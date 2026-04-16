@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Core</PackageId>
+    <Description>Core tensor types, backend abstractions, and shared interfaces for the SharpInference AI inference engine.</Description>
+    <RootNamespace>SharpInference.Core</RootNamespace>
+  </PropertyGroup>
+
+</Project>

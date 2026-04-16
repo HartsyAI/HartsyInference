@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Video</PackageId>
+    <Description>Video generation for SharpInference — LTX-Video, Wan, temporal attention, and video VAE. (Phase 3 — stub)</Description>
+    <RootNamespace>SharpInference.Video</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Diffusion\SharpInference.Diffusion.csproj" />
+  </ItemGroup>
+
+</Project>

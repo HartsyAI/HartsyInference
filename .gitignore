@@ -1,41 +1,90 @@
-# Prerequisites
-*.d
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+## NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+project.lock.json
+project.fragment.lock.json
 
-# Precompiled Headers
-*.gch
-*.pch
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+artifacts/
 
-# Linker files
-*.ilk
+## Visual Studio
+.vs/
+*.sln.iml
+launchSettings.json
 
-# Debugger Files
-*.pdb
+## JetBrains Rider
+.idea/
+*.sln.iml
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
+## VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
 
-# Fortran module files
-*.mod
-*.smod
+## Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+*.coverage
+*.coveragexml
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
+## BenchmarkDotNet
+BenchmarkDotNet.Artifacts/
 
-# Executables
-*.exe
-*.out
-*.app
+## OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# debug information files
-*.dwo
+## Model files (large binary files — don't commit)
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.bin
+
+## Model cache
+.sharpinference/
+
+## Python (for reference scripts)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+## Secrets
+*.env
+.env.*
+appsettings.*.json
+!appsettings.json
+!appsettings.Development.json

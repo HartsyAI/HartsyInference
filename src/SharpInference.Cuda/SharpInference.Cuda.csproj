@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Cuda</PackageId>
+    <Description>CUDA GPU inference backend for SharpInference with PTX kernels and cuBLAS integration.</Description>
+    <RootNamespace>SharpInference.Cuda</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+    <ProjectReference Include="..\SharpInference.Cpu\SharpInference.Cpu.csproj" />
+  </ItemGroup>
+
+  <!-- Embed PTX kernel files as resources -->
+  <ItemGroup>
+    <EmbeddedResource Include="Ptx\*.ptx" />
+  </ItemGroup>
+
+</Project>

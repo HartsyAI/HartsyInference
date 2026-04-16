@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Tokenizers</PackageId>
+    <Description>CLIP, T5, and Whisper tokenizers for SharpInference diffusion and audio pipelines.</Description>
+    <RootNamespace>SharpInference.Tokenizers</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+  </ItemGroup>
+
+</Project>

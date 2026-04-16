@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Cpu</PackageId>
+    <Description>CPU inference backend for SharpInference with AVX2/AVX-512/NEON SIMD kernels.</Description>
+    <RootNamespace>SharpInference.Cpu</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+  </ItemGroup>
+
+</Project>

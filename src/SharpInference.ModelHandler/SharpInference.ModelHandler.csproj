@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.ModelHandler</PackageId>
+    <Description>Model loading for SharpInference — safetensors, GGUF, model registry, and HuggingFace Hub integration.</Description>
+    <RootNamespace>SharpInference.ModelHandler</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,185 @@
+using SharpInference.Core.Backends;
+using SharpInference.Core.Tensors;
+
+namespace SharpInference.Diffusion.Models.Vae;
+
+/// <summary>Self-attention layer for the VAE mid-block. Single-head attention (heads=1, head_dim=channels) with GroupNorm and residual connection.</summary>
+public sealed class VaeAttention
+{
+    private readonly int _channels;
+    private readonly int _normGroups;
+    private readonly float _normEps;
+
+    // GroupNorm before attention projections
+    private Tensor? _groupNormWeight;
+    private Tensor? _groupNormBias;
+
+    // Q, K, V projections (linear, implemented as 1x1 conv or matmul)
+    private Tensor? _toQWeight;
+    private Tensor? _toQBias;
+    private Tensor? _toKWeight;
+    private Tensor? _toKBias;
+    private Tensor? _toVWeight;
+    private Tensor? _toVBias;
+
+    // Output projection
+    private Tensor? _toOutWeight;
+    private Tensor? _toOutBias;
+
+    /// <summary>Creates a VAE attention layer with the specified channel count.</summary>
+    public VaeAttention(int channels, int normGroups = 32, float normEps = 1e-6f)
+    {
+        _channels = channels;
+        _normGroups = normGroups;
+        _normEps = normEps;
+    }
+
+    /// <summary>Loads weights from named tensors using the given prefix (e.g., "decoder.mid_block.attentions.0").</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    {
+        _groupNormWeight = weights[$"{prefix}.group_norm.weight"];
+        _groupNormBias = weights[$"{prefix}.group_norm.bias"];
+        _toQWeight = weights[$"{prefix}.to_q.weight"];
+        _toQBias = weights[$"{prefix}.to_q.bias"];
+        _toKWeight = weights[$"{prefix}.to_k.weight"];
+        _toKBias = weights[$"{prefix}.to_k.bias"];
+        _toVWeight = weights[$"{prefix}.to_v.weight"];
+        _toVBias = weights[$"{prefix}.to_v.bias"];
+        _toOutWeight = weights[$"{prefix}.to_out.0.weight"];
+        _toOutBias = weights[$"{prefix}.to_out.0.bias"];
+    }
+
+    /// <summary>Forward pass: input [B, C, H, W] → output [B, C, H, W] with residual connection.</summary>
+    public Tensor Forward(IBackend backend, Tensor input)
+    {
+        int batch = (int)input.Shape[0];
+        int channels = (int)input.Shape[1];
+        int height = (int)input.Shape[2];
+        int width = (int)input.Shape[3];
+        int seqLen = height * width;
+
+        // GroupNorm
+        TensorShape spatialShape = new TensorShape(batch, channels, height, width);
+        Tensor normed = new Tensor(spatialShape, DType.F32);
+        backend.GroupNorm(normed, input, _groupNormWeight!, _groupNormBias!, _normGroups, _normEps);
+
+        // Reshape to [B, C, seqLen] then transpose to [B, seqLen, C] for attention
+        // Q, K, V projections: weight is [C, C], we do matmul [B, seqLen, C] @ [C, C]^T
+        TensorShape seqShape = new TensorShape(batch, seqLen, channels);
+        Tensor normedSeq = normed.Reshape(new TensorShape(batch, channels, seqLen));
+
+        // Transpose [B, C, seqLen] → [B, seqLen, C] by copying
+        Tensor normedTransposed = new Tensor(seqShape, DType.F32);
+        TransposeBCtoBC(backend, normedTransposed, normedSeq, batch, channels, seqLen);
+        normed.Dispose();
+
+        // Project Q, K, V via batched matmul: [B, seqLen, C] @ [C, C]^T = [B, seqLen, C]
+        Tensor query = ProjectLinear(backend, normedTransposed, _toQWeight!, _toQBias!, batch, seqLen, channels);
+        Tensor key = ProjectLinear(backend, normedTransposed, _toKWeight!, _toKBias!, batch, seqLen, channels);
+        Tensor value = ProjectLinear(backend, normedTransposed, _toVWeight!, _toVBias!, batch, seqLen, channels);
+        normedTransposed.Dispose();
+
+        // Scaled dot-product attention (single head): [B, seqLen, C]
+        float scale = 1.0f / MathF.Sqrt(channels);
+        Tensor attnOut = new Tensor(seqShape, DType.F32);
+        backend.ScaledDotProductAttention(attnOut, query, key, value, null, scale);
+        query.Dispose();
+        key.Dispose();
+        value.Dispose();
+
+        // Output projection: [B, seqLen, C] @ [C, C]^T = [B, seqLen, C]
+        Tensor projected = ProjectLinear(backend, attnOut, _toOutWeight!, _toOutBias!, batch, seqLen, channels);
+        attnOut.Dispose();
+
+        // Transpose back [B, seqLen, C] → [B, C, seqLen] → reshape to [B, C, H, W]
+        Tensor projectedChannelFirst = new Tensor(new TensorShape(batch, channels, seqLen), DType.F32);
+        TransposeBCtoBC(backend, projectedChannelFirst, projected, batch, seqLen, channels);
+        projected.Dispose();
+
+        Tensor projectedSpatial = projectedChannelFirst.Reshape(spatialShape);
+
+        // Residual connection
+        Tensor output = new Tensor(spatialShape, DType.F32);
+        backend.Add(output, input, projectedSpatial);
+        projectedChannelFirst.Dispose();
+
+        return output;
+    }
+
+    /// <summary>Linear projection: output[b] = input[b] @ weight^T + bias for each batch.</summary>
+    private static Tensor ProjectLinear(IBackend backend, Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int channels)
+    {
+        TensorShape outShape = new TensorShape(batch, seqLen, channels);
+        Tensor output = new Tensor(outShape, DType.F32);
+
+        // weight is [outCh, inCh], input is [B, seqLen, inCh]
+        // We need output = input @ weight^T + bias
+        // Reshape for batched matmul: [B, seqLen, inCh] @ [inCh, outCh] = [B, seqLen, outCh]
+        // weight^T is [inCh, outCh]
+        TensorShape weightTShape = new TensorShape(channels, channels);
+        Tensor weightT = new Tensor(weightTShape, DType.F32);
+        TransposeMatrix(weight, weightT, channels, channels);
+
+        backend.BatchedMatMul(output, input, weightT);
+        weightT.Dispose();
+
+        // Add bias (broadcast across batch and seqLen)
+        AddBiasBroadcast(output, bias, batch, seqLen, channels);
+
+        return output;
+    }
+
+    /// <summary>Transposes a 2D matrix [rows, cols] → [cols, rows].</summary>
+    private static unsafe void TransposeMatrix(Tensor src, Tensor dst, int rows, int cols)
+    {
+        float* srcPtr = (float*)src.DataPointer;
+        float* dstPtr = (float*)dst.DataPointer;
+
+        for (int r = 0; r < rows; r++)
+        {
+            for (int c = 0; c < cols; c++)
+            {
+                dstPtr[c * rows + r] = srcPtr[r * cols + c];
+            }
+        }
+    }
+
+    /// <summary>Transposes [B, dim1, dim2] → [B, dim2, dim1] via element copy.</summary>
+    private static unsafe void TransposeBCtoBC(IBackend backend, Tensor output, Tensor input, int batch, int dim1, int dim2)
+    {
+        float* inPtr = (float*)input.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+
+        for (int b = 0; b < batch; b++)
+        {
+            float* batchIn = inPtr + b * dim1 * dim2;
+            float* batchOut = outPtr + b * dim2 * dim1;
+            for (int i = 0; i < dim1; i++)
+            {
+                for (int j = 0; j < dim2; j++)
+                {
+                    batchOut[j * dim1 + i] = batchIn[i * dim2 + j];
+                }
+            }
+        }
+    }
+
+    /// <summary>Adds bias [channels] to output [B, seqLen, channels] in-place.</summary>
+    private static unsafe void AddBiasBroadcast(Tensor output, Tensor bias, int batch, int seqLen, int channels)
+    {
+        float* outPtr = (float*)output.DataPointer;
+        float* biasPtr = (float*)bias.DataPointer;
+
+        for (int b = 0; b < batch; b++)
+        {
+            for (int s = 0; s < seqLen; s++)
+            {
+                int offset = (b * seqLen + s) * channels;
+                for (int c = 0; c < channels; c++)
+                {
+                    outPtr[offset + c] += biasPtr[c];
+                }
+            }
+        }
+    }
+}

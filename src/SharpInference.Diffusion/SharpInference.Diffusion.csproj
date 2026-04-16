@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Diffusion</PackageId>
+    <Description>Image generation pipelines for SharpInference — SD1.5, SDXL, Flux, SD3, LoRA, ControlNet, and schedulers.</Description>
+    <RootNamespace>SharpInference.Diffusion</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+    <ProjectReference Include="..\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
+  </ItemGroup>
+
+</Project>

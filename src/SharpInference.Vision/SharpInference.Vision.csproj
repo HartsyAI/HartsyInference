@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Vision</PackageId>
+    <Description>Vision inference for SharpInference — CLIP embeddings, YOLO detection, SAM segmentation, and face detection.</Description>
+    <RootNamespace>SharpInference.Vision</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+    <ProjectReference Include="..\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
+  </ItemGroup>
+
+</Project>
