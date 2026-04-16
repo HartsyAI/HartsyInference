@@ -153,21 +153,21 @@ public sealed class EulerDiscreteScheduler : IScheduler
     {
         float logSigma = MathF.Log(sigma);
 
-        // Find where logSigma falls in the training log-sigma schedule (reversed: high to low)
+        // Find where logSigma falls in the training log-sigma schedule (descending: sigmas[0] is largest)
         for (int i = 0; i < _trainSigmas.Length - 1; i++)
         {
-            float logLow = MathF.Log(_trainSigmas[i]);
-            float logHigh = MathF.Log(_trainSigmas[i + 1]);
+            float logCurrent = MathF.Log(_trainSigmas[i]);
+            float logNext = MathF.Log(_trainSigmas[i + 1]);
 
-            if (logSigma >= logHigh && logSigma <= logLow)
+            if (logSigma >= logNext && logSigma <= logCurrent)
             {
-                float w = (logSigma - logHigh) / (logLow - logHigh);
+                float w = (logSigma - logNext) / (logCurrent - logNext);
                 return (1.0f - w) * (i + 1) + w * i;
             }
         }
 
         // Clamp to boundaries
         if (sigma >= _trainSigmas[0]) return 0.0f;
-        return _trainSigmas.Length - 1;
+        return (float)(_trainSigmas.Length - 1);
     }
 }

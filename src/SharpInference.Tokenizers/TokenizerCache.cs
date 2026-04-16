@@ -17,11 +17,12 @@ public sealed class TokenizerCache : IDisposable
         return _clipCache.GetOrAdd(key, _ => new ClipTokenizer(vocabPath, mergesPath));
     }
 
-    /// <summary>Gets or creates a T5 tokenizer for the given model file.</summary>
+    /// <summary>Gets or creates a T5 tokenizer for the given model file and max length.</summary>
     public T5Tokenizer GetOrCreateT5(string modelPath, int maxLength = T5Tokenizer.DefaultMaxLength)
     {
         ThrowIfDisposed();
-        return _t5Cache.GetOrAdd(modelPath, _ => new T5Tokenizer(modelPath, maxLength));
+        string key = $"{modelPath}|{maxLength}";
+        return _t5Cache.GetOrAdd(key, _ => new T5Tokenizer(modelPath, maxLength));
     }
 
     private void ThrowIfDisposed()

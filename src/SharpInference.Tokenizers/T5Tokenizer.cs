@@ -27,7 +27,8 @@ public sealed class T5Tokenizer : IDisposable
     public T5Tokenizer(string modelPath, int maxLength = DefaultMaxLength)
     {
         using Stream stream = File.OpenRead(modelPath);
-        _tokenizer = SentencePieceTokenizer.Create(stream, addBeginningOfSentence: false, addEndOfSentence: false) ?? throw new InvalidOperationException("Failed to create SentencePiece tokenizer.");
+        MemoryStream patched = PatchT5ProtobufStream(stream);
+        _tokenizer = SentencePieceTokenizer.Create(patched, addBeginningOfSentence: false, addEndOfSentence: false) ?? throw new InvalidOperationException("Failed to create SentencePiece tokenizer.");
         _maxLength = maxLength;
     }
 
@@ -36,7 +37,8 @@ public sealed class T5Tokenizer : IDisposable
     /// <param name="maxLength">Maximum sequence length. Default: 77.</param>
     public T5Tokenizer(Stream modelStream, int maxLength = DefaultMaxLength)
     {
-        _tokenizer = SentencePieceTokenizer.Create(modelStream, addBeginningOfSentence: false, addEndOfSentence: false) ?? throw new InvalidOperationException("Failed to create SentencePiece tokenizer.");
+        MemoryStream patched = PatchT5ProtobufStream(modelStream);
+        _tokenizer = SentencePieceTokenizer.Create(patched, addBeginningOfSentence: false, addEndOfSentence: false) ?? throw new InvalidOperationException("Failed to create SentencePiece tokenizer.");
         _maxLength = maxLength;
     }
 
@@ -107,6 +109,37 @@ public sealed class T5Tokenizer : IDisposable
             mask[i] = tokenIds[i] != PadTokenId ? 1 : 0;
         }
         return mask;
+    }
+
+    /// <summary>Patches T5 SentencePiece protobuf to work around bos_id=-1 causing IndexOutOfRangeException in Microsoft.ML.Tokenizers. T5 models set bos_id=-1 in TrainerSpec meaning "no BOS token", but the library interprets -1 as a vocabulary index.</summary>
+    private static MemoryStream PatchT5ProtobufStream(Stream source)
+    {
+        MemoryStream ms = new MemoryStream();
+        source.CopyTo(ms);
+        byte[] data = ms.GetBuffer();
+        long length = ms.Length;
+
+        // Find protobuf field tag for TrainerSpec.bos_id (field 41, wire type 0 = varint)
+        // Tag encoding: (41 << 3) | 0 = 328 → varint bytes 0xC8, 0x02
+        // Value -1 as varint: 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0xFF 0x01 (10 bytes)
+        // Patch: rename field 41 to unused field 99 → (99 << 3) | 0 = 792 → 0x98, 0x06
+        for (long i = 0; i < length - 11; i++)
+        {
+            if (data[i] == 0xC8 && data[i + 1] == 0x02 &&
+                data[i + 2] == 0xFF && data[i + 3] == 0xFF &&
+                data[i + 4] == 0xFF && data[i + 5] == 0xFF &&
+                data[i + 6] == 0xFF && data[i + 7] == 0xFF &&
+                data[i + 8] == 0xFF && data[i + 9] == 0xFF &&
+                data[i + 10] == 0xFF && data[i + 11] == 0x01)
+            {
+                data[i] = 0x98;
+                data[i + 1] = 0x06;
+                break;
+            }
+        }
+
+        ms.Position = 0;
+        return ms;
     }
 
     private void ThrowIfDisposed()
