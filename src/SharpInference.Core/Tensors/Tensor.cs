@@ -44,7 +44,7 @@ public sealed unsafe class Tensor : IDisposable
         DType = dtype;
         Device = device;
 
-        long byteSize = ComputeByteSize(shape, dtype);
+        long byteSize = dtype.ComputeByteCount(shape.ElementCount);
         _ownedBuffer = new NativeBuffer((nuint)byteSize);
         _dataPointer = (nint)_ownedBuffer.Pointer;
     }
@@ -66,7 +66,7 @@ public sealed unsafe class Tensor : IDisposable
         nint ptr = _dataPointer;
         if (ptr == 0)
             throw new ObjectDisposedException(nameof(Tensor));
-        int count = (int)(ComputeByteSize(Shape, DType) / sizeof(T));
+        int count = (int)(DType.ComputeByteCount(Shape.ElementCount) / sizeof(T));
         return new Span<T>((void*)ptr, count);
     }
 
@@ -77,8 +77,18 @@ public sealed unsafe class Tensor : IDisposable
         nint ptr = _dataPointer;
         if (ptr == 0)
             throw new ObjectDisposedException(nameof(Tensor));
-        int count = (int)(ComputeByteSize(Shape, DType) / sizeof(T));
+        int count = (int)(DType.ComputeByteCount(Shape.ElementCount) / sizeof(T));
         return new ReadOnlySpan<T>((void*)ptr, count);
+    }
+
+    /// <summary>Creates a zero-alloc TensorRef view of this tensor for use in kernel implementations.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public TensorRef AsRef()
+    {
+        nint ptr = _dataPointer;
+        if (ptr == 0)
+            throw new ObjectDisposedException(nameof(Tensor));
+        return new TensorRef(ptr, Shape, DType, Device);
     }
 
     /// <summary>Creates a view with a different shape but same underlying data. No copy.</summary>
@@ -101,7 +111,7 @@ public sealed unsafe class Tensor : IDisposable
         if (targetDevice == Device)
         {
             Tensor copy = new Tensor(Shape, DType, Device);
-            long byteSize = ComputeByteSize(Shape, DType);
+            long byteSize = DType.ComputeByteCount(Shape.ElementCount);
             Buffer.MemoryCopy(ptr, copy.DataPointer, byteSize, byteSize);
             return copy;
         }
@@ -118,7 +128,7 @@ public sealed unsafe class Tensor : IDisposable
         if (targetDtype == DType)
             return To(Device);
 
-        if (DType.IsQuantized() || targetDtype.IsQuantized())
+        if (DType.IsQuantized || targetDtype.IsQuantized)
             throw new SharpInference.Core.Exceptions.SharpInferenceException(
                 $"Quantized dtype conversion ({DType} → {targetDtype}) requires a dedicated dequantizer. Use GgufDequantizer instead.");
 
@@ -174,19 +184,8 @@ public sealed unsafe class Tensor : IDisposable
         }
     }
 
-    /// <summary>Computes the total byte size for a tensor of the given shape and dtype.</summary>
-    public static long ComputeByteSize(TensorShape shape, DType dtype)
-    {
-        if (dtype.IsQuantized())
-        {
-            int blockSize = dtype.BlockSize();
-            int blockByteSize = dtype.BlockByteSize();
-            long numBlocks = (shape.ElementCount + blockSize - 1) / blockSize;
-            return numBlocks * blockByteSize;
-        }
-
-        return shape.ElementCount * dtype.ElementSize();
-    }
+    /// <summary>Computes the total byte size for a tensor of the given shape and dtype. Delegates to DType.ComputeByteCount.</summary>
+    public static long ComputeByteSize(TensorShape shape, DType dtype) => dtype.ComputeByteCount(shape.ElementCount);
 
     /// <summary>Frees owned memory via atomic pointer exchange. Borrowed tensors are no-ops.</summary>
     public void Dispose()

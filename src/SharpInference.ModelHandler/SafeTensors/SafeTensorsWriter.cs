@@ -68,13 +68,10 @@ public static class SafeTensorsWriter
         }
     }
 
-    private static string FormatDType(DType dtype) => dtype switch
+    private static string FormatDType(DType dtype)
     {
-        DType.F32 => "F32",
-        DType.F16 => "F16",
-        DType.BF16 => "BF16",
-        DType.I8 => "I8",
-        DType.U8 => "U8",
-        _ => throw new SharpInference.Core.Exceptions.SharpInferenceException($"Cannot write quantized dtype {dtype} to safetensors."),
-    };
+        if (dtype.IsQuantized)
+            throw new SharpInference.Core.Exceptions.SharpInferenceException($"Cannot write quantized dtype {dtype} to safetensors.");
+        return dtype.Name;
+    }
 }

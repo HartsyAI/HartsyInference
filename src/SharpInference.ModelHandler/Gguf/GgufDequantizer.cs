@@ -9,7 +9,7 @@ public static class GgufDequantizer
     /// <summary>Dequantizes a quantized tensor to the target dtype (F16 or F32). Returns a new tensor with owned memory containing the dequantized data.</summary>
     public static unsafe Tensor Dequantize(Tensor source, DType targetDtype)
     {
-        if (!source.DType.IsQuantized())
+        if (!source.DType.IsQuantized)
             throw new ArgumentException($"Source tensor is not quantized (dtype={source.DType}).", nameof(source));
 
         if (targetDtype != DType.F32 && targetDtype != DType.F16)

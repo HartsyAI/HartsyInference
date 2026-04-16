@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/BasicImageGeneration/BasicImageGeneration.csproj" />
+  </Folder>
 
   <Folder Name="/src/">
     <Project Path="src/SharpInference.Core/SharpInference.Core.csproj" />

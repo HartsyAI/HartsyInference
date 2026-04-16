@@ -33,4 +33,8 @@ public interface IScheduler
 
     /// <summary>Returns the initial noise scale factor. For most schedulers this is 1.0, but some (like Karras) scale the initial noise.</summary>
     float InitialNoiseSigma { get; }
+
+    /// <summary>Returns the scale factor to apply to the model input at the given step. For Euler schedulers this is 1/sqrt(sigma^2 + 1), for most others it's 1.0 (no scaling).</summary>
+    /// <param name="stepIndex">Index into the timestep schedule (0-based).</param>
+    float ScaleModelInput(int stepIndex) => 1.0f;
 }

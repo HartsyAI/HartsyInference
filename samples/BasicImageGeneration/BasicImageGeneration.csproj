@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>BasicImageGeneration</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpInference.Core\SharpInference.Core.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Cpu\SharpInference.Cpu.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Diffusion\SharpInference.Diffusion.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
+  </ItemGroup>
+
+</Project>

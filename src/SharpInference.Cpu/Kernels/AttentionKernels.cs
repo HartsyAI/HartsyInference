@@ -5,12 +5,12 @@ namespace SharpInference.Cpu.Kernels;
 /// <summary>Provides scaled dot-product attention CPU compute kernels. Supports multi-head attention with optional masking for F32 tensors.</summary>
 public static class AttentionKernels
 {
-    /// <summary>Computes scaled dot-product attention: output = softmax(Q @ K^T * scale + mask) @ V. Inputs Q, K, V have shape [B, H, S, D] where B=batch, H=heads, S=sequence length, D=head dim. Uses a tiled approach with O(S) auxiliary memory per row for the attention scores.</summary>
-    /// <param name="output">Output tensor with shape [B, H, S, D].</param>
-    /// <param name="query">Query tensor with shape [B, H, S, D].</param>
-    /// <param name="key">Key tensor with shape [B, H, S, D].</param>
-    /// <param name="value">Value tensor with shape [B, H, S, D].</param>
-    /// <param name="mask">Optional additive mask tensor with shape broadcastable to [B, H, S, S], or null.</param>
+    /// <summary>Computes scaled dot-product attention: output = softmax(Q @ K^T * scale + mask) @ V. Query has shape [B, H, Sq, D], Key/Value have shape [B, H, Skv, D]. Supports different sequence lengths for Q and K/V (cross-attention). Uses O(Skv) auxiliary memory per row.</summary>
+    /// <param name="output">Output tensor with shape [B, H, Sq, D].</param>
+    /// <param name="query">Query tensor with shape [B, H, Sq, D].</param>
+    /// <param name="key">Key tensor with shape [B, H, Skv, D].</param>
+    /// <param name="value">Value tensor with shape [B, H, Skv, D].</param>
+    /// <param name="mask">Optional additive mask tensor with shape broadcastable to [B, H, Sq, Skv], or null.</param>
     /// <param name="scale">Scale factor, typically 1/sqrt(D).</param>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void ScaledDotProductAttention(
@@ -23,8 +23,9 @@ public static class AttentionKernels
     {
         long B = query.Shape[0];
         long H = query.Shape[1];
-        long S = query.Shape[2];
+        long Sq = query.Shape[2];   // Query sequence length
         long D = query.Shape[3];
+        long Skv = key.Shape[2];    // Key/Value sequence length (may differ from Sq for cross-attention)
 
         float* pQ = (float*)query.DataPointer;
         float* pK = (float*)key.DataPointer;
@@ -32,11 +33,13 @@ public static class AttentionKernels
         float* pOut = (float*)output.DataPointer;
         float* pMask = mask != null ? (float*)mask.DataPointer : null;
 
-        long headStride = S * D;
-        long batchStride = H * headStride;
+        long qHeadStride = Sq * D;
+        long kvHeadStride = Skv * D;
+        long qBatchStride = H * qHeadStride;
+        long kvBatchStride = H * kvHeadStride;
 
-        // Allocate a single row of attention scores: [S] floats
-        float* attnRow = (float*)NativeMemory.Alloc((nuint)(S * sizeof(float)));
+        // Allocate a single row of attention scores: [Skv] floats
+        float* attnRow = (float*)NativeMemory.Alloc((nuint)(Skv * sizeof(float)));
 
         try
         {
@@ -44,28 +47,27 @@ public static class AttentionKernels
             {
                 for (long h = 0; h < H; h++)
                 {
-                    long bhOffset = b * batchStride + h * headStride;
-                    float* qHead = pQ + bhOffset;
-                    float* kHead = pK + bhOffset;
-                    float* vHead = pV + bhOffset;
-                    float* oHead = pOut + bhOffset;
+                    float* qHead = pQ + b * qBatchStride + h * qHeadStride;
+                    float* kHead = pK + b * kvBatchStride + h * kvHeadStride;
+                    float* vHead = pV + b * kvBatchStride + h * kvHeadStride;
+                    float* oHead = pOut + b * qBatchStride + h * qHeadStride;
 
                     // Determine mask offset for this (b, h) pair
-                    // Mask shape can be [B, H, S, S] or [1, 1, S, S] or [1, H, S, S] etc.
+                    // Mask shape can be [B, H, Sq, Skv] or [1, 1, Sq, Skv] or [1, H, Sq, Skv] etc.
                     long maskBhOffset = 0;
                     if (pMask != null && mask != null)
                     {
                         long maskB = mask.Shape[0] > 1 ? b : 0;
                         long maskH = mask.Shape[1] > 1 ? h : 0;
-                        maskBhOffset = maskB * mask.Shape[1] * S * S + maskH * S * S;
+                        maskBhOffset = maskB * mask.Shape[1] * Sq * Skv + maskH * Sq * Skv;
                     }
 
-                    for (long qi = 0; qi < S; qi++)
+                    for (long qi = 0; qi < Sq; qi++)
                     {
                         float* qRow = qHead + qi * D;
 
-                        // Step 1: Compute Q[qi] @ K^T -> attnRow[S], scaled
-                        for (long ki = 0; ki < S; ki++)
+                        // Step 1: Compute Q[qi] @ K^T -> attnRow[Skv], scaled
+                        for (long ki = 0; ki < Skv; ki++)
                         {
                             float* kRow = kHead + ki * D;
                             float dot = VectorizedDot(qRow, kRow, (int)D);
@@ -75,15 +77,15 @@ public static class AttentionKernels
                         // Step 2: Apply additive mask if present
                         if (pMask != null)
                         {
-                            float* maskRow = pMask + maskBhOffset + qi * S;
-                            for (long ki = 0; ki < S; ki++)
+                            float* maskRow = pMask + maskBhOffset + qi * Skv;
+                            for (long ki = 0; ki < Skv; ki++)
                             {
                                 attnRow[ki] += maskRow[ki];
                             }
                         }
 
                         // Step 3: Softmax over attnRow
-                        SoftmaxInPlace(attnRow, (int)S);
+                        SoftmaxInPlace(attnRow, (int)Skv);
 
                         // Step 4: attnRow @ V -> output row
                         float* oRow = oHead + qi * D;
@@ -91,7 +93,7 @@ public static class AttentionKernels
                         // Zero the output row
                         NativeMemory.Clear(oRow, (nuint)(D * sizeof(float)));
 
-                        for (long vi = 0; vi < S; vi++)
+                        for (long vi = 0; vi < Skv; vi++)
                         {
                             float attnVal = attnRow[vi];
                             float* vRow = vHead + vi * D;

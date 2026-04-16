@@ -37,6 +37,13 @@ public sealed class EulerDiscreteScheduler : IScheduler
         }
     }
 
+    /// <summary>Scales the model input by 1/sqrt(sigma^2 + 1) as required by Euler schedulers.</summary>
+    public float ScaleModelInput(int stepIndex)
+    {
+        float sigma = _sigmas[stepIndex];
+        return 1.0f / MathF.Sqrt(sigma * sigma + 1.0f);
+    }
+
     /// <summary>Creates an Euler discrete scheduler with the given configuration.</summary>
     public EulerDiscreteScheduler(SchedulerConfig? config = null, bool useKarrasSigmas = false)
     {
@@ -105,15 +112,13 @@ public sealed class EulerDiscreteScheduler : IScheduler
 
         if (_config.PredictionType == PredictionType.Epsilon)
         {
-            // pred_x0 = sample - sigma * model_output
-            // derivative = (sample - pred_x0) / sigma = model_output
-            // prev_sample = sample + derivative * (sigma_next - sigma)
+            // For epsilon prediction, derivative simplifies to model_output:
+            // pred_x0 = sample - sigma * eps  →  derivative = (sample - pred_x0) / sigma = eps
+            // prev_sample = sample + eps * (sigma_next - sigma)
             float dt = sigmaNext - sigma;
             for (int i = 0; i < count; i++)
             {
-                float predX0 = samplePtr[i] - sigma * modelPtr[i];
-                float derivative = (samplePtr[i] - predX0) / sigma;
-                outPtr[i] = samplePtr[i] + derivative * dt;
+                outPtr[i] = samplePtr[i] + modelPtr[i] * dt;
             }
         }
         else if (_config.PredictionType == PredictionType.VPrediction)
@@ -123,11 +128,22 @@ public sealed class EulerDiscreteScheduler : IScheduler
             float sqrtSigmaSqPlus1 = MathF.Sqrt(sigmaSqPlus1);
             float dt = sigmaNext - sigma;
 
-            for (int i = 0; i < count; i++)
+            if (sigma < 1e-8f)
             {
-                float predX0 = modelPtr[i] * (-sigma / sqrtSigmaSqPlus1) + (samplePtr[i] / sigmaSqPlus1);
-                float derivative = (samplePtr[i] - predX0) / sigma;
-                outPtr[i] = samplePtr[i] + derivative * dt;
+                // At sigma≈0 the sample is already fully denoised
+                for (int i = 0; i < count; i++)
+                {
+                    outPtr[i] = samplePtr[i];
+                }
+            }
+            else
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    float predX0 = modelPtr[i] * (-sigma / sqrtSigmaSqPlus1) + (samplePtr[i] / sigmaSqPlus1);
+                    float derivative = (samplePtr[i] - predX0) / sigma;
+                    outPtr[i] = samplePtr[i] + derivative * dt;
+                }
             }
         }
     }

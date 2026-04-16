@@ -88,3 +88,4 @@ venv/
 appsettings.*.json
 !appsettings.json
 !appsettings.Development.json
+tests/test-models/

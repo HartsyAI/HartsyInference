@@ -1,7 +1,7 @@
 namespace SharpInference.Core.Models;
 
 /// <summary>Architecture parameters read from model metadata (safetensors config.json or GGUF metadata). Used by <see cref="IModel"/> implementations and pipeline factory to configure the correct pipeline.</summary>
-public sealed class ModelConfig
+public record ModelConfig
 {
     /// <summary>Architecture identifier (e.g., "stable-diffusion-v1-5", "sdxl", "flux-dev").</summary>
     public required string Architecture { get; init; }

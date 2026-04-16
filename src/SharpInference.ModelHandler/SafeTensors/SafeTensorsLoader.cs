@@ -119,11 +119,15 @@ public sealed class SafeTensorsLoader : IDisposable
 
     private static DType ParseDType(string dtype) => dtype switch
     {
+        "F64" => DType.F64,
         "F32" => DType.F32,
         "F16" => DType.F16,
         "BF16" => DType.BF16,
+        "I64" => DType.I64,
+        "I32" => DType.I32,
         "I8" => DType.I8,
         "U8" => DType.U8,
+        "BOOL" => DType.Bool,
         _ => throw new SharpInference.Core.Exceptions.SharpInferenceException($"Unsupported safetensors dtype: {dtype}"),
     };
 

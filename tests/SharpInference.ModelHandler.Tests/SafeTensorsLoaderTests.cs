@@ -170,15 +170,7 @@ public sealed unsafe class SafeTensorsLoaderTests : IDisposable
         Dictionary<string, object> headerDict = new();
         foreach (KeyValuePair<string, (DType dtype, long[] shape, float[] data)> kvp in tensors)
         {
-            string dtypeStr = kvp.Value.dtype switch
-            {
-                DType.F32 => "F32",
-                DType.F16 => "F16",
-                DType.BF16 => "BF16",
-                DType.I8 => "I8",
-                DType.U8 => "U8",
-                _ => "F32",
-            };
+            string dtypeStr = kvp.Value.dtype.Name;
 
             (long start, long end) = offsets[kvp.Key];
             Dictionary<string, object> tensorEntry = new()

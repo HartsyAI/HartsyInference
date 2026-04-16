@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Schedulers;
 
 /// <summary>Shared configuration for all diffusion schedulers.</summary>
-public sealed class SchedulerConfig
+public record SchedulerConfig
 {
     /// <summary>Number of training timesteps the model was trained with. Default: 1000.</summary>
     public int NumTrainTimesteps { get; init; } = 1000;
