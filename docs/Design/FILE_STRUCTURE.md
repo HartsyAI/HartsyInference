@@ -48,8 +48,9 @@ SharpInference.Core/
 ├── Tensors/
 │   ├── Tensor.cs                  Core tensor type (unmanaged memory, N-D shape)
 │   ├── TensorShape.cs             Shape + stride metadata
-│   ├── TensorView.cs              Non-owning slice / reshape view
-│   ├── DType.cs                   F32, F16, BF16, Q8_0, Q4_K, I8, U8 enum
+│   ├── TensorView.cs              Non-owning view, Dispose() is no-op (dotLLM pattern)
+│   ├── TensorMetadata.cs          Lightweight readonly record struct description
+│   ├── DType.cs                   readonly record struct with Name field (dotLLM pattern)
 │   └── TensorPool.cs              Thread-safe unmanaged buffer pool for temp allocations
 ├── Backends/
 │   ├── IBackend.cs                Full backend interface (matmul, conv, norm, attn, etc.)
@@ -148,13 +149,15 @@ SharpInference.Cpu/
 SharpInference.Cuda/
 ├── SharpInference.Cuda.csproj
 ├── CudaBackend.cs                 IBackend implementation — routes to PTX + cuBLAS
-├── CudaDriver.cs                  P/Invoke surface for CUDA Driver API
+├── CudaDriverApi.cs               P/Invoke surface: "cuda" lib name, int returns (dotLLM pattern)
 ├── CuBlasWrapper.cs               cuBLAS HGEMM, SGEMM
 ├── CuDnnWrapper.cs                cuDNN Conv2D (optional, fallback path)
 ├── CudaMemoryPool.cs              cuMemPool-based async memory pool
 ├── CudaStream.cs                  Stream lifecycle management
-├── PtxKernelLoader.cs             Load and JIT-compile PTX at runtime (dotLLM CudaModule pattern)
-└── Ptx/
+├── CudaKernels.cs                 All kernel function handles as nint fields, loaded in constructor
+├── CudaModule.cs                  LoadFromFile() + GetFunction() wrapper (dotLLM pattern)
+├── CudaLibraryResolver.cs         Maps "cuda" -> nvcuda.dll / libcuda.so at runtime
+└── Ptx/                           PTX content files loaded from this directory at runtime (NOT embedded)
     ├── conv2d_f16_3x3.ptx
     ├── conv2d_f16_1x1.ptx
     ├── group_norm_f16.ptx
@@ -188,7 +191,8 @@ SharpInference.Vulkan/
 ├── VulkanMemoryAllocator.cs       Sub-allocation from large device memory blocks
 ├── VulkanCommandPool.cs           Command buffer lifecycle management
 ├── VulkanDescriptorManager.cs     Descriptor set layout and pool management
-├── SpirVShaderLoader.cs           Load SPIR-V, create compute pipelines (mirrors PtxKernelLoader)
+├── SpirVShaderLoader.cs           Load SPIR-V from disk, create compute pipelines (mirrors CudaModule)
+├── VulkanKernels.cs               Compute pipeline handles, dispatch wrappers (mirrors CudaKernels)
 ├── VulkanLibraryResolver.cs       Cross-platform vulkan-1.dll / libvulkan.so.1 resolution
 └── Spirv/
     ├── conv2d_f16_3x3.spv

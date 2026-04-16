@@ -219,6 +219,38 @@ public sealed class NativeBuffer : IDisposable { }
 - Use `readonly struct` for value types that don't mutate
 - Use `readonly ref struct` for view types like `TensorView`
 
+### Records (from dotLLM)
+
+Use the right record type for each purpose:
+
+```csharp
+// readonly record struct -- for small value types passed by value on hot paths
+public readonly record struct TensorRef(nint DataPointer, TensorShape Shape, DType DType, DeviceKind Device);
+public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantized, int BlockByteSize = 0, int BlockElementCount = 1);
+public readonly record struct GenerationProgress(int Step, int TotalSteps, double ElapsedMs);
+
+// record (class record) -- for configuration/options created once and shared
+public record ModelConfig
+{
+    public required string Architecture { get; init; }
+    public required int HiddenSize { get; init; }
+    // Use 'required' for mandatory fields, defaults for optional
+}
+
+public record TextToImageOptions
+{
+    public int Steps { get; init; } = 20;
+    public float CfgScale { get; init; } = 7.5f;
+    // Three-tier: flat props, explicit composition (nullable), custom injection (nullable)
+}
+```
+
+- `readonly record struct` for value types (DType, TensorShape, TensorRef, DeviceKind, GenerationProgress)
+- `record` (class) for configuration and options that are created once and shared by reference
+- Use `required` keyword for mandatory fields in class records
+- Use `init` setters for all record properties
+- Never use `record struct` (mutable) -- always `readonly record struct`
+
 ### File ordering
 
 Within a class, organize members in this order:
@@ -230,6 +262,46 @@ Within a class, organize members in this order:
 6. Internal/private methods
 7. IDisposable implementation
 8. Nested types
+
+---
+
+## P/Invoke Conventions (from dotLLM)
+
+All native library interop follows dotLLM's source-verified patterns:
+
+### CUDA Driver API
+```csharp
+// Library name is "cuda" (NOT "nvcuda") -- resolved by CudaLibraryResolver at runtime
+private const string LibName = "cuda";
+
+// Return type is int (NOT a CuResult enum)
+[LibraryImport(LibName)]
+internal static partial int cuInit(uint flags);
+
+[LibraryImport(LibName)]
+internal static partial int cuModuleLoadData(out nint module, nint ptxImage);
+
+// .ThrowOnError() extension looks up error via cuGetErrorName/cuGetErrorString
+CudaDriverApi.cuInit(0).ThrowOnError();
+```
+
+### Vulkan API
+```csharp
+// Same pattern as CUDA -- int returns, .ThrowOnError()
+[LibraryImport("vulkan-1")]
+internal static partial int vkCreateInstance(in VkInstanceCreateInfo createInfo,
+    nint allocator, out nint instance);
+```
+
+### Rules
+- Always use `[LibraryImport]` (source-generated) -- never `[DllImport]`
+- Return type is always `int` -- never use an enum for P/Invoke returns
+- Every call must be checked via `.ThrowOnError()` -- no silent failures
+- Use `[SuppressGCTransition]` on short calls (< 1us) like `cuMemFree_v2`
+- Register `CudaLibraryResolver` / `VulkanLibraryResolver` via `NativeLibrary.SetDllImportResolver()` at startup
+- PTX loaded from disk directory via `CudaModule.LoadFromFile()` -- never embedded as resources
+- Function handles stored as `nint` fields -- never in `Dictionary<string, nint>`
+- Kernel arguments marshaled via `stackalloc void*[]` with **local variables for stable addresses**
 
 ---
 
