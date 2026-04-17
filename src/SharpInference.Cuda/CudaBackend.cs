@@ -431,49 +431,8 @@ public sealed class CudaBackend : IBackend
                 }
             }
 
-            // Step 3: Softmax over last dimension (Skv) for each row
-            // We need a softmax kernel. For now, use a simple per-row approach via CPU roundtrip
-            // TODO: Write a proper softmax PTX kernel
-            // Workaround: download scores, softmax on CPU, upload
-            {
-                long totalScoreElements = totalHeads * Sq * Skv;
-                nuint scoresByteSize = (nuint)(totalScoreElements * sizeof(float));
-                float* hostScores = (float*)NativeMemory.Alloc(scoresByteSize);
-                try
-                {
-                    CudaMemory.CopyDeviceToHost(hostScores, scoresBuf, scoresByteSize);
-                    _stream.Synchronize();
-
-                    // Softmax per row [Skv elements]
-                    for (long row = 0; row < totalHeads * Sq; row++)
-                    {
-                        float* rowPtr = hostScores + row * Skv;
-                        float maxVal = float.NegativeInfinity;
-                        for (long j = 0; j < Skv; j++)
-                        {
-                            if (rowPtr[j] > maxVal) maxVal = rowPtr[j];
-                        }
-                        float sum = 0f;
-                        for (long j = 0; j < Skv; j++)
-                        {
-                            float e = MathF.Exp(rowPtr[j] - maxVal);
-                            rowPtr[j] = e;
-                            sum += e;
-                        }
-                        float invSum = 1.0f / sum;
-                        for (long j = 0; j < Skv; j++)
-                        {
-                            rowPtr[j] *= invSum;
-                        }
-                    }
-
-                    CudaMemory.CopyHostToDevice(scoresBuf, hostScores, scoresByteSize);
-                }
-                finally
-                {
-                    NativeMemory.Free(hostScores);
-                }
-            }
+            // Step 3: Softmax over last dimension (Skv) for each row — GPU kernel
+            _kernels!.LaunchSoftmax(scoresBuf, (int)Skv, (int)(totalHeads * Sq), _stream.Handle);
 
             // Step 4: attn_weights @ V → output [B*H, Sq, D]
             // attn_weights is [Sq, Skv], V is [Skv, D], result is [Sq, D]

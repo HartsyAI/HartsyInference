@@ -74,10 +74,13 @@ public sealed unsafe class ClipTextEncoder
 
         causalMask.Dispose();
 
-        // For SD1.5, we return the last hidden state (output of last transformer layer)
-        // The final_layer_norm is NOT applied for diffusion conditioning
-        // (diffusers CLIPTextModel returns last_hidden_state from the encoder, not the pooled/normed output)
-        return hidden;
+        // CLIPTextModel applies final_layer_norm to encoder output before returning last_hidden_state.
+        // This matches HuggingFace CLIPTextTransformer.forward() behavior.
+        Tensor normed = new Tensor(hiddenShape, DType.F32);
+        backend.LayerNorm(normed, hidden, _finalLayerNormWeight!, _finalLayerNormBias!, _config.LayerNormEps);
+        hidden.Dispose();
+
+        return normed;
     }
 
     /// <summary>Token embedding lookup + position embedding addition. Writes directly into the output tensor.</summary>

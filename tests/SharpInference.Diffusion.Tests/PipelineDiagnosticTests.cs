@@ -23,7 +23,110 @@ public class PipelineDiagnosticTests
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 
-    [Fact]
+    [Fact(Skip = "Manual diagnostic — run explicitly with: dotnet test --filter DumpEarlyStageStats")]
+    public unsafe void DumpEarlyStageStats()
+    {
+        if (!Directory.Exists(ModelDir))
+        {
+            Assert.Fail($"Model directory not found: {ModelDir}");
+            return;
+        }
+
+        using CpuBackend backend = new();
+
+        // ── 1. Tokenize ──
+        string tokenizerVocab = Path.Combine(ModelDir, "tokenizer", "vocab.json");
+        string tokenizerMerges = Path.Combine(ModelDir, "tokenizer", "merges.txt");
+        using ClipTokenizer tokenizer = new(tokenizerVocab, tokenizerMerges);
+
+        string prompt = "a painting of a cat sitting on a windowsill";
+        string negativePrompt = "blurry, bad quality";
+        int[] promptTokens = tokenizer.Encode(prompt);
+        int[] negativeTokens = tokenizer.Encode(negativePrompt);
+
+        Console.WriteLine($"PROMPT_TOKENS: [{string.Join(", ", promptTokens)}]");
+        Console.WriteLine($"NEGATIVE_TOKENS: [{string.Join(", ", negativeTokens)}]");
+        Console.WriteLine($"Prompt token count: {promptTokens.Length}");
+        Console.WriteLine($"Negative token count: {negativeTokens.Length}");
+
+        // ── 2. Text Encoding ──
+        Console.WriteLine("Loading text encoder...");
+        ClipTextEncoderConfig clipConfig = ClipTextEncoderConfig.Sd15;
+        ClipTextEncoder textEncoder = new(clipConfig);
+
+        using SafeTensorsLoader textEncoderLoader = new();
+        textEncoderLoader.Load(Path.Combine(ModelDir, "text_encoder", "model.fp16.safetensors"));
+        Dictionary<string, Tensor> textEncoderWeights = CastWeightsToF32(textEncoderLoader.GetAllTensors());
+
+        // Print a few weight keys and stats
+        int printCount = 0;
+        foreach (KeyValuePair<string, Tensor> kvp in textEncoderWeights)
+        {
+            if (printCount++ < 5)
+                Console.WriteLine($"  Weight: {kvp.Key} shape=[{string.Join(",", Enumerable.Range(0, kvp.Value.Shape.Rank).Select(d => kvp.Value.Shape[d]))}] dtype={kvp.Value.DType}");
+        }
+        Console.WriteLine($"  Total weights: {textEncoderWeights.Count}");
+
+        textEncoder.LoadWeights(textEncoderWeights, "text_model");
+
+        Console.WriteLine("Encoding text...");
+        int[][] batchTokenIds = [negativeTokens, promptTokens];
+        Tensor textEmbeddings = textEncoder.Encode(backend, batchTokenIds);
+
+        int seqLen = (int)textEmbeddings.Shape[1];
+        int hiddenSize = (int)textEmbeddings.Shape[2];
+
+        Tensor negEmb = SliceBatch(textEmbeddings, 0, seqLen, hiddenSize);
+        Tensor posEmb = SliceBatch(textEmbeddings, 1, seqLen, hiddenSize);
+
+        Console.WriteLine($"NEG_EMB: mean={ComputeMean(negEmb):F6}, std={ComputeStd(negEmb):F6}, first8=[{string.Join(", ", GetFirst8(negEmb).Select(v => v.ToString("F6")))}]");
+        Console.WriteLine($"POS_EMB: mean={ComputeMean(posEmb):F6}, std={ComputeStd(posEmb):F6}, first8=[{string.Join(", ", GetFirst8(posEmb).Select(v => v.ToString("F6")))}]");
+        Console.WriteLine($"CONCAT_EMB: mean={ComputeMean(textEmbeddings):F6}, std={ComputeStd(textEmbeddings):F6}");
+
+        negEmb.Dispose();
+        posEmb.Dispose();
+
+        // ── 3. Noise ──
+        int width = 256, height = 256, steps = 20, seed = 42;
+        int latentH = height / 8, latentW = width / 8;
+        TensorShape latentShape = new(1, 4, latentH, latentW);
+        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
+        Console.WriteLine($"NOISE: mean={ComputeMean(latent):F6}, std={ComputeStd(latent):F6}, first8=[{string.Join(", ", GetFirst8(latent).Select(v => v.ToString("F6")))}]");
+
+        // ── 4. Scheduler ──
+        EulerDiscreteScheduler scheduler = new();
+        scheduler.SetTimesteps(steps);
+        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        float[] tsArr = new float[steps];
+        timesteps.CopyTo(tsArr);
+        Console.WriteLine($"TIMESTEPS: [{string.Join(", ", tsArr.Select(t => t.ToString("F4")))}]");
+        Console.WriteLine($"INIT_NOISE_SIGMA: {scheduler.InitialNoiseSigma:F6}");
+
+        // Scale initial noise
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new(latentShape, DType.F32);
+            backend.Scale(scaled, latent, initSigma);
+            latent.Dispose();
+            latent = scaled;
+        }
+        Console.WriteLine($"SCALED_NOISE: mean={ComputeMean(latent):F6}, std={ComputeStd(latent):F6}, first8=[{string.Join(", ", GetFirst8(latent).Select(v => v.ToString("F6")))}]");
+
+        latent.Dispose();
+        textEmbeddings.Dispose();
+    }
+
+    private static unsafe float[] GetFirst8(Tensor tensor)
+    {
+        float* ptr = (float*)tensor.DataPointer;
+        int count = Math.Min(8, (int)tensor.ElementCount);
+        float[] result = new float[count];
+        for (int i = 0; i < count; i++) result[i] = ptr[i];
+        return result;
+    }
+
+    [Fact(Skip = "Manual diagnostic — run explicitly with: dotnet test --filter DumpPipelineStats")]
     public unsafe void DumpPipelineStats()
     {
         string outputPath = Path.Combine(

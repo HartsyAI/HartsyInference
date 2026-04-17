@@ -34,18 +34,12 @@ def main():
     output_file = sys.argv[2] if len(sys.argv) > 2 else "reference_stats.json"
 
     from diffusers import UNet2DConditionModel, AutoencoderKL, EulerDiscreteScheduler
-    from transformers import CLIPTextModel, CLIPTextConfig, CLIPTokenizer
+    from transformers import CLIPTextModel, CLIPTextConfig
 
     device = "cpu"
     dtype = torch.float32
 
     print("Loading models...")
-
-    # Load tokenizer (has vocab.json and merges.txt)
-    tokenizer = CLIPTokenizer(
-        vocab_file=os.path.join(model_dir, "tokenizer", "vocab.json"),
-        merges_file=os.path.join(model_dir, "tokenizer", "merges.txt"),
-    )
 
     # Build text encoder from config + load fp16 weights as fp32
     clip_config = CLIPTextConfig(
@@ -58,7 +52,6 @@ def main():
     )
     text_encoder = CLIPTextModel(clip_config).to(dtype).to(device)
     te_weights = load_file(os.path.join(model_dir, "text_encoder", "model.fp16.safetensors"))
-    # Cast fp16 to fp32
     te_weights = {k: v.float() for k, v in te_weights.items()}
     text_encoder.load_state_dict(te_weights, strict=False)
     text_encoder.eval()
@@ -107,17 +100,16 @@ def main():
     vae.load_state_dict(vae_weights, strict=False)
     vae.eval()
 
-    # Scheduler (hardcoded SD1.5 defaults)
+    # Scheduler: use "leading" spacing to match C# defaults
     scheduler = EulerDiscreteScheduler(
         num_train_timesteps=1000,
         beta_start=0.00085,
         beta_end=0.012,
         beta_schedule="scaled_linear",
+        timestep_spacing="leading",
     )
 
     # Settings matching our C# test
-    prompt = "a painting of a cat sitting on a windowsill"
-    negative_prompt = "blurry, bad quality"
     width, height = 256, 256
     num_steps = 20
     cfg_scale = 7.5
@@ -125,16 +117,20 @@ def main():
 
     stats = []
 
-    # 1. Tokenize
-    print("Tokenizing...")
-    prompt_inputs = tokenizer(prompt, padding="max_length", max_length=77, return_tensors="pt")
-    neg_inputs = tokenizer(negative_prompt, padding="max_length", max_length=77, return_tensors="pt")
+    # 1. Token IDs — hardcoded from C# ClipTokenizer output to ensure identical inputs
+    # prompt: "a painting of a cat sitting on a windowsill"
+    prompt_ids_list = [49406, 64, 49164, 684, 64, 1481, 42988, 653, 521, 64, 3110, 6300, 828, 49407, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    # negative: "blurry, bad quality"
+    neg_ids_list = [49406, 12102, 1511, 11, 2564, 28545, 49407, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
-    prompt_ids = prompt_inputs.input_ids
-    neg_ids = neg_inputs.input_ids
+    prompt_ids = torch.tensor([prompt_ids_list], dtype=torch.long)
+    neg_ids = torch.tensor([neg_ids_list], dtype=torch.long)
 
-    stats.append({"name": "prompt_token_ids", "values": prompt_ids[0].tolist()})
-    stats.append({"name": "negative_token_ids", "values": neg_ids[0].tolist()})
+    print(f"  prompt_ids: {prompt_ids_list[:15]}...")
+    print(f"  neg_ids: {neg_ids_list[:10]}...")
+
+    stats.append({"name": "prompt_token_ids", "values": prompt_ids_list})
+    stats.append({"name": "negative_token_ids", "values": neg_ids_list})
 
     # 2. Text encoding
     print("Encoding text...")
@@ -144,6 +140,9 @@ def main():
 
     stats.append(tensor_stats("prompt_embeddings", prompt_embeds))
     stats.append(tensor_stats("negative_embeddings", neg_embeds))
+
+    print(f"  prompt_embeds: mean={float(prompt_embeds.mean()):.6f}, std={float(prompt_embeds.std()):.6f}, first8={[float(x) for x in prompt_embeds.flatten()[:8]]}")
+    print(f"  neg_embeds: mean={float(neg_embeds.mean()):.6f}, std={float(neg_embeds.std()):.6f}, first8={[float(x) for x in neg_embeds.flatten()[:8]]}")
 
     # Concatenate: [neg, pos] for CFG
     text_embeddings = torch.cat([neg_embeds, prompt_embeds], dim=0)  # [2, 77, 768]
@@ -159,6 +158,7 @@ def main():
     # 4. Scheduler setup
     scheduler.set_timesteps(num_steps)
     timesteps = scheduler.timesteps
+    print(f"  timesteps: {[float(t) for t in timesteps[:5]]}...")
     stats.append({"name": "timesteps", "values": [float(t) for t in timesteps]})
     stats.append({"name": "sigmas", "values": [float(s) for s in scheduler.sigmas]})
     stats.append({"name": "initial_noise_sigma", "value": float(scheduler.init_noise_sigma)})
@@ -167,38 +167,32 @@ def main():
     latents = latents * scheduler.init_noise_sigma
     stats.append(tensor_stats("scaled_noise", latents))
 
-    # 5. Denoising loop (first 3 steps only for diagnostics)
+    # 5. Denoising loop (first 3 steps)
     print("Running denoising steps...")
     diag_steps = min(3, num_steps)
 
     for i, t in enumerate(timesteps[:diag_steps]):
-        # Scale model input
         latent_model_input = scheduler.scale_model_input(latents, t)
         stats.append(tensor_stats(f"step{i}_scaled_input", latent_model_input))
 
-        # Expand for CFG: [2, 4, H, W]
         latent_model_input_cfg = torch.cat([latent_model_input] * 2)
 
         with torch.no_grad():
             noise_pred = unet(latent_model_input_cfg, t, encoder_hidden_states=text_embeddings).sample
 
-        # Split predictions
         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
         stats.append(tensor_stats(f"step{i}_noise_pred_uncond", noise_pred_uncond))
         stats.append(tensor_stats(f"step{i}_noise_pred_cond", noise_pred_cond))
 
-        # CFG
         noise_pred_cfg = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
         stats.append(tensor_stats(f"step{i}_noise_pred_cfg", noise_pred_cfg))
 
-        # Scheduler step
         latents = scheduler.step(noise_pred_cfg, t, latents).prev_sample
         stats.append(tensor_stats(f"step{i}_latents_after", latents))
 
         print(f"  Step {i}: t={float(t):.1f}, latent mean={float(latents.mean()):.6f}, std={float(latents.std()):.6f}")
 
-    # 6. VAE decode (on final latents after all steps for full run)
-    # Run remaining steps silently
+    # Run remaining steps
     for i, t in enumerate(timesteps[diag_steps:], start=diag_steps):
         latent_model_input = scheduler.scale_model_input(latents, t)
         latent_model_input_cfg = torch.cat([latent_model_input] * 2)
@@ -220,7 +214,6 @@ def main():
 
     stats.append(tensor_stats("vae_output", image))
 
-    # Clamp to [0, 1] for image
     image_clamped = ((image + 1.0) / 2.0).clamp(0, 1)
     stats.append(tensor_stats("image_clamped_01", image_clamped))
 

@@ -1,0 +1,186 @@
+// SharpInference Softmax kernel — FP32
+// Numerically stable per-row softmax: output[i] = exp(input[i] - max) / sum(exp(input - max))
+// Launch: gridDim.x = total_rows, blockDim.x = 256
+// Each block handles one row of length row_len
+// Shared memory: blockDim.x * sizeof(float)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+.extern .shared .f32 sdata[];
+
+// ─── softmax_f32 ──────────────────────────────────────────────────
+// In-place softmax over rows: data[row, col] for each row
+// Params: data*, row_len, total_rows
+// data is contiguous [total_rows, row_len]
+.visible .entry softmax_f32(
+    .param .u64 param_data,
+    .param .u32 param_row_len,
+    .param .u32 param_total_rows
+)
+{
+    .reg .u64 %rd<12>;
+    .reg .u32 %r<16>;
+    .reg .f32 %f<16>;
+    .reg .pred %p<4>;
+
+    ld.param.u64 %rd0, [param_data];
+    ld.param.u32 %r0, [param_row_len];
+    ld.param.u32 %r1, [param_total_rows];
+
+    // blockIdx.x = row index
+    mov.u32 %r2, %ctaid.x;        // row_idx
+    mov.u32 %r3, %tid.x;          // tid
+    mov.u32 %r4, %ntid.x;         // blockDim (256)
+
+    // Bounds check: skip if row_idx >= total_rows
+    setp.ge.u32 %p1, %r2, %r1;
+    @%p1 bra done_softmax;
+
+    // Compute base pointer for this row: data + row_idx * row_len * sizeof(float)
+    mul.lo.u32 %r5, %r2, %r0;     // row_idx * row_len
+    cvt.u64.u32 %rd1, %r5;
+    shl.b64 %rd1, %rd1, 2;        // * sizeof(float)
+    add.u64 %rd2, %rd0, %rd1;     // row_base_ptr
+
+    // Shared memory base
+    mov.u64 %rd3, sdata;
+    cvt.u64.u32 %rd4, %r3;
+    shl.b64 %rd4, %rd4, 2;        // tid * sizeof(float)
+    add.u64 %rd5, %rd3, %rd4;     // &sdata[tid]
+
+    // ── Pass 1: Find row max ──
+    // Each thread finds max of its strided elements
+    mov.f32 %f1, 0fFF800000;      // thread_max = -inf (0xFF800000)
+    mov.u32 %r6, %r3;             // i = tid
+
+pass1_max_loop:
+    setp.ge.u32 %p2, %r6, %r0;
+    @%p2 bra pass1_max_done;
+
+    cvt.u64.u32 %rd6, %r6;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.f32 %f2, [%rd7];
+    max.f32 %f1, %f1, %f2;
+
+    add.u32 %r6, %r6, %r4;        // i += blockDim
+    bra pass1_max_loop;
+
+pass1_max_done:
+    // Store thread_max to shared memory
+    st.shared.f32 [%rd5], %f1;
+    bar.sync 0;
+
+    // Block reduction for max
+    mov.u32 %r7, 128;             // s = blockDim / 2
+reduce_max:
+    setp.eq.u32 %p2, %r7, 0;
+    @%p2 bra reduce_max_done;
+    setp.ge.u32 %p3, %r3, %r7;
+    @%p3 bra reduce_max_skip;
+
+    add.u32 %r8, %r3, %r7;
+    cvt.u64.u32 %rd6, %r8;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd3, %rd6;
+    ld.shared.f32 %f2, [%rd7];
+    ld.shared.f32 %f3, [%rd5];
+    max.f32 %f3, %f3, %f2;
+    st.shared.f32 [%rd5], %f3;
+
+reduce_max_skip:
+    bar.sync 0;
+    shr.u32 %r7, %r7, 1;
+    bra reduce_max;
+
+reduce_max_done:
+    // row_max = sdata[0]
+    ld.shared.f32 %f4, [%rd3];    // %f4 = row_max
+    bar.sync 0;
+
+    // ── Pass 2: Compute exp(x - max) and sum ──
+    // Each thread computes exp for its elements and accumulates local sum
+    mov.f32 %f5, 0f00000000;      // thread_sum = 0
+    mov.u32 %r6, %r3;             // i = tid
+
+pass2_expsum_loop:
+    setp.ge.u32 %p2, %r6, %r0;
+    @%p2 bra pass2_expsum_done;
+
+    cvt.u64.u32 %rd6, %r6;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.f32 %f2, [%rd7];
+
+    // exp(x - max) via exp2((x - max) * log2(e))
+    sub.f32 %f6, %f2, %f4;        // x - max
+    mov.f32 %f7, 0f3FB8AA3B;      // log2(e) = 1.4426950408889634
+    mul.f32 %f6, %f6, %f7;        // (x - max) * log2(e)
+    ex2.approx.f32 %f8, %f6;      // exp(x - max)
+
+    // Store exp back to global memory (in-place)
+    st.global.f32 [%rd7], %f8;
+
+    // Accumulate sum
+    add.f32 %f5, %f5, %f8;
+
+    add.u32 %r6, %r6, %r4;        // i += blockDim
+    bra pass2_expsum_loop;
+
+pass2_expsum_done:
+    // Store thread_sum to shared memory
+    st.shared.f32 [%rd5], %f5;
+    bar.sync 0;
+
+    // Block reduction for sum
+    mov.u32 %r7, 128;
+reduce_sum:
+    setp.eq.u32 %p2, %r7, 0;
+    @%p2 bra reduce_sum_done;
+    setp.ge.u32 %p3, %r3, %r7;
+    @%p3 bra reduce_sum_skip;
+
+    add.u32 %r8, %r3, %r7;
+    cvt.u64.u32 %rd6, %r8;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd3, %rd6;
+    ld.shared.f32 %f2, [%rd7];
+    ld.shared.f32 %f3, [%rd5];
+    add.f32 %f3, %f3, %f2;
+    st.shared.f32 [%rd5], %f3;
+
+reduce_sum_skip:
+    bar.sync 0;
+    shr.u32 %r7, %r7, 1;
+    bra reduce_sum;
+
+reduce_sum_done:
+    // inv_sum = 1.0 / sdata[0]
+    ld.shared.f32 %f9, [%rd3];    // total sum
+    rcp.approx.f32 %f10, %f9;     // inv_sum
+    bar.sync 0;
+
+    // ── Pass 3: Normalize ──
+    // output[i] = exp_val[i] * inv_sum
+    mov.u32 %r6, %r3;             // i = tid
+
+pass3_norm_loop:
+    setp.ge.u32 %p2, %r6, %r0;
+    @%p2 bra pass3_norm_done;
+
+    cvt.u64.u32 %rd6, %r6;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.f32 %f2, [%rd7];
+    mul.f32 %f2, %f2, %f10;       // exp_val * inv_sum
+    st.global.f32 [%rd7], %f2;
+
+    add.u32 %r6, %r6, %r4;        // i += blockDim
+    bra pass3_norm_loop;
+
+pass3_norm_done:
+done_softmax:
+    ret;
+}

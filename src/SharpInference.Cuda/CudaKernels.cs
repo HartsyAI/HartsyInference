@@ -7,6 +7,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _groupnormModule;
     private readonly CudaModule _layernormModule;
     private readonly CudaModule _spatialModule;
+    private readonly CudaModule _softmaxModule;
 
     // ── Elementwise kernel function handles ─────────────────────────────
     private readonly nint _addF32;
@@ -24,6 +25,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _upsampleNearest2dF32;
     private readonly nint _im2colF32;
     private readonly nint _col2biasAddF32;
+
+    // ── Softmax kernel function handle ────────────────────────────────
+    private readonly nint _softmaxF32;
 
     private const uint BlockSize = 256;
 
@@ -59,6 +63,11 @@ public sealed class CudaKernels : IDisposable
         _upsampleNearest2dF32 = _spatialModule.GetFunction("upsample_nearest2d_f32");
         _im2colF32 = _spatialModule.GetFunction("im2col_f32");
         _col2biasAddF32 = _spatialModule.GetFunction("col2bias_add_f32");
+
+        // Softmax kernel
+        string softmaxPath = Path.Combine(ptxDir, "softmax_f32.ptx");
+        _softmaxModule = CudaModule.LoadFromFile(softmaxPath);
+        _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
     }
 
     // ── Elementwise Launches ────────────────────────────────────────────
@@ -311,12 +320,34 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    // ── Softmax Launch ─────────────────────────────────────────────────
+
+    /// <summary>Launches in-place per-row softmax: data[row, col] = softmax(data[row, :]). One block per row, shared memory = blockDim * sizeof(float).</summary>
+    public unsafe void LaunchSoftmax(ulong data, int rowLen, int totalRows, nint stream)
+    {
+        ulong dataArg = data;
+        uint rowLenArg = (uint)rowLen;
+        uint totalRowsArg = (uint)totalRows;
+
+        void** args = stackalloc void*[3];
+        args[0] = &dataArg;
+        args[1] = &rowLenArg;
+        args[2] = &totalRowsArg;
+
+        uint gridDim = (uint)totalRows;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(
+            _softmaxF32, gridDim, 1, 1, BlockSize, 1, 1,
+            sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public void Dispose()
     {
         _elementwiseModule.Dispose();
         _groupnormModule.Dispose();
         _layernormModule.Dispose();
         _spatialModule.Dispose();
+        _softmaxModule.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -326,5 +357,6 @@ public sealed class CudaKernels : IDisposable
         _groupnormModule.Dispose();
         _layernormModule.Dispose();
         _spatialModule.Dispose();
+        _softmaxModule.Dispose();
     }
 }

@@ -9,15 +9,22 @@
 
 **Reason:** Diffusers uses `/ (half_dim - 1)` in `get_timestep_embedding()`. Our code used `/ halfDim`, which caused the highest frequency component to be ~6% off from the reference. This ensures the frequency range spans exactly `[1, 1/10000]` matching the original sinusoidal position encoding formulation.
 
-## 2. CUDA SDPA Softmax — CPU Roundtrip
+## 2. CLIP Text Encoder — Missing Final LayerNorm
 
-**File:** `src/SharpInference.Cuda/CudaBackend.cs`
+**File:** `src/SharpInference.Diffusion/Models/TextEncoders/ClipTextEncoder.cs`
 
-**Deviation:** The CUDA ScaledDotProductAttention implementation uses a CPU roundtrip for the softmax step. QK^T and attention @ V are done via cuBLAS SGEMM, but the softmax is computed by downloading scores to host, running softmax in a tight loop, then uploading back.
+**Before:** `Encode()` returned the raw last transformer layer output without applying `final_layer_norm`.
+**After:** `Encode()` applies `final_layer_norm` to the encoder output before returning, matching HuggingFace `CLIPTextTransformer.forward()`.
 
-**Reason:** Writing a correct, numerically stable softmax PTX kernel with proper shared memory reductions is non-trivial. This is a temporary measure to get the full pipeline running on GPU. A pure-PTX softmax kernel should be implemented for production performance.
+**Reason:** The original code incorrectly assumed SD1.5 conditioning uses un-normed hidden states. In reality, HuggingFace `CLIPTextModel` applies `self.final_layer_norm()` to the encoder output before returning `last_hidden_state`. Without this, text embeddings had std ~5 instead of ~1, causing 5x amplified conditioning signals that produced abstract patterns instead of coherent images.
 
-## 3. CUDA Conv2D — Im2Col + cuBLAS SGEMM
+## 3. CUDA SDPA Softmax — PTX Kernel (Resolved)
+
+**Files:** `src/SharpInference.Cuda/Ptx/softmax_f32.ptx`, `src/SharpInference.Cuda/CudaKernels.cs`
+
+**Previous deviation:** The softmax step used a CPU roundtrip (download scores → host softmax → upload). This has been replaced with a pure-PTX numerically stable per-row softmax kernel using shared memory reductions (3-pass: max → exp+sum → normalize). One block per row, blockDim=256. Uses `ex2.approx.f32` for exp and `rcp.approx.f32` for 1/sum.
+
+## 4. CUDA Conv2D — Im2Col + cuBLAS SGEMM
 
 **File:** `src/SharpInference.Cuda/CudaBackend.cs`, `src/SharpInference.Cuda/Ptx/spatial_f32.ptx`
 
@@ -25,7 +32,7 @@
 
 **Reason:** Avoids cuDNN dependency, keeping the project pure C# + CUDA Driver API + cuBLAS. Performance is reasonable for inference workloads, though cuDNN's optimized implementations would be faster for production.
 
-## 4. CUDA GroupNorm/LayerNorm — Three-Pass Kernels
+## 5. CUDA GroupNorm/LayerNorm — Three-Pass Kernels
 
 **Files:** `src/SharpInference.Cuda/Ptx/groupnorm_f32.ptx`, `src/SharpInference.Cuda/Ptx/layernorm_f32.ptx`
 
