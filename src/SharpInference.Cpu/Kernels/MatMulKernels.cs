@@ -87,17 +87,20 @@ public static class MatMulKernels
         }
     }
 
-    /// <summary>Performs 3D batched matrix multiplication: output[B,M,N] = a[B,M,K] @ b[B,K,N]. Iterates over the batch dimension and delegates each slice to <see cref="MatMul"/>.</summary>
+    /// <summary>Performs 3D batched matrix multiplication: output[B,M,N] = a[B,M,K] @ b[K,N] or b[B,K,N]. When b is 2D, it is broadcast across the batch dimension. Iterates over the batch dimension and delegates each slice to <see cref="MatMul"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
         long batchSize = a.Shape[0];
         long M = a.Shape[1];
         long K = a.Shape[2];
-        long N = b.Shape[2];
+
+        // Handle 2D right operand: b is [K, N] broadcast across batch
+        bool bIs2D = b.Shape.Rank == 2;
+        long N = bIs2D ? b.Shape[1] : b.Shape[2];
 
         long aSliceSize = M * K;
-        long bSliceSize = K * N;
+        long bSliceSize = bIs2D ? 0 : K * N; // 0 = reuse same pointer for all batches
         long outSliceSize = M * N;
 
         float* pA = (float*)a.DataPointer;

@@ -246,10 +246,15 @@ internal sealed unsafe class TransformerSubBlock
         Tensor normed = new Tensor(hidShape, DType.F32);
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
 
-        // Q from normed hidden, K/V from context
+        // Q from normed hidden; K/V from normed hidden (self-attn) or raw context (cross-attn)
+        // Diffusers: self-attention passes norm_hidden_states for Q/K/V; cross-attention uses raw encoder_hidden_states for K/V
+        Tensor kvSource = ReferenceEquals(hidden, context) ? normed : context;
+        int kvSeqLen = ReferenceEquals(hidden, context) ? seqLen : ctxLen;
+        int kvDim = ReferenceEquals(hidden, context) ? _channels : _contextDim;
+
         Tensor query = LinearProject(normed, _toQWeight!, _toQBias, batch, seqLen, _channels, _channels);
-        Tensor key = LinearProject(context, _toKWeight!, _toKBias, batch, ctxLen, _contextDim, _channels);
-        Tensor value = LinearProject(context, _toVWeight!, _toVBias, batch, ctxLen, _contextDim, _channels);
+        Tensor key = LinearProject(kvSource, _toKWeight!, _toKBias, batch, kvSeqLen, kvDim, _channels);
+        Tensor value = LinearProject(kvSource, _toVWeight!, _toVBias, batch, kvSeqLen, kvDim, _channels);
         normed.Dispose();
 
         // Reshape to multi-head 4D: [B, S, numHeads*headDim] → [B, numHeads, S, headDim]

@@ -79,13 +79,21 @@ public sealed class VaeAttention
         Tensor value = ProjectLinear(backend, normedTransposed, _toVWeight!, _toVBias!, batch, seqLen, channels);
         normedTransposed.Dispose();
 
-        // Scaled dot-product attention (single head): [B, seqLen, C]
+        // Reshape to 4D for single-head attention: [B, seqLen, C] → [B, 1, seqLen, C]
+        TensorShape attn4DShape = new TensorShape(batch, 1, seqLen, channels);
+        Tensor query4D = query.Reshape(attn4DShape);
+        Tensor key4D = key.Reshape(attn4DShape);
+        Tensor value4D = value.Reshape(attn4DShape);
+
         float scale = 1.0f / MathF.Sqrt(channels);
-        Tensor attnOut = new Tensor(seqShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, query, key, value, null, scale);
+        Tensor attnOut4D = new Tensor(attn4DShape, DType.F32);
+        backend.ScaledDotProductAttention(attnOut4D, query4D, key4D, value4D, null, scale);
         query.Dispose();
         key.Dispose();
         value.Dispose();
+
+        // Reshape back to 3D: [B, 1, seqLen, C] → [B, seqLen, C]
+        Tensor attnOut = attnOut4D.Reshape(seqShape);
 
         // Output projection: [B, seqLen, C] @ [C, C]^T = [B, seqLen, C]
         Tensor projected = ProjectLinear(backend, attnOut, _toOutWeight!, _toOutBias!, batch, seqLen, channels);

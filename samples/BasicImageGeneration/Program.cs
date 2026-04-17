@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using SharpInference.Core.Backends;
 using SharpInference.Core.Logging;
 using SharpInference.Core.Tensors;
 using SharpInference.Cpu;
@@ -16,7 +15,7 @@ namespace BasicImageGeneration;
 
 public static class Program
 {
-    public static unsafe void Main(string[] args)
+    public static void Main(string[] args)
     {
         Logs.MinLevel = LogLevel.Debug;
 
@@ -59,7 +58,7 @@ public static class Program
         // Settings — small resolution and few steps for CPU
         int width = 256;
         int height = 256;
-        int steps = 10;
+        int steps = 20;
         float cfgScale = 7.5f;
         int seed = 42;
         string prompt = "a painting of a cat sitting on a windowsill";
@@ -126,7 +125,7 @@ public static class Program
         Console.WriteLine("All models loaded. Starting inference...");
         Console.WriteLine();
 
-        // ── Generate! ──
+        // ── Full pipeline with CFG ──
         using StableDiffusion15Pipeline pipeline = new StableDiffusion15Pipeline(backend, textEncoder, unet, vaeDecoder);
 
         TextToImageRequest request = new TextToImageRequest
@@ -140,21 +139,15 @@ public static class Program
             Seed = seed,
         };
 
-        (byte[] rgbData, int w, int h, int usedSeed) = pipeline.GenerateFromTokens(
+        (byte[] rgbData, int outW, int outH, int usedSeed) = pipeline.GenerateFromTokens(
             promptTokens, negativeTokens, request,
-            progress =>
-            {
-                Console.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} — {progress.ElapsedMs:F0}ms");
-            });
+            progress => Console.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
+
+        ImagePostProcessor.SaveBmp(outputPath, rgbData, outW, outH);
 
         totalSw.Stop();
-
-        // Save output
-        ImagePostProcessor.SaveBmp(outputPath, rgbData, w, h);
-        Console.WriteLine();
+        Console.WriteLine($"\nGeneration complete in {totalSw.Elapsed.TotalSeconds:F1}s (seed={usedSeed})");
         Console.WriteLine($"Image saved to: {outputPath}");
-        Console.WriteLine($"Total time: {totalSw.Elapsed.TotalSeconds:F1}s");
-        Console.WriteLine("Done!");
     }
 
     /// <summary>Casts all FP16/BF16 tensors to FP32 for CPU inference.</summary>
