@@ -1,0 +1,312 @@
+// SharpInference elementwise kernels — FP32
+// Fused add, mul, scale, SiLU, GELU for tensor operations
+// Launched with 1D grid: gridDim.x = ceil(count / 256)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+// ─── elementwise_add_f32 ────────────────────────────────────────────
+// output[i] = a[i] + b[i]
+// Params: output*, a*, b*, count
+.visible .entry elementwise_add_f32(
+    .param .u64 param_out,
+    .param .u64 param_a,
+    .param .u64 param_b,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f<4>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_a];
+    ld.param.u64 %rd2, [param_b];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_add;
+
+    // Compute byte offset
+    cvt.u64.u32 %rd3, %r1;
+    shl.b64 %rd3, %rd3, 2;
+
+    add.u64 %rd4, %rd1, %rd3;
+    add.u64 %rd5, %rd2, %rd3;
+
+    ld.global.f32 %f1, [%rd4];
+    ld.global.f32 %f2, [%rd5];
+    add.f32 %f3, %f1, %f2;
+
+    add.u64 %rd4, %rd0, %rd3;
+    st.global.f32 [%rd4], %f3;
+
+done_add:
+    ret;
+}
+
+// ─── elementwise_mul_f32 ────────────────────────────────────────────
+// output[i] = a[i] * b[i]
+.visible .entry elementwise_mul_f32(
+    .param .u64 param_out,
+    .param .u64 param_a,
+    .param .u64 param_b,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f<4>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_a];
+    ld.param.u64 %rd2, [param_b];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_mul;
+
+    cvt.u64.u32 %rd3, %r1;
+    shl.b64 %rd3, %rd3, 2;
+
+    add.u64 %rd4, %rd1, %rd3;
+    add.u64 %rd5, %rd2, %rd3;
+
+    ld.global.f32 %f1, [%rd4];
+    ld.global.f32 %f2, [%rd5];
+    mul.f32 %f3, %f1, %f2;
+
+    add.u64 %rd4, %rd0, %rd3;
+    st.global.f32 [%rd4], %f3;
+
+done_mul:
+    ret;
+}
+
+// ─── elementwise_scale_f32 ──────────────────────────────────────────
+// output[i] = input[i] * scalar
+.visible .entry elementwise_scale_f32(
+    .param .u64 param_out,
+    .param .u64 param_input,
+    .param .f32 param_scalar,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<5>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f<4>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_input];
+    ld.param.f32 %f0, [param_scalar];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_scale;
+
+    cvt.u64.u32 %rd3, %r1;
+    shl.b64 %rd3, %rd3, 2;
+
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.f32 %f1, [%rd4];
+    mul.f32 %f2, %f1, %f0;
+
+    add.u64 %rd4, %rd0, %rd3;
+    st.global.f32 [%rd4], %f2;
+
+done_scale:
+    ret;
+}
+
+// ─── elementwise_silu_f32 ───────────────────────────────────────────
+// output[i] = input[i] * sigmoid(input[i])
+// sigmoid(x) = 1 / (1 + exp(-x))
+.visible .entry elementwise_silu_f32(
+    .param .u64 param_out,
+    .param .u64 param_input,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<5>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f<8>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_input];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_silu;
+
+    cvt.u64.u32 %rd3, %r1;
+    shl.b64 %rd3, %rd3, 2;
+
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.f32 %f1, [%rd4];
+
+    // sigmoid(x) = 1 / (1 + exp(-x))
+    neg.f32 %f2, %f1;
+    ex2.approx.f32 %f3, %f2;          // exp2(-x) -- need to convert
+    // Actually: exp(-x) = exp2(-x * log2(e))
+    // log2(e) = 1.4426950408889634
+    mov.f32 %f4, 0f3FB8AA3B;          // 1.4426950408889634
+    mul.f32 %f2, %f2, %f4;            // -x * log2(e)
+    ex2.approx.f32 %f3, %f2;          // exp(-x)
+    mov.f32 %f5, 0f3F800000;          // 1.0
+    add.f32 %f6, %f3, %f5;            // 1 + exp(-x)
+    rcp.approx.f32 %f7, %f6;          // 1 / (1 + exp(-x))
+    mul.f32 %f7, %f1, %f7;            // x * sigmoid(x)
+
+    add.u64 %rd4, %rd0, %rd3;
+    st.global.f32 [%rd4], %f7;
+
+done_silu:
+    ret;
+}
+
+// ─── elementwise_gelu_f32 ───────────────────────────────────────────
+// output[i] = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// Approximation used by most ML frameworks
+.visible .entry elementwise_gelu_f32(
+    .param .u64 param_out,
+    .param .u64 param_input,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<5>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f<16>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_input];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_gelu;
+
+    cvt.u64.u32 %rd3, %r1;
+    shl.b64 %rd3, %rd3, 2;
+
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.f32 %f1, [%rd4];
+
+    // x^3
+    mul.f32 %f2, %f1, %f1;
+    mul.f32 %f3, %f2, %f1;
+
+    // 0.044715 * x^3
+    mov.f32 %f4, 0f3D372713;          // 0.044715
+    mul.f32 %f5, %f4, %f3;
+
+    // x + 0.044715 * x^3
+    add.f32 %f6, %f1, %f5;
+
+    // sqrt(2/pi) = 0.7978845608
+    mov.f32 %f7, 0f3F4C422A;          // 0.7978845608
+    mul.f32 %f8, %f7, %f6;
+
+    // tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+    // Use: tanh(x) = 2*sigmoid(2x) - 1
+    mov.f32 %f9, 0f40000000;          // 2.0
+    mul.f32 %f10, %f9, %f8;           // 2x
+    // exp(-2x) via exp2(-2x * log2(e))
+    neg.f32 %f11, %f10;
+    mov.f32 %f12, 0f3FB8AA3B;         // log2(e) = 1.4426950408889634
+    mul.f32 %f11, %f11, %f12;
+    ex2.approx.f32 %f11, %f11;        // exp(-2x)
+    mov.f32 %f13, 0f3F800000;         // 1.0
+    add.f32 %f14, %f11, %f13;         // 1 + exp(-2x)
+    rcp.approx.f32 %f14, %f14;        // sigmoid(2x) = 1/(1+exp(-2x))
+    mul.f32 %f14, %f9, %f14;          // 2*sigmoid(2x)
+    sub.f32 %f14, %f14, %f13;         // tanh = 2*sigmoid(2x) - 1
+
+    // 1 + tanh(...)
+    add.f32 %f15, %f13, %f14;
+
+    // 0.5 * x * (1 + tanh(...))
+    mov.f32 %f9, 0f3F000000;          // 0.5
+    mul.f32 %f15, %f9, %f15;
+    mul.f32 %f15, %f1, %f15;
+
+    add.u64 %rd4, %rd0, %rd3;
+    st.global.f32 [%rd4], %f15;
+
+done_gelu:
+    ret;
+}
+
+// ─── elementwise_clamp_f32 ──────────────────────────────────────────
+// output[i] = clamp(input[i], min_val, max_val)
+.visible .entry elementwise_clamp_f32(
+    .param .u64 param_out,
+    .param .u64 param_input,
+    .param .f32 param_min,
+    .param .f32 param_max,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<5>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f<5>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_input];
+    ld.param.f32 %f0, [param_min];
+    ld.param.f32 %f3, [param_max];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_clamp;
+
+    cvt.u64.u32 %rd3, %r1;
+    shl.b64 %rd3, %rd3, 2;
+
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.f32 %f1, [%rd4];
+
+    max.f32 %f2, %f1, %f0;
+    min.f32 %f4, %f2, %f3;
+
+    add.u64 %rd4, %rd0, %rd3;
+    st.global.f32 [%rd4], %f4;
+
+done_clamp:
+    ret;
+}

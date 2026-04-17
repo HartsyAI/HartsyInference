@@ -11,9 +11,9 @@
     <ProjectReference Include="..\SharpInference.Cpu\SharpInference.Cpu.csproj" />
   </ItemGroup>
 
-  <!-- Embed PTX kernel files as resources -->
+  <!-- PTX kernel files shipped as content, loaded from disk at runtime -->
   <ItemGroup>
-    <EmbeddedResource Include="Ptx\*.ptx" />
+    <Content Include="Ptx\*.ptx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

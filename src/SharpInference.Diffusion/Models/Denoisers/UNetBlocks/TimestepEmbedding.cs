@@ -66,8 +66,9 @@ public sealed unsafe class TimestepEmbedding
         Tensor embedding = new Tensor(shape, DType.F32);
         float* embPtr = (float*)embedding.DataPointer;
 
-        // freq[i] = exp(-ln(10000) * i / halfDim)
-        float logBase = -MathF.Log(10000.0f) / halfDim;
+        // freq[i] = exp(-ln(10000) * i / (halfDim - 1))
+        // Matches diffusers: torch.exp(torch.arange(half_dim) * -(math.log(10000) / (half_dim - 1)))
+        float logBase = -MathF.Log(10000.0f) / (halfDim - 1);
 
         for (int b = 0; b < batch; b++)
         {
