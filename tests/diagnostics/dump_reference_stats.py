@@ -155,6 +155,11 @@ def main():
     latents = torch.randn(latent_shape, generator=generator, device=device, dtype=dtype)
     stats.append(tensor_stats("initial_noise", latents))
 
+    # Save full noise tensor for cross-runtime comparison
+    noise_path = os.path.join(os.path.dirname(output_file), "initial_noise.bin")
+    latents.numpy().tofile(noise_path)
+    print(f"  Saved noise tensor ({latents.numel()} floats) to {noise_path}")
+
     # 4. Scheduler setup
     scheduler.set_timesteps(num_steps)
     timesteps = scheduler.timesteps
@@ -183,6 +188,15 @@ def main():
         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
         stats.append(tensor_stats(f"step{i}_noise_pred_uncond", noise_pred_uncond))
         stats.append(tensor_stats(f"step{i}_noise_pred_cond", noise_pred_cond))
+
+        # Save full step 0 tensors for cross-runtime comparison
+        if i == 0:
+            tensor_dir = os.path.join(os.path.dirname(output_file), "reference_tensors")
+            os.makedirs(tensor_dir, exist_ok=True)
+            noise_pred_uncond.numpy().tofile(os.path.join(tensor_dir, "step0_noise_pred_uncond.bin"))
+            noise_pred_cond.numpy().tofile(os.path.join(tensor_dir, "step0_noise_pred_cond.bin"))
+            latent_model_input.numpy().tofile(os.path.join(tensor_dir, "step0_scaled_input.bin"))
+            print(f"  Step 0 tensors saved to {tensor_dir}")
 
         noise_pred_cfg = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
         stats.append(tensor_stats(f"step{i}_noise_pred_cfg", noise_pred_cfg))

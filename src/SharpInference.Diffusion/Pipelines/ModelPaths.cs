@@ -1,0 +1,68 @@
+namespace SharpInference.Diffusion.Pipelines;
+
+/// <summary>Resolves file paths for all model components. Supports ComfyUI-style directory layouts.</summary>
+public record ModelPaths
+{
+    /// <summary>Path to the tokenizer directory containing vocab.json and merges.txt.</summary>
+    public required string TokenizerDir { get; init; }
+
+    /// <summary>Path to the text encoder safetensors file.</summary>
+    public required string TextEncoderPath { get; init; }
+
+    /// <summary>Path to the UNet safetensors file.</summary>
+    public required string UNetPath { get; init; }
+
+    /// <summary>Path to the VAE safetensors file.</summary>
+    public required string VaePath { get; init; }
+
+    /// <summary>Convenience property for vocab.json inside the tokenizer directory.</summary>
+    public string VocabPath => Path.Combine(TokenizerDir, "vocab.json");
+
+    /// <summary>Convenience property for merges.txt inside the tokenizer directory.</summary>
+    public string MergesPath => Path.Combine(TokenizerDir, "merges.txt");
+
+    /// <summary>Creates ModelPaths from a single model root with standard HuggingFace layout (tokenizer/, text_encoder/, unet/, vae/).</summary>
+    public static ModelPaths FromHuggingFaceDir(string modelRoot, string weightFileName = "model.fp16.safetensors")
+    {
+        string root = Path.GetFullPath(modelRoot);
+        return new ModelPaths
+        {
+            TokenizerDir = Path.Combine(root, "tokenizer"),
+            TextEncoderPath = Path.Combine(root, "text_encoder", weightFileName),
+            UNetPath = Path.Combine(root, "unet", $"diffusion_pytorch_model.fp16.safetensors"),
+            VaePath = Path.Combine(root, "vae", $"diffusion_pytorch_model.fp16.safetensors"),
+        };
+    }
+
+    /// <summary>Creates ModelPaths from a ComfyUI-style layout where each component type has its own top-level directory.</summary>
+    public static ModelPaths FromComfyLayout(
+        string modelsRoot,
+        string checkpointName,
+        string? vaeName = null,
+        string tokenizerDir = "tokenizer")
+    {
+        string root = Path.GetFullPath(modelsRoot);
+        string sdDir = Path.Combine(root, "Stable-Diffusion", checkpointName);
+
+        return new ModelPaths
+        {
+            TokenizerDir = Path.Combine(sdDir, tokenizerDir),
+            TextEncoderPath = Path.Combine(sdDir, "text_encoder", "model.fp16.safetensors"),
+            UNetPath = Path.Combine(sdDir, "unet", "diffusion_pytorch_model.fp16.safetensors"),
+            VaePath = vaeName != null
+                ? Path.Combine(root, "VAE", vaeName)
+                : Path.Combine(sdDir, "vae", "diffusion_pytorch_model.fp16.safetensors"),
+        };
+    }
+
+    /// <summary>Validates that all required files exist. Throws FileNotFoundException for the first missing file.</summary>
+    public void Validate()
+    {
+        string[] paths = [VocabPath, MergesPath, TextEncoderPath, UNetPath, VaePath];
+        foreach (string path in paths)
+        {
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"Required model file not found: {path}", path);
+        }
+    }
+}

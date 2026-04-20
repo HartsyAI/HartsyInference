@@ -73,6 +73,9 @@ Desktop.ini
 *.onnx
 *.bin
 
+## Generated output images
+samples/Output/*/
+
 ## Model cache
 .sharpinference/
 

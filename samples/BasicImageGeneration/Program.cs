@@ -15,107 +15,115 @@ namespace BasicImageGeneration;
 
 public static class Program
 {
+    #region Configuration
+
+    private static readonly string SamplesRoot = Path.GetFullPath(
+        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+
+    private static readonly ModelPaths DefaultModelPaths = ModelPaths.FromComfyLayout(
+        modelsRoot: Path.Combine(SamplesRoot, "Models"),
+        checkpointName: "StabilityAI/sd-v1-5");
+
+    private static readonly OutputSettings DefaultOutputSettings = new OutputSettings
+    {
+        OutputDir = Path.Combine(SamplesRoot, "Output"),
+    };
+
+    #endregion
+
+    #region Generation Settings
+
+    private const int ImageWidth = 256;
+    private const int ImageHeight = 256;
+    private const int Steps = 20;
+    private const float CfgScale = 7.5f;
+    private const int Seed = 42;
+    private const string Prompt = "a painting of a cat sitting on a windowsill";
+    private const string NegativePrompt = "blurry, bad quality";
+
+    #endregion
+
     public static void Main(string[] args)
     {
         Logs.MinLevel = LogLevel.Debug;
 
-        string modelDir = args.Length > 0
-            ? args[0]
-            : Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "tests", "test-models", "sd15");
+        // Allow overriding model dir and output dir via command line
+        ModelPaths modelPaths = args.Length > 0
+            ? ModelPaths.FromHuggingFaceDir(args[0])
+            : DefaultModelPaths;
 
-        modelDir = Path.GetFullPath(modelDir);
-
-        string outputPath = args.Length > 1
-            ? args[1]
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "sharpinference_output.bmp");
+        OutputSettings outputSettings = args.Length > 1
+            ? new OutputSettings { OutputDir = args[1] }
+            : DefaultOutputSettings;
 
         Console.WriteLine("╔══════════════════════════════════════════════╗");
-        Console.WriteLine("║  SharpInference — SD1.5 CPU Image Generation ║");
+        Console.WriteLine("║  SharpInference — SD1.5 Image Generation     ║");
         Console.WriteLine("╚══════════════════════════════════════════════╝");
         Console.WriteLine();
-        Console.WriteLine($"Model directory: {modelDir}");
-        Console.WriteLine($"Output path:     {outputPath}");
+        Console.WriteLine($"Model paths:");
+        Console.WriteLine($"  Tokenizer:    {modelPaths.TokenizerDir}");
+        Console.WriteLine($"  Text encoder: {modelPaths.TextEncoderPath}");
+        Console.WriteLine($"  UNet:         {modelPaths.UNetPath}");
+        Console.WriteLine($"  VAE:          {modelPaths.VaePath}");
+        Console.WriteLine();
+        Console.WriteLine($"Output dir: {outputSettings.OutputDir}");
         Console.WriteLine();
 
-        // Validate files exist
-        string tokenizerVocab = Path.Combine(modelDir, "tokenizer", "vocab.json");
-        string tokenizerMerges = Path.Combine(modelDir, "tokenizer", "merges.txt");
-        string textEncoderPath = Path.Combine(modelDir, "text_encoder", "model.fp16.safetensors");
-        string unetPath = Path.Combine(modelDir, "unet", "diffusion_pytorch_model.fp16.safetensors");
-        string vaePath = Path.Combine(modelDir, "vae", "diffusion_pytorch_model.fp16.safetensors");
-
-        string[] requiredFiles = [tokenizerVocab, tokenizerMerges, textEncoderPath, unetPath, vaePath];
-        foreach (string file in requiredFiles)
-        {
-            if (!File.Exists(file))
-            {
-                Console.Error.WriteLine($"ERROR: Required file not found: {file}");
-                return;
-            }
-        }
+        modelPaths.Validate();
         Console.WriteLine("All model files found.");
 
-        // Settings — small resolution and few steps for CPU
-        int width = 256;
-        int height = 256;
-        int steps = 20;
-        float cfgScale = 7.5f;
-        int seed = 42;
-        string prompt = "a painting of a cat sitting on a windowsill";
-        string negativePrompt = "blurry, bad quality";
-
-        Console.WriteLine($"Prompt: \"{prompt}\"");
-        Console.WriteLine($"Size: {width}x{height}, Steps: {steps}, CFG: {cfgScale}, Seed: {seed}");
+        Console.WriteLine($"Prompt: \"{Prompt}\"");
+        Console.WriteLine($"Size: {ImageWidth}x{ImageHeight}, Steps: {Steps}, CFG: {CfgScale}, Seed: {Seed}");
         Console.WriteLine();
 
         Stopwatch totalSw = Stopwatch.StartNew();
 
-        // ── 1. Create backend ──
+        // Create backend
         using CpuBackend backend = new CpuBackend();
         Console.WriteLine("[1/5] CPU backend created.");
 
-        // ── 2. Load tokenizer ──
+        // Load tokenizer
         Console.WriteLine("[2/5] Loading CLIP tokenizer...");
-        using ClipTokenizer tokenizer = new ClipTokenizer(tokenizerVocab, tokenizerMerges);
-        int[] promptTokens = tokenizer.Encode(prompt);
-        int[] negativeTokens = tokenizer.Encode(negativePrompt);
+        using ClipTokenizer tokenizer = new ClipTokenizer(modelPaths.VocabPath, modelPaths.MergesPath);
+        int[] promptTokens = tokenizer.Encode(Prompt);
+        int[] negativeTokens = tokenizer.Encode(NegativePrompt);
         Console.WriteLine($"  Prompt tokens: {CountNonZero(promptTokens)} non-padding");
         Console.WriteLine($"  Negative tokens: {CountNonZero(negativeTokens)} non-padding");
 
-        // ── 3. Load text encoder ──
+        // Load text encoder
         Console.WriteLine("[3/5] Loading CLIP text encoder...");
         Stopwatch sw = Stopwatch.StartNew();
         ClipTextEncoderConfig clipConfig = ClipTextEncoderConfig.Sd15;
         ClipTextEncoder textEncoder = new ClipTextEncoder(clipConfig);
 
         using SafeTensorsLoader textEncoderLoader = new SafeTensorsLoader();
-        textEncoderLoader.Load(textEncoderPath);
+        textEncoderLoader.Load(modelPaths.TextEncoderPath);
         Dictionary<string, Tensor> textEncoderWeights = CastWeightsToF32(textEncoderLoader.GetAllTensors());
         textEncoder.LoadWeights(textEncoderWeights, "text_model");
         sw.Stop();
         Console.WriteLine($"  Text encoder loaded in {sw.ElapsedMilliseconds}ms ({textEncoderWeights.Count} tensors)");
 
-        // ── 4. Load UNet ──
+        // Load UNet
         Console.WriteLine("[4/5] Loading UNet...");
         sw.Restart();
         UNetConfig unetConfig = UNetConfig.Sd15;
         UNet unet = new UNet(unetConfig);
 
         using SafeTensorsLoader unetLoader = new SafeTensorsLoader();
-        unetLoader.Load(unetPath);
+        unetLoader.Load(modelPaths.UNetPath);
         Dictionary<string, Tensor> unetWeights = CastWeightsToF32(unetLoader.GetAllTensors());
         unet.LoadWeights(unetWeights);
         sw.Stop();
         Console.WriteLine($"  UNet loaded in {sw.ElapsedMilliseconds}ms ({unetWeights.Count} tensors)");
 
-        // ── 5. Load VAE ──
+        // Load VAE decoder
         Console.WriteLine("[5/5] Loading VAE decoder...");
         sw.Restart();
         VaeConfig vaeConfig = VaeConfig.Sd15;
         VaeDecoder vaeDecoder = new VaeDecoder(vaeConfig);
 
         using SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-        vaeLoader.Load(vaePath);
+        vaeLoader.Load(modelPaths.VaePath);
         Dictionary<string, Tensor> vaeWeights = CastWeightsToF32(vaeLoader.GetAllTensors());
         vaeDecoder.LoadWeights(vaeWeights);
         sw.Stop();
@@ -125,24 +133,27 @@ public static class Program
         Console.WriteLine("All models loaded. Starting inference...");
         Console.WriteLine();
 
-        // ── Full pipeline with CFG ──
+        // Run inference pipeline
         using StableDiffusion15Pipeline pipeline = new StableDiffusion15Pipeline(backend, textEncoder, unet, vaeDecoder);
 
         TextToImageRequest request = new TextToImageRequest
         {
-            Prompt = prompt,
-            NegativePrompt = negativePrompt,
-            Width = width,
-            Height = height,
-            Steps = steps,
-            CfgScale = cfgScale,
-            Seed = seed,
+            Prompt = Prompt,
+            NegativePrompt = NegativePrompt,
+            Width = ImageWidth,
+            Height = ImageHeight,
+            Steps = Steps,
+            CfgScale = CfgScale,
+            Seed = Seed,
         };
 
         (byte[] rgbData, int outW, int outH, int usedSeed) = pipeline.GenerateFromTokens(
             promptTokens, negativeTokens, request,
             progress => Console.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
 
+        // Save output
+        string promptSlug = Prompt.Length > 30 ? Prompt[..30] : Prompt;
+        string outputPath = outputSettings.GetNextOutputPath(promptSlug);
         ImagePostProcessor.SaveBmp(outputPath, rgbData, outW, outH);
 
         totalSw.Stop();
