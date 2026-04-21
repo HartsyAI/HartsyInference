@@ -8,6 +8,7 @@ using SharpInference.Diffusion.Models.Vae;
 using SharpInference.Diffusion.Pipelines;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
@@ -129,6 +130,317 @@ public class SdxlWeightLoadingTests
         }
 
         Assert.True(descriptors.Count > 0, "Checkpoint should contain tensors");
+    }
+
+    /// <summary>
+    /// Loads a single-file SDXL checkpoint, converts keys to diffusers format via SdxlCheckpointConverter,
+    /// and loads all four components (UNet, CLIP-L, CLIP-G, VAE). This is the primary integration test
+    /// for the single-file checkpoint workflow that ComfyUI/A1111 users expect.
+    /// </summary>
+    [Fact]
+    public void SingleFile_ConvertAndLoadAllComponents()
+    {
+        if (!File.Exists(SdxlSingleFilePath))
+        {
+            _output.WriteLine($"SKIPPED: Single-file checkpoint not found: {SdxlSingleFilePath}");
+            return;
+        }
+
+        _output.WriteLine($"Loading and converting: {SdxlSingleFilePath}");
+        (SdxlCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
+            SdxlCheckpointConverter.LoadAndConvert(SdxlSingleFilePath);
+
+        using (loader)
+        {
+            _output.WriteLine($"  UNet keys: {converted.UNet.Count}");
+            _output.WriteLine($"  CLIP-L keys: {converted.ClipL.Count}");
+            _output.WriteLine($"  CLIP-G keys: {converted.ClipG.Count}");
+            _output.WriteLine($"  VAE keys: {converted.Vae.Count}");
+
+            // Cast all weights to F32 for loading
+            Dictionary<string, Tensor> unetF32 = CastWeightsToF32(converted.UNet);
+            Dictionary<string, Tensor> clipLF32 = CastWeightsToF32(converted.ClipL);
+            Dictionary<string, Tensor> clipGF32 = CastWeightsToF32(converted.ClipG);
+            Dictionary<string, Tensor> vaeF32 = CastWeightsToF32(converted.Vae);
+
+            // --- UNet ---
+            _output.WriteLine("\nLoading UNet from converted keys...");
+            UNet unet = new(UNetConfig.SdxlBase);
+            try
+            {
+                unet.LoadWeights(unetF32);
+                _output.WriteLine("  UNet: SUCCESS");
+            }
+            catch (KeyNotFoundException ex)
+            {
+                _output.WriteLine($"  UNet: FAILED — {ex.Message}");
+                _output.WriteLine("  Available keys with similar prefix:");
+                string missingKey = ex.Message;
+                string prefix = missingKey.Contains('.') ? missingKey[..missingKey.LastIndexOf('.')] : "";
+                foreach (string key in unetF32.Keys.Where(k => k.Contains(prefix)).Take(10))
+                    _output.WriteLine($"    {key}");
+                Assert.Fail($"Missing UNet key: {ex.Message}");
+            }
+
+            // Validate critical UNet shapes
+            Assert.True(unetF32.ContainsKey("conv_in.weight"), "UNet missing conv_in.weight");
+            Assert.Equal(320, (int)unetF32["conv_in.weight"].Shape[0]);
+            Assert.True(unetF32.ContainsKey("add_embedding.linear_1.weight"), "UNet missing add_embedding (ADM)");
+            Assert.Equal(2816, (int)unetF32["add_embedding.linear_1.weight"].Shape[1]);
+
+            // --- CLIP-L ---
+            _output.WriteLine("\nLoading CLIP-L from converted keys...");
+            ClipTextEncoder clipL = new(ClipTextEncoderConfig.SdxlClipL);
+            try
+            {
+                clipL.LoadWeights(clipLF32, "text_model");
+                _output.WriteLine("  CLIP-L: SUCCESS");
+            }
+            catch (KeyNotFoundException ex)
+            {
+                _output.WriteLine($"  CLIP-L: FAILED — {ex.Message}");
+                _output.WriteLine("  Available CLIP-L keys:");
+                foreach (string key in clipLF32.Keys.OrderBy(k => k).Take(20))
+                    _output.WriteLine($"    {key} {clipLF32[key].Shape}");
+                Assert.Fail($"Missing CLIP-L key: {ex.Message}");
+            }
+
+            // Validate CLIP-L embedding shape
+            Assert.True(clipLF32.ContainsKey("text_model.embeddings.token_embedding.weight"));
+            Assert.Equal(768, (int)clipLF32["text_model.embeddings.token_embedding.weight"].Shape[1]);
+
+            // --- CLIP-G ---
+            _output.WriteLine("\nLoading CLIP-G from converted keys...");
+            ClipTextEncoder clipG = new(ClipTextEncoderConfig.SdxlClipG);
+            try
+            {
+                clipG.LoadWeights(clipGF32, "text_model");
+                _output.WriteLine("  CLIP-G: SUCCESS");
+            }
+            catch (KeyNotFoundException ex)
+            {
+                _output.WriteLine($"  CLIP-G: FAILED — {ex.Message}");
+                _output.WriteLine("  Available CLIP-G keys:");
+                foreach (string key in clipGF32.Keys.OrderBy(k => k).Take(30))
+                    _output.WriteLine($"    {key} {clipGF32[key].Shape}");
+                Assert.Fail($"Missing CLIP-G key: {ex.Message}");
+            }
+
+            // Validate CLIP-G embedding shape and text_projection
+            Assert.True(clipGF32.ContainsKey("text_model.embeddings.token_embedding.weight"));
+            Assert.Equal(1280, (int)clipGF32["text_model.embeddings.token_embedding.weight"].Shape[1]);
+            Assert.True(clipGF32.ContainsKey("text_projection.weight"), "CLIP-G must have text_projection");
+            Assert.Equal(1280, (int)clipGF32["text_projection.weight"].Shape[0]);
+
+            // Validate q/k/v were properly split from in_proj
+            Assert.True(clipGF32.ContainsKey("text_model.encoder.layers.0.self_attn.q_proj.weight"),
+                "CLIP-G in_proj should have been split into q_proj");
+            Assert.False(clipGF32.Keys.Any(k => k.Contains("in_proj")),
+                "No in_proj keys should remain after splitting");
+
+            // --- VAE ---
+            _output.WriteLine("\nLoading VAE from converted keys...");
+            VaeDecoder vae = new(VaeConfig.Sdxl);
+            try
+            {
+                vae.LoadWeights(vaeF32);
+                _output.WriteLine("  VAE: SUCCESS");
+            }
+            catch (KeyNotFoundException ex)
+            {
+                _output.WriteLine($"  VAE: FAILED — {ex.Message}");
+                _output.WriteLine("  Available VAE keys:");
+                foreach (string key in vaeF32.Keys.OrderBy(k => k).Take(30))
+                    _output.WriteLine($"    {key} {vaeF32[key].Shape}");
+                Assert.Fail($"Missing VAE key: {ex.Message}");
+            }
+
+            // Validate VAE structure
+            Assert.True(vaeF32.ContainsKey("post_quant_conv.weight"), "VAE missing post_quant_conv");
+            Assert.True(vaeF32.ContainsKey("decoder.conv_in.weight"), "VAE missing decoder.conv_in");
+
+            _output.WriteLine("\n=== All 4 components loaded from single-file checkpoint: PASSED ===");
+        }
+    }
+
+    /// <summary>
+    /// Converts a single-file checkpoint and validates the converted UNet weight keys are complete
+    /// by checking all structural keys that the SDXL UNet expects.
+    /// </summary>
+    [Fact]
+    public void SingleFile_ConvertedUNetHasAllExpectedKeys()
+    {
+        if (!File.Exists(SdxlSingleFilePath))
+        {
+            _output.WriteLine($"SKIPPED: Single-file checkpoint not found: {SdxlSingleFilePath}");
+            return;
+        }
+
+        (SdxlCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
+            SdxlCheckpointConverter.LoadAndConvert(SdxlSingleFilePath);
+
+        using (loader)
+        {
+            Dictionary<string, Tensor> unet = converted.UNet;
+            _output.WriteLine($"Converted UNet key count: {unet.Count}");
+
+            int missing = 0;
+
+            // Core structural keys
+            string[] requiredKeys =
+            [
+                "conv_in.weight", "conv_in.bias",
+                "time_embedding.linear_1.weight", "time_embedding.linear_1.bias",
+                "time_embedding.linear_2.weight", "time_embedding.linear_2.bias",
+                "add_embedding.linear_1.weight", "add_embedding.linear_1.bias",
+                "add_embedding.linear_2.weight", "add_embedding.linear_2.bias",
+                "conv_norm_out.weight", "conv_norm_out.bias",
+                "conv_out.weight", "conv_out.bias",
+            ];
+
+            foreach (string key in requiredKeys)
+                CheckKeyExists(unet, key, ref missing);
+
+            // Down blocks: 3 levels, 2 resnets each
+            for (int level = 0; level < 3; level++)
+            {
+                for (int r = 0; r < 2; r++)
+                {
+                    string prefix = $"down_blocks.{level}.resnets.{r}";
+                    CheckKeyExists(unet, $"{prefix}.norm1.weight", ref missing);
+                    CheckKeyExists(unet, $"{prefix}.conv1.weight", ref missing);
+                    CheckKeyExists(unet, $"{prefix}.norm2.weight", ref missing);
+                    CheckKeyExists(unet, $"{prefix}.conv2.weight", ref missing);
+                    CheckKeyExists(unet, $"{prefix}.time_emb_proj.weight", ref missing);
+                }
+
+                // Downsamplers for levels 0 and 1
+                if (level < 2)
+                    CheckKeyExists(unet, $"down_blocks.{level}.downsamplers.0.conv.weight", ref missing);
+            }
+
+            // Attention blocks on down levels 1 and 2
+            int[] transformerDepths = [0, 2, 10];
+            for (int level = 1; level < 3; level++)
+            {
+                for (int a = 0; a < 2; a++)
+                {
+                    string attPrefix = $"down_blocks.{level}.attentions.{a}";
+                    CheckKeyExists(unet, $"{attPrefix}.norm.weight", ref missing);
+                    CheckKeyExists(unet, $"{attPrefix}.proj_in.weight", ref missing);
+                    CheckKeyExists(unet, $"{attPrefix}.proj_out.weight", ref missing);
+
+                    for (int tb = 0; tb < transformerDepths[level]; tb++)
+                    {
+                        string tbPrefix = $"{attPrefix}.transformer_blocks.{tb}";
+                        CheckKeyExists(unet, $"{tbPrefix}.attn1.to_q.weight", ref missing);
+                        CheckKeyExists(unet, $"{tbPrefix}.attn2.to_q.weight", ref missing);
+                        CheckKeyExists(unet, $"{tbPrefix}.ff.net.0.proj.weight", ref missing);
+                    }
+                }
+            }
+
+            // Mid block: 2 resnets + 1 attention (10 transformer blocks)
+            CheckKeyExists(unet, "mid_block.resnets.0.norm1.weight", ref missing);
+            CheckKeyExists(unet, "mid_block.resnets.1.norm1.weight", ref missing);
+            CheckKeyExists(unet, "mid_block.attentions.0.norm.weight", ref missing);
+            for (int tb = 0; tb < 10; tb++)
+            {
+                CheckKeyExists(unet, $"mid_block.attentions.0.transformer_blocks.{tb}.attn1.to_q.weight", ref missing);
+                CheckKeyExists(unet, $"mid_block.attentions.0.transformer_blocks.{tb}.attn2.to_q.weight", ref missing);
+            }
+
+            // Up blocks: 3 levels, 3 resnets each
+            int[] upTransformerDepths = [10, 2, 0]; // up_blocks.0=10, up_blocks.1=2, up_blocks.2=0
+            for (int level = 0; level < 3; level++)
+            {
+                for (int r = 0; r < 3; r++)
+                {
+                    string prefix = $"up_blocks.{level}.resnets.{r}";
+                    CheckKeyExists(unet, $"{prefix}.norm1.weight", ref missing);
+                    CheckKeyExists(unet, $"{prefix}.conv1.weight", ref missing);
+                }
+
+                // Upsamplers for levels 0 and 1
+                if (level < 2)
+                    CheckKeyExists(unet, $"up_blocks.{level}.upsamplers.0.conv.weight", ref missing);
+
+                // Attention on up levels 0 and 1
+                if (upTransformerDepths[level] > 0)
+                {
+                    for (int a = 0; a < 3; a++)
+                    {
+                        string attPrefix = $"up_blocks.{level}.attentions.{a}";
+                        CheckKeyExists(unet, $"{attPrefix}.norm.weight", ref missing);
+                        for (int tb = 0; tb < upTransformerDepths[level]; tb++)
+                        {
+                            CheckKeyExists(unet, $"{attPrefix}.transformer_blocks.{tb}.attn1.to_q.weight", ref missing);
+                        }
+                    }
+                }
+            }
+
+            _output.WriteLine($"\nTotal missing keys: {missing}");
+            Assert.Equal(0, missing);
+            _output.WriteLine("All expected SDXL UNet keys present after conversion.");
+        }
+    }
+
+    /// <summary>
+    /// Converts a single-file checkpoint, loads all components, and runs a UNet forward pass
+    /// to validate the converted weights produce non-degenerate output.
+    /// </summary>
+    [Fact]
+    public unsafe void SingleFile_UNetForwardPass()
+    {
+        if (!File.Exists(SdxlSingleFilePath))
+        {
+            _output.WriteLine($"SKIPPED: Single-file checkpoint not found: {SdxlSingleFilePath}");
+            return;
+        }
+
+        _output.WriteLine($"Loading and converting: {SdxlSingleFilePath}");
+        (SdxlCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
+            SdxlCheckpointConverter.LoadAndConvert(SdxlSingleFilePath);
+
+        using (loader)
+        {
+            Dictionary<string, Tensor> unetF32 = CastWeightsToF32(converted.UNet);
+
+            UNet unet = new(UNetConfig.SdxlBase);
+            unet.LoadWeights(unetF32);
+
+            using CpuBackend backend = new();
+
+            // Small latent for speed: [1, 4, 16, 16]
+            TensorShape latentShape = new(1, 4, 16, 16);
+            Tensor latent = SeedGenerator.CreateNoise(latentShape, 42);
+
+            // Zero embeddings
+            Tensor textEmb = new(new TensorShape(1, 77, 2048), DType.F32);
+            Tensor pooledEmb = new(new TensorShape(1, 1280), DType.F32);
+            float[] sizeCondition = [1024f, 1024f, 0f, 0f, 1024f, 1024f];
+
+            _output.WriteLine("Running UNet forward pass with converted weights...");
+            Tensor output = unet.Forward(backend, latent, 999.0f, textEmb, pooledEmb, sizeCondition);
+
+            float mean = ComputeMean(output);
+            float std = ComputeStd(output);
+            _output.WriteLine($"  Output: shape={output.Shape}, mean={mean:F6}, std={std:F6}");
+
+            Assert.False(float.IsNaN(mean), "Output contains NaN");
+            Assert.False(float.IsInfinity(std), "Output contains Inf");
+            Assert.True(std > 0.001f, $"Output std too small: {std}");
+            Assert.Equal(4, (int)output.Shape[1]);
+            Assert.Equal(16, (int)output.Shape[2]);
+
+            _output.WriteLine("Single-file UNet forward pass: PASSED");
+
+            output.Dispose();
+            latent.Dispose();
+            textEmb.Dispose();
+            pooledEmb.Dispose();
+        }
     }
 
     #endregion
