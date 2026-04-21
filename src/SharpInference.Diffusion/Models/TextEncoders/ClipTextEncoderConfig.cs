@@ -27,6 +27,9 @@ public record ClipTextEncoderConfig
     /// <summary>Whether to use quick GELU (x * sigmoid(1.702 * x)) instead of exact GELU. OpenAI CLIP uses quick GELU.</summary>
     public bool UseQuickGelu { get; init; } = true;
 
+    /// <summary>Projection dimension for the text_projection weight. 0 means no projection (SD1.5 CLIP-L). 1280 for CLIP-G (used for pooled output).</summary>
+    public int ProjectionDim { get; init; } = 0;
+
     /// <summary>Preset for SD1.5 (OpenAI CLIP ViT-L/14).</summary>
     public static ClipTextEncoderConfig Sd15 => new()
     {
@@ -37,5 +40,22 @@ public record ClipTextEncoderConfig
         MaxPositionEmbeddings = 77,
         VocabSize = 49408,
         UseQuickGelu = true,
+        ProjectionDim = 0,
+    };
+
+    /// <summary>Preset for SDXL text_encoder (OpenAI CLIP ViT-L/14). Same as SD1.5.</summary>
+    public static ClipTextEncoderConfig SdxlClipL => Sd15;
+
+    /// <summary>Preset for SDXL text_encoder_2 (OpenCLIP ViT-bigG/14). Uses standard GELU, larger hidden size, 32 layers.</summary>
+    public static ClipTextEncoderConfig SdxlClipG => new()
+    {
+        HiddenSize = 1280,
+        IntermediateSize = 5120,
+        NumLayers = 32,
+        NumHeads = 20,
+        MaxPositionEmbeddings = 77,
+        VocabSize = 49408,
+        UseQuickGelu = false,
+        ProjectionDim = 1280,
     };
 }

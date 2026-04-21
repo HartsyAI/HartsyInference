@@ -71,6 +71,19 @@ public sealed class ClipTokenizer : IDisposable
         return result;
     }
 
+    /// <summary>Finds the position of the EOT token in an encoded sequence. Used by SDXL to extract the pooled output from the CLIP-G encoder at the EOS token position.</summary>
+    /// <param name="tokenIds">Encoded token IDs from Encode().</param>
+    /// <returns>Index of the EOT token, or -1 if not found.</returns>
+    public static int FindEosPosition(ReadOnlySpan<int> tokenIds)
+    {
+        for (int i = 0; i < tokenIds.Length; i++)
+        {
+            if (tokenIds[i] == EndOfTextId)
+                return i;
+        }
+        return -1;
+    }
+
     /// <summary>Tokenizes text and returns just the token IDs without padding (no SOT/EOT).</summary>
     public IReadOnlyList<int> EncodeRaw(string text)
     {

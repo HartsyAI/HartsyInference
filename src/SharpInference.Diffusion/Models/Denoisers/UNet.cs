@@ -4,7 +4,7 @@ using SharpInference.Diffusion.Models.Denoisers.UNetBlocks;
 
 namespace SharpInference.Diffusion.Models.Denoisers;
 
-/// <summary>UNet2DConditionModel for Stable Diffusion. Takes noisy latents + timestep + text embeddings and predicts the noise (or velocity). Matches HuggingFace diffusers UNet2DConditionModel.</summary>
+/// <summary>UNet2DConditionModel for Stable Diffusion. Supports SD1.5, SDXL base, and SDXL refiner architectures via UNetConfig.</summary>
 public sealed class UNet
 {
     private readonly UNetConfig _config;
@@ -15,6 +15,9 @@ public sealed class UNet
 
     // Timestep embedding
     private readonly TimestepEmbedding _timeEmbedding;
+
+    // ADM conditioning (SDXL only — null for SD1.5)
+    private readonly AdditionEmbedding? _addEmbedding;
 
     // Down blocks
     private readonly DownBlock[] _downBlocks;
@@ -42,11 +45,17 @@ public sealed class UNet
         _config = config;
 
         int[] blockCh = config.BlockOutChannels;
-        int timeDim = config.ModelChannels * 4; // 1280 for SD1.5
+        int timeDim = config.ModelChannels * 4; // 1280 for SD1.5/SDXL base, 1536 for SDXL refiner
         int numBlocks = blockCh.Length;
 
         // Timestep embedding: sinusoidal(modelChannels) → MLP → timeDim
         _timeEmbedding = new TimestepEmbedding(config.ModelChannels, timeDim);
+
+        // ADM conditioning for SDXL (micro-conditioning: size/crop/target scalars + pooled text)
+        if (config.AdmInChannels > 0)
+        {
+            _addEmbedding = new AdditionEmbedding(config.AdmInChannels, timeDim, config.AdditionTimeEmbedDim);
+        }
 
         // Down blocks
         _downBlocks = new DownBlock[numBlocks];
@@ -55,23 +64,24 @@ public sealed class UNet
             int inCh = i == 0 ? config.ModelChannels : blockCh[i - 1];
             int outCh = blockCh[i];
             bool hasAttn = config.DownBlockHasAttention[i];
-            bool hasDown = i < numBlocks - 1; // All except last have downsample
+            bool hasDown = i < numBlocks - 1;
 
             int numHeads = config.NumAttentionHeads[i];
+            int transformerLayers = config.TransformerLayersPerBlock[i];
             _downBlocks[i] = new DownBlock(
                 inCh, outCh, timeDim, config.LayersPerBlock,
-                hasAttn, hasDown, numHeads, config.CrossAttentionDim);
+                hasAttn, hasDown, numHeads, config.CrossAttentionDim, transformerLayers);
         }
 
-        // Mid block
+        // Mid block — uses last level's config
         int midCh = blockCh[^1];
         _midResNet0 = new UNetResNetBlock(midCh, midCh, timeDim);
         int midNumHeads = config.NumAttentionHeads[^1];
-        _midAttention = new CrossAttentionBlock(midCh, midNumHeads, config.CrossAttentionDim);
+        int midTransformerLayers = config.TransformerLayersPerBlock[^1];
+        _midAttention = new CrossAttentionBlock(midCh, midNumHeads, config.CrossAttentionDim, midTransformerLayers);
         _midResNet1 = new UNetResNetBlock(midCh, midCh, timeDim);
 
         // Up blocks (reversed channel order with skip connections)
-        // Matches diffusers: output_channel = reversed[i], input_channel = reversed[min(i+1, len-1)]
         _upBlocks = new UpBlock[numBlocks];
         int[] reversedCh = new int[numBlocks];
         for (int i = 0; i < numBlocks; i++)
@@ -83,16 +93,16 @@ public sealed class UNet
         {
             int outCh = reversedCh[i];
             int prevOutCh = i == 0 ? midCh : reversedCh[i - 1];
-            // input_channel from diffusers — this determines the last layer's skip channels
             int inputCh = reversedCh[Math.Min(i + 1, numBlocks - 1)];
             bool hasAttn = config.UpBlockHasAttention[i];
             bool hasUp = i < numBlocks - 1;
 
-            // Up blocks have layers_per_block + 1 ResNet layers
-            int upNumHeads = config.NumAttentionHeads[numBlocks - 1 - i];
+            int upLevelIdx = numBlocks - 1 - i;
+            int upNumHeads = config.NumAttentionHeads[upLevelIdx];
+            int upTransformerLayers = config.TransformerLayersPerBlock[upLevelIdx];
             _upBlocks[i] = new UpBlock(
                 inputCh, outCh, prevOutCh, timeDim, config.LayersPerBlock + 1,
-                hasAttn, hasUp, upNumHeads, config.CrossAttentionDim);
+                hasAttn, hasUp, upNumHeads, config.CrossAttentionDim, upTransformerLayers);
         }
     }
 
@@ -105,6 +115,11 @@ public sealed class UNet
         _convInBias = weights[$"{p}conv_in.bias"];
 
         _timeEmbedding.LoadWeights(weights, $"{p}time_embedding");
+
+        if (_addEmbedding is not null)
+        {
+            _addEmbedding.LoadWeights(weights, $"{p}add_embedding");
+        }
 
         for (int i = 0; i < _downBlocks.Length; i++)
         {
@@ -126,8 +141,20 @@ public sealed class UNet
         _convOutBias = weights[$"{p}conv_out.bias"];
     }
 
-    /// <summary>Forward pass: noisy latents [B, 4, H, W] + timestep + text embeddings [B, seqLen, crossDim] → noise prediction [B, 4, H, W].</summary>
+    /// <summary>Forward pass for SD1.5 (no ADM conditioning). Noisy latents [B, 4, H, W] + timestep + text embeddings [B, seqLen, crossDim] → noise prediction [B, 4, H, W].</summary>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings)
+    {
+        return Forward(backend, latent, timestep, textEmbeddings, null, default);
+    }
+
+    /// <summary>Forward pass with optional SDXL ADM conditioning. For SD1.5, pooledTextEmb and sizeCondition can be null/empty.</summary>
+    /// <param name="backend">Compute backend.</param>
+    /// <param name="latent">Noisy latent [B, 4, H, W].</param>
+    /// <param name="timestep">Current denoising timestep (scalar).</param>
+    /// <param name="textEmbeddings">Text encoder hidden states [B, seqLen, crossAttentionDim].</param>
+    /// <param name="pooledTextEmb">SDXL: pooled text embedding from CLIP-G [B, 1280]. Null for SD1.5.</param>
+    /// <param name="sizeCondition">SDXL: micro-conditioning scalars [origH, origW, cropTop, cropLeft, targetH, targetW]. Empty for SD1.5.</param>
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, Tensor? pooledTextEmb, ReadOnlySpan<float> sizeCondition)
     {
         int batch = (int)latent.Shape[0];
         int height = (int)latent.Shape[2];
@@ -138,13 +165,23 @@ public sealed class UNet
         timesteps.Fill(timestep);
         Tensor temb = _timeEmbedding.Forward(backend, timesteps, batch);
 
-        // 2. conv_in
+        // 2. ADM conditioning (SDXL only): add micro-conditioning to timestep embedding
+        if (_addEmbedding is not null && pooledTextEmb is not null)
+        {
+            Tensor addEmb = _addEmbedding.Forward(pooledTextEmb, sizeCondition, batch);
+            Tensor combinedTemb = new Tensor(temb.Shape, DType.F32);
+            backend.Add(combinedTemb, temb, addEmb);
+            temb.Dispose();
+            addEmb.Dispose();
+            temb = combinedTemb;
+        }
+
+        // 3. conv_in
         TensorShape convInShape = new TensorShape(batch, _config.ModelChannels, height, width);
         Tensor hidden = new Tensor(convInShape, DType.F32);
         backend.Conv2D(hidden, latent, _convInWeight!, _convInBias, 1, 1, 1, 1);
 
-        // 3. Down blocks — collect all skip connections
-        // Save conv_in output as the first skip (matches diffusers)
+        // 4. Down blocks — collect all skip connections
         List<Tensor> allSkips = new List<Tensor> { hidden.To(hidden.Device) };
         for (int i = 0; i < _downBlocks.Length; i++)
         {
@@ -154,7 +191,7 @@ public sealed class UNet
             allSkips.AddRange(skips);
         }
 
-        // 4. Mid block
+        // 5. Mid block
         Tensor midRes0 = _midResNet0.Forward(backend, hidden, temb);
         hidden.Dispose();
 
@@ -166,7 +203,7 @@ public sealed class UNet
 
         hidden = midRes1;
 
-        // 5. Up blocks — consume skip connections in reverse
+        // 6. Up blocks — consume skip connections in reverse
         for (int i = 0; i < _upBlocks.Length; i++)
         {
             Tensor upOut = _upBlocks[i].Forward(backend, hidden, temb, textEmbeddings, allSkips);
@@ -176,7 +213,7 @@ public sealed class UNet
 
         temb.Dispose();
 
-        // 6. conv_norm_out → SiLU → conv_out
+        // 7. conv_norm_out → SiLU → conv_out
         int finalH = (int)hidden.Shape[2];
         int finalW = (int)hidden.Shape[3];
         int finalCh = _config.ModelChannels;

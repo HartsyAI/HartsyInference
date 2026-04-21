@@ -46,9 +46,15 @@ public sealed unsafe class ClipTextEncoder
 
         _finalLayerNormWeight = weights[$"{prefix}.final_layer_norm.weight"];
         _finalLayerNormBias = weights[$"{prefix}.final_layer_norm.bias"];
+
+        // text_projection exists for CLIP-G (SDXL text_encoder_2) — used for pooled output
+        weights.TryGetValue("text_projection.weight", out _textProjectionWeight);
     }
 
-    /// <summary>Encodes token IDs [B, seqLen] into hidden states [B, seqLen, hiddenSize]. Returns the last hidden state (before final layer norm) for SD1.5 conditioning.</summary>
+    // Text projection weight for pooled output (CLIP-G only, null for CLIP-L)
+    private Tensor? _textProjectionWeight;
+
+    /// <summary>Encodes token IDs [B, seqLen] into hidden states [B, seqLen, hiddenSize]. Returns the last hidden state with final layer norm applied. Used by SD1.5.</summary>
     public Tensor Encode(IBackend backend, ReadOnlySpan<int[]> batchTokenIds)
     {
         int batch = batchTokenIds.Length;
@@ -61,7 +67,6 @@ public sealed unsafe class ClipTextEncoder
         EmbedTokens(hidden, batchTokenIds, batch, seqLen, hiddenSize);
 
         // 2. Build causal attention mask [seqLen, seqLen]
-        // CLIP uses causal masking: mask[i,j] = -inf if j > i (can't attend to future tokens)
         Tensor causalMask = BuildCausalMask(seqLen);
 
         // 3. Run through transformer layers
@@ -75,12 +80,113 @@ public sealed unsafe class ClipTextEncoder
         causalMask.Dispose();
 
         // CLIPTextModel applies final_layer_norm to encoder output before returning last_hidden_state.
-        // This matches HuggingFace CLIPTextTransformer.forward() behavior.
         Tensor normed = new Tensor(hiddenShape, DType.F32);
         backend.LayerNorm(normed, hidden, _finalLayerNormWeight!, _finalLayerNormBias!, _config.LayerNormEps);
         hidden.Dispose();
 
         return normed;
+    }
+
+    /// <summary>Encodes token IDs and returns the penultimate hidden state (layer -2 output, before final layer norm). Used by SDXL for both CLIP-L and CLIP-G. Also returns pooled output [B, projectionDim] from the EOS token if text_projection weight exists.</summary>
+    /// <param name="backend">Compute backend.</param>
+    /// <param name="batchTokenIds">Token IDs [B, seqLen].</param>
+    /// <param name="eosTokenPositions">Position of the EOS token in each batch element (for pooled output extraction).</param>
+    /// <returns>Tuple of (penultimateHiddenStates [B, seqLen, hiddenSize], pooledOutput [B, projectionDim] or null).</returns>
+    public (Tensor hiddenStates, Tensor? pooledOutput) EncodePenultimate(IBackend backend, ReadOnlySpan<int[]> batchTokenIds, ReadOnlySpan<int> eosTokenPositions)
+    {
+        int batch = batchTokenIds.Length;
+        int seqLen = batchTokenIds[0].Length;
+        int hiddenSize = _config.HiddenSize;
+
+        // 1. Token embedding lookup + position embedding
+        TensorShape hiddenShape = new TensorShape(batch, seqLen, hiddenSize);
+        Tensor hidden = new Tensor(hiddenShape, DType.F32);
+        EmbedTokens(hidden, batchTokenIds, batch, seqLen, hiddenSize);
+
+        // 2. Build causal attention mask
+        Tensor causalMask = BuildCausalMask(seqLen);
+
+        // 3. Run through transformer layers, stop one before the end for penultimate output
+        int numLayers = _layers.Length;
+        for (int i = 0; i < numLayers - 1; i++)
+        {
+            Tensor layerOut = _layers[i].Forward(backend, hidden, causalMask);
+            hidden.Dispose();
+            hidden = layerOut;
+        }
+
+        // Save penultimate hidden state (before last transformer layer and final LN)
+        Tensor penultimate = hidden.To(hidden.Device);
+
+        // Run the final transformer layer for pooled output extraction
+        Tensor lastLayerOut = _layers[numLayers - 1].Forward(backend, hidden, causalMask);
+        hidden.Dispose();
+        causalMask.Dispose();
+
+        // Apply final layer norm to get the full last_hidden_state (needed for pooled output)
+        Tensor normedFull = new Tensor(hiddenShape, DType.F32);
+        backend.LayerNorm(normedFull, lastLayerOut, _finalLayerNormWeight!, _finalLayerNormBias!, _config.LayerNormEps);
+        lastLayerOut.Dispose();
+
+        // Extract pooled output from EOS token position, then apply text_projection
+        Tensor? pooledOutput = null;
+        if (_textProjectionWeight is not null && _config.ProjectionDim > 0)
+        {
+            pooledOutput = ExtractPooledOutput(normedFull, eosTokenPositions, batch, seqLen, hiddenSize);
+        }
+
+        normedFull.Dispose();
+
+        return (penultimate, pooledOutput);
+    }
+
+    /// <summary>Extracts pooled output: takes the hidden state at the EOS token position and projects through text_projection.</summary>
+    private Tensor ExtractPooledOutput(Tensor normedHidden, ReadOnlySpan<int> eosPositions, int batch, int seqLen, int hiddenSize)
+    {
+        int projDim = _config.ProjectionDim;
+
+        // Extract EOS token hidden states [B, hiddenSize]
+        TensorShape eosShape = new TensorShape(batch, hiddenSize);
+        Tensor eosHidden = new Tensor(eosShape, DType.F32);
+        float* srcPtr = (float*)normedHidden.DataPointer;
+        float* dstPtr = (float*)eosHidden.DataPointer;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int eosPos = eosPositions[b];
+            int srcOffset = (b * seqLen + eosPos) * hiddenSize;
+            int dstOffset = b * hiddenSize;
+            for (int d = 0; d < hiddenSize; d++)
+            {
+                dstPtr[dstOffset + d] = srcPtr[srcOffset + d];
+            }
+        }
+
+        // Project through text_projection: [B, hiddenSize] @ [hiddenSize, projDim] = [B, projDim]
+        // text_projection weight is [projDim, hiddenSize] (or [hiddenSize, projDim] depending on format)
+        TensorShape pooledShape = new TensorShape(batch, projDim);
+        Tensor pooled = new Tensor(pooledShape, DType.F32);
+        float* ePtr = (float*)eosHidden.DataPointer;
+        float* wPtr = (float*)_textProjectionWeight!.DataPointer;
+        float* pPtr = (float*)pooled.DataPointer;
+
+        // text_projection in diffusers is [hiddenSize, projDim] — no bias
+        for (int b = 0; b < batch; b++)
+        {
+            for (int o = 0; o < projDim; o++)
+            {
+                float sum = 0f;
+                int inOffset = b * hiddenSize;
+                for (int i = 0; i < hiddenSize; i++)
+                {
+                    sum += ePtr[inOffset + i] * wPtr[i * projDim + o];
+                }
+                pPtr[b * projDim + o] = sum;
+            }
+        }
+
+        eosHidden.Dispose();
+        return pooled;
     }
 
     /// <summary>Token embedding lookup + position embedding addition. Writes directly into the output tensor.</summary>

@@ -15,22 +15,22 @@
 
 ## 2. Planning
 
-- [ ] Map SDXL UNet block structure (channels, dual conditioning)
+- [x] Map SDXL UNet block structure (channels, dual conditioning)
 - [ ] Map Flux DiT block structure (double-stream vs single-stream counts)
 - [ ] Plan T5-XXL memory strategy (Q8_0 for consumer GPUs)
 - [ ] Plan LoRA loading API (load, apply, remove, adjust weight)
 - [ ] Plan multi-LoRA stacking strategy
-- [ ] Identify shared code between SD1.5/SDXL/Flux UNet blocks
+- [x] Identify shared code between SD1.5/SDXL/Flux UNet blocks
 - [ ] Write agent instructions for Phase 4
 
 ## 3. Implementation — SDXL
 
-- [ ] `ClipTextEncoderG.cs` — second CLIP-G encoder for SDXL
-- [ ] SDXL UNet modifications — larger channels, dual conditioning injection
-- [ ] SDXL conditioning — original size, crop coords, target size embeddings
-- [ ] `SdxlPipeline.cs` — dual CLIP encode, SDXL UNet, VAE decode
+- [x] `ClipTextEncoderG.cs` — CLIP-G reuses `ClipTextEncoder` with `ClipTextEncoderConfig.SdxlClipG` preset and `EncodePenultimate()` for penultimate hidden state + pooled output
+- [x] SDXL UNet modifications — `UNetConfig.SdxlBase` preset with 3 levels [320,640,1280], heterogeneous transformer depth [1,2,10], 2048-dim cross-attention, `UseLinearProjection`, `TransformerLayersPerBlock`
+- [x] SDXL conditioning — `AdditionEmbedding` implements ADM micro-conditioning (6 scalars → sinusoidal embed + pooled text → 2816-dim → project to 1280-dim)
+- [x] `SdxlPipeline.cs` — dual CLIP encode (CLIP-L penultimate + CLIP-G penultimate concatenated → [B,77,2048]), ADM conditioning, SDXL UNet, VAE decode
 - [ ] `SdxlRefinerPipeline.cs` — refiner UNet with base→refiner handoff
-- [ ] SDXL-specific VAE scaling factor (0.13025)
+- [x] SDXL-specific VAE scaling factor (0.13025) — already in `VaeConfig.Sdxl`
 
 ## 4. Implementation — Flux
 

@@ -3,13 +3,14 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.Denoisers.UNetBlocks;
 
-/// <summary>Transformer block for UNet cross-attention: LayerNorm→SelfAttn→Residual→LayerNorm→CrossAttn→Residual→LayerNorm→FFN→Residual. Matches diffusers BasicTransformerBlock.</summary>
+/// <summary>Spatial transformer block for UNet cross-attention. Wraps N BasicTransformerBlocks (each: SelfAttn→CrossAttn→FFN). SD1.5 uses 1 block, SDXL uses [1,2,10] per level.</summary>
 public sealed unsafe class CrossAttentionBlock
 {
     private readonly int _channels;
     private readonly int _numHeads;
     private readonly int _headDim;
     private readonly int _crossAttentionDim;
+    private readonly int _numTransformerBlocks;
 
     // Input projection: GroupNorm + linear proj_in (or conv 1x1)
     private Tensor? _normWeight;
@@ -17,31 +18,40 @@ public sealed unsafe class CrossAttentionBlock
     private Tensor? _projInWeight;
     private Tensor? _projInBias;
 
-    // Transformer block inner layers
-    private readonly TransformerSubBlock _selfAttn;
-    private readonly TransformerSubBlock _crossAttn;
-    private readonly FeedForwardBlock _ffn;
+    // Multiple transformer blocks (SDXL can have up to 10 per spatial transformer)
+    private readonly TransformerSubBlock[] _selfAttns;
+    private readonly TransformerSubBlock[] _crossAttns;
+    private readonly FeedForwardBlock[] _ffns;
 
     // Output projection
     private Tensor? _projOutWeight;
     private Tensor? _projOutBias;
 
-    /// <summary>Creates a cross-attention block.</summary>
+    /// <summary>Creates a cross-attention block with N transformer layers.</summary>
     /// <param name="channels">Number of input/output channels.</param>
     /// <param name="numHeads">Number of attention heads.</param>
     /// <param name="crossAttentionDim">Dimension of the cross-attention context (text encoder hidden size).</param>
+    /// <param name="numTransformerBlocks">Number of BasicTransformerBlocks. SD1.5=1, SDXL=[1,2,10] per level.</param>
     /// <param name="normGroups">Number of groups for the input GroupNorm.</param>
     /// <param name="normEps">GroupNorm epsilon.</param>
-    public CrossAttentionBlock(int channels, int numHeads, int crossAttentionDim, int normGroups = 32, float normEps = 1e-5f)
+    public CrossAttentionBlock(int channels, int numHeads, int crossAttentionDim, int numTransformerBlocks = 1, int normGroups = 32, float normEps = 1e-5f)
     {
         _channels = channels;
         _numHeads = numHeads;
         _headDim = channels / numHeads;
         _crossAttentionDim = crossAttentionDim;
+        _numTransformerBlocks = numTransformerBlocks;
 
-        _selfAttn = new TransformerSubBlock(channels, numHeads, channels);
-        _crossAttn = new TransformerSubBlock(channels, numHeads, crossAttentionDim);
-        _ffn = new FeedForwardBlock(channels);
+        _selfAttns = new TransformerSubBlock[numTransformerBlocks];
+        _crossAttns = new TransformerSubBlock[numTransformerBlocks];
+        _ffns = new FeedForwardBlock[numTransformerBlocks];
+
+        for (int i = 0; i < numTransformerBlocks; i++)
+        {
+            _selfAttns[i] = new TransformerSubBlock(channels, numHeads, channels);
+            _crossAttns[i] = new TransformerSubBlock(channels, numHeads, crossAttentionDim);
+            _ffns[i] = new FeedForwardBlock(channels);
+        }
     }
 
     /// <summary>Loads weights from named tensors.</summary>
@@ -52,9 +62,12 @@ public sealed unsafe class CrossAttentionBlock
         _projInWeight = weights[$"{prefix}.proj_in.weight"];
         _projInBias = weights[$"{prefix}.proj_in.bias"];
 
-        _selfAttn.LoadWeights(weights, $"{prefix}.transformer_blocks.0.attn1", $"{prefix}.transformer_blocks.0.norm1");
-        _crossAttn.LoadWeights(weights, $"{prefix}.transformer_blocks.0.attn2", $"{prefix}.transformer_blocks.0.norm2");
-        _ffn.LoadWeights(weights, $"{prefix}.transformer_blocks.0.ff", $"{prefix}.transformer_blocks.0.norm3");
+        for (int i = 0; i < _numTransformerBlocks; i++)
+        {
+            _selfAttns[i].LoadWeights(weights, $"{prefix}.transformer_blocks.{i}.attn1", $"{prefix}.transformer_blocks.{i}.norm1");
+            _crossAttns[i].LoadWeights(weights, $"{prefix}.transformer_blocks.{i}.attn2", $"{prefix}.transformer_blocks.{i}.norm2");
+            _ffns[i].LoadWeights(weights, $"{prefix}.transformer_blocks.{i}.ff", $"{prefix}.transformer_blocks.{i}.norm3");
+        }
 
         _projOutWeight = weights[$"{prefix}.proj_out.weight"];
         _projOutBias = weights[$"{prefix}.proj_out.bias"];
@@ -81,30 +94,36 @@ public sealed unsafe class CrossAttentionBlock
         normed.Dispose();
 
         // proj_in: [B, spatial, C] → [B, spatial, C]
+        // When SDXL (useLinearProjection=true), weights are [C, C] (linear)
+        // When SD1.5, weights are [C, C, 1, 1] (1x1 conv) but math is identical for proj_in/proj_out
         Tensor projected = LinearProjectBatched(hidden, _projInWeight!, _projInBias!, batch, spatial, channels, channels);
         hidden.Dispose();
         hidden = projected;
 
-        // 3. Self-attention (context = self)
-        Tensor selfOut = _selfAttn.Forward(backend, hidden, hidden);
-        hidden.Dispose();
-        hidden = selfOut;
+        // 3. Run N transformer blocks (SD1.5: 1, SDXL level 2: 10)
+        for (int i = 0; i < _numTransformerBlocks; i++)
+        {
+            // Self-attention (context = self)
+            Tensor selfOut = _selfAttns[i].Forward(backend, hidden, hidden);
+            hidden.Dispose();
+            hidden = selfOut;
 
-        // 4. Cross-attention (context = text embeddings)
-        Tensor crossOut = _crossAttn.Forward(backend, hidden, context);
-        hidden.Dispose();
-        hidden = crossOut;
+            // Cross-attention (context = text embeddings)
+            Tensor crossOut = _crossAttns[i].Forward(backend, hidden, context);
+            hidden.Dispose();
+            hidden = crossOut;
 
-        // 5. Feed-forward
-        Tensor ffnOut = _ffn.Forward(backend, hidden);
-        hidden.Dispose();
-        hidden = ffnOut;
+            // Feed-forward
+            Tensor ffnOut = _ffns[i].Forward(backend, hidden);
+            hidden.Dispose();
+            hidden = ffnOut;
+        }
 
-        // 6. proj_out: [B, spatial, C] → [B, spatial, C]
+        // 4. proj_out: [B, spatial, C] → [B, spatial, C]
         Tensor projOut = LinearProjectBatched(hidden, _projOutWeight!, _projOutBias!, batch, spatial, channels, channels);
         hidden.Dispose();
 
-        // 7. Reshape [B, H*W, C] → [B, C, H, W] and add residual
+        // 5. Reshape [B, H*W, C] → [B, C, H, W] and add residual
         Tensor output = new Tensor(spatialShape, DType.F32);
         ReshapeSequenceToSpatial(output, projOut, batch, channels, spatial);
         projOut.Dispose();

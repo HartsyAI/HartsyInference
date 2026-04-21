@@ -20,7 +20,7 @@ public sealed class DownBlock
     private Tensor? _downsampleBias;
 
     /// <summary>Creates a UNet down block.</summary>
-    public DownBlock(int inChannels, int outChannels, int timeDim, int numLayers, bool hasAttention, bool hasDownsample, int numHeads = 8, int crossAttentionDim = 768)
+    public DownBlock(int inChannels, int outChannels, int timeDim, int numLayers, bool hasAttention, bool hasDownsample, int numHeads = 8, int crossAttentionDim = 768, int numTransformerBlocks = 1)
     {
         _inChannels = inChannels;
         _outChannels = outChannels;
@@ -38,7 +38,7 @@ public sealed class DownBlock
 
             if (hasAttention)
             {
-                _attentions[i] = new CrossAttentionBlock(outChannels, numHeads, crossAttentionDim);
+                _attentions[i] = new CrossAttentionBlock(outChannels, numHeads, crossAttentionDim, numTransformerBlocks);
             }
         }
     }

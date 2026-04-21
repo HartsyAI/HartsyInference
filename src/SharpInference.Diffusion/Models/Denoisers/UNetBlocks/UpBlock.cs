@@ -30,7 +30,7 @@ public sealed class UpBlock
     /// <param name="hasUpsample">Whether this block has an upsample layer.</param>
     /// <param name="numHeads">Number of attention heads.</param>
     /// <param name="crossAttentionDim">Cross-attention context dimension.</param>
-    public UpBlock(int inChannels, int outChannels, int prevOutChannels, int timeDim, int numLayers, bool hasAttention, bool hasUpsample, int numHeads = 8, int crossAttentionDim = 768)
+    public UpBlock(int inChannels, int outChannels, int prevOutChannels, int timeDim, int numLayers, bool hasAttention, bool hasUpsample, int numHeads = 8, int crossAttentionDim = 768, int numTransformerBlocks = 1)
     {
         _inChannels = inChannels;
         _outChannels = outChannels;
@@ -54,7 +54,7 @@ public sealed class UpBlock
 
             if (hasAttention)
             {
-                _attentions[i] = new CrossAttentionBlock(outChannels, numHeads, crossAttentionDim);
+                _attentions[i] = new CrossAttentionBlock(outChannels, numHeads, crossAttentionDim, numTransformerBlocks);
             }
         }
     }
