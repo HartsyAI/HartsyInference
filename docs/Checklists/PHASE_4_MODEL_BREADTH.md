@@ -32,6 +32,14 @@
 - [ ] `SdxlRefinerPipeline.cs` — refiner UNet with base→refiner handoff
 - [x] SDXL-specific VAE scaling factor (0.13025) — already in `VaeConfig.Sdxl`
 
+## 3b. Implementation — Single-File Checkpoint Converters
+
+- [x] `CheckpointConvertUtils.cs` — shared utilities: ResNet sub-key remapping, time_embed, mid_block, VAE key conversion, in_proj tensor splitting
+- [x] `Sd15CheckpointConverter.cs` — single-file SD1.5 LDM → diffusers format (UNet 4-level, single CLIP-L via `cond_stage_model`, VAE). Tested against v1-5-pruned-emaonly.safetensors (4.0GB)
+- [x] `SdxlCheckpointConverter.cs` — single-file SDXL LDM → diffusers format (UNet 3-level, CLIP-L via `conditioner.embedders.0`, CLIP-G via `conditioner.embedders.1` with OpenCLIP→HF remapping + in_proj splitting, VAE, ADM via `label_emb`). Tested against JuggernautXL (6.7GB)
+- [ ] `FluxCheckpointConverter.cs` — **blocked**: requires DiT, T5TextEncoder, FlowMatchScheduler implementations
+- [ ] `Sd3CheckpointConverter.cs` — **blocked**: requires MMDiT, T5TextEncoder implementations
+
 ## 4. Implementation — Flux
 
 - [ ] `T5TextEncoder.cs` — full T5-XXL encoder-only transformer
@@ -56,7 +64,13 @@
 
 - [ ] SDXL pipeline — fixed seed + prompt → visually identical to diffusers (SSIM > 0.95)
 - [ ] SDXL refiner — base + refiner handoff produces expected quality improvement
-- [ ] SDXL dual CLIP — verify both encoders produce correct conditioning
+- [x] SDXL dual CLIP — verify both encoders produce correct conditioning (SdxlWeightLoadingTests)
+- [x] SD1.5 single-file checkpoint → convert → load all components (UNet, CLIP-L, VAE) — tested against v1-5-pruned-emaonly.safetensors
+- [x] SDXL single-file checkpoint → convert → load all components (UNet, CLIP-L, CLIP-G, VAE) — tested against JuggernautXL
+- [x] SD1.5 converted UNet forward pass — no NaN/Inf, reasonable statistics
+- [x] SDXL converted UNet forward pass — no NaN/Inf, reasonable statistics
+- [x] SD1.5 converted UNet has all expected diffusers keys (exhaustive key validation)
+- [x] SDXL converted UNet has all expected diffusers keys (exhaustive key validation)
 - [ ] Flux pipeline — fixed seed + prompt → visually identical to diffusers (SSIM > 0.95)
 - [ ] Flux schnell (4-step) — verify fast generation works correctly
 - [ ] T5 encoder — same tokens → same embeddings as HuggingFace (within 1e-3)

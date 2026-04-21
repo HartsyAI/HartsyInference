@@ -100,9 +100,16 @@ SharpInference.ModelHandler/
 ├── HuggingFace/
 │   ├── HuggingFaceClient.cs       Search, pull, resolve GGUF variant
 │   └── HuggingFaceModelIndex.cs   Parse model card metadata
+├── CheckpointConverters/
+│   ├── Utils/
+│   │   └── CheckpointConvertUtils.cs  Shared key remapping (ResNet, VAE, time_embed, tensor splitting)
+│   ├── Sd15CheckpointConverter.cs     Single-file SD1.5 → diffusers format (UNet + CLIP-L + VAE)
+│   ├── SdxlCheckpointConverter.cs     Single-file SDXL → diffusers format (UNet + CLIP-L + CLIP-G + VAE)
+│   ├── FluxCheckpointConverter.cs     (planned) Single-file Flux → diffusers format
+│   └── Sd3CheckpointConverter.cs      (planned) Single-file SD3 → diffusers format
 └── Convert/
-    ├── CheckpointConverter.cs     .ckpt → .safetensors
-    └── QuantizeConverter.cs       FP32 → FP16, FP16 → Q8_0
+    ├── CheckpointConverter.cs     .ckpt → .safetensors (planned)
+    └── QuantizeConverter.cs       FP32 → FP16, FP16 → Q8_0 (planned)
 ```
 
 ---
