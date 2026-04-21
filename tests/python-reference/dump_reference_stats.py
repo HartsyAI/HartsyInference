@@ -155,10 +155,17 @@ def main():
     latents = torch.randn(latent_shape, generator=generator, device=device, dtype=dtype)
     stats.append(tensor_stats("initial_noise", latents))
 
-    # Save full noise tensor for cross-runtime comparison
-    noise_path = os.path.join(os.path.dirname(output_file), "initial_noise.bin")
+    # Save tensors for cross-runtime comparison
+    tensor_dir = os.path.join(os.path.dirname(output_file), "reference_tensors")
+    os.makedirs(tensor_dir, exist_ok=True)
+
+    noise_path = os.path.join(tensor_dir, "initial_noise.bin")
     latents.numpy().tofile(noise_path)
     print(f"  Saved noise tensor ({latents.numel()} floats) to {noise_path}")
+
+    # Save text embeddings for cross-runtime UNet comparison
+    text_embeddings.numpy().tofile(os.path.join(tensor_dir, "text_embeddings.bin"))
+    print(f"  Saved text embeddings to {tensor_dir}")
 
     # 4. Scheduler setup
     scheduler.set_timesteps(num_steps)
@@ -189,10 +196,8 @@ def main():
         stats.append(tensor_stats(f"step{i}_noise_pred_uncond", noise_pred_uncond))
         stats.append(tensor_stats(f"step{i}_noise_pred_cond", noise_pred_cond))
 
-        # Save full step 0 tensors for cross-runtime comparison
+        # Save step 0 tensors for cross-runtime UNet comparison
         if i == 0:
-            tensor_dir = os.path.join(os.path.dirname(output_file), "reference_tensors")
-            os.makedirs(tensor_dir, exist_ok=True)
             noise_pred_uncond.numpy().tofile(os.path.join(tensor_dir, "step0_noise_pred_uncond.bin"))
             noise_pred_cond.numpy().tofile(os.path.join(tensor_dir, "step0_noise_pred_cond.bin"))
             latent_model_input.numpy().tofile(os.path.join(tensor_dir, "step0_scaled_input.bin"))
@@ -206,7 +211,7 @@ def main():
 
         print(f"  Step {i}: t={float(t):.1f}, latent mean={float(latents.mean()):.6f}, std={float(latents.std()):.6f}")
 
-    # Run remaining steps
+    # Run remaining steps with per-step stats
     for i, t in enumerate(timesteps[diag_steps:], start=diag_steps):
         latent_model_input = scheduler.scale_model_input(latents, t)
         latent_model_input_cfg = torch.cat([latent_model_input] * 2)
@@ -215,8 +220,11 @@ def main():
         noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
         noise_pred_cfg = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
         latents = scheduler.step(noise_pred_cfg, t, latents).prev_sample
-        if i % 5 == 0:
-            print(f"  Step {i}: t={float(t):.1f}, latent mean={float(latents.mean()):.6f}")
+        stats.append(tensor_stats(f"step{i}_latents_after", latents))
+        print(f"  Step {i}: t={float(t):.1f}, latent mean={float(latents.mean()):.6f}, std={float(latents.std()):.6f}")
+
+    # Save final latents for cross-runtime comparison
+    latents.numpy().tofile(os.path.join(tensor_dir, "final_latents.bin"))
 
     stats.append(tensor_stats("final_latents", latents))
 

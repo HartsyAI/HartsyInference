@@ -21,8 +21,9 @@ public record UNetConfig
     /// <summary>Cross-attention context dimension (768 for CLIP ViT-L/14 in SD1.5).</summary>
     public int CrossAttentionDim { get; init; } = 768;
 
-    /// <summary>Number of attention heads per block. If single value, used for all blocks.</summary>
-    public int[] AttentionHeadDim { get; init; } = [8, 8, 8, 8];
+    /// <summary>Number of attention heads per block. Matches diffusers' attention_head_dim parameter
+    /// which (confusingly) specifies head count, not head dimension. head_dim = channels / num_heads.</summary>
+    public int[] NumAttentionHeads { get; init; } = [8, 8, 8, 8];
 
     /// <summary>Which down blocks have cross-attention. Last block in SD1.5 has no attention.</summary>
     public bool[] DownBlockHasAttention { get; init; } = [true, true, true, false];
@@ -45,7 +46,7 @@ public record UNetConfig
         BlockOutChannels = [320, 640, 1280, 1280],
         LayersPerBlock = 2,
         CrossAttentionDim = 768,
-        AttentionHeadDim = [8, 8, 8, 8],
+        NumAttentionHeads = [8, 8, 8, 8],
         DownBlockHasAttention = [true, true, true, false],
         UpBlockHasAttention = [false, true, true, true],
     };

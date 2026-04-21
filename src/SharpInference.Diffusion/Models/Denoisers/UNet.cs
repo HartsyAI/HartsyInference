@@ -57,7 +57,7 @@ public sealed class UNet
             bool hasAttn = config.DownBlockHasAttention[i];
             bool hasDown = i < numBlocks - 1; // All except last have downsample
 
-            int numHeads = outCh / config.AttentionHeadDim[i];
+            int numHeads = config.NumAttentionHeads[i];
             _downBlocks[i] = new DownBlock(
                 inCh, outCh, timeDim, config.LayersPerBlock,
                 hasAttn, hasDown, numHeads, config.CrossAttentionDim);
@@ -66,7 +66,7 @@ public sealed class UNet
         // Mid block
         int midCh = blockCh[^1];
         _midResNet0 = new UNetResNetBlock(midCh, midCh, timeDim);
-        int midNumHeads = midCh / config.AttentionHeadDim[^1];
+        int midNumHeads = config.NumAttentionHeads[^1];
         _midAttention = new CrossAttentionBlock(midCh, midNumHeads, config.CrossAttentionDim);
         _midResNet1 = new UNetResNetBlock(midCh, midCh, timeDim);
 
@@ -89,7 +89,7 @@ public sealed class UNet
             bool hasUp = i < numBlocks - 1;
 
             // Up blocks have layers_per_block + 1 ResNet layers
-            int upNumHeads = outCh / config.AttentionHeadDim[numBlocks - 1 - i];
+            int upNumHeads = config.NumAttentionHeads[numBlocks - 1 - i];
             _upBlocks[i] = new UpBlock(
                 inputCh, outCh, prevOutCh, timeDim, config.LayersPerBlock + 1,
                 hasAttn, hasUp, upNumHeads, config.CrossAttentionDim);
