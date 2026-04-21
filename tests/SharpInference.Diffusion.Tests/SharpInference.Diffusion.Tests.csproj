@@ -18,6 +18,7 @@
     <ProjectReference Include="..\..\src\SharpInference.Cpu\SharpInference.Cpu.csproj" />
     <ProjectReference Include="..\..\src\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
     <ProjectReference Include="..\..\src\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Cuda\SharpInference.Cuda.csproj" />
   </ItemGroup>
 
 </Project>
