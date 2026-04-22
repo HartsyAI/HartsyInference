@@ -1,79 +1,42 @@
 # Docs Agent
 
-> **Role:** Keep README, API documentation, design docs, and code comments in sync with the actual codebase. Documentation should always reflect what the code actually does, not what it was planned to do.
+> **Role:** Keep README, API docs, design docs, and code comments in sync with the actual codebase.
 
----
+## Prerequisites
+- `docs/CODE_STYLE.md`, `docs/Design/CORE_DESIGN.md`, `docs/Design/FILE_STRUCTURE.md`
+- `README.md` and actual `src/` code (source of truth)
 
-## Before You Start
-
-Read these files:
-- `docs/CODE_STYLE.md` — **MANDATORY** code style and guidelines (follow this always)
-- `docs/Design/CORE_DESIGN.md` — the hub document that links to everything
-- `docs/Design/FILE_STRUCTURE.md` — where things are supposed to be
-- Existing `README.md` (if it exists)
-- The actual source code in `src/` — this is the source of truth
-
-## Your Workflow
-
-1. **Scan for drift** — compare docs against actual code, find discrepancies
-2. **Update docs** — fix anything that's out of date
-3. **Add missing docs** — if new features were added without documentation
-4. **Keep it concise** — docs should be useful, not verbose
-5. **Verify links** — ensure cross-references between docs still work
+## Workflow
+1. Scan for drift — compare docs vs code
+2. Update stale docs; add missing docs for new features
+3. Verify cross-references
 
 ## What to Maintain
 
-### README.md (project root)
-- Project description and value proposition
-- Quickstart / installation guide (NuGet packages)
-- Minimal code example for common use cases
-- Links to detailed documentation
-- Badge status (build, tests, NuGet version)
-- Keep it short — detailed docs live in `docs/`
+**README.md:** Description, quickstart (NuGet), minimal code examples, badges. Keep short; detail in `docs/`.
 
-### docs/Design/ (architecture docs)
-- Only update when architecture actually changes
-- `CORE_DESIGN.md` links should all work
-- Package dependency graph should match actual .csproj references
-- File structure should match actual repo layout
+**docs/Design/:** Update only when architecture changes. Ensure `CORE_DESIGN.md` links work; dependency graph matches `.csproj`; file structure matches repo layout.
 
-### docs/Research/ (research docs)
-- Mark status as "Complete" when research is done
-- Don't modify findings unless new information contradicts them
-- Add implementation notes after a component is built
+**docs/Research/:** Mark "Complete" when done. Don't modify findings unless contradicted. Add implementation notes after build.
 
-### XML Doc Comments (source code)
-- All public classes, methods, properties, and interfaces need XML docs
-- Focus on "what" and "why", not "how" (the code shows how)
-- Include parameter descriptions for non-obvious parameters
-- Include `<exception>` tags for methods that throw
-- Don't add docs to private/internal members unless complex
+**XML Docs:** All public APIs. Focus on "what" and "why", not "how". Include `<exception>` for throws. Skip private/internal unless complex.
 
-### CHANGELOG.md (when it exists)
-- Add entries for each release
-- Group by: Added, Changed, Fixed, Removed
-- Reference issue/PR numbers
+**CHANGELOG.md:** Group by Added/Changed/Fixed/Removed; reference issue/PR numbers.
 
-## Style Guide
+## Style
+- Present tense, active voice
+- Complete copy-pasteable code examples
+- Tables for comparisons; fenced code blocks with language specifiers
 
-- Use present tense ("Loads the model" not "Will load the model")
-- Use active voice ("The pipeline processes" not "The processing is done by")
-- Code examples should be complete and copy-pasteable
-- Keep sentences short and direct
-- Use tables for structured comparisons
-- Use code blocks with language specifiers (```csharp, ```xml)
+## Common Drift
 
-## Common Drift Patterns
-
-| What Drifts | How to Check |
+| Drift | Check |
 |---|---|
-| File structure diagram | Compare `docs/Design/FILE_STRUCTURE.md` against `ls -R src/` |
-| Package dependencies | Compare `docs/Design/NUGET_PACKAGE_DESIGN.md` against .csproj files |
-| API examples in README | Try to compile the code snippets |
-| Research doc status | Check if component is implemented but research still says "Draft" |
-| Checklist progress | Check if items are done in code but unchecked in checklist |
+| File structure | `docs/Design/FILE_STRUCTURE.md` vs actual `src/` |
+| Package deps | `docs/Design/NUGET_PACKAGE_DESIGN.md` vs `.csproj` |
+| API examples | Try to compile snippets |
+| Research status | Component built but research still "Draft"? |
+| Checklist | Code done but items unchecked? |
 
 ## Related Docs
-- All docs in `docs/Design/` — these are what you're maintaining
-- `docs/Agents/CHECKLIST.md` — for progress tracking updates
-- `CLAUDE.md` — root instruction file (update if agent list changes)
+- `docs/Design/`, `docs/Agents/CHECKLIST.md`, `CLAUDE.md`

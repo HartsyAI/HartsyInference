@@ -1,119 +1,65 @@
 # Integration Agent
 
-> **Role:** Wire up cross-package dependencies, ensure components work together end-to-end, resolve interface mismatches, and validate full pipeline data flow. Ensure device management and tensor lifecycle follow dotLLM's patterns.
+> **Role:** Wire cross-package dependencies, ensure end-to-end data flow, resolve interface mismatches, and validate tensor lifecycle.
 
----
+## Prerequisites
+- `docs/CODE_STYLE.md`, `docs/Design/CORE_DESIGN.md`, `docs/Design/NUGET_PACKAGE_DESIGN.md`
+- `docs/Design/BUILD_ORDER.md`, `docs/Design/IMPLEMENTATION_DETAILS.md`
+- `docs/Research/DOTLLM_ARCHITECTURE.md` — tensor type system, device management
+- Existing source code in packages being integrated
 
-## Before You Start
-
-Read these files:
-- `docs/CODE_STYLE.md` -- **MANDATORY** code style and guidelines (follow this always)
-- `docs/Design/CORE_DESIGN.md` -- architecture overview, IBackend divergence rationale
-- `docs/Design/NUGET_PACKAGE_DESIGN.md` -- package boundaries and dependency graph
-- `docs/Design/BUILD_ORDER.md` -- what depends on what
-- `docs/Design/IMPLEMENTATION_DETAILS.md` -- how components connect
-- `docs/Research/DOTLLM_ARCHITECTURE.md` -- tensor type system, device management, IBackend role
-- All existing source code in the packages you're integrating
-
-## Your Workflow
-
-1. **Identify the integration boundary** -- which packages are being connected
-2. **Verify interfaces match** -- does the consumer's expected API match the provider's actual API
-3. **Wire up the data flow** -- connect output of one component to input of the next
-4. **Handle cross-device** -- if tensors move between CPU and GPU, ensure copies happen via `IBackend.CopyTo()`
-5. **Verify tensor lifecycle** -- who allocates, who owns, who disposes. No leaks, no use-after-free
-6. **Run end-to-end** -- full pipeline from input to output
-7. **Fix mismatches** -- resolve shape, dtype, device, or API mismatches
-8. **Write integration tests** -- test the full flow, not just individual components
+## Workflow
+1. Identify integration boundary
+2. Verify interfaces match
+3. Wire data flow between components
+4. Handle cross-device copies via `IBackend.CopyTo()`
+5. Verify tensor lifecycle (allocate → own → dispose)
+6. Run end-to-end pipeline
+7. Fix shape/dtype/device/API mismatches
+8. Write integration tests
 
 ## Common Integration Points
 
-### ModelHandler -> Pipeline
-- Loader returns `Dictionary<string, TensorView>` -> pipeline maps tensor names to model parameters
-- `TensorView` is non-owning (`Dispose()` is no-op) -- the mmap handle must stay alive for the model's lifetime (dotLLM pattern: `ModelLoader` returns tuple including the file handle)
-- Different model formats (safetensors vs GGUF) produce the same `TensorView` interface
-- Model metadata (architecture key) drives `PipelineFactory` selection
-- `ModelConfig` is a class record with `required` properties (dotLLM pattern)
+| Boundary | Key Concern |
+|---|---|
+| ModelHandler → Pipeline | `Dictionary<string, TensorView>` mapping; mmap handle lifetime; `ModelConfig` (class record, `required`) |
+| Tokenizer → Text Encoder | `int[]` → `Tensor[batch, seq_len]`; padding/truncation; attention mask |
+| Text Encoder → UNet/DiT | Hidden states `[batch, seq_len, hidden_dim]`; SDXL dual CLIP concat; Flux CLIP+T5 format |
+| Scheduler → UNet/DiT | Timestep + noise level; `Step()` produces next latent; flow-matching vs noise-prediction semantics |
+| UNet/DiT → VAE | Latent `[batch, C, H, W]` → scaled → pixel image `[batch, 3, H*8, W*8]` |
+| Pipeline → Server | `IAsyncEnumerable<GenerationProgress>` (readonly record struct) → SSE via `Results.Stream()`; cancellation propagation; `ServerState` singleton |
+| CPU ↔ CUDA/Vulkan | Explicit `IBackend.CopyTo()` only; efficient page-in + VRAM copy; pre-allocate scratch at load time |
 
-### Tokenizer -> Text Encoder
-- Tokenizer outputs `int[]` token IDs -> text encoder expects `Tensor` of shape `[batch, seq_len]`
-- Padding and truncation must match the encoder's expectations
-- Attention mask must be generated correctly
+## Tensor Lifecycle (dotLLM)
 
-### Text Encoder -> UNet/DiT
-- Text encoder outputs hidden states `[batch, seq_len, hidden_dim]`
-- UNet cross-attention expects conditioning of specific shape
-- SDXL needs concatenated outputs from two CLIP encoders
-- Flux needs both CLIP and T5 outputs in specific format
-
-### Scheduler -> UNet/DiT
-- Scheduler provides timestep and noise level
-- UNet/DiT receives timestep embedding
-- Scheduler's `Step()` takes model output and produces next latent
-- Flow-matching (Flux) vs noise-prediction (SD) have different step semantics
-
-### UNet/DiT -> VAE
-- Denoiser outputs final latent `[batch, channels, H, W]`
-- VAE decoder expects latent scaled by model-specific factor
-- Output is pixel-space image `[batch, 3, H*8, W*8]`
-
-### Pipeline -> Server
-- Pipeline returns `IAsyncEnumerable<GenerationProgress>` (readonly record struct, zero-alloc per yield)
-- Server translates to SSE events via `Results.Stream()` (dotLLM pattern)
-- Cancellation must propagate from HTTP request through pipeline to GPU
-- `ServerState` singleton holds loaded models and backend references
-
-### CPU <-> CUDA / Vulkan
-- Tensors must be on the correct device before operations
-- Cross-device copies via `IBackend.CopyTo()` -- always explicit, never implicit
-- Model loading (CPU mmap) -> GPU transfer must be efficient (page-in on demand, copy to VRAM)
-- Pre-allocate scratch buffers on the target device at model load time (dotLLM `TransformerForwardState` pattern)
-
-## Tensor Lifecycle Rules
-
-Following dotLLM's tensor type system:
-
-| Type | Owns Memory | Dispose Behavior | Use For |
+| Type | Owns Memory | Dispose | Use For |
 |---|---|---|---|
-| `Tensor` | Yes | Frees memory (`Interlocked.Exchange` + `NativeMemory.AlignedFree`) | Model weights, intermediate buffers, any tensor with explicit lifetime |
-| `TensorView` | No | No-op | Borrowed references, mmap slices, weight views |
-| `TensorRef` | No | N/A (value type) | Internal kernel hot paths, zero-alloc compute |
+| `Tensor` | Yes | `Interlocked.Exchange` + `AlignedFree` | Weights, intermediates |
+| `TensorView` | No | No-op | Borrowed refs, mmap slices |
+| `TensorRef` | No | N/A (value type) | Kernel hot paths |
 
-**Rules:**
-- The creator of a `Tensor` is responsible for disposing it
-- `TensorView` must never outlive the `Tensor` or mmap it references
-- `TensorRef` is stack-only -- never store it in a field or collection
-- GPU tensors (`CudaTensor`, `VulkanTensor`) follow the same ownership rules
-- When passing tensors across package boundaries, document ownership transfer in XML doc comments
+**Rules:** creator disposes `Tensor`; `TensorView` never outlives backing memory; `TensorRef` stack-only; document ownership in XML docs at package boundaries.
 
 ## Integration Checklist
-
-- [ ] Tensor shapes match at every interface boundary
-- [ ] DTypes match (FP16 everywhere on GPU, or explicit conversion)
-- [ ] DeviceKind is consistent -- no accidental CPU tensor in CUDA operation
-- [ ] Memory ownership is clear -- who allocates, who disposes
-- [ ] `TensorView` does not outlive its backing memory
+- [ ] Shapes match at every boundary
+- [ ] DTypes match (FP16 on GPU, or explicit conversion)
+- [ ] DeviceKind consistent
+- [ ] Memory ownership clear
+- [ ] `TensorView` lifetime valid
 - [ ] Cancellation propagates end-to-end
-- [ ] Progress reporting works through the full stack (readonly record struct, `IAsyncEnumerable`)
-- [ ] Error handling doesn't swallow exceptions at boundaries
-- [ ] Logging captures enough info to debug cross-component issues
-- [ ] Source-generated JSON used for any serialization at boundaries
+- [ ] Progress reporting works (readonly record struct, `IAsyncEnumerable`)
+- [ ] Error handling doesn't swallow at boundaries
+- [ ] Source-gen JSON at serialization boundaries
 
-## Debugging Integration Issues
-
-When things don't work end-to-end:
-
-1. **Check shapes** -- print tensor shapes at every handoff point
-2. **Check dtypes** -- FP32 tensor fed to FP16 kernel will produce garbage
-3. **Check devices** -- CPU tensor passed to CUDA kernel will crash
-4. **Check names** -- model weight tensor names must match expected parameter names exactly
-5. **Check order** -- some operations are order-dependent (normalize before or after activation?)
-6. **Compare intermediate values** -- dump values at each stage, compare to Python reference
-7. **Check ownership** -- is a `TensorView` outliving its backing `Tensor`? Is something disposed too early?
+## Debugging End-to-End Issues
+1. Check shapes at every handoff
+2. Check dtypes (FP32→FP16 kernel = garbage)
+3. Check devices (CPU tensor in CUDA = crash)
+4. Check weight tensor names match exactly
+5. Check operation order
+6. Dump intermediates vs Python reference
+7. Check `TensorView` doesn't outlive backing `Tensor`
 
 ## Related Docs
-- `docs/Research/DOTLLM_ARCHITECTURE.md` -- tensor type system, device management patterns
-- `docs/Design/NUGET_PACKAGE_DESIGN.md` -- package dependency graph
-- `docs/Design/IMPLEMENTATION_DETAILS.md` -- data flow per component
-- `docs/Agents/DEBUG.md` -- debugging integration failures
-- `docs/Agents/TESTER.md` -- writing integration tests
+- `docs/Research/DOTLLM_ARCHITECTURE.md`, `docs/Design/NUGET_PACKAGE_DESIGN.md`, `docs/Design/IMPLEMENTATION_DETAILS.md`
+- `docs/Agents/DEBUG.md`, `docs/Agents/TESTER.md`

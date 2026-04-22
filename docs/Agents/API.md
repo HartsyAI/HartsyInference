@@ -1,140 +1,63 @@
 # API Agent
 
-> **Role:** Build the SharpInference.Server REST API -- OpenAI-compatible endpoints, SSE streaming, model management, request queue, authentication, and health probes. Follow dotLLM's Minimal API patterns (ServerState singleton, source-generated JSON, per-endpoint files).
+> **Role:** Build the SharpInference.Server REST API -- OpenAI-compatible endpoints, SSE streaming, model management, request queue, authentication, and health probes.
 
----
+## Prerequisites
+- `docs/CODE_STYLE.md` — mandatory style
+- `docs/Design/CORE_DESIGN.md`, `docs/Design/IMPLEMENTATION_DETAILS.md` (server section), `docs/Design/FILE_STRUCTURE.md`
+- `docs/Research/OPENAI_IMAGE_API.md` — exact schemas
+- `docs/Research/DOTLLM_ARCHITECTURE.md` — dotLLM patterns (ServerState, source-gen JSON, SSE)
+- `docs/Checklists/PHASE_7_SERVER.md`
+- Existing pipeline code in `src/SharpInference.Diffusion/` and `src/SharpInference.Audio/`
 
-## Before You Start
+## Workflow
+1. Read OpenAI spec → design Minimal API endpoints (one file per endpoint)
+2. Implement: HTTP request → pipeline call → HTTP response
+3. Add SSE streaming for image progress; chunked transfer for audio
+4. Add queue, auth, health probes
+5. Test with OpenAI SDK client
+6. Update checklist
 
-Read these files:
-- `docs/CODE_STYLE.md` -- **MANDATORY** code style and guidelines (follow this always)
-- `docs/Design/CORE_DESIGN.md` -- overall architecture
-- `docs/Design/IMPLEMENTATION_DETAILS.md` -- server section (DI patterns, JSON context, ServerState)
-- `docs/Design/FILE_STRUCTURE.md` -- server package structure
-- `docs/Research/OPENAI_IMAGE_API.md` -- exact OpenAI request/response schemas
-- `docs/Research/DOTLLM_ARCHITECTURE.md` -- dotLLM's server architecture (ServerState singleton, source-generated JSON, Minimal API patterns, SSE streaming via Results.Stream)
-- `docs/Checklists/PHASE_7_SERVER.md` -- what needs to be built
-- Existing pipeline code in `src/SharpInference.Diffusion/` and `src/SharpInference.Audio/` -- understand what you're wrapping
+## Design Principles
 
-## Your Workflow
+**OpenAI Compatibility:** Match request/response schemas exactly; return errors in OpenAI format; support `b64_json` and `url` response formats.
 
-1. **Read the OpenAI API spec** -- understand exact request/response formats
-2. **Design the endpoint** -- ASP.NET Minimal API pattern (one file per endpoint, from dotLLM)
-3. **Implement the endpoint** -- translate HTTP request -> pipeline call -> HTTP response
-4. **Add streaming** -- SSE for image progress, chunked transfer for audio
-5. **Add infrastructure** -- queue, auth, health probes
-6. **Test with OpenAI SDK** -- verify an OpenAI client library can call our endpoints
-7. **Update checklist** -- mark server items complete
-
-## API Design Principles
-
-### OpenAI Compatibility
-- Match OpenAI's request/response schemas exactly -- any OpenAI client library should work
-- Support the same query parameters, headers, and content types
-- Return errors in OpenAI's error format: `{"error": {"message": "...", "type": "...", "code": "..."}}`
-- Support both `response_format: "b64_json"` and `response_format: "url"`
-
-### ASP.NET Minimal API Pattern (from dotLLM)
-
+**Minimal API Pattern (dotLLM):**
 ```csharp
-// DI registration (from dotLLM's ServiceCollectionExtensions pattern)
 public static class SharpInferenceServiceExtensions
 {
-    public static IServiceCollection AddSharpInference(
-        this IServiceCollection services, ServerState state)
+    public static IServiceCollection AddSharpInference(this IServiceCollection services, ServerState state)
     {
         services.AddSingleton(state);
         services.ConfigureHttpJsonOptions(options =>
-            options.SerializerOptions.TypeInfoResolverChain
-                .Insert(0, SharpInferenceJsonContext.Default));
+            options.SerializerOptions.TypeInfoResolverChain.Insert(0, SharpInferenceJsonContext.Default));
         return services;
     }
 }
 
-// Endpoint registration (one file per endpoint)
 public static WebApplication MapSharpInferenceEndpoints(this WebApplication app)
 {
     app.MapPost("/v1/images/generations", ImageGenerationEndpoints.Generate);
-    app.MapPost("/v1/images/edits", ImageGenerationEndpoints.Edit);
-    app.MapPost("/v1/audio/transcriptions", AudioTranscriptionEndpoints.Transcribe);
-    app.MapPost("/v1/audio/speech", AudioTranscriptionEndpoints.Speak);
-    app.MapGet("/v1/models", ModelManagementEndpoints.List);
     // ...
 }
 ```
 
-### ServerState Singleton (from dotLLM)
+**ServerState:** Created before DI container, registered as singleton. Holds models, backend, queue, config.
 
-```csharp
-// Created BEFORE the DI container is built, then registered as singleton
-ServerState state = new ServerState(options);
-WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
-builder.Services.AddSharpInference(state);
-```
+**Source-Generated JSON:** All serialization uses `[JsonSerializable]` contexts — no reflection.
 
-`ServerState` holds loaded models, backend reference, inference queue, and configuration. This is exactly how dotLLM structures its server.
+**Streaming:** SSE for image progress (`text/event-stream`); chunked `audio/wav` or `audio/mp3` for TTS.
 
-### Source-Generated JSON (from dotLLM -- no reflection)
+**Request Queue:** FIFO, configurable depth; 429 when full; `CancellationToken` support.
 
-```csharp
-[JsonSerializable(typeof(ImageGenerationRequest))]
-[JsonSerializable(typeof(ImageGenerationResponse))]
-[JsonSerializable(typeof(AudioTranscriptionResponse))]
-[JsonSerializable(typeof(ModelListResponse))]
-[JsonSerializable(typeof(ErrorResponse))]
-internal partial class SharpInferenceJsonContext : JsonSerializerContext { }
-```
-
-All JSON serialization uses `[JsonSerializable]` source-generated contexts -- no reflection. This is a hard requirement matching dotLLM's approach.
-
-### Streaming (from dotLLM's Results.Stream pattern)
-
-```csharp
-// Image generation progress via SSE (from dotLLM's streaming pattern)
-app.MapPost("/v1/images/generations", async (ImageGenerationRequest request, ServerState state) =>
-{
-    // ... validation, model selection ...
-    return Results.Stream(async stream =>
-    {
-        await foreach (GenerationProgress progress in pipeline.GenerateAsync(request, ct))
-        {
-            await stream.WriteAsync(FormatSSE(progress));
-        }
-    }, "text/event-stream");
-});
-```
-
-- Image generation progress: SSE (`text/event-stream`)
-  - Each event: `data: {"step": 5, "total": 20, "preview": "<base64>"}\n\n`
-  - Final event: `data: {"status": "complete", "image": "<base64>"}\n\n`
-- TTS audio: chunked transfer encoding (`audio/wav` or `audio/mp3`)
-  - Stream PCM chunks as they're synthesized
-
-### Request Queue
-- FIFO queue with configurable max depth
-- One GPU inference at a time (configurable concurrency)
-- Return `429 Too Many Requests` when queue is full
-- Support request cancellation via `CancellationToken`
-- Track queue position and estimated wait time
-
-### Authentication
-- Optional -- disabled by default for local use
-- API key via `Authorization: Bearer sk-...` header
-- Configurable via `SharpInferenceServerOptions.ApiKey`
+**Auth:** Optional, disabled by default. API key via `Authorization: Bearer sk-...`.
 
 ## Security Checklist
-
-- [ ] Validate all input sizes (image dimensions, audio length, prompt length)
-- [ ] Validate file uploads (check content type, enforce size limits)
-- [ ] No path traversal in model file paths
-- [ ] Rate limiting per client IP
-- [ ] Request body size limits
-- [ ] Proper CORS configuration
-- [ ] No secrets in error messages or logs
+- [ ] Validate input sizes, file uploads, model paths
+- [ ] Rate limiting, CORS, body size limits
+- [ ] No secrets in errors/logs
 
 ## Related Docs
-- `docs/Research/OPENAI_IMAGE_API.md` -- exact API schemas
-- `docs/Research/DOTLLM_ARCHITECTURE.md` -- dotLLM server patterns
-- `docs/Checklists/PHASE_7_SERVER.md` -- implementation checklist
-- `docs/Design/FILE_STRUCTURE.md` -- server file layout
-- `docs/Agents/TESTER.md` -- testing the API endpoints
+- `docs/Research/OPENAI_IMAGE_API.md`, `docs/Research/DOTLLM_ARCHITECTURE.md`
+- `docs/Checklists/PHASE_7_SERVER.md`, `docs/Design/FILE_STRUCTURE.md`
+- `docs/Agents/TESTER.md`

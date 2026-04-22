@@ -1,72 +1,56 @@
 # Refactor Agent
 
-> **Role:** Optimize existing code for performance, reduce duplication, improve structure, and clean up technical debt — without changing behavior.
+> **Role:** Optimize performance, reduce duplication, improve structure, and clean technical debt — without changing behavior.
 
----
+## Prerequisites
+- `docs/CODE_STYLE.md`, `docs/Design/CORE_DESIGN.md`, `docs/Design/NUGET_PACKAGE_DESIGN.md`
+- `docs/Agents/BENCHMARK.md`, existing tests, and the code being refactored
 
-## Before You Start
+## Workflow
+1. Verify test coverage (write tests first if missing)
+2. Run baseline benchmarks (if perf-motivated)
+3. Make one change at a time, small commits
+4. Run all tests — must pass with identical results
+5. Run benchmarks — verify improvement or no regression
+6. Document in commit message
 
-Read these files:
-- `docs/CODE_STYLE.md` — **MANDATORY** code style and guidelines (follow this always)
-- `docs/Design/CORE_DESIGN.md` — design pillars to preserve
-- `docs/Design/NUGET_PACKAGE_DESIGN.md` — package boundaries to respect
-- `docs/Agents/BENCHMARK.md` — performance data that motivates the refactor
-- Existing tests — understand what's covered (refactoring without tests is dangerous)
-- The code you're refactoring — understand it fully before changing it
-
-## Your Workflow
-
-1. **Verify test coverage** — ensure tests exist for the code you're changing. If not, write them first
-2. **Run baseline benchmarks** — record performance before changes (if perf-motivated)
-3. **Make the change** — one refactor at a time, keep commits small
-4. **Run all tests** — every test must still pass with identical results
-5. **Run benchmarks** — verify performance improved (if perf-motivated) or didn't regress
-6. **Document** — explain what changed and why in the commit message
-
-## Valid Refactor Motivations
+## Valid Motivations
 
 | Motivation | Example |
 |---|---|
-| **Performance bottleneck** | Benchmark shows Conv2D is 3x slower than expected — optimize memory access pattern |
-| **Code duplication** | SD1.5 and SDXL pipelines have identical VAE decode code — extract shared method |
-| **Wrong abstraction level** | A 500-line method doing too many things — extract into focused methods |
-| **Package boundary violation** | Diffusion code directly calling CPU kernel — route through IBackend |
-| **Memory optimization** | Tensor temp allocations on hot path — switch to TensorPool |
-| **SIMD upgrade** | AVX2 kernel that could benefit from AVX-512 — add AVX-512 path |
+| Performance bottleneck | Conv2D 3x slower than expected — optimize memory access |
+| Code duplication | SD1.5/SDXL share VAE decode — extract shared method |
+| Wrong abstraction | 500-line method — extract focused methods |
+| Package boundary violation | Diffusion calling CPU kernel directly — route through `IBackend` |
+| Memory optimization | Hot path temp allocations — switch to `TensorPool` |
+| SIMD upgrade | AVX2 kernel → add AVX-512 path |
 
-## Invalid Refactor Motivations
-
-- "This could be cleaner" without a concrete problem — don't refactor working code for aesthetics
-- Adding abstractions for hypothetical future needs — YAGNI
-- Renaming things to match your personal preference — keep existing conventions
-- Reorganizing files without functional benefit — disrupts git blame for no gain
+## Invalid Motivations
+- "Could be cleaner" without concrete problem — don't refactor for aesthetics
+- Hypothetical future abstractions — YAGNI
+- Personal preference renames — keep existing conventions
+- Non-functional file reorganization — disrupts git blame
 
 ## Performance Refactoring
+1. Profile first — don't guess
+2. Optimize hot paths — inner loops, not setup code
+3. Memory access > computation — cache misses cost more than ALU ops
+4. Benchmark with `[MemoryDiagnoser]`
+5. Verify pipeline-level improvement, not just kernel
 
-When optimizing for performance:
-
-1. **Profile first** — don't guess the bottleneck, measure it
-2. **Optimize the hot path** — the inner loop that runs millions of times, not setup code
-3. **Memory access > computation** — cache misses cost more than ALU operations
-4. **Benchmark specific operations** — use BenchmarkDotNet with `[MemoryDiagnoser]`
-5. **Verify with pipeline benchmark** — kernel-level improvement must translate to pipeline improvement
-
-### Common Performance Wins
-- Fuse sequential operations (GroupNorm + SiLU into one kernel pass)
-- Eliminate unnecessary tensor copies (reshape via view, not copy)
-- Improve memory access pattern (sequential vs strided access)
-- Reduce thread synchronization (fewer `bar.sync` in PTX)
-- Use TensorPool instead of fresh allocation for temporaries
+### Common Wins
+- Fuse ops (GroupNorm+SiLU into one kernel)
+- Reshape via view, not copy
+- Sequential vs strided memory access
+- Fewer `bar.sync` in PTX
+- `TensorPool` for temporaries
 
 ## Safety Rules
-
-- **Tests must pass** — if any test fails, your refactor introduced a behavior change
-- **Numerical results must be identical** — within existing tolerance, not looser
-- **Don't change public API** — if the refactor changes method signatures, it's a breaking change
-- **One refactor per commit** — easy to revert if something goes wrong
-- **Don't mix refactoring with feature work** — keep them in separate commits
+- Tests must pass — failures = behavior change
+- Numerical results identical within existing tolerance
+- Don't change public API (breaking change)
+- One refactor per commit
+- Don't mix with feature work
 
 ## Related Docs
-- `docs/Agents/BENCHMARK.md` — how to measure performance
-- `docs/Agents/REVIEWER.md` — review standards for refactored code
-- `docs/Agents/KERNEL.md` — kernel optimization patterns
+- `docs/Agents/BENCHMARK.md`, `docs/Agents/REVIEWER.md`, `docs/Agents/KERNEL.md`
