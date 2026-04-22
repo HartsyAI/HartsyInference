@@ -1,4 +1,4 @@
-// SharpInference elementwise kernels — FP32
+// SharpInference elementwise kernels - FP32
 // Fused add, mul, scale, SiLU, GELU for tensor operations
 // Launched with 1D grid: gridDim.x = ceil(count / 256)
 
@@ -6,7 +6,7 @@
 .target sm_70
 .address_size 64
 
-// ─── elementwise_add_f32 ────────────────────────────────────────────
+// --- elementwise_add_f32 --------------------------------------------
 // output[i] = a[i] + b[i]
 // Params: output*, a*, b*, count
 .visible .entry elementwise_add_f32(
@@ -52,7 +52,7 @@ done_add:
     ret;
 }
 
-// ─── elementwise_mul_f32 ────────────────────────────────────────────
+// --- elementwise_mul_f32 --------------------------------------------
 // output[i] = a[i] * b[i]
 .visible .entry elementwise_mul_f32(
     .param .u64 param_out,
@@ -96,7 +96,7 @@ done_mul:
     ret;
 }
 
-// ─── elementwise_scale_f32 ──────────────────────────────────────────
+// --- elementwise_scale_f32 ------------------------------------------
 // output[i] = input[i] * scalar
 .visible .entry elementwise_scale_f32(
     .param .u64 param_out,
@@ -137,7 +137,7 @@ done_scale:
     ret;
 }
 
-// ─── elementwise_silu_f32 ───────────────────────────────────────────
+// --- elementwise_silu_f32 -------------------------------------------
 // output[i] = input[i] * sigmoid(input[i])
 // sigmoid(x) = 1 / (1 + exp(-x))
 .visible .entry elementwise_silu_f32(
@@ -189,7 +189,7 @@ done_silu:
     ret;
 }
 
-// ─── elementwise_gelu_f32 ───────────────────────────────────────────
+// --- elementwise_gelu_f32 -------------------------------------------
 // output[i] = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 // Approximation used by most ML frameworks
 .visible .entry elementwise_gelu_f32(
@@ -266,7 +266,7 @@ done_gelu:
     ret;
 }
 
-// ─── elementwise_clamp_f32 ──────────────────────────────────────────
+// --- elementwise_clamp_f32 ------------------------------------------
 // output[i] = clamp(input[i], min_val, max_val)
 .visible .entry elementwise_clamp_f32(
     .param .u64 param_out,

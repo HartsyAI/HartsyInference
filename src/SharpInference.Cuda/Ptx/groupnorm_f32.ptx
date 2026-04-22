@@ -1,4 +1,4 @@
-// SharpInference GroupNorm kernel — FP32
+// SharpInference GroupNorm kernel - FP32
 // Two-pass: pass 1 computes per-group mean+variance, pass 2 normalizes + affine
 // Launch: gridDim.x = batch * groups, blockDim.x = 256
 // Each block handles one (batch, group) pair
@@ -10,7 +10,7 @@
 // Shared memory for parallel reduction
 .extern .shared .f32 sdata[];
 
-// ─── groupnorm_f32 ─────────────────────────────────────────────────
+// --- groupnorm_f32 -------------------------------------------------
 // Params: output*, input*, weight*, bias*, batch, channels, spatial, groups, eps
 .visible .entry groupnorm_f32(
     .param .u64 param_out,
@@ -62,7 +62,7 @@
     add.u32 %r11, %r11, %r12;      // start_channel_offset
     mul.lo.u32 %r11, %r11, %r2;    // * spatial = base_offset
 
-    // ── Pass 1: Compute mean ──
+    // -- Pass 1: Compute mean --
     // Each thread sums elements stride-style
     mov.f32 %f1, 0f00000000;       // thread_sum = 0
     mov.u32 %r13, %r5;             // i = threadIdx
@@ -121,7 +121,7 @@ reduce_sum_done:
     div.rn.f32 %f5, %f5, %f6;     // mean
     bar.sync 0;
 
-    // ── Pass 2: Compute variance ──
+    // -- Pass 2: Compute variance --
     mov.f32 %f1, 0f00000000;       // thread_var_sum = 0
     mov.u32 %r13, %r5;
 
@@ -175,7 +175,7 @@ reduce_var_done:
     rsqrt.approx.f32 %f8, %f8;    // inv_std
     bar.sync 0;
 
-    // ── Pass 3: Normalize + affine ──
+    // -- Pass 3: Normalize + affine --
     // output[i] = (input[i] - mean) * inv_std * weight[c] + bias[c]
     // c = group_idx * cpg + (i / spatial)
     mov.u32 %r13, %r5;

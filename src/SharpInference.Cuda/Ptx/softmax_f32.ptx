@@ -1,4 +1,4 @@
-// SharpInference Softmax kernel — FP32
+// SharpInference Softmax kernel - FP32
 // Numerically stable per-row softmax: output[i] = exp(input[i] - max) / sum(exp(input - max))
 // Launch: gridDim.x = total_rows, blockDim.x = 256
 // Each block handles one row of length row_len
@@ -10,7 +10,7 @@
 
 .extern .shared .f32 sdata[];
 
-// ─── softmax_f32 ──────────────────────────────────────────────────
+// --- softmax_f32 --------------------------------------------------
 // In-place softmax over rows: data[row, col] for each row
 // Params: data*, row_len, total_rows
 // data is contiguous [total_rows, row_len]
@@ -50,7 +50,7 @@
     shl.b64 %rd4, %rd4, 2;        // tid * sizeof(float)
     add.u64 %rd5, %rd3, %rd4;     // &sdata[tid]
 
-    // ── Pass 1: Find row max ──
+    // -- Pass 1: Find row max --
     // Each thread finds max of its strided elements
     mov.f32 %f1, 0fFF800000;      // thread_max = -inf (0xFF800000)
     mov.u32 %r6, %r3;             // i = tid
@@ -100,7 +100,7 @@ reduce_max_done:
     ld.shared.f32 %f4, [%rd3];    // %f4 = row_max
     bar.sync 0;
 
-    // ── Pass 2: Compute exp(x - max) and sum ──
+    // -- Pass 2: Compute exp(x - max) and sum --
     // Each thread computes exp for its elements and accumulates local sum
     mov.f32 %f5, 0f00000000;      // thread_sum = 0
     mov.u32 %r6, %r3;             // i = tid
@@ -162,7 +162,7 @@ reduce_sum_done:
     rcp.approx.f32 %f10, %f9;     // inv_sum
     bar.sync 0;
 
-    // ── Pass 3: Normalize ──
+    // -- Pass 3: Normalize --
     // output[i] = exp_val[i] * inv_sum
     mov.u32 %r6, %r3;             // i = tid
 

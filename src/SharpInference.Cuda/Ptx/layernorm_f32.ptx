@@ -1,4 +1,4 @@
-// SharpInference LayerNorm kernel — FP32
+// SharpInference LayerNorm kernel - FP32
 // Each block normalizes one row (last dimension)
 // Launch: gridDim.x = total_rows, blockDim.x = 256
 // input/output shape: [total_rows, norm_dim]
@@ -9,7 +9,7 @@
 
 .extern .shared .f32 sdata[];
 
-// ─── layernorm_f32 ──────────────────────────────────────────────────
+// --- layernorm_f32 --------------------------------------------------
 // Params: output*, input*, weight*, bias*, norm_dim, total_rows, eps
 .visible .entry layernorm_f32(
     .param .u64 param_out,
@@ -44,7 +44,7 @@
     // Base offset: row_idx * norm_dim
     mul.lo.u32 %r5, %r2, %r0;
 
-    // ── Pass 1: Compute mean ──
+    // -- Pass 1: Compute mean --
     mov.f32 %f1, 0f00000000;
     mov.u32 %r6, %r3;
 
@@ -98,7 +98,7 @@ ln_reduce_sum_done:
     div.rn.f32 %f5, %f5, %f6;     // mean
     bar.sync 0;
 
-    // ── Pass 2: Compute variance ──
+    // -- Pass 2: Compute variance --
     mov.f32 %f1, 0f00000000;
     mov.u32 %r6, %r3;
 
@@ -149,7 +149,7 @@ ln_reduce_var_done:
     rsqrt.approx.f32 %f8, %f8;    // inv_std
     bar.sync 0;
 
-    // ── Pass 3: Normalize + affine ──
+    // -- Pass 3: Normalize + affine --
     mov.u32 %r6, %r3;
 
 ln_norm_loop:

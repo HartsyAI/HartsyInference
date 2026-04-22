@@ -36,7 +36,7 @@ public sealed class CudaModule : IDisposable
     }
 
     /// <summary>Loads PTX from a byte array (must be null-terminated UTF-8 or will be null-terminated automatically).</summary>
-    public static CudaModule LoadFromBytes(byte[] ptxBytes)
+    public static unsafe CudaModule LoadFromBytes(byte[] ptxBytes)
     {
         // Ensure null terminator
         byte[] terminated;
@@ -55,8 +55,54 @@ public sealed class CudaModule : IDisposable
         try
         {
             Marshal.Copy(terminated, 0, pinned, terminated.Length);
-            CudaDriverApi.cuModuleLoadData(out nint module, pinned).ThrowOnError();
-            return new CudaModule(module);
+
+            // Use cuModuleLoadDataEx with JIT error/info log to get diagnostics on failure
+            const int CU_JIT_ERROR_LOG_BUFFER = 5;
+            const int CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6;
+            const int CU_JIT_INFO_LOG_BUFFER = 3;
+            const int CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES = 4;
+
+            int logSize = 4096;
+            nint errorLog = Marshal.AllocHGlobal(logSize);
+            nint infoLog = Marshal.AllocHGlobal(logSize);
+
+            try
+            {
+                // Zero out the buffers
+                new Span<byte>((void*)errorLog, logSize).Clear();
+                new Span<byte>((void*)infoLog, logSize).Clear();
+
+                int* options = stackalloc int[4];
+                options[0] = CU_JIT_INFO_LOG_BUFFER;
+                options[1] = CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES;
+                options[2] = CU_JIT_ERROR_LOG_BUFFER;
+                options[3] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES;
+
+                nint* optionValues = stackalloc nint[4];
+                optionValues[0] = infoLog;
+                optionValues[1] = (nint)logSize;
+                optionValues[2] = errorLog;
+                optionValues[3] = (nint)logSize;
+
+                int result = CudaDriverApi.cuModuleLoadDataEx(
+                    out nint module, pinned,
+                    4, (nint)options, (nint)optionValues);
+
+                if (result != 0)
+                {
+                    string errorStr = Marshal.PtrToStringAnsi(errorLog) ?? "(no error log)";
+                    string infoStr = Marshal.PtrToStringAnsi(infoLog) ?? "(no info log)";
+                    string msg = $"PTX JIT failed. Error log: {errorStr}. Info log: {infoStr}";
+                    throw new CudaException(result, msg);
+                }
+
+                return new CudaModule(module);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(errorLog);
+                Marshal.FreeHGlobal(infoLog);
+            }
         }
         finally
         {

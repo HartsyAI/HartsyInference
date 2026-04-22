@@ -166,7 +166,7 @@ public sealed unsafe class SdxlPipeline : IDisposable
             latent = newLatent;
 
             stepSw.Stop();
-            Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
+            Logs.Info($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms (managed heap: {GC.GetTotalMemory(false) / 1024 / 1024}MB)");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
