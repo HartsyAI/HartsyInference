@@ -4,7 +4,9 @@ This document tracks every case where the C# implementation diverged from the re
 
 ---
 
-## 1. BatchedMatMul — 2D Right Operand Silently Produced Zeros
+## CPU Pipeline Deviations
+
+### 1. BatchedMatMul — 2D Right Operand Silently Produced Zeros
 
 **Design assumption**: `BatchedMatMul(a[B,M,K], b[K,N])` would correctly handle a 2D weight matrix broadcast across the batch dimension.
 
@@ -16,7 +18,7 @@ This document tracks every case where the C# implementation diverged from the re
 
 **Impact**: This was the primary cause of the "brownish blob" output — without functional text encoding, the UNet had no semantic conditioning and produced essentially random noise predictions.
 
-## 2. UNet Self-Attention — K/V Projected from Un-Normed Hidden
+### 2. UNet Self-Attention — K/V Projected from Un-Normed Hidden
 
 **Design assumption**: `TransformerSubBlock` would correctly apply LayerNorm before Q, K, and V projections for self-attention.
 
@@ -24,7 +26,7 @@ This document tracks every case where the C# implementation diverged from the re
 
 **Fix**: Added `ReferenceEquals(hidden, context)` check to detect self-attention and route K/V through the normed tensor: `Tensor kvSource = ReferenceEquals(hidden, context) ? normed : context;`
 
-## 3. UNet Attention Head Count — Inverted Head/Dim Interpretation
+### 3. UNet Attention Head Count — Inverted Head/Dim Interpretation
 
 **Design assumption**: `UNetConfig.AttentionHeadDim` values (8 for SD1.5) represent the per-head dimension, so `numHeads = channels / headDim`.
 
@@ -46,9 +48,9 @@ Running `dump_attn_sublayers.py` confirmed: Python uses 8 heads with head_dim=40
 
 **Result**: First attention block error dropped from avg_err=0.127 to avg_err=4.3e-5 (2,940x improvement). All layers now match Python within float32 accumulation tolerance. Pipeline produces coherent images.
 
-**Lesson**: Diffusers' `attention_head_dim` parameter is confusingly named — it specifies **head count**, not head dimension, when `num_attention_heads` is not provided. Always verify multi-head attention shapes against the reference by printing `attn.heads` and checking the actual Q/K/V reshape dimensions. See the troubleshooting guide below.
+**Lesson**: Diffusers' `attention_head_dim` parameter is confusingly named — it specifies **head count**, not head dimension, when `num_attention_heads` is not provided. Always verify multi-head attention shapes against the reference by printing `attn.heads` and checking the actual Q/K/V reshape dimensions.
 
-## 4. VAE Attention — 3D Tensors Passed to 4D SDPA Kernel
+### 4. VAE Attention — 3D Tensors Passed to 4D SDPA Kernel
 
 **Design assumption**: The VAE attention layer could pass tensors directly to `ScaledDotProductAttention`.
 
@@ -56,29 +58,48 @@ Running `dump_attn_sublayers.py` confirmed: Python uses 8 heads with head_dim=40
 
 **Fix**: Added reshape to 4D before SDPA: `[B, seqLen, C]` → `[B, 1, seqLen, C]` (single-head attention), then reshape back after.
 
-## 5. Timestep Embedding — Sin/Cos Order Swapped
+### 5. Timestep Embedding — Sin/Cos Order and Frequency Divisor
 
-**Design assumption**: Sinusoidal timestep embedding would use `[sin, cos]` layout.
+**Deviation (sin/cos order)**: SD1.5 diffusers uses `flip_sin_to_cos=True` (default), producing `[cos, sin]` layout. Our code had `[sin, cos]`. Since every ResNet block conditions on the timestep embedding, this corrupted all noise predictions.
 
-**Deviation**: SD1.5 diffusers uses `flip_sin_to_cos=True` (default), producing `[cos, sin]` layout. Our code had `[sin, cos]`.
+**Deviation (frequency divisor)**: Diffusers uses `/ (half_dim - 1)` in `get_timestep_embedding()`. Our code used `/ halfDim`, causing the highest frequency component to be ~6% off. This ensures the frequency range spans exactly `[1, 1/10000]`.
 
-**Fix**: Swapped to `embPtr[i] = cos(angle); embPtr[halfDim + i] = sin(angle);`
+**Fix**: Swapped to `[cos, sin]` order and changed divisor to `(halfDim - 1)`.
 
-## 6. Euler Scheduler — Missing scale_model_input
-
-**Design assumption**: The Euler scheduler would not need to scale model input before each UNet forward pass.
+### 6. Euler Scheduler — Missing scale_model_input
 
 **Deviation**: Diffusers' `EulerDiscreteScheduler.scale_model_input` divides the latent by `sqrt(sigma^2 + 1)` before each UNet call. Without this, the UNet receives inputs at the wrong scale.
 
-**Fix**: Added `ScaleModelInput(stepIndex)` to `IScheduler` interface and implemented in `EulerDiscreteScheduler`. Applied scaling in both `Generate` and `GenerateFromTokens` denoising loops.
+**Fix**: Added `ScaleModelInput(stepIndex)` to `IScheduler` interface and implemented in `EulerDiscreteScheduler`.
 
-## 7. Euler Step — Division by Zero at Final Timestep
+### 7. Euler Step — Division by Zero at Final Timestep
 
-**Design assumption**: The Euler step formula `derivative = (sample - pred_x0) / sigma` would work for all timesteps.
-
-**Deviation**: At the final timestep (t=0), sigma approaches 0, causing division by zero. The algebraic simplification for epsilon prediction eliminates this: since `derivative = model_output` (the division cancels), the step reduces to `prev_sample = sample + model_output * (sigma_next - sigma)` with no division needed.
+**Deviation**: At the final timestep (t=0), sigma approaches 0, causing division by zero in `derivative = (sample - pred_x0) / sigma`. The algebraic simplification for epsilon prediction eliminates this: `derivative = model_output` (the division cancels).
 
 **Fix**: Simplified the epsilon-prediction path to avoid division. Added sigma guard for v-prediction path.
+
+---
+
+## CUDA Backend Deviations
+
+### 8. CLIP Text Encoder — Missing Final LayerNorm
+
+**Before**: `Encode()` returned raw last transformer layer output without applying `final_layer_norm`.
+**After**: `Encode()` applies `final_layer_norm` matching HuggingFace `CLIPTextTransformer.forward()`.
+
+**Impact**: Without this, text embeddings had std ~5 instead of ~1, causing 5x amplified conditioning signals that produced abstract patterns instead of coherent images.
+
+### 9. CUDA SDPA Softmax — PTX Kernel
+
+**Previous deviation**: The softmax step used a CPU roundtrip (download scores → host softmax → upload). Replaced with pure-PTX numerically stable per-row softmax using shared memory reductions (3-pass: max → exp+sum → normalize). One block per row, blockDim=256. Uses `ex2.approx.f32` for exp and `rcp.approx.f32` for 1/sum.
+
+### 10. CUDA Conv2D — Im2Col + cuBLAS SGEMM (No cuDNN)
+
+Conv2D is implemented via im2col (PTX kernel) + cuBLAS SGEMM, rather than cuDNN. Temporary column buffer allocated per forward pass. For 1x1 convolutions, im2col is skipped and input is used directly. Avoids cuDNN dependency, keeping the project pure C# + CUDA Driver API + cuBLAS.
+
+### 11. CUDA GroupNorm/LayerNorm — Three-Pass Kernels
+
+Both normalization kernels use a three-pass approach (mean → variance → normalize+affine) with shared memory reductions. Simpler to implement correctly than online Welford single-pass. Performance impact minimal since not bottleneck vs GEMM.
 
 ---
 
@@ -98,41 +119,37 @@ Use a **venv** to avoid system Python conflicts: `python -m venv tests/python-re
 
 ### Step 2: Run C# Pipeline with Python's Noise
 
-Write a test (`CrossRuntimeValidationTests.PipelineWithPythonNoiseMatchesReference`) that loads Python's saved initial noise and text embeddings, runs the C# pipeline, and compares per-step latent statistics. This eliminates RNG differences and isolates model/scheduler bugs.
+Write a test that loads Python's saved initial noise and text embeddings, runs the C# pipeline, and compares per-step latent statistics. This eliminates RNG differences and isolates model/scheduler bugs.
 
 ### Step 3: Single Forward Pass Comparison
 
-If per-step stats diverge, isolate a single UNet forward pass (`CrossRuntimeValidationTests.SingleUNetPassMatchesPythonReference`). Save Python's step-0 inputs and outputs, feed the same inputs to C#, compare the output tensor element-wise. If this diverges, the bug is in the UNet (not the scheduler).
+If per-step stats diverge, isolate a single UNet forward pass. Save Python's step-0 inputs and outputs, feed the same inputs to C#, compare element-wise. If this diverges, the bug is in the model (not the scheduler).
 
 ### Step 4: Layer-by-Layer Binary Comparison
 
-Create a Python script (`tests/python-reference/dump_layer_outputs.py`) that hooks every UNet layer and saves each layer's output as a binary tensor. Then write a C# test (`UNetDiagnosticTests.LayerByLayerComparisonWithPythonInputs`) that manually steps through the UNet one layer at a time, comparing each output against the Python reference. This pinpoints the **first divergent layer**.
-
-Key pattern:
+Hook every layer in Python and save outputs. Step through C# one layer at a time, comparing each output. This pinpoints the **first divergent layer**:
 ```
-time_embedding:              avg_err=3.4e-8  (PERFECT — no bug here)
+time_embedding:              avg_err=3.4e-8  (PERFECT)
 conv_in:                     avg_err=0.0     (PERFECT)
 down_blocks.0.resnets.0:    avg_err=3.5e-7  (PERFECT)
-down_blocks.0.attentions.0: avg_err=0.127   ← FIRST DIVERGENCE — bug is here
+down_blocks.0.attentions.0: avg_err=0.127   ← FIRST DIVERGENCE
 ```
 
 ### Step 5: Sub-Layer Decomposition
 
-Once the divergent layer is identified, create a Python script (`tests/python-reference/dump_attn_sublayers.py`) that manually executes each sub-operation within that layer and saves intermediate tensors. For a CrossAttentionBlock, this means ~20 sub-steps: GroupNorm, reshape, proj_in, LayerNorm, Q/K/V projections, multi-head reshape, attention logits, softmax probs, attention output, merge, output projection, residuals, cross-attention intermediates, FFN intermediates, proj_out, final output.
-
-Compare the C# sub-operations against these references to find the exact operation that introduces error.
+Once the divergent layer is identified, manually execute each sub-operation in Python and save intermediates. For a CrossAttentionBlock: GroupNorm, reshape, proj_in, LayerNorm, Q/K/V projections, multi-head reshape, attention logits, softmax, output projection, residuals, FFN, etc. Compare C# sub-operations against these to find the exact bug.
 
 ### Step 6: Fix and Verify
 
-After fixing the bug, re-run the layer-by-layer comparison to confirm all layers now match within float32 tolerance (avg_err < 1e-3, ideally < 1e-4). Then run the full pipeline comparison to verify end-to-end correctness.
+Re-run layer-by-layer comparison to confirm all layers match (avg_err < 1e-3, ideally < 1e-4). Then run full pipeline comparison for end-to-end correctness.
 
 ---
 
-## Advice for Future Model Ports
+## Lessons for Future Model Ports
 
 ### Attention Configuration is the #1 Trap
 
-Every model framework names attention parameters differently. The same parameter name can mean different things across models:
+Every framework names attention parameters differently:
 
 | Framework/Model | Parameter | Meaning |
 |---|---|---|
@@ -141,47 +158,39 @@ Every model framework names attention parameters differently. The same parameter
 | Some configs | `num_heads=8` | 8 heads (clear) |
 | Some configs | `head_dim=64` | 64-dim per head (clear) |
 
-**Always verify** by printing `model.attn.heads` and checking Q/K/V reshape shapes in the Python reference before writing C# config code. Never trust parameter names alone.
+**Always verify** by printing `model.attn.heads` and checking Q/K/V reshape shapes in Python before writing C# config code.
 
 ### Weight Shape vs Usage Mismatches
 
-Safetensor weights carry their original shapes. A `proj_in.weight` with shape `[320, 320, 1, 1]` is a Conv2d, but applying it as a linear projection on reshaped data is mathematically equivalent for 1x1 kernels. However, for non-1x1 kernels, the im2col/GEMM path must be used. Always check the weight shape before assuming Linear vs Conv.
+A `proj_in.weight` with shape `[320, 320, 1, 1]` is a Conv2d but equivalent to linear for 1x1 kernels. For non-1x1 kernels, im2col/GEMM must be used. Always check weight shape.
 
 ### GELU Variant Differences
 
-- C# currently uses **tanh-approximated GELU**: `x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`
-- PyTorch default `F.gelu` uses **exact erf-based GELU**: `x * 0.5 * (1 + erf(x / sqrt(2)))`
-- Some models explicitly use `approximate="tanh"` which matches our C# version
+C# uses tanh-approximated GELU. PyTorch default `F.gelu` uses exact erf-based GELU. Difference is ~1e-4 and acceptable, but check which variant the reference uses if FFN diverges.
 
-For SD1.5, the GEGLU FFN uses the default (erf-based). The difference is small (~1e-4 relative error for typical values) and acceptable for inference. If a future model shows unexplained FFN divergence, check which GELU variant the reference uses.
+### RNG Differences
 
-### RNG Differences are Expected
+C# Box-Muller vs PyTorch algorithm. Same seed = different noise. Always compare with **shared noise tensors**, never by matching seeds.
 
-C# uses Box-Muller for Gaussian noise; PyTorch uses a different algorithm. Same seed produces different noise. For validation, always compare using **shared noise tensors** (saved from Python, loaded in C#), never by matching seeds.
+### Expected FP32 Tolerances
 
-### Float32 Accumulation Tolerance
+| Layer type | Expected avg_err |
+|---|---|
+| Element-wise (Add, SiLU) | < 1e-7 |
+| GroupNorm, LayerNorm | < 1e-6 |
+| Linear/Conv (GEMM) | < 1e-5 |
+| Full attention block | < 1e-4 |
+| Full UNet/DiT pass | < 1e-3 |
 
-Different operation ordering and SIMD reduction patterns cause small float32 differences. Expected tolerances for correctly-implemented layers:
-
-| Layer type | Expected avg_err | Notes |
-|---|---|---|
-| Element-wise (Add, SiLU) | < 1e-7 | Nearly exact |
-| GroupNorm, LayerNorm | < 1e-6 | Reduction order matters |
-| Linear/Conv (GEMM) | < 1e-5 | Accumulation order |
-| Full attention block | < 1e-4 | Compounds through softmax |
-| Full UNet pass | < 1e-3 | Accumulated through all layers |
-
-If a layer exceeds these by 10x+, there's a real bug — not just floating-point noise.
+If a layer exceeds these by 10x+, there's a real bug — not FP noise.
 
 ### Diagnostic Script Inventory
 
-All scripts live in `tests/python-reference/` and use the venv at `tests/python-reference/.venv/`:
+All scripts in `tests/python-reference/` using venv at `tests/python-reference/.venv/`:
 
 | Script | Purpose |
 |---|---|
-| `dump_reference_stats.py` | Full pipeline: saves noise, embeddings, per-step latents, final output |
-| `dump_layer_outputs.py` | Per-layer UNet outputs with index.json |
+| `dump_reference_stats.py` | Full pipeline: noise, embeddings, per-step latents, final output |
+| `dump_layer_outputs.py` | Per-layer model outputs with index.json |
 | `dump_attn_sublayers.py` | Sub-operation breakdown of first CrossAttentionBlock |
 | `compare_layers.py` | Utility for comparing binary tensor files |
-
-To run: `"tests/python-reference/.venv/Scripts/python" "tests/python-reference/<script>.py"`

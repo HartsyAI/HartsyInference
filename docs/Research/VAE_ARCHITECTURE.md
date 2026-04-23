@@ -1,9 +1,5 @@
 # VAE Architecture — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Diffusion (VAE)
-
 ## Summary
 
 The Variational Autoencoder (VAE) used in Stable Diffusion pipelines is an `AutoencoderKL` — a convolutional encoder-decoder with KL-divergence regularization that converts between RGB pixel space and a lower-dimensional latent space. All SD-family models (SD1.5, SDXL, SD3, Flux) use **the same fundamental architecture** (identical block types, identical layer structure) but differ in latent channel count (4 vs 16), scaling/shift constants, and whether quant/post-quant convolutions are present. The encoder compresses images by 8x spatially through four downsampling stages; the decoder reverses this with four upsampling stages. A mid-block with self-attention sits at the bottleneck. Tiled VAE decoding allows arbitrarily large images to be decoded within fixed VRAM by splitting the latent tensor into overlapping tiles, decoding each independently, and blending overlapping regions with linear interpolation.
@@ -420,12 +416,6 @@ Per the madebyollin notes, Flux.2 introduces a significantly different VAE:
 - Modified architecture that encodes normalization scaling factors internally
 - Uses RePA-like training scheme
 - Different from the standard AutoencoderKL architecture
-
-## Open Questions
-
-- [x] **Optimal tile size and overlap for seam-free blending**: Default 0.25 overlap factor (16 latent pixels / 128 pixel-space for SD1.5 at 512px tiles) is the standard. Community consensus is 512px tiles with 64-128px overlap. Increasing overlap beyond 0.25 reduces seams at the cost of more redundant computation.
-- [x] **Scaling factor for Flux VAE**: 0.3611 with shift_factor 0.1159 (confirmed from FLUX.1-schnell/dev config.json)
-- [x] **Whether SDXL VAE and SD1.5 VAE share the same architecture**: Yes, identical architecture (`[128, 256, 512, 512]`, 4 latent channels, same block types). Only weights, training procedure (batch size 256 + EMA), sample_size (1024 vs 512), and scaling factor differ.
 
 ## Implementation Notes
 

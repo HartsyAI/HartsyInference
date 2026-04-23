@@ -1,9 +1,5 @@
 # Safetensors Format — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.ModelHandler
-
 ## Summary
 
 Safetensors is a simple, safe binary format for storing tensors, created by Hugging Face as a secure alternative to Python pickle. Unlike pickle, safetensors files cannot execute arbitrary code on load — they are pure data. The format consists of three contiguous sections: an 8-byte little-endian header length, a UTF-8 JSON header describing all tensors (name, dtype, shape, byte offsets), and a raw data blob containing packed tensor bytes in little-endian, C-contiguous (row-major) order.
@@ -259,9 +255,6 @@ interface SafetensorsIndexJson {
 
 ## Open Questions
 
-- [x] ~~Exact JSON schema for shard index files~~ — Documented above (metadata.total_size + weight_map)
-- [x] ~~Edge cases in dtype string representations~~ — 22 dtypes cataloged, including sub-byte and FP8 variants
-- [x] ~~Maximum tested header size in the wild~~ — Limit is 100 MB (`MAX_HEADER_SIZE`); large models like Llama 70B have headers in the single-digit MB range
 - [ ] Whether any popular diffusion model uses `C64`, `F64`, `U16`, `U32`, or `U64` dtypes (likely not — can defer support)
 - [ ] Exact behavior when `__metadata__` contains non-string values — reference implementation likely rejects, but some third-party writers may produce them
 

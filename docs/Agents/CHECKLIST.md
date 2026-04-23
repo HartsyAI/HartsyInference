@@ -1,9 +1,9 @@
 # Checklist Agent
 
-> **Role:** Track implementation progress by updating phase checklists. Mark items complete, flag blockers, and ensure nothing falls through the cracks.
+> Track implementation progress by updating phase checklists.
 
-## Prerequisites
-- `docs/CODE_STYLE.md`, `docs/Design/BUILD_ORDER.md`
+## Extra Reading
+- `docs/Design/BUILD_ORDER.md`
 - All files in `docs/Checklists/`
 - Actual source code and tests
 
@@ -32,8 +32,4 @@
 | Review item | All Critical/High issues resolved |
 
 ## Phase Transition
-A phase is complete when: all items checked, tests pass on CI, code reviewed, merged to main.
-When complete: add `> **Status: COMPLETE** — Merged [date]` at top; verify next phase prerequisites; flag unblocked items.
-
-## Related Docs
-- `docs/Checklists/`, `docs/Design/BUILD_ORDER.md`, `docs/Design/VALIDATION_STRATEGY.md`
+A phase is complete when: all items checked, tests pass on CI, code reviewed, merged to main. When complete: add `> **Status: COMPLETE** — Merged [date]` at top; verify next phase prerequisites; flag unblocked items.

@@ -1,9 +1,5 @@
 # Flash Attention — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Cpu, SharpInference.Cuda
-
 ---
 
 ## Summary
@@ -400,12 +396,6 @@ For CUDA (SharpInference.Cuda via PTX):
 ---
 
 ## Open Questions
-
-- [x] Optimal tile size for cross-attention (asymmetric Q vs KV lengths): **Use standard FA2 tiling. When N_kv <= B_c, the entire KV fits in one tile and inner loop executes once. B_r = 64-128 for Q blocks, B_c >= N_kv for short text sequences.**
-- [x] Whether self-attention and cross-attention can share the same kernel: **Yes. The FA algorithm is parameterized by (N_q, N_kv) and the same kernel handles both. The official library and PyTorch SDPA both use a single kernel.**
-- [x] Memory savings at typical diffusion resolutions: **At 512x512 (32x32 attention = 1024 tokens self-attn), naive uses 4 MB for S; Flash uses ~8 KB extra. At 1024x1024 (SD3 joint-attn, 16384 tokens), naive uses 1 GB; Flash uses ~128 KB extra. Savings are 500x to 8000x.**
-
-### Remaining Open Questions
 
 - [ ] For the CPU implementation, does the exp() computation in the online softmax dominate? If so, consider fast-exp approximations (with error bounds).
 - [ ] For the CUDA implementation, should we write a custom PTX kernel or wrap the official flash-attn library? Custom gives control but the official library is highly optimized.

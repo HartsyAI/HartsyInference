@@ -1,8 +1,5 @@
 # YOLO Architecture — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Vision
 
 ## Summary
 
@@ -549,13 +546,6 @@ Note: In the exported ONNX model, DFL decoding is already performed inside the m
 - The ONNX model has DFL softmax and dist2bbox baked in; no need to reimplement DFL in C#
 
 ## Open Questions
-
-- [x] Exact C2f block structure — documented: split → n bottlenecks (each 2x Conv3x3) → concat all → 1x1 conv
-- [x] Number of bottleneck layers per stage — documented with depth_multiple scaling per variant
-- [x] Whether to support instance segmentation head — **Recommendation: Yes**. The seg variant adds minimal complexity (Proto module + mask coefficients + matrix multiply + sigmoid). It enables content moderation masking and precise subject extraction for auto-cropping.
-- [x] Model size variants and priority — **Recommendation**: Prioritize YOLO11n (2.6M params, fastest) as default, support YOLO11s/m for users needing higher accuracy. YOLOv8 support is also straightforward since YOLO11 is structurally similar. The `l` and `x` variants offer diminishing returns on accuracy for significantly more compute.
-
-### Remaining Questions for Implementation
 
 - [ ] Should SharpInference support the raw PyTorch `.pt` format, or only ONNX? ONNX is simpler (no need for DFL decoding) but `.pt` is more common in the community.
 - [ ] For segmentation mask assembly, should the C# implementation use GPU (CUDA) matrix multiply for the coefficients-prototypes product, or is CPU sufficient for 32x160x160?

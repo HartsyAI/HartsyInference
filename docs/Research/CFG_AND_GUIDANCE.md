@@ -1,9 +1,5 @@
 # Classifier-Free Guidance — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Diffusion (Pipelines)
-
 ## Table of Contents
 
 1. [Summary](#1-summary)
@@ -611,9 +607,6 @@ vec = vec + self.vector_in(y)
 
 ## 8. Open Questions
 
-- [x] How Flux handles guidance differently from SD/SDXL — Resolved: guidance embedding via sinusoidal encoding + MLP, added to timestep conditioning, trained via guidance distillation
-- [x] CFG rescale technique and when it's beneficial — Resolved: rescale std of guided prediction to match conditioned prediction std, most useful with v-prediction models or high guidance scales
-- [x] Performance impact of double forward pass vs single (Flux approach) — Resolved: ~2x compute and ~2x activation VRAM savings with guidance embedding approach
 - [ ] Whether PAG can be applied to Flux DiT architecture (no UNet) — PAG targets self-attention maps which exist in DiT, but the specific layer naming and effectiveness may differ
 - [ ] Optimal `guidance_rescale` values for different models/schedulers — 0.7 is recommended for v-prediction models, but model-specific tuning may be needed
 - [ ] Whether adapter-based guidance distillation (AGD) is practical for arbitrary models — Recent research ([arXiv:2503.07274](https://arxiv.org/abs/2503.07274)) suggests lightweight adapters can simulate CFG in a single pass

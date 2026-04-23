@@ -1,52 +1,48 @@
 # Phase 2 — Math Validation (Tokenizers + Schedulers + VAE)
 
-> **Goal:** Prove the math is correct before tackling the full UNet. Tokenizer output matches Python references exactly. Scheduler step sequences match diffusers. VAE output matches diffusers within 1e-3.
+> **Goal:** Prove the math is correct before full UNet. Tokenizer matches Python exactly. Scheduler steps match diffusers. VAE output within 1e-3.
 > **Packages:** SharpInference.Tokenizers, SharpInference.Diffusion
 
 ---
 
-## 1. Research
+## 1. Research — ALL COMPLETE
 
-- [x] Complete [DIFFUSION_SCHEDULERS.md](../Research/DIFFUSION_SCHEDULERS.md) — Euler, DPM++2M, DDIM exact formulas — done, verified against diffusers source
-- [x] Complete [VAE_ARCHITECTURE.md](../Research/VAE_ARCHITECTURE.md) — decoder layer structure, tiled decoding, constants — done, all model variants documented
-- [x] Complete [CLIP_TOKENIZER.md](../Research/CLIP_TOKENIZER.md) — BPE algorithm, vocab, regex, bytes_to_unicode — done
-- [x] Complete [T5_TOKENIZER.md](../Research/T5_TOKENIZER.md) — SentencePiece unigram, protobuf format, byte fallback
+- [x] DIFFUSION_SCHEDULERS (Euler, DPM++2M, DDIM), VAE_ARCHITECTURE, CLIP_TOKENIZER, T5_TOKENIZER
 
-## 2. Implementation — SharpInference.Tokenizers
+## 2. Implementation — Tokenizers — ALL COMPLETE
 
-- [x] `ClipTokenizer.cs` — BPE tokenizer wrapping Microsoft.ML.Tokenizers BpeTokenizer (49408 vocab, 77-token limit) — done
-- [x] `T5Tokenizer.cs` — SentencePiece tokenizer wrapping Microsoft.ML.Tokenizers SentencePieceTokenizer — done
-- [x] `WhisperTokenizer.cs` — Whisper multilingual BPE + special tokens (stub for Phase 5) — done
-- [x] `TokenizerCache.cs` — Reuse tokenizers across pipeline instances — done
+- [x] `ClipTokenizer.cs` — wraps Microsoft.ML.Tokenizers BpeTokenizer (49408 vocab, 77-token limit)
+- [x] `T5Tokenizer.cs` — wraps SentencePieceTokenizer (with bos_id protobuf patch)
+- [x] `WhisperTokenizer.cs` — stub for Phase 5
+- [x] `TokenizerCache.cs`
 
-## 3. Implementation — SharpInference.Diffusion (Schedulers)
+## 3. Implementation — Schedulers — ALL COMPLETE
 
-- [x] `SchedulerConfig.cs` — Shared config (beta schedule, prediction type, timestep spacing) — done
-- [x] `NoiseSchedule.cs` — Static utilities (betas, alphas_cumprod, sigmas, Karras sigmas, timestep selection) — done
-- [x] `EulerDiscreteScheduler.cs` — Euler discrete scheduler with Karras sigmas support — done (18 tests passing)
-- [x] `DpmPlusPlus2MScheduler.cs` — DPM++ 2M multistep scheduler — done
-- [x] `DdimScheduler.cs` — DDIM scheduler with configurable eta — done
+- [x] `SchedulerConfig.cs`, `NoiseSchedule.cs` (betas, alphas_cumprod, sigmas, Karras, timestep selection)
+- [x] `EulerDiscreteScheduler.cs` (18 tests), `DpmPlusPlus2MScheduler.cs`, `DdimScheduler.cs`
 
-## 4. Implementation — SharpInference.Diffusion (VAE)
+## 4. Implementation — VAE — ALL COMPLETE
 
-- [x] `VaeConfig.cs` — Configuration with presets for SD1.5, SDXL, SD3, Flux — done
-- [x] `ResNetBlock2D.cs` — GroupNorm→SiLU→Conv3x3→GroupNorm→SiLU→Conv3x3 + skip connection — done
-- [x] `VaeAttention.cs` — Mid-block single-head self-attention with GroupNorm and residual — done
-- [x] `VaeDecoder.cs` — Full decoder (post_quant_conv → conv_in → mid_block → up_blocks → norm → conv_out) — done
-- [x] `VaeTiledDecoder.cs` — Tiled decoding with overlap blending for large images — done
+- [x] `VaeConfig.cs` (presets: SD1.5, SDXL, SD3, Flux)
+- [x] `ResNetBlock2D.cs`, `VaeAttention.cs`, `VaeDecoder.cs`, `VaeTiledDecoder.cs`
 
-## 5. Testing
+## 5. Testing — 146 tests passing locally
 
-- [x] `SchedulerTests.cs` — 18 tests covering noise schedule, Euler/DDIM/DPM++ step, timesteps, add_noise — all passing
-- [x] `VaeDecoderTests.cs` — 20 tests covering config presets, scaling math, channel progression, tiled params, blending — all passing
-- [x] `ClipTokenizerTests.cs` — 16 tests covering encode/decode, SOT/EOT, padding, truncation, lowercasing, dispose — all passing with real CLIP vocab/merges
-- [x] `T5TokenizerTests.cs` — 22 tests covering encode/decode, EOS, padding, attention mask, SD3/Flux max lengths, bos_id patch — all passing with real T5 model
-- [x] All 146 tests pass locally (Core: 37, CPU: 19, ModelHandler: 14, Tokenizers: 38, Diffusion: 38)
+- [x] Schedulers (18), VAE (20), ClipTokenizer (16), T5Tokenizer (22), all others
 - [ ] All tests pass on CI
 
 ## 6. Review & Merge
 
-- [x] Code review — numerical correctness (scheduler math, tokenizer edge cases) — reviewed all schedulers and VAE components, fixed confusing variable names in EulerDiscreteScheduler.SigmaToTimestep, fixed TokenizerCache key ignoring maxLength
-- [x] Code review — memory safety (proper disposal, no leaks) — all tensor disposal patterns verified correct, unsafe pointer code bounds-safe via clamping, thread-safe Interlocked patterns used throughout
-- [x] Document any deviations from design plan — see [PHASE_2_DEVIATIONS.md](PHASE_2_DEVIATIONS.md) (T5 protobuf bos_id patch, CLIP token ID divergence, T5 default max length)
+- [x] Code review — numerical correctness, memory safety verified
+- [x] Deviations documented (see below)
 - [ ] Merge to main branch
+
+---
+
+## Deviations from Design
+
+**1. T5 Tokenizer — Protobuf bos_id Patching:** T5 models set `bos_id = -1` causing `IndexOutOfRangeException` in Microsoft.ML.Tokenizers. Workaround: `PatchT5ProtobufStream()` renames the field tag before loading. Harmless if fixed upstream.
+
+**2. CLIP Token IDs diverge from Python:** Microsoft.ML.Tokenizers BPE produces different IDs than OpenAI Python CLIP (different `bytes_to_unicode`/`</w>` handling). Internally consistent; end-to-end validation needed when CLIP encoder is built.
+
+**3. T5 Default Max Length:** Default 77 is generic; pipelines override (256 for SD3, 512 for Flux).

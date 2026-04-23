@@ -1,8 +1,5 @@
 # SD3 Architecture — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Diffusion (SD3)
 
 ## Summary
 
@@ -364,9 +361,6 @@ The unconditional pass uses zeroed-out text embeddings and zero pooled projectio
 
 ## Open Questions
 
-- [x] Exact QK-norm implementation: **RMSNorm with learnable scale, eps=1e-6, applied per-head to Q and K**
-- [x] How the three text encoder outputs are combined: **CLIP-L + CLIP-G concatenated along feature dim (2048), zero-padded to 4096, then concatenated with T5 along sequence dim (154 tokens total)**
-- [x] Architectural differences from Flux at the block level: **See comparison table above**
 - [ ] Whether SD3 Medium's released checkpoint actually includes QK-norm weights (the reference code supports it optionally, but the original 2B release may not have trained with it; SD3.5 definitely uses it)
 - [ ] Exact dual_attention_layers tuple for SD3.5 Medium and Large (confirmed to be approximately first 12-13 layers, but exact indices need verification from config.json)
 - [ ] Whether the SwiGLU MLP in the Stability AI reference matches the GELU MLP in the diffusers implementation, or if diffusers adapted it

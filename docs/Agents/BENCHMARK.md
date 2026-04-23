@@ -1,9 +1,9 @@
 # Benchmark Agent
 
-> **Role:** Run performance benchmarks, compare against reference implementations, identify bottlenecks, and track trends.
+> Run performance benchmarks, compare against references, identify bottlenecks, track trends.
 
-## Prerequisites
-- `docs/CODE_STYLE.md`, `docs/Design/CORE_DESIGN.md`, `docs/Design/IMPLEMENTATION_DETAILS.md`
+## Extra Reading
+- `docs/Design/IMPLEMENTATION_DETAILS.md`
 - `docs/Agents/KERNEL.md`
 - Existing benchmarks in `benchmarks/SharpInference.Benchmarks/`
 
@@ -12,16 +12,13 @@
 2. Write BenchmarkDotNet benchmark
 3. Run and compare against Python diffusers, whisper.cpp, etc.
 4. Document results in `benchmarks/results/`
-5. Profile and suggest optimizations to Kernel/Refactor agents
+5. Profile and suggest optimizations
 
 ## Benchmark Categories
 
 **Kernel:** MatMul (GFLOPS), Conv2D, GroupNorm, SDPA, FFT — compare to PyTorch.
-
 **Pipeline:** SD1.5 512² 20-step, SDXL 1024² 20-step, Flux 1024² — it/s vs diffusers.
-
-**Audio:** Whisper RTF (must be < 1.0), Kokoro TTS latency and throughput.
-
+**Audio:** Whisper RTF (must be < 1.0), Kokoro TTS latency/throughput.
 **Memory:** Peak VRAM per model/resolution; Q8_0 vs FP16; mmap effectiveness.
 
 ## BenchmarkDotNet Pattern
@@ -32,7 +29,6 @@ public class MatMulBenchmarks
 {
     private Tensor _a, _b, _output;
     private IBackend _backend;
-
     [Params(512, 1024, 2048, 4096)] public int N;
     [GlobalSetup] public void Setup() { /* allocate */ }
     [Benchmark] public void MatMul_Cpu_F32() => _backend.MatMul(_output, _a, _b);
@@ -51,7 +47,4 @@ public class MatMulBenchmarks
 | Whisper tiny RTF (CPU) | < 1.0 |
 
 ## Results Storage
-Store in `benchmarks/results/YYYY-MM-DD_phaseN_component.md` with hardware specs, driver versions, .NET version, results table, and gap analysis.
-
-## Related Docs
-- `docs/Agents/KERNEL.md`, `docs/Agents/REFACTOR.md`, `docs/Design/IMPLEMENTATION_DETAILS.md`
+`benchmarks/results/YYYY-MM-DD_phaseN_component.md` with hardware specs, driver versions, .NET version, results table, gap analysis.

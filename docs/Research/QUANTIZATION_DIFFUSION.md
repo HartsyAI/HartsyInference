@@ -1,9 +1,5 @@
 # Quantization for Diffusion — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.ModelHandler, SharpInference.Diffusion
-
 ## Summary
 
 Quantization enables large diffusion models to run on consumer GPUs with limited VRAM. Flux.1-dev at FP16 requires ~24 GB VRAM; Q8_0 reduces this to ~12 GB while maintaining 98-99% of visual quality. The key finding is that **mixed-precision is essential**: the UNet/DiT backbone tolerates Q8_0 (and even Q4_K in transformer architectures) with minimal degradation, but the VAE decoder and text encoders are significantly more sensitive. The recommended strategy for SharpInference is: **Q8_0 for the denoising backbone + FP16 for VAE + FP16 or FP8 for text encoders**, with GGUF as the on-disk format and on-demand dequantization during forward passes. Q4 quantization is usable for DiT-based models (Flux, SD3) but causes visible artifacts in UNet-based models (SD1.5, SDXL) and should be offered as an option with appropriate warnings. Q2 is not viable for any diffusion component.
@@ -309,9 +305,6 @@ model/
 
 ## Open Questions
 
-- [x] Exact quality degradation metrics (FID, CLIP score) for Q8_0 vs FP16 across model families — **Answered**: Q8_0 is essentially lossless (~0.01 perplexity increase). FID differences are within noise for Q8; Q4 shows FID increases of 2-4 points.
-- [x] Whether attention layers are more sensitive to quantization than FFN layers — **Answered**: Visual quality is primarily influenced by spatial attention and FFN layers. Cross-attention K/V projections and time embeddings are the most sensitive. FFN intermediate layers are the least sensitive and can be quantized more aggressively.
-- [x] Mixed-precision strategies: which layers get FP16, which get Q8_0 — **Answered**: Component-level mixed precision (Q8 backbone + FP16 VAE + FP16/FP8 encoders) is the standard approach. Layer-level mixed precision (higher bits for time embeddings, attention K/V, proj_out; lower bits for FFN) is an advanced optimization.
 - [ ] Optimal dequantization caching strategy: should SharpInference cache dequantized tensors between denoising steps when VRAM permits, or always dequantize on-the-fly?
 - [ ] Whether INT8 GEMM kernels on modern GPUs (Ada, Hopper) can skip dequantization entirely and compute directly in INT8 for diffusion workloads.
 - [ ] Performance impact of GGUF memory-mapped loading on Windows with .NET 10 — need to verify MemoryMappedFile performance for large GGUF files.

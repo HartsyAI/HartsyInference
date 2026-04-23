@@ -5,59 +5,41 @@
 
 ---
 
-## 1. Research
+## 1. Research — COMPLETE
 
-- [x] Complete [CLIP_ARCHITECTURE.md](../Research/CLIP_ARCHITECTURE.md) research (image encoder) — done and verified
-- [x] Complete [YOLO_ARCHITECTURE.md](../Research/YOLO_ARCHITECTURE.md) research — done and verified
+- [x] CLIP_ARCHITECTURE (image encoder), YOLO_ARCHITECTURE
 
 ## 2. Planning
 
-- [ ] Plan CLIP image preprocessing (resize, center crop, normalize with ImageNet stats)
-- [ ] Plan YOLO input preprocessing (letterbox resize, normalize to 0–1)
-- [ ] Plan NMS algorithm implementation (IoU threshold, confidence threshold)
-- [ ] Plan embedding API surface (single image, batch, similarity scoring)
-- [ ] Write agent instructions for Phase 6
+- [ ] CLIP image preprocessing (resize, center crop, ImageNet normalize)
+- [ ] YOLO preprocessing (letterbox resize, 0-1 normalize), NMS algorithm
+- [ ] Embedding API surface (single, batch, similarity scoring)
 
-## 3. Implementation — CLIP
+## 3. CLIP
 
-- [ ] `ClipImageEncoder.cs` — ViT: patch embedding → positional encoding → transformer → projection
-- [ ] `ClipScorer.cs` — cosine similarity between text and image embeddings
-- [ ] Image preprocessing — resize, center crop, normalize (ImageNet mean/std)
-- [ ] `ImageEmbeddingPipeline.cs` — image path/bytes → embedding vector
-- [ ] `TextEmbeddingPipeline.cs` — text → embedding vector (Nomic-Embed / E5 / BGE)
+- [ ] `ClipImageEncoder.cs` — ViT: patch embed → positional → transformer → projection
+- [ ] `ClipScorer.cs` — cosine similarity text↔image
+- [ ] Image preprocessing, `ImageEmbeddingPipeline.cs`, `TextEmbeddingPipeline.cs`
 
-## 4. Implementation — YOLO
+## 4. YOLO
 
-- [ ] `YoloPipeline.cs` — image → preprocessing → model forward → post-processing → detections
-- [ ] YOLO backbone — C2f blocks, SPPF module, convolutional layers
-- [ ] YOLO neck — FPN multi-scale feature fusion
-- [ ] YOLO detection head — box regression + class prediction
-- [ ] `YoloPostProcessor.cs` — decode boxes, apply NMS, filter by confidence
-- [ ] `DetectionResult.cs` — bounding box, class label, confidence score
+- [ ] `YoloPipeline.cs` — image → preprocess → model → post-process → detections
+- [ ] Backbone (C2f, SPPF), neck (FPN), detection head (box regression + class)
+- [ ] `YoloPostProcessor.cs` — decode boxes, NMS, confidence filter
+- [ ] `DetectionResult.cs`
 
-## 5. Implementation — Segmentation (stubs)
+## 5. Segmentation (stubs)
 
-- [ ] `SamPipeline.cs` — stub for SAM 2 (Phase 2 model)
-- [ ] `SamMaskDecoder.cs` — stub
-- [ ] `FaceDetector.cs` — stub for face detection
-- [ ] `LandmarkExtractor.cs` — stub for facial landmarks
+- [ ] `SamPipeline.cs`, `SamMaskDecoder.cs`, `FaceDetector.cs`, `LandmarkExtractor.cs`
 
-## 6. Testing & Validation
+## 6. Testing
 
-- [ ] CLIP image encoder — same image → same embedding as OpenAI CLIP (cosine sim > 0.999)
-- [ ] CLIP scorer — text-image similarity scores match reference
-- [ ] CLIP batch — batch of 10 images produces same embeddings as individual
-- [ ] Text embeddings — same text → same embedding as reference model
-- [ ] YOLO detection — same image → same bounding boxes as Ultralytics (IoU > 0.95)
-- [ ] YOLO NMS — verify correct suppression of overlapping detections
-- [ ] YOLO multi-class — verify correct class assignment on COCO test images
-- [ ] Performance test — CLIP embedding latency for single image
-- [ ] Performance test — YOLO detection latency for single image
+- [ ] CLIP embedding cosine sim > 0.999 vs OpenAI, batch consistency, text embeddings
+- [ ] YOLO detection IoU > 0.95 vs Ultralytics, NMS, multi-class COCO
+- [ ] Performance: CLIP embeddings/sec, YOLO detections/sec
 - [ ] All tests pass on CI
 
 ## 7. Review & Merge
 
-- [ ] Code review — image preprocessing correctness (normalization values)
-- [ ] Code review — NMS edge cases (overlapping boxes, single detection)
-- [ ] Benchmark: CLIP embeddings/sec, YOLO detections/sec
+- [ ] Code review (preprocessing values, NMS edge cases)
 - [ ] Merge to main branch

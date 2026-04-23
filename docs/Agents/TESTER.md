@@ -1,9 +1,9 @@
 # Tester Agent
 
-> **Role:** Write tests, generate golden references, run validation, and ensure every component matches its reference within documented tolerances.
+> Write tests, generate golden references, validate components against references within documented tolerances.
 
-## Prerequisites
-- `docs/CODE_STYLE.md`, `docs/Design/VALIDATION_STRATEGY.md`, `docs/Design/CORE_DESIGN.md`
+## Extra Reading
+- `docs/Design/VALIDATION_STRATEGY.md`
 - Relevant `docs/Research/` doc and existing tests in `tests/`
 
 ## Workflow
@@ -16,26 +16,15 @@
 
 ## Test Categories
 
-**Unit Tests (fast, every PR):**
-- Kernel correctness (matmul, conv2d, groupnorm, attention) against known values
-- Tokenizer — exact token ID match
-- Scheduler — step sequences match diffusers within tolerance
-- Tensor ops — create, slice, reshape, dispose, pool
+**Unit (fast, every PR):** Kernel correctness (matmul, conv2d, groupnorm, attention) against known values. Tokenizer exact token ID match. Scheduler step sequences vs diffusers. Tensor ops — create, slice, reshape, dispose, pool.
 
-**Golden Reference Tests (fast, every PR):**
-- Load pre-computed outputs from `tests/reference/golden/`
-- Compare component output against golden files within tolerance
-- Detect regressions
+**Golden Reference (fast, every PR):** Load pre-computed outputs from `tests/reference/golden/`. Compare against golden files within tolerance. Detect regressions.
 
-**Integration Tests (slower, GPU CI):**
-- Full pipeline: text→image with fixed seed, compare to reference image
-- Full pipeline: audio→transcript, compare to reference transcript
-- Memory stability — run N generations, verify no leak
-- Tagged `[Category("Integration")]` — skipped on CPU-only CI
+**Integration (slower, GPU CI):** Full pipeline with fixed seed vs reference. Memory stability over N generations. Tagged `[Category("Integration")]` — skipped on CPU-only CI.
 
 ## Writing Tests
 
-**Naming:** One test file per kernel file (e.g., `MatMulKernelTests.cs` for `MatMulKernels.cs`).
+**Naming:** One test file per source file (e.g., `MatMulKernelTests.cs` for `MatMulKernels.cs`).
 
 **Structure:**
 ```csharp
@@ -48,32 +37,14 @@ public void MatMul_4x4_MatchesReference()
 }
 ```
 
-**Comparison Utilities (shared test utilities):**
-- `TensorCompare` — element-wise abs/rel tolerance
-- `ImageCompare` — SSIM, per-pixel diff threshold
-- `TextCompare` — exact match or word error rate
-- `AudioCompare` — mel spectrogram tolerance
+**Comparison Utilities:** `TensorCompare` (element-wise abs/rel tolerance), `ImageCompare` (SSIM, per-pixel diff), `TextCompare` (exact or word error rate), `AudioCompare` (mel spectrogram tolerance).
 
 ## Golden References
 
-Python scripts in `tests/reference/` generate expected outputs into `tests/reference/golden/` (committed to repo):
-```
-generate_tokenizer_refs.py
-generate_scheduler_refs.py
-generate_unet_refs.py
-generate_vae_refs.py
-generate_pipeline_refs.py
-generate_whisper_refs.py
-generate_mel_refs.py
-golden/clip_tokens_100.json
-golden/euler_20step_seed42.npy
-```
+Python scripts in `tests/reference/` generate expected outputs into `tests/reference/golden/` (committed to repo).
 
 ## Quality Standards
-- Every public API has ≥1 test; every kernel has correctness test; every pipeline has integration test with fixed seed
+- Every public API ≥1 test; every kernel has correctness test; every pipeline has integration test with fixed seed
 - Deterministic — no random seeds without explicit control
 - Clean up — dispose tensors, free GPU memory
 - Fast — unit tests < 1s, integration tests < 60s
-
-## Related Docs
-- `docs/Design/VALIDATION_STRATEGY.md`, `docs/Checklists/`, `docs/Agents/BENCHMARK.md`

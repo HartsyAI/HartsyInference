@@ -1,8 +1,5 @@
 # SIMD Intrinsics in .NET -- Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Cpu
 
 ---
 
@@ -622,9 +619,6 @@ public static class KernelTemplate
 
 ## Open Questions
 
-- [x] Which operations benefit from hand-written intrinsics vs TensorPrimitives -- **Answered:** Single operations should use TensorPrimitives. Fused multi-operation kernels (dequantize+GEMV, scale+bias+activation) and quantized-format-specific operations need hand-written intrinsics.
-- [x] AVX-512 downclocking concerns on Intel CPUs -- **Answered:** Severe on Skylake-X/Cascade Lake (25% freq loss), minimal on Ice Lake, eliminated on Sapphire Rapids and AMD Zen 4. .NET handles worst cases via `IsHardwareAccelerated`.
-- [x] NEON performance characteristics for ARM server deployment -- **Answered:** 128-bit only, but multiple execution units compensate. No frequency penalty. Native pairwise reductions. Good perf/watt. SVE not yet in .NET.
 - [ ] Exact performance of TensorPrimitives.SoftMax vs hand-rolled SoftMax with fused max-subtraction -- needs benchmarking on target hardware.
 - [ ] Whether `Avx10v1` should be a dispatch target separate from `Avx512F` in SharpInference, or if `Vector256/512.IsHardwareAccelerated` covers all cases.
 - [ ] Impact of .NET 10 tiered compilation on SIMD kernel performance -- do Tier 0 (quick-JIT) compilations of SIMD code cause performance cliffs that matter for inference warmup?

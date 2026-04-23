@@ -1,9 +1,5 @@
 # Conv2D CUDA — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Cuda
-
 ## Summary
 
 Conv2D is the most frequently executed operation in diffusion UNets (Stable Diffusion 1.5 has ~70 Conv2D layers across its encoder, middle block, and decoder). The initial strategy for SharpInference is to use cuDNN via P/Invoke for correctness and competitive performance, with the option to later replace hot-path convolutions with custom PTX kernels. cuDNN provides algorithm auto-selection (Winograd for 3x3, implicit GEMM for 1x1), automatic Tensor Core utilization on Ampere+ when NHWC format is used, and workspace-managed execution that abstracts the complexity of tiled convolution.
@@ -652,9 +648,6 @@ On subsequent calls:
 
 ## Open Questions
 
-- [x] cuDNN version compatibility matrix — cuDNN 9.21.0 with CUDA 12.x requires driver >= 527.41 (Windows)
-- [x] NHWC vs NCHW performance — NHWC is strictly better on Ampere+; cuDNN auto-converts NCHW to NHWC for Tensor Cores (adding overhead)
-- [x] Workspace size requirements — 256 MB covers all practical algorithms for diffusion tensors; Winograd 3x3 needs 1-100 MB; implicit GEMM needs 0
 - [ ] Which cuDNN 9.x sub-DLL exports which function — need to verify at runtime whether `cudnnConvolutionForward` is in `cudnn_cnn_infer64_9.dll` or re-exported from `cudnn64_9.dll`
 - [ ] cuDNN Graph API migration — the legacy API is deprecated in 9.x; Graph API offers fused conv+bias+activation but is significantly more complex to P/Invoke
 - [ ] Grouped convolution performance — SD 1.5 uses standard (group=1) convolutions, but ControlNet and some SDXL variants use grouped convolutions

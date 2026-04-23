@@ -1,10 +1,10 @@
 # Convert Agent
 
-> **Role:** Handle model format conversion and quantization — .ckpt→.safetensors, FP32→FP16, FP16→Q8_0, and cross-format validation.
+> Handle model format conversion and quantization — .ckpt→.safetensors, FP32→FP16, FP16→Q8_0, cross-format validation.
 
-## Prerequisites
-- `docs/CODE_STYLE.md`, `docs/Research/SAFETENSORS_FORMAT.md`, `docs/Research/GGUF_FORMAT.md`
-- `docs/Research/QUANTIZATION_DIFFUSION.md`, `docs/Design/IMPLEMENTATION_DETAILS.md`
+## Extra Reading
+- `docs/Research/SAFETENSORS_FORMAT.md`, `docs/Research/GGUF_FORMAT.md`, `docs/Research/QUANTIZATION_DIFFUSION.md`
+- `docs/Design/IMPLEMENTATION_DETAILS.md`
 - Existing code in `src/SharpInference.ModelHandler/Convert/`
 
 ## Workflow
@@ -19,7 +19,7 @@
 | Conversion | Steps |
 |---|---|
 | .ckpt → .safetensors | Safe-pickle load → extract state dict → write safetensors. Byte-for-byte round-trip check. |
-| FP32 → FP16 | Load → convert float tensors to FP16 → write. Validate within 1e-3. |
+| FP32 → FP16 | Load → convert → write. Validate within 1e-3. |
 | FP16 → Q8_0 | Load → quantize eligible tensors (skip VAE, text encoders if needed) → write GGUF or quantized safetensors. Validate visual quality. |
 | Mixed | UNet/DiT Q8_0; VAE FP16; text encoders FP16 (or Q8_0 for T5 if safe). Validate per component. |
 
@@ -28,7 +28,3 @@
 - **Always validate** — compare output against original before shipping
 - **Preserve metadata** — architecture info, config, tokenizer files
 - **Report quality loss** — document any degradation
-
-## Related Docs
-- `docs/Research/SAFETENSORS_FORMAT.md`, `docs/Research/GGUF_FORMAT.md`, `docs/Research/QUANTIZATION_DIFFUSION.md`
-- `docs/Agents/TESTER.md`

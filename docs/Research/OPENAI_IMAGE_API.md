@@ -1,8 +1,5 @@
 # OpenAI Image API — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Server
 
 ## Summary
 
@@ -470,9 +467,6 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 
 ## Open Questions
 
-- [x] Full list of supported `size` values — documented above per model
-- [x] Whether to support `/v1/images/variations` — dall-e-2 only, low priority. Neither LocalAI nor vLLM implement it. **Recommendation: implement as stub returning 501 initially, or implement for completeness since the schema is simple**
-- [x] Audio response format options — documented above: mp3, opus, aac, flac, wav, pcm for TTS; json, text, srt, verbose_json, vtt, diarized_json for transcription
 - [ ] How to map OpenAI model names to local SharpInference models (e.g., `"dall-e-3"` -> which local diffusion pipeline?)
 - [ ] Whether to support the `stream` parameter for image generation (requires SSE with partial image events)
 - [ ] Whether to implement the `instructions` field for TTS (requires model support beyond basic Kokoro)

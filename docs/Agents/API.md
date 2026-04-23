@@ -1,10 +1,9 @@
 # API Agent
 
-> **Role:** Build the SharpInference.Server REST API -- OpenAI-compatible endpoints, SSE streaming, model management, request queue, authentication, and health probes.
+> Build the SharpInference.Server REST API — OpenAI-compatible endpoints, SSE streaming, model management, request queue, auth, and health probes.
 
-## Prerequisites
-- `docs/CODE_STYLE.md` — mandatory style
-- `docs/Design/CORE_DESIGN.md`, `docs/Design/IMPLEMENTATION_DETAILS.md` (server section), `docs/Design/FILE_STRUCTURE.md`
+## Extra Reading
+- `docs/Design/IMPLEMENTATION_DETAILS.md` (server section), `docs/Design/FILE_STRUCTURE.md`
 - `docs/Research/OPENAI_IMAGE_API.md` — exact schemas
 - `docs/Research/DOTLLM_ARCHITECTURE.md` — dotLLM patterns (ServerState, source-gen JSON, SSE)
 - `docs/Checklists/PHASE_7_SERVER.md`
@@ -22,7 +21,7 @@
 
 **OpenAI Compatibility:** Match request/response schemas exactly; return errors in OpenAI format; support `b64_json` and `url` response formats.
 
-**Minimal API Pattern (dotLLM):**
+**Minimal API Pattern:**
 ```csharp
 public static class SharpInferenceServiceExtensions
 {
@@ -34,17 +33,9 @@ public static class SharpInferenceServiceExtensions
         return services;
     }
 }
-
-public static WebApplication MapSharpInferenceEndpoints(this WebApplication app)
-{
-    app.MapPost("/v1/images/generations", ImageGenerationEndpoints.Generate);
-    // ...
-}
 ```
 
 **ServerState:** Created before DI container, registered as singleton. Holds models, backend, queue, config.
-
-**Source-Generated JSON:** All serialization uses `[JsonSerializable]` contexts — no reflection.
 
 **Streaming:** SSE for image progress (`text/event-stream`); chunked `audio/wav` or `audio/mp3` for TTS.
 
@@ -56,8 +47,3 @@ public static WebApplication MapSharpInferenceEndpoints(this WebApplication app)
 - [ ] Validate input sizes, file uploads, model paths
 - [ ] Rate limiting, CORS, body size limits
 - [ ] No secrets in errors/logs
-
-## Related Docs
-- `docs/Research/OPENAI_IMAGE_API.md`, `docs/Research/DOTLLM_ARCHITECTURE.md`
-- `docs/Checklists/PHASE_7_SERVER.md`, `docs/Design/FILE_STRUCTURE.md`
-- `docs/Agents/TESTER.md`

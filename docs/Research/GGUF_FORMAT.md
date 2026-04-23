@@ -1,9 +1,5 @@
 # GGUF Format — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.ModelHandler
-
 ## Summary
 
 GGUF (GGML Universal File) is a binary format for storing quantized ML model weights, designed for efficient `mmap`-based loading and single-file deployment. It is the native format for llama.cpp (LLMs) and stable-diffusion.cpp (diffusion models). The current version is **v3**. The format consists of a fixed header, typed key-value metadata, tensor descriptors, alignment padding, and a contiguous tensor data blob. Quantization is block-based: weights are grouped into blocks of 32 (legacy types) or super-blocks of 256 (K-quant types), each carrying its own scale factors. Dequantization reconstructs floats by multiplying quantized integers by per-block scales and adding per-block minimums where applicable.
@@ -475,13 +471,10 @@ ComfyUI-GGUF uses additional metadata keys not found in llama.cpp or sd.cpp:
 
 ## Open Questions
 
-- [x] Complete list of quantization types used by sd.cpp models — **Answered**: f16, f32, q8_0, q5_0, q5_1, q4_0, q4_1 are the primary types supported by sd.cpp's convert command. K-quant types can be used but may cause issues with certain models.
-- [x] GGUF v3 vs v2 differences — **Answered**: v2 changed counts from uint32 to uint64; v3 added big-endian support.
-- [x] How diffusion model architecture metadata is stored in GGUF keys — **Answered**: sd.cpp primarily uses tensor name pattern matching rather than explicit metadata keys. ComfyUI-GGUF uses `general.architecture` and `comfy.gguf.orig_shape.*` keys.
-- [ ] Exact nibble indexing for Q4_K `qs[]` array: the 128-byte array stores 256 x 4-bit values. Need to verify whether sub-block 0's 32 weights are in the first 16 bytes (indices 0..15) with low/high nibble split, or contiguous across sub-blocks. The reference `dequantize_row_q4_K` in ggml-quants.c is the authoritative source.
-- [ ] Q6_K bit reconstruction: the exact indexing into `ql[]` and `qh[]` may not follow the simple formula shown above. The reference code in ggml-quants.c uses a more complex indexing pattern that interleaves sub-blocks. Verify against source before implementing.
-- [ ] Whether sd.cpp GGUF files ever set `general.alignment` to non-default values.
-- [ ] Big-endian detection strategy: since v3 has no explicit flag, should SharpInference attempt to detect endianness by checking if the magic bytes are reversed (`0x46554747`)?
+- [ ] Exact nibble indexing for Q4_K `qs[]` array — verify against `dequantize_row_q4_K` in ggml-quants.c
+- [ ] Q6_K bit reconstruction — verify `ql[]`/`qh[]` indexing against ggml-quants.c (may use complex interleaving)
+- [ ] Whether sd.cpp GGUF files ever set `general.alignment` to non-default values
+- [ ] Big-endian detection strategy — check if magic bytes are reversed (`0x46554747`)?
 
 ---
 

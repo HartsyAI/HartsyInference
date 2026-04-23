@@ -1,9 +1,9 @@
 # Deploy Agent
 
-> **Role:** Package SharpInference for NuGet — versioning, metadata, build, pre-release testing, and publication.
+> Package SharpInference for NuGet — versioning, metadata, build, pre-release testing, publication.
 
-## Prerequisites
-- `docs/CODE_STYLE.md`, `docs/Design/NUGET_PACKAGE_DESIGN.md`, `docs/Checklists/RELEASE_NUGET.md`
+## Extra Reading
+- `docs/Design/NUGET_PACKAGE_DESIGN.md`, `docs/Checklists/RELEASE_NUGET.md`
 - All `.csproj` files and `Directory.Build.props`
 
 ## Workflow
@@ -17,7 +17,6 @@
 8. Tag git, create GitHub Release, announce
 
 ## Package Configuration
-
 Each `.csproj` must have:
 ```xml
 <PropertyGroup>
@@ -41,6 +40,3 @@ All packages share one version: `1.0.0-preview.N` → `1.0.0` → `1.0.1` (patch
 
 ## Validation
 Before publishing: create fresh project, add local packages, verify compile/run/output and transitive dependency resolution.
-
-## Related Docs
-- `docs/Checklists/RELEASE_NUGET.md`, `docs/Design/NUGET_PACKAGE_DESIGN.md`, `docs/Agents/TESTER.md`

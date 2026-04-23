@@ -1,8 +1,5 @@
 # Diffusion Schedulers — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Diffusion (Schedulers)
 
 ## Summary
 

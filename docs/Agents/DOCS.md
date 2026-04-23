@@ -1,9 +1,9 @@
 # Docs Agent
 
-> **Role:** Keep README, API docs, design docs, and code comments in sync with the actual codebase.
+> Keep README, API docs, design docs, and code comments in sync with the codebase.
 
-## Prerequisites
-- `docs/CODE_STYLE.md`, `docs/Design/CORE_DESIGN.md`, `docs/Design/FILE_STRUCTURE.md`
+## Extra Reading
+- `docs/Design/FILE_STRUCTURE.md`
 - `README.md` and actual `src/` code (source of truth)
 
 ## Workflow
@@ -15,11 +15,11 @@
 
 **README.md:** Description, quickstart (NuGet), minimal code examples, badges. Keep short; detail in `docs/`.
 
-**docs/Design/:** Update only when architecture changes. Ensure `CORE_DESIGN.md` links work; dependency graph matches `.csproj`; file structure matches repo layout.
+**docs/Design/:** Update only when architecture changes. Ensure links work; dependency graph matches `.csproj`; file structure matches repo.
 
 **docs/Research/:** Mark "Complete" when done. Don't modify findings unless contradicted. Add implementation notes after build.
 
-**XML Docs:** All public APIs. Focus on "what" and "why", not "how". Include `<exception>` for throws. Skip private/internal unless complex.
+**XML Docs:** All public APIs. Focus on "what" and "why". Include `<exception>` for throws. Skip private/internal unless complex.
 
 **CHANGELOG.md:** Group by Added/Changed/Fixed/Removed; reference issue/PR numbers.
 
@@ -32,11 +32,8 @@
 
 | Drift | Check |
 |---|---|
-| File structure | `docs/Design/FILE_STRUCTURE.md` vs actual `src/` |
-| Package deps | `docs/Design/NUGET_PACKAGE_DESIGN.md` vs `.csproj` |
+| File structure | `FILE_STRUCTURE.md` vs actual `src/` |
+| Package deps | `NUGET_PACKAGE_DESIGN.md` vs `.csproj` |
 | API examples | Try to compile snippets |
 | Research status | Component built but research still "Draft"? |
 | Checklist | Code done but items unchecked? |
-
-## Related Docs
-- `docs/Design/`, `docs/Agents/CHECKLIST.md`, `CLAUDE.md`

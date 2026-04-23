@@ -1,9 +1,5 @@
 # LoRA Format — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Diffusion (Adapters)
-
 ## Summary
 
 LoRA (Low-Rank Adaptation) decomposes weight updates into pairs of low-rank matrices stored in safetensors files. For each targeted layer, two matrices are stored: a down-projection A (rank x in_dim) and an up-projection B (out_dim x rank). The weight delta is computed as `delta_W = B x A x (alpha / rank)`, where alpha is a per-layer scaling factor and rank is the intrinsic dimension (typically 4-128). Three distinct naming conventions exist depending on the model family: SD1.5/SDXL use `lora_unet_*` / `lora_te_*` prefixes with UNet block paths, Flux uses `double_blocks` / `single_blocks` paths corresponding to its DiT architecture, and the diffusers library uses yet another format with `transformer.*` prefixes and `lora_A` / `lora_B` suffixes. LyCORIS variants (LoHa, LoKr) extend the concept with Hadamard and Kronecker product decompositions respectively.
@@ -544,10 +540,7 @@ For single_blocks.{i}.linear1 (fused Q+K+V+proj_mlp):
 
 ## Open Questions
 
-- [x] Complete Flux LoRA naming convention mapping — documented above for Kohya, Diffusers, and XLabs formats
-- [x] Whether LoRA deltas should be applied in-place or at forward time — in-place recommended as default, with deferred patching for multi-LoRA flexibility
-- [x] LyCORIS variant support priority — **Priority 1**: Standard LoRA (most common), **Priority 2**: LoHa (moderate community usage, captures more nuanced patterns), **Priority 3**: LoKr (smaller files but less common), **Priority 4**: (IA)^3, DyLoRA (rare in diffusion context)
-- [ ] Exact handling of DoRA (Weight-Decomposed Low-Rank Adaptation) — ComfyUI recognizes `.dora_scale` suffix but detailed implementation not yet researched
+- [ ] Exact handling of DoRA (Weight-Decomposed Low-Rank Adaptation) — ComfyUI recognizes `.dora_scale` suffix
 - [ ] Whether rsLoRA (sqrt(rank) scaling) should be supported as an option
 - [ ] Performance benchmarks for in-place vs deferred patching in a .NET context
 

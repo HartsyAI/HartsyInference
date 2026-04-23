@@ -1,8 +1,5 @@
 # dotLLM Architecture — Research Notes
 
-> Status: Complete (updated with source code verification)
-> Last Updated: 2026-04-16
-> Needed Before: All SharpInference packages (reference architecture)
 
 ## Summary
 

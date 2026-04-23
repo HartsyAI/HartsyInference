@@ -1,9 +1,5 @@
 # ControlNet — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Diffusion (Adapters)
-
 ## Summary
 
 ControlNet (Zhang et al., 2023) adds spatial conditioning controls to pretrained text-to-image diffusion models by creating a trainable copy of the encoder blocks and connecting them to the frozen model through "zero convolutions" — 1x1 convolutions with weights and biases initialized to zero. This ensures the ControlNet produces zero output at initialization, preventing any distortion to the base model before training begins. Different ControlNet variants (Canny, Depth, OpenPose, Scribble, etc.) share the same architecture but differ only in their input preprocessing. For SD1.5, there are 13 injection points (12 encoder skip connections + 1 mid block). For SDXL, there are 10 injection points due to the smaller encoder. For Flux, ControlNet operates on transformer blocks rather than UNet blocks, injecting residuals into both the joint (double-stream) and single-stream transformer blocks. Multi-ControlNet combines residuals from multiple ControlNets via element-wise addition with per-ControlNet scaling factors.
@@ -499,9 +495,6 @@ Input: hidden_states [B, seq_len, inner_dim], controlnet_cond, timestep, text_em
 
 ## Open Questions
 
-- [x] Exact residual injection points for SD1.5 vs SDXL ControlNets — **Resolved**: SD1.5 has 13 (12+1), SDXL has 10 (9+1), exact channel dims documented above
-- [x] How multi-ControlNet residuals are weighted and combined — **Resolved**: Element-wise addition after per-ControlNet scaling, no averaging
-- [x] Whether Flux ControlNet exists and how it differs architecturally — **Resolved**: Yes, uses zero-initialized linear layers instead of zero convolutions, injects into transformer blocks, supports shallow variants
 - [ ] Exact parameter count for SDXL ControlNet (estimated ~1.2B but not confirmed from source)
 - [ ] Whether ControlNet-XS (lightweight variant) is worth supporting alongside standard ControlNet
 - [ ] SD3 ControlNet architecture specifics (MMDiT-based, similar to Flux but different block structure)

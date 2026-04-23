@@ -1,9 +1,5 @@
 # Flux Architecture — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Diffusion (Flux)
-
 ## Table of Contents
 
 1. [Summary](#1-summary)
@@ -725,10 +721,6 @@ BFL uses a 2x2 rotation matrix representation and applies it via element-wise op
 
 ## 8. Open Questions
 
-- [x] Exact number of double-stream vs single-stream blocks: **19 double, 38 single** (same for dev and schnell)
-- [x] RoPE frequency encoding for 2D image positions: **Axial RoPE with axes_dim=[16,56,56], theta=10000, applied per-axis then concatenated**
-- [x] Flux LoRA naming convention: **Three formats documented (BFL, diffusers, ComfyUI/kohya) with full key mapping**
-- [x] Flow-matching sigma schedule: **Linear sigmas with dynamic exponential shift based on image resolution**
 - [ ] Exact VAE architecture details (encoder/decoder layer counts, channel progression) — deferred to VAE_ARCHITECTURE.md
 - [ ] Whether BFL-format or diffusers-format LoRA is more common in the community (affects which to support first)
 - [ ] FLUX.2 architecture changes vs FLUX.1 (reportedly 8 double-stream + 48 single-stream blocks)

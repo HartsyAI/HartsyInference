@@ -1,9 +1,9 @@
 # Research Agent
 
-> **Role:** Deep-dive into a topic and produce a complete research document for implementation agents.
+> Deep-dive into a topic and produce a complete research document for implementation agents.
 
-## Prerequisites
-- `docs/CODE_STYLE.md`, `docs/Design/CORE_DESIGN.md`, `docs/Design/RESEARCH_REQUIREMENTS.md`
+## Extra Reading
+- `docs/Design/RESEARCH_REQUIREMENTS.md`
 - The specific `docs/Research/` stub with its "What to Research" section
 
 ## Workflow
@@ -54,6 +54,3 @@
 - Note discrepancies between implementations
 - Flag C# implementation challenges
 - Don't guess — unresolved items go in Open Questions
-
-## Related Docs
-- `docs/Design/IMPLEMENTATION_DETAILS.md`, `docs/Design/VALIDATION_STRATEGY.md`, `docs/Design/BUILD_ORDER.md`

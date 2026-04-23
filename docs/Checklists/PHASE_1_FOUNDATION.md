@@ -1,110 +1,65 @@
 # Phase 1 — Foundation (Core + ModelHandler + Cpu)
 
-> **Goal:** Tensor types work, models can be loaded from disk, basic CPU math is operational.
+> **Goal:** Tensor types work, models load from disk, basic CPU math operational.
 > **Packages:** SharpInference.Core, SharpInference.ModelHandler, SharpInference.Cpu
 
 ---
 
-## 1. Research
+## 1. Research — ALL COMPLETE
 
-- [x] Complete [SAFETENSORS_FORMAT.md](../Research/SAFETENSORS_FORMAT.md) research — done and verified
-- [x] Complete [GGUF_FORMAT.md](../Research/GGUF_FORMAT.md) research — done and verified
-- [x] Complete [IM2COL_CPU.md](../Research/IM2COL_CPU.md) research — done and verified
-- [x] Complete [GROUPNORM_MATH.md](../Research/GROUPNORM_MATH.md) research — done and verified
-- [x] Complete [SIMD_INTRINSICS_DOTNET.md](../Research/SIMD_INTRINSICS_DOTNET.md) research — done and verified
-- [x] Complete [FLASH_ATTENTION.md](../Research/FLASH_ATTENTION.md) research — done and verified
-- [x] Review dotLLM source for tensor and SIMD patterns to follow — done in DOTLLM_ARCHITECTURE.md
+- [x] SAFETENSORS_FORMAT, GGUF_FORMAT, IM2COL_CPU, GROUPNORM_MATH, SIMD_INTRINSICS_DOTNET, FLASH_ATTENTION
+- [x] dotLLM source review for tensor and SIMD patterns → DOTLLM_ARCHITECTURE.md
 
-## 2. Planning
+## 2. Planning — ALL COMPLETE
 
-- [x] Finalize `Tensor` class API surface (constructors, indexers, slicing, disposal) — done in CORE_DESIGN.md and IMPLEMENTATION_DETAILS.md
-- [x] Finalize `IBackend` interface method signatures — done in CORE_DESIGN.md and IMPLEMENTATION_DETAILS.md
-- [x] Define `DType` enum values and byte-size mappings — done in CORE_DESIGN.md and IMPLEMENTATION_DETAILS.md
-- [x] Plan SIMD dispatch strategy (AVX2 baseline, AVX-512 optional, NEON for ARM) — done in CORE_DESIGN.md and IMPLEMENTATION_DETAILS.md
-- [x] Plan memory-mapped file lifecycle management — done in IMPLEMENTATION_DETAILS.md
-- [x] Plan thread pool design for CPU parallelism — done in IMPLEMENTATION_DETAILS.md
-- [x] Write CLAUDE.md agent instructions for Phase 1 — done, CLAUDE.md and 15 agent files exist
+- [x] `Tensor` API, `IBackend` interface, `DType` enum, SIMD dispatch, mmap lifecycle, thread pool design, CLAUDE.md agents
 
-## 3. Project Setup
+## 3. Project Setup — ALL COMPLETE
 
-- [x] Create `SharpInference.slnx` solution file — done and verified
-- [x] Create `Directory.Build.props` (net10.0, nullable, implicit usings) — done and verified
-- [x] Create `Directory.Packages.props` (central package management) — done and verified
-- [x] Create `SharpInference.Core.csproj` — done and verified
-- [x] Create `SharpInference.ModelHandler.csproj` — done and verified
-- [x] Create `SharpInference.Cpu.csproj` — done and verified
-- [x] Create `SharpInference.Core.Tests.csproj` — done and verified
-- [x] Create `SharpInference.ModelHandler.Tests.csproj` — done and verified
-- [x] Create `SharpInference.Cpu.Tests.csproj` — done and verified
-- [x] Set up CI pipeline (build + test on push) — done, GitHub Actions workflow at .github/workflows/ci.yml
-- [x] Add `.gitignore` for .NET — done and verified
-- [x] Add `LICENSE` file — done and verified
+- [x] Solution, Directory.Build.props, Directory.Packages.props, all 6 .csproj files (3 src + 3 test), CI pipeline, .gitignore, LICENSE
 
-## 4. Implementation — SharpInference.Core
+## 4. Implementation — SharpInference.Core — ALL COMPLETE
 
-- [x] `DType.cs` — enum with F32, F16, BF16, Q8_0, Q4_K, I8, U8 — done and verified (81 lines)
-- [x] `TensorShape.cs` — shape + stride metadata, up to 6D — done and verified (194 lines)
-- [x] `NativeBuffer.cs` — wrapper over `NativeMemory.AlignedAlloc` with IDisposable — done and verified
-- [x] `MmapHandle.cs` — `MemoryMappedFile` lifetime manager — done and verified
-- [x] `Tensor.cs` — core tensor type with unmanaged storage, shape, dtype, device — done and verified (207 lines)
-- [x] `TensorView.cs` — non-owning ref struct view with offset/shape — done and verified
-- [x] `TensorPool.cs` — thread-safe buffer pool for temp allocations — done and verified
-- [x] `DeviceKind.cs` — Cpu, Cuda enum — done and verified
-- [x] `IBackend.cs` — full interface (matmul, conv2d, groupnorm, layernorm, sdpa, activations, elementwise) — done and verified (103 lines)
-- [x] `BackendCapabilities.cs` — what ops a backend supports — done and verified
-- [x] `IDiffusionPipeline.cs`, `IAudioPipeline.cs`, `IVisionPipeline.cs` — done and verified
-- [x] `IPipelineRequest.cs` — base request record — done and verified
-- [x] `IScheduler.cs` — SetTimesteps, Step, AddNoise — done and verified
-- [x] `IModel.cs`, `ModelConfig.cs`, `ModelFormat.cs` — done and verified
-- [x] `Logs.cs` — static logging class — done and verified
-- [x] `SharpInferenceException.cs`, `OutOfVramException.cs`, `UnsupportedModelException.cs` — done and verified
+- [x] `DType.cs` (81L), `TensorShape.cs` (194L), `NativeBuffer.cs`, `MmapHandle.cs`, `Tensor.cs` (207L), `TensorView.cs`, `TensorPool.cs`, `DeviceKind.cs`
+- [x] `IBackend.cs` (103L), `BackendCapabilities.cs`, pipeline interfaces, `IScheduler.cs`, `IModel.cs`, `ModelConfig.cs`
+- [x] `Logs.cs`, exceptions (`SharpInferenceException`, `OutOfVramException`, `UnsupportedModelException`)
 
-## 5. Implementation — SharpInference.ModelHandler
+## 5. Implementation — SharpInference.ModelHandler — ALL COMPLETE
 
-- [x] `SafeTensorsLoader.cs` — mmap + JSON header parse → dictionary of TensorView — done and verified (169 lines)
-- [x] `SafeTensorsWriter.cs` — save tensors to safetensors format — done and verified
-- [x] `SafeTensorsShardLoader.cs` — multi-shard loading with unified index — done and verified
-- [x] `GgufLoader.cs` — GGUF v3 header + metadata + tensor mmap — done and verified (300 lines)
-- [x] `GgufDequantizer.cs` — Q4_0, Q8_0, Q4_K_M dequantization — done and verified
-- [x] `GgufMetadata.cs` — typed metadata access — done and verified
-- [x] `ModelRegistry.cs` — in-memory loaded model cache — done and verified
-- [x] `ModelCacheStore.cs` — disk cache at `~/.sharpinference/models/` — done and verified
-- [x] `ModelInfo.cs` — name, format, architecture, size, path — done and verified
-- [x] `HuggingFaceClient.cs` — search, download, resolve variants — done and verified
-- [x] `HuggingFaceModelIndex.cs` — parse model card metadata — done and verified
+- [x] `SafeTensorsLoader.cs` (169L), `SafeTensorsWriter.cs`, `SafeTensorsShardLoader.cs`
+- [x] `GgufLoader.cs` (300L), `GgufDequantizer.cs` (Q4_0, Q8_0, Q4_K_M), `GgufMetadata.cs`
+- [x] `ModelRegistry.cs`, `ModelCacheStore.cs`, `ModelInfo.cs`, `HuggingFaceClient.cs`, `HuggingFaceModelIndex.cs`
 
-## 6. Implementation — SharpInference.Cpu
+## 6. Implementation — SharpInference.Cpu — ALL COMPLETE
 
-- [x] `SimdDispatch.cs` — runtime AVX2/AVX-512/NEON detection — done and verified (62 lines)
-- [x] `CpuBackend.cs` — `IBackend` implementation routing to kernels — done and verified (202 lines)
-- [x] `MatMulKernels.cs` — GEMM, GEMV, batched matmul (AVX2 + AVX-512) — done and verified (131 lines)
-- [x] `Conv2DKernels.cs` — im2col + GEMM, 1×1, 3×3, depthwise — done and verified (204 lines)
-- [x] `NormKernels.cs` — GroupNorm, LayerNorm, RMSNorm, InstanceNorm — done and verified (327 lines)
-- [x] `AttentionKernels.cs` — tiled SDPA (flash-attention style) — done and verified (244 lines)
-- [x] `ActivationKernels.cs` — GELU, SiLU, GELU-approx, Mish, Swish — done and verified (54 lines)
-- [x] `UpDownSampleKernels.cs` — nearest/bilinear upsample, strided downsample — done and verified (210 lines)
-- [x] `AudioKernels.cs` — FFT (Cooley-Tukey), STFT, mel filterbank — done and verified (223 lines)
-- [x] `ElementWiseKernels.cs` — Add, Mul, Scale, Clamp, Concat, Split — done and verified (306 lines)
-- [x] `ComputeThreadPool.cs` — zero-alloc work-stealing thread pool — done and verified (60 lines)
-- [x] `NumaAffinity.cs` — NUMA + P-core pinning — done and verified (45 lines)
+- [x] `SimdDispatch.cs` (62L), `CpuBackend.cs` (202L)
+- [x] `MatMulKernels.cs` (131L), `Conv2DKernels.cs` (204L), `NormKernels.cs` (327L), `AttentionKernels.cs` (244L)
+- [x] `ActivationKernels.cs` (54L), `UpDownSampleKernels.cs` (210L), `AudioKernels.cs` (223L), `ElementWiseKernels.cs` (306L)
+- [x] `ComputeThreadPool.cs` (60L), `NumaAffinity.cs` (45L)
 
-## 7. Testing
+## 7. Testing — 69 tests passing locally
 
-- [x] `TensorTests.cs` — create, index, slice, reshape, dispose — done (12 tests passing)
-- [x] `TensorShapeTests.cs` — stride computation, broadcasting — done (15 tests passing)
-- [x] `NativeBufferTests.cs` — alloc, free, alignment, pool round-trip — done (10 tests passing)
-- [x] `SafeTensorsLoaderTests.cs` — load synthetic safetensors file, verify tensor values — done (7 tests passing)
-- [x] `GgufLoaderTests.cs` — load synthetic GGUF file, verify parsed values — done (7 tests passing)
-- [x] `MatMulKernelTests.cs` — compare against known-good values — done (6 tests passing)
-- [x] `Conv2DKernelTests.cs` — compare against hand-computed reference — done (4 tests passing)
-- [x] `NormKernelTests.cs` — compare against hand-computed norm values — done (5 tests passing)
-- [x] `AttentionKernelTests.cs` — compare against hand-computed SDPA — done (4 tests passing)
+- [x] Tensor, TensorShape, NativeBuffer, SafeTensorsLoader, GgufLoader, MatMul, Conv2D, Norm, Attention tests
 - [ ] All tests pass on CI
 
 ## 8. Review & Merge
 
-- [x] Code review — memory safety (no leaks, proper disposal) — done, 11 issues found and fixed across 9 files
-- [x] Code review — SIMD correctness (edge cases at vector boundaries) — done, 4 issues fixed
-- [x] Benchmark key kernels (matmul, conv2d, groupnorm) against baseline — done, benchmarks/SharpInference.Benchmarks/
-- [x] Document any deviations from design plan — done, see docs/PHASE_1_DEVIATIONS.md
+- [x] Code review (memory safety: 11 issues fixed; SIMD correctness: 4 issues fixed)
+- [x] Benchmark key kernels
+- [x] Deviations documented (see below)
 - [ ] Merge to main branch
+
+---
+
+## Deviations from Design
+
+| # | Deviation | Severity | Action |
+|---|---|---|---|
+| 1 | DType is enum, not record struct | Low | Keep — better design (single byte, exhaustive switch) |
+| 2 | TensorView ref struct instead of TensorRef record struct | Medium | Add TensorRef in Phase 2 |
+| 3 | IBackend accepts Tensor, not TensorRef | Medium | Revisit with TensorRef in Phase 2 |
+| 4 | ComputeThreadPool lacks dual-mode (SpinWait/EventBased) | Low | Implement when diffusion loop exists |
+| 5 | NumaAffinity simplified (no P-core/E-core detection) | Low | Defer to Phase 3 optimization |
+| 6 | No fused kernels yet | Low | Implement in Phase 2/3 |
+
+None impact Phase 1 correctness. All are intentional simplifications or improvements over original design.

@@ -1,9 +1,5 @@
 # GroupNorm Math — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Cpu
-
 ---
 
 ## Summary
@@ -320,9 +316,6 @@ For the Welford mean/variance pass, use `TensorPrimitives` or a manual SIMD Welf
 
 ## Open Questions
 
-- [x] **FP16 vs FP32 accumulation cost**: Negligible (<1%). Always use FP32 accumulation.
-- [x] **SiLU fusion**: Confirmed beneficial. Fuse in the normalize pass to halve memory traffic.
-- [x] **Epsilon value**: 1e-5 is the standard default for diffusion UNet GroupNorm; some transformer blocks use 1e-6.
 - [ ] **Conv2D -> GroupNorm -> SiLU triple fusion**: Is it worth fusing the Conv2D write with GroupNorm+SiLU? Requires Conv2D kernel modification. Likely only for CUDA path.
 - [ ] **TensorPrimitives for Welford**: Does .NET 10 `TensorPrimitives` expose a Welford-based mean/variance, or do we need to hand-roll with SIMD intrinsics?
 - [ ] **AVX-512 GroupNorm**: With `Vector512<float>` processing 16 floats at a time, is there a meaningful speedup over AVX2 for the memory-bound GroupNorm kernel?

@@ -1,9 +1,5 @@
 # im2col CPU — Research Notes
 
-> Status: Complete
-> Last Updated: 2026-04-16
-> Needed Before: SharpInference.Cpu
-
 ---
 
 ## Summary
@@ -327,9 +323,6 @@ function conv_transpose_2d(input, filter, bias, stride, padding, dilation):
 
 ## Open Questions
 
-- [x] **Optimal memory layout for L2 cache utilization:** Tile the im2col buffer so each tile's column count fits in L2 (target ~256 KB). For float32 with C_in*K_h*K_w rows, tile width = L2_size / (C_in * K_h * K_w * 4 bytes). Process tiles sequentially, calling GEMM per tile.
-- [x] **Whether to pre-allocate the im2col buffer or use a pool:** Use `TensorPool.Rent()`/`Return()` from SharpInference.Core, which already implements power-of-2 bucket sizing with `ConcurrentBag` reuse. The im2col buffer size is deterministic per layer, so pool hit rate will be high after the first inference pass.
-- [x] **Handling of non-square kernels:** Use separate `K_h`/`K_w`, `pad_h`/`pad_w`, `stride_h`/`stride_w`, `dilation_h`/`dilation_w` parameters throughout (matching Caffe's approach). Non-square kernels are uncommon in diffusion models but appear in some audio models (e.g., HiFi-GAN uses kernels like 3x1).
 - [ ] **Whether to implement im2row instead of im2col for better CPU cache behavior:** Benchmark both approaches with the project's SIMD GEMM implementation.
 - [ ] **Whether to implement the indirect convolution algorithm for zero-copy:** This would eliminate the im2col buffer entirely but requires modifying the GEMM micro-kernel. Consider as a Phase 2 optimization.
 - [ ] **Optimal tile size for L2 across different CPU architectures:** Profile on Intel (256 KB L2), AMD (512 KB - 1 MB L2), and Apple Silicon (128 KB perf core L2) to determine if a single tile size works or if runtime detection is needed.
