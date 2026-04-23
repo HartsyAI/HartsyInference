@@ -99,6 +99,62 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Linear layer via cuBLAS SGEMM with transpose: output = input × weight^T + bias.</summary>
+    public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    {
+        int N = (int)weight.Shape[0]; // outDim
+        int K = (int)weight.Shape[1]; // inDim
+        int M = (int)(input.ElementCount / K); // batch*seqLen
+
+        ulong pInput = 0, pWeight = 0, pOutput = 0;
+        try
+        {
+            pInput = GpuTransferHelper.CopyToDevice(input);
+            pWeight = GpuTransferHelper.CopyToDevice(weight);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOutput = GpuTransferHelper.AllocateDevice(outBytes);
+
+            float alpha = 1.0f;
+            float beta = 0.0f;
+
+            // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
+            // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N]
+            CublasApi.cublasSgemm(
+                _cublasHandle,
+                CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                N, M, K,
+                &alpha,
+                pWeight, K,
+                pInput, K,
+                &beta,
+                pOutput, N).ThrowOnCublasError();
+
+            Sync();
+            GpuTransferHelper.CopyToHost(output, pOutput, outBytes);
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pInput);
+            GpuTransferHelper.FreeDevice(pWeight);
+            GpuTransferHelper.FreeDevice(pOutput);
+        }
+
+        // Bias addition on CPU (negligible vs matmul: O(M*N) adds vs O(M*N*K) muls)
+        if (bias is not null)
+        {
+            float* bPtr = (float*)bias.DataPointer;
+            float* oPtr = (float*)output.DataPointer;
+            for (int m = 0; m < M; m++)
+            {
+                int rowOffset = m * N;
+                for (int n = 0; n < N; n++)
+                {
+                    oPtr[rowOffset + n] += bPtr[n];
+                }
+            }
+        }
+    }
+
     /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM.</summary>
     public unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
@@ -784,6 +840,20 @@ public sealed class CudaBackend : IBackend
         throw new NotSupportedException("CUDA MelFilterbank not supported - use CPU backend for audio");
     }
 
+    // ── GPU Cache Management -------------------------------------------------
+
+    /// <summary>Evicts all cached GPU weight buffers. Call between pipeline stages to free VRAM.</summary>
+    public void EvictGpuCache()
+    {
+        GpuTransferHelper.EvictAll();
+    }
+
+    /// <summary>Returns GPU cache stats: (cachedBytes, hits, misses).</summary>
+    public (long cachedBytes, long hits, long misses) GetGpuCacheStats()
+    {
+        return GpuTransferHelper.GetStats();
+    }
+
     // ── Disposal -------------------------------------------------------------
 
     public void Dispose()
@@ -792,6 +862,7 @@ public sealed class CudaBackend : IBackend
         {
             _disposed = true;
 
+            GpuTransferHelper.EvictAll();
             _kernels?.Dispose();
 
             if (_cublasHandle != 0)

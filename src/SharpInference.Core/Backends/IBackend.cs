@@ -19,6 +19,9 @@ public interface IBackend : IDisposable
     /// <summary>Batched matrix multiply: output[i] = a[i] @ b[i]</summary>
     void BatchedMatMul(Tensor output, Tensor a, Tensor b);
 
+    /// <summary>Linear layer: output = input × weight^T + bias. Input [M, K], weight [N, K], bias [N] (optional), output [M, N]. Also works with leading batch dims: input [B, S, K] → output [B, S, N].</summary>
+    void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias);
+
     // ── Convolution ─────────────────────────────────────────────────────
 
     /// <summary>2D convolution: output = conv2d(input, weight, bias, stride, padding)</summary>

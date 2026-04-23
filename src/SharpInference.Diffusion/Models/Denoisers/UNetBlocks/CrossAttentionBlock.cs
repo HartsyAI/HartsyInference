@@ -96,7 +96,8 @@ public sealed unsafe class CrossAttentionBlock
         // proj_in: [B, spatial, C] → [B, spatial, C]
         // When SDXL (useLinearProjection=true), weights are [C, C] (linear)
         // When SD1.5, weights are [C, C, 1, 1] (1x1 conv) but math is identical for proj_in/proj_out
-        Tensor projected = LinearProjectBatched(hidden, _projInWeight!, _projInBias!, batch, spatial, channels, channels);
+        Tensor projected = new Tensor(seqShape, DType.F32);
+        backend.Linear(projected, hidden, _projInWeight!, _projInBias!);
         hidden.Dispose();
         hidden = projected;
 
@@ -120,7 +121,8 @@ public sealed unsafe class CrossAttentionBlock
         }
 
         // 4. proj_out: [B, spatial, C] → [B, spatial, C]
-        Tensor projOut = LinearProjectBatched(hidden, _projOutWeight!, _projOutBias!, batch, spatial, channels, channels);
+        Tensor projOut = new Tensor(seqShape, DType.F32);
+        backend.Linear(projOut, hidden, _projOutWeight!, _projOutBias!);
         hidden.Dispose();
 
         // 5. Reshape [B, H*W, C] → [B, C, H, W] and add residual
@@ -134,40 +136,6 @@ public sealed unsafe class CrossAttentionBlock
         output.Dispose();
 
         return result;
-    }
-
-    /// <summary>Linear projection for batched sequence: output = input @ weight^T + bias.</summary>
-    private static Tensor LinearProjectBatched(Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        // weight is [outDim, inDim]
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr[o];
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                    {
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    }
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
-
-        return output;
     }
 
     /// <summary>Reshapes [B, C, H*W] → [B, H*W, C] via transposed copy.</summary>
@@ -271,9 +239,15 @@ internal sealed unsafe class TransformerSubBlock
         int kvSeqLen = ReferenceEquals(hidden, context) ? seqLen : ctxLen;
         int kvDim = ReferenceEquals(hidden, context) ? _channels : _contextDim;
 
-        Tensor query = LinearProject(normed, _toQWeight!, _toQBias, batch, seqLen, _channels, _channels);
-        Tensor key = LinearProject(kvSource, _toKWeight!, _toKBias, batch, kvSeqLen, kvDim, _channels);
-        Tensor value = LinearProject(kvSource, _toVWeight!, _toVBias, batch, kvSeqLen, kvDim, _channels);
+        Tensor query = new Tensor(hidShape, DType.F32);
+        backend.Linear(query, normed, _toQWeight!, _toQBias);
+
+        TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
+        Tensor key = new Tensor(kvOutShape, DType.F32);
+        backend.Linear(key, kvSource, _toKWeight!, _toKBias);
+
+        Tensor value = new Tensor(kvOutShape, DType.F32);
+        backend.Linear(value, kvSource, _toVWeight!, _toVBias);
         normed.Dispose();
 
         // Reshape to multi-head 4D: [B, S, numHeads*headDim] → [B, numHeads, S, headDim]
@@ -304,62 +278,14 @@ internal sealed unsafe class TransformerSubBlock
         attnOut.Dispose();
 
         // Output projection
-        Tensor projected = LinearProject(merged, _toOutWeight!, _toOutBias, batch, seqLen, _channels, _channels);
+        Tensor projected = new Tensor(hidShape, DType.F32);
+        backend.Linear(projected, merged, _toOutWeight!, _toOutBias);
         merged.Dispose();
 
         // Residual
         Tensor output = new Tensor(hidShape, DType.F32);
         backend.Add(output, hidden, projected);
         projected.Dispose();
-
-        return output;
-    }
-
-    private static Tensor LinearProject(Tensor input, Tensor weight, Tensor? bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = 0f;
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                    {
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    }
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
-
-        // Add bias if present
-        if (bias is not null)
-        {
-            float* bPtr = (float*)bias.DataPointer;
-            float* oPtr = (float*)output.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int s = 0; s < seqLen; s++)
-                {
-                    int offset = (b * seqLen + s) * outDim;
-                    for (int d = 0; d < outDim; d++)
-                    {
-                        oPtr[offset + d] += bPtr[d];
-                    }
-                }
-            }
-        }
 
         return output;
     }
@@ -459,7 +385,7 @@ internal sealed unsafe class FeedForwardBlock
 
         TensorShape geGluShape = new TensorShape(batch, seqLen, geGluOutDim);
         Tensor geGluOut = new Tensor(geGluShape, DType.F32);
-        LinearForward(geGluOut, normed, _geGluProjWeight!, _geGluProjBias!, batch, seqLen, _channels, geGluOutDim);
+        backend.Linear(geGluOut, normed, _geGluProjWeight!, _geGluProjBias!);
         normed.Dispose();
 
         // Split and apply GELU gate: output = x[:innerDim] * GELU(x[innerDim:])
@@ -470,7 +396,7 @@ internal sealed unsafe class FeedForwardBlock
 
         // Output linear: [B, seqLen, innerDim] → [B, seqLen, channels]
         Tensor outLinear = new Tensor(shape, DType.F32);
-        LinearForward(outLinear, gated, _outLinearWeight!, _outLinearBias!, batch, seqLen, innerDim, _channels);
+        backend.Linear(outLinear, gated, _outLinearWeight!, _outLinearBias!);
         gated.Dispose();
 
         // Residual
@@ -505,30 +431,4 @@ internal sealed unsafe class FeedForwardBlock
         }
     }
 
-    private static void LinearForward(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr[o];
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                    {
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    }
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
-    }
 }

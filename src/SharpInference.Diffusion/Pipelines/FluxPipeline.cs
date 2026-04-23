@@ -72,11 +72,11 @@ public sealed unsafe class FluxPipeline : IDisposable
         // ── 1. Encode text ─────────────────────────────────────────────
         Logs.Info("Encoding text with CLIP-L (pooled) + T5-XXL (per-token)...");
 
-        // CLIP-L: only pooled output [B, 768]
+        // CLIP-L: full forward → extract EOS hidden state as pooled output [B, 768]
         int[][] batchTokenIdsL = [promptTokenIdsL];
-        int[] eosPositionsL = [promptEosPositionL];
-        (Tensor clipLHidden, Tensor? clipPooled) = _clipL.EncodePenultimate(_backend, batchTokenIdsL, eosPositionsL);
-        clipLHidden.Dispose(); // Flux only uses the pooled output from CLIP-L
+        Tensor clipLHidden = _clipL.Encode(_backend, batchTokenIdsL);
+        Tensor clipPooled = ExtractEosHiddenState(clipLHidden, promptEosPositionL);
+        clipLHidden.Dispose();
 
         // T5-XXL: per-token embeddings [B, seqLen, 4096]
         int[][] batchTokenIdsT5 = [promptTokenIdsT5];
@@ -141,7 +141,7 @@ public sealed unsafe class FluxPipeline : IDisposable
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        clipPooled?.Dispose();
+        clipPooled.Dispose();
         t5Embeddings.Dispose();
 
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
@@ -257,6 +257,32 @@ public sealed unsafe class FluxPipeline : IDisposable
     {
         // The scheduler operates on flat data regardless of shape
         scheduler.Step(output, velocity, sample, stepIndex);
+    }
+
+    /// <summary>Extracts the hidden state at the EOS token position from [B, seqLen, hiddenSize] to [B, hiddenSize]. Used to get CLIP-L pooled output for Flux (no text_projection needed).</summary>
+    private static Tensor ExtractEosHiddenState(Tensor hidden, int eosPosition)
+    {
+        int batch = (int)hidden.Shape[0];
+        int seqLen = (int)hidden.Shape[1];
+        int hiddenSize = (int)hidden.Shape[2];
+
+        TensorShape pooledShape = new TensorShape(batch, hiddenSize);
+        Tensor pooled = new Tensor(pooledShape, DType.F32);
+
+        float* srcPtr = (float*)hidden.DataPointer;
+        float* dstPtr = (float*)pooled.DataPointer;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int srcOffset = (b * seqLen + eosPosition) * hiddenSize;
+            int dstOffset = b * hiddenSize;
+            for (int d = 0; d < hiddenSize; d++)
+            {
+                dstPtr[dstOffset + d] = srcPtr[srcOffset + d];
+            }
+        }
+
+        return pooled;
     }
 
     private void ThrowIfDisposed()

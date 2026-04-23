@@ -89,7 +89,7 @@ public sealed unsafe class UNetResNetBlock
         silu1Out.Dispose();
 
         // 2. Project timestep embedding and add to hidden: temb [B, timeDim] → [B, outCh] → broadcast add
-        Tensor tembProj = ProjectTimestepEmbedding(temb, batch);
+        Tensor tembProj = ProjectTimestepEmbedding(backend, temb, batch);
         AddTimestepEmbedding(conv1Out, tembProj, batch, _outChannels, height, width);
         tembProj.Dispose();
 
@@ -132,45 +132,19 @@ public sealed unsafe class UNetResNetBlock
     }
 
     /// <summary>Projects timestep embedding: SiLU(temb) → Linear → [B, outChannels].</summary>
-    private Tensor ProjectTimestepEmbedding(Tensor temb, int batch)
+    private Tensor ProjectTimestepEmbedding(IBackend backend, Tensor temb, int batch)
     {
         // SiLU on temb first (diffusers does this before the projection in the ResNet block)
         TensorShape tembShape = new TensorShape(batch, _timeDim);
         Tensor tembSilu = new Tensor(tembShape, DType.F32);
-        float* tIn = (float*)temb.DataPointer;
-        float* tOut = (float*)tembSilu.DataPointer;
-        int tembCount = batch * _timeDim;
-        for (int i = 0; i < tembCount; i++)
-        {
-            float x = tIn[i];
-            tOut[i] = x / (1.0f + MathF.Exp(-x)); // SiLU
-        }
+        backend.Silu(tembSilu, temb);
 
         // Linear: [B, timeDim] → [B, outChannels]
         TensorShape projShape = new TensorShape(batch, _outChannels);
         Tensor projected = new Tensor(projShape, DType.F32);
-
-        float* wPtr = (float*)_timeEmbProjWeight!.DataPointer;
-        float* bPtr = (float*)_timeEmbProjBias!.DataPointer;
-        float* sPtr = (float*)tembSilu.DataPointer;
-        float* pPtr = (float*)projected.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int o = 0; o < _outChannels; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * _timeDim;
-                int inOffset = b * _timeDim;
-                for (int i = 0; i < _timeDim; i++)
-                {
-                    sum += sPtr[inOffset + i] * wPtr[wOffset + i];
-                }
-                pPtr[b * _outChannels + o] = sum;
-            }
-        }
-
+        backend.Linear(projected, tembSilu, _timeEmbProjWeight!, _timeEmbProjBias!);
         tembSilu.Dispose();
+
         return projected;
     }
 

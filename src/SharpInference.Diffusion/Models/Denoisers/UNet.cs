@@ -168,7 +168,7 @@ public sealed class UNet
         // 2. ADM conditioning (SDXL only): add micro-conditioning to timestep embedding
         if (_addEmbedding is not null && pooledTextEmb is not null)
         {
-            Tensor addEmb = _addEmbedding.Forward(pooledTextEmb, sizeCondition, batch);
+            Tensor addEmb = _addEmbedding.Forward(backend, pooledTextEmb, sizeCondition, batch);
             Tensor combinedTemb = new Tensor(temb.Shape, DType.F32);
             backend.Add(combinedTemb, temb, addEmb);
             temb.Dispose();

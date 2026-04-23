@@ -39,6 +39,13 @@ public sealed class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
+    public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    {
+        ThrowIfDisposed();
+        MatMulKernels.LinearTransB(output, input, weight, bias);
+    }
+
+    /// <inheritdoc />
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
         ThrowIfDisposed();

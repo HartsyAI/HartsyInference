@@ -89,6 +89,9 @@ public sealed unsafe class SdxlPipeline : IDisposable
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
+        // Evict CLIP weights from GPU cache before UNet
+        EvictBackendCache("CLIP");
+
         // 2. Build ADM conditioning scalars for SDXL base
         // Default: original size = target size = requested size, no crop
         float[] sizeCondition =
@@ -166,12 +169,16 @@ public sealed unsafe class SdxlPipeline : IDisposable
             latent = newLatent;
 
             stepSw.Stop();
-            Logs.Info($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms (managed heap: {GC.GetTotalMemory(false) / 1024 / 1024}MB)");
+            string cacheInfo = GetBackendCacheStats();
+            Logs.Info($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms{cacheInfo}");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
         textEmbeddings.Dispose();
         pooledOutput?.Dispose();
+
+        // Evict UNet weights from GPU cache before VAE
+        EvictBackendCache("UNet");
 
         // 6. VAE decode
         Logs.Info("Decoding latents to image...");
@@ -314,6 +321,25 @@ public sealed unsafe class SdxlPipeline : IDisposable
             "dpm++2m" or "dpmpp2m" => new DpmPlusPlus2MScheduler(),
             _ => new EulerDiscreteScheduler(),
         };
+    }
+
+    /// <summary>Gets GPU cache stats string if the backend supports it.</summary>
+    private string GetBackendCacheStats()
+    {
+        System.Reflection.MethodInfo? method = _backend.GetType().GetMethod("GetGpuCacheStats");
+        if (method != null)
+        {
+            (long cachedBytes, long hits, long misses) stats = ((long, long, long))method.Invoke(_backend, null)!;
+            return $" (GPU cache: {stats.cachedBytes / 1024 / 1024}MB, hits={stats.hits}, misses={stats.misses})";
+        }
+        return "";
+    }
+
+    /// <summary>Evicts GPU weight cache if the backend supports it (CudaBackend).</summary>
+    private void EvictBackendCache(string stage)
+    {
+        System.Reflection.MethodInfo? method = _backend.GetType().GetMethod("EvictGpuCache");
+        method?.Invoke(_backend, null);
     }
 
     private void ThrowIfDisposed()

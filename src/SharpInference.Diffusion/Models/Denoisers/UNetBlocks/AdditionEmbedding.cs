@@ -1,3 +1,4 @@
+using SharpInference.Core.Backends;
 using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.Denoisers.UNetBlocks;
@@ -39,7 +40,7 @@ public sealed unsafe class AdditionEmbedding
     /// <param name="pooledTextEmb">Pooled text embedding from CLIP-G [B, 1280].</param>
     /// <param name="sizeCondition">Flattened scalar conditioning values. For SDXL base: [origH, origW, cropTop, cropLeft, targetH, targetW]. For refiner: [origH, origW, cropTop, cropLeft, aestheticScore].</param>
     /// <param name="batch">Batch size.</param>
-    public Tensor Forward(Tensor pooledTextEmb, ReadOnlySpan<float> sizeCondition, int batch)
+    public Tensor Forward(IBackend backend, Tensor pooledTextEmb, ReadOnlySpan<float> sizeCondition, int batch)
     {
         int pooledDim = (int)pooledTextEmb.Shape[1];
         int numScalars = sizeCondition.Length;
@@ -75,24 +76,17 @@ public sealed unsafe class AdditionEmbedding
         // 3. Linear1: [B, admInChannels] → [B, timeDim]
         TensorShape outShape = new TensorShape(batch, _timeDim);
         Tensor linear1Out = new Tensor(outShape, DType.F32);
-        LinearForward(linear1Out, admVector, _linear1Weight!, _linear1Bias!, batch, _admInChannels, _timeDim);
+        backend.Linear(linear1Out, admVector, _linear1Weight!, _linear1Bias!);
         admVector.Dispose();
 
         // 4. SiLU activation
         Tensor siluOut = new Tensor(outShape, DType.F32);
-        float* l1Ptr = (float*)linear1Out.DataPointer;
-        float* sPtr = (float*)siluOut.DataPointer;
-        int total = batch * _timeDim;
-        for (int i = 0; i < total; i++)
-        {
-            float x = l1Ptr[i];
-            sPtr[i] = x / (1.0f + MathF.Exp(-x));
-        }
+        backend.Silu(siluOut, linear1Out);
         linear1Out.Dispose();
 
         // 5. Linear2: [B, timeDim] → [B, timeDim]
         Tensor output = new Tensor(outShape, DType.F32);
-        LinearForward(output, siluOut, _linear2Weight!, _linear2Bias!, batch, _timeDim, _timeDim);
+        backend.Linear(output, siluOut, _linear2Weight!, _linear2Bias!);
         siluOut.Dispose();
 
         return output;
@@ -113,27 +107,4 @@ public sealed unsafe class AdditionEmbedding
         }
     }
 
-    /// <summary>Dense linear layer: output = input @ weight^T + bias.</summary>
-    private static void LinearForward(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int o = 0; o < outDim; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * inDim;
-                int inOffset = b * inDim;
-                for (int i = 0; i < inDim; i++)
-                {
-                    sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                }
-                outPtr[b * outDim + o] = sum;
-            }
-        }
-    }
 }

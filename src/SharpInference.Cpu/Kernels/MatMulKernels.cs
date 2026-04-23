@@ -87,6 +87,94 @@ public static class MatMulKernels
         }
     }
 
+    /// <summary>Linear layer: output[M,N] = input[M,K] × weight^T[K,N] + bias[N]. Weight is [N, K] row-major (PyTorch convention). Uses tiled GEMM with AVX2 for the matmul, then adds bias.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void LinearTransB(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    {
+        int N = (int)weight.Shape[0]; // outDim
+        int K = (int)weight.Shape[1]; // inDim
+        int M = (int)(input.ElementCount / K); // batch*seqLen
+
+        float* pIn = (float*)input.DataPointer;
+        float* pW = (float*)weight.DataPointer;
+        float* pOut = (float*)output.DataPointer;
+
+        // Zero the output buffer
+        NativeMemory.Clear(pOut, (nuint)(M * N * sizeof(float)));
+
+        // Tiled GEMM: C[M,N] = A[M,K] × B^T[K,N] where B is stored as [N, K]
+        // Access pattern: for each (i, j), sum_k A[i,k] * B[j,k]
+        for (int ii = 0; ii < M; ii += TileSize)
+        {
+            int iEnd = Math.Min(ii + TileSize, M);
+
+            for (int jj = 0; jj < N; jj += TileSize)
+            {
+                int jEnd = Math.Min(jj + TileSize, N);
+
+                for (int kk = 0; kk < K; kk += TileSize)
+                {
+                    int kEnd = Math.Min(kk + TileSize, K);
+
+                    for (int i = ii; i < iEnd; i++)
+                    {
+                        float* rowA = pIn + i * K;
+                        float* rowOut = pOut + i * N;
+
+                        for (int j = jj; j < jEnd; j++)
+                        {
+                            float* rowW = pW + j * K;
+                            float sum = 0f;
+
+                            int k = kk;
+                            if (Avx2.IsSupported)
+                            {
+                                Vector256<float> vSum = Vector256<float>.Zero;
+                                int vectorEnd = kEnd - Vector256<float>.Count + 1;
+                                for (; k < vectorEnd; k += Vector256<float>.Count)
+                                {
+                                    Vector256<float> vA = Avx.LoadVector256(rowA + k);
+                                    Vector256<float> vW = Avx.LoadVector256(rowW + k);
+                                    vSum = Fma.IsSupported
+                                        ? Fma.MultiplyAdd(vA, vW, vSum)
+                                        : Avx.Add(vSum, Avx.Multiply(vA, vW));
+                                }
+                                // Horizontal sum
+                                Vector128<float> hi = Avx.ExtractVector128(vSum, 1);
+                                Vector128<float> lo = vSum.GetLower();
+                                Vector128<float> v4 = Sse.Add(lo, hi);
+                                Vector128<float> v2 = Sse.Add(v4, Sse.MoveHighToLow(v4, v4));
+                                Vector128<float> v1 = Sse.AddScalar(v2, Sse.Shuffle(v2, v2, 1));
+                                sum = v1.ToScalar();
+                            }
+
+                            for (; k < kEnd; k++)
+                            {
+                                sum += rowA[k] * rowW[k];
+                            }
+
+                            rowOut[j] += sum;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add bias if present
+        if (bias is not null)
+        {
+            float* bPtr = (float*)bias.DataPointer;
+            for (int m = 0; m < M; m++)
+            {
+                int rowOffset = m * N;
+                for (int n = 0; n < N; n++)
+                {
+                    pOut[rowOffset + n] += bPtr[n];
+                }
+            }
+        }
+    }
+
     /// <summary>Performs 3D batched matrix multiplication: output[B,M,N] = a[B,M,K] @ b[K,N] or b[B,K,N]. When b is 2D, it is broadcast across the batch dimension. Iterates over the batch dimension and delegates each slice to <see cref="MatMul"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)

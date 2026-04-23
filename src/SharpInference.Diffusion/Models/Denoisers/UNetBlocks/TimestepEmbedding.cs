@@ -42,7 +42,7 @@ public sealed unsafe class TimestepEmbedding
         // 2. Linear1: [B, embeddingDim] → [B, timeDim]
         TensorShape outShape = new TensorShape(batch, _timeDim);
         Tensor linear1Out = new Tensor(outShape, DType.F32);
-        LinearForward(linear1Out, sinEmb, _linear1Weight!, _linear1Bias!, batch, _embeddingDim, _timeDim);
+        backend.Linear(linear1Out, sinEmb, _linear1Weight!, _linear1Bias!);
         sinEmb.Dispose();
 
         // 3. SiLU activation
@@ -52,7 +52,7 @@ public sealed unsafe class TimestepEmbedding
 
         // 4. Linear2: [B, timeDim] → [B, timeDim]
         Tensor linear2Out = new Tensor(outShape, DType.F32);
-        LinearForward(linear2Out, siluOut, _linear2Weight!, _linear2Bias!, batch, _timeDim, _timeDim);
+        backend.Linear(linear2Out, siluOut, _linear2Weight!, _linear2Bias!);
         siluOut.Dispose();
 
         return linear2Out;
@@ -88,28 +88,4 @@ public sealed unsafe class TimestepEmbedding
         return embedding;
     }
 
-    /// <summary>Dense linear layer: output = input @ weight^T + bias.</summary>
-    private static void LinearForward(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        // weight is [outDim, inDim], so output[b,o] = sum_i(input[b,i] * weight[o,i]) + bias[o]
-        for (int b = 0; b < batch; b++)
-        {
-            for (int o = 0; o < outDim; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * inDim;
-                int inOffset = b * inDim;
-                for (int i = 0; i < inDim; i++)
-                {
-                    sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                }
-                outPtr[b * outDim + o] = sum;
-            }
-        }
-    }
 }
