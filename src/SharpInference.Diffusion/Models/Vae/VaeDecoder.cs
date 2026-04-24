@@ -127,6 +127,31 @@ public sealed class VaeDecoder
         _convOutBias = weights["decoder.conv_out.bias"];
     }
 
+    /// <summary>Enumerates all weight tensors held by this decoder and its sub-blocks.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_postQuantConvWeight is not null) yield return _postQuantConvWeight;
+        if (_postQuantConvBias is not null) yield return _postQuantConvBias;
+        if (_convInWeight is not null) yield return _convInWeight;
+        if (_convInBias is not null) yield return _convInBias;
+        foreach (Tensor w in _midResNet0.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _midAttention.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _midResNet1.EnumerateWeights()) yield return w;
+        for (int blockIdx = 0; blockIdx < _upBlockResNets.Length; blockIdx++)
+        {
+            for (int resIdx = 0; resIdx < _upBlockResNets[blockIdx].Length; resIdx++)
+            {
+                foreach (Tensor w in _upBlockResNets[blockIdx][resIdx].EnumerateWeights()) yield return w;
+            }
+            if (_upsampleWeights[blockIdx] is not null) yield return _upsampleWeights[blockIdx]!;
+            if (_upsampleBiases[blockIdx] is not null) yield return _upsampleBiases[blockIdx]!;
+        }
+        if (_normOutWeight is not null) yield return _normOutWeight;
+        if (_normOutBias is not null) yield return _normOutBias;
+        if (_convOutWeight is not null) yield return _convOutWeight;
+        if (_convOutBias is not null) yield return _convOutBias;
+    }
+
     /// <summary>Decodes latent tensor [B, latentCh, H, W] to RGB image [B, 3, H*8, W*8]. Applies inverse scaling before decoding.</summary>
     public Tensor Decode(IBackend backend, Tensor latent)
     {

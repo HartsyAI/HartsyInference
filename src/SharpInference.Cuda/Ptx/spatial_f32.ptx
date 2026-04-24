@@ -132,26 +132,35 @@ up_done:
     ld.param.u32 %r10, [param_outW];
     ld.param.u32 %r11, [param_batch_offset];
 
-    // Global thread ID = index into col matrix [Cin*KH*KW * outH*outW]
+    // Global thread ID (64-bit to handle >4B elements for large Conv2D)
     mov.u32 %r12, %ctaid.x;
     mov.u32 %r13, %ntid.x;
     mov.u32 %r14, %tid.x;
-    mad.lo.u32 %r12, %r12, %r13, %r14;
+    cvt.u64.u32 %rd6, %r12;
+    cvt.u64.u32 %rd7, %r13;
+    cvt.u64.u32 %rd8, %r14;
+    mad.lo.u64 %rd6, %rd6, %rd7, %rd8;  // global thread ID (64-bit)
 
-    // Total col elements: channels * kH * kW * outH * outW
+    // Total col elements: channels * kH * kW * outH * outW (64-bit to avoid overflow)
     mul.lo.u32 %r15, %r0, %r3;
-    mul.lo.u32 %r15, %r15, %r4;    // Cin * kH * kW
-    mul.lo.u32 %r16, %r9, %r10;    // outH * outW
-    mul.lo.u32 %r17, %r15, %r16;   // total col elements
+    mul.lo.u32 %r15, %r15, %r4;    // Cin * kH * kW (fits u32)
+    mul.lo.u32 %r16, %r9, %r10;    // outH * outW (fits u32)
+    cvt.u64.u32 %rd7, %r15;
+    cvt.u64.u32 %rd8, %r16;
+    mul.lo.u64 %rd7, %rd7, %rd8;   // total col elements (64-bit)
 
-    setp.ge.u32 %p1, %r12, %r17;
+    setp.ge.u64 %p1, %rd6, %rd7;
     @%p1 bra im2col_done;
 
     // Decompose linear index -> (col_row, col_col)
     // col_col = idx % (outH*outW) -> output spatial position
     // col_row = idx / (outH*outW) -> c*kH*kW patch index
-    rem.u32 %r18, %r12, %r16;      // col_col = spatial index
-    div.u32 %r19, %r12, %r16;      // col_row = patch index
+    // Use 64-bit div/rem since thread ID can exceed u32
+    cvt.u64.u32 %rd8, %r16;        // divisor (outH*outW) in 64-bit
+    rem.u64 %rd9, %rd6, %rd8;
+    div.u64 %rd10, %rd6, %rd8;
+    cvt.u32.u64 %r18, %rd9;        // col_col (fits u32)
+    cvt.u32.u64 %r19, %rd10;       // col_row (fits u32)
 
     // Decompose spatial index -> (oh, ow)
     rem.u32 %r20, %r18, %r10;      // ow = col_col % outW
@@ -212,8 +221,7 @@ im2col_zero:
     mov.f32 %f1, 0f00000000;       // zero-padding
 
 im2col_store:
-    cvt.u64.u32 %rd4, %r12;
-    shl.b64 %rd4, %rd4, 2;
+    shl.b64 %rd4, %rd6, 2;         // byte offset from 64-bit thread ID
     add.u64 %rd5, %rd0, %rd4;
     st.global.f32 [%rd5], %f1;
 

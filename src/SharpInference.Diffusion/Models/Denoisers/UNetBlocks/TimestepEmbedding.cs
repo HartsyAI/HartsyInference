@@ -33,6 +33,15 @@ public sealed unsafe class TimestepEmbedding
         _linear2Bias = weights[$"{prefix}.linear_2.bias"];
     }
 
+    /// <summary>Enumerates all weight tensors held by this module.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_linear1Weight is not null) yield return _linear1Weight;
+        if (_linear1Bias is not null) yield return _linear1Bias;
+        if (_linear2Weight is not null) yield return _linear2Weight;
+        if (_linear2Bias is not null) yield return _linear2Bias;
+    }
+
     /// <summary>Computes timestep embeddings for a batch of timesteps. Returns [B, timeDim].</summary>
     public Tensor Forward(IBackend backend, ReadOnlySpan<float> timesteps, int batch)
     {

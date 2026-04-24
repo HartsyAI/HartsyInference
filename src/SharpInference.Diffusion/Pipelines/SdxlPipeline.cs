@@ -89,9 +89,6 @@ public sealed unsafe class SdxlPipeline : IDisposable
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
-        // Evict CLIP weights from GPU cache before UNet
-        EvictBackendCache("CLIP");
-
         // 2. Build ADM conditioning scalars for SDXL base
         // Default: original size = target size = requested size, no crop
         float[] sizeCondition =
@@ -176,9 +173,6 @@ public sealed unsafe class SdxlPipeline : IDisposable
 
         textEmbeddings.Dispose();
         pooledOutput?.Dispose();
-
-        // Evict UNet weights from GPU cache before VAE
-        EvictBackendCache("UNet");
 
         // 6. VAE decode
         Logs.Info("Decoding latents to image...");

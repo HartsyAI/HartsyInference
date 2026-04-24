@@ -73,6 +73,23 @@ public sealed unsafe class CrossAttentionBlock
         _projOutBias = weights[$"{prefix}.proj_out.bias"];
     }
 
+    /// <summary>Enumerates all weight tensors held by this block and its sub-blocks.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_normWeight is not null) yield return _normWeight;
+        if (_normBias is not null) yield return _normBias;
+        if (_projInWeight is not null) yield return _projInWeight;
+        if (_projInBias is not null) yield return _projInBias;
+        for (int i = 0; i < _numTransformerBlocks; i++)
+        {
+            foreach (Tensor w in _selfAttns[i].EnumerateWeights()) yield return w;
+            foreach (Tensor w in _crossAttns[i].EnumerateWeights()) yield return w;
+            foreach (Tensor w in _ffns[i].EnumerateWeights()) yield return w;
+        }
+        if (_projOutWeight is not null) yield return _projOutWeight;
+        if (_projOutBias is not null) yield return _projOutBias;
+    }
+
     /// <summary>Forward pass: input [B, C, H, W] + context [B, seqLen, crossDim] → output [B, C, H, W].</summary>
     public Tensor Forward(IBackend backend, Tensor input, Tensor context)
     {
@@ -221,6 +238,20 @@ internal sealed unsafe class TransformerSubBlock
         weights.TryGetValue($"{attnPrefix}.to_v.bias", out _toVBias);
     }
 
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_normWeight is not null) yield return _normWeight;
+        if (_normBias is not null) yield return _normBias;
+        if (_toQWeight is not null) yield return _toQWeight;
+        if (_toQBias is not null) yield return _toQBias;
+        if (_toKWeight is not null) yield return _toKWeight;
+        if (_toKBias is not null) yield return _toKBias;
+        if (_toVWeight is not null) yield return _toVWeight;
+        if (_toVBias is not null) yield return _toVBias;
+        if (_toOutWeight is not null) yield return _toOutWeight;
+        if (_toOutBias is not null) yield return _toOutBias;
+    }
+
     /// <summary>Forward: hidden [B, seqLen, C] + context [B, ctxLen, ctxDim] → output [B, seqLen, C] with residual.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor context)
     {
@@ -365,6 +396,16 @@ internal sealed unsafe class FeedForwardBlock
         _geGluProjBias = weights[$"{ffPrefix}.net.0.proj.bias"];
         _outLinearWeight = weights[$"{ffPrefix}.net.2.weight"];
         _outLinearBias = weights[$"{ffPrefix}.net.2.bias"];
+    }
+
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_normWeight is not null) yield return _normWeight;
+        if (_normBias is not null) yield return _normBias;
+        if (_geGluProjWeight is not null) yield return _geGluProjWeight;
+        if (_geGluProjBias is not null) yield return _geGluProjBias;
+        if (_outLinearWeight is not null) yield return _outLinearWeight;
+        if (_outLinearBias is not null) yield return _outLinearBias;
     }
 
     /// <summary>Forward: hidden [B, seqLen, C] → output [B, seqLen, C] with residual.</summary>

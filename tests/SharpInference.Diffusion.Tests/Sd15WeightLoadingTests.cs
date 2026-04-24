@@ -747,6 +747,290 @@ public class Sd15WeightLoadingTests
         }
     }
 
+    /// <summary>
+    /// Full UNet forward pass checkpoint test. Steps through every major block comparing CPU vs GPU
+    /// to find the first divergent block.
+    /// </summary>
+    [Fact]
+    public unsafe void SingleFile_FullForward_Checkpoint_GpuVsCpu()
+    {
+        if (!File.Exists(Sd15SingleFilePath))
+        {
+            _output.WriteLine($"SKIPPED: SD1.5 checkpoint not found: {Sd15SingleFilePath}");
+            return;
+        }
+
+        string assemblyDir = Path.GetDirectoryName(typeof(Sd15WeightLoadingTests).Assembly.Location)!;
+        string ptxDir = Path.Combine(assemblyDir, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+
+        _output.WriteLine($"Loading SD1.5 checkpoint: {Sd15SingleFilePath}");
+        (Sd15CheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
+            Sd15CheckpointConverter.LoadAndConvert(Sd15SingleFilePath);
+
+        using (loader)
+        {
+            Dictionary<string, Tensor> w = CastWeightsToF32(converted.UNet);
+            UNetConfig config = UNetConfig.Sd15;
+
+            using CpuBackend cpu = new();
+            using CudaBackend gpu = new(deviceOrdinal: 0, ptxDir: ptxDir);
+
+            // ── Build blocks ──
+            TimestepEmbedding timeEmb = new(config.ModelChannels, config.ModelChannels * 4);
+            timeEmb.LoadWeights(w, "time_embedding");
+
+            DownBlock[] downBlocks = new DownBlock[config.BlockOutChannels.Length];
+            for (int i = 0; i < downBlocks.Length; i++)
+            {
+                int inCh = i == 0 ? config.ModelChannels : config.BlockOutChannels[i - 1];
+                int outCh = config.BlockOutChannels[i];
+                bool hasAttn = config.DownBlockHasAttention[i];
+                bool hasDown = i < downBlocks.Length - 1;
+                downBlocks[i] = new DownBlock(inCh, outCh, config.ModelChannels * 4, config.LayersPerBlock,
+                    hasAttn, hasDown, config.NumAttentionHeads[i], config.CrossAttentionDim, config.TransformerLayersPerBlock[i]);
+                downBlocks[i].LoadWeights(w, $"down_blocks.{i}");
+            }
+
+            int midCh = config.BlockOutChannels[^1];
+            UNetResNetBlock midRes0 = new(midCh, midCh, config.ModelChannels * 4);
+            midRes0.LoadWeights(w, "mid_block.resnets.0");
+            CrossAttentionBlock midAttn = new(midCh, config.NumAttentionHeads[^1], config.CrossAttentionDim, config.TransformerLayersPerBlock[^1]);
+            midAttn.LoadWeights(w, "mid_block.attentions.0");
+            UNetResNetBlock midRes1 = new(midCh, midCh, config.ModelChannels * 4);
+            midRes1.LoadWeights(w, "mid_block.resnets.1");
+
+            UpBlock[] upBlocks = new UpBlock[config.BlockOutChannels.Length];
+            int[] reversedCh = config.BlockOutChannels.Reverse().ToArray();
+            for (int i = 0; i < upBlocks.Length; i++)
+            {
+                int outCh = reversedCh[i];
+                int prevOutCh = i == 0 ? midCh : reversedCh[i - 1];
+                int inputCh = reversedCh[Math.Min(i + 1, upBlocks.Length - 1)];
+                bool hasAttn = config.UpBlockHasAttention[i];
+                bool hasUp = i < upBlocks.Length - 1;
+                int upIdx = upBlocks.Length - 1 - i;
+                upBlocks[i] = new UpBlock(inputCh, outCh, prevOutCh, config.ModelChannels * 4, config.LayersPerBlock + 1,
+                    hasAttn, hasUp, config.NumAttentionHeads[upIdx], config.CrossAttentionDim, config.TransformerLayersPerBlock[upIdx]);
+                upBlocks[i].LoadWeights(w, $"up_blocks.{i}");
+            }
+
+            // ── Inputs ──
+            TensorShape latentShape = new(1, 4, 16, 16);
+            Tensor latent = SeedGenerator.CreateNoise(latentShape, 42);
+            Tensor textEmb = new(new TensorShape(1, 77, 768), DType.F32);
+            Random rng = new(123);
+            float* tePtr = (float*)textEmb.DataPointer;
+            for (long i = 0; i < textEmb.ElementCount; i++)
+                tePtr[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
+
+            Span<float> timesteps = stackalloc float[] { 999.0f };
+
+            _output.WriteLine("\n=== Full Forward Checkpoint Test ===\n");
+
+            // ── Step 1: time_embedding ──
+            Tensor cpuTemb = timeEmb.Forward(cpu, timesteps, 1);
+            Tensor gpuTemb = timeEmb.Forward(gpu, timesteps, 1);
+            CompareAndReport("time_embedding", cpuTemb, gpuTemb);
+            gpuTemb.Dispose();
+
+            // ── Step 2: conv_in ──
+            TensorShape convInShape = new(1, config.ModelChannels, 16, 16);
+            Tensor cpuHidden = new(convInShape, DType.F32);
+            cpu.Conv2D(cpuHidden, latent, w["conv_in.weight"], w["conv_in.bias"], 1, 1, 1, 1);
+            Tensor gpuHidden = new(convInShape, DType.F32);
+            gpu.Conv2D(gpuHidden, latent, w["conv_in.weight"], w["conv_in.bias"], 1, 1, 1, 1);
+            CompareAndReport("conv_in", cpuHidden, gpuHidden);
+            gpuHidden.Dispose();
+
+            // ── Step 3: Down blocks — run each block on BOTH backends with same CPU input ──
+            List<Tensor> cpuSkips = new() { cpuHidden.To(cpuHidden.Device) };
+            Tensor cpuDown = cpuHidden;
+            for (int i = 0; i < downBlocks.Length; i++)
+            {
+                // CPU first, then GPU — to avoid any side-effect from GPU forward
+                (Tensor cpuDownOut, List<Tensor> cpuDownSkips) = downBlocks[i].Forward(cpu, cpuDown, cpuTemb, textEmb);
+                (Tensor gpuDownOut, List<Tensor> gpuDownSkips) = downBlocks[i].Forward(gpu, cpuDown, cpuTemb, textEmb);
+                CompareAndReport($"down_blocks.{i} output", cpuDownOut, gpuDownOut);
+                gpuDownOut.Dispose();
+                foreach (Tensor s in gpuDownSkips) s.Dispose();
+
+                if (cpuDown != cpuHidden) cpuDown.Dispose();
+                cpuDown = cpuDownOut;
+                cpuSkips.AddRange(cpuDownSkips);
+            }
+
+            // ── Step 4: Mid block ──
+            Tensor cpuMidR0 = midRes0.Forward(cpu, cpuDown, cpuTemb);
+            Tensor gpuMidR0 = midRes0.Forward(gpu, cpuDown, cpuTemb);
+            CompareAndReport("mid_block.resnets.0", cpuMidR0, gpuMidR0);
+            gpuMidR0.Dispose();
+
+            Tensor cpuMidA = midAttn.Forward(cpu, cpuMidR0, textEmb);
+            Tensor gpuMidA = midAttn.Forward(gpu, cpuMidR0, textEmb);
+            CompareAndReport("mid_block.attentions.0", cpuMidA, gpuMidA);
+            gpuMidA.Dispose();
+
+            Tensor cpuMidR1 = midRes1.Forward(cpu, cpuMidA, cpuTemb);
+            Tensor gpuMidR1 = midRes1.Forward(gpu, cpuMidA, cpuTemb);
+            CompareAndReport("mid_block.resnets.1", cpuMidR1, gpuMidR1);
+            gpuMidR1.Dispose();
+
+            // ── Step 5: Up blocks — each block compared independently with same CPU input + skips ──
+            Tensor cpuUp = cpuMidR1;
+            for (int i = 0; i < upBlocks.Length; i++)
+            {
+                // Clone skips for GPU (Forward mutates the list)
+                List<Tensor> gpuUpSkips = new();
+                int skipsNeeded = upBlocks[i] == upBlocks[0] ? 3 : 3; // LayersPerBlock+1 = 3
+                for (int s = cpuSkips.Count - skipsNeeded; s < cpuSkips.Count; s++)
+                    gpuUpSkips.Add(cpuSkips[s].To(cpuSkips[s].Device));
+
+                Tensor gpuUpOut = upBlocks[i].Forward(gpu, cpuUp, cpuTemb, textEmb, gpuUpSkips);
+                Tensor cpuUpOut = upBlocks[i].Forward(cpu, cpuUp, cpuTemb, textEmb, cpuSkips);
+                CompareAndReport($"up_blocks.{i} output", cpuUpOut, gpuUpOut);
+                gpuUpOut.Dispose();
+
+                if (cpuUp != cpuMidR1) cpuUp.Dispose();
+                cpuUp = cpuUpOut;
+            }
+
+            // ── Step 6: Final norm + SiLU + conv_out ──
+            TensorShape finalShape = cpuUp.Shape;
+            int finalCh = config.ModelChannels;
+
+            Tensor cpuNormOut = new(finalShape, DType.F32);
+            cpu.GroupNorm(cpuNormOut, cpuUp, w["conv_norm_out.weight"], w["conv_norm_out.bias"], config.NormNumGroups, config.NormEps);
+            Tensor gpuNormOut = new(finalShape, DType.F32);
+            gpu.GroupNorm(gpuNormOut, cpuUp, w["conv_norm_out.weight"], w["conv_norm_out.bias"], config.NormNumGroups, config.NormEps);
+            CompareAndReport("conv_norm_out", cpuNormOut, gpuNormOut);
+            gpuNormOut.Dispose();
+
+            Tensor cpuSiluOut = new(finalShape, DType.F32);
+            cpu.Silu(cpuSiluOut, cpuNormOut);
+            Tensor gpuSiluOut = new(finalShape, DType.F32);
+            gpu.Silu(gpuSiluOut, cpuNormOut);
+            CompareAndReport("final SiLU", cpuSiluOut, gpuSiluOut);
+            gpuSiluOut.Dispose();
+
+            TensorShape outShape = new(1, config.OutChannels, (int)finalShape[2], (int)finalShape[3]);
+            Tensor cpuOut = new(outShape, DType.F32);
+            cpu.Conv2D(cpuOut, cpuSiluOut, w["conv_out.weight"], w["conv_out.bias"], 1, 1, 1, 1);
+            Tensor gpuOut = new(outShape, DType.F32);
+            gpu.Conv2D(gpuOut, cpuSiluOut, w["conv_out.weight"], w["conv_out.bias"], 1, 1, 1, 1);
+            CompareAndReport("conv_out", cpuOut, gpuOut);
+            gpuOut.Dispose();
+
+            _output.WriteLine("\n=== Checkpoint test complete ===");
+
+            // Cleanup
+            latent.Dispose();
+            textEmb.Dispose();
+            cpuTemb.Dispose();
+            cpuHidden.Dispose();
+            cpuDown.Dispose();
+            cpuMidR0.Dispose();
+            cpuMidA.Dispose();
+            cpuMidR1.Dispose();
+            cpuUp.Dispose();
+            cpuNormOut.Dispose();
+            cpuSiluOut.Dispose();
+            cpuOut.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Tests individual GPU ops at shapes used by the mid block (1280 channels, 2×2 spatial)
+    /// to isolate which op diverges at this shape.
+    /// </summary>
+    [Fact]
+    public unsafe void MidBlock_Ops_GpuVsCpu()
+    {
+        string assemblyDir = Path.GetDirectoryName(typeof(Sd15WeightLoadingTests).Assembly.Location)!;
+        string ptxDir = Path.Combine(assemblyDir, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+
+        using CpuBackend cpu = new();
+        using CudaBackend gpu = new(deviceOrdinal: 0, ptxDir: ptxDir);
+
+        _output.WriteLine("=== Testing ops at mid-block shapes (1280ch, 2×2) ===\n");
+
+        // Test at multiple shapes to see where things break
+        (int channels, int spatial)[] shapes = [(320, 16), (640, 8), (1280, 4), (1280, 2)];
+
+        foreach ((int ch, int sp) in shapes)
+        {
+            TensorShape shape = new(1, ch, sp, sp);
+            int elemCount = ch * sp * sp;
+
+            // Create random input
+            Tensor input = new(shape, DType.F32);
+            float* ptr = (float*)input.DataPointer;
+            Random rng = new(42);
+            for (int i = 0; i < elemCount; i++)
+                ptr[i] = (float)(rng.NextDouble() * 2 - 1);
+
+            // Create dummy weights for GroupNorm (ch elements each)
+            Tensor gnWeight = new(new TensorShape(ch), DType.F32);
+            Tensor gnBias = new(new TensorShape(ch), DType.F32);
+            float* gw = (float*)gnWeight.DataPointer;
+            float* gb = (float*)gnBias.DataPointer;
+            for (int i = 0; i < ch; i++) { gw[i] = 1.0f; gb[i] = 0.0f; }
+
+            _output.WriteLine($"  Shape: (1, {ch}, {sp}, {sp}) — {elemCount} elements");
+
+            // Test GroupNorm
+            Tensor cpuGn = new(shape, DType.F32);
+            cpu.GroupNorm(cpuGn, input, gnWeight, gnBias, 32, 1e-5f);
+            Tensor gpuGn = new(shape, DType.F32);
+            gpu.GroupNorm(gpuGn, input, gnWeight, gnBias, 32, 1e-5f);
+            CompareAndReport($"    GroupNorm({ch}ch, {sp}×{sp})", cpuGn, gpuGn);
+            gpuGn.Dispose();
+
+            // Test SiLU
+            Tensor cpuSilu = new(shape, DType.F32);
+            cpu.Silu(cpuSilu, input);
+            Tensor gpuSilu = new(shape, DType.F32);
+            gpu.Silu(gpuSilu, input);
+            CompareAndReport($"    SiLU({ch}ch, {sp}×{sp})", cpuSilu, gpuSilu);
+            gpuSilu.Dispose();
+
+            // Test Conv2D (ch→ch, 3×3, pad=1, stride=1)
+            Tensor convW = new(new TensorShape(ch, ch, 3, 3), DType.F32);
+            Tensor convB = new(new TensorShape(ch), DType.F32);
+            float* cw = (float*)convW.DataPointer;
+            for (long i = 0; i < convW.ElementCount; i++)
+                cw[i] = (float)(rng.NextDouble() * 0.01);
+
+            Tensor cpuConv = new(shape, DType.F32);
+            cpu.Conv2D(cpuConv, input, convW, convB, 1, 1, 1, 1);
+            Tensor gpuConv = new(shape, DType.F32);
+            gpu.Conv2D(gpuConv, input, convW, convB, 1, 1, 1, 1);
+            CompareAndReport($"    Conv2D({ch}ch, {sp}×{sp})", cpuConv, gpuConv);
+            gpuConv.Dispose();
+
+            // Cleanup
+            input.Dispose();
+            gnWeight.Dispose();
+            gnBias.Dispose();
+            cpuGn.Dispose();
+            cpuSilu.Dispose();
+            cpuConv.Dispose();
+            convW.Dispose();
+            convB.Dispose();
+
+            _output.WriteLine("");
+        }
+    }
+
     private unsafe bool CompareAndReport(string name, Tensor cpuTensor, Tensor gpuTensor)
     {
         float* cPtr = (float*)cpuTensor.DataPointer;

@@ -141,6 +141,33 @@ public sealed class UNet
         _convOutBias = weights[$"{p}conv_out.bias"];
     }
 
+    /// <summary>Enumerates all weight tensors held by this UNet and its sub-blocks.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_convInWeight is not null) yield return _convInWeight;
+        if (_convInBias is not null) yield return _convInBias;
+        foreach (Tensor w in _timeEmbedding.EnumerateWeights()) yield return w;
+        if (_addEmbedding is not null)
+        {
+            foreach (Tensor w in _addEmbedding.EnumerateWeights()) yield return w;
+        }
+        for (int i = 0; i < _downBlocks.Length; i++)
+        {
+            foreach (Tensor w in _downBlocks[i].EnumerateWeights()) yield return w;
+        }
+        foreach (Tensor w in _midResNet0.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _midAttention.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _midResNet1.EnumerateWeights()) yield return w;
+        for (int i = 0; i < _upBlocks.Length; i++)
+        {
+            foreach (Tensor w in _upBlocks[i].EnumerateWeights()) yield return w;
+        }
+        if (_normOutWeight is not null) yield return _normOutWeight;
+        if (_normOutBias is not null) yield return _normOutBias;
+        if (_convOutWeight is not null) yield return _convOutWeight;
+        if (_convOutBias is not null) yield return _convOutBias;
+    }
+
     /// <summary>Forward pass for SD1.5 (no ADM conditioning). Noisy latents [B, 4, H, W] + timestep + text embeddings [B, seqLen, crossDim] → noise prediction [B, 4, H, W].</summary>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings)
     {

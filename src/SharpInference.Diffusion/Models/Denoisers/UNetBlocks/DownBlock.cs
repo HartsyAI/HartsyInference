@@ -63,6 +63,21 @@ public sealed class DownBlock
         }
     }
 
+    /// <summary>Enumerates all weight tensors held by this block and its sub-blocks.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        for (int i = 0; i < _numLayers; i++)
+        {
+            foreach (Tensor w in _resnets[i].EnumerateWeights()) yield return w;
+            if (_attentions[i] is not null)
+            {
+                foreach (Tensor w in _attentions[i]!.EnumerateWeights()) yield return w;
+            }
+        }
+        if (_downsampleWeight is not null) yield return _downsampleWeight;
+        if (_downsampleBias is not null) yield return _downsampleBias;
+    }
+
     /// <summary>Forward pass. Returns (output, skipConnections). Each ResNet/Attention output is saved as a skip connection for the corresponding up block.</summary>
     public (Tensor output, List<Tensor> skips) Forward(IBackend backend, Tensor input, Tensor temb, Tensor context)
     {

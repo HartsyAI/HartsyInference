@@ -79,6 +79,21 @@ public sealed class UpBlock
         }
     }
 
+    /// <summary>Enumerates all weight tensors held by this block and its sub-blocks.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        for (int i = 0; i < _numLayers; i++)
+        {
+            foreach (Tensor w in _resnets[i].EnumerateWeights()) yield return w;
+            if (_attentions[i] is not null)
+            {
+                foreach (Tensor w in _attentions[i]!.EnumerateWeights()) yield return w;
+            }
+        }
+        if (_upsampleWeight is not null) yield return _upsampleWeight;
+        if (_upsampleBias is not null) yield return _upsampleBias;
+    }
+
     /// <summary>Forward pass with skip connections from the corresponding down block. Skips are consumed in reverse order.</summary>
     public Tensor Forward(IBackend backend, Tensor input, Tensor temb, Tensor context, List<Tensor> skips)
     {

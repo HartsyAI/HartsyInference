@@ -292,6 +292,22 @@ public class SdxlGenerationTests
 
             using SdxlPipeline pipeline = new(backend, clipL, clipG, unet, vae);
 
+            // Preload UNet + VAE weights to GPU, free CPU copies
+            _output.WriteLine("\n[GPU] Preloading UNet + VAE weights to GPU...");
+            sw.Restart();
+            backend.PreloadWeights(unet.EnumerateWeights());
+            backend.PreloadWeights(vae.EnumerateWeights());
+            (long cachedBytes, long _, long _) = backend.GetGpuCacheStats();
+            sw.Stop();
+            _output.WriteLine($"  Preloaded {cachedBytes / 1024.0 / 1024.0:F1} MB to GPU in {sw.ElapsedMilliseconds}ms");
+
+            // Free CPU weight memory (GPU cache holds copies; disposed tensors still work via cache)
+            foreach (Tensor tensor in unetF32.Values) tensor.Dispose();
+            foreach (Tensor tensor in vaeF32.Values) tensor.Dispose();
+            unetF32.Clear();
+            vaeF32.Clear();
+            _output.WriteLine("  CPU weight memory freed (CLIP retained on CPU)");
+
             TextToImageRequest request = new()
             {
                 Prompt = prompt,
@@ -314,7 +330,12 @@ public class SdxlGenerationTests
                 progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
 
             genSw.Stop();
+            (long finalCached, long hits, long misses) = backend.GetGpuCacheStats();
             _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1} seconds (seed={seed})");
+            _output.WriteLine($"  GPU cache: {finalCached / 1024.0 / 1024.0:F1} MB, hits={hits}, misses={misses}");
+
+            // Free GPU weight cache
+            backend.FreePreloadedWeights();
 
             // Validate output
             Assert.Equal(1024, width);

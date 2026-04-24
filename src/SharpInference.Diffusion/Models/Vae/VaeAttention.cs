@@ -49,6 +49,21 @@ public sealed class VaeAttention
         _toOutBias = weights[$"{prefix}.to_out.0.bias"];
     }
 
+    /// <summary>Enumerates all weight tensors held by this module.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_groupNormWeight is not null) yield return _groupNormWeight;
+        if (_groupNormBias is not null) yield return _groupNormBias;
+        if (_toQWeight is not null) yield return _toQWeight;
+        if (_toQBias is not null) yield return _toQBias;
+        if (_toKWeight is not null) yield return _toKWeight;
+        if (_toKBias is not null) yield return _toKBias;
+        if (_toVWeight is not null) yield return _toVWeight;
+        if (_toVBias is not null) yield return _toVBias;
+        if (_toOutWeight is not null) yield return _toOutWeight;
+        if (_toOutBias is not null) yield return _toOutBias;
+    }
+
     /// <summary>Forward pass: input [B, C, H, W] → output [B, C, H, W] with residual connection.</summary>
     public Tensor Forward(IBackend backend, Tensor input)
     {
@@ -120,36 +135,11 @@ public sealed class VaeAttention
         TensorShape outShape = new TensorShape(batch, seqLen, channels);
         Tensor output = new Tensor(outShape, DType.F32);
 
-        // weight is [outCh, inCh], input is [B, seqLen, inCh]
-        // We need output = input @ weight^T + bias
-        // Reshape for batched matmul: [B, seqLen, inCh] @ [inCh, outCh] = [B, seqLen, outCh]
-        // weight^T is [inCh, outCh]
-        TensorShape weightTShape = new TensorShape(channels, channels);
-        Tensor weightT = new Tensor(weightTShape, DType.F32);
-        TransposeMatrix(weight, weightT, channels, channels);
-
-        backend.BatchedMatMul(output, input, weightT);
-        weightT.Dispose();
-
-        // Add bias (broadcast across batch and seqLen)
-        AddBiasBroadcast(output, bias, batch, seqLen, channels);
+        // backend.Linear computes output = input @ weight^T + bias on GPU
+        // Weight transpose and bias addition are handled by cuBLAS SGEMM (OP_T) + GPU kernel
+        backend.Linear(output, input, weight, bias);
 
         return output;
-    }
-
-    /// <summary>Transposes a 2D matrix [rows, cols] → [cols, rows].</summary>
-    private static unsafe void TransposeMatrix(Tensor src, Tensor dst, int rows, int cols)
-    {
-        float* srcPtr = (float*)src.DataPointer;
-        float* dstPtr = (float*)dst.DataPointer;
-
-        for (int r = 0; r < rows; r++)
-        {
-            for (int c = 0; c < cols; c++)
-            {
-                dstPtr[c * rows + r] = srcPtr[r * cols + c];
-            }
-        }
     }
 
     /// <summary>Transposes [B, dim1, dim2] → [B, dim2, dim1] via element copy.</summary>
@@ -172,22 +162,4 @@ public sealed class VaeAttention
         }
     }
 
-    /// <summary>Adds bias [channels] to output [B, seqLen, channels] in-place.</summary>
-    private static unsafe void AddBiasBroadcast(Tensor output, Tensor bias, int batch, int seqLen, int channels)
-    {
-        float* outPtr = (float*)output.DataPointer;
-        float* biasPtr = (float*)bias.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * channels;
-                for (int c = 0; c < channels; c++)
-                {
-                    outPtr[offset + c] += biasPtr[c];
-                }
-            }
-        }
-    }
 }

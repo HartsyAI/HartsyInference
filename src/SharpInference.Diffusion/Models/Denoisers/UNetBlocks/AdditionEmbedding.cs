@@ -36,6 +36,15 @@ public sealed unsafe class AdditionEmbedding
         _linear2Bias = weights[$"{prefix}.linear_2.bias"];
     }
 
+    /// <summary>Enumerates all weight tensors held by this module.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_linear1Weight is not null) yield return _linear1Weight;
+        if (_linear1Bias is not null) yield return _linear1Bias;
+        if (_linear2Weight is not null) yield return _linear2Weight;
+        if (_linear2Bias is not null) yield return _linear2Bias;
+    }
+
     /// <summary>Computes the ADM conditioning vector. pooledTextEmb [B, pooledDim], sizeCondition contains scalar values to embed sinusoidally. Returns [B, timeDim] to be added to timestep embedding.</summary>
     /// <param name="pooledTextEmb">Pooled text embedding from CLIP-G [B, 1280].</param>
     /// <param name="sizeCondition">Flattened scalar conditioning values. For SDXL base: [origH, origW, cropTop, cropLeft, targetH, targetW]. For refiner: [origH, origW, cropTop, cropLeft, aestheticScore].</param>

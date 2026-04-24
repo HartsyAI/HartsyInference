@@ -31,7 +31,11 @@ public sealed class CudaBackend : IBackend
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
     {
         _context = new CudaContext(deviceOrdinal);
-        _stream = new CudaStream(nonBlocking: true);
+        // Must use blocking stream (CU_STREAM_DEFAULT) because GpuTransferHelper uses synchronous
+        // cuMemcpyHtoD/DtoH which operate on the NULL stream. A non-blocking stream does NOT
+        // synchronize with the NULL stream, causing race conditions where kernels read incomplete
+        // data from in-progress H2D transfers. Fix: switch to cuMemcpyHtoDAsync on this stream.
+        _stream = new CudaStream(nonBlocking: false);
         Device = DeviceKind.Cuda(deviceOrdinal);
 
         // Initialize cuBLAS
@@ -102,15 +106,21 @@ public sealed class CudaBackend : IBackend
     /// <summary>Linear layer via cuBLAS SGEMM with transpose: output = input × weight^T + bias.</summary>
     public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
+        EnsureKernels();
+
         int N = (int)weight.Shape[0]; // outDim
         int K = (int)weight.Shape[1]; // inDim
         int M = (int)(input.ElementCount / K); // batch*seqLen
 
-        ulong pInput = 0, pWeight = 0, pOutput = 0;
+        ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0;
         try
         {
             pInput = GpuTransferHelper.CopyToDevice(input);
             pWeight = GpuTransferHelper.CopyToDevice(weight);
+            if (bias is not null)
+            {
+                pBias = GpuTransferHelper.CopyToDevice(bias);
+            }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOutput = GpuTransferHelper.AllocateDevice(outBytes);
 
@@ -129,6 +139,13 @@ public sealed class CudaBackend : IBackend
                 &beta,
                 pOutput, N).ThrowOnCublasError();
 
+            // Add bias on GPU if present
+            if (bias is not null)
+            {
+                int totalElements = M * N;
+                _kernels!.LaunchBiasAdd(pOutput, pBias, N, 1, totalElements, _stream.Handle);
+            }
+
             Sync();
             GpuTransferHelper.CopyToHost(output, pOutput, outBytes);
         }
@@ -136,22 +153,8 @@ public sealed class CudaBackend : IBackend
         {
             GpuTransferHelper.FreeDevice(pInput);
             GpuTransferHelper.FreeDevice(pWeight);
+            GpuTransferHelper.FreeDevice(pBias);
             GpuTransferHelper.FreeDevice(pOutput);
-        }
-
-        // Bias addition on CPU (negligible vs matmul: O(M*N) adds vs O(M*N*K) muls)
-        if (bias is not null)
-        {
-            float* bPtr = (float*)bias.DataPointer;
-            float* oPtr = (float*)output.DataPointer;
-            for (int m = 0; m < M; m++)
-            {
-                int rowOffset = m * N;
-                for (int n = 0; n < N; n++)
-                {
-                    oPtr[rowOffset + n] += bPtr[n];
-                }
-            }
         }
     }
 
@@ -241,7 +244,7 @@ public sealed class CudaBackend : IBackend
 
             if (!is1x1)
             {
-                colBuf = CudaMemory.Allocate((nuint)(colRows * colCols * sizeof(float)));
+                colBuf = CudaMemory.Allocate((nuint)((long)colRows * colCols * sizeof(float)));
             }
 
             float alpha = 1.0f;
@@ -254,7 +257,7 @@ public sealed class CudaBackend : IBackend
                 ulong colPtr;
                 if (is1x1)
                 {
-                    colPtr = pInput + (ulong)(b * inCh * inH * inW * sizeof(float));
+                    colPtr = pInput + (ulong)((long)b * inCh * inH * inW * sizeof(float));
                 }
                 else
                 {
@@ -267,7 +270,7 @@ public sealed class CudaBackend : IBackend
                     colPtr = colBuf;
                 }
 
-                ulong outBatchPtr = pOutput + (ulong)(b * outCh * outH * outW * sizeof(float));
+                ulong outBatchPtr = pOutput + (ulong)((long)b * outCh * outH * outW * sizeof(float));
 
                 CublasApi.cublasSgemm(
                     _cublasHandle,
@@ -535,6 +538,7 @@ public sealed class CudaBackend : IBackend
             _kernels!.LaunchSilu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
 
             Sync();
+
             GpuTransferHelper.CopyToHost(output, pOut, outBytes);
         }
         finally
@@ -841,6 +845,21 @@ public sealed class CudaBackend : IBackend
     }
 
     // ── GPU Cache Management -------------------------------------------------
+
+    /// <summary>Preloads weight tensors to GPU memory. Subsequent ops using these tensors skip H2D transfer.</summary>
+    public void PreloadWeights(IEnumerable<Tensor> weights)
+    {
+        foreach (Tensor weight in weights)
+        {
+            GpuTransferHelper.PreloadWeight(weight);
+        }
+    }
+
+    /// <summary>Frees all preloaded weight memory from GPU and clears the cache.</summary>
+    public void FreePreloadedWeights()
+    {
+        GpuTransferHelper.FreeAllCached();
+    }
 
     /// <summary>Evicts all cached GPU weight buffers. Call between pipeline stages to free VRAM.</summary>
     public void EvictGpuCache()

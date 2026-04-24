@@ -67,6 +67,23 @@ public sealed unsafe class UNetResNetBlock
         }
     }
 
+    /// <summary>Enumerates all weight tensors held by this module.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_norm1Weight is not null) yield return _norm1Weight;
+        if (_norm1Bias is not null) yield return _norm1Bias;
+        if (_conv1Weight is not null) yield return _conv1Weight;
+        if (_conv1Bias is not null) yield return _conv1Bias;
+        if (_timeEmbProjWeight is not null) yield return _timeEmbProjWeight;
+        if (_timeEmbProjBias is not null) yield return _timeEmbProjBias;
+        if (_norm2Weight is not null) yield return _norm2Weight;
+        if (_norm2Bias is not null) yield return _norm2Bias;
+        if (_conv2Weight is not null) yield return _conv2Weight;
+        if (_conv2Bias is not null) yield return _conv2Bias;
+        if (_shortcutWeight is not null) yield return _shortcutWeight;
+        if (_shortcutBias is not null) yield return _shortcutBias;
+    }
+
     /// <summary>Forward pass: input [B, inCh, H, W] + temb [B, timeDim] → output [B, outCh, H, W].</summary>
     public Tensor Forward(IBackend backend, Tensor input, Tensor temb)
     {

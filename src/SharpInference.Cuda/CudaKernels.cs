@@ -257,8 +257,8 @@ public sealed class CudaKernels : IDisposable
         args[8] = &scaleHArg;
         args[9] = &scaleWArg;
 
-        int totalElements = batch * channels * outH * outW;
-        uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
+        long totalElements = (long)batch * channels * outH * outW;
+        uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
             _upsampleNearest2dF32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
@@ -294,8 +294,8 @@ public sealed class CudaKernels : IDisposable
         args[12] = &outWArg;
         args[13] = &batchOffsetArg;
 
-        int totalElements = channels * kH * kW * outH * outW;
-        uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
+        long totalElements = (long)channels * kH * kW * outH * outW;
+        uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
             _im2colF32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
