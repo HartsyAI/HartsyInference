@@ -65,6 +65,20 @@ public interface IBackend : IDisposable
     /// <summary>Element-wise clamp: output = clamp(input, min, max)</summary>
     void Clamp(Tensor output, Tensor input, float min, float max);
 
+    // ── Transpose / Permute ─────────────────────────────────────────────
+
+    /// <summary>Batched 2D transpose: [B, D1, D2] → [B, D2, D1].</summary>
+    void Transpose2D(Tensor output, Tensor input, int d1, int d2);
+
+    /// <summary>4D permute swapping dims 1 and 2: [B, S, H, D] → [B, H, S, D].</summary>
+    void Permute0213(Tensor output, Tensor input, int s, int h, int d);
+
+    /// <summary>GEGLU activation: splits input in half along last dim, applies GELU gate. Output has half the elements of input.</summary>
+    void GeGlu(Tensor output, Tensor input);
+
+    /// <summary>Broadcast add: hidden [B, C, ...spatial] += bias [B, C] in-place.</summary>
+    void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial);
+
     // ── Shape Operations ────────────────────────────────────────────────
 
     /// <summary>Concatenate tensors along the specified dimension.</summary>
@@ -99,4 +113,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Apply mel filterbank to FFT magnitude spectrogram.</summary>
     void MelFilterbank(Tensor output, Tensor input, Tensor filters);
+
+    // ── Synchronization ──────────────────────────────────────────────────
+
+    /// <summary>Waits for all pending GPU work to complete. No-op on CPU backends. Call at pipeline phase boundaries to ensure deferred memory frees are processed before large allocations.</summary>
+    void Sync() { }
+
+    /// <summary>Frees specific weight tensors from accelerator memory. No-op on CPU backends. Call between pipeline phases to reclaim VRAM (e.g., free UNet weights before VAE decode).</summary>
+    void FreeWeights(IEnumerable<Tensor> weights) { }
 }

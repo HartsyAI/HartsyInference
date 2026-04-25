@@ -3,10 +3,20 @@ namespace SharpInference.Cuda;
 /// <summary>GPU memory allocation and transfer helpers wrapping CUDA Driver API memory functions.</summary>
 public static class CudaMemory
 {
-    /// <summary>Allocates device memory and returns a device pointer.</summary>
+    /// <summary>Allocates device memory and returns a device pointer. On OOM, syncs the stream to flush pending FreeAsync ops and retries once.</summary>
     public static ulong Allocate(nuint byteSize)
     {
-        CudaDriverApi.cuMemAlloc(out ulong dptr, byteSize).ThrowOnError();
+        int result = CudaDriverApi.cuMemAlloc(out ulong dptr, byteSize);
+        if (result == 2) // CUDA_ERROR_OUT_OF_MEMORY
+        {
+            // Flush pending FreeAsync operations by syncing the stream, then retry
+            GpuTransferHelper.SyncStream();
+            CudaDriverApi.cuMemAlloc(out dptr, byteSize).ThrowOnError();
+        }
+        else
+        {
+            result.ThrowOnError();
+        }
         return dptr;
     }
 

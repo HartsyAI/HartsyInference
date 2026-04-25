@@ -92,16 +92,18 @@ SharpInference/
 
 | File | Description |
 |---|---|
-| `CudaBackend.cs` | IBackend implementation — routes to PTX + cuBLAS |
-| `CudaDriverApi.cs` | P/Invoke surface (~40 functions, `int` returns) |
-| `CuBlasWrapper.cs` | cuBLAS HGEMM, SGEMM |
-| `CuDnnWrapper.cs` | cuDNN Conv2D (optional fallback) |
-| `CudaMemoryPool.cs` | cuMemPool-based async memory pool |
-| `CudaStream.cs` | Stream lifecycle management |
-| `CudaKernels.cs` | Kernel function handles as `nint` fields, loaded in constructor |
-| `CudaModule.cs` | `LoadFromFile()` + `GetFunction()` wrapper (dotLLM pattern) |
-| `CudaLibraryResolver.cs` | Maps `"cuda"` → `nvcuda.dll` / `libcuda.so` at runtime |
-| `Ptx/*.ptx` | 18 kernel families (not embedded — loaded from disk at runtime) |
+| `CudaBackend.cs` | IBackend implementation — routes to PTX + cuBLAS. Auto-transfer pattern with GPU weight cache. Provides `PreloadWeights()`, `FreePreloadedWeights()`, `GetGpuCacheStats()`. |
+| `CudaDriverApi.cs` | P/Invoke surface (~40 functions): cuInit, cuDeviceGet, cuCtxCreate, cuModuleLoadData, cuLaunchKernel, cuMemAlloc/Free, cuMemcpyHtoD/DtoH, cuStreamCreate/Synchronize |
+| `CublasApi.cs` | cuBLAS P/Invoke — SGEMM for Linear/Conv2D, handle bound to stream |
+| `CudaMemory.cs` | GPU memory allocation (Allocate/Free/CopyHtoD/CopyDtoH) wrapping Driver API |
+| `CudaStream.cs` | Stream lifecycle (blocking mode — non-blocking causes race conditions with synchronous transfers) |
+| `CudaKernels.cs` | Kernel function handles as `nint` fields, launch wrappers (LaunchIm2Col, LaunchBiasAdd, LaunchGroupNorm, etc.) |
+| `CudaModule.cs` | PTX module loading + function handle extraction |
+| `GpuTransferHelper.cs` | Device memory management + GPU weight cache (`Dictionary<Tensor, ulong>` with reference equality). Cache-aware `CopyToDevice`/`FreeDevice`. `PreloadWeight`/`FreeAllCached`. |
+| `Ptx/elementwise_f32.ptx` | Add, Scale, SiLU, GELU, Sigmoid, Clamp kernels |
+| `Ptx/spatial_f32.ptx` | Im2Col (64-bit indexing for 1024+), UpsampleNearest2D, Col2BiasAdd |
+| `Ptx/norm_f32.ptx` | GroupNorm, LayerNorm (3-pass: mean → variance → normalize+affine) |
+| `Ptx/sdpa_f32.ptx` | Scaled dot-product attention with per-row softmax (shared memory reduction) |
 
 ---
 

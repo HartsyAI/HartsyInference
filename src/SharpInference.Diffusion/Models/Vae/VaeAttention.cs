@@ -83,9 +83,9 @@ public sealed class VaeAttention
         TensorShape seqShape = new TensorShape(batch, seqLen, channels);
         Tensor normedSeq = normed.Reshape(new TensorShape(batch, channels, seqLen));
 
-        // Transpose [B, C, seqLen] → [B, seqLen, C] by copying
+        // Transpose [B, C, seqLen] → [B, seqLen, C] via backend
         Tensor normedTransposed = new Tensor(seqShape, DType.F32);
-        TransposeBCtoBC(backend, normedTransposed, normedSeq, batch, channels, seqLen);
+        backend.Transpose2D(normedTransposed, normedSeq, channels, seqLen);
         normed.Dispose();
 
         // Project Q, K, V via batched matmul: [B, seqLen, C] @ [C, C]^T = [B, seqLen, C]
@@ -116,7 +116,7 @@ public sealed class VaeAttention
 
         // Transpose back [B, seqLen, C] → [B, C, seqLen] → reshape to [B, C, H, W]
         Tensor projectedChannelFirst = new Tensor(new TensorShape(batch, channels, seqLen), DType.F32);
-        TransposeBCtoBC(backend, projectedChannelFirst, projected, batch, seqLen, channels);
+        backend.Transpose2D(projectedChannelFirst, projected, seqLen, channels);
         projected.Dispose();
 
         Tensor projectedSpatial = projectedChannelFirst.Reshape(spatialShape);
@@ -140,26 +140,6 @@ public sealed class VaeAttention
         backend.Linear(output, input, weight, bias);
 
         return output;
-    }
-
-    /// <summary>Transposes [B, dim1, dim2] → [B, dim2, dim1] via element copy.</summary>
-    private static unsafe void TransposeBCtoBC(IBackend backend, Tensor output, Tensor input, int batch, int dim1, int dim2)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            float* batchIn = inPtr + b * dim1 * dim2;
-            float* batchOut = outPtr + b * dim2 * dim1;
-            for (int i = 0; i < dim1; i++)
-            {
-                for (int j = 0; j < dim2; j++)
-                {
-                    batchOut[j * dim1 + i] = batchIn[i * dim2 + j];
-                }
-            }
-        }
     }
 
 }

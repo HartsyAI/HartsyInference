@@ -101,6 +101,40 @@ Conv2D is implemented via im2col (PTX kernel) + cuBLAS SGEMM, rather than cuDNN.
 
 Both normalization kernels use a three-pass approach (mean → variance → normalize+affine) with shared memory reductions. Simpler to implement correctly than online Welford single-pass. Performance impact minimal since not bottleneck vs GEMM.
 
+### 12. Integer Overflow in Im2Col at 1024x1024
+
+**Problem**: At 1024x1024 with 512 channels and 3x3 kernels, the im2col total element count exceeds `uint32` max (4,294,967,295). Three overflow sites in `CudaBackend.cs` (buffer allocation, batch offsets), two in `CudaKernels.cs` (launch grid calculation), and one in `spatial_f32.ptx` (thread ID computation used `mul.lo.u32`).
+
+**Symptoms**: `CUDA_ERROR_ILLEGAL_ADDRESS` during Conv2D at 1024x1024. 256x256 and 512x512 worked fine (products fit in 32-bit).
+
+**Fix**: Cast to `long` before multiplication in C#. Use `cvt.u64.u32` + `mul.lo.u64` + `setp.ge.u64` + `rem.u64`/`div.u64` in PTX for 64-bit thread indexing and bounds checks.
+
+**Lesson**: Any product of `channels × kernelH × kernelW × outH × outW` can overflow `int`/`uint` at 1024+ resolution. Always use `long` for GPU buffer size calculations. PTX kernels handling spatial data must use 64-bit arithmetic for thread IDs and element counts.
+
+### 13. GPU Weight Cache Eviction by Pipeline
+
+**Problem**: `SdxlPipeline.cs` called `EvictBackendCache("CLIP")` after CLIP encoding and `EvictBackendCache("UNet")` after denoising. These called `GpuTransferHelper.FreeAllCached()`, destroying ALL preloaded weights between pipeline stages. First UNet step crashed with `ObjectDisposedException` when accessing a disposed weight tensor.
+
+**Fix**: Removed both `EvictBackendCache` calls. They were vestigial from an earlier design where no persistent GPU cache existed.
+
+**Lesson**: When adding GPU weight caching, audit all existing code paths that clear or evict GPU memory. Pipeline stage transitions must not destroy weights needed by subsequent stages.
+
+### 14. CudaBackend.Linear CPU Bias Access
+
+**Problem**: `CudaBackend.Linear` accessed `bias.DataPointer` directly on CPU (line 149) to copy bias values, bypassing the GPU weight cache. After preloading weights to GPU and disposing CPU copies, the disposed bias tensor's `DataPointer` was zero, causing a crash.
+
+**Fix**: Routed bias through `GpuTransferHelper.CopyToDevice` (which checks the GPU cache before accessing `DataPointer`) and used the `col2bias_add` PTX kernel with `spatial=1` for GPU-side bias addition.
+
+**Lesson**: After implementing GPU weight caching, ALL weight/bias access in backend ops must go through the cache-aware `CopyToDevice` path. Direct `DataPointer` access on weight tensors bypasses the cache and will crash after CPU disposal.
+
+### 15. VaeAttention CPU-Side Weight Manipulation
+
+**Problem**: `VaeAttention.ProjectLinear` performed weight transpose (`TransposeMatrix`) and bias addition (`AddBiasBroadcast`) using direct CPU pointer access. After GPU preload + CPU disposal, accessing disposed weight `DataPointer` crashed during VAE decode.
+
+**Fix**: Replaced manual CPU transpose + matmul + bias with `backend.Linear`, which handles weight transpose (cuBLAS `CUBLAS_OP_T`) and bias addition entirely on GPU with cached weights.
+
+**Lesson**: Model code must NEVER directly access `weight.DataPointer` for computation when GPU weight preloading is enabled. All weight operations must route through `IBackend` methods, which use the GPU cache. Audit all model code for direct `DataPointer` access on weight tensors — these are latent bugs when weights move to GPU.
+
 ---
 
 ## Troubleshooting Methodology
@@ -145,6 +179,70 @@ Re-run layer-by-layer comparison to confirm all layers match (avg_err < 1e-3, id
 
 ---
 
+## Phase 2 — GPU Kernel & Async Execution Deviations
+
+### 16. GEGLU Kernel — Flat Midpoint Split Instead of Last-Dimension Split
+
+**Problem**: The GEGLU PTX kernel split the input tensor at the flat midpoint: `x = input[i]`, `gate = input[i + outputElements]`. For a tensor shaped `[B, S, 2*D]`, the correct split is along the **last dimension** — the first D elements of each row are x values, the next D are gate values.
+
+**Symptoms**: 256x256 and 1024x1024 images were completely garbled (vertical banding, smeared colors). The output structure was recognizable as "something happened" but bore no resemblance to the prompt. The bug was invisible in per-op unit tests because those typically use 1D or single-row inputs where flat split equals last-dim split.
+
+**How it was found**: Compared Phase 2 output images against known-good pre-Phase 2 output. The pre-Phase 2 images were correct; Phase 2 images were garbled. Systematic review of all new GPU kernel call sites identified GEGLU as the only kernel that could cause global corruption — it runs in every FeedForward block (~46 times per step).
+
+**Root cause**: For output index `i` in a `[B, S, D]` output tensor:
+- **Wrong (flat split)**: `x = input[i]`, `gate = input[i + B*S*D]`
+- **Correct (last-dim split)**: decompose `i → (outerIdx, d)` where `outerIdx = i / D`, `d = i % D`, then `x = input[outerIdx * 2*D + d]`, `gate = input[outerIdx * 2*D + d + D]`
+
+For a concrete example with shape `[1, 2, 6]` (B=1, S=2, D=3, input has 2*D=6 per row):
+- Output index 3 maps to row 1, col 0. Correct: `x = input[1*6 + 0] = input[6]`. Wrong: `x = input[3]` (which is row 0, col 3 — a gate value from the wrong row).
+
+**Fix**: Rewrote `geglu_f32.ptx` to accept `innerDim` (D) as a kernel parameter. The kernel decomposes each thread's output index into `(outerIdx, d)` via integer division/modulo, then computes correct input offsets. Updated `CudaKernels.LaunchGeGlu` to pass 4 args (output, input, innerDim, outputElements). Applied same fix to `CpuBackend.GeGlu`.
+
+**Lesson**: When splitting a tensor along a specific dimension, you cannot use flat indexing. The split point depends on the stride of that dimension. For last-dim split of `[..., 2*D]`, each contiguous chunk of 2*D elements must be split at offset D — not at the global midpoint. **Always think in terms of the logical tensor layout, not flat memory offsets.** This trap is especially dangerous in PTX where there's no shape metadata — the kernel only sees raw pointers.
+
+**Lesson for future models**: GEGLU/SwiGLU/GLU variants all require this same last-dimension split pattern. When porting any gated activation from Python to a GPU kernel, verify the split logic handles multi-dimensional inputs correctly. A simple test with shape `[2, 2, 2*D]` will catch this — if flat split gives the same result as last-dim split, the test input is too simple.
+
+### 17. BroadcastAdd In-Place — Old GPU Callbacks Free Re-Cached Pointer
+
+**Problem**: `BroadcastAdd` modifies the hidden tensor in-place on GPU (adds bias into the existing buffer). After the kernel runs, `CacheActivation(hidden, pHidden, bytes)` is called to update the activation cache. But `CacheActivation` internally accesses `tensor.DataPointer` to store the CPU-side reference, which triggers the **old** `_gpuSyncCallback` — that callback calls `FreeAsync` on the GPU pointer that was just modified in-place. The pointer is freed before it can be re-cached.
+
+**Symptoms**: Intermittent corruption or crashes. The freed GPU memory might be reallocated for a different tensor, causing data from unrelated operations to appear in subsequent computations. Hard to reproduce because it depends on the GPU memory allocator's reuse pattern.
+
+**Fix**: Clear `_gpuSyncCallback` and `_gpuDisposeCallback` to `null` before calling `CacheActivation` for any in-place GPU operation:
+```csharp
+// BroadcastAdd modifies hidden in-place. Clear old GPU callbacks before re-caching.
+hidden._gpuSyncCallback = null;
+hidden._gpuDisposeCallback = null;
+GpuTransferHelper.CacheActivation(hidden, pHidden, hiddenBytes);
+```
+
+**Lesson**: Any `IBackend` op that modifies a tensor in-place on GPU must clear the tensor's `_gpuSyncCallback` and `_gpuDisposeCallback` before calling `CacheActivation`. The old callbacks hold a closure over the previous GPU pointer — if that's the same pointer being re-cached, the old callback will free it. **This applies to ALL in-place GPU operations**, not just BroadcastAdd. When adding new in-place ops (e.g., in-place Add, in-place Scale), always clear callbacks first.
+
+### 18. OOM During VAE Decode at 1024x1024 — FreeAsync Deferred Cleanup
+
+**Problem**: After removing per-op `cuStreamSynchronize`, GPU memory frees switched to `cuMemFreeAsync` (stream-ordered). The freed memory is not actually reclaimed until the stream processes the free command. When VAE decode tries to allocate large im2col buffers (~300MB–4.8GB for 512ch at 1024x1024), the allocation fails with `CUDA_ERROR_OUT_OF_MEMORY` because ~7.5GB of UNet weight memory has pending `FreeAsync` calls that haven't been processed yet.
+
+**Symptoms**: `CUDA_ERROR_OUT_OF_MEMORY` during the first Conv2D of VAE decode at 1024x1024. Lower resolutions (256x256) work fine because the im2col buffers are smaller.
+
+**Fix (three-part)**:
+1. **UNet weight eviction**: Added `IBackend.FreeWeights(IEnumerable<Tensor>)`. Before VAE decode, the pipeline calls `backend.Sync()` then `backend.FreeWeights(unet.EnumerateWeights())` to synchronously free UNet weights (~7.5GB), reclaiming VRAM.
+2. **OOM retry with stream sync**: In `CudaMemory.Allocate`, if `cuMemAlloc` returns `CUDA_ERROR_OUT_OF_MEMORY`, call `GpuTransferHelper.SyncStream()` to flush all pending `FreeAsync` ops, then retry. This catches any remaining deferred frees.
+3. **Pipeline-level sync**: `backend.Sync()` before weight eviction ensures all pending GPU work completes before freeing weight memory.
+
+**Lesson**: When switching from synchronous `cuMemFree` to `cuMemFreeAsync`, memory is NOT immediately available for reallocation. Plan for this:
+- At pipeline stage boundaries (e.g., UNet → VAE), explicitly sync and free weights from the previous stage
+- Add OOM retry logic that syncs the stream before giving up — pending frees may release enough memory
+- Monitor VRAM usage at transitions between models that share GPU memory
+- This is especially critical on consumer GPUs (12GB) running large models (~10GB weights)
+
+### 19. Non-Blocking Stream Race Condition (Phase 0, revisited)
+
+**Original fix**: Changed `CudaStream(nonBlocking: true)` to `CudaStream(nonBlocking: false)` because synchronous `cuMemcpyHtoD` operates on the NULL stream, and non-blocking streams don't synchronize with NULL stream operations.
+
+**Phase 2 relevance**: With per-op Sync removed, race conditions between memory operations and kernel launches would be even more severe with non-blocking streams. The blocking stream ensures CUDA's implicit synchronization guarantees apply. When future optimization moves to async copies (`cuMemcpyHtoDAsync`/`cuMemcpyDtoHAsync` on the compute stream), non-blocking streams can be revisited — but ALL memory operations must be on the same stream.
+
+---
+
 ## Lessons for Future Model Ports
 
 ### Attention Configuration is the #1 Trap
@@ -183,6 +281,40 @@ C# Box-Muller vs PyTorch algorithm. Same seed = different noise. Always compare 
 | Full UNet/DiT pass | < 1e-3 |
 
 If a layer exceeds these by 10x+, there's a real bug — not FP noise.
+
+### Gated Activations (GEGLU/SwiGLU/GLU) — Last-Dimension Split
+
+All gated activation functions split a tensor along the last dimension, NOT at the flat midpoint. For input `[..., 2*D]`:
+- First D elements per row = x (value path)
+- Next D elements per row = gate (gating path)
+
+In a GPU kernel with flat thread indexing, decompose the output index: `outerIdx = i / D`, `d = i % D`, then `inputX = outerIdx * 2*D + d`, `inputGate = inputX + D`. A flat midpoint split (`input[i]` and `input[i + totalOutput]`) is WRONG for any multi-row tensor.
+
+**Test pattern**: Always test with `[2, 2, 2*D]` or similar multi-row input. Single-row inputs (`[1, 1, 2*D]`) won't catch the bug because flat split coincidentally equals last-dim split.
+
+### In-Place GPU Operations — Callback Cleanup
+
+When a `CudaBackend` op modifies a tensor's GPU buffer in-place (BroadcastAdd, future in-place Add/Scale/etc.):
+1. The tensor may already have `_gpuSyncCallback` / `_gpuDisposeCallback` from a previous `CacheActivation` call
+2. Those callbacks hold closures over the GPU pointer
+3. Calling `CacheActivation` again triggers `DataPointer` access → fires old callback → `FreeAsync` on the pointer you just modified
+4. **Always clear both callbacks to `null` before calling `CacheActivation` for in-place ops**
+
+### FreeAsync and OOM at Pipeline Stage Boundaries
+
+When using `cuMemFreeAsync` instead of `cuMemFree`:
+- Memory is NOT immediately reclaimed — it's deferred until the stream processes the free
+- At pipeline stage transitions (UNet → VAE), explicitly `Sync()` and `FreeWeights()` for the previous model
+- Add OOM retry logic: on `CUDA_ERROR_OUT_OF_MEMORY`, sync the stream (flushes pending frees) and retry
+- Consumer GPUs (8-16GB) hit this hard when large models (~10GB) share VRAM with large temporary buffers
+
+### Visual Output Validation
+
+Never trust that "tests pass" means "output is correct". Always visually inspect output images after major changes:
+- A numerically plausible output (reasonable value ranges, no NaN/Inf) can still be completely wrong
+- GEGLU bug produced images with correct tensor statistics but garbled visual content
+- Keep known-good reference images and compare after every significant change
+- Quick sanity check: does the output resemble the prompt? If not, something is broken regardless of what metrics say
 
 ### Diagnostic Script Inventory
 

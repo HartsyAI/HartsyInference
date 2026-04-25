@@ -9,6 +9,12 @@ public sealed unsafe class Tensor : IDisposable
     private NativeBuffer? _ownedBuffer;
     private nint _dataPointer;
 
+    /// <summary>Backend-set callback: copies GPU→CPU then frees GPU pointer. Invoked lazily on first CPU data access.</summary>
+    internal Action? _gpuSyncCallback;
+
+    /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
+    internal Action? _gpuDisposeCallback;
+
     /// <summary>Shape and strides of this tensor.</summary>
     public TensorShape Shape { get; }
 
@@ -24,16 +30,30 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Whether this tensor owns its memory or borrows it from a mmap/view.</summary>
     public bool OwnsMemory => _ownedBuffer is not null;
 
-    /// <summary>Pointer to the raw tensor data.</summary>
+    /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first.</summary>
     public void* DataPointer
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get
         {
+            EnsureCpuData();
             nint ptr = _dataPointer;
             if (ptr == 0)
                 throw new ObjectDisposedException(nameof(Tensor));
             return (void*)ptr;
+        }
+    }
+
+    /// <summary>If GPU data is cached on this tensor, syncs it to CPU and clears the callbacks.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EnsureCpuData()
+    {
+        Action? sync = _gpuSyncCallback;
+        if (sync != null)
+        {
+            _gpuSyncCallback = null;
+            _gpuDisposeCallback = null;
+            sync();
         }
     }
 
@@ -63,6 +83,7 @@ public sealed unsafe class Tensor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Span<T> AsSpan<T>() where T : unmanaged
     {
+        EnsureCpuData();
         nint ptr = _dataPointer;
         if (ptr == 0)
             throw new ObjectDisposedException(nameof(Tensor));
@@ -74,6 +95,7 @@ public sealed unsafe class Tensor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ReadOnlySpan<T> AsReadOnlySpan<T>() where T : unmanaged
     {
+        EnsureCpuData();
         nint ptr = _dataPointer;
         if (ptr == 0)
             throw new ObjectDisposedException(nameof(Tensor));
@@ -85,6 +107,7 @@ public sealed unsafe class Tensor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public TensorRef AsRef()
     {
+        EnsureCpuData();
         nint ptr = _dataPointer;
         if (ptr == 0)
             throw new ObjectDisposedException(nameof(Tensor));
@@ -187,10 +210,13 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Computes the total byte size for a tensor of the given shape and dtype. Delegates to DType.ComputeByteCount.</summary>
     public static long ComputeByteSize(TensorShape shape, DType dtype) => dtype.ComputeByteCount(shape.ElementCount);
 
-    /// <summary>Frees owned memory via atomic pointer exchange. Borrowed tensors are no-ops.</summary>
+    /// <summary>Frees owned memory via atomic pointer exchange. If GPU data is cached, frees it without D2H copy. Borrowed tensors are no-ops.</summary>
     public void Dispose()
     {
         nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
+        Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
+        Interlocked.Exchange(ref _gpuSyncCallback, null);
+        gpuDispose?.Invoke();
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
         if (ptr != 0 && buffer is not null)
         {
@@ -202,6 +228,9 @@ public sealed unsafe class Tensor : IDisposable
     ~Tensor()
     {
         nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
+        Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
+        Interlocked.Exchange(ref _gpuSyncCallback, null);
+        gpuDispose?.Invoke();
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
         if (ptr != 0 && buffer is not null)
         {

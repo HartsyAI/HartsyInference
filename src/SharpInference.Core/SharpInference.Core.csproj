@@ -6,4 +6,8 @@
     <RootNamespace>SharpInference.Core</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpInference.Cuda" />
+  </ItemGroup>
+
 </Project>

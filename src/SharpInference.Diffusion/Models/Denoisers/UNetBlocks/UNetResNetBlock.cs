@@ -4,7 +4,7 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Diffusion.Models.Denoisers.UNetBlocks;
 
 /// <summary>ResNet block for UNet with timestep conditioning. GroupNorm→SiLU→Conv3x3→(temb projection)→GroupNorm→SiLU→Conv3x3 + skip.</summary>
-public sealed unsafe class UNetResNetBlock
+public sealed class UNetResNetBlock
 {
     private readonly int _inChannels;
     private readonly int _outChannels;
@@ -107,7 +107,7 @@ public sealed unsafe class UNetResNetBlock
 
         // 2. Project timestep embedding and add to hidden: temb [B, timeDim] → [B, outCh] → broadcast add
         Tensor tembProj = ProjectTimestepEmbedding(backend, temb, batch);
-        AddTimestepEmbedding(conv1Out, tembProj, batch, _outChannels, height, width);
+        backend.BroadcastAdd(conv1Out, tembProj, _outChannels, height * width);
         tembProj.Dispose();
 
         // 3. norm2 → SiLU → conv2
@@ -165,24 +165,4 @@ public sealed unsafe class UNetResNetBlock
         return projected;
     }
 
-    /// <summary>Adds timestep embedding [B, C] to hidden [B, C, H, W] in-place (broadcast over spatial dims).</summary>
-    private static void AddTimestepEmbedding(Tensor hidden, Tensor temb, int batch, int channels, int height, int width)
-    {
-        float* hPtr = (float*)hidden.DataPointer;
-        float* tPtr = (float*)temb.DataPointer;
-        int spatial = height * width;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < channels; c++)
-            {
-                float tVal = tPtr[b * channels + c];
-                int offset = (b * channels + c) * spatial;
-                for (int s = 0; s < spatial; s++)
-                {
-                    hPtr[offset + s] += tVal;
-                }
-            }
-        }
-    }
 }

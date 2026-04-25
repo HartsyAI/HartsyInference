@@ -1,0 +1,110 @@
+// SharpInference GEGLU kernel - FP32
+// Splits input [B,S,2*D] along last dim, applies GELU gate:
+//   output[outer*D + d] = input[outer*2D + d] * GELU(input[outer*2D + d + D])
+// where outer = i / D, d = i % D
+// Launched with 1D grid: gridDim.x = ceil(outputElements / 256)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+// --- geglu_f32 ---------------------------------------------------------
+// Params: output*, input*, innerDim (D), outputElements
+.visible .entry geglu_f32(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_innerDim,
+    .param .u32 param_outputElements
+)
+{
+    .reg .u64 %rd<8>;
+    .reg .u32 %r<10>;
+    .reg .f32 %f<16>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_innerDim];
+    ld.param.u32 %r1, [param_outputElements];
+
+    // Global thread index = output element index i
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.u32 %r2, %r2, %r3, %r4;
+
+    // Bounds check
+    setp.ge.u32 %p1, %r2, %r1;
+    @%p1 bra done_geglu;
+
+    // Decompose output index i -> (outerIdx, d)
+    // outerIdx = i / innerDim, d = i % innerDim
+    div.u32 %r5, %r2, %r0;            // outerIdx = i / D
+    rem.u32 %r6, %r2, %r0;            // d = i % D
+
+    // Input x index = outerIdx * (2*D) + d
+    shl.b32 %r7, %r0, 1;              // 2*D
+    mad.lo.u32 %r8, %r5, %r7, %r6;   // outerIdx * 2D + d
+
+    // Input gate index = outerIdx * (2*D) + d + D
+    add.u32 %r9, %r8, %r0;            // + D
+
+    // Load x = input[outerIdx * 2D + d]
+    cvt.u64.u32 %rd2, %r8;
+    shl.b64 %rd2, %rd2, 2;            // byte offset
+    add.u64 %rd3, %rd1, %rd2;
+    ld.global.f32 %f1, [%rd3];
+
+    // Load g = input[outerIdx * 2D + d + D]
+    cvt.u64.u32 %rd4, %r9;
+    shl.b64 %rd4, %rd4, 2;
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.f32 %f2, [%rd5];
+
+    // Compute GELU(g) = 0.5 * g * (1 + tanh(sqrt(2/pi) * (g + 0.044715 * g^3)))
+    // g^3
+    mul.f32 %f3, %f2, %f2;
+    mul.f32 %f4, %f3, %f2;
+
+    // 0.044715 * g^3
+    mov.f32 %f5, 0f3D372713;           // 0.044715
+    mul.f32 %f6, %f5, %f4;
+
+    // g + 0.044715 * g^3
+    add.f32 %f7, %f2, %f6;
+
+    // sqrt(2/pi) * (...)
+    mov.f32 %f8, 0f3F4C422A;           // 0.7978845608 = sqrt(2/pi)
+    mul.f32 %f9, %f8, %f7;
+
+    // tanh via 2*sigmoid(2x) - 1
+    mov.f32 %f10, 0f40000000;          // 2.0
+    mul.f32 %f11, %f10, %f9;           // 2x
+    neg.f32 %f12, %f11;
+    mov.f32 %f13, 0f3FB8AA3B;          // log2(e)
+    mul.f32 %f12, %f12, %f13;          // -2x * log2(e)
+    ex2.approx.f32 %f12, %f12;         // exp(-2x)
+    mov.f32 %f14, 0f3F800000;          // 1.0
+    add.f32 %f15, %f12, %f14;          // 1 + exp(-2x)
+    rcp.approx.f32 %f15, %f15;         // sigmoid(2x)
+    mul.f32 %f15, %f10, %f15;          // 2*sigmoid(2x)
+    sub.f32 %f15, %f15, %f14;          // tanh
+
+    // 0.5 * g * (1 + tanh)
+    add.f32 %f15, %f14, %f15;          // 1 + tanh
+    mov.f32 %f10, 0f3F000000;          // 0.5
+    mul.f32 %f15, %f10, %f15;          // 0.5 * (1 + tanh)
+    mul.f32 %f15, %f2, %f15;           // g * 0.5 * (1 + tanh) = GELU(g)
+
+    // output = x * GELU(g)
+    mul.f32 %f15, %f1, %f15;
+
+    // Store output[i]
+    cvt.u64.u32 %rd6, %r2;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd0, %rd6;
+    st.global.f32 [%rd7], %f15;
+
+done_geglu:
+    ret;
+}

@@ -38,6 +38,14 @@ These bugs have already bitten us. Check for them first:
 
 **Scheduler scale_model_input:** Some schedulers (Euler) scale latents before each model call. Missing this = wrong-scale inputs.
 
+**Gated activation (GEGLU/SwiGLU/GLU) flat-split bug:** GPU kernels that split `[..., 2*D]` along the last dimension must NOT use flat indexing. For output index `i`: decompose to `(outerIdx, d)` via `i / D` and `i % D`, then compute `inputX = outerIdx * 2D + d`. Flat midpoint split (`input[i]` and `input[i + N]`) gives wrong values for multi-row tensors. See PHASE_3_DEVIATIONS.md #16.
+
+**In-place GPU ops caching bug:** When a backend op modifies a tensor in-place on GPU (e.g., BroadcastAdd), clear `_gpuSyncCallback` and `_gpuDisposeCallback` to `null` BEFORE calling `CacheActivation`. The old callbacks close over the previous GPU pointer and will `FreeAsync` it when `CacheActivation` accesses `DataPointer`. See PHASE_3_DEVIATIONS.md #17.
+
+**FreeAsync OOM at pipeline boundaries:** `cuMemFreeAsync` defers GPU memory reclamation. Large allocations at pipeline stage transitions (e.g., VAE decode after UNet) may fail with OOM even though memory was "freed". Fix: explicitly `Sync()` + `FreeWeights()` at stage boundaries; add OOM retry that syncs stream before giving up. See PHASE_3_DEVIATIONS.md #18.
+
+**Visual output validation:** "Tests pass" does NOT mean output is correct. Always visually inspect generated images after major changes. The GEGLU bug produced numerically plausible tensors (no NaN/Inf, reasonable ranges) but completely garbled images. Keep known-good reference images and compare after every significant change.
+
 ## Cross-Runtime Debugging Methodology
 
 Use this systematic approach for any model port. Full details in `docs/Checklists/PHASE_3_DEVIATIONS.md`.

@@ -3,7 +3,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Cuda;
 
-/// <summary>CUDA GPU backend implementing IBackend. Routes operations to cuBLAS SGEMM for matmul and PTX kernels for element-wise/normalization ops. Transparently handles CPU tensors via auto-transfer (H2D before each op, D2H after, sync per op).</summary>
+/// <summary>CUDA GPU backend implementing IBackend. Routes operations to cuBLAS SGEMM for matmul and PTX kernels for element-wise/normalization ops. Uses activation caching to keep intermediate results on GPU between ops — lazy sync to CPU on DataPointer access.</summary>
 public sealed class CudaBackend : IBackend
 {
     private readonly CudaContext _context;
@@ -42,6 +42,9 @@ public sealed class CudaBackend : IBackend
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();
         CublasApi.cublasSetStream(_cublasHandle, _stream.Handle).ThrowOnCublasError();
 
+        // Give GpuTransferHelper the stream handle for FreeAsync and lazy-sync callbacks
+        GpuTransferHelper.SetStream(_stream.Handle);
+
         // Load PTX kernels if directory provided
         if (ptxDir != null && Directory.Exists(ptxDir))
         {
@@ -72,6 +75,7 @@ public sealed class CudaBackend : IBackend
         int N = (int)b.Shape[1];
 
         ulong pA = 0, pB = 0, pC = 0;
+        bool cachedOutput = false;
         try
         {
             pA = GpuTransferHelper.CopyToDevice(a);
@@ -92,14 +96,14 @@ public sealed class CudaBackend : IBackend
                 &beta,
                 pC, N).ThrowOnCublasError();
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pC, outBytes);
+            GpuTransferHelper.CacheActivation(output, pC, outBytes);
+            cachedOutput = true;
         }
         finally
         {
             GpuTransferHelper.FreeDevice(pA);
             GpuTransferHelper.FreeDevice(pB);
-            GpuTransferHelper.FreeDevice(pC);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pC);
         }
     }
 
@@ -113,6 +117,7 @@ public sealed class CudaBackend : IBackend
         int M = (int)(input.ElementCount / K); // batch*seqLen
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0;
+        bool cachedOutput = false;
         try
         {
             pInput = GpuTransferHelper.CopyToDevice(input);
@@ -146,15 +151,15 @@ public sealed class CudaBackend : IBackend
                 _kernels!.LaunchBiasAdd(pOutput, pBias, N, 1, totalElements, _stream.Handle);
             }
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOutput, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+            cachedOutput = true;
         }
         finally
         {
             GpuTransferHelper.FreeDevice(pInput);
             GpuTransferHelper.FreeDevice(pWeight);
             GpuTransferHelper.FreeDevice(pBias);
-            GpuTransferHelper.FreeDevice(pOutput);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
         }
     }
 
@@ -173,6 +178,7 @@ public sealed class CudaBackend : IBackend
         long strideC = M * N;
 
         ulong pA = 0, pB = 0, pC = 0;
+        bool cachedOutput = false;
         try
         {
             pA = GpuTransferHelper.CopyToDevice(a);
@@ -195,14 +201,14 @@ public sealed class CudaBackend : IBackend
                 (int)batchSize,
                 CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pC, outBytes);
+            GpuTransferHelper.CacheActivation(output, pC, outBytes);
+            cachedOutput = true;
         }
         finally
         {
             GpuTransferHelper.FreeDevice(pA);
             GpuTransferHelper.FreeDevice(pB);
-            GpuTransferHelper.FreeDevice(pC);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pC);
         }
     }
 
@@ -231,6 +237,7 @@ public sealed class CudaBackend : IBackend
         bool is1x1 = kH == 1 && kW == 1 && strideH == 1 && strideW == 1 && padH == 0 && padW == 0;
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, colBuf = 0;
+        bool cachedOutput = false;
         try
         {
             pInput = GpuTransferHelper.CopyToDevice(input);
@@ -292,16 +299,16 @@ public sealed class CudaBackend : IBackend
                     _stream.Handle);
             }
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOutput, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+            cachedOutput = true;
         }
         finally
         {
             GpuTransferHelper.FreeDevice(pInput);
             GpuTransferHelper.FreeDevice(pWeight);
             GpuTransferHelper.FreeDevice(pBias);
-            GpuTransferHelper.FreeDevice(pOutput);
-            if (colBuf != 0) CudaMemory.Free(colBuf);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
+            if (colBuf != 0) CudaMemory.FreeAsync(colBuf, _stream.Handle);
         }
     }
 
@@ -320,6 +327,7 @@ public sealed class CudaBackend : IBackend
         }
 
         ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
@@ -333,12 +341,12 @@ public sealed class CudaBackend : IBackend
                 batch, channels, spatial, groups, eps,
                 _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             GpuTransferHelper.FreeDevice(pB);
@@ -353,6 +361,7 @@ public sealed class CudaBackend : IBackend
         int totalRows = (int)(input.ElementCount / normDim);
 
         ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
@@ -366,12 +375,12 @@ public sealed class CudaBackend : IBackend
                 normDim, totalRows, eps,
                 _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             GpuTransferHelper.FreeDevice(pB);
@@ -399,6 +408,7 @@ public sealed class CudaBackend : IBackend
         long totalHeads = B * H;
 
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, scoresBuf = 0;
+        bool cachedOutput = false;
         try
         {
             pQ = GpuTransferHelper.CopyToDevice(query);
@@ -485,8 +495,8 @@ public sealed class CudaBackend : IBackend
                     oPtr, (int)D).ThrowOnCublasError();
             }
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
@@ -494,8 +504,8 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);
             GpuTransferHelper.FreeDevice(pMask);
-            GpuTransferHelper.FreeDevice(pOut);
-            if (scoresBuf != 0) CudaMemory.Free(scoresBuf);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
         }
     }
 
@@ -506,6 +516,7 @@ public sealed class CudaBackend : IBackend
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
@@ -514,12 +525,12 @@ public sealed class CudaBackend : IBackend
 
             _kernels!.LaunchGelu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
         }
     }
@@ -529,6 +540,7 @@ public sealed class CudaBackend : IBackend
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
@@ -537,13 +549,12 @@ public sealed class CudaBackend : IBackend
 
             _kernels!.LaunchSilu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
 
-            Sync();
-
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
         }
     }
@@ -555,6 +566,7 @@ public sealed class CudaBackend : IBackend
         EnsureKernels();
 
         ulong pOut = 0, pA = 0, pB = 0;
+        bool cachedOutput = false;
         try
         {
             pA = GpuTransferHelper.CopyToDevice(a);
@@ -564,12 +576,12 @@ public sealed class CudaBackend : IBackend
 
             _kernels!.LaunchAdd(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pA);
             GpuTransferHelper.FreeDevice(pB);
         }
@@ -580,6 +592,7 @@ public sealed class CudaBackend : IBackend
         EnsureKernels();
 
         ulong pOut = 0, pA = 0, pB = 0;
+        bool cachedOutput = false;
         try
         {
             pA = GpuTransferHelper.CopyToDevice(a);
@@ -589,12 +602,12 @@ public sealed class CudaBackend : IBackend
 
             _kernels!.LaunchMul(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pA);
             GpuTransferHelper.FreeDevice(pB);
         }
@@ -605,6 +618,7 @@ public sealed class CudaBackend : IBackend
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
@@ -613,12 +627,12 @@ public sealed class CudaBackend : IBackend
 
             _kernels!.LaunchScale(pOut, pIn, scalar, (int)input.ElementCount, _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
         }
     }
@@ -628,6 +642,7 @@ public sealed class CudaBackend : IBackend
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
@@ -636,12 +651,12 @@ public sealed class CudaBackend : IBackend
 
             _kernels!.LaunchClamp(pOut, pIn, min, max, (int)input.ElementCount, _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
         }
     }
@@ -652,11 +667,117 @@ public sealed class CudaBackend : IBackend
             throw new InvalidOperationException("PTX kernels not loaded. Provide a ptxDir to the CudaBackend constructor.");
     }
 
-    /// <summary>Synchronizes the default compute stream.</summary>
+    /// <summary>Synchronizes the default compute stream. Only needed at pipeline boundaries or before explicit D2H.
+    /// Per-op sync removed — CUDA guarantees sequential execution on a single blocking stream.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void Sync()
+    public void Sync()
     {
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
+    }
+
+    // ── Transpose / Permute ---------------------------------------------------
+
+    /// <summary>Batched 2D transpose: [B, D1, D2] -> [B, D2, D1] via PTX kernel.</summary>
+    public void Transpose2D(Tensor output, Tensor input, int d1, int d2)
+    {
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchTranspose2D(pOut, pIn, d1, d2, (int)output.ElementCount, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D] via PTX kernel.</summary>
+    public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
+    {
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchPermute0213(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>GEGLU activation: output[i] = input[i] * GELU(input[i + outputElements]) via PTX kernel.</summary>
+    public void GeGlu(Tensor output, Tensor input)
+    {
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            int innerDim = (int)output.Shape[output.Shape.Rank - 1];
+            _kernels!.LaunchGeGlu(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>Broadcast add: hidden[b,c,s] += bias[b,c] in-place via PTX kernel.</summary>
+    public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
+    {
+        EnsureKernels();
+
+        ulong pHidden = 0, pBias = 0;
+        try
+        {
+            pHidden = GpuTransferHelper.CopyToDevice(hidden);
+            pBias = GpuTransferHelper.CopyToDevice(bias);
+
+            _kernels!.LaunchBroadcastAdd(pHidden, pBias, channels, spatial, (int)hidden.ElementCount, _stream.Handle);
+
+            // BroadcastAdd modifies hidden in-place. Clear old GPU callbacks before re-caching
+            // to prevent CacheActivation's DataPointer access from firing the old sync callback
+            // (which would FreeAsync the GPU pointer we're about to re-cache).
+            hidden._gpuSyncCallback = null;
+            hidden._gpuDisposeCallback = null;
+            nuint hiddenBytes = GpuTransferHelper.ByteSize(hidden);
+            GpuTransferHelper.CacheActivation(hidden, pHidden, hiddenBytes);
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pBias);
+        }
     }
 
     // ── Shape Operations -----------------------------------------------------
@@ -666,6 +787,7 @@ public sealed class CudaBackend : IBackend
     {
         ulong[] gpuInputs = new ulong[inputs.Length];
         ulong pOut = 0;
+        bool cachedOutput = false;
         try
         {
             for (int t = 0; t < inputs.Length; t++)
@@ -720,8 +842,8 @@ public sealed class CudaBackend : IBackend
                 }
             }
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
@@ -729,7 +851,7 @@ public sealed class CudaBackend : IBackend
             {
                 GpuTransferHelper.FreeDevice(gpuInputs[t]);
             }
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
     }
 
@@ -752,6 +874,7 @@ public sealed class CudaBackend : IBackend
         int outW = inW * scaleW;
 
         ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
@@ -763,12 +886,12 @@ public sealed class CudaBackend : IBackend
                 batch, channels, inH, inW, outH, outW, scaleH, scaleW,
                 _stream.Handle);
 
-            Sync();
-            GpuTransferHelper.CopyToHost(output, pOut, outBytes);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
         }
     }
@@ -853,6 +976,12 @@ public sealed class CudaBackend : IBackend
         {
             GpuTransferHelper.PreloadWeight(weight);
         }
+    }
+
+    /// <summary>Frees specific weight tensors from GPU to reclaim VRAM (e.g., UNet weights before VAE decode).</summary>
+    public void FreeWeights(IEnumerable<Tensor> weights)
+    {
+        GpuTransferHelper.FreeWeights(weights);
     }
 
     /// <summary>Frees all preloaded weight memory from GPU and clears the cache.</summary>

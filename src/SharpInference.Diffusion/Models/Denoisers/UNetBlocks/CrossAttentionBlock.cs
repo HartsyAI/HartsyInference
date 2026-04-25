@@ -4,7 +4,7 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Diffusion.Models.Denoisers.UNetBlocks;
 
 /// <summary>Spatial transformer block for UNet cross-attention. Wraps N BasicTransformerBlocks (each: SelfAttn→CrossAttn→FFN). SD1.5 uses 1 block, SDXL uses [1,2,10] per level.</summary>
-public sealed unsafe class CrossAttentionBlock
+public sealed class CrossAttentionBlock
 {
     private readonly int _channels;
     private readonly int _numHeads;
@@ -104,10 +104,11 @@ public sealed unsafe class CrossAttentionBlock
         Tensor normed = new Tensor(spatialShape, DType.F32);
         backend.GroupNorm(normed, input, _normWeight!, _normBias!, 32, 1e-6f);
 
-        // 2. Reshape [B, C, H, W] → [B, H*W, C] and project in
+        // 2. Reshape [B, C, H, W] → [B, C, spatial] → transpose → [B, spatial, C] and project in
         TensorShape seqShape = new TensorShape(batch, spatial, channels);
+        Tensor normedFlat = normed.Reshape(new TensorShape(batch, channels, spatial));
         Tensor hidden = new Tensor(seqShape, DType.F32);
-        ReshapeSpatialToSequence(hidden, normed, batch, channels, spatial);
+        backend.Transpose2D(hidden, normedFlat, channels, spatial);
         normed.Dispose();
 
         // proj_in: [B, spatial, C] → [B, spatial, C]
@@ -142,10 +143,11 @@ public sealed unsafe class CrossAttentionBlock
         backend.Linear(projOut, hidden, _projOutWeight!, _projOutBias!);
         hidden.Dispose();
 
-        // 5. Reshape [B, H*W, C] → [B, C, H, W] and add residual
-        Tensor output = new Tensor(spatialShape, DType.F32);
-        ReshapeSequenceToSpatial(output, projOut, batch, channels, spatial);
+        // 5. Transpose [B, spatial, C] → [B, C, spatial] → reshape to [B, C, H, W] and add residual
+        Tensor projOutTransposed = new Tensor(new TensorShape(batch, channels, spatial), DType.F32);
+        backend.Transpose2D(projOutTransposed, projOut, spatial, channels);
         projOut.Dispose();
+        Tensor output = projOutTransposed.Reshape(spatialShape);
 
         // Add residual from input
         Tensor result = new Tensor(spatialShape, DType.F32);
@@ -155,45 +157,10 @@ public sealed unsafe class CrossAttentionBlock
         return result;
     }
 
-    /// <summary>Reshapes [B, C, H*W] → [B, H*W, C] via transposed copy.</summary>
-    private static void ReshapeSpatialToSequence(Tensor output, Tensor input, int batch, int channels, int spatial)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < channels; c++)
-            {
-                for (int s = 0; s < spatial; s++)
-                {
-                    outPtr[(b * spatial + s) * channels + c] = inPtr[(b * channels + c) * spatial + s];
-                }
-            }
-        }
-    }
-
-    /// <summary>Reshapes [B, H*W, C] → [B, C, H*W] via transposed copy.</summary>
-    private static void ReshapeSequenceToSpatial(Tensor output, Tensor input, int batch, int channels, int spatial)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < spatial; s++)
-            {
-                for (int c = 0; c < channels; c++)
-                {
-                    outPtr[(b * channels + c) * spatial + s] = inPtr[(b * spatial + s) * channels + c];
-                }
-            }
-        }
-    }
 }
 
 /// <summary>Attention sub-block: LayerNorm → MultiHeadAttention → Residual. Used for both self-attention and cross-attention.</summary>
-internal sealed unsafe class TransformerSubBlock
+internal sealed class TransformerSubBlock
 {
     private readonly int _channels;
     private readonly int _numHeads;
@@ -281,18 +248,23 @@ internal sealed unsafe class TransformerSubBlock
         backend.Linear(value, kvSource, _toVWeight!, _toVBias);
         normed.Dispose();
 
-        // Reshape to multi-head 4D: [B, S, numHeads*headDim] → [B, numHeads, S, headDim]
+        // Reshape to multi-head 4D: [B, S, numHeads*headDim] → view [B, S, H, D] → permute → [B, H, S, D]
         TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         TensorShape kvMhShape = new TensorShape(batch, _numHeads, ctxLen, _headDim);
-        Tensor queryMh = new Tensor(qMhShape, DType.F32);
-        Tensor keyMh = new Tensor(kvMhShape, DType.F32);
-        Tensor valueMh = new Tensor(kvMhShape, DType.F32);
 
-        ReshapeToMultiHead(queryMh, query, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(keyMh, key, batch, ctxLen, _numHeads, _headDim);
-        ReshapeToMultiHead(valueMh, value, batch, ctxLen, _numHeads, _headDim);
+        Tensor queryView = query.Reshape(new TensorShape(batch, seqLen, _numHeads, _headDim));
+        Tensor queryMh = new Tensor(qMhShape, DType.F32);
+        backend.Permute0213(queryMh, queryView, seqLen, _numHeads, _headDim);
         query.Dispose();
+
+        Tensor keyView = key.Reshape(new TensorShape(batch, ctxLen, _numHeads, _headDim));
+        Tensor keyMh = new Tensor(kvMhShape, DType.F32);
+        backend.Permute0213(keyMh, keyView, ctxLen, _numHeads, _headDim);
         key.Dispose();
+
+        Tensor valueView = value.Reshape(new TensorShape(batch, ctxLen, _numHeads, _headDim));
+        Tensor valueMh = new Tensor(kvMhShape, DType.F32);
+        backend.Permute0213(valueMh, valueView, ctxLen, _numHeads, _headDim);
         value.Dispose();
 
         // SDPA
@@ -303,10 +275,11 @@ internal sealed unsafe class TransformerSubBlock
         keyMh.Dispose();
         valueMh.Dispose();
 
-        // Reshape back: [B, numHeads, seqLen, headDim] → [B, seqLen, numHeads*headDim]
-        Tensor merged = new Tensor(hidShape, DType.F32);
-        ReshapeFromMultiHead(merged, attnOut, batch, seqLen, _numHeads, _headDim);
+        // Permute back: [B, H, S, D] → [B, S, H, D] → reshape [B, S, H*D]
+        Tensor attnPermuted = new Tensor(new TensorShape(batch, seqLen, _numHeads, _headDim), DType.F32);
+        backend.Permute0213(attnPermuted, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
+        Tensor merged = attnPermuted.Reshape(hidShape);
 
         // Output projection
         Tensor projected = new Tensor(hidShape, DType.F32);
@@ -321,53 +294,10 @@ internal sealed unsafe class TransformerSubBlock
         return output;
     }
 
-    private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        outPtr[outOffset + d] = inPtr[inOffset + d];
-                    }
-                }
-            }
-        }
-    }
-
-    private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        outPtr[outOffset + d] = inPtr[inOffset + d];
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// <summary>Feed-forward network: LayerNorm → Linear → GEGLU → Linear → Residual.</summary>
-internal sealed unsafe class FeedForwardBlock
+internal sealed class FeedForwardBlock
 {
     private readonly int _channels;
 
@@ -429,10 +359,10 @@ internal sealed unsafe class FeedForwardBlock
         backend.Linear(geGluOut, normed, _geGluProjWeight!, _geGluProjBias!);
         normed.Dispose();
 
-        // Split and apply GELU gate: output = x[:innerDim] * GELU(x[innerDim:])
+        // Split and apply GELU gate via backend: output = x[:innerDim] * GELU(x[innerDim:])
         TensorShape innerShape = new TensorShape(batch, seqLen, innerDim);
         Tensor gated = new Tensor(innerShape, DType.F32);
-        ApplyGeGlu(gated, geGluOut, batch, seqLen, innerDim);
+        backend.GeGlu(gated, geGluOut);
         geGluOut.Dispose();
 
         // Output linear: [B, seqLen, innerDim] → [B, seqLen, channels]
@@ -446,30 +376,6 @@ internal sealed unsafe class FeedForwardBlock
         outLinear.Dispose();
 
         return output;
-    }
-
-    /// <summary>GEGLU: splits input in half along last dim, applies GELU gate.</summary>
-    private static void ApplyGeGlu(Tensor output, Tensor input, int batch, int seqLen, int innerDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * (innerDim * 2);
-                int outOffset = (b * seqLen + s) * innerDim;
-                for (int d = 0; d < innerDim; d++)
-                {
-                    float x = inPtr[inOffset + d];
-                    float gate = inPtr[inOffset + innerDim + d];
-                    // GELU(gate) * x
-                    float geluGate = gate * 0.5f * (1.0f + MathF.Tanh(0.7978845608f * (gate + 0.044715f * gate * gate * gate)));
-                    outPtr[outOffset + d] = x * geluGate;
-                }
-            }
-        }
     }
 
 }

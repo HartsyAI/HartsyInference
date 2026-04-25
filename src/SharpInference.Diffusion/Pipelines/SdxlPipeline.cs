@@ -174,7 +174,9 @@ public sealed unsafe class SdxlPipeline : IDisposable
         textEmbeddings.Dispose();
         pooledOutput?.Dispose();
 
-        // 6. VAE decode
+        // 6. VAE decode — free UNet weights to reclaim VRAM for high-res VAE conv2d buffers
+        _backend.Sync();
+        _backend.FreeWeights(_unet.EnumerateWeights());
         Logs.Info("Decoding latents to image...");
         Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor image = _vaeDecoder.Decode(_backend, latent);

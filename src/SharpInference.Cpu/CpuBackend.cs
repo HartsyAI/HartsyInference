@@ -123,6 +123,97 @@ public sealed class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
+    public unsafe void Transpose2D(Tensor output, Tensor input, int d1, int d2)
+    {
+        ThrowIfDisposed();
+        float* inPtr = (float*)input.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        int batch = (int)(input.ElementCount / (d1 * d2));
+
+        for (int b = 0; b < batch; b++)
+        {
+            float* batchIn = inPtr + b * d1 * d2;
+            float* batchOut = outPtr + b * d2 * d1;
+            for (int i = 0; i < d1; i++)
+            {
+                for (int j = 0; j < d2; j++)
+                {
+                    batchOut[j * d1 + i] = batchIn[i * d2 + j];
+                }
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public unsafe void Permute0213(Tensor output, Tensor input, int s, int h, int d)
+    {
+        ThrowIfDisposed();
+        float* inPtr = (float*)input.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        int batch = (int)(input.ElementCount / (s * h * d));
+
+        for (int b = 0; b < batch; b++)
+        {
+            for (int si = 0; si < s; si++)
+            {
+                for (int hi = 0; hi < h; hi++)
+                {
+                    int inOffset = ((b * s + si) * h + hi) * d;
+                    int outOffset = ((b * h + hi) * s + si) * d;
+                    for (int di = 0; di < d; di++)
+                    {
+                        outPtr[outOffset + di] = inPtr[inOffset + di];
+                    }
+                }
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public unsafe void GeGlu(Tensor output, Tensor input)
+    {
+        ThrowIfDisposed();
+        float* inPtr = (float*)input.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        int outputElements = (int)output.ElementCount;
+        int innerDim = (int)output.Shape[output.Shape.Rank - 1];
+
+        for (int i = 0; i < outputElements; i++)
+        {
+            int outerIdx = i / innerDim;
+            int d = i % innerDim;
+            int inputIdx = outerIdx * (innerDim * 2) + d;
+            float x = inPtr[inputIdx];
+            float gate = inPtr[inputIdx + innerDim];
+            float geluGate = gate * 0.5f * (1.0f + MathF.Tanh(0.7978845608f * (gate + 0.044715f * gate * gate * gate)));
+            outPtr[i] = x * geluGate;
+        }
+    }
+
+    /// <inheritdoc />
+    public unsafe void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
+    {
+        ThrowIfDisposed();
+        float* hPtr = (float*)hidden.DataPointer;
+        float* bPtr = (float*)bias.DataPointer;
+        int total = (int)hidden.ElementCount;
+        int batch = total / (channels * spatial);
+
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < channels; c++)
+            {
+                float bVal = bPtr[b * channels + c];
+                int offset = (b * channels + c) * spatial;
+                for (int s = 0; s < spatial; s++)
+                {
+                    hPtr[offset + s] += bVal;
+                }
+            }
+        }
+    }
+
+    /// <inheritdoc />
     public void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
         ThrowIfDisposed();

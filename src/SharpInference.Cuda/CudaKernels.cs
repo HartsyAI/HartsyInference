@@ -8,6 +8,9 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _layernormModule;
     private readonly CudaModule _spatialModule;
     private readonly CudaModule _softmaxModule;
+    private readonly CudaModule _transposeModule;
+    private readonly CudaModule _gegluModule;
+    private readonly CudaModule _broadcastAddModule;
 
     // ── Elementwise kernel function handles ─────────────────────────────
     private readonly nint _addF32;
@@ -26,8 +29,18 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _im2colF32;
     private readonly nint _col2biasAddF32;
 
-    // ── Softmax kernel function handle ────────────────────────────────
+    // ── Softmax kernel function handle ─────────────────────────────────
     private readonly nint _softmaxF32;
+
+    // ── Transpose/permute kernel function handles ──────────────────────
+    private readonly nint _transpose2dF32;
+    private readonly nint _permute0213F32;
+
+    // ── GEGLU kernel function handle ───────────────────────────────────
+    private readonly nint _gegluF32;
+
+    // ── Broadcast add kernel function handle ───────────────────────────
+    private readonly nint _broadcastAddF32;
 
     private const uint BlockSize = 256;
 
@@ -68,6 +81,22 @@ public sealed class CudaKernels : IDisposable
         string softmaxPath = Path.Combine(ptxDir, "softmax_f32.ptx");
         _softmaxModule = CudaModule.LoadFromFile(softmaxPath);
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
+
+        // Transpose/permute kernels
+        string transposePath = Path.Combine(ptxDir, "transpose_f32.ptx");
+        _transposeModule = CudaModule.LoadFromFile(transposePath);
+        _transpose2dF32 = _transposeModule.GetFunction("transpose_2d_f32");
+        _permute0213F32 = _transposeModule.GetFunction("permute_0213_f32");
+
+        // GEGLU kernel
+        string gegluPath = Path.Combine(ptxDir, "geglu_f32.ptx");
+        _gegluModule = CudaModule.LoadFromFile(gegluPath);
+        _gegluF32 = _gegluModule.GetFunction("geglu_f32");
+
+        // Broadcast add kernel
+        string broadcastAddPath = Path.Combine(ptxDir, "broadcast_add_f32.ptx");
+        _broadcastAddModule = CudaModule.LoadFromFile(broadcastAddPath);
+        _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
     }
 
     // ── Elementwise Launches ────────────────────────────────────────────
@@ -341,6 +370,89 @@ public sealed class CudaKernels : IDisposable
             sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
+    // ── Transpose/Permute Launches ─────────────────────────────────────
+
+    /// <summary>Launches batched 2D transpose: [B, D1, D2] -> [B, D2, D1].</summary>
+    public unsafe void LaunchTranspose2D(ulong output, ulong input, int d1, int d2, int totalElements, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint d1Arg = (uint)d1, d2Arg = (uint)d2, totalArg = (uint)totalElements;
+
+        void** args = stackalloc void*[5];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &d1Arg;
+        args[3] = &d2Arg;
+        args[4] = &totalArg;
+
+        uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            _transpose2dF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches 4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D].</summary>
+    public unsafe void LaunchPermute0213(ulong output, ulong input, int s, int h, int d, int totalElements, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint sArg = (uint)s, hArg = (uint)h, dArg = (uint)d, totalArg = (uint)totalElements;
+
+        void** args = stackalloc void*[6];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &sArg;
+        args[3] = &hArg;
+        args[4] = &dArg;
+        args[5] = &totalArg;
+
+        uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            _permute0213F32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    // ── GEGLU Launch ───────────────────────────────────────────────────
+
+    /// <summary>Launches GEGLU: splits input along last dim (innerDim), applies GELU gate.</summary>
+    public unsafe void LaunchGeGlu(ulong output, ulong input, int innerDim, int outputElements, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint innerDimArg = (uint)innerDim;
+        uint outElemArg = (uint)outputElements;
+
+        void** args = stackalloc void*[4];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &innerDimArg;
+        args[3] = &outElemArg;
+
+        uint gridDim = ((uint)outputElements + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            _gegluF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    // ── Broadcast Add Launch ───────────────────────────────────────────
+
+    /// <summary>Launches broadcast add: hidden[b,c,s] += bias[b,c] in-place.</summary>
+    public unsafe void LaunchBroadcastAdd(ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
+    {
+        ulong hiddenArg = hidden, biasArg = bias;
+        uint chArg = (uint)channels, spatialArg = (uint)spatial, totalArg = (uint)totalElements;
+
+        void** args = stackalloc void*[5];
+        args[0] = &hiddenArg;
+        args[1] = &biasArg;
+        args[2] = &chArg;
+        args[3] = &spatialArg;
+        args[4] = &totalArg;
+
+        uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            _broadcastAddF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public void Dispose()
     {
         _elementwiseModule.Dispose();
@@ -348,6 +460,9 @@ public sealed class CudaKernels : IDisposable
         _layernormModule.Dispose();
         _spatialModule.Dispose();
         _softmaxModule.Dispose();
+        _transposeModule.Dispose();
+        _gegluModule.Dispose();
+        _broadcastAddModule.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -358,5 +473,8 @@ public sealed class CudaKernels : IDisposable
         _layernormModule.Dispose();
         _spatialModule.Dispose();
         _softmaxModule.Dispose();
+        _transposeModule.Dispose();
+        _gegluModule.Dispose();
+        _broadcastAddModule.Dispose();
     }
 }

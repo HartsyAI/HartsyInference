@@ -48,6 +48,8 @@ Model code programs against `IBackend` only. CPU dispatches to SIMD kernels; CUD
 - **Eager execution** — no computation graph. Each op executes immediately. Fusion is manual at kernel level.
 - **Multi-type tensor system** — `Tensor` (owns memory), `TensorView` (non-owning), `TensorRef` (zero-alloc kernel struct). See `AGENTS.md` for details.
 - **IBackend op-dispatch** — deliberate divergence from dotLLM. dotLLM uses `IBackend` for memory management only; SharpInference uses it for op-dispatch because 3 backends × many model types would be unmaintainable with direct calls. Virtual dispatch (~2ns) is negligible vs kernel runtime (ms).
+- **GPU weight cache** — weights preloaded to GPU via `PreloadWeights()`, cached by `Tensor` object reference. CPU copies can be disposed after preload. Cache-aware `CopyToDevice` returns GPU pointer without H2D transfer on cache hit. See `docs/Research/CUDA_PERFORMANCE.md`.
+- **Auto-transfer pattern** — current CUDA backend auto-transfers activation tensors H2D/D2H per op. Correct but slow (~33x vs ComfyUI). GPU-resident activations planned as primary optimization. See CUDA_PERFORMANCE.md for roadmap.
 - **Pipeline factory** — model metadata drives automatic pipeline selection.
 - **Three-tier options** — flat properties (simple), explicit composition (advanced), custom injection (full control).
 

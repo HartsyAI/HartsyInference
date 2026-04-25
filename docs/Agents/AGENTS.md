@@ -94,6 +94,22 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 | `[SkipLocalsInit]` | Large `stackalloc` paths |
 | `[SuppressGCTransition]` | Short CUDA P/Invoke (< 1us) |
 
+### GPU Weight Management
+- Weights preloaded to GPU via `backend.PreloadWeights(model.EnumerateWeights())`
+- After preload, CPU weight tensors can be `Dispose()`d to free RAM
+- `GpuTransferHelper.CopyToDevice` checks cache by `Tensor` reference equality BEFORE accessing `DataPointer` — works on disposed CPU tensors
+- Model code must NEVER access `weight.DataPointer` directly — always route through `IBackend` ops
+- At pipeline stage transitions (e.g., UNet → VAE), call `backend.Sync()` + `backend.FreeWeights(model.EnumerateWeights())` to reclaim VRAM
+- See `docs/Research/CUDA_PERFORMANCE.md` for the full optimization roadmap
+
+### GPU Activation Cache Rules
+- All `CudaBackend` ops call `CacheActivation(output)` to keep results on GPU
+- No per-op `cuStreamSynchronize` — CUDA stream ordering guarantees correctness on a single blocking stream
+- `FreeDevice` uses `cuMemFreeAsync` (stream-ordered) — memory is NOT immediately reclaimed
+- **In-place ops**: When modifying a tensor's GPU buffer in-place (BroadcastAdd, etc.), clear `_gpuSyncCallback` and `_gpuDisposeCallback` to `null` BEFORE calling `CacheActivation`. Old callbacks close over the GPU pointer and will free it.
+- **OOM retry**: `CudaMemory.Allocate` syncs the stream on `CUDA_ERROR_OUT_OF_MEMORY` to flush pending `FreeAsync` ops, then retries
+- **Gated activations (GEGLU/SwiGLU)**: Split along last dimension, NOT at flat midpoint. See `PHASE_3_DEVIATIONS.md` #16.
+
 ### What NOT to Do
 - No Python/C++ wrappers, ONNX Runtime, managed GPU wrappers
 - No computation graphs — eager only
@@ -102,3 +118,7 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - No `Dictionary<string, nint>` for CUDA handles
 - No embedded PTX/SPIR-V resources — load from disk
 - No reflection JSON — use source-gen contexts
+- No direct `weight.DataPointer` access in model code — use `IBackend` ops (GPU cache bypass causes crashes after preload + CPU disposal)
+- No flat-midpoint tensor splits in GPU kernels — always decompose index to logical coordinates for dimension-aware splitting
+- No `cuMemFree` on the hot path — use `cuMemFreeAsync` (stream-ordered). Synchronous free after removing per-op Sync can cause use-after-free.
+- No `CacheActivation` on in-place-modified tensors without clearing old `_gpuSyncCallback`/`_gpuDisposeCallback` first

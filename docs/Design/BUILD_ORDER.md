@@ -40,17 +40,24 @@ Phase 9: Video (stub → LTX-Video)
 
 **Validation:** Tokenizer matches OpenAI CLIP Python. Schedulers match diffusers. VAE within 1e-3.
 
-## Phase 3 — First Image (Cuda + SD1.5 Pipeline)
-**Goal:** Generate image with SD1.5 on CUDA.
+## Phase 3 — First Image (Cuda + SD1.5 Pipeline) — CUDA FUNCTIONAL
+**Goal:** Generate image with SD1.5/SDXL on CUDA.
+**Status:** CUDA backend working. SD1.5 + SDXL generating correct images on GPU. Performance optimization in progress.
 
-| Deliverable | Package | Description |
+| Deliverable | Package | Status |
 |---|---|---|
-| CUDA P/Invoke, PTX loader, cuBLAS | Cuda | `CudaDriverApi`, `PtxKernelLoader`, HGEMM |
-| Conv2D (cuDNN), GroupNorm, SDPA, dequant | Cuda | PTX kernels with shared memory |
-| Fused GroupNorm+SiLU | Cuda | Bandwidth optimization for UNet |
-| CLIP encoder, UNet, SD1.5 pipeline | Diffusion | Full end-to-end |
+| CUDA P/Invoke, stream, cuBLAS | Cuda | Done — `CudaDriverApi`, `CublasApi`, `CudaStream` |
+| PTX kernels (FP32): elementwise, spatial, norm, SDPA | Cuda | Done — im2col, GroupNorm, LayerNorm, SiLU, GELU, SDPA |
+| Conv2D via im2col + cuBLAS SGEMM | Cuda | Done — no cuDNN dependency |
+| GPU weight cache + preload API | Cuda | Done — `PreloadWeights`, `EnumerateWeights` on all models |
+| GPU-resident activations (lazy-sync) | Cuda | Done — `CacheActivation`, 77% hit rate, ~7% speedup. Per-op Sync still limits gains. |
+| GPU reshape/permute kernels | Cuda | **Next** — eliminate CPU-side reshape round-trips (~1,673 misses/step) |
+| Remove per-op Sync + async execution | Cuda | Planned — deferred cleanup, `cuMemFreeAsync` |
+| Kernel fusion (GroupNorm+SiLU, etc.) | Cuda | Planned |
+| FP16 inference | Cuda | Planned |
 
-**Validation:** Same seed + prompt → SSIM > 0.95 vs diffusers.
+**Current performance:** ~93s/step at 1024x1024 (per-op Sync + CPU reshapes dominate). Target: ~3-5s/step.
+**Validation:** GPU UNet forward matches CPU within avg_err=5e-7. See `docs/Research/CUDA_PERFORMANCE.md`.
 
 ## Phase 3.5 — Vulkan Backend
 **Goal:** Port CUDA PTX to SPIR-V; SD1.5 on AMD/Intel.
