@@ -1,0 +1,97 @@
+// SharpInference dtype cast kernels - F32 <-> F16
+// Bidirectional conversion between FP32 and FP16
+// Launched with 1D grid: gridDim.x = ceil(count / 256)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+// --- cast_f32_to_f16 ---------------------------------------------------
+// output[i] (f16) = (half)input[i] (f32)
+// Params: output* (f16), input* (f32), count
+.visible .entry cast_f32_to_f16(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f1;
+    .reg .b16 %h1;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_f32_to_f16;
+
+    // Load f32
+    cvt.u64.u32 %rd2, %r1;
+    shl.b64 %rd3, %rd2, 2;        // input byte offset (4 bytes per f32)
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.f32 %f1, [%rd4];
+
+    // Convert f32 -> f16
+    cvt.rn.f16.f32 %h1, %f1;
+
+    // Store f16
+    shl.b64 %rd3, %rd2, 1;        // output byte offset (2 bytes per f16)
+    add.u64 %rd5, %rd0, %rd3;
+    st.global.b16 [%rd5], %h1;
+
+done_f32_to_f16:
+    ret;
+}
+
+// --- cast_f16_to_f32 ---------------------------------------------------
+// output[i] (f32) = (float)input[i] (f16)
+// Params: output* (f32), input* (f16), count
+.visible .entry cast_f16_to_f32(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<4>;
+    .reg .f32 %f1;
+    .reg .b16 %h1;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_f16_to_f32;
+
+    // Load f16
+    cvt.u64.u32 %rd2, %r1;
+    shl.b64 %rd3, %rd2, 1;        // input byte offset (2 bytes per f16)
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.b16 %h1, [%rd4];
+
+    // Convert f16 -> f32
+    cvt.f32.f16 %f1, %h1;
+
+    // Store f32
+    shl.b64 %rd3, %rd2, 2;        // output byte offset (4 bytes per f32)
+    add.u64 %rd5, %rd0, %rd3;
+    st.global.f32 [%rd5], %f1;
+
+done_f16_to_f32:
+    ret;
+}

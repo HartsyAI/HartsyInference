@@ -1,0 +1,127 @@
+// SharpInference transpose/permute kernels - FP16
+// Batched 2D transpose and 4D permute(0,2,1,3) for multi-head attention reshapes
+// Launched with 1D grid: gridDim.x = ceil(totalElements / 256)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+// --- transpose_2d_f16 --------------------------------------------------
+// Batched 2D transpose: [B, D1, D2] -> [B, D2, D1] (f16)
+// output[b*D2*D1 + j*D1 + i] = input[b*D1*D2 + i*D2 + j]
+// Params: output*, input*, D1, D2, totalElements
+.visible .entry transpose_2d_f16(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_D1,
+    .param .u32 param_D2,
+    .param .u32 param_total
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<16>;
+    .reg .b16 %h1;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_D1];
+    ld.param.u32 %r1, [param_D2];
+    ld.param.u32 %r2, [param_total];
+
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r3, %r3, %r4, %r5;
+
+    setp.ge.u32 %p1, %r3, %r2;
+    @%p1 bra done_transpose16;
+
+    // Decompose output index: (b, j, i)
+    mul.lo.u32 %r6, %r1, %r0;         // sliceSize = D2 * D1
+    div.u32 %r7, %r3, %r6;            // b
+    rem.u32 %r8, %r3, %r6;
+    div.u32 %r9, %r8, %r0;            // j
+    rem.u32 %r10, %r8, %r0;           // i
+
+    // Input index: b*D1*D2 + i*D2 + j
+    mul.lo.u32 %r11, %r7, %r6;
+    mad.lo.u32 %r11, %r10, %r1, %r11;
+    add.u32 %r11, %r11, %r9;
+
+    // Load f16
+    cvt.u64.u32 %rd2, %r11;
+    shl.b64 %rd2, %rd2, 1;            // * 2 (f16)
+    add.u64 %rd3, %rd1, %rd2;
+    ld.global.b16 %h1, [%rd3];
+
+    // Store f16
+    cvt.u64.u32 %rd4, %r3;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd0, %rd4;
+    st.global.b16 [%rd5], %h1;
+
+done_transpose16:
+    ret;
+}
+
+// --- permute_0213_f16 --------------------------------------------------
+// 4D permute: [B, S, H, D] -> [B, H, S, D]  (swap dims 1 and 2, f16)
+// Params: output*, input*, S, H, D, totalElements
+.visible .entry permute_0213_f16(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_S,
+    .param .u32 param_H,
+    .param .u32 param_D,
+    .param .u32 param_total
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<20>;
+    .reg .b16 %h1;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_S];
+    ld.param.u32 %r1, [param_H];
+    ld.param.u32 %r2, [param_D];
+    ld.param.u32 %r3, [param_total];
+
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %ntid.x;
+    mov.u32 %r6, %tid.x;
+    mad.lo.u32 %r4, %r4, %r5, %r6;
+
+    setp.ge.u32 %p1, %r4, %r3;
+    @%p1 bra done_permute16;
+
+    // Decompose output [B, H, S, D] index
+    div.u32 %r7, %r4, %r2;
+    rem.u32 %r8, %r4, %r2;            // d
+    div.u32 %r9, %r7, %r0;
+    rem.u32 %r10, %r7, %r0;           // s
+    div.u32 %r11, %r9, %r1;           // b
+    rem.u32 %r12, %r9, %r1;           // h
+
+    // Input [B, S, H, D]: ((b*S + s)*H + h)*D + d
+    mad.lo.u32 %r13, %r11, %r0, %r10;
+    mad.lo.u32 %r13, %r13, %r1, %r12;
+    mad.lo.u32 %r13, %r13, %r2, %r8;
+
+    // Load f16
+    cvt.u64.u32 %rd2, %r13;
+    shl.b64 %rd2, %rd2, 1;
+    add.u64 %rd3, %rd1, %rd2;
+    ld.global.b16 %h1, [%rd3];
+
+    // Store f16
+    cvt.u64.u32 %rd4, %r4;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd0, %rd4;
+    st.global.b16 [%rd5], %h1;
+
+done_permute16:
+    ret;
+}
