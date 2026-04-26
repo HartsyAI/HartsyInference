@@ -316,6 +316,56 @@ Never trust that "tests pass" means "output is correct". Always visually inspect
 - Keep known-good reference images and compare after every significant change
 - Quick sanity check: does the output resemble the prompt? If not, something is broken regardless of what metrics say
 
+---
+
+## Phase 3 — FP16 Inference Deviations
+
+### 20. Normalization Kernels — F32 Weight/Bias Read as F16
+
+**Problem**: F16 PTX normalization kernels (`groupnorm_f16`, `layernorm_f16`, `groupnorm_silu_f16`) use `ld.global.b16` to load weight and bias parameters. CudaBackend dispatches the F16 kernel path based on `input.DType == DType.F16`, not weight dtype. SDXL safetensors checkpoints have mixed dtypes — some norm weights are F32 even when linear weights are F16. When F32 weight data is loaded as F16, the kernel reads garbage values, causing completely wrong normalization output.
+
+**Symptoms**: Output images were pure noise — all spatial structure destroyed. Every normalization layer (GroupNorm, LayerNorm, fused GroupNorm+SiLU) produced wrong output.
+
+**Fix**: In `CudaBackend.GroupNorm`, `GroupNormSilu`, and `LayerNorm`: before launching the F16 kernel, check `weight.DType` and `bias.DType`. If either is F32, allocate a temporary F16 buffer, cast using `LaunchCastF32ToF16`, pass the cast pointer to the kernel, and `FreeAsync` the temp buffer in the finally block.
+
+**Lesson**: PTX kernels that load data at a specific width (`ld.global.b16` vs `ld.global.b32`) are dtype-sensitive. When dispatching based on `input.DType`, always verify that ALL other tensor operands (weights, biases) match the expected kernel dtype. If not, cast before launch.
+
+### 21. Mixed-Dtype Safetensors — Inconsistent Per-Tensor DTypes
+
+**Problem**: SDXL safetensors checkpoints (e.g., Juggernaut XL) have inconsistent dtypes across tensors: conv weights are mostly F32 (60/62), linear weights are mostly F16 (867/869), norm weights are mixed. The original F16 test loaded raw weights without ensuring uniform dtype.
+
+**Analysis of Juggernaut XL checkpoint**: F16=2 conv weights, F32=60. F16=867 linear weights, F32=2. F16=492 norm params, F32=104.
+
+**Fix**: Added `CastWeightsToF16` helper that iterates all weights and casts any non-F16 tensors to F16 using `Tensor.CastTo(DType.F16)`. Applied before loading weights into models for F16 inference.
+
+**Lesson**: Never assume safetensors files have uniform dtype. Different model components may have been saved at different precisions. When running F16 inference, explicitly cast all weights to F16 before loading. Consider making this a utility in the model handler package.
+
+### 22. cuBLAS GemmEx — Does Not Support Mixed A/B Operand Types
+
+**Problem**: `cublasGemmEx` requires operands A and B to have the **same data type** (both F16 or both F32). When `TimestepEmbedding` and `AdditionEmbedding` create F32 intermediate tensors and call `backend.Linear` with F16 weights, the Linear method's F32 path called `cublasSgemm` which read F16 weight data as F32 (garbage), and the F16 path is unreachable since dispatch was based on `input.DType == DType.F16`.
+
+After fixing to always use `cublasGemmEx` with per-operand dtype detection (`CUDA_R_32F` for input, `CUDA_R_16F` for weight), cuBLAS returned `CUBLAS_STATUS_NOT_SUPPORTED` (error 15) because mixed A=F32, B=F16 is not a supported combination.
+
+**Fix**: When weight dtype differs from input dtype, cast the weight to match the input dtype before calling `cublasGemmEx`. Allocate temp buffer, launch `CastF32ToF16` or `CastF16ToF32` kernel, use cast pointer for GEMM, `FreeAsync` temp buffer in finally. Applied same pattern to bias add dispatch (check `output.DType` vs `bias.DType`, cast if mismatched). Applied to all GEMM call sites: `MatMul`, `Linear`, `BatchedMatMul`, `Conv2D`.
+
+**Lesson**: cuBLAS `GemmEx` supports these type combinations with `CUBLAS_COMPUTE_32F`:
+- A=F16, B=F16, C=F16 (half precision)
+- A=F16, B=F16, C=F32 (mixed precision upcast)
+- A=F32, B=F32, C=F32 (single precision)
+
+It does NOT support A=F32, B=F16 or A=F16, B=F32. When operands have different dtypes, always cast the mismatched one to match before calling GEMM. The cast is cheap (elementwise kernel) compared to the GEMM itself.
+
+### Mixed-Dtype Pattern for Future Ops
+
+When adding new CudaBackend ops that use cuBLAS or PTX kernels with dtype-specific code:
+1. Check ALL tensor operands' dtypes, not just the input
+2. If any operand has a different dtype than the kernel expects, cast it first
+3. Track cast buffer pointers and `FreeAsync` them in the finally block
+4. For cuBLAS: A and B must always have identical dtypes
+5. For PTX: `ld.global.b16` vs `ld.global.b32` — the load width must match the actual data format
+
+---
+
 ### Diagnostic Script Inventory
 
 All scripts in `tests/python-reference/` using venv at `tests/python-reference/.venv/`:

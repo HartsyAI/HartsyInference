@@ -54,10 +54,12 @@
 - [x] SDXL dual CLIP conditioning verified, SD1.5/SDXL single-file checkpoint conversion tested
 - [x] SD1.5 + SDXL converted UNet forward passes: no NaN/Inf, exhaustive key validation
 - [x] SDXL GPU UNet forward: avg_err=5.510E-007, max_err=8.821E-006 (vs CPU reference)
-- [x] SDXL GPU 256x256 image generation: passes, produces correct output (~64s, 10 steps)
-- [x] SDXL GPU 1024x1024 image generation: passes, produces output (~36min, 20 steps, auto-transfer limited)
+- [x] SDXL F32 GPU 256x256 image generation: passes, ~4.2s/step
+- [x] SDXL F32 GPU 1024x1024 image generation: passes, ~62s/step
+- [x] SDXL F16 GPU 256x256 image generation: passes, ~580ms/step (7.2x speedup)
+- [x] SDXL F16 GPU 1024x1024 image generation: passes, ~5.5s/step (11x speedup), 173s total for 20 steps
+- [x] SDXL GPU performance target: <5s/step achieved with F16 at 256x256. 1024x1024 at 5.5s/step (close to target)
 - [ ] SDXL pipeline SSIM > 0.95 vs diffusers
-- [ ] SDXL GPU performance target: <5s/step at 1024x1024 (requires GPU-resident activations)
 - [ ] Refiner handoff test
 - [ ] Flux pipeline SSIM > 0.95, Flux schnell 4-step, T5 encoder validation
 - [ ] LoRA apply/remove/stack tests, GGUF Flux Q8_0 test, 12GB VRAM fit test

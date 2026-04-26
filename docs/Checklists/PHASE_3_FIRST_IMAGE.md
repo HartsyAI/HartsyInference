@@ -3,7 +3,7 @@
 > **Goal:** Generate an actual image from text with SD1.5 on CUDA GPU.
 > **Packages:** SharpInference.Cuda, SharpInference.Diffusion (full)
 >
-> **Status:** CUDA backend functional. SD1.5 + SDXL generating correct images on GPU via auto-transfer pattern. Performance optimization in progress (see `docs/Research/CUDA_PERFORMANCE.md`).
+> **Status:** CUDA backend functional with FP16 inference + fused kernels. SD1.5 + SDXL generating correct images on GPU. SDXL 1024x1024 at ~5.5s/step (11x faster than Phase 2).
 
 ---
 
@@ -34,10 +34,16 @@
 - [x] Conv2D via im2col (PTX) + cuBLAS SGEMM (no cuDNN dependency)
 - [x] GPU weight preloading API: `PreloadWeights()`, `FreePreloadedWeights()`, `EnumerateWeights()` on all model classes
 - [x] Integer overflow fixes for 1024x1024 resolution (64-bit arithmetic in C# and PTX)
-- [ ] FP16 PTX kernels (conv2d_f16, group_norm_f16, sdpa_f16, etc.)
-- [ ] GPU-resident activations (eliminate per-op H2D/D2H round-trips)
-- [ ] Kernel fusion (GroupNorm+SiLU, Conv2D+Bias+SiLU)
-- [ ] `CudaMemoryPool.cs` — `cuMemPool` async allocator for activation memory
+- [x] GPU-resident activations — `CacheActivation` + lazy-sync, `FreeAsync` stream-ordered cleanup
+- [x] GPU reshape/permute kernels — `transpose_2d_f32`, `permute_0213_f32`, `geglu_f32`, `broadcast_add_f32`
+- [x] Remove per-op Sync + async execution — eliminated `cuStreamSynchronize` from all 15 ops
+- [x] FP16 PTX kernels (11 files): elementwise, groupnorm, layernorm, softmax, spatial, transpose, geglu, broadcast_add, cast, groupnorm_silu_f16, groupnorm_silu_f32
+- [x] FP16 cuBLAS — `cublasGemmEx` with `CUDA_R_16F` + `CUBLAS_COMPUTE_32F` for all GEMM ops
+- [x] Mixed-dtype safety — automatic operand casting when input/weight dtypes differ (cuBLAS requires uniform A/B types)
+- [x] Kernel fusion — fused GroupNorm+SiLU kernel (~40 fusions per UNet step)
+- [x] Model dtype propagation — all model code uses `input.DType` instead of hardcoded `DType.F32`
+- [x] Pipeline F16/F32 boundaries — scheduler stays F32, CLIP stays F32; cast at UNet/VAE entry/exit
+- [ ] `CudaMemoryPool.cs` — `cuMemPool` async allocator for activation memory (optimization)
 
 ## 4. Implementation — SD1.5 Pipeline (CPU path) — COMPLETE
 
@@ -55,21 +61,24 @@
 - [x] Full SD1.5 pipeline generates coherent images (CPU)
 - [x] SD1.5 UNet GPU forward pass: avg_err=5.188E-007 (vs CPU reference)
 - [x] SDXL UNet GPU forward pass: avg_err=5.510E-007, max_err=8.821E-006
-- [x] SDXL GPU 256x256 generation: passes, ~64s for 10 steps
-- [x] SDXL GPU 1024x1024 generation: passes, ~36min for 20 steps (auto-transfer limited)
+- [x] SDXL F32 GPU 256x256 generation: passes, ~4.2s/step steady-state
+- [x] SDXL F32 GPU 1024x1024 generation: passes, ~62s/step steady-state
+- [x] SDXL F16 GPU 256x256 generation: passes, ~580ms/step steady-state (7.2x faster than F32)
+- [x] SDXL F16 GPU 1024x1024 generation: passes, ~5.5s/step steady-state (11x faster than F32), 173s total for 20 steps
+- [x] F16 output visually matches F32 reference (same composition, colors, structure)
+- [x] F32 regression test: passes after all F16 changes (no breakage)
 - [ ] CUDA kernel unit tests (matmul, conv2d, groupnorm vs CPU) — individual op tests
 - [ ] Full pipeline SSIM > 0.95 vs Python reference
 - [ ] img2img, inpainting, memory leak test
 - [ ] All tests pass on GPU CI
-- [ ] Benchmark after GPU-resident activations: target <5s/step for 1024x1024
 
 ## 6. Deviations
 
-See [PHASE_3_DEVIATIONS.md](PHASE_3_DEVIATIONS.md) — 15 deviations documented (7 CPU pipeline bugs + 4 CUDA backend decisions + 4 GPU weight cache bugs) with full troubleshooting methodology.
+See [PHASE_3_DEVIATIONS.md](PHASE_3_DEVIATIONS.md) — 22 deviations documented (7 CPU pipeline bugs + 4 CUDA backend decisions + 4 GPU weight cache bugs + 4 Phase 2 async/kernel bugs + 3 Phase 3 FP16 mixed-dtype bugs) with full troubleshooting methodology.
 
 ## 7. Review & Merge
 
 - [ ] Code review (CUDA error handling, GPU memory safety)
 - [ ] Benchmark SD1.5 512x512 20-step it/s vs Python
-- [ ] Performance optimization: GPU-resident activations (see CUDA_PERFORMANCE.md)
+- [ ] Further optimization: CUDA memory pool, async H2D copies (see CUDA_PERFORMANCE.md)
 - [ ] Merge to main branch

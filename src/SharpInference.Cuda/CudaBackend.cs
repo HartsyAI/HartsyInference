@@ -67,14 +67,16 @@ public sealed class CudaBackend : IBackend
 
     // ── Linear Algebra -------------------------------------------------------
 
-    /// <summary>Matrix multiply via cuBLAS SGEMM: output = a @ b</summary>
+    /// <summary>Matrix multiply via cuBLAS GemmEx: output = a @ b. Supports mixed F32/F16 dtypes.</summary>
     public unsafe void MatMul(Tensor output, Tensor a, Tensor b)
     {
+        EnsureKernels();
+
         int M = (int)a.Shape[0];
         int K = (int)a.Shape[1];
         int N = (int)b.Shape[1];
 
-        ulong pA = 0, pB = 0, pC = 0;
+        ulong pA = 0, pB = 0, pC = 0, pBCast = 0;
         bool cachedOutput = false;
         try
         {
@@ -86,31 +88,32 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            if (a.DType == DType.F16)
+            // cuBLAS requires A and B to have the same dtype; cast B if mismatched
+            DType gemmDtype = a.DType;
+            ulong bPtr = pB;
+            if (b.DType != gemmDtype)
             {
-                CublasApi.cublasGemmEx(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                    N, M, K,
-                    &alpha,
-                    pB, CublasApi.CUDA_R_16F, N,
-                    pA, CublasApi.CUDA_R_16F, K,
-                    &beta,
-                    pC, CublasApi.CUDA_R_16F, N,
-                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                pBCast = CudaMemory.Allocate((nuint)(b.ElementCount * gemmDtype.SizeInBytes));
+                if (gemmDtype == DType.F16)
+                    _kernels!.LaunchCastF32ToF16(pBCast, pB, (int)b.ElementCount, _stream.Handle);
+                else
+                    _kernels!.LaunchCastF16ToF32(pBCast, pB, (int)b.ElementCount, _stream.Handle);
+                bPtr = pBCast;
             }
-            else
-            {
-                CublasApi.cublasSgemm(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                    N, M, K,
-                    &alpha,
-                    pB, N,
-                    pA, K,
-                    &beta,
-                    pC, N).ThrowOnCublasError();
-            }
+
+            int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+
+            CublasApi.cublasGemmEx(
+                _cublasHandle,
+                CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                N, M, K,
+                &alpha,
+                bPtr, gemmType, N,
+                pA, gemmType, K,
+                &beta,
+                pC, cType, N,
+                CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
             GpuTransferHelper.CacheActivation(output, pC, outBytes);
             cachedOutput = true;
@@ -119,11 +122,12 @@ public sealed class CudaBackend : IBackend
         {
             GpuTransferHelper.FreeDevice(pA);
             GpuTransferHelper.FreeDevice(pB);
+            if (pBCast != 0) CudaMemory.FreeAsync(pBCast, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pC);
         }
     }
 
-    /// <summary>Linear layer via cuBLAS SGEMM with transpose: output = input × weight^T + bias.</summary>
+    /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias. Supports mixed F32/F16 dtypes.</summary>
     public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         EnsureKernels();
@@ -132,7 +136,7 @@ public sealed class CudaBackend : IBackend
         int K = (int)weight.Shape[1]; // inDim
         int M = (int)(input.ElementCount / K); // batch*seqLen
 
-        ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0;
+        ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pWeightCast = 0, pBiasCast = 0;
         bool cachedOutput = false;
         try
         {
@@ -148,42 +152,55 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
-            // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N]
-            if (input.DType == DType.F16)
+            // cuBLAS requires A and B to have the same dtype; cast weight if mismatched
+            DType gemmDtype = input.DType;
+            ulong weightPtr = pWeight;
+            if (weight.DType != gemmDtype)
             {
-                CublasApi.cublasGemmEx(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                    N, M, K,
-                    &alpha,
-                    pWeight, CublasApi.CUDA_R_16F, K,
-                    pInput, CublasApi.CUDA_R_16F, K,
-                    &beta,
-                    pOutput, CublasApi.CUDA_R_16F, N,
-                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-            }
-            else
-            {
-                CublasApi.cublasSgemm(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                    N, M, K,
-                    &alpha,
-                    pWeight, K,
-                    pInput, K,
-                    &beta,
-                    pOutput, N).ThrowOnCublasError();
+                pWeightCast = CudaMemory.Allocate((nuint)(weight.ElementCount * gemmDtype.SizeInBytes));
+                if (gemmDtype == DType.F16)
+                    _kernels!.LaunchCastF32ToF16(pWeightCast, pWeight, (int)weight.ElementCount, _stream.Handle);
+                else
+                    _kernels!.LaunchCastF16ToF32(pWeightCast, pWeight, (int)weight.ElementCount, _stream.Handle);
+                weightPtr = pWeightCast;
             }
 
-            // Add bias on GPU if present
+            int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int outputType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+
+            // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
+            // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N]
+            CublasApi.cublasGemmEx(
+                _cublasHandle,
+                CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                N, M, K,
+                &alpha,
+                weightPtr, gemmType, K,
+                pInput, gemmType, K,
+                &beta,
+                pOutput, outputType, N,
+                CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+
+            // Add bias on GPU if present (cast bias to match output dtype if needed)
             if (bias is not null)
             {
                 int totalElements = M * N;
-                if (input.DType == DType.F16)
-                    _kernels!.LaunchBiasAddF16(pOutput, pBias, N, 1, totalElements, _stream.Handle);
+                ulong biasPtr = pBias;
+
+                if (output.DType != bias!.DType)
+                {
+                    pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
+                    if (output.DType == DType.F16)
+                        _kernels!.LaunchCastF32ToF16(pBiasCast, pBias, (int)bias.ElementCount, _stream.Handle);
+                    else
+                        _kernels!.LaunchCastF16ToF32(pBiasCast, pBias, (int)bias.ElementCount, _stream.Handle);
+                    biasPtr = pBiasCast;
+                }
+
+                if (output.DType == DType.F16)
+                    _kernels!.LaunchBiasAddF16(pOutput, biasPtr, N, 1, totalElements, _stream.Handle);
                 else
-                    _kernels!.LaunchBiasAdd(pOutput, pBias, N, 1, totalElements, _stream.Handle);
+                    _kernels!.LaunchBiasAdd(pOutput, biasPtr, N, 1, totalElements, _stream.Handle);
             }
 
             GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
@@ -194,13 +211,17 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pInput);
             GpuTransferHelper.FreeDevice(pWeight);
             GpuTransferHelper.FreeDevice(pBias);
+            if (pWeightCast != 0) CudaMemory.FreeAsync(pWeightCast, _stream.Handle);
+            if (pBiasCast != 0) CudaMemory.FreeAsync(pBiasCast, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
         }
     }
 
-    /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM.</summary>
+    /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM. Supports mixed F32/F16 dtypes.</summary>
     public unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
+        EnsureKernels();
+
         long batchSize = a.Shape[0];
         int M = (int)a.Shape[1];
         int K = (int)a.Shape[2];
@@ -212,7 +233,7 @@ public sealed class CudaBackend : IBackend
         long strideB = bIs2D ? 0 : K * N;
         long strideC = M * N;
 
-        ulong pA = 0, pB = 0, pC = 0;
+        ulong pA = 0, pB = 0, pC = 0, pBCast = 0;
         bool cachedOutput = false;
         try
         {
@@ -224,17 +245,31 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            int dataType = a.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            // cuBLAS requires A and B to have the same dtype; cast B if mismatched
+            DType gemmDtype = a.DType;
+            ulong bPtr = pB;
+            if (b.DType != gemmDtype)
+            {
+                pBCast = CudaMemory.Allocate((nuint)(b.ElementCount * gemmDtype.SizeInBytes));
+                if (gemmDtype == DType.F16)
+                    _kernels!.LaunchCastF32ToF16(pBCast, pB, (int)b.ElementCount, _stream.Handle);
+                else
+                    _kernels!.LaunchCastF16ToF32(pBCast, pB, (int)b.ElementCount, _stream.Handle);
+                bPtr = pBCast;
+            }
+
+            int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
             CublasApi.cublasGemmStridedBatchedEx(
                 _cublasHandle,
                 CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
                 N, M, K,
                 &alpha,
-                pB, dataType, N, strideB,
-                pA, dataType, K, strideA,
+                bPtr, gemmType, N, strideB,
+                pA, gemmType, K, strideA,
                 &beta,
-                pC, dataType, N, strideC,
+                pC, cType, N, strideC,
                 (int)batchSize,
                 CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
@@ -245,6 +280,7 @@ public sealed class CudaBackend : IBackend
         {
             GpuTransferHelper.FreeDevice(pA);
             GpuTransferHelper.FreeDevice(pB);
+            if (pBCast != 0) CudaMemory.FreeAsync(pBCast, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pC);
         }
     }
@@ -272,10 +308,12 @@ public sealed class CudaBackend : IBackend
         int colCols = outH * outW;
 
         bool is1x1 = kH == 1 && kW == 1 && strideH == 1 && strideW == 1 && padH == 0 && padW == 0;
-        bool isF16 = input.DType == DType.F16;
+        bool inputIsF16 = input.DType == DType.F16;
+        bool outputIsF16 = output.DType == DType.F16;
         int elemSize = input.DType.SizeInBytes;
+        int outElemSize = output.DType.SizeInBytes;
 
-        ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, colBuf = 0;
+        ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, colBuf = 0, pWeightCast = 0, pBiasCast = 0;
         bool cachedOutput = false;
         try
         {
@@ -296,6 +334,22 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
+            // cuBLAS requires A and B to have the same dtype; cast weight if mismatched
+            DType gemmDtype = input.DType;
+            ulong weightPtr = pWeight;
+            if (weight.DType != gemmDtype)
+            {
+                pWeightCast = CudaMemory.Allocate((nuint)(weight.ElementCount * gemmDtype.SizeInBytes));
+                if (gemmDtype == DType.F16)
+                    _kernels!.LaunchCastF32ToF16(pWeightCast, pWeight, (int)weight.ElementCount, _stream.Handle);
+                else
+                    _kernels!.LaunchCastF16ToF32(pWeightCast, pWeight, (int)weight.ElementCount, _stream.Handle);
+                weightPtr = pWeightCast;
+            }
+
+            int gemmType = inputIsF16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int gemmOutType = outputIsF16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+
             for (int b = 0; b < batch; b++)
             {
                 int inputBatchOffset = b * inCh;
@@ -307,7 +361,7 @@ public sealed class CudaBackend : IBackend
                 }
                 else
                 {
-                    if (isF16)
+                    if (inputIsF16)
                         _kernels!.LaunchIm2ColF16(
                             colBuf, pInput,
                             inCh, inH, inW, kH, kW,
@@ -324,46 +378,44 @@ public sealed class CudaBackend : IBackend
                     colPtr = colBuf;
                 }
 
-                ulong outBatchPtr = pOutput + (ulong)((long)b * outCh * outH * outW * elemSize);
+                ulong outBatchPtr = pOutput + (ulong)((long)b * outCh * outH * outW * outElemSize);
 
-                if (isF16)
-                {
-                    CublasApi.cublasGemmEx(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                        colCols, outCh, colRows,
-                        &alpha,
-                        colPtr, CublasApi.CUDA_R_16F, colCols,
-                        pWeight, CublasApi.CUDA_R_16F, colRows,
-                        &beta,
-                        outBatchPtr, CublasApi.CUDA_R_16F, colCols,
-                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-                }
-                else
-                {
-                    CublasApi.cublasSgemm(
-                        _cublasHandle,
-                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                        colCols, outCh, colRows,
-                        &alpha,
-                        colPtr, colCols,
-                        pWeight, colRows,
-                        &beta,
-                        outBatchPtr, colCols).ThrowOnCublasError();
-                }
+                CublasApi.cublasGemmEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                    colCols, outCh, colRows,
+                    &alpha,
+                    colPtr, gemmType, colCols,
+                    weightPtr, gemmType, colRows,
+                    &beta,
+                    outBatchPtr, gemmOutType, colCols,
+                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
+            // Add bias (cast if dtype mismatch)
             if (bias is not null)
             {
                 int totalElements = batch * outCh * outH * outW;
-                if (isF16)
+                ulong biasPtr = pBias;
+
+                if (output.DType != bias!.DType)
+                {
+                    pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
+                    if (outputIsF16)
+                        _kernels!.LaunchCastF32ToF16(pBiasCast, pBias, (int)bias.ElementCount, _stream.Handle);
+                    else
+                        _kernels!.LaunchCastF16ToF32(pBiasCast, pBias, (int)bias.ElementCount, _stream.Handle);
+                    biasPtr = pBiasCast;
+                }
+
+                if (outputIsF16)
                     _kernels!.LaunchBiasAddF16(
-                        pOutput, pBias,
+                        pOutput, biasPtr,
                         outCh, outH * outW, totalElements,
                         _stream.Handle);
                 else
                     _kernels!.LaunchBiasAdd(
-                        pOutput, pBias,
+                        pOutput, biasPtr,
                         outCh, outH * outW, totalElements,
                         _stream.Handle);
             }
@@ -376,6 +428,8 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pInput);
             GpuTransferHelper.FreeDevice(pWeight);
             GpuTransferHelper.FreeDevice(pBias);
+            if (pWeightCast != 0) CudaMemory.FreeAsync(pWeightCast, _stream.Handle);
+            if (pBiasCast != 0) CudaMemory.FreeAsync(pBiasCast, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
             if (colBuf != 0) CudaMemory.FreeAsync(colBuf, _stream.Handle);
         }
@@ -395,7 +449,7 @@ public sealed class CudaBackend : IBackend
             spatial *= (int)input.Shape[d];
         }
 
-        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0, pWCast = 0, pBCast = 0;
         bool cachedOutput = false;
         try
         {
@@ -406,15 +460,34 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             if (input.DType == DType.F16)
+            {
+                // Cast weight/bias to F16 if stored as F32 (common for norm params in FP16 models)
+                ulong wPtr = pW;
+                ulong bPtr = pB;
+                if (weight.DType == DType.F32)
+                {
+                    pWCast = CudaMemory.Allocate((nuint)(weight.ElementCount * 2));
+                    _kernels!.LaunchCastF32ToF16(pWCast, pW, (int)weight.ElementCount, _stream.Handle);
+                    wPtr = pWCast;
+                }
+                if (bias.DType == DType.F32)
+                {
+                    pBCast = CudaMemory.Allocate((nuint)(bias.ElementCount * 2));
+                    _kernels!.LaunchCastF32ToF16(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
+                    bPtr = pBCast;
+                }
                 _kernels!.LaunchGroupNormF16(
-                    pOut, pIn, pW, pB,
+                    pOut, pIn, wPtr, bPtr,
                     batch, channels, spatial, groups, eps,
                     _stream.Handle);
+            }
             else
+            {
                 _kernels!.LaunchGroupNorm(
                     pOut, pIn, pW, pB,
                     batch, channels, spatial, groups, eps,
                     _stream.Handle);
+            }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -425,6 +498,8 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             GpuTransferHelper.FreeDevice(pB);
+            if (pWCast != 0) CudaMemory.FreeAsync(pWCast, _stream.Handle);
+            if (pBCast != 0) CudaMemory.FreeAsync(pBCast, _stream.Handle);
         }
     }
 
@@ -435,7 +510,7 @@ public sealed class CudaBackend : IBackend
         int normDim = (int)input.Shape[input.Shape.Rank - 1];
         int totalRows = (int)(input.ElementCount / normDim);
 
-        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0, pWCast = 0, pBCast = 0;
         bool cachedOutput = false;
         try
         {
@@ -446,15 +521,34 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             if (input.DType == DType.F16)
+            {
+                // Cast weight/bias to F16 if stored as F32 (common for norm params in FP16 models)
+                ulong wPtr = pW;
+                ulong bPtr = pB;
+                if (weight.DType == DType.F32)
+                {
+                    pWCast = CudaMemory.Allocate((nuint)(weight.ElementCount * 2));
+                    _kernels!.LaunchCastF32ToF16(pWCast, pW, (int)weight.ElementCount, _stream.Handle);
+                    wPtr = pWCast;
+                }
+                if (bias.DType == DType.F32)
+                {
+                    pBCast = CudaMemory.Allocate((nuint)(bias.ElementCount * 2));
+                    _kernels!.LaunchCastF32ToF16(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
+                    bPtr = pBCast;
+                }
                 _kernels!.LaunchLayerNormF16(
-                    pOut, pIn, pW, pB,
+                    pOut, pIn, wPtr, bPtr,
                     normDim, totalRows, eps,
                     _stream.Handle);
+            }
             else
+            {
                 _kernels!.LaunchLayerNorm(
                     pOut, pIn, pW, pB,
                     normDim, totalRows, eps,
                     _stream.Handle);
+            }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -465,6 +559,8 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             GpuTransferHelper.FreeDevice(pB);
+            if (pWCast != 0) CudaMemory.FreeAsync(pWCast, _stream.Handle);
+            if (pBCast != 0) CudaMemory.FreeAsync(pBCast, _stream.Handle);
         }
     }
 
@@ -486,7 +582,7 @@ public sealed class CudaBackend : IBackend
             spatial *= (int)input.Shape[d];
         }
 
-        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0, pWCast = 0, pBCast = 0;
         bool cachedOutput = false;
         try
         {
@@ -497,15 +593,34 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             if (input.DType == DType.F16)
+            {
+                // Cast weight/bias to F16 if stored as F32 (common for norm params in FP16 models)
+                ulong wPtr = pW;
+                ulong bPtr = pB;
+                if (weight.DType == DType.F32)
+                {
+                    pWCast = CudaMemory.Allocate((nuint)(weight.ElementCount * 2));
+                    _kernels!.LaunchCastF32ToF16(pWCast, pW, (int)weight.ElementCount, _stream.Handle);
+                    wPtr = pWCast;
+                }
+                if (bias.DType == DType.F32)
+                {
+                    pBCast = CudaMemory.Allocate((nuint)(bias.ElementCount * 2));
+                    _kernels!.LaunchCastF32ToF16(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
+                    bPtr = pBCast;
+                }
                 _kernels!.LaunchGroupNormSiluF16(
-                    pOut, pIn, pW, pB,
+                    pOut, pIn, wPtr, bPtr,
                     batch, channels, spatial, groups, eps,
                     _stream.Handle);
+            }
             else
+            {
                 _kernels!.LaunchGroupNormSilu(
                     pOut, pIn, pW, pB,
                     batch, channels, spatial, groups, eps,
                     _stream.Handle);
+            }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -516,6 +631,8 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             GpuTransferHelper.FreeDevice(pB);
+            if (pWCast != 0) CudaMemory.FreeAsync(pWCast, _stream.Handle);
+            if (pBCast != 0) CudaMemory.FreeAsync(pBCast, _stream.Handle);
         }
     }
 

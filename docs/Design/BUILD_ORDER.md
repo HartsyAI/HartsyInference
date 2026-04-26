@@ -40,24 +40,31 @@ Phase 9: Video (stub → LTX-Video)
 
 **Validation:** Tokenizer matches OpenAI CLIP Python. Schedulers match diffusers. VAE within 1e-3.
 
-## Phase 3 — First Image (Cuda + SD1.5 Pipeline) — CUDA FUNCTIONAL
+## Phase 3 — First Image (Cuda + SD1.5 Pipeline) — COMPLETE
 **Goal:** Generate image with SD1.5/SDXL on CUDA.
-**Status:** CUDA backend working. SD1.5 + SDXL generating correct images on GPU. Performance optimization in progress.
+**Status:** CUDA backend fully functional with FP16 inference, fused kernels, and async execution. SDXL 1024x1024 at ~5.5s/step.
 
 | Deliverable | Package | Status |
 |---|---|---|
 | CUDA P/Invoke, stream, cuBLAS | Cuda | Done — `CudaDriverApi`, `CublasApi`, `CudaStream` |
 | PTX kernels (FP32): elementwise, spatial, norm, SDPA | Cuda | Done — im2col, GroupNorm, LayerNorm, SiLU, GELU, SDPA |
-| Conv2D via im2col + cuBLAS SGEMM | Cuda | Done — no cuDNN dependency |
+| PTX kernels (FP16): 11 F16 kernel files | Cuda | Done — elementwise, norms, spatial, transpose, geglu, broadcast_add, cast, fused GroupNorm+SiLU |
+| Conv2D via im2col + cuBLAS GEMM | Cuda | Done — no cuDNN, `cublasGemmEx` for F16 |
 | GPU weight cache + preload API | Cuda | Done — `PreloadWeights`, `EnumerateWeights` on all models |
-| GPU-resident activations (lazy-sync) | Cuda | Done — `CacheActivation`, 77% hit rate, ~7% speedup. Per-op Sync still limits gains. |
-| GPU reshape/permute kernels | Cuda | **Next** — eliminate CPU-side reshape round-trips (~1,673 misses/step) |
-| Remove per-op Sync + async execution | Cuda | Planned — deferred cleanup, `cuMemFreeAsync` |
-| Kernel fusion (GroupNorm+SiLU, etc.) | Cuda | Planned |
-| FP16 inference | Cuda | Planned |
+| GPU-resident activations (lazy-sync) | Cuda | Done — `CacheActivation`, 85%+ hit rate |
+| GPU reshape/permute kernels | Cuda | Done — `transpose_2d`, `permute_0213`, `geglu`, `broadcast_add` |
+| Remove per-op Sync + async execution | Cuda | Done — `cuMemFreeAsync`, no per-op sync |
+| Kernel fusion (GroupNorm+SiLU) | Cuda | Done — fused PTX kernel, ~40 fusions per UNet step |
+| FP16 inference | Cuda | Done — full F16 UNet/VAE, F32 scheduler/CLIP, mixed-dtype casting |
 
-**Current performance:** ~93s/step at 1024x1024 (per-op Sync + CPU reshapes dominate). Target: ~3-5s/step.
-**Validation:** GPU UNet forward matches CPU within avg_err=5e-7. See `docs/Research/CUDA_PERFORMANCE.md`.
+**Performance (SDXL on RTX 3060 12GB):**
+- F16 1024x1024: ~5.5s/step (173s total for 20 steps, 5GB VRAM for weights)
+- F16 256x256: ~580ms/step (10.7s total for 10 steps)
+- F32 1024x1024: ~62s/step (for comparison)
+- Speedup: 7-11x from FP16 + fused kernels + async execution
+- Target: ~3s/step (ComfyUI) — remaining gap is activation transfer overhead
+
+**Validation:** F16 output visually matches F32 reference. GPU UNet forward: avg_err=5e-7. See `docs/Research/CUDA_PERFORMANCE.md`.
 
 ## Phase 3.5 — Vulkan Backend
 **Goal:** Port CUDA PTX to SPIR-V; SD1.5 on AMD/Intel.

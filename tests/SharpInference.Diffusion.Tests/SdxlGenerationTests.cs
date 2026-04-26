@@ -555,15 +555,15 @@ public class SdxlGenerationTests
             Dictionary<string, Tensor> clipLF32 = CastWeightsToF32(converted.ClipL);
             Dictionary<string, Tensor> clipGF32 = CastWeightsToF32(converted.ClipG);
 
-            // UNet and VAE: use NATIVE F16 weights (no F32 cast!)
-            Dictionary<string, Tensor> unetWeights = converted.UNet;
-            Dictionary<string, Tensor> vaeWeights = converted.Vae;
+            // UNet and VAE: cast ALL weights to F16 (checkpoints may have mixed F16/F32)
+            Dictionary<string, Tensor> unetWeights = CastWeightsToF16(converted.UNet);
+            Dictionary<string, Tensor> vaeWeights = CastWeightsToF16(converted.Vae);
 
-            // Verify weights are actually F16
-            Tensor? firstUnetWeight = unetWeights.Values.FirstOrDefault();
-            Tensor? firstVaeWeight = vaeWeights.Values.FirstOrDefault();
-            _output.WriteLine($"  UNet weight dtype: {firstUnetWeight?.DType}, VAE weight dtype: {firstVaeWeight?.DType}");
-            Assert.Equal(DType.F16, firstUnetWeight!.DType);
+            // Count how many weights needed casting
+            int unetCastCount = converted.UNet.Count(kv => kv.Value.DType != DType.F16);
+            int vaeCastCount = converted.Vae.Count(kv => kv.Value.DType != DType.F16);
+            _output.WriteLine($"  UNet: {unetCastCount}/{converted.UNet.Count} weights cast to F16");
+            _output.WriteLine($"  VAE: {vaeCastCount}/{converted.Vae.Count} weights cast to F16");
 
             _output.WriteLine("[2/7] Tokenizing prompt...");
             using ClipTokenizer tokenizer = new(TokenizerVocabPath, TokenizerMergesPath);
@@ -723,9 +723,14 @@ public class SdxlGenerationTests
             Dictionary<string, Tensor> clipLF32 = CastWeightsToF32(converted.ClipL);
             Dictionary<string, Tensor> clipGF32 = CastWeightsToF32(converted.ClipG);
 
-            // UNet: native F16 weights. VAE: whatever the checkpoint has.
-            Dictionary<string, Tensor> unetWeights = converted.UNet;
-            Dictionary<string, Tensor> vaeWeights = converted.Vae;
+            // UNet and VAE: cast ALL weights to F16 (checkpoints may have mixed F16/F32)
+            Dictionary<string, Tensor> unetWeights = CastWeightsToF16(converted.UNet);
+            Dictionary<string, Tensor> vaeWeights = CastWeightsToF16(converted.Vae);
+
+            int unetCastCount = converted.UNet.Count(kv => kv.Value.DType != DType.F16);
+            int vaeCastCount = converted.Vae.Count(kv => kv.Value.DType != DType.F16);
+            _output.WriteLine($"  UNet: {unetCastCount}/{converted.UNet.Count} weights cast to F16");
+            _output.WriteLine($"  VAE: {vaeCastCount}/{converted.Vae.Count} weights cast to F16");
 
             _output.WriteLine("[2/7] Tokenizing prompt...");
             using ClipTokenizer tokenizer = new(TokenizerVocabPath, TokenizerMergesPath);
@@ -2034,5 +2039,17 @@ public class SdxlGenerationTests
                 : kvp.Value;
         }
         return f32;
+    }
+
+    private static Dictionary<string, Tensor> CastWeightsToF16(Dictionary<string, Tensor> weights)
+    {
+        Dictionary<string, Tensor> f16 = new(weights.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in weights)
+        {
+            f16[kvp.Key] = (kvp.Value.DType != DType.F16)
+                ? kvp.Value.CastTo(DType.F16)
+                : kvp.Value;
+        }
+        return f16;
     }
 }
