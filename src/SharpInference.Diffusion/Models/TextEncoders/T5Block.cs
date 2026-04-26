@@ -36,17 +36,32 @@ public sealed unsafe class T5Block
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         // Attention sublayer (layer.0)
-        _attnNormWeight = weights[$"{prefix}.layer.0.layer_norm.weight"];
+        // Norm weights must be F32 — they go through backend.RmsNorm with F32 input
+        _attnNormWeight = EnsureF32(weights[$"{prefix}.layer.0.layer_norm.weight"]);
         _qWeight = weights[$"{prefix}.layer.0.SelfAttention.q.weight"];
         _kWeight = weights[$"{prefix}.layer.0.SelfAttention.k.weight"];
         _vWeight = weights[$"{prefix}.layer.0.SelfAttention.v.weight"];
         _oWeight = weights[$"{prefix}.layer.0.SelfAttention.o.weight"];
 
         // FFN sublayer (layer.1) — named DenseReluDense despite using GEGLU in v1.1
-        _ffnNormWeight = weights[$"{prefix}.layer.1.layer_norm.weight"];
+        _ffnNormWeight = EnsureF32(weights[$"{prefix}.layer.1.layer_norm.weight"]);
         _wi0Weight = weights[$"{prefix}.layer.1.DenseReluDense.wi_0.weight"];
         _wi1Weight = weights[$"{prefix}.layer.1.DenseReluDense.wi_1.weight"];
         _woWeight = weights[$"{prefix}.layer.1.DenseReluDense.wo.weight"];
+    }
+
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_attnNormWeight is not null) yield return _attnNormWeight;
+        if (_qWeight is not null) yield return _qWeight;
+        if (_kWeight is not null) yield return _kWeight;
+        if (_vWeight is not null) yield return _vWeight;
+        if (_oWeight is not null) yield return _oWeight;
+        if (_ffnNormWeight is not null) yield return _ffnNormWeight;
+        if (_wi0Weight is not null) yield return _wi0Weight;
+        if (_wi1Weight is not null) yield return _wi1Weight;
+        if (_woWeight is not null) yield return _woWeight;
     }
 
     /// <summary>Forward pass: input [B, seqLen, dModel] + positionBias [1, numHeads, seqLen, seqLen] + optional attentionMask → output [B, seqLen, dModel].</summary>
@@ -63,9 +78,12 @@ public sealed unsafe class T5Block
         backend.RmsNorm(normed, input, _attnNormWeight!, _eps);
 
         // Q, K, V projections (no bias) — weight shape: [dModel, dModel]
-        Tensor query = LinearNoBias(normed, _qWeight!, batch, seqLen, _dModel, _dModel);
-        Tensor key = LinearNoBias(normed, _kWeight!, batch, seqLen, _dModel, _dModel);
-        Tensor value = LinearNoBias(normed, _vWeight!, batch, seqLen, _dModel, _dModel);
+        Tensor query = new Tensor(hidShape, DType.F32);
+        backend.Linear(query, normed, _qWeight!, null);
+        Tensor key = new Tensor(hidShape, DType.F32);
+        backend.Linear(key, normed, _kWeight!, null);
+        Tensor value = new Tensor(hidShape, DType.F32);
+        backend.Linear(value, normed, _vWeight!, null);
         normed.Dispose();
 
         // Reshape to multi-head: [B, seqLen, dModel] → [B, numHeads, seqLen, headDim]
@@ -99,7 +117,8 @@ public sealed unsafe class T5Block
         attnOut.Dispose();
 
         // Output projection (no bias)
-        Tensor attnProjected = LinearNoBias(merged, _oWeight!, batch, seqLen, _dModel, _dModel);
+        Tensor attnProjected = new Tensor(hidShape, DType.F32);
+        backend.Linear(attnProjected, merged, _oWeight!, null);
         merged.Dispose();
 
         // Residual connection
@@ -117,8 +136,10 @@ public sealed unsafe class T5Block
         int dFf = (int)_wi0Weight!.Shape[0]; // wi_0 is [dFf, dModel]
         TensorShape ffShape = new TensorShape(batch, seqLen, dFf);
 
-        Tensor gateProj = LinearNoBias(ffnNormed, _wi0Weight!, batch, seqLen, _dModel, dFf);
-        Tensor linearProj = LinearNoBias(ffnNormed, _wi1Weight!, batch, seqLen, _dModel, dFf);
+        Tensor gateProj = new Tensor(ffShape, DType.F32);
+        backend.Linear(gateProj, ffnNormed, _wi0Weight!, null);
+        Tensor linearProj = new Tensor(ffShape, DType.F32);
+        backend.Linear(linearProj, ffnNormed, _wi1Weight!, null);
         ffnNormed.Dispose();
 
         // Apply GeLU to gate projection
@@ -133,7 +154,8 @@ public sealed unsafe class T5Block
         linearProj.Dispose();
 
         // Output projection
-        Tensor ffnOutput = LinearNoBias(gated, _woWeight!, batch, seqLen, dFf, _dModel);
+        Tensor ffnOutput = new Tensor(hidShape, DType.F32);
+        backend.Linear(ffnOutput, gated, _woWeight!, null);
         gated.Dispose();
 
         // Residual connection
@@ -201,38 +223,6 @@ public sealed unsafe class T5Block
         return combined;
     }
 
-    /// <summary>Matrix multiply without bias: output = input @ weight^T. Weight shape: [outDim, inDim].</summary>
-    private static Tensor LinearNoBias(Tensor input, Tensor weight, int batch, int seqLen, int inDim, int outDim)
-    {
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = 0f;
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                    {
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    }
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
-
-        return output;
-    }
-
     private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
     {
         float* inPtr = (float*)input.DataPointer;
@@ -254,6 +244,9 @@ public sealed unsafe class T5Block
             }
         }
     }
+
+    private static Tensor EnsureF32(Tensor tensor) =>
+        tensor.DType != DType.F32 ? tensor.CastTo(DType.F32) : tensor;
 
     private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
     {

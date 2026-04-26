@@ -34,18 +34,21 @@ public sealed unsafe class T5TextEncoder : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         // Token embeddings — may be under "shared.weight" or "encoder.embed_tokens.weight"
+        // Auto-cast to F32 if needed (EmbeddingLookup uses float* directly)
+        Tensor? rawEmbed = null;
         if (weights.TryGetValue("encoder.embed_tokens.weight", out Tensor? embedTokens))
         {
-            _embedWeight = embedTokens;
+            rawEmbed = embedTokens;
         }
         else if (weights.TryGetValue("shared.weight", out Tensor? shared))
         {
-            _embedWeight = shared;
+            rawEmbed = shared;
         }
         else
         {
             throw new KeyNotFoundException("T5 embedding weights not found (expected 'encoder.embed_tokens.weight' or 'shared.weight')");
         }
+        _embedWeight = rawEmbed.DType != DType.F32 ? rawEmbed.CastTo(DType.F32) : rawEmbed;
 
         // Relative position bias (only on first block's attention layer)
         Tensor biasTable = weights["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"];
@@ -57,10 +60,23 @@ public sealed unsafe class T5TextEncoder : IDisposable
             _blocks[i].LoadWeights(weights, $"encoder.block.{i}");
         }
 
-        // Final layer norm
-        _finalNormWeight = weights["encoder.final_layer_norm.weight"];
+        // Final layer norm — must be F32 (goes through backend.RmsNorm with F32 input)
+        Tensor rawFinalNorm = weights["encoder.final_layer_norm.weight"];
+        _finalNormWeight = rawFinalNorm.DType != DType.F32 ? rawFinalNorm.CastTo(DType.F32) : rawFinalNorm;
 
         Logs.Info($"T5 encoder loaded: {_config.NumLayers} layers, d_model={_config.DModel}, {_config.NumHeads} heads");
+    }
+
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_embedWeight is not null) yield return _embedWeight;
+        if (_finalNormWeight is not null) yield return _finalNormWeight;
+        foreach (Tensor w in _positionBias.EnumerateWeights()) yield return w;
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
+        }
     }
 
     /// <summary>Encodes token IDs to contextualized embeddings. Returns [B, seqLen, dModel] tensor.</summary>
@@ -166,7 +182,6 @@ public sealed unsafe class T5TextEncoder : IDisposable
             // We just clear our references.
             _embedWeight = null;
             _finalNormWeight = null;
-            _positionBias.ComputeBias(0); // Clear cached bias
         }
     }
 }

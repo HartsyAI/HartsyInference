@@ -84,6 +84,11 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _castF32ToF16;
     private readonly nint _castF16ToF32;
 
+    // ── FP8 Cast Modules + Handles ────────────────────────────────────────
+    private readonly CudaModule _castF8Module;
+    private readonly nint _castF8E4M3ToF16;
+    private readonly nint _castF16ToF8E4M3;
+
     private const uint BlockSize = 256;
 
     /// <summary>Loads all PTX kernels from the specified directory.</summary>
@@ -169,6 +174,11 @@ public sealed class CudaKernels : IDisposable
         _castModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "cast_f32_f16.ptx"));
         _castF32ToF16 = _castModule.GetFunction("cast_f32_to_f16");
         _castF16ToF32 = _castModule.GetFunction("cast_f16_to_f32");
+
+        // ── FP8 Cast ─────────────────────────────────────────────────────
+        _castF8Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "cast_f8e4m3_f16.ptx"));
+        _castF8E4M3ToF16 = _castF8Module.GetFunction("cast_f8e4m3_to_f16");
+        _castF16ToF8E4M3 = _castF8Module.GetFunction("cast_f16_to_f8e4m3");
     }
 
     // ── Private Launch Helpers ───────────────────────────────────────────
@@ -640,6 +650,14 @@ public sealed class CudaKernels : IDisposable
     public void LaunchCastF16ToF32(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_castF16ToF32, output, input, count, stream);
 
+    /// <summary>Launches FP8 E4M3 to FP16 cast. Input is 1 byte/element, output is 2 bytes/element.</summary>
+    public void LaunchCastF8E4M3ToF16(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_castF8E4M3ToF16, output, input, count, stream);
+
+    /// <summary>Launches FP16 to FP8 E4M3 cast with saturation. Input is 2 bytes/element, output is 1 byte/element.</summary>
+    public void LaunchCastF16ToF8E4M3(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_castF16ToF8E4M3, output, input, count, stream);
+
     // ── Dispose ─────────────────────────────────────────────────────────
 
     private void DisposeModules()
@@ -663,6 +681,7 @@ public sealed class CudaKernels : IDisposable
         _groupnormSiluModule.Dispose();
         _groupnormSiluF16Module.Dispose();
         _castModule.Dispose();
+        _castF8Module.Dispose();
     }
 
     public void Dispose()

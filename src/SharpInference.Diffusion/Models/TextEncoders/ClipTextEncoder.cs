@@ -33,23 +33,27 @@ public sealed unsafe class ClipTextEncoder
         }
     }
 
-    /// <summary>Loads weights from a dictionary of named tensors. Keys should match diffusers naming (e.g., "text_model.encoder.layers.0.self_attn.q_proj.weight").</summary>
+    /// <summary>Loads weights from a dictionary of named tensors. Keys should match diffusers naming (e.g., "text_model.encoder.layers.0.self_attn.q_proj.weight"). Embedding and projection weights are auto-cast to F32 since they are accessed via float* DataPointer.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "text_model")
     {
-        _tokenEmbeddingWeight = weights[$"{prefix}.embeddings.token_embedding.weight"];
-        _positionEmbeddingWeight = weights[$"{prefix}.embeddings.position_embedding.weight"];
+        _tokenEmbeddingWeight = EnsureF32(weights[$"{prefix}.embeddings.token_embedding.weight"]);
+        _positionEmbeddingWeight = EnsureF32(weights[$"{prefix}.embeddings.position_embedding.weight"]);
 
         for (int i = 0; i < _layers.Length; i++)
         {
             _layers[i].LoadWeights(weights, $"{prefix}.encoder.layers.{i}");
         }
 
-        _finalLayerNormWeight = weights[$"{prefix}.final_layer_norm.weight"];
-        _finalLayerNormBias = weights[$"{prefix}.final_layer_norm.bias"];
+        _finalLayerNormWeight = EnsureF32(weights[$"{prefix}.final_layer_norm.weight"]);
+        _finalLayerNormBias = EnsureF32(weights[$"{prefix}.final_layer_norm.bias"]);
 
         // text_projection exists for CLIP-G (SDXL text_encoder_2) — used for pooled output
-        weights.TryGetValue("text_projection.weight", out _textProjectionWeight);
+        if (weights.TryGetValue("text_projection.weight", out Tensor? textProj))
+            _textProjectionWeight = EnsureF32(textProj);
     }
+
+    private static Tensor EnsureF32(Tensor tensor) =>
+        tensor.DType != DType.F32 ? tensor.CastTo(DType.F32) : tensor;
 
     // Text projection weight for pooled output (CLIP-G only, null for CLIP-L)
     private Tensor? _textProjectionWeight;
@@ -279,23 +283,27 @@ internal sealed unsafe class ClipTransformerLayer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _layerNorm1Weight = weights[$"{prefix}.layer_norm1.weight"];
-        _layerNorm1Bias = weights[$"{prefix}.layer_norm1.bias"];
-        _qProjWeight = weights[$"{prefix}.self_attn.q_proj.weight"];
-        _qProjBias = weights[$"{prefix}.self_attn.q_proj.bias"];
-        _kProjWeight = weights[$"{prefix}.self_attn.k_proj.weight"];
-        _kProjBias = weights[$"{prefix}.self_attn.k_proj.bias"];
-        _vProjWeight = weights[$"{prefix}.self_attn.v_proj.weight"];
-        _vProjBias = weights[$"{prefix}.self_attn.v_proj.bias"];
-        _outProjWeight = weights[$"{prefix}.self_attn.out_proj.weight"];
-        _outProjBias = weights[$"{prefix}.self_attn.out_proj.bias"];
-        _layerNorm2Weight = weights[$"{prefix}.layer_norm2.weight"];
-        _layerNorm2Bias = weights[$"{prefix}.layer_norm2.bias"];
-        _mlpFc1Weight = weights[$"{prefix}.mlp.fc1.weight"];
-        _mlpFc1Bias = weights[$"{prefix}.mlp.fc1.bias"];
-        _mlpFc2Weight = weights[$"{prefix}.mlp.fc2.weight"];
-        _mlpFc2Bias = weights[$"{prefix}.mlp.fc2.bias"];
+        // All weights auto-cast to F32 — ProjectLinear/TransposeMatrix/AddBiasBroadcast use float* DataPointer
+        _layerNorm1Weight = EnsureF32(weights[$"{prefix}.layer_norm1.weight"]);
+        _layerNorm1Bias = EnsureF32(weights[$"{prefix}.layer_norm1.bias"]);
+        _qProjWeight = EnsureF32(weights[$"{prefix}.self_attn.q_proj.weight"]);
+        _qProjBias = EnsureF32(weights[$"{prefix}.self_attn.q_proj.bias"]);
+        _kProjWeight = EnsureF32(weights[$"{prefix}.self_attn.k_proj.weight"]);
+        _kProjBias = EnsureF32(weights[$"{prefix}.self_attn.k_proj.bias"]);
+        _vProjWeight = EnsureF32(weights[$"{prefix}.self_attn.v_proj.weight"]);
+        _vProjBias = EnsureF32(weights[$"{prefix}.self_attn.v_proj.bias"]);
+        _outProjWeight = EnsureF32(weights[$"{prefix}.self_attn.out_proj.weight"]);
+        _outProjBias = EnsureF32(weights[$"{prefix}.self_attn.out_proj.bias"]);
+        _layerNorm2Weight = EnsureF32(weights[$"{prefix}.layer_norm2.weight"]);
+        _layerNorm2Bias = EnsureF32(weights[$"{prefix}.layer_norm2.bias"]);
+        _mlpFc1Weight = EnsureF32(weights[$"{prefix}.mlp.fc1.weight"]);
+        _mlpFc1Bias = EnsureF32(weights[$"{prefix}.mlp.fc1.bias"]);
+        _mlpFc2Weight = EnsureF32(weights[$"{prefix}.mlp.fc2.weight"]);
+        _mlpFc2Bias = EnsureF32(weights[$"{prefix}.mlp.fc2.bias"]);
     }
+
+    private static Tensor EnsureF32(Tensor tensor) =>
+        tensor.DType != DType.F32 ? tensor.CastTo(DType.F32) : tensor;
 
     /// <summary>Forward pass: hidden [B, seqLen, hiddenSize] → output [B, seqLen, hiddenSize].</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor causalMask)

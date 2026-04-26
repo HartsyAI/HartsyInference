@@ -4,7 +4,7 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Feed-forward network supporting SwiGLU (w2(silu(w1(x)) * w3(x))) and GELU-approximate (linear(gelu(linear(x)))) modes. Mode is set at weight loading time to support both Stability AI and HuggingFace diffusers weight formats.</summary>
-public sealed unsafe class SwiGluFfn
+public sealed class SwiGluFfn
 {
     private readonly int _hiddenSize;
     private readonly int _ffDim;
@@ -47,6 +47,17 @@ public sealed unsafe class SwiGluFfn
         _useGeluMode = true;
     }
 
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_w1Weight is not null) yield return _w1Weight;
+        if (_w1Bias is not null) yield return _w1Bias;
+        if (_w2Weight is not null) yield return _w2Weight;
+        if (_w2Bias is not null) yield return _w2Bias;
+        if (_w3Weight is not null) yield return _w3Weight;
+        if (_w3Bias is not null) yield return _w3Bias;
+    }
+
     /// <summary>Forward pass. Input: [B, seqLen, hiddenSize] → Output: [B, seqLen, hiddenSize].</summary>
     public Tensor Forward(IBackend backend, Tensor input, int batch, int seqLen)
     {
@@ -60,22 +71,26 @@ public sealed unsafe class SwiGluFfn
         TensorShape ffShape = new TensorShape(batch, seqLen, _ffDim);
 
         // gate = silu(input @ w1^T + b1)
-        Tensor gate = LinearProjection(input, _w1Weight!, _w1Bias!, batch, seqLen, _hiddenSize, _ffDim);
-        Tensor gateActivated = new Tensor(ffShape, DType.F32);
+        Tensor gate = new Tensor(ffShape, input.DType);
+        backend.Linear(gate, input, _w1Weight!, _w1Bias);
+        Tensor gateActivated = new Tensor(ffShape, input.DType);
         backend.Silu(gateActivated, gate);
         gate.Dispose();
 
         // linear = input @ w3^T + b3
-        Tensor linear = LinearProjection(input, _w3Weight!, _w3Bias!, batch, seqLen, _hiddenSize, _ffDim);
+        Tensor linear = new Tensor(ffShape, input.DType);
+        backend.Linear(linear, input, _w3Weight!, _w3Bias);
 
         // gated = silu(gate) * linear
-        Tensor gated = new Tensor(ffShape, DType.F32);
+        Tensor gated = new Tensor(ffShape, input.DType);
         backend.Mul(gated, gateActivated, linear);
         gateActivated.Dispose();
         linear.Dispose();
 
         // output = gated @ w2^T + b2
-        Tensor output = LinearProjection(gated, _w2Weight!, _w2Bias!, batch, seqLen, _ffDim, _hiddenSize);
+        TensorShape outShape = new TensorShape(batch, seqLen, _hiddenSize);
+        Tensor output = new Tensor(outShape, input.DType);
+        backend.Linear(output, gated, _w2Weight!, _w2Bias);
         gated.Dispose();
 
         return output;
@@ -86,46 +101,17 @@ public sealed unsafe class SwiGluFfn
         TensorShape ffShape = new TensorShape(batch, seqLen, _ffDim);
 
         // proj = gelu(input @ w1^T + b1)
-        Tensor proj = LinearProjection(input, _w1Weight!, _w1Bias!, batch, seqLen, _hiddenSize, _ffDim);
-        Tensor activated = new Tensor(ffShape, DType.F32);
+        Tensor proj = new Tensor(ffShape, input.DType);
+        backend.Linear(proj, input, _w1Weight!, _w1Bias);
+        Tensor activated = new Tensor(ffShape, input.DType);
         backend.Gelu(activated, proj);
         proj.Dispose();
 
         // output = activated @ w2^T + b2
-        Tensor output = LinearProjection(activated, _w2Weight!, _w2Bias!, batch, seqLen, _ffDim, _hiddenSize);
+        TensorShape outShape = new TensorShape(batch, seqLen, _hiddenSize);
+        Tensor output = new Tensor(outShape, input.DType);
+        backend.Linear(output, activated, _w2Weight!, _w2Bias);
         activated.Dispose();
-
-        return output;
-    }
-
-    private static Tensor LinearProjection(Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr[o];
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                    {
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    }
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
 
         return output;
     }

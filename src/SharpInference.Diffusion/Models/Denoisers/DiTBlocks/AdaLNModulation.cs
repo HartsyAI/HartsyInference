@@ -28,6 +28,13 @@ public sealed unsafe class AdaLNModulation
         _linearBias = bias;
     }
 
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_linearWeight is not null) yield return _linearWeight;
+        if (_linearBias is not null) yield return _linearBias;
+    }
+
     /// <summary>Computes modulation parameters from timestep embedding. Input: [B, hiddenSize] → Output: numParams tensors each [B, hiddenSize].</summary>
     public Tensor[] Forward(IBackend backend, Tensor timestepEmb)
     {
@@ -36,13 +43,13 @@ public sealed unsafe class AdaLNModulation
 
         // SiLU activation on input
         TensorShape inputShape = new TensorShape(batch, _hiddenSize);
-        Tensor activated = new Tensor(inputShape, DType.F32);
+        Tensor activated = new Tensor(inputShape, timestepEmb.DType);
         backend.Silu(activated, timestepEmb);
 
         // Linear projection: [B, hiddenSize] → [B, numParams * hiddenSize]
         TensorShape outShape = new TensorShape(batch, outDim);
-        Tensor projected = new Tensor(outShape, DType.F32);
-        LinearProjection(projected, activated, _linearWeight!, _linearBias!, batch, _hiddenSize, outDim);
+        Tensor projected = new Tensor(outShape, activated.DType);
+        backend.Linear(projected, activated, _linearWeight!, _linearBias);
         activated.Dispose();
 
         // Split into numParams chunks along last dim
@@ -52,7 +59,7 @@ public sealed unsafe class AdaLNModulation
         for (int p = 0; p < _numParams; p++)
         {
             TensorShape paramShape = new TensorShape(batch, _hiddenSize);
-            Tensor param = new Tensor(paramShape, DType.F32);
+            Tensor param = new Tensor(paramShape, projected.DType);
             float* paramPtr = (float*)param.DataPointer;
 
             for (int b = 0; b < batch; b++)
@@ -126,27 +133,4 @@ public sealed unsafe class AdaLNModulation
         return output;
     }
 
-    private static void LinearProjection(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int inOffset = b * inDim;
-            int outOffset = b * outDim;
-            for (int o = 0; o < outDim; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * inDim;
-                for (int i = 0; i < inDim; i++)
-                {
-                    sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                }
-                outPtr[outOffset + o] = sum;
-            }
-        }
-    }
 }

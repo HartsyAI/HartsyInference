@@ -128,6 +128,35 @@ public sealed unsafe class FluxDoubleStreamBlock
             weights[$"{prefix}.ff_context.net.2.bias"]);
     }
 
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor w in _imgModulation.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _txtModulation.EnumerateWeights()) yield return w;
+        if (_toQWeight is not null) yield return _toQWeight;
+        if (_toQBias is not null) yield return _toQBias;
+        if (_toKWeight is not null) yield return _toKWeight;
+        if (_toKBias is not null) yield return _toKBias;
+        if (_toVWeight is not null) yield return _toVWeight;
+        if (_toVBias is not null) yield return _toVBias;
+        if (_toOutWeight is not null) yield return _toOutWeight;
+        if (_toOutBias is not null) yield return _toOutBias;
+        if (_addQWeight is not null) yield return _addQWeight;
+        if (_addQBias is not null) yield return _addQBias;
+        if (_addKWeight is not null) yield return _addKWeight;
+        if (_addKBias is not null) yield return _addKBias;
+        if (_addVWeight is not null) yield return _addVWeight;
+        if (_addVBias is not null) yield return _addVBias;
+        if (_toAddOutWeight is not null) yield return _toAddOutWeight;
+        if (_toAddOutBias is not null) yield return _toAddOutBias;
+        foreach (Tensor w in _normQ.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _normK.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _normAddedQ.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _normAddedK.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _imgFfn.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _txtFfn.EnumerateWeights()) yield return w;
+    }
+
     /// <summary>Forward pass. Image and text streams share joint attention with RoPE, then run independent MLPs.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="image">Image tokens [B, N_img, hidden].</param>
@@ -160,14 +189,20 @@ public sealed unsafe class FluxDoubleStreamBlock
         txtNormed.Dispose();
 
         // ── 3. Q/K/V projections ──
-        Tensor imgQ = LinearProject(imgModulated, _toQWeight!, _toQBias, batch, imgSeqLen, _hiddenSize, _hiddenSize);
-        Tensor imgK = LinearProject(imgModulated, _toKWeight!, _toKBias, batch, imgSeqLen, _hiddenSize, _hiddenSize);
-        Tensor imgV = LinearProject(imgModulated, _toVWeight!, _toVBias, batch, imgSeqLen, _hiddenSize, _hiddenSize);
+        Tensor imgQ = new Tensor(imgShape, DType.F32);
+        backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
+        Tensor imgK = new Tensor(imgShape, DType.F32);
+        backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
+        Tensor imgV = new Tensor(imgShape, DType.F32);
+        backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
         imgModulated.Dispose();
 
-        Tensor txtQ = LinearProject(txtModulated, _addQWeight!, _addQBias, batch, txtSeqLen, _hiddenSize, _hiddenSize);
-        Tensor txtK = LinearProject(txtModulated, _addKWeight!, _addKBias, batch, txtSeqLen, _hiddenSize, _hiddenSize);
-        Tensor txtV = LinearProject(txtModulated, _addVWeight!, _addVBias, batch, txtSeqLen, _hiddenSize, _hiddenSize);
+        Tensor txtQ = new Tensor(txtShape, DType.F32);
+        backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
+        Tensor txtK = new Tensor(txtShape, DType.F32);
+        backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
+        Tensor txtV = new Tensor(txtShape, DType.F32);
+        backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
         txtModulated.Dispose();
 
         // ── 4. QK-Norm (per-head RMSNorm) ──
@@ -251,12 +286,14 @@ public sealed unsafe class FluxDoubleStreamBlock
         txtAttnMh.Dispose();
 
         // ── 11. Output projections + gated residual ──
-        Tensor imgAttnProj = LinearProject(imgAttn, _toOutWeight!, _toOutBias, batch, imgSeqLen, _hiddenSize, _hiddenSize);
+        Tensor imgAttnProj = new Tensor(imgShape, DType.F32);
+        backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
         imgAttn.Dispose();
         Tensor imgAfterAttn = AdaLNModulation.ApplyGatedResidual(image, imgAttnProj, imgMod[2], batch, imgSeqLen, _hiddenSize);
         imgAttnProj.Dispose();
 
-        Tensor txtAttnProj = LinearProject(txtAttn, _toAddOutWeight!, _toAddOutBias, batch, txtSeqLen, _hiddenSize, _hiddenSize);
+        Tensor txtAttnProj = new Tensor(txtShape, DType.F32);
+        backend.Linear(txtAttnProj, txtAttn, _toAddOutWeight!, _toAddOutBias);
         txtAttn.Dispose();
         Tensor txtAfterAttn = AdaLNModulation.ApplyGatedResidual(text, txtAttnProj, txtMod[2], batch, txtSeqLen, _hiddenSize);
         txtAttnProj.Dispose();
@@ -321,36 +358,6 @@ public sealed unsafe class FluxDoubleStreamBlock
                     outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
             }
         }
-    }
-
-    private static Tensor LinearProject(Tensor input, Tensor weight, Tensor? bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = bias != null ? (float*)bias.DataPointer : null;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr != null ? bPtr[o] : 0f;
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
-
-        return output;
     }
 
     private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)

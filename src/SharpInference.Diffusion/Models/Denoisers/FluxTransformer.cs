@@ -107,6 +107,39 @@ public sealed unsafe class FluxTransformer : IDisposable
         _projOutBias = weights["proj_out.bias"];
     }
 
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_xEmbedWeight is not null) yield return _xEmbedWeight;
+        if (_xEmbedBias is not null) yield return _xEmbedBias;
+        if (_contextEmbedWeight is not null) yield return _contextEmbedWeight;
+        if (_contextEmbedBias is not null) yield return _contextEmbedBias;
+        if (_timestepLinear1Weight is not null) yield return _timestepLinear1Weight;
+        if (_timestepLinear1Bias is not null) yield return _timestepLinear1Bias;
+        if (_timestepLinear2Weight is not null) yield return _timestepLinear2Weight;
+        if (_timestepLinear2Bias is not null) yield return _timestepLinear2Bias;
+        if (_textLinear1Weight is not null) yield return _textLinear1Weight;
+        if (_textLinear1Bias is not null) yield return _textLinear1Bias;
+        if (_textLinear2Weight is not null) yield return _textLinear2Weight;
+        if (_textLinear2Bias is not null) yield return _textLinear2Bias;
+        if (_guidanceLinear1Weight is not null) yield return _guidanceLinear1Weight;
+        if (_guidanceLinear1Bias is not null) yield return _guidanceLinear1Bias;
+        if (_guidanceLinear2Weight is not null) yield return _guidanceLinear2Weight;
+        if (_guidanceLinear2Bias is not null) yield return _guidanceLinear2Bias;
+        if (_normOutLinearWeight is not null) yield return _normOutLinearWeight;
+        if (_normOutLinearBias is not null) yield return _normOutLinearBias;
+        if (_projOutWeight is not null) yield return _projOutWeight;
+        if (_projOutBias is not null) yield return _projOutBias;
+        for (int i = 0; i < _doubleBlocks.Length; i++)
+        {
+            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
+        }
+        for (int i = 0; i < _singleBlocks.Length; i++)
+        {
+            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
+        }
+    }
+
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="packedLatent">Packed latent tokens [B, imgSeqLen, 64].</param>
@@ -127,12 +160,14 @@ public sealed unsafe class FluxTransformer : IDisposable
         int hidden = _config.HiddenSize;
 
         // ── 1. Project image tokens: [B, imgSeqLen, 64] → [B, imgSeqLen, 3072] ──
-        Tensor imgTokens = LinearProjectBatched(packedLatent, _xEmbedWeight!, _xEmbedBias!,
-            batch, imgSeqLen, _config.InChannels, hidden);
+        TensorShape imgTokShape = new TensorShape(batch, imgSeqLen, hidden);
+        Tensor imgTokens = new Tensor(imgTokShape, DType.F32);
+        backend.Linear(imgTokens, packedLatent, _xEmbedWeight!, _xEmbedBias);
 
         // ── 2. Project text tokens: [B, txtSeqLen, 4096] → [B, txtSeqLen, 3072] ──
-        Tensor txtTokens = LinearProjectBatched(t5Embeddings, _contextEmbedWeight!, _contextEmbedBias!,
-            batch, txtSeqLen, _config.ContextInDim, hidden);
+        TensorShape txtTokShape = new TensorShape(batch, txtSeqLen, hidden);
+        Tensor txtTokens = new Tensor(txtTokShape, DType.F32);
+        backend.Linear(txtTokens, t5Embeddings, _contextEmbedWeight!, _contextEmbedBias);
 
         // ── 3. Compute temb = timestep_embed + clip_pooled_embed + optional guidance_embed ──
         Tensor temb = ComputeTimestepEmbedding(backend, sigma, clipPooled, guidanceScale, batch);
@@ -207,23 +242,27 @@ public sealed unsafe class FluxTransformer : IDisposable
 
         // Timestep MLP: Linear(256, hidden) → SiLU → Linear(hidden, hidden)
         TensorShape hidShape = new TensorShape(batch, hidden);
-        Tensor t1 = LinearProject1D(sinEmbed, _timestepLinear1Weight!, _timestepLinear1Bias!, batch, 256, hidden);
+        Tensor t1 = new Tensor(hidShape, DType.F32);
+        backend.Linear(t1, sinEmbed, _timestepLinear1Weight!, _timestepLinear1Bias);
         sinEmbed.Dispose();
 
         Tensor t1Act = new Tensor(hidShape, DType.F32);
         backend.Silu(t1Act, t1);
         t1.Dispose();
 
-        Tensor tEmb = LinearProject1D(t1Act, _timestepLinear2Weight!, _timestepLinear2Bias!, batch, hidden, hidden);
+        Tensor tEmb = new Tensor(hidShape, DType.F32);
+        backend.Linear(tEmb, t1Act, _timestepLinear2Weight!, _timestepLinear2Bias);
         t1Act.Dispose();
 
         // Pooled text (CLIP) MLP: Linear(768, hidden) → SiLU → Linear(hidden, hidden)
-        Tensor p1 = LinearProject1D(clipPooled, _textLinear1Weight!, _textLinear1Bias!, batch, _config.VecInDim, hidden);
+        Tensor p1 = new Tensor(hidShape, DType.F32);
+        backend.Linear(p1, clipPooled, _textLinear1Weight!, _textLinear1Bias);
         Tensor p1Act = new Tensor(hidShape, DType.F32);
         backend.Silu(p1Act, p1);
         p1.Dispose();
 
-        Tensor pEmb = LinearProject1D(p1Act, _textLinear2Weight!, _textLinear2Bias!, batch, hidden, hidden);
+        Tensor pEmb = new Tensor(hidShape, DType.F32);
+        backend.Linear(pEmb, p1Act, _textLinear2Weight!, _textLinear2Bias);
         p1Act.Dispose();
 
         // temb = timestep_emb + clip_emb
@@ -239,14 +278,16 @@ public sealed unsafe class FluxTransformer : IDisposable
             Tensor gSin = new Tensor(sinShape, DType.F32);
             ComputeSinusoidalTimestep(gSin, guidanceScale * 1000.0f, batch);
 
-            Tensor g1 = LinearProject1D(gSin, _guidanceLinear1Weight!, _guidanceLinear1Bias!, batch, 256, hidden);
+            Tensor g1 = new Tensor(hidShape, DType.F32);
+            backend.Linear(g1, gSin, _guidanceLinear1Weight!, _guidanceLinear1Bias);
             gSin.Dispose();
 
             Tensor g1Act = new Tensor(hidShape, DType.F32);
             backend.Silu(g1Act, g1);
             g1.Dispose();
 
-            Tensor gEmb = LinearProject1D(g1Act, _guidanceLinear2Weight!, _guidanceLinear2Bias!, batch, hidden, hidden);
+            Tensor gEmb = new Tensor(hidShape, DType.F32);
+            backend.Linear(gEmb, g1Act, _guidanceLinear2Weight!, _guidanceLinear2Bias);
             g1Act.Dispose();
 
             Tensor tembNew = new Tensor(hidShape, DType.F32);
@@ -289,7 +330,8 @@ public sealed unsafe class FluxTransformer : IDisposable
         backend.Silu(activated, temb);
 
         TensorShape modShape = new TensorShape(batch, dim * 2);
-        Tensor modParams = LinearProject1D(activated, _normOutLinearWeight!, _normOutLinearBias!, batch, dim, dim * 2);
+        Tensor modParams = new Tensor(modShape, DType.F32);
+        backend.Linear(modParams, activated, _normOutLinearWeight!, _normOutLinearBias);
         activated.Dispose();
 
         // LayerNorm (no affine) + modulate
@@ -320,8 +362,9 @@ public sealed unsafe class FluxTransformer : IDisposable
         modParams.Dispose();
 
         // Linear projection: [B, seqLen, hidden] → [B, seqLen, out_channels]
-        Tensor projected = LinearProjectBatched(modulated, _projOutWeight!, _projOutBias!,
-            batch, seqLen, dim, outDim);
+        TensorShape projShape = new TensorShape(batch, seqLen, outDim);
+        Tensor projected = new Tensor(projShape, DType.F32);
+        backend.Linear(projected, modulated, _projOutWeight!, _projOutBias);
         modulated.Dispose();
 
         return projected;
@@ -358,64 +401,6 @@ public sealed unsafe class FluxTransformer : IDisposable
                     outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
             }
         }
-    }
-
-    private static Tensor LinearProject1D(Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
-    {
-        TensorShape outShape = new TensorShape(batch, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int inOffset = b * inDim;
-            int outOffset = b * outDim;
-            for (int o = 0; o < outDim; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * inDim;
-                for (int i = 0; i < inDim; i++)
-                    sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                outPtr[outOffset + o] = sum;
-            }
-        }
-
-        return output;
-    }
-
-    private static Tensor LinearProjectBatched(Tensor input, Tensor weight, Tensor bias,
-        int batch, int seqLen, int inDim, int outDim)
-    {
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr[o];
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
-
-        return output;
     }
 
     /// <summary>Concatenates two 3D tensors along the sequence dimension: [B,S1,D] + [B,S2,D] → [B,S1+S2,D].</summary>

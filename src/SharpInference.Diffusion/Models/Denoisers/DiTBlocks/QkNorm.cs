@@ -18,10 +18,16 @@ public sealed unsafe class QkNorm
         _eps = eps;
     }
 
-    /// <summary>Loads the learnable scale weight. Shape: [headDim].</summary>
+    /// <summary>Loads the learnable scale weight. Shape: [headDim]. Auto-casts to F32 if needed (Forward uses float* directly).</summary>
     public void LoadWeights(Tensor weight)
     {
-        _weight = weight;
+        _weight = weight.DType != DType.F32 ? weight.CastTo(DType.F32) : weight;
+    }
+
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_weight is not null) yield return _weight;
     }
 
     /// <summary>Applies per-head RMSNorm in-place. Data is treated as numVectors contiguous vectors of length headDim.</summary>

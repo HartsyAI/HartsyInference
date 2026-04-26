@@ -23,10 +23,16 @@ public sealed unsafe class T5RelativePositionBias
         _numHeads = numHeads;
     }
 
-    /// <summary>Loads the relative_attention_bias.weight tensor [numBuckets, numHeads].</summary>
+    /// <summary>Loads the relative_attention_bias.weight tensor [numBuckets, numHeads]. Auto-casts to F32 if needed (ComputeBias uses float* directly).</summary>
     public void LoadWeights(Tensor biasTable)
     {
-        _biasTable = biasTable;
+        _biasTable = biasTable.DType != DType.F32 ? biasTable.CastTo(DType.F32) : biasTable;
+    }
+
+    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_biasTable is not null) yield return _biasTable;
     }
 
     /// <summary>Computes position bias [1, numHeads, seqLen, seqLen]. Cached for repeated calls with same seqLen.</summary>

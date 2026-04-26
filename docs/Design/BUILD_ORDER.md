@@ -80,7 +80,7 @@ Phase 9: Video (stub → LTX-Video)
 
 **Risk:** No cuBLAS equivalent; tiled GEMM via subgroup ops. Slower than CUDA but still faster than CPU.
 
-## Phase 4 — Model Breadth (SDXL + Flux)
+## Phase 4 — Model Breadth (SDXL + Flux + FP8 + Extended Models)
 
 | Deliverable | Package | Description |
 |---|---|---|
@@ -88,6 +88,21 @@ Phase 9: Video (stub → LTX-Video)
 | SDXL UNet + refiner pipeline | Diffusion | Larger UNet, dual conditioning |
 | DiT/Flux pipeline + flow-match scheduler | Diffusion | Double/single-stream MMDiT |
 | LoRA loader | Diffusion | SD + Flux formats |
+| FP8 (E4M3) dtype + loading | Core + ModelHandler | DType.F8E4M3, safetensors FP8 support |
+| FP8 CUDA kernels | Cuda | Cast F8↔F16, cuBLAS FP8 GEMM (Ada+), Ampere fallback |
+| FP8 mixed-precision pipeline | Diffusion | FP8 backbone + FP16 VAE/CLIP, quality presets |
+| DiTUtils shared helpers | Diffusion | LayerNormNoAffine, SinusoidalTimestepEmbedding, linear projections |
+| Chroma config + pipeline | Diffusion | Flux fork with standard CFG |
+| AuraFlow config + transformer + pipeline | Diffusion | MMDiT with T5-XXL, SDXL VAE |
+| Hunyuan Image 2.1 config + transformer + pipeline | Diffusion | 17B MMDiT, 32×32 VAE |
+| Flux.2 config + pipeline | Diffusion | Next-gen 32B DiT, 16×16 VAE, Mistral/Qwen text enc |
+| Flux.1 Tools + Kontext configs | Diffusion | Fill/Redux/Canny/Depth/Kontext conditioning variants |
+| Qwen-Image config + transformer | Diffusion | 7B–20B MMDiT with unified editing |
+| SDXL Inpaint pipeline | Diffusion | 9-channel UNet inpainting |
+| ControlNet adapter | Diffusion | Parallel encoder + zero convs (SD1.5/SDXL/Flux) |
+| IP-Adapter | Diffusion | Image prompt conditioning with per-layer K/V projections |
+| LCM scheduler | Diffusion | 1–4 step distilled scheduler |
+| VaeConfig presets | Diffusion | Flux2, Chroma, AuraFlow, HunyuanImage, QwenImage |
 
 ## Phase 5 — Audio
 

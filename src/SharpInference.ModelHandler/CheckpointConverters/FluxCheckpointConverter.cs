@@ -290,13 +290,13 @@ public sealed class FluxCheckpointConverter
             return;
         }
 
-        // QK-norm
-        if (rest == "norm_q.weight")
+        // QK-norm (two naming conventions: BFL norm_q.weight vs FP8 norm.query_norm.scale)
+        if (rest == "norm_q.weight" || rest == "norm.query_norm.scale")
         {
             output[$"{prefix}.attn.norm_q.weight"] = tensor;
             return;
         }
-        if (rest == "norm_k.weight")
+        if (rest == "norm_k.weight" || rest == "norm.key_norm.scale")
         {
             output[$"{prefix}.attn.norm_k.weight"] = tensor;
             return;
@@ -324,13 +324,13 @@ public sealed class FluxCheckpointConverter
             return;
         }
 
-        // QK-norm
-        if (rest == "norm_q.weight")
+        // QK-norm (two naming conventions: BFL norm_q.weight vs FP8 norm.query_norm.scale)
+        if (rest == "norm_q.weight" || rest == "norm.query_norm.scale")
         {
             output[$"{prefix}.attn.norm_added_q.weight"] = tensor;
             return;
         }
-        if (rest == "norm_k.weight")
+        if (rest == "norm_k.weight" || rest == "norm.key_norm.scale")
         {
             output[$"{prefix}.attn.norm_added_k.weight"] = tensor;
             return;

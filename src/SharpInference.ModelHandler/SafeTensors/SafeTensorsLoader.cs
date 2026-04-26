@@ -123,6 +123,8 @@ public sealed class SafeTensorsLoader : IDisposable
         "F32" => DType.F32,
         "F16" => DType.F16,
         "BF16" => DType.BF16,
+        "F8_E4M3" => DType.F8E4M3,
+        "F8_E5M2" => DType.F8E5M2,
         "I64" => DType.I64,
         "I32" => DType.I32,
         "I8" => DType.I8,

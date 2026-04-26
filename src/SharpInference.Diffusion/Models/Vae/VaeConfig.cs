@@ -76,4 +76,46 @@ public record VaeConfig
         UseQuantConv = false,
         SampleSize = 1024,
     };
+
+    /// <summary>Preset for Flux.2 (16×16 downscale VAE). Same latent structure as Flux.1 but with 16× spatial downscale instead of 8×.</summary>
+    public static VaeConfig Flux2 => new()
+    {
+        LatentChannels = 16,
+        ScalingFactor = 0.3611f,
+        ShiftFactor = 0.1159f,
+        UsePostQuantConv = false,
+        UseQuantConv = false,
+        SampleSize = 1024,
+        // TODO: Confirm exact scaling/shift factors for Flux.2 VAE — may differ from Flux.1
+    };
+
+    /// <summary>Preset for Chroma (reuses Flux.1 VAE).</summary>
+    public static VaeConfig Chroma => Flux;
+
+    /// <summary>Preset for AuraFlow (reuses SDXL-compatible VAE with 4-channel latent).</summary>
+    public static VaeConfig AuraFlow => Sdxl;
+
+    /// <summary>Preset for Hunyuan Image 2.1 (32-channel latent, 32× downscale). Significantly different VAE architecture from standard models.</summary>
+    public static VaeConfig HunyuanImage => new()
+    {
+        LatentChannels = 32,
+        ScalingFactor = 1.0f,
+        ShiftFactor = null,
+        UsePostQuantConv = false,
+        UseQuantConv = false,
+        SampleSize = 2048,
+        // TODO: Confirm exact architecture (block channels, scaling factor) once HunyuanImage VAE is analyzed
+    };
+
+    /// <summary>Preset for Qwen-Image (same VAE architecture as SD3/Flux with 16-channel latent).</summary>
+    public static VaeConfig QwenImage => new()
+    {
+        LatentChannels = 16,
+        ScalingFactor = 1.5305f,
+        ShiftFactor = 0.0609f,
+        UsePostQuantConv = false,
+        UseQuantConv = false,
+        SampleSize = 1024,
+        // TODO: Confirm exact scaling/shift factors for Qwen-Image VAE
+    };
 }

@@ -145,6 +145,26 @@ public interface IBackend : IDisposable
             dst[i] = (float)src[i];
     }
 
+    /// <summary>Cast tensor from FP8 E4M3 to FP16. Default: CPU via F32 intermediate.</summary>
+    void CastF8E4M3ToF16(Tensor output, Tensor input)
+    {
+        Tensor f32 = input.CastTo(DType.F32);
+        CastToF16(output, f32);
+        f32.Dispose();
+    }
+
+    /// <summary>Cast tensor from FP16 to FP8 E4M3. Default: CPU via Tensor.CastTo.</summary>
+    void CastF16ToF8E4M3(Tensor output, Tensor input)
+    {
+        Tensor f8 = input.CastTo(DType.F8E4M3);
+        unsafe
+        {
+            long byteCount = output.Shape.ElementCount; // 1 byte per F8 element
+            Buffer.MemoryCopy(f8.DataPointer, output.DataPointer, byteCount, byteCount);
+        }
+        f8.Dispose();
+    }
+
     // ── Synchronization ──────────────────────────────────────────────────
 
     /// <summary>Waits for all pending GPU work to complete. No-op on CPU backends. Call at pipeline phase boundaries to ensure deferred memory frees are processed before large allocations.</summary>

@@ -87,6 +87,8 @@ internal static partial class CublasApi
     internal const int CUDA_R_32F = 0;
     internal const int CUDA_R_64F = 1;
     internal const int CUDA_R_16F = 2;
+    internal const int CUDA_R_8F_E4M3 = 28;  // CUDA 11.8+ (Ada / SM 8.9+)
+    internal const int CUDA_R_8F_E5M2 = 29;  // CUDA 11.8+ (Ada / SM 8.9+)
     internal const int CUDA_R_16BF = 14;
 
     // ── Compute Type Constants ──────────────────────────────────────────

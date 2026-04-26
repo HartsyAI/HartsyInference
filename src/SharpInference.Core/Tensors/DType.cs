@@ -14,6 +14,12 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>16-bit Brain floating point (bfloat16).</summary>
     public static readonly DType BF16 = new("BF16", 2, false);
 
+    /// <summary>8-bit floating point E4M3 (4-bit exponent, 3-bit mantissa, no NaN). Standard for FP8 inference weights.</summary>
+    public static readonly DType F8E4M3 = new("F8_E4M3", 1, false);
+
+    /// <summary>8-bit floating point E5M2 (5-bit exponent, 2-bit mantissa). Wider range, lower precision than E4M3.</summary>
+    public static readonly DType F8E5M2 = new("F8_E5M2", 1, false);
+
     /// <summary>8-bit block quantization (32 values per block, 1 FP16 scale).</summary>
     public static readonly DType Q8_0 = new("Q8_0", 0, true, 34, 32);
 
@@ -38,8 +44,11 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>64-bit IEEE 754 floating point (double precision).</summary>
     public static readonly DType F64 = new("F64", 8, false);
 
-    /// <summary>Whether this dtype is a floating-point format (F32, F16, or BF16).</summary>
-    public bool IsFloatingPoint => this == F32 || this == F16 || this == BF16;
+    /// <summary>Whether this dtype is a floating-point format (F32, F16, BF16, F8E4M3, F8E5M2).</summary>
+    public bool IsFloatingPoint => this == F32 || this == F16 || this == BF16 || this == F8E4M3 || this == F8E5M2;
+
+    /// <summary>Whether this dtype is an FP8 format.</summary>
+    public bool IsFp8 => this == F8E4M3 || this == F8E5M2;
 
     /// <summary>Computes total byte count for a given element count. Asserts block alignment for quantized types.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
