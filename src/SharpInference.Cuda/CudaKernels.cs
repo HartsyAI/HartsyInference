@@ -3,6 +3,7 @@ namespace SharpInference.Cuda;
 /// <summary>Loads PTX modules from disk and provides typed kernel launch methods. Function handles stored as nint fields for zero-alloc dispatch.</summary>
 public sealed class CudaKernels : IDisposable
 {
+    // ── F32 Modules ──────────────────────────────────────────────────────
     private readonly CudaModule _elementwiseModule;
     private readonly CudaModule _groupnormModule;
     private readonly CudaModule _layernormModule;
@@ -12,7 +13,22 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
-    // ── Elementwise kernel function handles ─────────────────────────────
+    // ── F16 Modules ──────────────────────────────────────────────────────
+    private readonly CudaModule _elementwiseF16Module;
+    private readonly CudaModule _groupnormF16Module;
+    private readonly CudaModule _layernormF16Module;
+    private readonly CudaModule _spatialF16Module;
+    private readonly CudaModule _softmaxF16Module;
+    private readonly CudaModule _transposeF16Module;
+    private readonly CudaModule _gegluF16Module;
+    private readonly CudaModule _broadcastAddF16Module;
+
+    // ── Fused + Cast Modules ─────────────────────────────────────────────
+    private readonly CudaModule _groupnormSiluModule;
+    private readonly CudaModule _groupnormSiluF16Module;
+    private readonly CudaModule _castModule;
+
+    // ── Elementwise F32 function handles ─────────────────────────────────
     private readonly nint _addF32;
     private readonly nint _mulF32;
     private readonly nint _scaleF32;
@@ -20,27 +36,53 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _geluF32;
     private readonly nint _clampF32;
 
-    // ── Normalization kernel function handles ───────────────────────────
-    private readonly nint _groupnormF32;
-    private readonly nint _layernormF32;
+    // ── Elementwise F16 function handles ─────────────────────────────────
+    private readonly nint _addF16;
+    private readonly nint _mulF16;
+    private readonly nint _scaleF16;
+    private readonly nint _siluF16;
+    private readonly nint _geluF16;
+    private readonly nint _clampF16;
 
-    // ── Spatial kernel function handles ─────────────────────────────────
+    // ── Normalization function handles ───────────────────────────────────
+    private readonly nint _groupnormF32;
+    private readonly nint _groupnormF16;
+    private readonly nint _layernormF32;
+    private readonly nint _layernormF16;
+
+    // ── Spatial function handles ─────────────────────────────────────────
     private readonly nint _upsampleNearest2dF32;
     private readonly nint _im2colF32;
     private readonly nint _col2biasAddF32;
+    private readonly nint _upsampleNearest2dF16;
+    private readonly nint _im2colF16;
+    private readonly nint _col2biasAddF16;
 
-    // ── Softmax kernel function handle ─────────────────────────────────
+    // ── Softmax function handles ─────────────────────────────────────────
     private readonly nint _softmaxF32;
+    private readonly nint _softmaxF16;
 
-    // ── Transpose/permute kernel function handles ──────────────────────
+    // ── Transpose/Permute function handles ───────────────────────────────
     private readonly nint _transpose2dF32;
     private readonly nint _permute0213F32;
+    private readonly nint _transpose2dF16;
+    private readonly nint _permute0213F16;
 
-    // ── GEGLU kernel function handle ───────────────────────────────────
+    // ── GeGlu function handles ───────────────────────────────────────────
     private readonly nint _gegluF32;
+    private readonly nint _gegluF16;
 
-    // ── Broadcast add kernel function handle ───────────────────────────
+    // ── BroadcastAdd function handles ────────────────────────────────────
     private readonly nint _broadcastAddF32;
+    private readonly nint _broadcastAddF16;
+
+    // ── Fused GroupNorm+SiLU function handles ────────────────────────────
+    private readonly nint _groupnormSiluF32;
+    private readonly nint _groupnormSiluF16;
+
+    // ── Cast function handles ────────────────────────────────────────────
+    private readonly nint _castF32ToF16;
+    private readonly nint _castF16ToF32;
 
     private const uint BlockSize = 256;
 
@@ -50,9 +92,8 @@ public sealed class CudaKernels : IDisposable
         if (!Directory.Exists(ptxDir))
             throw new DirectoryNotFoundException($"PTX directory not found: {ptxDir}");
 
-        // Elementwise kernels
-        string elementwisePath = Path.Combine(ptxDir, "elementwise_f32.ptx");
-        _elementwiseModule = CudaModule.LoadFromFile(elementwisePath);
+        // ── F32 modules ──────────────────────────────────────────────────
+        _elementwiseModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "elementwise_f32.ptx"));
         _addF32 = _elementwiseModule.GetFunction("elementwise_add_f32");
         _mulF32 = _elementwiseModule.GetFunction("elementwise_mul_f32");
         _scaleF32 = _elementwiseModule.GetFunction("elementwise_scale_f32");
@@ -60,49 +101,79 @@ public sealed class CudaKernels : IDisposable
         _geluF32 = _elementwiseModule.GetFunction("elementwise_gelu_f32");
         _clampF32 = _elementwiseModule.GetFunction("elementwise_clamp_f32");
 
-        // GroupNorm kernel
-        string groupnormPath = Path.Combine(ptxDir, "groupnorm_f32.ptx");
-        _groupnormModule = CudaModule.LoadFromFile(groupnormPath);
+        _groupnormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "groupnorm_f32.ptx"));
         _groupnormF32 = _groupnormModule.GetFunction("groupnorm_f32");
 
-        // LayerNorm kernel
-        string layernormPath = Path.Combine(ptxDir, "layernorm_f32.ptx");
-        _layernormModule = CudaModule.LoadFromFile(layernormPath);
+        _layernormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "layernorm_f32.ptx"));
         _layernormF32 = _layernormModule.GetFunction("layernorm_f32");
 
-        // Spatial kernels (upsample, im2col, bias add)
-        string spatialPath = Path.Combine(ptxDir, "spatial_f32.ptx");
-        _spatialModule = CudaModule.LoadFromFile(spatialPath);
+        _spatialModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "spatial_f32.ptx"));
         _upsampleNearest2dF32 = _spatialModule.GetFunction("upsample_nearest2d_f32");
         _im2colF32 = _spatialModule.GetFunction("im2col_f32");
         _col2biasAddF32 = _spatialModule.GetFunction("col2bias_add_f32");
 
-        // Softmax kernel
-        string softmaxPath = Path.Combine(ptxDir, "softmax_f32.ptx");
-        _softmaxModule = CudaModule.LoadFromFile(softmaxPath);
+        _softmaxModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "softmax_f32.ptx"));
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
 
-        // Transpose/permute kernels
-        string transposePath = Path.Combine(ptxDir, "transpose_f32.ptx");
-        _transposeModule = CudaModule.LoadFromFile(transposePath);
+        _transposeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "transpose_f32.ptx"));
         _transpose2dF32 = _transposeModule.GetFunction("transpose_2d_f32");
         _permute0213F32 = _transposeModule.GetFunction("permute_0213_f32");
 
-        // GEGLU kernel
-        string gegluPath = Path.Combine(ptxDir, "geglu_f32.ptx");
-        _gegluModule = CudaModule.LoadFromFile(gegluPath);
+        _gegluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "geglu_f32.ptx"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
 
-        // Broadcast add kernel
-        string broadcastAddPath = Path.Combine(ptxDir, "broadcast_add_f32.ptx");
-        _broadcastAddModule = CudaModule.LoadFromFile(broadcastAddPath);
+        _broadcastAddModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "broadcast_add_f32.ptx"));
         _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
+
+        // ── F16 modules ──────────────────────────────────────────────────
+        _elementwiseF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "elementwise_f16.ptx"));
+        _addF16 = _elementwiseF16Module.GetFunction("elementwise_add_f16");
+        _mulF16 = _elementwiseF16Module.GetFunction("elementwise_mul_f16");
+        _scaleF16 = _elementwiseF16Module.GetFunction("elementwise_scale_f16");
+        _siluF16 = _elementwiseF16Module.GetFunction("elementwise_silu_f16");
+        _geluF16 = _elementwiseF16Module.GetFunction("elementwise_gelu_f16");
+        _clampF16 = _elementwiseF16Module.GetFunction("elementwise_clamp_f16");
+
+        _groupnormF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "groupnorm_f16.ptx"));
+        _groupnormF16 = _groupnormF16Module.GetFunction("groupnorm_f16");
+
+        _layernormF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "layernorm_f16.ptx"));
+        _layernormF16 = _layernormF16Module.GetFunction("layernorm_f16");
+
+        _spatialF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "spatial_f16.ptx"));
+        _upsampleNearest2dF16 = _spatialF16Module.GetFunction("upsample_nearest2d_f16");
+        _im2colF16 = _spatialF16Module.GetFunction("im2col_f16");
+        _col2biasAddF16 = _spatialF16Module.GetFunction("col2bias_add_f16");
+
+        _softmaxF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "softmax_f16.ptx"));
+        _softmaxF16 = _softmaxF16Module.GetFunction("softmax_f16");
+
+        _transposeF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "transpose_f16.ptx"));
+        _transpose2dF16 = _transposeF16Module.GetFunction("transpose_2d_f16");
+        _permute0213F16 = _transposeF16Module.GetFunction("permute_0213_f16");
+
+        _gegluF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "geglu_f16.ptx"));
+        _gegluF16 = _gegluF16Module.GetFunction("geglu_f16");
+
+        _broadcastAddF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "broadcast_add_f16.ptx"));
+        _broadcastAddF16 = _broadcastAddF16Module.GetFunction("broadcast_add_f16");
+
+        // ── Fused GroupNorm+SiLU ─────────────────────────────────────────
+        _groupnormSiluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "groupnorm_silu_f32.ptx"));
+        _groupnormSiluF32 = _groupnormSiluModule.GetFunction("groupnorm_silu_f32");
+
+        _groupnormSiluF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "groupnorm_silu_f16.ptx"));
+        _groupnormSiluF16 = _groupnormSiluF16Module.GetFunction("groupnorm_silu_f16");
+
+        // ── Cast ─────────────────────────────────────────────────────────
+        _castModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "cast_f32_f16.ptx"));
+        _castF32ToF16 = _castModule.GetFunction("cast_f32_to_f16");
+        _castF16ToF32 = _castModule.GetFunction("cast_f16_to_f32");
     }
 
-    // ── Elementwise Launches ────────────────────────────────────────────
+    // ── Private Launch Helpers ───────────────────────────────────────────
 
-    /// <summary>Launches elementwise add: output[i] = a[i] + b[i]</summary>
-    public unsafe void LaunchAdd(ulong output, ulong a, ulong b, int count, nint stream)
+    private unsafe void LaunchBinaryImpl(nint func, ulong output, ulong a, ulong b, int count, nint stream)
     {
         ulong outArg = output, aArg = a, bArg = b;
         uint countArg = (uint)count;
@@ -115,30 +186,27 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _addF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches elementwise multiply: output[i] = a[i] * b[i]</summary>
-    public unsafe void LaunchMul(ulong output, ulong a, ulong b, int count, nint stream)
+    private unsafe void LaunchUnaryImpl(nint func, ulong output, ulong input, int count, nint stream)
     {
-        ulong outArg = output, aArg = a, bArg = b;
+        ulong outArg = output, inArg = input;
         uint countArg = (uint)count;
 
-        void** args = stackalloc void*[4];
+        void** args = stackalloc void*[3];
         args[0] = &outArg;
-        args[1] = &aArg;
-        args[2] = &bArg;
-        args[3] = &countArg;
+        args[1] = &inArg;
+        args[2] = &countArg;
 
         uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _mulF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches elementwise scale: output[i] = input[i] * scalar</summary>
-    public unsafe void LaunchScale(ulong output, ulong input, float scalar, int count, nint stream)
+    private unsafe void LaunchScaleImpl(nint func, ulong output, ulong input, float scalar, int count, nint stream)
     {
         ulong outArg = output, inArg = input;
         float scalarArg = scalar;
@@ -152,46 +220,11 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _scaleF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches SiLU activation: output[i] = input[i] * sigmoid(input[i])</summary>
-    public unsafe void LaunchSilu(ulong output, ulong input, int count, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint countArg = (uint)count;
-
-        void** args = stackalloc void*[3];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &countArg;
-
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(
-            _siluF32, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches GELU activation: output[i] = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))</summary>
-    public unsafe void LaunchGelu(ulong output, ulong input, int count, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint countArg = (uint)count;
-
-        void** args = stackalloc void*[3];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &countArg;
-
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(
-            _geluF32, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches elementwise clamp: output[i] = clamp(input[i], min, max)</summary>
-    public unsafe void LaunchClamp(ulong output, ulong input, float min, float max, int count, nint stream)
+    private unsafe void LaunchClampImpl(nint func, ulong output, ulong input, float min, float max, int count, nint stream)
     {
         ulong outArg = output, inArg = input;
         float minArg = min, maxArg = max;
@@ -206,14 +239,11 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _clampF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    // ── Normalization Launches ──────────────────────────────────────────
-
-    /// <summary>Launches GroupNorm: each block handles one (batch, group) pair. Shared memory = blockDim * sizeof(float).</summary>
-    public unsafe void LaunchGroupNorm(ulong output, ulong input, ulong weight, ulong bias,
+    private unsafe void LaunchGroupNormImpl(nint func, ulong output, ulong input, ulong weight, ulong bias,
         int batch, int channels, int spatial, int groups, float eps, nint stream)
     {
         ulong outArg = output, inArg = input, wArg = weight, bArg = bias;
@@ -234,12 +264,11 @@ public sealed class CudaKernels : IDisposable
         uint gridDim = (uint)(batch * groups);
         uint sharedMem = BlockSize * sizeof(float);
         CudaDriverApi.cuLaunchKernel(
-            _groupnormF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches LayerNorm: each block handles one row. Shared memory = blockDim * sizeof(float).</summary>
-    public unsafe void LaunchLayerNorm(ulong output, ulong input, ulong weight, ulong bias,
+    private unsafe void LaunchLayerNormImpl(nint func, ulong output, ulong input, ulong weight, ulong bias,
         int normDim, int totalRows, float eps, nint stream)
     {
         ulong outArg = output, inArg = input, wArg = weight, bArg = bias;
@@ -258,14 +287,29 @@ public sealed class CudaKernels : IDisposable
         uint gridDim = (uint)totalRows;
         uint sharedMem = BlockSize * sizeof(float);
         CudaDriverApi.cuLaunchKernel(
-            _layernormF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
-    // ── Spatial Launches ────────────────────────────────────────────────
+    private unsafe void LaunchSoftmaxImpl(nint func, ulong data, int rowLen, int totalRows, nint stream)
+    {
+        ulong dataArg = data;
+        uint rowLenArg = (uint)rowLen;
+        uint totalRowsArg = (uint)totalRows;
 
-    /// <summary>Launches UpsampleNearest2D.</summary>
-    public unsafe void LaunchUpsampleNearest2D(ulong output, ulong input,
+        void** args = stackalloc void*[3];
+        args[0] = &dataArg;
+        args[1] = &rowLenArg;
+        args[2] = &totalRowsArg;
+
+        uint gridDim = (uint)totalRows;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchUpsampleImpl(nint func, ulong output, ulong input,
         int batch, int channels, int inH, int inW, int outH, int outW, int scaleH, int scaleW, nint stream)
     {
         ulong outArg = output, inArg = input;
@@ -289,12 +333,11 @@ public sealed class CudaKernels : IDisposable
         long totalElements = (long)batch * channels * outH * outW;
         uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
-            _upsampleNearest2dF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches Im2Col for one batch element.</summary>
-    public unsafe void LaunchIm2Col(ulong col, ulong input,
+    private unsafe void LaunchIm2ColImpl(nint func, ulong col, ulong input,
         int channels, int inH, int inW, int kH, int kW,
         int padH, int padW, int strideH, int strideW,
         int outH, int outW, int batchOffset, nint stream)
@@ -326,12 +369,11 @@ public sealed class CudaKernels : IDisposable
         long totalElements = (long)channels * kH * kW * outH * outW;
         uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
-            _im2colF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches bias addition: output[i] += bias[channel_of(i)]</summary>
-    public unsafe void LaunchBiasAdd(ulong output, ulong bias, int outChannels, int spatial, int totalElements, nint stream)
+    private unsafe void LaunchBiasAddImpl(nint func, ulong output, ulong bias, int outChannels, int spatial, int totalElements, nint stream)
     {
         ulong outArg = output, biasArg = bias;
         uint outChArg = (uint)outChannels, spatialArg = (uint)spatial, totalArg = (uint)totalElements;
@@ -345,35 +387,11 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _col2biasAddF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    // ── Softmax Launch ─────────────────────────────────────────────────
-
-    /// <summary>Launches in-place per-row softmax: data[row, col] = softmax(data[row, :]). One block per row, shared memory = blockDim * sizeof(float).</summary>
-    public unsafe void LaunchSoftmax(ulong data, int rowLen, int totalRows, nint stream)
-    {
-        ulong dataArg = data;
-        uint rowLenArg = (uint)rowLen;
-        uint totalRowsArg = (uint)totalRows;
-
-        void** args = stackalloc void*[3];
-        args[0] = &dataArg;
-        args[1] = &rowLenArg;
-        args[2] = &totalRowsArg;
-
-        uint gridDim = (uint)totalRows;
-        uint sharedMem = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(
-            _softmaxF32, gridDim, 1, 1, BlockSize, 1, 1,
-            sharedMem, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    // ── Transpose/Permute Launches ─────────────────────────────────────
-
-    /// <summary>Launches batched 2D transpose: [B, D1, D2] -> [B, D2, D1].</summary>
-    public unsafe void LaunchTranspose2D(ulong output, ulong input, int d1, int d2, int totalElements, nint stream)
+    private unsafe void LaunchTranspose2DImpl(nint func, ulong output, ulong input, int d1, int d2, int totalElements, nint stream)
     {
         ulong outArg = output, inArg = input;
         uint d1Arg = (uint)d1, d2Arg = (uint)d2, totalArg = (uint)totalElements;
@@ -387,12 +405,11 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _transpose2dF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches 4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D].</summary>
-    public unsafe void LaunchPermute0213(ulong output, ulong input, int s, int h, int d, int totalElements, nint stream)
+    private unsafe void LaunchPermute0213Impl(nint func, ulong output, ulong input, int s, int h, int d, int totalElements, nint stream)
     {
         ulong outArg = output, inArg = input;
         uint sArg = (uint)s, hArg = (uint)h, dArg = (uint)d, totalArg = (uint)totalElements;
@@ -407,14 +424,11 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _permute0213F32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    // ── GEGLU Launch ───────────────────────────────────────────────────
-
-    /// <summary>Launches GEGLU: splits input along last dim (innerDim), applies GELU gate.</summary>
-    public unsafe void LaunchGeGlu(ulong output, ulong input, int innerDim, int outputElements, nint stream)
+    private unsafe void LaunchGeGluImpl(nint func, ulong output, ulong input, int innerDim, int outputElements, nint stream)
     {
         ulong outArg = output, inArg = input;
         uint innerDimArg = (uint)innerDim;
@@ -428,14 +442,11 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)outputElements + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _gegluF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    // ── Broadcast Add Launch ───────────────────────────────────────────
-
-    /// <summary>Launches broadcast add: hidden[b,c,s] += bias[b,c] in-place.</summary>
-    public unsafe void LaunchBroadcastAdd(ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
+    private unsafe void LaunchBroadcastAddImpl(nint func, ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
     {
         ulong hiddenArg = hidden, biasArg = bias;
         uint chArg = (uint)channels, spatialArg = (uint)spatial, totalArg = (uint)totalElements;
@@ -449,11 +460,189 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = ((uint)totalElements + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(
-            _broadcastAddF32, gridDim, 1, 1, BlockSize, 1, 1,
+            func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    public void Dispose()
+    // ── Elementwise Launches ────────────────────────────────────────────
+
+    /// <summary>Launches elementwise add: output[i] = a[i] + b[i] (F32)</summary>
+    public void LaunchAdd(ulong output, ulong a, ulong b, int count, nint stream)
+        => LaunchBinaryImpl(_addF32, output, a, b, count, stream);
+
+    /// <summary>Launches elementwise add: output[i] = a[i] + b[i] (F16)</summary>
+    public void LaunchAddF16(ulong output, ulong a, ulong b, int count, nint stream)
+        => LaunchBinaryImpl(_addF16, output, a, b, count, stream);
+
+    /// <summary>Launches elementwise multiply: output[i] = a[i] * b[i] (F32)</summary>
+    public void LaunchMul(ulong output, ulong a, ulong b, int count, nint stream)
+        => LaunchBinaryImpl(_mulF32, output, a, b, count, stream);
+
+    /// <summary>Launches elementwise multiply: output[i] = a[i] * b[i] (F16)</summary>
+    public void LaunchMulF16(ulong output, ulong a, ulong b, int count, nint stream)
+        => LaunchBinaryImpl(_mulF16, output, a, b, count, stream);
+
+    /// <summary>Launches elementwise scale: output[i] = input[i] * scalar (F32)</summary>
+    public void LaunchScale(ulong output, ulong input, float scalar, int count, nint stream)
+        => LaunchScaleImpl(_scaleF32, output, input, scalar, count, stream);
+
+    /// <summary>Launches elementwise scale: output[i] = input[i] * scalar (F16)</summary>
+    public void LaunchScaleF16(ulong output, ulong input, float scalar, int count, nint stream)
+        => LaunchScaleImpl(_scaleF16, output, input, scalar, count, stream);
+
+    /// <summary>Launches SiLU activation: output[i] = input[i] * sigmoid(input[i]) (F32)</summary>
+    public void LaunchSilu(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_siluF32, output, input, count, stream);
+
+    /// <summary>Launches SiLU activation: output[i] = input[i] * sigmoid(input[i]) (F16)</summary>
+    public void LaunchSiluF16(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_siluF16, output, input, count, stream);
+
+    /// <summary>Launches GELU activation (F32)</summary>
+    public void LaunchGelu(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_geluF32, output, input, count, stream);
+
+    /// <summary>Launches GELU activation (F16)</summary>
+    public void LaunchGeluF16(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_geluF16, output, input, count, stream);
+
+    /// <summary>Launches elementwise clamp: output[i] = clamp(input[i], min, max) (F32)</summary>
+    public void LaunchClamp(ulong output, ulong input, float min, float max, int count, nint stream)
+        => LaunchClampImpl(_clampF32, output, input, min, max, count, stream);
+
+    /// <summary>Launches elementwise clamp: output[i] = clamp(input[i], min, max) (F16)</summary>
+    public void LaunchClampF16(ulong output, ulong input, float min, float max, int count, nint stream)
+        => LaunchClampImpl(_clampF16, output, input, min, max, count, stream);
+
+    // ── Normalization Launches ──────────────────────────────────────────
+
+    /// <summary>Launches GroupNorm (F32). Each block handles one (batch, group) pair.</summary>
+    public void LaunchGroupNorm(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int channels, int spatial, int groups, float eps, nint stream)
+        => LaunchGroupNormImpl(_groupnormF32, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
+
+    /// <summary>Launches GroupNorm with F16 I/O, FP32 accumulation.</summary>
+    public void LaunchGroupNormF16(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int channels, int spatial, int groups, float eps, nint stream)
+        => LaunchGroupNormImpl(_groupnormF16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
+
+    /// <summary>Launches LayerNorm (F32). Each block handles one row.</summary>
+    public void LaunchLayerNorm(ulong output, ulong input, ulong weight, ulong bias,
+        int normDim, int totalRows, float eps, nint stream)
+        => LaunchLayerNormImpl(_layernormF32, output, input, weight, bias, normDim, totalRows, eps, stream);
+
+    /// <summary>Launches LayerNorm with F16 I/O, FP32 accumulation.</summary>
+    public void LaunchLayerNormF16(ulong output, ulong input, ulong weight, ulong bias,
+        int normDim, int totalRows, float eps, nint stream)
+        => LaunchLayerNormImpl(_layernormF16, output, input, weight, bias, normDim, totalRows, eps, stream);
+
+    // ── Fused GroupNorm+SiLU Launches ───────────────────────────────────
+
+    /// <summary>Launches fused GroupNorm+SiLU: normalize, affine, then SiLU in one kernel (F32).</summary>
+    public void LaunchGroupNormSilu(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int channels, int spatial, int groups, float eps, nint stream)
+        => LaunchGroupNormImpl(_groupnormSiluF32, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
+
+    /// <summary>Launches fused GroupNorm+SiLU with F16 I/O, FP32 accumulation.</summary>
+    public void LaunchGroupNormSiluF16(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int channels, int spatial, int groups, float eps, nint stream)
+        => LaunchGroupNormImpl(_groupnormSiluF16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
+
+    // ── Spatial Launches ────────────────────────────────────────────────
+
+    /// <summary>Launches UpsampleNearest2D (F32).</summary>
+    public void LaunchUpsampleNearest2D(ulong output, ulong input,
+        int batch, int channels, int inH, int inW, int outH, int outW, int scaleH, int scaleW, nint stream)
+        => LaunchUpsampleImpl(_upsampleNearest2dF32, output, input, batch, channels, inH, inW, outH, outW, scaleH, scaleW, stream);
+
+    /// <summary>Launches UpsampleNearest2D (F16).</summary>
+    public void LaunchUpsampleNearest2DF16(ulong output, ulong input,
+        int batch, int channels, int inH, int inW, int outH, int outW, int scaleH, int scaleW, nint stream)
+        => LaunchUpsampleImpl(_upsampleNearest2dF16, output, input, batch, channels, inH, inW, outH, outW, scaleH, scaleW, stream);
+
+    /// <summary>Launches Im2Col for one batch element (F32).</summary>
+    public void LaunchIm2Col(ulong col, ulong input,
+        int channels, int inH, int inW, int kH, int kW,
+        int padH, int padW, int strideH, int strideW,
+        int outH, int outW, int batchOffset, nint stream)
+        => LaunchIm2ColImpl(_im2colF32, col, input, channels, inH, inW, kH, kW, padH, padW, strideH, strideW, outH, outW, batchOffset, stream);
+
+    /// <summary>Launches Im2Col for one batch element (F16).</summary>
+    public void LaunchIm2ColF16(ulong col, ulong input,
+        int channels, int inH, int inW, int kH, int kW,
+        int padH, int padW, int strideH, int strideW,
+        int outH, int outW, int batchOffset, nint stream)
+        => LaunchIm2ColImpl(_im2colF16, col, input, channels, inH, inW, kH, kW, padH, padW, strideH, strideW, outH, outW, batchOffset, stream);
+
+    /// <summary>Launches bias addition: output[i] += bias[channel_of(i)] (F32)</summary>
+    public void LaunchBiasAdd(ulong output, ulong bias, int outChannels, int spatial, int totalElements, nint stream)
+        => LaunchBiasAddImpl(_col2biasAddF32, output, bias, outChannels, spatial, totalElements, stream);
+
+    /// <summary>Launches bias addition: output[i] += bias[channel_of(i)] (F16)</summary>
+    public void LaunchBiasAddF16(ulong output, ulong bias, int outChannels, int spatial, int totalElements, nint stream)
+        => LaunchBiasAddImpl(_col2biasAddF16, output, bias, outChannels, spatial, totalElements, stream);
+
+    // ── Softmax Launches ────────────────────────────────────────────────
+
+    /// <summary>Launches in-place per-row softmax (F32). One block per row.</summary>
+    public void LaunchSoftmax(ulong data, int rowLen, int totalRows, nint stream)
+        => LaunchSoftmaxImpl(_softmaxF32, data, rowLen, totalRows, stream);
+
+    /// <summary>Launches in-place per-row softmax with F16 I/O, FP32 accumulation.</summary>
+    public void LaunchSoftmaxF16(ulong data, int rowLen, int totalRows, nint stream)
+        => LaunchSoftmaxImpl(_softmaxF16, data, rowLen, totalRows, stream);
+
+    // ── Transpose/Permute Launches ──────────────────────────────────────
+
+    /// <summary>Launches batched 2D transpose: [B, D1, D2] -> [B, D2, D1] (F32).</summary>
+    public void LaunchTranspose2D(ulong output, ulong input, int d1, int d2, int totalElements, nint stream)
+        => LaunchTranspose2DImpl(_transpose2dF32, output, input, d1, d2, totalElements, stream);
+
+    /// <summary>Launches batched 2D transpose: [B, D1, D2] -> [B, D2, D1] (F16).</summary>
+    public void LaunchTranspose2DF16(ulong output, ulong input, int d1, int d2, int totalElements, nint stream)
+        => LaunchTranspose2DImpl(_transpose2dF16, output, input, d1, d2, totalElements, stream);
+
+    /// <summary>Launches 4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D] (F32).</summary>
+    public void LaunchPermute0213(ulong output, ulong input, int s, int h, int d, int totalElements, nint stream)
+        => LaunchPermute0213Impl(_permute0213F32, output, input, s, h, d, totalElements, stream);
+
+    /// <summary>Launches 4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D] (F16).</summary>
+    public void LaunchPermute0213F16(ulong output, ulong input, int s, int h, int d, int totalElements, nint stream)
+        => LaunchPermute0213Impl(_permute0213F16, output, input, s, h, d, totalElements, stream);
+
+    // ── GeGlu Launches ──────────────────────────────────────────────────
+
+    /// <summary>Launches GEGLU: splits input along last dim, applies GELU gate (F32).</summary>
+    public void LaunchGeGlu(ulong output, ulong input, int innerDim, int outputElements, nint stream)
+        => LaunchGeGluImpl(_gegluF32, output, input, innerDim, outputElements, stream);
+
+    /// <summary>Launches GEGLU with F16 I/O, F32 internal compute.</summary>
+    public void LaunchGeGluF16(ulong output, ulong input, int innerDim, int outputElements, nint stream)
+        => LaunchGeGluImpl(_gegluF16, output, input, innerDim, outputElements, stream);
+
+    // ── BroadcastAdd Launches ───────────────────────────────────────────
+
+    /// <summary>Launches broadcast add: hidden[b,c,s] += bias[b,c] in-place (F32).</summary>
+    public void LaunchBroadcastAdd(ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
+        => LaunchBroadcastAddImpl(_broadcastAddF32, hidden, bias, channels, spatial, totalElements, stream);
+
+    /// <summary>Launches broadcast add: hidden[b,c,s] += bias[b,c] in-place (F16).</summary>
+    public void LaunchBroadcastAddF16(ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
+        => LaunchBroadcastAddImpl(_broadcastAddF16, hidden, bias, channels, spatial, totalElements, stream);
+
+    // ── Cast Launches ───────────────────────────────────────────────────
+
+    /// <summary>Launches FP32 to FP16 cast.</summary>
+    public void LaunchCastF32ToF16(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_castF32ToF16, output, input, count, stream);
+
+    /// <summary>Launches FP16 to FP32 cast.</summary>
+    public void LaunchCastF16ToF32(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_castF16ToF32, output, input, count, stream);
+
+    // ── Dispose ─────────────────────────────────────────────────────────
+
+    private void DisposeModules()
     {
         _elementwiseModule.Dispose();
         _groupnormModule.Dispose();
@@ -463,18 +652,27 @@ public sealed class CudaKernels : IDisposable
         _transposeModule.Dispose();
         _gegluModule.Dispose();
         _broadcastAddModule.Dispose();
+        _elementwiseF16Module.Dispose();
+        _groupnormF16Module.Dispose();
+        _layernormF16Module.Dispose();
+        _spatialF16Module.Dispose();
+        _softmaxF16Module.Dispose();
+        _transposeF16Module.Dispose();
+        _gegluF16Module.Dispose();
+        _broadcastAddF16Module.Dispose();
+        _groupnormSiluModule.Dispose();
+        _groupnormSiluF16Module.Dispose();
+        _castModule.Dispose();
+    }
+
+    public void Dispose()
+    {
+        DisposeModules();
         GC.SuppressFinalize(this);
     }
 
     ~CudaKernels()
     {
-        _elementwiseModule.Dispose();
-        _groupnormModule.Dispose();
-        _layernormModule.Dispose();
-        _spatialModule.Dispose();
-        _softmaxModule.Dispose();
-        _transposeModule.Dispose();
-        _gegluModule.Dispose();
-        _broadcastAddModule.Dispose();
+        DisposeModules();
     }
 }

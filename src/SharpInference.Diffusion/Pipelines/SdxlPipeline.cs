@@ -99,6 +99,9 @@ public sealed unsafe class SdxlPipeline : IDisposable
         ];
 
         // 3. Create initial noise latent [1, 4, latentH, latentW]
+        // Determine UNet dtype: if weights are F16, run UNet in F16
+        bool useF16 = (_unet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
+
         TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
         Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
 
@@ -138,10 +141,18 @@ public sealed unsafe class SdxlPipeline : IDisposable
                 scaledLatent = latent;
             }
 
+            // Cast to F16 for UNet forward if weights are F16
+            Tensor unetInput = scaledLatent;
+            if (useF16 && scaledLatent.DType != DType.F16)
+            {
+                unetInput = new Tensor(scaledLatent.Shape, DType.F16);
+                _backend.CastToF16(unetInput, scaledLatent);
+            }
+
             Tensor noisePred;
             if (cfgScale > 1.0f)
             {
-                noisePred = ClassifierFreeGuidanceStep(scaledLatent, t, textEmbeddings, pooledOutput!, sizeCondition, cfgScale);
+                noisePred = ClassifierFreeGuidanceStep(unetInput, t, textEmbeddings, pooledOutput!, sizeCondition, cfgScale);
             }
             else
             {
@@ -151,17 +162,27 @@ public sealed unsafe class SdxlPipeline : IDisposable
                 Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
                 int pooledDim = (int)pooledOutput!.Shape[1];
                 Tensor condPooled = SliceBatchElement1D(pooledOutput, 1, pooledDim);
-                noisePred = _unet.Forward(_backend, scaledLatent, t, condEmb, condPooled, sizeCondition);
+                noisePred = _unet.Forward(_backend, unetInput, t, condEmb, condPooled, sizeCondition);
                 condEmb.Dispose();
                 condPooled.Dispose();
             }
 
+            if (unetInput != scaledLatent) unetInput.Dispose();
             if (scaledLatent != latent) scaledLatent.Dispose();
 
-            // Scheduler step
+            // Cast noise prediction back to F32 for scheduler (CPU-side arithmetic)
+            Tensor noisePredF32 = noisePred;
+            if (noisePred.DType == DType.F16)
+            {
+                noisePredF32 = new Tensor(noisePred.Shape, DType.F32);
+                _backend.CastToF32(noisePredF32, noisePred);
+                noisePred.Dispose();
+            }
+
+            // Scheduler step (always F32)
             Tensor newLatent = new Tensor(latentShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, latent, i);
-            noisePred.Dispose();
+            scheduler.Step(newLatent, noisePredF32, latent, i);
+            noisePredF32.Dispose();
             latent.Dispose();
             latent = newLatent;
 
@@ -179,8 +200,19 @@ public sealed unsafe class SdxlPipeline : IDisposable
         _backend.FreeWeights(_unet.EnumerateWeights());
         Logs.Info("Decoding latents to image...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(_backend, latent);
-        latent.Dispose();
+
+        // Cast latent to match VAE weight dtype (latent is F32 from scheduler, VAE weights may be F16)
+        bool vaeF16 = (_vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
+        Tensor vaeInput = latent;
+        if (vaeF16 && latent.DType != DType.F16)
+        {
+            vaeInput = new Tensor(latent.Shape, DType.F16);
+            _backend.CastToF16(vaeInput, latent);
+            latent.Dispose();
+        }
+
+        Tensor image = _vaeDecoder.Decode(_backend, vaeInput);
+        vaeInput.Dispose();
         vaeSw.Stop();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
@@ -216,9 +248,22 @@ public sealed unsafe class SdxlPipeline : IDisposable
         condPooled.Dispose();
 
         // CFG: output = uncond + scale * (cond - uncond)
+        // UNet output may be F16 — cast to F32 for CPU-side arithmetic, return F32 for scheduler
+        Tensor uncondF32 = uncondNoise;
+        Tensor condF32 = condNoise;
+        if (uncondNoise.DType == DType.F16)
+        {
+            uncondF32 = new Tensor(uncondNoise.Shape, DType.F32);
+            _backend.CastToF32(uncondF32, uncondNoise);
+            uncondNoise.Dispose();
+            condF32 = new Tensor(condNoise.Shape, DType.F32);
+            _backend.CastToF32(condF32, condNoise);
+            condNoise.Dispose();
+        }
+
         Tensor output = new Tensor(latent.Shape, DType.F32);
-        float* uncPtr = (float*)uncondNoise.DataPointer;
-        float* conPtr = (float*)condNoise.DataPointer;
+        float* uncPtr = (float*)uncondF32.DataPointer;
+        float* conPtr = (float*)condF32.DataPointer;
         float* outPtr = (float*)output.DataPointer;
         int count = (int)latent.ElementCount;
 
@@ -227,8 +272,8 @@ public sealed unsafe class SdxlPipeline : IDisposable
             outPtr[i] = uncPtr[i] + cfgScale * (conPtr[i] - uncPtr[i]);
         }
 
-        uncondNoise.Dispose();
-        condNoise.Dispose();
+        uncondF32.Dispose();
+        condF32.Dispose();
 
         return output;
     }

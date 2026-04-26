@@ -73,9 +73,11 @@ public sealed class VaeAttention
         int width = (int)input.Shape[3];
         int seqLen = height * width;
 
+        DType dtype = input.DType;
+
         // GroupNorm
         TensorShape spatialShape = new TensorShape(batch, channels, height, width);
-        Tensor normed = new Tensor(spatialShape, DType.F32);
+        Tensor normed = new Tensor(spatialShape, dtype);
         backend.GroupNorm(normed, input, _groupNormWeight!, _groupNormBias!, _normGroups, _normEps);
 
         // Reshape to [B, C, seqLen] then transpose to [B, seqLen, C] for attention
@@ -84,7 +86,7 @@ public sealed class VaeAttention
         Tensor normedSeq = normed.Reshape(new TensorShape(batch, channels, seqLen));
 
         // Transpose [B, C, seqLen] → [B, seqLen, C] via backend
-        Tensor normedTransposed = new Tensor(seqShape, DType.F32);
+        Tensor normedTransposed = new Tensor(seqShape, dtype);
         backend.Transpose2D(normedTransposed, normedSeq, channels, seqLen);
         normed.Dispose();
 
@@ -101,7 +103,7 @@ public sealed class VaeAttention
         Tensor value4D = value.Reshape(attn4DShape);
 
         float scale = 1.0f / MathF.Sqrt(channels);
-        Tensor attnOut4D = new Tensor(attn4DShape, DType.F32);
+        Tensor attnOut4D = new Tensor(attn4DShape, dtype);
         backend.ScaledDotProductAttention(attnOut4D, query4D, key4D, value4D, null, scale);
         query.Dispose();
         key.Dispose();
@@ -115,14 +117,14 @@ public sealed class VaeAttention
         attnOut.Dispose();
 
         // Transpose back [B, seqLen, C] → [B, C, seqLen] → reshape to [B, C, H, W]
-        Tensor projectedChannelFirst = new Tensor(new TensorShape(batch, channels, seqLen), DType.F32);
+        Tensor projectedChannelFirst = new Tensor(new TensorShape(batch, channels, seqLen), dtype);
         backend.Transpose2D(projectedChannelFirst, projected, seqLen, channels);
         projected.Dispose();
 
         Tensor projectedSpatial = projectedChannelFirst.Reshape(spatialShape);
 
         // Residual connection
-        Tensor output = new Tensor(spatialShape, DType.F32);
+        Tensor output = new Tensor(spatialShape, dtype);
         backend.Add(output, input, projectedSpatial);
         projectedChannelFirst.Dispose();
 
@@ -133,7 +135,7 @@ public sealed class VaeAttention
     private static Tensor ProjectLinear(IBackend backend, Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int channels)
     {
         TensorShape outShape = new TensorShape(batch, seqLen, channels);
-        Tensor output = new Tensor(outShape, DType.F32);
+        Tensor output = new Tensor(outShape, input.DType);
 
         // backend.Linear computes output = input @ weight^T + bias on GPU
         // Weight transpose and bias addition are handled by cuBLAS SGEMM (OP_T) + GPU kernel

@@ -114,6 +114,37 @@ public interface IBackend : IDisposable
     /// <summary>Apply mel filterbank to FFT magnitude spectrogram.</summary>
     void MelFilterbank(Tensor output, Tensor input, Tensor filters);
 
+    // ── Fused Operations ────────────────────────────────────────────────
+
+    /// <summary>Fused GroupNorm + SiLU: normalize, apply affine, then SiLU in one pass. Eliminates intermediate allocation. Default falls back to separate GroupNorm + Silu.</summary>
+    void GroupNormSilu(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
+    {
+        GroupNorm(output, input, weight, bias, groups, eps);
+        Silu(output, output);
+    }
+
+    // ── Dtype Casting ────────────────────────────────────────────────────
+
+    /// <summary>Cast tensor from FP32 to FP16. Default: CPU scalar loop.</summary>
+    unsafe void CastToF16(Tensor output, Tensor input)
+    {
+        float* src = (float*)input.DataPointer;
+        Half* dst = (Half*)output.DataPointer;
+        int count = (int)input.Shape.ElementCount;
+        for (int i = 0; i < count; i++)
+            dst[i] = (Half)src[i];
+    }
+
+    /// <summary>Cast tensor from FP16 to FP32. Default: CPU scalar loop.</summary>
+    unsafe void CastToF32(Tensor output, Tensor input)
+    {
+        Half* src = (Half*)input.DataPointer;
+        float* dst = (float*)output.DataPointer;
+        int count = (int)input.Shape.ElementCount;
+        for (int i = 0; i < count; i++)
+            dst[i] = (float)src[i];
+    }
+
     // ── Synchronization ──────────────────────────────────────────────────
 
     /// <summary>Waits for all pending GPU work to complete. No-op on CPU backends. Call at pipeline phase boundaries to ensure deferred memory frees are processed before large allocations.</summary>

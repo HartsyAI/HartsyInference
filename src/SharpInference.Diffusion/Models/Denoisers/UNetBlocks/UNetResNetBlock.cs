@@ -91,17 +91,15 @@ public sealed class UNetResNetBlock
         int height = (int)input.Shape[2];
         int width = (int)input.Shape[3];
 
-        // 1. norm1 → SiLU → conv1
-        TensorShape inShape = new TensorShape(batch, _inChannels, height, width);
-        Tensor norm1Out = new Tensor(inShape, DType.F32);
-        backend.GroupNorm(norm1Out, input, _norm1Weight!, _norm1Bias!, _normGroups, _normEps);
+        DType dtype = input.DType;
 
-        Tensor silu1Out = new Tensor(inShape, DType.F32);
-        backend.Silu(silu1Out, norm1Out);
-        norm1Out.Dispose();
+        // 1. Fused GroupNorm+SiLU → conv1
+        TensorShape inShape = new TensorShape(batch, _inChannels, height, width);
+        Tensor silu1Out = new Tensor(inShape, dtype);
+        backend.GroupNormSilu(silu1Out, input, _norm1Weight!, _norm1Bias!, _normGroups, _normEps);
 
         TensorShape outShape = new TensorShape(batch, _outChannels, height, width);
-        Tensor conv1Out = new Tensor(outShape, DType.F32);
+        Tensor conv1Out = new Tensor(outShape, dtype);
         backend.Conv2D(conv1Out, silu1Out, _conv1Weight!, _conv1Bias, 1, 1, 1, 1);
         silu1Out.Dispose();
 
@@ -110,16 +108,12 @@ public sealed class UNetResNetBlock
         backend.BroadcastAdd(conv1Out, tembProj, _outChannels, height * width);
         tembProj.Dispose();
 
-        // 3. norm2 → SiLU → conv2
-        Tensor norm2Out = new Tensor(outShape, DType.F32);
-        backend.GroupNorm(norm2Out, conv1Out, _norm2Weight!, _norm2Bias!, _normGroups, _normEps);
+        // 3. Fused GroupNorm+SiLU → conv2
+        Tensor silu2Out = new Tensor(outShape, dtype);
+        backend.GroupNormSilu(silu2Out, conv1Out, _norm2Weight!, _norm2Bias!, _normGroups, _normEps);
         conv1Out.Dispose();
 
-        Tensor silu2Out = new Tensor(outShape, DType.F32);
-        backend.Silu(silu2Out, norm2Out);
-        norm2Out.Dispose();
-
-        Tensor conv2Out = new Tensor(outShape, DType.F32);
+        Tensor conv2Out = new Tensor(outShape, dtype);
         backend.Conv2D(conv2Out, silu2Out, _conv2Weight!, _conv2Bias, 1, 1, 1, 1);
         silu2Out.Dispose();
 
@@ -127,7 +121,7 @@ public sealed class UNetResNetBlock
         Tensor skip;
         if (_hasShortcut)
         {
-            skip = new Tensor(outShape, DType.F32);
+            skip = new Tensor(outShape, dtype);
             backend.Conv2D(skip, input, _shortcutWeight!, _shortcutBias, 1, 1, 0, 0);
         }
         else
@@ -136,7 +130,7 @@ public sealed class UNetResNetBlock
         }
 
         // 5. Residual: output = conv2_out + skip
-        Tensor output = new Tensor(outShape, DType.F32);
+        Tensor output = new Tensor(outShape, dtype);
         backend.Add(output, conv2Out, skip);
         conv2Out.Dispose();
 
@@ -153,12 +147,12 @@ public sealed class UNetResNetBlock
     {
         // SiLU on temb first (diffusers does this before the projection in the ResNet block)
         TensorShape tembShape = new TensorShape(batch, _timeDim);
-        Tensor tembSilu = new Tensor(tembShape, DType.F32);
+        Tensor tembSilu = new Tensor(tembShape, temb.DType);
         backend.Silu(tembSilu, temb);
 
         // Linear: [B, timeDim] → [B, outChannels]
         TensorShape projShape = new TensorShape(batch, _outChannels);
-        Tensor projected = new Tensor(projShape, DType.F32);
+        Tensor projected = new Tensor(projShape, temb.DType);
         backend.Linear(projected, tembSilu, _timeEmbProjWeight!, _timeEmbProjBias!);
         tembSilu.Dispose();
 

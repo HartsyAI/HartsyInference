@@ -514,6 +514,319 @@ public class SdxlGenerationTests
     }
 
     /// <summary>
+    /// FP16 GPU generation test: passes native F16 weights to UNet/VAE (no F32 cast).
+    /// CLIP stays F32 (CPU-side). Tests the full Phase 3 FP16 inference path.
+    /// 256x256 with 10 steps for quick smoke test.
+    /// </summary>
+    [Fact]
+    public void Gpu_F16_GenerateImage_256()
+    {
+        if (!File.Exists(SdxlCheckpointPath))
+        {
+            _output.WriteLine($"SKIPPED: Checkpoint not found: {SdxlCheckpointPath}");
+            return;
+        }
+        if (!File.Exists(TokenizerVocabPath) || !File.Exists(TokenizerMergesPath))
+        {
+            _output.WriteLine("SKIPPED: Tokenizer files not found");
+            return;
+        }
+
+        string assemblyDir = Path.GetDirectoryName(typeof(SdxlGenerationTests).Assembly.Location)!;
+        string ptxDir = Path.Combine(assemblyDir, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+
+        Stopwatch totalSw = Stopwatch.StartNew();
+
+        _output.WriteLine($"[1/7] Loading checkpoint: {Path.GetFileName(SdxlCheckpointPath)}");
+        Stopwatch sw = Stopwatch.StartNew();
+        (SdxlCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
+            SdxlCheckpointConverter.LoadAndConvert(SdxlCheckpointPath);
+        sw.Stop();
+        _output.WriteLine($"  Checkpoint loaded and converted in {sw.ElapsedMilliseconds}ms");
+
+        using (loader)
+        {
+            // CLIP stays F32 (CPU-side text encoding)
+            Dictionary<string, Tensor> clipLF32 = CastWeightsToF32(converted.ClipL);
+            Dictionary<string, Tensor> clipGF32 = CastWeightsToF32(converted.ClipG);
+
+            // UNet and VAE: use NATIVE F16 weights (no F32 cast!)
+            Dictionary<string, Tensor> unetWeights = converted.UNet;
+            Dictionary<string, Tensor> vaeWeights = converted.Vae;
+
+            // Verify weights are actually F16
+            Tensor? firstUnetWeight = unetWeights.Values.FirstOrDefault();
+            Tensor? firstVaeWeight = vaeWeights.Values.FirstOrDefault();
+            _output.WriteLine($"  UNet weight dtype: {firstUnetWeight?.DType}, VAE weight dtype: {firstVaeWeight?.DType}");
+            Assert.Equal(DType.F16, firstUnetWeight!.DType);
+
+            _output.WriteLine("[2/7] Tokenizing prompt...");
+            using ClipTokenizer tokenizer = new(TokenizerVocabPath, TokenizerMergesPath);
+
+            string prompt = "a majestic lion in a field of sunflowers, golden hour, photorealistic";
+            string negPrompt = "blurry, low quality, deformed";
+
+            int[] promptTokensL = tokenizer.Encode(prompt);
+            int[] negTokensL = tokenizer.Encode(negPrompt);
+            int[] promptTokensG = tokenizer.Encode(prompt);
+            int[] negTokensG = tokenizer.Encode(negPrompt);
+
+            int promptEosG = ClipTokenizer.FindEosPosition(promptTokensG);
+            int negEosG = ClipTokenizer.FindEosPosition(negTokensG);
+
+            _output.WriteLine("[3/7] Loading CLIP-L (F32)...");
+            sw.Restart();
+            ClipTextEncoder clipL = new(ClipTextEncoderConfig.SdxlClipL);
+            clipL.LoadWeights(clipLF32, "text_model");
+            sw.Stop();
+            _output.WriteLine($"  CLIP-L loaded in {sw.ElapsedMilliseconds}ms");
+
+            _output.WriteLine("[4/7] Loading CLIP-G (F32)...");
+            sw.Restart();
+            ClipTextEncoder clipG = new(ClipTextEncoderConfig.SdxlClipG);
+            clipG.LoadWeights(clipGF32, "text_model");
+            sw.Stop();
+            _output.WriteLine($"  CLIP-G loaded in {sw.ElapsedMilliseconds}ms");
+
+            _output.WriteLine("[5/7] Loading UNet (F16 weights)...");
+            sw.Restart();
+            UNet unet = new(UNetConfig.SdxlBase);
+            unet.LoadWeights(unetWeights);
+            sw.Stop();
+            _output.WriteLine($"  UNet loaded in {sw.ElapsedMilliseconds}ms");
+
+            _output.WriteLine("[6/7] Loading VAE (F16 weights)...");
+            sw.Restart();
+            VaeDecoder vae = new(VaeConfig.Sdxl);
+            vae.LoadWeights(vaeWeights);
+            sw.Stop();
+            _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms");
+
+            _output.WriteLine("[7/7] Initializing CUDA backend...");
+            sw.Restart();
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            sw.Stop();
+            _output.WriteLine($"  CUDA backend initialized in {sw.ElapsedMilliseconds}ms");
+
+            using SdxlPipeline pipeline = new(backend, clipL, clipG, unet, vae);
+
+            // Preload F16 weights to GPU
+            _output.WriteLine("\n[GPU] Preloading F16 UNet + VAE weights to GPU...");
+            sw.Restart();
+            backend.PreloadWeights(unet.EnumerateWeights());
+            backend.PreloadWeights(vae.EnumerateWeights());
+            (long cachedBytes, long _, long _) = backend.GetGpuCacheStats();
+            sw.Stop();
+            _output.WriteLine($"  Preloaded {cachedBytes / 1024.0 / 1024.0:F1} MB to GPU in {sw.ElapsedMilliseconds}ms (should be ~half of F32)");
+
+            TextToImageRequest request = new()
+            {
+                Prompt = prompt,
+                NegativePrompt = negPrompt,
+                Width = 256,
+                Height = 256,
+                Steps = 10,
+                CfgScale = 7.0f,
+                Seed = 42,
+            };
+
+            _output.WriteLine($"\nGenerating {request.Width}x{request.Height} image, {request.Steps} steps, cfg={request.CfgScale}, seed=42 [GPU F16]...");
+            Stopwatch genSw = Stopwatch.StartNew();
+
+            (byte[] rgbData, int width, int height, int seed) = pipeline.GenerateFromTokens(
+                promptTokensL, negTokensL,
+                promptTokensG, negTokensG,
+                promptEosG, negEosG,
+                request,
+                progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
+
+            genSw.Stop();
+            (long finalCached, long hits, long misses) = backend.GetGpuCacheStats();
+            _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1} seconds (seed={seed})");
+            _output.WriteLine($"  GPU cache: {finalCached / 1024.0 / 1024.0:F1} MB, hits={hits}, misses={misses}");
+
+            backend.FreePreloadedWeights();
+
+            // Validate output
+            Assert.Equal(256, width);
+            Assert.Equal(256, height);
+            Assert.Equal(256 * 256 * 3, rgbData.Length);
+
+            // Check not all black or all white (NaN/Inf would produce all-zero or all-255)
+            int nonZero = 0;
+            int nonFF = 0;
+            foreach (byte b in rgbData)
+            {
+                if (b != 0) nonZero++;
+                if (b != 255) nonFF++;
+            }
+            float nonZeroPct = nonZero / (float)rgbData.Length * 100;
+            float nonFFPct = nonFF / (float)rgbData.Length * 100;
+            _output.WriteLine($"  Non-zero bytes: {nonZeroPct:F1}%, Non-255 bytes: {nonFFPct:F1}%");
+            Assert.True(nonZeroPct > 10, "Image appears to be all black (possible NaN/Inf in F16 path)");
+            Assert.True(nonFFPct > 10, "Image appears to be all white (possible F16 overflow)");
+
+            // Save output
+            Directory.CreateDirectory(OutputDir);
+            string outputPath = Path.Combine(OutputDir, $"sdxl_gpu_f16_256_{DateTime.Now:yyyyMMdd_HHmmss}.bmp");
+            ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
+            _output.WriteLine($"  Image saved to: {outputPath}");
+
+            totalSw.Stop();
+            _output.WriteLine($"\nTotal time: {totalSw.Elapsed.TotalSeconds:F1} seconds");
+        }
+    }
+
+    /// <summary>
+    /// FP16 GPU generation at full 1024x1024 resolution, 20 steps.
+    /// Tests Phase 3 FP16 inference at production resolution.
+    /// </summary>
+    [Fact]
+    public void Gpu_F16_GenerateImage_1024()
+    {
+        if (!File.Exists(SdxlCheckpointPath))
+        {
+            _output.WriteLine($"SKIPPED: Checkpoint not found: {SdxlCheckpointPath}");
+            return;
+        }
+        if (!File.Exists(TokenizerVocabPath) || !File.Exists(TokenizerMergesPath))
+        {
+            _output.WriteLine("SKIPPED: Tokenizer files not found");
+            return;
+        }
+
+        string assemblyDir = Path.GetDirectoryName(typeof(SdxlGenerationTests).Assembly.Location)!;
+        string ptxDir = Path.Combine(assemblyDir, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+
+        Stopwatch totalSw = Stopwatch.StartNew();
+
+        _output.WriteLine($"[1/7] Loading checkpoint: {Path.GetFileName(SdxlCheckpointPath)}");
+        Stopwatch sw = Stopwatch.StartNew();
+        (SdxlCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader loader) =
+            SdxlCheckpointConverter.LoadAndConvert(SdxlCheckpointPath);
+        sw.Stop();
+        _output.WriteLine($"  Checkpoint loaded and converted in {sw.ElapsedMilliseconds}ms");
+
+        using (loader)
+        {
+            // CLIP stays F32 (CPU-side text encoding)
+            Dictionary<string, Tensor> clipLF32 = CastWeightsToF32(converted.ClipL);
+            Dictionary<string, Tensor> clipGF32 = CastWeightsToF32(converted.ClipG);
+
+            // UNet: native F16 weights. VAE: whatever the checkpoint has.
+            Dictionary<string, Tensor> unetWeights = converted.UNet;
+            Dictionary<string, Tensor> vaeWeights = converted.Vae;
+
+            _output.WriteLine("[2/7] Tokenizing prompt...");
+            using ClipTokenizer tokenizer = new(TokenizerVocabPath, TokenizerMergesPath);
+
+            string prompt = "a majestic lion in a field of sunflowers, golden hour, photorealistic";
+            string negPrompt = "blurry, low quality, deformed";
+
+            int[] promptTokensL = tokenizer.Encode(prompt);
+            int[] negTokensL = tokenizer.Encode(negPrompt);
+            int[] promptTokensG = tokenizer.Encode(prompt);
+            int[] negTokensG = tokenizer.Encode(negPrompt);
+
+            int promptEosG = ClipTokenizer.FindEosPosition(promptTokensG);
+            int negEosG = ClipTokenizer.FindEosPosition(negTokensG);
+
+            _output.WriteLine("[3/7] Loading CLIP-L (F32)...");
+            ClipTextEncoder clipL = new(ClipTextEncoderConfig.SdxlClipL);
+            clipL.LoadWeights(clipLF32, "text_model");
+
+            _output.WriteLine("[4/7] Loading CLIP-G (F32)...");
+            ClipTextEncoder clipG = new(ClipTextEncoderConfig.SdxlClipG);
+            clipG.LoadWeights(clipGF32, "text_model");
+
+            _output.WriteLine("[5/7] Loading UNet (F16 weights)...");
+            UNet unet = new(UNetConfig.SdxlBase);
+            unet.LoadWeights(unetWeights);
+
+            _output.WriteLine("[6/7] Loading VAE...");
+            VaeDecoder vae = new(VaeConfig.Sdxl);
+            vae.LoadWeights(vaeWeights);
+
+            _output.WriteLine("[7/7] Initializing CUDA backend...");
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+
+            using SdxlPipeline pipeline = new(backend, clipL, clipG, unet, vae);
+
+            // Preload weights to GPU
+            _output.WriteLine("\n[GPU] Preloading UNet + VAE weights to GPU...");
+            sw.Restart();
+            backend.PreloadWeights(unet.EnumerateWeights());
+            backend.PreloadWeights(vae.EnumerateWeights());
+            (long cachedBytes, long _, long _) = backend.GetGpuCacheStats();
+            sw.Stop();
+            _output.WriteLine($"  Preloaded {cachedBytes / 1024.0 / 1024.0:F1} MB to GPU in {sw.ElapsedMilliseconds}ms");
+
+            TextToImageRequest request = new()
+            {
+                Prompt = prompt,
+                NegativePrompt = negPrompt,
+                Width = 1024,
+                Height = 1024,
+                Steps = 20,
+                CfgScale = 7.0f,
+                Seed = 42,
+            };
+
+            _output.WriteLine($"\nGenerating {request.Width}x{request.Height} image, {request.Steps} steps, cfg={request.CfgScale}, seed=42 [GPU F16]...");
+            Stopwatch genSw = Stopwatch.StartNew();
+
+            (byte[] rgbData, int width, int height, int seed) = pipeline.GenerateFromTokens(
+                promptTokensL, negTokensL,
+                promptTokensG, negTokensG,
+                promptEosG, negEosG,
+                request,
+                progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
+
+            genSw.Stop();
+            (long finalCached, long hits, long misses) = backend.GetGpuCacheStats();
+            _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1} seconds (seed={seed})");
+            _output.WriteLine($"  GPU cache: {finalCached / 1024.0 / 1024.0:F1} MB, hits={hits}, misses={misses}");
+
+            backend.FreePreloadedWeights();
+
+            Assert.Equal(1024, width);
+            Assert.Equal(1024, height);
+            Assert.Equal(1024 * 1024 * 3, rgbData.Length);
+
+            int nonZero = 0;
+            int nonFF = 0;
+            foreach (byte b in rgbData)
+            {
+                if (b != 0) nonZero++;
+                if (b != 255) nonFF++;
+            }
+            float nonZeroPct = nonZero / (float)rgbData.Length * 100;
+            float nonFFPct = nonFF / (float)rgbData.Length * 100;
+            _output.WriteLine($"  Non-zero bytes: {nonZeroPct:F1}%, Non-255 bytes: {nonFFPct:F1}%");
+            Assert.True(nonZeroPct > 10, "Image appears to be all black");
+            Assert.True(nonFFPct > 10, "Image appears to be all white");
+
+            Directory.CreateDirectory(OutputDir);
+            string outputPath = Path.Combine(OutputDir, $"sdxl_gpu_f16_1024_{DateTime.Now:yyyyMMdd_HHmmss}.bmp");
+            ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
+            _output.WriteLine($"  Image saved to: {outputPath}");
+
+            totalSw.Stop();
+            _output.WriteLine($"\nTotal time: {totalSw.Elapsed.TotalSeconds:F1} seconds");
+        }
+    }
+
+    /// <summary>
     /// Diagnostic: dumps text embedding and per-step latent stats for comparison with Python reference.
     /// Runs on CPU to avoid GPU-specific issues. Prints stats in same format as Python dump_sdxl_reference_stats.py.
     /// </summary>

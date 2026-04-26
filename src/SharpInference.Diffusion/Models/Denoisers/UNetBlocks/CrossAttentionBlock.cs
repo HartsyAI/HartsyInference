@@ -99,22 +99,24 @@ public sealed class CrossAttentionBlock
         int width = (int)input.Shape[3];
         int spatial = height * width;
 
+        DType dtype = input.DType;
+
         // 1. GroupNorm on spatial input
         TensorShape spatialShape = new TensorShape(batch, channels, height, width);
-        Tensor normed = new Tensor(spatialShape, DType.F32);
+        Tensor normed = new Tensor(spatialShape, dtype);
         backend.GroupNorm(normed, input, _normWeight!, _normBias!, 32, 1e-6f);
 
         // 2. Reshape [B, C, H, W] → [B, C, spatial] → transpose → [B, spatial, C] and project in
         TensorShape seqShape = new TensorShape(batch, spatial, channels);
         Tensor normedFlat = normed.Reshape(new TensorShape(batch, channels, spatial));
-        Tensor hidden = new Tensor(seqShape, DType.F32);
+        Tensor hidden = new Tensor(seqShape, dtype);
         backend.Transpose2D(hidden, normedFlat, channels, spatial);
         normed.Dispose();
 
         // proj_in: [B, spatial, C] → [B, spatial, C]
         // When SDXL (useLinearProjection=true), weights are [C, C] (linear)
         // When SD1.5, weights are [C, C, 1, 1] (1x1 conv) but math is identical for proj_in/proj_out
-        Tensor projected = new Tensor(seqShape, DType.F32);
+        Tensor projected = new Tensor(seqShape, dtype);
         backend.Linear(projected, hidden, _projInWeight!, _projInBias!);
         hidden.Dispose();
         hidden = projected;
@@ -139,18 +141,18 @@ public sealed class CrossAttentionBlock
         }
 
         // 4. proj_out: [B, spatial, C] → [B, spatial, C]
-        Tensor projOut = new Tensor(seqShape, DType.F32);
+        Tensor projOut = new Tensor(seqShape, dtype);
         backend.Linear(projOut, hidden, _projOutWeight!, _projOutBias!);
         hidden.Dispose();
 
         // 5. Transpose [B, spatial, C] → [B, C, spatial] → reshape to [B, C, H, W] and add residual
-        Tensor projOutTransposed = new Tensor(new TensorShape(batch, channels, spatial), DType.F32);
+        Tensor projOutTransposed = new Tensor(new TensorShape(batch, channels, spatial), dtype);
         backend.Transpose2D(projOutTransposed, projOut, spatial, channels);
         projOut.Dispose();
         Tensor output = projOutTransposed.Reshape(spatialShape);
 
         // Add residual from input
-        Tensor result = new Tensor(spatialShape, DType.F32);
+        Tensor result = new Tensor(spatialShape, dtype);
         backend.Add(result, output, input);
         output.Dispose();
 
@@ -226,9 +228,11 @@ internal sealed class TransformerSubBlock
         int seqLen = (int)hidden.Shape[1];
         int ctxLen = (int)context.Shape[1];
 
+        DType dtype = hidden.DType;
+
         // LayerNorm
         TensorShape hidShape = new TensorShape(batch, seqLen, _channels);
-        Tensor normed = new Tensor(hidShape, DType.F32);
+        Tensor normed = new Tensor(hidShape, dtype);
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
 
         // Q from normed hidden; K/V from normed hidden (self-attn) or raw context (cross-attn)
@@ -237,14 +241,14 @@ internal sealed class TransformerSubBlock
         int kvSeqLen = ReferenceEquals(hidden, context) ? seqLen : ctxLen;
         int kvDim = ReferenceEquals(hidden, context) ? _channels : _contextDim;
 
-        Tensor query = new Tensor(hidShape, DType.F32);
+        Tensor query = new Tensor(hidShape, dtype);
         backend.Linear(query, normed, _toQWeight!, _toQBias);
 
         TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
-        Tensor key = new Tensor(kvOutShape, DType.F32);
+        Tensor key = new Tensor(kvOutShape, dtype);
         backend.Linear(key, kvSource, _toKWeight!, _toKBias);
 
-        Tensor value = new Tensor(kvOutShape, DType.F32);
+        Tensor value = new Tensor(kvOutShape, dtype);
         backend.Linear(value, kvSource, _toVWeight!, _toVBias);
         normed.Dispose();
 
@@ -253,41 +257,41 @@ internal sealed class TransformerSubBlock
         TensorShape kvMhShape = new TensorShape(batch, _numHeads, ctxLen, _headDim);
 
         Tensor queryView = query.Reshape(new TensorShape(batch, seqLen, _numHeads, _headDim));
-        Tensor queryMh = new Tensor(qMhShape, DType.F32);
+        Tensor queryMh = new Tensor(qMhShape, dtype);
         backend.Permute0213(queryMh, queryView, seqLen, _numHeads, _headDim);
         query.Dispose();
 
         Tensor keyView = key.Reshape(new TensorShape(batch, ctxLen, _numHeads, _headDim));
-        Tensor keyMh = new Tensor(kvMhShape, DType.F32);
+        Tensor keyMh = new Tensor(kvMhShape, dtype);
         backend.Permute0213(keyMh, keyView, ctxLen, _numHeads, _headDim);
         key.Dispose();
 
         Tensor valueView = value.Reshape(new TensorShape(batch, ctxLen, _numHeads, _headDim));
-        Tensor valueMh = new Tensor(kvMhShape, DType.F32);
+        Tensor valueMh = new Tensor(kvMhShape, dtype);
         backend.Permute0213(valueMh, valueView, ctxLen, _numHeads, _headDim);
         value.Dispose();
 
         // SDPA
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(qMhShape, DType.F32);
+        Tensor attnOut = new Tensor(qMhShape, dtype);
         backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale);
         queryMh.Dispose();
         keyMh.Dispose();
         valueMh.Dispose();
 
         // Permute back: [B, H, S, D] → [B, S, H, D] → reshape [B, S, H*D]
-        Tensor attnPermuted = new Tensor(new TensorShape(batch, seqLen, _numHeads, _headDim), DType.F32);
+        Tensor attnPermuted = new Tensor(new TensorShape(batch, seqLen, _numHeads, _headDim), dtype);
         backend.Permute0213(attnPermuted, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
         Tensor merged = attnPermuted.Reshape(hidShape);
 
         // Output projection
-        Tensor projected = new Tensor(hidShape, DType.F32);
+        Tensor projected = new Tensor(hidShape, dtype);
         backend.Linear(projected, merged, _toOutWeight!, _toOutBias);
         merged.Dispose();
 
         // Residual
-        Tensor output = new Tensor(hidShape, DType.F32);
+        Tensor output = new Tensor(hidShape, dtype);
         backend.Add(output, hidden, projected);
         projected.Dispose();
 
@@ -344,9 +348,11 @@ internal sealed class FeedForwardBlock
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
 
+        DType dtype = hidden.DType;
+
         // LayerNorm
         TensorShape shape = new TensorShape(batch, seqLen, _channels);
-        Tensor normed = new Tensor(shape, DType.F32);
+        Tensor normed = new Tensor(shape, dtype);
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
 
         // GEGLU: project to 2*innerDim, split, gate
@@ -355,23 +361,23 @@ internal sealed class FeedForwardBlock
         int geGluOutDim = innerDim * 2;
 
         TensorShape geGluShape = new TensorShape(batch, seqLen, geGluOutDim);
-        Tensor geGluOut = new Tensor(geGluShape, DType.F32);
+        Tensor geGluOut = new Tensor(geGluShape, dtype);
         backend.Linear(geGluOut, normed, _geGluProjWeight!, _geGluProjBias!);
         normed.Dispose();
 
         // Split and apply GELU gate via backend: output = x[:innerDim] * GELU(x[innerDim:])
         TensorShape innerShape = new TensorShape(batch, seqLen, innerDim);
-        Tensor gated = new Tensor(innerShape, DType.F32);
+        Tensor gated = new Tensor(innerShape, dtype);
         backend.GeGlu(gated, geGluOut);
         geGluOut.Dispose();
 
         // Output linear: [B, seqLen, innerDim] → [B, seqLen, channels]
-        Tensor outLinear = new Tensor(shape, DType.F32);
+        Tensor outLinear = new Tensor(shape, dtype);
         backend.Linear(outLinear, gated, _outLinearWeight!, _outLinearBias!);
         gated.Dispose();
 
         // Residual
-        Tensor output = new Tensor(shape, DType.F32);
+        Tensor output = new Tensor(shape, dtype);
         backend.Add(output, hidden, outLinear);
         outLinear.Dispose();
 

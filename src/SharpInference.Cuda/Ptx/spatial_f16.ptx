@@ -234,7 +234,7 @@ im2col16_done:
     .reg .u64 %rd<6>;
     .reg .u32 %r<10>;
     .reg .f32 %f<4>;
-    .reg .b16 %h<2>;
+    .reg .b16 %h<3>;
     .reg .pred %p1;
 
     ld.param.u64 %rd0, [param_out];

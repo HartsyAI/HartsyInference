@@ -83,30 +83,24 @@ public sealed class ResNetBlock2D
         int height = (int)input.Shape[2];
         int width = (int)input.Shape[3];
 
-        // Path 1: norm1 → SiLU → conv1
-        TensorShape hiddenShape = new TensorShape(batch, _inChannels, height, width);
-        Tensor norm1Out = new Tensor(hiddenShape, DType.F32);
-        backend.GroupNorm(norm1Out, input, _norm1Weight!, _norm1Bias!, _normGroups, _normEps);
+        DType dtype = input.DType;
 
-        Tensor silu1Out = new Tensor(hiddenShape, DType.F32);
-        backend.Silu(silu1Out, norm1Out);
-        norm1Out.Dispose();
+        // Path 1: fused GroupNorm+SiLU → conv1
+        TensorShape hiddenShape = new TensorShape(batch, _inChannels, height, width);
+        Tensor silu1Out = new Tensor(hiddenShape, dtype);
+        backend.GroupNormSilu(silu1Out, input, _norm1Weight!, _norm1Bias!, _normGroups, _normEps);
 
         TensorShape conv1OutShape = new TensorShape(batch, _outChannels, height, width);
-        Tensor conv1Out = new Tensor(conv1OutShape, DType.F32);
+        Tensor conv1Out = new Tensor(conv1OutShape, dtype);
         backend.Conv2D(conv1Out, silu1Out, _conv1Weight!, _conv1Bias, 1, 1, 1, 1);
         silu1Out.Dispose();
 
-        // Path 1 continued: norm2 → SiLU → conv2
-        Tensor norm2Out = new Tensor(conv1OutShape, DType.F32);
-        backend.GroupNorm(norm2Out, conv1Out, _norm2Weight!, _norm2Bias!, _normGroups, _normEps);
+        // Path 1 continued: fused GroupNorm+SiLU → conv2
+        Tensor silu2Out = new Tensor(conv1OutShape, dtype);
+        backend.GroupNormSilu(silu2Out, conv1Out, _norm2Weight!, _norm2Bias!, _normGroups, _normEps);
         conv1Out.Dispose();
 
-        Tensor silu2Out = new Tensor(conv1OutShape, DType.F32);
-        backend.Silu(silu2Out, norm2Out);
-        norm2Out.Dispose();
-
-        Tensor conv2Out = new Tensor(conv1OutShape, DType.F32);
+        Tensor conv2Out = new Tensor(conv1OutShape, dtype);
         backend.Conv2D(conv2Out, silu2Out, _conv2Weight!, _conv2Bias, 1, 1, 1, 1);
         silu2Out.Dispose();
 
@@ -114,7 +108,7 @@ public sealed class ResNetBlock2D
         Tensor skip;
         if (_hasShortcut)
         {
-            skip = new Tensor(conv1OutShape, DType.F32);
+            skip = new Tensor(conv1OutShape, dtype);
             backend.Conv2D(skip, input, _shortcutWeight!, _shortcutBias, 1, 1, 0, 0);
         }
         else
@@ -123,7 +117,7 @@ public sealed class ResNetBlock2D
         }
 
         // Residual addition: output = conv2_out + skip
-        Tensor output = new Tensor(conv1OutShape, DType.F32);
+        Tensor output = new Tensor(conv1OutShape, dtype);
         backend.Add(output, conv2Out, skip);
         conv2Out.Dispose();
 

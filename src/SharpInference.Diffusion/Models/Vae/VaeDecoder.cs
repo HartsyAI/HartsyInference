@@ -158,10 +158,12 @@ public sealed class VaeDecoder
         // 1. Undo scaling: z = latent / scaling_factor + shift_factor
         Tensor z = UndoScaling(backend, latent);
 
+        DType dtype = z.DType;
+
         // 2. Optional post_quant_conv (1x1 conv)
         if (_config.UsePostQuantConv)
         {
-            Tensor quantOut = new Tensor(z.Shape, DType.F32);
+            Tensor quantOut = new Tensor(z.Shape, dtype);
             backend.Conv2D(quantOut, z, _postQuantConvWeight!, _postQuantConvBias, 1, 1, 0, 0);
             z.Dispose();
             z = quantOut;
@@ -174,7 +176,7 @@ public sealed class VaeDecoder
         int midCh = _config.BlockOutChannels[^1];
 
         TensorShape convInOutShape = new TensorShape(batch, midCh, h, w);
-        Tensor hidden = new Tensor(convInOutShape, DType.F32);
+        Tensor hidden = new Tensor(convInOutShape, dtype);
         backend.Conv2D(hidden, z, _convInWeight!, _convInBias, 1, 1, 1, 1);
         z.Dispose();
 
@@ -215,11 +217,11 @@ public sealed class VaeDecoder
                 int curCh = (int)hidden.Shape[1];
 
                 TensorShape upShape = new TensorShape(batch, curCh, curH * 2, curW * 2);
-                Tensor upsampled = new Tensor(upShape, DType.F32);
+                Tensor upsampled = new Tensor(upShape, dtype);
                 backend.UpsampleNearest2D(upsampled, hidden, 2, 2);
                 hidden.Dispose();
 
-                Tensor convUp = new Tensor(upShape, DType.F32);
+                Tensor convUp = new Tensor(upShape, dtype);
                 backend.Conv2D(convUp, upsampled, _upsampleWeights[blockIdx]!, _upsampleBiases[blockIdx], 1, 1, 1, 1);
                 upsampled.Dispose();
 
@@ -227,42 +229,48 @@ public sealed class VaeDecoder
             }
         }
 
-        // 6. conv_norm_out → SiLU → conv_out
+        // 6. Fused GroupNorm+SiLU → conv_out
         int finalH = (int)hidden.Shape[2];
         int finalW = (int)hidden.Shape[3];
         int finalCh = _config.BlockOutChannels[0];
 
         TensorShape finalShape = new TensorShape(batch, finalCh, finalH, finalW);
-        Tensor normOut = new Tensor(finalShape, DType.F32);
-        backend.GroupNorm(normOut, hidden, _normOutWeight!, _normOutBias!, _config.NormNumGroups, _config.NormEps);
+        Tensor siluOut = new Tensor(finalShape, dtype);
+        backend.GroupNormSilu(siluOut, hidden, _normOutWeight!, _normOutBias!, _config.NormNumGroups, _config.NormEps);
         hidden.Dispose();
 
-        Tensor siluOut = new Tensor(finalShape, DType.F32);
-        backend.Silu(siluOut, normOut);
-        normOut.Dispose();
-
         TensorShape rgbShape = new TensorShape(batch, 3, finalH, finalW);
-        Tensor output = new Tensor(rgbShape, DType.F32);
-        backend.Conv2D(output, siluOut, _convOutWeight!, _convOutBias, 1, 1, 1, 1);
+        Tensor convOut = new Tensor(rgbShape, dtype);
+        backend.Conv2D(convOut, siluOut, _convOutWeight!, _convOutBias, 1, 1, 1, 1);
         siluOut.Dispose();
 
-        return output;
+        // Cast final output to F32 for RGB post-processing if running in F16
+        if (dtype == DType.F16)
+        {
+            Tensor outputF32 = new Tensor(rgbShape, DType.F32);
+            backend.CastToF32(outputF32, convOut);
+            convOut.Dispose();
+            return outputF32;
+        }
+
+        return convOut;
     }
 
     /// <summary>Undoes the latent scaling: z = latent / scaling_factor + shift_factor.</summary>
     private Tensor UndoScaling(IBackend backend, Tensor latent)
     {
+        DType dtype = latent.DType;
         float invScale = 1.0f / _config.ScalingFactor;
-        Tensor scaled = new Tensor(latent.Shape, DType.F32);
+        Tensor scaled = new Tensor(latent.Shape, dtype);
         backend.Scale(scaled, latent, invScale);
 
         if (_config.ShiftFactor.HasValue)
         {
             // Add shift_factor to every element
-            Tensor shiftTensor = new Tensor(latent.Shape, DType.F32);
+            Tensor shiftTensor = new Tensor(latent.Shape, dtype);
             backend.Fill(shiftTensor, _config.ShiftFactor.Value);
 
-            Tensor shifted = new Tensor(latent.Shape, DType.F32);
+            Tensor shifted = new Tensor(latent.Shape, dtype);
             backend.Add(shifted, scaled, shiftTensor);
             scaled.Dispose();
             shiftTensor.Dispose();

@@ -86,15 +86,31 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            CublasApi.cublasSgemm(
-                _cublasHandle,
-                CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                N, M, K,
-                &alpha,
-                pB, N,
-                pA, K,
-                &beta,
-                pC, N).ThrowOnCublasError();
+            if (a.DType == DType.F16)
+            {
+                CublasApi.cublasGemmEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                    N, M, K,
+                    &alpha,
+                    pB, CublasApi.CUDA_R_16F, N,
+                    pA, CublasApi.CUDA_R_16F, K,
+                    &beta,
+                    pC, CublasApi.CUDA_R_16F, N,
+                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            }
+            else
+            {
+                CublasApi.cublasSgemm(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                    N, M, K,
+                    &alpha,
+                    pB, N,
+                    pA, K,
+                    &beta,
+                    pC, N).ThrowOnCublasError();
+            }
 
             GpuTransferHelper.CacheActivation(output, pC, outBytes);
             cachedOutput = true;
@@ -134,21 +150,40 @@ public sealed class CudaBackend : IBackend
 
             // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
             // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N]
-            CublasApi.cublasSgemm(
-                _cublasHandle,
-                CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                N, M, K,
-                &alpha,
-                pWeight, K,
-                pInput, K,
-                &beta,
-                pOutput, N).ThrowOnCublasError();
+            if (input.DType == DType.F16)
+            {
+                CublasApi.cublasGemmEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                    N, M, K,
+                    &alpha,
+                    pWeight, CublasApi.CUDA_R_16F, K,
+                    pInput, CublasApi.CUDA_R_16F, K,
+                    &beta,
+                    pOutput, CublasApi.CUDA_R_16F, N,
+                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            }
+            else
+            {
+                CublasApi.cublasSgemm(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                    N, M, K,
+                    &alpha,
+                    pWeight, K,
+                    pInput, K,
+                    &beta,
+                    pOutput, N).ThrowOnCublasError();
+            }
 
             // Add bias on GPU if present
             if (bias is not null)
             {
                 int totalElements = M * N;
-                _kernels!.LaunchBiasAdd(pOutput, pBias, N, 1, totalElements, _stream.Handle);
+                if (input.DType == DType.F16)
+                    _kernels!.LaunchBiasAddF16(pOutput, pBias, N, 1, totalElements, _stream.Handle);
+                else
+                    _kernels!.LaunchBiasAdd(pOutput, pBias, N, 1, totalElements, _stream.Handle);
             }
 
             GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
@@ -189,15 +224,17 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
+            int dataType = a.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+
             CublasApi.cublasGemmStridedBatchedEx(
                 _cublasHandle,
                 CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
                 N, M, K,
                 &alpha,
-                pB, CublasApi.CUDA_R_32F, N, strideB,
-                pA, CublasApi.CUDA_R_32F, K, strideA,
+                pB, dataType, N, strideB,
+                pA, dataType, K, strideA,
                 &beta,
-                pC, CublasApi.CUDA_R_32F, N, strideC,
+                pC, dataType, N, strideC,
                 (int)batchSize,
                 CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
@@ -235,6 +272,8 @@ public sealed class CudaBackend : IBackend
         int colCols = outH * outW;
 
         bool is1x1 = kH == 1 && kW == 1 && strideH == 1 && strideW == 1 && padH == 0 && padW == 0;
+        bool isF16 = input.DType == DType.F16;
+        int elemSize = input.DType.SizeInBytes;
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, colBuf = 0;
         bool cachedOutput = false;
@@ -251,7 +290,7 @@ public sealed class CudaBackend : IBackend
 
             if (!is1x1)
             {
-                colBuf = CudaMemory.Allocate((nuint)((long)colRows * colCols * sizeof(float)));
+                colBuf = CudaMemory.Allocate((nuint)((long)colRows * colCols * elemSize));
             }
 
             float alpha = 1.0f;
@@ -264,39 +303,69 @@ public sealed class CudaBackend : IBackend
                 ulong colPtr;
                 if (is1x1)
                 {
-                    colPtr = pInput + (ulong)((long)b * inCh * inH * inW * sizeof(float));
+                    colPtr = pInput + (ulong)((long)b * inCh * inH * inW * elemSize);
                 }
                 else
                 {
-                    _kernels!.LaunchIm2Col(
-                        colBuf, pInput,
-                        inCh, inH, inW, kH, kW,
-                        padH, padW, strideH, strideW,
-                        outH, outW, inputBatchOffset,
-                        _stream.Handle);
+                    if (isF16)
+                        _kernels!.LaunchIm2ColF16(
+                            colBuf, pInput,
+                            inCh, inH, inW, kH, kW,
+                            padH, padW, strideH, strideW,
+                            outH, outW, inputBatchOffset,
+                            _stream.Handle);
+                    else
+                        _kernels!.LaunchIm2Col(
+                            colBuf, pInput,
+                            inCh, inH, inW, kH, kW,
+                            padH, padW, strideH, strideW,
+                            outH, outW, inputBatchOffset,
+                            _stream.Handle);
                     colPtr = colBuf;
                 }
 
-                ulong outBatchPtr = pOutput + (ulong)((long)b * outCh * outH * outW * sizeof(float));
+                ulong outBatchPtr = pOutput + (ulong)((long)b * outCh * outH * outW * elemSize);
 
-                CublasApi.cublasSgemm(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                    colCols, outCh, colRows,
-                    &alpha,
-                    colPtr, colCols,
-                    pWeight, colRows,
-                    &beta,
-                    outBatchPtr, colCols).ThrowOnCublasError();
+                if (isF16)
+                {
+                    CublasApi.cublasGemmEx(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                        colCols, outCh, colRows,
+                        &alpha,
+                        colPtr, CublasApi.CUDA_R_16F, colCols,
+                        pWeight, CublasApi.CUDA_R_16F, colRows,
+                        &beta,
+                        outBatchPtr, CublasApi.CUDA_R_16F, colCols,
+                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                }
+                else
+                {
+                    CublasApi.cublasSgemm(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                        colCols, outCh, colRows,
+                        &alpha,
+                        colPtr, colCols,
+                        pWeight, colRows,
+                        &beta,
+                        outBatchPtr, colCols).ThrowOnCublasError();
+                }
             }
 
             if (bias is not null)
             {
                 int totalElements = batch * outCh * outH * outW;
-                _kernels!.LaunchBiasAdd(
-                    pOutput, pBias,
-                    outCh, outH * outW, totalElements,
-                    _stream.Handle);
+                if (isF16)
+                    _kernels!.LaunchBiasAddF16(
+                        pOutput, pBias,
+                        outCh, outH * outW, totalElements,
+                        _stream.Handle);
+                else
+                    _kernels!.LaunchBiasAdd(
+                        pOutput, pBias,
+                        outCh, outH * outW, totalElements,
+                        _stream.Handle);
             }
 
             GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
@@ -336,10 +405,16 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchGroupNorm(
-                pOut, pIn, pW, pB,
-                batch, channels, spatial, groups, eps,
-                _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchGroupNormF16(
+                    pOut, pIn, pW, pB,
+                    batch, channels, spatial, groups, eps,
+                    _stream.Handle);
+            else
+                _kernels!.LaunchGroupNorm(
+                    pOut, pIn, pW, pB,
+                    batch, channels, spatial, groups, eps,
+                    _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -370,10 +445,16 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchLayerNorm(
-                pOut, pIn, pW, pB,
-                normDim, totalRows, eps,
-                _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchLayerNormF16(
+                    pOut, pIn, pW, pB,
+                    normDim, totalRows, eps,
+                    _stream.Handle);
+            else
+                _kernels!.LaunchLayerNorm(
+                    pOut, pIn, pW, pB,
+                    normDim, totalRows, eps,
+                    _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -390,6 +471,102 @@ public sealed class CudaBackend : IBackend
     public void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)
     {
         throw new NotImplementedException("CUDA RmsNorm not yet implemented");
+    }
+
+    /// <summary>Fused GroupNorm + SiLU via single PTX kernel. Eliminates intermediate allocation.</summary>
+    public void GroupNormSilu(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
+    {
+        EnsureKernels();
+
+        int batch = (int)input.Shape[0];
+        int channels = (int)input.Shape[1];
+        int spatial = 1;
+        for (int d = 2; d < input.Shape.Rank; d++)
+        {
+            spatial *= (int)input.Shape[d];
+        }
+
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            pB = GpuTransferHelper.CopyToDevice(bias);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            if (input.DType == DType.F16)
+                _kernels!.LaunchGroupNormSiluF16(
+                    pOut, pIn, pW, pB,
+                    batch, channels, spatial, groups, eps,
+                    _stream.Handle);
+            else
+                _kernels!.LaunchGroupNormSilu(
+                    pOut, pIn, pW, pB,
+                    batch, channels, spatial, groups, eps,
+                    _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pW);
+            GpuTransferHelper.FreeDevice(pB);
+        }
+    }
+
+    /// <summary>GPU cast FP32 → FP16 via PTX kernel.</summary>
+    public void CastToF16(Tensor output, Tensor input)
+    {
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchCastF32ToF16(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>GPU cast FP16 → FP32 via PTX kernel.</summary>
+    public void CastToF32(Tensor output, Tensor input)
+    {
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchCastF16ToF32(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
     }
 
     // ── Attention ------------------------------------------------------------
@@ -421,7 +598,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            nuint scoresBytes = (nuint)(totalHeads * Sq * Skv * sizeof(float));
+            bool isF16 = query.DType == DType.F16;
+            int elemSize = query.DType.SizeInBytes;
+
+            nuint scoresBytes = (nuint)(totalHeads * Sq * Skv * elemSize);
             scoresBuf = CudaMemory.Allocate(scoresBytes);
 
             float alpha = scale;
@@ -434,19 +614,35 @@ public sealed class CudaBackend : IBackend
             // QK^T per head
             for (long bh = 0; bh < totalHeads; bh++)
             {
-                ulong qPtr = pQ + (ulong)(bh * strideQ * sizeof(float));
-                ulong kPtr = pK + (ulong)(bh * strideK * sizeof(float));
-                ulong sPtr = scoresBuf + (ulong)(bh * strideScores * sizeof(float));
+                ulong qPtr = pQ + (ulong)(bh * strideQ * elemSize);
+                ulong kPtr = pK + (ulong)(bh * strideK * elemSize);
+                ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
 
-                CublasApi.cublasSgemm(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                    (int)Skv, (int)Sq, (int)D,
-                    &alpha,
-                    kPtr, (int)D,
-                    qPtr, (int)D,
-                    &beta,
-                    sPtr, (int)Skv).ThrowOnCublasError();
+                if (isF16)
+                {
+                    CublasApi.cublasGemmEx(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                        (int)Skv, (int)Sq, (int)D,
+                        &alpha,
+                        kPtr, CublasApi.CUDA_R_16F, (int)D,
+                        qPtr, CublasApi.CUDA_R_16F, (int)D,
+                        &beta,
+                        sPtr, CublasApi.CUDA_R_16F, (int)Skv,
+                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                }
+                else
+                {
+                    CublasApi.cublasSgemm(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                        (int)Skv, (int)Sq, (int)D,
+                        &alpha,
+                        kPtr, (int)D,
+                        qPtr, (int)D,
+                        &beta,
+                        sPtr, (int)Skv).ThrowOnCublasError();
+                }
             }
 
             // Apply mask if present
@@ -459,18 +655,27 @@ public sealed class CudaBackend : IBackend
                 {
                     for (long bh = 0; bh < totalHeads; bh++)
                     {
-                        ulong sPtr = scoresBuf + (ulong)(bh * strideScores * sizeof(float));
-                        _kernels!.LaunchAdd(sPtr, sPtr, pMask, (int)(Sq * Skv), _stream.Handle);
+                        ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
+                        if (isF16)
+                            _kernels!.LaunchAddF16(sPtr, sPtr, pMask, (int)(Sq * Skv), _stream.Handle);
+                        else
+                            _kernels!.LaunchAdd(sPtr, sPtr, pMask, (int)(Sq * Skv), _stream.Handle);
                     }
                 }
                 else if (maskElements == scoreElements)
                 {
-                    _kernels!.LaunchAdd(scoresBuf, scoresBuf, pMask, (int)scoreElements, _stream.Handle);
+                    if (isF16)
+                        _kernels!.LaunchAddF16(scoresBuf, scoresBuf, pMask, (int)scoreElements, _stream.Handle);
+                    else
+                        _kernels!.LaunchAdd(scoresBuf, scoresBuf, pMask, (int)scoreElements, _stream.Handle);
                 }
             }
 
             // Softmax
-            _kernels!.LaunchSoftmax(scoresBuf, (int)Skv, (int)(totalHeads * Sq), _stream.Handle);
+            if (isF16)
+                _kernels!.LaunchSoftmaxF16(scoresBuf, (int)Skv, (int)(totalHeads * Sq), _stream.Handle);
+            else
+                _kernels!.LaunchSoftmax(scoresBuf, (int)Skv, (int)(totalHeads * Sq), _stream.Handle);
 
             // attn_weights @ V
             long strideV = Skv * D;
@@ -480,19 +685,35 @@ public sealed class CudaBackend : IBackend
 
             for (long bh = 0; bh < totalHeads; bh++)
             {
-                ulong sPtr = scoresBuf + (ulong)(bh * strideScores * sizeof(float));
-                ulong vPtr = pV + (ulong)(bh * strideV * sizeof(float));
-                ulong oPtr = pOut + (ulong)(bh * strideOut * sizeof(float));
+                ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
+                ulong vPtr = pV + (ulong)(bh * strideV * elemSize);
+                ulong oPtr = pOut + (ulong)(bh * strideOut * elemSize);
 
-                CublasApi.cublasSgemm(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                    (int)D, (int)Sq, (int)Skv,
-                    &one,
-                    vPtr, (int)D,
-                    sPtr, (int)Skv,
-                    &zero,
-                    oPtr, (int)D).ThrowOnCublasError();
+                if (isF16)
+                {
+                    CublasApi.cublasGemmEx(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                        (int)D, (int)Sq, (int)Skv,
+                        &one,
+                        vPtr, CublasApi.CUDA_R_16F, (int)D,
+                        sPtr, CublasApi.CUDA_R_16F, (int)Skv,
+                        &zero,
+                        oPtr, CublasApi.CUDA_R_16F, (int)D,
+                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                }
+                else
+                {
+                    CublasApi.cublasSgemm(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                        (int)D, (int)Sq, (int)Skv,
+                        &one,
+                        vPtr, (int)D,
+                        sPtr, (int)Skv,
+                        &zero,
+                        oPtr, (int)D).ThrowOnCublasError();
+                }
             }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -523,7 +744,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchGelu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchGeluF16(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchGelu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -547,7 +771,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchSilu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchSiluF16(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchSilu(pOut, pIn, (int)input.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -574,7 +801,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchAdd(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
+            if (a.DType == DType.F16)
+                _kernels!.LaunchAddF16(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchAdd(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -600,7 +830,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchMul(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
+            if (a.DType == DType.F16)
+                _kernels!.LaunchMulF16(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchMul(pOut, pA, pB, (int)a.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -625,7 +858,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchScale(pOut, pIn, scalar, (int)input.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchScaleF16(pOut, pIn, scalar, (int)input.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchScale(pOut, pIn, scalar, (int)input.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -649,7 +885,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchClamp(pOut, pIn, min, max, (int)input.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchClampF16(pOut, pIn, min, max, (int)input.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchClamp(pOut, pIn, min, max, (int)input.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -690,7 +929,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchTranspose2D(pOut, pIn, d1, d2, (int)output.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchTranspose2DF16(pOut, pIn, d1, d2, (int)output.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchTranspose2D(pOut, pIn, d1, d2, (int)output.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -715,7 +957,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchPermute0213(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchPermute0213F16(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchPermute0213(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -741,7 +986,10 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             int innerDim = (int)output.Shape[output.Shape.Rank - 1];
-            _kernels!.LaunchGeGlu(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchGeGluF16(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchGeGlu(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
@@ -764,7 +1012,10 @@ public sealed class CudaBackend : IBackend
             pHidden = GpuTransferHelper.CopyToDevice(hidden);
             pBias = GpuTransferHelper.CopyToDevice(bias);
 
-            _kernels!.LaunchBroadcastAdd(pHidden, pBias, channels, spatial, (int)hidden.ElementCount, _stream.Handle);
+            if (hidden.DType == DType.F16)
+                _kernels!.LaunchBroadcastAddF16(pHidden, pBias, channels, spatial, (int)hidden.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchBroadcastAdd(pHidden, pBias, channels, spatial, (int)hidden.ElementCount, _stream.Handle);
 
             // BroadcastAdd modifies hidden in-place. Clear old GPU callbacks before re-caching
             // to prevent CacheActivation's DataPointer access from firing the old sync callback
@@ -797,12 +1048,14 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
+            int elemSize = output.DType.SizeInBytes;
+
             if (dim == 0)
             {
                 ulong offset = 0;
                 for (int t = 0; t < inputs.Length; t++)
                 {
-                    nuint byteSize = (nuint)(inputs[t].ElementCount * sizeof(float));
+                    nuint byteSize = (nuint)(inputs[t].ElementCount * elemSize);
                     CudaMemory.CopyDeviceToDevice(pOut + offset, gpuInputs[t], byteSize);
                     offset += (ulong)byteSize;
                 }
@@ -830,11 +1083,11 @@ public sealed class CudaBackend : IBackend
                     {
                         long inputDimSize = inputs[t].Shape[dim];
                         long sliceSize = inputDimSize * innerSize;
-                        nuint sliceBytes = (nuint)(sliceSize * sizeof(float));
+                        nuint sliceBytes = (nuint)(sliceSize * elemSize);
 
                         long inDimStride = inputDimSize * innerSize;
-                        ulong srcOffset = (ulong)((outer * inDimStride) * sizeof(float));
-                        ulong dstOffset = (ulong)((outer * outDimStride + dimOffset) * sizeof(float));
+                        ulong srcOffset = (ulong)((outer * inDimStride) * elemSize);
+                        ulong dstOffset = (ulong)((outer * outDimStride + dimOffset) * elemSize);
 
                         CudaMemory.CopyDeviceToDevice(pOut + dstOffset, gpuInputs[t] + srcOffset, sliceBytes);
                         dimOffset += sliceSize;
@@ -881,10 +1134,16 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchUpsampleNearest2D(
-                pOut, pIn,
-                batch, channels, inH, inW, outH, outW, scaleH, scaleW,
-                _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchUpsampleNearest2DF16(
+                    pOut, pIn,
+                    batch, channels, inH, inW, outH, outW, scaleH, scaleW,
+                    _stream.Handle);
+            else
+                _kernels!.LaunchUpsampleNearest2D(
+                    pOut, pIn,
+                    batch, channels, inH, inW, outH, outW, scaleH, scaleW,
+                    _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

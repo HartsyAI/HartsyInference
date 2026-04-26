@@ -20,7 +20,7 @@
     .reg .u64 %rd<6>;
     .reg .u32 %r<14>;
     .reg .f32 %f<3>;
-    .reg .b16 %h<2>;
+    .reg .b16 %h<3>;
     .reg .pred %p1;
 
     ld.param.u64 %rd0, [param_hidden];

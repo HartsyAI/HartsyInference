@@ -110,7 +110,7 @@ public sealed class DownBlock
             int w = (int)hidden.Shape[3];
 
             TensorShape downShape = new TensorShape(batch, ch, h / 2, w / 2);
-            Tensor downsampled = new Tensor(downShape, DType.F32);
+            Tensor downsampled = new Tensor(downShape, hidden.DType);
             backend.Conv2D(downsampled, hidden, _downsampleWeight!, _downsampleBias, 2, 2, 1, 1);
             hidden.Dispose();
             hidden = downsampled;

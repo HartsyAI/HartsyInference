@@ -133,11 +133,11 @@ public sealed class UpBlock
             int w = (int)hidden.Shape[3];
 
             TensorShape upShape = new TensorShape(batch, ch, h * 2, w * 2);
-            Tensor upsampled = new Tensor(upShape, DType.F32);
+            Tensor upsampled = new Tensor(upShape, hidden.DType);
             backend.UpsampleNearest2D(upsampled, hidden, 2, 2);
             hidden.Dispose();
 
-            Tensor convUp = new Tensor(upShape, DType.F32);
+            Tensor convUp = new Tensor(upShape, upsampled.DType);
             backend.Conv2D(convUp, upsampled, _upsampleWeight!, _upsampleBias, 1, 1, 1, 1);
             upsampled.Dispose();
 
@@ -157,7 +157,7 @@ public sealed class UpBlock
         int width = (int)a.Shape[3];
 
         TensorShape outShape = new TensorShape(batch, chA + chB, height, width);
-        Tensor output = new Tensor(outShape, DType.F32);
+        Tensor output = new Tensor(outShape, a.DType);
         backend.Concat(output, [a, b], 1);
 
         return output;

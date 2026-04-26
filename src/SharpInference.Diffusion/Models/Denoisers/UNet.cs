@@ -187,7 +187,9 @@ public sealed class UNet
         int height = (int)latent.Shape[2];
         int width = (int)latent.Shape[3];
 
-        // 1. Timestep embedding
+        DType dtype = latent.DType;
+
+        // 1. Timestep embedding (computed in F32, cast to match latent dtype)
         Span<float> timesteps = stackalloc float[batch];
         timesteps.Fill(timestep);
         Tensor temb = _timeEmbedding.Forward(backend, timesteps, batch);
@@ -203,9 +205,28 @@ public sealed class UNet
             temb = combinedTemb;
         }
 
+        // Cast temb to match latent dtype (embeddings are computed in F32)
+        if (temb.DType != dtype)
+        {
+            Tensor tembCast = new Tensor(temb.Shape, dtype);
+            backend.CastToF16(tembCast, temb);
+            temb.Dispose();
+            temb = tembCast;
+        }
+
+        // Cast text embeddings to match latent dtype (CLIP produces F32, UNet may run F16)
+        bool ownsTextEmbeddings = false;
+        if (textEmbeddings.DType != dtype)
+        {
+            Tensor textCast = new Tensor(textEmbeddings.Shape, dtype);
+            backend.CastToF16(textCast, textEmbeddings);
+            textEmbeddings = textCast;
+            ownsTextEmbeddings = true;
+        }
+
         // 3. conv_in
         TensorShape convInShape = new TensorShape(batch, _config.ModelChannels, height, width);
-        Tensor hidden = new Tensor(convInShape, DType.F32);
+        Tensor hidden = new Tensor(convInShape, dtype);
         backend.Conv2D(hidden, latent, _convInWeight!, _convInBias, 1, 1, 1, 1);
 
         // 4. Down blocks — collect all skip connections
@@ -239,23 +260,20 @@ public sealed class UNet
         }
 
         temb.Dispose();
+        if (ownsTextEmbeddings) textEmbeddings.Dispose();
 
-        // 7. conv_norm_out → SiLU → conv_out
+        // 7. Fused GroupNorm+SiLU → conv_out
         int finalH = (int)hidden.Shape[2];
         int finalW = (int)hidden.Shape[3];
         int finalCh = _config.ModelChannels;
 
         TensorShape finalShape = new TensorShape(batch, finalCh, finalH, finalW);
-        Tensor normOut = new Tensor(finalShape, DType.F32);
-        backend.GroupNorm(normOut, hidden, _normOutWeight!, _normOutBias!, _config.NormNumGroups, _config.NormEps);
+        Tensor siluOut = new Tensor(finalShape, dtype);
+        backend.GroupNormSilu(siluOut, hidden, _normOutWeight!, _normOutBias!, _config.NormNumGroups, _config.NormEps);
         hidden.Dispose();
 
-        Tensor siluOut = new Tensor(finalShape, DType.F32);
-        backend.Silu(siluOut, normOut);
-        normOut.Dispose();
-
         TensorShape outShape = new TensorShape(batch, _config.OutChannels, finalH, finalW);
-        Tensor output = new Tensor(outShape, DType.F32);
+        Tensor output = new Tensor(outShape, dtype);
         backend.Conv2D(output, siluOut, _convOutWeight!, _convOutBias, 1, 1, 1, 1);
         siluOut.Dispose();
 
