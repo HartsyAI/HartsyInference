@@ -132,6 +132,7 @@ public sealed unsafe class FluxPipeline : IDisposable
                 clipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked);
 
             LogTensorStats($"Step {i+1} velocity", velocityPred);
+            LogPerLatentChannelMeanPacked($"Step {i+1} velocity", velocityPred);
 
             // Scheduler step: Euler on packed latent
             TensorShape packedStepShape = new TensorShape(1, imgSeqLen, 64);
@@ -140,6 +141,8 @@ public sealed unsafe class FluxPipeline : IDisposable
             velocityPred.Dispose();
             packedLatent.Dispose();
             packedLatent = newLatent;
+
+            LogPerLatentChannelMeanPacked($"Step {i+1} latent", packedLatent);
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
@@ -207,6 +210,38 @@ public sealed unsafe class FluxPipeline : IDisposable
         }
         float mean = data.Length > 0 ? sum / data.Length : 0;
         Logs.Debug($"  [{name}] shape={tensor.Shape} dtype={tensor.DType} min={min:E3} max={max:E3} mean={mean:E3} nan={nanCount} inf={infCount} zero={zeroCount}/{data.Length}");
+    }
+
+    /// <summary>Logs per-latent-channel mean for a packed [B, S, 64] tensor (velocity or latent). Each latent channel occupies 4 contiguous slots in the feature dim (c*4 .. c*4+3 for 2x2 patch).</summary>
+    private static void LogPerLatentChannelMeanPacked(string name, Tensor packed)
+    {
+        long batch = packed.Shape[0];
+        long seqLen = packed.Shape[1];
+        long featDim = packed.Shape[2];
+        int latentChannels = (int)(featDim / 4);
+        float* ptr = (float*)packed.DataPointer;
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        sb.Append($"  [{name}] per-lat-ch mean: ");
+        for (int c = 0; c < latentChannels; c++)
+        {
+            double sum = 0;
+            long count = 0;
+            for (long b = 0; b < batch; b++)
+            {
+                for (long s = 0; s < seqLen; s++)
+                {
+                    long baseIdx = (b * seqLen + s) * featDim + c * 4;
+                    sum += ptr[baseIdx + 0];
+                    sum += ptr[baseIdx + 1];
+                    sum += ptr[baseIdx + 2];
+                    sum += ptr[baseIdx + 3];
+                    count += 4;
+                }
+            }
+            float mean = (float)(sum / count);
+            sb.Append($"c{c}={mean:+0.000;-0.000} ");
+        }
+        Logs.Debug(sb.ToString());
     }
 
     /// <summary>Logs per-channel statistics for a 4D NCHW tensor. Useful for diagnosing color channel imbalances.</summary>

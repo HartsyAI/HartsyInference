@@ -21,8 +21,8 @@ public sealed unsafe class AdaLNModulation
         _numParams = numParams;
     }
 
-    /// <summary>Loads the linear projection weights. Weight shape: [numParams * hiddenSize, hiddenSize], Bias shape: [numParams * hiddenSize].</summary>
-    public void LoadWeights(Tensor weight, Tensor bias)
+    /// <summary>Loads the linear projection weights. Weight shape: [numParams * hiddenSize, hiddenSize], Bias shape: [numParams * hiddenSize] (may be null for Flux.2 where modulation projections have no bias).</summary>
+    public void LoadWeights(Tensor weight, Tensor? bias)
     {
         _linearWeight = weight;
         _linearBias = bias;

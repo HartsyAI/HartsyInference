@@ -163,7 +163,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOutput = GpuTransferHelper.AllocateDevice(outBytes);
 
-            float alpha = 1.0f;
+            // For ComfyUI fp8_scaled checkpoints, every FP8 weight has a per-tensor scalar scale.
+            // We store it on the Tensor itself; folding it into cuBLAS' alpha applies the scaling
+            // for free during the GEMM (no extra kernel launch). Default Fp8ScaleFactor is 1.0.
+            float alpha = weight.Fp8ScaleFactor;
             float beta = 0.0f;
 
             // Resolve GEMM dtype: FP8 inputs get cast to F16 (Ampere fallback)

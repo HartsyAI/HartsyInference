@@ -30,6 +30,15 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Whether this tensor owns its memory or borrows it from a mmap/view.</summary>
     public bool OwnsMemory => _ownedBuffer is not null;
 
+    /// <summary>
+    /// Per-tensor scaling factor for ComfyUI-style <c>fp8_scaled</c> quantization, where the real value
+    /// of each weight element is <c>fp8_byte_decoded * Fp8ScaleFactor</c>. Default is 1.0, meaning
+    /// "no extra scaling" (used for plain FP8 or non-quantized tensors). When non-1, GEMM call sites
+    /// fold this into cuBLAS' <c>alpha</c> parameter so the scaling is applied for free during the matmul.
+    /// Set during checkpoint conversion for fp8_scaled formats; left at 1.0 otherwise.
+    /// </summary>
+    public float Fp8ScaleFactor { get; set; } = 1.0f;
+
     /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first.</summary>
     public void* DataPointer
     {
@@ -241,6 +250,28 @@ public sealed unsafe class Tensor : IDisposable
                 for (int i = 0; i < (int)count; i++)
                     dst[i] = FloatToFp8E4M3(BitConverter.UInt32BitsToSingle((uint)src[i] << 16));
             }
+            else if (DType == DType.BF16 && targetDtype == DType.F16)
+            {
+                // BF16 → F16: round-trip through F32 (no direct shortcut). BF16 has the same
+                // exponent range as F32 (8-bit) so any finite F32 value resulting from the
+                // BF16 expand will fit fine into F16 only as long as |x| ≤ 65504 — values
+                // outside the F16 range are saturated to ±Inf, matching the standard half cast.
+                ReadOnlySpan<ushort> src = new ReadOnlySpan<ushort>(ptr, (int)count);
+                Span<Half> dst = new Span<Half>(result.DataPointer, (int)count);
+                for (int i = 0; i < (int)count; i++)
+                    dst[i] = (Half)BitConverter.UInt32BitsToSingle((uint)src[i] << 16);
+            }
+            else if (DType == DType.F16 && targetDtype == DType.BF16)
+            {
+                // F16 → BF16: cast through F32 then truncate the bottom 16 bits.
+                ReadOnlySpan<Half> src = new ReadOnlySpan<Half>(ptr, (int)count);
+                Span<ushort> dst = new Span<ushort>(result.DataPointer, (int)count);
+                for (int i = 0; i < (int)count; i++)
+                {
+                    uint bits = BitConverter.SingleToUInt32Bits((float)src[i]);
+                    dst[i] = (ushort)(bits >> 16);
+                }
+            }
             else if (DType == DType.F8E4M3 && targetDtype == DType.BF16)
             {
                 ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
@@ -268,6 +299,30 @@ public sealed unsafe class Tensor : IDisposable
 
     /// <summary>Computes the total byte size for a tensor of the given shape and dtype. Delegates to DType.ComputeByteCount.</summary>
     public static long ComputeByteSize(TensorShape shape, DType dtype) => dtype.ComputeByteCount(shape.ElementCount);
+
+    /// <summary>Fused dequant: FP8-E4M3 → F16, multiplying each value by a per-tensor F32 scalar scale. Used for ComfyUI-style fp8_scaled checkpoints (e.g. flux1-krea-dev_fp8_scaled, flux1-dev-kontext_fp8_scaled) where each linear weight is stored as FP8 plus a companion `scale_weight` scalar so that real_weight = fp8_value * scale_weight. Doing this in one pass avoids allocating an F32 intermediate, halving peak memory during checkpoint load.</summary>
+    public unsafe Tensor DequantFp8E4M3ScaledToF16(float scale)
+    {
+        if (DType != DType.F8E4M3)
+            throw new SharpInference.Core.Exceptions.SharpInferenceException(
+                $"DequantFp8E4M3ScaledToF16 requires FP8 E4M3 input, got {DType}");
+
+        Tensor result = new Tensor(Shape, DType.F16, Device);
+        try
+        {
+            long count = Shape.ElementCount;
+            ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(DataPointer, (int)count);
+            Span<Half> dst = new Span<Half>(result.DataPointer, (int)count);
+            for (int i = 0; i < (int)count; i++)
+                dst[i] = (Half)(Fp8E4M3ToFloat(src[i]) * scale);
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
+    }
 
     // ── FP8 E4M3FN Conversion ─────────────────────────────────────────────
     // E4M3FN: sign(1) + exponent(4) + mantissa(3), bias=7, no NaN/Inf, max=448, min_subnormal=2^-9

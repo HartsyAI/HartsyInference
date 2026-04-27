@@ -25,8 +25,8 @@ public sealed class SwiGluFfn
         _ffDim = ffDim;
     }
 
-    /// <summary>Loads weights for SwiGLU mode (3 projections): w1 = gate, w3 = linear, w2 = output.</summary>
-    public void LoadSwiGluWeights(Tensor w1Weight, Tensor w1Bias, Tensor w3Weight, Tensor w3Bias, Tensor w2Weight, Tensor w2Bias)
+    /// <summary>Loads weights for SwiGLU mode (3 projections): w1 = gate, w3 = linear, w2 = output. Biases may be null when the model has bias-less linears (Flux.2).</summary>
+    public void LoadSwiGluWeights(Tensor w1Weight, Tensor? w1Bias, Tensor w3Weight, Tensor? w3Bias, Tensor w2Weight, Tensor? w2Bias)
     {
         _w1Weight = w1Weight;
         _w1Bias = w1Bias;

@@ -215,4 +215,82 @@ public static unsafe class CheckpointConvertUtils
     }
 
     #endregion
+
+    #region FP8 Scaled
+
+    /// <summary>
+    /// Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the
+    /// matching weight tensors and drops the companion entries from the dictionary.
+    /// <para>Two companion-naming conventions are supported:</para>
+    /// <list type="bullet">
+    /// <item><b>ComfyUI fp8_scaled</b> (Flux Krea): suffixes are <c>.scale_weight</c> and <c>.scale_input</c>.</item>
+    /// <item><b>BFL Mistral / Flux.2 Dev fp8 mixed</b>: suffixes are <c>.weight_scale</c> and <c>.input_scale</c>.</item>
+    /// </list>
+    /// In both cases the input-side scale is dropped (we run F32 activations and effectively use
+    /// alpha=weight_scale at GEMM time, so the input scale is the identity in our compute path).
+    /// Helper marker tensors like <c>scaled_fp8</c> (zero-element FP8 tensor used to flag the
+    /// format) are also dropped.
+    /// </summary>
+    /// <param name="source">Raw checkpoint dictionary (mutated; companion keys removed).</param>
+    /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
+    public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
+    {
+        // First pass: gather scale companions keyed by the base name (the part before the suffix).
+        Dictionary<string, Tensor> weightScales = new();
+        bool sawAnyScale = false;
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            string key = kvp.Key;
+            string? baseKey = null;
+            if (key.EndsWith(".scale_weight", StringComparison.Ordinal))
+                baseKey = key[..^".scale_weight".Length];
+            else if (key.EndsWith(".weight_scale", StringComparison.Ordinal))
+                baseKey = key[..^".weight_scale".Length];
+            if (baseKey is not null)
+            {
+                weightScales[baseKey] = kvp.Value;
+                sawAnyScale = true;
+            }
+            else if (key.EndsWith(".scale_input", StringComparison.Ordinal) ||
+                     key.EndsWith(".input_scale", StringComparison.Ordinal) ||
+                     key == "scaled_fp8")
+            {
+                sawAnyScale = true; // these are dropped but flag the format as scaled
+            }
+        }
+        if (!sawAnyScale)
+            return source;
+
+        Dictionary<string, Tensor> result = new(source.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            string key = kvp.Key;
+            // Drop companions and format-flag tensors.
+            if (key.EndsWith(".scale_weight", StringComparison.Ordinal) ||
+                key.EndsWith(".scale_input", StringComparison.Ordinal) ||
+                key.EndsWith(".weight_scale", StringComparison.Ordinal) ||
+                key.EndsWith(".input_scale", StringComparison.Ordinal) ||
+                key == "scaled_fp8")
+            {
+                continue;
+            }
+
+            // For FP8 weight tensors with a matching scalar scale, fold into Fp8ScaleFactor so
+            // CudaBackend can apply it via cuBLAS alpha at GEMM time.
+            if (kvp.Value.DType.IsFp8 && key.EndsWith(".weight", StringComparison.Ordinal))
+            {
+                string baseKey = key[..^".weight".Length];
+                if (weightScales.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.DType == DType.F32)
+                {
+                    float scale = ((float*)scaleT.DataPointer)[0];
+                    kvp.Value.Fp8ScaleFactor = scale;
+                }
+            }
+
+            result[key] = kvp.Value;
+        }
+        return result;
+    }
+
+    #endregion
 }

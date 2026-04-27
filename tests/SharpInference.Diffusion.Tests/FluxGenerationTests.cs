@@ -28,29 +28,50 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public sealed class FluxGenerationTests
 {
-    private static readonly string FluxSingleFilePath =
-        Environment.GetEnvironmentVariable("FLUX_SINGLE_FILE_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-schnell.safetensors";
+    private static string PickPath(string envVar, string winPath, string linuxPath)
+    {
+        string? v = Environment.GetEnvironmentVariable(envVar);
+        if (!string.IsNullOrEmpty(v)) return v;
+        return OperatingSystem.IsWindows() ? winPath : linuxPath;
+    }
 
-    private static readonly string FluxDevFp8Path =
-        Environment.GetEnvironmentVariable("FLUX_DEV_FP8_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-dev-fp8.safetensors";
+    private static readonly string LinuxRepoRoot =
+        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
 
-    private static readonly string TokenizerVocabPath =
-        Environment.GetEnvironmentVariable("CLIP_VOCAB_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_vocab.json";
+    private static readonly string FluxSingleFilePath = PickPath(
+        "FLUX_SINGLE_FILE_PATH",
+        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-schnell-fp8.safetensors",
+        Path.Combine(LinuxRepoRoot, "Models", "flux1-schnell-fp8.safetensors"));
 
-    private static readonly string TokenizerMergesPath =
-        Environment.GetEnvironmentVariable("CLIP_MERGES_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_merges.txt";
+    private static readonly string FluxDevFp8Path = PickPath(
+        "FLUX_DEV_FP8_PATH",
+        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-dev-fp8.safetensors",
+        Path.Combine(LinuxRepoRoot, "Models", "flux1-dev-fp8.safetensors"));
 
-    private static readonly string T5SpieceModelPath =
-        Environment.GetEnvironmentVariable("T5_SPIECE_MODEL_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\t5_spiece.model";
+    private static readonly string FluxKreaFp8ScaledPath = PickPath(
+        "FLUX_KREA_FP8_PATH",
+        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-krea-dev_fp8_scaled.safetensors",
+        Path.Combine(LinuxRepoRoot, "Models", "flux1-krea-dev_fp8_scaled.safetensors"));
 
-    private static readonly string OutputDir =
-        Environment.GetEnvironmentVariable("FLUX_OUTPUT_DIR")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\Output";
+    private static readonly string TokenizerVocabPath = PickPath(
+        "CLIP_VOCAB_PATH",
+        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_vocab.json",
+        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_vocab.json"));
+
+    private static readonly string TokenizerMergesPath = PickPath(
+        "CLIP_MERGES_PATH",
+        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_merges.txt",
+        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_merges.txt"));
+
+    private static readonly string T5SpieceModelPath = PickPath(
+        "T5_SPIECE_MODEL_PATH",
+        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\t5_spiece.model",
+        Path.Combine(LinuxRepoRoot, "tests", "test-models", "t5_spiece.model"));
+
+    private static readonly string OutputDir = PickPath(
+        "FLUX_OUTPUT_DIR",
+        @"C:\Users\kaleb\Desktop\projects\SharpInference\Output",
+        Path.Combine(LinuxRepoRoot, "Output"));
 
     private readonly ITestOutputHelper _output;
 
@@ -233,14 +254,20 @@ public sealed class FluxGenerationTests
 
         using (loader)
         {
-            // Cast to F32 — CPU pointer code (QkNorm, ReshapeToMultiHead, LayerNormNoAffine, etc.) expects float*
-            Dictionary<string, Tensor> transformerF32 = CastWeightsToF32(converted.Transformer);
-            Dictionary<string, Tensor> clipLF32 = CastWeightsToF32(converted.ClipL);
-            Dictionary<string, Tensor> t5F32 = CastWeightsToF32(converted.T5);
+            // FP8 Schnell single-file checkpoint contains FP8 transformer + FP8 T5. Casting all
+            // to F32 would explode the 12B FP8 transformer to ~48GB and OOM a 32GB system.
+            // Pass FP8/F16 weights as-is — model.LoadWeights auto-casts the few sites that
+            // dereference float* (QkNorm, CLIP embeddings, T5 norms) to F32 internally.
+            // Linear weights stay native FP8 for cuBLAS auto-cast (CUDA path) or F32-on-demand (CPU path).
+            // Only VAE (small, F32) is cast for safety.
             Dictionary<string, Tensor> vaeF32 = CastWeightsToF32(converted.Vae);
 
             // GPU backend — auto-transfer, no weight preloading (12B params won't fit in VRAM)
-            CudaBackend backend = new CudaBackend();
+            string assemblyDir = Path.GetDirectoryName(typeof(FluxGenerationTests).Assembly.Location)!;
+            string ptxDir = Path.Combine(assemblyDir, "Ptx");
+            CudaBackend backend = Directory.Exists(ptxDir)
+                ? new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir)
+                : new CudaBackend();
 
             // 2. Detect architecture
             (int doubleBlocks, int singleBlocks, bool hasGuidance) =
@@ -249,27 +276,27 @@ public sealed class FluxGenerationTests
 
             FluxConfig config = hasGuidance ? FluxConfig.Dev : FluxConfig.Schnell;
 
-            // 3. Load transformer
-            _output.WriteLine("[3/7] Loading FluxTransformer...");
+            // 3. Load transformer (FP8 native — auto-casts QkNorm only)
+            _output.WriteLine("[3/7] Loading FluxTransformer (FP8 native)...");
             sw.Restart();
             FluxTransformer transformer = new FluxTransformer(config);
-            transformer.LoadWeights(transformerF32);
+            transformer.LoadWeights(converted.Transformer);
             sw.Stop();
             _output.WriteLine($"  Transformer loaded in {sw.ElapsedMilliseconds}ms");
 
-            // 4. Load CLIP-L
+            // 4. Load CLIP-L (auto-casts all layer weights to F32 internally)
             _output.WriteLine("[4/7] Loading CLIP-L...");
             sw.Restart();
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
-            clipL.LoadWeights(clipLF32, "text_model");
+            clipL.LoadWeights(converted.ClipL, "text_model");
             sw.Stop();
             _output.WriteLine($"  CLIP-L loaded in {sw.ElapsedMilliseconds}ms");
 
-            // 5. Load T5-XXL
-            _output.WriteLine("[5/7] Loading T5-XXL...");
+            // 5. Load T5-XXL (FP8 native — auto-casts norms/embeddings to F32, linear weights stay FP8)
+            _output.WriteLine("[5/7] Loading T5-XXL (FP8 native)...");
             sw.Restart();
             T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
-            t5.LoadWeights(t5F32);
+            t5.LoadWeights(converted.T5);
             sw.Stop();
             _output.WriteLine($"  T5-XXL loaded in {sw.ElapsedMilliseconds}ms");
 
@@ -293,11 +320,12 @@ public sealed class FluxGenerationTests
             int[] t5TokenIds = t5Tokenizer.Encode(prompt);
             int[] t5AttentionMask = T5Tokenizer.CreateAttentionMask(t5TokenIds);
 
+            // Schnell is distilled — designed for 1–4 steps with no CFG. 512×512 for direct comparison with Dev FP8 result.
             TextToImageRequest request = new TextToImageRequest
             {
                 Prompt = prompt,
-                Width = 256,
-                Height = 256,
+                Width = 512,
+                Height = 512,
                 Steps = 4,
                 Seed = 42,
             };
@@ -321,9 +349,9 @@ public sealed class FluxGenerationTests
             ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
             _output.WriteLine($"Saved: {outputPath}");
 
-            Assert.Equal(256, width);
-            Assert.Equal(256, height);
-            Assert.Equal(256 * 256 * 3, rgbData.Length);
+            Assert.Equal(512, width);
+            Assert.Equal(512, height);
+            Assert.Equal(512 * 512 * 3, rgbData.Length);
 
             ValidateImageNotDegenerate(rgbData);
 
@@ -456,12 +484,13 @@ public sealed class FluxGenerationTests
             int[] t5AttentionMask = T5Tokenizer.CreateAttentionMask(t5TokenIds);
 
             // Dev needs 20+ steps (4 is for Schnell only). 512x512 minimum for coherent output.
+            // Steps reduced to 10 for faster diagnostic run.
             TextToImageRequest request = new TextToImageRequest
             {
                 Prompt = prompt,
                 Width = 512,
                 Height = 512,
-                Steps = 20,
+                Steps = 10,
                 Seed = 42,
             };
 
@@ -543,6 +572,170 @@ public sealed class FluxGenerationTests
                 : kvp.Value;
         }
         return f32;
+    }
+
+    /// <summary>
+    /// Flux.1 Krea Dev (photoreal fine-tune of Dev) using ComfyUI's <c>fp8_scaled</c> single-file
+    /// transformer. The Krea checkpoint stores only the transformer (no CLIP-L / T5 / VAE), so we
+    /// pair it with the all-in-one Dev FP8 file for the encoders + VAE. The fp8_scaled format adds
+    /// per-tensor scalar <c>scale_weight</c> companions that <see cref="FluxCheckpointConverter"/>
+    /// folds into <see cref="Tensor.Fp8ScaleFactor"/> on each weight, then <c>CudaBackend.Linear</c>
+    /// applies the scale via cuBLAS' <c>alpha</c> parameter at GEMM time (zero memory overhead vs
+    /// dequanting to F16 at load). Uses FluxConfig.Dev (Krea has guidance embedding).
+    /// </summary>
+    [Fact]
+    public void Krea_Fp8Scaled_GenerateImage_Gpu()
+    {
+        if (!File.Exists(FluxKreaFp8ScaledPath))
+        {
+            _output.WriteLine($"SKIPPED: Krea checkpoint not found: {FluxKreaFp8ScaledPath}");
+            return;
+        }
+        if (!File.Exists(FluxDevFp8Path))
+        {
+            _output.WriteLine($"SKIPPED: Dev FP8 (for shared encoders+VAE) not found: {FluxDevFp8Path}");
+            return;
+        }
+        if (!File.Exists(TokenizerVocabPath) || !File.Exists(TokenizerMergesPath))
+        {
+            _output.WriteLine("SKIPPED: CLIP tokenizer files not found");
+            return;
+        }
+        if (!File.Exists(T5SpieceModelPath))
+        {
+            _output.WriteLine("SKIPPED: T5 SentencePiece model not found");
+            return;
+        }
+
+        string assemblyDir = Path.GetDirectoryName(typeof(FluxGenerationTests).Assembly.Location)!;
+        string ptxDir = Path.Combine(assemblyDir, "Ptx");
+        if (!Directory.Exists(ptxDir))
+        {
+            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+
+        Stopwatch totalSw = Stopwatch.StartNew();
+
+        // 1a. Load + convert Krea (transformer-only, fp8_scaled — converter folds scale_weight into Fp8ScaleFactor)
+        _output.WriteLine($"[1/7] Loading Krea checkpoint: {Path.GetFileName(FluxKreaFp8ScaledPath)}");
+        Stopwatch sw = Stopwatch.StartNew();
+        (FluxCheckpointConverter.ConvertedWeights kreaConverted, SafeTensorsLoader kreaLoader) =
+            FluxCheckpointConverter.LoadAndConvert(FluxKreaFp8ScaledPath);
+        sw.Stop();
+        _output.WriteLine($"  Krea loaded in {sw.ElapsedMilliseconds}ms ({kreaConverted.Transformer.Count} transformer keys)");
+        LogDTypeDistribution("Krea Transformer (FP8 native + scale_weight folded into Fp8ScaleFactor)", kreaConverted.Transformer);
+
+        // 1b. Load Dev FP8 for the shared encoders + VAE
+        _output.WriteLine($"[1b/7] Loading Dev FP8 for shared encoders+VAE: {Path.GetFileName(FluxDevFp8Path)}");
+        sw.Restart();
+        (FluxCheckpointConverter.ConvertedWeights devConverted, SafeTensorsLoader devLoader) =
+            FluxCheckpointConverter.LoadAndConvert(FluxDevFp8Path);
+        sw.Stop();
+        _output.WriteLine($"  Dev FP8 loaded in {sw.ElapsedMilliseconds}ms");
+
+        using (kreaLoader)
+        using (devLoader)
+        {
+            Dictionary<string, Tensor> vaeF32 = CastWeightsToF32(devConverted.Vae);
+
+            CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+
+            // 2. Detect architecture from Krea — should be Dev-style with guidance embedder
+            (int doubleBlocks, int singleBlocks, bool hasGuidance) =
+                FluxCheckpointConverter.DetectArchitecture(kreaConverted.Transformer);
+            _output.WriteLine($"[2/7] Architecture: {doubleBlocks} double + {singleBlocks} single blocks, guidance={hasGuidance}");
+            Assert.True(hasGuidance, "Expected Krea to be a Dev-architecture variant with guidance embedding");
+
+            FluxConfig config = FluxConfig.Dev;
+
+            // 3. Load Krea transformer (FP8 native; scale_weight stored on each tensor's Fp8ScaleFactor)
+            _output.WriteLine("[3/7] Loading FluxTransformer (Krea FP8 native + per-tensor scale)...");
+            sw.Restart();
+            FluxTransformer transformer = new FluxTransformer(config);
+            transformer.LoadWeights(kreaConverted.Transformer);
+            sw.Stop();
+            _output.WriteLine($"  Transformer loaded in {sw.ElapsedMilliseconds}ms");
+
+            // 4. Load CLIP-L from Dev (auto-casts internally)
+            _output.WriteLine("[4/7] Loading CLIP-L from Dev FP8...");
+            sw.Restart();
+            ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
+            clipL.LoadWeights(devConverted.ClipL, "text_model");
+            sw.Stop();
+            _output.WriteLine($"  CLIP-L loaded in {sw.ElapsedMilliseconds}ms");
+
+            // 5. Load T5-XXL from Dev (FP8 native — model auto-casts internally)
+            _output.WriteLine("[5/7] Loading T5-XXL from Dev FP8...");
+            sw.Restart();
+            T5TextEncoder t5 = new T5TextEncoder(T5TextEncoderConfig.Xxl);
+            t5.LoadWeights(devConverted.T5);
+            sw.Stop();
+            _output.WriteLine($"  T5-XXL loaded in {sw.ElapsedMilliseconds}ms");
+
+            // 6. Load VAE from Dev
+            _output.WriteLine("[6/7] Loading VAE from Dev FP8...");
+            sw.Restart();
+            VaeDecoder vaeDecoder = new VaeDecoder(VaeConfig.Flux);
+            vaeDecoder.LoadWeights(vaeF32);
+            sw.Stop();
+            _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms");
+
+            // 7. Tokenize + generate
+            _output.WriteLine("[7/7] Tokenizing and generating (GPU, Krea fp8_scaled → F16)...");
+
+            using ClipTokenizer clipTokenizer = new ClipTokenizer(TokenizerVocabPath, TokenizerMergesPath);
+            string prompt = "A photograph of an astronaut riding a horse";
+            int[] clipTokenIds = clipTokenizer.Encode(prompt);
+            int eosPosition = ClipTokenizer.FindEosPosition(clipTokenIds);
+
+            using T5Tokenizer t5Tokenizer = new T5Tokenizer(T5SpieceModelPath, maxLength: 512);
+            int[] t5TokenIds = t5Tokenizer.Encode(prompt);
+            int[] t5AttentionMask = T5Tokenizer.CreateAttentionMask(t5TokenIds);
+
+            // Krea is a Dev fine-tune — same step count and guidance recommendations.
+            TextToImageRequest request = new TextToImageRequest
+            {
+                Prompt = prompt,
+                Width = 512,
+                Height = 512,
+                Steps = 10,
+                Seed = 42,
+            };
+
+            FluxPipeline pipeline = new FluxPipeline(backend, clipL, t5, transformer, vaeDecoder, config);
+
+            sw.Restart();
+            (byte[] rgbData, int width, int height, int seed) = pipeline.GenerateFromTokens(
+                clipTokenIds, eosPosition, t5TokenIds, t5AttentionMask,
+                request, guidanceScale: 3.5f,
+                onProgress: p => _output.WriteLine($"  Step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
+
+            backend.Sync();
+            sw.Stop();
+
+            _output.WriteLine($"Generation done in {sw.ElapsedMilliseconds}ms (seed={seed})");
+
+            Directory.CreateDirectory(OutputDir);
+            string outputPath = Path.Combine(OutputDir, $"flux_krea_fp8scaled_gpu_{width}x{height}_s{request.Steps}_seed{seed}.bmp");
+            ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
+            _output.WriteLine($"Saved: {outputPath}");
+
+            Assert.Equal(512, width);
+            Assert.Equal(512, height);
+            Assert.Equal(512 * 512 * 3, rgbData.Length);
+
+            ValidateImageNotDegenerate(rgbData);
+            LogPerChannelRgbStats(rgbData, width, height);
+
+            totalSw.Stop();
+            _output.WriteLine($"\nTotal test time: {totalSw.ElapsedMilliseconds}ms");
+
+            pipeline.Dispose();
+            transformer.Dispose();
+            t5.Dispose();
+            backend.Dispose();
+        }
     }
 
     /// <summary>

@@ -32,6 +32,12 @@ public sealed class FluxCheckpointConverter
     /// <summary>Converts a single-file Flux checkpoint into separate per-component weight dictionaries. Auto-detects BFL vs diffusers format.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
     {
+        // Pre-process: detect ComfyUI fp8_scaled format (presence of `*.scale_weight` companion tensors)
+        // and dequant matching FP8 weights to F16 by multiplying each value by its scalar scale.
+        // Drops the `.scale_weight` and `.scale_input` metadata keys from the dict so the rest of
+        // the converter can run unchanged on a "regular" fp8 weight set.
+        allWeights = ApplyFp8ScaledDequant(allWeights);
+
         Dictionary<string, Tensor> transformer = new(4000);
         Dictionary<string, Tensor> clipL = new(200);
         Dictionary<string, Tensor> t5 = new(800);
@@ -129,6 +135,60 @@ public sealed class FluxCheckpointConverter
         return (converted, loader);
     }
 
+    /// <summary>
+    /// Detects ComfyUI's <c>fp8_scaled</c> format and folds per-tensor <c>scale_weight</c> values
+    /// into each FP8 weight tensor's <see cref="Tensor.Fp8ScaleFactor"/>. This keeps weights at
+    /// native FP8 (1 byte/element) so a 12B-param transformer stays under 12GB RAM rather than
+    /// ballooning to 24GB after F16 dequant. The scale is then applied for free at GEMM time via
+    /// cuBLAS' <c>alpha</c> parameter — see <c>CudaBackend.Linear</c>.
+    /// <para>The companion <c>scale_input</c> tensors (activation-quantization scales used only
+    /// for true FP8 GEMM with FP8 activations) are dropped — we cast FP8→F16 and run F16 GEMM, so
+    /// activations stay at full F16 magnitude.</para>
+    /// Returns the original dict unchanged when no <c>scale_weight</c> keys are present.
+    /// </summary>
+    private static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
+    {
+        // Pre-scan for any scale_weight keys to decide whether this is the scaled format.
+        Dictionary<string, Tensor> scaleWeights = new();
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            if (kvp.Key.EndsWith(".scale_weight", StringComparison.Ordinal))
+            {
+                string baseKey = kvp.Key[..^".scale_weight".Length];
+                scaleWeights[baseKey] = kvp.Value;
+            }
+        }
+        if (scaleWeights.Count == 0)
+            return source;
+
+        Dictionary<string, Tensor> result = new(source.Count - 2 * scaleWeights.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            // Drop the scale companion keys — they're consumed by being folded into Fp8ScaleFactor.
+            if (kvp.Key.EndsWith(".scale_weight", StringComparison.Ordinal) ||
+                kvp.Key.EndsWith(".scale_input", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // For an FP8 weight tensor with a matching scale companion, attach the scale to the
+            // tensor's Fp8ScaleFactor so the GEMM call site can fold it into cuBLAS alpha.
+            if (kvp.Value.DType == DType.F8E4M3 &&
+                kvp.Key.EndsWith(".weight", StringComparison.Ordinal))
+            {
+                string baseKey = kvp.Key[..^".weight".Length];
+                if (scaleWeights.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.DType == DType.F32)
+                {
+                    float scale = ((float*)scaleT.DataPointer)[0];
+                    kvp.Value.Fp8ScaleFactor = scale;
+                }
+            }
+
+            result[kvp.Key] = kvp.Value;
+        }
+        return result;
+    }
+
     #region BFL Transformer Key Conversion
 
     private static void ConvertBflTransformerKey(string bflKey, Tensor tensor, Dictionary<string, Tensor> output)
@@ -207,7 +267,14 @@ public sealed class FluxCheckpointConverter
     {
         if (rest.StartsWith("adaLN_modulation.1.", StringComparison.Ordinal))
         {
-            output["norm_out.linear." + rest["adaLN_modulation.1.".Length..]] = tensor;
+            // BFL final-layer chunks the modulation as [shift, scale] (rows 0..H = shift, H..2H = scale)
+            // and applies (1 + scale) * norm(x) + shift. Diffusers' AdaLayerNormContinuous chunks as
+            // [scale, shift] instead. Our C# transformer's final layer matches the diffusers convention
+            // (modParams[0..dim] = scale, modParams[dim..2*dim] = shift), so BFL weights need their
+            // halves swapped along dim 0 to match. See diffusers' convert_flux_to_diffusers.py
+            // `swap_scale_shift`.
+            Tensor swapped = SwapScaleShiftHalves(tensor);
+            output["norm_out.linear." + rest["adaLN_modulation.1.".Length..]] = swapped;
             return;
         }
         if (rest.StartsWith("linear.", StringComparison.Ordinal))
@@ -215,6 +282,34 @@ public sealed class FluxCheckpointConverter
             output["proj_out." + rest["linear.".Length..]] = tensor;
             return;
         }
+    }
+
+    /// <summary>Swaps the two halves of a tensor along dim 0. Input shape [2*H, ...] becomes [scale_half, shift_half] from BFL's [shift_half, scale_half] (or vice versa). Works for both 2D weights and 1D biases.</summary>
+    private static unsafe Tensor SwapScaleShiftHalves(Tensor input)
+    {
+        long firstDim = input.Shape[0];
+        if (firstDim % 2 != 0)
+            throw new InvalidOperationException(
+                $"SwapScaleShiftHalves: first dim must be even, got {firstDim}");
+
+        long halfDim = firstDim / 2;
+        long totalElements = input.ElementCount;
+        long elemBytes = input.DType.SizeInBytes;
+        long halfBytes = (totalElements / 2) * elemBytes;
+
+        Tensor swapped = new Tensor(input.Shape, input.DType);
+        // Propagate fp8_scaled per-tensor scale — the swap is a row-permutation, not a change of magnitudes.
+        swapped.Fp8ScaleFactor = input.Fp8ScaleFactor;
+
+        byte* src = (byte*)input.DataPointer;
+        byte* dst = (byte*)swapped.DataPointer;
+
+        // 2nd half of input → 1st half of swapped
+        Buffer.MemoryCopy(src + halfBytes, dst, halfBytes, halfBytes);
+        // 1st half of input → 2nd half of swapped
+        Buffer.MemoryCopy(src, dst + halfBytes, halfBytes, halfBytes);
+
+        return swapped;
     }
 
     private static void ConvertDoubleBlockKey(string rest, Tensor tensor, Dictionary<string, Tensor> output)
@@ -417,6 +512,11 @@ public sealed class FluxCheckpointConverter
         Tensor kWeight = new Tensor(splitShape, fused.DType);
         Tensor vWeight = new Tensor(splitShape, fused.DType);
 
+        // Propagate fp8_scaled per-tensor scale to all splits — they share the same quant scale.
+        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+
         byte* src = (byte*)fused.DataPointer;
         Buffer.MemoryCopy(src, (void*)qWeight.DataPointer, chunkBytes, chunkBytes);
         Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
@@ -463,6 +563,12 @@ public sealed class FluxCheckpointConverter
         Tensor kWeight = new Tensor(qkvShape, fused.DType);
         Tensor vWeight = new Tensor(qkvShape, fused.DType);
         Tensor mlpWeight = new Tensor(mlpShape, fused.DType);
+
+        // Propagate fp8_scaled per-tensor scale to all splits — they share the same quant scale.
+        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        mlpWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
 
         byte* src = (byte*)fused.DataPointer;
         long qkvChunkBytes = (long)HiddenSize * rowBytes;
