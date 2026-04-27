@@ -17,9 +17,9 @@ Every area below needs a `docs/Research/` document **before** implementation beg
 | [CUDA_DRIVER_API.md](../Research/CUDA_DRIVER_API.md) | Cuda |
 | [PTX_KERNELS.md](../Research/PTX_KERNELS.md) | Cuda / Ptx |
 | [CONV2D_CUDA.md](../Research/CONV2D_CUDA.md) | Cuda |
-| [VULKAN_COMPUTE_API.md](../Research/VULKAN_COMPUTE_API.md) | Vulkan |
-| [SPIRV_COMPUTE_SHADERS.md](../Research/SPIRV_COMPUTE_SHADERS.md) | Vulkan / Spirv |
-| [VULKAN_MEMORY_MANAGEMENT.md](../Research/VULKAN_MEMORY_MANAGEMENT.md) | Vulkan |
+| [VULKAN_COMPUTE_API.md](../Research/VULKAN_COMPUTE_API.md) | Vulkan ✅ |
+| [SPIRV_COMPUTE_SHADERS.md](../Research/SPIRV_COMPUTE_SHADERS.md) | Vulkan / Spirv ✅ |
+| [VULKAN_MEMORY_MANAGEMENT.md](../Research/VULKAN_MEMORY_MANAGEMENT.md) | Vulkan ✅ |
 | [SIMD_INTRINSICS_DOTNET.md](../Research/SIMD_INTRINSICS_DOTNET.md) | Cpu |
 
 ## CPU Kernel Algorithms

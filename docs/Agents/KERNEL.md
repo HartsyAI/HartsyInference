@@ -5,8 +5,13 @@
 ## Extra Reading
 - `docs/Design/IMPLEMENTATION_DETAILS.md`
 - `docs/Research/DOTLLM_ARCHITECTURE.md` — SIMD dispatch, PTX from disk, `nint` handles, `stackalloc` args
-- `docs/Research/SIMD_INTRINSICS_DOTNET.md`, `docs/Research/PTX_KERNELS.md`
-- `docs/Research/VULKAN_COMPUTE_API.md`, `docs/Research/SPIRV_COMPUTE_SHADERS.md`
+- `docs/Research/SIMD_INTRINSICS_DOTNET.md`
+- `docs/Research/CUDA_AND_PTX.md` — CUDA Driver API + PTX kernel patterns (current implementation)
+- `docs/Research/CONV2D_CUDA.md`, `docs/Research/CUDA_PERFORMANCE.md`
+- `docs/Research/VULKAN_COMPUTE_API.md` — Vulkan instance/device, P/Invoke surface, sync2 (Phase 3.5)
+- `docs/Research/SPIRV_COMPUTE_SHADERS.md` — GLSL → SPIR-V kernel patterns, tiled GEMM design (Phase 3.5)
+- `docs/Research/VULKAN_MEMORY_MANAGEMENT.md` — slab allocator, weight cache, descriptor management (Phase 3.5)
+- `docs/Checklists/PHASE_3_5_VULKAN_BACKEND.md` — Phase 3.5 build plan, sequenced
 - Relevant research docs and existing kernel code
 
 ## CPU Kernel Workflow
@@ -45,17 +50,22 @@ public sealed class CudaKernels : IDisposable
 **Pitfalls:** Bank conflicts, missing `bar.sync`, wrong grid/block, register spilling, non-multiple tile sizes. See "Known PTX Pitfalls" below for bugs that have bitten us.
 
 ## SPIR-V Kernel Workflow
-1. Write `.comp.glsl` → compile `glslangValidator --target-env vulkan1.2 -S comp`
-2. Ship as content file. Create pipeline via `vkCreateShaderModule` + `vkCreateComputePipelines`.
-3. Cache pipeline in `Dictionary<string, nint>` (acceptable for Vulkan complexity).
-4. Bind descriptor sets, set push constants, `vkCmdDispatch`.
-5. Validate vs CUDA within FP16 tolerance.
+> Authoritative references: [SPIRV_COMPUTE_SHADERS.md](../Research/SPIRV_COMPUTE_SHADERS.md), [VULKAN_COMPUTE_API.md](../Research/VULKAN_COMPUTE_API.md), [VULKAN_MEMORY_MANAGEMENT.md](../Research/VULKAN_MEMORY_MANAGEMENT.md), [PHASE_3_5_VULKAN_BACKEND.md](../Checklists/PHASE_3_5_VULKAN_BACKEND.md). The patterns below are summary; consult the research docs for exact P/Invoke shapes, struct layouts, kernel skeletons, and validation tolerances.
 
-**Standards:** `subgroupAdd`/`subgroupShuffle` for reductions. Subgroup size varies (32 NVIDIA, 64 AMD, 8-32 Intel). `shared` memory + `barrier()` for workgroup sync. Push constants ≤128 bytes. Storage buffers for tensor data. Target Vulkan 1.2.
+1. Write `.comp.glsl` with spec-constant workgroup size (`local_size_x_id = 0`) → compile `glslangValidator --target-env vulkan1.3 -S comp -V -O`. `spirv-val` after to fail fast.
+2. Ship as content file under `Spirv/`. Build SPIR-V from `native/vulkan/build.sh` invoked via MSBuild target.
+3. Build pipeline via `vkCreateShaderModule` + `vkCreateComputePipelines` with `VkSpecializationInfo` (tile sizes, dtype flags) and `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` (pin wave size). Cache `VkPipeline` in `Dictionary<KernelKey, ulong>`. Persist `VkPipelineCache` blob to disk.
+4. Pre-build `VkDescriptorSetLayout` + `VkPipelineLayout` for each binding shape (`L_2SSBO`, `L_3SSBO`, `L_4SSBO`, `L_5SSBO`, `L_3SSBO_QKV`). Prefer `VK_KHR_push_descriptor` when supported; pool ring fallback otherwise.
+5. Per dispatch: `vkCmdBindPipeline` + push descriptors / `vkCmdBindDescriptorSets` + `vkCmdPushConstants` + `vkCmdDispatch` + `VkBufferMemoryBarrier2` on output buffer.
+6. Validate vs CPU within 1e-3 (FP16) / 1e-5 (FP32). Validate vs CUDA within 1e-3 on the same NVIDIA HW.
 
-**SPIR-V vs PTX:** No cuBLAS — hand-written tiled GEMM. Runtime subgroup size via `gl_SubgroupSize`. Explicit `memoryBarrierShared()` + `barrier()`. Pipeline barriers between dispatches. Push constants 128B limit.
+**Standards:** Target **Vulkan 1.3**. Required device features: `shaderFloat16`, `storageBuffer16BitAccess`, `subgroupSizeControl`, `computeFullSubgroups`, `synchronization2`. Required subgroup ops: `ARITHMETIC | SHUFFLE | SHUFFLE_RELATIVE`. `subgroupAdd`/`subgroupShuffleXor` for reductions. **Always pin `requiredSubgroupSize`** so `gl_SubgroupSize` becomes a compile-time constant — subgroup size varies (32 NVIDIA / Intel Arc, 32 or 64 AMD RDNA, 64 AMD GCN, 8–32 Intel iGPU). `shared` memory + `barrier(); memoryBarrierShared();` for workgroup sync. Push constants ≤128 bytes. Storage buffers for all tensor data. **Always FP32-accumulate** even for FP16 inputs.
 
-**Pitfalls:** Fixed subgroup size assumption, missing `memoryBarrierShared()`, push constant overflow, descriptor pool exhaustion.
+**SPIR-V vs PTX:** No cuBLAS — single `matmul_tiled.comp.glsl` (CUTLASS-style 128×128×16 tile, FP16 inputs / FP32 accum) replaces every `cublasGemmEx`; build N variants via spec consts (transpose, dtype, bias, fused activation). Runtime workgroup size via `local_size_*_id` spec consts. Explicit `barrier(); memoryBarrierShared();` for shared-memory writes-then-reads. Per-buffer `VkBufferMemoryBarrier2` between dispatches (sync2). Push constants 128 B hard cap.
+
+**Tile-size starting points** (per vendor, override per kernel as profiling dictates): NVIDIA 128×128×16 / `local_size=(16,16,1)`; AMD wave32 128×64×16 / same; AMD wave64 64×64×16 / same; Intel Arc 64×64×16 / `local_size=(8,8,1)`; Apple MoltenVK 32×32×16. See [SPIRV_COMPUTE_SHADERS.md § Tile-size tuning](../Research/SPIRV_COMPUTE_SHADERS.md#tile-size-tuning-per-vendor).
+
+**Pitfalls:** Fixed subgroup-size assumption (without `requiredSubgroupSize` AMD may pick wave64 when shader assumes 32). Missing `memoryBarrierShared()` after writing `shared` memory. Push-constant overflow > 128 B (silent on dev HW, fails on spec-minimum HW). Descriptor pool exhaustion (use push descriptors). 32-bit indexing overflow in spatial kernels at 1024+ resolution (use `GL_EXT_shader_explicit_arithmetic_types_int64`). Last-dim-vs-flat split bug for GEGLU/SwiGLU (regressed in PTX, must not regress in GLSL — multi-row test mandatory). FP16 accumulator instead of FP32. Forgetting `vkFlushMappedMemoryRanges` on non-coherent staging upload. Cache invalidation: in-place GPU ops must clear the activation cache callback before re-caching the same buffer (mirror PTX deviation #17).
 
 ## GPU Performance Optimization
 

@@ -53,6 +53,7 @@ Highest-priority models; all target CUDA + Vulkan via `IBackend`.
 | Chroma | 8.9B Flux derivative by Lodestone Rock; standard CFG (not distilled to 1) |
 | Qwen-Image / Qwen-Image 2.0 | 7B–20B MMDiT; text-to-image gen + unified editing (inpaint, outpaint, relighting, style transfer) |
 | Qwen-Image Edit | Mask-based inpainting, semantic/appearance editing, text rendering in images |
+| Z-Image Turbo / Base | 6B Turbo (8-step distilled, Apache 2.0); Base unreleased (same 6B/3840-dim, un-distilled). Lumina2/NextDiT architecture (single-stream, 30 layers + 2 noise + 2 context refiners). FP8Mix distribution. Qwen3-4B text encoder + Flux VAE. See [Z_IMAGE_ARCHITECTURE.md](../Research/Z_IMAGE_ARCHITECTURE.md) |
 
 ### Audio
 
@@ -76,7 +77,6 @@ Highest-priority models; all target CUDA + Vulkan via `IBackend`.
 ## Phase 3 — Full Coverage (Months 9+)
 
 ### Image Generation
-- Z-Image Turbo (6B single-stream DiT, 8-step distilled, Apache 2.0) + Z-Image Base (20B, full quality)
 - ERNIE-Image (8B single-stream DiT) + ERNIE-Image-Turbo (distilled, 8-step)
 - F-Lite (10B/7B DiT by Freepik/Fal, copyright-safe training, CreativeML Open RAIL-M)
 - Anima (2B Cosmos-Predict2 based, anime-focused, by CircleStone Labs / Comfy Org)
@@ -110,7 +110,8 @@ Most image generation models on the roadmap fall into a few architectural famili
 
 | Family | Architecture | Models | Key Traits |
 |---|---|---|---|
-| **Flux-lineage DiT** | Single-stream (+ optional double-stream) | Flux.1, Flux.2, Chroma, Z-Image, ERNIE-Image, F-Lite, Kandinsky 5 | AdaLN-Zero, RoPE, flow-matching, single/double stream blocks |
+| **Flux-lineage DiT** | Single-stream (+ optional double-stream) | Flux.1, Flux.2, Chroma, ERNIE-Image, F-Lite, Kandinsky 5 | AdaLN-Zero, RoPE, flow-matching, single/double stream blocks |
+| **Lumina2 / NextDiT** | Single-stream w/ caption + noise refiner blocks | Z-Image (Turbo, Base), Lumina 2.0 | RMSNorm everywhere, multi-axis RoPE, AdaLN(4-out), SwiGLU, Qwen/Gemma LLM as text encoder |
 | **MMDiT** | Symmetric dual-stream joint attention | SD3/3.5, Qwen-Image, Hunyuan Image 2.1, HiDream i1, AuraFlow | AdaLN-Zero, dual-stream with shared attention, typically 3 text encoders |
 | **UNet** | Conv encoder-decoder with cross-attn | SD 1.5, SDXL, SVD, ControlNet, Inpaint variants | GroupNorm+SiLU, ResBlocks, cross-attention at select depths |
 | **Unique** | Model-specific | Anima (Cosmos-Predict2), Lumina 2.0 (NextDiT), OmniGen 2 (MLLM) | Less reuse opportunity; implement per-model |
@@ -151,7 +152,7 @@ Consolidated from duplicated code across `FluxTransformer` and `Sd3Transformer`:
 
 **Minimal new code** (new config + small architectural tweaks):
 - **Flux.2** — evolved Flux with new VAE (16×16) and text encoder (Mistral/Qwen). Core transformer likely reusable with config changes for block counts/dims.
-- **Z-Image** — S3-DiT (single-stream DiT), architecturally very close to Flux's single-stream blocks. Likely reusable with RoPE/block config changes.
+- **Z-Image** — Lumina2/NextDiT architecture (NOT Flux-lineage as initially assumed). New top-level transformer class required, but sub-components (`SwiGluFfn`, `QkNorm`, `AdaLNModulation`) reusable. Uses Qwen3-4B as text encoder + Flux VAE verbatim. See [Z_IMAGE_ARCHITECTURE.md](../Research/Z_IMAGE_ARCHITECTURE.md).
 - **ERNIE-Image** — single-stream DiT, same family. Config + checkpoint converter.
 - **F-Lite** — DiT-based, same family.
 

@@ -67,18 +67,31 @@ Phase 9: Video (stub → LTX-Video)
 **Validation:** F16 output visually matches F32 reference. GPU UNet forward: avg_err=5e-7. See `docs/Research/CUDA_PERFORMANCE.md`.
 
 ## Phase 3.5 — Vulkan Backend
-**Goal:** Port CUDA PTX to SPIR-V; SD1.5 on AMD/Intel.
+**Goal:** Port CUDA PTX to SPIR-V; SD1.5 on AMD/Intel/NVIDIA via Vulkan.
+**Status:** Research complete (3 docs, 1 phase checklist). Implementation not started — ready to build.
+
+**Research:** [VULKAN_COMPUTE_API.md](../Research/VULKAN_COMPUTE_API.md), [SPIRV_COMPUTE_SHADERS.md](../Research/SPIRV_COMPUTE_SHADERS.md), [VULKAN_MEMORY_MANAGEMENT.md](../Research/VULKAN_MEMORY_MANAGEMENT.md)
+**Plan:** [PHASE_3_5_VULKAN_BACKEND.md](../Checklists/PHASE_3_5_VULKAN_BACKEND.md) — sequential build order, every deliverable mapped to a research section.
 
 | Deliverable | Package | Description |
 |---|---|---|
-| Vulkan P/Invoke, SPIR-V loader | Vulkan | `VulkanApi`, `SpirVShaderLoader` |
-| Vulkan memory allocator, descriptor manager | Vulkan | Sub-allocation, staging buffers |
-| Conv2D/GroupNorm/SDPA/matmul/dequant | Vulkan | Tiled compute shaders |
-| SD1.5 pipeline on Vulkan | Diffusion | `IBackend` abstraction |
+| `VulkanApi` (~55 P/Invokes), `VulkanLibraryResolver`, `VulkanInstance`, `VulkanDevice` | Vulkan | Vulkan 1.3 instance/device; FP16 + subgroupSizeControl required; vendor scoring |
+| `VulkanMemoryAllocator`, `VulkanBuffer`, `VulkanGpuTransferHelper` | Vulkan | 256 MB / 16 MB slab allocator; weight cache (reference equality); ReBAR fast path; OOM retry |
+| `VulkanCommandPool`, `VulkanCommandStream`, `VulkanBarriers` | Vulkan | Single timeline semaphore; sync2 per-buffer barriers; lazy-sync activation cache port |
+| `SpirVShaderLoader`, `VulkanPipelineCache`, `VulkanKernels`, `VulkanDescriptorManager` | Vulkan | `.spv` from disk; persistent pipeline cache; push-descriptor preferred; pool ring fallback |
+| ~16 GLSL kernels: matmul (the cuBLAS replacement), conv2d, groupnorm/silu, layernorm, sdpa, softmax, transpose, geglu, broadcast_add, upsample, casts, elementwise | native/vulkan/shaders | Tiled GEMM is the centerpiece (≥ 60% of cuBLAS HGEMM target) |
+| `VulkanBackend : IBackend` | Vulkan | Op dispatch via `Dispatch(kernel, descriptors, pushConstants, group*)` — mirror of `CudaBackend` |
+| SD1.5 / SDXL pipelines run unchanged | Diffusion | `IBackend` abstraction validated by zero source changes in Diffusion package |
 
-**Validation:** Vulkan output matches CUDA within 1e-3. Same seed → same image.
+**Validation gates:**
+1. Every op matches CPU reference within 1e-3 (FP16) / 1e-5 (FP32).
+2. Every op matches CUDA reference within 1e-3 on the same NVIDIA hardware.
+3. SD1.5 512×512 same seed → SSIM > 0.99 vs CUDA.
+4. SD1.5 runs end-to-end on AMD RDNA2/3 (Mesa RADV) producing visually correct output.
+5. RTX 3060 Vulkan SD1.5 ≤ 8 s wall-clock (≤ 1.6× CUDA).
+6. No memory leaks (validation-layer clean, 100-step loop returns to baseline VRAM).
 
-**Risk:** No cuBLAS equivalent; tiled GEMM via subgroup ops. Slower than CUDA but still faster than CPU.
+**Risk:** No cuBLAS equivalent — hand-written tiled HGEMM is the largest single piece of work; ~16 .spv variants to ship. Subgroup size varies per vendor (32 NV, 32/64 AMD, 8–32 Intel) — pin via `requiredSubgroupSize`. See [SPIRV_COMPUTE_SHADERS.md § Performance Targets & Pitfalls](../Research/SPIRV_COMPUTE_SHADERS.md#performance-targets--pitfalls).
 
 ## Phase 4 — Model Breadth (SDXL + Flux + FP8 + Extended Models)
 

@@ -15,7 +15,7 @@ dotLLM proved pure C# with PTX achieves ~98-100% native CUDA performance for LLM
 | **Pure C#** | CUDA via PTX + Driver API P/Invoke; Vulkan via SPIR-V + Vulkan API P/Invoke |
 | **Zero-allocation hot paths** | `NativeMemory.AlignedAlloc`; mmap weights; `TensorRef` on kernels; `Span<T>` on hot paths |
 | **Modular NuGet** | Pull only what you need (see `NUGET_PACKAGE_DESIGN.md`) |
-| **Multi-GPU backend** | CUDA (NVIDIA) + Vulkan (AMD/Intel/NVIDIA) + CPU fallback |
+| **Multi-GPU backend** | CUDA (NVIDIA) — implemented, FP16 SD1.5/SDXL/Flux<br>Vulkan (AMD/Intel/NVIDIA) — research complete (Phase 3.5), implementation pending<br>CPU fallback — implemented (AVX-512/AVX2/NEON via SIMD dispatch) |
 | **OpenAI-compatible API** | Drop-in replacement for OpenAI image/audio endpoints |
 | **dotLLM alignment** | Same tensor memory, P/Invoke, PTX, SIMD dispatch, thread pool patterns |
 

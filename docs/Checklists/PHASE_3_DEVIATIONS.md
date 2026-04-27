@@ -366,6 +366,58 @@ When adding new CudaBackend ops that use cuBLAS or PTX kernels with dtype-specif
 
 ---
 
+## Phase 4 — Flux Deviations
+
+### 23. BFL→Diffusers Final-Layer AdaLN Swap (FluxCheckpointConverter)
+
+**Problem**: BFL Flux's `LastLayer` chunks its AdaLN-Continuous modulation as `[shift, scale]`:
+```python
+shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
+x = (1 + scale) * norm(x) + shift
+```
+Diffusers' `AdaLayerNormContinuous.forward` chunks as `[scale, shift]` — the opposite. The C# `FluxTransformer.ApplyFinalLayer` matches the diffusers convention (first half of `modParams` = scale, second half = shift). So when loading a BFL-format checkpoint (any single-file Flux .safetensors using `model.diffusion_model.*` keys, including all ComfyUI/BFL distributions and `flux1-dev-fp8.safetensors`), the final-layer adaLN weight rows must be **swapped along dim 0** to match.
+
+The original `FluxCheckpointConverter.ConvertFinalLayerKey` just renamed `final_layer.adaLN_modulation.1.weight/bias` → `norm_out.linear.weight/bias` without rearranging rows. Result: at every denoising step, the network applied BFL's shift coefficients as scale and vice versa, producing per-channel skew that compounded across steps.
+
+**Symptoms**: Image structure was correct (subject visible at the right pose/position) but the output had a strong color cast — typically magenta/purple, with the green channel pushed strongly negative. Per-channel velocity statistics showed monotonic growth in absolute magnitude across denoising steps (e.g. \|v_c13\| grew 3.4× from step 1 to step 10), instead of the constant-magnitude profile flow matching expects.
+
+**How it was found**: Per-latent-channel mean diagnostic logging on the packed velocity at every step showed channel 13 with monotonically increasing positive velocity (and channel 9 similarly), driving the latent ch13 to mean=−2.29 by step 10 while other channels stayed near zero. Visual output had R=166/G=69/B=171 (magenta cast). Static review of BFL's `LastLayer` vs diffusers' `AdaLayerNormContinuous` revealed the chunk-order mismatch. The official diffusers `convert_flux_to_diffusers.py` confirms the swap via `swap_scale_shift()` applied to `norm_out.linear.weight/bias`.
+
+**Fix**: Added `SwapScaleShiftHalves(Tensor)` helper in `FluxCheckpointConverter`. In `ConvertFinalLayerKey`, when converting BFL `final_layer.adaLN_modulation.1.weight` and `.bias`, swap the two halves of dim 0 before storing under the diffusers key. Byte-wise `Buffer.MemoryCopy` so it's dtype-agnostic (handles F8/F16/BF16/F32 weights). Applied to both weight (2D `[2*H, H]`) and bias (1D `[2*H]`). The swap is only needed for the BFL path — diffusers-format checkpoints already have the correct layout.
+
+**Result**: Flux Dev FP8 at 512×512, 10 steps, seed=42, prompt="A photograph of an astronaut riding a horse", guidance=3.5. RGB means went from 166/69/171 (magenta) to 59/54/55 (color-balanced). Per-step velocities became roughly constant in magnitude across steps (flow-match ideal). Output is now a clean photorealistic image.
+
+**Lesson**: When porting checkpoint conversions that involve `.chunk()` or `.split()` on a fused tensor, always verify the chunk order in BOTH the source framework and the destination framework. Naming alone (e.g. "shift", "scale") doesn't guarantee positional consistency — frameworks order them differently. The official converter scripts (in `diffusers/scripts/`) are the authoritative reference for these reorderings and worth grepping before writing custom converters. Future `swap_scale_shift`-style fixes may be needed for other DiT models that also have a final AdaLN-Continuous layer (Flux.2, AuraFlow, HunyuanImage, QwenImage, etc.) — verify each.
+
+### 24. ComfyUI `fp8_scaled` Checkpoint Format (Krea, Kontext, Flux.2-Klein)
+
+**Problem**: ComfyUI repackages BFL checkpoints into an `fp8_scaled` format that stores each linear-layer weight as raw FP8 E4M3 (full ±448 dynamic range, mean abs ~14) plus two F32-scalar companion tensors:
+- `<weight_key>.scale_weight` — so that `real_weight = fp8_byte_decoded × scale_weight`
+- `<weight_key>.scale_input` — activation-quantization scale for true FP8 GEMM with FP8 activations
+
+Plus a marker tensor `scaled_fp8` (FP8 dtype, no relevant content) at the top level. Files we have in this format: `flux1-krea-dev_fp8_scaled.safetensors`, `flux1-dev-kontext_fp8_scaled.safetensors`. Plain Comfy-Org Dev FP8 (`flux1-dev-fp8.safetensors`) is NOT scaled — it stores already-pre-scaled FP8 values directly (mean abs ~0.014) using a tiny fraction of FP8's range.
+
+The previous converter ignored these scale companions, producing garbage output.
+
+**Symptoms** (depend on which scale was missing):
+- Initial implementation (`alpha` not wired in): output severely under-magnitude → barely-visible silhouette in noise.
+- After wiring `alpha = scale_weight` for Linear, but missing scale propagation through `SwapScaleShiftHalves`: AdaLN-Continuous final layer ran with `alpha=1.0` instead of `~3.5e-4`, multiplying the modulation ~3000× too large → all-but-saturated white background with a blocky black silhouette where the saturation tipped (each 32×32 packed token producing a uniform 16×16 image patch because `proj_out`'s output was clamped at the F32 range tail).
+
+**Fix** (three coordinated pieces):
+1. Added `Tensor.Fp8ScaleFactor` (default 1.0) — a per-tensor scalar that GEMM call sites fold into cuBLAS' `alpha` parameter at zero memory + zero perf cost. Way cheaper than dequanting the 12B-param transformer to F16 at load (which would have OOMed our 31GB-RAM box at ~22GB anonymous RSS).
+2. Added `FluxCheckpointConverter.ApplyFp8ScaledDequant` pre-pass: detects the format by presence of any `*.scale_weight` key, attaches each scale to its sibling `.weight` tensor's `Fp8ScaleFactor`, drops the `.scale_weight` and `.scale_input` keys (we run F16 GEMM not FP8 GEMM, so `scale_input=1.0` activations are fine).
+3. **Critical**: every site that creates a NEW Tensor by copying bytes from an FP8 weight must propagate `Fp8ScaleFactor`. Updated:
+   - `SplitQkvWeight` (fused QKV → q, k, v)
+   - `SplitSingleLinear1Weight` (single-stream linear1 → q, k, v, mlp)
+   - `SwapScaleShiftHalves` (BFL→diffusers final-layer adaLN row swap from deviation #23)
+4. `CudaBackend.Linear`: `float alpha = weight.Fp8ScaleFactor;` (was hardcoded 1.0).
+
+**Result**: Flux.1 Krea Dev fp8_scaled at 512×512, 10 steps, seed=42, guidance=3.5. RGB means went from 180/180/180 (saturation pattern) → 141/137/132 (natural distribution, full 0-250 dynamic range). Output is now a sharp photoreal image of the prompt, with Krea's signature aesthetic richness (more detail than Dev FP8 produces at the same step count).
+
+**Lesson for future ports**: When introducing a per-tensor metadata field on `Tensor` (like `Fp8ScaleFactor` or any future quant scale / zero-point / activation-stat), audit *every* converter site that creates a new Tensor by copying bytes — splits, transposes, half-swaps, permutations. The metadata won't be set on the new tensor by default and the bug surfaces only at that specific layer's GEMM, which makes it hard to catch. A grep for `new Tensor(` inside checkpoint converters is a good audit checkpoint after adding any such field.
+
+---
+
 ### Diagnostic Script Inventory
 
 All scripts in `tests/python-reference/` using venv at `tests/python-reference/.venv/`:
