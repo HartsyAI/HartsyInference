@@ -3,7 +3,7 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <RootNamespace>SharpInference.Diffusion.Tests</RootNamespace>
+    <RootNamespace>SharpInference.Vulkan.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,15 +14,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\SharpInference.Diffusion\SharpInference.Diffusion.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Core\SharpInference.Core.csproj" />
     <ProjectReference Include="..\..\src\SharpInference.Cpu\SharpInference.Cpu.csproj" />
-    <ProjectReference Include="..\..\src\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
-    <ProjectReference Include="..\..\src\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
-    <ProjectReference Include="..\..\src\SharpInference.Cuda\SharpInference.Cuda.csproj" />
     <ProjectReference Include="..\..\src\SharpInference.Vulkan\SharpInference.Vulkan.csproj" />
   </ItemGroup>
 
-  <!-- Mirror SPIR-V kernels into the test bin so VulkanBackend can find them at runtime -->
+  <!-- Mirror the SPIR-V kernels into the test bin directory so VulkanBackend can resolve them. -->
   <ItemGroup>
     <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

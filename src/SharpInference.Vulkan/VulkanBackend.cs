@@ -81,7 +81,9 @@ public sealed class VulkanBackend : IBackend
 
     public void Sync()
     {
+        _xfer.DrainTransients();
         _stream.WaitIdleHost();
+        _dispatchesSinceSubmit = 0;
     }
 
     public void FreeWeights(IEnumerable<Tensor> weights) => _xfer.FreeWeights(weights);
@@ -137,8 +139,10 @@ public sealed class VulkanBackend : IBackend
         _dispatchesSinceSubmit++;
         if (_dispatchesSinceSubmit >= FLUSH_THRESHOLD)
         {
-            // Submit + wait so deferred-free buffers can be reclaimed. Without this, large
-            // models exhaust the device heap before the first explicit Sync().
+            // Submit + wait so deferred-free buffers can be reclaimed. Drain any transient (uncached)
+            // upload buffers from CopyToDevice — they must be released to the slab pool so streamed
+            // weights don't pile up.
+            _xfer.DrainTransients();
             _stream.WaitIdleHost();
             _dispatchesSinceSubmit = 0;
         }
@@ -374,11 +378,8 @@ public sealed class VulkanBackend : IBackend
         }
         finally
         {
-            // Free the original input buffers (no-op if they're cached weights/activations).
-            // Without this, every Linear/MatMul leaks the freshly-uploaded weight.
-            _xfer.FreeDevice(aBuf);
-            _xfer.FreeDevice(bBuf);
-            if (biasRaw is not null) _xfer.FreeDevice(biasRaw);
+            // a/b/bias buffers from GetBuffer are tracked by VulkanGpuTransferHelper as transients;
+            // they're freed during the next flush. Cast buffers are caller-owned and freed here.
             if (aOwned is not null) _xfer.FreeDevice(aOwned);
             if (bOwned is not null) _xfer.FreeDevice(bOwned);
             if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
@@ -515,7 +516,6 @@ public sealed class VulkanBackend : IBackend
                 }
                 finally
                 {
-                    _xfer.FreeDevice(biasRaw);
                     if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
                 }
             }
@@ -529,8 +529,6 @@ public sealed class VulkanBackend : IBackend
         }
         finally
         {
-            _xfer.FreeDevice(inBuf);
-            _xfer.FreeDevice(wBuf);
             if (inOwned is not null) _xfer.FreeDevice(inOwned);
             if (wOwned is not null) _xfer.FreeDevice(wOwned);
             _xfer.FreeDevice(colBuf);
@@ -591,9 +589,6 @@ public sealed class VulkanBackend : IBackend
         }
         finally
         {
-            _xfer.FreeDevice(inBuf);
-            if (wBuf is not null) _xfer.FreeDevice(wBuf);
-            if (bBuf is not null) _xfer.FreeDevice(bBuf);
             if (wOwned is not null) _xfer.FreeDevice(wOwned);
             if (bOwned is not null) _xfer.FreeDevice(bOwned);
         }
@@ -658,9 +653,6 @@ public sealed class VulkanBackend : IBackend
         }
         finally
         {
-            _xfer.FreeDevice(inBuf);
-            _xfer.FreeDevice(wBuf);
-            _xfer.FreeDevice(bBuf);
             if (wOwned is not null) _xfer.FreeDevice(wOwned);
             if (bOwned is not null) _xfer.FreeDevice(bOwned);
         }
@@ -813,10 +805,7 @@ public sealed class VulkanBackend : IBackend
         finally
         {
             _xfer.FreeDevice(scoresBuf);
-            _xfer.FreeDevice(qBuf);
-            _xfer.FreeDevice(kBuf);
-            _xfer.FreeDevice(vBuf);
-            if (maskBuf is not null) _xfer.FreeDevice(maskBuf);
+            // q/k/v/mask are transients (or cached) and drained by the next flush.
             if (qOwned is not null) _xfer.FreeDevice(qOwned);
             if (kOwned is not null) _xfer.FreeDevice(kOwned);
             if (vOwned is not null) _xfer.FreeDevice(vOwned);

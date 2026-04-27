@@ -77,20 +77,26 @@ public record VaeConfig
         SampleSize = 1024,
     };
 
-    /// <summary>Preset for Flux.2 (16×16 downscale VAE). Same latent structure as Flux.1 but with 16× spatial downscale instead of 8×.</summary>
+    /// <summary>Preset for Flux.2 (32-channel VAE, 8× spatial downscale, post_quant_conv used). The
+    /// effective 16× downscale for the transformer comes from a 2×2 patchify on top of the latent
+    /// (handled in the pipeline). Latent normalization is done via BatchNorm-like statistics
+    /// (<c>bn.running_mean/var</c>) — applied at pipeline boundary, not inside the VAE itself.
+    /// Verified against Comfy-Org/flux2-klein/flux2-vae.safetensors.</summary>
     public static VaeConfig Flux2 => new()
     {
-        LatentChannels = 16,
-        ScalingFactor = 0.3611f,
-        ShiftFactor = 0.1159f,
-        UsePostQuantConv = false,
-        UseQuantConv = false,
+        LatentChannels = 32,
+        ScalingFactor = 1.0f,           // unused — Flux.2 uses BN-style normalization, applied by pipeline
+        ShiftFactor = null,             // ditto
+        UsePostQuantConv = true,        // post_quant_conv: [32, 32, 1, 1]
+        UseQuantConv = true,            // quant_conv: [64, 64, 1, 1]
         SampleSize = 1024,
-        // TODO: Confirm exact scaling/shift factors for Flux.2 VAE — may differ from Flux.1
     };
 
     /// <summary>Preset for Chroma (reuses Flux.1 VAE).</summary>
     public static VaeConfig Chroma => Flux;
+
+    /// <summary>Preset for Z-Image (reuses Flux.1 VAE verbatim — same scale=0.3611, shift=0.1159, 16 channels, 8× downscale).</summary>
+    public static VaeConfig ZImage => Flux;
 
     /// <summary>Preset for AuraFlow (reuses SDXL-compatible VAE with 4-channel latent).</summary>
     public static VaeConfig AuraFlow => Sdxl;

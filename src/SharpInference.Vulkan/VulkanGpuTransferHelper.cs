@@ -16,6 +16,10 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     private readonly Dictionary<Tensor, VulkanBuffer> _weightCache = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Tensor, VulkanBuffer> _activationCache = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<VulkanBuffer> _cachedBuffers = new();
+    /// <summary>Uncached upload buffers from CopyToDevice cache-misses (typically streamed weights).
+    /// Drained when the engine flushes the command stream — they must outlive every recorded
+    /// command that used them, but no individual op needs to free them explicitly.</summary>
+    private readonly List<VulkanBuffer> _transientBuffers = new();
 
     private readonly nint _device;
     private readonly VulkanMemoryAllocator _allocator;
@@ -54,7 +58,21 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         ulong byteSize = (ulong)ByteSize(cpuTensor);
         VulkanBuffer dst = AllocateDevice(byteSize);
         Upload(dst, cpuTensor);
+        // Record so it gets freed at the next stream flush; otherwise streamed weights leak.
+        _transientBuffers.Add(dst);
         return dst;
+    }
+
+    /// <summary>Schedules every non-cached upload buffer for deferred-free. Called by the backend
+    /// during periodic flushes — by then every dispatch that referenced these buffers has been
+    /// recorded into the active command buffer, so tagging at _value+1 is safe.</summary>
+    public void DrainTransients()
+    {
+        foreach (VulkanBuffer t in _transientBuffers)
+        {
+            if (!_cachedBuffers.Contains(t)) _stream.DeferredFree(t);
+        }
+        _transientBuffers.Clear();
     }
 
     /// <summary>Allocates a device-local buffer for an op output / temporary. When ReBAR is
