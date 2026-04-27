@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Vulkan</PackageId>
+    <Description>Vulkan compute backend for SharpInference. Cross-vendor GPU inference (NVIDIA, AMD, Intel, Apple via MoltenVK) via SPIR-V compute shaders and P/Invoke into the Vulkan loader.</Description>
+    <RootNamespace>SharpInference.Vulkan</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+    <ProjectReference Include="..\SharpInference.Cpu\SharpInference.Cpu.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SharpInference.Vulkan.Tests" />
+  </ItemGroup>
+
+  <!-- SPIR-V kernel files shipped as content, loaded from disk at runtime.
+       Built from native/vulkan/shaders/*.comp.glsl by native/vulkan/build.sh.
+       The build is invoked manually (not as MSBuild target) because not every
+       dev box has glslangValidator installed; CI handles compilation. -->
+  <ItemGroup>
+    <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
