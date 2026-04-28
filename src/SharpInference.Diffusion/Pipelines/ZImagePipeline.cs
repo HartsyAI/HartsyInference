@@ -80,17 +80,26 @@ public sealed unsafe class ZImagePipeline : IDisposable
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
 
-            Tensor velocity = _transformer.Forward(_backend, latent, captionEmbeddings, sigma);
+            // Diffusers Z-Image pipeline inverts the timestep: it feeds the transformer
+            // `(1 - sigma)` (then the transformer multiplies by t_scale=1000 internally). Without
+            // this inversion every step conditions on the OPPOSITE point in the schedule and the
+            // model produces near-random output. See pipeline_z_image.py:506.
+            float invertedSigma = 1.0f - sigma;
+            Tensor velocity = _transformer.Forward(_backend, latent, captionEmbeddings, invertedSigma);
 
             if (cfgScale > 1.0f)
             {
-                Tensor uncondVelocity = _transformer.Forward(_backend, latent, negativeCaptionEmbeddings!, sigma);
+                Tensor uncondVelocity = _transformer.Forward(_backend, latent, negativeCaptionEmbeddings!, invertedSigma);
                 Tensor combined = new Tensor(velocity.Shape, DType.F32);
                 ApplyCfg(combined, velocity, uncondVelocity, cfgScale);
                 uncondVelocity.Dispose();
                 velocity.Dispose();
                 velocity = combined;
             }
+
+            // Diffusers Z-Image pipeline does `noise_pred = -noise_pred` (see pipeline_z_image.py:558).
+            // Empirically required: without this we get pure RGB noise; with it we get structured output.
+            NegateInPlace(velocity);
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
             scheduler.Step(newLatent, velocity, latent, i);
@@ -124,6 +133,15 @@ public sealed unsafe class ZImagePipeline : IDisposable
         Logs.Info($"Z-Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, request.Width, request.Height, seed);
+    }
+
+    /// <summary>In-place negate. Z-Image's diffusers pipeline negates the velocity output before stepping.</summary>
+    private static void NegateInPlace(Tensor t)
+    {
+        float* p = (float*)t.DataPointer;
+        long count = t.Shape.ElementCount;
+        for (long i = 0; i < count; i++)
+            p[i] = -p[i];
     }
 
     /// <summary>combined = uncond + cfg * (cond - uncond) — standard CFG combine.</summary>

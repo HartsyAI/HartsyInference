@@ -113,8 +113,53 @@ public sealed class ZImageGenerationTests
         Stopwatch totalSw = Stopwatch.StartNew();
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Load Z-Image transformer ─────────────────────────────────
-        _output.WriteLine($"[1/7] Loading Z-Image checkpoint: {Path.GetFileName(ZImageCheckpointPath)}");
+        CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+
+        // ── PHASE A: encode prompt with Qwen3-4B, then dispose it before loading Z-Image (memory pressure: 16 GB Qwen3 F32 + 7 GB Z-Image FP8 + activations exceeds 32 GB easily) ──
+        string prompt = "A photograph of an astronaut riding a horse on the moon";
+        Tensor captionEmbeddings;
+        {
+            sw.Restart();
+            _output.WriteLine($"[A1] Loading Qwen3-4B from: {Path.GetFileName(Qwen3WeightsPath)}");
+            using SafeTensorsLoader qwenLoader = new();
+            qwenLoader.Load(Qwen3WeightsPath);
+            Dictionary<string, Tensor> qwenWeights = qwenLoader.GetAllTensors();
+            Dictionary<string, Tensor> qwenF32 = new(qwenWeights.Count);
+            foreach (KeyValuePair<string, Tensor> kvp in qwenWeights)
+                qwenF32[kvp.Key] = kvp.Value.DType == DType.F32 ? kvp.Value : kvp.Value.CastTo(DType.F32);
+            LlamaStyleEncoder qwenEncoder = new(LlamaStyleEncoderConfig.Qwen3_4B);
+            qwenEncoder.LoadWeights(qwenF32);
+            _output.WriteLine($"  Qwen3-4B loaded in {sw.ElapsedMilliseconds}ms");
+
+            using Qwen3Tokenizer tok = new(Qwen3VocabPath, Qwen3MergesPath, maxLength: 64);
+            int[] tokenIds = tok.Encode(prompt, appendEos: true);
+            _output.WriteLine($"[A2] Tokenized prompt: \"{prompt}\" — raw tokens: {tok.EncodeRaw(prompt).Count}");
+
+            sw.Restart();
+            _output.WriteLine("[A3] Encoding prompt with Qwen3-4B...");
+            Tensor encoded = qwenEncoder.Encode(backend, [tokenIds]);
+            backend.Sync();
+            // Materialize to a CPU-owned tensor that doesn't reference any Qwen3 weight buffers.
+            captionEmbeddings = encoded;
+            _output.WriteLine($"  Caption embeddings: shape={captionEmbeddings.Shape}, dtype={captionEmbeddings.DType}, in {sw.ElapsedMilliseconds}ms");
+            LogTensorStats("captionEmbeddings", captionEmbeddings);
+
+            // Force Qwen3 weights to drop. Cast tensors hold heap-allocated F32 buffers — disposing the
+            // F32 dict and the encoder lets ~16 GB go before we load the transformer.
+            qwenEncoder.Dispose();
+            foreach (Tensor t in qwenF32.Values)
+                t.Dispose();
+            qwenF32.Clear();
+            // qwenWeights holds the original mmap-borrowed tensors; the loader's Dispose will release them.
+        }
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        _output.WriteLine($"  After Qwen3 dispose: free ≈ {GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024 * 1024)} GB");
+
+        // ── PHASE B: load Z-Image transformer + VAE ──
+        sw.Restart();
+        _output.WriteLine($"[B1] Loading Z-Image checkpoint: {Path.GetFileName(ZImageCheckpointPath)}");
         (ZImageCheckpointConverter.ConvertedWeights zConv, SafeTensorsLoader zLoader) =
             ZImageCheckpointConverter.LoadAndConvert(ZImageCheckpointPath);
         _output.WriteLine($"  Loaded in {sw.ElapsedMilliseconds}ms — Transformer keys: {zConv.Transformer.Count}, FP8Mix={zConv.IsFp8Mix}");
@@ -126,29 +171,25 @@ public sealed class ZImageGenerationTests
                 ZImageCheckpointConverter.DetectArchitecture(zConv.Transformer);
             _output.WriteLine($"  Architecture: {numLayers} layers, {numRefiner} refiner each, hidden={hidden}, ffnDim={ffnDim}, fp8={isFp8Mix}");
 
-            ZImageConfig zConfig = new()
+            ZImageConfig zConfig = ZImageConfig.Turbo with
             {
                 HiddenSize = hidden,
                 NumHeads = hidden / 128,
-                HeadDim = 128,
                 NumLayers = numLayers,
                 NumRefinerLayers = numRefiner,
                 FfnDim = ffnDim,
             };
 
-            // ── 2. Build transformer (FP8 weights pass-through; pad tokens auto-cast to F32 inside LoadWeights) ──
             sw.Restart();
-            _output.WriteLine("[2/7] Building ZImageTransformer + loading weights...");
+            _output.WriteLine("[B2] Building ZImageTransformer + loading weights...");
             ZImageTransformer transformer = new(zConfig);
             transformer.LoadWeights(zConv.Transformer);
             _output.WriteLine($"  Transformer loaded in {sw.ElapsedMilliseconds}ms");
 
-            // ── 3. Load Flux VAE from Flux.1 dev checkpoint ─────────────
             sw.Restart();
-            _output.WriteLine($"[3/7] Loading Flux VAE from: {Path.GetFileName(FluxVaeSourcePath)}");
+            _output.WriteLine($"[B3] Loading Flux VAE from: {Path.GetFileName(FluxVaeSourcePath)}");
             (FluxCheckpointConverter.ConvertedWeights fluxConv, SafeTensorsLoader fluxLoader) =
                 FluxCheckpointConverter.LoadAndConvert(FluxVaeSourcePath);
-            _output.WriteLine($"  VAE keys: {fluxConv.Vae.Count}");
             using (fluxLoader)
             {
                 Dictionary<string, Tensor> vaeF32 = CastWeightsToF32(fluxConv.Vae);
@@ -156,42 +197,7 @@ public sealed class ZImageGenerationTests
                 vaeDecoder.LoadWeights(vaeF32);
                 _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms");
 
-                // ── 4. Load Qwen3-4B text encoder ───────────────────────
-                sw.Restart();
-                _output.WriteLine($"[4/7] Loading Qwen3-4B from: {Path.GetFileName(Qwen3WeightsPath)}");
-                using SafeTensorsLoader qwenLoader = new();
-                qwenLoader.Load(Qwen3WeightsPath);
-                Dictionary<string, Tensor> qwenWeights = qwenLoader.GetAllTensors();
-                _output.WriteLine($"  Qwen3 tensors: {qwenWeights.Count}, casting to F32...");
-                Dictionary<string, Tensor> qwenF32 = new(qwenWeights.Count);
-                foreach (KeyValuePair<string, Tensor> kvp in qwenWeights)
-                    qwenF32[kvp.Key] = kvp.Value.DType == DType.F32 ? kvp.Value : kvp.Value.CastTo(DType.F32);
-
-                LlamaStyleEncoder qwenEncoder = new(LlamaStyleEncoderConfig.Qwen3_4B);
-                qwenEncoder.LoadWeights(qwenF32);
-                _output.WriteLine($"  Qwen3-4B loaded in {sw.ElapsedMilliseconds}ms");
-
-                // ── 5. Tokenize the prompt ──────────────────────────────
-                sw.Restart();
-                string prompt = "A photograph of an astronaut riding a horse on the moon";
-                _output.WriteLine($"[5/7] Tokenizing prompt: \"{prompt}\"");
-                using Qwen3Tokenizer tok = new(Qwen3VocabPath, Qwen3MergesPath, maxLength: 64);
-                int[] tokenIds = tok.Encode(prompt, appendEos: true);
-                IReadOnlyList<int> rawIds = tok.EncodeRaw(prompt);
-                _output.WriteLine($"  Raw tokens: {rawIds.Count}, padded length: {tokenIds.Length}");
-
-                // ── 6. Encode prompt with Qwen3 ─────────────────────────
-                sw.Restart();
-                _output.WriteLine("[6/7] Building backend + encoding prompt with Qwen3-4B...");
-                CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
-                int[][] batch = [tokenIds];
-                Tensor captionEmbeddings = qwenEncoder.Encode(backend, batch);
-                backend.Sync();
-                _output.WriteLine($"  Caption embeddings: shape={captionEmbeddings.Shape}, dtype={captionEmbeddings.DType}, in {sw.ElapsedMilliseconds}ms");
-                LogTensorStats("captionEmbeddings", captionEmbeddings);
-
-                // ── 7. Generate ─────────────────────────────────────────
-                _output.WriteLine("[7/7] Generating image (512×512, 8 NFE, CFG=1.0)...");
+                _output.WriteLine("[B4] Generating image (512×512, 8 NFE, CFG=1.0)...");
                 ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, zConfig);
                 TextToImageRequest request = new()
                 {
@@ -212,7 +218,6 @@ public sealed class ZImageGenerationTests
                 backend.Sync();
                 _output.WriteLine($"Generation done in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
-                // ── Save ────────────────────────────────────────────────
                 Directory.CreateDirectory(OutputDir);
                 string outputPath = Path.Combine(OutputDir, $"zimage_turbo_{width}x{height}_s{request.Steps}_seed{seed}.bmp");
                 ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
@@ -221,7 +226,6 @@ public sealed class ZImageGenerationTests
                 Assert.Equal(512, width);
                 Assert.Equal(512, height);
                 Assert.Equal(512 * 512 * 3, rgbData.Length);
-
                 ValidateImageNotDegenerate(rgbData);
 
                 totalSw.Stop();
@@ -229,7 +233,6 @@ public sealed class ZImageGenerationTests
 
                 captionEmbeddings.Dispose();
                 pipeline.Dispose();
-                qwenEncoder.Dispose();
                 transformer.Dispose();
                 backend.Dispose();
             }

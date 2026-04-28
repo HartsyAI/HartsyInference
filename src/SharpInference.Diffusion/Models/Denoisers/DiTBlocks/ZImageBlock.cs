@@ -214,6 +214,8 @@ public sealed unsafe class ZImageBlock
         Tensor projected = new Tensor(projShape, tEmb.DType);
         backend.Linear(projected, tEmb, _adaLNWeight!, _adaLNBias);
 
+        // Diffusers Z-Image applies tanh() to gate_msa (idx 1) and gate_mlp (idx 3) before use.
+        // Without this, gates blow up at init and the network produces noise. See transformer_z_image.py:233.
         Tensor[] results = new Tensor[4];
         float* projPtr = (float*)projected.DataPointer;
 
@@ -222,13 +224,22 @@ public sealed unsafe class ZImageBlock
             TensorShape paramShape = new TensorShape(batch, _hiddenSize);
             Tensor param = new Tensor(paramShape, projected.DType);
             float* paramPtr = (float*)param.DataPointer;
+            bool isGate = (p == 1 || p == 3);
 
             for (int b = 0; b < batch; b++)
             {
                 int srcOffset = b * outDim + p * _hiddenSize;
                 int dstOffset = b * _hiddenSize;
-                Buffer.MemoryCopy(projPtr + srcOffset, paramPtr + dstOffset,
-                    _hiddenSize * sizeof(float), _hiddenSize * sizeof(float));
+                if (isGate)
+                {
+                    for (int d = 0; d < _hiddenSize; d++)
+                        paramPtr[dstOffset + d] = MathF.Tanh(projPtr[srcOffset + d]);
+                }
+                else
+                {
+                    Buffer.MemoryCopy(projPtr + srcOffset, paramPtr + dstOffset,
+                        _hiddenSize * sizeof(float), _hiddenSize * sizeof(float));
+                }
             }
 
             results[p] = param;

@@ -72,8 +72,8 @@ public sealed unsafe class ZImageContextRefinerBlock
         if (_w3Weight is not null) yield return _w3Weight;
     }
 
-    /// <summary>Forward pass on caption tokens (no AdaLN). x: [B, capLen, hidden].</summary>
-    public Tensor Forward(IBackend backend, Tensor x)
+    /// <summary>Forward pass on caption tokens (no AdaLN). x: [B, capLen, hidden]. <paramref name="rope"/> is the caption-token RoPE — diffusers' ZImageTransformerBlock always applies the freqs_cis it receives, even with modulation=False, so context_refiner DOES apply RoPE to caption tokens. Caption pos IDs run frame=1..capPaddedLen on axis 0 (h=w=0).</summary>
+    public Tensor Forward(IBackend backend, Tensor x, ZImageRope? rope)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
@@ -112,6 +112,8 @@ public sealed unsafe class ZImageContextRefinerBlock
         qN.Dispose();
         kN.Dispose();
         v.Dispose();
+
+        rope?.Forward(qMh, kMh, batch, _numHeads, seqLen);
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);

@@ -151,20 +151,30 @@ public sealed unsafe class ZImageTransformer : IDisposable
 
         // ── 1. Timestep embedding ──
         Tensor tEmb = ComputeTimestepEmbedding(backend, sigma, batch);
+        ZImageDebugDump.Dump("t_embedder", tEmb);
 
         // ── 2. Caption embedding: cap_embedder + pad to multiple of 32 + context_refiner stack ──
         Tensor capProjected = EmbedCaption(backend, captionEmbeddings, batch, capRealLen);
+        ZImageDebugDump.Dump("cap_embedder", capProjected);
         Tensor capPadded = PadCaption(capProjected, capRealLen, capPaddedLen, batch);
         // PadCaption may return the input unchanged when paddedLen==realLen — only dispose if it allocated a new tensor.
         if (!ReferenceEquals(capPadded, capProjected))
             capProjected.Dispose();
 
+        // Caption-only RoPE: positions (1..capPaddedLen, 0, 0) on the frame axis. Diffusers ZImageTransformerBlock
+        // applies freqs_cis even when modulation=False (the context_refiner case), so caption tokens DO get RoPE.
+        ZImageRope captionRope = new ZImageRope(_config.AxesDims, _config.RopeTheta);
+        Tensor capPosIds = ZImageRope.BuildCaptionPositionIds(capPaddedLen);
+        captionRope.Precompute(capPosIds);
+        capPosIds.Dispose();
+
         Tensor refinedCaption = capPadded;
         for (int i = 0; i < _contextRefiners.Length; i++)
         {
-            Tensor next = _contextRefiners[i].Forward(backend, refinedCaption);
+            Tensor next = _contextRefiners[i].Forward(backend, refinedCaption, captionRope);
             refinedCaption.Dispose();
             refinedCaption = next;
+            ZImageDebugDump.Dump($"context_refiner.{i}", refinedCaption);
         }
 
         // ── 3. Image patchify + embed + pad + noise_refiner stack ──
@@ -172,17 +182,17 @@ public sealed unsafe class ZImageTransformer : IDisposable
         TensorShape imgEmbShape = new TensorShape(batch, imgRealLen, hidden);
         Tensor imgEmbedded = new Tensor(imgEmbShape, latent.DType);
         backend.Linear(imgEmbedded, packedLatent, _xEmbedderWeight!, _xEmbedderBias);
+        ZImageDebugDump.Dump("x_embedder", imgEmbedded);
         packedLatent.Dispose();
 
         Tensor imgPadded = PadImage(imgEmbedded, imgRealLen, imgPaddedLen, batch);
         if (!ReferenceEquals(imgPadded, imgEmbedded))
             imgEmbedded.Dispose();
 
-        // Image-only RoPE for noise_refiner. Caption position 0 is unused here, but the rope cache is
-        // built once over the full concat range below; for the refiners we use a separate rope built
-        // for image-only positions (axes [0, row, col] for image, all-zero for image pad slots).
+        // Image-only RoPE for noise_refiner. Diffusers uses pos_start=(1,0,0) for the image-only
+        // refinement stack — see ZImageRope.BuildImagePositionIds.
         ZImageRope refinerRope = new ZImageRope(_config.AxesDims, _config.RopeTheta);
-        Tensor refinerPosIds = ZImageRope.BuildPositionIds(0, hPacked, wPacked, imgPaddedLen);
+        Tensor refinerPosIds = ZImageRope.BuildImagePositionIds(hPacked, wPacked, imgPaddedLen);
         refinerRope.Precompute(refinerPosIds);
         refinerPosIds.Dispose();
 
@@ -192,14 +202,16 @@ public sealed unsafe class ZImageTransformer : IDisposable
             Tensor next = _noiseRefiners[i].Forward(backend, refinedImage, tEmb, refinerRope);
             refinedImage.Dispose();
             refinedImage = next;
+            ZImageDebugDump.Dump($"noise_refiner.{i}", refinedImage);
         }
 
-        // ── 4. Concatenate [refined_caption, refined_image] along sequence dim ──
-        Tensor concat = ConcatAlongSeqDim(refinedCaption, refinedImage, batch, capPaddedLen, imgPaddedLen, hidden);
+        // ── 4. Concatenate [refined_image, refined_caption] along sequence dim ──
+        // Order is [image, caption] per diffusers transformer_z_image.py:859 — NOT [caption, image].
+        Tensor concat = ConcatAlongSeqDim(refinedImage, refinedCaption, batch, imgPaddedLen, capPaddedLen, hidden);
         refinedCaption.Dispose();
         refinedImage.Dispose();
 
-        // ── 5. Build full RoPE for the concatenated sequence ──
+        // ── 5. Build full RoPE for the concatenated [image, caption] sequence ──
         Tensor fullPosIds = ZImageRope.BuildPositionIds(capPaddedLen, hPacked, wPacked, imgPaddedLen);
         _rope.Precompute(fullPosIds);
         fullPosIds.Dispose();
@@ -211,14 +223,16 @@ public sealed unsafe class ZImageTransformer : IDisposable
             Tensor next = _layers[i].Forward(backend, x, tEmb, _rope);
             x.Dispose();
             x = next;
+            ZImageDebugDump.Dump($"layers.{i}", x);
         }
 
-        // ── 7. Slice off image portion of the sequence ──
-        Tensor imageSlice = SliceImage(x, batch, capPaddedLen, imgPaddedLen, hidden);
+        // ── 7. Slice off image portion (front of the [image, caption] sequence) ──
+        Tensor imageSlice = SliceImageFront(x, batch, imgPaddedLen, capPaddedLen, hidden);
         x.Dispose();
 
         // ── 8. Final layer: AdaLN(scale, shift) → RmsNorm-no-affine + modulate → Linear → unpatchify ──
         Tensor finalProj = ApplyFinalLayer(backend, imageSlice, tEmb, batch, imgPaddedLen);
+        ZImageDebugDump.Dump("final_layer", finalProj);
         imageSlice.Dispose();
         tEmb.Dispose();
 
@@ -230,6 +244,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
         Tensor velocity = Unpatchify(realImage, batch, inChannels, hPacked, wPacked, patch);
         realImage.Dispose();
 
+        ZImageDebugDump.DumpOutput(velocity);
         return velocity;
     }
 
@@ -357,13 +372,13 @@ public sealed unsafe class ZImageTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Patchify: [B, C, H, W] → [B, hPacked*wPacked, C * patch²]. Uses 2D blocking matching Lumina2 conventions.</summary>
+    /// <summary>Patchify: [B, C, H, W] → [B, hPacked*wPacked, pH*pW*C]. Diffusers Z-Image (`transformer_z_image.py:542-549`) uses inner-most order (pH, pW, C) — channel is the FASTEST-VARYING axis inside each patch, NOT the slowest. The matching <c>x_embedder</c> Linear was trained with this convention. </summary>
     private static Tensor Patchify(Tensor latent, int batch, int channels, int H, int W, int patch)
     {
         int hPacked = H / patch;
         int wPacked = W / patch;
         int seqLen = hPacked * wPacked;
-        int patchDim = channels * patch * patch;
+        int patchDim = patch * patch * channels;
 
         TensorShape outShape = new TensorShape(batch, seqLen, patchDim);
         Tensor output = new Tensor(outShape, latent.DType);
@@ -380,13 +395,13 @@ public sealed unsafe class ZImageTransformer : IDisposable
                     int seqIdx = hp * wPacked + wp;
                     int outOffset = (b * seqLen + seqIdx) * patchDim;
 
-                    // Layout: for each channel, then each (ph, pw) within the patch.
+                    // Inner ordering (slowest-to-fastest): pH, pW, C.
                     int outIdx = 0;
-                    for (int c = 0; c < channels; c++)
+                    for (int ph = 0; ph < patch; ph++)
                     {
-                        for (int ph = 0; ph < patch; ph++)
+                        for (int pw = 0; pw < patch; pw++)
                         {
-                            for (int pw = 0; pw < patch; pw++)
+                            for (int c = 0; c < channels; c++)
                             {
                                 int srcH = hp * patch + ph;
                                 int srcW = wp * patch + pw;
@@ -401,13 +416,13 @@ public sealed unsafe class ZImageTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Inverse of Patchify: [B, hPacked*wPacked, C * patch²] → [B, C, H, W].</summary>
+    /// <summary>Inverse of Patchify: [B, hPacked*wPacked, pH*pW*C] → [B, C, H, W]. Inner ordering matches Patchify (pH, pW, C).</summary>
     private static Tensor Unpatchify(Tensor packed, int batch, int channels, int hPacked, int wPacked, int patch)
     {
         int H = hPacked * patch;
         int W = wPacked * patch;
         int seqLen = hPacked * wPacked;
-        int patchDim = channels * patch * patch;
+        int patchDim = patch * patch * channels;
 
         TensorShape outShape = new TensorShape(batch, channels, H, W);
         Tensor output = new Tensor(outShape, packed.DType);
@@ -425,11 +440,11 @@ public sealed unsafe class ZImageTransformer : IDisposable
                     int inOffset = (b * seqLen + seqIdx) * patchDim;
 
                     int inIdx = 0;
-                    for (int c = 0; c < channels; c++)
+                    for (int ph = 0; ph < patch; ph++)
                     {
-                        for (int ph = 0; ph < patch; ph++)
+                        for (int pw = 0; pw < patch; pw++)
                         {
-                            for (int pw = 0; pw < patch; pw++)
+                            for (int c = 0; c < channels; c++)
                             {
                                 int dstH = hp * patch + ph;
                                 int dstW = wp * patch + pw;
@@ -465,10 +480,10 @@ public sealed unsafe class ZImageTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Slices the image-token portion off the concatenated sequence: [B, capLen+imgLen, D] → [B, imgLen, D].</summary>
-    private static Tensor SliceImage(Tensor combined, int batch, int capLen, int imgLen, int dim)
+    /// <summary>Slices the image-token portion off the front of the [image, caption] concatenated sequence: [B, imgLen+capLen, D] → [B, imgLen, D].</summary>
+    private static Tensor SliceImageFront(Tensor combined, int batch, int imgLen, int capLen, int dim)
     {
-        int totalSeq = capLen + imgLen;
+        int totalSeq = imgLen + capLen;
         TensorShape outShape = new TensorShape(batch, imgLen, dim);
         Tensor output = new Tensor(outShape, combined.DType);
 
@@ -478,7 +493,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
         for (int b = 0; b < batch; b++)
         {
             long bytes = (long)imgLen * dim * sizeof(float);
-            Buffer.MemoryCopy(srcPtr + (b * totalSeq + capLen) * dim, outPtr + b * imgLen * dim, bytes, bytes);
+            Buffer.MemoryCopy(srcPtr + b * totalSeq * dim, outPtr + b * imgLen * dim, bytes, bytes);
         }
         return output;
     }
@@ -521,10 +536,10 @@ public sealed unsafe class ZImageTransformer : IDisposable
         backend.Linear(scaleParam, activated, _finalAdaLNWeight!, _finalAdaLNBias);
         activated.Dispose();
 
-        // LayerNorm-no-affine on image tokens
+        // LayerNorm-no-affine on image tokens. Diffusers Z-Image FinalLayer uses LayerNorm(eps=1e-6, elementwise_affine=False) — note: 1e-6, not the 1e-5 used elsewhere in the model.
         TensorShape seqShape = new TensorShape(batch, seqLen, hidden);
         Tensor normed = new Tensor(seqShape, imageTokens.DType);
-        DiTUtils.LayerNormNoAffine(normed, imageTokens, batch, seqLen, hidden, _config.NormEps);
+        DiTUtils.LayerNormNoAffine(normed, imageTokens, batch, seqLen, hidden, 1e-6f);
 
         // Apply scale only: out = normed * (1 + scale).
         Tensor modulated = new Tensor(seqShape, imageTokens.DType);
