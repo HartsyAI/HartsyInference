@@ -123,7 +123,7 @@ Key points:
 2. **Bindings** must match the `VkDescriptorSetLayout` used at pipeline creation. Use a stable convention across the engine:
    - `binding = 0` always reserved for the primary output
    - `binding = 1..` inputs in fixed order (A, B, bias, ...)
-3. **`readonly` / `writeonly`** qualifiers let the driver elide hazards/coherency you don't need. Use them.
+3. **`readonly` / `writeonly`** qualifiers let the driver elide hazards/coherency you don't need. Use them — but only after verifying every spec-const path. Example: the matmul output binding *cannot* be `writeonly` if the kernel supports `C = alpha*A*B + beta*C` (the `beta != 0` path reads C). See [PHASE_3_5_DEVIATIONS.md #8](../Checklists/PHASE_3_5_DEVIATIONS.md). Also note: GLSL has no built-in `erf`; the exact-GELU path uses an inline Abramowitz & Stegun 7.1.26 approximation — see [PHASE_3_5_DEVIATIONS.md #7](../Checklists/PHASE_3_5_DEVIATIONS.md).
 4. **`shared` memory** — per-workgroup scratch. Vulkan minimum: 16 KB; modern desktop ≥ 32 KB. Statically sized at SPIR-V compile time (use `layout_size_id` spec consts to scale at pipeline creation).
 5. **`push_constant`** struct mapped to the `vkCmdPushConstants` blob — exact byte layout enforced; `std430` rules apply. Keep ≤ 128 bytes.
 

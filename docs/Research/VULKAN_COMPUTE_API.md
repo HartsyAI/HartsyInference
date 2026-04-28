@@ -442,6 +442,8 @@ public struct VkPhysicalDeviceVulkan13Features
 
 **Required at device creation:** `shaderFloat16 = 1`, `storageBuffer16BitAccess = 1`, `subgroupSizeControl = 1`, `computeFullSubgroups = 1`, `synchronization2 = 1`. If any are unsupported, fall back: FP16 → FP32 path; subgroupSizeControl → query `subgroupSize` and bake it into shader constants at compile time.
 
+> **Driver warning — feature query under-reports on NVIDIA Linux blob.** Some NVIDIA Linux drivers (observed: 535-series) advertise `apiVersion = 1.3.x` but return zeros for `shaderFloat16`, `timelineSemaphore`, `bufferDeviceAddress`, `synchronization2`, `subgroupSizeControl`, and `computeFullSubgroups` when queried through the *promoted* v1.2 / v1.3 feature structs above. The features are real and `vkCreateDevice` accepts them — only the *query* is wrong. Phase 3.5 works around this by trusting `apiVersion` for known vendors (`vendorID is 0x10DE or 0x1002 or 0x8086`) when the feature struct reports zero. See [PHASE_3_5_DEVIATIONS.md #3](../Checklists/PHASE_3_5_DEVIATIONS.md) and [VulkanFeatureProbe.cs](../../tests/SharpInference.Vulkan.Tests/VulkanFeatureProbe.cs) for the isolation test that confirmed the bug.
+
 ### `VkPhysicalDeviceMemoryProperties`
 
 ```csharp

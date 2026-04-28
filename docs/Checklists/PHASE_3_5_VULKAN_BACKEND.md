@@ -4,7 +4,7 @@
 >
 > **Packages:** `SharpInference.Vulkan` (built), `SharpInference.Core` (minor — capabilities + DeviceKind already in place), `SharpInference.Diffusion` (untouched — `IBackend` abstraction handles routing).
 >
-> **Status:** Foundation complete. Compiles + 7/7 smoke tests passing on Linux Vulkan loader. Remaining work: pipeline-level integration (SD1.5 + SDXL end-to-end against CUDA reference), per-kernel correctness suite, performance tuning. Use this checklist to track progression.
+> **Status:** Backend functional. Compiles + 14/14 smoke tests pass on Linux + NVIDIA. End-to-end Flux Schnell FP8 4-step generation produces real photographic content matching the prompt. Remaining work: SD1.5 / SDXL pipeline validation against CUDA (SSIM gate), per-kernel correctness backfill (most kernels covered transitively, named `*_Vs_Cpu` tests still missing for several), AMD / Intel cross-vendor verification, performance tuning (currently ~9× CUDA wall-clock — target ≤ 1.6×). See [PHASE_3_5_DEVIATIONS.md](PHASE_3_5_DEVIATIONS.md) for the bugs we hit and how they were resolved. Use this checklist to track remaining progression.
 
 ---
 
@@ -23,7 +23,7 @@
 - [x] **`SharpInference.Vulkan.csproj`** committed empty with project references and build script wiring (no code yet)
 - [x] **`native/vulkan/` directory** committed with empty `shaders/` and `build.sh` (no .glsl yet)
 - [ ] **CI matrix updated** — at minimum a Linux runner with `mesa-vulkan-drivers` for unit tests via Mesa LLVMpipe (software Vulkan) so allocator / API tests run without a physical GPU
-- [ ] **`PHASE_3_5_DEVIATIONS.md`** scaffolded — start empty; populate as we hit issues
+- [x] **`PHASE_3_5_DEVIATIONS.md`** scaffolded and populated — 9 entries covering FP8 GEMM dtype mismatch, mid-op auto-flush UAF, NVIDIA feature-query bug, slab-size OOM, transient-buffer leak, deferred-free off-by-one, GLSL `erf` workaround, matmul `writeonly` constraint, glslangValidator `-O` flag
 
 ## 3. Implementation — `SharpInference.Vulkan`
 
@@ -39,7 +39,7 @@ The smallest possible end-to-end. **Goal:** allocate a buffer, run an `add` shad
 - [x] `VulkanInstance.cs` — `Create(bool enableValidation)`. Builds `VkApplicationInfo` (api 1.3) + `VkInstanceCreateInfo`. Returns instance handle + selected layer list. Reads `SHARPINFERENCE_VK_VALIDATION` env var.
 - [x] `VulkanDevice.cs` — physical device enumeration, scoring (deviceType discrete > integrated > CPU; FP16 + subgroupSizeControl + ARITHMETIC + SHUFFLE features required; VRAM size as tiebreaker). Logs full `BackendCapabilities`. Builds `pNext` chain (`VkPhysicalDeviceFeatures2 → Vulkan11Features → Vulkan12Features → Vulkan13Features`). Calls `vkCreateDevice` with required extensions: `VK_KHR_synchronization2` (for 1.2 fallback), `VK_EXT_memory_budget`, optional `VK_KHR_push_descriptor`, optional `VK_KHR_cooperative_matrix`. Picks compute queue family (compute-only > compute+graphics).
 - [x] `VulkanCapabilities` (in `Core` package, mirror `BackendCapabilities` extension fields) — `SubgroupSize`, `MinSubgroupSize`, `MaxSubgroupSize`, `HasReBAR`, `HasPushDescriptor`, `HasMemoryBudget`, `HasCoopMatrix`, `MaxComputeSharedMem`, `VendorId`. Surface to upper layers.
-- [ ] **Smoke test:** `tests/SharpInference.Vulkan.Tests/InstanceBringUpTests.cs` — enumerate physical devices, log device names, fail when none.
+- [x] **Smoke test:** `tests/SharpInference.Vulkan.Tests/VulkanDeviceInfoTest.cs` + `VulkanFeatureProbe.cs` — enumerate physical devices, log device names + capabilities, isolate per-struct feature query (caught the NVIDIA feature-query bug — see [PHASE_3_5_DEVIATIONS.md #3](PHASE_3_5_DEVIATIONS.md))
 
 ### 3b. Memory allocator + buffer wrapper
 
@@ -48,14 +48,14 @@ The smallest possible end-to-end. **Goal:** allocate a buffer, run an `add` shad
 - [x] `VulkanBuffer.cs` — `VkBuffer` + `VulkanAllocation`. `Dispose()` returns slab region. `AsSpan<T>` for host-visible mapping.
 - [x] `VulkanGpuTransferHelper.cs` — `Dictionary<Tensor, VulkanBuffer>` weight cache (reference equality). `CopyToDevice(Tensor)`, `PreloadWeight`, `PreloadWeights(IEnumerable<Tensor>)` with batched staging (one staging buf per ~64 MB batch). `FreeWeights` mirrors CUDA's `FreePreloadedWeights`. ReBAR fast path when `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` type exists.
 - [x] `VulkanDeferredFreeList.cs` — `Dictionary<ulong /*timelineValue*/, List<VulkanAllocation>>`. `FreeAsync(alloc, currentValue)`. `Reclaim(completedValue)` returns regions to allocator.
-- [ ] **Tests:** allocator round-trip, alignment, OOM-retry (synthetic), ReBAR-fast-path detection, batched preload measurement (SDXL preload should drop from minutes to ≤ 30 s)
+- [ ] **Tests:** allocator round-trip, alignment, OOM-retry (synthetic), ReBAR-fast-path detection, batched preload measurement (SDXL preload should drop from minutes to ≤ 30 s) — *covered transitively by Flux end-to-end run; dedicated unit tests still pending. OOM-retry path was added in response to [PHASE_3_5_DEVIATIONS.md #4](PHASE_3_5_DEVIATIONS.md) but not yet covered by a synthetic test.*
 
 ### 3c. Command buffer & sync layer
 
 - [x] `VulkanCommandPool.cs` — one pool per backend; `Acquire()` (allocate in batches of 8), `RecycleAllInUse()` (reset, not free)
 - [x] `VulkanCommandStream.cs` — single timeline semaphore + monotonic counter. `RecordOp(Action<nint>)`, `SubmitAndAdvance() → ulong`, `WaitTimeline(ulong)`, `CurrentValue()`. Replaces CUDA's `CudaStream` semantically; one logical "stream".
 - [x] `VulkanBarriers.cs` — emitter helpers: `EmitComputeToCompute(cb, buffer, offset, size)`, `EmitTransferToCompute(...)`, `EmitComputeToHost(...)`, `EmitComputeToTransfer(...)`. Always per-buffer scope.
-- [ ] **Tests:** record empty CB → submit → timeline counter advances; double-submit → second waits on first.
+- [ ] **Tests:** record empty CB → submit → timeline counter advances; double-submit → second waits on first. *Covered transitively by every smoke test (all dispatch through `_stream`); dedicated test still pending.*
 
 ### 3d. Pipeline & descriptor management
 
@@ -64,12 +64,12 @@ The smallest possible end-to-end. **Goal:** allocate a buffer, run an `add` shad
 - [x] `VulkanPipelineLayoutFactory.cs` — pre-builds the ~10–12 distinct `VkDescriptorSetLayout` shapes (`L_2SSBO`, `L_3SSBO`, `L_4SSBO`, `L_5SSBO`, `L_3SSBO_QKV`); pre-builds matching `VkPipelineLayout` per (descriptor layout × push-constant range).
 - [x] `VulkanDescriptorManager.cs` — push-descriptor path when `VK_KHR_push_descriptor` supported (no pool); pool ring fallback (two pools, alternate, reset between phases). Pre-allocate `MAX_SETS_PER_POOL = 4096`.
 - [x] `VulkanKernels.cs` — kernel registry. `Dictionary<KernelKey, VulkanKernel>` with `KernelKey = (Name, SpecConstHash)`. `Get(KernelKey)` returns or builds the `VkPipeline`. Builds via `VkComputePipelineCreateInfo` with `VkSpecializationInfo` and `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` chained.
-- [ ] **Tests:** load `add.spv`, build pipeline twice with different spec consts → two cached entries; persist + reload pipeline cache.
+- [ ] **Tests:** load `add.spv`, build pipeline twice with different spec consts → two cached entries; persist + reload pipeline cache. *Pipeline build covered transitively by every smoke test; cache persist+reload still untested.*
 
 ### 3e. Backend implementation (`VulkanBackend : IBackend`)
 
 - [x] `VulkanBackend.cs` — top-level. Fields: `_instance`, `_device`, `_queue`, `_alloc`, `_xferHelper`, `_cmdStream`, `_kernels`, `_descMgr`. Lifecycle: ctor builds all of the above; `Dispose()` tears down in reverse order with `vkDeviceWaitIdle` first.
-- [ ] All `IBackend` ops dispatch through one helper: `Dispatch(kernelName, specConsts, descriptorSet, pushConstants, groupX, groupY, groupZ)`. Exact mirror of `CudaBackend.Launch*` methods. Lazy-sync activation cache: every output buffer is registered with the producing dispatch's stage/access; consumers emit barriers.
+- [x] All `IBackend` ops dispatch through one helper: `Dispatch(kernelName, specConsts, descriptorSet, pushConstants, groupX, groupY, groupZ)`. Exact mirror of `CudaBackend.Launch*` methods. Lazy-sync activation cache via `_xfer` weight cache + transient-buffer tracking. Multi-dispatch ops are wrapped in `using OpScope _ = EnterOp();` to suppress mid-op auto-flush (see [PHASE_3_5_DEVIATIONS.md #2](PHASE_3_5_DEVIATIONS.md)).
 - [x] `MatMul`, `Linear`, `BatchedMatMul` — dispatch `matmul_tiled_*.spv`. Variant selected by transposes + dtype + bias + activation. Falls back to non-fused path when activation kernel not present.
 - [x] `Conv2D` — im2col + tiled GEMM + col2bias_add (or fused into GEMM). 64-bit indexing for resolutions ≥ 1024.
 - [x] `GroupNorm`, `GroupNormSilu`, `LayerNorm`, `RmsNorm` — direct GLSL ports of the PTX kernels; cross-warp reductions via subgroup arithmetic + `shared` memory.
@@ -120,8 +120,8 @@ The whole point of `IBackend` is that the diffusion package needs **zero changes
 
 - [ ] `Sd15Pipeline` runs against `VulkanBackend` with **no source changes** — flip via `Backend = new VulkanBackend(deviceOrdinal: 0)` in the integration test
 - [ ] `SdxlPipeline` likewise — Phase 3.5 acceptance gate is SD1.5 only, but SDXL should also produce reasonable output (may have perf gaps)
-- [ ] `FluxPipeline` — should work but FP8 path may need additional shaders (Phase 4 work item)
-- [ ] If any model code references `weight.DataPointer` directly, fix it (CUDA already requires this; cf. PHASE_3_DEVIATIONS #14–15)
+- [x] `FluxPipeline` — Flux Schnell FP8 4-step 512×512 generation produces real photographic content matching prompt on RTX 3060 ([FluxVulkanGenerationTest.cs](../../tests/SharpInference.Diffusion.Tests/FluxVulkanGenerationTest.cs)). Two correctness bugs surfaced and fixed during this run — see [PHASE_3_5_DEVIATIONS.md #1, #2](PHASE_3_5_DEVIATIONS.md). Wall-clock ~178 s vs CUDA ~20 s — perf tuning still required.
+- [x] No `weight.DataPointer` regressions — `IBackend` abstraction held cleanly; diffusion package required zero source changes
 
 ## 5. Testing & Validation
 
@@ -139,27 +139,28 @@ The whole point of `IBackend` is that the diffusion package needs **zero changes
 
 For every kernel: dispatch on Vulkan, dispatch on CPU, compare element-wise within tolerance from [SPIRV_COMPUTE_SHADERS.md](../Research/SPIRV_COMPUTE_SHADERS.md#validation-tolerances).
 
-- [ ] `Add_Vs_Cpu_F32` / `_F16`
+- [x] `Add_Vs_Cpu_F32` (`Backend_Add_Matches_Cpu`) — F16 variant still pending
 - [ ] `Mul_Vs_Cpu_F32` / `_F16`
 - [ ] `Scale_Vs_Cpu_F32` / `_F16`
-- [ ] `Silu_Vs_Cpu`
+- [x] `Silu_Vs_Cpu` (`Backend_Silu_Matches_Reference`)
 - [ ] `Gelu_Vs_Cpu`
 - [ ] `Transpose2D_Vs_Cpu`
 - [ ] `Permute0213_Vs_Cpu`
-- [ ] `GeGlu_Vs_Cpu` — **multi-row inputs** `[2, 2, 2*D]` mandatory
+- [x] `GeGlu_Vs_Cpu` (`Backend_GeGlu_Matches_Reference`) — multi-row coverage needs verification
 - [ ] `BroadcastAdd_Vs_Cpu`
 - [ ] `GroupNorm_Vs_Cpu` — 32-group, FP16 accumulate-FP32
 - [ ] `GroupNormSilu_Vs_Cpu` — fused
-- [ ] `LayerNorm_Vs_Cpu`
+- [x] `LayerNorm_Vs_Cpu` (`Backend_LayerNorm_Matches_Reference`)
+- [x] `RmsNorm_Vs_Cpu` (`Backend_RmsNorm_Matches_Reference`) — *added beyond original plan*
 - [ ] `Softmax_Vs_Cpu` — long-row stability test (4096 elements)
 - [ ] `Im2Col_Vs_Cpu` — 64×64, 256×256, **1024×1024** (regression for 64-bit indexing)
 - [ ] `Col2BiasAdd_Vs_Cpu`
 - [ ] `Upsample_Vs_Cpu`
-- [ ] `Cast_F32_F16_Vs_Cpu`, `Cast_F8E4M3_F16_Vs_Cpu`
-- [ ] `MatMul_Vs_Cpu` — square (256, 512, 1024), rectangular (1024 × 768), all transpose combos
-- [ ] `Linear_Vs_Cpu` — bias on/off
+- [x] `Cast_F8E4M3_F16_Vs_Cpu` (`Backend_FP8_Cast_Matches_Cpu_AllBytes`) — F32↔F16 cast tests still pending
+- [x] `MatMul_Vs_Cpu` — partial: `Backend_MatMul_Matches_Cpu_Reference`, `Backend_MatMul_F16_Roundtrip`, `Backend_MatMul_LargeFp16_Matches_Cpu`. Full transpose-combo matrix still pending.
+- [x] `Linear_Vs_Cpu` — `Backend_Linear_FluxShape_F32_Matches_Cpu`. Bias-off + F16 variants still pending.
 - [x] `Conv2D_Vs_Cpu` — 1×1, 3×3, stride 1 + 2, pad 0 + 1
-- [ ] `Sdpa_Vs_Cpu` — small (64×64×64) and large (1024×64×64)
+- [x] `Sdpa_Vs_Cpu` — `Backend_SDPA_MultiHead_Matches_Cpu_Reference` + `Backend_SDPA_FluxShape_AllHeads_Match_Cpu` (H=24, S=64, D=128 — caught the auto-flush UAF, see [PHASE_3_5_DEVIATIONS.md #2](PHASE_3_5_DEVIATIONS.md))
 
 ### Cross-backend consistency (`VulkanVsCudaTests`) — runs only on dual-GPU box
 

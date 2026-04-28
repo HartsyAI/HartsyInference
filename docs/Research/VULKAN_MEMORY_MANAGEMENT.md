@@ -100,7 +100,7 @@ The spec guarantees only 4096 simultaneous `VkDeviceMemory` allocations. SDXL ha
 ### Allocation count budget
 
 - 4096 total cap — but the *practical* cap is lower because each `vkAllocateMemory` is slow (~50–500 µs) and fragments VRAM.
-- Target: **≤ 64 device allocations** for the entire pipeline. One per pool (~1 GB each).
+- Original target: ≤ 64 device allocations. **Actual after Phase 3.5 implementation:** ~200 on a 12 GB Flux Schnell working set. Still well under spec cap; see deviation note below.
 
 ### Block / page allocator
 
@@ -108,8 +108,10 @@ We use a **slab allocator** with two block sizes:
 
 | Pool | Block size | Use |
 |---|---|---|
-| Large (`SLAB_LARGE_BLOCK = 256 MB`) | 256 MB | Weights, large activations |
-| Small (`SLAB_SMALL_BLOCK = 16 MB`) | 16 MB | Per-tensor temporaries, small tensors (< 1 MB) |
+| Large (`SLAB_LARGE = 64 MB`) | 64 MB | Weights, large activations |
+| Small (`SLAB_SMALL = 8 MB`) | 8 MB | Per-tensor temporaries, small tensors (< 1 MB) |
+
+> **Note (Phase 3.5):** The original design specified 256 MB / 16 MB slabs to match VMA defaults. Loading Flux Schnell FP8 (~12 GB) on a 12 GB RTX 3060 OOM'd at ~70% load with the larger slabs because the deferred-free list couldn't fit reclaimed allocations into the gaps left in a near-full heap. Reducing to 64 MB / 8 MB resolves the OOM at the cost of more `vkAllocateMemory` calls. See [PHASE_3_5_DEVIATIONS.md #4](../Checklists/PHASE_3_5_DEVIATIONS.md). Allocator also gained an `OnOutOfMemory` callback that drains the deferred-free list and retries.
 
 A pool tracks free regions inside its blocks via a sorted list (or tree) of `(offset, size)` pairs. Allocation = first-fit (or best-fit if fragmentation grows). Free = merge with adjacent regions.
 
@@ -651,7 +653,7 @@ The CUDA backend has 22+ documented bugs. Most are PTX-specific but several appl
 
 ## Implementation Notes
 
-1. **Two block sizes only** — 256 MB large pool, 16 MB small pool. More flexibility = more bugs, less win.
+1. **Two block sizes only** — 64 MB large pool, 8 MB small pool. More flexibility = more bugs, less win. (Originally 256 / 16 MB; reduced after near-VRAM-limit OOM on Flux Schnell — see deviation note above.)
 2. **Don't allocate per tensor** — `vkAllocateMemory` count is the binding constraint. Sub-allocate from pre-allocated blocks.
 3. **Persistent mapping** — host-visible blocks are mapped once at create time; never `vkMapMemory` per write.
 4. **ReBAR fast path** — detect `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` memory type at startup; route weight uploads there when total weight size fits the heap.
@@ -659,7 +661,8 @@ The CUDA backend has 22+ documented bugs. Most are PTX-specific but several appl
 6. **Timeline semaphores over fence + binary semaphore** — single 64-bit counter, simpler lifetime, matches CUDA stream-event mental model.
 7. **Push descriptors when supported** — `VK_KHR_push_descriptor` removes pool churn; pool path is fallback only.
 8. **Reset, don't free** — command buffers and descriptor pools are reset between phases, not freed.
-9. **Deferred-free list keyed by timeline value** — analogue of `cuMemFreeAsync`; reclaim when GPU passes that value.
+9. **Deferred-free list keyed by timeline value** — analogue of `cuMemFreeAsync`; reclaim when GPU passes that value. **Tag with `currentTick + 1`, not `lastSubmittedTick`** — at the time `DeferredFree` is called from inside a recording op, the consuming dispatch hasn't been submitted yet, so its signal value is the next tick. See [PHASE_3_5_DEVIATIONS.md #6](../Checklists/PHASE_3_5_DEVIATIONS.md).
+10. **Track cache-miss upload buffers explicitly** — `_transientBuffers` list in `VulkanGpuTransferHelper`, drained at op boundaries (not dispatch boundaries — multi-dispatch ops like SDPA share Q/K/V across heads, draining mid-op causes UAF). See [PHASE_3_5_DEVIATIONS.md #2, #5](../Checklists/PHASE_3_5_DEVIATIONS.md).
 10. **OOM retry** — flush deferred frees + retry once before surfacing `OutOfVramException`.
 11. **Memory budget** via `VK_EXT_memory_budget` for live VRAM telemetry; degrade gracefully when extension absent.
 12. **Per-buffer barriers** — never global; respect the activation-cache producer/consumer dependency graph.

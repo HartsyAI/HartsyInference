@@ -428,3 +428,90 @@ All scripts in `tests/python-reference/` using venv at `tests/python-reference/.
 | `dump_layer_outputs.py` | Per-layer model outputs with index.json |
 | `dump_attn_sublayers.py` | Sub-operation breakdown of first CrossAttentionBlock |
 | `compare_layers.py` | Utility for comparing binary tensor files |
+
+---
+
+## Phase 4 — Z-Image Deviations
+
+### 25. Z-Image Single-File Naming Differs From Diffusers Reference
+
+**Problem**: Initial implementation followed the diffusers naming spec (`all_x_embedder.2-1`, `all_final_layer.2-1`, separate `to_q/to_k/to_v` per attention) but the SwarmUI single-file FP8Mix checkpoint and the official Tongyi diffusers index use simpler, fused names. Loading with the diffusers-spec keys would `KeyNotFoundException` on every transformer block.
+
+**Discovery method**: Read the safetensors header with `python3 -c 'import json,struct; ...'` and grouped keys by prefix. Saw `attention.qkv.weight` `[11520, 3840]` (fused), `attention.out.weight`, `attention.{q_norm,k_norm}`, `x_embedder.{weight,bias}`, `final_layer.{adaLN_modulation.1,linear}.*` — all different from what the C# code expected. Also discovered each FP8 weight has companion `.weight_scale` (F32 scalar) and `.comfy_quant` (U8 metadata blob) — the ComfyUI fp8_scaled format.
+
+**Fix**: Rewrote `ZImageBlock` and `ZImageContextRefinerBlock` to load `attention.qkv.weight` as one fused `[3*hidden, hidden]` tensor and split Q/K/V at runtime in `SplitQkv`. Renamed loaders for `attention.out`, `attention.q_norm`, `attention.k_norm`. Updated `ZImageTransformer` for `x_embedder.*` and `final_layer.*` (no patch suffix). `ZImageCheckpointConverter` now folds `.weight_scale` into `Tensor.Fp8ScaleFactor` (cf. deviation #24) and drops `.comfy_quant` keys.
+
+**Lesson**: Always inspect the actual safetensors header before writing the loader. The diffusers source naming is canonical for the Python class, but **single-file checkpoints distributed by SwarmUI / ComfyUI / BFL routinely simplify naming** — fused QKV, no patch-size suffix, different scale-companion key names. Header inspection takes 10 seconds; debugging mismatched keys takes hours.
+
+### 26. Z-Image PadCaption / PadImage No-Op Disposal
+
+**Problem**: `PadCaption` and `PadImage` return the input tensor unchanged when `paddedLen == realLen` (already at the multiple-of-32 boundary). The caller did `capProjected.Dispose()` after `capPadded = PadCaption(capProjected, ...)` — disposing the still-aliased `capPadded` along with it. Next op got `ObjectDisposedException`.
+
+**Fix**: Added `if (!ReferenceEquals(capPadded, capProjected)) capProjected.Dispose();` guards to all three pad/trim sites in `ZImageTransformer.Forward`.
+
+**Lesson**: Pass-through helpers that *might* allocate are disposal traps. Either always allocate (so the caller's disposal pattern works), or guard with `ReferenceEquals` at the call site. The same pattern applies to any `if (x_already_correct) return x;` early-return helper.
+
+### 27. Z-Image Pipeline Semantic Bugs (Eight Deviations From Diffusers)
+
+**Problem**: First end-to-end run produced pure colored static. After fixes 25 and 26 the pipeline ran clean for 8 NFE but the output was noise. Comparing line-by-line against `huggingface/diffusers/src/diffusers/{models/transformers/transformer_z_image.py, pipelines/z_image/pipeline_z_image.py}` revealed eight semantic deviations from diffusers — every one of them shifted the output measurably, in roughly this order of magnitude:
+
+1. **Pipeline must negate the transformer output** (`noise_pred = -noise_pred`) before the flow-match Euler step. Without it, integration runs in the noise-direction and output is pure RGB static. (Diffusers flow-match Euler uses `x_next = x + dt * noise_pred` with `dt = sigma_next - sigma < 0`, so the negation gives `x + |dt| * v` — descent in the +v direction. **Without** the negation we ascend.)
+2. **Sequence concat order is `[image, caption]`, not `[caption, image]`**. Per `transformer_z_image.py` line 859 (`unified.append(torch.cat([x[i][:x_len], cap[i][:cap_len]]))`). Affects both attention pattern and which slice we take after the main blocks.
+3. **Gates pass through `tanh()`**: `gate_msa = mod[1].tanh()` and `gate_mlp = mod[3].tanh()`. Without this, gates blow up at init and the modulated residuals dominate the signal.
+4. **Patchify inner-dim order is `[pH, pW, C]` (channel last/fastest), not `[C, pH, pW]`**. Diffusers permutation is `permute(1, 3, 5, 2, 4, 6, 0)` on `[C, F_tokens, pF, H_tokens, pH, W_tokens, pW]` → `[F, H, W, pF, pH, pW, C]`. `Unpatchify` mirrors this (permute(6, 0, 3, 1, 4, 2, 5)).
+5. **Position IDs are not all-zero for caption**. Caption tokens get pos_start `(1, 0, 0)` with grid `(capRealLen, 1, 1)` — i.e. frame-axis runs `1..capRealLen`. Image tokens get pos_start `(capRealLen+1, 0, 0)` with grid `(1, hPacked, wPacked)` — same frame for all image tokens, varying h/w. Pad slots stay `(0,0,0)` (overwritten via `where(mask, pad, feat)` semantics).
+6. **Timestep is inverted**. Pipeline computes `t = (1000 - sigma_in_0_to_1000) / 1000 = 1 - sigma`, then transformer multiplies by `t_scale=1000` internally for the sinusoidal embedding. Without this, the model conditions on the OPPOSITE point in the schedule at every step.
+7. **Final-layer `norm_final` is `LayerNorm(elementwise_affine=False, eps=1e-6)`**, not RMSNorm and not eps=1e-5 (which is `_config.NormEps`). Use the literal 1e-6 here.
+8. **Final-layer modulation is scale-only, single chunk**. The checkpoint shape is `[hidden, ADALN_EMBED_DIM] = [3840, 256]` (one output) — formula is `out = norm(x) * (1 + scale)`, no shift, no gate. Lumina2's stock NextDiT outputs 2*hidden (scale+shift); Z-Image diverges by removing the shift.
+
+**Status**: After all eight fixes, output went from pure noise → blobby colored regions → recognizable central humanoid silhouette with heavy high-frequency glitch banding (~80% coherent). Pipeline plumbing is now correct end-to-end; remaining glitch artifacts likely come from one of: (a) attention-mask not enforced for pad slots (pad tokens currently participate fully in attention), (b) RoPE phase convention mismatch for the consecutive-pair complex multiplication, (c) dynamic-vs-static scheduler shift mismatch (config says static 3.0, diffusers pipeline may compute dynamic shift via `calculate_shift` like Flux). Further binary-comparison debugging vs a Python reference run is the remaining work.
+
+**Lesson**: For DiT models with a flow-match scheduler, an end-to-end pipeline can produce pure noise from any single one of these bugs — sign flip, wrong position IDs, wrong patchify, wrong timestep, missing tanh, wrong concat order. Each fix moves the output a step closer (noise → static → blobs → bands → silhouette), and you need them ALL to converge. Build a diagnostic run that dumps at least: caption embeddings stats, transformer-output stats per step, final latent before VAE, decoded RGB stats. Compare every one of those against a Python reference run at the same seed before suspecting your VAE or your CUDA backend. The deviations are almost always in the new model's pipeline plumbing.
+
+### 28. Z-Image Context-Refiner Was Missing RoPE (THE root cause of the glitch banding)
+
+**Discovery method**: Built a layer-by-layer F32 binary diff against the diffusers reference. `tests/python-reference/dump_zimage_full_forward.py` runs `ZImageTransformer2DModel.from_pretrained('Tongyi-MAI/Z-Image-Turbo')` on deterministic synthetic inputs (`torch.manual_seed(42)`, latent `[1,16,32,32]`, caption `[1,64,2560]`, sigma=0.5) and hooks every embedder, refiner, main block, and the final layer to dump 38 F32 tensors. The C# side (`ZImageDiffTests.Transformer_Matches_PythonReference_LayerByLayer`) loads the diffusers BF16 shards, fuses to_q/to_k/to_v into the C# fused-qkv layout, and runs Forward on the SAME bytes via the CPU backend with `Z_IMAGE_DEBUG_DIR` set so each layer dumps at the matching name. Then `diff_zimage_layers.py` prints |ref − cs| stats per layer.
+
+The first run showed:
+
+```
+t_embedder         8.270e-09   <-- noise floor
+x_embedder         2.757e-08
+noise_refiner.0    3.057e-08
+noise_refiner.1    3.252e-08
+cap_embedder       7.754e-08
+context_refiner.0  1.493e-01   <-- BUG (jump of 7 orders of magnitude)
+context_refiner.1  2.101e-01
+layers.0           4.314e-02   (compounding)
+... rest contaminated
+```
+
+Noise_refiner being clean while context_refiner blew up was the smoking gun: both blocks share the same architecture, but `noise_refiner` had `ZImageRope` wired up (image tokens) while `context_refiner` had no rope arg at all.
+
+**Root cause**: In diffusers, `ZImageTransformerBlock` takes `freqs_cis` regardless of the `modulation` flag — `ZSingleStreamAttnProcessor` always applies `apply_rotary_emb(query/key, freqs_cis)` if non-null. The block class is reused for context_refiner, noise_refiner, and main `layers` — **all three apply RoPE**. The C# implementation split the modulation case into two classes (`ZImageContextRefinerBlock` for modulation=False, `ZImageBlock` for modulation=True), and the context_refiner variant simply omitted the rope plumbing.
+
+Why noise_refiner was clean despite my noise_refiner using `BuildImagePositionIds` with `frame=1` instead of diffusers' `frame=cap_padded_len+1`: image-only attention with all tokens sharing the same frame index is rotation-invariant — the per-token rotation `R` cancels in `softmax((R·Q)(R·K)ᵀ) = softmax(QKᵀ)`. So the constant offset doesn't matter for image-only attention. (It DOES matter for cross-attention in the main layers — see fix 5 in deviation 27.)
+
+Why context_refiner couldn't tolerate this: caption tokens have **per-token frame indices** `1..capPaddedLen` along axis 0 (h=w=0). Different positions → different rotations → attention scores depend on relative position. Without RoPE, every caption token attends as if from the same point — losing all positional structure.
+
+**Fix**:
+1. Added `ZImageRope.BuildCaptionPositionIds(capPaddedLen)` returning `[(1,0,0), (2,0,0), …, (capPaddedLen,0,0)]`.
+2. Added a `ZImageRope?` parameter to `ZImageContextRefinerBlock.Forward` and applied it before SDPA, mirroring `ZImageBlock`.
+3. `ZImageTransformer.Forward` now builds a separate `captionRope` (caption positions only) and passes it to every context_refiner block. The full-sequence `_rope` is still built later for the main layers.
+
+After the fix, the diff ran clean end-to-end — every layer 1e-7 to 1e-4 (F32 numerical accumulation):
+
+```
+t_embedder         8.270e-09
+x_embedder         2.757e-08
+noise_refiner.0    3.057e-08
+cap_embedder       7.754e-08
+context_refiner.0  2.782e-07   <-- now matches reference
+context_refiner.1  4.391e-07
+layers.0           1.226e-07
+... clean through layers.29
+```
+
+**Also fixed in this round** — `BuildPositionIds` was using `capRealLen+1` for the image frame and `1..capRealLen` for caption frames. Diffusers uses `capPaddedLen+1` and `1..capPaddedLen` (every caption slot, real + pad, gets a position). The synthetic test masked this because `capRealLen == capPaddedLen` for a 64-token caption, but real prompts will hit the difference. Updated the signature to drop `capRealLen` (no longer needed); caller passes `capPaddedLen` only.
+
+**Lesson**: When porting a transformer where the same block class is reused with different module flags (modulation=True/False, with/without cross-attention, etc.), do NOT split it into separate C# classes that share architecture by accident. The diffusers `ZImageTransformerBlock` was the same class used in 3 places — context_refiner / noise_refiner / layers — and **all three branches** of the original code-path inherit the same `freqs_cis` / `attention_mask` / `processor` plumbing. Carving the modulation case into a separate class encouraged me to "clean up" the rope plumbing for the simpler path. The simpler path needed the rope just as much. Either keep the unified block (dispatch on a runtime flag), or after splitting, run a layer-by-layer diff to catch what the split silently dropped.
