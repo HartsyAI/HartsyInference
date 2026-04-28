@@ -137,15 +137,41 @@ public sealed class VulkanBackend : IBackend
         _stream.RecordGlobalComputeBarrier();
 
         _dispatchesSinceSubmit++;
-        if (_dispatchesSinceSubmit >= FLUSH_THRESHOLD)
+        // CRITICAL: do NOT drain transients here. Multi-dispatch ops like SDPA (24 heads × 3
+        // dispatches) reference the same Q/K/V upload buffers across many dispatches. Draining
+        // mid-op would tag those buffers for deferred-free, then the next flush completes them
+        // and the buffers get vkDestroy'd while later heads' descriptor sets still reference
+        // them — silent garbage output for heads beyond the first ~2.
+        // Transient drain is now done explicitly at op boundaries via DrainAndFlush.
+        if (_dispatchesSinceSubmit >= FLUSH_THRESHOLD && _opNestingDepth == 0)
         {
-            // Submit + wait so deferred-free buffers can be reclaimed. Drain any transient (uncached)
-            // upload buffers from CopyToDevice — they must be released to the slab pool so streamed
-            // weights don't pile up.
-            _xfer.DrainTransients();
-            _stream.WaitIdleHost();
-            _dispatchesSinceSubmit = 0;
+            DrainAndFlush();
         }
+    }
+
+    /// <summary>Tracks whether we're currently inside a backend op. While >0, auto-flush is suppressed
+    /// because draining transients mid-op would free buffers still referenced by later dispatches in
+    /// the same op (e.g. SDPA's per-head loop sharing Q/K/V uploads).</summary>
+    private int _opNestingDepth;
+
+    private OpScope EnterOp() => new(this);
+    private readonly struct OpScope : IDisposable
+    {
+        private readonly VulkanBackend _b;
+        public OpScope(VulkanBackend b) { _b = b; b._opNestingDepth++; }
+        public void Dispose()
+        {
+            _b._opNestingDepth--;
+            if (_b._opNestingDepth == 0)
+                _b.DrainAndFlush();
+        }
+    }
+
+    private void DrainAndFlush()
+    {
+        _xfer.DrainTransients();
+        _stream.WaitIdleHost();
+        _dispatchesSinceSubmit = 0;
     }
 
     /// <summary>Promotes a freshly-allocated GPU buffer to the activation cache (so the next op finds it via reference equality on the Tensor).</summary>
@@ -233,11 +259,13 @@ public sealed class VulkanBackend : IBackend
     /// <summary>Matrix multiply: output[M,N] = a[M,K] @ b[K,N]. Falls back to FP32 kernel if either input is FP32.</summary>
     public void MatMul(Tensor output, Tensor a, Tensor b)
     {
+        using OpScope _ = EnterOp();
         DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
     }
 
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
+        using OpScope _ = EnterOp();
         // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
         DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
     }
@@ -295,11 +323,14 @@ public sealed class VulkanBackend : IBackend
         }
         K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
 
-        // Pick GEMM dtype: F16 if both A and B are F16; otherwise F32.
-        DType gemmDtype = (a.DType == DType.F16 && b.DType == DType.F16 && Capabilities.SupportsF16)
-            ? DType.F16 : DType.F32;
-        // FP8 inputs are handled by casting up to F16
-        if (a.DType.IsFp8 || b.DType.IsFp8) gemmDtype = DType.F16;
+        // Pick GEMM dtype to MATCH the output's storage dtype — otherwise the matmul kernel writes
+        // a smaller element type (e.g. F16) into an F32-sized buffer and the model reads garbage
+        // when it interprets the bytes as F32. The model's choice of output dtype dictates the
+        // pipeline. F8 inputs always need to be cast (no F8 matmul kernel); cast all the way to
+        // the output dtype, not just to F16.
+        DType gemmDtype = output.DType;
+        if (gemmDtype.IsFp8) gemmDtype = DType.F16;
+        if (gemmDtype == DType.F16 && !Capabilities.SupportsF16) gemmDtype = DType.F32;
 
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
@@ -390,6 +421,7 @@ public sealed class VulkanBackend : IBackend
 
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
+        using OpScope _ = EnterOp();
         int batch = (int)input.Shape[0];
         int inCh = (int)input.Shape[1];
         int inH = (int)input.Shape[2];
@@ -400,8 +432,10 @@ public sealed class VulkanBackend : IBackend
         int outH = (inH + 2 * padH - kH) / strideH + 1;
         int outW = (inW + 2 * padW - kW) / strideW + 1;
 
-        DType gemmDtype = (input.DType == DType.F16 && weight.DType == DType.F16 && Capabilities.SupportsF16)
-            ? DType.F16 : DType.F32;
+        // GEMM dtype must match output's storage dtype (see DispatchMatmul note).
+        DType gemmDtype = output.DType;
+        if (gemmDtype.IsFp8) gemmDtype = DType.F16;
+        if (gemmDtype == DType.F16 && !Capabilities.SupportsF16) gemmDtype = DType.F32;
 
         VulkanBuffer inBuf = GetBuffer(input);
         VulkanBuffer wBuf = GetBuffer(weight);
@@ -679,6 +713,7 @@ public sealed class VulkanBackend : IBackend
     /// <summary>Naive 3-pass SDPA. Q*K^T -> mask add -> softmax -> *V dispatched once per (B*H) head with base offsets. FlashAttention-style is a Phase-4 optimization.</summary>
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
+        using OpScope _ = EnterOp();
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
 
@@ -689,8 +724,11 @@ public sealed class VulkanBackend : IBackend
         long Skv = key.Shape[2];
         long totalHeads = B * H;
 
-        // Resolve dtype: keep matching input dtype (F16 or F32). FP8 inputs cast to F16.
-        DType dtype = query.DType.IsFp8 ? DType.F16 : query.DType;
+        // Resolve dtype: must match output's storage dtype so the SDPA matmul writes match the
+        // model's expected element size. FP8 inputs cast to F16 first.
+        DType dtype = output.DType;
+        if (dtype.IsFp8) dtype = DType.F16;
+        if (dtype == DType.F16 && !Capabilities.SupportsF16) dtype = DType.F32;
 
         VulkanBuffer qBuf = GetBuffer(query);
         VulkanBuffer kBuf = GetBuffer(key);
@@ -715,9 +753,12 @@ public sealed class VulkanBackend : IBackend
             maskTotalSize = mask.ElementCount;
         }
 
-        // Scratch: scores [B, H, Sq, Skv]  in dtype
+        // Scratch: scores [B, H, Sq, Skv] for raw QK^T, probsBuf for softmax output (separate
+        // buffer to avoid same-binding aliasing in the softmax shader, which has readonly+writeonly
+        // bindings and would produce undefined results when src==dst).
         ulong scoresElems = (ulong)(totalHeads * Sq * Skv);
         VulkanBuffer scoresBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
+        VulkanBuffer probsBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
 
         // Output buffer (dtype)
         ulong outElems = (ulong)(B * H * Sq * D);
@@ -754,12 +795,12 @@ public sealed class VulkanBackend : IBackend
                         (uint)maskBroadcastSize, scoreOffset: sOff, maskOffset: maskOff);
                 }
 
-                // 2) softmax along last dim per row of scores  →  same shape, in-place
-                DispatchSoftmaxRows(scoresBuf.Handle, scoresBuf.Handle, dtype, (int)Skv, (int)Sq, sOff, sOff);
+                // 2) softmax along last dim per row of scores  →  probsBuf (separate output)
+                DispatchSoftmaxRows(scoresBuf.Handle, probsBuf.Handle, dtype, (int)Skv, (int)Sq, sOff, sOff);
 
-                // 3) out_head = scores @ V  →  shape (Sq, D)
+                // 3) out_head = probs @ V  →  shape (Sq, D)
                 DispatchMatmulWithOffsets(
-                    scoresBuf.Handle, vRes.Handle, outBufLocal.Handle,
+                    probsBuf.Handle, vRes.Handle, outBufLocal.Handle,
                     Sq, D, Skv,
                     transposeA: false, transposeB: false,
                     alpha: 1.0f, beta: 0.0f,
@@ -805,6 +846,7 @@ public sealed class VulkanBackend : IBackend
         finally
         {
             _xfer.FreeDevice(scoresBuf);
+            _xfer.FreeDevice(probsBuf);
             // q/k/v/mask are transients (or cached) and drained by the next flush.
             if (qOwned is not null) _xfer.FreeDevice(qOwned);
             if (kOwned is not null) _xfer.FreeDevice(kOwned);
@@ -1209,31 +1251,24 @@ public sealed class VulkanBackend : IBackend
 
     public unsafe void CastToF16(Tensor output, Tensor input)
     {
-        if (input.DType == DType.F32 && output.DType == DType.F16)
+        if ((input.DType == DType.F32 || input.DType == DType.F8E4M3) && output.DType == DType.F16)
         {
             VulkanBuffer src = GetBuffer(input);
-            ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-            VulkanBuffer dst = _xfer.AllocateDevice(outBytes);
-            try
-            {
-                VulkanKernel k = GetKernel("cast_f32_f16", 2,
-                    stackalloc SpecConstant[] {
-                        SpecConstant.UInt(0, LOCAL_X_1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
-                    });
-                Span<byte> pc = stackalloc byte[4]; BinaryWriteUInt(pc, 0, (uint)input.ElementCount);
-                Span<ulong> bufs = stackalloc ulong[] { src.Handle, dst.Handle };
-                Dispatch(k, bufs, pc, GroupCount(input.ElementCount, LOCAL_X_1D));
-                CacheOutput(output, dst);
-            }
-            catch { dst.Dispose(); throw; }
+            (VulkanBuffer cast, _) = CastIfNeeded(input, src, DType.F16);
+            // CastIfNeeded returns owned=cast when a conversion happened; just promote to activation cache.
+            CacheOutput(output, cast);
+            return;
         }
-        else
+
+        // CPU fallback for paths the Vulkan kernel suite doesn't yet cover.
+        if (input.DType == DType.F32 && output.DType == DType.F16)
         {
-            // CPU fallback for non-F32->F16 paths
             float* src = (float*)input.DataPointer;
             Half* dst = (Half*)output.DataPointer;
             for (long i = 0; i < input.ElementCount; i++) dst[i] = (Half)src[i];
+            return;
         }
+        throw new NotSupportedException($"VulkanBackend.CastToF16: {input.DType.Name} -> F16 not implemented.");
     }
 
     public unsafe void CastToF32(Tensor output, Tensor input)

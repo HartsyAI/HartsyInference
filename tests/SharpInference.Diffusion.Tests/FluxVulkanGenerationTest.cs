@@ -177,12 +177,14 @@ public sealed class FluxVulkanGenerationTest
             int[] t5AttentionMask = T5Tokenizer.CreateAttentionMask(t5TokenIds);
 
             // Schnell: 4 steps, no CFG, 512×512 — direct comparison with CUDA reference image.
+            // Override via env var for debugging — e.g. FLUX_VULKAN_STEPS=1 isolates first-pass issues.
+            int steps = int.TryParse(Environment.GetEnvironmentVariable("FLUX_VULKAN_STEPS"), out int s) ? s : 4;
             TextToImageRequest request = new()
             {
                 Prompt = prompt,
                 Width = 512,
                 Height = 512,
-                Steps = 4,
+                Steps = steps,
                 Seed = 42,
             };
 
