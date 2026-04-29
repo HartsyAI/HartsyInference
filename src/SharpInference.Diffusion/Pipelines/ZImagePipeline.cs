@@ -144,7 +144,7 @@ public sealed unsafe class ZImagePipeline : IDisposable
             p[i] = -p[i];
     }
 
-    /// <summary>combined = uncond + cfg * (cond - uncond) — standard CFG combine.</summary>
+    /// <summary>Z-Image CFG combine: <c>combined = pos + cfg * (pos - neg)</c> = <c>(1+cfg)*pos - cfg*neg</c>. NON-STANDARD: most pipelines use <c>uncond + cfg * (cond - uncond)</c>, but Z-Image's diffusers pipeline (<c>pipeline_z_image.py:541</c>) uses pos as the baseline and amplifies the (pos - neg) direction. At cfg=4.0 this gives pred = 5*pos - 4*neg, vs the standard 4*pos - 3*neg — a meaningfully different signal.</summary>
     private static void ApplyCfg(Tensor output, Tensor cond, Tensor uncond, float cfg)
     {
         float* condPtr = (float*)cond.DataPointer;
@@ -153,8 +153,8 @@ public sealed unsafe class ZImagePipeline : IDisposable
         long count = output.Shape.ElementCount;
         for (long i = 0; i < count; i++)
         {
-            float u = uncondPtr[i];
-            outPtr[i] = u + cfg * (condPtr[i] - u);
+            float c = condPtr[i];
+            outPtr[i] = c + cfg * (c - uncondPtr[i]);
         }
     }
 

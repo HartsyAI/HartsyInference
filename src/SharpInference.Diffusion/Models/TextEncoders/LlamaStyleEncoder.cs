@@ -39,6 +39,9 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             _blocks[i] = new LlamaBlock(config);
     }
 
+    /// <summary>Number of transformer blocks. Useful for callers that want to request a specific HF-indexed hidden state via <see cref="EncodeMultiLayer"/> (e.g., Z-Image needs <c>NumLayers - 1</c> for diffusers' <c>hidden_states[-2]</c>).</summary>
+    public int NumLayers => _config.NumLayers;
+
     /// <summary>Loads all weights from a HuggingFace-style key dict (keys like <c>model.layers.{i}.self_attn.q_proj.weight</c>). Cast to F32 sites are: token embedding (CPU lookup), RMSNorm scales (CPU pointer code expects float*), per-head q/k norms.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {

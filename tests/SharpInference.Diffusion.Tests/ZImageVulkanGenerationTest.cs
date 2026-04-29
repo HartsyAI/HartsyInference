@@ -1,9 +1,5 @@
 using System.Diagnostics;
-using Xunit;
-using Xunit.Abstractions;
 using SharpInference.Core.Tensors;
-using SharpInference.Cpu;
-using SharpInference.Cuda;
 using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Models.Vae;
@@ -13,16 +9,26 @@ using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
 using SharpInference.Tokenizers;
+using SharpInference.Vulkan;
+using Xunit;
+using Xunit.Abstractions;
 
 namespace SharpInference.Diffusion.Tests;
 
 /// <summary>
-/// End-to-end Z-Image-Turbo generation. Pipeline: prompt → Qwen3-4B encode → ZImageTransformer denoise → Flux VAE decode → BMP.
-/// Z-Image-Turbo is 8 NFE distilled, CFG=1.0 (single forward per step), no negative prompt.
-/// VAE is sourced from a Flux.1 dev checkpoint (Z-Image's vae/config.json says <c>_name_or_path: "flux-dev"</c>).
+/// End-to-end Z-Image-Turbo / Z-Image-Base generation on the Vulkan backend. Mirrors the CUDA
+/// path (<see cref="ZImageGenerationTests"/>) but swaps the backend. Phase 3.5 model-coverage
+/// gate: any model that runs on CUDA should run on Vulkan unchanged via the IBackend abstraction.
+///
+/// Skipped when checkpoints, VAE source, Qwen3 weights, or Vulkan loader are unavailable. Saves
+/// the resulting image to <c>Output/zimage_*_vulkan_*.bmp</c> alongside the CUDA reference.
 /// </summary>
-public sealed class ZImageGenerationTests
+public sealed class ZImageVulkanGenerationTest
 {
+    private readonly ITestOutputHelper _output;
+
+    public ZImageVulkanGenerationTest(ITestOutputHelper output) => _output = output;
+
     private static string PickPath(string envVar, string winPath, string linuxPath)
     {
         string? v = Environment.GetEnvironmentVariable(envVar);
@@ -33,12 +39,11 @@ public sealed class ZImageGenerationTests
     private static readonly string LinuxRepoRoot =
         Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
 
-    private static readonly string ZImageCheckpointPath = PickPath(
+    private static readonly string ZImageTurboCheckpointPath = PickPath(
         "Z_IMAGE_TURBO_PATH",
         @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Z-Image\SwarmUI_Z-Image-Turbo-FP8Mix.safetensors",
         Path.Combine(LinuxRepoRoot, "Models", "SwarmUI_Z-Image-Turbo-FP8Mix.safetensors"));
 
-    /// <summary>Path to a Z-Image-Base single-file checkpoint (e.g. <c>SwarmUI_Z-Image-Base-FP8Mix.safetensors</c> or the diffusers shards combined). Set Z_IMAGE_BASE_PATH to override; the default looks under Models/.</summary>
     private static readonly string ZImageBaseCheckpointPath = PickPath(
         "Z_IMAGE_BASE_PATH",
         @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Z-Image\SwarmUI_Z-Image-Base-FP8Mix.safetensors",
@@ -60,74 +65,59 @@ public sealed class ZImageGenerationTests
 
     private static readonly string Qwen3VocabPath = PickPath(
         "QWEN3_VOCAB_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\qwen3-4b\vocab.json",
+        "",
         Path.Combine(LinuxRepoRoot, "tests", "test-models", "qwen3-4b", "vocab.json"));
 
     private static readonly string Qwen3MergesPath = PickPath(
         "QWEN3_MERGES_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\qwen3-4b\merges.txt",
+        "",
         Path.Combine(LinuxRepoRoot, "tests", "test-models", "qwen3-4b", "merges.txt"));
 
     private static readonly string OutputDir = PickPath(
-        "Z_IMAGE_OUTPUT_DIR",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\Output",
+        "Z_IMAGE_OUTPUT_DIR", "",
         Path.Combine(LinuxRepoRoot, "Output"));
 
-    private readonly ITestOutputHelper _output;
-
-    public ZImageGenerationTests(ITestOutputHelper output) => _output = output;
-
-    /// <summary>
-    /// GPU end-to-end Z-Image-Turbo generation at 512×512, 8 NFE, CFG=1.0. Loads the SwarmUI FP8Mix transformer
-    /// (fused QKV, ComfyUI fp8_scaled), the Flux.1 VAE (extracted from a Flux dev checkpoint), and Qwen3-4B
-    /// as the text encoder. Single forward per step (Turbo is distilled — no CFG).
-    /// </summary>
-    [Fact]
-    public void Turbo_Fp8Mix_GenerateImage_Gpu()
+    private static bool VulkanAvailable()
     {
-        if (!File.Exists(ZImageCheckpointPath))
+        try
         {
-            _output.WriteLine($"SKIPPED: Z-Image checkpoint not found: {ZImageCheckpointPath}");
-            return;
+            using VulkanInstance instance = new();
+            return instance.EnumeratePhysicalDevices().Length > 0;
         }
-        if (!File.Exists(FluxVaeSourcePath))
-        {
-            _output.WriteLine($"SKIPPED: Flux VAE source checkpoint not found: {FluxVaeSourcePath}");
-            return;
-        }
-        if (!File.Exists(Qwen3WeightsPath))
-        {
-            _output.WriteLine($"SKIPPED: Qwen3 weights not found: {Qwen3WeightsPath}");
-            return;
-        }
-        if (!File.Exists(Qwen3VocabPath) || !File.Exists(Qwen3MergesPath))
-        {
-            _output.WriteLine("SKIPPED: Qwen3 tokenizer files not found");
-            return;
-        }
+        catch { return false; }
+    }
 
-        string assemblyDir = Path.GetDirectoryName(typeof(ZImageGenerationTests).Assembly.Location)!;
-        string ptxDir = Path.Combine(assemblyDir, "Ptx");
-        if (!Directory.Exists(ptxDir))
-        {
-            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
-            return;
-        }
+    /// <summary>End-to-end Z-Image-Turbo on Vulkan: 512×512, 8 NFE, CFG=1.0, seed=42.
+    /// Validates that an FP8Mix DiT transformer architecture other than Flux runs unchanged
+    /// through the IBackend abstraction on the Vulkan path.</summary>
+    [Fact]
+    public void Turbo_Fp8Mix_GenerateImage_Vulkan()
+    {
+        if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        if (!File.Exists(ZImageTurboCheckpointPath)) { _output.WriteLine($"SKIPPED: Z-Image-Turbo checkpoint not found: {ZImageTurboCheckpointPath}"); return; }
+        if (!File.Exists(FluxVaeSourcePath)) { _output.WriteLine($"SKIPPED: Flux VAE source not found: {FluxVaeSourcePath}"); return; }
+        if (!File.Exists(Qwen3WeightsPath)) { _output.WriteLine($"SKIPPED: Qwen3-4B weights not found: {Qwen3WeightsPath}"); return; }
+        if (!File.Exists(Qwen3VocabPath) || !File.Exists(Qwen3MergesPath)) { _output.WriteLine("SKIPPED: Qwen3 tokenizer files not found"); return; }
 
         Stopwatch totalSw = Stopwatch.StartNew();
         Stopwatch sw = Stopwatch.StartNew();
 
-        CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+        VulkanBackend backend = new();
+        _output.WriteLine($"[Vulkan device] {backend.Vk}");
 
-        // ── PHASE A: encode prompt with Qwen3-4B, then dispose it before loading Z-Image (memory pressure: 16 GB Qwen3 F32 + 7 GB Z-Image FP8 + activations exceeds 32 GB easily) ──
-        string prompt = "A photograph of an astronaut riding a horse on the moon";
+        const string prompt = "A photograph of an astronaut riding a horse on the moon";
         Tensor captionEmbeddings;
+
+        // PHASE A: Qwen3 encode then dispose. Same memory pattern as the CUDA test —
+        // ~16 GB Qwen3 (cast F32) + ~7 GB transformer FP8Mix exceeds available RAM if both live concurrently.
         {
             sw.Restart();
             _output.WriteLine($"[A1] Loading Qwen3-4B from: {Path.GetFileName(Qwen3WeightsPath)}");
             using SafeTensorsLoader qwenLoader = new();
             qwenLoader.Load(Qwen3WeightsPath);
             Dictionary<string, Tensor> qwenWeights = qwenLoader.GetAllTensors();
+            // Vulkan backend doesn't yet support BF16 weights — pre-cast Qwen3 BF16 → F32 (matches the CUDA
+            // Turbo test). Trades RAM for backend simplicity until BF16 lands as a Phase-4 work item.
             Dictionary<string, Tensor> qwenF32 = new(qwenWeights.Count);
             foreach (KeyValuePair<string, Tensor> kvp in qwenWeights)
                 qwenF32[kvp.Key] = kvp.Value.DType == DType.F32 ? kvp.Value : kvp.Value.CastTo(DType.F32);
@@ -135,9 +125,6 @@ public sealed class ZImageGenerationTests
             qwenEncoder.LoadWeights(qwenF32);
             _output.WriteLine($"  Qwen3-4B loaded in {sw.ElapsedMilliseconds}ms");
 
-            // Z-Image's diffusers pipeline applies a chat template and uses penultimate hidden state.
-            // Without these the model gets the wrong text distribution and outputs glitched images.
-            // See pipeline_z_image.py:213-240 — `apply_chat_template(...)` + `hidden_states[-2]`.
             using Qwen3Tokenizer tok = new(Qwen3VocabPath, Qwen3MergesPath, maxLength: 256);
             int[] tokenIds = tok.EncodeChat(prompt);
             int[] mask = Qwen3Tokenizer.CreateAttentionMask(tokenIds);
@@ -146,38 +133,28 @@ public sealed class ZImageGenerationTests
             _output.WriteLine($"[A2] Chat-templated prompt — real tokens: {realLen} of {tokenIds.Length}");
 
             sw.Restart();
-            _output.WriteLine("[A3] Encoding prompt with Qwen3-4B (penultimate hidden state) ...");
-            // hidden_states[-2] in HF terms = output of layer NumLayers-2 = hfLayerIndex (NumLayers-1).
+            _output.WriteLine("[A3] Encoding prompt with Qwen3-4B (penultimate hidden state)...");
             int penultimateHfIndex = qwenEncoder.NumLayers - 1;
             Tensor encodedFull = qwenEncoder.EncodeMultiLayer(backend, [tokenIds], [penultimateHfIndex]);
             backend.Sync();
-            // encodedFull is [1, maxLength, 2560]. Filter to real-token-only [1, realLen, 2560]
-            // — diffusers does `prompt_embeds[i][prompt_masks[i]]` which drops pad slots.
             captionEmbeddings = SliceFirstSeq(encodedFull, realLen);
             encodedFull.Dispose();
             _output.WriteLine($"  Caption embeddings: shape={captionEmbeddings.Shape}, dtype={captionEmbeddings.DType}, in {sw.ElapsedMilliseconds}ms");
-            LogTensorStats("captionEmbeddings", captionEmbeddings);
 
-            // Force Qwen3 weights to drop. Cast tensors hold heap-allocated F32 buffers — disposing the
-            // F32 dict and the encoder lets ~16 GB go before we load the transformer.
             qwenEncoder.Dispose();
-            foreach (Tensor t in qwenF32.Values)
-                t.Dispose();
+            foreach (Tensor t in qwenF32.Values) t.Dispose();
             qwenF32.Clear();
-            // qwenWeights holds the original mmap-borrowed tensors; the loader's Dispose will release them.
         }
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        _output.WriteLine($"  After Qwen3 dispose: free ≈ {GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024 * 1024)} GB");
 
-        // ── PHASE B: load Z-Image transformer + VAE ──
+        // PHASE B: Z-Image transformer + Flux VAE
         sw.Restart();
-        _output.WriteLine($"[B1] Loading Z-Image checkpoint: {Path.GetFileName(ZImageCheckpointPath)}");
+        _output.WriteLine($"[B1] Loading Z-Image-Turbo checkpoint: {Path.GetFileName(ZImageTurboCheckpointPath)}");
         (ZImageCheckpointConverter.ConvertedWeights zConv, SafeTensorsLoader zLoader) =
-            ZImageCheckpointConverter.LoadAndConvert(ZImageCheckpointPath);
+            ZImageCheckpointConverter.LoadAndConvert(ZImageTurboCheckpointPath);
         _output.WriteLine($"  Loaded in {sw.ElapsedMilliseconds}ms — Transformer keys: {zConv.Transformer.Count}, FP8Mix={zConv.IsFp8Mix}");
-        LogDTypeDistribution("Z-Image Transformer", zConv.Transformer);
 
         using (zLoader)
         {
@@ -195,7 +172,7 @@ public sealed class ZImageGenerationTests
             };
 
             sw.Restart();
-            _output.WriteLine("[B2] Building ZImageTransformer + loading weights...");
+            _output.WriteLine("[B2] Building ZImageTransformer + loading weights (FP8 native)...");
             ZImageTransformer transformer = new(zConfig);
             transformer.LoadWeights(zConv.Transformer);
             _output.WriteLine($"  Transformer loaded in {sw.ElapsedMilliseconds}ms");
@@ -211,7 +188,7 @@ public sealed class ZImageGenerationTests
                 vaeDecoder.LoadWeights(vaeF32);
                 _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms");
 
-                _output.WriteLine("[B4] Generating image (512×512, 8 NFE, CFG=1.0)...");
+                _output.WriteLine("[B4] Generating image (512×512, 8 NFE, CFG=1.0, Vulkan)...");
                 ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, zConfig);
                 TextToImageRequest request = new()
                 {
@@ -233,7 +210,7 @@ public sealed class ZImageGenerationTests
                 _output.WriteLine($"Generation done in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
                 Directory.CreateDirectory(OutputDir);
-                string outputPath = Path.Combine(OutputDir, $"zimage_turbo_{width}x{height}_s{request.Steps}_seed{seed}.bmp");
+                string outputPath = Path.Combine(OutputDir, $"zimage_turbo_vulkan_{width}x{height}_s{request.Steps}_seed{seed}.bmp");
                 ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
                 _output.WriteLine($"Saved: {outputPath}");
 
@@ -247,77 +224,60 @@ public sealed class ZImageGenerationTests
 
                 captionEmbeddings.Dispose();
                 pipeline.Dispose();
-                transformer.Dispose();
-                backend.Dispose();
+                foreach (Tensor t in vaeF32.Values) t.Dispose();
             }
+            foreach (Tensor t in zConv.Transformer.Values) t.Dispose();
         }
+        backend.Dispose();
     }
 
-    /// <summary>
-    /// GPU end-to-end Z-Image-Base generation at 1024×1024, 28 steps, CFG=4.0 with a negative prompt. Architecturally
-    /// identical to Turbo but un-distilled — uses standard CFG (two forwards per step: cond + uncond) and a static
-    /// scheduler shift of 6.0 (Turbo uses 3.0). Same checkpoint converter, transformer, VAE, and Qwen3 encoder paths.
-    /// Set Z_IMAGE_BASE_PATH to point at a Base single-file checkpoint.
-    /// </summary>
+    /// <summary>End-to-end Z-Image-Base on Vulkan: 1024×1024, 28 steps, CFG=4.0 with negative prompt.
+    /// Same architecture as Turbo but un-distilled (CFG path runs cond + uncond per step).</summary>
     [Fact]
-    public void Base_GenerateImage_Gpu()
+    public void Base_GenerateImage_Vulkan()
     {
-        if (!File.Exists(ZImageBaseCheckpointPath))
-        {
-            _output.WriteLine($"SKIPPED: Z-Image-Base checkpoint not found: {ZImageBaseCheckpointPath}");
-            return;
-        }
-        if (!File.Exists(FluxVaeSourcePath) || !File.Exists(Qwen3WeightsPath) ||
-            !File.Exists(Qwen3VocabPath) || !File.Exists(Qwen3MergesPath))
-        {
-            _output.WriteLine("SKIPPED: required dependency files missing (Flux VAE / Qwen3 weights or tokenizer)");
-            return;
-        }
-
-        string assemblyDir = Path.GetDirectoryName(typeof(ZImageGenerationTests).Assembly.Location)!;
-        string ptxDir = Path.Combine(assemblyDir, "Ptx");
-        if (!Directory.Exists(ptxDir))
-        {
-            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
-            return;
-        }
+        if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        if (!File.Exists(ZImageBaseCheckpointPath)) { _output.WriteLine($"SKIPPED: Z-Image-Base checkpoint not found: {ZImageBaseCheckpointPath}"); return; }
+        if (!File.Exists(FluxVaeSourcePath) || !File.Exists(Qwen3WeightsPath)
+            || !File.Exists(Qwen3VocabPath) || !File.Exists(Qwen3MergesPath))
+        { _output.WriteLine("SKIPPED: required dependency files missing (Flux VAE / Qwen3 weights or tokenizer)"); return; }
 
         Stopwatch totalSw = Stopwatch.StartNew();
         Stopwatch sw = Stopwatch.StartNew();
 
-        CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+        VulkanBackend backend = new();
+        _output.WriteLine($"[Vulkan device] {backend.Vk}");
 
-        string positivePrompt = "A photograph of an astronaut riding a horse on the moon";
-        string negativePrompt = "blurry, low quality, distorted, deformed, extra limbs";
-
-        // ── PHASE A: Qwen3 encode both prompts, then dispose Qwen3 weights before loading the
-        // ~12 GB BF16 transformer. Same memory pattern as the Turbo test — without it, peak RAM
-        // (Qwen3 F32 ~16 GB + transformer mmap + activations) overflows 32 GB.
+        const string positivePrompt = "A photograph of an astronaut riding a horse on the moon";
+        const string negativePrompt = "blurry, low quality, distorted, deformed, extra limbs";
         Tensor posEmb, negEmb;
+
+        // PHASE A: encode both prompts (positive + negative for CFG), dispose Qwen3
         {
             sw.Restart();
             _output.WriteLine($"[A1] Loading Qwen3-4B from: {Path.GetFileName(Qwen3WeightsPath)}");
             using SafeTensorsLoader qwenLoader = new();
             qwenLoader.Load(Qwen3WeightsPath);
             Dictionary<string, Tensor> qwenWeights = qwenLoader.GetAllTensors();
-            // Don't pre-cast Qwen3 weights to F32 — they're BF16 (~7.5 GB) and casting doubles to ~15 GB,
-            // which overflows ~18 GB of available RAM. CudaBackend now handles BF16 weight + F32 input via
-            // the cast_bf16_f32 PTX kernel, so the encoder runs natively with BF16 weights.
+            Dictionary<string, Tensor> qwenF32 = new(qwenWeights.Count);
+            foreach (KeyValuePair<string, Tensor> kvp in qwenWeights)
+                qwenF32[kvp.Key] = kvp.Value.DType == DType.F32 ? kvp.Value : kvp.Value.CastTo(DType.F32);
             LlamaStyleEncoder qwenEncoder = new(LlamaStyleEncoderConfig.Qwen3_4B);
-            qwenEncoder.LoadWeights(qwenWeights);
+            qwenEncoder.LoadWeights(qwenF32);
             _output.WriteLine($"  Qwen3-4B loaded in {sw.ElapsedMilliseconds}ms");
 
             using Qwen3Tokenizer tok = new(Qwen3VocabPath, Qwen3MergesPath, maxLength: 256);
+
             int[] posTokens = tok.EncodeChat(positivePrompt);
             int[] negTokens = tok.EncodeChat(negativePrompt);
-            int posReal = 0, negReal = 0;
-            foreach (int m in Qwen3Tokenizer.CreateAttentionMask(posTokens)) posReal += m;
-            foreach (int m in Qwen3Tokenizer.CreateAttentionMask(negTokens)) negReal += m;
-            _output.WriteLine($"[A2] Chat-templated — pos: {posReal} real / {posTokens.Length} total; neg: {negReal} real / {negTokens.Length} total");
+            int[] posMask = Qwen3Tokenizer.CreateAttentionMask(posTokens);
+            int[] negMask = Qwen3Tokenizer.CreateAttentionMask(negTokens);
+            int posReal = 0; for (int i = 0; i < posMask.Length; i++) posReal += posMask[i];
+            int negReal = 0; for (int i = 0; i < negMask.Length; i++) negReal += negMask[i];
+            _output.WriteLine($"[A2] Tokens — pos: {posReal}/{posTokens.Length}, neg: {negReal}/{negTokens.Length}");
 
             sw.Restart();
-            _output.WriteLine("[A3] Encoding both prompts (penultimate hidden state)...");
-            int penultimateHfIndex = qwenEncoder.NumLayers - 1;  // diffusers `hidden_states[-2]`
+            int penultimateHfIndex = qwenEncoder.NumLayers - 1;
             Tensor posEmbFull = qwenEncoder.EncodeMultiLayer(backend, [posTokens], [penultimateHfIndex]);
             Tensor negEmbFull = qwenEncoder.EncodeMultiLayer(backend, [negTokens], [penultimateHfIndex]);
             backend.Sync();
@@ -325,24 +285,21 @@ public sealed class ZImageGenerationTests
             negEmb = SliceFirstSeq(negEmbFull, negReal);
             posEmbFull.Dispose();
             negEmbFull.Dispose();
-            _output.WriteLine($"  Caption embeddings done in {sw.ElapsedMilliseconds}ms");
-            LogTensorStats("posEmb", posEmb);
-            LogTensorStats("negEmb", negEmb);
+            _output.WriteLine($"  Both prompts encoded in {sw.ElapsedMilliseconds}ms");
 
             qwenEncoder.Dispose();
+            foreach (Tensor t in qwenF32.Values) t.Dispose();
+            qwenF32.Clear();
         }
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        _output.WriteLine($"  After Qwen3 dispose: free ≈ {GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024 * 1024)} GB");
 
-        // ── PHASE B: Load the BF16 Base transformer + Flux VAE, run the CFG generation loop ──
         sw.Restart();
         _output.WriteLine($"[B1] Loading Z-Image-Base checkpoint: {Path.GetFileName(ZImageBaseCheckpointPath)}");
         (ZImageCheckpointConverter.ConvertedWeights zConv, SafeTensorsLoader zLoader) =
             ZImageCheckpointConverter.LoadAndConvert(ZImageBaseCheckpointPath);
         _output.WriteLine($"  Loaded in {sw.ElapsedMilliseconds}ms — Transformer keys: {zConv.Transformer.Count}, FP8Mix={zConv.IsFp8Mix}");
-        LogDTypeDistribution("Z-Image-Base Transformer", zConv.Transformer);
 
         using (zLoader)
         {
@@ -350,8 +307,7 @@ public sealed class ZImageGenerationTests
                 ZImageCheckpointConverter.DetectArchitecture(zConv.Transformer);
             _output.WriteLine($"  Architecture: {numLayers} layers, {numRefiner} refiner each, hidden={hidden}, ffnDim={ffnDim}, fp8={isFp8Mix}");
 
-            // Z-Image-Base: architecturally identical to Turbo. Only SchedulerShift differs (6.0 vs 3.0)
-            // and the sampling regime (CFG vs no-CFG distilled).
+            // Base uses different scheduler shift (6.0 vs Turbo 3.0). The config record carries it.
             ZImageConfig zConfig = ZImageConfig.Base with
             {
                 HiddenSize = hidden,
@@ -361,16 +317,12 @@ public sealed class ZImageGenerationTests
                 FfnDim = ffnDim,
             };
 
-            // Pass BF16 weights through directly — CudaBackend.Linear casts BF16 weight + F32 input
-            // via the cast_bf16_f32 PTX kernel, so we don't need to materialize an F32 copy on CPU
-            // (which would cost ~22 GB and tighten Phase B memory unnecessarily).
             sw.Restart();
             ZImageTransformer transformer = new(zConfig);
             transformer.LoadWeights(zConv.Transformer);
-            _output.WriteLine($"[B2] Transformer built in {sw.ElapsedMilliseconds}ms");
+            _output.WriteLine($"[B2] Transformer loaded in {sw.ElapsedMilliseconds}ms");
 
             sw.Restart();
-            _output.WriteLine($"[B3] Loading Flux VAE from: {Path.GetFileName(FluxVaeSourcePath)}");
             (FluxCheckpointConverter.ConvertedWeights fluxConv, SafeTensorsLoader fluxLoader) =
                 FluxCheckpointConverter.LoadAndConvert(FluxVaeSourcePath);
             using (fluxLoader)
@@ -378,34 +330,39 @@ public sealed class ZImageGenerationTests
                 Dictionary<string, Tensor> vaeF32 = CastWeightsToF32(fluxConv.Vae);
                 VaeDecoder vaeDecoder = new(VaeConfig.ZImage);
                 vaeDecoder.LoadWeights(vaeF32);
-                _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms");
+                _output.WriteLine($"[B3] VAE loaded in {sw.ElapsedMilliseconds}ms");
 
-                _output.WriteLine($"[B4] Generating 512×512 image, 28 steps, CFG=4.0 (Base regime)...");
+                _output.WriteLine("[B4] Generating image (1024×1024, 28 steps, CFG=4.0, Vulkan)...");
                 ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, zConfig);
                 TextToImageRequest request = new()
                 {
                     Prompt = positivePrompt,
-                    Width = 512,
-                    Height = 512,
+                    NegativePrompt = negativePrompt,
+                    Width = 1024,
+                    Height = 1024,
                     Steps = 28,
+                    CfgScale = 4.0f,
                     Seed = 42,
                 };
 
                 sw.Restart();
                 (byte[] rgbData, int width, int height, int seed) = pipeline.GenerateFromEmbeddings(
-                    posEmb, request, cfgScale: 4.0f, negativeCaptionEmbeddings: negEmb,
+                    posEmb,
+                    request,
+                    cfgScale: 4.0f,
+                    negativeCaptionEmbeddings: negEmb,
                     onProgress: p => _output.WriteLine($"  Step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
                 backend.Sync();
                 _output.WriteLine($"Generation done in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
                 Directory.CreateDirectory(OutputDir);
-                string outputPath = Path.Combine(OutputDir, $"zimage_base_{width}x{height}_s{request.Steps}_cfg4_seed{seed}.bmp");
+                string outputPath = Path.Combine(OutputDir, $"zimage_base_vulkan_{width}x{height}_s{request.Steps}_cfg{request.CfgScale:F0}_seed{seed}.bmp");
                 ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
                 _output.WriteLine($"Saved: {outputPath}");
 
-                Assert.Equal(request.Width, width);
-                Assert.Equal(request.Height, height);
-                Assert.Equal(width * height * 3, rgbData.Length);
+                Assert.Equal(1024, width);
+                Assert.Equal(1024, height);
+                Assert.Equal(1024 * 1024 * 3, rgbData.Length);
                 ValidateImageNotDegenerate(rgbData);
 
                 totalSw.Stop();
@@ -414,59 +371,13 @@ public sealed class ZImageGenerationTests
                 posEmb.Dispose();
                 negEmb.Dispose();
                 pipeline.Dispose();
-                transformer.Dispose();
-                backend.Dispose();
+                foreach (Tensor t in vaeF32.Values) t.Dispose();
             }
+            foreach (Tensor t in zConv.Transformer.Values) t.Dispose();
         }
+        backend.Dispose();
     }
 
-    private void LogDTypeDistribution(string name, Dictionary<string, Tensor> weights)
-    {
-        Dictionary<string, int> dtypeCounts = new();
-        foreach (KeyValuePair<string, Tensor> kvp in weights)
-        {
-            string dtype = kvp.Value.DType.ToString();
-            dtypeCounts[dtype] = dtypeCounts.GetValueOrDefault(dtype, 0) + 1;
-        }
-        string distribution = string.Join(", ", dtypeCounts.Select(x => $"{x.Key}={x.Value}"));
-        _output.WriteLine($"  {name} dtypes: {distribution}");
-    }
-
-    private void LogTensorStats(string name, Tensor tensor)
-    {
-        ReadOnlySpan<float> data = tensor.AsReadOnlySpan<float>();
-        float min = float.MaxValue, max = float.MinValue;
-        double sumAbs = 0;
-        int nan = 0, inf = 0;
-        for (int i = 0; i < data.Length; i++)
-        {
-            float v = data[i];
-            if (float.IsNaN(v)) { nan++; continue; }
-            if (float.IsInfinity(v)) { inf++; continue; }
-            if (v < min) min = v;
-            if (v > max) max = v;
-            sumAbs += Math.Abs(v);
-        }
-        _output.WriteLine($"  [{name}] shape={tensor.Shape} dtype={tensor.DType} min={min:E3} max={max:E3} abs_mean={sumAbs / data.Length:E3} nan={nan} inf={inf}");
-    }
-
-    private void ValidateImageNotDegenerate(byte[] rgbData)
-    {
-        int nonZero = 0;
-        int nonFF = 0;
-        foreach (byte b in rgbData)
-        {
-            if (b != 0) nonZero++;
-            if (b != 255) nonFF++;
-        }
-        float nonZeroPct = nonZero / (float)rgbData.Length * 100;
-        float nonFFPct = nonFF / (float)rgbData.Length * 100;
-        _output.WriteLine($"  Non-zero bytes: {nonZeroPct:F1}%, Non-255 bytes: {nonFFPct:F1}%");
-        Assert.True(nonZeroPct > 10, "Image appears to be all black");
-        Assert.True(nonFFPct > 10, "Image appears to be all white");
-    }
-
-    /// <summary>Slices a [B, S, D] F32 tensor down to [B, realLen, D] by keeping only the first <paramref name="realLen"/> sequence positions. Used to drop pad-position hidden states from the Qwen3 output before feeding the Z-Image transformer (mirrors diffusers' <c>prompt_embeds[i][prompt_masks[i]]</c>).</summary>
     private static unsafe Tensor SliceFirstSeq(Tensor t, int realLen)
     {
         long batch = t.Shape[0];
@@ -475,8 +386,8 @@ public sealed class ZImageGenerationTests
         if (realLen > seqLen)
             throw new ArgumentOutOfRangeException(nameof(realLen), $"realLen={realLen} > seqLen={seqLen}");
 
-        TensorShape outShape = new TensorShape(batch, realLen, dim);
-        Tensor result = new Tensor(outShape, t.DType);
+        TensorShape outShape = new(batch, realLen, dim);
+        Tensor result = new(outShape, t.DType);
         long bytesPerToken = dim * sizeof(float);
         float* src = (float*)t.DataPointer;
         float* dst = (float*)result.DataPointer;
@@ -492,7 +403,7 @@ public sealed class ZImageGenerationTests
         return result;
     }
 
-    private static Dictionary<string, Tensor> CastWeightsToF32(Dictionary<string, Tensor> weights)
+    private static Dictionary<string, Tensor> CastWeightsToF32(IReadOnlyDictionary<string, Tensor> weights)
     {
         Dictionary<string, Tensor> f32 = new(weights.Count);
         foreach (KeyValuePair<string, Tensor> kvp in weights)
@@ -503,5 +414,21 @@ public sealed class ZImageGenerationTests
                 : kvp.Value;
         }
         return f32;
+    }
+
+    private static void ValidateImageNotDegenerate(byte[] rgb)
+    {
+        long sum = 0;
+        long sumSq = 0;
+        bool[] byteSeen = new bool[256];
+        foreach (byte v in rgb) { sum += v; sumSq += (long)v * v; byteSeen[v] = true; }
+        double n = rgb.Length;
+        double mean = sum / n;
+        double std = Math.Sqrt(Math.Max(0, sumSq / n - mean * mean));
+        int distinctBytes = 0;
+        for (int i = 0; i < 256; i++) if (byteSeen[i]) distinctBytes++;
+
+        Assert.True(std > 20, $"RGB std-dev too low ({std:F1}) — image may be uniform / NaN-collapsed");
+        Assert.True(distinctBytes >= 200, $"Too few distinct byte values ({distinctBytes}/256) — image may have NaN-collapsed bands");
     }
 }

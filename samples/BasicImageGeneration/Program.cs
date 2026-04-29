@@ -1,7 +1,10 @@
 using System.Diagnostics;
+using SharpInference.Core.Backends;
 using SharpInference.Core.Logging;
 using SharpInference.Core.Tensors;
 using SharpInference.Cpu;
+using SharpInference.Cuda;
+using SharpInference.Vulkan;
 using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Models.Vae;
@@ -47,13 +50,29 @@ public static class Program
     {
         Logs.MinLevel = LogLevel.Debug;
 
-        // Allow overriding model dir and output dir via command line
-        ModelPaths modelPaths = args.Length > 0
-            ? ModelPaths.FromHuggingFaceDir(args[0])
+        // --backend cpu|vulkan|cuda  (default: cpu).
+        // Positional args still work: <modelDir> <outputDir>.
+        string backendChoice = "cpu";
+        List<string> positionals = new(args.Length);
+        for (int i = 0; i < args.Length; i++)
+        {
+            string a = args[i];
+            if (a == "--backend" && i + 1 < args.Length) { backendChoice = args[++i].ToLowerInvariant(); }
+            else if (a.StartsWith("--backend=", StringComparison.Ordinal)) { backendChoice = a["--backend=".Length..].ToLowerInvariant(); }
+            else if (a is "-h" or "--help")
+            {
+                Console.WriteLine("Usage: BasicImageGeneration [--backend cpu|vulkan|cuda] [modelDir] [outputDir]");
+                return;
+            }
+            else positionals.Add(a);
+        }
+
+        ModelPaths modelPaths = positionals.Count > 0
+            ? ModelPaths.FromHuggingFaceDir(positionals[0])
             : DefaultModelPaths;
 
-        OutputSettings outputSettings = args.Length > 1
-            ? new OutputSettings { OutputDir = args[1] }
+        OutputSettings outputSettings = positionals.Count > 1
+            ? new OutputSettings { OutputDir = positionals[1] }
             : DefaultOutputSettings;
 
         Console.WriteLine("╔══════════════════════════════════════════════╗");
@@ -79,8 +98,15 @@ public static class Program
         Stopwatch totalSw = Stopwatch.StartNew();
 
         // Create backend
-        using CpuBackend backend = new CpuBackend();
-        Console.WriteLine("[1/5] CPU backend created.");
+        using IBackend backend = backendChoice switch
+        {
+            "vulkan" => new VulkanBackend(),
+            "cuda" => new CudaBackend(deviceOrdinal: 0,
+                ptxDir: Path.Combine(AppContext.BaseDirectory, "Ptx")),
+            "cpu" => new CpuBackend(),
+            _ => throw new ArgumentException($"Unknown backend '{backendChoice}'. Valid: cpu, vulkan, cuda."),
+        };
+        Console.WriteLine($"[1/5] Backend: {backend.Capabilities.Name}");
 
         // Load tokenizer
         Console.WriteLine("[2/5] Loading CLIP tokenizer...");

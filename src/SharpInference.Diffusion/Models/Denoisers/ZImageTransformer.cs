@@ -69,7 +69,11 @@ public sealed unsafe class ZImageTransformer : IDisposable
         _tEmbLinear2Weight = weights["t_embedder.mlp.2.weight"];
         weights.TryGetValue("t_embedder.mlp.2.bias", out _tEmbLinear2Bias);
 
-        _capEmbedderNormWeight = weights["cap_embedder.0.weight"];
+        // CudaBackend.RmsNorm reads the weight pointer as float* directly, so the scale tensor MUST be F32
+        // (BF16/F16 norms would be reinterpreted as garbage F32 values). Cap_embedder.0 is the [2560]
+        // RMSNorm scale — cheap to cast, mandatory for correctness.
+        Tensor capNorm = weights["cap_embedder.0.weight"];
+        _capEmbedderNormWeight = capNorm.DType == DType.F32 ? capNorm : capNorm.CastTo(DType.F32);
         _capEmbedderLinearWeight = weights["cap_embedder.1.weight"];
         weights.TryGetValue("cap_embedder.1.bias", out _capEmbedderLinearBias);
 
