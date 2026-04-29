@@ -97,6 +97,9 @@ public enum VkStructureType
     SubmitInfo2 = 1000314004,
     SemaphoreSubmitInfo = 1000314005,
     CommandBufferSubmitInfo = 1000314006,
+
+    PhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506000,
+    CooperativeMatrixPropertiesKHR = 1000506001,
 }
 
 /// <summary>VkBufferUsageFlags — bits we actually use.</summary>

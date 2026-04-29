@@ -1119,6 +1119,26 @@ public sealed class CudaBackend : IBackend
             _kernels!.LaunchCastF16ToF8E4M3(output, temp, count, _stream.Handle);
             CudaMemory.FreeAsync(temp, _stream.Handle);
         }
+        else if (srcDtype == DType.BF16 && dstDtype == DType.F32)
+            _kernels!.LaunchCastBf16ToF32(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.F32 && dstDtype == DType.BF16)
+            _kernels!.LaunchCastF32ToBf16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.BF16 && dstDtype == DType.F16)
+        {
+            // BF16 → F32 → F16 (lossy via temp F32 buffer)
+            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            _kernels!.LaunchCastBf16ToF32(temp, input, count, _stream.Handle);
+            _kernels!.LaunchCastF32ToF16(output, temp, count, _stream.Handle);
+            CudaMemory.FreeAsync(temp, _stream.Handle);
+        }
+        else if (srcDtype == DType.F16 && dstDtype == DType.BF16)
+        {
+            // F16 → F32 → BF16 (round-trip via F32)
+            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            _kernels!.LaunchCastF16ToF32(temp, input, count, _stream.Handle);
+            _kernels!.LaunchCastF32ToBf16(output, temp, count, _stream.Handle);
+            CudaMemory.FreeAsync(temp, _stream.Handle);
+        }
         else
             throw new NotSupportedException($"GPU cast from {srcDtype} to {dstDtype} not supported.");
     }

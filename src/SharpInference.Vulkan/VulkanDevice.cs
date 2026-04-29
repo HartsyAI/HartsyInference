@@ -311,10 +311,16 @@ public sealed class VulkanDevice : IDisposable
             synchronization2 = caps.Synchronization2 ? 1u : 0u,
             maintenance4 = 1u,
         };
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR fCoop = new()
+        {
+            sType = VkStructureType.PhysicalDeviceCooperativeMatrixFeaturesKHR,
+            pNext = (nint)(&f13),
+            cooperativeMatrix = caps.HasCooperativeMatrix ? 1u : 0u,
+        };
         VkPhysicalDeviceFeatures2 feat2 = new()
         {
             sType = VkStructureType.PhysicalDeviceFeatures2,
-            pNext = (nint)(&f13),
+            pNext = caps.HasCooperativeMatrix ? (nint)(&fCoop) : (nint)(&f13),
         };
 
         float prio = 1.0f;
@@ -329,6 +335,7 @@ public sealed class VulkanDevice : IDisposable
         List<string> extList = new();
         if (caps.HasMemoryBudget) extList.Add("VK_EXT_memory_budget");
         if (caps.HasPushDescriptor) extList.Add("VK_KHR_push_descriptor");
+        if (caps.HasCooperativeMatrix) extList.Add("VK_KHR_cooperative_matrix");
 
         using PinnedStringArray ext = new(extList);
 

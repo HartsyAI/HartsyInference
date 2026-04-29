@@ -188,6 +188,16 @@ internal static partial class VulkanApi
     [LibraryImport(Lib)]
     internal static partial void vkCmdBindDescriptorSets(nint commandBuffer, VkPipelineBindPoint pipelineBindPoint, ulong layout, uint firstSet, uint descriptorSetCount, nint pDescriptorSets, uint dynamicOffsetCount, nint pDynamicOffsets);
 
+    /// <summary>
+    /// Records descriptor-set bindings directly into the command buffer without going
+    /// through a descriptor pool. Requires either Vulkan 1.4 core or the
+    /// <c>VK_KHR_push_descriptor</c> extension (the loader exposes both via the same
+    /// unsuffixed entry point on modern Linux/Windows builds).
+    /// Saves the vkAllocateDescriptorSets + vkUpdateDescriptorSets round-trip per dispatch.
+    /// </summary>
+    [LibraryImport(Lib)]
+    internal static partial void vkCmdPushDescriptorSet(nint commandBuffer, VkPipelineBindPoint pipelineBindPoint, ulong layout, uint set, uint descriptorWriteCount, nint pDescriptorWrites);
+
     [LibraryImport(Lib)]
     internal static partial void vkCmdPushConstants(nint commandBuffer, ulong layout, VkShaderStageFlags stageFlags, uint offset, uint size, nint pValues);
 

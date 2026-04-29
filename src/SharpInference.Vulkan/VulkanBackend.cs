@@ -22,12 +22,38 @@ public sealed class VulkanBackend : IBackend
     private readonly VulkanPipelineCache _pipelineCache;
     private readonly VulkanKernelRegistry _kernels;
     private readonly VulkanGpuTransferHelper _xfer;
+    private readonly VulkanProfiler _profiler = new();
     private readonly string _spvDir;
     private bool _disposed;
 
     public DeviceKind Device { get; }
     public BackendCapabilities Capabilities { get; }
     public VulkanCapabilities Vk => _vkDevice.Capabilities;
+
+    /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache. Exposed for tests that
+    /// verify persist + reload across backend lifetimes.</summary>
+    public string PipelineCachePath => _pipelineCache.CachePath;
+
+    /// <summary>Diagnostic snapshot of device-memory usage. Used by the leak-validation tests
+    /// to assert that VRAM returns to baseline after a generation loop. Aggregated across all
+    /// DEVICE_LOCAL heaps; values are stable across slab boundaries (slab-internal free regions
+    /// are subtracted from <c>UsedDeviceBytes</c>).</summary>
+    public (long usedDeviceBytes, long reservedDeviceBytes, int slabBlocks, long cachedTensorBytes) MemoryStats
+    {
+        get
+        {
+            ulong used = 0, reserved = 0;
+            for (uint h = 0; h < _vkDevice.MemoryProperties.memoryHeapCount; h++)
+            {
+                VkMemoryHeap heap = _vkDevice.MemoryProperties.GetMemoryHeap((int)h);
+                if ((heap.flags & VkMemoryHeapFlags.DeviceLocal) == 0) continue;
+                used += _allocator.UsedBytes(h);
+                reserved += _allocator.ReservedBytes(h);
+            }
+            (long cachedBytes, _, _) = _xfer.GetStats();
+            return ((long)used, (long)reserved, _allocator.BlockCount, cachedBytes);
+        }
+    }
 
     /// <summary>Creates a Vulkan backend on the best discrete GPU. Validation layers enabled if SHARPINFERENCE_VK_VALIDATION=1.</summary>
     public VulkanBackend(int deviceOrdinal = 0, string? spvDir = null)
@@ -43,7 +69,15 @@ public sealed class VulkanBackend : IBackend
         VkPhysicalDeviceMemoryProperties memProps = _vkDevice.MemoryProperties;
         _allocator = new VulkanMemoryAllocator(_vkDevice.Handle, in memProps);
         _stream = new VulkanCommandStream(_vkDevice.Handle, _vkDevice.ComputeQueue, Vk.ComputeQueueFamilyIndex);
-        _descriptors = new VulkanDescriptorManager(_vkDevice.Handle);
+        // Push descriptors (VK_KHR_push_descriptor) are *available* on most NVIDIA / AMD / Intel
+        // drivers, but on NVIDIA's RTX 30xx-class hardware the pool-ring path is faster:
+        // Phase-C2 measurements show push-descriptors regress Flux Schnell wall-clock by ~7%
+        // (129.5 s → 139.6 s) because the per-dispatch descriptor write into the command buffer
+        // costs more than the pool-flip approach. Default off; enable via SHARPINFERENCE_VK_PUSH_DESCRIPTORS=1
+        // when measuring on AMD/Intel — outcome there may differ.
+        bool enablePushDescriptor = Vk.HasPushDescriptor
+            && Environment.GetEnvironmentVariable("SHARPINFERENCE_VK_PUSH_DESCRIPTORS") == "1";
+        _descriptors = new VulkanDescriptorManager(_vkDevice.Handle, enablePushDescriptor: enablePushDescriptor);
         _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
@@ -117,13 +151,21 @@ public sealed class VulkanBackend : IBackend
         nint cb = _stream.AcquireRecording();
         VulkanApi.vkCmdBindPipeline(cb, VkPipelineBindPoint.Compute, kernel.Pipeline);
 
-        ulong setLayout = kernel.DescriptorSetLayout;
-        ulong dstSet = _descriptors.AllocateSet(setLayout);
-        _descriptors.WriteSet(dstSet, bufferHandles);
-
         ulong layout = kernel.PipelineLayout;
-        VulkanApi.vkCmdBindDescriptorSets(cb, VkPipelineBindPoint.Compute, layout,
-            0, 1, (nint)(&dstSet), 0, 0);
+        if (_descriptors.PushDescriptorActive)
+        {
+            // Fast path: write descriptor bindings directly into the command buffer. Skips the
+            // pool allocation + vkUpdateDescriptorSets + vkCmdBindDescriptorSets sequence.
+            _descriptors.PushSet(cb, layout, bufferHandles);
+        }
+        else
+        {
+            ulong setLayout = kernel.DescriptorSetLayout;
+            ulong dstSet = _descriptors.AllocateSet(setLayout);
+            _descriptors.WriteSet(dstSet, bufferHandles);
+            VulkanApi.vkCmdBindDescriptorSets(cb, VkPipelineBindPoint.Compute, layout,
+                0, 1, (nint)(&dstSet), 0, 0);
+        }
 
         if (pushConstants.Length > 0)
         {
@@ -154,23 +196,47 @@ public sealed class VulkanBackend : IBackend
     /// the same op (e.g. SDPA's per-head loop sharing Q/K/V uploads).</summary>
     private int _opNestingDepth;
 
-    private OpScope EnterOp() => new(this);
+    private OpScope EnterOp([System.Runtime.CompilerServices.CallerMemberName] string opName = "")
+        => new(this, opName);
     private readonly struct OpScope : IDisposable
     {
         private readonly VulkanBackend _b;
-        public OpScope(VulkanBackend b) { _b = b; b._opNestingDepth++; }
+        private readonly string _opName;
+        private readonly long _startTicks;
+
+        public OpScope(VulkanBackend b, string opName)
+        {
+            _b = b;
+            _opName = opName;
+            _startTicks = b._profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            b._opNestingDepth++;
+        }
+
         public void Dispose()
         {
             _b._opNestingDepth--;
             if (_b._opNestingDepth == 0)
+            {
+                int dispatches = _b._dispatchesSinceSubmit;
                 _b.DrainAndFlush();
+                if (_b._profiler.IsEnabled)
+                    _b._profiler.Record(_opName, System.Diagnostics.Stopwatch.GetTimestamp() - _startTicks, dispatches);
+            }
         }
     }
 
     private void DrainAndFlush()
     {
+        // Tag transient buffers at the upcoming tick (DrainTransients calls _stream.DeferredFree,
+        // which uses _value + 1 — see VulkanCommandStream.DeferredFree).
         _xfer.DrainTransients();
-        _stream.WaitIdleHost();
+        // Submit but don't host-wait. The GPU will complete in the background; deferred-free
+        // reclamation happens opportunistically inside SubmitAndAdvance once the GPU passes the
+        // tagged tick. Activation-cache reads from CPU pull a host wait inside the lazy-sync
+        // callback, and explicit Sync() callers still get a synchronous WaitIdleHost. This
+        // eliminates ~2800 host waits per Flux Schnell 4-step generation and lets the driver
+        // overlap submission of op N+1 with execution of op N.
+        _stream.SubmitAndAdvance();
         _dispatchesSinceSubmit = 0;
     }
 
@@ -178,6 +244,112 @@ public sealed class VulkanBackend : IBackend
     private void CacheOutput(Tensor output, VulkanBuffer buffer) => _xfer.CacheActivation(output, buffer);
 
     private VulkanBuffer GetBuffer(Tensor t) => _xfer.CopyToDevice(t);
+
+    /// <summary>Selects the (BM, BN, BK, TM, TN) tile size for the tiled matmul kernel based on
+    /// the GEMM shape. Profile-driven choice (Flux Schnell, RTX 3060): big tiles 128×128/32 for
+    /// Flux/SDXL Linear shapes (M, N ≥ 128) cut workgroup count by ~16× vs the old 32×32 default,
+    /// which is the primary perf win from Phase C2 step 1. Smaller tiles are picked for shapes
+    /// where big tiles would leave most threads idle (e.g. SDPA per-head 64×64 matmuls).
+    /// MAX_BM/BN/BK/TM/TN in the shader (matmul_tiled.comp.glsl) cap what's selectable here —
+    /// keep them in sync if you bump these values.</summary>
+    private static (uint BM, uint BN, uint BK, uint TM, uint TN) PickMatmulTile(long M, long N, long K)
+    {
+        if (M >= 128 && N >= 128) return (128, 128, 32, 8, 8);   // 16×16 = 256 threads/wg, 32 KB shared
+        if (M >= 64  && N >= 64)  return ( 64,  64, 16, 8, 8);   //  8× 8 =  64 threads/wg
+        return (32, 32, 16, 4, 4);                               //  8× 8 =  64 threads/wg, small shapes
+    }
+
+    /// <summary>Attempts the cooperative-matrix matmul fast path. Returns true when the kernel
+    /// was dispatched (op is fully handled). Returns false when the path doesn't apply and the
+    /// caller should fall through to <c>matmul_tiled</c>. Constraints for v1:
+    /// (a) <c>HasCooperativeMatrix</c> capability, (b) GEMM dtype is FP16, (c) M, N, K all
+    /// multiples of <c>FRAG=16</c>, (d) no fused activation. Bias is handled via a follow-up
+    /// <c>BroadcastAdd(N, 1)</c> dispatch — see comments below.</summary>
+    private bool TryDispatchCoopmat(
+        Tensor output, VulkanBuffer aRes, VulkanBuffer bRes,
+        int M, int N, int K, bool transposeA, bool transposeB, DType gemmDtype,
+        VulkanBuffer outBuf, Tensor? bias, VulkanBuffer? biasRes, VulkanBuffer? biasRaw)
+    {
+        const uint FRAG = 16;
+        if (!Vk.HasCooperativeMatrix) return false;
+        if (gemmDtype != DType.F16) return false;
+        if ((M % FRAG) != 0 || (N % FRAG) != 0 || (K % FRAG) != 0) return false;
+        // Output must be FP16 or FP32 — coopmat shader supports both via OUTPUT_F32 spec const.
+        // Other output dtypes (BF16, FP8, etc.) fall through to the tiled path.
+        bool outputIsF32 = output.DType == DType.F32;
+        if (output.DType != DType.F16 && !outputIsF32) return false;
+
+        // BM/BN: 64×64 covers Flux Linear shapes well (1280×3072×3072 → 20×48 = 960 wgs).
+        // Drop to 32×32 when M or N is exactly 16 or 32 (typical of small attention heads).
+        uint BM = (M >= 64) ? 64u : (M >= 32 ? 32u : 16u);
+        uint BN = (N >= 64) ? 64u : (N >= 32 ? 32u : 16u);
+        // SUBGROUP_SIZE matches what we pin via VkPipelineShaderStageRequiredSubgroupSizeCreateInfo.
+        uint subgroupSize = Vk.SubgroupSize;
+        // subgroups per workgroup = (BM/16) * (BN/16). Workgroup size = subgroups * subgroupSize.
+        uint subgroups = (BM / FRAG) * (BN / FRAG);
+        uint localX = subgroups * subgroupSize;
+
+        try
+        {
+            string shader = "matmul_coopmat";
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, localX),
+                SpecConstant.UInt(1, 1),
+                SpecConstant.UInt(2, 1),
+                SpecConstant.UInt(10, BM),
+                SpecConstant.UInt(11, BN),
+                SpecConstant.UInt(12, subgroupSize),
+                SpecConstant.Bool(13, transposeA),
+                SpecConstant.Bool(14, transposeB),
+                SpecConstant.Bool(15, outputIsF32),
+            };
+
+            VulkanKernel k = GetKernel(shader, storageBufferCount: 5, spec);
+
+            Span<byte> pc = stackalloc byte[11 * 4];
+            BinaryWriteUInt(pc, 0, (uint)M);
+            BinaryWriteUInt(pc, 4, (uint)N);
+            BinaryWriteUInt(pc, 8, (uint)K);
+            BinaryWriteUInt(pc, 12, (uint)(transposeA ? M : K));
+            BinaryWriteUInt(pc, 16, (uint)(transposeB ? K : N));
+            BinaryWriteUInt(pc, 20, (uint)N);
+            BinaryWriteFloat(pc, 24, 1.0f);
+            BinaryWriteFloat(pc, 28, 0.0f);
+            BinaryWriteUInt(pc, 32, 0u);
+            BinaryWriteUInt(pc, 36, 0u);
+            BinaryWriteUInt(pc, 40, 0u);
+
+            // Five descriptor bindings:
+            //   0=A, 1=B, 2=C_fp16, 3=Bias (unused, placeholder), 4=C_fp32
+            // The shader writes to slot 2 OR slot 4 depending on OUTPUT_F32. The unused output
+            // binding is bound to outBuf as a placeholder so the descriptor count stays uniform.
+            ulong cFp16Handle = outputIsF32 ? outBuf.Handle : outBuf.Handle;   // outBuf is the real output
+            ulong cFp32Handle = outputIsF32 ? outBuf.Handle : outBuf.Handle;
+            ulong biasHandle  = outBuf.Handle;
+            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, cFp16Handle, biasHandle, cFp32Handle };
+
+            uint groupsX = (uint)((N + BN - 1) / BN);
+            uint groupsY = (uint)((M + BM - 1) / BM);
+            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
+
+            CacheOutput(output, outBuf);
+
+            // Bias fold-in via BroadcastAdd: output[m, n] += bias[n] for all (m, n).
+            // BroadcastAdd's index formula `c = (i / spatial) % channels` with spatial=1 and
+            // channels=N produces `c = i % N`, which is exactly the column index for a flat
+            // [M, N] buffer. Adds one extra dispatch but keeps the coopmat shader simple.
+            if (bias is not null)
+                BroadcastAdd(output, bias, channels: N, spatial: 1);
+        }
+        catch
+        {
+            outBuf.Dispose();
+            throw;
+        }
+
+        return true;
+    }
 
     /// <summary>If <paramref name="src"/> is on a different dtype than <paramref name="want"/>, allocate a temp buffer in <paramref name="want"/> and dispatch the cast kernel; otherwise return <paramref name="srcBuf"/>. Returns (buffer, ownedTemp) — caller frees ownedTemp.</summary>
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
@@ -349,10 +521,25 @@ public sealed class VulkanBackend : IBackend
         ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
         VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
 
+        // Coopmat fast path — VK_KHR_cooperative_matrix tensor-core-style 16x16x16 ops on FP16.
+        // Only applicable when (a) the device exposes coopmat, (b) GEMM dtype is FP16, and
+        // (c) M, N, K are all multiples of 16 (the fragment size). Bias is folded as a separate
+        // BroadcastAdd dispatch after the matmul. Falls through to the tiled path otherwise.
+        if (TryDispatchCoopmat(output, aRes, bRes, M, N, K, transposeA, transposeB,
+                               gemmDtype, outBuf, bias, biasRes, biasRaw))
+        {
+            if (aOwned is not null) _xfer.FreeDevice(aOwned);
+            if (bOwned is not null) _xfer.FreeDevice(bOwned);
+            if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
+            return;
+        }
+
         try
         {
-            // Tile shape: keep small but-correct defaults. Tunable per vendor in Phase 4.
-            const uint BM = 32, BN = 32, BK = 16, TM = 4, TN = 4;
+            // Tile shape selected from M, N, K — see PickMatmulTile. Big tiles (128x128) win on
+            // Flux/SDXL Linear shapes (M, N >= 128); small tiles (32x32) avoid wasted dispatch
+            // threads on tiny GEMMs.
+            (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(M, N, K);
             uint localX = BN / TN;
             uint localY = BM / TM;
 
@@ -486,7 +673,7 @@ public sealed class VulkanBackend : IBackend
                 int K = inCh * kH * kW;
                 int N = outH * outW;
 
-                const uint BM = 32, BN = 32, BK = 16, TM = 4, TN = 4;
+                (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(M, N, K);
                 uint localX = BN / TN;
                 uint localY = BM / TM;
 
@@ -880,7 +1067,7 @@ public sealed class VulkanBackend : IBackend
         uint aOffset, uint bOffset, uint cOffset,
         DType dtype)
     {
-        const uint BM = 32, BN = 32, BK = 16, TM = 4, TN = 4;
+        (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(M, N, K);
         uint localX = BN / TN;
         uint localY = BM / TM;
 
@@ -1107,9 +1294,10 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 8, (uint)hidden.ElementCount);
             Span<ulong> bufs = stackalloc ulong[] { hBuf.Handle, bEff.Handle };
             Dispatch(k, bufs, pc, GroupCount(hidden.ElementCount, LOCAL_X_1D));
-            // hidden mutated in place — clear cache callbacks before re-cache, see PHASE_3_DEVIATIONS #17.
-            // Note: BroadcastAdd modifies hidden in-place; the previous activation cache entry on `hidden`
-            // already points at hBuf. We don't need to re-cache since the buffer is unchanged.
+            // hidden's GPU contents just changed — re-cache so CPU readback (lazy-sync callback)
+            // and subsequent GetBuffer hits return the post-add values, not the pre-upload CPU bytes.
+            // CacheActivation handles idempotent re-cache for in-place ops; see PHASE_3_DEVIATIONS #17.
+            CacheOutput(hidden, hBuf);
         }
         finally
         {
@@ -1306,6 +1494,10 @@ public sealed class VulkanBackend : IBackend
         if (_disposed) return;
         _disposed = true;
         try { _stream.WaitIdleHost(); } catch { /* swallow */ }
+        // Dump profiling data (no-op when SHARPINFERENCE_VK_PROFILE is unset) before tearing down
+        // anything that the per-op records reference (op names are strings only, but flush before
+        // we lose the device just to be tidy).
+        try { _profiler.Dump(); } catch { /* swallow */ }
         _xfer.Dispose();
         _kernels.Dispose();
         _pipelineCache.Dispose();

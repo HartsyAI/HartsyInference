@@ -579,6 +579,18 @@ public struct VkPipelineShaderStageRequiredSubgroupSizeCreateInfo
     public uint requiredSubgroupSize;
 }
 
+/// <summary><c>VkPhysicalDeviceCooperativeMatrixFeaturesKHR</c> — chained into
+/// <see cref="VkPhysicalDeviceFeatures2"/> at device-create when
+/// <c>VK_KHR_cooperative_matrix</c> is enabled.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct VkPhysicalDeviceCooperativeMatrixFeaturesKHR
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint cooperativeMatrix;
+    public uint cooperativeMatrixRobustBufferAccess;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct VkComputePipelineCreateInfo
 {

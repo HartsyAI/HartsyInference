@@ -19,17 +19,28 @@ public sealed class VulkanDescriptorManager : IDisposable
     private const int UniformBuffersPerSet = 2;
 
     private readonly nint _device;
+    private readonly bool _pushDescriptor;
     private readonly Dictionary<int, ulong> _setLayouts = new();      // bindingCount -> VkDescriptorSetLayout
     private readonly Dictionary<int, ulong> _pipelineLayouts = new(); // bindingCount -> VkPipelineLayout (push-const = 128B compute stage)
     private readonly ulong[] _pools = new ulong[2];
     private int _activePool;
     private uint _setsInActive;
 
-    public VulkanDescriptorManager(nint device)
+    /// <summary>True when VK_KHR_push_descriptor / Vulkan 1.4 core push descriptors are active.
+    /// In this mode <see cref="PushSet"/> writes descriptors directly into the command buffer,
+    /// bypassing the pool ring entirely. Saves a vkAllocateDescriptorSets + vkUpdateDescriptorSets
+    /// round-trip per dispatch.</summary>
+    public bool PushDescriptorActive => _pushDescriptor;
+
+    public VulkanDescriptorManager(nint device, bool enablePushDescriptor = false)
     {
         _device = device;
-        _pools[0] = CreatePool();
-        _pools[1] = CreatePool();
+        _pushDescriptor = enablePushDescriptor;
+        if (!_pushDescriptor)
+        {
+            _pools[0] = CreatePool();
+            _pools[1] = CreatePool();
+        }
     }
 
     /// <summary>Returns (or creates) a layout for <c>n</c> storage buffers at bindings 0..n-1, all visible to the compute stage.</summary>
@@ -83,11 +94,17 @@ public sealed class VulkanDescriptorManager : IDisposable
             };
         }
 
+        // VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR = 0x1.
+        // Required when the descriptor set will be populated via vkCmdPushDescriptorSet rather
+        // than allocated from a pool. Sets created with this flag cannot be allocated.
+        const uint pushDescriptorFlag = 0x1u;
+
         fixed (VkDescriptorSetLayoutBinding* p = bindings)
         {
             VkDescriptorSetLayoutCreateInfo ci = new()
             {
                 sType = VkStructureType.DescriptorSetLayoutCreateInfo,
+                flags = _pushDescriptor ? pushDescriptorFlag : 0u,
                 bindingCount = (uint)n,
                 pBindings = (nint)p,
             };
@@ -151,6 +168,47 @@ public sealed class VulkanDescriptorManager : IDisposable
         _setsInActive = 0;
     }
 
+    /// <summary>Records descriptor writes directly into the command buffer via
+    /// <c>vkCmdPushDescriptorSet</c>. No descriptor set allocation, no pool, no
+    /// <c>vkUpdateDescriptorSets</c> round-trip. Active when <see cref="PushDescriptorActive"/>
+    /// is true (set at construction). Safe to call from any recorded dispatch — the descriptors
+    /// are valid for the next dispatch only, which matches the per-op binding pattern we use.</summary>
+    public unsafe void PushSet(nint commandBuffer, ulong pipelineLayout, ReadOnlySpan<ulong> bufferHandles)
+    {
+        int n = bufferHandles.Length;
+        Span<VkDescriptorBufferInfo> infos = stackalloc VkDescriptorBufferInfo[n];
+        Span<VkWriteDescriptorSet> writes = stackalloc VkWriteDescriptorSet[n];
+        for (int i = 0; i < n; i++)
+        {
+            infos[i] = new VkDescriptorBufferInfo
+            {
+                buffer = bufferHandles[i],
+                offset = 0,
+                range = VkConstants.WholeSize,
+            };
+        }
+        fixed (VkDescriptorBufferInfo* pInfos = infos)
+        {
+            for (int i = 0; i < n; i++)
+            {
+                writes[i] = new VkWriteDescriptorSet
+                {
+                    sType = VkStructureType.WriteDescriptorSet,
+                    dstSet = 0,                                       // ignored for push descriptors
+                    dstBinding = (uint)i,
+                    descriptorCount = 1,
+                    descriptorType = VkDescriptorType.StorageBuffer,
+                    pBufferInfo = (nint)(pInfos + i),
+                };
+            }
+            fixed (VkWriteDescriptorSet* pWrites = writes)
+            {
+                VulkanApi.vkCmdPushDescriptorSet(commandBuffer, VkPipelineBindPoint.Compute,
+                    pipelineLayout, set: 0, descriptorWriteCount: (uint)n, pDescriptorWrites: (nint)pWrites);
+            }
+        }
+    }
+
     /// <summary>Writes the bindings for a fresh set: one storage-buffer descriptor per <paramref name="bufferHandles"/>. Buffer offset = 0, range = WHOLE_SIZE.</summary>
     public unsafe void WriteSet(ulong dstSet, ReadOnlySpan<ulong> bufferHandles)
     {
@@ -193,8 +251,11 @@ public sealed class VulkanDescriptorManager : IDisposable
         _pipelineLayouts.Clear();
         foreach ((_, ulong layout) in _setLayouts) VulkanApi.vkDestroyDescriptorSetLayout(_device, layout, 0);
         _setLayouts.Clear();
-        for (int i = 0; i < 2; i++)
-            if (_pools[i] != 0) { VulkanApi.vkDestroyDescriptorPool(_device, _pools[i], 0); _pools[i] = 0; }
+        if (!_pushDescriptor)
+        {
+            for (int i = 0; i < 2; i++)
+                if (_pools[i] != 0) { VulkanApi.vkDestroyDescriptorPool(_device, _pools[i], 0); _pools[i] = 0; }
+        }
         GC.SuppressFinalize(this);
     }
 }

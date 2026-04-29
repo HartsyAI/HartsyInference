@@ -238,8 +238,18 @@ AI coding agent instruction files for each role — see [CLAUDE.md](CLAUDE.md) f
 ## Requirements
 
 - **.NET 10** (SDK 10.0+)
-- **CUDA 12.x** (for GPU inference — optional, CPU works without it)
-- **NVIDIA GPU** with compute capability 8.0+ (RTX 30xx/40xx, A100, H100) for CUDA backend
+
+### CUDA backend (NVIDIA, fastest)
+- **CUDA 12.x**
+- **NVIDIA GPU** with compute capability 8.0+ (RTX 30xx/40xx, A100, H100)
+
+### Vulkan backend (NVIDIA / AMD / Intel, cross-vendor)
+- **Vulkan 1.3+ runtime** — almost always pre-installed by the GPU vendor driver
+  - **Linux:** `sudo apt install mesa-vulkan-drivers vulkan-tools` (AMD/Intel; NVIDIA blob ships its own ICD)
+  - **Windows:** the AMD / Intel / NVIDIA driver ships Vulkan; no extra install
+- **GPU with FP16 compute** (`shaderFloat16`). Most discrete GPUs from 2019+ qualify.
+- Validation layers (optional, for debugging) — install the [LunarG Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and set `SHARPINFERENCE_VK_VALIDATION=1`.
+- See [PHASE_3_5_VULKAN_BACKEND.md](docs/Checklists/PHASE_3_5_VULKAN_BACKEND.md) for current model support and acceptance status.
 
 ---
 

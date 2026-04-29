@@ -287,11 +287,25 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         }
     }
 
-    /// <summary>Drops every cached buffer (weights + activations).</summary>
+    /// <summary>Drops every cached buffer (weights + activations) and any pending transients.</summary>
     public void FreeAllCached()
     {
         _stream.WaitIdleHost();
+        // Neutralize lazy-sync / dispose callbacks on cached tensors before tearing down the
+        // buffers — otherwise a late Tensor finalizer (running after VulkanBackend.Dispose) would
+        // invoke a lambda closing over disposed device/buffer state and crash with
+        // "vkDestroyBuffer: Invalid device".
+        foreach (Tensor t in _activationCache.Keys)
+        {
+            t._gpuSyncCallback = null;
+            t._gpuDisposeCallback = null;
+        }
         foreach (VulkanBuffer b in _cachedBuffers) b.Dispose();
+        // Synchronously dispose any uncached upload buffers too — these would otherwise leak until
+        // GC, at which point VulkanBuffer's finalizer would call vkDestroyBuffer against a
+        // device that has already been destroyed by VulkanBackend.Dispose.
+        foreach (VulkanBuffer t in _transientBuffers) t.Dispose();
+        _transientBuffers.Clear();
         _weightCache.Clear();
         _activationCache.Clear();
         _cachedBuffers.Clear();
