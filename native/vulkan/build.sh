@@ -79,6 +79,7 @@ SINGLE_KERNELS=(
     cast_f32_f16
     cast_f16_f32
     cast_f8e4m3_f16
+    matmul_coopmat
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do

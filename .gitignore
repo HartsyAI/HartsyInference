@@ -97,3 +97,12 @@ appsettings.*.json
 !appsettings.Development.json
 tests/test-models/
 /.claude
+/.cache
+/src/SharpInference.Core/.cache
+/src/SharpInference.Cpu/.cache
+/src/SharpInference.Cuda/.cache
+/src/SharpInference.Diffusion/.cache
+/src/SharpInference.ModelHandler/.cache
+/src/SharpInference.Tokenizers/.cache
+/src/SharpInference.Vulkan/.cache
+/tests/SharpInference.Diffusion.Tests/.cache

@@ -51,6 +51,17 @@ layout(constant_id = 11) const uint BN = 32;
 layout(constant_id = 12) const uint BK = 16;
 layout(constant_id = 13) const uint TM = 4;
 layout(constant_id = 14) const uint TN = 4;
+
+// Compile-time max tile sizes (the static shared / register arrays must fit the largest tile
+// any pipeline can specialize to). Host picks small tiles for small shapes (low shared-mem
+// pressure → higher occupancy on small GEMMs) or large tiles for the bulk of Flux/SDXL Linear
+// calls (M, N >= 128). The actual BM/BN/BK/TM/TN values come from the spec consts above; only
+// the bounds of the static arrays change.
+#define MAX_BM 128
+#define MAX_BN 128
+#define MAX_BK 32
+#define MAX_TM 8
+#define MAX_TN 8
 layout(constant_id = 15) const bool TRANSPOSE_A = false;
 layout(constant_id = 16) const bool TRANSPOSE_B = false;
 layout(constant_id = 17) const bool HAS_BIAS    = false;
@@ -77,8 +88,15 @@ layout(push_constant) uniform Push {
     uint cOffset;
 } pc;
 
-shared float Asub[32 * 16];     // BM * BK (max), spec const allows 32x16
-shared float Bsub[16 * 32];     // BK * BN (max)
+// Shared tiles sized for the maximum supported (BM, BK, BN). When the host picks smaller
+// spec-const values, the unused area of these arrays is simply left untouched; total
+// shared-memory cost is the static size, not the spec-const size.
+//   MAX_BM * MAX_BK = 128 * 32 = 4096 floats = 16 KB
+//   MAX_BK * MAX_BN =  32 * 128 = 4096 floats = 16 KB
+//   total: 32 KB — within the 32 KB Vulkan-spec minimum and well under the
+//   48-64 KB available on RTX 3060 / RDNA / Arc.
+shared float Asub[MAX_BM * MAX_BK];
+shared float Bsub[MAX_BK * MAX_BN];
 
 float silu(float x)        { return x / (1.0 + exp(-x)); }
 float gelu_tanh(float x)   { return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x))); }
@@ -96,7 +114,7 @@ void main() {
     uint threadCol = (tid % (BN / TN)) * TN;
     uint threadRow = (tid / (BN / TN)) * TM;
 
-    float acc[16];   // upper bound for TM*TN (4*4=16)
+    float acc[MAX_TM * MAX_TN];   // upper bound for TM*TN (8*8=64)
     for (uint i = 0; i < TM * TN; i++) acc[i] = 0.0;
 
     uint kBlocks = (pc.K + BK - 1) / BK;
@@ -130,8 +148,8 @@ void main() {
 
         // Inner FMA on the shared tile
         for (uint k = 0; k < BK; ++k) {
-            float aReg[4];
-            float bReg[4];
+            float aReg[MAX_TM];
+            float bReg[MAX_TN];
             for (uint i = 0; i < TM; ++i) aReg[i] = Asub[(threadRow + i) * BK + k];
             for (uint j = 0; j < TN; ++j) bReg[j] = Bsub[k * BN + threadCol + j];
             for (uint i = 0; i < TM; ++i)

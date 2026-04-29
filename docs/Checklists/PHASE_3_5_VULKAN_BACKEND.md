@@ -4,7 +4,7 @@
 >
 > **Packages:** `SharpInference.Vulkan` (built), `SharpInference.Core` (minor — capabilities + DeviceKind already in place), `SharpInference.Diffusion` (untouched — `IBackend` abstraction handles routing).
 >
-> **Status:** Backend functional. Compiles + 14/14 smoke tests pass on Linux + NVIDIA. End-to-end Flux Schnell FP8 4-step generation produces real photographic content matching the prompt. Remaining work: SD1.5 / SDXL pipeline validation against CUDA (SSIM gate), per-kernel correctness backfill (most kernels covered transitively, named `*_Vs_Cpu` tests still missing for several), AMD / Intel cross-vendor verification, performance tuning (currently ~9× CUDA wall-clock — target ≤ 1.6×). See [PHASE_3_5_DEVIATIONS.md](PHASE_3_5_DEVIATIONS.md) for the bugs we hit and how they were resolved. Use this checklist to track remaining progression.
+> **Status:** Backend functional and perf-tuned. Compiles + 33/33 smoke tests pass on Linux + NVIDIA. End-to-end Flux Schnell FP8 4-step generation: 178 s → 129.5 s after Phase C tuning (1.38× faster). SD1.5 / SDXL integration tests + SSIM helper added (skip-when-checkpoint-missing). Remaining work: AMD / Intel cross-vendor verification (hardware-blocked), further perf tuning (currently ~6.5× CUDA wall-clock — target ≤ 1.6× — per-dispatch overhead is the dominant bottleneck), SSIM gates need CUDA reference images to run. See [PHASE_3_5_DEVIATIONS.md](PHASE_3_5_DEVIATIONS.md) for bugs hit and resolved. Use this checklist to track remaining progression.
 
 ---
 
@@ -109,8 +109,8 @@ Each kernel ships **FP32 + FP16 variants** (same .glsl, different `-DUSE_FP16` d
 
 ### 3g. Optional / Phase-4 carryover
 
-- [ ] `sdpa_flash.comp.glsl` — FlashAttention-2 style (online softmax, Br=64 / Bc=64 tiles). Phase 4 optimization; v1 uses naive 3-pass.
-- [ ] `matmul_coopmat.comp.glsl` — `VK_KHR_cooperative_matrix` variant. Phase 4 optimization.
+- [ ] `sdpa_flash.comp.glsl` — FlashAttention-2 style (online softmax, Br=64 / Bc=64 tiles). Phase 4 optimization; v1 uses naive 3-pass. **Phase C2 profile data shows SDPA is only 4.4% of host time on Flux Schnell** — FlashAttention is now low-priority versus the per-dispatch-overhead lever (push descriptors / kernel fusion).
+- [x] `matmul_coopmat.comp.glsl` — `VK_KHR_cooperative_matrix` variant. **Implemented in Phase C2 step 2.** FP16 input, FP32-or-FP16 output (gated by `OUTPUT_F32` spec const — see [PHASE_3_5_DEVIATIONS.md #11](PHASE_3_5_DEVIATIONS.md) for why both are required), transpose-aware via `gl_CooperativeMatrixLayout{Row,Column}Major`. Bias add via follow-up `BroadcastAdd(N, 1)` dispatch. Linear time on Flux 43.8 s → 37.0 s (15%); wall-clock 138 s → 129.5 s (6%). Less than projected — see § 8 perf measurements.
 - [ ] `dequant_q4_k.comp.glsl`, `dequant_q8_0.comp.glsl` — GGUF Q4/Q8 dequant on GPU. Phase 4.
 - [ ] Multi-queue / async-compute — Phase 7 if needed.
 
@@ -179,8 +179,54 @@ For every kernel: dispatch on Vulkan, dispatch on CPU, compare element-wise with
 
 ### Memory leak validation
 
-- [ ] 100-step generation cycle on Vulkan → final `vkAllocateMemory` count returns to startup baseline; final `VkDeviceMemory` total ≤ initial + epsilon
-- [ ] Validation layer reports zero leaks on shutdown
+- [x] 100-iteration MatMul cycle on Vulkan → device-memory delta ≤ 16 MB epsilon ([VulkanLeakTests.cs](../../tests/SharpInference.Vulkan.Tests/VulkanLeakTests.cs)). Surfaced two real fixes en route — see [PHASE_3_5_DEVIATIONS.md](PHASE_3_5_DEVIATIONS.md) (callbacks neutralized in `FreeAllCached`; transient-buffer Dispose in helper Dispose).
+- [ ] Full 100-step generation cycle on a real model (SD1.5 / Flux) — needs checkpoint, deferred until SSIM gate.
+- [ ] Validation layer reports zero leaks on shutdown.
+
+## 8. Performance Measurements (RTX 3060 Linux + NVIDIA driver)
+
+Captured via `SHARPINFERENCE_VK_PROFILE=1`. Generation: Flux Schnell FP8, 4 steps, 512×512, prompt "A photograph of an astronaut riding a horse", seed=42.
+
+| Stage | Wall-clock | Profiled host time | Linear total | Linear avg/call | Notes |
+|---|---|---|---|---|---|
+| Pre-Phase-C baseline | 178 s | n/a | n/a | n/a | Sync `WaitIdleHost` per op-boundary |
+| C1 (async timeline-semaphore submit) | 160 s | 47.6 s | 44.9 s | 20.6 ms | `DrainAndFlush` no longer host-waits |
+| C2.1 (matmul tiles 32×32→128×128) | 140 s | 49.3 s | 46.4 s | 21.3 ms | 16× fewer workgroups; GPU compute drops |
+| C2.2 (coopmat F16-only guard) | 138 s | 46.4 s | 43.8 s | 20.1 ms | **Path silently bypassed** — see deviation #11 |
+| **C2.2 (coopmat F32-output added)** | **129.5 s** | **39.5 s** | **37.0 s** | **17.0 ms** | Real coopmat hit on Flux Linears |
+| C2.3a (push descriptors, default on) | 139.6 s | 46.7 s | 43.8 s | 20.1 ms | **Regression on NVIDIA** — see deviation #12; default reverted to opt-in via env |
+
+**Cumulative: 178 s → 129.5 s, 1.38× faster, 27% reduction.**
+
+CUDA reference is ~20 s on the same hardware. Vulkan is **~6.5× off-target** for the Phase 3.5 acceptance gate (≤ 1.6× CUDA). Diagnosis from the profile:
+
+- Linear is 93.6% of profiled host time (37.0 s of 39.5 s).
+- 11,319 dispatches across 2,180 Linear calls = ~5 dispatches per call (input cast + weight cast + matmul + bias add + occasionally another cast).
+- 17 ms/call vs ~1 ms theoretical compute → **94% of per-call time is per-dispatch overhead** (descriptor binding, command buffer recording, vkQueueSubmit2). Bigger tiles and tensor-core compute reduce the 6% compute portion only.
+
+Remaining levers (Phase 4 carryover):
+
+- **Q/K/V projection fusion** — concat the three QKV weight matrices at weight-load time so the
+  three sequential `Linear` calls become one matmul producing `[batch, seqLen, 3*hidden]`,
+  followed by tensor-view-based slicing into Q, K, V. Cuts ~14% of total Linear dispatches
+  (Q/K/V Linears are ~21% of the total; saves 2/3 of those). Estimated ~5 s wall-clock saving.
+  **Deferred to Phase 4** — requires: (a) tensor view/slice API on `Tensor` (currently only
+  `Reshape` exists), (b) per-block weight-loading code in `FluxDoubleStreamBlock`,
+  `FluxSingleStreamBlock`, `Flux2DoubleBlock`, `Flux2SingleBlock`, and SDXL attention blocks.
+  Estimated 2–3 days of careful work.
+- **Pre-cast FP8 weights once at load** — currently FP8→F16 cast runs ~2 of the 5 dispatches
+  per Linear. Trades VRAM (Flux Schnell ~12 GB FP8 → ~24 GB F16) for fewer dispatches; not
+  feasible at full Flux size on a 12 GB card, but viable for selective caching of hot weights.
+  Phase 4 work item.
+- **Cooperative-matrix bias fusion** — currently coopmat path runs `BroadcastAdd` as a
+  follow-up dispatch when bias is present. Adding `HAS_BIAS` to `matmul_coopmat.comp.glsl`
+  would save ~50% of those follow-ups (~1,000 dispatches/generation). Estimated ~1 s wall-clock
+  saving. Not worth more shader-side complexity right now.
+- **Push descriptors on AMD/Intel** — measured as a *regression* on NVIDIA (deviation #12) but
+  may be a win on other vendors per published guides. Code path is implemented but
+  default-off; opt-in via `SHARPINFERENCE_VK_PUSH_DESCRIPTORS=1` for Phase E AMD/Intel testing.
+
+FlashAttention is **not** a meaningful lever here — SDPA is 4.4-5% of host time.
 
 ## 6. Deviations
 
@@ -199,7 +245,7 @@ Track unanticipated issues in [`PHASE_3_5_DEVIATIONS.md`](PHASE_3_5_DEVIATIONS.m
 - [ ] **Code review** — Vulkan handle-leak audit (every `vkCreate*` paired with `vkDestroy*` in `Dispose`); `[LibraryImport]` correctness; no allocations on hot path
 - [ ] **Documentation update** — `docs/Design/CORE_DESIGN.md` Phase-3.5 status flips to Done; `docs/Agents/KERNEL.md` SPIR-V section gains "implemented kernels" table; `README.md` adds AMD/Intel install snippet
 - [ ] **CI green** — Linux GPU runner passes Vulkan kernel tests + SD1.5 end-to-end
-- [ ] **Sample updated** — `samples/BasicImageGeneration` accepts `--backend cuda|vulkan|cpu`
+- [x] **Sample updated** — `samples/BasicImageGeneration` accepts `--backend cuda|vulkan|cpu`
 - [ ] **Benchmark report committed** to `docs/Research/CUDA_PERFORMANCE.md` (or new `VULKAN_PERFORMANCE.md`) with measured numbers
 - [ ] **Merge to main** with explicit changelog
 

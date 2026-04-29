@@ -515,3 +515,54 @@ layers.0           1.226e-07
 **Also fixed in this round** — `BuildPositionIds` was using `capRealLen+1` for the image frame and `1..capRealLen` for caption frames. Diffusers uses `capPaddedLen+1` and `1..capPaddedLen` (every caption slot, real + pad, gets a position). The synthetic test masked this because `capRealLen == capPaddedLen` for a 64-token caption, but real prompts will hit the difference. Updated the signature to drop `capRealLen` (no longer needed); caller passes `capPaddedLen` only.
 
 **Lesson**: When porting a transformer where the same block class is reused with different module flags (modulation=True/False, with/without cross-attention, etc.), do NOT split it into separate C# classes that share architecture by accident. The diffusers `ZImageTransformerBlock` was the same class used in 3 places — context_refiner / noise_refiner / layers — and **all three branches** of the original code-path inherit the same `freqs_cis` / `attention_mask` / `processor` plumbing. Carving the modulation case into a separate class encouraged me to "clean up" the rope plumbing for the simpler path. The simpler path needed the rope just as much. Either keep the unified block (dispatch on a runtime flag), or after splitting, run a layer-by-layer diff to catch what the split silently dropped.
+
+### 29. Z-Image Caption Encoding Pipeline — Three Bugs in How the Test Calls Qwen3
+
+**Problem**: With deviation 28 fixed, the Z-Image transformer matched the diffusers reference byte-for-byte across all 38 layers (max err 4.5e-5 at layer 29). But the end-to-end image was still glitched — recognizable astronaut shape with heavy banding. The transformer math was correct; the *inputs* to the transformer were wrong.
+
+**Discovery**: Re-read `pipeline_z_image.py:198-247` (`_encode_prompt`) and compared to the test code in `ZImageGenerationTests.cs`. Three deviations from the reference, each subtle and silent:
+
+1. **No chat template applied**. Diffusers does:
+   ```python
+   prompt_item = self.tokenizer.apply_chat_template(
+       [{"role": "user", "content": prompt}],
+       tokenize=False, add_generation_prompt=True, enable_thinking=True,
+   )
+   ```
+   This wraps the user prompt in `<|im_start|>user\n…<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`. The test was calling `tok.Encode(prompt)` (raw text + EOS), not `tok.EncodeChat(prompt)` — the model was conditioning on a text distribution it had never seen during training.
+
+2. **Final hidden state instead of penultimate**. Diffusers does `text_encoder(...).hidden_states[-2]` — the second-to-last layer's output, raw (no final RMSNorm). The test was using `qwenEncoder.Encode(...)` which returns the FINAL hidden state through the model's `model.norm` RMSNorm. That changes the statistics dramatically: post-norm `abs_mean ≈ 1.25`, penultimate `abs_mean ≈ 6.4` with a much wider min/max range. The Z-Image transformer's `cap_embedder` was trained to consume the wider distribution; feeding it the post-norm distribution sends every downstream layer off-spec.
+
+3. **Padding tokens treated as real**. Diffusers filters via `prompt_embeds[i][prompt_masks[i]]` — drops every padding-position hidden state. The test was passing the full padded `[1, 64, 2560]` tensor to `GenerateFromEmbeddings`. With `capRealLen = 64` (and `capPaddedLen` therefore also 64), `PadCaption` was a no-op, and the 51 garbage pad-position hidden states (Qwen3 hallucinations at causally-blind pad positions) flowed through `cap_embedder` and `context_refiner` as if they were real caption tokens. The Z-Image transformer expects: `realLen` real tokens → `cap_embedder` → pad to `capPaddedLen` with the **learned** `cap_pad_token` parameter.
+
+**Fix** (all in the test, no encoder/pipeline changes): use `tok.EncodeChat(prompt)`, compute `realLen` from `Qwen3Tokenizer.CreateAttentionMask`, call `qwenEncoder.EncodeMultiLayer(backend, [tokens], [NumLayers - 1])` to get the penultimate hidden state in HF indexing, and slice the result to `[1, realLen, 2560]` with a small `SliceFirstSeq` helper before handing it to `pipeline.GenerateFromEmbeddings`. The pipeline naturally derives `capRealLen = realLen`, pads to the next multiple of 32 with `cap_pad_token`, and the transformer sees exactly what diffusers feeds it. Also added a `NumLayers` accessor to `LlamaStyleEncoder` so the test doesn't have to hardcode 36.
+
+**Result**: First end-to-end run after the fix produced a clean 512×512 image of an astronaut riding a horse on the moon (8 NFE, CFG=1.0, seed=42) — no banding, no glitches, prompt fully respected. Total e2e time: 2 min 40 s on RTX 3060.
+
+**Lesson**: A perfect transformer with the wrong caption signal looks identical to a buggy transformer. After verifying the model math via layer-by-layer diff against synthetic inputs, the next failure mode is the pipeline plumbing around it — tokenization template, hidden-layer selection, attention/pad masking. For DiT models that take "caption embeddings" as input, treat the caption-encoding pipeline as a separate component that needs its own diff against the reference. Print the embedding stats (shape, abs_mean, min/max) and compare to Python; a wide divergence in `abs_mean` is a clean signal that you're reading the wrong layer or applying the wrong norm.
+
+### 30. CudaBackend.RmsNorm Reads Weight as `float*` Without DType Check
+
+**Problem**: When porting Z-Image-Base (BF16 weights for everything except FP8 Linear projections), the GPU end-to-end image came out as a 16-px-grid of disconnected color blobs — exact patch-boundary noise. Same code path that produces a clean image for Z-Image-Turbo. The transformer math, RoPE, AdaLN, attention, FFN, scheduler, CFG, caption encoding — all verified identical to Turbo, yet the output looked like every patch was being processed in isolation with no cross-patch attention.
+
+**Root cause**: [CudaBackend.cs:604-633](../../src/SharpInference.Cuda/CudaBackend.cs#L604) implements `RmsNorm` as a CPU fallback (T5 is a once-per-generation cost, not a hot path) and reads the weight pointer as `float*` directly:
+
+```csharp
+float* pWeight = (float*)weight.DataPointer;     // ← assumes F32
+...
+pOut[baseIdx + i] = pIn[baseIdx + i] * invRms * pWeight[i];
+```
+
+There is no dtype check. If the weight tensor is BF16 (or F16), the bytes get bit-reinterpreted: every two consecutive BF16 values are read as one F32. Each F32 read is the upper 16 bits of one BF16 value concatenated with the upper 16 bits of the next BF16 value, producing essentially random garbage scale factors.
+
+Why Turbo (FP8Mix) didn't surface this: `LogDTypeDistribution` shows `F32=283, F8_E4M3=170` — Turbo stores its norms in F32 natively, FP8 is only used for the heavy Linear weights (which go through cuBLAS GEMM with proper FP8→F16 cast). The F32 norm path is correct.
+
+Why Base BF16 (`benjiaiplayground/z-image-base-repacked`) and Base nvfp8-mixed (`RamonGuthrie/z_image_base-nvfp8-mixed`) hit the bug: both store norm scales as BF16 (`BF16=453` for the pure BF16 file, `BF16=281, F8_E4M3=172` for the nvfp8-mixed). Every RMSNorm call across the 4 norms × 30 main layers + 2×2 refiners + final cap_embedder.0 was producing garbage modulated activations, breaking attention coherence across patches.
+
+**Why the noise looked "blocky"**: each image patch (after `Patchify`) has its own independent token. Once attention can't propagate scale information across patches (because the RMSNorm scale per-channel is random per layer), each patch evolves into its own per-channel noise distribution, giving a clean 16-px-grid of differently-tinted blobs.
+
+**Fix**: cast non-F32 RMSNorm scales to F32 at load time. The norm scales are tiny (`[hidden]` = 3840 floats per scale, 8 KB) and there are ~5 per block × 32 blocks = ~1.3 MB total — negligible cost for a one-time conversion. Same pattern was already used for `QkNorm.LoadWeights` (head-norms) and `LlamaStyleEncoder.CastToF32IfNeeded` (Qwen3 RMS scales). Added `LoadAsF32` helpers in `ZImageBlock` and `ZImageContextRefinerBlock`, applied to the 4 norms per block; cap_embedder.0 cast in `ZImageTransformer.LoadWeights`. After the fix, Z-Image-Base produces a clean astronaut-on-horse-on-moon image at 512×512, 28 steps, CFG=4.0.
+
+**Lesson**: any C# kernel that does `(float*)weight.DataPointer` is a latent dtype bug — either fix the kernel to accept all supported dtypes, or guarantee F32 at load time and document the guarantee. Mixed-dtype checkpoints (FP8 Linear weights + BF16 norms is the modern norm) will surface these bugs the moment a non-F32-storing checkpoint hits a CPU-fallback op. When porting a model variant, audit every `weight.DataPointer` cast against the actual tensor dtypes the new checkpoint ships, not just the ones the previous variant happened to use.
+
+A second smaller bug: BF16-only checkpoints exposed that `CudaBackend.CastOnGpu` had no `BF16↔F32` path, so `Linear()` with F32 input + BF16 weight would throw `NotSupportedException`. Added [cast_bf16_f32.ptx](../../src/SharpInference.Cuda/Ptx/cast_bf16_f32.ptx) — BF16 is just the upper 16 bits of F32 (lossless one-way cast, RTNE on the way back). Wired through `LaunchCastBf16ToF32` / `LaunchCastF32ToBf16` and the `CastOnGpu` dispatch table. Same kernel exposes BF16↔F16 via two-step temp F32. This was a prerequisite for Base-BF16 to reach `RmsNorm` at all — without it the test crashed earlier at the t_embedder Linear.

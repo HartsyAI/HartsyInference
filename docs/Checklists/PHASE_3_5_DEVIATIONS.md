@@ -178,6 +178,126 @@ float gelu_exact(float x) { return 0.5 * x * (1.0 + erf_approx(x * 0.70710678118
 
 ---
 
+### 12. Push descriptors regressed perf on NVIDIA — default off
+
+**Design assumption**: `VK_KHR_push_descriptor` (or core-1.4 `vkCmdPushDescriptorSet`) eliminates
+the per-dispatch `vkAllocateDescriptorSets` + `vkUpdateDescriptorSets` round-trip by writing
+descriptor bindings directly into the command buffer. Common guidance is that this saves the
+host-time spent on pool allocation and update calls, especially on draw-heavy workloads.
+
+**Deviation**: Measured on RTX 3060 / NVIDIA Linux 535 driver, push descriptors are *slower*
+than the pool-ring path for our workload. Flux Schnell 4-step:
+- Pool-ring path:   129.5 s wall-clock, Linear total 37.0 s
+- Push-descriptor:  139.6 s wall-clock, Linear total 43.8 s (≈ 7% regression)
+
+**How it was found**: After implementing push descriptors as a default-on optimization in Phase
+C2 step 3, re-ran the Flux Schnell benchmark expecting ~10–30% improvement; saw a 7%
+regression instead. Profile dump showed Linear avg/call rose from 17.0 ms → 20.1 ms.
+
+**Probable cause**: NVIDIA's pool-ring implementation is highly tuned (descriptors live in a
+pre-allocated pool, allocation is essentially a counter bump). Push descriptors in contrast
+require copying the descriptor data (~32 bytes × 5 bindings = 160 B per dispatch × 11,319
+dispatches = 1.8 MB) into the command buffer at recording time, which on this driver is more
+expensive than the pre-allocated-pool path. Other vendors (AMD, Intel) may differ; the
+extension is reportedly the recommended path on AMD RDNA per several published guides.
+
+**Fix**: Push descriptors remain implemented in
+[VulkanDescriptorManager.PushSet](../../src/SharpInference.Vulkan/VulkanDescriptorManager.cs)
+and in the
+[VulkanBackend.Dispatch](../../src/SharpInference.Vulkan/VulkanBackend.cs) branch, but are
+**default-off**. Opt-in via `SHARPINFERENCE_VK_PUSH_DESCRIPTORS=1`. To revisit on AMD when
+Phase E hardware is available — if push descriptors are a win there, we'd want a per-vendor
+default rather than a universal one.
+
+**Impact**: Small — one config flip and one comment block. Important lesson: not every Vulkan
+"best practice" generalizes; profile before defaulting on. The current default (pool path) is
+the right choice for the only hardware we've measured.
+
+---
+
+### 11. Coopmat F16-output guard silently skipped Flux's F32-output Linears
+
+**Design assumption**: `VK_KHR_cooperative_matrix` writes via `coopMatStore` from a fp16 Accumulator
+coopmat to a `float16_t[]` buffer; the only safe output dtype for the coopmat path is therefore
+F16. A guard `if (output.DType != DType.F16) return false;` would correctly route F32-output ops
+to the tiled fallback.
+
+**Deviation**: Flux's `FluxTransformer.cs` allocates *every* Linear output as `DType.F32`
+([line 164](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L164),
+[L169](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L169),
+[L199](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L199),
+[L219](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L219), and many
+more) regardless of the input/weight dtype. With the F16-only guard, the coopmat path was never
+actually hit during Flux Schnell generation — every Linear silently fell through to
+`matmul_tiled`. Wall-clock improvement from "enabling" coopmat was 1.4% (138 s → 138 s within
+noise), confirming the path was inert.
+
+**How it was found**: After "enabling" coopmat with the F16-only guard, the Flux Schnell
+benchmark showed essentially no change. Tracing `output.DType` in `Linear` calls inside the Flux
+transformer showed they were all F32. Profile dump's `Linear` stats (count and dispatches/call)
+were identical to the pre-coopmat run — definitive evidence the coopmat shader was never
+launched.
+
+**Fix**: Added an `OUTPUT_F32` spec const + a second binding (slot 4) in
+[matmul_coopmat.comp.glsl](../../native/vulkan/shaders/matmul_coopmat.comp.glsl) so the
+accumulator (already fp32 internally on every conformant impl) can be stored directly to a
+fp32 buffer when the host requests it. Host guard relaxed to
+`output.DType is DType.F16 or DType.F32`; binds the real output buffer to either slot 2
+(fp16) or slot 4 (fp32) based on the spec const, with the unused slot bound to a placeholder
+to keep descriptor count uniform.
+
+**Impact**: Linear time dropped from 43.8 s → 37.0 s (15% faster) on Flux Schnell 4-step.
+Wall-clock improved 138 s → 129.5 s (6%). Less than the 2-4× projected for coopmat in
+isolation — see the perf measurements section below for why per-dispatch overhead, not GEMM
+compute, dominates at Flux Linear shapes. Lesson: tensor-core paths must store to whatever
+dtype the surrounding pipeline allocated; gating on fp16-only is correct but disables the path
+on every realistic transformer model.
+
+---
+
+### 10. Cross-warp reduction overflow at small subgroup sizes (LLVMpipe / Intel iGPU)
+
+**Design assumption**: The GroupNorm / LayerNorm / RmsNorm / Softmax cross-warp reductions
+follow the standard pattern: each subgroup reduces internally via `subgroupAdd`, the first
+lane stores the per-subgroup partial in `shared float warp_sum[N]`, then subgroup 0 loads
+`warp_sum[invId]` and reduces. The final reduction lane mask is gated with
+`gl_SubgroupInvocationID < gl_NumSubgroups`, which works correctly as long as
+`gl_NumSubgroups ≤ subgroupSize`.
+
+**Deviation**: On Mesa LLVMpipe (software Vulkan), subgroup size is small (often 4–8). With
+`local_size_x = 256`, `gl_NumSubgroups = 32` or `64`, which is *larger* than the subgroup
+size. The single-subgroup final reduction only covers the first `subgroupSize` partials and
+silently drops the rest. Real AMD (subgroup 32 or 64 on RDNA) and NVIDIA (subgroup 32) are
+unaffected because `local_size / subgroupSize` stays ≤ subgroupSize. Intel iGPU is the most
+likely real-hardware target to hit this.
+
+**How it was found**: Phase E pre-fly run of the Vulkan smoke suite under
+`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` (Mesa LLVMpipe). 30/33 pass;
+the 3 failures are all GroupNorm-shaped:
+- `Backend_GroupNorm_Matches_Cpu_Sd15Shape`: 81,869 mismatches, max error 2.01
+- `Backend_GroupNormSilu_Matches_Cpu`: error -0.11
+- The other reduction kernels (LayerNorm / RmsNorm) pass because their workgroup sizes are
+  small enough that `gl_NumSubgroups ≤ subgroupSize` holds even on LLVMpipe.
+
+**Fix**: Not yet shipped. Two viable options:
+1. **Pin `requiredSubgroupSize`** at pipeline creation via
+   `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` to a value that satisfies
+   `local_size_x / requiredSubgroupSize ≤ requiredSubgroupSize` (i.e. for `local_size_x =
+   256`, need `requiredSubgroupSize ≥ 16`). Intel Arc, AMD RDNA, NVIDIA all support
+   pinning ≥ 16. LLVMpipe doesn't, so it would still fail there — but LLVMpipe is a
+   software validation tool, not a deployment target.
+2. **Multi-pass reduction**: when `gl_NumSubgroups > subgroupSize`, do a second pass through
+   `shared` memory with another subgroup-internal reduction. Slightly more expensive but
+   driver-agnostic.
+
+**Impact**: Real AMD RDNA2/3 and Intel Arc are unaffected on the typical
+`local_size_x = 256` workgroups. Phase 3.5 acceptance gate #5 (SD1.5 visually correct on
+AMD RDNA + Mesa RADV) is at risk only if RADV reports subgroup ≤ 8, which is unlikely.
+Recommend implementing fix #1 (`requiredSubgroupSize`) before AMD acceptance run, and
+upgrading to fix #2 if Intel iGPU support becomes a deployment target.
+
+---
+
 ## Anticipated Categories (kept for reference)
 
 The CUDA backend's experience suggested the following classes of issues; mapping how each played out in Phase 3.5:
