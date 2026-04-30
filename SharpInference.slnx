@@ -1,8 +1,4 @@
 <Solution>
-  <Folder Name="/samples/">
-    <Project Path="samples/BasicImageGeneration/BasicImageGeneration.csproj" />
-  </Folder>
-
   <Folder Name="/src/">
     <Project Path="src/SharpInference.Core/SharpInference.Core.csproj" />
     <Project Path="src/SharpInference.ModelHandler/SharpInference.ModelHandler.csproj" />
@@ -15,9 +11,11 @@
     <Project Path="src/SharpInference.Video/SharpInference.Video.csproj" />
     <Project Path="src/SharpInference.Server/SharpInference.Server.csproj" />
     <Project Path="src/SharpInference.Vulkan/SharpInference.Vulkan.csproj" />
+    <Project Path="src/SharpInference.Cli/SharpInference.Cli.csproj" />
   </Folder>
 
   <Folder Name="/tests/">
+    <Project Path="tests/SharpInference.Tests.Common/SharpInference.Tests.Common.csproj" />
     <Project Path="tests/SharpInference.Core.Tests/SharpInference.Core.Tests.csproj" />
     <Project Path="tests/SharpInference.ModelHandler.Tests/SharpInference.ModelHandler.Tests.csproj" />
     <Project Path="tests/SharpInference.Cpu.Tests/SharpInference.Cpu.Tests.csproj" />
