@@ -2,9 +2,36 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Utilities;
 
-/// <summary>Converts VAE decoder output tensor [B, 3, H, W] (float, range ~[-1, 1]) to standard image byte arrays.</summary>
+/// <summary>Converts between VAE-style image tensors [B, 3, H, W] (float, range ~[-1, 1]) and standard RGB byte arrays [H, W, 3] in [0, 255]. Used at the boundary between user image I/O and the VAE encoder/decoder.</summary>
 public static unsafe class ImagePostProcessor
 {
+    /// <summary>Converts RGB byte data [H, W, 3] in [0, 255] (HWC interleaved) to a tensor [1, 3, H, W] in [-1, 1] (NCHW planar). Mirrors the inverse mapping in <see cref="TensorToRgbBytes"/>.</summary>
+    public static Tensor RgbBytesToTensor(ReadOnlySpan<byte> rgbData, int width, int height)
+    {
+        if (rgbData.Length != width * height * 3)
+            throw new ArgumentException($"rgbData length {rgbData.Length} != width*height*3 ({width * height * 3})", nameof(rgbData));
+
+        Tensor image = new Tensor(new TensorShape(1, 3, height, width), DType.F32);
+        float* imgPtr = (float*)image.DataPointer;
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int pixelOffset = (y * width + x) * 3;
+                for (int c = 0; c < 3; c++)
+                {
+                    // Inverse of TensorToRgbBytes: byte/255 → [0,1] → [-1,1]
+                    float val = rgbData[pixelOffset + c] / 255.0f;
+                    val = val * 2.0f - 1.0f;
+                    imgPtr[c * height * width + y * width + x] = val;
+                }
+            }
+        }
+
+        return image;
+    }
+
     /// <summary>Converts the first image in a batch from tensor [B, 3, H, W] to RGB byte array [H, W, 3]. Clamps to [0, 255].</summary>
     public static byte[] TensorToRgbBytes(Tensor image)
     {

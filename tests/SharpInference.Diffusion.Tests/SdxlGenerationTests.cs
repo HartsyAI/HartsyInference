@@ -13,6 +13,7 @@ using SharpInference.Diffusion.Schedulers;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
@@ -27,22 +28,10 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public class SdxlGenerationTests
 {
-    private static readonly string SdxlCheckpointPath =
-        Environment.GetEnvironmentVariable("SDXL_SINGLE_FILE_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\SDXL\Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors";
-
-    // CLIP-L and CLIP-G use the same OpenAI CLIP vocabulary (49408 tokens)
-    private static readonly string TokenizerVocabPath =
-        Environment.GetEnvironmentVariable("CLIP_VOCAB_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_vocab.json";
-
-    private static readonly string TokenizerMergesPath =
-        Environment.GetEnvironmentVariable("CLIP_MERGES_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_merges.txt";
-
-    private static readonly string OutputDir =
-        Environment.GetEnvironmentVariable("SDXL_OUTPUT_DIR")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\Output";
+    private static string SdxlCheckpointPath => TestPaths.Sdxl.SingleFile;
+    private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string TokenizerMergesPath => TestPaths.Tokenizers.ClipMerges;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private readonly ITestOutputHelper _output;
 
@@ -1121,7 +1110,7 @@ public class SdxlGenerationTests
     [Fact]
     public unsafe void CrossRuntime_SingleUNetPassMatchesPython()
     {
-        string refDir = @"c:\Users\kaleb\Desktop\projects\SharpInference\tests\python-reference\sdxl_reference_tensors";
+        string refDir = Path.Combine(RepoRoot.Path, "tests", "python-reference", "sdxl_reference_tensors");
         if (!Directory.Exists(refDir))
         {
             _output.WriteLine($"SKIPPED: Reference tensors not found: {refDir}");

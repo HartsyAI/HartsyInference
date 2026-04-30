@@ -11,6 +11,7 @@ using SharpInference.Diffusion.Requests;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
@@ -23,45 +24,12 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public sealed class Flux2GenerationTests
 {
-    private static string PickPath(string envVar, string winPath, string linuxPath)
-    {
-        string? v = Environment.GetEnvironmentVariable(envVar);
-        if (!string.IsNullOrEmpty(v)) return v;
-        return OperatingSystem.IsWindows() ? winPath : linuxPath;
-    }
-
-    private static readonly string LinuxRepoRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-
-    private static readonly string Klein4BPath = PickPath(
-        "FLUX2_KLEIN_4B_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux-2-klein-4b.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux-2-klein-4b.safetensors"));
-
-    private static readonly string Qwen3Path = PickPath(
-        "QWEN3_4B_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\qwen_3_4b.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "qwen_3_4b.safetensors"));
-
-    private static readonly string Flux2VaePath = PickPath(
-        "FLUX2_VAE_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux2-vae.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux2-vae.safetensors"));
-
-    private static readonly string Qwen3VocabPath = PickPath(
-        "QWEN3_VOCAB_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\qwen3-4b\vocab.json",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "qwen3-4b", "vocab.json"));
-
-    private static readonly string Qwen3MergesPath = PickPath(
-        "QWEN3_MERGES_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\qwen3-4b\merges.txt",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "qwen3-4b", "merges.txt"));
-
-    private static readonly string OutputDir = PickPath(
-        "FLUX_OUTPUT_DIR",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\Output",
-        Path.Combine(LinuxRepoRoot, "Output"));
+    private static string Klein4BPath => TestPaths.Flux2.Klein;
+    private static string Qwen3Path => TestPaths.TextEncoders.Qwen3_4B;
+    private static string Flux2VaePath => TestPaths.Vae.Flux2;
+    private static string Qwen3VocabPath => TestPaths.Tokenizers.Qwen3Vocab;
+    private static string Qwen3MergesPath => TestPaths.Tokenizers.Qwen3Merges;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private readonly ITestOutputHelper _output;
 

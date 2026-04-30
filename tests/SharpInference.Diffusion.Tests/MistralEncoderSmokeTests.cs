@@ -6,6 +6,7 @@ using SharpInference.Cuda;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.ModelHandler.CheckpointConverters.Utils;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 
 namespace SharpInference.Diffusion.Tests;
 
@@ -17,20 +18,7 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public sealed class MistralEncoderSmokeTests
 {
-    private static string PickPath(string envVar, string winPath, string linuxPath)
-    {
-        string? v = Environment.GetEnvironmentVariable(envVar);
-        if (!string.IsNullOrEmpty(v)) return v;
-        return OperatingSystem.IsWindows() ? winPath : linuxPath;
-    }
-
-    private static readonly string LinuxRepoRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-
-    private static readonly string MistralWeightsPath = PickPath(
-        "MISTRAL_FP8_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\mistral_3_small_flux2_fp8.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "mistral_3_small_flux2_fp8.safetensors"));
+    private static string MistralWeightsPath => TestPaths.TextEncoders.Mistral3SmallFp8;
 
     private readonly ITestOutputHelper _output;
 

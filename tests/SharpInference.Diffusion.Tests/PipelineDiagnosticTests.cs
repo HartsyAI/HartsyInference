@@ -9,6 +9,7 @@ using SharpInference.Diffusion.Models.Vae;
 using SharpInference.Diffusion.Schedulers;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
@@ -19,7 +20,7 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public class PipelineDiagnosticTests
 {
-    private const string ModelDir = @"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\test-models\sd15";
+    private static string ModelDir => TestPaths.Sd15.DiffusersDir;
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 

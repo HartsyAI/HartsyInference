@@ -1,3 +1,4 @@
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 using Xunit;
 
@@ -6,11 +7,8 @@ namespace SharpInference.Tokenizers.Tests;
 /// <summary>Tests for CLIP BPE tokenizer using real OpenAI CLIP vocabulary and merges files.</summary>
 public sealed class ClipTokenizerTests : IDisposable
 {
-    private static readonly string TestModelsDir = Path.GetFullPath(
-        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "test-models"));
-
-    private static readonly string VocabPath = Path.Combine(TestModelsDir, "clip_vocab.json");
-    private static readonly string MergesPath = Path.Combine(TestModelsDir, "clip_merges.txt");
+    private static string VocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string MergesPath => TestPaths.Tokenizers.ClipMerges;
 
     private readonly ClipTokenizer? _tokenizer;
     private readonly bool _modelsAvailable;

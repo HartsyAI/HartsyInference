@@ -8,6 +8,7 @@ using SharpInference.Diffusion.Requests;
 using SharpInference.Diffusion.Tests.Helpers;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 using SharpInference.Vulkan;
 using Xunit;
@@ -30,38 +31,11 @@ public sealed class SdxlVulkanGenerationTest
 
     public SdxlVulkanGenerationTest(ITestOutputHelper output) => _output = output;
 
-    private static string PickPath(string envVar, string winPath, string linuxPath)
-    {
-        string? v = Environment.GetEnvironmentVariable(envVar);
-        if (!string.IsNullOrEmpty(v)) return v;
-        return OperatingSystem.IsWindows() ? winPath : linuxPath;
-    }
-
-    private static readonly string LinuxRepoRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-
-    private static readonly string SdxlSingleFilePath = PickPath(
-        "SDXL_SINGLE_FILE_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\SDXL\Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors"));
-
-    private static readonly string TokenizerVocabPath = PickPath(
-        "CLIP_VOCAB_PATH",
-        "",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_vocab.json"));
-
-    private static readonly string TokenizerMergesPath = PickPath(
-        "CLIP_MERGES_PATH",
-        "",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_merges.txt"));
-
-    private static readonly string OutputDir = PickPath(
-        "SDXL_OUTPUT_DIR", "",
-        Path.Combine(LinuxRepoRoot, "Output"));
-
-    private static readonly string SdxlCudaReferencePath = PickPath(
-        "SDXL_CUDA_REFERENCE_PATH", "",
-        Path.Combine(LinuxRepoRoot, "Output", "sdxl_cuda_1024x1024_seed42.bmp"));
+    private static string SdxlSingleFilePath => TestPaths.Sdxl.SingleFile;
+    private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string TokenizerMergesPath => TestPaths.Tokenizers.ClipMerges;
+    private static string OutputDir => TestPaths.OutputDir;
+    private static string SdxlCudaReferencePath => TestPaths.ReferenceImage("SDXL_CUDA_REFERENCE_PATH", "sdxl_cuda_1024x1024_seed42.bmp");
 
     private static bool VulkanAvailable()
     {

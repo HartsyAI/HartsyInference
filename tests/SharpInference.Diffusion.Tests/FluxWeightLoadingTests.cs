@@ -4,19 +4,14 @@ using SharpInference.Core.Tensors;
 using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 
 namespace SharpInference.Diffusion.Tests;
 
 /// <summary>Flux weight loading tests. Validates that Flux safetensors checkpoints load correctly into the FluxTransformer. Supports both BFL single-file and diffusers formats.</summary>
 public sealed class FluxWeightLoadingTests
 {
-    private static readonly string FluxSingleFilePath =
-        Environment.GetEnvironmentVariable("FLUX_SINGLE_FILE_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-schnell.safetensors";
-
-    private static readonly string FluxDiffusersDir =
-        Environment.GetEnvironmentVariable("FLUX_DIFFUSERS_DIR")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\flux";
+    private static string FluxSingleFilePath => TestPaths.Flux.Schnell;
 
     private readonly ITestOutputHelper _output;
 

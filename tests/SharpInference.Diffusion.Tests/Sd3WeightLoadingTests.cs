@@ -6,6 +6,7 @@ using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Models.Vae;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 
 namespace SharpInference.Diffusion.Tests;
 
@@ -13,14 +14,10 @@ namespace SharpInference.Diffusion.Tests;
 public class Sd3WeightLoadingTests
 {
     /// <summary>Path to SD3 in HuggingFace diffusers layout.</summary>
-    private static readonly string Sd3DiffusersDir =
-        Environment.GetEnvironmentVariable("SD3_MODEL_DIR")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SharpInference\tests\test-models\sd3";
+    private static string Sd3DiffusersDir => TestPaths.Sd3.DiffusersDir;
 
     /// <summary>Path to a single-file SD3 safetensors checkpoint.</summary>
-    private static readonly string Sd3SingleFilePath =
-        Environment.GetEnvironmentVariable("SD3_SINGLE_FILE_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\SD3\sd3_medium_incl_clips_t5xxlfp16.safetensors";
+    private static string Sd3SingleFilePath => TestPaths.Sd3.SingleFile;
 
     private readonly ITestOutputHelper _output;
 

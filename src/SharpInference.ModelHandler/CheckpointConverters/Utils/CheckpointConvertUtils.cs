@@ -82,18 +82,21 @@ public static unsafe class CheckpointConvertUtils
     /// <param name="numUpLevels">Number of up block levels (4 for SD1.5/SDXL).</param>
     public static string? ConvertVaeKey(string ldmKey, int numUpLevels = 4)
     {
-        // Encoder keys — skip (not needed for inference)
-        if (ldmKey.StartsWith("encoder.")) return null;
-
         // post_quant_conv / quant_conv — keep as-is
         if (ldmKey.StartsWith("post_quant_conv.") || ldmKey.StartsWith("quant_conv."))
             return ldmKey;
 
-        // Decoder keys
-        if (!ldmKey.StartsWith("decoder.")) return null;
+        if (ldmKey.StartsWith("encoder."))
+            return ConvertVaeEncoderKey(ldmKey["encoder.".Length..], numUpLevels);
 
-        string decoderKey = ldmKey["decoder.".Length..];
+        if (ldmKey.StartsWith("decoder."))
+            return ConvertVaeDecoderKey(ldmKey["decoder.".Length..], numUpLevels);
 
+        return null;
+    }
+
+    private static string? ConvertVaeDecoderKey(string decoderKey, int numUpLevels)
+    {
         if (decoderKey.StartsWith("conv_in."))
             return "decoder.conv_in." + decoderKey["conv_in.".Length..];
         if (decoderKey.StartsWith("conv_out."))
@@ -102,7 +105,7 @@ public static unsafe class CheckpointConvertUtils
             return "decoder.conv_norm_out." + decoderKey["norm_out.".Length..];
 
         if (decoderKey.StartsWith("mid."))
-            return ConvertVaeMidKey(decoderKey["mid.".Length..]);
+            return ConvertVaeMidKey("decoder", decoderKey["mid.".Length..]);
 
         if (decoderKey.StartsWith("up."))
             return ConvertVaeUpKey(decoderKey["up.".Length..], numUpLevels);
@@ -110,14 +113,33 @@ public static unsafe class CheckpointConvertUtils
         return "decoder." + decoderKey;
     }
 
-    private static string? ConvertVaeMidKey(string midKey)
+    private static string? ConvertVaeEncoderKey(string encoderKey, int numDownLevels)
+    {
+        if (encoderKey.StartsWith("conv_in."))
+            return "encoder.conv_in." + encoderKey["conv_in.".Length..];
+        if (encoderKey.StartsWith("conv_out."))
+            return "encoder.conv_out." + encoderKey["conv_out.".Length..];
+        if (encoderKey.StartsWith("norm_out."))
+            return "encoder.conv_norm_out." + encoderKey["norm_out.".Length..];
+
+        if (encoderKey.StartsWith("mid."))
+            return ConvertVaeMidKey("encoder", encoderKey["mid.".Length..]);
+
+        if (encoderKey.StartsWith("down."))
+            return ConvertVaeDownKey(encoderKey["down.".Length..], numDownLevels);
+
+        return "encoder." + encoderKey;
+    }
+
+    // Mid block layout is identical between encoder and decoder.
+    private static string? ConvertVaeMidKey(string section, string midKey)
     {
         if (midKey.StartsWith("block_1."))
-            return "decoder.mid_block.resnets.0." + midKey["block_1.".Length..];
+            return $"{section}.mid_block.resnets.0." + midKey["block_1.".Length..];
         if (midKey.StartsWith("block_2."))
-            return "decoder.mid_block.resnets.1." + midKey["block_2.".Length..];
+            return $"{section}.mid_block.resnets.1." + midKey["block_2.".Length..];
         if (midKey.StartsWith("attn_1."))
-            return ConvertVaeAttentionKey("decoder.mid_block.attentions.0", midKey["attn_1.".Length..]);
+            return ConvertVaeAttentionKey($"{section}.mid_block.attentions.0", midKey["attn_1.".Length..]);
         return null;
     }
 
@@ -127,6 +149,7 @@ public static unsafe class CheckpointConvertUtils
         if (firstDot < 0) return null;
 
         int ldmLevel = int.Parse(upKey[..firstDot]);
+        // Diffusers indexes up_blocks deepest-first; LDM indexes shallowest-first. Reverse.
         int diffusersLevel = (numUpLevels - 1) - ldmLevel;
         string rest = upKey[(firstDot + 1)..];
 
@@ -146,6 +169,36 @@ public static unsafe class CheckpointConvertUtils
 
         if (rest.StartsWith("upsample.conv."))
             return $"decoder.up_blocks.{diffusersLevel}.upsamplers.0.conv." + rest["upsample.conv.".Length..];
+
+        return null;
+    }
+
+    private static string? ConvertVaeDownKey(string downKey, int numDownLevels)
+    {
+        int firstDot = downKey.IndexOf('.');
+        if (firstDot < 0) return null;
+
+        // Encoder down levels run shallow → deep in both LDM and diffusers, so no reversal.
+        int level = int.Parse(downKey[..firstDot]);
+        if (level < 0 || level >= numDownLevels) return null;
+        string rest = downKey[(firstDot + 1)..];
+
+        if (rest.StartsWith("block."))
+        {
+            string blockRest = rest["block.".Length..];
+            int nextDot = blockRest.IndexOf('.');
+            if (nextDot < 0) return null;
+            string resIdxStr = blockRest[..nextDot];
+            string param = blockRest[(nextDot + 1)..];
+
+            if (param.StartsWith("nin_shortcut."))
+                param = "conv_shortcut." + param["nin_shortcut.".Length..];
+
+            return $"encoder.down_blocks.{level}.resnets.{resIdxStr}.{param}";
+        }
+
+        if (rest.StartsWith("downsample.conv."))
+            return $"encoder.down_blocks.{level}.downsamplers.0.conv." + rest["downsample.conv.".Length..];
 
         return null;
     }

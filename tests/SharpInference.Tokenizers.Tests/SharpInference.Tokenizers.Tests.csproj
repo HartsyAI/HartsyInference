@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
+    <ProjectReference Include="..\SharpInference.Tests.Common\SharpInference.Tests.Common.csproj" />
   </ItemGroup>
 
 </Project>

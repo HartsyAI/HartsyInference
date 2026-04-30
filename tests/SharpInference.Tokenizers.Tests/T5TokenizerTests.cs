@@ -1,3 +1,4 @@
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 using Xunit;
 
@@ -6,10 +7,7 @@ namespace SharpInference.Tokenizers.Tests;
 /// <summary>Tests for T5 SentencePiece tokenizer using real T5 model files with protobuf bos_id patching.</summary>
 public sealed class T5TokenizerTests : IDisposable
 {
-    private static readonly string TestModelsDir = Path.GetFullPath(
-        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "test-models"));
-
-    private static readonly string T5ModelPath = Path.Combine(TestModelsDir, "t5_spiece.model");
+    private static string T5ModelPath => TestPaths.Tokenizers.T5Spiece;
 
     private readonly T5Tokenizer? _tokenizer;
     private readonly bool _modelAvailable;

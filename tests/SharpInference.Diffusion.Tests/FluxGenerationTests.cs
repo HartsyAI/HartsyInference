@@ -13,6 +13,7 @@ using SharpInference.Diffusion.Requests;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
@@ -28,50 +29,13 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public sealed class FluxGenerationTests
 {
-    private static string PickPath(string envVar, string winPath, string linuxPath)
-    {
-        string? v = Environment.GetEnvironmentVariable(envVar);
-        if (!string.IsNullOrEmpty(v)) return v;
-        return OperatingSystem.IsWindows() ? winPath : linuxPath;
-    }
-
-    private static readonly string LinuxRepoRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-
-    private static readonly string FluxSingleFilePath = PickPath(
-        "FLUX_SINGLE_FILE_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-schnell-fp8.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux1-schnell-fp8.safetensors"));
-
-    private static readonly string FluxDevFp8Path = PickPath(
-        "FLUX_DEV_FP8_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-dev-fp8.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux1-dev-fp8.safetensors"));
-
-    private static readonly string FluxKreaFp8ScaledPath = PickPath(
-        "FLUX_KREA_FP8_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-krea-dev_fp8_scaled.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux1-krea-dev_fp8_scaled.safetensors"));
-
-    private static readonly string TokenizerVocabPath = PickPath(
-        "CLIP_VOCAB_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_vocab.json",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_vocab.json"));
-
-    private static readonly string TokenizerMergesPath = PickPath(
-        "CLIP_MERGES_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_merges.txt",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_merges.txt"));
-
-    private static readonly string T5SpieceModelPath = PickPath(
-        "T5_SPIECE_MODEL_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\t5_spiece.model",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "t5_spiece.model"));
-
-    private static readonly string OutputDir = PickPath(
-        "FLUX_OUTPUT_DIR",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\Output",
-        Path.Combine(LinuxRepoRoot, "Output"));
+    private static string FluxSingleFilePath => TestPaths.Flux.Schnell;
+    private static string FluxDevFp8Path => TestPaths.Flux.Dev;
+    private static string FluxKreaFp8ScaledPath => TestPaths.Flux.KreaFp8;
+    private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string TokenizerMergesPath => TestPaths.Tokenizers.ClipMerges;
+    private static string T5SpieceModelPath => TestPaths.Tokenizers.T5Spiece;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private readonly ITestOutputHelper _output;
 

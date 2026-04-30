@@ -9,6 +9,7 @@ using SharpInference.Diffusion.Pipelines;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.SafeTensors;
 using SharpInference.ModelHandler.CheckpointConverters;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
@@ -27,14 +28,10 @@ namespace SharpInference.Diffusion.Tests;
 public class SdxlWeightLoadingTests
 {
     /// <summary>Path to SDXL in HuggingFace diffusers layout (tokenizer/, tokenizer_2/, text_encoder/, text_encoder_2/, unet/, vae/).</summary>
-    private static readonly string SdxlDiffusersDir =
-        Environment.GetEnvironmentVariable("SDXL_MODEL_DIR")
-        ?? @"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\test-models\sdxl";
+    private static string SdxlDiffusersDir => TestPaths.Sdxl.DiffusersDir;
 
     /// <summary>Path to a single-file SDXL safetensors checkpoint.</summary>
-    private static readonly string SdxlSingleFilePath =
-        Environment.GetEnvironmentVariable("SDXL_SINGLE_FILE_PATH")
-        ?? @"C:\Users\AI Overlord\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\juggernautXL_ragnarokBy.safetensors";
+    private static string SdxlSingleFilePath => TestPaths.Sdxl.SingleFile;
 
     private readonly ITestOutputHelper _output;
 

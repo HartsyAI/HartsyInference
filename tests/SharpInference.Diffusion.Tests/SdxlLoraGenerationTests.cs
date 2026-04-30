@@ -10,6 +10,7 @@ using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.Lora;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 using Xunit;
 using Xunit.Abstractions;
@@ -19,24 +20,14 @@ namespace SharpInference.Diffusion.Tests;
 /// <summary>End-to-end SDXL+LoRA generation test. Loads an SDXL checkpoint, merges a LoRA into the UNet/CLIP weights via LoraStack, runs the full CPU pipeline, and verifies the output is non-degenerate. Skips cleanly when SDXL_LORA_PATH is not set or files are missing.</summary>
 public class SdxlLoraGenerationTests
 {
-    private static readonly string SdxlCheckpointPath =
-        Environment.GetEnvironmentVariable("SDXL_SINGLE_FILE_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\SDXL\Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors";
+    private static string SdxlCheckpointPath => TestPaths.Sdxl.SingleFile;
 
     private static readonly string? SdxlLoraPath =
         Environment.GetEnvironmentVariable("SDXL_LORA_PATH");
 
-    private static readonly string TokenizerVocabPath =
-        Environment.GetEnvironmentVariable("CLIP_VOCAB_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_vocab.json";
-
-    private static readonly string TokenizerMergesPath =
-        Environment.GetEnvironmentVariable("CLIP_MERGES_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_merges.txt";
-
-    private static readonly string OutputDir =
-        Environment.GetEnvironmentVariable("SDXL_OUTPUT_DIR")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\Output";
+    private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string TokenizerMergesPath => TestPaths.Tokenizers.ClipMerges;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private readonly ITestOutputHelper _output;
 

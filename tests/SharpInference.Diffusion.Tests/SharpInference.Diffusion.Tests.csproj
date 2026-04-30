@@ -20,6 +20,7 @@
     <ProjectReference Include="..\..\src\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
     <ProjectReference Include="..\..\src\SharpInference.Cuda\SharpInference.Cuda.csproj" />
     <ProjectReference Include="..\..\src\SharpInference.Vulkan\SharpInference.Vulkan.csproj" />
+    <ProjectReference Include="..\SharpInference.Tests.Common\SharpInference.Tests.Common.csproj" />
   </ItemGroup>
 
   <!-- Mirror SPIR-V kernels into the test bin so VulkanBackend can find them at runtime -->

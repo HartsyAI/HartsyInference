@@ -12,6 +12,7 @@ using SharpInference.Diffusion.Requests;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
@@ -27,25 +28,11 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public class Sd3GenerationTests
 {
-    private static readonly string Sd3CheckpointPath =
-        Environment.GetEnvironmentVariable("SD3_SINGLE_FILE_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\SD3\sd3_medium_incl_clips_t5xxlfp16.safetensors";
-
-    private static readonly string TokenizerVocabPath =
-        Environment.GetEnvironmentVariable("CLIP_VOCAB_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_vocab.json";
-
-    private static readonly string TokenizerMergesPath =
-        Environment.GetEnvironmentVariable("CLIP_MERGES_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_merges.txt";
-
-    private static readonly string T5SpieceModelPath =
-        Environment.GetEnvironmentVariable("T5_SPIECE_MODEL_PATH")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\t5_spiece.model";
-
-    private static readonly string OutputDir =
-        Environment.GetEnvironmentVariable("SD3_OUTPUT_DIR")
-        ?? @"C:\Users\kaleb\Desktop\projects\SharpInference\Output";
+    private static string Sd3CheckpointPath => TestPaths.Sd3.SingleFile;
+    private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string TokenizerMergesPath => TestPaths.Tokenizers.ClipMerges;
+    private static string T5SpieceModelPath => TestPaths.Tokenizers.T5Spiece;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private readonly ITestOutputHelper _output;
 

@@ -7,6 +7,7 @@ using SharpInference.Diffusion.Pipelines;
 using SharpInference.Diffusion.Requests;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 using SharpInference.Vulkan;
 using Xunit;
@@ -29,39 +30,11 @@ public sealed class FluxVulkanGenerationTest
 
     public FluxVulkanGenerationTest(ITestOutputHelper output) => _output = output;
 
-    private static string PickPath(string envVar, string winPath, string linuxPath)
-    {
-        string? v = Environment.GetEnvironmentVariable(envVar);
-        if (!string.IsNullOrEmpty(v)) return v;
-        return OperatingSystem.IsWindows() ? winPath : linuxPath;
-    }
-
-    private static readonly string LinuxRepoRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-
-    private static readonly string FluxSingleFilePath = PickPath(
-        "FLUX_SINGLE_FILE_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-schnell-fp8.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux1-schnell-fp8.safetensors"));
-
-    private static readonly string TokenizerVocabPath = PickPath(
-        "CLIP_VOCAB_PATH",
-        "",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_vocab.json"));
-
-    private static readonly string TokenizerMergesPath = PickPath(
-        "CLIP_MERGES_PATH",
-        "",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_merges.txt"));
-
-    private static readonly string T5SpieceModelPath = PickPath(
-        "T5_SPIECE_MODEL_PATH",
-        "",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "t5_spiece.model"));
-
-    private static readonly string OutputDir = PickPath(
-        "FLUX_OUTPUT_DIR", "",
-        Path.Combine(LinuxRepoRoot, "Output"));
+    private static string FluxSingleFilePath => TestPaths.Flux.Schnell;
+    private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string TokenizerMergesPath => TestPaths.Tokenizers.ClipMerges;
+    private static string T5SpieceModelPath => TestPaths.Tokenizers.T5Spiece;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private static bool VulkanAvailable()
     {

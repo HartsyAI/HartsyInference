@@ -11,6 +11,7 @@ using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.Lora;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 using Xunit;
 using Xunit.Abstractions;
@@ -20,40 +21,11 @@ namespace SharpInference.Diffusion.Tests;
 /// <summary>End-to-end Flux+LoRA generation tests. The primary path validates AI Toolkit (ostris/ai-toolkit) format LoRAs since that is the dominant Flux trainer; secondary tests cover Kohya and diffusers PEFT formats. All tests skip cleanly when the appropriate FLUX_*_LORA_PATH env var is not set.</summary>
 public sealed class FluxLoraGenerationTests
 {
-    private static string PickPath(string envVar, string winPath, string linuxPath)
-    {
-        string? v = Environment.GetEnvironmentVariable(envVar);
-        if (!string.IsNullOrEmpty(v)) return v;
-        return OperatingSystem.IsWindows() ? winPath : linuxPath;
-    }
-
-    private static readonly string LinuxRepoRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-
-    private static readonly string FluxSingleFilePath = PickPath(
-        "FLUX_SINGLE_FILE_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-schnell-fp8.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux1-schnell-fp8.safetensors"));
-
-    private static readonly string TokenizerVocabPath = PickPath(
-        "CLIP_VOCAB_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_vocab.json",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_vocab.json"));
-
-    private static readonly string TokenizerMergesPath = PickPath(
-        "CLIP_MERGES_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\clip_merges.txt",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "clip_merges.txt"));
-
-    private static readonly string T5SpieceModelPath = PickPath(
-        "T5_SPIECE_MODEL_PATH",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\tests\test-models\t5_spiece.model",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "t5_spiece.model"));
-
-    private static readonly string OutputDir = PickPath(
-        "FLUX_OUTPUT_DIR",
-        @"C:\Users\kaleb\Desktop\projects\SharpInference\Output",
-        Path.Combine(LinuxRepoRoot, "Output"));
+    private static string FluxSingleFilePath => TestPaths.Flux.Schnell;
+    private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
+    private static string TokenizerMergesPath => TestPaths.Tokenizers.ClipMerges;
+    private static string T5SpieceModelPath => TestPaths.Tokenizers.T5Spiece;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private static readonly string? FluxAiToolkitLoraPath =
         Environment.GetEnvironmentVariable("FLUX_AITOOLKIT_LORA_PATH");
@@ -61,8 +33,7 @@ public sealed class FluxLoraGenerationTests
     private static readonly string? FluxKohyaLoraPath =
         Environment.GetEnvironmentVariable("FLUX_KOHYA_LORA_PATH");
 
-    private static readonly string? FluxDiffusersLoraPath =
-        Environment.GetEnvironmentVariable("FLUX_DIFFUSERS_LORA_PATH");
+    private static string FluxDiffusersLoraPath => TestPaths.Lora.YearbookFluxSchnell;
 
     private readonly ITestOutputHelper _output;
 

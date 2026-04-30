@@ -10,6 +10,7 @@ using SharpInference.Diffusion.Models.Vae;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.SafeTensors;
 using SharpInference.ModelHandler.CheckpointConverters;
+using SharpInference.Tests.Common;
 
 namespace SharpInference.Diffusion.Tests;
 
@@ -20,9 +21,7 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public class Sd15WeightLoadingTests
 {
-    private static readonly string Sd15SingleFilePath =
-        Environment.GetEnvironmentVariable("SD15_SINGLE_FILE_PATH")
-        ?? @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\test\v1-5-pruned-emaonly.safetensors";
+    private static string Sd15SingleFilePath => TestPaths.Sd15.SingleFile;
 
     private readonly ITestOutputHelper _output;
 
@@ -805,7 +804,7 @@ public class Sd15WeightLoadingTests
             midRes1.LoadWeights(w, "mid_block.resnets.1");
 
             UpBlock[] upBlocks = new UpBlock[config.BlockOutChannels.Length];
-            int[] reversedCh = config.BlockOutChannels.Reverse().ToArray();
+            int[] reversedCh = ((IEnumerable<int>)config.BlockOutChannels).Reverse().ToArray();
             for (int i = 0; i < upBlocks.Length; i++)
             {
                 int outCh = reversedCh[i];

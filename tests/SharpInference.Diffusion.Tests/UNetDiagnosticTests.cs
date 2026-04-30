@@ -10,6 +10,7 @@ using SharpInference.Diffusion.Models.Denoisers.UNetBlocks;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Schedulers;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 
 namespace SharpInference.Diffusion.Tests;
 
@@ -20,8 +21,8 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public class UNetDiagnosticTests
 {
-    private const string ModelDir = @"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\test-models\sd15";
-    private const string DiagnosticsDir = @"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\python-reference";
+    private static string ModelDir => TestPaths.Sd15.DiffusersDir;
+    private static string DiagnosticsDir => Path.Combine(RepoRoot.Path, "tests", "python-reference");
 
     private readonly ITestOutputHelper _output;
 

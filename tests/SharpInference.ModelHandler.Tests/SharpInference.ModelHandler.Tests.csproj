@@ -16,6 +16,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
     <ProjectReference Include="..\..\src\SharpInference.Cpu\SharpInference.Cpu.csproj" />
+    <ProjectReference Include="..\SharpInference.Tests.Common\SharpInference.Tests.Common.csproj" />
   </ItemGroup>
 
 </Project>

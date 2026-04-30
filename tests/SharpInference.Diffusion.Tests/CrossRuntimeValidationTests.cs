@@ -8,6 +8,7 @@ using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Schedulers;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 
 namespace SharpInference.Diffusion.Tests;
 
@@ -19,10 +20,10 @@ namespace SharpInference.Diffusion.Tests;
 /// </summary>
 public class CrossRuntimeValidationTests
 {
-    private const string ModelDir = @"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\test-models\sd15";
-    private const string DiagnosticsDir = @"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\python-reference";
-    private static readonly string ReferenceTensorsDir = Path.Combine(DiagnosticsDir, "reference_tensors");
-    private static readonly string ReferenceStatsPath = Path.Combine(DiagnosticsDir, "reference_stats.json");
+    private static string ModelDir => TestPaths.Sd15.DiffusersDir;
+    private static string DiagnosticsDir => Path.Combine(RepoRoot.Path, "tests", "python-reference");
+    private static string ReferenceTensorsDir => Path.Combine(DiagnosticsDir, "reference_tensors");
+    private static string ReferenceStatsPath => Path.Combine(DiagnosticsDir, "reference_stats.json");
 
     private readonly ITestOutputHelper _output;
 

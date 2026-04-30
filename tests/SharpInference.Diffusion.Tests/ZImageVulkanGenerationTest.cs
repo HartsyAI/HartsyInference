@@ -8,6 +8,7 @@ using SharpInference.Diffusion.Requests;
 using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
+using SharpInference.Tests.Common;
 using SharpInference.Tokenizers;
 using SharpInference.Vulkan;
 using Xunit;
@@ -29,53 +30,13 @@ public sealed class ZImageVulkanGenerationTest
 
     public ZImageVulkanGenerationTest(ITestOutputHelper output) => _output = output;
 
-    private static string PickPath(string envVar, string winPath, string linuxPath)
-    {
-        string? v = Environment.GetEnvironmentVariable(envVar);
-        if (!string.IsNullOrEmpty(v)) return v;
-        return OperatingSystem.IsWindows() ? winPath : linuxPath;
-    }
-
-    private static readonly string LinuxRepoRoot =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-
-    private static readonly string ZImageTurboCheckpointPath = PickPath(
-        "Z_IMAGE_TURBO_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Z-Image\SwarmUI_Z-Image-Turbo-FP8Mix.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "SwarmUI_Z-Image-Turbo-FP8Mix.safetensors"));
-
-    private static readonly string ZImageBaseCheckpointPath = PickPath(
-        "Z_IMAGE_BASE_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Z-Image\SwarmUI_Z-Image-Base-FP8Mix.safetensors",
-        File.Exists(Path.Combine(LinuxRepoRoot, "Models", "SwarmUI_Z-Image-Base-FP8Mix.safetensors"))
-            ? Path.Combine(LinuxRepoRoot, "Models", "SwarmUI_Z-Image-Base-FP8Mix.safetensors")
-            : File.Exists(Path.Combine(LinuxRepoRoot, "Models", "z_image_base-nvfp8-mixed.safetensors"))
-                ? Path.Combine(LinuxRepoRoot, "Models", "z_image_base-nvfp8-mixed.safetensors")
-                : Path.Combine(LinuxRepoRoot, "Models", "z_image_base-bf16.safetensors"));
-
-    private static readonly string FluxVaeSourcePath = PickPath(
-        "FLUX_VAE_SOURCE_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\flux1-dev-fp8.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "flux1-dev-fp8.safetensors"));
-
-    private static readonly string Qwen3WeightsPath = PickPath(
-        "QWEN3_4B_PATH",
-        @"C:\Users\kaleb\Desktop\Projects\SwarmUI\Models\Stable-Diffusion\Flux\qwen_3_4b.safetensors",
-        Path.Combine(LinuxRepoRoot, "Models", "qwen_3_4b.safetensors"));
-
-    private static readonly string Qwen3VocabPath = PickPath(
-        "QWEN3_VOCAB_PATH",
-        "",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "qwen3-4b", "vocab.json"));
-
-    private static readonly string Qwen3MergesPath = PickPath(
-        "QWEN3_MERGES_PATH",
-        "",
-        Path.Combine(LinuxRepoRoot, "tests", "test-models", "qwen3-4b", "merges.txt"));
-
-    private static readonly string OutputDir = PickPath(
-        "Z_IMAGE_OUTPUT_DIR", "",
-        Path.Combine(LinuxRepoRoot, "Output"));
+    private static string ZImageTurboCheckpointPath => TestPaths.ZImage.Turbo;
+    private static string ZImageBaseCheckpointPath => TestPaths.ZImage.Base;
+    private static string FluxVaeSourcePath => TestPaths.Vae.FluxVaeSource;
+    private static string Qwen3WeightsPath => TestPaths.TextEncoders.Qwen3_4B;
+    private static string Qwen3VocabPath => TestPaths.Tokenizers.Qwen3Vocab;
+    private static string Qwen3MergesPath => TestPaths.Tokenizers.Qwen3Merges;
+    private static string OutputDir => TestPaths.OutputDir;
 
     private static bool VulkanAvailable()
     {
