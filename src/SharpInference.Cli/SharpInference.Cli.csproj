@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>SharpInference.Cli</RootNamespace>
+    <AssemblyName>SharpInference.Cli</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
+    <ProjectReference Include="..\SharpInference.Cpu\SharpInference.Cpu.csproj" />
+    <ProjectReference Include="..\SharpInference.Cuda\SharpInference.Cuda.csproj" />
+    <ProjectReference Include="..\SharpInference.Vulkan\SharpInference.Vulkan.csproj" />
+    <ProjectReference Include="..\SharpInference.Diffusion\SharpInference.Diffusion.csproj" />
+    <ProjectReference Include="..\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
+  </ItemGroup>
+
+</Project>
