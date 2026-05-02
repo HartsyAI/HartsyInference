@@ -201,22 +201,27 @@ public sealed class CudaStreamingWeightCacheTests
     // ── Token validation ────────────────────────────────────────────────
 
     [Fact]
-    public void Await_With_Token_From_Different_Backend_Throws()
+    public void Await_With_Token_From_Different_Cache_Throws()
     {
         if (!CudaAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
-        using CudaBackend backendA = new CudaBackend();
-        using CudaBackend backendB = new CudaBackend();
+        using CudaBackend backend = new CudaBackend();
+        // Two cache instances on the same backend — same streams, same context, but
+        // different identity. The BackendTag check on the token should reject a token
+        // issued by one cache and presented to the other.
+        IStreamingWeightCache cacheA = backend.StreamingCache!;
+        IStreamingWeightCache cacheB = new CudaStreamingWeightCache(
+            backend.Context, backend.Stream.Handle, backend.UploadStream.Handle);
 
         using Tensor weight = MakeTensorF32(32, seed: 1f);
-        StreamingUploadToken tokenFromA = backendA.StreamingCache!.BeginUploadAsync(new[] { weight });
+        StreamingUploadToken tokenFromA = cacheA.BeginUploadAsync(new[] { weight });
         try
         {
-            Assert.Throws<InvalidOperationException>(() => backendB.StreamingCache!.AwaitWeights(tokenFromA));
+            Assert.Throws<InvalidOperationException>(() => cacheB.AwaitWeights(tokenFromA));
         }
         finally
         {
             // Don't leak the event — A still owns it.
-            backendA.StreamingCache!.AwaitWeights(tokenFromA);
+            cacheA.AwaitWeights(tokenFromA);
         }
     }
 

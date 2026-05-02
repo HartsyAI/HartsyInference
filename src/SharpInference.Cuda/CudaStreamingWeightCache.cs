@@ -63,7 +63,13 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
             }
 
             nuint byteSize = GpuTransferHelper.ByteSize(weight);
-            CudaDriverApi.cuMemAllocAsync(out ulong dptr, byteSize, _uploadStream).ThrowOnError();
+            // Use sync cuMemAlloc (microseconds, host-side) instead of cuMemAllocAsync
+            // because the stream-ordered allocator requires mempool initialization
+            // that isn't reliably present on the primary context. cuMemcpyHtoDAsync
+            // on the upload stream still gives us the overlap-with-compute behavior
+            // we need; the alloc itself was never the bottleneck. Eviction uses
+            // cuMemFreeAsync on the compute stream — works on dptrs from either alloc API.
+            ulong dptr = CudaMemory.Allocate(byteSize);
             unsafe
             {
                 CudaDriverApi.cuMemcpyHtoDAsync(dptr, (nint)weight.DataPointer, byteSize, _uploadStream).ThrowOnError();

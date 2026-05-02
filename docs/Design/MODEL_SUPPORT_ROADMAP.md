@@ -146,14 +146,12 @@ Consolidated from duplicated code across `FluxTransformer` and `Sd3Transformer`:
 ### Reuse Expectations Per Model
 
 **Near-zero new code** (config + checkpoint converter only):
-- **Chroma** — literal Flux fork, same architecture with different training. Reuse `FluxTransformer` directly with config changes (standard CFG instead of distilled-to-1).
 - **Flux.1 Tools** (Fill, Redux, Canny, Depth) — same Flux backbone with conditioning adapters
 - **Flux.1 Kontext** — Flux backbone with edit-mode conditioning
 
 **Minimal new code** (new config + small architectural tweaks):
 - **Flux.2** — evolved Flux with new VAE (16×16) and text encoder (Mistral/Qwen). Core transformer likely reusable with config changes for block counts/dims.
 - **Z-Image** — Lumina2/NextDiT architecture (NOT Flux-lineage as initially assumed). New top-level transformer class required, but sub-components (`SwiGluFfn`, `QkNorm`, `AdaLNModulation`) reusable. Uses Qwen3-4B as text encoder + Flux VAE verbatim. See [Z_IMAGE_ARCHITECTURE.md](../Research/Z_IMAGE_ARCHITECTURE.md).
-- **ERNIE-Image** — single-stream DiT, same family. Config + checkpoint converter.
 - **F-Lite** — DiT-based, same family.
 
 **Moderate new code** (new block class, reuse shared components):
@@ -161,8 +159,10 @@ Consolidated from duplicated code across `FluxTransformer` and `Sd3Transformer`:
 - **Qwen-Image** — MMDiT variant; reuse `AdaLNModulation`, `QkNorm`, `SwiGluFfn`; new block class for Qwen-specific attention + Qwen VL text encoder
 - **Hunyuan Image 2.1** — MMDiT with 32×32 VAE; reuse shared components, new block class + VAE
 - **HiDream i1** — MMDiT; reuse shared components, new config
-- **AuraFlow** — MMDiT using Pile T5-XXL + SDXL VAE; reuse shared components
+- **AuraFlow** — Hybrid 4-MMDiT-then-32-single-DiT using **Pile-T5-XL** (NOT XXL — context dim 2048) + SDXL VAE; reuse shared components, FP32 LayerNorm everywhere, no biases on attention/FFN, SwiGLU FFN with `mlpDim = find_multiple(int(2*4*dim/3), 256)` = 8192 for v0.3 (NOT 4×hidden), 8 register tokens prepended to text after `context_embedder`. Learned 2D pos_embed via `AuraFlowPatchEmbed` (Linear, NOT Conv2d) with center-crop selection on √1024=32×32 grid.
 - **Kandinsky 5** — DiT; reuse DiT shared components, new config
+- **Chroma** — moved here. Despite the v1 expectation of a "Flux fork", Chroma actually replaces Flux's per-block AdaLN linears with a **shared distilled-guidance approximator MLP** (5-layer SiLU + RMSNorm residual) that produces a precomputed per-block modulation table. Needs a custom transformer class (`ChromaTransformer`), pruned-AdaLN block variants (`ChromaDoubleStreamBlock` / `ChromaSingleStreamBlock`), the `ChromaApproximator` MLP, and a T5-only pipeline with attention-mask plumbing. Single-stream block does external `[txt, img]` concat once, not per-block. Reusable from Flux: `FluxAttention`, `FluxPosEmbed`, FFN/RMSNorm/SDPA, latent pack/unpack, and the FlowMatchEuler scheduler with dynamic shift. **No `swap_scale_shift` needed** for the final layer (norm shift/scale comes from the runtime modulation table, not from the checkpoint).
+- **ERNIE-Image** — moved here. Single-stream DiT (NOT Flux-lineage MMDiT). 36 identical `ErnieImageSharedAdaLNBlock` layers all sharing a single AdaLN modulation linear. RMSNorm everywhere (not LayerNorm), QK-RMSNorm over head_dim. **3D RoPE on `(text_pos, y, x)` axes (32, 48, 48)** with image tokens offset by `text_lens` per batch — non-standard pattern. GELU-gated FFN (NOT SwiGLU). Patch embed is a 1×1 Conv2d because patchification is delegated to a Flux2-style 128-channel VAE. Custom Baidu text encoder (`AutoModel`) — likely an ERNIE-class encoder (TBD without inspecting `text_encoder/config.json`). Optional `pe` Prompt Enhancer LLM (skip in v1). Diffusers reference exists at `transformer_ernie_image.py` + `pipeline_ernie_image.py`.
 
 **Significant new code** (unique architectures):
 - **Anima** — Cosmos-Predict2 is a fundamentally different architecture

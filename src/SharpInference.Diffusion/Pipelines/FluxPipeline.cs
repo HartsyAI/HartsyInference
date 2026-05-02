@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using SharpInference.Core.Backends;
 using SharpInference.Core.Logging;
+using SharpInference.Core.MemoryManagement;
 using SharpInference.Core.Tensors;
 using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -152,11 +153,31 @@ public sealed unsafe class FluxPipeline : IDisposable
         Tensor packedLatent = BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep);
 
         // ── 4. Denoising loop ─────────────────────────────────────────
-        // Preload transformer weights to GPU so the inner forward pass reuses cached
-        // device pointers across every step instead of re-uploading per matmul. For
-        // Flux this is the difference between minutes-per-step (PCIe-bound thrashing)
-        // and seconds-per-step (compute-bound on the SMs).
-        _backend.PreloadWeights(_transformer.EnumerateWeights());
+        // Two paths depending on whether the backend can stream:
+        //   - StreamingCache != null (CUDA): use BlockStreamingController so resident
+        //     VRAM peaks at ~(activations + 2 blocks of weights), making Flux work on
+        //     12 GB cards. Shared (non-block) transformer weights still preload eagerly
+        //     since they're touched on every step and only ~80 MB total.
+        //   - StreamingCache == null (CPU/Vulkan): preload everything eagerly. CPU has
+        //     no notion of "device memory"; Vulkan's allocator is independent of this API.
+        //     Same behavior as before this refactor.
+        BlockStreamingController? streamer = null;
+        if (_backend.StreamingCache is not null)
+        {
+            _backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
+            for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
+            streamer = new BlockStreamingController(_backend.StreamingCache, blocks, prefetchAhead: 1, retainBehind: 0);
+            _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+            streamer.Prime();
+            Logs.Info($"Flux streaming: {blocks.Length} blocks, prefetchAhead=1, " +
+                $"per-block ~{streamer.EstimatedTotalWeightBytes / blocks.Length / (1024 * 1024)} MB, " +
+                $"total ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB");
+        }
+        else
+        {
+            _backend.PreloadWeights(_transformer.EnumerateWeights());
+        }
 
         Logs.Info("Starting Flux denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -192,11 +213,21 @@ public sealed unsafe class FluxPipeline : IDisposable
         clipPooled.Dispose();
         t5Embeddings.Dispose();
 
-        // Free transformer weights from GPU now that sampling is done. The Flux
-        // transformer is ~12 GB at fp8 — VAE decode (~2-3 GB peak) cannot fit alongside
-        // it on a 12 GB card. Same tradeoff as the T5 eviction above: pay one-time
-        // re-upload on the next generation rather than crashing this one.
-        _backend.FreeWeights(_transformer.EnumerateWeights());
+        // Tear down the streaming controller (frees still-resident blocks) and free the
+        // shared weights. After this, the transformer holds no device memory, making
+        // room for VAE decode on tight VRAM budgets. The streaming + eager paths both
+        // converge on the same final state: zero transformer weights resident.
+        _transformer.BeforeBlockForward = null;
+        if (streamer is not null)
+        {
+            streamer.EvictAll();
+            streamer.Dispose();
+            _backend.FreeWeights(_transformer.EnumerateSharedWeights());
+        }
+        else
+        {
+            _backend.FreeWeights(_transformer.EnumerateWeights());
+        }
 
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
         LogTensorStats("Final packed latent", packedLatent);

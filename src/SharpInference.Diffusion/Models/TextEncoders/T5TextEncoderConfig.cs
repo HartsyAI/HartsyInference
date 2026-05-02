@@ -40,4 +40,18 @@ public record T5TextEncoderConfig
         NumLayers = 24,
         VocabSize = 32128,
     };
+
+    /// <summary>Pile-T5-XL (UMT5) encoder preset for AuraFlow text encoding (`EleutherAI/pile-t5-xl`).
+    /// <c>d_model = 2048</c> matches AuraFlow's <c>joint_attention_dim = 2048</c>. UMT5 is architecturally
+    /// identical to T5 v1.1 for the encoder-only inference path; the only difference is the SentencePiece
+    /// vocabulary. Max sequence length 256 per AuraFlow's pipeline.</summary>
+    public static T5TextEncoderConfig PileT5Xl => new()
+    {
+        DModel = 2048,
+        DFf = 5120,
+        DKv = 64,
+        NumHeads = 32,
+        NumLayers = 24,
+        VocabSize = 32128,
+    };
 }

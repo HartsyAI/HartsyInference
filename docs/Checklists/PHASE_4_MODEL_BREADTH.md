@@ -139,12 +139,119 @@ All items below are scaffolding with TODOs for backend/kernel logic. Forward pas
 - [x] `ChromaConfig.cs` — wraps FluxConfig with standard CFG (not distilled-to-1)
 - [x] `ChromaPipeline.cs` — full pipeline with dual forward pass for CFG
 
-### AuraFlow (MMDiT)
-- [x] `AuraFlowConfig.cs` — config with NumDoubleBlocks/NumSingleBlocks, V03 preset
-- [x] `AuraFlowJointBlock.cs` — dual-stream joint block (image+text modulation, attention, QK-norm, SwiGLU FFN)
-- [x] `AuraFlowSingleBlock.cs` — single-stream image-only block
-- [x] `AuraFlowTransformer.cs` — full transformer with PatchEmbed, double+single blocks, timestep embedding
-- [x] `AuraFlowPipeline.cs` — pipeline with T5-only text encoding, standard CFG
+### AuraFlow (Hybrid 4-MMDiT-then-32-single-DiT) — IN PROGRESS
+
+Reference: `huggingface/diffusers` `src/diffusers/models/transformers/auraflow_transformer_2d.py` + `src/diffusers/pipelines/aura_flow/pipeline_aura_flow.py`. Architecture: 4 dual-stream `AuraFlowJointTransformerBlock`s followed by 32 single-stream `AuraFlowSingleTransformerBlock`s on `concat([txt, img])` tokens. Text encoder is **Pile-T5-XL** (UMT5-XL, output dim 2048 — NOT T5-XXL/4096) at `EleutherAI/pile-t5-xl`. VAE is the SDXL 4-channel KL.
+
+Architectural quirks:
+- All LayerNorms in **FP32** (`fp32_layer_norm`) — `AdaLayerNormZero(bias=False, norm_type="fp32_layer_norm")`, `FP32LayerNorm` for the post-attn norms, QK-norm via `FP32LayerNorm` over head_dim.
+- **No biases on attention or FFN linears** (`bias=False`, `out_bias=False`, `added_proj_bias=False`).
+- **SwiGLU FFN** with `mlp_dim = find_multiple(int(2*4*dim/3), 256)` = **8192** for dim=3072 (NOT 4×hidden).
+- **8 register tokens** prepended to text after `context_embedder` ([anti-attn-artifact paper](https://huggingface.co/papers/2309.16588)).
+- **Patch embed is `nn.Linear`** over flattened `patch_size² * in_channels` = `2*2*4 = 16` features (NOT a Conv2d). Learned `pos_embed.pos_embed` of shape `[1, 1024, 3072]` selected via `pe_selection_index_based_on_dim(h, w)` — center-crop on a 32×32 grid.
+- `caption_projection_dim = inner_dim = 3072` (`12 heads × 256 head_dim`).
+- Single block input is `concat([txt + register_tokens, img])` — concat done **once** by the transformer wrapper, not per-block. Output drops the text prefix.
+- Final layer is `AuraFlowPreFinalBlock`: `Linear(silu(temb)) → 2*hidden, chunk into [scale, shift]` (note: diffusers convention `[scale, shift]`, opposite of Stability/SD3 native `[shift, scale]`).
+
+#### Done
+- [x] `AuraFlowConfig.cs` — corrected presets: 12 heads × 256 head_dim, ContextDim=2048 (Pile-T5-XL), CaptionProjectionDim=3072, PosEmbedMaxSize=1024, NumRegisterTokens=8, MlpDim=8192, OutChannels=4. (Previous values 48 heads × 64 head_dim, ContextDim=4096, PosEmbedMaxSize=192, NumRegisterTokens=0, mlpDim=12288 were all wrong.)
+
+#### In progress
+- [ ] `AuraFlowJointBlock.cs` — full rewrite with diffusers weight key naming (`norm1.linear`, `norm1_context.linear`, `attn.to_q/k/v`, `attn.add_q/k/v_proj`, `attn.norm_q/k`, `attn.norm_added_q/k`, `attn.to_out.0`, `attn.to_add_out`, `ff.linear_1/linear_2/out_projection`, `ff_context.*`). All projections bias=False. SwiGLU loaded with null bias args.
+- [ ] `AuraFlowSingleBlock.cs` — full rewrite with diffusers naming (single attention, no `add_kv_proj` since input is already concat). Same SwiGLU shape.
+- [ ] `AuraFlowTransformer.cs` — full implementation: Linear patch-embed + cropped pos_embed (`pe_selection_index_based_on_dim`), context embedder, 8 register tokens prepended to text, time_step_embed (sinusoidal scale=1000) + time_step_proj (256→inner→inner via SiLU), joint stack, concat-then-single stack, drop text prefix, AuraFlowPreFinalBlock (`[scale, shift]` chunk order), proj_out, unpatchify.
+- [ ] `AuraFlowDebugDump.cs` — copy `Sd3DebugDump` with env var `AURAFLOW_DEBUG_DIR`.
+- [ ] `AuraFlowCheckpointConverter.cs` — handle both single-file `aura_flow_0.3.safetensors` (~16.5 GB BFL-style) and diffusers folder format. Identify the BFL→diffusers key remap (`single_layers.*` → `single_transformer_blocks.*`, etc.). Cite `diffusers/loaders/single_file_utils.py` `convert_auraflow_transformer_checkpoint_to_diffusers` if it exists.
+- [ ] `AuraFlowPipeline.cs` rewrite — Pile-T5-XL encode (max_length=256), CFG dual-pass forward, FlowMatchEuler scheduler, FreeWeights eviction before VAE decode (PHASE_3_DEVIATIONS #18, #33), SDXL VAE decode.
+- [ ] End-to-end test + Python reference dump (`dump_auraflow_full_forward.py`) + diff harness (`diff_auraflow_layers.py`).
+
+#### Weights (12 GB target)
+- `fal/AuraFlow-v0.3` repo: `aura_flow_0.3.safetensors` (16.5 GB FP16) — fits with FP8 cast at load
+- `city96/AuraFlow-v0.3-gguf`: Q5_K_M (4.9 GB) or Q4_K_M (4.0 GB) — comfortable, but **requires GGUF K-quant reader** (not yet built in `SharpInference.ModelHandler`)
+- Pile-T5-XL: ~3.7 GB FP16, ~1.9 GB FP8
+- SDXL VAE: ~335 MB
+
+### ERNIE-Image (Single-Stream DiT, Shared AdaLN) — NOT STARTED
+
+Reference: `huggingface/diffusers` `src/diffusers/models/transformers/transformer_ernie_image.py` + `src/diffusers/pipelines/ernie_image/pipeline_ernie_image.py`. The roadmap previously said "Flux-lineage MMDiT" — **this is wrong**, ERNIE is single-stream with one shared AdaLN modulation.
+
+Architecture (verified against `transformer_ernie_image.py`):
+- **36 identical `ErnieImageSharedAdaLNBlock` layers**, all **sharing one** `nn.SiLU + Linear(hidden, 6*hidden)` modulation linear at the top level. Saves weights vs Flux's per-block AdaLN.
+- Hidden=4096, num_heads=32, head_dim=128, ffn_hidden=12288 (3×). text_in_dim=3072.
+- **RMSNorm everywhere** (not LayerNorm), elementwise_affine=True. QK-norm via RMSNorm over head_dim.
+- **3D RoPE on `(text_pos, y, x)` axes (32, 48, 48), theta=256.** Image tokens use `(text_lens_per_batch, y, x)` — i.e. image RoPE positions are **offset by the per-batch text length**. Text tokens use `(arange, 0, 0)`. Rotate-half is **non-interleaved Megatron-style** (`[θ0,θ0,θ1,θ1,...]`) — different from `FluxRope.cs` interleaved layout.
+- Attention bias=False, out bias=False. Internal `[S, B, H]` sequence-first layout (transposed at boundaries).
+- **GELU-gated FFN** (NOT SwiGLU): `linear_fc2(up_proj(x) * gelu(gate_proj(x)))`, all linears bias=False.
+- **Patch embed is `nn.Conv2d(128, 4096, kernel=1, stride=1, bias=True)`** — patch_size=1 because patchification happens in the VAE (Flux2-style 128-channel latent at lower spatial res).
+- `text_in = Linear(3072, 4096, bias=False)` to project text encoder output to model hidden.
+- Final layer: `ErnieImageAdaLNContinuous`: `LayerNorm(no affine) + Linear(hidden, 2*hidden) → scale/shift` then `final_linear: Linear(hidden, p²·out_channels)` with out_channels=128. Reshape to `[B, 128, H, W]`.
+- Padding-aware attention mask (image tokens always valid, text tokens valid up to `text_lens`).
+
+VAE: `AutoencoderKLFlux2` — Flux2-style 128-channel VAE. **Reuse the existing Flux2 VAE infra** (the project already has `Flux2Pipeline.cs` integrating it). Confirm the `bn.running_mean/var` un-normalize step lives at the pipeline boundary, same as Flux.2.
+
+Text encoder: **Unknown without inspecting `text_encoder/config.json`** on `huggingface.co/baidu/ERNIE-Image`. The pipeline does `from transformers import AutoModel, AutoTokenizer` — likely an in-house ERNIE encoder. text_in_dim=3072 suggests it produces 3072-dim output. Optional `pe` Prompt Enhancer LLM (`AutoModelForCausalLM`) — skip in v1, user pre-enhances prompts.
+
+#### Files needed (estimated ~700-1500 lines)
+- [ ] `ErnieImageConfig.cs` — 36 layers, 4096 hidden, 32 heads, 128 head_dim, ffn=12288, in/out=128, patch_size=1, text_in_dim=3072, rope_theta=256, axes_dim=(32,48,48). + `Turbo` preset (same arch, distilled for 8-step inference).
+- [ ] `ErnieImageSharedBlock.cs` — RMSNorm-pre-modulate, single self-attention (QK-RMSNorm + 3D RoPE), gated residual, RMSNorm-pre-mlp, GELU-gated FFN, gated residual. **Modulation tuple is shared (broadcast in)**, no per-block AdaLN linear.
+- [ ] `ErnieImageRope.cs` — non-interleaved 3-axis RoPE with axes (32,48,48), theta=256, image tokens offset by `text_lens` per batch. Cannot reuse `FluxRope.cs` directly (interleaved-pair layout).
+- [ ] `ErnieImagePatchEmbed.cs` — 1×1 Conv2d (`backend.Conv2D` with kernel/stride 1, bias).
+- [ ] `ErnieImageTransformer.cs` — top-level: shared AdaLN linear computed once per step + broadcast to all 36 blocks, 3D position-id construction with text_lens offsets, attention mask `[B, txt_seq + img_seq]`, single-block stack, AdaLN-continuous final, unpatchify reshape.
+- [ ] `ErnieImagePipeline.cs` — text encoding (custom Baidu encoder), text_lens computation, flow-match Euler scheduler, denoise loop, Flux2 VAE decode (or `VaeConfig.Flux2` if compatible).
+- [ ] `ErnieImageCheckpointConverter.cs` — diffusers folder format (the canonical layout). Comfy-Org single-file repackaging may exist; verify before relying.
+- [ ] `ErnieImageDebugDump.cs` — env var `ERNIE_DEBUG_DIR`, mirrors `Sd3DebugDump`.
+- [ ] Custom text encoder support — likely needs a new C# encoder class (research what `AutoModel` with `text_encoder/config.json` from the HF repo actually loads).
+- [ ] End-to-end test + Python ref dump + diff harness.
+
+#### Weights (12 GB target)
+- `unsloth/ERNIE-Image-GGUF`: Q4_K_M (5.0 GB) or Q5_K_M (5.9 GB) — comfortable, but **requires GGUF K-quant reader**
+- `vantagewithai/ERNIE-Image-GGUF-Base-Turbo`: same, plus Turbo variant
+- BF16/FP16: 16.1 GB transformer — won't fit on 12 GB without FP8 cast at load (FP8 cast → ~8 GB, just fits with VAE+text encoder evicted)
+
+### Chroma (Flux-derived with shared distilled-guidance approximator) — BROKEN SCAFFOLDING
+
+The previous roadmap called Chroma a "literal Flux fork — reuse FluxTransformer directly with config changes". **This is wrong.** Verified against `huggingface/diffusers` `src/diffusers/models/transformers/transformer_chroma.py` (624 lines):
+
+Architectural deltas vs Flux:
+- Chroma keeps `FluxAttention` and `FluxPosEmbed` (imports them) but defines **its own block classes** (`ChromaTransformerBlock`, `ChromaSingleTransformerBlock`) and **pruned norm classes** (`ChromaAdaLayerNormZeroPruned`, `ChromaAdaLayerNormZeroSinglePruned`, `ChromaAdaLayerNormContinuousPruned`).
+- "Pruned" = the per-block AdaLN linears that compute shift/scale/gate from `temb` are **removed**. Modulation values are computed **once at the top level** by a `ChromaApproximator` MLP and the result is sliced per-block from a precomputed table.
+- `ChromaApproximator` is a 5-layer SiLU MLP with `RMSNorm` residual blocks: `Linear(64, 5120) → 5x [PixArtAlphaTextProjection(5120) + RMSNorm(5120) + residual] → Linear(5120, 3072)`. Output shape `[B, mod_index_length, 3072]` where `mod_index_length = 3*N_single + 12*N_double + 2 = 344` for 19 doubles + 38 singles.
+- Approximator input: `concat([Timesteps(timestep, 16), Timesteps(zero_guidance, 16), mod_proj_index_embed(arange(out_dim) * 1000, 32)])` → 64 channels, repeated to `[B, 344, 64]`.
+- Per double block: slice 6 rows for image modulation + 6 rows for text → `temb` of shape `[B, 12, 3072]`, split `temb[:, :6]` for image and `temb[:, 6:]` for text inside the block.
+- Per single block: slice 3 rows starting at `3*i`.
+- Final norm: last 2 rows.
+- **No CLIP pooled projection.** Conditioning is timestep-only. The CLIP-L path that Flux uses is removed.
+- **T5-only pipeline.** `pipeline_chroma.py` constructor takes `text_encoder: T5EncoderModel` only.
+- "True CFG" via dual transformer forwards: `noise = neg + scale * (cond - neg)`. Default `guidance_scale = 5.0`, default 35 steps.
+- **Attention mask plumbed through the transformer.** T5 attention mask with the "first padding token unmasked" rule (`pipeline_chroma.py:249-252`), extended to all-ones for image tokens, broadcast to `[B, 1, 1, S+I]` for SDPA. Flux's pipeline does not propagate any mask.
+- Single-block stack receives **already-concatenated `[encoder_hidden_states; hidden_states]`** (concat done once before the loop, sliced off after). Flux's single block does the concat per-block.
+- **No `swap_scale_shift`** for the final layer — the `norm_out` shift/scale come from the runtime modulation table, not from a checkpoint linear.
+
+#### Existing C# scaffolding is broken
+- `ChromaConfig.cs` says "Reuses FluxTransformer directly" — wrong. With `GuidanceEmbed = false`, `FluxTransformer` builds `CombinedTimestepTextProjEmbeddings` (CLIP pooled + timestep MLP) and per-block `AdaLayerNormZero.linear`s — **none of these exist in Chroma's checkpoint**, so weight loading will fail with hundreds of missing keys.
+- `ChromaPipeline.cs` uses `ClipTextEncoder` and extracts a CLIP-L pooled vector — wrong (Chroma is T5-only).
+- Both files need to be rewritten from scratch.
+
+#### Files needed (estimated ~1300-1800 lines)
+- [ ] `ChromaConfig.cs` — rewrite. Fields: `Depth=19, DepthSingleBlocks=38, HiddenSize=3072, NumHeads=24, HeadDim=128, ApproximatorNumChannels=64, ApproximatorHiddenDim=5120, ApproximatorLayers=5`. Drop the `FluxConfig` field.
+- [ ] `ChromaApproximator.cs` — 5-layer gated SiLU MLP with RMSNorm residuals (~250 lines). Plus a non-persistent `mod_proj` index buffer (`get_timestep_embedding(arange(out_dim) * 1000, ...)`).
+- [ ] `ChromaCombinedTimestepEmbeddings.cs` — builds the approximator input from timestep + zero-guidance + mod_proj index buffer.
+- [ ] `ChromaDoubleStreamBlock.cs` and `ChromaSingleStreamBlock.cs` — block variants without `norm1.linear`, `norm.linear`. Take precomputed `temb` rows directly as input. Single block sees pre-concatenated `[txt, img]` tokens. ~250 lines.
+- [ ] `ChromaTransformer.cs` — top-level loop: approximator → table → per-block slice → block forward → concat-then-single → slice off image → `norm_out` from last 2 rows → `proj_out`. ~400 lines.
+- [ ] `ChromaCheckpointConverter.cs` — BFL-style single-file (`double_blocks.{i}.img_attn.qkv.weight`, etc.) → diffusers naming + `distilled_guidance_layer.*` tree. **No `swap_scale_shift`** for final layer (because final layer doesn't have a checkpoint linear). ~300 lines.
+- [ ] `ChromaPipeline.cs` — full rewrite (replaces existing 318-line file): T5-only encode, T5 attention mask plumbing with the "first padding token unmasked" trick, dual-pass CFG with default scale=5.0 + steps=35, FreeWeights eviction before VAE. ~250 lines.
+- [ ] `ChromaDebugDump.cs` — env var `CHROMA_DEBUG_DIR`.
+- [ ] End-to-end test + Python ref dump + diff harness.
+
+#### Weights (12 GB target)
+- BFL-style FP16 single-file (~17.8 GB) — won't fit at FP16, FP8 cast at load (~9 GB) tight but fits
+- GGUF Q4/Q5 (~5-6 GB) — comfortable, **requires GGUF K-quant reader**
+- T5-XXL Q8/Q4 (similar to Flux/SD3 setup) — already supported
+
+#### Common blocker
+All three of AuraFlow / ERNIE / Chroma have GGUF Q4/Q5 builds that comfortably fit 12 GB on the user's RTX 3060. We don't have a GGUF K-quant reader yet. Two paths:
+1. **Build GGUF K-quant reader** (probably ~1-2 days) — unlocks all three plus smaller variants of Flux/SD3.5/Qwen-Image.
+2. **Cast FP16 single-files to FP8 at load** — works on the user's 32 GB-RAM box (peak RAM ~17 GB during cast, well within budget). No new infrastructure needed; existing FP8 path handles inference. This is the recommended path for these three models pending GGUF support.
 
 ### Hunyuan Image 2.1 (MMDiT)
 - [x] `HunyuanImageConfig.cs` — 17B config with InChannels=32, V21/V21Distilled presets

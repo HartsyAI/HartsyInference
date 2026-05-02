@@ -11,8 +11,8 @@ using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
-/// <summary>AuraFlow text-to-image pipeline. Uses Pile T5-XXL for text encoding and SDXL-compatible VAE (4-channel latent). Supports standard classifier-free guidance. Flow-matching scheduler with configurable shift.</summary>
-public sealed class AuraFlowPipeline : IDisposable
+/// <summary>AuraFlow text-to-image pipeline (<c>AuraFlowPipeline</c>). Encodes prompts with Pile-T5-XL (joint_attention_dim=2048), runs the AuraFlow MMDiT transformer with classifier-free guidance, then decodes with the SDXL-compatible 4-channel VAE. Uses a static-shift FlowMatch scheduler. Mirrors the diffusers pipeline at <c>diffusers/pipelines/aura_flow/pipeline_aura_flow.py</c>.</summary>
+public sealed unsafe class AuraFlowPipeline : IDisposable
 {
     private readonly IBackend _backend;
     private readonly T5TextEncoder _t5;
@@ -23,6 +23,12 @@ public sealed class AuraFlowPipeline : IDisposable
     private int _disposed;
 
     /// <summary>Creates a new AuraFlow pipeline with all components pre-loaded.</summary>
+    /// <param name="backend">Compute backend.</param>
+    /// <param name="t5">Pile-T5-XL text encoder (output dim 2048, max length 256).</param>
+    /// <param name="transformer">AuraFlow MMDiT transformer.</param>
+    /// <param name="vaeDecoder">SDXL VAE decoder (<see cref="VaeConfig.Sdxl"/>; 4-channel latent, scaling=0.13025).</param>
+    /// <param name="config">AuraFlow configuration (use <see cref="AuraFlowConfig.V03"/> for fal/AuraFlow-v0.3).</param>
+    /// <param name="schedulerShift">Flow-match scheduler shift. AuraFlow uses a static shift; default 1.73 matches the diffusers config.</param>
     public AuraFlowPipeline(IBackend backend, T5TextEncoder t5, AuraFlowTransformer transformer,
         VaeDecoder vaeDecoder, AuraFlowConfig config, float schedulerShift = 1.73f)
     {
@@ -34,7 +40,13 @@ public sealed class AuraFlowPipeline : IDisposable
         _schedulerShift = schedulerShift;
     }
 
-    /// <summary>Generates an image from pre-tokenized T5 input with standard CFG.</summary>
+    /// <summary>Generates an image from pre-tokenized Pile-T5-XL input with optional CFG.</summary>
+    /// <param name="promptTokenIdsT5">Prompt token IDs from Pile-T5-XL tokenizer (max length 256).</param>
+    /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs (same length as <paramref name="promptTokenIdsT5"/>).</param>
+    /// <param name="promptAttentionMaskT5">Optional T5 attention mask for the prompt (1=attend, 0=pad).</param>
+    /// <param name="negativeAttentionMaskT5">Optional T5 attention mask for the negative prompt.</param>
+    /// <param name="request">Generation parameters.</param>
+    /// <param name="onProgress">Optional progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsT5,
         int[] negativePromptTokenIdsT5,
@@ -54,15 +66,16 @@ public sealed class AuraFlowPipeline : IDisposable
         Logs.Info($"AuraFlow: Generating {request.Width}x{request.Height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Encode text with T5-XXL ───────────────────────────────────
-        Logs.Info("Encoding text with T5-XXL...");
+        // ── 1. Encode text with Pile-T5-XL ───────────────────────────────
+        Logs.Info("Encoding text with Pile-T5-XL...");
+
+        bool useCfg = cfgScale > 1.0f;
 
         int[][] batchT5 = [promptTokenIdsT5];
         int[][]? batchMask = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
         Tensor condContext = _t5.Encode(_backend, batchT5, batchMask);
 
         Tensor? uncondContext = null;
-        bool useCfg = cfgScale > 1.0f;
         if (useCfg)
         {
             int[][] negBatchT5 = [negativePromptTokenIdsT5];
@@ -72,11 +85,11 @@ public sealed class AuraFlowPipeline : IDisposable
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
-        // ── 2. Create initial noise latent [1, 4, latentH, latentW] ─────
-        TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
+        // ── 2. Create initial noise latent [1, 4, latentH, latentW] ────
+        TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
 
-        // ── 3. Set up flow-match scheduler ───────────────────────────────
+        // ── 3. Set up flow-match scheduler (static shift) ────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
         scheduler.SetTimesteps(steps);
 
@@ -98,11 +111,21 @@ public sealed class AuraFlowPipeline : IDisposable
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            // TODO: Implement denoising step once AuraFlowTransformer.Forward is complete
-            // Tensor noisePred;
-            // if (useCfg) { run CFG with cond/uncond forward passes }
-            // else { single forward pass }
-            // Tensor newLatent = scheduler.Step(noisePred, latent, i);
+            Tensor noisePred;
+            if (useCfg)
+            {
+                noisePred = ClassifierFreeGuidanceStep(latent, t, condContext, uncondContext!, cfgScale);
+            }
+            else
+            {
+                noisePred = _transformer.Forward(_backend, latent, t, condContext);
+            }
+
+            Tensor newLatent = new Tensor(latentShape, DType.F32);
+            scheduler.Step(newLatent, noisePred, latent, i);
+            noisePred.Dispose();
+            latent.Dispose();
+            latent = newLatent;
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
@@ -111,6 +134,15 @@ public sealed class AuraFlowPipeline : IDisposable
 
         condContext.Dispose();
         uncondContext?.Dispose();
+
+        AuraFlowTransformer.DumpFinalLatent(latent);
+
+        // Free transformer + T5 weights from GPU before VAE decode (mirrors SD3 pattern;
+        // the SDXL VAE im2col buffers are large and the transformer is huge — we OOM on
+        // a 12 GB card without this eviction).
+        _backend.Sync();
+        _backend.FreeWeights(_transformer.EnumerateWeights());
+        _backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. VAE decode ────────────────────────────────────────────────
         Logs.Info("Decoding latents to image...");
@@ -129,12 +161,37 @@ public sealed class AuraFlowPipeline : IDisposable
         return (rgbData, request.Width, request.Height, seed);
     }
 
+    /// <summary>Runs classifier-free guidance: <c>noise_pred = uncond + cfg_scale * (cond - uncond)</c>.</summary>
+    private Tensor ClassifierFreeGuidanceStep(
+        Tensor latent, float timestep,
+        Tensor condContext, Tensor uncondContext, float cfgScale)
+    {
+        Tensor uncondNoise = _transformer.Forward(_backend, latent, timestep, uncondContext);
+        Tensor condNoise = _transformer.Forward(_backend, latent, timestep, condContext);
+
+        Tensor output = new Tensor(latent.Shape, DType.F32);
+        float* uncPtr = (float*)uncondNoise.DataPointer;
+        float* conPtr = (float*)condNoise.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        int count = (int)latent.ElementCount;
+
+        for (int i = 0; i < count; i++)
+        {
+            outPtr[i] = uncPtr[i] + cfgScale * (conPtr[i] - uncPtr[i]);
+        }
+
+        uncondNoise.Dispose();
+        condNoise.Dispose();
+
+        return output;
+    }
+
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components.</summary>
+    /// <summary>Disposes the pipeline. Does not dispose the backend or model components (shared resources).</summary>
     public void Dispose()
     {
         Volatile.Write(ref _disposed, 1);

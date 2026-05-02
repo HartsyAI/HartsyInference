@@ -1,4 +1,5 @@
 using SharpInference.Core.Backends;
+using SharpInference.Core.MemoryManagement;
 using SharpInference.Core.Tensors;
 using SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -107,8 +108,25 @@ public sealed unsafe class FluxTransformer : IDisposable
         _projOutBias = weights["proj_out.bias"];
     }
 
-    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    /// <summary>Enumerates all weight tensors for GPU preloading. Equivalent to
+    /// <see cref="EnumerateSharedWeights"/> followed by every block's weights — kept
+    /// for callers that want the eager all-at-once preload pattern.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
+        for (int i = 0; i < BlockCount; i++)
+        {
+            foreach (Tensor w in GetBlock(i).EnumerateWeights()) yield return w;
+        }
+    }
+
+    /// <summary>Enumerates the always-resident weights — input projections, timestep/text
+    /// MLPs, optional guidance MLP, final AdaLN + projection. These are touched on every
+    /// forward pass regardless of which block is currently executing, so the streaming
+    /// controller does not manage them — callers should preload them eagerly via
+    /// <see cref="IBackend.PreloadWeights"/> when streaming the per-block weights.
+    /// Total: ~80 MB for Flux at fp8, negligible against the budget.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         if (_xEmbedWeight is not null) yield return _xEmbedWeight;
         if (_xEmbedBias is not null) yield return _xEmbedBias;
@@ -130,14 +148,65 @@ public sealed unsafe class FluxTransformer : IDisposable
         if (_normOutLinearBias is not null) yield return _normOutLinearBias;
         if (_projOutWeight is not null) yield return _projOutWeight;
         if (_projOutBias is not null) yield return _projOutBias;
-        for (int i = 0; i < _doubleBlocks.Length; i++)
+    }
+
+    /// <summary>The number of streamable blocks: double-stream blocks first,
+    /// then single-stream. Indexes <c>[0, Depth)</c> map to double blocks;
+    /// <c>[Depth, Depth + DepthSingleBlocks)</c> to single blocks.</summary>
+    public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
+
+    /// <summary>Returns the streamable block at the given index. Wrappers are
+    /// instantiated on demand (cheap) — they hold a reference to the underlying
+    /// double/single block and forward enumeration calls to it.</summary>
+    public IStreamingBlock GetBlock(int idx)
+    {
+        if (idx < 0 || idx >= BlockCount) throw new ArgumentOutOfRangeException(nameof(idx));
+        if (idx < _doubleBlocks.Length)
         {
-            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
+            return new DoubleBlockHandle(_doubleBlocks[idx]);
         }
-        for (int i = 0; i < _singleBlocks.Length; i++)
+        return new SingleBlockHandle(_singleBlocks[idx - _doubleBlocks.Length]);
+    }
+
+    /// <summary>Optional hook invoked immediately before each block's forward pass
+    /// during <see cref="Forward"/>. The block index passed in is the same one used
+    /// by <see cref="GetBlock"/>. Pipelines plug a <see cref="BlockStreamingController"/>
+    /// in here to drive prefetch and eviction; left null, the transformer behaves
+    /// exactly as before (caller must have all weights resident).</summary>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>Wrapper around a <see cref="FluxDoubleStreamBlock"/> that satisfies
+    /// <see cref="IStreamingBlock"/>. Pre-computes byte size at construction so the
+    /// controller's budget heuristic doesn't pay enumeration cost on every query.</summary>
+    private sealed class DoubleBlockHandle : IStreamingBlock
+    {
+        private readonly FluxDoubleStreamBlock _block;
+        public DoubleBlockHandle(FluxDoubleStreamBlock block)
         {
-            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
+            _block = block;
+            EstimatedWeightBytes = SumBytes(block.EnumerateWeights());
         }
+        public long EstimatedWeightBytes { get; }
+        public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
+    }
+
+    private sealed class SingleBlockHandle : IStreamingBlock
+    {
+        private readonly FluxSingleStreamBlock _block;
+        public SingleBlockHandle(FluxSingleStreamBlock block)
+        {
+            _block = block;
+            EstimatedWeightBytes = SumBytes(block.EnumerateWeights());
+        }
+        public long EstimatedWeightBytes { get; }
+        public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
+    }
+
+    private static long SumBytes(IEnumerable<Tensor> tensors)
+    {
+        long total = 0;
+        foreach (Tensor t in tensors) total += t.ElementCount * t.DType.SizeInBytes;
+        return total;
     }
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
@@ -183,6 +252,7 @@ public sealed unsafe class FluxTransformer : IDisposable
 
         for (int i = 0; i < _config.Depth; i++)
         {
+            BeforeBlockForward?.Invoke(i);
             (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, currentImg, currentTxt, temb, _rope);
 
             if (!ReferenceEquals(currentImg, imgTokens))
@@ -209,6 +279,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         // ── 7. Single-stream blocks ──
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
         {
+            BeforeBlockForward?.Invoke(_config.Depth + i);
             Tensor newX = _singleBlocks[i].Forward(backend, x, temb, _rope);
             x.Dispose();
             x = newX;

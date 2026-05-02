@@ -26,7 +26,22 @@ public sealed class CudaContext : IDisposable
     [ThreadStatic]
     private static nint _threadCurrentContext;
 
+    /// <summary>The generation of the context bound to the calling thread. Pairs with
+    /// <see cref="_threadCurrentContext"/>. The CUDA driver reuses primary-context
+    /// handles after release+retain — so handle equality alone isn't enough to know
+    /// the binding is still valid. Bumping a process-wide generation on every new
+    /// <see cref="CudaContext"/> instance and checking the per-thread generation here
+    /// forces a re-bind whenever the underlying context object has been recreated.</summary>
+    [ThreadStatic]
+    private static long _threadCurrentGeneration;
+
+    /// <summary>Process-wide monotonic counter; each new <see cref="CudaContext"/>
+    /// instance gets a fresh generation regardless of whether the driver reused
+    /// the context handle.</summary>
+    private static long _generationCounter;
+
     private nint _context;
+    private readonly long _generation;
     private readonly int _deviceOrdinal;
     private readonly int _deviceHandle;
 
@@ -57,6 +72,7 @@ public sealed class CudaContext : IDisposable
         EnsureCudaInitialized();
 
         _deviceOrdinal = deviceOrdinal;
+        _generation = Interlocked.Increment(ref _generationCounter);
 
         CudaDriverApi.cuDeviceGet(out _deviceHandle, deviceOrdinal).ThrowOnError();
         CudaDriverApi.cuDevicePrimaryCtxRetain(out _context, _deviceHandle).ThrowOnError();
@@ -64,6 +80,7 @@ public sealed class CudaContext : IDisposable
         // caller does immediately after construction) see a current context.
         CudaDriverApi.cuCtxSetCurrent(_context).ThrowOnError();
         _threadCurrentContext = _context;
+        _threadCurrentGeneration = _generation;
 
         // Query device properties
         CudaDriverApi.cuDeviceGetAttribute(
@@ -93,7 +110,11 @@ public sealed class CudaContext : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnsureCurrent()
     {
-        if (_threadCurrentContext == _context)
+        // Both checks matter: handle equality alone is unsafe because the CUDA
+        // driver reuses primary-context handles after release+retain — a thread
+        // could see a numerically-equal handle that's actually backed by a freshly
+        // recreated context. The generation counter forces a re-bind in that case.
+        if (_threadCurrentContext == _context && _threadCurrentGeneration == _generation)
         {
             return;
         }
@@ -103,6 +124,7 @@ public sealed class CudaContext : IDisposable
         }
         CudaDriverApi.cuCtxSetCurrent(_context).ThrowOnError();
         _threadCurrentContext = _context;
+        _threadCurrentGeneration = _generation;
     }
 
     /// <summary>Forces a re-bind of this context on the calling thread, bypassing the TLS
@@ -116,6 +138,7 @@ public sealed class CudaContext : IDisposable
         }
         CudaDriverApi.cuCtxSetCurrent(_context).ThrowOnError();
         _threadCurrentContext = _context;
+        _threadCurrentGeneration = _generation;
     }
 
     /// <summary>Synchronizes the entire context (all streams).</summary>
@@ -213,10 +236,13 @@ public sealed class CudaContext : IDisposable
         {
             // Clear the TLS marker if the disposing thread still thought it held this
             // context — otherwise a later EnsureCurrent on this thread would skip the
-            // re-bind on a different (later-constructed) CudaContext.
-            if (_threadCurrentContext == ctx)
+            // re-bind on a different (later-constructed) CudaContext. Generation is
+            // cleared too so the per-thread state is unambiguous (matches the "no
+            // context bound" sentinel of generation=0 + handle=0).
+            if (_threadCurrentContext == ctx && _threadCurrentGeneration == _generation)
             {
                 _threadCurrentContext = 0;
+                _threadCurrentGeneration = 0;
             }
             CudaDriverApi.cuDevicePrimaryCtxRelease(_deviceHandle);
         }

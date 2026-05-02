@@ -113,10 +113,16 @@ internal static partial class CudaDriverApi
     [SuppressGCTransition]
     internal static partial int cuMemFreeAsync(ulong dptr, nint stream);
 
-    [LibraryImport(LibName)]
+    // The libcuda.so symbol table exports BOTH `cuMemcpyHtoDAsync` (legacy CUDA 1.x
+    // ABI with 32-bit CUdeviceptr) AND `cuMemcpyHtoDAsync_v2` (modern, 64-bit). The
+    // unsuffixed name binds to the legacy ABI on 64-bit Linux — the 64-bit ulong
+    // dptr we pass gets misinterpreted, manifesting as CUDA_ERROR_INVALID_CONTEXT
+    // (201) when the driver tries to validate the pointer. Same gotcha that
+    // cuMemcpyHtoD_v2 / cuMemAlloc_v2 already pin in the sync functions above.
+    [LibraryImport(LibName, EntryPoint = "cuMemcpyHtoDAsync_v2")]
     internal static partial int cuMemcpyHtoDAsync(ulong dst, nint src, nuint bytes, nint stream);
 
-    [LibraryImport(LibName)]
+    [LibraryImport(LibName, EntryPoint = "cuMemcpyDtoHAsync_v2")]
     internal static partial int cuMemcpyDtoHAsync(nint dst, ulong src, nuint bytes, nint stream);
 
     // ── Stream Management ───────────────────────────────────────────────
