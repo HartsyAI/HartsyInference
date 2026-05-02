@@ -174,6 +174,17 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         uncondProjected?.Dispose();
         uncondPooled?.Dispose();
 
+        Sd3Transformer.DumpFinalLatent(latent);
+
+        // Free transformer + text encoder weights from GPU now that denoising is done.
+        // The VAE im2col buffers at 512×512+ are large (hundreds of MB to several GB),
+        // and on a 12 GB card we OOM during VAE decode if the transformer is still
+        // resident. Mirrors PHASE_3_DEVIATIONS #18 (UNet eviction before VAE for SDXL/Flux).
+        // Backends without a weight cache (CPU/Vulkan) treat this as a no-op.
+        _backend.Sync();
+        _backend.FreeWeights(_transformer.EnumerateWeights());
+        if (_t5 is not null) _backend.FreeWeights(_t5.EnumerateWeights());
+
         // ── 5. VAE decode ───────────────────────────────────────────────
         Logs.Info("Decoding latents to image...");
         Stopwatch vaeSw = Stopwatch.StartNew();

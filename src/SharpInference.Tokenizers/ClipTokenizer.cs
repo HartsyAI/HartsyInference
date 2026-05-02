@@ -1,10 +1,11 @@
-using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.ML.Tokenizers;
 
 namespace SharpInference.Tokenizers;
 
-/// <summary>CLIP BPE tokenizer matching OpenAI's implementation exactly. Wraps Microsoft.ML.Tokenizers BPE with CLIP-specific preprocessing (lowercase, regex split, SOT/EOT tokens, 77-token limit).</summary>
+/// <summary>CLIP BPE tokenizer matching OpenAI's implementation. Wraps <see cref="Microsoft.ML.Tokenizers.BpeTokenizer"/> with CLIP-specific configuration: lowercase normalization, a regex pre-tokenizer that splits on word/contraction/punctuation boundaries, the <c>&lt;/w&gt;</c> end-of-word suffix that CLIP's BPE merges depend on, and SOT/EOT padding to 77 tokens.
+///
+/// Without the regex pre-tokenizer + <c>EndOfWordSuffix</c>, generic BPE produces character-level fragments (e.g. "photograph" → 'ph','ot','og','raph') instead of CLIP's correct merges (→ 'photograph&lt;/w&gt;'). That breaks every CLIP-conditioned model — see PHASE_3_DEVIATIONS #1 / SDXL silent CLIP failures and the SD3.5 patch-grid output we hit before this fix.</summary>
 public sealed class ClipTokenizer : IDisposable
 {
     /// <summary>Start-of-text token ID.</summary>
@@ -19,107 +20,117 @@ public sealed class ClipTokenizer : IDisposable
     /// <summary>Vocabulary size.</summary>
     public const int VocabSize = 49408;
 
+    /// <summary>End-of-word suffix used by CLIP's BPE merges.</summary>
+    private const string EndOfWordSuffix = "</w>";
+
+    /// <summary>OpenAI CLIP pre-tokenization regex (mirrors `huggingface/transformers` <c>CLIPTokenizer</c>):
+    /// matches the special tokens, English contractions, letter sequences, single digits, and runs of
+    /// non-whitespace symbols. Letter sequences use <c>\p{L}</c> so unicode letters are kept together.</summary>
+    private static readonly Regex ClipPreTokenRegex = new(
+        @"<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly IReadOnlyDictionary<string, int> ClipSpecialTokens =
+        new Dictionary<string, int>
+        {
+            ["<|startoftext|>"] = StartOfTextId,
+            ["<|endoftext|>"] = EndOfTextId,
+        };
+
     private readonly Tokenizer _tokenizer;
     private int _disposed;
 
     /// <summary>Creates a CLIP tokenizer using the canonical OpenAI CLIP vocab/merges
     /// embedded in this assembly. This is the right constructor for SD 1.5, SDXL,
     /// SD3, Flux, and the SDXL refiner — they all share the same 49,408-token
-    /// CLIP BPE. Use the path/stream overloads only if you need to override with a
-    /// non-standard vocabulary.</summary>
+    /// CLIP BPE.</summary>
     public ClipTokenizer()
     {
         using Stream vocabStream = EmbeddedTokenizerResources.OpenClipVocab();
         using Stream mergesStream = EmbeddedTokenizerResources.OpenClipMerges();
-        _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+        _tokenizer = CreateTokenizer(vocabStream, mergesStream);
     }
 
     /// <summary>Creates a CLIP tokenizer from a vocabulary file and merges file.</summary>
-    /// <param name="vocabPath">Path to the CLIP vocabulary JSON file (encoder.json).</param>
-    /// <param name="mergesPath">Path to the CLIP BPE merges file (vocab.bpe).</param>
     public ClipTokenizer(string vocabPath, string mergesPath)
     {
         using Stream vocabStream = File.OpenRead(vocabPath);
         using Stream mergesStream = File.OpenRead(mergesPath);
-        _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+        _tokenizer = CreateTokenizer(vocabStream, mergesStream);
     }
 
     /// <summary>Creates a CLIP tokenizer from streams.</summary>
-    /// <param name="vocabStream">Stream containing the CLIP vocabulary JSON.</param>
-    /// <param name="mergesStream">Stream containing the CLIP BPE merges.</param>
     public ClipTokenizer(Stream vocabStream, Stream mergesStream)
     {
-        _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+        _tokenizer = CreateTokenizer(vocabStream, mergesStream);
     }
 
-    /// <summary>Tokenizes text into token IDs matching OpenAI CLIP output. Prepends SOT, appends EOT, pads/truncates to MaxLength.</summary>
-    /// <param name="text">Input text to tokenize.</param>
-    /// <returns>Array of token IDs with length MaxLength.</returns>
+    private static BpeTokenizer CreateTokenizer(Stream vocabStream, Stream mergesStream)
+    {
+        // Argument order for this overload: vocab, merges, preTokenizer, normalizer, specialTokens, unknownToken, continuingSubwordPrefix, endOfWordSuffix, fuseUnknownTokens.
+        return BpeTokenizer.Create(
+            vocabStream,
+            mergesStream,
+            preTokenizer: new RegexPreTokenizer(ClipPreTokenRegex, ClipSpecialTokens),
+            normalizer: LowercaseNormalizer.Instance,
+            specialTokens: ClipSpecialTokens,
+            unknownToken: null,
+            continuingSubwordPrefix: null,
+            endOfWordSuffix: EndOfWordSuffix,
+            fuseUnknownTokens: false);
+    }
+
+    /// <summary>Tokenizes text into token IDs matching OpenAI CLIP output. Prepends SOT, appends EOT, pads with EOT to <see cref="MaxLength"/>. CLIP uses the EOT token as its pad token (matching HuggingFace <c>CLIPTokenizer(padding="max_length")</c>) — never zero-pad, since position 0 is a real token id (the byte-level "!").</summary>
     public int[] Encode(string text)
     {
         ThrowIfDisposed();
 
-        // CLIP preprocessing: lowercase and clean whitespace
-        string processed = text.ToLowerInvariant().Trim();
+        IReadOnlyList<int> tokenIds = _tokenizer.EncodeToIds(text);
 
-        // Encode using BPE
-        IReadOnlyList<int> tokenIds = _tokenizer.EncodeToIds(processed);
-
-        // Build final sequence: [SOT, ...tokens..., EOT, 0, 0, ...]
         int[] result = new int[MaxLength];
         result[0] = StartOfTextId;
 
-        int maxTokens = MaxLength - 2; // Reserve slots for SOT and EOT
+        int maxTokens = MaxLength - 2; // reserve slots for SOT and EOT
         int tokenCount = Math.Min(tokenIds.Count, maxTokens);
 
         for (int i = 0; i < tokenCount; i++)
-        {
             result[i + 1] = tokenIds[i];
-        }
 
         result[tokenCount + 1] = EndOfTextId;
-        // Remaining positions are already 0 (padding)
+        // CLIP convention: pad with EOT, not zero. Mirrors HuggingFace `CLIPTokenizer.pad_token == eos_token`.
+        for (int i = tokenCount + 2; i < MaxLength; i++)
+            result[i] = EndOfTextId;
 
         return result;
     }
 
-    /// <summary>Finds the position of the EOT token in an encoded sequence. Used by SDXL to extract the pooled output from the CLIP-G encoder at the EOS token position.</summary>
-    /// <param name="tokenIds">Encoded token IDs from Encode().</param>
-    /// <returns>Index of the EOT token, or -1 if not found.</returns>
+    /// <summary>Finds the position of the first EOT token in an encoded sequence.</summary>
     public static int FindEosPosition(ReadOnlySpan<int> tokenIds)
     {
         for (int i = 0; i < tokenIds.Length; i++)
-        {
             if (tokenIds[i] == EndOfTextId)
                 return i;
-        }
         return -1;
     }
 
-    /// <summary>Tokenizes text and returns just the token IDs without padding (no SOT/EOT).</summary>
+    /// <summary>Tokenizes text and returns just the BPE token IDs without padding (no SOT/EOT).</summary>
     public IReadOnlyList<int> EncodeRaw(string text)
     {
         ThrowIfDisposed();
-        string processed = text.ToLowerInvariant().Trim();
-        return _tokenizer.EncodeToIds(processed);
+        return _tokenizer.EncodeToIds(text);
     }
 
-    /// <summary>Decodes token IDs back to text.</summary>
+    /// <summary>Decodes token IDs back to text, filtering out SOT/EOT and zero-pad.</summary>
     public string Decode(ReadOnlySpan<int> tokenIds)
     {
         ThrowIfDisposed();
-
-        // Filter out SOT, EOT, and padding (0)
-        List<int> filtered = new List<int>(tokenIds.Length);
+        List<int> filtered = new(tokenIds.Length);
         for (int i = 0; i < tokenIds.Length; i++)
         {
             int id = tokenIds[i];
             if (id != StartOfTextId && id != EndOfTextId && id != 0)
-            {
                 filtered.Add(id);
-            }
         }
-
         return _tokenizer.Decode(filtered) ?? string.Empty;
     }
 
@@ -135,9 +146,15 @@ public sealed class ClipTokenizer : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             if (_tokenizer is IDisposable disposable)
-            {
                 disposable.Dispose();
-            }
         }
+    }
+
+    /// <summary>Lowercase-only normalizer used as the pre-BPE step. CLIP normalizes input by lowercasing — no NFKC, no whitespace cleanup beyond what the regex pre-tokenizer handles.</summary>
+    private sealed class LowercaseNormalizer : Normalizer
+    {
+        public static readonly LowercaseNormalizer Instance = new();
+        public override string Normalize(string original) => original.ToLowerInvariant();
+        public override string Normalize(ReadOnlySpan<char> original) => original.ToString().ToLowerInvariant();
     }
 }

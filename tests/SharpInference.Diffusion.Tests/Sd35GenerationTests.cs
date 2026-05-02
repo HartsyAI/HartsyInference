@@ -44,6 +44,16 @@ public class Sd35GenerationTests
     public void Sd35_LargeTurbo_Gpu_512() =>
         RunGenerationTest(TestPaths.Sd35.LargeTurbo, "sd35_large_turbo_512", width: 512, height: 512, steps: 4, cfgScale: 1.0f, useT5: false);
 
+    /// <summary>Diagnostic: SD3.5 Medium with cfg=1.0 (no CFG) and 4 steps. Used to isolate whether the patch-grid bug comes from CFG vs the base pipeline.</summary>
+    [Fact]
+    public void Sd35_Medium_Gpu_512_NoCfg_4Steps() =>
+        RunGenerationTest(TestPaths.Sd35.Medium, "sd35_medium_512_nocfg_4steps", width: 512, height: 512, steps: 4, cfgScale: 1.0f, useT5: false);
+
+    /// <summary>Smaller-resolution diagnostic that can fit alongside other GPU tenants (e.g. SwarmUI). cfg=1, 4 steps, 256×256 — minimal VRAM footprint.</summary>
+    [Fact]
+    public void Sd35_Medium_Gpu_256_NoCfg_4Steps() =>
+        RunGenerationTest(TestPaths.Sd35.Medium, "sd35_medium_256_nocfg_4steps", width: 256, height: 256, steps: 4, cfgScale: 1.0f, useT5: false);
+
     private void RunGenerationTest(string checkpointPath, string outputName, int width, int height, int steps, float cfgScale, bool useT5)
     {
         if (!File.Exists(checkpointPath))

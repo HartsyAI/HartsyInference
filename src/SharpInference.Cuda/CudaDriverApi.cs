@@ -133,6 +133,43 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuStreamQuery(nint stream);
 
+    /// <summary>Makes <paramref name="stream"/> wait until <paramref name="hEvent"/>
+    /// has been recorded. The host thread does not block — only subsequent work
+    /// queued on <paramref name="stream"/> is gated. <paramref name="flags"/> = 0 is
+    /// always the right value (CU_EVENT_WAIT_DEFAULT).</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuStreamWaitEvent(nint stream, nint hEvent, uint flags);
+
+    // ── Event Management ────────────────────────────────────────────────
+
+    /// <summary>Creates a CUDA event. <c>CU_EVENT_DISABLE_TIMING</c> (=2) is the right
+    /// flag for sync-only events; we never need the timing data and disabling it
+    /// avoids a tiny bit of driver bookkeeping.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuEventCreate(out nint phEvent, uint flags);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuEventDestroy(nint hEvent);
+
+    /// <summary>Records the event when <paramref name="hStream"/> reaches this point
+    /// in its queue. The event is "complete" once all preceding work on that stream
+    /// finishes; other streams can wait on it via <see cref="cuStreamWaitEvent"/>.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuEventRecord(nint hEvent, nint hStream);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuEventQuery(nint hEvent);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuEventSynchronize(nint hEvent);
+
+    // ── Memory Info ─────────────────────────────────────────────────────
+
+    /// <summary>Returns the free and total amount of memory available for allocation
+    /// by the CUDA context. Reports the values for the calling context's device.</summary>
+    [LibraryImport(LibName, EntryPoint = "cuMemGetInfo_v2")]
+    internal static partial int cuMemGetInfo(out nuint free, out nuint total);
+
     // ── Error Handling ──────────────────────────────────────────────────
 
     [LibraryImport(LibName)]
@@ -157,4 +194,15 @@ internal static partial class CudaDriverApi
 
     internal const uint CU_STREAM_DEFAULT = 0;
     internal const uint CU_STREAM_NON_BLOCKING = 1;
+
+    // ── Event Flags ─────────────────────────────────────────────────────
+
+    /// <summary>Default event flag — events support timing (we don't need that).</summary>
+    internal const uint CU_EVENT_DEFAULT = 0;
+
+    /// <summary>Sync-only event; saves a tiny bit of driver bookkeeping vs default.</summary>
+    internal const uint CU_EVENT_DISABLE_TIMING = 2;
+
+    /// <summary>Default flag for <see cref="cuStreamWaitEvent"/>.</summary>
+    internal const uint CU_EVENT_WAIT_DEFAULT = 0;
 }

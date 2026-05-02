@@ -106,6 +106,14 @@ public sealed unsafe class FluxPipeline : IDisposable
         // ── 1. Encode text ─────────────────────────────────────────────
         Logs.Info("Encoding text with CLIP-L (pooled) + T5-XXL (per-token)...");
 
+        // Preload T5 weights to GPU as a single batch upload. Without this, every
+        // matmul/layernorm inside the encoder would do its own cache-miss H2D
+        // transfer + immediate free (see CudaBackend.MatMul finally block) — turning
+        // text encoding into thousands of ~MB-sized PCIe ping-pongs instead of one
+        // bulk transfer + many on-GPU reuses. Backends that don't support a weight
+        // cache (Cpu, Vulkan) treat PreloadWeights as a no-op.
+        _backend.PreloadWeights(_t5.EnumerateWeights());
+
         int[][] batchTokenIdsL = [promptTokenIdsL];
         Tensor clipLHidden = _clipL.Encode(_backend, batchTokenIdsL);
         LogTensorStats("CLIP hidden (full)", clipLHidden);
@@ -120,6 +128,13 @@ public sealed unsafe class FluxPipeline : IDisposable
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (T5 seqLen={txtSeqLen})");
         LogTensorStats("CLIP pooled", clipPooled);
         LogTensorStats("T5 embeddings", t5Embeddings);
+
+        // Free T5 weights from GPU now that text encoding is done. T5-XXL is ~5 GB —
+        // keeping it cached through sampling + VAE decode would OOM 12 GB cards on Flux.
+        // The activation tensor `t5Embeddings` is on GPU/CPU and lives independently of
+        // the encoder weights. Re-uploading T5 on the next generation is a one-time cost
+        // (~hundreds of ms) that's strictly cheaper than swapping mid-pipeline.
+        _backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 2. Set up dynamic flow-match scheduler ─────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
@@ -137,6 +152,12 @@ public sealed unsafe class FluxPipeline : IDisposable
         Tensor packedLatent = BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep);
 
         // ── 4. Denoising loop ─────────────────────────────────────────
+        // Preload transformer weights to GPU so the inner forward pass reuses cached
+        // device pointers across every step instead of re-uploading per matmul. For
+        // Flux this is the difference between minutes-per-step (PCIe-bound thrashing)
+        // and seconds-per-step (compute-bound on the SMs).
+        _backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info("Starting Flux denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -171,6 +192,12 @@ public sealed unsafe class FluxPipeline : IDisposable
         clipPooled.Dispose();
         t5Embeddings.Dispose();
 
+        // Free transformer weights from GPU now that sampling is done. The Flux
+        // transformer is ~12 GB at fp8 — VAE decode (~2-3 GB peak) cannot fit alongside
+        // it on a 12 GB card. Same tradeoff as the T5 eviction above: pay one-time
+        // re-upload on the next generation rather than crashing this one.
+        _backend.FreeWeights(_transformer.EnumerateWeights());
+
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
         LogTensorStats("Final packed latent", packedLatent);
         Tensor unpackedLatent = UnpackLatent(packedLatent, latentH, latentW);
@@ -193,6 +220,10 @@ public sealed unsafe class FluxPipeline : IDisposable
         }
 
         // ── 6. VAE decode ─────────────────────────────────────────────
+        // Preload VAE weights too — many small conv+norm ops in a row, same per-op
+        // re-upload pattern would apply.
+        _backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+
         Logs.Info("Decoding latents to image...");
         Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor image = _vaeDecoder.Decode(_backend, unpackedLatent);

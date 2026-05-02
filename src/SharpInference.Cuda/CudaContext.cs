@@ -1,11 +1,30 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace SharpInference.Cuda;
 
-/// <summary>Manages a CUDA context for a specific device. Handles initialization, context creation, and device info queries.</summary>
+/// <summary>Manages a CUDA context for a specific device. Handles initialization, context creation, and device info queries.
+///
+/// <para>Uses the CUDA Driver API <c>cuDevicePrimaryCtxRetain</c> rather than <c>cuCtxCreate</c>:
+/// the primary context is one-per-device-per-process, refcounted, and shared with the
+/// CUDA Runtime API. This avoids the thread-stack push side-effect of <c>cuCtxCreate</c>
+/// (which silently binds the context only to the constructing thread) and lets any thread
+/// in the process bind the same context via <see cref="EnsureCurrent"/>.</para>
+///
+/// <para>Thread affinity in the Driver API is explicit: every thread that issues CUDA
+/// API calls must have the context current on it (via <c>cuCtxSetCurrent</c>). The
+/// <see cref="EnsureCurrent"/> method below uses a <c>[ThreadStatic]</c> cache so the
+/// binding is set once per worker thread; subsequent calls on the same thread are a
+/// TLS read + branch.</para></summary>
 public sealed class CudaContext : IDisposable
 {
     private static int _cudaInitialized;
+
+    /// <summary>The primary-context handle currently bound to the calling thread, or 0 if
+    /// the thread has never been bound. ThreadStatic so each worker maintains its own
+    /// notion of "what's already current here."</summary>
+    [ThreadStatic]
+    private static nint _threadCurrentContext;
 
     private nint _context;
     private readonly int _deviceOrdinal;
@@ -29,7 +48,9 @@ public sealed class CudaContext : IDisposable
     /// <summary>Device name.</summary>
     public string DeviceName { get; }
 
-    /// <summary>Creates a CUDA context for the specified device ordinal.</summary>
+    /// <summary>Creates a CUDA context for the specified device ordinal. Retains the
+    /// device's primary context (refcounted; safe to call from multiple <see cref="CudaContext"/>
+    /// instances pointing at the same device) and binds it to the calling thread.</summary>
     public CudaContext(int deviceOrdinal = 0)
     {
         CudaLibraryResolver.Register();
@@ -38,7 +59,11 @@ public sealed class CudaContext : IDisposable
         _deviceOrdinal = deviceOrdinal;
 
         CudaDriverApi.cuDeviceGet(out _deviceHandle, deviceOrdinal).ThrowOnError();
-        CudaDriverApi.cuCtxCreate(out _context, 0, _deviceHandle).ThrowOnError();
+        CudaDriverApi.cuDevicePrimaryCtxRetain(out _context, _deviceHandle).ThrowOnError();
+        // Bind to the constructing thread so device queries below (and any work the
+        // caller does immediately after construction) see a current context.
+        CudaDriverApi.cuCtxSetCurrent(_context).ThrowOnError();
+        _threadCurrentContext = _context;
 
         // Query device properties
         CudaDriverApi.cuDeviceGetAttribute(
@@ -59,19 +84,44 @@ public sealed class CudaContext : IDisposable
         DeviceName = QueryDeviceName(_deviceHandle);
     }
 
-    /// <summary>Makes this context current on the calling thread.</summary>
+    /// <summary>
+    /// Ensures this context is current on the calling thread. Cheap fast path on already-bound
+    /// threads (one TLS read + branch). Call from the entry of any code that issues CUDA
+    /// Driver API calls — this is the single guarantee that makes the backend safe to use
+    /// from <c>Task.Run</c> worker threads, finalizers, and async continuations.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void EnsureCurrent()
+    {
+        if (_threadCurrentContext == _context)
+        {
+            return;
+        }
+        if (_context == 0)
+        {
+            throw new ObjectDisposedException(nameof(CudaContext));
+        }
+        CudaDriverApi.cuCtxSetCurrent(_context).ThrowOnError();
+        _threadCurrentContext = _context;
+    }
+
+    /// <summary>Forces a re-bind of this context on the calling thread, bypassing the TLS
+    /// cache. Use when external code may have changed the current context out from under us
+    /// (e.g. another library that calls <c>cuCtxSetCurrent</c> on the same thread).</summary>
     public void MakeCurrent()
     {
         if (_context == 0)
+        {
             throw new ObjectDisposedException(nameof(CudaContext));
+        }
         CudaDriverApi.cuCtxSetCurrent(_context).ThrowOnError();
+        _threadCurrentContext = _context;
     }
 
     /// <summary>Synchronizes the entire context (all streams).</summary>
     public void Synchronize()
     {
-        if (_context == 0)
-            throw new ObjectDisposedException(nameof(CudaContext));
+        EnsureCurrent();
         CudaDriverApi.cuCtxSynchronize().ThrowOnError();
     }
 
@@ -143,20 +193,32 @@ public sealed class CudaContext : IDisposable
 
     public void Dispose()
     {
-        nint ctx = Interlocked.Exchange(ref _context, 0);
-        if (ctx != 0)
-        {
-            CudaDriverApi.cuCtxDestroy(ctx);
-        }
+        ReleasePrimaryContext();
         GC.SuppressFinalize(this);
     }
 
     ~CudaContext()
     {
+        ReleasePrimaryContext();
+    }
+
+    /// <summary>Releases the device's primary context (decrements the refcount). When
+    /// the count hits zero, the driver tears the context down. Safe to call from the
+    /// finalizer thread because primary-context release isn't thread-bound the way
+    /// <c>cuCtxDestroy</c> would be.</summary>
+    private void ReleasePrimaryContext()
+    {
         nint ctx = Interlocked.Exchange(ref _context, 0);
         if (ctx != 0)
         {
-            CudaDriverApi.cuCtxDestroy(ctx);
+            // Clear the TLS marker if the disposing thread still thought it held this
+            // context — otherwise a later EnsureCurrent on this thread would skip the
+            // re-bind on a different (later-constructed) CudaContext.
+            if (_threadCurrentContext == ctx)
+            {
+                _threadCurrentContext = 0;
+            }
+            CudaDriverApi.cuDevicePrimaryCtxRelease(_deviceHandle);
         }
     }
 }

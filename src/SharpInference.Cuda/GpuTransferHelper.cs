@@ -23,6 +23,12 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Stream handle for deferred GPU memory frees and sync-before-D2H.</summary>
     private static nint _streamHandle;
 
+    /// <summary>The active CUDA context. Held so the lazy sync/dispose callbacks (which fire
+    /// from arbitrary threads — finalizers, async continuations, etc.) can bind the context
+    /// before issuing any CUDA Driver API call. Without this, a callback that fires on a
+    /// thread that's never bound the context would hit CUDA_ERROR_INVALID_CONTEXT.</summary>
+    private static CudaContext? _context;
+
     private static long _cachedBytes;
     private static long _hits;
     private static long _misses;
@@ -30,11 +36,18 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Sets the CUDA stream handle used for FreeAsync and sync-before-D2H in lazy callbacks.</summary>
     public static void SetStream(nint stream) => _streamHandle = stream;
 
+    /// <summary>Sets the CUDA context that the lazy callbacks bind on demand. Called once
+    /// from <see cref="CudaBackend"/>'s constructor.</summary>
+    public static void SetContext(CudaContext context) => _context = context;
+
     /// <summary>Synchronizes the CUDA stream to flush pending FreeAsync operations. Called by CudaMemory.Allocate on OOM retry.</summary>
     public static void SyncStream()
     {
         if (_streamHandle != 0)
+        {
+            _context?.EnsureCurrent();
             CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
+        }
     }
 
     /// <summary>
@@ -101,10 +114,13 @@ internal static unsafe class GpuTransferHelper
 
         // Lazy sync: when CPU code accesses DataPointer, wait for stream, copy GPU→CPU, then free.
         // Stream sync is needed because per-op Sync() has been removed — the producing kernel may still be in flight.
+        // EnsureCurrent in both callbacks: they fire from whatever thread later reads/disposes
+        // the tensor (potentially the GC finalizer thread), which won't have bound the context.
         tensor._gpuSyncCallback = () =>
         {
             if (_activationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
             {
+                _context?.EnsureCurrent();
                 CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
                 CudaMemory.CopyDeviceToHost(cpuPtr, cached.gpuPtr, cached.bytes);
                 _cachedPointers.Remove(cached.gpuPtr);
@@ -117,6 +133,7 @@ internal static unsafe class GpuTransferHelper
         {
             if (_activationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
             {
+                _context?.EnsureCurrent();
                 _cachedPointers.Remove(cached.gpuPtr);
                 CudaMemory.FreeAsync(cached.gpuPtr, _streamHandle);
             }
@@ -133,14 +150,52 @@ internal static unsafe class GpuTransferHelper
         ulong dptr = CudaMemory.Allocate(byteSize);
         CudaMemory.CopyHostToDevice(dptr, weight.DataPointer, byteSize);
 
+        RegisterCachedWeight(weight, dptr, byteSize);
+    }
+
+    // ── Cache-state hooks for the streaming weight cache ────────────────
+    //
+    // The streaming cache (CudaStreamingWeightCache) does its own async alloc + memcpy
+    // on a side stream rather than going through PreloadWeight's synchronous path, but
+    // the bookkeeping that follows (registering in _weightCache so MatMul etc. find the
+    // dptr, tracking _cachedPointers so FreeDevice doesn't free, accumulating
+    // _cachedBytes) needs to stay in sync. Exposing these as internal helpers keeps a
+    // single source of truth for the cache state without forcing the streaming cache
+    // to reach into private fields.
+
+    /// <summary>True if the weight is currently cached on the device. Streaming
+    /// uploads check this to skip already-resident tensors.</summary>
+    internal static bool IsWeightCached(Tensor weight) => _weightCache.ContainsKey(weight);
+
+    /// <summary>Registers an already-uploaded weight in the cache. The caller is
+    /// responsible for the alloc + H2D copy (sync or async); this just records the
+    /// tensor → dptr mapping and bumps the byte counter.</summary>
+    internal static void RegisterCachedWeight(Tensor weight, ulong dptr, nuint byteSize)
+    {
         _weightCache[weight] = dptr;
         _cachedPointers.Add(dptr);
         _cachedBytes += (long)byteSize;
     }
 
+    /// <summary>Removes a weight from the cache and returns its dptr, leaving the
+    /// caller responsible for the actual <c>cuMemFree*</c> call. Returns <c>false</c>
+    /// if the weight wasn't cached.</summary>
+    internal static bool TryUnregisterCachedWeight(Tensor weight, out ulong dptr)
+    {
+        if (_weightCache.Remove(weight, out dptr))
+        {
+            _cachedPointers.Remove(dptr);
+            _cachedBytes -= (long)ByteSize(weight);
+            return true;
+        }
+        dptr = 0;
+        return false;
+    }
+
     /// <summary>Frees specific weight tensors from the GPU cache to reclaim VRAM.</summary>
     public static void FreeWeights(IEnumerable<Tensor> weights)
     {
+        _context?.EnsureCurrent();
         if (_streamHandle != 0)
             CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
 
@@ -158,6 +213,7 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Frees all cached GPU buffers (weights + activations) and clears all caches.</summary>
     public static void FreeAllCached()
     {
+        _context?.EnsureCurrent();
         // Sync stream before freeing — pending async work may still reference these buffers
         if (_streamHandle != 0)
         {

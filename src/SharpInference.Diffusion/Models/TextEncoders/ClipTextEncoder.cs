@@ -166,24 +166,28 @@ public sealed unsafe class ClipTextEncoder
             }
         }
 
-        // Project through text_projection: [B, hiddenSize] @ [hiddenSize, projDim] = [B, projDim]
-        // text_projection weight is [projDim, hiddenSize] (or [hiddenSize, projDim] depending on format)
+        // Project through text_projection. The stored weight is `nn.Linear(hidden, proj).weight`,
+        // shape `[proj, hidden]` (PyTorch's `out_features, in_features` convention), and forward is
+        // `output = x @ weight.T` → `output[o] = Σ_i x[i] * weight[o, i] = Σ_i x[i] * w[o*hidden + i]`.
+        // For non-symmetric square matrices (CLIP-L/G's 768/1280 text_projection) the wrong transpose
+        // produces "noisy but bounded" output that fooled smoke tests but mangled SD3's pooled
+        // conditioning — see PHASE_3_DEVIATIONS notes for SD3.5 patch-grid debugging.
         TensorShape pooledShape = new TensorShape(batch, projDim);
         Tensor pooled = new Tensor(pooledShape, DType.F32);
         float* ePtr = (float*)eosHidden.DataPointer;
         float* wPtr = (float*)_textProjectionWeight!.DataPointer;
         float* pPtr = (float*)pooled.DataPointer;
 
-        // text_projection in diffusers is [hiddenSize, projDim] — no bias
         for (int b = 0; b < batch; b++)
         {
+            int inOffset = b * hiddenSize;
             for (int o = 0; o < projDim; o++)
             {
                 float sum = 0f;
-                int inOffset = b * hiddenSize;
+                int wRow = o * hiddenSize;
                 for (int i = 0; i < hiddenSize; i++)
                 {
-                    sum += ePtr[inOffset + i] * wPtr[i * projDim + o];
+                    sum += ePtr[inOffset + i] * wPtr[wRow + i];
                 }
                 pPtr[b * projDim + o] = sum;
             }

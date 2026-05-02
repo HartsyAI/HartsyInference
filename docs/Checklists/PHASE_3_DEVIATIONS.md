@@ -566,3 +566,81 @@ Why Base BF16 (`benjiaiplayground/z-image-base-repacked`) and Base nvfp8-mixed (
 **Lesson**: any C# kernel that does `(float*)weight.DataPointer` is a latent dtype bug — either fix the kernel to accept all supported dtypes, or guarantee F32 at load time and document the guarantee. Mixed-dtype checkpoints (FP8 Linear weights + BF16 norms is the modern norm) will surface these bugs the moment a non-F32-storing checkpoint hits a CPU-fallback op. When porting a model variant, audit every `weight.DataPointer` cast against the actual tensor dtypes the new checkpoint ships, not just the ones the previous variant happened to use.
 
 A second smaller bug: BF16-only checkpoints exposed that `CudaBackend.CastOnGpu` had no `BF16↔F32` path, so `Linear()` with F32 input + BF16 weight would throw `NotSupportedException`. Added [cast_bf16_f32.ptx](../../src/SharpInference.Cuda/Ptx/cast_bf16_f32.ptx) — BF16 is just the upper 16 bits of F32 (lossless one-way cast, RTNE on the way back). Wired through `LaunchCastBf16ToF32` / `LaunchCastF32ToBf16` and the `CastOnGpu` dispatch table. Same kernel exposes BF16↔F16 via two-step temp F32. This was a prerequisite for Base-BF16 to reach `RmsNorm` at all — without it the test crashed earlier at the t_embedder Linear.
+
+---
+
+## Phase 4 — SD3.5 Deviations
+
+### 31. CLIP Tokenizer Producing Character-Level Garbage Tokens (CLIP-L + CLIP-G)
+
+**Problem**: `Microsoft.ML.Tokenizers.BpeTokenizer.Create(vocabStream, mergesStream)` — the simple two-arg overload — runs **generic byte-pair encoding without CLIP's `</w>` end-of-word suffix or CLIP's regex pre-tokenizer**. Tokenizing "A photograph of an astronaut riding a horse" produced `[49406, 64, 1688, 684, 514, 7982, 627, 83, 553, 7545, 64, 8562]` — character/prefix-level fragments (`'a'`, `'ph'`, `'ot'`, `'og'`, `'raph'`, `'of'`, `'an'`, `'astron'`, `'au'`, `'t'`, `'a'`, `'horse'`) — instead of the HF reference `[49406, 320, 8853, 539, 550, 18376, 6765, 320, 4558, 49407]` (`'a</w>'`, `'photograph</w>'`, `'of</w>'`, `'an</w>'`, `'astronaut</w>'`, `'riding</w>'`, `'a</w>'`, `'horse</w>'`). The `EOS` was at position 12 instead of position 9 because there were 11 phantom sub-tokens.
+
+A second, related defect: `Encode()` zero-padded after the EOS instead of padding with the EOS token. HF `CLIPTokenizer(padding="max_length")` uses `pad_token == eos_token`, so positions 10..76 should all be 49407, not 0.
+
+**Why this stayed hidden through SDXL**: SDXL is robust enough to extract some semantic content from corrupted tokens — the images "look fine" superficially, even though the prompt is ~half-ignored. SD3 is much less tolerant: combined with deviation #32 below, the wrong tokens produced enough conditioning drift to drive the model into a degenerate "patch grid" output that we could no longer wave off.
+
+**Symptoms**: image at the patch granularity (16-pixel cells for SD3 at patch_size=2 + 8× VAE), uniform purple cast (R≈82, G≈60, B≈103 per channel mean), looking like a textured surface — the model "denoised something" but never coherently propagated cross-patch attention.
+
+**Fix**: rewrote [`ClipTokenizer.cs`](../../src/SharpInference.Tokenizers/ClipTokenizer.cs) to use the long-form `BpeTokenizer.Create(vocab, merges, preTokenizer, normalizer, specialTokens, unknownToken, continuingSubwordPrefix, endOfWordSuffix, fuseUnknownTokens)` with:
+- `preTokenizer = new RegexPreTokenizer(ClipPreTokenRegex, ClipSpecialTokens)` where `ClipPreTokenRegex` matches `<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+` (mirrors `huggingface/transformers` `CLIPTokenizer.pat`).
+- `normalizer = LowercaseNormalizer.Instance` — a tiny custom `Normalizer` that just calls `string.ToLowerInvariant()`.
+- `specialTokens = { "<|startoftext|>": 49406, "<|endoftext|>": 49407 }`.
+- `endOfWordSuffix = "</w>"` — the missing piece that drives every CLIP BPE merge.
+- Padding loop changed to fill with `EndOfTextId` (49407) after the appended EOT.
+
+**Result**: tokens now match HF byte-for-byte; CLIP-L hidden state diff vs HF reference is at F32 noise (avg_err 9.4e-7, max 1.7e-3 across all 77 × 768 elements).
+
+**Lesson**: any port of an OpenAI/CLIP-family tokenizer needs the regex pre-tokenizer **and** `</w>` suffix **and** EOS-padding, not just vocab+merges. The two-arg `BpeTokenizer.Create(stream, stream)` overload from Microsoft.ML.Tokenizers is a trap for CLIP — it's correct for byte-level GPT-2-style BPE but silently wrong for word-level BPE with EOW markers. Quick smoke test for any future tokenizer port: encode "a photograph of an astronaut riding a horse" with HF, encode with C#, assert exact equality on the first 10 token IDs. Cost: 5 minutes. Coverage: catches every form of this bug class.
+
+### 32. CLIP `text_projection` Stored in PyTorch `nn.Linear` Format Read as Transposed (CLIP-L + CLIP-G Pooled Outputs)
+
+**Problem**: `ClipTextEncoder.ExtractPooledOutput` (used to compute the pooled vector that feeds AdaLN modulation in SDXL/SD3) implemented the projection as
+
+```csharp
+sum += ePtr[inOffset + i] * wPtr[i * projDim + o];   // x @ W where W treated as [hidden, proj]
+```
+
+This reads `text_projection.weight` as if it were stored row-major in `[hidden_size, projection_dim]` order. PyTorch `nn.Linear(hidden, proj).weight` stores `[out_features, in_features] = [proj, hidden]` and the forward is `output = x @ weight.T` — i.e. `output[o] = Σᵢ x[i] · weight[o, i] = wPtr[o*hidden + i]`. The two access patterns `wPtr[i*proj + o]` and `wPtr[o*hidden + i]` are **always** different for non-symmetric square matrices, which CLIP-L (768×768) and CLIP-G (1280×1280) both are.
+
+**Why it survived for so long**: a transposed dense matmul on a roughly-balanced learned weight produces output with the right ballpark norm and a plausible distribution. The pooled vector "looks fine" in any quick check — `abs_mean ≈ 0.6`, `std ≈ 0.97`, no NaN/Inf. The model accepts it as a conditioning input, AdaLN modulates with whatever it received, and the image is degraded but coherent. Smoke tests pass. Visual eyeballing on SDXL passes — the prompt is partially honored. Nobody questions it.
+
+**How it surfaced**: building the SD3.5 layer-by-layer diff harness (deviation methodology from #28) and comparing the C# `clip_g_pooled` against the HF `text_embeds` output element-by-element: avg_err = **0.96**, max_err = **4.44**, ref_abs_mean=0.77 vs cs_abs_mean=0.61. That's 100% relative error on the pooled — clearly not numerical drift.
+
+**Fix**: swapped the inner-loop indexing in [`ClipTextEncoder.ExtractPooledOutput`](../../src/SharpInference.Diffusion/Models/TextEncoders/ClipTextEncoder.cs):
+
+```csharp
+for (int o = 0; o < projDim; o++)
+{
+    float sum = 0f;
+    int wRow = o * hiddenSize;             // row-major access of [proj, hidden]
+    for (int i = 0; i < hiddenSize; i++)
+        sum += ePtr[inOffset + i] * wPtr[wRow + i];
+    pPtr[b * projDim + o] = sum;
+}
+```
+
+After the fix, `clip_g_pooled` avg_err drops to **3.6e-3** (270× improvement), `final_pooled` avg_err drops to **2.3e-3** (260× improvement). The remaining drift is the GELU-tanh-vs-erf approximation accumulating across CLIP-G's 32 layers, which is acceptable for visual quality.
+
+**Lesson**: PyTorch `nn.Linear.weight` is canonically `[out, in]` (i.e., transposed relative to "input dim, output dim" intuition). Any C# port that reads weights via raw `(float*)weight.DataPointer` for projection has to encode the **stored** order `[out, in]` and do the GEMM as `Σᵢ x[i] * w[o*in + i]`. If the matrix is square it'll silently work — until you hit a non-symmetric square (text_projection, certain attention projections in models with `kv_dim == q_dim`). Always verify against a 2×3 or 3×2 reference matrix in a unit test, not 768×768. Better still, route through `backend.Linear` which goes through cuBLAS with explicit `CUBLAS_OP_T` — there's no ambiguity. We should consider migrating `ExtractPooledOutput` to use `backend.Linear` in a future cleanup so this class of bug is structurally impossible.
+
+### 33. SD3 / SD3.5 Pipeline VAE OOM at 512×512 (UNet→VAE Eviction Missing)
+
+**Problem**: At 512×512, the SD3 VAE Conv2D im2col temporary buffers exceed available VRAM when the transformer is still resident. SwarmUI was holding ~10 GB at the same time, leaving us ~1.5 GB for the test — not enough for the 2.5 GB SD3.5 Medium FP8 transformer plus VAE im2col.
+
+**Fix**: mirrored the SDXL/Flux pattern from deviation #18 — `Sd3Pipeline.GenerateFromTokens` now calls `_backend.Sync()` followed by `_backend.FreeWeights(_transformer.EnumerateWeights())` (and `_t5.EnumerateWeights()` if T5 is in play) **after** the denoise loop, **before** VAE decode. Backends without a weight cache treat both as no-ops via the default-method fallback on `IBackend`.
+
+### 34. SD3 PatchEmbed `pos_embed` Read as F32 from F16 Storage (Pre-Emptive)
+
+The SD3.5 single-file checkpoint stores `pos_embed.pos_embed` as F16 (1×147456×1536 = 432 MB). `PatchEmbed.AddPositionalEmbedding` does `float* posPtr = (float*)posEmbed.DataPointer` and adds component-by-component to F32 image tokens. With F16 stored as F32, the bytes get bit-reinterpreted (same bug class as #30 in Z-Image's RmsNorm).
+
+This was identified during the layer-by-layer diff investigation but turned out **not** to be load-bearing for SD3.5 Medium specifically — the cosmetic fix (`PatchEmbed.LoadWeights` now does `posEmbed.DType != DType.F32 ? posEmbed.CastTo(DType.F32) : posEmbed`) was applied before we found the real root causes (#31, #32) and didn't change the visual output on its own. Kept because the next checkpoint that lands with non-F32 `pos_embed` would silently break.
+
+### 35. `Sd3ClipL` Config Preset Was Missing — CLIP-L Pooled Returned Null
+
+**Problem**: SD3 needs CLIP-L's pooled output (concatenated with CLIP-G's pooled into a 2048-dim conditioning vector). The Sd35 generation tests were instantiating CLIP-L with `ClipTextEncoderConfig.SdxlClipL`, which reuses `Sd15` and has `ProjectionDim = 0`. With `ProjectionDim = 0`, `ExtractPooledOutput` is gated off and `EncodePenultimate` returns `(hidden, null)`. The pipeline's `ConcatPooled(clipLPooled!, clipGPooled!)` then dereferenced null and threw a `NullReferenceException` at line 382 of `Sd3Pipeline.cs`.
+
+**Fix**: added [`ClipTextEncoderConfig.Sd3ClipL = Sd15 with { ProjectionDim = 768 }`](../../src/SharpInference.Diffusion/Models/TextEncoders/ClipTextEncoderConfig.cs) and updated [`Sd35GenerationTests.cs`](../../tests/SharpInference.Diffusion.Tests/Sd35GenerationTests.cs) to use it.
+
+A subtle aside: in the actual SD3.5 Medium FP8 checkpoint, `clip_l.text_projection.weight` is **99.9999% zero** by design — Stability didn't train it (mean = 4.66e-10, std = 3.58e-7, zero fraction = 0.999998). So CLIP-L's contribution to `final_pooled` is intentionally ~zero. The preset still has to project (otherwise pooled is null and `ConcatPooled` crashes), but the actual pooled values are tiny. The model was trained with this layout.
+
+**Lesson**: `ProjectionDim = 0` is "I don't have a text_projection" (SD1.5 CLIP-L has none); `ProjectionDim > 0` is "I do, please compute pooled". Using SDXL's CLIP-L preset for SD3 quietly reuses the SD1.5 fallback. Adding a model-specific preset (`Sd3ClipL`) prevents future ports from making the same mistake. CLIP-L for newer models (SD3, FLUX-text — though they don't use it pooled the same way) all need their own preset that matches what the checkpoint was actually trained with.

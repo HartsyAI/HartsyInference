@@ -8,6 +8,13 @@ public sealed class CudaBackend : IBackend
 {
     private readonly CudaContext _context;
     private readonly CudaStream _stream;
+    /// <summary>Side stream used by <see cref="_streamingCache"/> for asynchronous
+    /// weight uploads that overlap with compute on <see cref="_stream"/>. Created
+    /// non-blocking so it doesn't serialize with the compute stream — synchronization
+    /// between the two is explicit via <c>cuEventRecord</c> / <c>cuStreamWaitEvent</c>
+    /// inside the streaming cache.</summary>
+    private readonly CudaStream _uploadStream;
+    private readonly CudaStreamingWeightCache _streamingCache;
     private readonly CudaKernels? _kernels;
     private nint _cublasHandle;
     private bool _disposed;
@@ -24,6 +31,13 @@ public sealed class CudaBackend : IBackend
     /// <summary>The default compute stream.</summary>
     public CudaStream Stream => _stream;
 
+    /// <summary>The upload stream for asynchronous weight transfers. Exposed for
+    /// diagnostics and tests; production callers should use <see cref="StreamingCache"/>.</summary>
+    public CudaStream UploadStream => _uploadStream;
+
+    /// <inheritdoc/>
+    public IStreamingWeightCache? StreamingCache => _streamingCache;
+
     /// <summary>The cuBLAS handle for GEMM operations.</summary>
     public nint CublasHandle => _cublasHandle;
 
@@ -36,6 +50,12 @@ public sealed class CudaBackend : IBackend
         // synchronize with the NULL stream, causing race conditions where kernels read incomplete
         // data from in-progress H2D transfers. Fix: switch to cuMemcpyHtoDAsync on this stream.
         _stream = new CudaStream(nonBlocking: false);
+        // Upload stream is non-blocking so its in-flight work doesn't gate the compute
+        // stream's NULL-stream "wait for everything" semantics — without that, prefetched
+        // uploads would force compute to wait, defeating overlap. The streaming cache uses
+        // explicit cuEventRecord/cuStreamWaitEvent for the parts that *do* need to sync.
+        _uploadStream = new CudaStream(nonBlocking: true);
+        _streamingCache = new CudaStreamingWeightCache(_context, _stream.Handle, _uploadStream.Handle);
         Device = DeviceKind.Cuda(deviceOrdinal);
 
         // Initialize cuBLAS
@@ -44,6 +64,10 @@ public sealed class CudaBackend : IBackend
 
         // Give GpuTransferHelper the stream handle for FreeAsync and lazy-sync callbacks
         GpuTransferHelper.SetStream(_stream.Handle);
+        // ...and the context, so its lazy callbacks (which fire on whatever thread
+        // later reads/disposes a tensor — possibly the GC finalizer thread) can bind
+        // the primary context before issuing CUDA Driver API calls.
+        GpuTransferHelper.SetContext(_context);
 
         // Load PTX kernels if directory provided
         if (ptxDir != null && Directory.Exists(ptxDir))
@@ -70,6 +94,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Matrix multiply via cuBLAS GemmEx: output = a @ b. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void MatMul(Tensor output, Tensor a, Tensor b)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         int M = (int)a.Shape[0];
@@ -144,6 +169,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         int N = (int)weight.Shape[0]; // outDim
@@ -242,6 +268,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         long batchSize = a.Shape[0];
@@ -320,6 +347,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>2D convolution via im2col + cuBLAS SGEMM. Supports arbitrary stride, padding, and kernel sizes.</summary>
     public unsafe void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         int batch = (int)input.Shape[0];
@@ -476,6 +504,7 @@ public sealed class CudaBackend : IBackend
 
     public void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         int batch = (int)input.Shape[0];
@@ -542,6 +571,7 @@ public sealed class CudaBackend : IBackend
 
     public void LayerNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         int normDim = (int)input.Shape[input.Shape.Rank - 1];
@@ -603,6 +633,7 @@ public sealed class CudaBackend : IBackend
 
     public unsafe void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)
     {
+        _context.EnsureCurrent(); // DataPointer access below triggers lazy D2H — needs context bound.
         // CPU fallback — T5 encoding runs once per generation, not a bottleneck.
         // DataPointer access triggers D2H copy for GPU-cached tensors.
         int rank = input.Shape.Rank;
@@ -635,6 +666,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Fused GroupNorm + SiLU via single PTX kernel. Eliminates intermediate allocation.</summary>
     public void GroupNormSilu(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         int batch = (int)input.Shape[0];
@@ -702,6 +734,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU cast FP32 → FP16 via PTX kernel.</summary>
     public void CastToF16(Tensor output, Tensor input)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -727,6 +760,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GPU cast FP16 → FP32 via PTX kernel.</summary>
     public void CastToF32(Tensor output, Tensor input)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -754,6 +788,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Scaled dot-product attention via cuBLAS batched GEMM: softmax(Q @ K^T * scale) @ V.</summary>
     public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         long B = query.Shape[0];
@@ -914,6 +949,7 @@ public sealed class CudaBackend : IBackend
 
     public void Gelu(Tensor output, Tensor input)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -941,6 +977,7 @@ public sealed class CudaBackend : IBackend
 
     public void Silu(Tensor output, Tensor input)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -970,6 +1007,7 @@ public sealed class CudaBackend : IBackend
 
     public void Add(Tensor output, Tensor a, Tensor b)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pA = 0, pB = 0;
@@ -999,6 +1037,7 @@ public sealed class CudaBackend : IBackend
 
     public void Mul(Tensor output, Tensor a, Tensor b)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pA = 0, pB = 0;
@@ -1028,6 +1067,7 @@ public sealed class CudaBackend : IBackend
 
     public void Scale(Tensor output, Tensor input, float scalar)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -1055,6 +1095,7 @@ public sealed class CudaBackend : IBackend
 
     public void Clamp(Tensor output, Tensor input, float min, float max)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -1146,6 +1187,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Implements CastF8E4M3ToF16 using the PTX cast kernel on GPU.</summary>
     public void CastF8E4M3ToF16(Tensor output, Tensor input)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
         ulong pIn = 0, pOut = 0;
         bool cachedOutput = false;
@@ -1168,6 +1210,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Implements CastF16ToF8E4M3 using the PTX cast kernel on GPU.</summary>
     public void CastF16ToF8E4M3(Tensor output, Tensor input)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
         ulong pIn = 0, pOut = 0;
         bool cachedOutput = false;
@@ -1198,6 +1241,7 @@ public sealed class CudaBackend : IBackend
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Sync()
     {
+        _context.EnsureCurrent();
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
     }
 
@@ -1206,6 +1250,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Batched 2D transpose: [B, D1, D2] -> [B, D2, D1] via PTX kernel.</summary>
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -1234,6 +1279,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D] via PTX kernel.</summary>
     public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -1262,6 +1308,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>GEGLU activation: output[i] = input[i] * GELU(input[i + outputElements]) via PTX kernel.</summary>
     public void GeGlu(Tensor output, Tensor input)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pOut = 0, pIn = 0;
@@ -1291,6 +1338,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Broadcast add: hidden[b,c,s] += bias[b,c] in-place via PTX kernel.</summary>
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         ulong pHidden = 0, pBias = 0;
@@ -1323,6 +1371,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Concatenates tensors along the specified dimension.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
+        _context.EnsureCurrent();
         ulong[] gpuInputs = new ulong[inputs.Length];
         ulong pOut = 0;
         bool cachedOutput = false;
@@ -1404,6 +1453,7 @@ public sealed class CudaBackend : IBackend
 
     public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW)
     {
+        _context.EnsureCurrent();
         EnsureKernels();
 
         int batch = (int)input.Shape[0];
@@ -1452,6 +1502,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Copies tensor data between host and device or device to device.</summary>
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
+        _context.EnsureCurrent();
         nuint byteSize = (nuint)(source.ElementCount * source.DType.SizeInBytes);
 
         bool srcGpu = source.Device.IsCuda;
@@ -1518,6 +1569,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Preloads weight tensors to GPU memory. Subsequent ops using these tensors skip H2D transfer.</summary>
     public void PreloadWeights(IEnumerable<Tensor> weights)
     {
+        _context.EnsureCurrent();
         foreach (Tensor weight in weights)
         {
             GpuTransferHelper.PreloadWeight(weight);
@@ -1527,18 +1579,21 @@ public sealed class CudaBackend : IBackend
     /// <summary>Frees specific weight tensors from GPU to reclaim VRAM (e.g., UNet weights before VAE decode).</summary>
     public void FreeWeights(IEnumerable<Tensor> weights)
     {
+        _context.EnsureCurrent();
         GpuTransferHelper.FreeWeights(weights);
     }
 
     /// <summary>Frees all preloaded weight memory from GPU and clears the cache.</summary>
     public void FreePreloadedWeights()
     {
+        _context.EnsureCurrent();
         GpuTransferHelper.FreeAllCached();
     }
 
     /// <summary>Evicts all cached GPU weight buffers. Call between pipeline stages to free VRAM.</summary>
     public void EvictGpuCache()
     {
+        _context.EnsureCurrent();
         GpuTransferHelper.EvictAll();
     }
 
@@ -1556,6 +1611,11 @@ public sealed class CudaBackend : IBackend
         {
             _disposed = true;
 
+            // Bind context on the disposing thread so cuMemFree / cublasDestroy /
+            // cuStreamDestroy don't hit CUDA_ERROR_INVALID_CONTEXT. Disposal can run
+            // on the finalizer thread or a different worker than constructed us.
+            _context.EnsureCurrent();
+
             GpuTransferHelper.EvictAll();
             _kernels?.Dispose();
 
@@ -1565,6 +1625,9 @@ public sealed class CudaBackend : IBackend
                 _cublasHandle = 0;
             }
 
+            // Order: upload stream first (no other code holds events on it after
+            // EvictAll above), then compute stream, then context.
+            _uploadStream.Dispose();
             _stream.Dispose();
             _context.Dispose();
         }

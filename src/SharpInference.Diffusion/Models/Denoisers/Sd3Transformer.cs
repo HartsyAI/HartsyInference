@@ -127,8 +127,10 @@ public sealed unsafe class Sd3Transformer : IDisposable
         Tensor imageTokens = _patchEmbed.Forward(backend, latent);
         int imgSeqLen = (int)imageTokens.Shape[1];
         (int gridH, int gridW) = _patchEmbed.GetGridSize(height, width);
+        Sd3DebugDump.Dump("patch_embed", imageTokens);
 
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, pooled, batch);
+        Sd3DebugDump.Dump("time_text_embed", temb);
 
         Tensor currentImage = imageTokens;
         Tensor currentContext = context;
@@ -144,17 +146,25 @@ public sealed unsafe class Sd3Transformer : IDisposable
 
             currentImage = newImage;
             currentContext = newContext;
+
+            Sd3DebugDump.Dump($"block_{i}_image", currentImage);
+            // Last block (context_pre_only) returns context unchanged — skip the dump in that case
+            // since the diffusers reference doesn't expose it (the hook records None).
+            if (i < _config.Depth - 1)
+                Sd3DebugDump.Dump($"block_{i}_context", currentContext);
         }
 
         if (!ReferenceEquals(currentContext, context))
             currentContext.Dispose();
 
         Tensor output = ApplyFinalLayer(backend, currentImage, temb, batch, imgSeqLen);
+        Sd3DebugDump.Dump("proj_out", output);
         currentImage.Dispose();
         temb.Dispose();
 
         Tensor spatial = _unpatchify.Forward(output, batch, gridH, gridW);
         output.Dispose();
+        Sd3DebugDump.DumpOutput(spatial);
 
         return spatial;
     }
@@ -256,6 +266,7 @@ public sealed unsafe class Sd3Transformer : IDisposable
         }
         normed.Dispose();
         modParams.Dispose();
+        Sd3DebugDump.Dump("norm_out", modulated);
 
         TensorShape outShape = new TensorShape(batch, seqLen, outDim);
         Tensor projected = new Tensor(outShape, DType.F32);
@@ -264,6 +275,9 @@ public sealed unsafe class Sd3Transformer : IDisposable
 
         return projected;
     }
+
+    /// <summary>Pipeline-level debug hook: dumps the post-denoise, pre-VAE latent under <c>$SD3_DEBUG_DIR/final_latent.bin</c> when the env var is set. Used by the layer-by-layer diff harness to capture pipeline state.</summary>
+    public static void DumpFinalLatent(Tensor latent) => Sd3DebugDump.Dump("final_latent", latent);
 
     /// <summary>Releases all tensor references held by this transformer.</summary>
     public void Dispose()

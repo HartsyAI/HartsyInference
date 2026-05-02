@@ -172,4 +172,19 @@ public interface IBackend : IDisposable
 
     /// <summary>Frees specific weight tensors from accelerator memory. No-op on CPU backends. Call between pipeline phases to reclaim VRAM (e.g., free UNet weights before VAE decode).</summary>
     void FreeWeights(IEnumerable<Tensor> weights) { }
+
+    /// <summary>Pre-uploads weight tensors to accelerator memory and pins them in the
+    /// backend's weight cache. Subsequent ops using these tensors hit the cache (no per-op
+    /// H2D transfer). Without this, every op does an alloc+upload+free of its weight inputs
+    /// — fine on CPU (no transfer) but ruinously slow on CUDA where it turns model inference
+    /// into PCIe-bound thrashing. No-op on backends that don't have a weight cache.
+    /// Pair with <see cref="FreeWeights"/> at pipeline phase boundaries.</summary>
+    void PreloadWeights(IEnumerable<Tensor> weights) { }
+
+    /// <summary>Optional: a streaming cache for backends that support overlapping weight
+    /// uploads with compute on a separate stream. <c>null</c> on CPU and Vulkan (and any
+    /// backend without that capability). Consumers that don't get a cache here should
+    /// fall back to the eager <see cref="PreloadWeights"/> + <see cref="FreeWeights"/>
+    /// path, which is what every backend supports.</summary>
+    IStreamingWeightCache? StreamingCache => null;
 }
