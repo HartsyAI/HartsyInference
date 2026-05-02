@@ -12,7 +12,9 @@ using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
-/// <summary>SDXL text-to-image pipeline. Orchestrates dual CLIP text encoding (CLIP-L + CLIP-G) → UNet denoising with ADM conditioning → VAE decode → RGB image output.</summary>
+/// <summary>SDXL text-to-image and image-to-image pipeline. Orchestrates dual CLIP text encoding (CLIP-L + CLIP-G) → UNet denoising with ADM conditioning → VAE decode → RGB image output.
+/// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>) to <see cref="GenerateFromTokens"/> — same method, single API. Requires a <see cref="VaeEncoder"/> on construction. This also unlocks the cross-model refining pattern: any base pipeline's RGB output can be fed through this pipeline as a refiner via <see cref="ImagePostProcessor.RgbBytesToTensor"/> + img2img with low <c>Strength</c>.</para>
+/// </summary>
 public sealed unsafe class SdxlPipeline : IDisposable
 {
     private readonly IBackend _backend;
@@ -20,10 +22,11 @@ public sealed unsafe class SdxlPipeline : IDisposable
     private readonly ClipTextEncoder _clipG;
     private readonly UNet _unet;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly float _vaeScalingFactor;
     private int _disposed;
 
-    /// <summary>Creates a new SDXL pipeline with all components pre-loaded.</summary>
+    /// <summary>Creates a new SDXL pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="clipL">CLIP ViT-L/14 text encoder (text_encoder).</param>
     /// <param name="clipG">OpenCLIP ViT-bigG/14 text encoder (text_encoder_2).</param>
@@ -31,24 +34,29 @@ public sealed unsafe class SdxlPipeline : IDisposable
     /// <param name="vaeDecoder">VAE decoder (configured with VaeConfig.Sdxl, scaling factor 0.13025).</param>
     /// <param name="vaeScalingFactor">VAE scaling factor. Default: 0.13025 for SDXL.</param>
     public SdxlPipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, UNet unet, VaeDecoder vaeDecoder, float vaeScalingFactor = 0.13025f)
+        : this(backend, clipL, clipG, unet, vaeDecoder, vaeEncoder: null, vaeScalingFactor)
+    {
+    }
+
+    /// <summary>Creates a new SDXL pipeline with both VAE halves loaded. Required for img2img and for use as a cross-model refiner.</summary>
+    public SdxlPipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG, UNet unet, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, float vaeScalingFactor = 0.13025f)
     {
         _backend = backend;
         _clipL = clipL;
         _clipG = clipG;
         _unet = unet;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _vaeScalingFactor = vaeScalingFactor;
     }
 
-    /// <summary>Generates an image from pre-tokenized input for both CLIP encoders.</summary>
-    /// <param name="promptTokenIdsL">Prompt token IDs for CLIP-L [seqLen].</param>
-    /// <param name="negativePromptTokenIdsL">Negative prompt token IDs for CLIP-L [seqLen].</param>
-    /// <param name="promptTokenIdsG">Prompt token IDs for CLIP-G [seqLen].</param>
-    /// <param name="negativePromptTokenIdsG">Negative prompt token IDs for CLIP-G [seqLen].</param>
-    /// <param name="promptEosPositionG">Position of EOS token in prompt for CLIP-G (for pooled output).</param>
-    /// <param name="negativeEosPositionG">Position of EOS token in negative prompt for CLIP-G.</param>
-    /// <param name="request">Generation parameters.</param>
-    /// <param name="onProgress">Optional progress callback.</param>
+    /// <summary>Generates an image from pre-tokenized dual-CLIP input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
+    /// <list type="bullet">
+    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial latent = noise * initSigma, denoise from step 0).</item>
+    /// <item><see cref="ImageToImageRequest"/> → image-to-image (initial latent = VAE-encoded source + noise * sigma[startStep], denoise from <c>startStep = steps - round(steps * Strength)</c>). Requires a <see cref="VaeEncoder"/>.</item>
+    /// </list>
+    /// The two paths share the entire dual-CLIP encoding, ADM conditioning, denoise loop, and VAE decode pipeline. Strength=0 short-circuits to byte-identical pass-through.
+    /// </summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsL,
         int[] negativePromptTokenIdsL,
@@ -60,137 +68,79 @@ public sealed unsafe class SdxlPipeline : IDisposable
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / 8;
-        int latentW = request.Width / 8;
+        int width = request.Width;
+        int height = request.Height;
+        int latentH = height / 8;
+        int latentW = width / 8;
         int steps = request.Steps;
         float cfgScale = request.CfgScale;
+        TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
 
-        Logs.Info($"SDXL: Generating {request.Width}x{request.Height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
+        // Img2img: validate source shape + handle strength=0 short-circuit BEFORE any model work.
+        int startStep = 0;
+        if (request is ImageToImageRequest img2img)
+        {
+            Tensor src = img2img.SourceImage;
+            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
+                src.Shape[2] != height || src.Shape[3] != width)
+            {
+                throw new ArgumentException(
+                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
+                    nameof(request));
+            }
+
+            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
+            int initTimesteps = (int)MathF.Round(steps * strength);
+            startStep = Math.Max(steps - initTimesteps, 0);
+
+            if (initTimesteps == 0)
+            {
+                Logs.Info("Strength=0; passing source through unchanged");
+                return (ImagePostProcessor.TensorToRgbBytes(src), width, height, seed);
+            }
+        }
+
+        string mode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        Logs.Info($"SDXL {mode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // 1. Encode text with dual CLIP encoders
+        // 1. Dual CLIP text encoding (shared by both paths)
         Logs.Info("Encoding text with dual CLIP encoders...");
-
-        // CLIP-L: penultimate hidden states [2, 77, 768] (batch: [negative, positive])
         int[][] batchTokenIdsL = [negativePromptTokenIdsL, promptTokenIdsL];
         (Tensor clipLHidden, _) = _clipL.EncodePenultimate(_backend, batchTokenIdsL, [0, 0]);
 
-        // CLIP-G: penultimate hidden states [2, 77, 1280] + pooled output [2, 1280]
         int[][] batchTokenIdsG = [negativePromptTokenIdsG, promptTokenIdsG];
         int[] eosPositions = [negativeEosPositionG, promptEosPositionG];
         (Tensor clipGHidden, Tensor? pooledOutput) = _clipG.EncodePenultimate(_backend, batchTokenIdsG, eosPositions);
 
-        // Concatenate hidden states along feature dimension: [2, 77, 768] + [2, 77, 1280] = [2, 77, 2048]
         Tensor textEmbeddings = ConcatAlongLastDim(clipLHidden, clipGHidden);
         clipLHidden.Dispose();
         clipGHidden.Dispose();
-
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
-        // 2. Build ADM conditioning scalars for SDXL base
-        // Default: original size = target size = requested size, no crop
+        // 2. ADM size conditioning (orig_size = target_size = request resolution; no crop)
         float[] sizeCondition =
         [
-            request.Height, request.Width,   // orig_height, orig_width
-            0f, 0f,                          // crop_top, crop_left
-            request.Height, request.Width    // target_height, target_width
+            request.Height, request.Width,
+            0f, 0f,
+            request.Height, request.Width,
         ];
 
-        // 3. Create initial noise latent [1, 4, latentH, latentW]
-        // Determine UNet dtype: if weights are F16, run UNet in F16
-        bool useF16 = (_unet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
-
-        TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // 4. Set up scheduler
+        // 3. Set up scheduler
         IScheduler scheduler = CreateScheduler(request.Scheduler);
         scheduler.SetTimesteps(steps);
 
-        // Scale initial noise
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
-        {
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
-            latent.Dispose();
-            latent = scaled;
-        }
+        // 4. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
+        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, startStep);
 
-        // 5. Denoising loop
-        Logs.Info("Starting SDXL denoising loop...");
-        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-
-        for (int i = 0; i < steps; i++)
-        {
-            Stopwatch stepSw = Stopwatch.StartNew();
-            float t = timesteps[i];
-
-            // Scale model input
-            float inputScale = scheduler.ScaleModelInput(i);
-            Tensor scaledLatent;
-            if (MathF.Abs(inputScale - 1.0f) > 1e-6f)
-            {
-                scaledLatent = new Tensor(latentShape, DType.F32);
-                _backend.Scale(scaledLatent, latent, inputScale);
-            }
-            else
-            {
-                scaledLatent = latent;
-            }
-
-            // Cast to F16 for UNet forward if weights are F16
-            Tensor unetInput = scaledLatent;
-            if (useF16 && scaledLatent.DType != DType.F16)
-            {
-                unetInput = new Tensor(scaledLatent.Shape, DType.F16);
-                _backend.CastToF16(unetInput, scaledLatent);
-            }
-
-            Tensor noisePred;
-            if (cfgScale > 1.0f)
-            {
-                noisePred = ClassifierFreeGuidanceStep(unetInput, t, textEmbeddings, pooledOutput!, sizeCondition, cfgScale);
-            }
-            else
-            {
-                // Single pass with conditional embeddings only
-                int seqLen = (int)textEmbeddings.Shape[1];
-                int hiddenSize = (int)textEmbeddings.Shape[2];
-                Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
-                int pooledDim = (int)pooledOutput!.Shape[1];
-                Tensor condPooled = SliceBatchElement1D(pooledOutput, 1, pooledDim);
-                noisePred = _unet.Forward(_backend, unetInput, t, condEmb, condPooled, sizeCondition);
-                condEmb.Dispose();
-                condPooled.Dispose();
-            }
-
-            if (unetInput != scaledLatent) unetInput.Dispose();
-            if (scaledLatent != latent) scaledLatent.Dispose();
-
-            // Cast noise prediction back to F32 for scheduler (CPU-side arithmetic)
-            Tensor noisePredF32 = noisePred;
-            if (noisePred.DType == DType.F16)
-            {
-                noisePredF32 = new Tensor(noisePred.Shape, DType.F32);
-                _backend.CastToF32(noisePredF32, noisePred);
-                noisePred.Dispose();
-            }
-
-            // Scheduler step (always F32)
-            Tensor newLatent = new Tensor(latentShape, DType.F32);
-            scheduler.Step(newLatent, noisePredF32, latent, i);
-            noisePredF32.Dispose();
-            latent.Dispose();
-            latent = newLatent;
-
-            stepSw.Stop();
-            string cacheInfo = GetBackendCacheStats();
-            Logs.Info($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms{cacheInfo}");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
-        }
+        // 5. Denoise loop (both paths run the same loop from their respective startStep)
+        bool useF16 = (_unet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, onProgress);
 
         textEmbeddings.Dispose();
         pooledOutput?.Dispose();
@@ -201,7 +151,6 @@ public sealed unsafe class SdxlPipeline : IDisposable
         Logs.Info("Decoding latents to image...");
         Stopwatch vaeSw = Stopwatch.StartNew();
 
-        // Cast latent to match VAE weight dtype (latent is F32 from scheduler, VAE weights may be F16)
         bool vaeF16 = (_vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
         Tensor vaeInput = latent;
         if (vaeF16 && latent.DType != DType.F16)
@@ -221,9 +170,123 @@ public sealed unsafe class SdxlPipeline : IDisposable
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"SDXL image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"SDXL {mode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
-        return (rgbData, request.Width, request.Height, seed);
+        return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Builds the starting latent for the denoise loop. T2i: fresh noise scaled by <c>InitialNoiseSigma</c>. Img2img: VAE-encoded source plus fresh noise injected at <c>sigma[startStep]</c> via <c>scheduler.AddNoise</c>.</summary>
+    private Tensor BuildInitialLatent(TextToImageRequest request, IScheduler scheduler, TensorShape latentShape, int seed, int startStep)
+    {
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceLatent = _vaeEncoder!.Encode(_backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor latent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
+            sourceLatent.Dispose();
+            noise.Dispose();
+            return latent;
+        }
+
+        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(latentShape, DType.F32);
+            _backend.Scale(scaled, t2iNoise, initSigma);
+            t2iNoise.Dispose();
+            return scaled;
+        }
+        return t2iNoise;
+    }
+
+    /// <summary>Runs the SDXL denoising loop from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1. Handles input-scale, F16 cast, dual-conditioning UNet, CFG, and scheduler step. Returns the final denoised F32 latent. Disposes intermediate latents along the way.</summary>
+    private Tensor RunDenoiseLoop(
+        Tensor latent,
+        TensorShape latentShape,
+        Tensor textEmbeddings,
+        Tensor pooledOutput,
+        float[] sizeCondition,
+        IScheduler scheduler,
+        bool useF16,
+        int startStep,
+        int totalSteps,
+        float cfgScale,
+        Action<GenerationProgress>? onProgress)
+    {
+        Logs.Info("Starting SDXL denoising loop...");
+        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+
+        for (int i = startStep; i < totalSteps; i++)
+        {
+            Stopwatch stepSw = Stopwatch.StartNew();
+            float t = timesteps[i];
+
+            float inputScale = scheduler.ScaleModelInput(i);
+            Tensor scaledLatent;
+            if (MathF.Abs(inputScale - 1.0f) > 1e-6f)
+            {
+                scaledLatent = new Tensor(latentShape, DType.F32);
+                _backend.Scale(scaledLatent, latent, inputScale);
+            }
+            else
+            {
+                scaledLatent = latent;
+            }
+
+            Tensor unetInput = scaledLatent;
+            if (useF16 && scaledLatent.DType != DType.F16)
+            {
+                unetInput = new Tensor(scaledLatent.Shape, DType.F16);
+                _backend.CastToF16(unetInput, scaledLatent);
+            }
+
+            Tensor noisePred;
+            if (cfgScale > 1.0f)
+            {
+                noisePred = ClassifierFreeGuidanceStep(unetInput, t, textEmbeddings, pooledOutput, sizeCondition, cfgScale);
+            }
+            else
+            {
+                int seqLen = (int)textEmbeddings.Shape[1];
+                int hiddenSize = (int)textEmbeddings.Shape[2];
+                Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
+                int pooledDim = (int)pooledOutput.Shape[1];
+                Tensor condPooled = SliceBatchElement1D(pooledOutput, 1, pooledDim);
+                noisePred = _unet.Forward(_backend, unetInput, t, condEmb, condPooled, sizeCondition);
+                condEmb.Dispose();
+                condPooled.Dispose();
+            }
+
+            if (unetInput != scaledLatent) unetInput.Dispose();
+            if (scaledLatent != latent) scaledLatent.Dispose();
+
+            Tensor noisePredF32 = noisePred;
+            if (noisePred.DType == DType.F16)
+            {
+                noisePredF32 = new Tensor(noisePred.Shape, DType.F32);
+                _backend.CastToF32(noisePredF32, noisePred);
+                noisePred.Dispose();
+            }
+
+            Tensor newLatent = new Tensor(latentShape, DType.F32);
+            scheduler.Step(newLatent, noisePredF32, latent, i);
+            noisePredF32.Dispose();
+            latent.Dispose();
+            latent = newLatent;
+
+            stepSw.Stop();
+            string cacheInfo = GetBackendCacheStats();
+            Logs.Info($"Step {i + 1}/{totalSteps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms{cacheInfo}");
+            onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds));
+        }
+
+        return latent;
     }
 
     /// <summary>Runs classifier-free guidance for SDXL: noise_pred = uncond + cfg_scale * (cond - uncond).</summary>

@@ -48,6 +48,11 @@ public sealed class MistralEncoderSmokeTests
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
             return;
         }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
+            return;
+        }
 
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/4] Loading {Path.GetFileName(MistralWeightsPath)}...");

@@ -72,6 +72,11 @@ public sealed class Flux2GenerationTests
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
             return;
         }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
+            return;
+        }
 
         Stopwatch totalSw = Stopwatch.StartNew();
         Flux2Config config = Flux2Config.Klein4B;

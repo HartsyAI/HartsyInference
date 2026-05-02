@@ -26,6 +26,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Flux2Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly Flux2Config _config;
     private readonly Tensor _bnMean;     // [128] — running_mean of the patchified-latent BatchNorm
     private readonly Tensor _bnVar;      // [128] — running_var
@@ -33,18 +34,28 @@ public sealed unsafe class Flux2Pipeline : IDisposable
     private readonly int[] _hiddenLayers;
     private int _disposed;
 
-    /// <summary>Creates a Flux.2 pipeline.</summary>
+    /// <summary>Creates a Flux.2 pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
+    public Flux2Pipeline(IBackend backend, LlamaStyleEncoder textEncoder,
+        Flux2Transformer transformer, VaeDecoder vaeDecoder,
+        Tensor bnMean, Tensor bnVar, Flux2Config config,
+        int[]? hiddenLayers = null, float bnEps = 1e-5f)
+        : this(backend, textEncoder, transformer, vaeDecoder, vaeEncoder: null, bnMean, bnVar, config, hiddenLayers, bnEps)
+    {
+    }
+
+    /// <summary>Creates a Flux.2 pipeline with both VAE halves loaded. Required for img2img.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="textEncoder">Llama-style encoder configured for the variant (Qwen3-4B for Klein).</param>
     /// <param name="transformer">Pre-loaded <see cref="Flux2Transformer"/>.</param>
     /// <param name="vaeDecoder">VAE decoder loaded with <see cref="VaeConfig.Flux2"/>.</param>
+    /// <param name="vaeEncoder">Optional VAE encoder loaded with <see cref="VaeConfig.Flux2"/>. Required for img2img.</param>
     /// <param name="bnMean">BN <c>running_mean</c> tensor of shape <c>[128]</c> (= <c>32 latent channels × 4 patch</c>).</param>
     /// <param name="bnVar">BN <c>running_var</c> tensor of shape <c>[128]</c>.</param>
     /// <param name="config">Flux.2 variant config.</param>
     /// <param name="hiddenLayers">Text-encoder hidden-state layer indices to concatenate (Klein default: <c>[9, 18, 27]</c>). The encoder's per-layer outputs are concatenated along the hidden dim and fed into <c>context_embedder</c>.</param>
     /// <param name="bnEps">BatchNorm epsilon (matches <c>vae.config.batch_norm_eps</c>; default 1e-5).</param>
     public Flux2Pipeline(IBackend backend, LlamaStyleEncoder textEncoder,
-        Flux2Transformer transformer, VaeDecoder vaeDecoder,
+        Flux2Transformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder,
         Tensor bnMean, Tensor bnVar, Flux2Config config,
         int[]? hiddenLayers = null, float bnEps = 1e-5f)
     {
@@ -52,6 +63,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _bnMean = bnMean;
         _bnVar = bnVar;
         _bnEps = bnEps;
@@ -59,13 +71,14 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         _hiddenLayers = hiddenLayers ?? [9, 18, 27];
     }
 
-    /// <summary>
-    /// Generates an image from pre-tokenized prompt input. The input is expected to be
-    /// chat-templated (for Klein) or BPE-encoded raw text (for Dev) — the caller (typically
-    /// <c>Qwen3Tokenizer.EncodeChat</c> for Klein) is responsible for that.
+    /// <summary>Generates an image from pre-tokenized prompt input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
+    /// <list type="bullet">
+    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image.</item>
+    /// <item><see cref="ImageToImageRequest"/> → img2img. Source goes VAE-encode (32ch latent) → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep]. Requires a <see cref="VaeEncoder"/>.</item>
+    /// </list>
     /// </summary>
     /// <param name="promptTokenIds">Padded token IDs <c>[seqLen]</c>.</param>
-    /// <param name="request">Generation parameters.</param>
+    /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img.</param>
     /// <param name="guidanceScale">Guidance scale for Dev (embedded via MLP). Ignored when <see cref="Flux2Config.GuidanceEmbed"/> is false (Klein). Default 3.5.</param>
     /// <param name="onProgress">Optional progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
@@ -75,6 +88,9 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int steps = request.Steps;
@@ -89,8 +105,34 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         int patW = imgW / 16;
         int imgSeqLen = patH * patW;
 
+        // Img2img: validate source shape + handle strength=0 short-circuit BEFORE any model work.
+        // Note source must match the rounded imgH/imgW (not request.Height/Width) since Flux.2 rounds.
+        int startStep = 0;
+        if (request is ImageToImageRequest img2img)
+        {
+            Tensor src = img2img.SourceImage;
+            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
+                src.Shape[2] != imgH || src.Shape[3] != imgW)
+            {
+                throw new ArgumentException(
+                    $"SourceImage shape must be [1, 3, {imgH}, {imgW}] (matching the 16-rounded request resolution); got {src.Shape}.",
+                    nameof(request));
+            }
+
+            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
+            int initTimesteps = (int)MathF.Round(steps * strength);
+            startStep = Math.Max(steps - initTimesteps, 0);
+
+            if (initTimesteps == 0)
+            {
+                Logs.Info("Strength=0; passing source through unchanged");
+                return (ImagePostProcessor.TensorToRgbBytes(src), imgW, imgH, seed);
+            }
+        }
+
         string variant = _config.TextEncoderType == Flux2TextEncoderType.Mistral ? "Dev" : "Klein";
-        Logs.Info($"Flux.2 ({variant}): Generating {imgW}x{imgH} image, {steps} steps, guidance={guidanceScale}, seed={seed}");
+        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        Logs.Info($"Flux.2 ({variant}) {opMode}: {imgW}x{imgH}, {steps} steps, guidance={guidanceScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Text encoder forward ───────────────────────────────────
@@ -101,31 +143,20 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (seqLen={txtSeqLen}, hidden={textEmbeddings.Shape[2]})");
         LogTensorStats("text embeddings", textEmbeddings);
 
-        // ── 2. Initial noise: [1, 128, patH, patW] (already in patchified form) ──
+        // ── 2. Set up dynamic-shift flow-match scheduler ──────────────
         TensorShape noiseShape = new TensorShape(1, _config.InChannels, patH, patW);
-        Tensor noise = SeedGenerator.CreateNoise(noiseShape, seed);
-        Tensor packedLatent = PackLatent(noise);   // [1, S, 128]
-        noise.Dispose();
-
-        // ── 3. Set up dynamic-shift flow-match scheduler ──────────────
+        TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
         FlowMatchEulerDiscreteScheduler scheduler =
             FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen);
         scheduler.SetTimesteps(steps);
 
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
-        {
-            TensorShape packedShape = new TensorShape(1, imgSeqLen, _config.InChannels);
-            Tensor scaled = new Tensor(packedShape, DType.F32);
-            _backend.Scale(scaled, packedLatent, initSigma);
-            packedLatent.Dispose();
-            packedLatent = scaled;
-        }
+        // ── 3. Build initial packed latent (t2i: noise * initSigma; img2img: encode + patchify + BN-norm + pack + AddNoise) ──
+        Tensor packedLatent = BuildInitialPackedLatent(request, scheduler, noiseShape, packedShape, latH, latW, patH, patW, seed, startStep);
 
-        // ── 4. Denoising loop ─────────────────────────────────────────
+        // ── 4. Denoising loop (from startStep onward) ──
         Logs.Info("Starting Flux.2 denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
@@ -324,6 +355,129 @@ public sealed unsafe class Flux2Pipeline : IDisposable
             }
         }
         return output;
+    }
+
+    /// <summary>2×2 spatial patchify (inverse of <see cref="UnpatchifyLatent"/>): <c>[B, C, H*P, W*P] → [B, C*P², H, W]</c>. Used by img2img to convert the VAE-encoded source latent into the patchified form the transformer operates on.</summary>
+    private static Tensor PatchifyLatent(Tensor input, int outChannels, int patchSize)
+    {
+        int batch = (int)input.Shape[0];
+        int inChannels = (int)input.Shape[1];
+        int inH = (int)input.Shape[2];
+        int inW = (int)input.Shape[3];
+        if (outChannels != inChannels * patchSize * patchSize)
+            throw new InvalidOperationException(
+                $"PatchifyLatent: out_channels ({outChannels}) must equal in_channels * patch² ({inChannels} * {patchSize}² = {inChannels * patchSize * patchSize})");
+
+        int outH = inH / patchSize;
+        int outW = inW / patchSize;
+        TensorShape outShape = new TensorShape(batch, outChannels, outH, outW);
+        Tensor output = new Tensor(outShape, DType.F32);
+        float* inPtr = (float*)input.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < inChannels; c++)
+            {
+                for (int y = 0; y < outH; y++)
+                {
+                    for (int x = 0; x < outW; x++)
+                    {
+                        for (int py = 0; py < patchSize; py++)
+                        {
+                            for (int px = 0; px < patchSize; px++)
+                            {
+                                int outChannel = c * patchSize * patchSize + py * patchSize + px;
+                                int outIdx = ((b * outChannels + outChannel) * outH + y) * outW + x;
+                                int iy = y * patchSize + py;
+                                int ix = x * patchSize + px;
+                                int inIdx = ((b * inChannels + c) * inH + iy) * inW + ix;
+                                outPtr[outIdx] = inPtr[inIdx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return output;
+    }
+
+    /// <summary>Inverse of <see cref="ApplyBnUnNormalize"/>: <c>(latent - mean) / sqrt(var + eps)</c>. Used by img2img to renormalize the VAE-encoded source into the BN-normalized space the transformer expects.</summary>
+    private static Tensor ApplyBnNormalize(Tensor latent, Tensor mean, Tensor var, float eps)
+    {
+        int batch = (int)latent.Shape[0];
+        int channels = (int)latent.Shape[1];
+        int h = (int)latent.Shape[2];
+        int w = (int)latent.Shape[3];
+        int spatial = h * w;
+        Tensor output = new Tensor(latent.Shape, DType.F32);
+        float* inPtr = (float*)latent.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        float* meanPtr = (float*)mean.DataPointer;
+        float* varPtr = (float*)var.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < channels; c++)
+            {
+                float invStd = 1.0f / MathF.Sqrt(varPtr[c] + eps);
+                float m = meanPtr[c];
+                int chanBase = (b * channels + c) * spatial;
+                for (int s = 0; s < spatial; s++)
+                    outPtr[chanBase + s] = (inPtr[chanBase + s] - m) * invStd;
+            }
+        }
+        return output;
+    }
+
+    /// <summary>Builds the initial packed latent for Flux.2 denoising. T2I: fresh noise scaled by initSigma. Img2img: source goes VAE-encode → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep].</summary>
+    private Tensor BuildInitialPackedLatent(
+        TextToImageRequest request,
+        FlowMatchEulerDiscreteScheduler scheduler,
+        TensorShape noiseShape,
+        TensorShape packedShape,
+        int latH, int latW, int patH, int patW,
+        int seed, int startStep)
+    {
+        Tensor packedNoise = PackLatent(SeedGenerator.CreateNoise(noiseShape, seed));
+
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            // VaeConfig.Flux2 has ScalingFactor=1.0 + ShiftFactor=null, so encoder output is the raw mean (no scaling).
+            Tensor sourceLatent32 = _vaeEncoder!.Encode(_backend, img2img.SourceImage);  // [1, 32, latH, latW]
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            // 2×2 patchify: [1, 32, latH, latW] → [1, 128, patH, patW]
+            Tensor sourcePatchified = PatchifyLatent(sourceLatent32, _config.InChannels, _config.PatchSize);
+            sourceLatent32.Dispose();
+
+            // BN normalize: (latent - running_mean) / sqrt(running_var + eps)
+            Tensor sourceBn = ApplyBnNormalize(sourcePatchified, _bnMean, _bnVar, _bnEps);
+            sourcePatchified.Dispose();
+
+            // Pack: [1, 128, patH, patW] → [1, S, 128]
+            Tensor sourcePacked = PackLatent(sourceBn);
+            sourceBn.Dispose();
+
+            // AddNoise at sigma[startStep]: noisy = (1 - sigma) * source + sigma * noise
+            Tensor result = new Tensor(packedShape, DType.F32);
+            scheduler.AddNoise(result, sourcePacked, packedNoise, startStep);
+            sourcePacked.Dispose();
+            packedNoise.Dispose();
+            return result;
+        }
+
+        // T2I path: scale packed noise by initSigma.
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(packedShape, DType.F32);
+            _backend.Scale(scaled, packedNoise, initSigma);
+            packedNoise.Dispose();
+            return scaled;
+        }
+        return packedNoise;
     }
 
     private static void LogTensorStats(string name, Tensor tensor)

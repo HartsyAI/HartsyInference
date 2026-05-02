@@ -75,6 +75,11 @@ public sealed class ZImageGenerationTests
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
             return;
         }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
+            return;
+        }
 
         Stopwatch totalSw = Stopwatch.StartNew();
         Stopwatch sw = Stopwatch.StartNew();
@@ -241,6 +246,11 @@ public sealed class ZImageGenerationTests
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
             return;
         }
 

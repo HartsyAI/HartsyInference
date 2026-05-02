@@ -10,27 +10,42 @@ using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
-/// <summary>Z-Image text-to-image pipeline (Tongyi Lab, Apache 2.0). Accepts pre-computed Qwen3-4B caption embeddings (text-encoder forward is owned by a separate component) and orchestrates the Lumina2/NextDiT transformer with a static-shift flow-match Euler scheduler. Turbo (8 NFE, no CFG) is the primary target; Base would add CFG branching but is not yet released.</summary>
+/// <summary>Z-Image text-to-image and image-to-image pipeline (Tongyi Lab, Apache 2.0). Accepts pre-computed Qwen3-4B caption embeddings (text-encoder forward is owned by a separate component) and orchestrates the Lumina2/NextDiT transformer with a static-shift flow-match Euler scheduler.
+/// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>) to <see cref="GenerateFromEmbeddings"/>. Requires a <see cref="VaeEncoder"/> on construction. <b>Caveat:</b> Z-Image's latent normalization is split between this pipeline and the VAE decoder (see <see cref="PrepareVaeInput"/>); the img2img injection point uses the VaeEncoder's standard <c>(raw - shift) * scale</c> output. Strength=0 byte-identical pass-through is exact; nonzero-strength img2img produces structurally-correct output but quality has not been validated against a Python reference. For tight refining quality on Z-Image, prefer the cross-model pixel-space pattern (run a different pipeline as the refiner).</para>
+/// </summary>
 public sealed unsafe class ZImagePipeline : IDisposable
 {
     private readonly IBackend _backend;
     private readonly ZImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly ZImageConfig _config;
     private int _disposed;
 
-    /// <summary>Creates a Z-Image pipeline. The transformer and VAE decoder must already have weights loaded (and preferably preloaded onto the backend).</summary>
+    /// <summary>Creates a Z-Image pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public ZImagePipeline(IBackend backend, ZImageTransformer transformer, VaeDecoder vaeDecoder, ZImageConfig config)
+        : this(backend, transformer, vaeDecoder, vaeEncoder: null, config)
+    {
+    }
+
+    /// <summary>Creates a Z-Image pipeline with both VAE halves loaded. Required for img2img.</summary>
+    public ZImagePipeline(IBackend backend, ZImageTransformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, ZImageConfig config)
     {
         _backend = backend;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-computed Qwen3 caption embeddings.</summary>
+    /// <summary>Generates an image from pre-computed Qwen3 caption embeddings. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
+    /// <list type="bullet">
+    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial latent = fresh Gaussian noise scaled by initSigma; denoise from step 0).</item>
+    /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the 16-channel Flux/Z-Image VAE and combined with fresh noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Requires a <see cref="VaeEncoder"/>.</item>
+    /// </list>
+    /// </summary>
     /// <param name="captionEmbeddings">Last-hidden-state output of Qwen3-4B for the prompt [B, capLen, 2560]. The Z-Image system prompt + chat template should already be applied upstream.</param>
-    /// <param name="request">Generation parameters (Width, Height, Steps, Seed).</param>
+    /// <param name="request">Generation parameters (Width, Height, Steps, Seed). Pass an <see cref="ImageToImageRequest"/> for img2img.</param>
     /// <param name="cfgScale">Classifier-free guidance scale. Use 1.0 for Turbo (no CFG, single forward per step). Use 3.0–5.0 for Base when a negative-prompt embedding is also provided.</param>
     /// <param name="negativeCaptionEmbeddings">Optional negative-prompt embeddings for CFG. Required when <paramref name="cfgScale"/> &gt; 1.0.</param>
     /// <param name="onProgress">Optional progress callback per step.</param>
@@ -42,6 +57,9 @@ public sealed unsafe class ZImagePipeline : IDisposable
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         if (cfgScale > 1.0f && negativeCaptionEmbeddings is null)
             throw new ArgumentException(
@@ -49,33 +67,51 @@ public sealed unsafe class ZImagePipeline : IDisposable
                 nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / _config.VaeDownscaleFactor;
-        int latentW = request.Width / _config.VaeDownscaleFactor;
+        int width = request.Width;
+        int height = request.Height;
+        int latentH = height / _config.VaeDownscaleFactor;
+        int latentW = width / _config.VaeDownscaleFactor;
         int steps = request.Steps;
 
-        Logs.Info($"Z-Image: Generating {request.Width}x{request.Height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        // Img2img validation + strength=0 short-circuit BEFORE any model work.
+        int startStep = 0;
+        if (request is ImageToImageRequest img2img)
+        {
+            Tensor src = img2img.SourceImage;
+            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
+                src.Shape[2] != height || src.Shape[3] != width)
+            {
+                throw new ArgumentException(
+                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
+                    nameof(request));
+            }
+
+            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
+            int initTimesteps = (int)MathF.Round(steps * strength);
+            startStep = Math.Max(steps - initTimesteps, 0);
+
+            if (initTimesteps == 0)
+            {
+                Logs.Info("Strength=0; passing source through unchanged");
+                return (ImagePostProcessor.TensorToRgbBytes(src), width, height, seed);
+            }
+        }
+
+        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        Logs.Info($"Z-Image {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Initial noise latent [1, in_channels, latentH, latentW] ──
+        // ── 1. Static-shift flow-match Euler scheduler ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // ── 2. Static-shift flow-match Euler scheduler ──
         FlowMatchEulerDiscreteScheduler scheduler = new(_config.SchedulerShift);
         scheduler.SetTimesteps(steps);
 
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
-        {
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
-            latent.Dispose();
-            latent = scaled;
-        }
+        // ── 2. Build initial latent (t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at sigma[startStep]) ──
+        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, startStep);
 
-        // ── 3. Denoising loop ──
+        // ── 3. Denoising loop (from startStep onward) ──
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
@@ -130,9 +166,39 @@ public sealed unsafe class ZImagePipeline : IDisposable
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"Z-Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"Z-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
-        return (rgbData, request.Width, request.Height, seed);
+        return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) combined with fresh noise via flow-matching AddNoise at sigma[startStep].</summary>
+    private Tensor BuildInitialLatent(TextToImageRequest request, FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep)
+    {
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceLatent = _vaeEncoder!.Encode(_backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor latent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
+            sourceLatent.Dispose();
+            noise.Dispose();
+            return latent;
+        }
+
+        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(latentShape, DType.F32);
+            _backend.Scale(scaled, t2iNoise, initSigma);
+            t2iNoise.Dispose();
+            return scaled;
+        }
+        return t2iNoise;
     }
 
     /// <summary>In-place negate. Z-Image's diffusers pipeline negates the velocity output before stepping.</summary>

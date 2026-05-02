@@ -165,6 +165,11 @@ public sealed class Qwen3EncoderSmokeTests
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
             return;
         }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
+            return;
+        }
 
         Stopwatch sw = Stopwatch.StartNew();
         _output.WriteLine($"[1/4] Loading {Path.GetFileName(Qwen3WeightsPath)}...");
@@ -246,6 +251,11 @@ public sealed class Qwen3EncoderSmokeTests
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
             return;
         }
 

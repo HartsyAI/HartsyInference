@@ -205,6 +205,11 @@ public sealed class FluxGenerationTests
             _output.WriteLine("SKIPPED: T5 SentencePiece model not found");
             return;
         }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
+            return;
+        }
 
         Stopwatch totalSw = Stopwatch.StartNew();
 
@@ -360,6 +365,11 @@ public sealed class FluxGenerationTests
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
             return;
         }
 
@@ -579,6 +589,12 @@ public sealed class FluxGenerationTests
             return;
         }
 
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
+            return;
+        }
+
         Stopwatch totalSw = Stopwatch.StartNew();
 
         // 1a. Load + convert Krea (transformer-only, fp8_scaled — converter folds scale_weight into Fp8ScaleFactor)
@@ -725,6 +741,12 @@ public sealed class FluxGenerationTests
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
             return;
         }
 

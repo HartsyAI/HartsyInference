@@ -956,6 +956,11 @@ public class Sd15WeightLoadingTests
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
             return;
         }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
+            return;
+        }
 
         using CpuBackend cpu = new();
         using CudaBackend gpu = new(deviceOrdinal: 0, ptxDir: ptxDir);

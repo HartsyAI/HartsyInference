@@ -12,7 +12,9 @@ using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
-/// <summary>Flux text-to-image pipeline. Orchestrates CLIP-L pooled + T5-XXL text encoding → FluxTransformer denoising with flow matching → VAE decode → RGB image output. Supports Dev (guidance embedding) and Schnell (distilled, 1-4 steps) modes.</summary>
+/// <summary>Flux text-to-image and image-to-image pipeline. Orchestrates CLIP-L pooled + T5-XXL text encoding → FluxTransformer denoising with flow matching → VAE decode → RGB image output. Supports Dev (guidance embedding) and Schnell (distilled, 1-4 steps) modes.
+/// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>) to <see cref="GenerateFromTokens"/>. Requires a <see cref="VaeEncoder"/> on construction. The img2img path encodes the source via the 16-channel Flux VAE, packs the latent (2×2 patchify), and injects flow-matching noise at the timestep selected by <c>Strength</c>.</para>
+/// </summary>
 public sealed unsafe class FluxPipeline : IDisposable
 {
     private readonly IBackend _backend;
@@ -20,35 +22,37 @@ public sealed unsafe class FluxPipeline : IDisposable
     private readonly T5TextEncoder _t5;
     private readonly FluxTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly FluxConfig _config;
     private int _disposed;
 
-    /// <summary>Creates a new Flux pipeline with all components pre-loaded.</summary>
-    /// <param name="backend">Compute backend.</param>
-    /// <param name="clipL">CLIP ViT-L/14 text encoder (pooled output only).</param>
-    /// <param name="t5">T5-XXL text encoder (per-token embeddings).</param>
-    /// <param name="transformer">Flux transformer (configured with FluxConfig).</param>
-    /// <param name="vaeDecoder">VAE decoder (configured with VaeConfig.Flux).</param>
-    /// <param name="config">Flux configuration (Dev or Schnell).</param>
+    /// <summary>Creates a new Flux pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public FluxPipeline(IBackend backend, ClipTextEncoder clipL, T5TextEncoder t5,
         FluxTransformer transformer, VaeDecoder vaeDecoder, FluxConfig config)
+        : this(backend, clipL, t5, transformer, vaeDecoder, vaeEncoder: null, config)
+    {
+    }
+
+    /// <summary>Creates a new Flux pipeline with both VAE halves loaded. Required for img2img and for use as a cross-model refiner.</summary>
+    public FluxPipeline(IBackend backend, ClipTextEncoder clipL, T5TextEncoder t5,
+        FluxTransformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, FluxConfig config)
     {
         _backend = backend;
         _clipL = clipL;
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-tokenized input.</summary>
-    /// <param name="promptTokenIdsL">Prompt token IDs for CLIP-L [seqLen].</param>
-    /// <param name="promptEosPositionL">EOS token position in prompt for CLIP-L (for pooled output).</param>
-    /// <param name="promptTokenIdsT5">Prompt token IDs for T5-XXL [seqLen].</param>
-    /// <param name="promptAttentionMaskT5">T5 attention mask (1=attend, 0=pad). Null = attend all.</param>
-    /// <param name="request">Generation parameters.</param>
-    /// <param name="guidanceScale">Guidance scale for Dev (embedded via MLP). Ignored for Schnell. Default: 3.5.</param>
-    /// <param name="onProgress">Optional progress callback.</param>
+    /// <summary>Generates an image from pre-tokenized input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
+    /// <list type="bullet">
+    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image (initial packed latent = noise scaled by initSigma; denoise from step 0).</item>
+    /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the 16-channel Flux VAE, packed (2×2 patchify), and combined with fresh packed noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Requires a <see cref="VaeEncoder"/>.</item>
+    /// </list>
+    /// Strength=0 short-circuits to byte-identical pass-through.
+    /// </summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsL,
         int promptEosPositionL,
@@ -59,27 +63,55 @@ public sealed unsafe class FluxPipeline : IDisposable
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / 8;
-        int latentW = request.Width / 8;
+        int width = request.Width;
+        int height = request.Height;
+        int latentH = height / 8;
+        int latentW = width / 8;
         int steps = request.Steps;
 
-        string mode = _config.GuidanceEmbed ? "Dev" : "Schnell";
-        Logs.Info($"Flux ({mode}): Generating {request.Width}x{request.Height} image, {steps} steps, guidance={guidanceScale}, seed={seed}");
+        // Img2img validation + strength=0 short-circuit BEFORE any model work.
+        int startStep = 0;
+        if (request is ImageToImageRequest img2img)
+        {
+            Tensor src = img2img.SourceImage;
+            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
+                src.Shape[2] != height || src.Shape[3] != width)
+            {
+                throw new ArgumentException(
+                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
+                    nameof(request));
+            }
+
+            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
+            int initTimesteps = (int)MathF.Round(steps * strength);
+            startStep = Math.Max(steps - initTimesteps, 0);
+
+            if (initTimesteps == 0)
+            {
+                Logs.Info("Strength=0; passing source through unchanged");
+                return (ImagePostProcessor.TensorToRgbBytes(src), width, height, seed);
+            }
+        }
+
+        string baseMode = _config.GuidanceEmbed ? "Dev" : "Schnell";
+        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        Logs.Info($"Flux ({baseMode}) {opMode}: {width}x{height}, {steps} steps, guidance={guidanceScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode text ─────────────────────────────────────────────
         Logs.Info("Encoding text with CLIP-L (pooled) + T5-XXL (per-token)...");
 
-        // CLIP-L: full forward → extract EOS hidden state as pooled output [B, 768]
         int[][] batchTokenIdsL = [promptTokenIdsL];
         Tensor clipLHidden = _clipL.Encode(_backend, batchTokenIdsL);
         LogTensorStats("CLIP hidden (full)", clipLHidden);
         Tensor clipPooled = ExtractEosHiddenState(clipLHidden, promptEosPositionL);
         clipLHidden.Dispose();
 
-        // T5-XXL: per-token embeddings [B, seqLen, 4096]
         int[][] batchTokenIdsT5 = [promptTokenIdsT5];
         int[][]? batchMaskT5 = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
         Tensor t5Embeddings = _t5.Encode(_backend, batchTokenIdsT5, batchMaskT5);
@@ -89,39 +121,26 @@ public sealed unsafe class FluxPipeline : IDisposable
         LogTensorStats("CLIP pooled", clipPooled);
         LogTensorStats("T5 embeddings", t5Embeddings);
 
-        // ── 2. Create initial noise latent [1, 16, latentH, latentW] ──
+        // ── 2. Set up dynamic flow-match scheduler ─────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
-        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // Pack latent: [1, 16, H, W] → [1, H/2*W/2, 64]
         int hPacked = latentH / 2;
         int wPacked = latentW / 2;
         int imgSeqLen = hPacked * wPacked;
+        TensorShape packedShape = new TensorShape(1, imgSeqLen, 64);
 
-        Tensor packedLatent = PackLatent(noise, latentH, latentW);
-        noise.Dispose();
-
-        // ── 3. Set up dynamic flow-match scheduler ────────────────────
         FlowMatchEulerDiscreteScheduler scheduler =
             FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen);
         scheduler.SetTimesteps(steps);
 
-        // Scale initial noise by sigma[0]
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
-        {
-            TensorShape packedShape = new TensorShape(1, imgSeqLen, 64);
-            Tensor scaled = new Tensor(packedShape, DType.F32);
-            _backend.Scale(scaled, packedLatent, initSigma);
-            packedLatent.Dispose();
-            packedLatent = scaled;
-        }
+        // ── 3. Build initial packed latent ─────────────────────────────
+        // T2I: noise scaled by initSigma. Img2img: vaeEncoder.Encode → Pack → AddNoise at sigma[startStep].
+        Tensor packedLatent = BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep);
 
         // ── 4. Denoising loop ─────────────────────────────────────────
         Logs.Info("Starting Flux denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f; // Convert timestep back to sigma [0,1]
@@ -188,9 +207,48 @@ public sealed unsafe class FluxPipeline : IDisposable
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"Flux image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"Flux ({baseMode}) {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, request.Width, request.Height, seed);
+    }
+
+    /// <summary>Builds the initial packed latent for Flux denoising. T2I: fresh Gaussian noise scaled by the scheduler's initial sigma. Img2img: VAE-encoded source latent (16 channels) packed via <see cref="PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.</summary>
+    private Tensor BuildInitialPackedLatent(
+        TextToImageRequest request,
+        FlowMatchEulerDiscreteScheduler scheduler,
+        TensorShape latentShape,
+        TensorShape packedShape,
+        int latentH, int latentW, int seed, int startStep)
+    {
+        Tensor packedNoise = PackLatent(SeedGenerator.CreateNoise(latentShape, seed), latentH, latentW);
+
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceUnpacked = _vaeEncoder!.Encode(_backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor sourcePacked = PackLatent(sourceUnpacked, latentH, latentW);
+            sourceUnpacked.Dispose();
+
+            Tensor result = new Tensor(packedShape, DType.F32);
+            scheduler.AddNoise(result, sourcePacked, packedNoise, startStep);
+            sourcePacked.Dispose();
+            packedNoise.Dispose();
+            return result;
+        }
+
+        // T2I path: scale packed noise by initSigma.
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(packedShape, DType.F32);
+            _backend.Scale(scaled, packedNoise, initSigma);
+            packedNoise.Dispose();
+            return scaled;
+        }
+        return packedNoise;
     }
 
     private static void LogTensorStats(string name, Tensor tensor)

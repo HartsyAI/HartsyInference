@@ -84,6 +84,22 @@ public sealed class CudaContext : IDisposable
         return count;
     }
 
+    /// <summary>Probes for a usable CUDA driver + at least one device, without throwing. Returns <c>false</c> if the driver library can't be loaded (e.g. <c>libcuda.so.1</c> / <c>nvcuda.dll</c> missing, or running inside a sandbox that doesn't expose the host driver), if <c>cuInit</c> fails, or if no CUDA-capable devices are present. Mirrors the <c>VulkanAvailable</c> pattern used by the Vulkan tests so CUDA tests can skip cleanly in environments without a working driver.</summary>
+    public static bool IsAvailable()
+    {
+        try
+        {
+            CudaLibraryResolver.Register();
+            EnsureCudaInitialized();
+            CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();
+            return count > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static void EnsureCudaInitialized()
     {
         if (Interlocked.CompareExchange(ref _cudaInitialized, 1, 0) == 0)

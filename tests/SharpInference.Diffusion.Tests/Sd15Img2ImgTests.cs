@@ -71,7 +71,7 @@ public sealed class Sd15Img2ImgTests
         };
 
         Assert.Throws<InvalidOperationException>(() =>
-            pipeline.GenerateImg2ImgFromTokens(promptTokenIds: [], negativePromptTokenIds: [], request));
+            pipeline.GenerateFromTokens(promptTokenIds: [], negativePromptTokenIds: [], request));
 
         source.Dispose();
     }
@@ -98,7 +98,7 @@ public sealed class Sd15Img2ImgTests
         };
 
         Assert.Throws<ArgumentException>(() =>
-            pipeline.GenerateImg2ImgFromTokens(promptTokenIds: [], negativePromptTokenIds: [], request));
+            pipeline.GenerateFromTokens(promptTokenIds: [], negativePromptTokenIds: [], request));
 
         source.Dispose();
     }
@@ -143,7 +143,7 @@ public sealed class Sd15Img2ImgTests
             Strength = 0.0f,
         };
 
-        (byte[] outBytes, int outW, int outH, int seed) = pipeline.GenerateImg2ImgFromTokens(
+        (byte[] outBytes, int outW, int outH, int seed) = pipeline.GenerateFromTokens(
             promptTokenIds: [], negativePromptTokenIds: [], request);
 
         Assert.Equal(w, outW);
@@ -240,7 +240,7 @@ public sealed class Sd15Img2ImgTests
             using StableDiffusion15Pipeline pipeline = new(backend, clipL, unet, vaeDecoder, vaeEncoder);
 
             sw.Restart();
-            (byte[] outBytes, int outW, int outH, int seed) = pipeline.GenerateImg2ImgFromTokens(
+            (byte[] outBytes, int outW, int outH, int seed) = pipeline.GenerateFromTokens(
                 promptTokens, negativeTokens, request,
                 onProgress: p => _output.WriteLine($"  Step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
             sw.Stop();

@@ -1403,6 +1403,11 @@ public class SdxlGenerationTests
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
             return;
         }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available (running outside the host? try a non-Flatpak terminal)");
+            return;
+        }
 
         using CpuBackend cpu = new();
         using CudaBackend gpu = new(deviceOrdinal: 0, ptxDir: ptxDir);
@@ -1477,6 +1482,11 @@ public class SdxlGenerationTests
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
             return;
         }
 
@@ -1733,6 +1743,11 @@ public class SdxlGenerationTests
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
+            return;
+        }
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: no CUDA driver available");
             return;
         }
 

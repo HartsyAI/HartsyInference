@@ -161,7 +161,13 @@ public sealed class StableDiffusion15Pipeline : IDisposable
             "or provide a ClipTokenizer instance to the pipeline.");
     }
 
-    /// <summary>Generates an image from pre-tokenized input. This is the primary entry point for CPU inference testing.</summary>
+    /// <summary>Generates an image from pre-tokenized input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
+    /// <list type="bullet">
+    /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image. Initial latent is fresh Gaussian noise scaled by the scheduler's <c>InitialNoiseSigma</c>; denoise from step 0.</item>
+    /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the VAE encoder, fresh noise is injected at <c>sigma[startStep]</c> via <c>scheduler.AddNoise</c>, and denoising runs from <c>startStep = steps - round(steps * Strength)</c>. Requires a pipeline constructed with a <see cref="VaeEncoder"/>.</item>
+    /// </list>
+    /// The two paths only differ in the initial latent and the start step — text encoding, denoise loop, VAE decode, and RGB conversion are identical. Strength=0 short-circuits to a byte-identical pass-through.
+    /// </summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         int[] negativePromptTokenIds,
@@ -169,42 +175,62 @@ public sealed class StableDiffusion15Pipeline : IDisposable
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / 8;
-        int latentW = request.Width / 8;
+        int width = request.Width;
+        int height = request.Height;
+        int latentH = height / 8;
+        int latentW = width / 8;
         int steps = request.Steps;
         float cfgScale = request.CfgScale;
+        TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
 
-        Logs.Info($"Generating {request.Width}x{request.Height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
+        // Img2img: validate source shape and handle strength=0 short-circuit BEFORE any model work.
+        int startStep = 0;
+        if (request is ImageToImageRequest img2img)
+        {
+            Tensor source = img2img.SourceImage;
+            if (source.Shape.Rank != 4 || source.Shape[0] != 1 || source.Shape[1] != 3 ||
+                source.Shape[2] != height || source.Shape[3] != width)
+            {
+                throw new ArgumentException(
+                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {source.Shape}.",
+                    nameof(request));
+            }
+
+            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
+            int initTimesteps = (int)MathF.Round(steps * strength);
+            startStep = Math.Max(steps - initTimesteps, 0);
+
+            if (initTimesteps == 0)
+            {
+                Logs.Info("Strength=0; passing source through unchanged");
+                return (ImagePostProcessor.TensorToRgbBytes(source), width, height, seed);
+            }
+        }
+
+        string mode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        Logs.Info($"SD1.5 {mode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // 1. Encode text: batch of [negative, positive]
+        // 1. Encode text
         Logs.Info("Encoding text prompt...");
         int[][] batchTokenIds = [negativePromptTokenIds, promptTokenIds];
         Tensor textEmbeddings = _textEncoder.Encode(_backend, batchTokenIds);
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
-        // 2. Create initial noise latent [1, 4, latentH, latentW]
-        TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // 3. Set up scheduler
+        // 2. Set up scheduler (needed for both paths' initial-latent prep)
         IScheduler scheduler = CreateScheduler(request.Scheduler);
         scheduler.SetTimesteps(steps);
 
-        // Scale initial noise
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
-        {
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
-            latent.Dispose();
-            latent = scaled;
-        }
+        // 3. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
+        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, startStep);
 
-        // 4. Denoising loop
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, startStep: 0, totalSteps: steps, cfgScale, onProgress);
+        // 4. Denoise loop (both paths run the same loop from their respective startStep)
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, startStep, totalSteps: steps, cfgScale, onProgress);
 
         textEmbeddings.Dispose();
 
@@ -221,109 +247,40 @@ public sealed class StableDiffusion15Pipeline : IDisposable
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
-
-        return (rgbData, request.Width, request.Height, seed);
-    }
-
-    /// <summary>Generates an image by transforming an existing one. Encodes <see cref="ImageToImageRequest.SourceImage"/> via the VAE encoder, injects noise at the timestep selected by <see cref="ImageToImageRequest.Strength"/>, and runs the denoising loop from there.</summary>
-    /// <remarks>Requires a pipeline constructed with a <see cref="VaeEncoder"/>; otherwise throws.</remarks>
-    public (byte[] rgbData, int width, int height, int seed) GenerateImg2ImgFromTokens(
-        int[] promptTokenIds,
-        int[] negativePromptTokenIds,
-        ImageToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
-    {
-        ThrowIfDisposed();
-        if (_vaeEncoder is null)
-            throw new InvalidOperationException("Img2img requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
-
-        int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
-        int latentH = height / 8;
-        int latentW = width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
-        float strength = Math.Clamp(request.Strength, 0f, 1f);
-
-        // Validate source image shape matches the request resolution. The VAE encoder downsamples
-        // by 8× spatially, so source must already be at the target output resolution.
-        Tensor source = request.SourceImage;
-        if (source.Shape.Rank != 4 || source.Shape[0] != 1 || source.Shape[1] != 3 ||
-            source.Shape[2] != height || source.Shape[3] != width)
-        {
-            throw new ArgumentException(
-                $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {source.Shape}.",
-                nameof(request));
-        }
-
-        Logs.Info($"Img2img {width}x{height}, {steps} steps, strength={strength:F2}, cfg={cfgScale}, seed={seed}");
-        Stopwatch sw = Stopwatch.StartNew();
-
-        // 1. Determine starting step from strength. If strength==0, no denoising runs and the source
-        // passes through byte-identical. Short-circuit before text encoding / VAE work to avoid waste
-        // and to allow callers to skip tokenization entirely (empty token arrays are valid here).
-        int initTimesteps = (int)MathF.Round(steps * strength);
-        int startStep = Math.Max(steps - initTimesteps, 0);
-
-        if (initTimesteps == 0)
-        {
-            Logs.Info("Strength=0; passing source through unchanged");
-            byte[] passthroughBytes = ImagePostProcessor.TensorToRgbBytes(source);
-            return (passthroughBytes, width, height, seed);
-        }
-
-        // 2. Encode text
-        Logs.Info("Encoding text prompt...");
-        int[][] batchTokenIds = [negativePromptTokenIds, promptTokenIds];
-        Tensor textEmbeddings = _textEncoder.Encode(_backend, batchTokenIds);
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
-
-        // 3. Encode source image to latent space
-        Stopwatch vaeEncSw = Stopwatch.StartNew();
-        Tensor sourceLatent = _vaeEncoder.Encode(_backend, source);
-        vaeEncSw.Stop();
-        Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
-
-        TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
-
-        // 4. Generate fresh noise (same shape as the encoded latent)
-        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // 5. Set up scheduler
-        IScheduler scheduler = CreateScheduler(request.Scheduler);
-        scheduler.SetTimesteps(steps);
-
-        // 6. Inject noise at timestep[startStep]: noisy = sourceLatent + noise * sigma[startStep]
-        Tensor latent = new Tensor(latentShape, DType.F32);
-        scheduler.AddNoise(latent, sourceLatent, noise, startStep);
-        sourceLatent.Dispose();
-        noise.Dispose();
-
-        Logs.Info($"Starting denoise at step {startStep}/{steps} (running {initTimesteps} steps)");
-
-        // 6. Denoising loop from startStep onward
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, startStep, totalSteps: steps, cfgScale, onProgress);
-
-        textEmbeddings.Dispose();
-
-        // 7. VAE decode
-        Logs.Info("Decoding latents to image...");
-        Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(_backend, latent);
-        latent.Dispose();
-        vaeSw.Stop();
-        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
-
-        // 8. Convert to RGB bytes
-        byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
-        image.Dispose();
-
-        sw.Stop();
-        Logs.Info($"Img2img complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"SD1.5 {mode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Builds the starting latent for the denoise loop. For text-to-image this is fresh Gaussian noise scaled by the scheduler's initial sigma. For image-to-image this is the VAE-encoded source plus fresh noise injected at sigma[startStep] via <c>scheduler.AddNoise</c>.</summary>
+    private Tensor BuildInitialLatent(TextToImageRequest request, IScheduler scheduler, TensorShape latentShape, int seed, int startStep)
+    {
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceLatent = _vaeEncoder!.Encode(_backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor latent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
+            sourceLatent.Dispose();
+            noise.Dispose();
+            return latent;
+        }
+
+        // Text-to-image: scale fresh noise by the scheduler's initial sigma.
+        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(latentShape, DType.F32);
+            _backend.Scale(scaled, t2iNoise, initSigma);
+            t2iNoise.Dispose();
+            return scaled;
+        }
+        return t2iNoise;
     }
 
     /// <summary>Runs the diffusion denoising loop. Iterates <c>i</c> from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1, applying scheduler input scaling, the UNet (with optional CFG), and one scheduler step per iteration. Returns the final denoised latent. Disposes intermediate latents along the way.</summary>
