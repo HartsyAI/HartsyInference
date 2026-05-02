@@ -26,9 +26,12 @@ public sealed class Sd3CheckpointConverter
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>Converts a single-file SD3 checkpoint into separate per-component weight dictionaries.</summary>
+    /// <summary>Converts a single-file SD3 checkpoint into separate per-component weight dictionaries. Folds ComfyUI fp8_scaled per-tensor `.scale_weight` companions into <c>Tensor.Fp8ScaleFactor</c> before bucketing (SD3.5 FP8 distributions ship the T5-XXL encoder this way), and drops zero-byte `*.scaled_fp8` format markers.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
     {
+        // Fold per-tensor FP8 scale companions into Tensor.Fp8ScaleFactor (matches Flux fp8_scaled handling).
+        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+
         Dictionary<string, Tensor> transformer = new(2000);
         Dictionary<string, Tensor> clipL = new(200);
         Dictionary<string, Tensor> clipG = new(400);
@@ -39,6 +42,10 @@ public sealed class Sd3CheckpointConverter
         {
             string key = kvp.Key;
             Tensor tensor = kvp.Value;
+
+            // Skip ComfyUI fp8_scaled format markers (zero-byte sentinels indicating the file uses fp8_scaled)
+            if (key.EndsWith(".scaled_fp8") || key == "scaled_fp8")
+                continue;
 
             // MMDiT transformer (Stability format)
             if (key.StartsWith("model.diffusion_model."))
@@ -197,19 +204,18 @@ public sealed class Sd3CheckpointConverter
 
     private static void ConvertImageBlockKey(string prefix, string rest, Tensor tensor, Dictionary<string, Tensor> output)
     {
-        // AdaLN modulation
+        // AdaLN modulation (6 params for SD3, 9 for SD3.5 dual-attention layers — output dim differs but key path is the same)
         if (rest.StartsWith("adaLN_modulation.1."))
         {
             output[$"{prefix}.norm1.linear.{rest["adaLN_modulation.1.".Length..]}"] = tensor;
             return;
         }
 
-        // Attention
+        // Joint attention (`attn`)
         if (rest.StartsWith("attn."))
         {
             string attnKey = rest["attn.".Length..];
 
-            // Fused QKV → split into separate Q, K, V
             if (attnKey == "qkv.weight")
             {
                 int innerDim = (int)tensor.Shape[0] / 3;
@@ -222,15 +228,11 @@ public sealed class Sd3CheckpointConverter
                 SplitQkvBias(tensor, innerDim, prefix, "attn.to_q", "attn.to_k", "attn.to_v", output);
                 return;
             }
-
-            // Output projection
             if (attnKey.StartsWith("proj."))
             {
                 output[$"{prefix}.attn.to_out.0.{attnKey["proj.".Length..]}"] = tensor;
                 return;
             }
-
-            // QK-norm
             if (attnKey == "ln_q.weight")
             {
                 output[$"{prefix}.attn.norm_q.weight"] = tensor;
@@ -241,7 +243,41 @@ public sealed class Sd3CheckpointConverter
                 output[$"{prefix}.attn.norm_k.weight"] = tensor;
                 return;
             }
+            return;
+        }
 
+        // SD3.5 MMDiT-X dual self-attention (`attn2`) — image-only second attention
+        if (rest.StartsWith("attn2."))
+        {
+            string attnKey = rest["attn2.".Length..];
+
+            if (attnKey == "qkv.weight")
+            {
+                int innerDim = (int)tensor.Shape[0] / 3;
+                SplitQkvWeight(tensor, innerDim, prefix, "attn2.to_q", "attn2.to_k", "attn2.to_v", output);
+                return;
+            }
+            if (attnKey == "qkv.bias")
+            {
+                int innerDim = (int)tensor.Shape[0] / 3;
+                SplitQkvBias(tensor, innerDim, prefix, "attn2.to_q", "attn2.to_k", "attn2.to_v", output);
+                return;
+            }
+            if (attnKey.StartsWith("proj."))
+            {
+                output[$"{prefix}.attn2.to_out.0.{attnKey["proj.".Length..]}"] = tensor;
+                return;
+            }
+            if (attnKey == "ln_q.weight")
+            {
+                output[$"{prefix}.attn2.norm_q.weight"] = tensor;
+                return;
+            }
+            if (attnKey == "ln_k.weight")
+            {
+                output[$"{prefix}.attn2.norm_k.weight"] = tensor;
+                return;
+            }
             return;
         }
 
@@ -526,4 +562,33 @@ public sealed class Sd3CheckpointConverter
         }
         return maxBlock + 1;
     }
+
+    /// <summary>Detects which transformer block indices contain SD3.5 MMDiT-X dual-attention (`attn2`) weights. Returns an empty array for plain SD3.</summary>
+    public static int[] DetectDualAttentionLayers(Dictionary<string, Tensor> transformerWeights)
+    {
+        SortedSet<int> dualBlocks = new();
+        foreach (string key in transformerWeights.Keys)
+        {
+            if (!key.StartsWith("transformer_blocks.")) continue;
+            string afterPrefix = key["transformer_blocks.".Length..];
+            int dot = afterPrefix.IndexOf('.');
+            if (dot < 0) continue;
+            if (!afterPrefix.AsSpan(dot + 1).StartsWith("attn2.")) continue;
+            if (int.TryParse(afterPrefix[..dot], out int blockIdx))
+                dualBlocks.Add(blockIdx);
+        }
+        return dualBlocks.ToArray();
+    }
+
+    /// <summary>True if the converted transformer weights expose SD3.5-style QK-norm tensors.</summary>
+    public static bool DetectQkNorm(Dictionary<string, Tensor> transformerWeights)
+    {
+        foreach (string key in transformerWeights.Keys)
+        {
+            if (key.EndsWith(".attn.norm_q.weight") || key.EndsWith(".attn.norm_k.weight"))
+                return true;
+        }
+        return false;
+    }
+
 }

@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <PackageId>SharpInference.Tokenizers</PackageId>
-    <Description>CLIP, T5, and Whisper tokenizers for SharpInference diffusion and audio pipelines.</Description>
+    <Description>CLIP, T5, Qwen3, and Whisper tokenizers for SharpInference diffusion and audio pipelines. Ships canonical OpenAI-CLIP / T5-XXL / Qwen3-4B vocabularies as embedded resources so consumers can construct tokenizers with no external file management.</Description>
     <RootNamespace>SharpInference.Tokenizers</RootNamespace>
   </PropertyGroup>
 
@@ -12,6 +12,20 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.ML.Tokenizers" />
+  </ItemGroup>
+
+  <!-- Embedded canonical tokenizer vocabularies. ~6.7 MB total (uncompressed); the
+       assembly winds up ~7 MB. This is the price of being able to spin up a tokenizer
+       without making the user hunt down vocab/merges/spiece files separately, the way
+       Python's `transformers` library does by bundling them inside its wheel.
+
+       LogicalName flattens the path so resource lookups are stable across folder moves. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\clip_vocab.json"   LogicalName="SharpInference.Tokenizers.Resources.clip_vocab.json" />
+    <EmbeddedResource Include="Resources\clip_merges.txt"   LogicalName="SharpInference.Tokenizers.Resources.clip_merges.txt" />
+    <EmbeddedResource Include="Resources\t5_spiece.model"   LogicalName="SharpInference.Tokenizers.Resources.t5_spiece.model" />
+    <EmbeddedResource Include="Resources\qwen3_vocab.json"  LogicalName="SharpInference.Tokenizers.Resources.qwen3_vocab.json" />
+    <EmbeddedResource Include="Resources\qwen3_merges.txt"  LogicalName="SharpInference.Tokenizers.Resources.qwen3_merges.txt" />
   </ItemGroup>
 
 </Project>

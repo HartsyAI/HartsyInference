@@ -1,3 +1,5 @@
+using SharpInference.Core.Tensors;
+
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for SD3 MMDiT and SD3.5 MMDiT-X transformers. Architecture parameters are derived from depth: hidden_size = 64 * depth, num_heads = depth.</summary>
@@ -77,6 +79,41 @@ public record Sd3Config
             Depth = depth,
             HiddenSize = 64 * depth,
             NumHeads = depth,
+        };
+    }
+
+    /// <summary>Auto-detects an <see cref="Sd3Config"/> from a converted transformer weight dictionary. Reads depth from block indices, dual-attention layers from <c>attn2</c> presence, and QK-norm from <c>norm_q/k</c> presence. Returns plain SD3 (no dual attn) for SD3 Medium and SD3.5 (with dual attn) for SD3.5 Medium / Large.</summary>
+    public static Sd3Config AutoDetect(IReadOnlyDictionary<string, Tensor> transformerWeights)
+    {
+        int maxBlock = -1;
+        SortedSet<int> dualBlocks = new();
+        bool seenQkNorm = false;
+
+        foreach (string key in transformerWeights.Keys)
+        {
+            if (!key.StartsWith("transformer_blocks.")) continue;
+            string afterPrefix = key["transformer_blocks.".Length..];
+            int dot = afterPrefix.IndexOf('.');
+            if (dot < 0) continue;
+
+            if (!int.TryParse(afterPrefix[..dot], out int blockIdx)) continue;
+            if (blockIdx > maxBlock) maxBlock = blockIdx;
+
+            string subKey = afterPrefix[(dot + 1)..];
+            if (subKey.StartsWith("attn2.")) dualBlocks.Add(blockIdx);
+            if (subKey.EndsWith("norm_q.weight") || subKey.EndsWith("norm_k.weight")) seenQkNorm = true;
+        }
+
+        int depth = maxBlock + 1;
+        int[]? dualLayers = dualBlocks.Count > 0 ? dualBlocks.ToArray() : null;
+
+        return new Sd3Config
+        {
+            Depth = depth,
+            HiddenSize = 64 * depth,
+            NumHeads = depth,
+            UseQkNorm = seenQkNorm,
+            DualAttentionLayers = dualLayers,
         };
     }
 }

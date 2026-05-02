@@ -35,20 +35,24 @@ public static class CudaLibraryResolver
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                // Try versioned names first, then unversioned
-                if (NativeLibrary.TryLoad("cublas64_12.dll", out nint handle))
+                // Try newest first, then older toolkits
+                if (NativeLibrary.TryLoad("cublas64_13.dll", out nint handle))
+                    return handle;
+                if (NativeLibrary.TryLoad("cublas64_12.dll", out handle))
                     return handle;
                 if (NativeLibrary.TryLoad("cublas64_11.dll", out handle))
                     return handle;
-                return NativeLibrary.Load("cublas64_12.dll");
+                return NativeLibrary.Load("cublas64_13.dll");
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
-                if (NativeLibrary.TryLoad("libcublas.so.12", out nint handle))
+                if (NativeLibrary.TryLoad("libcublas.so.13", out nint handle))
+                    return handle;
+                if (NativeLibrary.TryLoad("libcublas.so.12", out handle))
                     return handle;
                 if (NativeLibrary.TryLoad("libcublas.so.11", out handle))
                     return handle;
-                return NativeLibrary.Load("libcublas.so.12");
+                return NativeLibrary.Load("libcublas.so.13");
             }
         }
 

@@ -1,0 +1,52 @@
+using System.Reflection;
+
+namespace SharpInference.Tokenizers;
+
+/// <summary>
+/// Streams over the canonical tokenizer vocabularies that ship inside this assembly.
+/// Each method returns a fresh <see cref="Stream"/> over the embedded blob — callers
+/// own the stream and must dispose it. Throws <see cref="InvalidOperationException"/>
+/// if the resource is missing (a build-time misconfiguration; never a user error).
+/// </summary>
+public static class EmbeddedTokenizerResources
+{
+    /// <summary>OpenAI CLIP BPE vocabulary (49,408 tokens). Used by CLIP-L and CLIP-G —
+    /// they share tokenization; only the encoder model size differs.</summary>
+    public const string ClipVocabName   = "SharpInference.Tokenizers.Resources.clip_vocab.json";
+
+    /// <summary>OpenAI CLIP BPE merges. Pairs with <see cref="ClipVocabName"/>.</summary>
+    public const string ClipMergesName  = "SharpInference.Tokenizers.Resources.clip_merges.txt";
+
+    /// <summary>T5 SentencePiece model (32,128 tokens). Same protobuf serves T5-base and
+    /// T5-XXL; the encoder weights differ but the tokenizer is identical.</summary>
+    public const string T5SpieceName    = "SharpInference.Tokenizers.Resources.t5_spiece.model";
+
+    /// <summary>Qwen3-4B BPE vocabulary (151,936 tokens). Used by Flux.2 Klein and
+    /// Z-Image text conditioning.</summary>
+    public const string Qwen3VocabName  = "SharpInference.Tokenizers.Resources.qwen3_vocab.json";
+
+    /// <summary>Qwen3-4B BPE merges. Pairs with <see cref="Qwen3VocabName"/>.</summary>
+    public const string Qwen3MergesName = "SharpInference.Tokenizers.Resources.qwen3_merges.txt";
+
+    private static readonly Assembly Asm = typeof(EmbeddedTokenizerResources).Assembly;
+
+    /// <summary>Opens the named embedded resource. Caller owns the returned stream.</summary>
+    public static Stream Open(string logicalName)
+    {
+        Stream? s = Asm.GetManifestResourceStream(logicalName);
+        if (s is null)
+        {
+            throw new InvalidOperationException(
+                $"Embedded tokenizer resource '{logicalName}' is missing from " +
+                $"{Asm.GetName().Name}. Available resources: " +
+                string.Join(", ", Asm.GetManifestResourceNames()));
+        }
+        return s;
+    }
+
+    public static Stream OpenClipVocab()   => Open(ClipVocabName);
+    public static Stream OpenClipMerges()  => Open(ClipMergesName);
+    public static Stream OpenT5Spiece()    => Open(T5SpieceName);
+    public static Stream OpenQwen3Vocab()  => Open(Qwen3VocabName);
+    public static Stream OpenQwen3Merges() => Open(Qwen3MergesName);
+}

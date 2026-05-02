@@ -46,6 +46,12 @@ public record ClipTextEncoderConfig
     /// <summary>Preset for SDXL text_encoder (OpenAI CLIP ViT-L/14). Same as SD1.5.</summary>
     public static ClipTextEncoderConfig SdxlClipL => Sd15;
 
+    /// <summary>Preset for SD3 / SD3.5 text_encoder (OpenAI CLIP ViT-L/14 with text_projection).
+    /// Diffusers uses <c>CLIPTextModelWithProjection</c> for clip_l on SD3 — the bundled checkpoint
+    /// ships <c>text_projection.weight</c> shape [768,768] so the pooled output is 768-dim and gets
+    /// concatenated with CLIP-G's pooled (1280) into the 2048-dim pooled conditioning.</summary>
+    public static ClipTextEncoderConfig Sd3ClipL => Sd15 with { ProjectionDim = 768 };
+
     /// <summary>Preset for SDXL text_encoder_2 (OpenCLIP ViT-bigG/14). Uses standard GELU, larger hidden size, 32 layers.</summary>
     public static ClipTextEncoderConfig SdxlClipG => new()
     {

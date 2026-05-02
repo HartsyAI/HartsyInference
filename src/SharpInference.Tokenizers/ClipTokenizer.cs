@@ -22,6 +22,18 @@ public sealed class ClipTokenizer : IDisposable
     private readonly Tokenizer _tokenizer;
     private int _disposed;
 
+    /// <summary>Creates a CLIP tokenizer using the canonical OpenAI CLIP vocab/merges
+    /// embedded in this assembly. This is the right constructor for SD 1.5, SDXL,
+    /// SD3, Flux, and the SDXL refiner — they all share the same 49,408-token
+    /// CLIP BPE. Use the path/stream overloads only if you need to override with a
+    /// non-standard vocabulary.</summary>
+    public ClipTokenizer()
+    {
+        using Stream vocabStream = EmbeddedTokenizerResources.OpenClipVocab();
+        using Stream mergesStream = EmbeddedTokenizerResources.OpenClipMerges();
+        _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+    }
+
     /// <summary>Creates a CLIP tokenizer from a vocabulary file and merges file.</summary>
     /// <param name="vocabPath">Path to the CLIP vocabulary JSON file (encoder.json).</param>
     /// <param name="mergesPath">Path to the CLIP BPE merges file (vocab.bpe).</param>

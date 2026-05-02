@@ -4,7 +4,7 @@ using SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace SharpInference.Diffusion.Models.Denoisers;
 
-/// <summary>SD3 Multi-Modal Diffusion Transformer (MMDiT). Jointly processes image patches and text tokens through symmetric dual-stream attention blocks. Supports both SD3 (MMDiT) and SD3.5 (MMDiT-X with dual attention).</summary>
+/// <summary>SD3 / SD3.5 Multi-Modal Diffusion Transformer (MMDiT). Jointly processes image patches and text tokens through symmetric dual-stream attention. SD3.5 MMDiT-X variant marks the early layers for parallel image-only `attn2` paths via `Sd3Config.DualAttentionLayers`.</summary>
 public sealed unsafe class Sd3Transformer : IDisposable
 {
     private readonly Sd3Config _config;
@@ -28,7 +28,7 @@ public sealed unsafe class Sd3Transformer : IDisposable
     private Tensor? _normOutLinearWeight, _normOutLinearBias;
     private Tensor? _projOutWeight, _projOutBias;
 
-    /// <summary>Creates an SD3 transformer from configuration.</summary>
+    /// <summary>Creates an SD3/SD3.5 transformer from configuration.</summary>
     public Sd3Transformer(Sd3Config config)
     {
         _config = config;
@@ -37,15 +37,21 @@ public sealed unsafe class Sd3Transformer : IDisposable
 
         int ffDim = config.HiddenSize * 4;
         _blocks = new JointBlock[config.Depth];
+        HashSet<int> dualLayers = config.DualAttentionLayers is null
+            ? new HashSet<int>()
+            : new HashSet<int>(config.DualAttentionLayers);
+
         for (int i = 0; i < config.Depth; i++)
         {
             bool isLastBlock = i == config.Depth - 1;
+            bool useDual = dualLayers.Contains(i);
             _blocks[i] = new JointBlock(
                 config.HiddenSize,
                 config.NumHeads,
                 ffDim,
                 isPreOnly: isLastBlock,
                 useQkNorm: config.UseQkNorm,
+                useDualAttention: useDual,
                 qkNormEps: config.QkNormEps);
         }
 
@@ -55,63 +61,75 @@ public sealed unsafe class Sd3Transformer : IDisposable
     /// <summary>Loads all transformer weights from named tensors using HuggingFace diffusers naming.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        // Patch embedding
         _patchEmbed.LoadWeights(
             weights["pos_embed.proj.weight"],
             weights["pos_embed.proj.bias"],
             weights.ContainsKey("pos_embed.pos_embed") ? weights["pos_embed.pos_embed"] : null);
 
-        // Timestep embedding MLP
         _timestepLinear1Weight = weights["time_text_embed.timestep_embedder.linear_1.weight"];
         _timestepLinear1Bias = weights["time_text_embed.timestep_embedder.linear_1.bias"];
         _timestepLinear2Weight = weights["time_text_embed.timestep_embedder.linear_2.weight"];
         _timestepLinear2Bias = weights["time_text_embed.timestep_embedder.linear_2.bias"];
 
-        // Pooled text projection MLP
         _textLinear1Weight = weights["time_text_embed.text_embedder.linear_1.weight"];
         _textLinear1Bias = weights["time_text_embed.text_embedder.linear_1.bias"];
         _textLinear2Weight = weights["time_text_embed.text_embedder.linear_2.weight"];
         _textLinear2Bias = weights["time_text_embed.text_embedder.linear_2.bias"];
 
-        // Context embedder
         _contextEmbedWeight = weights["context_embedder.weight"];
         _contextEmbedBias = weights["context_embedder.bias"];
 
-        // Transformer blocks
         for (int i = 0; i < _config.Depth; i++)
-        {
             _blocks[i].LoadWeights(weights, $"transformer_blocks.{i}");
-        }
 
-        // Final layer
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _normOutLinearBias = weights["norm_out.linear.bias"];
         _projOutWeight = weights["proj_out.weight"];
         _projOutBias = weights["proj_out.bias"];
     }
 
+    /// <summary>Yields every weight tensor for GPU preloading via <c>backend.PreloadWeights</c>.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_timestepLinear1Weight is not null) yield return _timestepLinear1Weight;
+        if (_timestepLinear1Bias is not null) yield return _timestepLinear1Bias;
+        if (_timestepLinear2Weight is not null) yield return _timestepLinear2Weight;
+        if (_timestepLinear2Bias is not null) yield return _timestepLinear2Bias;
+        if (_textLinear1Weight is not null) yield return _textLinear1Weight;
+        if (_textLinear1Bias is not null) yield return _textLinear1Bias;
+        if (_textLinear2Weight is not null) yield return _textLinear2Weight;
+        if (_textLinear2Bias is not null) yield return _textLinear2Bias;
+        if (_contextEmbedWeight is not null) yield return _contextEmbedWeight;
+        if (_contextEmbedBias is not null) yield return _contextEmbedBias;
+
+        foreach (Tensor w in _patchEmbed.EnumerateWeights()) yield return w;
+
+        for (int i = 0; i < _blocks.Length; i++)
+            foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
+
+        if (_normOutLinearWeight is not null) yield return _normOutLinearWeight;
+        if (_normOutLinearBias is not null) yield return _normOutLinearBias;
+        if (_projOutWeight is not null) yield return _projOutWeight;
+        if (_projOutBias is not null) yield return _projOutBias;
+    }
+
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
-    /// <param name="backend">Compute backend.</param>
     /// <param name="latent">Noisy latent [B, 16, H, W].</param>
     /// <param name="timestep">Timestep value (sigma * 1000 for flow matching).</param>
     /// <param name="context">Projected context embeddings [B, 154, hidden_size] (already through context_embedder).</param>
     /// <param name="pooled">Pooled text projection [B, 2048].</param>
-    /// <returns>Predicted velocity [B, 16, H, W].</returns>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor context, Tensor pooled)
     {
         int batch = (int)latent.Shape[0];
         int height = (int)latent.Shape[2];
         int width = (int)latent.Shape[3];
 
-        // ── 1. Patch embed latent → image tokens ────────────────────────
         Tensor imageTokens = _patchEmbed.Forward(backend, latent);
         int imgSeqLen = (int)imageTokens.Shape[1];
         (int gridH, int gridW) = _patchEmbed.GetGridSize(height, width);
 
-        // ── 2. Timestep + pooled embedding → temb ───────────────────────
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, pooled, batch);
 
-        // ── 3. Run all JointBlocks ──────────────────────────────────────
         Tensor currentImage = imageTokens;
         Tensor currentContext = context;
 
@@ -121,40 +139,35 @@ public sealed unsafe class Sd3Transformer : IDisposable
 
             if (!ReferenceEquals(currentImage, imageTokens))
                 currentImage.Dispose();
-            if (!ReferenceEquals(currentContext, context) && i > 0)
+            if (!ReferenceEquals(currentContext, context))
                 currentContext.Dispose();
 
             currentImage = newImage;
             currentContext = newContext;
         }
 
-        // Dispose final context if it's not the original
         if (!ReferenceEquals(currentContext, context))
             currentContext.Dispose();
 
-        // ── 4. Final layer: AdaLN-Continuous + Linear projection ────────
-        Tensor output = ApplyFinalLayerWithTemb(backend, currentImage, temb, batch, imgSeqLen);
+        Tensor output = ApplyFinalLayer(backend, currentImage, temb, batch, imgSeqLen);
         currentImage.Dispose();
         temb.Dispose();
 
-        // ── 5. Unpatchify → [B, 16, H, W] ──────────────────────────────
         Tensor spatial = _unpatchify.Forward(output, batch, gridH, gridW);
         output.Dispose();
 
         return spatial;
     }
 
-    /// <summary>Projects the combined context tensor from joint_attention_dim to hidden_size. Call this before Forward() to prepare context.</summary>
+    /// <summary>Projects the combined context tensor from joint_attention_dim to hidden_size. Run once per prompt before <see cref="Forward"/>.</summary>
     public Tensor ProjectContext(IBackend backend, Tensor context)
     {
         int batch = (int)context.Shape[0];
         int seqLen = (int)context.Shape[1];
-        int inDim = (int)context.Shape[2];
 
         TensorShape outShape = new TensorShape(batch, seqLen, _config.HiddenSize);
         Tensor output = new Tensor(outShape, DType.F32);
-
-        LinearProjectBatched(output, context, _contextEmbedWeight!, _contextEmbedBias!, batch, seqLen, inDim, _config.HiddenSize);
+        backend.Linear(output, context, _contextEmbedWeight!, _contextEmbedBias);
 
         return output;
     }
@@ -163,16 +176,14 @@ public sealed unsafe class Sd3Transformer : IDisposable
     {
         int hidden = _config.HiddenSize;
 
-        // Sinusoidal timestep embedding with flip_sin_to_cos=True (SD3 convention)
-        // SD1.5 trap #5: SD3 uses [cos, sin] order (flip_sin_to_cos=True)
         TensorShape sinShape = new TensorShape(batch, 256);
         Tensor sinEmbed = new Tensor(sinShape, DType.F32);
-        ComputeSinusoidalTimestep(sinEmbed, timestep, batch);
+        DiTUtils.SinusoidalTimestepEmbedding(sinEmbed, timestep, batch, embDim: 256);
 
-        // MLP: Linear(256, hidden) → SiLU → Linear(hidden, hidden)
         TensorShape hidShape = new TensorShape(batch, hidden);
+
         Tensor t1 = new Tensor(hidShape, DType.F32);
-        LinearProject1D(t1, sinEmbed, _timestepLinear1Weight!, _timestepLinear1Bias!, batch, 256, hidden);
+        backend.Linear(t1, sinEmbed, _timestepLinear1Weight!, _timestepLinear1Bias);
         sinEmbed.Dispose();
 
         Tensor t1Activated = new Tensor(hidShape, DType.F32);
@@ -180,22 +191,20 @@ public sealed unsafe class Sd3Transformer : IDisposable
         t1.Dispose();
 
         Tensor tEmb = new Tensor(hidShape, DType.F32);
-        LinearProject1D(tEmb, t1Activated, _timestepLinear2Weight!, _timestepLinear2Bias!, batch, hidden, hidden);
+        backend.Linear(tEmb, t1Activated, _timestepLinear2Weight!, _timestepLinear2Bias);
         t1Activated.Dispose();
 
-        // Pooled text projection: Linear(2048, hidden) → SiLU → Linear(hidden, hidden)
         Tensor p1 = new Tensor(hidShape, DType.F32);
-        LinearProject1D(p1, pooled, _textLinear1Weight!, _textLinear1Bias!, batch, _config.PooledProjectionDim, hidden);
+        backend.Linear(p1, pooled, _textLinear1Weight!, _textLinear1Bias);
 
         Tensor p1Activated = new Tensor(hidShape, DType.F32);
         backend.Silu(p1Activated, p1);
         p1.Dispose();
 
         Tensor pEmb = new Tensor(hidShape, DType.F32);
-        LinearProject1D(pEmb, p1Activated, _textLinear2Weight!, _textLinear2Bias!, batch, hidden, hidden);
+        backend.Linear(pEmb, p1Activated, _textLinear2Weight!, _textLinear2Bias);
         p1Activated.Dispose();
 
-        // Combine: temb = timestep_emb + pooled_emb
         Tensor temb = new Tensor(hidShape, DType.F32);
         backend.Add(temb, tEmb, pEmb);
         tEmb.Dispose();
@@ -204,49 +213,28 @@ public sealed unsafe class Sd3Transformer : IDisposable
         return temb;
     }
 
-    /// <summary>Sinusoidal timestep embedding with flip_sin_to_cos=True. Output: [cos_0..cos_127, sin_0..sin_127].</summary>
-    private static void ComputeSinusoidalTimestep(Tensor output, float timestep, int batch)
-    {
-        float* outPtr = (float*)output.DataPointer;
-        int halfDim = 128; // 256 / 2
-
-        for (int b = 0; b < batch; b++)
-        {
-            int baseOffset = b * 256;
-            for (int i = 0; i < halfDim; i++)
-            {
-                float freq = MathF.Exp(-MathF.Log(10000.0f) * i / halfDim);
-                float angle = timestep * freq;
-                // flip_sin_to_cos=True: output is [cos, sin]
-                outPtr[baseOffset + i] = MathF.Cos(angle);
-                outPtr[baseOffset + halfDim + i] = MathF.Sin(angle);
-            }
-        }
-    }
-
-    /// <summary>Applies the final AdaLN-Continuous + Linear projection. Takes the combined timestep+pooled embedding.</summary>
-    private Tensor ApplyFinalLayerWithTemb(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
+    /// <summary>Final AdaLN-Continuous: SiLU(temb) → Linear → [scale, shift] modulation, then unparameterized LayerNorm + modulate + proj_out.</summary>
+    private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
     {
         int dim = _config.HiddenSize;
         int outDim = _config.PatchSize * _config.PatchSize * _config.InChannels;
         TensorShape hidShape = new TensorShape(batch, seqLen, dim);
 
-        // AdaLN-Continuous: SiLU(temb) → Linear → [scale, shift]
         TensorShape tembShape = new TensorShape(batch, dim);
         Tensor activated = new Tensor(tembShape, DType.F32);
         backend.Silu(activated, temb);
 
         TensorShape modParamShape = new TensorShape(batch, dim * 2);
         Tensor modParams = new Tensor(modParamShape, DType.F32);
-        LinearProject1D(modParams, activated, _normOutLinearWeight!, _normOutLinearBias!, batch, dim, dim * 2);
+        backend.Linear(modParams, activated, _normOutLinearWeight!, _normOutLinearBias);
         activated.Dispose();
 
-        // Split into scale and shift (each [B, dim])
+        // Diffusers SD3 final-layer order: [shift, scale]
+        // (mod[:dim] = shift, mod[dim:] = scale)
         float* modPtr = (float*)modParams.DataPointer;
 
-        // Unparameterized LayerNorm + modulate
         Tensor normed = new Tensor(hidShape, DType.F32);
-        LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
+        DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
 
         Tensor modulated = new Tensor(hidShape, DType.F32);
         float* normPtr = (float*)normed.DataPointer;
@@ -260,8 +248,8 @@ public sealed unsafe class Sd3Transformer : IDisposable
                 int vecOffset = (b * seqLen + s) * dim;
                 for (int d = 0; d < dim; d++)
                 {
-                    float scale = modPtr[modBase + d];
-                    float shift = modPtr[modBase + dim + d];
+                    float shift = modPtr[modBase + d];
+                    float scale = modPtr[modBase + dim + d];
                     outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
                 }
             }
@@ -269,98 +257,12 @@ public sealed unsafe class Sd3Transformer : IDisposable
         normed.Dispose();
         modParams.Dispose();
 
-        // Final linear projection: [B, seqLen, hidden] → [B, seqLen, patch^2 * channels]
         TensorShape outShape = new TensorShape(batch, seqLen, outDim);
         Tensor projected = new Tensor(outShape, DType.F32);
-        LinearProjectBatched(projected, modulated, _projOutWeight!, _projOutBias!, batch, seqLen, dim, outDim);
+        backend.Linear(projected, modulated, _projOutWeight!, _projOutBias);
         modulated.Dispose();
 
         return projected;
-    }
-
-    /// <summary>Unparameterized LayerNorm.</summary>
-    private static void LayerNormNoAffine(Tensor output, Tensor input, int batch, int seqLen, int dim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * dim;
-
-                float mean = 0f;
-                for (int d = 0; d < dim; d++)
-                    mean += inPtr[offset + d];
-                mean /= dim;
-
-                float variance = 0f;
-                for (int d = 0; d < dim; d++)
-                {
-                    float diff = inPtr[offset + d] - mean;
-                    variance += diff * diff;
-                }
-                variance /= dim;
-
-                float invStd = 1.0f / MathF.Sqrt(variance + 1e-6f);
-                for (int d = 0; d < dim; d++)
-                    outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
-            }
-        }
-    }
-
-    /// <summary>Linear projection for 1D vectors: output = input @ weight^T + bias. Input: [B, inDim], Output: [B, outDim].</summary>
-    private static void LinearProject1D(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int inOffset = b * inDim;
-            int outOffset = b * outDim;
-            for (int o = 0; o < outDim; o++)
-            {
-                float sum = bPtr[o];
-                int wOffset = o * inDim;
-                for (int i = 0; i < inDim; i++)
-                {
-                    sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                }
-                outPtr[outOffset + o] = sum;
-            }
-        }
-    }
-
-    /// <summary>Batched linear projection: output = input @ weight^T + bias. Input: [B, S, inDim], Output: [B, S, outDim].</summary>
-    private static void LinearProjectBatched(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int inDim, int outDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* wPtr = (float*)weight.DataPointer;
-        float* bPtr = (float*)bias.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int inOffset = (b * seqLen + s) * inDim;
-                int outOffset = (b * seqLen + s) * outDim;
-                for (int o = 0; o < outDim; o++)
-                {
-                    float sum = bPtr[o];
-                    int wOffset = o * inDim;
-                    for (int i = 0; i < inDim; i++)
-                    {
-                        sum += inPtr[inOffset + i] * wPtr[wOffset + i];
-                    }
-                    outPtr[outOffset + o] = sum;
-                }
-            }
-        }
     }
 
     /// <summary>Releases all tensor references held by this transformer.</summary>
@@ -368,22 +270,13 @@ public sealed unsafe class Sd3Transformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            // Tensor ownership is with the weight loader (safetensors mmap).
-            // We just null out our references.
-            _timestepLinear1Weight = null;
-            _timestepLinear1Bias = null;
-            _timestepLinear2Weight = null;
-            _timestepLinear2Bias = null;
-            _textLinear1Weight = null;
-            _textLinear1Bias = null;
-            _textLinear2Weight = null;
-            _textLinear2Bias = null;
-            _contextEmbedWeight = null;
-            _contextEmbedBias = null;
-            _normOutLinearWeight = null;
-            _normOutLinearBias = null;
-            _projOutWeight = null;
-            _projOutBias = null;
+            _timestepLinear1Weight = null; _timestepLinear1Bias = null;
+            _timestepLinear2Weight = null; _timestepLinear2Bias = null;
+            _textLinear1Weight = null; _textLinear1Bias = null;
+            _textLinear2Weight = null; _textLinear2Bias = null;
+            _contextEmbedWeight = null; _contextEmbedBias = null;
+            _normOutLinearWeight = null; _normOutLinearBias = null;
+            _projOutWeight = null; _projOutBias = null;
         }
         GC.SuppressFinalize(this);
     }

@@ -61,7 +61,10 @@ public sealed unsafe class MmapHandle : IDisposable
         if (ptr == 0)
             throw new ObjectDisposedException(nameof(MmapHandle));
 
-        if ((ulong)byteOffset >= (ulong)ByteLength)
+        // Allow byteOffset == ByteLength so that 0-byte marker tensors at the very end of a file
+        // (e.g. ComfyUI fp8_scaled `*.scaled_fp8` markers with shape=[0]) can be safely returned
+        // as a past-the-end pointer that callers must not read from.
+        if ((ulong)byteOffset > (ulong)ByteLength)
             throw new ArgumentOutOfRangeException(nameof(byteOffset));
 
         return (byte*)ptr + byteOffset;

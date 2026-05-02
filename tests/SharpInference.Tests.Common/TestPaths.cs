@@ -14,27 +14,27 @@ public static class TestPaths
     /// <summary>Flux family checkpoint paths.</summary>
     public static class Flux
     {
-        public static string Schnell      => Resolve("FLUX_SCHNELL_PATH",      Path.Combine(ModelsDir, "StableDiffusion", "Flux", "flux1-schnell-fp8.safetensors"));
-        public static string Dev          => Resolve("FLUX_DEV_PATH",          Path.Combine(ModelsDir, "StableDiffusion", "Flux", "flux1-dev-fp8.safetensors"));
-        public static string KreaFp8      => Resolve("FLUX_KREA_FP8_PATH",     Path.Combine(ModelsDir, "StableDiffusion", "Flux", "flux1-krea-dev_fp8_scaled.safetensors"));
-        public static string Kontext      => Resolve("FLUX_KONTEXT_PATH",      Path.Combine(ModelsDir, "StableDiffusion", "Flux", "flux1-dev-kontext_fp8_scaled.safetensors"));
-        public static string Canny        => Resolve("FLUX_CANNY_PATH",        Path.Combine(ModelsDir, "StableDiffusion", "Flux", "flux1-canny-dev.safetensors"));
-        public static string Fill         => Resolve("FLUX_FILL_PATH",         Path.Combine(ModelsDir, "StableDiffusion", "Flux", "flux1-fill-dev.safetensors"));
+        public static string Schnell      => Resolve("FLUX_SCHNELL_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-schnell-fp8.safetensors"));
+        public static string Dev          => Resolve("FLUX_DEV_PATH",          Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-fp8.safetensors"));
+        public static string KreaFp8      => Resolve("FLUX_KREA_FP8_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-krea-dev_fp8_scaled.safetensors"));
+        public static string Kontext      => Resolve("FLUX_KONTEXT_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-kontext_fp8_scaled.safetensors"));
+        public static string Canny        => Resolve("FLUX_CANNY_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-canny-dev.safetensors"));
+        public static string Fill         => Resolve("FLUX_FILL_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-fill-dev.safetensors"));
     }
 
     /// <summary>Flux 2 family checkpoint paths.</summary>
     public static class Flux2
     {
-        public static string Dev          => Resolve("FLUX2_DEV_PATH",         Path.Combine(ModelsDir, "StableDiffusion", "Flux2", "flux2_dev_fp8mixed.safetensors"));
-        public static string Klein        => Resolve("FLUX2_KLEIN_PATH",       Path.Combine(ModelsDir, "StableDiffusion", "Flux2", "flux-2-klein-4b.safetensors"));
+        public static string Dev          => Resolve("FLUX2_DEV_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "Flux2", "flux2_dev_fp8mixed.safetensors"));
+        public static string Klein        => Resolve("FLUX2_KLEIN_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "Flux2", "flux-2-klein-4b.safetensors"));
     }
 
     /// <summary>Z-Image family checkpoint paths.</summary>
     public static class ZImage
     {
-        public static string Turbo        => Resolve("ZIMAGE_TURBO_PATH",      Path.Combine(ModelsDir, "StableDiffusion", "ZImage", "SwarmUI_Z-Image-Turbo-FP8Mix.safetensors"));
-        public static string BaseBf16     => Resolve("ZIMAGE_BASE_BF16_PATH",  Path.Combine(ModelsDir, "StableDiffusion", "ZImage", "z_image_base-bf16.safetensors"));
-        public static string BaseFp8      => Resolve("ZIMAGE_BASE_FP8_PATH",   Path.Combine(ModelsDir, "StableDiffusion", "ZImage", "z_image_base-nvfp8-mixed.safetensors"));
+        public static string Turbo        => Resolve("ZIMAGE_TURBO_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "ZImage", "SwarmUI_Z-Image-Turbo-FP8Mix.safetensors"));
+        public static string BaseBf16     => Resolve("ZIMAGE_BASE_BF16_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "ZImage", "z_image_base-bf16.safetensors"));
+        public static string BaseFp8      => Resolve("ZIMAGE_BASE_FP8_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "ZImage", "z_image_base-nvfp8-mixed.safetensors"));
 
         /// <summary>Resolves to the first existing Z-Image-Base checkpoint (FP8 → BF16). Override with ZIMAGE_BASE_PATH.</summary>
         public static string Base
@@ -53,29 +53,37 @@ public static class TestPaths
     /// <summary>Stable Diffusion 1.5 paths. Assets are not bundled — tests skip when missing.</summary>
     public static class Sd15
     {
-        public static string SingleFile   => Resolve("SD15_SINGLE_FILE_PATH",  Path.Combine(ModelsDir, "StableDiffusion", "SD15", "v1-5-pruned-emaonly.safetensors"));
-        public static string DiffusersDir => Resolve("SD15_MODEL_DIR",         Path.Combine(ModelsDir, "StableDiffusion", "SD15"));
+        public static string SingleFile   => Resolve("SD15_SINGLE_FILE_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "SD15", "v1-5-pruned-emaonly.safetensors"));
+        public static string DiffusersDir => Resolve("SD15_MODEL_DIR",         Path.Combine(ModelsDir, "Stable-Diffusion", "SD15"));
     }
 
     /// <summary>SDXL paths. Assets are not bundled — tests skip when missing.</summary>
     public static class Sdxl
     {
-        public static string SingleFile   => Resolve("SDXL_SINGLE_FILE_PATH",  Path.Combine(ModelsDir, "StableDiffusion", "SDXL", "Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors"));
-        public static string DiffusersDir => Resolve("SDXL_MODEL_DIR",         Path.Combine(ModelsDir, "StableDiffusion", "SDXL"));
+        public static string SingleFile   => Resolve("SDXL_SINGLE_FILE_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL", "Juggernaut_XL_-_Ragnarok_by_RunDiffusion.safetensors"));
+        public static string DiffusersDir => Resolve("SDXL_MODEL_DIR",         Path.Combine(ModelsDir, "Stable-Diffusion", "SDXL"));
     }
 
     /// <summary>SD3 paths. Assets are not bundled — tests skip when missing.</summary>
     public static class Sd3
     {
-        public static string SingleFile   => Resolve("SD3_SINGLE_FILE_PATH",   Path.Combine(ModelsDir, "StableDiffusion", "SD3", "sd3_medium_incl_clips_t5xxlfp16.safetensors"));
-        public static string DiffusersDir => Resolve("SD3_MODEL_DIR",          Path.Combine(ModelsDir, "StableDiffusion", "SD3"));
+        public static string SingleFile   => Resolve("SD3_SINGLE_FILE_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3_medium_incl_clips_t5xxlfp16.safetensors"));
+        public static string DiffusersDir => Resolve("SD3_MODEL_DIR",          Path.Combine(ModelsDir, "Stable-Diffusion", "SD3"));
+    }
+
+    /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
+    public static class Sd35
+    {
+        public static string Medium       => Resolve("SD35_MEDIUM_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"));
+        public static string Large        => Resolve("SD35_LARGE_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_large_fp8_scaled.safetensors"));
+        public static string LargeTurbo   => Resolve("SD35_LARGE_TURBO_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "SD3", "sd3.5_large_turbo.safetensors"));
     }
 
     /// <summary>Standalone text encoder weights.</summary>
     public static class TextEncoders
     {
-        public static string Mistral3SmallFp8 => Resolve("MISTRAL_FP8_PATH",   Path.Combine(ModelsDir, "TextEncoders", "mistral_3_small_flux2_fp8.safetensors"));
-        public static string Qwen3_4B         => Resolve("QWEN3_4B_PATH",      Path.Combine(ModelsDir, "TextEncoders", "qwen_3_4b.safetensors"));
+        public static string Mistral3SmallFp8 => Resolve("MISTRAL_FP8_PATH",   Path.Combine(ModelsDir, "text_encoders", "mistral_3_small_flux2_fp8.safetensors"));
+        public static string Qwen3_4B         => Resolve("QWEN3_4B_PATH",      Path.Combine(ModelsDir, "text_encoders", "qwen_3_4b.safetensors"));
     }
 
     /// <summary>Standalone VAE weights.</summary>
@@ -89,7 +97,7 @@ public static class TestPaths
     /// <summary>LoRA adapter weights.</summary>
     public static class Lora
     {
-        public static string YearbookFluxSchnell => Resolve("YEARBOOK_LORA_PATH", Path.Combine(ModelsDir, "LoRA", "yearbook-photo-flux-schnell-v1.safetensors"));
+        public static string YearbookFluxSchnell => Resolve("YEARBOOK_LORA_PATH", Path.Combine(ModelsDir, "Lora", "yearbook-photo-flux-schnell-v1.safetensors"));
     }
 
     /// <summary>Tokenizer asset paths.</summary>

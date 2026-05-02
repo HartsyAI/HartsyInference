@@ -84,12 +84,31 @@ public sealed class CudaContext : IDisposable
         return count;
     }
 
-    /// <summary>Probes for a usable CUDA driver + at least one device, without throwing. Returns <c>false</c> if the driver library can't be loaded (e.g. <c>libcuda.so.1</c> / <c>nvcuda.dll</c> missing, or running inside a sandbox that doesn't expose the host driver), if <c>cuInit</c> fails, or if no CUDA-capable devices are present. Mirrors the <c>VulkanAvailable</c> pattern used by the Vulkan tests so CUDA tests can skip cleanly in environments without a working driver.</summary>
+    /// <summary>Probes whether a <see cref="CudaBackend"/> can be constructed in this environment. Returns <c>false</c> if any of: the driver library is missing (<c>libcuda.so.1</c> / <c>nvcuda.dll</c>), cuBLAS is missing (<c>libcublas.so.13</c>/<c>.12</c>/<c>.11</c> on Linux or <c>cublas64_13/12/11.dll</c> on Windows — typically requires the CUDA Toolkit, not just the driver), <c>cuInit</c> fails, or no CUDA-capable devices are present. Used by tests to skip cleanly when CUDA isn't fully usable, mirroring the <c>VulkanAvailable</c> pattern.</summary>
     public static bool IsAvailable()
     {
         try
         {
             CudaLibraryResolver.Register();
+
+            // Probe cuBLAS up front — the driver may be present (e.g., NVIDIA GL extension) without
+            // the toolkit, in which case CudaBackend construction would fail at cublasCreate. Match
+            // the version set probed by CudaLibraryResolver.ResolveLibrary("cublas").
+            bool cublasOk = false;
+            if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+            {
+                cublasOk = System.Runtime.InteropServices.NativeLibrary.TryLoad("cublas64_13.dll", out _)
+                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("cublas64_12.dll", out _)
+                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("cublas64_11.dll", out _);
+            }
+            else if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Linux))
+            {
+                cublasOk = System.Runtime.InteropServices.NativeLibrary.TryLoad("libcublas.so.13", out _)
+                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("libcublas.so.12", out _)
+                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("libcublas.so.11", out _);
+            }
+            if (!cublasOk) return false;
+
             EnsureCudaInitialized();
             CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();
             return count > 0;

@@ -25,6 +25,22 @@ public sealed class Qwen3Tokenizer : IDisposable
     private readonly int _maxLength;
     private int _disposed;
 
+    /// <summary>Creates a Qwen3 tokenizer using the canonical <c>Qwen/Qwen3-4B</c>
+    /// vocab/merges embedded in this assembly. This is the right constructor for
+    /// Flux.2 Klein and Z-Image text conditioning. Use the path overload only if
+    /// you need to override with a non-standard Qwen3 vocabulary.</summary>
+    /// <param name="maxLength">Truncation cap. Default 512 (matches typical diffusion
+    /// text-encoder windows; Qwen3 itself supports up to 40,960).</param>
+    public Qwen3Tokenizer(int maxLength = 512)
+    {
+        if (maxLength <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxLength));
+        _maxLength = maxLength;
+        using Stream vocabStream = EmbeddedTokenizerResources.OpenQwen3Vocab();
+        using Stream mergesStream = EmbeddedTokenizerResources.OpenQwen3Merges();
+        _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+    }
+
     /// <summary>Creates a Qwen3 tokenizer from <c>vocab.json</c> and <c>merges.txt</c> files (download from <c>Qwen/Qwen3-4B</c> on HuggingFace).</summary>
     /// <param name="vocabPath">Path to <c>vocab.json</c>.</param>
     /// <param name="mergesPath">Path to <c>merges.txt</c>.</param>

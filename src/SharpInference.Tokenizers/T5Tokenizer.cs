@@ -21,6 +21,21 @@ public sealed class T5Tokenizer : IDisposable
     private readonly int _maxLength;
     private int _disposed;
 
+    /// <summary>Creates a T5 tokenizer using the canonical T5 SentencePiece protobuf
+    /// embedded in this assembly. Same vocabulary as T5-base / T5-small / T5-XXL —
+    /// the encoder model size differs but the tokenizer is identical. Use the
+    /// path/stream overloads only if you need to override with a non-standard
+    /// SentencePiece model.</summary>
+    /// <param name="maxLength">Maximum sequence length. Default: 77 (matches the
+    /// CLIP context window — Flux and SD3 typically pass 256 or 512 instead).</param>
+    public T5Tokenizer(int maxLength = DefaultMaxLength)
+    {
+        using Stream stream = EmbeddedTokenizerResources.OpenT5Spiece();
+        MemoryStream patched = PatchT5ProtobufStream(stream);
+        _tokenizer = SentencePieceTokenizer.Create(patched, addBeginningOfSentence: false, addEndOfSentence: false) ?? throw new InvalidOperationException("Failed to create SentencePiece tokenizer.");
+        _maxLength = maxLength;
+    }
+
     /// <summary>Creates a T5 tokenizer from a SentencePiece .model file.</summary>
     /// <param name="modelPath">Path to the SentencePiece .model protobuf file.</param>
     /// <param name="maxLength">Maximum sequence length. Default: 77.</param>
