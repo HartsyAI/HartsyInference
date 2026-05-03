@@ -78,10 +78,19 @@ public sealed unsafe class AuraFlowJointBlock
         _addVWeight = weights[$"{prefix}.attn.add_v_proj.weight"];
         _toAddOutWeight = weights[$"{prefix}.attn.to_add_out.weight"];
 
-        _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
-        _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
-        _normAddedQ.LoadWeights(weights[$"{prefix}.attn.norm_added_q.weight"]);
-        _normAddedK.LoadWeights(weights[$"{prefix}.attn.norm_added_k.weight"]);
+        // AuraFlow uses `qk_norm="fp32_layer_norm"` with `elementwise_affine=False, bias=False` — i.e.,
+        // **no learnable weights** (auraflow_transformer_2d.py lines 161, 226, plus diffusers Attention.__init__).
+        // The checkpoint therefore does not ship `attn.norm_q.weight` etc. We synthesize a unit-scale weight
+        // (all 1s) so our `QkNorm` (which is RMSNorm-style with a mandatory learnable scale) becomes
+        // mathematically `(x / RMS(x)) * 1`. **Caveat:** AuraFlow's QK-norm is *LayerNorm* not *RMSNorm* —
+        // it subtracts the mean as well. With this shim we apply RMSNorm instead, which differs by
+        // `(x - mean) / std` vs `x / rms`. For zero-mean Q/K this matches; for non-zero-mean it'll be a
+        // small but compounding drift across all 4 joint blocks. Fixing this requires a no-affine
+        // LayerNorm-style QK-norm — see tracking note in PHASE_4_MODEL_BREADTH.md `### AuraFlow`.
+        _normQ.LoadWeights(GetOrFakeOnes(weights, $"{prefix}.attn.norm_q.weight", _headDim));
+        _normK.LoadWeights(GetOrFakeOnes(weights, $"{prefix}.attn.norm_k.weight", _headDim));
+        _normAddedQ.LoadWeights(GetOrFakeOnes(weights, $"{prefix}.attn.norm_added_q.weight", _headDim));
+        _normAddedK.LoadWeights(GetOrFakeOnes(weights, $"{prefix}.attn.norm_added_k.weight", _headDim));
 
         // AuraFlowFeedForward: linear_1 = gate (SiLU path), linear_2 = linear path, out_projection = output.
         // Maps onto SwiGluFfn's (w1=gate, w3=linear, w2=output) with all biases null.
@@ -261,6 +270,23 @@ public sealed unsafe class AuraFlowJointBlock
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
 
         return (imgFinal, txtFinal);
+    }
+
+    /// <summary>Returns the named tensor or a fresh F32 [headDim] all-ones tensor when missing.
+    /// Used for AuraFlow's non-affine QK-norm (no learnable scale in the checkpoint). The synthetic
+    /// tensor lives for the lifetime of the block — small enough that we don't bother to cache.</summary>
+    private static Tensor GetOrFakeOnes(IReadOnlyDictionary<string, Tensor> weights, string key, int headDim)
+    {
+        if (weights.TryGetValue(key, out Tensor? t) && t is not null)
+            return t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
+
+        Tensor ones = new(new TensorShape(headDim), DType.F32);
+        unsafe
+        {
+            float* p = (float*)ones.DataPointer;
+            for (int i = 0; i < headDim; i++) p[i] = 1.0f;
+        }
+        return ones;
     }
 
     /// <summary>Yields all weight tensors for GPU preloading.</summary>

@@ -71,6 +71,40 @@ public static class TestPaths
         public static string DiffusersDir => Resolve("SD3_MODEL_DIR",          Path.Combine(ModelsDir, "Stable-Diffusion", "SD3"));
     }
 
+    /// <summary>AuraFlow paths. Default: <c>fal/AuraFlow-v0.3</c> single-file safetensors. The transformer is
+    /// 16.5 GB FP16 standalone; the Pile-T5-XL text encoder + SDXL VAE are loaded separately.</summary>
+    public static class AuraFlow
+    {
+        /// <summary>FP8 scaled single-file from <c>calcuis/aura</c>. Bundles transformer + Pile-T5-XL text encoder + AuraFlow VAE in one file under prefixes <c>model.*</c>, <c>text_encoders.pile_t5xl.transformer.*</c>, <c>vae.*</c>.</summary>
+        public static string V03Fp8      => Resolve("AURAFLOW_V03_FP8_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "AuraFlow", "aura_flow_0.3_fp8_scaled.safetensors"));
+        /// <summary>BF16 single-file from <c>fal/AuraFlow-v0.3</c>. Transformer-only — needs separate Pile-T5-XL.</summary>
+        public static string V03         => Resolve("AURAFLOW_V03_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "AuraFlow", "aura_flow_0.3.safetensors"));
+        public static string PileT5XlDir => Resolve("PILE_T5_XL_DIR",          Path.Combine(ModelsDir, "text_encoders", "pile-t5-xl"));
+        public static string PileT5XlSpiece => Resolve("PILE_T5_XL_SPIECE",    Path.Combine(Tokenizers.T5XxlSpiece));  // UMT5 vocab compatible
+        public static string Vae         => Resolve("AURAFLOW_VAE_PATH",       Path.Combine(ModelsDir, "VAE", "aura_vae.safetensors"));
+        public static string SdxlVae     => Resolve("SDXL_VAE_PATH",           Path.Combine(ModelsDir, "VAE", "sdxl_vae.safetensors"));
+    }
+
+    /// <summary>Chroma paths. Default: <c>silveroxides/Chroma1-HD-fp8-scaled</c> FP8 single-file safetensors
+    /// (BFL-style native format with `distilled_guidance_layer.*` + `double_blocks.*` + `single_blocks.*`).
+    /// Reuses T5-XXL bundled in our SD3.5 single-file + Flux VAE bundled in Flux Dev FP8.</summary>
+    public static class Chroma
+    {
+        public static string V1          => Resolve("CHROMA_V1_PATH",          Path.Combine(ModelsDir, "Stable-Diffusion", "Chroma", "Chroma1-HD-fp8mixed-final.safetensors"));
+        public static string T5XxlSpiece => Tokenizers.T5XxlSpiece;
+        /// <summary>Source for a 16-channel VAE — defaults to Flux Dev FP8 single-file (which bundles a Flux VAE under <c>vae.*</c> keys).</summary>
+        public static string VaePath     => Resolve("CHROMA_VAE_PATH",         Vae.FluxVaeSource);
+        /// <summary>Source for T5-XXL — defaults to our SD3.5 Medium FP8 single-file (which bundles T5-XXL under <c>text_encoders.t5xxl.transformer.*</c>).</summary>
+        public static string T5XxlSource => Resolve("CHROMA_T5XXL_SOURCE",     Sd35.Medium);
+    }
+
+    /// <summary>ERNIE-Image paths. Diffusers folder layout (transformer/, text_encoder/, vae/, scheduler/, tokenizer/).</summary>
+    public static class ErnieImage
+    {
+        public static string V1Dir       => Resolve("ERNIE_IMAGE_V1_DIR",       Path.Combine(ModelsDir, "Stable-Diffusion", "ErnieImage", "v1"));
+        public static string V1TurboDir  => Resolve("ERNIE_IMAGE_V1_TURBO_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "ErnieImage", "v1-turbo"));
+    }
+
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
     public static class Sd35
     {

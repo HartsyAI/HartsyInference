@@ -109,4 +109,36 @@ public record LlamaStyleEncoderConfig
         EosTokenId = 2,
         BosTokenId = 1,
     };
+
+    /// <summary>
+    /// Ministral-3B preset as packaged for ERNIE-Image (Baidu): 26 layers, hidden=3072, GQA 32:8,
+    /// head_dim=128, intermediate=9216, vocab=131072 (Tekken). The 3072 hidden matches ERNIE-Image's
+    /// <c>text_in_dim=3072</c>, so the encoder hidden is fed straight into <c>text_in: Linear(3072→hidden=4096)</c>.
+    /// Verified against <c>baidu/ERNIE-Image/text_encoder/config.json</c> (model_type "ministral3", wrapped
+    /// in a <c>Mistral3Model</c> envelope alongside a Pixtral vision_config we ignore for pure t2i).
+    ///
+    /// RoPE uses YaRN scaling with theta=1M; for short prompts (≤4096 tokens) the unscaled RoPE table is fine.
+    /// `tie_word_embeddings=true` — the LM head shares weights with the input embedding (we don't run the
+    /// LM head for text-conditioning anyway). No per-head Q/K norm. `HasFinalNorm=true` for the full
+    /// Comfy-Org safetensors (`text_encoders/ministral-3-3b.safetensors`); ships the full encoder including
+    /// `model.norm.weight`.
+    /// </summary>
+    public static LlamaStyleEncoderConfig Ministral3B => new()
+    {
+        HiddenSize = 3072,
+        NumLayers = 26,
+        NumQueryHeads = 32,
+        NumKvHeads = 8,
+        HeadDim = 128,
+        IntermediateSize = 9216,
+        VocabSize = 131072,
+        RmsNormEps = 1e-5f,
+        RopeTheta = 1_000_000f,
+        MaxPositionEmbeddings = 262144,
+        QkHeadNorm = false,
+        AttentionBias = false,
+        HasFinalNorm = true,
+        EosTokenId = 2,
+        BosTokenId = 1,
+    };
 }

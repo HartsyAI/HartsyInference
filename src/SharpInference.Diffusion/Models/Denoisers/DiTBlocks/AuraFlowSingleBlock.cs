@@ -54,8 +54,10 @@ public sealed unsafe class AuraFlowSingleBlock
         _toVWeight = weights[$"{prefix}.attn.to_v.weight"];
         _toOutWeight = weights[$"{prefix}.attn.to_out.0.weight"];
 
-        _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
-        _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+        // Same shim as AuraFlowJointBlock — AuraFlow's `qk_norm="fp32_layer_norm"` is non-affine,
+        // so the checkpoint doesn't ship these weights. Synthesize unit-scale.
+        _normQ.LoadWeights(GetOrFakeOnes(weights, $"{prefix}.attn.norm_q.weight", _headDim));
+        _normK.LoadWeights(GetOrFakeOnes(weights, $"{prefix}.attn.norm_k.weight", _headDim));
 
         _ffn.LoadSwiGluWeights(
             weights[$"{prefix}.ff.linear_1.weight"], null,
@@ -153,6 +155,21 @@ public sealed unsafe class AuraFlowSingleBlock
     }
 
     /// <summary>Yields all weight tensors for GPU preloading.</summary>
+    /// <summary>See note on <c>AuraFlowJointBlock.GetOrFakeOnes</c>.</summary>
+    private static Tensor GetOrFakeOnes(IReadOnlyDictionary<string, Tensor> weights, string key, int headDim)
+    {
+        if (weights.TryGetValue(key, out Tensor? t) && t is not null)
+            return t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
+
+        Tensor ones = new(new TensorShape(headDim), DType.F32);
+        unsafe
+        {
+            float* p = (float*)ones.DataPointer;
+            for (int i = 0; i < headDim; i++) p[i] = 1.0f;
+        }
+        return ones;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor t in _modulation.EnumerateWeights()) yield return t;

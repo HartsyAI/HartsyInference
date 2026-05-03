@@ -33,22 +33,39 @@ namespace SharpInference.ModelHandler.CheckpointConverters;
 /// </summary>
 public sealed class AuraFlowCheckpointConverter
 {
-    /// <summary>Result of converting a single-file AuraFlow checkpoint. The single-file ships only the
-    /// transformer; text encoder + VAE must be loaded separately from their own safetensors.</summary>
+    /// <summary>Result of converting a single-file AuraFlow checkpoint. The <c>calcuis/aura</c> FP8 single-file
+    /// bundles transformer (<c>model.*</c>), Pile-T5-XL text encoder (<c>text_encoders.pile_t5xl.transformer.*</c>),
+    /// and AuraFlow VAE (<c>vae.*</c>) all in one safetensors. The original <c>fal/AuraFlow-v0.3</c> BF16
+    /// single-file ships transformer-only with no <c>model.</c> prefix; both formats are handled.</summary>
     public sealed class ConvertedWeights
     {
-        /// <summary>AuraFlow MMDiT transformer weights in diffusers format. Loaded into <see cref="SharpInference.Diffusion.Models.Denoisers.AuraFlowTransformer.LoadWeights(IReadOnlyDictionary{string, Tensor})"/>.</summary>
+        /// <summary>AuraFlow MMDiT transformer weights in diffusers format.</summary>
         public required Dictionary<string, Tensor> Transformer { get; init; }
+
+        /// <summary>Pile-T5-XL encoder weights (HuggingFace T5 naming, prefix stripped). Empty when the
+        /// single-file doesn't bundle T5 (the BF16 <c>fal/AuraFlow-v0.3</c> release).</summary>
+        public required Dictionary<string, Tensor> T5 { get; init; }
+
+        /// <summary>AuraFlow VAE weights (diffusers naming). Empty when the single-file doesn't bundle the VAE
+        /// (the BF16 release expects you to load <c>aura_vae.safetensors</c> separately).</summary>
+        public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
-    /// <summary>Converts a flat AuraFlow single-file weight dictionary to diffusers naming. Folds any
-    /// ComfyUI fp8_scaled <c>.scale_weight</c> companions into <c>Tensor.Fp8ScaleFactor</c> first
-    /// (some community repackagings ship fp8_scaled even for AuraFlow).</summary>
+    /// <summary>Converts a flat AuraFlow single-file weight dictionary into transformer + T5 + VAE buckets.
+    /// Routes by prefix: <c>model.*</c> → transformer (strip <c>model.</c>, then run BFL→diffusers rename);
+    /// <c>text_encoders.pile_t5xl.transformer.*</c> → T5 (strip the prefix); <c>vae.*</c> → VAE (strip <c>vae.</c>).
+    /// Folds ComfyUI <c>.scale_weight</c> FP8 companions into <c>Tensor.Fp8ScaleFactor</c> first.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
     {
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
 
         Dictionary<string, Tensor> transformer = new(800);
+        Dictionary<string, Tensor> t5 = new(250);
+        Dictionary<string, Tensor> vae = new(280);
+
+        const string ModelPrefix = "model.";
+        const string T5Prefix = "text_encoders.pile_t5xl.transformer.";
+        const string VaePrefix = "vae.";
 
         foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
@@ -58,10 +75,23 @@ public sealed class AuraFlowCheckpointConverter
             if (key.EndsWith(".scaled_fp8") || key == "scaled_fp8")
                 continue;
 
-            ConvertKey(key, tensor, transformer);
+            if (key.StartsWith(T5Prefix, StringComparison.Ordinal))
+            {
+                t5[key[T5Prefix.Length..]] = tensor;
+                continue;
+            }
+            if (key.StartsWith(VaePrefix, StringComparison.Ordinal))
+            {
+                vae[key[VaePrefix.Length..]] = tensor;
+                continue;
+            }
+
+            // Strip "model." prefix (calcuis FP8 ships transformer keys this way; fal/AuraFlow BF16 ships flat).
+            string trKey = key.StartsWith(ModelPrefix, StringComparison.Ordinal) ? key[ModelPrefix.Length..] : key;
+            ConvertKey(trKey, tensor, transformer);
         }
 
-        return new ConvertedWeights { Transformer = transformer };
+        return new ConvertedWeights { Transformer = transformer, T5 = t5, Vae = vae };
     }
 
     /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader
@@ -69,7 +99,8 @@ public sealed class AuraFlowCheckpointConverter
     public static (ConvertedWeights weights, SafeTensorsLoader loader) LoadAndConvert(string checkpointPath)
     {
         SafeTensorsLoader loader = new();
-        Dictionary<string, Tensor> raw = loader.Load(checkpointPath);
+        loader.Load(checkpointPath);
+        Dictionary<string, Tensor> raw = loader.GetAllTensors();
         ConvertedWeights converted = Convert(raw);
         return (converted, loader);
     }
