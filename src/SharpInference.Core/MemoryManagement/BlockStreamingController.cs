@@ -156,9 +156,13 @@ public sealed class BlockStreamingController : IDisposable
         }
     }
 
-    /// <summary>Frees every block that's still resident. Call when the model is
-    /// finished — e.g. at the end of the denoising loop, before the VAE pipeline
-    /// stage starts. Safe to call multiple times.</summary>
+    /// <summary>Frees every block that's still resident, then asks the cache to drain
+    /// in-flight async ops and release any backend-internal pool reservations back to
+    /// the driver. Call when the model is finished — e.g. at the end of the denoising
+    /// loop, before the VAE pipeline stage starts. Safe to call multiple times; the
+    /// drain step is critical between streaming and eager-allocation phases (CUDA's
+    /// stream-ordered allocator pool is invisible to subsequent sync allocations
+    /// unless explicitly trimmed).</summary>
     public void EvictAll()
     {
         ThrowIfDisposed();
@@ -166,6 +170,10 @@ public sealed class BlockStreamingController : IDisposable
         {
             EvictBlock(i);
         }
+        // Hand control back to the cache to flush its internal pool. On CUDA this
+        // syncs both streams + trims the default mempool. On CPU/Vulkan this is a
+        // no-op (no pool to trim).
+        _cache.DrainAndReleasePool();
     }
 
     // ── State transitions ───────────────────────────────────────────────

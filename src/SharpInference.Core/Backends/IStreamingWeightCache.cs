@@ -63,4 +63,22 @@ public interface IStreamingWeightCache
     /// should target for its resident working set.
     /// </summary>
     long QueryAvailableWeightCacheBytes(long activationReserve);
+
+    /// <summary>
+    /// Drains any in-flight uploads and releases backend-internal pool reservations
+    /// back to the driver/OS. Call when transitioning out of a streaming phase into
+    /// a phase that uses eager (synchronous) allocation — e.g. between transformer
+    /// streaming and VAE decode in a diffusion pipeline.
+    ///
+    /// <para><b>Why this exists:</b> CUDA's stream-ordered allocator (the one
+    /// <see cref="EvictAsync"/> uses for <c>cuMemFreeAsync</c>) keeps freed memory in
+    /// a per-device pool that is independent of the regular driver pool that sync
+    /// <c>cuMemAlloc</c> sees. After eviction, the bytes are "free" from CUDA's
+    /// perspective but invisible to the next sync allocation. This method forces
+    /// the pool to release everything not in use, so subsequent eager allocs find
+    /// the memory the streaming phase just freed.</para>
+    ///
+    /// <para>No-op on backends without a stream-ordered allocator (CPU, Vulkan).</para>
+    /// </summary>
+    void DrainAndReleasePool();
 }

@@ -44,17 +44,23 @@ public class ErnieImageGenerationTests
         if (!Directory.Exists(modelDir))
         {
             _output.WriteLine($"SKIPPED: ERNIE-Image folder not found: {modelDir}");
-            _output.WriteLine($"  Download `transformer/`, `text_encoder/`, `vae/` shards from https://huggingface.co/baidu/ERNIE-Image");
+            _output.WriteLine($"  Download `diffusion_models/`, `text_encoders/`, `vae/` shards from https://huggingface.co/Comfy-Org/ERNIE-Image (or `transformer/`, `text_encoder/`, `vae/` from https://huggingface.co/baidu/ERNIE-Image)");
             _output.WriteLine($"  or set ERNIE_IMAGE_V1_DIR / ERNIE_IMAGE_V1_TURBO_DIR to override.");
             return;
         }
 
-        string transformerSubdir = Path.Combine(modelDir, "transformer");
-        string textEncoderSubdir = Path.Combine(modelDir, "text_encoder");
+        // Accept either diffusers (`transformer/`, `text_encoder/`, `vae/`) or Comfy-Org
+        // (`diffusion_models/`, `text_encoders/`, `vae/`) folder layouts. The converter handles both.
+        string transformerSubdir = Directory.Exists(Path.Combine(modelDir, "transformer"))
+            ? Path.Combine(modelDir, "transformer")
+            : Path.Combine(modelDir, "diffusion_models");
+        string textEncoderSubdir = Directory.Exists(Path.Combine(modelDir, "text_encoder"))
+            ? Path.Combine(modelDir, "text_encoder")
+            : Path.Combine(modelDir, "text_encoders");
         string vaeSubdir = Path.Combine(modelDir, "vae");
         if (!Directory.Exists(transformerSubdir))
         {
-            _output.WriteLine($"SKIPPED: transformer/ subfolder missing: {transformerSubdir}");
+            _output.WriteLine($"SKIPPED: neither transformer/ nor diffusion_models/ subfolder found in: {modelDir}");
             return;
         }
         if (!Directory.Exists(vaeSubdir))
@@ -64,7 +70,7 @@ public class ErnieImageGenerationTests
         }
         if (!Directory.Exists(textEncoderSubdir))
         {
-            _output.WriteLine($"SKIPPED: text_encoder/ subfolder missing: {textEncoderSubdir}");
+            _output.WriteLine($"SKIPPED: neither text_encoder/ nor text_encoders/ subfolder found in: {modelDir}");
             return;
         }
 
@@ -127,11 +133,12 @@ public class ErnieImageGenerationTests
                     _output.WriteLine($"  Models ready in {sw.ElapsedMilliseconds}ms (using LlamaStyleEncoder Ministral3B)");
 
                     // ── 5. Initialize backend + preload weights ──
-                    _output.WriteLine($"[5/6] Initializing CUDA backend + preloading weights...");
+                    // Only preload transformer; VAE uploads lazily during decode (PHASE_3_DEVIATIONS #18).
+                    // ERNIE (13.8 GB transformer + 334 MB VAE) exceeds 16 GB at full preload when SwarmUI holds 2.4 GB.
+                    _output.WriteLine($"[5/6] Initializing CUDA backend + preloading transformer...");
                     sw.Restart();
                     using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
                     backend.PreloadWeights(transformer.EnumerateWeights());
-                    backend.PreloadWeights(vae.EnumerateWeights());
                     _output.WriteLine($"  Backend ready in {sw.ElapsedMilliseconds}ms (device: {backend.Capabilities.Name})");
 
                     using ErnieImagePipeline pipeline = new(backend, textEncoder, transformer, vae, config);

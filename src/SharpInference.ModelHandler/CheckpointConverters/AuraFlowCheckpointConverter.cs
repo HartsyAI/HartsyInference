@@ -118,9 +118,9 @@ public sealed class AuraFlowCheckpointConverter
             output["pos_embed.pos_embed"] = tensor;
             return;
         }
-        if (key == "final_linear.weight")
+        if (key == "final_linear.weight" || key == "final_linear.bias")
         {
-            output["proj_out.weight"] = tensor;
+            output[$"proj_out.{key["final_linear.".Length..]}"] = tensor;
             return;
         }
         if (key == "modF.1.weight")
@@ -132,6 +132,16 @@ public sealed class AuraFlowCheckpointConverter
         if (key == "cond_seq_linear.weight")
         {
             output["context_embedder.weight"] = tensor;
+            return;
+        }
+        // BFL `init_x_linear` is the patch projection — a Linear over flattened patches that
+        // diffusers names `pos_embed.proj.{weight,bias}`. The diffusers single_file converter
+        // omits this rename (it loads `pos_embed.pos_embed` from `positional_encoding` but
+        // doesn't translate `init_x_linear`); we add it here so the C# transformer's `LoadWeights`
+        // can find `pos_embed.proj.{weight,bias}`.
+        if (key == "init_x_linear.weight" || key == "init_x_linear.bias")
+        {
+            output[$"pos_embed.proj.{key["init_x_linear.".Length..]}"] = tensor;
             return;
         }
         if (key.StartsWith("t_embedder.mlp.0.", StringComparison.Ordinal))

@@ -86,40 +86,75 @@ public class AuraFlowGenerationTests
 
         using (transformerLoader)
         {
-            // Cast non-F32 to F32 for the diff-friendly first-run baseline. (Production runs would skip
-            // this and let cuBLAS handle F16/FP8 directly via backend.Linear.)
             Dictionary<string, Tensor> transformerWeights = converted.Transformer;
+            Dictionary<string, Tensor> t5Weights;
+            Dictionary<string, Tensor> vaeWeights;
 
-            // ── Load Pile-T5-XL shards (diffusers folder layout). The fal/AuraFlow-v0.3 repo ships
-            //    text_encoder/ as multiple safetensors shards; we load each and merge into one dict. ──
-            _output.WriteLine($"[2/7] Loading Pile-T5-XL from {pileT5Dir}...");
-            sw.Restart();
-            Dictionary<string, Tensor> t5Weights = new();
-            List<SafeTensorsLoader> t5Loaders = new();
-            try
+            if (bundled)
             {
+                // FP8 single-file: T5 + VAE buckets are populated by the converter.
+                _output.WriteLine($"[2/7] Bundled file — extracted T5 ({converted.T5.Count} keys) + VAE ({converted.Vae.Count} keys) from same safetensors.");
+                t5Weights = converted.T5;
+                vaeWeights = converted.Vae;
+                if (t5Weights.Count == 0)
+                {
+                    _output.WriteLine($"SKIPPED: bundled file but T5 bucket is empty — checkpoint may not bundle Pile-T5-XL.");
+                    return;
+                }
+                if (vaeWeights.Count == 0)
+                {
+                    // Fall back to the standalone aura_vae.safetensors if the bundled file lacks VAE keys.
+                    string vaePath = TestPaths.AuraFlow.Vae;
+                    if (!File.Exists(vaePath))
+                    {
+                        _output.WriteLine($"SKIPPED: bundled file lacks VAE and no fallback at {vaePath}");
+                        return;
+                    }
+                    _output.WriteLine($"  Falling back to standalone VAE: {Path.GetFileName(vaePath)}");
+                    using SafeTensorsLoader vLoader = new();
+                    vLoader.Load(vaePath);
+                    vaeWeights = vLoader.GetAllTensors();
+                }
+            }
+            else
+            {
+                // BF16 transformer-only file: load Pile-T5-XL shards from a separate directory + standalone VAE.
+                string pileT5Dir = TestPaths.AuraFlow.PileT5XlDir;
+                if (!Directory.Exists(pileT5Dir))
+                {
+                    _output.WriteLine($"SKIPPED: BF16 path requires Pile-T5-XL shards at {pileT5Dir}");
+                    return;
+                }
+                _output.WriteLine($"[2/7] Loading Pile-T5-XL from {pileT5Dir}...");
+                sw.Restart();
+                t5Weights = new Dictionary<string, Tensor>();
+                List<SafeTensorsLoader> tLoaders = new();
                 foreach (string shard in Directory.GetFiles(pileT5Dir, "*.safetensors").OrderBy(p => p))
                 {
                     SafeTensorsLoader shardLoader = new();
                     shardLoader.Load(shard);
                     foreach (KeyValuePair<string, Tensor> kvp in shardLoader.GetAllTensors())
                         t5Weights[kvp.Key] = kvp.Value;
-                    t5Loaders.Add(shardLoader);
+                    tLoaders.Add(shardLoader);
                 }
-                if (t5Weights.Count == 0)
+                _output.WriteLine($"  {t5Weights.Count} T5 tensors loaded across {tLoaders.Count} shard(s) in {sw.ElapsedMilliseconds}ms");
+
+                string vaePath = TestPaths.AuraFlow.Vae;
+                if (!File.Exists(vaePath))
                 {
-                    _output.WriteLine($"SKIPPED: no .safetensors shards found in {pileT5Dir}");
+                    _output.WriteLine($"SKIPPED: standalone VAE not found at {vaePath}");
+                    foreach (SafeTensorsLoader l in tLoaders) l.Dispose();
                     return;
                 }
-                _output.WriteLine($"  {t5Weights.Count} tensors loaded across {t5Loaders.Count} shard(s) in {sw.ElapsedMilliseconds}ms");
+                _output.WriteLine($"[3/7] Loading standalone VAE: {Path.GetFileName(vaePath)}");
+                using SafeTensorsLoader vaeLoader2 = new();
+                vaeLoader2.Load(vaePath);
+                vaeWeights = vaeLoader2.GetAllTensors();
+            }
 
-                // ── Load SDXL VAE ──
-                _output.WriteLine($"[3/7] Loading SDXL VAE: {Path.GetFileName(vaePath)}");
-                sw.Restart();
-                using SafeTensorsLoader vaeLoader = new();
-                vaeLoader.Load(vaePath);
-                Dictionary<string, Tensor> vaeWeights = vaeLoader.GetAllTensors();
-                _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms ({vaeWeights.Count} keys)");
+            try
+            {
+                _output.WriteLine($"  T5 keys: {t5Weights.Count}, VAE keys: {vaeWeights.Count}");
 
                 // ── Tokenize ──
                 _output.WriteLine($"[4/7] Tokenizing prompt...");
@@ -146,17 +181,18 @@ public class AuraFlowGenerationTests
                 transformer.LoadWeights(transformerWeights);
                 _output.WriteLine($"  Transformer ready in {sw.ElapsedMilliseconds}ms");
 
-                // ── Build SDXL VAE decoder ──
-                VaeDecoder vae = new(VaeConfig.Sdxl);
+                // ── Build VAE decoder (AuraFlow's bundled VAE OR standalone aura_vae.safetensors) ──
+                VaeDecoder vae = new(VaeConfig.AuraFlow);
                 vae.LoadWeights(CastWeightsToF32(vaeWeights));
 
-                // ── Initialize CUDA backend + preload ──
-                _output.WriteLine($"[7/7] Initializing CUDA backend + preloading weights...");
+                // ── Initialize CUDA backend + preload only the transformer ──
+                // T5 (~3.7 GB FP16, ~1.9 GB FP8) auto-uploads on first use; VAE preloads after pipeline
+                // frees the transformer (PHASE_3 #18 / #33). Preloading everything would OOM 12 GB cards
+                // sharing VRAM with SwarmUI etc.
+                _output.WriteLine($"[7/7] Initializing CUDA backend + preloading transformer...");
                 sw.Restart();
                 using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
-                backend.PreloadWeights(t5.EnumerateWeights());
                 backend.PreloadWeights(transformer.EnumerateWeights());
-                backend.PreloadWeights(vae.EnumerateWeights());
                 _output.WriteLine($"  Backend ready in {sw.ElapsedMilliseconds}ms (device: {backend.Capabilities.Name})");
 
                 using AuraFlowPipeline pipeline = new(backend, t5, transformer, vae, config);
@@ -195,7 +231,7 @@ public class AuraFlowGenerationTests
             }
             finally
             {
-                foreach (SafeTensorsLoader l in t5Loaders) l.Dispose();
+                // tLoaders are scoped inside the BF16 branch and disposed there if used.
             }
         }
     }

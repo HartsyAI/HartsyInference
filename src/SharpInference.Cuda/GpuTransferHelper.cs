@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using SharpInference.Core.Backends;
 using SharpInference.Core.Tensors;
 
 namespace SharpInference.Cuda;
@@ -23,6 +24,12 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Stream handle for deferred GPU memory frees and sync-before-D2H.</summary>
     private static nint _streamHandle;
 
+    /// <summary>Streaming cache reference, used to drain its upload stream + trim the
+    /// device's stream-ordered allocator pool when an OOM retry needs to reclaim
+    /// memory locked up in pool reservations. Null when the backend's streaming
+    /// cache hasn't been wired (test setups, CPU/Vulkan).</summary>
+    private static IStreamingWeightCache? _streamingCache;
+
     /// <summary>The active CUDA context. Held so the lazy sync/dispose callbacks (which fire
     /// from arbitrary threads — finalizers, async continuations, etc.) can bind the context
     /// before issuing any CUDA Driver API call. Without this, a callback that fires on a
@@ -40,6 +47,11 @@ internal static unsafe class GpuTransferHelper
     /// from <see cref="CudaBackend"/>'s constructor.</summary>
     public static void SetContext(CudaContext context) => _context = context;
 
+    /// <summary>Sets the streaming cache so the OOM retry path can drain its upload
+    /// stream and trim the device mempool. Called once from <see cref="CudaBackend"/>'s
+    /// constructor; safe to leave null on test setups that don't construct a backend.</summary>
+    public static void SetStreamingCache(IStreamingWeightCache cache) => _streamingCache = cache;
+
     /// <summary>Synchronizes the CUDA stream to flush pending FreeAsync operations. Called by CudaMemory.Allocate on OOM retry.</summary>
     public static void SyncStream()
     {
@@ -48,6 +60,21 @@ internal static unsafe class GpuTransferHelper
             _context?.EnsureCurrent();
             CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
         }
+    }
+
+    /// <summary>OOM-retry hook: drains both the compute stream and the streaming cache's
+    /// upload stream, then trims the device mempool so memory queued via
+    /// <c>cuMemFreeAsync</c> is released back to the driver allocator. Called from
+    /// <see cref="CudaMemory.Allocate"/> when the first <c>cuMemAlloc</c> returned OOM.
+    /// Without this, an op that should succeed against just-evicted streaming memory
+    /// will throw OOM even though several GB are technically free.</summary>
+    public static void SyncStreamsAndReleasePool()
+    {
+        _context?.EnsureCurrent();
+        SyncStream();
+        // Cache also drains its own upload stream + calls cuMemPoolTrimTo on the
+        // default mempool. No-op if no streaming cache is wired (CPU/Vulkan, tests).
+        _streamingCache?.DrainAndReleasePool();
     }
 
     /// <summary>

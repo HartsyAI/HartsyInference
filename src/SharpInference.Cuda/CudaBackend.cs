@@ -68,6 +68,10 @@ public sealed class CudaBackend : IBackend
         // later reads/disposes a tensor — possibly the GC finalizer thread) can bind
         // the primary context before issuing CUDA Driver API calls.
         GpuTransferHelper.SetContext(_context);
+        // ...and the streaming cache, so the OOM retry path can drain its upload
+        // stream and trim the device mempool when sync allocs are starved by memory
+        // locked up in the stream-ordered allocator pool.
+        GpuTransferHelper.SetStreamingCache(_streamingCache);
 
         // Load PTX kernels if directory provided
         if (ptxDir != null && Directory.Exists(ptxDir))
@@ -113,31 +117,10 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            // Resolve GEMM dtype: FP8 inputs get cast to F16 (Ampere fallback)
-            DType gemmDtype = ResolveGemmDtype(a.DType);
-            ulong aPtr = pA;
-            if (a.DType.IsFp8)
-            {
-                pACast = CudaMemory.Allocate((nuint)(a.ElementCount * DType.F16.SizeInBytes));
-                _kernels!.LaunchCastF8E4M3ToF16(pACast, pA, (int)a.ElementCount, _stream.Handle);
-                aPtr = pACast;
-            }
-
-            // cuBLAS requires A and B to have the same dtype; cast B if mismatched
-            ulong bPtr = pB;
-            DType bResolved = ResolveGemmDtype(b.DType);
-            if (bResolved != gemmDtype)
-            {
-                pBCast = CudaMemory.Allocate((nuint)(b.ElementCount * gemmDtype.SizeInBytes));
-                CastOnGpu(pBCast, pB, b.DType, gemmDtype, (int)b.ElementCount);
-                bPtr = pBCast;
-            }
-            else if (b.DType.IsFp8)
-            {
-                pBCast = CudaMemory.Allocate((nuint)(b.ElementCount * DType.F16.SizeInBytes));
-                _kernels!.LaunchCastF8E4M3ToF16(pBCast, pB, (int)b.ElementCount, _stream.Handle);
-                bPtr = pBCast;
-            }
+            // Joint dtype resolution — see ResolveGemmDtype(a, b) docs. Fp8 forces F16.
+            DType gemmDtype = ResolveGemmDtype(a.DType, b.DType);
+            ulong aPtr = CastIfNeeded(pA, a.DType, gemmDtype, (int)a.ElementCount, out pACast);
+            ulong bPtr = CastIfNeeded(pB, b.DType, gemmDtype, (int)b.ElementCount, out pBCast);
 
             int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
             int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
@@ -148,7 +131,7 @@ public sealed class CudaBackend : IBackend
                 N, M, K,
                 &alpha,
                 bPtr, gemmType, N,
-                pA, gemmType, K,
+                aPtr, gemmType, K,
                 &beta,
                 pC, cType, N,
                 CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
@@ -195,25 +178,13 @@ public sealed class CudaBackend : IBackend
             float alpha = weight.Fp8ScaleFactor;
             float beta = 0.0f;
 
-            // Resolve GEMM dtype: FP8 inputs get cast to F16 (Ampere fallback)
-            DType gemmDtype = ResolveGemmDtype(input.DType);
-            ulong inputPtr = pInput;
-            if (input.DType.IsFp8)
-            {
-                pInputCast = CudaMemory.Allocate((nuint)(input.ElementCount * DType.F16.SizeInBytes));
-                _kernels!.LaunchCastF8E4M3ToF16(pInputCast, pInput, (int)input.ElementCount, _stream.Handle);
-                inputPtr = pInputCast;
-            }
-
-            // cuBLAS requires A and B to have the same dtype; cast weight if mismatched
-            ulong weightPtr = pWeight;
-            DType weightResolved = ResolveGemmDtype(weight.DType);
-            if (weightResolved != gemmDtype || weight.DType.IsFp8)
-            {
-                pWeightCast = CudaMemory.Allocate((nuint)(weight.ElementCount * gemmDtype.SizeInBytes));
-                CastOnGpu(pWeightCast, pWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
-                weightPtr = pWeightCast;
-            }
+            // Joint resolution: when fp8 is in play we run the whole GEMM in F16, casting the
+            // F32 activation down too. Old behaviour resolved per-operand and ended up at F32,
+            // forcing an oversized weight cast (151 MB for proj_mlp) plus a 75 MB intermediate
+            // inside CastOnGpu's F8→F32 path.
+            DType gemmDtype = ResolveGemmDtype(input.DType, weight.DType);
+            ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
+            ulong weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
 
             int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
             int outputType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
@@ -294,25 +265,10 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            // Resolve GEMM dtype: FP8 inputs get cast to F16 (Ampere fallback)
-            DType gemmDtype = ResolveGemmDtype(a.DType);
-            ulong aPtr = pA;
-            if (a.DType.IsFp8)
-            {
-                pACast = CudaMemory.Allocate((nuint)(a.ElementCount * DType.F16.SizeInBytes));
-                _kernels!.LaunchCastF8E4M3ToF16(pACast, pA, (int)a.ElementCount, _stream.Handle);
-                aPtr = pACast;
-            }
-
-            // cuBLAS requires A and B to have the same dtype; cast B if mismatched
-            ulong bPtr = pB;
-            DType bResolved = ResolveGemmDtype(b.DType);
-            if (bResolved != gemmDtype || b.DType.IsFp8)
-            {
-                pBCast = CudaMemory.Allocate((nuint)(b.ElementCount * gemmDtype.SizeInBytes));
-                CastOnGpu(pBCast, pB, b.DType, gemmDtype, (int)b.ElementCount);
-                bPtr = pBCast;
-            }
+            // Joint dtype resolution — see ResolveGemmDtype(a, b) docs.
+            DType gemmDtype = ResolveGemmDtype(a.DType, b.DType);
+            ulong aPtr = CastIfNeeded(pA, a.DType, gemmDtype, (int)a.ElementCount, out pACast);
+            ulong bPtr = CastIfNeeded(pB, b.DType, gemmDtype, (int)b.ElementCount, out pBCast);
 
             int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
             int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
@@ -366,11 +322,13 @@ public sealed class CudaBackend : IBackend
         int colCols = outH * outW;
 
         bool is1x1 = kH == 1 && kW == 1 && strideH == 1 && strideW == 1 && padH == 0 && padW == 0;
-        // FP8 inputs get treated as F16 after cast
-        DType effectiveInputDtype = ResolveGemmDtype(input.DType);
-        bool inputIsF16 = effectiveInputDtype == DType.F16;
+        // Joint dtype resolution — fp8 on either side forces F16. The im2col buffer matches
+        // the GEMM dtype so element size has to be derived from gemmDtype, not the original
+        // input dtype.
+        DType gemmDtype = ResolveGemmDtype(input.DType, weight.DType);
+        bool inputIsF16 = gemmDtype == DType.F16;
         bool outputIsF16 = output.DType == DType.F16;
-        int elemSize = effectiveInputDtype.SizeInBytes;
+        int elemSize = gemmDtype.SizeInBytes;
         int outElemSize = output.DType.SizeInBytes;
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, colBuf = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
@@ -380,14 +338,7 @@ public sealed class CudaBackend : IBackend
             pInput = GpuTransferHelper.CopyToDevice(input);
             pWeight = GpuTransferHelper.CopyToDevice(weight);
 
-            // Cast FP8 input to F16 for GEMM
-            ulong inputPtr = pInput;
-            if (input.DType.IsFp8)
-            {
-                pInputCast = CudaMemory.Allocate((nuint)(input.ElementCount * DType.F16.SizeInBytes));
-                _kernels!.LaunchCastF8E4M3ToF16(pInputCast, pInput, (int)input.ElementCount, _stream.Handle);
-                inputPtr = pInputCast;
-            }
+            ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
             if (bias is not null)
             {
                 pBias = GpuTransferHelper.CopyToDevice(bias);
@@ -403,16 +354,7 @@ public sealed class CudaBackend : IBackend
             float alpha = 1.0f;
             float beta = 0.0f;
 
-            // cuBLAS requires A and B to have the same dtype; cast weight if mismatched
-            DType gemmDtype = effectiveInputDtype;
-            ulong weightPtr = pWeight;
-            DType weightResolved = ResolveGemmDtype(weight.DType);
-            if (weightResolved != gemmDtype || weight.DType.IsFp8)
-            {
-                pWeightCast = CudaMemory.Allocate((nuint)(weight.ElementCount * gemmDtype.SizeInBytes));
-                CastOnGpu(pWeightCast, pWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
-                weightPtr = pWeightCast;
-            }
+            ulong weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
 
             int gemmType = inputIsF16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
             int gemmOutType = outputIsF16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
@@ -1125,10 +1067,47 @@ public sealed class CudaBackend : IBackend
 
     /// <summary>Resolves FP8 dtypes to their compute dtype (F16 on Ampere, native on Ada+). Non-FP8 dtypes pass through unchanged.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// <summary>Resolves the dtype a single operand will end up at after fp8 → F16 fallback.
+    /// Kept for callers (e.g. Conv2D's im2col elemSize) that need the per-operand answer
+    /// without the joint-dtype rule. New code should prefer the two-operand overload.</summary>
     private DType ResolveGemmDtype(DType dtype)
     {
         if (dtype.IsFp8) return DType.F16; // Ampere fallback: cast F8→F16 for GEMM
         return dtype;
+    }
+
+    /// <summary>Resolves the GEMM compute dtype for an op with two operands. Rule: if EITHER
+    /// operand is fp8, run the GEMM in F16 — casting both sides down if needed. This is the
+    /// critical path: previously, an F32 activation × fp8 weight resolved to F32, forcing
+    /// the fp8 weight to be expanded to a full F32 buffer (151 MB for proj_mlp at 1024x1024)
+    /// plus a ~75 MB F16 intermediate inside CastOnGpu's F8→F32 path. Resolving to F16
+    /// halves the weight cast and skips the intermediate, saving ~150 MB transient per Linear
+    /// call — enough to keep Flux fp8 inside a 12 GB card. Cost: an extra F32→F16 cast on the
+    /// activation (much smaller buffer than the weight, and Ampere Tensor Cores prefer F16
+    /// anyway, so the GEMM itself runs faster too).</summary>
+    private DType ResolveGemmDtype(DType a, DType b)
+    {
+        if (a.IsFp8 || b.IsFp8) return DType.F16;
+        if (a == DType.F32 || b == DType.F32) return DType.F32;
+        if (a == DType.F16 || b == DType.F16) return DType.F16;
+        return a;
+    }
+
+    /// <summary>Ensures a GPU buffer holding a tensor of <paramref name="srcDtype"/> is
+    /// available in <paramref name="dstDtype"/>. Returns the existing pointer if no cast
+    /// is needed, or allocates + casts and writes the new dptr to <paramref name="castOut"/>
+    /// (which the caller is responsible for freeing with <c>cuMemFreeAsync</c>). Hides the
+    /// F8 special case so the four GEMM call sites all look the same.</summary>
+    private unsafe ulong CastIfNeeded(ulong srcPtr, DType srcDtype, DType dstDtype, int elementCount, out ulong castOut)
+    {
+        if (srcDtype == dstDtype)
+        {
+            castOut = 0;
+            return srcPtr;
+        }
+        castOut = CudaMemory.Allocate((nuint)(elementCount * dstDtype.SizeInBytes));
+        CastOnGpu(castOut, srcPtr, srcDtype, dstDtype, elementCount);
+        return castOut;
     }
 
     /// <summary>Casts GPU data between dtypes using PTX kernels. Handles F8↔F16, F16↔F32 conversions.</summary>

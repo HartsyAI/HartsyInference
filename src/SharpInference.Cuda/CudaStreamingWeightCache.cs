@@ -46,6 +46,21 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         _context = context;
         _computeStream = computeStream;
         _uploadStream = uploadStream;
+
+        // Configure the device's default mempool to be aggressive about returning
+        // freed memory to the driver. Without this, the pool can hold many GB of
+        // reserved memory across cuMemFreeAsync calls — invisible to subsequent
+        // sync cuMemAlloc requests, manifesting as OOM mid-streaming. The default
+        // is supposed to be 0 but at least one Linux driver leaves it at "infinite"
+        // unless we set it explicitly. Stream syncs (or explicit trim) then return
+        // the bytes to the driver immediately.
+        context.EnsureCurrent();
+        CudaDriverApi.cuDeviceGetDefaultMemPool(out nint pool, context.DeviceOrdinal).ThrowOnError();
+        unsafe
+        {
+            ulong releaseThreshold = 0;
+            CudaDriverApi.cuMemPoolSetAttribute(pool, CudaDriverApi.CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, &releaseThreshold).ThrowOnError();
+        }
     }
 
     /// <inheritdoc/>
@@ -145,5 +160,21 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         CudaDriverApi.cuMemGetInfo(out nuint freeBytes, out _).ThrowOnError();
         long avail = (long)freeBytes - activationReserve;
         return avail < 0 ? 0 : avail;
+    }
+
+    /// <inheritdoc/>
+    public void DrainAndReleasePool()
+    {
+        _context.EnsureCurrent();
+        // Drain both streams so any queued cuMemFreeAsync calls actually return
+        // their memory to the stream-ordered allocator pool. Without this the trim
+        // below would only release whatever already-completed frees the pool sees.
+        CudaDriverApi.cuStreamSynchronize(_uploadStream).ThrowOnError();
+        CudaDriverApi.cuStreamSynchronize(_computeStream).ThrowOnError();
+        // Trim the device's default mempool back to 0 reserved bytes — releases
+        // the just-drained frees back to the regular driver allocator so subsequent
+        // sync cuMemAlloc calls (e.g. inside the VAE) can use that memory.
+        CudaDriverApi.cuDeviceGetDefaultMemPool(out nint pool, _context.DeviceOrdinal).ThrowOnError();
+        CudaDriverApi.cuMemPoolTrimTo(pool, 0).ThrowOnError();
     }
 }

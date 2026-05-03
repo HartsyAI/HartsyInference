@@ -51,6 +51,8 @@ public sealed class BlockStreamingControllerTests
 
         public long QueryAvailableWeightCacheBytes(long activationReserve) => long.MaxValue;
 
+        public void DrainAndReleasePool() => Calls.Add("drain");
+
         private static string ExtractBlockId(IEnumerable<Tensor> weights)
         {
             // The fake block tags its weights via TaggedBlock.BlockId; we surface that
@@ -235,7 +237,8 @@ public sealed class BlockStreamingControllerTests
         //  - 0: Evicted → no-op
         //  - 1: Resident → evict
         //  - 2: Uploading → await first, then evict
-        Assert.Equal(new[] { "evict:b1", "await:#3", "evict:b2" }, cache.Calls);
+        // Then DrainAndReleasePool is called to flush the cache's stream-ordered pool.
+        Assert.Equal(new[] { "evict:b1", "await:#3", "evict:b2", "drain" }, cache.Calls);
     }
 
     [Fact]
@@ -246,7 +249,9 @@ public sealed class BlockStreamingControllerTests
         ctrl.EvictAll();
         cache.Calls.Clear();
         ctrl.EvictAll();
-        Assert.Empty(cache.Calls);
+        // Per-block evictions are no-ops on the second call (everything's Evicted),
+        // but the drain still runs — it's a transition signal, not bound to per-block state.
+        Assert.Equal(new[] { "drain" }, cache.Calls);
     }
 
     // ── Edge cases ───────────────────────────────────────────────────────

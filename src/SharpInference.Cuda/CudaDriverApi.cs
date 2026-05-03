@@ -176,6 +176,41 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemGetInfo_v2")]
     internal static partial int cuMemGetInfo(out nuint free, out nuint total);
 
+    // ── Memory Pool Management ──────────────────────────────────────────
+    //
+    // The stream-ordered allocator (cuMemAllocAsync / cuMemFreeAsync) uses a
+    // per-device "default mempool" that is SEPARATE from the regular driver allocator
+    // that sync cuMemAlloc/cuMemFree use. Memory freed via cuMemFreeAsync is returned
+    // to the mempool but stays reserved by it — sync cuMemAlloc cannot see those bytes
+    // until the mempool releases them back to the driver. cuMemPoolTrimTo forces that
+    // release. We need this every time we transition out of a streaming phase into
+    // an eager-allocation phase (e.g. transformer-streaming → VAE-decode-eager) so the
+    // VAE sees the memory the streamer just freed.
+
+    /// <summary>Gets the default memory pool of the specified device — used by
+    /// cuMemAllocAsync / cuMemFreeAsync when no explicit pool is given.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuDeviceGetDefaultMemPool(out nint pool, int dev);
+
+    /// <summary>Releases memory back to the OS until the pool's reserved size is
+    /// at most <paramref name="minBytesToKeep"/>. Pass 0 to release everything not
+    /// currently in use by an in-flight async allocation.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuMemPoolTrimTo(nint pool, nuint minBytesToKeep);
+
+    /// <summary>Sets a memory pool attribute. Used to configure
+    /// <c>CU_MEMPOOL_ATTR_RELEASE_THRESHOLD</c> to 0 so the pool releases reserved
+    /// memory back to the driver on every stream sync — without this, the default
+    /// behaviour on some drivers is to hold pool memory indefinitely, starving
+    /// subsequent sync <c>cuMemAlloc</c> calls.</summary>
+    [LibraryImport(LibName)]
+    internal static unsafe partial int cuMemPoolSetAttribute(nint pool, int attr, void* value);
+
+    /// <summary>Memory pool attribute: amount of reserved memory in bytes to hold
+    /// onto before trying to release back to the OS on the next sync. Value type
+    /// is <c>cuuint64_t</c> (a 64-bit unsigned integer). Set to 0 to be aggressive.</summary>
+    internal const int CU_MEMPOOL_ATTR_RELEASE_THRESHOLD = 4;
+
     // ── Error Handling ──────────────────────────────────────────────────
 
     [LibraryImport(LibName)]

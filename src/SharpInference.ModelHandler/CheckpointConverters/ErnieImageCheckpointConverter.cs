@@ -24,8 +24,14 @@ public sealed class ErnieImageCheckpointConverter
         if (!Directory.Exists(folderPath))
             throw new DirectoryNotFoundException($"ERNIE-Image folder not found: {folderPath}");
 
+        // Accept either the diffusers folder layout (`transformer/`) or the Comfy-Org repackage
+        // (`diffusion_models/`, used by `Comfy-Org/ERNIE-Image`). Fall back to the root folder
+        // if neither subfolder exists (single-file or flat layout).
         string transformerDir = Path.Combine(folderPath, "transformer");
-        string actualDir = Directory.Exists(transformerDir) ? transformerDir : folderPath;
+        string diffusionModelsDir = Path.Combine(folderPath, "diffusion_models");
+        string actualDir = Directory.Exists(transformerDir) ? transformerDir
+            : Directory.Exists(diffusionModelsDir) ? diffusionModelsDir
+            : folderPath;
 
         string[] shards = Directory.GetFiles(actualDir, "*.safetensors");
         if (shards.Length == 0)
@@ -99,9 +105,12 @@ public sealed class ErnieImageCheckpointConverter
     /// <summary>Loads text-encoder shards from <c>{folderPath}/text_encoder/</c>. Returns the merged dict + loader handles. The exact tensor names depend on which encoder Baidu shipped; see <c>{folderPath}/text_encoder/config.json</c> to determine the architecture before constructing the encoder.</summary>
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTextEncoder(string folderPath)
     {
-        string teDir = Path.Combine(folderPath, "text_encoder");
+        // Accept diffusers `text_encoder/` or Comfy-Org `text_encoders/` (plural).
+        string teDir1 = Path.Combine(folderPath, "text_encoder");
+        string teDir2 = Path.Combine(folderPath, "text_encoders");
+        string teDir = Directory.Exists(teDir1) ? teDir1 : teDir2;
         if (!Directory.Exists(teDir))
-            throw new DirectoryNotFoundException($"text_encoder folder not found: {teDir}");
+            throw new DirectoryNotFoundException($"text_encoder folder not found: {teDir1} or {teDir2}");
 
         string[] shards = Directory.GetFiles(teDir, "*.safetensors");
         if (shards.Length == 0)
