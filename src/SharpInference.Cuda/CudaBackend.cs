@@ -1076,21 +1076,26 @@ public sealed class CudaBackend : IBackend
         return dtype;
     }
 
-    /// <summary>Resolves the GEMM compute dtype for an op with two operands. Rule: if EITHER
-    /// operand is fp8, run the GEMM in F16 — casting both sides down if needed. This is the
-    /// critical path: previously, an F32 activation × fp8 weight resolved to F32, forcing
-    /// the fp8 weight to be expanded to a full F32 buffer (151 MB for proj_mlp at 1024x1024)
-    /// plus a ~75 MB F16 intermediate inside CastOnGpu's F8→F32 path. Resolving to F16
-    /// halves the weight cast and skips the intermediate, saving ~150 MB transient per Linear
-    /// call — enough to keep Flux fp8 inside a 12 GB card. Cost: an extra F32→F16 cast on the
-    /// activation (much smaller buffer than the weight, and Ampere Tensor Cores prefer F16
-    /// anyway, so the GEMM itself runs faster too).</summary>
+    /// <summary>Resolves the GEMM compute dtype for an op with two operands. Rule: prefer F16
+    /// over F32 whenever either operand is F16 (or fp8, which always casts to F16).
+    ///
+    /// <para>Why F16 wins over F32: cublasGemmEx with COMPUTE_32F supports F16×F16→F16,
+    /// F16×F16→F32, and F32×F32→F32, but does NOT support F32×F32→F16. So when an F16
+    /// activation feeds an F16 output (the VAE F16 path) and the weight happens to be F32,
+    /// the only viable combination is F16×F16 — meaning the F32 weight must be cast down,
+    /// not the F16 input cast up. Earlier "wider type wins" rule resolved that case to F32
+    /// and got CUBLAS_STATUS_NOT_SUPPORTED on every VAE Conv2D. The fp8 rule is a special
+    /// case of the same principle (an fp8 weight forces F16 GEMM regardless of input).</para>
+    ///
+    /// <para>Side benefits: F16 GEMM gets Tensor Core acceleration on Ampere+, and casting
+    /// an F32 weight down to F16 is a smaller/cheaper alloc than casting an F16 activation
+    /// up. VAE weights stay well within F16's dynamic range, no precision issues observed.</para>
+    /// </summary>
     private DType ResolveGemmDtype(DType a, DType b)
     {
         if (a.IsFp8 || b.IsFp8) return DType.F16;
-        if (a == DType.F32 || b == DType.F32) return DType.F32;
         if (a == DType.F16 || b == DType.F16) return DType.F16;
-        return a;
+        return a == DType.F32 || b == DType.F32 ? DType.F32 : a;
     }
 
     /// <summary>Ensures a GPU buffer holding a tensor of <paramref name="srcDtype"/> is
@@ -1518,11 +1523,23 @@ public sealed class CudaBackend : IBackend
     /// <summary>Fills a tensor with a constant float value. Works on CPU tensors directly.</summary>
     public unsafe void Fill(Tensor tensor, float value)
     {
-        // Fill operates directly on CPU tensor memory - no GPU transfer needed
-        float* ptr = (float*)tensor.DataPointer;
-        for (long i = 0; i < tensor.ElementCount; i++)
+        // CPU-side fill — DataPointer access syncs the GPU copy out (if cached) and
+        // disposes its dptr, so the next op will re-upload from the just-written CPU
+        // buffer. Dtype-aware so VAE F16 codepaths can use this for shift/scale broadcasts.
+        if (tensor.DType == DType.F16)
         {
-            ptr[i] = value;
+            Half* ptr = (Half*)tensor.DataPointer;
+            Half h = (Half)value;
+            for (long i = 0; i < tensor.ElementCount; i++) ptr[i] = h;
+        }
+        else if (tensor.DType == DType.F32)
+        {
+            float* ptr = (float*)tensor.DataPointer;
+            for (long i = 0; i < tensor.ElementCount; i++) ptr[i] = value;
+        }
+        else
+        {
+            throw new NotSupportedException($"Fill not supported for dtype {tensor.DType}");
         }
     }
 

@@ -167,12 +167,16 @@ public sealed unsafe class FluxPipeline : IDisposable
             _backend.PreloadWeights(_transformer.EnumerateSharedWeights());
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
-            streamer = new BlockStreamingController(_backend.StreamingCache, blocks, prefetchAhead: 1, retainBehind: 0);
+
+            int prefetchAhead = ChooseFluxPrefetchAhead(
+                _backend.StreamingCache, blocks, txtSeqLen, imgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio));
+            streamer = new BlockStreamingController(_backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
             _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
             streamer.Prime();
-            Logs.Info($"Flux streaming: {blocks.Length} blocks, prefetchAhead=1, " +
-                $"per-block ~{streamer.EstimatedTotalWeightBytes / blocks.Length / (1024 * 1024)} MB, " +
-                $"total ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB");
+            long perBlockMb = streamer.EstimatedTotalWeightBytes / blocks.Length / (1024 * 1024);
+            long totalMb = streamer.EstimatedTotalWeightBytes / (1024 * 1024);
+            Logs.Info($"Flux streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, " +
+                $"per-block ~{perBlockMb} MB, total ~{totalMb} MB");
         }
         else
         {
@@ -255,9 +259,17 @@ public sealed unsafe class FluxPipeline : IDisposable
         // re-upload pattern would apply.
         _backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
 
-        Logs.Info("Decoding latents to image...");
+        // Always go through DecodeTiled. It internally fast-paths to a single direct
+        // decode when the latent fits in one tile (small images), so there's no overhead
+        // for normal sizes — but for anything ≥1024² it slices into 64-latent / 512-RGB
+        // tiles with a 64-pixel RGB blend overlap. This kills the catastrophic im2col
+        // workspace blow-up: a 256ch 3×3 conv at 1024² needs ~9.7 GB workspace as one
+        // shot vs ~2.4 GB per tile (F32), regardless of final resolution.
+        // (Tiles run at F32; F16 VAE produced black output on Flux Schnell — needs
+        // GroupNorm/softmax precision investigation before re-enabling.)
+        Logs.Info("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(_backend, unpackedLatent);
+        Tensor image = _vaeDecoder.DecodeTiled(_backend, unpackedLatent);
         unpackedLatent.Dispose();
         LogTensorStats("VAE output", image);
         LogPerChannelStats("VAE output", image);
@@ -272,6 +284,53 @@ public sealed unsafe class FluxPipeline : IDisposable
         Logs.Info($"Flux ({baseMode}) {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, request.Width, request.Height, seed);
+    }
+
+    /// <summary>Picks <c>prefetchAhead</c> for the streaming controller based on how much VRAM
+    /// is left after reserving for the peak activation working set of a single forward pass.
+    /// Each extra prefetched block costs one block's worth of resident weights in addition to
+    /// the current+next block already in flight. We pick the largest value that still leaves
+    /// headroom for activations + cuBLAS workspace, capped at 2 (deeper just churns VRAM
+    /// without extra hiding when blocks compute in tens of milliseconds).</summary>
+    private static int ChooseFluxPrefetchAhead(
+        IStreamingWeightCache cache,
+        IStreamingBlock[] blocks,
+        int txtSeqLen, int imgSeqLen, int hiddenSize, int mlpDim)
+    {
+        // Estimate the peak activation footprint of a single SingleStreamBlock — the deepest
+        // valley in the forward pass, since SingleStreamBlocks hold both the F16 mlpInput +
+        // mlpActivated and the F16 concatted simultaneously alongside the F32 attention
+        // tensors. Numbers below are byte sizes for B=1.
+        long totalSeqLen = txtSeqLen + imgSeqLen;
+        long mlpInputBytes = totalSeqLen * mlpDim * 2;             // F16
+        long mlpActivatedBytes = totalSeqLen * mlpDim * 2;         // F16
+        long concattedBytes = totalSeqLen * (hiddenSize + mlpDim) * 2; // F16
+        long attnFlatBytes = totalSeqLen * hiddenSize * 4;         // F32
+        long qkvBytes = 3L * totalSeqLen * hiddenSize * 4;         // F32 q/k/v
+        long mhBytes = 3L * totalSeqLen * hiddenSize * 4;          // F32 multi-head q/k/v
+        long modulatedBytes = totalSeqLen * hiddenSize * 4;        // F32 modulated/normed
+        long xBytes = totalSeqLen * hiddenSize * 4;                // F32 block input
+        long scratchBytes = mlpInputBytes + mlpActivatedBytes + concattedBytes
+            + attnFlatBytes + qkvBytes + mhBytes + modulatedBytes + xBytes;
+        // Add a generous fudge for cuBLAS workspace, fp8→F16 weight cast buffers, RoPE tables,
+        // and the persistent shared weights that aren't part of the streamed set. These are
+        // hard to predict tightly; 1 GB is roomy enough to keep us out of OOM territory and
+        // cheap if we have it.
+        long activationReserve = scratchBytes + 1024L * 1024 * 1024;
+
+        long avail = cache.QueryAvailableWeightCacheBytes(activationReserve);
+        if (avail <= 0) return 0;
+
+        long perBlockBytes = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
+        if (perBlockBytes <= 0) return 1;
+
+        // The streaming working set briefly hits (prefetchAhead + 2) blocks at the moment we
+        // make block N+1 resident before evicting block N-1 (see BlockStreamingController.
+        // BeforeBlockForward). Pick the largest prefetch that keeps that peak under budget.
+        // Cap at 2 — beyond that we burn VRAM without much extra latency hiding.
+        int maxByBudget = (int)(avail / perBlockBytes) - 2;
+        int chosen = Math.Clamp(maxByBudget, 0, 2);
+        return chosen;
     }
 
     /// <summary>Builds the initial packed latent for Flux denoising. T2I: fresh Gaussian noise scaled by the scheduler's initial sigma. Img2img: VAE-encoded source latent (16 channels) packed via <see cref="PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.</summary>

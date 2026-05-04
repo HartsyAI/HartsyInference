@@ -119,8 +119,13 @@ public sealed unsafe class FluxSingleStreamBlock
         backend.Linear(k, modulated, _toKWeight!, _toKBias);
         Tensor v = new Tensor(shape, DType.F32);
         backend.Linear(v, modulated, _toVWeight!, _toVBias);
+        // mlpInput / mlpActivated / concatted run at F16. At 1024x1024 these are the three
+        // largest activations in the block (213/213/267 MB at F32) and dominate VRAM peak.
+        // F16 halves them and lets the next Linear skip its input cast since the joint
+        // dtype is already F16. The proj_mlp Linear writes F16 directly into mlpInput;
+        // cuBLAS still accumulates in F32 internally so accuracy is preserved.
         TensorShape mlpProjShape = new TensorShape(batch, seqLen, _mlpDim);
-        Tensor mlpInput = new Tensor(mlpProjShape, DType.F32);
+        Tensor mlpInput = new Tensor(mlpProjShape, DType.F16);
         backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();
 
@@ -161,20 +166,31 @@ public sealed unsafe class FluxSingleStreamBlock
         ReshapeFromMultiHead(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
         attnOut.Dispose();
 
-        // ── 9. GELU(tanh) on MLP input ──
+        // ── 9. GELU(tanh) on MLP input ── (F16, matches mlpInput; CudaBackend.Gelu has an F16 path)
         TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpDim);
-        Tensor mlpActivated = new Tensor(mlpShape, DType.F32);
+        Tensor mlpActivated = new Tensor(mlpShape, DType.F16);
         backend.Gelu(mlpActivated, mlpInput);
         mlpInput.Dispose();
 
         // ── 10. Concatenate [attn_out, gelu(mlp)] → proj_out ──
+        // attnFlat is F32 (the attention path stays F32 — SDPA is fine in F32 and the
+        // attention activations are 4x smaller than the MLP ones). Cast it down to F16
+        // so concat operands match. The cast is small (53 MB at 1024x1024), a worthwhile
+        // tradeoff for a 134 MB concatted buffer at F16 instead of 267 MB at F32.
+        Tensor attnFlatF16 = new Tensor(shape, DType.F16);
+        backend.CastToF16(attnFlatF16, attnFlat);
+        attnFlat.Dispose();
+
         int concatDim = _hiddenSize + _mlpDim;
         TensorShape concatShape = new TensorShape(batch, seqLen, concatDim);
-        Tensor concatted = new Tensor(concatShape, DType.F32);
-        ConcatAlongFeatureDim(concatted, attnFlat, mlpActivated, batch, seqLen, _hiddenSize, _mlpDim);
-        attnFlat.Dispose();
+        Tensor concatted = new Tensor(concatShape, DType.F16);
+        ConcatAlongFeatureDim(concatted, attnFlatF16, mlpActivated, batch, seqLen, _hiddenSize, _mlpDim);
+        attnFlatF16.Dispose();
         mlpActivated.Dispose();
 
+        // proj_out's input is F16 (concatted) and its weight is fp8/F16 — joint resolution
+        // picks F16 with no input cast needed. Output stays F32 because the gated residual
+        // at the end of the block adds it to x (F32).
         Tensor output = new Tensor(shape, DType.F32);
         backend.Linear(output, concatted, _projOutWeight!, _projOutBias);
         concatted.Dispose();
@@ -259,27 +275,37 @@ public sealed unsafe class FluxSingleStreamBlock
         }
     }
 
-    /// <summary>Concatenates two tensors along the feature dimension: [B, S, D1] + [B, S, D2] → [B, S, D1+D2].</summary>
+    /// <summary>Concatenates two tensors along the feature dimension: [B, S, D1] + [B, S, D2] → [B, S, D1+D2].
+    /// Operates on raw bytes via Tensor.DataPointer — all three tensors must share the same element
+    /// size (validated at the top). Works for F32 and F16 alike.</summary>
     private static void ConcatAlongFeatureDim(Tensor output, Tensor first, Tensor second,
         int batch, int seqLen, int firstDim, int secondDim)
     {
-        float* firstPtr = (float*)first.DataPointer;
-        float* secondPtr = (float*)second.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
+        int elemSize = first.DType.SizeInBytes;
+        if (second.DType.SizeInBytes != elemSize || output.DType.SizeInBytes != elemSize)
+        {
+            throw new InvalidOperationException(
+                $"ConcatAlongFeatureDim requires identical element size; got first={first.DType}, second={second.DType}, output={output.DType}");
+        }
+        byte* firstPtr = (byte*)first.DataPointer;
+        byte* secondPtr = (byte*)second.DataPointer;
+        byte* outPtr = (byte*)output.DataPointer;
         int totalDim = firstDim + secondDim;
+        long firstRowBytes = (long)firstDim * elemSize;
+        long secondRowBytes = (long)secondDim * elemSize;
+        long totalRowBytes = (long)totalDim * elemSize;
 
         for (int b = 0; b < batch; b++)
         {
             for (int s = 0; s < seqLen; s++)
             {
-                int outOffset = (b * seqLen + s) * totalDim;
-                int firstOffset = (b * seqLen + s) * firstDim;
-                int secondOffset = (b * seqLen + s) * secondDim;
+                long row = (long)b * seqLen + s;
+                long outOffset = row * totalRowBytes;
+                long firstOffset = row * firstRowBytes;
+                long secondOffset = row * secondRowBytes;
 
-                Buffer.MemoryCopy(firstPtr + firstOffset, outPtr + outOffset,
-                    firstDim * sizeof(float), firstDim * sizeof(float));
-                Buffer.MemoryCopy(secondPtr + secondOffset, outPtr + outOffset + firstDim,
-                    secondDim * sizeof(float), secondDim * sizeof(float));
+                Buffer.MemoryCopy(firstPtr + firstOffset, outPtr + outOffset, firstRowBytes, firstRowBytes);
+                Buffer.MemoryCopy(secondPtr + secondOffset, outPtr + outOffset + firstRowBytes, secondRowBytes, secondRowBytes);
             }
         }
     }

@@ -101,10 +101,27 @@ public static class CudaMemory
         CudaDriverApi.cuMemsetD32(dptr, value, count).ThrowOnError();
     }
 
-    /// <summary>Allocates device memory asynchronously on the given stream.</summary>
+    /// <summary>Allocates device memory asynchronously on the given stream. Mirrors
+    /// <see cref="Allocate"/>'s OOM retry: if the stream-ordered allocator can't satisfy
+    /// the request, drain everything and trim the pool, then retry once.</summary>
     public static ulong AllocateAsync(nuint byteSize, nint stream)
     {
-        CudaDriverApi.cuMemAllocAsync(out ulong dptr, byteSize, stream).ThrowOnError();
+        int result = CudaDriverApi.cuMemAllocAsync(out ulong dptr, byteSize, stream);
+        if (result == 2) // CUDA_ERROR_OUT_OF_MEMORY
+        {
+            LogOomDiagnostic("OOM on async first attempt", byteSize);
+            GpuTransferHelper.SyncStreamsAndReleasePool();
+            int retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);
+            if (retryResult != 0)
+            {
+                LogOomDiagnostic("OOM after async sync+pool-trim retry", byteSize);
+                retryResult.ThrowOnError();
+            }
+        }
+        else
+        {
+            result.ThrowOnError();
+        }
         return dptr;
     }
 

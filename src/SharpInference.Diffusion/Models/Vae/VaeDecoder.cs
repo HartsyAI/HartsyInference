@@ -1,4 +1,5 @@
 using SharpInference.Core.Backends;
+using SharpInference.Core.Logging;
 using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.Vae;
@@ -254,6 +255,191 @@ public sealed class VaeDecoder
         }
 
         return convOut;
+    }
+
+    /// <summary>Spatial scale factor applied by the decoder (latent → RGB pixel ratio).
+    /// AutoencoderKL is always 8×, but exposed here so callers don't hardcode it.</summary>
+    public const int SpatialScale = 8;
+
+    /// <summary>Decodes the latent in spatial tiles and blends overlapping RGB regions,
+    /// rather than running the full convolution stack on the entire latent at once.
+    /// Solves the catastrophic im2col workspace blow-up (e.g. ~9.7 GB for a 256ch 3×3
+    /// conv at 1024² output): each tile's worst-case workspace scales with the tile area
+    /// instead of the full image area, so a 64-latent / 512-RGB tile fits comfortably in
+    /// any modern GPU regardless of final resolution.
+    ///
+    /// <para>Tile/overlap defaults match ComfyUI's tiled decode: 64 latent (=512 RGB) tile,
+    /// 8 latent (=64 RGB) overlap. Overlap regions are blended with a tent-function
+    /// weight (linear ramp from 0 at tile edge to 1 at <c>overlapLatent</c> px in),
+    /// then divided by the per-pixel weight sum so the result is a proper weighted
+    /// average regardless of how many tiles overlap any given pixel.</para>
+    /// </summary>
+    /// <param name="backend">Compute backend.</param>
+    /// <param name="latent">Full latent <c>[B, latentCh, H, W]</c>. Any dtype accepted; the
+    /// per-tile decode internally runs at F32 for numerical safety (F16 GroupNorm/softmax
+    /// precision in the VAE has been observed to produce all-black output on some
+    /// checkpoints — needs investigation before F16 can be re-enabled in this path).</param>
+    /// <param name="tileLatentSize">Latent edge size of each tile, before overlap is
+    /// subtracted. RGB tile size = <c>tileLatentSize × 8</c>. Default 64.</param>
+    /// <param name="overlapLatent">Number of latent pixels overlapping between adjacent
+    /// tiles. RGB overlap = <c>overlapLatent × 8</c>. Default 8.</param>
+    public unsafe Tensor DecodeTiled(IBackend backend, Tensor latent, int tileLatentSize = 64, int overlapLatent = 8)
+    {
+        if (tileLatentSize <= overlapLatent || overlapLatent < 0)
+        {
+            throw new ArgumentException(
+                $"tileLatentSize ({tileLatentSize}) must be > overlapLatent ({overlapLatent}) and overlap must be non-negative.");
+        }
+
+        int batch = (int)latent.Shape[0];
+        int latentCh = (int)latent.Shape[1];
+        int latentH = (int)latent.Shape[2];
+        int latentW = (int)latent.Shape[3];
+
+        // Fast path: latent already fits in one tile, just decode it directly at its
+        // native dtype (no cast).
+        if (latentH <= tileLatentSize && latentW <= tileLatentSize)
+        {
+            return Decode(backend, latent);
+        }
+
+        int rgbH = latentH * SpatialScale;
+        int rgbW = latentW * SpatialScale;
+        int rgbTileSize = tileLatentSize * SpatialScale;
+        int rgbOverlap = overlapLatent * SpatialScale;
+        int strideLatent = tileLatentSize - overlapLatent;
+
+        int nTilesH = Math.Max(1, (int)Math.Ceiling((double)(latentH - overlapLatent) / strideLatent));
+        int nTilesW = Math.Max(1, (int)Math.Ceiling((double)(latentW - overlapLatent) / strideLatent));
+
+        Logs.Info($"VAE tiled decode: {latentH}x{latentW} latent → {rgbH}x{rgbW} RGB, " +
+            $"{nTilesH}x{nTilesW} tiles ({tileLatentSize} latent / {rgbTileSize} RGB, overlap {overlapLatent}/{rgbOverlap})");
+
+        // Output accumulator (F32) and per-pixel weight accumulator (F32).
+        // Both are CPU tensors — the per-tile decode runs on GPU and we accumulate on
+        // CPU because each tile's contribution writes into different overlapping regions
+        // and a GPU-side scatter would need extra kernels we don't have yet. The
+        // accumulator buffers are tiny vs the savings (12 MB for 1024² RGB output).
+        TensorShape outShape = new TensorShape(batch, 3, rgbH, rgbW);
+        Tensor accumOutput = new Tensor(outShape, DType.F32);
+        float* accumPtr = (float*)accumOutput.DataPointer;
+        for (long i = 0; i < accumOutput.ElementCount; i++) accumPtr[i] = 0f;
+
+        // Single weight plane shared across the 3 channels.
+        long weightCount = (long)rgbH * rgbW;
+        float[] weightAccum = new float[weightCount];
+
+        // Pre-read the source latent as a CPU float pointer so we can slice quickly.
+        if (latent.DType != DType.F32)
+        {
+            // Decode contracts on F32-or-F16 CPU latents. A non-F32 latent gets converted
+            // up so we don't have to teach the slice loop multiple dtypes.
+            Tensor latentF32 = new Tensor(latent.Shape, DType.F32);
+            backend.CastToF32(latentF32, latent);
+            latent = latentF32;
+        }
+        float* latentPtr = (float*)latent.DataPointer;
+
+        for (int ty = 0; ty < nTilesH; ty++)
+        {
+            int latentY = Math.Min(ty * strideLatent, latentH - tileLatentSize);
+            if (latentY < 0) latentY = 0;
+            int actualTileH = Math.Min(tileLatentSize, latentH - latentY);
+
+            for (int tx = 0; tx < nTilesW; tx++)
+            {
+                int latentX = Math.Min(tx * strideLatent, latentW - tileLatentSize);
+                if (latentX < 0) latentX = 0;
+                int actualTileW = Math.Min(tileLatentSize, latentW - latentX);
+
+                // 1. Slice the latent into a contiguous tile [B, C, actualTileH, actualTileW].
+                TensorShape sliceShape = new TensorShape(batch, latentCh, actualTileH, actualTileW);
+                Tensor latentSlice = new Tensor(sliceShape, DType.F32);
+                float* slicePtr = (float*)latentSlice.DataPointer;
+                for (int b = 0; b < batch; b++)
+                {
+                    for (int c = 0; c < latentCh; c++)
+                    {
+                        for (int yy = 0; yy < actualTileH; yy++)
+                        {
+                            long srcRow = ((long)b * latentCh + c) * latentH * latentW + (long)(latentY + yy) * latentW + latentX;
+                            long dstRow = ((long)b * latentCh + c) * actualTileH * actualTileW + (long)yy * actualTileW;
+                            for (int xx = 0; xx < actualTileW; xx++)
+                            {
+                                slicePtr[dstRow + xx] = latentPtr[srcRow + xx];
+                            }
+                        }
+                    }
+                }
+
+                // 2. Decode the tile at the latent's native dtype → RGB tile [B, 3, tileH*8, tileW*8].
+                // Decode propagates input.DType throughout; if the caller cast to F16 before
+                // calling DecodeTiled, this stays F16 internally and saves workspace memory.
+                // If the caller passed F32 (default), the whole tile decode runs in F32.
+                Tensor rgbTile = Decode(backend, latentSlice);
+                latentSlice.Dispose();
+
+                int rgbTileH = actualTileH * SpatialScale;
+                int rgbTileW = actualTileW * SpatialScale;
+                int rgbY = latentY * SpatialScale;
+                int rgbX = latentX * SpatialScale;
+                bool firstTileX = (tx == 0);
+                bool lastTileX = (tx == nTilesW - 1);
+                bool firstTileY = (ty == 0);
+                bool lastTileY = (ty == nTilesH - 1);
+
+                // 3. Blend weight + tile contribution into the accumulator.
+                float* tilePtr = (float*)rgbTile.DataPointer;
+                for (int yy = 0; yy < rgbTileH; yy++)
+                {
+                    int outY = rgbY + yy;
+                    float wY = ComputeBlendWeight(yy, rgbTileH, rgbOverlap, firstTileY, lastTileY);
+                    for (int xx = 0; xx < rgbTileW; xx++)
+                    {
+                        int outX = rgbX + xx;
+                        float wX = ComputeBlendWeight(xx, rgbTileW, rgbOverlap, firstTileX, lastTileX);
+                        float w = wY * wX;
+                        long outPixIdx = (long)outY * rgbW + outX;
+                        weightAccum[outPixIdx] += w;
+                        for (int c = 0; c < 3; c++)
+                        {
+                            long outIdx = ((long)c * rgbH + outY) * rgbW + outX;
+                            long tileIdx = ((long)c * rgbTileH + yy) * rgbTileW + xx;
+                            accumPtr[outIdx] += tilePtr[tileIdx] * w;
+                        }
+                    }
+                }
+                rgbTile.Dispose();
+            }
+        }
+
+        // 4. Normalize by the weight accumulator. Pixels at the very edges of the
+        // image have weightSum=1 (single tile contribution); interior pixels are
+        // weighted averages of multiple tiles.
+        for (int c = 0; c < 3; c++)
+        {
+            for (long i = 0; i < weightCount; i++)
+            {
+                long outIdx = (long)c * weightCount + i;
+                float w = weightAccum[i];
+                if (w > 1e-8f) accumPtr[outIdx] /= w;
+            }
+        }
+
+        return accumOutput;
+    }
+
+    /// <summary>Tent function: ramps linearly from 0 at the tile edge to 1 at
+    /// <paramref name="overlap"/> pixels in, then stays at 1 through the interior, then
+    /// ramps back to 0 at the opposite edge. Edges that touch the image border get full
+    /// weight (no ramp) since there's no neighbor to blend with — without this, image
+    /// edges would be darkened by division.</summary>
+    private static float ComputeBlendWeight(int idx, int tileSize, int overlap, bool isFirstTile, bool isLastTile)
+    {
+        if (overlap <= 0) return 1f;
+        float left = isFirstTile ? 1f : Math.Min(1f, (idx + 1) / (float)overlap);
+        float right = isLastTile ? 1f : Math.Min(1f, (tileSize - idx) / (float)overlap);
+        return Math.Min(left, right);
     }
 
     /// <summary>Undoes the latent scaling: z = latent / scaling_factor + shift_factor.</summary>
