@@ -64,7 +64,7 @@ public sealed unsafe class T5TextEncoder : IDisposable
         Tensor rawFinalNorm = weights["encoder.final_layer_norm.weight"];
         _finalNormWeight = rawFinalNorm.DType != DType.F32 ? rawFinalNorm.CastTo(DType.F32) : rawFinalNorm;
 
-        Logs.Info($"T5 encoder loaded: {_config.NumLayers} layers, d_model={_config.DModel}, {_config.NumHeads} heads");
+        Logs.Verbose($"T5 encoder loaded: {_config.NumLayers} layers, d_model={_config.DModel}, {_config.NumHeads} heads");
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>

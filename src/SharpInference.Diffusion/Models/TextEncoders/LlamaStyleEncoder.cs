@@ -57,7 +57,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         for (int i = 0; i < _config.NumLayers; i++)
             _blocks[i].LoadWeights(weights, $"model.layers.{i}");
 
-        Logs.Info($"LlamaStyleEncoder loaded: {_config.NumLayers} layers, hidden={_config.HiddenSize}, " +
+        Logs.Verbose($"LlamaStyleEncoder loaded: {_config.NumLayers} layers, hidden={_config.HiddenSize}, " +
                   $"q_heads={_config.NumQueryHeads}, kv_heads={_config.NumKvHeads}, head_dim={_config.HeadDim}");
     }
 

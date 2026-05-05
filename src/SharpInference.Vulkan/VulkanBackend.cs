@@ -265,12 +265,16 @@ public sealed class VulkanBackend : IBackend
     /// (a) <c>HasCooperativeMatrix</c> capability, (b) GEMM dtype is FP16, (c) M, N, K all
     /// multiples of <c>FRAG=16</c>, (d) no fused activation. Bias is handled via a follow-up
     /// <c>BroadcastAdd(N, 1)</c> dispatch — see comments below.</summary>
+    private static readonly bool s_disableCoopmat =
+        Environment.GetEnvironmentVariable("SHARPINFERENCE_VK_DISABLE_COOPMAT") == "1";
+
     private bool TryDispatchCoopmat(
         Tensor output, VulkanBuffer aRes, VulkanBuffer bRes,
         int M, int N, int K, bool transposeA, bool transposeB, DType gemmDtype,
         VulkanBuffer outBuf, Tensor? bias, VulkanBuffer? biasRes, VulkanBuffer? biasRaw)
     {
         const uint FRAG = 16;
+        if (s_disableCoopmat) return false;
         if (!Vk.HasCooperativeMatrix) return false;
         if (gemmDtype != DType.F16) return false;
         if ((M % FRAG) != 0 || (N % FRAG) != 0 || (K % FRAG) != 0) return false;

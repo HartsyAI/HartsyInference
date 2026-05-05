@@ -5,6 +5,9 @@
     <Description>OpenAI-compatible REST API server for SharpInference — image generation, audio, vision endpoints with SSE streaming.</Description>
     <RootNamespace>SharpInference.Server</RootNamespace>
     <OutputType>Exe</OutputType>
+    <!-- ASP.NET Core 10 packages require net10 runtime; this project does not multi-target. -->
+    <TargetFrameworks></TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>

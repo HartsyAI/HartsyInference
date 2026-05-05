@@ -197,12 +197,14 @@ public sealed unsafe class ChromaPipeline : IDisposable
 
         // ── 6. VAE decode ────────────────────────────────────────────────
         _backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
-        Logs.Info("Decoding latents to image...");
+        // Tiled decode: caps im2col workspace at ~2.4 GB per tile. Internal fast-path
+        // skips tiling when the latent fits in a single tile, so small images pay no overhead.
+        Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(_backend, unpackedLatent);
+        Tensor image = _vaeDecoder.DecodeTiled(_backend, unpackedLatent);
         unpackedLatent.Dispose();
         vaeSw.Stop();
-        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+        Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();

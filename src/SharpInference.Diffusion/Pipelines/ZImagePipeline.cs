@@ -11,7 +11,7 @@ using SharpInference.Diffusion.Utilities;
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>Z-Image text-to-image and image-to-image pipeline (Tongyi Lab, Apache 2.0). Accepts pre-computed Qwen3-4B caption embeddings (text-encoder forward is owned by a separate component) and orchestrates the Lumina2/NextDiT transformer with a static-shift flow-match Euler scheduler.
-/// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>) to <see cref="GenerateFromEmbeddings"/>. Requires a <see cref="VaeEncoder"/> on construction. <b>Caveat:</b> Z-Image's latent normalization is split between this pipeline and the VAE decoder (see <see cref="PrepareVaeInput"/>); the img2img injection point uses the VaeEncoder's standard <c>(raw - shift) * scale</c> output. Strength=0 byte-identical pass-through is exact; nonzero-strength img2img produces structurally-correct output but quality has not been validated against a Python reference. For tight refining quality on Z-Image, prefer the cross-model pixel-space pattern (run a different pipeline as the refiner).</para>
+/// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>) to <see cref="GenerateFromEmbeddings"/>. Requires a <see cref="VaeEncoder"/> on construction. Strength=0 byte-identical pass-through is exact; nonzero-strength img2img produces structurally-correct output but quality has not been validated against a Python reference. For tight refining quality on Z-Image, prefer the cross-model pixel-space pattern (run a different pipeline as the refiner). Latent normalization is handled in one place — <see cref="VaeDecoder"/>'s internal UndoScaling — same as Flux.</para>
 /// </summary>
 public sealed unsafe class ZImagePipeline : IDisposable
 {
@@ -148,18 +148,30 @@ public sealed unsafe class ZImagePipeline : IDisposable
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        // ── 4. VAE-prep: undo the (latent - shift) * scale that the VAE expects to be inverted ──
-        // Z-Image latents are in the same scaled space as Flux: latent_for_vae = latent / scale + shift.
-        Tensor vaeInput = PrepareVaeInput(latent, _config.VaeScaleFactor, _config.VaeShiftFactor);
-        latent.Dispose();
+        // ── 4. VAE decode ──
+        // No pre-scale: VaeDecoder.UndoScaling already applies `latent / ScalingFactor + ShiftFactor`
+        // using VaeConfig.ZImage (== VaeConfig.Flux: scale=0.3611, shift=0.1159). The previous
+        // `PrepareVaeInput` step did the same arithmetic in the pipeline and then DecodeTiled
+        // ran it again inside UndoScaling — double-scaling pushed the latent ~2.77× too high
+        // and saturated every conv layer. Fix: hand the raw latent directly to DecodeTiled
+        // and trust the single normalize-on-decode contract that Flux's pipeline already
+        // follows. DecodeTiled caps im2col workspace at ~2.4 GB per tile and fast-paths to
+        // a single direct decode when the latent fits in one tile.
+        //
+        // Diagnostic: log per-channel min/max/mean of the latent BEFORE the VAE sees it.
+        // Compare against Flux's healthy distribution (typically min~-4, max~+4, mean<|2|)
+        // — if Z-Image's are wildly different (saturated, out-of-range, all near 0) the
+        // bug isn't in the VAE, it's upstream in the denoise loop or scheduler.
+        LogLatentStatsPerChannel("Pre-VAE latent", latent);
 
-        // ── 5. VAE decode ──
-        Logs.Info("Decoding latents to image...");
+        Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(_backend, vaeInput);
-        vaeInput.Dispose();
+        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent);
+        latent.Dispose();
         vaeSw.Stop();
-        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+        Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+
+        LogLatentStatsPerChannel("VAE output", image);
 
         // ── 6. RGB conversion ──
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
@@ -224,17 +236,34 @@ public sealed unsafe class ZImagePipeline : IDisposable
         }
     }
 
-    /// <summary>Inverts the VAE's latent normalization: latent_for_vae = latent / scale + shift. The VAE decoder applies (vae_input - shift) * scale internally; here we precompute the left side so the VAE receives raw latents in its native distribution.</summary>
-    private static Tensor PrepareVaeInput(Tensor latent, float scaleFactor, float shiftFactor)
+    /// <summary>Per-channel min/max/mean diagnostic for a 4D NCHW tensor at Verbose level.
+    /// Used to bracket the pre/post VAE state when tracking down all-black output bugs —
+    /// healthy Z-Image / Flux latents have per-channel min ~-5 to -1, max ~+1 to +5,
+    /// mean within ±2. RGB outputs should land in roughly [-1, 1] with mean near 0.
+    /// Outside those bands means the model or VAE saturated.</summary>
+    private static void LogLatentStatsPerChannel(string name, Tensor t)
     {
-        Tensor result = new Tensor(latent.Shape, DType.F32);
-        float* inPtr = (float*)latent.DataPointer;
-        float* outPtr = (float*)result.DataPointer;
-        long count = latent.Shape.ElementCount;
-        float invScale = 1.0f / scaleFactor;
-        for (long i = 0; i < count; i++)
-            outPtr[i] = inPtr[i] * invScale + shiftFactor;
-        return result;
+        if (t.Shape.Rank != 4) return;
+        int channels = (int)t.Shape[1];
+        int spatial = (int)(t.Shape[2] * t.Shape[3]);
+        float* ptr = (float*)t.DataPointer;
+        for (int c = 0; c < channels; c++)
+        {
+            float min = float.MaxValue, max = float.MinValue, sum = 0;
+            int nan = 0, inf = 0;
+            for (int i = 0; i < spatial; i++)
+            {
+                float v = ptr[c * spatial + i];
+                if (float.IsNaN(v)) { nan++; continue; }
+                if (float.IsInfinity(v)) { inf++; continue; }
+                if (v < min) min = v;
+                if (v > max) max = v;
+                sum += v;
+            }
+            float mean = spatial > 0 ? sum / spatial : 0;
+            string flags = nan > 0 || inf > 0 ? $" nan={nan} inf={inf}" : "";
+            Logs.Verbose($"  [{name}] ch{c}: min={min:F4} max={max:F4} mean={mean:F4}{flags}");
+        }
     }
 
     private void ThrowIfDisposed()

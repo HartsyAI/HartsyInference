@@ -239,10 +239,11 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
             latent.Dispose();
         }
 
-        Tensor image = _vaeDecoder.Decode(_backend, vaeInput);
+        // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
+        Tensor image = _vaeDecoder.DecodeTiled(_backend, vaeInput);
         vaeInput.Dispose();
         vaeSw.Stop();
-        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+        Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();

@@ -15,6 +15,12 @@ public static class Logs
     public static LogLevel MinLevel { get; set; } = LogLevel.Info;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Verbose(string message)
+    {
+        if (MinLevel <= LogLevel.Verbose) Write(LogLevel.Verbose, message);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Debug(string message)
     {
         if (MinLevel <= LogLevel.Debug) Write(LogLevel.Debug, message);
@@ -53,6 +59,7 @@ public static class Logs
 
         string prefix = level switch
         {
+            LogLevel.Verbose => "[VRB]",
             LogLevel.Debug => "[DBG]",
             LogLevel.Info => "[INF]",
             LogLevel.Warning => "[WRN]",

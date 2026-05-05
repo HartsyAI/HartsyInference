@@ -1428,9 +1428,25 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Splits <paramref name="input"/> into <paramref name="outputs"/> along
+    /// <paramref name="dim"/>. Used by <c>VaeEncoder</c> to pull <c>mu</c> off the
+    /// concatenated <c>[mu, logvar]</c> moments tensor, and by any future architecture
+    /// that needs strided slicing along a single axis.
+    ///
+    /// <para>Implementation: delegates to the CPU kernel. Split is pure memcpy with no
+    /// arithmetic, so no compute kernel is needed. Accessing <c>input.DataPointer</c>
+    /// triggers a GPU→CPU sync via the cached-activation callback (transparent — the
+    /// first DataPointer read of any GPU-resident tensor pulls it back), the slice runs
+    /// as native memcpys, and the next op that touches <c>outputs[k]</c> uploads it
+    /// back through the normal <c>CopyToDevice</c> path. There's a minor perf cost
+    /// (one round-trip instead of staying on-GPU) but Split is rare in our pipelines
+    /// — exactly one call per VAE encode — so a GPU-native cuMemcpyDtoD implementation
+    /// is a future optimization, not a correctness requirement. TODO: GPU-native Split
+    /// using cuMemcpyDtoDAsync per output slice on the compute stream.</para>
+    /// </summary>
     public void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
     {
-        throw new NotImplementedException("CUDA Split not yet implemented");
+        SharpInference.Cpu.Kernels.ElementWiseKernels.Split(outputs, input, dim);
     }
 
     // ── Sampling -------------------------------------------------------------

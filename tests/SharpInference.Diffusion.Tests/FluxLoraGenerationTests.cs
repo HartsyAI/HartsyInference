@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using SharpInference.Core.Tensors;
 using SharpInference.Cpu;
-using SharpInference.Cuda;
+using SharpInference.Vulkan;
 using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Models.Vae;
@@ -46,7 +46,7 @@ public sealed class FluxLoraGenerationTests
         RunFluxLoraTest(FluxAiToolkitLoraPath, "FLUX_AITOOLKIT_LORA_PATH", LoraFormat.AiToolkitFlux, "aitk_lora");
     }
 
-    /// <summary>GPU end-to-end visual diff. Generates the same prompt+seed twice — once baseline (no LoRA), once with the yearbook LoRA merged into the FP8 transformer weights via LoraStack. Saves both BMPs side-by-side so the LoRA effect can be visually confirmed. Skips when FLUX_DIFFUSERS_LORA_PATH (or FLUX_AITOOLKIT_LORA_PATH) is not set or the PTX directory is missing.</summary>
+    /// <summary>GPU end-to-end visual diff (Vulkan backend). Generates the same prompt+seed twice — once baseline (no LoRA), once with the yearbook LoRA merged into the FP8 transformer weights via LoraStack. Saves both BMPs side-by-side so the LoRA effect can be visually confirmed. Skips when FLUX_DIFFUSERS_LORA_PATH (or FLUX_AITOOLKIT_LORA_PATH) is not set.</summary>
     [Fact]
     public void Yearbook_Flux_BaselineVsLora_GenerateImage_Gpu()
     {
@@ -72,14 +72,6 @@ public sealed class FluxLoraGenerationTests
             return;
         }
 
-        string assemblyDir = Path.GetDirectoryName(typeof(FluxLoraGenerationTests).Assembly.Location)!;
-        string ptxDir = Path.Combine(assemblyDir, "Ptx");
-        if (!Directory.Exists(ptxDir))
-        {
-            _output.WriteLine($"SKIPPED: PTX directory not found: {ptxDir}");
-            return;
-        }
-
         Stopwatch totalSw = Stopwatch.StartNew();
 
         _output.WriteLine($"[1/9] Loading Flux checkpoint (mmap, FP8 native): {Path.GetFileName(FluxSingleFilePath)}");
@@ -98,7 +90,7 @@ public sealed class FluxLoraGenerationTests
             FluxConfig config = hasG ? FluxConfig.Dev : FluxConfig.Schnell;
             _output.WriteLine($"  Architecture: {dB} double + {sB} single, guidance={hasG}");
 
-            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            using VulkanBackend backend = new();
 
             using ClipTokenizer clipTokenizer = new(TokenizerVocabPath, TokenizerMergesPath);
             using T5Tokenizer t5Tokenizer = new(T5SpieceModelPath, maxLength: 256);
@@ -111,8 +103,8 @@ public sealed class FluxLoraGenerationTests
             TextToImageRequest request = new()
             {
                 Prompt = prompt,
-                Width = 512,
-                Height = 512,
+                Width = 256,
+                Height = 256,
                 Steps = 4,
                 Seed = 42,
             };

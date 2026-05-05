@@ -186,12 +186,14 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         if (_t5 is not null) _backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. VAE decode ───────────────────────────────────────────────
-        Logs.Info("Decoding latents to image...");
+        // Tiled decode: caps im2col workspace at ~2.4 GB per tile. Internal fast-path
+        // skips tiling when the latent fits in a single tile, so small images pay no overhead.
+        Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(_backend, latent);
+        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent);
         latent.Dispose();
         vaeSw.Stop();
-        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+        Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         // ── 6. Convert to RGB bytes ─────────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);

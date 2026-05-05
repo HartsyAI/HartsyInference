@@ -192,12 +192,13 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         unBn.Dispose();
 
         // ── 8. VAE decode: [B, 32, latH, latW] → [B, 3, imgH, imgW] ──
-        Logs.Info("Decoding latents...");
+        // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
+        Logs.Verbose("Decoding latents (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.Decode(_backend, latent32);
+        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent32);
         latent32.Dispose();
         vaeSw.Stop();
-        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+        Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         // ── 9. RGB conversion ─────────────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);

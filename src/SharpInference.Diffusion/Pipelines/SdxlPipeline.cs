@@ -148,7 +148,7 @@ public sealed unsafe class SdxlPipeline : IDisposable
         // 6. VAE decode — free UNet weights to reclaim VRAM for high-res VAE conv2d buffers
         _backend.Sync();
         _backend.FreeWeights(_unet.EnumerateWeights());
-        Logs.Info("Decoding latents to image...");
+        Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
 
         bool vaeF16 = (_vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
@@ -160,10 +160,11 @@ public sealed unsafe class SdxlPipeline : IDisposable
             latent.Dispose();
         }
 
-        Tensor image = _vaeDecoder.Decode(_backend, vaeInput);
+        // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
+        Tensor image = _vaeDecoder.DecodeTiled(_backend, vaeInput);
         vaeInput.Dispose();
         vaeSw.Stop();
-        Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
+        Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         // 7. Convert to RGB bytes
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
