@@ -1,3 +1,5 @@
+using SharpInference.Core.Tensors;
+
 namespace SharpInference.Diffusion.Requests;
 
 /// <summary>Request parameters for text-to-image generation.</summary>
@@ -26,4 +28,7 @@ public record TextToImageRequest
 
     /// <summary>Scheduler to use. Null = default (Euler).</summary>
     public string? Scheduler { get; init; }
+
+    /// <summary>Optional pre-built initial noise tensor. When non-null, overrides the seed-based noise generator — used for cross-runtime parity tests where the same noise tensor must flow into both PyTorch and SharpInference (PyTorch's <c>torch.Generator.manual_seed</c> and SharpInference's <c>SeedGenerator</c> use different RNGs and don't agree bit-for-bit on the same seed). Pipeline takes ownership and disposes after use. Shape must match the pipeline's expected initial latent shape (txt2img path; for img2img use <see cref="ImageToImageRequest.SourceImage"/>).</summary>
+    public Tensor? InitialNoise { get; init; }
 }

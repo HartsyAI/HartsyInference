@@ -186,7 +186,7 @@ public sealed unsafe class SdxlPipeline : IDisposable
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             Tensor latent = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(latent, sourceLatent, noise, startStep);
             sourceLatent.Dispose();
@@ -194,7 +194,7 @@ public sealed unsafe class SdxlPipeline : IDisposable
             return latent;
         }
 
-        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor t2iNoise = TakeOrCreateNoise(request, latentShape, seed);
         float initSigma = scheduler.InitialNoiseSigma;
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
@@ -204,6 +204,21 @@ public sealed unsafe class SdxlPipeline : IDisposable
             return scaled;
         }
         return t2iNoise;
+    }
+
+    private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)
+    {
+        if (request.InitialNoise is not null)
+        {
+            Tensor injected = request.InitialNoise;
+            if (!injected.Shape.Equals(latentShape))
+                throw new ArgumentException($"InitialNoise shape {injected.Shape} does not match expected latent shape {latentShape}.", nameof(request));
+            if (injected.DType != DType.F32)
+                throw new ArgumentException($"InitialNoise must be F32; got {injected.DType}.", nameof(request));
+            Logs.Info($"SDXL: using injected initial noise tensor (shape={injected.Shape}); seed-based generator skipped.");
+            return injected;
+        }
+        return SeedGenerator.CreateNoise(latentShape, seed);
     }
 
     /// <summary>Runs the SDXL denoising loop from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1. Handles input-scale, F16 cast, dual-conditioning UNet, CFG, and scheduler step. Returns the final denoised F32 latent. Disposes intermediate latents along the way.</summary>

@@ -363,3 +363,34 @@ ComfyUI/PyTorch achieve ~3s/step because:
 6. Memory pooling eliminates alloc/free overhead — Phase D
 7. Kernel fusion (GroupNorm+SiLU, Conv2D+Bias+SiLU) — Phase B (~1.5-2x)
 8. Optimized attention (FlashAttention-style tiled SDPA) — future
+
+---
+
+## Native FP8 GEMM (Ada+ / SM 8.9+)
+
+### Path overview
+On Ampere (SM 8.0/8.6/8.7) the FP8 GEMM dispatch in [`CudaBackend.Linear`](../../src/SharpInference.Cuda/CudaBackend.cs) casts FP8 weights to F16 once per call and runs `cublasGemmEx` in F16. The cast adds an extra kernel launch and a transient F16 buffer the size of the weight tensor; the GEMM itself runs on F16 tensor cores.
+
+On Ada (SM 8.9: RTX 40-series, L40, L4) and Hopper (SM 9.0: H100 / GH200) the same operation can run as a native FP8 tensor-core GEMM via `cublasLtMatmul`, eliminating both the cast and the F16 staging buffer. Expected speedup vs the cast-then-F16 path is roughly **1.6× – 2×** for backbone Linear ops (weight-bound).
+
+### Implementation
+- [`CublasLtApi.cs`](../../src/SharpInference.Cuda/CublasLtApi.cs) — P/Invoke for cuBLASLt: handle, matmul-desc, matrix-layout, preference, dispatch.
+- [`Fp8GemmExecutor.cs`](../../src/SharpInference.Cuda/Fp8GemmExecutor.cs) — single-handle wrapper. Allocates a 4 MiB workspace at construction (Hopper recommends 32 MiB; tune via constants if a future Hopper benchmark warrants it). `IsSupported` is `(smMajor == 8 && smMinor >= 9) || smMajor >= 9`.
+- [`CudaBackend.Linear`](../../src/SharpInference.Cuda/CudaBackend.cs) — gated dispatch: when `EnableNativeFp8Gemm == true` AND both operands are FP8 AND output is F16 AND `Fp8Executor.IsSupported`, dispatch via `Fp8Executor.Run`. Otherwise fall through to the existing cast-to-F16 path.
+
+### Usage
+```csharp
+using CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: "...");
+if (backend.Fp8Executor.IsSupported)
+{
+    backend.EnableNativeFp8Gemm = true;
+}
+```
+The `EnableNativeFp8Gemm` flag is opt-in because the path has not yet been end-to-end validated on Ada hardware in CI (the project's primary dev box is a 12 GB RTX 3060 / SM 8.6). Once an Ada GPU is added to CI, flip the default to `true` after benchmarking against the F16 fallback for at least Flux Dev FP8 + SD3.5 Medium.
+
+### Per-tensor scale handling
+ComfyUI fp8_scaled and BFL distilled checkpoints carry a single scalar `Fp8ScaleFactor` per weight tensor. The executor folds this into the cuBLAS `alpha` parameter — exact for per-tensor scale, no extra kernel launch. If a future checkpoint format ships per-row or per-column scales, wire them via `CUBLASLT_MATMUL_DESC_A_SCALE_POINTER` (constants already in `CublasLtApi.cs`).
+
+### Validation
+- [`Fp8GemmExecutorTests`](../../tests/SharpInference.Cuda.Tests/Fp8GemmExecutorTests.cs) — gating tests confirming Ampere reports `IsSupported = false` and `Run` throws on unsupported hardware.
+- Pending on Ada hardware: accuracy test vs F16 reference (target avg_err < 1e-3), end-to-end SSIM on Flux Dev FP8 vs the F16 fallback, peak-VRAM measurement.

@@ -17,6 +17,7 @@ public sealed class CudaBackend : IBackend
     private readonly CudaStreamingWeightCache _streamingCache;
     private readonly CudaKernels? _kernels;
     private nint _cublasHandle;
+    private Fp8GemmExecutor? _fp8Executor;
     private bool _disposed;
 
     /// <summary>The device this backend targets.</summary>
@@ -40,6 +41,19 @@ public sealed class CudaBackend : IBackend
 
     /// <summary>The cuBLAS handle for GEMM operations.</summary>
     public nint CublasHandle => _cublasHandle;
+
+    /// <summary>Opt-in flag for the native cuBLASLt FP8 GEMM path on Ada+ (SM 8.9+) GPUs. Defaults to <c>false</c> — on Ampere and below the path is unsupported and the existing cast-to-F16 fallback is correct. The native path is gated on this flag because it has not been end-to-end validated on Ada hardware in CI; flip on after benchmarking against the F16 fallback.</summary>
+    public bool EnableNativeFp8Gemm { get; set; }
+
+    /// <summary>Lazily-initialized FP8 GEMM executor. Exposed for diagnostic and benchmarking callers; production GEMM dispatch goes through <see cref="MatMul"/> / <see cref="Linear"/>.</summary>
+    public Fp8GemmExecutor Fp8Executor
+    {
+        get
+        {
+            _fp8Executor ??= new Fp8GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
+            return _fp8Executor;
+        }
+    }
 
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
@@ -177,6 +191,32 @@ public sealed class CudaBackend : IBackend
             // for free during the GEMM (no extra kernel launch). Default Fp8ScaleFactor is 1.0.
             float alpha = weight.Fp8ScaleFactor;
             float beta = 0.0f;
+
+            // Native FP8 GEMM path (Ada/Hopper, opt-in). Both operands must be FP8 and the output
+            // F16 to dispatch via cublasLtMatmul. The Ampere fallback below stays the default
+            // because the native path has not been end-to-end validated on Ada in CI.
+            if (EnableNativeFp8Gemm
+                && input.DType.IsFp8 && weight.DType.IsFp8
+                && output.DType == DType.F16
+                && Fp8Executor.IsSupported)
+            {
+                Fp8Executor.Run(weight: pWeight, input: pInput, outPtr: pOutput, m: M, n: N, k: K, weightScale: alpha, stream: _stream.Handle);
+                if (bias is not null)
+                {
+                    int totalElementsFp8 = M * N;
+                    ulong biasPtr = pBias;
+                    if (output.DType != bias!.DType)
+                    {
+                        pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
+                        CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
+                        biasPtr = pBiasCast;
+                    }
+                    _kernels!.LaunchBiasAddF16(pOutput, biasPtr, N, 1, totalElementsFp8, _stream.Handle);
+                }
+                GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                cachedOutput = true;
+                return;
+            }
 
             // Joint resolution: when fp8 is in play we run the whole GEMM in F16, casting the
             // F32 activation down too. Old behaviour resolved per-operand and ended up at F32,
@@ -1630,6 +1670,12 @@ public sealed class CudaBackend : IBackend
 
             GpuTransferHelper.EvictAll();
             _kernels?.Dispose();
+
+            if (_fp8Executor is not null)
+            {
+                _fp8Executor.Dispose();
+                _fp8Executor = null;
+            }
 
             if (_cublasHandle != 0)
             {

@@ -341,7 +341,9 @@ public sealed unsafe class FluxPipeline : IDisposable
         TensorShape packedShape,
         int latentH, int latentW, int seed, int startStep)
     {
-        Tensor packedNoise = PackLatent(SeedGenerator.CreateNoise(latentShape, seed), latentH, latentW);
+        Tensor unpackedNoise = TakeOrCreateNoise(request, latentShape, seed);
+        Tensor packedNoise = PackLatent(unpackedNoise, latentH, latentW);
+        unpackedNoise.Dispose();
 
         if (request is ImageToImageRequest img2img)
         {
@@ -370,6 +372,21 @@ public sealed unsafe class FluxPipeline : IDisposable
             return scaled;
         }
         return packedNoise;
+    }
+
+    private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)
+    {
+        if (request.InitialNoise is not null)
+        {
+            Tensor injected = request.InitialNoise;
+            if (!injected.Shape.Equals(latentShape))
+                throw new ArgumentException($"InitialNoise shape {injected.Shape} does not match expected unpacked latent shape {latentShape}.", nameof(request));
+            if (injected.DType != DType.F32)
+                throw new ArgumentException($"InitialNoise must be F32; got {injected.DType}.", nameof(request));
+            Logs.Info($"Flux: using injected initial noise tensor (shape={injected.Shape}); seed-based generator skipped.");
+            return injected;
+        }
+        return SeedGenerator.CreateNoise(latentShape, seed);
     }
 
     private static void LogTensorStats(string name, Tensor tensor)

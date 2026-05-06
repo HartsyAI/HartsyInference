@@ -47,20 +47,28 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         _computeStream = computeStream;
         _uploadStream = uploadStream;
 
-        // Configure the device's default mempool to be aggressive about returning
-        // freed memory to the driver. Without this, the pool can hold many GB of
-        // reserved memory across cuMemFreeAsync calls — invisible to subsequent
-        // sync cuMemAlloc requests, manifesting as OOM mid-streaming. The default
-        // is supposed to be 0 but at least one Linux driver leaves it at "infinite"
-        // unless we set it explicitly. Stream syncs (or explicit trim) then return
-        // the bytes to the driver immediately.
+        // PROBE 2026-05-05: temporarily disabled aggressive mempool release. Hypothesis (A) from
+        // Z-Image bring-up debugging: with release-threshold 0, cuMemFreeAsync hands memory back
+        // to the driver at its stream point, where a subsequent sync cuMemAlloc can immediately
+        // reissue the same physical address while the prior op (queued earlier on the compute
+        // stream) is still in flight — last-writer-wins corruption that surfaces as full-NaN
+        // latents on Z-Image (which churns the activation cache hardest of any pipeline because
+        // its CPU-fallback RmsNorm forces ~180 GPU↔CPU round-trips per step). If the Z-Image
+        // CUDA test goes from all-black to a real image with this disabled, hypothesis A is
+        // confirmed and the proper fix is either: (1) explicit cuStreamSynchronize before sync
+        // cuMemAlloc, or (2) switch FreeDevice to use sync cuMemFree, or (3) keep the threshold
+        // but sync the compute stream inside CopyToDevice's cache-miss path. If reverting this
+        // makes Z-Image work but breaks Flux/SDXL with mid-streaming OOM, this block must be
+        // restored AND a different fix path chosen for hypothesis A.
         context.EnsureCurrent();
         CudaDriverApi.cuDeviceGetDefaultMemPool(out nint pool, context.DeviceOrdinal).ThrowOnError();
-        unsafe
-        {
-            ulong releaseThreshold = 0;
-            CudaDriverApi.cuMemPoolSetAttribute(pool, CudaDriverApi.CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, &releaseThreshold).ThrowOnError();
-        }
+        // Original code (probe disabled — restore if Flux/SDXL OOM regresses):
+        // unsafe
+        // {
+        //     ulong releaseThreshold = 0;
+        //     CudaDriverApi.cuMemPoolSetAttribute(pool, CudaDriverApi.CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, &releaseThreshold).ThrowOnError();
+        // }
+        _ = pool; // suppress unused warning during the probe
     }
 
     /// <inheritdoc/>
