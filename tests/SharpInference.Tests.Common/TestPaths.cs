@@ -114,6 +114,40 @@ public static class TestPaths
         public static string Vae           => Resolve("QWEN_IMAGE_VAE_PATH",    Path.Combine(ModelsDir, "VAE", "qwen_image_vae.safetensors"));
     }
 
+    /// <summary>Anima (Cosmos-Predict2 2B Text2Image derivative by CircleStone Labs / Comfy Org). The
+    /// transformer is shipped as a single-file safetensors (<c>anima-preview3-base.safetensors</c>);
+    /// the Qwen-3 0.6B text encoder and Qwen-Image VAE are loaded separately.</summary>
+    public static class Anima
+    {
+        public static string Preview3Base => Resolve("ANIMA_PREVIEW3_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "Anima", "anima-preview3-base.safetensors"));
+        public static string TextEncoder  => Resolve("ANIMA_TE_PATH",           Path.Combine(ModelsDir, "text_encoders", "qwen_3_06b_base.safetensors"));
+        public static string Vae          => Resolve("ANIMA_VAE_PATH",          QwenImage.Vae);
+    }
+
+    /// <summary>Kandinsky 5.0 paths. Default expects the diffusers folder layout from
+    /// <c>kandinskylab/Kandinsky-5.0-T2I-Lite-sft-Diffusers</c> with <c>transformer/</c> + <c>vae/</c>
+    /// subdirectories. The dual text encoders (Qwen2.5-VL-7B and CLIP-L) are not yet implemented in
+    /// SharpInference, so end-to-end tests rely on pre-computed embeddings stored as raw F32 binaries.</summary>
+    public static class Kandinsky5
+    {
+        /// <summary>Diffusers root for Kandinsky 5 Lite (contains transformer/, vae/, scheduler/, etc.).</summary>
+        public static string LiteDir            => Resolve("KANDINSKY5_LITE_DIR",         Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "Kandinsky-5.0-T2I-Lite-sft-Diffusers"));
+        /// <summary>Transformer subdirectory (default <c>{LiteDir}/transformer</c>).</summary>
+        public static string TransformerDir     => Resolve("KANDINSKY5_TRANSFORMER_DIR",  Path.Combine(LiteDir, "transformer"));
+        /// <summary>Standalone single-file transformer (alternative to <see cref="TransformerDir"/> for repackaged checkpoints).</summary>
+        public static string TransformerSingle  => Resolve("KANDINSKY5_TRANSFORMER_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "kandinsky5_t2i_lite.safetensors"));
+        /// <summary>VAE source. Defaults to the bundled VAE under <c>{LiteDir}/vae</c>; if missing, fall back to the standalone Flux VAE.</summary>
+        public static string Vae                => Resolve("KANDINSKY5_VAE_PATH",         Path.Combine(LiteDir, "vae", "diffusion_pytorch_model.safetensors"));
+        /// <summary>Pre-computed Qwen2.5-VL sequence embeddings (raw F32 [S_t, in_text_dim=3584]).</summary>
+        public static string PromptQwenEmbeds   => Resolve("KANDINSKY5_QWEN_EMBEDS",      Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "TestEmbeddings", "prompt_qwen.bin"));
+        /// <summary>Pre-computed CLIP-L pooled embeddings (raw F32 [in_text_dim2=768]).</summary>
+        public static string PromptClipPooled   => Resolve("KANDINSKY5_CLIP_POOLED",      Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "TestEmbeddings", "prompt_clip.bin"));
+        /// <summary>Pre-computed Qwen2.5-VL sequence embeddings for the negative prompt.</summary>
+        public static string NegPromptQwenEmbeds => Resolve("KANDINSKY5_NEG_QWEN_EMBEDS", Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "TestEmbeddings", "neg_prompt_qwen.bin"));
+        /// <summary>Pre-computed CLIP-L pooled embeddings for the negative prompt.</summary>
+        public static string NegPromptClipPooled => Resolve("KANDINSKY5_NEG_CLIP_POOLED", Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "TestEmbeddings", "neg_prompt_clip.bin"));
+    }
+
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
     public static class Sd35
     {

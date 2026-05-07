@@ -21,17 +21,23 @@ public record HunyuanImageConfig
     /// <summary>Patch size for latent→token embedding.</summary>
     public int PatchSize { get; init; } = 2;
 
-    /// <summary>Number of latent channels (32 for Hunyuan Image's 32×32 VAE).</summary>
-    public int InChannels { get; init; } = 32;
+    /// <summary>Number of latent channels (64 for Hunyuan Image, the 32× VAE outputs 64-channel latents).</summary>
+    public int InChannels { get; init; } = 64;
 
-    /// <summary>Text context dimension from the text encoder.</summary>
-    public int ContextDim { get; init; } = 4096;
+    /// <summary>Number of refiner layers in the MLLM context embedder (<c>HunyuanImageTokenRefiner</c>). Default 2.</summary>
+    public int NumRefinerLayers { get; init; } = 2;
 
-    /// <summary>Pooled projection dimension from CLIP-like encoder.</summary>
-    public int PooledProjectionDim { get; init; } = 1024;
+    /// <summary>Primary text context dimension (Qwen2.5-VL MLLM hidden size).</summary>
+    public int TextEmbedDim { get; init; } = 4096;
+
+    /// <summary>Optional secondary text context dimension (ByT5 glyph encoder). Null when only the primary encoder is used.</summary>
+    public int? TextEmbedDim2 { get; init; }
 
     /// <summary>RoPE base frequency for positional encoding.</summary>
-    public int RopeTheta { get; init; } = 10000;
+    public float RopeTheta { get; init; } = 256.0f;
+
+    /// <summary>Per-axis RoPE dim split (height, width). Must sum to <see cref="HeadDim"/>.</summary>
+    public int[] RopeAxesDim { get; init; } = [64, 64];
 
     /// <summary>Whether to embed guidance scale via MLP (true for full model, false for distilled).</summary>
     public bool GuidanceEmbed { get; init; } = true;
@@ -53,8 +59,14 @@ public record HunyuanImageConfig
         HeadDim = 128,
         NumDoubleBlocks = 20,
         NumSingleBlocks = 40,
-        InChannels = 32,
+        NumRefinerLayers = 2,
+        PatchSize = 1,
+        InChannels = 64,
+        TextEmbedDim = 4096,
+        TextEmbedDim2 = 1472,
         GuidanceEmbed = true,
+        RopeTheta = 256.0f,
+        RopeAxesDim = [64, 64],
     };
 
     /// <summary>Hunyuan Image 2.1 distilled preset (faster, fewer steps).</summary>
@@ -65,7 +77,13 @@ public record HunyuanImageConfig
         HeadDim = 128,
         NumDoubleBlocks = 20,
         NumSingleBlocks = 40,
-        InChannels = 32,
+        NumRefinerLayers = 2,
+        PatchSize = 1,
+        InChannels = 64,
+        TextEmbedDim = 4096,
+        TextEmbedDim2 = 1472,
         GuidanceEmbed = false,
+        RopeTheta = 256.0f,
+        RopeAxesDim = [64, 64],
     };
 }

@@ -77,15 +77,21 @@ public sealed unsafe class ZImageRope
         }
     }
 
-    /// <summary>Applies RoPE rotation to Q/K in-place. Q/K shape [B, numHeads, seqLen, headDim]. <see cref="Precompute"/> must have been called with matching seqLen.</summary>
+    /// <summary>Applies RoPE rotation to Q/K in-place when both share the same head count (full MHA). Q/K shape [B, numHeads, seqLen, headDim]. <see cref="Precompute"/> must have been called with matching seqLen.</summary>
     public void Forward(Tensor q, Tensor k, int batch, int numHeads, int seqLen)
+    {
+        ForwardSingle(q, batch, numHeads, seqLen);
+        ForwardSingle(k, batch, numHeads, seqLen);
+    }
+
+    /// <summary>Applies RoPE rotation to a single tensor in-place. Tensor shape [B, numHeads, seqLen, headDim]. Used when Q and K have different head counts (GQA — call once per tensor with its own head count).</summary>
+    public void ForwardSingle(Tensor t, int batch, int numHeads, int seqLen)
     {
         if (_cosCache == null || _sinCache == null)
             throw new InvalidOperationException("ZImageRope.Precompute must be called before Forward.");
 
         int halfDim = _headDim / 2;
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
+        float* tPtr = (float*)t.DataPointer;
 
         fixed (float* cosPtr = _cosCache, sinPtr = _sinCache)
         {
@@ -97,9 +103,7 @@ public sealed unsafe class ZImageRope
                     {
                         int vecOffset = ((b * numHeads + h) * seqLen + s) * _headDim;
                         int freqIdx = s * halfDim;
-
-                        ApplyRotation(qPtr + vecOffset, cosPtr + freqIdx, sinPtr + freqIdx, halfDim);
-                        ApplyRotation(kPtr + vecOffset, cosPtr + freqIdx, sinPtr + freqIdx, halfDim);
+                        ApplyRotation(tPtr + vecOffset, cosPtr + freqIdx, sinPtr + freqIdx, halfDim);
                     }
                 }
             }

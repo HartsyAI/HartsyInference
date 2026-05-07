@@ -185,4 +185,55 @@ public record LlamaStyleEncoderConfig
         EosTokenId = 151645,
         BosTokenId = 151643,
     };
+
+    /// <summary>Qwen2.5-VL-3B preset (text-only path) as packaged for OmniGen2: 36 layers, hidden=2048, GQA 16:2, head_dim=128, intermediate=11008, vocab=151936. Verified against <c>OmniGen2/OmniGen2/mllm/config.json</c>: <c>num_hidden_layers=36, num_attention_heads=16, num_key_value_heads=2, hidden_size=2048, intermediate_size=11008, rms_norm_eps=1e-6, rope_theta=1e6</c>. The vision adapter is ignored for pure t2i (the OmniGen2 transformer's <c>text_feat_dim=2048</c> matches the text-encoder hidden directly). M-RoPE collapsed to standard RoPE for the text-only forward path.</summary>
+    public static LlamaStyleEncoderConfig Qwen2_5_VL_3B => new()
+    {
+        HiddenSize = 2048,
+        NumLayers = 36,
+        NumQueryHeads = 16,
+        NumKvHeads = 2,
+        HeadDim = 128,
+        IntermediateSize = 11008,
+        VocabSize = 151936,
+        RmsNormEps = 1e-6f,
+        RopeTheta = 1_000_000f,
+        MaxPositionEmbeddings = 128000,
+        QkHeadNorm = false,
+        AttentionBias = true,
+        HasFinalNorm = true,
+        EosTokenId = 151645,
+        BosTokenId = 151643,
+    };
+
+    /// <summary>Gemma 2 2B preset (Lumina-Image-2.0 text encoder). 26 layers, hidden=2304, GQA 8:4,
+    /// head_dim=256 (note: hidden=2304 != heads*head_dim=2048 — Gemma 2 uses an oversized head_dim
+    /// distinct from hidden_size, projected back via the o_proj weight), intermediate=9216,
+    /// vocab=256000. RMSNorm eps 1e-6, RoPE theta 10000, no attention bias.
+    /// <para>Caveats vs vanilla Llama family: Gemma 2 uses GeGLU (GELU(gate)*up) rather than SwiGLU,
+    /// applies a fixed query pre-attention scalar of sqrt(256), softcaps attention logits at 50.0,
+    /// alternates sliding-window attention (4096), and uses pre+post norms on both attention and FFN
+    /// (4 RMSNorms per block). The current <see cref="LlamaStyleEncoder"/> assumes SwiGLU + 2 norms +
+    /// no softcap — running Gemma 2 weights through it as-is will not produce reference-correct text
+    /// embeddings. The preset is provided for downstream pipelines (Lumina 2.0) that pre-compute
+    /// Gemma 2 embeddings via a Gemma-2-aware encoder; the <see cref="LlamaStyleEncoder"/> path is
+    /// approximate. Verified against <c>Alpha-VLLM/Lumina-Image-2.0/text_encoder/config.json</c>.</summary>
+    public static LlamaStyleEncoderConfig Gemma2_2B => new()
+    {
+        HiddenSize = 2304,
+        NumLayers = 26,
+        NumQueryHeads = 8,
+        NumKvHeads = 4,
+        HeadDim = 256,
+        IntermediateSize = 9216,
+        VocabSize = 256000,
+        RmsNormEps = 1e-6f,
+        RopeTheta = 10_000f,
+        MaxPositionEmbeddings = 8192,
+        QkHeadNorm = false,
+        AttentionBias = false,
+        HasFinalNorm = true,
+        EosTokenId = 1,
+        BosTokenId = 2,
+    };
 }
