@@ -265,11 +265,11 @@ internal static unsafe class GpuTransferHelper
         FreeAllCached();
     }
 
-    /// <summary>Computes the byte size of a tensor's data.</summary>
+    /// <summary>Computes the byte size of a tensor's data. Uses <see cref="DType.ComputeByteCount"/> so quantized tensors (Q4_K, Q5_K, Q8_0, etc.) report their true on-disk byte count rather than <c>elementCount * 0</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static nuint ByteSize(Tensor tensor)
     {
-        return (nuint)(tensor.ElementCount * tensor.DType.SizeInBytes);
+        return (nuint)tensor.DType.ComputeByteCount(tensor.ElementCount);
     }
 
     /// <summary>Returns GPU cache statistics.</summary>

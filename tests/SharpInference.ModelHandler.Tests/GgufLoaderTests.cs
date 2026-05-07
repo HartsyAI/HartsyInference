@@ -94,7 +94,7 @@ public sealed unsafe class GgufLoaderTests : IDisposable
         using (FileStream fs = new(filePath, FileMode.Create, FileAccess.Write))
         using (BinaryWriter writer = new(fs))
         {
-            writer.Write((uint)0x46475547); // "GGUF" magic
+            writer.Write((uint)0x46554747); // "GGUF" magic
             writer.Write((uint)99);          // unsupported version
             writer.Write((ulong)0);          // tensor count
             writer.Write((ulong)0);          // metadata kv count
@@ -164,7 +164,7 @@ public sealed unsafe class GgufLoaderTests : IDisposable
         using BinaryWriter writer = new(fs);
 
         // Magic
-        writer.Write((uint)0x46475547);
+        writer.Write((uint)0x46554747);
 
         // Version 3
         writer.Write((uint)3);

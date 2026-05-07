@@ -82,6 +82,30 @@ public record LlamaStyleEncoderConfig
         BosTokenId = 151643,
     };
 
+    /// <summary>Qwen3-8B preset (36 layers, hidden=4096, GQA 32:8, head_dim=128, intermediate=12288,
+    /// vocab=151936). Same Qwen3 family as 4B — only hidden + intermediate change.
+    /// Used by Flux.2 Klein 9B (`Comfy-Org/flux2-klein-9B/.../qwen_3_8b_*.safetensors`).
+    /// Note: Comfy distributes this as fp4-mixed; SharpInference doesn't yet support FP4 GEMM,
+    /// so this preset is currently usable only with fp8 / fp16 Qwen3-8B variants.</summary>
+    public static LlamaStyleEncoderConfig Qwen3_8B => new()
+    {
+        HiddenSize = 4096,
+        NumLayers = 36,
+        NumQueryHeads = 32,
+        NumKvHeads = 8,
+        HeadDim = 128,
+        IntermediateSize = 12288,
+        VocabSize = 151936,
+        RmsNormEps = 1e-6f,
+        RopeTheta = 1_000_000f,
+        MaxPositionEmbeddings = 40960,
+        QkHeadNorm = true,
+        AttentionBias = false,
+        HasFinalNorm = true,
+        EosTokenId = 151645,
+        BosTokenId = 151643,
+    };
+
     /// <summary>
     /// Mistral-Small-3 (BFL Flux.2 Dev distill) preset: 30 layers, hidden=5120, GQA 32:8,
     /// head_dim=128, IntermediateSize=32768 (~6.4× ratio — wider FFN than standard Mistral),
@@ -140,5 +164,25 @@ public record LlamaStyleEncoderConfig
         HasFinalNorm = true,
         EosTokenId = 2,
         BosTokenId = 1,
+    };
+
+    /// <summary>Qwen2.5-VL-7B preset (text-only path): 28 layers, hidden=3584, GQA 28:4, head_dim=128, intermediate=18944, vocab=152064. Matches diffusers' `Qwen2_5_VLForConditionalGeneration` config (text encoder portion); the vision adapter is ignored for pure text conditioning of Qwen-Image. RoPE uses Qwen2's M-RoPE — for text-only forward we collapse to standard RoPE which is correct for non-multimodal usage. RMSNorm eps 1e-6, theta 1M (same as Qwen3).</summary>
+    public static LlamaStyleEncoderConfig Qwen2_5_VL_7B => new()
+    {
+        HiddenSize = 3584,
+        NumLayers = 28,
+        NumQueryHeads = 28,
+        NumKvHeads = 4,
+        HeadDim = 128,
+        IntermediateSize = 18944,
+        VocabSize = 152064,
+        RmsNormEps = 1e-6f,
+        RopeTheta = 1_000_000f,
+        MaxPositionEmbeddings = 32768,
+        QkHeadNorm = false,
+        AttentionBias = true,
+        HasFinalNorm = true,
+        EosTokenId = 151645,
+        BosTokenId = 151643,
     };
 }

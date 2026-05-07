@@ -1,7 +1,7 @@
 # Model Implementation Status
 
 Snapshot of where each non-LLM image-generation model stands in SharpInference.
-Last updated: 2026-05-02 session — AuraFlow / Chroma / ERNIE-Image push.
+Last updated: 2026-05-07 session — Qwen-Image full scaffold + ERNIE-Image audit.
 
 For architecture details, deviations, and per-model task lists, see
 [PHASE_4_MODEL_BREADTH.md](PHASE_4_MODEL_BREADTH.md) and
@@ -25,9 +25,9 @@ For architecture details, deviations, and per-model task lists, see
 | **Flux.2 Klein 4B** | ✅ | done | passes | Clean astronaut. |
 | **Flux.2 Dev (32B)** | 🔧 | done | blocked | Won't fit on 12 GB without GGUF Q4 + per-block streaming. |
 | **AuraFlow v0.3** | 🔧 | done | scaffolded | Full impl green (~1650 lines + diff harness). Awaits checkpoint download. |
-| **Qwen-Image** | 🚧 | stub | n/a | 20B MMDiT. Needs custom block + complex RoPE + Wan-style 3D causal-conv VAE + Qwen2.5-VL text encoder + GGUF reader. ~2500-3000 lines. |
+| **Qwen-Image** | 🔧 | done | scaffolded | Full impl green (~1419 lines): `QwenImageBlock` (dual-stream, 6-output AdaLN per stream, joint `[txt,img]` attention concat, GELU FFN, QK-norm) + `QwenImageRope` (3-axis [16,56,56] per-stream pre-concat) + `QwenImageTransformer` (img_in / txt_norm / txt_in / sinusoidal+MLP timestep / 60-block stack / `[shift,scale]` AdaLN-Continuous final / unpatchify) + `QwenImageDebugDump` + `QwenImagePipeline` (Qwen2.5-VL text encode → 2×2 patch pack → flow-match Euler → optional CFG → FreeWeights → 16-channel VAE) + `QwenImageCheckpointConverter` (diffusers single-file with fused-QKV split + FP8 scale folding) + `QwenImageGenerationTests` with VRAM probe. Awaits ≥22 GB free VRAM (FP8 stock) or Q4_K GGUF. |
 | **Chroma** | 🔧 | done | scaffolded | Full impl green (~2350 lines): `ChromaApproximator` (5-layer SiLU+RMSNorm MLP) + `ChromaCombinedTimestepEmbeddings` + pruned-AdaLN double + single block variants + `ChromaTransformer` + `ChromaCheckpointConverter` (BFL→diffusers) + T5-only `ChromaPipeline` (with "first padding token unmasked" mask + true-CFG dual-pass) + `ChromaDebugDump` + `ChromaGenerationTests`. All `Forward` methods implemented (zero `NotImplementedException`). Awaits `chroma_v1.safetensors` download. |
-| **ERNIE-Image** | 🔧 | done | scaffolded | Full impl green (~2090 lines): non-interleaved 3-axis `ErnieImageRope` (axes 32/48/48, theta=256, image-position offset by `text_lens`) + `ErnieImagePatchEmbed` (1×1 Conv2d) + `ErnieImageBlock` (single-stream w/ shared modulation) + `ErnieImageTransformer` + `ErnieImageCheckpointConverter` (diffusers folder layout) + `ErnieImagePipeline` (Flux2-style BN-unnormalize + standard CFG) + `IErnieTextEncoder` interface + `ErnieImagePlaceholderTextEncoder` (throws `NotSupportedException` with "plug in real encoder" message) + `ErnieImageLlamaTextEncoder` (Llama-shaped fallback wrapping `LlamaStyleEncoder` with `hidden_states[-2]`) + `ErnieImageDebugDump` + `ErnieImageGenerationTests`. Awaits `baidu/ERNIE-Image` download + verification of the actual text encoder architecture (placeholder/Llama fallback may need replacing). |
+| **ERNIE-Image** | 🔧 | done | scaffolded | Full impl green (~2090 lines): non-interleaved 3-axis `ErnieImageRope` (axes 32/48/48, theta=256, image-position offset by `text_lens`) + `ErnieImagePatchEmbed` (1×1 Conv2d) + `ErnieImageBlock` (single-stream w/ shared modulation) + `ErnieImageTransformer` + `ErnieImageCheckpointConverter` (accepts both diffusers and Comfy-Org folder layouts) + `ErnieImagePipeline` (Flux2-style BN-unnormalize + standard CFG) + `IErnieTextEncoder` interface + `ErnieImageLlamaTextEncoder` (Ministral 3B per the Baidu repo's `text_encoder/config.json`) + `ErnieImageDebugDump` + `ErnieImageGenerationTests` with VRAM probe (skips below 14 GB free). Awaits ≥14 GB free VRAM for FP16 stock or Q4_K GGUF (`unsloth/ERNIE-Image-GGUF`). |
 | **Hunyuan Image 2.1** | 🚧 | stub | n/a | 17B MMDiT, 32×32 VAE downscale. Scaffolding only. |
 | **Anima / OmniGen 2 / Lumina 2.0 / HiDream / Kandinsky 5 / F-Lite** | ❌ | n/a | n/a | Not started. |
 
@@ -62,20 +62,28 @@ To get a 🔧 model to ✅:
 
 ### ERNIE-Image
 1. Download `baidu/ERNIE-Image` diffusers folder layout (~31.6 GB total) →
-   `Models/Stable-Diffusion/ErnieImage/v1/`.
-2. **Critical**: `text_encoder/config.json` will reveal the custom Baidu encoder
-   architecture. The C# pipeline currently has a placeholder `IErnieTextEncoder`
-   interface — implement the concrete class once the architecture is confirmed.
+   `Models/Stable-Diffusion/ErnieImage/v1/`. Or grab a Q4_K GGUF dump from
+   `unsloth/ERNIE-Image-GGUF` (~5 GB transformer; fits 12 GB GPU).
+2. The Ministral 3B text encoder is already wired in via `LlamaStyleEncoder`.
+   No additional encoder code is needed.
 3. Reuse the existing Flux2-style 128-channel VAE (`VaeConfig.Flux2`).
 4. `dotnet test --filter ErnieImageGenerationTests` → iterate via
    `dump_ernie_image_full_forward.py` + `diff_ernie_image_layers.py`.
 
+### Qwen-Image
+1. Download `Qwen/Qwen-Image` diffusers single-file (FP8, ~20 GB transformer) +
+   Qwen2.5-VL-7B text encoder (~15 GB BF16) + the 16-channel Qwen-Image VAE →
+   point `TestPaths.QwenImage.{V1, TextEncoder, Vae}` at the files. Or wait for a
+   Q4_K GGUF dump — the GGUF backend is ready.
+2. Set the Qwen3 BPE tokenizer assets (already vendored via `Qwen3Tokenizer`).
+3. `dotnet test --filter QwenImage_V1_Gpu_512_NoCfg_Smoke` (skips on <22 GB free VRAM).
+4. Author `dump_qwenimage_full_forward.py` and walk the `QwenImageDebugDump` hooks
+   to fix any first-run plumbing bugs (expect 1-3 iterations per past patterns).
+
 ## Pending unblockers
 
-- **GGUF K-quant reader** (Q4_K_M, Q5_K_M, Q8_0). Would unlock 12-GB-fitting variants
-  of Qwen-Image, AuraFlow, Chroma, ERNIE-Image, Flux.2 Dev, and SD3.5 Large. Estimated
-  1-2 days of focused work — implement K-quant block dequant kernels in
-  `SharpInference.ModelHandler` mirroring `ggml-quants.c`.
-- **Per-block weight streaming** for Flux.2 Dev (32B) — requires a substantial
-  refactor of the GPU weight cache to support eviction-on-demand per layer.
-- **Anima / Lumina 2.0 / OmniGen 2** — unique architectures, no scaffolding yet.
+- **Per-block weight streaming** for Flux.2 Dev (32B) and stock-FP8 Qwen-Image — would
+  let large models run on 12 GB cards by uploading-running-freeing one block at a time.
+  Requires a substantial refactor of the GPU weight cache. Cost: PCIe-bound runtime.
+- **Anima / Lumina 2.0 / OmniGen 2** — unique architectures, no scaffolding yet. Out of
+  scope for the current image-model push (defer to a follow-up phase).

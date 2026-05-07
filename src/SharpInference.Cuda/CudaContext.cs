@@ -148,6 +148,17 @@ public sealed class CudaContext : IDisposable
         CudaDriverApi.cuCtxSynchronize().ThrowOnError();
     }
 
+    /// <summary>Queries free / total device memory via <c>cuMemGetInfo</c>. Free memory is what's
+    /// actually allocatable right now — it accounts for VRAM held by other processes (e.g. another
+    /// app's CUDA context, the X server, browser GPU acceleration). Use this for fail-skip
+    /// decisions in tests on memory-constrained hosts.</summary>
+    public (nuint freeBytes, nuint totalBytes) GetMemoryInfo()
+    {
+        EnsureCurrent();
+        CudaDriverApi.cuMemGetInfo(out nuint free, out nuint total).ThrowOnError();
+        return (free, total);
+    }
+
     /// <summary>Returns the number of CUDA-capable devices in the system.</summary>
     public static int GetDeviceCount()
     {

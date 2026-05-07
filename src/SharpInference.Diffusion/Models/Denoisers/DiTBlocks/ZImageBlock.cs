@@ -105,6 +105,7 @@ public sealed unsafe class ZImageBlock
         // ── AdaLN: Linear(t_emb) → split into 4 along last dim ──
         Tensor[] mod = ComputeAdaLN(backend, tEmb, batch);
 
+
         // ── Attention sub-block ──
         Tensor norm1 = new Tensor(shape, x.DType);
         backend.RmsNorm(norm1, x, _attnNorm1Weight!, _eps);

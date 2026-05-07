@@ -93,6 +93,16 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _castF32ToBf16;
     private readonly nint _castF16ToF8E4M3;
 
+    // ── GGUF Dequant Modules + Handles ───────────────────────────────────
+    private readonly CudaModule _dequantQ8_0Module;
+    private readonly nint _dequantQ8_0ToF16;
+    private readonly CudaModule _dequantQ4_KModule;
+    private readonly nint _dequantQ4_KToF16;
+    private readonly CudaModule _dequantQ5_KModule;
+    private readonly nint _dequantQ5_KToF16;
+    private readonly CudaModule _dequantQ6_KModule;
+    private readonly nint _dequantQ6_KToF16;
+
     private const uint BlockSize = 256;
 
     /// <summary>Loads all PTX kernels from the specified directory.</summary>
@@ -188,6 +198,16 @@ public sealed class CudaKernels : IDisposable
         _castBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "cast_bf16_f32.ptx"));
         _castBf16ToF32 = _castBf16Module.GetFunction("cast_bf16_to_f32");
         _castF32ToBf16 = _castBf16Module.GetFunction("cast_f32_to_bf16");
+
+        // ── GGUF Dequant ─────────────────────────────────────────────────
+        _dequantQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
+        _dequantQ8_0ToF16 = _dequantQ8_0Module.GetFunction("dequant_q8_0_to_f16");
+        _dequantQ4_KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q4_k_to_f16.ptx"));
+        _dequantQ4_KToF16 = _dequantQ4_KModule.GetFunction("dequant_q4_k_to_f16");
+        _dequantQ5_KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q5_k_to_f16.ptx"));
+        _dequantQ5_KToF16 = _dequantQ5_KModule.GetFunction("dequant_q5_k_to_f16");
+        _dequantQ6_KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q6_k_to_f16.ptx"));
+        _dequantQ6_KToF16 = _dequantQ6_KModule.GetFunction("dequant_q6_k_to_f16");
     }
 
     // ── Private Launch Helpers ───────────────────────────────────────────
@@ -675,6 +695,59 @@ public sealed class CudaKernels : IDisposable
     public void LaunchCastF32ToBf16(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_castF32ToBf16, output, input, count, stream);
 
+    // ── GGUF Dequant Launches ────────────────────────────────────────────
+
+    /// <summary>Launches Q8_0 → F16 dequant. <paramref name="elementCount"/> is the total element count (must be a multiple of 32). Internally launches one CUDA block per Q8_0 quant block (32 elements), 32 threads per CUDA block.</summary>
+    public unsafe void LaunchDequantQ8_0ToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 32 != 0)
+            throw new ArgumentException($"Q8_0 element count must be a multiple of 32, got {elementCount}.");
+        int superBlockCount = elementCount / 32;
+        LaunchDequantImpl(_dequantQ8_0ToF16, output, input, superBlockCount, threadsPerBlock: 32, stream);
+    }
+
+    /// <summary>Launches Q4_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>
+    public unsafe void LaunchDequantQ4_KToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 256 != 0)
+            throw new ArgumentException($"Q4_K element count must be a multiple of 256, got {elementCount}.");
+        int superBlockCount = elementCount / 256;
+        LaunchDequantImpl(_dequantQ4_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
+    }
+
+    /// <summary>Launches Q5_K → F16 dequant. Element count must be a multiple of 256.</summary>
+    public unsafe void LaunchDequantQ5_KToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 256 != 0)
+            throw new ArgumentException($"Q5_K element count must be a multiple of 256, got {elementCount}.");
+        int superBlockCount = elementCount / 256;
+        LaunchDequantImpl(_dequantQ5_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
+    }
+
+    /// <summary>Launches Q6_K → F16 dequant. Element count must be a multiple of 256. The Q6_K kernel uses 64 threads per CUDA block — each thread emits 4 elements at strides {0, +32, +64, +96} (2 halves × 32 l-values = 64 threads cover all 256 elements).</summary>
+    public unsafe void LaunchDequantQ6_KToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 256 != 0)
+            throw new ArgumentException($"Q6_K element count must be a multiple of 256, got {elementCount}.");
+        int superBlockCount = elementCount / 256;
+        LaunchDequantImpl(_dequantQ6_KToF16, output, input, superBlockCount, threadsPerBlock: 64, stream);
+    }
+
+    private unsafe void LaunchDequantImpl(nint func, ulong output, ulong input, int superBlockCount, int threadsPerBlock, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint countArg = (uint)superBlockCount;
+        void** args = stackalloc void*[3];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &countArg;
+        CudaDriverApi.cuLaunchKernel(
+            func,
+            (uint)superBlockCount, 1, 1,
+            (uint)threadsPerBlock, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     // ── Dispose ─────────────────────────────────────────────────────────
 
     private void DisposeModules()
@@ -700,6 +773,10 @@ public sealed class CudaKernels : IDisposable
         _castModule.Dispose();
         _castF8Module.Dispose();
         _castBf16Module.Dispose();
+        _dequantQ8_0Module.Dispose();
+        _dequantQ4_KModule.Dispose();
+        _dequantQ5_KModule.Dispose();
+        _dequantQ6_KModule.Dispose();
     }
 
     public void Dispose()

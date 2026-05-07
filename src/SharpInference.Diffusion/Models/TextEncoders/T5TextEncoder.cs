@@ -83,28 +83,25 @@ public sealed unsafe class T5TextEncoder : IDisposable
     /// <param name="backend">Compute backend.</param>
     /// <param name="tokenIds">Batch of token ID arrays, each of length seqLen.</param>
     /// <param name="attentionMasks">Optional batch of attention masks (1=attend, 0=pad). If null, all positions attend.</param>
-    public Tensor Encode(IBackend backend, int[][] tokenIds, int[][]? attentionMasks = null)
+    public Tensor Encode(IBackend backend, int[][] tokenIds, int[][]? attentionMasks = null) =>
+        EncodeAtLayer(backend, tokenIds, _config.NumLayers, applyFinalNorm: true, attentionMasks);
+
+    /// <summary>Runs the encoder for the first <paramref name="layerCount"/> blocks (1-indexed; pass <see cref="T5TextEncoderConfig.NumLayers"/> for the full encoder), optionally re-applying the final RMSNorm. Used by F-Lite, which conditions on <c>hidden_states[17]</c> with the final norm + dropout reapplied (dropout is a no-op in eval mode, so we skip it). Pass <paramref name="layerCount"/> = 17 to replicate F-Lite's <c>return_index = -8</c> on a 24-layer T5-XXL.</summary>
+    public Tensor EncodeAtLayer(IBackend backend, int[][] tokenIds, int layerCount, bool applyFinalNorm, int[][]? attentionMasks = null)
     {
         ThrowIfDisposed();
+        if (layerCount <= 0 || layerCount > _config.NumLayers)
+            throw new ArgumentOutOfRangeException(nameof(layerCount), $"layerCount must be in [1, {_config.NumLayers}], got {layerCount}.");
 
         int batch = tokenIds.Length;
         int seqLen = tokenIds[0].Length;
 
-        // 1. Embedding lookup
         Tensor hidden = EmbeddingLookup(tokenIds, batch, seqLen);
 
-        // 2. Build attention mask tensor if provided
-        Tensor? maskTensor = null;
-        if (attentionMasks is not null)
-        {
-            maskTensor = BuildMaskTensor(attentionMasks, batch, seqLen);
-        }
-
-        // 3. Compute relative position bias once (shared across all layers)
+        Tensor? maskTensor = attentionMasks is not null ? BuildMaskTensor(attentionMasks, batch, seqLen) : null;
         Tensor positionBias = _positionBias.ComputeBias(seqLen);
 
-        // 4. Run through 24 encoder blocks
-        for (int i = 0; i < _config.NumLayers; i++)
+        for (int i = 0; i < layerCount; i++)
         {
             Tensor blockOutput = _blocks[i].Forward(backend, hidden, positionBias, maskTensor);
             hidden.Dispose();
@@ -113,12 +110,12 @@ public sealed unsafe class T5TextEncoder : IDisposable
 
         maskTensor?.Dispose();
 
-        // 5. Final RMSNorm
+        if (!applyFinalNorm) return hidden;
+
         TensorShape outShape = new TensorShape(batch, seqLen, _config.DModel);
         Tensor output = new Tensor(outShape, DType.F32);
         backend.RmsNorm(output, hidden, _finalNormWeight!, _config.LayerNormEpsilon);
         hidden.Dispose();
-
         return output;
     }
 

@@ -6,7 +6,7 @@ namespace SharpInference.ModelHandler.Gguf;
 /// <summary>Loads GGUF files via memory-mapping, parsing the header, metadata, and tensor descriptors. GGUF format: magic(4) + version(4) + tensor_count(8) + metadata_kv_count(8) + metadata + tensor_infos + padding + tensor_data.</summary>
 public sealed class GgufLoader : IDisposable
 {
-    private const uint GgufMagic = 0x46475547; // "GGUF" in LE
+    private const uint GgufMagic = 0x46554747; // "GGUF" bytes 47 47 55 46 read as little-endian uint32
     private const int SupportedVersion = 3;
 
     private MmapHandle? _handle;
@@ -249,13 +249,38 @@ public sealed class GgufLoader : IDisposable
         return (value, 8 + (long)length);
     }
 
+    /// <summary>Maps GGUF/ggml tensor type IDs to <see cref="DType"/>. IDs follow `enum ggml_type` in ggml.h. Variants like Q4_K_S/M/L share the same block layout (id=12) — the per-tensor mix policy is encoded in the file metadata, not the type ID.
+    ///
+    /// <para>Note: <see cref="DType"/> registration ≠ codec availability. A type ID can be mapped here while the corresponding codec in <see cref="Codecs.GgufCodecRegistry"/> is still pending. Caller will get an explicit "no codec registered" error from the registry rather than a silent corruption.</para></summary>
     private static DType MapGgufType(uint ggufType) => ggufType switch
     {
         0 => DType.F32,
         1 => DType.F16,
+        2 => DType.Q4_0,
+        3 => DType.Q4_1,
+        6 => DType.Q5_0,
+        7 => DType.Q5_1,
         8 => DType.Q8_0,
-        14 => DType.Q4_K,  // Q4_K_M
-        _ => DType.F32,    // Unknown types default to F32; dequantizer handles specifics
+        9 => DType.Q8_1,
+        10 => DType.Q2_K,
+        11 => DType.Q3_K,
+        12 => DType.Q4_K,
+        13 => DType.Q5_K,
+        14 => DType.Q6_K,
+        15 => DType.Q8_K,
+        16 => DType.IQ2_XXS,
+        17 => DType.IQ2_XS,
+        18 => DType.IQ3_XXS,
+        19 => DType.IQ1_S,
+        20 => DType.IQ4_NL,
+        21 => DType.IQ3_S,
+        22 => DType.IQ2_S,
+        23 => DType.IQ4_XS,
+        29 => DType.IQ1_M,
+        30 => DType.BF16,
+        31 => DType.TQ1_0,
+        32 => DType.TQ2_0,
+        _ => throw new SharpInference.Core.Exceptions.SharpInferenceException($"Unsupported GGUF tensor type: {ggufType}. See ggml.h enum ggml_type."),
     };
 
     private static long AlignUp(long value, long alignment)

@@ -136,7 +136,7 @@ public sealed class CudaBackend : IBackend
             ulong aPtr = CastIfNeeded(pA, a.DType, gemmDtype, (int)a.ElementCount, out pACast);
             ulong bPtr = CastIfNeeded(pB, b.DType, gemmDtype, (int)b.ElementCount, out pBCast);
 
-            int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int gemmType = CublasDataType(gemmDtype);
             int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
             CublasApi.cublasGemmEx(
@@ -226,7 +226,7 @@ public sealed class CudaBackend : IBackend
             ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
             ulong weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
 
-            int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int gemmType = CublasDataType(gemmDtype);
             int outputType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
             // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
@@ -310,7 +310,7 @@ public sealed class CudaBackend : IBackend
             ulong aPtr = CastIfNeeded(pA, a.DType, gemmDtype, (int)a.ElementCount, out pACast);
             ulong bPtr = CastIfNeeded(pB, b.DType, gemmDtype, (int)b.ElementCount, out pBCast);
 
-            int gemmType = gemmDtype == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int gemmType = CublasDataType(gemmDtype);
             int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
             CublasApi.cublasGemmStridedBatchedEx(
@@ -396,7 +396,7 @@ public sealed class CudaBackend : IBackend
 
             ulong weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
 
-            int gemmType = inputIsF16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int gemmType = CublasDataType(gemmDtype);
             int gemmOutType = outputIsF16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
             for (int b = 0; b < batch; b++)
@@ -1116,6 +1116,19 @@ public sealed class CudaBackend : IBackend
         return dtype;
     }
 
+    /// <summary>Maps a SharpInference dtype to its cuBLAS data-type constant for use with
+    /// <c>cublasGemmEx</c> / <c>cublasGemmStridedBatchedEx</c>. Handles F16, BF16, and F32;
+    /// throws on anything else (FP8 should be cast to F16/BF16 via <see cref="CastIfNeeded"/>
+    /// before reaching cuBLAS).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int CublasDataType(DType dtype)
+    {
+        if (dtype == DType.F16) return CublasApi.CUDA_R_16F;
+        if (dtype == DType.BF16) return CublasApi.CUDA_R_16BF;
+        if (dtype == DType.F32) return CublasApi.CUDA_R_32F;
+        throw new NotSupportedException($"cuBLAS GEMM does not support dtype {dtype}.");
+    }
+
     /// <summary>Resolves the GEMM compute dtype for an op with two operands. Rule: prefer F16
     /// over F32 whenever either operand is F16 (or fp8, which always casts to F16).
     ///
@@ -1133,8 +1146,26 @@ public sealed class CudaBackend : IBackend
     /// </summary>
     private DType ResolveGemmDtype(DType a, DType b)
     {
-        if (a.IsFp8 || b.IsFp8) return DType.F16;
+        // FP8 forces a 16-bit GEMM (Ampere has fast Tensor Cores in F16/BF16, not F32). Pick:
+        //  - BF16 when the other operand is F32 — BF16 has F32's full dynamic range, so the
+        //    F32→16-bit activation cast cannot produce ±Inf even when SwiGLU's `gated`
+        //    intermediate momentarily exceeds 65504 in F32. F16 *would* overflow there
+        //    (Z-Image L0 ffnOut had INF=9024 at step 1 of CUDA bring-up before this fix).
+        //  - F16 otherwise — keeps the existing F16 fast path that Flux/SDXL FP8 paths rely on
+        //    when their activations are already F16 (and therefore in-range).
+        if (a.IsFp8 || b.IsFp8)
+        {
+            return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
+        }
+        // GGUF quants always dequantize to F16 (or BF16 if the other operand is F32). The
+        // dequant kernels emit F16 directly; routing through F32 would force an extra F16→F32
+        // cast pass for no benefit. Same precedence rule as FP8 above.
+        if (a.IsQuantized || b.IsQuantized)
+        {
+            return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
+        }
         if (a == DType.F16 || b == DType.F16) return DType.F16;
+        if (a == DType.BF16 || b == DType.BF16) return DType.BF16;
         return a == DType.F32 || b == DType.F32 ? DType.F32 : a;
     }
 
@@ -1155,10 +1186,49 @@ public sealed class CudaBackend : IBackend
         return castOut;
     }
 
-    /// <summary>Casts GPU data between dtypes using PTX kernels. Handles F8↔F16, F16↔F32 conversions.</summary>
+    /// <summary>Casts GPU data between dtypes using PTX kernels. Handles F8↔F16, F16↔F32 conversions, and GGUF quantized → F16/F32 dequant (Q8_0 / Q4_K / Q5_K / Q6_K).</summary>
     private void CastOnGpu(ulong output, ulong input, DType srcDtype, DType dstDtype, int count)
     {
         if (srcDtype == dstDtype) return;
+
+        // ── GGUF dequant paths. F16 is the kernel's native output. F32 and BF16 stage through F16. ──
+        if (srcDtype.IsQuantized && dstDtype == DType.F16)
+        {
+            LaunchGgufDequantToF16(output, input, srcDtype, count);
+            return;
+        }
+        if (srcDtype.IsQuantized && dstDtype == DType.F32)
+        {
+            ulong tempF16 = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
+            try
+            {
+                LaunchGgufDequantToF16(tempF16, input, srcDtype, count);
+                _kernels!.LaunchCastF16ToF32(output, tempF16, count, _stream.Handle);
+            }
+            finally
+            {
+                CudaMemory.FreeAsync(tempF16, _stream.Handle);
+            }
+            return;
+        }
+        if (srcDtype.IsQuantized && dstDtype == DType.BF16)
+        {
+            // quant → F16 → F32 → BF16. F32 staging needed because BF16 conversion goes through F32 in our kernel set.
+            ulong tempF16 = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
+            ulong tempF32 = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            try
+            {
+                LaunchGgufDequantToF16(tempF16, input, srcDtype, count);
+                _kernels!.LaunchCastF16ToF32(tempF32, tempF16, count, _stream.Handle);
+                _kernels!.LaunchCastF32ToBf16(output, tempF32, count, _stream.Handle);
+            }
+            finally
+            {
+                CudaMemory.FreeAsync(tempF16, _stream.Handle);
+                CudaMemory.FreeAsync(tempF32, _stream.Handle);
+            }
+            return;
+        }
 
         if (srcDtype.IsFp8 && dstDtype == DType.F16)
             _kernels!.LaunchCastF8E4M3ToF16(output, input, count, _stream.Handle);
@@ -1171,6 +1241,31 @@ public sealed class CudaBackend : IBackend
             _kernels!.LaunchCastF8E4M3ToF16(temp, input, count, _stream.Handle);
             _kernels!.LaunchCastF16ToF32(output, temp, count, _stream.Handle);
             CudaMemory.FreeAsync(temp, _stream.Handle);
+        }
+        else if (srcDtype.IsFp8 && dstDtype == DType.BF16)
+        {
+            // F8 → F32 → BF16 (the values FP8 represents are within F16 range, so we could go
+            // F8→F16 first, but the F16→BF16 path also goes via F32; folding them avoids a
+            // redundant intermediate). FP8 max ≈ 448, well within BF16's range.
+            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            // F8 → F32 (re-uses the two-step F8→F16→F32 ladder via recursion).
+            CastOnGpu(temp, input, srcDtype, DType.F32, count);
+            _kernels!.LaunchCastF32ToBf16(output, temp, count, _stream.Handle);
+            CudaMemory.FreeAsync(temp, _stream.Handle);
+        }
+        else if (srcDtype == DType.BF16 && dstDtype.IsFp8)
+        {
+            // BF16 → F32 → F16 → F8. BF16 represents values up to 3.4e38; FP8's max is 448.
+            // Going through F32 then F16 catches saturation at the F16 stage (which clips to ±Inf,
+            // then the F16→F8 stage maps Inf to FP8's NaN encoding — so over-range values are
+            // marked rather than wrapping silently).
+            ulong temp32 = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            ulong temp16 = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
+            _kernels!.LaunchCastBf16ToF32(temp32, input, count, _stream.Handle);
+            _kernels!.LaunchCastF32ToF16(temp16, temp32, count, _stream.Handle);
+            _kernels!.LaunchCastF16ToF8E4M3(output, temp16, count, _stream.Handle);
+            CudaMemory.FreeAsync(temp32, _stream.Handle);
+            CudaMemory.FreeAsync(temp16, _stream.Handle);
         }
         else if (srcDtype == DType.F32 && dstDtype == DType.F16)
             _kernels!.LaunchCastF32ToF16(output, input, count, _stream.Handle);
@@ -1206,6 +1301,21 @@ public sealed class CudaBackend : IBackend
         }
         else
             throw new NotSupportedException($"GPU cast from {srcDtype} to {dstDtype} not supported.");
+    }
+
+    /// <summary>Dispatches the right per-DType GGUF dequant kernel. Element count must respect the block size of the source dtype (32 for Q8_0, 256 for Q*_K).</summary>
+    private void LaunchGgufDequantToF16(ulong output, ulong input, DType srcDtype, int count)
+    {
+        if (srcDtype == DType.Q8_0)
+            _kernels!.LaunchDequantQ8_0ToF16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.Q4_K)
+            _kernels!.LaunchDequantQ4_KToF16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.Q5_K)
+            _kernels!.LaunchDequantQ5_KToF16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.Q6_K)
+            _kernels!.LaunchDequantQ6_KToF16(output, input, count, _stream.Handle);
+        else
+            throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
     }
 
     /// <summary>Implements CastF8E4M3ToF16 using the PTX cast kernel on GPU.</summary>

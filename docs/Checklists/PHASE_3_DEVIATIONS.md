@@ -644,3 +644,101 @@ This was identified during the layer-by-layer diff investigation but turned out 
 A subtle aside: in the actual SD3.5 Medium FP8 checkpoint, `clip_l.text_projection.weight` is **99.9999% zero** by design — Stability didn't train it (mean = 4.66e-10, std = 3.58e-7, zero fraction = 0.999998). So CLIP-L's contribution to `final_pooled` is intentionally ~zero. The preset still has to project (otherwise pooled is null and `ConcatPooled` crashes), but the actual pooled values are tiny. The model was trained with this layout.
 
 **Lesson**: `ProjectionDim = 0` is "I don't have a text_projection" (SD1.5 CLIP-L has none); `ProjectionDim > 0` is "I do, please compute pooled". Using SDXL's CLIP-L preset for SD3 quietly reuses the SD1.5 fallback. Adding a model-specific preset (`Sd3ClipL`) prevents future ports from making the same mistake. CLIP-L for newer models (SD3, FLUX-text — though they don't use it pooled the same way) all need their own preset that matches what the checkpoint was actually trained with.
+
+---
+
+## Phase 4 — Z-Image CUDA Bring-up Deviations
+
+### 36. Z-Image SwiGLU FFN F16 GEMM Overflow on F32 Activations (CUDA-only, all-black output from step 1 onward)
+
+**Problem**: Z-Image generation on the CUDA backend produced all-black images for both Turbo (4-step, CFG=1) and Base (20-step, CFG=4) at every resolution we tried (512², 1024²). The same generation on the Vulkan backend produced clean photographic output. Pipeline ran without errors — the pre-VAE latent logging revealed the latent had become fully NaN by the end of denoising (`nan=16384` per channel for a 128×128 latent), which then propagated through the VAE to all-black RGB.
+
+**Symptom-level evidence**:
+- `[Pre-VAE latent] ch0..15: nan=16384` (every element NaN, all 16 channels)
+- `[VAE output] ch0..2: nan=1048576` (NaN propagated through VAE for 1024² output)
+- Pipeline completed all denoising steps without exception (no OOM, no kernel error)
+- **Vulkan backend produced a real image** at the same prompt/seed (mean=65.9, std=83.4, 256 distinct byte values) — confirming the bug was in CUDA-specific code, not in the Z-Image transformer logic itself
+
+**How it was found** — full troubleshooting journey, in order:
+
+1. **Initial confusion: was it model-specific or extension-specific?** First attempt was to compare `z_image_base-nvfp8-mixed.safetensors` against `z_image_base-bf16.safetensors` against `SwarmUI_Z-Image-Turbo-FP8Mix.safetensors` — all three produced black output. The bug was not checkpoint-format specific. Wasted ~30 min hypothesizing the NVFP8 format had a missing weight_scale handler before noticing the trace was identical across all three checkpoints.
+
+2. **The CUDA-vs-Vulkan A/B test** — the moment of clarity. Ran `ZImageGenerationTests.Turbo_Fp8Mix_GenerateImage_Gpu` (CUDA) → all-black assertion failure. Ran `ZImageVulkanGenerationTest.Turbo_Fp8Mix_GenerateImage_Vulkan` → passed, real image. The bug was definitively isolated to CUDA-specific code.
+
+3. **First wrong probe**: hypothesized a stream-ordered allocator race introduced by `bc23474 stream cua to GPU` — specifically the `cuMemPoolSetAttribute(CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, 0)` call in `CudaStreamingWeightCache`'s constructor. Disabled it. **Did not fix the bug**. Reverted the probe. Hypothesis A wrong.
+
+4. **The real localization: `ZImageNaNTrace`** ([src/SharpInference.Diffusion/Models/Denoisers/ZImageNaNTrace.cs](../../src/SharpInference.Diffusion/Models/Denoisers/ZImageNaNTrace.cs)). Wrote a stat-logger that runs inside `ZImageTransformer.Forward` at every phase boundary, gated to step 0 only initially, writing one line per phase to `/tmp/zimage_layer_trace.log`. First trace showed step 0 completely clean — no NaN at any of the 38 phases (`t_embedder`, `cap_embedder`, `context_refiner.{0,1}`, `x_embedder`, `noise_refiner.{0,1}`, `concat`, `layers.0` through `layers.29`, `imageSlice`, `final_layer`, `velocity(out)`).
+
+5. **Key clue from step-0-clean**: NaN was being introduced *between* steps. Extended the trace to all 4 steps. Step 1's first 7 phases (caption embedder path, x_embedder path, noise refiners, concat) were clean — first NaN appeared in `layers.0` of step 1, with **only ~3.6% of values being NaN**. That fraction matched 1-of-30 attention heads (1/30 = 3.33%), so the initial guess was a degenerate-head softmax in SDPA. Wrong guess.
+
+6. **Drilling into `ZImageBlock.Forward`**: added a `TracePrefix` field on `ZImageBlock` and instrumented every sub-step of `Forward` (mod{0..3}, norm1, modulated, qkv, q/k/v, qN/kN, q/k/vMh post-rope, attnOut, attnFlat, projected, postAttnNorm, afterAttn, normF1, modulatedF, ffnOut, postFfnNorm). Wired the prefix from `ZImageTransformer.Forward` to enable tracing only on the first 2 main layers (avoiding 30× log size).
+
+7. **The smoking gun**, step 1 layer 0:
+   ```
+   [ZT s1] L0.modulatedF   abs_mean=0.286   max=14.82                            (clean)
+   [ZT s1] L0.ffnOut       abs_mean=1053.91 max=12242  *** NAN=0 INF=9024 ***   (Inf!)
+   [ZT s1] L0.postFfnNorm  abs_mean=0.07    max=4.99   *** NAN=9024 ***          (Inf→NaN via RmsNorm)
+   ```
+   The SwiGLU FFN output (`w2(silu(w1(x)) * w3(x))`) had **9024 +Inf values**, no NaN yet. The next op (CPU `RmsNorm`) sees Inf, computes `sumSq = Inf`, `invRms = 1/sqrt(Inf) = 0`, then `output = Inf × 0 = NaN`. From there NaN propagated through layer 1's QKV Linear and consumed every downstream activation.
+
+**Root cause**: commit `bc23474 stream cua to GPU` (May 3, 2026) replaced `CudaBackend`'s per-operand dtype resolution with a joint `ResolveGemmDtype(a, b)`:
+
+```csharp
+// bc23474 version (THE BUG):
+private DType ResolveGemmDtype(DType a, DType b)
+{
+    if (a.IsFp8 || b.IsFp8) return DType.F16;        // ← forces F16 even when input is F32
+    if (a == DType.F16 || b == DType.F16) return DType.F16;
+    return a == DType.F32 || b == DType.F32 ? DType.F32 : a;
+}
+```
+
+The intent was to save memory: previously, an F32 activation × FP8 weight resolved to a *F32* GEMM, which forced the FP8 weight to be expanded to a full F32 buffer (151 MB for `proj_mlp` at 1024×1024). The new joint rule cuts that in half by running the whole GEMM in F16, casting the F32 activation down too.
+
+But there's a hidden assumption: that the F32 activation always fits in F16's range (max 65504). For Z-Image's SwiGLU FFN this is **false** in step 1 onward. The intermediate `gated = silu(w1(x)) * w3(x)` is a non-linear amplification — for typical Z-Image activations:
+- `w1(x)` produces values up to ~1300 (`sqrt(K=3840) × FP8_max(2.25) × x_max(15) × Fp8ScaleFactor(0.005)` order-of-magnitude)
+- `silu(w1(x)) ≈ w1(x)` for large positive inputs
+- `w3(x)` similar magnitude
+- `gated = silu(w1) × w3` reaches **>65504** for some positions
+
+When `CudaBackend.Linear` then casts `gated` from F32 to F16 to run w2's GEMM, **those positions become +Inf**. The cuBLAS F16 × F16 GEMM with `COMPUTE_32F` accumulates in F32 (which would otherwise be safe), but the *operand* is already Inf, so each affected output element gets Inf × weight = Inf. Step 1's `L0.ffnOut` had 9024 Inf values; step 0's stayed under 65504 by luck (different activations, max ffnOut=3876).
+
+Why Vulkan didn't hit it: `VulkanBackend`'s `DispatchMatmul` derives `gemmDtype` from `output.DType`, not from the inputs (per [PHASE_3_5_DEVIATIONS.md #1](PHASE_3_5_DEVIATIONS.md)). Z-Image's SwiGLU output is F32, so Vulkan ran the GEMM in F32 (or with F32 widening for the gated input via `CastIfNeeded`), no overflow.
+
+Why Flux/SDXL didn't hit it on CUDA: Flux's hot-path activations come out of `LayerNorm` and stay tighter in distribution. Z-Image's gated SwiGLU has no upstream normalization on the gating multiply specifically.
+
+**Fix**: `ResolveGemmDtype(F32, FP8)` now returns **BF16** instead of F16 ([CudaBackend.cs:1134-1148](../../src/SharpInference.Cuda/CudaBackend.cs#L1134-L1148)). BF16 has F32's full dynamic range (3.4e38), so the F32→16-bit activation cast cannot produce ±Inf. Memory savings vs F32 are preserved (BF16 weight cast is the same size as F16). Ampere's BF16 Tensor Cores are as fast as F16. The new rule:
+
+```csharp
+private DType ResolveGemmDtype(DType a, DType b)
+{
+    if (a.IsFp8 || b.IsFp8)
+    {
+        // BF16 when paired with F32 — full F32 range, no overflow on SwiGLU's gated tensor.
+        // F16 when paired with F16 — keeps the existing fast path; F16 inputs are already in-range.
+        return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
+    }
+    if (a == DType.F16 || b == DType.F16) return DType.F16;
+    if (a == DType.BF16 || b == DType.BF16) return DType.BF16;
+    return a == DType.F32 || b == DType.F32 ? DType.F32 : a;
+}
+```
+
+Three supporting changes:
+1. Added F8↔BF16 cast paths in `CastOnGpu` (F8→F32→BF16 via temp F32; BF16→F32→F16→F8 on the way back, so over-range values surface as FP8 NaN rather than wrapping silently).
+2. Replaced four hardcoded `gemmDtype == DType.F16 ? CUDA_R_16F : CUDA_R_32F` ternaries with a `CublasDataType(DType)` helper that maps F16, BF16, and F32 to their cuBLAS constants.
+3. Conv2D's `inputIsF16` flag was left alone — Conv2D paths in Flux/SD3 VAEs don't combine F32 inputs with FP8 weights (VAEs are pure F32 or F16), so the BF16 path is unreachable there. If a future model introduces a mixed FP8 + F32 Conv2D, the im2col kernel dispatch needs an additional BF16 branch.
+
+**Result**: Z-Image-Turbo CUDA generation produces a clean photographic image. `L0.ffnOut` on step 1 stays finite (no Inf), `layers.0..29` stay in-range across all 4 denoising steps, pre-VAE latent has 0 NaN per channel.
+
+**Lesson**: when introducing precision-saving dtype rules for mixed-precision GEMMs, **the dynamic range of the activation matters, not just its declared dtype**. F32 is permissive: any model that accumulates residual signal across many blocks can produce intermediate F32 values that exceed F16's 65504 ceiling, especially through gated multiplications (SwiGLU, GeGLU) where two activations multiply each other. F16's narrow range (5-bit exponent, ±65504) makes it the wrong target for F32→16-bit casts on activations of unknown bound. **BF16 is the correct fallback**: same byte count, F32-equivalent range, Tensor-Core-fast on Ampere+. Default to BF16 for any "narrow the GEMM" optimization that touches an F32 activation.
+
+**Methodology note**: this took 8+ trace-and-rebuild iterations because the bug only appeared at step 1 — step 0 was always clean, so a single-step trace showed nothing wrong. The debugging approach that finally worked:
+
+1. **Backend A/B**: confirmed CUDA-only by running the same test on Vulkan. This eliminates "the model logic is wrong" as a hypothesis class.
+2. **Per-phase tracing across all denoising steps**: gating the trace to step 0 was a wrong instinct — bugs that depend on accumulation only appear in step 1+. Default to all-step tracing for any "works once, fails on iteration" symptom.
+3. **Drill into the failing phase**: once `layers.0` was identified as the failing phase, sub-instrumented `ZImageBlock.Forward` to trace its internals.
+4. **Read what the trace actually says**: `INF=9024` (not NaN!) was the diagnostic clue. NaN can come from many sources; Inf in a cuBLAS output narrows it to "an operand was Inf going in", which immediately points at the F32→F16 cast as the only place an Inf could be introduced from finite inputs.
+5. **Don't trust the previous step's clean trace**: step 0's `ffnOut max=3876` was ALSO above the "expected" range — it was just luck that step 0's max stayed under 65504. The fix had to address the structural overflow risk, not the specific values from one step.
+
+Future debugging of similar "compounding instability" bugs should default to the same shape: backend A/B → all-step trace at phase boundaries → drill into the failing phase → look for the dtype/range condition that differs from the working backend.

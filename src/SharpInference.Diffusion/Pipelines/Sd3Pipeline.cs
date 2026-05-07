@@ -11,7 +11,8 @@ using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
-/// <summary>SD3 text-to-image pipeline. Orchestrates triple text encoding (CLIP-L + CLIP-G + T5-XXL) → MMDiT denoising with flow matching → VAE decode → RGB image output. T5 is optional for reduced VRAM usage.</summary>
+/// <summary>SD3 text-to-image and image-to-image pipeline. Orchestrates triple text encoding (CLIP-L + CLIP-G + T5-XXL) → MMDiT denoising with flow matching → VAE decode → RGB image output. T5 is optional for reduced VRAM usage.
+/// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>). Requires a <see cref="VaeEncoder"/> on the constructor. Setting <see cref="ImageToImageRequest.Mask"/> additionally enables blend-on-vanilla inpaint, identical to the SDXL/Flux paths but on SD3's 16-channel NCHW latent.</para></summary>
 public sealed unsafe class Sd3Pipeline : IDisposable
 {
     private readonly IBackend _backend;
@@ -20,10 +21,11 @@ public sealed unsafe class Sd3Pipeline : IDisposable
     private readonly T5TextEncoder? _t5;
     private readonly Sd3Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly float _schedulerShift;
     private int _disposed;
 
-    /// <summary>Creates a new SD3 pipeline with all components pre-loaded.</summary>
+    /// <summary>Creates a new SD3 pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="clipL">CLIP ViT-L/14 text encoder (text_encoder). Must have text_projection for pooled output.</param>
     /// <param name="clipG">OpenCLIP ViT-bigG/14 text encoder (text_encoder_2). Must have text_projection for pooled output.</param>
@@ -34,6 +36,14 @@ public sealed unsafe class Sd3Pipeline : IDisposable
     public Sd3Pipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG,
         T5TextEncoder? t5, Sd3Transformer transformer, VaeDecoder vaeDecoder,
         float schedulerShift = 3.0f)
+        : this(backend, clipL, clipG, t5, transformer, vaeDecoder, vaeEncoder: null, schedulerShift)
+    {
+    }
+
+    /// <summary>Creates a new SD3 pipeline with both VAE halves loaded. Required for img2img and for use as a cross-model refiner.</summary>
+    public Sd3Pipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG,
+        T5TextEncoder? t5, Sd3Transformer transformer, VaeDecoder vaeDecoder,
+        VaeEncoder? vaeEncoder, float schedulerShift = 3.0f)
     {
         _backend = backend;
         _clipL = clipL;
@@ -41,6 +51,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _schedulerShift = schedulerShift;
     }
 
@@ -76,14 +87,65 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / 8;
-        int latentW = request.Width / 8;
+        int width = request.Width;
+        int height = request.Height;
+        int latentH = height / 8;
+        int latentW = width / 8;
         int steps = request.Steps;
         float cfgScale = request.CfgScale;
 
-        Logs.Info($"SD3: Generating {request.Width}x{request.Height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
+        // Img2img validation + strength=0 short-circuit BEFORE any model work.
+        int startStep = 0;
+        Tensor? maskPixel = null;
+        if (request is ImageToImageRequest img2img)
+        {
+            Tensor src = img2img.SourceImage;
+            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
+                src.Shape[2] != height || src.Shape[3] != width)
+            {
+                throw new ArgumentException(
+                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
+                    nameof(request));
+            }
+
+            if (img2img.Mask is not null)
+            {
+                Tensor mk = img2img.Mask;
+                if (mk.Shape.Rank != 4 || mk.Shape[0] != 1 || mk.Shape[1] != 1 ||
+                    mk.Shape[2] != height || mk.Shape[3] != width)
+                {
+                    throw new ArgumentException(
+                        $"Mask shape must be [1, 1, {height}, {width}] (matching source); got {mk.Shape}.",
+                        nameof(request));
+                }
+                if (mk.DType != DType.F32)
+                {
+                    throw new ArgumentException($"Mask must be F32 in [0, 1]; got {mk.DType}.", nameof(request));
+                }
+                maskPixel = mk;
+            }
+
+            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
+            int initTimesteps = (int)MathF.Round(steps * strength);
+            startStep = Math.Max(steps - initTimesteps, 0);
+
+            if (initTimesteps == 0)
+            {
+                Logs.Info("Strength=0; passing source through unchanged");
+                return (ImagePostProcessor.TensorToRgbBytes(src), width, height, seed);
+            }
+        }
+
+        bool isMaskedInpaint = maskPixel is not null;
+        string mode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                    : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                    : "txt2img";
+        Logs.Info($"SD3 {mode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode text with triple encoders ─────────────────────────
@@ -119,29 +181,57 @@ public sealed unsafe class Sd3Pipeline : IDisposable
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
-        // ── 2. Create initial noise latent [1, 16, latentH, latentW] ────
+        // ── 2. Set up flow-match scheduler ──────────────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // ── 3. Set up flow-match scheduler ──────────────────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
         scheduler.SetTimesteps(steps);
 
-        // Scale initial noise by sigma[0]
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        // ── 3. Build initial latent ─────────────────────────────────────
+        // T2I: noise scaled by initSigma. Img2img: VAE-encode source + AddNoise at sigma[startStep].
+        // Masked inpaint: keep clean source latent + downsampled mask alive for per-step blend.
+        Tensor latent;
+        Tensor? sourceLatent = null;
+        Tensor? latentMask = null;
+        if (request is ImageToImageRequest img2imgInit)
         {
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
-            latent.Dispose();
-            latent = scaled;
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            sourceLatent = _vaeEncoder!.Encode(_backend, img2imgInit.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            latent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
+            noise.Dispose();
+
+            if (isMaskedInpaint)
+            {
+                latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+            }
+            else
+            {
+                sourceLatent.Dispose();
+                sourceLatent = null;
+            }
+        }
+        else
+        {
+            latent = SeedGenerator.CreateNoise(latentShape, seed);
+            float initSigma = scheduler.InitialNoiseSigma;
+            if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+            {
+                Tensor scaled = new Tensor(latentShape, DType.F32);
+                _backend.Scale(scaled, latent, initSigma);
+                latent.Dispose();
+                latent = scaled;
+            }
         }
 
         // ── 4. Denoising loop ───────────────────────────────────────────
         Logs.Info("Starting SD3 denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
@@ -164,6 +254,27 @@ public sealed unsafe class Sd3Pipeline : IDisposable
             latent.Dispose();
             latent = newLatent;
 
+            // Masked-inpaint blend: replace unmasked region with re-noised source at the
+            // next step's sigma. Same formulation as SDXL — only the channel count differs.
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
@@ -173,6 +284,8 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         condPooled.Dispose();
         uncondProjected?.Dispose();
         uncondPooled?.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         Sd3Transformer.DumpFinalLatent(latent);
 
@@ -195,14 +308,20 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
-        // ── 6. Convert to RGB bytes ─────────────────────────────────────
+        // ── 6. Pixel-space recomposite for masked inpaint ──────────────
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
+        // ── 7. Convert to RGB bytes ─────────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"SD3 image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"SD3 {mode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
-        return (rgbData, request.Width, request.Height, seed);
+        return (rgbData, width, height, seed);
     }
 
     /// <summary>Encodes a single prompt through all three text encoders and combines the results.</summary>

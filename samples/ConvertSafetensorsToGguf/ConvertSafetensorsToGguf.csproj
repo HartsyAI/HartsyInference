@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>SharpInference.Samples.ConvertSafetensorsToGguf</RootNamespace>
+    <AssemblyName>convert-safetensors-to-gguf</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SharpInference.Core\SharpInference.Core.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
+  </ItemGroup>
+
+</Project>

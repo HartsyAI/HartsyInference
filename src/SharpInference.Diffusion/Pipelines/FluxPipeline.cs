@@ -77,6 +77,7 @@ public sealed unsafe class FluxPipeline : IDisposable
 
         // Img2img validation + strength=0 short-circuit BEFORE any model work.
         int startStep = 0;
+        Tensor? maskPixel = null;
         if (request is ImageToImageRequest img2img)
         {
             Tensor src = img2img.SourceImage;
@@ -86,6 +87,23 @@ public sealed unsafe class FluxPipeline : IDisposable
                 throw new ArgumentException(
                     $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
                     nameof(request));
+            }
+
+            if (img2img.Mask is not null)
+            {
+                Tensor mk = img2img.Mask;
+                if (mk.Shape.Rank != 4 || mk.Shape[0] != 1 || mk.Shape[1] != 1 ||
+                    mk.Shape[2] != height || mk.Shape[3] != width)
+                {
+                    throw new ArgumentException(
+                        $"Mask shape must be [1, 1, {height}, {width}] (matching source); got {mk.Shape}.",
+                        nameof(request));
+                }
+                if (mk.DType != DType.F32)
+                {
+                    throw new ArgumentException($"Mask must be F32 in [0, 1]; got {mk.DType}.", nameof(request));
+                }
+                maskPixel = mk;
             }
 
             float strength = Math.Clamp(img2img.Strength, 0f, 1f);
@@ -99,8 +117,11 @@ public sealed unsafe class FluxPipeline : IDisposable
             }
         }
 
+        bool isMaskedInpaint = maskPixel is not null;
         string baseMode = _config.GuidanceEmbed ? "Dev" : "Schnell";
-        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                       : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                       : "txt2img";
         Logs.Info($"Flux ({baseMode}) {opMode}: {width}x{height}, {steps} steps, guidance={guidanceScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -150,7 +171,16 @@ public sealed unsafe class FluxPipeline : IDisposable
 
         // ── 3. Build initial packed latent ─────────────────────────────
         // T2I: noise scaled by initSigma. Img2img: vaeEncoder.Encode → Pack → AddNoise at sigma[startStep].
-        Tensor packedLatent = BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep);
+        // Masked inpaint: also keep the packed source latent + packed mask alive for per-step blend.
+        (Tensor packedLatent, Tensor? packedSourceLatent) =
+            BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? packedMask = null;
+        if (isMaskedInpaint)
+        {
+            Tensor latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+            packedMask = MaskBlendUtilities.PackLatentMask2x2(latentMask, latentH, latentW);
+            latentMask.Dispose();
+        }
 
         // ── 4. Denoising loop ─────────────────────────────────────────
         // Two paths depending on whether the backend can stream:
@@ -207,6 +237,30 @@ public sealed unsafe class FluxPipeline : IDisposable
             packedLatent.Dispose();
             packedLatent = newLatent;
 
+            // Masked-inpaint blend in packed form: keep unmasked region on the source's
+            // flow-matching trajectory by re-noising the source latent at the next step's
+            // sigma. Final step blends with the clean source — no further denoising follows.
+            if (packedMask is not null && packedSourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshUnpackedNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    Tensor freshPackedNoise = PackLatent(freshUnpackedNoise, latentH, latentW);
+                    freshUnpackedNoise.Dispose();
+                    noisedSource = new Tensor(packedStepShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
+                    freshPackedNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = packedSourceLatent;
+                }
+                MaskBlendUtilities.BlendPackedInPlace(packedLatent, noisedSource, packedMask);
+                if (noisedSource != packedSourceLatent) noisedSource.Dispose();
+            }
+
             LogPerLatentChannelMeanPacked($"Step {i+1} latent", packedLatent);
 
             stepSw.Stop();
@@ -216,6 +270,8 @@ public sealed unsafe class FluxPipeline : IDisposable
 
         clipPooled.Dispose();
         t5Embeddings.Dispose();
+        packedSourceLatent?.Dispose();
+        packedMask?.Dispose();
 
         // Tear down the streaming controller (frees still-resident blocks) and free the
         // shared weights. After this, the transformer holds no device memory, making
@@ -276,7 +332,16 @@ public sealed unsafe class FluxPipeline : IDisposable
         vaeSw.Stop();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
-        // ── 7. Convert to RGB bytes ───────────────────────────────────
+        // ── 7. Pixel-space recomposite for masked inpaint ─────────────
+        // Paste decoded pixels over source pixels where mask=1; suppresses VAE encode/
+        // decode drift in unmasked regions. Identical math to SDXL — Flux's 16ch latent
+        // affects only the per-step blend, not the final RGB recomposite.
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
+        // ── 8. Convert to RGB bytes ───────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
@@ -333,13 +398,15 @@ public sealed unsafe class FluxPipeline : IDisposable
         return chosen;
     }
 
-    /// <summary>Builds the initial packed latent for Flux denoising. T2I: fresh Gaussian noise scaled by the scheduler's initial sigma. Img2img: VAE-encoded source latent (16 channels) packed via <see cref="PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.</summary>
-    private Tensor BuildInitialPackedLatent(
+    /// <summary>Builds the initial packed latent for Flux denoising. T2I: fresh Gaussian noise scaled by the scheduler's initial sigma. Img2img: VAE-encoded source latent (16 channels) packed via <see cref="PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint path), the packed source latent is returned as the second tuple element instead of being disposed — the caller reuses it per step for blending. Returns null source for txt2img and for img2img without a mask.</para></summary>
+    private (Tensor packedLatent, Tensor? packedSourceLatent) BuildInitialPackedLatent(
         TextToImageRequest request,
         FlowMatchEulerDiscreteScheduler scheduler,
         TensorShape latentShape,
         TensorShape packedShape,
-        int latentH, int latentW, int seed, int startStep)
+        int latentH, int latentW, int seed, int startStep,
+        bool keepSourceLatent)
     {
         Tensor unpackedNoise = TakeOrCreateNoise(request, latentShape, seed);
         Tensor packedNoise = PackLatent(unpackedNoise, latentH, latentW);
@@ -357,9 +424,13 @@ public sealed unsafe class FluxPipeline : IDisposable
 
             Tensor result = new Tensor(packedShape, DType.F32);
             scheduler.AddNoise(result, sourcePacked, packedNoise, startStep);
-            sourcePacked.Dispose();
             packedNoise.Dispose();
-            return result;
+            if (keepSourceLatent)
+            {
+                return (result, sourcePacked);
+            }
+            sourcePacked.Dispose();
+            return (result, null);
         }
 
         // T2I path: scale packed noise by initSigma.
@@ -369,9 +440,9 @@ public sealed unsafe class FluxPipeline : IDisposable
             Tensor scaled = new Tensor(packedShape, DType.F32);
             _backend.Scale(scaled, packedNoise, initSigma);
             packedNoise.Dispose();
-            return scaled;
+            return (scaled, null);
         }
-        return packedNoise;
+        return (packedNoise, null);
     }
 
     private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)

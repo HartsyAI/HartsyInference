@@ -499,12 +499,12 @@ public sealed class FluxCheckpointConverter
 
     #region QKV Splitting
 
-    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three separate [innerDim, inDim] weights.</summary>
+    /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three separate [innerDim, inDim] weights. Uses <see cref="DType.ComputeByteCount"/> rather than <c>SizeInBytes</c> so quantized fused-QKV tensors (Q4_K, Q5_K, Q8_0) split correctly — the row-aligned chunk size is computed from the per-row element count, which is block-aligned for ggml K-quants since Flux's hidden=3072 is a multiple of the 256-element super-block.</summary>
     private static unsafe void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
         string qName, string kName, string vName, Dictionary<string, Tensor> output)
     {
         int inDim = (int)fused.Shape[1];
-        long rowBytes = (long)inDim * fused.DType.SizeInBytes;
+        long rowBytes = fused.DType.ComputeByteCount(inDim);
         long chunkBytes = (long)innerDim * rowBytes;
         TensorShape splitShape = new TensorShape(innerDim, inDim);
 
@@ -527,12 +527,11 @@ public sealed class FluxCheckpointConverter
         output[$"{prefix}.{vName}.weight"] = vWeight;
     }
 
-    /// <summary>Splits a fused QKV bias [3*innerDim] into three separate [innerDim] biases.</summary>
+    /// <summary>Splits a fused QKV bias [3*innerDim] into three separate [innerDim] biases. ggml-quantized 1D biases would need block-alignment which 3072 satisfies (3072/256=12); but in practice ggml never quantizes biases (always F32/F16), so the quant path here is theoretical.</summary>
     private static unsafe void SplitQkvBias(Tensor fused, int innerDim, string prefix,
         string qName, string kName, string vName, Dictionary<string, Tensor> output)
     {
-        long elemBytes = fused.DType.SizeInBytes;
-        long chunkBytes = (long)innerDim * elemBytes;
+        long chunkBytes = fused.DType.ComputeByteCount(innerDim);
         TensorShape splitShape = new TensorShape(innerDim);
 
         Tensor qBias = new Tensor(splitShape, fused.DType);
@@ -549,11 +548,11 @@ public sealed class FluxCheckpointConverter
         output[$"{prefix}.{vName}.bias"] = vBias;
     }
 
-    /// <summary>Splits single-stream fused linear1 weight [3*hidden + mlpDim, hidden] = [21504, 3072] into Q, K, V, proj_mlp weights.</summary>
+    /// <summary>Splits single-stream fused linear1 weight [3*hidden + mlpDim, hidden] = [21504, 3072] into Q, K, V, proj_mlp weights. Quantization-aware via <see cref="DType.ComputeByteCount"/>.</summary>
     private static unsafe void SplitSingleLinear1Weight(Tensor fused, string prefix, Dictionary<string, Tensor> output)
     {
         int inDim = (int)fused.Shape[1];
-        long rowBytes = (long)inDim * fused.DType.SizeInBytes;
+        long rowBytes = fused.DType.ComputeByteCount(inDim);
 
         // Split order: Q [HiddenSize rows], K [HiddenSize rows], V [HiddenSize rows], MLP [MlpDim rows]
         TensorShape qkvShape = new TensorShape(HiddenSize, inDim);
@@ -588,8 +587,6 @@ public sealed class FluxCheckpointConverter
     /// <summary>Splits single-stream fused linear1 bias [3*hidden + mlpDim] = [21504] into Q, K, V, proj_mlp biases.</summary>
     private static unsafe void SplitSingleLinear1Bias(Tensor fused, string prefix, Dictionary<string, Tensor> output)
     {
-        long elemBytes = fused.DType.SizeInBytes;
-
         TensorShape qkvShape = new TensorShape(HiddenSize);
         TensorShape mlpShape = new TensorShape(MlpDim);
 
@@ -599,8 +596,8 @@ public sealed class FluxCheckpointConverter
         Tensor mlpBias = new Tensor(mlpShape, fused.DType);
 
         byte* src = (byte*)fused.DataPointer;
-        long qkvChunkBytes = (long)HiddenSize * elemBytes;
-        long mlpChunkBytes = (long)MlpDim * elemBytes;
+        long qkvChunkBytes = fused.DType.ComputeByteCount(HiddenSize);
+        long mlpChunkBytes = fused.DType.ComputeByteCount(MlpDim);
 
         Buffer.MemoryCopy(src, (void*)qBias.DataPointer, qkvChunkBytes, qkvChunkBytes);
         Buffer.MemoryCopy(src + qkvChunkBytes, (void*)kBias.DataPointer, qkvChunkBytes, qkvChunkBytes);

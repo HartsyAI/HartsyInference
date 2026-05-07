@@ -42,16 +42,19 @@ public record QwenImageConfig
     /// <summary>Whether this model supports unified editing tasks (inpaint, outpaint, etc.).</summary>
     public bool SupportsEditing { get; init; }
 
-    /// <summary>Qwen-Image 7B preset.</summary>
-    public static QwenImageConfig V1_7B => new()
+    /// <summary>`Qwen/Qwen-Image` (20B): 60 transformer blocks, hidden=3072, 24 heads, head_dim=128. Matches diffusers `transformer_qwenimage.py` config. Pairs with Qwen2.5-VL-7B text encoder (~15 GB at BF16). Requires ~30 GB total VRAM at FP8 — fits 40+ GB cards (A100 / L40S / 4090 with offload) or needs Q4_K backbone quant for 12 GB consumer cards.</summary>
+    public static QwenImageConfig V1 => new()
     {
         HiddenSize = 3072,
         NumHeads = 24,
-        Depth = 24,
+        Depth = 60,
         SupportsEditing = false,
     };
 
-    /// <summary>Qwen-Image 2.0 14B preset.</summary>
+    /// <summary>Alias kept for back-compat. Identical to <see cref="V1"/>; the original "_7B" suffix was a misnomer — the public Qwen-Image weights are 20B (the "7B" pairs with Qwen2.5-VL-7B as the text encoder, not the diffusion backbone).</summary>
+    public static QwenImageConfig V1_7B => V1;
+
+    /// <summary>Speculative Qwen-Image 2.0 14B preset. <b>Not yet released by Alibaba</b> — placeholder values held until an actual checkpoint config is published. Do not rely on these dimensions.</summary>
     public static QwenImageConfig V2_14B => new()
     {
         HiddenSize = 4096,
@@ -60,7 +63,7 @@ public record QwenImageConfig
         SupportsEditing = true,
     };
 
-    /// <summary>Qwen-Image 2.0 20B preset.</summary>
+    /// <summary>Speculative Qwen-Image 2.0 20B preset. Same caveat as <see cref="V2_14B"/>.</summary>
     public static QwenImageConfig V2_20B => new()
     {
         HiddenSize = 5120,

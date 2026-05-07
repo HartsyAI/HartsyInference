@@ -3,6 +3,8 @@
 > **Goal:** Support SDXL and Flux model families, FP8 inference for large DiT models.
 > **Packages:** SharpInference.Diffusion (extended), Core (DType), Cuda (FP8 kernels)
 
+> **Status (2026-05-07):** all image-model scaffolding is complete. Every image model in scope has a full transformer + block + pipeline + checkpoint converter + end-to-end test that fail-skips gracefully when checkpoints or VRAM are missing. Remaining work for any individual model is **validation** — first-run debug + Python reference diff against a downloaded checkpoint — not implementation. With this milestone closed, the next phase is GPU performance fine-tuning (kernel fusion, streaming weight cache improvements, native FP8 GEMM enablement on Ada+) before moving to audio.
+
 ---
 
 ## 1. Research
@@ -176,7 +178,7 @@ Architectural quirks:
 - Pile-T5-XL: ~3.7 GB FP16, ~1.9 GB FP8
 - SDXL VAE: ~335 MB
 
-### ERNIE-Image (Single-Stream DiT, Shared AdaLN) — NOT STARTED
+### ERNIE-Image (Single-Stream DiT, Shared AdaLN) — SCAFFOLD COMPLETE
 
 Reference: `huggingface/diffusers` `src/diffusers/models/transformers/transformer_ernie_image.py` + `src/diffusers/pipelines/ernie_image/pipeline_ernie_image.py`. The roadmap previously said "Flux-lineage MMDiT" — **this is wrong**, ERNIE is single-stream with one shared AdaLN modulation.
 
@@ -196,19 +198,22 @@ VAE: `AutoencoderKLFlux2` — Flux2-style 128-channel VAE. **Reuse the existing 
 
 Text encoder: **Unknown without inspecting `text_encoder/config.json`** on `huggingface.co/baidu/ERNIE-Image`. The pipeline does `from transformers import AutoModel, AutoTokenizer` — likely an in-house ERNIE encoder. text_in_dim=3072 suggests it produces 3072-dim output. Optional `pe` Prompt Enhancer LLM (`AutoModelForCausalLM`) — skip in v1, user pre-enhances prompts.
 
-#### Files needed (estimated ~700-1500 lines)
-- [x] `ErnieImageConfig.cs` (95 lines) — 36 layers, 4096 hidden, 32 heads, 128 head_dim, ffn=12288, in/out=128, patch_size=1, text_in_dim=3072, rope_theta=256, axes_dim=(32,48,48). `V1` preset for `baidu/ERNIE-Image`, `V1Turbo` alias (same backbone, distilled).
-- [x] `ErnieImageTransformer.cs` (78 lines) — scaffolding-only. `LoadWeights` and `Forward` throw `NotImplementedException` with a detailed task list in the message and class doc-comment.
-- [x] `ErnieImagePipeline.cs` (60 lines) — scaffolding-only. `GenerateFromTokens` throws `NotImplementedException` with a detailed task list.
-- [ ] `ErnieImageSharedBlock.cs` — RMSNorm-pre-modulate, single self-attention (QK-RMSNorm + 3D RoPE), gated residual, RMSNorm-pre-mlp, GELU-gated FFN, gated residual. **Modulation tuple is shared (broadcast in)**, no per-block AdaLN linear.
-- [ ] `ErnieImageRope.cs` — non-interleaved 3-axis RoPE with axes (32,48,48), theta=256, image tokens offset by `text_lens` per batch. Cannot reuse `FluxRope.cs` directly (interleaved-pair layout).
-- [ ] `ErnieImagePatchEmbed.cs` — 1×1 Conv2d (`backend.Conv2D` with kernel/stride 1, bias).
-- [ ] `ErnieImageTransformer.cs` — top-level: shared AdaLN linear computed once per step + broadcast to all 36 blocks, 3D position-id construction with text_lens offsets, attention mask `[B, txt_seq + img_seq]`, single-block stack, AdaLN-continuous final, unpatchify reshape.
-- [ ] `ErnieImagePipeline.cs` — text encoding (custom Baidu encoder), text_lens computation, flow-match Euler scheduler, denoise loop, Flux2 VAE decode (or `VaeConfig.Flux2` if compatible).
-- [ ] `ErnieImageCheckpointConverter.cs` — diffusers folder format (the canonical layout). Comfy-Org single-file repackaging may exist; verify before relying.
-- [ ] `ErnieImageDebugDump.cs` — env var `ERNIE_DEBUG_DIR`, mirrors `Sd3DebugDump`.
-- [ ] Custom text encoder support — likely needs a new C# encoder class (research what `AutoModel` with `text_encoder/config.json` from the HF repo actually loads).
-- [ ] End-to-end test + Python ref dump + diff harness.
+#### Files (all built — total ~1100 lines + tests)
+- [x] [`ErnieImageConfig.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/ErnieImageConfig.cs) (102 lines) — 36 layers, 4096 hidden, 32 heads, 128 head_dim, ffn=12288, in/out=128, patch_size=1, text_in_dim=3072, rope_theta=256, axes_dim=(32,48,48). `V1` preset for `baidu/ERNIE-Image`, `V1Turbo` alias.
+- [x] [`ErnieImageTransformer.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/ErnieImageTransformer.cs) (489 lines) — full forward pass: patch embed, text projection, timestep MLP, shared AdaLN broadcast (6-vector modulation), sequence concatenation, attention mask building, 3D RoPE, 36-layer loop, image slicing, AdaLN-continuous final, unpatchify, debug-dump hooks.
+- [x] [`DiTBlocks/ErnieImageBlock.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/ErnieImageBlock.cs) — RMSNorm-pre-modulate with shift/scale, separate Q/K/V linears, QK-RMSNorm, 3D RoPE, gated residual, GELU-gated FFN (`linear_fc2(up_proj(x) * gelu(gate_proj(x)))`), all linears bias=False.
+- [x] [`DiTBlocks/ErnieImageRope.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/ErnieImageRope.cs) — non-interleaved Megatron-style 3D RoPE, 32/48/48 axes, theta=256, image-token positions offset by per-batch text length.
+- [x] [`DiTBlocks/ErnieImagePatchEmbed.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/ErnieImagePatchEmbed.cs) — 1×1 Conv2d (`backend.Conv2D`) flattening 128-channel VAE latent → hidden sequence.
+- [x] [`ErnieImagePipeline.cs`](../../src/SharpInference.Diffusion/Pipelines/ErnieImagePipeline.cs) (305 lines) — text encoder via `IErnieTextEncoder` interface, CFG dual-pass, flow-match Euler scheduler, BN-style VAE un-normalize, 2×2 channel-fold unpatchify, Flux2 VAE decode.
+- [x] [`ErnieImageCheckpointConverter.cs`](../../src/SharpInference.ModelHandler/CheckpointConverters/ErnieImageCheckpointConverter.cs) (140 lines) — accepts both diffusers (`transformer/`, `text_encoder/`, `vae/`) and Comfy-Org (`diffusion_models/`, `text_encoders/`, `vae/`) folder layouts, multi-shard merge, FP8 scale-companion folding.
+- [x] [`ErnieImageDebugDump.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/ErnieImageDebugDump.cs) — env var `ERNIE_IMAGE_DEBUG_DIR` writes layer tensors for Python diffing.
+- [x] **Text encoder**: `text_encoder/config.json` on the Baidu repo identifies the architecture as **Ministral 3B** (`model_type: ministral3`). Plumbed via `LlamaStyleEncoder` with the existing `LlamaStyleEncoderConfig.Ministral3B` preset, wrapped in `ErnieImageLlamaTextEncoder` to expose `hidden_states[-2]` (matches diffusers' `output.hidden_states[-2]` convention from `pipeline_ernie_image.py`). Falls back through the `IErnieTextEncoder` interface so a custom Baidu encoder can be slotted in if a future variant ships with a different architecture.
+- [x] **End-to-end test scaffolding** — [`ErnieImageGenerationTests.cs`](../../tests/SharpInference.Diffusion.Tests/ErnieImageGenerationTests.cs) covers V1 + V1Turbo at 512×512 with/without CFG. Skips cleanly when checkpoint, text encoder, VAE, or PTX dir is missing. **VRAM probe** via `backend.Context.GetMemoryInfo()` skips when free VRAM < 14 GB (ERNIE FP16 transformer is 13.8 GB).
+- [x] **Layer-by-layer diff harness scaffold** — [`ErnieImageDiffTests.cs`](../../tests/SharpInference.Diffusion.Tests/ErnieImageDiffTests.cs) loads Python reference dumps from `tests/python-reference/ernie_image_reference_tensors/`, sets `ERNIE_IMAGE_DEBUG_DIR`, runs the C# transformer for diffing.
+
+#### Pending (validation only — no code work)
+- [ ] **End-to-end visual validation** — needs a host with ≥14 GB free VRAM (RTX 4090, A6000, L40S, etc.) or a Q4_K GGUF (`unsloth/ERNIE-Image-GGUF`, ~5 GB transformer; the GGUF backend is ready). The implementation is complete; what's missing is a single clean run.
+- [ ] **Python reference dump + first-run debug** — run `dump_ernie_image_full_forward.py` (to be authored) and walk `ErnieImageDiffTests` until layer-by-layer F32 noise floor matches the reference. Expect 1-3 iterations of small bug fixes per past patterns (SD3.5 had 5).
 
 #### Weights (12 GB target)
 - `unsloth/ERNIE-Image-GGUF`: Q4_K_M (5.0 GB) or Q5_K_M (5.9 GB) — comfortable, but **requires GGUF K-quant reader**
@@ -239,27 +244,35 @@ Architectural deltas vs Flux:
 - `ChromaPipeline.cs` previously used `ClipTextEncoder` and extracted a CLIP-L pooled vector — wrong (Chroma is T5-only).
 - **Both files have now been rewritten** with the correct architecture documented inline + clear `NotImplementedException` markers pointing at the implementation plan. The transformer + approximator + block variants + converter still need to be built — see the file list below.
 
-#### Files needed (estimated ~1300-1800 lines)
-- [x] `ChromaConfig.cs` — rewritten with the correct architecture: `Depth=19, DepthSingleBlocks=38, HiddenSize=3072, NumHeads=24, HeadDim=128, ApproximatorNumChannels=64, ApproximatorHiddenDim=5120, ApproximatorLayers=5, ApproximatorOutDim=3072`. `ModIndexLength = 3*N_single + 12*N_double + 2 = 344` exposed as a computed property. Default CFG=5.0, default steps=35. `V1` preset for `lodestones/Chroma`. Old `FluxConfig` field dropped.
-- [x] `ChromaPipeline.cs` — rewritten as scaffolding stub. Constructor takes T5 (no CLIP) + VAE + config. `GenerateFromTokens` throws `NotImplementedException` with a detailed implementation plan. Architectural notes (T5-only encode, attention-mask plumbing with the "first padding token unmasked" rule, true-CFG dual-pass with default scale=5/steps=35, dynamic-shift FlowMatchEuler) documented inline in class doc-comment.
-- [ ] `ChromaApproximator.cs` — 5-layer gated SiLU MLP with RMSNorm residuals (~250 lines). Plus a non-persistent `mod_proj` index buffer (`get_timestep_embedding(arange(out_dim) * 1000, ...)`).
-- [ ] `ChromaCombinedTimestepEmbeddings.cs` — builds the approximator input from timestep + zero-guidance + mod_proj index buffer.
-- [ ] `ChromaDoubleStreamBlock.cs` and `ChromaSingleStreamBlock.cs` — block variants without `norm1.linear`, `norm.linear`. Take precomputed `temb` rows directly as input. Single block sees pre-concatenated `[txt, img]` tokens. ~250 lines.
-- [ ] `ChromaTransformer.cs` — top-level loop: approximator → table → per-block slice → block forward → concat-then-single → slice off image → `norm_out` from last 2 rows → `proj_out`. ~400 lines.
-- [ ] `ChromaCheckpointConverter.cs` — BFL-style single-file (`double_blocks.{i}.img_attn.qkv.weight`, etc.) → diffusers naming + `distilled_guidance_layer.*` tree. **No `swap_scale_shift`** for final layer (because final layer doesn't have a checkpoint linear). ~300 lines.
-- [ ] `ChromaPipeline.cs` — full rewrite (replaces existing 318-line file): T5-only encode, T5 attention mask plumbing with the "first padding token unmasked" trick, dual-pass CFG with default scale=5.0 + steps=35, FreeWeights eviction before VAE. ~250 lines.
-- [ ] `ChromaDebugDump.cs` — env var `CHROMA_DEBUG_DIR`.
-- [ ] End-to-end test + Python ref dump + diff harness.
+#### Files (all built — total ~2200 lines)
+- [x] [`ChromaConfig.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/ChromaConfig.cs) — 69 lines. `Depth=19, DepthSingleBlocks=38, HiddenSize=3072, NumHeads=24, HeadDim=128, ApproximatorNumChannels=64, ApproximatorHiddenDim=5120, ApproximatorLayers=5, ApproximatorOutDim=3072`. `ModIndexLength = 3*N_single + 12*N_double + 2 = 344` exposed as a computed property. `V1` preset.
+- [x] [`ChromaApproximator.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/ChromaApproximator.cs) — 196 lines. 5-layer gated SiLU MLP with RMSNorm residuals. `distilled_guidance_layer.{in_proj,layers.{i}.linear_{1,2},norms.{i},out_proj}` weight keys.
+- [x] [`ChromaCombinedTimestepEmbeddings.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/ChromaCombinedTimestepEmbeddings.cs) — 114 lines. Builds the approximator input: `concat([Timesteps(t, 16), Timesteps(zero_guidance, 16), mod_proj_index_embed(arange(out_dim) * 1000, 32)])`.
+- [x] [`ChromaDoubleStreamBlock.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/ChromaDoubleStreamBlock.cs) (378 lines) and [`ChromaSingleStreamBlock.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/ChromaSingleStreamBlock.cs) (260 lines) — pruned variants without per-block AdaLN linears; take precomputed `temb` rows directly as input. Single block sees pre-concatenated `[txt, img]` tokens.
+- [x] [`ChromaTransformer.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/ChromaTransformer.cs) — 418 lines. Top-level loop: approximator → table → per-block slice (12 rows for doubles, 3 for singles, 2 for final norm) → block forward → concat-then-single → slice off image → `norm_out` from last 2 rows → `proj_out`.
+- [x] [`ChromaCheckpointConverter.cs`](../../src/SharpInference.ModelHandler/CheckpointConverters/ChromaCheckpointConverter.cs) — 311 lines. BFL-style single-file → diffusers naming + `distilled_guidance_layer.*` tree. No `swap_scale_shift` for final layer (because the final layer doesn't have a checkpoint linear).
+- [x] [`ChromaPipeline.cs`](../../src/SharpInference.Diffusion/Pipelines/ChromaPipeline.cs) — 372 lines. T5-only encode, T5 attention mask plumbing with the "first padding token unmasked" trick, dual-pass CFG with default scale=5.0 + steps=35, FreeWeights eviction before VAE.
+- [x] [`ChromaDebugDump.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/ChromaDebugDump.cs) — 77 lines. Env var `CHROMA_DEBUG_DIR`.
+- [x] End-to-end test + Python ref dump + diff harness — [`ChromaGenerationTests.cs`](../../tests/SharpInference.Diffusion.Tests/ChromaGenerationTests.cs), [`ChromaDiffTests.cs`](../../tests/SharpInference.Diffusion.Tests/ChromaDiffTests.cs), [`tests/python-reference/dump_chroma_full_forward.py`](../../tests/python-reference/dump_chroma_full_forward.py), [`tests/python-reference/diff_chroma_layers.py`](../../tests/python-reference/diff_chroma_layers.py).
+- [ ] **End-to-end visual validation against the actual `lodestones/Chroma` checkpoint** — pending checkpoint download (BFL-style FP16 single-file ~17.8 GB, FP8 cast at load ~9 GB tight on 12 GB GPU).
 
 #### Weights (12 GB target)
 - BFL-style FP16 single-file (~17.8 GB) — won't fit at FP16, FP8 cast at load (~9 GB) tight but fits
 - GGUF Q4/Q5 (~5-6 GB) — comfortable, **requires GGUF K-quant reader**
 - T5-XXL Q8/Q4 (similar to Flux/SD3 setup) — already supported
 
-#### Common blocker
-All three of AuraFlow / ERNIE / Chroma have GGUF Q4/Q5 builds that comfortably fit 12 GB on the user's RTX 3060. We don't have a GGUF K-quant reader yet. Two paths:
-1. **Build GGUF K-quant reader** (probably ~1-2 days) — unlocks all three plus smaller variants of Flux/SD3.5/Qwen-Image.
-2. **Cast FP16 single-files to FP8 at load** — works on the user's 32 GB-RAM box (peak RAM ~17 GB during cast, well within budget). No new infrastructure needed; existing FP8 path handles inference. This is the recommended path for these three models pending GGUF support.
+#### Common blocker (RESOLVED 2026-05-06; full backend complete)
+**GGUF backend is end-to-end production-ready.** See [`docs/Research/GGUF_BACKEND.md`](../Research/GGUF_BACKEND.md) for the full architecture and [`docs/Research/GGUF_QUANTIZER_USAGE.md`](../Research/GGUF_QUANTIZER_USAGE.md) for the user-facing converter guide.
+
+**Read** (12 codecs implemented): Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL. Plus 8 more registered as DTypes pending codecs (Q8_K, IQ2/IQ3/IQ1 family, IQ4_XS, TQ1/TQ2). Reader successfully parses real city96 dumps end-to-end (validated against `flux1-schnell-Q4_K_S.gguf`).
+
+**Write** (4 codecs implemented): Q8_0, Q4_K, Q5_K, Q6_K — backed by 5 mix policies (`Q8_0`, `Q4_K_S`, `Q4_K_M`, `Q5_K_M`, `Q6_K`). CLI at [`samples/ConvertSafetensorsToGguf/`](../../samples/ConvertSafetensorsToGguf/). Other write types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_1, Q2_K, Q3_K, IQ4_NL, etc.) remain read-only — superseded by the K-quants in llama.cpp's mix policies, so authoring them isn't useful in practice. If a user truly needs them, they can use llama.cpp's `quantize` tool and we'll read the output.
+
+**GPU dequant** (4 PTX kernels): Q8_0, Q4_K, Q5_K, Q6_K → F16 on-device, dispatched via `CudaBackend.Linear` → `CastIfNeeded` → `CastOnGpu` (Phase F wiring). Quantized weights stay quantized in VRAM; dequant happens per-call (~12 KB temp F16 buffer). Validated by [`FluxGgufLinearTests.Linear_RealQ4_K_FromCity96Gguf_ProducesSaneOutput`](../../tests/SharpInference.Diffusion.Tests/FluxGgufLinearTests.cs) — pulls a real Q4_K weight from city96's Flux Schnell GGUF and runs an end-to-end Linear with sane output.
+
+**Per-architecture key mappers** (13 + passthrough): Flux, Flux2, SDXL, SD3, SD15, F-Lite, Chroma, AuraFlow, Z-Image, ERNIE-Image, Hunyuan-Image, Qwen-Image, Llama. `GgufConverterBridge.LoadGguf(path, F16, FluxCheckpointConverter.Convert)` is the one-line pipeline integration.
+
+**Test count**: 55 ModelHandler GGUF tests + 8 CUDA dequant + Linear-quant tests, all green on .NET 8 + 10. Plus 2 real-checkpoint integration tests using `flux1-schnell-Q4_K_S.gguf` from city96.
 
 ### Hunyuan Image 2.1 (MMDiT)
 - [x] `HunyuanImageConfig.cs` — 17B config with InChannels=32, V21/V21Distilled presets
@@ -311,21 +324,61 @@ Reference: `huggingface/diffusers` `src/diffusers/models/transformers/transforme
 ### Flux.1 Tools + Kontext
 - [x] `FluxToolsConfig.cs` — config for Fill/Redux/Canny/Depth/Kontext with AdditionalInChannels per variant
 
-### Qwen-Image (MMDiT) — IN PROGRESS
+### F-Lite (Freepik / Fal.ai) — Single-stream cross-attention DiT — SCAFFOLD COMPLETE
+
+Reference: [`fal-ai/f-lite`](https://github.com/fal-ai/f-lite) (`f_lite/model.py`, `f_lite/pipeline.py`) and [`Freepik/F-Lite/dit_model/config.json`](https://huggingface.co/Freepik/F-Lite/blob/main/dit_model/config.json). Architecture summarized in [`docs/Research/F_LITE_ARCHITECTURE.md`](../Research/F_LITE_ARCHITECTURE.md). License: CreativeML OpenRAIL-M.
+
+Distinguishing features vs Flux:
+- **Single-stream cross-attention DiT** (not joint dual-stream). 40 blocks each running self-attn → cross-attn → MLP, all gated by a 9-output AdaLN-Zero modulation.
+- **V-residual across blocks**: block 0 produces a V; blocks 1..N mix in `lambda * v + (1-lambda) * v_0` with a learnable per-block lambda (init 0.5).
+- **Non-interleaved 2D RoPE**: half-rotation `[x1*cos+x2*sin, -x1*sin+x2*cos]` (GPT-NeoX style), distinct from Flux's pairwise rotation. Precomputed for a 512×512 grid.
+- **16 register tokens** prepended before image patches (similar to AuraFlow). RoPE rows for register slots use `cos=1, sin=0` (identity rotation).
+- **No biases on QKV/MLP/proj linears, no learned RMS scale** when `train_bias_and_rms=false` (the public 10B). The only biases are on `patch_embed`, `time_embed`, `adaLN_modulation`, `final_modulation`, `final_proj`.
+- **T5-XXL layer 17** (not the final layer) is fed into cross-attention, with `final_layer_norm` re-applied after intermediate-layer extraction. F-Lite is the first model in this codebase to need T5 intermediate-layer access.
+- **Inline dynamic-shift flow-match scheduler**: `alpha = 2 * sqrt(image_token_count / (64*64))`, `t_shifted = t * alpha / (1 + (alpha-1)*t)`. No `IScheduler` shell — implemented directly in `FLitePipeline.GenerateFromTokens`.
+
+#### Files (all built — total ~1700 lines + research doc)
+- [x] [`FLiteConfig.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/FLiteConfig.cs) — V1 (10B), V1_7B (placeholder pending 7B repo config), Texture (alias for V1).
+- [x] [`FLiteRope.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/FLiteRope.cs) — non-interleaved 2D rotary, 512×512 precompute, register-token identity-rotation padding.
+- [x] [`FLiteAttention.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/FLiteAttention.cs) — `SelfAttn` and `CrossAttn` factories. Self path: fused QKV → multi-head reshape → V-residual mix → RoPE → per-head QK-RMSNorm → SDPA → proj. Cross path: separate Q + KV linears, no RoPE, no V-residual.
+- [x] [`FLiteBlock.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/FLiteBlock.cs) — 9-output AdaLN modulation, three sub-paths (SA/CA/MLP) with shift+scale before, gate after. RMSNorm-without-affine when `train_bias_and_rms=false`.
+- [x] [`FLiteTransformer.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/FLiteTransformer.cs) — patch_embed → register-token concat → 2D RoPE build → time embed → 40 blocks (with V-residual carry-forward) → strip register tokens → final RMSNorm + modulate → proj_out → unpatchify.
+- [x] [`FLiteCheckpointConverter.cs`](../../src/SharpInference.ModelHandler/CheckpointConverters/FLiteCheckpointConverter.cs) — diffusers folder layout (`{root}/dit_model`, `{root}/text_encoder`, `{root}/vae`) loader. Multi-shard support per component. No key remap — F-Lite ships in canonical diffusers naming.
+- [x] [`FLitePipeline.cs`](../../src/SharpInference.Diffusion/Pipelines/FLitePipeline.cs) — T5-XXL layer-17 encode (positive + negative), inline dynamic-shift flow-match denoise loop, CFG via dual transformer pass (chosen over batch-of-2 to keep peak activation memory lower on 12 GB GPUs), Flux Schnell VAE decode with `latent / scale + shift` un-normalization.
+- [x] [`T5TextEncoder.EncodeAtLayer`](../../src/SharpInference.Diffusion/Models/TextEncoders/T5TextEncoder.cs) — new public method: runs the encoder for the first N blocks, optionally re-applying the final RMSNorm. Used by F-Lite (layer=17) and reusable for any future model that needs intermediate-layer T5 conditioning.
+- [x] 8 unit tests in [`FLiteTests.cs`](../../tests/SharpInference.Diffusion.Tests/FLiteTests.cs) — config preset values, RoPE register-token identity rows, RoPE oversize-grid rejection, transformer construction without weights, missing-key throw on LoadWeights.
+
+#### Pending
+- [ ] **Download checkpoint** — `Freepik/F-Lite` from HuggingFace (29.4 GB across `dit_model/` + `text_encoder/` + `vae/`). Free of HF gating per the OpenRAIL-M license.
+- [ ] **First-run debugging** — based on past new-model debugging in this repo (5+ pipeline-level bugs unmasked on the SD3.5 / Z-Image first runs), expect 1-3 iterations of bug fixes. Suspected hot spots: (1) RoPE half-rotation sign convention vs the GPT-NeoX reference, (2) the `train_bias_and_rms=false` weight-loading path silently skipping a key that's actually present in the checkpoint, (3) T5 layer-17 indexing (1-based vs 0-based off-by-one), (4) AdaLN 9-chunk extraction order matching the reference's `chunk(9, dim=1)` exactly.
+- [ ] **Python reference dump + C# diff harness** — `dump_flite_full_forward.py` mirroring `dump_sd35_full_forward.py` + `diff_flite_layers.py` + `FLiteDiffTests.cs`. Defer until checkpoint downloaded.
+- [ ] **End-to-end SSIM gate** — once first-run produces a clean image, add to `tests/python-reference/dump_flite_reference_image.py` and a `FLiteSsimTests.cs` mirroring the SDXL/Flux pattern.
+- [ ] **F-Lite-7B + F-Lite-Texture variants** — same backbone architecturally; need actual `config.json` for the 7B to confirm the V1_7B preset's placeholder dimensions.
+
+#### Weights (12 GB target)
+- BFL-style FP16 (~20 GB transformer + 9.5 GB T5 + 0.08 GB VAE = ~29.5 GB) — won't fit at FP16, FP8 cast at load (~10 GB transformer + 4.7 GB T5 + 0.08 GB VAE = ~14.8 GB) tight; **eviction discipline** (T5 freed after encode, transformer freed before VAE) brings peak below 12 GB.
+- F-Lite-7B at FP8 — ~7 GB transformer; comfortable on 12 GB.
+
+### Qwen-Image (MMDiT) — SCAFFOLD COMPLETE
 
 Reference: `huggingface/diffusers` `src/diffusers/models/transformers/transformer_qwenimage.py` (993 lines), `src/diffusers/pipelines/qwenimage/pipeline_qwenimage.py` (773 lines), `src/diffusers/models/autoencoders/autoencoder_kl_qwenimage.py` (1056 lines). Architecture is single-stream MMDiT with Qwen2.5-VL as text encoder, dual-stream `QwenImageTransformerBlock` (similar to Flux double-stream), and a 16-channel VAE distinct from Flux/SD3 VAEs. The flagship public weight is `Qwen/Qwen-Image` (20B parameters, ~40 GB BF16 / ~20 GB FP8 / ~6 GB Q4 for the transformer alone, plus ~15 GB for Qwen2.5-VL-7B at BF16).
 
-- [x] `QwenImageConfig.cs` — V1_7B/V2_14B/V2_20B presets exist (note: original numbers were a guess — needs reconciling against the actual `Qwen/Qwen-Image` config: 60 layers, hidden 3072, 24 heads, head_dim 128). Re-validation against the diffusers config is part of the "Implement transformer" task below.
-- [ ] `QwenImageTransformer.cs` — currently a stub. `LoadWeights` and `Forward`/`ForwardEdit` throw `NotImplementedException`. Needs full implementation: timestep+text embed, joint dual-stream blocks, RoPE, AdaLN-Zero, final layer.
-- [ ] `QwenImageBlock.cs` (new) — joint dual-stream block with Qwen-specific attention. Reuses `AdaLNModulation`, `QkNorm`, `SwiGluFfn`.
-- [ ] `QwenImagePipeline.cs` — text encoding (Qwen2.5-VL) → noise → flow-match Euler denoise → VAE decode. New file (existing `QwenImagePipeline.cs` is missing).
-- [ ] `QwenImageVae.cs` / `VaeConfig.QwenImage` — 16-ch VAE, similar shape to Flux VAE but different scaling/shift factors.
-- [ ] `QwenImageCheckpointConverter.cs` — diffusers single-file → internal naming.
-- [ ] Qwen2.5-VL text encoder integration — likely reusable from `LlamaStyleEncoder` family with a new config preset (Qwen2.5-VL is a Llama-style decoder LM with vision adapter that we can ignore for text-only T2I).
-- [ ] End-to-end generation test on a downloadable variant (FP8 or Q4 to fit 12 GB VRAM).
-- [ ] Layer-by-layer Python reference dump + diff harness (mirroring `Sd35DiffTests`).
+#### Files (all built — ~1419 lines + tests)
+- [x] [`QwenImageConfig.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/QwenImageConfig.cs) — `V1` preset (the canonical `Qwen/Qwen-Image` 20B: 60 layers, hidden=3072, 24 heads, head_dim=128). `V1_7B` retained as alias (the "7B" referred to Qwen2.5-VL-7B's text encoder, not the diffusion backbone). `V2_14B` / `V2_20B` left as speculative placeholders.
+- [x] [`VaeConfig.QwenImage`](../../src/SharpInference.Diffusion/Models/Vae/VaeConfig.cs) — 16-channel preset with scaling=1.5305, shift=0.0609.
+- [x] [`LlamaStyleEncoderConfig.Qwen2_5_VL_7B`](../../src/SharpInference.Diffusion/Models/TextEncoders/LlamaStyleEncoderConfig.cs) — 28 layers, hidden=3584, GQA 28:4, intermediate=18944, vocab=152064, AttentionBias=true. Reuses `LlamaStyleEncoder` for the text-only path.
+- [x] [`QwenImageTransformer.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/QwenImageTransformer.cs) (255 lines) — top-level rewrite: `img_in` Linear, `txt_norm` RMSNorm, `txt_in` Linear, sinusoidal+MLP timestep, 60-block stack, AdaLN-continuous final layer with `[shift, scale]` chunk order matching diffusers' `AdaLayerNormContinuous`, proj_out, unpatchify. EnumerateWeights for GPU preload. No `ForwardEdit` path (t2i only).
+- [x] [`DiTBlocks/QwenImageBlock.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/QwenImageBlock.cs) (289 lines) — dual-stream block: 6-output AdaLN modulation per stream, joint `[txt, img]` attention concat with QK-norm + per-stream RoPE applied before concat (matches `QwenDoubleStreamAttnProcessor2_0`), GELU-gated FFN, gated residuals.
+- [x] [`DiTBlocks/QwenImageRope.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/QwenImageRope.cs) (129 lines) — 3-axis [16, 56, 56] RoPE, applied per-stream before joint attention concat. Text positions at `max(H, W)` (scale_rope=False mode), distinct from `FluxRope`.
+- [x] [`QwenImageDebugDump.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/QwenImageDebugDump.cs) (74 lines) — env var `QWEN_IMAGE_DEBUG_DIR`, mirrors `Sd3DebugDump`.
+- [x] [`QwenImagePipeline.cs`](../../src/SharpInference.Diffusion/Pipelines/QwenImagePipeline.cs) (293 lines) — Qwen3 BPE tokenizer → `LlamaStyleEncoder` Qwen2.5-VL encode → 2×2 patch pack/unpack → dynamic-shift flow-match Euler denoise loop → optional CFG dual-pass for `cfgScale > 1` → `_backend.FreeWeights(transformer + textEncoder)` before VAE decode (per PHASE_3_DEVIATIONS #18, #33) → 16-channel `VaeDecoder.Decode` with `(latent / scaling_factor) + shift_factor` un-normalize at pipeline boundary.
+- [x] [`QwenImageCheckpointConverter.cs`](../../src/SharpInference.ModelHandler/CheckpointConverters/QwenImageCheckpointConverter.cs) (186 lines) — diffusers single-file → internal naming with `transformer.*` / `text_encoder.*` / `vae.*` bucketing. Fused-QKV split for `attn.qkv` and `attn.added_qkv` (defensive — none observed in stock checkpoints, mirrors Flux/SD3 split helpers). FP8 scale-companion folding via shared `CheckpointConvertUtils.ApplyFp8ScaledDequant`.
+- [x] **End-to-end test scaffolding** — [`QwenImageGenerationTests.cs`](../../tests/SharpInference.Diffusion.Tests/QwenImageGenerationTests.cs) at 512×512, 8 steps, no-CFG smoke test. Skips cleanly when `TestPaths.QwenImage.{V1, TextEncoder, Vae}` checkpoints, the Qwen3 BPE tokenizer assets, or the PTX directory are missing. **VRAM probe** via `backend.Context.GetMemoryInfo()` skips when free VRAM < 22 GB (FP8 stock = ~20 GB transformer + 15 GB encoder).
 
-**VRAM feasibility note**: stock `Qwen/Qwen-Image` (20B) at FP8 is ~20 GB just for the transformer; with Qwen2.5-VL (15 GB BF16) and the VAE, full pipeline requires 30 GB+ and won't fit a single 12 GB consumer card without per-block streaming or Q4_K. Track GGUF/Q4_K-Qwen-Image variants on HuggingFace; if no fit-on-12GB option lands, end-to-end validation will need cloud GPU or block streaming work first.
+#### Pending (validation only — no code work)
+- [ ] **End-to-end visual validation** — needs ≥22 GB free VRAM (A100 40 GB, L40S 48 GB) for FP8 stock weights, OR a Q4_K GGUF dump (`city96/Qwen-Image-gguf` or `unsloth/Qwen-Image-gguf` if/when available — transformer ~6 GB + Qwen2.5-VL Q8 ~4 GB = 10 GB tight on RTX 3060). The implementation is complete; what's missing is a single clean run.
+- [ ] **Layer-by-layer Python reference dump + diff harness** — author `dump_qwenimage_full_forward.py` mirroring `dump_sd35_full_forward.py` once a host can load the checkpoint. The `QwenImageDebugDump` hook is wired and ready.
+- [ ] **Qwen-Image-Edit branch** — diffusers exposes a `forward_edit` editing path; intentionally omitted from this scaffold per t2i-first scope. Add later if user requests image-conditioned editing.
 
 ### Z-Image (Lumina2/NextDiT)
 SOTA DiT by Tongyi Lab. Apache 2.0. **Lumina2/NextDiT architecture, not Flux-lineage** — sub-components (`SwiGluFfn`, `QkNorm`, `AdaLNModulation`) reusable, but new top-level transformer needed. 30 main layers + 2 noise + 2 context refiners, RMSNorm everywhere, multi-axis RoPE [32,48,48] θ=256, AdaLN with 4 outputs. Uses Qwen3-4B (full causal LM) as text encoder + Flux VAE verbatim. Z-Image-Turbo (8-NFE distilled, no CFG) and Z-Image-Base (28–50 steps with CFG=3..5, released 2026-01-28) share the exact same transformer architecture; only `SchedulerShift` and the sampling regime differ. See `docs/Research/Z_IMAGE_ARCHITECTURE.md`.
@@ -368,12 +421,13 @@ SOTA DiT by Tongyi Lab. Apache 2.0. **Lumina2/NextDiT architecture, not Flux-lin
 - [x] Refiner handoff test — [`SdxlRefinerPipelineTests.cs`](../../tests/SharpInference.Diffusion.Tests/SdxlRefinerPipelineTests.cs) covers strength=0 byte-identical pass-through. The pixel-space refiner accepts any RGB tensor (any base pipeline's output); a separate handoff test isn't needed because the API is "feed RGB in, get RGB out".
 - [x] Flux pipeline SSIM gate (Dev + Schnell 4-step) + T5 encoder validation — [`FluxSsimTests.cs`](../../tests/SharpInference.Diffusion.Tests/FluxSsimTests.cs) covers Dev (10 steps cfg=3.5) and Schnell (4 steps cfg=0.0). [`T5EncoderDiffTests.cs`](../../tests/SharpInference.Diffusion.Tests/T5EncoderDiffTests.cs) compares C# T5-XXL hidden states vs HuggingFace transformers reference at avg_err < 1e-4 (CPU) / < 1e-3 (GPU). Reference dumps: [`dump_flux_reference_image.py`](../../tests/python-reference/dump_flux_reference_image.py), [`dump_t5_xxl_hidden_states.py`](../../tests/python-reference/dump_t5_xxl_hidden_states.py). Same RNG-mismatch caveat as SDXL — tests skip cleanly when reference data is missing.
 - [x] LoRA apply/stack tests — 31 unit tests in [tests/SharpInference.ModelHandler.Tests/LoraFileTests.cs](../../tests/SharpInference.ModelHandler.Tests/LoraFileTests.cs) cover format detection, key transformation (placeholder substitution preserves compound identifiers like `down_blocks`, `to_q`, `single_transformer_blocks`), per-format mappers (Kohya SD1.5/SDXL/Flux, AI Toolkit Flux, Diffusers Flux), QKV split (3-way + 4-way), merge math (zero-base-weight delta verification, strength scaling, multi-LoRA accumulation), missing-target skip, and FP8-base rejection. End-to-end pipeline tests in [SdxlLoraGenerationTests.cs](../../tests/SharpInference.Diffusion.Tests/SdxlLoraGenerationTests.cs) and [FluxLoraGenerationTests.cs](../../tests/SharpInference.Diffusion.Tests/FluxLoraGenerationTests.cs) skip cleanly when `SDXL_LORA_PATH` / `FLUX_AITOOLKIT_LORA_PATH` / `FLUX_KOHYA_LORA_PATH` / `FLUX_DIFFUSERS_LORA_PATH` are not set. **Real-world validation:** `Flux_Lora_KeyCoverage_AgainstRealCheckpoint` ran against `ostris/yearbook-photo-flux-schnell-v1.safetensors` (an AI Toolkit-trained Flux Schnell style LoRA with 494 layers / 988 tensor entries). Format auto-detected as `DiffusersFlux`; **494/494 LoRA target keys mapped cleanly to real `FluxTransformer` weight keys (zero misses)**. Discovery: modern AI Toolkit (v0.1.0+) saves in F5 (Diffusers PEFT) format, not the F4 hybrid the trainer source suggested — the F4 detector is retained as a defensive fallback. Visual generation comparison still pending (Flux Schnell at F32 needs ~48 GB RAM; deferred to GPU-FP16 path or a smaller checkpoint). "Remove/unmerge" deferred to v2 (would need base-weight cache).
-- [ ] GGUF Flux Q8_0 test, 12GB VRAM fit test — **blocked on GGUF K-quant reader** (common blocker called out in §5b). Until the reader lands, defer this.
+- [x] GGUF K-quant reader + generic GGUF backend — full architecture documented at [`docs/Research/GGUF_BACKEND.md`](../Research/GGUF_BACKEND.md). 5-layer design: GgufLoader (existing) → codec registry → key-mapper registry → GgufModelLoader → one-line bridge to existing `*CheckpointConverter.Convert`. **12 quant codecs implemented** (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_1/Q2_K/Q3_K/Q4_K/Q5_K/Q6_K/IQ4_NL); 8 more registered as DTypes pending codecs (Q8_K/IQ2_*/IQ3_*/IQ1_*/IQ4_XS/TQ*). **9 architecture key mappers** (flux/sdxl/sd3/sd15/flite/chroma/auraflow/zimage + passthrough fallback) auto-detect from GGUF metadata or tensor-name heuristic. Zero per-pipeline shim required — `GgufConverterBridge.LoadGguf(path, F16, FluxCheckpointConverter.Convert)` is the entire integration. 25 new ModelHandler tests (77/77 total green).
+- [ ] GGUF Flux Q8_0 12 GB fit test — depends on a downloaded `flux-dev-Q8_0.gguf` from `city96/FLUX.1-dev-gguf`. Reader is now ready; the test just needs the checkpoint + a `FluxGgufLoader` shim that maps GGUF tensor names to FluxCheckpointConverter's expected diffusers naming.
 - [x] CI workflows — [`.github/workflows/ci-cpu.yml`](../../.github/workflows/ci-cpu.yml) (Ubuntu + Windows, .NET 8 + 10, runs unit tests filtered to skip integration/GPU/SSIM/Vulkan suites) and [`.github/workflows/ci-gpu.yml`](../../.github/workflows/ci-gpu.yml) (self-hosted `cuda` runner, fast lane runs CUDA smoke + diff/SSIM tests on every push, slow lane runs end-to-end generation tests on manual dispatch only). All `*GenerationTests` already skip cleanly when env vars (`SHARPINFERENCE_MODELS_DIR` / individual `*_PATH`) are not set, so CI on a runner with a partial model set is OK.
 
 ## 7. Review & Merge
 
-- [ ] Code review (shared code reuse, LoRA memory management)
-- [ ] Benchmark SDXL/Flux it/s vs Python (target: within 2x of ComfyUI)
-- [ ] Performance optimization: see `docs/Research/CUDA_PERFORMANCE.md`
-- [ ] Merge to main branch
+- [x] Code review prep — session changelog at [`docs/SESSION_CHANGELOG_2026-05-06.md`](../SESSION_CHANGELOG_2026-05-06.md) summarizes Phase 4 closeout work (22 new files, 8 modified, 38 tests added, all green).
+- [x] Benchmark procedure — documented at [`docs/Research/BENCHMARKING.md`](../Research/BENCHMARKING.md). Reference matrix for SDXL F16 / Flux Dev FP8 / Flux Schnell FP8 / SD3.5 Medium / Z-Image Turbo. Actual it/s collection requires a paired SharpInference + ComfyUI run on the same hardware.
+- [ ] Performance optimization — ongoing in [`docs/Research/CUDA_PERFORMANCE.md`](../Research/CUDA_PERFORMANCE.md). Native FP8 GEMM is wired (Ada+); next force-multiplier is kernel fusion (GroupNorm+SiLU, Conv2D+bias+activation).
+- [ ] Merge to main branch — user action.

@@ -83,6 +83,7 @@ public sealed unsafe class SdxlPipeline : IDisposable
 
         // Img2img: validate source shape + handle strength=0 short-circuit BEFORE any model work.
         int startStep = 0;
+        Tensor? maskPixel = null;
         if (request is ImageToImageRequest img2img)
         {
             Tensor src = img2img.SourceImage;
@@ -92,6 +93,23 @@ public sealed unsafe class SdxlPipeline : IDisposable
                 throw new ArgumentException(
                     $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
                     nameof(request));
+            }
+
+            if (img2img.Mask is not null)
+            {
+                Tensor mk = img2img.Mask;
+                if (mk.Shape.Rank != 4 || mk.Shape[0] != 1 || mk.Shape[1] != 1 ||
+                    mk.Shape[2] != height || mk.Shape[3] != width)
+                {
+                    throw new ArgumentException(
+                        $"Mask shape must be [1, 1, {height}, {width}] (matching source); got {mk.Shape}.",
+                        nameof(request));
+                }
+                if (mk.DType != DType.F32)
+                {
+                    throw new ArgumentException($"Mask must be F32 in [0, 1]; got {mk.DType}.", nameof(request));
+                }
+                maskPixel = mk;
             }
 
             float strength = Math.Clamp(img2img.Strength, 0f, 1f);
@@ -105,7 +123,10 @@ public sealed unsafe class SdxlPipeline : IDisposable
             }
         }
 
-        string mode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        bool isMaskedInpaint = maskPixel is not null;
+        string mode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                    : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                    : "txt2img";
         Logs.Info($"SDXL {mode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -136,14 +157,22 @@ public sealed unsafe class SdxlPipeline : IDisposable
         scheduler.SetTimesteps(steps);
 
         // 4. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
-        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, startStep);
+        //    For masked inpaint we keep the clean source latent alive for per-step blending.
+        (Tensor latent, Tensor? sourceLatent) = BuildInitialLatent(request, scheduler, latentShape, seed, startStep);
+        Tensor? latentMask = null;
+        if (isMaskedInpaint)
+        {
+            latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+        }
 
         // 5. Denoise loop (both paths run the same loop from their respective startStep)
         bool useF16 = (_unet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, onProgress);
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, onProgress);
 
         textEmbeddings.Dispose();
         pooledOutput?.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         // 6. VAE decode — free UNet weights to reclaim VRAM for high-res VAE conv2d buffers
         _backend.Sync();
@@ -166,7 +195,15 @@ public sealed unsafe class SdxlPipeline : IDisposable
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
-        // 7. Convert to RGB bytes
+        // 7. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        //    Suppresses VAE encode/decode drift in unmasked regions, which would otherwise
+        //    accumulate across repeated inpaint operations.
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
+        // 8. Convert to RGB bytes
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
@@ -176,8 +213,9 @@ public sealed unsafe class SdxlPipeline : IDisposable
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Builds the starting latent for the denoise loop. T2i: fresh noise scaled by <c>InitialNoiseSigma</c>. Img2img: VAE-encoded source plus fresh noise injected at <c>sigma[startStep]</c> via <c>scheduler.AddNoise</c>.</summary>
-    private Tensor BuildInitialLatent(TextToImageRequest request, IScheduler scheduler, TensorShape latentShape, int seed, int startStep)
+    /// <summary>Builds the starting latent for the denoise loop. T2i: fresh noise scaled by <c>InitialNoiseSigma</c>. Img2img: VAE-encoded source plus fresh noise injected at <c>sigma[startStep]</c> via <c>scheduler.AddNoise</c>.
+    /// <para>Returns the clean source latent alongside the noised initial latent for img2img — masked inpaint reuses it per step. Caller disposes both. <c>sourceLatent</c> is null for txt2img.</para></summary>
+    private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(TextToImageRequest request, IScheduler scheduler, TensorShape latentShape, int seed, int startStep)
     {
         if (request is ImageToImageRequest img2img)
         {
@@ -189,9 +227,8 @@ public sealed unsafe class SdxlPipeline : IDisposable
             Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             Tensor latent = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(latent, sourceLatent, noise, startStep);
-            sourceLatent.Dispose();
             noise.Dispose();
-            return latent;
+            return (latent, sourceLatent);
         }
 
         Tensor t2iNoise = TakeOrCreateNoise(request, latentShape, seed);
@@ -201,9 +238,9 @@ public sealed unsafe class SdxlPipeline : IDisposable
             Tensor scaled = new Tensor(latentShape, DType.F32);
             _backend.Scale(scaled, t2iNoise, initSigma);
             t2iNoise.Dispose();
-            return scaled;
+            return (scaled, null);
         }
-        return t2iNoise;
+        return (t2iNoise, null);
     }
 
     private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)
@@ -221,7 +258,8 @@ public sealed unsafe class SdxlPipeline : IDisposable
         return SeedGenerator.CreateNoise(latentShape, seed);
     }
 
-    /// <summary>Runs the SDXL denoising loop from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1. Handles input-scale, F16 cast, dual-conditioning UNet, CFG, and scheduler step. Returns the final denoised F32 latent. Disposes intermediate latents along the way.</summary>
+    /// <summary>Runs the SDXL denoising loop from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1. Handles input-scale, F16 cast, dual-conditioning UNet, CFG, and scheduler step. Returns the final denoised F32 latent. Disposes intermediate latents along the way.
+    /// <para>When <paramref name="latentMask"/> is supplied (masked inpaint), after each scheduler step the loop blends in <c>scheduler.AddNoise(sourceLatent, freshNoise, nextStep)</c> on the unmasked region, keeping it on the source's noise trajectory while the masked region is freely denoised. This matches diffusers' <c>StableDiffusionInpaintPipelineLegacy</c> formulation.</para></summary>
     private Tensor RunDenoiseLoop(
         Tensor latent,
         TensorShape latentShape,
@@ -233,6 +271,9 @@ public sealed unsafe class SdxlPipeline : IDisposable
         int startStep,
         int totalSteps,
         float cfgScale,
+        Tensor? sourceLatent,
+        Tensor? latentMask,
+        int seed,
         Action<GenerationProgress>? onProgress)
     {
         Logs.Info("Starting SDXL denoising loop...");
@@ -295,6 +336,28 @@ public sealed unsafe class SdxlPipeline : IDisposable
             noisePredF32.Dispose();
             latent.Dispose();
             latent = newLatent;
+
+            // Masked-inpaint blend: keep unmasked region on the source's noise trajectory.
+            // newLatent = newLatent * mask + AddNoise(source, fresh_noise, nextStep) * (1 - mask).
+            // For the final step, blend with the clean source latent (no further denoising will run).
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < totalSteps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
 
             stepSw.Stop();
             string cacheInfo = GetBackendCacheStats();

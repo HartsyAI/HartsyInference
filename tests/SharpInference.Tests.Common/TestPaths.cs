@@ -15,6 +15,7 @@ public static class TestPaths
     public static class Flux
     {
         public static string Schnell      => Resolve("FLUX_SCHNELL_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-schnell-fp8.safetensors"));
+        public static string SchnellQ4KS  => Resolve("FLUX_SCHNELL_Q4KS_PATH", Path.Combine(ModelsDir, "unet", "Flux", "flux1-schnell-Q4_K_S.gguf"));
         public static string Dev          => Resolve("FLUX_DEV_PATH",          Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-fp8.safetensors"));
         public static string KreaFp8      => Resolve("FLUX_KREA_FP8_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-krea-dev_fp8_scaled.safetensors"));
         public static string Kontext      => Resolve("FLUX_KONTEXT_PATH",      Path.Combine(ModelsDir, "Stable-Diffusion", "Flux", "flux1-dev-kontext_fp8_scaled.safetensors"));
@@ -103,6 +104,14 @@ public static class TestPaths
     {
         public static string V1Dir       => Resolve("ERNIE_IMAGE_V1_DIR",       Path.Combine(ModelsDir, "Stable-Diffusion", "ErnieImage", "v1"));
         public static string V1TurboDir  => Resolve("ERNIE_IMAGE_V1_TURBO_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "ErnieImage", "v1-turbo"));
+    }
+
+    /// <summary>Qwen-Image paths. Default expects a single-file checkpoint at <c>Models/Stable-Diffusion/QwenImage/qwen_image_v1.safetensors</c>; the Qwen2.5-VL-7B text encoder and the 16-channel VAE are loaded separately.</summary>
+    public static class QwenImage
+    {
+        public static string V1            => Resolve("QWEN_IMAGE_V1_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "QwenImage", "qwen_image_v1.safetensors"));
+        public static string TextEncoder   => Resolve("QWEN_IMAGE_TE_PATH",     Path.Combine(ModelsDir, "text_encoders", "qwen2_5_vl_7b.safetensors"));
+        public static string Vae           => Resolve("QWEN_IMAGE_VAE_PATH",    Path.Combine(ModelsDir, "VAE", "qwen_image_vae.safetensors"));
     }
 
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
