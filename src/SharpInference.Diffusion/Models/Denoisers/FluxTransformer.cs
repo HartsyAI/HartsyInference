@@ -155,6 +155,9 @@ public sealed unsafe class FluxTransformer : IDisposable
     /// <c>[Depth, Depth + DepthSingleBlocks)</c> to single blocks.</summary>
     public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
 
+    /// <summary>Input dimension of the <c>x_embedder</c> linear, derived from the loaded weight shape. Returns <c>64</c> for vanilla Flux (16 latent channels × 2×2 packing) or <c>128</c> for FLUX.1 Tools variants (Canny / Depth / Fill — 32 channels × 2×2). Pipelines use this to detect whether a control image must be concatenated to the noise latent before the transformer pass. Returns <c>0</c> when weights aren't yet loaded.</summary>
+    public int XEmbedInputDim => _xEmbedWeight is not null ? (int)_xEmbedWeight.Shape[1] : 0;
+
     /// <summary>Returns the streamable block at the given index. Wrappers are
     /// instantiated on demand (cheap) — they hold a reference to the underlying
     /// double/single block and forward enumeration calls to it.</summary>

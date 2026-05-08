@@ -3,7 +3,28 @@
 > **Goal:** Support SDXL and Flux model families, FP8 inference for large DiT models.
 > **Packages:** SharpInference.Diffusion (extended), Core (DType), Cuda (FP8 kernels)
 
-> **Status (2026-05-07):** all image-model scaffolding is complete. Every image model in scope has a full transformer + block + pipeline + checkpoint converter + end-to-end test that fail-skips gracefully when checkpoints or VRAM are missing. Remaining work for any individual model is **validation** — first-run debug + Python reference diff against a downloaded checkpoint — not implementation. With this milestone closed, the next phase is GPU performance fine-tuning (kernel fusion, streaming weight cache improvements, native FP8 GEMM enablement on Ada+) before moving to audio.
+> **Status (2026-05-07):** all image-model scaffolding is complete across **15 model families** —
+> SD1.5, SDXL (+Inpaint, +Refiner), SD3 / SD3.5 (Medium / Large / Large-Turbo), Flux (Dev / Schnell / Krea),
+> Flux.2 (Klein 4B / Dev), Z-Image (Turbo / Base), AuraFlow v0.3, Chroma, ERNIE-Image, Qwen-Image,
+> F-Lite, Hunyuan Image 2.1, Lumina-Image-2.0, HiDream i1 (Full / Dev), Kandinsky 5.0, Anima
+> (Cosmos-Predict2), OmniGen 2. Every model has a transformer + block + pipeline + checkpoint
+> converter + end-to-end test that fail-skips gracefully when checkpoints or VRAM are missing.
+> Each test additionally probes free VRAM via <c>backend.Context.GetMemoryInfo()</c> and skips when
+> insufficient — surfacing what the model needs to run rather than OOM-failing.
+>
+> Remaining work for any individual model is **validation** — first-run debug + Python reference diff
+> against a downloaded checkpoint — not implementation. Updated 2026-05-07 (Bucket A closeout):
+> Hunyuan Image 2.1's pipeline body (T5 encode → patchify → transformer → unpatchify → distilled-guidance
+> CFG → 32-channel VAE) and OmniGen 2's transformer Forward chain (patchify → noise/context refiners
+> → joint main blocks → AdaLN-continuous → unpatchify) are now both fully wired. A `LlamaTokenizer`
+> class supports HiDream's Llama-3.1 path; the `LlamaStyleEncoder` config gained
+> <c>MlpActivation.GeluTanh</c>, <c>HasFfnSandwichNorms</c>, and <c>RmsNormScalePlusOne</c> flags so
+> the Gemma2_2B preset produces structurally-correct hidden states for Lumina 2.0 (full attention
+> logit soft-capping + sliding-window alternation deferred — small numerical drift expected on long
+> prompts).
+>
+> With this milestone closed, the next phase is GPU performance fine-tuning (kernel fusion,
+> streaming weight cache improvements, native FP8 GEMM enablement on Ada+) before moving to audio.
 
 ---
 

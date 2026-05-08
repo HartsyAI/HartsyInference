@@ -1,5 +1,15 @@
 namespace SharpInference.Diffusion.Models.TextEncoders;
 
+/// <summary>MLP activation function variant. <see cref="Silu"/> matches Llama / Qwen / Mistral SwiGLU;
+/// <see cref="GeluTanh"/> matches Gemma 2's GeGLU (<c>gelu(x, approximate="tanh")</c> in PyTorch).</summary>
+public enum MlpActivation
+{
+    /// <summary>SiLU/Swish: <c>x * sigmoid(x)</c>. Default for Llama family.</summary>
+    Silu,
+    /// <summary>Tanh-approximation GELU (Gemma 2 family).</summary>
+    GeluTanh,
+}
+
 /// <summary>
 /// Configuration for Llama-family decoder transformers used as text encoders for diffusion conditioning
 /// (Qwen3 in Flux.2 Klein, Mistral-Small-3 in Flux.2 Dev). The transformer is run as an encoder: a single
@@ -61,6 +71,22 @@ public record LlamaStyleEncoderConfig
 
     /// <summary>Whether the checkpoint has a final RMSNorm at the model root (<c>model.norm.weight</c>). True for Qwen3 / Llama / Mistral-Instruct full checkpoints. False for the BFL Mistral-Small-3 distill packaged with Flux.2 Dev — it ships without final norm and lm_head, used only as a feature extractor.</summary>
     public bool HasFinalNorm { get; init; } = true;
+
+    /// <summary>MLP activation. <see cref="MlpActivation.Silu"/> for Llama / Qwen / Mistral (SwiGLU);
+    /// <see cref="MlpActivation.GeluTanh"/> for Gemma 2 (GeGLU with the tanh-approx GELU). The
+    /// gated-MLP wiring is identical (<c>down(act(gate) * up)</c>); only the activation function differs.</summary>
+    public MlpActivation Activation { get; init; } = MlpActivation.Silu;
+
+    /// <summary>True for models that store RMSNorm scales as offsets from 1.0 (Gemma 2 convention:
+    /// effective scale = 1 + weight). False for Llama / Qwen / Mistral. The encoder pre-adds 1 to the
+    /// scale tensor at load time, so the runtime path stays unchanged.</summary>
+    public bool RmsNormScalePlusOne { get; init; } = false;
+
+    /// <summary>True for Gemma 2 family — adds <c>post_attention_layernorm</c> after attention and
+    /// renames the pre-MLP norm to <c>pre_feedforward_layernorm</c>, plus a
+    /// <c>post_feedforward_layernorm</c> after the FFN. Result: 4 norms per block instead of 2.
+    /// Llama / Qwen use 2 norms.</summary>
+    public bool HasFfnSandwichNorms { get; init; } = false;
 
     /// <summary>Qwen3-4B preset (36 layers, hidden=2560, GQA 32:8, head_dim=128, vocab=151936). Matches the safetensors at Comfy-Org/Flux2-klein/text_encoders/qwen_3_4b.safetensors.</summary>
     public static LlamaStyleEncoderConfig Qwen3_4B => new()
@@ -213,11 +239,12 @@ public record LlamaStyleEncoderConfig
     /// <para>Caveats vs vanilla Llama family: Gemma 2 uses GeGLU (GELU(gate)*up) rather than SwiGLU,
     /// applies a fixed query pre-attention scalar of sqrt(256), softcaps attention logits at 50.0,
     /// alternates sliding-window attention (4096), and uses pre+post norms on both attention and FFN
-    /// (4 RMSNorms per block). The current <see cref="LlamaStyleEncoder"/> assumes SwiGLU + 2 norms +
-    /// no softcap — running Gemma 2 weights through it as-is will not produce reference-correct text
-    /// embeddings. The preset is provided for downstream pipelines (Lumina 2.0) that pre-compute
-    /// Gemma 2 embeddings via a Gemma-2-aware encoder; the <see cref="LlamaStyleEncoder"/> path is
-    /// approximate. Verified against <c>Alpha-VLLM/Lumina-Image-2.0/text_encoder/config.json</c>.</summary>
+    /// (4 RMSNorms per block). This preset turns on <see cref="Activation"/>=GeluTanh,
+    /// <see cref="HasFfnSandwichNorms"/>=true, and <see cref="RmsNormScalePlusOne"/>=true so the
+    /// encoder produces Gemma-2-correct hidden states up to the soft-cap and sliding-window
+    /// approximations (the encoder uses full-attention without logit clipping; small numerical drift
+    /// is expected for long-context prompts but the structural shape and feature-extractor behavior
+    /// match). Verified against <c>Alpha-VLLM/Lumina-Image-2.0/text_encoder/config.json</c>.</summary>
     public static LlamaStyleEncoderConfig Gemma2_2B => new()
     {
         HiddenSize = 2304,
@@ -233,6 +260,9 @@ public record LlamaStyleEncoderConfig
         QkHeadNorm = false,
         AttentionBias = false,
         HasFinalNorm = true,
+        Activation = MlpActivation.GeluTanh,
+        RmsNormScalePlusOne = true,
+        HasFfnSandwichNorms = true,
         EosTokenId = 1,
         BosTokenId = 2,
     };

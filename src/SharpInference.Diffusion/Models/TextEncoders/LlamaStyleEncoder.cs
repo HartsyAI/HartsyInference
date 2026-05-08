@@ -52,6 +52,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         {
             Tensor rawFinalNorm = weights["model.norm.weight"];
             _finalNormWeight = CastToF32IfNeeded(rawFinalNorm);
+            if (_config.RmsNormScalePlusOne) AddOneInPlace(_finalNormWeight);
         }
 
         for (int i = 0; i < _config.NumLayers; i++)
@@ -282,6 +283,18 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     private static Tensor CastToF32IfNeeded(Tensor t) =>
         t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
+    /// <summary>Pre-adds 1.0 to every element of an F32 RMSNorm scale tensor in place. Gemma 2 stores
+    /// scales as offsets from 1.0; folding the +1 at load time keeps the runtime <c>RmsNorm</c> path
+    /// unchanged.</summary>
+    private static unsafe void AddOneInPlace(Tensor scale)
+    {
+        if (scale.DType != DType.F32)
+            throw new InvalidOperationException("AddOneInPlace requires F32 scale.");
+        float* p = (float*)scale.DataPointer;
+        long count = scale.Shape.ElementCount;
+        for (long i = 0; i < count; i++) p[i] += 1.0f;
+    }
+
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
@@ -302,9 +315,15 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     {
         private readonly LlamaStyleEncoderConfig _config;
 
-        // Norms (pre-attn and pre-mlp), F32.
+        // Norms (pre-attn and pre-mlp), F32. For Gemma 2 (HasFfnSandwichNorms=true), `_postAttnNorm`
+        // is the post-attention sandwich norm (applied to attention output before residual), and
+        // `_preFfnNorm` / `_postFfnNorm` are loaded from `pre_feedforward_layernorm` and
+        // `post_feedforward_layernorm`. For Llama / Qwen, `_postAttnNorm` is the pre-MLP norm and
+        // the FFN-sandwich slots stay null.
         private Tensor? _inputNorm;
         private Tensor? _postAttnNorm;
+        private Tensor? _preFfnNorm;
+        private Tensor? _postFfnNorm;
 
         // Attention projections (kept native for cuBLAS; bias absent for Qwen3/Llama).
         private Tensor? _qProj;
@@ -327,6 +346,21 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         {
             _inputNorm = CastToF32IfNeeded(weights[$"{prefix}.input_layernorm.weight"]);
             _postAttnNorm = CastToF32IfNeeded(weights[$"{prefix}.post_attention_layernorm.weight"]);
+            if (_config.RmsNormScalePlusOne)
+            {
+                AddOneInPlace(_inputNorm);
+                AddOneInPlace(_postAttnNorm);
+            }
+            if (_config.HasFfnSandwichNorms)
+            {
+                _preFfnNorm = CastToF32IfNeeded(weights[$"{prefix}.pre_feedforward_layernorm.weight"]);
+                _postFfnNorm = CastToF32IfNeeded(weights[$"{prefix}.post_feedforward_layernorm.weight"]);
+                if (_config.RmsNormScalePlusOne)
+                {
+                    AddOneInPlace(_preFfnNorm);
+                    AddOneInPlace(_postFfnNorm);
+                }
+            }
 
             _qProj = weights[$"{prefix}.self_attn.q_proj.weight"];
             _kProj = weights[$"{prefix}.self_attn.k_proj.weight"];
@@ -348,6 +382,8 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         {
             if (_inputNorm is not null) yield return _inputNorm;
             if (_postAttnNorm is not null) yield return _postAttnNorm;
+            if (_preFfnNorm is not null) yield return _preFfnNorm;
+            if (_postFfnNorm is not null) yield return _postFfnNorm;
             if (_qProj is not null) yield return _qProj;
             if (_kProj is not null) yield return _kProj;
             if (_vProj is not null) yield return _vProj;
@@ -448,16 +484,28 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             attnFlat.Dispose();
 
             // 9. First residual.
+            // Gemma 2 inserts a "sandwich" RMSNorm between attention output and the residual add
+            // (post_attention_layernorm). Llama / Qwen skip this step.
+            Tensor postAttnInput = attnProj;
+            if (_config.HasFfnSandwichNorms)
+            {
+                Tensor sandwich = new Tensor(hShape, DType.F32);
+                backend.RmsNorm(sandwich, attnProj, _postAttnNorm!, _config.RmsNormEps);
+                attnProj.Dispose();
+                postAttnInput = sandwich;
+            }
             Tensor afterAttn = new Tensor(hShape, DType.F32);
-            backend.Add(afterAttn, hidden, attnProj);
-            attnProj.Dispose();
+            backend.Add(afterAttn, hidden, postAttnInput);
+            postAttnInput.Dispose();
 
-            // ── MLP sub-block (SwiGLU) ───────────────────────────────────
-            // 10. Pre-mlp RMSNorm.
+            // ── MLP sub-block (SwiGLU or GeGLU) ──────────────────────────
+            // 10. Pre-mlp RMSNorm. For Gemma 2, this is `pre_feedforward_layernorm`; for Llama, it's
+            // `post_attention_layernorm` (semantically the pre-MLP norm).
+            Tensor preMlpScale = _config.HasFfnSandwichNorms ? _preFfnNorm! : _postAttnNorm!;
             Tensor preMlp = new Tensor(hShape, DType.F32);
-            backend.RmsNorm(preMlp, afterAttn, _postAttnNorm!, _config.RmsNormEps);
+            backend.RmsNorm(preMlp, afterAttn, preMlpScale, _config.RmsNormEps);
 
-            // 11. Gate + Up projections, SiLU(gate) * up, then Down projection.
+            // 11. Gate + Up projections, SiLU/GeluTanh(gate) * up, then Down projection.
             TensorShape mlpShape = new TensorShape(batch, seqLen, _config.IntermediateSize);
             Tensor gate = new Tensor(mlpShape, DType.F32);
             Tensor up = new Tensor(mlpShape, DType.F32);
@@ -466,7 +514,10 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             preMlp.Dispose();
 
             Tensor activated = new Tensor(mlpShape, DType.F32);
-            backend.Silu(activated, gate);
+            if (_config.Activation == MlpActivation.GeluTanh)
+                backend.Gelu(activated, gate);
+            else
+                backend.Silu(activated, gate);
             gate.Dispose();
 
             Tensor gated = new Tensor(mlpShape, DType.F32);
@@ -478,11 +529,21 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             backend.Linear(mlpOut, gated, _downProj!, null);
             gated.Dispose();
 
+            // 11b. Gemma 2: post-FFN sandwich norm before the residual add.
+            Tensor postMlpInput = mlpOut;
+            if (_config.HasFfnSandwichNorms)
+            {
+                Tensor sandwich = new Tensor(hShape, DType.F32);
+                backend.RmsNorm(sandwich, mlpOut, _postFfnNorm!, _config.RmsNormEps);
+                mlpOut.Dispose();
+                postMlpInput = sandwich;
+            }
+
             // 12. Second residual.
             Tensor result = new Tensor(hShape, DType.F32);
-            backend.Add(result, afterAttn, mlpOut);
+            backend.Add(result, afterAttn, postMlpInput);
             afterAttn.Dispose();
-            mlpOut.Dispose();
+            postMlpInput.Dispose();
 
             return result;
         }

@@ -1,5 +1,6 @@
 using SharpInference.Core.Backends;
 using SharpInference.Core.Tensors;
+using SharpInference.Cuda.Profiling;
 
 namespace SharpInference.Cuda;
 
@@ -112,6 +113,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Matrix multiply via cuBLAS GemmEx: output = a @ b. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void MatMul(Tensor output, Tensor a, Tensor b)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("MatMul");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -166,6 +168,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Linear");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -279,6 +282,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("BatchedMatMul");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -343,6 +347,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>2D convolution via im2col + cuBLAS SGEMM. Supports arbitrary stride, padding, and kernel sizes.</summary>
     public unsafe void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Conv2D");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -486,6 +491,7 @@ public sealed class CudaBackend : IBackend
 
     public void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("GroupNorm");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -553,6 +559,7 @@ public sealed class CudaBackend : IBackend
 
     public void LayerNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("LayerNorm");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -615,6 +622,7 @@ public sealed class CudaBackend : IBackend
 
     public unsafe void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("RmsNorm");
         _context.EnsureCurrent(); // DataPointer access below triggers lazy D2H — needs context bound.
         // CPU fallback — T5 encoding runs once per generation, not a bottleneck.
         // DataPointer access triggers D2H copy for GPU-cached tensors.
@@ -648,6 +656,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Fused GroupNorm + SiLU via single PTX kernel. Eliminates intermediate allocation.</summary>
     public void GroupNormSilu(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("GroupNormSilu");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -770,6 +779,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>Scaled dot-product attention via cuBLAS batched GEMM: softmax(Q @ K^T * scale) @ V.</summary>
     public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("SDPA");
         _context.EnsureCurrent();
         EnsureKernels();
 

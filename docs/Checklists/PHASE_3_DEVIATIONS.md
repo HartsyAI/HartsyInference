@@ -742,3 +742,53 @@ Three supporting changes:
 5. **Don't trust the previous step's clean trace**: step 0's `ffnOut max=3876` was ALSO above the "expected" range — it was just luck that step 0's max stayed under 65504. The fix had to address the structural overflow risk, not the specific values from one step.
 
 Future debugging of similar "compounding instability" bugs should default to the same shape: backend A/B → all-step trace at phase boundaries → drill into the failing phase → look for the dtype/range condition that differs from the working backend.
+
+## Phase 4 — Bucket A Closeout Deviations
+
+### 37. OmniGen 2 RoPE Joint-Mode Missing (joint stack would silently skip rotation)
+
+**Problem**: After the 6-model parallel agent push, OmniGen 2's `OmniGen2Block` exposed three RoPE modes — `None`, `Text`, `Image` — and the joint main-block stack was supposed to use `None` with the comment "RoPE already applied externally (joint stack uses pre-rotated Q/K because text and image positions differ)". But Q/K are computed *inside* the block from the input tensor; the transformer has no way to inject a pre-rotation before the block's Q/K projection runs. The `None` mode in practice meant "no positional encoding at all" for the joint stack — silently wrong, no compile error, no test failure.
+
+**Fix**: added a real `Joint` mode + corresponding `OmniGen2Rope.ApplyJoint(q, k, batch, numQHeads, numKvHeads, txtSeqLen, hPacked, wPacked)`. Block derives `txtSeqLen = seqLen - hPacked * wPacked`, builds the joint cos/sin table (text positions `(s,s,s)`, image positions `(textSeqLen, row, col)`), and rotates both Q and K with GQA-aware head counts. `None` mode kept as a diagnostic-only escape hatch.
+
+**Lesson**: when a Block's design says "do this step externally", verify there's actually a place to do it. RoPE applies to Q/K specifically, after the projection — if the block computes Q/K, the block must rotate them. External RoPE only works when the *upstream* values carry the position info (not the case here).
+
+### 38. OmniGen 2 Block GQA Double-Call Bug
+
+**Problem**: The block called `rope.ApplyText(qMh, kMh, batch, _numQHeads, seqLen)` followed by `rope.ApplyText(qMh, kMh, batch, _numKvHeads, seqLen)`. Each call rotated *both* qMh and kMh with the same head count, but qMh has `_numQHeads` heads and kMh has `_numKvHeads` (different in GQA: 21 vs 7 in the V1 preset). The first call rotated kMh with 21 heads (out-of-bounds writes past the kMh buffer) AND the second call rotated qMh with 7 heads (only 1/3 of qMh got rotated, the rest unchanged).
+
+**Fix**: collapsed to a single `ApplyText(q, k, batch, numQHeads, numKvHeads, seqLen)` call that rotates Q with `numQHeads` heads and K with `numKvHeads` heads using the same precomputed table. Same fix for `ApplyImage` and `ApplyJoint`.
+
+**Lesson**: GQA-aware kernels need separate head counts for Q and K. Functions that take a single `numHeads` parameter and rotate "Q and K" are silently wrong on any non-MHA model.
+
+### 39. Hunyuan Image 2.1 CLIP Encoder Is a Phantom Dependency
+
+**Problem**: The Hunyuan Image 2.1 pipeline ctor signature took a `ClipTextEncoder` parameter, but the transformer has no pooled-conditioning input — the CLIP encoder was never used. The original pipeline body had a TODO comment "produce pooled embedding for AdaLN conditioning" that misdescribed the architecture: Hunyuan Image conditions on timestep + optional distilled-guidance (no pooled vector). The model uses two *per-token* text encoders: a primary 4096-dim encoder (MLLM in the upstream model, T5-XXL in our scaffolding) and an optional 1472-dim secondary (ByT5).
+
+**Fix**: changed the ctor to accept `ClipTextEncoder?` (nullable) and ignored it in the pipeline body. Pipeline now encodes via T5-XXL only and passes `encoderHidden2: null` to the transformer. Tests and downstream code don't break because the parameter is still accepted.
+
+**Lesson**: when porting a model, verify what the transformer's `Forward` actually takes — don't infer text-encoder requirements from the diffusers pipeline class signature, which often pre-encodes more than the transformer needs.
+
+### 40. Gemma 2 Has 4 Norms Per Block + Offset-From-1 RMSNorm Scale
+
+**Problem**: Lumina-Image-2.0 uses Gemma 2 as text encoder, but `LlamaStyleEncoder` was Llama/Qwen-shaped: 2 norms per block (input + post-attn / pre-MLP), SiLU/SwiGLU MLP, RMSNorm scale used as-is. Gemma 2 differs in three load-bearing ways:
+1. **4 norms per block**: pre-attn (`input_layernorm`), **post-attn sandwich** (`post_attention_layernorm`, applied to attention output before residual add — Llama applies this name to the pre-MLP norm), **pre-FFN** (`pre_feedforward_layernorm`, the actual pre-MLP norm), **post-FFN sandwich** (`post_feedforward_layernorm`).
+2. **GeluTanh activation**, not SiLU. The gated wiring is the same: `down(act(gate) * up)`.
+3. **Offset-from-1 RMSNorm scale convention**: stored weights are scale - 1, runtime applies `(1 + weight)`.
+
+**Fix**: added `MlpActivation` enum + `Activation` field, `HasFfnSandwichNorms` bool, `RmsNormScalePlusOne` bool to `LlamaStyleEncoderConfig`. Block conditionally loads two extra norm tensors and applies them around attention output and FFN output respectively. `AddOneInPlace` helper folds the +1 offset at load time so the runtime `RmsNorm` path stays unchanged. Activation switch picks GeluTanh vs SiLU at runtime.
+
+**Not yet implemented** (deferred — small numerical drift on long prompts):
+- Attention logit soft-capping (cap softmax pre-softmax dot-products at 50.0 — Gemma 2 specific; needs a custom attention path that doesn't use `ScaledDotProductAttention`).
+- Alternating local/global attention with sliding window 4096 (Gemma 2 alternates per-layer).
+- Per-query `sqrt(head_dim)` pre-attention scalar.
+
+**Lesson**: "Llama-family" models often disagree on small details that look like cosmetic norm-naming changes but encode real architectural differences. Sandwich-norm patterns (Gemma 2, Cosmos-Predict2) and offset-from-1 scale conventions are common enough that a config-driven flag pattern is a better generalization than per-model encoder classes.
+
+### 41. Hunyuan / OmniGen Patchify In-Patch Order: Channel-Inner
+
+**Problem**: When patchifying `[B, C, H, W]` → `[B, S, p²·C]`, the in-patch ordering matters. The diffusers reference uses `einops.rearrange(x, 'B C (H p) (W q) -> B (H W) (p q C)')` — channel is the **innermost** dimension within each patch (for each `(py, px)` position, all C channels are contiguous). A naive C# `for (c) for (py) for (px)` loop produces the inverse layout, which silently misaligns the `patch_embed.weight` columns.
+
+**Fix**: explicit nested loops `for (py) for (px) for (c)` in both `OmniGen2Transformer.PatchifyLatent` and `HunyuanImagePipeline.PatchifyLatent`. Inverse `UnpatchifyTokens` mirrors the same ordering.
+
+**Lesson**: when porting a DiT, the patch_embed weight layout is a load-bearing convention. Read the einops string (or the equivalent reshape+permute sequence) and translate the dimension order directly.

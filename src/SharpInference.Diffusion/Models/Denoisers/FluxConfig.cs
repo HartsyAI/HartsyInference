@@ -70,6 +70,19 @@ public record FluxConfig
         GuidanceEmbed = false,
     };
 
+    /// <summary>FLUX.1 Tools (Canny / Depth / Fill) preset. Same shape as Dev (12B params, 19+38 blocks, guidance embedding) BUT with a wider <c>x_embedder</c> input — 32 latent channels (16 noise + 16 control, concatenated along the channel dim) instead of 16, packed as <c>32×4 = 128</c> instead of <c>16×4 = 64</c>. The pipeline detects Tools mode by inspecting <see cref="FluxTransformer.XEmbedInputDim"/> at load time and routes through the control-image-concat path.
+    /// <para>The three Tools variants (Canny / Depth / Fill) all share the same architectural shape — the differentiator is purely how the "control" image is preprocessed (canny edges, depth map, masked-image+mask). Loaders pick the preprocessor based on filename or metadata.</para></summary>
+    public static FluxConfig Flux1Tools => new()
+    {
+        HiddenSize = 3072,
+        NumHeads = 24,
+        HeadDim = 128,
+        Depth = 19,
+        DepthSingleBlocks = 38,
+        GuidanceEmbed = true,
+        InChannels = 128,
+    };
+
     /// <summary>Auto-detects config from weight key count. Counts transformer_blocks.* and single_transformer_blocks.* prefixes.</summary>
     public static FluxConfig FromWeights(IReadOnlyDictionary<string, object> keys)
     {

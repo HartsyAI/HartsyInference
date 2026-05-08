@@ -61,12 +61,37 @@ public sealed unsafe class FluxPipeline : IDisposable
         int[]? promptAttentionMaskT5,
         TextToImageRequest request,
         float guidanceScale = 3.5f,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        Tensor? controlImage = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
         if (isImg2Img && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
+
+        // FLUX.1 Tools detection: vanilla Flux has x_embed input dim 64 (16 latent channels
+        // × 2×2 packing). Canny / Depth / Fill variants have 128 (32 channels — noise + a
+        // VAE-encoded control image, concatenated along the channel dim before patchify).
+        // The control image is required for Tools variants and forbidden for vanilla.
+        bool isToolsModel = _transformer.XEmbedInputDim == 128;
+        if (isToolsModel)
+        {
+            if (controlImage is null)
+            {
+                throw new InvalidOperationException(
+                    "This Flux checkpoint is a FLUX.1 Tools variant (Canny / Depth / Fill — x_embedder input dim is 128) and requires a control image. Pass one via the controlImage parameter; for Canny it should be the canny-edge map of the user's reference image, for Depth a depth-map estimate, for Fill the masked-image + mask conditioning.");
+            }
+            if (_vaeEncoder is null)
+            {
+                throw new InvalidOperationException(
+                    "FLUX.1 Tools variants require a VaeEncoder to encode the control image. Construct the pipeline with the overload that accepts one.");
+            }
+        }
+        else if (controlImage is not null)
+        {
+            throw new InvalidOperationException(
+                "Control image was supplied but this Flux checkpoint is the vanilla variant (x_embedder input dim is 64). Use a FLUX.1 Canny / Depth / Fill checkpoint or remove the control image.");
+        }
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width;
@@ -182,6 +207,29 @@ public sealed unsafe class FluxPipeline : IDisposable
             latentMask.Dispose();
         }
 
+        // ── 3b. FLUX.1 Tools control: VAE-encode the control image once and pack it.
+        //    The packed control [1, S, 64] is concatenated to the packed noise [1, S, 64]
+        //    along the feature dim every step → [1, S, 128], which the wider x_embedder
+        //    consumes. Since the control image is fixed across the schedule we encode it
+        //    once and reuse — meaningful win on long schedules.
+        Tensor? packedControl = null;
+        if (isToolsModel && controlImage is not null)
+        {
+            if (controlImage.Shape.Rank != 4 || controlImage.Shape[0] != 1 || controlImage.Shape[1] != 3
+                || controlImage.Shape[2] != height || controlImage.Shape[3] != width)
+            {
+                throw new ArgumentException(
+                    $"controlImage shape must be [1, 3, {height}, {width}] (matching request); got {controlImage.Shape}.",
+                    nameof(controlImage));
+            }
+            Stopwatch ctrlEncSw = Stopwatch.StartNew();
+            Tensor controlLatentUnpacked = _vaeEncoder!.Encode(_backend, controlImage);
+            ctrlEncSw.Stop();
+            Logs.Info($"Flux Tools control VAE encode done in {ctrlEncSw.ElapsedMilliseconds}ms");
+            packedControl = PackLatent(controlLatentUnpacked, latentH, latentW);
+            controlLatentUnpacked.Dispose();
+        }
+
         // ── 4. Denoising loop ─────────────────────────────────────────
         // Two paths depending on whether the backend can stream:
         //   - StreamingCache != null (CUDA): use BlockStreamingController so resident
@@ -221,10 +269,19 @@ public sealed unsafe class FluxPipeline : IDisposable
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f; // Convert timestep back to sigma [0,1]
 
+            // For FLUX.1 Tools: concat noise + control along the feature dim before the
+            // transformer pass. The transformer's wider x_embedder consumes the 128-dim
+            // input; velocity output is back at 64 dims (no control side in the prediction).
+            Tensor transformerInput = packedControl is null
+                ? packedLatent
+                : ConcatPackedFeatureDim(packedLatent, packedControl);
+
             // Forward pass: velocity prediction
             Tensor velocityPred = _transformer.Forward(
-                _backend, packedLatent, t5Embeddings, sigma,
+                _backend, transformerInput, t5Embeddings, sigma,
                 clipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked);
+
+            if (transformerInput != packedLatent) transformerInput.Dispose();
 
             LogTensorStats($"Step {i+1} velocity", velocityPred);
             LogPerLatentChannelMeanPacked($"Step {i+1} velocity", velocityPred);
@@ -272,6 +329,7 @@ public sealed unsafe class FluxPipeline : IDisposable
         t5Embeddings.Dispose();
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
+        packedControl?.Dispose();
 
         // Tear down the streaming controller (frees still-resident blocks) and free the
         // shared weights. After this, the transformer holds no device memory, making
@@ -530,6 +588,37 @@ public sealed unsafe class FluxPipeline : IDisposable
             float cMean = spatial > 0 ? cSum / spatial : 0;
             Logs.Info($"  [{name}] ch{c}: min={cMin:F4} max={cMax:F4} mean={cMean:F4}");
         }
+    }
+
+    /// <summary>Concatenates two packed-form tensors <c>[1, S, D1]</c> and <c>[1, S, D2]</c> along the feature dim → <c>[1, S, D1+D2]</c>. Used by FLUX.1 Tools to glue the packed control latent onto the packed noise before the wider <c>x_embedder</c>. Both inputs must share the same batch and sequence length; F32 only.</summary>
+    private static Tensor ConcatPackedFeatureDim(Tensor a, Tensor b)
+    {
+        if (a.Shape.Rank != 3 || b.Shape.Rank != 3 || a.Shape[0] != b.Shape[0] || a.Shape[1] != b.Shape[1])
+        {
+            throw new ArgumentException($"ConcatPackedFeatureDim requires [B, S, D] tensors with matching B and S; got {a.Shape} and {b.Shape}.");
+        }
+        long batch = a.Shape[0];
+        long seqLen = a.Shape[1];
+        long dimA = a.Shape[2];
+        long dimB = b.Shape[2];
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, dimA + dimB), DType.F32);
+        float* ap = (float*)a.DataPointer;
+        float* bp = (float*)b.DataPointer;
+        float* op = (float*)output.DataPointer;
+        long aBytes = dimA * sizeof(float);
+        long bBytes = dimB * sizeof(float);
+        for (long bi = 0; bi < batch; bi++)
+        {
+            for (long s = 0; s < seqLen; s++)
+            {
+                long aOff = (bi * seqLen + s) * dimA;
+                long bOff = (bi * seqLen + s) * dimB;
+                long oOff = (bi * seqLen + s) * (dimA + dimB);
+                Buffer.MemoryCopy(ap + aOff, op + oOff, aBytes, aBytes);
+                Buffer.MemoryCopy(bp + bOff, op + oOff + dimA, bBytes, bBytes);
+            }
+        }
+        return output;
     }
 
     /// <summary>Packs a latent tensor from [B, C, H, W] to [B, H/2*W/2, C*4]. Rearranges 2x2 spatial patches into channel dimension.</summary>

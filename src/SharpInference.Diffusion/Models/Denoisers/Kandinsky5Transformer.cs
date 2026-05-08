@@ -454,7 +454,6 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
             _textNormWeight = null; _textNormBias = null;
             _pooledProjWeight = null; _pooledProjBias = null;
             _pooledNormWeight = null; _pooledNormBias = null;
-            _timeFreqs = null;
             _timeIn1Weight = null; _timeIn1Bias = null;
             _timeIn2Weight = null; _timeIn2Bias = null;
             _visualProjWeight = null; _visualProjBias = null;

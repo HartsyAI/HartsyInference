@@ -176,6 +176,17 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemGetInfo_v2")]
     internal static partial int cuMemGetInfo(out nuint free, out nuint total);
 
+    // ── Profiler Control ────────────────────────────────────────────────
+    //
+    // Used by `nsys profile --capture-range=cudaProfilerApi` to scope the trace to a window
+    // bounded by cuProfilerStart() and cuProfilerStop(). Wrapped by `CudaProfilerControl`.
+
+    [LibraryImport(LibName, EntryPoint = "cuProfilerStart")]
+    internal static partial int cuProfilerStart();
+
+    [LibraryImport(LibName, EntryPoint = "cuProfilerStop")]
+    internal static partial int cuProfilerStop();
+
     // ── Memory Pool Management ──────────────────────────────────────────
     //
     // The stream-ordered allocator (cuMemAllocAsync / cuMemFreeAsync) uses a

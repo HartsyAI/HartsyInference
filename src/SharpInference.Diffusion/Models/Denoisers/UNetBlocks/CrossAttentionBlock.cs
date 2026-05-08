@@ -12,6 +12,9 @@ public sealed class CrossAttentionBlock
     private readonly int _crossAttentionDim;
     private readonly int _numTransformerBlocks;
 
+    /// <summary>How many cross-attention layers this block contains. Equal to the BasicTransformerBlock count — each transformer block has one cross-attention sub-layer that an IP-Adapter injects K_ip/V_ip into.</summary>
+    public int NumTransformerBlocks => _numTransformerBlocks;
+
     // Input projection: GroupNorm + linear proj_in (or conv 1x1)
     private Tensor? _normWeight;
     private Tensor? _normBias;
@@ -90,8 +93,19 @@ public sealed class CrossAttentionBlock
         if (_projOutBias is not null) yield return _projOutBias;
     }
 
-    /// <summary>Forward pass: input [B, C, H, W] + context [B, seqLen, crossDim] → output [B, C, H, W].</summary>
+    /// <summary>Forward pass: input [B, C, H, W] + context [B, seqLen, crossDim] → output [B, C, H, W]. No IPA injection.</summary>
     public Tensor Forward(IBackend backend, Tensor input, Tensor context)
+    {
+        return Forward(backend, input, context, ipaImageTokens: null, ipaToKIpAll: null, ipaToVIpAll: null, ipaStartIndex: 0, ipaScalePerLayer: null);
+    }
+
+    /// <summary>Forward with optional IP-Adapter image-attention injection. The shared image-prompt tokens (<paramref name="ipaImageTokens"/>) are injected into each cross-attention sub-layer with its own per-layer <c>to_k_ip</c> / <c>to_v_ip</c> projection, indexed from the flat checkpoint list starting at <paramref name="ipaStartIndex"/>. The block consumes <see cref="NumTransformerBlocks"/> entries from the K/V lists. Per-layer IPA strength comes from <paramref name="ipaScalePerLayer"/> at index <c>ipaStartIndex + i</c> for sub-block <c>i</c>; a scale of 0 short-circuits the image attention entirely (used for step-fraction gating and weight-type schedules that zero out specific blocks).</summary>
+    public Tensor Forward(IBackend backend, Tensor input, Tensor context,
+        Tensor? ipaImageTokens,
+        IReadOnlyList<Tensor>? ipaToKIpAll,
+        IReadOnlyList<Tensor>? ipaToVIpAll,
+        int ipaStartIndex,
+        IReadOnlyList<float>? ipaScalePerLayer)
     {
         int batch = (int)input.Shape[0];
         int channels = (int)input.Shape[1];
@@ -100,6 +114,7 @@ public sealed class CrossAttentionBlock
         int spatial = height * width;
 
         DType dtype = input.DType;
+        bool hasIpa = ipaImageTokens is not null && ipaToKIpAll is not null && ipaToVIpAll is not null && ipaScalePerLayer is not null;
 
         // 1. GroupNorm on spatial input
         TensorShape spatialShape = new TensorShape(batch, channels, height, width);
@@ -121,16 +136,23 @@ public sealed class CrossAttentionBlock
         hidden.Dispose();
         hidden = projected;
 
-        // 3. Run N transformer blocks (SD1.5: 1, SDXL level 2: 10)
+        // 3. Run N transformer blocks (SD1.5: 1, SDXL level 2: 10).
+        //    IPA, when supplied, picks per-cross-attn-layer K/V from the flat checkpoint list
+        //    starting at ipaStartIndex; the i-th transformer block uses entries
+        //    ipaToK/VIpAll[ipaStartIndex + i].
         for (int i = 0; i < _numTransformerBlocks; i++)
         {
-            // Self-attention (context = self)
+            // Self-attention (context = self) — never gets IPA injection.
             Tensor selfOut = _selfAttns[i].Forward(backend, hidden, hidden);
             hidden.Dispose();
             hidden = selfOut;
 
-            // Cross-attention (context = text embeddings)
-            Tensor crossOut = _crossAttns[i].Forward(backend, hidden, context);
+            // Cross-attention (context = text embeddings) — IPA hooks here.
+            Tensor? perLayerKIp = hasIpa ? ipaToKIpAll![ipaStartIndex + i] : null;
+            Tensor? perLayerVIp = hasIpa ? ipaToVIpAll![ipaStartIndex + i] : null;
+            float perLayerScale = hasIpa ? ipaScalePerLayer![ipaStartIndex + i] : 0f;
+            Tensor crossOut = _crossAttns[i].Forward(backend, hidden, context,
+                ipaImageTokens, perLayerKIp, perLayerVIp, perLayerScale);
             hidden.Dispose();
             hidden = crossOut;
 
@@ -162,7 +184,7 @@ public sealed class CrossAttentionBlock
 }
 
 /// <summary>Attention sub-block: LayerNorm → MultiHeadAttention → Residual. Used for both self-attention and cross-attention.</summary>
-internal sealed class TransformerSubBlock
+internal sealed unsafe class TransformerSubBlock
 {
     private readonly int _channels;
     private readonly int _numHeads;
@@ -221,14 +243,22 @@ internal sealed class TransformerSubBlock
         if (_toOutBias is not null) yield return _toOutBias;
     }
 
-    /// <summary>Forward: hidden [B, seqLen, C] + context [B, ctxLen, ctxDim] → output [B, seqLen, C] with residual.</summary>
+    /// <summary>Forward: hidden [B, seqLen, C] + context [B, ctxLen, ctxDim] → output [B, seqLen, C] with residual. No IPA injection.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor context)
+    {
+        return Forward(backend, hidden, context, ipaImageTokens: null, toKIp: null, toVIp: null, ipaScale: 0f);
+    }
+
+    /// <summary>Forward with optional IP-Adapter image attention injection. When <paramref name="ipaImageTokens"/> + <paramref name="toKIp"/> + <paramref name="toVIp"/> are all non-null, a parallel attention pass is computed with the same Q (from <paramref name="hidden"/>) but K/V derived from the projected image tokens. The image attention output is added to the text attention output (scaled by <paramref name="ipaScale"/>) before the shared <c>to_out</c> projection — matching diffusers' <c>IPAdapterAttnProcessor.__call__</c> exactly.</summary>
+    public Tensor Forward(IBackend backend, Tensor hidden, Tensor context,
+        Tensor? ipaImageTokens, Tensor? toKIp, Tensor? toVIp, float ipaScale)
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
         int ctxLen = (int)context.Shape[1];
 
         DType dtype = hidden.DType;
+        bool hasIpa = ipaImageTokens is not null && toKIp is not null && toVIp is not null && ipaScale != 0f;
 
         // LayerNorm
         TensorShape hidShape = new TensorShape(batch, seqLen, _channels);
@@ -236,10 +266,8 @@ internal sealed class TransformerSubBlock
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
 
         // Q from normed hidden; K/V from normed hidden (self-attn) or raw context (cross-attn)
-        // Diffusers: self-attention passes norm_hidden_states for Q/K/V; cross-attention uses raw encoder_hidden_states for K/V
         Tensor kvSource = ReferenceEquals(hidden, context) ? normed : context;
         int kvSeqLen = ReferenceEquals(hidden, context) ? seqLen : ctxLen;
-        int kvDim = ReferenceEquals(hidden, context) ? _channels : _contextDim;
 
         Tensor query = new Tensor(hidShape, dtype);
         backend.Linear(query, normed, _toQWeight!, _toQBias);
@@ -252,7 +280,7 @@ internal sealed class TransformerSubBlock
         backend.Linear(value, kvSource, _toVWeight!, _toVBias);
         normed.Dispose();
 
-        // Reshape to multi-head 4D: [B, S, numHeads*headDim] → view [B, S, H, D] → permute → [B, H, S, D]
+        // Reshape to multi-head 4D
         TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         TensorShape kvMhShape = new TensorShape(batch, _numHeads, ctxLen, _headDim);
 
@@ -271,15 +299,50 @@ internal sealed class TransformerSubBlock
         backend.Permute0213(valueMh, valueView, ctxLen, _numHeads, _headDim);
         value.Dispose();
 
-        // SDPA
+        // SDPA — text branch
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(qMhShape, dtype);
         backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale);
-        queryMh.Dispose();
         keyMh.Dispose();
         valueMh.Dispose();
 
-        // Permute back: [B, H, S, D] → [B, S, H, D] → reshape [B, S, H*D]
+        // SDPA — image branch (IP-Adapter). Reuses queryMh; produces attention against
+        // image-prompt tokens projected through to_k_ip / to_v_ip. Result is added on top of
+        // the text attention before to_out, scaled by ipaScale (the user's "IP-Adapter strength").
+        if (hasIpa)
+        {
+            int imgSeqLen = (int)ipaImageTokens!.Shape[1];
+            // Project to_k_ip and to_v_ip — shape [_channels, contextDim], no bias.
+            Tensor ipKeyFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
+            backend.Linear(ipKeyFlat, ipaImageTokens, toKIp!, null);
+            Tensor ipValueFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
+            backend.Linear(ipValueFlat, ipaImageTokens, toVIp!, null);
+
+            // Reshape to multi-head: [B, imgSeqLen, H*D] → [B, H, imgSeqLen, D]
+            TensorShape ipMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
+            Tensor ipKeyView = ipKeyFlat.Reshape(new TensorShape(batch, imgSeqLen, _numHeads, _headDim));
+            Tensor ipKeyMh = new Tensor(ipMhShape, dtype);
+            backend.Permute0213(ipKeyMh, ipKeyView, imgSeqLen, _numHeads, _headDim);
+            ipKeyFlat.Dispose();
+
+            Tensor ipValueView = ipValueFlat.Reshape(new TensorShape(batch, imgSeqLen, _numHeads, _headDim));
+            Tensor ipValueMh = new Tensor(ipMhShape, dtype);
+            backend.Permute0213(ipValueMh, ipValueView, imgSeqLen, _numHeads, _headDim);
+            ipValueFlat.Dispose();
+
+            // Image attention against the same Q
+            Tensor imgAttnOut = new Tensor(qMhShape, dtype);
+            backend.ScaledDotProductAttention(imgAttnOut, queryMh, ipKeyMh, ipValueMh, null, scale);
+            ipKeyMh.Dispose();
+            ipValueMh.Dispose();
+
+            // attnOut += ipaScale * imgAttnOut
+            AccumulateScaled(attnOut, imgAttnOut, ipaScale);
+            imgAttnOut.Dispose();
+        }
+        queryMh.Dispose();
+
+        // Permute back
         Tensor attnPermuted = new Tensor(new TensorShape(batch, seqLen, _numHeads, _headDim), dtype);
         backend.Permute0213(attnPermuted, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
@@ -296,6 +359,35 @@ internal sealed class TransformerSubBlock
         projected.Dispose();
 
         return output;
+    }
+
+    /// <summary>In-place accumulate: <c>target += scale * addend</c>. Both tensors must have identical shapes and dtypes. Used by IPA to fold image-attention output into the text-attention output before the shared <c>to_out</c> projection. Handled in F32 / F16 directly to avoid an extra backend op for what amounts to a fused-multiply-add over the attention output buffer.</summary>
+    private static void AccumulateScaled(Tensor target, Tensor addend, float scale)
+    {
+        long count = target.ElementCount;
+        if (target.DType == DType.F32)
+        {
+            float* tp = (float*)target.DataPointer;
+            float* ap = (float*)addend.DataPointer;
+            for (long i = 0; i < count; i++) tp[i] += scale * ap[i];
+        }
+        else if (target.DType == DType.F16)
+        {
+            // F16 stored as ushort half-precision; round-trip through F32 for the accumulate
+            // to avoid catastrophic precision loss on small contributions.
+            ushort* tp = (ushort*)target.DataPointer;
+            ushort* ap = (ushort*)addend.DataPointer;
+            for (long i = 0; i < count; i++)
+            {
+                float t = (float)BitConverter.UInt16BitsToHalf(tp[i]);
+                float a = (float)BitConverter.UInt16BitsToHalf(ap[i]);
+                tp[i] = BitConverter.HalfToUInt16Bits((Half)(t + scale * a));
+            }
+        }
+        else
+        {
+            throw new NotSupportedException($"AccumulateScaled doesn't support dtype {target.DType}.");
+        }
     }
 
 }

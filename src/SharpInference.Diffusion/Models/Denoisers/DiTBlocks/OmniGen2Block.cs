@@ -335,14 +335,16 @@ public sealed unsafe class OmniGen2Block
 
         if (ropeMode == RopeApplyMode.Text)
         {
-            rope.ApplyText(qMh, kMh, batch, _numQHeads, seqLen);
-            rope.ApplyText(qMh, kMh, batch, _numKvHeads, seqLen);
+            rope.ApplyText(qMh, kMh, batch, _numQHeads, _numKvHeads, seqLen);
         }
-
-        if (ropeMode == RopeApplyMode.Image)
+        else if (ropeMode == RopeApplyMode.Image)
         {
-            rope.ApplyImage(qMh, kMh, batch, _numQHeads, hPacked, wPacked, timeOffset);
-            rope.ApplyImage(qMh, kMh, batch, _numKvHeads, hPacked, wPacked, timeOffset);
+            rope.ApplyImage(qMh, kMh, batch, _numQHeads, _numKvHeads, hPacked, wPacked, timeOffset);
+        }
+        else if (ropeMode == RopeApplyMode.Joint)
+        {
+            int txtSeqLen = seqLen - hPacked * wPacked;
+            rope.ApplyJoint(qMh, kMh, batch, _numQHeads, _numKvHeads, txtSeqLen, hPacked, wPacked);
         }
 
         Tensor kRepeated = RepeatHeads(kMh, batch, _numKvHeads, _kvGroupSize, seqLen, _headDim);
@@ -486,14 +488,16 @@ public sealed unsafe class OmniGen2Block
 
 /// <summary>How an <see cref="OmniGen2Block"/> should rotate Q/K. Picked at the call site: text-stream blocks
 /// (<c>context_refiner</c>) use <see cref="Text"/>; image-stream blocks (<c>noise_refiner</c>) use <see cref="Image"/>;
-/// the joint <c>layers</c> stack rotates the concatenated stream as a whole — handled outside the block by the
-/// transformer (<see cref="None"/> tells the block to skip RoPE).</summary>
+/// the joint <c>layers</c> stack uses <see cref="Joint"/> which rotates each token according to whether it falls in
+/// the text or image partition.</summary>
 public enum RopeApplyMode
 {
-    /// <summary>RoPE already applied externally (joint stack uses pre-rotated Q/K because text and image positions differ).</summary>
+    /// <summary>No rotation (only used for diagnostic / ablation paths; production code should pick a real mode).</summary>
     None,
     /// <summary>Apply text-stream RoPE: position <c>(s, s, s)</c> per token.</summary>
     Text,
     /// <summary>Apply image-stream RoPE: position <c>(timeOffset, row, col)</c> per token.</summary>
     Image,
+    /// <summary>Apply joint-sequence RoPE for <c>[text || image]</c>. The block derives <c>txtSeqLen = seqLen - hPacked * wPacked</c>.</summary>
+    Joint,
 }

@@ -171,18 +171,58 @@ public sealed class UNet
     /// <summary>Forward pass for SD1.5 (no ADM conditioning). Noisy latents [B, 4, H, W] + timestep + text embeddings [B, seqLen, crossDim] → noise prediction [B, 4, H, W].</summary>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings)
     {
-        return Forward(backend, latent, timestep, textEmbeddings, null, default);
+        return Forward(backend, latent, timestep, textEmbeddings, null, default, null, null, null, null, null, null);
     }
 
     /// <summary>Forward pass with optional SDXL ADM conditioning. For SD1.5, pooledTextEmb and sizeCondition can be null/empty.</summary>
-    /// <param name="backend">Compute backend.</param>
-    /// <param name="latent">Noisy latent [B, 4, H, W].</param>
-    /// <param name="timestep">Current denoising timestep (scalar).</param>
-    /// <param name="textEmbeddings">Text encoder hidden states [B, seqLen, crossAttentionDim].</param>
-    /// <param name="pooledTextEmb">SDXL: pooled text embedding from CLIP-G [B, 1280]. Null for SD1.5.</param>
-    /// <param name="sizeCondition">SDXL: micro-conditioning scalars [origH, origW, cropTop, cropLeft, targetH, targetW]. Empty for SD1.5.</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, Tensor? pooledTextEmb, ReadOnlySpan<float> sizeCondition)
     {
+        return Forward(backend, latent, timestep, textEmbeddings, pooledTextEmb, sizeCondition, null, null, null, null, null, null);
+    }
+
+    /// <summary>Forward pass with optional SDXL ADM + optional ControlNet residual injection (no IPA).</summary>
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, Tensor? pooledTextEmb, ReadOnlySpan<float> sizeCondition,
+        IReadOnlyList<Tensor>? controlNetDownResiduals, Tensor? controlNetMidResidual)
+    {
+        return Forward(backend, latent, timestep, textEmbeddings, pooledTextEmb, sizeCondition, controlNetDownResiduals, controlNetMidResidual, null, null, null, null);
+    }
+
+    /// <summary>Total cross-attention sub-layer count this UNet exposes — sum of the count across all down blocks, the mid block, and all up blocks (in that order). IP-Adapter checkpoints store one <c>to_k_ip</c> / <c>to_v_ip</c> pair per cross-attention sub-layer; the count must match exactly.</summary>
+    public int CrossAttentionLayerCount
+    {
+        get
+        {
+            int count = 0;
+            for (int i = 0; i < _downBlocks.Length; i++) count += _downBlocks[i].CrossAttentionLayerCount;
+            count += _midAttention.NumTransformerBlocks;
+            for (int i = 0; i < _upBlocks.Length; i++) count += _upBlocks[i].CrossAttentionLayerCount;
+            return count;
+        }
+    }
+
+    /// <summary>Forward pass with optional SDXL ADM, ControlNet residuals, and IP-Adapter image-attention injection.
+    /// <para>When IPA params are supplied, each cross-attention sub-layer in the UNet runs an additional attention pass over <paramref name="ipaImageTokens"/> using its dedicated <c>to_k_ip</c> / <c>to_v_ip</c> projection from <paramref name="ipaToKIpAll"/> / <paramref name="ipaToVIpAll"/>; results are scaled by <paramref name="ipaScale"/> and added to the text-attention output before the cross-attention's shared <c>to_out</c>. The K/V lists are flat — one entry per cross-attention sub-layer, in down→mid→up traversal order — and must have length equal to <see cref="CrossAttentionLayerCount"/>.</para></summary>
+    /// <param name="ipaImageTokens">Image-prompt tokens <c>[B, numImageTokens, crossAttentionDim]</c> from <see cref="SharpInference.Diffusion.Adapters.IpAdapter.ProjectImage"/>. Null = no IPA.</param>
+    /// <param name="ipaToKIpAll">Per-cross-attention-sub-layer K_ip projection weights, in UNet traversal order. Length must match <see cref="CrossAttentionLayerCount"/>.</param>
+    /// <param name="ipaToVIpAll">Same as <paramref name="ipaToKIpAll"/> but for V_ip.</param>
+    /// <param name="ipaScalePerLayer">Per-cross-attn-layer IP-Adapter scale array. Same length as <paramref name="ipaToKIpAll"/>. The pipeline computes this from the user's base scale + weight type + step-fraction gating once per step. Layers with scale 0 short-circuit the image attention entirely.</param>
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, Tensor? pooledTextEmb, ReadOnlySpan<float> sizeCondition,
+        IReadOnlyList<Tensor>? controlNetDownResiduals, Tensor? controlNetMidResidual,
+        Tensor? ipaImageTokens, IReadOnlyList<Tensor>? ipaToKIpAll, IReadOnlyList<Tensor>? ipaToVIpAll, IReadOnlyList<float>? ipaScalePerLayer)
+    {
+        bool hasIpa = ipaImageTokens is not null && ipaToKIpAll is not null && ipaToVIpAll is not null && ipaScalePerLayer is not null;
+        if (hasIpa && ipaToKIpAll!.Count != CrossAttentionLayerCount)
+        {
+            throw new ArgumentException(
+                $"IP-Adapter K/V list length ({ipaToKIpAll.Count}) doesn't match UNet cross-attention sub-layer count ({CrossAttentionLayerCount}). The checkpoint isn't for this UNet config.",
+                nameof(ipaToKIpAll));
+        }
+        if (hasIpa && ipaScalePerLayer!.Count != CrossAttentionLayerCount)
+        {
+            throw new ArgumentException(
+                $"IP-Adapter per-layer scale list length ({ipaScalePerLayer.Count}) doesn't match UNet cross-attention sub-layer count ({CrossAttentionLayerCount}).",
+                nameof(ipaScalePerLayer));
+        }
         int batch = (int)latent.Shape[0];
         int height = (int)latent.Shape[2];
         int width = (int)latent.Shape[3];
@@ -229,32 +269,71 @@ public sealed class UNet
         Tensor hidden = new Tensor(convInShape, dtype);
         backend.Conv2D(hidden, latent, _convInWeight!, _convInBias, 1, 1, 1, 1);
 
-        // 4. Down blocks — collect all skip connections
+        // 4. Down blocks — collect all skip connections.
+        //    IPA: maintain a flat offset into the per-cross-attn-layer K/V lists, advancing
+        //    by each block's cross-attn count. Order matches diffusers: down → mid → up.
         List<Tensor> allSkips = new List<Tensor> { hidden.To(hidden.Device) };
+        int ipaOffset = 0;
         for (int i = 0; i < _downBlocks.Length; i++)
         {
-            (Tensor downOut, List<Tensor> skips) = _downBlocks[i].Forward(backend, hidden, temb, textEmbeddings);
+            (Tensor downOut, List<Tensor> skips) = _downBlocks[i].Forward(backend, hidden, temb, textEmbeddings,
+                ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaOffset, ipaScalePerLayer);
+            ipaOffset += _downBlocks[i].CrossAttentionLayerCount;
             hidden.Dispose();
             hidden = downOut;
             allSkips.AddRange(skips);
         }
 
-        // 5. Mid block
+        // 4b. ControlNet residual injection — add CN residuals onto each skip in place.
+        //     Must run before the up blocks consume them; allSkips index 0 is the conv_in
+        //     output and matches the diffusers convention exactly.
+        if (controlNetDownResiduals is not null)
+        {
+            if (controlNetDownResiduals.Count != allSkips.Count)
+            {
+                throw new ArgumentException(
+                    $"ControlNet down residual count ({controlNetDownResiduals.Count}) must match UNet skip count ({allSkips.Count}). " +
+                    "The ControlNet checkpoint's encoder shape doesn't match this UNet config.",
+                    nameof(controlNetDownResiduals));
+            }
+            for (int i = 0; i < allSkips.Count; i++)
+            {
+                Tensor sum = new Tensor(allSkips[i].Shape, allSkips[i].DType);
+                backend.Add(sum, allSkips[i], controlNetDownResiduals[i]);
+                allSkips[i].Dispose();
+                allSkips[i] = sum;
+            }
+        }
+
+        // 5. Mid block — IPA injects on the single CrossAttentionBlock between the two ResNets.
         Tensor midRes0 = _midResNet0.Forward(backend, hidden, temb);
         hidden.Dispose();
 
-        Tensor midAttn = _midAttention.Forward(backend, midRes0, textEmbeddings);
+        Tensor midAttn = _midAttention.Forward(backend, midRes0, textEmbeddings,
+            ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaOffset, ipaScalePerLayer);
+        ipaOffset += _midAttention.NumTransformerBlocks;
         midRes0.Dispose();
 
         Tensor midRes1 = _midResNet1.Forward(backend, midAttn, temb);
         midAttn.Dispose();
 
+        // 5b. ControlNet mid residual injection.
+        if (controlNetMidResidual is not null)
+        {
+            Tensor sumMid = new Tensor(midRes1.Shape, midRes1.DType);
+            backend.Add(sumMid, midRes1, controlNetMidResidual);
+            midRes1.Dispose();
+            midRes1 = sumMid;
+        }
+
         hidden = midRes1;
 
-        // 6. Up blocks — consume skip connections in reverse
+        // 6. Up blocks — consume skip connections in reverse, continue advancing the IPA cursor.
         for (int i = 0; i < _upBlocks.Length; i++)
         {
-            Tensor upOut = _upBlocks[i].Forward(backend, hidden, temb, textEmbeddings, allSkips);
+            Tensor upOut = _upBlocks[i].Forward(backend, hidden, temb, textEmbeddings, allSkips,
+                ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaOffset, ipaScalePerLayer);
+            ipaOffset += _upBlocks[i].CrossAttentionLayerCount;
             hidden.Dispose();
             hidden = upOut;
         }

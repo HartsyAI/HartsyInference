@@ -15,6 +15,21 @@ public sealed class DownBlock
     private readonly UNetResNetBlock[] _resnets;
     private readonly CrossAttentionBlock?[] _attentions;
 
+    /// <summary>Total cross-attention sub-layer count this block exposes for IP-Adapter purposes — sum of <see cref="CrossAttentionBlock.NumTransformerBlocks"/> across all attention layers in the block. <c>0</c> when <c>hasAttention=false</c>; the UNet uses this to advance the IPA layer-index cursor between blocks.</summary>
+    public int CrossAttentionLayerCount
+    {
+        get
+        {
+            if (!_hasAttention) return 0;
+            int count = 0;
+            for (int i = 0; i < _numLayers; i++)
+            {
+                if (_attentions[i] is not null) count += _attentions[i]!.NumTransformerBlocks;
+            }
+            return count;
+        }
+    }
+
     // Downsample: Conv2d(outCh, outCh, 3, stride=2, padding=1)
     private Tensor? _downsampleWeight;
     private Tensor? _downsampleBias;
@@ -78,11 +93,19 @@ public sealed class DownBlock
         if (_downsampleBias is not null) yield return _downsampleBias;
     }
 
-    /// <summary>Forward pass. Returns (output, skipConnections). Each ResNet/Attention output is saved as a skip connection for the corresponding up block.</summary>
+    /// <summary>Forward pass without IPA injection. Returns (output, skipConnections).</summary>
     public (Tensor output, List<Tensor> skips) Forward(IBackend backend, Tensor input, Tensor temb, Tensor context)
+    {
+        return Forward(backend, input, temb, context, ipaImageTokens: null, ipaToKIpAll: null, ipaToVIpAll: null, ipaStartIndex: 0, ipaScalePerLayer: null);
+    }
+
+    /// <summary>Forward pass with optional IP-Adapter image-attention injection. The block consumes a contiguous range of the flat per-cross-attn-layer K/V lists starting at <paramref name="ipaStartIndex"/> and length <see cref="CrossAttentionLayerCount"/>; each <see cref="CrossAttentionBlock"/> internally consumes its own <see cref="CrossAttentionBlock.NumTransformerBlocks"/> entries. Per-layer scale comes from <paramref name="ipaScalePerLayer"/> at the same flat indices.</summary>
+    public (Tensor output, List<Tensor> skips) Forward(IBackend backend, Tensor input, Tensor temb, Tensor context,
+        Tensor? ipaImageTokens, IReadOnlyList<Tensor>? ipaToKIpAll, IReadOnlyList<Tensor>? ipaToVIpAll, int ipaStartIndex, IReadOnlyList<float>? ipaScalePerLayer)
     {
         List<Tensor> skips = new List<Tensor>();
         Tensor hidden = input;
+        int ipaOffset = ipaStartIndex;
 
         for (int i = 0; i < _numLayers; i++)
         {
@@ -92,7 +115,9 @@ public sealed class DownBlock
 
             if (_hasAttention && _attentions[i] is not null)
             {
-                Tensor attnOut = _attentions[i]!.Forward(backend, hidden, context);
+                Tensor attnOut = _attentions[i]!.Forward(backend, hidden, context,
+                    ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaOffset, ipaScalePerLayer);
+                ipaOffset += _attentions[i]!.NumTransformerBlocks;
                 hidden.Dispose();
                 hidden = attnOut;
             }

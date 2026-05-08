@@ -1,0 +1,27 @@
+# SharpInference Python baseline — pinned per docs/Research/CUDA_PERFORMANCE_PLAN.md.
+# Any version change here invalidates collected baselines and requires re-running B2.
+#
+# These versions match what ComfyUI shipped in its bundled installer in late 2025 / early 2026.
+# Install with `pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124`.
+
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+
+# Diffusion stack
+diffusers==0.32.1
+transformers==4.46.3
+accelerate==1.2.1
+xformers==0.0.28.post3
+safetensors==0.4.5
+sentencepiece==0.2.0
+
+# Numerical + statistics
+numpy==1.26.4
+scipy==1.14.1
+psutil==6.1.0
+
+# GPU monitoring
+nvidia-ml-py==12.560.30
+
+# CSV / output
+pandas==2.2.3

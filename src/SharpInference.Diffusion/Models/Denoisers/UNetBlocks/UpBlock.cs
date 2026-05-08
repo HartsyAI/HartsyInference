@@ -16,6 +16,21 @@ public sealed class UpBlock
     private readonly UNetResNetBlock[] _resnets;
     private readonly CrossAttentionBlock?[] _attentions;
 
+    /// <summary>Total cross-attention sub-layer count this block exposes for IP-Adapter purposes — sum of <see cref="CrossAttentionBlock.NumTransformerBlocks"/> across all attention layers in the block. <c>0</c> when <c>hasAttention=false</c>; the UNet uses this to advance the IPA layer-index cursor between blocks.</summary>
+    public int CrossAttentionLayerCount
+    {
+        get
+        {
+            if (!_hasAttention) return 0;
+            int count = 0;
+            for (int i = 0; i < _numLayers; i++)
+            {
+                if (_attentions[i] is not null) count += _attentions[i]!.NumTransformerBlocks;
+            }
+            return count;
+        }
+    }
+
     // Upsample: nearest-neighbor 2x → Conv2d(outCh, outCh, 3, padding=1)
     private Tensor? _upsampleWeight;
     private Tensor? _upsampleBias;
@@ -94,10 +109,18 @@ public sealed class UpBlock
         if (_upsampleBias is not null) yield return _upsampleBias;
     }
 
-    /// <summary>Forward pass with skip connections from the corresponding down block. Skips are consumed in reverse order.</summary>
+    /// <summary>Forward pass with skip connections from the corresponding down block. No IPA injection.</summary>
     public Tensor Forward(IBackend backend, Tensor input, Tensor temb, Tensor context, List<Tensor> skips)
     {
+        return Forward(backend, input, temb, context, skips, ipaImageTokens: null, ipaToKIpAll: null, ipaToVIpAll: null, ipaStartIndex: 0, ipaScalePerLayer: null);
+    }
+
+    /// <summary>Forward pass with skip connections + optional IP-Adapter image-attention injection. Block consumes <see cref="CrossAttentionLayerCount"/> entries from the K/V lists starting at <paramref name="ipaStartIndex"/>; per-layer scale comes from <paramref name="ipaScalePerLayer"/> at the matching flat indices.</summary>
+    public Tensor Forward(IBackend backend, Tensor input, Tensor temb, Tensor context, List<Tensor> skips,
+        Tensor? ipaImageTokens, IReadOnlyList<Tensor>? ipaToKIpAll, IReadOnlyList<Tensor>? ipaToVIpAll, int ipaStartIndex, IReadOnlyList<float>? ipaScalePerLayer)
+    {
         Tensor hidden = input;
+        int ipaOffset = ipaStartIndex;
 
         for (int i = 0; i < _numLayers; i++)
         {
@@ -115,10 +138,12 @@ public sealed class UpBlock
             concatenated.Dispose();
             hidden = resOut;
 
-            // Cross-attention
+            // Cross-attention (with optional IPA injection)
             if (_hasAttention && _attentions[i] is not null)
             {
-                Tensor attnOut = _attentions[i]!.Forward(backend, hidden, context);
+                Tensor attnOut = _attentions[i]!.Forward(backend, hidden, context,
+                    ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaOffset, ipaScalePerLayer);
+                ipaOffset += _attentions[i]!.NumTransformerBlocks;
                 hidden.Dispose();
                 hidden = attnOut;
             }

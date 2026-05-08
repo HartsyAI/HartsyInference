@@ -3,6 +3,7 @@ using SharpInference.Core.Backends;
 using SharpInference.Core.Logging;
 using SharpInference.Core.Schedulers;
 using SharpInference.Core.Tensors;
+using SharpInference.Diffusion.Adapters;
 using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Models.Vae;
@@ -65,7 +66,10 @@ public sealed unsafe class SdxlPipeline : IDisposable
         int promptEosPositionG,
         int negativeEosPositionG,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        IReadOnlyList<ControlNetConditioning>? controlNets = null,
+        RefinerSwapConfig? refiner = null,
+        IReadOnlyList<IpAdapterConditioning>? ipAdapters = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -124,9 +128,33 @@ public sealed unsafe class SdxlPipeline : IDisposable
         }
 
         bool isMaskedInpaint = maskPixel is not null;
+
+        // Refiner StepSwap setup. Compute swap step from refiner Strength (fraction of total
+        // steps the refiner runs at the END). Disabled when Strength<=0 or refiner is null.
+        // For img2img / inpaint, the swap is still measured against the full schedule —
+        // matches Comfy semantics so a user typing "Strength=0.2" gets the same swap point
+        // regardless of img2img InitImageCreativity.
+        int swapStep = -1;
+        bool useStepSwap = false;
+        float[]? refinerSizeConditionPos = null;
+        float[]? refinerSizeConditionNeg = null;
+        if (refiner is not null)
+        {
+            float refinerStrength = Math.Clamp(refiner.Strength, 0f, 1f);
+            if (refinerStrength > 0f)
+            {
+                int refinerSteps = (int)MathF.Round(steps * refinerStrength);
+                swapStep = Math.Clamp(steps - refinerSteps, startStep, steps);
+                useStepSwap = swapStep < steps;
+                refinerSizeConditionPos = [request.Height, request.Width, 0f, 0f, refiner.AestheticScore];
+                refinerSizeConditionNeg = [request.Height, request.Width, 0f, 0f, refiner.NegativeAestheticScore];
+            }
+        }
+
         string mode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
                     : isImg2Img ? $"img2img (start={startStep}/{steps})"
                     : "txt2img";
+        if (useStepSwap) mode += $" + refiner@{swapStep}/{steps}";
         Logs.Info($"SDXL {mode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -141,7 +169,10 @@ public sealed unsafe class SdxlPipeline : IDisposable
 
         Tensor textEmbeddings = ConcatAlongLastDim(clipLHidden, clipGHidden);
         clipLHidden.Dispose();
-        clipGHidden.Dispose();
+        // Keep clipGHidden alive when StepSwap is active — refiner UNet uses CLIP-G alone
+        // (CrossAttentionDim=1280) instead of the concat (2048). Disposed at end of pipeline.
+        Tensor? clipGForRefiner = useStepSwap ? clipGHidden : null;
+        if (!useStepSwap) clipGHidden.Dispose();
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
         // 2. ADM size conditioning (orig_size = target_size = request resolution; no crop)
@@ -167,12 +198,14 @@ public sealed unsafe class SdxlPipeline : IDisposable
 
         // 5. Denoise loop (both paths run the same loop from their respective startStep)
         bool useF16 = (_unet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, onProgress);
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets,
+            refiner, swapStep, clipGForRefiner, refinerSizeConditionPos, refinerSizeConditionNeg, ipAdapters, onProgress);
 
         textEmbeddings.Dispose();
         pooledOutput?.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
+        clipGForRefiner?.Dispose();
 
         // 6. VAE decode — free UNet weights to reclaim VRAM for high-res VAE conv2d buffers
         _backend.Sync();
@@ -274,8 +307,44 @@ public sealed unsafe class SdxlPipeline : IDisposable
         Tensor? sourceLatent,
         Tensor? latentMask,
         int seed,
+        IReadOnlyList<ControlNetConditioning>? controlNets,
+        RefinerSwapConfig? refiner,
+        int swapStep,
+        Tensor? clipGForRefiner,
+        float[]? refinerSizeConditionPos,
+        float[]? refinerSizeConditionNeg,
+        IReadOnlyList<IpAdapterConditioning>? ipAdapters,
         Action<GenerationProgress>? onProgress)
     {
+        bool useStepSwap = refiner is not null && swapStep < totalSteps && clipGForRefiner is not null;
+        bool refinerUseF16 = useStepSwap
+            && (refiner!.RefinerUnet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
+
+        // IP-Adapter setup. v1 honors the first adapter in the list (Swarm UI exposes one
+        // slot; the upstream API allows multiple but pipelines don't stack image-attention
+        // contributions across them yet). The K/V tensor lists and image tokens are fixed
+        // across the whole loop; the per-layer base scale array is built here once from the
+        // adapter's weight type, and per-step gating multiplies it to handle the start/end
+        // fraction window.
+        IpAdapterConditioning? ipa = (ipAdapters is not null && ipAdapters.Count > 0) ? ipAdapters[0] : null;
+        Tensor? ipaImageTokens = ipa?.ImageTokens;
+        IReadOnlyList<Tensor>? ipaToKIp = null;
+        IReadOnlyList<Tensor>? ipaToVIp = null;
+        float[]? ipaBaseScalesPerLayer = null;
+        if (ipa is not null)
+        {
+            int layers = ipa.Adapter.CrossAttentionLayerCount;
+            Tensor[] kArr = new Tensor[layers];
+            Tensor[] vArr = new Tensor[layers];
+            for (int li = 0; li < layers; li++)
+            {
+                kArr[li] = ipa.Adapter.GetToKIpWeight(li);
+                vArr[li] = ipa.Adapter.GetToVIpWeight(li);
+            }
+            ipaToKIp = kArr;
+            ipaToVIp = vArr;
+            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers);
+        }
         Logs.Info("Starting SDXL denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -283,6 +352,18 @@ public sealed unsafe class SdxlPipeline : IDisposable
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
+
+            // Refiner phase: from swapStep onward, swap to refiner UNet + CLIP-G-only text
+            // emb + refiner ADM (separate cond/uncond aesthetic scores). ControlNet is
+            // disabled here — its zero convs are sized for the base UNet's skip count and
+            // the per-skip channel widths, so applying them to the refiner's different
+            // block schedule would break the residual addition.
+            bool inRefinerPhase = useStepSwap && i >= swapStep;
+            UNet activeUnet = inRefinerPhase ? refiner!.RefinerUnet : _unet;
+            Tensor activeTextEmb = inRefinerPhase ? clipGForRefiner! : textEmbeddings;
+            float[] activeSizeCond = inRefinerPhase ? refinerSizeConditionPos! : sizeCondition;
+            float[]? activeSizeCondUncond = inRefinerPhase ? refinerSizeConditionNeg : null;
+            bool activeUseF16 = inRefinerPhase ? refinerUseF16 : useF16;
 
             float inputScale = scheduler.ScaleModelInput(i);
             Tensor scaledLatent;
@@ -297,27 +378,86 @@ public sealed unsafe class SdxlPipeline : IDisposable
             }
 
             Tensor unetInput = scaledLatent;
-            if (useF16 && scaledLatent.DType != DType.F16)
+            if (activeUseF16 && scaledLatent.DType != DType.F16)
             {
                 unetInput = new Tensor(scaledLatent.Shape, DType.F16);
                 _backend.CastToF16(unetInput, scaledLatent);
             }
 
+            // ControlNet (single pass per step, cond branch only — residuals shared across
+            // CFG branches when CFG is on. This matches diffusers' guess_mode=True behavior;
+            // running CN twice for strict cond/uncond parity is a future optimization).
+            // Skip during refiner phase (zero-conv residuals are base-UNet-shaped).
+            Tensor[]? cnDownRes = null;
+            Tensor? cnMidRes = null;
+            if (!inRefinerPhase && controlNets is not null && controlNets.Count > 0)
+            {
+                int seqLenCN = (int)textEmbeddings.Shape[1];
+                int hiddenSizeCN = (int)textEmbeddings.Shape[2];
+                int pooledDimCN = (int)pooledOutput.Shape[1];
+                Tensor condEmbForCN = SliceBatchElement(textEmbeddings, 1, seqLenCN, hiddenSizeCN);
+                Tensor condPooledForCN = SliceBatchElement1D(pooledOutput, 1, pooledDimCN);
+                (cnDownRes, cnMidRes) = RunControlNets(controlNets, unetInput, t, condEmbForCN, condPooledForCN, sizeCondition);
+                condEmbForCN.Dispose();
+                condPooledForCN.Dispose();
+            }
+
+            // IP-Adapter: skip during refiner phase (refiner UNet has a different cross-attn
+            // shape so the K_ip/V_ip projections wouldn't match). For the base UNet path,
+            // gate by the adapter's [start, end] step-fraction window: outside the window,
+            // pass null scales so UNet skips the image-attention computation entirely.
+            Tensor? activeIpaTokens = null;
+            IReadOnlyList<Tensor>? activeIpaK = null;
+            IReadOnlyList<Tensor>? activeIpaV = null;
+            IReadOnlyList<float>? activeIpaScales = null;
+            if (!inRefinerPhase && ipa is not null && ipaBaseScalesPerLayer is not null)
+            {
+                float gate = IpAdapterScaleSchedule.StepGate(i, totalSteps, ipa.StartFraction, ipa.EndFraction);
+                if (gate > 0f)
+                {
+                    activeIpaTokens = ipaImageTokens;
+                    activeIpaK = ipaToKIp;
+                    activeIpaV = ipaToVIp;
+                    if (gate == 1.0f)
+                    {
+                        activeIpaScales = ipaBaseScalesPerLayer;
+                    }
+                    else
+                    {
+                        // Gate is exclusively 0 or 1 today (boolean window), but keep the
+                        // multiply path so a soft-gate / ramp can be added without rewiring.
+                        float[] gated = new float[ipaBaseScalesPerLayer.Length];
+                        for (int li = 0; li < gated.Length; li++) gated[li] = ipaBaseScalesPerLayer[li] * gate;
+                        activeIpaScales = gated;
+                    }
+                }
+            }
+
             Tensor noisePred;
             if (cfgScale > 1.0f)
             {
-                noisePred = ClassifierFreeGuidanceStep(unetInput, t, textEmbeddings, pooledOutput, sizeCondition, cfgScale);
+                noisePred = ClassifierFreeGuidanceStep(unetInput, t, activeTextEmb, pooledOutput, activeSizeCond, cfgScale, cnDownRes, cnMidRes,
+                    overrideUnet: inRefinerPhase ? activeUnet : null,
+                    sizeConditionUncond: activeSizeCondUncond,
+                    ipaImageTokens: activeIpaTokens, ipaToKIpAll: activeIpaK, ipaToVIpAll: activeIpaV, ipaScalePerLayer: activeIpaScales);
             }
             else
             {
-                int seqLen = (int)textEmbeddings.Shape[1];
-                int hiddenSize = (int)textEmbeddings.Shape[2];
-                Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
+                int seqLen = (int)activeTextEmb.Shape[1];
+                int hiddenSize = (int)activeTextEmb.Shape[2];
+                Tensor condEmb = SliceBatchElement(activeTextEmb, 1, seqLen, hiddenSize);
                 int pooledDim = (int)pooledOutput.Shape[1];
                 Tensor condPooled = SliceBatchElement1D(pooledOutput, 1, pooledDim);
-                noisePred = _unet.Forward(_backend, unetInput, t, condEmb, condPooled, sizeCondition);
+                noisePred = activeUnet.Forward(_backend, unetInput, t, condEmb, condPooled, activeSizeCond, cnDownRes, cnMidRes,
+                    activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);
                 condEmb.Dispose();
                 condPooled.Dispose();
+            }
+
+            if (cnDownRes is not null)
+            {
+                foreach (Tensor d in cnDownRes) d.Dispose();
+                cnMidRes?.Dispose();
             }
 
             if (unetInput != scaledLatent) unetInput.Dispose();
@@ -368,9 +508,15 @@ public sealed unsafe class SdxlPipeline : IDisposable
         return latent;
     }
 
-    /// <summary>Runs classifier-free guidance for SDXL: noise_pred = uncond + cfg_scale * (cond - uncond).</summary>
-    private Tensor ClassifierFreeGuidanceStep(Tensor latent, float timestep, Tensor textEmbeddings, Tensor pooledOutput, float[] sizeCondition, float cfgScale)
+    /// <summary>Runs classifier-free guidance for SDXL: noise_pred = uncond + cfg_scale * (cond - uncond). When ControlNet residuals are supplied they're applied to both UNet branches (single CN pass per step, residuals shared — matches diffusers' guess_mode=True; strict per-branch CN passes are a future optimization).
+    /// <para>The optional <paramref name="overrideUnet"/> + <paramref name="sizeConditionUncond"/> parameters drive refiner StepSwap mode: during the refiner phase the loop calls this with the refiner UNet and a separate uncond ADM array (so the cond/uncond branches use different aesthetic_score values, matching the refiner's training).</para></summary>
+    private Tensor ClassifierFreeGuidanceStep(Tensor latent, float timestep, Tensor textEmbeddings, Tensor pooledOutput, float[] sizeCondition, float cfgScale,
+        IReadOnlyList<Tensor>? cnDownRes = null, Tensor? cnMidRes = null,
+        UNet? overrideUnet = null, float[]? sizeConditionUncond = null,
+        Tensor? ipaImageTokens = null, IReadOnlyList<Tensor>? ipaToKIpAll = null, IReadOnlyList<Tensor>? ipaToVIpAll = null, IReadOnlyList<float>? ipaScalePerLayer = null)
     {
+        UNet activeUnet = overrideUnet ?? _unet;
+        float[] uncondAdm = sizeConditionUncond ?? sizeCondition;
         int seqLen = (int)textEmbeddings.Shape[1];
         int hiddenSize = (int)textEmbeddings.Shape[2];
         int pooledDim = (int)pooledOutput.Shape[1];
@@ -381,9 +527,16 @@ public sealed unsafe class SdxlPipeline : IDisposable
         Tensor uncondPooled = SliceBatchElement1D(pooledOutput, 0, pooledDim);
         Tensor condPooled = SliceBatchElement1D(pooledOutput, 1, pooledDim);
 
-        // Run UNet twice with ADM conditioning
-        Tensor uncondNoise = _unet.Forward(_backend, latent, timestep, uncondEmb, uncondPooled, sizeCondition);
-        Tensor condNoise = _unet.Forward(_backend, latent, timestep, condEmb, condPooled, sizeCondition);
+        // Run UNet twice with ADM conditioning (and optional ControlNet residuals + IPA injection).
+        // IPA is applied to BOTH branches with the same image tokens — diffusers' IPAdapter
+        // attn processor uses the same image-prompt tokens for cond and uncond, so the IPA
+        // contribution gets cancelled out by CFG except where Q differs (which is everywhere
+        // because Q is from the latent, not the text). Net: IPA influences final output by
+        // exactly its scaled image-attention contribution.
+        Tensor uncondNoise = activeUnet.Forward(_backend, latent, timestep, uncondEmb, uncondPooled, uncondAdm, cnDownRes, cnMidRes,
+            ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaScalePerLayer);
+        Tensor condNoise = activeUnet.Forward(_backend, latent, timestep, condEmb, condPooled, sizeCondition, cnDownRes, cnMidRes,
+            ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaScalePerLayer);
         uncondEmb.Dispose();
         condEmb.Dispose();
         uncondPooled.Dispose();
@@ -418,6 +571,46 @@ public sealed unsafe class SdxlPipeline : IDisposable
         condF32.Dispose();
 
         return output;
+    }
+
+    /// <summary>Runs every supplied ControlNet at the current step and sums their residuals into a single set. Each ControlNet sees the same latent + timestep + cond text embedding and produces its own per-skip residual stack and mid residual; this helper collapses them by element-wise addition so the UNet path doesn't need to know how many ControlNets are stacked.</summary>
+    private (Tensor[] downResiduals, Tensor midResidual) RunControlNets(
+        IReadOnlyList<ControlNetConditioning> controlNets,
+        Tensor latent,
+        float timestep,
+        Tensor condTextEmb,
+        Tensor condPooled,
+        ReadOnlySpan<float> sizeCondition)
+    {
+        ControlNetConditioning first = controlNets[0];
+        (Tensor[] down, Tensor mid) = first.Adapter.Forward(_backend, latent, first.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, first.Scale);
+        for (int c = 1; c < controlNets.Count; c++)
+        {
+            ControlNetConditioning next = controlNets[c];
+            (Tensor[] downNext, Tensor midNext) = next.Adapter.Forward(_backend, latent, next.ConditionImage, timestep, condTextEmb, condPooled, sizeCondition, next.Scale);
+            if (downNext.Length != down.Length)
+            {
+                foreach (Tensor d in downNext) d.Dispose();
+                midNext.Dispose();
+                throw new InvalidOperationException(
+                    $"Stacked ControlNet residual count mismatch: {down.Length} vs {downNext.Length}. " +
+                    "All stacked ControlNets must target the same base UNet config.");
+            }
+            for (int i = 0; i < down.Length; i++)
+            {
+                Tensor sum = new Tensor(down[i].Shape, down[i].DType);
+                _backend.Add(sum, down[i], downNext[i]);
+                down[i].Dispose();
+                downNext[i].Dispose();
+                down[i] = sum;
+            }
+            Tensor sumMid = new Tensor(mid.Shape, mid.DType);
+            _backend.Add(sumMid, mid, midNext);
+            mid.Dispose();
+            midNext.Dispose();
+            mid = sumMid;
+        }
+        return (down, mid);
     }
 
     /// <summary>Concatenates two [B, seqLen, D1] and [B, seqLen, D2] tensors along the last dimension → [B, seqLen, D1+D2].</summary>

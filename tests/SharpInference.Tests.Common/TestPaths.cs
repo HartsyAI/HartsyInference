@@ -119,9 +119,11 @@ public static class TestPaths
     /// the Qwen-3 0.6B text encoder and Qwen-Image VAE are loaded separately.</summary>
     public static class Anima
     {
+        public static string Transformer  => Resolve("ANIMA_TRANSFORMER_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "Anima", "anima-preview3-base.safetensors"));
         public static string Preview3Base => Resolve("ANIMA_PREVIEW3_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "Anima", "anima-preview3-base.safetensors"));
         public static string TextEncoder  => Resolve("ANIMA_TE_PATH",           Path.Combine(ModelsDir, "text_encoders", "qwen_3_06b_base.safetensors"));
         public static string Vae          => Resolve("ANIMA_VAE_PATH",          QwenImage.Vae);
+        public static string PromptEmbeds => Resolve("ANIMA_PROMPT_EMBEDS",     Path.Combine(ModelsDir, "Stable-Diffusion", "Anima", "TestEmbeddings", "prompt.bin"));
     }
 
     /// <summary>Kandinsky 5.0 paths. Default expects the diffusers folder layout from
@@ -146,6 +148,47 @@ public static class TestPaths
         public static string NegPromptQwenEmbeds => Resolve("KANDINSKY5_NEG_QWEN_EMBEDS", Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "TestEmbeddings", "neg_prompt_qwen.bin"));
         /// <summary>Pre-computed CLIP-L pooled embeddings for the negative prompt.</summary>
         public static string NegPromptClipPooled => Resolve("KANDINSKY5_NEG_CLIP_POOLED", Path.Combine(ModelsDir, "Stable-Diffusion", "Kandinsky5", "TestEmbeddings", "neg_prompt_clip.bin"));
+    }
+
+    /// <summary>Lumina-Image-2.0 paths. The dual text encoder Gemma 2 2B is not yet implemented in
+    /// SharpInference, so end-to-end tests rely on pre-computed embeddings shipped as raw F32 binaries —
+    /// the same format Diffusers' pipeline accepts via <c>prompt_embeds</c>.</summary>
+    public static class Lumina2
+    {
+        public static string Transformer       => Resolve("LUMINA2_TRANSFORMER_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "lumina2_transformer.safetensors"));
+        public static string Vae               => Resolve("LUMINA2_VAE_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "vae.safetensors"));
+        public static string PromptEmbeds      => Resolve("LUMINA2_PROMPT_EMBEDS",    Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "TestEmbeddings", "prompt.bin"));
+        public static string NegPromptEmbeds   => Resolve("LUMINA2_NEG_PROMPT_EMBEDS",Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "TestEmbeddings", "neg_prompt.bin"));
+    }
+
+    /// <summary>Hunyuan Image 2.1 paths. The dual text encoder stack (CLIP-L + ByT5/T5) is wired through
+    /// the existing encoders; the test skips when checkpoint or tokenizer assets are missing.</summary>
+    public static class HunyuanImage
+    {
+        public static string Transformer  => Resolve("HUNYUAN_IMAGE_TRANSFORMER_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "HunyuanImage", "hunyuan_image_2_1.safetensors"));
+        public static string Vae          => Resolve("HUNYUAN_IMAGE_VAE_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "HunyuanImage", "vae.safetensors"));
+        public static string ClipL        => Resolve("HUNYUAN_IMAGE_CLIPL_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "HunyuanImage", "clip_l.safetensors"));
+        public static string T5           => Resolve("HUNYUAN_IMAGE_T5_PATH",          Path.Combine(ModelsDir, "Stable-Diffusion", "HunyuanImage", "t5xxl.safetensors"));
+    }
+
+    /// <summary>HiDream i1 paths. Quad text encoder (CLIP-L + CLIP-G + T5-XXL + Llama-3.1).</summary>
+    public static class HiDream
+    {
+        public static string Transformer  => Resolve("HIDREAM_TRANSFORMER_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "HiDream", "hidream_i1.safetensors"));
+        public static string Vae          => Resolve("HIDREAM_VAE_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "HiDream", "vae.safetensors"));
+        public static string ClipL        => Resolve("HIDREAM_CLIPL_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "HiDream", "clip_l.safetensors"));
+        public static string ClipG        => Resolve("HIDREAM_CLIPG_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "HiDream", "clip_g.safetensors"));
+        public static string T5           => Resolve("HIDREAM_T5_PATH",          Path.Combine(ModelsDir, "Stable-Diffusion", "HiDream", "t5xxl.safetensors"));
+        public static string Llama        => Resolve("HIDREAM_LLAMA_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "HiDream", "llama_3_1_8b.safetensors"));
+    }
+
+    /// <summary>OmniGen 2 paths. MLLM text encoder (Qwen2.5-VL).</summary>
+    public static class OmniGen2
+    {
+        public static string Transformer  => Resolve("OMNIGEN2_TRANSFORMER_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "OmniGen2", "omnigen2.safetensors"));
+        public static string Vae          => Resolve("OMNIGEN2_VAE_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "OmniGen2", "vae.safetensors"));
+        public static string TextEncoder  => Resolve("OMNIGEN2_TEXT_ENCODER",     Path.Combine(ModelsDir, "Stable-Diffusion", "OmniGen2", "qwen2_5_vl.safetensors"));
+        public static string PromptEmbeds => Resolve("OMNIGEN2_PROMPT_EMBEDS",    Path.Combine(ModelsDir, "Stable-Diffusion", "OmniGen2", "TestEmbeddings", "prompt.bin"));
     }
 
     /// <summary>SD3.5 paths. Assets are not bundled — tests skip when missing. FP8-bundled single-file checkpoints from Comfy-Org/stable-diffusion-3.5-fp8 are the default; set env vars to override for FP16 / community quants.</summary>
@@ -185,6 +228,10 @@ public static class TestPaths
         public static string T5Spiece      => Resolve("T5_SPIECE_PATH",       Path.Combine(ModelsDir, "Tokenizers", "T5", "t5_spiece.model"));
         public static string T5XxlSpiece   => Resolve("T5_XXL_SPIECE_PATH",   Path.Combine(ModelsDir, "Tokenizers", "T5", "t5_xxl_spiece.model"));
         public static string LlamaTokenizer => Resolve("LLAMA_TOKENIZER_PATH", Path.Combine(ModelsDir, "Tokenizers", "Llama", "llama_tokenizer.model"));
+        /// <summary>Llama 3 / 3.1 BPE vocab.json (extracted from <c>tokenizer.json</c>). Used by HiDream.</summary>
+        public static string LlamaVocab    => Resolve("LLAMA_VOCAB_PATH",     Path.Combine(ModelsDir, "Tokenizers", "Llama", "vocab.json"));
+        /// <summary>Llama 3 / 3.1 BPE merges.txt (extracted from <c>tokenizer.json</c>).</summary>
+        public static string LlamaMerges   => Resolve("LLAMA_MERGES_PATH",    Path.Combine(ModelsDir, "Tokenizers", "Llama", "merges.txt"));
         public static string Qwen3Dir      => Resolve("QWEN3_TOKENIZER_DIR",  Path.Combine(ModelsDir, "Tokenizers", "Qwen3"));
         public static string Qwen3Vocab    => Resolve("QWEN3_VOCAB_PATH",     Path.Combine(Qwen3Dir, "vocab.json"));
         public static string Qwen3Merges   => Resolve("QWEN3_MERGES_PATH",    Path.Combine(Qwen3Dir, "merges.txt"));

@@ -3,6 +3,7 @@ using SharpInference.Core.Backends;
 using SharpInference.Core.Logging;
 using SharpInference.Core.Schedulers;
 using SharpInference.Core.Tensors;
+using SharpInference.Diffusion.Adapters;
 using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Models.Vae;
@@ -172,7 +173,8 @@ public sealed class StableDiffusion15Pipeline : IDisposable
         int[] promptTokenIds,
         int[] negativePromptTokenIds,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        IReadOnlyList<IpAdapterConditioning>? ipAdapters = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -230,7 +232,7 @@ public sealed class StableDiffusion15Pipeline : IDisposable
         Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, startStep);
 
         // 4. Denoise loop (both paths run the same loop from their respective startStep)
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, startStep, totalSteps: steps, cfgScale, onProgress);
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, startStep, totalSteps: steps, cfgScale, ipAdapters, onProgress);
 
         textEmbeddings.Dispose();
 
@@ -292,8 +294,31 @@ public sealed class StableDiffusion15Pipeline : IDisposable
         int startStep,
         int totalSteps,
         float cfgScale,
+        IReadOnlyList<IpAdapterConditioning>? ipAdapters,
         Action<GenerationProgress>? onProgress)
     {
+        // IP-Adapter setup (same shape as SDXL — single adapter honored, weight-type +
+        // start/end window applied per step).
+        IpAdapterConditioning? ipa = (ipAdapters is not null && ipAdapters.Count > 0) ? ipAdapters[0] : null;
+        Tensor? ipaImageTokens = ipa?.ImageTokens;
+        IReadOnlyList<Tensor>? ipaToKIp = null;
+        IReadOnlyList<Tensor>? ipaToVIp = null;
+        float[]? ipaBaseScalesPerLayer = null;
+        if (ipa is not null)
+        {
+            int layers = ipa.Adapter.CrossAttentionLayerCount;
+            Tensor[] kArr = new Tensor[layers];
+            Tensor[] vArr = new Tensor[layers];
+            for (int li = 0; li < layers; li++)
+            {
+                kArr[li] = ipa.Adapter.GetToKIpWeight(li);
+                vArr[li] = ipa.Adapter.GetToVIpWeight(li);
+            }
+            ipaToKIp = kArr;
+            ipaToVIp = vArr;
+            ipaBaseScalesPerLayer = IpAdapterScaleSchedule.Build(ipa.WeightType, ipa.Scale, layers);
+        }
+
         Logs.Info("Starting denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -315,17 +340,46 @@ public sealed class StableDiffusion15Pipeline : IDisposable
                 scaledLatent = latent;
             }
 
+            // Per-step IPA gating
+            Tensor? activeIpaTokens = null;
+            IReadOnlyList<Tensor>? activeIpaK = null;
+            IReadOnlyList<Tensor>? activeIpaV = null;
+            IReadOnlyList<float>? activeIpaScales = null;
+            if (ipa is not null && ipaBaseScalesPerLayer is not null)
+            {
+                float gate = IpAdapterScaleSchedule.StepGate(i, totalSteps, ipa.StartFraction, ipa.EndFraction);
+                if (gate > 0f)
+                {
+                    activeIpaTokens = ipaImageTokens;
+                    activeIpaK = ipaToKIp;
+                    activeIpaV = ipaToVIp;
+                    if (gate == 1.0f)
+                    {
+                        activeIpaScales = ipaBaseScalesPerLayer;
+                    }
+                    else
+                    {
+                        float[] gated = new float[ipaBaseScalesPerLayer.Length];
+                        for (int li = 0; li < gated.Length; li++) gated[li] = ipaBaseScalesPerLayer[li] * gate;
+                        activeIpaScales = gated;
+                    }
+                }
+            }
+
             Tensor noisePred;
             if (cfgScale > 1.0f)
             {
-                noisePred = ClassifierFreeGuidanceStep(_backend, scaledLatent, t, textEmbeddings, cfgScale);
+                noisePred = ClassifierFreeGuidanceStep(_backend, scaledLatent, t, textEmbeddings, cfgScale,
+                    activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);
             }
             else
             {
                 int seqLen = (int)textEmbeddings.Shape[1];
                 int hiddenSize = (int)textEmbeddings.Shape[2];
                 Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
-                noisePred = _unet.Forward(_backend, scaledLatent, t, condEmb);
+                noisePred = _unet.Forward(_backend, scaledLatent, t, condEmb, null, default,
+                    null, null,
+                    activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);
                 condEmb.Dispose();
             }
 
@@ -345,8 +399,9 @@ public sealed class StableDiffusion15Pipeline : IDisposable
         return latent;
     }
 
-    /// <summary>Runs classifier-free guidance: noise_pred = uncond + cfg_scale * (cond - uncond).</summary>
-    private unsafe Tensor ClassifierFreeGuidanceStep(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, float cfgScale)
+    /// <summary>Runs classifier-free guidance: noise_pred = uncond + cfg_scale * (cond - uncond). Optionally injects IP-Adapter image-attention contribution into both UNet branches.</summary>
+    private unsafe Tensor ClassifierFreeGuidanceStep(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, float cfgScale,
+        Tensor? ipaImageTokens = null, IReadOnlyList<Tensor>? ipaToKIpAll = null, IReadOnlyList<Tensor>? ipaToVIpAll = null, IReadOnlyList<float>? ipaScalePerLayer = null)
     {
         int seqLen = (int)textEmbeddings.Shape[1];
         int hiddenSize = (int)textEmbeddings.Shape[2];
@@ -355,9 +410,14 @@ public sealed class StableDiffusion15Pipeline : IDisposable
         Tensor uncondEmb = SliceBatchElement(textEmbeddings, 0, seqLen, hiddenSize);
         Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
 
-        // Run UNet twice
-        Tensor uncondNoise = _unet.Forward(backend, latent, timestep, uncondEmb);
-        Tensor condNoise = _unet.Forward(backend, latent, timestep, condEmb);
+        // Run UNet twice. SD1.5 has no SDXL ADM conditioning; pooled / sizeCondition / CN
+        // residuals stay null. IPA params are passed identically to both branches.
+        Tensor uncondNoise = _unet.Forward(backend, latent, timestep, uncondEmb, null, default,
+            null, null,
+            ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaScalePerLayer);
+        Tensor condNoise = _unet.Forward(backend, latent, timestep, condEmb, null, default,
+            null, null,
+            ipaImageTokens, ipaToKIpAll, ipaToVIpAll, ipaScalePerLayer);
         uncondEmb.Dispose();
         condEmb.Dispose();
 

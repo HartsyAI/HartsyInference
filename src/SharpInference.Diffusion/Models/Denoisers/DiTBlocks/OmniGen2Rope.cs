@@ -97,6 +97,39 @@ public sealed unsafe class OmniGen2Rope
         return (cos, sin);
     }
 
+    /// <summary>Builds the text table and rotates both Q and K in-place. GQA-aware: Q is rotated with its
+    /// own head count, K with the (smaller) KV head count, both using the same RoPE table.</summary>
+    public void ApplyText(Tensor q, Tensor k, int batch, int numQHeads, int numKvHeads, int seqLen)
+    {
+        (float[] cos, float[] sin) = BuildTextTable(seqLen);
+        Apply(q, cos, sin, batch, numQHeads, seqLen);
+        Apply(k, cos, sin, batch, numKvHeads, seqLen);
+    }
+
+    /// <summary>Builds the image table and rotates both Q and K in-place. GQA-aware: Q is rotated with its
+    /// own head count, K with the (smaller) KV head count, both using the same RoPE table.</summary>
+    public void ApplyImage(Tensor q, Tensor k, int batch, int numQHeads, int numKvHeads,
+        int hPacked, int wPacked, int timeOffset)
+    {
+        int imgSeqLen = hPacked * wPacked;
+        (float[] cos, float[] sin) = BuildImageTable(hPacked, wPacked, timeOffset);
+        Apply(q, cos, sin, batch, numQHeads, imgSeqLen);
+        Apply(k, cos, sin, batch, numKvHeads, imgSeqLen);
+    }
+
+    /// <summary>Builds the joint-sequence table and rotates both Q and K in-place over the merged
+    /// <c>[txt, img]</c> sequence. Text positions <c>(s, s, s)</c> for the first <paramref name="txtSeqLen"/>
+    /// tokens; image positions <c>(txtSeqLen, row, col)</c> for the remaining <c>hPacked * wPacked</c> tokens.
+    /// GQA-aware.</summary>
+    public void ApplyJoint(Tensor q, Tensor k, int batch, int numQHeads, int numKvHeads,
+        int txtSeqLen, int hPacked, int wPacked)
+    {
+        int totalSeqLen = txtSeqLen + hPacked * wPacked;
+        (float[] cos, float[] sin) = BuildJointTable(txtSeqLen, hPacked, wPacked);
+        Apply(q, cos, sin, batch, numQHeads, totalSeqLen);
+        Apply(k, cos, sin, batch, numKvHeads, totalSeqLen);
+    }
+
     /// <summary>Rotates Q and K in-place using a precomputed <c>(cos, sin)</c> table sized to the sequence length.
     /// Q and K must be <c>[B, numHeads, seqLen, headDim]</c>. Use this once per block per stream — the table is
     /// independent of head count, so a single table can rotate both Q (with full Q heads) and K (with KV heads).</summary>
