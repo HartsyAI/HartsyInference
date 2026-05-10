@@ -7,6 +7,15 @@ public sealed unsafe class TensorView : IDisposable
 {
     private readonly nint _dataPointer;
 
+    /// <summary>Creates a view into existing tensor data.</summary>
+    public TensorView(void* dataPointer, TensorShape shape, DType dtype, DeviceKind device = default)
+    {
+        _dataPointer = (nint)dataPointer;
+        Shape = shape;
+        DType = dtype;
+        Device = device;
+    }
+
     /// <summary>Pointer to the start of this view's data (offset from the source tensor).</summary>
     public void* DataPointer
     {
@@ -22,15 +31,6 @@ public sealed unsafe class TensorView : IDisposable
 
     /// <summary>Device this view's data resides on.</summary>
     public DeviceKind Device { get; }
-
-    /// <summary>Creates a view into existing tensor data.</summary>
-    public TensorView(void* dataPointer, TensorShape shape, DType dtype, DeviceKind device = default)
-    {
-        _dataPointer = (nint)dataPointer;
-        Shape = shape;
-        DType = dtype;
-        Device = device;
-    }
 
     /// <summary>Returns a span over the view's data interpreted as <typeparamref name="T"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -73,7 +73,6 @@ public sealed unsafe class TensorView : IDisposable
             byteOffset = start * stride0 * DType.SizeInBytes;
         }
 
-        // Build sliced shape: replace dim 0 with length, keep remaining dims
         Span<long> newDims = stackalloc long[Shape.Rank];
         Shape.CopyDimsTo(newDims);
         newDims[0] = length;
@@ -82,9 +81,6 @@ public sealed unsafe class TensorView : IDisposable
         return new TensorView((byte*)_dataPointer + byteOffset, newShape, DType, Device);
     }
 
-    /// <summary>No-op disposal — TensorView does not own its memory.</summary>
-    public void Dispose()
-    {
-        // Intentionally empty — non-owning view
-    }
+    /// <summary>No-op — TensorView does not own its memory.</summary>
+    public void Dispose() { }
 }

@@ -9,6 +9,15 @@ public sealed unsafe class MmapHandle : IDisposable
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _accessor;
 
+    private MmapHandle(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePointer, long byteLength, string filePath)
+    {
+        _mmf = mmf;
+        _accessor = accessor;
+        _basePointer = (nint)basePointer;
+        ByteLength = byteLength;
+        FilePath = filePath;
+    }
+
     /// <summary>Total byte length of the memory-mapped region.</summary>
     public long ByteLength { get; }
 
@@ -26,15 +35,6 @@ public sealed unsafe class MmapHandle : IDisposable
                 throw new ObjectDisposedException(nameof(MmapHandle));
             return (byte*)ptr;
         }
-    }
-
-    private MmapHandle(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePointer, long byteLength, string filePath)
-    {
-        _mmf = mmf;
-        _accessor = accessor;
-        _basePointer = (nint)basePointer;
-        ByteLength = byteLength;
-        FilePath = filePath;
     }
 
     /// <summary>Opens a file as a read-only memory-mapped region.</summary>
@@ -61,9 +61,9 @@ public sealed unsafe class MmapHandle : IDisposable
         if (ptr == 0)
             throw new ObjectDisposedException(nameof(MmapHandle));
 
-        // Allow byteOffset == ByteLength so that 0-byte marker tensors at the very end of a file
-        // (e.g. ComfyUI fp8_scaled `*.scaled_fp8` markers with shape=[0]) can be safely returned
-        // as a past-the-end pointer that callers must not read from.
+        // Allow byteOffset == ByteLength so 0-byte marker tensors at the end of a file
+        // (e.g. ComfyUI fp8_scaled `*.scaled_fp8` markers with shape=[0]) return a
+        // past-the-end pointer that callers must not read from.
         if ((ulong)byteOffset > (ulong)ByteLength)
             throw new ArgumentOutOfRangeException(nameof(byteOffset));
 

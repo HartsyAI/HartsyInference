@@ -9,12 +9,6 @@ public readonly struct TensorShape : IEquatable<TensorShape>
     private readonly long _dim0, _dim1, _dim2, _dim3, _dim4, _dim5;
     private readonly long _stride0, _stride1, _stride2, _stride3, _stride4, _stride5;
 
-    /// <summary>Number of dimensions in this shape.</summary>
-    public int Rank { get; }
-
-    /// <summary>Total number of elements across all dimensions.</summary>
-    public long ElementCount { get; }
-
     /// <summary>Creates a tensor shape from the given dimensions. Strides are computed as row-major.</summary>
     public TensorShape(ReadOnlySpan<long> dims)
     {
@@ -23,7 +17,6 @@ public readonly struct TensorShape : IEquatable<TensorShape>
 
         Rank = dims.Length;
 
-        // Store dimensions
         _dim0 = dims.Length > 0 ? dims[0] : 0;
         _dim1 = dims.Length > 1 ? dims[1] : 0;
         _dim2 = dims.Length > 2 ? dims[2] : 0;
@@ -31,7 +24,6 @@ public readonly struct TensorShape : IEquatable<TensorShape>
         _dim4 = dims.Length > 4 ? dims[4] : 0;
         _dim5 = dims.Length > 5 ? dims[5] : 0;
 
-        // Compute row-major strides and total element count
         ElementCount = 1;
         Span<long> strides = stackalloc long[MaxRank];
         for (int i = Rank - 1; i >= 0; i--)
@@ -59,6 +51,12 @@ public readonly struct TensorShape : IEquatable<TensorShape>
 
     /// <summary>Convenience constructor for 4D shape (NCHW).</summary>
     public TensorShape(long d0, long d1, long d2, long d3) : this([d0, d1, d2, d3]) { }
+
+    /// <summary>Number of dimensions in this shape.</summary>
+    public int Rank { get; }
+
+    /// <summary>Total number of elements across all dimensions.</summary>
+    public long ElementCount { get; }
 
     /// <summary>Gets the size of the given dimension.</summary>
     public long this[int index] => index switch

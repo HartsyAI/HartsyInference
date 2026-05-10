@@ -14,6 +14,9 @@ public interface IScheduler
     /// <summary>The computed timestep schedule.</summary>
     ReadOnlySpan<float> Timesteps { get; }
 
+    /// <summary>Returns the initial noise scale factor. For most schedulers this is 1.0, but some (like Karras) scale the initial noise.</summary>
+    float InitialNoiseSigma { get; }
+
     /// <summary>Configures the scheduler for the given number of inference steps. Must be called before <see cref="Step"/>.</summary>
     void SetTimesteps(int numInferenceSteps);
 
@@ -30,9 +33,6 @@ public interface IScheduler
     /// <param name="noise">Random noise tensor (same shape as sample).</param>
     /// <param name="stepIndex">Index into the timestep schedule.</param>
     void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex);
-
-    /// <summary>Returns the initial noise scale factor. For most schedulers this is 1.0, but some (like Karras) scale the initial noise.</summary>
-    float InitialNoiseSigma { get; }
 
     /// <summary>Returns the scale factor to apply to the model input at the given step. For Euler schedulers this is 1/sqrt(sigma^2 + 1), for most others it's 1.0 (no scaling).</summary>
     /// <param name="stepIndex">Index into the timestep schedule (0-based).</param>

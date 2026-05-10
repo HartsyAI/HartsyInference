@@ -5,14 +5,14 @@ public static class Logs
 {
     private static Action<LogLevel, string>? _logger;
 
+    /// <summary>Minimum log level to emit. Default is <see cref="LogLevel.Info"/>.</summary>
+    public static LogLevel MinLevel { get; set; } = LogLevel.Info;
+
     /// <summary>Sets a custom logger callback. If not set, logs are written to <see cref="Console.Error"/>.</summary>
     public static void SetLogger(Action<LogLevel, string> logger)
     {
         _logger = logger;
     }
-
-    /// <summary>Minimum log level to emit. Default is <see cref="LogLevel.Info"/>.</summary>
-    public static LogLevel MinLevel { get; set; } = LogLevel.Info;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Verbose(string message)

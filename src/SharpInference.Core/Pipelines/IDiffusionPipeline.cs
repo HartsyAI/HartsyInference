@@ -9,10 +9,3 @@ public interface IDiffusionPipeline : IDisposable
     /// <summary>Generates images from a text prompt, yielding progress updates at each denoising step.</summary>
     IAsyncEnumerable<GenerationProgress> GenerateAsync(IPipelineRequest request);
 }
-
-/// <summary>Progress update emitted at each denoising step during image generation.</summary>
-public readonly record struct GenerationProgress(int Step, int TotalSteps, double ElapsedMs)
-{
-    /// <summary>Whether generation is complete.</summary>
-    public bool IsComplete => Step >= TotalSteps;
-}

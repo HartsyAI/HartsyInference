@@ -5,6 +5,17 @@ public sealed unsafe class NativeBuffer : IDisposable
 {
     private nint _pointer;
 
+    /// <summary>Allocates an aligned block of unmanaged memory, zeroed.</summary>
+    public NativeBuffer(nuint byteLength, nuint alignment = 64)
+    {
+        if (byteLength == 0)
+            throw new ArgumentException("Cannot allocate zero bytes.", nameof(byteLength));
+        ByteLength = byteLength;
+        Alignment = alignment;
+        _pointer = (nint)NativeMemory.AlignedAlloc(byteLength, alignment);
+        NativeMemory.Clear((void*)_pointer, byteLength);
+    }
+
     /// <summary>Total size in bytes of the allocated buffer.</summary>
     public nuint ByteLength { get; }
 
@@ -22,17 +33,6 @@ public sealed unsafe class NativeBuffer : IDisposable
                 throw new ObjectDisposedException(nameof(NativeBuffer));
             return (void*)ptr;
         }
-    }
-
-    /// <summary>Allocates an aligned block of unmanaged memory, zeroed.</summary>
-    public NativeBuffer(nuint byteLength, nuint alignment = 64)
-    {
-        if (byteLength == 0)
-            throw new ArgumentException("Cannot allocate zero bytes.", nameof(byteLength));
-        ByteLength = byteLength;
-        Alignment = alignment;
-        _pointer = (nint)NativeMemory.AlignedAlloc(byteLength, alignment);
-        NativeMemory.Clear((void*)_pointer, byteLength);
     }
 
     /// <summary>Interprets the buffer as a span of <typeparamref name="T"/>.</summary>

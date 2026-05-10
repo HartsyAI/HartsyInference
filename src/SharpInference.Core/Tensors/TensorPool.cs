@@ -68,10 +68,8 @@ public sealed class TensorPool : IDisposable
         }
     }
 
-    private static nuint RoundUpToPowerOf2(nuint value)
-    {
-        return (nuint)BitOperations.RoundUpToPowerOf2((ulong)value);
-    }
+    private static nuint RoundUpToPowerOf2(nuint value) =>
+        (nuint)BitOperations.RoundUpToPowerOf2((ulong)value);
 
     /// <summary>Disposes all pooled buffers. Thread-safe via Interlocked.</summary>
     public void Dispose()

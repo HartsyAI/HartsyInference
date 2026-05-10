@@ -1,7 +1,9 @@
+using SharpInference.Core.Tensors;
+
 namespace SharpInference.Core.Models;
 
 /// <summary>Architecture parameters read from model metadata (safetensors config.json or GGUF metadata). Used by <see cref="IModel"/> implementations and pipeline factory to configure the correct pipeline.</summary>
-public record ModelConfig
+public sealed record ModelConfig
 {
     /// <summary>Architecture identifier (e.g., "stable-diffusion-v1-5", "sdxl", "flux-dev").</summary>
     public required string Architecture { get; init; }
@@ -10,7 +12,7 @@ public record ModelConfig
     public required ModelFormat Format { get; init; }
 
     /// <summary>Data type of the model weights.</summary>
-    public required Tensors.DType WeightDType { get; init; }
+    public required DType WeightDType { get; init; }
 
     /// <summary>Number of hidden dimensions in the primary model component.</summary>
     public int HiddenSize { get; init; }
