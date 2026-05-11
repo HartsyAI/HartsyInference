@@ -23,6 +23,14 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _gegluF16Module;
     private readonly CudaModule _broadcastAddF16Module;
 
+    // ── BF16 Modules (only the subset VAE needs; SDXL VAE F16 overflows) ─
+    private readonly CudaModule _elementwiseBf16Module;
+    private readonly CudaModule _groupnormBf16Module;
+    private readonly CudaModule _layernormBf16Module;
+    private readonly CudaModule _spatialBf16Module;
+    private readonly CudaModule _broadcastAddBf16Module;
+    private readonly CudaModule _groupnormSiluBf16Module;
+
     // ── Fused + Cast Modules ─────────────────────────────────────────────
     private readonly CudaModule _groupnormSiluModule;
     private readonly CudaModule _groupnormSiluF16Module;
@@ -44,11 +52,21 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _geluF16;
     private readonly nint _clampF16;
 
+    // ── Elementwise BF16 function handles ────────────────────────────────
+    private readonly nint _addBf16;
+    private readonly nint _mulBf16;
+    private readonly nint _scaleBf16;
+    private readonly nint _siluBf16;
+    private readonly nint _geluBf16;
+    private readonly nint _clampBf16;
+
     // ── Normalization function handles ───────────────────────────────────
     private readonly nint _groupnormF32;
     private readonly nint _groupnormF16;
+    private readonly nint _groupnormBf16;
     private readonly nint _layernormF32;
     private readonly nint _layernormF16;
+    private readonly nint _layernormBf16;
 
     // ── Spatial function handles ─────────────────────────────────────────
     private readonly nint _upsampleNearest2dF32;
@@ -57,6 +75,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _upsampleNearest2dF16;
     private readonly nint _im2colF16;
     private readonly nint _col2biasAddF16;
+    private readonly nint _upsampleNearest2dBf16;
+    private readonly nint _im2colBf16;
+    private readonly nint _col2biasAddBf16;
 
     // ── Softmax function handles ─────────────────────────────────────────
     private readonly nint _softmaxF32;
@@ -75,10 +96,12 @@ public sealed class CudaKernels : IDisposable
     // ── BroadcastAdd function handles ────────────────────────────────────
     private readonly nint _broadcastAddF32;
     private readonly nint _broadcastAddF16;
+    private readonly nint _broadcastAddBf16;
 
     // ── Fused GroupNorm+SiLU function handles ────────────────────────────
     private readonly nint _groupnormSiluF32;
     private readonly nint _groupnormSiluF16;
+    private readonly nint _groupnormSiluBf16;
 
     // ── Cast function handles ────────────────────────────────────────────
     private readonly nint _castF32ToF16;
@@ -176,6 +199,32 @@ public sealed class CudaKernels : IDisposable
 
         _broadcastAddF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "broadcast_add_f16.ptx"));
         _broadcastAddF16 = _broadcastAddF16Module.GetFunction("broadcast_add_f16");
+
+        // ── BF16 modules (subset VAE needs; SDXL VAE F16 overflows) ──────
+        _elementwiseBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "elementwise_bf16.ptx"));
+        _addBf16 = _elementwiseBf16Module.GetFunction("elementwise_add_bf16");
+        _mulBf16 = _elementwiseBf16Module.GetFunction("elementwise_mul_bf16");
+        _scaleBf16 = _elementwiseBf16Module.GetFunction("elementwise_scale_bf16");
+        _siluBf16 = _elementwiseBf16Module.GetFunction("elementwise_silu_bf16");
+        _geluBf16 = _elementwiseBf16Module.GetFunction("elementwise_gelu_bf16");
+        _clampBf16 = _elementwiseBf16Module.GetFunction("elementwise_clamp_bf16");
+
+        _groupnormBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "groupnorm_bf16.ptx"));
+        _groupnormBf16 = _groupnormBf16Module.GetFunction("groupnorm_bf16");
+
+        _layernormBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "layernorm_bf16.ptx"));
+        _layernormBf16 = _layernormBf16Module.GetFunction("layernorm_bf16");
+
+        _spatialBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "spatial_bf16.ptx"));
+        _upsampleNearest2dBf16 = _spatialBf16Module.GetFunction("upsample_nearest2d_bf16");
+        _im2colBf16 = _spatialBf16Module.GetFunction("im2col_bf16");
+        _col2biasAddBf16 = _spatialBf16Module.GetFunction("col2bias_add_bf16");
+
+        _broadcastAddBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "broadcast_add_bf16.ptx"));
+        _broadcastAddBf16 = _broadcastAddBf16Module.GetFunction("broadcast_add_bf16");
+
+        _groupnormSiluBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "groupnorm_silu_bf16.ptx"));
+        _groupnormSiluBf16 = _groupnormSiluBf16Module.GetFunction("groupnorm_silu_bf16");
 
         // ── Fused GroupNorm+SiLU ─────────────────────────────────────────
         _groupnormSiluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "groupnorm_silu_f32.ptx"));
@@ -513,6 +562,10 @@ public sealed class CudaKernels : IDisposable
     public void LaunchAddF16(ulong output, ulong a, ulong b, int count, nint stream)
         => LaunchBinaryImpl(_addF16, output, a, b, count, stream);
 
+    /// <summary>Launches elementwise add: output[i] = a[i] + b[i] (BF16)</summary>
+    public void LaunchAddBf16(ulong output, ulong a, ulong b, int count, nint stream)
+        => LaunchBinaryImpl(_addBf16, output, a, b, count, stream);
+
     /// <summary>Launches elementwise multiply: output[i] = a[i] * b[i] (F32)</summary>
     public void LaunchMul(ulong output, ulong a, ulong b, int count, nint stream)
         => LaunchBinaryImpl(_mulF32, output, a, b, count, stream);
@@ -520,6 +573,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches elementwise multiply: output[i] = a[i] * b[i] (F16)</summary>
     public void LaunchMulF16(ulong output, ulong a, ulong b, int count, nint stream)
         => LaunchBinaryImpl(_mulF16, output, a, b, count, stream);
+
+    /// <summary>Launches elementwise multiply: output[i] = a[i] * b[i] (BF16)</summary>
+    public void LaunchMulBf16(ulong output, ulong a, ulong b, int count, nint stream)
+        => LaunchBinaryImpl(_mulBf16, output, a, b, count, stream);
 
     /// <summary>Launches elementwise scale: output[i] = input[i] * scalar (F32)</summary>
     public void LaunchScale(ulong output, ulong input, float scalar, int count, nint stream)
@@ -529,6 +586,10 @@ public sealed class CudaKernels : IDisposable
     public void LaunchScaleF16(ulong output, ulong input, float scalar, int count, nint stream)
         => LaunchScaleImpl(_scaleF16, output, input, scalar, count, stream);
 
+    /// <summary>Launches elementwise scale: output[i] = input[i] * scalar (BF16)</summary>
+    public void LaunchScaleBf16(ulong output, ulong input, float scalar, int count, nint stream)
+        => LaunchScaleImpl(_scaleBf16, output, input, scalar, count, stream);
+
     /// <summary>Launches SiLU activation: output[i] = input[i] * sigmoid(input[i]) (F32)</summary>
     public void LaunchSilu(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_siluF32, output, input, count, stream);
@@ -536,6 +597,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches SiLU activation: output[i] = input[i] * sigmoid(input[i]) (F16)</summary>
     public void LaunchSiluF16(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_siluF16, output, input, count, stream);
+
+    /// <summary>Launches SiLU activation: output[i] = input[i] * sigmoid(input[i]) (BF16)</summary>
+    public void LaunchSiluBf16(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_siluBf16, output, input, count, stream);
 
     /// <summary>Launches GELU activation (F32)</summary>
     public void LaunchGelu(ulong output, ulong input, int count, nint stream)
@@ -545,6 +610,10 @@ public sealed class CudaKernels : IDisposable
     public void LaunchGeluF16(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_geluF16, output, input, count, stream);
 
+    /// <summary>Launches GELU activation (BF16)</summary>
+    public void LaunchGeluBf16(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_geluBf16, output, input, count, stream);
+
     /// <summary>Launches elementwise clamp: output[i] = clamp(input[i], min, max) (F32)</summary>
     public void LaunchClamp(ulong output, ulong input, float min, float max, int count, nint stream)
         => LaunchClampImpl(_clampF32, output, input, min, max, count, stream);
@@ -552,6 +621,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches elementwise clamp: output[i] = clamp(input[i], min, max) (F16)</summary>
     public void LaunchClampF16(ulong output, ulong input, float min, float max, int count, nint stream)
         => LaunchClampImpl(_clampF16, output, input, min, max, count, stream);
+
+    /// <summary>Launches elementwise clamp: output[i] = clamp(input[i], min, max) (BF16)</summary>
+    public void LaunchClampBf16(ulong output, ulong input, float min, float max, int count, nint stream)
+        => LaunchClampImpl(_clampBf16, output, input, min, max, count, stream);
 
     // ── Normalization Launches ──────────────────────────────────────────
 
@@ -565,6 +638,12 @@ public sealed class CudaKernels : IDisposable
         int batch, int channels, int spatial, int groups, float eps, nint stream)
         => LaunchGroupNormImpl(_groupnormF16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
 
+    /// <summary>Launches GroupNorm with BF16 I/O, FP32 accumulation. Used for SDXL VAE
+    /// where F16 activations overflow (resnet activations exceed Â±65504).</summary>
+    public void LaunchGroupNormBf16(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int channels, int spatial, int groups, float eps, nint stream)
+        => LaunchGroupNormImpl(_groupnormBf16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
+
     /// <summary>Launches LayerNorm (F32). Each block handles one row.</summary>
     public void LaunchLayerNorm(ulong output, ulong input, ulong weight, ulong bias,
         int normDim, int totalRows, float eps, nint stream)
@@ -574,6 +653,11 @@ public sealed class CudaKernels : IDisposable
     public void LaunchLayerNormF16(ulong output, ulong input, ulong weight, ulong bias,
         int normDim, int totalRows, float eps, nint stream)
         => LaunchLayerNormImpl(_layernormF16, output, input, weight, bias, normDim, totalRows, eps, stream);
+
+    /// <summary>Launches LayerNorm with BF16 I/O, FP32 accumulation.</summary>
+    public void LaunchLayerNormBf16(ulong output, ulong input, ulong weight, ulong bias,
+        int normDim, int totalRows, float eps, nint stream)
+        => LaunchLayerNormImpl(_layernormBf16, output, input, weight, bias, normDim, totalRows, eps, stream);
 
     // ── Fused GroupNorm+SiLU Launches ───────────────────────────────────
 
@@ -587,6 +671,11 @@ public sealed class CudaKernels : IDisposable
         int batch, int channels, int spatial, int groups, float eps, nint stream)
         => LaunchGroupNormImpl(_groupnormSiluF16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
 
+    /// <summary>Launches fused GroupNorm+SiLU with BF16 I/O, FP32 accumulation.</summary>
+    public void LaunchGroupNormSiluBf16(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int channels, int spatial, int groups, float eps, nint stream)
+        => LaunchGroupNormImpl(_groupnormSiluBf16, output, input, weight, bias, batch, channels, spatial, groups, eps, stream);
+
     // ── Spatial Launches ────────────────────────────────────────────────
 
     /// <summary>Launches UpsampleNearest2D (F32).</summary>
@@ -598,6 +687,11 @@ public sealed class CudaKernels : IDisposable
     public void LaunchUpsampleNearest2DF16(ulong output, ulong input,
         int batch, int channels, int inH, int inW, int outH, int outW, int scaleH, int scaleW, nint stream)
         => LaunchUpsampleImpl(_upsampleNearest2dF16, output, input, batch, channels, inH, inW, outH, outW, scaleH, scaleW, stream);
+
+    /// <summary>Launches UpsampleNearest2D (BF16).</summary>
+    public void LaunchUpsampleNearest2DBf16(ulong output, ulong input,
+        int batch, int channels, int inH, int inW, int outH, int outW, int scaleH, int scaleW, nint stream)
+        => LaunchUpsampleImpl(_upsampleNearest2dBf16, output, input, batch, channels, inH, inW, outH, outW, scaleH, scaleW, stream);
 
     /// <summary>Launches Im2Col for one batch element (F32).</summary>
     public void LaunchIm2Col(ulong col, ulong input,
@@ -613,6 +707,13 @@ public sealed class CudaKernels : IDisposable
         int outH, int outW, int batchOffset, nint stream)
         => LaunchIm2ColImpl(_im2colF16, col, input, channels, inH, inW, kH, kW, padH, padW, strideH, strideW, outH, outW, batchOffset, stream);
 
+    /// <summary>Launches Im2Col for one batch element (BF16).</summary>
+    public void LaunchIm2ColBf16(ulong col, ulong input,
+        int channels, int inH, int inW, int kH, int kW,
+        int padH, int padW, int strideH, int strideW,
+        int outH, int outW, int batchOffset, nint stream)
+        => LaunchIm2ColImpl(_im2colBf16, col, input, channels, inH, inW, kH, kW, padH, padW, strideH, strideW, outH, outW, batchOffset, stream);
+
     /// <summary>Launches bias addition: output[i] += bias[channel_of(i)] (F32)</summary>
     public void LaunchBiasAdd(ulong output, ulong bias, int outChannels, int spatial, int totalElements, nint stream)
         => LaunchBiasAddImpl(_col2biasAddF32, output, bias, outChannels, spatial, totalElements, stream);
@@ -620,6 +721,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches bias addition: output[i] += bias[channel_of(i)] (F16)</summary>
     public void LaunchBiasAddF16(ulong output, ulong bias, int outChannels, int spatial, int totalElements, nint stream)
         => LaunchBiasAddImpl(_col2biasAddF16, output, bias, outChannels, spatial, totalElements, stream);
+
+    /// <summary>Launches bias addition: output[i] += bias[channel_of(i)] (BF16)</summary>
+    public void LaunchBiasAddBf16(ulong output, ulong bias, int outChannels, int spatial, int totalElements, nint stream)
+        => LaunchBiasAddImpl(_col2biasAddBf16, output, bias, outChannels, spatial, totalElements, stream);
 
     // ── Softmax Launches ────────────────────────────────────────────────
 
@@ -668,6 +773,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches broadcast add: hidden[b,c,s] += bias[b,c] in-place (F16).</summary>
     public void LaunchBroadcastAddF16(ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
         => LaunchBroadcastAddImpl(_broadcastAddF16, hidden, bias, channels, spatial, totalElements, stream);
+
+    /// <summary>Launches broadcast add: hidden[b,c,s] += bias[b,c] in-place (BF16).</summary>
+    public void LaunchBroadcastAddBf16(ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
+        => LaunchBroadcastAddImpl(_broadcastAddBf16, hidden, bias, channels, spatial, totalElements, stream);
 
     // ── Cast Launches ───────────────────────────────────────────────────
 
@@ -752,31 +861,40 @@ public sealed class CudaKernels : IDisposable
 
     private void DisposeModules()
     {
-        _elementwiseModule.Dispose();
-        _groupnormModule.Dispose();
-        _layernormModule.Dispose();
-        _spatialModule.Dispose();
-        _softmaxModule.Dispose();
-        _transposeModule.Dispose();
-        _gegluModule.Dispose();
-        _broadcastAddModule.Dispose();
-        _elementwiseF16Module.Dispose();
-        _groupnormF16Module.Dispose();
-        _layernormF16Module.Dispose();
-        _spatialF16Module.Dispose();
-        _softmaxF16Module.Dispose();
-        _transposeF16Module.Dispose();
-        _gegluF16Module.Dispose();
-        _broadcastAddF16Module.Dispose();
-        _groupnormSiluModule.Dispose();
-        _groupnormSiluF16Module.Dispose();
-        _castModule.Dispose();
-        _castF8Module.Dispose();
-        _castBf16Module.Dispose();
-        _dequantQ8_0Module.Dispose();
-        _dequantQ4_KModule.Dispose();
-        _dequantQ5_KModule.Dispose();
-        _dequantQ6_KModule.Dispose();
+        // Null-safe: if the constructor threw partway through, some modules will not
+        // have been assigned. Finalizers must not raise â a null-ref here would crash
+        // the process during GC after a CUDA backend init failure / Vulkan fallback.
+        _elementwiseModule?.Dispose();
+        _groupnormModule?.Dispose();
+        _layernormModule?.Dispose();
+        _spatialModule?.Dispose();
+        _softmaxModule?.Dispose();
+        _transposeModule?.Dispose();
+        _gegluModule?.Dispose();
+        _broadcastAddModule?.Dispose();
+        _elementwiseF16Module?.Dispose();
+        _groupnormF16Module?.Dispose();
+        _layernormF16Module?.Dispose();
+        _spatialF16Module?.Dispose();
+        _softmaxF16Module?.Dispose();
+        _transposeF16Module?.Dispose();
+        _gegluF16Module?.Dispose();
+        _broadcastAddF16Module?.Dispose();
+        _elementwiseBf16Module?.Dispose();
+        _groupnormBf16Module?.Dispose();
+        _layernormBf16Module?.Dispose();
+        _spatialBf16Module?.Dispose();
+        _broadcastAddBf16Module?.Dispose();
+        _groupnormSiluBf16Module?.Dispose();
+        _groupnormSiluModule?.Dispose();
+        _groupnormSiluF16Module?.Dispose();
+        _castModule?.Dispose();
+        _castF8Module?.Dispose();
+        _castBf16Module?.Dispose();
+        _dequantQ8_0Module?.Dispose();
+        _dequantQ4_KModule?.Dispose();
+        _dequantQ5_KModule?.Dispose();
+        _dequantQ6_KModule?.Dispose();
     }
 
     public void Dispose()

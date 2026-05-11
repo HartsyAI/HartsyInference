@@ -3,12 +3,7 @@ using static SharpInference.Vulkan.VulkanUtilities;
 
 namespace SharpInference.Vulkan;
 
-/// <summary>
-/// Picks a physical device, queries its features/limits/queue families,
-/// builds the Vulkan 1.3 feature pNext chain (FP16, subgroupSizeControl,
-/// synchronization2, timelineSemaphore, bufferDeviceAddress), and creates
-/// the logical device + compute queue. Captures full <see cref="VulkanCapabilities"/>.
-/// </summary>
+/// <summary>Picks a physical device, queries its features/limits/queue families, builds the Vulkan 1.3 feature pNext chain (FP16, subgroupSizeControl, synchronization2, timelineSemaphore, bufferDeviceAddress), and creates the logical device + compute queue. Captures full <see cref="VulkanCapabilities"/>.</summary>
 public sealed class VulkanDevice : IDisposable
 {
     private readonly VulkanInstance _instance;

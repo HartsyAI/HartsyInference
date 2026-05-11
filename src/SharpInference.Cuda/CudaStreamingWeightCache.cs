@@ -3,26 +3,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Cuda;
 
-/// <summary>
-/// CUDA implementation of <see cref="IStreamingWeightCache"/>. Uploads weight
-/// tensors on a dedicated <em>upload stream</em>, gates the compute stream on
-/// completion via CUDA events, and frees on the compute stream so reclamation
-/// is naturally ordered after any prior reads of the cached memory.
-///
-/// <para><b>Why a separate stream:</b> on a single stream every op is serialised,
-/// so an H2D copy blocks the kernel that would have run alongside it. Putting the
-/// upload on its own stream lets the GPU's copy engine work in parallel with the
-/// compute SMs — the same parallelism Comfy gets via PyTorch's <c>non_blocking=True</c>
-/// + offload-stream pattern. On a 3060 a Flux block's weights (~150 MB) take
-/// ~5 ms over PCIe Gen4 x16; a block's compute takes ~30-80 ms, so prefetching
-/// one block ahead fully hides the transfer.</para>
-///
-/// <para><b>State sharing:</b> uploaded weights are registered in
-/// <see cref="GpuTransferHelper"/>'s shared <c>_weightCache</c> so the existing
-/// <c>CopyToDevice</c> fast path on every <see cref="CudaBackend"/> op finds them
-/// and reuses the cached dptr — the streaming cache is just a different way to
-/// populate the same cache. <see cref="EvictAsync"/> removes them.</para>
-/// </summary>
+/// <summary>CUDA implementation of <see cref="IStreamingWeightCache"/>. Uploads weights on a dedicated upload stream so the copy engine runs in parallel with compute SMs, gates the compute stream on completion via CUDA events, and frees on the compute stream so reclamation is naturally ordered after any prior reads. Uploaded weights register in <see cref="GpuTransferHelper"/>'s shared cache so the existing <see cref="CudaBackend"/> fast path reuses the cached dptr; <see cref="EvictAsync"/> removes them.</summary>
 public sealed class CudaStreamingWeightCache : IStreamingWeightCache
 {
     private readonly CudaContext _context;

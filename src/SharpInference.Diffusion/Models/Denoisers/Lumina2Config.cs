@@ -3,7 +3,7 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for Lumina-Image-2.0 transformers (Alpha-VLLM, Apache 2.0). Sibling NextDiT family member of Z-Image — same overall block structure (RMSNorm + AdaLN modulation + GQA attention + GeGLU/SwiGLU FFN + multi-axis RoPE) but architecturally divergent in: separate (not fused) Q/K/V projections, GQA (24 Q heads / 8 KV heads), no learned cap_pad/x_pad tokens, no fixed seq-multiple-of padding, RoPE θ=10000 (vs Z-Image's 256), axes [32,32,32] (vs [32,48,48]), and Gemma 2 (not Qwen3) text encoder. See diffusers transformer_lumina2.py and Alpha-VLLM/Lumina-Image-2.0 model card.</summary>
-public record Lumina2Config
+public sealed record Lumina2Config
 {
     /// <summary>Hidden dimension (2304 for Lumina-Image-2.0).</summary>
     public required int HiddenSize { get; init; }

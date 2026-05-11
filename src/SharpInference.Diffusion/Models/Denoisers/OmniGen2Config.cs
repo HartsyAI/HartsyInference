@@ -12,7 +12,7 @@ namespace SharpInference.Diffusion.Models.Denoisers;
 /// <c>transformer/config.json</c>): hidden=2520, 32 layers, 21 attention heads, 7 KV heads (GQA), patch=2,
 /// in_channels=16, axes_dim_rope=[40,40,40] (3-axis RoPE summing to head_dim=120), text_feat_dim=2048
 /// (matching Qwen2.5-VL-3B hidden), timestep_scale=1000.</para></summary>
-public record OmniGen2Config
+public sealed record OmniGen2Config
 {
     /// <summary>Hidden dimension of the joint transformer (2520 for the public release).</summary>
     public required int HiddenSize { get; init; }

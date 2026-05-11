@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>Resolves file paths for all model components. Supports ComfyUI-style directory layouts.</summary>
-public record ModelPaths
+public sealed record ModelPaths
 {
     /// <summary>Path to the tokenizer directory containing vocab.json and merges.txt.</summary>
     public required string TokenizerDir { get; init; }
@@ -68,7 +68,7 @@ public record ModelPaths
 }
 
 /// <summary>Resolves file paths for SDXL model components. Extends ModelPaths with dual tokenizer and dual text encoder support for CLIP-L + CLIP-G.</summary>
-public record SdxlModelPaths
+public sealed record SdxlModelPaths
 {
     /// <summary>Path to the CLIP-L tokenizer directory (tokenizer/).</summary>
     public required string TokenizerLDir { get; init; }

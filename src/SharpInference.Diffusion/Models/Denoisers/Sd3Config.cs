@@ -3,7 +3,7 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for SD3 MMDiT and SD3.5 MMDiT-X transformers. Architecture parameters are derived from depth: hidden_size = 64 * depth, num_heads = depth.</summary>
-public record Sd3Config
+public sealed record Sd3Config
 {
     /// <summary>Number of JointTransformerBlocks (24 for SD3 Medium, 38 for SD3.5 Large).</summary>
     public required int Depth { get; init; }

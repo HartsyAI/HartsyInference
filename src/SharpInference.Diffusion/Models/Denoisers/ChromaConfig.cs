@@ -18,7 +18,7 @@ namespace SharpInference.Diffusion.Models.Denoisers;
 /// + checkpoint converter + T5-only pipeline are not yet implemented. See PHASE_4_MODEL_BREADTH.md `### Chroma`
 /// for the full task list.
 /// </summary>
-public record ChromaConfig
+public sealed record ChromaConfig
 {
     /// <summary>Number of dual-stream blocks (`ChromaTransformerBlock`). 19 for the v1 release.</summary>
     public required int Depth { get; init; }

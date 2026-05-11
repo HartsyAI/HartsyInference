@@ -4,9 +4,7 @@ using SharpInference.ModelHandler.SafeTensors;
 
 namespace SharpInference.ModelHandler.CheckpointConverters;
 
-/// <summary>Converts single-file SDXL refiner checkpoints (LDM/CompVis format) to diffusers-format weight dictionaries.
-/// <para>The refiner UNet has a different block layout from the SDXL base — 4 levels (vs base's 3), uniform transformer-depth 4 (vs base's [1,2,10]), and only CLIP-G text conditioning (no CLIP-L). The VAE is identical to the base, so VAE conversion is delegated to the shared <see cref="CheckpointConvertUtils.ConvertVaeKey"/>.</para>
-/// </summary>
+/// <summary>Converts single-file SDXL refiner checkpoints (LDM/CompVis format) to diffusers-format weight dictionaries. The refiner UNet has a 4-level layout (vs base's 3), uniform transformer-depth 4, and only CLIP-G text conditioning. The VAE is identical to the base, so VAE conversion is delegated to <see cref="CheckpointConvertUtils.ConvertVaeKey"/>.</summary>
 public sealed class SdxlRefinerCheckpointConverter
 {
     /// <summary>Result of converting an SDXL refiner checkpoint.</summary>

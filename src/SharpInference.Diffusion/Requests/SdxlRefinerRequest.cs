@@ -6,7 +6,7 @@ namespace SharpInference.Diffusion.Requests;
 /// which differs from the SDXL base's 6-scalar (target_h/w replaces aesthetic_score). Both <see cref="AestheticScore"/>
 /// and <see cref="NegativeAestheticScore"/> are sinusoidally encoded and concatenated with the spatial scalars.
 /// </remarks>
-public record SdxlRefinerRequest : ImageToImageRequest
+public sealed record SdxlRefinerRequest : ImageToImageRequest
 {
     /// <summary>Positive aesthetic score (higher = stronger refinement toward "aesthetic" output). Default 6.0 matches diffusers' StableDiffusionXLImg2ImgPipeline default.</summary>
     public float AestheticScore { get; init; } = 6.0f;

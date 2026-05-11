@@ -2,14 +2,7 @@ using Microsoft.ML.Tokenizers;
 
 namespace SharpInference.Tokenizers;
 
-/// <summary>
-/// Qwen3 byte-level BPE tokenizer used for Flux.2 Klein text conditioning. Wraps
-/// <see cref="BpeTokenizer"/> with vocab.json + merges.txt from <c>Qwen/Qwen3-4B</c>.
-/// Vocab size 151,936; <c>BosTokenId</c> = 151643 (<c>&lt;|endoftext|&gt;</c>); <c>EosTokenId</c>
-/// = 151645 (<c>&lt;|im_end|&gt;</c>). Typical use: encode the raw prompt as-is, no chat template
-/// — Klein's text encoder runs the prompt through Qwen3 as a feature extractor and harvests the
-/// last hidden states, so chat formatting is not required.
-/// </summary>
+/// <summary>Qwen3 byte-level BPE tokenizer used for Flux.2 Klein text conditioning. Wraps <see cref="BpeTokenizer"/> with vocab.json + merges.txt from <c>Qwen/Qwen3-4B</c>. Vocab size 151,936; <c>BosTokenId</c> = 151643 (<c>&lt;|endoftext|&gt;</c>); <c>EosTokenId</c> = 151645 (<c>&lt;|im_end|&gt;</c>). Encode raw prompts as-is — Klein's text encoder runs Qwen3 as a feature extractor.</summary>
 public sealed class Qwen3Tokenizer : IDisposable
 {
     /// <summary>Vocabulary size (matches Qwen3-4B's <c>config.json</c>).</summary>
@@ -94,20 +87,7 @@ public sealed class Qwen3Tokenizer : IDisposable
     /// <summary>Token id for <c>&lt;|im_end|&gt;</c>.</summary>
     public const int ImEndId = 151645;
 
-    /// <summary>
-    /// Encodes a single user prompt using the Qwen3 chat template (matches
-    /// <c>tokenizer.apply_chat_template([{role:"user", content:prompt}], add_generation_prompt=True, enable_thinking=False)</c>).
-    /// Required by Flux.2 Klein — the diffusion text encoder receives chat-formatted hidden states
-    /// from Qwen3, not raw prompt embeddings, so encoding the prompt as if it were a free-form text
-    /// would produce the wrong conditioning signal.
-    /// <para>The format produced is:
-    /// <c>&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n&lt;think&gt;\n\n&lt;/think&gt;\n\n</c>
-    /// — empty <c>&lt;think&gt;</c> block matches <c>enable_thinking=False</c>.</para>
-    /// Output is right-padded with <see cref="BosTokenId"/> (Qwen3's <c>&lt;|endoftext|&gt;</c>, the
-    /// default pad token) to <see cref="_maxLength"/>. With causal attention the padded-position
-    /// hidden states don't affect the real-token hidden states (real tokens come first; causal mask
-    /// prevents them from attending to pad).
-    /// </summary>
+    /// <summary>Encodes a single user prompt using the Qwen3 chat template (matches <c>apply_chat_template([{role:"user",content:prompt}], add_generation_prompt=True, enable_thinking=False)</c>). Required by Flux.2 Klein — the diffusion text encoder receives chat-formatted hidden states; raw prompt encoding produces wrong conditioning. Format: <c>&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n&lt;think&gt;\n\n&lt;/think&gt;\n\n</c>. Right-padded with <see cref="BosTokenId"/> to maxLength.</summary>
     public int[] EncodeChat(string prompt)
     {
         ThrowIfDisposed();

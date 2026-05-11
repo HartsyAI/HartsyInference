@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.Vae;
 
 /// <summary>Configuration for AutoencoderKL VAE. Covers SD1.5, SDXL, SD3, and Flux variants.</summary>
-public record VaeConfig
+public sealed record VaeConfig
 {
     /// <summary>Number of latent channels (4 for SD1.5/SDXL, 16 for SD3/Flux).</summary>
     public int LatentChannels { get; init; } = 4;

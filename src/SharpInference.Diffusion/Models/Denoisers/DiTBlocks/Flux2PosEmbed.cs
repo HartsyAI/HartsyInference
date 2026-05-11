@@ -2,31 +2,13 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>
-/// Position-ID builders for Flux.2's 4-axis RoPE. The rotation math is identical to Flux.1
-/// (pairwise <c>[2i, 2i+1]</c> rotation per <c>diffusers.embeddings.apply_rotary_emb</c> with
-/// <c>repeat_interleave_real=True</c> and <c>use_real_unbind_dim=-1</c>), so the actual cos/sin
-/// table generation and rotation is delegated to <see cref="FluxRope"/>. This class only
-/// constructs the 4-axis (T, H, W, L) position IDs that distinguish text from image tokens.
-/// <para>Layout convention (matches diffusers <c>_prepare_text_ids</c> /
-/// <c>_prepare_latent_ids</c>):</para>
-/// <list type="bullet">
-/// <item>Text token <c>i</c>: <c>(0, 0, 0, i)</c> — text gets sequence ordering on the L axis.</item>
-/// <item>Image patch at <c>(row, col)</c>: <c>(0, row, col, 0)</c> — image gets spatial ordering
-/// on H/W and 0 on T/L.</item>
-/// <item>Reference image <c>k</c> at <c>(row, col)</c>: <c>(scale * (k+1), row, col, 0)</c> with
-/// <c>scale = 10</c> — refs are time-shifted away from the primary image.</item>
-/// </list>
-/// </summary>
+/// <summary>Position-ID builders for Flux.2's 4-axis RoPE. The rotation math is identical to Flux.1 (delegated to <see cref="FluxRope"/>); this class only constructs the 4-axis (T, H, W, L) position IDs that distinguish text from image tokens. Text token i: (0,0,0,i); image patch (row,col): (0,row,col,0); reference image k at (row,col): (10*(k+1),row,col,0) — refs time-shifted from the primary image.</summary>
 public static unsafe class Flux2PosEmbed
 {
     /// <summary>The four RoPE axes.</summary>
     public const int NumAxes = 4;
 
-    /// <summary>
-    /// Builds combined position IDs for the concatenated [text, image] sequence used by Flux.2's
-    /// double- and single-stream blocks. Output shape is <c>[txtSeqLen + imgSeqLen, 4]</c>.
-    /// </summary>
+    /// <summary>Builds combined position IDs for the concatenated [text, image] sequence used by Flux.2's double- and single-stream blocks. Output shape is <c>[txtSeqLen + imgSeqLen, 4]</c>.</summary>
     /// <param name="txtSeqLen">Number of text tokens (typically 512 for Klein).</param>
     /// <param name="latentHPacked">Patchified latent height (= image_height / 16).</param>
     /// <param name="latentWPacked">Patchified latent width (= image_width / 16).</param>

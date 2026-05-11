@@ -38,7 +38,7 @@ namespace SharpInference.Diffusion.Models.Denoisers;
 /// <c>condition_mask</c> (Video2World autoregressive conditioning), ControlNet residuals, and <c>image_context</c>
 /// (the Predict2.5 hybrid attention path) are not implemented.
 /// </summary>
-public record AnimaConfig
+public sealed record AnimaConfig
 {
     /// <summary>Hidden dim (= num_attention_heads * head_dim). 2048 for Cosmos-Predict2 2B / Anima.</summary>
     public required int HiddenSize { get; init; }

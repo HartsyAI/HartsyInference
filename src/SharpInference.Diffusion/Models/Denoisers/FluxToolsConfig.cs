@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for Flux.1 Tools variants (Fill, Redux, Canny, Depth) and Kontext. These share the core Flux transformer architecture but add conditioning adapters for specific tasks. The base FluxTransformer is reused with additional conditioning inputs.</summary>
-public record FluxToolsConfig
+public sealed record FluxToolsConfig
 {
     /// <summary>Base Flux transformer config. All tools variants use the same backbone.</summary>
     public required FluxConfig TransformerConfig { get; init; }

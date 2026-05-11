@@ -1,22 +1,7 @@
 namespace SharpInference.Diffusion.Models.TextEncoders;
 
-/// <summary>MLP activation function variant. <see cref="Silu"/> matches Llama / Qwen / Mistral SwiGLU;
-/// <see cref="GeluTanh"/> matches Gemma 2's GeGLU (<c>gelu(x, approximate="tanh")</c> in PyTorch).</summary>
-public enum MlpActivation
-{
-    /// <summary>SiLU/Swish: <c>x * sigmoid(x)</c>. Default for Llama family.</summary>
-    Silu,
-    /// <summary>Tanh-approximation GELU (Gemma 2 family).</summary>
-    GeluTanh,
-}
-
-/// <summary>
-/// Configuration for Llama-family decoder transformers used as text encoders for diffusion conditioning
-/// (Qwen3 in Flux.2 Klein, Mistral-Small-3 in Flux.2 Dev). The transformer is run as an encoder: a single
-/// forward pass over the prompt tokens, with the final hidden states harvested as conditioning input.
-/// No autoregressive generation, no KV cache, no sampling.
-/// </summary>
-public record LlamaStyleEncoderConfig
+/// <summary>Configuration for Llama-family decoder transformers used as text encoders for diffusion conditioning (Qwen3 in Flux.2 Klein, Mistral-Small-3 in Flux.2 Dev). Run as an encoder: single forward pass with the final hidden states harvested as conditioning. No autoregressive generation, no KV cache, no sampling.</summary>
+public sealed record LlamaStyleEncoderConfig
 {
     /// <summary>Hidden dimension of the transformer (e.g. 2560 for Qwen3-4B).</summary>
     public required int HiddenSize { get; init; }
@@ -132,13 +117,7 @@ public record LlamaStyleEncoderConfig
         BosTokenId = 151643,
     };
 
-    /// <summary>
-    /// Mistral-Small-3 (BFL Flux.2 Dev distill) preset: 30 layers, hidden=5120, GQA 32:8,
-    /// head_dim=128, IntermediateSize=32768 (~6.4× ratio — wider FFN than standard Mistral),
-    /// vocab=131072 (Tekken tokenizer). No per-head Q/K norm, no final norm in the checkpoint —
-    /// it ships as a feature extractor for diffusion conditioning. Verified against
-    /// <c>Comfy-Org/Flux2/text_encoders/mistral_3_small_flux2_fp8.safetensors</c>.
-    /// </summary>
+    /// <summary>Mistral-Small-3 (BFL Flux.2 Dev distill): 30 layers, hidden=5120, GQA 32:8, head_dim=128, IntermediateSize=32768 (~6.4× ratio — wider FFN than standard Mistral), vocab=131072 (Tekken). No per-head Q/K norm, no final norm — ships as a feature extractor. Verified against <c>Comfy-Org/Flux2/text_encoders/mistral_3_small_flux2_fp8.safetensors</c>.</summary>
     public static LlamaStyleEncoderConfig MistralSmall3 => new()
     {
         HiddenSize = 5120,
@@ -160,19 +139,7 @@ public record LlamaStyleEncoderConfig
         BosTokenId = 1,
     };
 
-    /// <summary>
-    /// Ministral-3B preset as packaged for ERNIE-Image (Baidu): 26 layers, hidden=3072, GQA 32:8,
-    /// head_dim=128, intermediate=9216, vocab=131072 (Tekken). The 3072 hidden matches ERNIE-Image's
-    /// <c>text_in_dim=3072</c>, so the encoder hidden is fed straight into <c>text_in: Linear(3072→hidden=4096)</c>.
-    /// Verified against <c>baidu/ERNIE-Image/text_encoder/config.json</c> (model_type "ministral3", wrapped
-    /// in a <c>Mistral3Model</c> envelope alongside a Pixtral vision_config we ignore for pure t2i).
-    ///
-    /// RoPE uses YaRN scaling with theta=1M; for short prompts (≤4096 tokens) the unscaled RoPE table is fine.
-    /// `tie_word_embeddings=true` — the LM head shares weights with the input embedding (we don't run the
-    /// LM head for text-conditioning anyway). No per-head Q/K norm. `HasFinalNorm=true` for the full
-    /// Comfy-Org safetensors (`text_encoders/ministral-3-3b.safetensors`); ships the full encoder including
-    /// `model.norm.weight`.
-    /// </summary>
+    /// <summary>Ministral-3B as packaged for ERNIE-Image (Baidu): 26 layers, hidden=3072 (matches ERNIE-Image's text_in_dim), GQA 32:8, head_dim=128, intermediate=9216, vocab=131072 (Tekken). YaRN-scaled RoPE with theta=1M (unscaled table is fine for ≤4096 tokens). No per-head Q/K norm; HasFinalNorm=true for the Comfy-Org safetensors which ship the full encoder.</summary>
     public static LlamaStyleEncoderConfig Ministral3B => new()
     {
         HiddenSize = 3072,

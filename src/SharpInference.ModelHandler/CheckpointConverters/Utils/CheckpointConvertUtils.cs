@@ -5,7 +5,7 @@ namespace SharpInference.ModelHandler.CheckpointConverters.Utils;
 /// <summary>Shared utilities for converting LDM/CompVis checkpoint keys to diffusers format. Used by model-specific converters.</summary>
 public static unsafe class CheckpointConvertUtils
 {
-    #region UNet Shared
+    // ── UNet Shared ──────────────────────────────────────────
 
     /// <summary>Converts LDM ResNet sub-keys to diffusers format. Shared across all Stable Diffusion variants.</summary>
     /// <remarks>
@@ -73,9 +73,8 @@ public static unsafe class CheckpointConvertUtils
         };
     }
 
-    #endregion
 
-    #region VAE Shared
+    // ── VAE Shared ──────────────────────────────────────────
 
     /// <summary>Converts LDM VAE keys (after stripping first_stage_model. prefix) to diffusers format. Shared across all Stable Diffusion variants.</summary>
     /// <param name="ldmKey">Key after stripping "first_stage_model." prefix.</param>
@@ -219,9 +218,8 @@ public static unsafe class CheckpointConvertUtils
         return $"{prefix}.{attnKey}";
     }
 
-    #endregion
 
-    #region Tensor Splitting
+    // ── Tensor Splitting ──────────────────────────────────────────
 
     /// <summary>Splits a fused in_proj_weight [3*H, H] into separate q_proj, k_proj, v_proj weights [H, H] each.</summary>
     public static void SplitInProjWeight(Tensor inProj, int hiddenSize, string layerPrefix, Dictionary<string, Tensor> output)
@@ -267,23 +265,10 @@ public static unsafe class CheckpointConvertUtils
         output[$"{layerPrefix}.self_attn.v_proj.bias"] = vBias;
     }
 
-    #endregion
 
-    #region FP8 Scaled
+    // ── FP8 Scaled ──────────────────────────────────────────
 
-    /// <summary>
-    /// Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the
-    /// matching weight tensors and drops the companion entries from the dictionary.
-    /// <para>Two companion-naming conventions are supported:</para>
-    /// <list type="bullet">
-    /// <item><b>ComfyUI fp8_scaled</b> (Flux Krea): suffixes are <c>.scale_weight</c> and <c>.scale_input</c>.</item>
-    /// <item><b>BFL Mistral / Flux.2 Dev fp8 mixed</b>: suffixes are <c>.weight_scale</c> and <c>.input_scale</c>.</item>
-    /// </list>
-    /// In both cases the input-side scale is dropped (we run F32 activations and effectively use
-    /// alpha=weight_scale at GEMM time, so the input scale is the identity in our compute path).
-    /// Helper marker tensors like <c>scaled_fp8</c> (zero-element FP8 tensor used to flag the
-    /// format) are also dropped.
-    /// </summary>
+    /// <summary>Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the matching weight tensors and drops the companions. Supports ComfyUI fp8_scaled (.scale_weight/.scale_input) and BFL Mistral / Flux.2 Dev mixed-fp8 (.weight_scale/.input_scale). The input-side scale is dropped — we run F32 activations and use alpha=weight_scale at GEMM time. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
     /// <param name="source">Raw checkpoint dictionary (mutated; companion keys removed).</param>
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
@@ -345,5 +330,4 @@ public static unsafe class CheckpointConvertUtils
         return result;
     }
 
-    #endregion
 }

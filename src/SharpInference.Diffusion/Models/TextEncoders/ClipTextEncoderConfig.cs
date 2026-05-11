@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.TextEncoders;
 
 /// <summary>Configuration for CLIP text encoder. Covers ViT-L/14 (SD1.5) and ViT-bigG (SDXL second encoder).</summary>
-public record ClipTextEncoderConfig
+public sealed record ClipTextEncoderConfig
 {
     /// <summary>Hidden size of the transformer layers.</summary>
     public int HiddenSize { get; init; } = 768;

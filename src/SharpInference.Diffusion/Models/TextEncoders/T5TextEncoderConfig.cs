@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.TextEncoders;
 
 /// <summary>Configuration for the T5 v1.1 XXL encoder-only model used by SD3 and Flux.</summary>
-public record T5TextEncoderConfig
+public sealed record T5TextEncoderConfig
 {
     /// <summary>Hidden dimension (embedding size).</summary>
     public required int DModel { get; init; }

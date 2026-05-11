@@ -12,21 +12,7 @@ using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
-/// <summary>
-/// SDXL refiner pipeline. Refines an existing image using the SDXL refiner UNet (4-level, CLIP-G-only conditioning, aesthetic-score ADM).
-///
-/// <para><b>Standalone refining:</b> Call <see cref="RefineFromTokens"/> with any RGB image converted via
-/// <see cref="ImagePostProcessor.RgbBytesToTensor"/>. Strength controls how aggressively the refiner alters the input
-/// (0.3 is a typical "polish" strength; 0.0 is byte-identical pass-through).</para>
-///
-/// <para><b>Cross-model refining:</b> The refiner pipeline accepts ANY base pipeline's output as input — SD1.5, SDXL,
-/// Flux, Z-Image — because the handoff is in pixel space. Run the base pipeline first, get RGB bytes, convert to tensor,
-/// pass to <see cref="RefineFromTokens"/>. The two pipelines are otherwise independent.</para>
-///
-/// <para><b>Same-VAE base→refiner (latent handoff, faster):</b> Not implemented in this pipeline. The pixel-space
-/// path costs one extra VAE encode+decode roundtrip (~2-3s on GPU) but works universally; the latent handoff path
-/// would only work for SDXL→SDXL and is a perf optimization deferred.</para>
-/// </summary>
+/// <summary>SDXL refiner pipeline. Refines an existing image using the SDXL refiner UNet (4-level, CLIP-G-only conditioning, aesthetic-score ADM). Cross-model refining works for any base pipeline (SD1.5/SDXL/Flux/Z-Image) because the handoff is in pixel space — strength controls how aggressively to polish (0.3 typical, 0.0 pass-through). Same-VAE latent handoff is a deferred SDXL→SDXL optimization.</summary>
 public sealed unsafe class SdxlRefinerPipeline : IDisposable
 {
     private readonly IBackend _backend;

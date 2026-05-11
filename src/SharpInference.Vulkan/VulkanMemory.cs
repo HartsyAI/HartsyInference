@@ -148,13 +148,7 @@ internal sealed class VulkanMemoryBlock : IDisposable
     }
 }
 
-/// <summary>
-/// Two-tier slab allocator. Sub-allocates <see cref="VkBuffer"/> regions out of large
-/// pre-allocated <see cref="VkDeviceMemory"/> blocks (256 MB for big tensors / weights,
-/// 16 MB for small temporaries). Allocations larger than the slab fall back to dedicated
-/// blocks. Mirrors the design in <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>.
-/// Not thread-safe — the engine uses one allocator per <see cref="VulkanBackend"/>.
-/// </summary>
+/// <summary>Two-tier slab allocator. Sub-allocates <see cref="VkBuffer"/> regions from large pre-allocated <see cref="VkDeviceMemory"/> blocks (256 MB for big tensors/weights, 16 MB for small temporaries); allocations larger than the slab fall back to dedicated blocks. Not thread-safe — the engine uses one allocator per <see cref="VulkanBackend"/>. See <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>.</summary>
 public sealed class VulkanMemoryAllocator : IDisposable
 {
     public const ulong SLAB_LARGE = 64UL * 1024 * 1024;

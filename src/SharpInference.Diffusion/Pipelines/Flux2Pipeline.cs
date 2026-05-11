@@ -11,15 +11,7 @@ using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
-/// <summary>
-/// Flux.2 text-to-image pipeline (Klein 4B / Klein 9B / Dev). Orchestrates Qwen3-4B (Klein) or
-/// Mistral-Small-3 (Dev) text encoding → <see cref="Flux2Transformer"/> denoising with flow
-/// matching → BN-style latent un-normalization → 2×2 unpatchify → VAE decode → RGB image.
-/// <para>Differences from Flux.1: no CLIP-L pooled embedding, no T5; multi-layer text-encoder
-/// hidden state concat; 32-channel VAE latent (16× effective downscale once 2×2 patchify is
-/// applied); BatchNorm-style latent normalization (<c>bn.running_mean/var</c>) applied at the
-/// pipeline boundary, not inside the VAE module.</para>
-/// </summary>
+/// <summary>Flux.2 text-to-image pipeline (Klein 4B / Klein 9B / Dev). Orchestrates Qwen3-4B (Klein) or Mistral-Small-3 (Dev) text encoding → <see cref="Flux2Transformer"/> denoising with flow matching → BN-style latent un-normalization → 2×2 unpatchify → VAE decode. Differs from Flux.1: no CLIP-L pooled / no T5, multi-layer text-encoder hidden state concat, 32-channel VAE latent, BN normalization applied at the pipeline boundary.</summary>
 public sealed unsafe class Flux2Pipeline : IDisposable
 {
     private readonly IBackend _backend;
@@ -270,11 +262,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         return unpacked;
     }
 
-    /// <summary>
-    /// Applies BatchNorm un-normalization on the patchified latent: <c>z = z * std + mean</c>.
-    /// Operates per-channel (mean/var have shape <c>[128]</c>; broadcast across batch and spatial dims).
-    /// Mirrors the diffusers reference: <c>latents = latents * sqrt(running_var + eps) + running_mean</c>.
-    /// </summary>
+    /// <summary>Applies BatchNorm un-normalization on the patchified latent: <c>z = z * sqrt(var + eps) + mean</c>, per-channel (mean/var have shape <c>[128]</c>).</summary>
     private static Tensor ApplyBnUnNormalize(Tensor latent, Tensor mean, Tensor var, float eps)
     {
         int batch = (int)latent.Shape[0];
@@ -301,12 +289,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         return output;
     }
 
-    /// <summary>
-    /// 2×2 spatial unpatchify: <c>[B, C*4, H, W] → [B, C, H*2, W*2]</c>. Implements the diffusers
-    /// <c>_unpatchify_latents</c>: reshape to <c>[B, C, 2, 2, H, W]</c>, permute to
-    /// <c>[B, C, H, 2, W, 2]</c>, reshape to <c>[B, C, H*2, W*2]</c>. Equivalent to nn.PixelShuffle(2)
-    /// applied per-channel-group.
-    /// </summary>
+    /// <summary>2×2 spatial unpatchify: <c>[B, C*4, H, W] → [B, C, H*2, W*2]</c>. Equivalent to nn.PixelShuffle(2) applied per-channel-group.</summary>
     private static Tensor UnpatchifyLatent(Tensor input, int outChannels, int patchSize)
     {
         int batch = (int)input.Shape[0];

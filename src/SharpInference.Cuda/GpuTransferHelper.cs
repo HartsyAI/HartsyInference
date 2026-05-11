@@ -4,12 +4,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Cuda;
 
-/// <summary>
-/// GPU memory transfer helper with weight and activation caching.
-/// Weight cache: preloaded via PreloadWeight(), permanent until FreeAllCached().
-/// Activation cache: set by CacheActivation() after each op, consumed by next op's CopyToDevice().
-/// Lazy sync: if CPU code accesses DataPointer, activation data syncs GPU→CPU on demand.
-/// </summary>
+/// <summary>GPU memory transfer helper with weight and activation caching. Weights preload via PreloadWeight() and stay until FreeAllCached(); activations set by CacheActivation() after each op and are consumed by the next op's CopyToDevice(). Lazy sync: CPU access to DataPointer triggers a GPU→CPU sync on demand.</summary>
 internal static unsafe class GpuTransferHelper
 {
     /// <summary>Cache mapping Tensor object references to GPU device pointers (weights — permanent).</summary>
@@ -77,10 +72,7 @@ internal static unsafe class GpuTransferHelper
         _streamingCache?.DrainAndReleasePool();
     }
 
-    /// <summary>
-    /// Returns the GPU device pointer for a tensor, using caches to avoid transfers.
-    /// Priority: weight cache → activation cache → fresh H2D transfer.
-    /// </summary>
+    /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache → activation cache → fresh H2D transfer.</summary>
     public static ulong CopyToDevice(Tensor cpuTensor)
     {
         // 1. Weight cache (permanent, highest priority)
@@ -126,10 +118,7 @@ internal static unsafe class GpuTransferHelper
         }
     }
 
-    /// <summary>
-    /// Caches an op's output GPU pointer with the tensor, avoiding D2H transfer.
-    /// Sets lazy sync callbacks: DataPointer access triggers D2H, Dispose frees GPU memory.
-    /// </summary>
+    /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer access triggers D2H, Dispose frees GPU memory.</summary>
     public static void CacheActivation(Tensor tensor, ulong gpuPtr, nuint byteSize)
     {
         // Capture CPU buffer pointer before setting callbacks.

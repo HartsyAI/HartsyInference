@@ -145,6 +145,21 @@ public interface IBackend : IDisposable
             dst[i] = (float)src[i];
     }
 
+    /// <summary>Cast tensor from FP32 to BF16. Default: CPU fallback via Tensor.CastTo.</summary>
+    void CastToBf16(Tensor output, Tensor input)
+    {
+        Tensor casted = input.CastTo(DType.BF16);
+        try
+        {
+            unsafe
+            {
+                Buffer.MemoryCopy((void*)casted.DataPointer, (void*)output.DataPointer,
+                    output.ElementCount * 2, casted.ElementCount * 2);
+            }
+        }
+        finally { casted.Dispose(); }
+    }
+
     /// <summary>Cast tensor from FP8 E4M3 to FP16. Default: CPU via F32 intermediate.</summary>
     void CastF8E4M3ToF16(Tensor output, Tensor input)
     {

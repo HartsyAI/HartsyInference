@@ -3,7 +3,7 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for Z-Image transformers (Tongyi Lab, Apache 2.0). Lumina2/NextDiT architecture: 30 main DiT layers + 2 noise refiner blocks + 2 context refiner blocks. RMSNorm everywhere, multi-axis RoPE [32,48,48] θ=256, AdaLN with 4 outputs, SwiGLU FFN. See docs/Research/Z_IMAGE_ARCHITECTURE.md.</summary>
-public record ZImageConfig
+public sealed record ZImageConfig
 {
     /// <summary>Hidden dimension (3840 for Z-Image-Turbo and Base).</summary>
     public required int HiddenSize { get; init; }

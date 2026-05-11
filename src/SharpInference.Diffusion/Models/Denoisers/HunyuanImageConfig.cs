@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for Hunyuan Image 2.1 MMDiT transformer (17B by Tencent). Features a 32×32 VAE downscale, native 2048×2048 resolution, and includes distilled + refiner variants. Uses dual text encoders and a unique double/single-stream MMDiT architecture.</summary>
-public record HunyuanImageConfig
+public sealed record HunyuanImageConfig
 {
     /// <summary>Hidden dimension of the transformer.</summary>
     public required int HiddenSize { get; init; }

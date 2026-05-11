@@ -5,13 +5,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Vulkan;
 
-/// <summary>
-/// Vulkan compute backend implementing <see cref="IBackend"/>.
-/// Routes operations to SPIR-V compute shaders loaded from disk and dispatched
-/// via vkCmdDispatch on a single timeline-semaphore stream. Mirrors the CUDA
-/// backend's GPU weight cache + lazy-sync activation cache so model code that
-/// works on CUDA works unchanged here.
-/// </summary>
+/// <summary>Vulkan compute backend implementing <see cref="IBackend"/>. Routes operations to SPIR-V compute shaders loaded from disk and dispatched via vkCmdDispatch on a single timeline-semaphore stream. Mirrors the CUDA backend's GPU weight cache + lazy-sync activation cache so model code that works on CUDA works unchanged here.</summary>
 public sealed class VulkanBackend : IBackend
 {
     private readonly VulkanInstance _instance;

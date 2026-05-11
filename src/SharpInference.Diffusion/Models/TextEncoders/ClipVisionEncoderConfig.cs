@@ -2,7 +2,7 @@ namespace SharpInference.Diffusion.Models.TextEncoders;
 
 /// <summary>Configuration for CLIP vision-tower transformers used as image-prompt encoders for diffusion conditioning. The vision tower mirrors the text tower's transformer-encoder architecture but ingests image patches via a Conv2D patch embedding (stride=patch_size, no bias) plus a learned <c>class_embedding</c> CLS token, and skips the causal attention mask (vision tokens attend bidirectionally).
 /// <para>The standard IP-Adapter family uses CLIP-ViT-H/14 with a 1024-dim visual_projection — the projected CLS embedding is what gets MLP'd into 4 image-prompt tokens. IP-Adapter Plus instead consumes the penultimate-layer hidden states (all 257 patch tokens, hidden_size=1280) through a Perceiver-style resampler.</para></summary>
-public record ClipVisionEncoderConfig
+public sealed record ClipVisionEncoderConfig
 {
     /// <summary>Hidden dimension of the transformer (1280 for ViT-H/14).</summary>
     public required int HiddenSize { get; init; }

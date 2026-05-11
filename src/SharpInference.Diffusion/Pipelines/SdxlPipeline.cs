@@ -207,18 +207,30 @@ public sealed unsafe class SdxlPipeline : IDisposable
         latentMask?.Dispose();
         clipGForRefiner?.Dispose();
 
-        // 6. VAE decode — free UNet weights to reclaim VRAM for high-res VAE conv2d buffers
+        // 6. VAE decode â free UNet weights to reclaim VRAM for high-res VAE conv2d buffers.
+        // CLIP-L/CLIP-G stay resident (they don't expose EnumerateWeights yet); BF16 VAE
+        // is the same byte count as the previously-broken F16 path so no extra pressure.
         _backend.Sync();
         _backend.FreeWeights(_unet.EnumerateWeights());
-        Logs.Verbose("Decoding latents to image (tiled F32 path)...");
+
+        // Match the latent dtype to the loaded VAE weight dtype. SDXL VAE F16 is broken
+        // (resnet activations overflow â NaN â black output); the loader now casts SDXL
+        // VAE weights to BF16 (Ampere+) or F32 (older HW) per the ComfyUI policy. Cast the
+        // latent to match â otherwise the kernel dispatch reads weights of one dtype as
+        // another and produces garbage. See PHASE_3_DEVIATIONS.md ("F16 has been observed
+        // to produce all-black output").
+        DType vaeDtype = _vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
+        Logs.Verbose($"Decoding latents to image (VAE dtype={vaeDtype})...");
         Stopwatch vaeSw = Stopwatch.StartNew();
 
-        bool vaeF16 = (_vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
         Tensor vaeInput = latent;
-        if (vaeF16 && latent.DType != DType.F16)
+        if (latent.DType != vaeDtype)
         {
-            vaeInput = new Tensor(latent.Shape, DType.F16);
-            _backend.CastToF16(vaeInput, latent);
+            vaeInput = new Tensor(latent.Shape, vaeDtype);
+            if (vaeDtype == DType.F16) _backend.CastToF16(vaeInput, latent);
+            else if (vaeDtype == DType.BF16) _backend.CastToBf16(vaeInput, latent);
+            else if (vaeDtype == DType.F32) _backend.CastToF32(vaeInput, latent);
+            else throw new InvalidOperationException($"Unsupported VAE dtype: {vaeDtype}");
             latent.Dispose();
         }
 

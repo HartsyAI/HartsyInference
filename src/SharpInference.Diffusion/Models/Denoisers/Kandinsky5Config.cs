@@ -23,7 +23,7 @@ namespace SharpInference.Diffusion.Models.Denoisers;
 /// <item>Flow-matching with <c>FlowMatchEulerDiscreteScheduler(shift=5.0)</c>.</item>
 /// </list>
 /// </summary>
-public record Kandinsky5Config
+public sealed record Kandinsky5Config
 {
     /// <summary>Visual latent channels (16 for Flux VAE).</summary>
     public required int InVisualDim { get; init; }

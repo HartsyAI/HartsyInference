@@ -14,7 +14,7 @@ namespace SharpInference.Diffusion.Models.Denoisers;
 /// - **`caption_projection_dim` = `inner_dim`** (3072 = 12*256) in the released v0.3 checkpoint.
 /// - **`joint_attention_dim` = 2048** matches Pile-T5-XL hidden_size.
 /// </summary>
-public record AuraFlowConfig
+public sealed record AuraFlowConfig
 {
     /// <summary>Hidden dimension of the transformer (= num_attention_heads * attention_head_dim).</summary>
     public required int HiddenSize { get; init; }

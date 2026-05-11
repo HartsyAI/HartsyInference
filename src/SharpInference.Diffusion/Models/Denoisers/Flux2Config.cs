@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for Flux.2 transformers (Flux.2 Dev 32B, Flux.2 Klein 4B/9B). Architecturally distinct from Flux.1: LayerNorm (not RMSNorm) for stream norms, top-level shared modulation projections (one set per stream type, not per-block), 4-axis RoPE (T,H,W,L) with theta=2000, parallel single-stream block (fused QKV+MLP linear1, fused output linear2), SwiGLU MLP, 32-ch VAE latent + 2×2 patchify giving 128 in-channels per token. Reference: huggingface/diffusers transformer_flux2.py.</summary>
-public record Flux2Config
+public sealed record Flux2Config
 {
     /// <summary>Hidden dimension (= NumHeads × HeadDim). 3072 for Klein 4B, 4096 for Klein 9B, 6144 for Dev.</summary>
     public required int HiddenSize { get; init; }

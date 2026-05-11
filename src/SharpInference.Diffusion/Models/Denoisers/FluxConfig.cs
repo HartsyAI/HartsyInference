@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for Flux DiT transformers (Flux.1 Dev, Flux.1 Schnell). Architecture is defined by depth (double-stream blocks) and depth_single_blocks (single-stream blocks).</summary>
-public record FluxConfig
+public sealed record FluxConfig
 {
     /// <summary>Hidden dimension of the transformer (3072 for Flux.1).</summary>
     public required int HiddenSize { get; init; }

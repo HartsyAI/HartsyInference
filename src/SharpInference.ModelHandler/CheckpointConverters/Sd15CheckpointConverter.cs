@@ -88,7 +88,7 @@ public sealed class Sd15CheckpointConverter
         return (converted, loader);
     }
 
-    #region UNet Key Conversion
+    // ── UNet Key Conversion ──────────────────────────────────────────
 
     private static string? ConvertUNetKey(string ldmKey)
     {
@@ -193,9 +193,8 @@ public sealed class Sd15CheckpointConverter
         return null;
     }
 
-    #endregion
 
-    #region CLIP-L Key Conversion
+    // ── CLIP-L Key Conversion ──────────────────────────────────────────
 
     private static void ConvertClipLKey(string key, Tensor tensor, Dictionary<string, Tensor> clipL)
     {
@@ -211,5 +210,4 @@ public sealed class Sd15CheckpointConverter
         clipL[rest] = tensor;
     }
 
-    #endregion
 }

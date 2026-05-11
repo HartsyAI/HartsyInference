@@ -3,22 +3,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>
-/// Flux.2 double-stream block. Joint attention between text and image streams (concatenated as
-/// <c>[txt, img]</c> for attention; separately gated/residual'd outside). Differences from
-/// <see cref="FluxDoubleStreamBlock"/>:
-/// <list type="bullet">
-/// <item><b>Modulation lives outside the block</b> — Flux.2 has top-level shared modulation
-/// projections (<c>double_stream_modulation_img/txt</c>) reused across all double blocks, so the
-/// block receives the 6 pre-split modulation params as inputs rather than computing them itself.</item>
-/// <item><b>SwiGLU MLP</b> instead of Flux.1's GELU MLP. The fused <c>linear_in: dim → 2*inner</c>
-/// is split at converter time into <c>ff.linear_in_gate</c> (first half) and <c>ff.linear_in_up</c>
-/// (second half) so the activation reduces to <c>silu(gate) * up</c>.</item>
-/// <item><b>No QKV bias</b> for any Flux.2 variant.</item>
-/// </list>
-/// LayerNorm (no affine), per-head RMSNorm on Q and K (pre-RoPE), pairwise-rotation 4-axis RoPE
-/// applied to concatenated [txt, img] Q/K only.
-/// </summary>
+/// <summary>Flux.2 double-stream block. Joint attention between text and image streams (concatenated as <c>[txt, img]</c>; separately gated/residual'd outside). Differs from <see cref="FluxDoubleStreamBlock"/>: modulation lives outside the block (top-level shared projections), SwiGLU MLP (split into linear_in_gate/up at converter time), no QKV bias for any Flux.2 variant. LayerNorm (no affine), per-head Q/K RMSNorm pre-RoPE, 4-axis pairwise-rotation RoPE on Q/K only.</summary>
 public sealed unsafe class Flux2DoubleBlock
 {
     private readonly int _hiddenSize;
@@ -69,11 +54,7 @@ public sealed unsafe class Flux2DoubleBlock
         _txtFfn = new SwiGluFfn(hiddenSize, mlpInner);
     }
 
-    /// <summary>
-    /// Loads weights with diffusers-style naming. Converter is expected to split BFL
-    /// <c>img_attn.qkv</c> → <c>attn.to_{q,k,v}</c> and BFL <c>img_mlp.0</c> →
-    /// <c>ff.linear_in_gate / ff.linear_in_up</c>. Same for txt-stream counterparts.
-    /// </summary>
+    /// <summary>Loads weights with diffusers-style naming. Converter is expected to split BFL <c>img_attn.qkv</c> → <c>attn.to_{q,k,v}</c> and <c>img_mlp.0</c> → <c>ff.linear_in_gate / ff.linear_in_up</c>; same for txt-stream.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         // Image Q/K/V (no bias)
@@ -147,12 +128,7 @@ public sealed unsafe class Flux2DoubleBlock
         foreach (Tensor w in _txtFfn.EnumerateWeights()) yield return w;
     }
 
-    /// <summary>
-    /// Forward pass. Modulation tensors (<paramref name="imgMod"/>, <paramref name="txtMod"/>) are
-    /// 6 elements each: <c>(shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)</c>,
-    /// shape <c>[B, hidden]</c>. They are computed once at the top level (shared modulation) and
-    /// passed unchanged to every double block.
-    /// </summary>
+    /// <summary>Forward pass. Modulation tensors (<paramref name="imgMod"/>, <paramref name="txtMod"/>) are 6 elements each: <c>(shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)</c>, shape <c>[B, hidden]</c>. Computed once at the top level (shared modulation) and passed unchanged to every double block.</summary>
     public (Tensor image, Tensor text) Forward(IBackend backend,
         Tensor image, Tensor text,
         Tensor[] imgMod, Tensor[] txtMod, FluxRope rope)

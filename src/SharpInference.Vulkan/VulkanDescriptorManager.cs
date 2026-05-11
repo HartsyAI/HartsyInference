@@ -3,15 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace SharpInference.Vulkan;
 
-/// <summary>
-/// Manages a small set of canonical descriptor-set layouts, pipeline layouts,
-/// and a descriptor-pool ring. Used by every kernel — by sharing layouts across
-/// kernels with the same binding shape we keep total layout count to ~12.
-///
-/// Pool ring strategy: two pools, alternate per phase boundary. <c>FlipPool()</c>
-/// resets the next pool. The active pool can hold up to <see cref="MaxSetsPerPool"/>
-/// allocations before forcing a flip.
-/// </summary>
+/// <summary>Manages a small set of canonical descriptor-set layouts, pipeline layouts, and a descriptor-pool ring. Sharing layouts across kernels with the same binding shape keeps total layout count to ~12. Pool ring: two pools alternated per phase boundary via <c>FlipPool()</c>; active pool can hold up to <see cref="MaxSetsPerPool"/> allocations before forcing a flip.</summary>
 public sealed class VulkanDescriptorManager : IDisposable
 {
     private const int MaxSetsPerPool = 4096;

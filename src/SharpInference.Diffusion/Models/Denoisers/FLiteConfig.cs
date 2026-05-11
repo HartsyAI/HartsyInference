@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for F-Lite (Freepik / Fal.ai) — single-stream cross-attention DiT with T5-XXL conditioning, 16-channel Flux VAE, and 16 register tokens. See [`F_LITE_ARCHITECTURE.md`](../../../../docs/Research/F_LITE_ARCHITECTURE.md) for the architectural deep-dive.</summary>
-public record FLiteConfig
+public sealed record FLiteConfig
 {
     /// <summary>Hidden dimension. F-Lite 10B = 3072.</summary>
     public required int HiddenSize { get; init; }

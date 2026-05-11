@@ -3,7 +3,7 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for the HiDream-I1 image transformer (HiDreamImageTransformer2DModel). HiDream pairs 16 double-stream blocks (joint image/text MM-attention) with 32 single-stream blocks (parallel image+text-prefix attention), MoE SwiGLU FFN with shared + 4 routed experts, and a 3-axis RoPE keyed on [layer-id, row, col]. Both Full and Dev share the same architecture; the difference is the distillation training (Dev = guidance-distilled).</summary>
-public record HiDreamConfig
+public sealed record HiDreamConfig
 {
     /// <summary>Patch size for the latent → token embedding. 2 for HiDream.</summary>
     public int PatchSize { get; init; } = 2;

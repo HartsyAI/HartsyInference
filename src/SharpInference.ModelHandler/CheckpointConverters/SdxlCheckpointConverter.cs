@@ -90,7 +90,7 @@ public sealed class SdxlCheckpointConverter
         return (converted, loader);
     }
 
-    #region UNet Key Conversion
+    // ── UNet Key Conversion ──────────────────────────────────────────
 
     private static string? ConvertUNetKey(string ldmKey)
     {
@@ -198,9 +198,8 @@ public sealed class SdxlCheckpointConverter
         return null;
     }
 
-    #endregion
 
-    #region CLIP-L Key Conversion
+    // ── CLIP-L Key Conversion ──────────────────────────────────────────
 
     private static void ConvertClipLKey(string key, Tensor tensor, Dictionary<string, Tensor> clipL)
     {
@@ -214,9 +213,8 @@ public sealed class SdxlCheckpointConverter
         clipL[rest] = tensor;
     }
 
-    #endregion
 
-    #region CLIP-G Key Conversion
+    // ── CLIP-G Key Conversion ──────────────────────────────────────────
 
     private static void ConvertClipGKey(string key, Tensor tensor, Dictionary<string, Tensor> clipG)
     {
@@ -299,5 +297,4 @@ public sealed class SdxlCheckpointConverter
         }
     }
 
-    #endregion
 }

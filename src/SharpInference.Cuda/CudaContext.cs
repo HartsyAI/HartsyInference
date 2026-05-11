@@ -101,12 +101,7 @@ public sealed class CudaContext : IDisposable
         DeviceName = QueryDeviceName(_deviceHandle);
     }
 
-    /// <summary>
-    /// Ensures this context is current on the calling thread. Cheap fast path on already-bound
-    /// threads (one TLS read + branch). Call from the entry of any code that issues CUDA
-    /// Driver API calls — this is the single guarantee that makes the backend safe to use
-    /// from <c>Task.Run</c> worker threads, finalizers, and async continuations.
-    /// </summary>
+    /// <summary>Ensures this context is current on the calling thread. Cheap fast path on already-bound threads (one TLS read + branch). Call from the entry of any code that issues CUDA Driver API calls — the single guarantee that makes the backend safe to use from <c>Task.Run</c> worker threads, finalizers, and async continuations.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnsureCurrent()
     {

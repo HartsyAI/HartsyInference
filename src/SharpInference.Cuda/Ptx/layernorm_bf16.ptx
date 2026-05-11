@@ -1,0 +1,226 @@
+// SharpInference LayerNorm kernel - BF16 I/O, FP32 accumulation
+// Each block normalizes one row (last dimension)
+// Identical to layernorm_f16 except for BF16<->F32 conversion at load/store.
+// Launch: gridDim.x = total_rows, blockDim.x = 256
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+.extern .shared .f32 sdata[];
+
+// --- layernorm_bf16 ----------------------------------------------------
+// Params: output* (bf16), input* (bf16), weight* (bf16), bias* (bf16),
+//         norm_dim, total_rows, eps
+.visible .entry layernorm_bf16(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u64 param_weight,
+    .param .u64 param_bias,
+    .param .u32 param_norm_dim,
+    .param .u32 param_total_rows,
+    .param .f32 param_eps
+)
+{
+    .reg .u64 %rd<16>;
+    .reg .u32 %r<32>;
+    .reg .f32 %f<16>;
+    .reg .b16 %h<4>;
+    .reg .pred %p<4>;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u64 %rd2, [param_weight];
+    ld.param.u64 %rd3, [param_bias];
+    ld.param.u32 %r0, [param_norm_dim];
+    ld.param.u32 %r1, [param_total_rows];
+    ld.param.f32 %f0, [param_eps];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %ntid.x;
+
+    setp.ge.u32 %p1, %r2, %r1;
+    @%p1 bra ln_bf16_done;
+
+    mul.lo.u32 %r5, %r2, %r0;
+
+    // -- Pass 1: Compute mean --
+    mov.f32 %f1, 0f00000000;
+    mov.u32 %r6, %r3;
+
+ln_bf16_sum_loop:
+    setp.ge.u32 %p1, %r6, %r0;
+    @%p1 bra ln_bf16_sum_done;
+
+    add.u32 %r7, %r5, %r6;
+    cvt.u64.u32 %rd4, %r7;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.b16 %h1, [%rd5];
+
+    // BF16 -> F32
+    cvt.u32.u16 %r20, %h1;
+    shl.b32 %r21, %r20, 16;
+    mov.b32 %f2, %r21;
+
+    add.f32 %f1, %f1, %f2;
+
+    add.u32 %r6, %r6, %r4;
+    bra ln_bf16_sum_loop;
+
+ln_bf16_sum_done:
+    mov.u64 %rd6, sdata;
+    cvt.u64.u32 %rd7, %r3;
+    shl.b64 %rd7, %rd7, 2;
+    add.u64 %rd8, %rd6, %rd7;
+    st.shared.f32 [%rd8], %f1;
+    bar.sync 0;
+
+    mov.u32 %r8, 128;
+ln_bf16_reduce_sum:
+    setp.eq.u32 %p2, %r8, 0;
+    @%p2 bra ln_bf16_reduce_sum_done;
+    setp.ge.u32 %p1, %r3, %r8;
+    @%p1 bra ln_bf16_reduce_sum_skip;
+
+    add.u32 %r9, %r3, %r8;
+    cvt.u64.u32 %rd9, %r9;
+    shl.b64 %rd9, %rd9, 2;
+    add.u64 %rd10, %rd6, %rd9;
+    ld.shared.f32 %f3, [%rd10];
+    ld.shared.f32 %f4, [%rd8];
+    add.f32 %f4, %f4, %f3;
+    st.shared.f32 [%rd8], %f4;
+
+ln_bf16_reduce_sum_skip:
+    bar.sync 0;
+    shr.u32 %r8, %r8, 1;
+    bra ln_bf16_reduce_sum;
+
+ln_bf16_reduce_sum_done:
+    ld.shared.f32 %f5, [%rd6];
+    cvt.rn.f32.u32 %f6, %r0;
+    div.rn.f32 %f5, %f5, %f6;
+    bar.sync 0;
+
+    // -- Pass 2: Compute variance --
+    mov.f32 %f1, 0f00000000;
+    mov.u32 %r6, %r3;
+
+ln_bf16_var_loop:
+    setp.ge.u32 %p1, %r6, %r0;
+    @%p1 bra ln_bf16_var_done;
+
+    add.u32 %r7, %r5, %r6;
+    cvt.u64.u32 %rd4, %r7;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.b16 %h1, [%rd5];
+
+    cvt.u32.u16 %r20, %h1;
+    shl.b32 %r21, %r20, 16;
+    mov.b32 %f2, %r21;
+
+    sub.f32 %f3, %f2, %f5;
+    fma.rn.f32 %f1, %f3, %f3, %f1;
+
+    add.u32 %r6, %r6, %r4;
+    bra ln_bf16_var_loop;
+
+ln_bf16_var_done:
+    st.shared.f32 [%rd8], %f1;
+    bar.sync 0;
+
+    mov.u32 %r8, 128;
+ln_bf16_reduce_var:
+    setp.eq.u32 %p2, %r8, 0;
+    @%p2 bra ln_bf16_reduce_var_done;
+    setp.ge.u32 %p1, %r3, %r8;
+    @%p1 bra ln_bf16_reduce_var_skip;
+
+    add.u32 %r9, %r3, %r8;
+    cvt.u64.u32 %rd9, %r9;
+    shl.b64 %rd9, %rd9, 2;
+    add.u64 %rd10, %rd6, %rd9;
+    ld.shared.f32 %f3, [%rd10];
+    ld.shared.f32 %f4, [%rd8];
+    add.f32 %f4, %f4, %f3;
+    st.shared.f32 [%rd8], %f4;
+
+ln_bf16_reduce_var_skip:
+    bar.sync 0;
+    shr.u32 %r8, %r8, 1;
+    bra ln_bf16_reduce_var;
+
+ln_bf16_reduce_var_done:
+    ld.shared.f32 %f7, [%rd6];
+    div.rn.f32 %f7, %f7, %f6;
+    add.f32 %f8, %f7, %f0;
+    rsqrt.approx.f32 %f8, %f8;    // inv_std
+    bar.sync 0;
+
+    // -- Pass 3: Normalize + affine -> bf16 --
+    mov.u32 %r6, %r3;
+
+ln_bf16_norm_loop:
+    setp.ge.u32 %p1, %r6, %r0;
+    @%p1 bra ln_bf16_done;
+
+    add.u32 %r7, %r5, %r6;
+    cvt.u64.u32 %rd4, %r7;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.b16 %h1, [%rd5];
+    cvt.u32.u16 %r20, %h1;
+    shl.b32 %r21, %r20, 16;
+    mov.b32 %f2, %r21;
+
+    sub.f32 %f3, %f2, %f5;
+    mul.f32 %f3, %f3, %f8;
+
+    // weight/bias are bf16
+    cvt.u64.u32 %rd9, %r6;
+    shl.b64 %rd9, %rd9, 1;
+    add.u64 %rd10, %rd2, %rd9;
+    ld.global.b16 %h2, [%rd10];
+    cvt.u32.u16 %r22, %h2;
+    shl.b32 %r23, %r22, 16;
+    mov.b32 %f9, %r23;
+
+    add.u64 %rd10, %rd3, %rd9;
+    ld.global.b16 %h3, [%rd10];
+    cvt.u32.u16 %r24, %h3;
+    shl.b32 %r25, %r24, 16;
+    mov.b32 %f10, %r25;
+
+    fma.rn.f32 %f3, %f3, %f9, %f10;
+
+    // F32 -> BF16 RTNE with NaN preservation
+    mov.b32 %r26, %f3;
+    and.b32 %r27, %r26, 2147483647;
+    setp.gt.u32 %p3, %r27, 2139095040;
+    @%p3 bra ln_bf16_isnan;
+
+    shr.b32 %r28, %r26, 16;
+    and.b32 %r29, %r28, 1;
+    add.u32 %r30, %r29, 32767;
+    add.u32 %r31, %r26, %r30;
+    shr.b32 %r31, %r31, 16;
+    bra ln_bf16_store;
+
+ln_bf16_isnan:
+    shr.b32 %r31, %r26, 16;
+    or.b32 %r31, %r31, 64;
+
+ln_bf16_store:
+    cvt.u16.u32 %h1, %r31;
+    add.u64 %rd5, %rd0, %rd4;
+    st.global.b16 [%rd5], %h1;
+
+    add.u32 %r6, %r6, %r4;
+    bra ln_bf16_norm_loop;
+
+ln_bf16_done:
+    ret;
+}

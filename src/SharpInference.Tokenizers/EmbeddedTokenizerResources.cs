@@ -2,12 +2,7 @@ using System.Reflection;
 
 namespace SharpInference.Tokenizers;
 
-/// <summary>
-/// Streams over the canonical tokenizer vocabularies that ship inside this assembly.
-/// Each method returns a fresh <see cref="Stream"/> over the embedded blob — callers
-/// own the stream and must dispose it. Throws <see cref="InvalidOperationException"/>
-/// if the resource is missing (a build-time misconfiguration; never a user error).
-/// </summary>
+/// <summary>Streams over the canonical tokenizer vocabularies shipped inside this assembly. Each method returns a fresh <see cref="Stream"/> the caller owns and must dispose. Throws <see cref="InvalidOperationException"/> if the resource is missing (build-time misconfiguration).</summary>
 public static class EmbeddedTokenizerResources
 {
     /// <summary>OpenAI CLIP BPE vocabulary (49,408 tokens). Used by CLIP-L and CLIP-G —

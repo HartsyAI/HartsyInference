@@ -16,12 +16,7 @@ public sealed class VulkanKernel
     public int StorageBufferCount { get; init; }
 }
 
-/// <summary>
-/// Loads SPIR-V kernels from disk, builds compute pipelines on first use, and caches
-/// them by (name, spec-hash). Pipelines are destroyed all at once on dispose. The
-/// design assumes one registry per <see cref="VulkanBackend"/> for the device's
-/// lifetime — kernels are not unloaded individually.
-/// </summary>
+/// <summary>Loads SPIR-V kernels from disk, builds compute pipelines on first use, and caches them by (name, spec-hash). Pipelines are destroyed together on dispose; one registry per <see cref="VulkanBackend"/> for the device's lifetime, kernels are not unloaded individually.</summary>
 public sealed class VulkanKernelRegistry : IDisposable
 {
     private readonly nint _device;

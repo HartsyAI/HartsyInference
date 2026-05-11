@@ -40,7 +40,7 @@ namespace SharpInference.Diffusion.Models.Denoisers;
 ///
 /// **Implementation status:** scaffolding only. See PHASE_4_MODEL_BREADTH.md `### ERNIE-Image`.
 /// </summary>
-public record ErnieImageConfig
+public sealed record ErnieImageConfig
 {
     /// <summary>Hidden dim (= num_attention_heads * head_dim). 4096 for `baidu/ERNIE-Image`.</summary>
     public required int HiddenSize { get; init; }

@@ -135,17 +135,7 @@ public sealed class FluxCheckpointConverter
         return (converted, loader);
     }
 
-    /// <summary>
-    /// Detects ComfyUI's <c>fp8_scaled</c> format and folds per-tensor <c>scale_weight</c> values
-    /// into each FP8 weight tensor's <see cref="Tensor.Fp8ScaleFactor"/>. This keeps weights at
-    /// native FP8 (1 byte/element) so a 12B-param transformer stays under 12GB RAM rather than
-    /// ballooning to 24GB after F16 dequant. The scale is then applied for free at GEMM time via
-    /// cuBLAS' <c>alpha</c> parameter — see <c>CudaBackend.Linear</c>.
-    /// <para>The companion <c>scale_input</c> tensors (activation-quantization scales used only
-    /// for true FP8 GEMM with FP8 activations) are dropped — we cast FP8→F16 and run F16 GEMM, so
-    /// activations stay at full F16 magnitude.</para>
-    /// Returns the original dict unchanged when no <c>scale_weight</c> keys are present.
-    /// </summary>
+    /// <summary>Detects ComfyUI's <c>fp8_scaled</c> format and folds per-tensor <c>scale_weight</c> values into each FP8 weight tensor's <see cref="Tensor.Fp8ScaleFactor"/>. Keeps weights at native FP8 (12B-param transformer stays under 12GB instead of ballooning to 24GB after dequant); scale is applied at GEMM time via cuBLAS' <c>alpha</c>. Companion <c>scale_input</c> tensors are dropped — we cast FP8→F16 and run F16 GEMM. Returns the original dict unchanged when no <c>scale_weight</c> keys are present.</summary>
     private static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
     {
         // Pre-scan for any scale_weight keys to decide whether this is the scaled format.
@@ -189,7 +179,7 @@ public sealed class FluxCheckpointConverter
         return result;
     }
 
-    #region BFL Transformer Key Conversion
+    // ── BFL Transformer Key Conversion ──────────────────────────────────────────
 
     private static void ConvertBflTransformerKey(string bflKey, Tensor tensor, Dictionary<string, Tensor> output)
     {
@@ -495,9 +485,8 @@ public sealed class FluxCheckpointConverter
         }
     }
 
-    #endregion
 
-    #region QKV Splitting
+    // ── QKV Splitting ──────────────────────────────────────────
 
     /// <summary>Splits a fused QKV weight [3*innerDim, inDim] into three separate [innerDim, inDim] weights. Uses <see cref="DType.ComputeByteCount"/> rather than <c>SizeInBytes</c> so quantized fused-QKV tensors (Q4_K, Q5_K, Q8_0) split correctly — the row-aligned chunk size is computed from the per-row element count, which is block-aligned for ggml K-quants since Flux's hidden=3072 is a multiple of the 256-element super-block.</summary>
     private static unsafe void SplitQkvWeight(Tensor fused, int innerDim, string prefix,
@@ -610,9 +599,8 @@ public sealed class FluxCheckpointConverter
         output[$"{prefix}.proj_mlp.bias"] = mlpBias;
     }
 
-    #endregion
 
-    #region CLIP-L Key Conversion
+    // ── CLIP-L Key Conversion ──────────────────────────────────────────
 
     private static void ConvertClipL(string key, Tensor tensor, Dictionary<string, Tensor> clipL)
     {
@@ -634,9 +622,8 @@ public sealed class FluxCheckpointConverter
         }
     }
 
-    #endregion
 
-    #region T5 Key Conversion
+    // ── T5 Key Conversion ──────────────────────────────────────────
 
     private static void ConvertT5(string key, Tensor tensor, Dictionary<string, Tensor> t5)
     {
@@ -647,9 +634,8 @@ public sealed class FluxCheckpointConverter
         t5[rest] = tensor;
     }
 
-    #endregion
 
-    #region VAE Key Conversion
+    // ── VAE Key Conversion ──────────────────────────────────────────
 
     private static void ConvertVae(string key, Tensor tensor, Dictionary<string, Tensor> vae)
     {
@@ -666,7 +652,6 @@ public sealed class FluxCheckpointConverter
             vae[diffusersKey] = tensor;
     }
 
-    #endregion
 
     /// <summary>Auto-detects model depth from transformer weights by counting block prefixes.</summary>
     public static (int doubleBlocks, int singleBlocks, bool hasGuidance) DetectArchitecture(

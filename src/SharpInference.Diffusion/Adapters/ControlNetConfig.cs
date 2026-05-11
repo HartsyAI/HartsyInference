@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Adapters;
 
 /// <summary>Configuration for ControlNet conditioning adapters. Supports SD1.5, SDXL, and Flux-based ControlNets with various conditioning modes (depth, canny, openpose, scribble, tile, etc.).</summary>
-public record ControlNetConfig
+public sealed record ControlNetConfig
 {
     /// <summary>Base model architecture this ControlNet was trained for.</summary>
     public required ControlNetBaseModel BaseModel { get; init; }

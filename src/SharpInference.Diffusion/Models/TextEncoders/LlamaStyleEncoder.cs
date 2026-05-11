@@ -4,15 +4,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.TextEncoders;
 
-/// <summary>
-/// Llama-family decoder transformer used as a text encoder for diffusion conditioning. Supports
-/// grouped-query attention (GQA), RMSNorm, RoPE (theta-configurable), SwiGLU MLP, and optional
-/// per-head Q/K RMSNorm (for Qwen3).
-/// <para>This is run as an encoder: a single forward pass over the prompt tokens, returning
-/// <c>last_hidden_state</c> as <c>[B, seqLen, hiddenSize]</c>. Causal attention mask is applied
-/// (matching how the model was trained); the diffusion downstream sees the full sequence of
-/// hidden states.</para>
-/// </summary>
+/// <summary>Llama-family decoder transformer used as a text encoder for diffusion conditioning. Supports GQA, RMSNorm, RoPE (theta-configurable), SwiGLU MLP, and optional per-head Q/K RMSNorm (Qwen3). Runs as an encoder: single forward pass returning <c>last_hidden_state</c> as <c>[B, seqLen, hiddenSize]</c>; causal attention mask matches how the model was trained.</summary>
 public sealed unsafe class LlamaStyleEncoder : IDisposable
 {
     private readonly LlamaStyleEncoderConfig _config;
@@ -117,16 +109,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         return hidden;
     }
 
-    /// <summary>
-    /// Encodes a prompt and concatenates the hidden states from selected intermediate layers along
-    /// the feature axis. Used by Flux.2 Klein, which conditions on the concatenation of Qwen3
-    /// hidden states from layers (9, 18, 27) — total feature dim = 3 × hidden = 7680 for Qwen3-4B.
-    /// <para>HuggingFace transformers semantics: <c>output.hidden_states[k]</c> with <c>k=0</c> is
-    /// the embedding output (pre-layer-0); <c>k=1..N</c> is post-layer-(k−1). This method matches
-    /// that indexing — pass <c>layerIndices=[9, 18, 27]</c> to mirror Klein's diffusers pipeline.</para>
-    /// Final RMSNorm is NOT applied to intermediate outputs (matches HF behavior — only the very
-    /// last hidden state passes through <c>model.norm</c>; intermediates are raw block outputs).
-    /// </summary>
+    /// <summary>Encodes a prompt and concatenates hidden states from selected intermediate layers along the feature axis. Used by Flux.2 Klein (layers 9, 18, 27 → 7680 dim for Qwen3-4B). HuggingFace indexing: <c>k=0</c> is the embedding output (pre-layer-0); <c>k=1..N</c> is post-layer-(k−1). Final RMSNorm is NOT applied to intermediate outputs (matches HF — only the last hidden state passes through <c>model.norm</c>).</summary>
     /// <param name="layerIndices">Layer indices in HuggingFace convention: 0 = embeddings, k = post-layer-(k-1). Must be sorted ascending and within [0, NumLayers].</param>
     /// <returns>F32 tensor of shape <c>[batch, seqLen, layerIndices.Length × hiddenSize]</c>. Channels are arranged as <c>[layer_0_features, layer_1_features, ..., layer_N_features]</c> per token (matching diffusers' <c>permute(0, 2, 1, 3).reshape(B, S, N*H)</c>).</returns>
     public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices)

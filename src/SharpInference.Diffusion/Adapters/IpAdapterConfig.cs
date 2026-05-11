@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Adapters;
 
 /// <summary>Configuration for IP-Adapter (Image Prompt Adapter). Projects CLIP image embeddings into cross-attention space for image-guided generation. Works alongside text conditioning.</summary>
-public record IpAdapterConfig
+public sealed record IpAdapterConfig
 {
     /// <summary>Base model this adapter was trained for.</summary>
     public required IpAdapterBaseModel BaseModel { get; init; }

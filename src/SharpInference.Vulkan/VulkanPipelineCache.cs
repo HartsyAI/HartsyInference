@@ -2,13 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace SharpInference.Vulkan;
 
-/// <summary>
-/// Wraps a VkPipelineCache, persisting it to disk between runs.
-/// Cache file lives at ~/.cache/sharpinference/vulkan/&lt;deviceUUID&gt;.pipeline_cache
-/// (or %LOCALAPPDATA%\sharpinference\vulkan\... on Windows). The driver gracefully
-/// ignores cache contents that don't match the current device, so the file can be
-/// shared without breaking on driver/GPU upgrades.
-/// </summary>
+/// <summary>Wraps a VkPipelineCache and persists it between runs at ~/.cache/sharpinference/vulkan/&lt;deviceUUID&gt;.pipeline_cache (or %LOCALAPPDATA%\sharpinference\vulkan\... on Windows). The driver gracefully ignores cache contents that don't match the current device, so the file survives driver/GPU upgrades.</summary>
 public sealed class VulkanPipelineCache : IDisposable
 {
     private readonly nint _device;

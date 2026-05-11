@@ -245,8 +245,10 @@ public sealed class VaeDecoder
         backend.Conv2D(convOut, siluOut, _convOutWeight!, _convOutBias, 1, 1, 1, 1);
         siluOut.Dispose();
 
-        // Cast final output to F32 for RGB post-processing if running in F16
-        if (dtype == DType.F16)
+        // Cast final output to F32 for RGB post-processing. TensorToRgbBytes reads
+        // DataPointer as float*, so any non-F32 dtype produces garbage if returned as-is.
+        // Both F16 and BF16 paths must cast back here.
+        if (dtype == DType.F16 || dtype == DType.BF16)
         {
             Tensor outputF32 = new Tensor(rgbShape, DType.F32);
             backend.CastToF32(outputF32, convOut);

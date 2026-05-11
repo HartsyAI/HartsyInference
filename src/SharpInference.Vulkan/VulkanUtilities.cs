@@ -25,12 +25,7 @@ internal static class VulkanUtilities
     }
 }
 
-/// <summary>
-/// Holds an array of UTF-8 NUL-terminated strings as a single contiguous block
-/// of unmanaged memory, with a parallel array of <c>const char**</c> pointers
-/// suitable for Vulkan's <c>ppEnabledLayerNames</c> / <c>ppEnabledExtensionNames</c>.
-/// Disposable — frees both blocks.
-/// </summary>
+/// <summary>Holds an array of UTF-8 NUL-terminated strings as a contiguous block of unmanaged memory, with a parallel array of <c>const char**</c> pointers suitable for Vulkan's <c>ppEnabledLayerNames</c> / <c>ppEnabledExtensionNames</c>. Disposable — frees both blocks.</summary>
 internal sealed unsafe class PinnedStringArray : IDisposable
 {
     private nint _stringsBlock;

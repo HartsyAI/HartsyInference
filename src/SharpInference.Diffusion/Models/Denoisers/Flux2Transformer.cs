@@ -4,24 +4,7 @@ using SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace SharpInference.Diffusion.Models.Denoisers;
 
-/// <summary>
-/// Flux.2 Diffusion Transformer (Klein 4B / Klein 9B / Dev). Architecturally distinct from
-/// <see cref="FluxTransformer"/>: LayerNorm (not RMSNorm) for stream norms, top-level shared
-/// modulation projections (one Linear per stream type, output reused across all blocks of that
-/// type), 4-axis RoPE with theta=2000, parallel single-stream block (fused QKV+MLP), SwiGLU MLP
-/// in both block types. Reference: <c>diffusers.transformer_flux2.Flux2Transformer2DModel</c>.
-/// <para>Per-step flow:</para>
-/// <list type="number">
-/// <item>x_embedder: <c>[B, S, in_channels=128] → [B, S, hidden]</c></item>
-/// <item>context_embedder: <c>[B, T, joint_attention_dim=7680] → [B, T, hidden]</c></item>
-/// <item>time_guidance_embed: sinusoidal(timestep) → MLP → temb (+ optional guidance MLP)</item>
-/// <item>3 shared modulation projections (img-double, txt-double, single) → 6/6/3 params each</item>
-/// <item>4-axis RoPE precomputed for [text, image] concat sequence</item>
-/// <item>N double blocks (each receives the same shared mod params)</item>
-/// <item>Concatenate [text, image]; M single blocks; strip text prefix</item>
-/// <item>norm_out (AdaLN: shift/scale only) + proj_out → <c>[B, S, out_channels]</c></item>
-/// </list>
-/// </summary>
+/// <summary>Flux.2 Diffusion Transformer (Klein 4B / Klein 9B / Dev). Distinct from <see cref="FluxTransformer"/>: LayerNorm for stream norms, top-level shared modulation projections (one Linear per stream type, output reused across all blocks), 4-axis RoPE with theta=2000, parallel single-stream block (fused QKV+MLP), SwiGLU MLP in both block types. Reference: <c>diffusers.transformer_flux2.Flux2Transformer2DModel</c>.</summary>
 public sealed unsafe class Flux2Transformer : IDisposable
 {
     private readonly Flux2Config _config;
@@ -79,11 +62,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         _singleMod = new AdaLNModulation(config.HiddenSize, 3);
     }
 
-    /// <summary>
-    /// Loads weights using the canonical naming emitted by <c>Flux2CheckpointConverter</c>.
-    /// Naming follows the diffusers Flux2 module hierarchy except where the converter has split
-    /// fused weights (see <see cref="Flux2DoubleBlock"/> and <see cref="Flux2SingleBlock"/>).
-    /// </summary>
+    /// <summary>Loads weights using the canonical naming emitted by <c>Flux2CheckpointConverter</c>. Follows the diffusers Flux2 module hierarchy except where the converter has split fused weights (see <see cref="Flux2DoubleBlock"/> and <see cref="Flux2SingleBlock"/>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         _xEmbedWeight = weights["x_embedder.weight"];
@@ -292,12 +271,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         }
     }
 
-    /// <summary>
-    /// Final layer: AdaLayerNormContinuous (SiLU(temb) → Linear → split into [shift, scale]) → LayerNorm(no affine) →
-    /// modulate (no gate, just <c>(1+scale)*x + shift</c>) → proj_out. The converter applies BFL→diffusers
-    /// half-swap on <c>norm_out.linear</c> so that the layout here is <c>[scale, shift]</c> (diffusers order),
-    /// matching how Flux.1 deviation #23 was handled.
-    /// </summary>
+    /// <summary>Final layer: AdaLayerNormContinuous (SiLU(temb) → Linear → split [shift, scale]) → LayerNorm(no affine) → modulate <c>(1+scale)*x + shift</c> → proj_out. The converter applies BFL→diffusers half-swap on <c>norm_out.linear</c> so the layout here is <c>[scale, shift]</c>.</summary>
     private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
     {
         int dim = _config.HiddenSize;

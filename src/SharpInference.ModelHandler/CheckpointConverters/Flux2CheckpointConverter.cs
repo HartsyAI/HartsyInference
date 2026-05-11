@@ -2,28 +2,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.ModelHandler.CheckpointConverters;
 
-/// <summary>
-/// Converts BFL-format Flux.2 (Klein 4B / Klein 9B / Dev) checkpoints to the canonical layout
-/// loaded by <see cref="Flux2Transformer"/>. Per-block remapping mirrors
-/// <see cref="FluxCheckpointConverter"/> but accounts for Flux.2-specific changes:
-/// <list type="bullet">
-/// <item>Top-level shared modulation projections: <c>double_stream_modulation_img/txt.lin</c> and
-/// <c>single_stream_modulation.lin</c> rename to <c>double_stream_modulation_img.linear</c> /
-/// <c>single_stream_modulation.linear</c> (per-block <c>img_mod</c>/<c>txt_mod</c> do not exist
-/// in Flux.2).</item>
-/// <item>Double-block MLP <c>img_mlp.0.weight: [2*mlp_inner, hidden]</c> is the fused SwiGLU
-/// <c>linear_in</c>; we split into <c>ff.linear_in_gate</c> (rows 0..mlp_inner) and
-/// <c>ff.linear_in_up</c> (rows mlp_inner..2*mlp_inner). <c>img_mlp.2</c> renames to
-/// <c>ff.linear_out</c>. Same for txt-stream → <c>ff_context.*</c>.</item>
-/// <item>Single-block <c>linear1</c> packs <c>Q + K + V + gate + up</c> (3*hidden + 2*mlp_inner
-/// rows); we split into 5 separate weights. <c>linear2</c> is kept fused and renamed to
-/// <c>attn.to_out</c>.</item>
-/// <item>Final-layer <c>norm_out.linear</c> needs <c>swap_scale_shift</c> on its first dim
-/// (BFL stores [shift, scale] but the diffusers convention used by
-/// <see cref="Flux2Transformer"/>'s final layer is [scale, shift]).</item>
-/// <item>No CLIP pooled MLP and no <c>guidance_in</c> on Klein; Dev has <c>guidance_in</c>.</item>
-/// </list>
-/// </summary>
+/// <summary>Converts BFL-format Flux.2 (Klein 4B / Klein 9B / Dev) checkpoints to the canonical layout loaded by <see cref="Flux2Transformer"/>. Mirrors <see cref="FluxCheckpointConverter"/> but accounts for Flux.2 changes: top-level shared modulation projections, fused-SwiGLU MLP splits, single-block linear1 packing Q+K+V+gate+up, swap_scale_shift on the final layer, and Klein's missing CLIP pooled MLP / guidance_in.</summary>
 public sealed class Flux2CheckpointConverter
 {
     /// <summary>Result of converting a single-file Flux.2 checkpoint.</summary>
@@ -213,10 +192,7 @@ public sealed class Flux2CheckpointConverter
         }
     }
 
-    /// <summary>
-    /// Splits the fused SwiGLU <c>linear_in</c> in a Flux.2 double block's MLP into separate gate
-    /// and up projections, and renames <c>*_mlp.2</c> to <c>linear_out</c>.
-    /// </summary>
+    /// <summary>Splits the fused SwiGLU <c>linear_in</c> in a Flux.2 double block's MLP into separate gate and up projections, and renames <c>*_mlp.2</c> to <c>linear_out</c>.</summary>
     private void ConvertDoubleMlp(string prefix, string ffName, string rest, Tensor tensor, Dictionary<string, Tensor> output)
     {
         if (rest == "0.weight")
@@ -341,11 +317,7 @@ public sealed class Flux2CheckpointConverter
         output[$"{prefix}.{vName}.bias"] = vBias;
     }
 
-    /// <summary>
-    /// Splits a SwiGLU <c>linear_in</c> weight or bias along dim 0 into <c>linear_in_gate</c>
-    /// (first half — the gate proj that gets <c>silu</c>) and <c>linear_in_up</c> (second half —
-    /// the up proj that multiplies the gated activation).
-    /// </summary>
+    /// <summary>Splits a SwiGLU <c>linear_in</c> weight or bias along dim 0 into <c>linear_in_gate</c> (first half, gate proj that gets <c>silu</c>) and <c>linear_in_up</c> (second half, up proj that multiplies the gated activation).</summary>
     private unsafe void SplitSwiGluLinearIn(Tensor fused, string prefix, string ffName,
         Dictionary<string, Tensor> output, bool hasBias)
     {
@@ -375,11 +347,7 @@ public sealed class Flux2CheckpointConverter
         output[$"{prefix}.{ffName}.linear_in_up.{suffix}"] = up;
     }
 
-    /// <summary>
-    /// Splits the fused single-block <c>linear1</c> weight <c>[3*hidden + 2*mlp_inner, hidden]</c>
-    /// into <c>attn.to_{q,k,v}</c> (each <c>[hidden, hidden]</c>) plus <c>attn.linear_in_{gate,up}</c>
-    /// (each <c>[mlp_inner, hidden]</c>).
-    /// </summary>
+    /// <summary>Splits the fused single-block <c>linear1</c> weight <c>[3*hidden + 2*mlp_inner, hidden]</c> into <c>attn.to_{q,k,v}</c> (each <c>[hidden, hidden]</c>) plus <c>attn.linear_in_{gate,up}</c> (each <c>[mlp_inner, hidden]</c>).</summary>
     private unsafe void SplitSingleLinear1Weight(Tensor fused, string prefix, Dictionary<string, Tensor> output)
     {
         int inDim = (int)fused.Shape[1];

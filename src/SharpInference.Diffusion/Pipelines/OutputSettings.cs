@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>Controls where and how generated images are saved. Creates date-based subdirectories with unique filenames.</summary>
-public record OutputSettings
+public sealed record OutputSettings
 {
     /// <summary>Root output directory. Date-based subdirectories are created automatically.</summary>
     public required string OutputDir { get; init; }

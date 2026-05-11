@@ -2,16 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace SharpInference.Vulkan;
 
-/// <summary>
-/// One logical compute "stream" backed by a single timeline semaphore + a recycled
-/// command-buffer chain on the device's compute queue. Replaces CudaStream + per-op
-/// cuStreamSynchronize. Defaults to batching multiple recorded ops into one
-/// command buffer, submitting once per <see cref="Sync"/> / <see cref="SubmitAndAdvance"/>.
-///
-/// Deferred-free list: buffers freed during recording aren't truly destroyed until
-/// the timeline counter passes the recording's tick — analogous to CUDA's
-/// <c>cuMemFreeAsync</c>.
-/// </summary>
+/// <summary>One logical compute "stream" backed by a single timeline semaphore + a recycled command-buffer chain on the device's compute queue. Replaces CudaStream + per-op cuStreamSynchronize. Batches recorded ops into one command buffer, submitting once per <see cref="Sync"/> / <see cref="SubmitAndAdvance"/>. Buffers freed during recording stay live until the timeline counter passes the recording's tick — analogous to CUDA's <c>cuMemFreeAsync</c>.</summary>
 public sealed class VulkanCommandStream : IDisposable
 {
     private readonly nint _device;

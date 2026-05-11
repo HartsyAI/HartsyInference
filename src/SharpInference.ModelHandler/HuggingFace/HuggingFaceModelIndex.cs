@@ -332,9 +332,9 @@ public sealed class HuggingFaceModelIndex
                 File.Delete(path);
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort cleanup; swallow exceptions.
+            Logs.Verbose($"Best-effort delete of {path} failed: {ex.Message}");
         }
     }
 }

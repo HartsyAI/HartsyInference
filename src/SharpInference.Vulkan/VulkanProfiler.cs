@@ -2,20 +2,7 @@ using System.Diagnostics;
 
 namespace SharpInference.Vulkan;
 
-/// <summary>
-/// Per-op host-side timing for the Vulkan backend. Enabled via
-/// <c>SHARPINFERENCE_VK_PROFILE=1</c>. Captures elapsed wall-clock from <c>EnterOp</c>
-/// to <c>OpScope.Dispose</c> for each public IBackend op, plus the dispatch count.
-///
-/// Wall-clock includes both GPU shader time and any host wait (the <c>DrainAndFlush</c>
-/// → <c>WaitIdleHost</c> at op exit). That ratio is precisely what Phase C1 of the
-/// Vulkan plan needs to validate: if host-wait dominates, replacing the per-op
-/// <c>WaitIdleHost</c> with async timeline-semaphore sync is the next move.
-///
-/// On backend disposal, dumps a top-N table to stderr (or to <c>SHARPINFERENCE_VK_PROFILE_FILE</c>
-/// if set). Cheap when disabled — the OpScope captures one timestamp each side and skips
-/// recording entirely when <see cref="IsEnabled"/> is false.
-/// </summary>
+/// <summary>Per-op host-side timing for the Vulkan backend, enabled via <c>SHARPINFERENCE_VK_PROFILE=1</c>. Captures wall-clock from <c>EnterOp</c> to <c>OpScope.Dispose</c> for each public IBackend op plus the dispatch count. Wall-clock includes GPU shader time and any host wait (the per-op <c>WaitIdleHost</c>) — Phase C1's question is whether host-wait dominates. On backend disposal dumps a top-N table to stderr (or to <c>SHARPINFERENCE_VK_PROFILE_FILE</c>). Cheap when disabled.</summary>
 internal sealed class VulkanProfiler
 {
     private readonly bool _enabled;

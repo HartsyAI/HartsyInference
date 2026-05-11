@@ -3,23 +3,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>
-/// Flux.2 single-stream block. <b>Parallel</b> transformer block (ViT-22B style): the QKV
-/// projections and the SwiGLU MLP gate/up projections all share a single fused input linear
-/// (<c>linear1</c>); the attention output and the SwiGLU MLP output are concatenated and projected
-/// back to hidden via a single fused output linear (<c>linear2</c>).
-/// <para>The block runs on the concatenated <c>[txt, img]</c> sequence (concatenation is done by
-/// the transformer before the first single block). Modulation is shared across all single blocks
-/// and produces 3 params <c>(shift, scale, gate)</c>.</para>
-/// <para>Per-token flow:
-/// <c>norm(LayerNorm) → modulate → linear1 → split [Q,K,V,gate,up] → QK-RMSNorm → RoPE → SDPA → concat[attn, silu(gate)*up] → linear2 → gated residual</c>.
-/// </para>
-/// In the BFL checkpoint the fused weights are stored as:
-/// <c>single_blocks.{i}.linear1.weight: [3*hidden + 2*mlp_inner, hidden]</c> (rows 0..3*hidden = QKV, then gate, then up)
-/// and <c>single_blocks.{i}.linear2.weight: [hidden, hidden + mlp_inner]</c>.
-/// The converter splits <c>linear1</c> into 5 separate weights so QKV and SwiGLU can be computed
-/// as independent matmuls; <c>linear2</c> is kept fused.
-/// </summary>
+/// <summary>Flux.2 single-stream parallel block (ViT-22B style): QKV and SwiGLU gate/up share one fused input linear, attn-out and MLP-out share one fused output linear. Runs on concatenated [txt,img]; modulation shared across all single blocks (3 params: shift/scale/gate). Flow: LayerNorm → modulate → linear1 → split [Q,K,V,gate,up] → QK-RMSNorm → RoPE → SDPA → concat[attn, silu(gate)*up] → linear2 → gated residual. The converter splits BFL's fused linear1 into 5 independent weights; linear2 is kept fused.</summary>
 public sealed unsafe class Flux2SingleBlock
 {
     private readonly int _hiddenSize;
@@ -103,11 +87,7 @@ public sealed unsafe class Flux2SingleBlock
         foreach (Tensor w in _normK.EnumerateWeights()) yield return w;
     }
 
-    /// <summary>
-    /// Forward pass on the concatenated <c>[txt, img]</c> sequence. <paramref name="mod"/> has 3
-    /// elements: <c>(shift, scale, gate)</c>, shape <c>[B, hidden]</c>, shared across all single
-    /// blocks (computed once at the top level).
-    /// </summary>
+    /// <summary>Forward pass on the concatenated <c>[txt, img]</c> sequence. <paramref name="mod"/> has 3 elements <c>(shift, scale, gate)</c>, shape <c>[B, hidden]</c>, shared across all single blocks (computed once at the top level).</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor[] mod, FluxRope rope)
     {
         int batch = (int)hidden.Shape[0];

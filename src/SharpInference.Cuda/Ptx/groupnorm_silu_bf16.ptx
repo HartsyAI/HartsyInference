@@ -1,0 +1,260 @@
+// SharpInference Fused GroupNorm+SiLU kernel - BF16 I/O, FP32 accumulation
+// Three-pass: mean, variance, normalize+affine+SiLU
+// Identical to groupnorm_silu_f16 except for BF16<->F32 conversion at load/store.
+// BF16 = upper 16 bits of F32 (sign + 8-bit exp + 7-bit mantissa).
+// BF16->F32: zero-extend to 32 bits, shift left 16. Lossless.
+// F32->BF16: round-to-nearest-even with NaN preservation, then truncate to upper 16 bits.
+// Launch: gridDim.x = batch * groups, blockDim.x = 256
+// Shared memory: 256 * sizeof(float) = 1024 bytes
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+.extern .shared .f32 sdata[];
+
+// --- groupnorm_silu_bf16 ------------------------------------------------
+// Params: output* (bf16), input* (bf16), weight* (bf16), bias* (bf16),
+//         batch, channels, spatial, groups, eps
+.visible .entry groupnorm_silu_bf16(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u64 param_weight,
+    .param .u64 param_bias,
+    .param .u32 param_batch,
+    .param .u32 param_channels,
+    .param .u32 param_spatial,
+    .param .u32 param_groups,
+    .param .f32 param_eps
+)
+{
+    .reg .u64 %rd<20>;
+    .reg .u32 %r<32>;
+    .reg .f32 %f<20>;
+    .reg .b16 %h<4>;
+    .reg .pred %p<4>;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u64 %rd2, [param_weight];
+    ld.param.u64 %rd3, [param_bias];
+    ld.param.u32 %r0, [param_batch];
+    ld.param.u32 %r1, [param_channels];
+    ld.param.u32 %r2, [param_spatial];
+    ld.param.u32 %r3, [param_groups];
+    ld.param.f32 %f0, [param_eps];
+
+    mov.u32 %r4, %ctaid.x;
+    mov.u32 %r5, %tid.x;
+    mov.u32 %r6, %ntid.x;
+
+    rem.u32 %r7, %r4, %r3;         // group_idx
+    div.u32 %r8, %r4, %r3;         // batch_idx
+    div.u32 %r9, %r1, %r3;         // channels_per_group
+    mul.lo.u32 %r10, %r9, %r2;     // group_size = cpg * spatial
+
+    // Base offset (in elements; multiply by 2 for BF16 byte stride at load/store)
+    mul.lo.u32 %r11, %r8, %r1;
+    mul.lo.u32 %r12, %r7, %r9;
+    add.u32 %r11, %r11, %r12;
+    mul.lo.u32 %r11, %r11, %r2;
+
+    // -- Pass 1: Compute mean (f32 accumulation) --
+    mov.f32 %f1, 0f00000000;
+    mov.u32 %r13, %r5;
+
+gns_bf16_sum_loop:
+    setp.ge.u32 %p1, %r13, %r10;
+    @%p1 bra gns_bf16_sum_done;
+
+    add.u32 %r14, %r11, %r13;
+    cvt.u64.u32 %rd4, %r14;
+    shl.b64 %rd4, %rd4, 1;         // * 2 (bf16 bytes)
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.b16 %h1, [%rd5];
+
+    // BF16 -> F32: zero-extend, shift left 16
+    cvt.u32.u16 %r20, %h1;
+    shl.b32 %r21, %r20, 16;
+    mov.b32 %f2, %r21;
+
+    add.f32 %f1, %f1, %f2;
+
+    add.u32 %r13, %r13, %r6;
+    bra gns_bf16_sum_loop;
+
+gns_bf16_sum_done:
+    cvt.u64.u32 %rd6, %r5;
+    shl.b64 %rd6, %rd6, 2;         // shared mem offset (f32)
+    mov.u64 %rd7, sdata;
+    add.u64 %rd8, %rd7, %rd6;
+    st.shared.f32 [%rd8], %f1;
+    bar.sync 0;
+
+    mov.u32 %r15, 128;
+gns_bf16_reduce_sum:
+    setp.eq.u32 %p2, %r15, 0;
+    @%p2 bra gns_bf16_reduce_sum_done;
+    setp.ge.u32 %p1, %r5, %r15;
+    @%p1 bra gns_bf16_reduce_sum_skip;
+
+    add.u32 %r16, %r5, %r15;
+    cvt.u64.u32 %rd9, %r16;
+    shl.b64 %rd9, %rd9, 2;
+    add.u64 %rd10, %rd7, %rd9;
+    ld.shared.f32 %f3, [%rd10];
+    ld.shared.f32 %f4, [%rd8];
+    add.f32 %f4, %f4, %f3;
+    st.shared.f32 [%rd8], %f4;
+
+gns_bf16_reduce_sum_skip:
+    bar.sync 0;
+    shr.u32 %r15, %r15, 1;
+    bra gns_bf16_reduce_sum;
+
+gns_bf16_reduce_sum_done:
+    ld.shared.f32 %f5, [%rd7];
+    cvt.rn.f32.u32 %f6, %r10;
+    div.rn.f32 %f5, %f5, %f6;     // mean
+    bar.sync 0;
+
+    // -- Pass 2: Compute variance (f32 accumulation) --
+    mov.f32 %f1, 0f00000000;
+    mov.u32 %r13, %r5;
+
+gns_bf16_var_loop:
+    setp.ge.u32 %p1, %r13, %r10;
+    @%p1 bra gns_bf16_var_done;
+
+    add.u32 %r14, %r11, %r13;
+    cvt.u64.u32 %rd4, %r14;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.b16 %h1, [%rd5];
+
+    // BF16 -> F32
+    cvt.u32.u16 %r20, %h1;
+    shl.b32 %r21, %r20, 16;
+    mov.b32 %f2, %r21;
+
+    sub.f32 %f3, %f2, %f5;
+    fma.rn.f32 %f1, %f3, %f3, %f1;
+
+    add.u32 %r13, %r13, %r6;
+    bra gns_bf16_var_loop;
+
+gns_bf16_var_done:
+    st.shared.f32 [%rd8], %f1;
+    bar.sync 0;
+
+    mov.u32 %r15, 128;
+gns_bf16_reduce_var:
+    setp.eq.u32 %p2, %r15, 0;
+    @%p2 bra gns_bf16_reduce_var_done;
+    setp.ge.u32 %p1, %r5, %r15;
+    @%p1 bra gns_bf16_reduce_var_skip;
+
+    add.u32 %r16, %r5, %r15;
+    cvt.u64.u32 %rd9, %r16;
+    shl.b64 %rd9, %rd9, 2;
+    add.u64 %rd10, %rd7, %rd9;
+    ld.shared.f32 %f3, [%rd10];
+    ld.shared.f32 %f4, [%rd8];
+    add.f32 %f4, %f4, %f3;
+    st.shared.f32 [%rd8], %f4;
+
+gns_bf16_reduce_var_skip:
+    bar.sync 0;
+    shr.u32 %r15, %r15, 1;
+    bra gns_bf16_reduce_var;
+
+gns_bf16_reduce_var_done:
+    ld.shared.f32 %f7, [%rd7];
+    div.rn.f32 %f7, %f7, %f6;
+    add.f32 %f8, %f7, %f0;
+    rsqrt.approx.f32 %f8, %f8;    // inv_std
+    bar.sync 0;
+
+    // -- Pass 3: Normalize + affine + SiLU -> bf16 output --
+    mov.u32 %r13, %r5;
+
+gns_bf16_norm_loop:
+    setp.ge.u32 %p1, %r13, %r10;
+    @%p1 bra gns_bf16_done;
+
+    add.u32 %r14, %r11, %r13;
+
+    // channel index
+    div.u32 %r16, %r13, %r2;
+    add.u32 %r17, %r12, %r16;
+
+    // Load input (bf16 -> f32)
+    cvt.u64.u32 %rd4, %r14;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd1, %rd4;
+    ld.global.b16 %h1, [%rd5];
+    cvt.u32.u16 %r20, %h1;
+    shl.b32 %r21, %r20, 16;
+    mov.b32 %f2, %r21;
+
+    // Normalize
+    sub.f32 %f3, %f2, %f5;
+    mul.f32 %f3, %f3, %f8;
+
+    // Affine (weight/bias are bf16)
+    cvt.u64.u32 %rd9, %r17;
+    shl.b64 %rd9, %rd9, 1;         // bf16 byte offset
+    add.u64 %rd10, %rd2, %rd9;
+    ld.global.b16 %h2, [%rd10];
+    cvt.u32.u16 %r22, %h2;
+    shl.b32 %r23, %r22, 16;
+    mov.b32 %f9, %r23;
+
+    add.u64 %rd10, %rd3, %rd9;
+    ld.global.b16 %h3, [%rd10];
+    cvt.u32.u16 %r24, %h3;
+    shl.b32 %r25, %r24, 16;
+    mov.b32 %f10, %r25;
+
+    fma.rn.f32 %f3, %f3, %f9, %f10; // y = norm * weight + bias
+
+    // SiLU: y * sigmoid(y) = y / (1 + exp(-y))
+    neg.f32 %f11, %f3;
+    mov.f32 %f12, 0f3FB8AA3B;     // log2(e)
+    mul.f32 %f11, %f11, %f12;     // -y * log2(e)
+    ex2.approx.f32 %f13, %f11;    // exp(-y)
+    mov.f32 %f14, 0f3F800000;     // 1.0
+    add.f32 %f15, %f13, %f14;     // 1 + exp(-y)
+    rcp.approx.f32 %f15, %f15;    // sigmoid(y)
+    mul.f32 %f3, %f3, %f15;       // y * sigmoid(y)
+
+    // Store output (f32 -> bf16, RTNE with NaN preservation)
+    mov.b32 %r26, %f3;
+    and.b32 %r27, %r26, 2147483647;       // strip sign bit
+    setp.gt.u32 %p3, %r27, 2139095040;    // > +inf -> NaN
+    @%p3 bra gns_bf16_isnan;
+
+    shr.b32 %r28, %r26, 16;
+    and.b32 %r29, %r28, 1;
+    add.u32 %r30, %r29, 32767;            // 0x7FFF
+    add.u32 %r31, %r26, %r30;
+    shr.b32 %r31, %r31, 16;
+    bra gns_bf16_store;
+
+gns_bf16_isnan:
+    shr.b32 %r31, %r26, 16;
+    or.b32 %r31, %r31, 64;                // ensure quiet NaN
+
+gns_bf16_store:
+    cvt.u16.u32 %h1, %r31;
+    cvt.u64.u32 %rd4, %r14;
+    shl.b64 %rd4, %rd4, 1;
+    add.u64 %rd5, %rd0, %rd4;
+    st.global.b16 [%rd5], %h1;
+
+    add.u32 %r13, %r13, %r6;
+    bra gns_bf16_norm_loop;
+
+gns_bf16_done:
+    ret;
+}

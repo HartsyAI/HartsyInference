@@ -1,7 +1,7 @@
 namespace SharpInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for UNet2DConditionModel. Covers SD1.5 and SDXL variants.</summary>
-public record UNetConfig
+public sealed record UNetConfig
 {
     /// <summary>Number of input channels (4 for SD1.5/SDXL latent space).</summary>
     public int InChannels { get; init; } = 4;

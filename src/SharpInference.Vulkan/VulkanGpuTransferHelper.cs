@@ -3,14 +3,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Vulkan;
 
-/// <summary>
-/// Vulkan analogue of <c>SharpInference.Cuda.GpuTransferHelper</c>. Holds two caches keyed by Tensor reference:
-/// <list type="bullet">
-///   <item><description>Weight cache: permanent until <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>.</description></item>
-///   <item><description>Activation cache: set by <see cref="CacheActivation"/> after each op, consumed by next op's <see cref="CopyToDevice"/>.</description></item>
-/// </list>
-/// Lazy-sync callbacks on the Tensor mirror CUDA's behavior so model code may freely access <c>DataPointer</c>.
-/// </summary>
+/// <summary>Vulkan analogue of <c>SharpInference.Cuda.GpuTransferHelper</c>. Holds a weight cache (permanent until <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>) and an activation cache (set by <see cref="CacheActivation"/> after each op, consumed by the next op's <see cref="CopyToDevice"/>), both keyed by Tensor reference. Lazy-sync callbacks on the Tensor mirror CUDA so model code may freely access <c>DataPointer</c>.</summary>
 public sealed class VulkanGpuTransferHelper : IDisposable
 {
     private readonly Dictionary<Tensor, VulkanBuffer> _weightCache = new(ReferenceEqualityComparer.Instance);

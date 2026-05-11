@@ -4,33 +4,7 @@ using SharpInference.ModelHandler.SafeTensors;
 
 namespace SharpInference.ModelHandler.CheckpointConverters;
 
-/// <summary>Converts <c>fal/AuraFlow-v0.3</c> single-file safetensors (BFL-style native naming) to
-/// diffusers-format weight dictionaries for our C# <see cref="SharpInference.Diffusion.Models.Denoisers.AuraFlowTransformer"/>.
-///
-/// Mirrors <c>diffusers/loaders/single_file_utils.py:convert_auraflow_transformer_checkpoint_to_diffusers</c>:
-/// <list type="bullet">
-/// <item><c>double_layers.{i}.modX.1.weight</c> → <c>joint_transformer_blocks.{i}.norm1.linear.weight</c></item>
-/// <item><c>double_layers.{i}.modC.1.weight</c> → <c>joint_transformer_blocks.{i}.norm1_context.linear.weight</c></item>
-/// <item><c>double_layers.{i}.attn.w2{q,k,v,o}.weight</c> → image attention <c>attn.to_q/to_k/to_v/to_out.0</c></item>
-/// <item><c>double_layers.{i}.attn.w1{q,k,v,o}.weight</c> → text attention <c>attn.add_q_proj/add_k_proj/add_v_proj/to_add_out</c></item>
-/// <item><c>double_layers.{i}.mlpX.{c_fc1,c_fc2,c_proj}.weight</c> → image FFN <c>ff.linear_1/linear_2/out_projection</c></item>
-/// <item><c>double_layers.{i}.mlpC.*</c> → text FFN <c>ff_context.*</c></item>
-/// <item><c>single_layers.{i}.modCX.1.weight</c> → <c>single_transformer_blocks.{i}.norm1.linear.weight</c></item>
-/// <item><c>single_layers.{i}.attn.w1{q,k,v,o}.weight</c> → single attention <c>attn.to_q/to_k/to_v/to_out.0</c></item>
-/// <item><c>single_layers.{i}.mlp.{c_fc1,c_fc2,c_proj}.weight</c> → single FFN <c>ff.*</c></item>
-/// <item><c>final_linear.weight</c> → <c>proj_out.weight</c></item>
-/// <item><c>modF.1.weight</c> → <c>norm_out.linear.weight</c> with <see cref="SwapScaleShiftHalves"/> applied
-/// (BFL native is <c>[shift, scale]</c>; diffusers' <c>AuraFlowPreFinalBlock</c> chunks as <c>[scale, shift]</c>).</item>
-/// <item><c>positional_encoding</c> → <c>pos_embed.pos_embed</c></item>
-/// <item><c>register_tokens</c> → <c>register_tokens</c> (passthrough)</item>
-/// <item><c>cond_seq_linear.weight</c> → <c>context_embedder.weight</c></item>
-/// <item><c>t_embedder.mlp.{0,2}.{weight,bias}</c> → <c>time_step_proj.linear_{1,2}.{weight,bias}</c></item>
-/// </list>
-///
-/// AuraFlow's BFL single-file is bias-free for attention and FFN; only timestep MLP has biases.
-/// Pile-T5-XL text encoder weights are shipped separately by <c>fal/AuraFlow-v0.3</c> in <c>text_encoder/</c>
-/// (diffusers folder layout) — not included in the single-file safetensors. Same for the SDXL VAE.
-/// </summary>
+/// <summary>Converts <c>fal/AuraFlow-v0.3</c> single-file safetensors (BFL-style native naming) to diffusers-format weight dictionaries for the C# AuraFlowTransformer. Mirrors <c>diffusers/loaders/single_file_utils.py:convert_auraflow_transformer_checkpoint_to_diffusers</c>. AuraFlow's BFL single-file is bias-free for attention and FFN (only timestep MLP has biases); Pile-T5-XL and the SDXL VAE ship separately in the diffusers folder layout.</summary>
 public sealed class AuraFlowCheckpointConverter
 {
     /// <summary>Result of converting a single-file AuraFlow checkpoint. The <c>calcuis/aura</c> FP8 single-file
