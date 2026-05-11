@@ -124,7 +124,11 @@ public sealed class StableDiffusion15Pipeline : IDisposable
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Sd15,
+            });
         }
 
         textEmbeddings.Dispose();
@@ -393,7 +397,11 @@ public sealed class StableDiffusion15Pipeline : IDisposable
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{totalSteps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Sd15,
+            });
         }
 
         return latent;

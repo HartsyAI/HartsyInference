@@ -342,6 +342,14 @@ public sealed class VaeDecoder
         }
         float* latentPtr = (float*)latent.DataPointer;
 
+        // The VAE weights are loaded at a specific dtype (BF16 on Ampere+ for SDXL,
+        // F32 elsewhere). After we slice an F32 tile out of the latent, we must cast
+        // the slice to match the weight dtype before calling Decode â otherwise
+        // Decode's per-op dispatch picks the F32 kernel which reads BF16 weights as
+        // F32 garbage. This is the analog of the SdxlPipeline match-to-VAE cast, but
+        // at per-tile granularity. Sample dtype from any weight tensor.
+        DType vaeDtype = EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
+
         for (int ty = 0; ty < nTilesH; ty++)
         {
             int latentY = Math.Min(ty * strideLatent, latentH - tileLatentSize);
@@ -374,12 +382,21 @@ public sealed class VaeDecoder
                     }
                 }
 
-                // 2. Decode the tile at the latent's native dtype → RGB tile [B, 3, tileH*8, tileW*8].
-                // Decode propagates input.DType throughout; if the caller cast to F16 before
-                // calling DecodeTiled, this stays F16 internally and saves workspace memory.
-                // If the caller passed F32 (default), the whole tile decode runs in F32.
-                Tensor rgbTile = Decode(backend, latentSlice);
-                latentSlice.Dispose();
+                // 2. Decode the tile. We need to feed Decode at the same dtype its
+                // weights are loaded in â otherwise the per-op dispatch picks the wrong
+                // kernel and reads the weights at the wrong width. Cast the F32 slice to
+                // vaeDtype if they differ.
+                Tensor tileInput = latentSlice;
+                if (vaeDtype != DType.F32)
+                {
+                    tileInput = new Tensor(sliceShape, vaeDtype);
+                    if (vaeDtype == DType.F16) backend.CastToF16(tileInput, latentSlice);
+                    else if (vaeDtype == DType.BF16) backend.CastToBf16(tileInput, latentSlice);
+                    else throw new InvalidOperationException($"Unsupported VAE dtype: {vaeDtype}");
+                    latentSlice.Dispose();
+                }
+                Tensor rgbTile = Decode(backend, tileInput);
+                tileInput.Dispose();
 
                 int rgbTileH = actualTileH * SpatialScale;
                 int rgbTileW = actualTileW * SpatialScale;

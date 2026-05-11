@@ -514,7 +514,11 @@ public sealed unsafe class SdxlPipeline : IDisposable
             stepSw.Stop();
             string cacheInfo = GetBackendCacheStats();
             Logs.Info($"Step {i + 1}/{totalSteps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms{cacheInfo}");
-            onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, totalSteps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.Sdxl,
+            });
         }
 
         return latent;

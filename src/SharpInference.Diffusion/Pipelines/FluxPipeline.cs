@@ -322,7 +322,14 @@ public sealed unsafe class FluxPipeline : IDisposable
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            // Latent is the packed [B, S, 64] form (16 channels × 2×2 patches per token).
+            // LatentPreview.DecodeLatent2Rgb expects unpacked NCHW, so leave Latent null
+            // here — consumers see LatentArch=Flux but no preview yet. Wiring packed-latent
+            // unpack into LatentPreview is a follow-up.
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                LatentArch = LatentArchitecture.Flux,
+            });
         }
 
         clipPooled.Dispose();

@@ -176,7 +176,12 @@ public sealed unsafe class ChromaPipeline : IDisposable
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            // packedLatent is Flux-style packed; LatentPreview needs unpacked NCHW.
+            // Leave Latent null until packed-latent support lands.
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                LatentArch = LatentArchitecture.Chroma,
+            });
         }
 
         condContext.Dispose();

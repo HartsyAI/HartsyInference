@@ -127,7 +127,11 @@ public sealed unsafe class FLitePipeline : IDisposable
 
             stepSw.Stop();
             Logs.Info($"F-Lite step {step + 1}/{steps} (t={t:F3} → {tNext:F3}, dt={dt:F3}) done in {stepSw.ElapsedMilliseconds}ms.");
-            onProgress?.Invoke(new GenerationProgress(step + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(step + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latent,
+                LatentArch = LatentArchitecture.FLite,
+            });
         }
         accumulator.Dispose();
         positiveContext.Dispose();

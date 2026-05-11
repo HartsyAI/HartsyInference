@@ -165,7 +165,12 @@ public sealed unsafe class Flux2Pipeline : IDisposable
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            // packedLatent is [B, S, 128] (32 channels × 2×2 patches); LatentPreview needs
+            // unpacked NCHW. Leave Latent null until packed-latent support lands.
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                LatentArch = LatentArchitecture.Flux2,
+            });
         }
 
         textEmbeddings.Dispose();
