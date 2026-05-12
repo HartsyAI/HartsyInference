@@ -73,6 +73,31 @@ public sealed record LlamaStyleEncoderConfig
     /// Llama / Qwen use 2 norms.</summary>
     public bool HasFfnSandwichNorms { get; init; } = false;
 
+    /// <summary>Qwen3-0.6B-Base preset (28 layers, hidden=1024, GQA 16:8, head_dim=128, intermediate=3072,
+    /// vocab=151936). Q dim = 16×128 = 2048, K/V dim = 8×128 = 1024 — attention projections are wider than
+    /// the hidden size (Qwen3 0.6B's signature property). Used by Anima as its text encoder
+    /// (<c>circlestone-labs/Anima/text_encoders/qwen_3_06b_base.safetensors</c>). Per
+    /// <c>Qwen/Qwen3-0.6B-Base/config.json</c>: <c>tie_word_embeddings=true</c>, theta=1M, RMSNorm eps=1e-6,
+    /// max_position=32768.</summary>
+    public static LlamaStyleEncoderConfig Qwen3_0_6B => new()
+    {
+        HiddenSize = 1024,
+        NumLayers = 28,
+        NumQueryHeads = 16,
+        NumKvHeads = 8,
+        HeadDim = 128,
+        IntermediateSize = 3072,
+        VocabSize = 151936,
+        RmsNormEps = 1e-6f,
+        RopeTheta = 1_000_000f,
+        MaxPositionEmbeddings = 32768,
+        QkHeadNorm = true,
+        AttentionBias = false,
+        HasFinalNorm = true,
+        EosTokenId = 151645,
+        BosTokenId = 151643,
+    };
+
     /// <summary>Qwen3-4B preset (36 layers, hidden=2560, GQA 32:8, head_dim=128, vocab=151936). Matches the safetensors at Comfy-Org/Flux2-klein/text_encoders/qwen_3_4b.safetensors.</summary>
     public static LlamaStyleEncoderConfig Qwen3_4B => new()
     {

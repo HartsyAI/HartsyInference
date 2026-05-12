@@ -3,187 +3,156 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>Anima / Cosmos-Predict2 transformer block. Three sub-blocks (self-attn, cross-attn, FFN) each gated by its own
-/// <c>CosmosAdaLayerNormZero</c> module. The AdaLN-Zero produces <c>(shift, scale, gate)</c> from <c>embedded_timestep</c>
-/// (with an additive contribution from <c>temb</c>):
+/// <summary>Anima / Cosmos-Predict2 DiT transformer block. Three sub-blocks (self-attn, cross-attn, FFN), each gated by
+/// its own AdaLN-LoRA modulator. All weight shapes verified against the actual Anima checkpoint
+/// <c>anima-preview3-base.safetensors</c>:
+///
+/// <para><b>AdaLN-LoRA modulators:</b> Each block has three independent modulators
+/// (<c>adaln_modulation_{self_attn,cross_attn,mlp}</c>). The forward is:</para>
 /// <code>
-///     y = linear_2(silu(linear_1(embedded_timestep)))   # [B, 3*hidden]
-///     y = y + temb[..., :3*hidden]                      # broadcast add
-///     shift, scale, gate = y.chunk(3, dim=-1)
-///     x = norm(x) * (1 + scale) + shift                 # norm = LayerNorm-no-affine
+/// y1 = Linear[256, 2048] @ silu(embedded_timestep)   # [B, 256]   — bottleneck
+/// y2 = Linear[6144, 256] @ y1                        # [B, 6144]  — expand to 3*hidden
+/// y = y2 + temb[:6144]                               # add main temb slice
+/// shift, scale, gate = chunk(y, 3, dim=-1)           # each [B, 2048]
+/// x = norm(x) * (1 + scale) + shift                  # LayerNorm-no-affine, then modulate
 /// </code>
-/// The norm is unparameterized LayerNorm (Cosmos uses <c>nn.LayerNorm(elementwise_affine=False, ...)</c>). The block runs:
-/// <list type="number">
-///   <item>norm1+modulate → SDPA self-attention with QK-RMSNorm + 3D RoPE on Q,K → gated residual.</item>
-///   <item>norm2+modulate → SDPA cross-attention (Q from hidden, K/V from <paramref name="encoderHidden"/>) → gated residual.</item>
-///   <item>norm3+modulate → Linear(hidden→ffn)+GELU+Linear(ffn→hidden) → gated residual.</item>
-/// </list>
-/// All attention linears default to <c>bias=True</c> in the upstream Cosmos config; FFN linears do too. We carry biases when
-/// present and skip cleanly when absent.</summary>
+/// No biases on any AdaLN linear.
+///
+/// <para><b>Self-attention</b>: standard SDPA with QK-RMSNorm (per-head_dim scale length 128) and 3D RoPE on Q/K.
+/// All projections (Q, K, V, output) are <c>[2048, 2048]</c>, no biases.</para>
+///
+/// <para><b>Cross-attention</b>: Q from hidden (<c>[2048, 2048]</c>), K/V from <see cref="AnimaLlmAdapter"/> output
+/// (<c>[2048, 1024]</c>) — the LlmAdapter emits 1024-dim refined Qwen-3 features, and the DiT consumes them via a
+/// rectangular K/V projection. Output projection <c>[2048, 2048]</c>. Per-head_dim QK-RMSNorm (length 128). No biases.</para>
+///
+/// <para><b>FFN</b>: <c>Linear[8192, 2048] → GELU → Linear[2048, 8192]</c>, named <c>mlp.layer1</c> / <c>mlp.layer2</c>.
+/// No biases.</para></summary>
 public sealed unsafe class AnimaBlock
 {
     private readonly int _hidden;
     private readonly int _numHeads;
     private readonly int _headDim;
     private readonly int _ffnHidden;
+    private readonly int _adaLnRank;
+    private readonly int _adaLnExpandWidth;  // = 3 * hidden, the post-expand width of the AdaLN-LoRA output.
     private readonly float _eps;
     private readonly float _qkEps;
 
-    private readonly QkNorm _normQ1;
-    private readonly QkNorm _normK1;
-    private readonly QkNorm _normQ2;
-    private readonly QkNorm _normK2;
+    private readonly QkNorm _selfQNorm;
+    private readonly QkNorm _selfKNorm;
+    private readonly QkNorm _crossQNorm;
+    private readonly QkNorm _crossKNorm;
 
-    // AdaLN_Zero #1 (self-attn): linear_1 [hidden, hidden], linear_2 [hidden, 3*hidden].
-    private Tensor? _norm1Linear1Weight, _norm1Linear1Bias;
-    private Tensor? _norm1Linear2Weight, _norm1Linear2Bias;
+    // AdaLN-LoRA modulators (3 per block: self-attn, cross-attn, mlp). Each has:
+    //   .1.weight [rank=256, hidden=2048]  — bottleneck projection
+    //   .2.weight [3*hidden=6144, rank=256] — expand projection
+    // No biases.
+    private Tensor? _adaSelfL1, _adaSelfL2;
+    private Tensor? _adaCrossL1, _adaCrossL2;
+    private Tensor? _adaMlpL1, _adaMlpL2;
 
-    // AdaLN_Zero #2 (cross-attn): same shape as #1.
-    private Tensor? _norm2Linear1Weight, _norm2Linear1Bias;
-    private Tensor? _norm2Linear2Weight, _norm2Linear2Bias;
+    // Self-attention projections.
+    private Tensor? _selfQ, _selfK, _selfV, _selfOut;
 
-    // AdaLN_Zero #3 (FFN): same shape.
-    private Tensor? _norm3Linear1Weight, _norm3Linear1Bias;
-    private Tensor? _norm3Linear2Weight, _norm3Linear2Bias;
+    // Cross-attention projections.
+    private Tensor? _crossQ;          // [hidden, hidden]
+    private Tensor? _crossK, _crossV; // [hidden, kvDim] where kvDim is the LlmAdapter hidden (1024).
+    private Tensor? _crossOut;        // [hidden, hidden]
 
-    // Self-attention (attn1): to_q [hidden, hidden], to_k [hidden, hidden], to_v [hidden, hidden], to_out [hidden, hidden].
-    private Tensor? _attn1QWeight, _attn1QBias;
-    private Tensor? _attn1KWeight, _attn1KBias;
-    private Tensor? _attn1VWeight, _attn1VBias;
-    private Tensor? _attn1OutWeight, _attn1OutBias;
+    // MLP (no biases).
+    private Tensor? _mlp1, _mlp2;
 
-    // Cross-attention (attn2): Q from hidden [hidden, hidden], K/V from text [hidden, hidden] (post crossattn_proj),
-    // to_out [hidden, hidden].
-    private Tensor? _attn2QWeight, _attn2QBias;
-    private Tensor? _attn2KWeight, _attn2KBias;
-    private Tensor? _attn2VWeight, _attn2VBias;
-    private Tensor? _attn2OutWeight, _attn2OutBias;
+    private int _kvDim;  // Inferred from cross_attn.k_proj weight shape at LoadWeights time.
 
-    // FFN (ff): net.0.proj [ffn, hidden], net.2 [hidden, ffn] in the diffusers FeedForward layout.
-    private Tensor? _ffLinear1Weight, _ffLinear1Bias;
-    private Tensor? _ffLinear2Weight, _ffLinear2Bias;
-
-    public AnimaBlock(int hidden, int numHeads, int ffnHidden, float eps = 1e-6f, float qkEps = 1e-6f)
+    public AnimaBlock(int hidden, int numHeads, int headDim, int ffnHidden, int adaLnRank, float eps = 1e-6f, float qkEps = 1e-6f)
     {
-        if (hidden % numHeads != 0)
-            throw new ArgumentException($"hidden {hidden} must be divisible by numHeads {numHeads}.", nameof(hidden));
+        if (hidden != numHeads * headDim)
+            throw new ArgumentException(
+                $"hidden {hidden} != numHeads {numHeads} × headDim {headDim} ({numHeads * headDim}).", nameof(hidden));
         _hidden = hidden;
         _numHeads = numHeads;
-        _headDim = hidden / numHeads;
+        _headDim = headDim;
         _ffnHidden = ffnHidden;
+        _adaLnRank = adaLnRank;
+        _adaLnExpandWidth = 3 * hidden;
         _eps = eps;
         _qkEps = qkEps;
-        _normQ1 = new QkNorm(_headDim, qkEps);
-        _normK1 = new QkNorm(_headDim, qkEps);
-        _normQ2 = new QkNorm(_headDim, qkEps);
-        _normK2 = new QkNorm(_headDim, qkEps);
+        _selfQNorm = new QkNorm(headDim, qkEps);
+        _selfKNorm = new QkNorm(headDim, qkEps);
+        _crossQNorm = new QkNorm(headDim, qkEps);
+        _crossKNorm = new QkNorm(headDim, qkEps);
     }
 
-    /// <summary>Loads weights from a diffusers-style key dict. <paramref name="prefix"/> is e.g. <c>transformer_blocks.0</c>.</summary>
+    /// <summary>Loads block weights from the converter-stripped DiT trunk bucket. <paramref name="prefix"/>
+    /// is e.g. <c>blocks.0</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        // ── AdaLN-Zero #1 (self-attn) ──
-        _norm1Linear1Weight = weights[$"{prefix}.norm1.linear_1.weight"];
-        weights.TryGetValue($"{prefix}.norm1.linear_1.bias", out _norm1Linear1Bias);
-        _norm1Linear2Weight = weights[$"{prefix}.norm1.linear_2.weight"];
-        weights.TryGetValue($"{prefix}.norm1.linear_2.bias", out _norm1Linear2Bias);
+        // ── AdaLN-LoRA modulators (3 per block) ──
+        _adaSelfL1 = weights[$"{prefix}.adaln_modulation_self_attn.1.weight"];
+        _adaSelfL2 = weights[$"{prefix}.adaln_modulation_self_attn.2.weight"];
+        _adaCrossL1 = weights[$"{prefix}.adaln_modulation_cross_attn.1.weight"];
+        _adaCrossL2 = weights[$"{prefix}.adaln_modulation_cross_attn.2.weight"];
+        _adaMlpL1 = weights[$"{prefix}.adaln_modulation_mlp.1.weight"];
+        _adaMlpL2 = weights[$"{prefix}.adaln_modulation_mlp.2.weight"];
 
-        // ── AdaLN-Zero #2 (cross-attn) ──
-        _norm2Linear1Weight = weights[$"{prefix}.norm2.linear_1.weight"];
-        weights.TryGetValue($"{prefix}.norm2.linear_1.bias", out _norm2Linear1Bias);
-        _norm2Linear2Weight = weights[$"{prefix}.norm2.linear_2.weight"];
-        weights.TryGetValue($"{prefix}.norm2.linear_2.bias", out _norm2Linear2Bias);
+        // ── Self-attention ──
+        _selfQ = weights[$"{prefix}.self_attn.q_proj.weight"];
+        _selfK = weights[$"{prefix}.self_attn.k_proj.weight"];
+        _selfV = weights[$"{prefix}.self_attn.v_proj.weight"];
+        _selfOut = weights[$"{prefix}.self_attn.output_proj.weight"];
+        _selfQNorm.LoadWeights(weights[$"{prefix}.self_attn.q_norm.weight"]);
+        _selfKNorm.LoadWeights(weights[$"{prefix}.self_attn.k_norm.weight"]);
 
-        // ── AdaLN-Zero #3 (FFN) ──
-        _norm3Linear1Weight = weights[$"{prefix}.norm3.linear_1.weight"];
-        weights.TryGetValue($"{prefix}.norm3.linear_1.bias", out _norm3Linear1Bias);
-        _norm3Linear2Weight = weights[$"{prefix}.norm3.linear_2.weight"];
-        weights.TryGetValue($"{prefix}.norm3.linear_2.bias", out _norm3Linear2Bias);
+        // ── Cross-attention ──
+        _crossQ = weights[$"{prefix}.cross_attn.q_proj.weight"];
+        _crossK = weights[$"{prefix}.cross_attn.k_proj.weight"];
+        _crossV = weights[$"{prefix}.cross_attn.v_proj.weight"];
+        _crossOut = weights[$"{prefix}.cross_attn.output_proj.weight"];
+        _crossQNorm.LoadWeights(weights[$"{prefix}.cross_attn.q_norm.weight"]);
+        _crossKNorm.LoadWeights(weights[$"{prefix}.cross_attn.k_norm.weight"]);
 
-        // ── Self-attn ──
-        _attn1QWeight = weights[$"{prefix}.attn1.to_q.weight"];
-        weights.TryGetValue($"{prefix}.attn1.to_q.bias", out _attn1QBias);
-        _attn1KWeight = weights[$"{prefix}.attn1.to_k.weight"];
-        weights.TryGetValue($"{prefix}.attn1.to_k.bias", out _attn1KBias);
-        _attn1VWeight = weights[$"{prefix}.attn1.to_v.weight"];
-        weights.TryGetValue($"{prefix}.attn1.to_v.bias", out _attn1VBias);
-        _attn1OutWeight = weights[$"{prefix}.attn1.to_out.0.weight"];
-        weights.TryGetValue($"{prefix}.attn1.to_out.0.bias", out _attn1OutBias);
+        // K/V input dim is inferred from the K-projection weight: shape is [out_features=hidden, in_features=kvDim].
+        _kvDim = (int)_crossK.Shape[1];
 
-        _normQ1.LoadWeights(weights[$"{prefix}.attn1.norm_q.weight"]);
-        _normK1.LoadWeights(weights[$"{prefix}.attn1.norm_k.weight"]);
-
-        // ── Cross-attn ──
-        _attn2QWeight = weights[$"{prefix}.attn2.to_q.weight"];
-        weights.TryGetValue($"{prefix}.attn2.to_q.bias", out _attn2QBias);
-        _attn2KWeight = weights[$"{prefix}.attn2.to_k.weight"];
-        weights.TryGetValue($"{prefix}.attn2.to_k.bias", out _attn2KBias);
-        _attn2VWeight = weights[$"{prefix}.attn2.to_v.weight"];
-        weights.TryGetValue($"{prefix}.attn2.to_v.bias", out _attn2VBias);
-        _attn2OutWeight = weights[$"{prefix}.attn2.to_out.0.weight"];
-        weights.TryGetValue($"{prefix}.attn2.to_out.0.bias", out _attn2OutBias);
-
-        _normQ2.LoadWeights(weights[$"{prefix}.attn2.norm_q.weight"]);
-        _normK2.LoadWeights(weights[$"{prefix}.attn2.norm_k.weight"]);
-
-        // ── FFN — diffusers FeedForward stores the inner linear at `ff.net.0.proj` and the output at `ff.net.2`. ──
-        _ffLinear1Weight = weights[$"{prefix}.ff.net.0.proj.weight"];
-        weights.TryGetValue($"{prefix}.ff.net.0.proj.bias", out _ffLinear1Bias);
-        _ffLinear2Weight = weights[$"{prefix}.ff.net.2.weight"];
-        weights.TryGetValue($"{prefix}.ff.net.2.bias", out _ffLinear2Bias);
+        // ── MLP ──
+        _mlp1 = weights[$"{prefix}.mlp.layer1.weight"];
+        _mlp2 = weights[$"{prefix}.mlp.layer2.weight"];
     }
 
-    /// <summary>Enumerates all weights for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        if (_norm1Linear1Weight is not null) yield return _norm1Linear1Weight;
-        if (_norm1Linear1Bias is not null) yield return _norm1Linear1Bias;
-        if (_norm1Linear2Weight is not null) yield return _norm1Linear2Weight;
-        if (_norm1Linear2Bias is not null) yield return _norm1Linear2Bias;
-        if (_norm2Linear1Weight is not null) yield return _norm2Linear1Weight;
-        if (_norm2Linear1Bias is not null) yield return _norm2Linear1Bias;
-        if (_norm2Linear2Weight is not null) yield return _norm2Linear2Weight;
-        if (_norm2Linear2Bias is not null) yield return _norm2Linear2Bias;
-        if (_norm3Linear1Weight is not null) yield return _norm3Linear1Weight;
-        if (_norm3Linear1Bias is not null) yield return _norm3Linear1Bias;
-        if (_norm3Linear2Weight is not null) yield return _norm3Linear2Weight;
-        if (_norm3Linear2Bias is not null) yield return _norm3Linear2Bias;
-        if (_attn1QWeight is not null) yield return _attn1QWeight;
-        if (_attn1QBias is not null) yield return _attn1QBias;
-        if (_attn1KWeight is not null) yield return _attn1KWeight;
-        if (_attn1KBias is not null) yield return _attn1KBias;
-        if (_attn1VWeight is not null) yield return _attn1VWeight;
-        if (_attn1VBias is not null) yield return _attn1VBias;
-        if (_attn1OutWeight is not null) yield return _attn1OutWeight;
-        if (_attn1OutBias is not null) yield return _attn1OutBias;
-        foreach (Tensor w in _normQ1.EnumerateWeights()) yield return w;
-        foreach (Tensor w in _normK1.EnumerateWeights()) yield return w;
-        if (_attn2QWeight is not null) yield return _attn2QWeight;
-        if (_attn2QBias is not null) yield return _attn2QBias;
-        if (_attn2KWeight is not null) yield return _attn2KWeight;
-        if (_attn2KBias is not null) yield return _attn2KBias;
-        if (_attn2VWeight is not null) yield return _attn2VWeight;
-        if (_attn2VBias is not null) yield return _attn2VBias;
-        if (_attn2OutWeight is not null) yield return _attn2OutWeight;
-        if (_attn2OutBias is not null) yield return _attn2OutBias;
-        foreach (Tensor w in _normQ2.EnumerateWeights()) yield return w;
-        foreach (Tensor w in _normK2.EnumerateWeights()) yield return w;
-        if (_ffLinear1Weight is not null) yield return _ffLinear1Weight;
-        if (_ffLinear1Bias is not null) yield return _ffLinear1Bias;
-        if (_ffLinear2Weight is not null) yield return _ffLinear2Weight;
-        if (_ffLinear2Bias is not null) yield return _ffLinear2Bias;
+        if (_adaSelfL1 is not null) yield return _adaSelfL1;
+        if (_adaSelfL2 is not null) yield return _adaSelfL2;
+        if (_adaCrossL1 is not null) yield return _adaCrossL1;
+        if (_adaCrossL2 is not null) yield return _adaCrossL2;
+        if (_adaMlpL1 is not null) yield return _adaMlpL1;
+        if (_adaMlpL2 is not null) yield return _adaMlpL2;
+        if (_selfQ is not null) yield return _selfQ;
+        if (_selfK is not null) yield return _selfK;
+        if (_selfV is not null) yield return _selfV;
+        if (_selfOut is not null) yield return _selfOut;
+        foreach (Tensor w in _selfQNorm.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _selfKNorm.EnumerateWeights()) yield return w;
+        if (_crossQ is not null) yield return _crossQ;
+        if (_crossK is not null) yield return _crossK;
+        if (_crossV is not null) yield return _crossV;
+        if (_crossOut is not null) yield return _crossOut;
+        foreach (Tensor w in _crossQNorm.EnumerateWeights()) yield return w;
+        foreach (Tensor w in _crossKNorm.EnumerateWeights()) yield return w;
+        if (_mlp1 is not null) yield return _mlp1;
+        if (_mlp2 is not null) yield return _mlp2;
     }
 
-    /// <summary>Forward pass.</summary>
+    /// <summary>Forward pass through one DiT block.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="hidden">Image token sequence <c>[B, S, hidden]</c>.</param>
-    /// <param name="encoderHidden">Text encoder hiddens projected to model hidden, <c>[B, T, hidden]</c>.</param>
-    /// <param name="embeddedTimestep">Per-batch timestep features <c>[B, hidden]</c> (the RMSNorm'd sin/cos vector).</param>
-    /// <param name="temb">Per-batch processed timestep <c>[B, condition_dim]</c>; <c>condition_dim ≥ 3*hidden</c>. Added to AdaLN <c>linear_2</c> output.</param>
+    /// <param name="encoderHidden">Refined text features from <see cref="AnimaLlmAdapter"/>, <c>[B, T, kvDim=1024]</c>.</param>
+    /// <param name="embeddedTimestep">RMSNorm'd sin/cos vector <c>[B, 2048]</c> — input to the AdaLN-LoRA bottleneck.</param>
+    /// <param name="temb">Processed timestep <c>[B, 6144]</c> — added to the AdaLN-LoRA expand output before chunking.</param>
     /// <param name="ropeCos">RoPE cos table <c>[S, headDim]</c> for image self-attn.</param>
     /// <param name="ropeSin">RoPE sin table <c>[S, headDim]</c> for image self-attn.</param>
     /// <param name="rope">RoPE applier (re-used across blocks).</param>
-    /// <param name="crossAttentionMask">Optional cross-attn mask <c>[B, 1, 1, T]</c> with 0 for valid, large-negative for padded text.</param>
+    /// <param name="crossAttentionMask">Optional cross-attn mask <c>[B, 1, 1, T]</c>.</param>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoderHidden,
         Tensor embeddedTimestep, Tensor temb,
         Tensor ropeCos, Tensor ropeSin, AnimaRope rope,
@@ -193,22 +162,19 @@ public sealed unsafe class AnimaBlock
         int seqLen = (int)hidden.Shape[1];
         int textSeq = (int)encoderHidden.Shape[1];
         TensorShape hiddenShape = new TensorShape(batch, seqLen, _hidden);
-        TensorShape textShape = new TensorShape(batch, textSeq, _hidden);
 
-        // ── 1. AdaLN-Zero #1 + self-attention ──
-        (Tensor norm1, Tensor gate1) = ApplyAdaLnZero(backend, hidden, embeddedTimestep, temb,
-            _norm1Linear1Weight!, _norm1Linear1Bias, _norm1Linear2Weight!, _norm1Linear2Bias,
-            batch, seqLen);
+        // ── 1. AdaLN-LoRA #1 + self-attention ──
+        (Tensor norm1, Tensor gate1) = ApplyAdaLnLora(backend, hidden, embeddedTimestep, temb,
+            _adaSelfL1!, _adaSelfL2!, batch, seqLen);
         Tensor attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch, seqLen);
         norm1.Dispose();
         Tensor afterAttn1 = AddGated(hidden, attn1Out, gate1, batch, seqLen, _hidden);
         attn1Out.Dispose();
         gate1.Dispose();
 
-        // ── 2. AdaLN-Zero #2 + cross-attention ──
-        (Tensor norm2, Tensor gate2) = ApplyAdaLnZero(backend, afterAttn1, embeddedTimestep, temb,
-            _norm2Linear1Weight!, _norm2Linear1Bias, _norm2Linear2Weight!, _norm2Linear2Bias,
-            batch, seqLen);
+        // ── 2. AdaLN-LoRA #2 + cross-attention ──
+        (Tensor norm2, Tensor gate2) = ApplyAdaLnLora(backend, afterAttn1, embeddedTimestep, temb,
+            _adaCrossL1!, _adaCrossL2!, batch, seqLen);
         Tensor attn2Out = CrossAttention(backend, norm2, encoderHidden, crossAttentionMask, batch, seqLen, textSeq);
         norm2.Dispose();
         Tensor afterAttn2 = AddGated(afterAttn1, attn2Out, gate2, batch, seqLen, _hidden);
@@ -216,10 +182,9 @@ public sealed unsafe class AnimaBlock
         afterAttn1.Dispose();
         gate2.Dispose();
 
-        // ── 3. AdaLN-Zero #3 + FFN ──
-        (Tensor norm3, Tensor gate3) = ApplyAdaLnZero(backend, afterAttn2, embeddedTimestep, temb,
-            _norm3Linear1Weight!, _norm3Linear1Bias, _norm3Linear2Weight!, _norm3Linear2Bias,
-            batch, seqLen);
+        // ── 3. AdaLN-LoRA #3 + MLP ──
+        (Tensor norm3, Tensor gate3) = ApplyAdaLnLora(backend, afterAttn2, embeddedTimestep, temb,
+            _adaMlpL1!, _adaMlpL2!, batch, seqLen);
         Tensor ffOut = FeedForward(backend, norm3, batch, seqLen);
         norm3.Dispose();
         Tensor result = AddGated(afterAttn2, ffOut, gate3, batch, seqLen, _hidden);
@@ -230,38 +195,44 @@ public sealed unsafe class AnimaBlock
         return result;
     }
 
-    /// <summary>Computes one AdaLN-Zero modulation pair: returns the modulated tensor and the gate. Allocates
-    /// <c>norm</c> output (caller disposes) and <c>gate</c> (caller disposes).</summary>
-    private (Tensor Modulated, Tensor Gate) ApplyAdaLnZero(IBackend backend, Tensor x,
+    /// <summary>AdaLN-LoRA modulation: silu(embedded_timestep) → Linear(rank=256) → Linear(3*hidden=6144) → + temb[:6144] →
+    /// chunk(3) → (shift, scale, gate). Applies <c>norm(x) * (1 + scale) + shift</c> and returns the modulated tensor
+    /// + the gate (used for the gated residual).</summary>
+    private (Tensor Modulated, Tensor Gate) ApplyAdaLnLora(IBackend backend, Tensor x,
         Tensor embeddedTimestep, Tensor temb,
-        Tensor lin1Weight, Tensor? lin1Bias, Tensor lin2Weight, Tensor? lin2Bias,
+        Tensor linRankWeight, Tensor linExpandWeight,
         int batch, int seqLen)
     {
         TensorShape embShape = new TensorShape(batch, _hidden);
+        TensorShape rankShape = new TensorShape(batch, _adaLnRank);
+        TensorShape expandShape = new TensorShape(batch, _adaLnExpandWidth);
+
+        // silu(embedded_timestep) [B, 2048]
         Tensor act = new Tensor(embShape, DType.F32);
         backend.Silu(act, embeddedTimestep);
 
-        Tensor lin1Out = new Tensor(embShape, DType.F32);
-        backend.Linear(lin1Out, act, lin1Weight, lin1Bias);
+        // bottleneck Linear[256, 2048] → [B, 256]
+        Tensor rank = new Tensor(rankShape, DType.F32);
+        backend.Linear(rank, act, linRankWeight, null);
         act.Dispose();
 
-        TensorShape projShape = new TensorShape(batch, 3 * _hidden);
-        Tensor lin2Out = new Tensor(projShape, DType.F32);
-        backend.Linear(lin2Out, lin1Out, lin2Weight, lin2Bias);
-        lin1Out.Dispose();
+        // expand Linear[6144, 256] → [B, 6144]
+        Tensor expanded = new Tensor(expandShape, DType.F32);
+        backend.Linear(expanded, rank, linExpandWeight, null);
+        rank.Dispose();
 
-        // Add temb[..., :3*hidden] to the projected output.
-        AddTembSlice(lin2Out, temb, batch, 3 * _hidden);
+        // + temb[:6144] (broadcast over batch — temb is [B, 6144], so element-wise add)
+        AddTembSlice(expanded, temb, batch, _adaLnExpandWidth);
 
-        // Chunk into shift, scale, gate along last dim.
+        // chunk(3) → shift, scale, gate, each [B, hidden]
         TensorShape chunkShape = new TensorShape(batch, _hidden);
         Tensor shift = new Tensor(chunkShape, DType.F32);
         Tensor scale = new Tensor(chunkShape, DType.F32);
         Tensor gate = new Tensor(chunkShape, DType.F32);
-        SplitThree(lin2Out, shift, scale, gate, batch, _hidden);
-        lin2Out.Dispose();
+        SplitThree(expanded, shift, scale, gate, batch, _hidden);
+        expanded.Dispose();
 
-        // LayerNorm-no-affine on x along last dim, then x*(1+scale)+shift.
+        // LayerNorm-no-affine on x along last dim, then x * (1 + scale) + shift.
         TensorShape xShape = new TensorShape(batch, seqLen, _hidden);
         Tensor normed = new Tensor(xShape, DType.F32);
         DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, _hidden, _eps);
@@ -274,18 +245,18 @@ public sealed unsafe class AnimaBlock
         return (modulated, gate);
     }
 
-    /// <summary>Self-attention with QK-RMSNorm and 3D RoPE on Q,K. Output <c>[B, S, hidden]</c>.</summary>
+    /// <summary>Self-attention with QK-RMSNorm and 3D RoPE on Q,K.</summary>
     private Tensor SelfAttention(IBackend backend, Tensor x, Tensor ropeCos, Tensor ropeSin, AnimaRope rope, int batch, int seqLen)
     {
         TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
+
         Tensor q = new Tensor(flatShape, DType.F32);
         Tensor k = new Tensor(flatShape, DType.F32);
         Tensor v = new Tensor(flatShape, DType.F32);
-        backend.Linear(q, x, _attn1QWeight!, _attn1QBias);
-        backend.Linear(k, x, _attn1KWeight!, _attn1KBias);
-        backend.Linear(v, x, _attn1VWeight!, _attn1VBias);
+        backend.Linear(q, x, _selfQ!, null);
+        backend.Linear(k, x, _selfK!, null);
+        backend.Linear(v, x, _selfV!, null);
 
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         Tensor qMh = DiTUtils.ReshapeToMultiHead(q, batch, seqLen, _numHeads, _headDim);
         Tensor kMh = DiTUtils.ReshapeToMultiHead(k, batch, seqLen, _numHeads, _headDim);
         Tensor vMh = DiTUtils.ReshapeToMultiHead(v, batch, seqLen, _numHeads, _headDim);
@@ -294,17 +265,17 @@ public sealed unsafe class AnimaBlock
         v.Dispose();
 
         int totalVecs = batch * _numHeads * seqLen;
-        Tensor qNorm = new Tensor(mhShape, DType.F32);
-        Tensor kNorm = new Tensor(mhShape, DType.F32);
-        _normQ1.Forward(qNorm, qMh, totalVecs);
-        _normK1.Forward(kNorm, kMh, totalVecs);
+        Tensor qNorm = new Tensor(qMh.Shape, DType.F32);
+        Tensor kNorm = new Tensor(kMh.Shape, DType.F32);
+        _selfQNorm.Forward(qNorm, qMh, totalVecs);
+        _selfKNorm.Forward(kNorm, kMh, totalVecs);
         qMh.Dispose();
         kMh.Dispose();
 
         rope.ApplyRotation(qNorm, kNorm, ropeCos, ropeSin, batch, _numHeads, seqLen);
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
+        Tensor attnOut = new Tensor(qMh.Shape, DType.F32);
         backend.ScaledDotProductAttention(attnOut, qNorm, kNorm, vMh, null, scale);
         qNorm.Dispose();
         kNorm.Dispose();
@@ -314,14 +285,16 @@ public sealed unsafe class AnimaBlock
         attnOut.Dispose();
 
         Tensor projected = new Tensor(flatShape, DType.F32);
-        backend.Linear(projected, flat, _attn1OutWeight!, _attn1OutBias);
+        backend.Linear(projected, flat, _selfOut!, null);
         flat.Dispose();
         return projected;
     }
 
-    /// <summary>Cross-attention from image tokens (Q) to text tokens (K, V). No RoPE, no QK-norm-on-text — the upstream
-    /// only applies <c>norm_q</c>/<c>norm_k</c> to the projected Q and K, which we mirror.</summary>
-    private Tensor CrossAttention(IBackend backend, Tensor x, Tensor encoderHidden, Tensor? attnMask, int batch, int seqLen, int textSeq)
+    /// <summary>Cross-attention from image tokens (Q) to text tokens (K, V from the LlmAdapter output).
+    /// No RoPE. K/V projections are rectangular (<c>[hidden, kvDim]</c>) since the LlmAdapter emits a
+    /// 1024-dim stream while the DiT operates at 2048-dim.</summary>
+    private Tensor CrossAttention(IBackend backend, Tensor x, Tensor encoderHidden, Tensor? attnMask,
+        int batch, int seqLen, int textSeq)
     {
         TensorShape qShape = new TensorShape(batch, seqLen, _hidden);
         TensorShape kvShape = new TensorShape(batch, textSeq, _hidden);
@@ -329,12 +302,10 @@ public sealed unsafe class AnimaBlock
         Tensor q = new Tensor(qShape, DType.F32);
         Tensor k = new Tensor(kvShape, DType.F32);
         Tensor v = new Tensor(kvShape, DType.F32);
-        backend.Linear(q, x, _attn2QWeight!, _attn2QBias);
-        backend.Linear(k, encoderHidden, _attn2KWeight!, _attn2KBias);
-        backend.Linear(v, encoderHidden, _attn2VWeight!, _attn2VBias);
+        backend.Linear(q, x, _crossQ!, null);
+        backend.Linear(k, encoderHidden, _crossK!, null);
+        backend.Linear(v, encoderHidden, _crossV!, null);
 
-        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-        TensorShape kvMhShape = new TensorShape(batch, _numHeads, textSeq, _headDim);
         Tensor qMh = DiTUtils.ReshapeToMultiHead(q, batch, seqLen, _numHeads, _headDim);
         Tensor kMh = DiTUtils.ReshapeToMultiHead(k, batch, textSeq, _numHeads, _headDim);
         Tensor vMh = DiTUtils.ReshapeToMultiHead(v, batch, textSeq, _numHeads, _headDim);
@@ -344,15 +315,15 @@ public sealed unsafe class AnimaBlock
 
         int qVecs = batch * _numHeads * seqLen;
         int kVecs = batch * _numHeads * textSeq;
-        Tensor qNorm = new Tensor(qMhShape, DType.F32);
-        Tensor kNorm = new Tensor(kvMhShape, DType.F32);
-        _normQ2.Forward(qNorm, qMh, qVecs);
-        _normK2.Forward(kNorm, kMh, kVecs);
+        Tensor qNorm = new Tensor(qMh.Shape, DType.F32);
+        Tensor kNorm = new Tensor(kMh.Shape, DType.F32);
+        _crossQNorm.Forward(qNorm, qMh, qVecs);
+        _crossKNorm.Forward(kNorm, kMh, kVecs);
         qMh.Dispose();
         kMh.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(qMhShape, DType.F32);
+        Tensor attnOut = new Tensor(qMh.Shape, DType.F32);
         backend.ScaledDotProductAttention(attnOut, qNorm, kNorm, vMh, attnMask, scale);
         qNorm.Dispose();
         kNorm.Dispose();
@@ -362,26 +333,26 @@ public sealed unsafe class AnimaBlock
         attnOut.Dispose();
 
         Tensor projected = new Tensor(qShape, DType.F32);
-        backend.Linear(projected, flat, _attn2OutWeight!, _attn2OutBias);
+        backend.Linear(projected, flat, _crossOut!, null);
         flat.Dispose();
         return projected;
     }
 
-    /// <summary>Standard FFN: Linear(hidden→ffn) → GELU → Linear(ffn→hidden).</summary>
+    /// <summary>FFN: <c>Linear[ffn, hidden] → GELU → Linear[hidden, ffn]</c>. No biases.</summary>
     private Tensor FeedForward(IBackend backend, Tensor x, int batch, int seqLen)
     {
         TensorShape inShape = new TensorShape(batch, seqLen, _hidden);
         TensorShape ffShape = new TensorShape(batch, seqLen, _ffnHidden);
 
         Tensor proj1 = new Tensor(ffShape, DType.F32);
-        backend.Linear(proj1, x, _ffLinear1Weight!, _ffLinear1Bias);
+        backend.Linear(proj1, x, _mlp1!, null);
 
         Tensor activated = new Tensor(ffShape, DType.F32);
         backend.Gelu(activated, proj1);
         proj1.Dispose();
 
         Tensor output = new Tensor(inShape, DType.F32);
-        backend.Linear(output, activated, _ffLinear2Weight!, _ffLinear2Bias);
+        backend.Linear(output, activated, _mlp2!, null);
         activated.Dispose();
         return output;
     }
@@ -413,13 +384,13 @@ public sealed unsafe class AnimaBlock
     }
 
     /// <summary>Adds the first <paramref name="sliceLen"/> elements of <paramref name="temb"/> per batch into
-    /// <paramref name="lin2Out"/> in-place. Cosmos's AdaLN does <c>embedded_timestep + temb[..., :3*hidden]</c>.</summary>
-    private static void AddTembSlice(Tensor lin2Out, Tensor temb, int batch, int sliceLen)
+    /// <paramref name="expand"/> in-place. Implements the <c>expand + temb[:sliceLen]</c> step of the AdaLN-LoRA.</summary>
+    private static void AddTembSlice(Tensor expand, Tensor temb, int batch, int sliceLen)
     {
-        if (temb.Shape[1] < sliceLen)
-            throw new ArgumentException($"temb width {temb.Shape[1]} < slice {sliceLen}.", nameof(temb));
         int tembStride = (int)temb.Shape[1];
-        float* outPtr = (float*)lin2Out.DataPointer;
+        if (tembStride < sliceLen)
+            throw new ArgumentException($"temb width {tembStride} < slice {sliceLen}.", nameof(temb));
+        float* outPtr = (float*)expand.DataPointer;
         float* tembPtr = (float*)temb.DataPointer;
         for (int b = 0; b < batch; b++)
         {
@@ -430,7 +401,7 @@ public sealed unsafe class AnimaBlock
         }
     }
 
-    /// <summary>Splits <c>[B, 3*hidden]</c> into three <c>[B, hidden]</c> tensors (shift, scale, gate).</summary>
+    /// <summary>Splits <c>[B, 3*hidden]</c> into three <c>[B, hidden]</c> tensors (shift, scale, gate) in Cosmos order.</summary>
     private static void SplitThree(Tensor src, Tensor a, Tensor b, Tensor c, int batch, int hidden)
     {
         float* sPtr = (float*)src.DataPointer;

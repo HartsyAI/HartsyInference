@@ -27,4 +27,7 @@ public enum LatentArchitecture
     FLite = 8,
     /// <summary>Z-Image — reuses the Flux VAE, so Flux factors apply.</summary>
     ZImage = 9,
+    /// <summary>Anima (Cosmos-Predict2 2B) — 16-channel Qwen-Image VAE, 8× downscale. Same channel count as Flux/SD3
+    /// so Flux factors are a reasonable preview approximation until Qwen-Image-specific factors are derived.</summary>
+    Anima = 10,
 }

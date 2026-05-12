@@ -93,7 +93,7 @@ public sealed unsafe class TaesdDecoder : IDisposable
     {
         LatentArchitecture.Sd15 or LatentArchitecture.Sdxl or LatentArchitecture.AuraFlow => 4,
         LatentArchitecture.Sd3 or LatentArchitecture.Flux or LatentArchitecture.Chroma
-            or LatentArchitecture.FLite or LatentArchitecture.ZImage => 16,
+            or LatentArchitecture.FLite or LatentArchitecture.ZImage or LatentArchitecture.Anima => 16,
         LatentArchitecture.Flux2 => 32,
         _ => throw new ArgumentException($"TAESD not defined for arch {arch}.", nameof(arch)),
     };

@@ -4,28 +4,28 @@ using SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace SharpInference.Diffusion.Models.Denoisers;
 
-/// <summary>Anima / Cosmos-Predict2-2B-Text2Image diffusion transformer (image-only mode). Implements the diffusers
-/// <c>CosmosTransformer3DModel</c> with the temporal axis pinned to <c>T = 1</c>. Drops every video / world-model code
-/// path: no FPS-conditioned RoPE, no multi-frame patchify, no <c>condition_mask</c> autoregressive conditioning, no
-/// ControlNet residuals, no image-context (Predict2.5) hybrid attention. Supports only standard t2i forward.
+/// <summary>Anima / Cosmos-Predict2-2B-Text2Image DiT (image-only mode). Every tensor name + shape below is measured
+/// from the actual <c>anima-preview3-base.safetensors</c> ComfyUI single-file checkpoint. All weights live under a
+/// flat <c>net.</c> prefix in the file; the <see cref="SharpInference.ModelHandler.CheckpointConverters.AnimaCheckpointConverter"/>
+/// strips that prefix before handing us the dict, so the loader expects keys like <c>x_embedder.proj.1.weight</c>,
+/// <c>blocks.0.self_attn.q_proj.weight</c>, <c>final_layer.linear.weight</c>.
 ///
-/// Forward summary (per <c>diffusers/models/transformers/transformer_cosmos.py</c>):
+/// Forward summary:
 /// <list type="number">
-///   <item>Optional concat of a constant-1 padding-mask channel (<c>concat_padding_mask=True</c>) → <c>[B, C+1, 1, H, W]</c>.</item>
-///   <item>RoPE table: 3-axis, but <c>T = 1</c> collapses temporal sub-bands to position 0.</item>
-///   <item>Patch embed: <c>Linear((C+1) * p_t * p_h * p_w, hidden)</c> over the flattened <c>p_t·p_h·p_w</c>-element patch.</item>
-///   <item>Optional learnable positional embedding (<c>extra_pos_embed_type="learnable"</c>) — sum of three axis-specific
-///        learned tables, then L2-normalized over the last dim — added to the patch sequence.</item>
-///   <item>Time embed: sin/cos timesteps → <c>CosmosTimestepEmbedding(Linear→SiLU→Linear)</c> = <c>temb [B, condition_dim]</c>;
-///        the pre-MLP sin/cos vector is RMSNorm'd to <c>embedded_timestep [B, hidden]</c>.</item>
-///   <item>Optional <c>crossattn_proj</c>: Linear maps text encoder hiddens to <c>hidden</c>.</item>
-///   <item>28 stacked <see cref="AnimaBlock"/>s.</item>
-///   <item>Final <c>CosmosAdaLayerNorm</c> (Linear→+temb[:2*hidden]→chunk(2,-1)→x*(1+scale)+shift) + <c>proj_out</c> Linear →
-///        unpatchify back to <c>[B, C_out, H, W]</c>.</item>
+///   <item>Concat a constant-1 padding-mask channel → <c>[B, 17, H, W]</c>.</item>
+///   <item>Patch embed: gather <c>2×2</c> patches, flatten to 68-dim features per token, then
+///        <c>x_embedder.proj.1</c> Linear[2048, 68] → <c>[B, S, 2048]</c>. No bias.</item>
+///   <item>Time embedding: sin/cos timesteps → RMSNorm (<c>t_embedding_norm.weight [2048]</c>) → <c>embedded_timestep [B, 2048]</c>.
+///        Same sin/cos → <c>t_embedder.1.linear_1 [2048,2048]</c> → SiLU → <c>t_embedder.1.linear_2 [6144,2048]</c> → <c>temb [B, 6144]</c>.</item>
+///   <item>28 stacked <see cref="AnimaBlock"/>s, each with three AdaLN-LoRA modulators and self+cross+mlp sub-blocks.
+///        Cross-attention K/V come from the <see cref="AnimaLlmAdapter"/> output (1024-dim).</item>
+///   <item>Final layer (<c>final_layer.adaln_modulation</c>): AdaLN-LoRA with 2-chunk output (shift, scale only, no gate).
+///        Linear[256, 2048] → Linear[4096, 256] → + temb[:4096] → chunk(2) → (shift, scale). Apply <c>norm(x) * (1+scale) + shift</c>.</item>
+///   <item><c>final_layer.linear</c> projects each token to <c>p_h × p_w × out_channels = 64</c>, then unpatchify back to
+///        <c>[B, out_channels, H, W]</c>.</item>
 /// </list>
 ///
-/// **Image-only invariants (asserted at runtime):** <c>p_t = 1</c>, latent rank is 4 (<c>[B, C, H, W]</c>), <c>fps</c>
-/// is unused.</summary>
+/// All DiT-trunk weights in the Anima checkpoint are bias-less.</summary>
 public sealed unsafe class AnimaTransformer : IDisposable
 {
     private readonly AnimaConfig _config;
@@ -33,126 +33,85 @@ public sealed unsafe class AnimaTransformer : IDisposable
     private readonly AnimaRope _rope;
     private int _disposed;
 
-    // patch_embed.proj: Linear((in_channels + concat_mask?) * p_t * p_h * p_w, hidden) with bias.
-    private Tensor? _patchEmbedWeight, _patchEmbedBias;
+    // ── x_embedder.proj.1.weight [hidden, in_total] where in_total = (in_ch + concat_mask?) × p_h × p_w. ──
+    private Tensor? _patchEmbedWeight;  // No bias in Anima checkpoint.
 
-    // crossattn_proj (optional): Linear(text_embed_dim, hidden).
-    private Tensor? _crossAttnProjWeight, _crossAttnProjBias;
+    // ── t_embedder.1.linear_1.weight [hidden, hidden], linear_2.weight [condition_dim, hidden]. No biases. ──
+    private Tensor? _timeLinear1Weight;
+    private Tensor? _timeLinear2Weight;
 
-    // time_embed: Timesteps(sin/cos, embedding_dim, flip_sin_to_cos=True) — no params; followed by:
-    //   t_embedder.linear_1 [hidden, hidden]
-    //   t_embedder.linear_2 [condition_dim, hidden]
-    //   norm: RMSNorm(embedding_dim)
-    private Tensor? _timeLinear1Weight, _timeLinear1Bias;
-    private Tensor? _timeLinear2Weight, _timeLinear2Bias;
-    private Tensor? _timeNormWeight; // RMSNorm scale, [hidden]
+    // ── t_embedding_norm.weight [hidden] (RMSNorm scale applied to the raw sin/cos vector). ──
+    private Tensor? _timeEmbeddingNormWeight;
 
-    // learnable_pos_embed (optional, [max_t, dim] / [max_h, dim] / [max_w, dim]).
-    private Tensor? _posEmbT, _posEmbH, _posEmbW;
+    // ── final_layer.adaln_modulation: .1.weight [rank, hidden], .2.weight [2*hidden, rank]. No biases. ──
+    private Tensor? _finalAdaL1, _finalAdaL2;
 
-    // norm_out: Linear(condition_dim, 2*hidden) + bias. Followed by + temb[:2*hidden], chunk(2,-1) → scale, shift.
-    private Tensor? _normOutLinear1Weight, _normOutLinear1Bias;
-    private Tensor? _normOutLinear2Weight, _normOutLinear2Bias;
-
-    // proj_out: Linear(hidden, p_t * p_h * p_w * out_channels).
-    private Tensor? _projOutWeight, _projOutBias;
+    // ── final_layer.linear.weight [p_t*p_h*p_w*out_ch, hidden]. No bias. ──
+    private Tensor? _finalLinearWeight;
 
     public AnimaTransformer(AnimaConfig config)
     {
         if (config.PatchSize.T != 1)
             throw new ArgumentException(
-                $"AnimaTransformer is t2i-only; PatchSize.T must be 1 (got {config.PatchSize.T}). Video paths are not implemented.",
+                $"AnimaTransformer is t2i-only; PatchSize.T must be 1 (got {config.PatchSize.T}).",
                 nameof(config));
         _config = config;
         _rope = new AnimaRope(config.HeadDim, config.RopeTheta, config.RopeScale);
         _blocks = new AnimaBlock[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
-            _blocks[i] = new AnimaBlock(config.HiddenSize, config.NumHeads, config.FfnHiddenSize, config.RmsNormEps, config.QkNormEps);
+        {
+            _blocks[i] = new AnimaBlock(
+                config.HiddenSize, config.NumHeads, config.HeadDim, config.FfnHiddenSize,
+                config.AdaLnLoraDim, config.RmsNormEps, config.QkNormEps);
+        }
     }
 
-    /// <summary>Convenience accessor for the config bound at construction.</summary>
     public AnimaConfig Config => _config;
 
-    /// <summary>Loads weights from a diffusers-style key dict (post-converter). Tolerates missing optional keys for
-    /// distributions that ship a subset of the upstream model (e.g., omitted learnable positional embedding when
-    /// <c>extra_pos_embed_type=null</c>, or fused single-file checkpoints that flatten the embedder MLP).</summary>
+    /// <summary>Loads DiT-trunk weights from the converter-stripped dict (no <c>net.</c> prefix).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _patchEmbedWeight = weights["patch_embed.proj.weight"];
-        weights.TryGetValue("patch_embed.proj.bias", out _patchEmbedBias);
+        // Patch embed: wrapped in nn.Sequential([?, Linear]); the linear is at index .1.
+        _patchEmbedWeight = weights["x_embedder.proj.1.weight"];
 
-        if (_config.UseCrossAttnProjection)
-        {
-            // Diffusers stores this at `crossattn_proj.weight` (and `.bias` if present).
-            if (weights.TryGetValue("crossattn_proj.weight", out Tensor? cWeight))
-            {
-                _crossAttnProjWeight = cWeight;
-                weights.TryGetValue("crossattn_proj.bias", out _crossAttnProjBias);
-            }
-        }
+        // Time embedder: wrapped in nn.Sequential at .1. Linear_1[hidden, hidden] → SiLU → Linear_2[condition_dim, hidden].
+        _timeLinear1Weight = weights["t_embedder.1.linear_1.weight"];
+        _timeLinear2Weight = weights["t_embedder.1.linear_2.weight"];
 
-        // time_embed.t_embedder is a CosmosTimestepEmbedding (Linear→SiLU→Linear).
-        _timeLinear1Weight = weights["time_embed.t_embedder.linear_1.weight"];
-        weights.TryGetValue("time_embed.t_embedder.linear_1.bias", out _timeLinear1Bias);
-        _timeLinear2Weight = weights["time_embed.t_embedder.linear_2.weight"];
-        weights.TryGetValue("time_embed.t_embedder.linear_2.bias", out _timeLinear2Bias);
-        // RMSNorm on the pre-MLP sin/cos vector to produce embedded_timestep.
-        _timeNormWeight = LoadAsF32(weights, "time_embed.norm.weight");
+        // RMSNorm of the raw sin/cos vector → embedded_timestep.
+        _timeEmbeddingNormWeight = LoadAsF32(weights, "t_embedding_norm.weight");
 
-        if (_config.UseLearnablePosEmbed)
-        {
-            weights.TryGetValue("learnable_pos_embed.pos_emb_t", out _posEmbT);
-            weights.TryGetValue("learnable_pos_embed.pos_emb_h", out _posEmbH);
-            weights.TryGetValue("learnable_pos_embed.pos_emb_w", out _posEmbW);
-        }
+        // Final-layer AdaLN-LoRA (2-chunk: shift, scale).
+        _finalAdaL1 = weights["final_layer.adaln_modulation.1.weight"];
+        _finalAdaL2 = weights["final_layer.adaln_modulation.2.weight"];
 
-        // norm_out is a CosmosAdaLayerNorm: linear_1[hidden,hidden] + linear_2[2*hidden, hidden] (the diffusers code splits
-        // the projection into two linears — preserve both names for compatibility).
-        _normOutLinear1Weight = weights["norm_out.linear_1.weight"];
-        weights.TryGetValue("norm_out.linear_1.bias", out _normOutLinear1Bias);
-        _normOutLinear2Weight = weights["norm_out.linear_2.weight"];
-        weights.TryGetValue("norm_out.linear_2.bias", out _normOutLinear2Bias);
-
-        _projOutWeight = weights["proj_out.weight"];
-        weights.TryGetValue("proj_out.bias", out _projOutBias);
+        // Final patch-projection linear.
+        _finalLinearWeight = weights["final_layer.linear.weight"];
 
         for (int i = 0; i < _blocks.Length; i++)
-            _blocks[i].LoadWeights(weights, $"transformer_blocks.{i}");
+            _blocks[i].LoadWeights(weights, $"blocks.{i}");
     }
 
-    /// <summary>Enumerates every weight tensor for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_patchEmbedWeight is not null) yield return _patchEmbedWeight;
-        if (_patchEmbedBias is not null) yield return _patchEmbedBias;
-        if (_crossAttnProjWeight is not null) yield return _crossAttnProjWeight;
-        if (_crossAttnProjBias is not null) yield return _crossAttnProjBias;
         if (_timeLinear1Weight is not null) yield return _timeLinear1Weight;
-        if (_timeLinear1Bias is not null) yield return _timeLinear1Bias;
         if (_timeLinear2Weight is not null) yield return _timeLinear2Weight;
-        if (_timeLinear2Bias is not null) yield return _timeLinear2Bias;
-        if (_timeNormWeight is not null) yield return _timeNormWeight;
-        if (_posEmbT is not null) yield return _posEmbT;
-        if (_posEmbH is not null) yield return _posEmbH;
-        if (_posEmbW is not null) yield return _posEmbW;
-        if (_normOutLinear1Weight is not null) yield return _normOutLinear1Weight;
-        if (_normOutLinear1Bias is not null) yield return _normOutLinear1Bias;
-        if (_normOutLinear2Weight is not null) yield return _normOutLinear2Weight;
-        if (_normOutLinear2Bias is not null) yield return _normOutLinear2Bias;
-        if (_projOutWeight is not null) yield return _projOutWeight;
-        if (_projOutBias is not null) yield return _projOutBias;
+        if (_timeEmbeddingNormWeight is not null) yield return _timeEmbeddingNormWeight;
+        if (_finalAdaL1 is not null) yield return _finalAdaL1;
+        if (_finalAdaL2 is not null) yield return _finalAdaL2;
+        if (_finalLinearWeight is not null) yield return _finalLinearWeight;
         for (int i = 0; i < _blocks.Length; i++)
             foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
     }
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
-    /// <param name="latent">VAE latent <c>[B, in_channels, H, W]</c>.</param>
-    /// <param name="timestep">Scalar timestep (same value for every batch row).</param>
-    /// <param name="textEmbeds">Text encoder hiddens <c>[B, T, text_embed_dim]</c>.</param>
-    /// <param name="textAttentionMask">Optional padded-text mask <c>[B, T]</c> (1 = valid, 0 = padded). When non-null,
-    /// converted to additive mask <c>[B, 1, 1, T]</c> for cross-attention.</param>
-    /// <returns>Predicted velocity <c>[B, out_channels, H, W]</c>.</returns>
+    /// <param name="latent">VAE latent <c>[B, in_channels=16, H, W]</c>.</param>
+    /// <param name="timestep">Scalar timestep.</param>
+    /// <param name="textEmbeds">Refined text features from <see cref="AnimaLlmAdapter"/>, <c>[B, T, 1024]</c>.</param>
+    /// <param name="textAttentionMask">Optional padded-text mask <c>[B, T]</c> (1=valid, 0=padded). When non-null,
+    /// converted to an additive cross-attn mask.</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int[]? textAttentionMask = null)
     {
         if (latent.Shape.Rank != 4)
@@ -175,7 +134,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
             throw new ArgumentException(
                 $"Latent {latentH}x{latentW} not divisible by patch {patchH}x{patchW}.", nameof(latent));
 
-        // ── 1. Optional concat of constant-1 padding-mask channel ──
+        // ── 1. Concat padding-mask channel → [B, 17, H, W] ──
         Tensor latentExpanded = _config.ConcatPaddingMask
             ? AppendPaddingMaskChannel(latent)
             : latent;
@@ -188,37 +147,26 @@ public sealed unsafe class AnimaTransformer : IDisposable
         if (!ReferenceEquals(latentExpanded, latent)) latentExpanded.Dispose();
         AnimaDebugDump.Dump("patch_embed", imgTokens);
 
-        // ── 3. Optional learnable positional embedding (T=1, broadcasted) ──
-        if (_config.UseLearnablePosEmbed && _posEmbT is not null && _posEmbH is not null && _posEmbW is not null)
-        {
-            AddLearnablePosEmbed(imgTokens, batch, gridH, gridW);
-            AnimaDebugDump.Dump("after_pos_embed", imgTokens);
-        }
-
-        // ── 4. RoPE table for image self-attn ──
+        // ── 3. RoPE table for image self-attn ──
         (Tensor ropeCos, Tensor ropeSin) = _rope.BuildFreqs(tFrames: 1, hPatched: gridH, wPatched: gridW);
         AnimaDebugDump.Dump("rope_cos", ropeCos);
         AnimaDebugDump.Dump("rope_sin", ropeSin);
 
-        // ── 5. Time embedding ──
+        // ── 4. Time embedding (temb [B, 6144], embedded_timestep [B, 2048]) ──
         (Tensor temb, Tensor embeddedTimestep) = TimeEmbed(backend, timestep, batch);
         AnimaDebugDump.Dump("temb", temb);
         AnimaDebugDump.Dump("embedded_timestep", embeddedTimestep);
 
-        // ── 6. Project text embeds to hidden if needed ──
-        Tensor textHidden = ProjectText(backend, textEmbeds, batch, textSeq, hidden);
-        AnimaDebugDump.Dump("text_hidden", textHidden);
-
-        // ── 7. Build cross-attn mask if provided ──
+        // ── 5. Build cross-attn mask if provided ──
         Tensor? crossMask = textAttentionMask is not null
             ? BuildAttentionMask(batch, textSeq, textAttentionMask)
             : null;
 
-        // ── 8. Layer loop ──
+        // ── 6. Layer loop ──
         Tensor x = imgTokens;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, x, textHidden, embeddedTimestep, temb, ropeCos, ropeSin, _rope, crossMask);
+            Tensor next = _blocks[i].Forward(backend, x, textEmbeds, embeddedTimestep, temb, ropeCos, ropeSin, _rope, crossMask);
             x.Dispose();
             x = next;
             AnimaDebugDump.Dump($"block_{i}", x);
@@ -226,17 +174,16 @@ public sealed unsafe class AnimaTransformer : IDisposable
 
         ropeCos.Dispose();
         ropeSin.Dispose();
-        textHidden.Dispose();
         crossMask?.Dispose();
 
-        // ── 9. Final AdaLN (no gate) + proj_out ──
-        Tensor projected = ApplyFinalLayer(backend, x, temb, batch, seqLen, hidden);
+        // ── 7. Final AdaLN-LoRA (2-chunk) + linear ──
+        Tensor projected = ApplyFinalLayer(backend, x, embeddedTimestep, temb, batch, seqLen);
         x.Dispose();
         temb.Dispose();
         embeddedTimestep.Dispose();
         AnimaDebugDump.Dump("final_proj", projected);
 
-        // ── 10. Unpatchify [B, S, p_h*p_w*C_out] → [B, C_out, H, W] ──
+        // ── 8. Unpatchify ──
         Tensor velocity = Unpatchify(projected, batch, gridH, gridW, patchH, patchW, _config.OutChannels);
         projected.Dispose();
         AnimaDebugDump.DumpOutput(velocity);
@@ -244,9 +191,12 @@ public sealed unsafe class AnimaTransformer : IDisposable
         return velocity;
     }
 
-    /// <summary>Concatenates a constant-1 channel to <c>[B, C, H, W]</c>, returning <c>[B, C+1, H, W]</c>. Mirrors the
-    /// upstream <c>concat_padding_mask</c> path with a constant unmasked padding mask (we don't expose explicit padding
-    /// masks for image-only inference).</summary>
+    /// <summary>Concatenates a zero-valued padding-mask channel to <c>[B, C, H, W]</c>, returning
+    /// <c>[B, C+1, H, W]</c>. Upstream Cosmos (per <c>transformer_cosmos.py</c> line 707-712)
+    /// resizes the caller-supplied <c>padding_mask</c> to the latent's spatial dim and concatenates
+    /// it. For unpadded t2i (the only mode we support), the padding mask is all zeros — there's no
+    /// padding to ignore. Using a constant <b>0</b> here, not 1, matches what the model was trained
+    /// to expect on the extra channel.</summary>
     private static Tensor AppendPaddingMaskChannel(Tensor latent)
     {
         int batch = (int)latent.Shape[0];
@@ -269,16 +219,14 @@ public sealed unsafe class AnimaTransformer : IDisposable
                 long bytes = spatial * sizeof(float);
                 Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, bytes, bytes);
             }
-            // Final channel: all ones.
+            // Pad-mask channel = 0 (no padding present for unpadded t2i).
             long maskOff = ((long)b * (channels + 1) + channels) * spatial;
-            for (long i = 0; i < spatial; i++) outPtr[maskOff + i] = 1.0f;
+            for (long i = 0; i < spatial; i++) outPtr[maskOff + i] = 0.0f;
         }
         return output;
     }
 
-    /// <summary>Patch embed via a single linear projection over the flattened p_t·p_h·p_w-element patch. Mirrors
-    /// <c>CosmosPatchEmbed.forward</c> for <c>p_t=1</c>: reshape to <c>[B, C, gridH, p_h, gridW, p_w]</c> →
-    /// permute to <c>[B, gridH, gridW, C, p_h, p_w]</c> → flatten last 3 dims → linear.</summary>
+    /// <summary>Patch embed via a single linear projection over the flattened p_t·p_h·p_w-element patch.</summary>
     private Tensor PatchEmbed(IBackend backend, Tensor latent, int batch, int channels, int latentH, int latentW, int gridH, int gridW)
     {
         int patchH = _config.PatchSize.H;
@@ -320,123 +268,45 @@ public sealed unsafe class AnimaTransformer : IDisposable
 
         TensorShape outShape = new TensorShape(batch, gridH * gridW, _config.HiddenSize);
         Tensor output = new Tensor(outShape, DType.F32);
-        backend.Linear(output, gathered, _patchEmbedWeight!, _patchEmbedBias);
+        backend.Linear(output, gathered, _patchEmbedWeight!, null);
         gathered.Dispose();
         return output;
     }
 
-    /// <summary>Adds the L2-normalized sum of three axis-specific learnable embeddings into the image token sequence.
-    /// Mirrors <c>CosmosLearnablePositionalEmbed.forward</c> for <c>T=1</c>: <c>emb = pos_t[0] + pos_h[h] + pos_w[w]</c>
-    /// per token, then <c>emb / (||emb||_2 + eps)</c>, summed into the token. Modifies <paramref name="imgTokens"/>
-    /// in-place.</summary>
-    private void AddLearnablePosEmbed(Tensor imgTokens, int batch, int gridH, int gridW)
-    {
-        int hidden = _config.HiddenSize;
-        int seqLen = gridH * gridW;
-        float eps = _config.RmsNormEps;
-        float* posTPtr = (float*)_posEmbT!.DataPointer;
-        float* posHPtr = (float*)_posEmbH!.DataPointer;
-        float* posWPtr = (float*)_posEmbW!.DataPointer;
-        float* tokPtr = (float*)imgTokens.DataPointer;
-
-        Span<float> emb = stackalloc float[hidden > 4096 ? 0 : hidden];
-        // Fall back to heap allocation for very wide hiddens.
-        float[]? embHeap = hidden > 4096 ? new float[hidden] : null;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < gridH; h++)
-            {
-                for (int w = 0; w < gridW; w++)
-                {
-                    Span<float> embView = embHeap is not null ? embHeap.AsSpan() : emb;
-
-                    long tBase = 0; // T = 0 for t2i.
-                    long hBase = (long)h * hidden;
-                    long wBase = (long)w * hidden;
-                    float sumSq = 0f;
-                    for (int d = 0; d < hidden; d++)
-                    {
-                        float v = posTPtr[tBase + d] + posHPtr[hBase + d] + posWPtr[wBase + d];
-                        embView[d] = v;
-                        sumSq += v * v;
-                    }
-                    // Cosmos uses linalg.vector_norm with eps in the divisor (not added in sqrt).
-                    float invNorm = 1.0f / (MathF.Sqrt(sumSq) + eps);
-                    long tokBase = ((long)b * seqLen + (long)h * gridW + w) * hidden;
-                    for (int d = 0; d < hidden; d++)
-                        tokPtr[tokBase + d] += embView[d] * invNorm;
-                }
-            }
-        }
-    }
-
-    /// <summary>Time embedding: sinusoidal projection (flip_sin_to_cos=True) → CosmosTimestepEmbedding (Linear→SiLU→Linear)
-    /// produces <c>temb</c>. Separately, the pre-MLP sin/cos vector is RMSNorm'd to produce <c>embedded_timestep</c>.</summary>
+    /// <summary>Time embedding: sin/cos timesteps → MLP produces <c>temb [B, condition_dim=6144]</c>; the raw sin/cos
+    /// is RMSNorm'd to produce <c>embedded_timestep [B, hidden=2048]</c>.</summary>
     private (Tensor Temb, Tensor EmbeddedTimestep) TimeEmbed(IBackend backend, float timestep, int batch)
     {
         int hidden = _config.HiddenSize;
         int condDim = _config.ConditionDim;
 
+        // Sin/cos timesteps at `hidden` width (matches t_embedder.1.linear_1's input dim).
         TensorShape sinShape = new TensorShape(batch, hidden);
         Tensor sinEmb = new Tensor(sinShape, DType.F32);
         DiTUtils.SinusoidalTimestepEmbedding(sinEmb, timestep, batch, hidden, 10000f);
         AnimaDebugDump.Dump("time_sin_proj", sinEmb);
 
-        // t_embedder MLP: Linear(hidden, condDim) → SiLU → Linear(condDim, condDim) — diffusers'
-        // CosmosTimestepEmbedding linear_1 maps hidden→hidden (or condDim) and linear_2 maps to the final
-        // condition_dim. We respect whatever shapes were loaded.
-        Tensor mlp1 = new Tensor(new TensorShape(batch, (int)_timeLinear1Weight!.Shape[0]), DType.F32);
-        backend.Linear(mlp1, sinEmb, _timeLinear1Weight!, _timeLinear1Bias);
+        // MLP: Linear[hidden, hidden] → SiLU → Linear[condDim, hidden] → temb.
+        Tensor mlp1 = new Tensor(new TensorShape(batch, hidden), DType.F32);
+        backend.Linear(mlp1, sinEmb, _timeLinear1Weight!, null);
 
         Tensor mlp1Act = new Tensor(mlp1.Shape, DType.F32);
         backend.Silu(mlp1Act, mlp1);
         mlp1.Dispose();
 
         Tensor temb = new Tensor(new TensorShape(batch, condDim), DType.F32);
-        backend.Linear(temb, mlp1Act, _timeLinear2Weight!, _timeLinear2Bias);
+        backend.Linear(temb, mlp1Act, _timeLinear2Weight!, null);
         mlp1Act.Dispose();
 
-        // embedded_timestep: RMSNorm of the pre-MLP sinusoidal vector. Cosmos uses RMSNorm without learnable scale by
-        // default, but the checkpoint exposes a `time_embed.norm.weight` so we use it via backend.RmsNorm.
+        // embedded_timestep: RMSNorm of the raw sin/cos vector (scale = t_embedding_norm.weight).
         Tensor embeddedTimestep = new Tensor(sinShape, DType.F32);
-        backend.RmsNorm(embeddedTimestep, sinEmb, _timeNormWeight!, _config.RmsNormEps);
+        backend.RmsNorm(embeddedTimestep, sinEmb, _timeEmbeddingNormWeight!, _config.RmsNormEps);
         sinEmb.Dispose();
 
         return (temb, embeddedTimestep);
     }
 
-    /// <summary>Projects text embeddings to <c>hidden</c> via the optional <c>crossattn_proj</c>. If absent (or text dim
-    /// already equals hidden), returns a copy.</summary>
-    private Tensor ProjectText(IBackend backend, Tensor textEmbeds, int batch, int textSeq, int hidden)
-    {
-        TensorShape outShape = new TensorShape(batch, textSeq, hidden);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        if (_crossAttnProjWeight is not null)
-        {
-            backend.Linear(output, textEmbeds, _crossAttnProjWeight, _crossAttnProjBias);
-            return output;
-        }
-
-        int textDim = (int)textEmbeds.Shape[2];
-        if (textDim != hidden)
-            throw new InvalidOperationException(
-                $"Text dim {textDim} != hidden {hidden} but crossattn_proj weight is missing. Set UseCrossAttnProjection=true and ensure the checkpoint contains `crossattn_proj.weight`.");
-
-        // Identity copy (cast to F32 if needed).
-        long bytes = batch * textSeq * hidden * sizeof(float);
-        if (textEmbeds.DType == DType.F32)
-        {
-            Buffer.MemoryCopy(textEmbeds.DataPointer, output.DataPointer, bytes, bytes);
-            return output;
-        }
-        using Tensor f32 = textEmbeds.CastTo(DType.F32);
-        Buffer.MemoryCopy(f32.DataPointer, output.DataPointer, bytes, bytes);
-        return output;
-    }
-
-    /// <summary>Builds a cross-attention mask <c>[B, 1, 1, T]</c> with 0 for valid positions and large-negative for masked.</summary>
+    /// <summary>Builds an additive cross-attention mask <c>[B, 1, 1, T]</c> (0 valid, large-negative masked).</summary>
     private static Tensor BuildAttentionMask(int batch, int textSeq, int[] textAttentionMask)
     {
         if (textAttentionMask.Length != batch * textSeq && textAttentionMask.Length != textSeq)
@@ -458,40 +328,39 @@ public sealed unsafe class AnimaTransformer : IDisposable
         return mask;
     }
 
-    /// <summary>Applies the final <c>CosmosAdaLayerNorm</c> + <c>proj_out</c>: <c>norm_out</c> projects temb into a
-    /// <c>2*hidden</c> shift/scale, modulates the post-LayerNorm-no-affine sequence, then <c>proj_out</c> linearly maps
-    /// to <c>p_h*p_w*out_channels</c> per token.</summary>
-    private Tensor ApplyFinalLayer(IBackend backend, Tensor x, Tensor temb, int batch, int seqLen, int hidden)
+    /// <summary>Final-layer AdaLN-LoRA + linear. The AdaLN here outputs 2 chunks (shift, scale only — no gate):
+    /// <c>Linear[rank, hidden] → Linear[2*hidden, rank] → + temb[:2*hidden] → chunk(2)</c>. Then
+    /// <c>norm(x) * (1+scale) + shift</c>, then <c>final_layer.linear</c> projects per-token to <c>p_h*p_w*out_ch</c>.</summary>
+    private Tensor ApplyFinalLayer(IBackend backend, Tensor x, Tensor embeddedTimestep, Tensor temb, int batch, int seqLen)
     {
-        // Step 1: linear_1(silu(embedded_timestep))? Diffusers' CosmosAdaLayerNorm does:
-        //   y = activation(embedded_timestep) → linear_1 → linear_2
-        // Then y = y + temb[..., :2*hidden]. Then chunk(2,-1) → shift, scale.
-        // Our temb here is the actual processed temb output of the time embedder; we skip the silu+linear_1/linear_2
-        // chain and use the same temb pipeline as the AdaLN-Zero in the blocks. Concretely: linear_1 maps hidden→hidden
-        // and linear_2 maps hidden→2*hidden; we feed silu(temb) through them.
-        TensorShape act1Shape = new TensorShape(batch, (int)_normOutLinear1Weight!.Shape[0]);
-        Tensor act = new Tensor(temb.Shape, DType.F32);
-        backend.Silu(act, temb);
+        int hidden = _config.HiddenSize;
+        int rank = _config.AdaLnLoraDim;
+        int expandWidth = 2 * hidden;  // shift + scale only.
 
-        Tensor m1 = new Tensor(act1Shape, DType.F32);
-        backend.Linear(m1, act, _normOutLinear1Weight!, _normOutLinear1Bias);
+        // silu(embedded_timestep) [B, hidden]
+        Tensor act = new Tensor(embeddedTimestep.Shape, DType.F32);
+        backend.Silu(act, embeddedTimestep);
+
+        // bottleneck [B, rank]
+        Tensor rankProj = new Tensor(new TensorShape(batch, rank), DType.F32);
+        backend.Linear(rankProj, act, _finalAdaL1!, null);
         act.Dispose();
 
-        TensorShape projShape = new TensorShape(batch, 2 * hidden);
-        Tensor projected = new Tensor(projShape, DType.F32);
-        backend.Linear(projected, m1, _normOutLinear2Weight!, _normOutLinear2Bias);
-        m1.Dispose();
+        // expand [B, 2*hidden]
+        Tensor expanded = new Tensor(new TensorShape(batch, expandWidth), DType.F32);
+        backend.Linear(expanded, rankProj, _finalAdaL2!, null);
+        rankProj.Dispose();
 
-        // Cosmos's CosmosAdaLayerNorm also does + temb[..., :2*hidden] before the chunk.
-        AddTembSliceInPlace(projected, temb, batch, 2 * hidden);
+        // + temb[:2*hidden]
+        AddTembSliceInPlace(expanded, temb, batch, expandWidth);
 
-        TensorShape modShape = new TensorShape(batch, hidden);
-        Tensor shift = new Tensor(modShape, DType.F32);
-        Tensor scale = new Tensor(modShape, DType.F32);
-        SplitTwo(projected, shift, scale, batch, hidden);
-        projected.Dispose();
+        // chunk(2) → shift, scale
+        Tensor shift = new Tensor(new TensorShape(batch, hidden), DType.F32);
+        Tensor scale = new Tensor(new TensorShape(batch, hidden), DType.F32);
+        SplitTwo(expanded, shift, scale, batch, hidden);
+        expanded.Dispose();
 
-        // LayerNorm-no-affine + scale/shift.
+        // LayerNorm-no-affine + modulate.
         TensorShape seqShape = new TensorShape(batch, seqLen, hidden);
         Tensor normed = new Tensor(seqShape, DType.F32);
         DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, hidden, _config.RmsNormEps);
@@ -501,17 +370,24 @@ public sealed unsafe class AnimaTransformer : IDisposable
         shift.Dispose();
         scale.Dispose();
 
-        // proj_out: hidden → p_h * p_w * out_channels (p_t = 1).
+        // final_layer.linear: hidden → p_h * p_w * out_channels (p_t = 1). Shape [out_features=64, in_features=2048].
         int outDim = _config.PatchSize.H * _config.PatchSize.W * _config.OutChannels;
-        TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor output = new Tensor(outShape, DType.F32);
-        backend.Linear(output, modulated, _projOutWeight!, _projOutBias);
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, outDim), DType.F32);
+        backend.Linear(output, modulated, _finalLinearWeight!, null);
         modulated.Dispose();
         return output;
     }
 
-    /// <summary>Reshapes <c>[B, S, p_h*p_w*C]</c> back to <c>[B, C, H, W]</c>. Inverse of the patch-embed gather order
-    /// <c>(c, ph, pw)</c>.</summary>
+    /// <summary>Reshapes <c>[B, S, p_h*p_w*C]</c> back to <c>[B, C, H, W]</c>. Mirrors the upstream
+    /// Cosmos <c>permute(0, 7, 1, 6, 2, 4, 3, 5)</c> ordering for the proj_out output (per
+    /// <c>diffusers/models/transformers/transformer_cosmos.py</c> line 800-807). Crucial detail:
+    /// PATCHIFY uses feature order <c>(C, p_t, p_h, p_w)</c> with channel OUTERMOST, but
+    /// UNPATCHIFY uses <c>(p_h, p_w, p_t, C)</c> with channel INNERMOST. The two orderings are
+    /// deliberately asymmetric — the upstream comment in <c>transformer_cosmos.py</c> calls this
+    /// out as "NOT the inverse operation of what happens when patching as usually expected". So
+    /// flat feature index in each token's <c>p_h*p_w*p_t*C</c>-element vector is:
+    /// <code>feat_idx = ph * (p_w * p_t * C) + pw * (p_t * C) + pt * C + c</code>.
+    /// For image mode (p_t = 1) this collapses to <c>ph * p_w * C + pw * C + c</c>.</summary>
     private static Tensor Unpatchify(Tensor packed, int batch, int gridH, int gridW, int patchH, int patchW, int outChannels)
     {
         int height = gridH * patchH;
@@ -536,14 +412,16 @@ public sealed unsafe class AnimaTransformer : IDisposable
                     for (int gw = 0; gw < gridW; gw++)
                     {
                         int seqIdx = gh * gridW + gw;
-                        long inBase = ((long)b * seqLen + seqIdx) * featDim + (long)c * patchVol;
+                        long inBase = ((long)b * seqLen + seqIdx) * featDim;
                         for (int ph = 0; ph < patchH; ph++)
                         {
                             for (int pw = 0; pw < patchW; pw++)
                             {
                                 int row = gh * patchH + ph;
                                 int col = gw * patchW + pw;
-                                outPtr[outChannelBase + (long)row * width + col] = inPtr[inBase + ph * patchW + pw];
+                                // Channel-innermost feature order: feat_idx = ph * (pW * C) + pw * C + c
+                                long featIdx = (long)ph * patchW * outChannels + (long)pw * outChannels + c;
+                                outPtr[outChannelBase + (long)row * width + col] = inPtr[inBase + featIdx];
                             }
                         }
                     }
@@ -553,7 +431,6 @@ public sealed unsafe class AnimaTransformer : IDisposable
         return output;
     }
 
-    /// <summary>In-place: <c>dst[b, d] += temb[b, d]</c> for d in [0, sliceLen).</summary>
     private static void AddTembSliceInPlace(Tensor dst, Tensor temb, int batch, int sliceLen)
     {
         int tembStride = (int)temb.Shape[1];
@@ -570,7 +447,6 @@ public sealed unsafe class AnimaTransformer : IDisposable
         }
     }
 
-    /// <summary>Splits <c>[B, 2*hidden]</c> into <c>[B, hidden]</c> shift and scale (Cosmos order: shift first, scale second).</summary>
     private static void SplitTwo(Tensor src, Tensor shift, Tensor scale, int batch, int hidden)
     {
         float* sPtr = (float*)src.DataPointer;
@@ -586,28 +462,23 @@ public sealed unsafe class AnimaTransformer : IDisposable
         }
     }
 
-    /// <summary>Loads a tensor and casts to F32 if needed (RmsNorm scales must be F32).</summary>
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
     {
         Tensor t = weights[key];
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
-    /// <summary>Disposes the transformer state. The actual unmanaged tensor storage is owned by the underlying
-    /// safetensors mmap.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _patchEmbedWeight = null; _patchEmbedBias = null;
-            _crossAttnProjWeight = null; _crossAttnProjBias = null;
-            _timeLinear1Weight = null; _timeLinear1Bias = null;
-            _timeLinear2Weight = null; _timeLinear2Bias = null;
-            _timeNormWeight = null;
-            _posEmbT = null; _posEmbH = null; _posEmbW = null;
-            _normOutLinear1Weight = null; _normOutLinear1Bias = null;
-            _normOutLinear2Weight = null; _normOutLinear2Bias = null;
-            _projOutWeight = null; _projOutBias = null;
+            _patchEmbedWeight = null;
+            _timeLinear1Weight = null;
+            _timeLinear2Weight = null;
+            _timeEmbeddingNormWeight = null;
+            _finalAdaL1 = null;
+            _finalAdaL2 = null;
+            _finalLinearWeight = null;
         }
         GC.SuppressFinalize(this);
     }

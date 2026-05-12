@@ -146,6 +146,9 @@ public static unsafe class LatentPreview
         LatentArchitecture.Flux2 => FluxFactors,
         LatentArchitecture.Chroma => FluxFactors,
         LatentArchitecture.ZImage => FluxFactors,
+        // Anima uses the Qwen-Image VAE (16 ch). Flux factors are a reasonable approximation
+        // for preview purposes; replace with Qwen-Image-specific factors when published.
+        LatentArchitecture.Anima => FluxFactors,
         LatentArchitecture.FLite => Sd3Factors,
         LatentArchitecture.AuraFlow => SdxlFactors,
         _ => null,
@@ -155,7 +158,8 @@ public static unsafe class LatentPreview
     {
         LatentArchitecture.Sd3 => Sd3Bias,
         LatentArchitecture.Flux or LatentArchitecture.Flux2
-            or LatentArchitecture.Chroma or LatentArchitecture.ZImage => FluxBias,
+            or LatentArchitecture.Chroma or LatentArchitecture.ZImage
+            or LatentArchitecture.Anima => FluxBias,
         LatentArchitecture.FLite => Sd3Bias,
         _ => ZeroBias,
     };
