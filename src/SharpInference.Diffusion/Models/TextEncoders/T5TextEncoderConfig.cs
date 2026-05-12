@@ -30,6 +30,12 @@ public sealed record T5TextEncoderConfig
     /// <summary>RMSNorm epsilon.</summary>
     public float LayerNormEpsilon { get; init; } = 1e-6f;
 
+    /// <summary>If true, each encoder layer has its own learned relative position bias (UMT5 convention,
+    /// used by Pile-T5-XL / AuraFlow). If false (T5 v1.1 default), only block 0 has a learned bias and
+    /// every subsequent block shares it. Using the wrong mode produces a perfect-looking transformer
+    /// with semantically-wrong conditioning — image quality high, prompt ignored.</summary>
+    public bool UsePerLayerPositionBias { get; init; } = false;
+
     /// <summary>T5 v1.1 XXL encoder preset for SD3/Flux text encoding.</summary>
     public static T5TextEncoderConfig Xxl => new()
     {
@@ -42,9 +48,13 @@ public sealed record T5TextEncoderConfig
     };
 
     /// <summary>Pile-T5-XL (UMT5) encoder preset for AuraFlow text encoding (`EleutherAI/pile-t5-xl`).
-    /// <c>d_model = 2048</c> matches AuraFlow's <c>joint_attention_dim = 2048</c>. UMT5 is architecturally
-    /// identical to T5 v1.1 for the encoder-only inference path; the only difference is the SentencePiece
-    /// vocabulary. Max sequence length 256 per AuraFlow's pipeline.</summary>
+    /// <c>d_model = 2048</c> matches AuraFlow's <c>joint_attention_dim = 2048</c>. UMT5 differs from
+    /// T5 v1.1 in TWO ways for the encoder path: (1) the SentencePiece vocabulary (different token IDs
+    /// for the same words — needs the Pile-T5 <c>spiece.model</c>, not Google's <c>t5_spiece.model</c>),
+    /// AND (2) a separately-learned <c>relative_attention_bias</c> per layer rather than a single
+    /// shared one. Both are required — using the wrong tokenizer or sharing block 0's bias across
+    /// all 24 layers produces a perfect-looking transformer with semantically wrong conditioning
+    /// (image high quality, prompt ignored). Max sequence length 256 per AuraFlow's pipeline.</summary>
     public static T5TextEncoderConfig PileT5Xl => new()
     {
         DModel = 2048,
@@ -53,5 +63,6 @@ public sealed record T5TextEncoderConfig
         NumHeads = 32,
         NumLayers = 24,
         VocabSize = 32128,
+        UsePerLayerPositionBias = true,
     };
 }

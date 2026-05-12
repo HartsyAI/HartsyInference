@@ -9,7 +9,10 @@ public sealed unsafe class T5TextEncoder : IDisposable
 {
     private readonly T5TextEncoderConfig _config;
     private readonly T5Block[] _blocks;
-    private readonly T5RelativePositionBias _positionBias;
+    // T5 v1.1 mode (single shared bias): _positionBias is non-null, _perLayerPositionBias is null.
+    // UMT5 mode (per-layer bias for Pile-T5-XL / AuraFlow): _perLayerPositionBias is non-null with one entry per block.
+    private readonly T5RelativePositionBias? _positionBias;
+    private readonly T5RelativePositionBias[]? _perLayerPositionBias;
 
     // Embedding table [vocabSize, dModel]
     private Tensor? _embedWeight;
@@ -27,7 +30,18 @@ public sealed unsafe class T5TextEncoder : IDisposable
         {
             _blocks[i] = new T5Block(config.DModel, config.NumHeads, config.DKv, config.LayerNormEpsilon);
         }
-        _positionBias = new T5RelativePositionBias(config.RelativeAttentionNumBuckets, config.RelativeAttentionMaxDistance, config.NumHeads);
+        if (config.UsePerLayerPositionBias)
+        {
+            _perLayerPositionBias = new T5RelativePositionBias[config.NumLayers];
+            for (int i = 0; i < config.NumLayers; i++)
+            {
+                _perLayerPositionBias[i] = new T5RelativePositionBias(config.RelativeAttentionNumBuckets, config.RelativeAttentionMaxDistance, config.NumHeads);
+            }
+        }
+        else
+        {
+            _positionBias = new T5RelativePositionBias(config.RelativeAttentionNumBuckets, config.RelativeAttentionMaxDistance, config.NumHeads);
+        }
     }
 
     /// <summary>Loads all encoder weights from a tensor dictionary (HuggingFace safetensors format).</summary>
@@ -50,9 +64,23 @@ public sealed unsafe class T5TextEncoder : IDisposable
         }
         _embedWeight = rawEmbed.DType != DType.F32 ? rawEmbed.CastTo(DType.F32) : rawEmbed;
 
-        // Relative position bias (only on first block's attention layer)
-        Tensor biasTable = weights["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"];
-        _positionBias.LoadWeights(biasTable);
+        // Relative position bias. T5 v1.1 stores it once on block 0 and shares across all layers.
+        // UMT5 (Pile-T5-XL / AuraFlow) stores a separate learned bias per layer — we must load all
+        // 24 of them, otherwise layers 1..N-1 silently inherit block 0's bias and the encoder
+        // produces hidden states with the wrong positional structure (image high-quality, prompt ignored).
+        if (_perLayerPositionBias is not null)
+        {
+            for (int i = 0; i < _config.NumLayers; i++)
+            {
+                Tensor perLayerBias = weights[$"encoder.block.{i}.layer.0.SelfAttention.relative_attention_bias.weight"];
+                _perLayerPositionBias[i].LoadWeights(perLayerBias);
+            }
+        }
+        else
+        {
+            Tensor biasTable = weights["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"];
+            _positionBias!.LoadWeights(biasTable);
+        }
 
         // Per-block weights
         for (int i = 0; i < _config.NumLayers; i++)
@@ -72,7 +100,15 @@ public sealed unsafe class T5TextEncoder : IDisposable
     {
         if (_embedWeight is not null) yield return _embedWeight;
         if (_finalNormWeight is not null) yield return _finalNormWeight;
-        foreach (Tensor w in _positionBias.EnumerateWeights()) yield return w;
+        if (_perLayerPositionBias is not null)
+        {
+            for (int i = 0; i < _perLayerPositionBias.Length; i++)
+                foreach (Tensor w in _perLayerPositionBias[i].EnumerateWeights()) yield return w;
+        }
+        else
+        {
+            foreach (Tensor w in _positionBias!.EnumerateWeights()) yield return w;
+        }
         for (int i = 0; i < _blocks.Length; i++)
         {
             foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
@@ -99,11 +135,18 @@ public sealed unsafe class T5TextEncoder : IDisposable
         Tensor hidden = EmbeddingLookup(tokenIds, batch, seqLen);
 
         Tensor? maskTensor = attentionMasks is not null ? BuildMaskTensor(attentionMasks, batch, seqLen) : null;
-        Tensor positionBias = _positionBias.ComputeBias(seqLen);
+
+        // T5 v1.1: compute bias once and reuse across layers (cheaper, identical to diffusers).
+        // UMT5: each layer has its own learned bias — fetched per block.
+        // Never dispose the returned bias tensors — T5RelativePositionBias.ComputeBias caches them
+        // internally and the instance owns the lifetime. Disposing here corrupts the cache and the
+        // next encode call (e.g. CFG negative prompt) hits an ObjectDisposedException.
+        Tensor? sharedBias = _perLayerPositionBias is null ? _positionBias!.ComputeBias(seqLen) : null;
 
         for (int i = 0; i < layerCount; i++)
         {
-            Tensor blockOutput = _blocks[i].Forward(backend, hidden, positionBias, maskTensor);
+            Tensor layerBias = sharedBias ?? _perLayerPositionBias![i].ComputeBias(seqLen);
+            Tensor blockOutput = _blocks[i].Forward(backend, hidden, layerBias, maskTensor);
             hidden.Dispose();
             hidden = blockOutput;
         }

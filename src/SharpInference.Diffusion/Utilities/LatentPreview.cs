@@ -22,6 +22,54 @@ public static unsafe class LatentPreview
     /// <summary>Returns true if a <c>latent2rgb</c> factor table is available for the given architecture.</summary>
     public static bool IsSupported(LatentArchitecture arch) => GetFactors(arch) is not null;
 
+    /// <summary>Unpacks a Flux-family packed latent <c>[B, latH/2 * latW/2, C*4]</c> back to
+    /// canonical NCHW <c>[B, C, latH, latW]</c> (with C=16 for Flux.1 / Chroma / Z-Image's
+    /// internal packed form). Returns a freshly-allocated F32 tensor — the caller owns it and
+    /// must dispose. The input is not modified or disposed.
+    /// <para>The packing pattern matches diffusers' Flux <c>_pack_latents</c>: each
+    /// <c>[2, 2]</c> spatial patch of every channel is interleaved into the channel dim of
+    /// one token, in <c>[(y,x)=(0,0), (0,1), (1,0), (1,1)]</c> order.</para></summary>
+    public static Tensor UnpackFluxStylePacked(Tensor packed, int latentH, int latentW, int channels = 16)
+    {
+        if (packed.Shape.Rank != 3)
+            throw new ArgumentException($"Expected packed shape [B, S, C*4]; got {packed.Shape}.", nameof(packed));
+        int batch = (int)packed.Shape[0];
+        int hPacked = latentH / 2;
+        int wPacked = latentW / 2;
+        int patchDim = channels * 4;
+        int seqLen = hPacked * wPacked;
+        if ((int)packed.Shape[1] != seqLen || (int)packed.Shape[2] != patchDim)
+            throw new ArgumentException(
+                $"Packed shape {packed.Shape} doesn't match expected [{batch}, {seqLen}, {patchDim}] " +
+                $"for latH={latentH}, latW={latentW}, C={channels}.", nameof(packed));
+
+        Tensor unpacked = new(new TensorShape(batch, channels, latentH, latentW), DType.F32);
+        float* inPtr = (float*)packed.DataPointer;
+        float* outPtr = (float*)unpacked.DataPointer;
+
+        for (int b = 0; b < batch; b++)
+        {
+            for (int ph = 0; ph < hPacked; ph++)
+            {
+                for (int pw = 0; pw < wPacked; pw++)
+                {
+                    int seqIdx = ph * wPacked + pw;
+                    int inBase = (b * seqLen + seqIdx) * patchDim;
+                    for (int c = 0; c < channels; c++)
+                    {
+                        int outChannelBase = (b * channels + c) * latentH * latentW;
+                        int patchBase = inBase + c * 4;
+                        outPtr[outChannelBase + (ph * 2 + 0) * latentW + (pw * 2 + 0)] = inPtr[patchBase + 0];
+                        outPtr[outChannelBase + (ph * 2 + 0) * latentW + (pw * 2 + 1)] = inPtr[patchBase + 1];
+                        outPtr[outChannelBase + (ph * 2 + 1) * latentW + (pw * 2 + 0)] = inPtr[patchBase + 2];
+                        outPtr[outChannelBase + (ph * 2 + 1) * latentW + (pw * 2 + 1)] = inPtr[patchBase + 3];
+                    }
+                }
+            }
+        }
+        return unpacked;
+    }
+
     /// <summary>Decodes the first batch element of <paramref name="latent"/> (shape <c>[1, C, H, W]</c>)
     /// into an HWC-interleaved RGB byte array in <c>[0, 255]</c>. Returns <c>null</c> if the architecture
     /// has no preview factors registered, the latent dtype isn't F32, or the channel count doesn't

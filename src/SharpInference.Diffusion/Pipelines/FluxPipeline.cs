@@ -322,14 +322,23 @@ public sealed unsafe class FluxPipeline : IDisposable
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            // Latent is the packed [B, S, 64] form (16 channels × 2×2 patches per token).
-            // LatentPreview.DecodeLatent2Rgb expects unpacked NCHW, so leave Latent null
-            // here — consumers see LatentArch=Flux but no preview yet. Wiring packed-latent
-            // unpack into LatentPreview is a follow-up.
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            // packedLatent is [B, S, 64] (16 channels × 2×2 patches per token). LatentPreview
+            // needs unpacked NCHW — allocate a temp, emit, dispose. ~1 ms for 1024² Flux; the
+            // PreviewEncoder throttles to ≤4/sec so the unpack only fires when a frame will
+            // actually be rendered.
+            if (onProgress is not null)
             {
-                LatentArch = LatentArchitecture.Flux,
-            });
+                Tensor previewLatent = LatentPreview.UnpackFluxStylePacked(packedLatent, latentH, latentW, channels: 16);
+                try
+                {
+                    onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                    {
+                        Latent = previewLatent,
+                        LatentArch = LatentArchitecture.Flux,
+                    });
+                }
+                finally { previewLatent.Dispose(); }
+            }
         }
 
         clipPooled.Dispose();

@@ -165,8 +165,14 @@ public sealed unsafe class Flux2Pipeline : IDisposable
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            // packedLatent is [B, S, 128] (32 channels × 2×2 patches); LatentPreview needs
-            // unpacked NCHW. Leave Latent null until packed-latent support lands.
+            // No live preview for Flux.2 yet. Three things would need to line up:
+            //   1. Unpack packedLatent [B, S, 128] → [B, 128, patH, patW] (mechanical).
+            //   2. Reverse the pipeline's BN normalization using _bnMean/_bnVar (also mechanical).
+            //   3. Unpatchify [B, 128, patH, patW] → [B, 32, latH, latW] (already in this file).
+            // But (4) we'd then need a Flux.2-specific 32×3 latent2rgb factor matrix that
+            // doesn't exist publicly, AND there's no published TAESD checkpoint for the
+            // 32-channel Flux.2 VAE. So Flux.2 emits progress percentages only — no preview
+            // frames. PreviewEncoder skips when Latent is null.
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
             {
                 LatentArch = LatentArchitecture.Flux2,

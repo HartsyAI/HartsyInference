@@ -268,7 +268,13 @@ public static unsafe class CheckpointConvertUtils
 
     // ── FP8 Scaled ──────────────────────────────────────────
 
-    /// <summary>Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the matching weight tensors and drops the companions. Supports ComfyUI fp8_scaled (.scale_weight/.scale_input) and BFL Mistral / Flux.2 Dev mixed-fp8 (.weight_scale/.input_scale). The input-side scale is dropped — we run F32 activations and use alpha=weight_scale at GEMM time. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
+    /// <summary>Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the matching weight tensors and drops the companions. Supports three companion formats:
+    /// <list type="bullet">
+    ///   <item>ComfyUI <c>fp8_scaled</c>: <c>.scale_weight</c>/<c>.scale_input</c> (F32 scalar).</item>
+    ///   <item>BFL Mistral / Flux.2 Dev mixed-fp8: <c>.weight_scale</c>/<c>.input_scale</c> (F32 scalar).</item>
+    ///   <item>ComfyUI <c>comfy_quant</c>: <c>.comfy_quant</c> (U8 JSON blob like <c>{"format":"float8_e4m3fn"}</c>) — newer format used by Chroma1-HD-fp8mixed and similar. There's no separately-stored scalar; fp8 values are used at identity scale (the model is trained with the natural fp8 dynamic range). The companion is purely a format declaration and must still be dropped or it pollutes the weight dictionary.</item>
+    /// </list>
+    /// The input-side scale is dropped — we run F32 activations and use alpha=weight_scale at GEMM time. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
     /// <param name="source">Raw checkpoint dictionary (mutated; companion keys removed).</param>
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
@@ -291,9 +297,10 @@ public static unsafe class CheckpointConvertUtils
             }
             else if (key.EndsWith(".scale_input", StringComparison.Ordinal) ||
                      key.EndsWith(".input_scale", StringComparison.Ordinal) ||
+                     key.EndsWith(".comfy_quant", StringComparison.Ordinal) ||
                      key == "scaled_fp8")
             {
-                sawAnyScale = true; // these are dropped but flag the format as scaled
+                sawAnyScale = true; // these are dropped but flag the format as scaled (or as fp8-declared in comfy_quant's case)
             }
         }
         if (!sawAnyScale)
@@ -308,13 +315,16 @@ public static unsafe class CheckpointConvertUtils
                 key.EndsWith(".scale_input", StringComparison.Ordinal) ||
                 key.EndsWith(".weight_scale", StringComparison.Ordinal) ||
                 key.EndsWith(".input_scale", StringComparison.Ordinal) ||
+                key.EndsWith(".comfy_quant", StringComparison.Ordinal) ||
                 key == "scaled_fp8")
             {
                 continue;
             }
 
             // For FP8 weight tensors with a matching scalar scale, fold into Fp8ScaleFactor so
-            // CudaBackend can apply it via cuBLAS alpha at GEMM time.
+            // CudaBackend can apply it via cuBLAS alpha at GEMM time. Weights without a scale
+            // companion (e.g. comfy_quant format) keep the default Fp8ScaleFactor of 1.0 — the
+            // model was trained with fp8's natural dynamic range and no per-tensor rescaling.
             if (kvp.Value.DType.IsFp8 && key.EndsWith(".weight", StringComparison.Ordinal))
             {
                 string baseKey = key[..^".weight".Length];
