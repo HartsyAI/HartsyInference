@@ -1,0 +1,62 @@
+<Project>
+
+  <!--
+    TODO: REMOVE THIS FILE WHEN SHARPINFERENCE IS PUBLISHED AS A NUGET PACKAGE.
+
+    This target is a *development convenience* for the SwarmUI-SharpInference extension.
+    The extension's csproj references SharpInference DLLs via HintPath into this repo's
+    bin/Release/net8.0/ folders. When you rebuild a SharpInference subproject, the
+    extension's runtime copies under SwarmUI/src/bin/extensions/... and SwarmUI/src/bin/live_release/
+    don't auto-update — they were copied at extension build time and become stale.
+
+    Until SharpInference ships as a NuGet package (where dependency updates flow through
+    normal `dotnet restore` + extension rebuild), this target mirrors freshly-built DLLs
+    into the two Swarm runtime locations so the next Swarm launch picks them up without
+    manual `cp` steps.
+
+    Once NuGet packaging lands:
+      1. The SwarmUI-SharpInference.csproj will use PackageReference instead of HintPath.
+      2. NuGet's restore + the extension rebuild will handle dependency propagation.
+      3. Delete this file. The whole post-build copy mechanism becomes dead weight.
+  -->
+
+  <PropertyGroup>
+    <!-- Override on command line if SwarmUI lives elsewhere. -->
+    <SwarmUIRoot Condition=" '$(SwarmUIRoot)' == '' ">$(MSBuildThisFileDirectory)..\SwarmUI</SwarmUIRoot>
+    <SwarmExtensionBin>$(SwarmUIRoot)\src\bin\extensions\SwarmExtensionSwarmUI-SharpInference</SwarmExtensionBin>
+    <SwarmLiveReleaseBin>$(SwarmUIRoot)\src\bin\live_release</SwarmLiveReleaseBin>
+  </PropertyGroup>
+
+  <!-- Whitelist: the seven SharpInference projects that the SwarmUI extension references
+       via HintPath. Anything else (Cli, Server, Audio, Video, tests, samples) is skipped. -->
+  <ItemGroup>
+    <SwarmConsumedAssembly Include="SharpInference.Core" />
+    <SwarmConsumedAssembly Include="SharpInference.ModelHandler" />
+    <SwarmConsumedAssembly Include="SharpInference.Tokenizers" />
+    <SwarmConsumedAssembly Include="SharpInference.Diffusion" />
+    <SwarmConsumedAssembly Include="SharpInference.Cpu" />
+    <SwarmConsumedAssembly Include="SharpInference.Cuda" />
+    <SwarmConsumedAssembly Include="SharpInference.Vulkan" />
+  </ItemGroup>
+
+  <Target Name="CopyToSwarmRuntimeFolders"
+          AfterTargets="Build"
+          Condition=" '$(Configuration)' == 'Release'
+                      AND '$(TargetFramework)' == 'net8.0'
+                      AND Exists('$(SwarmExtensionBin)')
+                      AND '@(SwarmConsumedAssembly->WithMetadataValue(`Identity`, `$(AssemblyName)`))' != '' ">
+    <Message Importance="high" Text="[SwarmAutoCopy] $(AssemblyName).dll → SwarmExtension/ + live_release/" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SwarmExtensionBin)" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb"
+          DestinationFolder="$(SwarmExtensionBin)"
+          SkipUnchangedFiles="false"
+          Condition=" Exists('$(TargetDir)$(AssemblyName).pdb') " />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SwarmLiveReleaseBin)" SkipUnchangedFiles="false"
+          Condition=" Exists('$(SwarmLiveReleaseBin)') " />
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb"
+          DestinationFolder="$(SwarmLiveReleaseBin)"
+          SkipUnchangedFiles="false"
+          Condition=" Exists('$(SwarmLiveReleaseBin)') AND Exists('$(TargetDir)$(AssemblyName).pdb') " />
+  </Target>
+
+</Project>

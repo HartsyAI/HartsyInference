@@ -153,11 +153,13 @@ public sealed unsafe class AnimaPipeline : IDisposable
         _backend.FreeWeights(_llmAdapter.EnumerateWeights());
 
         LogStats("final latent (pre-VAE)", latent);
+        LogPerChannelStats("final latent (pre-VAE) per-channel", latent);
 
         Tensor decoded = _vaeDecoder.Decode(_backend, latent);
         latent.Dispose();
 
         LogStats("VAE decoded (raw)", decoded);
+        LogPerChannelStats("VAE decoded per-channel", decoded);
 
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
         decoded.Dispose();
@@ -197,6 +199,58 @@ public sealed unsafe class AnimaPipeline : IDisposable
         double std = finite > 0 ? Math.Sqrt(Math.Max(0, sumSq / finite - mean * mean)) : 0;
         string nanInf = (nanCount > 0 || infCount > 0) ? $"  *** NAN={nanCount} INF={infCount} ***" : "";
         Logs.Info($"[Anima stats] {label,-44} shape={src.Shape}  min={min:F3}  max={max:F3}  mean={mean:F4}  abs_mean={absMean:F4}  std={std:F4}{nanInf}");
+        if (!ReferenceEquals(src, t)) src.Dispose();
+    }
+
+    /// <summary>Print per-channel mean/std/abs_mean of a 4-D tensor [B, C, H, W]. Used to detect whether
+    /// individual latent channels carry distinct content (suggesting the DiT produced meaningful output
+    /// and the VAE is the issue) vs all channels looking statistically identical (suggesting the DiT
+    /// is producing uniform-ish noise per channel = DiT is the issue).</summary>
+    private static unsafe void LogPerChannelStats(string label, Tensor t)
+    {
+        Tensor src = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        if (src.Shape.Rank != 4)
+        {
+            Logs.Info($"[Anima per-ch] {label} — not 4D, shape={src.Shape}, skipping.");
+            if (!ReferenceEquals(src, t)) src.Dispose();
+            return;
+        }
+        int batch = (int)src.Shape[0];
+        int channels = (int)src.Shape[1];
+        int h = (int)src.Shape[2];
+        int w = (int)src.Shape[3];
+        long spatial = (long)h * w;
+        float* p = (float*)src.DataPointer;
+
+        System.Text.StringBuilder sb = new();
+        sb.AppendLine($"[Anima per-ch] {label} shape=[{batch},{channels},{h},{w}]:");
+        for (int c = 0; c < channels; c++)
+        {
+            float min = float.PositiveInfinity, max = float.NegativeInfinity;
+            double sum = 0, sumSq = 0, sumAbs = 0;
+            long count = 0;
+            for (int b = 0; b < batch; b++)
+            {
+                long bcOff = ((long)b * channels + c) * spatial;
+                for (long i = 0; i < spatial; i++)
+                {
+                    float v = p[bcOff + i];
+                    if (float.IsNaN(v) || float.IsInfinity(v)) continue;
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                    sum += v;
+                    sumSq += (double)v * v;
+                    sumAbs += Math.Abs(v);
+                    count++;
+                }
+            }
+            double mean = count > 0 ? sum / count : 0;
+            double std = count > 0 ? Math.Sqrt(Math.Max(0, sumSq / count - mean * mean)) : 0;
+            double absMean = count > 0 ? sumAbs / count : 0;
+            sb.AppendLine($"   ch{c,2}: min={min,7:F3} max={max,7:F3} mean={mean,7:F4} abs_mean={absMean,7:F4} std={std,7:F4}");
+        }
+        Logs.Info(sb.ToString().TrimEnd());
+
         if (!ReferenceEquals(src, t)) src.Dispose();
     }
 
