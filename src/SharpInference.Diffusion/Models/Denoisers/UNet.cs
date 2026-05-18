@@ -245,24 +245,16 @@ public sealed class UNet
             temb = combinedTemb;
         }
 
-        // Cast temb to match latent dtype (embeddings are computed in F32)
-        if (temb.DType != dtype)
-        {
-            Tensor tembCast = new Tensor(temb.Shape, dtype);
-            backend.CastToF16(tembCast, temb);
-            temb.Dispose();
-            temb = tembCast;
-        }
+        // Cast temb to match latent dtype (embeddings are computed in F32). temb is locally
+        // owned — let the helper dispose source on cast.
+        temb = Utilities.DtypeCastHelper.EnsureDtype(backend, temb, dtype);
 
-        // Cast text embeddings to match latent dtype (CLIP produces F32, UNet may run F16)
-        bool ownsTextEmbeddings = false;
-        if (textEmbeddings.DType != dtype)
-        {
-            Tensor textCast = new Tensor(textEmbeddings.Shape, dtype);
-            backend.CastToF16(textCast, textEmbeddings);
-            textEmbeddings = textCast;
-            ownsTextEmbeddings = true;
-        }
+        // Cast text embeddings to match latent dtype (CLIP produces F32, UNet may run F16).
+        // textEmbeddings is a parameter — don't dispose source. Track ownership of the casted
+        // copy so we can dispose it later if a cast actually happened.
+        Tensor textEmbeddingsOriginal = textEmbeddings;
+        textEmbeddings = Utilities.DtypeCastHelper.EnsureDtype(backend, textEmbeddings, dtype, disposeSourceOnCast: false);
+        bool ownsTextEmbeddings = textEmbeddings != textEmbeddingsOriginal;
 
         // 3. conv_in
         TensorShape convInShape = new TensorShape(batch, _config.ModelChannels, height, width);

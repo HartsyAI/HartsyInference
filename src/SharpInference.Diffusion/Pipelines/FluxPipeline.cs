@@ -16,16 +16,14 @@ namespace SharpInference.Diffusion.Pipelines;
 /// <summary>Flux text-to-image and image-to-image pipeline. Orchestrates CLIP-L pooled + T5-XXL text encoding → FluxTransformer denoising with flow matching → VAE decode → RGB image output. Supports Dev (guidance embedding) and Schnell (distilled, 1-4 steps) modes.
 /// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>) to <see cref="GenerateFromTokens"/>. Requires a <see cref="VaeEncoder"/> on construction. The img2img path encodes the source via the 16-channel Flux VAE, packs the latent (2×2 patchify), and injects flow-matching noise at the timestep selected by <c>Strength</c>.</para>
 /// </summary>
-public sealed unsafe class FluxPipeline : IDisposable
+public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly ClipTextEncoder _clipL;
     private readonly T5TextEncoder _t5;
     private readonly FluxTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder? _vaeEncoder;
     private readonly FluxConfig _config;
-    private int _disposed;
 
     /// <summary>Creates a new Flux pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public FluxPipeline(IBackend backend, ClipTextEncoder clipL, T5TextEncoder t5,
@@ -37,8 +35,8 @@ public sealed unsafe class FluxPipeline : IDisposable
     /// <summary>Creates a new Flux pipeline with both VAE halves loaded. Required for img2img and for use as a cross-model refiner.</summary>
     public FluxPipeline(IBackend backend, ClipTextEncoder clipL, T5TextEncoder t5,
         FluxTransformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, FluxConfig config)
+        : base(backend)
     {
-        _backend = backend;
         _clipL = clipL;
         _t5 = t5;
         _transformer = transformer;
@@ -100,49 +98,16 @@ public sealed unsafe class FluxPipeline : IDisposable
         int latentW = width / 8;
         int steps = request.Steps;
 
-        // Img2img validation + strength=0 short-circuit BEFORE any model work.
-        int startStep = 0;
-        Tensor? maskPixel = null;
-        if (request is ImageToImageRequest img2img)
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
         {
-            Tensor src = img2img.SourceImage;
-            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
-                src.Shape[2] != height || src.Shape[3] != width)
-            {
-                throw new ArgumentException(
-                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
-                    nameof(request));
-            }
-
-            if (img2img.Mask is not null)
-            {
-                Tensor mk = img2img.Mask;
-                if (mk.Shape.Rank != 4 || mk.Shape[0] != 1 || mk.Shape[1] != 1 ||
-                    mk.Shape[2] != height || mk.Shape[3] != width)
-                {
-                    throw new ArgumentException(
-                        $"Mask shape must be [1, 1, {height}, {width}] (matching source); got {mk.Shape}.",
-                        nameof(request));
-                }
-                if (mk.DType != DType.F32)
-                {
-                    throw new ArgumentException($"Mask must be F32 in [0, 1]; got {mk.DType}.", nameof(request));
-                }
-                maskPixel = mk;
-            }
-
-            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
-            int initTimesteps = (int)MathF.Round(steps * strength);
-            startStep = Math.Max(steps - initTimesteps, 0);
-
-            if (initTimesteps == 0)
-            {
-                Logs.Info("Strength=0; passing source through unchanged");
-                return (ImagePostProcessor.TensorToRgbBytes(src), width, height, seed);
-            }
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
         }
-
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
         bool isMaskedInpaint = maskPixel is not null;
+
         string baseMode = _config.GuidanceEmbed ? "Dev" : "Schnell";
         string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
                        : isImg2Img ? $"img2img (start={startStep}/{steps})"
@@ -159,17 +124,17 @@ public sealed unsafe class FluxPipeline : IDisposable
         // text encoding into thousands of ~MB-sized PCIe ping-pongs instead of one
         // bulk transfer + many on-GPU reuses. Backends that don't support a weight
         // cache (Cpu, Vulkan) treat PreloadWeights as a no-op.
-        _backend.PreloadWeights(_t5.EnumerateWeights());
+        Backend.PreloadWeights(_t5.EnumerateWeights());
 
         int[][] batchTokenIdsL = [promptTokenIdsL];
-        Tensor clipLHidden = _clipL.Encode(_backend, batchTokenIdsL);
+        Tensor clipLHidden = _clipL.Encode(Backend, batchTokenIdsL);
         LogTensorStats("CLIP hidden (full)", clipLHidden);
         Tensor clipPooled = ExtractEosHiddenState(clipLHidden, promptEosPositionL);
         clipLHidden.Dispose();
 
         int[][] batchTokenIdsT5 = [promptTokenIdsT5];
         int[][]? batchMaskT5 = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
-        Tensor t5Embeddings = _t5.Encode(_backend, batchTokenIdsT5, batchMaskT5);
+        Tensor t5Embeddings = _t5.Encode(Backend, batchTokenIdsT5, batchMaskT5);
 
         int txtSeqLen = (int)t5Embeddings.Shape[1];
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (T5 seqLen={txtSeqLen})");
@@ -181,7 +146,7 @@ public sealed unsafe class FluxPipeline : IDisposable
         // The activation tensor `t5Embeddings` is on GPU/CPU and lives independently of
         // the encoder weights. Re-uploading T5 on the next generation is a one-time cost
         // (~hundreds of ms) that's strictly cheaper than swapping mid-pipeline.
-        _backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 2. Set up dynamic flow-match scheduler ─────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
@@ -223,7 +188,7 @@ public sealed unsafe class FluxPipeline : IDisposable
                     nameof(controlImage));
             }
             Stopwatch ctrlEncSw = Stopwatch.StartNew();
-            Tensor controlLatentUnpacked = _vaeEncoder!.Encode(_backend, controlImage);
+            Tensor controlLatentUnpacked = _vaeEncoder!.Encode(Backend, controlImage);
             ctrlEncSw.Stop();
             Logs.Info($"Flux Tools control VAE encode done in {ctrlEncSw.ElapsedMilliseconds}ms");
             packedControl = PackLatent(controlLatentUnpacked, latentH, latentW);
@@ -240,15 +205,15 @@ public sealed unsafe class FluxPipeline : IDisposable
         //     no notion of "device memory"; Vulkan's allocator is independent of this API.
         //     Same behavior as before this refactor.
         BlockStreamingController? streamer = null;
-        if (_backend.StreamingCache is not null)
+        if (Backend.StreamingCache is not null)
         {
-            _backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
 
             int prefetchAhead = ChooseFluxPrefetchAhead(
-                _backend.StreamingCache, blocks, txtSeqLen, imgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio));
-            streamer = new BlockStreamingController(_backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+                Backend.StreamingCache, blocks, txtSeqLen, imgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio));
+            streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
             _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
             streamer.Prime();
             long perBlockMb = streamer.EstimatedTotalWeightBytes / blocks.Length / (1024 * 1024);
@@ -258,7 +223,7 @@ public sealed unsafe class FluxPipeline : IDisposable
         }
         else
         {
-            _backend.PreloadWeights(_transformer.EnumerateWeights());
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
         }
 
         Logs.Info("Starting Flux denoising loop...");
@@ -278,7 +243,7 @@ public sealed unsafe class FluxPipeline : IDisposable
 
             // Forward pass: velocity prediction
             Tensor velocityPred = _transformer.Forward(
-                _backend, transformerInput, t5Embeddings, sigma,
+                Backend, transformerInput, t5Embeddings, sigma,
                 clipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked);
 
             if (transformerInput != packedLatent) transformerInput.Dispose();
@@ -356,11 +321,11 @@ public sealed unsafe class FluxPipeline : IDisposable
         {
             streamer.EvictAll();
             streamer.Dispose();
-            _backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            Backend.FreeWeights(_transformer.EnumerateSharedWeights());
         }
         else
         {
-            _backend.FreeWeights(_transformer.EnumerateWeights());
+            Backend.FreeWeights(_transformer.EnumerateWeights());
         }
 
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
@@ -387,7 +352,7 @@ public sealed unsafe class FluxPipeline : IDisposable
         // ── 6. VAE decode ─────────────────────────────────────────────
         // Preload VAE weights too — many small conv+norm ops in a row, same per-op
         // re-upload pattern would apply.
-        _backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
 
         // Always go through DecodeTiled. It internally fast-paths to a single direct
         // decode when the latent fits in one tile (small images), so there's no overhead
@@ -399,7 +364,7 @@ public sealed unsafe class FluxPipeline : IDisposable
         // GroupNorm/softmax precision investigation before re-enabling.)
         Logs.Info("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, unpackedLatent);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, unpackedLatent);
         unpackedLatent.Dispose();
         LogTensorStats("VAE output", image);
         LogPerChannelStats("VAE output", image);
@@ -489,7 +454,7 @@ public sealed unsafe class FluxPipeline : IDisposable
         if (request is ImageToImageRequest img2img)
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            Tensor sourceUnpacked = _vaeEncoder!.Encode(_backend, img2img.SourceImage);
+            Tensor sourceUnpacked = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
@@ -512,7 +477,7 @@ public sealed unsafe class FluxPipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(packedShape, DType.F32);
-            _backend.Scale(scaled, packedNoise, initSigma);
+            Backend.Scale(scaled, packedNoise, initSigma);
             packedNoise.Dispose();
             return (scaled, null);
         }
@@ -754,16 +719,5 @@ public sealed unsafe class FluxPipeline : IDisposable
         }
 
         return pooled;
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components (shared resources).</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

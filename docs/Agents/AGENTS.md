@@ -100,7 +100,19 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - `GpuTransferHelper.CopyToDevice` checks cache by `Tensor` reference equality BEFORE accessing `DataPointer` — works on disposed CPU tensors
 - Model code must NEVER access `weight.DataPointer` directly — always route through `IBackend` ops
 - At pipeline stage transitions (e.g., UNet → VAE), call `backend.Sync()` + `backend.FreeWeights(model.EnumerateWeights())` to reclaim VRAM
+- **Pair `PreloadWeights` with `FreeWeights` symmetrically.** If you `FreeWeights` a component at the end of a phase, also `PreloadWeights` it before the first heavy use — otherwise the first kernel pays a per-op cache-miss H2D transfer that defeats the bulk-upload optimization. Every diffusion pipeline follows this pattern; see `FluxPipeline` or `Sd3Pipeline` for the canonical placement (preload before text-encode, then again before the denoise loop). No-op on backends without a weight cache (CPU, Vulkan).
 - See `docs/Research/CUDA_PERFORMANCE.md` for the full optimization roadmap
+
+### Diffusion Pipeline Conventions
+- All pipelines inherit `SharpInference.Diffusion.Pipelines.DiffusionPipelineBase` — provides `Backend` property, idempotent `Dispose` + `ThrowIfDisposed`, `DisposeCore()` hook for subclass cleanup.
+- **Component ownership**: pipelines do NOT own their components (text encoders, transformers/UNets, VAE) — those are shared resources passed in by the caller. `Dispose()` on a pipeline only releases pipeline-internal state.
+- **Public API shape**: pipelines expose synchronous `GenerateFromTokens` / `GenerateFromEmbeddings` / `InpaintFromTokens` / `RefineFromTokens` methods that return `(byte[] rgbData, int width, int height, int seed)` tuples and accept `Action<GenerationProgress>?` callbacks. They do NOT implement `IAsyncEnumerable<GenerationProgress>` — there is no `IDiffusionPipeline` interface (the old one was deleted because it didn't match what any pipeline actually does).
+- **Shared utilities** under `SharpInference.Diffusion/Utilities/`:
+  - `CfgHelper.SliceBatchElement` / `SliceBatchElement1D` / `ApplyCfg` / `ConcatLastDim` — every CFG pipeline routes through these.
+  - `DtypeCastHelper.EnsureDtype` / `EnsureF32` — single source for F16/F32/BF16 activation casts. Don't write `new Tensor(shape, dt); backend.CastTo*(...)` inline.
+  - `Img2ImgSetup.Prepare(request, h, w, steps)` — validates source/mask and computes `StartStep` for img2img/inpaint. Handles strength=0 pass-through detection.
+  - `Schedulers/SchedulerFactory.Create(name)` — user-selectable scheduler dispatch (DDIM / DPM++ 2M / LCM / Euler default).
+- **Why no `DenoiseLoopRunner`**: the per-step body varies meaningfully across pipelines (Flux streaming controller, Z-Image non-standard CFG, Lumina timestep inversion, F-Lite custom integrator, Anima Cosmos normalization, SDXL refiner step-swap). The genuine duplication has been extracted into the utilities above; the loops themselves stay inline where the model quirks live. See class-level docs on `DiffusionPipelineBase` for the full rationale.
 
 ### GPU Activation Cache Rules
 - All `CudaBackend` ops call `CacheActivation(output)` to keep results on GPU

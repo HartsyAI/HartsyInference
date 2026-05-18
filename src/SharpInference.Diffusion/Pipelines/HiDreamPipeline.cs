@@ -21,9 +21,8 @@ namespace SharpInference.Diffusion.Pipelines;
 /// indices configured in <see cref="HiDreamConfig.LlamaLayers"/>; the encoder returns a single packed
 /// tensor with all selected layers concatenated along the last dim, which we slice into per-layer tensors
 /// before calling the transformer.</para></summary>
-public sealed unsafe class HiDreamPipeline : IDisposable
+public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly ClipTextEncoder _clipL;
     private readonly ClipTextEncoder _clipG;
     private readonly T5TextEncoder _t5;
@@ -31,18 +30,17 @@ public sealed unsafe class HiDreamPipeline : IDisposable
     private readonly HiDreamTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly HiDreamConfig _config;
-    private int _disposed;
 
     /// <summary>Creates a new HiDream pipeline with all components pre-loaded. Caller owns each component
     /// and is responsible for their lifetime — the pipeline does not dispose them on its own
-    /// <see cref="Dispose"/>.</summary>
+    /// <see cref="DiffusionPipelineBase.Dispose"/>.</summary>
     public HiDreamPipeline(IBackend backend,
         ClipTextEncoder clipL, ClipTextEncoder clipG,
         T5TextEncoder t5, LlamaStyleEncoder llama,
         HiDreamTransformer transformer, VaeDecoder vaeDecoder,
         HiDreamConfig config)
+        : base(backend)
     {
-        _backend = backend;
         _clipL = clipL;
         _clipG = clipG;
         _t5 = t5;
@@ -53,22 +51,6 @@ public sealed unsafe class HiDreamPipeline : IDisposable
     }
 
     /// <summary>Generates an image from pre-tokenized inputs for all four text encoders.</summary>
-    /// <param name="promptTokenIdsL">Prompt token IDs for CLIP-L [seqLen].</param>
-    /// <param name="negativePromptTokenIdsL">Negative prompt token IDs for CLIP-L. Used only when <c>CfgScale &gt; 1</c>.</param>
-    /// <param name="promptTokenIdsG">Prompt token IDs for CLIP-G [seqLen].</param>
-    /// <param name="negativePromptTokenIdsG">Negative prompt token IDs for CLIP-G.</param>
-    /// <param name="promptEosPositionL">EOS position in prompt for CLIP-L (for pooled output).</param>
-    /// <param name="negativeEosPositionL">EOS position in negative prompt for CLIP-L.</param>
-    /// <param name="promptEosPositionG">EOS position in prompt for CLIP-G.</param>
-    /// <param name="negativeEosPositionG">EOS position in negative prompt for CLIP-G.</param>
-    /// <param name="promptTokenIdsT5">Prompt token IDs for T5-XXL [seqLen].</param>
-    /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs for T5-XXL.</param>
-    /// <param name="promptAttentionMaskT5">T5 attention mask for prompt (1=attend, 0=pad). Null = attend all.</param>
-    /// <param name="negativeAttentionMaskT5">T5 attention mask for negative prompt.</param>
-    /// <param name="promptTokenIdsLlama">Prompt token IDs for Llama-3.1 [seqLen].</param>
-    /// <param name="negativePromptTokenIdsLlama">Negative prompt token IDs for Llama-3.1.</param>
-    /// <param name="request">Generation parameters.</param>
-    /// <param name="onProgress">Optional per-step progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsL, int[] negativePromptTokenIdsL,
         int[] promptTokenIdsG, int[] negativePromptTokenIdsG,
@@ -95,6 +77,13 @@ public sealed unsafe class HiDreamPipeline : IDisposable
 
         // ── 1. Encode all four text encoders (positive + optional negative) ──
         Logs.Info("Encoding text with CLIP-L, CLIP-G, T5-XXL, and Llama-3.1...");
+
+        // Bulk-upload T5 + Llama-3.1 weights once. These are the heavy encoders (T5 ~5 GB, Llama
+        // ~8 GB) and the kernels inside touch them on every layer — per-op cache misses would
+        // dominate first-generation latency. CLIP-L/G are tiny and stay lazy-cached. Paired
+        // with FreeWeights below the VAE handoff. No-op on backends without a weight cache.
+        Backend.PreloadWeights(_t5.EnumerateWeights());
+        Backend.PreloadWeights(_llama.EnumerateWeights());
 
         (Tensor condPooled, Tensor condT5, IReadOnlyList<Tensor> condLlama) = EncodePrompt(
             promptTokenIdsL, promptTokenIdsG, promptTokenIdsT5, promptTokenIdsLlama,
@@ -123,12 +112,16 @@ public sealed unsafe class HiDreamPipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
+            Backend.Scale(scaled, latent, initSigma);
             latent.Dispose();
             latent = scaled;
         }
 
         // ── 4. Denoising loop ──
+        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights
+        // at the VAE handoff so VRAM cycles between generations. No-op on non-cache backends.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info("Starting HiDream denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = 0; i < steps; i++)
@@ -139,15 +132,15 @@ public sealed unsafe class HiDreamPipeline : IDisposable
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor condNoise = _transformer.Forward(_backend, latent, t, condT5, condLlama, condPooled);
-                Tensor uncondNoise = _transformer.Forward(_backend, latent, t, uncondT5!, uncondLlama!, uncondPooled!);
-                noisePred = ApplyCfg(latent.Shape, uncondNoise, condNoise, cfgScale);
+                Tensor condNoise = _transformer.Forward(Backend, latent, t, condT5, condLlama, condPooled);
+                Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondT5!, uncondLlama!, uncondPooled!);
+                noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
                 condNoise.Dispose();
                 uncondNoise.Dispose();
             }
             else
             {
-                noisePred = _transformer.Forward(_backend, latent, t, condT5, condLlama, condPooled);
+                noisePred = _transformer.Forward(Backend, latent, t, condT5, condLlama, condPooled);
             }
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
@@ -172,15 +165,15 @@ public sealed unsafe class HiDreamPipeline : IDisposable
         HiDreamTransformer.DumpFinalLatent(latent);
 
         // Free transformer + text-encoder weights from VRAM before VAE decode (Phase 3 deviations #18).
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
-        _backend.FreeWeights(_t5.EnumerateWeights());
-        _backend.FreeWeights(_llama.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.FreeWeights(_llama.EnumerateWeights());
 
         // ── 5. VAE decode ──
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -201,12 +194,12 @@ public sealed unsafe class HiDreamPipeline : IDisposable
         // CLIP-L pooled
         int[][] batchL = [tokenIdsL];
         int[] eosL = [eosPositionL];
-        (Tensor _, Tensor? clipLPooled) = _clipL.EncodePenultimate(_backend, batchL, eosL);
+        (Tensor _, Tensor? clipLPooled) = _clipL.EncodePenultimate(Backend, batchL, eosL);
 
         // CLIP-G pooled
         int[][] batchG = [tokenIdsG];
         int[] eosG = [eosPositionG];
-        (Tensor _, Tensor? clipGPooled) = _clipG.EncodePenultimate(_backend, batchG, eosG);
+        (Tensor _, Tensor? clipGPooled) = _clipG.EncodePenultimate(Backend, batchG, eosG);
 
         // Pooled = concat(clipL_pooled, clipG_pooled, dim=-1) -> [B, 2048]
         Tensor pooled = ConcatPooled(clipLPooled!, clipGPooled!);
@@ -216,7 +209,7 @@ public sealed unsafe class HiDreamPipeline : IDisposable
         // T5-XXL hidden [B, S_t5, 4096]
         int[][] batchT5 = [tokenIdsT5];
         int[][]? batchMask = attentionMaskT5 is not null ? [attentionMaskT5] : null;
-        Tensor t5Hidden = _t5.Encode(_backend, batchT5, batchMask);
+        Tensor t5Hidden = _t5.Encode(Backend, batchT5, batchMask);
 
         // Llama multi-layer: extract each requested layer separately. The diffusers reference indexes
         // hidden_states[1:] (one per encoder layer, dropping the embeddings) and feeds those into
@@ -231,7 +224,7 @@ public sealed unsafe class HiDreamPipeline : IDisposable
         for (int i = 0; i < llamaIndices.Length; i++) uniqueLayers.Add(llamaIndices[i]);
         int[] uniqueArray = uniqueLayers.ToArray();
 
-        Tensor stacked = _llama.EncodeMultiLayer(_backend, batchLlama, uniqueArray);
+        Tensor stacked = _llama.EncodeMultiLayer(Backend, batchLlama, uniqueArray);
         // stacked is [B, S, K * H_llama]. Split into K per-layer tensors of [B, S, H_llama], then expand
         // to one tensor per LlamaLayers entry by mapping each entry to its slot in uniqueArray.
         int H = (int)stacked.Shape[2] / uniqueArray.Length;
@@ -296,19 +289,6 @@ public sealed unsafe class HiDreamPipeline : IDisposable
         return dst;
     }
 
-    /// <summary>CFG combine: out = uncond + cfgScale * (cond - uncond).</summary>
-    private static Tensor ApplyCfg(TensorShape shape, Tensor uncond, Tensor cond, float cfgScale)
-    {
-        Tensor output = new Tensor(shape, DType.F32);
-        float* up = (float*)uncond.DataPointer;
-        float* cp = (float*)cond.DataPointer;
-        float* op = (float*)output.DataPointer;
-        long count = shape.ElementCount;
-        for (long i = 0; i < count; i++)
-            op[i] = up[i] + cfgScale * (cp[i] - up[i]);
-        return output;
-    }
-
     /// <summary>Concatenates two pooled tensors [B, D1] and [B, D2] along the last dim → [B, D1+D2].</summary>
     private static Tensor ConcatPooled(Tensor a, Tensor b)
     {
@@ -328,14 +308,5 @@ public sealed unsafe class HiDreamPipeline : IDisposable
             Buffer.MemoryCopy(bPtr + bIdx * dimB, outPtr + bIdx * dimOut + dimA, dimB * sizeof(float), dimB * sizeof(float));
         }
         return output;
-    }
-
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components (shared resources).</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

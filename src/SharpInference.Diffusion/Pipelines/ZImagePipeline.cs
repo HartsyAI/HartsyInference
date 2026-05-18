@@ -13,14 +13,12 @@ namespace SharpInference.Diffusion.Pipelines;
 /// <summary>Z-Image text-to-image and image-to-image pipeline (Tongyi Lab, Apache 2.0). Accepts pre-computed Qwen3-4B caption embeddings (text-encoder forward is owned by a separate component) and orchestrates the Lumina2/NextDiT transformer with a static-shift flow-match Euler scheduler.
 /// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>) to <see cref="GenerateFromEmbeddings"/>. Requires a <see cref="VaeEncoder"/> on construction. Strength=0 byte-identical pass-through is exact; nonzero-strength img2img produces structurally-correct output but quality has not been validated against a Python reference. For tight refining quality on Z-Image, prefer the cross-model pixel-space pattern (run a different pipeline as the refiner). Latent normalization is handled in one place — <see cref="VaeDecoder"/>'s internal UndoScaling — same as Flux.</para>
 /// </summary>
-public sealed unsafe class ZImagePipeline : IDisposable
+public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly ZImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder? _vaeEncoder;
     private readonly ZImageConfig _config;
-    private int _disposed;
 
     /// <summary>Creates a Z-Image pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public ZImagePipeline(IBackend backend, ZImageTransformer transformer, VaeDecoder vaeDecoder, ZImageConfig config)
@@ -30,8 +28,8 @@ public sealed unsafe class ZImagePipeline : IDisposable
 
     /// <summary>Creates a Z-Image pipeline with both VAE halves loaded. Required for img2img.</summary>
     public ZImagePipeline(IBackend backend, ZImageTransformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, ZImageConfig config)
+        : base(backend)
     {
-        _backend = backend;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _vaeEncoder = vaeEncoder;
@@ -73,31 +71,14 @@ public sealed unsafe class ZImagePipeline : IDisposable
         int latentW = width / _config.VaeDownscaleFactor;
         int steps = request.Steps;
 
-        // Img2img validation + strength=0 short-circuit BEFORE any model work.
-        int startStep = 0;
-        if (request is ImageToImageRequest img2img)
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
         {
-            Tensor src = img2img.SourceImage;
-            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
-                src.Shape[2] != height || src.Shape[3] != width)
-            {
-                throw new ArgumentException(
-                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
-                    nameof(request));
-            }
-
-            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
-            int initTimesteps = (int)MathF.Round(steps * strength);
-            startStep = Math.Max(steps - initTimesteps, 0);
-
-            if (initTimesteps == 0)
-            {
-                Logs.Info("Strength=0; passing source through unchanged");
-                return (ImagePostProcessor.TensorToRgbBytes(src), width, height, seed);
-            }
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
         }
 
-        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        string opMode = isImg2Img ? $"img2img (start={plan.StartStep}/{steps})" : "txt2img";
         Logs.Info($"Z-Image {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -107,11 +88,11 @@ public sealed unsafe class ZImagePipeline : IDisposable
         scheduler.SetTimesteps(steps);
 
         // ── 2. Build initial latent (t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at sigma[startStep]) ──
-        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, startStep);
+        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep);
 
         // ── 3. Denoising loop (from startStep onward) ──
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = startStep; i < steps; i++)
+        for (int i = plan.StartStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
@@ -121,13 +102,12 @@ public sealed unsafe class ZImagePipeline : IDisposable
             // this inversion every step conditions on the OPPOSITE point in the schedule and the
             // model produces near-random output. See pipeline_z_image.py:506.
             float invertedSigma = 1.0f - sigma;
-            Tensor velocity = _transformer.Forward(_backend, latent, captionEmbeddings, invertedSigma);
+            Tensor velocity = _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma);
 
             if (cfgScale > 1.0f)
             {
-                Tensor uncondVelocity = _transformer.Forward(_backend, latent, negativeCaptionEmbeddings!, invertedSigma);
-                Tensor combined = new Tensor(velocity.Shape, DType.F32);
-                ApplyCfg(combined, velocity, uncondVelocity, cfgScale);
+                Tensor uncondVelocity = _transformer.Forward(Backend, latent, negativeCaptionEmbeddings!, invertedSigma);
+                Tensor combined = ApplyZImageCfg(velocity, uncondVelocity, cfgScale);
                 uncondVelocity.Dispose();
                 velocity.Dispose();
                 velocity = combined;
@@ -170,7 +150,7 @@ public sealed unsafe class ZImagePipeline : IDisposable
 
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -193,7 +173,7 @@ public sealed unsafe class ZImagePipeline : IDisposable
         if (request is ImageToImageRequest img2img)
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            Tensor sourceLatent = _vaeEncoder!.Encode(_backend, img2img.SourceImage);
+            Tensor sourceLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
@@ -210,7 +190,7 @@ public sealed unsafe class ZImagePipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, t2iNoise, initSigma);
+            Backend.Scale(scaled, t2iNoise, initSigma);
             t2iNoise.Dispose();
             return scaled;
         }
@@ -226,9 +206,14 @@ public sealed unsafe class ZImagePipeline : IDisposable
             p[i] = -p[i];
     }
 
-    /// <summary>Z-Image CFG combine: <c>combined = pos + cfg * (pos - neg)</c> = <c>(1+cfg)*pos - cfg*neg</c>. NON-STANDARD: most pipelines use <c>uncond + cfg * (cond - uncond)</c>, but Z-Image's diffusers pipeline (<c>pipeline_z_image.py:541</c>) uses pos as the baseline and amplifies the (pos - neg) direction. At cfg=4.0 this gives pred = 5*pos - 4*neg, vs the standard 4*pos - 3*neg — a meaningfully different signal.</summary>
-    private static void ApplyCfg(Tensor output, Tensor cond, Tensor uncond, float cfg)
+    /// <summary>Z-Image CFG combine: <c>combined = cond + cfg * (cond - uncond)</c> = <c>(1+cfg)*cond - cfg*uncond</c>. NON-STANDARD: the conventional formula is <c>uncond + cfg * (cond - uncond)</c> = <c>(1-cfg)*uncond + cfg*cond</c>; Z-Image's diffusers pipeline (<c>pipeline_z_image.py:541</c>) uses cond as the baseline and amplifies the (cond - uncond) direction. At cfg=4.0 this gives <c>5*cond - 4*uncond</c>, vs the standard <c>4*cond - 3*uncond</c> — a meaningfully different signal. <see cref="CfgHelper.ApplyCfg"/> is therefore NOT a drop-in replacement; this stays local.</summary>
+    private static Tensor ApplyZImageCfg(Tensor cond, Tensor uncond, float cfg)
     {
+        if (cond.DType != DType.F32 || uncond.DType != DType.F32)
+            throw new ArgumentException($"ApplyZImageCfg requires F32 inputs; got cond={cond.DType}, uncond={uncond.DType}.");
+        if (!cond.Shape.Equals(uncond.Shape))
+            throw new ArgumentException($"ApplyZImageCfg shape mismatch: cond={cond.Shape}, uncond={uncond.Shape}.");
+        Tensor output = new Tensor(cond.Shape, DType.F32);
         float* condPtr = (float*)cond.DataPointer;
         float* uncondPtr = (float*)uncond.DataPointer;
         float* outPtr = (float*)output.DataPointer;
@@ -238,6 +223,7 @@ public sealed unsafe class ZImagePipeline : IDisposable
             float c = condPtr[i];
             outPtr[i] = c + cfg * (c - uncondPtr[i]);
         }
+        return output;
     }
 
     /// <summary>Per-channel min/max/mean diagnostic for a 4D NCHW tensor at Verbose level.
@@ -268,16 +254,5 @@ public sealed unsafe class ZImagePipeline : IDisposable
             string flags = nan > 0 || inf > 0 ? $" nan={nan} inf={inf}" : "";
             Logs.Verbose($"  [{name}] ch{c}: min={min:F4} max={max:F4} mean={mean:F4}{flags}");
         }
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend, transformer, or VAE — those are shared.</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

@@ -29,7 +29,7 @@ SharpInference/
 | `Backends/IBackend.cs` | Full backend interface |
 | `Backends/BackendCapabilities.cs` | Backend capability flags |
 | `Backends/DeviceKind.cs` | Cpu / Cuda / Vulkan enum |
-| `Pipelines/` | `IDiffusionPipeline`, `IAudioPipeline`, `IVisionPipeline`, `IPipelineRequest` |
+| `Pipelines/` | `IAudioPipeline`, `IVisionPipeline`, `IPipelineRequest` (aspirational scaffolds for not-yet-built modalities). Diffusion has its own base class in `SharpInference.Diffusion` — see `Pipelines/DiffusionPipelineBase.cs` there. |
 | `Schedulers/IScheduler.cs` | `SetTimesteps`, `Step`, `AddNoise` |
 | `Models/IModel.cs` / `ModelConfig.cs` / `ModelFormat.cs` | Load/Forward/GetConfig, architecture params, format enum |
 | `Memory/NativeBuffer.cs` / `MmapHandle.cs` | `NativeMemory.AlignedAlloc` wrapper, `MemoryMappedFile` lifetime manager |
@@ -128,17 +128,21 @@ SharpInference/
 
 | File | Description |
 |---|---|
-| `Pipelines/StableDiffusion15Pipeline.cs` / `SdxlPipeline.cs` / `SdxlRefinerPipeline.cs` / `Sd3Pipeline.cs` / `FluxPipeline.cs` | Pipeline implementations |
-| `Pipelines/PipelineFactory.cs` | Auto-detect model arch → correct pipeline |
-| `Models/TextEncoders/ClipTextEncoder.cs` / `ClipTextEncoderG.cs` / `T5TextEncoder.cs` | CLIP-L, CLIP-G, T5 text encoders |
-| `Models/Denoisers/UNet.cs` / `DiT.cs` | UNet and DiT denoisers |
+| `Pipelines/DiffusionPipelineBase.cs` | Abstract base for every pipeline — holds the `IBackend`, idempotent disposal flag, `ThrowIfDisposed()`, `DisposeCore()` hook. Class-level docs explain why no `DenoiseLoopRunner` (per-model loop variation resists abstraction). |
+| `Pipelines/StableDiffusion15Pipeline.cs` / `SdxlPipeline.cs` / `SdxlInpaintPipeline.cs` / `SdxlRefinerPipeline.cs` / `Sd3Pipeline.cs` / `FluxPipeline.cs` / `Flux2Pipeline.cs` / `ChromaPipeline.cs` / `AuraFlowPipeline.cs` / `FLitePipeline.cs` / `HiDreamPipeline.cs` / `HunyuanImagePipeline.cs` / `Kandinsky5Pipeline.cs` / `Lumina2Pipeline.cs` / `QwenImagePipeline.cs` / `ErnieImagePipeline.cs` / `ZImagePipeline.cs` / `AnimaPipeline.cs` / `OmniGen2Pipeline.cs` | 19 pipeline implementations, all inherit `DiffusionPipelineBase`. Take pre-loaded components via constructor; expose `GenerateFromTokens` / `GenerateFromEmbeddings` / `InpaintFromTokens` / `RefineFromTokens` (signature varies per pipeline). Callbacks via `Action<GenerationProgress>?` — NOT `IAsyncEnumerable`. |
+| `Pipelines/PipelineFactory.cs` | Scaffolding only — `LoadAuto` throws `NotImplementedException` with a list of 5 unresolved design questions (model-type detection, layout discovery, tokenizer ownership, quality profile, caching). A real factory needs a design conversation; callers currently construct pipelines directly. |
+| `Models/TextEncoders/ClipTextEncoder.cs` / `T5TextEncoder.cs` / `LlamaStyleEncoder.cs` | CLIP-L/G (penultimate-layer or pooled), T5 (Pile-T5, T5-XXL), Llama-style (Qwen-3 / Qwen2.5-VL / Mistral) text encoders |
+| `Models/Denoisers/` | One transformer/UNet config + class per model family (UNet for SD1.5/SDXL; per-model DiT/MMDiT for newer arches) |
 | `Models/Denoisers/UNetBlocks/` | ResNetBlock, CrossAttentionBlock, DownSampleBlock, UpSampleBlock |
-| `Models/Denoisers/DiTBlocks/` | MmDiTBlock, SingleStreamBlock, DoubleStreamBlock |
-| `Models/Vae/VaeEncoder.cs` / `VaeDecoder.cs` / `VaeTiledDecoder.cs` | VAE encode/decode/tiled decode |
-| `Schedulers/` | EulerDiscrete, DPM++ 2M, DPM++ 2M SDE, DDIM, LCM, FlowMatchEuler |
-| `Adapters/LoraLoader.cs` / `LoraManager.cs` / `ControlNetLoader.cs` / `IpAdapterLoader.cs` | LoRA, ControlNet, IP-Adapter |
-| `Requests/` | TextToImage, ImageToImage, Inpaint, GenerationProgress |
-| `Utilities/LatentPreviewDecoder.cs` / `ImagePostProcessor.cs` / `SeedGenerator.cs` | Preview decode, post-process, seed |
+| `Models/Denoisers/DiTBlocks/` | MmDiTBlock, FluxSingleStreamBlock, FluxDoubleStreamBlock, OmniGen2Block, AnimaLlmAdapter, etc. |
+| `Models/Vae/VaeEncoder.cs` / `VaeDecoder.cs` / `QwenImage/QwenImageVaeDecoder.cs` | VAE encode/decode (tiled decode is on `VaeDecoder.DecodeTiled`). Qwen-Image VAE is separate (3D causal autoencoder collapsed to 2D for image mode). |
+| `Schedulers/` | EulerDiscrete, DPM++ 2M, DDIM, LCM, FlowMatchEulerDiscrete (static + dynamic shift). `SchedulerFactory.Create(name)` centralizes the user-selectable-scheduler switch. |
+| `Adapters/ControlNet.cs` / `LoraLoader.cs` / `IpAdapter*.cs` | ControlNet residual injection, LoRA loading, IP-Adapter conditioning |
+| `Requests/TextToImageRequest.cs` / `ImageToImageRequest.cs` / `SdxlRefinerRequest.cs` | Request types. Inpaint is enabled by setting `ImageToImageRequest.Mask` (no separate request type). |
+| `Utilities/ImagePostProcessor.cs` / `SeedGenerator.cs` / `LatentPreview.cs` / `MaskBlendUtilities.cs` / `TaesdDecoder.cs` / `LatentArchitecture.cs` | Image I/O, RNG/noise, preview decode, mask blending, TAESD preview |
+| `Utilities/CfgHelper.cs` | Shared CFG helpers used by every pipeline that runs uncond+cond passes: `SliceBatchElement`, `SliceBatchElement1D`, `ApplyCfg`, `ConcatLastDim`. Z-Image's non-standard formula stays local in `ZImagePipeline`. |
+| `Utilities/DtypeCastHelper.cs` | `EnsureDtype` / `EnsureF32` — single source of truth for F16↔F32↔BF16 activation casts. Replaces ~20 inline `new Tensor(shape, dt); backend.CastTo*(...)` sites in pipelines + UNet/ControlNet/VaeDecoder/FluxSingleStreamBlock. |
+| `Utilities/Img2ImgSetup.cs` | `Img2ImgSetup.Prepare(request, h, w, steps)` returns a `Plan` with `StartStep`, `MaskPixel`, `PassThrough`. Centralizes source-shape / mask validation + strength-clamp + start-step computation. Flux.2 keeps its own validation (16-rounded dimensions). |
 
 ---
 

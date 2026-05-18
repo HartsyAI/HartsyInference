@@ -13,18 +13,16 @@ namespace SharpInference.Diffusion.Pipelines;
 /// <summary>Lumina-Image-2.0 text-to-image pipeline (Alpha-VLLM, Apache 2.0). Accepts pre-computed Gemma-2 caption embeddings (text-encoder forward is owned by a separate component, since SharpInference's <see cref="Models.TextEncoders.LlamaStyleEncoder"/> does not yet implement Gemma-2-specific features like GeGLU MLP and attention soft-capping) and orchestrates the NextDiT transformer with a static-shift flow-match Euler scheduler.
 /// <para>The diffusers pipeline (<c>pipeline_lumina2.py</c>) inverts the timestep before feeding it to the transformer (<c>1 - t / num_train_timesteps</c>) and negates the predicted velocity before the scheduler step — both behaviors are replicated here for parity. Default sampling: 30 steps, cfg_scale=4.0 with a negative prompt (matches the diffusers default). Only t2i is supported.</para>
 /// </summary>
-public sealed unsafe class Lumina2Pipeline : IDisposable
+public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly Lumina2Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly Lumina2Config _config;
-    private int _disposed;
 
     /// <summary>Creates a Lumina-Image-2.0 pipeline (text-to-image only; no image-to-image).</summary>
     public Lumina2Pipeline(IBackend backend, Lumina2Transformer transformer, VaeDecoder vaeDecoder, Lumina2Config config)
+        : base(backend)
     {
-        _backend = backend;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _config = config;
@@ -75,13 +73,12 @@ public sealed unsafe class Lumina2Pipeline : IDisposable
             // Lumina 2.0's diffusers pipeline inverts the timestep before feeding it to the transformer
             // (`current_timestep = 1 - t/num_train_timesteps`). See pipeline_lumina2.py:757.
             float invertedSigma = 1.0f - sigma;
-            Tensor velocity = _transformer.Forward(_backend, latent, captionEmbeddings, invertedSigma);
+            Tensor velocity = _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma);
 
             if (cfgScale > 1.0f)
             {
-                Tensor uncondVelocity = _transformer.Forward(_backend, latent, negativeCaptionEmbeddings!, invertedSigma);
-                Tensor combined = new Tensor(velocity.Shape, DType.F32);
-                ApplyStandardCfg(combined, velocity, uncondVelocity, cfgScale);
+                Tensor uncondVelocity = _transformer.Forward(Backend, latent, negativeCaptionEmbeddings!, invertedSigma);
+                Tensor combined = CfgHelper.ApplyCfg(uncondVelocity, velocity, cfgScale);
                 uncondVelocity.Dispose();
                 velocity.Dispose();
                 velocity = combined;
@@ -103,7 +100,7 @@ public sealed unsafe class Lumina2Pipeline : IDisposable
 
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -125,25 +122,11 @@ public sealed unsafe class Lumina2Pipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, noise, initSigma);
+            Backend.Scale(scaled, noise, initSigma);
             noise.Dispose();
             return scaled;
         }
         return noise;
-    }
-
-    /// <summary>Standard CFG: <c>combined = uncond + cfg * (cond - uncond)</c>. Mirrors Lumina 2.0's diffusers pipeline (<c>pipeline_lumina2.py:768</c>) — note this is the standard formula, NOT Z-Image's amplified-pos variant.</summary>
-    private static void ApplyStandardCfg(Tensor output, Tensor cond, Tensor uncond, float cfg)
-    {
-        float* condPtr = (float*)cond.DataPointer;
-        float* uncondPtr = (float*)uncond.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long count = output.Shape.ElementCount;
-        for (long i = 0; i < count; i++)
-        {
-            float u = uncondPtr[i];
-            outPtr[i] = u + cfg * (condPtr[i] - u);
-        }
     }
 
     private static void NegateInPlace(Tensor t)
@@ -152,16 +135,5 @@ public sealed unsafe class Lumina2Pipeline : IDisposable
         long count = t.Shape.ElementCount;
         for (long i = 0; i < count; i++)
             p[i] = -p[i];
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend, transformer, or VAE — those are shared.</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

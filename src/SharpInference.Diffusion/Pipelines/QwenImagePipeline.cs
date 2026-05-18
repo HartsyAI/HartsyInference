@@ -12,20 +12,18 @@ using SharpInference.Diffusion.Utilities;
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>Qwen-Image text-to-image pipeline. Encodes the prompt through Qwen2.5-VL via <see cref="LlamaStyleEncoder"/>, packs the noisy latent into 2×2 patch tokens, runs <see cref="QwenImageTransformer"/> with flow-match Euler scheduling (dynamic shift), unpacks the predicted velocity back to <c>[B, 16, H, W]</c>, and decodes through the 16-channel Qwen-Image VAE. CFG is applied as a dual-pass when <c>request.CfgScale &gt; 1</c>; otherwise a single conditional forward is used. Transformer + text encoder weights are evicted from VRAM before VAE decode (Phase 3 deviations #18 / #33) so a 30 GB Qwen-Image FP8 stack still leaves room for tiled decode workspace on a 40 GB card.</summary>
-public sealed unsafe class QwenImagePipeline : IDisposable
+public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly QwenImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly QwenImageConfig _config;
-    private int _disposed;
 
     /// <summary>Creates a Qwen-Image pipeline. Caller is responsible for the lifetime of the components — they may be reused across pipelines.</summary>
     public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
         QwenImageTransformer transformer, VaeDecoder vaeDecoder, QwenImageConfig config)
+        : base(backend)
     {
-        _backend = backend;
         _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
@@ -61,21 +59,21 @@ public sealed unsafe class QwenImagePipeline : IDisposable
         Logs.Info($"Qwen-Image: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        _backend.PreloadWeights(_textEncoder.EnumerateWeights());
+        Backend.PreloadWeights(_textEncoder.EnumerateWeights());
 
         int[][] batchPrompt = [promptTokenIds];
-        Tensor condHidden = _textEncoder.Encode(_backend, batchPrompt);
+        Tensor condHidden = _textEncoder.Encode(Backend, batchPrompt);
 
         Tensor? uncondHidden = null;
         if (useCfg)
         {
             int[][] batchNeg = [negativeTokenIds];
-            uncondHidden = _textEncoder.Encode(_backend, batchNeg);
+            uncondHidden = _textEncoder.Encode(Backend, batchNeg);
         }
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (txt seqLen={condHidden.Shape[1]})");
 
-        _backend.FreeWeights(_textEncoder.EnumerateWeights());
+        Backend.FreeWeights(_textEncoder.EnumerateWeights());
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         TensorShape packedShape = new TensorShape(1, imgSeqLen, patchDim);
@@ -92,12 +90,12 @@ public sealed unsafe class QwenImagePipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(packedShape, DType.F32);
-            _backend.Scale(scaled, packedLatent, initSigma);
+            Backend.Scale(scaled, packedLatent, initSigma);
             packedLatent.Dispose();
             packedLatent = scaled;
         }
 
-        _backend.PreloadWeights(_transformer.EnumerateWeights());
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
 
         Logs.Info("Starting Qwen-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -111,18 +109,15 @@ public sealed unsafe class QwenImagePipeline : IDisposable
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor condPred = _transformer.Forward(_backend, packedLatent, condHidden, normalizedT, hPacked, wPacked);
-                Tensor uncondPred = _transformer.Forward(_backend, packedLatent, uncondHidden!, normalizedT, hPacked, wPacked);
-
-                Tensor combined = new Tensor(condPred.Shape, DType.F32);
-                ApplyCfg(combined, uncondPred, condPred, cfgScale);
+                Tensor condPred = _transformer.Forward(Backend, packedLatent, condHidden, normalizedT, hPacked, wPacked);
+                Tensor uncondPred = _transformer.Forward(Backend, packedLatent, uncondHidden!, normalizedT, hPacked, wPacked);
+                noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
                 uncondPred.Dispose();
                 condPred.Dispose();
-                noisePred = combined;
             }
             else
             {
-                noisePred = _transformer.Forward(_backend, packedLatent, condHidden, normalizedT, hPacked, wPacked);
+                noisePred = _transformer.Forward(Backend, packedLatent, condHidden, normalizedT, hPacked, wPacked);
             }
 
             Tensor newLatent = new Tensor(packedShape, DType.F32);
@@ -141,8 +136,8 @@ public sealed unsafe class QwenImagePipeline : IDisposable
 
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
 
         Tensor unpacked = UnpackLatent(packedLatent, latentH, latentW, _config.InChannels, _config.PatchSize);
         packedLatent.Dispose();
@@ -152,10 +147,10 @@ public sealed unsafe class QwenImagePipeline : IDisposable
         ApplyVaeShiftScale(scaled2, unpacked, vaeConfig.ShiftFactor ?? 0.0f, vaeConfig.ScalingFactor);
         unpacked.Dispose();
 
-        _backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         Logs.Info("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, scaled2);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, scaled2);
         scaled2.Dispose();
         vaeSw.Stop();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -261,16 +256,6 @@ public sealed unsafe class QwenImagePipeline : IDisposable
         return unpacked;
     }
 
-    private static void ApplyCfg(Tensor output, Tensor uncond, Tensor cond, float cfgScale)
-    {
-        float* uncPtr = (float*)uncond.DataPointer;
-        float* conPtr = (float*)cond.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long count = output.ElementCount;
-        for (long i = 0; i < count; i++)
-            outPtr[i] = uncPtr[i] + cfgScale * (conPtr[i] - uncPtr[i]);
-    }
-
     /// <summary>Applies the diffusers-style VAE input transform: <c>(latent / scaling_factor) + shift_factor</c>. The decoder expects this de-normalized input; the scaling and shift constants come from the model card.</summary>
     private static void ApplyVaeShiftScale(Tensor output, Tensor input, float shift, float scale)
     {
@@ -280,14 +265,5 @@ public sealed unsafe class QwenImagePipeline : IDisposable
         float invScale = 1.0f / scale;
         for (long i = 0; i < count; i++)
             outPtr[i] = inPtr[i] * invScale + shift;
-    }
-
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components — those are caller-owned.</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

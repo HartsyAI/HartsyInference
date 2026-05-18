@@ -15,16 +15,14 @@ namespace SharpInference.Diffusion.Pipelines;
 /// <para><b>Inline scheduler</b>: F-Lite uses a custom dynamic-shift flow-match integrator with <c>alpha = 2 * sqrt(image_token_count / (64 * 64))</c>. Per the reference pipeline, the loop is implemented inline rather than through an <see cref="SharpInference.Core.Schedulers.IScheduler"/> — this avoids a 3-line scheduler shell and keeps the integration close to the reference for first-run debugging.</para>
 ///
 /// <para><b>Status (2026-05-06)</b>: implementation tracked against [`F_LITE_ARCHITECTURE.md`](../../../docs/Research/F_LITE_ARCHITECTURE.md). End-to-end visual validation against the actual `Freepik/F-Lite` checkpoint is pending download. Expect 1-3 first-run bugs to surface (typical for a new model port; see SD3.5 / Z-Image debug histories in PHASE_3_DEVIATIONS.md).</para></summary>
-public sealed unsafe class FLitePipeline : IDisposable
+public sealed unsafe class FLitePipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly T5TextEncoder _t5;
     private readonly FLiteTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly FLiteConfig _config;
     private readonly float _vaeScalingFactor;
     private readonly float _vaeShiftFactor;
-    private int _disposed;
 
     /// <summary>Creates an F-Lite text-to-image pipeline.</summary>
     /// <param name="vaeScalingFactor">Flux Schnell VAE scaling factor (default 0.3611). Latent is divided by this before VAE decode.</param>
@@ -32,8 +30,8 @@ public sealed unsafe class FLitePipeline : IDisposable
     public FLitePipeline(IBackend backend, T5TextEncoder t5, FLiteTransformer transformer,
         VaeDecoder vaeDecoder, FLiteConfig config,
         float vaeScalingFactor = 0.3611f, float vaeShiftFactor = 0.1159f)
+        : base(backend)
     {
-        _backend = backend;
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
@@ -65,17 +63,22 @@ public sealed unsafe class FLitePipeline : IDisposable
         Stopwatch totalSw = Stopwatch.StartNew();
 
         Stopwatch sw = Stopwatch.StartNew();
+        // Bulk-upload T5 weights once so the encoder's many kernel launches don't each pay a
+        // per-op cache-miss H2D transfer. Paired with FreeWeights immediately after encoding
+        // since T5-XXL is ~5 GB and we want it gone before the transformer phase. No-op on
+        // backends without a weight cache.
+        Backend.PreloadWeights(_t5.EnumerateWeights());
         int[][] posTokens = [t5TokenIds];
         int[][] posMask = [t5AttentionMask];
-        Tensor positiveContext = _t5.EncodeAtLayer(_backend, posTokens, _config.T5LayerIndex, applyFinalNorm: true, posMask);
+        Tensor positiveContext = _t5.EncodeAtLayer(Backend, posTokens, _config.T5LayerIndex, applyFinalNorm: true, posMask);
         int[][] negTokens = [negativeT5TokenIds];
         int[][] negMask = [negativeT5AttentionMask];
-        Tensor negativeContext = _t5.EncodeAtLayer(_backend, negTokens, _config.T5LayerIndex, applyFinalNorm: true, negMask);
+        Tensor negativeContext = _t5.EncodeAtLayer(Backend, negTokens, _config.T5LayerIndex, applyFinalNorm: true, negMask);
         sw.Stop();
         Logs.Info($"T5 encode (layer {_config.T5LayerIndex}) done in {sw.ElapsedMilliseconds}ms (pos shape={positiveContext.Shape}, neg shape={negativeContext.Shape}).");
 
-        _backend.Sync();
-        _backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_t5.EnumerateWeights());
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         Tensor latent = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
@@ -85,6 +88,11 @@ public sealed unsafe class FLitePipeline : IDisposable
         int imgTokenCount = hPacked * wPacked;
         float alpha = 2.0f * MathF.Sqrt(imgTokenCount / (64.0f * 64.0f));
         Logs.Info($"F-Lite: dynamic-shift alpha={alpha:F3} for {hPacked}x{wPacked} image-token grid.");
+
+        // Bulk-upload transformer weights before the denoise loop. F-Lite is a 40-block
+        // single-stream DiT — without preload the first step would pay cache-miss overhead
+        // for every block. Paired with FreeWeights below the VAE handoff.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
 
         Tensor accumulator = new Tensor(latentShape, DType.F32);
         Buffer.MemoryCopy((void*)latent.DataPointer, (void*)accumulator.DataPointer,
@@ -105,15 +113,15 @@ public sealed unsafe class FLitePipeline : IDisposable
             Tensor velocity;
             if (useCfg)
             {
-                Tensor uncond = _transformer.Forward(_backend, latent, negativeContext, t);
-                Tensor cond = _transformer.Forward(_backend, latent, positiveContext, t);
-                velocity = ApplyCfg(uncond, cond, cfgScale);
+                Tensor uncond = _transformer.Forward(Backend, latent, negativeContext, t);
+                Tensor cond = _transformer.Forward(Backend, latent, positiveContext, t);
+                velocity = CfgHelper.ApplyCfg(uncond, cond, cfgScale);
                 uncond.Dispose();
                 cond.Dispose();
             }
             else
             {
-                velocity = _transformer.Forward(_backend, latent, positiveContext, t);
+                velocity = _transformer.Forward(Backend, latent, positiveContext, t);
             }
 
             ApplyEulerStepInPlace(accumulator, velocity, dt);
@@ -137,13 +145,13 @@ public sealed unsafe class FLitePipeline : IDisposable
         positiveContext.Dispose();
         negativeContext.Dispose();
 
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
 
         ApplyVaeShiftScale(latent);
         Logs.Info("F-Lite VAE decode...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor decoded = _vaeDecoder.DecodeTiled(_backend, latent);
+        Tensor decoded = _vaeDecoder.DecodeTiled(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms.");
@@ -154,20 +162,6 @@ public sealed unsafe class FLitePipeline : IDisposable
         totalSw.Stop();
         Logs.Info($"F-Lite total: {totalSw.ElapsedMilliseconds}ms (seed={seed}).");
         return (rgbData, width, height, seed);
-    }
-
-    private static Tensor ApplyCfg(Tensor uncond, Tensor cond, float cfgScale)
-    {
-        Tensor result = new Tensor(uncond.Shape, DType.F32);
-        float* uncondPtr = (float*)uncond.DataPointer;
-        float* condPtr = (float*)cond.DataPointer;
-        float* outPtr = (float*)result.DataPointer;
-        long count = uncond.ElementCount;
-        for (long i = 0; i < count; i++)
-        {
-            outPtr[i] = uncondPtr[i] + cfgScale * (condPtr[i] - uncondPtr[i]);
-        }
-        return result;
     }
 
     private static void ApplyEulerStepInPlace(Tensor accumulator, Tensor velocity, float dt)
@@ -191,8 +185,4 @@ public sealed unsafe class FLitePipeline : IDisposable
             p[i] = p[i] * invScale + _vaeShiftFactor;
         }
     }
-
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    public void Dispose() => Volatile.Write(ref _disposed, 1);
 }

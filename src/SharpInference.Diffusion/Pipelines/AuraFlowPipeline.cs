@@ -12,15 +12,13 @@ using SharpInference.Diffusion.Utilities;
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>AuraFlow text-to-image pipeline (<c>AuraFlowPipeline</c>). Encodes prompts with Pile-T5-XL (joint_attention_dim=2048), runs the AuraFlow MMDiT transformer with classifier-free guidance, then decodes with the SDXL-compatible 4-channel VAE. Uses a static-shift FlowMatch scheduler. Mirrors the diffusers pipeline at <c>diffusers/pipelines/aura_flow/pipeline_aura_flow.py</c>.</summary>
-public sealed unsafe class AuraFlowPipeline : IDisposable
+public sealed class AuraFlowPipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly T5TextEncoder _t5;
     private readonly AuraFlowTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly AuraFlowConfig _config;
     private readonly float _schedulerShift;
-    private int _disposed;
 
     /// <summary>Creates a new AuraFlow pipeline with all components pre-loaded.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -31,8 +29,8 @@ public sealed unsafe class AuraFlowPipeline : IDisposable
     /// <param name="schedulerShift">Flow-match scheduler shift. AuraFlow uses a static shift; default 1.73 matches the diffusers config.</param>
     public AuraFlowPipeline(IBackend backend, T5TextEncoder t5, AuraFlowTransformer transformer,
         VaeDecoder vaeDecoder, AuraFlowConfig config, float schedulerShift = 1.73f)
+        : base(backend)
     {
-        _backend = backend;
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
@@ -69,18 +67,23 @@ public sealed unsafe class AuraFlowPipeline : IDisposable
         // ── 1. Encode text with Pile-T5-XL ───────────────────────────────
         Logs.Info("Encoding text with Pile-T5-XL...");
 
+        // Bulk-upload T5 weights once so the encoder's many kernel launches don't each pay a
+        // per-op cache-miss H2D transfer. Backends without a weight cache no-op. Paired with
+        // the FreeWeights below the VAE handoff so VRAM cycles cleanly.
+        Backend.PreloadWeights(_t5.EnumerateWeights());
+
         bool useCfg = cfgScale > 1.0f;
 
         int[][] batchT5 = [promptTokenIdsT5];
         int[][]? batchMask = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
-        Tensor condContext = _t5.Encode(_backend, batchT5, batchMask);
+        Tensor condContext = _t5.Encode(Backend, batchT5, batchMask);
 
         Tensor? uncondContext = null;
         if (useCfg)
         {
             int[][] negBatchT5 = [negativePromptTokenIdsT5];
             int[][]? negBatchMask = negativeAttentionMaskT5 is not null ? [negativeAttentionMaskT5] : null;
-            uncondContext = _t5.Encode(_backend, negBatchT5, negBatchMask);
+            uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
         }
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
@@ -97,12 +100,17 @@ public sealed unsafe class AuraFlowPipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
+            Backend.Scale(scaled, latent, initSigma);
             latent.Dispose();
             latent = scaled;
         }
 
         // ── 4. Denoising loop ────────────────────────────────────────────
+        // Bulk-upload transformer weights before the denoise loop (touched every step, every
+        // block — without this the first step would pay cache-miss overhead per parameter).
+        // Paired with FreeWeights at the VAE handoff so VRAM cycles between generations.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info("Starting AuraFlow denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -114,11 +122,15 @@ public sealed unsafe class AuraFlowPipeline : IDisposable
             Tensor noisePred;
             if (useCfg)
             {
-                noisePred = ClassifierFreeGuidanceStep(latent, t, condContext, uncondContext!, cfgScale);
+                Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondContext!);
+                Tensor condNoise = _transformer.Forward(Backend, latent, t, condContext);
+                noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
+                uncondNoise.Dispose();
+                condNoise.Dispose();
             }
             else
             {
-                noisePred = _transformer.Forward(_backend, latent, t, condContext);
+                noisePred = _transformer.Forward(Backend, latent, t, condContext);
             }
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
@@ -144,15 +156,15 @@ public sealed unsafe class AuraFlowPipeline : IDisposable
         // Free transformer + T5 weights from GPU before VAE decode (mirrors SD3 pattern;
         // the SDXL VAE im2col buffers are large and the transformer is huge — we OOM on
         // a 12 GB card without this eviction).
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
-        _backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. VAE decode ────────────────────────────────────────────────
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -164,41 +176,5 @@ public sealed unsafe class AuraFlowPipeline : IDisposable
         Logs.Info($"AuraFlow image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, request.Width, request.Height, seed);
-    }
-
-    /// <summary>Runs classifier-free guidance: <c>noise_pred = uncond + cfg_scale * (cond - uncond)</c>.</summary>
-    private Tensor ClassifierFreeGuidanceStep(
-        Tensor latent, float timestep,
-        Tensor condContext, Tensor uncondContext, float cfgScale)
-    {
-        Tensor uncondNoise = _transformer.Forward(_backend, latent, timestep, uncondContext);
-        Tensor condNoise = _transformer.Forward(_backend, latent, timestep, condContext);
-
-        Tensor output = new Tensor(latent.Shape, DType.F32);
-        float* uncPtr = (float*)uncondNoise.DataPointer;
-        float* conPtr = (float*)condNoise.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int count = (int)latent.ElementCount;
-
-        for (int i = 0; i < count; i++)
-        {
-            outPtr[i] = uncPtr[i] + cfgScale * (conPtr[i] - uncPtr[i]);
-        }
-
-        uncondNoise.Dispose();
-        condNoise.Dispose();
-
-        return output;
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components (shared resources).</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

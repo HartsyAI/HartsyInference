@@ -148,16 +148,9 @@ public sealed unsafe class ControlNet : IDisposable
 
         // 1. Conditioning hint: downsample control image to latent grid.
         //    Cast to UNet dtype if needed (callers usually hand us a F32 image and a F16 UNet).
-        Tensor condInput = conditionImage;
-        bool ownsCondInput = false;
-        if (conditionImage.DType != dtype)
-        {
-            condInput = new Tensor(conditionImage.Shape, dtype);
-            backend.CastToF16(condInput, conditionImage);
-            ownsCondInput = true;
-        }
+        Tensor condInput = Utilities.DtypeCastHelper.EnsureDtype(backend, conditionImage, dtype, disposeSourceOnCast: false);
         Tensor condHint = _condEmbedding.Forward(backend, condInput);
-        if (ownsCondInput) condInput.Dispose();
+        if (condInput != conditionImage) condInput.Dispose();
 
         // 2. Timestep + ADM embedding (matches UNet.Forward exactly).
         Span<float> timesteps = stackalloc float[batch];
@@ -172,22 +165,14 @@ public sealed unsafe class ControlNet : IDisposable
             addEmb.Dispose();
             temb = combinedTemb;
         }
-        if (temb.DType != dtype)
-        {
-            Tensor tembCast = new Tensor(temb.Shape, dtype);
-            backend.CastToF16(tembCast, temb);
-            temb.Dispose();
-            temb = tembCast;
-        }
+        // temb is locally owned (computed above) — let the helper dispose source on cast.
+        temb = Utilities.DtypeCastHelper.EnsureDtype(backend, temb, dtype);
 
-        bool ownsText = false;
-        if (textEmbeddings.DType != dtype)
-        {
-            Tensor textCast = new Tensor(textEmbeddings.Shape, dtype);
-            backend.CastToF16(textCast, textEmbeddings);
-            textEmbeddings = textCast;
-            ownsText = true;
-        }
+        // textEmbeddings is a parameter — don't dispose source. Track ownership of the casted
+        // copy so we can dispose it later if a cast actually happened.
+        Tensor textEmbeddingsOriginal = textEmbeddings;
+        textEmbeddings = Utilities.DtypeCastHelper.EnsureDtype(backend, textEmbeddings, dtype, disposeSourceOnCast: false);
+        bool ownsText = textEmbeddings != textEmbeddingsOriginal;
 
         // 3. conv_in
         TensorShape convInShape = new TensorShape(batch, _baseConfig.ModelChannels, height, width);

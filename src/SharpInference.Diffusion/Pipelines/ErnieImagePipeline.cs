@@ -23,9 +23,8 @@ namespace SharpInference.Diffusion.Pipelines;
 /// </list>
 ///
 /// The pipeline does NOT own the BN stats — it accepts an optional <c>vaeBnMean</c>/<c>vaeBnVar</c> pair via the constructor. If <c>null</c>, the latent is fed to the VAE without un-normalization (works for VAEs that don't ship BN-style stats).</summary>
-public sealed unsafe class ErnieImagePipeline : IDisposable
+public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly IErnieTextEncoder _textEncoder;
     private readonly ErnieImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
@@ -34,7 +33,6 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
     private readonly Tensor? _vaeBnVar;
     private readonly float _vaeBnEps;
     private readonly float _schedulerShift;
-    private int _disposed;
 
     /// <summary>Creates a new ERNIE-Image pipeline.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -50,8 +48,8 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
         VaeDecoder vaeDecoder, ErnieImageConfig config,
         Tensor? vaeBnMean = null, Tensor? vaeBnVar = null, float vaeBnEps = 1e-5f,
         float schedulerShift = 1.0f)
+        : base(backend)
     {
-        _backend = backend;
         _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
@@ -91,6 +89,10 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
         bool useCfg = cfgScale > 1.0f;
 
         Logs.Info("Encoding prompt(s)...");
+        // Bulk-upload text encoder weights once so its kernels don't pay per-op cache-miss
+        // H2D transfers. Paired with FreeWeights below the VAE handoff. No-op on backends
+        // without a weight cache.
+        Backend.PreloadWeights(_textEncoder.EnumerateWeights());
         (Tensor condEmb, int[] condLens) = EncodeBatch(promptTokenIds, promptRealLen);
         Tensor? uncondEmb = null;
         int[]? uncondLens = null;
@@ -112,12 +114,16 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
+            Backend.Scale(scaled, latent, initSigma);
             latent.Dispose();
             latent = scaled;
         }
 
         // ── 4. Denoising loop ─────────────────────────────────────────────
+        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights at
+        // the VAE handoff (line ~160). No-op on backends without a weight cache.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info("Starting ERNIE-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = 0; i < steps; i++)
@@ -128,15 +134,15 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor uncondNoise = _transformer.Forward(_backend, latent, t, uncondEmb!, uncondLens!);
-                Tensor condNoise = _transformer.Forward(_backend, latent, t, condEmb, condLens);
-                noisePred = ApplyCfg(uncondNoise, condNoise, cfgScale);
+                Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondEmb!, uncondLens!);
+                Tensor condNoise = _transformer.Forward(Backend, latent, t, condEmb, condLens);
+                noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
                 uncondNoise.Dispose();
                 condNoise.Dispose();
             }
             else
             {
-                noisePred = _transformer.Forward(_backend, latent, t, condEmb, condLens);
+                noisePred = _transformer.Forward(Backend, latent, t, condEmb, condLens);
             }
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
@@ -154,9 +160,9 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
         uncondEmb?.Dispose();
 
         // ── 5. Free transformer + text encoder weights from VRAM before VAE decode ──
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
-        _backend.FreeWeights(_textEncoder.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.FreeWeights(_textEncoder.EnumerateWeights());
 
         // ── 6. BN-style un-normalization (Flux2 VAE ships running mean/var) ──
         if (_vaeBnMean is not null && _vaeBnVar is not null)
@@ -174,7 +180,7 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, vaeIn);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeIn);
         vaeIn.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -193,20 +199,7 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
     {
         int[][] batch = [tokenIds];
         int[] lens = [realLen];
-        return _textEncoder.Encode(_backend, batch, lens);
-    }
-
-    /// <summary>CFG combine: <c>out = uncond + scale * (cond - uncond)</c>.</summary>
-    private static Tensor ApplyCfg(Tensor uncond, Tensor cond, float scale)
-    {
-        Tensor output = new Tensor(uncond.Shape, DType.F32);
-        float* uPtr = (float*)uncond.DataPointer;
-        float* cPtr = (float*)cond.DataPointer;
-        float* oPtr = (float*)output.DataPointer;
-        long count = uncond.Shape.ElementCount;
-        for (long i = 0; i < count; i++)
-            oPtr[i] = uPtr[i] + scale * (cPtr[i] - uPtr[i]);
-        return output;
+        return _textEncoder.Encode(Backend, batch, lens);
     }
 
     /// <summary>Reverses the pipeline-level 2×2 channel-fold: <c>[1, 128, H, W] → [1, 32, 2H, 2W]</c>. Mirrors <c>pipeline_ernie_image.py:_unpatchify_latents</c>.</summary>
@@ -228,7 +221,6 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
 
         // Diffusers Python (matched verbatim):
         //   l.reshape(b, c//4, 2, 2, h, w).permute(0, 1, 4, 2, 5, 3).reshape(b, c//4, h*2, w*2)
-        // Per-element index: source[b, oc*4 + (ph*2 + pw), ph_h?, ph_w?] is wrong — let me derive.
         // After reshape(b, c//4, 2, 2, h, w): axes are (b, oc, ph, pw, h, w).
         // After permute(0, 1, 4, 2, 5, 3): axes become (b, oc, h, ph, w, pw).
         // Final reshape merges (h, ph) → 2h and (w, pw) → 2w.
@@ -296,10 +288,4 @@ public sealed unsafe class ErnieImagePipeline : IDisposable
         }
         return output;
     }
-
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    /// <summary>Disposes the pipeline. Does NOT dispose the backend / encoder / transformer / VAE — those are shared resources owned by the caller.</summary>
-    public void Dispose() => Volatile.Write(ref _disposed, 1);
 }

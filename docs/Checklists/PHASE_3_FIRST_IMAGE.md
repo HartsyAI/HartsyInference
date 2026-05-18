@@ -52,7 +52,8 @@
 - [x] `EulerDiscreteScheduler.cs` (leading timestep, epsilon prediction, scale_model_input)
 - [x] `StableDiffusion15Pipeline.cs` — end-to-end: tokenize → encode → noise → denoise → VAE → image
 - [x] `VaeDecoder.cs`, `TextToImageRequest.cs`, `ImagePostProcessor.cs`
-- [ ] `PipelineFactory.cs`, `ImageToImageRequest.cs`, `InpaintRequest.cs`
+- [x] `ImageToImageRequest.cs` — exists, used by every pipeline that supports img2img/inpaint. Inpaint is enabled by setting `ImageToImageRequest.Mask` (no separate request type). Validation centralized in `Utilities/Img2ImgSetup.cs`.
+- [ ] `PipelineFactory.cs` — scaffolding only ([Pipelines/PipelineFactory.cs](../../src/SharpInference.Diffusion/Pipelines/PipelineFactory.cs)). `LoadAuto` throws `NotImplementedException` because a real factory needs 5 unresolved design decisions (model-type detection, on-disk layout discovery, tokenizer ownership, quality profile, instance caching). Documented in the class header. Callers currently construct pipelines directly via per-pipeline constructors — every test in `SharpInference.Diffusion.Tests` demonstrates the pattern. Reopen this item once there's a real consumer (Server in Phase 7, or SwarmUI integration in Phase 8) ready to drive the design.
 
 ## 5. Testing & Validation
 

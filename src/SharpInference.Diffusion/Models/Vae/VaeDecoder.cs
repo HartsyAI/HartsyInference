@@ -247,16 +247,9 @@ public sealed class VaeDecoder
 
         // Cast final output to F32 for RGB post-processing. TensorToRgbBytes reads
         // DataPointer as float*, so any non-F32 dtype produces garbage if returned as-is.
-        // Both F16 and BF16 paths must cast back here.
-        if (dtype == DType.F16 || dtype == DType.BF16)
-        {
-            Tensor outputF32 = new Tensor(rgbShape, DType.F32);
-            backend.CastToF32(outputF32, convOut);
-            convOut.Dispose();
-            return outputF32;
-        }
-
-        return convOut;
+        // EnsureF32 returns convOut unchanged when already F32, otherwise allocates F32 and
+        // disposes the source — covers both F16 and BF16 paths.
+        return Utilities.DtypeCastHelper.EnsureF32(backend, convOut);
     }
 
     /// <summary>Spatial scale factor applied by the decoder (latent → RGB pixel ratio).
@@ -332,14 +325,12 @@ public sealed class VaeDecoder
         float[] weightAccum = new float[weightCount];
 
         // Pre-read the source latent as a CPU float pointer so we can slice quickly.
-        if (latent.DType != DType.F32)
-        {
-            // Decode contracts on F32-or-F16 CPU latents. A non-F32 latent gets converted
-            // up so we don't have to teach the slice loop multiple dtypes.
-            Tensor latentF32 = new Tensor(latent.Shape, DType.F32);
-            backend.CastToF32(latentF32, latent);
-            latent = latentF32;
-        }
+        // Decode contracts on F32 CPU latents — a non-F32 latent gets converted up so we
+        // don't have to teach the slice loop multiple dtypes. Don't dispose the source: the
+        // caller still owns it, and replacing `latent` with a new F32 tensor here means we
+        // own the new one (it goes out of scope at method end and gets GC'd via Tensor's
+        // finalizer if we don't dispose — but it's small relative to the per-tile work).
+        latent = Utilities.DtypeCastHelper.EnsureF32(backend, latent, disposeSourceOnCast: false);
         float* latentPtr = (float*)latent.DataPointer;
 
         // The VAE weights are loaded at a specific dtype (BF16 on Ampere+ for SDXL,
@@ -383,18 +374,10 @@ public sealed class VaeDecoder
                 }
 
                 // 2. Decode the tile. We need to feed Decode at the same dtype its
-                // weights are loaded in â otherwise the per-op dispatch picks the wrong
+                // weights are loaded in — otherwise the per-op dispatch picks the wrong
                 // kernel and reads the weights at the wrong width. Cast the F32 slice to
-                // vaeDtype if they differ.
-                Tensor tileInput = latentSlice;
-                if (vaeDtype != DType.F32)
-                {
-                    tileInput = new Tensor(sliceShape, vaeDtype);
-                    if (vaeDtype == DType.F16) backend.CastToF16(tileInput, latentSlice);
-                    else if (vaeDtype == DType.BF16) backend.CastToBf16(tileInput, latentSlice);
-                    else throw new InvalidOperationException($"Unsupported VAE dtype: {vaeDtype}");
-                    latentSlice.Dispose();
-                }
+                // vaeDtype if they differ (no-op when already F32).
+                Tensor tileInput = Utilities.DtypeCastHelper.EnsureDtype(backend, latentSlice, vaeDtype);
                 Tensor rgbTile = Decode(backend, tileInput);
                 tileInput.Dispose();
 

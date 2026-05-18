@@ -21,7 +21,7 @@
 
 **Performance:** Zero allocations on hot paths. `TensorRef` in kernels, `Span<T>` for views. Function-pointer dispatch (`delegate*`) for compute thread pool. Pre-allocate scratch buffers at load time (`TransformerForwardState` pattern).
 
-**Architecture:** Code against `IBackend` only. Pipelines use `IAsyncEnumerable<GenerationProgress>`. Every CUDA/Vulkan call checked via `.ThrowOnError()`.
+**Architecture:** Code against `IBackend` only. Diffusion pipelines inherit `DiffusionPipelineBase` and report progress via `Action<GenerationProgress>?` callbacks (NOT `IAsyncEnumerable` — the old `IDiffusionPipeline` interface that declared that was deleted because no pipeline implemented it). Use the shared `Utilities/CfgHelper`, `DtypeCastHelper`, `Img2ImgSetup`, and `Schedulers/SchedulerFactory` rather than reinventing per-pipeline. Every CUDA/Vulkan call checked via `.ThrowOnError()`.
 
 **C# Style:** File-scoped namespaces, primary constructors, `readonly`/`sealed`, `readonly record struct` for value types, `record` for config. No `#region`. Nullable enabled.
 
@@ -38,7 +38,12 @@
 | DType | `readonly record struct` |
 | ModelConfig | class `record` with `required` + `init` |
 | Options | three-tier (flat / explicit / custom) |
-| Streaming | `IAsyncEnumerable<readonly record struct>` |
+| Streaming (LLM/audio) | `IAsyncEnumerable<readonly record struct>` |
+| Diffusion progress | `Action<GenerationProgress>?` callback (per-step, sync) |
+| Pipeline base | `DiffusionPipelineBase` (Backend property + idempotent Dispose) |
+| CFG helpers | `CfgHelper.SliceBatchElement` / `ApplyCfg` / `ConcatLastDim` |
+| Activation casts | `DtypeCastHelper.EnsureF32` / `EnsureDtype` |
+| Img2img validation | `Img2ImgSetup.Prepare(request, h, w, steps)` |
 | Thread pool | `delegate*` dispatch |
 | Server JSON | `[JsonSerializable]` |
 | Worker crash | `Environment.FailFast` |

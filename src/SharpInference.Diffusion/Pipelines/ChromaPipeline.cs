@@ -28,15 +28,13 @@ namespace SharpInference.Diffusion.Pipelines;
 ///   <item><b>Latent packing</b> identical to Flux (2x2 patchify into channel dim, 16ch → 64dim).</item>
 /// </list>
 /// VRAM eviction at the transformer→VAE boundary mirrors <see cref="Sd3Pipeline"/> / <see cref="FluxPipeline"/>.</summary>
-public sealed unsafe class ChromaPipeline : IDisposable
+public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly T5TextEncoder _t5;
     private readonly ChromaTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly ChromaConfig _config;
     private readonly float _schedulerShiftFallback;
-    private int _disposed;
 
     /// <summary>Creates a new Chroma pipeline with all components pre-loaded.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -49,8 +47,8 @@ public sealed unsafe class ChromaPipeline : IDisposable
     /// somehow short-circuits the dynamic path.</param>
     public ChromaPipeline(IBackend backend, T5TextEncoder t5, ChromaTransformer transformer,
         VaeDecoder vaeDecoder, ChromaConfig config, float schedulerShift = 3.0f)
+        : base(backend)
     {
-        _backend = backend;
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
@@ -99,16 +97,21 @@ public sealed unsafe class ChromaPipeline : IDisposable
         // ── 1. Encode prompts with T5-XXL ─────────────────────────────────
         Logs.Info("Encoding text with T5-XXL...");
 
+        // Bulk-upload T5 weights once (~5 GB on T5-XXL) so the encoder's many kernels don't
+        // each pay a per-op cache-miss H2D transfer. Paired with FreeWeights below the VAE
+        // handoff. No-op on backends without a weight cache.
+        Backend.PreloadWeights(_t5.EnumerateWeights());
+
         int[][] batchT5 = [promptTokenIdsT5];
         int[][] batchMask = [promptAttentionMaskT5];
-        Tensor condContext = _t5.Encode(_backend, batchT5, batchMask);
+        Tensor condContext = _t5.Encode(Backend, batchT5, batchMask);
 
         Tensor? uncondContext = null;
         if (useCfg)
         {
             int[][] negBatchT5 = [negativePromptTokenIdsT5];
             int[][] negBatchMask = [negativeAttentionMaskT5];
-            uncondContext = _t5.Encode(_backend, negBatchT5, negBatchMask);
+            uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
         }
 
         // Build the [B, txtSeqLen] transformer-side mask:
@@ -139,12 +142,17 @@ public sealed unsafe class ChromaPipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(packedShape, DType.F32);
-            _backend.Scale(scaled, packedLatent, initSigma);
+            Backend.Scale(scaled, packedLatent, initSigma);
             packedLatent.Dispose();
             packedLatent = scaled;
         }
 
         // ── 4. Denoising loop ────────────────────────────────────────────
+        // Bulk-upload transformer weights before the denoise loop. Chroma is Flux-derived
+        // (~12 GB at FP16) — without preload the first step would pay cache-miss overhead
+        // for every block. Paired with FreeWeights below the VAE handoff.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info("Starting Chroma denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int txtSeqLen = (int)condContext.Shape[1];
@@ -164,7 +172,7 @@ public sealed unsafe class ChromaPipeline : IDisposable
             }
             else
             {
-                noisePred = _transformer.Forward(_backend, packedLatent, condContext, sigma,
+                noisePred = _transformer.Forward(Backend, packedLatent, condContext, sigma,
                     txtSeqLen, hPacked, wPacked, condMask);
             }
 
@@ -201,21 +209,21 @@ public sealed unsafe class ChromaPipeline : IDisposable
         ChromaTransformer.DumpFinalLatent(packedLatent);
 
         // Free transformer + T5 weights from GPU before VAE decode (mirrors SD3/Flux/AuraFlow pattern).
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
-        _backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
         Tensor unpackedLatent = UnpackLatent(packedLatent, latentH, latentW);
         packedLatent.Dispose();
 
         // ── 6. VAE decode ────────────────────────────────────────────────
-        _backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile. Internal fast-path
         // skips tiling when the latent fits in a single tile, so small images pay no overhead.
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, unpackedLatent);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, unpackedLatent);
         unpackedLatent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -241,23 +249,15 @@ public sealed unsafe class ChromaPipeline : IDisposable
         int condTxtLen = (int)condContext.Shape[1];
         int uncondTxtLen = (int)uncondContext.Shape[1];
 
-        Tensor uncondNoise = _transformer.Forward(_backend, packedLatent, uncondContext, sigma,
+        Tensor uncondNoise = _transformer.Forward(Backend, packedLatent, uncondContext, sigma,
             uncondTxtLen, hPacked, wPacked, uncondMask);
-        Tensor condNoise = _transformer.Forward(_backend, packedLatent, condContext, sigma,
+        Tensor condNoise = _transformer.Forward(Backend, packedLatent, condContext, sigma,
             condTxtLen, hPacked, wPacked, condMask);
-
-        Tensor output = new Tensor(packedLatent.Shape, DType.F32);
-        float* uncPtr = (float*)uncondNoise.DataPointer;
-        float* conPtr = (float*)condNoise.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long count = packedLatent.ElementCount;
-
-        for (long i = 0; i < count; i++)
-            outPtr[i] = uncPtr[i] + cfgScale * (conPtr[i] - uncPtr[i]);
 
         // Touch txtSeqLen so the field isn't flagged unused (it remains for callers that need to introspect).
         _ = txtSeqLen;
 
+        Tensor output = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
         uncondNoise.Dispose();
         condNoise.Dispose();
         return output;
@@ -371,16 +371,5 @@ public sealed unsafe class ChromaPipeline : IDisposable
         }
 
         return unpacked;
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    /// <summary>Disposes the pipeline. Does not dispose backend or model components (shared resources).</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

@@ -12,9 +12,8 @@ using SharpInference.Diffusion.Utilities;
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>Flux.2 text-to-image pipeline (Klein 4B / Klein 9B / Dev). Orchestrates Qwen3-4B (Klein) or Mistral-Small-3 (Dev) text encoding → <see cref="Flux2Transformer"/> denoising with flow matching → BN-style latent un-normalization → 2×2 unpatchify → VAE decode. Differs from Flux.1: no CLIP-L pooled / no T5, multi-layer text-encoder hidden state concat, 32-channel VAE latent, BN normalization applied at the pipeline boundary.</summary>
-public sealed unsafe class Flux2Pipeline : IDisposable
+public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Flux2Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
@@ -24,7 +23,6 @@ public sealed unsafe class Flux2Pipeline : IDisposable
     private readonly Tensor _bnVar;      // [128] — running_var
     private readonly float _bnEps;
     private readonly int[] _hiddenLayers;
-    private int _disposed;
 
     /// <summary>Creates a Flux.2 pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public Flux2Pipeline(IBackend backend, LlamaStyleEncoder textEncoder,
@@ -36,22 +34,12 @@ public sealed unsafe class Flux2Pipeline : IDisposable
     }
 
     /// <summary>Creates a Flux.2 pipeline with both VAE halves loaded. Required for img2img.</summary>
-    /// <param name="backend">Compute backend.</param>
-    /// <param name="textEncoder">Llama-style encoder configured for the variant (Qwen3-4B for Klein).</param>
-    /// <param name="transformer">Pre-loaded <see cref="Flux2Transformer"/>.</param>
-    /// <param name="vaeDecoder">VAE decoder loaded with <see cref="VaeConfig.Flux2"/>.</param>
-    /// <param name="vaeEncoder">Optional VAE encoder loaded with <see cref="VaeConfig.Flux2"/>. Required for img2img.</param>
-    /// <param name="bnMean">BN <c>running_mean</c> tensor of shape <c>[128]</c> (= <c>32 latent channels × 4 patch</c>).</param>
-    /// <param name="bnVar">BN <c>running_var</c> tensor of shape <c>[128]</c>.</param>
-    /// <param name="config">Flux.2 variant config.</param>
-    /// <param name="hiddenLayers">Text-encoder hidden-state layer indices to concatenate (Klein default: <c>[9, 18, 27]</c>). The encoder's per-layer outputs are concatenated along the hidden dim and fed into <c>context_embedder</c>.</param>
-    /// <param name="bnEps">BatchNorm epsilon (matches <c>vae.config.batch_norm_eps</c>; default 1e-5).</param>
     public Flux2Pipeline(IBackend backend, LlamaStyleEncoder textEncoder,
         Flux2Transformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder,
         Tensor bnMean, Tensor bnVar, Flux2Config config,
         int[]? hiddenLayers = null, float bnEps = 1e-5f)
+        : base(backend)
     {
-        _backend = backend;
         _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
@@ -69,10 +57,6 @@ public sealed unsafe class Flux2Pipeline : IDisposable
     /// <item><see cref="ImageToImageRequest"/> → img2img. Source goes VAE-encode (32ch latent) → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep]. Requires a <see cref="VaeEncoder"/>.</item>
     /// </list>
     /// </summary>
-    /// <param name="promptTokenIds">Padded token IDs <c>[seqLen]</c>.</param>
-    /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img.</param>
-    /// <param name="guidanceScale">Guidance scale for Dev (embedded via MLP). Ignored when <see cref="Flux2Config.GuidanceEmbed"/> is false (Klein). Default 3.5.</param>
-    /// <param name="onProgress">Optional progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         TextToImageRequest request,
@@ -98,7 +82,10 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         int imgSeqLen = patH * patW;
 
         // Img2img: validate source shape + handle strength=0 short-circuit BEFORE any model work.
-        // Note source must match the rounded imgH/imgW (not request.Height/Width) since Flux.2 rounds.
+        // NOTE: cannot use the shared Img2ImgSetup helper here — Flux.2 rounds image dimensions to
+        // a multiple of 16, so the source-shape validation must compare against the *rounded*
+        // imgH/imgW (not request.Height/Width). Img2ImgSetup hard-checks against the request, which
+        // would reject any input that wasn't already 16-aligned.
         int startStep = 0;
         if (request is ImageToImageRequest img2img)
         {
@@ -130,7 +117,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         // ── 1. Text encoder forward ───────────────────────────────────
         Logs.Info("Encoding text with Qwen3 (multi-layer hidden states)...");
         int[][] batchedTokenIds = [promptTokenIds];
-        Tensor textEmbeddings = _textEncoder.EncodeMultiLayer(_backend, batchedTokenIds, _hiddenLayers);
+        Tensor textEmbeddings = _textEncoder.EncodeMultiLayer(Backend, batchedTokenIds, _hiddenLayers);
         int txtSeqLen = (int)textEmbeddings.Shape[1];
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (seqLen={txtSeqLen}, hidden={textEmbeddings.Shape[2]})");
         LogTensorStats("text embeddings", textEmbeddings);
@@ -154,7 +141,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
             float sigma = timesteps[i] / 1000.0f;
 
             Tensor velocityPred = _transformer.Forward(
-                _backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW);
+                Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW);
 
             TensorShape packedStepShape = new TensorShape(1, imgSeqLen, _config.InChannels);
             Tensor newLatent = new Tensor(packedStepShape, DType.F32);
@@ -198,7 +185,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
         Logs.Verbose("Decoding latents (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent32);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent32);
         latent32.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -439,7 +426,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
             // VaeConfig.Flux2 has ScalingFactor=1.0 + ShiftFactor=null, so encoder output is the raw mean (no scaling).
-            Tensor sourceLatent32 = _vaeEncoder!.Encode(_backend, img2img.SourceImage);  // [1, 32, latH, latW]
+            Tensor sourceLatent32 = _vaeEncoder!.Encode(Backend, img2img.SourceImage);  // [1, 32, latH, latW]
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
@@ -468,7 +455,7 @@ public sealed unsafe class Flux2Pipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(packedShape, DType.F32);
-            _backend.Scale(scaled, packedNoise, initSigma);
+            Backend.Scale(scaled, packedNoise, initSigma);
             packedNoise.Dispose();
             return scaled;
         }
@@ -491,15 +478,5 @@ public sealed unsafe class Flux2Pipeline : IDisposable
             sum += v;
         }
         Logs.Debug($"  [{name}] shape={tensor.Shape} min={min:E3} max={max:E3} mean={sum / data.Length:E3} nan={nan} inf={inf}");
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

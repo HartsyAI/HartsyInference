@@ -18,14 +18,12 @@ namespace SharpInference.Diffusion.Pipelines;
 /// the DiT's cross-attention. The flow-match Euler scheduler is fixed at <c>shift = 3.0</c> per the Anima reference
 /// workflow (ER-SDE substitute; pixel parity with Comfy's <c>er_sde + simple</c> requires a dedicated SDE scheduler
 /// — see roadmap).</summary>
-public sealed unsafe class AnimaPipeline : IDisposable
+public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly AnimaTransformer _transformer;
     private readonly AnimaLlmAdapter _llmAdapter;
     private readonly QwenImageVaeDecoder _vaeDecoder;
     private readonly AnimaConfig _config;
-    private int _disposed;
 
     /// <summary>Creates an Anima t2i pipeline. Caller owns the components. The VAE is the
     /// <see cref="QwenImageVaeDecoder"/> (3D causal autoencoder collapsed to 2D for image mode);
@@ -33,8 +31,8 @@ public sealed unsafe class AnimaPipeline : IDisposable
     /// layout and conv ranks differ.</summary>
     public AnimaPipeline(IBackend backend, AnimaTransformer transformer, AnimaLlmAdapter llmAdapter,
         QwenImageVaeDecoder vaeDecoder, AnimaConfig config)
+        : base(backend)
     {
-        _backend = backend;
         _transformer = transformer;
         _llmAdapter = llmAdapter;
         _vaeDecoder = vaeDecoder;
@@ -70,6 +68,13 @@ public sealed unsafe class AnimaPipeline : IDisposable
 
         LogStats("textEmbeddings (Qwen3 0.6B output)", textEmbeddings);
 
+        // Bulk-upload the LlmAdapter + transformer weights to the backend's weight cache so the
+        // hundreds of per-op kernel launches inside Forward() don't each pay a cache-miss H2D
+        // transfer. Backends without a weight cache (CPU, Vulkan) no-op. Paired with the
+        // FreeWeights calls below the VAE handoff so VRAM cycles cleanly between generations.
+        Backend.PreloadWeights(_llmAdapter.EnumerateWeights());
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         // Diagnostic toggle: ANIMA_BYPASS_LLM_ADAPTER=1 skips the in-checkpoint LlmAdapter and feeds raw
         // Qwen-3 hidden states directly to the DiT cross-attention. The DiT's cross_attn.{k,v}_proj weights
         // are [2048, 1024] and Qwen-3 outputs 1024-dim features, so the projection is geometrically valid
@@ -86,7 +91,7 @@ public sealed unsafe class AnimaPipeline : IDisposable
         else
         {
             // Refine the Qwen-3 0.6B hidden states through the LlmAdapter ONCE per generation (timestep-independent).
-            refinedText = _llmAdapter.Forward(_backend, textEmbeddings);
+            refinedText = _llmAdapter.Forward(Backend, textEmbeddings);
         }
         LogStats("refinedText (LlmAdapter output)", refinedText);
 
@@ -95,7 +100,7 @@ public sealed unsafe class AnimaPipeline : IDisposable
         {
             refinedNegText = bypassAdapter
                 ? (negativeTextEmbeddings.DType == DType.F32 ? CloneF32(negativeTextEmbeddings) : negativeTextEmbeddings.CastTo(DType.F32))
-                : _llmAdapter.Forward(_backend, negativeTextEmbeddings);
+                : _llmAdapter.Forward(Backend, negativeTextEmbeddings);
         }
 
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
@@ -120,13 +125,12 @@ public sealed unsafe class AnimaPipeline : IDisposable
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i] / 1000f;  // Cosmos-convention timestep in [0, ~1].
 
-            Tensor velocity = _transformer.Forward(_backend, latent, t, refinedText);
+            Tensor velocity = _transformer.Forward(Backend, latent, t, refinedText);
 
             if (cfgScale > 1.0f)
             {
-                Tensor uncond = _transformer.Forward(_backend, latent, t, refinedNegText!);
-                Tensor combined = new(velocity.Shape, DType.F32);
-                ApplyStandardCfg(combined, velocity, uncond, cfgScale);
+                Tensor uncond = _transformer.Forward(Backend, latent, t, refinedNegText!);
+                Tensor combined = CfgHelper.ApplyCfg(uncond, velocity, cfgScale);
                 uncond.Dispose();
                 velocity.Dispose();
                 velocity = combined;
@@ -148,14 +152,14 @@ public sealed unsafe class AnimaPipeline : IDisposable
         refinedText.Dispose();
         refinedNegText?.Dispose();
 
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
-        _backend.FreeWeights(_llmAdapter.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.FreeWeights(_llmAdapter.EnumerateWeights());
 
         LogStats("final latent (pre-VAE)", latent);
         LogPerChannelStats("final latent (pre-VAE) per-channel", latent);
 
-        Tensor decoded = _vaeDecoder.Decode(_backend, latent);
+        Tensor decoded = _vaeDecoder.Decode(Backend, latent);
         latent.Dispose();
 
         LogStats("VAE decoded (raw)", decoded);
@@ -261,22 +265,4 @@ public sealed unsafe class AnimaPipeline : IDisposable
         Buffer.MemoryCopy(src.DataPointer, copy.DataPointer, bytes, bytes);
         return copy;
     }
-
-    private static void ApplyStandardCfg(Tensor output, Tensor cond, Tensor uncond, float cfg)
-    {
-        float* condPtr = (float*)cond.DataPointer;
-        float* uncondPtr = (float*)uncond.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long count = output.Shape.ElementCount;
-        for (long i = 0; i < count; i++)
-        {
-            float u = uncondPtr[i];
-            outPtr[i] = u + cfg * (condPtr[i] - u);
-        }
-    }
-
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    public void Dispose() => Volatile.Write(ref _disposed, 1);
 }

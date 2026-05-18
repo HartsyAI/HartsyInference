@@ -13,15 +13,13 @@ using SharpInference.Diffusion.Utilities;
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>SDXL refiner pipeline. Refines an existing image using the SDXL refiner UNet (4-level, CLIP-G-only conditioning, aesthetic-score ADM). Cross-model refining works for any base pipeline (SD1.5/SDXL/Flux/Z-Image) because the handoff is in pixel space — strength controls how aggressively to polish (0.3 typical, 0.0 pass-through). Same-VAE latent handoff is a deferred SDXL→SDXL optimization.</summary>
-public sealed unsafe class SdxlRefinerPipeline : IDisposable
+public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly ClipTextEncoder _clipG;
     private readonly UNet _refinerUnet;
     private readonly VaeEncoder _vaeEncoder;
     private readonly VaeDecoder _vaeDecoder;
     private readonly float _vaeScalingFactor;
-    private int _disposed;
 
     /// <summary>Creates a new SDXL refiner pipeline.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -37,8 +35,8 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
         VaeEncoder vaeEncoder,
         VaeDecoder vaeDecoder,
         float vaeScalingFactor = 0.13025f)
+        : base(backend)
     {
-        _backend = backend;
         _clipG = clipG;
         _refinerUnet = refinerUnet;
         _vaeEncoder = vaeEncoder;
@@ -99,7 +97,7 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
         Logs.Info("Encoding text with CLIP-G...");
         int[][] batchTokenIdsG = [negativePromptTokenIdsG, promptTokenIdsG];
         int[] eosPositions = [negativeEosPositionG, promptEosPositionG];
-        (Tensor textEmbeddings, Tensor? pooledOutput) = _clipG.EncodePenultimate(_backend, batchTokenIdsG, eosPositions);
+        (Tensor textEmbeddings, Tensor? pooledOutput) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositions);
         if (pooledOutput is null)
             throw new InvalidOperationException("CLIP-G must produce a pooled output for SDXL refiner.");
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
@@ -121,7 +119,7 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
 
         // 3. Encode source image via the VAE encoder
         Stopwatch vaeEncSw = Stopwatch.StartNew();
-        Tensor sourceLatent = _vaeEncoder.Encode(_backend, source);
+        Tensor sourceLatent = _vaeEncoder.Encode(Backend, source);
         vaeEncSw.Stop();
         Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
@@ -129,7 +127,7 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
 
         // 4. Generate fresh noise + scheduler setup
         Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
-        IScheduler scheduler = CreateScheduler(request.Scheduler);
+        IScheduler scheduler = SchedulerFactory.Create(request.Scheduler);
         scheduler.SetTimesteps(steps);
 
         // 5. Inject noise at sigma[startStep]
@@ -141,6 +139,9 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
         Logs.Info($"Refiner denoise from step {startStep}/{steps} ({initTimesteps} steps)");
 
         // 6. Refiner denoise loop
+        // Bulk-upload refiner UNet weights before the loop. Paired with FreeWeights below
+        // the VAE handoff. No-op on backends without a weight cache.
+        Backend.PreloadWeights(_refinerUnet.EnumerateWeights());
         bool useF16 = (_refinerUnet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -154,19 +155,16 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
             if (MathF.Abs(inputScale - 1.0f) > 1e-6f)
             {
                 scaledLatent = new Tensor(latentShape, DType.F32);
-                _backend.Scale(scaledLatent, latent, inputScale);
+                Backend.Scale(scaledLatent, latent, inputScale);
             }
             else
             {
                 scaledLatent = latent;
             }
 
-            Tensor unetInput = scaledLatent;
-            if (useF16 && scaledLatent.DType != DType.F16)
-            {
-                unetInput = new Tensor(scaledLatent.Shape, DType.F16);
-                _backend.CastToF16(unetInput, scaledLatent);
-            }
+            Tensor unetInput = useF16
+                ? DtypeCastHelper.EnsureDtype(Backend, scaledLatent, DType.F16, disposeSourceOnCast: false)
+                : scaledLatent;
 
             Tensor noisePred;
             if (cfgScale > 1.0f)
@@ -177,10 +175,10 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
             {
                 int seqLen = (int)textEmbeddings.Shape[1];
                 int hiddenSize = (int)textEmbeddings.Shape[2];
-                Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
+                Tensor condEmb = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
                 int pooledDim = (int)pooledOutput.Shape[1];
-                Tensor condPooled = SliceBatchElement1D(pooledOutput, 1, pooledDim);
-                noisePred = _refinerUnet.Forward(_backend, unetInput, t, condEmb, condPooled, sizeConditionPos);
+                Tensor condPooled = CfgHelper.SliceBatchElement1D(pooledOutput, 1, pooledDim);
+                noisePred = _refinerUnet.Forward(Backend, unetInput, t, condEmb, condPooled, sizeConditionPos);
                 condEmb.Dispose();
                 condPooled.Dispose();
             }
@@ -188,13 +186,7 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
             if (unetInput != scaledLatent) unetInput.Dispose();
             if (scaledLatent != latent) scaledLatent.Dispose();
 
-            Tensor noisePredF32 = noisePred;
-            if (noisePred.DType == DType.F16)
-            {
-                noisePredF32 = new Tensor(noisePred.Shape, DType.F32);
-                _backend.CastToF32(noisePredF32, noisePred);
-                noisePred.Dispose();
-            }
+            Tensor noisePredF32 = DtypeCastHelper.EnsureF32(Backend, noisePred);
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
             scheduler.Step(newLatent, noisePredF32, latent, i);
@@ -215,22 +207,18 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
         pooledOutput.Dispose();
 
         // 7. VAE decode
-        _backend.Sync();
-        _backend.FreeWeights(_refinerUnet.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_refinerUnet.EnumerateWeights());
         Logs.Info("Decoding refined latents to image...");
         Stopwatch vaeSw = Stopwatch.StartNew();
 
         bool vaeF16 = (_vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
-        Tensor vaeInput = latent;
-        if (vaeF16 && latent.DType != DType.F16)
-        {
-            vaeInput = new Tensor(latent.Shape, DType.F16);
-            _backend.CastToF16(vaeInput, latent);
-            latent.Dispose();
-        }
+        Tensor vaeInput = vaeF16
+            ? DtypeCastHelper.EnsureDtype(Backend, latent, DType.F16)
+            : latent;
 
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, vaeInput);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeInput);
         vaeInput.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -254,80 +242,24 @@ public sealed unsafe class SdxlRefinerPipeline : IDisposable
         int hiddenSize = (int)textEmbeddings.Shape[2];
         int pooledDim = (int)pooledOutput.Shape[1];
 
-        Tensor uncondEmb = SliceBatchElement(textEmbeddings, 0, seqLen, hiddenSize);
-        Tensor condEmb = SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
-        Tensor uncondPooled = SliceBatchElement1D(pooledOutput, 0, pooledDim);
-        Tensor condPooled = SliceBatchElement1D(pooledOutput, 1, pooledDim);
+        Tensor uncondEmb = CfgHelper.SliceBatchElement(textEmbeddings, 0, seqLen, hiddenSize);
+        Tensor condEmb = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
+        Tensor uncondPooled = CfgHelper.SliceBatchElement1D(pooledOutput, 0, pooledDim);
+        Tensor condPooled = CfgHelper.SliceBatchElement1D(pooledOutput, 1, pooledDim);
 
         // Note: refiner uses different aesthetic scalars per branch
-        Tensor uncondNoise = _refinerUnet.Forward(_backend, latent, timestep, uncondEmb, uncondPooled, sizeConditionNeg);
-        Tensor condNoise = _refinerUnet.Forward(_backend, latent, timestep, condEmb, condPooled, sizeConditionPos);
+        Tensor uncondNoise = _refinerUnet.Forward(Backend, latent, timestep, uncondEmb, uncondPooled, sizeConditionNeg);
+        Tensor condNoise = _refinerUnet.Forward(Backend, latent, timestep, condEmb, condPooled, sizeConditionPos);
         uncondEmb.Dispose();
         condEmb.Dispose();
         uncondPooled.Dispose();
         condPooled.Dispose();
 
-        Tensor uncondF32 = uncondNoise;
-        Tensor condF32 = condNoise;
-        if (uncondNoise.DType == DType.F16)
-        {
-            uncondF32 = new Tensor(uncondNoise.Shape, DType.F32);
-            _backend.CastToF32(uncondF32, uncondNoise);
-            uncondNoise.Dispose();
-            condF32 = new Tensor(condNoise.Shape, DType.F32);
-            _backend.CastToF32(condF32, condNoise);
-            condNoise.Dispose();
-        }
-
-        Tensor output = new Tensor(latent.Shape, DType.F32);
-        float* uncPtr = (float*)uncondF32.DataPointer;
-        float* conPtr = (float*)condF32.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int count = (int)latent.ElementCount;
-
-        for (int i = 0; i < count; i++)
-        {
-            outPtr[i] = uncPtr[i] + cfgScale * (conPtr[i] - uncPtr[i]);
-        }
-
+        Tensor uncondF32 = DtypeCastHelper.EnsureF32(Backend, uncondNoise);
+        Tensor condF32 = DtypeCastHelper.EnsureF32(Backend, condNoise);
+        Tensor output = CfgHelper.ApplyCfg(uncondF32, condF32, cfgScale);
         uncondF32.Dispose();
         condF32.Dispose();
-
         return output;
     }
-
-    private static Tensor SliceBatchElement(Tensor tensor, int batchIdx, int seqLen, int hiddenSize)
-    {
-        TensorShape shape = new TensorShape(1, seqLen, hiddenSize);
-        Tensor slice = new Tensor(shape, DType.F32);
-        float* srcPtr = (float*)tensor.DataPointer;
-        float* dstPtr = (float*)slice.DataPointer;
-        int elements = seqLen * hiddenSize;
-        int srcOffset = batchIdx * elements;
-        for (int i = 0; i < elements; i++) dstPtr[i] = srcPtr[srcOffset + i];
-        return slice;
-    }
-
-    private static Tensor SliceBatchElement1D(Tensor tensor, int batchIdx, int dim)
-    {
-        TensorShape shape = new TensorShape(1, dim);
-        Tensor slice = new Tensor(shape, DType.F32);
-        float* srcPtr = (float*)tensor.DataPointer;
-        float* dstPtr = (float*)slice.DataPointer;
-        int srcOffset = batchIdx * dim;
-        for (int i = 0; i < dim; i++) dstPtr[i] = srcPtr[srcOffset + i];
-        return slice;
-    }
-
-    private static IScheduler CreateScheduler(string? name) => (name?.ToLowerInvariant()) switch
-    {
-        "ddim" => new DdimScheduler(),
-        "dpm++2m" or "dpmpp2m" => new DpmPlusPlus2MScheduler(),
-        _ => new EulerDiscreteScheduler(),
-    };
-
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components (shared resources).</summary>
-    public void Dispose() => Volatile.Write(ref _disposed, 1);
 }

@@ -13,9 +13,8 @@ namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>SD3 text-to-image and image-to-image pipeline. Orchestrates triple text encoding (CLIP-L + CLIP-G + T5-XXL) → MMDiT denoising with flow matching → VAE decode → RGB image output. T5 is optional for reduced VRAM usage.
 /// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> (instead of <see cref="TextToImageRequest"/>). Requires a <see cref="VaeEncoder"/> on the constructor. Setting <see cref="ImageToImageRequest.Mask"/> additionally enables blend-on-vanilla inpaint, identical to the SDXL/Flux paths but on SD3's 16-channel NCHW latent.</para></summary>
-public sealed unsafe class Sd3Pipeline : IDisposable
+public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly ClipTextEncoder _clipL;
     private readonly ClipTextEncoder _clipG;
     private readonly T5TextEncoder? _t5;
@@ -23,16 +22,8 @@ public sealed unsafe class Sd3Pipeline : IDisposable
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder? _vaeEncoder;
     private readonly float _schedulerShift;
-    private int _disposed;
 
     /// <summary>Creates a new SD3 pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
-    /// <param name="backend">Compute backend.</param>
-    /// <param name="clipL">CLIP ViT-L/14 text encoder (text_encoder). Must have text_projection for pooled output.</param>
-    /// <param name="clipG">OpenCLIP ViT-bigG/14 text encoder (text_encoder_2). Must have text_projection for pooled output.</param>
-    /// <param name="t5">T5-XXL text encoder (text_encoder_3). Null to skip T5 conditioning (reduced VRAM).</param>
-    /// <param name="transformer">SD3 MMDiT transformer (loaded with Sd3Config).</param>
-    /// <param name="vaeDecoder">VAE decoder (configured with VaeConfig.Sd3).</param>
-    /// <param name="schedulerShift">Flow-match scheduler shift. Default: 3.0 for SD3 Medium.</param>
     public Sd3Pipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG,
         T5TextEncoder? t5, Sd3Transformer transformer, VaeDecoder vaeDecoder,
         float schedulerShift = 3.0f)
@@ -44,8 +35,8 @@ public sealed unsafe class Sd3Pipeline : IDisposable
     public Sd3Pipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG,
         T5TextEncoder? t5, Sd3Transformer transformer, VaeDecoder vaeDecoder,
         VaeEncoder? vaeEncoder, float schedulerShift = 3.0f)
+        : base(backend)
     {
-        _backend = backend;
         _clipL = clipL;
         _clipG = clipG;
         _t5 = t5;
@@ -56,20 +47,6 @@ public sealed unsafe class Sd3Pipeline : IDisposable
     }
 
     /// <summary>Generates an image from pre-tokenized input for all three text encoders.</summary>
-    /// <param name="promptTokenIdsL">Prompt token IDs for CLIP-L [seqLen].</param>
-    /// <param name="negativePromptTokenIdsL">Negative prompt token IDs for CLIP-L [seqLen].</param>
-    /// <param name="promptTokenIdsG">Prompt token IDs for CLIP-G [seqLen].</param>
-    /// <param name="negativePromptTokenIdsG">Negative prompt token IDs for CLIP-G [seqLen].</param>
-    /// <param name="promptEosPositionL">EOS token position in prompt for CLIP-L (for pooled output).</param>
-    /// <param name="negativeEosPositionL">EOS token position in negative prompt for CLIP-L.</param>
-    /// <param name="promptEosPositionG">EOS token position in prompt for CLIP-G (for pooled output).</param>
-    /// <param name="negativeEosPositionG">EOS token position in negative prompt for CLIP-G.</param>
-    /// <param name="promptTokenIdsT5">Prompt token IDs for T5-XXL [seqLen]. Null if T5 is not available.</param>
-    /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs for T5. Null if T5 is not available.</param>
-    /// <param name="promptAttentionMaskT5">T5 attention mask for prompt (1=attend, 0=pad). Null = attend all.</param>
-    /// <param name="negativeAttentionMaskT5">T5 attention mask for negative prompt. Null = attend all.</param>
-    /// <param name="request">Generation parameters.</param>
-    /// <param name="onProgress">Optional progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsL,
         int[] negativePromptTokenIdsL,
@@ -99,49 +76,16 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         int steps = request.Steps;
         float cfgScale = request.CfgScale;
 
-        // Img2img validation + strength=0 short-circuit BEFORE any model work.
-        int startStep = 0;
-        Tensor? maskPixel = null;
-        if (request is ImageToImageRequest img2img)
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
         {
-            Tensor src = img2img.SourceImage;
-            if (src.Shape.Rank != 4 || src.Shape[0] != 1 || src.Shape[1] != 3 ||
-                src.Shape[2] != height || src.Shape[3] != width)
-            {
-                throw new ArgumentException(
-                    $"SourceImage shape must be [1, 3, {height}, {width}] (matching request); got {src.Shape}.",
-                    nameof(request));
-            }
-
-            if (img2img.Mask is not null)
-            {
-                Tensor mk = img2img.Mask;
-                if (mk.Shape.Rank != 4 || mk.Shape[0] != 1 || mk.Shape[1] != 1 ||
-                    mk.Shape[2] != height || mk.Shape[3] != width)
-                {
-                    throw new ArgumentException(
-                        $"Mask shape must be [1, 1, {height}, {width}] (matching source); got {mk.Shape}.",
-                        nameof(request));
-                }
-                if (mk.DType != DType.F32)
-                {
-                    throw new ArgumentException($"Mask must be F32 in [0, 1]; got {mk.DType}.", nameof(request));
-                }
-                maskPixel = mk;
-            }
-
-            float strength = Math.Clamp(img2img.Strength, 0f, 1f);
-            int initTimesteps = (int)MathF.Round(steps * strength);
-            startStep = Math.Max(steps - initTimesteps, 0);
-
-            if (initTimesteps == 0)
-            {
-                Logs.Info("Strength=0; passing source through unchanged");
-                return (ImagePostProcessor.TensorToRgbBytes(src), width, height, seed);
-            }
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
         }
-
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
         bool isMaskedInpaint = maskPixel is not null;
+
         string mode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
                     : isImg2Img ? $"img2img (start={startStep}/{steps})"
                     : "txt2img";
@@ -150,6 +94,12 @@ public sealed unsafe class Sd3Pipeline : IDisposable
 
         // ── 1. Encode text with triple encoders ─────────────────────────
         Logs.Info("Encoding text with CLIP-L, CLIP-G, T5...");
+
+        // Bulk-upload T5 weights once (~5 GB on T5-XXL) so the encoder's many kernels don't
+        // each pay a per-op cache-miss H2D transfer. Backends without a weight cache no-op.
+        // Pairs with the FreeWeights below the VAE handoff. CLIP-L/G are tiny and we let them
+        // lazy-cache (no matching free either — they stay resident across generations).
+        if (_t5 is not null) Backend.PreloadWeights(_t5.EnumerateWeights());
 
         bool useCfg = cfgScale > 1.0f;
 
@@ -160,7 +110,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
             promptAttentionMaskT5);
 
         // Project context through transformer's context_embedder
-        Tensor condProjected = _transformer.ProjectContext(_backend, condContext);
+        Tensor condProjected = _transformer.ProjectContext(Backend, condContext);
         condContext.Dispose();
 
         Tensor? uncondProjected = null;
@@ -174,7 +124,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
                 negativeEosPositionL, negativeEosPositionG,
                 negativeAttentionMaskT5);
 
-            uncondProjected = _transformer.ProjectContext(_backend, negContext);
+            uncondProjected = _transformer.ProjectContext(Backend, negContext);
             negContext.Dispose();
             uncondPooled = negPooled;
         }
@@ -195,7 +145,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         if (request is ImageToImageRequest img2imgInit)
         {
             Stopwatch vaeEncSw = Stopwatch.StartNew();
-            sourceLatent = _vaeEncoder!.Encode(_backend, img2imgInit.SourceImage);
+            sourceLatent = _vaeEncoder!.Encode(Backend, img2imgInit.SourceImage);
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
@@ -221,13 +171,19 @@ public sealed unsafe class Sd3Pipeline : IDisposable
             if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
             {
                 Tensor scaled = new Tensor(latentShape, DType.F32);
-                _backend.Scale(scaled, latent, initSigma);
+                Backend.Scale(scaled, latent, initSigma);
                 latent.Dispose();
                 latent = scaled;
             }
         }
 
         // ── 4. Denoising loop ───────────────────────────────────────────
+        // Bulk-upload transformer weights before the denoise loop. The transformer is touched
+        // every step, every block — without preload, the first step would pay cache-miss
+        // overhead for every parameter access. FreeWeights below the VAE handoff cycles the
+        // VRAM. No-op on backends without a weight cache.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info("Starting SD3 denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -244,7 +200,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
             }
             else
             {
-                noisePred = _transformer.Forward(_backend, latent, t, condProjected, condPooled);
+                noisePred = _transformer.Forward(Backend, latent, t, condProjected, condPooled);
             }
 
             // Scheduler step
@@ -298,16 +254,16 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         // and on a 12 GB card we OOM during VAE decode if the transformer is still
         // resident. Mirrors PHASE_3_DEVIATIONS #18 (UNet eviction before VAE for SDXL/Flux).
         // Backends without a weight cache (CPU/Vulkan) treat this as a no-op.
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
-        if (_t5 is not null) _backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (_t5 is not null) Backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. VAE decode ───────────────────────────────────────────────
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile. Internal fast-path
         // skips tiling when the latent fits in a single tile, so small images pay no overhead.
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, latent);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -339,12 +295,12 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         // CLIP-L: penultimate hidden [1, 77, 768] + pooled [1, 768]
         int[][] batchTokenIdsL = [tokenIdsL];
         int[] eosPositionsL = [eosPositionL];
-        (Tensor clipLHidden, Tensor? clipLPooled) = _clipL.EncodePenultimate(_backend, batchTokenIdsL, eosPositionsL);
+        (Tensor clipLHidden, Tensor? clipLPooled) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, eosPositionsL);
 
         // CLIP-G: penultimate hidden [1, 77, 1280] + pooled [1, 1280]
         int[][] batchTokenIdsG = [tokenIdsG];
         int[] eosPositionsG = [eosPositionG];
-        (Tensor clipGHidden, Tensor? clipGPooled) = _clipG.EncodePenultimate(_backend, batchTokenIdsG, eosPositionsG);
+        (Tensor clipGHidden, Tensor? clipGPooled) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositionsG);
 
         // Combine pooled: concat(clip_l_pooled, clip_g_pooled, dim=-1) → [1, 2048]
         Tensor pooled = ConcatPooled(clipLPooled!, clipGPooled!);
@@ -352,7 +308,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         clipGPooled?.Dispose();
 
         // Combine hidden: concat(clip_l_hidden, clip_g_hidden, dim=-1) → [1, 77, 2048]
-        Tensor lgHidden = ConcatAlongLastDim(clipLHidden, clipGHidden);
+        Tensor lgHidden = CfgHelper.ConcatLastDim(clipLHidden, clipGHidden);
         clipLHidden.Dispose();
         clipGHidden.Dispose();
 
@@ -368,7 +324,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         {
             int[][] batchT5 = [tokenIdsT5];
             int[][]? batchMask = attentionMaskT5 is not null ? [attentionMaskT5] : null;
-            t5Hidden = _t5.Encode(_backend, batchT5, batchMask);
+            t5Hidden = _t5.Encode(Backend, batchT5, batchMask);
         }
         else
         {
@@ -376,7 +332,7 @@ public sealed unsafe class Sd3Pipeline : IDisposable
             int t5SeqLen = tokenIdsT5?.Length ?? seqLenClip;
             TensorShape t5Shape = new TensorShape(1, t5SeqLen, targetDim);
             t5Hidden = new Tensor(t5Shape, DType.F32);
-            _backend.Fill(t5Hidden, 0.0f);
+            Backend.Fill(t5Hidden, 0.0f);
         }
 
         // Concat along sequence: [1, 77, 4096] + [1, 77, 4096] → [1, 154, 4096]
@@ -394,56 +350,11 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         Tensor uncondContext, Tensor uncondPooled,
         float cfgScale)
     {
-        Tensor uncondNoise = _transformer.Forward(_backend, latent, timestep, uncondContext, uncondPooled);
-        Tensor condNoise = _transformer.Forward(_backend, latent, timestep, condContext, condPooled);
-
-        // CFG: output = uncond + scale * (cond - uncond)
-        Tensor output = new Tensor(latent.Shape, DType.F32);
-        float* uncPtr = (float*)uncondNoise.DataPointer;
-        float* conPtr = (float*)condNoise.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int count = (int)latent.ElementCount;
-
-        for (int i = 0; i < count; i++)
-        {
-            outPtr[i] = uncPtr[i] + cfgScale * (conPtr[i] - uncPtr[i]);
-        }
-
+        Tensor uncondNoise = _transformer.Forward(Backend, latent, timestep, uncondContext, uncondPooled);
+        Tensor condNoise = _transformer.Forward(Backend, latent, timestep, condContext, condPooled);
+        Tensor output = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
         uncondNoise.Dispose();
         condNoise.Dispose();
-
-        return output;
-    }
-
-    /// <summary>Concatenates two [B, seqLen, D1] and [B, seqLen, D2] tensors along the last dimension → [B, seqLen, D1+D2].</summary>
-    private static Tensor ConcatAlongLastDim(Tensor a, Tensor b)
-    {
-        int batch = (int)a.Shape[0];
-        int seqLen = (int)a.Shape[1];
-        int dimA = (int)a.Shape[2];
-        int dimB = (int)b.Shape[2];
-        int dimOut = dimA + dimB;
-
-        TensorShape outShape = new TensorShape(batch, seqLen, dimOut);
-        Tensor output = new Tensor(outShape, DType.F32);
-
-        float* aPtr = (float*)a.DataPointer;
-        float* bPtr = (float*)b.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int bIdx = 0; bIdx < batch; bIdx++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int aOffset = (bIdx * seqLen + s) * dimA;
-                int bOffset = (bIdx * seqLen + s) * dimB;
-                int outOffset = (bIdx * seqLen + s) * dimOut;
-
-                Buffer.MemoryCopy(aPtr + aOffset, outPtr + outOffset, dimA * sizeof(float), dimA * sizeof(float));
-                Buffer.MemoryCopy(bPtr + bOffset, outPtr + outOffset + dimA, dimB * sizeof(float), dimB * sizeof(float));
-            }
-        }
-
         return output;
     }
 
@@ -534,16 +445,5 @@ public sealed unsafe class Sd3Pipeline : IDisposable
         }
 
         return output;
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components (shared resources).</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

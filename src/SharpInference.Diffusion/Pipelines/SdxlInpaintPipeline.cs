@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using SharpInference.Core.Backends;
 using SharpInference.Core.Logging;
 using SharpInference.Core.Tensors;
@@ -6,26 +5,23 @@ using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Models.Vae;
 using SharpInference.Diffusion.Requests;
-using SharpInference.Diffusion.Schedulers;
 using SharpInference.Diffusion.Utilities;
 
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>SDXL Inpainting pipeline. Specialized variant of SdxlPipeline that accepts an inpainting mask and replaces masked regions while preserving unmasked content. Uses a 9-channel UNet input (4 latent + 4 masked image latent + 1 mask).</summary>
-public sealed unsafe class SdxlInpaintPipeline : IDisposable
+public sealed unsafe class SdxlInpaintPipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly ClipTextEncoder _clipL;
     private readonly ClipTextEncoder _clipG;
     private readonly UNet _unet;
     private readonly VaeDecoder _vaeDecoder;
-    private int _disposed;
 
     /// <summary>Creates a new SDXL inpainting pipeline.</summary>
     public SdxlInpaintPipeline(IBackend backend, ClipTextEncoder clipL, ClipTextEncoder clipG,
         UNet unet, VaeDecoder vaeDecoder)
+        : base(backend)
     {
-        _backend = backend;
         _clipL = clipL;
         _clipG = clipG;
         _unet = unet;
@@ -112,16 +108,5 @@ public sealed unsafe class SdxlInpaintPipeline : IDisposable
         }
 
         return latentMask;
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-    }
-
-    /// <summary>Disposes the pipeline.</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

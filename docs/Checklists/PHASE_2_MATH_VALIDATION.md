@@ -29,13 +29,13 @@
 ## 5. Testing — 146 tests passing locally
 
 - [x] Schedulers (18), VAE (20), ClipTokenizer (16), T5Tokenizer (22), all others
-- [ ] All tests pass on CI
+- [x] All tests pass on CI
 
 ## 6. Review & Merge
 
 - [x] Code review — numerical correctness, memory safety verified
 - [x] Deviations documented (see below)
-- [ ] Merge to main branch
+- [x] Merge to main branch
 
 ---
 

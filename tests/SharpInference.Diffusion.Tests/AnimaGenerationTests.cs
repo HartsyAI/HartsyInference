@@ -4,7 +4,9 @@ using Xunit.Abstractions;
 using SharpInference.Core.Tensors;
 using SharpInference.Cuda;
 using SharpInference.Diffusion.Models.Denoisers;
+using SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 using SharpInference.Diffusion.Models.Vae;
+using SharpInference.Diffusion.Models.Vae.QwenImage;
 using SharpInference.Diffusion.Pipelines;
 using SharpInference.Diffusion.Requests;
 using SharpInference.Diffusion.Utilities;
@@ -74,18 +76,23 @@ public sealed class AnimaGenerationTests
             using (loader)
             {
                 Dictionary<string, Tensor> transformerWeights = CastWeightsToF32(converted.Transformer);
+                Dictionary<string, Tensor> llmAdapterWeights = CastWeightsToF32(converted.LlmAdapter);
 
                 sw.Restart();
-                AnimaConfig config = AnimaConfig.Cosmos2_2B;
+                AnimaConfig config = AnimaConfig.AnimaPreview3;
                 using AnimaTransformer transformer = new(config);
                 transformer.LoadWeights(transformerWeights);
-                _output.WriteLine($"[2/5] Transformer ready in {sw.ElapsedMilliseconds}ms (depth={config.NumLayers}, hidden={config.HiddenSize})");
+                using AnimaLlmAdapter llmAdapter = new(config.LlmAdapter);
+                llmAdapter.LoadWeights(llmAdapterWeights);
+                _output.WriteLine($"[2/5] Transformer + LlmAdapter ready in {sw.ElapsedMilliseconds}ms (depth={config.NumLayers}, hidden={config.HiddenSize})");
 
                 sw.Restart();
                 using SafeTensorsLoader vaeLoader = new();
                 vaeLoader.Load(TestPaths.Anima.Vae);
                 Dictionary<string, Tensor> vaeWeights = CastWeightsToF32(vaeLoader.GetAllTensors());
-                VaeDecoder vae = new(VaeConfig.Flux);
+                // Anima uses the Qwen-Image VAE (3D causal autoencoder collapsed to 2D for image mode);
+                // the standard VaeDecoder can't load this checkpoint because the key layout differs.
+                using QwenImageVaeDecoder vae = new(VaeConfig.QwenImage);
                 vae.LoadWeights(vaeWeights);
                 _output.WriteLine($"[3/5] VAE ready in {sw.ElapsedMilliseconds}ms");
 
@@ -102,9 +109,10 @@ public sealed class AnimaGenerationTests
                 backend.PreloadWeights(transformer.EnumerateWeights());
                 _output.WriteLine($"[4/5] Backend + preload ready in {sw.ElapsedMilliseconds}ms");
 
-                using Tensor promptEmbeds = LoadF32Tensor(TestPaths.Anima.PromptEmbeds, config.TextEmbedDim);
+                // Text embedding dim = LlmAdapter input dim = Qwen-3 0.6B hidden (1024).
+                using Tensor promptEmbeds = LoadF32Tensor(TestPaths.Anima.PromptEmbeds, config.LlmAdapter.HiddenSize);
 
-                using AnimaPipeline pipeline = new(backend, transformer, vae, config);
+                using AnimaPipeline pipeline = new(backend, transformer, llmAdapter, vae, config);
 
                 TextToImageRequest request = new()
                 {

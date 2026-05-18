@@ -17,23 +17,21 @@ namespace SharpInference.Diffusion.Pipelines;
 /// path, so the CLIP encoder constructor parameter is accepted for API compatibility but unused. The
 /// pipeline patchifies the latent before the transformer call (<c>patch_size</c> from config) and
 /// unpatchifies after, then VAE-decodes through the 32-channel Hunyuan VAE.</summary>
-public sealed unsafe class HunyuanImagePipeline : IDisposable
+public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly ClipTextEncoder? _clipEncoder;
     private readonly T5TextEncoder _t5Encoder;
     private readonly HunyuanImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly HunyuanImageConfig _config;
-    private int _disposed;
 
     /// <summary>Creates a new Hunyuan Image pipeline. <paramref name="clipEncoder"/> is accepted for
     /// API compatibility but not consumed — Hunyuan's pooled-conditioning path is replaced by the
     /// timestep + distilled-guidance embedding inside the transformer.</summary>
     public HunyuanImagePipeline(IBackend backend, ClipTextEncoder? clipEncoder, T5TextEncoder t5Encoder,
         HunyuanImageTransformer transformer, VaeDecoder vaeDecoder, HunyuanImageConfig config)
+        : base(backend)
     {
-        _backend = backend;
         _clipEncoder = clipEncoder;
         _t5Encoder = t5Encoder;
         _transformer = transformer;
@@ -79,14 +77,14 @@ public sealed unsafe class HunyuanImagePipeline : IDisposable
         Logs.Info("Encoding text with T5-XXL (primary 4096-dim per-token)...");
         int[][] condTokenBatch = [promptTokenIdsT5];
         int[][]? condMaskBatch = promptAttentionMaskT5 is null ? null : [promptAttentionMaskT5];
-        Tensor condT5 = _t5Encoder.Encode(_backend, condTokenBatch, condMaskBatch);
+        Tensor condT5 = _t5Encoder.Encode(Backend, condTokenBatch, condMaskBatch);
 
         Tensor? uncondT5 = null;
         if (useCfg)
         {
             int[][] uncondTokenBatch = [negativePromptTokenIdsT5];
             int[][]? uncondMaskBatch = negativeAttentionMaskT5 is null ? null : [negativeAttentionMaskT5];
-            uncondT5 = _t5Encoder.Encode(_backend, uncondTokenBatch, uncondMaskBatch);
+            uncondT5 = _t5Encoder.Encode(Backend, uncondTokenBatch, uncondMaskBatch);
         }
 
         Tensor? guidancePrep = null;
@@ -99,6 +97,10 @@ public sealed unsafe class HunyuanImagePipeline : IDisposable
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
+        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights at
+        // the VAE handoff. No-op on backends without a weight cache.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info($"Starting denoise loop ({steps} steps, distilled guidance={distilledGuidance})...");
         for (int i = 0; i < steps; i++)
         {
@@ -107,7 +109,7 @@ public sealed unsafe class HunyuanImagePipeline : IDisposable
 
             Tensor patched = PatchifyLatent(latent, inChannels, latentH, latentW, patch);
 
-            Tensor velocity = _transformer.Forward(_backend, patched, condT5, encoderHidden2: null,
+            Tensor velocity = _transformer.Forward(Backend, patched, condT5, encoderHidden2: null,
                 t, distilledGuidance, hPacked, wPacked);
             Tensor velocityImage = UnpatchifyTokens(velocity, inChannels, hPacked, wPacked, patch);
             velocity.Dispose();
@@ -116,14 +118,13 @@ public sealed unsafe class HunyuanImagePipeline : IDisposable
             {
                 // Standard CFG path (un-distilled variant).
                 Tensor uncondPatched = PatchifyLatent(latent, inChannels, latentH, latentW, patch);
-                Tensor uncondVel = _transformer.Forward(_backend, uncondPatched, uncondT5!, encoderHidden2: null,
+                Tensor uncondVel = _transformer.Forward(Backend, uncondPatched, uncondT5!, encoderHidden2: null,
                     t, 1.0f, hPacked, wPacked);
                 Tensor uncondImage = UnpatchifyTokens(uncondVel, inChannels, hPacked, wPacked, patch);
                 uncondVel.Dispose();
                 uncondPatched.Dispose();
 
-                Tensor combined = new(latentShape, DType.F32);
-                ApplyStandardCfg(combined, velocityImage, uncondImage, cfgScale);
+                Tensor combined = CfgHelper.ApplyCfg(uncondImage, velocityImage, cfgScale);
                 velocityImage.Dispose();
                 uncondImage.Dispose();
                 velocityImage = combined;
@@ -145,12 +146,12 @@ public sealed unsafe class HunyuanImagePipeline : IDisposable
         uncondT5?.Dispose();
         guidancePrep?.Dispose();
 
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
 
         Logs.Info("Decoding latents to image (32-channel VAE)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor decoded = _vaeDecoder.Decode(_backend, latent);
+        Tensor decoded = _vaeDecoder.Decode(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
 
@@ -251,23 +252,4 @@ public sealed unsafe class HunyuanImagePipeline : IDisposable
         }
         return result;
     }
-
-    private static void ApplyStandardCfg(Tensor output, Tensor cond, Tensor uncond, float cfg)
-    {
-        float* condPtr = (float*)cond.DataPointer;
-        float* uncondPtr = (float*)uncond.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long count = output.Shape.ElementCount;
-        for (long i = 0; i < count; i++)
-        {
-            float u = uncondPtr[i];
-            outPtr[i] = u + cfg * (condPtr[i] - u);
-        }
-    }
-
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend, transformer, encoder or VAE — those are shared.</summary>
-    public void Dispose() => Volatile.Write(ref _disposed, 1);
 }

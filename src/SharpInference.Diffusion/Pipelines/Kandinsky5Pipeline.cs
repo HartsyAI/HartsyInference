@@ -20,16 +20,14 @@ namespace SharpInference.Diffusion.Pipelines;
 /// hatch — production users can pre-compute embeddings once with a sidecar Python helper, and
 /// once a Qwen2.5-VL text encoder lands in SharpInference this pipeline can grow a tokenizer-fed
 /// overload without touching the denoising path.</summary>
-public sealed unsafe class Kandinsky5Pipeline : IDisposable
+public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly Kandinsky5Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly Kandinsky5Config _config;
     private readonly float _schedulerShift;
     private readonly float _vaeScalingFactor;
     private readonly float _vaeShiftFactor;
-    private int _disposed;
 
     /// <summary>Creates a new Kandinsky 5 pipeline. The VAE used for the Lite model is the Flux VAE
     /// (16-channel latent, 8× downsample), with shift/scale identical to <c>VaeConfig.Flux</c>.</summary>
@@ -43,8 +41,8 @@ public sealed unsafe class Kandinsky5Pipeline : IDisposable
     public Kandinsky5Pipeline(IBackend backend, Kandinsky5Transformer transformer, VaeDecoder vaeDecoder,
         Kandinsky5Config config, float schedulerShift = 5.0f,
         float vaeScalingFactor = 0.3611f, float vaeShiftFactor = 0.1159f)
+        : base(backend)
     {
-        _backend = backend;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _config = config;
@@ -93,12 +91,16 @@ public sealed unsafe class Kandinsky5Pipeline : IDisposable
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(latentShape, DType.F32);
-            _backend.Scale(scaled, latent, initSigma);
+            Backend.Scale(scaled, latent, initSigma);
             latent.Dispose();
             latent = scaled;
         }
 
         // ── 3. Denoising loop ──
+        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights
+        // below the VAE handoff. No-op on backends without a weight cache.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         Logs.Info("Kandinsky5: starting denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = 0; i < steps; i++)
@@ -109,15 +111,15 @@ public sealed unsafe class Kandinsky5Pipeline : IDisposable
             Tensor noisePred;
             if (useCfg)
             {
-                Tensor uncond = _transformer.Forward(_backend, latent, t, negQwenEmbeds!, negClipPooled!);
-                Tensor cond = _transformer.Forward(_backend, latent, t, qwenEmbeds, clipPooled);
-                noisePred = ApplyCfg(uncond, cond, cfgScale);
+                Tensor uncond = _transformer.Forward(Backend, latent, t, negQwenEmbeds!, negClipPooled!);
+                Tensor cond = _transformer.Forward(Backend, latent, t, qwenEmbeds, clipPooled);
+                noisePred = CfgHelper.ApplyCfg(uncond, cond, cfgScale);
                 uncond.Dispose();
                 cond.Dispose();
             }
             else
             {
-                noisePred = _transformer.Forward(_backend, latent, t, qwenEmbeds, clipPooled);
+                noisePred = _transformer.Forward(Backend, latent, t, qwenEmbeds, clipPooled);
             }
 
             Tensor newLatent = new Tensor(latentShape, DType.F32);
@@ -134,8 +136,8 @@ public sealed unsafe class Kandinsky5Pipeline : IDisposable
         Kandinsky5Transformer.DumpFinalLatent(latent);
 
         // ── 4. Free transformer weights before VAE decode (mirrors AuraFlow / Flux pattern). ──
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
 
         // ── 5. Apply Flux VAE shift+scale before decoding: latent = latent / scale + shift ──
         Tensor decodeIn = new Tensor(latent.Shape, DType.F32);
@@ -145,7 +147,7 @@ public sealed unsafe class Kandinsky5Pipeline : IDisposable
         // ── 6. VAE decode (tiled to keep im2col workspace bounded). ──
         Logs.Verbose("Kandinsky5: decoding latents (tiled)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(_backend, decodeIn);
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, decodeIn);
         decodeIn.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
@@ -158,19 +160,6 @@ public sealed unsafe class Kandinsky5Pipeline : IDisposable
         return (rgbData, request.Width, request.Height, seed);
     }
 
-    /// <summary>Classifier-free guidance: <c>noise_pred = uncond + scale * (cond - uncond)</c>.</summary>
-    private static Tensor ApplyCfg(Tensor uncond, Tensor cond, float cfgScale)
-    {
-        Tensor output = new Tensor(uncond.Shape, DType.F32);
-        float* u = (float*)uncond.DataPointer;
-        float* c = (float*)cond.DataPointer;
-        float* o = (float*)output.DataPointer;
-        long n = uncond.ElementCount;
-        for (long i = 0; i < n; i++)
-            o[i] = u[i] + cfgScale * (c[i] - u[i]);
-        return output;
-    }
-
     /// <summary>Inverse of the VAE encoder's normalization: <c>x = x / scale + shift</c>. Flux/Kandinsky 5
     /// store latents in the shifted-scaled space, so we reverse it before decoding.</summary>
     private static void ApplyVaeShiftScale(Tensor output, Tensor input, float scale, float shift)
@@ -181,14 +170,5 @@ public sealed unsafe class Kandinsky5Pipeline : IDisposable
         float invScale = 1.0f / scale;
         for (long k = 0; k < n; k++)
             o[k] = i[k] * invScale + shift;
-    }
-
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    /// <summary>Disposes the pipeline. Does not dispose the backend or model components.</summary>
-    public void Dispose()
-    {
-        Volatile.Write(ref _disposed, 1);
     }
 }

@@ -177,9 +177,7 @@ public sealed unsafe class FluxSingleStreamBlock
         // attention activations are 4x smaller than the MLP ones). Cast it down to F16
         // so concat operands match. The cast is small (53 MB at 1024x1024), a worthwhile
         // tradeoff for a 134 MB concatted buffer at F16 instead of 267 MB at F32.
-        Tensor attnFlatF16 = new Tensor(shape, DType.F16);
-        backend.CastToF16(attnFlatF16, attnFlat);
-        attnFlat.Dispose();
+        Tensor attnFlatF16 = Utilities.DtypeCastHelper.EnsureDtype(backend, attnFlat, DType.F16);
 
         int concatDim = _hiddenSize + _mlpDim;
         TensorShape concatShape = new TensorShape(batch, seqLen, concatDim);

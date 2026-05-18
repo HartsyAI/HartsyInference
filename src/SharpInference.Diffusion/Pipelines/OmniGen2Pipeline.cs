@@ -14,18 +14,16 @@ namespace SharpInference.Diffusion.Pipelines;
 /// — OmniGen 2's text encoder is wired through the existing <see cref="Models.TextEncoders.LlamaStyleEncoder"/>
 /// at the Qwen2.5-VL preset, but a working Qwen2.5-VL forward + embedding extraction is left to the
 /// caller for now. Editing / multi-image-input paths are intentionally out of scope (t2i only).</summary>
-public sealed unsafe class OmniGen2Pipeline : IDisposable
+public sealed class OmniGen2Pipeline : DiffusionPipelineBase
 {
-    private readonly IBackend _backend;
     private readonly OmniGen2Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly OmniGen2Config _config;
-    private int _disposed;
 
     /// <summary>Creates an OmniGen 2 t2i pipeline. Caller owns each component.</summary>
     public OmniGen2Pipeline(IBackend backend, OmniGen2Transformer transformer, VaeDecoder vaeDecoder, OmniGen2Config config)
+        : base(backend)
     {
-        _backend = backend;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _config = config;
@@ -65,19 +63,22 @@ public sealed unsafe class OmniGen2Pipeline : IDisposable
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int textSeqLen = (int)captionEmbeddings.Shape[1];
 
+        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights
+        // below the VAE handoff. No-op on backends without a weight cache.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            Tensor velocity = _transformer.Forward(_backend, latent, t, captionEmbeddings, textSeqLen);
+            Tensor velocity = _transformer.Forward(Backend, latent, t, captionEmbeddings, textSeqLen);
 
             if (cfgScale > 1.0f)
             {
                 int negSeqLen = (int)negativeCaptionEmbeddings!.Shape[1];
-                Tensor uncond = _transformer.Forward(_backend, latent, t, negativeCaptionEmbeddings, negSeqLen);
-                Tensor combined = new(velocity.Shape, DType.F32);
-                ApplyStandardCfg(combined, velocity, uncond, cfgScale);
+                Tensor uncond = _transformer.Forward(Backend, latent, t, negativeCaptionEmbeddings, negSeqLen);
+                Tensor combined = CfgHelper.ApplyCfg(uncond, velocity, cfgScale);
                 uncond.Dispose();
                 velocity.Dispose();
                 velocity = combined;
@@ -93,10 +94,10 @@ public sealed unsafe class OmniGen2Pipeline : IDisposable
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        _backend.Sync();
-        _backend.FreeWeights(_transformer.EnumerateWeights());
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
 
-        Tensor decoded = _vaeDecoder.Decode(_backend, latent);
+        Tensor decoded = _vaeDecoder.Decode(Backend, latent);
         latent.Dispose();
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
         decoded.Dispose();
@@ -106,22 +107,4 @@ public sealed unsafe class OmniGen2Pipeline : IDisposable
 
         return (rgb, width, height, seed);
     }
-
-    private static void ApplyStandardCfg(Tensor output, Tensor cond, Tensor uncond, float cfg)
-    {
-        float* condPtr = (float*)cond.DataPointer;
-        float* uncondPtr = (float*)uncond.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long count = output.Shape.ElementCount;
-        for (long i = 0; i < count; i++)
-        {
-            float u = uncondPtr[i];
-            outPtr[i] = u + cfg * (condPtr[i] - u);
-        }
-    }
-
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-
-    public void Dispose() => Volatile.Write(ref _disposed, 1);
 }

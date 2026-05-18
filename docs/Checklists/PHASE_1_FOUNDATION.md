@@ -40,14 +40,14 @@
 ## 7. Testing — 69 tests passing locally
 
 - [x] Tensor, TensorShape, NativeBuffer, SafeTensorsLoader, GgufLoader, MatMul, Conv2D, Norm, Attention tests
-- [ ] All tests pass on CI
+- [x] All tests pass on CI
 
 ## 8. Review & Merge
 
 - [x] Code review (memory safety: 11 issues fixed; SIMD correctness: 4 issues fixed)
 - [x] Benchmark key kernels
 - [x] Deviations documented (see below)
-- [ ] Merge to main branch
+- [x] Merge to main branch
 
 ---
 
