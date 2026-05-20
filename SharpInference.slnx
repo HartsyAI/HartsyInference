@@ -21,7 +21,12 @@
     <Project Path="tests/SharpInference.Cpu.Tests/SharpInference.Cpu.Tests.csproj" />
     <Project Path="tests/SharpInference.Tokenizers.Tests/SharpInference.Tokenizers.Tests.csproj" />
     <Project Path="tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj" />
+    <Project Path="tests/SharpInference.Audio.Tests/SharpInference.Audio.Tests.csproj" />
     <Project Path="tests/SharpInference.Vulkan.Tests/SharpInference.Vulkan.Tests.csproj" />
+  </Folder>
+
+  <Folder Name="/samples/">
+    <Project Path="samples/SharpInference.Whisper.Cli/SharpInference.Whisper.Cli.csproj" />
   </Folder>
 
   <Folder Name="/benchmarks/">

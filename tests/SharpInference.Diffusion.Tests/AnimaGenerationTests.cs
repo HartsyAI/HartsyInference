@@ -111,6 +111,13 @@ public sealed class AnimaGenerationTests
 
                 // Text embedding dim = LlmAdapter input dim = Qwen-3 0.6B hidden (1024).
                 using Tensor promptEmbeds = LoadF32Tensor(TestPaths.Anima.PromptEmbeds, config.LlmAdapter.HiddenSize);
+                // Negative embeds — produced alongside the positive prompt by encode_anima_prompt.py.
+                // Required when cfgScale > 1.0; the pipeline throws if missing in that case.
+                string negPromptPath = Path.Combine(Path.GetDirectoryName(TestPaths.Anima.PromptEmbeds)!, "neg_prompt.bin");
+                Tensor? negPromptEmbeds = (cfgScale > 1.0f && File.Exists(negPromptPath))
+                    ? LoadF32Tensor(negPromptPath, config.LlmAdapter.HiddenSize)
+                    : null;
+                _output.WriteLine($"  Loaded prompt embeds: {promptEmbeds.Shape}, neg: {(negPromptEmbeds?.Shape.ToString() ?? "(none)")}");
 
                 using AnimaPipeline pipeline = new(backend, transformer, llmAdapter, vae, config);
 
@@ -128,8 +135,9 @@ public sealed class AnimaGenerationTests
                 _output.WriteLine($"\n[5/5] Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed=42...");
                 Stopwatch genSw = Stopwatch.StartNew();
                 (byte[] rgb, int outW, int outH, int seed) = pipeline.GenerateFromEmbeddings(
-                    promptEmbeds, request, cfgScale, null,
+                    promptEmbeds, request, cfgScale, negPromptEmbeds,
                     progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
+                negPromptEmbeds?.Dispose();
                 genSw.Stop();
                 _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1}s (seed={seed})");
 

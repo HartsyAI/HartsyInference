@@ -113,15 +113,36 @@ public sealed record VaeConfig
         // TODO: Confirm exact architecture (block channels, scaling factor) once HunyuanImage VAE is analyzed
     };
 
-    /// <summary>Preset for Qwen-Image (same VAE architecture as SD3/Flux with 16-channel latent).</summary>
+    /// <summary>Per-channel mean values for VAE latent post-denoising rescale. When set, the decode path
+    /// does <c>latent_rescaled[b, c, h, w] = latent[b, c, h, w] * LatentsStd[c] + LatentsMean[c]</c>
+    /// (per-channel) instead of the scalar <c>latent / ScalingFactor + ShiftFactor</c>. Used by the
+    /// Qwen-Image and Wan VAE families. Length must equal <see cref="LatentChannels"/> when set.</summary>
+    public float[]? LatentsMean { get; init; }
+
+    /// <summary>Per-channel std values, paired with <see cref="LatentsMean"/>. See remarks above.</summary>
+    public float[]? LatentsStd { get; init; }
+
+    /// <summary>Preset for Qwen-Image (3D causal autoencoder, WAN 2.1 family). Used by Anima and
+    /// Qwen-Image proper. Uses per-channel <c>latents_mean</c> / <c>latents_std</c> rescale before
+    /// decode (matches <c>AutoencoderKLQwenImage.config</c> in diffusers, applied by the pipeline as
+    /// <c>latents = latents * std + mean</c> per channel BEFORE <c>vae.decode</c>).</summary>
     public static VaeConfig QwenImage => new()
     {
         LatentChannels = 16,
-        ScalingFactor = 1.5305f,
-        ShiftFactor = 0.0609f,
+        // Scalar fallbacks (unused when LatentsMean/Std are set, but kept for API compatibility).
+        ScalingFactor = 1.0f,
+        ShiftFactor = 0.0f,
         UsePostQuantConv = false,
         UseQuantConv = false,
         SampleSize = 1024,
-        // TODO: Confirm exact scaling/shift factors for Qwen-Image VAE
+        // Per-channel statistics from diffusers' AutoencoderKLQwenImage.config (16 channels each).
+        LatentsMean = [
+            -0.7571f, -0.7089f, -0.9113f,  0.1075f, -0.1745f,  0.9653f, -0.1517f,  1.5508f,
+             0.4134f, -0.0715f,  0.5517f, -0.3632f, -0.1922f, -0.9497f,  0.2503f, -0.2921f,
+        ],
+        LatentsStd = [
+            2.8184f, 1.4541f, 2.3275f, 2.6558f, 1.2196f, 1.7708f, 2.6052f, 2.0743f,
+            3.2687f, 2.1526f, 2.8652f, 1.5579f, 1.6382f, 1.1253f, 2.8251f, 1.9160f,
+        ],
     };
 }

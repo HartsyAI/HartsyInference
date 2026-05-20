@@ -1,0 +1,315 @@
+using SharpInference.Audio.Cache;
+using SharpInference.Audio.Models.F5Tts;
+using SharpInference.Audio.Models.Vocoders;
+using F5SwaySamplingScheduler = SharpInference.Audio.Models.F5Tts.F5SwaySamplingScheduler;
+using SharpInference.Core.Backends;
+using SharpInference.Core.Pipelines;
+using SharpInference.Core.Tensors;
+using SharpInference.ModelHandler.SafeTensors;
+
+namespace SharpInference.Audio.Pipelines;
+
+/// <summary>F5-TTS zero-shot voice-clone pipeline. Takes a reference audio mel + the
+/// text that was spoken in it + the target text we want to generate, runs flow-matching
+/// Euler under <see cref="F5SwaySamplingScheduler"/>, and vocodes the result through
+/// <see cref="Vocos"/>.
+///
+/// <para>Pipeline shape (matches <c>F5TTS.api.F5TTS.infer</c> in the reference repo):
+/// <code>
+///   ref_mel    = mel_extract(ref_audio_wav)                  # [1, 100, T_ref]
+///   target_T   = T_ref * len(target_text) / len(ref_text)    # duration heuristic
+///   T_total    = T_ref + target_T
+///   cond_mel   = concat([ref_mel, zeros(T_target)], dim=T)   # [1, 100, T_total]
+///   x          = randn(target_mel_shape)                     # starting noise on target
+///   text_ids   = encode(ref_text + " " + target_text)        # joint chars
+///
+///   for (t, dt) in zip(sigmas[:-1], deltas):
+///     v_cond  = dit(x_cond_audio_text)
+///     v_uncond = dit(x_drop_audio_drop_text)
+///     v       = v_uncond + cfg_scale * (v_cond - v_uncond)
+///     x       = x + dt * v        # update ONLY the target portion
+///
+///   # x[T_ref:] is the generated mel
+///   audio = vocos(x[T_ref:])
+/// </code></para>
+///
+/// <para><b>Status:</b> this pipeline is wired up but not yet validated against an
+/// actual reference audio (the upstream impl involves a few subtle bits around the
+/// in-context infill masking + CFG that need numerical reference dumps to confirm).
+/// The single-DiT-forward smoke test passes; full E2E with audible output is a
+/// follow-up.</para></summary>
+public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
+{
+    private readonly F5TtsConfig _cfg;
+    private readonly F5Dit _dit;
+    private readonly Vocos _vocos;
+    private readonly F5Tokenizer _tokenizer;
+    private readonly SafeTensorsLoader _ditLoader;
+    private readonly SafeTensorsLoader _vocosLoader;
+    private int _disposed;
+
+    /// <summary>Model name (HF repo id).</summary>
+    public string ModelName { get; }
+
+    private F5TtsPipeline(string modelName, F5TtsConfig cfg, F5Dit dit, Vocos vocos, F5Tokenizer tok, SafeTensorsLoader ditLoader, SafeTensorsLoader vocosLoader)
+    {
+        ModelName = modelName;
+        _cfg = cfg;
+        _dit = dit;
+        _vocos = vocos;
+        _tokenizer = tok;
+        _ditLoader = ditLoader;
+        _vocosLoader = vocosLoader;
+    }
+
+    /// <summary>Loads the F5-TTS v1 Base pipeline (DiT + Vocos vocoder + char tokenizer).
+    /// Both checkpoints are auto-downloaded into the SharpInference cache on first use.</summary>
+    public static async Task<F5TtsPipeline> LoadAsync(F5TtsConfig? cfg = null, CancellationToken ct = default)
+    {
+        F5TtsConfig resolved = cfg ?? F5TtsConfig.V1Base;
+
+        // DiT: SWivid/F5-TTS, file F5TTS_v1_Base/model_1250000.safetensors
+        string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
+        Task<string> ditPath = AudioModelCache.GetAsync("SWivid/F5-TTS", "F5TTS_v1_Base/model_1250000.safetensors", ct: ct);
+        Task<string> vocabPath = AudioModelCache.GetAsync("SWivid/F5-TTS", "F5TTS_v1_Base/vocab.txt", ct: ct);
+
+        // Vocos: lucasnewman/vocos-mel-24khz (safetensors)
+        Task<string> vocosPath = AudioModelCache.GetAsync("lucasnewman/vocos-mel-24khz", "model.safetensors", ct: ct);
+
+        await Task.WhenAll(ditPath, vocabPath, vocosPath).ConfigureAwait(false);
+
+        SafeTensorsLoader ditLoader = new();
+        ditLoader.Load(ditPath.Result);
+        F5Dit dit = new(resolved);
+        dit.LoadWeights(ditLoader.GetAllTensors());
+
+        SafeTensorsLoader vocosLoader = new();
+        vocosLoader.Load(vocosPath.Result);
+        Vocos vocos = new(VocosConfig.Mel24k);
+        vocos.LoadWeights(vocosLoader.GetAllTensors());
+
+        // The tokenizer expects vocab.txt in a known directory — copy it into the F5-TTS
+        // base of the cache so the tokenizer can find it without bypassing the cache layer.
+        string baseCacheDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
+        string vocabDest = Path.Combine(baseCacheDir, "vocab.txt");
+        if (!File.Exists(vocabDest)) File.Copy(vocabPath.Result, vocabDest, overwrite: true);
+        F5Tokenizer tok = new(baseCacheDir);
+
+        return new F5TtsPipeline("SWivid/F5-TTS", resolved, dit, vocos, tok, ditLoader, vocosLoader);
+    }
+
+    /// <summary>Runs one forward pass of the DiT on synthetic inputs. Used by the
+    /// integration test to verify the model assembles and produces sensible-magnitude
+    /// output without crashing — a real audio generation pipeline is layered on top.</summary>
+    public Tensor SmokeForward(IBackend backend, int t, int textLen)
+    {
+        Tensor noisyMel = new(new TensorShape(1, _cfg.MelDim, t), DType.F32);
+        Tensor condMel = new(new TensorShape(1, _cfg.MelDim, t), DType.F32);
+        unsafe
+        {
+            // Fill with deterministic small values so we don't depend on a RNG.
+            float* n = (float*)noisyMel.DataPointer;
+            float* c = (float*)condMel.DataPointer;
+            for (long i = 0; i < noisyMel.ElementCount; i++) n[i] = MathF.Sin(i * 0.01f) * 0.1f;
+            for (long i = 0; i < condMel.ElementCount; i++) c[i] = MathF.Cos(i * 0.01f) * 0.05f;
+        }
+        int[] textIds = new int[textLen];
+        for (int i = 0; i < textLen; i++) textIds[i] = (i % 50) + 1;
+
+        Tensor v = _dit.Forward(backend, noisyMel, condMel, textIds, timestep: 0.5f);
+        noisyMel.Dispose();
+        condMel.Dispose();
+        return v;
+    }
+
+    /// <summary>Generates audio for <paramref name="targetText"/> in the voice of
+    /// <paramref name="refMel"/>. <paramref name="refMel"/> is a precomputed log-mel of
+    /// the reference WAV (shape <c>[1, 100, T_ref]</c>, natural-log, no normalization —
+    /// matches Vocos's own feature extractor). <paramref name="refText"/> is the text
+    /// spoken in the reference audio (used to align the joint character sequence).
+    ///
+    /// <para><b>Status:</b> the pipeline is wired up structurally but the duration
+    /// heuristic, CFG mixing, and in-context infill masking all need numerical
+    /// validation against the upstream Python reference before producing audible
+    /// output reliably. The single-DiT-forward path
+    /// (<see cref="SmokeForward"/>) is tested and works.</para></summary>
+    public float[] Generate(IBackend backend, Tensor refMel, string refText, string targetText, F5TtsOptions? options = null)
+    {
+        ThrowIfDisposed();
+        F5TtsOptions opts = options ?? new F5TtsOptions();
+
+        int tRef = (int)refMel.Shape[2];
+        int[] refIds = _tokenizer.Encode(refText);
+        int[] targetIds = _tokenizer.Encode(targetText);
+
+        // Duration heuristic: target frames = ref_frames * len(target_text) / len(ref_text) / speed
+        int tTarget = (int)Math.Round((double)tRef * targetIds.Length / Math.Max(1, refIds.Length) / opts.Speed);
+        if (tTarget < 1) tTarget = 1;
+        int tTotal = tRef + tTarget;
+
+        // Build cond_mel: [ref_mel, zeros(tTarget)] along the time dim.
+        Tensor condMel = ConcatRefAndZeros(refMel, tTarget, _cfg.MelDim);
+
+        // Build initial noise on the full timeline (the ref portion gets clamped back to
+        // the reference values at every step — equivalent to running flow matching only
+        // over the target portion).
+        Tensor x = BuildNoise(_cfg.MelDim, tTotal, opts.Seed);
+
+        // Joint text token ids: refIds ++ targetIds.
+        int[] jointIds = new int[refIds.Length + targetIds.Length];
+        Array.Copy(refIds, jointIds, refIds.Length);
+        Array.Copy(targetIds, 0, jointIds, refIds.Length, targetIds.Length);
+
+        F5SwaySamplingScheduler sched = new(opts.Steps, opts.SwayCoef);
+
+        // Flow-matching Euler with CFG.
+        for (int step = 0; step < sched.Steps; step++)
+        {
+            float t = sched.Timesteps[step];
+            float dt = sched.Deltas[step];
+
+            // Conditional forward
+            Tensor vCond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: false, dropText: false);
+            // Unconditional forward (for CFG)
+            Tensor vUncond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: true, dropText: true);
+
+            // v = v_uncond + cfg * (v_cond - v_uncond)
+            // (Equivalent to F5-TTS's convention with their cfg_strength meaning.)
+            ApplyCfgAndStep(x, vCond, vUncond, opts.CfgStrength, dt, refMel, tRef);
+            vCond.Dispose();
+            vUncond.Dispose();
+        }
+
+        // Slice the target portion of x and vocode through Vocos.
+        Tensor targetMel = SliceTargetPortion(x, tRef, tTotal);
+        x.Dispose();
+        condMel.Dispose();
+
+        float[] audio = _vocos.Forward(backend, targetMel);
+        targetMel.Dispose();
+        return audio;
+    }
+
+    private static unsafe Tensor ConcatRefAndZeros(Tensor refMel, int tTarget, int melDim)
+    {
+        int tRef = (int)refMel.Shape[2];
+        int tTotal = tRef + tTarget;
+        Tensor outT = new(new TensorShape(1, melDim, tTotal), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        float* rp = (float*)refMel.DataPointer;
+        for (int d = 0; d < melDim; d++)
+        {
+            for (int t = 0; t < tRef; t++) op[d * tTotal + t] = rp[d * tRef + t];
+            for (int t = tRef; t < tTotal; t++) op[d * tTotal + t] = 0f;
+        }
+        return outT;
+    }
+
+    private static unsafe Tensor BuildNoise(int melDim, int tTotal, ulong seed)
+    {
+        Tensor noise = new(new TensorShape(1, melDim, tTotal), DType.F32);
+        float* p = (float*)noise.DataPointer;
+        // Mulberry32-based deterministic Gaussian via Box-Muller. Good enough for inference.
+        uint state = (uint)(seed ^ (seed >> 32));
+        long n = melDim * tTotal;
+        for (long i = 0; i < n; i += 2)
+        {
+            uint a = NextRandom(ref state);
+            uint b = NextRandom(ref state);
+            double u1 = (a + 1.0) / 4294967296.0;  // (0, 1]
+            double u2 = (b + 1.0) / 4294967296.0;
+            double r = Math.Sqrt(-2.0 * Math.Log(u1));
+            double theta = 2.0 * Math.PI * u2;
+            p[i] = (float)(r * Math.Cos(theta));
+            if (i + 1 < n) p[i + 1] = (float)(r * Math.Sin(theta));
+        }
+        return noise;
+    }
+
+    private static uint NextRandom(ref uint state)
+    {
+        state += 0x6D2B79F5u;
+        uint z = state;
+        z = (z ^ (z >> 15)) * (z | 1);
+        z ^= z + (z ^ (z >> 7)) * (z | 61);
+        return z ^ (z >> 14);
+    }
+
+    private static unsafe void ApplyCfgAndStep(Tensor x, Tensor vCond, Tensor vUncond, float cfg, float dt, Tensor refMel, int tRef)
+    {
+        // vCond and vUncond come out as [1, T, mel_dim] (channels-last) from the DiT.
+        // x is [1, mel_dim, T] (channels-first). Walk over both layouts in step.
+        int t = (int)x.Shape[2];
+        int melDim = (int)x.Shape[1];
+        float* xp = (float*)x.DataPointer;
+        float* cp = (float*)vCond.DataPointer;
+        float* up = (float*)vUncond.DataPointer;
+        float* rp = (float*)refMel.DataPointer;
+
+        for (int tt = 0; tt < t; tt++)
+        {
+            for (int d = 0; d < melDim; d++)
+            {
+                int xIdx = d * t + tt;                  // [1, mel_dim, T]
+                int vIdx = tt * melDim + d;             // [1, T, mel_dim]
+                float v = up[vIdx] + cfg * (cp[vIdx] - up[vIdx]);
+                xp[xIdx] += dt * v;
+            }
+        }
+
+        // Clamp the reference portion back to the original reference mel (in-context infill).
+        for (int d = 0; d < melDim; d++)
+            for (int tt = 0; tt < tRef; tt++)
+                xp[d * t + tt] = rp[d * tRef + tt];
+    }
+
+    private static unsafe Tensor SliceTargetPortion(Tensor x, int tRef, int tTotal)
+    {
+        int melDim = (int)x.Shape[1];
+        int tTarget = tTotal - tRef;
+        Tensor outT = new(new TensorShape(1, melDim, tTarget), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        float* xp = (float*)x.DataPointer;
+        for (int d = 0; d < melDim; d++)
+            for (int tt = 0; tt < tTarget; tt++)
+                op[d * tTarget + tt] = xp[d * tTotal + tRef + tt];
+        return outT;
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(F5TtsPipeline));
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            _dit.Dispose();
+            _vocos.Dispose();
+            _tokenizer.Dispose();
+            _ditLoader.Dispose();
+            _vocosLoader.Dispose();
+        }
+    }
+}
+
+/// <summary>F5-TTS generation knobs. Default values match the reference repo.</summary>
+public sealed record F5TtsOptions
+{
+    /// <summary>NFE (function evaluations). 32 is the F5-TTS default.</summary>
+    public int Steps { get; init; } = 32;
+
+    /// <summary>Sway sampling coefficient. -1.0 default (biases toward noise end).</summary>
+    public float SwayCoef { get; init; } = -1.0f;
+
+    /// <summary>CFG strength. Convention: <c>v = v_uncond + cfg * (v_cond - v_uncond)</c>.
+    /// F5-TTS upstream calls this <c>cfg_strength=2.0</c> for their default.</summary>
+    public float CfgStrength { get; init; } = 2.0f;
+
+    /// <summary>Speech speed multiplier. 1.0 = natural. Larger = faster (shorter target duration).</summary>
+    public float Speed { get; init; } = 1.0f;
+
+    /// <summary>RNG seed for initial noise sample.</summary>
+    public ulong Seed { get; init; } = 42;
+}

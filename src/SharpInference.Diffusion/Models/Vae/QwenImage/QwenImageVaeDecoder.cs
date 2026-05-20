@@ -172,7 +172,7 @@ public sealed class QwenImageVaeDecoder : IDisposable
     /// <summary>Decodes a latent <c>[B, 16, H, W]</c> to an RGB image <c>[B, 3, H*8, W*8]</c> in F32.
     /// Values are in roughly <c>[-1, 1]</c>; downstream <c>ImagePostProcessor.TensorToRgbBytes</c>
     /// rescales to <c>[0, 255]</c>.</summary>
-    public Tensor Decode(IBackend backend, Tensor latent)
+    public unsafe Tensor Decode(IBackend backend, Tensor latent)
     {
         if (latent.Shape.Rank != 4)
             throw new ArgumentException($"Latent must be 4-D [B, C, H, W], got {latent.Shape}.", nameof(latent));
@@ -191,12 +191,14 @@ public sealed class QwenImageVaeDecoder : IDisposable
         Tensor zPost = new Tensor(z.Shape, DType.F32);
         backend.Conv2D(zPost, z, _conv2Weight!, _conv2Bias, strideH: 1, strideW: 1, padH: 0, padW: 0);
         z.Dispose();
+        QwenImageVaeDebugDump.Dump("post_quant_conv", zPost);
 
         // ── 3. decoder.conv1: 16 → 384 (3×3, pad=1) ──
         TensorShape midShape = new TensorShape(batch, MidChannels, height, width);
         Tensor hidden = new Tensor(midShape, DType.F32);
         backend.Conv2D(hidden, zPost, _convInWeight!, _convInBias, strideH: 1, strideW: 1, padH: 1, padW: 1);
         zPost.Dispose();
+        QwenImageVaeDebugDump.Dump("decoder.conv_in", hidden);
 
         // ── 4. Middle: ResNet → Attention → ResNet ──
         Tensor afterMid0 = _midRes0.Forward(backend, hidden);
@@ -206,8 +208,13 @@ public sealed class QwenImageVaeDecoder : IDisposable
         Tensor afterMid1 = _midRes1.Forward(backend, afterAttn);
         afterAttn.Dispose();
         hidden = afterMid1;
+        QwenImageVaeDebugDump.Dump("decoder.mid_block", hidden);
 
-        // ── 5. 15 upsample stages ──
+        // ── 5. 15 upsample stages — grouped to match diffusers up_blocks {0..3} boundaries:
+        //         raw idx 0..3   → up_blocks.0 (3 res + 1 upsampler) — dump after idx 3
+        //         raw idx 4..7   → up_blocks.1 (3 res + 1 upsampler) — dump after idx 7
+        //         raw idx 8..11  → up_blocks.2 (3 res + 1 upsampler) — dump after idx 11
+        //         raw idx 12..14 → up_blocks.3 (3 res, no upsampler) — dump after idx 14
         for (int i = 0; i < _upStages.Length; i++)
         {
             Tensor next;
@@ -224,6 +231,10 @@ public sealed class QwenImageVaeDecoder : IDisposable
             }
             hidden.Dispose();
             hidden = next;
+            if (i == 3) QwenImageVaeDebugDump.Dump("decoder.up_blocks.0", hidden);
+            else if (i == 7) QwenImageVaeDebugDump.Dump("decoder.up_blocks.1", hidden);
+            else if (i == 11) QwenImageVaeDebugDump.Dump("decoder.up_blocks.2", hidden);
+            else if (i == 14) QwenImageVaeDebugDump.Dump("decoder.up_blocks.3", hidden);
         }
 
         // ── 6. Head: RMSNorm(96) → SiLU → 3×3 Conv2D to RGB ──
@@ -241,13 +252,72 @@ public sealed class QwenImageVaeDecoder : IDisposable
         Tensor rgb = new Tensor(rgbShape, DType.F32);
         backend.Conv2D(rgb, headSilu, _headConvWeight!, _headConvBias, strideH: 1, strideW: 1, padH: 1, padW: 1);
         headSilu.Dispose();
+        QwenImageVaeDebugDump.Dump("decoder.conv_out", rgb);
+
+        // ── 7. Clamp to [-1, 1] — matches diffusers' AutoencoderKLQwenImage._decode:
+        //   `out = torch.clamp(out, min=-1.0, max=1.0)` applied AFTER decoder.forward.
+        //   Without this, the C# output exceeds [-1, 1] (saw range [-1.33, 1.21]) and
+        //   image rescaling overflows the [0, 255] byte range.
+        float* rgbPtr = (float*)rgb.DataPointer;
+        long rgbCount = rgb.ElementCount;
+        for (long i = 0; i < rgbCount; i++)
+        {
+            float v = rgbPtr[i];
+            if (v < -1.0f) rgbPtr[i] = -1.0f;
+            else if (v > 1.0f) rgbPtr[i] = 1.0f;
+        }
+        QwenImageVaeDebugDump.DumpOutput(rgb);
 
         return rgb;
     }
 
-    private Tensor UndoScaling(IBackend backend, Tensor latent)
+    /// <summary>Rescales the latent BEFORE the VAE decoder runs. Two paths:
+    /// <list type="bullet">
+    ///   <item><b>Per-channel</b> (Qwen-Image/Wan family): <c>output[b, c, h, w] = latent[b, c, h, w] * std[c] + mean[c]</c>.
+    ///        Matches the diffusers Qwen-Image pipeline's pre-decode step (per
+    ///        <c>diffusers/pipelines/qwenimage/pipeline_qwenimage.py</c> line 755-763:
+    ///        <c>latents = latents / (1/std) + mean</c>, where <c>std</c> and <c>mean</c> are 16-vectors).</item>
+    ///   <item><b>Scalar</b> (SD/Flux family, fallback): <c>output = latent / scaling_factor + shift_factor</c>.</item>
+    /// </list>
+    /// The per-channel path runs when <see cref="VaeConfig.LatentsMean"/> and <see cref="VaeConfig.LatentsStd"/>
+    /// are both set on the config.</summary>
+    private unsafe Tensor UndoScaling(IBackend backend, Tensor latent)
     {
         Tensor latentF32 = latent.DType == DType.F32 ? latent : latent.CastTo(DType.F32);
+
+        if (_config.LatentsMean is float[] meanArr && _config.LatentsStd is float[] stdArr)
+        {
+            if (meanArr.Length != _config.LatentChannels || stdArr.Length != _config.LatentChannels)
+                throw new InvalidOperationException(
+                    $"VaeConfig.LatentsMean/Std length must equal LatentChannels ({_config.LatentChannels}); got mean={meanArr.Length}, std={stdArr.Length}.");
+
+            int batch = (int)latentF32.Shape[0];
+            int channels = (int)latentF32.Shape[1];
+            int height = (int)latentF32.Shape[2];
+            int width = (int)latentF32.Shape[3];
+            long spatial = (long)height * width;
+
+            Tensor result = new Tensor(latentF32.Shape, DType.F32);
+            float* inPtr = (float*)latentF32.DataPointer;
+            float* outPtr = (float*)result.DataPointer;
+            for (int b = 0; b < batch; b++)
+            {
+                for (int c = 0; c < channels; c++)
+                {
+                    float scale = stdArr[c];
+                    float shift = meanArr[c];
+                    long bcOff = ((long)b * channels + c) * spatial;
+                    for (long s = 0; s < spatial; s++)
+                    {
+                        outPtr[bcOff + s] = inPtr[bcOff + s] * scale + shift;
+                    }
+                }
+            }
+            if (!ReferenceEquals(latentF32, latent)) latentF32.Dispose();
+            return result;
+        }
+
+        // Scalar fallback (SD/Flux convention): latent / scaling_factor + shift_factor
         Tensor scaled = new Tensor(latentF32.Shape, DType.F32);
         backend.Scale(scaled, latentF32, 1.0f / _config.ScalingFactor);
         if (!ReferenceEquals(latentF32, latent)) latentF32.Dispose();

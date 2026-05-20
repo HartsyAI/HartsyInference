@@ -2,13 +2,14 @@
 
   <PropertyGroup>
     <PackageId>SharpInference.Audio</PackageId>
-    <Description>Audio inference for SharpInference — Whisper STT, Kokoro TTS, voice conversion, and audio preprocessing.</Description>
+    <Description>Audio inference for SharpInference — Whisper STT, Kokoro TTS, voice conversion, mel-spectrogram preprocessing, audio codecs, and HuggingFace model caching.</Description>
     <RootNamespace>SharpInference.Audio</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\SharpInference.Core\SharpInference.Core.csproj" />
     <ProjectReference Include="..\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
   </ItemGroup>
 
 </Project>
