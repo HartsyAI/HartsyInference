@@ -11,7 +11,7 @@ namespace SharpInference.Vision.Detection;
 /// <para>Input is <c>[1, 3, H, W]</c> where H and W are multiples of 32 (the network's max stride).
 /// Output is <c>[1, 4 + numClasses, totalAnchors]</c> with box xywh in input-pixel coords and
 /// class probabilities after sigmoid — ready for confidence filtering and NMS.</para></summary>
-public sealed class YoloModel
+public sealed class YoloModel : IYoloDetectModel
 {
     private readonly YoloConfig _config;
 

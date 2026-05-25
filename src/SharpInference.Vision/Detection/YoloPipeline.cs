@@ -18,23 +18,35 @@ public sealed class YoloPipeline : IDetectionPipeline
 {
     private readonly IBackend _backend;
     private readonly SafeTensorsLoader _loader;
-    private readonly YoloModel _model;
+    private readonly IYoloDetectModel _model;
     private readonly YoloPreprocessor _preprocessor;
     private readonly IReadOnlyList<string>? _labels;
     private int _disposed;
 
-    /// <summary>Variant name (e.g. <c>"yolov8n"</c>).</summary>
+    /// <summary>Variant name (e.g. <c>"yolov8n"</c>, <c>"yolo11n"</c>).</summary>
     public string ModelName => _model.Config.Name;
 
     /// <summary>The underlying model — exposed for diagnostics and weight preloading.</summary>
-    public YoloModel Model => _model;
+    public IYoloDetectModel Model => _model;
 
     /// <summary>Letterbox target size used by the preprocessor (640 default).</summary>
     public int InputSize => _preprocessor.TargetSize;
 
-    /// <summary>Constructs the pipeline from a config and a safetensors checkpoint. Optionally
-    /// provide a label table; when null, <see cref="CocoLabels"/> is used.</summary>
+    /// <summary>Constructs a YOLOv8 pipeline. Use <see cref="LoadV11"/> for YOLO11 checkpoints — the
+    /// architecture lives in the model class, not the config, so we need a separate factory.</summary>
     public YoloPipeline(IBackend backend, YoloConfig config, string safetensorsPath, int inputSize = 640, IReadOnlyList<string>? labels = null)
+        : this(backend, new YoloModel(config), config, safetensorsPath, inputSize, labels)
+    {
+    }
+
+    /// <summary>Factory for YOLO11 checkpoints. Use the <c>YoloV11n</c>/<c>YoloV11s</c>/etc.
+    /// presets on <see cref="YoloConfig"/>.</summary>
+    public static YoloPipeline LoadV11(IBackend backend, YoloConfig config, string safetensorsPath, int inputSize = 640, IReadOnlyList<string>? labels = null)
+    {
+        return new YoloPipeline(backend, new YoloV11Model(config), config, safetensorsPath, inputSize, labels);
+    }
+
+    private YoloPipeline(IBackend backend, IYoloDetectModel model, YoloConfig config, string safetensorsPath, int inputSize, IReadOnlyList<string>? labels)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -46,7 +58,7 @@ public sealed class YoloPipeline : IDetectionPipeline
         _loader = new SafeTensorsLoader();
         _loader.Load(safetensorsPath);
 
-        _model = new YoloModel(config);
+        _model = model;
         Dictionary<string, Tensor> weights = _loader.GetAllTensors();
         _model.LoadWeights(weights);
 

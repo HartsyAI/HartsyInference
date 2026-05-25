@@ -71,6 +71,44 @@ public sealed record YoloConfig
     /// <summary>YOLOv8x (68.2M params, 53.9 mAP).</summary>
     public static YoloConfig YoloV8x => YoloV8l with { Name = "yolov8x", WidthMultiple = 1.25f };
 
+    // ── YOLO11 presets ────────────────────────────────────────────────────────
+    //
+    // YOLO11 architecture has a different layer layout than v8 (extra C2PSA + reshuffled C3k2
+    // channel progression); the channel-resolution helpers in this record happen to work for
+    // both because the scaling formula <c>make_divisible(min(c_base, max_channels) * width, 8)</c>
+    // is identical. The YAML layer counts diverge between the two families, so the model class
+    // (YoloModel vs YoloV11Model) is the architecture switch — these config presets are only
+    // the scaling knobs.
+
+    /// <summary>YOLO11n — smallest variant (2.6M params, 39.5 mAP@0.5:0.95 — ~19% fewer params than v8n with +2.2 mAP).</summary>
+    public static YoloConfig YoloV11n => new()
+    {
+        Name = "yolo11n",
+        DepthMultiple = 0.50f,
+        WidthMultiple = 0.25f,
+        MaxChannels = 1024,
+        NumClasses = 80,
+    };
+
+    /// <summary>YOLO11s (9.4M params, 47.0 mAP).</summary>
+    public static YoloConfig YoloV11s => YoloV11n with { Name = "yolo11s", WidthMultiple = 0.50f };
+
+    /// <summary>YOLO11m (20.1M params, 51.5 mAP).</summary>
+    public static YoloConfig YoloV11m => YoloV11n with { Name = "yolo11m", WidthMultiple = 1.00f, MaxChannels = 512 };
+
+    /// <summary>YOLO11l (25.3M params, 53.4 mAP).</summary>
+    public static YoloConfig YoloV11l => new()
+    {
+        Name = "yolo11l",
+        DepthMultiple = 1.00f,
+        WidthMultiple = 1.00f,
+        MaxChannels = 512,
+        NumClasses = 80,
+    };
+
+    /// <summary>YOLO11x (56.9M params, 54.7 mAP).</summary>
+    public static YoloConfig YoloV11x => YoloV11l with { Name = "yolo11x", WidthMultiple = 1.50f };
+
     /// <summary>Resolved per-stage backbone channels matching Ultralytics' formula
     /// <c>make_divisible(min(c_base, max_channels) * width, 8)</c> — i.e. cap to <c>max_channels</c>
     /// <i>first</i>, then multiply by width, then ceil-round to a multiple of 8. Indexed 0..4
