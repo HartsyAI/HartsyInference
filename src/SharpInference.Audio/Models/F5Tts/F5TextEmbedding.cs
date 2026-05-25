@@ -89,11 +89,9 @@ internal sealed unsafe class F5TextEmbedding
         }
 
         // 3. 4 ConvNeXt-V2 blocks at text_dim=512.
-        bool dump = Environment.GetEnvironmentVariable("F5_DUMP") == "1";
         Tensor running = textHidden;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            if (dump) Console.Error.WriteLine($"    text block {i}");
             Tensor next = _blocks[i].Forward(backend, running, seqLen, textDim);
             running.Dispose();
             running = next;

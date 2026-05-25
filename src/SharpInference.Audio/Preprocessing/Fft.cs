@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace SharpInference.Audio.Preprocessing;
 
 /// <summary>Cooley-Tukey radix-2 FFT for power-of-two sizes. Pure C#, allocation-free
@@ -42,25 +44,78 @@ public static class Fft
 
         // Standard Cooley-Tukey butterflies. Twiddle index step = n/size, so reading
         // the precomputed full-N table avoids per-stage recomputation of sin/cos.
+        //
+        // SIMD path: when step==1 (which holds for the largest stage where size==n, and
+        // any earlier stage whose butterfly half-block is at least Vector<float>.Count
+        // wide) we vectorize the inner butterfly via Vector<float> — 8-wide on AVX2,
+        // 4-wide on SSE/Neon. This collapses to the most-expensive stage's 4-8× speedup
+        // for typical Whisper / Kokoro FFT sizes (n=512 / 2048). For step>1 stages
+        // (which have small inner loops anyway) we keep the scalar path — gather-based
+        // SIMD would lose more in gather overhead than it gains.
+        int simdWidth = Vector<float>.Count;
         for (int size = 2; size <= n; size <<= 1)
         {
             int half = size >> 1;
             int step = n / size;
-            for (int i = 0; i < n; i += size)
+            if (step == 1 && half >= simdWidth && Vector.IsHardwareAccelerated)
             {
-                int t = 0;
-                for (int j = i; j < i + half; j++)
+                // step == 1 means twiddles are contiguous slices of cos/sin tables.
+                // This branch handles the asymptotically dominant final stage.
+                for (int i = 0; i < n; i += size)
                 {
-                    float wr = cosTab[t];
-                    float wi = -sinTab[t]; // forward FFT
-                    int k = j + half;
-                    float tr = wr * re[k] - wi * im[k];
-                    float ti = wr * im[k] + wi * re[k];
-                    re[k] = re[j] - tr;
-                    im[k] = im[j] - ti;
-                    re[j] += tr;
-                    im[j] += ti;
-                    t += step;
+                    int j = i;
+                    int t = 0;
+                    int kBase = i + half;
+                    for (; t + simdWidth <= half; t += simdWidth, j += simdWidth)
+                    {
+                        Vector<float> wr = new(cosTab, t);
+                        Vector<float> wi = -new Vector<float>(sinTab, t);
+                        Vector<float> rek = new(re[(kBase + t)..]);
+                        Vector<float> imk = new(im[(kBase + t)..]);
+                        Vector<float> tr = wr * rek - wi * imk;
+                        Vector<float> ti = wr * imk + wi * rek;
+                        Vector<float> rej = new(re[j..]);
+                        Vector<float> imj = new(im[j..]);
+                        (rej - tr).CopyTo(re[(kBase + t)..]);
+                        (imj - ti).CopyTo(im[(kBase + t)..]);
+                        (rej + tr).CopyTo(re[j..]);
+                        (imj + ti).CopyTo(im[j..]);
+                    }
+                    // Scalar tail when half is not a multiple of simdWidth (rare for
+                    // power-of-two FFT sizes, but kept for safety).
+                    for (; t < half; t++, j++)
+                    {
+                        float wr = cosTab[t];
+                        float wi = -sinTab[t];
+                        int k = kBase + t;
+                        float tr = wr * re[k] - wi * im[k];
+                        float ti = wr * im[k] + wi * re[k];
+                        re[k] = re[j] - tr;
+                        im[k] = im[j] - ti;
+                        re[j] += tr;
+                        im[j] += ti;
+                    }
+                }
+            }
+            else
+            {
+                // Scalar path for early stages with step > 1 (small inner loops anyway).
+                for (int i = 0; i < n; i += size)
+                {
+                    int t = 0;
+                    for (int j = i; j < i + half; j++)
+                    {
+                        float wr = cosTab[t];
+                        float wi = -sinTab[t];
+                        int k = j + half;
+                        float tr = wr * re[k] - wi * im[k];
+                        float ti = wr * im[k] + wi * re[k];
+                        re[k] = re[j] - tr;
+                        im[k] = im[j] - ti;
+                        re[j] += tr;
+                        im[j] += ti;
+                        t += step;
+                    }
                 }
             }
         }

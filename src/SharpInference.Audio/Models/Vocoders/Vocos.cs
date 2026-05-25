@@ -165,7 +165,15 @@ public sealed unsafe class Vocos : IDisposable
         }
         headOut.Dispose();
 
-        return IStft.Apply(specRe, specIm, t, _cfg.NFft, _cfg.HopLength);
+        float[] audio = IStft.Apply(specRe, specIm, t, _cfg.NFft, _cfg.HopLength);
+
+        // Apply empirically-calibrated output gain (see VocosConfig.OutputGain doc).
+        if (_cfg.OutputGain != 1.0f)
+        {
+            float g = _cfg.OutputGain;
+            for (int i = 0; i < audio.Length; i++) audio[i] *= g;
+        }
+        return audio;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

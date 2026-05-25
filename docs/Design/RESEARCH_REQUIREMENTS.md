@@ -39,6 +39,7 @@ Every area below needs a `docs/Research/` document **before** implementation beg
 | [FLUX_ARCHITECTURE.md](../Research/FLUX_ARCHITECTURE.md) | Diffusion (Flux) |
 | [SD3_ARCHITECTURE.md](../Research/SD3_ARCHITECTURE.md) | Diffusion (SD3) |
 | [VAE_ARCHITECTURE.md](../Research/VAE_ARCHITECTURE.md) | Diffusion (VAE) |
+| [LANCE_ARCHITECTURE.md](../Research/LANCE_ARCHITECTURE.md) ✅ | Diffusion (Lance image pipeline, Phase 4) + Video (Lance video pipeline, Phase 9) |
 
 ## Diffusion Techniques
 
@@ -116,3 +117,16 @@ Every area below needs a `docs/Research/` document **before** implementation beg
 | [YOLO_ARCHITECTURE.md](../Research/YOLO_ARCHITECTURE.md) | Vision |
 | [OPENAI_IMAGE_API.md](../Research/OPENAI_IMAGE_API.md) | Server |
 | [DOTLLM_ARCHITECTURE.md](../Research/DOTLLM_ARCHITECTURE.md) | All packages |
+
+## Interactive / World Models (Phase 10)
+
+> Foundational design doc + one architecture doc per Tier-1 model. All Apache-2.0 / MIT except Hunyuan-GameCraft (Tencent Hunyuan Community License — restricted, license-acceptance gated).
+
+| Document | Needed Before |
+|---|---|
+| [INTERACTIVE_INFERENCE.md](../Research/INTERACTIVE_INFERENCE.md) ✅ | Phase 9 shared infra (`IActionEncoder`, `DenoiseKvCache`, `IDiscreteVideoTokenizer`, `DistilledFlowMatchEuler`, `VideoVaeStreamDecoder`, license plumbing) + Phase 10 (Interactive + all world-model pipelines) |
+| [MATRIX_GAME_3_ARCHITECTURE.md](../Research/MATRIX_GAME_3_ARCHITECTURE.md) ✅ | SharpInference.Interactive (Matrix-Game 3.0 pipeline, Phase 10) — flagship 5B world model, Wan2.2-TI2V-5B finetune, ActionModule + camera-aware memory, FlowUniPC + DMD distilled |
+| [MATRIX_GAME_2_ARCHITECTURE.md](../Research/MATRIX_GAME_2_ARCHITECTURE.md) ✅ | SharpInference.Interactive (Matrix-Game 2.0 pipeline, Phase 10) — 1.8B entry-level, SkyReels-V2 (Wan2.1) lineage, per-variant action vocabs, 3-4 step distilled |
+| [OASIS_ARCHITECTURE.md](../Research/OASIS_ARCHITECTURE.md) ✅ | SharpInference.Interactive (Oasis pipeline, Phase 10) — tiny 500M DiT-S/2 spatio-temporal axial attention, continuous Gaussian VAE, DDIM v-pred + Diffusion Forcing; CI smoke-test target |
+| [HUNYUAN_GAMECRAFT_ARCHITECTURE.md](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md) ✅ | SharpInference.Interactive (GameCraft pipeline, Phase 10) — **license-restricted**, gated on user acceptance |
+| [COSMOS_PREDICT1_VIDEO2WORLD_ARCHITECTURE.md](../Research/COSMOS_PREDICT1_VIDEO2WORLD_ARCHITECTURE.md) ✅ | SharpInference.Video (Cosmos V2W pipeline, Phase 9 — AR video continuation) — discrete FSQ tokenizer + AR transformer infra reused by future Phase 10 AR world models |

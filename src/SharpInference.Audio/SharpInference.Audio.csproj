@@ -12,4 +12,10 @@
     <ProjectReference Include="..\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Test project needs access to internals (LstmCell, WeightNormFusion, codec sub-classes)
+         so per-layer numerical correctness can be tested without lifting everything to public. -->
+    <InternalsVisibleTo Include="SharpInference.Audio.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -13,11 +13,25 @@ with open(os.path.join(ref_dir, "index.json")) as f: idx = json.load(f)
 print(f"Reference: {ref_dir}\nC#: {cs_dir}\n")
 print(f"{'layer':<32} {'shape':<25} {'avg_err':>11} {'max_err':>11} flag")
 print("-" * 95)
+def cs_filename_for(name: str) -> str:
+    """Translate Python ref layer name → C# dump filename.
+    Python uses tuple-hook indices (double_N_0 = txt out, double_N_1 = img out — diffusers'
+    Chroma block returns `(encoder_hidden_states, hidden_states)` in that order). C# uses
+    explicit `double_N_txt_out` / `double_N_img_out` names.
+    """
+    if name == "output_velocity": return "output_velocity.bin"
+    if name.startswith("double_"):
+        parts = name.split("_")
+        if len(parts) == 3 and parts[2] in ("0", "1"):
+            suffix = "txt_out" if parts[2] == "0" else "img_out"
+            return f"layers/double_{parts[1]}_{suffix}.bin"
+    return f"layers/{name.replace('.', '_')}.bin"
+
 for entry in idx:
     name = entry["name"]
     if name.startswith("input_"): continue
-    safe = name.replace(".", "_")
-    cs_path = os.path.join(cs_dir, "output_velocity.bin" if name == "output_velocity" else f"layers/{safe}.bin")
+    cs_rel = cs_filename_for(name)
+    cs_path = os.path.join(cs_dir, cs_rel)
     ref_path = os.path.join(ref_dir, entry["file"])
     if not os.path.exists(cs_path):
         print(f"{name:<32} {str(entry['shape']):<25} {'-':>11} {'-':>11} <missing C#>"); continue

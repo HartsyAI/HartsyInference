@@ -29,8 +29,10 @@ Highest-priority models; all target CUDA + Vulkan via `IBackend`.
 
 | Model | Format | Why First |
 |---|---|---|
-| CLIP ViT-L/14 | safetensors | Required by SD/SDXL; ship standalone too |
-| CLIP ViT-H/14 | safetensors | Required by SDXL |
+| CLIP ViT-L/14 (OpenAI) | safetensors | Required by SD/SDXL; ship standalone too |
+| CLIP ViT-H/14 (OpenCLIP) | safetensors | Used by IP-Adapter SDXL; standalone scoring |
+| CLIP ViT-bigG/14 (OpenCLIP) | safetensors | Required by SDXL second encoder |
+| YOLO11n / YOLO11s | safetensors (PT→ours) | Smallest/fastest detection; baseline coverage |
 
 ## Phase 2 — Extended Support (Months 5–8)
 
@@ -68,11 +70,20 @@ Highest-priority models; all target CUDA + Vulkan via `IBackend`.
 
 | Model | Notes |
 |---|---|
-| SigLIP | Better zero-shot than CLIP |
-| YOLOv8 / YOLOv11 | Detection + segmentation |
-| Florence-2 | Vision-language, captioning, grounding |
-| SAM 2 | Segment Anything (image + video) |
-| DINO v2 | Dense feature extraction |
+| SigLIP / **SigLIP 2** | Better zero-shot than CLIP; SigLIP 2 (2025) adds multilingual + improved alignment, drop-in replacement |
+| **EVA-CLIP** | LAION-trained CLIP variant, much stronger than OpenAI baseline; useful for retrieval / search |
+| YOLOv8 / YOLO11 / **YOLOv10** / **YOLOv12** | Detection + segmentation across the modern Ultralytics + community variants |
+| **RT-DETR / RT-DETRv2** | Baidu transformer-based detector; anchor-free, NMS-free; faster than YOLO at equal mAP |
+| **Grounding DINO 1.5 / Grounding DINO Pro** | Open-vocabulary detection ("detect a red mug") — text-prompted; pairs with SAM for open-vocab segmentation |
+| **YOLO-World v2** / **YOLOE** | Open-vocabulary YOLO variants; faster than Grounding DINO for fixed-class subsets |
+| **OWLv2** | Google open-vocabulary detector; text + image query support |
+| Florence-2 / **Florence-2.5** | Vision-language: captioning, grounding, OCR, dense prediction (unified output format) |
+| SAM 2 / **SAM 2.1** | Segment Anything (image + video); SAM 2.1 adds long-video memory bank |
+| **HQ-SAM / MobileSAM / FastSAM / EfficientSAM** | SAM variants: higher quality, mobile-grade, ~50× faster, real-time targeting |
+| **EVF-SAM** | Text-prompted SAM ("segment the dog") — open-vocabulary segmentation |
+| DINO v2 / **DINOv3** | Dense self-supervised features; DINOv3 (2025) is the current SOTA for unsupervised visual representations |
+| **Hiera** | Meta hierarchical ViT; backbone for SAM 2; useful standalone for dense prediction |
+| **AM-RADIO** | NVIDIA agglomerative model — distills CLIP + DINO + SAM into one backbone; one forward pass for retrieval + features + segmentation |
 
 ## Phase 3 — Full Coverage (Months 9+)
 
@@ -92,9 +103,46 @@ Highest-priority models; all target CUDA + Vulkan via `IBackend`.
 
 ### Video Generation
 - LTX-Video, Wan (2.1+), HunyuanVideo, CogVideoX
+- **Lance video** (`Lance_3B_Video`, ByteDance, Apache-2.0) — unified multimodal, Wan2.2 3D causal VAE. See [LANCE_ARCHITECTURE.md](../Research/LANCE_ARCHITECTURE.md).
+- **Cosmos-Predict1 Video2World** (NVIDIA, Open Model License) — AR transformer + discrete video tokenizer (Cosmos DV). Video continuation (not action-conditioned), but the AR + DV tokenizer infra is reused by Phase 10 world models. See [COSMOS_PREDICT1_VIDEO2WORLD_ARCHITECTURE.md](../Research/COSMOS_PREDICT1_VIDEO2WORLD_ARCHITECTURE.md).
+
+### Interactive / World Models (Phase 10)
+
+Action-conditioned, real-time, frame-by-frame video generators — distinct from offline video diffusion. Take typed input events (keyboard scancodes, mouse deltas, gamepad sticks, camera pose) and emit a streamed frame per step. New `SharpInference.Interactive` package. See [INTERACTIVE_INFERENCE.md](../Research/INTERACTIVE_INFERENCE.md) for the cross-cutting foundation.
+
+| Model | Org | License | Notes |
+|---|---|---|---|
+| **Matrix-Game 3.0** | Skywork | Apache-2.0 | 5B (+ 28B MoE variant), 720p @ 40 FPS, memory-augmented DiT finetuned from Wan2.2-TI2V-5B. Flagship; shares VAE with Lance video. See [MATRIX_GAME_3_ARCHITECTURE.md](../Research/MATRIX_GAME_3_ARCHITECTURE.md). |
+| **Matrix-Game 2.0** | Skywork | MIT | 1.8B, 540p @ 25 FPS, real-time on 12 GB GPUs. SkyReels-V2/Wan lineage. Entry-level world model. See [MATRIX_GAME_2_ARCHITECTURE.md](../Research/MATRIX_GAME_2_ARCHITECTURE.md). |
+| **Oasis-500m** | Decart + Etched | MIT | Tiny (~500M), autoregressive frame-by-frame Minecraft world model. Likely uses a discrete video tokenizer (VQ family). Pedagogical / CI smoke test. See [OASIS_ARCHITECTURE.md](../Research/OASIS_ARCHITECTURE.md). |
+| **Hunyuan-GameCraft 1.0** | Tencent | Tencent Hunyuan Community **(RESTRICTED)** | 13B, 704×1216 @ 33 frames, keyboard + camera-pose actions, hybrid history conditioning. **License forbidden in EU/UK/SK + 100M MAU cap.** Optional — gated on user license acceptance; SharpInference does not bundle weights. See [HUNYUAN_GAMECRAFT_ARCHITECTURE.md](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md). |
+
+**Considered + deferred** (not in v1 of Phase 10):
+- **DIAMOND** (Alonso et al., MIT) — small (~381M) research-grade Atari / CS:GO world models. Useful as a reference for action-conditioning correctness but too narrow for shipping.
+- **WHAM / Microsoft Muse** (Microsoft Research License — non-commercial) — architecturally interesting (VQ-GAN tokens + decoder-only AR + controller actions) but fails our permissive-license bar.
+- **DreamerV3** — RL world-model training framework; no deployable inference checkpoints. Wrong shape for our engine.
+- **V-JEPA 2** (Meta) — open and large but representation-only (predicts in embedding space, not pixels). Wrong modality for "world model that outputs frames."
+- **Genie 3, GameNGen, VideoPoet, Sora, ByteDance Yan** — closed weights as of 2026-05; revisit if released.
+
+### Vision (Phase 3 extensions)
+
+| Category | Models |
+|---|---|
+| **Depth estimation** | Depth Anything v2, Depth Pro (Apple), Marigold (diffusion-based), MoGe, ZoeDepth, MiDaS (legacy) |
+| **Pose estimation** | RTMPose, YOLOv8/v11-Pose, ViTPose++, OpenPose (legacy compat) |
+| **Face detection / recognition** | RetinaFace, YOLOv8-Face, **InsightFace / ArcFace** (recognition + alignment), MediaPipe FaceMesh (468-pt landmarks) |
+| **OCR** | GOT-OCR 2.0, PaddleOCR v4, Florence-2 OCR-mode, olmOCR (document-level) |
+| **Object tracking / Re-ID** | ByteTrack, BoT-SORT, FairMOT — multi-object tracking with YOLO detector backbone |
+| **Image captioning** | BLIP-2, BLIP-3, CogVLM2, GIT |
+| **Dense prediction backbones** | Vision Mamba / VMamba (state-space), ConvNeXt v2 |
+| **Image super-resolution** | Real-ESRGAN, ESRGAN, SwinIR — also serve as diffusion upscalers |
 
 ### Multimodal / LLM+Vision
-- LLaVA-style (via dotLLM), Qwen2.5-VL, Pixtral
+- LLaVA-style (via dotLLM), Qwen2.5-VL, **Qwen3-VL** (2026), Pixtral
+- **InternVL 2.5 / 3** — open weights, competitive with GPT-4V on benchmarks
+- **PaliGemma 2** — Google, 2B/9B/28B sizes, vision-language transfer
+- **Molmo** (Allen AI) — competitive open VLM
+- **NVIDIA Eagle 2** — multi-vision-encoder fusion (CLIP + SigLIP + DINOv2 + SAM)
 
 ### Other
 - Any model expressible with SharpInference's op set

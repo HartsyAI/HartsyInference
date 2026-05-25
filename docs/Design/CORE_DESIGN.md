@@ -1,6 +1,6 @@
 # SharpInference — Core Design Overview
 
-SharpInference is a **native C#/.NET 10 AI inference engine** for non-LLM modalities — image generation, speech-to-text, text-to-speech, vision, object detection, and video. It works alongside **dotLLM** ([kkokosa/dotLLM](https://github.com/kkokosa/dotLLM)) as a complete AI platform with zero Python dependencies, zero C++ wrappers, and no external processes.
+SharpInference is a **native C#/.NET 10 AI inference engine** for non-LLM modalities — image generation, speech-to-text, text-to-speech, vision, object detection, video, and **interactive world models** (action-conditioned, real-time, frame-by-frame video generation for games / sims / agents). It works alongside **dotLLM** ([kkokosa/dotLLM](https://github.com/kkokosa/dotLLM)) as a complete AI platform with zero Python dependencies, zero C++ wrappers, and no external processes.
 
 ## Why SharpInference?
 
@@ -25,11 +25,13 @@ dotLLM proved pure C# with PTX achieves ~98-100% native CUDA performance for LLM
 +--------------------------------------------------------------+
 |                     SharpInference.Server                     |
 |            (OpenAI-compatible REST API + SSE)                 |
-+------------+--------------+----------------------------------+
-|  Diffusion |    Audio     |           Vision                 |
-|  SD/SDXL   |  Whisper STT |  CLIP Embeddings                 |
-|  Flux/SD3  |  Kokoro TTS  |  YOLO Detection                  |
-+------------+--------------+----------------------------------+
++------+----------+----------+--------+----------+-------------+
+| Diff | Audio    | Vision   | Video  | Inter-   |             |
+| SD/  | Whisper  | CLIP     | LTX /  | active   |             |
+| Flux | Kokoro   | YOLO     | Wan /  | Matrix-  | World       |
+| SD3  | F5/Bark  | SAM      | Lance  | Game /   | models      |
+|      |          |          | Cosmos | Oasis    | (Phase 10)  |
++------+----------+----------+--------+----------+-------------+
 |                  SharpInference.Core                          |
 |    Tensor + TensorRef . IBackend . Schedulers . Pipelines    |
 +--------------+---------------------+------------------------+

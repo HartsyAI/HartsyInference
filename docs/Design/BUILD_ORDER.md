@@ -13,7 +13,8 @@ Phase 5: Audio (Whisper → TTS)
 Phase 6: Vision (CLIP → detection)
 Phase 7: Server (OpenAI-compatible API)
 Phase 8: SwarmUI extension
-Phase 9: Video (stub → LTX-Video)
+Phase 9: Video (LTX-Video → Wan → Lance → Cosmos-Predict V2W) + shared interactive infra
+Phase 10: Interactive / World Models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft)
 ```
 
 ## Phase 1 — Foundation (Core + ModelHandler + Cpu)
@@ -147,9 +148,31 @@ Phase 9: Video (stub → LTX-Video)
 ## Phase 8 — SwarmUI Extension
 **Goal:** Register as in-process SwarmUI backend.
 
-## Phase 9 — Video (Future)
+## Phase 9 — Video + Interactive Infra (Future)
 
 | Deliverable | Package | Description |
 |---|---|---|
 | Temporal attention, video VAE | Video | Cross-frame consistency |
-| LTX-Video / Wan pipelines | Video | First video models |
+| `IBackend.Conv3D` + `CausalConv3d` streaming wrapper | Cpu / Cuda / Vulkan | 3D conv kernel family; per-conv frame cache for chunked decode (shared with Lance, Wan, LTX, Matrix-Game) |
+| `IBackend.PackedAttention` (variable-length) | Cpu / Cuda / Vulkan | Packed attention with cu_seqlens (shared with Lance + AR video models) |
+| LTX-Video / Wan / Lance video / Cosmos-Predict V2W pipelines | Video | First video models. Cosmos-Predict V2W's discrete video tokenizer + AR transformer is the reusable infra for Phase 10 world models. |
+| `IActionEncoder` + action embedding plumbing | Diffusion (shared) | Generic action-conditioning abstraction landing in Phase 9 for reuse by Phase 10 world models |
+| `DenoiseKvCache` utility | Diffusion (shared) | First-pass KV-cache for the (text + clean cond) prefix across denoise steps; used by Lance video and reusable in Phase 10 |
+| Distilled few-step schedulers (DMD, CM) | Diffusion (shared) | 3-8 step samplers required by Matrix-Game 2/3 and GameCraft distilled — land in Phase 9 to keep schedulers in one place |
+| Discrete video tokenizer (Cosmos DV / VQ-GAN) | Video (shared) | Cosmos DV first; VQ-GAN follows for Oasis. Shared `IDiscreteVideoTokenizer` interface |
+| Streaming VAE decode helper | Video (shared) | Per-frame / per-chunk VAE decode on a separate compute stream — enables 25-40 FPS interactive output in Phase 10 |
+
+## Phase 10 — Interactive / World Models (Future)
+
+| Deliverable | Package | Description |
+|---|---|---|
+| `SharpInference.Interactive` (new package) | Interactive | New package for action-conditioned, real-time, frame-by-frame world models. Depends on Video + Diffusion + ModelHandler. |
+| `IInteractiveSession` streaming loop | Interactive | Real-time event pump: (read action → encode → step → decode → present) at 25-40 FPS |
+| Action vocabs: keyboard, mouse, gamepad, camera-pose | Interactive | Per-model `IActionEncoder` implementations; reuse the Phase 9 abstraction |
+| Matrix-Game 2.0 pipeline (Skywork, MIT, 1.8B) | Interactive | First interactive world model. 540p @ 25 FPS, SkyReels-V2/Wan lineage. Apache/MIT-style permissive. |
+| Matrix-Game 3.0 pipeline (Skywork, Apache-2.0, 5B + MoE 28B) | Interactive | Flagship. 720p @ 40 FPS, memory-augmented DiT finetuned from Wan2.2-TI2V-5B (shares VAE with Lance video path). |
+| Oasis-500m pipeline (Decart+Etched, MIT, ~500M) | Interactive | Tiny Minecraft world model. Pedagogical / CI smoke-test target. Likely uses a discrete video tokenizer (VQ family). |
+| Hunyuan-GameCraft pipeline (Tencent, **restricted license**) | Interactive | Optional / gated on license acceptance — Tencent Hunyuan Community License excludes EU/UK/SK + 100M MAU cap. SharpInference does NOT bundle weights; user opts in. |
+| Memory-augmented DiT cross-attention | Interactive | Matrix-Game 3.0 specific (extra cross-attn stream over stored past-frame latents); designed for reuse if future models add similar memory paths |
+| History-mask channel | Interactive | Binary mask channel (1=history, 0=predict) injected into latent input — GameCraft style |
+| Deferred-foundation backlog | Interactive (docs) | Explicit list of foundational pieces (AR KV-cache over interleaved video/action tokens, long-context spacetime RoPE, license-acceptance plumbing) deferred until a model that needs them is selected |

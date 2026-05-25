@@ -132,10 +132,19 @@ public sealed class AnimaGenerationTests
                     Seed = 42,
                 };
 
+                // T5 token IDs (the LlmAdapter main stream lookup keys) are produced by encode_anima_prompt.py
+                // alongside the Qwen3 embeddings. We load the raw int64 binaries.
+                string testEmbedsDir = Path.GetDirectoryName(TestPaths.Anima.PromptEmbeds)!;
+                int[] t5Ids = LoadInt64TensorAsInt32(Path.Combine(testEmbedsDir, "prompt_t5_ids.bin"));
+                int[]? negT5Ids = (cfgScale > 1.0f)
+                    ? LoadInt64TensorAsInt32(Path.Combine(testEmbedsDir, "neg_prompt_t5_ids.bin"))
+                    : null;
+                _output.WriteLine($"  T5 token IDs: pos len={t5Ids.Length}, neg len={negT5Ids?.Length ?? 0}");
+
                 _output.WriteLine($"\n[5/5] Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed=42...");
                 Stopwatch genSw = Stopwatch.StartNew();
                 (byte[] rgb, int outW, int outH, int seed) = pipeline.GenerateFromEmbeddings(
-                    promptEmbeds, request, cfgScale, negPromptEmbeds,
+                    promptEmbeds, t5Ids, request, cfgScale, negPromptEmbeds, negT5Ids,
                     progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
                 negPromptEmbeds?.Dispose();
                 genSw.Stop();
@@ -159,6 +168,22 @@ public sealed class AnimaGenerationTests
         {
             _output.WriteLine($"SKIPPED: pipeline body has unfinished sections — {nie.Message}");
         }
+    }
+
+    private static unsafe int[] LoadInt64TensorAsInt32(string path)
+    {
+        if (!File.Exists(path))
+            throw new FileNotFoundException(
+                $"T5 token IDs file not found at {path}. Re-run encode_anima_prompt.py to produce it alongside prompt.bin.", path);
+        byte[] raw = File.ReadAllBytes(path);
+        long count = raw.LongLength / sizeof(long);
+        int[] result = new int[count];
+        fixed (byte* src = raw)
+        {
+            long* lp = (long*)src;
+            for (long i = 0; i < count; i++) result[i] = checked((int)lp[i]);
+        }
+        return result;
     }
 
     private static unsafe Tensor LoadF32Tensor(string path, int embedDim)

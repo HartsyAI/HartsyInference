@@ -87,6 +87,12 @@ public sealed class WhisperPipelineSurfaceTests
         public void ScaledDotProductAttention(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor q, SharpInference.Core.Tensors.Tensor k, SharpInference.Core.Tensors.Tensor v, SharpInference.Core.Tensors.Tensor? m, float s) => throw new NotImplementedException();
         public void Gelu(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
         public void Silu(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
+        public void Sigmoid(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
+        public void Tanh(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
+        public void Elu(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, float a) => throw new NotImplementedException();
+        public void Snake(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, SharpInference.Core.Tensors.Tensor a, SharpInference.Core.Tensors.Tensor? b) => throw new NotImplementedException();
+        public void Conv1d(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, SharpInference.Core.Tensors.Tensor w, SharpInference.Core.Tensors.Tensor? b, int s, int pl, int pr, int d, int g) => throw new NotImplementedException();
+        public void ConvTranspose1d(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, SharpInference.Core.Tensors.Tensor w, SharpInference.Core.Tensors.Tensor? b, int s, int pl, int pr, int d) => throw new NotImplementedException();
         public void Add(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor a, SharpInference.Core.Tensors.Tensor b) => throw new NotImplementedException();
         public void Mul(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor a, SharpInference.Core.Tensors.Tensor b) => throw new NotImplementedException();
         public void Scale(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, float s) => throw new NotImplementedException();

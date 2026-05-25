@@ -22,8 +22,9 @@ import json
 import torch
 from diffusers.models.transformers.transformer_chroma import ChromaTransformer2DModel
 
-CKPT_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/Chroma/chroma_v1.safetensors"
-OUT_DIR = "tests/python-reference/chroma_reference_tensors/full_forward"
+CKPT_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/Chroma/Chroma1-HD-fp8mixed-final.safetensors"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+OUT_DIR = os.path.join(REPO_ROOT, "tests/python-reference/chroma_reference_tensors/full_forward")
 
 os.makedirs(f"{OUT_DIR}/inputs", exist_ok=True)
 os.makedirs(f"{OUT_DIR}/layers", exist_ok=True)
@@ -47,24 +48,72 @@ if not os.path.exists(CKPT_PATH):
     raise FileNotFoundError(f"Chroma checkpoint not found: {CKPT_PATH}")
 
 print(f"Loading Chroma single-file from {CKPT_PATH}...")
-xfm = ChromaTransformer2DModel.from_single_file(CKPT_PATH, torch_dtype=torch.float32).eval()
+# Memory-saving path: Chroma is 8.9B params; F32 alone is ~36GB which OOMs a 31GB machine. We
+# construct on meta device, write params into BF16 storage one at a time, then sync any non-param
+# state (RoPE bases, normalization stats) by initializing those buffers on CPU explicitly. This
+# uses ~18GB peak.
+import gc
+from accelerate import init_empty_weights
+from accelerate.utils import set_module_tensor_to_device
+from diffusers.loaders.single_file_utils import convert_chroma_transformer_checkpoint_to_diffusers
+from safetensors.torch import load_file as load_safetensors
+
+with init_empty_weights():
+    xfm = ChromaTransformer2DModel()
+
+print(f"Loading + converting weights (BF16 streamed via set_module_tensor_to_device)...")
+raw_state = load_safetensors(CKPT_PATH)
+converted = convert_chroma_transformer_checkpoint_to_diffusers(raw_state)
+del raw_state
+gc.collect()
+
+# Place each tensor onto CPU/BF16 storage via accelerate — this skips the F32 intermediate that
+# `.to()` + `load_state_dict(assign=True)` produces internally, AND it correctly initializes any
+# non-persistent buffers (RoPE freqs, etc.) by NOT touching them (they stay on meta until forward,
+# which lazy-initializes them on the right device).
+loaded_keys = set()
+for k, v in converted.items():
+    set_module_tensor_to_device(xfm, k, device='cpu', dtype=torch.bfloat16, value=v)
+    loaded_keys.add(k)
+del converted
+gc.collect()
+
+# Materialize any remaining meta-device parameters (none expected for a clean state_dict, but the
+# init_empty path can leave non-persistent buffers on meta).
+remaining_meta = [(n, p) for n, p in xfm.named_parameters() if p.device.type == "meta"]
+remaining_meta += [(n, b) for n, b in xfm.named_buffers() if b.device.type == "meta"]
+if remaining_meta:
+    print(f"  WARNING: {len(remaining_meta)} tensors still on meta after load:")
+    for n, _ in remaining_meta[:5]:
+        print(f"    {n}")
+
+xfm.eval()
+print(f"  Model ready in BF16 (~18GB).")
 
 # ── Synthetic inputs ──
+# Memory-saving: 32×32 latent (= 256 image tokens after 2×2 patchify) instead of 64×64.
+# Both sides run at this reduced size; the math is identical to full resolution.
 torch.manual_seed(42)
-B, C, H, W = 1, 16, 64, 64
-SEQ_T = 256
+B, C, H, W = 1, 16, 32, 32
+SEQ_T = 64
 JOINT_DIM = 4096
 
 latent = torch.randn(B, C, H, W, dtype=torch.float32)
 context_pre = torch.randn(B, SEQ_T, JOINT_DIM, dtype=torch.float32)
 timestep = torch.tensor([0.5], dtype=torch.float32)
-text_lens = torch.tensor([SEQ_T - 8], dtype=torch.long)
-attention_mask = (torch.arange(SEQ_T)[None, :] <= text_lens[:, None]).long()
+text_lens = torch.tensor([SEQ_T - 4], dtype=torch.long)  # 4 padded slots at the end
+attention_mask = (torch.arange(SEQ_T)[None, :] < text_lens[:, None]).long()
 
 save(latent, f"{OUT_DIR}/inputs/latent.bin")
 save(context_pre, f"{OUT_DIR}/inputs/context_pre.bin")
 save(timestep, f"{OUT_DIR}/inputs/timestep.bin")
-save(attention_mask, f"{OUT_DIR}/inputs/attention_mask.bin")
+attention_mask.to(torch.int64).detach().cpu().contiguous().numpy().tofile(f"{OUT_DIR}/inputs/attention_mask.bin")
+
+# Extend the prompt attention mask to cover image tokens (diffusers `_prepare_attention_mask`).
+# The transformer sees a joint [text|image] sequence; image tokens are always unmasked.
+img_seq_len = (H // 2) * (W // 2)
+joint_attention_mask = torch.cat([attention_mask,
+                                  torch.ones(B, img_seq_len, dtype=torch.long)], dim=1)
 
 # ── Hooks ──
 layer_data = {}
@@ -100,15 +149,15 @@ img_ids[:, :, 1] = torch.arange(H//2).repeat_interleave(W//2)[None, :]
 img_ids[:, :, 2] = torch.arange(W//2).tile(H//2)[None, :]
 txt_ids = torch.zeros(B, SEQ_T, 3, dtype=torch.float32)
 
-print("Running forward ...")
+print("Running forward (BF16) ...")
 with torch.no_grad():
     out = xfm(
-        hidden_states=packed_latent,
-        encoder_hidden_states=context_pre,
-        timestep=timestep,
-        img_ids=img_ids,
-        txt_ids=txt_ids,
-        attention_mask=attention_mask,
+        hidden_states=packed_latent.to(torch.bfloat16),
+        encoder_hidden_states=context_pre.to(torch.bfloat16),
+        timestep=timestep.to(torch.bfloat16),
+        img_ids=img_ids.squeeze(0),                              # 2D per diffusers expectation
+        txt_ids=txt_ids.squeeze(0),                              # 2D per diffusers expectation
+        attention_mask=joint_attention_mask.to(torch.bfloat16),  # Joint [text|image] mask, SDPA wants float
     ).sample
 
 save(out, f"{OUT_DIR}/output_velocity.bin")

@@ -40,6 +40,17 @@ public sealed record VocosConfig
     /// <summary>Output audio sample rate.</summary>
     public int SampleRate { get; init; } = 24_000;
 
+    /// <summary>Linear gain applied to the iSTFT output. 44.53 for the charactr / lucasnewman
+    /// 24 kHz checkpoints. Empirical: the published Vocos checkpoints predict log-magnitudes
+    /// that are ~log(44.53) ≈ 3.8 lower than the true STFT log-magnitude of a reconstructed
+    /// signal. Likely a subtle mel-extractor scale mismatch between training (torchaudio
+    /// MelSpectrogram with power=1, slaney norm) and our reproduction. STFT→iSTFT round-trip
+    /// validates as exact (ratio 1.0000) so the iSTFT itself is correct.
+    ///
+    /// <para>Set to 1.0 to disable. Override per-checkpoint as future Vocos forks may have
+    /// different mel calibration.</para></summary>
+    public float OutputGain { get; init; } = 44.53f;
+
     /// <summary>Standard preset: <c>charactr/vocos-mel-24khz</c>. 24 kHz mono, 100 mel input,
     /// 512 hidden, 8 ConvNeXt blocks, n_fft=1024, hop=256.</summary>
     public static VocosConfig Mel24k => new();

@@ -32,6 +32,7 @@
 
 - [x] SDXL_ARCHITECTURE, FLUX_ARCHITECTURE, LORA_FORMAT, T5_ARCHITECTURE
 - [x] QUANTIZATION_DIFFUSION — comprehensive (FP8, GGUF Q8_0/Q4_K, mixed-precision strategy, quality presets)
+- [x] [LANCE_ARCHITECTURE](../Research/LANCE_ARCHITECTURE.md) — ByteDance unified multimodal (MoT dual-stream + MaPE + Wan2.2 3D causal VAE + 3-way CFG flow-match). Covers both the Phase 4 image variant (`Lance_3B`) and the Phase 9 video variant (`Lance_3B_Video`); the two share a backbone, so the image pipeline lands first to amortize the net-new infra.
 
 ## 2. Planning
 
@@ -379,6 +380,65 @@ Distinguishing features vs Flux:
 #### Weights (12 GB target)
 - BFL-style FP16 (~20 GB transformer + 9.5 GB T5 + 0.08 GB VAE = ~29.5 GB) — won't fit at FP16, FP8 cast at load (~10 GB transformer + 4.7 GB T5 + 0.08 GB VAE = ~14.8 GB) tight; **eviction discipline** (T5 freed after encode, transformer freed before VAE) brings peak below 12 GB.
 - F-Lite-7B at FP8 — ~7 GB transformer; comfortable on 12 GB.
+
+### Lance (ByteDance Research, unified multimodal) — NOT STARTED
+
+> Apache 2.0. Unified 3B-active-parameter model covering T2I (this section) plus T2V / edit / understanding (Phase 9 video section).
+> Source of truth: [github.com/bytedance/Lance](https://github.com/bytedance/Lance), [arXiv:2605.18678](https://arxiv.org/abs/2605.18678), [HF `bytedance-research/Lance`](https://huggingface.co/bytedance-research/Lance).
+> **Architecture research: [`docs/Research/LANCE_ARCHITECTURE.md`](../Research/LANCE_ARCHITECTURE.md).**
+
+**Why this model belongs in Phase 4 (and not just Phase 9):** the image-only `Lance_3B` variant ships separately from the unified `Lance_3B_Video` variant. The transformer backbone, tokenizer, ViT, VAE, and pipeline are identical between the two — only `model.safetensors` differs. Building the image pipeline first amortizes all of the net-new infra (MoT routing, packed/varlen attention, 3D causal VAE at T=1, 3-way CFG) before video frame-streaming is layered on in Phase 9.
+
+#### Architecture sketch (see research doc for exact numbers)
+
+- **Backbone:** modified Qwen2.5-VL 3B (36 layers / hidden 2048 / 16 heads / 2 KV heads / FFN 11008 / RMSNorm 1e-6 / SwiGLU / M-RoPE θ=1e6, mrope_section [16,24,24]).
+- **MoT (novel):** every decoder layer stores two parallel parameter sets — standard `q_proj`/`k_proj`/`v_proj`/`o_proj`/`mlp.*`/`input_layernorm`/`post_attention_layernorm` for *understanding* tokens, and `*_moe_gen`-suffixed siblings for *generation* tokens. One joint attention call mixes both routes.
+- **MaPE (novel):** per-modality integer offset on M-RoPE's temporal axis only, so {text, ViT-semantic, clean-VAE, noisy-VAE} tokens don't collide in shared position space.
+- **Vision encoder:** frozen Qwen2.5-VL ViT (32 layers / 1280 dim / patch 14 / temporal patch 2 / window 112 + full-attn at [7,15,23,31] / 2×2 spatial merge / output dim 2048).
+- **VAE:** frozen Wan2.2 3D causal VAE (`z_channels=48, downsample_spatial=16, downsample_temporal=4, dim=160, dim_mult=[1,2,4,4], num_res_blocks=2`, RMSNorm, `CausalConv3d` with `CACHE_T=2`). For image inference T=1 so CausalConv3d collapses to Conv2d-equivalent; the full 3D path is needed for Phase 9.
+- **Patchify:** VAE latent `(B, 48, T, H, W)` → patch `(1, 2, 2)` → feature dim 192 → `Linear(192 → 2048)`. `Linear(2048 → 192)` unpatchify on the way out.
+- **Sampling:** rectified-flow velocity prediction with logit-normal timestep shift = **3.5** (image) / 4.0 (video), explicit Euler over 30 steps, **3-way CFG** (text + vision conditional, default `cfg_text_scale = 4.0`).
+- **Tokenizer:** Qwen2 BPE, vocab 151,936 (reuses existing `Qwen3Tokenizer` infra).
+
+#### Net-new backend / kernel work — required before Lance can build
+
+These items are **shared with future Wan / LTX / Hunyuan-Video pipelines** and should be designed as reusable infra, not Lance-only one-offs. They block Phase 4 *and* Phase 9.
+
+- [ ] **Packed / variable-length attention (`IBackend.PackedAttention`)** — Lance's `PackedAttentionMoT` runs one `flash_attn_varlen_func` call over a packed `[token_0, …]` buffer with per-sample lengths and a custom block mask (text=causal, visual=bidirectional within block, cross-block=3D causal, `BLOCK_SIZE=128`). First pass: padded dense + bool mask (correct but slow on long sequences). Follow-up: real varlen FlashAttention-style CUDA kernel. PTX work lives in `native/cuda/attention/`.
+- [ ] **3D Convolution (`IBackend.Conv3D`)** — `Wan22VaeDecoder` uses `CausalConv3d` throughout. First pass: 3D im2col + GEMM (CPU + CUDA + Vulkan). Follow-up: streaming-decode helper that maintains a per-conv 2-frame cache so `LanceVideoPipeline` can decode chunks without OOM. Note: with `T=1` the image pipeline can use the existing Conv2D paths as a degenerate case until the real Conv3D lands.
+- [ ] **MoT routing primitive** — per-layer dispatch of dual `q_proj` / `k_proj` / `v_proj` / `o_proj` / `mlp.*` / norms based on per-token modality role. Plan: `Models/Denoisers/DiTBlocks/LanceMoTBlock.cs` does re-batched dispatch (split packed sequence into und/gen sub-batches, run path-specific Linears, scatter back, run one joint attention). Branchless dual-matmul deferred — wastes ~2× compute on every linear.
+- [ ] **Diffusion KV-cache utility (`SharpInference.Diffusion/Utilities/DenoiseKvCache.cs`)** — first inference-time KV-cache use case in the project. Caches K/V for the (text + ViT + clean-VAE) prefix on step 0; on steps 1..N only the noisy slot's Q/K/V is recomputed and joined against the cached K/V. Matches Lance's `validation_gen_KVcache` ~2-3× speedup. Will be reused by Wan / LTX / Hunyuan-Video.
+- [ ] **3D sin-cos position embedding helper** in `DiTUtils` (`PositionEmbedding3D`) — CPU-side precompute, upload once. No new kernel.
+
+#### Phase 4 deliverables — image pipeline (`Lance_3B`)
+
+Files (planned, none built):
+
+- [ ] `src/SharpInference.Diffusion/Models/Denoisers/LanceConfig.cs` — backbone config (36L/2048d/16h/2KV/11008FFN/RMS 1e-6/M-RoPE θ=1e6 [16,24,24]) + Lance-specific knobs (`MaPE` Δ_m offsets, MoT enable, `latent_patch_size=(1,2,2)`, `max_latent_size=32`, `connector_act="gelu_pytorch_tanh"`, `vae_z_channels=48`, `timestep_shift=3.5`).
+- [ ] `src/SharpInference.Diffusion/Models/Denoisers/LanceTransformer.cs` — top-level. Owns `language_model`, ViT injection, VAE in/out Linears (`Linear(192↔2048)`), `TimestepEmbedder` (256-dim sinusoidal → MLP → 2048), `PositionEmbedding3D`, MoT block stack.
+- [ ] `src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/LanceMoTBlock.cs` — dual `q/k/v/o_proj` + `q/k/v/o_proj_moe_gen`, dual `mlp.*` + `mlp_moe_gen.*`, dual `input_layernorm` + `_moe_gen` siblings. Re-batched dispatch by modality role + one joint `IBackend.PackedAttention`.
+- [ ] `src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/LanceMRopeMaPE.cs` — multi-axis M-RoPE precompute + MaPE per-role temporal Δ_m offset. **Exact Δ_m values must be read from `modeling/lance/qwen2_navit.py:get_rope_index` once the repo is cloned** (open question § 2 in research doc).
+- [ ] `src/SharpInference.Diffusion/Models/TextEncoders/Qwen25VlVit.cs` — frozen ViT (forward-only). Windowed attention with full-attn at indices [7, 15, 23, 31]. Reuse RMSNorm / SwiGLU / SDPA primitives. Connector `MLPconnector(1280→2048, act="gelu_pytorch_tanh")`.
+- [ ] `src/SharpInference.Diffusion/Models/Vae/Wan22VaeConfig.cs` + `Wan22VaeDecoder.cs` — first 3D causal VAE in the codebase. Embeds the 48-vector `mean` / `std` constants from the research doc. T=1 fast path (uses Conv2D under the hood) for image inference.
+- [ ] `src/SharpInference.Diffusion/Pipelines/LanceImagePipeline.cs` — Qwen2 tokenize → chat template → MoT-aware sequence pack with `<|vision_start|>…<|vision_end|>` slot for noisy VAE latents → 3-way CFG dual/triple-pass flow-match Euler (30 steps, shift 3.5) → `FreeWeights(transformer + vit)` before VAE decode → Wan2.2 VAE decode at T=1 → RGB.
+- [ ] `src/SharpInference.Diffusion/Models/Denoisers/LanceDebugDump.cs` — env var `LANCE_DEBUG_DIR`, mirrors `Sd3DebugDump`. Dumps after `vae_in`, every `LanceMoTBlock` (und + gen path activations separately), final `vae_out`.
+- [ ] `src/SharpInference.ModelHandler/CheckpointConverters/LanceCheckpointConverter.cs` — loads `model.safetensors`, splits into `language_model.*` / `vit.*` / `connector.*` / `vae_in.*` / `vae_out.*` / `time_embedder.*` / `pos_embed_3d.*` / `task_embed` / `modality_embed` buckets. Demuxes `*_moe_gen` siblings into per-stream dicts. Wan2.2 `.pth` conversion is a separate one-off Python helper (the existing safetensors loader can't read `.pth`).
+- [ ] `tests/SharpInference.Diffusion.Tests/LanceImageGenerationTests.cs` — env-var-gated, VRAM probe ≥ 8 GB free for FP8 / ≥ 16 GB for FP16. Skips cleanly when `LANCE_3B_PATH`, `LANCE_VIT_PATH`, `LANCE_VAE_PATH`, or the PTX dir is missing.
+- [ ] `tests/python-reference/dump_lance_full_forward.py` + `diff_lance_layers.py` + `LanceDiffTests.cs` — layer-by-layer F32 diff harness, same pattern as `Sd35DiffTests` / `ZImageDiffTests`. **Expect 1-3 iterations of pipeline-level bugs on first run** (MoT routing order, MaPE Δ_m off-by-one, ViT layer-index convention, chat-template special-token placement).
+
+#### Weights (12 GB target)
+
+- `Lance_3B/model.safetensors` BF16 (24.7 GB) — won't fit at FP16, **FP8 cast at load** (~12.4 GB) tight; needs eviction discipline (ViT after vision encode, transformer before VAE).
+- `Qwen2.5-VL-ViT/vit.safetensors` BF16 (1.34 GB) — comfortable at FP16 (~0.7 GB).
+- `Wan2.2_VAE.pth` FP32 (2.82 GB) — cast to FP16 at load (~1.4 GB) for inference.
+- GGUF Q4_K dump: **not yet available** (model just released). When it lands (~3 GB transformer), the 12 GB GPU path becomes trivial.
+
+#### Open questions / blockers (full list in research doc § Open Questions)
+
+- Exact tensor key names in `model.safetensors` — Xet-backed, too large to inline-inspect via the HF web viewer. First step on download: dump keys with `safetensors_metadata --print-keys` and reconcile against the prefix tree in the research doc.
+- MaPE Δ_m integer offsets — implemented inside `get_rope_index()` in `modeling/lance/qwen2_navit.py`. Read once cloned.
+- `llm_qk_norm` default in released checkpoints — confirm via presence of `q_norm` / `k_norm` weights in the key dump.
+- `cfg_vision_scale` default for edit tasks — not in `inference_lance.sh`; read `config/examples/*.json` per task.
 
 ### Qwen-Image (MMDiT) — SCAFFOLD COMPLETE
 

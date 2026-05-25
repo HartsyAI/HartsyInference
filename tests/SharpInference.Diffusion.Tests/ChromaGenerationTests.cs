@@ -150,10 +150,12 @@ public class ChromaGenerationTests
                 // exceeds 12GB. The pipeline frees the transformer + T5 before VAE decode (PHASE_3 #18 / #33),
                 // and T5 auto-uploads on first use; preloading just the transformer at start is the right
                 // staging for a 12 GB card.
-                _output.WriteLine($"[7/7] Initializing CUDA backend + preloading transformer weights...");
+                _output.WriteLine($"[7/7] Initializing CUDA backend (pipeline handles weight staging)...");
                 sw.Restart();
                 using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
-                backend.PreloadWeights(transformer.EnumerateWeights());
+                // NB: the pipeline itself does T5-preload → encode → free → transformer-preload →
+                // denoise → free → vae-preload → decode. Pre-uploading the transformer here would
+                // collide with the pipeline's T5 upload on a 12 GB card.
                 _output.WriteLine($"  Backend ready in {sw.ElapsedMilliseconds}ms (device: {backend.Capabilities.Name})");
 
                 using ChromaPipeline pipeline = new(backend, t5, transformer, vae, config);

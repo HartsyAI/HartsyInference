@@ -1,0 +1,158 @@
+{
+  "model": "Anima net.llm_adapter (canonical from tdrussell/diffusion-pipe)",
+  "prompt": "Anime girl with blue hair in a garden",
+  "t5_input_ids": [
+    3,
+    19209,
+    15,
+    3202,
+    28,
+    1692,
+    1268,
+    16,
+    3,
+    9,
+    2004,
+    1
+  ],
+  "qwen3_seq_len": 8,
+  "t5_seq_len": 12,
+  "hidden_size": 1024,
+  "num_blocks": 6,
+  "final_output_stats": {
+    "name": "final_output",
+    "shape": [
+      1,
+      12,
+      1024
+    ],
+    "dtype": "torch.float32",
+    "mean": -0.00350107136182487,
+    "std": 0.16444726288318634,
+    "min": -0.9263803958892822,
+    "max": 0.7739601731300354,
+    "abs_mean": 0.12410137802362442
+  },
+  "layers": [
+    {
+      "name": "x_post_embed",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.017552876845002174,
+      "std": 5.103720664978027,
+      "min": -31.0,
+      "max": 85.5,
+      "abs_mean": 3.961542844772339,
+      "file": "layers/x_post_embed.bin"
+    },
+    {
+      "name": "block_0",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.010965727269649506,
+      "std": 2.6743617057800293,
+      "min": -17.942710876464844,
+      "max": 62.203941345214844,
+      "abs_mean": 2.0266473293304443,
+      "file": "layers/block_0.bin"
+    },
+    {
+      "name": "block_1",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.023087671026587486,
+      "std": 2.036907434463501,
+      "min": -14.538249969482422,
+      "max": 48.10945129394531,
+      "abs_mean": 1.4977976083755493,
+      "file": "layers/block_1.bin"
+    },
+    {
+      "name": "block_2",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.04478280618786812,
+      "std": 1.677335500717163,
+      "min": -14.597274780273438,
+      "max": 36.841163635253906,
+      "abs_mean": 1.2004245519638062,
+      "file": "layers/block_2.bin"
+    },
+    {
+      "name": "block_3",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.02888502925634384,
+      "std": 1.5777106285095215,
+      "min": -14.913080215454102,
+      "max": 29.209197998046875,
+      "abs_mean": 1.0974794626235962,
+      "file": "layers/block_3.bin"
+    },
+    {
+      "name": "block_4",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.03598841652274132,
+      "std": 1.648544192314148,
+      "min": -13.103059768676758,
+      "max": 23.559772491455078,
+      "abs_mean": 1.177457571029663,
+      "file": "layers/block_4.bin"
+    },
+    {
+      "name": "block_5",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": 0.015919752418994904,
+      "std": 3.4040982723236084,
+      "min": -28.758136749267578,
+      "max": 26.67174530029297,
+      "abs_mean": 2.18422269821167,
+      "file": "layers/block_5.bin"
+    },
+    {
+      "name": "post_out_proj",
+      "shape": [
+        1,
+        12,
+        1024
+      ],
+      "dtype": "torch.float32",
+      "mean": -0.04351942613720894,
+      "std": 5.159958362579346,
+      "min": -250.66140747070312,
+      "max": 362.9912109375,
+      "abs_mean": 0.987252414226532,
+      "file": "layers/post_out_proj.bin"
+    }
+  ]
+}

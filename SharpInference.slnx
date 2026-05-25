@@ -22,6 +22,7 @@
     <Project Path="tests/SharpInference.Tokenizers.Tests/SharpInference.Tokenizers.Tests.csproj" />
     <Project Path="tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj" />
     <Project Path="tests/SharpInference.Audio.Tests/SharpInference.Audio.Tests.csproj" />
+    <Project Path="tests/SharpInference.Vision.Tests/SharpInference.Vision.Tests.csproj" />
     <Project Path="tests/SharpInference.Vulkan.Tests/SharpInference.Vulkan.Tests.csproj" />
   </Folder>
 

@@ -1125,6 +1125,44 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public void Sigmoid(Tensor output, Tensor input)
+    {
+        // Sigmoid / Tanh / Snake PTX kernels and Conv1d / ConvTranspose1d PTX kernels
+        // are not yet implemented. Audio models that use any of these (every codec in
+        // PHASE_5_AUDIO §4) currently must run those layers on CpuBackend; the rest of
+        // the pipeline (attention, matmul, cast) can stay on GPU. PTX work tracked under
+        // Phase 5 §3 "PTX kernels" in PHASE_5_AUDIO.md (conv_transpose1d.ptx +
+        // snake_activation.ptx are explicitly listed).
+        throw new NotSupportedException("CUDA Sigmoid not yet implemented — use CpuBackend for LSTM activations.");
+    }
+
+    public void Tanh(Tensor output, Tensor input)
+    {
+        throw new NotSupportedException("CUDA Tanh not yet implemented — use CpuBackend for LSTM activations.");
+    }
+
+    public void Elu(Tensor output, Tensor input, float alpha)
+    {
+        throw new NotSupportedException("CUDA Elu not yet implemented — use CpuBackend for SEANet codec models.");
+    }
+
+    public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta)
+    {
+        throw new NotSupportedException("CUDA Snake not yet implemented — use CpuBackend for snake-using vocoders.");
+    }
+
+    public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int stride, int padLeft, int padRight, int dilation, int groups)
+    {
+        throw new NotSupportedException("CUDA Conv1d not yet implemented — use CpuBackend for codec models.");
+    }
+
+    public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int stride, int padLeft, int padRight, int dilation)
+    {
+        throw new NotSupportedException("CUDA ConvTranspose1d not yet implemented — use CpuBackend for codec models.");
+    }
+
     public void Silu(Tensor output, Tensor input)
     {
         _context.EnsureCurrent();

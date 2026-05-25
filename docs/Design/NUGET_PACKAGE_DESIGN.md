@@ -30,7 +30,8 @@ Monolithic NuGet is wrong because:
 | **Diffusion** | SD1.5/SDXL/SD3/Flux pipelines, UNet, DiT, VAE, CLIP, schedulers, LoRA, ControlNet | Core, ModelHandler, Tokenizers |
 | **Audio** | Whisper STT, Kokoro/Parler TTS, voice conversion, STFT/mel, vocoder | Core, ModelHandler |
 | **Vision** | CLIP image encoder, embeddings, YOLO, SAM, face detection | Core, ModelHandler |
-| **Video** | LTX-Video, Wan, temporal attention, video VAE | Diffusion |
+| **Video** | LTX-Video, Wan, Lance video, Cosmos-Predict V2W. 3D causal VAE, temporal attention, packed/varlen attention, distilled schedulers, discrete video tokenizers (Cosmos DV / VQ-GAN). Hosts the shared infra that Interactive consumes. | Diffusion |
+| **Interactive** | Action-conditioned, real-time, frame-by-frame world models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft). `IInteractiveSession` streaming loop, `IActionEncoder` abstractions, memory-augmented cross-attn primitive. Strictly user-driven runtime — does not appear in offline pipelines. | Video |
 
 ### Application
 
@@ -61,6 +62,8 @@ Monolithic NuGet is wrong because:
        \_______|_______/
                |
           Video (future)
+               |
+        Interactive (Phase 10 — world models)
                |
           Server → SwarmUI
 ```
@@ -104,4 +107,11 @@ Monolithic NuGet is wrong because:
 <PackageReference Include="SharpInference.Cuda" />
 <PackageReference Include="SharpInference.Vulkan" />
 <PackageReference Include="SharpInference.ModelHandler" />
+```
+
+**Interactive world model (game-engine integration):**
+```xml
+<PackageReference Include="SharpInference.Interactive" />
+<PackageReference Include="SharpInference.Cuda" />
+<!-- Brings Video + Diffusion + ModelHandler transitively -->
 ```

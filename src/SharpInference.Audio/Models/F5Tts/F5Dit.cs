@@ -79,22 +79,13 @@ public sealed unsafe class F5Dit : IDisposable
         if (noisyMel.Shape.Rank != 3) throw new ArgumentException("noisyMel must be [B, mel_dim, T]");
         int t = (int)noisyMel.Shape[2];
 
-        bool dump = Environment.GetEnvironmentVariable("F5_DUMP") == "1";
-        if (dump) Console.Error.WriteLine("  step 1: time embed");
         Tensor timeEmb = _timeEmb.Forward(backend, timestep);
-
-        if (dump) Console.Error.WriteLine("  step 2: text embed");
         Tensor textHidden = _textEmb.Forward(backend, textIds, t, dropText);
-
-        if (dump) Console.Error.WriteLine("  step 3: input embed");
         Tensor x = _inputEmb.Forward(backend, noisyMel, condMel, textHidden, t, dropAudioCond);
         textHidden.Dispose();
 
-        // 4. 22 DiT blocks.
         for (int i = 0; i < _blocks.Length; i++)
         {
-            if (Environment.GetEnvironmentVariable("F5_DUMP") == "1")
-                Console.Error.WriteLine($"  block {i} start");
             Tensor next = _blocks[i].Forward(backend, x, timeEmb, t, _ropeCos!, _ropeSin!);
             x.Dispose();
             x = next;
@@ -212,7 +203,10 @@ internal sealed unsafe class F5TimestepEmbedding
         //    NOTE: x_transformers / lucidrains' SinusPositionEmbedding swaps the order to
         //    [sin, cos] (vs the diffusers/Stable Diffusion convention of [cos, sin]). The
         //    F5-TTS reference uses lucidrains' implementation.
-        Tensor sinEmb = new(new TensorShape(1, freqDim), DType.F32);
+        // Rank-3 [1, 1, freqDim] so ProjectLinear → BatchedMatMul reads a.Shape[2] safely.
+        // BatchedMatMul indexes a.Shape[0..2] unconditionally; a rank-2 tensor here used to
+        // surface as a hang (out-of-bounds shape index returned a huge garbage K).
+        Tensor sinEmb = new(new TensorShape(1, 1, freqDim), DType.F32);
         float* sp = (float*)sinEmb.DataPointer;
         int half = freqDim / 2;
         float factor = MathF.Log(10_000f) / (half - 1);

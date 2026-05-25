@@ -42,7 +42,6 @@ internal static class Program
         if (model.StartsWith("UsefulSensors/", StringComparison.OrdinalIgnoreCase))
             return await RunMoonshineAsync(wavPath, model);
 
-        if (model == "debug-f5") return await DebugF5.RunAsync();
 
 
 

@@ -63,14 +63,12 @@ public unsafe class ChromaDiffTests
         Directory.CreateDirectory(Path.Combine(csDumpDir, "layers"));
         Environment.SetEnvironmentVariable("CHROMA_DEBUG_DIR", csDumpDir);
 
-        // Synthetic inputs (must match dump_chroma_full_forward.py): latent [1, 16, 64, 64] (already packed
-        // by the Python script via `pack(latent)` to [1, 1024, 64]); context [1, 256, 4096];
-        // attention_mask [1, 256] (long); timestep [1] (sigma=0.5).
-        // The Python script saves `packed_latent` separately via `pack(latent)` only at construction —
-        // we reconstruct it here by loading and re-packing.
-        Tensor latentBchw = LoadF32Tensor(Path.Combine(inputsDir, "latent.bin"), 1, 16, 64, 64);
-        Tensor contextPre = LoadF32Tensor(Path.Combine(inputsDir, "context_pre.bin"), 1, 256, 4096);
-        Tensor attentionMask = LoadInt64AsF32Mask(Path.Combine(inputsDir, "attention_mask.bin"), 1, 256);
+        // Synthetic inputs (must match dump_chroma_full_forward.py): latent [1, 16, 32, 32] (memory-saving
+        // 256-token equivalent), context [1, 64, 4096], attention_mask [1, 64] (long), timestep [1] (sigma=0.5).
+        // The Python script packs the latent via 2×2 patchify; we reconstruct it here by loading and re-packing.
+        Tensor latentBchw = LoadF32Tensor(Path.Combine(inputsDir, "latent.bin"), 1, 16, 32, 32);
+        Tensor contextPre = LoadF32Tensor(Path.Combine(inputsDir, "context_pre.bin"), 1, 64, 4096);
+        Tensor attentionMask = LoadInt64AsF32Mask(Path.Combine(inputsDir, "attention_mask.bin"), 1, 64);
         float timestep = LoadF32Scalar(Path.Combine(inputsDir, "timestep.bin"));
         Tensor packedLatent = PackLatent2x2(latentBchw);
         latentBchw.Dispose();
@@ -103,7 +101,8 @@ public unsafe class ChromaDiffTests
             sw.Restart();
             _output.WriteLine($"\nRunning ChromaTransformer.Forward ({(useGpu ? "GPU" : "CPU")}) ...");
             // Chroma forward: (backend, packedLatent, encoderHidden, timestep, txtSeqLen, hPacked, wPacked, attentionMask)
-            Tensor velocity = transformer.Forward(backend, packedLatent, contextPre, timestep, 256, 32, 32, attentionMask);
+            // txtSeqLen=64 (Python SEQ_T), hPacked=wPacked=16 (= 32/2 after 2×2 patchify of [1,16,32,32]).
+            Tensor velocity = transformer.Forward(backend, packedLatent, contextPre, timestep, 64, 16, 16, attentionMask);
             sw.Stop();
             _output.WriteLine($"Forward done in {sw.ElapsedMilliseconds}ms.");
             _output.WriteLine($"Output velocity: shape={velocity.Shape}");
@@ -206,7 +205,11 @@ public unsafe class ChromaDiffTests
         foreach (KeyValuePair<string, Tensor> kvp in weights)
         {
             DType dt = kvp.Value.DType;
-            f32[kvp.Key] = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
+            // Chroma1-HD is fp8-mixed: most layers are F8E4M3, a few are BF16 (norms, embed). All must
+            // be cast to F32 for the CPU forward — otherwise the F32 backend reads 1-byte FP8 tensors
+            // as F32 and walks off the end of the buffer (AccessViolationException).
+            bool needsCast = dt == DType.F16 || dt == DType.BF16 || dt == DType.F8E4M3 || dt == DType.F8E5M2;
+            f32[kvp.Key] = needsCast ? kvp.Value.CastTo(DType.F32) : kvp.Value;
         }
         return f32;
     }

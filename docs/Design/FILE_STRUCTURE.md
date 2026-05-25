@@ -10,7 +10,7 @@ SharpInference/
 ├── CLAUDE.md / GEMINI.md / README.md / LICENSE / CONTRIBUTING.md
 ├── src/
 │   ├── SharpInference.Core / ModelHandler / Tokenizers / Cpu / Cuda / Vulkan
-│   ├── SharpInference.Diffusion / Audio / Vision / Video / Server
+│   ├── SharpInference.Diffusion / Audio / Vision / Video / Interactive / Server
 ├── tests/ / samples/ / benchmarks/ / docs/ / native/
 ```
 
@@ -169,13 +169,34 @@ SharpInference/
 
 ---
 
+## src/SharpInference.Interactive/  (Phase 10 — world models)
+
+| File | Description |
+|---|---|
+| `Sessions/IInteractiveSession.cs` | Bidirectional streaming session — `SubmitActionAsync` / `ReadFramesAsync` |
+| `Sessions/BackgroundComputeSession.cs` | Default impl — dedicated compute thread + CUDA stream, bounded action/frame channels with backpressure |
+| `Sessions/InteractiveSessionStats.cs` | p50/p99 step latency, dropped frames, queue depths |
+| `ActionEncoders/IActionEncoder.cs` | Multi-stream encoder interface (each model emits typed streams: PerBlockSelfAttn / PerBlockCrossAttn / PluckerMap / TimestepAddon) |
+| `ActionEncoders/KeyboardOneHotEncoder.cs` / `MouseDeltaEncoder.cs` | Reusable building blocks |
+| `ActionEncoders/MatrixGameUniversalActionEncoder.cs` / `Gta` / `TempleRun` / `MatrixGame3ActionEncoder.cs` | Per-model action encoders |
+| `ActionEncoders/MinecraftVptActionEncoder.cs` | Oasis 25-dim VPT action vector |
+| `ActionEncoders/GameCraftActionEncoder.cs` | GameCraft `(w/a/s/d, speed)` → 33-pose camera trajectory → 6-ch Plücker |
+| `Camera/SE3Math.cs` / `PluckerEmbedding.cs` | Shared SE(3) inverse, SLERP, integrate-actions-to-poses; Plücker ray-coord computation |
+| `Memory/FrameHistoryBuffer.cs` | Rolling buffer of `(latent, camera_pose, frame_index)` |
+| `Memory/FrustumOverlapSelector.cs` / `MatrixGame3MemoryRetrieval.cs` | Camera-FOV memory selection (Matrix-Game 3.0 specific) |
+| `Models/Denoisers/DiTBlocks/MatrixGame2ActionModule.cs` / `MatrixGame3ActionModule.cs` | Per-block dual-stream (mouse=self-attn, keyboard=cross-attn) modules |
+| `Models/Denoisers/DiTBlocks/GameCraftCameraNet.cs` | GameCraft action-to-token CameraNet (PixelUnshuffle + Convs + PatchEmbed) |
+| `Pipelines/MatrixGame2Pipeline.cs` / `MatrixGame3StandardPipeline.cs` / `MatrixGame3InteractivePipeline.cs` | Skywork Matrix-Game pipelines |
+| `Pipelines/OasisPipeline.cs` | Decart/Etched Oasis-500m AR frame-by-frame Minecraft world model |
+| `Pipelines/HunyuanGameCraftPipeline.cs` | Tencent GameCraft pipeline — license-acceptance-gated at construction |
+
 ## src/SharpInference.Server/
 
 | File | Description |
 |---|---|
 | `Setup/SharpInferenceServiceExtensions.cs` / `SharpInferenceServerOptions.cs` | DI registration, server options |
-| `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement |
-| `Streaming/SseProgressStream.cs` / `AudioChunkStream.cs` | SSE progress, audio chunk streaming |
+| `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement, **InteractiveSessionEndpoint** (WebSocket), **LicenseAcceptanceEndpoint** (`POST /v1/licenses/accept`) |
+| `Streaming/SseProgressStream.cs` / `AudioChunkStream.cs` / `InteractiveFrameStream.cs` | SSE progress, audio chunk streaming, interactive frame serialization (PNG / JPEG / raw RGB) |
 | `Queue/InferenceQueue.cs` / `InferenceQueueEntry.cs` | FIFO inference queue |
 | `Auth/ApiKeyMiddleware.cs` | Optional API key validation |
 

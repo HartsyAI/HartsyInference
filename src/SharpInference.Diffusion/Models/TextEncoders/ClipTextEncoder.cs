@@ -58,6 +58,23 @@ public sealed unsafe class ClipTextEncoder
     // Text projection weight for pooled output (CLIP-G only, null for CLIP-L)
     private Tensor? _textProjectionWeight;
 
+    /// <summary>Yields every weight tensor — token + position embeddings, every transformer layer's
+    /// parameters, the final LayerNorm, and the optional <c>text_projection</c>. Used by
+    /// <c>backend.PreloadWeights(encoder.EnumerateWeights())</c> for GPU weight cache priming, and
+    /// by sharing pipelines that need to free CLIP weights when transitioning stages.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_tokenEmbeddingWeight is not null) yield return _tokenEmbeddingWeight;
+        if (_positionEmbeddingWeight is not null) yield return _positionEmbeddingWeight;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            foreach (Tensor w in _layers[i].EnumerateWeights()) yield return w;
+        }
+        if (_finalLayerNormWeight is not null) yield return _finalLayerNormWeight;
+        if (_finalLayerNormBias is not null) yield return _finalLayerNormBias;
+        if (_textProjectionWeight is not null) yield return _textProjectionWeight;
+    }
+
     /// <summary>Encodes token IDs [B, seqLen] into hidden states [B, seqLen, hiddenSize]. Returns the last hidden state with final layer norm applied. Used by SD1.5.</summary>
     public Tensor Encode(IBackend backend, ReadOnlySpan<int[]> batchTokenIds)
     {
@@ -308,6 +325,18 @@ internal sealed unsafe class ClipTransformerLayer
 
     private static Tensor EnsureF32(Tensor tensor) =>
         tensor.DType != DType.F32 ? tensor.CastTo(DType.F32) : tensor;
+
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        Tensor?[] all = [
+            _layerNorm1Weight, _layerNorm1Bias,
+            _qProjWeight, _qProjBias, _kProjWeight, _kProjBias, _vProjWeight, _vProjBias,
+            _outProjWeight, _outProjBias,
+            _layerNorm2Weight, _layerNorm2Bias,
+            _mlpFc1Weight, _mlpFc1Bias, _mlpFc2Weight, _mlpFc2Bias,
+        ];
+        foreach (Tensor? t in all) if (t is not null) yield return t;
+    }
 
     /// <summary>Forward pass: hidden [B, seqLen, hiddenSize] → output [B, seqLen, hiddenSize].</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor causalMask)

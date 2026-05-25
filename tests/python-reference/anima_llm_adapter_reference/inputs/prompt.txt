@@ -1,0 +1,6 @@
+prompt = Anime girl with blue hair in a garden
+qwen3_seq_len = 8
+qwen3_hidden_size = 1024
+t5_seq_len = 12
+t5_ids = [3, 19209, 15, 3202, 28, 1692, 1268, 16, 3, 9, 2004, 1]
+t5_pieces = ['▁', 'Anim', 'e', '▁girl', '▁with', '▁blue', '▁hair', '▁in', '▁', 'a', '▁garden', '</s>']

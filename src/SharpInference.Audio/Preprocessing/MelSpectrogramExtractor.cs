@@ -215,6 +215,57 @@ public sealed class MelSpectrogramExtractor
         }
     }
 
+    /// <summary>Computes a single mel frame from <c>WinLength</c> samples of audio. Used
+    /// by <see cref="SharpInference.Audio.Streaming.StreamingMelExtractor"/>. No global
+    /// normalization is applied — streaming has no "global max" to clamp against; the
+    /// caller layers any per-feature normalization on top.
+    ///
+    /// <para><paramref name="windowAudio"/> must be exactly <c>WinLength</c> samples (or
+    /// shorter, in which case zeros pad to <c>FFT size</c>). <paramref name="melColumn"/>
+    /// must be exactly <c>NMels</c> values.</para></summary>
+    public void ComputeFrame(ReadOnlySpan<float> windowAudio, Span<float> melColumn)
+    {
+        if (melColumn.Length != _cfg.NMels)
+            throw new ArgumentException($"melColumn must be length {_cfg.NMels}, got {melColumn.Length}.", nameof(melColumn));
+
+        // Windowed frame, zero-padded to FFT size.
+        int n = Math.Min(windowAudio.Length, _cfg.WinLength);
+        for (int i = 0; i < n; i++) _frame[i] = windowAudio[i] * _window[i];
+        for (int i = n; i < _fftSize; i++) _frame[i] = 0f;
+
+        Fft.RealTransform(_frame, _stftRe, _stftIm, _fftSize);
+
+        if (_cfg.PowerSpectrum)
+        {
+            for (int k = 0; k < _numBins; k++)
+                _power[k] = _stftRe[k] * _stftRe[k] + _stftIm[k] * _stftIm[k];
+        }
+        else
+        {
+            for (int k = 0; k < _numBins; k++)
+                _power[k] = MathF.Sqrt(_stftRe[k] * _stftRe[k] + _stftIm[k] * _stftIm[k]);
+        }
+
+        for (int m = 0; m < _cfg.NMels; m++)
+        {
+            float acc = 0f;
+            for (int k = 0; k < _numBins; k++) acc += _filterbank[m, k] * _power[k];
+            _melCol[m] = acc;
+        }
+
+        float floor = _cfg.LogFloor ?? 1e-10f;
+        for (int m = 0; m < _cfg.NMels; m++)
+        {
+            float v = MathF.Max(_melCol[m], floor);
+            float l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
+            melColumn[m] = l;
+        }
+    }
+
+    /// <summary>Exposes the config for streaming clients that need WinLength / HopLength
+    /// / NMels without owning the extractor's internal scratch.</summary>
+    public Config Configuration => _cfg;
+
     /// <summary>Convenience overload that allocates the output array.</summary>
     public float[,] Compute(ReadOnlySpan<float> audio)
     {

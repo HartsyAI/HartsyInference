@@ -51,6 +51,25 @@ public interface IBackend : IDisposable
     /// <summary>SiLU activation (x * sigmoid(x)).</summary>
     void Silu(Tensor output, Tensor input);
 
+    /// <summary>Sigmoid activation (1 / (1 + exp(-x))). Used by LSTM gating.</summary>
+    void Sigmoid(Tensor output, Tensor input);
+
+    /// <summary>Hyperbolic tangent activation. Used by LSTM cell update / output and
+    /// several vocoders (Mish, snake-bias).</summary>
+    void Tanh(Tensor output, Tensor input);
+
+    /// <summary>ELU activation: <c>x if x &gt;= 0 else alpha * (exp(x) - 1)</c>. Used by
+    /// the SEANet residual blocks in EnCodec and DAC — alpha is typically 1.0.</summary>
+    void Elu(Tensor output, Tensor input, float alpha);
+
+    /// <summary>Snake activation: <c>x + (sin(alpha * x))^2 / divisor</c>, where
+    /// <c>divisor = alpha</c> when <paramref name="beta"/> is null (vanilla snake from
+    /// the Stable Audio Oobleck VAE), and <c>divisor = beta + 1e-8</c> when supplied
+    /// (snake-beta variant from BigVGAN). <paramref name="alpha"/> and
+    /// <paramref name="beta"/> are per-channel learnable params of shape <c>[1, C, 1]</c>
+    /// (broadcast across batch and time for <c>[B, C, T]</c> input).</summary>
+    void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta);
+
     // ── Element-wise ────────────────────────────────────────────────────
 
     /// <summary>Element-wise addition: output = a + b</summary>
@@ -87,6 +106,27 @@ public interface IBackend : IDisposable
     /// <summary>Split a tensor into chunks along the specified dimension.</summary>
     void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim);
 
+    // ── Convolution ─────────────────────────────────────────────────────
+
+    /// <summary>1D convolution with explicit asymmetric padding. Inputs and outputs are
+    /// channels-first: <paramref name="input"/> <c>[B, C_in, T_in]</c>,
+    /// <paramref name="output"/> <c>[B, C_out, T_out]</c> (pre-allocated by the caller).
+    /// <paramref name="weight"/> follows PyTorch convention <c>[C_out, C_in / groups, K]</c>.
+    /// Pass <paramref name="padLeft"/>/<paramref name="padRight"/> separately so the same
+    /// op covers both causal (left-only) and symmetric padding; pass
+    /// <paramref name="groups"/> equal to channels for depthwise mode.</summary>
+    void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int stride, int padLeft, int padRight, int dilation, int groups);
+
+    /// <summary>1D transposed convolution. Input/output channels-first;
+    /// <paramref name="weight"/> follows PyTorch convention <c>[C_in, C_out, K]</c>.
+    /// Output length is <c>(T_in - 1) * stride + dilation * (K - 1) + 1 - padLeft - padRight</c>.
+    /// For VibeVoice / EnCodec causal decoders pass <c>padLeft = 0</c>,
+    /// <c>padRight = K - stride</c> to remove all trailing pad (matches
+    /// <c>trim_right_ratio = 1.0</c>).</summary>
+    void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int stride, int padLeft, int padRight, int dilation);
+
     // ── Sampling ────────────────────────────────────────────────────────
 
     /// <summary>Nearest-neighbor 2D upsample by the given scale factor.</summary>
@@ -94,6 +134,65 @@ public interface IBackend : IDisposable
 
     /// <summary>Bilinear 2D upsample by the given scale factor.</summary>
     void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW);
+
+    /// <summary>2D max-pooling with explicit kernel, stride, and zero-padding. Used by YOLO's
+    /// SPPF block (k=5, s=1, p=2 — preserves spatial dims). Default implementation is a CPU loop
+    /// over F32 NCHW tensors; backends should override for performance.</summary>
+    unsafe void MaxPool2D(Tensor output, Tensor input, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException($"MaxPool2D default fallback only supports F32 — got input={input.DType}, output={output.DType}. Override in the backend if you need other dtypes.");
+        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new ArgumentException($"MaxPool2D requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
+
+        int n = (int)input.Shape[0];
+        int c = (int)input.Shape[1];
+        int iH = (int)input.Shape[2];
+        int iW = (int)input.Shape[3];
+        int oH = (int)output.Shape[2];
+        int oW = (int)output.Shape[3];
+
+        float* srcBase = (float*)input.DataPointer;
+        float* dstBase = (float*)output.DataPointer;
+
+        // NCHW: outer indices [n, c] address a contiguous H*W plane.
+        for (int b = 0; b < n; b++)
+        {
+            for (int ch = 0; ch < c; ch++)
+            {
+                long planeOffset = ((long)b * c + ch) * iH * iW;
+                long outPlaneOffset = ((long)b * c + ch) * oH * oW;
+                float* srcPlane = srcBase + planeOffset;
+                float* dstPlane = dstBase + outPlaneOffset;
+
+                for (int oy = 0; oy < oH; oy++)
+                {
+                    int iy0 = oy * strideH - padH;
+                    for (int ox = 0; ox < oW; ox++)
+                    {
+                        int ix0 = ox * strideW - padW;
+                        float maxVal = float.NegativeInfinity;
+                        for (int ky = 0; ky < kernelH; ky++)
+                        {
+                            int iy = iy0 + ky;
+                            if (iy < 0 || iy >= iH) continue;
+                            for (int kx = 0; kx < kernelW; kx++)
+                            {
+                                int ix = ix0 + kx;
+                                if (ix < 0 || ix >= iW) continue;
+                                float v = srcPlane[iy * iW + ix];
+                                if (v > maxVal) maxVal = v;
+                            }
+                        }
+                        // If the entire receptive field was out-of-bounds (impossible for k=5,s=1,p=2
+                        // but defensible for arbitrary configs), fall back to 0 instead of -inf to
+                        // avoid poisoning downstream layers. Won't trigger in any YOLO config.
+                        dstPlane[oy * oW + ox] = float.IsNegativeInfinity(maxVal) ? 0f : maxVal;
+                    }
+                }
+            }
+        }
+    }
 
     // ── Data Movement ───────────────────────────────────────────────────
 

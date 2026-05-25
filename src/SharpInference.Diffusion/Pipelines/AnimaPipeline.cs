@@ -39,21 +39,26 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-computed Qwen-3 0.6B hidden states <c>[1, T, 1024]</c>. The pipeline
-    /// runs them through the LlmAdapter to produce refined features, then through the DiT cross-attention.
-    /// CFG dual-pass when <paramref name="cfgScale"/> &gt; 1 and a negative-prompt embedding is provided.</summary>
+    /// <summary>Generates an image from pre-computed Qwen-3 0.6B hidden states <c>[1, T, 1024]</c> + T5
+    /// tokenizations of the same prompt(s). The LlmAdapter's main stream is built from
+    /// <c>embed[t5TokenIds]</c>; the Qwen-3 states are the cross-attention K/V source. The adapter's output
+    /// sequence length equals the T5 token count (NOT the Qwen-3 token count).
+    /// <para>CFG dual-pass when <paramref name="cfgScale"/> &gt; 1 and both negative embeddings and negative
+    /// T5 token ids are provided.</para></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromEmbeddings(
         Tensor textEmbeddings,
+        int[] t5TokenIds,
         TextToImageRequest request,
         float cfgScale = 1.0f,
         Tensor? negativeTextEmbeddings = null,
+        int[]? negativeT5TokenIds = null,
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
 
-        if (cfgScale > 1.0f && negativeTextEmbeddings is null)
+        if (cfgScale > 1.0f && (negativeTextEmbeddings is null || negativeT5TokenIds is null))
             throw new ArgumentException(
-                "negativeTextEmbeddings is required when cfgScale > 1.0.",
+                "negativeTextEmbeddings and negativeT5TokenIds are required when cfgScale > 1.0.",
                 nameof(negativeTextEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
@@ -90,8 +95,9 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         }
         else
         {
-            // Refine the Qwen-3 0.6B hidden states through the LlmAdapter ONCE per generation (timestep-independent).
-            refinedText = _llmAdapter.Forward(Backend, textEmbeddings);
+            // Refine through the LlmAdapter ONCE per generation (timestep-independent). Main stream =
+            // embed[t5_ids], cross-attn K/V = Qwen-3 hidden states. Output seq_len = t5_ids.Length.
+            refinedText = _llmAdapter.Forward(Backend, textEmbeddings, t5TokenIds);
         }
         LogStats("refinedText (LlmAdapter output)", refinedText);
 
@@ -100,47 +106,74 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         {
             refinedNegText = bypassAdapter
                 ? (negativeTextEmbeddings.DType == DType.F32 ? CloneF32(negativeTextEmbeddings) : negativeTextEmbeddings.CastTo(DType.F32))
-                : _llmAdapter.Forward(Backend, negativeTextEmbeddings);
+                : _llmAdapter.Forward(Backend, negativeTextEmbeddings, negativeT5TokenIds!);
         }
 
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
         Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
         LogStats("initial noise latent", latent);
 
-        FlowMatchEulerDiscreteScheduler scheduler = new(3.0f);
-        scheduler.SetTimesteps(steps);
-        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        // CRITICAL: Cosmos / Anima expects timestep in [0, ~1] range, NOT [0, 1000] (SD3/Flux convention).
-        // Per diffusers' pipeline_cosmos2_text2image.py line 588-599, the transformer receives
-        // `current_t = sigma / (sigma + 1)` directly — no ×1000 scaling. SharpInference's
-        // FlowMatchEulerDiscreteScheduler stores `_timesteps[i] = sigma * 1000` for SD3 compatibility,
-        // so we divide by 1000 here to get the Cosmos-convention timestep. Without this, the model's
-        // sinusoidal time embedding sees values 1000× larger than training distribution, AdaLN
-        // modulation produces near-random shift/scale, and the velocity has no consistent denoising
-        // direction.
-        Logs.Info($"Anima timesteps (after /1000 normalization): [{timesteps[0] / 1000f:F4}, {timesteps[1] / 1000f:F4}, ..., {timesteps[^1] / 1000f:F4}] (expected range ~[1.0, 0.0])");
+        // Pad refinedText / refinedNegText to 512 tokens with zeros. Anima training (per
+        // `tdrussell/diffusion-pipe/models/cosmos_predict2.py:_tokenize`) tokenizes T5 inputs to
+        // `padding="max_length", max_length=512` and the upstream-blessed inference path
+        // (`modelscope/DiffSynth-Studio/diffsynth/models/anima_dit.py:preprocess_text_embeds`) right-pads the
+        // LlmAdapter output with zeros to exactly 512 tokens before feeding the DiT cross-attention. Without
+        // padding, the cross-attention sees a much shorter sequence than at training time, the attention
+        // softmax weights are concentrated on the wrong tokens, and the model produces noise.
+        const int CrossAttnPaddedLen = 512;
+        Tensor refinedTextPadded = PadSeq(refinedText, CrossAttnPaddedLen);
+        refinedText.Dispose();
+        refinedText = refinedTextPadded;
+        if (refinedNegText is not null)
+        {
+            Tensor pn = PadSeq(refinedNegText, CrossAttnPaddedLen);
+            refinedNegText.Dispose();
+            refinedNegText = pn;
+        }
+        LogStats("refinedText (padded to 512)", refinedText);
+
+        // Anima uses the Z-Image flow-matching schedule (per
+        // `modelscope/DiffSynth-Studio/diffsynth/diffusion/flow_match.py`):
+        //   sigmas = linspace(1, 0, N+1)[:-1]       # drop terminal 0
+        //   sigmas = shift * sigmas / (1 + (shift-1) * sigmas)   # shift=3 for Z-Image / Anima
+        // The network outputs velocity (v ≈ noise - x_clean); we integrate via plain Euler:
+        //   x_{i+1} = x_i + v * (sigma_next - sigma)
+        // No EDM preconditioning, no sigma_max=80 scaling. Initial latent is unit-variance Gaussian.
+        const float Shift = 3.0f;
+        float[] sigmas = new float[steps + 1];
+        for (int i = 0; i < steps; i++)
+        {
+            float lin = 1.0f - (float)i / steps;        // linspace(1, 0, N+1)[:-1]
+            sigmas[i] = Shift * lin / (1.0f + (Shift - 1.0f) * lin);
+        }
+        sigmas[steps] = 0.0f;                            // terminal sigma
+        Logs.Info($"Anima sigmas (Z-Image flow-match, shift={Shift}): [{sigmas[0]:F4}, {sigmas[1]:F4}, ..., {sigmas[^2]:F4}, {sigmas[^1]:F4}]");
 
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            float t = timesteps[i] / 1000f;  // Cosmos-convention timestep in [0, ~1].
+            float sigma = sigmas[i];
+            float sigmaNext = sigmas[i + 1];
+            // Anima feeds `t = sigma` directly to the transformer (per anima-preview.py + anima_dit.py:
+            // `timestep = timestep / 1000` then model receives the normalized t = sigma).
+            float t = sigma;
 
             Tensor velocity = _transformer.Forward(Backend, latent, t, refinedText);
-
             if (cfgScale > 1.0f)
             {
-                Tensor uncond = _transformer.Forward(Backend, latent, t, refinedNegText!);
-                Tensor combined = CfgHelper.ApplyCfg(uncond, velocity, cfgScale);
-                uncond.Dispose();
+                Tensor velUncond = _transformer.Forward(Backend, latent, t, refinedNegText!);
+                // Standard SD3-form CFG: combined = uncond + scale * (cond - uncond).
+                Tensor combined = CfgHelper.ApplyCfg(velUncond, velocity, cfgScale);
+                velUncond.Dispose();
                 velocity.Dispose();
                 velocity = combined;
             }
 
             if (i == 0 || i == steps / 2 || i == steps - 1)
-                LogStats($"velocity step={i} (t={t:F1})", velocity);
+                LogStats($"velocity step={i} (t={t:F4}, sigma={sigma:F4}→{sigmaNext:F4})", velocity);
 
             Tensor newLatent = new(latentShape, DType.F32);
-            scheduler.Step(newLatent, velocity, latent, i);
+            FlowMatchStep(newLatent, latent, velocity, sigmaNext - sigma);
             velocity.Dispose();
             latent.Dispose();
             latent = newLatent;
@@ -264,5 +297,112 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         long bytes = src.Shape.ElementCount * sizeof(float);
         Buffer.MemoryCopy(src.DataPointer, copy.DataPointer, bytes, bytes);
         return copy;
+    }
+
+    /// <summary>Right-pads <paramref name="text"/> <c>[B, S, D]</c> to <paramref name="targetLen"/> tokens by
+    /// appending all-zero rows. Caller owns the returned tensor and the input. Mirrors
+    /// <c>diffsynth/models/anima_dit.py:preprocess_text_embeds</c>'s
+    /// <c>F.pad(out, (0, 0, 0, 512 - out.shape[1]))</c>.</summary>
+    private static unsafe Tensor PadSeq(Tensor text, int targetLen)
+    {
+        int batch = (int)text.Shape[0];
+        int curLen = (int)text.Shape[1];
+        int dim = (int)text.Shape[2];
+        if (curLen == targetLen) return CloneF32(text);
+        if (curLen > targetLen)
+            throw new ArgumentException($"PadSeq: input seq_len {curLen} > target {targetLen}; truncation not supported.", nameof(text));
+
+        TensorShape outShape = new TensorShape(batch, targetLen, dim);
+        Tensor padded = new Tensor(outShape, DType.F32);
+        float* srcPtr = (float*)text.DataPointer;
+        float* dstPtr = (float*)padded.DataPointer;
+        long copyBytes = (long)batch * curLen * dim * sizeof(float);
+        // text is laid out [B, S, D] contiguously; the [0..curLen) prefix per batch followed by zeros.
+        for (int b = 0; b < batch; b++)
+        {
+            float* src = srcPtr + (long)b * curLen * dim;
+            float* dst = dstPtr + (long)b * targetLen * dim;
+            Buffer.MemoryCopy(src, dst, curLen * dim * sizeof(float), curLen * dim * sizeof(float));
+            // Remaining slots stay zero (default-initialised by Tensor allocator — verify in your runtime;
+            // if it doesn't, add an explicit memset here). On SharpInference's tensor allocator, F32 tensors
+            // are zero-initialised on alloc.
+            float* zerosStart = dst + (long)curLen * dim;
+            long zeroFloats = (long)(targetLen - curLen) * dim;
+            for (long i = 0; i < zeroFloats; i++) zerosStart[i] = 0f;
+        }
+        return padded;
+    }
+
+    /// <summary>In-place scalar multiply: <c>t[i] *= s</c>. Used to scale the initial noise by sigma_max.</summary>
+    private static unsafe void ScaleInPlace(Tensor t, float s)
+    {
+        float* p = (float*)t.DataPointer;
+        long n = t.Shape.ElementCount;
+        for (long i = 0; i < n; i++) p[i] *= s;
+    }
+
+    /// <summary>Out-of-place scalar multiply: <c>out[i] = s * src[i]</c>. Used for the EDM
+    /// <c>latent_model_input = latent * c_in</c> step.</summary>
+    private static unsafe Tensor ScaleClone(Tensor src, float s)
+    {
+        Tensor result = new Tensor(src.Shape, DType.F32);
+        float* sp = (float*)src.DataPointer;
+        float* op = (float*)result.DataPointer;
+        long n = src.Shape.ElementCount;
+        for (long i = 0; i < n; i++) op[i] = sp[i] * s;
+        return result;
+    }
+
+    /// <summary>Cosmos-style CFG: <c>out[i] = x0_cond[i] + scale * (x0_cond[i] - x0_uncond[i])</c>.
+    /// NB: this differs from SD3/Flux's <c>uncond + scale * (cond - uncond)</c> — Cosmos uses cond as the
+    /// baseline, not uncond, so the conditioning side is amplified additively. Matches
+    /// diffusers' pipeline_cosmos2_text2image.py line 198.</summary>
+    private static unsafe Tensor CosmosCfg(Tensor x0Cond, Tensor x0Uncond, float scale)
+    {
+        Tensor result = new Tensor(x0Cond.Shape, DType.F32);
+        float* cp = (float*)x0Cond.DataPointer;
+        float* up = (float*)x0Uncond.DataPointer;
+        float* op = (float*)result.DataPointer;
+        long n = x0Cond.Shape.ElementCount;
+        for (long i = 0; i < n; i++) op[i] = cp[i] + scale * (cp[i] - up[i]);
+        return result;
+    }
+
+    /// <summary>EDM denoised estimate: <c>x0[i] = cSkip * latent[i] + cOut * f[i]</c>.
+    /// Matches diffusers' <c>noise_pred = c_skip * latents + c_out * F</c>.</summary>
+    private static unsafe Tensor EdmDenoise(Tensor latent, Tensor f, float cSkip, float cOut)
+    {
+        Tensor x0 = new Tensor(latent.Shape, DType.F32);
+        float* lp = (float*)latent.DataPointer;
+        float* fp = (float*)f.DataPointer;
+        float* op = (float*)x0.DataPointer;
+        long n = latent.Shape.ElementCount;
+        for (long i = 0; i < n; i++) op[i] = cSkip * lp[i] + cOut * fp[i];
+        return x0;
+    }
+
+    /// <summary>Convert EDM denoised estimate to FlowMatchEuler-compatible epsilon:
+    /// <c>eps[i] = (latent[i] - x0[i]) / sigma</c>.</summary>
+    private static unsafe Tensor EpsFromX0(Tensor latent, Tensor x0, float sigma)
+    {
+        Tensor eps = new Tensor(latent.Shape, DType.F32);
+        float* lp = (float*)latent.DataPointer;
+        float* xp = (float*)x0.DataPointer;
+        float* ep = (float*)eps.DataPointer;
+        long n = latent.Shape.ElementCount;
+        float invSigma = 1.0f / sigma;
+        for (long i = 0; i < n; i++) ep[i] = (lp[i] - xp[i]) * invSigma;
+        return eps;
+    }
+
+    /// <summary>FlowMatchEuler discrete step: <c>new_latent[i] = latent[i] + dt * eps[i]</c>.
+    /// <paramref name="dt"/> is <c>sigma_next - sigma</c> (negative as sigmas decrease).</summary>
+    private static unsafe void FlowMatchStep(Tensor newLatent, Tensor latent, Tensor eps, float dt)
+    {
+        float* np = (float*)newLatent.DataPointer;
+        float* lp = (float*)latent.DataPointer;
+        float* ep = (float*)eps.DataPointer;
+        long n = latent.Shape.ElementCount;
+        for (long i = 0; i < n; i++) np[i] = lp[i] + dt * ep[i];
     }
 }

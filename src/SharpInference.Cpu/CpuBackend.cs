@@ -88,6 +88,50 @@ public sealed class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
+    public void Sigmoid(Tensor output, Tensor input)
+    {
+        ThrowIfDisposed();
+        ActivationKernels.Sigmoid(output, input);
+    }
+
+    /// <inheritdoc />
+    public void Tanh(Tensor output, Tensor input)
+    {
+        ThrowIfDisposed();
+        ActivationKernels.Tanh(output, input);
+    }
+
+    /// <inheritdoc />
+    public void Elu(Tensor output, Tensor input, float alpha)
+    {
+        ThrowIfDisposed();
+        ActivationKernels.Elu(output, input, alpha);
+    }
+
+    /// <inheritdoc />
+    public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta)
+    {
+        ThrowIfDisposed();
+        ActivationKernels.Snake(output, input, alpha, beta);
+    }
+
+    /// <inheritdoc />
+    public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int stride, int padLeft, int padRight, int dilation, int groups)
+    {
+        ThrowIfDisposed();
+        Conv1dKernels.Conv1d(output, input, weight, bias, stride, padLeft, padRight, dilation, groups);
+    }
+
+    /// <inheritdoc />
+    public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int stride, int padLeft, int padRight, int dilation)
+    {
+        ThrowIfDisposed();
+        Conv1dKernels.ConvTranspose1d(output, input, weight, bias, stride, padLeft, padRight, dilation);
+    }
+
+    /// <inheritdoc />
     public void Silu(Tensor output, Tensor input)
     {
         ThrowIfDisposed();

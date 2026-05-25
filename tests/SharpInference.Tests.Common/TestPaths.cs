@@ -214,6 +214,25 @@ public static class TestPaths
         public static string FluxVaeSource  => Resolve("FLUX_VAE_SOURCE_PATH", Flux.Dev);
     }
 
+    /// <summary>Standalone CLIP checkpoint paths (Vision package). HuggingFace <c>CLIPModel</c> single-file
+    /// safetensors layout: <c>text_model.*</c>, <c>vision_model.*</c>, <c>text_projection.weight</c>, <c>visual_projection.weight</c>.</summary>
+    public static class Clip
+    {
+        public static string ViTLargePatch14 => Resolve("CLIP_VIT_LARGE_PATH",  Path.Combine(ModelsDir, "clip", "clip-vit-large-patch14.safetensors"));
+        public static string ViTHugePatch14  => Resolve("CLIP_VIT_HUGE_PATH",   Path.Combine(ModelsDir, "clip", "clip-vit-h-14-laion2b.safetensors"));
+        public static string ViTBigGPatch14  => Resolve("CLIP_VIT_BIGG_PATH",   Path.Combine(ModelsDir, "clip", "clip-vit-bigg-14-laion2b.safetensors"));
+    }
+
+    /// <summary>YOLO checkpoint paths (Vision package). Use the Python conversion script under
+    /// <c>tests/python-reference/convert_yolov8_pt_to_safetensors.py</c> to produce these from
+    /// Ultralytics <c>.pt</c> files — the conversion folds BN into Conv weights for fast inference.</summary>
+    public static class Yolo
+    {
+        public static string V8nFolded => Resolve("YOLOV8N_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolov8n-folded.safetensors"));
+        public static string V8sFolded => Resolve("YOLOV8S_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolov8s-folded.safetensors"));
+        public static string V8mFolded => Resolve("YOLOV8M_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolov8m-folded.safetensors"));
+    }
+
     /// <summary>LoRA adapter weights.</summary>
     public static class Lora
     {

@@ -148,9 +148,14 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         }
 
         // ── 4. Denoising loop ────────────────────────────────────────────
+        // Free T5 weights from VRAM before uploading the transformer. T5-XXL is ~5 GB; Chroma is
+        // ~9 GB FP8. Without this free, both sit in VRAM together (14 GB) and OOM on a 12 GB card.
+        Backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.Sync();
+
         // Bulk-upload transformer weights before the denoise loop. Chroma is Flux-derived
-        // (~12 GB at FP16) — without preload the first step would pay cache-miss overhead
-        // for every block. Paired with FreeWeights below the VAE handoff.
+        // (~12 GB at FP16, ~9 GB at FP8) — without preload the first step would pay cache-miss
+        // overhead for every block. Paired with FreeWeights below the VAE handoff.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
         Logs.Info("Starting Chroma denoising loop...");
