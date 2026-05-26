@@ -336,11 +336,18 @@ public sealed unsafe class ChromaTransformer : IDisposable
         float* nPtr = (float*)normed.DataPointer;
         float* outPtr = (float*)output.DataPointer;
         float* tembPtr = (float*)temb.DataPointer;
-        // temb is [B, 2, hidden] so row 0 (scale) starts at offset 0, row 1 (shift) at offset hidden.
+        // temb is [B, 2, hidden] in (SHIFT, SCALE) order. Per ComfyUI's
+        // `comfy/ldm/chroma/layers.py:LastLayer.forward`:
+        //   shift, scale = vec  # vec = (mod_vectors[:, -2:-1, :], mod_vectors[:, -1:, :])
+        //   x = addcmul(shift, 1 + scale, norm_final(x))   == norm_final(x) * (1 + scale) + shift
+        // Row -2 of the 344-row modulation table is SHIFT, row -1 is SCALE. Our previous code had this
+        // swapped (treating row 0 of the 2-row slice as scale, row 1 as shift), which scrambled the
+        // final-layer modulation and added a fixed-per-image noise overlay even when the rest of the
+        // pipeline was correct.
         for (int b = 0; b < batch; b++)
         {
-            int scaleBase = b * 2 * hidden + 0 * hidden;
-            int shiftBase = b * 2 * hidden + 1 * hidden;
+            int shiftBase = b * 2 * hidden + 0 * hidden;
+            int scaleBase = b * 2 * hidden + 1 * hidden;
             for (int s = 0; s < seqLen; s++)
             {
                 int seqBase = (b * seqLen + s) * hidden;

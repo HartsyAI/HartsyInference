@@ -100,13 +100,15 @@ internal sealed class VibeVoiceTokenizerDecoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _stem.LoadWeights(w, $"{_prefix}.upsample_layers.0.0.conv");
+        // SConv1d / SConvTranspose1d already append ".conv.conv" / ".convtr.convtr"
+        // internally — pass the prefix for the module itself, not its inner attribute.
+        _stem.LoadWeights(w, $"{_prefix}.upsample_layers.0.0");
         for (int i = 0; i < _upsamples.Length; i++)
-            _upsamples[i].LoadWeights(w, $"{_prefix}.upsample_layers.{i + 1}.0.convtr");
+            _upsamples[i].LoadWeights(w, $"{_prefix}.upsample_layers.{i + 1}.0");
         for (int i = 0; i < _stageBlocks.Length; i++)
             for (int j = 0; j < _stageBlocks[i].Length; j++)
                 _stageBlocks[i][j].LoadWeights(w);
-        _head.LoadWeights(w, $"{_prefix}.head.conv");
+        _head.LoadWeights(w, $"{_prefix}.head");
         if (!_config.DisableLastNorm)
             _lastNormW = WhisperOps.EnsureF32(w[$"{_prefix}.norm.weight"]);
     }

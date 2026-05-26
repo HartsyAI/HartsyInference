@@ -74,6 +74,13 @@ public sealed class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
+    public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
+    {
+        ThrowIfDisposed();
+        NormKernels.AdaInstanceNorm1d(output, input, gamma, beta, eps);
+    }
+
+    /// <inheritdoc />
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
         ThrowIfDisposed();
@@ -106,6 +113,13 @@ public sealed class CpuBackend : IBackend
     {
         ThrowIfDisposed();
         ActivationKernels.Elu(output, input, alpha);
+    }
+
+    /// <inheritdoc />
+    public void LeakyRelu(Tensor output, Tensor input, float slope)
+    {
+        ThrowIfDisposed();
+        ActivationKernels.LeakyRelu(output, input, slope);
     }
 
     /// <inheritdoc />

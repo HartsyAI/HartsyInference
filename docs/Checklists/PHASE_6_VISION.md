@@ -57,10 +57,27 @@
   - This matches Ultralytics' canonical demo output on this image one-for-one.
 - ~6s/image at 640×640 on CPU; CUDA / Vulkan acceleration is a future perf slice.
 
+**YOLO11 support — ✅ complete and validated:**
+- [x] `Detection/Blocks/C3k.cs` — CSP-with-3-convs block (cv1 + cv2 parallel + cv3 final project; inner Bottlenecks applied sequentially on cv1's branch). Used as the inner unit of <see cref="C3k2"/> when c3k=True.
+- [x] `Detection/Blocks/C3k2.cs` — outer C2f-style block with switchable inner units (Bottleneck for c3k=False, C3k for c3k=True). Critically, when c3k=False the inner Bottlenecks use `expansion=0.5` (compress by half) — Ultralytics' default, distinct from C2f which explicitly passes e=1.0.
+- [x] `Detection/Blocks/PsaAttention.cs` — multi-head self-attention with depthwise-conv positional encoding. Custom shapes (Q/K have `key_dim` channels per head while V has `head_dim`) so we hand-code the matmuls; `IBackend.ScaledDotProductAttention`'s standard layout doesn't apply.
+- [x] `Detection/Blocks/PsaBlock.cs` — attention + FFN with residual connections.
+- [x] `Detection/Blocks/C2psa.cs` — cross-stage with PSA: cv1 expand → split → PsaBlocks on partB → concat → cv2 project.
+- [x] `Detection/Blocks/DwConvBnSilu.cs` — depthwise variant of `ConvBnSilu` (used by v11's class branch + C2psa's positional encoding).
+- [x] `Detection/Blocks/DetectHeadV11.cs` — same box branch as v8 but cv3 (class) uses depthwise-separable: `[DwConv 3×3 + Conv 1×1] → [DwConv 3×3 + Conv 1×1] → Conv 1×1`. Final 1×1 is plain Conv2d (no BN/SiLU).
+- [x] `Detection/YoloV11Model.cs` — 11-layer backbone (Conv → C3k2 × 4 → SPPF → C2PSA) + 12-layer FPN+PAN neck + DetectHeadV11. Implements `IYoloDetectModel`.
+- [x] `Detection/IYoloDetectModel.cs` — interface so `YoloPipeline` can hold either v8 or v11.
+- [x] YOLO11 presets: `YoloConfig.YoloV11n / s / m / l / x`.
+- [x] `IBackend.Conv2dDepthwise` (default CPU fallback, override-ready).
+- [x] `YoloPipeline.LoadV11(...)` static factory.
+- [x] Python converter handles both v8 and v11 — picks up plain (non-BN) Conv2d weights anywhere via a generic suffix-based fallback (not hard-coded to the v8 detect-head layer index).
+- [x] **End-to-end validation against `yolo11n.pt` (5.5 MB) → `yolo11n-folded.safetensors` (10 MB)**: on Ultralytics' bus.png test image, my YOLO11n produces:
+  - bus (conf 0.940), person (0.902), person (0.849), person (0.833), person (0.396)
+  - Exactly matches Ultralytics' canonical YOLO11n output
+
 **Out of scope (deferred):**
-- YOLO11 — adds C3k2 (variant of C2f) + C2PSA (spatial attention block) + YOLO11n/s/m/l/x presets. The block library is the only addition; everything else (preprocessor, NMS, post-processor, pipeline) reuses the YOLOv8 path.
-- Segmentation head (YOLOv8-seg / YOLO11-seg) — adds a Proto module + 32-mask coefficient branch.
-- GPU-native MaxPool2D — currently uses the IBackend default (CPU loop). For SDPA-heavy YOLO11 a real Vulkan/CUDA kernel is worth doing.
+- YOLO segmentation head (YOLOv8-seg / YOLO11-seg) — adds a Proto module + 32-mask coefficient branch.
+- GPU-native MaxPool2D / Conv2dDepthwise — currently use the IBackend defaults (CPU loops). Worth dedicated Vulkan/CUDA kernels for inference perf.
 
 ## 5. Segmentation / Face (stubs ✅)
 

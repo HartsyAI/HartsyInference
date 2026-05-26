@@ -893,6 +893,16 @@ public sealed class VulkanBackend : IBackend
         DispatchPerRowNorm(shader, 3, output, input, weight, null, eps, normDim, totalRows);
     }
 
+    public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
+    {
+        throw new NotImplementedException("VulkanBackend.AdaInstanceNorm1d not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2 prosody and decoder paths.");
+    }
+
+    public void LeakyRelu(Tensor output, Tensor input, float slope)
+    {
+        throw new NotImplementedException("VulkanBackend.LeakyRelu not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2.");
+    }
+
     // ── Attention ───────────────────────────────────────────────────────
 
     /// <summary>Naive 3-pass SDPA. Q*K^T -> mask add -> softmax -> *V dispatched once per (B*H) head with base offsets. FlashAttention-style is a Phase-4 optimization.</summary>

@@ -22,29 +22,29 @@ public sealed class YoloV11Model : IYoloDetectModel
 {
     private readonly YoloConfig _config;
 
-    // Backbone (11 layers, indices 0..10).
-    private readonly ConvBnSilu _layer0;
-    private readonly ConvBnSilu _layer1;
-    private readonly C3k2 _layer2;
-    private readonly ConvBnSilu _layer3;
-    private readonly C3k2 _layer4;        // outputs feed neck concat 13 (P3 backbone)
-    private readonly ConvBnSilu _layer5;
-    private readonly C3k2 _layer6;        // outputs feed neck concat 11 (P4 backbone)
-    private readonly ConvBnSilu _layer7;
-    private readonly C3k2 _layer8;
-    private readonly Sppf _layer9;
-    private readonly C2psa _layer10;      // outputs feed neck concat 20 (P5 SPPF+C2PSA)
+    // Backbone (11 layers, indices 0..10). Internal so diagnostic tests can probe per-layer outputs.
+    internal readonly ConvBnSilu _layer0;
+    internal readonly ConvBnSilu _layer1;
+    internal readonly C3k2 _layer2;
+    internal readonly ConvBnSilu _layer3;
+    internal readonly C3k2 _layer4;        // outputs feed neck concat 13 (P3 backbone)
+    internal readonly ConvBnSilu _layer5;
+    internal readonly C3k2 _layer6;        // outputs feed neck concat 11 (P4 backbone)
+    internal readonly ConvBnSilu _layer7;
+    internal readonly C3k2 _layer8;
+    internal readonly Sppf _layer9;
+    internal readonly C2psa _layer10;      // outputs feed neck concat 20 (P5 SPPF+C2PSA)
 
-    // Neck.
-    private readonly C3k2 _layer13;       // C3k2 after upsample(layer10) + concat(layer6)
-    private readonly C3k2 _layer16;       // C3k2 after upsample(layer13) + concat(layer4) → P3 detect input
-    private readonly ConvBnSilu _layer17; // downsample
-    private readonly C3k2 _layer19;       // → P4 detect input
-    private readonly ConvBnSilu _layer20; // downsample
-    private readonly C3k2 _layer22;       // → P5 detect input (uses c3k=True)
+    // Neck — internal so the layer-by-layer diagnostic test can probe each output.
+    internal readonly C3k2 _layer13;       // C3k2 after upsample(layer10) + concat(layer6)
+    internal readonly C3k2 _layer16;       // C3k2 after upsample(layer13) + concat(layer4) → P3 detect input
+    internal readonly ConvBnSilu _layer17; // downsample
+    internal readonly C3k2 _layer19;       // → P4 detect input
+    internal readonly ConvBnSilu _layer20; // downsample
+    internal readonly C3k2 _layer22;       // → P5 detect input (uses c3k=True)
 
     // Detect head (layer 23 in YOLO11 YAML).
-    private readonly DetectHead _detect;
+    private readonly DetectHeadV11 _detect;
 
     public YoloConfig Config => _config;
     public int NumClasses => _config.NumClasses;
@@ -94,7 +94,7 @@ public sealed class YoloV11Model : IYoloDetectModel
         _layer20 = new ConvBnSilu(c512, 2, 2, 1, 1);
         _layer22 = new C3k2(c512 + c1024, c1024, r2, c3k: true, shortcut: true);
 
-        _detect = new DetectHead(
+        _detect = new DetectHeadV11(
             numClasses: config.NumClasses,
             regMax: config.RegMax,
             inChannels: [c256, c512, c1024],
@@ -201,7 +201,7 @@ public sealed class YoloV11Model : IYoloDetectModel
         return decoded;
     }
 
-    private static Tensor Upsample(IBackend backend, Tensor input, int scale)
+    internal static Tensor Upsample(IBackend backend, Tensor input, int scale)
     {
         int n = (int)input.Shape[0];
         int c = (int)input.Shape[1];
@@ -212,7 +212,7 @@ public sealed class YoloV11Model : IYoloDetectModel
         return output;
     }
 
-    private static Tensor ConcatChannel(IBackend backend, Tensor a, Tensor b)
+    internal static Tensor ConcatChannel(IBackend backend, Tensor a, Tensor b)
     {
         int n = (int)a.Shape[0];
         int c = (int)(a.Shape[1] + b.Shape[1]);

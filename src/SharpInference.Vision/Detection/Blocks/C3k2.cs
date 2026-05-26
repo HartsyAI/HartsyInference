@@ -46,8 +46,11 @@ public sealed class C3k2
         else
         {
             _bottlenecks = new Bottleneck[n];
+            // Ultralytics' C3k2 constructs inner Bottlenecks WITHOUT overriding the default e=0.5,
+            // so the bottleneck compresses by half (cv1: c → c/2, cv2: c/2 → c). This differs from
+            // C2f, which explicitly passes e=1.0. Passing e=0.5 here matches the v11 checkpoints.
             for (int i = 0; i < n; i++)
-                _bottlenecks[i] = new Bottleneck(_hiddenChannels, _hiddenChannels, shortcut);
+                _bottlenecks[i] = new Bottleneck(_hiddenChannels, _hiddenChannels, shortcut, expansion: 0.5f);
         }
     }
 

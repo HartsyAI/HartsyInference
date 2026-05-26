@@ -223,6 +223,12 @@ public static class TestPaths
         public static string ViTBigGPatch14  => Resolve("CLIP_VIT_BIGG_PATH",   Path.Combine(ModelsDir, "clip", "clip-vit-bigg-14-laion2b.safetensors"));
     }
 
+    /// <summary>SigLIP checkpoint paths. HuggingFace single-file safetensors (no key remapping required — our SigLIP encoder uses the HF key names directly).</summary>
+    public static class Siglip
+    {
+        public static string Base16_224 => Resolve("SIGLIP_BASE_224_PATH", Path.Combine(ModelsDir, "clip", "siglip-base-patch16-224.safetensors"));
+    }
+
     /// <summary>YOLO checkpoint paths (Vision package). Use the Python conversion script under
     /// <c>tests/python-reference/convert_yolov8_pt_to_safetensors.py</c> to produce these from
     /// Ultralytics <c>.pt</c> files — the conversion folds BN into Conv weights for fast inference.</summary>
@@ -231,6 +237,10 @@ public static class TestPaths
         public static string V8nFolded => Resolve("YOLOV8N_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolov8n-folded.safetensors"));
         public static string V8sFolded => Resolve("YOLOV8S_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolov8s-folded.safetensors"));
         public static string V8mFolded => Resolve("YOLOV8M_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolov8m-folded.safetensors"));
+        public static string V11nFolded => Resolve("YOLO11N_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolo11n-folded.safetensors"));
+        public static string V11sFolded => Resolve("YOLO11S_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolo11s-folded.safetensors"));
+        public static string V11mFolded => Resolve("YOLO11M_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolo11m-folded.safetensors"));
+        public static string V8nSegFolded => Resolve("YOLOV8N_SEG_FOLDED_PATH", Path.Combine(ModelsDir, "yolo", "yolov8n-seg-folded.safetensors"));
     }
 
     /// <summary>LoRA adapter weights.</summary>

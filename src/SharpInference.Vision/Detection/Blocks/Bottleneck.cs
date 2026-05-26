@@ -4,9 +4,12 @@ using SharpInference.Core.Tensors;
 namespace SharpInference.Vision.Detection.Blocks;
 
 /// <summary>YOLOv8 Bottleneck block: two 3×3 Conv-BN-SiLU stages, optionally with a residual
-/// shortcut. The expansion ratio is fixed at 1.0 inside the bottleneck (so the hidden channel
-/// count equals the output channel count), and the residual is added only when the channel
-/// counts match AND <see cref="Shortcut"/> is true — Ultralytics' standard contract.</summary>
+/// shortcut. The hidden channel count is <c>int(outChannels * expansion)</c>:
+/// <list type="bullet">
+///   <item><c>expansion=1.0</c> (no compression): used by C2f's inner Bottlenecks and C3k's inner Bottlenecks (Ultralytics overrides the default).</item>
+///   <item><c>expansion=0.5</c> (half compression, default): used by C3k2's inner Bottlenecks when c3k=False (Ultralytics uses the Bottleneck default).</item>
+/// </list>
+/// The residual adds only when shortcut=true AND in/out channels match.</summary>
 public sealed unsafe class Bottleneck
 {
     private readonly ConvBnSilu _cv1;
@@ -18,10 +21,13 @@ public sealed unsafe class Bottleneck
     /// <summary>Whether the shortcut path is enabled (only takes effect when in/out channels match).</summary>
     public bool Shortcut => _shortcut;
 
-    /// <summary>Creates a Bottleneck. <paramref name="shortcut"/> is the YOLO standard contract — backbone bottlenecks use shortcut=true, neck bottlenecks use shortcut=false.</summary>
-    public Bottleneck(int inChannels, int outChannels, bool shortcut)
+    /// <summary>Creates a Bottleneck with explicit expansion ratio. <paramref name="expansion"/>
+    /// controls the hidden width: <c>cv1</c> projects to <c>int(outChannels * expansion)</c>,
+    /// <c>cv2</c> projects back to <c>outChannels</c>.</summary>
+    public Bottleneck(int inChannels, int outChannels, bool shortcut, float expansion = 1.0f)
     {
-        _cv1 = new ConvBnSilu(outChannels, strideH: 1, strideW: 1, padH: 1, padW: 1, useSilu: true);
+        int hidden = (int)(outChannels * expansion);
+        _cv1 = new ConvBnSilu(hidden, strideH: 1, strideW: 1, padH: 1, padW: 1, useSilu: true);
         _cv2 = new ConvBnSilu(outChannels, strideH: 1, strideW: 1, padH: 1, padW: 1, useSilu: true);
         _shortcut = shortcut;
         _inChannels = inChannels;

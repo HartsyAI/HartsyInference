@@ -76,7 +76,12 @@ public sealed class VocosTests
         loader.Load(modelPath);
         Dictionary<string, Tensor> weights = loader.GetAllTensors();
 
-        using Vocos vocos = new(VocosConfig.Mel24k);
+        // OutputGain=44.53 is the per-checkpoint workaround for the mel-scale mismatch
+        // between our C# MelSpectrogramExtractor and the torchaudio mel that the published
+        // Vocos checkpoints were trained on. The fixture <c>jfk_mel_vocos.bin</c> is a mel
+        // dumped from upstream Python and is already on the "correct" training-time scale,
+        // so the gain workaround does NOT apply here — disable it.
+        using Vocos vocos = new(VocosConfig.Mel24k with { OutputGain = 1.0f });
         vocos.LoadWeights(weights);
 
         using CpuBackend backend = new();

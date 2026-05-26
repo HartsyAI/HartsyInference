@@ -77,6 +77,23 @@ public static class ActivationKernels
         for (int i = 0; i < count; i++) pOut[i] = MathF.Tanh(pIn[i]);
     }
 
+    /// <summary>Leaky ReLU: <c>x if x &gt;= 0 else slope * x</c>. Used by Kokoro /
+    /// StyleTTS 2's text encoder (slope=0.2) and several other audio nets where the
+    /// non-zero negative gradient prevents dead-neuron failure modes in narrow channel
+    /// counts.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void LeakyRelu(Tensor output, Tensor input, float slope)
+    {
+        int count = (int)output.ElementCount;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (int i = 0; i < count; i++)
+        {
+            float x = pIn[i];
+            pOut[i] = x >= 0f ? x : slope * x;
+        }
+    }
+
     /// <summary>ELU activation: <c>x if x &gt;= 0 else alpha * (exp(x) - 1)</c>. Standard SEANet activation for EnCodec / DAC residual blocks.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void Elu(Tensor output, Tensor input, float alpha)

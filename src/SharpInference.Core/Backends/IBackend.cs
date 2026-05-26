@@ -38,6 +38,14 @@ public interface IBackend : IDisposable
     /// <summary>RMS normalization.</summary>
     void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps);
 
+    /// <summary>Adaptive Instance Normalization 1D. Input <c>[B, C, T]</c> is normalized
+    /// per-(batch, channel) across the <c>T</c> axis, then affinely scaled by
+    /// <c>(1 + gamma[c])</c> and shifted by <c>beta[c]</c>. <paramref name="gamma"/> and
+    /// <paramref name="beta"/> are <c>[B, C]</c> (or <c>[C]</c>, broadcast across batch);
+    /// they typically come from a Linear projection of a style / speaker embedding —
+    /// AdaIN1d is the core style-conditioning primitive in Kokoro and StyleTTS 2.</summary>
+    void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps);
+
     // ── Attention ───────────────────────────────────────────────────────
 
     /// <summary>Scaled dot-product attention: output = softmax(Q @ K^T / sqrt(d)) @ V</summary>
@@ -61,6 +69,10 @@ public interface IBackend : IDisposable
     /// <summary>ELU activation: <c>x if x &gt;= 0 else alpha * (exp(x) - 1)</c>. Used by
     /// the SEANet residual blocks in EnCodec and DAC — alpha is typically 1.0.</summary>
     void Elu(Tensor output, Tensor input, float alpha);
+
+    /// <summary>Leaky ReLU: <c>x if x &gt;= 0 else slope * x</c>. Kokoro / StyleTTS 2's
+    /// text encoder + decoder use slope=0.2; HiFi-GAN MRF blocks use the same.</summary>
+    void LeakyRelu(Tensor output, Tensor input, float slope);
 
     /// <summary>Snake activation: <c>x + (sin(alpha * x))^2 / divisor</c>, where
     /// <c>divisor = alpha</c> when <paramref name="beta"/> is null (vanilla snake from
@@ -134,6 +146,147 @@ public interface IBackend : IDisposable
 
     /// <summary>Bilinear 2D upsample by the given scale factor.</summary>
     void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW);
+
+    /// <summary>2D transposed convolution. Used by YOLO seg's Proto module for upsampling mask
+    /// prototypes (k=2, s=2, p=0 doubles spatial dims). Weight shape is <c>[C_in, C_out, kH, kW]</c>
+    /// — PyTorch convention, note input channels come first (opposite of standard Conv2d).
+    /// Default implementation is a CPU scatter-add loop over F32 NCHW tensors; backends should
+    /// override for performance.</summary>
+    unsafe void ConvTranspose2d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32)
+            throw new NotSupportedException($"ConvTranspose2d default fallback only supports F32 — got input={input.DType}, output={output.DType}, weight={weight.DType}.");
+        if (input.Shape.Rank != 4 || output.Shape.Rank != 4 || weight.Shape.Rank != 4)
+            throw new ArgumentException($"ConvTranspose2d requires 4D tensors; got input {input.Shape}, output {output.Shape}, weight {weight.Shape}.");
+
+        int n = (int)input.Shape[0];
+        int cIn = (int)input.Shape[1];
+        int iH = (int)input.Shape[2];
+        int iW = (int)input.Shape[3];
+        int cOut = (int)output.Shape[1];
+        int oH = (int)output.Shape[2];
+        int oW = (int)output.Shape[3];
+        int kH = (int)weight.Shape[2];
+        int kW = (int)weight.Shape[3];
+        if (weight.Shape[0] != cIn || weight.Shape[1] != cOut)
+            throw new ArgumentException($"ConvTranspose2d weight shape [{weight.Shape[0]}, {weight.Shape[1]}, ...] must equal [C_in={cIn}, C_out={cOut}, ...].");
+
+        float* srcBase = (float*)input.DataPointer;
+        float* dstBase = (float*)output.DataPointer;
+        float* wBase = (float*)weight.DataPointer;
+        float* bBase = bias is null ? null : (float*)bias.DataPointer;
+
+        // Initialize output to bias (so the scatter-add can accumulate on top).
+        for (int b = 0; b < n; b++)
+        {
+            for (int co = 0; co < cOut; co++)
+            {
+                float biasVal = bBase is null ? 0f : bBase[co];
+                float* plane = dstBase + ((long)b * cOut + co) * oH * oW;
+                for (long i = 0; i < (long)oH * oW; i++) plane[i] = biasVal;
+            }
+        }
+
+        // Scatter-add: each input pixel (ci, yi, xi) contributes weight[ci, co, ky, kx] * value
+        // to every output position (yi*sH+ky-pH, xi*sW+kx-pW) for each (co, ky, kx).
+        for (int b = 0; b < n; b++)
+        {
+            for (int ci = 0; ci < cIn; ci++)
+            {
+                float* srcPlane = srcBase + ((long)b * cIn + ci) * iH * iW;
+                for (int co = 0; co < cOut; co++)
+                {
+                    float* dstPlane = dstBase + ((long)b * cOut + co) * oH * oW;
+                    long wOff = ((long)ci * cOut + co) * kH * kW;
+                    for (int yi = 0; yi < iH; yi++)
+                    {
+                        for (int xi = 0; xi < iW; xi++)
+                        {
+                            float v = srcPlane[yi * iW + xi];
+                            if (v == 0f) continue;
+                            for (int ky = 0; ky < kH; ky++)
+                            {
+                                int yo = yi * strideH + ky - padH;
+                                if (yo < 0 || yo >= oH) continue;
+                                for (int kx = 0; kx < kW; kx++)
+                                {
+                                    int xo = xi * strideW + kx - padW;
+                                    if (xo < 0 || xo >= oW) continue;
+                                    dstPlane[yo * oW + xo] += wBase[wOff + ky * kW + kx] * v;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Depthwise 2D convolution — each output channel sees exactly one input channel
+    /// (groups = C). Used by YOLO11's class branch and the C2PSA positional encoding. Weight
+    /// shape is <c>[C, 1, kH, kW]</c> and bias <c>[C]</c>. Default implementation is a CPU loop
+    /// over F32 NCHW tensors; backends should override for performance once a depthwise
+    /// kernel is worth shipping.</summary>
+    unsafe void Conv2dDepthwise(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32)
+            throw new NotSupportedException($"Conv2dDepthwise default fallback only supports F32 — got input={input.DType}, output={output.DType}, weight={weight.DType}.");
+        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new ArgumentException($"Conv2dDepthwise requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
+        if (weight.Shape.Rank != 4 || weight.Shape[1] != 1)
+            throw new ArgumentException($"Conv2dDepthwise weight must be [C, 1, kH, kW]; got {weight.Shape}.");
+        if (input.Shape[1] != weight.Shape[0] || output.Shape[1] != weight.Shape[0])
+            throw new ArgumentException("Conv2dDepthwise requires input/output channel count to equal weight channel count.");
+
+        int n = (int)input.Shape[0];
+        int c = (int)input.Shape[1];
+        int iH = (int)input.Shape[2];
+        int iW = (int)input.Shape[3];
+        int oH = (int)output.Shape[2];
+        int oW = (int)output.Shape[3];
+        int kH = (int)weight.Shape[2];
+        int kW = (int)weight.Shape[3];
+
+        float* srcBase = (float*)input.DataPointer;
+        float* dstBase = (float*)output.DataPointer;
+        float* wBase = (float*)weight.DataPointer;
+        float* bBase = bias is null ? null : (float*)bias.DataPointer;
+
+        for (int b = 0; b < n; b++)
+        {
+            for (int ch = 0; ch < c; ch++)
+            {
+                float* srcPlane = srcBase + ((long)b * c + ch) * iH * iW;
+                float* dstPlane = dstBase + ((long)b * c + ch) * oH * oW;
+                float* kernel = wBase + (long)ch * kH * kW;
+                float biasVal = bBase is null ? 0f : bBase[ch];
+
+                for (int oy = 0; oy < oH; oy++)
+                {
+                    int iy0 = oy * strideH - padH;
+                    for (int ox = 0; ox < oW; ox++)
+                    {
+                        int ix0 = ox * strideW - padW;
+                        float v = biasVal;
+                        for (int ky = 0; ky < kH; ky++)
+                        {
+                            int iy = iy0 + ky;
+                            if (iy < 0 || iy >= iH) continue;
+                            for (int kx = 0; kx < kW; kx++)
+                            {
+                                int ix = ix0 + kx;
+                                if (ix < 0 || ix >= iW) continue;
+                                v += kernel[ky * kW + kx] * srcPlane[iy * iW + ix];
+                            }
+                        }
+                        dstPlane[oy * oW + ox] = v;
+                    }
+                }
+            }
+        }
+    }
 
     /// <summary>2D max-pooling with explicit kernel, stride, and zero-padding. Used by YOLO's
     /// SPPF block (k=5, s=1, p=2 — preserves spatial dims). Default implementation is a CPU loop

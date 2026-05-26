@@ -84,6 +84,8 @@ public sealed class WhisperPipelineSurfaceTests
         public void GroupNorm(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, SharpInference.Core.Tensors.Tensor w, SharpInference.Core.Tensors.Tensor b, int g, float e) => throw new NotImplementedException();
         public void LayerNorm(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, SharpInference.Core.Tensors.Tensor w, SharpInference.Core.Tensors.Tensor b, float e) => throw new NotImplementedException();
         public void RmsNorm(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, SharpInference.Core.Tensors.Tensor w, float e) => throw new NotImplementedException();
+        public void AdaInstanceNorm1d(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, SharpInference.Core.Tensors.Tensor g, SharpInference.Core.Tensors.Tensor b, float e) => throw new NotImplementedException();
+        public void LeakyRelu(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i, float s) => throw new NotImplementedException();
         public void ScaledDotProductAttention(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor q, SharpInference.Core.Tensors.Tensor k, SharpInference.Core.Tensors.Tensor v, SharpInference.Core.Tensors.Tensor? m, float s) => throw new NotImplementedException();
         public void Gelu(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
         public void Silu(SharpInference.Core.Tensors.Tensor o, SharpInference.Core.Tensors.Tensor i) => throw new NotImplementedException();

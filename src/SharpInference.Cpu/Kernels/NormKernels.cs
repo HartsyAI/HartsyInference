@@ -127,6 +127,65 @@ public static class NormKernels
         }
     }
 
+    /// <summary>Adaptive Instance Norm 1D over a channels-first tensor <c>[B, C, T]</c>.
+    /// For each <c>(b, c)</c> slice, normalizes across the <c>T</c> axis to zero-mean
+    /// unit-variance, then applies a per-channel affine: <c>(1 + gamma[c]) * x_hat +
+    /// beta[c]</c>. <paramref name="gamma"/> and <paramref name="beta"/> are <c>[B, C]</c>
+    /// (or <c>[C]</c>; the kernel broadcasts a 1-D affine across the batch).
+    ///
+    /// <para>This is the AdaIN1d block used by Kokoro / StyleTTS 2 throughout the prosody
+    /// predictor and the iSTFTNet decoder: a Linear projection from the style vector
+    /// produces a <c>[B, 2*C]</c> tensor that is split into <c>gamma</c> and <c>beta</c>,
+    /// then fed here.</para>
+    ///
+    /// <para>The <c>(1 + gamma)</c> term (not just <c>gamma</c>) matches the official
+    /// AdaIN1d implementation — at init gamma=beta=0 the AdaIN block is the identity on
+    /// top of instance-normalized input, which is the expected starting point for
+    /// fine-tuning.</para></summary>
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public static unsafe void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
+    {
+        if (input.Shape.Rank != 3) throw new ArgumentException($"AdaInstanceNorm1d expects rank-3 input [B,C,T], got {input.Shape}.");
+        int batch = (int)input.Shape[0];
+        int channels = (int)input.Shape[1];
+        int t = (int)input.Shape[2];
+
+        // gamma / beta can be either [B, C] or [C]; if rank-1, broadcast across the batch.
+        bool perBatch = gamma.Shape.Rank == 2;
+        if (!perBatch && gamma.Shape.Rank != 1)
+            throw new ArgumentException($"AdaInstanceNorm1d gamma must be [B,C] or [C], got {gamma.Shape}.");
+        if (perBatch && ((int)gamma.Shape[0] != batch || (int)gamma.Shape[1] != channels))
+            throw new ArgumentException($"AdaInstanceNorm1d gamma shape {gamma.Shape} does not match [B={batch}, C={channels}].");
+        if (!perBatch && (int)gamma.Shape[0] != channels)
+            throw new ArgumentException($"AdaInstanceNorm1d gamma [C] must have C={channels}, got {gamma.Shape}.");
+        if (beta.Shape.Rank != gamma.Shape.Rank || beta.ElementCount != gamma.ElementCount)
+            throw new ArgumentException($"AdaInstanceNorm1d beta shape {beta.Shape} must match gamma {gamma.Shape}.");
+
+        float* ip = (float*)input.DataPointer;
+        float* op = (float*)output.DataPointer;
+        float* gp = (float*)gamma.DataPointer;
+        float* bp = (float*)beta.DataPointer;
+
+        for (int b = 0; b < batch; b++)
+        {
+            int affineBase = perBatch ? b * channels : 0;
+            for (int c = 0; c < channels; c++)
+            {
+                long baseIdx = ((long)b * channels + c) * t;
+                VectorizedSumAndSumSq(ip + baseIdx, t, out float sum, out float sumSq);
+                float mean = sum / t;
+                float var = sumSq / t - mean * mean;
+                float invStd = 1.0f / MathF.Sqrt(var + eps);
+
+                float g = gp[affineBase + c];
+                float bAdd = bp[affineBase + c];
+                float scale = (1.0f + g) * invStd;
+                float shift = bAdd - mean * scale;
+                for (int j = 0; j < t; j++) op[baseIdx + j] = ip[baseIdx + j] * scale + shift;
+            }
+        }
+    }
+
     /// <summary>Applies Root Mean Square Normalization over the last dimension of the input tensor. RMSNorm omits the mean centering step: output = (x / rms(x)) * weight, where rms(x) = sqrt(mean(x^2) + eps).</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)

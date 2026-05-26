@@ -707,6 +707,16 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
+    {
+        throw new NotImplementedException("CudaBackend.AdaInstanceNorm1d not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2 prosody and decoder paths.");
+    }
+
+    public void LeakyRelu(Tensor output, Tensor input, float slope)
+    {
+        throw new NotImplementedException("CudaBackend.LeakyRelu not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2.");
+    }
+
     /// <summary>Fused GroupNorm + SiLU via single PTX kernel. Eliminates intermediate allocation.</summary>
     public void GroupNormSilu(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
