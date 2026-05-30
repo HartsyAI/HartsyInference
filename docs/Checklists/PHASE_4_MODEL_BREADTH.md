@@ -3,6 +3,11 @@
 > **Goal:** Support SDXL and Flux model families, FP8 inference for large DiT models.
 > **Packages:** SharpInference.Diffusion (extended), Core (DType), Cuda (FP8 kernels)
 
+> **Status (2026-05-27):** added **Microsoft Lens / Lens-Turbo / Lens-Base** research + checklist (3.8B
+> dual-stream MMDiT, MIT, released 2026-05-25). Lens is not-started — it's research-complete and waiting on
+> net-new GPT-OSS infra (real top-k MoE FFN routing, MXFP4 dequant-at-load, alternating sliding/full
+> attention masks). See § Microsoft Lens below.
+>
 > **Status (2026-05-07):** all image-model scaffolding is complete across **15 model families** —
 > SD1.5, SDXL (+Inpaint, +Refiner), SD3 / SD3.5 (Medium / Large / Large-Turbo), Flux (Dev / Schnell / Krea),
 > Flux.2 (Klein 4B / Dev), Z-Image (Turbo / Base), AuraFlow v0.3, Chroma, ERNIE-Image, Qwen-Image,
@@ -33,6 +38,7 @@
 - [x] SDXL_ARCHITECTURE, FLUX_ARCHITECTURE, LORA_FORMAT, T5_ARCHITECTURE
 - [x] QUANTIZATION_DIFFUSION — comprehensive (FP8, GGUF Q8_0/Q4_K, mixed-precision strategy, quality presets)
 - [x] [LANCE_ARCHITECTURE](../Research/LANCE_ARCHITECTURE.md) — ByteDance unified multimodal (MoT dual-stream + MaPE + Wan2.2 3D causal VAE + 3-way CFG flow-match). Covers both the Phase 4 image variant (`Lance_3B`) and the Phase 9 video variant (`Lance_3B_Video`); the two share a backbone, so the image pipeline lands first to amortize the net-new infra.
+- [x] [MICROSOFT_LENS_ARCHITECTURE](../Research/MICROSOFT_LENS_ARCHITECTURE.md) — Microsoft Research's 3.8B dual-stream MMDiT (MIT, 2026-05-25). 48 layers / hidden 1536 / GPT-OSS MoE multi-layer (layers 5/11/17/23) text encoder + Flux.2 semantic VAE + flow-match Euler with empirical mu + norm-rescaled CFG. Covers all three weight variants (Lens RL-tuned, Lens-Turbo distilled, Lens-Base SFT-only — same architecture, different sampling defaults). Documents net-new infra: real top-k MoE routing for GPT-OSS (HiDream's MoE today is single-expert fallback), MXFP4 dequant-at-load, alternating sliding-128 / full-attention masks.
 
 ## 2. Planning
 
@@ -380,6 +386,112 @@ Distinguishing features vs Flux:
 #### Weights (12 GB target)
 - BFL-style FP16 (~20 GB transformer + 9.5 GB T5 + 0.08 GB VAE = ~29.5 GB) — won't fit at FP16, FP8 cast at load (~10 GB transformer + 4.7 GB T5 + 0.08 GB VAE = ~14.8 GB) tight; **eviction discipline** (T5 freed after encode, transformer freed before VAE) brings peak below 12 GB.
 - F-Lite-7B at FP8 — ~7 GB transformer; comfortable on 12 GB.
+
+### Microsoft Lens / Lens-Turbo / Lens-Base — DIT + ENCODER COMPLETE; CHECKPOINT-GATED VISUAL VALIDATION PENDING
+
+> MIT license. 3.8B-parameter dual-stream MMDiT from Microsoft Research, released 2026-05-25 and announced via SwarmUI integration shortly after.
+> Source of truth: [github.com/microsoft/Lens](https://github.com/microsoft/Lens) (`lens/transformer.py`, `lens/pipeline.py`, `lens/text_encoder.py`, `lens/resolution.py`), [`huggingface.co/microsoft/Lens`](https://huggingface.co/microsoft/Lens), `microsoft/Lens-Turbo`, `microsoft/Lens-Base`.
+> **Architecture research: [`docs/Research/MICROSOFT_LENS_ARCHITECTURE.md`](../Research/MICROSOFT_LENS_ARCHITECTURE.md).**
+
+**Why this matters:** Microsoft's headline trick is that the DiT itself is small (3.8B) but conditioning is enormous — frozen GPT-OSS MoE text encoder with **four hidden-state layers concatenated** (layers 5/11/17/23 of a 24-layer MoE LM, channel-concat'd to 11520-dim then projected down to 1536). The result is a model that on a 4090 generates clean 1440×1440 with sharp text, iconography, and characters in a few seconds. Quality competitive with Flux at one-fifth the DiT parameter count. Three variants share the exact same transformer architecture, differing only in training and recommended sampler settings:
+
+| Variant | Steps | CFG | Training | Repo |
+|---|---|---|---|---|
+| `microsoft/Lens` (default) | 20 | 5.0 | Pre-train → SFT → RL | RL-tuned production weights |
+| `microsoft/Lens-Turbo` | 4 | 1.0 | + distillation | Fast inference, no CFG |
+| `microsoft/Lens-Base` | 50 | 5.0 | SFT only | Reference baseline |
+
+**Distinguishing features vs everything we've built so far:**
+
+- **Dual-stream MMDiT with 6-output per-stream AdaLN** chunked as `(shift1, scale1, gate1, shift2, scale2, gate2)` — Flux's six-output order differs subtly; the chunk semantics must match exactly. Per-stream `(norm_q, norm_k, norm_added_q, norm_added_k)` RMSNorm applied per-head (eps=1e-5) BEFORE the joint concat.
+- **3-axis complex-polar RoPE** with `axes_dims_rope=(8, 28, 28)` sum 64 = head_dim, theta=10000, **scale_rope=True hardcoded** (centers rotation around image middle by splitting height/width into pos+neg halves). Same kernel as Qwen-Image's RoPE — reuse.
+- **GPT-OSS MoE text encoder, multi-layer feature extraction.** Captures hidden states at layers [5, 11, 17, 23] (0-indexed; layer 23 is the final), early-exits after layer 23. Each layer is RMSNorm'd by its own learnable scale, channel-concat'd (11520), Linear-projected to 1536. The encoder is **MoE (32 local experts × 4 active per token), GQA 64:8, alternating sliding-128 / full causal attention**, native **MXFP4**.
+- **Empirical-mu flow-match schedule:** `mu` is computed as a piecewise-linear function of `(image_seq_len, num_steps)` with calibrated constants — `a1=8.73809524e-5`, `b1=1.89833333`, `a2=0.00016927`, `b2=0.45666666`. Existing `FlowMatchEulerDiscreteScheduler` accepts `mu` directly; just need to plumb it.
+- **Norm-rescaled CFG:** standard `comb = uncond + cfg*(cond - uncond)`, then per-token rescale `comb *= cond_norm / max(comb_norm, 1e-12)`. Important even at CFG=1.0 (no-op in expectation, but the multiplication still runs). This is what keeps CFG=5.0 from saturating.
+- **Packed-token latent format throughout the denoise loop.** Shape `(B, latent_h * latent_w, 128)` — never `[B, C, H, W]` until the VAE-decode boundary, where the pipeline does `rearrange("b (h w) (c p1 p2) -> b c (h p1) (w p2)", p1=2, p2=2)`.
+- **VAE-side BN un-normalization at the pipeline boundary** (same pattern as Flux.2): `shift = -bn.running_mean`, `scale = 1/sqrt(bn.running_var + eps)` applied via 2×2 patchify → div/sub → unpatchify before `vae.decode`.
+- **Reuses Flux.2 semantic VAE verbatim** — no new VAE code needed.
+- **Fixed resolution buckets** (1024 or 1440 base × 9 aspect ratios, all H/W divisible by 16): 1:2, 9:16, 2:3, 3:4, 1:1, 4:3, 3:2, 16:9, 2:1. The pipeline's `resolve_resolution(base_resolution, aspect_ratio)` returns the exact (H, W) tuple — list in `lens/resolution.py`.
+- **97-token system-prompt strip** — `DEFAULT_TXT_OFFSET = 97`. The chat-template wrapper (system message describing the image-generation task + assistant thinking) always tokenizes to exactly 97 tokens; Lens strips those from the encoder output before the DiT sees them. Verify on first run by running the chat template through the tokenizer.
+
+#### Net-new backend / kernel work — required before Lens can build
+
+These items are **shared with future MoE-LM-conditioned models** and should be designed as reusable infra, not Lens-only one-offs.
+
+- [x] **Real top-k MoE FFN routing** — implemented as [`GptOssMoeFfn.cs`](../../src/SharpInference.Diffusion/Models/TextEncoders/GptOssMoeFfn.cs): router (linear+bias) → top-4-of-32 selection → softmax over the top-k logits only → per-expert GPT-OSS clamped GLU (`gate=cols[0::2].clamp(max=L)`, `up=cols[1::2].clamp(±L)`, `glu=gate·σ(α·gate)`, `gated=(up+1)·glu`) → `down_proj` accumulate. Direct (non-transposed) `state @ gate_up_proj[e]` / `gated @ down_proj[e]` matching upstream `GptOssExperts`. CPU reference dispatch (fine for the once-per-generation encoder pass); CUDA gather-scatter is a throughput follow-up.
+- [x] **MXFP4 dequant-at-load** — [`Mxfp4Codec.cs`](../../src/SharpInference.ModelHandler/Mxfp4/Mxfp4Codec.cs): 16-entry FP4 LUT + per-32-element E8M0 scale (`2^(stored-127)`). `DequantGptOssExpert` reproduces the on-disk `[E, A, G, 16]` → runtime `[E, G·32, A]` **transpose** that upstream `convert_moe_packed_tensors` applies (verified byte-exact vs `transformers.integrations.mxfp4`). Wired into `LensCheckpointConverter.Convert` via `DequantGptOssExpertsInPlace`. Dequant-to-F32 at load; native MXFP4 GEMM deferred.
+- [x] **Alternating sliding-window / full-attention masks in `LlamaStyleEncoderConfig`** — `LayerAttentionTypes : string[]` (per-layer `"sliding_attention"`/`"full_attention"`) + `SlidingWindow`. `GptOssEncoder.EnsureMasks` builds both masks; the per-layer forward picks by type. Lens window = 128.
+- [x] **GPT-OSS chat template + special tokens in tokenizer** — [`GptOssTokenizer.cs`](../../src/SharpInference.Tokenizers/GptOssTokenizer.cs) with the Harmony role markers (`<|start|>`/`<|message|>`/`<|end|>`/`<|channel|>`), reusing `Microsoft.ML.Tokenizers.BpeTokenizer`.
+
+#### Phase 4 deliverables — image pipeline (all three variants)
+
+**Status 2026-05-27:** DiT + checkpoint converter + pipeline + tokenizer built and unit-tested.
+
+**Status 2026-05-28 (encoder landed + validated):** The GPT-OSS text encoder is now fully implemented — `GptOssEncoder` (biased GQA 64:8 + split-half YaRN RoPE + attention sinks + alternating sliding-128/full masks + multi-layer capture/early-exit), `GptOssMoeFfn` (top-4-of-32 routing + clamped GLU), `Mxfp4Codec` (dequant-at-load with the transposed expert layout), and the `LensGptOssEncoder` offset-stripping wrapper. `LensPipeline.GenerateFromTokens` wires tokenizer → encoder → embeddings → denoise; the MXFP4 dequant is wired into `LensCheckpointConverter`. **The full encoder forward was cross-checked against HuggingFace `transformers.GptOssModel` (tiny config, random weights) and matches to float32 noise (max abs diff 9.3e-8)**; the MXFP4 dequant+transpose matches `convert_moe_packed_tensors` byte-exact; the YaRN inv_freq + `attention_factor` mscale match HF exactly. 45 Lens unit tests pass on .NET 8 + .NET 10. Two bugs found and fixed during validation: (1) the MXFP4 codec was missing the upstream `transpose(1,2)` on expert weights (would have garbled every MoE layer); (2) the YaRN RoPE used a wavelength-based ramp and omitted the `attention_factor` mscale (1.3466×) — replaced with HF's dimension-index ramp. **Remaining: end-to-end visual validation against the 30.7 GB `microsoft/Lens` checkpoint (download-gated) + an env-gated `LensGenerationTests` + the file-based layer-diff harness.**
+
+##### Built in 2026-05-27 session
+
+- [x] [`LensConfig.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/LensConfig.cs) — three variant presets (`Default`, `Turbo`, `Base`), all sharing the same architecture with different `(DefaultSteps, DefaultCfgScale)` tuples. Matches `transformer/config.json` verbatim (`HiddenSize=1536, NumLayers=48, NumHeads=24, HeadDim=64, MlpDim=4096, PatchSize=2, InChannels=128, OutChannels=32, EncoderHiddenDim=2880, SelectedEncoderLayers=[5,11,17,23], AxesDimsRope=[8,28,28], RopeTheta=10000`).
+- [x] [`LensRope.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/LensRope.cs) — complex-polar 3-axis RoPE with `scale_rope=True` hardcoded. `ComputeCenteredPositions(len)` builds the negative+positive split for height/width axes; `ApplyImage` rotates per-token by `[0, row_pos, col_pos]`; `ApplyText(positionStart=max(h//2, w//2))` rotates text with the per-axis-identical position to avoid image collision.
+- [x] [`LensTransformerBlock.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/LensTransformerBlock.cs) — dual-stream block. Reuses `AdaLNModulation(6)`, `QkNorm`, `SwiGluFfn` from existing DiTBlocks. RMSNorm stream norms (eps=1e-6) — distinct from Qwen-Image's LayerNormNoAffine. SwiGLU FFN with `w1/w2/w3` naming (no biases). Returns `(text, image)` matching upstream return order. Joint-attention concat order is `[img, txt]` per upstream `LensJointAttention`.
+- [x] [`LensTransformer.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/LensTransformer.cs) — top-level. Per-layer `txt_norm[i]` (4× RMSNorm 2880 with learned scale) → channel-concat to 11520 → `txt_in` Linear(11520→1536). `img_in` Linear(128→1536). `time_text_embed` sinusoidal × 1000 + Linear(256→1536) + SiLU + Linear(1536→1536). 48× `LensTransformerBlock`. AdaLN-Continuous final layer (`Linear(1536→3072)` for `[shift, scale]` + LayerNorm-no-affine + modulate + `proj_out` Linear(1536→128)).
+- [x] [`LensDebugDump.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/LensDebugDump.cs) — env var `LENS_DEBUG_DIR`. Mirrors `QwenImageDebugDump` / `Sd3DebugDump` for the future layer-by-layer diff harness.
+- [x] [`LensCheckpointConverter.cs`](../../src/SharpInference.ModelHandler/CheckpointConverters/LensCheckpointConverter.cs) — diffusers passthrough + splits fused `attn.img_qkv` → `to_q/to_k/to_v` and `attn.txt_qkv` → `add_q_proj/add_k_proj/add_v_proj`. Buckets by `transformer.` / `text_encoder.` / `vae.` prefix. FP8 scale-companion folding via `CheckpointConvertUtils.ApplyFp8ScaledDequant`.
+- [x] [`LensPipeline.cs`](../../src/SharpInference.Diffusion/Pipelines/LensPipeline.cs) — `GenerateFromEmbeddings(positiveLayers, negativeLayers?, request, onProgress)` accepts pre-computed multi-layer GPT-OSS hidden states (Kandinsky5/Anima pattern). Implements: empirical-mu schedule via the existing `FlowMatchEulerDiscreteScheduler` (algebraically identical: `shift = exp(mu)`), packed-token latent throughout the denoise loop, norm-rescaled CFG dual-pass when `cfgScale > 1`, weight eviction before VAE decode (PHASE_3_DEVIATIONS #18), Flux.2 VAE BN un-normalization + 2×2 unpatchify + `VaeDecoder.DecodeTiled`.
+- [x] [`GptOssTokenizer.cs`](../../src/SharpInference.Tokenizers/GptOssTokenizer.cs) — BPE wrap with the Lens Harmony chat template (`<|start|>`/`<|message|>`/`<|end|>`/`<|channel|>` role markers). Constants `ChatSystemPrompt`, `ChatAssistantThinking`, `DefaultTxtOffset = 97` mirror upstream verbatim. `BuildChatInputs(prompt)` returns `(int[] tokenIds, int[] attentionMask)` of length 512 with right-padding by pad token.
+- [x] [`LensTests.cs`](../../tests/SharpInference.Diffusion.Tests/LensTests.cs) — 14 unit tests passing on .NET 8 and .NET 10: variant config preset values, RoPE head-dim invariants, RoPE axis-count rejection, text-position-start formula for scale_rope=True, RoPE identity at position 0, image-RoPE smoke (mutates non-zero positions), transformer construction without weights, missing-key throw on LoadWeights, fused QKV split (img + txt → to_q/k/v + add_*_proj), bias split, non-fused passthrough, prefix bucketing.
+- [x] [`LensEncoderTests.cs`](../../tests/SharpInference.Diffusion.Tests/LensEncoderTests.cs) — 31 unit tests for the encoder side: GptOss config preset + alternating-attention pattern, MXFP4 LUT/scale/nibble-ordering/multi-block dequant **and the GPT-OSS expert transpose dequant** (`[E,A,G,16]→[E,G·32,A]`) + in-place gate_up/down stripping, MoE top-k routing + softmax + clamped-GLU ceiling vs hand-computed values, encoder construction/validation guards, end-to-end synthetic forward (finite outputs through every path), multi-layer capture/early-exit/ordering, and the `LensGptOssEncoder` offset-stripping wrapper guards.
+
+##### Encoder side — BUILT + validated 2026-05-28
+
+The GPT-OSS encoder is implemented and cross-checked against HuggingFace (see status note above). The DiT can also still be exercised through `LensPipeline.GenerateFromEmbeddings` with pre-computed embeddings.
+
+- [x] [`GptOssEncoder.cs`](../../src/SharpInference.Diffusion/Models/TextEncoders/GptOssEncoder.cs) — GPT-OSS forward: embedding lookup, per-layer RMSNorm → biased GQA self-attn (split-half YaRN RoPE, per-head attention sinks folded into the softmax denominator, sliding-128/full mask per `LayerAttentionTypes`) → residual → RMSNorm → MoE FFN → residual; optional final norm. `EncodeAtLayers` captures multi-layer hidden states with early-exit after the largest selected index.
+- [x] [`GptOssMoeFfn.cs`](../../src/SharpInference.Diffusion/Models/TextEncoders/GptOssMoeFfn.cs) — top-4-of-32 routing + GPT-OSS clamped GLU (verified vs `GptOssExperts`).
+- [x] [`LensGptOssEncoder.cs`](../../src/SharpInference.Diffusion/Models/TextEncoders/LensGptOssEncoder.cs) — Lens wrapper: hardcoded `SelectedLayers=[5,11,17,23]`, `DefaultTextOffset=97` strip, returns the four `[1, S_txt, 2880]` captures the DiT consumes.
+- [x] `LlamaStyleEncoderConfig.GptOss` preset — now backed by real runtime support (MoE + alternating attention + GQA 64:8 + YaRN + sinks + clamped GLU); preset values asserted in `LensEncoderTests`.
+- [x] **MXFP4 dequant-at-load** — `Mxfp4Codec` (see net-new section above), wired into `LensCheckpointConverter`.
+- [ ] `src/SharpInference.ModelHandler/Gguf/KeyMappers/LensKeyMapper.cs` — GGUF tensor-name → diffusers key remap. **No GGUF release for Lens as of 2026-05-28.**
+
+##### ComfyUI checkpoint formats (`Comfy-Org/Lens`) — BUILT + validated 2026-05-29
+
+The checkpoints actually in use are the ComfyUI repackages (ungated): BF16/MXFP8 DiT + NVFP4 GPT-OSS text encoder + Flux.2 VAE, shipped as three separate single-component files (see [`MICROSOFT_LENS_ARCHITECTURE.md` § ComfyUI distribution](../Research/MICROSOFT_LENS_ARCHITECTURE.md)). The MXFP8 and NVFP4 dequant math + the NVIDIA swizzled block-scale layout were validated byte-/noise-exact against `comfy.float`.
+
+- [x] [`BlockScaleSwizzle.cs`](../../src/SharpInference.ModelHandler/BlockScale/BlockScaleSwizzle.cs) — inverts NVIDIA's cuBLAS "blocked" scale layout (`comfy.float.to_blocked`); swizzle round-trip exact.
+- [x] [`Mxfp8Codec.cs`](../../src/SharpInference.ModelHandler/Mxfp8/Mxfp8Codec.cs) — `mxfp8_block32` DiT linears: F8E4M3 weight + U8 E8M0 group-32 swizzled scale → BF16. `DequantInPlace` strips companions; no-op on the BF16 file.
+- [x] [`Nvfp4Codec.cs`](../../src/SharpInference.ModelHandler/Nvfp4/Nvfp4Codec.cs) — `nvfp4` GPT-OSS experts: U8 FP4 (E2M1, high-nibble-even) + F8E4M3 group-16 swizzled block scale + F32 per-expert global → transposed F32 `[E, in, out]`.
+- [x] `LensCheckpointConverter.ConvertComfy` / `ConvertComfyDit` / `ConvertComfyTextEncoder` / `LoadAndConvertComfy` — split-file loader: MXFP8/NVFP4 dequant, `model.` prefix for the TE, ComfyUI expert-bias rename (`gate_up_proj.bias`→`gate_up_proj_bias`), BF16→F32 cast for the CPU encoder GEMM, drops `comfy_quant` + `tokenizer_json`.
+- [x] [`LensComfyQuantTests.cs`](../../tests/SharpInference.Diffusion.Tests/LensComfyQuantTests.cs) — 6 tests: swizzle golden + bijection, MXFP8 dequant + companion strip, NVFP4 dequant + transpose, ComfyUI TE convert (remap + bias rename + blob drop + expert dequant).
+- [x] **Pipeline factory + VAE bn extraction** — [`LensPipelineFactory`](../../src/SharpInference.Diffusion/Pipelines/LensPipelineFactory.cs) wires `ConvertComfy` (and single-file `Convert`) output → `LensTransformer.LoadWeights` + `LensGptOssEncoder.LoadWeights` + Flux.2 `VaeDecoder`, extracting the patchified-latent BN `running_mean`/`running_var` from the VAE dict as owned F32 `[128]` copies (`CastTo(F32)` always copies, so the loader-/caller-owned source mmap views are left intact), mirroring `Flux2GenerationTests`' Flux.2 wiring. BN validation runs **before** the multi-GB transformer load so a VAE missing the stats fails fast. Three entry points: `BuildFromConverted(converted)`, `LoadFromComfyFiles(dit, te, vae)`, `LoadFromSingleFile(path)`. Returns a [`LensPipelineBundle`](../../src/SharpInference.Diffusion/Pipelines/LensPipelineBundle.cs) (`IDisposable`) that owns the pipeline + components + BN copies + any opened loaders — `DiffusionPipelineBase` itself doesn't own components, so the bundle gives callers one handle to dispose. Checkpoint-free tests in [`LensPipelineFactoryTests.cs`](../../tests/SharpInference.Diffusion.Tests/LensPipelineFactoryTests.cs) pin the fail-fast BN-extraction contract (2 tests).
+- [ ] **Per-layer streaming NVFP4 dequant** — full-dequant of the 20B encoder to F32 is RAM-heavy; stream-dequant each layer's experts during the encode pass for tight-RAM/≤12 GB hosts.
+- [ ] **GGUF key mapper** — `LensKeyMapper.cs`. No GGUF release as of 2026-05-29.
+- [ ] `tests/SharpInference.Diffusion.Tests/LensGenerationTests.cs` — env-var-gated end-to-end test (`LENS_PATH`, `LENS_TURBO_PATH`, `LENS_BASE_PATH`, `LENS_TEXT_ENCODER_PATH`, `LENS_VAE_PATH`). VRAM probe ≥10 GB FP16-mix / ≥6 GB FP8. Three tests matching the three variants under their default sampler settings.
+- [ ] `tests/python-reference/dump_lens_full_forward.py` + `diff_lens_layers.py` + `LensDiffTests.cs` — layer-by-layer F32 diff harness. **Critical because Lens has several pipeline-level oddities** that are likely to need 1-3 first-run bug fixes per the SD3.5 / Z-Image pattern. Suspected hot spots:
+  1. **AdaLN chunk order** — Lens splits the 6-output mod tensor as `chunk(2)` of halves, then each half as `chunk(3)` into `(shift, scale, gate)`. Off-by-one here scrambles the entire denoise.
+  2. **Block return order** `(encoder, hidden)` vs the more common `(hidden, encoder)` — easy to swap silently.
+  3. **CFG batch ordering** — `LensPipeline` runs cond and uncond as TWO separate forward passes (not a batched-of-2 single pass) and applies norm-rescaling on the combined result. Upstream batches `[pos, neg]` then `chunk(2)` gives `(cond, uncond)` — algebraically the same as our two-pass impl for `batch=1`, but the diff harness must compare appropriately.
+  4. **Multi-layer feature concat order** — `encoderLayers[0]` MUST be layer-5, `[1]` layer-11, `[2]` layer-17, `[3]` layer-23. Mis-ordering shuffles which `txt_norm[i]` applies to which features.
+  5. **97-token offset off-by-one** — verify the chat template re-tokenizes to exactly 97 system+wrapper tokens on first run (`DEFAULT_TXT_OFFSET` in upstream pipeline). The C# `GptOssTokenizer.BuildChatInputs` renders the template explicitly; expected token count should match upstream's `_build_chat_inputs`.
+  6. **`scale_rope=True` is HARDCODED** in upstream `LensTransformer2DModel.__init__` but absent from `config.json` — the C# `LensRope` defaults to scale_rope=True implicitly via its centered-position table.
+  7. **GPT-OSS MoE router top-k order** — does softmax happen over all 32 logits then top-4, or top-4 logits then softmax over those? Settle via `transformers/models/gpt_oss/modeling_gpt_oss.py:GptOssExperts.forward` when the encoder lands.
+- [ ] **First-run debugging & visual validation** — needs `microsoft/Lens` downloaded (~30.7 GB total). Free of HF gating per MIT.
+- [ ] **End-to-end SSIM gate** — once first-run produces a clean image, add `tests/python-reference/dump_lens_reference_image.py` and a `LensSsimTests.cs` mirroring `FluxSsimTests`.
+
+#### Weights (12 GB target)
+
+- DiT (FP16, 3.8 B) ≈ **7.6 GB**; FP8 cast-on-load ≈ **3.8 GB**
+- GPT-OSS encoder MXFP4-native ≈ **12 GB** packed; **24 GB** dequant'd to FP16 (default first-cut)
+- Flux.2 VAE (FP16) ≈ **~5 GB**
+- 12 GB plan: encode prompt → `FreeWeights(encoder)` → load DiT → denoise → `FreeWeights(DiT)` → load VAE → decode. Same eviction discipline as Flux/SD3.5/Qwen-Image.
+- Native MXFP4 GEMM would let the encoder stay resident for batch encoding (deferred; not needed for correctness).
+
+#### Open questions / blockers (full list in research doc § Open Questions)
+
+- Exact tensor key names in `transformer/diffusion_pytorch_model.safetensors` — diffusers `ModelMixin.save_pretrained` should produce 1:1 PyTorch state-dict names. First step on download: `safetensors_metadata --print-keys` and reconcile against the layout in the research doc.
+- MXFP4 unpack variant — confirm against `modeling_gpt_oss.py` (most likely standard MXFP4 with E8M0 block scales).
+- GPT-OSS MoE router output ordering (softmax-then-topk vs topk-then-softmax) — read once.
+- Lens-Turbo CFG=1.0 norm-rescale numerics — flag as "expected no-op but verify" on first run.
+- PromptReasoner (default OFF in upstream) — uses the same GPT-OSS to rewrite the prompt into a longer description. Out of scope for the first cut.
 
 ### Lance (ByteDance Research, unified multimodal) — NOT STARTED
 

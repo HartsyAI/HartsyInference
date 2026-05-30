@@ -73,6 +73,79 @@ public sealed record LlamaStyleEncoderConfig
     /// Llama / Qwen use 2 norms.</summary>
     public bool HasFfnSandwichNorms { get; init; } = false;
 
+    // ────────────────────────────────────────────────────────────────────
+    // GPT-OSS additions (MoE FFN, attention sinks, sliding window per-layer,
+    // YaRN-extended RoPE, clamped non-standard SwiGLU). All default to off so
+    // existing Llama / Qwen / Mistral / Gemma presets continue to work.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// <summary>Per-layer attention pattern. <c>null</c> (default) → uniform causal attention with no
+    /// windowing. Non-null → must contain one entry per layer; each entry must be either
+    /// <c>"full_attention"</c> or <c>"sliding_attention"</c>. GPT-OSS alternates sliding/full starting
+    /// with sliding at layer 0. When a layer is sliding, only positions within
+    /// <see cref="SlidingWindow"/> tokens to the left are attended (plus the current token).</summary>
+    public string[]? LayerAttentionTypes { get; init; }
+
+    /// <summary>Sliding-window size (number of attended positions including current) for any layer
+    /// marked <c>"sliding_attention"</c> in <see cref="LayerAttentionTypes"/>. GPT-OSS uses 128.
+    /// Ignored if <see cref="LayerAttentionTypes"/> is null.</summary>
+    public int SlidingWindow { get; init; } = 128;
+
+    /// <summary>Number of routed experts per Mixture-of-Experts FFN. <c>0</c> (default) → dense FFN
+    /// (Llama path). GPT-OSS uses 32. Each layer has its own router and expert bank.</summary>
+    public int NumLocalExperts { get; init; } = 0;
+
+    /// <summary>Number of experts each token is routed to (top-k). GPT-OSS uses 4 of 32.
+    /// Must satisfy <c>0 &lt; NumExpertsPerToken &lt;= NumLocalExperts</c> when MoE is enabled.</summary>
+    public int NumExpertsPerToken { get; init; } = 0;
+
+    /// <summary>True when each attention layer has a learnable per-head <c>sinks</c> parameter mixed
+    /// into the attention logits (GPT-OSS-only). The sink acts as a per-head "bias bucket" that absorbs
+    /// probability mass under softmax, mitigating the attention-sink pathology in long-context models.
+    /// Implementation detail: for each head <c>h</c>, the softmax denominator gets an extra
+    /// <c>exp(sinks[h])</c> term, equivalent to prepending one virtual key-value pair with logit
+    /// <c>sinks[h]</c> and zero value. We implement this by post-scaling attention probabilities by
+    /// <c>1 / (1 + exp(sinks[h] - max_logit) / sum_exp)</c> equivalently to running softmax over
+    /// <c>[logits, sinks[h]]</c>.</summary>
+    public bool HasAttentionSinks { get; init; } = false;
+
+    /// <summary>True when the gated MLP uses GPT-OSS's clamped SwiGLU variant rather than standard
+    /// SwiGLU. Math: <c>gate.clamp(max=L)</c>, <c>up.clamp(-L, L)</c>,
+    /// <c>glu = gate * sigmoid(α·gate)</c>, output = <c>(up + 1) · glu</c>. Different from standard
+    /// SwiGLU in three ways: (1) clamping, (2) SiLU is taken at <c>α·gate</c> with <c>α=1.702</c>
+    /// (GELU-approximation), (3) up is shifted by +1.</summary>
+    public bool ClampedSwiGlu { get; init; } = false;
+
+    /// <summary>Clamp limit <c>L</c> for the GPT-OSS-style gated MLP. Default 7.0 matches
+    /// <c>config.swiglu_limit</c> in <c>openai/gpt-oss-20b</c>. Only used when
+    /// <see cref="ClampedSwiGlu"/> is true.</summary>
+    public float ClampedSwiGluLimit { get; init; } = 7.0f;
+
+    /// <summary>α coefficient for the SiLU approximation inside GPT-OSS-style gated MLP. Default 1.702
+    /// — the "GELU via SiLU" approximation constant. Only used when <see cref="ClampedSwiGlu"/> is true.</summary>
+    public float ClampedSwiGluAlpha { get; init; } = 1.702f;
+
+    /// <summary>RoPE scaling type. <see cref="RopeScalingType.None"/> = standard RoPE (default for
+    /// Llama / Qwen / Mistral / Gemma). <see cref="RopeScalingType.Yarn"/> = YaRN-extended RoPE used
+    /// by GPT-OSS.</summary>
+    public RopeScalingType RopeScaling { get; init; } = RopeScalingType.None;
+
+    /// <summary>YaRN scaling factor (original_max / extended_max). GPT-OSS: 32.0 (extends 4096 →
+    /// 131072). Only used when <see cref="RopeScaling"/> is <see cref="RopeScalingType.Yarn"/>.</summary>
+    public float YarnFactor { get; init; } = 1.0f;
+
+    /// <summary>YaRN high-frequency boundary — wavelengths shorter than
+    /// <c>original_max_pos / beta_fast</c> use the original (unscaled) inv-freq.</summary>
+    public float YarnBetaFast { get; init; } = 32.0f;
+
+    /// <summary>YaRN low-frequency boundary — wavelengths longer than
+    /// <c>original_max_pos / beta_slow</c> use fully-scaled inv-freq (divided by factor).</summary>
+    public float YarnBetaSlow { get; init; } = 1.0f;
+
+    /// <summary>The pre-extension max position. YaRN uses this to define which frequencies need
+    /// interpolation vs extrapolation. GPT-OSS: 4096.</summary>
+    public int YarnOriginalMaxPosition { get; init; } = 4096;
+
     /// <summary>Qwen3-0.6B-Base preset (28 layers, hidden=1024, GQA 16:8, head_dim=128, intermediate=3072,
     /// vocab=151936). Q dim = 16×128 = 2048, K/V dim = 8×128 = 1024 — attention projections are wider than
     /// the hidden size (Qwen3 0.6B's signature property). Used by Anima as its text encoder
@@ -258,4 +331,57 @@ public sealed record LlamaStyleEncoderConfig
         EosTokenId = 1,
         BosTokenId = 2,
     };
+
+    /// <summary>GPT-OSS preset (<c>openai/gpt-oss-20b</c>, re-published in <c>microsoft/Lens/text_encoder/</c>).
+    /// 24 layers, hidden=2880, GQA 64:8, head_dim=64 (Q proj output = 4096 ≠ hidden=2880), intermediate=2880
+    /// per expert × 32 experts × top-4 routing, vocab=201088, RMSNorm eps=1e-5, YaRN-extended RoPE
+    /// (theta=150000, factor=32, beta_fast=32, beta_slow=1, original_max=4096), attention biases enabled,
+    /// per-layer attention sinks, alternating sliding-128/full-causal attention, clamped GPT-OSS-style
+    /// gated MLP (clamp=7.0, α=1.702). Used by Microsoft Lens as its conditioning text encoder.</summary>
+    public static LlamaStyleEncoderConfig GptOss => new()
+    {
+        HiddenSize = 2880,
+        NumLayers = 24,
+        NumQueryHeads = 64,
+        NumKvHeads = 8,
+        HeadDim = 64,
+        IntermediateSize = 2880,
+        VocabSize = 201088,
+        RmsNormEps = 1e-5f,
+        RopeTheta = 150_000f,
+        MaxPositionEmbeddings = 131072,
+        QkHeadNorm = false,
+        AttentionBias = true,
+        HasFinalNorm = true,
+        Activation = MlpActivation.Silu,
+        // ── GPT-OSS-specific ──
+        LayerAttentionTypes = BuildAlternatingAttentionTypes(numLayers: 24, startsWithSliding: true),
+        SlidingWindow = 128,
+        NumLocalExperts = 32,
+        NumExpertsPerToken = 4,
+        HasAttentionSinks = true,
+        ClampedSwiGlu = true,
+        ClampedSwiGluLimit = 7.0f,
+        ClampedSwiGluAlpha = 1.702f,
+        RopeScaling = RopeScalingType.Yarn,
+        YarnFactor = 32.0f,
+        YarnBetaFast = 32.0f,
+        YarnBetaSlow = 1.0f,
+        YarnOriginalMaxPosition = 4096,
+        EosTokenId = 200002,
+        BosTokenId = 199998,
+    };
+
+    /// <summary>Builds the canonical GPT-OSS alternating attention layer-type array
+    /// (<c>sliding, full, sliding, full, ...</c>) of length <paramref name="numLayers"/>.</summary>
+    public static string[] BuildAlternatingAttentionTypes(int numLayers, bool startsWithSliding)
+    {
+        string[] result = new string[numLayers];
+        for (int i = 0; i < numLayers; i++)
+        {
+            bool sliding = (i % 2 == 0) == startsWithSliding;
+            result[i] = sliding ? "sliding_attention" : "full_attention";
+        }
+        return result;
+    }
 }
