@@ -55,12 +55,23 @@ public sealed class FftTests
     }
 
     [Fact]
-    public void NonPowerOfTwo_Throws()
+    public void NonPowerOfTwo_ComputesCorrectDft()
     {
-        float[] x = new float[100];
-        float[] re = new float[51];
-        float[] im = new float[51];
-        Assert.Throws<ArgumentException>(() => Fft.RealTransform(x, re, im, 100));
+        // n_fft=20 is iSTFTNet's (Kokoro) synthesis size — not a power of two, so it routes
+        // through the direct-DFT fallback. A pure 3-cycle cosine must concentrate in bin 3.
+        const int n = 20;
+        const int bin = 3;
+        float[] x = new float[n];
+        for (int t = 0; t < n; t++) x[t] = MathF.Cos(2f * MathF.PI * bin * t / n);
+        float[] re = new float[n / 2 + 1];
+        float[] im = new float[n / 2 + 1];
+        Fft.RealTransform(x, re, im, n);
+        for (int k = 0; k < re.Length; k++)
+        {
+            float mag = MathF.Sqrt(re[k] * re[k] + im[k] * im[k]);
+            if (k == bin) Assert.True(mag > n / 2f - 0.5f, $"bin {k}: magnitude {mag} should be ~{n / 2}");
+            else Assert.True(mag < 0.01f, $"bin {k}: magnitude {mag} should be ~0");
+        }
     }
 
     [Fact]

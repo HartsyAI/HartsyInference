@@ -59,7 +59,7 @@ public sealed class KokoroPipeline : IDisposable
     private readonly KokoroTextEncoder _textEncoder;
     private readonly KokoroProsodyPredictor _predictor;
     private readonly KokoroIStftNetDecoder _decoder;
-    private readonly SafeTensorsLoader _loader;
+    private readonly SafeTensorsLoader? _loader;
     private readonly Dictionary<string, KokoroVoicePack> _voicePackCache = new(StringComparer.Ordinal);
     private readonly string _repoDir;
     private int _disposed;
@@ -69,7 +69,7 @@ public sealed class KokoroPipeline : IDisposable
 
     private KokoroPipeline(KokoroConfig cfg, KokoroPhonemeTokenizer tok, KokoroPlBert plBert,
         KokoroTextEncoder textEnc, KokoroProsodyPredictor pred, KokoroIStftNetDecoder dec,
-        SafeTensorsLoader loader, string repoDir)
+        SafeTensorsLoader? loader, string repoDir)
     {
         _cfg = cfg;
         _tokenizer = tok;
@@ -79,6 +79,16 @@ public sealed class KokoroPipeline : IDisposable
         _decoder = dec;
         _loader = loader;
         _repoDir = repoDir;
+    }
+
+    /// <summary>Constructs a pipeline from already-loaded Kokoro/StyleTTS2 modules, without the Kokoro
+    /// repo cache. The voice-pack <see cref="Synthesize"/> path is unavailable (no <c>voices/</c> dir);
+    /// use <see cref="SynthesizeFromStyle"/> with an externally-computed style vector. This is the reuse
+    /// entry point for StyleTTS 2, which shares these exact modules but loads them from its own weights.</summary>
+    public KokoroPipeline(KokoroConfig cfg, KokoroPhonemeTokenizer tok, KokoroPlBert plBert,
+        KokoroTextEncoder textEnc, KokoroProsodyPredictor pred, KokoroIStftNetDecoder dec)
+        : this(cfg, tok, plBert, textEnc, pred, dec, loader: null, repoDir: "")
+    {
     }
 
     /// <summary>Loads the Kokoro-82M pipeline. Downloads the model.safetensors + config.json
@@ -125,56 +135,80 @@ public sealed class KokoroPipeline : IDisposable
         if (tokenIds.Length < 3)
             throw new ArgumentException("phonemes must encode to at least one visible token.");
 
-        // 1. Voice-pack slice for the predictor + decoder.
+        // Voice-pack slice for the predictor + decoder, then run the shared core.
         using Tensor style = pack.GetStyle(tokenIds.Length);
         (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(style);
-
         try
         {
-            // 2. PLBERT → d_bert [1, T, 512].
-            using Tensor dBert = _plBert.Forward(backend, tokenIds);
-
-            // 3. TextEncoder → text_features [1, T, 512].
-            using Tensor textFeatures = _textEncoder.Forward(backend, tokenIds);
-
-            // 4. Predict durations.
-            (Tensor durFeatures, int[] durations) = _predictor.PredictDurations(backend, dBert, sPred, speed);
-            durFeatures.Dispose();     // we only needed the durations + cached d_bert
-
-            int tTotal = 0;
-            for (int i = 0; i < durations.Length; i++) tTotal += durations[i];
-            if (tTotal == 0) tTotal = durations.Length;     // graceful fallback for an all-zeros case
-
-            // 5. Length-regulate d_bert and text_features by repeating each phoneme by its
-            //    predicted duration. Output is channels-first [1, 512, T_total].
-            Tensor dBertExpanded = LengthRegulate(dBert, durations, tTotal);
-            Tensor asr = LengthRegulate(textFeatures, durations, tTotal);
-
-            try
-            {
-                // 6. F0Ntrain: predictor.shared + F0/N chains → [1, 1, 2*T_total] each.
-                (Tensor f0, Tensor n) = _predictor.F0Ntrain(backend, dBertExpanded, sPred);
-                try
-                {
-                    // 7. Decoder forward → audio.
-                    return _decoder.Forward(backend, asr, f0, n, sDec);
-                }
-                finally
-                {
-                    f0.Dispose();
-                    n.Dispose();
-                }
-            }
-            finally
-            {
-                dBertExpanded.Dispose();
-                asr.Dispose();
-            }
+            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed);
         }
         finally
         {
             sDec.Dispose();
             sPred.Dispose();
+        }
+    }
+
+    /// <summary>Synthesizes from an externally-provided 256-d style vector — the reuse entry point for
+    /// StyleTTS 2, whose decoder/predictor style halves come from a reference-audio <c>StyleEncoder</c>
+    /// or the diffusion style sampler rather than a Kokoro voice pack. The vector is split
+    /// <c>[:128] → decoder (acoustic)</c>, <c>[128:] → predictor (prosodic)</c>, matching the voice-pack
+    /// convention.</summary>
+    public float[] SynthesizeFromStyle(IBackend backend, string phonemes, Tensor refStyle256, float speed = 1f)
+    {
+        ThrowIfDisposed();
+        int[] tokenIds = _tokenizer.Encode(phonemes);
+        if (tokenIds.Length < 3)
+            throw new ArgumentException("phonemes must encode to at least one visible token.");
+        (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(refStyle256);
+        try
+        {
+            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed);
+        }
+        finally
+        {
+            sDec.Dispose();
+            sPred.Dispose();
+        }
+    }
+
+    /// <summary>The shared PLBERT → TextEncoder → duration → length-regulate → F0/N → decoder path.
+    /// Borrows <paramref name="sDec"/> / <paramref name="sPred"/> (the caller owns + disposes them).</summary>
+    private float[] SynthesizeCore(IBackend backend, int[] tokenIds, Tensor sDec, Tensor sPred, float speed)
+    {
+        // PLBERT → d_bert [1, T, 512].
+        using Tensor dBert = _plBert.Forward(backend, tokenIds);
+        // TextEncoder → text_features [1, T, 512].
+        using Tensor textFeatures = _textEncoder.Forward(backend, tokenIds);
+
+        // Predict durations.
+        (Tensor durFeatures, int[] durations) = _predictor.PredictDurations(backend, dBert, sPred, speed);
+        durFeatures.Dispose();
+
+        int tTotal = 0;
+        for (int i = 0; i < durations.Length; i++) tTotal += durations[i];
+        if (tTotal == 0) tTotal = durations.Length;
+
+        // Length-regulate d_bert + text_features → channels-first [1, 512, T_total].
+        Tensor dBertExpanded = LengthRegulate(dBert, durations, tTotal);
+        Tensor asr = LengthRegulate(textFeatures, durations, tTotal);
+        try
+        {
+            (Tensor f0, Tensor n) = _predictor.F0Ntrain(backend, dBertExpanded, sPred);
+            try
+            {
+                return _decoder.Forward(backend, asr, f0, n, sDec);
+            }
+            finally
+            {
+                f0.Dispose();
+                n.Dispose();
+            }
+        }
+        finally
+        {
+            dBertExpanded.Dispose();
+            asr.Dispose();
         }
     }
 
@@ -235,6 +269,6 @@ public sealed class KokoroPipeline : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (KokoroVoicePack pack in _voicePackCache.Values) pack.Dispose();
         _voicePackCache.Clear();
-        _loader.Dispose();
+        _loader?.Dispose();
     }
 }

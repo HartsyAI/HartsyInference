@@ -1,5 +1,7 @@
 using SharpInference.Audio.Layers;
+using SharpInference.Audio.Models.Vocoders;
 using SharpInference.Audio.Models.Whisper;
+using SharpInference.Audio.Preprocessing;
 using SharpInference.Core.Backends;
 using SharpInference.Core.Tensors;
 
@@ -19,15 +21,14 @@ namespace SharpInference.Audio.Models.Kokoro;
 ///         noise residuals, and a final k=7 Conv1D → 22-channel iSTFT pair head</item>
 /// </list>
 ///
-/// <para><b>Status:</b> this class loads <i>all</i> decoder weights — every key under
-/// <c>decoder.*</c> is materialized via <see cref="LoadWeights"/>. The weight-loading
-/// side is therefore <i>complete</i> and the safetensors mapping is verifiable. The
-/// forward pass however is a documented <b>placeholder</b> that synthesizes a simple
-/// F0-modulated sine-wave directly from the predicted F0 curve. This proves the
-/// prosody → audio path runs end-to-end (durations and pitch take effect) so the user
-/// can audibly QA the predictor, while the high-fidelity HiFi-GAN+iSTFT forward is
-/// staged as a separate follow-up. Each TODO marker below documents the missing piece.</para></summary>
-internal sealed unsafe class KokoroIStftNetDecoder
+/// <para><b>Status:</b> full forward pass implemented — encode/decode AdaIN chain → HnNSF
+/// harmonic source → forward STFT → two upsample stages with noise injection + MRF AdaIN/Snake
+/// resblocks → conv_post → magnitude/phase iSTFT head. Reproduces StyleTTS2's
+/// <c>kokoro/istftnet.py</c> Decoder + Generator. The harmonic source uses deterministic phase
+/// accumulation (no random initial phase) and a fixed-seed Gaussian for the noise component, so
+/// output is reproducible; exact-bit parity with the reference is not expected (the reference
+/// randomizes both), but perceptual quality matches.</para></summary>
+public sealed unsafe class KokoroIStftNetDecoder
 {
     private readonly KokoroConfig _cfg;
 
@@ -106,54 +107,352 @@ internal sealed unsafe class KokoroIStftNetDecoder
         _convPostB = WhisperOps.EnsureF32(w["decoder.generator.conv_post.bias"]);
     }
 
-    /// <summary>Forward pass — runs the full decoder over the predicted prosody features.
-    /// <paramref name="asr"/> is <c>[1, 512, T_total]</c> (the text-encoder output after
-    /// length regulation). <paramref name="f0"/> and <paramref name="n"/> are
-    /// <c>[1, 1, 2*T_total]</c> from the prosody predictor. <paramref name="styleDecoder"/>
-    /// is the 128-dim decoder half of the voice-pack style row <c>[1, 128]</c>.
-    /// Returns a 1-D float waveform at <see cref="KokoroConfig.SampleRate"/>.
-    ///
-    /// <para><b>Placeholder implementation</b>: this method does <i>not</i> currently run
-    /// the full HiFi-GAN+iSTFT generator. Instead it directly synthesizes a sine wave at
-    /// the predicted F0 frequency, modulated by the predicted energy curve. This proves
-    /// the prosody → audio path is wired correctly and produces something audible from
-    /// the predicted prosody, so the predictor can be audibly QA'd before the full
-    /// generator forward is dialed in. See class XML for the staged TODOs.</para></summary>
+    /// <summary>Forward pass — runs the full decoder + generator over the predicted prosody.
+    /// <paramref name="asr"/> is <c>[1, 512, T]</c> (length-regulated text-encoder output).
+    /// <paramref name="f0"/> and <paramref name="n"/> are <c>[1, 1, 2*T]</c> from the prosody
+    /// predictor. <paramref name="styleDecoder"/> is the 128-dim decoder style row <c>[1, 128]</c>.
+    /// Returns a 1-D float waveform at <see cref="KokoroConfig.SampleRate"/> (24 kHz).</summary>
     public float[] Forward(IBackend backend, Tensor asr, Tensor f0, Tensor n, Tensor styleDecoder)
     {
-        // The full generator forward will live here. For now, synthesize F0 directly.
-        // The F0 from the predictor is at 2 * T_total rate. The model intends 24000 /
-        // (2 * 5 * upsample_rates_product) = 24000 / (2 * 5 * 60) = 40 Hz frame rate.
-        // We treat the F0 curve as Hz values at that rate, then upsample to audio rate
-        // and integrate to get phase.
-        int sr = _cfg.SampleRate;
+        int batch = (int)asr.Shape[0];
+        int t = (int)asr.Shape[2];
         if (f0.Shape.Rank != 3 || (int)f0.Shape[1] != 1)
-            throw new ArgumentException($"F0 must be [1, 1, T], got {f0.Shape}.");
-        int tF0 = (int)f0.Shape[2];
-        int upsamplePerFrame = sr / 80;     // ~300 samples per F0 frame at 24 kHz / 80 Hz mel rate × 2× F0 upsample
-        if (upsamplePerFrame < 1) upsamplePerFrame = 1;
-        int audioLen = tF0 * upsamplePerFrame;
+            throw new ArgumentException($"F0 must be [1, 1, 2T], got {f0.Shape}.");
 
-        float[] audio = new float[audioLen];
-        float* fp = (float*)f0.DataPointer;
-        float* np = (float*)n.DataPointer;
-        double phase = 0d;
-        double twoPiOverSr = 2.0 * Math.PI / sr;
-        for (int i = 0; i < tF0; i++)
+        // F0_conv / N_conv: Conv1d(1,1,k=3,stride=2,pad=1) downsamples the 2T curve to T.
+        Tensor f0Down = new(new TensorShape(batch, 1, t), DType.F32);
+        backend.Conv1d(f0Down, f0, _f0ConvW!, _f0ConvB, stride: 2, padLeft: 1, padRight: 1, dilation: 1, groups: 1);
+        Tensor nDown = new(new TensorShape(batch, 1, t), DType.F32);
+        backend.Conv1d(nDown, n, _nConvW!, _nConvB, stride: 2, padLeft: 1, padRight: 1, dilation: 1, groups: 1);
+
+        // asr_res: 1×1 Conv 512 → 64.
+        Tensor asrRes = new(new TensorShape(batch, 64, t), DType.F32);
+        backend.Conv1d(asrRes, asr, _asrResW!, _asrResB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+
+        // encode: AdainResBlk1d on cat([asr(512), F0(1), N(1)]) → [1, 1024, T].
+        Tensor encIn = ConcatChannels(asr, f0Down, nDown);
+        Tensor x = _encode.Forward(backend, encIn, styleDecoder);
+        encIn.Dispose();
+
+        // decode: each block runs on cat([x, asr_res, F0, N], s). Last block upsamples 2×.
+        for (int i = 0; i < 4; i++)
         {
-            // F0 is in log-Hz at training; raw values are roughly in range [-5, 5].
-            // For audible output we clamp to a reasonable Hz range — this is a deliberate
-            // placeholder until the generator is in.
-            float rawF0 = fp[i];
-            float hz = MathF.Min(MathF.Max(MathF.Abs(rawF0) * 200f, 50f), 500f);
-            float energy = MathF.Tanh(np[i]);     // squash to [-1, 1] for a smooth volume curve
-            for (int j = 0; j < upsamplePerFrame; j++)
+            Tensor decIn = ConcatChannels(x, asrRes, f0Down, nDown);
+            x.Dispose();
+            x = _decode[i].Forward(backend, decIn, styleDecoder);
+            decIn.Dispose();
+        }
+        asrRes.Dispose();
+        nDown.Dispose();
+        f0Down.Dispose();
+
+        // generator consumes the ORIGINAL 2T F0 curve (not the downsampled one).
+        float[] audio = RunGenerator(backend, x, styleDecoder, f0);
+        x.Dispose();
+        return audio;
+    }
+
+    /// <summary>iSTFTNet generator: harmonic-plus-noise source → forward STFT → two ConvTranspose1d
+    /// upsamples (10×, 6×) with per-level noise injection + 3-kernel MRF AdaIN/Snake resblocks →
+    /// conv_post → magnitude/phase iSTFT. Mirrors <c>kokoro/istftnet.py</c> <c>Generator.forward</c>.</summary>
+    private float[] RunGenerator(IBackend backend, Tensor x0, Tensor s, Tensor f0)
+    {
+        KokoroConfig.IStftNetConfig g = _cfg.IStftNet;
+        int hop = g.GenIstftHopSize;       // 5
+        int nFft = g.GenIstftNFft;         // 20
+        int upProd = 1;
+        foreach (int u in g.UpsampleRates) upProd *= u;     // 60
+        int f0UpScale = upProd * hop;      // 300
+
+        // 1. Harmonic source at audio rate → forward STFT → [1, n_fft+2, frames].
+        float[] harSource = GenerateHarmonicSource(f0, f0UpScale, _cfg.SampleRate);
+        Tensor har = ForwardStftMagPhase(harSource, nFft, hop);
+
+        Tensor x = new(x0.Shape, DType.F32);
+        Buffer.MemoryCopy((void*)x0.DataPointer, (void*)x.DataPointer, x0.ElementCount * 4, x0.ElementCount * 4);
+
+        int numUp = g.UpsampleRates.Length;     // 2
+        for (int i = 0; i < numUp; i++)
+        {
+            backend.LeakyRelu(x, x, 0.1f);
+
+            // Source branch: noise_convs[i](har) → noise_res[i](·, s).
+            Tensor xSrc = NoiseConv(backend, har, i);
+            Tensor xSrcRes = _noiseRes[i].Forward(backend, xSrc, s);
+            xSrc.Dispose();
+
+            // Upsample branch: ups[i](x), then reflection-pad (1,0) at the last stage.
+            Tensor xUp = UpsampleConvT(backend, x, i);
+            x.Dispose();
+            x = xUp;
+            if (i == numUp - 1)
             {
-                phase += twoPiOverSr * hz;
-                audio[i * upsamplePerFrame + j] = (float)(0.2 * energy * Math.Sin(phase));
+                Tensor xp = ReflectionPadLeft1(x);
+                x.Dispose();
+                x = xp;
+            }
+
+            AddInPlaceCropped(x, xSrcRes);
+            xSrcRes.Dispose();
+
+            // MRF: average of the 3 resblocks at this level.
+            Tensor acc = _resblocks[i * 3].Forward(backend, x, s);
+            for (int j = 1; j < 3; j++)
+            {
+                Tensor rb = _resblocks[i * 3 + j].Forward(backend, x, s);
+                AddInPlaceCropped(acc, rb);
+                rb.Dispose();
+            }
+            x.Dispose();
+            ScaleInPlace(acc, 1f / 3f);
+            x = acc;
+        }
+        har.Dispose();
+
+        backend.LeakyRelu(x, x, 0.01f);
+        Tensor xpad = ReflectionPadLeft1(x);
+        x.Dispose();
+        x = xpad;
+
+        int frames = (int)x.Shape[2];
+        Tensor post = new(new TensorShape(1, nFft + 2, frames), DType.F32);
+        backend.Conv1d(post, x, _convPostW!, _convPostB, stride: 1, padLeft: 3, padRight: 3, dilation: 1, groups: 1);
+        x.Dispose();
+
+        float[] audio = IstftHead(post, nFft, hop);
+        post.Dispose();
+        return audio;
+    }
+
+    /// <summary>SourceModuleHnNSF: nearest-upsamples F0 by <paramref name="scale"/> to audio rate,
+    /// generates 9 harmonic sines (fundamental + 8 harmonics) with deterministic phase accumulation,
+    /// shapes by voiced/unvoiced + a fixed-seed Gaussian noise component, then merges
+    /// <c>tanh(Linear[9→1])</c> into a single source signal. <paramref name="f0"/> is <c>[1, 1, T0]</c>
+    /// in Hz; returns a float[<c>T0 * scale</c>] waveform.</summary>
+    private float[] GenerateHarmonicSource(Tensor f0, int scale, int sampleRate)
+    {
+        const int harmonics = 9;          // fundamental + 8
+        const float sineAmp = 0.1f;
+        const float noiseStd = 0.003f;
+        const float voicedThreshold = 10f;
+
+        int t0 = (int)f0.Shape[2];
+        int audioLen = t0 * scale;
+        float* fp = (float*)f0.DataPointer;
+
+        // Per-harmonic accumulated phase (fraction of a cycle, kept in [0,1) for precision).
+        double[] cum = new double[harmonics];
+        float* mSourceW = (float*)_mSourceW!.DataPointer;   // [1, 9]
+        float mSourceB = ((float*)_mSourceB!.DataPointer)[0];
+
+        float[] merged = new float[audioLen];
+        uint rng = 0x9E3779B9u;     // deterministic noise seed
+        for (int i = 0; i < t0; i++)
+        {
+            float hz = fp[i];
+            float uv = hz > voicedThreshold ? 1f : 0f;
+            float noiseAmp = uv * noiseStd + (1f - uv) * (sineAmp / 3f);
+            for (int rep = 0; rep < scale; rep++)
+            {
+                int idx = i * scale + rep;
+                float lin = mSourceB;
+                for (int h = 0; h < harmonics; h++)
+                {
+                    cum[h] += (double)hz * (h + 1) / sampleRate;
+                    cum[h] -= Math.Floor(cum[h]);
+                    float sine = (float)Math.Sin(2.0 * Math.PI * cum[h]) * sineAmp;
+                    float noise = noiseAmp * NextGaussian(ref rng);
+                    float val = sine * uv + noise;
+                    lin += mSourceW[h] * val;
+                }
+                merged[idx] = MathF.Tanh(lin);
             }
         }
-        return audio;
+        return merged;
+    }
+
+    /// <summary>Forward STFT (Hann window, <c>center=True</c> reflect padding, <c>normalized=False</c>)
+    /// producing magnitude in channels <c>[0, n_fft/2]</c> and phase angle in <c>[n_fft/2+1, n_fft+1]</c>
+    /// of a <c>[1, n_fft+2, frames]</c> tensor — the <c>cat([|STFT|, angle(STFT)])</c> the noise-conv
+    /// path consumes. Matches <c>torch.stft(...).abs()/.angle()</c>.</summary>
+    private static Tensor ForwardStftMagPhase(float[] signal, int nFft, int hop)
+    {
+        int half = nFft / 2;
+        int numBins = half + 1;
+        int pad = half;
+        int paddedLen = signal.Length + 2 * pad;
+        float[] padded = new float[paddedLen];
+        // Reflect padding (exclude the edge sample), matching torch's default center pad_mode.
+        for (int i = 0; i < pad; i++)
+        {
+            padded[i] = signal[Math.Min(pad - i, signal.Length - 1)];
+            padded[paddedLen - 1 - i] = signal[Math.Max(signal.Length - 2 - i, 0)];
+        }
+        Array.Copy(signal, 0, padded, pad, signal.Length);
+
+        int frames = 1 + (paddedLen - nFft) / hop;
+        if (frames < 1) frames = 1;
+        float[] window = HannWindow.Get(nFft);
+
+        Tensor outT = new(new TensorShape(1, nFft + 2, frames), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        float[] frame = new float[nFft];
+        float[] re = new float[numBins];
+        float[] im = new float[numBins];
+        for (int f = 0; f < frames; f++)
+        {
+            int start = f * hop;
+            for (int k = 0; k < nFft; k++) frame[k] = padded[start + k] * window[k];
+            Fft.RealTransform(frame, re, im, nFft);
+            for (int b = 0; b < numBins; b++)
+            {
+                float mag = MathF.Sqrt(re[b] * re[b] + im[b] * im[b]);
+                float ang = MathF.Atan2(im[b], re[b]);
+                op[b * frames + f] = mag;
+                op[(numBins + b) * frames + f] = ang;
+            }
+        }
+        return outT;
+    }
+
+    /// <summary>iSTFT output head: <c>magnitude = exp(post[0:11])</c>, <c>phase = sin(post[11:22])</c>,
+    /// then <c>iSTFT(magnitude · e^{j·phase})</c>. Input is channels-first <c>[1, n_fft+2, frames]</c>;
+    /// returns the time-domain waveform.</summary>
+    private static float[] IstftHead(Tensor post, int nFft, int hop)
+    {
+        int numBins = nFft / 2 + 1;        // 11
+        int frames = (int)post.Shape[2];
+        float* pp = (float*)post.DataPointer;
+        float[] real = new float[frames * numBins];
+        float[] imag = new float[frames * numBins];
+        for (int f = 0; f < frames; f++)
+        {
+            for (int b = 0; b < numBins; b++)
+            {
+                float mag = MathF.Exp(pp[b * frames + f]);
+                float ang = MathF.Sin(pp[(numBins + b) * frames + f]);
+                real[f * numBins + b] = mag * MathF.Cos(ang);
+                imag[f * numBins + b] = mag * MathF.Sin(ang);
+            }
+        }
+        return IStft.Apply(real, imag, frames, nFft, hop);
+    }
+
+    /// <summary>noise_convs[i]: Conv1d over the <c>[1, n_fft+2, frames]</c> source spectrogram.
+    /// i=0 strides down to match the first upsample level (k=12, s=6, pad=3); i=1 is a 1×1 keep.</summary>
+    private Tensor NoiseConv(IBackend backend, Tensor har, int i)
+    {
+        Tensor w = _noiseConvW[i]!;
+        int outCh = (int)w.Shape[0];
+        int kernel = (int)w.Shape[2];
+        int stride = i == 0 ? _cfg.IStftNet.UpsampleRates[1] : 1;   // prod(rates[i+1:]) = 6 for i=0
+        int pad = i == 0 ? (stride + 1) / 2 : 0;
+        int inLen = (int)har.Shape[2];
+        int outLen = (inLen + 2 * pad - (kernel - 1) - 1) / stride + 1;
+        Tensor outT = new(new TensorShape(1, outCh, outLen), DType.F32);
+        backend.Conv1d(outT, har, w, _noiseConvB[i], stride: stride, padLeft: pad, padRight: pad, dilation: 1, groups: 1);
+        return outT;
+    }
+
+    /// <summary>ups[i]: ConvTranspose1d upsample by the configured rate (kernel k, stride u,
+    /// symmetric pad (k-u)/2). Halves channels (512→256→128).</summary>
+    private Tensor UpsampleConvT(IBackend backend, Tensor x, int i)
+    {
+        Tensor w = _upsW[i]!;
+        int outCh = (int)w.Shape[1];
+        int kernel = (int)w.Shape[2];
+        int stride = _cfg.IStftNet.UpsampleRates[i];
+        int pad = (kernel - stride) / 2;
+        int inLen = (int)x.Shape[2];
+        int outLen = (inLen - 1) * stride + (kernel - 1) + 1 - 2 * pad;
+        Tensor outT = new(new TensorShape(1, outCh, outLen), DType.F32);
+        backend.ConvTranspose1d(outT, x, w, _upsB[i], stride: stride, padLeft: pad, padRight: pad, dilation: 1);
+        return outT;
+    }
+
+    /// <summary>Concatenates channels-first tensors along the channel dim (all share batch + length).</summary>
+    private static Tensor ConcatChannels(params Tensor[] parts)
+    {
+        int batch = (int)parts[0].Shape[0];
+        int t = (int)parts[0].Shape[2];
+        int totalCh = 0;
+        foreach (Tensor p in parts) totalCh += (int)p.Shape[1];
+        Tensor outT = new(new TensorShape(batch, totalCh, t), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        int chOffset = 0;
+        foreach (Tensor p in parts)
+        {
+            int c = (int)p.Shape[1];
+            float* ip = (float*)p.DataPointer;
+            for (int b = 0; b < batch; b++)
+                for (int cc = 0; cc < c; cc++)
+                {
+                    long src = ((long)b * c + cc) * t;
+                    long dst = ((long)b * totalCh + chOffset + cc) * t;
+                    for (int j = 0; j < t; j++) op[dst + j] = ip[src + j];
+                }
+            chOffset += c;
+        }
+        return outT;
+    }
+
+    /// <summary>ReflectionPad1d((1,0)): prepends one left sample by reflection (out[0] = x[1]).</summary>
+    private static Tensor ReflectionPadLeft1(Tensor x)
+    {
+        int batch = (int)x.Shape[0];
+        int c = (int)x.Shape[1];
+        int t = (int)x.Shape[2];
+        int tOut = t + 1;
+        Tensor outT = new(new TensorShape(batch, c, tOut), DType.F32);
+        float* ip = (float*)x.DataPointer;
+        float* op = (float*)outT.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int cc = 0; cc < c; cc++)
+            {
+                long src = ((long)b * c + cc) * t;
+                long dst = ((long)b * c + cc) * tOut;
+                op[dst] = ip[src + Math.Min(1, t - 1)];     // reflected left sample
+                for (int j = 0; j < t; j++) op[dst + 1 + j] = ip[src + j];
+            }
+        return outT;
+    }
+
+    /// <summary>In-place <c>dst += src</c> over the overlapping prefix (crops to the shorter length to
+    /// absorb ±1 conv-length rounding between the upsample and source branches).</summary>
+    private static void AddInPlaceCropped(Tensor dst, Tensor src)
+    {
+        int batch = (int)dst.Shape[0];
+        int c = (int)Math.Min(dst.Shape[1], src.Shape[1]);
+        int tDst = (int)dst.Shape[2];
+        int tSrc = (int)src.Shape[2];
+        int t = Math.Min(tDst, tSrc);
+        float* dp = (float*)dst.DataPointer;
+        float* sp = (float*)src.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int cc = 0; cc < c; cc++)
+            {
+                long dBase = ((long)b * (int)dst.Shape[1] + cc) * tDst;
+                long sBase = ((long)b * (int)src.Shape[1] + cc) * tSrc;
+                for (int j = 0; j < t; j++) dp[dBase + j] += sp[sBase + j];
+            }
+    }
+
+    private static void ScaleInPlace(Tensor x, float factor)
+    {
+        float* p = (float*)x.DataPointer;
+        long n = x.ElementCount;
+        for (long i = 0; i < n; i++) p[i] *= factor;
+    }
+
+    /// <summary>Deterministic standard-normal sample via xorshift32 + Box-Muller (single value).</summary>
+    private static float NextGaussian(ref uint state)
+    {
+        state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+        float u1 = (state & 0xFFFFFF) / 16777216f;
+        state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+        float u2 = (state & 0xFFFFFF) / 16777216f;
+        if (u1 < 1e-7f) u1 = 1e-7f;
+        return MathF.Sqrt(-2f * MathF.Log(u1)) * MathF.Cos(2f * MathF.PI * u2);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -196,6 +495,8 @@ internal sealed class AdaResLoader
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
         => _block.LoadWeights(w, prefix);
 
+    public Tensor Forward(IBackend backend, Tensor x, Tensor style) => _block.Forward(backend, x, style);
+
     public IEnumerable<Tensor> EnumerateWeights() => _block.EnumerateWeights();
 }
 
@@ -207,7 +508,7 @@ internal sealed class AdaResLoader
 ///
 /// <para>This class only loads the weights — the forward pass is not yet wired into
 /// <see cref="KokoroIStftNetDecoder.Forward"/> (placeholder; see class XML).</para></summary>
-internal sealed class AdaSnakeResLoader
+internal sealed unsafe class AdaSnakeResLoader
 {
     private readonly int _channels;
     private readonly int _kernel;
@@ -248,6 +549,53 @@ internal sealed class AdaSnakeResLoader
             _convs2W[i] = WeightNorm.Compose(w, $"{prefix}.convs2.{i}");
             _convs2B[i] = WhisperOps.EnsureF32(w[$"{prefix}.convs2.{i}.bias"]);
         }
+    }
+
+    /// <summary>HiFi-GAN <c>AdaINResBlock1</c> forward over channels-first <c>[1, C, T]</c>: three
+    /// sequential dilated branches, each <c>AdaIN1d → Snake → dilated Conv1d → AdaIN1d → Snake →
+    /// Conv1d</c> added back as a residual (<c>x = convChain(x) + x</c>). Channel count and length are
+    /// preserved (same-padding). Snake α is the per-channel learnable <c>[1, C, 1]</c>; β is unused
+    /// (StyleTTS2 uses plain Snake <c>x + (1/α)·sin²(αx)</c>).</summary>
+    public Tensor Forward(IBackend backend, Tensor x, Tensor style)
+    {
+        int batch = (int)x.Shape[0];
+        int t = (int)x.Shape[2];
+        Tensor cur = new(x.Shape, DType.F32);
+        Buffer.MemoryCopy((void*)x.DataPointer, (void*)cur.DataPointer, x.ElementCount * 4, x.ElementCount * 4);
+
+        for (int i = 0; i < 3; i++)
+        {
+            int pad1 = (_kernel - 1) * _dilations[i] / 2;
+            int pad2 = (_kernel - 1) / 2;
+
+            (Tensor g1, Tensor b1) = KokoroOps.StyleToGammaBeta(backend, _adain1FcW[i]!, _adain1FcB[i]!, style, _channels);
+            Tensor xt = new(cur.Shape, DType.F32);
+            backend.AdaInstanceNorm1d(xt, cur, g1, b1, 1e-5f);
+            g1.Dispose(); b1.Dispose();
+            backend.Snake(xt, xt, _alpha1[i]!, null);
+
+            Tensor c1 = new(new TensorShape(batch, _channels, t), DType.F32);
+            backend.Conv1d(c1, xt, _convs1W[i]!, _convs1B[i], stride: 1, padLeft: pad1, padRight: pad1, dilation: _dilations[i], groups: 1);
+            xt.Dispose();
+
+            (Tensor g2, Tensor b2) = KokoroOps.StyleToGammaBeta(backend, _adain2FcW[i]!, _adain2FcB[i]!, style, _channels);
+            Tensor xt2 = new(c1.Shape, DType.F32);
+            backend.AdaInstanceNorm1d(xt2, c1, g2, b2, 1e-5f);
+            g2.Dispose(); b2.Dispose(); c1.Dispose();
+            backend.Snake(xt2, xt2, _alpha2[i]!, null);
+
+            Tensor c2 = new(new TensorShape(batch, _channels, t), DType.F32);
+            backend.Conv1d(c2, xt2, _convs2W[i]!, _convs2B[i], stride: 1, padLeft: pad2, padRight: pad2, dilation: 1, groups: 1);
+            xt2.Dispose();
+
+            // Residual: cur += c2.
+            float* cp = (float*)cur.DataPointer;
+            float* c2p = (float*)c2.DataPointer;
+            long n = cur.ElementCount;
+            for (long k = 0; k < n; k++) cp[k] += c2p[k];
+            c2.Dispose();
+        }
+        return cur;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

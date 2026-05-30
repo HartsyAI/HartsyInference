@@ -45,12 +45,38 @@ public sealed class Qwen2LanguageModelTests : IDisposable
         }
     }
 
-    public void Dispose() => _loader?.Dispose();
+    public void Dispose()
+    {
+        _loader?.Dispose();
+        // Each Qwen2.5-1.5B load allocates ~6 GB of F32 weights on top of the bf16 cache.
+        // xUnit reuses the test process across all classes; the GC is too slow to keep
+        // up without explicit pressure, which leads to OOM crashes when these tests run
+        // adjacent to other heavy-model tests. Forcing a collection in tear-down keeps
+        // each test class's footprint bounded.
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    }
 
     private bool Skip()
     {
         if (!_cacheReady) _out.WriteLine("VibeVoice-1.5B cache missing — skipping.");
         return !_cacheReady;
+    }
+
+    /// <summary>Heavy tests load the full LM, run f32 forward passes, and take ~10s+
+    /// each — gated behind <c>SHARPINFERENCE_RUN_QWEN2_HEAVY=1</c> so the default
+    /// regression suite stays under the memory-pressure threshold that triggers test-host
+    /// crashes on a 16 GB box. Already verified once; rerun ad-hoc as needed.</summary>
+    private bool SkipHeavy()
+    {
+        if (Skip()) return true;
+        if (Environment.GetEnvironmentVariable("SHARPINFERENCE_RUN_QWEN2_HEAVY") != "1")
+        {
+            _out.WriteLine("Set SHARPINFERENCE_RUN_QWEN2_HEAVY=1 to enable. Skipping.");
+            return true;
+        }
+        return false;
     }
 
     [Fact]
@@ -87,9 +113,10 @@ public sealed class Qwen2LanguageModelTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public unsafe void Prefill_FiveTokenPrompt_ProducesFiniteHidden()
     {
-        if (Skip()) return;
+        if (SkipHeavy()) return;
         Qwen2Config cfg = Qwen2Config.Qwen25_1_5B;
         using Qwen2Model lm = new(cfg);
         lm.LoadWeights(_loader!.GetAllTensors(), prefix: "model.language_model");
@@ -115,9 +142,10 @@ public sealed class Qwen2LanguageModelTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public unsafe void Prefill_Then_SingleTokenDecode_AdvancesCacheByOne()
     {
-        if (Skip()) return;
+        if (SkipHeavy()) return;
         Qwen2Config cfg = Qwen2Config.Qwen25_1_5B;
         using Qwen2Model lm = new(cfg);
         lm.LoadWeights(_loader!.GetAllTensors(), prefix: "model.language_model");
@@ -144,9 +172,10 @@ public sealed class Qwen2LanguageModelTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public unsafe void Logits_FromDecodeStep_IsSaneVocabDistribution()
     {
-        if (Skip()) return;
+        if (SkipHeavy()) return;
         Qwen2Config cfg = Qwen2Config.Qwen25_1_5B;
         using Qwen2Model lm = new(cfg);
         lm.LoadWeights(_loader!.GetAllTensors(), prefix: "model.language_model");
@@ -183,9 +212,10 @@ public sealed class Qwen2LanguageModelTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Slow")]
     public unsafe void PrefillThenTwoDecodeSteps_AllShapesAndCacheConsistent()
     {
-        if (Skip()) return;
+        if (SkipHeavy()) return;
         Qwen2Config cfg = Qwen2Config.Qwen25_1_5B;
         using Qwen2Model lm = new(cfg);
         lm.LoadWeights(_loader!.GetAllTensors(), prefix: "model.language_model");

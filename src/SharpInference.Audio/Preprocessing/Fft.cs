@@ -25,8 +25,14 @@ public static class Fft
     /// supplied buffers — pass freshly-allocated arrays if you need to keep the input.</summary>
     public static void Transform(Span<float> re, Span<float> im, int n)
     {
-        if ((n & (n - 1)) != 0) throw new ArgumentException($"FFT size {n} is not a power of two.");
         if (re.Length < n || im.Length < n) throw new ArgumentException("buffers too small for transform size.");
+        if ((n & (n - 1)) != 0)
+        {
+            // Non-power-of-two (e.g. iSTFTNet's n_fft=20): fall back to a direct O(n²) DFT.
+            // Tiny sizes only — the radix-2 path below still serves Whisper/Vocos/Kokoro-analysis pow2 sizes.
+            DirectDft(re, im, n);
+            return;
+        }
 
         (float[] cosTab, float[] sinTab) = GetTwiddles(n);
 
@@ -119,6 +125,30 @@ public static class Fft
                 }
             }
         }
+    }
+
+    /// <summary>Direct O(n²) forward DFT for non-power-of-two sizes, in place via temp buffers.
+    /// Uses the same <c>e^{-2πi kn/N}</c> sign convention as the radix-2 path so the iSTFT
+    /// inverse trick (<c>conj(FFT(conj(X)))/N</c>) remains valid.</summary>
+    private static void DirectDft(Span<float> re, Span<float> im, int n)
+    {
+        float[] outRe = new float[n];
+        float[] outIm = new float[n];
+        double twoPiOverN = 2.0 * Math.PI / n;
+        for (int k = 0; k < n; k++)
+        {
+            double sumRe = 0, sumIm = 0;
+            for (int t = 0; t < n; t++)
+            {
+                double ang = twoPiOverN * k * t;
+                double c = Math.Cos(ang), s = Math.Sin(ang);
+                sumRe += re[t] * c + im[t] * s;
+                sumIm += im[t] * c - re[t] * s;
+            }
+            outRe[k] = (float)sumRe;
+            outIm[k] = (float)sumIm;
+        }
+        for (int i = 0; i < n; i++) { re[i] = outRe[i]; im[i] = outIm[i]; }
     }
 
     /// <summary>Real-input FFT producing only the first n/2+1 complex bins (the rest

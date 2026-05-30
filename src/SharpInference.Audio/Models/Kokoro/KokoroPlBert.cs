@@ -36,7 +36,7 @@ namespace SharpInference.Audio.Models.Kokoro;
 /// <para>token-type embeddings are loaded but Kokoro is monolingual at inference — all
 /// inputs get token_type=0, so only row 0 is ever read. Position embeddings cap at
 /// 512: a sequence longer than 512 phonemes would overrun the position table.</para></summary>
-internal sealed unsafe class KokoroPlBert
+public sealed unsafe class KokoroPlBert
 {
     private readonly KokoroConfig _cfg;
     private readonly KokoroConfig.PlBertConfig _plBert;

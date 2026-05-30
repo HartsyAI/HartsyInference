@@ -1,0 +1,118 @@
+using SharpInference.Audio.Models.Kokoro;
+using SharpInference.Audio.Models.StyleTts2;
+using SharpInference.Core.Backends;
+using SharpInference.Core.Tensors;
+
+namespace SharpInference.Audio.Pipelines;
+
+/// <summary>StyleTTS 2 text-to-speech pipeline. Reuses Kokoro's (bit-identical) PLBERT + TextEncoder +
+/// ProsodyPredictor + iSTFTNet decoder via <see cref="KokoroPipeline.SynthesizeFromStyle"/>, and adds
+/// the StyleTTS 2-specific style path: the 256-d style vector comes from a reference-audio
+/// <see cref="StyleEncoder"/> pair (zero-shot cloning) and/or the <see cref="StyleDiffusionSampler"/>
+/// (random / perturbed style), instead of a fixed Kokoro voice pack. Supports the three StyleTTS 2
+/// inference modes:
+/// <list type="bullet">
+///   <item><b>Clone</b> — <see cref="SynthesizeClone"/>: reference mel → acoustic ⊕ prosodic style.</item>
+///   <item><b>Random</b> — <see cref="SynthesizeRandom"/>: diffusion sampler with no reference.</item>
+///   <item><b>Perturbed clone</b> — <see cref="SynthesizeClonePerturbed"/>: diffusion sampler seeded by
+///         the reference style for a more text-adapted result.</item>
+/// </list>
+/// Phoneme-in (IPA), like Kokoro — text→IPA G2P is the caller's responsibility.</summary>
+public sealed unsafe class StyleTts2Pipeline : IDisposable
+{
+    private readonly StyleTts2Config _cfg;
+    private readonly KokoroPipeline _kokoro;
+    private readonly KokoroPlBert _plBert;
+    private readonly KokoroPhonemeTokenizer _tokenizer;
+    private readonly StyleEncoder? _styleEncoder;     // acoustic half (multispeaker only)
+    private readonly StyleEncoder? _predictorEncoder; // prosodic half (multispeaker only)
+    private readonly StyleDenoiser _denoiser;
+    private readonly StyleDiffusionSampler _sampler;
+    private int _disposed;
+
+    public StyleTts2Pipeline(StyleTts2Config cfg, KokoroPipeline kokoro, KokoroPlBert plBert,
+        KokoroPhonemeTokenizer tokenizer, StyleDenoiser denoiser,
+        StyleEncoder? styleEncoder = null, StyleEncoder? predictorEncoder = null)
+    {
+        _cfg = cfg;
+        _kokoro = kokoro;
+        _plBert = plBert;
+        _tokenizer = tokenizer;
+        _denoiser = denoiser;
+        _styleEncoder = styleEncoder;
+        _predictorEncoder = predictorEncoder;
+        _sampler = new StyleDiffusionSampler(cfg);
+    }
+
+    /// <summary>Zero-shot voice cloning: extract the 256-d style directly from a reference mel
+    /// <c>[1, 80, T]</c> (acoustic ⊕ prosodic) and synthesize <paramref name="phonemes"/> in that voice.</summary>
+    public float[] SynthesizeClone(IBackend backend, string phonemes, Tensor referenceMel, float speed = 1f)
+    {
+        ThrowIfDisposed();
+        using Tensor refStyle = CloneStyle(backend, referenceMel);
+        return _kokoro.SynthesizeFromStyle(backend, phonemes, refStyle, speed);
+    }
+
+    /// <summary>Random / unconditional style sampling: the diffusion sampler invents a 256-d style
+    /// conditioned only on the text (the only mode applicable to the single-speaker LJSpeech model).</summary>
+    public float[] SynthesizeRandom(IBackend backend, string phonemes, int seed = 0, float speed = 1f)
+    {
+        ThrowIfDisposed();
+        using Tensor refStyle = SampleStyle(backend, phonemes, referenceStyle: null, seed);
+        return _kokoro.SynthesizeFromStyle(backend, phonemes, refStyle, speed);
+    }
+
+    /// <summary>Perturbed clone: the diffusion sampler refines the reference-extracted style toward the
+    /// requested text — often more natural than the raw clone.</summary>
+    public float[] SynthesizeClonePerturbed(IBackend backend, string phonemes, Tensor referenceMel, int seed = 0, float speed = 1f)
+    {
+        ThrowIfDisposed();
+        using Tensor refClone = CloneStyle(backend, referenceMel);
+        using Tensor refStyle = SampleStyle(backend, phonemes, referenceStyle: refClone, seed);
+        return _kokoro.SynthesizeFromStyle(backend, phonemes, refStyle, speed);
+    }
+
+    /// <summary>Extracts the 256-d reference style = <c>style_encoder(mel) ⊕ predictor_encoder(mel)</c>.</summary>
+    private Tensor CloneStyle(IBackend backend, Tensor referenceMel)
+    {
+        if (_styleEncoder is null || _predictorEncoder is null)
+            throw new InvalidOperationException("Cloning requires the multi-speaker style + predictor encoders (LibriTTS).");
+        using Tensor sAcoustic = _styleEncoder.Forward(backend, referenceMel);   // [1, 128]
+        using Tensor sProsodic = _predictorEncoder.Forward(backend, referenceMel);
+        return Concat(sAcoustic, sProsodic);                                     // [1, 256]
+    }
+
+    /// <summary>Runs the diffusion style sampler conditioned on PLBERT text features (and optional
+    /// reference style), returning a squeezed <c>[1, 256]</c> style vector.</summary>
+    private Tensor SampleStyle(IBackend backend, string phonemes, Tensor? referenceStyle, int seed)
+    {
+        int[] tokenIds = _tokenizer.Encode(phonemes);
+        using Tensor textFeatures = _plBert.Forward(backend, tokenIds);
+        _denoiser.Prepare(textFeatures, referenceStyle);
+        using Tensor latent = _sampler.Sample(backend, _denoiser, seed);          // [1, 1, 256]
+        return latent.Reshape(new TensorShape(1, _cfg.StyleDim));
+    }
+
+    private static Tensor Concat(Tensor a, Tensor b)
+    {
+        int da = (int)a.Shape[1], db = (int)b.Shape[1];
+        Tensor outT = new(new TensorShape(1, da + db), DType.F32);
+        Buffer.MemoryCopy((void*)a.DataPointer, (void*)outT.DataPointer, da * 4, da * 4);
+        Buffer.MemoryCopy((void*)b.DataPointer, (void*)((float*)outT.DataPointer + da), db * 4, db * 4);
+        return outT;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _kokoro.Dispose();
+        _styleEncoder?.Dispose();
+        _predictorEncoder?.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed != 0) throw new ObjectDisposedException(nameof(StyleTts2Pipeline));
+    }
+}

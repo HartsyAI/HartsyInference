@@ -34,7 +34,7 @@ namespace SharpInference.Audio.Models.Kokoro;
 /// <para>The pipeline that owns this class is responsible for converting durations into
 /// an alignment matrix and producing <c>d_bert_expanded</c> — that's a simple repeat
 /// based on integer durations and doesn't need to live here.</para></summary>
-internal sealed unsafe class KokoroProsodyPredictor
+public sealed unsafe class KokoroProsodyPredictor
 {
     private readonly KokoroConfig _cfg;
 

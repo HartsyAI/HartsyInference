@@ -32,7 +32,7 @@ namespace SharpInference.Audio.Models.Kokoro;
 /// <para>The "LayerNorm1d" between conv and LeakyReLU is a custom channel-axis LN with
 /// parameters named <c>gamma</c> / <c>beta</c> (vs. the standard <c>weight</c> /
 /// <c>bias</c>). We implement it as transpose → standard LayerNorm → transpose-back.</para></summary>
-internal sealed unsafe class KokoroTextEncoder
+public sealed unsafe class KokoroTextEncoder
 {
     private readonly KokoroConfig _cfg;
 
