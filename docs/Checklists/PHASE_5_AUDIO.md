@@ -84,6 +84,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] PTX kernels: `fft_radix2.ptx`, `mel_filterbank.ptx`, `istft_overlap_add.ptx`, `snake_activation.ptx`, `conv_transpose1d.ptx` — **CUDA source written**, awaiting nvcc build pass ([native/cuda/audio/](../../native/cuda/audio/)). Vulkan shaders source-only ([native/vulkan/shaders/snake.comp.glsl](../../native/vulkan/shaders/snake.comp.glsl) + conv1d/conv_transpose1d), awaiting glslc build pass.
 - [x] `IAsyncEnumerable<AudioChunk>` output streaming surface ([Streaming/AudioStreamer.cs](../../src/SharpInference.Audio/Streaming/AudioStreamer.cs) + [Streaming/AudioChunk.cs](../../src/SharpInference.Audio/Streaming/AudioChunk.cs))
 - [x] `LstmCell` / `BiLstm` modules ([Layers/LstmCell.cs](../../src/SharpInference.Audio/Layers/LstmCell.cs), [Layers/BiLstm.cs](../../src/SharpInference.Audio/Layers/BiLstm.cs)). Bonus: [Layers/UnidirectionalLstm.cs](../../src/SharpInference.Audio/Layers/UnidirectionalLstm.cs) for stacked multi-layer LSTM (EnCodec bottleneck).
+- [x] **Shared DSP statics** ([`Dsp/`](../../src/SharpInference.Audio/Dsp/)) — **reuse these, don't re-roll per model** (see AGENTS.md "Reuse shared primitives"): [`NsfVocoderDsp`](../../src/SharpInference.Audio/Dsp/NsfVocoderDsp.cs) (NSF harmonic source + forward-STFT mag/phase + iSTFT exp/sin head + reflection-pad + add-cropped + scale — shared by Kokoro iSTFTNet + CosyVoice HiFTNet) and [`DeterministicRng`](../../src/SharpInference.Audio/Dsp/DeterministicRng.cs) (seeded xorshift+Box-Muller Gaussian/uniform — shared by NSF source, CFM/diffusion samplers, the speech-token sampler). Layout transpose `[1,C,T]↔[1,T,C]` is the existing `backend.Transpose2D` op (used 30+ places); the central linear is `WhisperOps.ProjectLinear`.
 
 ### Backend ops landed in 3.x (post-original-checklist additions)
 
@@ -177,12 +178,15 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] `XttsHifiGan.cs` — takes 1024-d GPT latents (not mel), FiLM-conditioned per ResBlock
 - [ ] Streaming variant (chunk_size=20 mel tokens, overlap_wav_chunks=1024)
 
-### Bark
-- [ ] `BarkSemanticTransformer.cs` / `BarkCoarseTransformer.cs` / `BarkFineTransformer.cs`
-- [ ] `BarkTokenizer.cs` — mBERT-cased with +10048 offset
-- [ ] `BarkSpeakerPrompt.cs` — load 3-stream pickles (offline-convert to safetensors)
-- [ ] `BarkPipeline.cs` — three-stage orchestration, coarse alternation, fine window stitching
-- [ ] EnCodec 24kHz 8-codebook decoder
+### Bark — SCAFFOLD COMPLETE (3-stage cascade); checkpoint-gated
+> Files under [`Models/Bark/`](../../src/SharpInference.Audio/Models/Bark/) + [`BarkPipeline.cs`](../../src/SharpInference.Audio/Pipelines/BarkPipeline.cs). **Shared GPT-2 backbone built** ([`Models/LanguageModels/Gpt/`](../../src/SharpInference.Audio/Models/LanguageModels/Gpt/) — `GptBackbone`/`GptBlock`/`GptConfig`) that all three Bark stages reuse and **XTTS/ChatTTS will reuse**. EnCodec 24 kHz decoder already built (§4).
+- [x] **Shared `GptBackbone`** — GPT-2 pre-norm (learned abs pos, MHA, 4× GELU MLP, bias=False, LayerNorm), causal + non-causal. **Validated** via synthetic-weight forward (3 tests, both mask modes finite). Full-sequence (no KV cache); AR re-feeds the prefix — perf-tunable later.
+- [x] [`BarkCausalStage.cs`](../../src/SharpInference.Audio/Models/Bark/BarkCausalStage.cs) — semantic + coarse stages (token embed + `GptBackbone` + lm_head, AR via shared `NucleusSampler`).
+- [x] [`BarkFineModel.cs`](../../src/SharpInference.Audio/Models/Bark/BarkFineModel.cs) — non-causal refiner: 8 codebook embeds summed + 7 heads, iterative argmax fill of codebooks 2..7.
+- [x] [`BarkConfig.cs`](../../src/SharpInference.Audio/Models/Bark/BarkConfig.cs) — Full/Small presets + the Bark token-offset constants. **Tested**.
+- [x] [`BarkPipeline.cs`](../../src/SharpInference.Audio/Pipelines/BarkPipeline.cs) — semantic → coarse (de-interleave 2 codebooks) → fine → EnCodec 24 kHz decode → audio.
+- [ ] `BarkTokenizer.cs` (mBERT WordPiece + `+10048` offset) — token-IDs-in for now; caller tokenizes.
+- [ ] `BarkSpeakerPrompt.cs` (3-stream speaker-prompt history) + checkpoint validation (`suno/bark`).
 
 ### CosyVoice 2 — SCAFFOLD COMPLETE (non-streaming); checkpoint-gated validation pending
 > All components build and the exactly-specified pieces are unit-tested; the rest are structurally-correct scaffolds per the FunAudioLLM repo, **awaiting the 4.4 GB `FunAudioLLM/CosyVoice2-0.5B` checkpoint** for first-run validation (none on this host). Files under [`src/SharpInference.Audio/Models/CosyVoice/`](../../src/SharpInference.Audio/Models/CosyVoice/). **Architecture correction:** the LM is *not* the research doc's "single extended-vocab softmax" — the real `llm.pt` keeps the Qwen text embedding and adds separate `speech_embedding` / `llm_decoder` / `llm_embedding` heads; built to match.
@@ -206,11 +210,15 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] BigVGAN v2 22kHz vocoder (download from `nvidia/bigvgan_v2_22khz_80band_256x`)
 - [ ] Optional Qwen-3 0.6B-emo for text-emotion conditioning
 
-### SparkTTS
-- [ ] Qwen2.5-0.5B with 166000 vocab (151936 base + 14064 BiCodec tokens)
-- [ ] BiCodec encoder + decoder (50 Hz semantic VQ 8192 + 32 global FSQ tokens 4096)
-- [ ] DAC HiFi-GAN wave generator (16 kHz)
-- [ ] w2v-BERT 2.0 feature extractor (cached per audio hash)
+### SparkTTS — SCAFFOLD COMPLETE (attribute-controlled generation); checkpoint-gated
+> Files under [`Models/SparkTts/`](../../src/SharpInference.Audio/Models/SparkTts/) + [`SparkTtsPipeline.cs`](../../src/SharpInference.Audio/Pipelines/SparkTtsPipeline.cs). **Maximal reuse:** the LM is a plain Qwen2.5-0.5B (single extended-vocab softmax) reusing `Qwen2Model` verbatim; sampling reuses the new shared `NucleusSampler`; BiCodec global dequant reuses `Fsq`; the wave-gen MRF reuses the new shared `SnakeResBlock`.
+- [x] [`SparkTtsConfig.cs`](../../src/SharpInference.Audio/Models/SparkTts/SparkTtsConfig.cs) — `V0_5B` (Qwen2.5-0.5B with `VocabSize=166000`) + token-ID bases (semantic/global/EOS/structure) + BiCodec decode config. **Tested** (vocab/codec sizes, FSQ-levels↔global-vocab consistency). Token offsets are config fields pending `added_tokens.json` reconciliation.
+- [x] [`SparkTtsLm.cs`](../../src/SharpInference.Audio/Models/SparkTts/SparkTtsLm.cs) — reuses `Qwen2Model` + `StreamingKvCache` + shared `NucleusSampler`; AR loop parses emitted absolute IDs → global/semantic codec indices by range.
+- [x] [`BiCodecDecoder.cs`](../../src/SharpInference.Audio/Models/SparkTts/BiCodecDecoder.cs) — semantic VQ lookup + global FSQ dequant (`Fsq.Dequantize`) + DAC-style HiFi-GAN wave generator (ConvTranspose [8,5,4,2] + shared `SnakeResBlock` MRF + conv_post→tanh, FiLM-lite speaker conditioning). 16 kHz. (Full Vocos-ConvNeXt AdaLN prenet + exact BiCodec keys are the checkpoint-gated piece.)
+- [x] [`SparkTtsPipeline.cs`](../../src/SharpInference.Audio/Pipelines/SparkTtsPipeline.cs) — token-IDs-in → LM → BiCodec decode → 16 kHz audio. Zero-shot cloning (w2v-BERT reference tokenization on the *encode* side) is deferred — attribute-controlled generation needs no reference.
+- [x] **Shared primitives hoisted this pass** (reuse principle): [`NucleusSampler`](../../src/SharpInference.Audio/Sampling/NucleusSampler.cs) (top-k/top-p/temp draw — `SpeechSampler` refactored to delegate, bit-identical) + [`SnakeResBlock`](../../src/SharpInference.Audio/Models/Vocoders/SnakeResBlock.cs) (plain-Snake MRF — HiFTNet refactored to use it).
+- [ ] **BiCodec encoder (cloning) + w2v-BERT feature extractor** — encode-side (reference→tokens) for zero-shot voice cloning; deferred (attribute generation works without it).
+- [ ] **Checkpoint validation** — `SparkAudio/Spark-TTS-0.5B` (3.95 GB): reconcile `added_tokens.json` IDs + BiCodec state-dict keys, then env-gated generation test.
 
 ### ChatTTS
 - [ ] `ChatTtsGpt.cs` — single LLaMA-style 20L × 768, 4-codebook GFSQ output
@@ -225,12 +233,14 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] RAS (Repetition-Aware Sampling)
 - [ ] Multi-speaker prompt format with `[SPEAKER0]` / `[SPEAKER1]` tags
 
-### Sesame CSM
-- [ ] Llama-3.2-1B backbone for codebook 1
-- [ ] Small (~100M) decoder for codebooks 2-N (per-frame, AR within frame)
-- [ ] Mimi codec decoder (12.5 Hz / 8 codebooks)
-- [ ] Conversational context format with audio interleaving
-- [ ] Aggressive streaming pipeline (~50 ms per-frame latency target)
+### Sesame CSM — SCAFFOLD COMPLETE (dual-transformer); checkpoint-gated
+> Files under [`Models/Csm/`](../../src/SharpInference.Audio/Models/Csm/) + [`CsmPipeline.cs`](../../src/SharpInference.Audio/Pipelines/CsmPipeline.cs). **Reuse:** both transformers are headless Llama-3.2 bodies → reuse `Qwen2Model` (generalized this pass with a `Qwen2Config.AttentionBias` flag, default true, so Llama loads bias-free while CosyVoice/SparkTTS/VibeVoice are unchanged); audio decode reuses the built Mimi codec; sampling reuses `NucleusSampler`.
+- [x] [`CsmConfig.cs`](../../src/SharpInference.Audio/Models/Csm/CsmConfig.cs) — `V1B`: backbone (Llama-1B: 16L/2048/GQA 32:8, bias-off) + decoder (Llama-100M: 4L/1024/8:2) + 8 codebooks + Mimi. **Tested** (dual-transformer shape + the AttentionBias regression guard).
+- [x] **`Qwen2Model.LoadWeightsHeadless`** — loads the transformer body (layers + final norm) without `embed_tokens`/`lm_head` (CSM's are `Identity`; embeds + heads live on the outer model). Reusable for any headless-LM design.
+- [x] [`CsmModel.cs`](../../src/SharpInference.Audio/Models/Csm/CsmModel.cs) — dual `Qwen2Model` + text/audio embed tables + codebook-0 head + backbone→decoder projection + 7 decoder heads; `GenerateFrame` (backbone → codebook 0, decoder AR → codebooks 1..7).
+- [x] [`CsmPipeline.cs`](../../src/SharpInference.Audio/Pipelines/CsmPipeline.cs) — frame loop (re-embedded context) → Mimi 24 kHz decode. Conversational `Segment` history is token-IDs-in (caller assembles).
+- [ ] **Aggressive streaming + persistent KV cache** (~50 ms/frame) — current path re-feeds context per frame (correct, not yet streaming-optimized).
+- [ ] **Checkpoint validation** — `sesame/csm-1b`: reconcile HF key names + decoder-side audio embeddings + Llama-3.2 RoPE rescaling (scale_factor=32), then env-gated generation test.
 
 ### GPT-SoVITS
 - [ ] T2S GPT (predict semantic tokens from text + reference)
@@ -322,14 +332,14 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] Melody conditioning (chromagram extractor + argmax-and-zero + cross-attn prepend)
 - [ ] Stereo variants (8 codebooks, paired delay)
 
-### YuE
-- [ ] Llama-2 7B (S1) with extended vocab for x-codec audio tokens — overlap with dotLLM
-- [ ] Llama-2 1B (S2) upsampler
-- [ ] X-Codec mini decoder (8 codebooks × 1024 entries @ 50 Hz, 16 kHz mono)
-- [ ] Dual-track interleaving (v_0, a_0, v_1, a_1, ...)
-- [ ] Mandatory `repetition_penalty=1.1`
-- [ ] CoT and ICL variants
-- [ ] Long-context RoPE scaling for 5+ minute songs
+### YuE — SCAFFOLD COMPLETE (Stage-1, first music model); checkpoint-gated
+> **First music model.** Files under [`Models/Music/`](../../src/SharpInference.Audio/Models/Music/) + [`YuePipeline.cs`](../../src/SharpInference.Audio/Pipelines/YuePipeline.cs). Built almost entirely from reuse — the codec-LM music models live in the Audio package since they reuse its codecs + LM infra (the diffusion music models — ACE-Step/Stable Audio/DiffRhythm/AudioLDM2 — will go in the Diffusion package).
+- [x] [`YueStage1Lm.cs`](../../src/SharpInference.Audio/Models/Music/YueStage1Lm.cs) — **reuses `Qwen2Model`** (Llama-2-7B: bias-off + MHA via `NumKeyValueHeads == NumAttentionHeads`) + shared `NucleusSampler`; emits the interleaved **dual-track** `[vocal_cb0, accomp_cb0, …]` stream and parses it into the two per-track codebook-0 streams. Mandatory `repetition_penalty=1.1` applied.
+- [x] [`YueConfig.cs`](../../src/SharpInference.Audio/Models/Music/YueConfig.cs) — Stage-1 (Llama-2-7B) + Stage-2 (~1.5B) presets + extended-vocab audio-token bases. **Tested**.
+- [x] [`YuePipeline.cs`](../../src/SharpInference.Audio/Pipelines/YuePipeline.cs) — Stage-1 → cb0 → **built `XCodec`** 16 kHz decode.
+- [ ] **Stage-2 residual upsampler** (cb0 → 8 codebooks) — reuses `Qwen2Model` again; currently codebooks 1..7 are zero-filled (decodes cb0 semantic content only). The accompaniment track + mix also ride on Stage-2.
+- [ ] **Vocos 16→44.1 kHz upsampler** + CoT/ICL prompt variants + long-context RoPE scaling.
+- [ ] **Checkpoint validation** — `m-a-p/YuE-s1-7B-*` + `xcodec_mini_infer`: reconcile the tokenizer audio-token bases + HF key names, then env-gated test.
 
 ### DiffRhythm
 - [ ] Stable-Audio-derived VAE (21.5 Hz / 64-ch / 2048× downsample)
@@ -405,7 +415,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 ### Done
 
 - **STT — Whisper + Moonshine shipped.** Whisper (encoder/decoder/pipeline + Distil + large-v3-turbo presets, greedy decode + suppress-tokens) and Moonshine (Conv1D + RoPE + SentencePiece BPE) both transcribe canonical JFK audio end-to-end. NeMo / SenseVoice / FireRedASR families remain unstarted.
-- **TTS — F5-TTS + Kokoro shipped; VibeVoice multi-speaker + CosyVoice 2 scaffolded.** F5-TTS (DiT + sway-sampling + Vocos) is complete. Kokoro is now end-to-end real speech: the full **iSTFTNet generator forward** (HnNSF harmonic source + 2 upsample stages + MRF AdaIN/Snake + magnitude/phase iSTFT) replaced the sine placeholder; the only remaining Kokoro gap is a C# **G2P** (IPA-in only today). VibeVoice's multi-speaker pipeline (tokenizers, diffusion head, cosine DPM-Solver, processor, AR + DDPM loop) is wired; the **streaming-0.5B split-LM pipeline + `BinaryClassifier` EOS are not built**. **CosyVoice 2** is a full non-streaming scaffold across all 7 components (config / Qwen LM + RAS sampler / S3 FSQ tokenizer / CAM++ / OT-CFM flow / HiFTNet vocoder / pipeline) — the exactly-specified pieces (sampler, CFM Euler+CFG solver, FSQ packing) are unit-tested (13 tests); the rest are structurally-correct scaffolds **awaiting the CV2-0.5B checkpoint** for first-run validation. **StyleTTS 2** (Kokoro's parent) reuses the validated Kokoro stack verbatim via a new `KokoroPipeline.SynthesizeFromStyle` path and adds the style modules — the diffusion style sampler (Karras + ADPM2 + EDM/CFG) and FSQ-free 2D-Conv `StyleEncoder` — unlocking zero-shot voice cloning + random-style modes; sampler/config unit-tested (8 tests), the StyleTransformer1d network awaiting `StyleTTS2-LibriTTS`.
+- **TTS — F5-TTS + Kokoro shipped; VibeVoice multi-speaker + CosyVoice 2 scaffolded.** F5-TTS (DiT + sway-sampling + Vocos) is complete. Kokoro is now end-to-end real speech: the full **iSTFTNet generator forward** (HnNSF harmonic source + 2 upsample stages + MRF AdaIN/Snake + magnitude/phase iSTFT) replaced the sine placeholder; the only remaining Kokoro gap is a C# **G2P** (IPA-in only today). VibeVoice's multi-speaker pipeline (tokenizers, diffusion head, cosine DPM-Solver, processor, AR + DDPM loop) is wired; the **streaming-0.5B split-LM pipeline + `BinaryClassifier` EOS are not built**. **CosyVoice 2** is a full non-streaming scaffold across all 7 components (config / Qwen LM + RAS sampler / S3 FSQ tokenizer / CAM++ / OT-CFM flow / HiFTNet vocoder / pipeline) — the exactly-specified pieces (sampler, CFM Euler+CFG solver, FSQ packing) are unit-tested (13 tests); the rest are structurally-correct scaffolds **awaiting the CV2-0.5B checkpoint** for first-run validation. **StyleTTS 2** (Kokoro's parent) reuses the validated Kokoro stack verbatim via a new `KokoroPipeline.SynthesizeFromStyle` path and adds the style modules — the diffusion style sampler (Karras + ADPM2 + EDM/CFG) and FSQ-free 2D-Conv `StyleEncoder` — unlocking zero-shot voice cloning + random-style modes; sampler/config unit-tested (8 tests), the StyleTransformer1d network awaiting `StyleTTS2-LibriTTS`. **Spark-TTS** (Qwen2.5-0.5B LM → BiCodec) is a non-streaming scaffold built almost entirely from reuse — the LM reuses `Qwen2Model` verbatim (single extended-vocab softmax), and two shared primitives were hoisted in the process: `NucleusSampler` (top-k/top-p draw, now shared by CosyVoice + Spark) and `SnakeResBlock` (plain-Snake MRF, now shared by HiFTNet + BiCodec); config + sampler unit-tested (10 tests), BiCodec decode awaiting `Spark-TTS-0.5B`.
 - **All 9 codecs** in §4 are structurally complete with config + Encode + Decode + EnumerateWeights surfaces. Build passes clean across 12 projects × 2 frameworks.
 - **All 10 shared-primitive items** in §3 are landed (streaming surface, ring buffer, KV cache, LSTMs, mel extractor, SIMD FFT).
 - **Backend op gaps from §3 PTX list** addressed at the C# IBackend level: `Conv1d`, `ConvTranspose1d`, `Sigmoid`, `Tanh`, `Snake`, `Elu` are wired on CpuBackend with real implementations. CudaBackend + VulkanBackend currently throw `NotSupportedException` for the not-yet-compiled-PTX/SPIR-V variants, with native source files staged.

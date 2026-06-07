@@ -1,3 +1,5 @@
+using SharpInference.Audio.Dsp;
+using SharpInference.Audio.Sampling;
 using SharpInference.Core.Tensors;
 
 namespace SharpInference.Audio.Models.CosyVoice;
@@ -21,7 +23,7 @@ public sealed unsafe class SpeechSampler
     {
         _cfg = cfg;
         _numCandidates = eosToken + 1;
-        _rng = unchecked((uint)seed * 2654435761u + 0x9E3779B9u) | 1u;
+        _rng = DeterministicRng.Seed(seed);
     }
 
     /// <summary>Draws the next speech token from <paramref name="logits"/> (<c>[1, 1, vocab]</c>),
@@ -44,63 +46,14 @@ public sealed unsafe class SpeechSampler
             }
         }
 
-        float temp = _cfg.Temperature > 0 ? _cfg.Temperature : 1f;
         int recentRepeat = CountTrailingRepeat(history);
 
-        // RAS: if we're already at the repeat ceiling, re-roll while masking the repeated token.
-        int chosen = DrawFiltered(work, temp, maskToken: -1);
+        // Filtered draw via the shared sampler; RAS re-rolls (masking the repeated token) if we're at
+        // the repeat ceiling.
+        int chosen = NucleusSampler.Draw(work, _numCandidates, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref _rng);
         if (_cfg.UseRas && recentRepeat >= _cfg.RasMaxRepeat - 1 && history.Count > 0 && chosen == history[^1])
-            chosen = DrawFiltered(work, temp, maskToken: history[^1]);
+            chosen = NucleusSampler.Draw(work, _numCandidates, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref _rng, maskToken: history[^1]);
         return chosen;
-    }
-
-    /// <summary>One filtered multinomial draw: temperature → softmax → top-k → top-p → sample,
-    /// optionally forcing one token's probability to zero (RAS re-roll).</summary>
-    private int DrawFiltered(float[] logits, float temp, int maskToken)
-    {
-        float[] probs = new float[_numCandidates];
-        float max = float.NegativeInfinity;
-        for (int i = 0; i < _numCandidates; i++)
-        {
-            float v = logits[i] / temp;
-            probs[i] = v;
-            if (v > max) max = v;
-        }
-        double sum = 0;
-        for (int i = 0; i < _numCandidates; i++)
-        {
-            float e = MathF.Exp(probs[i] - max);
-            probs[i] = e;
-            sum += e;
-        }
-        float inv = (float)(1.0 / sum);
-        for (int i = 0; i < _numCandidates; i++) probs[i] *= inv;
-        if ((uint)maskToken < (uint)_numCandidates) probs[maskToken] = 0f;
-
-        // top-k + top-p over an index list sorted by probability (descending).
-        int[] order = ArgsortDescending(probs);
-        int k = _cfg.TopK > 0 ? Math.Min(_cfg.TopK, _numCandidates) : _numCandidates;
-        float cumulative = 0f;
-        int keep = 0;
-        for (int rank = 0; rank < k; rank++)
-        {
-            cumulative += probs[order[rank]];
-            keep = rank + 1;
-            if (_cfg.TopP > 0 && _cfg.TopP < 1f && cumulative >= _cfg.TopP) break;
-        }
-
-        // Renormalize the kept set and draw.
-        float keptSum = 0f;
-        for (int rank = 0; rank < keep; rank++) keptSum += probs[order[rank]];
-        if (keptSum <= 0f) return order[0];
-        float r = NextFloat() * keptSum;
-        float acc = 0f;
-        for (int rank = 0; rank < keep; rank++)
-        {
-            acc += probs[order[rank]];
-            if (r <= acc) return order[rank];
-        }
-        return order[keep - 1];
     }
 
     private static int CountTrailingRepeat(List<int> history)
@@ -110,19 +63,5 @@ public sealed unsafe class SpeechSampler
         int count = 0;
         for (int i = history.Count - 1; i >= 0 && history[i] == last; i--) count++;
         return count;
-    }
-
-    private static int[] ArgsortDescending(float[] values)
-    {
-        int[] idx = new int[values.Length];
-        for (int i = 0; i < idx.Length; i++) idx[i] = i;
-        Array.Sort(idx, (a, b) => values[b].CompareTo(values[a]));
-        return idx;
-    }
-
-    private float NextFloat()
-    {
-        _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5;
-        return (_rng & 0xFFFFFF) / 16777216f;
     }
 }

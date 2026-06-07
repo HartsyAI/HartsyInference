@@ -35,11 +35,18 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     /// <param name="negativeTokenIds">Negative-prompt token IDs (same length as <paramref name="promptTokenIds"/> recommended). Used only when <c>CfgScale &gt; 1</c>.</param>
     /// <param name="request">Generation parameters.</param>
     /// <param name="onProgress">Optional per-step progress callback.</param>
+    /// <param name="promptDropIndex">Number of leading hidden-state positions to drop from the conditional
+    /// stream after encoding. Qwen-Image wraps the prompt in a system+user-header template and discards
+    /// those prefix tokens' hidden states (diffusers' <c>prompt_template_encode_start_idx</c>). 0 = keep all
+    /// (raw-prompt path).</param>
+    /// <param name="negativeDropIndex">Same as <paramref name="promptDropIndex"/> for the negative stream.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         int[] negativeTokenIds,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        int promptDropIndex = 0,
+        int negativeDropIndex = 0)
     {
         ThrowIfDisposed();
 
@@ -63,12 +70,24 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
         int[][] batchPrompt = [promptTokenIds];
         Tensor condHidden = _textEncoder.Encode(Backend, batchPrompt);
+        if (promptDropIndex > 0)
+        {
+            Tensor trimmed = DropPrefixHiddenStates(condHidden, promptDropIndex);
+            condHidden.Dispose();
+            condHidden = trimmed;
+        }
 
         Tensor? uncondHidden = null;
         if (useCfg)
         {
             int[][] batchNeg = [negativeTokenIds];
             uncondHidden = _textEncoder.Encode(Backend, batchNeg);
+            if (negativeDropIndex > 0)
+            {
+                Tensor trimmed = DropPrefixHiddenStates(uncondHidden, negativeDropIndex);
+                uncondHidden.Dispose();
+                uncondHidden = trimmed;
+            }
         }
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (txt seqLen={condHidden.Shape[1]})");
@@ -162,6 +181,28 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         Logs.Info($"Qwen-Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Drops the first <paramref name="drop"/> sequence positions from a <c>[1, seq, hidden]</c>
+    /// F32 hidden-state tensor, returning <c>[1, seq-drop, hidden]</c>. Used to discard the system+user-header
+    /// template prefix from Qwen-Image text conditioning (the kept tail = prompt content + assistant suffix,
+    /// matching diffusers' <c>split_hidden_states[drop_idx:]</c>). No-op clone guard if drop is out of range.</summary>
+    private static Tensor DropPrefixHiddenStates(Tensor hidden, int drop)
+    {
+        long batch = hidden.Shape[0];
+        long seq = hidden.Shape[1];
+        long hiddenDim = hidden.Shape[2];
+        long elem = hidden.DType.SizeInBytes;
+        long rowBytes = hiddenDim * elem;
+        // Guard: if the drop would empty the sequence (or batch isn't 1), copy the whole tensor unchanged
+        // rather than drop — the caller always disposes the input and adopts our return value.
+        long effectiveDrop = (drop <= 0 || drop >= seq || batch != 1) ? 0 : drop;
+        long newSeq = seq - effectiveDrop;
+        Tensor result = new Tensor(new TensorShape(batch, newSeq, hiddenDim), hidden.DType);
+        byte* src = (byte*)hidden.DataPointer;
+        byte* dst = (byte*)result.DataPointer;
+        Buffer.MemoryCopy(src + effectiveDrop * rowBytes, dst, newSeq * rowBytes, newSeq * rowBytes);
+        return result;
     }
 
     /// <summary>Packs a latent tensor from <c>[B, C, H, W]</c> to <c>[B, (H/p)*(W/p), p² * C]</c> by interleaving p×p spatial blocks into the feature dim. Diffusers uses <c>view → permute(0,2,4,1,3,5) → reshape</c>; we replicate the resulting layout where each p×p patch contributes channels C × p² to the token, ordered <c>(c, py, px)</c> so the inverse <see cref="UnpackLatent"/> is exact.</summary>

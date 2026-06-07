@@ -16,8 +16,14 @@ public static class LoraFormatDetector
 
         foreach (string key in descriptors.Keys)
         {
+            // HuggingFace PEFT diffusers format. The mapper is architecture-agnostic — it strips the
+            // `transformer.` prefix and passes the body through as the canonical key — so the same arm
+            // covers Flux (`transformer_blocks` / `single_transformer_blocks`) AND single-stream DiTs that
+            // name blocks `transformer.blocks.{i}.*` (Anima / Cosmos-Predict2, whose canonical keys are
+            // `blocks.{i}.self_attn.q_proj.weight` etc. — an exact passthrough match).
             if (key.StartsWith("transformer.transformer_blocks.", StringComparison.Ordinal)
-                || key.StartsWith("transformer.single_transformer_blocks.", StringComparison.Ordinal))
+                || key.StartsWith("transformer.single_transformer_blocks.", StringComparison.Ordinal)
+                || key.StartsWith("transformer.blocks.", StringComparison.Ordinal))
             {
                 hasDiffusersFlux = true;
             }

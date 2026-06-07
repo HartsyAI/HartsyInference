@@ -42,11 +42,14 @@ internal sealed unsafe class Qwen2Attention
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _qW = WhisperOps.EnsureF32(w[$"{prefix}.q_proj.weight"]);
-        _qB = WhisperOps.EnsureF32(w[$"{prefix}.q_proj.bias"]);
         _kW = WhisperOps.EnsureF32(w[$"{prefix}.k_proj.weight"]);
-        _kB = WhisperOps.EnsureF32(w[$"{prefix}.k_proj.bias"]);
         _vW = WhisperOps.EnsureF32(w[$"{prefix}.v_proj.weight"]);
-        _vB = WhisperOps.EnsureF32(w[$"{prefix}.v_proj.bias"]);
+        if (_cfg.AttentionBias)
+        {
+            _qB = WhisperOps.EnsureF32(w[$"{prefix}.q_proj.bias"]);
+            _kB = WhisperOps.EnsureF32(w[$"{prefix}.k_proj.bias"]);
+            _vB = WhisperOps.EnsureF32(w[$"{prefix}.v_proj.bias"]);
+        }
         _oW = WhisperOps.EnsureF32(w[$"{prefix}.o_proj.weight"]);
     }
 

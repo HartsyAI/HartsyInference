@@ -73,7 +73,8 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         // encoder_proj → μ [1, T_mel, mel] then transpose to channels-first [1, mel, T_mel].
         Tensor muSeq = WhisperOps.ProjectLinear(backend, up, _encoderProjW!, _encoderProjB, 1, tMel, inputSize, mel);
         up.Dispose();
-        Tensor mu = TransposeToChannelsFirst(muSeq, tMel, mel);
+        Tensor mu = new(new TensorShape(1, mel, tMel), DType.F32);
+        backend.Transpose2D(mu, muSeq, tMel, mel);
         muSeq.Dispose();
 
         // Speaker embedding → mel dim [1, mel] (kept as [1, mel, 1] for broadcast).
@@ -119,17 +120,6 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
             Buffer.MemoryCopy(row, op + (long)(2 * j) * dim, dim * 4, dim * 4);
             Buffer.MemoryCopy(row, op + (long)(2 * j + 1) * dim, dim * 4, dim * 4);
         }
-        return outT;
-    }
-
-    private static Tensor TransposeToChannelsFirst(Tensor seq, int t, int c)
-    {
-        Tensor outT = new(new TensorShape(1, c, t), DType.F32);
-        float* ip = (float*)seq.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int j = 0; j < t; j++)
-            for (int cc = 0; cc < c; cc++)
-                op[(long)cc * t + j] = ip[(long)j * c + cc];
         return outT;
     }
 

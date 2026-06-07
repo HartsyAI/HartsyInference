@@ -42,7 +42,22 @@ public sealed class LlamaTokenizer : IDisposable
     private readonly int _maxLength;
     private int _disposed;
 
-    /// <summary>Creates a Llama 3 tokenizer from <c>vocab.json</c> + <c>merges.txt</c>.</summary>
+    /// <summary>Creates a Llama 3 tokenizer from the canonical <c>vocab.json</c> + <c>merges.txt</c>
+    /// embedded in this assembly (same pattern as <see cref="ClipTokenizer"/> / <see cref="Qwen3Tokenizer"/>).
+    /// Throws if the assets aren't embedded in this build — check
+    /// <see cref="EmbeddedTokenizerResources.HasLlama3Assets"/> first if you want to fall back gracefully.</summary>
+    /// <param name="maxLength">Truncation cap. Default 256 (matches HiDream's text-encoder window).</param>
+    public LlamaTokenizer(int maxLength = 256)
+    {
+        if (maxLength <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxLength));
+        _maxLength = maxLength;
+        using Stream vocabStream = EmbeddedTokenizerResources.OpenLlama3Vocab();
+        using Stream mergesStream = EmbeddedTokenizerResources.OpenLlama3Merges();
+        _tokenizer = BpeTokenizer.Create(vocabStream, mergesStream);
+    }
+
+    /// <summary>Creates a Llama 3 tokenizer from <c>vocab.json</c> + <c>merges.txt</c> on disk.</summary>
     /// <param name="vocabPath">Path to <c>vocab.json</c>.</param>
     /// <param name="mergesPath">Path to <c>merges.txt</c>.</param>
     /// <param name="maxLength">Truncation cap. Default 256 (matches HiDream's text-encoder window).</param>

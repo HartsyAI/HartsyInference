@@ -215,6 +215,38 @@ public sealed record LlamaStyleEncoderConfig
         BosTokenId = 151643,
     };
 
+    /// <summary>Llama-3.1-8B-Instruct preset, used as HiDream-I1's fourth text encoder (text_encoder_4).
+    /// 32 layers, hidden=4096, GQA 32:8, head_dim=128, intermediate=14336, vocab=128256. Standard Llama:
+    /// NO per-head Q/K norm (distinguishes it from Qwen3-8B, which is otherwise dimensionally similar),
+    /// no attention bias, theta=500,000 (Llama-3 family — NOT the 1M Qwen uses), RMSNorm eps=1e-5.
+    /// HiDream harvests hidden states from all 32 layers (<see cref="Denoisers.HiDreamConfig.LlamaLayers"/>
+    /// indexes 0..31), so the layer count must be exactly 32.
+    /// <para>RoPE scaling: Llama-3.1 technically uses the "llama3" inv-freq scaling (factor 8, original
+    /// context 8192), but we run it as standard RoPE (<see cref="RopeScalingType.None"/>) — same decision
+    /// as <see cref="Ministral3B"/>. The scaling only diverges from identity for long contexts; HiDream
+    /// feeds the encoder ≤256-token prompts where the unscaled table is effectively exact. Revisit if
+    /// end-to-end output shows positional drift.</para>
+    /// <para>Matches Comfy-Org/HiDream-I1_ComfyUI <c>llama_3.1_8b_instruct_fp8_scaled.safetensors</c>
+    /// (HasFinalNorm=true — the repackaged encoder ships <c>model.norm.weight</c>).</para></summary>
+    public static LlamaStyleEncoderConfig Llama31_8B => new()
+    {
+        HiddenSize = 4096,
+        NumLayers = 32,
+        NumQueryHeads = 32,
+        NumKvHeads = 8,
+        HeadDim = 128,
+        IntermediateSize = 14336,
+        VocabSize = 128256,
+        RmsNormEps = 1e-5f,
+        RopeTheta = 500_000f,
+        MaxPositionEmbeddings = 131072,
+        QkHeadNorm = false,
+        AttentionBias = false,
+        HasFinalNorm = true,
+        EosTokenId = 128_001,
+        BosTokenId = 128_000,
+    };
+
     /// <summary>Mistral-Small-3 (BFL Flux.2 Dev distill): 30 layers, hidden=5120, GQA 32:8, head_dim=128, IntermediateSize=32768 (~6.4× ratio — wider FFN than standard Mistral), vocab=131072 (Tekken). No per-head Q/K norm, no final norm — ships as a feature extractor. Verified against <c>Comfy-Org/Flux2/text_encoders/mistral_3_small_flux2_fp8.safetensors</c>.</summary>
     public static LlamaStyleEncoderConfig MistralSmall3 => new()
     {

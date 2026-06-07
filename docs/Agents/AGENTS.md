@@ -46,6 +46,8 @@ These apply to ALL agents. Specialized files only add task-specific rules.
 
 **Package boundaries** — respect `docs/Design/NUGET_PACKAGE_DESIGN.md`. Don't leak CUDA/Vulkan into CPU packages.
 
+**Reuse shared primitives — no redundant bloat.** The backend is modular *so that models share it*. Before writing ANY helper (inline or a new shared one), grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`, `Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics (`WhisperOps` for `ProjectLinear`/`EnsureF32`, `WeightNorm`, `IStft`, and `SharpInference.Audio/Dsp/` → `NsfVocoderDsp` for NSF source / forward-STFT / iSTFT head / pad / scale, `DeterministicRng` for seeded noise). Concrete: a `[1,C,T]↔[1,T,C]` layout transpose is `backend.Transpose2D(out, in, d1, d2)` — never a hand-rolled loop. When 2+ models need the same operation, hoist ONE helper **parameterized by the differences** (a few extra params or a `switch` beats a dozen near-identical small methods). When adding a model, audit it for duplication against the models already built and fold the shared parts. Re-run affected models' tests after hoisting — shared code is load-bearing.
+
 ## dotLLM Patterns (Single Source of Truth)
 
 All code follows patterns verified from the dotLLM codebase. See `docs/CODE_STYLE.md` for full P/Invoke and disposal patterns.
@@ -134,3 +136,4 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - No flat-midpoint tensor splits in GPU kernels — always decompose index to logical coordinates for dimension-aware splitting
 - No `cuMemFree` on the hot path — use `cuMemFreeAsync` (stream-ordered). Synchronous free after removing per-op Sync can cause use-after-free.
 - No `CacheActivation` on in-place-modified tensors without clearing old `_gpuSyncCallback`/`_gpuDisposeCallback` first
+- No per-model copy of logic that exists as a shared helper or `IBackend` op (layout transpose = `backend.Transpose2D`, not a hand-rolled loop; NSF source / STFT / iSTFT = `NsfVocoderDsp`; seeded noise = `DeterministicRng`). Check first, then hoist a parameterized shared helper.

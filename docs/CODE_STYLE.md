@@ -478,3 +478,4 @@ public long ElementCount => Shape.ElementCount;
 - **Don't catch `Exception` at a low level** — only at pipeline/API boundaries
 - **Don't use reflection on hot paths** — it's slow and allocates
 - **Don't add NuGet packages without discussion** — every dependency is a liability
+- **Don't duplicate a shared primitive** — before writing a helper, grep `IBackend` ops + shared statics (`WhisperOps`, `WeightNorm`, `IStft`, `SharpInference.Audio/Dsp/`). When 2+ call sites need the same op, hoist ONE parameterized helper; don't copy a private method into each model. (e.g. layout transpose = `backend.Transpose2D`.)

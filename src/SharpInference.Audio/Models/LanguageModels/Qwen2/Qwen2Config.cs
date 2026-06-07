@@ -48,6 +48,11 @@ public sealed record Qwen2Config
     /// <summary>RMSNorm epsilon. 1e-6 across Qwen2.5.</summary>
     public float RmsNormEps { get; init; } = 1e-6f;
 
+    /// <summary>Whether Q/K/V projections carry biases. <c>true</c> for Qwen2/Qwen2.5 (its defining
+    /// feature). Set <c>false</c> to reuse this exact transformer for <b>Llama-3.2</b>-family backbones
+    /// (e.g. Sesame CSM), which have no attention bias. The O projection never has a bias either way.</summary>
+    public bool AttentionBias { get; init; } = true;
+
     /// <summary>Whether <c>lm_head.weight</c> is tied to <c>embed_tokens.weight</c>.
     /// True for 1.5B / 0.5B, false for 7B.</summary>
     public bool TieWordEmbeddings { get; init; } = true;

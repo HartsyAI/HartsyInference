@@ -23,19 +23,30 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
     private readonly AnimaTransformer _transformer;
     private readonly AnimaLlmAdapter _llmAdapter;
     private readonly QwenImageVaeDecoder _vaeDecoder;
+    private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly AnimaConfig _config;
 
     /// <summary>Creates an Anima t2i pipeline. Caller owns the components. The VAE is the
     /// <see cref="QwenImageVaeDecoder"/> (3D causal autoencoder collapsed to 2D for image mode);
     /// the standard <see cref="VaeDecoder"/> class can't load this checkpoint because the key
-    /// layout and conv ranks differ.</summary>
+    /// layout and conv ranks differ. Img2img is unavailable; use the overload accepting a
+    /// <see cref="QwenImageVaeEncoder"/> to enable it.</summary>
     public AnimaPipeline(IBackend backend, AnimaTransformer transformer, AnimaLlmAdapter llmAdapter,
         QwenImageVaeDecoder vaeDecoder, AnimaConfig config)
+        : this(backend, transformer, llmAdapter, vaeDecoder, vaeEncoder: null, config)
+    {
+    }
+
+    /// <summary>Creates an Anima pipeline with both VAE halves loaded — required for img2img / inpaint
+    /// (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromEmbeddings"/>).</summary>
+    public AnimaPipeline(IBackend backend, AnimaTransformer transformer, AnimaLlmAdapter llmAdapter,
+        QwenImageVaeDecoder vaeDecoder, QwenImageVaeEncoder? vaeEncoder, AnimaConfig config)
         : base(backend)
     {
         _transformer = transformer;
         _llmAdapter = llmAdapter;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
     }
 
@@ -68,7 +79,19 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         int latentW = width / 8;
         int steps = request.Steps;
 
-        Logs.Info($"Anima t2i: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        // img2img / inpaint: validate source + compute the denoise start step + strength=0 short-circuit.
+        Img2ImgSetup.Plan img2imgPlan = Img2ImgSetup.Prepare(request, height, width, steps);
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException(
+                "ImageToImageRequest requires a QwenImageVaeEncoder. Construct AnimaPipeline with the overload that accepts one.");
+        if (img2imgPlan.PassThrough)
+        {
+            Logs.Info("Anima img2img strength=0 → returning source image unchanged.");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+
+        Logs.Info($"Anima {(isImg2Img ? "img2img" : "t2i")}: {width}x{height}, {steps} steps, start={img2imgPlan.StartStep}, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         LogStats("textEmbeddings (Qwen3 0.6B output)", textEmbeddings);
@@ -110,8 +133,6 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         }
 
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-        LogStats("initial noise latent", latent);
 
         // Pad refinedText / refinedNegText to 512 tokens with zeros. Anima training (per
         // `tdrussell/diffusion-pipe/models/cosmos_predict2.py:_tokenize`) tokenizes T5 inputs to
@@ -149,7 +170,26 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         sigmas[steps] = 0.0f;                            // terminal sigma
         Logs.Info($"Anima sigmas (Z-Image flow-match, shift={Shift}): [{sigmas[0]:F4}, {sigmas[1]:F4}, ..., {sigmas[^2]:F4}, {sigmas[^1]:F4}]");
 
-        for (int i = 0; i < steps; i++)
+        // Initial latent: fresh noise (t2i) or the VAE-encoded source noised to sigma[startStep] (img2img).
+        int startStep = img2imgPlan.StartStep;
+        Tensor latent;
+        if (isImg2Img)
+        {
+            Tensor sourceLatent = _vaeEncoder!.Encode(Backend, ((ImageToImageRequest)request).SourceImage);  // [1, 16, latentH, latentW]
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            latent = new Tensor(latentShape, DType.F32);
+            AddNoiseFlowMatch(latent, sourceLatent, noise, sigmas[startStep]);   // x = (1-σ)·source + σ·noise
+            sourceLatent.Dispose();
+            noise.Dispose();
+            Logs.Info($"Anima img2img: encoded source, AddNoise at sigma[{startStep}]={sigmas[startStep]:F4}.");
+        }
+        else
+        {
+            latent = SeedGenerator.CreateNoise(latentShape, seed);
+        }
+        LogStats("initial latent", latent);
+
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = sigmas[i];
@@ -179,7 +219,14 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
             latent = newLatent;
 
             stepSw.Stop();
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                // Attach the current latent so the backend's PreviewEncoder can render per-step previews
+                // (without this, progress.Latent is null and TryEncode bails → no previews). Anima's latent
+                // is [1, 16, H, W] NCHW (Qwen-Image VAE), decoded with Flux factors per LatentArchitecture.Anima.
+                Latent = latent,
+                LatentArch = LatentArchitecture.Anima,
+            });
         }
 
         refinedText.Dispose();
@@ -404,5 +451,18 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         float* ep = (float*)eps.DataPointer;
         long n = latent.Shape.ElementCount;
         for (long i = 0; i < n; i++) np[i] = lp[i] + dt * ep[i];
+    }
+
+    /// <summary>Flow-matching forward noising for img2img: <c>out = (1 − sigma)·source + sigma·noise</c>.
+    /// Mirrors the Z-Image / Anima schedule where the clean latent sits at sigma=0 and pure noise at the
+    /// initial sigma, so the denoise loop resumed at step <c>startStep</c> integrates back to the source.</summary>
+    private static unsafe void AddNoiseFlowMatch(Tensor outLatent, Tensor source, Tensor noise, float sigma)
+    {
+        float* op = (float*)outLatent.DataPointer;
+        float* sp = (float*)source.DataPointer;
+        float* xp = (float*)noise.DataPointer;
+        long n = outLatent.Shape.ElementCount;
+        float oneMinus = 1.0f - sigma;
+        for (long i = 0; i < n; i++) op[i] = oneMinus * sp[i] + sigma * xp[i];
     }
 }

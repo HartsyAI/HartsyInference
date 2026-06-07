@@ -1,3 +1,4 @@
+using SharpInference.Audio.Dsp;
 using SharpInference.Core.Backends;
 using SharpInference.Core.Tensors;
 
@@ -93,17 +94,9 @@ public sealed unsafe class ConditionalCfm
     {
         Tensor x = new(new TensorShape(1, channels, t), DType.F32);
         float* p = (float*)x.DataPointer;
-        uint rng = unchecked((uint)seed * 2654435761u + 0x9E3779B9u) | 1u;
+        uint rng = DeterministicRng.Seed(seed);
         long n = (long)channels * t;
-        for (long i = 0; i < n; i++)
-        {
-            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-            float u1 = (rng & 0xFFFFFF) / 16777216f;
-            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
-            float u2 = (rng & 0xFFFFFF) / 16777216f;
-            if (u1 < 1e-7f) u1 = 1e-7f;
-            p[i] = MathF.Sqrt(-2f * MathF.Log(u1)) * MathF.Cos(2f * MathF.PI * u2);
-        }
+        for (long i = 0; i < n; i++) p[i] = DeterministicRng.NextGaussian(ref rng);
         return x;
     }
 }

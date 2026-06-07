@@ -1,3 +1,4 @@
+using SharpInference.Audio.Dsp;
 using SharpInference.Core.Backends;
 using SharpInference.Core.Tensors;
 
@@ -49,12 +50,12 @@ public sealed unsafe class StyleDiffusionSampler
     {
         float[] sigmas = KarrasSchedule(_cfg.DiffusionSteps, _cfg.SigmaMin, _cfg.SigmaMax, _cfg.SigmaRho);
         int dim = _cfg.StyleDim;
-        uint rng = unchecked((uint)seed * 2654435761u + 0x9E3779B9u) | 1u;
+        uint rng = DeterministicRng.Seed(seed);
 
         // x = σ_0 · noise.
         Tensor x = new(new TensorShape(1, 1, dim), DType.F32);
         float* xp = (float*)x.DataPointer;
-        for (int i = 0; i < dim; i++) xp[i] = sigmas[0] * NextGaussian(ref rng);
+        for (int i = 0; i < dim; i++) xp[i] = sigmas[0] * DeterministicRng.NextGaussian(ref rng);
 
         for (int step = 0; step < _cfg.DiffusionSteps; step++)
         {
@@ -85,7 +86,7 @@ public sealed unsafe class StyleDiffusionSampler
             if (sigmaUp > 0f)
             {
                 float* np = (float*)xNext.DataPointer;
-                for (int i = 0; i < dim; i++) np[i] += sigmaUp * NextGaussian(ref rng);
+                for (int i = 0; i < dim; i++) np[i] += sigmaUp * DeterministicRng.NextGaussian(ref rng);
             }
             x.Dispose();
             x = xNext;
@@ -110,15 +111,5 @@ public sealed unsafe class StyleDiffusionSampler
             op[i] = xp[i] + d * dt;
         }
         return outT;
-    }
-
-    private static float NextGaussian(ref uint state)
-    {
-        state ^= state << 13; state ^= state >> 17; state ^= state << 5;
-        float u1 = (state & 0xFFFFFF) / 16777216f;
-        state ^= state << 13; state ^= state >> 17; state ^= state << 5;
-        float u2 = (state & 0xFFFFFF) / 16777216f;
-        if (u1 < 1e-7f) u1 = 1e-7f;
-        return MathF.Sqrt(-2f * MathF.Log(u1)) * MathF.Cos(2f * MathF.PI * u2);
     }
 }

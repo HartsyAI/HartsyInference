@@ -69,7 +69,8 @@ public sealed unsafe class S3Tokenizer : IDisposable
         // proj_down to the 8 FSQ channels, then pack each frame.
         int hidden = (int)x.Shape[1];
         int t = (int)x.Shape[2];
-        Tensor xt = TransposeToSeq(x, hidden, t);          // [1, T, hidden]
+        Tensor xt = new(new TensorShape(1, t, hidden), DType.F32);   // [1, T, hidden]
+        backend.Transpose2D(xt, x, hidden, t);
         if (owns) x.Dispose();
         Tensor z = WhisperOps.ProjectLinear(backend, xt, _projDownW!, _projDownB, 1, t, hidden, FsqDim);
         xt.Dispose();
@@ -116,16 +117,6 @@ public sealed unsafe class S3Tokenizer : IDisposable
         if (_projDownB is not null) yield return _projDownB;
     }
 
-    private static Tensor TransposeToSeq(Tensor chFirst, int c, int t)
-    {
-        Tensor outT = new(new TensorShape(1, t, c), DType.F32);
-        float* ip = (float*)chFirst.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int cc = 0; cc < c; cc++)
-            for (int j = 0; j < t; j++)
-                op[(long)j * c + cc] = ip[(long)cc * t + j];
-        return outT;
-    }
 
     public void Dispose()
     {

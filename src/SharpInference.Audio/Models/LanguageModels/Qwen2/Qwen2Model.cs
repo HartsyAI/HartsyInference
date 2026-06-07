@@ -72,6 +72,17 @@ public sealed unsafe class Qwen2Model : IDisposable
         }
     }
 
+    /// <summary>Loads a <b>headless</b> transformer body — the decoder layers + final RMSNorm only, no
+    /// <c>embed_tokens</c> / <c>lm_head</c>. Used when the embedding tables and output heads live on an
+    /// outer model (e.g. Sesame CSM's backbone/decoder, whose <c>tok_embeddings</c>/<c>output</c> are
+    /// <c>Identity</c>). Drive it via <see cref="ForwardEmbeds"/>; do not call <see cref="ProjectLogits"/>.</summary>
+    public void LoadWeightsHeadless(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        ThrowIfDisposed();
+        _finalNorm = WhisperOps.EnsureF32(w[$"{prefix}.norm.weight"]);
+        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}");
+    }
+
     /// <summary>Standard token-IDs-in path. Performs embedding lookup then delegates to
     /// <see cref="ForwardEmbeds"/>.
     ///

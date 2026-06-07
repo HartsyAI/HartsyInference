@@ -28,4 +28,14 @@
     <EmbeddedResource Include="Resources\qwen3_merges.txt"  LogicalName="SharpInference.Tokenizers.Resources.qwen3_merges.txt" />
   </ItemGroup>
 
+  <!-- Llama-3.1 tokenizer assets (HiDream's fourth text encoder). These ship separately from the
+       source tree (vocab.json is ~5 MB) and are pulled in only when present, so a fresh checkout
+       still compiles. To enable HiDream: extract vocab.json + merges.txt from the Llama-3.1
+       tokenizer.json and drop them in Resources/ as llama3_vocab.json + llama3_merges.txt, then
+       rebuild. EmbeddedTokenizerResources.HasLlama3Assets reports whether they were embedded. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\llama3_vocab.json"  LogicalName="SharpInference.Tokenizers.Resources.llama3_vocab.json"  Condition="Exists('Resources\llama3_vocab.json')" />
+    <EmbeddedResource Include="Resources\llama3_merges.txt"  LogicalName="SharpInference.Tokenizers.Resources.llama3_merges.txt"  Condition="Exists('Resources\llama3_merges.txt')" />
+  </ItemGroup>
+
 </Project>

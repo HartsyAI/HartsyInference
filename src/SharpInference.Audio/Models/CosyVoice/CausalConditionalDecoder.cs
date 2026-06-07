@@ -276,7 +276,8 @@ internal sealed unsafe class SelfAttnBlock1D
     {
         int c = _channels;
         int t = (int)x.Shape[2];
-        Tensor seq = Transpose(x);                          // [1, T, C]
+        Tensor seq = new(new TensorShape(1, t, c), DType.F32);   // [1, T, C]
+        backend.Transpose2D(seq, x, c, t);
 
         Tensor normed = new(seq.Shape, DType.F32);
         backend.LayerNorm(normed, seq, _norm1W!, _norm1B!, 1e-6f);
@@ -308,7 +309,8 @@ internal sealed unsafe class SelfAttnBlock1D
         AddInPlace(f2, o);
         o.Dispose();
 
-        Tensor outT = Transpose(f2);                        // back to [1, C, T]
+        Tensor outT = new(new TensorShape(1, c, t), DType.F32);   // back to [1, C, T]
+        backend.Transpose2D(outT, f2, t, c);
         f2.Dispose();
         return outT;
     }
@@ -319,19 +321,6 @@ internal sealed unsafe class SelfAttnBlock1D
         float* sp = (float*)src.DataPointer;
         long n = dst.ElementCount;
         for (long i = 0; i < n; i++) dp[i] += sp[i];
-    }
-
-    private static Tensor Transpose(Tensor chFirst)
-    {
-        int c = (int)chFirst.Shape[1];
-        int t = (int)chFirst.Shape[2];
-        Tensor outT = new(new TensorShape(1, t, c), DType.F32);
-        float* ip = (float*)chFirst.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int cc = 0; cc < c; cc++)
-            for (int j = 0; j < t; j++)
-                op[(long)j * c + cc] = ip[(long)cc * t + j];
-        return outT;
     }
 
     private Tensor ToHeads(Tensor seq, int t)

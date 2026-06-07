@@ -94,12 +94,10 @@ public sealed class HiDreamGenerationTests
                 clipG.LoadWeights(LoadStandalone(TestPaths.HiDream.ClipG), "text_model");
                 T5TextEncoder t5 = new(T5TextEncoderConfig.Xxl);
                 t5.LoadWeights(LoadStandalone(TestPaths.HiDream.T5));
-                // HiDream's reference uses Llama-3.1-8B as the fourth text encoder. SharpInference's
-                // LlamaStyleEncoder doesn't ship a dedicated Llama-3.1-8B preset yet — Qwen3_8B is the
-                // closest GQA Llama-family preset we have (32 layers, hidden 4096, GQA 32:8, head_dim 128).
-                // Whether the weights load cleanly depends on Llama-3.1-8B sharing the same key naming;
-                // this test will surface any mismatch on first checkpoint download.
-                LlamaStyleEncoder llama = new(LlamaStyleEncoderConfig.Qwen3_8B);
+                // HiDream's fourth text encoder is Llama-3.1-8B-Instruct, run as a feature extractor.
+                // Uses the dedicated Llama31_8B preset: 32 layers (Qwen3-8B's 36 would over-read the
+                // layer harvest), no per-head QK-norm (Qwen3 has it; Llama doesn't), theta=500k.
+                LlamaStyleEncoder llama = new(LlamaStyleEncoderConfig.Llama31_8B);
                 llama.LoadWeights(LoadStandalone(TestPaths.HiDream.Llama));
                 _output.WriteLine($"[4/7] Quad text encoders loaded in {sw.ElapsedMilliseconds}ms");
 
@@ -133,7 +131,14 @@ public sealed class HiDreamGenerationTests
                 int[] negT5Mask = T5Tokenizer.CreateAttentionMask(negT5);
 
                 int[] ll, negLl;
-                if (File.Exists(TestPaths.Tokenizers.LlamaVocab) && File.Exists(TestPaths.Tokenizers.LlamaMerges))
+                if (EmbeddedTokenizerResources.HasLlama3Assets)
+                {
+                    // Preferred path: the embedded Llama-3.1 tokenizer (same as the SwarmUI extension uses).
+                    using LlamaTokenizer llamaTokenizer = new(maxLength: 256);
+                    ll = llamaTokenizer.Encode(prompt);
+                    negLl = llamaTokenizer.Encode(negPrompt);
+                }
+                else if (File.Exists(TestPaths.Tokenizers.LlamaVocab) && File.Exists(TestPaths.Tokenizers.LlamaMerges))
                 {
                     using LlamaTokenizer llamaTokenizer = new(TestPaths.Tokenizers.LlamaVocab, TestPaths.Tokenizers.LlamaMerges, maxLength: 256);
                     ll = llamaTokenizer.Encode(prompt);
@@ -141,7 +146,7 @@ public sealed class HiDreamGenerationTests
                 }
                 else
                 {
-                    _output.WriteLine("  Note: Llama-3.1 tokenizer (vocab.json + merges.txt) not found, using placeholder tokens. Set LLAMA_VOCAB_PATH and LLAMA_MERGES_PATH for real tokenization.");
+                    _output.WriteLine("  Note: Llama-3.1 tokenizer not embedded (no llama3_vocab.json/merges.txt in SharpInference.Tokenizers/Resources) and no vocab.json+merges.txt on disk — using PLACEHOLDER tokens. Output will be wrong on the Llama branch. Embed the assets for a real result.");
                     ll = [LlamaTokenizer.BosTokenId, 1, 2, 3, 4, 5, 6, 7];
                     negLl = [LlamaTokenizer.BosTokenId, 1, 2, 3, 4, 5, 6, 7];
                 }
