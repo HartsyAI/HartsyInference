@@ -3,6 +3,15 @@
 > **Goal:** Support SDXL and Flux model families, FP8 inference for large DiT models.
 > **Packages:** SharpInference.Diffusion (extended), Core (DType), Cuda (FP8 kernels)
 
+> **Status (2026-06-07):** added **Ideogram 4** research + checklist (9.3B single-stream unified-sequence DiT,
+> "Ideogram 4 Non-Commercial" license, released 2026-06). Research-complete, implementation not-started.
+> Net-new infra: a multi-layer Qwen3-VL hidden-state tap (13 layers — **shared with Lens**), a `LogitNormalSchedule`,
+> 3D sectioned MRoPE `(24,20,20)`, fixed-constant latent norm, and asymmetric (different-length) CFG. Also added a
+> model-agnostic **Structured Prompt Builder** design (Ideogram's JSON-caption format + regional prompting for other
+> models). See § Ideogram 4 and § Structured Prompt Builder below, plus
+> [`IDEOGRAM4_ARCHITECTURE.md`](../Research/IDEOGRAM4_ARCHITECTURE.md) and
+> [`STRUCTURED_PROMPT_BUILDER.md`](../Research/STRUCTURED_PROMPT_BUILDER.md).
+>
 > **Status (2026-05-27):** added **Microsoft Lens / Lens-Turbo / Lens-Base** research + checklist (3.8B
 > dual-stream MMDiT, MIT, released 2026-05-25). Lens is not-started — it's research-complete and waiting on
 > net-new GPT-OSS infra (real top-k MoE FFN routing, MXFP4 dequant-at-load, alternating sliding/full
@@ -38,6 +47,7 @@
 - [x] SDXL_ARCHITECTURE, FLUX_ARCHITECTURE, LORA_FORMAT, T5_ARCHITECTURE
 - [x] QUANTIZATION_DIFFUSION — comprehensive (FP8, GGUF Q8_0/Q4_K, mixed-precision strategy, quality presets)
 - [x] [LANCE_ARCHITECTURE](../Research/LANCE_ARCHITECTURE.md) — ByteDance unified multimodal (MoT dual-stream + MaPE + Wan2.2 3D causal VAE + 3-way CFG flow-match). Covers both the Phase 4 image variant (`Lance_3B`) and the Phase 9 video variant (`Lance_3B_Video`); the two share a backbone, so the image pipeline lands first to amortize the net-new infra.
+- [x] [IDEOGRAM4_ARCHITECTURE](../Research/IDEOGRAM4_ARCHITECTURE.md) — `ideogram-oss` 9.3B single-stream unified-sequence DiT (non-commercial, 2026-06). Qwen3-VL-8B 13-layer-tap text encoder, 3D sectioned MRoPE `(24,20,20)`, scale-only tanh-gated AdaLN + sandwich norms, logit-normal scheduler, asymmetric CFG, Flux.2 VAE + fixed-constant latent norm, structured-JSON prompting. Flags ComfyUI mistakes (Gemma-4 is a magic-prompt LLM not an encoder; the "unconditional" file is likely repackaged weights). Plus [STRUCTURED_PROMPT_BUILDER](../Research/STRUCTURED_PROMPT_BUILDER.md) — model-agnostic structured/regional prompt builder.
 - [x] [MICROSOFT_LENS_ARCHITECTURE](../Research/MICROSOFT_LENS_ARCHITECTURE.md) — Microsoft Research's 3.8B dual-stream MMDiT (MIT, 2026-05-25). 48 layers / hidden 1536 / GPT-OSS MoE multi-layer (layers 5/11/17/23) text encoder + Flux.2 semantic VAE + flow-match Euler with empirical mu + norm-rescaled CFG. Covers all three weight variants (Lens RL-tuned, Lens-Turbo distilled, Lens-Base SFT-only — same architecture, different sampling defaults). Documents net-new infra: real top-k MoE routing for GPT-OSS (HiDream's MoE today is single-expert fallback), MXFP4 dequant-at-load, alternating sliding-128 / full-attention masks.
 
 ## 2. Planning
@@ -586,6 +596,63 @@ SOTA DiT by Tongyi Lab. Apache 2.0. **Lumina2/NextDiT architecture, not Flux-lin
 - [x] `ZImagePipeline.cs` — accepts pre-computed Qwen embeddings. Static-shift flow-match Euler from `ZImageConfig.SchedulerShift`. Single forward per step at `cfgScale=1.0` (Turbo) **or** dual cond/uncond forward at `cfgScale>1.0` with `negativeCaptionEmbeddings` (Base). Inverts `(latent - shift) * scale` before VAE decode (Flux VAE shift=0.1159, scale=0.3611)
 - [x] End-to-end Turbo generation test — **CLEAN PHOTOREAL OUTPUT**. 512×512, 8 NFE, CFG=1.0, seed=42 produces sharp astronaut-on-horse-on-moon. ~2:40 wall on RTX 3060 (~16s/step + 24s Qwen3 encode + 2s VAE). All bugs documented in `PHASE_3_DEVIATIONS.md` #25–29: single-file naming (#25), dispose-after-noop pad (#26), 8 pipeline semantics (#27), missing context_refiner RoPE (#28), caption encoding pipeline triple-bug (#29). Layer-by-layer F32 diff harness at `tests/python-reference/dump_zimage_full_forward.py` + `tests/python-reference/diff_zimage_layers.py` — used `Z_IMAGE_DEBUG_DIR` env var to dump every layer through `ZImageTransformer.Forward`
 - [x] End-to-end Base generation test — **CLEAN PHOTOREAL OUTPUT**. 512×512, 28 steps, CFG=4.0 with negative prompt and `RamonGuthrie/z_image_base-nvfp8-mixed` checkpoint produces sharp astronaut-on-horse-on-moon. ~15 min wall on RTX 3060. Required two fixes: (1) `cast_bf16_f32.ptx` PTX kernel for BF16↔F32 GPU cast (BF16 norms in nvfp8-mixed weren't supported by `CudaBackend.CastOnGpu` previously), and (2) `LoadAsF32` cast at weight-load for all `RmsNorm` scales (`CudaBackend.RmsNorm` reads `weight.DataPointer` as `float*` without dtype check, so BF16 norms got bit-reinterpreted as garbage F32 — manifested as a 16-px-grid of disconnected color blobs because per-channel scales randomized across layers broke cross-patch attention coherence). See `PHASE_3_DEVIATIONS.md` #30.
+
+### Ideogram 4 (Single-Stream Unified-Sequence DiT) — IMPLEMENTED (CPU + GPU-routed); CHECKPOINT-GATED VALIDATION PENDING
+
+> **Status (2026-06-07):** full implementation landed and **compiles clean (0 warnings) on net8.0 + net10.0**; all 16 pure-logic tests (dialect golden-JSON + scheduler) pass; the end-to-end generation test skips cleanly with no checkpoint. Ported **verbatim** from upstream `ideogram-oss/ideogram4` source (pulled raw, not from summaries). **Resolved the big open question: there ARE two genuinely distinct transformers** — upstream `pipeline_ideogram4.py` loads `transformer/` and `unconditional_transformer/` as separate state dicts and runs both per step. Remaining work is **validation only** (first-run debug + Python layer-diff against a downloaded checkpoint) + the SwarmUI wiring. **Also corrected from the original plan:** the Qwen multi-layer tap was NOT net-new — the existing `LlamaStyleEncoder.EncodeMultiLayer` already does it (only a `Qwen3_VL_8B` preset with θ=5e6 was added); `norm_final` is non-affine (no params); features fuse by masked addition, not concat.
+
+Open-weight 9.3B single-stream DiT from `ideogram-oss` (non-commercial license, released 2026-06). **NOT a dual-stream MMDiT** — text tokens (Qwen3-VL hidden states) and image latents are concatenated into ONE unified sequence through 34 identical blocks, kept apart by 3D MRoPE + `segment_ids` block-diagonal mask + an `image_indicator` embedding. Conditioning = **Qwen3-VL-8B-Instruct** language tower, 13 layers tapped `(0,3,6,…,33,35)` and channel-concatenated (4096×13=53248 → RMSNorm → Linear→4608). Trained on **structured JSON captions** (scene/style/per-object bbox+palette) — see the prompt-builder subsection below. VAE = Flux.2 VAE (reused), but with **fixed-constant latent norm** (not BN). Scheduler = **logit-normal flow matching** (resolution-adjusted mean), **asymmetric CFG** (image-only zeroed-text negative pass), two-stage guidance (gw≈7 main / gw≈3 polish). Full architecture, exact state-dict keys, MRoPE math, and the ComfyUI-mistake notes in [`docs/Research/IDEOGRAM4_ARCHITECTURE.md`](../Research/IDEOGRAM4_ARCHITECTURE.md).
+
+> **Why it's its own thing (don't clone an existing DiT):** scale-only AdaLN (no shift) + tanh-gated residuals + sandwich norms; 3D sectioned MRoPE `(24,20,20)` θ=5e6 with a 65536 image-position offset (a third RoPE flavor, distinct from Flux pair-rotation and Lens/Qwen complex-polar); asymmetric CFG with **different-length** positive/negative forwards (not batch-of-2); logit-normal schedule (not the SD3 time-shift `FlowMatchEulerDiscreteScheduler`); fixed-constant latent norm (not the Flux.2/Lens BN un-normalize); `head_dim=256` (verify SDPA kernel handles 256-wide heads).
+
+#### Research
+- [x] [IDEOGRAM4_ARCHITECTURE.md](../Research/IDEOGRAM4_ARCHITECTURE.md) — complete. Module hierarchy, verbatim state-dict keys, block forward (scale-only tanh-gated AdaLN + sandwich norms), 3D MRoPE construction with the bespoke interleave slicing, Qwen3-VL multi-layer tap, logit-normal scheduler + the three sampler presets, asymmetric CFG, fixed latent-norm constants, Comfy checkpoint layout (fp8_scaled / nvfp4), VRAM/eviction plan, open questions (the "unconditional" file, BN bypass, indicator mapping), and the reuse-vs-net-new table.
+- [x] [STRUCTURED_PROMPT_BUILDER.md](../Research/STRUCTURED_PROMPT_BUILDER.md) — design for the model-agnostic structured-prompt tool (see subsection below).
+
+#### Net-new infra
+- [x] **Multi-layer Qwen3-VL hidden-state tap** — NOT net-new after all: the existing [`LlamaStyleEncoder.EncodeMultiLayer`](../../src/SharpInference.Diffusion/Models/TextEncoders/LlamaStyleEncoder.cs) already concatenates selected layers' hidden states (no final-norm on intermediates), exactly what Ideogram needs. Added only [`LlamaStyleEncoderConfig.Qwen3_VL_8B`](../../src/SharpInference.Diffusion/Models/TextEncoders/LlamaStyleEncoderConfig.cs) (= Qwen3-8B dims with θ=5e6). The 13 upstream tap indices map to HF (`+1`) convention via `Ideogram4Config.QwenActivationLayersHf`.
+- [x] **`LogitNormalSchedule`** — [`LogitNormalSchedule.cs`](../../src/SharpInference.Diffusion/Schedulers/LogitNormalSchedule.cs): Acklam `ndtri` (+ Halley/erfc refinement) + stable `expit` + resolution-mean adjust + log-SNR clamp. Plus [`Ideogram4SamplerPreset.cs`](../../src/SharpInference.Diffusion/Schedulers/Ideogram4SamplerPreset.cs) (V4_QUALITY_48 / V4_DEFAULT_20 / V4_TURBO_12). Verified monotonic + within clamp window by `Ideogram4SchedulerTests`.
+- [x] **3D sectioned MRoPE** — [`Ideogram4Mrope.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/Ideogram4Mrope.cs): `cat(freqs,freqs)` block-repeat + standard HF `rotate_half`, section overwrite per `(24,20,20)`. (Distinct from Ernie's adjacent-duplicate layout — could not reuse `ErnieImageRope`.) Interleave still to be diff-validated against a Python dump.
+- [ ] **SDPA at head_dim=256** — confirm `sdpa_f32.ptx` tiling handles 256-wide heads at runtime (CPU path is fine). Verification item only.
+
+#### Implementation — COMPLETE (CPU + GPU-routed, all via `IBackend`)
+- [x] [`Ideogram4Config.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/Ideogram4Config.cs) — 34 layers, dim 4608, 18 heads, head_dim 256, MLP 12288, adaln 512, in/out 128, MRoPE `(24,20,20)` θ=5e6, 13 tap layers (+ HF-mapped), max text 2048.
+- [x] [`Ideogram4Block.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/Ideogram4Block.cs) — scale-only AdaLN (`chunk(4)`, `tanh` gates, `1+scale`, NO shift), sandwich norms, fused-QKV split, per-head QK-RMSNorm (`QkNorm`), MRoPE, SwiGLU `w2(silu(w1)·w3)`, all bias=False.
+- [x] [`Ideogram4Transformer.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/Ideogram4Transformer.cs) — masked-add unified sequence (`input_proj`·image_mask + `llm_cond_proj(llm_cond_norm)`·text_mask + `embed_image_indicator`), shared `adaln_input = silu(adaln_proj(t_embedding(t)))`, 34 blocks, non-affine `norm_final` + scale-only final AdaLN (double-silu) + `Linear→128`. `EnumerateWeights()`, debug-dump hooks.
+- [x] [`Ideogram4Pipeline.cs`](../../src/SharpInference.Diffusion/Pipelines/Ideogram4Pipeline.cs) — Qwen 13-layer encode → free Qwen → **two transformers resident** → asymmetric CFG (full-seq conditional, image-only zeroed-text unconditional) → two-stage guidance → logit-normal Euler `z+=v·(s−t)` → free DiTs → fixed-constant latent norm → token-unpatchify → Flux.2 VAE decode. Warns about 2×9.3B VRAM.
+- [x] [`Ideogram4LatentNorm.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/Ideogram4LatentNorm.cs) — the 128 `LATENT_SHIFT`/`LATENT_SCALE` floats copied verbatim from `latent_norm.py`.
+- [x] [`Ideogram4CheckpointConverter.cs`](../../src/SharpInference.ModelHandler/CheckpointConverters/Ideogram4CheckpointConverter.cs) — loads both transformers (diffusers folder OR Comfy single-file, prefix strip + fp8_scaled fold), remaps Qwen3-VL keys to `LlamaStyleEncoder` naming (drops vision tower + lm_head), VAE bucket.
+- [x] [`Ideogram4DebugDump.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/Ideogram4DebugDump.cs) — env var `IDEOGRAM4_DEBUG_DIR`.
+
+#### Testing
+- [x] [`Ideogram4PromptTests.cs`](../../tests/SharpInference.Diffusion.Tests/Ideogram4PromptTests.cs) + [`Ideogram4SchedulerTests.cs`](../../tests/SharpInference.Diffusion.Tests/Ideogram4SchedulerTests.cs) — **16 pure-logic tests pass** (byte-exact golden Ideogram JSON, validator rejections, NL flatten, bbox→pixels; scheduler monotonicity/bounds/presets).
+- [x] [`Ideogram4GenerationTests.cs`](../../tests/SharpInference.Diffusion.Tests/Ideogram4GenerationTests.cs) — end-to-end at 1024² (Default20 + Turbo12); loads both transformers + Qwen + VAE via converter, tokenizes via `Qwen3Tokenizer.EncodeChat`, VRAM-probe skip (≥22 GB). Skips cleanly when `IDEOGRAM4_DIR` / Qwen tokenizer / PTX dir absent.
+- [ ] **First-run visual validation + Python layer-diff** — needs a downloaded checkpoint + a very-high-VRAM host (two 9.3B DiTs). `dump_ideogram4_full_forward.py` + `diff_ideogram4_layers.py` + `Ideogram4DiffTests.cs` to be authored (SD3.5/Lens template). Suspected first-run hotspots: MRoPE section interleave, asymmetric-CFG sequence handling, latent-norm-vs-BN, image-indicator index mapping, the final-layer double-SiLU.
+
+#### SwarmUI extension (NOT STARTED — final deliverable)
+- [ ] Register the Ideogram 4 arch loader + Qwen3-VL side-model in the SwarmUI-SharpInference extension (per-arch loader + side-model registry, see [[swarmui_extension]] memory). Expose the structured-prompt builder UI (scene/style/draggable-bbox elements) wired to `Ideogram4Dialect.Serialize`, plus a plain-text path. Generate end-to-end in SwarmUI.
+
+#### Weights (12 GB target)
+- `Comfy-Org/Ideogram-4` `diffusion_models/ideogram4_fp8_scaled.safetensors` (~13.8 GB, fp8_scaled — already supported) — tight at fp8; activations non-trivial.
+- `ideogram4_*_nvfp4_mixed.safetensors` (NVFP4 — reuse `Nvfp4Codec`) — smaller, for ≤12 GB.
+- `text_encoders/qwen3vl_8b_fp8_scaled.safetensors` (~8 GB) — encode once, then `FreeWeights` before DiT.
+- `vae/flux2-vae.safetensors` (~336 MB) — reused as-is.
+- ⚠ `gemma4_e4b_it_fp8_scaled.safetensors` is ComfyUI's **magic-prompt LLM, NOT a conditioning encoder** — do not load it as a text encoder.
+- ⚠ Official `ideogram-ai/ideogram-4-nf4` uses bitsandbytes NF4 — **skip** (managed dependency); fp8/fp8_scaled/nvfp4 cover the weights.
+
+### Structured Prompt Builder (model-agnostic, reused across models) — IMPLEMENTED (core + Ideogram dialect + NL dialect)
+
+Ideogram 4 is trained on **structured JSON captions**, and the community pain point is "you have to LLM-prompt each region." Built ONE model-agnostic `StructuredPrompt` data model + per-model serializer **dialects** under [`src/SharpInference.Diffusion/Prompting/`](../../src/SharpInference.Diffusion/Prompting/). Full design in [`docs/Research/STRUCTURED_PROMPT_BUILDER.md`](../Research/STRUCTURED_PROMPT_BUILDER.md).
+
+- [x] `StructuredPrompt.cs` / `StyleBlock.cs` / `PromptElement.cs` (+ `ObjectElement`/`TextElement`) / `BoundingBox.cs` — universal data model (0–1000 `[y_min,x_min,y_max,x_max]` boxes; palette limits enforced by the validator).
+- [x] `StructuredPromptBuilder.cs` — fluent builder (+ nested `StyleBlockBuilder`).
+- [x] `IPromptDialect.cs` (+ `RegionPrompt`/`RectMask`) — serializer interface.
+- [x] `Dialects/Ideogram4Dialect.cs` — exact JSON via `Utf8JsonWriter`, fixed key order, compact separators, `UnsafeRelaxedJsonEscaping` (literal unicode), uppercase `#RRGGBB`, `obj`/`text` discriminator, `.Validate()` for the common mistakes. **Byte-exact golden-JSON test passes.**
+- [x] `Dialects/NaturalLanguageDialect.cs` — prose flattener for plain-text models (SD/Flux/Lens).
+- [x] `MagicPrompt/IMagicPromptExpander.cs` — optional LLM-expander interface (core builder has zero LLM dependency).
+- [ ] `Dialects/RegionalAttentionDialect.cs` — bbox→pixel-space `RectMask` per element (deferred; the attention-coupling kernel/loop is a separate future effort — `BoundingBox.ToPixels` + `RegionPrompt` data path already in place).
+- [ ] `MagicPrompt/IMagicPromptExpander.cs` (+ a default `ClaudeMagicPromptExpander` / `DotLlmMagicPromptExpander` behind it; core builder has ZERO LLM dependency) and `Ideogram4SystemPrompt.cs` ported from `magic_prompt_system_prompts/`.
+- [ ] `StructuredPromptDialectTests.cs` — golden-file byte-exact Ideogram JSON, round-trip, validator-rejection cases, NL flatten, bbox→pixel-rect mapping.
 
 ### SDXL Inpaint
 - [x] `SdxlInpaintPipeline.cs` — 9-channel UNet pipeline with DownsampleMask helper

@@ -215,6 +215,14 @@ public sealed record LlamaStyleEncoderConfig
         BosTokenId = 151643,
     };
 
+    /// <summary>Qwen3-VL-8B-Instruct (language tower) preset, used by Ideogram 4 as its sole conditioning encoder.
+    /// Dimensionally identical to <see cref="Qwen3_8B"/> (36 layers, hidden=4096, GQA 32:8, head_dim=128,
+    /// intermediate=12288, vocab=151936) EXCEPT <c>rope_theta=5e6</c> (verified against
+    /// <c>Qwen/Qwen3-VL-8B-Instruct/config.json</c> <c>text_config.rope_theta</c>; plain Qwen3-8B uses 1e6).
+    /// The vision tower is unused — only the text decoder layers run, and Ideogram taps 13 of them via
+    /// <see cref="LlamaStyleEncoder.EncodeMultiLayer"/> (M-RoPE collapses to standard RoPE for text-only input).</summary>
+    public static LlamaStyleEncoderConfig Qwen3_VL_8B => Qwen3_8B with { RopeTheta = 5_000_000f };
+
     /// <summary>Llama-3.1-8B-Instruct preset, used as HiDream-I1's fourth text encoder (text_encoder_4).
     /// 32 layers, hidden=4096, GQA 32:8, head_dim=128, intermediate=14336, vocab=128256. Standard Llama:
     /// NO per-head Q/K norm (distinguishes it from Qwen3-8B, which is otherwise dimensionally similar),

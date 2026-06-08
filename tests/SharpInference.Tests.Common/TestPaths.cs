@@ -106,6 +106,12 @@ public static class TestPaths
         public static string V1TurboDir  => Resolve("ERNIE_IMAGE_V1_TURBO_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "ErnieImage", "v1-turbo"));
     }
 
+    /// <summary>Ideogram 4 paths. Expects a root folder with either diffusers (<c>transformer/</c>, <c>unconditional_transformer/</c>, <c>text_encoder/</c>, <c>vae/</c>) or Comfy-Org (<c>diffusion_models/</c>, <c>text_encoders/</c>, <c>vae/</c>) layout. The Qwen3-VL chat tokenizer is loaded separately (see <see cref="Tokenizers.Qwen3Dir"/>).</summary>
+    public static class Ideogram4
+    {
+        public static string Dir => Resolve("IDEOGRAM4_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "Ideogram4"));
+    }
+
     /// <summary>Qwen-Image paths. Default expects a single-file checkpoint at <c>Models/Stable-Diffusion/QwenImage/qwen_image_v1.safetensors</c>; the Qwen2.5-VL-7B text encoder and the 16-channel VAE are loaded separately.</summary>
     public static class QwenImage
     {
