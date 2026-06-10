@@ -1,0 +1,88 @@
+using SharpInference.Core.Tensors;
+
+namespace SharpInference.Diffusion.Pipelines;
+
+/// <summary>Shared sequence-packing / sampling helpers for the Lance image and video pipelines (so they aren't duplicated). Covers the MaPE position build, the logit-normal-shifted timestep grid, the 2-way CFG Euler step, and the channel-last→BCTHW permute for the VAE handoff.</summary>
+public static unsafe class LancePipelineCommon
+{
+    /// <summary>Text (und) modality role tag.</summary>
+    public const int TextRole = 0;
+    /// <summary>VAE (gen) modality role tag.</summary>
+    public const int VaeRole = 1;
+    /// <summary>MaPE temporal rebase for gen/noisy tokens (upstream <c>shift_position_ids</c> type-4 → 1000 range). VALIDATION-GATED: confirm exact per-role offsets vs the checkpoint.</summary>
+    public const int MapeGenTemporalBase = 1000;
+
+    /// <summary>Builds the packed-sequence positions + role partition: <c>[text(und) | VAE(gen)]</c>. Text tokens get 1-D positions <c>(i,i,i)</c>; VAE tokens get the 3-D grid with the gen temporal axis rebased to <see cref="MapeGenTemporalBase"/>. Returns <c>posIds[seq,3]</c>, the und (text) index list, and the gen (VAE) index list.</summary>
+    public static (Tensor Pos, int[] Und, int[] Gen) BuildSequence(int numText, int gridT, int gridH, int gridW)
+    {
+        int nVae = gridT * gridH * gridW;
+        int seq = numText + nVae;
+        Tensor pos = new Tensor(new TensorShape(seq, 3), DType.F32);
+        float* p = (float*)pos.DataPointer;
+
+        for (int i = 0; i < numText; i++) { p[i * 3 + 0] = i; p[i * 3 + 1] = i; p[i * 3 + 2] = i; }
+
+        int idx = 0;
+        for (int ti = 0; ti < gridT; ti++)
+            for (int hi = 0; hi < gridH; hi++)
+                for (int wi = 0; wi < gridW; wi++)
+                {
+                    long off = (long)(numText + idx) * 3;
+                    p[off + 0] = MapeGenTemporalBase + ti;
+                    p[off + 1] = hi;
+                    p[off + 2] = wi;
+                    idx++;
+                }
+
+        int[] und = new int[numText];
+        for (int i = 0; i < numText; i++) und[i] = i;
+        int[] gen = new int[nVae];
+        for (int i = 0; i < nVae; i++) gen[i] = numText + i;
+        return (pos, und, gen);
+    }
+
+    /// <summary>Logit-normal (SD3-style) shifted timestep grid from 1→0, length steps+1.</summary>
+    public static float[] BuildShiftedTimesteps(int steps, float shift)
+    {
+        float[] t = new float[steps + 1];
+        for (int i = 0; i <= steps; i++)
+        {
+            float lin = 1.0f - (float)i / steps;
+            t[i] = shift * lin / (1.0f + (shift - 1.0f) * lin);
+        }
+        return t;
+    }
+
+    /// <summary>In-place 2-way text-CFG Euler step: <c>z -= (uncond + cfg·(cond − uncond))·dt</c>.</summary>
+    public static void EulerCfgStep(Tensor latents, Tensor cond, Tensor uncond, float cfg, float dt)
+    {
+        long n = latents.Shape.ElementCount;
+        float* z = (float*)latents.DataPointer;
+        float* c = (float*)cond.DataPointer;
+        float* u = (float*)uncond.DataPointer;
+        for (long i = 0; i < n; i++)
+        {
+            float v = u[i] + cfg * (c[i] - u[i]);
+            z[i] -= v * dt;
+        }
+    }
+
+    /// <summary>Channel-last <c>[T,H,W,C]</c> → <c>[1,C,T,H,W]</c> for the VAE decode handoff.</summary>
+    public static Tensor ChannelLastToBcthw(Tensor cl)
+    {
+        int t = (int)cl.Shape[0], h = (int)cl.Shape[1], w = (int)cl.Shape[2], c = (int)cl.Shape[3];
+        Tensor outT = new Tensor(new TensorShape([1L, c, t, h, w]), DType.F32);
+        float* s = (float*)cl.DataPointer;
+        float* d = (float*)outT.DataPointer;
+        for (int ti = 0; ti < t; ti++)
+            for (int hi = 0; hi < h; hi++)
+                for (int wi = 0; wi < w; wi++)
+                    for (int ci = 0; ci < c; ci++)
+                    {
+                        long src = (((long)ti * h + hi) * w + wi) * c + ci;
+                        long dst = (((long)ci * t + ti) * h + hi) * w + wi;
+                        d[dst] = s[src];
+                    }
+        return outT;
+    }
+}

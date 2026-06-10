@@ -1,6 +1,13 @@
 # Lance — Research Notes
 
-> Status: Complete (paper + code + configs captured; tensor key dump still required) | Last Updated: 2026-05-24 | Needed Before: SharpInference.Diffusion (Lance image pipeline) + SharpInference.Video (Lance video pipeline)
+> Status: Complete — **image T2I + video T2V IMPLEMENTED 2026-06-08** (both structurally verified end-to-end on CPU; numeric validation vs checkpoint pending). Last Updated: 2026-06-08 | Video: `LanceVideoPipeline` + Wan2.2 VAE streaming decode (`feat_cache`) + frame-streaming/encoders all built — see PHASE_9 § 6.
+>
+> **BUILD STATUS (2026-06-08):** Lance image T2I is built and runs end-to-end (see PHASE_4 § Lance). Several open questions below were resolved while building from the verbatim upstream source (pulled raw):
+> - **OQ#2 (MaPE offsets):** NOT in `get_rope_index` (that's stock Qwen2.5-VL M-RoPE). They live in `data/common.py` `shift_position_ids` — `pos_shift=1000`; modality type-4 (gen/noisy) temporal rebased to the 1000 range, type-3 (clean-VAE) to 2000. Spatial axes unchanged.
+> - **OQ#11 (CausalConv3d / `CACHE_T`):** the VAE decode driver processes ONE latent frame per call; frame 0 uses `first_chunk=True` with a fresh all-None cache, so **for a single image (T=1) the whole decoder is stateless** — the feat_cache streaming machine is video-only. Also: `feat_cache=None` is INVALID mid-decode (Resample skips `time_conv` → temporal mismatch vs the `DupUp3D` shortcut).
+> - **Conv3D:** no net-new `IBackend.Conv3D` needed — `CausalConv3d` decomposes into `Conv2D` over temporal taps (all backends).
+> - **OQ#12 (MoT `_moe_gen` layout):** confirmed — gen-path weights are sibling keys (`*_moe_gen`), not fused; routing is deterministic by modality role (gen mode: text→und weights, vae→`_moe_gen` weights), one joint attention. Latent handoff einops: `(t pt)(h ph)(w pw) c → (t h w)(pt ph pw c)` channel-last.
+> - **Still pending (validation-gated):** exact `model.safetensors` key names (OQ#1), `llm_qk_norm` default (OQ#3), `cfg_vision_scale` (OQ#4, editing-only), sparse attn mask exactness (OQ#8 — currently full attn for B=1).
 > Source of truth: [ByteDance/Lance GitHub](https://github.com/bytedance/Lance), [arXiv 2605.18678](https://arxiv.org/abs/2605.18678), [HF repo `bytedance-research/Lance`](https://huggingface.co/bytedance-research/Lance)
 > License: Apache 2.0
 > Related: [`Z_IMAGE_ARCHITECTURE.md`](Z_IMAGE_ARCHITECTURE.md) (M-RoPE / NextDiT lineage of the LLM backbone), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (rectified-flow background), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md)

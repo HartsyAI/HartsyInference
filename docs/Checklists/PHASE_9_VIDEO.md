@@ -3,11 +3,13 @@
 > **Goal:** Video generation starting with LTX-Video, with Lance (ByteDance) layered on top once Phase 4's MoT + packed-attention infra is in place.
 > **Packages:** SharpInference.Video (+ shared 3D VAE / packed attention in SharpInference.Diffusion / Core / per-backend kernels)
 
+> **Status (2026-06-08): FIRST VIDEO MODEL LANDED — Lance T2V is built end-to-end** (structurally verified on CPU; numeric validation pending). This brought the reusable 3D-video foundation online: `CausalConv3d` (Conv2D-decomposed, all backends), the Wan2.2 3D causal VAE with streaming `feat_cache` decode, `Multimodal3DRope`, `Sincos3DPositionEmbedding`, frame-streaming output + ffmpeg/BMP encoders. **LTX-Video and Wan now reuse all of this** — they need only their own transformer + (for LTX) a different VAE. See § 6 Lance video. Remaining for Lance video: first-run numeric validation, the ViT (editing/3-way CFG), and the secondary-stream decode-overlap perf optimization.
+
 ---
 
 ## 1. Research
 
-- [ ] LTX-Video architecture (temporal attention, 3D VAE, conditioning)
+- [x] LTX-Video — [`LTX_VIDEO_ARCHITECTURE.md`](../Research/LTX_VIDEO_ARCHITECTURE.md). **T2V COMPLETE END-TO-END (2026-06-10)** — structurally CPU-verified, numerics validation-pending. DiT (`LtxVideoTransformer`/`LtxRope`/`LtxVideoBlock`, 28 layers, self-attn+3D RoPE / cross-attn to T5-XXL / AdaLN-Single) + base 3D VAE decoder (`LtxVideoVaeDecoder` + `LtxVaeResnetBlock3d`/`LtxVaeUpsampler3d`; released 0.9 config = non-causal, no timestep cond) + `LtxVideoPipeline` (flow-match Euler + 2-way CFG + frame streaming). ~16 LTX tests. Reuses T5/RMSNorm/SDPA/CausalConv3d (extended with non-causal symmetric-replicate padding)/frame-streaming. Remaining: T5 generation entry + checkpoint converter + timestep-conditioned 0.9.5 VAE variant + first-run numeric validation.
 - [ ] Wan 2.1 architecture
 - [ ] Temporal attention, video VAE decoder (3D convolutions), video output encoding
 - [x] [LANCE_ARCHITECTURE](../Research/LANCE_ARCHITECTURE.md) — `Lance_3B_Video` unified multimodal model (T2I + T2V + edit + understanding in one 3B-active backbone). Wan2.2 3D causal VAE (z=48, 16× spatial / 4× temporal), MoT dual-stream LLM, MaPE on M-RoPE, 3-way CFG. Shares the entire transformer + tokenizer + VAE + connectors with the Phase 4 image variant — only `model.safetensors` differs.
@@ -27,13 +29,13 @@ See [`docs/Research/INTERACTIVE_INFERENCE.md`](../Research/INTERACTIVE_INFERENCE
 ### 3a. Backend kernels (cross-vendor)
 
 - [ ] **`IBackend.PackedAttention(q, k, v, cu_seqlens, max_seqlen, block_mask, ...)`** — variable-length / packed attention. First pass: padded dense + bool mask (correct, slow on long sequences). Follow-up: real varlen FlashAttention-style CUDA PTX kernel. Shared with Lance + LTX + Cosmos-AR + any future packed-sequence model.
-- [ ] **`IBackend.Conv3D(input, weight, bias, stride, padding, dilation)`** — 3D im2col + GEMM. Required by Wan2.2 VAE (Lance, Matrix-Game 2/3), Cosmos DV tokenizer, and any future 3D VAE in LTX / Wan-Video / Hunyuan-Video. CPU SIMD path, CUDA PTX kernel, Vulkan SPIR-V shader.
-- [ ] **`CausalConv3d` streaming wrapper** — maintains a per-conv 2-frame cache (`CACHE_T=2` for Wan2.2) so video VAE decode can stream chunks of frames without OOM. Required for any video clip longer than a single GPU-resident chunk.
+- [x] **3D Convolution — delivered WITHOUT a new `IBackend.Conv3D`** (2026-06-08, Lance image build). [`CausalConv3d`](../../src/SharpInference.Diffusion/Models/Vae/CausalConv3d.cs) decomposes a 3D causal conv into existing `Conv2D` calls over temporal taps, so it runs on CPU/CUDA/Vulkan today with no new kernel. Reusable by LTX/Wan/Hunyuan video VAEs + Cosmos. A native `IBackend.Conv3D` (3D im2col+GEMM) remains an optional perf follow-up. 3 unit tests.
+- [x] **`CausalConv3d` streaming wrapper** — DONE (2026-06-08, Lance video V1). [`Wan22StreamCache`](../../src/SharpInference.Diffusion/Models/Vae/Wan22StreamCache.cs) threads the per-conv `CACHE_T=2` cache (`StepConv` + the Resample `time_conv` "Rep"/first-chunk `StepTimeConv`) across the per-latent-frame decode loop in `Wan22VaeDecoder`. Verified streamed == full-clip (byte-identical).
 
 ### 3b. Conditioning (shared across video + interactive)
 
 - [ ] **`SharpInference.Conditioning/IActionEncoder.cs`** — generic action-conditioning abstraction. `ActionInput` (raw `ReadOnlyMemory<byte>` payload + frame index + timestamp) → preallocated `Span<float>` tokens. Lives in `Diffusion` for cross-domain reuse. Per-model encoders (keyboard+mouse, camera pose, Minecraft VPT 25-dim, gamepad) land in their respective Phase 10 model packages.
-- [ ] **`SharpInference.Diffusion/Models/Denoisers/DiTBlocks/PositionEmbedding3D.cs`** — frozen 3D sin-cos position embedding. CPU precompute, upload once. No new kernel.
+- [x] **3D sin-cos position embedding** — delivered as [`DiTUtils.Sincos3DPositionEmbedding`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/DiTUtils.cs) (2026-06-08, Lance image build). Frozen, CPU precompute, generic/reusable. Also landed: generic [`Multimodal3DRope`](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/Multimodal3DRope.cs) (Qwen2.5-VL M-RoPE, reusable across VL-family video models).
 
 ### 3c. Caches + schedulers
 
@@ -44,8 +46,8 @@ See [`docs/Research/INTERACTIVE_INFERENCE.md`](../Research/INTERACTIVE_INFERENCE
 ### 3d. Streaming + tokenizers
 
 - [ ] **`SharpInference.Video/Tokenizers/IDiscreteVideoTokenizer.cs`** — interface for discrete video codecs (encode RGB → int32 indices; decode indices → RGB; embedding lookup). First implementation `CosmosDvTokenizer` lands with Cosmos-Predict V2W. **VQ-GAN / MagViT-v2 / FSQ variants deferred** until a model that needs them lands (Oasis uses a continuous Gaussian VAE, not discrete).
-- [ ] **`SharpInference.Video/Streaming/VideoVaeStreamDecoder.cs`** — per-frame / per-chunk VAE decode helper running on a secondary CUDA stream, overlapping decode with next-frame denoise. Critical for hitting interactive 25-40 FPS in Phase 10; also useful for offline frame-streaming in Phase 9.
-- [ ] **Frame-streaming output** — `IAsyncEnumerable<VideoFrame>` shape on video pipelines, with optional `IVideoEncoder` (FFmpeg via process-spawn or a pure C# MP4 muxer) for users that want a single file at the end. Bound by `MAX_FRAMES_IN_FLIGHT` to keep VRAM flat.
+- [x] **Per-frame streaming VAE decode** — DONE as `Wan22VaeDecoder.DecodeStreaming` (yields one RGB frame-group per latent frame; memory bounded to a single group). A secondary-CUDA-stream overlap of decode with denoise is a perf follow-up (denoise is joint across frames, so only the decode stage streams).
+- [x] **Frame-streaming output** — DONE. `LanceVideoPipeline.GenerateFramesAsync` → `IAsyncEnumerable<VideoFrame>` (pull-based backpressure) + `IVideoEncoder` (`FfmpegProcessEncoder` process-spawn, `BmpSequenceEncoder` fallback). Pure-C# MP4 muxer deferred.
 
 ### 3e. Licensing
 
@@ -62,11 +64,13 @@ See [`docs/Research/INTERACTIVE_INFERENCE.md`](../Research/INTERACTIVE_INFERENCE
 
 - [ ] `WanPipeline.cs` — Wan 2.1 / 2.2 video. Wan2.2's 3D causal VAE is the same family as the one Lance uses (`Wan22VaeDecoder`), so the VAE module is shared.
 
-## 6. Implementation — Lance video (`Lance_3B_Video`) — NOT STARTED
+## 6. Implementation — Lance video (`Lance_3B_Video`) — IMPLEMENTED (structurally verified end-to-end; numeric validation pending)
 
 > Apache 2.0. Reuses every Phase 4 § Lance class verbatim and adds a video-specific pipeline.
 
-**Prerequisites:** Phase 4 § Lance image pipeline complete (lands `LanceTransformer`, `LanceMoTBlock`, `LanceMRopeMaPE`, `Qwen25VlVit`, `Wan22VaeDecoder`, `LanceCheckpointConverter`, plus the shared infra in § 3 above).
+> **Status (2026-06-08):** Lance T2V is **built and runs end-to-end on CPU** (tiny-config test → 5 frames). Delivered across 4 phases: (V1) Wan2.2 VAE **streaming decode** — the `feat_cache` temporal state machine (`Wan22StreamCache` + temporal `time_conv` in `Wan22Resample` + per-frame driver in `Wan22VaeDecoder`); (V2) `LanceVideoPipeline`; (V3) frame streaming (`GenerateFramesAsync` → `IAsyncEnumerable<VideoFrame>`) + encoders (`FfmpegProcessEncoder`, `BmpSequenceEncoder`); (V4) tests + env-gated generation entry. **52 Lance/Wan tests pass.** Strong gates verified: video frame-0 byte-identical to the image decode, and **streamed decode byte-identical to full-clip decode**. Numerics vs the real checkpoint remain validation-pending (no weights/GPU here). Reuses the entire image stack + all 3D primitives; the streaming VAE + frame-streaming infra is reusable by LTX/Wan video.
+
+**Prerequisites — MOSTLY MET (2026-06-08):** Phase 4 § Lance image pipeline is built — `LanceTransformer`, `LanceMoTBlock`, `Multimodal3DRope`, `Wan22VaeDecoder` (image/T=1 path), `LanceLatentPatch`, `LanceCheckpointConverter`, `LanceImagePipeline`, plus the shared infra in § 3 (`CausalConv3d`, `Sincos3DPositionEmbedding`) all exist + are unit-tested. **Remaining prereqs for video:** (a) the `Wan22VaeDecoder` T>1 streaming path (feat_cache chunk loop + Resample temporal `time_conv`), and (b) `Qwen25VlVit` only if video *editing*/understanding is wanted (pure T2V doesn't need it). Numeric validation of the image path against the real checkpoint should land first so the shared transformer/VAE are trusted before adding the time axis.
 
 #### Architecture deltas vs the image pipeline (see [`docs/Research/LANCE_ARCHITECTURE.md`](../Research/LANCE_ARCHITECTURE.md))
 
@@ -77,14 +81,13 @@ See [`docs/Research/INTERACTIVE_INFERENCE.md`](../Research/INTERACTIVE_INFERENCE
 - `PositionEmbedding3D` actually varies over t; image was the trivial t=0 case.
 - 3-way CFG semantics are identical (just bigger noisy slot per step).
 
-#### Files (planned, none built)
+#### Files
 
-- [ ] `src/SharpInference.Video/Pipelines/LanceVideoPipeline.cs` — Qwen2 chat-template encode with `<|video_pad|>` slot → MoT-aware packed sequence with text + (optional ViT + clean-VAE-cond for edits) + noisy-target spanning `T_lat = ceil(num_frames/4) + 1` latent frames → 3-way CFG flow-match Euler (30 steps, shift 4.0) → `FreeWeights(transformer + vit)` before VAE → streamed Wan2.2 VAE decode (`CausalConv3d` 2-frame cache) → `IAsyncEnumerable<VideoFrame>`.
-- [ ] `src/SharpInference.Video/Streaming/VideoFrameStreamer.cs` — bounded-buffer producer for `IAsyncEnumerable<VideoFrame>` with backpressure.
-- [ ] `src/SharpInference.Video/Encoding/IVideoEncoder.cs` + at least one impl (`FfmpegProcessEncoder.cs` first, optional pure-C# `Mp4Muxer.cs` follow-up).
-- [ ] `tests/SharpInference.Video.Tests/LanceVideoGenerationTests.cs` — env-var-gated, VRAM probe ≥ 24 GB free for FP8 short-clip / ≥ 40 GB for FP16. Skips cleanly when `LANCE_3B_VIDEO_PATH`, `LANCE_VIT_PATH`, `LANCE_VAE_PATH`, or PTX dir is missing. Skips additionally when the requested frame count would exceed memory for the detected VRAM budget.
-- [ ] `tests/SharpInference.Video.Tests/Wan22VaeStreamingTests.cs` — verifies `CausalConv3d` 2-frame cache produces byte-identical output to a non-streamed full-clip decode for small clips (regression gate for any future temporal-cache refactor).
-- [ ] `tests/python-reference/dump_lance_video_full_forward.py` + `diff_lance_video_layers.py` — layer-by-layer F32 diff harness for video shapes (`(B, 48, T_lat, H, W)` latents).
+- [x] **Wan2.2 VAE streaming decode (V1)** — [`Wan22StreamCache.cs`](../../src/SharpInference.Diffusion/Models/Vae/Wan22StreamCache.cs) (`feat_cache`/`feat_idx` machine: `StepConv` + `StepTimeConv` "Rep" logic), temporal `time_conv` branch in [`Wan22Resample`](../../src/SharpInference.Diffusion/Models/Vae/Wan22Resample.cs), per-frame driver + `DecodeStreaming` iterator in [`Wan22VaeDecoder`](../../src/SharpInference.Diffusion/Models/Vae/Wan22VaeDecoder.cs), frame-slice/concat helpers in [`Vae3dLayout`](../../src/SharpInference.Diffusion/Models/Vae/Vae3dLayout.cs). Decodes `T_lat → (T_lat−1)·4 + 1` frames. Gates: video frame-0 == image decode, **streamed == full-clip** (byte-identical).
+- [x] [`src/SharpInference.Video/Pipelines/LanceVideoPipeline.cs`](../../src/SharpInference.Video/Pipelines/LanceVideoPipeline.cs) (V2/V3) — packs `[text(und) | noisy-VAE(gen)]` spanning `T_lat = (num_frames−1)/4 + 1` latent frames, MaPE positions over t, 2-way text CFG (3-way vision CFG = editing, needs ViT, deferred), logit-normal Euler (shift 4.0), streamed VAE decode → `GenerateFromTokens` (all frames) + `GenerateFramesAsync` (`IAsyncEnumerable<VideoFrame>`, pull-based backpressure). Shared sampling via [`LancePipelineCommon`](../../src/SharpInference.Diffusion/Pipelines/LancePipelineCommon.cs).
+- [x] [`src/SharpInference.Video/VideoFrame.cs`](../../src/SharpInference.Video/VideoFrame.cs) + [`Encoding/IVideoEncoder.cs`](../../src/SharpInference.Video/Encoding/IVideoEncoder.cs) + [`Encoding/FfmpegProcessEncoder.cs`](../../src/SharpInference.Video/Encoding/FfmpegProcessEncoder.cs) (raw RGB24 → H.264 MP4 via process pipe) + [`Encoding/BmpSequenceEncoder.cs`](../../src/SharpInference.Video/Encoding/BmpSequenceEncoder.cs) (no-dependency frame-sequence fallback). Pull-based encoders → decode paced by encoding (backpressure); pure-C# `Mp4Muxer` deferred.
+- [x] [`tests/SharpInference.Video.Tests/`](../../tests/SharpInference.Video.Tests/) — `LanceVideoPipelineTests` (tiny-config e2e, frame-count reject, streaming, BMP encoder) + `LanceVideoGenerationTests` (env-gated real-checkpoint entry, VRAM probe ≥24 GB, streams → BMP sequence). Streaming-correctness gate lives in `Wan22VaeDecoderTests.Decode_StreamingMatchesFullClip`.
+- [ ] `tests/python-reference/dump_lance_video_full_forward.py` + `diff_lance_video_layers.py` — layer-by-layer F32 diff harness for video shapes. Deferred to first-run numeric validation (needs the checkpoint).
 
 #### Weights (24 GB target)
 

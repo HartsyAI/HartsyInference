@@ -62,6 +62,49 @@ public static unsafe class DiTUtils
         }
     }
 
+    /// <summary>Frozen 3D sin-cos position embedding (DiT-style), generic across video DiTs. Returns <c>[frames*height*width, dim]</c> in <c>(t, h, w)</c> row-major order (<c>idx = t*(H*W) + h*W + w</c>). Channels are split <c>dim ≈ [dim/3, dim/3, rest]</c> across the three axes; each axis uses 1D sin-cos (<c>[sin, cos]</c> halves, base 10000). Matches Lance/Wan/`get_3d_sincos_pos_embed`. Reusable by any model needing a frozen 3D positional grid.</summary>
+    public static Tensor Sincos3DPositionEmbedding(int frames, int height, int width, int dim)
+    {
+        if (dim % 2 != 0)
+            throw new ArgumentException($"dim {dim} must be even.", nameof(dim));
+        int d = dim / 3;
+        if (d % 2 != 0) d -= 1;
+        int dimT = d, dimH = d, dimW = dim - 2 * d;
+
+        int count = frames * height * width;
+        Tensor output = new Tensor(new TensorShape(count, dim), DType.F32);
+        float* outPtr = (float*)output.DataPointer;
+
+        for (int ti = 0; ti < frames; ti++)
+        {
+            for (int hi = 0; hi < height; hi++)
+            {
+                for (int wi = 0; wi < width; wi++)
+                {
+                    long row = ((long)ti * height + hi) * width + wi;
+                    long baseOff = row * dim;
+                    Write1DSincos(outPtr + baseOff, ti, dimT);
+                    Write1DSincos(outPtr + baseOff + dimT, hi, dimH);
+                    Write1DSincos(outPtr + baseOff + dimT + dimH, wi, dimW);
+                }
+            }
+        }
+        return output;
+    }
+
+    /// <summary>Writes a 1D sin-cos embedding for scalar <paramref name="pos"/> into <paramref name="dst"/> (length <paramref name="axisDim"/>): first half sin, second half cos, <c>omega_k = 1/10000^(k/(axisDim/2))</c>.</summary>
+    private static void Write1DSincos(float* dst, int pos, int axisDim)
+    {
+        int half = axisDim / 2;
+        for (int k = 0; k < half; k++)
+        {
+            double omega = 1.0 / Math.Pow(10000.0, (double)k / half);
+            double angle = pos * omega;
+            dst[k] = (float)Math.Sin(angle);
+            dst[half + k] = (float)Math.Cos(angle);
+        }
+    }
+
     /// <summary>Linear projection for 1D vectors: output = input @ weight^T + bias. Input: [B, inDim], Output: [B, outDim].</summary>
     public static void LinearProject1D(Tensor output, Tensor input, Tensor weight, Tensor bias, int batch, int inDim, int outDim)
     {

@@ -112,6 +112,14 @@ public static class TestPaths
         public static string Dir => Resolve("IDEOGRAM4_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "Ideogram4"));
     }
 
+    /// <summary>Lance (ByteDance) paths. <see cref="Dir"/> is the variant folder holding <c>model.safetensors</c> (e.g. <c>Lance_3B</c>); <see cref="VaePath"/> is the Wan2.2 VAE converted to safetensors (the original ships as <c>Wan2.2_VAE.pth</c>). The Qwen2 chat tokenizer is loaded separately.</summary>
+    public static class Lance
+    {
+        public static string Dir => Resolve("LANCE_3B_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "Lance", "Lance_3B"));
+        public static string VideoDir => Resolve("LANCE_3B_VIDEO_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "Lance", "Lance_3B_Video"));
+        public static string VaePath => Resolve("LANCE_VAE_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "Lance", "wan22_vae.safetensors"));
+    }
+
     /// <summary>Qwen-Image paths. Default expects a single-file checkpoint at <c>Models/Stable-Diffusion/QwenImage/qwen_image_v1.safetensors</c>; the Qwen2.5-VL-7B text encoder and the 16-channel VAE are loaded separately.</summary>
     public static class QwenImage
     {

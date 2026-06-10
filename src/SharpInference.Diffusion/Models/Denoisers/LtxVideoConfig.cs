@@ -1,0 +1,66 @@
+namespace SharpInference.Diffusion.Models.Denoisers;
+
+/// <summary>Configuration for LTX-Video (Lightricks, Apache-2.0) — a fast DiT text-to-video model. Verified against diffusers <c>LTXVideoTransformer3DModel</c>. The DiT is single-stream: self-attention + 3D RoPE on VAE-latent tokens, cross-attention to a frozen T5-XXL, AdaLN-Single timestep conditioning. See <c>docs/Research/LTX_VIDEO_ARCHITECTURE.md</c>.</summary>
+public sealed record LtxVideoConfig
+{
+    /// <summary>Transformer I/O channels (= VAE latent channels; patch_size 1 → no extra patchify).</summary>
+    public int InChannels { get; init; } = 128;
+
+    /// <summary>Output channels.</summary>
+    public int OutChannels { get; init; } = 128;
+
+    /// <summary>Attention heads.</summary>
+    public int NumHeads { get; init; } = 32;
+
+    /// <summary>Per-head dim.</summary>
+    public int HeadDim { get; init; } = 64;
+
+    /// <summary>Inner model dim (<c>NumHeads × HeadDim</c>).</summary>
+    public int InnerDim => NumHeads * HeadDim;
+
+    /// <summary>Cross-attention dim (T5 features after caption projection).</summary>
+    public int CrossAttentionDim { get; init; } = 2048;
+
+    /// <summary>Number of DiT blocks.</summary>
+    public int NumLayers { get; init; } = 28;
+
+    /// <summary>T5-XXL feature width fed to the caption projection.</summary>
+    public int CaptionChannels { get; init; } = 4096;
+
+    /// <summary>RMSNorm epsilon for the no-affine pre-norms (norm1/norm2/norm_out).</summary>
+    public float NormEps { get; init; } = 1e-6f;
+
+    /// <summary>QK-RMSNorm epsilon (across-heads, affine).</summary>
+    public float QkNormEps { get; init; } = 1e-5f;
+
+    /// <summary>RoPE base θ.</summary>
+    public float RopeTheta { get; init; } = 10000.0f;
+
+    /// <summary>RoPE base frame count (normalizer for the temporal axis).</summary>
+    public int RopeBaseNumFrames { get; init; } = 20;
+
+    /// <summary>RoPE base height (normalizer for the H axis).</summary>
+    public int RopeBaseHeight { get; init; } = 2048;
+
+    /// <summary>RoPE base width (normalizer for the W axis).</summary>
+    public int RopeBaseWidth { get; init; } = 2048;
+
+    // ── VAE / spatial-temporal compression (for the pipeline) ──
+    /// <summary>VAE spatial compression factor.</summary>
+    public int VaeSpatialCompression { get; init; } = 32;
+
+    /// <summary>VAE temporal compression factor.</summary>
+    public int VaeTemporalCompression { get; init; } = 8;
+
+    /// <summary>Default flow-match timestep shift.</summary>
+    public float TimestepShift { get; init; } = 1.0f;
+
+    /// <summary>Default sampling steps.</summary>
+    public int NumInferenceSteps { get; init; } = 50;
+
+    /// <summary>Default CFG guidance scale.</summary>
+    public float GuidanceScale { get; init; } = 3.0f;
+
+    /// <summary>The base LTX-Video preset.</summary>
+    public static LtxVideoConfig V09 => new();
+}
