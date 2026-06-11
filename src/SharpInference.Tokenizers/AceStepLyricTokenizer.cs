@@ -3,21 +3,25 @@ using System.Text.RegularExpressions;
 
 namespace SharpInference.Tokenizers;
 
-/// <summary>ACE-Step's lyric tokenizer — the XTTS-v2 <c>VoiceBpeTokenizer</c> (vocab ~6693) plus the
-/// <c>tokenize_lyrics</c> line protocol: stream starts with token 261, every line is BPE-encoded with an XTTS-style
-/// language prefix (<c>[en]…</c>), spaces become the <c>[SPACE]</c> special token, structure tags like
-/// <c>[verse]</c>/<c>[chorus]</c> are byte-encoded as English, and every line (and each blank line) is terminated by
-/// token 2. Loads a <c>vocab.json</c> + <c>merges.txt</c> pair (export once from the HF <c>tokenizer.json</c> in the
-/// checkpoint repo — see the converter docs). Language auto-detection is a per-line Unicode-script heuristic;
-/// pass explicit codes for mixed-script lines. CJK G2P preprocessing is the caller's responsibility (matches the
-/// official pipeline's external phonemizer). Token-stream equality vs Python is validation-gated.</summary>
+/// <summary>ACE-Step's lyric tokenizer — the XTTS-v2 <c>VoiceBpeTokenizer</c> (vocab 6693 incl. 12 structure-tag
+/// added tokens — verified against the shipped tokenizer) plus the <c>tokenize_lyrics</c> line protocol: stream
+/// starts with <c>[START]</c>=261, every line is encoded as <c>[lang]line</c> with spaces replaced by
+/// <c>[SPACE]</c>=2 (which also terminates each line, bare 2 for blank lines), <c>zh</c> maps to the <c>[zh-cn]</c>
+/// token, and lowercase structure tags (<c>[verse]</c>, <c>[chorus]</c>, …) hit their dedicated added tokens
+/// (ids 6681–6692). Mirrors the reference encode: lowercase + whitespace-collapse cleaners, HF Whitespace
+/// pre-tokenization (<c>\w+|[^\w\s]+</c> runs) then plain BPE with <c>[UNK]</c>=1 fallback. Loads the
+/// <c>vocab.json</c> + <c>merges.txt</c> export described in <c>AceStepCheckpointConverter</c>. Number expansion and
+/// CJK G2P/transliteration are the caller's responsibility (the official pipeline uses external phonemizers).</summary>
 public sealed partial class AceStepLyricTokenizer
 {
     /// <summary>Stream-opening token.</summary>
     public const int StartToken = 261;
 
-    /// <summary>End-of-line / blank-line separator token.</summary>
+    /// <summary>End-of-line / blank-line separator token (the <c>[SPACE]</c> token doubling as line separator).</summary>
     public const int LineSeparatorToken = 2;
+
+    /// <summary>Unknown-symbol token.</summary>
+    public const int UnkToken = 1;
 
     [GeneratedRegex(@"^\s*\[[^\]]+\]\s*$")]
     private static partial Regex StructureTagPattern();
@@ -68,10 +72,14 @@ public sealed partial class AceStepLyricTokenizer
         return [.. ids];
     }
 
-    /// <summary>Encodes one line XTTS-style: lowercase, <c>[lang]</c> prefix, spaces → <c>[SPACE]</c>, then BPE.</summary>
+    /// <summary>Encodes one line per the reference: cleaners (lowercase + whitespace collapse), <c>zh → zh-cn</c>,
+    /// <c>[lang]</c> prefix, spaces → <c>[SPACE]</c>, then pre-tokenized BPE.</summary>
     public int[] EncodeLine(string text, string lang)
     {
-        string prepared = $"[{lang}]{text.Trim().ToLowerInvariant()}".Replace(" ", "[SPACE]");
+        lang = lang.Split('-')[0];
+        if (lang == "zh") lang = "zh-cn";
+        string cleaned = CollapseWhitespace(text.Trim().ToLowerInvariant());
+        string prepared = $"[{lang}]{cleaned}".Replace(" ", "[SPACE]");
         List<int> ids = [];
         foreach (string segment in SplitSpecials(prepared))
         {
@@ -115,26 +123,60 @@ public sealed partial class AceStepLyricTokenizer
         if (runStart < text.Length) yield return text[runStart..];
     }
 
-    /// <summary>Character-level BPE with ranked merges; unknown symbols are skipped.</summary>
+    /// <summary>HF Whitespace pre-tokenization (<c>\w+|[^\w\s]+</c> runs) then character BPE per piece;
+    /// unknown symbols emit <c>[UNK]</c>.</summary>
     private IEnumerable<int> Bpe(string segment)
     {
-        List<string> parts = [.. segment.Select(ch => ch.ToString())];
-        while (parts.Count > 1)
+        foreach (string piece in PreTokenize(segment))
         {
-            int bestRank = int.MaxValue, bestIdx = -1;
-            for (int i = 0; i < parts.Count - 1; i++)
-                if (_mergeRanks.TryGetValue((parts[i], parts[i + 1]), out int r) && r < bestRank)
-                {
-                    bestRank = r;
-                    bestIdx = i;
-                }
-            if (bestIdx < 0) break;
-            parts[bestIdx] += parts[bestIdx + 1];
-            parts.RemoveAt(bestIdx + 1);
+            List<string> parts = [.. piece.Select(ch => ch.ToString())];
+            while (parts.Count > 1)
+            {
+                int bestRank = int.MaxValue, bestIdx = -1;
+                for (int i = 0; i < parts.Count - 1; i++)
+                    if (_mergeRanks.TryGetValue((parts[i], parts[i + 1]), out int r) && r < bestRank)
+                    {
+                        bestRank = r;
+                        bestIdx = i;
+                    }
+                if (bestIdx < 0) break;
+                parts[bestIdx] += parts[bestIdx + 1];
+                parts.RemoveAt(bestIdx + 1);
+            }
+            foreach (string p in parts)
+                yield return _vocab.TryGetValue(p, out int id) ? id : UnkToken;
         }
-        foreach (string p in parts)
-            if (_vocab.TryGetValue(p, out int id))
-                yield return id;
+    }
+
+    /// <summary>Splits a run into word (<c>\w+</c>) and punctuation (<c>[^\w\s]+</c>) pieces so merges never cross
+    /// the boundary (matches the tokenizer.json Whitespace pre-tokenizer).</summary>
+    private static IEnumerable<string> PreTokenize(string text)
+    {
+        int i = 0;
+        while (i < text.Length)
+        {
+            if (char.IsWhiteSpace(text[i])) { i++; continue; }
+            bool word = IsWordChar(text[i]);
+            int start = i;
+            while (i < text.Length && !char.IsWhiteSpace(text[i]) && IsWordChar(text[i]) == word) i++;
+            yield return text[start..i];
+        }
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    private static string CollapseWhitespace(string text)
+    {
+        System.Text.StringBuilder sb = new(text.Length);
+        bool lastSpace = false;
+        foreach (char c in text)
+        {
+            bool space = char.IsWhiteSpace(c);
+            if (space && lastSpace) continue;
+            sb.Append(space ? ' ' : c);
+            lastSpace = space;
+        }
+        return sb.ToString();
     }
 
     /// <summary>Per-line script heuristic over ACE-Step's 17 supported languages (the official pipeline uses a

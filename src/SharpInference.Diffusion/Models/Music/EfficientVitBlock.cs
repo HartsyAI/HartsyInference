@@ -38,7 +38,10 @@ public sealed unsafe class EfficientVitBlock
             w.TryGetValue($"{p}.attn.to_qkv_multiscale.0.proj_out.weight", out _msProjOutW);
             w.TryGetValue($"{p}.attn.to_qkv_multiscale.0.proj_out.bias", out _msProjOutB);
         }
-        _projOutW = w[$"{p}.attn.proj_out.weight"]; w.TryGetValue($"{p}.attn.proj_out.bias", out _projOutB);
+        if (!w.TryGetValue($"{p}.attn.to_out.weight", out _projOutW))
+            _projOutW = w[$"{p}.attn.proj_out.weight"];
+        if (!w.TryGetValue($"{p}.attn.to_out.bias", out _projOutB))
+            w.TryGetValue($"{p}.attn.proj_out.bias", out _projOutB);
         _attnNormW = LoadF32(w, $"{p}.attn.norm_out.weight"); w.TryGetValue($"{p}.attn.norm_out.bias", out _attnNormB);
 
         _ffInvW = w[$"{p}.conv_out.conv_inverted.weight"]; w.TryGetValue($"{p}.conv_out.conv_inverted.bias", out _ffInvB);

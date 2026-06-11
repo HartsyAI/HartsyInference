@@ -46,11 +46,11 @@ public sealed record AceStepConfig
     /// <summary>Lyric BPE vocab (safetensors embedding rows; config says 6693).</summary>
     public int LyricVocabSize { get; init; } = 6693;
 
-    /// <summary>Conformer lyric encoder layers.</summary>
-    public int LyricEncoderLayers { get; init; } = 8;
+    /// <summary>Lyric encoder layers (6 verified from the 3.5B key dump — the research doc's "8" was wrong).</summary>
+    public int LyricEncoderLayers { get; init; } = 6;
 
-    /// <summary>Patch-embed intermediate channels (proj_in first conv).</summary>
-    public int PatchEmbedHidden { get; init; } = 64;
+    /// <summary>Patch-embed intermediate channels (in·256 = 2048 in the real checkpoint; read from weights at load).</summary>
+    public int PatchEmbedHidden { get; init; } = 2048;
 
     /// <summary>Timestep sinusoidal frequency dim.</summary>
     public int FreqDim { get; init; } = 256;

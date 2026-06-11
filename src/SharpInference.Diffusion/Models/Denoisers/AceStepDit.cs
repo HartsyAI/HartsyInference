@@ -34,15 +34,17 @@ public sealed unsafe class AceStepDit : IDisposable
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _projInConv1W = Pick(w, "proj_in.conv1.weight", "proj_in.early_conv_layers.0.weight");
-        _projInConv1B = PickOpt(w, "proj_in.conv1.bias", "proj_in.early_conv_layers.0.bias");
-        _projInNormW = PickF32(w, "proj_in.norm.weight", "proj_in.early_conv_layers.1.weight");
-        _projInNormB = PickOpt(w, "proj_in.norm.bias", "proj_in.early_conv_layers.1.bias");
-        _projInConv2W = Pick(w, "proj_in.conv2.weight", "proj_in.early_conv_layers.2.weight");
-        _projInConv2B = PickOpt(w, "proj_in.conv2.bias", "proj_in.early_conv_layers.2.bias");
+        _projInConv1W = Pick(w, "proj_in.early_conv_layers.0.weight");
+        _projInConv1B = PickOpt(w, "proj_in.early_conv_layers.0.bias");
+        _projInNormW = PickF32(w, "proj_in.early_conv_layers.1.weight");
+        _projInNormB = PickOpt(w, "proj_in.early_conv_layers.1.bias");
+        _projInConv2W = Pick(w, "proj_in.early_conv_layers.2.weight");
+        _projInConv2B = PickOpt(w, "proj_in.early_conv_layers.2.bias");
 
-        _timeEmb1W = w["time_embed.timestep_embedder.linear_1.weight"]; w.TryGetValue("time_embed.timestep_embedder.linear_1.bias", out _timeEmb1B);
-        _timeEmb2W = w["time_embed.timestep_embedder.linear_2.weight"]; w.TryGetValue("time_embed.timestep_embedder.linear_2.bias", out _timeEmb2B);
+        _timeEmb1W = Pick(w, "timestep_embedder.linear_1.weight", "time_embed.timestep_embedder.linear_1.weight");
+        _timeEmb1B = PickOpt(w, "timestep_embedder.linear_1.bias", "time_embed.timestep_embedder.linear_1.bias");
+        _timeEmb2W = Pick(w, "timestep_embedder.linear_2.weight", "time_embed.timestep_embedder.linear_2.weight");
+        _timeEmb2B = PickOpt(w, "timestep_embedder.linear_2.bias", "time_embed.timestep_embedder.linear_2.bias");
         _tBlockW = Pick(w, "t_block.1.weight", "time_embed.linear.weight");
         _tBlockB = PickOpt(w, "t_block.1.bias", "time_embed.linear.bias");
 
@@ -62,9 +64,9 @@ public sealed unsafe class AceStepDit : IDisposable
             _blocks[i].LoadWeights(w, $"transformer_blocks.{i}");
         }
 
-        _finalScaleShift = PickF32(w, "proj_out.scale_shift_table", "final_layer.scale_shift_table", "scale_shift_table");
-        _projOutW = Pick(w, "proj_out.linear.weight", "final_layer.linear.weight", "proj_out.weight");
-        _projOutB = PickOpt(w, "proj_out.linear.bias", "final_layer.linear.bias", "proj_out.bias");
+        _finalScaleShift = PickF32(w, "final_layer.scale_shift_table", "proj_out.scale_shift_table");
+        _projOutW = Pick(w, "final_layer.linear.weight", "proj_out.linear.weight");
+        _projOutB = PickOpt(w, "final_layer.linear.bias", "proj_out.linear.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -169,17 +171,18 @@ public sealed unsafe class AceStepDit : IDisposable
         return velocity;
     }
 
+    /// <summary>The real PatchEmbed (verified vs the 3.5B dump): height-collapsing conv (8 → in·256, kernel/stride
+    /// (16,1)) → GroupNorm(32, eps 1e-6) → 1×1 conv to inner dim.</summary>
     private Tensor PatchEmbed(IBackend backend, Tensor latent, int f)
     {
-        int hid = _config.PatchEmbedHidden, h = _config.LatentHeight, dim = _config.InnerDim;
-        Tensor c1 = new Tensor(new TensorShape(1, hid, h, f), DType.F32);
-        backend.Conv2D(c1, latent, _projInConv1W!, _projInConv1B, 1, 1, 1, 1);
+        int hid = (int)_projInConv1W!.Shape[0], dim = _config.InnerDim;
+        Tensor c1 = new Tensor(new TensorShape(1, hid, 1, f), DType.F32);
+        backend.Conv2D(c1, latent, _projInConv1W!, _projInConv1B, _config.PatchSize.H, _config.PatchSize.W, 0, 0);
         Tensor n = new Tensor(c1.Shape, DType.F32);
-        backend.GroupNorm(n, c1, _projInNormW!, _projInNormB!, Math.Min(32, hid), 1e-5f);
+        backend.GroupNorm(n, c1, _projInNormW!, _projInNormB!, Math.Min(32, hid), 1e-6f);
         c1.Dispose();
-        // Height-collapsing conv: kernel (16, 1), stride (16, 1) → [1, dim, 1, F].
         Tensor c2 = new Tensor(new TensorShape(1, dim, 1, f), DType.F32);
-        backend.Conv2D(c2, n, _projInConv2W!, _projInConv2B, _config.PatchSize.H, _config.PatchSize.W, 0, 0);
+        backend.Conv2D(c2, n, _projInConv2W!, _projInConv2B, 1, 1, 0, 0);
         n.Dispose();
         // → tokens [F, dim].
         Tensor tokens = new Tensor(new TensorShape(f, dim), DType.F32);
@@ -220,17 +223,20 @@ public sealed unsafe class AceStepDit : IDisposable
         return (temb, tBlock);
     }
 
+    /// <summary>Qwen2-style tables: <c>cos/sin [S, D]</c> with the HALF-CONCAT layout (<c>emb = cat(freqs, freqs)</c>)
+    /// while the rotation itself is interleaved-pair — the exact (unusual) combination the reference trains with.</summary>
     private (float[] Cos, float[] Sin) BuildRope(int length)
     {
-        int half = _config.HeadDim / 2;
-        float[] cos = new float[length * half];
-        float[] sin = new float[length * half];
+        int d = _config.HeadDim, half = d / 2;
+        float[] cos = new float[length * d];
+        float[] sin = new float[length * d];
         for (int pos = 0; pos < length; pos++)
             for (int i = 0; i < half; i++)
             {
-                double freq = Math.Pow(_config.RopeTheta, -2.0 * i / _config.HeadDim);
-                cos[pos * half + i] = (float)Math.Cos(pos * freq);
-                sin[pos * half + i] = (float)Math.Sin(pos * freq);
+                double freq = Math.Pow(_config.RopeTheta, -2.0 * i / d);
+                float c = (float)Math.Cos(pos * freq), si = (float)Math.Sin(pos * freq);
+                cos[pos * d + i] = c; cos[pos * d + half + i] = c;
+                sin[pos * d + i] = si; sin[pos * d + half + i] = si;
             }
         return (cos, sin);
     }
@@ -304,8 +310,8 @@ public sealed unsafe class AceStepDit : IDisposable
     {
         private readonly AceStepConfig _c;
         private Tensor? _scaleShift;
-        private Tensor? _qW, _kW, _vW, _oW, _oB, _normQ, _normK;
-        private Tensor? _cqW, _ckW, _cvW, _coW, _coB, _cNormQ, _cNormK;
+        private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _normQ, _normK;
+        private Tensor? _cqW, _cqB, _ckW, _ckB, _cvW, _cvB, _coW, _coB, _cNormQ, _cNormK;
         private Tensor? _ffInvW, _ffInvB, _ffDepthW, _ffDepthB, _ffPointW, _ffPointB;
 
         public Block(AceStepConfig c) => _c = c;
@@ -313,21 +319,23 @@ public sealed unsafe class AceStepDit : IDisposable
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
             _scaleShift = PickF32(w, $"{p}.scale_shift_table");
-            _qW = Pick(w, $"{p}.attn.to_q.weight", $"{p}.attn1.to_q.weight");
-            _kW = Pick(w, $"{p}.attn.to_k.weight", $"{p}.attn1.to_k.weight");
-            _vW = Pick(w, $"{p}.attn.to_v.weight", $"{p}.attn1.to_v.weight");
-            _oW = Pick(w, $"{p}.attn.to_out.0.weight", $"{p}.attn1.to_out.0.weight");
-            _oB = PickOpt(w, $"{p}.attn.to_out.0.bias", $"{p}.attn1.to_out.0.bias");
-            _normQ = PickOptF32(w, $"{p}.attn.norm_q.weight", $"{p}.attn1.norm_q.weight");
-            _normK = PickOptF32(w, $"{p}.attn.norm_k.weight", $"{p}.attn1.norm_k.weight");
+            _qW = Pick(w, $"{p}.attn.to_q.weight"); _qB = PickOpt(w, $"{p}.attn.to_q.bias");
+            _kW = Pick(w, $"{p}.attn.to_k.weight"); _kB = PickOpt(w, $"{p}.attn.to_k.bias");
+            _vW = Pick(w, $"{p}.attn.to_v.weight"); _vB = PickOpt(w, $"{p}.attn.to_v.bias");
+            _oW = Pick(w, $"{p}.attn.to_out.0.weight");
+            _oB = PickOpt(w, $"{p}.attn.to_out.0.bias");
+            _normQ = PickOptF32(w, $"{p}.attn.norm_q.weight");
+            _normK = PickOptF32(w, $"{p}.attn.norm_k.weight");
 
-            _cqW = Pick(w, $"{p}.cross_attn.to_q.weight", $"{p}.attn2.to_q.weight");
-            _ckW = Pick(w, $"{p}.cross_attn.to_k.weight", $"{p}.attn2.to_k.weight");
-            _cvW = Pick(w, $"{p}.cross_attn.to_v.weight", $"{p}.attn2.to_v.weight");
-            _coW = Pick(w, $"{p}.cross_attn.to_out.0.weight", $"{p}.attn2.to_out.0.weight");
-            _coB = PickOpt(w, $"{p}.cross_attn.to_out.0.bias", $"{p}.attn2.to_out.0.bias");
-            _cNormQ = PickOptF32(w, $"{p}.cross_attn.norm_q.weight", $"{p}.attn2.norm_q.weight");
-            _cNormK = PickOptF32(w, $"{p}.cross_attn.norm_k.weight", $"{p}.attn2.norm_k.weight");
+            _cqW = Pick(w, $"{p}.cross_attn.to_q.weight"); _cqB = PickOpt(w, $"{p}.cross_attn.to_q.bias");
+            _ckW = Pick(w, $"{p}.cross_attn.to_k.weight"); _ckB = PickOpt(w, $"{p}.cross_attn.to_k.bias");
+            _cvW = Pick(w, $"{p}.cross_attn.to_v.weight"); _cvB = PickOpt(w, $"{p}.cross_attn.to_v.bias");
+            _coW = Pick(w, $"{p}.cross_attn.to_out.0.weight");
+            _coB = PickOpt(w, $"{p}.cross_attn.to_out.0.bias");
+            _cNormQ = PickOptF32(w, $"{p}.cross_attn.norm_q.weight");
+            _cNormK = PickOptF32(w, $"{p}.cross_attn.norm_k.weight");
+            // NOTE: the checkpoint also ships cross_attn.add_{q,k,v}_proj/to_add_out — constructed by the reference
+            // but UNUSED by its CustomerAttnProcessor2_0 (verified in source). Deliberately not loaded.
 
             _ffInvW = Squeeze1d(Pick(w, $"{p}.ff.inverted_conv.conv.weight", $"{p}.ff.conv_inverted.weight"));
             _ffInvB = PickOpt(w, $"{p}.ff.inverted_conv.conv.bias", $"{p}.ff.conv_inverted.bias");
@@ -339,8 +347,8 @@ public sealed unsafe class AceStepDit : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            foreach (Tensor? t in new[] { _scaleShift, _qW, _kW, _vW, _oW, _oB, _normQ, _normK,
-                _cqW, _ckW, _cvW, _coW, _coB, _cNormQ, _cNormK,
+            foreach (Tensor? t in new[] { _scaleShift, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _normQ, _normK,
+                _cqW, _cqB, _ckW, _ckB, _cvW, _cvB, _coW, _coB, _cNormQ, _cNormK,
                 _ffInvW, _ffInvB, _ffDepthW, _ffDepthB, _ffPointW, _ffPointB })
                 if (t is not null) yield return t;
         }
@@ -381,9 +389,9 @@ public sealed unsafe class AceStepDit : IDisposable
         private Tensor LiteLaSelfAttention(IBackend backend, Tensor n, float[] cos, float[] sin, int f)
         {
             int dim = _c.InnerDim, heads = _c.NumHeads, hd = _c.HeadDim;
-            Tensor q = Proj(backend, n, _qW!, null, f, dim);
-            Tensor k = Proj(backend, n, _kW!, null, f, dim);
-            Tensor v = Proj(backend, n, _vW!, null, f, dim);
+            Tensor q = Proj(backend, n, _qW!, _qB, f, dim);
+            Tensor k = Proj(backend, n, _kW!, _kB, f, dim);
+            Tensor v = Proj(backend, n, _vW!, _vB, f, dim);
             if (_normQ is not null) RmsNormHeads(q, _normQ, f, heads, hd);
             if (_normK is not null) RmsNormHeads(k, _normK, f, heads, hd);
             ApplyRope(q, cos, sin, f, heads, hd);
@@ -439,9 +447,9 @@ public sealed unsafe class AceStepDit : IDisposable
         {
             int dim = _c.InnerDim, heads = _c.NumHeads, hd = _c.HeadDim;
             int l = (int)ctx.Shape[0];
-            Tensor q = Proj(backend, x, _cqW!, null, f, dim);
-            Tensor k = Proj(backend, ctx, _ckW!, null, l, dim);
-            Tensor v = Proj(backend, ctx, _cvW!, null, l, dim);
+            Tensor q = Proj(backend, x, _cqW!, _cqB, f, dim);
+            Tensor k = Proj(backend, ctx, _ckW!, _ckB, l, dim);
+            Tensor v = Proj(backend, ctx, _cvW!, _cvB, l, dim);
             if (_cNormQ is not null) RmsNormHeads(q, _cNormQ, f, heads, hd);
             if (_cNormK is not null) RmsNormHeads(k, _cNormK, l, heads, hd);
             // Queries rotate at audio positions; keys at context positions (validation-gated).
@@ -568,21 +576,23 @@ public sealed unsafe class AceStepDit : IDisposable
                 }
         }
 
-        /// <summary>Interleaved-pair rotation: <c>out = x·cos + rot(x)·sin</c> with <c>rot = (−x₂ᵢ₊₁, x₂ᵢ)</c>.</summary>
+        /// <summary>The reference rotation verbatim: per element e, <c>out[e] = x[e]·cos[e] + rot(x)[e]·sin[e]</c>
+        /// with <c>rot = interleaved (−x_odd, x_even)</c> and per-element half-concat cos/sin tables.</summary>
         private static void ApplyRope(Tensor x, float[] cos, float[] sin, int rows, int heads, int hd)
         {
             float* xp = (float*)x.DataPointer;
-            int dim = heads * hd, half = hd / 2;
+            int dim = heads * hd;
             for (int i = 0; i < rows; i++)
                 for (int h = 0; h < heads; h++)
                 {
                     long off = (long)i * dim + h * hd;
-                    for (int d = 0; d < half; d++)
+                    for (int d = 0; d < hd / 2; d++)
                     {
-                        float c = cos[i * half + d], s = sin[i * half + d];
                         float a = xp[off + 2 * d], b = xp[off + 2 * d + 1];
-                        xp[off + 2 * d] = a * c - b * s;
-                        xp[off + 2 * d + 1] = b * c + a * s;
+                        float cA = cos[i * hd + 2 * d], sA = sin[i * hd + 2 * d];
+                        float cB = cos[i * hd + 2 * d + 1], sB = sin[i * hd + 2 * d + 1];
+                        xp[off + 2 * d] = a * cA - b * sA;
+                        xp[off + 2 * d + 1] = b * cB + a * sB;
                     }
                 }
         }

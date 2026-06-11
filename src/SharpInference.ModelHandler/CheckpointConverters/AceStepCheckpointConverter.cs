@@ -15,8 +15,11 @@ namespace SharpInference.ModelHandler.CheckpointConverters;
 /// isinstance(m, list) else m for m in t['model']['merges']))"</c>).</summary>
 public sealed class AceStepCheckpointConverter
 {
-    /// <summary>Loads the DiT safetensors, dropping training-only keys. Caller owns the loader.</summary>
-    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadTransformer(string path)
+    /// <summary>Loads the DiT safetensors, dropping training-only keys. With <paramref name="castToF32"/> every
+    /// tensor is materialized as F32 (required for CPU inference — the BF16 checkpoint is ~13 GB in F32; without it
+    /// tensors borrow the mmap and stay BF16, which is fine for key/shape validation and GPU paths with F16 kernels).
+    /// Caller owns the loader.</summary>
+    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadTransformer(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
@@ -24,33 +27,36 @@ public sealed class AceStepCheckpointConverter
         foreach (string key in loader.Descriptors.Keys)
         {
             if (key.StartsWith("projectors.", StringComparison.Ordinal)) continue;   // SSL heads (training only)
-            weights[Strip(key, "model.")] = loader.GetTensor(key);
+            weights[Strip(key, "model.")] = MaybeCast(loader.GetTensor(key), castToF32);
         }
         return (weights, loader);
     }
 
     /// <summary>Loads the Music-DCAE safetensors (passthrough; strips an optional <c>autoencoder.</c> prefix).</summary>
-    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadDcae(string path)
+    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadDcae(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
         Dictionary<string, Tensor> weights = new();
         foreach (string key in loader.Descriptors.Keys)
-            weights[Strip(Strip(key, "autoencoder."), "dcae.")] = loader.GetTensor(key);
+            weights[Strip(Strip(key, "autoencoder."), "dcae.")] = MaybeCast(loader.GetTensor(key), castToF32);
         return (weights, loader);
     }
 
     /// <summary>Loads the ADaMoS vocoder safetensors with weight-norm fusion. Fused tensors are freshly allocated;
     /// the caller owns the loader for the rest.</summary>
-    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadVocoder(string path)
+    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadVocoder(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
         Dictionary<string, Tensor> raw = new();
         foreach (string key in loader.Descriptors.Keys)
-            raw[Strip(Strip(key, "generator."), "model.")] = loader.GetTensor(key);
+            raw[Strip(Strip(key, "generator."), "model.")] = MaybeCast(loader.GetTensor(key), castToF32);
         return (FuseWeightNorm(raw), loader);
     }
+
+    private static Tensor MaybeCast(Tensor t, bool castToF32) =>
+        castToF32 && t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
     /// <summary>Fuses <c>*.weight_g/*.weight_v</c> pairs into plain <c>*.weight</c> (PyTorch <c>weight_norm</c>,
     /// dim=0: per-output-channel L2 over the remaining dims). Non-paired keys pass through.</summary>

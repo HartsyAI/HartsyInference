@@ -11,6 +11,13 @@
 > **Why this matters:** SwarmUI's only supported audio-gen model class is `ace-step-1_5`
 > (T2IModelClassSorter detection key `encoder.lyric_encoder.layers.0.post_attention_layernorm.weight` —
 > matches the key dump below). This is the build target for audio in the SwarmUI extension.
+>
+> **STATUS UPDATE 2026-06-10:** the engine shipped **ACE-Step v1 (3.5B DiT)** first
+> (`AceStepPipeline`/`AceStepDit` in SharpInference.Diffusion, per ACE_STEP_ARCHITECTURE.md's
+> recommendation), and the SwarmUI extension wires **v1** — registering its own `ace-step-v1` model
+> class (detection: `lyric_embs.weight`) under the existing `ace-step-1_5` COMPAT class so the
+> Text2Audio params light up. This doc remains the spec for the **v1.5** build (steps 1-2 done:
+> Oobleck VAE + Qwen3-Embedding preset); v1.5 checkpoints are refused by the extension until then.
 
 ## 1. Corrections to prior research
 

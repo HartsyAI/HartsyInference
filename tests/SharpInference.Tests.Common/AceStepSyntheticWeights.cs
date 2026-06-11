@@ -23,16 +23,16 @@ public static unsafe class AceStepSyntheticWeights
         int dim = c.InnerDim, hid = c.PatchEmbedHidden, lh = c.LyricHiddenDim;
         Dictionary<string, Tensor> w = new()
         {
-            ["proj_in.conv1.weight"] = R([hid, c.InChannels, 3, 3]),
-            ["proj_in.conv1.bias"] = R([hid]),
-            ["proj_in.norm.weight"] = R([hid]),
-            ["proj_in.norm.bias"] = R([hid]),
-            ["proj_in.conv2.weight"] = R([dim, hid, c.PatchSize.H, c.PatchSize.W]),
-            ["proj_in.conv2.bias"] = R([dim]),
-            ["time_embed.timestep_embedder.linear_1.weight"] = R([dim, c.FreqDim]),
-            ["time_embed.timestep_embedder.linear_1.bias"] = R([dim]),
-            ["time_embed.timestep_embedder.linear_2.weight"] = R([dim, dim]),
-            ["time_embed.timestep_embedder.linear_2.bias"] = R([dim]),
+            ["proj_in.early_conv_layers.0.weight"] = R([hid, c.InChannels, c.PatchSize.H, c.PatchSize.W]),
+            ["proj_in.early_conv_layers.0.bias"] = R([hid]),
+            ["proj_in.early_conv_layers.1.weight"] = R([hid]),
+            ["proj_in.early_conv_layers.1.bias"] = R([hid]),
+            ["proj_in.early_conv_layers.2.weight"] = R([dim, hid, 1, 1]),
+            ["proj_in.early_conv_layers.2.bias"] = R([dim]),
+            ["timestep_embedder.linear_1.weight"] = R([dim, c.FreqDim]),
+            ["timestep_embedder.linear_1.bias"] = R([dim]),
+            ["timestep_embedder.linear_2.weight"] = R([dim, dim]),
+            ["timestep_embedder.linear_2.bias"] = R([dim]),
             ["t_block.1.weight"] = R([6 * dim, dim]),
             ["t_block.1.bias"] = R([6 * dim]),
             ["speaker_embedder.weight"] = R([dim, c.SpeakerDim]),
@@ -42,9 +42,9 @@ public static unsafe class AceStepSyntheticWeights
             ["lyric_embs.weight"] = R([c.LyricVocabSize, lh]),
             ["lyric_proj.weight"] = R([dim, lh]),
             ["lyric_proj.bias"] = R([dim]),
-            ["proj_out.scale_shift_table"] = R([2, dim]),
-            ["proj_out.linear.weight"] = R([c.LatentHeight * c.InChannels, dim]),
-            ["proj_out.linear.bias"] = R([c.LatentHeight * c.InChannels]),
+            ["final_layer.scale_shift_table"] = R([2, dim]),
+            ["final_layer.linear.weight"] = R([c.LatentHeight * c.InChannels, dim]),
+            ["final_layer.linear.bias"] = R([c.LatentHeight * c.InChannels]),
         };
 
         // Lyric Conformer (no macaron in the tiny build — presence-driven).
@@ -83,13 +83,11 @@ public static unsafe class AceStepSyntheticWeights
             w[$"{p}.scale_shift_table"] = R([6, dim]);
             foreach (string attn in new[] { "attn", "cross_attn" })
             {
-                w[$"{p}.{attn}.to_q.weight"] = R([dim, dim]);
-                w[$"{p}.{attn}.to_k.weight"] = R([dim, dim]);
-                w[$"{p}.{attn}.to_v.weight"] = R([dim, dim]);
+                w[$"{p}.{attn}.to_q.weight"] = R([dim, dim]); w[$"{p}.{attn}.to_q.bias"] = R([dim]);
+                w[$"{p}.{attn}.to_k.weight"] = R([dim, dim]); w[$"{p}.{attn}.to_k.bias"] = R([dim]);
+                w[$"{p}.{attn}.to_v.weight"] = R([dim, dim]); w[$"{p}.{attn}.to_v.bias"] = R([dim]);
                 w[$"{p}.{attn}.to_out.0.weight"] = R([dim, dim]);
                 w[$"{p}.{attn}.to_out.0.bias"] = R([dim]);
-                w[$"{p}.{attn}.norm_q.weight"] = Ones([c.HeadDim]);
-                w[$"{p}.{attn}.norm_k.weight"] = Ones([c.HeadDim]);
             }
             w[$"{p}.ff.inverted_conv.conv.weight"] = R([2 * ffHidden, dim, 1]);
             w[$"{p}.ff.inverted_conv.conv.bias"] = R([2 * ffHidden]);
@@ -129,9 +127,9 @@ public static unsafe class AceStepSyntheticWeights
                 w[$"{p}.attn.to_q.weight"] = R([d, d]);
                 w[$"{p}.attn.to_k.weight"] = R([d, d]);
                 w[$"{p}.attn.to_v.weight"] = R([d, d]);
-                w[$"{p}.attn.proj_out.weight"] = R([d, d]);
-                w[$"{p}.attn.proj_out.bias"] = R([d]);
+                w[$"{p}.attn.to_out.weight"] = R([d, d]);
                 w[$"{p}.attn.norm_out.weight"] = R([d]);
+                w[$"{p}.attn.norm_out.bias"] = R([d]);
                 w[$"{p}.conv_out.conv_inverted.weight"] = R([2 * glumbHidden, d, 1, 1]);
                 w[$"{p}.conv_out.conv_inverted.bias"] = R([2 * glumbHidden]);
                 w[$"{p}.conv_out.conv_depth.weight"] = R([2 * glumbHidden, 1, 3, 3]);
