@@ -66,6 +66,20 @@ public sealed record T5TextEncoderConfig
         UsePerLayerPositionBias = true,
     };
 
+    /// <summary>umT5-base encoder preset (`google/umt5-base`) used by ACE-Step's style/genre conditioning — 12 layers,
+    /// hidden 768, per-layer relative position bias, the 256k multilingual SentencePiece (same family as
+    /// <see cref="Umt5Xxl"/>, just the base size).</summary>
+    public static T5TextEncoderConfig Umt5Base => new()
+    {
+        DModel = 768,
+        DFf = 2048,
+        DKv = 64,
+        NumHeads = 12,
+        NumLayers = 12,
+        VocabSize = 256384,
+        UsePerLayerPositionBias = true,
+    };
+
     /// <summary>umT5-XXL encoder preset (`google/umt5-xxl`) used by Wan-Video text conditioning. Same dims as T5-XXL
     /// but with the UMT5 conventions: per-layer learned relative position bias AND the 256k multilingual
     /// SentencePiece vocabulary (needs the umT5 <c>spiece.model</c>, not Google's T5 one). Max sequence length 512

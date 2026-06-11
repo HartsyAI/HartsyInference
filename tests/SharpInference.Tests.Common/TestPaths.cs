@@ -99,6 +99,20 @@ public static class TestPaths
         public static string T5XxlSource => Resolve("CHROMA_T5XXL_SOURCE",     Sd35.Medium);
     }
 
+    /// <summary>ACE-Step v1 (3.5B music DiT) paths. Expects the HF repo folder layout (<c>ace_step_transformer/</c>,
+    /// <c>music_dcae_f8c8/</c>, <c>music_vocoder/</c>, <c>umt5-base/</c>); the lyric tokenizer needs the one-time
+    /// <c>vocab.json</c>/<c>merges.txt</c> export described in <c>AceStepCheckpointConverter</c>.</summary>
+    public static class AceStep
+    {
+        public static string RootDir => Resolve("ACE_STEP_DIR", Path.Combine(ModelsDir, "Music", "ACE-Step-v1-3.5B"));
+        public static string TransformerPath => Path.Combine(RootDir, "ace_step_transformer", "diffusion_pytorch_model.safetensors");
+        public static string DcaePath => Path.Combine(RootDir, "music_dcae_f8c8", "diffusion_pytorch_model.safetensors");
+        public static string VocoderPath => Path.Combine(RootDir, "music_vocoder", "diffusion_pytorch_model.safetensors");
+        public static string Umt5BaseDir => Path.Combine(RootDir, "umt5-base");
+        public static string LyricVocabPath => Resolve("ACE_STEP_LYRIC_VOCAB", Path.Combine(RootDir, "vocab.json"));
+        public static string LyricMergesPath => Resolve("ACE_STEP_LYRIC_MERGES", Path.Combine(RootDir, "merges.txt"));
+    }
+
     /// <summary>ERNIE-Image paths. Diffusers folder layout (transformer/, text_encoder/, vae/, scheduler/, tokenizer/).</summary>
     public static class ErnieImage
     {

@@ -75,8 +75,11 @@ public sealed unsafe class ClipTextEncoder
         if (_textProjectionWeight is not null) yield return _textProjectionWeight;
     }
 
-    /// <summary>Encodes token IDs [B, seqLen] into hidden states [B, seqLen, hiddenSize]. Returns the last hidden state with final layer norm applied. Used by SD1.5.</summary>
-    public Tensor Encode(IBackend backend, ReadOnlySpan<int[]> batchTokenIds)
+    /// <summary>Encodes token IDs [B, seqLen] into hidden states [B, seqLen, hiddenSize]. Returns the hidden state with final layer norm applied. Used by SD1.5.</summary>
+    /// <param name="backend">Compute backend.</param>
+    /// <param name="batchTokenIds">Token IDs [B, seqLen].</param>
+    /// <param name="layersFromEnd">"CLIP skip": 1 (default) runs all transformer layers (standard last_hidden_state); 2 stops one layer early (penultimate, the "clip skip 2" many SD1.5 anime checkpoints were trained with); etc. Final layer norm is applied to whichever layer's output is taken, matching ComfyUI's <c>CLIPSetLastLayer</c> semantics. Clamped to [1, numLayers].</param>
+    public Tensor Encode(IBackend backend, ReadOnlySpan<int[]> batchTokenIds, int layersFromEnd = 1)
     {
         int batch = batchTokenIds.Length;
         int seqLen = batchTokenIds[0].Length;
@@ -90,8 +93,9 @@ public sealed unsafe class ClipTextEncoder
         // 2. Build causal attention mask [seqLen, seqLen]
         Tensor causalMask = BuildCausalMask(seqLen);
 
-        // 3. Run through transformer layers
-        for (int i = 0; i < _layers.Length; i++)
+        // 3. Run through transformer layers, optionally stopping early (CLIP skip)
+        int layersToRun = _layers.Length - Math.Clamp(layersFromEnd, 1, _layers.Length) + 1;
+        for (int i = 0; i < layersToRun; i++)
         {
             Tensor layerOut = _layers[i].Forward(backend, hidden, causalMask);
             hidden.Dispose();

@@ -79,7 +79,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         // 1. Encode text
         Logs.Info("Encoding text prompt...");
         int[][] batchTokenIds = [negativePromptTokenIds, promptTokenIds];
-        Tensor textEmbeddings = _textEncoder.Encode(Backend, batchTokenIds);
+        Tensor textEmbeddings = _textEncoder.Encode(Backend, batchTokenIds, request.ClipSkip ?? 1);
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
         // 2. Set up scheduler (needed for both paths' initial-latent prep)
@@ -122,7 +122,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             Tensor latent = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(latent, sourceLatent, noise, startStep);
             sourceLatent.Dispose();
@@ -131,7 +131,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         }
 
         // Text-to-image: scale fresh noise by the scheduler's initial sigma.
-        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor t2iNoise = TakeOrCreateNoise(request, latentShape, seed);
         float initSigma = scheduler.InitialNoiseSigma;
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
@@ -141,6 +141,21 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             return scaled;
         }
         return t2iNoise;
+    }
+
+    private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)
+    {
+        if (request.InitialNoise is not null)
+        {
+            Tensor injected = request.InitialNoise;
+            if (!injected.Shape.Equals(latentShape))
+                throw new ArgumentException($"InitialNoise shape {injected.Shape} does not match expected latent shape {latentShape}.", nameof(request));
+            if (injected.DType != DType.F32)
+                throw new ArgumentException($"InitialNoise must be F32; got {injected.DType}.", nameof(request));
+            Logs.Info($"SD1.5: using injected initial noise tensor (shape={injected.Shape}); seed-based generator skipped.");
+            return injected;
+        }
+        return SeedGenerator.CreateNoise(latentShape, seed);
     }
 
     /// <summary>Runs the diffusion denoising loop. Iterates <c>i</c> from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1, applying scheduler input scaling, the UNet (with optional CFG), and one scheduler step per iteration. Returns the final denoised latent. Disposes intermediate latents along the way.</summary>
