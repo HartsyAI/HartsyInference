@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>SharpInference.Interactive.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+    <ProjectReference Include="..\..\src\SharpInference.Interactive\SharpInference.Interactive.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Cpu\SharpInference.Cpu.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Cuda\SharpInference.Cuda.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.ModelHandler\SharpInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\..\src\SharpInference.Tokenizers\SharpInference.Tokenizers.csproj" />
+    <ProjectReference Include="..\SharpInference.Tests.Common\SharpInference.Tests.Common.csproj" />
+  </ItemGroup>
+
+</Project>

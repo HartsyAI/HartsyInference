@@ -77,6 +77,39 @@ public static unsafe class LanceSyntheticWeights
         return w;
     }
 
+    /// <summary>Builds a full `Wan22VaeEncoder` weight dict (encoder.conv1 + down-stages with resample/time_conv + middle Res/Attn/Res + head + top-level quant conv1).</summary>
+    public static Dictionary<string, Tensor> BuildVaeEncoder(int dim, int zDim, int[] dimMult, int numResBlocks, bool[] tDown)
+    {
+        Dictionary<string, Tensor> w = new();
+        int[] dims = new int[dimMult.Length + 1];
+        dims[0] = dim;
+        for (int i = 0; i < dimMult.Length; i++) dims[i + 1] = dim * dimMult[i];
+
+        w["encoder.conv1.weight"] = R([dims[0], 12, 3, 3, 3]); w["encoder.conv1.bias"] = R([dims[0]]);
+        for (int i = 0; i < dimMult.Length; i++)
+        {
+            int cur = dims[i], outDim = dims[i + 1];
+            for (int j = 0; j < numResBlocks; j++) { AddRes(w, $"encoder.downsamples.{i}.downsamples.{j}", cur, outDim); cur = outDim; }
+            if (i != dimMult.Length - 1)
+            {
+                w[$"encoder.downsamples.{i}.downsamples.{numResBlocks}.resample.1.weight"] = R([outDim, outDim, 3, 3]);
+                w[$"encoder.downsamples.{i}.downsamples.{numResBlocks}.resample.1.bias"] = R([outDim]);
+                if (i < tDown.Length && tDown[i])
+                {
+                    w[$"encoder.downsamples.{i}.downsamples.{numResBlocks}.time_conv.weight"] = R([outDim, outDim, 3, 1, 1]);
+                    w[$"encoder.downsamples.{i}.downsamples.{numResBlocks}.time_conv.bias"] = R([outDim]);
+                }
+            }
+        }
+        AddRes(w, "encoder.middle.0", dims[^1], dims[^1]);
+        AddAttn(w, "encoder.middle.1", dims[^1]);
+        AddRes(w, "encoder.middle.2", dims[^1], dims[^1]);
+        w["encoder.head.0.gamma"] = R([dims[^1]]);
+        w["encoder.head.2.weight"] = R([2 * zDim, dims[^1], 3, 3, 3]); w["encoder.head.2.bias"] = R([2 * zDim]);
+        w["conv1.weight"] = R([2 * zDim, 2 * zDim, 1, 1, 1]); w["conv1.bias"] = R([2 * zDim]);
+        return w;
+    }
+
     private static void AddRes(Dictionary<string, Tensor> w, string p, int inDim, int outDim)
     {
         w[$"{p}.residual.0.gamma"] = R([inDim]);

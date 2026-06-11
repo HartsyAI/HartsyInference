@@ -14,8 +14,8 @@
     <PackageReference Include="Microsoft.ML.Tokenizers" />
   </ItemGroup>
 
-  <!-- Embedded canonical tokenizer vocabularies. ~6.7 MB total (uncompressed); the
-       assembly winds up ~7 MB. This is the price of being able to spin up a tokenizer
+  <!-- Embedded canonical tokenizer vocabularies. ~11 MB total (uncompressed); the
+       assembly winds up ~12 MB. This is the price of being able to spin up a tokenizer
        without making the user hunt down vocab/merges/spiece files separately, the way
        Python's `transformers` library does by bundling them inside its wheel.
 
@@ -24,6 +24,7 @@
     <EmbeddedResource Include="Resources\clip_vocab.json"   LogicalName="SharpInference.Tokenizers.Resources.clip_vocab.json" />
     <EmbeddedResource Include="Resources\clip_merges.txt"   LogicalName="SharpInference.Tokenizers.Resources.clip_merges.txt" />
     <EmbeddedResource Include="Resources\t5_spiece.model"   LogicalName="SharpInference.Tokenizers.Resources.t5_spiece.model" />
+    <EmbeddedResource Include="Resources\umt5_spiece.model" LogicalName="SharpInference.Tokenizers.Resources.umt5_spiece.model" />
     <EmbeddedResource Include="Resources\qwen3_vocab.json"  LogicalName="SharpInference.Tokenizers.Resources.qwen3_vocab.json" />
     <EmbeddedResource Include="Resources\qwen3_merges.txt"  LogicalName="SharpInference.Tokenizers.Resources.qwen3_merges.txt" />
   </ItemGroup>

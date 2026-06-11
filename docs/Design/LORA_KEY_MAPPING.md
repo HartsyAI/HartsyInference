@@ -10,11 +10,20 @@
 | F2 | **Kohya SDXL** | `kohya-ss/sd-scripts`, AI Toolkit (SDXL) | same as F1 plus `lora_te2_` keys exist OR block index goes to `_2_` only (3 levels, not 4) |
 | F3 | **Kohya Flux** | `kohya-ss/sd-scripts` (Flux), ComfyUI repackages | any key matches `^lora_unet_(double\|single)_blocks_` |
 | F4 | **AI Toolkit Flux (legacy hybrid)** | older `ostris/ai-toolkit` builds — possibly never shipped to public | any key matches `^lora_transformer_` |
-| F5 | **Diffusers Flux** (incl. **modern AI Toolkit**) | HuggingFace PEFT trainers, **`ostris/ai-toolkit` v0.1.0+**, Civitai uploads | any key matches `^transformer\.(transformer\|single_transformer)_blocks\.` |
+| F5 | **Diffusers Flux** (incl. **modern AI Toolkit**) | HuggingFace PEFT trainers, **`ostris/ai-toolkit` v0.1.0+**, Civitai uploads | any key matches `^transformer\.(transformer\|single_transformer)_blocks\.` (or `^transformer\.blocks\.` — architecture-agnostic passthrough for Anima/Cosmos and diffusers-PEFT Wan) |
+| F6 | **Kohya Wan** (musubi-tuner) | `kohya-ss/musubi-tuner`, diffusion-pipe kohya exports | any key matches `^lora_unet_blocks_` AND contains `self_attn` or `cross_attn` |
+| F7 | **Diffusers Wan** (ComfyUI-style) | lightx2v distill releases, Kijai WanVideo conversions, Comfy repacks | any key matches `^diffusion_model\.blocks\.` |
 
 > **Empirical correction (validated 2026-04-28 against `ostris/yearbook-photo-flux-schnell-v1.safetensors`):** the public AI Toolkit-trained LoRAs ship in **F5 (Diffusers PEFT)** format, not the F4 hybrid. The trainer's `__metadata__.software.name == "ai-toolkit"` field identifies the trainer, but the on-disk key naming is full diffusers (`transformer.transformer_blocks.{i}.attn.to_q.lora_A.weight` with dots throughout). The F4 format is kept as a defensive fallback in case any older / forked trainer build emits the `lora_transformer_` hybrid we inferred from `ai-toolkit/toolkit/network_mixins.py`, but no real F4 file has been observed in the wild yet.
 
-**Deferred (v2):** XLabs Flux (`*.processor.*`), LoHa (`hada_w*_*`), LoKr (`lokr_w*`), DoRA (`dora_scale`), Flux.2/Z-Image/Qwen-Image LoRAs, Hunyuan-Video / Wan / Lumina2 LoRAs.
+> **Wan LoRAs (added 2026-06-10).** Three families exist in the wild and all load:
+> - **F6** keys are underscored original Wan module paths: `lora_unet_blocks_{i}_self_attn_q.lora_down.weight` (+ `.lora_up.weight`, `.alpha`). `LoraKeyTransformer.UnderscoreToDot` restores the dots (protected tokens added: `cross_attn`, `k_img`, `v_img`, `norm_k_img`, `text_embedding`, `time_projection`, `patch_embedding`).
+> - **F7** keys are dotted original Wan paths under a `diffusion_model.` prefix, with either PEFT (`.lora_A`/`.lora_B`) or kohya (`.lora_down`/`.lora_up`) suffixes. Comfy full-weight `.diff`/`.diff_b` entries are skipped with a warning (not low-rank).
+> - **Diffusers-PEFT Wan** (`transformer.blocks.{i}.attn1.to_q.lora_A.weight`) needs no new mapper — it rides the F5 architecture-agnostic passthrough and lands directly on the canonical keys.
+>
+> F6/F7 bodies in original Wan naming are renamed to the canonical `WanVideoTransformer` keys via the **same verbatim table the checkpoint converter uses** (`WanVideoCheckpointConverter.MapKey`): `self_attn.q → attn1.to_q`, `self_attn.o → attn1.to_out.0`, `cross_attn.* → attn2.*`, `cross_attn.{k,v}_img → attn2.add_{k,v}_proj` (I2V-14B), `ffn.0 → ffn.net.0.proj`, `ffn.2 → ffn.net.2`, `time_embedding.{0,2} → condition_embedder.time_embedder.linear_{1,2}`, `head.head → proj_out`. Original-vs-diffusers naming is detected per body (LoRA targets are linears, so the checkpoint-level norm2/norm3 swap ambiguity cannot arise). Detection requires an attention key for F6 (`lora_unet_blocks_` alone is too generic); ffn-only LoRA files would stay Unknown — not observed in practice. Covers Wan2.1/2.2-family DiTs incl. TI2V-5B and Matrix-Game finetunes; the same merged-weight path applies (merge before `LoadWeights`, FP8-quantized checkpoints rejected — cast to F16 first).
+
+**Deferred (v2):** XLabs Flux (`*.processor.*`), LoHa (`hada_w*_*`), LoKr (`lokr_w*`), DoRA (`dora_scale`), Flux.2/Z-Image/Qwen-Image LoRAs, Hunyuan-Video / Lumina2 LoRAs, Wan2.2-A14B dual-expert (high/low-noise) paired files — each file loads individually; expert pairing is a pipeline concern.
 
 ## Suffix patterns
 

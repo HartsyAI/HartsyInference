@@ -65,4 +65,19 @@ public sealed record T5TextEncoderConfig
         VocabSize = 32128,
         UsePerLayerPositionBias = true,
     };
+
+    /// <summary>umT5-XXL encoder preset (`google/umt5-xxl`) used by Wan-Video text conditioning. Same dims as T5-XXL
+    /// but with the UMT5 conventions: per-layer learned relative position bias AND the 256k multilingual
+    /// SentencePiece vocabulary (needs the umT5 <c>spiece.model</c>, not Google's T5 one). Max sequence length 512
+    /// per Wan's pipeline.</summary>
+    public static T5TextEncoderConfig Umt5Xxl => new()
+    {
+        DModel = 4096,
+        DFf = 10240,
+        DKv = 64,
+        NumHeads = 64,
+        NumLayers = 24,
+        VocabSize = 256384,
+        UsePerLayerPositionBias = true,
+    };
 }

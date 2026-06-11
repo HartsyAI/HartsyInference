@@ -36,6 +36,16 @@ public sealed class T5Tokenizer : IDisposable
         _maxLength = maxLength;
     }
 
+    /// <summary>Creates a tokenizer over the embedded umT5 multilingual SentencePiece (256k vocab,
+    /// <c>google/umt5-xxl</c>). Required for Wan-Video conditioning — the base T5 spiece produces
+    /// out-of-vocabulary IDs against a umT5-XXL encoder.</summary>
+    /// <param name="maxLength">Maximum sequence length. Default: 512 (Wan's umT5 context).</param>
+    public static T5Tokenizer CreateUmt5(int maxLength = 512)
+    {
+        using Stream stream = EmbeddedTokenizerResources.OpenUmt5Spiece();
+        return new T5Tokenizer(stream, maxLength);
+    }
+
     /// <summary>Creates a T5 tokenizer from a SentencePiece .model file.</summary>
     /// <param name="modelPath">Path to the SentencePiece .model protobuf file.</param>
     /// <param name="maxLength">Maximum sequence length. Default: 77.</param>

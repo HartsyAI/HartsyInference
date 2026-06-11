@@ -215,6 +215,17 @@ public sealed record LlamaStyleEncoderConfig
         BosTokenId = 151643,
     };
 
+    /// <summary>Qwen3-Embedding-0.6B preset — ACE-Step 1.5's text + lyric feature extractor (run as a
+    /// per-token hidden-state source; the 1024-d states feed the main model's text_projector / lyric
+    /// encoder, no sentence pooling). Architecturally identical to <see cref="Qwen3_0_6B"/> except the
+    /// embedding model's trimmed vocab (151669) and plain <c>&lt;|endoftext|&gt;</c> EOS — verified against
+    /// <c>ACE-Step/Ace-Step1.5/Qwen3-Embedding-0.6B/config.json</c>.</summary>
+    public static LlamaStyleEncoderConfig Qwen3_Embedding_0_6B => Qwen3_0_6B with
+    {
+        VocabSize = 151669,
+        EosTokenId = 151643,
+    };
+
     /// <summary>Qwen3-VL-8B-Instruct (language tower) preset, used by Ideogram 4 as its sole conditioning encoder.
     /// Dimensionally identical to <see cref="Qwen3_8B"/> (36 layers, hidden=4096, GQA 32:8, head_dim=128,
     /// intermediate=12288, vocab=151936) EXCEPT <c>rope_theta=5e6</c> (verified against

@@ -16,6 +16,10 @@ public static class EmbeddedTokenizerResources
     /// T5-XXL; the encoder weights differ but the tokenizer is identical.</summary>
     public const string T5SpieceName    = "SharpInference.Tokenizers.Resources.t5_spiece.model";
 
+    /// <summary>umT5 multilingual SentencePiece model (256k vocab, from <c>google/umt5-xxl</c>).
+    /// Used by Wan-Video's umT5-XXL conditioning — NOT interchangeable with <see cref="T5SpieceName"/>.</summary>
+    public const string Umt5SpieceName  = "SharpInference.Tokenizers.Resources.umt5_spiece.model";
+
     /// <summary>Qwen3-4B BPE vocabulary (151,936 tokens). Used by Flux.2 Klein and
     /// Z-Image text conditioning.</summary>
     public const string Qwen3VocabName  = "SharpInference.Tokenizers.Resources.qwen3_vocab.json";
@@ -50,6 +54,7 @@ public static class EmbeddedTokenizerResources
     public static Stream OpenClipVocab()   => Open(ClipVocabName);
     public static Stream OpenClipMerges()  => Open(ClipMergesName);
     public static Stream OpenT5Spiece()    => Open(T5SpieceName);
+    public static Stream OpenUmt5Spiece()  => Open(Umt5SpieceName);
     public static Stream OpenQwen3Vocab()  => Open(Qwen3VocabName);
     public static Stream OpenQwen3Merges() => Open(Qwen3MergesName);
     public static Stream OpenLlama3Vocab() => Open(Llama3VocabName);

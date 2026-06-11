@@ -20,4 +20,10 @@ public enum LoraFormat
 
     /// <summary>HuggingFace PEFT Flux format: transformer.transformer_blocks.* keys with .lora_A.weight / .lora_B.weight suffixes, dotted naming throughout.</summary>
     DiffusersFlux,
+
+    /// <summary>Kohya/musubi-tuner Wan format: lora_unet_blocks_{i}_self_attn_* / _cross_attn_* / _ffn_* underscored keys in original Wan module naming.</summary>
+    KohyaWan,
+
+    /// <summary>ComfyUI-style Wan format: diffusion_model.blocks.* dotted keys in original Wan module naming, with either PEFT (.lora_A/.lora_B) or kohya (.lora_down/.lora_up) suffixes.</summary>
+    DiffusersWan,
 }

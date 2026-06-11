@@ -75,6 +75,52 @@ public sealed class EmbeddedResourceTokenizerTests
         }
     }
 
+    // ── umT5 ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void EmbeddedUmt5Tokenizer_Constructs()
+    {
+        using T5Tokenizer tok = T5Tokenizer.CreateUmt5();
+        Assert.NotNull(tok);
+    }
+
+    [Fact]
+    public void EmbeddedUmt5Tokenizer_RespectsMaxLength()
+    {
+        using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 256);
+        int[] tokens = tok.Encode("hello");
+        Assert.Equal(256, tokens.Length);
+    }
+
+    [Fact]
+    public void EmbeddedUmt5Tokenizer_Uses256kVocab()
+    {
+        // The base T5 spiece tops out at 32,128 IDs; umT5's multilingual vocab reaches 256k.
+        // Non-Latin text must produce IDs beyond the T5 range — if it doesn't, the wrong
+        // protobuf is embedded and Wan conditioning would be silently wrong.
+        using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 64);
+        int[] tokens = tok.Encode("一只猫在阳光明媚的花园里散步");
+        Assert.Contains(tokens, id => id >= 32128);
+    }
+
+    [Fact]
+    public void EmbeddedUmt5Tokenizer_MatchesFileBased()
+    {
+        if (!File.Exists(TestPaths.Tokenizers.Umt5XxlSpiece))
+        {
+            return;
+        }
+        using T5Tokenizer fromFile = new(TestPaths.Tokenizers.Umt5XxlSpiece, maxLength: 256);
+        using T5Tokenizer fromEmbed = T5Tokenizer.CreateUmt5(maxLength: 256);
+
+        foreach (string prompt in new[] { "a photo of a cat", "hello world", "", "magnificent dragon flying over a castle at sunset" })
+        {
+            int[] expected = fromFile.Encode(prompt);
+            int[] actual = fromEmbed.Encode(prompt);
+            Assert.Equal(expected, actual);
+        }
+    }
+
     // ── Qwen3 ───────────────────────────────────────────────────────────
 
     [Fact]

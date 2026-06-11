@@ -16,6 +16,7 @@ public static class LoraKeyTransformer
         ("mid_block", "\x01MBLOCK\x01"),
         ("text_model", "\x01TEXTMODEL\x01"),
         ("self_attn", "\x01SELFATTN\x01"),
+        ("cross_attn", "\x01CROSSATTN\x01"),
         ("final_layer_norm", "\x01FLN\x01"),
         ("layer_norm1", "\x01LN1\x01"),
         ("layer_norm2", "\x01LN2\x01"),
@@ -29,8 +30,14 @@ public static class LoraKeyTransformer
         ("to_add_out", "\x01TOADDOUT\x01"),
         ("norm_added_q", "\x01NORMADDQ\x01"),
         ("norm_added_k", "\x01NORMADDK\x01"),
+        ("norm_k_img", "\x01NORMKIMG\x01"),   // Wan I2V image-KV norm — must bind before norm_k / k_img
         ("norm_q", "\x01NORMQ\x01"),
         ("norm_k", "\x01NORMK\x01"),
+        ("k_img", "\x01KIMG\x01"),            // Wan I2V image K/V projections
+        ("v_img", "\x01VIMG\x01"),
+        ("text_embedding", "\x01TXTEMB\x01"), // Wan top-level condition embedders
+        ("time_projection", "\x01TIMEPROJ\x01"),
+        ("patch_embedding", "\x01PATCHEMB\x01"),
         ("q_proj", "\x01QPROJ\x01"),
         ("k_proj", "\x01KPROJ\x01"),
         ("v_proj", "\x01VPROJ\x01"),

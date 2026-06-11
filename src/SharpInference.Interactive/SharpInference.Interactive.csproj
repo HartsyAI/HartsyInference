@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>SharpInference.Interactive</PackageId>
+    <Description>Interactive world models for SharpInference — action-conditioned real-time streaming sessions, camera/Plücker conditioning, FOV memory retrieval, and Matrix-Game pipelines. (Phase 10)</Description>
+    <RootNamespace>SharpInference.Interactive</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SharpInference.Video\SharpInference.Video.csproj" />
+  </ItemGroup>
+
+</Project>

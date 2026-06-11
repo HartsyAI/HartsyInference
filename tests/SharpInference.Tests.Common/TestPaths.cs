@@ -120,6 +120,28 @@ public static class TestPaths
         public static string VaePath => Resolve("LANCE_VAE_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "Lance", "wan22_vae.safetensors"));
     }
 
+    /// <summary>Wan-Video (Wan2.2 TI2V-5B) paths. The DiT single-file is the Comfy-Org repackage (original Wan
+    /// naming — <c>WanVideoCheckpointConverter</c> renames to diffusers); the VAE is the same Wan2.2 VAE safetensors
+    /// Lance uses (loaded via <c>LanceCheckpointConverter.LoadVae</c>); text encoding is umT5-XXL.</summary>
+    public static class WanVideo
+    {
+        public static string Ti2V5B        => Resolve("WAN22_TI2V_5B_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "Wan", "wan2.2_ti2v_5B_fp16.safetensors"));
+        public static string VaePath       => Resolve("WAN22_VAE_PATH",       Lance.VaePath);
+        public static string Umt5Xxl       => Resolve("UMT5_XXL_PATH",        Path.Combine(ModelsDir, "text_encoders", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"));
+        public static string Umt5XxlSpiece => Tokenizers.Umt5XxlSpiece;
+        /// <summary>Optional Wan LoRA applied by the generation test when present (kohya/musubi, Comfy diffusion_model, or diffusers-PEFT format).</summary>
+        public static string LoraPath      => Resolve("WAN_LORA_PATH",        Path.Combine(ModelsDir, "Lora", "wan_lora.safetensors"));
+    }
+
+    /// <summary>LTX-Video paths. The single file bundles DiT + VAE (original naming — <c>LtxVideoCheckpointConverter</c>
+    /// renames + buckets); T5-XXL is extracted from the SD3.5 bundle by default, like Chroma.</summary>
+    public static class LtxVideo
+    {
+        public static string SingleFile  => Resolve("LTX_VIDEO_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "LtxVideo", "ltx-video-2b-v0.9.safetensors"));
+        public static string T5XxlSource => Resolve("LTX_T5XXL_SOURCE",      Sd35.Medium);
+        public static string T5XxlSpiece => Tokenizers.T5XxlSpiece;
+    }
+
     /// <summary>Qwen-Image paths. Default expects a single-file checkpoint at <c>Models/Stable-Diffusion/QwenImage/qwen_image_v1.safetensors</c>; the Qwen2.5-VL-7B text encoder and the 16-channel VAE are loaded separately.</summary>
     public static class QwenImage
     {
@@ -270,6 +292,8 @@ public static class TestPaths
         public static string ClipMerges    => Resolve("CLIP_MERGES_PATH",     Path.Combine(ModelsDir, "Tokenizers", "CLIP", "clip_merges.txt"));
         public static string T5Spiece      => Resolve("T5_SPIECE_PATH",       Path.Combine(ModelsDir, "Tokenizers", "T5", "t5_spiece.model"));
         public static string T5XxlSpiece   => Resolve("T5_XXL_SPIECE_PATH",   Path.Combine(ModelsDir, "Tokenizers", "T5", "t5_xxl_spiece.model"));
+        /// <summary>umT5 multilingual SentencePiece (256k vocab, from <c>google/umt5-xxl</c>). Used by Wan-Video.</summary>
+        public static string Umt5XxlSpiece => Resolve("UMT5_XXL_SPIECE_PATH", Path.Combine(ModelsDir, "Tokenizers", "T5", "umt5_xxl_spiece.model"));
         public static string LlamaTokenizer => Resolve("LLAMA_TOKENIZER_PATH", Path.Combine(ModelsDir, "Tokenizers", "Llama", "llama_tokenizer.model"));
         /// <summary>Llama 3 / 3.1 BPE vocab.json (extracted from <c>tokenizer.json</c>). Used by HiDream.</summary>
         public static string LlamaVocab    => Resolve("LLAMA_VOCAB_PATH",     Path.Combine(ModelsDir, "Tokenizers", "Llama", "vocab.json"));

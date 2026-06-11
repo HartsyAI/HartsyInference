@@ -30,4 +30,10 @@ public enum LatentArchitecture
     /// <summary>Anima (Cosmos-Predict2 2B) — 16-channel Qwen-Image VAE, 8× downscale. Same channel count as Flux/SD3
     /// so Flux factors are a reasonable preview approximation until Qwen-Image-specific factors are derived.</summary>
     Anima = 10,
+    /// <summary>Wan2.2 video — 48-channel 3-D latent <c>[1, 48, T, H, W]</c>, 16× spatial downscale.
+    /// Previews decode the middle latent frame.</summary>
+    Wan = 11,
+    /// <summary>LTX-Video — 128-channel 3-D latent, 32× spatial downscale. The pipeline hands the
+    /// preview a single-frame <c>[1, 128, H, W]</c> slice (its working latent is token-packed).</summary>
+    Ltx = 12,
 }
