@@ -3,12 +3,7 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.TextEncoders;
 
-/// <summary>Adapter for ERNIE-Image's text encoder. Baidu's published <c>baidu/ERNIE-Image</c> uses an in-house ERNIE-class encoder loaded via HuggingFace <c>AutoModel</c>; the exact architecture is determined by <c>text_encoder/config.json</c> on the HF repo. This interface lets the pipeline ignore those details and swap in either:
-/// <list type="bullet">
-///   <item>An <see cref="ErnieImageLlamaTextEncoder"/> fallback when the encoder turns out to be Llama-shaped (Qwen3 / Mistral-style).</item>
-///   <item>A custom Baidu encoder once the architecture is confirmed.</item>
-///   <item>The <see cref="ErnieImagePlaceholderTextEncoder"/> stub for compile-time wiring without a real encoder.</item>
-/// </list>
+/// <summary>Adapter for ERNIE-Image's text encoder. Baidu's <c>text_encoder/config.json</c> describes a Mistral3 ("ministral3") decoder, served by <see cref="ErnieImageLlamaTextEncoder"/> over <see cref="LlamaStyleEncoderConfig.Ministral3B"/>; the interface stays so an alternative encoder can be swapped in without touching the pipeline.
 ///
 /// Implementations are responsible for whatever pre/post-processing the ERNIE pipeline expects (e.g., diffusers takes <c>output.hidden_states[-2][0]</c> — second-to-last hidden state — as the conditioning vector).</summary>
 public interface IErnieTextEncoder : IDisposable

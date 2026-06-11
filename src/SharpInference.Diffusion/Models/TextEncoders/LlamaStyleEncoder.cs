@@ -314,6 +314,12 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         private Tensor? _vProj;
         private Tensor? _oProj;
 
+        // Q/K/V biases (Qwen2 / Qwen2.5-VL convention — o_proj has none). Loaded only when
+        // config.AttentionBias is set AND the checkpoint ships them.
+        private Tensor? _qBias;
+        private Tensor? _kBias;
+        private Tensor? _vBias;
+
         // Per-head q/k norms (Qwen3 only). F32 because broadcast-applied via RmsNorm CPU path.
         private Tensor? _qHeadNorm;
         private Tensor? _kHeadNorm;
@@ -350,6 +356,14 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             _vProj = weights[$"{prefix}.self_attn.v_proj.weight"];
             _oProj = weights[$"{prefix}.self_attn.o_proj.weight"];
 
+            if (_config.AttentionBias)
+            {
+                // TryGetValue keeps repackaged checkpoints that stripped biases loadable.
+                weights.TryGetValue($"{prefix}.self_attn.q_proj.bias", out _qBias);
+                weights.TryGetValue($"{prefix}.self_attn.k_proj.bias", out _kBias);
+                weights.TryGetValue($"{prefix}.self_attn.v_proj.bias", out _vBias);
+            }
+
             if (_config.QkHeadNorm)
             {
                 _qHeadNorm = CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
@@ -371,6 +385,9 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             if (_kProj is not null) yield return _kProj;
             if (_vProj is not null) yield return _vProj;
             if (_oProj is not null) yield return _oProj;
+            if (_qBias is not null) yield return _qBias;
+            if (_kBias is not null) yield return _kBias;
+            if (_vBias is not null) yield return _vBias;
             if (_qHeadNorm is not null) yield return _qHeadNorm;
             if (_kHeadNorm is not null) yield return _kHeadNorm;
             if (_gateProj is not null) yield return _gateProj;
@@ -401,9 +418,9 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             Tensor qFlat = new Tensor(qShape, DType.F32);
             Tensor kFlat = new Tensor(kvShape, DType.F32);
             Tensor vFlat = new Tensor(kvShape, DType.F32);
-            backend.Linear(qFlat, preAttn, _qProj!, null);
-            backend.Linear(kFlat, preAttn, _kProj!, null);
-            backend.Linear(vFlat, preAttn, _vProj!, null);
+            backend.Linear(qFlat, preAttn, _qProj!, _qBias);
+            backend.Linear(kFlat, preAttn, _kProj!, _kBias);
+            backend.Linear(vFlat, preAttn, _vProj!, _vBias);
             preAttn.Dispose();
 
             // 3. Reshape Q to [B, Hq, S, D]; K, V to [B, Hkv, S, D].

@@ -6,6 +6,7 @@ using SharpInference.Diffusion.Models.Denoisers;
 using SharpInference.Diffusion.Models.Music;
 using SharpInference.Diffusion.Models.TextEncoders;
 using SharpInference.Diffusion.Pipelines;
+using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
 using SharpInference.Tests.Common;
@@ -57,9 +58,9 @@ public unsafe class AceStepGenerationTests
         {
             using AceStepDit dit = new(AceStepConfig.V1);
             dit.LoadWeights(ditW);
-            long params9 = dit.EnumerateWeights().Sum(t => t.Shape.ElementCount);
-            _output.WriteLine($"DiT loaded: {params9 / 1e9:F2}B params");
-            Assert.True(params9 > 2.0e9);
+            long paramCount = dit.EnumerateWeights().Sum(t => t.Shape.ElementCount);
+            _output.WriteLine($"DiT loaded: {paramCount / 1e9:F2}B params");
+            Assert.True(paramCount > 2.0e9);
         }
     }
 
@@ -79,8 +80,10 @@ public unsafe class AceStepGenerationTests
         SafeTensorsLoader umt5Loader = new();
         umt5Loader.Load(Path.Combine(TestPaths.AceStep.Umt5BaseDir, "model.safetensors"));
         umt5.LoadWeights(umt5Loader.GetAllTensors());
-        int[] promptIds = t5Tokenizer.Encode("lo-fi hip hop, mellow piano, calm, 90 BPM", padToMax: false);
-        Tensor textEmbeds = umt5.Encode(backend, promptIds);
+        int[] promptIds = t5Tokenizer.Encode("lo-fi hip hop, mellow piano, calm, 90 BPM");
+        Tensor textBatch = umt5.Encode(backend, [promptIds]);
+        Tensor textEmbeds = CfgHelper.SliceBatchElement(textBatch, 0, promptIds.Length, 768);
+        textBatch.Dispose();
         umt5Loader.Dispose();
         _output.WriteLine($"UMT5: [{textEmbeds.Shape[0]}, {textEmbeds.Shape[1]}]");
 

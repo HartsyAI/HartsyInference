@@ -12,12 +12,13 @@ using SharpInference.Diffusion.Utilities;
 using SharpInference.ModelHandler.CheckpointConverters;
 using SharpInference.ModelHandler.SafeTensors;
 using SharpInference.Tests.Common;
+using SharpInference.Tokenizers;
 
 namespace SharpInference.Diffusion.Tests;
 
 /// <summary>End-to-end ERNIE-Image (Baidu, Apache-2.0) image generation against the diffusers folder layout. Skips cleanly when the checkpoint folder, text encoder, or VAE are missing — these aren't bundled. Default paths are documented in <see cref="TestPaths.ErnieImage"/>.
 ///
-/// Note: as of writing, ERNIE-Image's text encoder architecture is undetermined in this codebase (the Baidu HF repo's <c>text_encoder/config.json</c> needs to be inspected). The test wires up <see cref="ErnieImagePlaceholderTextEncoder"/> by default — the actual encoder must be plugged in by setting <c>ERNIE_IMAGE_USE_LLAMA_FALLBACK=1</c> AND providing a Llama-shaped weights folder, otherwise the placeholder throws and the test fails fast (catches the exception → skip).</summary>
+/// The text encoder is Mistral3 ("ministral3" per <c>baidu/ERNIE-Image/text_encoder/config.json</c>), run via <see cref="ErnieImageLlamaTextEncoder"/> over <see cref="LlamaStyleEncoderConfig.Ministral3B"/>. Real prompts are tokenized with <see cref="ErnieTokenizer"/> when a <c>tokenizer.json</c> is found (set <c>ERNIE_TOKENIZER_JSON</c>, or drop it at <c>{modelDir}/tokenizer.json</c> / <c>{modelDir}/tokenizer/tokenizer.json</c>); otherwise a hardcoded token fallback keeps the wiring testable without the file.</summary>
 public class ErnieImageGenerationTests
 {
     private static string OutputDir => TestPaths.OutputDir;
@@ -165,35 +166,40 @@ public class ErnieImageGenerationTests
                     // ── 6. Generate ──
                     _output.WriteLine($"\n[6/6] Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed=42...");
 
-                    // Tokens are placeholder — the real encoder is what matters. We feed a synthetic 8-token
-                    // sequence so the placeholder fails predictably (and the SKIP path triggers cleanly).
-                    int[] promptTokens = [1, 2, 3, 4, 5, 6, 7, 8];
-                    int[] negTokens = [1, 2, 3, 4, 5, 6, 7, 8];
-
-                    try
+                    // Real tokenization when a tokenizer.json is available; hardcoded fallback keeps the
+                    // wiring exercisable without it (token-id parity is validation-gated on the real file).
+                    int[] promptTokens;
+                    int[] negTokens;
+                    string? tokenizerJson = FindTokenizerJson(modelDir);
+                    if (tokenizerJson is not null)
                     {
-                        Stopwatch genSw = Stopwatch.StartNew();
-                        (byte[] rgb, int outW, int outH, int seed) = pipeline.GenerateFromTokens(
-                            promptTokens, negTokens, promptTokens.Length, negTokens.Length, request,
-                            progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
-                        genSw.Stop();
-                        _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1}s (seed={seed})");
-
-                        Assert.Equal(width, outW);
-                        Assert.Equal(height, outH);
-                        Assert.Equal(width * height * 3, rgb.Length);
-
-                        Directory.CreateDirectory(OutputDir);
-                        string outputPath = Path.Combine(OutputDir, $"{outputName}_{DateTime.Now:yyyyMMdd_HHmmss}.bmp");
-                        ImagePostProcessor.SaveBmp(outputPath, rgb, outW, outH);
-                        _output.WriteLine($"  Saved: {outputPath}");
+                        _output.WriteLine($"  Tokenizing with {tokenizerJson}");
+                        using ErnieTokenizer ernieTokenizer = new(tokenizerJson);
+                        promptTokens = ernieTokenizer.Encode(request.Prompt);
+                        negTokens = ernieTokenizer.Encode(request.NegativePrompt ?? "");
                     }
-                    catch (NotSupportedException ex)
+                    else
                     {
-                        _output.WriteLine($"SKIPPED (placeholder text encoder): {ex.Message}");
-                        _output.WriteLine("  Plug in a real IErnieTextEncoder once the Baidu encoder architecture is confirmed.");
-                        return;
+                        _output.WriteLine("  tokenizer.json not found — using hardcoded fallback tokens (set ERNIE_TOKENIZER_JSON for real prompts)");
+                        promptTokens = [1, 2, 3, 4, 5, 6, 7, 8];
+                        negTokens = [1, 2, 3, 4, 5, 6, 7, 8];
                     }
+
+                    Stopwatch genSw = Stopwatch.StartNew();
+                    (byte[] rgb, int outW, int outH, int seed) = pipeline.GenerateFromTokens(
+                        promptTokens, negTokens, promptTokens.Length, negTokens.Length, request,
+                        progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
+                    genSw.Stop();
+                    _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1}s (seed={seed})");
+
+                    Assert.Equal(width, outW);
+                    Assert.Equal(height, outH);
+                    Assert.Equal(width * height * 3, rgb.Length);
+
+                    Directory.CreateDirectory(OutputDir);
+                    string outputPath = Path.Combine(OutputDir, $"{outputName}_{DateTime.Now:yyyyMMdd_HHmmss}.bmp");
+                    ImagePostProcessor.SaveBmp(outputPath, rgb, outW, outH);
+                    _output.WriteLine($"  Saved: {outputPath}");
 
                     totalSw.Stop();
                     _output.WriteLine($"\nTotal: {totalSw.Elapsed.TotalSeconds:F1}s");
@@ -212,5 +218,18 @@ public class ErnieImageGenerationTests
         {
             foreach (SafeTensorsLoader l in transformerLoaders) l.Dispose();
         }
+    }
+
+    /// <summary>Resolves the ERNIE tokenizer.json: <c>ERNIE_TOKENIZER_JSON</c> env var first, then <c>{modelDir}/tokenizer.json</c> and <c>{modelDir}/tokenizer/tokenizer.json</c> (the diffusers folder layout).</summary>
+    private static string? FindTokenizerJson(string modelDir)
+    {
+        string? env = Environment.GetEnvironmentVariable("ERNIE_TOKENIZER_JSON");
+        if (!string.IsNullOrEmpty(env) && File.Exists(env))
+            return env;
+        string direct = Path.Combine(modelDir, "tokenizer.json");
+        if (File.Exists(direct))
+            return direct;
+        string nested = Path.Combine(modelDir, "tokenizer", "tokenizer.json");
+        return File.Exists(nested) ? nested : null;
     }
 }

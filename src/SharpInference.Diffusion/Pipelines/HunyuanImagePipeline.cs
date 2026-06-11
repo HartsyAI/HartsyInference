@@ -12,35 +12,90 @@ using SharpInference.Diffusion.Utilities;
 namespace SharpInference.Diffusion.Pipelines;
 
 /// <summary>Hunyuan Image 2.1 text-to-image pipeline. The transformer takes per-token text embeddings
-/// at 4096-dim plus an optional 1472-dim secondary stream (ByT5 in the upstream model). Conditioning is
-/// driven by the timestep + optional distilled-guidance embedding — there is no pooled-conditioning
-/// path, so the CLIP encoder constructor parameter is accepted for API compatibility but unused. The
-/// pipeline patchifies the latent before the transformer call (<c>patch_size</c> from config) and
-/// unpatchifies after, then VAE-decodes through the 32-channel Hunyuan VAE.</summary>
+/// at 3584-dim (Qwen2.5-VL-7B hidden) plus an optional 1472-dim secondary stream (ByT5 in the upstream
+/// model). Conditioning is driven by the timestep + optional distilled-guidance embedding — there is no
+/// pooled-conditioning path, so the CLIP encoder constructor parameter is accepted for API compatibility
+/// but unused. The pipeline patchifies the latent before the transformer call (<c>patch_size</c> from
+/// config) and unpatchifies after, then VAE-decodes through the 32-channel Hunyuan VAE.
+///
+/// <para>Two text-encode paths: the primary <see cref="HunyuanImageQwenTextEncoder"/> path matching the
+/// upstream model (template → pad 1034 → <c>hidden_states[-3]</c> → drop the 34-token prefix), and a
+/// legacy CLIP-L + T5-XXL constructor kept for repackaged checkpoints that bundle those encoders.
+/// The ByT5 glyph branch (1472-dim secondary stream for quoted text) is not implemented yet — the
+/// transformer receives <c>encoderHidden2 = null</c>, equivalent to diffusers' zero-tensor fallback for
+/// prompts without quoted text. TODO (validation-gated): add a ByT5-small encoder for glyph prompts.</para></summary>
 public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 {
     private readonly ClipTextEncoder? _clipEncoder;
-    private readonly T5TextEncoder _t5Encoder;
+    private readonly T5TextEncoder? _t5Encoder;
+    private readonly HunyuanImageQwenTextEncoder? _qwenEncoder;
     private readonly HunyuanImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly HunyuanImageConfig _config;
 
-    /// <summary>Creates a new Hunyuan Image pipeline. <paramref name="clipEncoder"/> is accepted for
-    /// API compatibility but not consumed — Hunyuan's pooled-conditioning path is replaced by the
-    /// timestep + distilled-guidance embedding inside the transformer.</summary>
-    public HunyuanImagePipeline(IBackend backend, ClipTextEncoder? clipEncoder, T5TextEncoder t5Encoder,
+    /// <summary>Creates a Hunyuan Image pipeline with the primary Qwen2.5-VL-7B text encoder (matches <c>tencent/HunyuanImage-2.1</c>).</summary>
+    public HunyuanImagePipeline(IBackend backend, HunyuanImageQwenTextEncoder qwenEncoder,
         HunyuanImageTransformer transformer, VaeDecoder vaeDecoder, HunyuanImageConfig config)
         : base(backend)
     {
-        _clipEncoder = clipEncoder;
-        _t5Encoder = t5Encoder;
+        _qwenEncoder = qwenEncoder ?? throw new ArgumentNullException(nameof(qwenEncoder));
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _config = config;
     }
 
-    /// <summary>Generates an image from pre-tokenized input. CLIP token args are unused (kept for
-    /// signature stability); the T5 encoder produces per-token context fed to the transformer.</summary>
+    /// <summary>Legacy/fallback constructor using CLIP-L + T5-XXL (repackaged checkpoints).
+    /// <paramref name="clipEncoder"/> is accepted for API compatibility but not consumed — Hunyuan's
+    /// pooled-conditioning path is replaced by the timestep + distilled-guidance embedding inside the
+    /// transformer.</summary>
+    public HunyuanImagePipeline(IBackend backend, ClipTextEncoder? clipEncoder, T5TextEncoder t5Encoder,
+        HunyuanImageTransformer transformer, VaeDecoder vaeDecoder, HunyuanImageConfig config)
+        : base(backend)
+    {
+        _clipEncoder = clipEncoder;
+        _t5Encoder = t5Encoder ?? throw new ArgumentNullException(nameof(t5Encoder));
+        _transformer = transformer;
+        _vaeDecoder = vaeDecoder;
+        _config = config;
+    }
+
+    /// <summary>Generates an image via the primary Qwen2.5-VL path. Token ids come from
+    /// <c>Qwen2Tokenizer.EncodeChat(prompt, systemPrompt: HunyuanImageQwenTextEncoder.SystemPrompt,
+    /// addGenerationPrompt: false)</c> padded to <see cref="HunyuanImageQwenTextEncoder.PaddedLength"/>
+    /// with matching attention masks. Negative inputs may be null when CFG is off (cfg ≤ 1).</summary>
+    public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
+        int[] promptTokenIdsQwen,
+        int[] promptAttentionMaskQwen,
+        int[]? negativePromptTokenIdsQwen,
+        int[]? negativeAttentionMaskQwen,
+        TextToImageRequest request,
+        Action<GenerationProgress>? onProgress = null)
+    {
+        ThrowIfDisposed();
+        if (_qwenEncoder is null)
+            throw new InvalidOperationException(
+                "This pipeline was constructed with the legacy CLIP+T5 encoders — use the CLIP/T5 GenerateFromTokens overload.");
+
+        bool useCfg = request.CfgScale > 1.0f;
+        if (useCfg && (negativePromptTokenIdsQwen is null || negativeAttentionMaskQwen is null))
+            throw new ArgumentException("Negative prompt tokens + mask are required when CfgScale > 1.", nameof(negativePromptTokenIdsQwen));
+
+        int seed = request.Seed ?? SeedGenerator.RandomSeed();
+        Logs.Info("Encoding text with Qwen2.5-VL-7B (primary 3584-dim per-token)...");
+        Backend.PreloadWeights(_qwenEncoder.EnumerateWeights());
+        Tensor cond = _qwenEncoder.Encode(Backend, promptTokenIdsQwen, promptAttentionMaskQwen);
+        Tensor? uncond = useCfg
+            ? _qwenEncoder.Encode(Backend, negativePromptTokenIdsQwen!, negativeAttentionMaskQwen!)
+            : null;
+        Backend.Sync();
+        Backend.FreeWeights(_qwenEncoder.EnumerateWeights());
+
+        return Denoise(cond, uncond, request, seed, onProgress);
+    }
+
+    /// <summary>Generates an image from pre-tokenized input via the legacy CLIP+T5 path. CLIP token args
+    /// are unused (kept for signature stability); the T5 encoder produces per-token context fed to the
+    /// transformer.</summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsClip,
         int[] negativePromptTokenIdsClip,
@@ -54,8 +109,33 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        if (_t5Encoder is null)
+            throw new InvalidOperationException(
+                "This pipeline was constructed with the Qwen2.5-VL encoder — use the Qwen GenerateFromTokens overload.");
 
+        bool useCfg = request.CfgScale > 1.0f;
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
+
+        Logs.Info("Encoding text with T5-XXL (legacy per-token context path)...");
+        int[][] condTokenBatch = [promptTokenIdsT5];
+        int[][]? condMaskBatch = promptAttentionMaskT5 is null ? null : [promptAttentionMaskT5];
+        Tensor cond = _t5Encoder.Encode(Backend, condTokenBatch, condMaskBatch);
+
+        Tensor? uncond = null;
+        if (useCfg)
+        {
+            int[][] uncondTokenBatch = [negativePromptTokenIdsT5];
+            int[][]? uncondMaskBatch = negativeAttentionMaskT5 is null ? null : [negativeAttentionMaskT5];
+            uncond = _t5Encoder.Encode(Backend, uncondTokenBatch, uncondMaskBatch);
+        }
+
+        return Denoise(cond, uncond, request, seed, onProgress);
+    }
+
+    /// <summary>Shared denoise + VAE-decode body. Takes ownership of <paramref name="condText"/> / <paramref name="uncondText"/> and disposes them.</summary>
+    private (byte[] rgbData, int width, int height, int seed) Denoise(Tensor condText, Tensor? uncondText,
+        TextToImageRequest request, int seed, Action<GenerationProgress>? onProgress)
+    {
         int width = request.Width;
         int height = request.Height;
         const int VaeDownscale = 32;
@@ -74,20 +154,6 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         Logs.Info($"Hunyuan Image 2.1: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        Logs.Info("Encoding text with T5-XXL (primary 4096-dim per-token)...");
-        int[][] condTokenBatch = [promptTokenIdsT5];
-        int[][]? condMaskBatch = promptAttentionMaskT5 is null ? null : [promptAttentionMaskT5];
-        Tensor condT5 = _t5Encoder.Encode(Backend, condTokenBatch, condMaskBatch);
-
-        Tensor? uncondT5 = null;
-        if (useCfg)
-        {
-            int[][] uncondTokenBatch = [negativePromptTokenIdsT5];
-            int[][]? uncondMaskBatch = negativeAttentionMaskT5 is null ? null : [negativeAttentionMaskT5];
-            uncondT5 = _t5Encoder.Encode(Backend, uncondTokenBatch, uncondMaskBatch);
-        }
-
-        Tensor? guidancePrep = null;
         float distilledGuidance = _config.GuidanceEmbed ? cfgScale : 1.0f;
 
         TensorShape latentShape = new(1, inChannels, latentH, latentW);

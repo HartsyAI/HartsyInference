@@ -1,4 +1,5 @@
 using SharpInference.Core.Backends;
+using SharpInference.Core.Models;
 using SharpInference.Core.Tensors;
 
 namespace SharpInference.Audio.Models.Codecs.Oobleck;
@@ -13,7 +14,7 @@ namespace SharpInference.Audio.Models.Codecs.Oobleck;
 /// exponentiated at load). Decode-only checkpoints (no <c>encoder.*</c> keys) are accepted —
 /// <see cref="EncodeMode"/> then throws. <b>Numerics are validation-pending vs the Python
 /// reference</b> (no weights in this environment); structure and shapes are CPU-tested.</para></summary>
-public sealed class OobleckVae
+public sealed class OobleckVae : IAudioLatentDecoder
 {
     private readonly OobleckConfig _config;
     private readonly OobleckDecoder _decoder;

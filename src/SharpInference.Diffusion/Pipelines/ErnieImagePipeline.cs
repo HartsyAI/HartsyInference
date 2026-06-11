@@ -15,7 +15,7 @@ namespace SharpInference.Diffusion.Pipelines;
 ///
 /// Pipeline-level deltas vs other DiT pipelines:
 /// <list type="bullet">
-///   <item>**Text encoder swappable.** ERNIE's encoder architecture is determined at runtime from the published HF repo's <c>text_encoder/config.json</c>; this pipeline accepts any <see cref="IErnieTextEncoder"/>. See <see cref="ErnieImagePlaceholderTextEncoder"/> (compile-time stub) and <see cref="ErnieImageLlamaTextEncoder"/> (Llama-shaped fallback).</item>
+///   <item>**Text encoder swappable.** This pipeline accepts any <see cref="IErnieTextEncoder"/>; the published <c>baidu/ERNIE-Image</c> encoder is Mistral3-shaped and served by <see cref="ErnieImageLlamaTextEncoder"/>.</item>
 ///   <item>**Per-batch text length is tracked separately** and forwarded into the transformer so 3D RoPE can offset image positions by the actual non-padded text length.</item>
 ///   <item>**Patchify on top of the latent.** The Flux2-style VAE produces a 32-channel latent; the pipeline applies a 2×2 channel-fold (32 → 128) before feeding the transformer (mirrors <c>pipeline_ernie_image.py:_patchify_latents</c>) and undoes it before VAE decode.</item>
 ///   <item>**BatchNorm-style latent normalization.** The Flux2 VAE ships <c>bn.running_mean</c>/<c>bn.running_var</c>; the pipeline un-normalizes via these stats just before VAE decode.</item>
@@ -60,7 +60,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         _schedulerShift = schedulerShift;
     }
 
-    /// <summary>Generates an image from pre-tokenized prompt + negative prompt token ids. The token ids must already be padded (per-prompt) up to a single common <c>Tmax</c>; pass the corresponding real lengths in <paramref name="promptRealLen"/> and <paramref name="negativeRealLen"/>. Use the placeholder encoder if you only need to test wiring without real text conditioning.</summary>
+    /// <summary>Generates an image from pre-tokenized prompt + negative prompt token ids (use <c>ErnieTokenizer</c> from SharpInference.Tokenizers: BOS-prefixed raw prompt, no padding). The token ids must already be padded (per-prompt) up to a single common <c>Tmax</c>; pass the corresponding real lengths in <paramref name="promptRealLen"/> and <paramref name="negativeRealLen"/>.</summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         int[] negativePromptTokenIds,

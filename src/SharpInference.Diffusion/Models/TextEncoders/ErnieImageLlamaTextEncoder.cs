@@ -3,44 +3,28 @@ using SharpInference.Core.Tensors;
 
 namespace SharpInference.Diffusion.Models.TextEncoders;
 
-/// <summary>Llama-shaped <see cref="IErnieTextEncoder"/> fallback. Wraps an existing <see cref="LlamaStyleEncoder"/> and exposes the second-to-last hidden state — matching the diffusers reference's <c>output.hidden_states[-2]</c> convention. Use this if (and only if) Baidu's <c>text_encoder/config.json</c> turns out to describe a Llama-class architecture (Qwen3-shaped or Mistral-shaped); otherwise build a dedicated encoder that implements <see cref="IErnieTextEncoder"/>.
+/// <summary>Llama-shaped <see cref="IErnieTextEncoder"/> for ERNIE-Image. Baidu's <c>text_encoder/config.json</c> describes a Mistral3 ("ministral3") decoder — see <see cref="LlamaStyleEncoderConfig.Ministral3B"/> — so this wraps a <see cref="LlamaStyleEncoder"/> and exposes diffusers' <c>output.hidden_states[-2]</c> tap: with N layers, HF <c>hidden_states</c> has N+1 entries, so <c>[-2]</c> is entry N−1 = the output of block N−2 with the final block and final RMSNorm both skipped. <see cref="LlamaStyleEncoder.EncodeMultiLayer"/> uses the same HF indexing (k = post-layer-(k−1), no final norm on intermediates), so passing layer index N−1 reproduces the reference exactly.
 ///
 /// **Caveat:** the diffusers <c>encode_prompt</c> implementation (<c>pipeline_ernie_image.py:124-163</c>) tokenizes one prompt at a time and squeezes out the batch dimension. We follow the same pattern: each call to <see cref="Encode"/> must receive a <c>tokenIds</c> batch where every row has the same length — pre-pad shorter prompts to the longest in the batch and provide the per-row real lengths via <c>realLens</c>. The encoder runs once over the padded batch and emits <c>[B, Tmax, hidden]</c>.</summary>
 public sealed class ErnieImageLlamaTextEncoder : IErnieTextEncoder
 {
     private readonly LlamaStyleEncoder _encoder;
     private readonly int _hiddenStateLayer;
+    private int _capturedHiddenSize;
 
     /// <summary>Constructs the wrapper.</summary>
     /// <param name="encoder">Pre-loaded LlamaStyleEncoder. Lifetime is owned by the caller — disposing this wrapper does NOT dispose the encoder (matches dotLLM's "shared resources" pattern).</param>
-    /// <param name="hiddenStateLayer">Which HuggingFace-indexed hidden state to emit. Default <c>NumLayers - 1</c> = second-to-last (matches diffusers' <c>hidden_states[-2]</c>).</param>
+    /// <param name="hiddenStateLayer">Which HuggingFace-indexed hidden state to emit. Default <c>NumLayers - 1</c> = diffusers' <c>hidden_states[-2]</c> (second-to-last entry, before the final block and final norm).</param>
     public ErnieImageLlamaTextEncoder(LlamaStyleEncoder encoder, int? hiddenStateLayer = null)
     {
         _encoder = encoder;
         _hiddenStateLayer = hiddenStateLayer ?? (encoder.NumLayers - 1);
     }
 
-    /// <summary>Hidden dim of the wrapped encoder.</summary>
-    public int OutputDim
-    {
-        get
-        {
-            // We ask for one layer slice; its dim is the encoder's hidden size.
-            // LlamaStyleEncoder doesn't expose the hidden size directly, but EncodeMultiLayer
-            // returns [B, S, K*hidden] for K=1, so the third dim of a single-token shape probe
-            // would tell us — at construction we don't have a backend, so we surface it via the
-            // encoder.LastConfigured (not present in LlamaStyleEncoder API). Use a reflection-free
-            // alternative: the caller knows the dim from LlamaStyleEncoderConfig.
-            // We delegate to the dump-friendly public NumLayers; for OutputDim we expect callers
-            // to also know the hidden size from their LlamaStyleEncoderConfig.
-            // To make this self-contained, we capture the hidden size via the first Encode call.
-            return _capturedHiddenSize;
-        }
-    }
+    /// <summary>Hidden dim of the wrapped encoder. <see cref="LlamaStyleEncoder"/> doesn't expose its config, so this is 0 until either <see cref="WithHiddenSize"/> is called at wiring time or the first <see cref="Encode"/> captures it from the output shape.</summary>
+    public int OutputDim => _capturedHiddenSize;
 
-    private int _capturedHiddenSize;
-
-    /// <summary>Sets the captured hidden size manually (call once at construction time when wiring up).</summary>
+    /// <summary>Sets the reported hidden size up front (call once at construction time when wiring up, using the value from your <see cref="LlamaStyleEncoderConfig"/>).</summary>
     public ErnieImageLlamaTextEncoder WithHiddenSize(int hiddenSize)
     {
         _capturedHiddenSize = hiddenSize;

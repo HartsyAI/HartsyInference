@@ -27,8 +27,8 @@ public sealed record HunyuanImageConfig
     /// <summary>Number of refiner layers in the MLLM context embedder (<c>HunyuanImageTokenRefiner</c>). Default 2.</summary>
     public int NumRefinerLayers { get; init; } = 2;
 
-    /// <summary>Primary text context dimension (Qwen2.5-VL MLLM hidden size).</summary>
-    public int TextEmbedDim { get; init; } = 4096;
+    /// <summary>Primary text context dimension — 3584 = Qwen2.5-VL-7B hidden size (diffusers <c>HunyuanImageTransformer2DModel.text_embed_dim</c> default).</summary>
+    public int TextEmbedDim { get; init; } = 3584;
 
     /// <summary>Optional secondary text context dimension (ByT5 glyph encoder). Null when only the primary encoder is used.</summary>
     public int? TextEmbedDim2 { get; init; }
@@ -62,7 +62,7 @@ public sealed record HunyuanImageConfig
         NumRefinerLayers = 2,
         PatchSize = 1,
         InChannels = 64,
-        TextEmbedDim = 4096,
+        TextEmbedDim = 3584,
         TextEmbedDim2 = 1472,
         GuidanceEmbed = true,
         RopeTheta = 256.0f,
@@ -80,7 +80,7 @@ public sealed record HunyuanImageConfig
         NumRefinerLayers = 2,
         PatchSize = 1,
         InChannels = 64,
-        TextEmbedDim = 4096,
+        TextEmbedDim = 3584,
         TextEmbedDim2 = 1472,
         GuidanceEmbed = false,
         RopeTheta = 256.0f,

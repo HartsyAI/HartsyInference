@@ -74,9 +74,27 @@ public sealed unsafe class ChromaTransformer : IDisposable
 
     /// <summary>Loads all transformer weights from named tensors using diffusers naming (post-conversion).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
+        => LoadWeightsInternal(weights, requireImageProjections: true);
+
+    /// <summary>Weight-loading core shared with <see cref="ChromaRadianceTransformer"/>. Radiance checkpoints have
+    /// no <c>x_embedder.*</c> / <c>proj_out.*</c> (replaced by conv patchify + NeRF head), so those lookups become
+    /// optional when <paramref name="requireImageProjections"/> is false.</summary>
+    internal void LoadWeightsInternal(IReadOnlyDictionary<string, Tensor> weights, bool requireImageProjections)
     {
-        _xEmbedWeight = weights["x_embedder.weight"];
-        _xEmbedBias = weights["x_embedder.bias"];
+        if (requireImageProjections)
+        {
+            _xEmbedWeight = weights["x_embedder.weight"];
+            _xEmbedBias = weights["x_embedder.bias"];
+            _projOutWeight = weights["proj_out.weight"];
+            _projOutBias = weights["proj_out.bias"];
+        }
+        else
+        {
+            weights.TryGetValue("x_embedder.weight", out _xEmbedWeight);
+            weights.TryGetValue("x_embedder.bias", out _xEmbedBias);
+            weights.TryGetValue("proj_out.weight", out _projOutWeight);
+            weights.TryGetValue("proj_out.bias", out _projOutBias);
+        }
 
         _contextEmbedWeight = weights["context_embedder.weight"];
         _contextEmbedBias = weights["context_embedder.bias"];
@@ -88,9 +106,6 @@ public sealed unsafe class ChromaTransformer : IDisposable
 
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
             _singleBlocks[i].LoadWeights(weights, $"single_transformer_blocks.{i}");
-
-        _projOutWeight = weights["proj_out.weight"];
-        _projOutBias = weights["proj_out.bias"];
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -131,15 +146,57 @@ public sealed unsafe class ChromaTransformer : IDisposable
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int hidden = _config.HiddenSize;
-        int totalSeqLen = txtSeqLen + imgSeqLen;
-        int numDoubles = _config.Depth;
-        int numSingles = _config.DepthSingleBlocks;
 
         // ── 1. img_in: [B, imgSeqLen, 64] → [B, imgSeqLen, hidden] ──
         TensorShape imgTokShape = new TensorShape(batch, imgSeqLen, hidden);
         Tensor img = new Tensor(imgTokShape, DType.F32);
         backend.Linear(img, packedLatent, _xEmbedWeight!, _xEmbedBias);
         ChromaDebugDump.Dump("img_in", img);
+
+        (Tensor imgOut, Tensor modTable) = ForwardCore(backend, img, encoderHidden, timestep,
+            txtSeqLen, hPacked, wPacked, attentionMask);
+
+        // ── 11. Final norm (ChromaAdaLayerNormContinuousPruned) ──
+        // temb_final = modTable[:, -2:, :]  → row 0 = scale, row 1 = shift
+        Tensor finalScaleShift = SliceModSlab(modTable, batch, _config.ModIndexLength - 2, rowCount: 2, hidden);
+        modTable.Dispose();
+
+        Tensor normedOut = ApplyContinuousNorm(imgOut, finalScaleShift, batch, imgSeqLen, hidden);
+        finalScaleShift.Dispose();
+        imgOut.Dispose();
+        ChromaDebugDump.Dump("img_post_norm_out", normedOut);
+
+        // ── 12. proj_out: [B, imgSeqLen, hidden] → [B, imgSeqLen, patch_size² * out_channels=64] ──
+        int outDim = (int)_projOutWeight!.Shape[0];
+        TensorShape projShape = new TensorShape(batch, imgSeqLen, outDim);
+        Tensor velocity = new Tensor(projShape, DType.F32);
+        backend.Linear(velocity, normedOut, _projOutWeight!, _projOutBias);
+        normedOut.Dispose();
+
+        ChromaDebugDump.DumpOutput(velocity);
+        return velocity;
+    }
+
+    /// <summary>Backbone forward shared with <see cref="ChromaRadianceTransformer"/>: approximator + double/single
+    /// blocks, from already-embedded image tokens to pre-final-norm image tokens. Consumes (disposes)
+    /// <paramref name="img"/>; the caller owns both returned tensors. <c>modTable</c> is returned so classic Chroma
+    /// can slice the final norm rows — Radiance disposes it unused (its NeRF head replaces <c>final_layer</c>).</summary>
+    internal (Tensor imgTokens, Tensor modTable) ForwardCore(
+        IBackend backend,
+        Tensor img,
+        Tensor encoderHidden,
+        float timestep,
+        int txtSeqLen,
+        int hPacked,
+        int wPacked,
+        Tensor? attentionMask)
+    {
+        int batch = (int)img.Shape[0];
+        int imgSeqLen = (int)img.Shape[1];
+        int hidden = _config.HiddenSize;
+        int totalSeqLen = txtSeqLen + imgSeqLen;
+        int numDoubles = _config.Depth;
+        int numSingles = _config.DepthSingleBlocks;
 
         // ── 2. Timestep × 1000 (diffusers does this on the input side; the embedding sees [0, 1000]) ──
         float scaledTimestep = timestep * 1000.0f;
@@ -226,25 +283,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
         combined.Dispose();
         ChromaDebugDump.Dump("img_pre_norm_out", imgOut);
 
-        // ── 11. Final norm (ChromaAdaLayerNormContinuousPruned) ──
-        // temb_final = modTable[:, -2:, :]  → row 0 = scale, row 1 = shift
-        Tensor finalScaleShift = SliceModSlab(modTable, batch, _config.ModIndexLength - 2, rowCount: 2, hidden);
-        modTable.Dispose();
-
-        Tensor normedOut = ApplyContinuousNorm(imgOut, finalScaleShift, batch, imgSeqLen, hidden);
-        finalScaleShift.Dispose();
-        imgOut.Dispose();
-        ChromaDebugDump.Dump("img_post_norm_out", normedOut);
-
-        // ── 12. proj_out: [B, imgSeqLen, hidden] → [B, imgSeqLen, patch_size² * out_channels=64] ──
-        int outDim = (int)_projOutWeight!.Shape[0];
-        TensorShape projShape = new TensorShape(batch, imgSeqLen, outDim);
-        Tensor velocity = new Tensor(projShape, DType.F32);
-        backend.Linear(velocity, normedOut, _projOutWeight!, _projOutBias);
-        normedOut.Dispose();
-
-        ChromaDebugDump.DumpOutput(velocity);
-        return velocity;
+        return (imgOut, modTable);
     }
 
     /// <summary>Convenience pass-through that hooks the static debug dumper for the final latent.</summary>
