@@ -303,16 +303,28 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 ## 7. Music Generation (`SharpInference.Music`)
 
 ### ACE-Step (flagship)
-- [ ] `AceStepUmt5TextEncoder.cs` — reuse AuraFlow's UMT5 from SharpInference.Diffusion
-- [ ] `AceStepDit.cs` v1 — 24L × 20 heads × head_dim 128 × inner 2560
-- [ ] `AceStepFsqLm.cs` v1.5 — Qwen3-based decoder predicting FSQ audio tokens
-- [ ] `MusicDcaeVae.cs` — Sana AutoencoderDC over 2D stereo mel
-- [ ] `AdaMosHiFiGanV1.cs` vocoder
-- [ ] Voice BPE tokenizer (XTTS-style)
-- [ ] Lyric structure tags + `tokenize_lyrics` function + 19-lang ID map
-- [ ] Flow-match scheduler with `shift=3.0` + omega/APG/CFG-Zero*
-- [ ] Three schedulers: Euler / Heun / PingPong
-- [ ] Flow-edit / repaint algorithm
+
+> **v1 BUILT END-TO-END (2026-06-10)** — lives in **SharpInference.Diffusion** per the §"diffusion music models" routing
+> note (`Models/Music/` + `Models/Denoisers/AceStep*` + `Pipelines/AceStepPipeline.cs`), NOT a separate Music package.
+> Structurally CPU-verified (6 model tests incl. a tiny e2e stereo generation); **numerics validation-pending** against
+> the Python reference. Source-confirmed correction to the research doc: the self-attention is Sana **LiteLA ReLU-linear
+> attention** (`CustomLiteLAProcessor2_0`), not softmax SDPA. Validation-gated items: several checkpoint key spellings
+> carry fallback candidates pending a real key dump (`proj_in.*`, `t_block`, `genre_embedder`, GLUMBConv conv names),
+> cross-attn K RoPE positions, Conformer macaron/conv-norm variants (presence-driven at load).
+
+- [x] UMT5-base — reused the shared `T5TextEncoder` (new `T5TextEncoderConfig.Umt5Base` preset, per-layer position bias); no ACE-specific encoder class needed
+- [x] [`AceStepDit.cs`](../../src/SharpInference.Diffusion/Models/Denoisers/AceStepDit.cs) v1 — 24L × 20 heads × 128 (inner 2560), LiteLA self-attn + RoPE θ=1e6, softmax cross-attn over [speaker ‖ text ‖ lyrics], GLUMBConv FFN (ratio 2.5), patch [16,1] height collapse; owns speaker/genre/lyric projections + the lyric Conformer
+- [ ] `AceStepFsqLm.cs` v1.5 — Qwen3-based decoder predicting FSQ audio tokens (separate later effort; FSQ codec already exists in Audio)
+- [x] [`MusicDcaeDecoder.cs`](../../src/SharpInference.Diffusion/Models/Music/MusicDcaeDecoder.cs) — Sana AutoencoderDC decoder over 2-D stereo mel ([`ResBlock2d`](../../src/SharpInference.Diffusion/Models/Music/ResBlock2d.cs) + [`EfficientVitBlock`](../../src/SharpInference.Diffusion/Models/Music/EfficientVitBlock.cs) multiscale ReLU-linear attention + GLUMBConv, repeat-interleave/pixel-shuffle shortcuts). **Encoder not built yet** — needed for edit/repaint/reference-audio modes only
+- [x] [`AdaMosHiFiGanV1.cs`](../../src/SharpInference.Diffusion/Models/Music/AdaMosHiFiGanV1.cs) — ConvNeXt backbone (depths [3,3,9,3]) + HiFi-GAN head (7 ups, ×512 total, MRF kernels [3,7,11,13]); weight-norm fused at conversion
+- [x] [`AceStepLyricEncoder.cs`](../../src/SharpInference.Diffusion/Models/Music/AceStepLyricEncoder.cs) — 8-layer wenet Conformer (rel-pos MHSA with pos_bias_u/v, GLU conv module with fused BatchNorm, presence-driven macaron) — first Conformer in the codebase
+- [x] Voice BPE tokenizer — [`AceStepLyricTokenizer`](../../src/SharpInference.Tokenizers/AceStepLyricTokenizer.cs) (XTTS-style: `[lang]` prefix, `[SPACE]`, vocab+merges from the one-time tokenizer.json export documented in the converter)
+- [x] Lyric structure tags + `tokenize_lyrics` (261/2 line protocol) + per-line script-heuristic language detection (statistical 17-lang detector + CJK G2P = caller responsibility, documented)
+- [x] Flow-match shift=3.0 + APG/CFG-Zero★/CFG — [`AceStepGuidance`](../../src/SharpInference.Diffusion/Utilities/AceStepGuidance.cs) (momentum buffer, norm threshold, parallel/orthogonal decomposition; orthogonality + formula tests)
+- [x] Three samplers: Euler / Heun (in-pipeline 2nd-order) / [`FlowMatchPingPongScheduler`](../../src/SharpInference.Diffusion/Schedulers/FlowMatchPingPongScheduler.cs)
+- [x] [`AceStepPipeline.cs`](../../src/SharpInference.Diffusion/Pipelines/AceStepPipeline.cs) — denoise → pipeline latent scale (0.1786/−1.9091, NOT the diffusers 0.41407) → DCAE decode → de-standardize to log-mel [−11,3] → per-channel vocoder → 44.1 kHz stereo; [`AceStepCheckpointConverter`](../../src/SharpInference.ModelHandler/CheckpointConverters/AceStepCheckpointConverter.cs) (SSL-head drop, weight-norm fusion w/ numeric test) + `TestPaths.AceStep`
+- [ ] Flow-edit / repaint algorithm (masked dual-conditioning velocity loop — needs the DCAE **encoder** first)
+- [ ] Env-gated `AceStepGenerationTests` against the real `ACE-Step/ACE-Step-v1-3.5B` checkpoint + key-dump confirmation of the fallback spellings + python diff harness
 
 ### Stable Audio Open
 - [ ] `OobleckVae.cs` — 5-stage Conv1D + snake activation + weight-norm (no GroupNorm), 2048× downsample, 64-ch latent

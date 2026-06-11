@@ -83,15 +83,14 @@ public sealed unsafe class EfficientVitBlock
         Tensor? qm = null, km = null, vm = null;
         if (_msProjInW is not null)
         {
+            // diffusers SanaMultiscaleAttentionProjection: depthwise 5×5 over fused qkv, then a grouped 1×1
+            // (groups = 3·heads).
             Tensor fused = FuseQkvMaps(q, k, v, c, hh, ww);
-            int kernel = (int)_msProjInW.Shape[2];
-            Tensor ms = new Tensor(fused.Shape, DType.F32);
-            backend.Conv2D(ms, fused, _msProjInW, _msProjInB, 1, 1, kernel / 2, kernel / 2);
+            Tensor ms = DepthwiseConv2d(fused, _msProjInW, _msProjInB);
             fused.Dispose();
             if (_msProjOutW is not null)
             {
-                Tensor ms2 = new Tensor(ms.Shape, DType.F32);
-                backend.Conv2D(ms2, ms, _msProjOutW, _msProjOutB, 1, 1, 0, 0);
+                Tensor ms2 = GroupedPointwiseConv2d(ms, _msProjOutW, _msProjOutB, groups: 3 * (c / _headDim));
                 ms.Dispose();
                 ms = ms2;
             }
@@ -174,9 +173,7 @@ public sealed unsafe class EfficientVitBlock
         Tensor inv = new Tensor(new TensorShape(b, hidden2, hh, ww), DType.F32);
         backend.Conv2D(inv, x, _ffInvW, _ffInvB, 1, 1, 0, 0);
         backend.Silu(inv, inv);
-        int dk = (int)_ffDepthW!.Shape[2];
-        Tensor depth = new Tensor(inv.Shape, DType.F32);
-        backend.Conv2D(depth, inv, _ffDepthW, _ffDepthB, 1, 1, dk / 2, dk / 2);
+        Tensor depth = DepthwiseConv2d(inv, _ffDepthW!, _ffDepthB);
         inv.Dispose();
 
         // Chunk channels: x · SiLU(gate).
@@ -199,6 +196,73 @@ public sealed unsafe class EfficientVitBlock
         gated.Dispose();
         MusicDcaeDecoder.RmsNormChannels(outT, _ffNormW!, _ffNormB);
         return outT;
+    }
+
+    /// <summary>Depthwise 3×3 conv (groups = channels) — IBackend.Conv2D has no groups mode, and the GLUMB depth
+    /// conv is tiny relative to the surrounding GEMMs, so a direct loop is fine on CPU.</summary>
+    private static Tensor DepthwiseConv2d(Tensor x, Tensor w, Tensor? bias)
+    {
+        int c = (int)x.Shape[1], hh = (int)x.Shape[2], ww = (int)x.Shape[3];
+        int k = (int)w.Shape[2];
+        int pad = k / 2;
+        Tensor o = new Tensor(x.Shape, DType.F32);
+        float* xp = (float*)x.DataPointer;
+        float* wp = (float*)w.DataPointer;
+        float* bp = bias is null ? null : (float*)bias.DataPointer;
+        float* op = (float*)o.DataPointer;
+        long frame = (long)hh * ww;
+        for (int ci = 0; ci < c; ci++)
+        {
+            float b = bp is null ? 0f : bp[ci];
+            for (int y = 0; y < hh; y++)
+                for (int xPos = 0; xPos < ww; xPos++)
+                {
+                    double acc = b;
+                    for (int ky = 0; ky < k; ky++)
+                    {
+                        int sy = y + ky - pad;
+                        if (sy < 0 || sy >= hh) continue;
+                        for (int kx = 0; kx < k; kx++)
+                        {
+                            int sx = xPos + kx - pad;
+                            if (sx < 0 || sx >= ww) continue;
+                            acc += xp[(long)ci * frame + (long)sy * ww + sx] * wp[((long)ci * k + ky) * k + kx];
+                        }
+                    }
+                    op[(long)ci * frame + (long)y * ww + xPos] = (float)acc;
+                }
+        }
+        return o;
+    }
+
+    /// <summary>Grouped 1×1 conv (channels split into <paramref name="groups"/> independent slices).</summary>
+    private static Tensor GroupedPointwiseConv2d(Tensor x, Tensor w, Tensor? bias, int groups)
+    {
+        int c = (int)x.Shape[1], hh = (int)x.Shape[2], ww = (int)x.Shape[3];
+        int outC = (int)w.Shape[0];
+        int inPerGroup = (int)w.Shape[1];
+        int outPerGroup = outC / groups;
+        Tensor o = new Tensor(new TensorShape(x.Shape[0], outC, hh, ww), DType.F32);
+        float* xp = (float*)x.DataPointer;
+        float* wp = (float*)w.DataPointer;
+        float* bp = bias is null ? null : (float*)bias.DataPointer;
+        float* op = (float*)o.DataPointer;
+        long frame = (long)hh * ww;
+        for (int g = 0; g < groups; g++)
+            for (int oc = 0; oc < outPerGroup; oc++)
+            {
+                int outIdx = g * outPerGroup + oc;
+                float b = bp is null ? 0f : bp[outIdx];
+                for (long pos = 0; pos < frame; pos++)
+                {
+                    double acc = b;
+                    for (int ic = 0; ic < inPerGroup; ic++)
+                        acc += xp[(long)(g * inPerGroup + ic) * frame + pos] * wp[(long)outIdx * inPerGroup + ic];
+                    op[(long)outIdx * frame + pos] = (float)acc;
+                }
+            }
+        _ = c;
+        return o;
     }
 
     private static Tensor Project(IBackend backend, Tensor tokens, Tensor w, int s, int c)
