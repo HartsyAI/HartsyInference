@@ -78,8 +78,14 @@ public sealed unsafe class Kandinsky5Rope
     /// <param name="height">Number of vertical patches.</param>
     /// <param name="width">Number of horizontal patches.</param>
     /// <param name="tStart">Starting position offset along the temporal axis (default 0).</param>
-    public void Precompute3D(int[] axesDims, int duration, int height, int width, int tStart = 0)
+    /// <param name="scaleT">Temporal rope arg divisor (video resolution-dependent; 1.0 = T2I behavior).</param>
+    /// <param name="scaleH">Vertical rope arg divisor — diffusers <c>args_h / scale_factor[1]</c>.</param>
+    /// <param name="scaleW">Horizontal rope arg divisor — diffusers <c>args_w / scale_factor[2]</c>.</param>
+    public void Precompute3D(int[] axesDims, int duration, int height, int width, int tStart = 0,
+        float scaleT = 1.0f, float scaleH = 1.0f, float scaleW = 1.0f)
     {
+        if (scaleT <= 0f || scaleH <= 0f || scaleW <= 0f)
+            throw new ArgumentException($"RoPE scale factors must be positive, got ({scaleT}, {scaleH}, {scaleW}).");
         int axisSum = 0;
         for (int i = 0; i < axesDims.Length; i++) axisSum += axesDims[i];
         if (axisSum != _headDim)
@@ -104,13 +110,13 @@ public sealed unsafe class Kandinsky5Rope
 
         for (int t = 0; t < duration; t++)
         {
-            double posT = t + tStart;
+            double posT = (t + tStart) / (double)scaleT;
             for (int h = 0; h < height; h++)
             {
-                double posH = h;
+                double posH = h / (double)scaleH;
                 for (int w = 0; w < width; w++)
                 {
-                    double posW = w;
+                    double posW = w / (double)scaleW;
                     int s = (t * height + h) * width + w;
                     int rowOffset = s * halfDim;
 

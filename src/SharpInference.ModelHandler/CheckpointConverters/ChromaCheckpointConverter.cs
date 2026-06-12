@@ -47,7 +47,8 @@ public sealed class ChromaCheckpointConverter
         Dictionary<string, Tensor> transformer = new(2000);
 
         // First pass: strip "model.diffusion_model." prefix on a per-key basis so the rest of the converter
-        // sees the BFL keys directly. Mirrors the Python converter's first loop.
+        // sees the BFL keys directly. Mirrors the Python converter's first loop. Also strip the
+        // "_orig_mod." torch.compile artifact prefix that Chroma Radiance checkpoints ship with.
         Dictionary<string, Tensor> bfl = new(allWeights.Count);
         foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
@@ -56,6 +57,8 @@ public sealed class ChromaCheckpointConverter
             string k = kvp.Key.StartsWith("model.diffusion_model.", StringComparison.Ordinal)
                 ? kvp.Key["model.diffusion_model.".Length..]
                 : kvp.Key;
+            if (k.StartsWith("_orig_mod.", StringComparison.Ordinal))
+                k = k["_orig_mod.".Length..];
             bfl[k] = kvp.Value;
         }
 
@@ -152,7 +155,31 @@ public sealed class ChromaCheckpointConverter
         TryRename(bfl, "final_layer.linear.weight", "proj_out.weight", transformer);
         TryRename(bfl, "final_layer.linear.bias", "proj_out.bias", transformer);
 
+        // ── Chroma Radiance pixel-space IO (absent on classic Chroma) ──
+        // No diffusers rename exists for these; the C# ChromaRadianceImagePatchifier / ChromaRadianceNerfHead
+        // load them under their native names, so they pass through verbatim.
+        foreach (KeyValuePair<string, Tensor> kvp in bfl)
+        {
+            if (kvp.Key.StartsWith("img_in_patch.", StringComparison.Ordinal) ||
+                kvp.Key.StartsWith("nerf_", StringComparison.Ordinal))
+            {
+                transformer[kvp.Key] = kvp.Value;
+            }
+        }
+
         return new ConvertedWeights { Transformer = transformer };
+    }
+
+    /// <summary>True when a raw (pre- or post-conversion) Chroma-family dict is a Radiance checkpoint —
+    /// the NeRF head replaces <c>final_layer</c>. Handles wrapped/compiled key prefixes.</summary>
+    public static bool ContainsRadianceKeys(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        foreach (string key in weights.Keys)
+        {
+            if (key.Contains("nerf_blocks.", StringComparison.Ordinal))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>Loads from disk and converts in one shot. Returns the converted weights plus the loader

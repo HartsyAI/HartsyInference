@@ -126,8 +126,9 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
             if (tail[i] is Tensor t) yield return t;
     }
 
-    /// <summary>Forward pass: predicts velocity for one denoising step. Inputs in BCHW layout (matches
-    /// the rest of the SharpInference diffusion stack); the channel-last conversion happens internally.</summary>
+    /// <summary>Forward pass (image variant): predicts velocity for one denoising step. Inputs in BCHW
+    /// layout (matches the rest of the SharpInference diffusion stack); the channel-last conversion
+    /// happens internally. Thin wrapper over the shared image/video core with duration 1.</summary>
     /// <param name="latent">Noisy latent <c>[B, in_visual_dim, H_lat, W_lat]</c>.</param>
     /// <param name="timestep">Scaled timestep value (sigma * 1000).</param>
     /// <param name="textEmbeds">Qwen2.5-VL sequence embeddings <c>[B, S_t, in_text_dim]</c>.</param>
@@ -135,23 +136,64 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, Tensor pooledEmbeds)
     {
         ThrowIfDisposed();
+        if (latent.Shape.Rank != 4)
+            throw new ArgumentException($"Image forward expects a 4-D BCHW latent, got {latent.Shape}.", nameof(latent));
 
         int batch = (int)latent.Shape[0];
         int channels = (int)latent.Shape[1];
         int latH = (int)latent.Shape[2];
         int latW = (int)latent.Shape[3];
 
+        // BCHW and BC1HW share the same memory layout, so the video core runs unchanged with T=1.
+        Tensor latent5d = latent.Reshape(new TensorShape([(long)batch, channels, 1, latH, latW]));
+        return ForwardCore(backend, latent5d, timestep, textEmbeds, pooledEmbeds,
+            1.0f, 1.0f, 1.0f, new TensorShape(batch, _config.OutVisualDim, latH, latW));
+    }
+
+    /// <summary>Forward pass (video variant): predicts velocity over a clip. Latent is BCTHW with
+    /// <c>C = config.VisualEmbedDim</c> (33 = noisy 16 + cond 16 + mask 1 when <c>visual_cond</c>);
+    /// output is <c>[B, out_visual_dim, T, H, W]</c>. RoPE scale factors divide the rope args per
+    /// diffusers (<c>(1,2,2)</c> at 480p-class resolutions, <c>(1,3.16,3.16)</c> otherwise).</summary>
+    public Tensor ForwardVideo(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds,
+        Tensor pooledEmbeds, float ropeScaleT = 1.0f, float ropeScaleH = 1.0f, float ropeScaleW = 1.0f)
+    {
+        ThrowIfDisposed();
+        if (latent.Shape.Rank != 5)
+            throw new ArgumentException($"Video forward expects a 5-D BCTHW latent, got {latent.Shape}.", nameof(latent));
+        if ((int)latent.Shape[1] != _config.VisualEmbedDim)
+            throw new ArgumentException(
+                $"Video latent channels {latent.Shape[1]} != config.VisualEmbedDim {_config.VisualEmbedDim} " +
+                $"(visual_cond={_config.VisualCond} expects noisy+cond+mask packing).", nameof(latent));
+
+        int batch = (int)latent.Shape[0];
+        int latT = (int)latent.Shape[2];
+        int latH = (int)latent.Shape[3];
+        int latW = (int)latent.Shape[4];
+        TensorShape outShape = new TensorShape([(long)batch, _config.OutVisualDim, latT, latH, latW]);
+        return ForwardCore(backend, latent, timestep, textEmbeds, pooledEmbeds,
+            ropeScaleT, ropeScaleH, ropeScaleW, outShape);
+    }
+
+    /// <summary>Shared image/video forward over a BCTHW latent view. <paramref name="outShape"/> selects
+    /// the rank of the returned tensor (4-D for image, 5-D for video; identical memory layout).</summary>
+    private Tensor ForwardCore(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds,
+        Tensor pooledEmbeds, float ropeScaleT, float ropeScaleH, float ropeScaleW, TensorShape outShape)
+    {
+        int batch = (int)latent.Shape[0];
+        int channels = (int)latent.Shape[1];
+        int latT = (int)latent.Shape[2];
+        int latH = (int)latent.Shape[3];
+        int latW = (int)latent.Shape[4];
+
         (int pT, int pH, int pW) = _config.PatchSize;
         if (pT != 1)
-            throw new InvalidOperationException(
-                $"Kandinsky5Transformer (image variant) requires patch_size[0]=1; got {pT}");
+            throw new InvalidOperationException($"Kandinsky5Transformer requires patch_size[0]=1; got {pT}");
         if (latH % pH != 0 || latW % pW != 0)
             throw new InvalidOperationException(
                 $"Latent size {latH}x{latW} must be divisible by patch size {pH}x{pW}");
 
-        int gridT = 1, gridH = latH / pH, gridW = latW / pW;
+        int gridT = latT, gridH = latH / pH, gridW = latW / pW;
         int numPatches = gridT * gridH * gridW;
-        int dim = _config.ModelDim;
 
         // ── 1. Project text embeddings ──
         Tensor textHidden = ProjectText(backend, textEmbeds);
@@ -167,16 +209,15 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         Kandinsky5DebugDump.Dump("time_embed", temb);
 
         // ── 3. Patch embed ──
-        Tensor visualTokens = PatchEmbed(backend, latent, batch, channels, latH, latW, gridH, gridW);
+        Tensor visualTokens = PatchEmbed(backend, latent, batch, channels, gridT, latH, latW, gridH, gridW);
         Kandinsky5DebugDump.Dump("patch_embed", visualTokens);
 
         // ── 4. Build RoPEs ──
         int sT = (int)textHidden.Shape[1];
-        Span<int> textPositions = stackalloc int[0];
         int[] textPosArr = new int[sT];
         for (int i = 0; i < sT; i++) textPosArr[i] = i;
         _textRope.Precompute1D(textPosArr);
-        _visualRope.Precompute3D(_config.AxesDims, gridT, gridH, gridW);
+        _visualRope.Precompute3D(_config.AxesDims, gridT, gridH, gridW, 0, ropeScaleT, ropeScaleH, ropeScaleW);
 
         // ── 5. Text encoder blocks ──
         Tensor curText = textHidden;
@@ -201,13 +242,13 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         curText.Dispose();
 
         // ── 7. Final out layer: 2-param modulation + LayerNorm + Linear ──
-        Tensor finalProj = ApplyOutLayer(backend, curVisual, temb, batch, numPatches, gridH, gridW);
+        Tensor finalProj = ApplyOutLayer(backend, curVisual, temb, batch, numPatches);
         curVisual.Dispose();
         temb.Dispose();
         Kandinsky5DebugDump.Dump("out_layer", finalProj);
 
-        // ── 8. Unpatchify back to BCHW ──
-        Tensor result = Unpatchify(finalProj, batch, gridH, gridW, latH, latW);
+        // ── 8. Unpatchify back to BC(T)HW ──
+        Tensor result = Unpatchify(finalProj, batch, gridT, gridH, gridW, latH, latW, outShape);
         finalProj.Dispose();
         Kandinsky5DebugDump.DumpOutput(result);
 
@@ -297,47 +338,44 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
             d[i] += a[i];
     }
 
-    /// <summary>Patch embed for the image variant. Latent <c>[B, C, H, W]</c> in BCHW reshapes to
-    /// <c>[B, gridH, gridW, p_h * p_w * C]</c> with C as the innermost axis (matching diffusers'
-    /// <c>permute(0, 1, 3, 5, 2, 4, 6, 7).flatten(4, 7)</c> with duration=1), then projects via
-    /// <c>visual_embeddings.in_layer</c> to <c>[B, gridH * gridW, model_dim]</c>.</summary>
-    private Tensor PatchEmbed(IBackend backend, Tensor latent, int batch, int channels, int latH, int latW,
-        int gridH, int gridW)
+    /// <summary>Patch embed over a BCTHW latent. Mirrors diffusers' <c>Kandinsky5VisualEmbeddings</c>:
+    /// <c>[B, T, H, W, C] → view(B, T/pT, pT, H/pH, pH, W/pW, pW, C) → permute(0,1,3,5,2,4,6,7) →
+    /// flatten(4,7)</c>, i.e. token order <c>(t, gy, gx)</c> and inner patch order <c>(pt, py, px, c)</c>
+    /// with C innermost. With BCTHW input we walk (c, py, px) and write to (py, px, c) per patch
+    /// (pT is always 1), then project via <c>visual_embeddings.in_layer</c>.</summary>
+    private Tensor PatchEmbed(IBackend backend, Tensor latent, int batch, int channels, int gridT,
+        int latH, int latW, int gridH, int gridW)
     {
         (int _, int pH, int pW) = _config.PatchSize;
         int patchInDim = pH * pW * channels;
-        int numPatches = gridH * gridW;
+        int numPatches = gridT * gridH * gridW;
 
         Tensor flat = new Tensor(new TensorShape(batch, numPatches, patchInDim), DType.F32);
         float* inPtr = (float*)latent.DataPointer;
         float* outPtr = (float*)flat.DataPointer;
 
-        // Reference reshape with duration=1 and channel last:
-        //   [B, 1, H, W, C] → [B, 1, H/pH, pH, W/pW, pW, C]
-        //   → permute (0, 1, 2, 4, 3, 5, 6) on the (h_outer, h_inner, w_outer, w_inner, c) tail
-        //   → flatten(3, 6) giving [B, gridH, gridW, pH*pW*C].
-        // Since our latent is BCHW (not BHWC) we need an extra "channel last" twist: at flatten time
-        // diffusers' flatten(4, 7) yields innermost order (pH, pW, C). With BCHW input we walk
-        // (c, py, px) in nested loops and write to (py, px, c) in the patch.
         for (int b = 0; b < batch; b++)
         {
-            for (int gy = 0; gy < gridH; gy++)
+            for (int t = 0; t < gridT; t++)
             {
-                for (int gx = 0; gx < gridW; gx++)
+                for (int gy = 0; gy < gridH; gy++)
                 {
-                    int patchIdx = gy * gridW + gx;
-                    int dstBase = (b * numPatches + patchIdx) * patchInDim;
-                    for (int py = 0; py < pH; py++)
+                    for (int gx = 0; gx < gridW; gx++)
                     {
-                        for (int px = 0; px < pW; px++)
+                        int patchIdx = (t * gridH + gy) * gridW + gx;
+                        long dstBase = ((long)b * numPatches + patchIdx) * patchInDim;
+                        for (int py = 0; py < pH; py++)
                         {
-                            int srcY = gy * pH + py;
-                            int srcX = gx * pW + px;
-                            for (int c = 0; c < channels; c++)
+                            for (int px = 0; px < pW; px++)
                             {
-                                int srcIdx = ((b * channels + c) * latH + srcY) * latW + srcX;
-                                int dstIdx = dstBase + (py * pW + px) * channels + c;
-                                outPtr[dstIdx] = inPtr[srcIdx];
+                                int srcY = gy * pH + py;
+                                int srcX = gx * pW + px;
+                                for (int c = 0; c < channels; c++)
+                                {
+                                    long srcIdx = ((((long)b * channels + c) * gridT + t) * latH + srcY) * latW + srcX;
+                                    long dstIdx = dstBase + (py * pW + px) * channels + c;
+                                    outPtr[dstIdx] = inPtr[srcIdx];
+                                }
                             }
                         }
                     }
@@ -354,8 +392,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
     /// <summary>Final output layer per <c>Kandinsky5OutLayer.forward</c>: produces 2 modulation params
     /// (shift, scale), applies non-affine LayerNorm + modulate, then projects to
     /// <c>p_h * p_w * out_visual_dim</c> per token.</summary>
-    private Tensor ApplyOutLayer(IBackend backend, Tensor visual, Tensor temb, int batch, int numPatches,
-        int gridH, int gridW)
+    private Tensor ApplyOutLayer(IBackend backend, Tensor visual, Tensor temb, int batch, int numPatches)
     {
         int dim = _config.ModelDim;
         (int _, int pH, int pW) = _config.PatchSize;
@@ -400,39 +437,44 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         return projected;
     }
 
-    /// <summary>Reverses the patch embed reshape, going from <c>[B, num_patches, p_h * p_w * C_out]</c>
-    /// back to BCHW <c>[B, C_out, H, W]</c>. The innermost token order is <c>(py, px, c)</c> matching
-    /// the diffusers' final permute pattern that places C last before flattening.</summary>
-    private Tensor Unpatchify(Tensor patched, int batch, int gridH, int gridW, int latH, int latW)
+    /// <summary>Reverses the out-layer projection reshape: <c>[B, num_patches, p_h·p_w·C_out]</c> →
+    /// BC(T)HW per <paramref name="outShape"/>. Per diffusers <c>Kandinsky5OutLayer</c>, the projection
+    /// vector splits as <c>view(..., -1, p_t, p_h, p_w)</c>, i.e. <b>channel-major</b> inner order
+    /// <c>(c, pt, py, px)</c> — note this differs from the patch-embed input order (which is C-minor).</summary>
+    private Tensor Unpatchify(Tensor patched, int batch, int gridT, int gridH, int gridW, int latH, int latW,
+        TensorShape outShape)
     {
         (int _, int pH, int pW) = _config.PatchSize;
         int outChannels = _config.OutVisualDim;
         int patchOutDim = pH * pW * outChannels;
-        int numPatches = gridH * gridW;
+        int numPatches = gridT * gridH * gridW;
 
-        Tensor result = new Tensor(new TensorShape(batch, outChannels, latH, latW), DType.F32);
+        Tensor result = new Tensor(outShape, DType.F32);
         float* srcPtr = (float*)patched.DataPointer;
         float* dstPtr = (float*)result.DataPointer;
 
         for (int b = 0; b < batch; b++)
         {
-            for (int gy = 0; gy < gridH; gy++)
+            for (int t = 0; t < gridT; t++)
             {
-                for (int gx = 0; gx < gridW; gx++)
+                for (int gy = 0; gy < gridH; gy++)
                 {
-                    int patchIdx = gy * gridW + gx;
-                    int srcBase = (b * numPatches + patchIdx) * patchOutDim;
-                    for (int py = 0; py < pH; py++)
+                    for (int gx = 0; gx < gridW; gx++)
                     {
-                        for (int px = 0; px < pW; px++)
+                        int patchIdx = (t * gridH + gy) * gridW + gx;
+                        long srcBase = ((long)b * numPatches + patchIdx) * patchOutDim;
+                        for (int c = 0; c < outChannels; c++)
                         {
-                            int dstY = gy * pH + py;
-                            int dstX = gx * pW + px;
-                            for (int c = 0; c < outChannels; c++)
+                            for (int py = 0; py < pH; py++)
                             {
-                                int srcIdx = srcBase + (py * pW + px) * outChannels + c;
-                                int dstIdx = ((b * outChannels + c) * latH + dstY) * latW + dstX;
-                                dstPtr[dstIdx] = srcPtr[srcIdx];
+                                for (int px = 0; px < pW; px++)
+                                {
+                                    int dstY = gy * pH + py;
+                                    int dstX = gx * pW + px;
+                                    long srcIdx = srcBase + (c * pH + py) * pW + px;
+                                    long dstIdx = ((((long)b * outChannels + c) * gridT + t) * latH + dstY) * latW + dstX;
+                                    dstPtr[dstIdx] = srcPtr[srcIdx];
+                                }
                             }
                         }
                     }

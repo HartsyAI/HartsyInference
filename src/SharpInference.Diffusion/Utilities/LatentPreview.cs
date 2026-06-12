@@ -19,8 +19,14 @@ namespace SharpInference.Diffusion.Utilities;
 /// slowing diffusion. For higher-fidelity previews use TAESD instead.</para></summary>
 public static unsafe class LatentPreview
 {
-    /// <summary>Returns true if a <c>latent2rgb</c> factor table is available for the given architecture.</summary>
-    public static bool IsSupported(LatentArchitecture arch) => GetFactors(arch) is not null;
+    /// <summary>Returns true if a <c>latent2rgb</c> factor table is available for the given architecture
+    /// (or the architecture is pixel-space, where the latent previews as-is).</summary>
+    public static bool IsSupported(LatentArchitecture arch) => IsPixelSpace(arch) || GetFactors(arch) is not null;
+
+    /// <summary>True for VAE-free architectures whose "latent" is already an RGB image in [-1, 1] —
+    /// previews bypass the factor matrix entirely.</summary>
+    public static bool IsPixelSpace(LatentArchitecture arch)
+        => arch is LatentArchitecture.ChromaRadiance or LatentArchitecture.ZetaChroma;
 
     /// <summary>Unpacks a Flux-family packed latent <c>[B, latH/2 * latW/2, C*4]</c> back to
     /// canonical NCHW <c>[B, C, latH, latW]</c> (with C=16 for Flux.1 / Chroma / Z-Image's
@@ -85,6 +91,26 @@ public static unsafe class LatentPreview
         height = 0;
         if (latent is null || latent.DType != DType.F32) return null;
         if (latent.Shape.Rank != 4 && latent.Shape.Rank != 5) return null;
+
+        // Pixel-space architectures: the latent IS the image — convert [1, 3, H, W] directly.
+        if (IsPixelSpace(arch))
+        {
+            if (latent.Shape.Rank != 4 || (int)latent.Shape[1] != 3) return null;
+            int ph = (int)latent.Shape[2];
+            int pw = (int)latent.Shape[3];
+            width = pw;
+            height = ph;
+            byte[] direct = new byte[pw * ph * 3];
+            float* pp = (float*)latent.DataPointer;
+            int pixPlane = ph * pw;
+            for (int i = 0; i < pixPlane; i++)
+            {
+                direct[i * 3 + 0] = ToByte(pp[i]);
+                direct[i * 3 + 1] = ToByte(pp[pixPlane + i]);
+                direct[i * 3 + 2] = ToByte(pp[2 * pixPlane + i]);
+            }
+            return direct;
+        }
 
         float[,]? factors = GetFactors(arch);
         if (factors is null) return null;

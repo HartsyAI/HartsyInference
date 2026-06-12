@@ -271,8 +271,9 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     /// <summary>Builds Chroma's transformer-side text mask. Per pipeline_chroma.py:249-252, the mask used inside
     /// the transformer is <c>(arange(seq_len) &lt;= text_len)</c>: every real token plus exactly one extra
     /// padding slot kept unmasked. <paramref name="tokenizerMask"/> is the standard tokenizer mask
-    /// (1=real, 0=pad). Returns a [batch, seq_len] F32 tensor with the extension applied.</summary>
-    private static Tensor BuildChromaTextMask(int[] tokenizerMask, int batchSize)
+    /// (1=real, 0=pad). Returns a [batch, seq_len] F32 tensor with the extension applied.
+    /// Internal so <see cref="ChromaRadiancePipeline"/> shares the identical text path.</summary>
+    internal static Tensor BuildChromaTextMask(int[] tokenizerMask, int batchSize)
     {
         int seqLen = tokenizerMask.Length;
         TensorShape shape = new TensorShape(batchSize, seqLen);

@@ -175,7 +175,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 
             Tensor patched = PatchifyLatent(latent, inChannels, latentH, latentW, patch);
 
-            Tensor velocity = _transformer.Forward(Backend, patched, condT5, encoderHidden2: null,
+            Tensor velocity = _transformer.Forward(Backend, patched, condText, encoderHidden2: null,
                 t, distilledGuidance, hPacked, wPacked);
             Tensor velocityImage = UnpatchifyTokens(velocity, inChannels, hPacked, wPacked, patch);
             velocity.Dispose();
@@ -184,7 +184,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             {
                 // Standard CFG path (un-distilled variant).
                 Tensor uncondPatched = PatchifyLatent(latent, inChannels, latentH, latentW, patch);
-                Tensor uncondVel = _transformer.Forward(Backend, uncondPatched, uncondT5!, encoderHidden2: null,
+                Tensor uncondVel = _transformer.Forward(Backend, uncondPatched, uncondText!, encoderHidden2: null,
                     t, 1.0f, hPacked, wPacked);
                 Tensor uncondImage = UnpatchifyTokens(uncondVel, inChannels, hPacked, wPacked, patch);
                 uncondVel.Dispose();
@@ -208,9 +208,8 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        condT5.Dispose();
-        uncondT5?.Dispose();
-        guidancePrep?.Dispose();
+        condText.Dispose();
+        uncondText?.Dispose();
 
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());

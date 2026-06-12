@@ -103,11 +103,11 @@ internal sealed unsafe class AceStep15Attention
         return (cos, sin);
     }
 
-    /// <summary>Bidirectional sliding-window additive mask <c>[S, S]</c>: 0 where <c>|i − j| ≤ window</c>, −1e30
-    /// elsewhere (the reference masks <c>abs(diff) &gt; sliding_window</c>, non-causal).</summary>
+    /// <summary>Bidirectional sliding-window additive mask <c>[1, 1, S, S]</c> (broadcast over heads): 0 where
+    /// <c>|i − j| ≤ window</c>, −1e30 elsewhere (the reference masks <c>abs(diff) &gt; sliding_window</c>, non-causal).</summary>
     public static Tensor BuildSlidingMask(int seqLen, int window)
     {
-        Tensor mask = new Tensor(new TensorShape(seqLen, seqLen), DType.F32);
+        Tensor mask = new Tensor(new TensorShape(1, 1, seqLen, seqLen), DType.F32);
         float* p = (float*)mask.DataPointer;
         for (int i = 0; i < seqLen; i++)
             for (int j = 0; j < seqLen; j++)

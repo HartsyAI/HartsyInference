@@ -10,6 +10,11 @@ public static class GgufKeyMapperRegistry
     private static Dictionary<string, IGgufKeyMapper> BuildRegistry()
     {
         Dictionary<string, IGgufKeyMapper> r = new(StringComparer.OrdinalIgnoreCase);
+        // Pixel-space variants must precede their parent families (and Flux, whose double+single-block
+        // signature also matches the whole Chroma family): DetectByKeys probes mappers in registration
+        // order and a Radiance/Zeta checkpoint is a strict key-superset of classic Chroma / Z-Image.
+        Register(r, new ChromaRadianceKeyMapper());
+        Register(r, new ZetaChromaKeyMapper());
         Register(r, new FluxKeyMapper());
         Register(r, new Flux2KeyMapper());
         Register(r, new SdxlKeyMapper());

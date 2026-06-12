@@ -23,16 +23,19 @@ public sealed unsafe class CausalConv3d
     private readonly int _padTLeft;   // causal: 2 * padT frames on the left only; non-causal: padT on the left
     private readonly int _padTRight;  // non-causal: padT frames on the right (replicate last frame)
     private readonly bool _causal;
-    private readonly bool _replicateFirstPad;   // LTX: pad with copies of the edge frame instead of zeros
+    private readonly bool _replicateFirstPad;   // LTX/HunyuanVideo: pad with copies of the edge frame instead of zeros
+    private readonly bool _spatialReplicatePad; // HunyuanVideo: F.pad(mode="replicate") spatially instead of zero-pad
     private readonly Tensor[] _weight2d;  // kt slices of [cOut, cIn, kh, kw]
     private readonly Tensor? _bias;
 
-    /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video) instead of zeros (Wan2.2).</summary>
+    /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros.</summary>
     public CausalConv3d(Tensor weight5d, Tensor? bias,
         int strideT = 1, int strideH = 1, int strideW = 1,
-        int padT = 0, int padH = 0, int padW = 0, bool replicateFirstPad = false, bool causal = true)
+        int padT = 0, int padH = 0, int padW = 0, bool replicateFirstPad = false, bool causal = true,
+        bool spatialReplicatePad = false)
     {
         _replicateFirstPad = replicateFirstPad;
+        _spatialReplicatePad = spatialReplicatePad;
         _causal = causal;
         if (weight5d.Shape.Rank != 5)
             throw new ArgumentException($"weight must be 5-D [cOut,cIn,kt,kh,kw], got {weight5d.Shape}.", nameof(weight5d));
@@ -115,8 +118,15 @@ public sealed unsafe class CausalConv3d
                 int srcT = to * _strideT + dt;
                 Tensor? frame = ResolveFrame(srcT, zeroPad, cacheLen, cacheFrames, input, batch, h, w);
                 if (frame is null) continue;                    // zero-pad frame contributes nothing
+                if (_spatialReplicatePad && (_padH > 0 || _padW > 0))
+                {
+                    Tensor padded = ReplicatePadSpatial(frame, batch, h, w);
+                    frame.Dispose();
+                    frame = padded;
+                }
                 Tensor conv = new Tensor(new TensorShape(batch, _cOut, hOut, wOut), DType.F32);
-                backend.Conv2D(conv, frame, _weight2d[dt], null, _strideH, _strideW, _padH, _padW);
+                backend.Conv2D(conv, frame, _weight2d[dt], null, _strideH, _strideW,
+                    _spatialReplicatePad ? 0 : _padH, _spatialReplicatePad ? 0 : _padW);
                 frame.Dispose();
                 if (acc is null) { acc = conv; }
                 else { AddInPlace(acc, conv); conv.Dispose(); }
@@ -191,6 +201,31 @@ public sealed unsafe class CausalConv3d
                     Buffer.MemoryCopy(ip + srcOff, dp + dstOff, frame * 4, frame * 4);
                 }
         }
+        return outF;
+    }
+
+    /// <summary>Edge-replicate pads a <c>[B, cIn, H, W]</c> frame to <c>[B, cIn, H+2·padH, W+2·padW]</c> (HunyuanVideo <c>F.pad(mode="replicate")</c>).</summary>
+    private Tensor ReplicatePadSpatial(Tensor frame, int batch, int h, int w)
+    {
+        int hp = h + 2 * _padH, wp = w + 2 * _padW;
+        Tensor outF = new Tensor(new TensorShape(batch, _cIn, hp, wp), DType.F32);
+        float* sp = (float*)frame.DataPointer;
+        float* dp = (float*)outF.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int ci = 0; ci < _cIn; ci++)
+            {
+                long srcBase = ((long)b * _cIn + ci) * h * w;
+                long dstBase = ((long)b * _cIn + ci) * hp * wp;
+                for (int y = 0; y < hp; y++)
+                {
+                    int sy = Math.Clamp(y - _padH, 0, h - 1);
+                    for (int x = 0; x < wp; x++)
+                    {
+                        int sx = Math.Clamp(x - _padW, 0, w - 1);
+                        dp[dstBase + (long)y * wp + x] = sp[srcBase + (long)sy * w + sx];
+                    }
+                }
+            }
         return outF;
     }
 

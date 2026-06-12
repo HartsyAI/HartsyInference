@@ -97,4 +97,60 @@ public sealed class Kandinsky5CheckpointConverter
         ConvertedWeights converted = Convert(merged);
         return (converted, loaders);
     }
+
+    /// <summary>Loads the T2V video transformer from either a diffusers <c>transformer/</c> directory or
+    /// a single repackaged safetensors file. The video state dict uses the same canonical key set as T2I
+    /// (plus the wider 33-channel <c>visual_embeddings.in_layer</c>), so the conversion path is shared.</summary>
+    public static (ConvertedWeights weights, List<SafeTensorsLoader> loaders) LoadVideoTransformer(string transformerPathOrDir)
+    {
+        if (Directory.Exists(transformerPathOrDir))
+            return LoadDiffusersFolder(transformerPathOrDir);
+
+        if (!File.Exists(transformerPathOrDir))
+            throw new FileNotFoundException($"Kandinsky 5 video transformer not found: {transformerPathOrDir}");
+
+        (ConvertedWeights weights, SafeTensorsLoader loader) = LoadAndConvert(transformerPathOrDir);
+        return (weights, [loader]);
+    }
+
+    /// <summary>Loads the HunyuanVideo VAE shard (<c>vae/diffusion_pytorch_model.safetensors</c> or a
+    /// directory containing it) for <c>HunyuanVideoVaeDecoder</c>/<c>HunyuanVideoVaeEncoder</c>. The
+    /// diffusers shard is already keyed <c>encoder.* / decoder.* / quant_conv.* / post_quant_conv.*</c>;
+    /// a <c>vae.</c> wrapper prefix (single-file repacks) is stripped. Caller disposes the loaders.</summary>
+    public static (Dictionary<string, Tensor> weights, List<SafeTensorsLoader> loaders) LoadHunyuanVideoVae(string vaePathOrDir)
+    {
+        string[] shards;
+        if (Directory.Exists(vaePathOrDir))
+        {
+            shards = Directory.GetFiles(vaePathOrDir, "*.safetensors");
+            Array.Sort(shards, StringComparer.Ordinal);
+            if (shards.Length == 0)
+                throw new FileNotFoundException($"No safetensors found in Kandinsky 5 VAE dir: {vaePathOrDir}");
+        }
+        else if (File.Exists(vaePathOrDir))
+        {
+            shards = [vaePathOrDir];
+        }
+        else
+        {
+            throw new FileNotFoundException($"Kandinsky 5 VAE not found: {vaePathOrDir}");
+        }
+
+        List<SafeTensorsLoader> loaders = new();
+        Dictionary<string, Tensor> weights = new(1024);
+        foreach (string shard in shards)
+        {
+            SafeTensorsLoader loader = new();
+            loader.Load(shard);
+            foreach (KeyValuePair<string, Tensor> kvp in loader.GetAllTensors())
+            {
+                string key = kvp.Key;
+                if (key.StartsWith("vae.", StringComparison.Ordinal))
+                    key = key["vae.".Length..];
+                weights[key] = kvp.Value;
+            }
+            loaders.Add(loader);
+        }
+        return (weights, loaders);
+    }
 }

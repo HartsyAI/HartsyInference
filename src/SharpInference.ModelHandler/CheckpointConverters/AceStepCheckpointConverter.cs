@@ -55,6 +55,23 @@ public sealed class AceStepCheckpointConverter
         return (FuseWeightNorm(raw), loader);
     }
 
+    /// <summary>Loads the ACE-Step <b>v1.5</b> turbo main safetensors (<c>ACE-Step/Ace-Step1.5</c>,
+    /// <c>acestep-v15-turbo/model.safetensors</c>, 677 BF16 keys) — one file holds the DiT (<c>decoder.*</c>, for
+    /// <c>AceStep15Dit</c>) and the condition encoders (<c>encoder.*</c>, for <c>AceStep15ConditionEncoder</c>);
+    /// both classes pick their prefixes from this single dict. Passthrough: the FSQ <c>tokenizer.*</c> /
+    /// <c>detokenizer.*</c> hint path and <c>null_condition_emb</c> (phase 2 / CFG-only) are kept but unused by the
+    /// turbo text-to-music path. The Oobleck VAE is a separate file loaded straight into <c>OobleckVae</c>
+    /// (it fuses its own weight norm). Caller owns the loader.</summary>
+    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadModel15(string path, bool castToF32 = false)
+    {
+        SafeTensorsLoader loader = new();
+        loader.Load(path);
+        Dictionary<string, Tensor> weights = new();
+        foreach (string key in loader.Descriptors.Keys)
+            weights[Strip(key, "model.")] = MaybeCast(loader.GetTensor(key), castToF32);
+        return (weights, loader);
+    }
+
     private static Tensor MaybeCast(Tensor t, bool castToF32) =>
         castToF32 && t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 

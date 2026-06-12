@@ -36,4 +36,10 @@ public enum LatentArchitecture
     /// <summary>LTX-Video — 128-channel 3-D latent, 32× spatial downscale. The pipeline hands the
     /// preview a single-frame <c>[1, 128, H, W]</c> slice (its working latent is token-packed).</summary>
     Ltx = 12,
+    /// <summary>Chroma Radiance — pixel-space (no VAE). The "latent" IS the RGB image in [-1, 1];
+    /// previews convert it directly without a factor matrix.</summary>
+    ChromaRadiance = 13,
+    /// <summary>Zeta-Chroma — pixel-space Z-Image S3-DiT (no VAE). Direct RGB preview like
+    /// <see cref="ChromaRadiance"/>.</summary>
+    ZetaChroma = 14,
 }

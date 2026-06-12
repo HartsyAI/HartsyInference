@@ -63,6 +63,12 @@ public sealed unsafe class ZImageTransformer : IDisposable
 
     /// <summary>Loads all weights from a Z-Image diffusers/single-file dict (post-converter).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
+        => LoadWeightsInternal(weights, requireFinalLayer: true);
+
+    /// <summary>Weight-loading core shared with <see cref="ZetaChromaTransformer"/>. Zeta-Chroma checkpoints have
+    /// no <c>final_layer.*</c> (replaced by the <c>dec_net.*</c> pixel decoder head), so those lookups become
+    /// optional when <paramref name="requireFinalLayer"/> is false.</summary>
+    internal void LoadWeightsInternal(IReadOnlyDictionary<string, Tensor> weights, bool requireFinalLayer)
     {
         _tEmbLinear1Weight = weights["t_embedder.mlp.0.weight"];
         weights.TryGetValue("t_embedder.mlp.0.bias", out _tEmbLinear1Bias);
@@ -80,10 +86,20 @@ public sealed unsafe class ZImageTransformer : IDisposable
         _xEmbedderWeight = weights["x_embedder.weight"];
         weights.TryGetValue("x_embedder.bias", out _xEmbedderBias);
 
-        _finalAdaLNWeight = weights["final_layer.adaLN_modulation.1.weight"];
-        weights.TryGetValue("final_layer.adaLN_modulation.1.bias", out _finalAdaLNBias);
-        _finalLinearWeight = weights["final_layer.linear.weight"];
-        weights.TryGetValue("final_layer.linear.bias", out _finalLinearBias);
+        if (requireFinalLayer)
+        {
+            _finalAdaLNWeight = weights["final_layer.adaLN_modulation.1.weight"];
+            weights.TryGetValue("final_layer.adaLN_modulation.1.bias", out _finalAdaLNBias);
+            _finalLinearWeight = weights["final_layer.linear.weight"];
+            weights.TryGetValue("final_layer.linear.bias", out _finalLinearBias);
+        }
+        else
+        {
+            weights.TryGetValue("final_layer.adaLN_modulation.1.weight", out _finalAdaLNWeight);
+            weights.TryGetValue("final_layer.adaLN_modulation.1.bias", out _finalAdaLNBias);
+            weights.TryGetValue("final_layer.linear.weight", out _finalLinearWeight);
+            weights.TryGetValue("final_layer.linear.bias", out _finalLinearBias);
+        }
 
         // Pad-token raw float* access happens in PadCaption/PadImage, so force F32 here. These are
         // tiny ([1, 3840]) so the cast cost is negligible regardless of the checkpoint's native dtype.
@@ -134,6 +150,36 @@ public sealed unsafe class ZImageTransformer : IDisposable
     /// <param name="sigma">Current sigma (flow-match noise level, 0..1).</param>
     /// <returns>Predicted velocity [B, in_channels, H, W] (in patch-space → unpatchified).</returns>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor captionEmbeddings, float sigma)
+    {
+        int batch = (int)latent.Shape[0];
+        int inChannels = (int)latent.Shape[1];
+        int patch = _config.PatchSize;
+
+        (Tensor imgTokens, Tensor tEmb, int hPacked, int wPacked) =
+            ForwardCore(backend, latent, captionEmbeddings, sigma);
+        int imgRealLen = hPacked * wPacked;
+
+        // ── 8. Final layer: AdaLN(scale only) → LayerNorm-no-affine + modulate → Linear → unpatchify ──
+        // Applied AFTER the pad-token trim — the final layer is per-token, so trimming first is equivalent
+        // to the diffusers order (final layer on the padded sequence, then trim) and skips dead tokens.
+        Tensor finalProj = ApplyFinalLayer(backend, imgTokens, tEmb, batch, imgRealLen);
+        ZImageDebugDump.Dump("final_layer", finalProj);
+        imgTokens.Dispose();
+        tEmb.Dispose();
+
+        Tensor velocity = Unpatchify(finalProj, batch, inChannels, hPacked, wPacked, patch);
+        finalProj.Dispose();
+
+        ZImageDebugDump.DumpOutput(velocity);
+        return velocity;
+    }
+
+    /// <summary>Backbone forward shared with <see cref="ZetaChromaTransformer"/>: caption/noise refiners + the 30
+    /// main layers, from raw latent to post-backbone image tokens (pad tokens already trimmed, final layer NOT
+    /// applied). The caller owns both returned tensors; <c>tEmb</c> is returned so classic Z-Image can run its
+    /// AdaLN final layer — Zeta-Chroma disposes it unused (its decoder head conditions on the tokens only).</summary>
+    internal (Tensor imgTokens, Tensor tEmb, int hPacked, int wPacked) ForwardCore(
+        IBackend backend, Tensor latent, Tensor captionEmbeddings, float sigma)
     {
         int batch = (int)latent.Shape[0];
         int inChannels = (int)latent.Shape[1];
@@ -230,26 +276,15 @@ public sealed unsafe class ZImageTransformer : IDisposable
             ZImageDebugDump.Dump($"layers.{i}", x);
         }
 
-        // ── 7. Slice off image portion (front of the [image, caption] sequence) ──
+        // ── 7. Slice off image portion (front of the [image, caption] sequence), trim pad tokens ──
         Tensor imageSlice = SliceImageFront(x, batch, imgPaddedLen, capPaddedLen, hidden);
         x.Dispose();
 
-        // ── 8. Final layer: AdaLN(scale, shift) → RmsNorm-no-affine + modulate → Linear → unpatchify ──
-        Tensor finalProj = ApplyFinalLayer(backend, imageSlice, tEmb, batch, imgPaddedLen);
-        ZImageDebugDump.Dump("final_layer", finalProj);
-        imageSlice.Dispose();
-        tEmb.Dispose();
+        Tensor realImage = TrimImagePad(imageSlice, batch, imgRealLen, imgPaddedLen);
+        if (!ReferenceEquals(realImage, imageSlice))
+            imageSlice.Dispose();
 
-        // Trim padded image tokens off the front-aligned real-region before unpatchify.
-        Tensor realImage = TrimImagePad(finalProj, batch, imgRealLen, imgPaddedLen);
-        if (!ReferenceEquals(realImage, finalProj))
-            finalProj.Dispose();
-
-        Tensor velocity = Unpatchify(realImage, batch, inChannels, hPacked, wPacked, patch);
-        realImage.Dispose();
-
-        ZImageDebugDump.DumpOutput(velocity);
-        return velocity;
+        return (realImage, tEmb, hPacked, wPacked);
     }
 
     /// <summary>Computes the timestep embedding [B, adaLNEmbedDim] via sinusoidal × 1000 → Linear → SiLU → Linear.</summary>
@@ -377,7 +412,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
     }
 
     /// <summary>Patchify: [B, C, H, W] → [B, hPacked*wPacked, pH*pW*C]. Diffusers Z-Image (`transformer_z_image.py:542-549`) uses inner-most order (pH, pW, C) — channel is the FASTEST-VARYING axis inside each patch, NOT the slowest. The matching <c>x_embedder</c> Linear was trained with this convention. </summary>
-    private static Tensor Patchify(Tensor latent, int batch, int channels, int H, int W, int patch)
+    internal static Tensor Patchify(Tensor latent, int batch, int channels, int H, int W, int patch)
     {
         int hPacked = H / patch;
         int wPacked = W / patch;
@@ -421,7 +456,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
     }
 
     /// <summary>Inverse of Patchify: [B, hPacked*wPacked, pH*pW*C] → [B, C, H, W]. Inner ordering matches Patchify (pH, pW, C).</summary>
-    private static Tensor Unpatchify(Tensor packed, int batch, int channels, int hPacked, int wPacked, int patch)
+    internal static Tensor Unpatchify(Tensor packed, int batch, int channels, int hPacked, int wPacked, int patch)
     {
         int H = hPacked * patch;
         int W = wPacked * patch;

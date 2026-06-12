@@ -58,8 +58,13 @@ public sealed record Kandinsky5Config
     /// <summary>CLIP pooled embedding dim (768 for CLIP-L).</summary>
     public required int InTextDim2 { get; init; }
 
-    /// <summary>Whether the model accepts a visual conditioning input (i2i mode). Always <c>false</c> for the pure t2i variant.</summary>
+    /// <summary>Whether the model accepts a visual conditioning input. <c>false</c> for the pure t2i variant;
+    /// <c>true</c> for the T2V/I2V video checkpoints, where the model input is
+    /// <c>concat([noisy(16), cond(16), mask(1)]) = 33</c> channels even in pure T2V mode (cond+mask zeros).</summary>
     public bool VisualCond { get; init; } = false;
+
+    /// <summary>Total model-input channels: <c>2·InVisualDim + 1</c> with <see cref="VisualCond"/>, else <see cref="InVisualDim"/>.</summary>
+    public int VisualEmbedDim => VisualCond ? 2 * InVisualDim + 1 : InVisualDim;
 
     /// <summary>Per-head attention dim — derived as <c>sum(AxesDims)</c>. For Lite this is 128.</summary>
     public int HeadDim
@@ -105,5 +110,44 @@ public sealed record Kandinsky5Config
         InTextDim = 3584,
         InTextDim2 = 768,
         VisualCond = false,
+    };
+
+    /// <summary>T2V Lite 2B preset (kandinskylab/Kandinsky-5.0-T2V-Lite-*-Diffusers).
+    /// Source: <c>transformer/config.json</c> — model_dim=1792, ff_dim=7168, 2 text + 32 visual blocks,
+    /// axes_dims=[16,24,24] (head_dim=64, 28 heads), time_dim=512, visual_cond=true (33-channel input),
+    /// HunyuanVideo VAE (16-ch latent, 8× spatial / 4× temporal). RoPE scale factors are resolution-dependent
+    /// and supplied per-call by the pipeline (see <c>Kandinsky5VideoPipeline.GetRopeScaleFactor</c>).</summary>
+    public static Kandinsky5Config VideoLite2B => new()
+    {
+        InVisualDim = 16,
+        OutVisualDim = 16,
+        TimeDim = 512,
+        PatchSize = (1, 2, 2),
+        ModelDim = 1792,
+        FfDim = 7168,
+        NumTextBlocks = 2,
+        NumVisualBlocks = 32,
+        AxesDims = [16, 24, 24],
+        InTextDim = 3584,
+        InTextDim2 = 768,
+        VisualCond = true,
+    };
+
+    /// <summary>T2V Pro 19B preset — config-only support (weights untested in this engine):
+    /// model_dim=4096, ff_dim=16384, 4 text + 60 visual blocks, axes_dims=[32,48,48], time_dim=1024.</summary>
+    public static Kandinsky5Config VideoPro19B => new()
+    {
+        InVisualDim = 16,
+        OutVisualDim = 16,
+        TimeDim = 1024,
+        PatchSize = (1, 2, 2),
+        ModelDim = 4096,
+        FfDim = 16384,
+        NumTextBlocks = 4,
+        NumVisualBlocks = 60,
+        AxesDims = [32, 48, 48],
+        InTextDim = 3584,
+        InTextDim2 = 768,
+        VisualCond = true,
     };
 }

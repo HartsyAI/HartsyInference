@@ -14,7 +14,7 @@ namespace SharpInference.Audio.Models.Codecs.Oobleck;
 /// exponentiated at load). Decode-only checkpoints (no <c>encoder.*</c> keys) are accepted —
 /// <see cref="EncodeMode"/> then throws. <b>Numerics are validation-pending vs the Python
 /// reference</b> (no weights in this environment); structure and shapes are CPU-tested.</para></summary>
-public sealed class OobleckVae : IAudioLatentDecoder
+public sealed class OobleckVae : IAudioLatentDecoder, IAudioLatentEncoder
 {
     private readonly OobleckConfig _config;
     private readonly OobleckDecoder _decoder;
@@ -34,6 +34,12 @@ public sealed class OobleckVae : IAudioLatentDecoder
 
     /// <summary>True once encoder weights were found and loaded (needed for <see cref="EncodeMode"/>).</summary>
     public bool HasEncoder => _encoder is not null;
+
+    /// <summary>Interface alias of <see cref="HasEncoder"/>.</summary>
+    public bool CanEncode => _encoder is not null;
+
+    /// <summary>PCM channel count (1 = mono, 2 = stereo).</summary>
+    public int AudioChannels => _config.AudioChannels;
 
     /// <summary>Loads decoder (always) and encoder (when its keys are present) from a
     /// diffusers-layout weight dict.</summary>

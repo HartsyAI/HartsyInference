@@ -69,16 +69,54 @@ public sealed class VaeAttention
     {
         int batch = (int)input.Shape[0];
         int channels = (int)input.Shape[1];
-        int height = (int)input.Shape[2];
-        int width = (int)input.Shape[3];
-        int seqLen = height * width;
+        int seqLen = (int)(input.Shape[2] * input.Shape[3]);
+        return ForwardCore(backend, input, batch, channels, seqLen, null);
+    }
 
+    /// <summary>Forward pass over a video tensor <c>[B, C, T, H, W]</c>: attention over all <c>T·H·W</c>
+    /// tokens with an optional frame-causal additive mask (tokens attend only to frames ≤ their own —
+    /// HunyuanVideo VAE mid-block, <c>prepare_causal_attention_mask</c>). GroupNorm statistics span the
+    /// full clip, matching diffusers' channel-dim GroupNorm over the flattened sequence.</summary>
+    public Tensor Forward3D(IBackend backend, Tensor input, bool frameCausal = true)
+    {
+        int batch = (int)input.Shape[0];
+        int channels = (int)input.Shape[1];
+        int frames = (int)input.Shape[2];
+        int spatial = (int)(input.Shape[3] * input.Shape[4]);
+
+        Tensor? mask = frameCausal && frames > 1 ? BuildFrameCausalMask(frames, spatial) : null;
+        Tensor result = ForwardCore(backend, input, batch, channels, frames * spatial, mask);
+        mask?.Dispose();
+        return result;
+    }
+
+    /// <summary>Additive attention mask <c>[1, 1, S, S]</c> with 0 where key-frame ≤ query-frame, −inf elsewhere.</summary>
+    private static unsafe Tensor BuildFrameCausalMask(int frames, int spatial)
+    {
+        long s = (long)frames * spatial;
+        Tensor mask = new Tensor(new TensorShape([1L, 1, s, s]), DType.F32);
+        float* p = (float*)mask.DataPointer;
+        for (long qi = 0; qi < s; qi++)
+        {
+            long qFrame = qi / spatial;
+            long row = qi * s;
+            long allowed = (qFrame + 1) * spatial;
+            for (long ki = 0; ki < allowed; ki++) p[row + ki] = 0f;
+            for (long ki = allowed; ki < s; ki++) p[row + ki] = float.NegativeInfinity;
+        }
+        return mask;
+    }
+
+    /// <summary>Shared core: treats the input as <c>[B, C, seqLen]</c> (any trailing spatial dims) and returns a tensor with the input's shape.</summary>
+    private Tensor ForwardCore(IBackend backend, Tensor input, int batch, int channels, int seqLen, Tensor? mask)
+    {
         DType dtype = input.DType;
 
-        // GroupNorm
-        TensorShape spatialShape = new TensorShape(batch, channels, height, width);
+        // GroupNorm — viewed as [B, C, seqLen, 1] so group statistics span the whole sequence.
+        TensorShape spatialShape = new TensorShape(batch, channels, seqLen, 1);
+        Tensor input4d = input.Reshape(spatialShape);
         Tensor normed = new Tensor(spatialShape, dtype);
-        backend.GroupNorm(normed, input, _groupNormWeight!, _groupNormBias!, _normGroups, _normEps);
+        backend.GroupNorm(normed, input4d, _groupNormWeight!, _groupNormBias!, _normGroups, _normEps);
 
         // Reshape to [B, C, seqLen] then transpose to [B, seqLen, C] for attention
         // Q, K, V projections: weight is [C, C], we do matmul [B, seqLen, C] @ [C, C]^T
@@ -104,7 +142,7 @@ public sealed class VaeAttention
 
         float scale = 1.0f / MathF.Sqrt(channels);
         Tensor attnOut4D = new Tensor(attn4DShape, dtype);
-        backend.ScaledDotProductAttention(attnOut4D, query4D, key4D, value4D, null, scale);
+        backend.ScaledDotProductAttention(attnOut4D, query4D, key4D, value4D, mask, scale);
         query.Dispose();
         key.Dispose();
         value.Dispose();
@@ -116,15 +154,15 @@ public sealed class VaeAttention
         Tensor projected = ProjectLinear(backend, attnOut, _toOutWeight!, _toOutBias!, batch, seqLen, channels);
         attnOut.Dispose();
 
-        // Transpose back [B, seqLen, C] → [B, C, seqLen] → reshape to [B, C, H, W]
+        // Transpose back [B, seqLen, C] → [B, C, seqLen] → reshape to the input's layout
         Tensor projectedChannelFirst = new Tensor(new TensorShape(batch, channels, seqLen), dtype);
         backend.Transpose2D(projectedChannelFirst, projected, seqLen, channels);
         projected.Dispose();
 
-        Tensor projectedSpatial = projectedChannelFirst.Reshape(spatialShape);
+        Tensor projectedSpatial = projectedChannelFirst.Reshape(input.Shape);
 
         // Residual connection
-        Tensor output = new Tensor(spatialShape, dtype);
+        Tensor output = new Tensor(input.Shape, dtype);
         backend.Add(output, input, projectedSpatial);
         projectedChannelFirst.Dispose();
 

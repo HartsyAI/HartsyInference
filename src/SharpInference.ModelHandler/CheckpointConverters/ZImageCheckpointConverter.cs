@@ -47,12 +47,15 @@ public sealed class ZImageCheckpointConverter
             string key = kvp.Key;
             Tensor tensor = kvp.Value;
 
-            // Optional `model.diffusion_model.` / `transformer.` wrapper.
+            // Optional `model.diffusion_model.` / `transformer.` wrapper, plus the `_orig_mod.`
+            // torch.compile artifact prefix (Lodestone pixel-proto dumps, same as Chroma Radiance).
             string transformerKey = key;
             if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
                 transformerKey = key["model.diffusion_model.".Length..];
             else if (key.StartsWith("transformer.", StringComparison.Ordinal))
                 transformerKey = key["transformer.".Length..];
+            if (transformerKey.StartsWith("_orig_mod.", StringComparison.Ordinal))
+                transformerKey = transformerKey["_orig_mod.".Length..];
 
             if (IsTransformerKey(transformerKey))
             {
@@ -138,6 +141,8 @@ public sealed class ZImageCheckpointConverter
             || key.StartsWith("cap_embedder.", StringComparison.Ordinal)
             || key.StartsWith("x_embedder.", StringComparison.Ordinal)
             || key.StartsWith("final_layer.", StringComparison.Ordinal)
+            // Zeta-Chroma pixel decoder head (absent on classic Z-Image; replaces final_layer.*).
+            || key.StartsWith("dec_net.", StringComparison.Ordinal)
             || key == "cap_pad_token"
             || key == "x_pad_token";
     }

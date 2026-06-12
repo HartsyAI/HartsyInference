@@ -30,6 +30,15 @@ public sealed record T5TextEncoderConfig
     /// <summary>RMSNorm epsilon.</summary>
     public float LayerNormEpsilon { get; init; } = 1e-6f;
 
+    /// <summary>If true (T5 v1.1 / UMT5 GEGLU: <c>wi_0</c>/<c>wi_1</c> pair), the feed-forward is gated.
+    /// If false (original T5 v1.0, e.g. <c>google/t5-base</c>), it is a plain two-layer MLP with a single
+    /// <c>wi</c> projection.</summary>
+    public bool GatedFeedForward { get; init; } = true;
+
+    /// <summary>If true, the feed-forward activation is ReLU (original T5 v1.0 <c>DenseReluDense</c>);
+    /// if false (v1.1 default), GELU.</summary>
+    public bool UseReluActivation { get; init; } = false;
+
     /// <summary>If true, each encoder layer has its own learned relative position bias (UMT5 convention,
     /// used by Pile-T5-XL / AuraFlow). If false (T5 v1.1 default), only block 0 has a learned bias and
     /// every subsequent block shares it. Using the wrong mode produces a perfect-looking transformer

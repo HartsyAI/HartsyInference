@@ -10,13 +10,15 @@ namespace SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 ///   <item><c>nerf_image_embedder</c>: Linear(3 + maxFreqs² → nerfHidden) in FP32 over per-pixel [r,g,b] from the
 ///         noisy input image plus maxFreqs² separable cosine positional features.</item>
 ///   <item><c>nerf_blocks.{i}</c> (depth 4): <c>param_generator</c> Linear(3072 → 3·nerfHidden·(nerfHidden·ratio))
-///         emits gate W1, value W2, out W3 per patch; <c>x = x + W3(silu(xn·W1ᵀ) ⊙ (xn·W2ᵀ))</c> with
-///         <c>xn = RMSNorm(x)</c> (key <c>.norm.scale</c>).</item>
+///         emits gate W1, value W2, out W3 per patch (each L2-normalized along the input dim);
+///         <c>x = x + (silu(xn·W1) ⊙ (xn·W2))·W3</c> with <c>xn = RMSNorm(x)</c> (key <c>.norm.scale</c>).</item>
 ///   <item>Final head: variant A (<c>nerf_final_layer_conv</c>): RMSNorm → fold to [B,64,H,W] → Conv2d(64→3, k3, p1).
 ///         Variant B (<c>nerf_final_layer</c>): RMSNorm → per-pixel Linear [3,64] (folded as a 1×1 conv).</item>
 /// </list>
-/// Validation-gated items (see docs/Research/CHROMA_RADIANCE_ARCHITECTURE.md, uncertainty table): the cosine basis
-/// formula (#1), the 49152-chunk split order/transposition (#2), and the conv-variant sub-key names (#4).</summary>
+/// The cosine basis (#1) and param-chunk layout/normalization (#2) are verified against ComfyUI
+/// <c>comfy/ldm/chroma_radiance/layers.py</c> (<c>NerfEmbedder.fetch_pos</c> / <c>NerfGLUBlock.forward</c>);
+/// the conv-variant sub-key names (#4) remain checkpoint-validation-gated. See
+/// docs/Research/CHROMA_RADIANCE_ARCHITECTURE.md, uncertainty table.</summary>
 public sealed unsafe class ChromaRadianceNerfHead : IDisposable
 {
     // RMSNorm epsilon — assumed to match the Flux/Chroma block convention (validation-gated).
@@ -223,13 +225,14 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
 
                     for (int t = 0; t < tileCount; t++)
                     {
-                        // Split order [W1 gate, W2 value, W3 out], each chunk row-major [out, in] —
-                        // validation-gated (research doc item 2).
+                        // Split order [W1 gate, W2 value, W3 out]. Per ComfyUI NerfGLUBlock.forward each chunk is
+                        // viewed row-major [in, out] (fc1: [nh, inner], fc2: [inner, nh]) and L2-normalized along
+                        // the INPUT dim per output unit before use. backend.Linear wants [out, in], so transpose
+                        // while normalizing.
                         long rowBase = (long)t * paramDim;
-                        long w1Bytes = chunk * sizeof(float);
-                        Buffer.MemoryCopy(parPtr + rowBase, (void*)w1.DataPointer, w1Bytes, w1Bytes);
-                        Buffer.MemoryCopy(parPtr + rowBase + chunk, (void*)w2.DataPointer, w1Bytes, w1Bytes);
-                        Buffer.MemoryCopy(parPtr + rowBase + 2 * chunk, (void*)w3.DataPointer, w1Bytes, w1Bytes);
+                        TransposeNormalizeChunk(parPtr + rowBase, (float*)w1.DataPointer, nh, inner);
+                        TransposeNormalizeChunk(parPtr + rowBase + chunk, (float*)w2.DataPointer, nh, inner);
+                        TransposeNormalizeChunk(parPtr + rowBase + 2 * chunk, (float*)w3.DataPointer, inner, nh);
 
                         long pixBytes = (long)pix * nh * sizeof(float);
                         Buffer.MemoryCopy(xnPtr + (long)t * pix * nh, (void*)xnPatch.DataPointer, pixBytes, pixBytes);
@@ -301,9 +304,10 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         return x0;
     }
 
-    /// <summary>Separable cosine positional basis over the P×P patch: feature[u·F+v](y, x) = cos(π·u·y)·cos(π·v·x)
-    /// with y, x ∈ linspace(0, 1, P). Formula validation-gated (research doc item 1).</summary>
-    internal static float[] BuildPositionalFeatures(int patchSize, int maxFreqs)
+    /// <summary>Damped separable cosine (DCT-like) positional basis over the P×P patch, matching ComfyUI's
+    /// <c>NerfEmbedder.fetch_pos</c>: feature[u·F+v](y, x) = cos(π·u·x)·cos(π·v·y) / (1 + u·v) with
+    /// y, x ∈ linspace(0, 1, P). Note the u↔x / v↔y pairing and the 1/(1+u·v) damping coefficient.</summary>
+    public static float[] BuildPositionalFeatures(int patchSize, int maxFreqs)
     {
         int pix = patchSize * patchSize;
         int features = maxFreqs * maxFreqs;
@@ -317,13 +321,33 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
                 int baseIdx = (py * patchSize + px) * features;
                 for (int u = 0; u < maxFreqs; u++)
                 {
-                    float cy = MathF.Cos(MathF.PI * u * yPos);
+                    float cx = MathF.Cos(MathF.PI * u * xPos);
                     for (int v = 0; v < maxFreqs; v++)
-                        result[baseIdx + u * maxFreqs + v] = cy * MathF.Cos(MathF.PI * v * xPos);
+                        result[baseIdx + u * maxFreqs + v] = cx * MathF.Cos(MathF.PI * v * yPos) / (1.0f + u * v);
                 }
             }
         }
         return result;
+    }
+
+    /// <summary>Converts one generated-parameter chunk (row-major [inDim, outDim] per ComfyUI's <c>view</c>) into a
+    /// backend-ready [outDim, inDim] weight, L2-normalizing each output unit's input-weight column
+    /// (<c>F.normalize(dim=-2)</c>, eps 1e-12) along the way.</summary>
+    private static void TransposeNormalizeChunk(float* chunk, float* dst, int inDim, int outDim)
+    {
+        for (int o = 0; o < outDim; o++)
+        {
+            float sumSq = 0f;
+            for (int i = 0; i < inDim; i++)
+            {
+                float v = chunk[(long)i * outDim + o];
+                sumSq += v * v;
+            }
+            float invNorm = 1.0f / MathF.Max(MathF.Sqrt(sumSq), 1e-12f);
+            long dstBase = (long)o * inDim;
+            for (int i = 0; i < inDim; i++)
+                dst[dstBase + i] = chunk[(long)i * outDim + o] * invNorm;
+        }
     }
 
     private void FillEmbedInput(Tensor embedInput, float* rgbPtr, float[] posFeat,
@@ -354,16 +378,12 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
                     dst[row + 0] = rgbPtr[rgbBase + off];
                     dst[row + 1] = rgbPtr[rgbBase + plane + off];
                     dst[row + 2] = rgbPtr[rgbBase + 2 * plane + off];
-                    Array.Copy(posFeat, pixIdx * posFeatures, ToManaged(dst, row + 3, posFeatures), 0, 0);
                     for (int f = 0; f < posFeatures; f++)
                         dst[row + 3 + f] = posFeat[pixIdx * posFeatures + f];
                 }
             }
         }
     }
-
-    // Placeholder shim so Array.Copy above is never used with unmanaged memory; the explicit loop does the copy.
-    private static float[] ToManaged(float* _, long __, int ___) => [];
 
     private static void CopyTokenRows(Tensor dst, Tensor imgTokens, int b, int tileStart, int tileCount,
         int seqLen, int tokenDim)
