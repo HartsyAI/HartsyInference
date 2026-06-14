@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SharpInference end-to-end benchmark harness.
+# HartsyInference end-to-end benchmark harness.
 #
 # Runs:
 #   1. Hardware + software fingerprinting → hardware.txt, software.txt, digests.txt
@@ -69,7 +69,7 @@ GPU_SLUG=$(echo "$GPU_NAME" \
     | sed 's/^-//;s/-$//')
 RUN_ID="run_${TIMESTAMP_UTC}_${GPU_SLUG}"
 
-STAGING="$(mktemp -d -t sharpinference_bench_XXXXXX)"
+STAGING="$(mktemp -d -t hartsyinference_bench_XXXXXX)"
 echo "[run_benchmarks] staging dir: $STAGING"
 trap 'rm -rf "$STAGING"' EXIT
 
@@ -108,14 +108,14 @@ echo "[1/6] Capturing hardware + software fingerprints..."
 
 {
     echo "## PTX SHA-256"
-    find src/SharpInference.Cuda/Ptx -name '*.ptx' 2>/dev/null | sort | xargs -r sha256sum
+    find src/HartsyInference.Cuda/Ptx -name '*.ptx' 2>/dev/null | sort | xargs -r sha256sum
     echo "## Native CUDA SHA-256"
     find native/cuda -name '*.cu' 2>/dev/null | sort | xargs -r sha256sum
 } > "$STAGING/digests.txt"
 
 # ── 2. C# build (Release) ───────────────────────────────────────────────────
-echo "[2/6] Building SharpInference.GpuBenchmarks (Release)..."
-dotnet build benchmarks/SharpInference.GpuBenchmarks/SharpInference.GpuBenchmarks.csproj -c Release \
+echo "[2/6] Building HartsyInference.GpuBenchmarks (Release)..."
+dotnet build benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj -c Release \
     -v minimal > "$STAGING/dotnet_build.log" 2>&1
 
 # ── 3. C# microbenchmarks ───────────────────────────────────────────────────
@@ -125,7 +125,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     FILTER='*MatMul*'
 fi
 
-dotnet run --no-build -c Release --project benchmarks/SharpInference.GpuBenchmarks -- \
+dotnet run --no-build -c Release --project benchmarks/HartsyInference.GpuBenchmarks -- \
     --filter "$FILTER" \
     --warmupCount 1 --iterationCount "$TRIALS" \
     --exporters json,markdown,csv \

@@ -91,7 +91,7 @@ Source: `Tongyi-MAI/Z-Image-Turbo/vae/config.json`.
 - `force_upcast: true` (decode in FP32 for stability).
 - No `quant_conv` / `post_quant_conv`.
 
-**Implication:** Existing Flux VAE in SharpInference works as-is. Reuse the same scale/shift constants.
+**Implication:** Existing Flux VAE in HartsyInference works as-is. Reuse the same scale/shift constants.
 
 ## Scheduler
 
@@ -162,11 +162,11 @@ layers.{0..29}.{ffn_norm1,ffn_norm2}.weight
 - Per-tensor handling at load: read dtype from safetensors header. If `F8_E4M3` → route through existing FP8 path (cast to F16 at GEMM time, or native FP8 GEMM on Ada+). Non-FP8 tensors will be in BF16 → existing BF16→F16 path.
 - **Text encoder and VAE must be supplied separately** (`qwen_3_4b.safetensors` + Flux VAE `ae.safetensors`), just like ComfyUI does.
 
-## Implementation strategy for SharpInference
+## Implementation strategy for HartsyInference
 
 1. **`ZImageConfig.cs`** — record with the fields above, `Turbo` static preset. Auto-detect via weight keys (`t_embedder.mlp.0.weight` + `cap_embedder.1.weight` + `all_x_embedder.2-1.weight` + 30 `layers.*` blocks).
 2. **`ZImageTransformer.cs`** — new top-level class. Cannot reuse `FluxTransformer` (different modulation count, sequence assembly, RoPE). Sub-components reusable: `SwiGluFfn`, `QkNorm`, `AdaLNModulation` (with 4-output config). New: `ZImageBlock`, `ZImageContextRefinerBlock`, `ZImageNoiseRefinerBlock`, `ZImageRope` (multi-axis [32,48,48], theta=256).
-3. **Qwen3-4B text encoder** — needed alongside (or in `SharpInference.LLM` if that's where Qwen lives). 36 layers, GQA 32→8, RoPE θ=1e6, RMSNorm, SwiGLU, tied embeddings. Apply Z-Image chat template + system prompt before tokenization.
+3. **Qwen3-4B text encoder** — needed alongside (or in `HartsyInference.LLM` if that's where Qwen lives). 36 layers, GQA 32→8, RoPE θ=1e6, RMSNorm, SwiGLU, tied embeddings. Apply Z-Image chat template + system prompt before tokenization.
 4. **VAE** — reuse existing Flux VAE path verbatim.
 5. **Scheduler** — extend flow-match Euler with static `shift=3.0`. No dynamic shifting branch.
 6. **`ZImageCheckpointConverter.cs`** — passthrough naming for diffusers/single-file format. Detect FP8Mix by dtype-inspecting `layers.0.attention.to_q.weight`.

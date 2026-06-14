@@ -23,7 +23,7 @@ Saved to `tests/python-reference/zimage_reference_tensors/inputs/{latent.bin, ca
 ### 1.1 Verify venv works with Z-Image
 
 ```bash
-cd /home/kalebbroo/Desktop/Projects/SharpInference
+cd /home/kalebbroo/Desktop/Projects/HartsyInference
 python3 -m venv tests/python-reference/.venv
 tests/python-reference/.venv/bin/pip install \
     "torch>=2.1" --index-url https://download.pytorch.org/whl/cu121
@@ -47,7 +47,7 @@ We need the **transformer subfolder only** (the 6 GB diffusers safetensors split
 tests/python-reference/.venv/bin/python -c "
 from huggingface_hub import snapshot_download
 snapshot_download('Tongyi-MAI/Z-Image-Turbo', allow_patterns=['transformer/*'],
-    local_dir='/home/kalebbroo/Desktop/Projects/SharpInference/tests/test-models/zimage-turbo')
+    local_dir='/home/kalebbroo/Desktop/Projects/HartsyInference/tests/test-models/zimage-turbo')
 "
 ```
 
@@ -322,7 +322,7 @@ Run order:
 tests/python-reference/.venv/bin/python tests/python-reference/dump_zimage_full_forward.py
 
 # 2. Run C# diff test (fast — synthetic inputs, no Qwen3)
-LD_LIBRARY_PATH=/tmp/cuda-libs dotnet test tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj \
+LD_LIBRARY_PATH=/tmp/cuda-libs dotnet test tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj \
     --filter "FullyQualifiedName~Transformer_Matches_PythonReference_LayerByLayer"
 
 # 3. Diff

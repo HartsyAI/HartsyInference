@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Video</PackageId>
+    <Description>Video generation for HartsyInference — LTX-Video, Wan, temporal attention, and video VAE. (Phase 3 — stub)</Description>
+    <RootNamespace>HartsyInference.Video</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+  </ItemGroup>
+
+</Project>

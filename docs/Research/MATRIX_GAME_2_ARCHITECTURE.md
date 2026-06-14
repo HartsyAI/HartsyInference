@@ -1,6 +1,6 @@
 # Matrix-Game 2.0 — Research Notes
 
-> Status: Complete (HF model card + GitHub source + paper + per-task configs captured; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: SharpInference.Interactive (Matrix-Game 2.0 pipeline, Phase 10)
+> Status: Complete (HF model card + GitHub source + paper + per-task configs captured; safetensors key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Interactive (Matrix-Game 2.0 pipeline, Phase 10)
 > Source of truth: [SkyworkAI/Matrix-Game GitHub](https://github.com/SkyworkAI/Matrix-Game/tree/main/Matrix-Game-2), [HF `Skywork/Matrix-Game-2.0`](https://huggingface.co/Skywork/Matrix-Game-2.0), [arXiv 2508.13009](https://arxiv.org/abs/2508.13009)
 > License: **MIT** (confirmed on HF model card and on the Matrix-Game-2 GitHub README)
 > Related: future `MATRIX_GAME_3_ARCHITECTURE.md` (the 5B sibling), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (flow-matching scheduler background), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md), [`FLUX_ARCHITECTURE.md`](FLUX_ARCHITECTURE.md) (AdaLN modulation lineage)
@@ -15,7 +15,7 @@ Real-time streaming is achieved by **(a)** converting the bidirectional DiT into
 
 The VAE is the **Wan2.1 3D causal VAE** (16 latent channels, **8 × 8 spatial / 4 × temporal** compression, 508 MB). Input image conditioning is dual: the input image is **VAE-encoded** (concatenated with the noisy latent along the channel dim → `in_dim = 36`) **and** passed through a frozen **CLIP-ViT-H/14 XLM-RoBERTa** encoder (4.77 GB) for "visual context" that is consumed by the I2V cross-attention. Action conditioning is **deterministic** (no learned router): every other denoising step, current-frame mouse deltas pass through an MLP and self-attention (acting like RoPE'd cross-attention over the spatial token grid) and keyboard one-hots pass through MLP + cross-attention.
 
-For SharpInference, Matrix-Game 2.0 is best treated as a **new `SharpInference.Interactive` package built on top of a Wan2.1-family DiT backbone** that will be shared with Matrix-Game 3.0 once we add it. The same DiT, RoPE, AdaLN, action-module, KV-cache, and Wan VAE primitives are reusable across both — only the backbone weights (1.3B vs 5B), action-block coverage (15 vs 30 blocks), and resolution (352×640 vs 1280×720) change.
+For HartsyInference, Matrix-Game 2.0 is best treated as a **new `HartsyInference.Interactive` package built on top of a Wan2.1-family DiT backbone** that will be shared with Matrix-Game 3.0 once we add it. The same DiT, RoPE, AdaLN, action-module, KV-cache, and Wan VAE primitives are reusable across both — only the backbone weights (1.3B vs 5B), action-block coverage (15 vs 30 blocks), and resolution (352×640 vs 1280×720) change.
 
 ## Detailed Findings
 
@@ -48,7 +48,7 @@ Plus the always-present shared sub-models in the HF repo:
 | `architecture.png` | 414 kB | The pipeline diagram. |
 | `model_index.json` | 46 B | `{"_class_name": "MatrixGame2I2VPipeline"}` — the diffusers `from_pretrained` entry point. |
 
-**Repository total = 27.9 GB**. The `xlm-roberta-large/` weights and the CLIP text tower can be skipped on disk for a minimal SharpInference install — we only need `Wan2.1_VAE.pth`, the CLIP image tower (~1.0 GB partial), and one distilled checkpoint.
+**Repository total = 27.9 GB**. The `xlm-roberta-large/` weights and the CLIP text tower can be skipped on disk for a minimal HartsyInference install — we only need `Wan2.1_VAE.pth`, the CLIP image tower (~1.0 GB partial), and one distilled checkpoint.
 
 ### 2. Backbone — `CausalWanModel` (Wan2.1 1.3B I2V, text branch removed)
 
@@ -290,7 +290,7 @@ Common scheduler settings (from `inference_yaml/*.yaml`):
   where the inner generator outputs are scored against the teacher's distribution via a separately trained critic.
 - Step-count progression in the paper: distilled first to **4 steps**, then further down to **3 steps** in deployment.
 
-**Implication for SharpInference:** we do NOT need to implement DMD training. We only need the discrete few-step Flow-Match inference loop with the warp-step remapping. This is ~50 lines of pipeline code.
+**Implication for HartsyInference:** we do NOT need to implement DMD training. We only need the discrete few-step Flow-Match inference loop with the warp-step remapping. This is ~50 lines of pipeline code.
 
 ### 6. Causal attention + rolling KV cache
 
@@ -374,7 +374,7 @@ The **streaming** variant (`CausalInferenceStreamingPipeline`) interleaves step 
 | Paper | arXiv 2506.18701 | **arXiv 2508.13009** (Aug 2025) | arXiv 2604.08995 (Apr 2026) |
 | License | MIT | **MIT** | MIT |
 
-**Reusable components between 2.0 and 3.0 in SharpInference:**
+**Reusable components between 2.0 and 3.0 in HartsyInference:**
 - ActionModule (identical class — only `keyboard_dim_in`, `mouse_dim_in` and `blocks` change).
 - `CausalWanModel` core: AdaLN, RoPE, qk-norm, flash-attn forward, FFN.
 - Rolling KV-cache primitive.
@@ -795,23 +795,23 @@ Source-of-truth files (canonical paths inside that subtree):
 
 ## Implementation Notes
 
-### How this maps to SharpInference packages
+### How this maps to HartsyInference packages
 
-Matrix-Game 2.0 motivates a **new `SharpInference.Interactive` NuGet package**. Suggested layout:
+Matrix-Game 2.0 motivates a **new `HartsyInference.Interactive` NuGet package**. Suggested layout:
 
-- **`SharpInference.Interactive`** (new) — adds:
+- **`HartsyInference.Interactive`** (new) — adds:
   - `Models/MatrixGame2/MatrixGame2Config.cs`, `Models/MatrixGame2/CausalWanModel.cs`, `Models/MatrixGame2/CausalWanBlock.cs`, `Models/MatrixGame2/ActionModule.cs`.
   - `Pipelines/MatrixGame2Pipeline.cs` (offline `Bench_actions_*` driver).
   - `Pipelines/MatrixGame2StreamingPipeline.cs` (interactive driver with `IActionStream` interface).
   - `Streaming/IActionStream.cs` — abstract input source (keyboard+mouse), pluggable for game-engine integration.
   - `Streaming/RollingKvCache.cs` — generic ring-buffer KV cache reusable for Matrix-Game 3.0 and any other causal-DiT model.
 
-- **`SharpInference.Diffusion`** (existing) — adds:
+- **`HartsyInference.Diffusion`** (existing) — adds:
   - `Models/Vae/Wan21VaeConfig.cs`, `Models/Vae/Wan21VaeEncoder.cs`, `Models/Vae/Wan21VaeDecoder.cs` (3D causal VAE, 16-channel, 8×8×4 compression). Design as `IWanVae` so Wan2.2 (Matrix-Game 3.0) can implement the same interface.
   - `Models/TextEncoders/OpenClipViTH14Image.cs` (image-only forward — text tower NOT needed).
   - `Schedulers/FlowMatchDmdScheduler.cs` — discrete-step Flow-Match with `warp_denoising_step` + `timestep_shift=5.0`. Reusable for any DMD-distilled flow model.
 
-- **`SharpInference.ModelHandler`** (existing) — adds:
+- **`HartsyInference.ModelHandler`** (existing) — adds:
   - `CheckpointConverters/MatrixGame2CheckpointConverter.cs` — loads one of `base_distill / gta_keyboard2dim / templerun_7dim_onlykey .safetensors`, splits into per-block buckets, separates `action_model.*` from `self_attn.*` / `cross_attn.*` / `ffn.*`, handles the dual mouse-path/keyboard-path projections.
   - `CheckpointConverters/Wan21VaePthConverter.cs` (or recommend offline conversion to `.safetensors`).
   - `CheckpointConverters/OpenClipViTH14CheckpointConverter.cs` — parse the 4.77 GB `.pth`, take only the visual tower (~1.0 GB FP16).
@@ -820,13 +820,13 @@ Matrix-Game 2.0 motivates a **new `SharpInference.Interactive` NuGet package**. 
 
 1. **3D Causal Convolution.** The Wan2.1 VAE uses `CausalConv3d` with a 2-frame cache (same family as Wan2.2 / Lance). Requires `IBackend.Conv3D(input, weight, bias, stride, padding, dilation)`. Naive `im2col + GEMM` is fine for v1; specialized streaming kernels follow. **Shared with future Wan / LTX video pipelines.**
 
-2. **Flex-attention block mask.** The `flex_attention(block_mask=causal_block_mask_per_block_of_3)` call needs an equivalent in SharpInference. First-pass: emit a precomputed dense bool mask and do padded dense attention; later, a true sparse / block-sparse attention kernel.
+2. **Flex-attention block mask.** The `flex_attention(block_mask=causal_block_mask_per_block_of_3)` call needs an equivalent in HartsyInference. First-pass: emit a precomputed dense bool mask and do padded dense attention; later, a true sparse / block-sparse attention kernel.
 
 3. **Rolling KV cache primitive.** Reusable `RollingKvCache<T>` data structure that supports `Insert(newK, newV)` with eviction-and-memcpy. The pattern in `action_module.py` (clone-shift the survivors forward then overwrite the tail) is straightforward — implement once as a generic kernel, reuse across all three caches (main self-attn, mouse self-attn, keyboard cross-attn).
 
 4. **CLIP cross-attention K/V one-shot fill.** `crossattn_cache[layer]` is filled on the first call and reused. Pipeline-level optimization, not a new kernel — just gate `cross_attn.k(visual_context)` and `cross_attn.v(visual_context)` behind a `null check`.
 
-5. **bf16 + fp16 mixed precision.** Weights/activations are bf16; the VAE decoder runs fp16 with `torch.compile(max-autotune-no-cudagraphs)`. SharpInference already supports both; ensure the autocast policy in the pipeline mirrors this (DiT → bf16, VAE decode → fp16).
+5. **bf16 + fp16 mixed precision.** Weights/activations are bf16; the VAE decoder runs fp16 with `torch.compile(max-autotune-no-cudagraphs)`. HartsyInference already supports both; ensure the autocast policy in the pipeline mirrors this (DiT → bf16, VAE decode → fp16).
 
 6. **3D RoPE (already partially in DiT primitives).** The main DiT's RoPE splits the 128-dim head into `(44, 42, 42)` for `(T, H, W)`. The action module's RoPE splits 64-dim into `(8, 28, 28)`. Both reduce to the same `apply_rotary_emb` primitive; only the freq-cache precompute differs.
 
@@ -894,7 +894,7 @@ Once Matrix-Game 3.0 lands:
 - Replace the 1.3B `CausalWanModel` with the 5B version (dim ≈ 3072, layers ≈ 30-ish, heads ≈ 24).
 - Action modules: same class, more blocks possibly.
 - Add: long-horizon memory retrieval module (camera-pose query → frozen memory bank K/V), frame self-correction loop (synthetic-frame re-injection during inference for drift correction).
-- Both Matrix-Game 2.0 and 3.0 can ship from the same `SharpInference.Interactive` package with a model-card discriminator.
+- Both Matrix-Game 2.0 and 3.0 can ship from the same `HartsyInference.Interactive` package with a model-card discriminator.
 
 ---
 

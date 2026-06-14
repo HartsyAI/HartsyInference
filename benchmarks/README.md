@@ -1,4 +1,4 @@
-# SharpInference Benchmarks
+# HartsyInference Benchmarks
 
 This directory holds the benchmarking infrastructure for [Phase B GPU performance optimization](../docs/Checklists/PHASE_B_GPU_PERFORMANCE.md). Read [`docs/Research/CUDA_PERFORMANCE_PLAN.md`](../docs/Research/CUDA_PERFORMANCE_PLAN.md) and [`docs/Research/PROFILING_METHODOLOGY.md`](../docs/Research/PROFILING_METHODOLOGY.md) before adding new benchmarks — the methodology is non-trivial.
 
@@ -31,9 +31,9 @@ benchmarks/
 ├── results/                                  ← committed result directories (raw data for the paper)
 │   ├── README.md
 │   └── run_*/
-├── SharpInference.Benchmarks/                ← legacy CPU benchmarks (existing; not Phase B)
-├── SharpInference.GpuBenchmarks/             ← C# GPU microbenchmarks via BenchmarkDotNet
-│   ├── SharpInference.GpuBenchmarks.csproj
+├── HartsyInference.Benchmarks/                ← legacy CPU benchmarks (existing; not Phase B)
+├── HartsyInference.GpuBenchmarks/             ← C# GPU microbenchmarks via BenchmarkDotNet
+│   ├── HartsyInference.GpuBenchmarks.csproj
 │   ├── BenchmarkConfig.cs                    ← shared BDN config (1 warmup, 5 trials)
 │   ├── BenchmarkFixture.cs                   ← CudaBackend + tensor allocation helpers
 │   ├── Program.cs
@@ -91,7 +91,7 @@ bash benchmarks/run_benchmarks.sh --skip-python
 bash benchmarks/profile.sh --test "FullyQualifiedName~Sdxl_GenerateImage_Gpu"
 
 # Run only one C# benchmark class
-dotnet run --no-build -c Release --project benchmarks/SharpInference.GpuBenchmarks -- \
+dotnet run --no-build -c Release --project benchmarks/HartsyInference.GpuBenchmarks -- \
     --filter '*Sdpa*' --warmupCount 1 --iterationCount 5
 
 # Run only one Python baseline (for debugging schema issues)
@@ -102,7 +102,7 @@ python3 benchmarks/python-baseline/bench_pytorch_matmul.py --output /tmp/test.cs
 
 - **Functional tests** (numerical correctness): those live under `tests/`. Benchmarks measure speed; tests measure math.
 - **Per-checkpoint reference dumps**: those live under `tests/python-reference/`.
-- **CPU benchmarks**: keep using `benchmarks/SharpInference.Benchmarks/` (existing, BDN-based).
+- **CPU benchmarks**: keep using `benchmarks/HartsyInference.Benchmarks/` (existing, BDN-based).
 
 ## When to add a new benchmark
 
@@ -115,4 +115,4 @@ When you add one, also add the matching Python script to `python-baseline/` so t
 
 ## License + reproducibility
 
-All result CSVs in `benchmarks/results/` are checked into the repository. They form the public reproducibility trail for the paper. The harness scripts (this directory) are part of the SharpInference MIT-licensed source distribution — re-run them on any compatible CUDA box to reproduce or refute our numbers.
+All result CSVs in `benchmarks/results/` are checked into the repository. They form the public reproducibility trail for the paper. The harness scripts (this directory) are part of the HartsyInference MIT-licensed source distribution — re-run them on any compatible CUDA box to reproduce or refute our numbers.

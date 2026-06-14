@@ -118,7 +118,7 @@ Keys follow Z-Image single-file naming: `x_embedder.*`, `layers.{0..29}.*`, `t_e
 | 9 | Zeta scheduler shift | Static 3.0 (Z-Image Turbo default) | ComfyUI model config |
 | 10 | Zeta pad tokens / SeqMultiOf in pixel mode | Same as Z-Image (32, learned pad tokens if present) | Checkpoint key dump |
 
-## Implementation Notes (SharpInference)
+## Implementation Notes (HartsyInference)
 
 - `ChromaTransformer` gained an internal `ForwardCore` (blocks only, no img embed / final norm / proj_out) so `ChromaRadianceTransformer` reuses the backbone without duplication. Classic `Forward` is unchanged.
 - `ChromaRadianceImagePatchifier` (conv patchify) and `ChromaRadianceNerfHead` live under `Models/Denoisers/DiTBlocks/`.

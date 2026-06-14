@@ -108,14 +108,14 @@ Highest-priority models; all target CUDA + Vulkan via `IBackend`.
 
 ### Interactive / World Models (Phase 10)
 
-Action-conditioned, real-time, frame-by-frame video generators — distinct from offline video diffusion. Take typed input events (keyboard scancodes, mouse deltas, gamepad sticks, camera pose) and emit a streamed frame per step. New `SharpInference.Interactive` package. See [INTERACTIVE_INFERENCE.md](../Research/INTERACTIVE_INFERENCE.md) for the cross-cutting foundation.
+Action-conditioned, real-time, frame-by-frame video generators — distinct from offline video diffusion. Take typed input events (keyboard scancodes, mouse deltas, gamepad sticks, camera pose) and emit a streamed frame per step. New `HartsyInference.Interactive` package. See [INTERACTIVE_INFERENCE.md](../Research/INTERACTIVE_INFERENCE.md) for the cross-cutting foundation.
 
 | Model | Org | License | Notes |
 |---|---|---|---|
 | **Matrix-Game 3.0** | Skywork | Apache-2.0 | 5B (+ 28B MoE variant), 720p @ 40 FPS, memory-augmented DiT finetuned from Wan2.2-TI2V-5B. Flagship; shares VAE with Lance video. See [MATRIX_GAME_3_ARCHITECTURE.md](../Research/MATRIX_GAME_3_ARCHITECTURE.md). |
 | **Matrix-Game 2.0** | Skywork | MIT | 1.8B, 540p @ 25 FPS, real-time on 12 GB GPUs. SkyReels-V2/Wan lineage. Entry-level world model. See [MATRIX_GAME_2_ARCHITECTURE.md](../Research/MATRIX_GAME_2_ARCHITECTURE.md). |
 | **Oasis-500m** | Decart + Etched | MIT | Tiny (~500M), autoregressive frame-by-frame Minecraft world model. Likely uses a discrete video tokenizer (VQ family). Pedagogical / CI smoke test. See [OASIS_ARCHITECTURE.md](../Research/OASIS_ARCHITECTURE.md). |
-| **Hunyuan-GameCraft 1.0** | Tencent | Tencent Hunyuan Community **(RESTRICTED)** | 13B, 704×1216 @ 33 frames, keyboard + camera-pose actions, hybrid history conditioning. **License forbidden in EU/UK/SK + 100M MAU cap.** Optional — gated on user license acceptance; SharpInference does not bundle weights. See [HUNYUAN_GAMECRAFT_ARCHITECTURE.md](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md). |
+| **Hunyuan-GameCraft 1.0** | Tencent | Tencent Hunyuan Community **(RESTRICTED)** | 13B, 704×1216 @ 33 frames, keyboard + camera-pose actions, hybrid history conditioning. **License forbidden in EU/UK/SK + 100M MAU cap.** Optional — gated on user license acceptance; HartsyInference does not bundle weights. See [HUNYUAN_GAMECRAFT_ARCHITECTURE.md](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md). |
 
 **Considered + deferred** (not in v1 of Phase 10):
 - **DIAMOND** (Alonso et al., MIT) — small (~381M) research-grade Atari / CS:GO world models. Useful as a reference for action-conditioning correctness but too narrow for shipping.
@@ -145,7 +145,7 @@ Action-conditioned, real-time, frame-by-frame video generators — distinct from
 - **NVIDIA Eagle 2** — multi-vision-encoder fusion (CLIP + SigLIP + DINOv2 + SAM)
 
 ### Other
-- Any model expressible with SharpInference's op set
+- Any model expressible with HartsyInference's op set
 - ONNX passthrough for unsupported architectures
 
 ---

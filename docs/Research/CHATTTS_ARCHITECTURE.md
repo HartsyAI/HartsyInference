@@ -1,6 +1,6 @@
 # ChatTTS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (ChatTTS pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (ChatTTS pipeline)
 
 ## Summary
 
@@ -577,7 +577,7 @@ First-yield happens after batch 3 (~3 * 12000 = 36000 samples worth of generated
 - [ ] Streaming overlap-and-discard exact window sizes for both Decoder and Vocos at chunk boundaries. The reference implementation may use a fixed `pad_left`/`pad_right` rather than a true overlap-add.
 - [ ] Whether the `decoder.yaml` `vq_config: null` means the Decoder-path takes embeddings directly (no quantization), and the GFSQ in `dvae.yaml` is only for the round-trip encode path. Reading `core.py` suggests yes; confirm.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **LlamaModel is standard.** We will have already built a causal LLaMA implementation for dotLLM (RoPE + RMSNorm + SwiGLU FFN, KV cache). The GPT here is a stock LLaMA with hidden=768, layers=20, heads=12 — reuse the dotLLM Llama block directly. The only ChatTTS-specific wrapper is:
    - Replace `emb_tokens` with a switchable `emb_text` (21178x768) + 4x `emb_code[i]` (626x768 each). At each step pick the right embedding table based on which mode we're in.
@@ -596,31 +596,31 @@ First-yield happens after batch 3 (~3 * 12000 = 36000 samples worth of generated
    ```
    block(x) = x + pointwise_conv(GELU(GroupNorm(depthwise_conv_d(x))))
    ```
-   with depthwise kernel=7 and dilation per-block doubling from 1 up to 2^11. Bottleneck projects to `bn_dim=128` mid-block. Final `Conv1d(384, 100, 1)` projects to mel. Build this as `SharpInference.Audio/Modules/DvaeDecoder.cs`.
+   with depthwise kernel=7 and dilation per-block doubling from 1 up to 2^11. Bottleneck projects to `bn_dim=128` mid-block. Final `Conv1d(384, 100, 1)` projects to mel. Build this as `HartsyInference.Audio/Modules/DvaeDecoder.cs`.
 
-5. **GFSQ for cloning path (optional v2).** Group-Residual Finite Scalar Quantization. The encoder maps mel -> 1024-dim latent -> reshape to `(G=2, R=2, 4)` where 4 is the FSQ-dim and the levels are `[5,5,5,5]`. FSQ quantization is `round(tanh(z) * (L-1)/2) -> int in [-(L-1)/2, (L-1)/2]`. Decode by reversing. Implement as `SharpInference.Audio/Modules/GroupedResidualFSQ.cs` — see [AUDIO_CODECS.md](AUDIO_CODECS.md) for the math.
+5. **GFSQ for cloning path (optional v2).** Group-Residual Finite Scalar Quantization. The encoder maps mel -> 1024-dim latent -> reshape to `(G=2, R=2, 4)` where 4 is the FSQ-dim and the levels are `[5,5,5,5]`. FSQ quantization is `round(tanh(z) * (L-1)/2) -> int in [-(L-1)/2, (L-1)/2]`. Decode by reversing. Implement as `HartsyInference.Audio/Modules/GroupedResidualFSQ.cs` — see [AUDIO_CODECS.md](AUDIO_CODECS.md) for the math.
 
 6. **Vocos reuses existing code.** We have a Vocos implementation planned for F5-TTS and other models — see [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) Vocos section. Same exact config (input_channels=100, dim=512, num_layers=8, intermediate_dim=1536, iSTFTHead with n_fft=1024, hop=256). Single shared Vocos module across ChatTTS / F5-TTS / Kokoro (note: Kokoro uses iSTFTNet not Vocos — different module).
 
-7. **Tokenizer:** BertTokenizerFast is HF's WordPiece, not BPE. We need a pure-C# WordPiece tokenizer that supports Chinese character-splitting and 61 additional special tokens. Plan: a generic WordPiece in `SharpInference.Core/Tokenization/WordPieceTokenizer.cs`. The `tokenizer.json` from the HF tokenizer directory contains the full vocab + merge rules + special token list — parse once at load time.
+7. **Tokenizer:** BertTokenizerFast is HF's WordPiece, not BPE. We need a pure-C# WordPiece tokenizer that supports Chinese character-splitting and 61 additional special tokens. Plan: a generic WordPiece in `HartsyInference.Core/Tokenization/WordPieceTokenizer.cs`. The `tokenizer.json` from the HF tokenizer directory contains the full vocab + merge rules + special token list — parse once at load time.
 
 8. **Special token handling:** `[spk_emb]` is a single token ID that needs to be located in the encoded sequence (one or more positions); the embedding at that position is replaced. Cache the ID at tokenizer-load time. Same for `[empty_spk]`. All `[break_X]`, `[laugh_X]`, `[oral_X]`, `[speed_X]` are normal tokens that go through the embedding table — no special handling beyond standard tokenization.
 
 9. **Speaker latent transport:** Implement base16384 + LZMA2 codec so users can paste/share voice strings. .NET has `System.IO.Compression` but no LZMA — use `LZMA-SDK` or `SharpCompress` (already an indirect dep via the safetensors loader? verify). base16384 is unusual — port the ~50 lines from pybase16384 to C#. Keep it pure-C# (no native deps).
 
-10. **Sampling:** Each of the 4 audio heads samples *independently* per step with temperature=0.3, top_k=20, top_p=0.7, repetition_penalty=1.05. Use the shared `SharpInference.Core.Sampling.LogitsSampler` — no special ChatTTS-only sampler needed. Repetition penalty: track the last N (N=64? confirm) generated tokens per codebook; multiply logits of those tokens by `1/1.05` before top-k.
+10. **Sampling:** Each of the 4 audio heads samples *independently* per step with temperature=0.3, top_k=20, top_p=0.7, repetition_penalty=1.05. Use the shared `HartsyInference.Core.Sampling.LogitsSampler` — no special ChatTTS-only sampler needed. Repetition penalty: track the last N (N=64? confirm) generated tokens per codebook; multiply logits of those tokens by `1/1.05` before top-k.
 
 11. **Streaming requires chunked Decoder + Vocos.** Plan: a `ChatTtsStreamingSession` that owns the GPT KV-cache, a ring buffer of recent audio tokens (size = chunk + overlap), and a callback fired on each chunk. The first 2 chunks are computed but suppressed; from chunk 3 onward each new chunk is decoded with an overlap window, the leading samples of the Decoder output are dropped, and the rest is yielded. Same overlap/discard pattern for Vocos (centered STFT has reflective padding artifacts).
 
 12. **Speaker stat loading:** `spk_stat.pt` is a tiny PyTorch pickle. Either ship a pre-converted `spk_stat.bin` (raw 2x768 float16, 3 KB) at model packaging time, or implement a minimal pickle reader for the float16 tensor case. Recommend pre-conversion.
 
-13. **Determinism:** RNG for speaker sampling and for sampling tokens uses PyTorch's Mersenne Twister. We need bit-exact reproducibility against the reference for validation. Plan: use a SharpInference-specific seedable PRNG and only compare final waveforms within an audio-quality tolerance (PESQ > 4.0, mel-cepstral distance < 1.0) — bit-exact PyTorch RNG reproduction is not worth the effort.
+13. **Determinism:** RNG for speaker sampling and for sampling tokens uses PyTorch's Mersenne Twister. We need bit-exact reproducibility against the reference for validation. Plan: use a HartsyInference-specific seedable PRNG and only compare final waveforms within an audio-quality tolerance (PESQ > 4.0, mel-cepstral distance < 1.0) — bit-exact PyTorch RNG reproduction is not worth the effort.
 
 14. **Validation tolerances:**
     - GPT logits: cosine similarity > 0.9999 vs reference at FP32, > 0.999 at FP16.
     - Decoder mel output: mean abs error < 0.01 dB per mel bin vs reference.
     - Vocos waveform: PCM MAE < 1e-3 at FP32, < 5e-3 at FP16. PESQ vs reference > 4.2.
-    - End-to-end: mel-cepstral distance < 0.5 between SharpInference output and PyTorch output for the same text + seed.
+    - End-to-end: mel-cepstral distance < 0.5 between HartsyInference output and PyTorch output for the same text + seed.
 
 15. **Memory budget at FP16:**
     - GPT weights: ~440 MB

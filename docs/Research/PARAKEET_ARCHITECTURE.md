@@ -1,6 +1,6 @@
 # NVIDIA Parakeet (CTC / RNN-T / TDT) — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Parakeet pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Parakeet pipeline)
 
 ## Summary
 
@@ -314,7 +314,7 @@ Two regularizers from the paper, both implemented in NeMo:
 - **Sigma trick** (`tdt_loss_kwargs.sigma`, typical 0.02–0.05): per-transition logit under-normalization. Each transition's contribution to the lattice is multiplied by `exp(-sigma)`. Because paths with more transitions accumulate more `sigma` penalty, the model is biased toward fewer, longer-duration transitions. This is what trains the model to actually *use* the duration head instead of always picking `d=1`.
 - **Omega weight** (`tdt_loss_kwargs.omega`, typical 0.1): a small RNN-T loss term added to the TDT loss to stabilise training.
 
-These don't matter at inference; SharpInference only needs the forward pass and the decode loop.
+These don't matter at inference; HartsyInference only needs the forward pass and the decode loop.
 
 #### 5.4 TDT greedy decoding loop (the inference algorithm)
 
@@ -373,7 +373,7 @@ All English Parakeet models use a **SentencePiece** tokenizer trained on the mod
 | Parakeet-TDT-0.6B-v2 | SentencePiece BPE | ~1,024 | blank; tokenizer emits mixed-case + punctuation directly |
 | Parakeet-TDT-0.6B-v3 | SentencePiece Unigram (unified, multilingual) | **8,192** | blank |
 
-The tokenizer model file lives inside the `.nemo` archive as `tokenizer.model` (the SentencePiece binary) plus `vocab.txt` (the human-readable vocab). SharpInference already needs SentencePiece for other models (T5, etc.); we reuse that loader. Important detail: **no language IDs**, no special start/end-of-transcript tokens. Output is plain token IDs in `[0, V-1]`, blank is `V`.
+The tokenizer model file lives inside the `.nemo` archive as `tokenizer.model` (the SentencePiece binary) plus `vocab.txt` (the human-readable vocab). HartsyInference already needs SentencePiece for other models (T5, etc.); we reuse that loader. Important detail: **no language IDs**, no special start/end-of-transcript tokens. Output is plain token IDs in `[0, V-1]`, blank is `V`.
 
 For v3 (multilingual), there's no language token either — the encoder/decoder identify language implicitly from acoustics + LM context.
 
@@ -518,7 +518,7 @@ Cross-reference [STREAMING_AUDIO_INFERENCE.md](STREAMING_AUDIO_INFERENCE.md) (pl
 
 **Step**: ingest a chunk of `chunk_size + right_context` mel frames → run subsampler over the new region → for each block, prepend cached K/V to current chunk's K/V, run windowed attention, run causal conv with prepended conv cache, update caches.
 
-NeMo also publishes a fully-streaming model `nvidia/nemotron-speech-streaming-en-0.6b` that bakes these choices in. For SharpInference's first Parakeet release, offline TDT is enough; streaming is a follow-up that adds maybe 200 LoC to the existing block + a state object.
+NeMo also publishes a fully-streaming model `nvidia/nemotron-speech-streaming-en-0.6b` that bakes these choices in. For HartsyInference's first Parakeet release, offline TDT is enough; streaming is a follow-up that adds maybe 200 LoC to the existing block + a state object.
 
 The decoder side (RNN-T / TDT) is already stateful and naturally streams — you just keep `(LSTM state, last_token)` between chunks and call the joint network whenever fresh encoder frames arrive.
 
@@ -571,7 +571,7 @@ The key story: **Parakeet-CTC/TDT delivers 30-100x the throughput of Whisper-lar
 | English WER | 6.43 (avg) | 6.05 (avg) |
 | RTFx (A100 b=128) | 69 | 3,386 |
 
-For SharpInference, Whisper remains the multilingual choice and Parakeet becomes the high-throughput English (and multi-EU) choice. The two models share the mel preprocessor (modulo `n_fft` 400 vs 512 and Whisper's `(x+4)/4` vs Parakeet's per-feature z-score), so the audio frontend is reusable with parameter swaps.
+For HartsyInference, Whisper remains the multilingual choice and Parakeet becomes the high-throughput English (and multi-EU) choice. The two models share the mel preprocessor (modulo `n_fft` 400 vs 512 and Whisper's `(x+4)/4` vs Parakeet's per-feature z-score), so the audio frontend is reusable with parameter swaps.
 
 ### 11. C# Implementation Notes
 
@@ -598,7 +598,7 @@ What we already have when Parakeet lands (assuming Whisper and Kokoro are done):
 - **Greedy TDT/RNN-T decoder**: ~120 LoC including the state-management and safety guards.
 - **Tokenizer wiring + post-processing** (mixed case for v2): ~50 LoC.
 
-Total new SharpInference.Audio.Parakeet surface: roughly **2200 LoC** plus shared infrastructure (LSTM kernel from Kokoro, rel-pos MHA reusable for any future Conformer).
+Total new HartsyInference.Audio.Parakeet surface: roughly **2200 LoC** plus shared infrastructure (LSTM kernel from Kokoro, rel-pos MHA reusable for any future Conformer).
 
 #### 11.2 `.nemo` file format
 
@@ -616,7 +616,7 @@ vocab.txt               # Human-readable vocab (optional)
 Two viable approaches:
 
 1. **Direct `.nemo` loading**: tar extractor (.NET has `System.Formats.Tar.TarReader`) + a torch-pickle reader (~1500 LoC of Python opcode interpretation, equivalent to ggerganov/llama.cpp's approach for `.pth`). Doable but unfun; we'd be one of very few C# projects that parses pickled tensors.
-2. **Use the HF safetensors mirrors** where they exist: e.g. `istupakov/parakeet-tdt-0.6b-v3-onnx`, `NexaAI/parakeet-tdt-0.6b-v2-MLX`, `FluidInference/parakeet-tdt-0.6b-v3-coreml`. The MLX and ONNX ports include `safetensors` weight files. We can build a one-time *conversion* tool (Python or PyTorch C# port via TorchSharp staged for conversion only) that produces a `.safetensors + config.json + tokenizer.model` triple. Loaders for those formats already exist in SharpInference.
+2. **Use the HF safetensors mirrors** where they exist: e.g. `istupakov/parakeet-tdt-0.6b-v3-onnx`, `NexaAI/parakeet-tdt-0.6b-v2-MLX`, `FluidInference/parakeet-tdt-0.6b-v3-coreml`. The MLX and ONNX ports include `safetensors` weight files. We can build a one-time *conversion* tool (Python or PyTorch C# port via TorchSharp staged for conversion only) that produces a `.safetensors + config.json + tokenizer.model` triple. Loaders for those formats already exist in HartsyInference.
 
 **Recommendation**: ship a small **conversion script** (Python, separate from the C# runtime) that takes a `.nemo` URL or path and produces a `parakeet/<variant>/{model.safetensors, config.json, tokenizer.model}` directory. The C# runtime never sees pickle. This is the same path we took for Whisper (HF safetensors) and matches the project rule "pure C# only" — the conversion is a one-off offline step, not part of inference.
 
@@ -656,4 +656,4 @@ As of the Open ASR Leaderboard 2026 expansion ([arXiv:2510.06961v4](https://arxi
 - **Multilingual ranking** (added 2025): Parakeet-TDT-0.6B-v3 covers 25 EU langs at the same RTFx as v2; Canary-1B-v2 also does 25 at ~6x lower RTFx but better WER; Whisper-large-v3 covers 99 at 50x lower RTFx. For non-EU languages, no member of the Parakeet family is competitive — fall back to Whisper.
 - **Long-form track** (audios > 30 min): Parakeet's full-attention XL handles ~24 min single-pass; its local-attention mode reaches ~3 h. Whisper's 30 s windowing + hallucination tendency makes it weaker on long form despite multilingual coverage.
 
-For SharpInference's positioning: **Parakeet-TDT-0.6B-v2 is the default high-throughput English path; Parakeet-TDT-0.6B-v3 is the default high-throughput EU-multilingual path; Whisper-large-v3 remains the long-tail multilingual path.** All three share our FastConformer + Whisper-encoder + mel infrastructure once §2 lands.
+For HartsyInference's positioning: **Parakeet-TDT-0.6B-v2 is the default high-throughput English path; Parakeet-TDT-0.6B-v3 is the default high-throughput EU-multilingual path; Whisper-large-v3 remains the long-tail multilingual path.** All three share our FastConformer + Whisper-encoder + mel infrastructure once §2 lands.

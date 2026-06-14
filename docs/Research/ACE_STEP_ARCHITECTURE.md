@@ -1,6 +1,6 @@
 # ACE-Step — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (ACE-Step pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (ACE-Step pipeline)
 
 ## Table of Contents
 
@@ -12,7 +12,7 @@
 6. [Reference Implementations](#6-reference-implementations)
 7. [Differences Between Implementations](#7-differences-between-implementations)
 8. [Open Questions](#8-open-questions)
-9. [Implementation Notes for SharpInference](#9-implementation-notes-for-sharpinference)
+9. [Implementation Notes for HartsyInference](#9-implementation-notes-for-hartsyinference)
 
 ---
 
@@ -25,7 +25,7 @@
 
 Both generations share: UMT5 text encoder, 32k-context RoPE (θ=1e6), in/out 8-channel latents (v1) or 192-channel pre-quant features (v1.5), structured-lyric tags (`[verse]`, `[chorus]`, `[bridge]`, `[instrumental]`, …), 50+ language support, and a flow-matching scheduler with shift=3.0 (v1) or learned `(μ=-0.4, σ=1.0)` timestep distribution (v1.5).
 
-For SharpInference, the **v1 3.5B model is the implementation target first**: its component boundaries are clean (UMT5 text encoder + Conformer lyric encoder + DiT + DCAE + HiFiGAN vocoder), it reuses UMT5 (already in SharpInference for AuraFlow) and a flow-match Euler scheduler (already in SharpInference for Flux/SD3). v1.5 should follow once Qwen3-style decoder LM + FSQ vocoder are scoped — those are dotLLM territory plus a new audio codec component.
+For HartsyInference, the **v1 3.5B model is the implementation target first**: its component boundaries are clean (UMT5 text encoder + Conformer lyric encoder + DiT + DCAE + HiFiGAN vocoder), it reuses UMT5 (already in HartsyInference for AuraFlow) and a flow-match Euler scheduler (already in HartsyInference for Flux/SD3). v1.5 should follow once Qwen3-style decoder LM + FSQ vocoder are scoped — those are dotLLM territory plus a new audio codec component.
 
 This file covers ACE-Step architecture, weights, conditioning, and inference. The shared flow-matching mathematics live in [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md). The HiFiGAN vocoder family used by both generations is documented in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). UMT5 details live with the AuraFlow text-encoder notes ([TEXT_ENCODERS.md](TEXT_ENCODERS.md)).
 
@@ -78,7 +78,7 @@ ACE-Step-v1-3.5B/
 | `acestep-5Hz-lm-1.7B` | 1.7B | Balanced |
 | `acestep-5Hz-lm-4B` | 4B | Strong composition + audio understanding |
 
-These LMs take a free-form user request, emit a structured song blueprint (genre tags, lyrics with structure markers, BPM, key), and hand it to the DiT/decoder. They are pure dotLLM work — SharpInference only needs to consume the resulting structured prompt.
+These LMs take a free-form user request, emit a structured song blueprint (genre tags, lyrics with structure markers, BPM, key), and hand it to the DiT/decoder. They are pure dotLLM work — HartsyInference only needs to consume the resulting structured prompt.
 
 #### GGUF quantizations (community)
 
@@ -160,7 +160,7 @@ x ── RMSNorm(elementwise_affine=False, eps=1e-6) (norm1)
   └─► residual add
 ```
 
-AdaLN modulation = **6 chunks per block** (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp), produced by `self.scale_shift_table` indexed by the timestep embedding. This is the same pattern as PixArt-α/Sana/Lumina, so SharpInference can reuse its existing `AdaLNZero6` modulation kernel.
+AdaLN modulation = **6 chunks per block** (shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp), produced by `self.scale_shift_table` indexed by the timestep embedding. This is the same pattern as PixArt-α/Sana/Lumina, so HartsyInference can reuse its existing `AdaLNZero6` modulation kernel.
 
 RoPE: `Qwen2RotaryEmbedding(dim=128, max_position_embeddings=32768, base=1_000_000.0)`. Same RoPE flavor as Qwen2 / Lumina-Next. Independent RoPE caches for self-attention (audio-latent positions) and cross-attention (text + lyric positions).
 
@@ -209,7 +209,7 @@ ConformerEncoder(
 proj = Linear(1024, 2560)
 ```
 
-Conformer = self-attn + depthwise-conv + macaron FFN — the standard ESPnet/wenet Conformer block. SharpInference does not have one yet (Whisper uses a plain transformer); this is new code.
+Conformer = self-attn + depthwise-conv + macaron FFN — the standard ESPnet/wenet Conformer block. HartsyInference does not have one yet (Whisper uses a plain transformer); this is new code.
 
 #### SSL alignment heads (training only — safe to omit at inference)
 
@@ -222,7 +222,7 @@ projectors = nn.ModuleList([
 # Cosine-embedding loss against frozen MERT / m-HuBERT features at training time.
 ```
 
-These exist in the safetensors but contribute no compute at inference; SharpInference can skip projecting and drop the weights.
+These exist in the safetensors but contribute no compute at inference; HartsyInference can skip projecting and drop the weights.
 
 ### 2.3 Music DCAE (`music_dcae_f8c8/config.json`, verbatim)
 
@@ -353,7 +353,7 @@ Same fields, but: `hidden_size=2560`, `intermediate_size=9728`, `num_hidden_laye
 - **Sliding pool of 5 frames** (`pool_window_size=5`) — explicit temporal pooling to keep the audio sequence manageable; rate of decoder tokens ≈ 5 Hz (matches the "5Hz" branding of the planner LMs).
 - **Turbo variants** flip `is_turbo: true`. CFG is disabled in turbo (matches v1 turbo behaviour); only 8 sampling steps.
 
-For SharpInference v1.5 work, treat the decoder as **a dotLLM-class causal transformer with a custom audio-token output head** rather than as a diffusion model. The FSQ decode step (token → continuous → vocoder → waveform) is the only piece that needs SharpInference.Audio code; the rest is dotLLM.
+For HartsyInference v1.5 work, treat the decoder as **a dotLLM-class causal transformer with a custom audio-token output head** rather than as a diffusion model. The FSQ decode step (token → continuous → vocoder → waveform) is the only piece that needs HartsyInference.Audio code; the rest is dotLLM.
 
 ### 2.6 UMT5-base text encoder (v1 and v1.5)
 
@@ -411,7 +411,7 @@ The structure tags are **plain bracketed strings tokenized via BPE** — there a
 
 Modifiers can be inline: `[Chorus - anthemic]`, `[Verse - whispered]`. Treated as part of the tag string.
 
-For phonemic conversion of non-Latin scripts (Chinese, Japanese, Korean) the official pipeline runs **G2P preprocessing** before VoiceBpe — same convention as SongGen. SharpInference can either bundle pyphonemes-equivalent G2P or expect callers to pre-phonemize.
+For phonemic conversion of non-Latin scripts (Chinese, Japanese, Korean) the official pipeline runs **G2P preprocessing** before VoiceBpe — same convention as SongGen. HartsyInference can either bundle pyphonemes-equivalent G2P or expect callers to pre-phonemize.
 
 ### 2.8 Conditioning inputs summary
 
@@ -917,7 +917,7 @@ def apg_forward(pred_cond, pred_uncond, scale, momentum_buf,
 ### Underlying components
 
 - **DCAE** (Sana) — NVIDIA's Deep Compression Autoencoder; HF `mit-han-lab/dc-ae-f32c32-sana-1.0` etc.
-- **UMT5** — `google/umt5-base` (already used by AuraFlow in SharpInference)
+- **UMT5** — `google/umt5-base` (already used by AuraFlow in HartsyInference)
 - **MERT** — `m-a-p/MERT-v1-330M` (training-only target)
 - **m-HuBERT** — `utter-project/mHuBERT-147` (training-only target)
 - **VoiceBpeTokenizer** — vendored from XTTS-v2 (`coqui-ai/TTS`)
@@ -950,7 +950,7 @@ Different community workflows default to different schedulers. The official pipe
 
 ### v1 vs v1.5 — fundamentally different inference
 
-v1 is a continuous-latent flow-matching DiT (diffusers-style). v1.5 is a Qwen3-style decoder over FSQ tokens. They share UMT5, structured lyrics, and the general "music generation" UX, but the inference code is not interchangeable. SharpInference will need two distinct pipelines.
+v1 is a continuous-latent flow-matching DiT (diffusers-style). v1.5 is a Qwen3-style decoder over FSQ tokens. They share UMT5, structured lyrics, and the general "music generation" UX, but the inference code is not interchangeable. HartsyInference will need two distinct pipelines.
 
 ### Stereo handling
 
@@ -961,7 +961,7 @@ The DCAE config says `in_channels=2`, suggesting joint stereo at the latent leve
 ## 8. Open Questions
 
 - **Lyric embedding vocab size** — 6681 (code) vs 6693 (config). Verify by inspecting `lyric_embs.weight` shape in `diffusion_pytorch_model.safetensors`. Implementation must match the actual tensor shape.
-- **Speaker encoder identity** — v1 takes a 512-d pre-computed speaker vector but the repo does not ship the encoder that produces it. Is it RawNet3? ECAPA-TDNN? WavLM-based? For v1 SharpInference can support either "no speaker" (zero vector) or "pre-supplied vector"; producing speaker vectors from a reference audio file is **out of scope** until the upstream encoder is identified.
+- **Speaker encoder identity** — v1 takes a 512-d pre-computed speaker vector but the repo does not ship the encoder that produces it. Is it RawNet3? ECAPA-TDNN? WavLM-based? For v1 HartsyInference can support either "no speaker" (zero vector) or "pre-supplied vector"; producing speaker vectors from a reference audio file is **out of scope** until the upstream encoder is identified.
 - **Exact APG parameters** in production — defaults are `momentum=-0.75, threshold=2.5, eta=0.0`, but the README's recommended preset and ComfyUI's "quality" preset may differ. Replicate's hosted version uses `momentum=-0.5` per some forks.
 - **DCAE pipeline-scale provenance** — `0.1786` and `-1.9091` look like empirical stats of a held-out audio distribution; confirm whether they were computed once over a calibration set or learned. Either way, treat them as constants.
 - **Conformer layer count** — code is parametric but only `num_lyric_encoder_hidden_layers=8` from v1.5 confirms; the v1 default is unstated. Inspect the safetensors keys to count blocks directly.
@@ -973,7 +973,7 @@ The DCAE config says `in_channels=2`, suggesting joint stereo at the latent leve
 
 ---
 
-## 9. Implementation Notes for SharpInference
+## 9. Implementation Notes for HartsyInference
 
 ### What we already have
 
@@ -985,7 +985,7 @@ The DCAE config says `in_channels=2`, suggesting joint stereo at the latent leve
 
 ### What we need to build
 
-1. **GLUMBConv FFN** — gated MBConv-style FFN with depthwise-separable conv + SiLU gate. New op for SharpInference. Sana / EfficientViT use the same block, so it's worth landing as a reusable `GLUMBConv` layer rather than ACE-Step-specific code.
+1. **GLUMBConv FFN** — gated MBConv-style FFN with depthwise-separable conv + SiLU gate. New op for HartsyInference. Sana / EfficientViT use the same block, so it's worth landing as a reusable `GLUMBConv` layer rather than ACE-Step-specific code.
 2. **EfficientViTBlock** — multi-scale linear-attention block used in the deepest DCAE stages. Standard for Sana-family. Implementable on top of our existing scaled-dot-product attention with a lightweight multi-scale projection wrapper.
 3. **Conformer encoder** — 8-layer Conformer block (macaron FFN + multi-head self-attn + depthwise conv + macaron FFN). Doesn't exist yet (Whisper uses a plain transformer). Reusable elsewhere (FunASR, SenseVoice, future ASR work).
 4. **VoiceBpeTokenizer** — port the XTTS-v2 BPE merge table + multilingual support. Should live in a shared text-tokenization module; can be reused by SongGen, XTTS, or any other vocoder-conditioning model that adopts it.
@@ -1007,7 +1007,7 @@ The DCAE config says `in_channels=2`, suggesting joint stereo at the latent leve
 7. **End-to-end pipeline** — chain it all together. Validate against a published seed/prompt → known waveform (tolerance: PESQ > 3.5 vs reference).
 8. **Quantization** — wire up GGUF Q4/Q8 loading paths through the existing GGUF backend. Verify perceptual quality.
 9. **Edit / repaint / cover modes** — flow-edit mask-aware loop on top of the basic generation path.
-10. **v1.5 2B turbo** — second pipeline. Largely orthogonal; touches dotLLM for the decoder and SharpInference.Audio for the FSQ → mel → wav path.
+10. **v1.5 2B turbo** — second pipeline. Largely orthogonal; touches dotLLM for the decoder and HartsyInference.Audio for the FSQ → mel → wav path.
 
 ### Validation strategy
 
@@ -1024,11 +1024,11 @@ The DiT's hidden activation at peak is roughly `(1, F_lat, 2560)` for the audio 
 
 ### Package routing
 
-- `SharpInference.Audio.AceStep` — new sub-namespace for the v1 pipeline (DiT, DCAE, ADaMoS vocoder, lyric preprocessor, edit modes).
-- `SharpInference.Diffusion.Schedulers` — extend with `FlowMatchPingPongScheduler` (already has Euler / Heun for v1).
-- `SharpInference.TextEncoders.UMT5` — reuse (already present for AuraFlow).
-- `SharpInference.Audio.Vocoders` — extend with ADaMoSHiFiGANV1; shared with future Stable-Audio-Open / Suno-style vocoders.
-- `SharpInference.Audio.Codecs.DCAE` — new module; shared with future Sana image work.
-- `SharpInference.Text.VoiceBpe` — new tokenizer module; shared with XTTS / SongGen if/when added.
+- `HartsyInference.Audio.AceStep` — new sub-namespace for the v1 pipeline (DiT, DCAE, ADaMoS vocoder, lyric preprocessor, edit modes).
+- `HartsyInference.Diffusion.Schedulers` — extend with `FlowMatchPingPongScheduler` (already has Euler / Heun for v1).
+- `HartsyInference.TextEncoders.UMT5` — reuse (already present for AuraFlow).
+- `HartsyInference.Audio.Vocoders` — extend with ADaMoSHiFiGANV1; shared with future Stable-Audio-Open / Suno-style vocoders.
+- `HartsyInference.Audio.Codecs.DCAE` — new module; shared with future Sana image work.
+- `HartsyInference.Text.VoiceBpe` — new tokenizer module; shared with XTTS / SongGen if/when added.
 
-v1.5 should land in a separate `SharpInference.Audio.AceStepV15` sub-namespace once dotLLM-side Qwen3 decoder work catches up, because the inference loop is causal-LM-shaped rather than diffusion-shaped.
+v1.5 should land in a separate `HartsyInference.Audio.AceStepV15` sub-namespace once dotLLM-side Qwen3 decoder work catches up, because the inference loop is causal-LM-shaped rather than diffusion-shaped.

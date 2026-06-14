@@ -545,7 +545,7 @@ layers.0           1.226e-07
 
 **Problem**: When porting Z-Image-Base (BF16 weights for everything except FP8 Linear projections), the GPU end-to-end image came out as a 16-px-grid of disconnected color blobs — exact patch-boundary noise. Same code path that produces a clean image for Z-Image-Turbo. The transformer math, RoPE, AdaLN, attention, FFN, scheduler, CFG, caption encoding — all verified identical to Turbo, yet the output looked like every patch was being processed in isolation with no cross-patch attention.
 
-**Root cause**: [CudaBackend.cs:604-633](../../src/SharpInference.Cuda/CudaBackend.cs#L604) implements `RmsNorm` as a CPU fallback (T5 is a once-per-generation cost, not a hot path) and reads the weight pointer as `float*` directly:
+**Root cause**: [CudaBackend.cs:604-633](../../src/HartsyInference.Cuda/CudaBackend.cs#L604) implements `RmsNorm` as a CPU fallback (T5 is a once-per-generation cost, not a hot path) and reads the weight pointer as `float*` directly:
 
 ```csharp
 float* pWeight = (float*)weight.DataPointer;     // ← assumes F32
@@ -565,7 +565,7 @@ Why Base BF16 (`benjiaiplayground/z-image-base-repacked`) and Base nvfp8-mixed (
 
 **Lesson**: any C# kernel that does `(float*)weight.DataPointer` is a latent dtype bug — either fix the kernel to accept all supported dtypes, or guarantee F32 at load time and document the guarantee. Mixed-dtype checkpoints (FP8 Linear weights + BF16 norms is the modern norm) will surface these bugs the moment a non-F32-storing checkpoint hits a CPU-fallback op. When porting a model variant, audit every `weight.DataPointer` cast against the actual tensor dtypes the new checkpoint ships, not just the ones the previous variant happened to use.
 
-A second smaller bug: BF16-only checkpoints exposed that `CudaBackend.CastOnGpu` had no `BF16↔F32` path, so `Linear()` with F32 input + BF16 weight would throw `NotSupportedException`. Added [cast_bf16_f32.ptx](../../src/SharpInference.Cuda/Ptx/cast_bf16_f32.ptx) — BF16 is just the upper 16 bits of F32 (lossless one-way cast, RTNE on the way back). Wired through `LaunchCastBf16ToF32` / `LaunchCastF32ToBf16` and the `CastOnGpu` dispatch table. Same kernel exposes BF16↔F16 via two-step temp F32. This was a prerequisite for Base-BF16 to reach `RmsNorm` at all — without it the test crashed earlier at the t_embedder Linear.
+A second smaller bug: BF16-only checkpoints exposed that `CudaBackend.CastOnGpu` had no `BF16↔F32` path, so `Linear()` with F32 input + BF16 weight would throw `NotSupportedException`. Added [cast_bf16_f32.ptx](../../src/HartsyInference.Cuda/Ptx/cast_bf16_f32.ptx) — BF16 is just the upper 16 bits of F32 (lossless one-way cast, RTNE on the way back). Wired through `LaunchCastBf16ToF32` / `LaunchCastF32ToBf16` and the `CastOnGpu` dispatch table. Same kernel exposes BF16↔F16 via two-step temp F32. This was a prerequisite for Base-BF16 to reach `RmsNorm` at all — without it the test crashed earlier at the t_embedder Linear.
 
 ---
 
@@ -581,7 +581,7 @@ A second, related defect: `Encode()` zero-padded after the EOS instead of paddin
 
 **Symptoms**: image at the patch granularity (16-pixel cells for SD3 at patch_size=2 + 8× VAE), uniform purple cast (R≈82, G≈60, B≈103 per channel mean), looking like a textured surface — the model "denoised something" but never coherently propagated cross-patch attention.
 
-**Fix**: rewrote [`ClipTokenizer.cs`](../../src/SharpInference.Tokenizers/ClipTokenizer.cs) to use the long-form `BpeTokenizer.Create(vocab, merges, preTokenizer, normalizer, specialTokens, unknownToken, continuingSubwordPrefix, endOfWordSuffix, fuseUnknownTokens)` with:
+**Fix**: rewrote [`ClipTokenizer.cs`](../../src/HartsyInference.Tokenizers/ClipTokenizer.cs) to use the long-form `BpeTokenizer.Create(vocab, merges, preTokenizer, normalizer, specialTokens, unknownToken, continuingSubwordPrefix, endOfWordSuffix, fuseUnknownTokens)` with:
 - `preTokenizer = new RegexPreTokenizer(ClipPreTokenRegex, ClipSpecialTokens)` where `ClipPreTokenRegex` matches `<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+` (mirrors `huggingface/transformers` `CLIPTokenizer.pat`).
 - `normalizer = LowercaseNormalizer.Instance` — a tiny custom `Normalizer` that just calls `string.ToLowerInvariant()`.
 - `specialTokens = { "<|startoftext|>": 49406, "<|endoftext|>": 49407 }`.
@@ -606,7 +606,7 @@ This reads `text_projection.weight` as if it were stored row-major in `[hidden_s
 
 **How it surfaced**: building the SD3.5 layer-by-layer diff harness (deviation methodology from #28) and comparing the C# `clip_g_pooled` against the HF `text_embeds` output element-by-element: avg_err = **0.96**, max_err = **4.44**, ref_abs_mean=0.77 vs cs_abs_mean=0.61. That's 100% relative error on the pooled — clearly not numerical drift.
 
-**Fix**: swapped the inner-loop indexing in [`ClipTextEncoder.ExtractPooledOutput`](../../src/SharpInference.Diffusion/Models/TextEncoders/ClipTextEncoder.cs):
+**Fix**: swapped the inner-loop indexing in [`ClipTextEncoder.ExtractPooledOutput`](../../src/HartsyInference.Diffusion/Models/TextEncoders/ClipTextEncoder.cs):
 
 ```csharp
 for (int o = 0; o < projDim; o++)
@@ -639,7 +639,7 @@ This was identified during the layer-by-layer diff investigation but turned out 
 
 **Problem**: SD3 needs CLIP-L's pooled output (concatenated with CLIP-G's pooled into a 2048-dim conditioning vector). The Sd35 generation tests were instantiating CLIP-L with `ClipTextEncoderConfig.SdxlClipL`, which reuses `Sd15` and has `ProjectionDim = 0`. With `ProjectionDim = 0`, `ExtractPooledOutput` is gated off and `EncodePenultimate` returns `(hidden, null)`. The pipeline's `ConcatPooled(clipLPooled!, clipGPooled!)` then dereferenced null and threw a `NullReferenceException` at line 382 of `Sd3Pipeline.cs`.
 
-**Fix**: added [`ClipTextEncoderConfig.Sd3ClipL = Sd15 with { ProjectionDim = 768 }`](../../src/SharpInference.Diffusion/Models/TextEncoders/ClipTextEncoderConfig.cs) and updated [`Sd35GenerationTests.cs`](../../tests/SharpInference.Diffusion.Tests/Sd35GenerationTests.cs) to use it.
+**Fix**: added [`ClipTextEncoderConfig.Sd3ClipL = Sd15 with { ProjectionDim = 768 }`](../../src/HartsyInference.Diffusion/Models/TextEncoders/ClipTextEncoderConfig.cs) and updated [`Sd35GenerationTests.cs`](../../tests/HartsyInference.Diffusion.Tests/Sd35GenerationTests.cs) to use it.
 
 A subtle aside: in the actual SD3.5 Medium FP8 checkpoint, `clip_l.text_projection.weight` is **99.9999% zero** by design — Stability didn't train it (mean = 4.66e-10, std = 3.58e-7, zero fraction = 0.999998). So CLIP-L's contribution to `final_pooled` is intentionally ~zero. The preset still has to project (otherwise pooled is null and `ConcatPooled` crashes), but the actual pooled values are tiny. The model was trained with this layout.
 
@@ -667,7 +667,7 @@ A subtle aside: in the actual SD3.5 Medium FP8 checkpoint, `clip_l.text_projecti
 
 3. **First wrong probe**: hypothesized a stream-ordered allocator race introduced by `bc23474 stream cua to GPU` — specifically the `cuMemPoolSetAttribute(CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, 0)` call in `CudaStreamingWeightCache`'s constructor. Disabled it. **Did not fix the bug**. Reverted the probe. Hypothesis A wrong.
 
-4. **The real localization: `ZImageNaNTrace`** ([src/SharpInference.Diffusion/Models/Denoisers/ZImageNaNTrace.cs](../../src/SharpInference.Diffusion/Models/Denoisers/ZImageNaNTrace.cs)). Wrote a stat-logger that runs inside `ZImageTransformer.Forward` at every phase boundary, gated to step 0 only initially, writing one line per phase to `/tmp/zimage_layer_trace.log`. First trace showed step 0 completely clean — no NaN at any of the 38 phases (`t_embedder`, `cap_embedder`, `context_refiner.{0,1}`, `x_embedder`, `noise_refiner.{0,1}`, `concat`, `layers.0` through `layers.29`, `imageSlice`, `final_layer`, `velocity(out)`).
+4. **The real localization: `ZImageNaNTrace`** ([src/HartsyInference.Diffusion/Models/Denoisers/ZImageNaNTrace.cs](../../src/HartsyInference.Diffusion/Models/Denoisers/ZImageNaNTrace.cs)). Wrote a stat-logger that runs inside `ZImageTransformer.Forward` at every phase boundary, gated to step 0 only initially, writing one line per phase to `/tmp/zimage_layer_trace.log`. First trace showed step 0 completely clean — no NaN at any of the 38 phases (`t_embedder`, `cap_embedder`, `context_refiner.{0,1}`, `x_embedder`, `noise_refiner.{0,1}`, `concat`, `layers.0` through `layers.29`, `imageSlice`, `final_layer`, `velocity(out)`).
 
 5. **Key clue from step-0-clean**: NaN was being introduced *between* steps. Extended the trace to all 4 steps. Step 1's first 7 phases (caption embedder path, x_embedder path, noise refiners, concat) were clean — first NaN appeared in `layers.0` of step 1, with **only ~3.6% of values being NaN**. That fraction matched 1-of-30 attention heads (1/30 = 3.33%), so the initial guess was a degenerate-head softmax in SDPA. Wrong guess.
 
@@ -707,7 +707,7 @@ Why Vulkan didn't hit it: `VulkanBackend`'s `DispatchMatmul` derives `gemmDtype`
 
 Why Flux/SDXL didn't hit it on CUDA: Flux's hot-path activations come out of `LayerNorm` and stay tighter in distribution. Z-Image's gated SwiGLU has no upstream normalization on the gating multiply specifically.
 
-**Fix**: `ResolveGemmDtype(F32, FP8)` now returns **BF16** instead of F16 ([CudaBackend.cs:1134-1148](../../src/SharpInference.Cuda/CudaBackend.cs#L1134-L1148)). BF16 has F32's full dynamic range (3.4e38), so the F32→16-bit activation cast cannot produce ±Inf. Memory savings vs F32 are preserved (BF16 weight cast is the same size as F16). Ampere's BF16 Tensor Cores are as fast as F16. The new rule:
+**Fix**: `ResolveGemmDtype(F32, FP8)` now returns **BF16** instead of F16 ([CudaBackend.cs:1134-1148](../../src/HartsyInference.Cuda/CudaBackend.cs#L1134-L1148)). BF16 has F32's full dynamic range (3.4e38), so the F32→16-bit activation cast cannot produce ±Inf. Memory savings vs F32 are preserved (BF16 weight cast is the same size as F16). Ampere's BF16 Tensor Cores are as fast as F16. The new rule:
 
 ```csharp
 private DType ResolveGemmDtype(DType a, DType b)

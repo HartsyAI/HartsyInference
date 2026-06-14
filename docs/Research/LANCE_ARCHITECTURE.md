@@ -20,7 +20,7 @@ The backbone is a **modified Qwen2.5-VL 3B decoder** (36 layers / hidden 2048 / 
 
 Generation is **rectified-flow velocity prediction** with logit-normal timestep shifting (3.5 for image, 4.0 for video), explicit Euler integration over a default 30 steps, and **three-way CFG** (text + vision conditional, default text scale 4.0, optional renorm). Understanding is autoregressive next-token over the LLM's text vocab. The frozen Qwen2.5-VL ViT (32 layers / 1280 dim / 14-px patches / 4-frame temporal patches / windowed attention with full-attention at indices 7/15/23/31) provides semantic vision tokens; the frozen **Wan2.2 3D causal VAE** (48 latent channels, 16× spatial / 4× temporal downscale, RMSNorm, CausalConv3d with 2-frame cache) provides generation latents. Latents are patchified `(t,h,w)=(1,2,2)` → 192-dim tokens → `Linear(192→2048)` and joined back via `Linear(2048→192)` after the transformer.
 
-For SharpInference, Lance is best treated as **two related pipelines sharing one transformer backbone**: a Phase 4 (image breadth) `LanceImagePipeline` using `Lance_3B`, and a Phase 9 (video) `LanceVideoPipeline` using `Lance_3B_Video`. The image path can ship without 3D temporal infra; the video path requires the Wan2.2 3D causal VAE and CausalConv3d streaming-decode plumbing. Either path requires net-new backend work for **packed/var-length attention** (FlashAttention's `flash_attn_varlen_func`) and **MoT routing** (dispatching different weights for different token slices in the same attention call).
+For HartsyInference, Lance is best treated as **two related pipelines sharing one transformer backbone**: a Phase 4 (image breadth) `LanceImagePipeline` using `Lance_3B`, and a Phase 9 (video) `LanceVideoPipeline` using `Lance_3B_Video`. The image path can ship without 3D temporal infra; the video path requires the Wan2.2 3D causal VAE and CausalConv3d streaming-decode plumbing. Either path requires net-new backend work for **packed/var-length attention** (FlashAttention's `flash_attn_varlen_func`) and **MoT routing** (dispatching different weights for different token slices in the same attention call).
 
 ## Detailed Findings
 
@@ -549,7 +549,7 @@ There is **only one reference implementation** (the ByteDance codebase). No diff
 
 ## Open Questions
 
-1. **Exact tensor key names in `model.safetensors`** — `Lance_3B/model.safetensors` is Xet-backed and too large to inline via the HF web viewer. The names above (§ Data Layouts) are my best inference from `Lance(PreTrainedModel)` source; SharpInference's `LanceCheckpointConverter` should be written after dumping the actual keys with a small Python helper:
+1. **Exact tensor key names in `model.safetensors`** — `Lance_3B/model.safetensors` is Xet-backed and too large to inline via the HF web viewer. The names above (§ Data Layouts) are my best inference from `Lance(PreTrainedModel)` source; HartsyInference's `LanceCheckpointConverter` should be written after dumping the actual keys with a small Python helper:
    ```python
    from safetensors import safe_open
    with safe_open("Lance_3B/model.safetensors", framework="pt") as f:
@@ -568,7 +568,7 @@ There is **only one reference implementation** (the ByteDance codebase). No diff
 
 7. **Per-task `config/examples/*.json`** — exact resolution presets, default frame counts, prompt templates.
 
-8. **Sparse attention block-mask layout** — `create_sparse_mask(sample_lens, split_lens, attn_modes)` with `BLOCK_SIZE=128`. SharpInference does not have a varlen-FlashAttention equivalent yet; the first port can use a padded dense mask and accept the quadratic cost on padding tokens, then optimize later. The exact `attn_modes` enum values need to be confirmed in source.
+8. **Sparse attention block-mask layout** — `create_sparse_mask(sample_lens, split_lens, attn_modes)` with `BLOCK_SIZE=128`. HartsyInference does not have a varlen-FlashAttention equivalent yet; the first port can use a padded dense mask and accept the quadratic cost on padding tokens, then optimize later. The exact `attn_modes` enum values need to be confirmed in source.
 
 9. **`AutoEncoderParams` full field list** — only `downsample_spatial`, `downsample_temporal`, `z_channels` were extracted from the constructor call. Other fields (if any) need to be read from `modeling/vae/wan/vae2_2.py`.
 
@@ -580,20 +580,20 @@ There is **only one reference implementation** (the ByteDance codebase). No diff
 
 ## Implementation Notes
 
-### How this maps to SharpInference packages
+### How this maps to HartsyInference packages
 
-- **`SharpInference.Diffusion`** — adds:
+- **`HartsyInference.Diffusion`** — adds:
   - `Models/Denoisers/LanceConfig.cs`, `Models/Denoisers/LanceTransformer.cs`, `Models/Denoisers/DiTBlocks/LanceMoTBlock.cs`, `Models/Denoisers/DiTBlocks/LanceMRopeMaPE.cs`, `Models/Denoisers/LanceDebugDump.cs`.
   - `Models/TextEncoders/Qwen25VlVit.cs` (frozen ViT — only the forward + load; no training paths).
   - `Models/Vae/Wan22VaeConfig.cs` and a new `Models/Vae/Wan22VaeDecoder.cs` (3D causal VAE). Possibly factor a shared `IVaeDecoder3D` interface so this and any future Wan/LTX VAEs share Box.
   - `Pipelines/LanceImagePipeline.cs` (image-only path, single-frame T=1 decode).
-- **`SharpInference.Video`** — adds:
+- **`HartsyInference.Video`** — adds:
   - `Pipelines/LanceVideoPipeline.cs` (multi-frame T>1 decode, frame streaming).
-  - Shares `Wan22VaeDecoder.cs` with Diffusion (best: live in `SharpInference.Diffusion` and import from Video).
-- **`SharpInference.ModelHandler`** — adds:
+  - Shares `Wan22VaeDecoder.cs` with Diffusion (best: live in `HartsyInference.Diffusion` and import from Video).
+- **`HartsyInference.ModelHandler`** — adds:
   - `CheckpointConverters/LanceCheckpointConverter.cs` (loads `model.safetensors`, splits into `language_model.*` / `vit.*` / `connector.*` / `vae_in.*` / `vae_out.*` / `time_embedder.*` / `pos_embed_3d.*` / `task_embed` / `modality_embed` buckets and demuxes the MoT `_moe_gen` sibling weights into per-stream dicts).
   - Wan2.2 `.pth` reader path (or convert to safetensors offline; the existing safetensors loader does not parse `.pth`). Simplest: ship a one-off Python script that converts `Wan2.2_VAE.pth` → `wan22_vae.safetensors` for users.
-- **`SharpInference.Tokenizers`** — Qwen2 BPE is already covered by the existing Qwen support (`Qwen3Tokenizer`). Lance uses Qwen2 vocab (151,936); the existing BPE tokenizer with this vocab works. Chat template needs the Qwen2.5-VL pad-insertion variant.
+- **`HartsyInference.Tokenizers`** — Qwen2 BPE is already covered by the existing Qwen support (`Qwen3Tokenizer`). Lance uses Qwen2 vocab (151,936); the existing BPE tokenizer with this vocab works. Chat template needs the Qwen2.5-VL pad-insertion variant.
 
 ### Net-new backend / kernel work required
 
@@ -611,10 +611,10 @@ There is **only one reference implementation** (the ByteDance codebase). No diff
 5. **`TimestepEmbedder`** is the standard sinusoidal-MLP — already implemented in `DiTUtils`.
 6. **GQA-2** is an extreme GQA factor (Lance uses 16 Q : 2 KV). Existing GEMM paths handle this fine, but make sure attention reshape doesn't accidentally assume `n_kv >= 4` anywhere (Z-Image uses 32:32 = no GQA; Qwen3-4B uses 32:8 = factor 4; Lance is **factor 8** — the most extreme so far).
 7. **3-way CFG with renorm** — pipeline-level loop change, not a kernel. Three forward passes per step (vs the usual 2 for SDXL/Flux). On 12 GB cards the noisy slot has to be small enough to fit 3× activations; image at 512×512 should still work.
-8. **KV-cache for diffusion (`NaiveCache`)** — significant pipeline change. Diffusion pipelines in SharpInference today recompute the entire sequence every step. To match Lance's `validation_gen_KVcache` speedup, the pipeline needs to:
+8. **KV-cache for diffusion (`NaiveCache`)** — significant pipeline change. Diffusion pipelines in HartsyInference today recompute the entire sequence every step. To match Lance's `validation_gen_KVcache` speedup, the pipeline needs to:
    - On step 0, cache K/V for the text + ViT + clean-VAE prefix.
    - On steps 1..N, only recompute Q/K/V for the noisy slot, append to the cached K/V, run attention against the joined K/V.
-   - This is the first inference-time KV-cache use case in SharpInference and will eventually be reused by Wan and LTX. Worth designing as a reusable `DenoiseKvCache` helper in `SharpInference.Diffusion/Utilities/`.
+   - This is the first inference-time KV-cache use case in HartsyInference and will eventually be reused by Wan and LTX. Worth designing as a reusable `DenoiseKvCache` helper in `HartsyInference.Diffusion/Utilities/`.
 
 ### VRAM and viability per target GPU
 
@@ -651,4 +651,4 @@ Following the project convention (every `*GenerationTests` skips cleanly when en
 - `FlowMatchEulerDiscreteScheduler` with `shift = 3.5 / 4.0` matches the Z-Image / Flux flow-matching path; reuse `FlowMatchEulerDiscreteScheduler.cs`.
 - `SinusoidalTimestepEmbedding` from `DiTUtils` is unchanged.
 - The 3D sin-cos position embed has no analogue yet in the codebase — add a small `PositionEmbedding3D` helper in `DiTUtils`.
-- The Wan2.2 VAE will be the **first 3D causal VAE** in SharpInference and should be designed as a foundation other Wan-family / LTX video VAEs can extend.
+- The Wan2.2 VAE will be the **first 3D causal VAE** in HartsyInference and should be designed as a foundation other Wan-family / LTX video VAEs can extend.

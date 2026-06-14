@@ -1,7 +1,7 @@
 """
 Dumps per-JointBlock layer outputs from an SD3 MMDiT forward pass.
 Hooks every JointTransformerBlock and saves both image and context stream
-outputs for layer-by-layer comparison against SharpInference C#.
+outputs for layer-by-layer comparison against HartsyInference C#.
 
 Usage: python dump_sd3_layer_outputs.py <model_dir> [output_dir]
 Requires: pip install diffusers transformers torch safetensors sentencepiece accelerate

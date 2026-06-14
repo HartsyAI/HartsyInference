@@ -302,7 +302,7 @@ This is an approximation of GELU that is faster to compute but slightly differen
 
 ### Implementation Notes
 
-#### For SharpInference.Diffusion (text encoder only)
+#### For HartsyInference.Diffusion (text encoder only)
 
 1. **SD1.5**: Implement CLIP ViT-L/14 text encoder. Output full hidden states `[B, 77, 768]` from the last transformer layer. Do NOT apply `ln_final` or `text_projection` — the UNet cross-attention consumes raw hidden states.
 
@@ -312,7 +312,7 @@ This is an approximation of GELU that is faster to compute but slightly differen
 
 4. **Attention fusing**: OpenAI/OpenCLIP fuse Q/K/V into a single `in_proj_weight` `[3*D, D]`. HuggingFace splits them. Internal implementation should pick one representation and convert at load time.
 
-#### For SharpInference.Vision (full CLIP)
+#### For HartsyInference.Vision (full CLIP)
 
 1. Implement both vision and text encoders. Output L2-normalized embeddings in the shared `embed_dim` space.
 
@@ -697,7 +697,7 @@ Both Flux and SD3 use the T5 v1.1 XXL encoder as a text encoder, but:
 
 ### Implementation Notes
 
-#### For SharpInference (C#/.NET 10)
+#### For HartsyInference (C#/.NET 10)
 
 1. **Encoder-only extraction:** Only load encoder weights + embedding + final norm. Decoder weights can be skipped entirely, saving ~50% memory and load time.
 

@@ -17,10 +17,10 @@ GPU).
 ```sh
 nvcc --ptx -arch=sm_80 audio_activations_f32.cu -o audio_activations_f32.ptx
 nvcc --ptx -arch=sm_80 conv1d_f32.cu -o conv1d_f32.ptx
-cp audio_activations_f32.ptx conv1d_f32.ptx ../../src/SharpInference.Cuda/Ptx/
+cp audio_activations_f32.ptx conv1d_f32.ptx ../../src/HartsyInference.Cuda/Ptx/
 ```
 
-After copying the `.ptx` artifacts into `src/SharpInference.Cuda/Ptx/`, update
+After copying the `.ptx` artifacts into `src/HartsyInference.Cuda/Ptx/`, update
 `CudaKernels.cs` to load them at startup and replace the `NotSupportedException`
 stubs in `CudaBackend.cs` with kernel launches.
 

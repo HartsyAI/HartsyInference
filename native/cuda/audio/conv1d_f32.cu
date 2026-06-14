@@ -4,7 +4,7 @@
 //
 // Build:
 //   nvcc --ptx -arch=sm_80 conv1d_f32.cu -o conv1d_f32.ptx
-//   (move the .ptx into src/SharpInference.Cuda/Ptx/)
+//   (move the .ptx into src/HartsyInference.Cuda/Ptx/)
 
 extern "C" __global__ void conv1d_f32(
     float* __restrict__ output,

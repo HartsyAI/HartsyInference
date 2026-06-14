@@ -1,6 +1,6 @@
 # Bark (Suno) — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Bark pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Bark pipeline)
 
 ## Summary
 
@@ -405,7 +405,7 @@ For coarse outputs longer than 1024 frames:
 - [ ] What `INFER_ARTIFACT_TOKEN` is used for (referenced in HF source but appears unused at inference).
 - [ ] What the 32 extra entries in the fine-stage `output_vocab_size=1056 = 1024 + 32` are (likely all-pad / unused).
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **Three independent GPT-2-style models**: all three stages reuse the same Transformer block. Implement one `GptBlock` (LayerNorm + CausalSelfAttention/NonCausalSelfAttention + LayerNorm + MLP) and one `GptModel` shell parametrized by `(hidden, layers, heads, vocab, block_size, attention_kind)`. Then instantiate three times. Estimated ~600 lines of C# total for the model definitions.
 
@@ -447,7 +447,7 @@ For coarse outputs longer than 1024 frames:
     - **Coarse-only streaming**: emit raw EnCodec-decoded coarse-only audio as the coarse stage progresses (audio quality is degraded — missing 6 fine codebooks ≈ 1.5 kbps quality), then re-emit the fully-fine version when it finishes. Probably not worth the code complexity for v1.
     - Defer streaming to v2.
 
-13. **Determinism**: with the default sampling, runs are non-deterministic unless we set the RNG seed. The HF code respects PyTorch's RNG. For SharpInference we need a deterministic seedable sampler — `Random(seed)` for the multinomial draws, parameterized via a constructor argument.
+13. **Determinism**: with the default sampling, runs are non-deterministic unless we set the RNG seed. The HF code respects PyTorch's RNG. For HartsyInference we need a deterministic seedable sampler — `Random(seed)` for the multinomial draws, parameterized via a constructor argument.
 
 14. **Loading the original Suno `.pt` files vs HF consolidated `pytorch_model.bin`**: both are PyTorch pickle. Convert offline to safetensors as a packaging step. Cross-reference [SAFETENSORS_FORMAT.md](SAFETENSORS_FORMAT.md). Suno per-stage files have a `model_args` dict + a `model` state_dict with `"module."` prefix; HF consolidated has hierarchical keys (`semantic.*`, `coarse_acoustics.*`, `fine_acoustics.*`, `codec_model.*`) with no `module.` prefix. Both convert cleanly.
 
@@ -487,4 +487,4 @@ For coarse outputs longer than 1024 frames:
 | Bias on Linears | nanoGPT default `True` (but weights have none) | Honors config (`bias=false`) |
 | Attention impl | Manual + optional `F.scaled_dot_product_attention` | SDPA / FlashAttention2 / eager all supported |
 
-For SharpInference we model after the HF version (cleaner separation, config-driven), but use the original Suno per-stage `.pt` only if it's smaller for download.
+For HartsyInference we model after the HF version (cleaner separation, config-driven), but use the original Suno per-stage `.pt` only if it's smaller for download.

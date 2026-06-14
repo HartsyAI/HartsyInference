@@ -15,7 +15,7 @@ Lens is a **3.8B-parameter dual-stream MMDiT** image generator from Microsoft Re
 
 VAE is the same **Flux.2 semantic VAE** (`AutoencoderKLFlux2`) already implemented for Flux.2 Klein in this codebase: 16× spatial downsample × 4× channel patchify = 32-channel latent → 128-channel transformer input. Scheduler is the standard `FlowMatchEulerDiscreteScheduler` with an **empirical mu** computed per-resolution. CFG is a dual-pass batch-of-2 with **norm-rescaling** (Microsoft's twist — combined prediction is rescaled to match the conditional branch's L2 norm per token). Default sampling is **20 steps, CFG 5.0** for the RL-tuned variant; **4 steps, CFG 1.0** for Turbo; **50 steps, CFG 5.0** for Base.
 
-For SharpInference the genuinely new piece is **GPT-OSS as a text encoder** — Mixture-of-Experts (32 local experts, 4 active per token, MXFP4-native), GQA (64 query heads : 8 KV heads), alternating sliding/full attention (window 128) — none of which the existing `LlamaStyleEncoder` supports. The transformer block itself is close enough to Flux's double-stream that ~70% of the block code can be reused (modulation, fused QKV, joint attention, AdaLN-Continuous final). RoPE is its own thing (complex-polar with scale_rope=True centered around zero), but mathematically identical to Qwen-Image's 3-axis RoPE just with different per-axis dims.
+For HartsyInference the genuinely new piece is **GPT-OSS as a text encoder** — Mixture-of-Experts (32 local experts, 4 active per token, MXFP4-native), GQA (64 query heads : 8 KV heads), alternating sliding/full attention (window 128) — none of which the existing `LlamaStyleEncoder` supports. The transformer block itself is close enough to Flux's double-stream that ~70% of the block code can be reused (modulation, fused QKV, joint attention, AdaLN-Continuous final). RoPE is its own thing (complex-polar with scale_rope=True centered around zero), but mathematically identical to Qwen-Image's 3-axis RoPE just with different per-axis dims.
 
 ## Detailed Findings
 
@@ -331,7 +331,7 @@ for i in range(min(24, max(selected_layer_index)+1)):     # early exit after lay
 return captured   # list of 4 tensors, each [B, S_txt, 2880]
 ```
 
-**Net-new infra required for this in SharpInference:**
+**Net-new infra required for this in HartsyInference:**
 
 1. **MoE FFN with sparse routing.** Top-4-of-32 expert selection, sparse dispatch through SwiGLU MLPs (each expert is a SwiGLU pair). HiDream already has a `NumRoutedExperts`/`NumActivatedExperts` config but the routing/dispatch primitive itself in HiDream is "single-expert fallback" today (see `MODEL_STATUS.md`) — we'd need the real top-k router. This is the single biggest infrastructure ask.
 
@@ -579,7 +579,7 @@ The reference is single-source (microsoft/Lens), but there are a few places wher
 - **`txt_offset = 97` validity for non-English prompts** — the system prompt is fixed English ("Describe the image by detailing the color, ..."), but the user prompt may be multilingual. The 97 only counts the wrapper, not the user prompt, so this should be tokenizer-language-invariant. Worth confirming by checking the chat-template output for non-ASCII input.
 - **PromptReasoner (default OFF)** — uses the same GPT-OSS to rewrite the prompt into a longer, more detailed description before encoding. Probably out of scope for the first cut; deferred.
 
-## Implementation Notes (recommendations for SharpInference)
+## Implementation Notes (recommendations for HartsyInference)
 
 ### What can be reused
 

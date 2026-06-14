@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Tokenizers</PackageId>
+    <Description>CLIP, T5, Qwen3, and Whisper tokenizers for HartsyInference diffusion and audio pipelines. Ships canonical OpenAI-CLIP / T5-XXL / Qwen3-4B vocabularies as embedded resources so consumers can construct tokenizers with no external file management.</Description>
+    <RootNamespace>HartsyInference.Tokenizers</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+  </ItemGroup>
+
+  <!-- Embedded canonical tokenizer vocabularies. ~11 MB total (uncompressed); the
+       assembly winds up ~12 MB. This is the price of being able to spin up a tokenizer
+       without making the user hunt down vocab/merges/spiece files separately, the way
+       Python's `transformers` library does by bundling them inside its wheel.
+
+       LogicalName flattens the path so resource lookups are stable across folder moves. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\clip_vocab.json"   LogicalName="HartsyInference.Tokenizers.Resources.clip_vocab.json" />
+    <EmbeddedResource Include="Resources\clip_merges.txt"   LogicalName="HartsyInference.Tokenizers.Resources.clip_merges.txt" />
+    <EmbeddedResource Include="Resources\t5_spiece.model"   LogicalName="HartsyInference.Tokenizers.Resources.t5_spiece.model" />
+    <EmbeddedResource Include="Resources\umt5_spiece.model" LogicalName="HartsyInference.Tokenizers.Resources.umt5_spiece.model" />
+    <EmbeddedResource Include="Resources\qwen3_vocab.json"  LogicalName="HartsyInference.Tokenizers.Resources.qwen3_vocab.json" />
+    <EmbeddedResource Include="Resources\qwen3_merges.txt"  LogicalName="HartsyInference.Tokenizers.Resources.qwen3_merges.txt" />
+  </ItemGroup>
+
+  <!-- Llama-3.1 tokenizer assets (HiDream's fourth text encoder). These ship separately from the
+       source tree (vocab.json is ~5 MB) and are pulled in only when present, so a fresh checkout
+       still compiles. To enable HiDream: extract vocab.json + merges.txt from the Llama-3.1
+       tokenizer.json and drop them in Resources/ as llama3_vocab.json + llama3_merges.txt, then
+       rebuild. EmbeddedTokenizerResources.HasLlama3Assets reports whether they were embedded. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\llama3_vocab.json"  LogicalName="HartsyInference.Tokenizers.Resources.llama3_vocab.json"  Condition="Exists('Resources\llama3_vocab.json')" />
+    <EmbeddedResource Include="Resources\llama3_merges.txt"  LogicalName="HartsyInference.Tokenizers.Resources.llama3_merges.txt"  Condition="Exists('Resources\llama3_merges.txt')" />
+  </ItemGroup>
+
+</Project>

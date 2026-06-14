@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Convert PyTorch .pt / .pth checkpoints to .safetensors for use with SharpInference.
+Convert PyTorch .pt / .pth checkpoints to .safetensors for use with HartsyInference.
 
 Why this exists
 ---------------
@@ -11,7 +11,7 @@ Several audio models in our research scope ship only .pth pickles:
   - ChatTTS     (gpt.pt, dvae.pt, decoder.pt — flat state_dicts)
   - Moonshine   (also has safetensors on HF, but the original .pt was the canonical drop)
 
-SharpInference reads only safetensors at runtime (project rule: pure C#, no python
+HartsyInference reads only safetensors at runtime (project rule: pure C#, no python
 pickle parsing). This is the offline one-shot tool that produces the artifact our
 ModelHandler.SafeTensors loader consumes.
 
@@ -38,9 +38,9 @@ Requires
 --------
   pip install torch safetensors
 
-The script is intentionally NOT invoked at SharpInference build/runtime. It runs
+The script is intentionally NOT invoked at HartsyInference build/runtime. It runs
 once per checkpoint, and the resulting .safetensors gets cached under
-~/.cache/sharpinference/models/ — or uploaded to a HuggingFace mirror we control.
+~/.cache/hartsyinference/models/ — or uploaded to a HuggingFace mirror we control.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ def cast_dtype(tensors: dict[str, torch.Tensor], target: str | None) -> dict[str
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Convert .pth / .pt to .safetensors for SharpInference.")
+    parser = argparse.ArgumentParser(description="Convert .pth / .pt to .safetensors for HartsyInference.")
     parser.add_argument("input", help="Path to the .pth / .pt file.")
     parser.add_argument("-o", "--output", required=True, help="Output .safetensors path.")
     parser.add_argument("--dtype", choices=["fp32", "fp16", "bf16"], default=None,
@@ -161,7 +161,7 @@ def main() -> int:
         k, v = entry.split("=", 1)
         metadata[k] = v
 
-    metadata.setdefault("converted_by", "sharpinference convert_pth_to_safetensors.py")
+    metadata.setdefault("converted_by", "hartsyinference convert_pth_to_safetensors.py")
     metadata.setdefault("source", os.path.basename(args.input))
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)

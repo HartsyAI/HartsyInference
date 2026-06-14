@@ -1,6 +1,6 @@
 # F5-TTS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (F5-TTS pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (F5-TTS pipeline)
 
 ## Summary
 
@@ -52,7 +52,7 @@ Training data for the base models: **Emilia 95k h ZH + EN** ([amphion/Emilia-Dat
 
 There is also **Cross-Lingual F5-TTS** ([arXiv:2509.14579](https://arxiv.org/abs/2509.14579)) — a 2025 follow-up adding language-agnostic voice cloning, and **Fast F5-TTS** ([fast-f5-tts.github.io](https://fast-f5-tts.github.io/)) — a 7-NFE distilled variant.
 
-The **"F5-TTS-Small"** topology (used by Arabic, Hindi) is approximately `dim=768, depth=18, heads=12, ff_mult=2, conv_layers=4` (~155 M params). The official repo carries the YAML; planned variants in the SharpInference loader must read `dim/depth/heads/ff_mult/conv_layers/text_dim/text_num_embeds` from the YAML next to the safetensors and dispatch accordingly.
+The **"F5-TTS-Small"** topology (used by Arabic, Hindi) is approximately `dim=768, depth=18, heads=12, ff_mult=2, conv_layers=4` (~155 M params). The official repo carries the YAML; planned variants in the HartsyInference loader must read `dim/depth/heads/ff_mult/conv_layers/text_dim/text_num_embeds` from the YAML next to the safetensors and dispatch accordingly.
 
 ### 2. Architecture
 
@@ -60,7 +60,7 @@ The **"F5-TTS-Small"** topology (used by Arabic, Hindi) is approximately `dim=76
 
 F5-TTS replaces phoneme conditioning with **raw character conditioning**. There are three supported tokenization modes (`get_tokenizer()` in `src/f5_tts/model/utils.py`):
 
-1. **`byte`** — UTF-8 byte values, vocab size = 256, zero G2P needed. Index 0 is reserved for "unknown / pad". This is the simplest mode and is the **recommended one for SharpInference's first cut**.
+1. **`byte`** — UTF-8 byte values, vocab size = 256, zero G2P needed. Index 0 is reserved for "unknown / pad". This is the simplest mode and is the **recommended one for HartsyInference's first cut**.
 2. **`char`** — load `vocab.txt` next to the checkpoint, one symbol per line, look each character up. The shipped `F5TTS_v1_Base/vocab.txt` (EN+ZH model) contains ASCII printables + pinyin syllables + ZH punctuation; vocab size ≈ 2545.
 3. **`pinyin`** *(used by all official EN+ZH checkpoints)* — Chinese characters are first segmented with `rjieba` and converted to **TONE3-style pinyin** ("ni3 hao3 ma5"), then looked up in `vocab.txt`. ASCII text is passed through character-by-character. **Spaces separate syllables.**
 
@@ -111,7 +111,7 @@ Reference audio is **clipped to ≤ 12 s** by progressive silence detection (100
 | `mel_dim` | **100** (input/output channel count) |
 | Positional encoding | **Rotary (RoPE)** on Q/K, computed by `RotaryEmbedding(dim_head=64)` |
 | `qk_norm` | Optional RMSNorm on Q/K (config flag, **off** in base) |
-| Attention backend | `torch` (eager) or `flash_attn`; SharpInference target = own kernel |
+| Attention backend | `torch` (eager) or `flash_attn`; HartsyInference target = own kernel |
 | Long skip connection | Optional symmetric U-net-style skip (off in base) |
 | FFN | GeGLU? **No** — plain Linear → GELU → Linear (`FeedForward` in `modules.py`) |
 | Final norm | `AdaLayerNorm_Final` (zero-init) → `Linear(dim → mel_dim)` |
@@ -187,7 +187,7 @@ Vocos architecture (full design in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) → 
 - A single **inverse STFT** synthesizes the waveform — no transposed convs, no upsampling tower
 - ~13.5 M params, 13× faster than HiFiGAN-V1 at higher quality
 
-For BigVGAN-trained checkpoints (e.g. `F5TTS_Base_bigvgan`), substitute the `nvidia/bigvgan_v2_24khz_100band_256x` vocoder. SharpInference will target Vocos first (smaller, simpler, matches the default v1 checkpoint).
+For BigVGAN-trained checkpoints (e.g. `F5TTS_Base_bigvgan`), substitute the `nvidia/bigvgan_v2_24khz_100band_256x` vocoder. HartsyInference will target Vocos first (smaller, simpler, matches the default v1 checkpoint).
 
 ### 3. In-context inference pattern (the key idea)
 
@@ -245,7 +245,7 @@ x_{t-dt} = x_t - v * dt          # Euler step (negative because we integrate 1�
 # at every step, overwrite the ref region of x with ref_mel
 ```
 
-E2-TTS (predecessor) is mathematically the same model with no ConvNeXt text stem and `sway_sampling_coef = 0`. For SharpInference: **E2-TTS = F5-TTS scheduler with sway off, plus drop the ConvNeXt blocks from the text path.**
+E2-TTS (predecessor) is mathematically the same model with no ConvNeXt text stem and `sway_sampling_coef = 0`. For HartsyInference: **E2-TTS = F5-TTS scheduler with sway off, plus drop the ConvNeXt blocks from the text path.**
 
 ### 5. Duration prediction — closed-form heuristic, no learned predictor
 
@@ -281,7 +281,7 @@ The official models use **pinyin for Chinese, raw characters for everything else
 
 Community fine-tunes typically just **extend `vocab.txt`** with the script's characters (Cyrillic, Devanagari, Arabic, kana/kanji, etc.) and re-init the embedding rows for new tokens. The DiT itself is script-agnostic.
 
-For SharpInference, the **`byte` tokenization mode is the easiest first cut** — works for any UTF-8 input, no vocab file needed, vocab size = 257. Quality will be slightly lower than the pinyin path on Chinese (no syllable structure) but is fully general. Pinyin support can be added later as a separate Tokenizer implementation behind an interface.
+For HartsyInference, the **`byte` tokenization mode is the easiest first cut** — works for any UTF-8 input, no vocab file needed, vocab size = 257. Quality will be slightly lower than the pinyin path on Chinese (no syllable structure) but is fully general. Pinyin support can be added later as a separate Tokenizer implementation behind an interface.
 
 ### 7. Voice cloning quality
 
@@ -378,7 +378,7 @@ For multi-chunk generation (target text > ~135 UTF-8 bytes): split target into c
 
 The bottleneck is the **DiT** (22 layers × 32 NFE × 2 CFG branches × ~T forward passes), specifically attention over `T` tokens where `T ≈ 94 * audio_seconds`. For a 10 s output `T ≈ 940`, so the attention is well-suited to flash-attention / our own fused-attention kernel; this is where the bulk of optimization payoff lives. Vocos is negligible cost (one feed-forward conv stack + one iSTFT per call).
 
-### 10. C# implementation notes (SharpInference)
+### 10. C# implementation notes (HartsyInference)
 
 | Component | Reuse / new | Source of truth |
 |---|---|---|
@@ -394,7 +394,7 @@ The bottleneck is the **DiT** (22 layers × 32 NFE × 2 CFG branches × ~T forwa
 | **Safetensors loader** | **Reuse** | [SAFETENSORS_FORMAT.md](SAFETENSORS_FORMAT.md) |
 | **GGUF quantized variants (community Q8)** | **Reuse** GGUF backend; verify tensor naming matches `f5_tts.*` convention | [GGUF_BACKEND.md](GGUF_BACKEND.md) |
 
-**Package placement**: `SharpInference.Audio` owns the F5-TTS pipeline, Vocos vocoder, mel preprocessor, and Sway scheduler. The DiT block kernels live in `SharpInference.Core` (already shared with image diffusion). No new native code required — pure C# + PTX.
+**Package placement**: `HartsyInference.Audio` owns the F5-TTS pipeline, Vocos vocoder, mel preprocessor, and Sway scheduler. The DiT block kernels live in `HartsyInference.Core` (already shared with image diffusion). No new native code required — pure C# + PTX.
 
 **Recommended first-milestone scope**:
 1. Load `F5TTS_v1_Base/model_1250000.safetensors` (FP32 → FP16) into a typed weight dictionary.

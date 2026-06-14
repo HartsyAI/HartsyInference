@@ -73,7 +73,7 @@ For SD 1.5 / SDXL with G=32 and typical channel counts:
 
 **NVIDIA Apex's solution**: Similarly accumulates in FP32 and supports mixed dtype combinations: `(input=float16, params=float32)`, `(input=float16, params=float16)`, etc.
 
-**Recommendation for SharpInference**: Always accumulate mean and variance in FP32, even when inputs are FP16 or BF16. The FP32 accumulation cost is negligible compared to the memory bandwidth cost of reading the input tensor — the reduction is compute-light and memory-bound.
+**Recommendation for HartsyInference**: Always accumulate mean and variance in FP32, even when inputs are FP16 or BF16. The FP32 accumulation cost is negligible compared to the memory bandwidth cost of reading the input tensor — the reduction is compute-light and memory-bound.
 
 ### 5. FP32 Accumulation Performance Cost
 
@@ -146,7 +146,7 @@ NVIDIA Apex provides dedicated NHWC GroupNorm kernels (`nhwc_fprop`, `nhwc_bprop
 - `H*W <= 256` (or 1024 on SM80+): one-pass kernel
 - `H*W > threshold`: two-pass kernel (first pass computes mean/var, second pass normalizes)
 
-**For SharpInference CPU (NCHW)**: The contiguous layout makes SIMD vectorization straightforward — process 8 floats at a time with AVX2 `Vector256<float>`.
+**For HartsyInference CPU (NCHW)**: The contiguous layout makes SIMD vectorization straightforward — process 8 floats at a time with AVX2 `Vector256<float>`.
 
 ---
 
@@ -319,13 +319,13 @@ For the Welford mean/variance pass, use `TensorPrimitives` or a manual SIMD Welf
 - [ ] **Conv2D -> GroupNorm -> SiLU triple fusion**: Is it worth fusing the Conv2D write with GroupNorm+SiLU? Requires Conv2D kernel modification. Likely only for CUDA path.
 - [ ] **TensorPrimitives for Welford**: Does .NET 10 `TensorPrimitives` expose a Welford-based mean/variance, or do we need to hand-roll with SIMD intrinsics?
 - [ ] **AVX-512 GroupNorm**: With `Vector512<float>` processing 16 floats at a time, is there a meaningful speedup over AVX2 for the memory-bound GroupNorm kernel?
-- [ ] **Adaptive algorithm selection on CPU**: Should SharpInference use one-pass Welford for small spatial sizes and two-pass for large, similar to Apex's strategy?
+- [ ] **Adaptive algorithm selection on CPU**: Should HartsyInference use one-pass Welford for small spatial sizes and two-pass for large, similar to Apex's strategy?
 
 ---
 
 ## Implementation Notes
 
-### For SharpInference.Cpu
+### For HartsyInference.Cpu
 
 1. **Always accumulate in FP32.** Even if the tensor storage is FP16, cast each element to `float` before accumulating mean/variance. Cast back to input dtype after applying gamma/beta.
 
@@ -350,7 +350,7 @@ For the Welford mean/variance pass, use `TensorPrimitives` or a manual SIMD Welf
 
 9. **SiLU approximation**: For CPU, `exp(-x)` is expensive. Consider a fast polynomial approximation of sigmoid for the fused SiLU path, with an accuracy-vs-speed tradeoff flag.
 
-### For SharpInference.Cuda (future)
+### For HartsyInference.Cuda (future)
 
 1. Follow the NHWC layout to match cuDNN convolution output format, avoiding transpose overhead.
 2. Implement fused GroupNorm+SiLU as a single PTX kernel.

@@ -1,0 +1,38 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HartsyInference.Core/HartsyInference.Core.csproj" />
+    <Project Path="src/HartsyInference.ModelHandler/HartsyInference.ModelHandler.csproj" />
+    <Project Path="src/HartsyInference.Tokenizers/HartsyInference.Tokenizers.csproj" />
+    <Project Path="src/HartsyInference.Cpu/HartsyInference.Cpu.csproj" />
+    <Project Path="src/HartsyInference.Cuda/HartsyInference.Cuda.csproj" />
+    <Project Path="src/HartsyInference.Diffusion/HartsyInference.Diffusion.csproj" />
+    <Project Path="src/HartsyInference.Audio/HartsyInference.Audio.csproj" />
+    <Project Path="src/HartsyInference.Vision/HartsyInference.Vision.csproj" />
+    <Project Path="src/HartsyInference.Video/HartsyInference.Video.csproj" />
+    <Project Path="src/HartsyInference.Server/HartsyInference.Server.csproj" />
+    <Project Path="src/HartsyInference.Vulkan/HartsyInference.Vulkan.csproj" />
+    <Project Path="src/HartsyInference.Cli/HartsyInference.Cli.csproj" />
+  </Folder>
+
+  <Folder Name="/tests/">
+    <Project Path="tests/HartsyInference.Tests.Common/HartsyInference.Tests.Common.csproj" />
+    <Project Path="tests/HartsyInference.Core.Tests/HartsyInference.Core.Tests.csproj" />
+    <Project Path="tests/HartsyInference.ModelHandler.Tests/HartsyInference.ModelHandler.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Cpu.Tests/HartsyInference.Cpu.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Tokenizers.Tests/HartsyInference.Tokenizers.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Audio.Tests/HartsyInference.Audio.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Vision.Tests/HartsyInference.Vision.Tests.csproj" />
+    <Project Path="tests/HartsyInference.Vulkan.Tests/HartsyInference.Vulkan.Tests.csproj" />
+  </Folder>
+
+  <Folder Name="/samples/">
+    <Project Path="samples/HartsyInference.Whisper.Cli/HartsyInference.Whisper.Cli.csproj" />
+  </Folder>
+
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/HartsyInference.Benchmarks/HartsyInference.Benchmarks.csproj" />
+    <Project Path="benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj" />
+  </Folder>
+
+</Solution>

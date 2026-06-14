@@ -1,5 +1,5 @@
 # Neural Audio Codecs — Research Notes
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (codecs)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (codecs)
 
 ## Summary
 
@@ -9,7 +9,7 @@ Modern TTS and music-generation models (Bark, MusicGen, AudioGen, Moshi/Sesame C
 2. **Quantizer** — a Residual Vector Quantizer (RVQ), Finite Scalar Quantizer (FSQ), or single VQ that converts each latent frame into 1–32 small integer codebook indices.
 3. **Decoder** — a mirrored CNN (or ConvNeXt + iSTFT in Vocos-style codecs) that reconstructs the waveform.
 
-For SharpInference we only need **inference**: the encoder (for voice cloning / reference audio embedding) and the decoder (to turn LM-predicted tokens back into PCM). We do **not** need the GAN discriminators, EMA codebook updates, or distillation teachers used at training time. This document covers EnCodec, DAC, Mimi, SNAC, WavTokenizer, SpeechTokenizer, XCodec/XCodec2, and BigCodec — the eight codecs that cover essentially every modern TTS / music model in our scope.
+For HartsyInference we only need **inference**: the encoder (for voice cloning / reference audio embedding) and the decoder (to turn LM-predicted tokens back into PCM). We do **not** need the GAN discriminators, EMA codebook updates, or distillation teachers used at training time. This document covers EnCodec, DAC, Mimi, SNAC, WavTokenizer, SpeechTokenizer, XCodec/XCodec2, and BigCodec — the eight codecs that cover essentially every modern TTS / music model in our scope.
 
 ## Detailed Findings
 
@@ -318,7 +318,7 @@ fused = w_v * w.view(-1, 1, 1)                       # (out, in, k)
 
 ### Mmap-safetensors plan
 
-All HF checkpoints listed are <500 MB except XCodec2 (3.3 GB, only ~1 GB needed for decode-only) and BigCodec/WavTokenizer (~1.5 GB). Standard SharpInference mmap-safetensors loader handles all of these. PyTorch `.pt` checkpoints (WavTokenizer, official SpeechTokenizer, SNAC 24k) must be converted offline using our existing pt→safetensors tool.
+All HF checkpoints listed are <500 MB except XCodec2 (3.3 GB, only ~1 GB needed for decode-only) and BigCodec/WavTokenizer (~1.5 GB). Standard HartsyInference mmap-safetensors loader handles all of these. PyTorch `.pt` checkpoints (WavTokenizer, official SpeechTokenizer, SNAC 24k) must be converted offline using our existing pt→safetensors tool.
 
 ## Algorithm Steps
 
@@ -428,14 +428,14 @@ These three are the easiest reference targets when porting to C# because the HF 
 - **WavTokenizer iSTFT phase prediction.** The Vocos head predicts `log(magnitude)` and `phase` then runs torch's `istft`. Need to confirm whether the phase head outputs raw radians or sin/cos pair (the Vocos paper uses sin/cos).
 - **BigCodec encoder vs decoder hop mismatch.** Encoder strides `(2,2,2,5,5)` product 200, decoder strides `(5,5,2,2,2)` product 1000 — that's a 5× asymmetry. Source comments suggest internal up/down rates and bypassing — needs careful re-reading of `forward()` before implementation.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 ### Ops we need that aren't in IBackend today
 
 1. **ConvTranspose1d.** Required by every codec decoder (except Vocos-style WavTokenizer / XCodec2 which use Conv1d + iSTFT). Implementation is straightforward — equivalent to a Conv1d on dilated/padded input or, more efficiently, a direct strided write-back. Reuse Conv2d kernel by reshape if needed (treat 1-D as `[B, C, 1, T]`).
 2. **Snake1d activation.** `y = x + (1 / (alpha + 1e-9)) * sin(alpha * x)^2`, with `alpha` a learnable per-channel parameter of shape `(1, C, 1)`. Trivial to add (element-wise). Used by DAC, SNAC, BigCodec, XCodec2.
 3. **Causal Conv1d with KV-cache.** Required only by Mimi and EnCodec-24k streaming mode. For the offline path we can treat causal convs as regular convs with left-only padding. For real-time streaming (LM generates one frame, codec emits 1920 samples) we need to keep the last `(kernel-1)*dilation` input samples per conv layer as a small ring buffer. Recommend implementing this as a wrapper around the existing Conv1d op rather than a new kernel.
-4. **LSTM (unidirectional + bidirectional).** EnCodec, SpeechTokenizer, BigCodec use 2-layer LSTM at the encoder/decoder bottleneck. Already on the SharpInference roadmap for Kokoro — same op. SpeechTokenizer's encoder LSTM is **bi**directional; that doubles the parameters but is just two unidirectional LSTMs running on the forward and reversed sequence with output concat.
+4. **LSTM (unidirectional + bidirectional).** EnCodec, SpeechTokenizer, BigCodec use 2-layer LSTM at the encoder/decoder bottleneck. Already on the HartsyInference roadmap for Kokoro — same op. SpeechTokenizer's encoder LSTM is **bi**directional; that doubles the parameters but is just two unidirectional LSTMs running on the forward and reversed sequence with output concat.
 5. **Local windowed self-attention.** Only SNAC 32k/44k need this (`attn_window_size = 32`). Implementable as standard scaled-dot-product attention with a band-diagonal mask. Not needed for SNAC 24k (Orpheus's choice).
 6. **Bottleneck Transformer (RoPE + GELU).** Mimi only. Standard transformer block — we already have all the pieces (matmul, RMSNorm/LayerNorm, GELU, attention, RoPE).
 7. **iSTFT.** WavTokenizer and XCodec2 decoders. We have FFT (for mel spectrogram). iSTFT is FFT⁻¹ + overlap-add — small op, write it once.
@@ -456,7 +456,7 @@ Store codebooks contiguously in unmanaged memory as `float32[codebook_size, code
 
 EnCodec and DAC are float32 throughout; we should match PyTorch float32 reconstruction within ~1e-4 RMS error on standard audio. Mimi uses bf16 in the bundled checkpoint (`moshiko-pytorch-bf16`) — when porting we should upcast bf16 → fp32 at load time for the encoder/decoder and quantizer (the speed cost is negligible compared to the LM), and only keep bf16 for the optional in-bottleneck transformer if memory matters.
 
-### Priority order for SharpInference
+### Priority order for HartsyInference
 
 1. **EnCodec 24k** — needed for Bark. Smallest, simplest, well-documented. First codec to implement.
 2. **DAC 24k** — needed for IndexTTS-2 and any modern TTS that's swapped EnCodec for DAC. Adds Snake1d.
@@ -470,14 +470,14 @@ EnCodec and DAC are float32 throughout; we should match PyTorch float32 reconstr
 
 ### Package boundaries
 
-All codecs should live in **SharpInference.Audio.Codecs**. The Wav2Vec2-BERT semantic encoder required by XCodec2 *encoding* is a separate concern and belongs in **SharpInference.Audio.SpeechEncoders** (alongside HuBERT, WavLM, Whisper-encoder). Decoder-only usage of XCodec2 doesn't need that dependency, so split the load paths cleanly to avoid forcing every Llasa user to load a 2 GB w2v-BERT they don't need.
+All codecs should live in **HartsyInference.Audio.Codecs**. The Wav2Vec2-BERT semantic encoder required by XCodec2 *encoding* is a separate concern and belongs in **HartsyInference.Audio.SpeechEncoders** (alongside HuBERT, WavLM, Whisper-encoder). Decoder-only usage of XCodec2 doesn't need that dependency, so split the load paths cleanly to avoid forcing every Llasa user to load a 2 GB w2v-BERT they don't need.
 
 ### Reference tests
 
 For every codec, ship a regression test that:
 1. Loads a 1-second 1 kHz sine wave at the codec's sample rate.
 2. Encodes via Python reference (HF transformers or original repo) → saves `codes.npy`.
-3. Encodes via SharpInference → asserts integer-exact match of codes (allow off-by-one drift on edge frames if causality differs, but assert match on the middle 80% of frames).
+3. Encodes via HartsyInference → asserts integer-exact match of codes (allow off-by-one drift on edge frames if causality differs, but assert match on the middle 80% of frames).
 4. Decodes the reference codes via both → assert per-sample L1 difference < 1e-3 in float32.
 
 XCodec2 FSQ is the only codec where integer-exact code match is mandatory across the entire stream — its quantization grid is deterministic with no near-miss tolerance.

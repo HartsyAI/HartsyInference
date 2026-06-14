@@ -5,7 +5,7 @@
 ## Extra Reading
 - `docs/Design/IMPLEMENTATION_DETAILS.md`
 - `docs/Agents/KERNEL.md`
-- Existing benchmarks in `benchmarks/SharpInference.Benchmarks/`
+- Existing benchmarks in `benchmarks/HartsyInference.Benchmarks/`
 
 ## Workflow
 1. Identify target (kernel, pipeline, regression check)

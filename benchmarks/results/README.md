@@ -22,7 +22,7 @@ run_2026-05-18T160000Z_nvidia-h100-80gb-hbm3/
 | `hardware.txt` | `run_benchmarks.sh` | nvidia-smi, lscpu, governor, ECC, etc. |
 | `software.txt` | `run_benchmarks.sh` | dotnet, nvcc, driver, pip-freeze, git rev |
 | `digests.txt` | `run_benchmarks.sh` | SHA-256 of every PTX file + native CUDA source |
-| `microbench_csharp.csv` | BenchmarkDotNet via `SharpInference.GpuBenchmarks` | per-kernel per-shape latency (C#) |
+| `microbench_csharp.csv` | BenchmarkDotNet via `HartsyInference.GpuBenchmarks` | per-kernel per-shape latency (C#) |
 | `microbench_pytorch.csv` | `python-baseline/run_all.sh` | per-kernel per-shape latency (PyTorch) |
 | `e2e_csharp.csv` | (added in B4 once wired) | per-step end-to-end timing (C#) |
 | `e2e_pytorch.csv` | `python-baseline/bench_pytorch_e2e.py` | per-step end-to-end timing (PyTorch + diffusers) |
@@ -42,7 +42,7 @@ for the duration of Phase B; any change requires bumping a version field and re-
 1. **Always read `hardware.txt` and `software.txt` first.** A speedup claim that holds on one driver
    version may not hold on another. The fingerprints scope the claim.
 2. **Open `comparison.md`** — it lists every (op, shape, dtype) tuple sorted by `speedup_x_csharp_over_pytorch`.
-   Values > 1 mean SharpInference is faster than PyTorch on that shape.
+   Values > 1 mean HartsyInference is faster than PyTorch on that shape.
 3. **Trust the `significant` column.** A speedup that doesn't survive a Welch's t-test at α = 0.01 is
    noise.
 4. **For paper figures**: drive plotting from `comparison.csv` (the joined data); never hand-author
@@ -61,7 +61,7 @@ for the duration of Phase B; any change requires bumping a version field and re-
 
 ```bash
 # On any CUDA box with dotnet, python3, nvidia-smi:
-git clone <repo> sharpinference && cd sharpinference
+git clone <repo> hartsyinference && cd hartsyinference
 git checkout <commit-sha-from-software.txt>
 
 # Match Python deps

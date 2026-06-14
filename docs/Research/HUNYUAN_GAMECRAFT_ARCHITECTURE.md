@@ -1,6 +1,6 @@
 # Hunyuan-GameCraft 1.0 — Research Notes
 
-> Status: Complete (paper + repo + HF file tree captured; exact `.pt` tensor key dump still required — see Open Questions) | Last Updated: 2026-05-24 | Needed Before: SharpInference.Interactive (Phase 10) — **gated on license acceptance, NOT default-bundled**
+> Status: Complete (paper + repo + HF file tree captured; exact `.pt` tensor key dump still required — see Open Questions) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Interactive (Phase 10) — **gated on license acceptance, NOT default-bundled**
 > Source of truth: [GitHub `Tencent-Hunyuan/Hunyuan-GameCraft-1.0`](https://github.com/Tencent-Hunyuan/Hunyuan-GameCraft-1.0), [arXiv 2506.17201](https://arxiv.org/abs/2506.17201), [HF `tencent/Hunyuan-GameCraft-1.0`](https://huggingface.co/tencent/Hunyuan-GameCraft-1.0), [project page](https://hunyuan-gamecraft.github.io/), [ROCm blog reproduction](https://rocm.blogs.amd.com/artificial-intelligence/hunyuan-gamecraft/README.html)
 > License: **Tencent Hunyuan Community License — RESTRICTED** (see warning below)
 > Related: [`FLUX_ARCHITECTURE.md`](FLUX_ARCHITECTURE.md) (dual-stream / single-stream MM-DiT lineage shared with HunyuanVideo), [`DIFFUSION_SCHEDULERS.md`](DIFFUSION_SCHEDULERS.md) (FlowMatchDiscrete shift formula), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md) (3D causal VAE patterns shared with HunyuanVideo), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (Llava-Llama-3-8B + CLIP-L dual encoder), [`CFG_AND_GUIDANCE.md`](CFG_AND_GUIDANCE.md) (CFG distillation), [`SAFETENSORS_FORMAT.md`](SAFETENSORS_FORMAT.md) (this model does **not** ship safetensors — see warning).
@@ -9,11 +9,11 @@
 
 ## Warning — License & Distribution
 
-**Hunyuan-GameCraft 1.0 is released under the *Tencent Hunyuan Community License Agreement* (the LICENSE file in the GitHub repo and the model HF repo). This license is materially different from the permissive licenses (Apache-2.0, MIT, BSD) that gate every other model SharpInference bundles by default.** Any implementer touching this code path **must** read the full LICENSE text and surface its restrictions to end users at model-load time.
+**Hunyuan-GameCraft 1.0 is released under the *Tencent Hunyuan Community License Agreement* (the LICENSE file in the GitHub repo and the model HF repo). This license is materially different from the permissive licenses (Apache-2.0, MIT, BSD) that gate every other model HartsyInference bundles by default.** Any implementer touching this code path **must** read the full LICENSE text and surface its restrictions to end users at model-load time.
 
 The headline restrictions are:
 
-1. **Geographic exclusion.** Section "Territory" excludes the **European Union, United Kingdom, and South Korea** from the licensed territory. The license expressly states: "THIS LICENSE AGREEMENT DOES NOT APPLY IN THE EUROPEAN UNION, UNITED KINGDOM AND SOUTH KOREA." Any download, use, reproduction, modification, or distribution in those jurisdictions is **unlicensed and unauthorized** under Tencent's terms. SharpInference users in those regions cannot legally use these weights via this license; they must seek a separate commercial license from Tencent.
+1. **Geographic exclusion.** Section "Territory" excludes the **European Union, United Kingdom, and South Korea** from the licensed territory. The license expressly states: "THIS LICENSE AGREEMENT DOES NOT APPLY IN THE EUROPEAN UNION, UNITED KINGDOM AND SOUTH KOREA." Any download, use, reproduction, modification, or distribution in those jurisdictions is **unlicensed and unauthorized** under Tencent's terms. HartsyInference users in those regions cannot legally use these weights via this license; they must seek a separate commercial license from Tencent.
 
 2. **100 M MAU commercial-scale cap.** Any entity (including affiliates) whose products or services using the model — or any Model Derivative — exceed **100 million monthly active users (MAU)** in the calendar month preceding the most recent major release must apply to Tencent for a separate commercial license and **must not exercise any of the licensed rights** until that license is granted.
 
@@ -25,18 +25,18 @@ The headline restrictions are:
 
 6. **Acceptance is implicit.** Per the LICENSE, **accessing, downloading, or using any portion** of the model "constitutes acceptance of all terms" — the load path itself is a license-acceptance act. There is no neutral "look but don't use" mode.
 
-### Consequences for SharpInference
+### Consequences for HartsyInference
 
-SharpInference itself ships under permissive licensing (the project's own LICENSE), and we deliberately do not bundle restrictively-licensed weights, propagate restrictive licenses to downstream users, or auto-download such weights without explicit opt-in. Therefore Hunyuan-GameCraft must be implemented as an **optional, opt-in pipeline** with the following hard requirements built into the loader:
+HartsyInference itself ships under permissive licensing (the project's own LICENSE), and we deliberately do not bundle restrictively-licensed weights, propagate restrictive licenses to downstream users, or auto-download such weights without explicit opt-in. Therefore Hunyuan-GameCraft must be implemented as an **optional, opt-in pipeline** with the following hard requirements built into the loader:
 
-- **Weights are never bundled in any SharpInference NuGet package or release artifact.** Users supply their own download.
-- **No automatic download from huggingface.co/tencent/Hunyuan-GameCraft-1.0 without explicit user action.** A click-through (or `--accept-tencent-hunyuan-community-license` CLI flag, or `AcceptTencentHunyuanCommunityLicense = true` API surface, plus an environment variable like `SHARPINFERENCE_ACCEPT_TENCENT_HUNYUAN_LICENSE=1`) is required before the loader will touch the files. The loader must also display the geographic-exclusion list (EU / UK / South Korea) and the 100 M MAU cap inline at acceptance time.
+- **Weights are never bundled in any HartsyInference NuGet package or release artifact.** Users supply their own download.
+- **No automatic download from huggingface.co/tencent/Hunyuan-GameCraft-1.0 without explicit user action.** A click-through (or `--accept-tencent-hunyuan-community-license` CLI flag, or `AcceptTencentHunyuanCommunityLicense = true` API surface, plus an environment variable like `HARTSYINFERENCE_ACCEPT_TENCENT_HUNYUAN_LICENSE=1`) is required before the loader will touch the files. The loader must also display the geographic-exclusion list (EU / UK / South Korea) and the 100 M MAU cap inline at acceptance time.
 - **Documentation in `samples/` and any pipeline README must lead with these restrictions.** Do not write code samples that implicitly download the weights.
 - **Tests that exercise this pipeline must be opt-in (skipped by default)** behind the same acceptance flag, exactly the way other restricted-weight test paths are gated in the repo.
 - **Generated Outputs carry the use restrictions with them.** Downstream users redistributing inference results must be told they cannot be used to train competing models.
-- **The pipeline must be in its own NuGet package** (e.g. `SharpInference.Interactive.HunyuanGameCraft`) so that depending on `SharpInference.Interactive` does not pull in this code path or imply license acceptance.
+- **The pipeline must be in its own NuGet package** (e.g. `HartsyInference.Interactive.HunyuanGameCraft`) so that depending on `HartsyInference.Interactive` does not pull in this code path or imply license acceptance.
 
-If at any point Tencent retracts or changes the license, or if the project decides the compliance overhead is not worth carrying, this entire package should be removable with no impact on any other SharpInference module. Implementers: read the full LICENSE file in the GitHub repo before writing a line of code.
+If at any point Tencent retracts or changes the license, or if the project decides the compliance overhead is not worth carrying, this entire package should be removable with no impact on any other HartsyInference module. Implementers: read the full LICENSE file in the GitHub repo before writing a line of code.
 
 ---
 
@@ -53,7 +53,7 @@ Two novel architectural pieces sit *on top of* that backbone:
 
 Text conditioning uses HunyuanVideo's dual encoder — **Llava-Llama-3-8B-v1.1** as the primary high-dim sequence encoder (≈4096-dim hidden, passed through a TokenRefiner) and **CLIP-ViT-Large-Patch14** as the pooled global encoder (768-dim). VAE is HunyuanVideo's **3D causal VAE** (`884-16c-hy0801`): 16 latent channels, 8× spatial compression, 4× temporal compression, causal-conv3d. Scheduler is **FlowMatchDiscreteScheduler** (`num_train_timesteps=1000`, `shift=5.0` at inference, `reverse=true`, Euler solver). CFG at scale 2.0 over 50 steps for the base model; a **Phased Consistency Model (PCM)** distilled variant runs in **8 steps with CFG=1.0** for ≈10-20× speedup, hitting 6.6 fps on the reference 8×H20 setup.
 
-For SharpInference: the **transformer code can be ≈98 % shared with a future HunyuanVideo pipeline** (only the input-channel count and the CameraNet attachment differ). The hard new work is (a) Plücker-ray generation from `(w/a/s/d, speed)` sequences, (b) the 3D causal VAE decoder, (c) Llava-Llama-3-8B text-encoder inference (likely shared with dotLLM via the existing Llama backbone), and (d) a **`.pt` (PyTorch pickle) loader** — the weights ship only as `mp_rank_00_model_states.pt` (30.2 GB) and `mp_rank_00_model_states_distill.pt` (30.2 GB), not safetensors. See § File tree warning.
+For HartsyInference: the **transformer code can be ≈98 % shared with a future HunyuanVideo pipeline** (only the input-channel count and the CameraNet attachment differ). The hard new work is (a) Plücker-ray generation from `(w/a/s/d, speed)` sequences, (b) the 3D causal VAE decoder, (c) Llava-Llama-3-8B text-encoder inference (likely shared with dotLLM via the existing Llama backbone), and (d) a **`.pt` (PyTorch pickle) loader** — the weights ship only as `mp_rank_00_model_states.pt` (30.2 GB) and `mp_rank_00_model_states_distill.pt` (30.2 GB), not safetensors. See § File tree warning.
 
 ## Detailed Findings
 
@@ -93,7 +93,7 @@ For SharpInference: the **transformer code can be ≈98 % shared with a future H
 | `stdmodels/openai_clip-vit-large-patch14/` | ≈1.7 GB | safetensors + tokenizer JSON | Pooled text encoder. |
 | `stdmodels/vae_3d/hyvae/` | ≈1 GB | likely safetensors | 3D causal VAE (`884-16c-hy0801` config name). |
 
-> **File-format alert.** The denoiser weights ship **only as PyTorch pickle (`.pt`) files, not safetensors**, and the `mp_rank_00_` naming reflects DeepSpeed-style model-parallel rank-0 sharding (so a future Tencent release could ship multi-rank shards). SharpInference's tensor loader is built around safetensors and does not have a `.pt` parser. The two viable paths are:
+> **File-format alert.** The denoiser weights ship **only as PyTorch pickle (`.pt`) files, not safetensors**, and the `mp_rank_00_` naming reflects DeepSpeed-style model-parallel rank-0 sharding (so a future Tencent release could ship multi-rank shards). HartsyInference's tensor loader is built around safetensors and does not have a `.pt` parser. The two viable paths are:
 >
 > 1. **Ship a one-off Python conversion script** (`tools/convert_gamecraft_pt_to_safetensors.py`) that the user runs once, post-download, to produce a `model.safetensors` + `model.safetensors.index.json`. This is the path-of-least-resistance and how other restricted-format models (e.g. early Stable Diffusion `.ckpt`) were handled. Conversion requires `torch.load` so the user must already have PyTorch installed, but they're already in PyTorch's licensing/runtime universe to consume Tencent weights anyway.
 > 2. **Implement a minimal `.pt` reader in C#.** PyTorch `.pt` is a ZIP container holding a Pickle stream that references `data/N` blob files (raw little-endian tensor bytes) plus a `data.pkl` index. A safe-subset pickle parser (handling only the ops PyTorch emits: `torch._utils._rebuild_tensor_v2`, `OrderedDict`, `collections.OrderedDict`, `torch.BFloat16Storage`, `torch.HalfStorage`, etc.) is ≈600 LOC of C# and avoids the pure-Python conversion dependency. **This is the architecturally cleaner option** but adds maintenance surface for a single license-restricted model. Recommend option 1 unless we end up needing `.pt` support for other models too.
@@ -270,7 +270,7 @@ The string `884-16c-hy0801` is HunyuanVideo's naming convention: **8×8 spatial,
 - VAE dtype at inference: fp16 per the recommended diffusers table.
 - Supports tiling + slicing for low-VRAM (cf. `enable_vae_tiling()` in diffusers' equivalent).
 
-The VAE is fully reusable as-is for any future HunyuanVideo pipeline in SharpInference.
+The VAE is fully reusable as-is for any future HunyuanVideo pipeline in HartsyInference.
 
 ### 8. Scheduler — `FlowMatchDiscreteScheduler`
 
@@ -501,7 +501,7 @@ Chunks 1..N reuse steps 1–10 with two changes at step 2 and 3:
 
 The reference image plays no further role after chunk 0. Action symbol `a_N` and speed `s_N` come from the user's action list for chunk `N`.
 
-### Training (informational only — not in SharpInference scope)
+### Training (informational only — not in HartsyInference scope)
 
 - Phased consistency distillation (PCM) trains the 8-step student to match the 50-step teacher's trajectory at log-spaced phase boundaries (typically 4 phases over the 50-step trajectory).
 - CFG distillation folds the implicit dual-pass CFG into a single forward by training the student under text-conditioning with the teacher's CFG-applied prediction as target.
@@ -526,7 +526,7 @@ The reference image plays no further role after chunk 0. Action symbol `a_N` and
 1. **Backbone block counts vs HunyuanVideo base.** GameCraft's `HYVideoDiffusionTransformer` defaults to `depth_double=19, depth_single=38`, while diffusers' `HunyuanVideoTransformer3DModel` defaults to `num_layers=20, num_single_layers=40`. Tencent likely trimmed one dual + two single blocks to spend the parameter budget on (a) CameraNet, (b) the wider 33-channel patchify input, (c) the extra training compute for hybrid history. **A diffusers-style loader will not load GameCraft weights without explicitly overriding these depths.**
 2. **`in_channels` mismatch.** HunyuanVideo expects `in_channels=16`. GameCraft cats noisy + ref + mask = **33**. The patchify projection's first conv weight differs in shape. (Implementers must construct the backbone with `in_channels=33`, not 16.)
 3. **`guidance_embed`.** Vanilla HunyuanVideo uses CFG-distilled embedded guidance (`guidance_embed=True`, accepting a `guidance` tensor as input). GameCraft uses **raw two-pass CFG** at base (`cfg-scale=2.0`) and one-pass at distilled (`cfg-scale=1.0`); the `guidance` argument is unused.
-4. **Distilled variant is PCM, not Hyper-SD or LCM.** PCM (Phased Consistency Model) has different boundary-step training than the LCM family. At inference both run as straight `step` calls on a Euler-flow scheduler — no special PCM-specific sampler. So the SharpInference scheduler code is identical between base and distilled; only `num_inference_steps` and `cfg-scale` change.
+4. **Distilled variant is PCM, not Hyper-SD or LCM.** PCM (Phased Consistency Model) has different boundary-step training than the LCM family. At inference both run as straight `step` calls on a Euler-flow scheduler — no special PCM-specific sampler. So the HartsyInference scheduler code is identical between base and distilled; only `num_inference_steps` and `cfg-scale` change.
 5. **CameraNet has zero-init final projection + zero-init scale.** Means a freshly-constructed CameraNet contributes nothing — useful for sanity-checking the rest of the pipeline before loading CameraNet weights. (Equivalently: if CameraNet weights fail to load, the model degrades to a text-only HunyuanVideo-like behaviour rather than producing garbage.)
 6. **Single-stream-block modulation.** GameCraft's `SingleStreamBlock` uses **3-factor modulation** (`shift, scale, gate`) on a single concatenated stream, where the equivalent FLUX/HunyuanVideo block also uses 3-factor — confirm by tensor key. The double-stream block uses 6-factor per stream (12 total).
 7. **`flow-shift-eval-video=5.0` is hardcoded for the 720p / 33-frame regime.** Lower shift values (e.g. 3.0) are used in HunyuanVideo for 540p; **do not change this for GameCraft** unless you also retune the schedule.
@@ -535,52 +535,52 @@ The reference image plays no further role after chunk 0. Action symbol `a_N` and
 ## Open Questions
 
 1. **Exact tensor key names in `mp_rank_00_model_states.pt`.** Confirmed structure: flat `OrderedDict[str, bf16 Tensor]`. Confirmed naming likely follows HunyuanVideo (`img_in.proj.*`, `txt_in.*`, `double_blocks.N.img_*` / `.txt_*`, `single_blocks.N.linear1/2.*`, `final_layer.*`, `camera_in.*`). **Action**: dump `keys()` + `shape` once weights are downloaded and pin the exact mapping in this doc. Especially: the `camera_in.scale` shape (per-channel vs scalar), and whether the mask channel is treated as a separate input projection or stacked into the same conv.
-2. **Camera FOV used for Plücker generation.** Paper does not state the pinhole intrinsics explicitly. Likely 60° horizontal FOV (the gaming default) but needs source-code confirmation in `ActionToPoseFromID`. SharpInference must match exactly or the rays will be miscalibrated.
+2. **Camera FOV used for Plücker generation.** Paper does not state the pinhole intrinsics explicitly. Likely 60° horizontal FOV (the gaming default) but needs source-code confirmation in `ActionToPoseFromID`. HartsyInference must match exactly or the rays will be miscalibrated.
 3. **`fps_emb` or framerate conditioning.** Paper does not mention a separate fps embedding; HunyuanVideo's variants do have one (`fps_in`). Need to grep the weights for any `fps_*` keys.
 4. **TokenRefiner internals.** Paper says 2 layers, 3072 hidden; need to confirm whether QK-norm and modulation match HunyuanVideo's TokenRefiner exactly or are slightly tweaked. The `txt_in.*` keyspace will tell us.
 5. **Mouse action mapping.** `ActionToPoseFromID` reportedly supports mouse signals but CLI examples only show keyboard. Need to read source to enumerate the full action vocabulary and quantify mouse pitch/yaw scaling.
-6. **Sequence-parallel inference.** The `_sp` package suffix indicates DeepSpeed-Ulysses sequence parallelism is core to the 8-GPU recipe. For SharpInference single-GPU CUDA, this just becomes "don't shard"; for SharpInference multi-GPU Vulkan/CUDA we'd need to revisit. For Phase 10 single-GPU only.
+6. **Sequence-parallel inference.** The `_sp` package suffix indicates DeepSpeed-Ulysses sequence parallelism is core to the 8-GPU recipe. For HartsyInference single-GPU CUDA, this just becomes "don't shard"; for HartsyInference multi-GPU Vulkan/CUDA we'd need to revisit. For Phase 10 single-GPU only.
 7. **Long-form quality cliff.** Paper claims "consistency across long temporal sequences" but doesn't publish a sharp number for when artefacts begin. Empirically, community reports suggest visible drift after 20+ chunks (≈26 s). Mitigation: re-anchor on the original reference image periodically.
 8. **CFG-distillation residual.** Does the distilled checkpoint accept `--cfg-scale` >1 at all, or is it a no-op? Code review needed; likely a no-op (one forward per step regardless).
-9. **VAE tiling support.** HunyuanVideo's diffusers VAE has `enable_tiling()`/`enable_slicing()`. The GameCraft repo wraps the same VAE — confirm the flags are preserved and that tiling is needed at 704×1216 for SharpInference's target GPUs (RTX 3090 24 GB will require it).
-10. **Quantisation tolerance.** Tencent ships an FP8 option (`--use-fp8`). For SharpInference we'd target bf16 first and FP8/INT8 later. No public number for the quality delta of `--use-fp8` vs bf16 — need to benchmark.
+9. **VAE tiling support.** HunyuanVideo's diffusers VAE has `enable_tiling()`/`enable_slicing()`. The GameCraft repo wraps the same VAE — confirm the flags are preserved and that tiling is needed at 704×1216 for HartsyInference's target GPUs (RTX 3090 24 GB will require it).
+10. **Quantisation tolerance.** Tencent ships an FP8 option (`--use-fp8`). For HartsyInference we'd target bf16 first and FP8/INT8 later. No public number for the quality delta of `--use-fp8` vs bf16 — need to benchmark.
 11. **Plücker map dtype.** Paper / code likely use fp32 for Plücker computation then cast to bf16 before CameraNet. Confirm — small precision losses in ray geometry can show as visual drift over chunks.
-12. **`Notice.txt` contents.** Acknowledges HunyuanVideo, SD3, FLUX, Llama, LLaVA, diffusers. Implementers must propagate this attribution into any SharpInference NOTICE file for the Hunyuan-GameCraft package.
+12. **`Notice.txt` contents.** Acknowledges HunyuanVideo, SD3, FLUX, Llama, LLaVA, diffusers. Implementers must propagate this attribution into any HartsyInference NOTICE file for the Hunyuan-GameCraft package.
 
 ## Implementation Notes
 
-(For the SharpInference port. Phase 10 / `SharpInference.Interactive.HunyuanGameCraft`.)
+(For the HartsyInference port. Phase 10 / `HartsyInference.Interactive.HunyuanGameCraft`.)
 
 1. **Project structure.**
-    - `src/SharpInference.Interactive.HunyuanGameCraft/` — separate NuGet package so it doesn't pollute `SharpInference.Interactive` for users who can't or won't accept the license.
+    - `src/HartsyInference.Interactive.HunyuanGameCraft/` — separate NuGet package so it doesn't pollute `HartsyInference.Interactive` for users who can't or won't accept the license.
     - Subfolders: `Models/Backbone/HunyuanVideoTransformer.cs`, `Models/Camera/CameraNet.cs`, `Models/Camera/PluckerEmbedding.cs`, `Models/Camera/ActionToPose.cs`, `Pipelines/HunyuanGameCraftPipeline.cs`, `Schedulers/FlowMatchDiscreteScheduler.cs` (if not already shared).
-    - Shared with future `SharpInference.Video.HunyuanVideo`: `Models/Backbone/HunyuanVideoTransformer.cs` (parameterize block counts), `Models/Vae/HunyuanVideo3DCausalVae.cs`, `TextEncoders/LlavaLlamaTextEncoder.cs`. Plan accordingly: build these in `SharpInference.Video` first, depend on them from the Interactive package.
+    - Shared with future `HartsyInference.Video.HunyuanVideo`: `Models/Backbone/HunyuanVideoTransformer.cs` (parameterize block counts), `Models/Vae/HunyuanVideo3DCausalVae.cs`, `TextEncoders/LlavaLlamaTextEncoder.cs`. Plan accordingly: build these in `HartsyInference.Video` first, depend on them from the Interactive package.
 2. **License-acceptance gate.** First thing the loader does:
     ```csharp
     if (!options.AcceptTencentHunyuanCommunityLicense
-        && Environment.GetEnvironmentVariable("SHARPINFERENCE_ACCEPT_TENCENT_HUNYUAN_LICENSE") != "1")
+        && Environment.GetEnvironmentVariable("HARTSYINFERENCE_ACCEPT_TENCENT_HUNYUAN_LICENSE") != "1")
     {
         throw new LicenseAcceptanceRequiredException(
             "Hunyuan-GameCraft is licensed under the Tencent Hunyuan Community License. " +
             "This license is NOT available in the EU, UK, or South Korea, and is capped at " +
             "100M MAU. See LICENSE in the model repo. Set " +
             "options.AcceptTencentHunyuanCommunityLicense = true, or the " +
-            "SHARPINFERENCE_ACCEPT_TENCENT_HUNYUAN_LICENSE=1 env var, to confirm acceptance.");
+            "HARTSYINFERENCE_ACCEPT_TENCENT_HUNYUAN_LICENSE=1 env var, to confirm acceptance.");
     }
     ```
     Same gate on the auto-downloader if we ever ship one. Tests are skipped unless the env var is set.
 3. **Weight loader strategy.** Recommend **option (1) from § File-format alert**: provide `tools/convert_hunyuan_gamecraft_to_safetensors.py` that the user runs once. Output: `transformer.safetensors`, `transformer_distill.safetensors`, plus `transformer.config.json` capturing the depths and `in_channels=33`. Loader then uses the existing safetensors path. Document this in the package README, gated behind the license-acceptance step.
 4. **Backbone implementation.** Parameterize `HunyuanVideoTransformer` over `(depth_double, depth_single, in_channels, has_camera, guidance_embed)` so the same class serves both vanilla HunyuanVideo (20/40, 16, false, true) and GameCraft (19/38, 33, true, false). Block code is identical.
 5. **3D RoPE.** Implement `compute_3d_rope(rope_dim_list=[16,56,56], shape=(T_lat, H_lat//2, W_lat//2), theta=...)`. Theta per axis: HunyuanVideo uses `rope_theta=256.0` in diffusers — confirm against GameCraft source. Compute `freqs_cos` / `freqs_sin` once per chunk and cache.
-6. **CameraNet.** ~200 LOC. Use existing `Conv2d` and `GroupNorm` from `SharpInference.Core`. The PixelUnshuffle is a pure tensor reshape (no compute). The temporal pooling step is `(T, C, H, W) → (T', C, H, W)` with `T' = (T-1)/4 + 1` via causal stride-4 averaging of frames 1..T while keeping frame 0 — implement as a small custom op.
+6. **CameraNet.** ~200 LOC. Use existing `Conv2d` and `GroupNorm` from `HartsyInference.Core`. The PixelUnshuffle is a pure tensor reshape (no compute). The temporal pooling step is `(T, C, H, W) → (T', C, H, W)` with `T' = (T-1)/4 + 1` via causal stride-4 averaging of frames 1..T while keeping frame 0 — implement as a small custom op.
 7. **Plücker generation.** Pure CPU code; runs once per chunk, ~1 ms at 704×1216×33. No backend kernel needed. Cache the unit ray directions in pixel coordinates at startup; per-chunk only the camera pose changes.
 8. **Action → pose integration.** `ActionToPose` is a tiny state machine: `(action, speed)` → constant `(d_trans, d_rot, α, β)` for the chunk → integrate over 33 frames → 33 poses. Use double precision for the integration to avoid drift over long rollouts. Quaternion for rotation.
 9. **VAE.** Reuse the future `HunyuanVideo3DCausalVae` decoder. Tiling required at 704×1216 on consumer GPUs (24 GB).
-10. **Text encoders.** Llava-Llama-3-8B is just Llama-3-8B at the language tower — depend on `SharpInference.Text.Llama` (or `dotLLM`) for the inference. Apply the diffusers prompt template + `crop_start=95` exactly. CLIP-L pooled is a tiny standalone encoder; we likely already have it for SD3/FLUX.
+10. **Text encoders.** Llava-Llama-3-8B is just Llama-3-8B at the language tower — depend on `HartsyInference.Text.Llama` (or `dotLLM`) for the inference. Apply the diffusers prompt template + `crop_start=95` exactly. CLIP-L pooled is a tiny standalone encoder; we likely already have it for SD3/FLUX.
 11. **CFG.** Two-pass CFG at scale 2.0 doubles the per-step transformer cost. At 30k tokens × 50 steps × 2 passes this is the dominant cost. Consider always-batched CFG (cat cond + uncond along batch axis) to halve the launch overhead — same trick FLUX uses.
 12. **Distilled checkpoint.** Same code path; just swap the safetensors file, set `num_inference_steps=8`, skip the uncond pass entirely (`cfg-scale=1.0`).
 13. **Streaming output.** The natural API is `async IAsyncEnumerable<VideoChunk>` yielding one 33-frame chunk at a time, with the caller supplying the next action via a callback or queue. Match `dotLLM`'s streaming token API where possible for consistency.
 14. **Validation.** Reproduce the first frame of `asset/village.png + "w 0.2"` exactly (within bf16 tolerance) against the Python reference. Numeric tolerance budget: max-abs ≤ 1e-2 on the final decoded RGB frame after one chunk; mean-abs ≤ 1e-3. (Tight because flow-matching + CFG amplifies small precision errors over 50 steps.)
 15. **Sample app.** `samples/HunyuanGameCraft.Interactive/` — a console app that takes `--reference-image`, `--prompt`, and reads action keys from stdin (`w/a/s/d`) to produce chunks on demand. Must display the license warning before doing anything.
 16. **Documentation in `docs/Checklists/PHASE_10_INTERACTIVE.md`** must call out the license gate as a separate checklist item from "implement transformer" / "implement CameraNet" / "implement VAE decode."
-17. **Do not** auto-resolve the model on `dotnet add package SharpInference.Interactive.HunyuanGameCraft`. The first call into the package must explain how to acquire weights with full license context.
+17. **Do not** auto-resolve the model on `dotnet add package HartsyInference.Interactive.HunyuanGameCraft`. The first call into the package must explain how to acquire weights with full license context.

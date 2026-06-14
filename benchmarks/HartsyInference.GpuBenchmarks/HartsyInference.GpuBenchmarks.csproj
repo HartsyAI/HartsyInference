@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>HartsyInference.GpuBenchmarks</RootNamespace>
+    <AssemblyName>HartsyInference.GpuBenchmarks</AssemblyName>
+    <!-- BenchmarkDotNet emits sample apps that intentionally exceed our project's strict warning rules; suppress for benches only. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+  </ItemGroup>
+
+  <!-- Copy compiled PTX kernels next to the benchmark executable so CudaBackend can locate them. -->
+  <ItemGroup>
+    <None Include="..\..\src\HartsyInference.Cuda\Ptx\*.ptx">
+      <Link>Ptx\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>

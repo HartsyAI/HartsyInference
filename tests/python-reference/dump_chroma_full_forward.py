@@ -22,7 +22,7 @@ import json
 import torch
 from diffusers.models.transformers.transformer_chroma import ChromaTransformer2DModel
 
-CKPT_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/Chroma/Chroma1-HD-fp8mixed-final.safetensors"
+CKPT_PATH = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Stable-Diffusion/Chroma/Chroma1-HD-fp8mixed-final.safetensors"
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT_DIR = os.path.join(REPO_ROOT, "tests/python-reference/chroma_reference_tensors/full_forward")
 

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Vision</PackageId>
+    <Description>Vision inference for HartsyInference — CLIP embeddings, YOLO detection (planned), SAM segmentation (planned), and face detection (planned).</Description>
+    <RootNamespace>HartsyInference.Vision</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+    <!--
+      Vision depends on Diffusion because the existing ClipTextEncoder and ClipVisionEncoder
+      live in HartsyInference.Diffusion (originally built for SDXL conditioning and IP-Adapter).
+      Reusing them here avoids duplicating the ViT/transformer math. The long-term fix is to
+      hoist the CLIP encoders into a small shared package both Vision and Diffusion can depend
+      on, so pure-Vision installs don't drag in the diffusion stack. Tracked in PHASE_6_VISION.md.
+    -->
+    <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Vision.Tests" />
+  </ItemGroup>
+
+</Project>

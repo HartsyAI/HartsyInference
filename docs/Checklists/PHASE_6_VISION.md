@@ -1,7 +1,7 @@
 # Phase 6 — Vision (CLIP + YOLO)
 
 > **Goal:** CLIP embeddings and object detection working end-to-end.
-> **Packages:** SharpInference.Vision
+> **Packages:** HartsyInference.Vision
 
 ---
 
@@ -15,7 +15,7 @@
 - [x] CLIP image preprocessing (resize, center crop, CLIP normalize — *not* ImageNet)
 - [ ] YOLO preprocessing (letterbox resize, 0-1 normalize), NMS algorithm
 - [x] Embedding API surface (single, batch, similarity scoring)
-- [x] **Reuse decision**: `ClipTextEncoder` + `ClipVisionEncoder` already exist in `SharpInference.Diffusion/Models/TextEncoders/` (originally for IP-Adapter / SDXL conditioning). The standalone Vision pipeline wraps these rather than duplicating the math. Vision references Diffusion for now; long-term these encoders should be hoisted to a shared sub-package so pure-Vision installs don't pull the full diffusion stack.
+- [x] **Reuse decision**: `ClipTextEncoder` + `ClipVisionEncoder` already exist in `HartsyInference.Diffusion/Models/TextEncoders/` (originally for IP-Adapter / SDXL conditioning). The standalone Vision pipeline wraps these rather than duplicating the math. Vision references Diffusion for now; long-term these encoders should be hoisted to a shared sub-package so pure-Vision installs don't pull the full diffusion stack.
 - [x] **YOLO format decision**: Pure-C# native — read weights from converted safetensors (Ultralytics `.pt` → safetensors via a converter), execute through `IBackend`. **No `Microsoft.ML.OnnxRuntime` dependency.** This overrides the suggestion in `YOLO_ARCHITECTURE.md § Implementation Notes` which assumed ONNX Runtime; that section was written before the engine's pure-C# rule was codified.
 
 ## 3. CLIP — Standalone Embedding Pipeline
@@ -51,7 +51,7 @@
 
 **Validation results (CPU end-to-end, against `Models/yolo/yolov8n-folded.safetensors`):**
 - Output tensor shape `[1, 84, 8400]` (4 box + 80 classes × 8400 anchors at 640×640) — matches Ultralytics exactly.
-- Real-image test (`tests/SharpInference.Vision.Tests/TestData/bus.png`, 810×1080) detects:
+- Real-image test (`tests/HartsyInference.Vision.Tests/TestData/bus.png`, 810×1080) detects:
   - **4 persons** (confidence 0.44, 0.88, 0.88, 0.89) at the correct locations
   - **1 bus** (confidence 0.84) spanning the image
   - This matches Ultralytics' canonical demo output on this image one-for-one.

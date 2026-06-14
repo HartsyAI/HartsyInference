@@ -1,17 +1,17 @@
 # IndexTTS-2 — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (IndexTTS pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (IndexTTS pipeline)
 
 ## Summary
 
-IndexTTS is a family of zero-shot voice-cloning text-to-speech systems developed by the **Bilibili Index Team**. It started as a heavy rework of Tortoise/XTTS (single-codebook codec + GPT-style autoregressive LM + neural vocoder) and evolved into a fully cascaded three-stage system. The two open-weight versions in scope for SharpInference are:
+IndexTTS is a family of zero-shot voice-cloning text-to-speech systems developed by the **Bilibili Index Team**. It started as a heavy rework of Tortoise/XTTS (single-codebook codec + GPT-style autoregressive LM + neural vocoder) and evolved into a fully cascaded three-stage system. The two open-weight versions in scope for HartsyInference are:
 
 - **IndexTTS-1.5** (May 2025) — single-codebook DVAE codec at 25 Hz, GPT-2-style 24-layer / 1280-dim / 20-head decoder generating mel codes, Conformer-Perceiver speaker conditioner, BigVGAN-v2 vocoder synthesising 24 kHz waveform directly from GPT output. Chinese + English. ~3.66 GB on disk.
 - **IndexTTS-2** (Sept 2025, [arXiv:2506.21619](https://arxiv.org/abs/2506.21619)) — three modules trained separately: (T2S) the same GPT decoder enlarged to support an additional emotion-conditioning Perceiver, (S2M) a non-autoregressive **flow-matching DiT** that turns semantic codec tokens + speaker embedding + GPT latents into an 80-band mel at 22 050 Hz, and (vocoder) NVIDIA's pretrained `bigvgan_v2_22khz_80band_256x`. A separate fine-tuned **Qwen-3 0.6B** ("qwen0.6bemo4-merge") provides text-to-emotion-distribution control. Chinese + English (training corpus 55 000 h covers Chinese, English, Japanese; output quality is calibrated for ZH+EN). ~5.9 GB on disk.
 
 The hallmark new capabilities of IndexTTS-2 are (a) **explicit duration control** via a token-count input that fixes the AR generation length without distorting prosody, (b) **disentangled emotion vs. speaker identity** via a Gradient-Reversal-Layer trick during T2S training, and (c) **natural-language emotion prompts** distilled from DeepSeek-R1 into a tiny LoRA-fine-tuned Qwen-3 0.6B. The system tops Chinese TTS benchmarks (WER on test-zh beats F5-TTS by ~0.5 pp and MaskGCT by ~2 pp) while matching F5-TTS on English.
 
-For SharpInference, IndexTTS-2 is a complex pipeline that **reuses several blocks we already have or are planning** — a causal GPT-2 style decoder (Phase identical to dotLLM's transformer), a DiT block stack (already implemented for Flux/SD3 in `SharpInference.Diffusion`), a flow-matching Euler scheduler (already in `SharpInference.Diffusion`, see [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md)), a BigVGAN-v2 vocoder ([HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md)), and a Conformer encoder for the speaker-prompt perceiver. The genuinely new work is: a custom **semantic codec** (Vocos-style decoder over 8192 codebook entries, see [AUDIO_CODECS.md](AUDIO_CODECS.md)), a **wav2vec2-BERT** front end for semantic-token extraction during conditioning, the **Conformer-Perceiver** prompt module, and the BPE+pinyin **Chinese tokenizer**.
+For HartsyInference, IndexTTS-2 is a complex pipeline that **reuses several blocks we already have or are planning** — a causal GPT-2 style decoder (Phase identical to dotLLM's transformer), a DiT block stack (already implemented for Flux/SD3 in `HartsyInference.Diffusion`), a flow-matching Euler scheduler (already in `HartsyInference.Diffusion`, see [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md)), a BigVGAN-v2 vocoder ([HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md)), and a Conformer encoder for the speaker-prompt perceiver. The genuinely new work is: a custom **semantic codec** (Vocos-style decoder over 8192 codebook entries, see [AUDIO_CODECS.md](AUDIO_CODECS.md)), a **wav2vec2-BERT** front end for semantic-token extraction during conditioning, the **Conformer-Perceiver** prompt module, and the BPE+pinyin **Chinese tokenizer**.
 
 Sources: [IndexTTS-2 paper (arXiv 2506.21619)](https://arxiv.org/abs/2506.21619), [IndexTTS paper (arXiv 2502.05512)](https://arxiv.org/abs/2502.05512), [HF IndexTeam/IndexTTS-2](https://huggingface.co/IndexTeam/IndexTTS-2), [HF IndexTeam/IndexTTS-1.5](https://huggingface.co/IndexTeam/IndexTTS-1.5), [index-tts repo](https://github.com/index-tts/index-tts), [DeepWiki: index-tts](https://deepwiki.com/index-tts/index-tts), [IndexTTS-2 demo page](https://index-tts.github.io/index-tts2.github.io/), [BigVGAN-v2 22kHz 80band 256x](https://huggingface.co/nvidia/bigvgan_v2_22khz_80band_256x), [Qwen3 0.6B-emo4-merge config](https://huggingface.co/IndexTeam/IndexTTS-2/tree/main/qwen0.6bemo4-merge).
 
@@ -217,9 +217,9 @@ In practice the best **latency strategy** at inference time is **sentence-level 
 
 A community vLLM fork ([Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm)) accelerates the T2S step substantially but still cannot deliver true frame-by-frame streaming.
 
-**IndexTTS-2.5** (technical report only, not yet open weights as of this writing) addresses streaming by (a) compressing the semantic codec from 50 Hz to 25 Hz (halving the AR length), and (b) replacing the U-DiT S2M backbone with a **causal Zipformer** that allows chunked generation. RTF goes from 0.310 → 0.136 (2.28×). When 2.5 weights drop, SharpInference.Audio should adopt the Zipformer path for live use; until then plan only for **batched / sentence-level** generation with first-audio latency ≈ 0.3–1.5 s on a desktop GPU.
+**IndexTTS-2.5** (technical report only, not yet open weights as of this writing) addresses streaming by (a) compressing the semantic codec from 50 Hz to 25 Hz (halving the AR length), and (b) replacing the U-DiT S2M backbone with a **causal Zipformer** that allows chunked generation. RTF goes from 0.310 → 0.136 (2.28×). When 2.5 weights drop, HartsyInference.Audio should adopt the Zipformer path for live use; until then plan only for **batched / sentence-level** generation with first-audio latency ≈ 0.3–1.5 s on a desktop GPU.
 
-See [STREAMING_AUDIO_INFERENCE.md](STREAMING_AUDIO_INFERENCE.md) for SharpInference's streaming-vs-batched abstraction (`IStreamingPipeline<TIn,TOut>`) — IndexTTS-2 will implement the non-streaming `IBatchedPipeline` surface and expose sentence-level `IAsyncEnumerable<AudioChunk>` via a sentence-splitting wrapper, not via in-model streaming.
+See [STREAMING_AUDIO_INFERENCE.md](STREAMING_AUDIO_INFERENCE.md) for HartsyInference's streaming-vs-batched abstraction (`IStreamingPipeline<TIn,TOut>`) — IndexTTS-2 will implement the non-streaming `IBatchedPipeline` surface and expose sentence-level `IAsyncEnumerable<AudioChunk>` via a sentence-splitting wrapper, not via in-model streaming.
 
 ### 6. Emotion and Style Control
 
@@ -233,7 +233,7 @@ Three independent surfaces, all routed through the **emotion Perceiver prefix** 
 
 The **disentanglement guarantee** is delivered structurally at training time: a Gradient Reversal Layer plus a small speaker classifier sits on top of the emotion-prefix output and forces it to be speaker-invariant; symmetrically a GRL+emotion-classifier sits on the speaker prefix. At inference both classifiers are dropped. The architectural consequence is that you can take **speaker A**'s timbre and apply **speaker B**'s emotional delivery (or a vector / text emotion) without bleed-through — this is the main quality claim of the paper.
 
-The natural-language route is convenient but not necessary: if SharpInference does not want to ship a 1.19 GB Qwen-3 0.6B alongside the TTS, the **vector** path is a clean, deterministic, dependency-free alternative that exposes the same expressive range.
+The natural-language route is convenient but not necessary: if HartsyInference does not want to ship a 1.19 GB Qwen-3 0.6B alongside the TTS, the **vector** path is a clean, deterministic, dependency-free alternative that exposes the same expressive range.
 
 ### 7. HuggingFace Files
 
@@ -273,7 +273,7 @@ Not in the repo: `bigvgan_v2_22khz_80band_256x` (the vocoder weights live at [`n
 | `gpt.pth` | 1.17 GB | GPT (24L × 1280, 20 heads) + Conformer-Perceiver speaker conditioner |
 | `dvae.pth` | 243 MB | DVAE codec (100-band mel → 8192-entry codebook at ~23 Hz) |
 | `bigvgan_generator.pth` | 536 MB | Custom-trained BigVGAN-v2 24 kHz generator (100-band, 4×4×4×4×2×2 upsample = 1024× hop, gpt_dim=1280 conditioning, snake-beta activation, CQT discriminator on the training side) |
-| `bigvgan_discriminator.pth` | 1.65 GB | Training-only; **not needed for inference** — can be omitted from the SharpInference distribution |
+| `bigvgan_discriminator.pth` | 1.65 GB | Training-only; **not needed for inference** — can be omitted from the HartsyInference distribution |
 
 ### 8. Memory and Performance
 
@@ -304,11 +304,11 @@ On a RTX 3060 12 GB the community reports RTF ≈ 13× without optimisation (one
 
 **Training scale** (for reference, not implementer-relevant): 55 000 hours of multilingual ZH/EN/JA, 8× A100 80 GB, AdamW lr=2e-4, three weeks of training.
 
-### 9. C# Implementation Notes for SharpInference
+### 9. C# Implementation Notes for HartsyInference
 
-Mapping every IndexTTS-2 component onto SharpInference packages:
+Mapping every IndexTTS-2 component onto HartsyInference packages:
 
-#### 9.1 SharpInference.Audio.IndexTTS (new package)
+#### 9.1 HartsyInference.Audio.IndexTTS (new package)
 
 Top-level orchestrator class `IndexTtsPipeline` with constructor taking the model directory. Owns:
 
@@ -319,7 +319,7 @@ Top-level orchestrator class `IndexTtsPipeline` with constructor taking the mode
 - `T2sGptDecoder` — causal Transformer, 24 × 1280 / 20 heads. Architecture is a **plain GPT-2** (sinusoidal positional embeddings, no RoPE, no GQA, full attention). Reuse the dotLLM `GptDecoderBlock` if we have one; otherwise this is ~400 LOC of standard MHSA + FFN. Must support **prefix conditioning** (the speaker/emotion prefixes are continuous 1280-dim vectors inserted *between* the text tokens and the mel-start token — they are not in the embedding table). Implement the prefix path via a `prepend_continuous(Tensor prefix)` API on the KV-cache builder. Sampling: top-p, top-k, repetition penalty (Tortoise/XTTS defaults). Stop at `stop_mel_token = 8193` or at `max_mel_tokens = 1815`. Must export the **final-layer hidden state per emitted position** for downstream S2Mel — make this an opt-in tap to avoid extra memory traffic when not needed.
 - `SemanticCodec` — Vocos-style decoder (12 ConvNeXt blocks, dim 384, intermediate 2048) over an 8192-entry codebook with codebook_dim 8. The encoder side runs only on the reference clip during conditioning. Both halves are pure-C# CNNs; reuse [AUDIO_CODECS.md](AUDIO_CODECS.md)'s Vocos decoder description (the SNAC / WavTokenizer pattern is structurally identical).
 - `W2vBert2Extractor` — a 580 M-param wav2vec2-BERT encoder used only to extract continuous features that the semantic codec then quantises. **Pre-quantise the reference clip's semantic tokens once** at session start so this network does not run per-token. Architecture: a CNN feature extractor + 24-block Conformer-style Transformer; substantial work (~1500 LOC). Mitigation: cache reference-derived semantic tokens to disk keyed by audio hash.
-- `S2MelFlowMatcher` — the 13-block × 512-dim DiT. **Reuse the Flux/SD3 DiT block implementation in SharpInference.Diffusion** with the following deltas: (a) `in_channels=80` instead of image latent channels, (b) two skip-connection patterns (`long_skip_connection` + `uvit_skip_connection`) — both are simple add-after-N-blocks patterns, (c) WaveNet final layer (8 dilated-conv blocks, kernel 5, hidden 512, gated tanh×sigmoid activation), (d) style conditioning concatenated to every block's input rather than via AdaLN — read the s2mel checkpoint to confirm. Scheduler: `FlowMatchEulerDiscreteScheduler` already exists; 25 steps default. CFG is supported (`class_dropout_prob=0.1` trained the unconditional path) — reuse the velocity-field CFG combiner from [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md).
+- `S2MelFlowMatcher` — the 13-block × 512-dim DiT. **Reuse the Flux/SD3 DiT block implementation in HartsyInference.Diffusion** with the following deltas: (a) `in_channels=80` instead of image latent channels, (b) two skip-connection patterns (`long_skip_connection` + `uvit_skip_connection`) — both are simple add-after-N-blocks patterns, (c) WaveNet final layer (8 dilated-conv blocks, kernel 5, hidden 512, gated tanh×sigmoid activation), (d) style conditioning concatenated to every block's input rather than via AdaLN — read the s2mel checkpoint to confirm. Scheduler: `FlowMatchEulerDiscreteScheduler` already exists; 25 steps default. CFG is supported (`class_dropout_prob=0.1` trained the unconditional path) — reuse the velocity-field CFG combiner from [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md).
 - `BigVGanV2Vocoder` — reuse the BigVGAN section of [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). Snake-Beta activation is non-trivial CUDA work (we already need it for several other models). The 22 kHz / 80-band / 256× variant is the **NVIDIA pretrained** weight — separate small download manager class.
 
 #### 9.2 Configuration loader
@@ -328,7 +328,7 @@ Top-level orchestrator class `IndexTtsPipeline` with constructor taking the mode
 
 #### 9.3 Weight loading
 
-Both `.pth` files are PyTorch pickle archives (zip-of-pickled-tensors). We already have a pickle reader in `SharpInference.Common.Weights` (used for Kokoro and other PyTorch-checkpoint models). The state-dict keys follow standard PyTorch module-path convention — write a per-component key-prefix mapper (`gpt.*` → `T2sGptDecoder`, `conditioning_encoder.*` → `SpeakerEncoder`, `emo_encoder.*` → `EmotionEncoder`). The Qwen-3 sub-model is in `model.safetensors` (standard safetensors layout — reuse [SAFETENSORS_FORMAT.md](SAFETENSORS_FORMAT.md)). `feat1.pt` and `feat2.pt` are simple 2-D float matrices — load them as `Tensor<float>` constants on the device and use them via a fused matmul in the emotion path.
+Both `.pth` files are PyTorch pickle archives (zip-of-pickled-tensors). We already have a pickle reader in `HartsyInference.Common.Weights` (used for Kokoro and other PyTorch-checkpoint models). The state-dict keys follow standard PyTorch module-path convention — write a per-component key-prefix mapper (`gpt.*` → `T2sGptDecoder`, `conditioning_encoder.*` → `SpeakerEncoder`, `emo_encoder.*` → `EmotionEncoder`). The Qwen-3 sub-model is in `model.safetensors` (standard safetensors layout — reuse [SAFETENSORS_FORMAT.md](SAFETENSORS_FORMAT.md)). `feat1.pt` and `feat2.pt` are simple 2-D float matrices — load them as `Tensor<float>` constants on the device and use them via a fused matmul in the emotion path.
 
 #### 9.4 Chinese tokenizer notes
 
@@ -346,20 +346,20 @@ Per project rule "validate against references": compare on three fronts:
 1. **Phase 1 — IndexTTS-1.5 path only.** Skip semantic codec, S2Mel, w2v-BERT, Qwen-3, emotion. This gets a working ZH+EN voice clone with ~25% of the implementation work. Reuses everything we already need for Kokoro plus the GPT-2 + Conformer-Perceiver + DVAE + BigVGAN-v2 (24 kHz custom variant). Output: 24 kHz mono.
 2. **Phase 2 — Add IndexTTS-2 pipeline.** Implement semantic codec (Vocos-style), wav2vec2-BERT extractor, S2Mel flow-matching DiT, the NVIDIA 22 kHz BigVGAN-v2. Output: 22.05 kHz mono with non-emotional, non-duration-controlled cloning. Quality should already beat IndexTTS-1.5.
 3. **Phase 3 — Emotion control surfaces.** Wire up the emotion Perceiver, `feat1.pt`/`feat2.pt` matrix paths, and the **vector** and **audio-prompt** emotion APIs. Skip Qwen-3 for now.
-4. **Phase 4 (optional add-on) — Qwen-3 0.6B-emo text-to-emotion.** Ship as a separately-downloadable extension package `SharpInference.Audio.IndexTTS.EmotionText` to keep the base distribution small.
+4. **Phase 4 (optional add-on) — Qwen-3 0.6B-emo text-to-emotion.** Ship as a separately-downloadable extension package `HartsyInference.Audio.IndexTTS.EmotionText` to keep the base distribution small.
 5. **Phase 5 (when IndexTTS-2.5 open-weights arrive).** Replace S2Mel with the streaming Zipformer variant, drop semantic-codec frame rate to 25 Hz, expose true `IAsyncEnumerable<AudioChunk>` streaming.
 
 #### 9.7 What we deliberately do not implement
 
 - **Training/fine-tuning paths.** Discriminators, GAN losses, GRL+classifier heads, EMA codebook update, KL warm-up — all training-only, omit from the inference distribution.
-- **vLLM-style paged attention.** Out of scope for SharpInference's first release; revisit when SharpInference.Server adds batched serving.
+- **vLLM-style paged attention.** Out of scope for HartsyInference's first release; revisit when HartsyInference.Server adds batched serving.
 - **CUDA fused kernels for Snake-Beta.** The NVIDIA BigVGAN repo provides one for 1.5–3× speedup; write a PTX equivalent only after the pure-C# pipeline lands and we have a baseline RTF to compare against.
 
 ---
 
-## Appendix A — Cross-reference summary for SharpInference
+## Appendix A — Cross-reference summary for HartsyInference
 
-| External dep | SharpInference doc |
+| External dep | HartsyInference doc |
 |---|---|
 | Mel spectrogram (24 kHz / 100-band, 22.05 kHz / 80-band) | [MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md) |
 | Semantic codec (Vocos-style decoder), DVAE quantiser | [AUDIO_CODECS.md](AUDIO_CODECS.md) |

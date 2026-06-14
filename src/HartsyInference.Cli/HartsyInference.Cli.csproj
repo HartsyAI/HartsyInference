@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>HartsyInference.Cli</RootNamespace>
+    <AssemblyName>HartsyInference.Cli</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Console app, not a library — excluded from the alpha NuGet release. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
+    <ProjectReference Include="..\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
+    <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+  </ItemGroup>
+
+</Project>

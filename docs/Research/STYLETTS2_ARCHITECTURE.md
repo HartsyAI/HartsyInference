@@ -1,6 +1,6 @@
 # StyleTTS 2 — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (StyleTTS 2 pipeline, Kokoro extension)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (StyleTTS 2 pipeline, Kokoro extension)
 
 ## Summary
 
@@ -59,7 +59,7 @@ Both `.pth` files are PyTorch pickle, FP32, containing a dict of state_dicts (`b
 | PLBERT | CustomAlbert (12 shared layers, hidden 768) | Same — CustomAlbert with the multilingual PLBERT checkpoint (`Utils/PLBERT/`) |
 | Training discriminators on disk | None (inference-only release) | MPD + MSD + a WavLM-based SLM discriminator `wd` (stage-2 adversarial). Strip at packaging. |
 
-**The four model classes shared with Kokoro are bit-identical in topology** — `CustomAlbert` (PLBERT), `TextEncoder`, `ProsodyPredictor` (DurationEncoder + duration head + F0/N AdainResBlk1d chains), and `Decoder` (iSTFTNet) all have the same hidden_dim=512, n_layer=3, style_dim=128, n_token=178, max_dur=50. SharpInference can reuse the Kokoro modules verbatim and just swap in the StyleTTS 2 weight loader.
+**The four model classes shared with Kokoro are bit-identical in topology** — `CustomAlbert` (PLBERT), `TextEncoder`, `ProsodyPredictor` (DurationEncoder + duration head + F0/N AdainResBlk1d chains), and `Decoder` (iSTFTNet) all have the same hidden_dim=512, n_layer=3, style_dim=128, n_token=178, max_dur=50. HartsyInference can reuse the Kokoro modules verbatim and just swap in the StyleTTS 2 weight loader.
 
 ### 3. Diffusion Style Sampler
 
@@ -236,7 +236,7 @@ input_ids       = [0] + token_ids + [0]    # BOS/EOS = pad token 0
 - `Utils/JDC/bst.t7` (~30 MB) — F0 / pitch extractor, training-only, can be omitted.
 - `Utils/PLBERT/step_1000000.t7` (~110 MB) — PLBERT pretrained weights. **Required** at first-stage training and at model construction time in the official code, but the PLBERT weights are also serialized inside `epochs_2nd_*.pth` (the `bert` key), so once we strip and re-pack the inference checkpoint we don't need to ship `step_1000000.t7` separately.
 
-**Inference-only re-packed format (recommended for SharpInference shipping):**
+**Inference-only re-packed format (recommended for HartsyInference shipping):**
 
 Strip the checkpoint to just `{bert, bert_encoder, text_encoder, predictor, decoder, style_encoder, predictor_encoder, diffusion}` and convert PyTorch pickle → safetensors. Approximate sizes:
 - FP32: ~590 MB.
@@ -247,7 +247,7 @@ Strip the checkpoint to just `{bert, bert_encoder, text_encoder, predictor, deco
 
 The StyleTTS 2 paper reports a real-time factor (RTF) of about **0.137** on a single NVIDIA Tesla V100 GPU for the LJSpeech model — i.e., it generates 1 s of audio in ~0.14 s wall-clock (roughly 7× faster than realtime). The LibriTTS multispeaker model with zero-shot diffusion is similar order of magnitude. Per-step diffusion cost is negligible compared to iSTFTNet / HiFi-GAN decode.
 
-**Expected SharpInference numbers (target):**
+**Expected HartsyInference numbers (target):**
 
 | Setting | VRAM (FP16) | RTF (RTX 4070-class) | Notes |
 |---|---|---|---|
@@ -259,19 +259,19 @@ Reference encoding is one-time per voice — cache the 256-d `ref_s` and reuse a
 
 ### 9. C# Implementation Notes
 
-1. **Reuse Kokoro modules verbatim.** PLBERT (CustomAlbert with weight sharing), `TextEncoder`, `ProsodyPredictor`, and the iSTFTNet `Decoder` are bit-identical. Move them under `SharpInference.Audio/Modules/StyleTTS2Shared/` and have both the Kokoro pipeline and the StyleTTS 2 pipeline reference them. The LibriTTS variant additionally needs a **full HiFi-GAN decoder branch** (`upsample_rates [10, 5, 3, 2]` without the iSTFT shortcut) — implement as a config switch on the existing decoder class, not a separate file.
+1. **Reuse Kokoro modules verbatim.** PLBERT (CustomAlbert with weight sharing), `TextEncoder`, `ProsodyPredictor`, and the iSTFTNet `Decoder` are bit-identical. Move them under `HartsyInference.Audio/Modules/StyleTTS2Shared/` and have both the Kokoro pipeline and the StyleTTS 2 pipeline reference them. The LibriTTS variant additionally needs a **full HiFi-GAN decoder branch** (`upsample_rates [10, 5, 3, 2]` without the iSTFT shortcut) — implement as a config switch on the existing decoder class, not a separate file.
 
 2. **New module: `StyleEncoder` (and `PredictorEncoder`).** Pure 2D Conv2d / `ResBlk2d` / `AdaptiveAvgPool2d(1)` / `Linear`. Components:
    - `Conv2d` with `kernel_size=3, padding=1` and a `spectral_norm` wrapper (at inference time, spectral_norm collapses to a regular matmul — we can pre-fold it during weight conversion and ship plain conv weights).
    - `ResBlk2d` with `'half'` downsample (Conv + InstanceNorm2d + LeakyReLU(0.2) + AvgPool2d(2), with 1×1 shortcut).
    - `AdaptiveAvgPool2d(output=1)` — `mean` over all spatial dims, trivial.
    - `Linear(512, 128)` head.
-   Both encoders are tiny (~13 M params each); FP32 is fine. Add `Conv2d` + `InstanceNorm2d` + `AvgPool2d` ops to `SharpInference.Core` if not already present (they are needed by other models too).
+   Both encoders are tiny (~13 M params each); FP32 is fine. Add `Conv2d` + `InstanceNorm2d` + `AvgPool2d` ops to `HartsyInference.Core` if not already present (they are needed by other models too).
 
 3. **New module: Diffusion style sampler.** Three sub-tasks:
-   - **`StyleTransformer1d` (or `Transformer1d`) network.** A 1D transformer with 3 layers, 8 heads, 64 head dim, self-attention + cross-attention to a `(seq=≤512, dim=768)` PLBERT context, and AdaLayerNorm for reference-style modulation. Reuse our existing transformer block from `SharpInference.Core/Modules/Transformer` — add an AdaLayerNorm variant.
+   - **`StyleTransformer1d` (or `Transformer1d`) network.** A 1D transformer with 3 layers, 8 heads, 64 head dim, self-attention + cross-attention to a `(seq=≤512, dim=768)` PLBERT context, and AdaLayerNorm for reference-style modulation. Reuse our existing transformer block from `HartsyInference.Core/Modules/Transformer` — add an AdaLayerNorm variant.
    - **Time embedding.** `TimePositionalEmbedding`: sinusoidal `(B, dim)` from `t ∈ [0, 1]`, followed by a 2-layer MLP → time features. Standard, identical to Stable Diffusion's time embedding.
-   - **Sampler.** Implement `ADPM2Sampler` (second-order Heun / DPM-2) and `KarrasSchedule(sigma_min, sigma_max, rho, num_steps)` in `SharpInference.Audio/Diffusion/`. Cross-reference [DIFFUSION_SCHEDULERS.md](DIFFUSION_SCHEDULERS.md) — these are well-documented samplers shared with image diffusion.
+   - **Sampler.** Implement `ADPM2Sampler` (second-order Heun / DPM-2) and `KarrasSchedule(sigma_min, sigma_max, rho, num_steps)` in `HartsyInference.Audio/Diffusion/`. Cross-reference [DIFFUSION_SCHEDULERS.md](DIFFUSION_SCHEDULERS.md) — these are well-documented samplers shared with image diffusion.
    - **CFG.** Trivial two-forward-pass mixing with `embedding_scale`. Cross-reference [CFG_AND_GUIDANCE.md](CFG_AND_GUIDANCE.md). The "unconditional" branch uses a `FixedEmbedding` learned during training — a single `(1, 1, 256)` constant that replaces `bert_dur`. Extract it from the diffusion state_dict's `to_embedding.fixed_embedding.embedding.weight` (or similar — verify key during weight conversion).
 
 4. **Weight conversion script.** One-time offline tool:
@@ -294,7 +294,7 @@ Reference encoding is one-time per voice — cache the 256-d `ref_s` and reuse a
 
 9. **LibriTTS HiFi-GAN decoder differs slightly from iSTFTNet.** The LibriTTS config uses `decoder.type: hifigan` with 4 upsampling stages (`[10, 5, 3, 2]`) instead of `istftnet`'s 2 stages (`[10, 6]`) + iSTFT tail. Both have hop-product 300. We need to support both decoder topologies — either as two separate decoder classes or one parameterized class. Recommend one parameterized class with `is_istft: bool` flag, since the upsample/ResBlock chain is otherwise identical.
 
-10. **Validation plan.** For each released checkpoint, generate 50 reference utterances with the Python reference (fixed seed, fixed text, fixed reference audio) and store as ground-truth WAV. SharpInference output must match within 1e-3 PCM tolerance per sample (or, for the diffusion-sampled style, within a documented MOS-equivalent tolerance — diffusion sampling is float-order-sensitive, so exact-match might require matching the exact ordering of CUDA reductions; bit-exact is a stretch goal).
+10. **Validation plan.** For each released checkpoint, generate 50 reference utterances with the Python reference (fixed seed, fixed text, fixed reference audio) and store as ground-truth WAV. HartsyInference output must match within 1e-3 PCM tolerance per sample (or, for the diffusion-sampled style, within a documented MOS-equivalent tolerance — diffusion sampling is float-order-sensitive, so exact-match might require matching the exact ordering of CUDA reductions; bit-exact is a stretch goal).
 
 ## Key Numbers / Constants
 
@@ -368,7 +368,7 @@ Per transformer layer:
 
 ### Inference-only re-packed weights (target safetensors layout)
 ```
-SharpInference StyleTTS 2 v1 safetensors:
+HartsyInference StyleTTS 2 v1 safetensors:
   bert.*                          PLBERT (shared with Kokoro)
   bert_encoder.weight             Linear(768, 512)
   text_encoder.*                  TextEncoder
@@ -441,7 +441,7 @@ For each parametrized layer in the .pth:
   v      = state[f"{prefix}.weight_v"]               # (in*kh*kw,)  flattened
   σ      = u @ W_orig.reshape(out, -1) @ v
   W_inf  = W_orig / max(σ, 1)
-  → emit W_inf as the plain "weight" key for SharpInference.
+  → emit W_inf as the plain "weight" key for HartsyInference.
 ```
 
 ## Open Questions

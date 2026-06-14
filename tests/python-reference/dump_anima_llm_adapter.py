@@ -39,10 +39,10 @@ from safetensors import safe_open
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ANIMA_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/Anima/anima-preview3-base.safetensors"
-QWEN3_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/text_encoders/qwen_3_600m.safetensors"
-QWEN3_TOK = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Tokenizers/Qwen3"
-T5_SPM = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Tokenizers/T5/t5_xxl_spiece.model"
+ANIMA_PATH = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Stable-Diffusion/Anima/anima-preview3-base.safetensors"
+QWEN3_PATH = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/text_encoders/qwen_3_600m.safetensors"
+QWEN3_TOK = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Tokenizers/Qwen3"
+T5_SPM = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Tokenizers/T5/t5_xxl_spiece.model"
 OUT_DIR = os.path.join(REPO_ROOT, "tests/python-reference/anima_llm_adapter_reference")
 
 os.makedirs(f"{OUT_DIR}/inputs", exist_ok=True)

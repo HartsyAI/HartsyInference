@@ -1,6 +1,6 @@
 # Mel Spectrogram (Audio Preprocessing) — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (any speech model)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (any speech model)
 
 ## Summary
 
@@ -285,7 +285,7 @@ Whisper implementations agree bit-for-bit (within float32 rounding) when paramet
 - [ ] Whether to ship a pre-computed filterbank table per model (faster startup) or always compute at startup (no asset shipping). Lean toward compute-at-startup — it's ~milliseconds.
 - [ ] Polyphase resample quality — 64 taps for STT is fine. For music models that take 44.1 kHz input, do we resample once on file load to 24 kHz/16 kHz, or do all internal compute at native sample rate? Decision belongs in each music model's pipeline.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **Hann window must be periodic** — `w[n] = 0.5 * (1 - cos(2 * PI * n / N))` where N is the divisor (NOT N-1). Easy to get wrong. Validate by hashing window values against PyTorch's `torch.hann_window(N, periodic=True)`.
 

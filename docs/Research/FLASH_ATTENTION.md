@@ -374,7 +374,7 @@ When N_kv <= B_c, the entire KV sequence fits in a single tile and the inner loo
 | Head dims | 64, 128 | 32-256 | 64-256 |
 | Backward pass | Recomputation from saved m, l | Recomputation (optimized) | Recomputation (async) |
 
-### CPU vs GPU Considerations for SharpInference
+### CPU vs GPU Considerations for HartsyInference
 
 For a pure C# implementation targeting CPU:
 
@@ -385,7 +385,7 @@ For a pure C# implementation targeting CPU:
 - SIMD (AVX2/AVX-512) should be used for the matmul tiles and exp() computation
 - The sequential inner loop over KV blocks maps naturally to single-threaded execution per Q block, with parallelism over Q blocks using .NET thread pool
 
-For CUDA (SharpInference.Cuda via PTX):
+For CUDA (HartsyInference.Cuda via PTX):
 
 - Implement FA2 algorithm directly in PTX or CUDA
 - Use shared memory (SRAM) for tiles, registers for m, l, O accumulators
@@ -405,7 +405,7 @@ For CUDA (SharpInference.Cuda via PTX):
 
 ## Implementation Notes
 
-### For SharpInference.Cpu
+### For HartsyInference.Cpu
 
 1. **Tiling strategy**: Tile Q into blocks of B_r rows. For each Q block, iterate over KV in blocks of B_c. Target B_r = B_c = 64 for d <= 80, B_r = B_c = 32 for d = 128, to fit tiles in L2 cache.
 
@@ -420,7 +420,7 @@ For CUDA (SharpInference.Cuda via PTX):
 
 5. **Cross-attention optimization**: When N_kv <= B_c (e.g., 77 CLIP tokens with B_c = 128), load all of K and V once and iterate only over Q blocks. This is the common case for diffusion cross-attention.
 
-### For SharpInference.Cuda
+### For HartsyInference.Cuda
 
 1. **Kernel design**: One CUDA kernel for the forward pass. Grid dimensions: `(ceil(N_q / B_r), batch * n_heads)`. Each thread block handles one Q tile.
 

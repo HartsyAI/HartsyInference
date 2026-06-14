@@ -1,6 +1,6 @@
 # Phase B — GPU Performance Optimization
 
-> **Goal**: SharpInference CUDA backend within 1.0–1.5× of PyTorch + diffusers per kernel; SDXL 1024² @ 20 steps ≤ 5 s/step on RTX 3060.
+> **Goal**: HartsyInference CUDA backend within 1.0–1.5× of PyTorch + diffusers per kernel; SDXL 1024² @ 20 steps ≤ 5 s/step on RTX 3060.
 > **Output**: a peer-reviewable systems paper + a reproducible benchmark harness.
 > **Approach**: measure first, profile second, optimize third. Every change validated for correctness *and* significance.
 
@@ -19,7 +19,7 @@ Strategic plan: [`docs/Research/CUDA_PERFORMANCE_PLAN.md`](../Research/CUDA_PERF
 
 ### B1.1 — C# GPU Microbenchmark Project
 
-- [ ] [`benchmarks/SharpInference.GpuBenchmarks/SharpInference.GpuBenchmarks.csproj`](../../benchmarks/SharpInference.GpuBenchmarks/SharpInference.GpuBenchmarks.csproj) — net8.0+net10.0 BenchmarkDotNet project
+- [ ] [`benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj`](../../benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj) — net8.0+net10.0 BenchmarkDotNet project
 - [ ] `BenchmarkConfig.cs` — common config (1 warmup, 5 trials, JSON+Markdown export, `--artifacts` dir)
 - [ ] `MatMulGpuBenchmarks.cs` — F16 / F32 / BF16 cuBLAS at all GEMM shapes hit by SDXL / Flux / SD3.5 / Z-Image / Flux2
 - [ ] `Conv2DGpuBenchmarks.cs` — VAE + UNet conv shapes, 1×1 + 3×3 + 3×3-stride-2 variants
@@ -45,10 +45,10 @@ Strategic plan: [`docs/Research/CUDA_PERFORMANCE_PLAN.md`](../Research/CUDA_PERF
 
 ### B1.3 — NVTX + In-Process Profiling
 
-- [ ] [`src/SharpInference.Cuda/Profiling/NvtxRange.cs`](../../src/SharpInference.Cuda/Profiling/NvtxRange.cs) — IDisposable wrapper around `nvtxRangePushA` / `nvtxRangePop`
-- [ ] [`src/SharpInference.Cuda/Profiling/NvtxApi.cs`](../../src/SharpInference.Cuda/Profiling/NvtxApi.cs) — P/Invoke for `libnvToolsExt.so.1` / `nvToolsExt64_1.dll`
-- [ ] `CudaBackend` — wrap pipeline-phase entry points (`MatMul`, `Linear`, `Conv2D`, `ScaledDotProductAttention`, etc.) with NVTX ranges. Per-op granularity gated behind the `SHARPINFERENCE_NVTX_DETAILED` env var to avoid 4 000+ ranges/step polluting the steady-state timeline.
-- [ ] [`src/SharpInference.Cuda/Profiling/CudaProfilerControl.cs`](../../src/SharpInference.Cuda/Profiling/CudaProfilerControl.cs) — wrappers around `cuProfilerStart` / `cuProfilerStop` so `nsys --capture-range=cudaProfilerApi` can scope to the steady-state denoise window only
+- [ ] [`src/HartsyInference.Cuda/Profiling/NvtxRange.cs`](../../src/HartsyInference.Cuda/Profiling/NvtxRange.cs) — IDisposable wrapper around `nvtxRangePushA` / `nvtxRangePop`
+- [ ] [`src/HartsyInference.Cuda/Profiling/NvtxApi.cs`](../../src/HartsyInference.Cuda/Profiling/NvtxApi.cs) — P/Invoke for `libnvToolsExt.so.1` / `nvToolsExt64_1.dll`
+- [ ] `CudaBackend` — wrap pipeline-phase entry points (`MatMul`, `Linear`, `Conv2D`, `ScaledDotProductAttention`, etc.) with NVTX ranges. Per-op granularity gated behind the `HARTSYINFERENCE_NVTX_DETAILED` env var to avoid 4 000+ ranges/step polluting the steady-state timeline.
+- [ ] [`src/HartsyInference.Cuda/Profiling/CudaProfilerControl.cs`](../../src/HartsyInference.Cuda/Profiling/CudaProfilerControl.cs) — wrappers around `cuProfilerStart` / `cuProfilerStop` so `nsys --capture-range=cudaProfilerApi` can scope to the steady-state denoise window only
 
 ### B1.4 — Run Scripts + Result Layout
 
@@ -67,8 +67,8 @@ Strategic plan: [`docs/Research/CUDA_PERFORMANCE_PLAN.md`](../Research/CUDA_PERF
 
 ### B1.5 — Verification (no perf changes yet)
 
-- [ ] `dotnet build benchmarks/SharpInference.GpuBenchmarks/SharpInference.GpuBenchmarks.csproj` succeeds
-- [ ] `dotnet run -c Release --project benchmarks/SharpInference.GpuBenchmarks -- --filter '*MatMulGpu*' --runOncePerIteration` completes (smoke test the harness on whatever GPU is available)
+- [ ] `dotnet build benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj` succeeds
+- [ ] `dotnet run -c Release --project benchmarks/HartsyInference.GpuBenchmarks -- --filter '*MatMulGpu*' --runOncePerIteration` completes (smoke test the harness on whatever GPU is available)
 - [ ] `python3 -m pip install -r benchmarks/python-baseline/requirements.txt` succeeds in a fresh venv
 - [ ] `python3 benchmarks/python-baseline/bench_pytorch_matmul.py --device cuda --trials 1 --output /tmp/smoke.csv` completes (smoke test the Python harness)
 - [ ] `bash benchmarks/run_benchmarks.sh --smoke` (1 trial per kernel, 1 model) completes end-to-end
@@ -98,10 +98,10 @@ Each subphase is its own deliverable with a benchmarks/results/run_post_{tag}_{g
 - [ ] [`native/cuda/attention/flash_attention_f16.cu`](../../native/cuda/attention/flash_attention_f16.cu) — FA2 with online softmax, B_r=B_c=64–128, wmma Tensor Core path for head_dim ∈ {64, 128}
 - [ ] [`native/cuda/attention/flash_attention_f32.cu`](../../native/cuda/attention/flash_attention_f32.cu) — F32 reference path (slower, used for accuracy validation)
 - [ ] [`native/cuda/attention/build.sh`](../../native/cuda/attention/build.sh) — `nvcc -ptx -arch=sm_70 ...` (and sm_80, sm_89 variants)
-- [ ] [`src/SharpInference.Cuda/Ptx/flash_attention_f16.ptx`](../../src/SharpInference.Cuda/Ptx/flash_attention_f16.ptx) — compiled output (committed)
-- [ ] [`src/SharpInference.Cuda/CudaKernels.cs`](../../src/SharpInference.Cuda/CudaKernels.cs) — `LaunchFlashAttentionF16` / `LaunchFlashAttentionF32`
-- [ ] [`src/SharpInference.Cuda/CudaBackend.cs`](../../src/SharpInference.Cuda/CudaBackend.cs) — `ScaledDotProductAttention` dispatches to FA2 when shape fits the kernel; falls back to existing materialize-S path otherwise. Gated by `EnableFlashAttention` flag (default true once validated).
-- [ ] Unit tests: [`tests/SharpInference.Cuda.Tests/FlashAttentionTests.cs`](../../tests/SharpInference.Cuda.Tests/FlashAttentionTests.cs) — accuracy vs the materialize-S reference (avg_err < 1e-3 in F16, < 1e-5 in F32)
+- [ ] [`src/HartsyInference.Cuda/Ptx/flash_attention_f16.ptx`](../../src/HartsyInference.Cuda/Ptx/flash_attention_f16.ptx) — compiled output (committed)
+- [ ] [`src/HartsyInference.Cuda/CudaKernels.cs`](../../src/HartsyInference.Cuda/CudaKernels.cs) — `LaunchFlashAttentionF16` / `LaunchFlashAttentionF32`
+- [ ] [`src/HartsyInference.Cuda/CudaBackend.cs`](../../src/HartsyInference.Cuda/CudaBackend.cs) — `ScaledDotProductAttention` dispatches to FA2 when shape fits the kernel; falls back to existing materialize-S path otherwise. Gated by `EnableFlashAttention` flag (default true once validated).
+- [ ] Unit tests: [`tests/HartsyInference.Cuda.Tests/FlashAttentionTests.cs`](../../tests/HartsyInference.Cuda.Tests/FlashAttentionTests.cs) — accuracy vs the materialize-S reference (avg_err < 1e-3 in F16, < 1e-5 in F32)
 - [ ] Python parity: `tests/python-reference/dump_sdpa_reference.py` — diffs C# FA2 against `F.scaled_dot_product_attention` at the model-relevant shapes
 - [ ] Microbench: `SdpaGpuBenchmarks` reruns; speedup table updated
 - [ ] E2E: SSIM tests pass; `e2e.csv` shows SDXL / Flux / SD3.5 / Z-Image step-time improvement
@@ -111,8 +111,8 @@ Each subphase is its own deliverable with a benchmarks/results/run_post_{tag}_{g
 
 ### B4.2 — cuDNN Conv2D Winograd Path
 
-- [ ] [`src/SharpInference.Cuda/CudnnApi.cs`](../../src/SharpInference.Cuda/CudnnApi.cs) — P/Invoke for `cudnnConvolutionForward`, `cudnnGetConvolutionForwardAlgorithm_v7`, descriptor management
-- [ ] [`src/SharpInference.Cuda/Cudnn/CudnnConv2D.cs`](../../src/SharpInference.Cuda/Cudnn/CudnnConv2D.cs) — wrapper around the cuDNN forward conv path
+- [ ] [`src/HartsyInference.Cuda/CudnnApi.cs`](../../src/HartsyInference.Cuda/CudnnApi.cs) — P/Invoke for `cudnnConvolutionForward`, `cudnnGetConvolutionForwardAlgorithm_v7`, descriptor management
+- [ ] [`src/HartsyInference.Cuda/Cudnn/CudnnConv2D.cs`](../../src/HartsyInference.Cuda/Cudnn/CudnnConv2D.cs) — wrapper around the cuDNN forward conv path
 - [ ] `CudaBackend.Conv2D` — dispatches to cuDNN Winograd when (kernel == 3×3, stride == 1, padding == 1, in_channels >= 32, dilation == 1); falls back to im2col otherwise. Gated by `EnableCudnnConv2D` flag.
 - [ ] Algorithm cache — heuristic-driven selection (cuDNN's `IMPLICIT_GEMM` vs `WINOGRAD` vs `WINOGRAD_NONFUSED`) memoized per (input shape, kernel shape) tuple
 - [ ] Workspace allocator — cuDNN needs scratch memory; size queried via `cudnnGetConvolutionForwardWorkspaceSize`, allocated lazily, reused across calls
@@ -139,7 +139,7 @@ Each subphase is its own deliverable with a benchmarks/results/run_post_{tag}_{g
 
 ### B4.4 — Activation Memory Pool
 
-- [ ] [`src/SharpInference.Cuda/Memory/CudaMemoryPool.cs`](../../src/SharpInference.Cuda/Memory/CudaMemoryPool.cs) — size-class buckets, free-list per bucket, `Acquire(size)` / `Release(ptr, size)` API
+- [ ] [`src/HartsyInference.Cuda/Memory/CudaMemoryPool.cs`](../../src/HartsyInference.Cuda/Memory/CudaMemoryPool.cs) — size-class buckets, free-list per bucket, `Acquire(size)` / `Release(ptr, size)` API
 - [ ] `GpuTransferHelper` — routes `AllocateDevice` / `FreeAsync` through the pool
 - [ ] Pool size cap (e.g. 25 % of total VRAM); evict-on-full
 - [ ] No leaks under stress (1000-step generation finishes with same VRAM as start)

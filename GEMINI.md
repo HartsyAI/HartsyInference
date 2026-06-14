@@ -1,8 +1,8 @@
-# SharpInference — Gemini Agent Instructions
+# HartsyInference — Gemini Agent Instructions
 
 ## Project Overview
 
-SharpInference is a pure C#/.NET 10 AI inference engine for non-LLM modalities — image generation (diffusion), speech-to-text, text-to-speech, voice conversion, vision, object detection, and video generation. It pairs with dotLLM for LLM inference.
+HartsyInference is a pure C#/.NET 10 AI inference engine for non-LLM modalities — image generation (diffusion), speech-to-text, text-to-speech, voice conversion, vision, object detection, and video generation. It pairs with dotLLM for LLM inference.
 
 **Before doing anything, read these files to understand the project:**
 

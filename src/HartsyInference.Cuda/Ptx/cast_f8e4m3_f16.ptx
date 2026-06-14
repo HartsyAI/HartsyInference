@@ -1,0 +1,236 @@
+// HartsyInference dtype cast kernels - F8_E4M3 <-> F16
+// Bidirectional conversion between FP8 E4M3FN and FP16
+// F8 E4M3FN: sign(1) + exp(4) + mant(3), bias=7, max=448, no NaN/Inf
+// Launched with 1D grid: gridDim.x = ceil(count / 256)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+// --- cast_f8e4m3_to_f16 ---------------------------------------------------
+// Dequantizes FP8 E4M3FN to FP16.
+// Strategy: extract sign/exp/mant from 8-bit, reconstruct as FP16 bits.
+// F16: sign(1) + exp(5) + mant(10), bias=15
+// E4M3: sign(1) + exp(4) + mant(3), bias=7
+//
+// Normal:   f16_exp = e4m3_exp + (15 - 7) = e4m3_exp + 8
+//           f16_mant = e4m3_mant << 7 (3 bits -> 10 bits)
+// Subnormal: e4m3_exp=0, need to normalize for f16
+// Zero:     all zero
+//
+// Params: output* (f16), input* (u8), count
+.visible .entry cast_f8e4m3_to_f16(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<12>;
+    .reg .u16 %s1;
+    .reg .b16 %h1;
+    .reg .pred %p<4>;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_count];
+
+    // Global thread index
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_f8_to_f16;
+
+    // Load 1 byte (FP8 E4M3FN)
+    cvt.u64.u32 %rd2, %r1;
+    add.u64 %rd3, %rd1, %rd2;       // input byte offset (1 byte per element)
+    ld.global.u8 %r4, [%rd3];       // r4 = fp8 byte (in low 8 bits)
+
+    // Extract sign, exponent, mantissa
+    shr.u32 %r5, %r4, 7;            // r5 = sign (bit 7)
+    shr.u32 %r6, %r4, 3;
+    and.b32 %r6, %r6, 0xF;          // r6 = exponent (bits 6:3)
+    and.b32 %r7, %r4, 0x7;          // r7 = mantissa (bits 2:0)
+
+    // Check if zero (exp==0 && mant==0)
+    or.b32 %r8, %r6, %r7;
+    setp.eq.u32 %p2, %r8, 0;
+    @%p2 bra zero_f8_to_f16;
+
+    // Check if subnormal (exp==0, mant!=0)
+    setp.eq.u32 %p3, %r6, 0;
+    @%p3 bra subnormal_f8_to_f16;
+
+    // Normal case: f16_exp = e4m3_exp + 8, f16_mant = e4m3_mant << 7
+    add.u32 %r6, %r6, 8;            // rebias: e4m3 bias=7, f16 bias=15, diff=8
+    shl.b32 %r7, %r7, 7;            // 3-bit mant -> 10-bit mant position
+    shl.b32 %r5, %r5, 15;           // sign -> bit 15
+    shl.b32 %r6, %r6, 10;           // exp -> bits 14:10
+    or.b32 %r9, %r5, %r6;
+    or.b32 %r9, %r9, %r7;           // r9 = f16 bits
+    bra store_f8_to_f16;
+
+subnormal_f8_to_f16:
+    // E4M3 subnormal: value = (-1)^sign * 2^(1-7) * (mant/8) = (-1)^sign * 2^-6 * (mant/8)
+    // In F16: this is very small. 2^-6 in F16 = exp=15-6=9, mant=0
+    // mant=1: 2^-6 * 1/8 = 2^-9. F16: exp=15-9=6, mant=0
+    // mant=2: 2^-6 * 2/8 = 2^-8. F16: exp=15-8=7, mant=0
+    // mant=3: 2^-6 * 3/8. F16: exp=6, mant=512 (0x200) since 3/2=1.5, so 2^-8 * 1.5
+    // mant=4: 2^-6 * 4/8 = 2^-7. F16: exp=8, mant=0
+    // mant=5: 2^-6 * 5/8. F16: exp=6, mant=256+512=0x280... complex
+    // mant=6: 2^-6 * 6/8 = 2^-6 * 3/4 = 2^-7 * 1.5. F16: exp=8, mant=512
+    // mant=7: 2^-6 * 7/8. F16: exp=6, mant=0x300...
+    //
+    // General approach: normalize the subnormal.
+    // Find leading 1 in mant (3 bits). E4M3 subnormal: value = 2^(1-7) * mant/8 = 2^(-6-3) * mant
+    // We need to find the position of the highest set bit in mant.
+    // mant=1 (001): shift=2, normalized=1.000, f16_exp = 1-7+15-2 = 7, wait...
+    //
+    // Simpler: use a lookup. Only 7 subnormal values (mant 1-7).
+    // We'll compute via float intermediate using PTX cvt.
+    // Load mant as float, multiply by 2^-9 (smallest subnormal = 2^-6 * 1/8 = 2^-9)
+    // Actually let's just do: value = mant * 2^-9 = mant * (1/512)
+
+    // Convert mantissa to f32, multiply by 2^-9, then cvt to f16
+    .reg .f32 %fval;
+    cvt.rn.f32.u32 %fval, %r7;      // mant as float
+    mul.rn.f32 %fval, %fval, 0f3B000000; // 0x3B000000 = 2^-9 = 1/512 = 0.001953125
+    cvt.rn.f16.f32 %h1, %fval;
+
+    // Apply sign
+    setp.ne.u32 %p2, %r5, 0;
+    @!%p2 bra store_f8_to_f16_h;
+    // Negate: flip sign bit of f16
+    mov.b32 %r9, {%h1, %h1};        // extract to u32
+    and.b32 %r9, %r9, 0xFFFF;
+    xor.b32 %r9, %r9, 0x8000;       // flip sign
+    bra store_f8_to_f16;
+
+zero_f8_to_f16:
+    // Zero: preserve sign
+    shl.b32 %r9, %r5, 15;
+    bra store_f8_to_f16;
+
+store_f8_to_f16:
+    cvt.u16.u32 %s1, %r9;
+    mov.b16 %h1, %s1;
+store_f8_to_f16_h:
+    // Store f16
+    shl.b64 %rd4, %rd2, 1;          // output byte offset (2 bytes per f16)
+    add.u64 %rd5, %rd0, %rd4;
+    st.global.b16 [%rd5], %h1;
+
+done_f8_to_f16:
+    ret;
+}
+
+// --- cast_f16_to_f8e4m3 ---------------------------------------------------
+// Quantizes FP16 to FP8 E4M3FN with saturation (clamp to +-448).
+// Strategy: convert F16 -> F32 -> extract bits -> rebuild as E4M3.
+// Params: output* (u8), input* (f16), count
+.visible .entry cast_f16_to_f8e4m3(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<12>;
+    .reg .f32 %f<3>;
+    .reg .b16 %h1;
+    .reg .pred %p<5>;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_f16_to_f8;
+
+    // Load f16 and convert to f32
+    cvt.u64.u32 %rd2, %r1;
+    shl.b64 %rd3, %rd2, 1;          // input byte offset (2 bytes per f16)
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.b16 %h1, [%rd4];
+    cvt.f32.f16 %f0, %h1;
+
+    // Extract sign and absolute value
+    mov.b32 %r4, %f0;
+    shr.u32 %r5, %r4, 31;           // sign bit
+    and.b32 %r4, %r4, 0x7FFFFFFF;   // clear sign -> |f|
+    mov.b32 %f1, %r4;               // f1 = abs(f)
+
+    // Check zero
+    setp.eq.f32 %p2, %f1, 0f00000000;
+    @%p2 bra zero_f16_to_f8;
+
+    // Clamp to max E4M3 value (448.0)
+    min.f32 %f1, %f1, 0f43E00000;   // 448.0f = 0x43E00000
+
+    // Check if subnormal in E4M3 range: abs < 2^-6 = 0.015625
+    setp.lt.f32 %p3, %f1, 0f3C000000; // 0.015625 = 0x3C000000
+    @%p3 bra subnormal_f16_to_f8;
+
+    // Normal range: extract f32 exp and mant
+    mov.b32 %r6, %f1;
+    shr.u32 %r7, %r6, 23;
+    and.b32 %r7, %r7, 0xFF;         // f32 unbiased_exp + 127
+    sub.u32 %r7, %r7, 127;          // unbiased exponent
+    and.b32 %r8, %r6, 0x7FFFFF;     // f32 23-bit mantissa
+
+    // E4M3 exponent = unbiased_exp + 7 (bias)
+    add.u32 %r7, %r7, 7;
+
+    // Clamp exponent (should be 1..15 for normal)
+    max.s32 %r7, %r7, 1;
+    min.s32 %r7, %r7, 15;
+
+    // Round mantissa: 23 bits -> 3 bits (round to nearest even)
+    add.u32 %r8, %r8, 0x80000;      // add 0.5 ULP for rounding (bit 19)
+    shr.u32 %r8, %r8, 20;           // shift down to 3 bits
+    and.b32 %r8, %r8, 0x7;          // mask to 3 bits
+
+    // Assemble E4M3: sign(1) | exp(4) | mant(3)
+    shl.b32 %r5, %r5, 7;
+    shl.b32 %r7, %r7, 3;
+    or.b32 %r9, %r5, %r7;
+    or.b32 %r9, %r9, %r8;
+    bra store_f16_to_f8;
+
+subnormal_f16_to_f8:
+    // abs < 2^-6: E4M3 subnormal. value = 2^-9 * mant (mant=0..7)
+    // mant = round(abs / 2^-9) = round(abs * 512)
+    mul.rn.f32 %f2, %f1, 0f44000000; // 512.0f = 0x44000000
+    cvt.rni.u32.f32 %r8, %f2;       // round to nearest integer
+
+    // Clamp to 0..7
+    min.u32 %r8, %r8, 7;
+
+    // If mant rounds to 0, output signed zero
+    setp.eq.u32 %p4, %r8, 0;
+    @%p4 bra zero_f16_to_f8;
+
+    // Assemble: sign | 0000 | mant
+    shl.b32 %r5, %r5, 7;
+    or.b32 %r9, %r5, %r8;
+    bra store_f16_to_f8;
+
+zero_f16_to_f8:
+    shl.b32 %r9, %r5, 7;            // signed zero
+
+store_f16_to_f8:
+    // Store 1 byte
+    add.u64 %rd5, %rd0, %rd2;       // output byte offset (1 byte per element)
+    st.global.u8 [%rd5], %r9;
+
+done_f16_to_f8:
+    ret;
+}

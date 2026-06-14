@@ -5,7 +5,7 @@
 ## Extra Reading
 - `docs/Research/SAFETENSORS_FORMAT.md`, `docs/Research/GGUF_FORMAT.md`, `docs/Research/QUANTIZATION_DIFFUSION.md`
 - `docs/Design/IMPLEMENTATION_DETAILS.md`
-- Existing code in `src/SharpInference.ModelHandler/Convert/`
+- Existing code in `src/HartsyInference.ModelHandler/Convert/`
 
 ## Workflow
 1. Understand conversion (source→target, preserved/lost)

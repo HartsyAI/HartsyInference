@@ -1,5 +1,5 @@
 """
-Compares VAE decode between SharpInference (C#) and diffusers (Python).
+Compares VAE decode between HartsyInference (C#) and diffusers (Python).
 Loads the C# unpacked latent from a binary file, decodes it using the VAE
 weights from the same safetensors checkpoint, and reports per-channel stats.
 

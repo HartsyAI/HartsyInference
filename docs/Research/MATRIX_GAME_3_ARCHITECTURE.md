@@ -1,6 +1,6 @@
 # Matrix-Game 3.0 — Research Notes
 
-> Status: Complete (model card + arXiv v2 paper + GitHub source code + Wan2.2 base config captured; only safetensors tensor-key dump remains as a local follow-up) | Last Updated: 2026-05-24 | Needed Before: SharpInference.Interactive (Matrix-Game 3.0 pipeline, Phase 10)
+> Status: Complete (model card + arXiv v2 paper + GitHub source code + Wan2.2 base config captured; only safetensors tensor-key dump remains as a local follow-up) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Interactive (Matrix-Game 3.0 pipeline, Phase 10)
 > Source of truth: [HF `Skywork/Matrix-Game-3.0`](https://huggingface.co/Skywork/Matrix-Game-3.0), [GitHub `SkyworkAI/Matrix-Game`](https://github.com/SkyworkAI/Matrix-Game/tree/main/Matrix-Game-3), [arXiv 2604.08995 v2](https://arxiv.org/abs/2604.08995v2), [project page](https://matrix-game-v3.github.io/), [base `Wan-AI/Wan2.2-TI2V-5B`](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)
 > License: Apache-2.0 (Matrix-Game 3.0 code + weights), Apache-2.0 (Wan2.2-TI2V-5B base), Apache-2.0 (UMT5-XXL encoder). No model-card-imposed use restrictions beyond standard Apache-2.0 terms.
 > Related: [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (Wan2.2 3D causal VAE — exact same `Wan2.2_VAE.pth`, same 48-channel latent, same mean/std), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (UMT5-XXL is also used by AuraFlow / Pile-T5-XL), [`FLOW_MATCHING_AUDIO.md`](FLOW_MATCHING_AUDIO.md) (rectified-flow background; Matrix-Game uses FlowUniPC).
@@ -11,7 +11,7 @@ Matrix-Game 3.0 (Skywork AI Matrix-Game Team, arXiv:2604.08995, 2026-03 initial 
 
 Two checkpoints ship under one HuggingFace repo: a **base model** (12.9 GB safetensors, 50-step FlowUniPC inference, sample_shift=5.0, CFG=5.0) and a **base_distilled_model** (25.9 GB safetensors — larger because it bundles student + critic / EMA — runs at **3 inference steps** via multi-segment Distribution Matching Distillation). Inference is autoregressive over **segments of latent length 15** (57 RGB frames for the first segment, 40 for every subsequent segment); the next segment conditions on the last 4 past latent frames plus 5 retrieved memory frames plus the new noisy prediction. A separate **MG-LightVAE** decoder (a pruned distillation of the Wan2.2 VAE decoder; 50 % or 75 % pruning shipping as `MG-LightVAE.pth` 2.74 GB and `MG-LightVAE_v2.pth` 841 MB) replaces the Wan2.2 decoder at inference time for a 2.6× / 5.2× decode speedup. There is also a paper-only **2×14B MoE** variant ("Coming Soon") that splits high-noise denoising between a first-person expert and a third-person expert; the 5B is what's actually downloadable today.
 
-For SharpInference this is a Phase-10 `SharpInference.Interactive` pipeline that reuses substantially all of the work needed for a Wan2.2 video pipeline (DiT backbone, 3D causal VAE, UMT5-XXL encoder, FlowUniPC scheduler) and adds three new pieces: (1) the **ActionModule** block (a small ~16-head dual-attention block with its own RoPE θ=256), (2) a **camera-pose + Plücker-embedding** preprocessor, and (3) a streaming **per-segment loop** that maintains the past-frame buffer, the 5-slot memory cache, and routes decoding to an async worker (or to a single in-process VAE call on a smaller install).
+For HartsyInference this is a Phase-10 `HartsyInference.Interactive` pipeline that reuses substantially all of the work needed for a Wan2.2 video pipeline (DiT backbone, 3D causal VAE, UMT5-XXL encoder, FlowUniPC scheduler) and adds three new pieces: (1) the **ActionModule** block (a small ~16-head dual-attention block with its own RoPE θ=256), (2) a **camera-pose + Plücker-embedding** preprocessor, and (3) a streaming **per-segment loop** that maintains the past-frame buffer, the 5-slot memory cache, and routes decoding to an async worker (or to a single in-process VAE call on a smaller install).
 
 ## Detailed Findings
 
@@ -105,7 +105,7 @@ CACHE_T       = 2     (CausalConv3d frame cache)
 RMSNorm everywhere (no GroupNorm)
 ```
 
-**Same 48-channel mean / std** as Lance — reuse SharpInference's existing `Wan22VaeNormalization` constants verbatim.
+**Same 48-channel mean / std** as Lance — reuse HartsyInference's existing `Wan22VaeNormalization` constants verbatim.
 
 **MG-LightVAE pruning** = decoder channel widths multiplied by `(1.0 − pruning_rate)`. The encoder is **always** the full Wan2.2 encoder (used once per session to encode the input image). At load time the helper `infer_lightvae_pruning_rate_from_ckpt()` reads `decoder.conv1.weight.shape[0]` and derives the rate. The hybrid mode is "teacher encoder (unpruned) + student decoder (pruned)".
 
@@ -261,7 +261,7 @@ So **GPU-side FOV retrieval is the single biggest perf knob**, then VAE pruning,
 
 (§ 3.5.) The 28B MoE consists of **two 14B "high-noise" experts** specialized by **viewpoint**: one trained on first-person data only, one trained on third-person data only. A routing decision (deterministic, not learned) at sample-start picks the expert based on the input image's view type. This is **not** a Mixtral-style per-token MoE — it's a coarse model-level switch. Each expert is itself a Wan2.2-shape DiT scaled up to 14B (specific shape TBD; not yet released).
 
-For SharpInference, the 5B is the only viable target until the MoE actually drops. When/if it does, the implementation is "load expert A xor expert B at session start" — no per-token routing code needed.
+For HartsyInference, the 5B is the only viable target until the MoE actually drops. When/if it does, the implementation is "load expert A xor expert B at session start" — no per-token routing code needed.
 
 ## Key Numbers / Constants
 
@@ -528,7 +528,7 @@ Source-of-truth files:
 - [`Matrix-Game-3/wan/modules/t5.py`](https://github.com/SkyworkAI/Matrix-Game/blob/main/Matrix-Game-3/wan/modules/t5.py) + `tokenizers.py` — UMT5-XXL encoder + SentencePiece tokenizer wrapper.
 - [`Matrix-Game-3/wan/configs/config.py`](https://github.com/SkyworkAI/Matrix-Game/blob/main/Matrix-Game-3/wan/configs/config.py) — `matrix_game3` EasyDict with all shape constants and inference defaults.
 - [`Matrix-Game-3/wan/configs/shared_config.py`](https://github.com/SkyworkAI/Matrix-Game/blob/main/Matrix-Game-3/wan/configs/shared_config.py) — UMT5 dtype (bf16), 1000-timestep flow base, 16 fps sample rate, 481-frame max, base negative prompt.
-- [`Matrix-Game-3/wan/triton_kernels.py`](https://github.com/SkyworkAI/Matrix-Game/blob/main/Matrix-Game-3/wan/triton_kernels.py) — INT8 W8A8 GEMM triton kernel (port to CUDA PTX for SharpInference).
+- [`Matrix-Game-3/wan/triton_kernels.py`](https://github.com/SkyworkAI/Matrix-Game/blob/main/Matrix-Game-3/wan/triton_kernels.py) — INT8 W8A8 GEMM triton kernel (port to CUDA PTX for HartsyInference).
 - [`Matrix-Game-3/utils/cam_utils.py`](https://github.com/SkyworkAI/Matrix-Game/blob/main/Matrix-Game-3/utils/cam_utils.py) — SE(3) inverse, SLERP, Plücker embeddings, `select_memory_idx`, `select_memory_idx_fov` (GPU frustum overlap).
 - [`Matrix-Game-3/utils/conditions.py`](https://github.com/SkyworkAI/Matrix-Game/blob/main/Matrix-Game-3/utils/conditions.py) — canned action bench (`Bench_actions_universal`), action→tensor packing, `combine_data` (asserts `num_frames % 4 == 1`).
 
@@ -574,44 +574,44 @@ The only notable inconsistency is between the *Wan-AI base config* (`dim=3072, n
 
 6. **Exact AdaLN modulation scheme.** `time_projection(t_emb).view(2, 6, dim)` — paper / source has 6 modulation params per block but the split (which goes to pre-attn norm, which to post-attn, which to ffn) needs to be read from `WanAttentionBlock.forward()`. Standard Wan pattern is `[norm1_shift, norm1_scale, attn_gate, norm2_shift, norm2_scale, ffn_gate]`.
 
-7. **FlowUniPC scheduler details for SharpInference port.** Need to implement `FlowUniPCMultistepScheduler` (or the FlowMatch-Euler equivalent with `shift=5.0` — verify whether UniPC vs Euler gives matching outputs at 50 steps and matching outputs at 3 distilled steps).
+7. **FlowUniPC scheduler details for HartsyInference port.** Need to implement `FlowUniPCMultistepScheduler` (or the FlowMatch-Euler equivalent with `shift=5.0` — verify whether UniPC vs Euler gives matching outputs at 50 steps and matching outputs at 3 distilled steps).
 
-8. **DMD-distilled student-only weight layout.** The 25.9 GB `base_distilled_model/` is roughly 2× the 12.9 GB base. Likely contains student + critic (DMD needs both) + maybe an EMA copy. For inference only the student is needed; figure out which key prefix is the student so SharpInference can load only that ~13 GB slice. Probably keys like `student.*`, `critic.*`, `ema.*` — confirm by key dump.
+8. **DMD-distilled student-only weight layout.** The 25.9 GB `base_distilled_model/` is roughly 2× the 12.9 GB base. Likely contains student + critic (DMD needs both) + maybe an EMA copy. For inference only the student is needed; figure out which key prefix is the student so HartsyInference can load only that ~13 GB slice. Probably keys like `student.*`, `critic.*`, `ema.*` — confirm by key dump.
 
 9. **`MG-LightVAE.pth` / `MG-LightVAE_v2.pth` tensor key naming.** Are they drop-in replacements (same keys as `Wan2.2_VAE.pth` but smaller shapes), or do they have a `student.` / `decoder_pruned.` prefix? Affects whether the existing Wan2.2-VAE loader can load them with just a shape-tolerant mode.
 
-10. **INT8 quantization scale layout.** `Int8Linear` packs scales as a side tensor (probably `*.weight_scale` of shape `[out_features]`). Confirm exact name and dtype (FP32? BF16?) for SharpInference INT8 kernel parity.
+10. **INT8 quantization scale layout.** `Int8Linear` packs scales as a side tensor (probably `*.weight_scale` of shape `[out_features]`). Confirm exact name and dtype (FP32? BF16?) for HartsyInference INT8 kernel parity.
 
 11. **The `--interactive` mode CLI contract.** How does the streaming pipeline read live keyboard/mouse inputs from the user? Stdin? A socket? A file watcher? Read the top of `inference_interactive_pipeline.py:__init__` and the `generate.py` interactive branch.
 
-12. **Frame-rate clarification.** Source is 16 fps (`wan_shared_cfg.sample_fps = 16`), CLI generates at 24 fps, paper claims 40 fps real-time. The 40 fps figure is *output rate after distillation and async pipelining* — not the inference clock. Document for SharpInference users so they don't expect 40 fps on single-GPU.
+12. **Frame-rate clarification.** Source is 16 fps (`wan_shared_cfg.sample_fps = 16`), CLI generates at 24 fps, paper claims 40 fps real-time. The 40 fps figure is *output rate after distillation and async pipelining* — not the inference clock. Document for HartsyInference users so they don't expect 40 fps on single-GPU.
 
 ## Implementation Notes
 
-### How this maps to SharpInference packages
+### How this maps to HartsyInference packages
 
-- **New package `SharpInference.Interactive`** (Phase 10) — entirely new. Contains:
+- **New package `HartsyInference.Interactive`** (Phase 10) — entirely new. Contains:
   - `MatrixGame3Pipeline.cs` (streaming session manager: rolling buffer, memory cache, per-segment denoise loop, async VAE worker).
   - `Pipelines/MatrixGame3StandardPipeline.cs` (canned-action one-shot; matches `inference_pipeline.py`).
   - `Pipelines/MatrixGame3InteractivePipeline.cs` (live actions; matches `inference_interactive_pipeline.py`).
   - `CameraUtils.cs` — SE(3) inverse, SLERP quaternion interpolation, integrate-actions-to-poses, `GetPluckerEmbeddings`.
   - `MemoryRetrieval.cs` — `SelectMemoryByFovOverlap` (port `select_memory_idx_fov`), sphere-point sampling, frustum test (GPU kernel).
   - `ActionEncoder.cs` — packs raw (mouse_dx, mouse_dy, keyboard[6]) per-frame buffers into the tensors the DiT expects.
-- **`SharpInference.Video`** — shared with Wan2.2 / future Wan-family pipelines:
+- **`HartsyInference.Video`** — shared with Wan2.2 / future Wan-family pipelines:
   - `Models/Denoisers/WanDit.cs` (the 40-layer Wan2.2 DiT — also needed for any Wan2.2 video pipeline).
   - `Models/Denoisers/DiTBlocks/WanAttentionBlock.cs`, `WanSelfAttention.cs`, `WanCrossAttention.cs`.
   - `Models/Denoisers/DiTBlocks/MatrixGameActionModule.cs` (new — only Matrix-Game uses it, but it lives next to the WanDit blocks).
   - `Models/Vae/Wan22VaeDecoder.cs` (full Wan2.2 VAE — likely already needed by other pipelines).
   - `Models/Vae/MgLightVaeDecoder.cs` (pruned variant — same code path with shape-tolerant loader and `decoder_channels = dim * (1 − pruning_rate)`).
-  - `Schedulers/FlowUniPCMultistepScheduler.cs` (new — not in SharpInference yet; the FlowMatchEulerDiscreteScheduler may give acceptable results at 50 steps but a real UniPC is needed for 3-step distilled).
-- **`SharpInference.Diffusion`** — provides reusable bits:
+  - `Schedulers/FlowUniPCMultistepScheduler.cs` (new — not in HartsyInference yet; the FlowMatchEulerDiscreteScheduler may give acceptable results at 50 steps but a real UniPC is needed for 3-step distilled).
+- **`HartsyInference.Diffusion`** — provides reusable bits:
   - `Models/TextEncoders/Umt5XxlEncoder.cs` (already needed for AuraFlow / Pile-T5; identical model here).
   - `Utilities/SinusoidalTimestepEmbedding.cs` (already exists in `DiTUtils`).
   - `Utilities/RotaryPositionEmbeddingNd.cs` (extend existing 1D RoPE helper to N-D with per-axis `rope_dim_list`).
-- **`SharpInference.ModelHandler`** — new converter:
+- **`HartsyInference.ModelHandler`** — new converter:
   - `CheckpointConverters/MatrixGame3CheckpointConverter.cs` — splits `model.safetensors` into `dit.*` (Wan core), `action.*` (per-block ActionModule), `plucker_proj.*`. Handles the optional `base_distilled_model/` student-only extraction.
   - Existing `Wan22VaeConverter` (if it exists from Lance work) handles `Wan2.2_VAE.pth`; add an `MgLightVaeConverter` that reads pruning rate from `decoder.conv1.weight.shape[0]` per `infer_lightvae_pruning_rate_from_ckpt()`.
-- **`SharpInference.Tokenizers`** — UMT5 SentencePiece. The Lance/AuraFlow text-encoder work should already cover this; ensure `google/umt5-xxl/spm.model` loads.
+- **`HartsyInference.Tokenizers`** — UMT5 SentencePiece. The Lance/AuraFlow text-encoder work should already cover this; ensure `google/umt5-xxl/spm.model` loads.
 
 ### Net-new backend / kernel work required
 
@@ -621,10 +621,10 @@ The only notable inconsistency is between the *Wan-AI base config* (`dim=3072, n
 4. **MG-LightVAE.** Same architecture as Wan2.2 VAE with `dim_mult` scaled by `(1 − pruning_rate)` only on the decoder side. Reuse the encoder code, just allow shape-flexible loading of the decoder side.
 5. **ActionModule dual-stream attention.** Small (~128/1024/1536 dims, 16 heads). Plain bf16 SDPA is fine for v1 — the small dims won't bottleneck. No new kernel.
 6. **GPU camera-frustum overlap test.** Naively: sample ~2k random 3D points in a sphere, project each candidate frustum onto each, count overlaps. A 1-shot CUDA kernel; falls back to CPU on single-GPU installs (slow path, but still correct).
-7. **INT8 W8A8 GEMM (attention QKV/O only).** The reference uses a Triton kernel. SharpInference will need a PTX-compiled equivalent (one CUDA C++ source → PTX, called via the existing CUDA driver API path). Scale per output channel, dtype FP32 or BF16 (TBD per Open Question 10). **First INT8 path in the project — design carefully.** Alternatively, ship without INT8 in v1 and accept the ~30 % slowdown.
+7. **INT8 W8A8 GEMM (attention QKV/O only).** The reference uses a Triton kernel. HartsyInference will need a PTX-compiled equivalent (one CUDA C++ source → PTX, called via the existing CUDA driver API path). Scale per output channel, dtype FP32 or BF16 (TBD per Open Question 10). **First INT8 path in the project — design carefully.** Alternatively, ship without INT8 in v1 and accept the ~30 % slowdown.
 8. **Async VAE worker.** Multi-GPU only. v1 can ignore (single-GPU runs serially); when multi-GPU lands, wire a background `Task` that owns the second GPU's CUDA context and pops latents off a queue.
 9. **Ulysses sequence-parallel attention.** Multi-GPU only. Same comment — defer to a later phase.
-10. **FlowUniPC scheduler.** This is the most novel scheduler in SharpInference's lineup. The simplest correct port is the diffusers `FlowUniPCMultistepScheduler` algorithm with `shift=5.0` applied to the timestep grid in the SD3 logit-normal style. At 3 distilled steps a precomputed timestep table is fine; at 50 steps the standard UniPC corrector loop is needed.
+10. **FlowUniPC scheduler.** This is the most novel scheduler in HartsyInference's lineup. The simplest correct port is the diffusers `FlowUniPCMultistepScheduler` algorithm with `shift=5.0` applied to the timestep grid in the SD3 logit-normal style. At 3 distilled steps a precomputed timestep table is fine; at 50 steps the standard UniPC corrector loop is needed.
 
 ### VRAM and viability per target GPU
 
@@ -644,10 +644,10 @@ Q4_K GGUF dumps do not yet exist for Matrix-Game 3.0. When/if a community port a
 
 ### Ordering / dependencies for the build
 
-1. **Land the Wan2.2 DiT first** as a generic dependency (`SharpInference.Video`). The 40-layer 5120-dim block is reusable for any Wan2.2 pipeline. Validate on Wan2.2-TI2V-5B's own demo (text → 5-sec video) before tackling Matrix-Game.
-2. **Land the Wan2.2 3D causal VAE** (`SharpInference.Video.Models.Vae.Wan22VaeDecoder`). This is the same VAE Lance uses — if Lance lands first, this is purely reuse.
-3. **Land UMT5-XXL encoder** in `SharpInference.Diffusion.Models.TextEncoders`. Shared with AuraFlow / Pile-T5.
-4. **Land `FlowUniPCMultistepScheduler`** in `SharpInference.Video.Schedulers`.
+1. **Land the Wan2.2 DiT first** as a generic dependency (`HartsyInference.Video`). The 40-layer 5120-dim block is reusable for any Wan2.2 pipeline. Validate on Wan2.2-TI2V-5B's own demo (text → 5-sec video) before tackling Matrix-Game.
+2. **Land the Wan2.2 3D causal VAE** (`HartsyInference.Video.Models.Vae.Wan22VaeDecoder`). This is the same VAE Lance uses — if Lance lands first, this is purely reuse.
+3. **Land UMT5-XXL encoder** in `HartsyInference.Diffusion.Models.TextEncoders`. Shared with AuraFlow / Pile-T5.
+4. **Land `FlowUniPCMultistepScheduler`** in `HartsyInference.Video.Schedulers`.
 5. **Then** add the ActionModule block and `WanModel.forward()` overrides for action conditioning + memory tokens.
 6. **Then** add the streaming `MatrixGame3Pipeline` with rolling buffer + memory selection + per-segment denoise.
 7. **Optional follow-ups:** MG-LightVAE, INT8 attention path, async VAE worker, Ulysses SP. These are the perf knobs that get the cluster from ~6 fps to 40 fps; correctness lands without them.

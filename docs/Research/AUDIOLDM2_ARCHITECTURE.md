@@ -1,6 +1,6 @@
 # AudioLDM 2 — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (AudioLDM2 pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (AudioLDM2 pipeline)
 
 ## Summary
 
@@ -15,7 +15,7 @@ Sources:
 - Diffusers modeling: [`modeling_audioldm2.py`](https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/audioldm2/modeling_audioldm2.py)
 - Weights: [`cvssp/audioldm2`](https://huggingface.co/cvssp/audioldm2), [`cvssp/audioldm2-large`](https://huggingface.co/cvssp/audioldm2-large), [`cvssp/audioldm2-music`](https://huggingface.co/cvssp/audioldm2-music)
 
-License: cc-by-nc-sa-4.0 (non-commercial — note this is incompatible with paid SharpInference use; flag in the pipeline docs).
+License: cc-by-nc-sa-4.0 (non-commercial — note this is incompatible with paid HartsyInference use; flag in the pipeline docs).
 
 ## Detailed Findings
 
@@ -31,7 +31,7 @@ All public checkpoints share the same encoders (CLAP, T5, GPT-2, projection mode
 | `cvssp/audioldm2-speech-gigaspeech` | TTS (GigaSpeech) | 350 M | ~1.1 B | 1 | speech corpus | 16 kHz | 10.24 s |
 | `cvssp/audioldm2-speech-ljspeech` | TTS (LJSpeech) | 350 M | ~1.1 B | 1 | LJSpeech | 16 kHz | 10.24 s |
 
-There is also a `audioldm_48k` upstream variant in the reference repo (not on diffusers): 48 kHz output, 256 mel bins, hop 480, `n_fft` 2048, latent embed dim 16, latent time 128, latent freq 32. **Not** wired into the diffusers pipeline — we'll target the diffusers configs for SharpInference v1 and revisit 48k later.
+There is also a `audioldm_48k` upstream variant in the reference repo (not on diffusers): 48 kHz output, 256 mel bins, hop 480, `n_fft` 2048, latent embed dim 16, latent time 128, latent freq 32. **Not** wired into the diffusers pipeline — we'll target the diffusers configs for HartsyInference v1 and revisit 48k later.
 
 The base / large / music checkpoints are the focus of this doc; the speech checkpoints additionally use a VITS-based phoneme encoder in place of T5, which the diffusers `AudioLDM2Pipeline` supports but is a separate code path. We will only implement the **CLAP + T5** general/music path in v1.
 
@@ -64,7 +64,7 @@ CLAP is a contrastive audio-text encoder (the audio analogue of CLIP). For Audio
 - After the transformer, a projection head reduces hidden states to a **single 512-dim embedding** per prompt: `text_features = clap.get_text_features(input_ids, attention_mask)` → shape `(B, 512)`.
 - The pipeline unsqueezes to `(B, 1, 512)` to expose a sequence dimension. This 1-token CLAP embedding is the "global" text condition.
 
-CLAP config fields surface only the fusion/projection sizes (`fusion_hidden_size=768`, `projection_hidden_size=768`); the rest of the architecture matches the standard HuggingFace `LAION/clap-htsat-unfused` text model. SharpInference must implement:
+CLAP config fields surface only the fusion/projection sizes (`fusion_hidden_size=768`, `projection_hidden_size=768`); the rest of the architecture matches the standard HuggingFace `LAION/clap-htsat-unfused` text model. HartsyInference must implement:
 - RoBERTa BPE tokenization (we have BPE infrastructure; add RoBERTa-specific byte-level pretok + special tokens `<s>` `</s>` `<pad>` `<unk>`).
 - RoBERTa transformer (post-LN, learned positional embeddings, gelu, max_position=514 with offset 2).
 - A projection MLP (linear → gelu → linear → L2-normalize) producing the 512-dim feature.
@@ -93,7 +93,7 @@ The second text encoder is FLAN-T5-Large (encoder only).
 
 Pad token id 0, EOS token id 1. Input is padded to `max_length` (the pipeline uses the tokenizer's model max length unless overridden). Output is `(B, T5_seq_len, 1024)`.
 
-This is the standard FLAN-T5-Large encoder — SharpInference already has the T5 encoder kernel from prior pipelines. The only T5-XL/Pile-T5/UMT5 idiosyncrasies (per-layer relative bias) **do not** apply here; this is plain T5 v1.1.
+This is the standard FLAN-T5-Large encoder — HartsyInference already has the T5 encoder kernel from prior pipelines. The only T5-XL/Pile-T5/UMT5 idiosyncrasies (per-layer relative bias) **do not** apply here; this is plain T5 v1.1.
 
 ### 5. Projection Model (`AudioLDM2ProjectionModel`)
 
@@ -165,7 +165,7 @@ Notes:
 
 Per the paper, AudioMAE is an audio masked autoencoder pretrained on AudioSet that produces patch-level features over a mel spectrogram. During AudioLDM 2 training, AudioMAE features extracted from the *target* audio (8 averaged patch tokens) act as the regression target for GPT-2. At inference, GPT-2 hallucinates those features purely from text. This gives the UNet a much richer, audio-aware conditioning than text alone.
 
-For SharpInference: we do **not** need to ship AudioMAE — it's a training-time component only. We only need the trained GPT-2.
+For HartsyInference: we do **not** need to ship AudioMAE — it's a training-time component only. We only need the trained GPT-2.
 
 ### 7. UNet (`AudioLDM2UNet2DConditionModel`)
 
@@ -250,7 +250,7 @@ Confirmed: stream 0 = GPT-2 (768), stream 1 = T5 (1024). **CLAP is consumed only
 
 Standard sinusoidal at `block_out_channels[0]=128` dims, projected through `Linear → SiLU → Linear` to `4 × 128 = 512` dims, added inside each ResBlock. No class embeddings, no add embeddings (`class_embed_type=null`, `projection_class_embeddings_input_dim=null`).
 
-#### What SharpInference can reuse
+#### What HartsyInference can reuse
 
 The block layout is **identical** to SD1.5's UNet except for: (a) 8 latent channels instead of 4, (b) `block_out_channels=(128,256,384,640)` instead of `(320,640,1280,1280)`, (c) two cross-attention streams routed per the rule above, (d) the input is shaped `(time, mel_freq)` rather than `(H, W)` but the math is unchanged. The existing SD1.5/SDXL UNet kernels (GroupNorm, ResnetBlock2D, Transformer2D, CrossAttn) port over directly. The only new piece is the dual-stream cross-attention routing, which is a forward-time control-flow change inside the transformer block.
 
@@ -340,7 +340,7 @@ Notes for parity:
 - `set_alpha_to_one=false`: the "final alpha" used for the last denoising step uses `alphas_cumprod[0]` rather than 1.0 — affects the very last DDIM step.
 - `steps_offset=1`: shift the inference timestep schedule by +1 (matches original DDIM impl in SD).
 - `prediction_type="epsilon"`: standard noise prediction (not v-pred, not x0). CFG applies to the noise prediction.
-- DPM-Solver++ is a drop-in replacement at inference (same betas / prediction_type) and reaches comparable quality in ~30–50 steps. SharpInference should ship both DDIM (default) and DPMSolver++ for users who want speed. Both schedulers are in [DIFFUSION_SCHEDULERS.md](DIFFUSION_SCHEDULERS.md).
+- DPM-Solver++ is a drop-in replacement at inference (same betas / prediction_type) and reaches comparable quality in ~30–50 steps. HartsyInference should ship both DDIM (default) and DPMSolver++ for users who want speed. Both schedulers are in [DIFFUSION_SCHEDULERS.md](DIFFUSION_SCHEDULERS.md).
 - **No flow matching.** This is classic Gaussian diffusion.
 
 ### 11. Mel Spectrogram Parameters
@@ -409,7 +409,7 @@ For `pipeline("a cat meowing", num_inference_steps=200, guidance_scale=3.5, audi
 | Negative prompt | Yes | Defaults to empty string. CFG enabled when `guidance_scale > 1`. |
 | Audio duration | Yes, configurable | `audio_length_in_s`; will be rounded so the latent height is a multiple of `vae_scale_factor=4`. Effective resolution = 10.24 ms (one mel frame at 100 Hz, hop 160 @ 16 kHz). Practical range 1–30 s; quality degrades past ~15 s because the UNet was mostly trained at 10.24 s. |
 | Melody / audio conditioning | **No** | Diffusers `AudioLDM2Pipeline` does not expose audio-to-audio or melody conditioning. The VAE can encode audio, but no `audio2audio` pipeline ships. (Skip for v1.) |
-| Seed | Yes | Standard `torch.Generator`; SharpInference uses our `cuRand`-equivalent kernel for reproducibility. |
+| Seed | Yes | Standard `torch.Generator`; HartsyInference uses our `cuRand`-equivalent kernel for reproducibility. |
 | `num_waveforms_per_prompt` | Yes | If >1, generate multiple candidates and rerank via CLAP audio↔text similarity (requires the CLAP audio tower — defer this to a later milestone). |
 
 ### 14. Memory & Performance
@@ -436,13 +436,13 @@ T5-Large alone is ~750 M params (~1.4 GB FP16). It can be eagerly unloaded after
 Same architecture, different training data and (for some variants) tokenizer:
 - **General (`audioldm2`, `audioldm2-large`)**: trained on 1,150 k hours of mixed sound effects, music, and some speech from AudioSet and other sources. Best all-rounder; mediocre at intelligible speech.
 - **Music (`audioldm2-music`)**: trained on 665 k hours of music only. Higher fidelity instrumental output, but cannot generate sound effects or speech.
-- **Speech (`audioldm2-speech-*`)**: trained on the named speech corpus. **Uses a VITS phoneme encoder** in place of T5 — the diffusers `AudioLDM2Pipeline` handles this by branching on `text_encoder_2.config.model_type`. Quality is below dedicated TTS models (Kokoro, F5-TTS) and the model has no speaker control. **Recommendation: do NOT prioritize the speech variant** — SharpInference already has Kokoro / F5-TTS for TTS.
+- **Speech (`audioldm2-speech-*`)**: trained on the named speech corpus. **Uses a VITS phoneme encoder** in place of T5 — the diffusers `AudioLDM2Pipeline` handles this by branching on `text_encoder_2.config.model_type`. Quality is below dedicated TTS models (Kokoro, F5-TTS) and the model has no speaker control. **Recommendation: do NOT prioritize the speech variant** — HartsyInference already has Kokoro / F5-TTS for TTS.
 
 Inference parameters are identical across variants.
 
-### 16. SharpInference Implementation Notes
+### 16. HartsyInference Implementation Notes
 
-This pipeline is roughly 70% reuse from existing SharpInference components and 30% new.
+This pipeline is roughly 70% reuse from existing HartsyInference components and 30% new.
 
 **Reuse:**
 - T5EncoderModel — already implemented (F-Lite / SD3 / Flux pipelines).
@@ -453,7 +453,7 @@ This pipeline is roughly 70% reuse from existing SharpInference components and 3
 - DPM-Solver++ scheduler — already implemented (Z-Image / SD3); plug-and-play.
 
 **New:**
-- **CLAP text encoder** (RoBERTa-base + projection MLP). Tokenizer: RoBERTa BPE (need to add to `SharpInference.Tokenizers`). Model: ~12-layer post-LN transformer; 768 → 512 projection head. **No audio tower needed for v1.**
+- **CLAP text encoder** (RoBERTa-base + projection MLP). Tokenizer: RoBERTa BPE (need to add to `HartsyInference.Tokenizers`). Model: ~12-layer post-LN transformer; 768 → 512 projection head. **No audio tower needed for v1.**
 - **GPT-2 small** (~124 M). Need to implement:
   - Learned token + positional embeddings (`wte` + `wpe`).
   - 12 × decoder-only transformer blocks (pre-LN, GELU-new, causal self-attn).
@@ -462,7 +462,7 @@ This pipeline is roughly 70% reuse from existing SharpInference components and 3
   - **Continuous-prefix mode**: feed `inputs_embeds` (skip `wte`). The pipeline never tokenizes anything for GPT-2.
   - **KV-cache**: required for performance. Prefix encoded once on iteration 0, then 8 single-step extensions.
   - **No sampling**: deterministic; no temperature / top-p / top-k logic needed.
-  - This is the first decoder-only Transformer in SharpInference. Architecture is similar to dotLLM's Llama (RoPE → swap for learned positional, RMSNorm → LayerNorm, SwiGLU → GELU MLP). Treat it as the foundation kernel for any future small autoregressive transformer; consider a `SharpInference.Transformer.Gpt2` package shared with future work.
+  - This is the first decoder-only Transformer in HartsyInference. Architecture is similar to dotLLM's Llama (RoPE → swap for learned positional, RMSNorm → LayerNorm, SwiGLU → GELU MLP). Treat it as the foundation kernel for any future small autoregressive transformer; consider a `HartsyInference.Transformer.Gpt2` package shared with future work.
 - **AudioLDM2ProjectionModel** (~80 K params). Two linears + four learned vectors + the SOS/EOS insertion logic. Trivial — implement inline in the AudioLDM2 pipeline class.
 - **Dual-stream cross-attention routing** inside the UNet transformer block. Per-sublayer table maps to one of two `encoder_hidden_states` tensors. Add a `int[][] CrossAttnStreamIndex` config to the UNet block and switch the K/V tensor accordingly. Implement once in `Transformer2DBlock`; existing single-stream pipelines pass a length-1 table.
 
@@ -478,12 +478,12 @@ This pipeline is roughly 70% reuse from existing SharpInference components and 3
 - End-to-end: not bit-exact (DDIM noise sampling differs); compare on **CLAP audio score** of the generated waveform vs the prompt — should match Python within ±0.01 CLAP score over a 32-prompt benchmark.
 
 **Package placement.** Per [NUGET_PACKAGE_DESIGN.md](../Design/NUGET_PACKAGE_DESIGN.md):
-- `SharpInference.Audio.AudioLDM2` — pipeline class, projection model, UNet 2D dual-stream override.
-- `SharpInference.TextEncoders.Clap` — new package (text-only for v1; can grow to add audio tower later).
-- `SharpInference.TextEncoders.T5` — existing.
-- `SharpInference.Transformer.Gpt2` — new (consider naming to allow future reuse; keep tiny).
-- `SharpInference.Vocoder.HifiGan` — existing; add the 5-stage 16 kHz config preset.
-- `SharpInference.Vae` — existing; add the 1-channel mel-VAE config preset.
+- `HartsyInference.Audio.AudioLDM2` — pipeline class, projection model, UNet 2D dual-stream override.
+- `HartsyInference.TextEncoders.Clap` — new package (text-only for v1; can grow to add audio tower later).
+- `HartsyInference.TextEncoders.T5` — existing.
+- `HartsyInference.Transformer.Gpt2` — new (consider naming to allow future reuse; keep tiny).
+- `HartsyInference.Vocoder.HifiGan` — existing; add the 5-stage 16 kHz config preset.
+- `HartsyInference.Vae` — existing; add the 1-channel mel-VAE config preset.
 
 **Build order** (suggested for [Checklists/](../Checklists/)):
 1. CLAP text encoder + RoBERTa tokenizer (CPU + CUDA).
@@ -502,8 +502,8 @@ This pipeline is roughly 70% reuse from existing SharpInference components and 3
 - VAE has only 3 down-blocks → `vae_scale_factor = 4` (not 8). All downstream shape arithmetic depends on this.
 - The vocoder is shape-sensitive: input mel must be `(B, T, 64)` (T = `audio_length_in_s × 100`), in log-magnitude (natural log), with **no per-feature normalization** (`normalize_before=false`).
 - GPT-2 `max_new_tokens=8` is **baked into UNet training**. Don't expose it as a user parameter.
-- Per the diffusers source, the UNet supports at most 4 cross-attention sublayers per block. SharpInference's `Transformer2DBlock` should enforce this and fail loudly otherwise.
-- License is cc-by-nc-sa-4.0 (non-commercial). The SharpInference loader should expose the license string at load time so end-user apps can warn / gate accordingly. Music-only and speech-only variants share this license.
+- Per the diffusers source, the UNet supports at most 4 cross-attention sublayers per block. HartsyInference's `Transformer2DBlock` should enforce this and fail loudly otherwise.
+- License is cc-by-nc-sa-4.0 (non-commercial). The HartsyInference loader should expose the license string at load time so end-user apps can warn / gate accordingly. Music-only and speech-only variants share this license.
 - The reference repo's separate 48 kHz variant uses a different VAE (16 latent channels, different mel bins) and is **not** API-compatible — defer to a separate config preset.
 
 ## Open Questions

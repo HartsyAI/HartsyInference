@@ -1,6 +1,6 @@
 # ACE-Step 1.5 (turbo) — Inference Architecture, From Source
 
-> Status: Complete | Last Updated: 2026-06-10 | Needed Before: SharpInference.Audio (ACE-Step 1.5 pipeline)
+> Status: Complete | Last Updated: 2026-06-10 | Needed Before: HartsyInference.Audio (ACE-Step 1.5 pipeline)
 >
 > Supersedes the v1.5 sections of [ACE_STEP_ARCHITECTURE.md](ACE_STEP_ARCHITECTURE.md) (§2.5, §8) which were
 > written from configs only. This doc is extracted from the **actual shipped reference code** —
@@ -13,7 +13,7 @@
 > matches the key dump below). This is the build target for audio in the SwarmUI extension.
 >
 > **STATUS UPDATE 2026-06-10:** the engine shipped **ACE-Step v1 (3.5B DiT)** first
-> (`AceStepPipeline`/`AceStepDit` in SharpInference.Diffusion, per ACE_STEP_ARCHITECTURE.md's
+> (`AceStepPipeline`/`AceStepDit` in HartsyInference.Diffusion, per ACE_STEP_ARCHITECTURE.md's
 > recommendation), and the SwarmUI extension wires **v1** — registering its own `ace-step-v1` model
 > class (detection: `lyric_embs.weight`) under the existing `ace-step-1_5` COMPAT class so the
 > Text2Audio params light up. This doc remains the spec for the **v1.5** build (steps 1-2 done:
@@ -36,7 +36,7 @@ dotLLM. **The shipped turbo model is NOT that.** It is:
 4. **Turbo uses NO CFG and no APG** — `fix_nfe=8` Euler steps over a **hardcoded timestep table**
    (see §4). The PingPong/APG/CFG-Zero★ work items only matter for v1 (3.5B) and v1.5 base/sft.
 5. **Every component is a Qwen3-style block** (RMSNorm, GQA 16:8, head_dim 128, q/k-norm, RoPE θ=1e6,
-   alternating sliding(128)/full attention) — the same block family SharpInference already runs for
+   alternating sliding(128)/full attention) — the same block family HartsyInference already runs for
    Anima (Qwen3-0.6B) and VibeVoice (Qwen2.5). No dotLLM dependency.
 
 ## 2. Model zoo (HF `ACE-Step/Ace-Step1.5`, one repo = all four parts)
@@ -147,11 +147,11 @@ VAE: AutoencoderOobleck — audio_channels 2, ratios [2,4,4,6,10] (×1920), deco
 Latent math: T_latent = duration_s × 25 ; samples = T_latent × 1920
 ```
 
-## 7. Build plan for SharpInference (everything has an in-repo precedent)
+## 7. Build plan for HartsyInference (everything has an in-repo precedent)
 
 | # | Component | Reuses | New work |
 |---|---|---|---|
-| 1 | **Oobleck VAE decoder (+encoder)** — ✅ BUILT 2026-06-10 (`SharpInference.Audio/Models/Codecs/Oobleck/`, `OobleckVae` facade, `AceStep15` + `StableAudioOpen` presets, structural tests green; numerics validation-pending) | `IBackend.Snake` (beta variant), `WeightNormFusion`, Conv1d/ConvTranspose1d — all existed | logscale snake exp at load. **Trap found:** diffusers transpose convs use torch's default dim-0 weight_norm (g = `[C_in,1,1]`, header-verified) → use `WeightNormFusion.Fuse`, NOT EnCodec's per-out-channel `WeightNormFusionT` |
+| 1 | **Oobleck VAE decoder (+encoder)** — ✅ BUILT 2026-06-10 (`HartsyInference.Audio/Models/Codecs/Oobleck/`, `OobleckVae` facade, `AceStep15` + `StableAudioOpen` presets, structural tests green; numerics validation-pending) | `IBackend.Snake` (beta variant), `WeightNormFusion`, Conv1d/ConvTranspose1d — all existed | logscale snake exp at load. **Trap found:** diffusers transpose convs use torch's default dim-0 weight_norm (g = `[C_in,1,1]`, header-verified) → use `WeightNormFusion.Fuse`, NOT EnCodec's per-out-channel `WeightNormFusionT` |
 | 2 | **Qwen3-Embedding-0.6B encoder** — ✅ DONE 2026-06-10 via pure reuse: `LlamaStyleEncoderConfig.Qwen3_Embedding_0_6B` preset (= `Qwen3_0_6B with { VocabSize = 151669, EosTokenId = 151643 }`, config-verified). No pooling — ACE consumes per-token hidden states. | `LlamaStyleEncoder` (Anima's path) + embedded Qwen3 tokenizer | none — 3-line preset. Pipeline step must mirror ACE's prompt formatting (instruct template?) from the GitHub pipeline code when wiring step 5 |
 | 3 | **AceStep DiT (24L)** | Qwen-style GQA attention + RMSNorm + RoPE from existing DiTs; AdaLN-6 | sliding-window attention mask; dual timestep embed; context-latent channel concat; Conv1d patchify |
 | 4 | **Condition encoders** (lyric 8L, timbre 4L) | same Qwen3 encoder layer | packing of [text, lyric, timbre] cross-attn sequence |

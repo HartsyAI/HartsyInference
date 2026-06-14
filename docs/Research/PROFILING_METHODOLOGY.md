@@ -1,4 +1,4 @@
-# Profiling Methodology — How To Measure SharpInference GPU Workloads
+# Profiling Methodology — How To Measure HartsyInference GPU Workloads
 
 > **Purpose**: every measurement that lands in [`benchmarks/results/`](../../benchmarks/results/) is reproducible by someone with a CUDA box and the pinned software stack. This document is the recipe.
 
@@ -71,7 +71,7 @@ Every `benchmarks/results/run_*/` directory must contain a `hardware.txt` produc
     git rev-parse HEAD
     git status --porcelain
     echo "## PTX SHA-256"
-    find src/SharpInference.Cuda/Ptx -name '*.ptx' | sort | xargs sha256sum
+    find src/HartsyInference.Cuda/Ptx -name '*.ptx' | sort | xargs sha256sum
     echo "## checkpoint SHA-256 (if present)"
     find Models -name '*.safetensors' 2>/dev/null | sort | xargs -r sha256sum
 } > software.txt
@@ -87,7 +87,7 @@ For Nsight Systems timelines to be readable, the C# code annotates ranges. The p
 
 ```csharp
 // Add to CudaBackend ops
-using SharpInference.Cuda.Profiling;
+using HartsyInference.Cuda.Profiling;
 
 public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
 {
@@ -96,7 +96,7 @@ public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bi
 }
 ```
 
-Where `NvtxRange` is a tiny wrapper around `nvtxRangePushA` / `nvtxRangePop` from `libnvToolsExt.so` (P/Invoked, no native dependency beyond the driver). Implementation lives in [`src/SharpInference.Cuda/Profiling/NvtxRange.cs`](../../src/SharpInference.Cuda/Profiling/NvtxRange.cs) (added in B1).
+Where `NvtxRange` is a tiny wrapper around `nvtxRangePushA` / `nvtxRangePop` from `libnvToolsExt.so` (P/Invoked, no native dependency beyond the driver). Implementation lives in [`src/HartsyInference.Cuda/Profiling/NvtxRange.cs`](../../src/HartsyInference.Cuda/Profiling/NvtxRange.cs) (added in B1).
 
 **Granularity**: pipeline phases get NVTX ranges (e.g. "TextEncode", "DenoiseStep", "VaeDecode"); per-op ranges are gated behind a `#if NVTX_ENABLED` to avoid 4 000+ ranges/step polluting the timeline (turn on only when zoomed-in profiling is needed).
 
@@ -106,7 +106,7 @@ Where `NvtxRange` is a tiny wrapper around `nvtxRangePushA` / `nvtxRangePop` fro
 
 ```bash
 # Single GPU, full microbench suite, 5 trials each, JSON output
-dotnet run -c Release --project benchmarks/SharpInference.GpuBenchmarks -- \
+dotnet run -c Release --project benchmarks/HartsyInference.GpuBenchmarks -- \
     --filter '*' \
     --warmupCount 1 \
     --iterationCount 5 \
@@ -124,8 +124,8 @@ End-to-end timing wraps an actual generation test with a stopwatch:
 
 ```bash
 # Run a single SDXL test, capture per-step timings
-SHARPINFERENCE_BENCH_OUT=benchmarks/results/run_$(date -u +%Y-%m-%dT%H%M%SZ)_e2e/sdxl.csv \
-dotnet test tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj \
+HARTSYINFERENCE_BENCH_OUT=benchmarks/results/run_$(date -u +%Y-%m-%dT%H%M%SZ)_e2e/sdxl.csv \
+dotnet test tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj \
     --filter "FullyQualifiedName~Sdxl_GenerateImage_Gpu" \
     --logger "console;verbosity=detailed" \
     -- --runtime-mode benchmark
@@ -147,7 +147,7 @@ nsys profile \
     --capture-range=cudaProfilerApi \
     --cuda-memory-usage=true \
     --force-overwrite=true \
-    dotnet test tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj \
+    dotnet test tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj \
         --filter "FullyQualifiedName~Sdxl_GenerateImage_Gpu" \
         -- --runtime-mode benchmark
 ```
@@ -230,7 +230,7 @@ For cloud GPUs (L40S / A100 / H100), the typical workflow:
 nvidia-smi
 nvcc --version
 
-git clone <this-repo> sharpinference && cd sharpinference
+git clone <this-repo> hartsyinference && cd hartsyinference
 git checkout <commit-sha>          # exact commit being benchmarked
 
 # Install pinned PyTorch
@@ -312,7 +312,7 @@ These bite every GPU benchmarker. Document them so reviewers can confirm we avoi
    ```
 5. **PCIe traffic**: external host activity (e.g. test result CSV writes) can interfere. The harness writes results to `/tmp/...` then atomically moves to `benchmarks/results/` after the measurement window closes.
 6. **GPU thermal throttling**: long-running suites can heat-throttle. The harness samples GPU temperature; if it exceeds 80 °C, sleeps 30 s between trials.
-7. **Different CUDA streams**: SharpInference uses `nonBlocking=false` (per [`PHASE_3_DEVIATIONS.md`](../Checklists/PHASE_3_DEVIATIONS.md) #4); always benchmark on this stream, not on a fresh one.
+7. **Different CUDA streams**: HartsyInference uses `nonBlocking=false` (per [`PHASE_3_DEVIATIONS.md`](../Checklists/PHASE_3_DEVIATIONS.md) #4); always benchmark on this stream, not on a fresh one.
 8. **Process forking and CUDA context**: after `Parallel.For` etc., the CUDA context state may not match. Benchmarks always run on the main thread.
 9. **`nsys --capture-range=cudaProfilerApi`**: without this, the trace includes test-runner startup, which dominates the timeline. With it, only the measurement window is captured.
 
@@ -340,7 +340,7 @@ Before committing a result directory, verify:
 run_id,timestamp_utc,gpu_name,gpu_compute_cap,driver_version,cuda_version,backend,op,shape,dtype,trial,latency_us,throughput_gflops,memory_mb,workspace_mb
 ```
 
-- `backend` ∈ {`sharpinference_cuda`, `pytorch`, `pytorch_xformers`}
+- `backend` ∈ {`hartsyinference_cuda`, `pytorch`, `pytorch_xformers`}
 - `op` ∈ {`matmul`, `conv2d_3x3`, `conv2d_1x1`, `groupnorm`, `layernorm`, `rmsnorm`, `sdpa_self`, `sdpa_cross`, `silu`, `gelu`, `broadcast_add`}
 - `shape` is a string `"BxCxHxW"` for conv inputs or `"BxMxN-BxNxK"` for GEMM
 - `trial` ∈ {0..4}; trial 0 may be flagged as warmup (see § 12)

@@ -1,7 +1,7 @@
 # Phase 8 — SwarmUI Extension
 
-> **Goal:** Register SharpInference as an in-process SwarmUI backend.
-> **Packages:** SharpInference.SwarmUI
+> **Goal:** Register HartsyInference as an in-process SwarmUI backend.
+> **Packages:** HartsyInference.SwarmUI
 
 ---
 
@@ -12,7 +12,7 @@
 
 ## 2. Planning
 
-- [ ] Map SwarmUI API → SharpInference pipeline calls
+- [ ] Map SwarmUI API → HartsyInference pipeline calls
 - [ ] Model format compatibility, LoRA/ControlNet passthrough, progress reporting, error surfacing
 
 ## 3. Implementation

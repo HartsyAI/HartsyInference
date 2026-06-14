@@ -1,7 +1,7 @@
 # Phase 3 — First Image (Cuda + SD1.5 Pipeline)
 
 > **Goal:** Generate an actual image from text with SD1.5 on CUDA GPU.
-> **Packages:** SharpInference.Cuda, SharpInference.Diffusion (full)
+> **Packages:** HartsyInference.Cuda, HartsyInference.Diffusion (full)
 >
 > **Status:** CUDA backend functional with FP16 inference + fused kernels. SD1.5 + SDXL generating correct images on GPU. SDXL 1024x1024 at ~5.5s/step (11x faster than Phase 2).
 
@@ -22,7 +22,7 @@
 - [ ] CUDA memory pool strategy — see CUDA_PERFORMANCE.md Phase D
 - [ ] cuDNN version target — see CUDA_PERFORMANCE.md Phase E (optional)
 
-## 3. Implementation — SharpInference.Cuda
+## 3. Implementation — HartsyInference.Cuda
 
 - [x] `CudaDriverApi.cs` — P/Invoke (cuInit, cuDeviceGet, cuCtxCreate, cuModuleLoadData, cuLaunchKernel, cuMemAlloc/Free, cuMemcpy)
 - [x] `CudaStream.cs` — stream lifecycle, blocking mode (non-blocking causes race conditions, see CUDA_PERFORMANCE.md)
@@ -53,7 +53,7 @@
 - [x] `StableDiffusion15Pipeline.cs` — end-to-end: tokenize → encode → noise → denoise → VAE → image
 - [x] `VaeDecoder.cs`, `TextToImageRequest.cs`, `ImagePostProcessor.cs`
 - [x] `ImageToImageRequest.cs` — exists, used by every pipeline that supports img2img/inpaint. Inpaint is enabled by setting `ImageToImageRequest.Mask` (no separate request type). Validation centralized in `Utilities/Img2ImgSetup.cs`.
-- [ ] `PipelineFactory.cs` — scaffolding only ([Pipelines/PipelineFactory.cs](../../src/SharpInference.Diffusion/Pipelines/PipelineFactory.cs)). `LoadAuto` throws `NotImplementedException` because a real factory needs 5 unresolved design decisions (model-type detection, on-disk layout discovery, tokenizer ownership, quality profile, instance caching). Documented in the class header. Callers currently construct pipelines directly via per-pipeline constructors — every test in `SharpInference.Diffusion.Tests` demonstrates the pattern. Reopen this item once there's a real consumer (Server in Phase 7, or SwarmUI integration in Phase 8) ready to drive the design.
+- [ ] `PipelineFactory.cs` — scaffolding only ([Pipelines/PipelineFactory.cs](../../src/HartsyInference.Diffusion/Pipelines/PipelineFactory.cs)). `LoadAuto` throws `NotImplementedException` because a real factory needs 5 unresolved design decisions (model-type detection, on-disk layout discovery, tokenizer ownership, quality profile, instance caching). Documented in the class header. Callers currently construct pipelines directly via per-pipeline constructors — every test in `HartsyInference.Diffusion.Tests` demonstrates the pattern. Reopen this item once there's a real consumer (Server in Phase 7, or SwarmUI integration in Phase 8) ready to drive the design.
 
 ## 5. Testing & Validation
 

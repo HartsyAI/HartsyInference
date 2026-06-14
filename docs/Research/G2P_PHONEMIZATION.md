@@ -1,12 +1,12 @@
 # G2P / Phonemization — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (any phoneme-input TTS — Kokoro, StyleTTS2, MeloTTS)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (any phoneme-input TTS — Kokoro, StyleTTS2, MeloTTS)
 
 ## Summary
 
-Most modern TTS models that take phoneme input depend on **espeak-ng** (a GPL/LGPL C library) or **phonemizer** (its Python wrapper). SharpInference is pure C# / .NET 10 with no native binaries, so we cannot link or ship espeak. This document surveys G2P (grapheme-to-phoneme) options that can be implemented in pure C# and recommends a per-language strategy.
+Most modern TTS models that take phoneme input depend on **espeak-ng** (a GPL/LGPL C library) or **phonemizer** (its Python wrapper). HartsyInference is pure C# / .NET 10 with no native binaries, so we cannot link or ship espeak. This document surveys G2P (grapheme-to-phoneme) options that can be implemented in pure C# and recommends a per-language strategy.
 
-The short version: for **English** we ship CMUDict (134k entries, public domain, ARPABET) with a deterministic ARPABET→IPA conversion table and POS-tag-based heteronym disambiguation; OOV words go to a small (~5-6 M param) ByT5-style neural G2P model run through SharpInference itself. For **Mandarin** we ship jieba.NET + a pinyin dictionary + a pinyin→IPA table with tone digits. For **Korean** we do pure rule-based Hangul-jamo decomposition (trivial). For **Japanese** we either skip it on day one or port pyopenjtalk's MeCab+UniDic pipeline (large project — flagged). For **German / Spanish / French / Italian / Portuguese / Russian / Hindi** we port `epitran`-style rule tables. Notably, **F5-TTS, XTTS-v2, Bark, and IndexTTS-2** require no G2P at all — they take raw text — so for those models we ship nothing and just normalize text. Kokoro is the most demanding consumer here: its phoneme vocabulary is exactly 178 tokens (indices 0-177, pad=0) and its expected IPA inventory matches misaki's 49-phoneme English set plus diacritics, prosody arrows, and punctuation.
+The short version: for **English** we ship CMUDict (134k entries, public domain, ARPABET) with a deterministic ARPABET→IPA conversion table and POS-tag-based heteronym disambiguation; OOV words go to a small (~5-6 M param) ByT5-style neural G2P model run through HartsyInference itself. For **Mandarin** we ship jieba.NET + a pinyin dictionary + a pinyin→IPA table with tone digits. For **Korean** we do pure rule-based Hangul-jamo decomposition (trivial). For **Japanese** we either skip it on day one or port pyopenjtalk's MeCab+UniDic pipeline (large project — flagged). For **German / Spanish / French / Italian / Portuguese / Russian / Hindi** we port `epitran`-style rule tables. Notably, **F5-TTS, XTTS-v2, Bark, and IndexTTS-2** require no G2P at all — they take raw text — so for those models we ship nothing and just normalize text. Kokoro is the most demanding consumer here: its phoneme vocabulary is exactly 178 tokens (indices 0-177, pad=0) and its expected IPA inventory matches misaki's 49-phoneme English set plus diacritics, prosody arrows, and punctuation.
 
 ## Detailed Findings
 
@@ -58,7 +58,7 @@ espeak-ng (https://github.com/espeak-ng/espeak-ng) is a C library that does TTS 
 **Why we can't link or ship it**:
 
 1. **Native code, no managed binding**. espeak-ng is C; the only C# binding (`espeak-sharp` etc.) P/Invokes the shared library. Per CLAUDE.md: "Pure C# only — no native shared libraries". Disqualifying.
-2. **License**. espeak-ng is GPLv3, espeak-data is also GPLv3. We're aiming at MIT-ish for SharpInference — GPL would force the entire engine to GPL.
+2. **License**. espeak-ng is GPLv3, espeak-data is also GPLv3. We're aiming at MIT-ish for HartsyInference — GPL would force the entire engine to GPL.
 3. **Binary `.so` / `.dll` deployment**. Even if licensing were fine, we'd need per-platform binaries and would lose AOT-friendliness.
 
 **What we *can* take from espeak-ng**:
@@ -219,7 +219,7 @@ The NLTK averaged-perceptron tagger has been ported to pure C# already (search "
 - **Heteronym table**: ~1,000 entries keyed by `(word, POS)`. Hand-curated; both `g2p-en` and `misaki` have starter sets we can reference (Apache-licensed in misaki's case — directly reusable).
 - **POS tagger**: pure-C# averaged-perceptron, ~3 MB model.
 - **Punctuation / numerals**: normalize numbers via a small expansion module (port of `num2words` — 600 LOC for English).
-- **OOV fallback**: small ByT5-style G2P (see section 8), running through SharpInference itself as a `.safetensors`.
+- **OOV fallback**: small ByT5-style G2P (see section 8), running through HartsyInference itself as a `.safetensors`.
 - **UK variant**: same pipeline, different lexicon file (BEEP or gruut's en-gb).
 
 Expected accuracy vs espeak reference: ≥98 % on in-vocab, ≥92 % on OOV with the neural fallback. CMUDict alone (no neural) is ~90 % on the typical inference text because most OOV is proper nouns.
@@ -313,7 +313,7 @@ OOV = "out of vocabulary": a word not in the dictionary. Options, ranked by cost
 | Option | Pros | Cons |
 |---|---|---|
 | (a) Ship a larger lexicon (CMUDict + Wiktionary + Wikipedia titles, ~500k entries) | Best accuracy on names; zero inference cost | Storage bloat (~20 MB); never covers everything |
-| (b) Small neural seq2seq G2P (~5M params) running through SharpInference | Generalizes; handles names; reusable across languages (ByT5) | ~10-20 ms per OOV word; needs SharpInference inference path |
+| (b) Small neural seq2seq G2P (~5M params) running through HartsyInference | Generalizes; handles names; reusable across languages (ByT5) | ~10-20 ms per OOV word; needs HartsyInference inference path |
 | (c) Per-language rule-based fallback | No model, no extra MB | Bad on proper nouns and loanwords |
 | (d) Return placeholder phoneme (e.g. just spell the letters phonetically) | Simplest | Poor quality; some models choke on unknown tokens |
 
@@ -338,7 +338,7 @@ Small transformer G2P models that fit our "run it ourselves" criterion:
 | **DeepPhonemizer transformer** | ~10 M | English | [as3eem/DeepPhonemizer](https://github.com/as3eem/DeepPhonemizer) | MIT |
 | **g2p-en LSTM** | ~3 M | English | [Kyubyong/g2p](https://github.com/Kyubyong/g2p) | Apache |
 
-All are small enough that running them through SharpInference itself is fine — we already have transformer kernels for text encoders. Recommended: **PhonoGlyphe (6M, English)** for production, **CharsiuG2P byT5-tiny (30M, 100 langs)** as the universal fallback.
+All are small enough that running them through HartsyInference itself is fine — we already have transformer kernels for text encoders. Recommended: **PhonoGlyphe (6M, English)** for production, **CharsiuG2P byT5-tiny (30M, 100 langs)** as the universal fallback.
 
 ByT5 is convenient because it's **byte-level** — no tokenizer to ship, the input IS UTF-8 bytes. This sidesteps the SentencePiece-vs-pure-C# headache.
 
@@ -366,12 +366,12 @@ Ship F5-TTS and/or XTTS-v2 as our first TTS models. Both are character-level. Th
 
 **Phase 2 — English G2P (for Kokoro)** (~2 weeks):
 
-1. Pack CMUDict (134k entries) into a compact binary lookup (`SharpInference.Audio.Phonemes.CmuDict`).
+1. Pack CMUDict (134k entries) into a compact binary lookup (`HartsyInference.Audio.Phonemes.CmuDict`).
 2. Hard-code the ARPABET → IPA table (single switch statement, ~40 cases).
 3. Port misaki's English heteronym table (~1000 entries, Apache-licensed) into a `(word, POS) → IPA` lookup.
 4. Port a pure-C# averaged-perceptron POS tagger (model ~3 MB).
 5. Implement English number expansion (port `num2words.en`, ~600 LOC).
-6. Convert PhonoGlyphe checkpoint to `.safetensors`, wire it as the OOV fallback through SharpInference's existing transformer runtime.
+6. Convert PhonoGlyphe checkpoint to `.safetensors`, wire it as the OOV fallback through HartsyInference's existing transformer runtime.
 7. Wire up to Kokoro and StyleTTS 2's expected vocabularies.
 
 Acceptance test: phonemize 10,000 sentences from LibriTTS, compare to misaki+espeak output, target ≥98 % phoneme-level agreement (excluding heteronym corner cases).
@@ -620,14 +620,14 @@ function phonemize_zh(text):
 - Do we attach a **TTS-time text normalizer** (handling "$5.99" → "five dollars and ninety-nine cents", dates, abbreviations, URLs) before the G2P stage? This is technically separate from G2P but every real TTS shipping product has one. (Recommendation: yes, ship a small one — port num2words + a handful of regex rules.)
 - For Mandarin polyphone disambiguation beyond what jieba+CC-CEDICT covers, is a small BERT-based disambiguator worth it? Or accept ~1 % wrong tones?
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 ### Package layout
 
 Per the file structure rules (CLAUDE.md), this belongs in its own assembly inside the audio package:
 
 ```
-src/SharpInference.Audio.Phonemes/
+src/HartsyInference.Audio.Phonemes/
     CmuDictionary.cs              # public CMUDict loader/lookup
     ArpabetToIpa.cs               # 39-row static conversion table
     Heteronyms.cs                 # (word, POS) -> IPA table
@@ -649,7 +649,7 @@ src/SharpInference.Audio.Phonemes/
         cc_cedict.bin             # ~3 MB
     OovFallback/
         IOovFallback.cs           # interface so users can plug in
-        PhonoGlypheFallback.cs    # default: runs PhonoGlyphe through SharpInference
+        PhonoGlypheFallback.cs    # default: runs PhonoGlyphe through HartsyInference
         CharsiuG2PFallback.cs     # alternative: multilingual ByT5
 ```
 
@@ -662,7 +662,7 @@ src/SharpInference.Audio.Phonemes/
 
 ### Validation strategy
 
-For each language, hold out a 10k-sentence reference set, phonemize with the gold reference (misaki + espeak via Python subprocess at test time only — not at runtime), and require ≥98 % token-level agreement (where "token" = one IPA character) for in-vocab text, ≥92 % for OOV text. Document tolerances per language in `tests/SharpInference.Audio.Tests/Phonemes/`.
+For each language, hold out a 10k-sentence reference set, phonemize with the gold reference (misaki + espeak via Python subprocess at test time only — not at runtime), and require ≥98 % token-level agreement (where "token" = one IPA character) for in-vocab text, ≥92 % for OOV text. Document tolerances per language in `tests/HartsyInference.Audio.Tests/Phonemes/`.
 
 ### Encoding / Unicode
 
@@ -674,7 +674,7 @@ For each language, hold out a 10k-sentence reference set, phonemize with the gol
 
 To ship Kokoro with English voices on Monday:
 
-1. `SharpInference.Audio.Phonemes.CmuDictionary` (loader + lookup) — 1 day
+1. `HartsyInference.Audio.Phonemes.CmuDictionary` (loader + lookup) — 1 day
 2. `ArpabetToIpa` static table + converter — 0.5 day
 3. `Heteronyms` table (port misaki's gold heteronyms) — 0.5 day
 4. `PosTagger` (averaged perceptron, port from existing C# implementations) — 1 day

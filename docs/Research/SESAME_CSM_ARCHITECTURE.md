@@ -1,6 +1,6 @@
 # Sesame CSM — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Sesame CSM pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Sesame CSM pipeline)
 
 ## Summary
 
@@ -486,11 +486,11 @@ On lower-end consumer GPUs (RTX 3060 12 GB, bf16): first-audio ~250–400 ms, RT
 
 Sesame's blog claims their internal (larger, unreleased) model achieves ~150 ms p50 user-stop-to-audio latency in their voice demo, suggesting CSM-1B at ~150–250 ms is in the same ballpark.
 
-### C# Implementation Notes (SharpInference)
+### C# Implementation Notes (HartsyInference)
 
 #### Component reuse map
 
-| CSM Component                          | SharpInference reuse                                                                  |
+| CSM Component                          | HartsyInference reuse                                                                  |
 |----------------------------------------|---------------------------------------------------------------------------------------|
 | Backbone (Llama-3.2 1B with GQA, RoPE, RMSNorm, SwiGLU) | **Direct dotLLM reuse.** This is bit-identical Llama-3.2-1B except `tok_embeddings`/`output` are stubbed. Use the dotLLM `LlamaBlock`, KV cache, attention, RoPE with `scale_factor=32`. |
 | Decoder (4-layer Llama-100M)           | **Same dotLLM blocks, smaller config.** Note `intermediate_dim=8192` (8× hidden, not 2.6×) — make sure the FFN dim is read from config, not derived. KV cache size = 8 entries per layer per head. |
@@ -519,7 +519,7 @@ Sesame's blog claims their internal (larger, unreleased) model achieves ~150 ms 
 
 9. **Mimi `set_num_codebooks(32)` at load.** Context audio is encoded at 32 codebooks even though generation samples 8. This is intentional — the context carries more information about the reference voice than the generation can express. If you encode context at 8 codebooks (to save memory), expect somewhat degraded voice cloning quality. Match the reference unless you have a reason not to.
 
-#### Streaming pipeline shape (target SharpInference API)
+#### Streaming pipeline shape (target HartsyInference API)
 
 ```csharp
 public interface ISesameCsmGenerator
@@ -554,11 +554,11 @@ Implementation notes for the streaming path:
 
 #### Suggested implementation order
 
-1. **Mimi decoder + encoder** in `SharpInference.Audio.Codecs.Mimi` — both directions are needed (encoder for context audio, decoder for generation output). Validate against the HF `MimiModel` port (Python) within 1e-3 RMS on a fixed test waveform. See [AUDIO_CODECS.md](AUDIO_CODECS.md) Mimi section for the full op list.
-2. **CSM `Model` class** in `SharpInference.Audio.Tts.Sesame` — wraps two dotLLM-Llama instances + the embedding tables + the three projection/head parameters. Implement the wide-frame embedding sum and the `generate_frame` loop. Validate `generate_frame` output (the 8 sampled codebooks) is plausible (cb0 distribution matches Mimi-semantic distribution for known audio).
-3. **Generator + tokenization** in `SharpInference.Audio.Tts.Sesame.Generator` — port `_tokenize_text_segment`, `_tokenize_audio`, `_tokenize_segment`, the conversation-context loop. Reuse the dotLLM Llama-3.2 tokenizer.
+1. **Mimi decoder + encoder** in `HartsyInference.Audio.Codecs.Mimi` — both directions are needed (encoder for context audio, decoder for generation output). Validate against the HF `MimiModel` port (Python) within 1e-3 RMS on a fixed test waveform. See [AUDIO_CODECS.md](AUDIO_CODECS.md) Mimi section for the full op list.
+2. **CSM `Model` class** in `HartsyInference.Audio.Tts.Sesame` — wraps two dotLLM-Llama instances + the embedding tables + the three projection/head parameters. Implement the wide-frame embedding sum and the `generate_frame` loop. Validate `generate_frame` output (the 8 sampled codebooks) is plausible (cb0 distribution matches Mimi-semantic distribution for known audio).
+3. **Generator + tokenization** in `HartsyInference.Audio.Tts.Sesame.Generator` — port `_tokenize_text_segment`, `_tokenize_audio`, `_tokenize_segment`, the conversation-context loop. Reuse the dotLLM Llama-3.2 tokenizer.
 4. **Non-streaming `GenerateAsync`** — batched frame loop, single Mimi decode at the end. End-to-end validate output PCM against the Python reference: same prompt, same seed → audibly identical waveform (perfect bit-match is unlikely due to sampling).
-5. **Streaming `GenerateStreamingAsync`** — refactor the frame loop to emit per-frame. Per-frame Mimi decode with causal ring buffers. Build the `IAsyncEnumerable<AudioChunk>` plumbing and the producer/consumer split. **This is the showcase real-time path for SharpInference.**
+5. **Streaming `GenerateStreamingAsync`** — refactor the frame loop to emit per-frame. Per-frame Mimi decode with causal ring buffers. Build the `IAsyncEnumerable<AudioChunk>` plumbing and the producer/consumer split. **This is the showcase real-time path for HartsyInference.**
 6. **Performance pass** — fuse the wide-frame embedding sum kernel, ensure backbone KV cache writes are coalesced, profile single-frame latency target ≤ 25 ms on RTX 4090 bf16.
 
 #### What is *not* needed
@@ -640,7 +640,7 @@ Shape `(B, n_codebooks, T_frames)`:
 
 ### Audio output tensor
 
-`mimi.decode(codes)` returns `(B, 1, T_frames * 1920)` float32 in `[-1, 1]`. The reference `Generator.generate` then runs SilentCipher watermarking and a sample-rate-identity resample (the resample appears to be a no-op safety net for cases where the watermarker changes sample rate). For SharpInference v1, skip both — return the raw PCM.
+`mimi.decode(codes)` returns `(B, 1, T_frames * 1920)` float32 in `[-1, 1]`. The reference `Generator.generate` then runs SilentCipher watermarking and a sample-rate-identity resample (the resample appears to be a no-op safety net for cases where the watermarker changes sample rate). For HartsyInference v1, skip both — return the raw PCM.
 
 ### Llama tokenizer
 
@@ -698,7 +698,7 @@ codes = stack(samples).permute(1, 2, 0)        # (B, 8, T_gen)
 pcm   = mimi.decode(codes)                     # (B, 1, T_gen * 1920)
 ```
 
-### Streaming variant (target SharpInference)
+### Streaming variant (target HartsyInference)
 
 ```
 prefill as above
@@ -756,9 +756,9 @@ Applied independently per codebook of every sampled frame. **No shared random st
 
 6. **End-of-segment marker correctness.** The reference appends a single all-zero frame after every context audio segment in `_tokenize_audio`. We should verify this matches the training-time format; an off-by-one here would silently degrade context conditioning.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
-### What SharpInference already has (or will, from dotLLM)
+### What HartsyInference already has (or will, from dotLLM)
 
 - Llama-3.2 transformer block (RoPE + GQA + RMSNorm + SwiGLU) — both backbone (16 layers) and decoder (4 layers) use this directly.
 - Llama-3 BPE tokenizer.
@@ -769,21 +769,21 @@ Applied independently per codebook of every sampled frame. **No shared random st
 
 ### What is new and must be built
 
-1. **Mimi codec** (`SharpInference.Audio.Codecs.Mimi`):
+1. **Mimi codec** (`HartsyInference.Audio.Codecs.Mimi`):
    - Causal SEANet encoder + decoder with streaming ring buffers (see [AUDIO_CODECS.md](AUDIO_CODECS.md)).
    - Bottleneck Transformer (RoPE + GELU, 8 layers × 8 heads × 512 dim, causal with 250-frame finite context).
    - Split-RVQ: standalone semantic VQ + 7-step residual VQ on top.
    - Both `encode(wav) → codes[B, 32, T]` and `decode(codes) → wav[B, 1, T*1920]`.
    - **Streaming `decode_one_frame(codes[B, 8]) → pcm[B, 1920]`** — this is the critical path for low-latency.
 
-2. **CSM `Model`** (`SharpInference.Audio.Tts.Sesame.SesameCsmModel`):
+2. **CSM `Model`** (`HartsyInference.Audio.Tts.Sesame.SesameCsmModel`):
    - Two `LlamaTransformer` instances (1B backbone, 100M decoder).
    - Three parameters / heads: `projection (2048→1024)`, `codebook0_head (2048→2048)`, `audio_head (31, 1024, 2048)`.
    - Two embedding tables: `text_embeddings (128256, 2048)`, `audio_embeddings (65536, 2048)`.
    - `_embed_tokens(wide_frame) → (B, S, 33, D)`: 33 lookups per row.
    - `generate_frame(...)` implementing the dual-loop above. Decoder KV cache reset per frame.
 
-3. **CSM `Generator`** (`SharpInference.Audio.Tts.Sesame.SesameCsmGenerator`):
+3. **CSM `Generator`** (`HartsyInference.Audio.Tts.Sesame.SesameCsmGenerator`):
    - Conversation-context tokenizer (text + Mimi encode).
    - Outer frame loop with EOS detection.
    - Both `GenerateAsync` (non-streaming) and `GenerateStreamingAsync` (showcase path).
@@ -807,4 +807,4 @@ Applied independently per codebook of every sampled frame. **No shared random st
 | VRAM (model + KV cache, batch=1)                  | ≤ 3.5 GB         | ≤ 3.0 GB         |
 | Numerical agreement with Python ref (codebook 0)  | ≥ 95% top-1 match at T=0 | 100% bit-match at T=0 with same RNG seed |
 
-This is the showcase real-time TTS pipeline for SharpInference — getting the streaming path right is more important than matching every last ms of single-frame throughput.
+This is the showcase real-time TTS pipeline for HartsyInference — getting the streaming path right is more important than matching every last ms of single-frame throughput.

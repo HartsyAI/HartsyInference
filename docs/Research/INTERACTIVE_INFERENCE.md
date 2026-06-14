@@ -7,7 +7,7 @@
 
 Interactive inference is a distinct mode of generative model serving where the model **emits a frame per user input** at real-time rates (25–40 FPS) rather than producing an offline clip. The model is *driven* by an action stream — keyboard, mouse, gamepad, camera pose, or arbitrary control vectors — and maintains a persistent rolling state (KV-cache, frame history, memory bank) across steps. The classic example is "world models" for games (Matrix-Game, Oasis, Hunyuan-GameCraft), but the same machinery serves any application where a model must respond to live input: real-time animation, agent simulation, AR overlays, controllable music generation.
 
-This document defines the **cross-cutting infrastructure** that has to land in SharpInference before any interactive world model can run. The model-specific architecture details live in the per-model research docs; this doc is about the shared substrate: action encoders, the streaming session API, KV-cache for video tokens, discrete video tokenizers, distilled few-step schedulers, streaming VAE decode, memory-augmented attention, license-acceptance plumbing, and the package boundary between `SharpInference.Video` (shared infra) and `SharpInference.Interactive` (user-facing world-model pipelines).
+This document defines the **cross-cutting infrastructure** that has to land in HartsyInference before any interactive world model can run. The model-specific architecture details live in the per-model research docs; this doc is about the shared substrate: action encoders, the streaming session API, KV-cache for video tokens, discrete video tokenizers, distilled few-step schedulers, streaming VAE decode, memory-augmented attention, license-acceptance plumbing, and the package boundary between `HartsyInference.Video` (shared infra) and `HartsyInference.Interactive` (user-facing world-model pipelines).
 
 Phase 9 (Video) is the right home for everything an offline AR-video-continuation model also needs (3D causal VAE, packed/varlen attention, distilled schedulers, streaming VAE decode, discrete video tokenizer abstraction). Phase 10 (Interactive / World Models) is the right home for the strictly real-time-and-action-conditioned pieces (`IInteractiveSession`, `IActionEncoder`, history-mask channel, memory-augmented cross-attention) and for the model pipelines themselves. We intentionally **do not** build all 10 foundational gaps up front — only the ones the chosen v1 models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft) actually need, with the rest documented as a deferred backlog.
 
@@ -34,8 +34,8 @@ The defining trait is the **action input loop**: a frame can't be generated unti
 Every interactive model takes some flavor of action. The action vocabularies vary wildly, so we define a thin generic interface and let each model implement its own encoder.
 
 ```csharp
-// SharpInference.Diffusion (Phase 9 — shared so video-cond models can use it too)
-namespace SharpInference.Conditioning;
+// HartsyInference.Diffusion (Phase 9 — shared so video-cond models can use it too)
+namespace HartsyInference.Conditioning;
 
 public readonly record struct ActionInput(
     ReadOnlyMemory<byte> Payload,       // model-defined bytes (key state, camera pose, etc.)
@@ -75,17 +75,17 @@ public readonly record struct ActionStream(
 
 Per-model encoder defines which stream names it produces; per-model pipeline knows which streams its blocks consume. Pipelines without an action encoder (Lance video, Cosmos V2W) simply pass no streams.
 
-**Why generic instead of `KeyboardActionEncoder` / `MouseActionEncoder` / etc. baked in:** every model defines its own vocab and tokenization. A generic byte payload + per-model encoder keeps SharpInference out of the business of unifying action spaces (which is what game engines do).
+**Why generic instead of `KeyboardActionEncoder` / `MouseActionEncoder` / etc. baked in:** every model defines its own vocab and tokenization. A generic byte payload + per-model encoder keeps HartsyInference out of the business of unifying action spaces (which is what game engines do).
 
 **Why not a single `Tensor` per action:** allocations on the hot path. The 25–40 FPS budget is too tight to allocate a new `Tensor` per step. `Span<float>` is filled into a pre-allocated buffer the session owns.
 
 ### 3. The interactive session — `IInteractiveSession`
 
-The streaming loop is the highest-level abstraction. It lives in the new `SharpInference.Interactive` package (Phase 10).
+The streaming loop is the highest-level abstraction. It lives in the new `HartsyInference.Interactive` package (Phase 10).
 
 ```csharp
-// SharpInference.Interactive
-namespace SharpInference.Interactive;
+// HartsyInference.Interactive
+namespace HartsyInference.Interactive;
 
 public interface IInteractiveSession : IAsyncDisposable
 {
@@ -134,7 +134,7 @@ public interface IInteractiveSession : IAsyncDisposable
 
 **Why not `IAsyncEnumerable<VideoFrame>` on its own:** the consumer-only `IAsyncEnumerable` shape (as used by Lance video) is offline-shaped. You ask for frames and get a fixed-length stream. Interactive sessions are bidirectional and indefinite — actions in, frames out, forever. The `IInteractiveSession` shape is honest about that.
 
-**Why a separate package (`SharpInference.Interactive`):** the streaming session has different threading and lifecycle semantics from any other pipeline. Bundling it into `SharpInference.Video` would pull `IInteractiveSession` into every video pipeline's surface even though offline pipelines don't need it.
+**Why a separate package (`HartsyInference.Interactive`):** the streaming session has different threading and lifecycle semantics from any other pipeline. Bundling it into `HartsyInference.Video` would pull `IInteractiveSession` into every video pipeline's surface even though offline pipelines don't need it.
 
 ### 4. KV-cache for video tokens (`DenoiseKvCache`)
 
@@ -145,7 +145,7 @@ For models that do multi-step denoising per frame (Matrix-Game, GameCraft) or au
 - **AR KV-cache for video tokens.** For AR-token models (Cosmos-AR-13B, future MineWorld / Solaris), the past video tokens + past actions are the K/V being attended to. The cache grows monotonically (or via sliding window) as frames are generated. This is the same pattern as LLM inference (which dotLLM owns), adapted to the multimodal token stream (interleaved text-tokens + action-tokens + video-tokens). **Note: Oasis-500m is *not* AR-over-tokens** — it's a DiT diffusion model over a continuous latent grid with action conditioning added to the timestep embedding, so it uses the diffusion prefix-cache, not the AR cache.
 
 ```csharp
-// SharpInference.Diffusion/Utilities/ (shared between Lance, Matrix-Game, GameCraft, Cosmos AR)
+// HartsyInference.Diffusion/Utilities/ (shared between Lance, Matrix-Game, GameCraft, Cosmos AR)
 public sealed class DenoiseKvCache : IDisposable
 {
     public DenoiseKvCache(IBackend backend, int numLayers, int hiddenDim, int maxSeq, DType dtype, KvCacheMode mode);
@@ -177,7 +177,7 @@ public enum KvCacheMode { DiffusionPrefix, SlidingWindowVideoFrames, Autoregress
 AR world models operate on **discrete** video tokens, not continuous latents. The tokenizer is an encoder that maps a frame (or chunk of frames) to a sequence of integer codebook indices, plus a decoder that maps indices back to pixels.
 
 ```csharp
-// SharpInference.Video (Phase 9 — first cut lands with Cosmos-Predict V2W)
+// HartsyInference.Video (Phase 9 — first cut lands with Cosmos-Predict V2W)
 public interface IDiscreteVideoTokenizer : IDisposable
 {
     int CodebookSize { get; }
@@ -231,7 +231,7 @@ Interactive models distill the full 30-50 step flow-matching schedule down to 3�
 
 - **DMD (Distribution Matching Distillation)** — used by Matrix-Game 2/3. 3-4 step inference. Compatible with existing `FlowMatchEulerDiscreteScheduler` infrastructure but with a tighter shift schedule. Matrix-Game 2.0 uses `warp_denoising_step=true` with discrete step lists `[1000, 666, 333]` (3-step) or `[1000, 750, 500, 250]` (4-step).
 - **PCM (Phased Consistency Model) + CFG distillation** — used by Hunyuan-GameCraft's distilled variant. 8 inference steps at CFG=1.0 (10-20× speedup over 50-step base).
-- **FlowUniPC (UniPC adapted for flow-matching)** — used by Matrix-Game 3.0 (both base 50-step and distilled 3-step). **First UniPC variant in SharpInference's lineup** — not present today. The simplest correct port is the diffusers `FlowUniPCMultistepScheduler` algorithm with `shift=5.0` applied to the timestep grid SD3-style.
+- **FlowUniPC (UniPC adapted for flow-matching)** — used by Matrix-Game 3.0 (both base 50-step and distilled 3-step). **First UniPC variant in HartsyInference's lineup** — not present today. The simplest correct port is the diffusers `FlowUniPCMultistepScheduler` algorithm with `shift=5.0` applied to the timestep grid SD3-style.
 - **DDIM v-pred + sigmoid β-schedule** — used by Oasis-500m. 10 inference steps with **Diffusion Forcing** (context frames held at fixed noise level 14, target at full noise). This is genuinely different from flow-matching and gets its own scheduler class (`DdimVPredScheduler`).
 - **Consistency Models (CM) / Lightning** — used by some distilled Wan variants and SD-Lightning. 1-4 step direct denoise. Already partially supported by our `LcmScheduler` for SD/SDXL; needs porting to flow-matching for Wan-family.
 
@@ -254,10 +254,10 @@ Deferred until an AR world model is selected for implementation.
 
 ### 11. License-acceptance plumbing
 
-Some models we want to support (Hunyuan-GameCraft) have non-permissive licenses. SharpInference must **not** bundle these weights and must require explicit license acceptance at load time. Plan:
+Some models we want to support (Hunyuan-GameCraft) have non-permissive licenses. HartsyInference must **not** bundle these weights and must require explicit license acceptance at load time. Plan:
 
 ```csharp
-// SharpInference.ModelHandler/Licensing
+// HartsyInference.ModelHandler/Licensing
 public abstract record ModelLicense
 {
     public abstract string Name { get; }
@@ -319,7 +319,7 @@ step:
   7. yield frame
 ```
 
-### Session lifecycle (Phase 10 SharpInference.Interactive)
+### Session lifecycle (Phase 10 HartsyInference.Interactive)
 
 ```
 [App] ─create─> InteractiveSessionFactory.Create(model_loader, options)
@@ -369,29 +369,29 @@ The per-model research docs are the canonical references. This doc just defines 
 
 1. **`SubmitActionAsync` API shape under back-pressure** — block, throw, or drop oldest? Lean toward "block by default, configurable." Confirm with one application integration before locking the contract.
 2. **Per-session vs shared CUDA stream** — every interactive session wants its own stream for overlap. Does the existing `CudaBackend` (one stream per backend) hold up, or do we need per-session stream pools? Probably the latter; defer to first implementation.
-3. **License acceptance UX in `SharpInference.Server`** — the headless server can't pop an interactive dialog. Plan: license-acceptance must happen as an explicit `POST /v1/licenses/accept` before the first model load that needs it. The Server package owns this endpoint; ModelHandler enforces.
-4. **Whether `IInteractiveSession` belongs on `SharpInference.Video` rather than a new `SharpInference.Interactive`** — pro: avoids a new package. Con: `IInteractiveSession`'s threading model spills into every video pipeline that includes the type. Going with separate package; revisit if it adds friction.
+3. **License acceptance UX in `HartsyInference.Server`** — the headless server can't pop an interactive dialog. Plan: license-acceptance must happen as an explicit `POST /v1/licenses/accept` before the first model load that needs it. The Server package owns this endpoint; ModelHandler enforces.
+4. **Whether `IInteractiveSession` belongs on `HartsyInference.Video` rather than a new `HartsyInference.Interactive`** — pro: avoids a new package. Con: `IInteractiveSession`'s threading model spills into every video pipeline that includes the type. Going with separate package; revisit if it adds friction.
 5. **Action replay / record** — for testing and reproducibility, sessions should be able to record their action stream and replay it deterministically. Plan: stub `IActionLogger` interface in Phase 10, real implementation when a debugger or QA process actually needs it.
 
 ## Implementation Notes
 
 ### Phase 9 deliverables (Video) — shared infra
 
-- `SharpInference.Conditioning/ActionInput.cs`, `IActionEncoder.cs` — lives in Diffusion for cross-domain reuse.
-- `SharpInference.Diffusion/Utilities/DenoiseKvCache.cs` — first user is Lance video; reused everywhere.
-- `SharpInference.Diffusion/Schedulers/DistilledFlowMatchEuler.cs` — DMD / CM / Lightning support added to flow-match scheduler family.
-- `SharpInference.Video/Tokenizers/IDiscreteVideoTokenizer.cs` + first impl `CosmosDvTokenizer.cs` (with Cosmos-Predict V2W).
-- `SharpInference.Video/Streaming/VideoVaeStreamDecoder.cs` — secondary-stream per-frame VAE decode helper.
+- `HartsyInference.Conditioning/ActionInput.cs`, `IActionEncoder.cs` — lives in Diffusion for cross-domain reuse.
+- `HartsyInference.Diffusion/Utilities/DenoiseKvCache.cs` — first user is Lance video; reused everywhere.
+- `HartsyInference.Diffusion/Schedulers/DistilledFlowMatchEuler.cs` — DMD / CM / Lightning support added to flow-match scheduler family.
+- `HartsyInference.Video/Tokenizers/IDiscreteVideoTokenizer.cs` + first impl `CosmosDvTokenizer.cs` (with Cosmos-Predict V2W).
+- `HartsyInference.Video/Streaming/VideoVaeStreamDecoder.cs` — secondary-stream per-frame VAE decode helper.
 - `IBackend.PackedAttention` and `IBackend.Conv3D` — implemented across CPU / CUDA / Vulkan (Phase 9 § 3 of [PHASE_9_VIDEO.md](../Checklists/PHASE_9_VIDEO.md)).
-- `SharpInference.ModelHandler/Licensing/ModelLicense.cs`, `LicenseAcceptance.cs` — restricted-license plumbing for Hunyuan-GameCraft and similar models.
+- `HartsyInference.ModelHandler/Licensing/ModelLicense.cs`, `LicenseAcceptance.cs` — restricted-license plumbing for Hunyuan-GameCraft and similar models.
 
 ### Phase 10 deliverables (Interactive) — model pipelines
 
-- `SharpInference.Interactive/Sessions/IInteractiveSession.cs` and the default `BackgroundComputeSession.cs`.
-- `SharpInference.Interactive/Pipelines/MatrixGame2Pipeline.cs`, `MatrixGame3Pipeline.cs`, `OasisPipeline.cs`, `HunyuanGameCraftPipeline.cs`.
-- `SharpInference.Interactive/Models/Denoisers/DiTBlocks/MemoryAugmentedBlock.cs` — Matrix-Game 3 memory bank cross-attention.
-- `SharpInference.Interactive/ActionEncoders/KeyboardMouseEncoder.cs`, `CameraPoseEncoder.cs`, `MinecraftActionEncoder.cs`, `GamepadEncoder.cs` — per-model action encoder implementations.
-- `SharpInference.Interactive/Tokenizers/VqGanTokenizer.cs` — placeholder for future VQ-family world models (MineWorld, Solaris). Not needed for Oasis (continuous VAE).
+- `HartsyInference.Interactive/Sessions/IInteractiveSession.cs` and the default `BackgroundComputeSession.cs`.
+- `HartsyInference.Interactive/Pipelines/MatrixGame2Pipeline.cs`, `MatrixGame3Pipeline.cs`, `OasisPipeline.cs`, `HunyuanGameCraftPipeline.cs`.
+- `HartsyInference.Interactive/Models/Denoisers/DiTBlocks/MemoryAugmentedBlock.cs` — Matrix-Game 3 memory bank cross-attention.
+- `HartsyInference.Interactive/ActionEncoders/KeyboardMouseEncoder.cs`, `CameraPoseEncoder.cs`, `MinecraftActionEncoder.cs`, `GamepadEncoder.cs` — per-model action encoder implementations.
+- `HartsyInference.Interactive/Tokenizers/VqGanTokenizer.cs` — placeholder for future VQ-family world models (MineWorld, Solaris). Not needed for Oasis (continuous VAE).
 
 ### Deferred-foundation backlog (documented, not built v1)
 

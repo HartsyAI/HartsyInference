@@ -5,10 +5,10 @@ on:
   push:
     branches: [main]
     paths:
-      - 'src/SharpInference.Cuda/**'
-      - 'src/SharpInference.Diffusion/**'
-      - 'tests/SharpInference.Cuda.Tests/**'
-      - 'tests/SharpInference.Diffusion.Tests/**'
+      - 'src/HartsyInference.Cuda/**'
+      - 'src/HartsyInference.Diffusion/**'
+      - 'tests/HartsyInference.Cuda.Tests/**'
+      - 'tests/HartsyInference.Diffusion.Tests/**'
       - '.github/workflows/ci-gpu.yml'
 
 permissions:
@@ -21,7 +21,7 @@ permissions:
 #  - PTX kernels built once via `bash native/cuda/build.sh` (output goes to
 #    `native/cuda/build/`; persisted on the runner so this workflow doesn't
 #    rebuild them every push).
-#  - Optional: SHARPINFERENCE_MODELS_DIR environment variable pointing at a
+#  - Optional: HARTSYINFERENCE_MODELS_DIR environment variable pointing at a
 #    cached models directory. Tests skip cleanly when individual checkpoints
 #    are missing.
 
@@ -36,21 +36,21 @@ jobs:
 
       - name: Restore + build (Release)
         run: |
-          dotnet restore
-          dotnet build --configuration Release --no-restore
+          dotnet restore HartsyInference.sln
+          dotnet build HartsyInference.sln --configuration Release --no-restore
 
       - name: Quick GPU smoke (no checkpoints required)
         run: |
-          dotnet test tests/SharpInference.Cuda.Tests/SharpInference.Cuda.Tests.csproj \
+          dotnet test tests/HartsyInference.Cuda.Tests/HartsyInference.Cuda.Tests.csproj \
             --configuration Release --no-build \
             --logger "console;verbosity=normal"
 
       - name: Diff tests (skip cleanly when no checkpoint)
         env:
           # Models dir comes from runner-local config — never hard-coded in YAML
-          SHARPINFERENCE_MODELS_DIR: ${{ vars.SHARPINFERENCE_MODELS_DIR }}
+          HARTSYINFERENCE_MODELS_DIR: ${{ vars.HARTSYINFERENCE_MODELS_DIR }}
         run: |
-          dotnet test tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj \
+          dotnet test tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj \
             --configuration Release --no-build \
             --filter "FullyQualifiedName~Diff|FullyQualifiedName~Ssim|FullyQualifiedName~Smoke" \
             --logger "console;verbosity=normal"
@@ -67,14 +67,14 @@ jobs:
 
       - name: Build (Release)
         run: |
-          dotnet restore
-          dotnet build --configuration Release --no-restore
+          dotnet restore HartsyInference.sln
+          dotnet build HartsyInference.sln --configuration Release --no-restore
 
       - name: End-to-end generation tests
         env:
-          SHARPINFERENCE_MODELS_DIR: ${{ vars.SHARPINFERENCE_MODELS_DIR }}
+          HARTSYINFERENCE_MODELS_DIR: ${{ vars.HARTSYINFERENCE_MODELS_DIR }}
         run: |
-          dotnet test tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj \
+          dotnet test tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj \
             --configuration Release --no-build \
             --filter "FullyQualifiedName~Generation" \
             --logger "console;verbosity=normal"

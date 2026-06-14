@@ -3,9 +3,9 @@
 
 ## Summary
 
-dotLLM ([github.com/kkokosa/dotLLM](https://github.com/kkokosa/dotLLM)) is a ground-up, pure C#/.NET 10 LLM inference engine created by Konrad Kokosa. It supports Llama, Mistral, Phi, Qwen, and DeepSeek architectures with both CPU (AVX2/AVX-512) and CUDA (PTX + cuBLAS) backends. dotLLM proves that production AI inference can be done entirely in managed code — no Python, no C++ wrappers, no ONNX Runtime — while achieving ~98–100% of native CUDA performance. SharpInference is designed to follow dotLLM's proven patterns and extend them to non-LLM inference modalities (diffusion, audio, vision).
+dotLLM ([github.com/kkokosa/dotLLM](https://github.com/kkokosa/dotLLM)) is a ground-up, pure C#/.NET 10 LLM inference engine created by Konrad Kokosa. It supports Llama, Mistral, Phi, Qwen, and DeepSeek architectures with both CPU (AVX2/AVX-512) and CUDA (PTX + cuBLAS) backends. dotLLM proves that production AI inference can be done entirely in managed code — no Python, no C++ wrappers, no ONNX Runtime — while achieving ~98–100% of native CUDA performance. HartsyInference is designed to follow dotLLM's proven patterns and extend them to non-LLM inference modalities (diffusion, audio, vision).
 
-This document catalogs dotLLM's architecture, implementation patterns, and design decisions so that SharpInference can adopt the same approaches consistently. Where dotLLM has solved a problem (e.g., PTX loading, tensor memory, SIMD dispatch), SharpInference should follow the same solution rather than inventing a new one.
+This document catalogs dotLLM's architecture, implementation patterns, and design decisions so that HartsyInference can adopt the same approaches consistently. Where dotLLM has solved a problem (e.g., PTX loading, tensor memory, SIMD dispatch), HartsyInference should follow the same solution rather than inventing a new one.
 
 Sources: [dotLLM GitHub repository](https://github.com/kkokosa/dotLLM), [Konrad Kokosa's .NET blog](https://prodotnetmemory.com/), [dotLLM README](https://github.com/kkokosa/dotLLM/blob/main/README.md)
 
@@ -36,7 +36,7 @@ DotLLM.Telemetry       ← Performance counters
 
 Source: [dotLLM solution structure](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Mirror this exact layering: `SharpInference.Core` → `SharpInference.Cpu`/`SharpInference.Cuda` → `SharpInference.Diffusion`/`Audio`/`Vision` → `SharpInference.Server`.
+**HartsyInference adoption:** Mirror this exact layering: `HartsyInference.Core` → `HartsyInference.Cpu`/`HartsyInference.Cuda` → `HartsyInference.Diffusion`/`Audio`/`Vision` → `HartsyInference.Server`.
 
 ### Dual Tensor Types: ITensor + TensorRef
 
@@ -77,7 +77,7 @@ public readonly record struct TensorRef
 
 Source: [dotLLM tensor implementation](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Implement the same dual-type pattern. `Tensor` class (or `ITensor`) for lifecycle, `TensorRef` readonly record struct for all kernel signatures and compute paths.
+**HartsyInference adoption:** Implement the same dual-type pattern. `Tensor` class (or `ITensor`) for lifecycle, `TensorRef` readonly record struct for all kernel signatures and compute paths.
 
 ### DType as Readonly Record Struct
 
@@ -106,7 +106,7 @@ public readonly record struct DType(
 
 Source: [dotLLM DType definitions](https://github.com/kkokosa/dotLLM), [GGML quantization formats](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
 
-**SharpInference adoption:** Use the same `DType` readonly record struct pattern with identical field semantics. Add additional dtypes as needed for vision/audio (e.g., INT8, UINT8 for image pixels).
+**HartsyInference adoption:** Use the same `DType` readonly record struct pattern with identical field semantics. Add additional dtypes as needed for vision/audio (e.g., INT8, UINT8 for image pixels).
 
 ### Unmanaged Memory Management
 
@@ -144,7 +144,7 @@ public void Dispose()
 
 Source: [dotLLM UnmanagedTensor](https://github.com/kkokosa/dotLLM), [NativeMemory docs](https://learn.microsoft.com/en-us/dotnet/api/system.runtime.interopservices.nativememory)
 
-**SharpInference adoption:** Same 64-byte aligned allocation, same `Interlocked.Exchange` disposal pattern, same finalizer safety net. Use `ArrayPool<T>` only for non-tensor temporaries.
+**HartsyInference adoption:** Same 64-byte aligned allocation, same `Interlocked.Exchange` disposal pattern, same finalizer safety net. Use `ArrayPool<T>` only for non-tensor temporaries.
 
 ### CUDA Integration via P/Invoke
 
@@ -192,7 +192,7 @@ Registered via `NativeLibrary.SetDllImportResolver()` at startup. Called from `C
 
 Source: [dotLLM CudaDriverApi.cs](https://github.com/kkokosa/dotLLM), [CUDA Driver API docs](https://docs.nvidia.com/cuda/cuda-driver-api/)
 
-**SharpInference adoption:** Same P/Invoke surface, same `CudaLibraryResolver`, same error-checking pattern. Add additional Driver API functions as needed for SharpInference-specific operations.
+**HartsyInference adoption:** Same P/Invoke surface, same `CudaLibraryResolver`, same error-checking pattern. Add additional Driver API functions as needed for HartsyInference-specific operations.
 
 ### PTX Kernel Management
 
@@ -238,7 +238,7 @@ void LaunchRmsNorm(nint output, nint input, nint weights, int n, float eps)
 
 Source: [dotLLM CUDA kernels](https://github.com/kkokosa/dotLLM), [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/)
 
-**SharpInference adoption:** Same PTX loading, caching, and launch patterns. SharpInference kernels cover a different domain (Conv2D, GroupNorm, SDPA for spatial attention, upsampling, FFT/STFT) but use identical infrastructure.
+**HartsyInference adoption:** Same PTX loading, caching, and launch patterns. HartsyInference kernels cover a different domain (Conv2D, GroupNorm, SDPA for spatial attention, upsampling, FFT/STFT) but use identical infrastructure.
 
 ### cuBLAS Integration
 
@@ -271,7 +271,7 @@ internal static partial CublasStatus cublasGemmEx(
 
 Source: [dotLLM CublasApi.cs](https://github.com/kkokosa/dotLLM), [cuBLAS docs](https://docs.nvidia.com/cuda/cublas/)
 
-**SharpInference adoption:** Same cuBLAS binding strategy for FP16/FP32 GEMM in convolution (im2col + GEMM) and attention operations.
+**HartsyInference adoption:** Same cuBLAS binding strategy for FP16/FP32 GEMM in convolution (im2col + GEMM) and attention operations.
 
 ### Memory-Mapped Model Loading (GGUF)
 
@@ -295,7 +295,7 @@ accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref basePtr);
 
 Source: [dotLLM GGUF loader](https://github.com/kkokosa/dotLLM), [GGUF spec](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
 
-**SharpInference adoption:** Same mmap loading for both SafeTensors and GGUF. Clean-room GGUF implementation to maintain licensing independence from both dotLLM (GPLv3) and llama.cpp.
+**HartsyInference adoption:** Same mmap loading for both SafeTensors and GGUF. Clean-room GGUF implementation to maintain licensing independence from both dotLLM (GPLv3) and llama.cpp.
 
 ### IBackend Abstraction
 
@@ -322,7 +322,7 @@ public interface IBackend : IDisposable
 
 Source: [dotLLM IBackend](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Same `IBackend` as device/memory manager. Kernel dispatch happens in model-specific code or a separate layer, not through `IBackend`. This avoids a bloated interface that must be implemented for every backend.
+**HartsyInference adoption:** Same `IBackend` as device/memory manager. Kernel dispatch happens in model-specific code or a separate layer, not through `IBackend`. This avoids a bloated interface that must be implemented for every backend.
 
 ### SIMD Kernel Dispatch
 
@@ -351,7 +351,7 @@ else
 
 Source: [dotLLM CPU kernels](https://github.com/kkokosa/dotLLM), [.NET SIMD docs](https://learn.microsoft.com/en-us/dotnet/standard/simd)
 
-**SharpInference adoption:** Same dispatch hierarchy. SharpInference's CPU kernels (Conv2D, GroupNorm, FFT, mel spectrogram) follow identical patterns.
+**HartsyInference adoption:** Same dispatch hierarchy. HartsyInference's CPU kernels (Conv2D, GroupNorm, FFT, mel spectrogram) follow identical patterns.
 
 ### R4 Weight Repacking for SIMD
 
@@ -378,7 +378,7 @@ This ensures each cache line read provides data for 4 output elements, maximizin
 
 Source: [dotLLM weight repacking](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Apply same repacking concept for quantized vision/audio model weights where applicable.
+**HartsyInference adoption:** Apply same repacking concept for quantized vision/audio model weights where applicable.
 
 ### Fused Kernels
 
@@ -401,7 +401,7 @@ dotLLM fuses operations to minimize memory bandwidth:
 
 Source: [dotLLM fused kernels](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Apply fusion philosophy throughout. Key candidates: GroupNorm+SiLU fusion in UNet blocks, Conv2D+bias+activation fusion, attention score computation.
+**HartsyInference adoption:** Apply fusion philosophy throughout. Key candidates: GroupNorm+SiLU fusion in UNet blocks, Conv2D+bias+activation fusion, attention score computation.
 
 ### ComputeThreadPool with Adaptive Dispatch
 
@@ -421,7 +421,7 @@ dotLLM uses a custom thread pool (not `ThreadPool` or `Task.Run`) with two dispa
 
 Source: [dotLLM ComputeThreadPool](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Implement similar adaptive thread pool. For diffusion: SpinWait during denoising steps (latency between steps matters for streaming), EventBased during model loading and preprocessing.
+**HartsyInference adoption:** Implement similar adaptive thread pool. For diffusion: SpinWait during denoising steps (latency between steps matters for streaming), EventBased during model loading and preprocessing.
 
 ### Error Handling Patterns
 
@@ -450,7 +450,7 @@ catch (Exception ex)
 
 Source: [dotLLM error handling](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Same patterns. Custom exceptions (`SharpInferenceException`, `OutOfVramException`, `UnsupportedModelException`). `Environment.FailFast` for unrecoverable compute thread errors.
+**HartsyInference adoption:** Same patterns. Custom exceptions (`HartsyInferenceException`, `OutOfVramException`, `UnsupportedModelException`). `Environment.FailFast` for unrecoverable compute thread errors.
 
 ### Streaming via IAsyncEnumerable
 
@@ -477,7 +477,7 @@ public async IAsyncEnumerable<GenerationToken> GenerateAsync(
 
 Source: [dotLLM streaming](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Same pattern for diffusion progress streaming: `IAsyncEnumerable<GenerationProgress>` where `GenerationProgress` is a readonly record struct carrying step number, preview image (optional), and timing info.
+**HartsyInference adoption:** Same pattern for diffusion progress streaming: `IAsyncEnumerable<GenerationProgress>` where `GenerationProgress` is a readonly record struct carrying step number, preview image (optional), and timing info.
 
 ### ASP.NET Server Architecture
 
@@ -505,7 +505,7 @@ app.MapPost("/v1/chat/completions", async (ChatCompletionRequest request, Server
 
 Source: [dotLLM server](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Same Minimal API architecture. SharpInference serves `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/audio/speech`, and `/v1/audio/translations`. Shared `ServerState` pattern, source-generated JSON, per-endpoint files.
+**HartsyInference adoption:** Same Minimal API architecture. HartsyInference serves `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/audio/speech`, and `/v1/audio/translations`. Shared `ServerState` pattern, source-generated JSON, per-endpoint files.
 
 ### Testing Strategy
 
@@ -538,7 +538,7 @@ Models are downloaded once and cached. Integration tests are tagged so they can 
 
 Source: [dotLLM tests](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Same three-tier testing: SIMD-vs-scalar unit tests, known-value tests against Python outputs, integration tests with lazy model download.
+**HartsyInference adoption:** Same three-tier testing: SIMD-vs-scalar unit tests, known-value tests against Python outputs, integration tests with lazy model download.
 
 ### Performance Attributes and Code Style
 
@@ -562,12 +562,12 @@ dotLLM uses specific C# attributes consistently:
 
 Source: [dotLLM code conventions](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Follow all of these conventions identically.
+**HartsyInference adoption:** Follow all of these conventions identically.
 
 ### Configuration and Model Discovery
 
 **Model registry pattern:**
-- Models discovered from a configurable local directory (default: `~/.cache/sharpinference/models/`)
+- Models discovered from a configurable local directory (default: `~/.cache/hartsyinference/models/`)
 - HuggingFace download support for automatic model fetching
 - Architecture key in model metadata drives automatic pipeline selection
 - Model hot-swap supported without process restart
@@ -579,7 +579,7 @@ Source: [dotLLM code conventions](https://github.com/kkokosa/dotLLM)
 
 Source: [dotLLM configuration](https://github.com/kkokosa/dotLLM)
 
-**SharpInference adoption:** Same model discovery patterns. Shared model cache directory when both dotLLM and SharpInference are used together.
+**HartsyInference adoption:** Same model discovery patterns. Shared model cache directory when both dotLLM and HartsyInference are used together.
 
 ## Key Patterns Summary
 
@@ -600,15 +600,15 @@ Source: [dotLLM configuration](https://github.com/kkokosa/dotLLM)
 | `Environment.FailFast` | Unrecoverable compute thread errors | No silent corruption |
 | Source-generated JSON | `[JsonSerializable]` contexts | No reflection in server |
 
-## Architectural Lessons for SharpInference
+## Architectural Lessons for HartsyInference
 
 1. **Don't abstract prematurely.** dotLLM's CPU and CUDA attention implementations are intentionally *not* behind a unified interface — the optimization strategies are too different. Follow this principle: `IBackend` abstracts the operation, but backend implementations can be radically different internally.
 
-2. **Memory bandwidth is the bottleneck.** Most inference kernels are memory-bandwidth-bound, not compute-bound. Fused kernels, activation quantization, and cache-tiled loops all target bandwidth reduction. Apply this lens to every SharpInference kernel.
+2. **Memory bandwidth is the bottleneck.** Most inference kernels are memory-bandwidth-bound, not compute-bound. Fused kernels, activation quantization, and cache-tiled loops all target bandwidth reduction. Apply this lens to every HartsyInference kernel.
 
-3. **Quantization on the small side.** dotLLM quantizes activations (small) rather than dequantizing weights (large) for GEMV. Look for analogous opportunities in SharpInference — always move the smaller tensor.
+3. **Quantization on the small side.** dotLLM quantizes activations (small) rather than dequantizing weights (large) for GEMV. Look for analogous opportunities in HartsyInference — always move the smaller tensor.
 
-4. **Load-time preprocessing pays off.** R4 repacking costs milliseconds at load time but saves microseconds on every inference. SharpInference should similarly preprocess weights at load time for optimal runtime access patterns.
+4. **Load-time preprocessing pays off.** R4 repacking costs milliseconds at load time but saves microseconds on every inference. HartsyInference should similarly preprocess weights at load time for optimal runtime access patterns.
 
 5. **Process-lifetime caching.** PTX modules, function handles, cuBLAS handles — created once and cached forever. Avoid repeated initialization in hot paths.
 
@@ -637,7 +637,7 @@ public interface IBackend : IDisposable
 
 There are no `MatMul`, `RmsNorm`, `Softmax`, etc. methods on `IBackend`. Those are called directly as static methods in the kernel classes (`MatMul.GemvQ8_0(...)`, `RmsNorm.Execute(...)`, etc.) from `TransformerModel.Forward()`.
 
-**SharpInference implication:** Our `IBackend` should similarly be about memory and device management, NOT op dispatch. Kernel dispatch happens in model-specific code or in a separate op dispatcher.
+**HartsyInference implication:** Our `IBackend` should similarly be about memory and device management, NOT op dispatch. Kernel dispatch happens in model-specific code or in a separate op dispatcher.
 
 ### Exact ITensor Interface
 

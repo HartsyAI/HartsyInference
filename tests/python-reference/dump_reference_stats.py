@@ -1,6 +1,6 @@
 """
 Dumps intermediate tensor statistics from a diffusers SD1.5 pipeline run.
-Use these as reference values to compare against SharpInference C# output.
+Use these as reference values to compare against HartsyInference C# output.
 
 Usage: python dump_reference_stats.py <model_dir> [output_file]
 Requires: pip install diffusers transformers torch safetensors
@@ -30,7 +30,7 @@ def tensor_stats(name: str, t: torch.Tensor) -> dict:
         }
 
 def main():
-    model_dir = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\test-models\sd15"
+    model_dir = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\AI Overlord\Desktop\Projects\HartsyInference\tests\test-models\sd15"
     output_file = sys.argv[2] if len(sys.argv) > 2 else "reference_stats.json"
 
     from diffusers import UNet2DConditionModel, AutoencoderKL, EulerDiscreteScheduler

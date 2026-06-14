@@ -1,6 +1,6 @@
 # convert-safetensors-to-gguf
 
-CLI utility for converting any SharpInference-compatible safetensors checkpoint to a quantized GGUF file.
+CLI utility for converting any HartsyInference-compatible safetensors checkpoint to a quantized GGUF file.
 
 ## Quick reference
 

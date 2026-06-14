@@ -1,13 +1,13 @@
 # API Agent
 
-> Build the SharpInference.Server REST API — OpenAI-compatible endpoints, SSE streaming, model management, request queue, auth, and health probes.
+> Build the HartsyInference.Server REST API — OpenAI-compatible endpoints, SSE streaming, model management, request queue, auth, and health probes.
 
 ## Extra Reading
 - `docs/Design/IMPLEMENTATION_DETAILS.md` (server section), `docs/Design/FILE_STRUCTURE.md`
 - `docs/Research/OPENAI_IMAGE_API.md` — exact schemas
 - `docs/Research/DOTLLM_ARCHITECTURE.md` — dotLLM patterns (ServerState, source-gen JSON, SSE)
 - `docs/Checklists/PHASE_7_SERVER.md`
-- Existing pipeline code in `src/SharpInference.Diffusion/` and `src/SharpInference.Audio/`
+- Existing pipeline code in `src/HartsyInference.Diffusion/` and `src/HartsyInference.Audio/`
 
 ## Workflow
 1. Read OpenAI spec → design Minimal API endpoints (one file per endpoint)
@@ -23,13 +23,13 @@
 
 **Minimal API Pattern:**
 ```csharp
-public static class SharpInferenceServiceExtensions
+public static class HartsyInferenceServiceExtensions
 {
-    public static IServiceCollection AddSharpInference(this IServiceCollection services, ServerState state)
+    public static IServiceCollection AddHartsyInference(this IServiceCollection services, ServerState state)
     {
         services.AddSingleton(state);
         services.ConfigureHttpJsonOptions(options =>
-            options.SerializerOptions.TypeInfoResolverChain.Insert(0, SharpInferenceJsonContext.Default));
+            options.SerializerOptions.TypeInfoResolverChain.Insert(0, HartsyInferenceJsonContext.Default));
         return services;
     }
 }

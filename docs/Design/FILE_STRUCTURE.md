@@ -5,18 +5,18 @@
 ## Full Project Layout
 
 ```
-SharpInference/
-├── SharpInference.slnx / Directory.Build.props / Directory.Packages.props
+HartsyInference/
+├── HartsyInference.slnx / Directory.Build.props / Directory.Packages.props
 ├── CLAUDE.md / GEMINI.md / README.md / LICENSE / CONTRIBUTING.md
 ├── src/
-│   ├── SharpInference.Core / ModelHandler / Tokenizers / Cpu / Cuda / Vulkan
-│   ├── SharpInference.Diffusion / Audio / Vision / Video / Interactive / Server
+│   ├── HartsyInference.Core / ModelHandler / Tokenizers / Cpu / Cuda / Vulkan
+│   ├── HartsyInference.Diffusion / Audio / Vision / Video / Interactive / Server
 ├── tests/ / samples/ / benchmarks/ / docs/ / native/
 ```
 
 ---
 
-## src/SharpInference.Core/
+## src/HartsyInference.Core/
 
 | File | Description |
 |---|---|
@@ -29,16 +29,16 @@ SharpInference/
 | `Backends/IBackend.cs` | Full backend interface |
 | `Backends/BackendCapabilities.cs` | Backend capability flags |
 | `Backends/DeviceKind.cs` | Cpu / Cuda / Vulkan enum |
-| `Pipelines/` | `IAudioPipeline`, `IVisionPipeline`, `IPipelineRequest` (aspirational scaffolds for not-yet-built modalities). Diffusion has its own base class in `SharpInference.Diffusion` — see `Pipelines/DiffusionPipelineBase.cs` there. |
+| `Pipelines/` | `IAudioPipeline`, `IVisionPipeline`, `IPipelineRequest` (aspirational scaffolds for not-yet-built modalities). Diffusion has its own base class in `HartsyInference.Diffusion` — see `Pipelines/DiffusionPipelineBase.cs` there. |
 | `Schedulers/IScheduler.cs` | `SetTimesteps`, `Step`, `AddNoise` |
 | `Models/IModel.cs` / `ModelConfig.cs` / `ModelFormat.cs` | Load/Forward/GetConfig, architecture params, format enum |
 | `Memory/NativeBuffer.cs` / `MmapHandle.cs` | `NativeMemory.AlignedAlloc` wrapper, `MemoryMappedFile` lifetime manager |
 | `Logging/Logs.cs` | Static Logs class |
-| `Exceptions/` | `SharpInferenceException`, `OutOfVramException`, `UnsupportedModelException` |
+| `Exceptions/` | `HartsyInferenceException`, `OutOfVramException`, `UnsupportedModelException` |
 
 ---
 
-## src/SharpInference.ModelHandler/
+## src/HartsyInference.ModelHandler/
 
 | File | Description |
 |---|---|
@@ -49,7 +49,7 @@ SharpInference/
 | `Gguf/GgufDequantizer.cs` | Dequantize Q4_0/Q8_0/Q4_K_M to F16/F32 |
 | `Gguf/GgufMetadata.cs` | Typed metadata key-value access |
 | `Registry/ModelRegistry.cs` | In-memory model cache |
-| `Registry/ModelCacheStore.cs` | Disk cache at `~/.sharpinference/models/` |
+| `Registry/ModelCacheStore.cs` | Disk cache at `~/.hartsyinference/models/` |
 | `Registry/ModelInfo.cs` | Model metadata |
 | `HuggingFace/HuggingFaceClient.cs` | Search, pull, resolve GGUF variant |
 | `CheckpointConverters/` | SD1.5 / SDXL / Flux / SD3 `.ckpt` → diffusers format |
@@ -58,7 +58,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Tokenizers/
+## src/HartsyInference.Tokenizers/
 
 | File | Description |
 |---|---|
@@ -69,7 +69,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Cpu/
+## src/HartsyInference.Cpu/
 
 | File | Description |
 |---|---|
@@ -88,7 +88,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Cuda/
+## src/HartsyInference.Cuda/
 
 | File | Description |
 |---|---|
@@ -107,7 +107,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Vulkan/
+## src/HartsyInference.Vulkan/
 
 | File | Description |
 |---|---|
@@ -124,7 +124,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Diffusion/
+## src/HartsyInference.Diffusion/
 
 | File | Description |
 |---|---|
@@ -146,7 +146,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Audio/
+## src/HartsyInference.Audio/
 
 | File | Description |
 |---|---|
@@ -157,7 +157,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Vision/
+## src/HartsyInference.Vision/
 
 | File | Description |
 |---|---|
@@ -169,7 +169,7 @@ SharpInference/
 
 ---
 
-## src/SharpInference.Interactive/  (Phase 10 — world models)
+## src/HartsyInference.Interactive/  (Phase 10 — world models)
 
 | File | Description |
 |---|---|
@@ -190,11 +190,11 @@ SharpInference/
 | `Pipelines/OasisPipeline.cs` | Decart/Etched Oasis-500m AR frame-by-frame Minecraft world model |
 | `Pipelines/HunyuanGameCraftPipeline.cs` | Tencent GameCraft pipeline — license-acceptance-gated at construction |
 
-## src/SharpInference.Server/
+## src/HartsyInference.Server/
 
 | File | Description |
 |---|---|
-| `Setup/SharpInferenceServiceExtensions.cs` / `SharpInferenceServerOptions.cs` | DI registration, server options |
+| `Setup/HartsyInferenceServiceExtensions.cs` / `HartsyInferenceServerOptions.cs` | DI registration, server options |
 | `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement, **InteractiveSessionEndpoint** (WebSocket), **LicenseAcceptanceEndpoint** (`POST /v1/licenses/accept`) |
 | `Streaming/SseProgressStream.cs` / `AudioChunkStream.cs` / `InteractiveFrameStream.cs` | SSE progress, audio chunk streaming, interactive frame serialization (PNG / JPEG / raw RGB) |
 | `Queue/InferenceQueue.cs` / `InferenceQueueEntry.cs` | FIFO inference queue |
@@ -206,12 +206,12 @@ SharpInference/
 
 | Project | Tests |
 |---|---|
-| `SharpInference.Core.Tests` | TensorTests, TensorShapeTests, NativeBufferTests |
-| `SharpInference.ModelHandler.Tests` | SafeTensorsLoaderTests, GgufLoaderTests |
-| `SharpInference.Cpu.Tests` | MatMulKernelTests, Conv2DKernelTests, NormKernelTests, AttentionKernelTests |
-| `SharpInference.Diffusion.Tests` | SchedulerTests, ClipTokenizerTests, PipelineIntegrationTests |
-| `SharpInference.Audio.Tests` | StftTests, MelSpectrogramTests, WhisperIntegrationTests |
-| `SharpInference.Server.Tests` | ImageApiTests |
+| `HartsyInference.Core.Tests` | TensorTests, TensorShapeTests, NativeBufferTests |
+| `HartsyInference.ModelHandler.Tests` | SafeTensorsLoaderTests, GgufLoaderTests |
+| `HartsyInference.Cpu.Tests` | MatMulKernelTests, Conv2DKernelTests, NormKernelTests, AttentionKernelTests |
+| `HartsyInference.Diffusion.Tests` | SchedulerTests, ClipTokenizerTests, PipelineIntegrationTests |
+| `HartsyInference.Audio.Tests` | StftTests, MelSpectrogramTests, WhisperIntegrationTests |
+| `HartsyInference.Server.Tests` | ImageApiTests |
 
 ---
 
@@ -230,7 +230,7 @@ SharpInference/
 
 | File | Description |
 |---|---|
-| `SharpInference.Benchmarks/KernelBenchmarks.cs` / `PipelineBenchmarks.cs` / `AudioBenchmarks.cs` | BenchmarkDotNet suites |
+| `HartsyInference.Benchmarks/KernelBenchmarks.cs` / `PipelineBenchmarks.cs` / `AudioBenchmarks.cs` | BenchmarkDotNet suites |
 | `scripts/bench_compare.py` / `bench_trend.py` | Comparison and trend analysis scripts |
 
 ---

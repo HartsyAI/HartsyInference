@@ -1,4 +1,4 @@
-"""Shared utilities for the SharpInference PyTorch baseline benchmarks.
+"""Shared utilities for the HartsyInference PyTorch baseline benchmarks.
 
 This module is intentionally small and dependency-light. It provides:
 

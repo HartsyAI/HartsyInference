@@ -69,7 +69,7 @@ Three states per type:
 
 **Why are the IQ-types codec-pending?** The i-quant family uses 256-byte / 512-byte importance-weighted lookup tables baked into ggml. Reading them requires embedding those tables verbatim. Low-priority for diffusion since they're rare for image models; common only for LLM Q1_S / IQ2_* extreme-compression variants.
 
-The codecs not yet implemented all hit "codec not registered" in the registry — explicit error, not silent corruption. Adding one is mechanical: drop a `Codec_<Type>.cs` in `src/SharpInference.ModelHandler/Gguf/Codecs/` and register it in `GgufCodecRegistry.BuildRegistry`.
+The codecs not yet implemented all hit "codec not registered" in the registry — explicit error, not silent corruption. Adding one is mechanical: drop a `Codec_<Type>.cs` in `src/HartsyInference.ModelHandler/Gguf/Codecs/` and register it in `GgufCodecRegistry.BuildRegistry`.
 
 ### Architecture coverage (key mappers)
 
@@ -97,25 +97,25 @@ All mappers are pass-through today because city96 / unsloth / ComfyUI GGUFs ship
 
 ## Phase C — Safetensors → GGUF writer (DONE)
 
-Offline utility that quantizes a SharpInference model to a GGUF file. Mirrors llama.cpp's `quantize` tool but operates on safetensors input.
+Offline utility that quantizes a HartsyInference model to a GGUF file. Mirrors llama.cpp's `quantize` tool but operates on safetensors input.
 
 ### Files shipped (~900 lines)
 
-- [`GgufWriter.cs`](../../src/SharpInference.ModelHandler/Gguf/GgufWriter.cs) — header + descriptor + tensor data emission. Inverse of `GgufLoader`. Two-pass design: register tensors → `Flush()` writes header + descriptor table + zero-padded data section. Includes inverse `MapDTypeToGgufId` covering every registered DType.
-- [`GgufQuantizer.cs`](../../src/SharpInference.ModelHandler/Gguf/GgufQuantizer.cs) — orchestrator. `ConvertSafetensorsToGguf(input, output, policy, architecture)` for the file-to-file path; `ConvertDictionaryToGguf` for the dict-to-file path. Returns `GgufQuantizationReport` with per-DType counts.
-- [`GgufQuantPolicies.cs`](../../src/SharpInference.ModelHandler/Gguf/GgufQuantPolicies.cs) — predefined mix policies that mirror llama.cpp's `LLAMA_FTYPE_*`:
+- [`GgufWriter.cs`](../../src/HartsyInference.ModelHandler/Gguf/GgufWriter.cs) — header + descriptor + tensor data emission. Inverse of `GgufLoader`. Two-pass design: register tensors → `Flush()` writes header + descriptor table + zero-padded data section. Includes inverse `MapDTypeToGgufId` covering every registered DType.
+- [`GgufQuantizer.cs`](../../src/HartsyInference.ModelHandler/Gguf/GgufQuantizer.cs) — orchestrator. `ConvertSafetensorsToGguf(input, output, policy, architecture)` for the file-to-file path; `ConvertDictionaryToGguf` for the dict-to-file path. Returns `GgufQuantizationReport` with per-DType counts.
+- [`GgufQuantPolicies.cs`](../../src/HartsyInference.ModelHandler/Gguf/GgufQuantPolicies.cs) — predefined mix policies that mirror llama.cpp's `LLAMA_FTYPE_*`:
   - `Q8_0` — uniform Q8_0 backbone, F16 norms/biases (~50% of F16 size)
   - `Q4_K_S` — uniform Q4_K, F16 norms (~25% of F16, fastest, lowest fidelity)
   - `Q4_K_M` — Q4_K backbone + Q6_K for V/output projections (~30% of F16, popular default)
   - `Q5_K_M` — Q5_K backbone + Q6_K for V/output (~37% of F16)
   - `Q6_K` — uniform Q6_K, F16 norms (~44% of F16, near-lossless)
 - Reverse codec direction (`QuantizeFromF32`) implemented for **Q8_0, Q4_K, Q5_K, Q6_K** — covers every dtype the policies use. Uses simplified `MakeQkx2Quants` (initial pass, no iterative refinement; ~5% PPL gap to canonical ggml output).
-- Shared K-quant helpers in [`Codecs/QkxQuantizer.cs`](../../src/SharpInference.ModelHandler/Gguf/Codecs/QkxQuantizer.cs): `MakeQkx2Quants`, `MakeSymmetricScale`, `PackScaleMinK4` (inverse of `GetScaleMinK4`).
+- Shared K-quant helpers in [`Codecs/QkxQuantizer.cs`](../../src/HartsyInference.ModelHandler/Gguf/Codecs/QkxQuantizer.cs): `MakeQkx2Quants`, `MakeSymmetricScale`, `PackScaleMinK4` (inverse of `GetScaleMinK4`).
 - CLI: [`samples/ConvertSafetensorsToGguf/Program.cs`](../../samples/ConvertSafetensorsToGguf/Program.cs). Usage: `convert-safetensors-to-gguf input.safetensors output.gguf q4_k_m flux`.
-- Round-trip tests in [`GgufQuantizerTests.cs`](../../tests/SharpInference.ModelHandler.Tests/GgufQuantizerTests.cs) — 5 tests covering Q8_0 / Q4_K_M / Q5_K_M end-to-end (dict → GGUF → loader → dequantize) with RMSE budgets verified against llama.cpp's documented quality deltas.
+- Round-trip tests in [`GgufQuantizerTests.cs`](../../tests/HartsyInference.ModelHandler.Tests/GgufQuantizerTests.cs) — 5 tests covering Q8_0 / Q4_K_M / Q5_K_M end-to-end (dict → GGUF → loader → dequantize) with RMSE budgets verified against llama.cpp's documented quality deltas.
 
 ### Bug fix surfaced during Phase C
-The Q6_K dequantizer had a hardcoded scale-index pattern (used `scH[0/2/4/6]` regardless of element position) that masked itself in the all-uniform-scale unit test. Round-trip testing through the new quantize path uncovered it: ggml's canonical `dequantize_row_q6_K` uses `is = l/16` so scale indices alternate between `scH[0..6]` and `scH[1..7]` per 16-element half. Now fixed in [`Codec_Q6_K.cs`](../../src/SharpInference.ModelHandler/Gguf/Codecs/Codec_Q6_K.cs).
+The Q6_K dequantizer had a hardcoded scale-index pattern (used `scH[0/2/4/6]` regardless of element position) that masked itself in the all-uniform-scale unit test. Round-trip testing through the new quantize path uncovered it: ggml's canonical `dequantize_row_q6_K` uses `is = l/16` so scale indices alternate between `scH[0..6]` and `scH[1..7]` per 16-element half. Now fixed in [`Codec_Q6_K.cs`](../../src/HartsyInference.ModelHandler/Gguf/Codecs/Codec_Q6_K.cs).
 
 ### Quality vs canonical ggml
 Round-trip RMSE on uniform-noise data:
@@ -135,17 +135,17 @@ GPU-side dequant for the four most-shipped GGUF quant types. CUDA C source compi
 - [`native/cuda/dequant/dequant_q4_k_to_f16.cu`](../../native/cuda/dequant/dequant_q4_k_to_f16.cu) — 256-element super-block, 256 threads, on-device `get_scale_min_k4` device helper.
 - [`native/cuda/dequant/dequant_q5_k_to_f16.cu`](../../native/cuda/dequant/dequant_q5_k_to_f16.cu) — same shape as Q4_K plus high-bit bookkeeping.
 - [`native/cuda/dequant/dequant_q6_k_to_f16.cu`](../../native/cuda/dequant/dequant_q6_k_to_f16.cu) — 128 threads × 4 elements per thread (matches the canonical ggml unrolled access pattern).
-- [`native/cuda/dequant/build.sh`](../../native/cuda/dequant/build.sh) — `nvcc -ptx -arch=sm_70` builds + installs into `src/SharpInference.Cuda/Ptx/`. SM 7.0 covers Volta and later (RTX 20-series onward).
-- Compiled PTX: `dequant_q8_0_to_f16.ptx`, `dequant_q4_k_to_f16.ptx`, `dequant_q5_k_to_f16.ptx`, `dequant_q6_k_to_f16.ptx` in [`src/SharpInference.Cuda/Ptx/`](../../src/SharpInference.Cuda/Ptx/).
+- [`native/cuda/dequant/build.sh`](../../native/cuda/dequant/build.sh) — `nvcc -ptx -arch=sm_70` builds + installs into `src/HartsyInference.Cuda/Ptx/`. SM 7.0 covers Volta and later (RTX 20-series onward).
+- Compiled PTX: `dequant_q8_0_to_f16.ptx`, `dequant_q4_k_to_f16.ptx`, `dequant_q5_k_to_f16.ptx`, `dequant_q6_k_to_f16.ptx` in [`src/HartsyInference.Cuda/Ptx/`](../../src/HartsyInference.Cuda/Ptx/).
 
 ### Wiring
 
-- Module loading + handle storage + Launch helpers added to [`CudaKernels.cs`](../../src/SharpInference.Cuda/CudaKernels.cs). Five new public methods: `LaunchDequantQ8_0ToF16`, `LaunchDequantQ4_KToF16`, `LaunchDequantQ5_KToF16`, `LaunchDequantQ6_KToF16`, plus a private `LaunchDequantImpl` that handles the per-quant block-size variation (32 / 128 / 256 threads per CUDA block).
-- [`CudaBackend.CastOnGpu`](../../src/SharpInference.Cuda/CudaBackend.cs) gains two top-level routes for any quantized source: `quant → F16` dispatches directly through the new launches; `quant → F32` stages through F16 and casts. Both return early before reaching the existing F8/F16/BF16/F32 cast cascade — no behavioral change to non-quantized paths.
+- Module loading + handle storage + Launch helpers added to [`CudaKernels.cs`](../../src/HartsyInference.Cuda/CudaKernels.cs). Five new public methods: `LaunchDequantQ8_0ToF16`, `LaunchDequantQ4_KToF16`, `LaunchDequantQ5_KToF16`, `LaunchDequantQ6_KToF16`, plus a private `LaunchDequantImpl` that handles the per-quant block-size variation (32 / 128 / 256 threads per CUDA block).
+- [`CudaBackend.CastOnGpu`](../../src/HartsyInference.Cuda/CudaBackend.cs) gains two top-level routes for any quantized source: `quant → F16` dispatches directly through the new launches; `quant → F32` stages through F16 and casts. Both return early before reaching the existing F8/F16/BF16/F32 cast cascade — no behavioral change to non-quantized paths.
 
 ### Tests
 
-[`GgufGpuDequantTests.cs`](../../tests/SharpInference.Cuda.Tests/GgufGpuDequantTests.cs) — 5 tests:
+[`GgufGpuDequantTests.cs`](../../tests/HartsyInference.Cuda.Tests/GgufGpuDequantTests.cs) — 5 tests:
 
 1. `Q8_0_GpuDequant_MatchesCpu` — synthetic block, GPU vs CPU dequant agreement.
 2. `Q4_K_GpuDequant_MatchesCpu`
@@ -183,29 +183,29 @@ Phase F closed the loop: tied the Phase D GPU dequant kernels into the productio
 
 ### Real-world validation
 
-[`FluxGgufLinearTests.Linear_RealQ4_K_FromCity96Gguf_ProducesSaneOutput`](../../tests/SharpInference.Diffusion.Tests/FluxGgufLinearTests.cs) downloads `city96/FLUX.1-schnell-gguf/flux1-schnell-Q4_K_S.gguf` (6.78 GB), pulls one Q4_K weight (`double_blocks.0.img_attn.qkv.weight`, [3072×3072]), and runs `CudaBackend.Linear` with an F16 input. End-to-end validated: GGUF mmap → Tensor with Q4_K dtype → `CopyToDevice` (correct byte count) → `Linear`'s `CastIfNeeded` → GPU dequant kernel → cuBLAS GEMM → sane F16 output (no NaN/Inf, mean magnitude in expected range). 429 ms first call, mostly CUDA context init.
+[`FluxGgufLinearTests.Linear_RealQ4_K_FromCity96Gguf_ProducesSaneOutput`](../../tests/HartsyInference.Diffusion.Tests/FluxGgufLinearTests.cs) downloads `city96/FLUX.1-schnell-gguf/flux1-schnell-Q4_K_S.gguf` (6.78 GB), pulls one Q4_K weight (`double_blocks.0.img_attn.qkv.weight`, [3072×3072]), and runs `CudaBackend.Linear` with an F16 input. End-to-end validated: GGUF mmap → Tensor with Q4_K dtype → `CopyToDevice` (correct byte count) → `Linear`'s `CastIfNeeded` → GPU dequant kernel → cuBLAS GEMM → sane F16 output (no NaN/Inf, mean magnitude in expected range). 429 ms first call, mostly CUDA context init.
 
-[`CudaLinearQuantTests`](../../tests/SharpInference.Cuda.Tests/CudaLinearQuantTests.cs) — synthetic F32 input → CPU-quantize → run Linear with quant weight → compare to F16 reference. All 3 quants (Q8_0, Q4_K, Q6_K) match within tolerance.
+[`CudaLinearQuantTests`](../../tests/HartsyInference.Cuda.Tests/CudaLinearQuantTests.cs) — synthetic F32 input → CPU-quantize → run Linear with quant weight → compare to F16 reference. All 3 quants (Q8_0, Q4_K, Q6_K) match within tolerance.
 
 ### Full-pipeline integration (memory-bound on dev box)
 
-[`FluxGgufGenerationTests.Schnell_FromGguf_GeneratesImage`](../../tests/SharpInference.Diffusion.Tests/FluxGgufGenerationTests.cs) attempts full Flux Schnell pipeline with GGUF transformer + FP8 T5/CLIP/VAE. **Currently OOMs at ~20 GB anon-RSS** during the QKV-split + FP8-load phase, even though wiring is correct. Skips cleanly via `/proc/meminfo` probe when available memory < 25 GB. Cause is environmental — the dotnet process inherits a memcg from the calling shell session that's tighter than the 32 GB system. Per-tensor `Convert` (single-tensor calls in a loop) processes the entire GGUF without OOM, so the codec/split/dequant code is correct; the batch path triggers a memory amplification we haven't isolated.
+[`FluxGgufGenerationTests.Schnell_FromGguf_GeneratesImage`](../../tests/HartsyInference.Diffusion.Tests/FluxGgufGenerationTests.cs) attempts full Flux Schnell pipeline with GGUF transformer + FP8 T5/CLIP/VAE. **Currently OOMs at ~20 GB anon-RSS** during the QKV-split + FP8-load phase, even though wiring is correct. Skips cleanly via `/proc/meminfo` probe when available memory < 25 GB. Cause is environmental — the dotnet process inherits a memcg from the calling shell session that's tighter than the 32 GB system. Per-tensor `Convert` (single-tensor calls in a loop) processes the entire GGUF without OOM, so the codec/split/dequant code is correct; the batch path triggers a memory amplification we haven't isolated.
 
 To run end-to-end on this hardware: 64 GB host or run outside the constrained cgroup. Phase D + F wiring itself is fully validated by the two tests above.
 
 ## Adding a new quant codec (mechanical recipe)
 
-1. **Add the DType** in `src/SharpInference.Core/Tensors/DType.cs`:
+1. **Add the DType** in `src/HartsyInference.Core/Tensors/DType.cs`:
    ```csharp
    public static readonly DType MyNewQuant = new("MY_NEW_QUANT", 0, true, blockBytes, blockElems);
    ```
 
-2. **Add the GGUF type ID mapping** in `src/SharpInference.ModelHandler/Gguf/GgufLoader.cs:MapGgufType`:
+2. **Add the GGUF type ID mapping** in `src/HartsyInference.ModelHandler/Gguf/GgufLoader.cs:MapGgufType`:
    ```csharp
    42 => DType.MyNewQuant,
    ```
 
-3. **Implement the codec** at `src/SharpInference.ModelHandler/Gguf/Codecs/Codec_MyNewQuant.cs`:
+3. **Implement the codec** at `src/HartsyInference.ModelHandler/Gguf/Codecs/Codec_MyNewQuant.cs`:
    ```csharp
    public sealed unsafe class Codec_MyNewQuant : GgufCodecBase
    {
@@ -219,11 +219,11 @@ To run end-to-end on this hardware: 64 GB host or run outside the constrained cg
    Register(r, new Codec_MyNewQuant());
    ```
 
-5. **Add a round-trip test** in `tests/SharpInference.ModelHandler.Tests/GgufCodecRegistryTests.cs` with hand-built canonical block bytes verified against `ggml-quants.c`.
+5. **Add a round-trip test** in `tests/HartsyInference.ModelHandler.Tests/GgufCodecRegistryTests.cs` with hand-built canonical block bytes verified against `ggml-quants.c`.
 
 ## Adding a new architecture key mapper
 
-1. **Implement** at `src/SharpInference.ModelHandler/Gguf/KeyMappers/MyArchKeyMapper.cs`:
+1. **Implement** at `src/HartsyInference.ModelHandler/Gguf/KeyMappers/MyArchKeyMapper.cs`:
    ```csharp
    public sealed class MyArchKeyMapper : IGgufKeyMapper
    {
@@ -238,6 +238,6 @@ To run end-to-end on this hardware: 64 GB host or run outside the constrained cg
    Register(r, new MyArchKeyMapper());
    ```
 
-3. **Add detection tests** in `tests/SharpInference.ModelHandler.Tests/GgufKeyMapperTests.cs`.
+3. **Add detection tests** in `tests/HartsyInference.ModelHandler.Tests/GgufKeyMapperTests.cs`.
 
 That's it — every existing pipeline immediately works with the new architecture. **Zero per-pipeline changes.**

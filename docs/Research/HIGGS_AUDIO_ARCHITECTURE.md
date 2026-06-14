@@ -1,6 +1,6 @@
 # Higgs Audio v2 — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Higgs Audio pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Higgs Audio pipeline)
 
 ## Summary
 
@@ -10,7 +10,7 @@ The pipeline uniquely supports four modes from one checkpoint via the chat templ
 
 Higgs v2.5 (Sep 2025) is a 1B-parameter condensation with the same tokenizer and chat template but stronger primary-language coverage (en/zh/ko/ja via GRPO) and explicit expressiveness control tags.
 
-For SharpInference this maps cleanly to: **dotLLM patterns for the Llama-3.2-3B backbone + a new DualFFN MLP variant; a new audio codec implementation in SharpInference.Audio that combines DAC-style decoder ops (already documented in [AUDIO_CODECS.md](AUDIO_CODECS.md)) with a HuBERT-style semantic encoder; pure string templating for prompt construction; KV-cache + `IAsyncEnumerable<float[]>` for streaming.**
+For HartsyInference this maps cleanly to: **dotLLM patterns for the Llama-3.2-3B backbone + a new DualFFN MLP variant; a new audio codec implementation in HartsyInference.Audio that combines DAC-style decoder ops (already documented in [AUDIO_CODECS.md](AUDIO_CODECS.md)) with a HuBERT-style semantic encoder; pure string templating for prompt construction; KV-cache + `IAsyncEnumerable<float[]>` for streaming.**
 
 Sources: [boson-ai/higgs-audio (GitHub)](https://github.com/boson-ai/higgs-audio), [bosonai/higgs-audio-v2-generation-3B-base (HF)](https://huggingface.co/bosonai/higgs-audio-v2-generation-3B-base), [bosonai/higgs-audio-v2-tokenizer (HF)](https://huggingface.co/bosonai/higgs-audio-v2-tokenizer), [HiggsAudioV2 transformers docs](https://huggingface.co/docs/transformers/model_doc/higgs_audio_v2), [Boson AI v2 blog](https://www.boson.ai/blog/higgs-audio-v2), [Boson AI v2.5 blog](https://www.boson.ai/blog/higgs-audio-v2.5), [erogol model-check writeup](https://erogol.substack.com/p/model-check-higgs-audio-v2-unified).
 
@@ -176,7 +176,7 @@ This is a **unified dual-branch codec**: a "semantic" HuBERT branch operating at
 
 **Semantic branch (`semantic_model_config`, `model_type: "hubert"`):** Standard HuBERT-base config — 12 transformer layers, hidden 768, 12 heads, intermediate 3072, GELU. Conv feature extractor: 7 layers, dims all 512, kernels `[10, 3, 3, 3, 3, 2, 2]`, strides `[5, 2, 2, 2, 2, 2, 2]` → cumulative stride 320 → 16000 / 320 = **50 Hz** semantic frame rate. The semantic branch produces continuous features that condition / are fused with the acoustic VQ — implementers should treat it as **encoder-only at inference** (it's only needed when *encoding* reference audio for voice cloning, not when decoding LM-predicted codes back to waveform).
 
-**Inference path for SharpInference.** Two directions:
+**Inference path for HartsyInference.** Two directions:
 - **Encode** (voice cloning / reference audio in the conversation): waveform → resample 16 k → semantic HuBERT features + acoustic DAC encoder → quantize → per-frame codebook IDs of shape `(num_frames, 8)`. These IDs are then embedded by the LM's per-codebook embedding tables and spliced into the text stream at `<|AUDIO_OUT|>` positions.
 - **Decode** (the only direction needed for pure-TTS without cloning): per-frame codebook IDs `(num_frames, 8)` → look up VQ entries (factorized: `(1024, 8)` per codebook, then project up to acoustic latent) → sum residuals → DAC decoder (snake + ConvTranspose1d × 5 with strides `[8,5,4,2,3]`) → waveform → resample to 24 kHz. The semantic branch is **not needed for decoding**.
 
@@ -307,7 +307,7 @@ The delay pattern naturally aligns with streaming: codebook k is delayed by k LM
 
 **`bosonai/higgs-audio-v2-generation-3B-base`** (~23 GB):
 
-| File | Size | Purpose | Needed by SharpInference? |
+| File | Size | Purpose | Needed by HartsyInference? |
 |---|---|---|---|
 | `model.safetensors` OR `model-0000{1..3}-of-00003.safetensors` + index | 11.5 GB consolidated, or 4.97+4.98+1.59 GB sharded | BF16 weights for backbone, DualFFN, audio embedding tables, audio heads, (optional) text LM head | **Yes** — load one form |
 | `config.json` | 1.1 kB | Architecture config above | **Yes** |
@@ -328,7 +328,7 @@ The delay pattern naturally aligns with streaming: codebook k is delayed by k LM
 | `config.json` | 2.53 kB | Dual-branch config (DAC + HuBERT) | **Yes** |
 | `preprocessor_config.json` | 206 B | Resample/normalize spec for the encoder | Encode-only |
 
-> The ~600 M acoustic + ~95 M HuBERT-base ≈ 700 M params should give a `model.safetensors` of ~1.4 GB at BF16, not 11.5 GB. The 11.5 GB suggests the safetensors file includes redundant copies, optimizer/EMA shadows, or float32 weights — verify and possibly extract just the acoustic decoder for a decode-only SharpInference build to save ~10 GB.
+> The ~600 M acoustic + ~95 M HuBERT-base ≈ 700 M params should give a `model.safetensors` of ~1.4 GB at BF16, not 11.5 GB. The 11.5 GB suggests the safetensors file includes redundant copies, optimizer/EMA shadows, or float32 weights — verify and possibly extract just the acoustic decoder for a decode-only HartsyInference build to save ~10 GB.
 
 ### 8. Memory and Performance
 
@@ -354,7 +354,7 @@ The brief's "~7 GB at FP16" figure undercounts because it ignores the 2.2 B Dual
 - Tokenizer is the standard Llama-3.2 BPE — dotLLM's tokenizer loader works unchanged.
 - All RoPE/attention/RMSNorm/MLP kernels from dotLLM port directly.
 
-**New code required (SharpInference.Audio.HiggsAudio):**
+**New code required (HartsyInference.Audio.HiggsAudio):**
 
 1. **DualFFN routing**. Two SwiGLU MLPs per layer; per-token mask drives a gather/scatter (text positions → MLP_text, audio positions → MLP_audio). Two reasonable implementations:
    - **Mask-and-add**: run both MLPs on the full sequence, multiply outputs by `(1-audio_mask)` and `audio_mask` respectively, add. Simple, wastes ~2× MLP FLOPs but trivially batchable.
@@ -370,7 +370,7 @@ The brief's "~7 GB at FP16" figure undercounts because it ignores the 2.2 B Dual
 5. **Audio tokenizer decoder** (decode-only is sufficient for non-cloning TTS). Implement:
    - 8 per-codebook lookups → factorized projection to acoustic latent (`codebook_dim=8` projected up to `decoder_hidden_size=1024` via per-codebook `Linear(8, 1024)`).
    - Sum the 8 latents.
-   - DAC decoder: initial `Conv1d`, then 5 `DecoderBlock`s with `ConvTranspose1d` strides `[8, 5, 4, 2, 3]` (cumulative ×960) and dilated `ResidualUnit`s with Snake1d, final `Conv1d → 1ch`. Add `Snake1d` to the SharpInference IBackend (currently only documented for SNAC/DAC in [AUDIO_CODECS.md](AUDIO_CODECS.md), not yet implemented).
+   - DAC decoder: initial `Conv1d`, then 5 `DecoderBlock`s with `ConvTranspose1d` strides `[8, 5, 4, 2, 3]` (cumulative ×960) and dilated `ResidualUnit`s with Snake1d, final `Conv1d → 1ch`. Add `Snake1d` to the HartsyInference IBackend (currently only documented for SNAC/DAC in [AUDIO_CODECS.md](AUDIO_CODECS.md), not yet implemented).
    - Resample 16 kHz → 24 kHz (or skip if decoder output is already 24 k — verify against reference).
 
 6. **Audio tokenizer encoder** (only needed for voice cloning):

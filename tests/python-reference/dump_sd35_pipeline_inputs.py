@@ -28,7 +28,7 @@ from safetensors.torch import load_file
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, CLIPTextConfig, T5EncoderModel, T5TokenizerFast, T5Config
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
-CKPT = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/SD3/sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"
+CKPT = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Stable-Diffusion/SD3/sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"
 OUT_DIR = "tests/python-reference/sd35_reference_tensors/pipeline_inputs"
 os.makedirs(OUT_DIR, exist_ok=True)
 

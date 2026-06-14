@@ -1,6 +1,6 @@
 # Vulkan Compute API — Research Notes
 
-SharpInference accesses non-NVIDIA GPUs (and NVIDIA as an alternative) entirely through the **Vulkan Compute API** via P/Invoke — no native shared libraries beyond the system-installed Vulkan loader (`libvulkan.so.1` on Linux, `vulkan-1.dll` on Windows, `libMoltenVK.dylib` on macOS via MoltenVK). Compute shaders are authored in GLSL, compiled to SPIR-V at build time via `glslangValidator`, loaded at runtime via `vkCreateShaderModule`, and dispatched via `vkCmdDispatch`.
+HartsyInference accesses non-NVIDIA GPUs (and NVIDIA as an alternative) entirely through the **Vulkan Compute API** via P/Invoke — no native shared libraries beyond the system-installed Vulkan loader (`libvulkan.so.1` on Linux, `vulkan-1.dll` on Windows, `libMoltenVK.dylib` on macOS via MoltenVK). Compute shaders are authored in GLSL, compiled to SPIR-V at build time via `glslangValidator`, loaded at runtime via `vkCreateShaderModule`, and dispatched via `vkCmdDispatch`.
 
 Vulkan compute is the **cross-vendor** counterpart to CUDA in this engine: the same model code that targets `IBackend` runs on CUDA on NVIDIA and on Vulkan on AMD / Intel / NVIDIA / ARM Mali / Qualcomm Adreno / Apple Silicon (via MoltenVK). The P/Invoke surface needed for inference is small (~55 functions) compared to a full graphics renderer (~250+), because we only need queues, buffers, descriptors, compute pipelines, command buffers, and synchronization — no swapchain, no render passes, no graphics pipeline state.
 
@@ -73,8 +73,8 @@ Mirror the existing `CudaLibraryResolver.cs` exactly. The validator `glslangVali
 Validation is opt-in and provided by `VK_LAYER_KHRONOS_validation`. Enabled at instance creation by passing the layer name. Required at development time, **must be off in production** (5–20× slowdown). On Linux, set `VK_LOADER_DEBUG=warn` to debug ICD resolution.
 
 ```csharp
-// Enable when SHARPINFERENCE_VK_VALIDATION env var is set
-bool enableValidation = Environment.GetEnvironmentVariable("SHARPINFERENCE_VK_VALIDATION") == "1";
+// Enable when HARTSYINFERENCE_VK_VALIDATION env var is set
+bool enableValidation = Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_VALIDATION") == "1";
 ```
 
 ---
@@ -442,7 +442,7 @@ public struct VkPhysicalDeviceVulkan13Features
 
 **Required at device creation:** `shaderFloat16 = 1`, `storageBuffer16BitAccess = 1`, `subgroupSizeControl = 1`, `computeFullSubgroups = 1`, `synchronization2 = 1`. If any are unsupported, fall back: FP16 → FP32 path; subgroupSizeControl → query `subgroupSize` and bake it into shader constants at compile time.
 
-> **Driver warning — feature query under-reports on NVIDIA Linux blob.** Some NVIDIA Linux drivers (observed: 535-series) advertise `apiVersion = 1.3.x` but return zeros for `shaderFloat16`, `timelineSemaphore`, `bufferDeviceAddress`, `synchronization2`, `subgroupSizeControl`, and `computeFullSubgroups` when queried through the *promoted* v1.2 / v1.3 feature structs above. The features are real and `vkCreateDevice` accepts them — only the *query* is wrong. Phase 3.5 works around this by trusting `apiVersion` for known vendors (`vendorID is 0x10DE or 0x1002 or 0x8086`) when the feature struct reports zero. See [PHASE_3_5_DEVIATIONS.md #3](../Checklists/PHASE_3_5_DEVIATIONS.md) and [VulkanFeatureProbe.cs](../../tests/SharpInference.Vulkan.Tests/VulkanFeatureProbe.cs) for the isolation test that confirmed the bug.
+> **Driver warning — feature query under-reports on NVIDIA Linux blob.** Some NVIDIA Linux drivers (observed: 535-series) advertise `apiVersion = 1.3.x` but return zeros for `shaderFloat16`, `timelineSemaphore`, `bufferDeviceAddress`, `synchronization2`, `subgroupSizeControl`, and `computeFullSubgroups` when queried through the *promoted* v1.2 / v1.3 feature structs above. The features are real and `vkCreateDevice` accepts them — only the *query* is wrong. Phase 3.5 works around this by trusting `apiVersion` for known vendors (`vendorID is 0x10DE or 0x1002 or 0x8086`) when the feature struct reports zero. See [PHASE_3_5_DEVIATIONS.md #3](../Checklists/PHASE_3_5_DEVIATIONS.md) and [VulkanFeatureProbe.cs](../../tests/HartsyInference.Vulkan.Tests/VulkanFeatureProbe.cs) for the isolation test that confirmed the bug.
 
 ### `VkPhysicalDeviceMemoryProperties`
 
@@ -865,7 +865,7 @@ public struct VkPhysicalDeviceSubgroupSizeControlProperties
 
 ### Pipeline cache
 
-`VkPipelineCache` saves driver-compiled binaries across runs. Persist its blob to `~/.cache/sharpinference/vulkan/<deviceUUID>.pipeline_cache` to skip ~50–500 ms re-compile on every launch.
+`VkPipelineCache` saves driver-compiled binaries across runs. Persist its blob to `~/.cache/hartsyinference/vulkan/<deviceUUID>.pipeline_cache` to skip ~50–500 ms re-compile on every launch.
 
 ```csharp
 // On startup:
@@ -1315,7 +1315,7 @@ public struct VkBufferCopy
 `vkCmdCopyBuffer` runs on the queue's transfer or compute path. Patterns:
 
 - **Weight upload (one-shot, large):** allocate `HOST_VISIBLE | HOST_COHERENT` staging buffer (or chunked sequence of them up to free RAM), `memcpy` mmapped safetensors slice into it, `vkCmdCopyBuffer` to `DEVICE_LOCAL`, fence-wait, free staging. We do this in `PreloadWeights()` exactly like CUDA's `GpuTransferHelper.PreloadWeight`.
-- **Activation H2D / D2H:** rare in SharpInference because activations stay GPU-resident. Only at pipeline boundaries (CLIP→UNet input, VAE→PNG output).
+- **Activation H2D / D2H:** rare in HartsyInference because activations stay GPU-resident. Only at pipeline boundaries (CLIP→UNet input, VAE→PNG output).
 - **ReBAR fast path:** if a `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` memory type exists and the upload fits, write directly — no staging buffer, no copy command.
 
 `vkCmdUpdateBuffer` is convenient for *very* small (< 64 KB, 4-byte aligned) updates — driver pulls data through the command stream — but is bandwidth-limited; do **not** use for tensors.
@@ -1378,7 +1378,7 @@ Use unmanaged function-pointer types (`delegate* unmanaged[Cdecl]<...>`) — zer
 
 ## P/Invoke Function List (Phase 3.5 minimum surface)
 
-These ~55 functions cover the entire Vulkan compute backend. Mirror the layout of [CudaDriverApi.cs](../../src/SharpInference.Cuda/CudaDriverApi.cs) — flat static class, `[LibraryImport]`, no marshalling.
+These ~55 functions cover the entire Vulkan compute backend. Mirror the layout of [CudaDriverApi.cs](../../src/HartsyInference.Cuda/CudaDriverApi.cs) — flat static class, `[LibraryImport]`, no marshalling.
 
 **Instance / device:**
 `vkCreateInstance`, `vkDestroyInstance`,
@@ -1451,7 +1451,7 @@ Tested on Linux unless noted.
 
 | Need | Tool | How |
 |---|---|---|
-| Validation | `VK_LAYER_KHRONOS_validation` | Set env `SHARPINFERENCE_VK_VALIDATION=1` at startup |
+| Validation | `VK_LAYER_KHRONOS_validation` | Set env `HARTSYINFERENCE_VK_VALIDATION=1` at startup |
 | GPU trace | RenderDoc (Linux/Windows) | `RENDERDOC_HOOK_EGL=0` env, attach via UI |
 | Per-kernel timing | `VkQueryPool` of timestamps | `vkCmdWriteTimestamp2` before/after dispatch, multiply diff by `limits.timestampPeriod` ns |
 | Memory leaks | Validation + `vkAllocateMemory` count | Fail at shutdown if any non-freed `VkDeviceMemory`/`VkBuffer` |
@@ -1480,7 +1480,7 @@ Tested on Linux unless noted.
 3. **Strong-typed handles** — wrap dispatchable in `nint` and non-dispatchable in `ulong` consistently. Define a `VkBuffer { ulong Handle; }` struct only if the readability win is worth the boxing risk.
 4. **Pin extension-name strings once** — build a `static readonly byte[] s_extNamesBlob` of UTF-8 + nulls and a `static readonly nint s_extNamePtrs[]`; reuse across multiple `vkCreateDevice` attempts.
 5. **Fail fast on missing required features** — surface `UnsupportedDeviceException` listing exactly which feature failed (`shaderFloat16`, `subgroupSizeControl`, etc.). Users can downgrade or pick a different GPU.
-6. **Persist pipeline cache** — `~/.cache/sharpinference/vulkan/<deviceUUID>.pipeline_cache`. Saves 0.5–2 s on cold start.
+6. **Persist pipeline cache** — `~/.cache/hartsyinference/vulkan/<deviceUUID>.pipeline_cache`. Saves 0.5–2 s on cold start.
 7. **One command pool per thread** — command pools are not thread-safe. We use one per backend instance; multithreaded recording is Phase 7+.
 8. **Reset don't free** — `vkResetCommandPool` (cheap) instead of `vkFreeCommandBuffers` per frame.
 9. **Timeline semaphores beat binary semaphores + fences** — single 64-bit counter per logical stream replaces a fence pool.

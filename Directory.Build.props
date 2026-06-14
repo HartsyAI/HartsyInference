@@ -19,11 +19,11 @@
   <!-- Package metadata shared across all projects -->
   <PropertyGroup>
     <Authors>kalebbroo</Authors>
-    <Company>SharpInference</Company>
-    <Product>SharpInference</Product>
+    <Company>HartsyInference</Company>
+    <Product>HartsyInference</Product>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/HartsyAI/SharpInference</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/HartsyAI/SharpInference</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/HartsyAI/HartsyInference</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/HartsyAI/HartsyInference</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>ai;inference;diffusion;stable-diffusion;flux;whisper;cuda;dotnet;csharp</PackageTags>
     <PackageReadmeFile>README.nuget.md</PackageReadmeFile>

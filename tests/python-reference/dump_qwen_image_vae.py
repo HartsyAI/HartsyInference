@@ -27,7 +27,7 @@ from safetensors import safe_open
 from diffusers import AutoencoderKLQwenImage
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-VAE_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/VAE/QwenImage/qwen_image_vae.safetensors"
+VAE_PATH = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/VAE/QwenImage/qwen_image_vae.safetensors"
 OUT_DIR = os.path.join(REPO_ROOT, "tests/python-reference/qwen_image_vae_reference")
 
 LATENT_H = 32

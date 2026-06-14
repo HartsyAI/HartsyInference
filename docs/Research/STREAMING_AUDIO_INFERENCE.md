@@ -1,12 +1,12 @@
 # Streaming Audio Inference — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (streaming pipelines), SharpInference.Server (Phase 7)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (streaming pipelines), HartsyInference.Server (Phase 7)
 
 ## Summary
 
 "Streaming" in audio inference is overloaded. Some models are **natively streaming** (causal or bounded-lookahead encoders that emit partial output as audio arrives — Parakeet-TDT, Moonshine, CosyVoice 2, Sesame CSM, RNN-T family, CTC family). Others are **non-streaming** but admit **pseudo-streaming wrappers** (overlap-and-dedupe sliding windows — Whisper, distil-Whisper, F5-TTS, Kokoro). The latency that matters for a voice agent is not throughput (RTF) but **first-token latency** and the **algorithmic lookahead** baked into the encoder.
 
-This document fixes vocabulary (RTF/RTFx, latency vs throughput, causal vs lookahead, partial vs final hypotheses), enumerates the streaming architectures we will encounter (chunked-and-overlap, cache-aware encoder + per-layer state, RNN-T/TDT joint, chunk-aware causal flow-matching, autoregressive codec-token streaming), and lists the concrete C# infrastructure SharpInference.Audio needs to build before any streaming model can ship: `AudioRingBuffer`, `StreamingMelExtractor`, `StreamingKvCache`, `IStreamingPipeline<TIn,TOut>`, and an `IAsyncEnumerable<AudioChunk>` output surface that mirrors dotLLM's existing token-streaming API.
+This document fixes vocabulary (RTF/RTFx, latency vs throughput, causal vs lookahead, partial vs final hypotheses), enumerates the streaming architectures we will encounter (chunked-and-overlap, cache-aware encoder + per-layer state, RNN-T/TDT joint, chunk-aware causal flow-matching, autoregressive codec-token streaming), and lists the concrete C# infrastructure HartsyInference.Audio needs to build before any streaming model can ship: `AudioRingBuffer`, `StreamingMelExtractor`, `StreamingKvCache`, `IStreamingPipeline<TIn,TOut>`, and an `IAsyncEnumerable<AudioChunk>` output surface that mirrors dotLLM's existing token-streaming API.
 
 Sources: [Moonshine v2 paper](https://arxiv.org/abs/2602.12241), [CosyVoice 2 paper](https://arxiv.org/abs/2412.10117), [NVIDIA Parakeet-TDT blog](https://developer.nvidia.com/blog/turbocharge-asr-accuracy-and-speed-with-nvidia-nemo-parakeet-tdt/), [Parakeet-TDT 0.6b-v2 card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2), [whisper.cpp stream.cpp](https://github.com/ggml-org/whisper.cpp/blob/master/examples/stream/stream.cpp), [whisper_streaming](https://github.com/ufal/whisper_streaming), [CosyVoice repo](https://github.com/FunAudioLLM/CosyVoice), [Sesame CSM](https://github.com/SesameAILabs/csm), [Mimi codec](https://huggingface.co/kyutai/mimi), [Moonshine repo](https://github.com/moonshine-ai/moonshine), [Coqui XTTS docs](https://docs.coqui.ai/en/latest/models/xtts.html), [HiFi-GAN](https://github.com/jik876/hifi-gan), [RNN-T / Transducer overview](https://www.assemblyai.com/blog/an-overview-of-transducer-models-for-asr), [TDT explained (Speechmatics)](https://www.speechmatics.com/company/articles-and-news/token-duration-transducer-tdt-explained), [F5-TTS](https://github.com/SWivid/F5-TTS), [Canary streaming docs](https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/asr/streaming_decoding/canary_chunked_and_streaming_decoding.html).
 
@@ -59,7 +59,7 @@ Whisper's encoder consumes a **fixed 30 s window** with sinusoidal positional en
 - Trim the audio buffer when it exceeds 15 s, preferring sentence boundaries (via tokenizer) or Whisper segment boundaries.
 - Reported latency: **~500–800 ms** in "online" mode with min-chunk 1 s.
 
-**Verdict for SharpInference**: Whisper streaming is a wrapper layer, not an encoder change. Build `WhisperStreamingPipeline` on top of the standard `WhisperPipeline`. Implement LocalAgreement in C# as a separate `HypothesisBuffer` class. Do not pretend it is "real" streaming — first-token latency floor is `min_chunk_size + encoder_pass_time` (~1.1–1.5 s for a large-v3 single-stream pass).
+**Verdict for HartsyInference**: Whisper streaming is a wrapper layer, not an encoder change. Build `WhisperStreamingPipeline` on top of the standard `WhisperPipeline`. Implement LocalAgreement in C# as a separate `HypothesisBuffer` class. Do not pretend it is "real" streaming — first-token latency floor is `min_chunk_size + encoder_pass_time` (~1.1–1.5 s for a large-v3 single-stream pass).
 
 #### 2.2 Parakeet-TDT — native streaming RNN-T descendant
 
@@ -253,7 +253,7 @@ on finalize():
 
 ### 5. KV-cache management for streaming TTS / bi-directional models
 
-dotLLM already has a KV-cache pattern for LLM inference; SharpInference inherits the same idea but applies it to autoregressive *audio* models. The cache holds `(K_layer, V_layer)` tensors per layer; each new generated token appends one row.
+dotLLM already has a KV-cache pattern for LLM inference; HartsyInference inherits the same idea but applies it to autoregressive *audio* models. The cache holds `(K_layer, V_layer)` tensors per layer; each new generated token appends one row.
 
 **Append-and-grow** (the common case for short utterances):
 - Pre-allocate `[max_seq_len, n_heads, head_dim]` per layer.
@@ -268,7 +268,7 @@ dotLLM already has a KV-cache pattern for LLM inference; SharpInference inherits
 - When `position` exceeds `target`, evict the oldest N tokens by sliding K/V down by N rows (memcpy in place) and reset `position -= N`.
 - Cheap on GPU (one launch per layer), but loses the evicted prefix forever.
 
-**For SharpInference**:
+**For HartsyInference**:
 - Phase 6 (audio LLM-style models) needs `StreamingKvCache` as a first-class component.
 - We do NOT need this for diffusion image models (each step processes the full latent).
 - Storage: unmanaged buffer (`NativeMemory.AlignedAlloc`) sized for `n_layers * max_seq_len * n_heads * head_dim * 2 (K and V) * dtype_size`. For CSM-1B at 32 layers, 2048 ctx, 16 heads, 128 dim, FP16: `32 * 2048 * 16 * 128 * 2 * 2 = 512 MB`. Pre-allocate.
@@ -315,12 +315,12 @@ Target: **<500 ms p50** for "conversational", **<200 ms p50** for "natural turn-
 
 **Sub-200 ms requires**: Moonshine-tiny (≤80 ms lookahead + ~20 ms compute), a 1–3 B LLM with short context, and a Sesame-style integrated TTS that produces audio frames at 12.5 Hz directly (no separate codec→mel→PCM pipeline).
 
-### 8. Concrete C# infrastructure SharpInference.Audio will need
+### 8. Concrete C# infrastructure HartsyInference.Audio will need
 
 This is the dependency surface that every streaming audio model will share.
 
 ```csharp
-namespace SharpInference.Audio.Streaming;
+namespace HartsyInference.Audio.Streaming;
 
 /// <summary>Thread-safe circular PCM buffer for live capture.</summary>
 public sealed class AudioRingBuffer : IDisposable
@@ -676,13 +676,13 @@ on melChunk(C frames):
 - **Q7**: VAD selection — Silero-VAD (PyTorch, ~1.8 MB) is the de-facto standard but requires its own runtime. WebRTC-VAD (pure C) is leaner but worse. Should we port Silero-VAD weights to our runtime or use an energy-threshold detector for v1? Affects audio pipeline architecture.
 - **Q8**: For `AudioRingBuffer`, is single-producer / single-consumer enough, or do we need multi-consumer (e.g. simultaneous VAD + STT readers)? SPSC is much simpler and 10× faster.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 ### Package boundaries (per NUGET_PACKAGE_DESIGN)
-- `SharpInference.Audio` owns `AudioRingBuffer`, `StreamingMelExtractor`, `StreamingKvCache`, the `IStreamingPipeline` interfaces, `HypothesisBuffer`, and `AudioChunk`/`TranscriptionChunk` records. No model-specific code lives here.
-- `SharpInference.Audio.Whisper` (or wherever Whisper lives) owns `WhisperStreamingPipeline` which composes `StreamingMelExtractor` + `WhisperPipeline` + `HypothesisBuffer`.
-- `SharpInference.Audio.Parakeet` owns the TDT joint+predictor loop and the cache-aware encoder front-end. Reuses `StreamingMelExtractor` and `StreamingKvCache`.
-- `SharpInference.Audio.Vocoders` (HiFi-GAN, Vocos) owns the chunked-vocoder context-window logic. Exposes a streaming `Synthesize(mel) → IAsyncEnumerable<AudioChunk>` API.
+- `HartsyInference.Audio` owns `AudioRingBuffer`, `StreamingMelExtractor`, `StreamingKvCache`, the `IStreamingPipeline` interfaces, `HypothesisBuffer`, and `AudioChunk`/`TranscriptionChunk` records. No model-specific code lives here.
+- `HartsyInference.Audio.Whisper` (or wherever Whisper lives) owns `WhisperStreamingPipeline` which composes `StreamingMelExtractor` + `WhisperPipeline` + `HypothesisBuffer`.
+- `HartsyInference.Audio.Parakeet` owns the TDT joint+predictor loop and the cache-aware encoder front-end. Reuses `StreamingMelExtractor` and `StreamingKvCache`.
+- `HartsyInference.Audio.Vocoders` (HiFi-GAN, Vocos) owns the chunked-vocoder context-window logic. Exposes a streaming `Synthesize(mel) → IAsyncEnumerable<AudioChunk>` API.
 
 ### Phase ordering
 1. **Audio primitives first** (`AudioRingBuffer`, `StreamingMelExtractor`) — required by every audio model anyway.

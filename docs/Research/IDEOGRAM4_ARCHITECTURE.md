@@ -10,7 +10,7 @@
 > - Text encoder config: [`Qwen/Qwen3-VL-8B-Instruct`](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) `config.json` (`text_config`)
 > - ComfyUI reference (treat as **example, not gospel** — several known mistakes; see § Differences Between Implementations): [docs.comfy.org Ideogram v4](https://docs.comfy.org/tutorials/image/ideogram/ideogram-v4)
 >
-> **License:** "Ideogram 4 Non-Commercial" (gated on HuggingFace). The DiT weights and inference code are non-commercial. The ComfyUI repackage (`Comfy-Org/Ideogram-4`) mirrors the same weights. **This is a non-commercial license — flag for the package/legal boundary; SharpInference itself stays MIT/permissive, the model weights carry their own terms (same handling as the existing GameCraft license-acceptance gate).**
+> **License:** "Ideogram 4 Non-Commercial" (gated on HuggingFace). The DiT weights and inference code are non-commercial. The ComfyUI repackage (`Comfy-Org/Ideogram-4`) mirrors the same weights. **This is a non-commercial license — flag for the package/legal boundary; HartsyInference itself stays MIT/permissive, the model weights carry their own terms (same handling as the existing GameCraft license-acceptance gate).**
 
 ## Summary
 
@@ -20,7 +20,7 @@ The model is trained on **structured JSON captions** (scene summary + style bloc
 
 VAE is the **Flux.2 semantic VAE** (`flux2-vae.safetensors`, 32-channel, 8× spatial) — **already implemented** in this codebase for Flux.2/Lens — but Ideogram does **NOT** use the Flux.2 BN running-stats un-normalize. Instead it applies its own **fixed 128-value per-channel `LATENT_SHIFT`/`LATENT_SCALE`** constants at the pipeline boundary (`z = z * scale + shift` before decode). Sampling is **flow-matching Euler** with a **logit-normal timestep schedule** whose mean auto-adjusts for resolution, and **asymmetric CFG** (the unconditional branch is the image-only token sequence with zeroed text features — shorter and cheaper than a symmetric pass) with a **two-stage guidance schedule** (gw≈7 for the bulk, gw≈3 for the last few "polish" steps).
 
-For SharpInference, the genuinely new pieces are: (1) **single-stream unified-sequence DiT** with **scale-only AdaLN** (no shift) + tanh-gated residuals + sandwich norms; (2) **3D MRoPE with non-equal interleaved sections** and a large image-position offset; (3) **multi-layer Qwen3-VL hidden-state capture** (13 layers — the `LlamaStyleEncoder` family already supports Qwen, needs the multi-layer tap that Lens also needs); (4) the **fixed-constant latent normalization** (replaces the BN un-normalize used by Flux.2/Lens); (5) **asymmetric CFG** with a per-step guidance schedule; (6) the **structured-JSON prompt path**. The VAE, flow-match Euler scheduler core, RMSNorm, SwiGLU, and Qwen tokenizer are all reusable.
+For HartsyInference, the genuinely new pieces are: (1) **single-stream unified-sequence DiT** with **scale-only AdaLN** (no shift) + tanh-gated residuals + sandwich norms; (2) **3D MRoPE with non-equal interleaved sections** and a large image-position offset; (3) **multi-layer Qwen3-VL hidden-state capture** (13 layers — the `LlamaStyleEncoder` family already supports Qwen, needs the multi-layer tap that Lens also needs); (4) the **fixed-constant latent normalization** (replaces the BN un-normalize used by Flux.2/Lens); (5) **asymmetric CFG** with a per-step guidance schedule; (6) the **structured-JSON prompt path**. The VAE, flow-match Euler scheduler core, RMSNorm, SwiGLU, and Qwen tokenizer are all reusable.
 
 ## Detailed Findings
 
@@ -434,7 +434,7 @@ Ideogram4Pipeline.GenerateFromTokens(promptIds, height, width, presetName, seed)
 
 The reference is single-source (`ideogram-oss/ideogram4`). The divergences worth pinning are vs **ComfyUI** (which the user flagged as having mistakes) and vs **other DiTs in this codebase**:
 
-1. **Gemma-4 is NOT a conditioning text encoder.** ComfyUI bundles `gemma4_e4b_it_fp8_scaled.safetensors` (~2 GB) as a **local LLM to generate the structured-JSON prompt** (its "magic prompt"). The actual model conditioning comes from **Qwen3-VL only**. Treating Gemma-4 as a second text encoder would be wrong. The official repo uses an API/Claude/Ideogram-hosted LLM for the same job. **In SharpInference, the JSON builder is a separate utility (the prompt builder), with an optional pluggable LLM expander — not a model component.**
+1. **Gemma-4 is NOT a conditioning text encoder.** ComfyUI bundles `gemma4_e4b_it_fp8_scaled.safetensors` (~2 GB) as a **local LLM to generate the structured-JSON prompt** (its "magic prompt"). The actual model conditioning comes from **Qwen3-VL only**. Treating Gemma-4 as a second text encoder would be wrong. The official repo uses an API/Claude/Ideogram-hosted LLM for the same job. **In HartsyInference, the JSON builder is a separate utility (the prompt builder), with an optional pluggable LLM expander — not a model component.**
 2. **The "unconditional" checkpoint is (almost certainly) not a separate network.** Official CFG runs one transformer twice. See § Open Questions — verify by hashing.
 3. **Asymmetric CFG, not symmetric.** Unlike Lens/SD3.5 (duplicate one tensor batch-of-2, identical shapes), Ideogram's negative pass is a *shorter, image-only* sequence with zeroed text. Two forwards of different length.
 4. **Scale-only AdaLN (no shift), tanh gates, sandwich norms.** Every other DiT here has shift terms and a single pre-norm. Do not copy `FluxDoubleStreamBlock` / `JointBlock` modulation wholesale.
@@ -454,7 +454,7 @@ The reference is single-source (`ideogram-oss/ideogram4`). The divergences worth
 - **Magic-prompt system prompts** — `magic_prompt_system_prompts/` contents define the JSON the model expects; useful for the prompt-builder defaults but not load-bearing for inference.
 - **NF4 path** — we will NOT support bitsandbytes NF4 (managed dep). Confirm the fp8 / fp8_scaled / nvfp4 paths fully cover the weights (they should).
 
-## Implementation Notes (recommendations for SharpInference)
+## Implementation Notes (recommendations for HartsyInference)
 
 ### What can be reused
 
@@ -500,7 +500,7 @@ The reference is single-source (`ideogram-oss/ideogram4`). The divergences worth
 4. **`Ideogram4CheckpointConverter`** (diffusers passthrough + fp8_scaled/nvfp4).
 5. **`Ideogram4Pipeline`** (asymmetric CFG, two-stage guidance).
 6. **Validation harness** — expect 1-3 first-run bug iterations (MRoPE interleave, asymmetric-CFG seq lengths, latent-norm vs BN are the suspects).
-7. **SwarmUI extension wiring** — register the new arch loader + Qwen side-model in the SwarmUI-SharpInference extension (see Phase 4 checklist + the [[swarmui_extension]] memory).
+7. **SwarmUI extension wiring** — register the new arch loader + Qwen side-model in the SwarmUI-HartsyInference extension (see Phase 4 checklist + the [[swarmui_extension]] memory).
 
 ### What NOT to do
 

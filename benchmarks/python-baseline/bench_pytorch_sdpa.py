@@ -8,7 +8,7 @@ backend variants:
     apples-to-apples comparison vs our materialize-S baseline.
   * `pytorch-xformers` — xFormers' `memory_efficient_attention` for an alternate tiled implementation.
 
-Speedups in the paper compare SharpInference's FA2 to `pytorch-sdpa` (the default fast path)."""
+Speedups in the paper compare HartsyInference's FA2 to `pytorch-sdpa` (the default fast path)."""
 
 from __future__ import annotations
 

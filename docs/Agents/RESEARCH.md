@@ -44,7 +44,7 @@
 [Unresolved items — clearly marked]
 
 ## Implementation Notes
-[Recommendations for SharpInference]
+[Recommendations for HartsyInference]
 ```
 
 ## Quality Standards

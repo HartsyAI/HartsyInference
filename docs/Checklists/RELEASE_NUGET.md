@@ -1,6 +1,6 @@
 # Release — NuGet Publication
 
-> **Goal:** Publish all SharpInference packages to NuGet.org.
+> **Goal:** Publish all HartsyInference packages to NuGet.org.
 
 ---
 

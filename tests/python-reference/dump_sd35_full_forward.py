@@ -25,7 +25,7 @@ from safetensors.torch import load_file
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 from diffusers.loaders.single_file_utils import convert_sd3_transformer_checkpoint_to_diffusers
 
-CKPT_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/SD3/sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"
+CKPT_PATH = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Stable-Diffusion/SD3/sd3.5_medium_incl_clips_t5xxlfp8scaled.safetensors"
 OUT_DIR = "tests/python-reference/sd35_reference_tensors/full_forward"
 
 os.makedirs(f"{OUT_DIR}/inputs", exist_ok=True)

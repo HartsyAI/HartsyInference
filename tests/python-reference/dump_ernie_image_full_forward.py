@@ -22,7 +22,7 @@ import torch
 from diffusers.models.transformers.transformer_ernie_image import ErnieImageTransformer2DModel
 
 MODEL_DIR = sys.argv[1] if len(sys.argv) > 1 else \
-    "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/ErnieImage/v1"
+    "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Stable-Diffusion/ErnieImage/v1"
 OUT_DIR = "tests/python-reference/ernie_image_reference_tensors/full_forward"
 
 os.makedirs(f"{OUT_DIR}/inputs", exist_ok=True)

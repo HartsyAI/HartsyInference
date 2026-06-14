@@ -1,7 +1,7 @@
 # Phase 2 — Math Validation (Tokenizers + Schedulers + VAE)
 
 > **Goal:** Prove the math is correct before full UNet. Tokenizer matches Python exactly. Scheduler steps match diffusers. VAE output within 1e-3.
-> **Packages:** SharpInference.Tokenizers, SharpInference.Diffusion
+> **Packages:** HartsyInference.Tokenizers, HartsyInference.Diffusion
 
 ---
 

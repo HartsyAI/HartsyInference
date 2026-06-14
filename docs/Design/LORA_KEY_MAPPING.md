@@ -1,6 +1,6 @@
 # LoRA Key Mapping — Implementation Reference
 
-> Authoritative table of LoRA safetensors key patterns supported in v1, and the canonical SharpInference weight keys they map to. Every mapper in `src/SharpInference.ModelHandler/Lora/Mappers/` codifies the rules in this doc.
+> Authoritative table of LoRA safetensors key patterns supported in v1, and the canonical HartsyInference weight keys they map to. Every mapper in `src/HartsyInference.ModelHandler/Lora/Mappers/` codifies the rules in this doc.
 
 ## Supported formats (v1)
 
@@ -77,7 +77,7 @@ lora_unet_..._transformer_blocks_{T}_ff_net_2
   → ....transformer_blocks.{T}.ff.net.2
 ```
 
-These map to the SharpInference fields `_geGluProjWeight` and `_outLinearWeight` in [CrossAttentionBlock.cs:329-332](../../src/SharpInference.Diffusion/Models/Denoisers/UNetBlocks/CrossAttentionBlock.cs#L329-L332).
+These map to the HartsyInference fields `_geGluProjWeight` and `_outLinearWeight` in [CrossAttentionBlock.cs:329-332](../../src/HartsyInference.Diffusion/Models/Denoisers/UNetBlocks/CrossAttentionBlock.cs#L329-L332).
 
 ### CLIP-L (text encoder) — `lora_te_*`
 
@@ -101,7 +101,7 @@ lora_te_text_model_encoder_layers_{L}_mlp_fc2
   → text_model.encoder.layers.{L}.mlp.fc2
 ```
 
-These match [ClipTextEncoder.cs:289-302](../../src/SharpInference.Diffusion/Models/TextEncoders/ClipTextEncoder.cs#L289-L302) field paths.
+These match [ClipTextEncoder.cs:289-302](../../src/HartsyInference.Diffusion/Models/TextEncoders/ClipTextEncoder.cs#L289-L302) field paths.
 
 ### General algorithm (F1 / F2)
 
@@ -263,7 +263,7 @@ lora_transformer_transformer_blocks_0_attn_to_q.lora_A.weight
   → role: Down (from .lora_A.weight)
 ```
 
-This matches [FluxDoubleStreamBlock.cs:83](../../src/SharpInference.Diffusion/Models/Denoisers/DiTBlocks/FluxDoubleStreamBlock.cs#L83) which loads `weights[$"{prefix}.attn.to_q.weight"]`.
+This matches [FluxDoubleStreamBlock.cs:83](../../src/HartsyInference.Diffusion/Models/Denoisers/DiTBlocks/FluxDoubleStreamBlock.cs#L83) which loads `weights[$"{prefix}.attn.to_q.weight"]`.
 
 ### CLIP-L in AI Toolkit Flux
 
@@ -284,7 +284,7 @@ transformer.transformer_blocks.0.attn.to_q.lora_A.weight
   → append .weight: transformer_blocks.0.attn.to_q.weight
 ```
 
-No underscore-to-dot transformation needed — the keys already use dots correctly. The leading `transformer.` segment is stripped because [FluxTransformer.LoadWeights](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L64) is called with no prefix on a dict that already has top-level keys like `transformer_blocks.0.attn.to_q.weight`.
+No underscore-to-dot transformation needed — the keys already use dots correctly. The leading `transformer.` segment is stripped because [FluxTransformer.LoadWeights](../../src/HartsyInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L64) is called with no prefix on a dict that already has top-level keys like `transformer_blocks.0.attn.to_q.weight`.
 
 ### CLIP-L for diffusers Flux
 

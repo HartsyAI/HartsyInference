@@ -1,7 +1,7 @@
 """
 Dumps intermediate tensor statistics from a diffusers SD3 pipeline run.
 Saves text encoder outputs, per-step latent stats, and final latent for
-cross-runtime validation against SharpInference C# output.
+cross-runtime validation against HartsyInference C# output.
 
 Usage: python dump_sd3_reference_stats.py <model_dir> [output_dir]
   model_dir: path to SD3 Medium diffusers model (e.g., stabilityai/stable-diffusion-3-medium-diffusers)

@@ -369,7 +369,7 @@ The unconditional pass uses zeroed-out text embeddings and zero pooled projectio
 
 ## Implementation Notes
 
-### For SharpInference
+### For HartsyInference
 
 1. **Code reuse with Flux**: The joint attention mechanism is fundamentally different from Flux's double-stream/single-stream split. However, the following can be shared:
    - Flow matching scheduler (same `FlowMatchEulerDiscreteScheduler`, different shift values)
@@ -394,7 +394,7 @@ The unconditional pass uses zeroed-out text embeddings and zero pooled projectio
    - Total with all encoders: ~16GB in fp16
    - Quantization (fp8 for T5, fp8/int8 for transformer) reduces this significantly
 
-4. **Weight loading**: The Stability AI reference derives all architecture parameters from weight tensor shapes at load time. Key formula: `depth = x_embedder.proj.weight.shape[0] // 64`. This means SharpInference can auto-detect model configuration from safetensors metadata without requiring a separate config file.
+4. **Weight loading**: The Stability AI reference derives all architecture parameters from weight tensor shapes at load time. Key formula: `depth = x_embedder.proj.weight.shape[0] // 64`. This means HartsyInference can auto-detect model configuration from safetensors metadata without requiring a separate config file.
 
 5. **Latent scaling**: After VAE decode, apply: `latent_for_decode = (x / 1.5305) + 0.0609`. This is different from SD1.5/SDXL which use a simple scale factor.
 

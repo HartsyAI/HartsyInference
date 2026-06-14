@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wraps Nsight Systems around a single SharpInference end-to-end generation.
+# Wraps Nsight Systems around a single HartsyInference end-to-end generation.
 #
 # Default target: SDXL 1024² 20 steps (the hot path the paper reports). Override via $TEST_FILTER.
 #
@@ -42,7 +42,7 @@ nsys profile \
     --cuda-memory-usage=true \
     --force-overwrite=true \
     -- \
-    dotnet test tests/SharpInference.Diffusion.Tests/SharpInference.Diffusion.Tests.csproj \
+    dotnet test tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj \
         --filter "$TEST_FILTER" \
         --logger "console;verbosity=detailed" \
         --no-build \

@@ -1,5 +1,5 @@
 """End-to-end PyTorch + diffusers generation baselines. Runs SDXL / Flux Dev / SD3.5 Medium /
-Z-Image with matched seed, prompt, scheduler config, and step count to the SharpInference test
+Z-Image with matched seed, prompt, scheduler config, and step count to the HartsyInference test
 suite. Per-step timing emitted to a CSV with the canonical e2e schema (PROFILING_METHODOLOGY.md
 § 14).
 

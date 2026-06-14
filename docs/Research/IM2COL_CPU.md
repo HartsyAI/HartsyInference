@@ -4,7 +4,7 @@
 
 ## Summary
 
-The im2col (image-to-column) transformation converts a convolution operation into a general matrix multiplication (GEMM) by rearranging input image patches into columns of a matrix. Each column represents one flattened receptive field (all input channels for one spatial patch). The filter weights are reshaped into rows, and a single GEMM call produces the entire convolution output. This approach trades memory (the im2col buffer is K^2 times larger than the input per channel) for the ability to use highly optimized BLAS/SIMD GEMM routines. For SharpInference.Cpu, im2col + GEMM is the primary Conv2D strategy, with special-case optimizations for 1x1 kernels (skip im2col entirely) and depthwise convolution (per-channel im2col + element-wise multiply or batched small GEMMs).
+The im2col (image-to-column) transformation converts a convolution operation into a general matrix multiplication (GEMM) by rearranging input image patches into columns of a matrix. Each column represents one flattened receptive field (all input channels for one spatial patch). The filter weights are reshaped into rows, and a single GEMM call produces the entire convolution output. This approach trades memory (the im2col buffer is K^2 times larger than the input per channel) for the ability to use highly optimized BLAS/SIMD GEMM routines. For HartsyInference.Cpu, im2col + GEMM is the primary Conv2D strategy, with special-case optimizations for 1x1 kernels (skip im2col entirely) and depthwise convolution (per-channel im2col + element-wise multiply or batched small GEMMs).
 
 ---
 
@@ -18,7 +18,7 @@ Convolution slides a kernel over an input feature map, computing element-wise mu
 
 ### 2. NCHW Data Layout Assumption
 
-SharpInference uses NCHW (batch, channels, height, width) tensor layout, matching PyTorch and ONNX conventions. The im2col transformation and GEMM dimensions below assume NCHW throughout.
+HartsyInference uses NCHW (batch, channels, height, width) tensor layout, matching PyTorch and ONNX conventions. The im2col transformation and GEMM dimensions below assume NCHW throughout.
 
 ### 3. Output Dimension Formulas
 
@@ -44,7 +44,7 @@ In depthwise convolution (groups = C_in = C_out), each channel is convolved inde
 - **Per-channel im2col + batched GEMV:** For each channel c, extract the im2col patch matrix of shape `[K_h*K_w, H_out*W_out]`, multiply by filter vector `[1, K_h*K_w]`. This produces C_in independent GEMV calls. Overhead: many small GEMV calls.
 - **Direct loop with SIMD:** For depthwise, it is often faster to avoid im2col entirely and use a direct convolution loop with SIMD vectorization across the spatial (W_out) dimension. This avoids the memory expansion entirely.
 
-For SharpInference, the recommended approach is direct SIMD for depthwise (common kernel sizes 3x3, 5x5) and im2col+GEMM for grouped convolution where groups > 1 but groups < C_in.
+For HartsyInference, the recommended approach is direct SIMD for depthwise (common kernel sizes 3x3, 5x5) and im2col+GEMM for grouped convolution where groups > 1 but groups < C_in.
 
 ### 7. col2im (Reverse Operation)
 
@@ -63,7 +63,7 @@ Research literature identifies several approaches to improve cache behavior:
 - **MEC (Memory-Efficient Convolution):** Reduces the lowered matrix size by ~54% by exploiting horizontal overlap between adjacent patches and splitting one large GEMM into multiple smaller parallel GEMMs.
 - **Tile blocking:** Divide the output spatial dimensions into tiles that fit in L2 cache. For each tile, only the corresponding im2col columns are materialized, keeping the working set small.
 
-For SharpInference's initial implementation, the practical approach is: build the im2col buffer in tiles that fit in L2 (typically 256 KB - 1 MB per core on modern x86), then call GEMM per tile. This balances simplicity with good cache behavior.
+For HartsyInference's initial implementation, the practical approach is: build the im2col buffer in tiles that fit in L2 (typically 256 KB - 1 MB per core on modern x86), then call GEMM per tile. This balances simplicity with good cache behavior.
 
 ---
 
@@ -317,7 +317,7 @@ function conv_transpose_2d(input, filter, bias, stride, padding, dilation):
 | Cache optimization | None (naive fill) | Workspace reuse | MKL-DNN handles it | Fused with GEMM |
 | Memory overhead | K^2 x input size | Pre-sized max buffer | K^2 x input size | ~0 (pointers only) |
 
-**im2col vs im2row:** im2row fills the lowered matrix in row-major order (each row = one output position, each column = one filter tap). On CPU, im2row tends to have better spatial locality since GEMM implementations access the B matrix in column-major order. On GPU, im2col is preferred. For SharpInference CPU, **im2col (Caffe-style) is recommended** for initial implementation due to simplicity and extensive documentation; im2row can be explored later if profiling shows cache misses in the GEMM B-matrix access.
+**im2col vs im2row:** im2row fills the lowered matrix in row-major order (each row = one output position, each column = one filter tap). On CPU, im2row tends to have better spatial locality since GEMM implementations access the B matrix in column-major order. On GPU, im2col is preferred. For HartsyInference CPU, **im2col (Caffe-style) is recommended** for initial implementation due to simplicity and extensive documentation; im2row can be explored later if profiling shows cache misses in the GEMM B-matrix access.
 
 ---
 
@@ -334,7 +334,7 @@ function conv_transpose_2d(input, filter, bias, stride, padding, dilation):
 ### Recommended Implementation Order
 
 1. **im2col_cpu with 1x1 fast path** -- handles the two most common cases (3x3 and 1x1 kernels)
-2. **GEMM integration** -- wire up to the existing SIMD GEMM from SharpInference.Cpu
+2. **GEMM integration** -- wire up to the existing SIMD GEMM from HartsyInference.Cpu
 3. **Grouped convolution** -- loop over groups with pointer offsets
 4. **Depthwise convolution** -- direct SIMD loop (skip im2col for this case)
 5. **col2im for transposed convolution** -- needed for VAE decoder
@@ -342,7 +342,7 @@ function conv_transpose_2d(input, filter, bias, stride, padding, dilation):
 
 ### Buffer Management
 
-Use `TensorPool` from `SharpInference.Core.Tensors`:
+Use `TensorPool` from `HartsyInference.Core.Tensors`:
 ```csharp
 // Rent im2col workspace
 nuint bufferSize = (nuint)(cIn * kH * kW * hOut * wOut * sizeof(float));

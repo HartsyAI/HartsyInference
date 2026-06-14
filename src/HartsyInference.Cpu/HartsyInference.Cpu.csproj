@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Cpu</PackageId>
+    <Description>CPU inference backend for HartsyInference with AVX2/AVX-512/NEON SIMD kernels.</Description>
+    <RootNamespace>HartsyInference.Cpu</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+  </ItemGroup>
+
+</Project>

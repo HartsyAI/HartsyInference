@@ -501,7 +501,7 @@ Input: hidden_states [B, seq_len, inner_dim], controlnet_cond, timestep, text_em
 
 ## Implementation Notes
 
-### For SharpInference C# Implementation
+### For HartsyInference C# Implementation
 
 1. **ControlNet is a separate model** that runs in parallel with the main UNet/transformer. Its forward pass receives the same noisy latent, timestep, and text embeddings as the main model, plus the control image.
 

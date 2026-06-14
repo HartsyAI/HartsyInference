@@ -2,7 +2,7 @@
 
 ## Summary
 
-Quantization enables large diffusion models to run on consumer GPUs with limited VRAM. Flux.1-dev at FP16 requires ~24 GB VRAM; Q8_0 reduces this to ~12 GB while maintaining 98-99% of visual quality. The key finding is that **mixed-precision is essential**: the UNet/DiT backbone tolerates Q8_0 (and even Q4_K in transformer architectures) with minimal degradation, but the VAE decoder and text encoders are significantly more sensitive. The recommended strategy for SharpInference is: **Q8_0 for the denoising backbone + FP16 for VAE + FP16 or FP8 for text encoders**, with GGUF as the on-disk format and on-demand dequantization during forward passes. Q4 quantization is usable for DiT-based models (Flux, SD3) but causes visible artifacts in UNet-based models (SD1.5, SDXL) and should be offered as an option with appropriate warnings. Q2 is not viable for any diffusion component.
+Quantization enables large diffusion models to run on consumer GPUs with limited VRAM. Flux.1-dev at FP16 requires ~24 GB VRAM; Q8_0 reduces this to ~12 GB while maintaining 98-99% of visual quality. The key finding is that **mixed-precision is essential**: the UNet/DiT backbone tolerates Q8_0 (and even Q4_K in transformer architectures) with minimal degradation, but the VAE decoder and text encoders are significantly more sensitive. The recommended strategy for HartsyInference is: **Q8_0 for the denoising backbone + FP16 for VAE + FP16 or FP8 for text encoders**, with GGUF as the on-disk format and on-demand dequantization during forward passes. Q4 quantization is usable for DiT-based models (Flux, SD3) but causes visible artifacts in UNet-based models (SD1.5, SDXL) and should be offered as an option with appropriate warnings. Q2 is not viable for any diffusion component.
 
 ## Detailed Findings
 
@@ -48,7 +48,7 @@ Key difference: DiT models like Flux use predominantly linear layers and attenti
 
 ### 3. Post-Load vs Pre-Quantized Loading Strategies
 
-**Strategy A: Pre-quantized GGUF (Recommended for SharpInference)**
+**Strategy A: Pre-quantized GGUF (Recommended for HartsyInference)**
 - Weights stored on disk in quantized GGUF format (Q8_0, Q4_K_M, etc.).
 - During inference, each tensor is dequantized on-demand to the compute dtype (FP16 or BF16) for each forward pass.
 - Advantages: Fast loading, small disk footprint, no quantization step at startup.
@@ -67,7 +67,7 @@ Key difference: DiT models like Flux use predominantly linear layers and attenti
 - Load different components from different files at different precisions.
 - sd.cpp supports separate `--diffusion-model`, `--clip_l`, `--clip_g`, `--t5xxl`, `--vae` flags.
 - Example: Q4_K DiT + FP16 VAE + Q4_K T5 + FP16 CLIP.
-- **This is the recommended approach for SharpInference** — maximum flexibility.
+- **This is the recommended approach for HartsyInference** — maximum flexibility.
 
 ### 4. Layer-Level Sensitivity Analysis
 
@@ -99,7 +99,7 @@ Q4 quantization for diffusion models is **not universally "too lossy"** but requ
 - **DiT models (Flux, SD3):** Q4_K_S is viable. SVDQuant achieves W4A4 on FLUX.1-dev with FID 19.9 vs FP16 baseline FID 20.3 — actually slightly better ([SVDQuant paper](https://arxiv.org/html/2411.05007v1)). Community reports Q4_1 delivers "outstanding quality" on Flux even on a GTX 1070ti.
 - **UNet models (SDXL):** Q4 shows more degradation. SDXL W4A4 FID increases from 16.6 (FP16) to 19.0-20.7 (quantized). Usable but noticeably different.
 - **SD1.5:** Q4 is marginal. Research suggests 3-bit uniform quantization causes "extremely challenging" FID degradation (jumping from ~100 to 170+ FID).
-- **For SharpInference:** Offer Q4_K as an option for DiT models with a note that quality is reduced. For UNet models, Q8_0 should be the minimum recommended.
+- **For HartsyInference:** Offer Q4_K as an option for DiT models with a note that quality is reduced. For UNet models, Q8_0 should be the minimum recommended.
 
 ### 6. Quality Metrics
 
@@ -301,17 +301,17 @@ model/
 | Mixed quant types | Yes (via PR #447 for SD3.5) | Limited | Yes (per-module config) |
 | torch.compile | N/A | N/A | Compatible (torchao, GGUF) |
 
-**Key architectural difference for SharpInference:** sd.cpp is the closest reference since we are also building a native inference engine (C# instead of C++). We should follow sd.cpp's pattern of separate GGUF files per component with independent precision, and its on-demand dequantization approach. However, we can improve on sd.cpp by caching dequantized tensors when VRAM permits (sd.cpp currently dequantizes every forward pass).
+**Key architectural difference for HartsyInference:** sd.cpp is the closest reference since we are also building a native inference engine (C# instead of C++). We should follow sd.cpp's pattern of separate GGUF files per component with independent precision, and its on-demand dequantization approach. However, we can improve on sd.cpp by caching dequantized tensors when VRAM permits (sd.cpp currently dequantizes every forward pass).
 
 ## Open Questions
 
-- [ ] Optimal dequantization caching strategy: should SharpInference cache dequantized tensors between denoising steps when VRAM permits, or always dequantize on-the-fly?
+- [ ] Optimal dequantization caching strategy: should HartsyInference cache dequantized tensors between denoising steps when VRAM permits, or always dequantize on-the-fly?
 - [ ] Whether INT8 GEMM kernels on modern GPUs (Ada, Hopper) can skip dequantization entirely and compute directly in INT8 for diffusion workloads.
 - [ ] Performance impact of GGUF memory-mapped loading on Windows with .NET 10 — need to verify MemoryMappedFile performance for large GGUF files.
 
 ## Implementation Notes
 
-### For SharpInference.ModelHandler
+### For HartsyInference.ModelHandler
 
 1. **GGUF loader must support per-component precision.** The model handler should accept separate paths and quant configs for backbone, VAE, and each text encoder. Default: Q8_0 backbone, FP16 everything else.
 
@@ -328,9 +328,9 @@ model/
 
 5. **K-quant tensor shape validation:** Before applying K-quant dequantization, verify the tensor's element count is divisible by 256 (superblock size). For SD3.5 Large, ~90% of tensors will fail this check and need fallback to legacy quant types.
 
-6. **Conversion tool:** SharpInference should include a safetensors-to-GGUF converter that supports mixed quantization (different quant levels for different components), following sd.cpp's approach.
+6. **Conversion tool:** HartsyInference should include a safetensors-to-GGUF converter that supports mixed quantization (different quant levels for different components), following sd.cpp's approach.
 
-### For SharpInference.Diffusion
+### For HartsyInference.Diffusion
 
 1. **Pipeline should enforce mixed precision by default.** When loading a Flux pipeline, automatically route:
    - DiT transformer: user-specified quant (default Q8_0)

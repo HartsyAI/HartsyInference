@@ -1,6 +1,6 @@
 # OpenVoice v2 — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (OpenVoice pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (OpenVoice pipeline)
 
 ## Summary
 
@@ -143,7 +143,7 @@ Full end-to-end clone of an utterance:
    - `z_p = flow(z, g=g_src)`.
    - `z_hat = flow(z_p, g=g_tgt, reverse=True)`.
    - `audio_out = dec(z_hat, g=g_tgt)` @ 22.05 kHz.
-4. (Optional) Apply audio watermarking via `wavmark` model — partitions into 16000-sample chunks and embeds message bits. Disabled by default in v2; we can skip this in SharpInference.
+4. (Optional) Apply audio watermarking via `wavmark` model — partitions into 16000-sample chunks and embeds message bits. Disabled by default in v2; we can skip this in HartsyInference.
 
 ### Language Support
 
@@ -415,11 +415,11 @@ def flip(x): return x.flip(dim=1)            # reverse channel order; log-det = 
 - [ ] Whether MeloTTS speaker IDs map 1-to-1 to the `base_speakers/ses/*.pth` files, or whether the pth files were extracted from a specific recording of each base voice (matters for stage-1/stage-2 alignment).
 - [ ] Whether tau ∈ [0.0, 1.0] is the recommended range or it can usefully go higher.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **Stage 1 (MeloTTS)** — implement per [MELOTTS_ARCHITECTURE.md](MELOTTS_ARCHITECTURE.md). The OpenVoice C# wrapper just consumes the stage-1 PCM and the pre-extracted source `g_src` embedding, and does not need to know what's inside MeloTTS.
 
-2. **Stage 2 (Tone Color Converter)** is the unique part of OpenVoice. Modules we need in `SharpInference.Audio`:
+2. **Stage 2 (Tone Color Converter)** is the unique part of OpenVoice. Modules we need in `HartsyInference.Audio`:
 
    - **`PosteriorEncoder`** — `Conv1d(513→192, k=1)` → 16× WN(k=5, d=1) with speaker cond → `Conv1d(192→384, k=1)` → split into (mean, logσ). One reparameterized sample with `tau`.
    - **`ResidualCouplingBlock`** — 4× (`ResidualCouplingLayer` + `Flip`).
@@ -430,7 +430,7 @@ def flip(x): return x.flip(dim=1)            # reverse channel order; log-det = 
 
 3. **WN (WaveNet) block** is the central reusable primitive — it appears in posterior encoder, every coupling layer, and (with a different shape) HiFi-GAN. Implement once with parameters `(in_channels, hidden, kernel, dilation_rate, n_layers, gin_channels)`. Hot-path ops: dilated `Conv1d(k=5)`, fused tanh-sigmoid gate, residual+skip projection (single `Conv1d(hidden→2·hidden, k=1)`). The speaker conditioning is a single big `Conv1d(gin → 2·hidden·n_layers, k=1)` whose output is sliced per layer — implement that exact layout to match checkpoint shape.
 
-4. **GRU implementation** — PyTorch's `GRU(input, hidden, batch_first=True)` with sequence input. We only need the final hidden state, not all timesteps. Standard fused GRU cell: `r = σ(Wir·x + bir + Whr·h + bhr)`, `z = σ(Wiz·x + biz + Whz·h + bhz)`, `n = tanh(Win·x + bin + r * (Whn·h + bhn))`, `h' = (1-z)·n + z·h`. Add `Gru` to `SharpInference.Core/Modules` (Kokoro also needs LSTM — same family, different gates).
+4. **GRU implementation** — PyTorch's `GRU(input, hidden, batch_first=True)` with sequence input. We only need the final hidden state, not all timesteps. Standard fused GRU cell: `r = σ(Wir·x + bir + Whr·h + bhr)`, `z = σ(Wiz·x + biz + Whz·h + bhz)`, `n = tanh(Win·x + bin + r * (Whn·h + bhn))`, `h' = (1-z)·n + z·h`. Add `Gru` to `HartsyInference.Core/Modules` (Kokoro also needs LSTM — same family, different gates).
 
 5. **InstanceNorm2d** — per-(batch, channel) mean/variance across spatial dims, eps=1e-5, no learnable affine. Trivial elementwise kernel; can share with our existing LayerNorm path. Different from BatchNorm (no running stats).
 
@@ -442,7 +442,7 @@ def flip(x): return x.flip(dim=1)            # reverse channel order; log-det = 
 
 9. **Determinism vs sampling** — the posterior reparameterization `z = m + exp(logs) * randn * tau` uses Gaussian noise. For reproducibility expose a `seed` parameter; default to deterministic by passing `tau=0.0` if the caller wants reproducible output (this becomes "take the posterior mean", which loses some prosody nuance but is bit-stable). The reference defaults to `tau=0.3`.
 
-10. **API shape** for `SharpInference.Audio.OpenVoiceCloner`:
+10. **API shape** for `HartsyInference.Audio.OpenVoiceCloner`:
     ```csharp
     // One-shot per target voice (slow only because of I/O; model is tiny)
     SpeakerEmbedding ExtractReference(ReadOnlySpan<float> audio22kMono, int sampleRate = 22050);

@@ -3,7 +3,7 @@ Dumps Flux flow-match Euler scheduler reference data: sigma schedules with
 dynamic exponential shift for various resolutions and step counts.
 
 Validates the exp(mu) shift formula and saves schedules as raw float32 binary
-for cross-runtime comparison against SharpInference C#.
+for cross-runtime comparison against HartsyInference C#.
 
 Usage: python dump_flux_scheduler.py [output_dir]
 Requires: pip install torch numpy diffusers

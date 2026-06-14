@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Core</PackageId>
+    <Description>Core tensor types, backend abstractions, and shared interfaces for the HartsyInference AI inference engine.</Description>
+    <RootNamespace>HartsyInference.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Cuda" />
+    <InternalsVisibleTo Include="HartsyInference.Vulkan" />
+  </ItemGroup>
+
+</Project>

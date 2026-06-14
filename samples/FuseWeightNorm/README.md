@@ -43,6 +43,6 @@ All other tensors are copied through unchanged.
   consumer doesn't pay a (typically 50-200 ms) fusion cost at load time.
 - **Inspection / debugging.** Some tooling expects vanilla `.weight` keys and can't
   handle the `weight_g` / `weight_v` pair directly.
-- **Hashing / signing.** Pre-fused checkpoints are byte-stable across SharpInference
+- **Hashing / signing.** Pre-fused checkpoints are byte-stable across HartsyInference
   versions; the `weight_g` / `weight_v` representation isn't (PyTorch can choose to
   normalize along different axes depending on minor version changes).

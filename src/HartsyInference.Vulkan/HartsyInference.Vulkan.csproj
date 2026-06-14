@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Vulkan</PackageId>
+    <Description>Vulkan compute backend for HartsyInference. Cross-vendor GPU inference (NVIDIA, AMD, Intel, Apple via MoltenVK) via SPIR-V compute shaders and P/Invoke into the Vulkan loader.</Description>
+    <RootNamespace>HartsyInference.Vulkan</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Vulkan.Tests" />
+  </ItemGroup>
+
+  <!-- SPIR-V kernel files shipped as content, loaded from disk at runtime.
+       Built from native/vulkan/shaders/*.comp.glsl by native/vulkan/build.sh.
+       The build is invoked manually (not as MSBuild target) because not every
+       dev box has glslangValidator installed; CI handles compilation. -->
+  <ItemGroup>
+    <!-- One item, two jobs: copy SPIR-V next to THIS project's own output under Spirv/
+         (local build/tests), AND pack it into the nupkg under spirv/.
+         HartsyInference.Vulkan.targets then copies it into a *consumer's* output. -->
+    <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)" Pack="true" PackagePath="spirv/">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Ship the copy logic. build/ = direct package refs; buildTransitive/ = via meta-package. -->
+    <None Include="HartsyInference.Vulkan.targets" Pack="true" PackagePath="build/;buildTransitive/" Visible="false" />
+  </ItemGroup>
+
+</Project>

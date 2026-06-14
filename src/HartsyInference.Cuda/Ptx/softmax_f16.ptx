@@ -1,0 +1,176 @@
+// HartsyInference Softmax kernel - FP16 I/O, FP32 internal
+// Numerically stable per-row softmax: output[i] = exp(input[i] - max) / sum(exp(input - max))
+// Launch: gridDim.x = total_rows, blockDim.x = 256
+// In-place: reads and writes to same data pointer
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+.extern .shared .f32 sdata[];
+
+// --- softmax_f16 --------------------------------------------------
+// In-place softmax over rows: data[row, col] (f16)
+// Params: data* (f16), row_len, total_rows
+.visible .entry softmax_f16(
+    .param .u64 param_data,
+    .param .u32 param_row_len,
+    .param .u32 param_total_rows
+)
+{
+    .reg .u64 %rd<12>;
+    .reg .u32 %r<16>;
+    .reg .f32 %f<16>;
+    .reg .b16 %h1;
+    .reg .pred %p<4>;
+
+    ld.param.u64 %rd0, [param_data];
+    ld.param.u32 %r0, [param_row_len];
+    ld.param.u32 %r1, [param_total_rows];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %tid.x;
+    mov.u32 %r4, %ntid.x;
+
+    setp.ge.u32 %p1, %r2, %r1;
+    @%p1 bra done_softmax;
+
+    // Row base pointer (f16: 2 bytes per element)
+    mul.lo.u32 %r5, %r2, %r0;
+    cvt.u64.u32 %rd1, %r5;
+    shl.b64 %rd1, %rd1, 1;         // * 2
+    add.u64 %rd2, %rd0, %rd1;
+
+    // Shared memory
+    mov.u64 %rd3, sdata;
+    cvt.u64.u32 %rd4, %r3;
+    shl.b64 %rd4, %rd4, 2;         // shared is f32
+    add.u64 %rd5, %rd3, %rd4;
+
+    // -- Pass 1: Find row max --
+    mov.f32 %f1, 0fFF800000;       // -inf
+    mov.u32 %r6, %r3;
+
+sm16_max_loop:
+    setp.ge.u32 %p2, %r6, %r0;
+    @%p2 bra sm16_max_done;
+
+    cvt.u64.u32 %rd6, %r6;
+    shl.b64 %rd6, %rd6, 1;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.b16 %h1, [%rd7];
+    cvt.f32.f16 %f2, %h1;
+    max.f32 %f1, %f1, %f2;
+
+    add.u32 %r6, %r6, %r4;
+    bra sm16_max_loop;
+
+sm16_max_done:
+    st.shared.f32 [%rd5], %f1;
+    bar.sync 0;
+
+    mov.u32 %r7, 128;
+sm16_reduce_max:
+    setp.eq.u32 %p2, %r7, 0;
+    @%p2 bra sm16_reduce_max_done;
+    setp.ge.u32 %p3, %r3, %r7;
+    @%p3 bra sm16_reduce_max_skip;
+
+    add.u32 %r8, %r3, %r7;
+    cvt.u64.u32 %rd6, %r8;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd3, %rd6;
+    ld.shared.f32 %f2, [%rd7];
+    ld.shared.f32 %f3, [%rd5];
+    max.f32 %f3, %f3, %f2;
+    st.shared.f32 [%rd5], %f3;
+
+sm16_reduce_max_skip:
+    bar.sync 0;
+    shr.u32 %r7, %r7, 1;
+    bra sm16_reduce_max;
+
+sm16_reduce_max_done:
+    ld.shared.f32 %f4, [%rd3];     // row_max
+    bar.sync 0;
+
+    // -- Pass 2: exp(x - max) and sum --
+    mov.f32 %f5, 0f00000000;       // thread_sum
+    mov.u32 %r6, %r3;
+
+sm16_exp_loop:
+    setp.ge.u32 %p2, %r6, %r0;
+    @%p2 bra sm16_exp_done;
+
+    cvt.u64.u32 %rd6, %r6;
+    shl.b64 %rd6, %rd6, 1;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.b16 %h1, [%rd7];
+    cvt.f32.f16 %f2, %h1;
+
+    sub.f32 %f6, %f2, %f4;         // x - max
+    mov.f32 %f7, 0f3FB8AA3B;       // log2(e)
+    mul.f32 %f6, %f6, %f7;
+    ex2.approx.f32 %f8, %f6;       // exp(x - max)
+
+    // Store exp back as f16
+    cvt.rn.f16.f32 %h1, %f8;
+    st.global.b16 [%rd7], %h1;
+
+    add.f32 %f5, %f5, %f8;
+
+    add.u32 %r6, %r6, %r4;
+    bra sm16_exp_loop;
+
+sm16_exp_done:
+    st.shared.f32 [%rd5], %f5;
+    bar.sync 0;
+
+    mov.u32 %r7, 128;
+sm16_reduce_sum:
+    setp.eq.u32 %p2, %r7, 0;
+    @%p2 bra sm16_reduce_sum_done;
+    setp.ge.u32 %p3, %r3, %r7;
+    @%p3 bra sm16_reduce_sum_skip;
+
+    add.u32 %r8, %r3, %r7;
+    cvt.u64.u32 %rd6, %r8;
+    shl.b64 %rd6, %rd6, 2;
+    add.u64 %rd7, %rd3, %rd6;
+    ld.shared.f32 %f2, [%rd7];
+    ld.shared.f32 %f3, [%rd5];
+    add.f32 %f3, %f3, %f2;
+    st.shared.f32 [%rd5], %f3;
+
+sm16_reduce_sum_skip:
+    bar.sync 0;
+    shr.u32 %r7, %r7, 1;
+    bra sm16_reduce_sum;
+
+sm16_reduce_sum_done:
+    ld.shared.f32 %f9, [%rd3];
+    rcp.approx.f32 %f10, %f9;      // inv_sum
+    bar.sync 0;
+
+    // -- Pass 3: Normalize --
+    mov.u32 %r6, %r3;
+
+sm16_norm_loop:
+    setp.ge.u32 %p2, %r6, %r0;
+    @%p2 bra done_softmax;
+
+    cvt.u64.u32 %rd6, %r6;
+    shl.b64 %rd6, %rd6, 1;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.b16 %h1, [%rd7];
+    cvt.f32.f16 %f2, %h1;
+    mul.f32 %f2, %f2, %f10;
+    cvt.rn.f16.f32 %h1, %f2;
+    st.global.b16 [%rd7], %h1;
+
+    add.u32 %r6, %r6, %r4;
+    bra sm16_norm_loop;
+
+done_softmax:
+    ret;
+}

@@ -67,7 +67,7 @@ if not hasattr(_cosmos_mod, "transforms"):
         print("Injected torchvision.transforms SHIM (torchvision not installed).")
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ANIMA_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/Anima/anima-preview3-base.safetensors"
+ANIMA_PATH = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Stable-Diffusion/Anima/anima-preview3-base.safetensors"
 OUT_DIR = os.path.join(REPO_ROOT, "tests/python-reference/anima_reference_tensors/full_forward")
 
 # ── Memory-saving knobs ──

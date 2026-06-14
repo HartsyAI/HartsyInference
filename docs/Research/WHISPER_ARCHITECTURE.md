@@ -1,6 +1,6 @@
 # Whisper — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Whisper encoder, decoder, pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Whisper encoder, decoder, pipeline)
 
 ## Summary
 
@@ -340,7 +340,7 @@ We should implement sequential first (matches reference behavior, less brittle d
 | Format | `.pt` (pickle) | `.bin` (GGML) | safetensors |
 | Quantization | None | Q4_0/Q5_0/Q8_0 | bitsandbytes int8 |
 
-For SharpInference our reference is the **HF safetensors layout** (most stable, no pickle hazard, our SafeTensors loader is ready). Validation goes against whisper.cpp's GGML model (greedy, identical mel) for bit-level reproducibility.
+For HartsyInference our reference is the **HF safetensors layout** (most stable, no pickle hazard, our SafeTensors loader is ready). Validation goes against whisper.cpp's GGML model (greedy, identical mel) for bit-level reproducibility.
 
 ## Open Questions
 
@@ -348,7 +348,7 @@ For SharpInference our reference is the **HF safetensors layout** (most stable, 
 - [ ] Whether to expose chunked long-form as an option in addition to sequential — chunked is easier to parallelize across GPU streams
 - [ ] Beam search implementation strategy — beams add KV-cache duplication overhead (5x for default beam_size=5). May skip beam in v1, ship greedy + temperature fallback.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **Attention scaling**: Use `head_dim^(-0.25)` on both Q and K, NOT the standard `head_dim^(-0.5)` on QK product. Easy to miss; check against whisper.cpp's `whisper_full_default_params`.
 

@@ -46,7 +46,7 @@ These apply to ALL agents. Specialized files only add task-specific rules.
 
 **Package boundaries** — respect `docs/Design/NUGET_PACKAGE_DESIGN.md`. Don't leak CUDA/Vulkan into CPU packages.
 
-**Reuse shared primitives — no redundant bloat.** The backend is modular *so that models share it*. Before writing ANY helper (inline or a new shared one), grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`, `Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics (`WhisperOps` for `ProjectLinear`/`EnsureF32`, `WeightNorm`, `IStft`, and `SharpInference.Audio/Dsp/` → `NsfVocoderDsp` for NSF source / forward-STFT / iSTFT head / pad / scale, `DeterministicRng` for seeded noise). Concrete: a `[1,C,T]↔[1,T,C]` layout transpose is `backend.Transpose2D(out, in, d1, d2)` — never a hand-rolled loop. When 2+ models need the same operation, hoist ONE helper **parameterized by the differences** (a few extra params or a `switch` beats a dozen near-identical small methods). When adding a model, audit it for duplication against the models already built and fold the shared parts. Re-run affected models' tests after hoisting — shared code is load-bearing.
+**Reuse shared primitives — no redundant bloat.** The backend is modular *so that models share it*. Before writing ANY helper (inline or a new shared one), grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`, `Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics (`WhisperOps` for `ProjectLinear`/`EnsureF32`, `WeightNorm`, `IStft`, and `HartsyInference.Audio/Dsp/` → `NsfVocoderDsp` for NSF source / forward-STFT / iSTFT head / pad / scale, `DeterministicRng` for seeded noise). Concrete: a `[1,C,T]↔[1,T,C]` layout transpose is `backend.Transpose2D(out, in, d1, d2)` — never a hand-rolled loop. When 2+ models need the same operation, hoist ONE helper **parameterized by the differences** (a few extra params or a `switch` beats a dozen near-identical small methods). When adding a model, audit it for duplication against the models already built and fold the shared parts. Re-run affected models' tests after hoisting — shared code is load-bearing.
 
 ## dotLLM Patterns (Single Source of Truth)
 
@@ -84,10 +84,10 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 `IAsyncEnumerable<GenerationProgress>` where `GenerationProgress` is `readonly record struct`.
 
 ### Error Handling
-- Shape mismatches: fail fast with `SharpInferenceException`
+- Shape mismatches: fail fast with `HartsyInferenceException`
 - CUDA/Vulkan: `.ThrowOnError()` on every call
 - Compute threads: `Environment.FailFast` for unrecoverable errors
-- Custom exceptions: `SharpInferenceException`, `OutOfVramException`, `UnsupportedModelException`
+- Custom exceptions: `HartsyInferenceException`, `OutOfVramException`, `UnsupportedModelException`
 
 ### Performance Attributes
 | Attribute | When |
@@ -106,10 +106,10 @@ PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fi
 - See `docs/Research/CUDA_PERFORMANCE.md` for the full optimization roadmap
 
 ### Diffusion Pipeline Conventions
-- All pipelines inherit `SharpInference.Diffusion.Pipelines.DiffusionPipelineBase` — provides `Backend` property, idempotent `Dispose` + `ThrowIfDisposed`, `DisposeCore()` hook for subclass cleanup.
+- All pipelines inherit `HartsyInference.Diffusion.Pipelines.DiffusionPipelineBase` — provides `Backend` property, idempotent `Dispose` + `ThrowIfDisposed`, `DisposeCore()` hook for subclass cleanup.
 - **Component ownership**: pipelines do NOT own their components (text encoders, transformers/UNets, VAE) — those are shared resources passed in by the caller. `Dispose()` on a pipeline only releases pipeline-internal state.
 - **Public API shape**: pipelines expose synchronous `GenerateFromTokens` / `GenerateFromEmbeddings` / `InpaintFromTokens` / `RefineFromTokens` methods that return `(byte[] rgbData, int width, int height, int seed)` tuples and accept `Action<GenerationProgress>?` callbacks. They do NOT implement `IAsyncEnumerable<GenerationProgress>` — there is no `IDiffusionPipeline` interface (the old one was deleted because it didn't match what any pipeline actually does).
-- **Shared utilities** under `SharpInference.Diffusion/Utilities/`:
+- **Shared utilities** under `HartsyInference.Diffusion/Utilities/`:
   - `CfgHelper.SliceBatchElement` / `SliceBatchElement1D` / `ApplyCfg` / `ConcatLastDim` — every CFG pipeline routes through these.
   - `DtypeCastHelper.EnsureDtype` / `EnsureF32` — single source for F16/F32/BF16 activation casts. Don't write `new Tensor(shape, dt); backend.CastTo*(...)` inline.
   - `Img2ImgSetup.Prepare(request, h, w, steps)` — validates source/mask and computes `StartStep` for img2img/inpaint. Handles strength=0 pass-through detection.

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Cuda</PackageId>
+    <Description>CUDA GPU inference backend for HartsyInference with PTX kernels and cuBLAS integration.</Description>
+    <RootNamespace>HartsyInference.Cuda</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Cuda.Tests" />
+  </ItemGroup>
+
+  <!-- PTX kernel files, loaded from disk at runtime (CudaBackend: BaseDirectory/Ptx). -->
+  <ItemGroup>
+    <!-- One item, two jobs: copy PTX next to THIS project's own output (local build/tests),
+         AND pack it into the nupkg under ptx/. HartsyInference.Cuda.targets then copies it
+         into a *consumer's* output at build time. -->
+    <Content Include="Ptx\*.ptx" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="ptx/" />
+    <!-- Ship the copy logic. build/ = direct package refs; buildTransitive/ = via meta-package. -->
+    <None Include="HartsyInference.Cuda.targets" Pack="true" PackagePath="build/;buildTransitive/" Visible="false" />
+  </ItemGroup>
+
+</Project>

@@ -1,10 +1,10 @@
 # SenseVoice + FireRedASR — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (SenseVoice + FireRedASR pipelines)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (SenseVoice + FireRedASR pipelines)
 
 ## Summary
 
-This document covers two strong Chinese / multilingual STT model families that we plan to wrap as pure-C# pipelines under `SharpInference.Audio`:
+This document covers two strong Chinese / multilingual STT model families that we plan to wrap as pure-C# pipelines under `HartsyInference.Audio`:
 
 - **SenseVoice** (Alibaba FunAudioLLM, July 2024) — non-autoregressive, CTC-based, encoder-only "speech understanding" model. The released **SenseVoice-Small** variant matches Whisper-Large-v3 quality on Chinese / Cantonese while running 15× faster (≈70 ms for 10 s of audio). One forward pass emits a 4-part output: `<emotion><language><event><text>`. Encoder uses **SAN-M** (Self-Attention with Memory) — vanilla multi-head attention augmented with an FSMN depthwise-conv "memory" block.
 - **FireRedASR** (Xiaohongshu / FireRedTeam, Jan 2025) — industrial-grade Mandarin + dialect + English ASR. Two variants: **AED-L** (1.1 B params, Conformer encoder + Transformer decoder, Whisper-style autoregressive decode) and **LLM-L** (8.3 B params, same Conformer encoder + Linear-ReLU-Linear adapter + Qwen2-7B-Instruct decoder). Both share the same audio frontend (80-bin log-mel, kaldi fbank, CMVN, no LFR) and the same `train_bpe1000` SentencePiece tokenizer (7 832 entries: 1 000 English BPE + 6 827 Chinese chars + 5 special tokens). FireRedASR-LLM-L holds SOTA on Mandarin benchmarks (avg CER 3.05 % across AISHELL-1/2, WenetSpeech-Net/Meeting).
@@ -345,7 +345,7 @@ Beam search uses standard length penalty and a repetition penalty (FireRedASR's 
 10. transcript = qwen_tokenizer.decode(generated_ids, skip_special_tokens=True)
 ```
 
-The Qwen2 forward path is exactly the standard Qwen2-7B forward — `SharpInference.Audio` should hand this off to `dotLLM`'s Qwen2 implementation rather than reimplement it.
+The Qwen2 forward path is exactly the standard Qwen2-7B forward — `HartsyInference.Audio` should hand this off to `dotLLM`'s Qwen2 implementation rather than reimplement it.
 
 ### 7. Streaming
 
@@ -401,7 +401,7 @@ Notes:
 - On the 19-set internal dialect benchmark: ~11.55 % (LLM) / 11.67 % (AED) avg CER.
 - On singing lyrics: 50–67 % relative CERR vs industrial baselines.
 
-### 9. C# Implementation Notes (SharpInference.Audio)
+### 9. C# Implementation Notes (HartsyInference.Audio)
 
 #### 9.1 Shared infrastructure to build first
 
@@ -425,7 +425,7 @@ Notes:
 #### 9.3 FireRedASR-AED-L specifics
 
 - **Reuses the Conformer encoder we're building for Parakeet** (same Macaron-FF / MHSA / GLU-Conv / Macaron-FF block structure, same Conv2dSubsampling ×4 frontend). Difference: FireRedASR uses **relative positional encoding** in MHSA (not rotary) and **depthwise kernel 33** (Parakeet uses 31). Make these configurable parameters on the shared block.
-- **Decoder is a vanilla Transformer decoder** — standard pre-norm self-attn + cross-attn + FFN. Same structure as Whisper decoder; we should reuse the Whisper decoder block from `SharpInference.Audio.Whisper`, just parameterize `vocab_size = 7832`, `kv_cache`, `cross-attn target = encoder_out`.
+- **Decoder is a vanilla Transformer decoder** — standard pre-norm self-attn + cross-attn + FFN. Same structure as Whisper decoder; we should reuse the Whisper decoder block from `HartsyInference.Audio.Whisper`, just parameterize `vocab_size = 7832`, `kv_cache`, `cross-attn target = encoder_out`.
 - **Beam search** with length penalty + repetition penalty — already part of the Whisper decoder pipeline plan; share that infra.
 - **Tokenizer**: hybrid Chinese-char + English-BPE decoder. Easiest implementation: keep a flat `int[] -> string` table of size 7 832 built once from `dict.txt + train_bpe1000.model`. No need to keep the SentencePiece runtime live at inference time (encode path only matters for training / not needed for inference). Decode: lookup, then on the English-BPE pieces apply standard "▁ = space, merge subwords" rule.
 - **Audio limit 60 s** — enforce in the API or chunk.
@@ -434,7 +434,7 @@ Notes:
 
 - **Encoder = identical to AED-L's encoder** — load AED-L encoder weights into the LLM-L encoder slot. Same C# code path.
 - **Adapter is trivial**: `frame_splice` (reshape `[T,2D] → [T/2, 4D]`... actually concatenate pairs: `[T,D] → [T/2, 2D]`) then 2× Linear with ReLU between. ~30 M params.
-- **Decoder = Qwen2-7B-Instruct** — **delegate to dotLLM**. We do NOT reimplement Qwen2 inside SharpInference. Define a `SharpInference.Audio.ILlmDecoder` interface, have the FireRedASR-LLM pipeline call into a `dotLLM.Qwen2Model` instance through that interface. The interface needs:
+- **Decoder = Qwen2-7B-Instruct** — **delegate to dotLLM**. We do NOT reimplement Qwen2 inside HartsyInference. Define a `HartsyInference.Audio.ILlmDecoder` interface, have the FireRedASR-LLM pipeline call into a `dotLLM.Qwen2Model` instance through that interface. The interface needs:
   - `Embed(int[] tokenIds) → Tensor[seq, hidden]`  (so we can build the embedding sequence ourselves and then splice in speech_emb at the placeholder positions).
   - `Forward(Tensor inputsEmbeds, KVCache cache) → Tensor logits`.
   - `Generate(...)` with the standard Qwen2 generation config.
@@ -444,9 +444,9 @@ Notes:
 
 #### 9.5 Package boundaries
 
-- `SharpInference.Audio` — frontend (fbank + LFR + CMVN), SenseVoice model, FireRedASR-AED model, FireRedASR-LLM **pipeline orchestration**.
-- `SharpInference.Audio` depends on `SharpInference.Core` (tensors, CUDA) and — for FireRedASR-LLM only — on `dotLLM` (Qwen2 decoder). That dotLLM dependency must be a **soft / optional** package reference so users who only want SenseVoice or FireRedASR-AED don't pay for it. Suggested split: `SharpInference.Audio.FireRedLlm` as a separate small package that pulls in `dotLLM`, while base `SharpInference.Audio` covers SenseVoice + FireRedASR-AED.
-- Tokenizers: SentencePiece runtime already needed by dotLLM; promote it to a shared `SharpInference.Tokenizers` package (or reuse dotLLM's) to avoid duplication.
+- `HartsyInference.Audio` — frontend (fbank + LFR + CMVN), SenseVoice model, FireRedASR-AED model, FireRedASR-LLM **pipeline orchestration**.
+- `HartsyInference.Audio` depends on `HartsyInference.Core` (tensors, CUDA) and — for FireRedASR-LLM only — on `dotLLM` (Qwen2 decoder). That dotLLM dependency must be a **soft / optional** package reference so users who only want SenseVoice or FireRedASR-AED don't pay for it. Suggested split: `HartsyInference.Audio.FireRedLlm` as a separate small package that pulls in `dotLLM`, while base `HartsyInference.Audio` covers SenseVoice + FireRedASR-AED.
+- Tokenizers: SentencePiece runtime already needed by dotLLM; promote it to a shared `HartsyInference.Tokenizers` package (or reuse dotLLM's) to avoid duplication.
 
 #### 9.6 Validation targets
 

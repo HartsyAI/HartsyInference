@@ -1,12 +1,12 @@
 # Flow Matching for Audio — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio + SharpInference.Diffusion (schedulers)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio + HartsyInference.Diffusion (schedulers)
 
 ## Summary
 
 Modern open-source audio generation models — F5-TTS, E2-TTS, ACE-Step, DiffRhythm, Stable Audio Open (1.0 / Small / 2) — are almost all built on **rectified flow / Conditional Flow Matching (CFM)**. The model predicts a constant velocity field `v_theta(x_t, t, cond)` along a straight-line path between Gaussian noise (`t=1`) and the data (`t=0`), and a first-order Euler ODE solver integrates it. The math is essentially identical to image flow-matching (Flux, SD3), with three audio-specific wrinkles worth dedicated scheduler code: (1) **F5/DiffRhythm "Sway Sampling"** — a one-shot cosine remap of the timestep grid that biases sampling toward early steps where the model lays out coarse structure; (2) **ACE-Step "omega mean-shift"** — a mean-preserving rescale applied to each Euler delta to control variance of the trajectory; (3) ACE-Step's optional **APG (Adaptive Projected Guidance)** and **CFG-Zero\*** in place of vanilla CFG. AudioLDM 2 is included as a counter-example: it is *not* flow matching — it is classic ε-prediction latent diffusion with DDIM/DPM-Solver++ at ~200 steps.
 
-For SharpInference, every model in this batch except AudioLDM 2 can be served by a single C# `FlowMatchEulerDiscreteScheduler` (which we already have for Flux/SD3) plus three small additions: a Sway-Sampling timestep remap helper, an Omega mean-shift `Step` overload, and a CFG combiner that operates on the velocity field exactly like ε-prediction CFG. AudioLDM 2 reuses our existing `DpmPlusPlus2MScheduler` / `DdimScheduler`.
+For HartsyInference, every model in this batch except AudioLDM 2 can be served by a single C# `FlowMatchEulerDiscreteScheduler` (which we already have for Flux/SD3) plus three small additions: a Sway-Sampling timestep remap helper, an Omega mean-shift `Step` overload, and a CFG combiner that operates on the velocity field exactly like ε-prediction CFG. AudioLDM 2 reuses our existing `DpmPlusPlus2MScheduler` / `DdimScheduler`.
 
 ---
 
@@ -101,7 +101,7 @@ Concrete numbers — for `steps=32`, `s=-1.0`:
 
 E2-TTS uses **plain CFM with Euler integration, no sway sampling, no EPSS, no special shift**. Vector field, CFG formula and per-step update are identical to F5-TTS. The conditioning trick — concatenate padded character sequence with input speech, predict the masked portion — is what F5-TTS inherited. E2-TTS evaluated at NFE = 32 with `cfg_strength ≈ 2.0`.
 
-For SharpInference, **E2-TTS == F5-TTS scheduler with `sway_sampling_coef = 0`**.
+For HartsyInference, **E2-TTS == F5-TTS scheduler with `sway_sampling_coef = 0`**.
 
 ### 4. ACE-Step — flow matching for music with mean-shift step
 
@@ -231,7 +231,7 @@ AudioLDM 2 is a **classic ε-prediction latent diffusion** (variance-preserving 
 | `audio_length_in_s` | 10.24 | |
 | sample rate | 16 kHz | mel-spec latents → HiFi-GAN |
 
-For SharpInference, AudioLDM 2 routes through our **existing** `DdimScheduler` (200 steps) or `DpmPlusPlus2MScheduler` (~25 steps), no new code needed.
+For HartsyInference, AudioLDM 2 routes through our **existing** `DdimScheduler` (200 steps) or `DpmPlusPlus2MScheduler` (~25 steps), no new code needed.
 
 ### Why flow matching for audio? (the intuition)
 
@@ -421,7 +421,7 @@ for i in 0..N-1:
 | Stable Audio Open paper | [arXiv:2407.14358](https://arxiv.org/abs/2407.14358) | §3 architecture, §4 inference recipe |
 | AudioLDM 2 | [diffusers AudioLDM2Pipeline](https://huggingface.co/docs/diffusers/api/pipelines/audioldm2) | 200 NFE DDIM default; recommend `DPMSolverMultistepScheduler` for ~25 NFE |
 | Lipman et al. CFM | [arXiv:2210.02747](https://arxiv.org/abs/2210.02747) | §3 OT path, §4 conditional FM loss |
-| Existing C# baseline | `src/SharpInference.Diffusion/Schedulers/FlowMatchEulerDiscreteScheduler.cs` | Already implements the SD3-shift sigma schedule + Euler step |
+| Existing C# baseline | `src/HartsyInference.Diffusion/Schedulers/FlowMatchEulerDiscreteScheduler.cs` | Already implements the SD3-shift sigma schedule + Euler step |
 
 ---
 
@@ -452,11 +452,11 @@ for i in 0..N-1:
 
 ---
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 ### Reuse what we have
 
-- `FlowMatchEulerDiscreteScheduler` (existing, `src/SharpInference.Diffusion/Schedulers/FlowMatchEulerDiscreteScheduler.cs`) **already handles**:
+- `FlowMatchEulerDiscreteScheduler` (existing, `src/HartsyInference.Diffusion/Schedulers/FlowMatchEulerDiscreteScheduler.cs`) **already handles**:
   - `sigma = shift * t / (1 + (shift - 1) * t)` schedule (set `shift=3.0` for ACE-Step, `shift=1.0` for F5/DiffRhythm/Stable Audio Open RF).
   - The Euler step `out = sample + v * (sigma_next - sigma)`.
   - The flow-matching forward `AddNoise` for img2img / audio2audio.
@@ -504,7 +504,7 @@ Add a constructor arg (or builder) for shift / sway_coef / omega so the same cla
 
 ### Validation strategy
 
-For each new scheduler, generate the sigma table for representative configs in Python (pin a checkpoint of each upstream repo) and dump as a `.json` golden file under `tests/SharpInference.Diffusion.Tests/golden/audio/`. The C# scheduler must reproduce the table within `1e-6` absolute. This validates everything except the model forward pass — the sigma math is small and deterministic.
+For each new scheduler, generate the sigma table for representative configs in Python (pin a checkpoint of each upstream repo) and dump as a `.json` golden file under `tests/HartsyInference.Diffusion.Tests/golden/audio/`. The C# scheduler must reproduce the table within `1e-6` absolute. This validates everything except the model forward pass — the sigma math is small and deterministic.
 
 Concrete golden tables to produce:
 - F5-TTS: `(steps=32, shift=1.0, sway_coef=-1.0)` → 33 sigma values

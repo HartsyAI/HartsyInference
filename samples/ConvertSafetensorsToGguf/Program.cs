@@ -1,4 +1,4 @@
-using SharpInference.ModelHandler.Gguf;
+using HartsyInference.ModelHandler.Gguf;
 
 if (args.Length < 3)
 {

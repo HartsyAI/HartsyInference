@@ -1,8 +1,8 @@
-# SharpInference — Claude Code Instructions
+# HartsyInference — Claude Code Instructions
 
 ## Project Overview
 
-SharpInference is a pure C#/.NET 10 AI inference engine for non-LLM modalities — image generation (diffusion), speech-to-text, text-to-speech, voice conversion, vision, object detection, and video generation. It pairs with dotLLM for LLM inference.
+HartsyInference is a pure C#/.NET 10 AI inference engine for non-LLM modalities — image generation (diffusion), speech-to-text, text-to-speech, voice conversion, vision, object detection, and video generation. It pairs with dotLLM for LLM inference.
 
 ## Before Any Task
 
@@ -30,7 +30,7 @@ For deeper context on specific areas, read:
 ## Project Structure
 
 ```
-SharpInference/
+HartsyInference/
 ├── CLAUDE.md                          ← You are here
 ├── docs/
 │   ├── CODE_STYLE.md                  Mandatory code style

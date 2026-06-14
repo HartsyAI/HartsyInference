@@ -55,8 +55,8 @@ nvidia-smi --query-compute-apps=pid --format=csv,noheader
 ### 1. Clone + build (one-time)
 
 ```bash
-git clone https://github.com/<org>/SharpInference sharpinference
-cd sharpinference
+git clone https://github.com/<org>/HartsyInference hartsyinference
+cd hartsyinference
 
 # Pin to exact commit being benchmarked
 git checkout <commit-sha>
@@ -154,7 +154,7 @@ git push
 | `HF_HOME` | diffusers / HF cache root | Set to a persistent volume on cloud instances to avoid re-downloading on each rental |
 | `CUDA_VISIBLE_DEVICES` | restricts visible GPUs | Set to `0` on multi-GPU boxes to ensure single-GPU benchmarks |
 | `CUBLASLT_LOG_LEVEL` | cuBLASLt log verbosity | Set to `5` to debug FP8 GEMM dispatch issues; do NOT set during measurement (slows things down) |
-| `SHARPINFERENCE_NVTX_DETAILED` | enables per-op NVTX ranges | Set when running under `nsys` for fine-grained timeline; leave unset for plain timing |
+| `HARTSYINFERENCE_NVTX_DETAILED` | enables per-op NVTX ranges | Set when running under `nsys` for fine-grained timeline; leave unset for plain timing |
 | `TORCH_CUDA_ALLOC_CONF` | torch CUDA allocator tuning | Leave at default — changing this invalidates the baseline |
 
 ## Troubleshooting
@@ -191,7 +191,7 @@ for cooldown and retry, or document the throttling in the run's `hardware.txt`.
 
 ### "PTX module load failed" on a brand-new device
 
-The compiled PTX in `src/SharpInference.Cuda/Ptx/` targets `sm_70` by default (forward-compatible
+The compiled PTX in `src/HartsyInference.Cuda/Ptx/` targets `sm_70` by default (forward-compatible
 to all newer architectures). If a device fails this load, check `nvcc --version` matches our
 pinned CUDA 12.4 — older toolkits may not generate compatible PTX.
 

@@ -1,0 +1,282 @@
+// HartsyInference spatial kernels - FP32
+// UpsampleNearest2D, Im2Col for Conv2D
+// All launched with 1D grid: gridDim.x = ceil(output_elements / 256)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+// --- upsample_nearest2d_f32 -----------------------------------------
+// output[b,c,oh,ow] = input[b,c, oh/scaleH, ow/scaleW]
+// Params: output*, input*, batch, channels, inH, inW, outH, outW, scaleH, scaleW
+.visible .entry upsample_nearest2d_f32(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_batch,
+    .param .u32 param_channels,
+    .param .u32 param_inH,
+    .param .u32 param_inW,
+    .param .u32 param_outH,
+    .param .u32 param_outW,
+    .param .u32 param_scaleH,
+    .param .u32 param_scaleW
+)
+{
+    .reg .u64 %rd<10>;
+    .reg .u32 %r<20>;
+    .reg .f32 %f<2>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_batch];
+    ld.param.u32 %r1, [param_channels];
+    ld.param.u32 %r2, [param_inH];
+    ld.param.u32 %r3, [param_inW];
+    ld.param.u32 %r4, [param_outH];
+    ld.param.u32 %r5, [param_outW];
+    ld.param.u32 %r6, [param_scaleH];
+    ld.param.u32 %r7, [param_scaleW];
+
+    // Global thread ID
+    mov.u32 %r8, %ctaid.x;
+    mov.u32 %r9, %ntid.x;
+    mov.u32 %r10, %tid.x;
+    mad.lo.u32 %r8, %r8, %r9, %r10;
+
+    // Total output elements: batch * channels * outH * outW
+    mul.lo.u32 %r11, %r0, %r1;
+    mul.lo.u32 %r11, %r11, %r4;
+    mul.lo.u32 %r11, %r11, %r5;
+
+    setp.ge.u32 %p1, %r8, %r11;
+    @%p1 bra up_done;
+
+    // Decompose linear index -> (b, c, oh, ow)
+    // ow = idx % outW
+    rem.u32 %r12, %r8, %r5;        // ow
+    div.u32 %r13, %r8, %r5;        // remaining
+    // oh = remaining % outH
+    rem.u32 %r14, %r13, %r4;       // oh
+    div.u32 %r13, %r13, %r4;       // remaining
+    // c = remaining % channels
+    rem.u32 %r15, %r13, %r1;       // c
+    div.u32 %r16, %r13, %r1;       // b
+
+    // Source coordinates: ih = oh / scaleH, iw = ow / scaleW
+    div.u32 %r17, %r14, %r6;       // ih
+    div.u32 %r18, %r12, %r7;       // iw
+
+    // Input index: ((b * channels + c) * inH + ih) * inW + iw
+    mul.lo.u32 %r19, %r16, %r1;
+    add.u32 %r19, %r19, %r15;
+    mul.lo.u32 %r19, %r19, %r2;
+    add.u32 %r19, %r19, %r17;
+    mul.lo.u32 %r19, %r19, %r3;
+    add.u32 %r19, %r19, %r18;
+
+    // Load and store
+    cvt.u64.u32 %rd2, %r19;
+    shl.b64 %rd2, %rd2, 2;
+    add.u64 %rd3, %rd1, %rd2;
+    ld.global.f32 %f1, [%rd3];
+
+    cvt.u64.u32 %rd4, %r8;
+    shl.b64 %rd4, %rd4, 2;
+    add.u64 %rd5, %rd0, %rd4;
+    st.global.f32 [%rd5], %f1;
+
+up_done:
+    ret;
+}
+
+// --- im2col_f32 -----------------------------------------------------
+// Extracts patches from input NCHW into a column matrix for GEMM-based Conv2D
+// Output: col[Cin*KH*KW, outH*outW] (per batch)
+// Params: col*, input*, channels, inH, inW, kH, kW, padH, padW, strideH, strideW, outH, outW, batch_offset
+.visible .entry im2col_f32(
+    .param .u64 param_col,
+    .param .u64 param_in,
+    .param .u32 param_channels,
+    .param .u32 param_inH,
+    .param .u32 param_inW,
+    .param .u32 param_kH,
+    .param .u32 param_kW,
+    .param .u32 param_padH,
+    .param .u32 param_padW,
+    .param .u32 param_strideH,
+    .param .u32 param_strideW,
+    .param .u32 param_outH,
+    .param .u32 param_outW,
+    .param .u32 param_batch_offset
+)
+{
+    .reg .u64 %rd<12>;
+    .reg .u32 %r<30>;
+    .reg .s32 %rs<6>;
+    .reg .f32 %f<2>;
+    .reg .pred %p<4>;
+
+    ld.param.u64 %rd0, [param_col];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_channels];
+    ld.param.u32 %r1, [param_inH];
+    ld.param.u32 %r2, [param_inW];
+    ld.param.u32 %r3, [param_kH];
+    ld.param.u32 %r4, [param_kW];
+    ld.param.u32 %r5, [param_padH];
+    ld.param.u32 %r6, [param_padW];
+    ld.param.u32 %r7, [param_strideH];
+    ld.param.u32 %r8, [param_strideW];
+    ld.param.u32 %r9, [param_outH];
+    ld.param.u32 %r10, [param_outW];
+    ld.param.u32 %r11, [param_batch_offset];
+
+    // Global thread ID (64-bit to handle >4B elements for large Conv2D)
+    mov.u32 %r12, %ctaid.x;
+    mov.u32 %r13, %ntid.x;
+    mov.u32 %r14, %tid.x;
+    cvt.u64.u32 %rd6, %r12;
+    cvt.u64.u32 %rd7, %r13;
+    cvt.u64.u32 %rd8, %r14;
+    mad.lo.u64 %rd6, %rd6, %rd7, %rd8;  // global thread ID (64-bit)
+
+    // Total col elements: channels * kH * kW * outH * outW (64-bit to avoid overflow)
+    mul.lo.u32 %r15, %r0, %r3;
+    mul.lo.u32 %r15, %r15, %r4;    // Cin * kH * kW (fits u32)
+    mul.lo.u32 %r16, %r9, %r10;    // outH * outW (fits u32)
+    cvt.u64.u32 %rd7, %r15;
+    cvt.u64.u32 %rd8, %r16;
+    mul.lo.u64 %rd7, %rd7, %rd8;   // total col elements (64-bit)
+
+    setp.ge.u64 %p1, %rd6, %rd7;
+    @%p1 bra im2col_done;
+
+    // Decompose linear index -> (col_row, col_col)
+    // col_col = idx % (outH*outW) -> output spatial position
+    // col_row = idx / (outH*outW) -> c*kH*kW patch index
+    // Use 64-bit div/rem since thread ID can exceed u32
+    cvt.u64.u32 %rd8, %r16;        // divisor (outH*outW) in 64-bit
+    rem.u64 %rd9, %rd6, %rd8;
+    div.u64 %rd10, %rd6, %rd8;
+    cvt.u32.u64 %r18, %rd9;        // col_col (fits u32)
+    cvt.u32.u64 %r19, %rd10;       // col_row (fits u32)
+
+    // Decompose spatial index -> (oh, ow)
+    rem.u32 %r20, %r18, %r10;      // ow = col_col % outW
+    div.u32 %r21, %r18, %r10;      // oh = col_col / outW
+
+    // Decompose patch index -> (c, kh, kw)
+    mul.lo.u32 %r22, %r3, %r4;     // kH * kW
+    rem.u32 %r23, %r19, %r22;      // kh*kW + kw
+    div.u32 %r24, %r19, %r22;      // c
+
+    rem.u32 %r25, %r23, %r4;       // kw
+    div.u32 %r26, %r23, %r4;       // kh
+
+    // Input coords: ih = oh*strideH + kh - padH, iw = ow*strideW + kw - padW
+    // Use signed arithmetic for bounds checking
+    mul.lo.u32 %r27, %r21, %r7;    // oh * strideH
+    add.u32 %r27, %r27, %r26;      // + kh
+    // Need signed subtraction for padding
+    cvt.s32.u32 %rs0, %r27;
+    cvt.s32.u32 %rs1, %r5;
+    sub.s32 %rs0, %rs0, %rs1;      // ih (signed)
+
+    mul.lo.u32 %r28, %r20, %r8;    // ow * strideW
+    add.u32 %r28, %r28, %r25;      // + kw
+    cvt.s32.u32 %rs2, %r28;
+    cvt.s32.u32 %rs3, %r6;
+    sub.s32 %rs2, %rs2, %rs3;      // iw (signed)
+
+    // Bounds check: 0 <= ih < inH && 0 <= iw < inW
+    cvt.s32.u32 %rs4, %r1;         // (signed)inH
+    cvt.s32.u32 %rs5, %r2;         // (signed)inW
+    setp.lt.s32 %p2, %rs0, 0;
+    setp.ge.s32 %p3, %rs0, %rs4;
+    or.pred %p2, %p2, %p3;
+    setp.lt.s32 %p3, %rs2, 0;
+    or.pred %p2, %p2, %p3;
+    setp.ge.s32 %p3, %rs2, %rs5;
+    or.pred %p2, %p2, %p3;
+
+    @%p2 bra im2col_zero;
+
+    // In-bounds: load input[(batch_offset + c) * inH * inW + ih * inW + iw]
+    add.u32 %r29, %r11, %r24;      // batch_offset + c
+    mul.lo.u32 %r29, %r29, %r1;    // * inH
+    cvt.u32.s32 %r27, %rs0;
+    add.u32 %r29, %r29, %r27;      // + ih
+    mul.lo.u32 %r29, %r29, %r2;    // * inW
+    cvt.u32.s32 %r28, %rs2;
+    add.u32 %r29, %r29, %r28;      // + iw
+
+    cvt.u64.u32 %rd2, %r29;
+    shl.b64 %rd2, %rd2, 2;
+    add.u64 %rd3, %rd1, %rd2;
+    ld.global.f32 %f1, [%rd3];
+    bra im2col_store;
+
+im2col_zero:
+    mov.f32 %f1, 0f00000000;       // zero-padding
+
+im2col_store:
+    shl.b64 %rd4, %rd6, 2;         // byte offset from 64-bit thread ID
+    add.u64 %rd5, %rd0, %rd4;
+    st.global.f32 [%rd5], %f1;
+
+im2col_done:
+    ret;
+}
+
+// --- col2bias_add_f32 -----------------------------------------------
+// Adds bias to each output channel: output[idx] += bias[channel]
+// Params: output*, bias*, outChannels, spatial (outH*outW), total_elements
+.visible .entry col2bias_add_f32(
+    .param .u64 param_out,
+    .param .u64 param_bias,
+    .param .u32 param_outCh,
+    .param .u32 param_spatial,
+    .param .u32 param_total
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<10>;
+    .reg .f32 %f<4>;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_bias];
+    ld.param.u32 %r0, [param_outCh];
+    ld.param.u32 %r1, [param_spatial];
+    ld.param.u32 %r2, [param_total];
+
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r3, %r3, %r4, %r5;
+
+    setp.ge.u32 %p1, %r3, %r2;
+    @%p1 bra bias_done;
+
+    // channel = (idx / spatial) % outCh
+    div.u32 %r6, %r3, %r1;
+    rem.u32 %r6, %r6, %r0;
+
+    // Load bias[channel]
+    cvt.u64.u32 %rd2, %r6;
+    shl.b64 %rd2, %rd2, 2;
+    add.u64 %rd3, %rd1, %rd2;
+    ld.global.f32 %f1, [%rd3];
+
+    // Load output[idx], add bias, store
+    cvt.u64.u32 %rd4, %r3;
+    shl.b64 %rd4, %rd4, 2;
+    add.u64 %rd5, %rd0, %rd4;
+    ld.global.f32 %f2, [%rd5];
+    add.f32 %f3, %f2, %f1;
+    st.global.f32 [%rd5], %f3;
+
+bias_done:
+    ret;
+}

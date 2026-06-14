@@ -419,7 +419,7 @@ Per the madebyollin notes, Flux.2 introduces a significantly different VAE:
 
 ## Implementation Notes
 
-### For SharpInference C# Implementation
+### For HartsyInference C# Implementation
 
 1. **Single VAE class**: One `AutoencoderKL` class can handle all four model families. Use config values to control:
    - `latent_channels` (4 or 16)

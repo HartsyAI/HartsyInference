@@ -107,7 +107,7 @@ type SafetensorsFileHeader = Record<string, TensorInfo> & {
 
 From the Rust `Dtype` enum in [`tensor.rs`](https://github.com/huggingface/safetensors/blob/main/safetensors/src/tensor.rs) and [docs.rs](https://docs.rs/safetensors/latest/safetensors/tensor/enum.Dtype.html). The enum is `#[non_exhaustive]` — more variants may be added.
 
-| Dtype String | Bits | Bytes | Description | Relevant to SharpInference |
+| Dtype String | Bits | Bytes | Description | Relevant to HartsyInference |
 |-------------|------|-------|-------------|---------------------------|
 | `BOOL` | 8 | 1 | Boolean | Rare in model weights |
 | `U8` | 8 | 1 | Unsigned 8-bit integer | Image data, masks |
@@ -134,7 +134,7 @@ From the Rust `Dtype` enum in [`tensor.rs`](https://github.com/huggingface/safet
 
 **Total: 22 dtype variants** as of latest source.
 
-**Priority for SharpInference**: `F32`, `F16`, `BF16` cover ~99% of diffusion model weights. `I8` for quantized models. `I32`/`I64` for embedding indices and metadata tensors.
+**Priority for HartsyInference**: `F32`, `F16`, `BF16` cover ~99% of diffusion model weights. `I8` for quantized models. `I32`/`I64` for embedding indices and metadata tensors.
 
 **Sub-byte dtype warning** (from README): "Some smaller than 1 byte dtypes appeared, which make alignment tricky. Non-traditional APIs might be required." The library errors on non-byte-aligned reads (`nbits % 8 != 0`).
 
@@ -250,7 +250,7 @@ interface SafetensorsIndexJson {
 | Duplicate key handling | Enforced via `HashSet` — error on duplicate | Inherited from Rust (PyO3 binding) | C# should use `Dictionary` — will naturally reject duplicates |
 | Memory mapping | `SafeTensors::deserialize()` works on `&[u8]` — caller handles mmap | `safe_open(framework="pt", device="cpu")` handles mmap internally | C# should use `MemoryMappedFile` |
 | Tensor ordering on write | Sorted by descending dtype alignment | Same (wraps Rust) | Reader must NOT assume any order |
-| Sub-byte dtype support | Full support with `MisalignedSlice` error | Same | SharpInference can defer — no diffusion models use sub-byte dtypes yet |
+| Sub-byte dtype support | Full support with `MisalignedSlice` error | Same | HartsyInference can defer — no diffusion models use sub-byte dtypes yet |
 | Header padding | Pads to multiple of 8 with 0x20 | Same | Reader must tolerate trailing whitespace in header |
 
 ## Open Questions

@@ -7,7 +7,7 @@ Output: tests/python-reference/flux_reference_images/
   ref_dev_<idx>.png        # Flux Dev: 10 steps, cfg=3.5
   ref_schnell_<idx>.png    # Flux Schnell: 4 steps, cfg=0.0
 
-The C# tests in tests/SharpInference.Diffusion.Tests/FluxSsimTests.cs compare against
+The C# tests in tests/HartsyInference.Diffusion.Tests/FluxSsimTests.cs compare against
 these references at 256×256 (so generation completes in seconds). Strict SSIM > 0.95
 requires noise injection into FluxPipeline; current relaxed threshold is documented in
 the test.

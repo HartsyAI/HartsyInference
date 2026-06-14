@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SharpInference Vulkan / SPIR-V kernel build.
+# HartsyInference Vulkan / SPIR-V kernel build.
 # Compiles every native/vulkan/shaders/*.comp.glsl to native/vulkan/build/*.spv
 # using glslangValidator. Each output is also validated via spirv-val.
 #

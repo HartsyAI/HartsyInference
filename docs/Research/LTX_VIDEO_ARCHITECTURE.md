@@ -8,7 +8,7 @@
 
 LTX-Video (Lightricks) is a fast DiT text-to-video model. A **28-layer single-stream DiT** (inner 2048 = 32 heads × 64) operates on VAE-latent tokens with **self-attention + 3D RoPE**, **cross-attention to a frozen T5-XXL** (caption_channels 4096), **AdaLN-Single** timestep conditioning, and gelu-approximate FFN. The latent comes from a high-compression **3D causal VAE** (~32× spatial, 8× temporal, 128 latent channels) whose **decoder is timestep-conditioned** (a denoising decoder, unusual). Sampling is rectified-flow Euler.
 
-For SharpInference this is the **second video model on the Lance-built foundation**: it reuses `CausalConv3d`, the generic 3D-causal-VAE pattern, `T5TextEncoder` (T5-XXL), backend `RmsNorm`/`ScaledDotProductAttention`, flow-match Euler, and the frame-streaming output (`VideoFrame`/`IVideoEncoder`). The only genuinely new pieces are LTX's own DiT block, its interleaved 3D RoPE, and the timestep-conditioned VAE decoder.
+For HartsyInference this is the **second video model on the Lance-built foundation**: it reuses `CausalConv3d`, the generic 3D-causal-VAE pattern, `T5TextEncoder` (T5-XXL), backend `RmsNorm`/`ScaledDotProductAttention`, flow-match Euler, and the frame-streaming output (`VideoFrame`/`IVideoEncoder`). The only genuinely new pieces are LTX's own DiT block, its interleaved 3D RoPE, and the timestep-conditioned VAE decoder.
 
 ## Transformer (`LTXVideoTransformer3DModel`) — verbatim
 

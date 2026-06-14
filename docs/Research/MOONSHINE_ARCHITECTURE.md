@@ -1,6 +1,6 @@
 # Moonshine — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Moonshine pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Moonshine pipeline)
 
 Moonshine (Useful Sensors, 2024) is a tiny encoder-decoder ASR family explicitly designed for edge devices and live transcription. Unlike Whisper, it operates **directly on the raw 16 kHz waveform** (no mel spectrogram), uses **RoPE** instead of learned absolute positional embeddings, and processes **variable-length** audio without zero-padding to 30 s.
 

@@ -226,7 +226,7 @@ When converting from Kohya format (fused QKV) to diffusers format (separate Q/K/
 - **Non-sparse**: the down_weight is distributed across all splits, and the up_weight is split along dimension 0
 - **Sparse**: chunks are detected and split separately per head
 
-For SharpInference, the recommended approach is to support all three Flux formats at load time and normalize internally to a single representation.
+For HartsyInference, the recommended approach is to support all three Flux formats at load time and normalize internally to a single representation.
 
 ### LyCORIS Variants
 
@@ -325,7 +325,7 @@ Different LoRAs are activated at different denoising timesteps. Each element is 
 
 Inspired by classifier-free guidance. Unconditional and conditional score estimates are computed from each LoRA at every denoising step, then averaged ([source](https://arxiv.org/html/2402.16843v1)).
 
-For SharpInference, **weight-space addition** (strategy 1) should be the primary implementation, with deferred patching (strategy 2) as an option for flexibility.
+For HartsyInference, **weight-space addition** (strategy 1) should be the primary implementation, with deferred patching (strategy 2) as an option for flexibility.
 
 ### In-Place vs Forward-Time Application
 
@@ -341,7 +341,7 @@ This is a critical implementation decision ([source](https://github.com/lllyasvi
 
 ComfyUI uses a **deferred patching** hybrid: patches are registered on the ModelPatcher and computed when weights are accessed, but the result is cached. This gives the flexibility of forward-time with the performance of in-place once computed ([source](https://deepwiki.com/patientx/ComfyUI-Zluda/4.1-model-patching-and-lora)).
 
-**Recommendation for SharpInference**: Implement in-place weight patching as the default (simplest, fastest for single-LoRA workflows). Provide an API to apply/unapply LoRAs by storing the original base weights separately. For multi-LoRA with dynamic strengths, consider a deferred-compute approach similar to ComfyUI.
+**Recommendation for HartsyInference**: Implement in-place weight patching as the default (simplest, fastest for single-LoRA workflows). Provide an API to apply/unapply LoRAs by storing the original base weights separately. For multi-LoRA with dynamic strengths, consider a deferred-compute approach similar to ComfyUI.
 
 ## Key Numbers / Constants
 
@@ -546,7 +546,7 @@ For single_blocks.{i}.linear1 (fused Q+K+V+proj_mlp):
 
 ## Implementation Notes
 
-### For SharpInference
+### For HartsyInference
 
 1. **Format auto-detection**: Scan the first few keys of a safetensors file to determine the format (SD1.5, SDXL, Flux-Kohya, Flux-Diffusers, Flux-XLabs) and variant (LoRA, LoHa, LoKr). Use the `__metadata__` `ss_network_module` field as a hint when available.
 

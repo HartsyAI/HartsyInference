@@ -1,8 +1,8 @@
-using SharpInference.Audio.Models.Codecs;
-using SharpInference.Core.Tensors;
-using SharpInference.ModelHandler.SafeTensors;
+using HartsyInference.Audio.Models.Codecs;
+using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.SafeTensors;
 
-namespace SharpInference.Samples.FuseWeightNorm;
+namespace HartsyInference.Samples.FuseWeightNorm;
 
 /// <summary>Offline weight-norm fusion tool. Scans an input safetensors file for any
 /// <c>*.weight_g</c> / <c>*.weight_v</c> pair, fuses them into a single <c>*.weight</c>

@@ -2,7 +2,7 @@
 
 > **Goal:** Run SD1.5 on AMD / Intel / NVIDIA via Vulkan compute shaders. Match CUDA reference within 1e-3 per kernel and SSIM > 0.99 end-to-end.
 >
-> **Packages:** `SharpInference.Vulkan` (built), `SharpInference.Core` (minor — capabilities + DeviceKind already in place), `SharpInference.Diffusion` (untouched — `IBackend` abstraction handles routing).
+> **Packages:** `HartsyInference.Vulkan` (built), `HartsyInference.Core` (minor — capabilities + DeviceKind already in place), `HartsyInference.Diffusion` (untouched — `IBackend` abstraction handles routing).
 >
 > **Status:** Backend functional and perf-tuned. Compiles + 33/33 smoke tests pass on Linux + NVIDIA. End-to-end Flux Schnell FP8 4-step generation: 178 s → 129.5 s after Phase C tuning (1.38× faster). SD1.5 / SDXL integration tests + SSIM helper added (skip-when-checkpoint-missing). Remaining work: AMD / Intel cross-vendor verification (hardware-blocked), further perf tuning (currently ~6.5× CUDA wall-clock — target ≤ 1.6× — per-dispatch overhead is the dominant bottleneck), SSIM gates need CUDA reference images to run. See [PHASE_3_5_DEVIATIONS.md](PHASE_3_5_DEVIATIONS.md) for bugs hit and resolved. Use this checklist to track remaining progression.
 
@@ -20,12 +20,12 @@
 
 - [x] **Vulkan SDK installed locally** — `glslangValidator`, `spirv-tools` (`apt install vulkan-tools glslang-tools spirv-tools` on Linux; LunarG Vulkan SDK for richest validation layers)
 - [ ] **Test hardware confirmed** — at minimum Linux + NVIDIA (for A/B against CUDA backend) + Linux + AMD RDNA2 or RDNA3 (the cross-vendor proof). Ideal: also Linux + Intel Arc (variable subgroup size validates `requiredSubgroupSize` path).
-- [x] **`SharpInference.Vulkan.csproj`** committed empty with project references and build script wiring (no code yet)
+- [x] **`HartsyInference.Vulkan.csproj`** committed empty with project references and build script wiring (no code yet)
 - [x] **`native/vulkan/` directory** committed with empty `shaders/` and `build.sh` (no .glsl yet)
 - [ ] **CI matrix updated** — at minimum a Linux runner with `mesa-vulkan-drivers` for unit tests via Mesa LLVMpipe (software Vulkan) so allocator / API tests run without a physical GPU
 - [x] **`PHASE_3_5_DEVIATIONS.md`** scaffolded and populated — 9 entries covering FP8 GEMM dtype mismatch, mid-op auto-flush UAF, NVIDIA feature-query bug, slab-size OOM, transient-buffer leak, deferred-free off-by-one, GLSL `erf` workaround, matmul `writeonly` constraint, glslangValidator `-O` flag
 
-## 3. Implementation — `SharpInference.Vulkan`
+## 3. Implementation — `HartsyInference.Vulkan`
 
 ### 3a. Bring-up (instance → device → trivial dispatch)
 
@@ -36,10 +36,10 @@ The smallest possible end-to-end. **Goal:** allocate a buffer, run an `add` shad
 - [x] `VulkanException.cs` — wraps `VkResult`; `.ThrowOnError(string op)` extension method
 - [x] `VulkanStructs.cs` — `VkApplicationInfo`, `VkInstanceCreateInfo`, `VkDeviceCreateInfo`, `VkDeviceQueueCreateInfo`, `VkPhysicalDeviceProperties2`, `VkPhysicalDeviceFeatures2`, `VkPhysicalDeviceMemoryProperties`, `VkQueueFamilyProperties`, `VkMemoryAllocateInfo`, `VkBufferCreateInfo`, `VkMemoryRequirements`, `VkMappedMemoryRange`, `VkSubgroupProperties`, `VkSubgroupSizeControlProperties`, `VkPhysicalDeviceVulkan11/12/13Features`, `VkSpecializationInfo`, `VkSpecializationMapEntry`, `VkPipelineShaderStageCreateInfo`, `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`, `VkComputePipelineCreateInfo`, `VkPipelineLayoutCreateInfo`, `VkDescriptorSetLayoutBinding`, `VkDescriptorSetLayoutCreateInfo`, `VkDescriptorPoolCreateInfo`, `VkDescriptorPoolSize`, `VkDescriptorSetAllocateInfo`, `VkWriteDescriptorSet`, `VkDescriptorBufferInfo`, `VkPushConstantRange`, `VkCommandPoolCreateInfo`, `VkCommandBufferAllocateInfo`, `VkCommandBufferBeginInfo`, `VkBufferCopy`, `VkBufferMemoryBarrier2`, `VkMemoryBarrier2`, `VkDependencyInfo`, `VkSubmitInfo2`, `VkCommandBufferSubmitInfo`, `VkSemaphoreSubmitInfo`, `VkSemaphoreCreateInfo`, `VkSemaphoreTypeCreateInfo`, `VkSemaphoreSignalInfo`, `VkSemaphoreWaitInfo`, `VkFenceCreateInfo`, `VkPipelineCacheCreateInfo`. All `[StructLayout(LayoutKind.Sequential)]`.
 - [x] `VulkanEnums.cs` — `VkResult`, `VkStructureType`, `VkDescriptorType`, `VkBufferUsageFlags`, `VkMemoryPropertyFlags`, `VkPipelineStageFlags2`, `VkAccessFlags2`, `VkShaderStageFlags`, `VkCommandPoolCreateFlags`, `VkCommandBufferUsageFlags`, `VkSubgroupFeatureFlags`, `VkPipelineShaderStageCreateFlags`, `VkSemaphoreType`. Match exact spec values.
-- [x] `VulkanInstance.cs` — `Create(bool enableValidation)`. Builds `VkApplicationInfo` (api 1.3) + `VkInstanceCreateInfo`. Returns instance handle + selected layer list. Reads `SHARPINFERENCE_VK_VALIDATION` env var.
+- [x] `VulkanInstance.cs` — `Create(bool enableValidation)`. Builds `VkApplicationInfo` (api 1.3) + `VkInstanceCreateInfo`. Returns instance handle + selected layer list. Reads `HARTSYINFERENCE_VK_VALIDATION` env var.
 - [x] `VulkanDevice.cs` — physical device enumeration, scoring (deviceType discrete > integrated > CPU; FP16 + subgroupSizeControl + ARITHMETIC + SHUFFLE features required; VRAM size as tiebreaker). Logs full `BackendCapabilities`. Builds `pNext` chain (`VkPhysicalDeviceFeatures2 → Vulkan11Features → Vulkan12Features → Vulkan13Features`). Calls `vkCreateDevice` with required extensions: `VK_KHR_synchronization2` (for 1.2 fallback), `VK_EXT_memory_budget`, optional `VK_KHR_push_descriptor`, optional `VK_KHR_cooperative_matrix`. Picks compute queue family (compute-only > compute+graphics).
 - [x] `VulkanCapabilities` (in `Core` package, mirror `BackendCapabilities` extension fields) — `SubgroupSize`, `MinSubgroupSize`, `MaxSubgroupSize`, `HasReBAR`, `HasPushDescriptor`, `HasMemoryBudget`, `HasCoopMatrix`, `MaxComputeSharedMem`, `VendorId`. Surface to upper layers.
-- [x] **Smoke test:** `tests/SharpInference.Vulkan.Tests/VulkanDeviceInfoTest.cs` + `VulkanFeatureProbe.cs` — enumerate physical devices, log device names + capabilities, isolate per-struct feature query (caught the NVIDIA feature-query bug — see [PHASE_3_5_DEVIATIONS.md #3](PHASE_3_5_DEVIATIONS.md))
+- [x] **Smoke test:** `tests/HartsyInference.Vulkan.Tests/VulkanDeviceInfoTest.cs` + `VulkanFeatureProbe.cs` — enumerate physical devices, log device names + capabilities, isolate per-struct feature query (caught the NVIDIA feature-query bug — see [PHASE_3_5_DEVIATIONS.md #3](PHASE_3_5_DEVIATIONS.md))
 
 ### 3b. Memory allocator + buffer wrapper
 
@@ -60,7 +60,7 @@ The smallest possible end-to-end. **Goal:** allocate a buffer, run an `add` shad
 ### 3d. Pipeline & descriptor management
 
 - [x] `SpirVShaderLoader.cs` — `LoadFromFile(string path)` returns `VkShaderModule` handle. Reads `.spv` from `Spirv/` content directory. Validates `codeSize % 4 == 0`.
-- [x] `VulkanPipelineCache.cs` — read/write cache blob to `~/.cache/sharpinference/vulkan/<deviceUUID>.pipeline_cache`. `Persist()` on backend dispose.
+- [x] `VulkanPipelineCache.cs` — read/write cache blob to `~/.cache/hartsyinference/vulkan/<deviceUUID>.pipeline_cache`. `Persist()` on backend dispose.
 - [x] `VulkanPipelineLayoutFactory.cs` — pre-builds the ~10–12 distinct `VkDescriptorSetLayout` shapes (`L_2SSBO`, `L_3SSBO`, `L_4SSBO`, `L_5SSBO`, `L_3SSBO_QKV`); pre-builds matching `VkPipelineLayout` per (descriptor layout × push-constant range).
 - [x] `VulkanDescriptorManager.cs` — push-descriptor path when `VK_KHR_push_descriptor` supported (no pool); pool ring fallback (two pools, alternate, reset between phases). Pre-allocate `MAX_SETS_PER_POOL = 4096`.
 - [x] `VulkanKernels.cs` — kernel registry. `Dictionary<KernelKey, VulkanKernel>` with `KernelKey = (Name, SpecConstHash)`. `Get(KernelKey)` returns or builds the `VkPipeline`. Builds via `VkComputePipelineCreateInfo` with `VkSpecializationInfo` and `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` chained.
@@ -120,12 +120,12 @@ The whole point of `IBackend` is that the diffusion package needs **zero changes
 
 - [ ] `Sd15Pipeline` runs against `VulkanBackend` with **no source changes** — flip via `Backend = new VulkanBackend(deviceOrdinal: 0)` in the integration test
 - [ ] `SdxlPipeline` likewise — Phase 3.5 acceptance gate is SD1.5 only, but SDXL should also produce reasonable output (may have perf gaps)
-- [x] `FluxPipeline` — Flux Schnell FP8 4-step 512×512 generation produces real photographic content matching prompt on RTX 3060 ([FluxVulkanGenerationTest.cs](../../tests/SharpInference.Diffusion.Tests/FluxVulkanGenerationTest.cs)). Two correctness bugs surfaced and fixed during this run — see [PHASE_3_5_DEVIATIONS.md #1, #2](PHASE_3_5_DEVIATIONS.md). Wall-clock ~178 s vs CUDA ~20 s — perf tuning still required.
+- [x] `FluxPipeline` — Flux Schnell FP8 4-step 512×512 generation produces real photographic content matching prompt on RTX 3060 ([FluxVulkanGenerationTest.cs](../../tests/HartsyInference.Diffusion.Tests/FluxVulkanGenerationTest.cs)). Two correctness bugs surfaced and fixed during this run — see [PHASE_3_5_DEVIATIONS.md #1, #2](PHASE_3_5_DEVIATIONS.md). Wall-clock ~178 s vs CUDA ~20 s — perf tuning still required.
 - [x] No `weight.DataPointer` regressions — `IBackend` abstraction held cleanly; diffusion package required zero source changes
 
 ## 5. Testing & Validation
 
-### Unit tests (`SharpInference.Vulkan.Tests`)
+### Unit tests (`HartsyInference.Vulkan.Tests`)
 
 - [ ] `InstanceBringUpTests` — physical device enumeration; capability discovery
 - [ ] `MemoryAllocatorTests` — alloc/free round-trip, alignment, large allocation, OOM retry, ReBAR detection
@@ -171,7 +171,7 @@ For every kernel: dispatch on Vulkan, dispatch on CPU, compare element-wise with
 - [ ] **End-to-end:** `Sd15_512x512_Vulkan_Vs_Cuda` — same seed, same prompt → SSIM > 0.99 (visually indistinguishable)
 - [ ] **End-to-end:** `Sdxl_1024x1024_Vulkan_Vs_Cuda` — same seed, same prompt → SSIM > 0.95 (some FP16 path differences expected)
 
-### Performance benchmarks (`SharpInference.Benchmarks`)
+### Performance benchmarks (`HartsyInference.Benchmarks`)
 
 - [ ] `MatMulBench` — Vulkan vs CUDA on same NVIDIA HW; target ≥ 60% of cuBLAS HGEMM
 - [ ] `Sd15_Pipeline_Bench` — RTX 3060: target ≤ 8 s (CUDA: ~5 s). RX 7900 XTX: target ≤ 10 s (no CUDA reference; absolute target).
@@ -179,13 +179,13 @@ For every kernel: dispatch on Vulkan, dispatch on CPU, compare element-wise with
 
 ### Memory leak validation
 
-- [x] 100-iteration MatMul cycle on Vulkan → device-memory delta ≤ 16 MB epsilon ([VulkanLeakTests.cs](../../tests/SharpInference.Vulkan.Tests/VulkanLeakTests.cs)). Surfaced two real fixes en route — see [PHASE_3_5_DEVIATIONS.md](PHASE_3_5_DEVIATIONS.md) (callbacks neutralized in `FreeAllCached`; transient-buffer Dispose in helper Dispose).
+- [x] 100-iteration MatMul cycle on Vulkan → device-memory delta ≤ 16 MB epsilon ([VulkanLeakTests.cs](../../tests/HartsyInference.Vulkan.Tests/VulkanLeakTests.cs)). Surfaced two real fixes en route — see [PHASE_3_5_DEVIATIONS.md](PHASE_3_5_DEVIATIONS.md) (callbacks neutralized in `FreeAllCached`; transient-buffer Dispose in helper Dispose).
 - [ ] Full 100-step generation cycle on a real model (SD1.5 / Flux) — needs checkpoint, deferred until SSIM gate.
 - [ ] Validation layer reports zero leaks on shutdown.
 
 ## 8. Performance Measurements (RTX 3060 Linux + NVIDIA driver)
 
-Captured via `SHARPINFERENCE_VK_PROFILE=1`. Generation: Flux Schnell FP8, 4 steps, 512×512, prompt "A photograph of an astronaut riding a horse", seed=42.
+Captured via `HARTSYINFERENCE_VK_PROFILE=1`. Generation: Flux Schnell FP8, 4 steps, 512×512, prompt "A photograph of an astronaut riding a horse", seed=42.
 
 | Stage | Wall-clock | Profiled host time | Linear total | Linear avg/call | Notes |
 |---|---|---|---|---|---|
@@ -224,7 +224,7 @@ Remaining levers (Phase 4 carryover):
   saving. Not worth more shader-side complexity right now.
 - **Push descriptors on AMD/Intel** — measured as a *regression* on NVIDIA (deviation #12) but
   may be a win on other vendors per published guides. Code path is implemented but
-  default-off; opt-in via `SHARPINFERENCE_VK_PUSH_DESCRIPTORS=1` for Phase E AMD/Intel testing.
+  default-off; opt-in via `HARTSYINFERENCE_VK_PUSH_DESCRIPTORS=1` for Phase E AMD/Intel testing.
 
 FlashAttention is **not** a meaningful lever here — SDPA is 4.4-5% of host time.
 
@@ -255,7 +255,7 @@ Track unanticipated issues in [`PHASE_3_5_DEVIATIONS.md`](PHASE_3_5_DEVIATIONS.m
 
 Phase 3.5 is **done** when:
 
-1. `SharpInference.Vulkan` package builds and ships ~16 `.spv` kernels.
+1. `HartsyInference.Vulkan` package builds and ships ~16 `.spv` kernels.
 2. Every `IBackend` op has a Vulkan implementation that matches the CPU reference within documented tolerance.
 3. Every `IBackend` op matches the CUDA reference within 1e-3 (FP16) on the same NVIDIA hardware.
 4. SD1.5 512×512 generates the same image (SSIM > 0.99) on Vulkan and CUDA from the same seed on the same NVIDIA GPU.

@@ -1,7 +1,7 @@
 # Phase 7 — Server (OpenAI-Compatible API)
 
 > **Goal:** OpenAI-compatible REST API serving image generation and audio endpoints.
-> **Packages:** SharpInference.Server
+> **Packages:** HartsyInference.Server
 
 ---
 
@@ -18,8 +18,8 @@
 
 ## 3. Setup
 
-- [ ] `SharpInferenceServiceExtensions.cs` — `AddSharpInference()` + `MapSharpInferenceEndpoints()`
-- [ ] `SharpInferenceServerOptions.cs`
+- [ ] `HartsyInferenceServiceExtensions.cs` — `AddHartsyInference()` + `MapHartsyInferenceEndpoints()`
+- [ ] `HartsyInferenceServerOptions.cs`
 
 ## 4. Image Endpoints
 

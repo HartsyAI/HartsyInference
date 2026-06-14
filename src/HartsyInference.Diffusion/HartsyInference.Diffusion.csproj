@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Diffusion</PackageId>
+    <Description>Image generation pipelines for HartsyInference — SD1.5, SDXL, Flux, SD3, LoRA, ControlNet, and schedulers.</Description>
+    <RootNamespace>HartsyInference.Diffusion</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+  </ItemGroup>
+
+</Project>

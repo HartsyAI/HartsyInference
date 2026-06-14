@@ -1,6 +1,6 @@
-# Contributing to SharpInference
+# Contributing to HartsyInference
 
-Thanks for your interest in contributing to SharpInference.
+Thanks for your interest in contributing to HartsyInference.
 
 ## Getting Started
 
@@ -13,8 +13,8 @@ Thanks for your interest in contributing to SharpInference.
 ### Building
 
 ```bash
-git clone https://github.com/your-org/SharpInference.git
-cd SharpInference
+git clone https://github.com/your-org/HartsyInference.git
+cd HartsyInference
 dotnet build
 ```
 

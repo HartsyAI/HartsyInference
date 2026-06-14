@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compiles all dequant CUDA kernels to PTX and copies into the SharpInference.Cuda Ptx folder.
+# Compiles all dequant CUDA kernels to PTX and copies into the HartsyInference.Cuda Ptx folder.
 # Requires nvcc (CUDA 11+) on PATH. Target SM 7.0 — compatible with every GPU since Volta (RTX 20xx onward).
 #
 # Usage:  ./build.sh              # compile + install
@@ -8,7 +8,7 @@
 set -euo pipefail
 
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
-PTX_OUT="${THIS_DIR}/../../../src/SharpInference.Cuda/Ptx"
+PTX_OUT="${THIS_DIR}/../../../src/HartsyInference.Cuda/Ptx"
 
 KERNELS=(
     "dequant_q8_0_to_f16"

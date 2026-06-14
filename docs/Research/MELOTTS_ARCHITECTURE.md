@@ -1,6 +1,6 @@
 # MeloTTS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (MeloTTS pipeline, also stage 1 of OpenVoice)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (MeloTTS pipeline, also stage 1 of OpenVoice)
 
 ## Summary
 
@@ -383,7 +383,7 @@ Chinese is the heavy outlier (~5x larger than the synthesizer itself). For a CPU
 
 ## C# implementation notes
 
-1. **VITS is a new model family for SharpInference** — Kokoro (StyleTTS2) and AudioLDM2 are the closest existing references, but the flow + duration predictor structure is different. The required new building blocks:
+1. **VITS is a new model family for HartsyInference** — Kokoro (StyleTTS2) and AudioLDM2 are the closest existing references, but the flow + duration predictor structure is different. The required new building blocks:
 
    - **WaveNet residual block** (`modules.py::WN`): dilated Conv1d + gated activation `tanh ⊙ sigmoid` + residual + skip, with global conditioning (`g`) projected to `2*channels` and added pre-activation. Used in the flow's coupling layers. **Implement once**, reuse across flow, posterior encoder (if we ever train), and SDP's `cond`.
 
@@ -412,7 +412,7 @@ Chinese is the heavy outlier (~5x larger than the synthesizer itself). For a CPU
    - Build a minimal "torch.load"-compatible pickle reader in C# (we likely already have one for Kokoro). Filter top-level keys; pull only `model.*` and remap key prefixes (`enc_p.`, `flow.`, `dec.`, `sdp.`, `dp.`, `emb_g.`).
    - **Preferred**: convert to safetensors offline at packaging time. Strip discriminators and posterior encoder during conversion (~50 MB saved per variant). This is the pattern from KOKORO_ARCHITECTURE.md item 3.
 
-6. **Determinism**: `noise_scale`, `noise_scale_w`, and the SDP's internal `randn` calls all consume randomness. To reproduce reference output bit-for-bit we need a deterministic RNG seedable from the caller. Use a PCG / xoshiro RNG in `SharpInference.Core.Random`, NOT `System.Random` (not deterministic across .NET versions). The PyTorch `randn_like` semantics is per-call so the call order matters — log and match it exactly.
+6. **Determinism**: `noise_scale`, `noise_scale_w`, and the SDP's internal `randn` calls all consume randomness. To reproduce reference output bit-for-bit we need a deterministic RNG seedable from the caller. Use a PCG / xoshiro RNG in `HartsyInference.Core.Random`, NOT `System.Random` (not deterministic across .NET versions). The PyTorch `randn_like` semantics is per-call so the call order matters — log and match it exactly.
 
 7. **`ceil(w)` and `Math.Round`**: same warning as Kokoro. `w_ceil = torch.ceil(w * x_mask)` uses standard ceiling — use `Math.Ceiling`. Be careful with `length_scale = 1/speed` rounding for very small speed values (clamp `speed ∈ [0.1, 10]`).
 

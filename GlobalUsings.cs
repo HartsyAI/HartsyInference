@@ -1,4 +1,4 @@
-// SharpInference — Global Using Directives
+// HartsyInference — Global Using Directives
 // These are available across all projects via Directory.Build.props import.
 
 global using System.Buffers;

@@ -3,7 +3,7 @@ Dumps Flux RoPE (Rotary Position Embedding) reference data: cos/sin tables and
 rotated Q/K vectors for known positions.
 
 Validates the axial RoPE implementation with axes_dim=[16,56,56], theta=10000.
-Saves raw float32 binary for cross-runtime comparison against SharpInference C#.
+Saves raw float32 binary for cross-runtime comparison against HartsyInference C#.
 
 Usage: python dump_flux_rope_reference.py [output_dir]
 Requires: pip install torch numpy

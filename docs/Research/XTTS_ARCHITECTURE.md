@@ -1,6 +1,6 @@
 # XTTS-v2 — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (XTTS-v2 pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (XTTS-v2 pipeline)
 
 ## Summary
 
@@ -328,7 +328,7 @@ The canonical revision is `coqui/XTTS-v2` (HF), pinned to `v2.0.2`. Full file li
 | `README.md` | varies | Model card with usage examples. |
 
 **Notes on the .pth format**:
-- All `.pth` files are PyTorch pickles. Loading requires either `torch.load(weights_only=False)` (insecure — arbitrary code execution risk) or a safe re-pickling pass. **For SharpInference: convert to safetensors offline at packaging time.** The conversion is one-shot: load the dict, walk each tensor, write `safetensors` with the same key names. See [SAFETENSORS_FORMAT.md](SAFETENSORS_FORMAT.md). After conversion the package becomes `xtts_v2.safetensors` (~1.86 GB), plus `tokenizer.json`, `speakers_xtts.safetensors`, and `config.json`.
+- All `.pth` files are PyTorch pickles. Loading requires either `torch.load(weights_only=False)` (insecure — arbitrary code execution risk) or a safe re-pickling pass. **For HartsyInference: convert to safetensors offline at packaging time.** The conversion is one-shot: load the dict, walk each tensor, write `safetensors` with the same key names. See [SAFETENSORS_FORMAT.md](SAFETENSORS_FORMAT.md). After conversion the package becomes `xtts_v2.safetensors` (~1.86 GB), plus `tokenizer.json`, `speakers_xtts.safetensors`, and `config.json`.
 - Community safetensors conversions exist (search HF for `xtts-v2-safetensors`) but are NOT official. We should do our own conversion to be sure of the key names and to strip the DVAE decoder weights (unused at inference, saves ~100 MB).
 
 ### Memory and Performance
@@ -519,14 +519,14 @@ After step 6 starts, every `stream_chunk_size` (default 20) new tokens:
 After step 6 terminates, flush any remaining latents through the vocoder and yield the final chunk.
 ```
 
-## C# Implementation Notes for SharpInference
+## C# Implementation Notes for HartsyInference
 
 1. **GPT-2 backbone is in dotLLM territory.** A 30-layer pre-norm causal Transformer with learned positional embeddings is exactly what dotLLM already implements for small open LLMs. We should expose a configurable GPT-2 module in dotLLM (or factor it to a shared low-level package) and instantiate it from XTTS with `n_layer=30, n_embd=1024, n_head=16, head_dim=64, bias=True, ffn_dim=4096, max_seq_len≈1077`. Reuse dotLLM's RoPE-free / learned-pos-embedding path. Reuse dotLLM's KV-cache infrastructure verbatim — the only XTTS-specific concern is that we have **two prediction heads** (text_head, mel_head) sharing the trunk, only mel_head is needed at inference, and the input embedding is the concatenation of three sub-sequences with **two different positional embedding tables** (text_pos_embedding, mel_pos_embedding) that must be indexed independently. See [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md) for the GPT-2 layer primitives we already have.
 
 2. **Mel-VQ codebook is not needed at inference.** This is the most important simplification to bake in. The GPT's `mel_embedding: Embedding(1026, 1024)` already contains everything downstream consumers need; we never need to look up the DVAE codebook directly at runtime. **Strip the entire `dvae.*` subtree from the safetensors package** at conversion time. Saves ~100 MB.
 
 3. **Conditioning encoder = Conv1d stack + Perceiver IO.** The Perceiver is small (~12M params) but needs care: it has 32 learned latent queries, cross-attention from queries → ref_mel features, and ~2-4 transformer layers on the queries. We need to implement:
-   - `Conv1d` (already in SharpInference.Core for HiFiGAN), GroupNorm, GELU.
+   - `Conv1d` (already in HartsyInference.Core for HiFiGAN), GroupNorm, GELU.
    - A small Perceiver IO block: one `nn.MultiheadAttention(query=latents, kv=features)` per layer, with pre-LayerNorm and a feed-forward block. ~200 LOC of new code. Document parameter naming in the safetensors mapping table during port.
    - Mel spectrogram with the exact parameters listed above (22050, n_fft=1024, hop=256, win=1024, n_mels=80, fmin=0, fmax=8000, Slaney mel norm, natural log + 1e-5). See [MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md). This is shared with Kokoro mel preprocessing (different params, same machinery).
 
@@ -534,7 +534,7 @@ After step 6 terminates, flush any remaining latents through the vocoder and yie
    - Pre-emphasis (optional, the official path omits it).
    - 40-bin mel filterbank input (NOT 80-bin — H/ASP uses 40 bins at 16 kHz internally; the wav is first turned into a 40-bin mel inside the encoder).
    - 1D ResNet with SE blocks: input 40 → conv1d(stride 1) → 3 ResNet stages with channel widths 32, 64, 128, 256 → SE blocks → ASP (attentive statistics pooling) → linear → 512-d → L2 norm.
-   - Implement as a separate small module under `SharpInference.Audio.SpeakerEncoder` since other TTS models may want to reuse it. **Frozen at training, frozen at inference.**
+   - Implement as a separate small module under `HartsyInference.Audio.SpeakerEncoder` since other TTS models may want to reuse it. **Frozen at training, frozen at inference.**
 
 5. **HiFiGAN decoder reuses our HiFiGAN code with two modifications.** See [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). The two XTTS-specific changes:
    - Pre-conv accepts 1024-dim input (GPT latents) instead of 80-dim mel.
@@ -557,7 +557,7 @@ After step 6 terminates, flush any remaining latents through the vocoder and yie
      - **Pure-C# port strategy**: for Chinese, ship a precomputed Han→Pinyin lookup table (~20K most common characters, ~500 KB) with simple tone-mark application; for Japanese, ship a Han+kana→romaji table or a small finite-state morphological analyzer. These are one-time ports; not blockers for English/European-language support.
    - **For first ship**: support 14 of 17 languages (drop zh, ja for v1 of the C# port). Add zh + ja in a follow-up with the romanization tables.
 
-8. **License**: CPML is **non-commercial**. SharpInference itself can ship the model loader code (BSD/MIT-style), but users must accept CPML before downloading weights. Mirror Coqui's approach: weights are not bundled in the NuGet package; a `SharpInference.Audio.Xtts.DownloadModel(licenseAccepted: true)` helper fetches from HF on first use. Surface the license text and require explicit acceptance.
+8. **License**: CPML is **non-commercial**. HartsyInference itself can ship the model loader code (BSD/MIT-style), but users must accept CPML before downloading weights. Mirror Coqui's approach: weights are not bundled in the NuGet package; a `HartsyInference.Audio.Xtts.DownloadModel(licenseAccepted: true)` helper fetches from HF on first use. Surface the license text and require explicit acceptance.
 
 9. **Validation reference**: the [Idiap fork](https://github.com/idiap/coqui-ai-TTS) is the recommended reference since it is actively maintained. Pin a specific commit, write a Python script that emits intermediate tensors (mel of reference, gpt_cond_latent, speaker_embedding, first 10 mel-token logits, final waveform first 1000 samples), and validate the C# port against those at every component boundary.
 

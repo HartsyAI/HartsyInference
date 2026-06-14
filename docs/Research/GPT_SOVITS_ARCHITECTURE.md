@@ -1,6 +1,6 @@
 # GPT-SoVITS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (GPT-SoVITS pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (GPT-SoVITS pipeline)
 
 ## Summary
 
@@ -34,7 +34,7 @@ Sources: [RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS), [lj1995/
 
 All checkpoints live under [lj1995/GPT-SoVITS](https://huggingface.co/lj1995/GPT-SoVITS) (official). Common mirrors: [kevinwang676/GPT-SoVITS-v4](https://huggingface.co/kevinwang676/GPT-SoVITS-v4), [kevinwang676/GPT-SoVITS-v-3](https://huggingface.co/kevinwang676/GPT-SoVITS-v-3).
 
-**Recommended order of implementation for SharpInference**: v2 first (most stable, most fine-tunes in the wild, simplest architecture — pure VITS), then v2Pro, then v4. Skip v1 (superseded) and v3 (superseded by v4).
+**Recommended order of implementation for HartsyInference**: v2 first (most stable, most fine-tunes in the wild, simplest architecture — pure VITS), then v2Pro, then v4. Skip v1 (superseded) and v3 (superseded by v4).
 
 ### Overall Architecture
 
@@ -116,7 +116,7 @@ File: [`GPT_SoVITS/AR/models/t2s_model.py`](https://github.com/RVC-Boss/GPT-SoVI
 
 The text portion is `phoneme_embed + bert_proj(bert_feature)`. The semantic portion is `semantic_embed(prompt_semantic)`. A causal mask blocks attention from text to semantic and from semantic to future semantic tokens. EOS terminates generation.
 
-**Inference**: greedy / top-k / top-p sampling with KV cache. The original code has three exported sub-modules used by the OpenVINO / mobile path: `t2s_encoder` (text + BERT → context), `first_stage_decoder` (consume prompt prefix, produce first new token), `stage_decoder` (incremental one-step decode). For SharpInference we can fuse these — there's no compile-graph reason to split them.
+**Inference**: greedy / top-k / top-p sampling with KV cache. The original code has three exported sub-modules used by the OpenVINO / mobile path: `t2s_encoder` (text + BERT → context), `first_stage_decoder` (consume prompt prefix, produce first new token), `stage_decoder` (incremental one-step decode). For HartsyInference we can fuse these — there's no compile-graph reason to split them.
 
 **Sampling defaults** (from `inference_webui.py`): `top_k=15`, `top_p=1.0`, `temperature=1.0`, `repetition_penalty=1.35`, `early_stop_num=1500` (hard cap on generated tokens). EOS detection is "token == 1024 OR cumulative duration exceeds reference scale".
 
@@ -183,7 +183,7 @@ DiT depth / width and number of CFM sampling steps:
 - Default CFM steps: 32 (v3 / v4). Configurable via `Sample Steps` parameter (4, 8, 16, 32, 64, 128). Lower steps → faster, lower quality.
 - Conditioning: GPT-predicted semantic IDs + speaker embed + (optional) duration prior.
 
-For SharpInference we are deferring v3/v4 until v2 ships. The CFM-DiT requires implementing flow-matching ODE solvers — see [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md) for solver design (Euler / midpoint). The BigVGAN v2 vocoder is documented in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md).
+For HartsyInference we are deferring v3/v4 until v2 ships. The CFM-DiT requires implementing flow-matching ODE solvers — see [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md) for solver design (Euler / midpoint). The BigVGAN v2 vocoder is documented in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md).
 
 ### HuBERT Feature Extractor
 
@@ -225,7 +225,7 @@ Model: [`hfl/chinese-roberta-wwm-ext-large`](https://huggingface.co/hfl/chinese-
 
 **Usage**: per Chinese character, the BERT hidden state (the 3rd-to-last layer, mean-pooled across the subword tokens that compose the character) is expanded to match the per-phoneme stream and concatenated into the GPT input. For **non-Chinese languages (EN, JA, KO), the BERT feature is zeros** — the GPT was trained with zero-BERT on non-Chinese batches, so this works correctly.
 
-**Tradeoff for SharpInference**: BERT-large is 1.3 GB. We can:
+**Tradeoff for HartsyInference**: BERT-large is 1.3 GB. We can:
 - Ship a quantised (INT8 or Q4) version for the Chinese-only path.
 - For purely English/Japanese pipelines, skip loading BERT entirely and pass zeros — measurable quality drop on Chinese, no effect on EN/JA/KO.
 
@@ -268,7 +268,7 @@ Per-language tokenisation:
 
 **ARPABET prefix convention**: ARPABET symbols are prefixed with `@` to ensure uniqueness against single-letter Chinese pinyin symbols (some collide with English single uppercase letters).
 
-For SharpInference: see [G2P_PHONEMIZATION.md](G2P_PHONEMIZATION.md) for the broader G2P strategy. Specific to GPT-SoVITS we need:
+For HartsyInference: see [G2P_PHONEMIZATION.md](G2P_PHONEMIZATION.md) for the broader G2P strategy. Specific to GPT-SoVITS we need:
 - A Chinese pinyin dictionary (~70k characters → pinyin entries). Convert the jieba dict + pypinyin CSVs to a flat C# `Dictionary<int, string[]>` at packaging time.
 - G2PW ONNX or a ported pure-C# version (it is a small BERT classifier; could be replaced by a simpler dictionary-merge heuristic at ~95% accuracy if we don't want a runtime BERT).
 - `g2p_en` CMU dict + a small fallback NN (or just drop OOV-to-phoneme accuracy and require known words).
@@ -580,7 +580,7 @@ PyTorch Lightning checkpoint, contains:
 }
 ```
 
-For SharpInference we only need `state_dict` and `hyper_parameters`. Convert offline to safetensors + JSON config.
+For HartsyInference we only need `state_dict` and `hyper_parameters`. Convert offline to safetensors + JSON config.
 
 ### SoVITS Checkpoint Layout (`s2G*.pth`)
 
@@ -727,7 +727,7 @@ This is the canonical way to produce "what HuBERT semantic IDs does this audio c
 - [ ] Whether v2Pro and ProPlus are checkpoint-compatible with v2 SoVITS code or require schema changes. Issue #2191 suggests text_embedding shape changed between (322, 192) and (732, 192) — confirm what else changes for Pro.
 - [ ] Whether `g2pW` ONNX can be replaced by a dictionary heuristic at acceptable accuracy. (Important: we want a no-ONNX-runtime path.)
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **Build order**: implement and validate components in this sequence to keep cycle time short:
    1. Text frontend (CN pinyin + EN ARPABET) → symbol vocab → validate against Python `clean_text` on a fixed corpus.
@@ -739,11 +739,11 @@ This is the canonical way to produce "what HuBERT semantic IDs does this audio c
 
 2. **Two-stage cascade is the simplifying factor**: do not try to share weights or fuse stages. Stage 1 emits integers; that's a clean serialisable boundary. Cache `prompt_semantic` + `refer_g` per reference voice — they're cheap once computed (a few KB).
 
-3. **HuBERT is the heaviest non-LLM component**: 95 M params, 12 transformer layers. Reuse our existing Transformer building block (same as used by BERT / CLIP encoders elsewhere in SharpInference) — HuBERT is a *standard* Transformer encoder with no special modules. The only HuBERT-specific code is the 7-layer 1D conv feature extractor (strides `5,2,2,2,2,2,2`, kernels `10,3,3,3,3,2,2`, 512 channels each, GELU). This is straightforward Conv1D.
+3. **HuBERT is the heaviest non-LLM component**: 95 M params, 12 transformer layers. Reuse our existing Transformer building block (same as used by BERT / CLIP encoders elsewhere in HartsyInference) — HuBERT is a *standard* Transformer encoder with no special modules. The only HuBERT-specific code is the 7-layer 1D conv feature extractor (strides `5,2,2,2,2,2,2`, kernels `10,3,3,3,3,2,2`, 512 channels each, GELU). This is straightforward Conv1D.
 
 4. **VQ quantiser**: implement as a single-codebook residual VQ. The codebook is `(1024, 192)`. Given an input `(B, T, 192)`, return `(B, T)` integer indices via nearest-codebook L2 search. **Deterministic** — must match reference exactly. Use FP32 for the distance computation even if surrounding ops are FP16 (avoid tie-break drift).
 
-5. **GPT KV cache**: the dominant cost is the 24-layer transformer × ~125-1500 tokens. Implement proper KV cache (preallocated tensor of shape `(batch, n_layers, 2, n_heads, max_len, head_dim)`) so each step is O(seq_len) attention not O(seq_len²). This is the same KV-cache pattern as our dotLLM cross-reference — consider extracting a shared `KvCache` type into `SharpInference.Core`.
+5. **GPT KV cache**: the dominant cost is the 24-layer transformer × ~125-1500 tokens. Implement proper KV cache (preallocated tensor of shape `(batch, n_layers, 2, n_heads, max_len, head_dim)`) so each step is O(seq_len) attention not O(seq_len²). This is the same KV-cache pattern as our dotLLM cross-reference — consider extracting a shared `KvCache` type into `HartsyInference.Core`.
 
 6. **Sampling**: top-k + repetition penalty + temperature. Match Python semantics:
    - Repetition penalty is applied multiplicatively to logits of previously generated tokens **before** softmax (PyTorch: `logits[batch, prev_token] /= rep_pen if logits[batch, prev_token] > 0 else logits[batch, prev_token] *= rep_pen`).
@@ -782,7 +782,7 @@ This is the canonical way to produce "what HuBERT semantic IDs does this audio c
 
 18. **Reference audio cache**: extract and cache `(prompt_semantic, refer_g, prompt_phone_ids, prompt_bert_feat)` per voice. These are tiny (~few KB) and avoid re-running HuBERT every utterance.
 
-19. **Cross-reference with SwarmUI extension**: the SwarmUI SharpInference extension (from MEMORY.md) will need to expose a TTS backend with per-voice cache and language selector. Plan the public API surface (`SoVitsPipeline.Synthesize(text, voice, language)`) before implementing internals, so the SwarmUI wiring is uncontroversial.
+19. **Cross-reference with SwarmUI extension**: the SwarmUI HartsyInference extension (from MEMORY.md) will need to expose a TTS backend with per-voice cache and language selector. Plan the public API surface (`SoVitsPipeline.Synthesize(text, voice, language)`) before implementing internals, so the SwarmUI wiring is uncontroversial.
 
 20. **Validation harness**: build a test that takes (text, ref_audio, ref_text) → produces waveform, then compares against a Python-generated reference waveform via mel-spectrogram L2 distance. Target: < 0.02 normalised MSE for v2 base voices.
 

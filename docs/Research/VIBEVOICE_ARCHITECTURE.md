@@ -1,6 +1,6 @@
 # VibeVoice — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-20 | Needed Before: SharpInference.Audio (VibeVoice pipeline)
+> Status: Complete | Last Updated: 2026-05-20 | Needed Before: HartsyInference.Audio (VibeVoice pipeline)
 
 ## Summary
 
@@ -8,7 +8,7 @@ VibeVoice (Microsoft Research, 2025; community-maintained fork since the officia
 
 The pipeline is `(multi-speaker script, ref audio per speaker) → Qwen2.5 LM prefill → AR loop {emit token → if diffusion: DDPM-20 + acoustic decode → semantic re-encode → feedback embed} → concat 7.5 Hz chunks → 24 kHz waveform`. There is **no mel front-end, no phonemizer, no learned duration predictor, no separate vocoder** — the acoustic VAE decoder *is* the vocoder. The model handles **up to 4 speakers and 90-minute outputs** (1.5B) or 45-minute outputs (7B), and has a **single-speaker streaming-0.5B variant** with a split-LM architecture and binary EOS classifier for low-latency real-time TTS.
 
-This file covers the model architecture, scheduler, and inference pipeline for the three official checkpoints. The DDPM math and v-prediction noise-prediction loss are covered by the existing diffusion-pipeline scheduler infra in `SharpInference.Diffusion`. Voice-cloning works zero-shot from any 5-30 s reference clip per speaker (24 kHz mono). License is **MIT** (community fork) — fully commercially usable.
+This file covers the model architecture, scheduler, and inference pipeline for the three official checkpoints. The DDPM math and v-prediction noise-prediction loss are covered by the existing diffusion-pipeline scheduler infra in `HartsyInference.Diffusion`. Voice-cloning works zero-shot from any 5-30 s reference clip per speaker (24 kHz mono). License is **MIT** (community fork) — fully commercially usable.
 
 **Sources**:
 - Paper: ["VibeVoice Technical Report"](https://arxiv.org/pdf/2508.19205) (Microsoft Research, 2025)
@@ -237,7 +237,7 @@ x = linear(modulate(norm_final(x), shift, scale))
 - `final_layer.linear.weight` initialized to **zero**
 - `t_embedder.mlp[0].weight` and `t_embedder.mlp[2].weight` initialized to `N(0, 0.02)`
 
-This means the diffusion head starts as an identity-like function and learns to add corrections during training. The SharpInference port doesn't need to reproduce the init — just load the trained weights — but the math invariant matters for unit tests (random-init output must equal the identity branch).
+This means the diffusion head starts as an identity-like function and learns to add corrections during training. The HartsyInference port doesn't need to reproduce the init — just load the trained weights — but the math invariant matters for unit tests (random-init output must equal the identity branch).
 
 ### 7. Inference Loop (Multi-Speaker, 1.5B / 7B)
 
@@ -406,7 +406,7 @@ For CFG, the streaming variant uses `<|image_pad|>` (Qwen2 vision token, not use
 - `solver_order = 2` (multistep)
 - `num_inference_steps = 20`
 
-`SharpInference.Diffusion` already has `DpmppMultiStepScheduler` with v-prediction support — we should verify the cosine beta schedule and exact alpha bar formula match, then **reuse the existing scheduler** rather than porting the file.
+`HartsyInference.Diffusion` already has `DpmppMultiStepScheduler` with v-prediction support — we should verify the cosine beta schedule and exact alpha bar formula match, then **reuse the existing scheduler** rather than porting the file.
 
 Cosine schedule reference (Nichol-Dhariwal):
 ```
@@ -420,16 +420,16 @@ This must match exactly — a small drift in `s` or the clip bound changes the i
 
 **MIT** — fully commercial-friendly. The community fork preserves the original license terms after Microsoft removed the official repo. Voice samples in `demo/` are CC-BY-4.0 from Common Voice + LibriSpeech (cleared for redistribution). Model weights on HF are MIT.
 
-### 12. Mapping to SharpInference
+### 12. Mapping to HartsyInference
 
-Tasks split between "reuse" (existing SharpInference / dotLLM code) and "new":
+Tasks split between "reuse" (existing HartsyInference / dotLLM code) and "new":
 
 | Component | Reuse | New |
 |---|---|---|
 | Qwen2.5-0.5B / 1.5B / 7B LM | **dotLLM** (full Qwen2 forward + KV cache + RoPE + tied embeddings) | None — dotLLM dependency check only |
 | Qwen2 tokenizer (BPE) | **dotLLM** tokenizer | Subclass to expose `speech_start_id`, `speech_end_id`, `speech_diffusion_id` from `<|vision_start/end/pad|>` |
 | `<|vision_pad|>` constraint logits processor | — | New: small constrained-vocab logit mask (~30 lines) |
-| Cosine beta schedule, v-prediction, DPM++ multistep | `SharpInference.Diffusion/Schedulers/DpmppMultiStepScheduler` (verify cosine match) | Likely no new code; one validation test |
+| Cosine beta schedule, v-prediction, DPM++ multistep | `HartsyInference.Diffusion/Schedulers/DpmppMultiStepScheduler` (verify cosine match) | Likely no new code; one validation test |
 | Acoustic VAE encoder + decoder | — | **New** `VibeVoiceAcousticTokenizer.cs` (1D causal ConvNeXt + streaming cache). Patterns from F5-TTS Vocos but causal and depthwise-conv. |
 | Semantic VAE encoder | — | **New** `VibeVoiceSemanticTokenizer.cs` (encoder only; shares `Block1D` with acoustic) |
 | `SpeechConnector` | — | **New** trivial 3-line MLP |
@@ -438,7 +438,7 @@ Tasks split between "reuse" (existing SharpInference / dotLLM code) and "new":
 | Streaming cache for SConv1d / SConvTranspose1d | — | **New** `VibeVoiceTokenizerStreamingCache` — per-sample, per-layer ring of last `(k-1)*d - (s-1)` samples |
 | Streaming-0.5B split-LM forward | dotLLM Qwen2 (per-layer hooks needed — see deviation below) | **New** wrapper that runs lower-N layers, then upper-(N-K) layers as a separate forward with `tts_input_types` embedding injected |
 | Binary EOS classifier | — | **New** trivial 2-layer MLP |
-| Audio I/O (24 kHz PCM) | `SharpInference.Audio/Io` | None |
+| Audio I/O (24 kHz PCM) | `HartsyInference.Audio/Io` | None |
 
 #### 12.1 Deviation risk: dotLLM Qwen2 must expose per-layer outputs
 
@@ -451,7 +451,7 @@ The first is cleaner and matches what `VibeVoiceStreamingModel` does in Python (
 
 #### 12.2 GPU kernels required
 
-All ops needed already exist in `SharpInference.Core`/`SharpInference.Diffusion`:
+All ops needed already exist in `HartsyInference.Core`/`HartsyInference.Diffusion`:
 - `Conv1d` (causal padding + dilation) — already exists for F5-TTS Vocos
 - `ConvTranspose1d` (causal + trim_right) — already exists for HiFiGAN/Vocos vocoders
 - `RMSNorm`, `LayerNorm`, `SiLU`, `GELU` — all in `Core`
@@ -463,8 +463,8 @@ No new PTX kernels needed.
 
 #### 12.3 Package boundaries
 
-- `SharpInference.Audio.Models.VibeVoice/` — all new model code
-- `SharpInference.Audio.Pipelines.VibeVoicePipeline.cs` — orchestration
+- `HartsyInference.Audio.Models.VibeVoice/` — all new model code
+- `HartsyInference.Audio.Pipelines.VibeVoicePipeline.cs` — orchestration
 - **dotLLM** dependency: Qwen2.5 LM only (existing). VibeVoice should not depend on `dotLLM.Cli` or any other dotLLM package beyond what F5-TTS already uses (if any) — see [`docs/Design/NUGET_PACKAGE_DESIGN.md`](../Design/NUGET_PACKAGE_DESIGN.md).
 
 ### 13. Open Questions / Pre-Implementation Verification

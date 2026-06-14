@@ -1,6 +1,6 @@
 # CUDA Driver API & PTX Kernels — Research Notes
 
-SharpInference accesses CUDA GPUs entirely through the CUDA Driver API via P/Invoke — no CUDA Runtime API, no native shared libraries beyond the system-installed NVIDIA driver. PTX kernels are loaded at runtime via `cuModuleLoadData`, JIT-compiled for the target GPU, and launched via `cuLaunchKernel`. cuBLAS is used for GEMM operations (FP16/FP32 matrix multiply).
+HartsyInference accesses CUDA GPUs entirely through the CUDA Driver API via P/Invoke — no CUDA Runtime API, no native shared libraries beyond the system-installed NVIDIA driver. PTX kernels are loaded at runtime via `cuModuleLoadData`, JIT-compiled for the target GPU, and launched via `cuLaunchKernel`. cuBLAS is used for GEMM operations (FP16/FP32 matrix multiply).
 
 Hand-written PTX provides a 7-14% performance improvement over CUDA C++ for critical-path kernels in diffusion inference (Conv2D, GroupNorm+SiLU, SDPA, elementwise add/scale), at the cost of per-architecture tuning and higher development complexity.
 
@@ -319,9 +319,9 @@ Full enum: [swigged.cuda CUresult.cs](https://github.com/kaby76/swigged.cuda/blo
 
 Source: [CUDA Release Notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/), [Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/)
 
-### Differences: managedCuda vs SharpInference
+### Differences: managedCuda vs HartsyInference
 
-| Aspect | managedCuda | SharpInference |
+| Aspect | managedCuda | HartsyInference |
 |--------|-------------|----------------|
 | CUdeviceptr | Struct wrapping ulong | Struct (same) |
 | Binding style | DllImport | LibraryImport (.NET 7+, faster) |
@@ -662,7 +662,7 @@ occupancy = max_resident_threads / max_threads_per_SM
 
 ### Tensor Layout in Memory
 
-SharpInference uses **NCHW** layout (batch, channel, height, width) as canonical, matching PyTorch's default. For CUDA kernels:
+HartsyInference uses **NCHW** layout (batch, channel, height, width) as canonical, matching PyTorch's default. For CUDA kernels:
 - **Conv2D (implicit GEMM):** NHWC internally for coalesced access. Transpose NCHW->NHWC at the boundary.
 - **GroupNorm:** NCHW (natural for channel-group slicing).
 - **SDPA:** `(batch, heads, seq_len, head_dim)` — effectively NCHW where C=heads, H=seq_len, W=head_dim.

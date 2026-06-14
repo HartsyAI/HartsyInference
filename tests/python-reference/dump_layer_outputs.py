@@ -15,7 +15,7 @@ from safetensors.torch import load_file
 
 
 def main():
-    model_dir = r"C:\Users\AI Overlord\Desktop\Projects\SharpInference\tests\test-models\sd15"
+    model_dir = r"C:\Users\AI Overlord\Desktop\Projects\HartsyInference\tests\test-models\sd15"
     ref_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reference_tensors")
     out_dir = os.path.join(ref_dir, "layers")
     os.makedirs(out_dir, exist_ok=True)

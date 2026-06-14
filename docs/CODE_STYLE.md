@@ -1,6 +1,6 @@
-# SharpInference — Code Style & Guidelines
+# HartsyInference — Code Style & Guidelines
 
-> **All agents must follow these rules.** This document is the single source of truth for coding conventions in SharpInference. When in doubt, follow what's written here.
+> **All agents must follow these rules.** This document is the single source of truth for coding conventions in HartsyInference. When in doubt, follow what's written here.
 
 ---
 
@@ -157,10 +157,10 @@ catch (Exception ex)
 public void MatMul(Tensor output, Tensor a, Tensor b)
 {
     if (a.Shape.Rank != 2 || b.Shape.Rank != 2)
-        throw new SharpInferenceException($"MatMul requires 2D tensors, got {a.Shape} and {b.Shape}");
+        throw new HartsyInferenceException($"MatMul requires 2D tensors, got {a.Shape} and {b.Shape}");
 
     if (a.Shape[1] != b.Shape[0])
-        throw new SharpInferenceException($"MatMul inner dimensions must match: {a.Shape[1]} != {b.Shape[0]}");
+        throw new HartsyInferenceException($"MatMul inner dimensions must match: {a.Shape[1]} != {b.Shape[0]}");
 }
 ```
 
@@ -170,7 +170,7 @@ public void MatMul(Tensor output, Tensor a, Tensor b)
 
 | Element | Convention | Example |
 |---|---|---|
-| Namespace | PascalCase matching folder | `SharpInference.Core.Tensors` |
+| Namespace | PascalCase matching folder | `HartsyInference.Core.Tensors` |
 | Public class/struct/record | PascalCase | `TensorShape`, `CpuBackend` |
 | Interface | `I` prefix + PascalCase | `IBackend`, `IScheduler` |
 | Public method | PascalCase | `LoadWeights()`, `Forward()` |
@@ -190,13 +190,13 @@ public void MatMul(Tensor output, Tensor a, Tensor b)
 
 ```csharp
 // WRONG
-namespace SharpInference.Core.Tensors
+namespace HartsyInference.Core.Tensors
 {
     public class Tensor { }
 }
 
 // RIGHT
-namespace SharpInference.Core.Tensors;
+namespace HartsyInference.Core.Tensors;
 
 public class Tensor { }
 ```
@@ -478,4 +478,4 @@ public long ElementCount => Shape.ElementCount;
 - **Don't catch `Exception` at a low level** — only at pipeline/API boundaries
 - **Don't use reflection on hot paths** — it's slow and allocates
 - **Don't add NuGet packages without discussion** — every dependency is a liability
-- **Don't duplicate a shared primitive** — before writing a helper, grep `IBackend` ops + shared statics (`WhisperOps`, `WeightNorm`, `IStft`, `SharpInference.Audio/Dsp/`). When 2+ call sites need the same op, hoist ONE parameterized helper; don't copy a private method into each model. (e.g. layout transpose = `backend.Transpose2D`.)
+- **Don't duplicate a shared primitive** — before writing a helper, grep `IBackend` ops + shared statics (`WhisperOps`, `WeightNorm`, `IStft`, `HartsyInference.Audio/Dsp/`). When 2+ call sites need the same op, hoist ONE parameterized helper; don't copy a private method into each model. (e.g. layout transpose = `backend.Transpose2D`.)

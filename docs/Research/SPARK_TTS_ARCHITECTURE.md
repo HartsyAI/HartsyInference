@@ -1,6 +1,6 @@
 # Spark-TTS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Spark-TTS pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Spark-TTS pipeline)
 
 ## Summary
 
@@ -330,10 +330,10 @@ In this mode the LM **predicts the 32 global tokens itself** (after the semantic
 
 For fine-grained control, replace `<|pitch_label_X|>` with `<|pitch_value_X|>` (X ∈ 0..1000, a Hz quantization) and similarly for speed_value/loudness_value/pitch_var_value. The CoT chain ordering observed in the test code is: `task → age → gender → pitch_value → pitch_label → loudness_value → loudness_label → emotion`.
 
-#### 3.3 Pseudocode for SharpInference
+#### 3.3 Pseudocode for HartsyInference
 
 ```csharp
-// Pseudocode for SharpInference.Audio.SparkTtsPipeline
+// Pseudocode for HartsyInference.Audio.SparkTtsPipeline
 public async Task<float[]> SynthesizeAsync(string text, string referenceWavPath, string referenceTranscript)
 {
     // A. Reference encoding
@@ -448,16 +448,16 @@ Repo: [`SparkAudio/Spark-TTS-0.5B`](https://huggingface.co/SparkAudio/Spark-TTS-
 
 ### 8. C# Implementation Notes
 
-#### 8.1 Reuse from dotLLM / existing SharpInference
+#### 8.1 Reuse from dotLLM / existing HartsyInference
 
 - **Qwen2.5-0.5B LM = standard Llama-style decoder transformer.** GQA (14:2), SwiGLU FFN, RMSNorm, RoPE θ=1M, tied embeddings. **Reuse dotLLM's `Qwen2ForCausalLM` implementation as-is** — only the embedding/lm_head dimensions change (vocab 151,936 → 166,000). Make sure the safetensors loader accepts the wider embedding matrix.
   - dotLLM patterns for KV-cache, sampling (temp/top-k/top-p), RoPE precomputation, and the GGUF-quantized variants all apply.
   - Sampling stop conditions: stop on `<|end_semantic_token|>` or `<|im_end|>`.
-- **Qwen tokenizer**: SharpInference already has BPE / Qwen tokenizer infra (see [TOKENIZERS.md](TOKENIZERS.md)). The `added_tokens.json` adds ~14k textual tokens — these need to be registered as atomic units that bypass BPE merging.
-- **Mel-spectrogram**: SharpInference already has a mel-spec kernel ([MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md)). Use n_fft=1024, win=640, hop=320, n_mels=128, fmin=10, fmax=sr/2. **Note the unusual win_length=640 (40 ms) with hop=320 (20 ms) — 50% overlap, not the more common 25%.** Use Hann window.
+- **Qwen tokenizer**: HartsyInference already has BPE / Qwen tokenizer infra (see [TOKENIZERS.md](TOKENIZERS.md)). The `added_tokens.json` adds ~14k textual tokens — these need to be registered as atomic units that bypass BPE merging.
+- **Mel-spectrogram**: HartsyInference already has a mel-spec kernel ([MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md)). Use n_fft=1024, win=640, hop=320, n_mels=128, fmin=10, fmax=sr/2. **Note the unusual win_length=640 (40 ms) with hop=320 (20 ms) — 50% overlap, not the more common 25%.** Use Hann window.
 - **HiFi-GAN wave generator** = same DAC-style decoder family covered in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) and [AUDIO_CODECS.md](AUDIO_CODECS.md) §DAC. **The exact code is "Adapted from descript-audio-codec under Apache 2.0"** — the same WNConv1d / WNConvTranspose1d / Snake1d / ResidualUnit primitives we need for DAC are exactly reused here. Implement once, use for both. Snake activation: `x + (1/β)·sin²(βx)` with per-channel learnable β.
 
-#### 8.2 New components needed (Spark-specific, add to `SharpInference.Audio.SparkTts`)
+#### 8.2 New components needed (Spark-specific, add to `HartsyInference.Audio.SparkTts`)
 
 | Component | Purpose | Notes |
 |---|---|---|
@@ -497,7 +497,7 @@ Suggested implementation phases (depends on what's already done):
 1. **Phase A (prerequisites)**: dotLLM Qwen2.5-0.5B BF16 inference + Qwen BPE tokenizer with added-token registration. Mel-spec kernel. (Likely already shipped.)
 2. **Phase B (reusable codec primitives)**: WNConv1d, WNConvTranspose1d, Snake1d, ResidualUnit, ConvNeXtBlock, AdaLayerNorm, VocosBackbone. These are shared with DAC and other codecs.
 3. **Phase C (BiCodec specifics)**: FactorizedVectorQuantize, ResidualFsq, EcapaTdnnGlobC512, PerceiverResampler, WaveGeneratorDac. Wire into BiCodec class.
-4. **Phase D (wav2vec2 helper)**: standalone Wav2Vec2Xlsr53Encoder — only the inference path, no training-time CTC head. Loadable from PyTorch `pytorch_model.bin` (use SharpInference's existing PyTorch-pickle loader or convert to safetensors at packaging).
+4. **Phase D (wav2vec2 helper)**: standalone Wav2Vec2Xlsr53Encoder — only the inference path, no training-time CTC head. Loadable from PyTorch `pytorch_model.bin` (use HartsyInference's existing PyTorch-pickle loader or convert to safetensors at packaging).
 5. **Phase E (pipeline)**: SparkTtsTokenParser + SparkTtsPipeline + voice-cloning sample app.
 6. **Phase F (controllable mode)**: add the attribute control prompt builder + sample.
 
@@ -508,8 +508,8 @@ Suggested implementation phases (depends on what's already done):
 - **wav2vec2 hidden state indexing**: layer 0 is the post-feature-extractor input embedding, so "layer 11" means `hidden_states[11]` which is the **output of the 11th transformer block** (1-indexed: blocks 11, 14, 16). Verify against the HF `Wav2Vec2Model.forward(output_hidden_states=True)` semantics.
 - **Reference clip duration**: not hard-coded; read `ref_segment_duration` from `config.yaml`. If missing, the inference code uses 6 seconds. Pad short audio by tile-repeat, NOT zero-pad (zero-padding affects ECAPA stats).
 - **AdaLayerNorm conditioning**: the d-vector must be projected to `2 × vocos_dim = 768` (scale + shift) per AdaLN block. Verify against `prenet` weights — there should be 12 small Linear(1024, 768) modules.
-- **Non-commercial license**: CC-BY-NC-SA 4.0 — flag this in SharpInference's model registry so commercial users see the restriction.
-- **No streaming**: official inference is one-shot. If we want streaming TTS in SharpInference, we'd need to chunk the BiCodec decoder over windows of N≥32 semantic tokens (~640 ms) while the LM generates. This is a future enhancement, not in the official pipeline.
+- **Non-commercial license**: CC-BY-NC-SA 4.0 — flag this in HartsyInference's model registry so commercial users see the restriction.
+- **No streaming**: official inference is one-shot. If we want streaming TTS in HartsyInference, we'd need to chunk the BiCodec decoder over windows of N≥32 semantic tokens (~640 ms) while the LM generates. This is a future enhancement, not in the official pipeline.
 
 ## Open Questions / TODO During Implementation
 

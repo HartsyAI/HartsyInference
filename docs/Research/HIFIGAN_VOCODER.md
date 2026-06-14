@@ -1,10 +1,10 @@
 # HiFiGAN + iSTFTNet + Vocos Vocoder — Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (vocoder)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (vocoder)
 
 ## Summary
 
-A vocoder converts mel-spectrogram features (or other compressed audio features) into raw audio waveform. This doc covers three families used by SharpInference's TTS pipelines:
+A vocoder converts mel-spectrogram features (or other compressed audio features) into raw audio waveform. This doc covers three families used by HartsyInference's TTS pipelines:
 
 1. **HiFiGAN** (Kong et al., 2020) — GAN-trained generator with transposed convolutions + Multi-Receptive Field Fusion. The reference baseline. Used standalone by some TTS systems and by HiFi-GAN-based codecs.
 2. **iSTFTNet** (Kaneko et al., 2022) — modifies HiFiGAN by replacing the final upsampling stages with an inverse STFT, predicting magnitude+phase spectrograms instead of waveform samples directly. Used by **StyleTTS 2** and therefore by **Kokoro** ([KOKORO_ARCHITECTURE.md](KOKORO_ARCHITECTURE.md)).
@@ -474,9 +474,9 @@ This can be pre-computed and stored as a single weight tensor. Kokoro's iSTFTNet
 - [ ] Exact parameter count of the iSTFTNet decoder portion alone (vs. full 82M model)
 - [ ] Whether Kokoro's iSTFTNet weights can be loaded independently from the rest of the model
 - [ ] Whether the F0 (pitch) input is required or can be set to zero for inference (probably not — the model is trained with F0 as a strong conditioning signal)
-- [ ] Whether to ship Vocos as a separate package or bundle it into SharpInference.Audio (probably bundle — Vocos is small and shared by F5-TTS, Kokoro-vocos variants, EnCodec decoding paths)
+- [ ] Whether to ship Vocos as a separate package or bundle it into HartsyInference.Audio (probably bundle — Vocos is small and shared by F5-TTS, Kokoro-vocos variants, EnCodec decoding paths)
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **Implement iSTFTNet first, not standard HiFiGAN.** Kokoro is our first TTS target and it uses iSTFTNet. Standard HiFiGAN is only useful as a reference/test target.
 
@@ -504,7 +504,7 @@ This can be pre-computed and stored as a single weight tensor. Kokoro's iSTFTNet
 
 8. **Vocos for F5-TTS path**: F5-TTS uses `vocos-mel-24khz` directly. Implementing Vocos doubles as the F5-TTS vocoder. ConvNeXt blocks are simpler than HiFiGAN — no transposed convs at all. Plan to implement Vocos alongside iSTFTNet.
 
-9. **iSTFT shared kernel**: All three vocoder families need iSTFT (HiFiGAN's tanh head is the only outlier). Implement once in SharpInference.Audio as `IStftLayer`. Match `torch.istft(window=hann, center=True, normalized=False)` exactly.
+9. **iSTFT shared kernel**: All three vocoder families need iSTFT (HiFiGAN's tanh head is the only outlier). Implement once in HartsyInference.Audio as `IStftLayer`. Match `torch.istft(window=hann, center=True, normalized=False)` exactly.
 
 10. **GPU kernels needed for the vocoder:**
     - Conv1D (existing CUDA backend has 2D via im2col; need 1D variant — implement via im2col_1d or special-case)

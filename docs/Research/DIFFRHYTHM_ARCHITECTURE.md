@@ -1,12 +1,12 @@
 # DiffRhythm — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (DiffRhythm pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (DiffRhythm pipeline)
 
 ## Summary
 
 DiffRhythm (ASLP-Lab @ NWPU, 2025, [arXiv:2503.01183](https://arxiv.org/abs/2503.01183)) is the first open-source **end-to-end latent diffusion model** for full-length song generation (synchronized vocals + accompaniment) at 44.1 kHz stereo. The pipeline is two-stage and "embarrassingly simple": (1) a VAE compresses 44.1 kHz stereo waveforms into a 64-dim continuous latent at 21.5 Hz (compression factor 2048), and (2) a 1.1B-parameter Diffusion Transformer (DiT) — built from **16 LLaMA-style decoder layers** at hidden=2048, 32 heads, head_dim=64 — denoises the full-song latent in one shot using **flow matching** (no autoregression, no chunking at the DiT level). Conditioning is: a **MuQ-MuLan** style embedding (or a fine-tuned LSTM over MuQ in DiffRhythm-v1) fed via AdaLN-Zero, plus **G2P phoneme tokens** of the LRC lyrics fed via cross-attention with **sentence-level start-timestamp alignment**. A 4m45s song generates in ~10 s on a single H800 (Apache-2.0).
 
-This file covers the DiffRhythm-1 family (v1.0 and v1.2) plus brief notes on the v2 / "+"-line variants. Pure-C# implementation hints assume reuse of existing SharpInference DiT blocks (Flux/SD3) and 1-D Conv stacks (Kokoro iSTFTNet / Stable Audio VAE). Flow-matching scheduler details live in **[FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md)** (to be authored); shared DiT primitives are in [FLUX_ARCHITECTURE.md](FLUX_ARCHITECTURE.md) and [SD3_ARCHITECTURE.md](SD3_ARCHITECTURE.md); VAE primitives in [VAE_ARCHITECTURE.md](VAE_ARCHITECTURE.md); CFG semantics in [CFG_AND_GUIDANCE.md](CFG_AND_GUIDANCE.md).
+This file covers the DiffRhythm-1 family (v1.0 and v1.2) plus brief notes on the v2 / "+"-line variants. Pure-C# implementation hints assume reuse of existing HartsyInference DiT blocks (Flux/SD3) and 1-D Conv stacks (Kokoro iSTFTNet / Stable Audio VAE). Flow-matching scheduler details live in **[FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md)** (to be authored); shared DiT primitives are in [FLUX_ARCHITECTURE.md](FLUX_ARCHITECTURE.md) and [SD3_ARCHITECTURE.md](SD3_ARCHITECTURE.md); VAE primitives in [VAE_ARCHITECTURE.md](VAE_ARCHITECTURE.md); CFG semantics in [CFG_AND_GUIDANCE.md](CFG_AND_GUIDANCE.md).
 
 Sources: paper [arXiv:2503.01183](https://arxiv.org/html/2503.01183v1); follow-ups DiffRhythm+ ([arXiv:2507.12890](https://arxiv.org/abs/2507.12890)) and DiffRhythm 2 ([arXiv:2510.22950](https://arxiv.org/abs/2510.22950)); code [github.com/ASLP-lab/DiffRhythm](https://github.com/ASLP-lab/DiffRhythm); weights at [ASLP-lab on HF](https://huggingface.co/ASLP-lab); MuLan dependency [OpenMuQ/MuQ-MuLan-large](https://huggingface.co/OpenMuQ/MuQ-MuLan-large).
 
@@ -340,7 +340,7 @@ All three target full-length (multi-minute) song generation with synchronized vo
 
 ---
 
-## 8. C# Implementation Notes (SharpInference.Audio)
+## 8. C# Implementation Notes (HartsyInference.Audio)
 
 ### 8.1 VAE (1-D Conv stack)
 
@@ -351,7 +351,7 @@ All three target full-length (multi-minute) song generation with synchronized vo
 
 ### 8.2 DiT
 
-- **Reuse**: closest existing block in SharpInference is the **Flux / SD3 DiT block** ([FLUX_ARCHITECTURE.md](FLUX_ARCHITECTURE.md), [SD3_ARCHITECTURE.md](SD3_ARCHITECTURE.md)). Differences:
+- **Reuse**: closest existing block in HartsyInference is the **Flux / SD3 DiT block** ([FLUX_ARCHITECTURE.md](FLUX_ARCHITECTURE.md), [SD3_ARCHITECTURE.md](SD3_ARCHITECTURE.md)). Differences:
   - 1-D RoPE instead of 2-D (simpler: one axis, head_dim/2 frequencies).
   - Cross-attention block per DiT block (vs Flux's joint MMDiT). Add a `DiTCrossAttnBlock` variant alongside `DiTSelfAttnBlock`.
   - SwiGLU FFN instead of GELU-MLP (already used by F-Lite per [F_LITE_ARCHITECTURE.md](F_LITE_ARCHITECTURE.md); the same kernel applies).
@@ -365,7 +365,7 @@ All three target full-length (multi-minute) song generation with synchronized vo
 - **G2P (espeak-ng)**: C# wrapper via P/Invoke around `libespeak-ng.so` / `libespeak-ng.dll`. Already a known dependency for Kokoro ([KOKORO_ARCHITECTURE.md](KOKORO_ARCHITECTURE.md)) — share the binding. Need IPA mode + language switching per LRC line if multilingual.
 - **LRC parser**: trivial regex `\[(\d+):(\d+\.\d+)\](.*)` per line; sort by timestamp; produce `(start_seconds, raw_text)` tuples.
 - **MuQ-MuLan**: **larger lift.** Two sub-models:
-  - *Text tower*: XLM-RoBERTa-base (~278 M) + 8 Transformer layers. XLM-R is a BERT-family model; reuse SharpInference's existing BERT/RoBERTa primitives. SentencePiece tokenizer ([TOKENIZERS.md](TOKENIZERS.md)).
+  - *Text tower*: XLM-RoBERTa-base (~278 M) + 8 Transformer layers. XLM-R is a BERT-family model; reuse HartsyInference's existing BERT/RoBERTa primitives. SentencePiece tokenizer ([TOKENIZERS.md](TOKENIZERS.md)).
   - *Audio tower*: MuQ encoder (mel → ConvNeXt → Transformer with Mel-Residual VQ heads). New. Plan as its own implementation task before DiffRhythm v1.2 ships; for v1.0 the LSTM-on-MuQ adapter is even smaller but still requires MuQ.
   - For an initial MVP, support **audio-prompt only** (skip MuLan text tower) — this matches DiffRhythm-base/full v1.0 behavior and gets the pipeline to "first sound" with much less work.
 
@@ -380,7 +380,7 @@ All three target full-length (multi-minute) song generation with synchronized vo
 Following [NUGET_PACKAGE_DESIGN.md](../Design/NUGET_PACKAGE_DESIGN.md):
 
 ```
-SharpInference.Audio
+HartsyInference.Audio
   ├─ Vae/StableAudioVae.cs           (shared with Stable Audio path)
   ├─ DiffRhythm/
   │   ├─ DiffRhythmPipeline.cs       (the orchestrator)

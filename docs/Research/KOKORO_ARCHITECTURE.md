@@ -1,6 +1,6 @@
 # Kokoro TTS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Kokoro pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Kokoro pipeline)
 
 ## Summary
 
@@ -283,7 +283,7 @@ The duration predictor outputs a tensor of shape `(batch, seq_len, max_dur=50)`.
 - [ ] Whether the model supports streaming output or requires full sequence generation. The architecture suggests synchronous (whole-sequence) decode; chunked output would require running the decoder on partial alignments.
 - [ ] Whether we should ship the v1.1-zh variant alongside v1.0 — the architecture is identical, the weights are different. Probably yes, load via the same model class with a config switch.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 1. **ALBERT weight sharing**: PLBERT is ALBERT with `n_layer=12` but only ONE set of weights shared across all layers. This affects how we instantiate the encoder: load the weights once, loop 12 times during forward. Standard transformer code that creates 12 distinct `LayerBlock` instances would 12x the memory and silently miscompute.
 
@@ -304,11 +304,11 @@ The duration predictor outputs a tensor of shape `(batch, seq_len, max_dur=50)`.
    - Snake activation: `x + (1/alpha) * sin^2(alpha * x)`.
    - SineGen: cumulative sum of phase increments, sine wave generation.
 
-5. **BiLSTM implementation**: PyTorch's BiLSTM is fused. For SharpInference we need:
+5. **BiLSTM implementation**: PyTorch's BiLSTM is fused. For HartsyInference we need:
    - Forward LSTM over input
    - Backward LSTM over reversed input
    - Concat along feature dim
-   LSTM cell: standard `i, f, g, o = chunk(W*[x; h] + b, 4)`, `c = f*c_prev + i*tanh(g)`, `h = o*tanh(c)`. Plan to add to `SharpInference.Core/Modules` as `LstmCell` / `BiLstm`.
+   LSTM cell: standard `i, f, g, o = chunk(W*[x; h] + b, 4)`, `c = f*c_prev + i*tanh(g)`, `h = o*tanh(c)`. Plan to add to `HartsyInference.Core/Modules` as `LstmCell` / `BiLstm`.
 
 6. **Alignment expansion**: The alignment matrix `pred_aln_trg` is `(1, seq_len, total_frames)` with each row a one-hot indicator. The matmul `en = d.transpose @ pred_aln_trg` is equivalent to a `Repeat` op (each `d[:, t]` repeated `duration[t]` times). Implement directly as a Repeat — faster, less memory.
 

@@ -1,6 +1,6 @@
 # Deploy Agent
 
-> Package SharpInference for NuGet — versioning, metadata, build, pre-release testing, publication.
+> Package HartsyInference for NuGet — versioning, metadata, build, pre-release testing, publication.
 
 ## Extra Reading
 - `docs/Design/NUGET_PACKAGE_DESIGN.md`, `docs/Checklists/RELEASE_NUGET.md`
@@ -20,7 +20,7 @@
 Each `.csproj` must have:
 ```xml
 <PropertyGroup>
-    <PackageId>SharpInference.Core</PackageId>
+    <PackageId>HartsyInference.Core</PackageId>
     <Version>1.0.0-preview.1</Version>
     <Authors>YourName</Authors>
     <Description>...</Description>

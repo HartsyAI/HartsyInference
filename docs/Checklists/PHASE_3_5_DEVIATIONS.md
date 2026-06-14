@@ -14,7 +14,7 @@ Format mirrors [PHASE_3_DEVIATIONS.md](PHASE_3_DEVIATIONS.md): one entry per iss
 
 **How it was found**: First end-to-end Flux Schnell 4-step generation produced an all-zero RGB buffer. Backed up by checking activations after the first transformer block — they were already NaN. Disabled FP8 cast path locally and the NaNs went away, isolating the cast logic as the root cause.
 
-**Fix**: Bind `gemmDtype` to `output.DType` directly, demoting only when capability flags require it ([VulkanBackend.cs:331-333](../../src/SharpInference.Vulkan/VulkanBackend.cs#L331-L333), mirrored at L436-438 for Conv2D and in `ScaledDotProductAttention`):
+**Fix**: Bind `gemmDtype` to `output.DType` directly, demoting only when capability flags require it ([VulkanBackend.cs:331-333](../../src/HartsyInference.Vulkan/VulkanBackend.cs#L331-L333), mirrored at L436-438 for Conv2D and in `ScaledDotProductAttention`):
 
 ```csharp
 DType gemmDtype = output.DType;
@@ -36,7 +36,7 @@ The FP8 inputs are still cast up to F16 (or F32) via `CastIfNeeded` for the mult
 
 **How it was found**: After fixing deviation #1, the image went from all-black (NaN) to **uniform gray** with no spatial structure. Wrote `Backend_SDPA_FluxShape_AllHeads_Match_Cpu` (H=24, S=64, D=128) which produced 2,788 mismatches starting precisely at head 2 — the head index where the auto-flush threshold was first crossed inside the SDPA dispatch loop.
 
-**Fix**: Introduced an `OpScope` RAII counter to suppress mid-op drain, with explicit drain at op boundaries instead ([VulkanBackend.cs:140-174](../../src/SharpInference.Vulkan/VulkanBackend.cs#L140-L174)):
+**Fix**: Introduced an `OpScope` RAII counter to suppress mid-op drain, with explicit drain at op boundaries instead ([VulkanBackend.cs:140-174](../../src/HartsyInference.Vulkan/VulkanBackend.cs#L140-L174)):
 
 ```csharp
 private int _opNestingDepth;
@@ -67,9 +67,9 @@ private readonly struct OpScope : IDisposable
 
 **Deviation**: NVIDIA Linux 535-series drivers (and likely older) advertise `apiVersion = 1.3.x` but return zeros for `shaderFloat16`, `timelineSemaphore`, `bufferDeviceAddress`, `synchronization2`, `subgroupSizeControl`, and `computeFullSubgroups` when queried through the *promoted* v1.2/v1.3 feature structs. Querying through the original extension structs (`VkPhysicalDeviceShaderFloat16Int8FeaturesKHR`, etc.) returns the right answer, but our codepath used the consolidated chain. The features are real and `vkCreateDevice` accepts them — only the feature *query* is wrong.
 
-**How it was found**: `VulkanFeatureProbe.IsolateFeatureQuery` test ([tests/SharpInference.Vulkan.Tests/VulkanFeatureProbe.cs](../../tests/SharpInference.Vulkan.Tests/VulkanFeatureProbe.cs)) probed each promoted struct independently and saw all-zero results despite `apiVersion = 1.3.250`. The smoke tests then failed to enable any of the features the kernels needed.
+**How it was found**: `VulkanFeatureProbe.IsolateFeatureQuery` test ([tests/HartsyInference.Vulkan.Tests/VulkanFeatureProbe.cs](../../tests/HartsyInference.Vulkan.Tests/VulkanFeatureProbe.cs)) probed each promoted struct independently and saw all-zero results despite `apiVersion = 1.3.250`. The smoke tests then failed to enable any of the features the kernels needed.
 
-**Fix**: Trust `apiVersion` as the source of truth for guaranteed-promoted core features on known vendors ([VulkanDevice.cs:195-211](../../src/SharpInference.Vulkan/VulkanDevice.cs#L195-L211)):
+**Fix**: Trust `apiVersion` as the source of truth for guaranteed-promoted core features on known vendors ([VulkanDevice.cs:195-211](../../src/HartsyInference.Vulkan/VulkanDevice.cs#L195-L211)):
 
 ```csharp
 uint api = props2.properties.apiVersion;
@@ -96,7 +96,7 @@ The vendorID guard restricts the override to NVIDIA / AMD / Intel, where these f
 
 **How it was found**: Loading Flux Schnell on RTX 3060 — the first transformer-block weight upload OOM'd ~70% through the load. CUDA backend handles the same weights without issue (it uses raw `cuMemAlloc`, no slabs).
 
-**Fix**: [VulkanMemory.cs:160-161](../../src/SharpInference.Vulkan/VulkanMemory.cs#L160-L161):
+**Fix**: [VulkanMemory.cs:160-161](../../src/HartsyInference.Vulkan/VulkanMemory.cs#L160-L161):
 
 ```csharp
 public const ulong SLAB_LARGE = 64UL * 1024 * 1024;   // was 256 MB
@@ -117,7 +117,7 @@ Also added an `OnOutOfMemory` callback that drains the deferred-free list and re
 
 **How it was found**: VRAM usage climbing per step during the long pipeline integration runs. Process-RSS roughly stable but driver-side allocation count rising.
 
-**Fix**: Added a `_transientBuffers` list and `DrainTransients()` method ([VulkanGpuTransferHelper.cs:22-75](../../src/SharpInference.Vulkan/VulkanGpuTransferHelper.cs#L22-L75)). Cache-miss buffers are appended to the list, then drained at op boundaries via `DrainAndFlush` in the backend. (See deviation #2 — the original drain-on-every-flush was too aggressive; deviation #2 fixed it to drain on op exit instead.)
+**Fix**: Added a `_transientBuffers` list and `DrainTransients()` method ([VulkanGpuTransferHelper.cs:22-75](../../src/HartsyInference.Vulkan/VulkanGpuTransferHelper.cs#L22-L75)). Cache-miss buffers are appended to the list, then drained at op boundaries via `DrainAndFlush` in the backend. (See deviation #2 — the original drain-on-every-flush was too aggressive; deviation #2 fixed it to drain on op exit instead.)
 
 **Impact**: Stable VRAM across multi-step generation. No buffer-leak validation errors on Mesa LLVMpipe. The `_transientBuffers` list is also what made deviation #2 visible — without it the SDPA dispatches would have leaked but completed fine.
 
@@ -131,7 +131,7 @@ Also added an `OnOutOfMemory` callback that drains the deferred-free list and re
 
 **How it was found**: Caught by inspection while debugging deviation #2 — when I traced the timeline counter against destroyed-buffer events the off-by-one was visible. No isolated test reproduced it because the dispatch usually completes before the next reclaim runs; it was a latent UAF that would bite under load.
 
-**Fix**: Tag with `_value + 1` ([VulkanCommandStream.cs](../../src/SharpInference.Vulkan/VulkanCommandStream.cs) — `DeferredFree(alloc, _value + 1)`). `SubmitAndAdvance` increments `_value` first, then signals that value, so the tag matches.
+**Fix**: Tag with `_value + 1` ([VulkanCommandStream.cs](../../src/HartsyInference.Vulkan/VulkanCommandStream.cs) — `DeferredFree(alloc, _value + 1)`). `SubmitAndAdvance` increments `_value` first, then signals that value, so the tag matches.
 
 **Impact**: Eliminates a class of latent UAF that's hard to reproduce but real. Lesson: deferred-free tags must reference the *next* tick to be reached when the recording op submits, not the most-recent already-submitted tick.
 
@@ -202,10 +202,10 @@ expensive than the pre-allocated-pool path. Other vendors (AMD, Intel) may diffe
 extension is reportedly the recommended path on AMD RDNA per several published guides.
 
 **Fix**: Push descriptors remain implemented in
-[VulkanDescriptorManager.PushSet](../../src/SharpInference.Vulkan/VulkanDescriptorManager.cs)
+[VulkanDescriptorManager.PushSet](../../src/HartsyInference.Vulkan/VulkanDescriptorManager.cs)
 and in the
-[VulkanBackend.Dispatch](../../src/SharpInference.Vulkan/VulkanBackend.cs) branch, but are
-**default-off**. Opt-in via `SHARPINFERENCE_VK_PUSH_DESCRIPTORS=1`. To revisit on AMD when
+[VulkanBackend.Dispatch](../../src/HartsyInference.Vulkan/VulkanBackend.cs) branch, but are
+**default-off**. Opt-in via `HARTSYINFERENCE_VK_PUSH_DESCRIPTORS=1`. To revisit on AMD when
 Phase E hardware is available — if push descriptors are a win there, we'd want a per-vendor
 default rather than a universal one.
 
@@ -223,10 +223,10 @@ F16. A guard `if (output.DType != DType.F16) return false;` would correctly rout
 to the tiled fallback.
 
 **Deviation**: Flux's `FluxTransformer.cs` allocates *every* Linear output as `DType.F32`
-([line 164](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L164),
-[L169](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L169),
-[L199](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L199),
-[L219](../../src/SharpInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L219), and many
+([line 164](../../src/HartsyInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L164),
+[L169](../../src/HartsyInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L169),
+[L199](../../src/HartsyInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L199),
+[L219](../../src/HartsyInference.Diffusion/Models/Denoisers/FluxTransformer.cs#L219), and many
 more) regardless of the input/weight dtype. With the F16-only guard, the coopmat path was never
 actually hit during Flux Schnell generation — every Linear silently fell through to
 `matmul_tiled`. Wall-clock improvement from "enabling" coopmat was 1.4% (138 s → 138 s within

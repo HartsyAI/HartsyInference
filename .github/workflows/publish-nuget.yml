@@ -1,13 +1,13 @@
 name: Publish to NuGet
 
-# Auto-publishes the SharpInference packages to NuGet.org on every push to main that
+# Auto-publishes the HartsyInference packages to NuGet.org on every push to main that
 # touches source or packaging. Each run gets a unique prerelease version
 # (1.0.0-alpha.<run_number>) so versions never collide — NuGet.org forbids re-pushing
 # an existing version. Trigger manually via "Run workflow" to override the suffix.
 #
 # Auth uses NuGet Trusted Publishing (OIDC) — no API key/secret to store. A matching
 # Trusted Publisher policy must exist on nuget.org:
-#   Owner=kalebbroo  RepositoryOwner=HartsyAI  Repository=SharpInference  WorkflowFile=publish-nuget.yml
+#   Owner=kalebbroo  RepositoryOwner=HartsyAI  Repository=HartsyInference  WorkflowFile=publish-nuget.yml
 
 on:
   push:
@@ -65,10 +65,10 @@ jobs:
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: |
-          dotnet pack SharpInference.sln \
+          dotnet pack HartsyInference.sln \
             -c Release -o artifacts \
             -p:VersionSuffix=${{ steps.ver.outputs.suffix }}
-          dotnet pack src/SharpInference.Meta/SharpInference.Meta.csproj \
+          dotnet pack src/HartsyInference.Meta/HartsyInference.Meta.csproj \
             -c Release -o artifacts \
             -p:VersionSuffix=${{ steps.ver.outputs.suffix }}
 

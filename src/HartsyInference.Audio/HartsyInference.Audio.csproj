@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Audio</PackageId>
+    <Description>Audio inference for HartsyInference — Whisper STT, Kokoro TTS, voice conversion, mel-spectrogram preprocessing, audio codecs, and HuggingFace model caching.</Description>
+    <RootNamespace>HartsyInference.Audio</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Test project needs access to internals (LstmCell, WeightNormFusion, codec sub-classes)
+         so per-layer numerical correctness can be tested without lifting everything to public. -->
+    <InternalsVisibleTo Include="HartsyInference.Audio.Tests" />
+  </ItemGroup>
+
+</Project>

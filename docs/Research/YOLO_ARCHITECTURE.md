@@ -3,7 +3,7 @@
 
 ## Summary
 
-YOLO (You Only Look Once) is an anchor-free, single-stage object detection model used in SharpInference for subject detection, auto-cropping, and content moderation. This document covers both YOLOv8 and YOLO11 (also called YOLOv11) from Ultralytics. Both share a three-part architecture: a CSPDarknet-inspired **backbone** using C2f blocks (YOLOv8) or C3k2 blocks (YOLO11) with an SPPF module, a **neck** implementing a bidirectional Feature Pyramid Network (FPN + PAN) for multi-scale feature fusion, and a **decoupled detection head** that predicts bounding boxes via Distribution Focal Loss (DFL) and class probabilities through separate branches. The architecture produces detections at three scales (P3/8, P4/16, P5/32) yielding 8400 candidate boxes at 640x640 input. Post-processing uses Non-Maximum Suppression (NMS) with default confidence threshold 0.25 and IoU threshold 0.45. Both detection and instance segmentation (YOLOv8-seg / YOLO11-seg) variants exist; SharpInference should prioritize the `n` (nano) variant for speed-sensitive use cases and support `s`/`m` for accuracy-sensitive scenarios.
+YOLO (You Only Look Once) is an anchor-free, single-stage object detection model used in HartsyInference for subject detection, auto-cropping, and content moderation. This document covers both YOLOv8 and YOLO11 (also called YOLOv11) from Ultralytics. Both share a three-part architecture: a CSPDarknet-inspired **backbone** using C2f blocks (YOLOv8) or C3k2 blocks (YOLO11) with an SPPF module, a **neck** implementing a bidirectional Feature Pyramid Network (FPN + PAN) for multi-scale feature fusion, and a **decoupled detection head** that predicts bounding boxes via Distribution Focal Loss (DFL) and class probabilities through separate branches. The architecture produces detections at three scales (P3/8, P4/16, P5/32) yielding 8400 candidate boxes at 640x640 input. Post-processing uses Non-Maximum Suppression (NMS) with default confidence threshold 0.25 and IoU threshold 0.45. Both detection and instance segmentation (YOLOv8-seg / YOLO11-seg) variants exist; HartsyInference should prioritize the `n` (nano) variant for speed-sensitive use cases and support `s`/`m` for accuracy-sensitive scenarios.
 
 ## Detailed Findings
 
@@ -537,7 +537,7 @@ Note: In the exported ONNX model, DFL decoding is already performed inside the m
 - The `nms` export flag can optionally embed NMS into the ONNX graph
 - Without embedded NMS: output is `[1, 84, 8400]` (raw detections)
 - With embedded NMS: output is `[1, max_det, 6]` (post-NMS, xyxy + conf + class)
-- SharpInference should implement NMS in C# for flexibility (adjustable thresholds at runtime)
+- HartsyInference should implement NMS in C# for flexibility (adjustable thresholds at runtime)
 
 ### PyTorch vs ONNX Output Differences
 
@@ -547,14 +547,14 @@ Note: In the exported ONNX model, DFL decoding is already performed inside the m
 
 ## Open Questions
 
-- [ ] Should SharpInference support the raw PyTorch `.pt` format, or only ONNX? ONNX is simpler (no need for DFL decoding) but `.pt` is more common in the community.
+- [ ] Should HartsyInference support the raw PyTorch `.pt` format, or only ONNX? ONNX is simpler (no need for DFL decoding) but `.pt` is more common in the community.
 - [ ] For segmentation mask assembly, should the C# implementation use GPU (CUDA) matrix multiply for the coefficients-prototypes product, or is CPU sufficient for 32x160x160?
 - [ ] Should we support oriented bounding box (OBB) detection? YOLO11 supports it but it is a niche use case.
 - [ ] Batched inference: should NMS support batch_size > 1? This requires per-image offset tricks or separate NMS per image.
 
 ## Implementation Notes
 
-### Priority Order for SharpInference.Vision
+### Priority Order for HartsyInference.Vision
 
 1. **ONNX inference with pre-trained YOLO11n** — load model, preprocess, run, decode output
 2. **NMS in C#** — implement greedy NMS with configurable conf/IoU thresholds

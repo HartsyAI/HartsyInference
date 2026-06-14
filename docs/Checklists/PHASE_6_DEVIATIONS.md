@@ -35,7 +35,7 @@ My first implementation copied C2f's pattern: single `cv1` expanding to `2*c`, s
 
 **How it was found**: After implementing the full YOLO11 pipeline, the end-to-end test on `bus.png` returned 0 detections. A diagnostic dump of the converted safetensors revealed three convs per inner C3k unit (`model.6.m.0.cv1`, `cv2`, `cv3`) — not the two my C2f-style code expected. Reading the Ultralytics source then made the inheritance chain obvious.
 
-**Fix**: Rewrote [`C3k.Forward`](../../src/SharpInference.Vision/Detection/Blocks/C3k.cs):
+**Fix**: Rewrote [`C3k.Forward`](../../src/HartsyInference.Vision/Detection/Blocks/C3k.cs):
 ```csharp
 public Tensor Forward(IBackend backend, Tensor input)
 {
@@ -102,7 +102,7 @@ Hmm — actually let me not over-explain the exact failure mode; the relevant th
 4. Wrote a focused unit test that ran just `C3k2(c3k=False, e=0.25)` on Python's `x1` and compared against Python's `x2`. **Max abs diff 11.65** — clearly broken.
 5. Dumped the actual checkpoint weight shapes for `model.2.m.0.*` — they were `[8, 16, 3, 3]` and `[16, 8, 3, 3]`, revealing the half-compression.
 
-**Fix**: Added an `expansion` parameter to [`Bottleneck`](../../src/SharpInference.Vision/Detection/Blocks/Bottleneck.cs) with default `1.0` (preserves v8 / C3k inner behavior), and have `C3k2` pass `expansion: 0.5f` explicitly when c3k=False:
+**Fix**: Added an `expansion` parameter to [`Bottleneck`](../../src/HartsyInference.Vision/Detection/Blocks/Bottleneck.cs) with default `1.0` (preserves v8 / C3k inner behavior), and have `C3k2` pass `expansion: 0.5f` explicitly when c3k=False:
 ```csharp
 // Bottleneck.cs:
 public Bottleneck(int inChannels, int outChannels, bool shortcut, float expansion = 1.0f)
@@ -154,9 +154,9 @@ YOLOv8's cv3 was three `Conv` stages (`.0.conv`, `.1.conv`, `.2.weight`) — dif
 **How it was found**: Inspecting `model.23.*` keys in the converted YOLO11n checkpoint via the Python header-parsing diagnostic. The cv3 path had 8 BN-folded conv keys per scale (4 depthwise+pointwise) plus 1 plain conv key = 10 tensors per scale, instead of v8's 6.
 
 **Fix**: Three coordinated changes:
-1. New [`Conv2dDepthwise`](../../src/SharpInference.Core/Backends/IBackend.cs) op on `IBackend` with a CPU-loop default fallback. Backends override for performance.
-2. New [`DwConvBnSilu`](../../src/SharpInference.Vision/Detection/Blocks/DwConvBnSilu.cs) helper — depthwise variant of `ConvBnSilu`. Calls `backend.Conv2dDepthwise` instead of `Conv2D` and expects weight shape `[C, 1, kH, kW]`.
-3. New [`DetectHeadV11`](../../src/SharpInference.Vision/Detection/Blocks/DetectHeadV11.cs) — same box branch (cv2) as v8 but cv3 is the dw+pw chain. `YoloV11Model` uses `DetectHeadV11`; the original `DetectHead` is retained for YOLOv8.
+1. New [`Conv2dDepthwise`](../../src/HartsyInference.Core/Backends/IBackend.cs) op on `IBackend` with a CPU-loop default fallback. Backends override for performance.
+2. New [`DwConvBnSilu`](../../src/HartsyInference.Vision/Detection/Blocks/DwConvBnSilu.cs) helper — depthwise variant of `ConvBnSilu`. Calls `backend.Conv2dDepthwise` instead of `Conv2D` and expects weight shape `[C, 1, kH, kW]`.
+3. New [`DetectHeadV11`](../../src/HartsyInference.Vision/Detection/Blocks/DetectHeadV11.cs) — same box branch (cv2) as v8 but cv3 is the dw+pw chain. `YoloV11Model` uses `DetectHeadV11`; the original `DetectHead` is retained for YOLOv8.
 
 **Impact**: Necessary to handle YOLO11 at all — the v8 `DetectHead` would have errored on missing keys during `LoadWeights`. Also unlocked a generally-useful `Conv2dDepthwise` op for future depthwise-using models (MobileNet variants, DINOv2 patch embed, etc.).
 
@@ -184,7 +184,7 @@ x = self.proj(x)
 
 **How it was found**: While reading Ultralytics' `Attention.__init__` — the channel counts in the qkv projection (`dim + 2*nh*kd` instead of `3*nh*head_dim`) made the asymmetry obvious. Confirmed by checking the actual qkv weight shape in the checkpoint: `[256, 128, 1, 1]` for layer 10's qkv (with dim=128, nh=2, kd=32: 128 + 2*2*32 = 256 ✓).
 
-**Fix**: Hand-coded the matmuls and softmax inline in [`PsaAttention.ComputeAttention`](../../src/SharpInference.Vision/Detection/Blocks/PsaAttention.cs). The spatial sizes are small (N ≤ 1600 at 640×640 input) so the manual loop performs adequately on CPU. The depthwise PE is folded into the same per-head loop. A future GPU port can fuse these into a single kernel.
+**Fix**: Hand-coded the matmuls and softmax inline in [`PsaAttention.ComputeAttention`](../../src/HartsyInference.Vision/Detection/Blocks/PsaAttention.cs). The spatial sizes are small (N ≤ 1600 at 640×640 input) so the manual loop performs adequately on CPU. The depthwise PE is folded into the same per-head loop. A future GPU port can fuse these into a single kernel.
 
 **Impact**: This block worked on the first try (the C2PSA block diagnostic test matched Python with max abs diff = 7e-6). The lesson is that "this looks like standard attention" can be misleading — check the QKV projection output channels against `3 * total_head_channels` before assuming standard SDPA applies.
 

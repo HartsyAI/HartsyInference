@@ -2,7 +2,7 @@
 
 ## Summary
 
-Conv2D is the most frequently executed operation in diffusion UNets (Stable Diffusion 1.5 has ~70 Conv2D layers across its encoder, middle block, and decoder). The initial strategy for SharpInference is to use cuDNN via P/Invoke for correctness and competitive performance, with the option to later replace hot-path convolutions with custom PTX kernels. cuDNN provides algorithm auto-selection (Winograd for 3x3, implicit GEMM for 1x1), automatic Tensor Core utilization on Ampere+ when NHWC format is used, and workspace-managed execution that abstracts the complexity of tiled convolution.
+Conv2D is the most frequently executed operation in diffusion UNets (Stable Diffusion 1.5 has ~70 Conv2D layers across its encoder, middle block, and decoder). The initial strategy for HartsyInference is to use cuDNN via P/Invoke for correctness and competitive performance, with the option to later replace hot-path convolutions with custom PTX kernels. cuDNN provides algorithm auto-selection (Winograd for 3x3, implicit GEMM for 1x1), automatic Tensor Core utilization on Ampere+ when NHWC format is used, and workspace-managed execution that abstracts the complexity of tiled convolution.
 
 All cuDNN functions are in split DLLs starting with cuDNN 8+: `cudnn64_9.dll` (core), `cudnn_cnn_infer64_9.dll` (CNN inference), `cudnn_ops64_9.dll` (ops) on Windows; `libcudnn.so.9`, `libcudnn_cnn_infer.so.9`, `libcudnn_ops.so.9` on Linux. The legacy API (`cudnnConvolutionForward`) is deprecated as of cuDNN 9.x in favor of the Graph API but remains functional and is the simplest path for initial implementation. All functions return `cudnnStatus_t` and use `CallingConvention.Cdecl`.
 
@@ -246,7 +246,7 @@ public static extern CudnnStatus cudnnGetConvolutionForwardWorkspaceSize(
     out nuint sizeInBytes);
 ```
 
-**`cudnnGetConvolutionForwardAlgorithm_v7`** uses heuristics (fast, no GPU work). **`cudnnFindConvolutionForwardAlgorithm`** benchmarks all algorithms (slow, runs actual convolutions). For SharpInference: use `_v7` at first call, optionally run `Find` once and cache results per unique (shape, dtype, algo) tuple. Request `CUDNN_CONVOLUTION_FWD_ALGO_COUNT` (8) algorithms and pick the first with `status == CUDNN_STATUS_SUCCESS`.
+**`cudnnGetConvolutionForwardAlgorithm_v7`** uses heuristics (fast, no GPU work). **`cudnnFindConvolutionForwardAlgorithm`** benchmarks all algorithms (slow, runs actual convolutions). For HartsyInference: use `_v7` at first call, optionally run `Find` once and cache results per unique (shape, dtype, algo) tuple. Request `CUDNN_CONVOLUTION_FWD_ALGO_COUNT` (8) algorithms and pick the first with `status == CUDNN_STATUS_SUCCESS`.
 
 ### Output Dimension Query
 
@@ -627,7 +627,7 @@ On subsequent calls:
 
 ## Differences Between Implementations
 
-| Aspect | managedCuda | SharpInference (planned) |
+| Aspect | managedCuda | HartsyInference (planned) |
 |--------|-------------|--------------------------|
 | cuDNN version target | cuDNN 7.x/8.x | cuDNN 9.x (latest stable) |
 | Binding style | DllImport with wrappers | LibraryImport (.NET 10) |
@@ -638,7 +638,7 @@ On subsequent calls:
 | Algorithm selection | Per-call | Cached by shape key |
 | Workspace | Per-call allocation | Single pre-allocated buffer (256 MB) |
 
-| Aspect | PyTorch cuDNN | SharpInference (planned) |
+| Aspect | PyTorch cuDNN | HartsyInference (planned) |
 |--------|--------------|--------------------------|
 | API level | Runtime API (cudaStream_t) | Driver API (CUstream) — interchangeable |
 | Bias handling | Separate addmm or custom kernel | cudnnAddTensor |

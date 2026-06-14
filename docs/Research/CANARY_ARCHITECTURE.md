@@ -1,6 +1,6 @@
 # NVIDIA Canary — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Canary pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Canary pipeline)
 
 ## Summary
 
@@ -158,7 +158,7 @@ Key differences from Whisper's decoder:
 - **Tied embedding / output projection**: yes (verify in checkpoint — typical NeMo pattern).
 - **No prefix tokens for "no-speech" probability**: Canary has `<|nospeech|>` but uses it differently from Whisper's separate no-speech prob output.
 
-Practical implication: a SharpInference `TransformerDecoder` class built for Whisper can be reused with minor parameter changes (different vocab size, different max seq, different special-token IDs). The forward graph (self-attn → cross-attn → FFN, pre-LN) and the KV cache shape are identical.
+Practical implication: a HartsyInference `TransformerDecoder` class built for Whisper can be reused with minor parameter changes (different vocab size, different max seq, different special-token IDs). The forward graph (self-attn → cross-attn → FFN, pre-LN) and the KV cache shape are identical.
 
 #### 2.3 Tokenizer
 
@@ -386,7 +386,7 @@ Doesn't support timestamps at all. If a user needs them with v1, run a separate 
 
 Add ~50-100 MB for the mel/encoder intermediate activations. Comfortable on a 4 GB GPU; trivial on 8+ GB.
 
-INT8 / FP8 quantization is supported by NeMo via TensorRT-LLM but no published recipe for pure ONNX/Safetensors. For our SharpInference loader we should plan FP16 first, GGUF Q8_0/Q4_K_M later.
+INT8 / FP8 quantization is supported by NeMo via TensorRT-LLM but no published recipe for pure ONNX/Safetensors. For our HartsyInference loader we should plan FP16 first, GGUF Q8_0/Q4_K_M later.
 
 #### Compute / latency
 
@@ -397,8 +397,8 @@ For C# / CUDA: the encoder FastConformer maps to ~10 PTX kernels per layer (FFN,
 ### 10. C# Implementation Notes
 
 #### Reuse strategy
-- **Encoder**: 100% reuse the FastConformer encoder built for Parakeet (`SharpInference.Audio.FastConformer`). Only parameters differ (layer count and possibly d_model for 180M). Construct with config struct.
-- **Decoder**: 95% reuse the Transformer decoder built for Whisper (`SharpInference.Audio.TransformerDecoder`). Same forward graph (self-attn → cross-attn → FFN, pre-LN). Differences: vocab size, max_seq, special-token IDs, and pos-embedding table size.
+- **Encoder**: 100% reuse the FastConformer encoder built for Parakeet (`HartsyInference.Audio.FastConformer`). Only parameters differ (layer count and possibly d_model for 180M). Construct with config struct.
+- **Decoder**: 95% reuse the Transformer decoder built for Whisper (`HartsyInference.Audio.TransformerDecoder`). Same forward graph (self-attn → cross-attn → FFN, pre-LN). Differences: vocab size, max_seq, special-token IDs, and pos-embedding table size.
 - **Mel preprocessor**: 100% reuse the NeMo `FilterbankFeatures` implementation built for Parakeet — same config (128 mels, 512 n_fft, 25 ms / 10 ms, `per_feature` norm).
 - **Beam search**: 100% reuse Whisper's beam search (greedy + beam-5 with length penalty).
 - **KV caches**: same shapes and lifetime as Whisper. Reuse Whisper's `KvCache` allocator.
@@ -447,10 +447,10 @@ Canary v2 has **1,162 special tokens total** (most are timestamp grid + placehol
 | Format | Encoder | Decoder | Tokenizer | Use |
 |--------|---------|---------|-----------|-----|
 | `.nemo` (NeMo tar) | PyTorch pickle | PyTorch pickle | SentencePiece `.model` files | Source of truth; HF distribution format |
-| Safetensors (converted) | Safetensors | Safetensors | SentencePiece `.model` | **Preferred** for SharpInference; ship a Python converter |
+| Safetensors (converted) | Safetensors | Safetensors | SentencePiece `.model` | **Preferred** for HartsyInference; ship a Python converter |
 | GGUF | Quantized | Quantized | Token data block | Future, for quantized inference |
 
-#### Implementation order (when building this in SharpInference.Audio)
+#### Implementation order (when building this in HartsyInference.Audio)
 1. Implement Whisper (encoder + decoder + greedy/beam). Validates the Transformer decoder + KV cache.
 2. Implement Parakeet (FastConformer + CTC). Validates FastConformer encoder + mel preprocessor.
 3. Implement Canary-1B-Flash (FastConformer encoder from Parakeet + Transformer decoder from Whisper + new prompt + concatenated tokenizer). This is the fastest payoff — most flexible (4 languages, ASR + AST + timestamps) and fastest variant.

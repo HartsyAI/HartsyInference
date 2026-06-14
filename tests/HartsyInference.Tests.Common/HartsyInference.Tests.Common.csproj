@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>HartsyInference.Tests.Common</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+  </ItemGroup>
+
+</Project>

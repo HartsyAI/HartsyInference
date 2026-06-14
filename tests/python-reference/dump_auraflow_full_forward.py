@@ -25,7 +25,7 @@ import torch
 from safetensors.torch import load_file
 from diffusers.models.transformers.auraflow_transformer_2d import AuraFlowTransformer2DModel
 
-CKPT_PATH = "/home/kalebbroo/Desktop/Projects/SharpInference/Models/Stable-Diffusion/AuraFlow/aura_flow_0.3.safetensors"
+CKPT_PATH = "/home/kalebbroo/Desktop/Projects/HartsyInference/Models/Stable-Diffusion/AuraFlow/aura_flow_0.3.safetensors"
 OUT_DIR = "tests/python-reference/auraflow_reference_tensors/full_forward"
 
 os.makedirs(f"{OUT_DIR}/inputs", exist_ok=True)

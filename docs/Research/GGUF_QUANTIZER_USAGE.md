@@ -1,6 +1,6 @@
 # GGUF Quantizer — Usage Guide
 
-> Take a SharpInference safetensors checkpoint and write a quantized GGUF file. Mirrors llama.cpp's `quantize` tool but operates on safetensors input and is C#-native (no native dependency).
+> Take a HartsyInference safetensors checkpoint and write a quantized GGUF file. Mirrors llama.cpp's `quantize` tool but operates on safetensors input and is C#-native (no native dependency).
 
 ## Quick start
 
@@ -8,7 +8,7 @@
 
 ```bash
 # Build the converter once
-cd /path/to/SharpInference
+cd /path/to/HartsyInference
 dotnet build samples/ConvertSafetensorsToGguf/ConvertSafetensorsToGguf.csproj -c Release
 
 # Convert any safetensors to GGUF (architecture is required so loaders pick the right key mapper)
@@ -29,7 +29,7 @@ samples/ConvertSafetensorsToGguf/bin/Release/net10.0/convert-safetensors-to-gguf
 ### C# API (programmatic)
 
 ```csharp
-using SharpInference.ModelHandler.Gguf;
+using HartsyInference.ModelHandler.Gguf;
 
 GgufQuantizationReport report = GgufQuantizer.ConvertSafetensorsToGguf(
     safetensorsPath: "flux1-schnell.safetensors",
@@ -64,7 +64,7 @@ VAE is **never** quantized below F16 — quality-critical, small enough that the
 | IQ4_NL / IQ4_XS / IQ2_* / IQ3_* / IQ1_* | not supported | i-quant family needs ggml's importance-weighted lookup tables. Low priority for diffusion. |
 | TQ1_0 / TQ2_0 | not supported | Ternary, rare |
 
-**Workaround**: if you need a non-supported quant type, use llama.cpp's `quantize` tool. SharpInference can read its output (verified against city96 dumps which use llama.cpp internally).
+**Workaround**: if you need a non-supported quant type, use llama.cpp's `quantize` tool. HartsyInference can read its output (verified against city96 dumps which use llama.cpp internally).
 
 ## Architecture argument — what it does
 
@@ -75,7 +75,7 @@ flux | flux2 | sdxl | sd3 | sd15 | flite | chroma | auraflow | zimage |
 ernie_image | hunyuan_image | qwen_image | llama | passthrough
 ```
 
-Pass `passthrough` for an unknown architecture; the reader will fall back to a key-pattern heuristic. For known architectures, set the right value — it's a no-op when reading SharpInference-internal naming, but matters when the GGUF is consumed by `ComfyUI-GGUF` or other downstream tools that route by `general.architecture`.
+Pass `passthrough` for an unknown architecture; the reader will fall back to a key-pattern heuristic. For known architectures, set the right value — it's a no-op when reading HartsyInference-internal naming, but matters when the GGUF is consumed by `ComfyUI-GGUF` or other downstream tools that route by `general.architecture`.
 
 ## What gets quantized vs kept at F16
 
@@ -104,7 +104,7 @@ GgufQuantizer.ConvertSafetensorsToGguf("input.safetensors", "output.gguf", custo
 
 1. **Block alignment**: K-quants have a 256-element super-block; legacy quants have a 32-element block. The inner dimension of every quantized weight must be a multiple of 256 (K-quants) or 32 (legacy). For Flux (hidden=3072), SDXL (320..1280), SD3 (1536..2432), Z-Image (3840) — all are 256-aligned, so this is rarely a problem in practice. If you hit a tensor whose inner dim isn't a multiple of 256, the quantizer will throw at write time. **Workaround**: add that tensor's name to `ShouldKeepF16`.
 
-2. **Quality vs llama.cpp**: SharpInference's writer uses a simplified `make_qkx2_quants` (initial pass without iterative refinement). PPL gap to llama.cpp's `quantize` is ~5%. For bit-identical quality, use llama.cpp's tool. For most diffusion users, the gap is invisible.
+2. **Quality vs llama.cpp**: HartsyInference's writer uses a simplified `make_qkx2_quants` (initial pass without iterative refinement). PPL gap to llama.cpp's `quantize` is ~5%. For bit-identical quality, use llama.cpp's tool. For most diffusion users, the gap is invisible.
 
 3. **Memory at write time**: peak ~2× input file size (mmap of source + anonymous heap for quantized output). For Flux Schnell at 24 GB F16 → Q4_K_M (~7 GB), peak is ~31 GB. Make sure your machine can handle it.
 
@@ -120,7 +120,7 @@ GgufQuantizer.ConvertSafetensorsToGguf(
     "myflux.safetensors", "myflux-Q4_K_M.gguf",
     GgufQuantPolicy.Q4_K_M, architecture: "flux");
 
-// 2. Read back into a SharpInference pipeline
+// 2. Read back into a HartsyInference pipeline
 (FluxCheckpointConverter.ConvertedWeights converted,
  GgufModelLoader.LoadedGgufModel handle) =
     GgufConverterBridge.LoadGguf(
@@ -132,7 +132,7 @@ using (handle)
 }
 ```
 
-The reader uses the same codecs as the writer (forward direction), so a SharpInference-written GGUF round-trips losslessly through dequant → original-quality F16.
+The reader uses the same codecs as the writer (forward direction), so a HartsyInference-written GGUF round-trips losslessly through dequant → original-quality F16.
 
 ## Verifying the output
 
@@ -146,8 +146,8 @@ xxd -l 8 myflux-Q4_K_M.gguf
 # 2. ComfyUI-GGUF can load it (validates against the canonical reader)
 # Drop into your ComfyUI's models/unet/ folder and try a workflow.
 
-# 3. SharpInference can round-trip it
-dotnet test tests/SharpInference.ModelHandler.Tests/SharpInference.ModelHandler.Tests.csproj \
+# 3. HartsyInference can round-trip it
+dotnet test tests/HartsyInference.ModelHandler.Tests/HartsyInference.ModelHandler.Tests.csproj \
     --filter "FullyQualifiedName~GgufRoundTripTests"
 ```
 

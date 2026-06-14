@@ -1,8 +1,8 @@
-# SharpInference
+# HartsyInference
 
 **A pure C#/.NET AI inference engine for image generation, speech, vision, video, and interactive world models — no Python, no native runtime DLLs.**
 
-SharpInference loads `.safetensors` and `.gguf` checkpoints directly and runs them on NVIDIA CUDA, cross-vendor Vulkan, or CPU SIMD — entirely in managed .NET. GPU kernels are PTX/SPIR-V shipped with the package and JIT-compiled at runtime; there are no C++ wrappers, no bundled native inference library, and no external Python process to manage. Just NuGet packages.
+HartsyInference loads `.safetensors` and `.gguf` checkpoints directly and runs them on NVIDIA CUDA, cross-vendor Vulkan, or CPU SIMD — entirely in managed .NET. GPU kernels are PTX/SPIR-V shipped with the package and JIT-compiled at runtime; there are no C++ wrappers, no bundled native inference library, and no external Python process to manage. Just NuGet packages.
 
 It is the non-LLM companion to [dotLLM](https://github.com/kalebbroo/dotLLM): together they form a complete AI stack in pure .NET.
 
@@ -17,7 +17,7 @@ It is the non-LLM companion to [dotLLM](https://github.com/kalebbroo/dotLLM): to
 - **No support guarantees, no semver stability** until `1.0.0`.
 - The OpenAI-compatible **server and CLI are not published as packages** in this alpha — they live in the source repository.
 
-Found a bug or a mismatch against a reference? Please [open an issue](https://github.com/kalebbroo/SharpInference/issues).
+Found a bug or a mismatch against a reference? Please [open an issue](https://github.com/kalebbroo/HartsyInference/issues).
 
 ---
 
@@ -26,14 +26,14 @@ Found a bug or a mismatch against a reference? Please [open an issue](https://gi
 One package pulls in the whole stack (all backends + every modality):
 
 ```sh
-dotnet add package SharpInference --prerelease
+dotnet add package HartsyInference --prerelease
 ```
 
 Or reference only the pieces you need (see [Packages](#packages)):
 
 ```sh
-dotnet add package SharpInference.Audio --prerelease
-dotnet add package SharpInference.Cpu   --prerelease
+dotnet add package HartsyInference.Audio --prerelease
+dotnet add package HartsyInference.Cpu   --prerelease
 ```
 
 **Requires .NET 8 or .NET 10.**
@@ -45,9 +45,9 @@ dotnet add package SharpInference.Cpu   --prerelease
 The Whisper pipeline downloads a checkpoint from HuggingFace on first use and runs on whichever backend you pass:
 
 ```csharp
-using SharpInference.Audio.Pipelines;
-using SharpInference.Core.Backends;
-using SharpInference.Cpu;          // or SharpInference.Cuda / SharpInference.Vulkan
+using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Backends;
+using HartsyInference.Cpu;          // or HartsyInference.Cuda / HartsyInference.Vulkan
 
 using WhisperPipeline pipeline = await WhisperPipeline.LoadAsync("openai/whisper-base");
 using IBackend backend = new CpuBackend();
@@ -58,7 +58,7 @@ string text = pipeline.TranscribeWav(backend, "audio.wav", options);
 Console.WriteLine(text);
 ```
 
-Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()` — the pipeline is backend-agnostic. The same `LoadAsync` / pipeline pattern applies across modalities (`StableDiffusion15Pipeline`, `WanVideoPipeline`, `KokoroPipeline`, …); see the [samples in the repo](https://github.com/kalebbroo/SharpInference/tree/main/samples) for image, video, and TTS walkthroughs.
+Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()` — the pipeline is backend-agnostic. The same `LoadAsync` / pipeline pattern applies across modalities (`StableDiffusion15Pipeline`, `WanVideoPipeline`, `KokoroPipeline`, …); see the [samples in the repo](https://github.com/kalebbroo/HartsyInference/tree/main/samples) for image, video, and TTS walkthroughs.
 
 ---
 
@@ -95,18 +95,18 @@ Checkpoints load directly from `.safetensors` / `.gguf`, including quantized wei
 
 | Package | Description |
 |---|---|
-| `SharpInference` | Meta-package — references everything below |
-| `SharpInference.Core` | Tensor types, `IBackend`, schedulers, pipeline base types |
-| `SharpInference.ModelHandler` | Safetensors/GGUF loaders, quant dequant, HuggingFace download, model registry |
-| `SharpInference.Tokenizers` | CLIP, T5, Whisper, and LLM-style tokenizers |
-| `SharpInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
-| `SharpInference.Cuda` | CUDA backend — PTX kernels + cuBLAS |
-| `SharpInference.Vulkan` | Cross-vendor Vulkan backend (NVIDIA / AMD / Intel) via SPIR-V |
-| `SharpInference.Diffusion` | Image + music diffusion pipelines, VAEs, text encoders, LoRA |
-| `SharpInference.Audio` | Whisper/Moonshine STT, TTS, voice conversion, music |
-| `SharpInference.Vision` | CLIP/SigLIP embeddings, YOLO, SAM, face detection |
-| `SharpInference.Video` | LTX-Video, Wan, Lance, Kandinsky 5 video |
-| `SharpInference.Interactive` | Action-conditioned world models (Matrix-Game, Oasis) |
+| `HartsyInference` | Meta-package — references everything below |
+| `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline base types |
+| `HartsyInference.ModelHandler` | Safetensors/GGUF loaders, quant dequant, HuggingFace download, model registry |
+| `HartsyInference.Tokenizers` | CLIP, T5, Whisper, and LLM-style tokenizers |
+| `HartsyInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
+| `HartsyInference.Cuda` | CUDA backend — PTX kernels + cuBLAS |
+| `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (NVIDIA / AMD / Intel) via SPIR-V |
+| `HartsyInference.Diffusion` | Image + music diffusion pipelines, VAEs, text encoders, LoRA |
+| `HartsyInference.Audio` | Whisper/Moonshine STT, TTS, voice conversion, music |
+| `HartsyInference.Vision` | CLIP/SigLIP embeddings, YOLO, SAM, face detection |
+| `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky 5 video |
+| `HartsyInference.Interactive` | Action-conditioned world models (Matrix-Game, Oasis) |
 
 ---
 
@@ -129,8 +129,8 @@ Checkpoints load directly from `.safetensors` / `.gguf`, including quantized wei
 
 ## Links
 
-- **Source & docs:** https://github.com/kalebbroo/SharpInference
-- **Issues:** https://github.com/kalebbroo/SharpInference/issues
+- **Source & docs:** https://github.com/kalebbroo/HartsyInference
+- **Issues:** https://github.com/kalebbroo/HartsyInference/issues
 - **LLM companion:** [dotLLM](https://github.com/kalebbroo/dotLLM)
 
 ---

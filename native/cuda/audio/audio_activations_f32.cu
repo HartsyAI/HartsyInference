@@ -9,7 +9,7 @@
 //
 // Build:
 //   nvcc --ptx -arch=sm_80 audio_activations_f32.cu -o audio_activations_f32.ptx
-//   (move the .ptx into src/SharpInference.Cuda/Ptx/)
+//   (move the .ptx into src/HartsyInference.Cuda/Ptx/)
 //
 // All kernels assume contiguous float buffers. Snake variants additionally take per-
 // channel alpha (and optional beta) tensors of shape [channels].

@@ -1,4 +1,4 @@
-"""Joins SharpInference C# microbenchmark results with the PyTorch baselines and emits a
+"""Joins HartsyInference C# microbenchmark results with the PyTorch baselines and emits a
 side-by-side comparison report. Implements the statistical analysis described in
 docs/Research/PROFILING_METHODOLOGY.md § 11.
 
@@ -146,11 +146,11 @@ def main() -> None:
     for backend, op, shape, dtype in pytorch_agg:
         all_keys.add((op, shape, dtype))
 
-    # Pick the best backend per side: SharpInference for C# (only one), pytorch (default fast path)
+    # Pick the best backend per side: HartsyInference for C# (only one), pytorch (default fast path)
     # for Python. Other Python variants (math, xformers) end up in the appendix.
     sharpinf_keys = {(op, shape, dtype): trials
                      for (b, op, shape, dtype), trials in csharp_agg.items()
-                     if "SharpInference" in b or b == "sharpinference_cuda" or b.startswith("Job")}
+                     if "HartsyInference" in b or b == "hartsyinference_cuda" or b.startswith("Job")}
     pytorch_main = {(op, shape, dtype): trials
                     for (b, op, shape, dtype), trials in pytorch_agg.items()
                     if b == "pytorch" or b == "pytorch-sdpa"}
@@ -196,13 +196,13 @@ def main() -> None:
             w.writerow(r)
 
     # Markdown
-    md = ["# SharpInference vs PyTorch — Comparison", ""]
+    md = ["# HartsyInference vs PyTorch — Comparison", ""]
     md.append(f"- C# rows considered: {len(csharp_rows)}")
     md.append(f"- PyTorch rows considered: {len(pytorch_rows)}")
     md.append(f"- Joined op-shape-dtype tuples: {len(rows_out)}")
     md.append(f"- scipy available: {HAVE_SCIPY}")
     md.append("")
-    md.append("Speedup = PyTorch_mean / SharpInference_mean. >1 = C# faster, <1 = PyTorch faster.")
+    md.append("Speedup = PyTorch_mean / HartsyInference_mean. >1 = C# faster, <1 = PyTorch faster.")
     md.append("")
     md.append("| op | shape | dtype | C# (µs) | PyTorch (µs) | Speedup × | p | sig |")
     md.append("|---|---|---|---|---|---|---|---|")

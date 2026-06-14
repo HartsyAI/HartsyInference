@@ -1,0 +1,120 @@
+// HartsyInference dtype cast kernels - BF16 <-> F32
+// BF16 = upper 16 bits of F32 (sign + 8-bit exp + 7-bit mantissa).
+// BF16 -> F32: zero-extend to 32 bits, shift left 16. Lossless.
+// F32 -> BF16: round-to-nearest-even, then truncate upper 16 bits.
+// Launched with 1D grid: gridDim.x = ceil(count / 256)
+
+.version 7.0
+.target sm_70
+.address_size 64
+
+// --- cast_bf16_to_f32 -------------------------------------------------
+// output[i] (f32) = (float)input[i] (bf16)
+// Params: output* (f32), input* (bf16), count
+.visible .entry cast_bf16_to_f32(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<6>;
+    .reg .b16 %h1;
+    .reg .pred %p1;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_bf16_to_f32;
+
+    // Load bf16 (16-bit unsigned) at input + i*2
+    cvt.u64.u32 %rd2, %r1;
+    shl.b64 %rd3, %rd2, 1;
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.b16 %h1, [%rd4];
+
+    // Zero-extend to 32-bit, then shift left 16 to put bf16 bits in the upper half.
+    // Result is bit-identical to a F32 with the same sign/exp/mantissa[6:0] and zero mantissa[22:7].
+    cvt.u32.u16 %r4, %h1;
+    shl.b32 %r5, %r4, 16;
+
+    // Store as f32 (raw bits)
+    shl.b64 %rd3, %rd2, 2;
+    add.u64 %rd5, %rd0, %rd3;
+    st.global.b32 [%rd5], %r5;
+
+done_bf16_to_f32:
+    ret;
+}
+
+// --- cast_f32_to_bf16 -------------------------------------------------
+// output[i] (bf16) = (bfloat16)input[i] (f32) with round-to-nearest-even.
+// Params: output* (bf16), input* (f32), count
+.visible .entry cast_f32_to_bf16(
+    .param .u64 param_out,
+    .param .u64 param_in,
+    .param .u32 param_count
+)
+{
+    .reg .u64 %rd<6>;
+    .reg .u32 %r<10>;
+    .reg .b16 %h1;
+    .reg .pred %p1, %p_isnan;
+
+    ld.param.u64 %rd0, [param_out];
+    ld.param.u64 %rd1, [param_in];
+    ld.param.u32 %r0, [param_count];
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %tid.x;
+    mad.lo.u32 %r1, %r1, %r2, %r3;
+
+    setp.ge.u32 %p1, %r1, %r0;
+    @%p1 bra done_f32_to_bf16;
+
+    // Load f32 raw bits at input + i*4
+    cvt.u64.u32 %rd2, %r1;
+    shl.b64 %rd3, %rd2, 2;
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.b32 %r4, [%rd4];
+
+    // Round-to-nearest-even: add (0x7FFF + bit16-of-input) and shift right 16.
+    // For NaN, the result must remain NaN (top 16 bits would otherwise round to inf).
+    // NaN detection: exponent == 0xFF (bits 30:23 == 0xFF) and mantissa != 0 (bits 22:0 != 0).
+    // Simpler: check (raw & 0x7FFFFFFF) > 0x7F800000 (sign-stripped > +inf).
+    and.b32 %r5, %r4, 2147483647;       // strip sign bit
+    setp.gt.u32 %p_isnan, %r5, 2139095040;  // > 0x7F800000 (positive infinity)
+    @%p_isnan bra is_nan_f32_to_bf16;
+
+    // Round-to-nearest-even: lsb = (raw >> 16) & 1, rounding_bias = 0x7FFF + lsb
+    shr.b32 %r6, %r4, 16;
+    and.b32 %r7, %r6, 1;
+    add.u32 %r8, %r7, 32767;           // 0x7FFF
+    add.u32 %r9, %r4, %r8;
+    shr.b32 %r9, %r9, 16;
+    bra store_bf16;
+
+is_nan_f32_to_bf16:
+    // Quiet NaN: take the upper 16 bits and set the high mantissa bit (0x40) to ensure quiet
+    shr.b32 %r9, %r4, 16;
+    or.b32 %r9, %r9, 64;               // 0x40 - top mantissa bit (bf16's quiet bit)
+
+store_bf16:
+    cvt.u16.u32 %h1, %r9;
+
+    // Store bf16 at output + i*2
+    shl.b64 %rd3, %rd2, 1;
+    add.u64 %rd5, %rd0, %rd3;
+    st.global.b16 [%rd5], %h1;
+
+done_f32_to_bf16:
+    ret;
+}

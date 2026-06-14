@@ -1,6 +1,6 @@
 # SPIR-V Compute Shaders — Research Notes
 
-SPIR-V is the binary intermediate language consumed by Vulkan, OpenCL 2.1+, and OpenGL 4.6. SharpInference authors compute kernels in **GLSL 4.50** with the `GL_KHR_*` subgroup extensions, compiles them at build time to SPIR-V via `glslangValidator`, ships the `.spv` files as content, and loads them at runtime via `vkCreateShaderModule`. The driver re-optimizes after applying our specialization constants and JITs to vendor ISA (NVIDIA SASS, AMD GCN/RDNA, Intel Gen ISA).
+SPIR-V is the binary intermediate language consumed by Vulkan, OpenCL 2.1+, and OpenGL 4.6. HartsyInference authors compute kernels in **GLSL 4.50** with the `GL_KHR_*` subgroup extensions, compiles them at build time to SPIR-V via `glslangValidator`, ships the `.spv` files as content, and loads them at runtime via `vkCreateShaderModule`. The driver re-optimizes after applying our specialization constants and JITs to vendor ISA (NVIDIA SASS, AMD GCN/RDNA, Intel Gen ISA).
 
 This document is the kernel-design counterpart to [VULKAN_COMPUTE_API.md](VULKAN_COMPUTE_API.md). It mirrors the role of [CUDA_AND_PTX.md](CUDA_AND_PTX.md) for the CUDA backend: shader skeletons, tiling strategies, subgroup-reduction patterns, validation tolerances, and one detailed design per kernel family the engine needs.
 
@@ -60,7 +60,7 @@ for f in shaders/*.comp.glsl; do
 done
 ```
 
-Mirror the CUDA pattern in `native/cuda/build.sh`. The MSBuild target in `SharpInference.Vulkan.csproj` invokes this script during build and copies `.spv` files into the package's `Spirv/` content directory.
+Mirror the CUDA pattern in `native/cuda/build.sh`. The MSBuild target in `HartsyInference.Vulkan.csproj` invokes this script during build and copies `.spv` files into the package's `Spirv/` content directory.
 
 ### MSBuild integration
 
@@ -76,7 +76,7 @@ Mirror the CUDA pattern in `native/cuda/build.sh`. The MSBuild target in `SharpI
 </ItemGroup>
 ```
 
-Identical pattern to the CUDA Ptx/ content inclusion in `SharpInference.Cuda.csproj`.
+Identical pattern to the CUDA Ptx/ content inclusion in `HartsyInference.Cuda.csproj`.
 
 ---
 
@@ -270,7 +270,7 @@ Equivalent to PTX `add.rn.f16x2`. Useful for elementwise add/scale/silu where th
 
 ## Kernel Catalog
 
-Every kernel in [src/SharpInference.Cuda/Ptx/](../../src/SharpInference.Cuda/Ptx/) needs a Vulkan counterpart in `native/vulkan/shaders/`. The mapping:
+Every kernel in [src/HartsyInference.Cuda/Ptx/](../../src/HartsyInference.Cuda/Ptx/) needs a Vulkan counterpart in `native/vulkan/shaders/`. The mapping:
 
 | CUDA PTX file | GLSL shader | Notes |
 |---|---|---|
@@ -811,7 +811,7 @@ Supported sizes are vendor-specific (queried via `vkGetPhysicalDeviceCooperative
 7. **64-bit indexing for SDXL spatial kernels.** Use `GL_EXT_shader_explicit_arithmetic_types_int64`.
 8. **Always pad shared-memory tiles** to avoid bank conflicts (32 banks × 4 bytes).
 9. **Bias + activation fuse into matmul.** Single inner write per output element.
-10. **Validate every shader against CPU reference.** Same test harness as CUDA; reuse [`SharpInference.Diffusion.Tests`] kernel-correctness tests, switch backend.
+10. **Validate every shader against CPU reference.** Same test harness as CUDA; reuse [`HartsyInference.Diffusion.Tests`] kernel-correctness tests, switch backend.
 11. **Persist `VkPipelineCache`** to disk per-`deviceUUID`; cuts cold-start by 0.5–2 s.
 12. **`spirv-val` every shader** in CI; fails fast on malformed SPIR-V before runtime.
 13. **`spirv-opt -O` after build** unless explicitly disabled — driver still re-optimizes but starting from optimized SPIR-V is faster JIT.

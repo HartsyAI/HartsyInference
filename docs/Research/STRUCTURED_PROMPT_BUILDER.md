@@ -13,12 +13,12 @@
 
 The builder is a small, dependency-free library: a **`StructuredPrompt` data model** (scene description, style block, ordered list of elements each with optional bounding box + color palette), a set of **`IPromptDialect` serializers** (one per target model/format), and an optional **`IMagicPromptExpander`** hook (plug an LLM — dotLLM, Claude API, or a local Gemma/Qwen — to turn a plain string into a `StructuredPrompt`). The first dialect is **`Ideogram4Dialect`**, which emits the exact JSON Ideogram 4 was trained on (correct key ordering, compact separators, uppercase `#RRGGBB`, `0–1000` normalized `[y_min,x_min,y_max,x_max]` boxes). Later dialects cover **regional-attention prompting** (for models that take per-region prompt + mask instead of JSON) and **plain natural language** (flatten the structure to prose).
 
-This lives in **`src/SharpInference.Diffusion/Prompting/`** (image-generation specific; not Core). It is **pure data + serialization** — no backend, no tensors, no hot path — so it has no performance constraints and no package-boundary concerns beyond Diffusion. The LLM expander is an interface only; concrete expanders live behind it so the core builder never depends on any LLM SDK.
+This lives in **`src/HartsyInference.Diffusion/Prompting/`** (image-generation specific; not Core). It is **pure data + serialization** — no backend, no tensors, no hot path — so it has no performance constraints and no package-boundary concerns beyond Diffusion. The LLM expander is an interface only; concrete expanders live behind it so the core builder never depends on any LLM SDK.
 
 ## The universal data model
 
 ```csharp
-namespace SharpInference.Diffusion.Prompting;
+namespace HartsyInference.Diffusion.Prompting;
 
 /// <summary>Model-agnostic structured prompt: a scene, a style, and spatially-placed elements.</summary>
 public record StructuredPrompt
@@ -65,7 +65,7 @@ public record TextElement : PromptElement
 /// <summary>Normalized 0–1000 box. Order matches Ideogram: [y_min, x_min, y_max, x_max].</summary>
 public readonly record struct BoundingBox(int YMin, int XMin, int YMax, int XMax)
 {
-    public void Validate() { /* 0 ≤ min < max ≤ 1000 on both axes; throw SharpInferenceException otherwise */ }
+    public void Validate() { /* 0 ≤ min < max ≤ 1000 on both axes; throw HartsyInferenceException otherwise */ }
 }
 ```
 
@@ -115,7 +115,7 @@ public readonly record struct RegionPrompt(string Prompt, RectMask Mask, float W
 - **Serialization flags (must match):** compact separators `(",", ":")` (no spaces), `ensure_ascii=False` (keep `らーめん`/accents literal — needed for multilingual text rendering).
 - **Key order matters:** "trained on JSON with a consistent key order; maintaining it improves generation quality." Deviating "means sampling outside the training distribution."
 
-**C# implementation note:** use **source-generated `System.Text.Json`** (`[JsonSerializable]`, no reflection — per CODE_STYLE) with a `JsonSerializerOptions { WriteIndented = false, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }` and an explicit property order. Because key order + the `obj`/`text` discriminator + uppercase-hex normalization are load-bearing, the cleanest path is a **hand-written serializer that writes via `Utf8JsonWriter` in the exact field order** rather than relying on attribute ordering (which is fragile). Normalize hex to uppercase and validate `#RRGGBB` at serialize time; throw `SharpInferenceException` on a bad color or out-of-range bbox.
+**C# implementation note:** use **source-generated `System.Text.Json`** (`[JsonSerializable]`, no reflection — per CODE_STYLE) with a `JsonSerializerOptions { WriteIndented = false, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }` and an explicit property order. Because key order + the `obj`/`text` discriminator + uppercase-hex normalization are load-bearing, the cleanest path is a **hand-written serializer that writes via `Utf8JsonWriter` in the exact field order** rather than relying on attribute ordering (which is fragile). Normalize hex to uppercase and validate `#RRGGBB` at serialize time; throw `HartsyInferenceException` on a bad color or out-of-range bbox.
 
 The dialect should also expose a **validator** (`Ideogram4Dialect.Validate(prompt)`) surfacing the common mistakes as actionable errors: lowercase/short hex, >16 or >5 palette entries, both `photo` and `art_style` set, missing `background`, bbox outside 0–1000 or `min ≥ max`.
 
@@ -144,7 +144,7 @@ public interface IMagicPromptExpander
 
 ## Package placement & files
 
-`src/SharpInference.Diffusion/Prompting/` (pure data + serialization; no backend/tensor deps):
+`src/HartsyInference.Diffusion/Prompting/` (pure data + serialization; no backend/tensor deps):
 
 | File | Contents |
 |---|---|
@@ -164,7 +164,7 @@ The `Ideogram4Pipeline` accepts **either** a raw conditioning string **or** a `S
 
 ## Testing
 
-- **`StructuredPromptDialectTests.cs`** (`SharpInference.Diffusion.Tests`):
+- **`StructuredPromptDialectTests.cs`** (`HartsyInference.Diffusion.Tests`):
   - Golden-file test: a known `StructuredPrompt` serializes byte-for-byte to an expected Ideogram JSON string (separators, key order, uppercase hex, literal unicode).
   - Round-trip: parse one of the `magic_prompt_system_prompts/` example JSONs into `StructuredPrompt` and re-serialize → identical.
   - Validator rejects: lowercase hex, `#abc` shorthand, >16/>5 palette, both photo+art_style, missing background, bbox out of `[0,1000]`, `min≥max`.
@@ -183,5 +183,5 @@ The `Ideogram4Pipeline` accepts **either** a raw conditioning string **or** a `S
 - **Reuse, don't duplicate:** there is no existing prompt-construction utility in the repo (grep confirmed). This is genuinely new shared infrastructure — build it once under `Prompting/` and have every layout-aware pipeline consume it, per the AGENTS.md reuse rule.
 - **No hot-path concerns** — this runs once per generation, before inference. Plain managed code, `System.Text.Json` source-gen, normal allocations are fine here (the zero-GC rule is for the denoise/attention path, not prompt prep).
 - **Keep the LLM out of the core.** The builder + dialects must compile and run with zero LLM dependencies; expanders are opt-in behind the interface.
-- **SwarmUI angle:** the SwarmUI-SharpInference extension ([[swarmui_extension]] memory) can surface the builder as a structured-prompt UI (scene/style/elements with draggable bboxes) and call `Ideogram4Dialect.Serialize` — that's how "people having to LLM-prompt each region" becomes a real UI instead of hand-written JSON.
+- **SwarmUI angle:** the SwarmUI-HartsyInference extension ([[swarmui_extension]] memory) can surface the builder as a structured-prompt UI (scene/style/elements with draggable bboxes) and call `Ideogram4Dialect.Serialize` — that's how "people having to LLM-prompt each region" becomes a real UI instead of hand-written JSON.
 </content>

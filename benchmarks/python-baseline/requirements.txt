@@ -1,4 +1,4 @@
-# SharpInference Python baseline — pinned per docs/Research/CUDA_PERFORMANCE_PLAN.md.
+# HartsyInference Python baseline — pinned per docs/Research/CUDA_PERFORMANCE_PLAN.md.
 # Any version change here invalidates collected baselines and requires re-running B2.
 #
 # These versions match what ComfyUI shipped in its bundled installer in late 2025 / early 2026.

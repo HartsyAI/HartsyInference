@@ -1,6 +1,6 @@
 # CosyVoice 2 — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (CosyVoice pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (CosyVoice pipeline)
 
 ## Summary
 
@@ -31,7 +31,7 @@ Sources: [FunAudioLLM/CosyVoice repo](https://github.com/FunAudioLLM/CosyVoice),
 
 > Param counts for components (1, 2) are from the CosyVoice 2 paper §3 and the CosyVoice 1 paper §3; LM and flow numbers were also cross-checked against config sizes in `llm.pt` and `flow.pt`.
 
-**HuggingFace mirrors that may also be useful** for SharpInference users: `model-scope/CosyVoice-300M` (identical content, ModelScope mirror), `gpustack/CosyVoice-300M-Instruct` (with `.onnx` exports for the speaker encoder), `ayousanz/cosy-voice3-onnx` (full ONNX export of CV3).
+**HuggingFace mirrors that may also be useful** for HartsyInference users: `model-scope/CosyVoice-300M` (identical content, ModelScope mirror), `gpustack/CosyVoice-300M-Instruct` (with `.onnx` exports for the speaker encoder), `ayousanz/cosy-voice3-onnx` (full ONNX export of CV3).
 
 ### 2. End-to-End Architecture
 
@@ -419,7 +419,7 @@ CV2 first-packet latency on RTX 4090: ~150 ms with chunk-2M, ~95 ms with chunk-M
 
 ### 15. C# Implementation Notes
 
-Notes for the implementer of `SharpInference.Audio` CosyVoice pipeline.
+Notes for the implementer of `HartsyInference.Audio` CosyVoice pipeline.
 
 1. **LM (Qwen2.5-0.5B) — reuse dotLLM verbatim.** The CV2 LM *is* a plain Qwen2.5-0.5B with an extended vocabulary (6561 extra IDs appended). Our existing `DotLLM.Models.Qwen2` runtime can load it directly given two trivial extensions:
    - Embed table resize: load `model.embed_tokens.weight` as `[151643 + N_special + 6561, 896]`.
@@ -430,7 +430,7 @@ Notes for the implementer of `SharpInference.Audio` CosyVoice pipeline.
 
 3. **Speech tokenizer FSQ — small and pure C#.** This is the simplest of all the components.
    - Port the encoder (6 Transformer blocks with RoPE) using our existing Conformer/Transformer kernels (Parakeet shares this).
-   - Replace the 80-mel input STFT with our `MelSpectrogram` from `SharpInference.Audio.Preprocessing`.
+   - Replace the 80-mel input STFT with our `MelSpectrogram` from `HartsyInference.Audio.Preprocessing`.
    - Implement FSQ as pure scalar arithmetic — see exact formula in §4. Two `Linear` layers + `tanh` + `round` + base-3 packing. **No CUDA kernel needed**, but for batched inference we can keep it on GPU via `ITensorPrimitives.Tanh` + a custom `RoundAndPackBase3` PTX kernel (~30 LOC). A SIMD AVX2 CPU path is also viable for clip-by-clip use.
 
 4. **Speaker encoder (CAM++).** ~7M parameters of D-TDNN + context-aware masking. Plan to share the D-TDNN scaffold with our **Parakeet** Conformer encoder work (D-TDNN ≈ a TDNN + dense skip + lightweight context attention; the Conformer's TDNN-style conv module is the closest existing building block). Roughly 1-2 days of porting; reference weights from `campplus.onnx`.
@@ -439,7 +439,7 @@ Notes for the implementer of `SharpInference.Audio` CosyVoice pipeline.
    - The CFM estimator is essentially a small UNet1D with attention; channel widths are tiny (`[256, 256]`) compared to image DiTs, so memory is trivial.
    - For CV2: the **chunk-aware causal attention mask** is the only new piece — implement as a `[T, T] bool` mask that we precompute per chunk size and pass into the same attention kernel we already use for Flux. The four masking modes (non-causal / full-causal / chunk-M / chunk-2M) are all rectangular block masks — easy to construct.
    - The look-ahead `Conv1D` with right-padding before upsampling is a one-line conv with `padding=(0, K-1)`.
-   - Euler ODE solver: reuse `FlowMatchEulerDiscreteScheduler` from `SharpInference.Diffusion` (Flux/SD3 already validated). CFG weight 0.7 is supported by our existing CFG combiner.
+   - Euler ODE solver: reuse `FlowMatchEulerDiscreteScheduler` from `HartsyInference.Diffusion` (Flux/SD3 already validated). CFG weight 0.7 is supported by our existing CFG combiner.
    - NFE 10 — no sway sampling, no omega shift; the audio model uses vanilla Euler.
 
 6. **Vocoder — HiFTNet for CV2, HiFiGAN-with-F0 for CV1.** Plan covered in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). The CV2 vocoder is shape-identical to the Kokoro iSTFTNet branch we are already implementing for Kokoro; the only new piece is the **internal F0 predictor** that feeds the harmonic source module. That F0 predictor is a 4-layer 1-D conv stack — trivial.
@@ -477,10 +477,10 @@ Notes for the implementer of `SharpInference.Audio` CosyVoice pipeline.
    - End-to-end: voice similarity (CAM++ cosine) ≥ 0.95 vs Python reference clip.
 
 10. **Package boundaries** (per `NUGET_PACKAGE_DESIGN.md`):
-    - `SharpInference.Audio.Preprocessing` — mel spectrogram.
-    - `SharpInference.Audio.Tokenizers.S3` — speech tokenizer (depends on Conformer kernels in `SharpInference.Audio` core).
-    - `SharpInference.Audio.SpeakerEmbeddings.CamPlusPlus` — CAM++ encoder.
-    - `SharpInference.Audio.CosyVoice` — top-level pipeline; depends on `DotLLM.Qwen2`, `SharpInference.Audio.Tokenizers.S3`, `SharpInference.Audio.SpeakerEmbeddings.CamPlusPlus`, `SharpInference.Audio.FlowMatching`, `SharpInference.Audio.Vocoders.HiFTNet`, `SharpInference.Diffusion.Schedulers` (Euler flow scheduler).
+    - `HartsyInference.Audio.Preprocessing` — mel spectrogram.
+    - `HartsyInference.Audio.Tokenizers.S3` — speech tokenizer (depends on Conformer kernels in `HartsyInference.Audio` core).
+    - `HartsyInference.Audio.SpeakerEmbeddings.CamPlusPlus` — CAM++ encoder.
+    - `HartsyInference.Audio.CosyVoice` — top-level pipeline; depends on `DotLLM.Qwen2`, `HartsyInference.Audio.Tokenizers.S3`, `HartsyInference.Audio.SpeakerEmbeddings.CamPlusPlus`, `HartsyInference.Audio.FlowMatching`, `HartsyInference.Audio.Vocoders.HiFTNet`, `HartsyInference.Diffusion.Schedulers` (Euler flow scheduler).
     - **No transitive dotLLM leakage** — the pipeline accepts an `IQwen2LM` interface so dotLLM remains an optional peer dep.
 
 ---

@@ -1,6 +1,6 @@
 # MusicGen / AudioGen / AudioCraft — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (MusicGen pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (MusicGen pipeline)
 
 ## Summary
 
@@ -81,7 +81,7 @@ For codec internals (encoder conv stack, RVQ algorithm, decoder ConvTranspose st
 
 ### Codebook Interleaving Patterns
 
-This is the central novelty of MusicGen and the main piece of logic that does not exist in dotLLM or any existing SharpInference component. Reference implementation: `audiocraft/modules/codebooks_patterns.py`.
+This is the central novelty of MusicGen and the main piece of logic that does not exist in dotLLM or any existing HartsyInference component. Reference implementation: `audiocraft/modules/codebooks_patterns.py`.
 
 Given a tensor of audio codes with shape `[B, K, T]` (B = batch, K = codebooks, T = codec frames), a "pattern" specifies how those K×T tokens are arranged into a flat sequence of LM steps. The paper compares four patterns; MusicGen ships with **delay**.
 
@@ -366,7 +366,7 @@ Shape `[B, L_text + L_chroma, D_cross]` where `D_cross` equals the decoder hidde
 - `decoder.*` — the MusicGen LM.
 - `enc_to_dec_proj.*` — Linear(768, decoder_hidden) used to project T5 output into cross-attention dim.
 
-For inference only, the `audio_encoder` weights for the EnCodec *encoder* are unused (we never re-encode audio unless doing audio-prompted continuation); we only need the EnCodec *decoder* weights. SharpInference can split these.
+For inference only, the `audio_encoder` weights for the EnCodec *encoder* are unused (we never re-encode audio unless doing audio-prompted continuation); we only need the EnCodec *decoder* weights. HartsyInference can split these.
 
 ## Algorithm Steps
 
@@ -448,15 +448,15 @@ For validation, the AudioCraft official and HF Transformers implementations shou
 2. The exact `delays` array for stereo (whether `[0,0,1,1,2,2,3,3]` or `[0,1,2,3,0,1,2,3]`) needs to be confirmed against the actual `audiocraft/solvers/musicgen.py` source — both forms appear in community discussions. The interleaving order (L-R-L-R per depth, vs all-L-then-all-R) matters for un-delay logic.
 3. Whether AudioGen uses Flan-T5 or vanilla T5: AudioCraft's `text_conditioner.py` defaults to `t5-base`, but the released checkpoint may have been trained on either. Both have identical architecture so loading works for either, but the tokenizer vocabulary should be checked (Flan-T5 uses the same SentencePiece).
 4. Chroma extraction details (window size, hop length, STFT n_fft) for melody conditioning are not fully documented in the model card. The chroma_len=235 in the melody config implies a specific hop, but the conditioner code reads it from the audio sample rate at runtime. Need to read `ChromaExtractor` source for exact STFT params for a C# port.
-5. RTF numbers above are community-reported; we should run our own benchmarks once SharpInference.Audio compiles.
+5. RTF numbers above are community-reported; we should run our own benchmarks once HartsyInference.Audio compiles.
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
-This is the first **autoregressive** model in SharpInference (everything to date is diffusion or feed-forward — diffusion samplers loop, but each step is feed-forward). Many of the patterns needed already exist in dotLLM; SharpInference will need a thin port of those patterns.
+This is the first **autoregressive** model in HartsyInference (everything to date is diffusion or feed-forward — diffusion samplers loop, but each step is feed-forward). Many of the patterns needed already exist in dotLLM; HartsyInference will need a thin port of those patterns.
 
-### What SharpInference already has
+### What HartsyInference already has
 
-- **T5 encoder** — exists in `SharpInference.Diffusion` (used by SD3, Flux, AuraFlow). T5-base is smaller than the T5-XXL used by diffusion but uses the same code path. Reuse it; just allow a different size config.
+- **T5 encoder** — exists in `HartsyInference.Diffusion` (used by SD3, Flux, AuraFlow). T5-base is smaller than the T5-XXL used by diffusion but uses the same code path. Reuse it; just allow a different size config.
 - **SentencePiece tokenizer** — exists for T5.
 - **Safetensors loader** — exists.
 - **CUDA/Vulkan compute** — exists.

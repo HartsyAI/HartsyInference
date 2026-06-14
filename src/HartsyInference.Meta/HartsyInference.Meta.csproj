@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Meta-package published as "HartsyInference". It contains no code of its own — it just
+    depends on every HartsyInference library so a consumer can add ONE package and get the
+    whole stack (dotnet add package HartsyInference, prerelease).
+  -->
+  <PropertyGroup>
+    <PackageId>HartsyInference</PackageId>
+    <Description>Meta-package for HartsyInference — a pure C#/.NET AI inference engine for non-LLM modalities (diffusion image generation, speech-to-text, text-to-speech, vision, video, interactive world models). Adds all backends (CPU, CUDA, Vulkan) and modality packages in one reference.</Description>
+    <!-- No build output: this package is dependencies-only. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <!-- NU5128: "dependencies declared but no lib/ files" — expected and correct for a meta-package. -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+  </PropertyGroup>
+
+  <!-- Referenced projects become package dependencies of HartsyInference. Listing all 11 libs
+       (rather than relying on transitivity) keeps the dependency set explicit and complete. -->
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
+    <ProjectReference Include="..\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+    <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+    <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
+    <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
+    <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
+    <ProjectReference Include="..\HartsyInference.Interactive\HartsyInference.Interactive.csproj" />
+  </ItemGroup>
+
+</Project>

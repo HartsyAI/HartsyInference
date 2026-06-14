@@ -1,7 +1,7 @@
 """
 Dumps a single Flux DoubleStreamBlock's inputs/outputs from a diffusers model.
 Hooks the first DoubleStreamBlock (transformer_blocks.0) and saves all intermediate
-tensors for layer-by-layer validation against SharpInference C#.
+tensors for layer-by-layer validation against HartsyInference C#.
 
 Usage: python dump_flux_double_block.py <model_dir> [output_dir]
   model_dir: path to Flux diffusers model (e.g., black-forest-labs/FLUX.1-schnell)

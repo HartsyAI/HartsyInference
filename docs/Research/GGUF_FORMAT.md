@@ -4,7 +4,7 @@
 
 GGUF (GGML Universal File) is a binary format for storing quantized ML model weights, designed for efficient `mmap`-based loading and single-file deployment. It is the native format for llama.cpp (LLMs) and stable-diffusion.cpp (diffusion models). The current version is **v3**. The format consists of a fixed header, typed key-value metadata, tensor descriptors, alignment padding, and a contiguous tensor data blob. Quantization is block-based: weights are grouped into blocks of 32 (legacy types) or super-blocks of 256 (K-quant types), each carrying its own scale factors. Dequantization reconstructs floats by multiplying quantized integers by per-block scales and adding per-block minimums where applicable.
 
-Key facts for SharpInference:
+Key facts for HartsyInference:
 - All integers are little-endian by default (v3 adds big-endian support but no flag marks it).
 - Strings are length-prefixed (`uint64` length + UTF-8 bytes, no null terminator).
 - Default alignment is 32 bytes; overridable via `general.alignment` metadata key.
@@ -423,7 +423,7 @@ This mixed approach preserves quality on attention-critical tensors while aggres
 | k-quants PR | [llama.cpp PR #1684](https://github.com/ggml-org/llama.cpp/pull/1684) | MIT | Original K-quant implementation |
 | GGUF structural guide | [Malcolm Mill guide](https://malcolm-mill.github.io/LLM/gguf-file-structure-guide/) | — | Clear byte-offset tables |
 
-**IMPORTANT**: dotLLM's GGUF implementation is GPLv3-licensed. Do NOT reference it for SharpInference.
+**IMPORTANT**: dotLLM's GGUF implementation is GPLv3-licensed. Do NOT reference it for HartsyInference.
 
 ---
 
@@ -480,7 +480,7 @@ ComfyUI-GGUF uses additional metadata keys not found in llama.cpp or sd.cpp:
 
 ## Implementation Notes
 
-### For SharpInference.ModelHandler
+### For HartsyInference.ModelHandler
 
 1. **Parser structure**: Implement a streaming reader that reads the header, then lazily reads metadata and tensor info. Use `mmap` (or `MemoryMappedFile` in .NET) for the tensor data section to avoid loading all weights into memory.
 
@@ -499,7 +499,7 @@ ComfyUI-GGUF uses additional metadata keys not found in llama.cpp or sd.cpp:
 
 6. **SIMD optimization**: The K-quant scale packing is designed for SIMD-friendly byte-level access. Consider using `System.Runtime.Intrinsics` (AVX2/NEON) for the inner dequantization loops, especially for Q4_K and Q6_K which involve bit manipulation.
 
-7. **sd.cpp compatibility**: Since sd.cpp detects architecture via tensor names rather than metadata, SharpInference should implement pattern-based architecture detection as a fallback when `general.architecture` is missing or set to "pig".
+7. **sd.cpp compatibility**: Since sd.cpp detects architecture via tensor names rather than metadata, HartsyInference should implement pattern-based architecture detection as a fallback when `general.architecture` is missing or set to "pig".
 
 8. **Tensor data computation**: For a tensor with dimensions `[d0, d1, ..., dn]` and type `T`:
    - `total_elements = d0 * d1 * ... * dn`

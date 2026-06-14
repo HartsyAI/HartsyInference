@@ -87,7 +87,7 @@ Desktop.ini
 tests/python-reference/*_reference_tensors/
 
 ## Model cache
-.sharpinference/
+.hartsyinference/
 
 ## Python (for reference scripts)
 __pycache__/

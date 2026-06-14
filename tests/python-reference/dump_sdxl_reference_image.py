@@ -13,7 +13,7 @@ Usage:
     python dump_sdxl_reference_image.py --checkpoint /path/to/JuggernautXL.safetensors \\
         --output ./sdxl_reference_images --width 256 --height 256 --steps 20
 
-The C# tests in tests/SharpInference.Diffusion.Tests/SdxlSsimTests.cs load the
+The C# tests in tests/HartsyInference.Diffusion.Tests/SdxlSsimTests.cs load the
 generated PNGs as reference and compare against fresh generations. The strict
 SSIM > 0.95 gate requires noise-injection into the C# pipeline; until that's
 wired the tests run with a relaxed threshold (see test file for current value).

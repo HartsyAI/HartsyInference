@@ -1,6 +1,6 @@
-# Benchmarking SharpInference vs ComfyUI
+# Benchmarking HartsyInference vs ComfyUI
 
-> **Goal:** SharpInference within 2× of ComfyUI on the same hardware running the same model + same noise + same scheduler config.
+> **Goal:** HartsyInference within 2× of ComfyUI on the same hardware running the same model + same noise + same scheduler config.
 > **Status:** procedure documented, not yet collected — needs a paired dual-run on the user's RTX 3060 (or any single-GPU box) once checkpoints are downloaded.
 
 ## What to measure
@@ -26,9 +26,9 @@ Numbers are rough; recapture them on your specific GPU before declaring a regres
 ## Procedure
 
 1. Run a ComfyUI workflow with the **same checkpoint, prompt, seed, scheduler, and step count**. Note steady-state it/s from the ComfyUI console.
-2. Run the matching SharpInference test (e.g. `Sdxl_GenerateImage_Gpu`, `FluxDev_Generates_WithinSsimThreshold`). The pipeline emits per-step timing via the `onProgress` callback used by every test in this repo — see [`FluxGenerationTests`](../../tests/SharpInference.Diffusion.Tests/FluxGenerationTests.cs) and similar.
+2. Run the matching HartsyInference test (e.g. `Sdxl_GenerateImage_Gpu`, `FluxDev_Generates_WithinSsimThreshold`). The pipeline emits per-step timing via the `onProgress` callback used by every test in this repo — see [`FluxGenerationTests`](../../tests/HartsyInference.Diffusion.Tests/FluxGenerationTests.cs) and similar.
 3. Compute it/s = `1000 / avg_step_ms` from steps 5..15.
-4. Record peak VRAM with `nvidia-smi -l 1` running during the SharpInference run.
+4. Record peak VRAM with `nvidia-smi -l 1` running during the HartsyInference run.
 
 ## Where the gap will show up
 
@@ -49,4 +49,4 @@ If a fresh measurement on the same GPU + same model is **>30% slower** than a pr
 
 ## Cross-runtime parity check
 
-For numerical (not perf) regression detection, the SSIM tests at [`SdxlSsimTests`](../../tests/SharpInference.Diffusion.Tests/SdxlSsimTests.cs) and [`FluxSsimTests`](../../tests/SharpInference.Diffusion.Tests/FluxSsimTests.cs) compare against diffusers reference images at matched noise. With reference noise loaded from `init_noise_seed42.bin`, the strict gate (0.85-0.90) catches any pipeline-level math drift.
+For numerical (not perf) regression detection, the SSIM tests at [`SdxlSsimTests`](../../tests/HartsyInference.Diffusion.Tests/SdxlSsimTests.cs) and [`FluxSsimTests`](../../tests/HartsyInference.Diffusion.Tests/FluxSsimTests.cs) compare against diffusers reference images at matched noise. With reference noise loaded from `init_noise_seed42.bin`, the strict gate (0.85-0.90) catches any pipeline-level math drift.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SharpInference model downloader for RunPod / SwarmUI testing.
+HartsyInference model downloader for RunPod / SwarmUI testing.
 
-Downloads all models needed to validate SharpInference's 🔧 (implementation-done,
+Downloads all models needed to validate HartsyInference's 🔧 (implementation-done,
 checkpoint-pending) pipelines. Drives SwarmUI's download WebSocket API so models
 land in the correct sub-folders automatically.
 

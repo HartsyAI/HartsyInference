@@ -1,6 +1,6 @@
 # Cosmos-Predict1 Video2World — Research Notes
 
-> Status: Complete (code + configs + tokenizer captured; HF tensor key dump still required) | Last Updated: 2026-05-24 | Needed Before: SharpInference.Video (Phase 9, AR video continuation pipeline). Discrete tokenizer (Cosmos DV) + AR transformer infra reused by SharpInference.Interactive (Phase 10) for action-conditioned world models.
+> Status: Complete (code + configs + tokenizer captured; HF tensor key dump still required) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Video (Phase 9, AR video continuation pipeline). Discrete tokenizer (Cosmos DV) + AR transformer infra reused by HartsyInference.Interactive (Phase 10) for action-conditioned world models.
 > License: NVIDIA Open Model License (commercial OK — see § License)
 > Source of truth: [nvidia-cosmos/cosmos-predict1 GitHub](https://github.com/nvidia-cosmos/cosmos-predict1), [arXiv 2501.03575 "Cosmos World Foundation Model Platform for Physical AI"](https://arxiv.org/abs/2501.03575), [HF nvidia/Cosmos-Predict1-5B-Video2World](https://huggingface.co/nvidia/Cosmos-Predict1-5B-Video2World), [HF nvidia/Cosmos-Predict1-13B-Video2World](https://huggingface.co/nvidia/Cosmos-Predict1-13B-Video2World), [HF nvidia/Cosmos-Tokenizer-DV8x16x16](https://huggingface.co/nvidia/Cosmos-Tokenizer-DV8x16x16)
 > Related: [`LANCE_ARCHITECTURE.md`](LANCE_ARCHITECTURE.md) (joint image+video unified pipeline lineage), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (T5-11B is used here), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md) (continuous side of Cosmos Tokenizer family for diffusion decoder), and the forthcoming `WORLD_MODELS_AR_ACTION.md` (Phase 10, action-conditioned world models built on the same DV-token primitives)
@@ -9,14 +9,14 @@
 
 Cosmos-Predict1 Video2World (V2W) is NVIDIA's discrete-token **autoregressive video continuation** family — Llama3-style transformers that predict the next discrete video token until a clip is complete. Two variants ship: **5B** (4B base + cross-attn) and **13B** (12B base + cross-attn). Both consume text + image (1 frame) or text + video (9 frames) and emit a 24-frame or 32-frame clip at **1024×640 @ 25 fps**. Internally the model is **strictly next-token**: it autoregresses over the discrete tokens produced by the **Cosmos-Tokenize1-DV8x16x16-720p** tokenizer (8× temporal × 16× spatial × 16× spatial compression, FSQ codebook of **64,000** entries). T5 prompt embeddings are injected through cross-attention layers inserted **every transformer block** (`insert_cross_attn_every_k_layers=1`, `context_dim=1024`). After AR sampling, a **separate 7B latent diffusion decoder** ("Cosmos-Predict1-7B-Decoder-DV8x16x16ToCV8x8x8-720p") upsamples DV tokens into a CV8x8x8 continuous latent and decodes RGB — the AR model itself does not own pixel reconstruction.
 
-**Framing for SharpInference.** Cosmos-Predict1 V2W does **not** take action inputs (no joystick, no keyboard, no robot pose). It is not an "interactive world model" in the Matrix-Game / Oasis / GameCraft / DriveDreamer sense. It *is* a state-of-the-art autoregressive video predictor, and the same Python repo contains an `action_dim`/`action_embedding_mode` post-training path (`create_video2world_model` ll. 476–479) that wires an MLP action embedding into the same context stream, so the same backbone is the on-ramp for the Phase 10 action-conditioned models. The reusable Phase-10 infrastructure is:
+**Framing for HartsyInference.** Cosmos-Predict1 V2W does **not** take action inputs (no joystick, no keyboard, no robot pose). It is not an "interactive world model" in the Matrix-Game / Oasis / GameCraft / DriveDreamer sense. It *is* a state-of-the-art autoregressive video predictor, and the same Python repo contains an `action_dim`/`action_embedding_mode` post-training path (`create_video2world_model` ll. 476–479) that wires an MLP action embedding into the same context stream, so the same backbone is the on-ramp for the Phase 10 action-conditioned models. The reusable Phase-10 infrastructure is:
 
 1. **Cosmos-Tokenize1-DV8x16x16** — discrete video tokenizer (JIT encoder + JIT decoder, FSQ levels [8,8,8,5,5,5], 64,000-entry vocab, 8×16×16 compression). This is the single most reusable artifact — *any* Cosmos-lineage AR world model (Matrix-Game-2 included) consumes/produces tokens in this exact space.
 2. **CosmosAR backbone** — Llama3-shaped decoder with **3D RoPE** over (T,H,W), QK-norm, GQA (32 Q heads / 8 KV heads), SwiGLU FFN, RMSNorm. Same body for 4B/12B base and 5B/13B V2W.
 3. **Cross-attn-every-layer adapter** — light, frozen-base finetune that turns the base AR LM into a conditioned video generator. The same hook is what an action-conditioned world model will reuse, just swapping T5 embeddings for action embeddings (or concatenating both).
 4. **3D RoPE** — per-axis split of `head_dim` into temporal/H/W ranges.
 
-For SharpInference this means: **build Cosmos V2W in `SharpInference.Video` (Phase 9)** as `CosmosV2WPipeline`, and design the DV tokenizer + AR backbone + 3D RoPE as standalone reusable types under `SharpInference.Video/Models/Cosmos/` so Phase 10 (`SharpInference.Interactive`) can compose them with an `ActionEmbedder`.
+For HartsyInference this means: **build Cosmos V2W in `HartsyInference.Video` (Phase 9)** as `CosmosV2WPipeline`, and design the DV tokenizer + AR backbone + 3D RoPE as standalone reusable types under `HartsyInference.Video/Models/Cosmos/` so Phase 10 (`HartsyInference.Interactive`) can compose them with an `ActionEmbedder`.
 
 Predict1 has been **superseded by Cosmos-Predict2 / Cosmos-Predict2.5** in the diffusion family — Predict2.5-2B (Oct 6 2025) is **diffusion, not AR** and replaces the diffusion-side Predict1 pipelines. The autoregressive V2W path remains Predict1's domain; there is no AR Predict2.5 as of 2026-05-24. So Predict1 5B/13B V2W are still the SOTA AR-token world models from NVIDIA.
 
@@ -28,14 +28,14 @@ Predict1 has been **superseded by Cosmos-Predict2 / Cosmos-Predict2.5** in the d
 
 - **Commercial use: yes.** "Models are commercially usable."
 - **Derivative models: yes.** "You are free to create and distribute Derivative Models. Derivative Model means all (a) modifications to the Model, (b) works based on the Model, and (c) any other derivative works of the Model."
-- **Output ownership: yours.** "NVIDIA does not claim ownership to any outputs generated using the Models or Derivative Models." → SharpInference users keep ownership of every video Cosmos generates.
+- **Output ownership: yours.** "NVIDIA does not claim ownership to any outputs generated using the Models or Derivative Models." → HartsyInference users keep ownership of every video Cosmos generates.
 - **Relicensing of derivatives: allowed.** "You may add your own copyright statement to your modifications and may provide additional or different license terms and conditions for use, reproduction, or distribution of your modifications, or for any such Derivative Models as a whole, provided your use, reproduction, and distribution of the Model otherwise complies with the conditions stated in this Agreement."
 - **Redistribution of the base model: must include OML.** "if you distribute the Model, you must give any other recipients of the Model a copy of this Agreement and include the following attribution notice within a 'Notice' text file with such copies: 'Licensed by NVIDIA Corporation under the NVIDIA Open Model License'."
 
-### Hard restrictions (load-bearing for SharpInference)
+### Hard restrictions (load-bearing for HartsyInference)
 
 - **Cannot bypass safety guardrails.** Every Cosmos model card states the license **automatically terminates** if you "circumvent" NVIDIA's safety guardrails. NVIDIA's reference code ships a "guardrail" pipeline (text classifier + face-blur + content filter) that runs before/after generation. The OML text frames this as a model-specific use restriction.
-  - **SharpInference implication:** we can ship Cosmos V2W *without* implementing NVIDIA's guardrail pipeline (it's not architecturally required), but our distribution must not include code that detects or removes guardrail enforcement when present. Practical stance: do not port the guardrail; document its absence; do not actively suppress it. This is the same posture we took for Anima.
+  - **HartsyInference implication:** we can ship Cosmos V2W *without* implementing NVIDIA's guardrail pipeline (it's not architecturally required), but our distribution must not include code that detects or removes guardrail enforcement when present. Practical stance: do not port the guardrail; document its absence; do not actively suppress it. This is the same posture we took for Anima.
 - **Trade compliance.** OML requires you to comply with U.S. export controls when redistributing. Standard.
 - **No "hate, harm, harass" content as marketed output.** The "intended use" sections in the model cards (which the OML incorporates by reference for Cosmos-Predict1) say outputs must not be used to harm individuals. Not enforceable in code; ship as a user-facing warning.
 
@@ -45,14 +45,14 @@ Predict1 has been **superseded by Cosmos-Predict2 / Cosmos-Predict2.5** in the d
 Licensed by NVIDIA Corporation under the NVIDIA Open Model License
 ```
 
-To be placed in a `NOTICE` file alongside any Cosmos weights or derivatives that SharpInference ships. The Apache-2.0 code in the GitHub repo additionally requires retaining the per-file `SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.` notices if we port any code (we won't — pure C# reimplementation — so this only applies to weights).
+To be placed in a `NOTICE` file alongside any Cosmos weights or derivatives that HartsyInference ships. The Apache-2.0 code in the GitHub repo additionally requires retaining the per-file `SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.` notices if we port any code (we won't — pure C# reimplementation — so this only applies to weights).
 
 ### Permissibility summary
 
 | Activity | OML status |
 |---|---|
 | Use Cosmos-Predict1 weights in a closed-source commercial SaaS | ✅ |
-| Ship Cosmos-Predict1 weights in SharpInference's distribution | ✅ (include NOTICE file) |
+| Ship Cosmos-Predict1 weights in HartsyInference's distribution | ✅ (include NOTICE file) |
 | Generate videos and sell them | ✅ (you own them) |
 | Fine-tune V2W on game footage, redistribute as `MatrixGameLike-7B` | ✅ Derivative Model — relicense at your option |
 | Strip the guardrail pipeline from NVIDIA's Python and ship that | ❌ License termination |
@@ -243,7 +243,7 @@ For the full 33-pixel-frame output (4× chunks of 9 = wait, math: `num_video_fra
 
 **Constraint:** `pixel_chunk_duration % compression_ratio[0] == 1` must hold (asserted in `model_config.py:357-359`). That's why valid prefix lengths are **1, 9** (`_SUPPORTED_CONTEXT_LEN = [1, 9]` in `utils/inference.py:33`) — both satisfy `n*8 + 1`.
 
-**Pretrained tokenizer constants for SharpInference porting:**
+**Pretrained tokenizer constants for HartsyInference porting:**
 
 - Levels: `[8, 8, 8, 5, 5, 5]` (FSQ basis = cumprod = `[1, 8, 64, 512, 2560, 12800]`)
 - Codebook: 64,000
@@ -260,7 +260,7 @@ def __init__(self, model_name: str = "google-t5/t5-11b", ...):
 
 T5-11B has hidden size **1024** (matches `context_dim=1024`), 24 encoder layers, 64 attention heads, and FFN 65,536. Token limit per `encode_prompts(..., max_length: int = 512)`. Standard SentencePiece tokenizer (`T5TokenizerFast`). Embeddings are extracted from `last_hidden_state`, with positions past the actual prompt length **zero-masked** (line 99-101 of `t5_text_encoder.py`).
 
-Note: T5-11B (1024 dim) is *not* the T5-XXL (4096 dim, often called "T5xxl" in SD3/Flux). Cosmos chose T5-11B specifically so the cross-attn `k`/`v` projection can stay narrow (1024→4096 for 4B or 1024→5120 for 12B). This is unusual — most modern diffusion/video models use T5-XXL. If SharpInference already has T5-XXL plumbing, we will need a separate **T5-11B** loader.
+Note: T5-11B (1024 dim) is *not* the T5-XXL (4096 dim, often called "T5xxl" in SD3/Flux). Cosmos chose T5-11B specifically so the cross-attn `k`/`v` projection can stay narrow (1024→4096 for 4B or 1024→5120 for 12B). This is unusual — most modern diffusion/video models use T5-XXL. If HartsyInference already has T5-XXL plumbing, we will need a separate **T5-11B** loader.
 
 T5 weights are loaded from a local cache at `checkpoints/google-t5/t5-11b/` (HF cache layout), not from the Cosmos HF repo itself.
 
@@ -284,7 +284,7 @@ After AR sampling produces 12,800 DV tokens, the reference inference path runs t
 
 A "generic prompt" T5 embedding (`"high quality, 4k, high definition, smooth video"`) ships in `aux_vars.pt` and is used when the user prompt is unavailable. Without the diffusion decoder, the AR-only path can fall back to `decoder.jit` of the DV tokenizer, but quality is **noticeably worse** — the README notes this is the "fast/lower-quality" mode.
 
-**For SharpInference:** the diffusion decoder is large (7B params, 14 GB). Phase 9 should implement Cosmos V2W in two stages, with `--disable_diffusion_decoder` equivalent as the always-on default, and the diffusion decoder as an opt-in quality upgrade. This is also the boundary where pure-AR cleanly separates from diffusion — Phase 10 world models will not need the diffusion decoder if they target playable latency.
+**For HartsyInference:** the diffusion decoder is large (7B params, 14 GB). Phase 9 should implement Cosmos V2W in two stages, with `--disable_diffusion_decoder` equivalent as the always-on default, and the diffusion decoder as an opt-in quality upgrade. This is also the boundary where pure-AR cleanly separates from diffusion — Phase 10 world models will not need the diffusion decoder if they target playable latency.
 
 ### 10. Inference pipeline (end-to-end)
 
@@ -434,9 +434,9 @@ Cosmos-Predict1-13B-Video2World/
 └── model.pt             26.6 GB
 ```
 
-**No safetensors.** Weights ship as **`model.pt`** PyTorch pickles. The pickle root is `collections.OrderedDict` containing `torch.BFloat16Storage` tensors via `torch._utils._rebuild_tensor_v2`. **For SharpInference this is a concrete blocker**: we don't have a PyTorch pickle loader and don't want one. The conversion approach is:
+**No safetensors.** Weights ship as **`model.pt`** PyTorch pickles. The pickle root is `collections.OrderedDict` containing `torch.BFloat16Storage` tensors via `torch._utils._rebuild_tensor_v2`. **For HartsyInference this is a concrete blocker**: we don't have a PyTorch pickle loader and don't want one. The conversion approach is:
 
-1. **One-off Python script** (off-ship) that loads `model.pt` and re-emits as `.safetensors`. SharpInference's existing safetensors loader then consumes it.
+1. **One-off Python script** (off-ship) that loads `model.pt` and re-emits as `.safetensors`. HartsyInference's existing safetensors loader then consumes it.
 2. Document this in `samples/ConvertCosmosCheckpoint/` so the user runs it once per model.
 
 The `config.json` is a Cosmos-private dataclass dump, not a `transformers.PretrainedConfig`. It's tiny (480-621 bytes); we'll read it as a JSON metadata header (or just hard-code the architecture in `CosmosCheckpointConverter` keyed by file size / model name).
@@ -494,7 +494,7 @@ half_width_d = levels[d] // 2
 zhat_d = (code_d - half_width_d) / half_width_d        # back to [-1, 1]
 ```
 
-Then `project_out(zhat)` (a `Linear(6 → dim)` inside the encoder/decoder) gives the continuous code. For SharpInference we only need the integer codebook for AR sampling; the FSQ project_out is internal to the tokenizer decoder.
+Then `project_out(zhat)` (a `Linear(6 → dim)` inside the encoder/decoder) gives the continuous code. For HartsyInference we only need the integer codebook for AR sampling; the FSQ project_out is internal to the tokenizer decoder.
 
 ## Algorithm Steps
 
@@ -561,7 +561,7 @@ Source-of-truth files (always cite these in implementation PRs):
 
 **HuggingFace collection:** [nvidia/cosmos-predict1](https://huggingface.co/collections/nvidia/cosmos-predict1-67c9d1b97678dbf7669c89a7) (12 items: AR, diffusion, tokenizers).
 
-**Diffusers integration:** **None as of 2026-05-24.** `diffusers` upstream has a `CosmosTextToWorldPipeline` and `CosmosVideoToWorldPipeline` for **Predict2** (diffusion), but no AR Cosmos pipeline. The AR Predict1 path lives only in NVIDIA's reference repo and a NeMo integration. There is also a [vLLM tracking issue #11968](https://github.com/vllm-project/vllm/issues/11968) ("[New Model]: Cosmos-1.0-Autoregressive") — still open, no merged code. **SharpInference will be the first non-NVIDIA pure inference path for the AR Predict1 V2W family.**
+**Diffusers integration:** **None as of 2026-05-24.** `diffusers` upstream has a `CosmosTextToWorldPipeline` and `CosmosVideoToWorldPipeline` for **Predict2** (diffusion), but no AR Cosmos pipeline. The AR Predict1 path lives only in NVIDIA's reference repo and a NeMo integration. There is also a [vLLM tracking issue #11968](https://github.com/vllm-project/vllm/issues/11968) ("[New Model]: Cosmos-1.0-Autoregressive") — still open, no merged code. **HartsyInference will be the first non-NVIDIA pure inference path for the AR Predict1 V2W family.**
 
 **Community ports:** none of substance. ComfyUI has nodes for Cosmos *Predict2* diffusion but not AR Predict1.
 
@@ -605,7 +605,7 @@ Source-of-truth files (always cite these in implementation PRs):
    ```
    and store the result alongside the C# `CosmosCheckpointConverter`.
 
-2. **`fuse_qkv` toggle.** `create_inference_config` sets `inference_config.model_config.fuse_qkv = False` (line 146). The base config defaults to `False` too. Confirm cross-attn never fuses (`cross_attention_args.update({"fuse_qkv": False})` at transformer.py:77 is explicit). SharpInference can implement unfused QKV first; fused is an optimization.
+2. **`fuse_qkv` toggle.** `create_inference_config` sets `inference_config.model_config.fuse_qkv = False` (line 146). The base config defaults to `False` too. Confirm cross-attn never fuses (`cross_attention_args.update({"fuse_qkv": False})` at transformer.py:77 is explicit). HartsyInference can implement unfused QKV first; fused is an optimization.
 
 3. **Cross-attn K/V dim ambiguity.** The `Attention(attn_type="cross")` constructor takes `context_dim=1024` and `dim=4096` (or 5120). Need to verify whether the cross-attn `wk`/`wv` projection is `(context_dim → n_kv_heads*head_dim)` = `(1024 → 1024)` for 4B-base or `(1024 → 1024)` for 12B-base (both have `n_kv_heads*head_dim = 8*128 = 1024`, so it lines up — but verify against the actual tensor shapes in `model.pt`).
 
@@ -619,19 +619,19 @@ Source-of-truth files (always cite these in implementation PRs):
 
 8. **Cosmos Tokenize1 vs Cosmos-0.1-Tokenizer-DV8x16x16.** The HF model card I read was for `Cosmos-0.1-Tokenizer-DV8x16x16` (the original public release). The pipeline actually loads `Cosmos-Tokenize1-DV8x16x16-720p` (the "720p" specialization, presumably retrained for the Predict1 resolutions). Architecture is the same family; weights differ. Verify which HF repo NVIDIA has gated for download (likely under `nvidia/Cosmos-Tokenizer` collection).
 
-9. **Action conditioning hook.** `create_video2world_model` exposes `use_action_condition: bool = False`, `action_dim: int = 8`, `action_embedding_mode: Optional[str] = "mlp"`, `concat_action_to_context: bool = False`. The wgp inference path does **not** wire actions. This is the post-training hook NVIDIA used for their DROID / robotics demos. For Phase 10 SharpInference world models, we'd add an `ActionEmbedder` that produces a (B, 1, context_dim)-or-similar embedding and concatenates onto the T5 context. Verify the exact wiring in `cosmos_predict1/autoregressive/training/model.py` before designing the abstract layer.
+9. **Action conditioning hook.** `create_video2world_model` exposes `use_action_condition: bool = False`, `action_dim: int = 8`, `action_embedding_mode: Optional[str] = "mlp"`, `concat_action_to_context: bool = False`. The wgp inference path does **not** wire actions. This is the post-training hook NVIDIA used for their DROID / robotics demos. For Phase 10 HartsyInference world models, we'd add an `ActionEmbedder` that produces a (B, 1, context_dim)-or-similar embedding and concatenates onto the T5 context. Verify the exact wiring in `cosmos_predict1/autoregressive/training/model.py` before designing the abstract layer.
 
-10. **License for the Cosmos-Tokenizer JIT files specifically.** They're tagged OML (same as the AR models), but JIT TorchScript blobs are a different distribution shape. SharpInference must either include them as-is (with NOTICE) or recreate the encoder/decoder architecture in C# from scratch and ship a separate weights-conversion step.
+10. **License for the Cosmos-Tokenizer JIT files specifically.** They're tagged OML (same as the AR models), but JIT TorchScript blobs are a different distribution shape. HartsyInference must either include them as-is (with NOTICE) or recreate the encoder/decoder architecture in C# from scratch and ship a separate weights-conversion step.
 
-11. **`tokenizer_offset`.** `VideoTokenizerConfig(tokenizer_offset=0)` because the AR vocab is only video tokens — no text vocab share. This means the embedding table is `nn.Embedding(64000, dim)` exactly. No offset arithmetic is needed in SharpInference's token-id handling.
+11. **`tokenizer_offset`.** `VideoTokenizerConfig(tokenizer_offset=0)` because the AR vocab is only video tokens — no text vocab share. This means the embedding table is `nn.Embedding(64000, dim)` exactly. No offset arithmetic is needed in HartsyInference's token-id handling.
 
 12. **fps mismatch (25 save vs 24 train).** Documented above. Replicate NVIDIA's behavior (save at 25) for output-bit-identical results, or expose `--output_fps` and let the user pick. First pass: save at 24 fps (the actual training frame rate) and document the deviation.
 
 ## Implementation Notes
 
-### How this maps to SharpInference packages
+### How this maps to HartsyInference packages
 
-**`SharpInference.Video`** (Phase 9 — primary home) adds:
+**`HartsyInference.Video`** (Phase 9 — primary home) adds:
 
 - `Models/Cosmos/CosmosArConfig.cs` — backbone config record (5B / 13B variants).
 - `Models/Cosmos/CosmosArTransformer.cs` — the Llama3-shape decoder with optional per-layer cross-attn, 3D RoPE, QK-norm, GQA, SwiGLU, RMSNorm. **Designed as a reusable backbone, not bound to V2W specifically** — Phase 10 instantiates the same class with `useActionEmbeddings: true`.
@@ -642,21 +642,21 @@ Source-of-truth files (always cite these in implementation PRs):
 - `Models/Cosmos/Tokenizer/Fsq.cs` — 6-dim FSQ (`levels`, mixed-radix basis, `index↔code`).
 - `Pipelines/CosmosV2WPipeline.cs` — orchestrates T5 → DV-encode (if video prefix) → AR sample → DV-decode (or DD-decode).
 
-**`SharpInference.Diffusion`** (deferred follow-up):
+**`HartsyInference.Diffusion`** (deferred follow-up):
 
 - `Pipelines/CosmosDDPipeline.cs` — 7B latent DiT decoder. Only needed for quality mode; defer to a second PR.
 
-**`SharpInference.ModelHandler`** adds:
+**`HartsyInference.ModelHandler`** adds:
 
 - `CheckpointConverters/CosmosArCheckpointConverter.cs` — load NVIDIA's `model.pt`-converted safetensors (after the one-off PyTorch script). Maps tensor keys to `CosmosArTransformer` parameters; demuxes the cross-attn sibling weights into a separate dict if present.
 - `CheckpointConverters/CosmosDvTokenizerConverter.cs` — load DV encoder/decoder weights (after a separate conversion script that extracts state from the JIT).
 - A `tools/ConvertCosmosCheckpoint/` sample Python helper (one-off, off-ship) that re-emits `model.pt` → `.safetensors` and `encoder.jit` / `decoder.jit` → `.safetensors`.
 
-**`SharpInference.TextEncoders`** adds (or extends if not yet present):
+**`HartsyInference.TextEncoders`** adds (or extends if not yet present):
 
 - `T5_11B.cs` — T5-11B encoder (24 layers, hidden 1024, 64 heads, FFN 65536, SentencePiece tokenizer). **Distinct from T5-XXL.** If the codebase already has a generic T5 encoder, this is a config selection only.
 
-**`SharpInference.Interactive`** (Phase 10 — *future*, this doc is the foundation):
+**`HartsyInference.Interactive`** (Phase 10 — *future*, this doc is the foundation):
 
 - `Models/CosmosLike/ActionEmbedder.cs` — MLP/matrix embed of action vector → context tokens.
 - `Pipelines/CosmosActionPipeline.cs` — composes `CosmosArTransformer` + `CosmosDvTokenizer` + `ActionEmbedder`. **Reuses ~95% of Phase 9 code; only the conditioning stream differs.**
@@ -671,9 +671,9 @@ Source-of-truth files (always cite these in implementation PRs):
 5. **QK-norm** — per-head RMSNorm on Q and K before attention. Existing `RmsNorm` kernel, just applied at a different point in the attention path.
 6. **GQA-4** (32 Q / 8 KV). Existing GEMM paths handle. Same factor as Qwen3-4B.
 7. **Cross-attention without causal mask** — already supported (cross-attn primitives are standard). Just ensure the attention helper accepts a separate `context_mask` distinct from the causal mask.
-8. **AR sampling loop with KV-cache** — **net-new for SharpInference's video path**. Whisper has it for audio; we need a generic `IKvCache` that supports growing per-step appends and works across CPU / CUDA / Vulkan. Design this as a reusable primitive in `SharpInference.Core/Inference/KvCache.cs`. Lance's `DenoiseKvCache` (planned for diffusion) is a different shape (fixed-prefix + recompute-noisy-slot) and should be kept separate.
-9. **Top-p (nucleus) sampler** — sort logits, cumulative softmax, mask & resample. ~30 lines of C#. Top-k is even simpler. Both should live in `SharpInference.Core/Sampling/`.
-10. **T5-11B encoder forward** — if not already in the codebase, this is the standard encoder-only T5: rel-pos bias attention, GeGLU FFN, LayerNorm (T5 LayerNorm, no mean), SentencePiece tokenizer. ~1-2 weeks of work if from scratch, ~1 day if SharpInference already has T5-XXL and just needs a smaller config.
+8. **AR sampling loop with KV-cache** — **net-new for HartsyInference's video path**. Whisper has it for audio; we need a generic `IKvCache` that supports growing per-step appends and works across CPU / CUDA / Vulkan. Design this as a reusable primitive in `HartsyInference.Core/Inference/KvCache.cs`. Lance's `DenoiseKvCache` (planned for diffusion) is a different shape (fixed-prefix + recompute-noisy-slot) and should be kept separate.
+9. **Top-p (nucleus) sampler** — sort logits, cumulative softmax, mask & resample. ~30 lines of C#. Top-k is even simpler. Both should live in `HartsyInference.Core/Sampling/`.
+10. **T5-11B encoder forward** — if not already in the codebase, this is the standard encoder-only T5: rel-pos bias attention, GeGLU FFN, LayerNorm (T5 LayerNorm, no mean), SentencePiece tokenizer. ~1-2 weeks of work if from scratch, ~1 day if HartsyInference already has T5-XXL and just needs a smaller config.
 
 ### VRAM and viability per target GPU
 
@@ -685,7 +685,7 @@ Source-of-truth files (always cite these in implementation PRs):
 | H100 80 GB | 80 GB | NVIDIA's reference target. All stages co-resident at BF16 (~66 GB). | All stages co-resident at BF16 (~80+ GB). NVIDIA documents this as the un-offloaded path. |
 | A100 40 GB | 40 GB | Requires partial offload. NVIDIA's recommended offload set: guardrails + T5 → 41.3 GB total. | Requires aggressive offload. |
 
-**Recommended SharpInference quality presets** (matching `QualityProfileApplier` conventions):
+**Recommended HartsyInference quality presets** (matching `QualityProfileApplier` conventions):
 
 - 5B V2W `Maximum`: BF16 backbone, FP16 T5, FP16 DV tokenizer, BF16 diffusion decoder (24 GB+ card).
 - 5B V2W `High`: BF16 backbone, FP16 T5 with offload, no diffusion decoder (12 GB card achievable).
@@ -697,7 +697,7 @@ Source-of-truth files (always cite these in implementation PRs):
 
 1. **Cosmos-Tokenize1-DV8x16x16 port first.** It's standalone (encode + decode RGB ↔ tokens), testable against reference frame-by-frame with a small Python diff harness, and **is the single most reusable artifact** for Phase 10. Get this working before any AR code. Validation: encode a 9-frame test clip with both NVIDIA's JIT and our C# port, compare token IDs (must match exactly — FSQ is deterministic).
 2. **T5-11B encoder.** If not already present, add it. Validate against `transformers.T5EncoderModel.from_pretrained("google-t5/t5-11b")` on a few prompts (max cos-sim should be ≥ 0.999 for fp32).
-3. **CosmosArTransformer (5B, no diffusion decoder).** Build the body, validate layer-by-layer against a PyTorch dump using the standard SharpInference debug-dump pattern (see Anima / Z-Image). The cross-attn is the only novel piece vs other Llama3-shape decoders we already have.
+3. **CosmosArTransformer (5B, no diffusion decoder).** Build the body, validate layer-by-layer against a PyTorch dump using the standard HartsyInference debug-dump pattern (see Anima / Z-Image). The cross-attn is the only novel piece vs other Llama3-shape decoders we already have.
 4. **AR sampling loop with KV-cache.** Use 5B at 1024×640 with temperature=0.6, top_p=0.9 for first validation. Match output tokens against NVIDIA's reference at seed=42 (deterministic comparison).
 5. **DV-decoder-only pixel reconstruction.** Acceptable for v1 — quality is lower than DD-decoded but works. Document the quality trade-off.
 6. **13B variant.** Same pipeline class with different config. Should be a config swap once 5B works.
@@ -723,11 +723,11 @@ Following project convention (every `*GenerationTests` skips cleanly when env va
 - **Cosmos3DRoPE** — reusable by any future video-AR or video-diffusion model that uses 3D positional encoding (Wan, LTX, OpenSora-style).
 - **FSQ quantizer (6-dim)** — small but generic; could be reused by other FSQ-tokenized models (some MAGVIT variants).
 - **T5-11B encoder** — fewer reuse opportunities since most newer models use T5-XXL or LLM-based encoders (Qwen, Llama). Build it lean.
-- **KV-cache primitive** — reusable across **every** future AR model in SharpInference. This is the most important infrastructure investment.
+- **KV-cache primitive** — reusable across **every** future AR model in HartsyInference. This is the most important infrastructure investment.
 
 ### What does *not* belong in this pipeline
 
-- **No guardrails port.** NVIDIA ships a Llama-Guard-style text classifier + face-blur + post-gen content filter. SharpInference doesn't replicate them — see § License. Document in `CosmosV2WPipeline.cs` XML doc that the user is responsible for content review.
+- **No guardrails port.** NVIDIA ships a Llama-Guard-style text classifier + face-blur + post-gen content filter. HartsyInference doesn't replicate them — see § License. Document in `CosmosV2WPipeline.cs` XML doc that the user is responsible for content review.
 - **No NeMo/Megatron parallelism.** Pure single-GPU C#; the reference's TP/CP machinery is N/A.
 - **No `transformer_engine` backend hook.** N/A.
 - **No FSDP / training paths.** Inference only — `TrainingModelConfig` and `act_ckpt_enabled` fields are ignored.

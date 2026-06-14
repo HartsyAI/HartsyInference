@@ -1,12 +1,12 @@
 # Stable Audio Open — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (Stable Audio pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (Stable Audio pipeline)
 
 ## Summary
 
 Stable Audio is Stability AI's family of latent-diffusion text-to-audio / text-to-music models. The pipeline is uniformly three blocks: (1) a **stereo waveform VAE** ("Oobleck VAE") that compresses 44.1 kHz stereo audio by a factor of 2048× into a 64-channel latent at ~21.5 Hz, (2) a **text conditioner** (T5-base for the open models; CLAP for the original closed Stable Audio 1.0/2.0), and (3) a **Diffusion Transformer (DiT)** that denoises the 1D latent sequence with cross-attention to the text tokens and adaLN-modulated global conditioning carrying both the diffusion timestep and two unique-to-this-family scalars: `seconds_start` and `seconds_total`. Those two timing scalars are encoded with Fourier features and let the user generate variable-length audio (0–47 s for Open 1.0, ~11.9 s for Open Small) while preserving timeline coherence.
 
-There are three released open-weight variants relevant to SharpInference: **Stable Audio Open 1.0** (1.06B-param DiT, dpmpp-3m-sde, 100 steps, classical CFG ~ 7, ~47 s output, June 2024); **Stable Audio Open Small** (0.34B DiT, ARC-adversarial post-trained, ping-pong sampler, 8 steps, no CFG, ~11.89 s output, May 2025); and the **stable-audio-tools 2.0 DiT config** (1.06B+, 1536-dim, CLAP text, used internally for "Stable Audio 2.0" but **not released as weights** — Stable Audio 2.0 / 2.5 are API-only). All three share the **same Oobleck VAE** architecture (different checkpoints in the 2.0 line are not public). Open 1.0 and Open Small share the **same VAE weights**. Stable Audio Open uses **EDM-style v-prediction with cosine-shaped sigma schedule** for 1.0; Open Small was **re-trained as a rectified flow** then ARC-distilled. Implementation in pure C# is feasible: the VAE is a 1D snake-activated weight-norm Conv stack (no GroupNorm, ~156M params), the DiT is a standard Stable-Diffusion-3-style DiT with cross-attention + global adaLN (a Flux/SD3 block is ~80% reusable), and T5-base already exists in `SharpInference.Diffusion`.
+There are three released open-weight variants relevant to HartsyInference: **Stable Audio Open 1.0** (1.06B-param DiT, dpmpp-3m-sde, 100 steps, classical CFG ~ 7, ~47 s output, June 2024); **Stable Audio Open Small** (0.34B DiT, ARC-adversarial post-trained, ping-pong sampler, 8 steps, no CFG, ~11.89 s output, May 2025); and the **stable-audio-tools 2.0 DiT config** (1.06B+, 1536-dim, CLAP text, used internally for "Stable Audio 2.0" but **not released as weights** — Stable Audio 2.0 / 2.5 are API-only). All three share the **same Oobleck VAE** architecture (different checkpoints in the 2.0 line are not public). Open 1.0 and Open Small share the **same VAE weights**. Stable Audio Open uses **EDM-style v-prediction with cosine-shaped sigma schedule** for 1.0; Open Small was **re-trained as a rectified flow** then ARC-distilled. Implementation in pure C# is feasible: the VAE is a 1D snake-activated weight-norm Conv stack (no GroupNorm, ~156M params), the DiT is a standard Stable-Diffusion-3-style DiT with cross-attention + global adaLN (a Flux/SD3 block is ~80% reusable), and T5-base already exists in `HartsyInference.Diffusion`.
 
 ---
 
@@ -619,26 +619,26 @@ return x_t   // == x_0
 1. **Exact Fourier-feature initialization for `NumberEmbedder`.** Stability's code computes random projections at module init; the trained weights freeze that randomness. Need to confirm the safetensors actually contains the projection matrix (likely `projection_model.start_number_conditioner.embedder.weight` etc.) and whether the diffusers `ProjectionModel` exposes them under different names. **Action:** dump the safetensors index and grep for "embedder" / "fourier".
 2. **`final_cross_attn_ix` for Open 1.0.** The config does not set it explicitly; default is `-1` (cross-attn in every block). Need to confirm at weight-load by checking whether `transformer_blocks.{i}.attn2.*` exists for all 24 blocks.
 3. **QK-LayerNorm in Open Small** — the paper says "we add QK-LayerNorm" but doesn't specify whether it's per-head RMSNorm or LayerNorm, and whether on Q only or both Q and K. The diffusers `StableAudioDiTModel` for Open 1.0 likely doesn't have these params; for Open Small we may need separate `q_norm` / `k_norm` modules. **Action:** inspect Open Small's safetensors key list once weights are downloaded.
-4. **Stable Audio 2.0 / 2.5 architecture.** No open release. The closed 2.0 uses CLAP text encoder per the config, and was extended to ~190 s outputs. 2.5 details are not public; Stability's marketing implies faster generation and "complex" outputs — likely rectified flow + larger DiT, no public confirmation. **For SharpInference, plan only for the open variants.**
+4. **Stable Audio 2.0 / 2.5 architecture.** No open release. The closed 2.0 uses CLAP text encoder per the config, and was extended to ~190 s outputs. 2.5 details are not public; Stability's marketing implies faster generation and "complex" outputs — likely rectified flow + larger DiT, no public confirmation. **For HartsyInference, plan only for the open variants.**
 5. **Chunk-decode crossfade strategy.** Paper says 16-latent overlap on each side is sufficient. Exact crossfade window (linear? Hann?) is not specified — diffusers' AutoencoderOobleck does not implement chunking. **Action:** mirror stable-audio-tools' `decode_audio` helper.
 6. **Mean/logvar split — order in concat.** stable-audio-tools' `VAEBottleneck` does `mean, logvar = enc.chunk(2, dim=1)` (mean first, logvar second). Confirm safetensors layout uses the same ordering when saving.
 7. **Inpainting checkpoint.** `diffusion_cond_inpaint` model_type exists in the codebase but no public Stable Audio Open inpaint weights have been released. Skip implementing the inpaint path until weights surface.
 
 ---
 
-## Implementation Notes for SharpInference
+## Implementation Notes for HartsyInference
 
 ### Package placement
-- New package: **`SharpInference.Audio.StableAudio`** under `src/SharpInference.Audio.StableAudio/`. Depends on `SharpInference.Core`, `SharpInference.Diffusion` (for T5 + scheduler infrastructure + DiT block primitives), `SharpInference.Audio.Vocoders` (the future home of iSTFTNet / Kokoro / ACE-Step VAEs — share the snake activation and weight-norm Conv1d primitives there).
+- New package: **`HartsyInference.Audio.StableAudio`** under `src/HartsyInference.Audio.StableAudio/`. Depends on `HartsyInference.Core`, `HartsyInference.Diffusion` (for T5 + scheduler infrastructure + DiT block primitives), `HartsyInference.Audio.Vocoders` (the future home of iSTFTNet / Kokoro / ACE-Step VAEs — share the snake activation and weight-norm Conv1d primitives there).
 
 ### Component-by-component implementation plan
 
 **1. T5-base encoder — reuse.**
-The existing `SharpInference.Diffusion` T5 encoder (used for Flux, SD3, etc.) supports `t5-base` already. Wire the SAO tokenizer to the same SentencePiece path (`spiece.model`). Verify `last_hidden_state` (not penultimate) is returned. Max length should default to 128 to match training.
+The existing `HartsyInference.Diffusion` T5 encoder (used for Flux, SD3, etc.) supports `t5-base` already. Wire the SAO tokenizer to the same SentencePiece path (`spiece.model`). Verify `last_hidden_state` (not penultimate) is returned. Max length should default to 128 to match training.
 
 **2. Oobleck VAE — new code, but share primitives with iSTFTNet / Kokoro / ACE-Step.**
 
-Required new primitives (under `SharpInference.Audio.Layers/`):
+Required new primitives (under `HartsyInference.Audio.Layers/`):
 - `WeightNormConv1D` — Conv1D where `weight = g * v / ||v||`; at load time can be fused to a single Conv1D weight (`fused_weight = g * v / ||v||_per_outchannel`). Recommend **fusing at load** so the forward path is plain Conv1D.
 - `WeightNormConvTranspose1D` — same idea on transposed conv.
 - `Snake1D` — per-channel learnable `alpha`, formula `x + sin(alpha*x)^2 / (alpha + 1e-9)`. Already needed by ACE-Step too. Make this a CUDA kernel (PTX) — it's elementwise, trivial.
@@ -651,26 +651,26 @@ Required new primitives (under `SharpInference.Audio.Layers/`):
 
 **3. DiT — reuse Flux/SD3 blocks heavily, but build a 1D variant.**
 
-The DiT is structurally **a 1D version of SD3's MM-DiT minus the dual-stream image/text branching** — single stream over latent tokens with cross-attention to a separate text+timing token bank, plus adaLN with 6-vector chunking. Reusable from `SharpInference.Diffusion`:
+The DiT is structurally **a 1D version of SD3's MM-DiT minus the dual-stream image/text branching** — single stream over latent tokens with cross-attention to a separate text+timing token bank, plus adaLN with 6-vector chunking. Reusable from `HartsyInference.Diffusion`:
 - **AdaLN modulation** (6-chunk variant from SD3) — direct reuse.
 - **RoPE** — reuse Flux's `RotaryEmbedding`, configure for 1D over 1024 positions, applied to first `head_dim//2 = 32` channels per head.
 - **SwiGLU FFN** — reuse SD3's `GatedFeedForward` (gate+up+down with SiLU gating, `mult=4`).
 - **bias-less LayerNorm** — reuse the SD3 norm.
 
-Build new (under `SharpInference.Audio.StableAudio.Models/`):
+Build new (under `HartsyInference.Audio.StableAudio.Models/`):
 - `FourierFeatures1D` — random-projection sinusoidal embedding; load the projection matrix from safetensors. **Make it CUDA kernel** — single matmul + sin + cos.
 - `TimestepEmbed` — `FourierFeatures1D(1, 256) → Linear(256, 1536) → SiLU → Linear(1536, 1536)`.
 - `NumberConditioner` — clamps to [0,512], normalizes, calls a `FourierFeatures1D(1, 768)` then optional linear; outputs `(B, 1, 768)`.
 - `StableAudioDiTBlock` — composes the reused AdaLN + self-attn (with optional QK-LN for Open Small) + cross-attn-with-12-KV-heads + FFN. **The 12-KV-head cross-attention is the only structurally new attention pattern**; either repeat-interleave KV heads at projection time (2× KV memory waste) or write a small CUDA kernel that broadcasts.
 - `StableAudioDiT` — stem `Conv1D(64, 1536, k=1)` (effectively a Linear over channels), 24 (or 16) blocks, head `Conv1D(1536, 64, k=1)`. Plus the "prepend global token" trick from diffusers if loading diffusers-format weights, or pure-adaLN if loading stable-audio-tools-format weights.
 
-**4. Sampler — extend `SharpInference.Diffusion.Schedulers`.**
+**4. Sampler — extend `HartsyInference.Diffusion.Schedulers`.**
 
-- **dpmpp-3m-sde** (for Open 1.0) — port from k_diffusion. Order-3 multistep DPM-Solver++ with SDE noise injection. Needs `polyexponential` sigma schedule `(sigma_min=0.3, sigma_max=500, rho=7, steps=100)`. This sampler is NOT yet in `SharpInference.Diffusion`. Reuse the existing EDM preconditioning helpers. Cross-link `docs/Research/DIFFUSION_SCHEDULERS.md`.
+- **dpmpp-3m-sde** (for Open 1.0) — port from k_diffusion. Order-3 multistep DPM-Solver++ with SDE noise injection. Needs `polyexponential` sigma schedule `(sigma_min=0.3, sigma_max=500, rho=7, steps=100)`. This sampler is NOT yet in `HartsyInference.Diffusion`. Reuse the existing EDM preconditioning helpers. Cross-link `docs/Research/DIFFUSION_SCHEDULERS.md`.
 - **pingpong** (for Open Small) — trivial: denoise to `x_0_hat`, renoise with linear schedule. New code, but tiny (~20 lines).
 
 **5. WAV writer.**
-Reuse whatever `SharpInference.Audio.Vocoders` already has (Kokoro / iSTFTNet need it). Standard 16-bit PCM WAV, sample_rate=44100, channels=2, little-endian. **No** float WAV mode by default (writers like Audacity expect int16 for compatibility).
+Reuse whatever `HartsyInference.Audio.Vocoders` already has (Kokoro / iSTFTNet need it). Standard 16-bit PCM WAV, sample_rate=44100, channels=2, little-endian. **No** float WAV mode by default (writers like Audacity expect int16 for compatibility).
 
 ### Loader strategy
 

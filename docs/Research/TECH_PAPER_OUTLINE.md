@@ -1,6 +1,6 @@
 # Technical Paper Outline — A Pure-C# CUDA Backend for Diffusion Inference
 
-> **Working title**: *SharpInference: Hand-Tuned PTX Kernels for Diffusion Models in Managed C# without C++ Wrappers*
+> **Working title**: *HartsyInference: Hand-Tuned PTX Kernels for Diffusion Models in Managed C# without C++ Wrappers*
 > **Target venue**: MLSys (primary), EuroSys (secondary), SC (tertiary). All three accept full systems papers with rigorous experimental methodology; MLSys is the closest topical fit. Submission deadline check before pinning a venue (typically MLSys is February–March, EuroSys is October).
 > **Length**: 12 pages (MLSys) including figures, excluding references. Conference style: ACM `acmart` or USENIX `usetex`.
 
@@ -14,7 +14,7 @@ The paper's thesis: **a measurement-driven optimization process targeting six sp
 
 Placeholder structure — fill in with measured numbers when B5 closes:
 
-> Diffusion model inference on GPUs is dominated by Python frameworks (PyTorch, diffusers, ComfyUI) that deliver excellent performance but impose heavy runtime dependencies (Python interpreter, native CUDA wheels totalling > 5 GB, virtualenv complexity). Native C++ alternatives (e.g. stable-diffusion.cpp) trade dependencies for development cost. This work presents *SharpInference*, a managed-C# implementation that targets NVIDIA GPUs entirely through PTX kernels loaded via the CUDA Driver API — no native shared libraries beyond the system driver. We show that, with **N hand-written PTX kernels**, **kernel fusion at six block-level patterns**, **a tiled FlashAttention-2 implementation**, and **CUDA Graph capture of the per-step kernel sequence**, the C# backend reaches **R%** of PyTorch+diffusers throughput on **M models** across **K GPU generations** (Ampere, Ada, Hopper), with end-to-end SDXL 1024² generation in **T s/step** on a consumer RTX 3060 (vs **T_pt s/step** for PyTorch). We characterize the contribution of each optimization individually using **N=5 trial Welch's t-tests**, releasing all kernels, benchmarks, and result CSVs as open artifacts.
+> Diffusion model inference on GPUs is dominated by Python frameworks (PyTorch, diffusers, ComfyUI) that deliver excellent performance but impose heavy runtime dependencies (Python interpreter, native CUDA wheels totalling > 5 GB, virtualenv complexity). Native C++ alternatives (e.g. stable-diffusion.cpp) trade dependencies for development cost. This work presents *HartsyInference*, a managed-C# implementation that targets NVIDIA GPUs entirely through PTX kernels loaded via the CUDA Driver API — no native shared libraries beyond the system driver. We show that, with **N hand-written PTX kernels**, **kernel fusion at six block-level patterns**, **a tiled FlashAttention-2 implementation**, and **CUDA Graph capture of the per-step kernel sequence**, the C# backend reaches **R%** of PyTorch+diffusers throughput on **M models** across **K GPU generations** (Ampere, Ada, Hopper), with end-to-end SDXL 1024² generation in **T s/step** on a consumer RTX 3060 (vs **T_pt s/step** for PyTorch). We characterize the contribution of each optimization individually using **N=5 trial Welch's t-tests**, releasing all kernels, benchmarks, and result CSVs as open artifacts.
 
 (All bold values are populated from B5 results.)
 
@@ -39,7 +39,7 @@ Placeholder structure — fill in with measured numbers when B5 closes:
 
 ### 1.3 Non-Goals
 
-- Multi-GPU scaling (the SharpInference workloads are single-GPU latency-bound).
+- Multi-GPU scaling (the HartsyInference workloads are single-GPU latency-bound).
 - Training or fine-tuning (inference only).
 - Beating CUDA C++ — we target *parity with optimized PyTorch + cuDNN + cuBLAS*, which itself sits on top of CUDA C++.
 - New attention algorithms — we implement FA2 as published, not a novel algorithm.
@@ -72,13 +72,13 @@ Placeholder structure — fill in with measured numbers when B5 closes:
 
 ### 2.4 Why Not Just Wrap libtorch
 
-- libtorch is 4 GB. SharpInference's PTX kernels are ~200 KB total.
+- libtorch is 4 GB. HartsyInference's PTX kernels are ~200 KB total.
 - libtorch's API is C++; managed-language bindings introduce marshalling per call.
 - Pinning the libtorch version locks deployments to a specific CUDA toolkit; our PTX kernels are JIT'd per device.
 
 ---
 
-## 3. The SharpInference Architecture
+## 3. The HartsyInference Architecture
 
 ### 3.1 Layered Backend Design
 
@@ -204,7 +204,7 @@ Headline figure: per-shape latency comparison, our PTX vs PyTorch (with and with
 
 ### 6.2 End-to-End Generation
 
-Headline figure: per-step time across (model × device × backend) tuples. SharpInference vs PyTorch+diffusers vs ComfyUI. Bar chart with error bars.
+Headline figure: per-step time across (model × device × backend) tuples. HartsyInference vs PyTorch+diffusers vs ComfyUI. Bar chart with error bars.
 
 ### 6.3 Speedup Decomposition
 
@@ -295,7 +295,7 @@ Single paragraph summary of what was achieved, with the headline number. Future 
 
 ## 10. Reproducibility Statement
 
-- All code: `https://github.com/kalebbroo/SharpInference` at tag `phase-b-complete`
+- All code: `https://github.com/kalebbroo/HartsyInference` at tag `phase-b-complete`
 - All raw data: `benchmarks/results/run_*/` directories, signed and SHA-256-hashed
 - All scripts: `benchmarks/run_benchmarks.sh`, `benchmarks/python-baseline/run_all.sh`, `benchmarks/analyze.py`
 - Pinned dependencies in `benchmarks/python-baseline/requirements.txt`

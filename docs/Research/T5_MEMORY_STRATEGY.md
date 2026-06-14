@@ -112,7 +112,7 @@ CPU cost: ~5 ms/MB on a modern CPU. For T5-XXL (9.4 GB BF16) this is ~50 seconds
 
 ### Pattern C: Q8_0 GGUF (FUTURE — needs GGUF K-quant reader)
 
-GGUF Q8_0 reader is not yet implemented in `SharpInference.ModelHandler`. When it lands:
+GGUF Q8_0 reader is not yet implemented in `HartsyInference.ModelHandler`. When it lands:
 - Load T5 weights via `GgufLoader.Load(path)` instead of `SafeTensorsLoader`
 - Each block-32 group dequantizes to F16/F32 on-demand at GEMM time
 - Slightly better quality than FP8 (block-wise scale + tighter range), same VRAM footprint
@@ -170,7 +170,7 @@ T5's prompt embeddings drive **spatial layout** in MMDiT pipelines through cross
 
 VAE decoders are small (84–335 MB) and quality-critical: they map a `[B, C, H, W]` latent through ~8× upsampling Conv2D blocks. FP8 GroupNorm in particular produces visible posterization on smooth gradients (skies, skin tones).
 
-Pipelines should **assert** the VAE dtype at construction. If a `QualityProfile` is wired through, reject any preset that places VAE below FP16 with a `SharpInferenceException`. See [`QualityProfile.cs`](../../src/SharpInference.Diffusion/Quality/QualityProfile.cs).
+Pipelines should **assert** the VAE dtype at construction. If a `QualityProfile` is wired through, reject any preset that places VAE below FP16 with a `HartsyInferenceException`. See [`QualityProfile.cs`](../../src/HartsyInference.Diffusion/Quality/QualityProfile.cs).
 
 ---
 

@@ -2,7 +2,7 @@
 
 CUDA hides nearly all of memory management behind `cuMemAlloc` / `cuMemFree` (or `cuMemAllocAsync` on a stream). Vulkan does not. The application is responsible for: (a) discovering memory types and heaps, (b) selecting the right type for each use case, (c) sub-allocating from large `VkDeviceMemory` blocks (because the spec only guarantees 4096 simultaneous allocations), (d) handling host-visible vs device-local correctly, (e) flushing/invalidating non-coherent ranges, (f) tracking buffer lifetimes through the synchronization graph so we never free memory still referenced by an in-flight command buffer, and (g) recycling descriptor sets and command buffers across frames.
 
-This document specifies how SharpInference's `VulkanMemoryAllocator`, `VulkanDescriptorManager`, `VulkanCommandPool`, and `VulkanGpuTransferHelper` are structured so the inference pipeline matches CUDA semantically: lazy-sync activation cache, GPU weight preloading, OOM retry, stream-ordered free.
+This document specifies how HartsyInference's `VulkanMemoryAllocator`, `VulkanDescriptorManager`, `VulkanCommandPool`, and `VulkanGpuTransferHelper` are structured so the inference pipeline matches CUDA semantically: lazy-sync activation cache, GPU weight preloading, OOM retry, stream-ordered free.
 
 The reference implementation patterns here are inspired by AMD's [Vulkan Memory Allocator (VMA)](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) (the de-facto standard C++ allocator) but rewritten for the C# memory model and tailored to **inference workloads** (large weights uploaded once, activations recycled per step, no images/textures/sparse memory).
 
@@ -596,7 +596,7 @@ Surface to `BackendCapabilities` so model code can probe (e.g., FP16 path on/off
 
 ## Testing Strategy
 
-### Unit tests (`SharpInference.Vulkan.Tests`)
+### Unit tests (`HartsyInference.Vulkan.Tests`)
 
 | Test | What it validates |
 |---|---|

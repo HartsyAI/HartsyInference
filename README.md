@@ -1,8 +1,8 @@
-# SharpInference
+# HartsyInference
 
 **A pure C#/.NET 10 AI inference engine for image generation, speech-to-text, text-to-speech, vision, and video — with zero Python dependencies.**
 
-SharpInference loads `.safetensors` and `.gguf` models directly, runs inference on CUDA GPUs (or CPU via SIMD), and exposes an OpenAI-compatible REST API. No Python. No C++ wrappers. No external processes. Just NuGet packages.
+HartsyInference loads `.safetensors` and `.gguf` models directly, runs inference on CUDA GPUs (or CPU via SIMD), and exposes an OpenAI-compatible REST API. No Python. No C++ wrappers. No external processes. Just NuGet packages.
 
 Designed to pair with [dotLLM](https://github.com/your-org/dotLLM) for LLM inference, forming a complete AI platform in pure .NET.
 
@@ -34,15 +34,15 @@ Designed to pair with [dotLLM](https://github.com/your-org/dotLLM) for LLM infer
 ### Image Generation
 
 ```xml
-<PackageReference Include="SharpInference.Diffusion" />
-<PackageReference Include="SharpInference.Cuda" />
-<PackageReference Include="SharpInference.ModelHandler" />
+<PackageReference Include="HartsyInference.Diffusion" />
+<PackageReference Include="HartsyInference.Cuda" />
+<PackageReference Include="HartsyInference.ModelHandler" />
 ```
 
 ```csharp
-using SharpInference.Diffusion;
-using SharpInference.ModelHandler;
-using SharpInference.Cuda;
+using HartsyInference.Diffusion;
+using HartsyInference.ModelHandler;
+using HartsyInference.Cuda;
 
 // Load a Stable Diffusion model
 var model = await ModelRegistry.LoadAsync("stabilityai/stable-diffusion-xl-base-1.0");
@@ -69,12 +69,12 @@ await foreach (var progress in pipeline.GenerateAsync(request))
 ### Speech-to-Text
 
 ```xml
-<PackageReference Include="SharpInference.Audio" />
-<PackageReference Include="SharpInference.Cpu" />
+<PackageReference Include="HartsyInference.Audio" />
+<PackageReference Include="HartsyInference.Cpu" />
 ```
 
 ```csharp
-using SharpInference.Audio;
+using HartsyInference.Audio;
 
 var whisper = await WhisperPipeline.LoadAsync("openai/whisper-base");
 var transcript = await whisper.TranscribeAsync("audio.wav");
@@ -84,20 +84,20 @@ Console.WriteLine(transcript.Text);
 ### OpenAI-Compatible Server
 
 ```xml
-<PackageReference Include="SharpInference.Server" />
-<PackageReference Include="SharpInference.Cuda" />
+<PackageReference Include="HartsyInference.Server" />
+<PackageReference Include="HartsyInference.Cuda" />
 ```
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddSharpInference(options =>
+builder.Services.AddHartsyInference(options =>
 {
-    options.ModelsDirectory = "~/.sharpinference/models";
+    options.ModelsDirectory = "~/.hartsyinference/models";
     options.DefaultImageModel = "stabilityai/sdxl-base-1.0";
 });
 
 var app = builder.Build();
-app.MapSharpInferenceEndpoints();
+app.MapHartsyInferenceEndpoints();
 app.Run();
 ```
 
@@ -115,17 +115,17 @@ response = client.images.generate(prompt="A cat in space", model="sdxl", size="1
 
 | Package | Description |
 |---|---|
-| `SharpInference.Core` | Tensor types, `IBackend`, schedulers, pipeline interfaces |
-| `SharpInference.ModelHandler` | Safetensors/GGUF loaders, model registry, HuggingFace download |
-| `SharpInference.Tokenizers` | CLIP, T5, Whisper tokenizers |
-| `SharpInference.Cpu` | CPU backend with AVX2/AVX-512/NEON SIMD kernels |
-| `SharpInference.Cuda` | CUDA backend with PTX kernels and cuBLAS |
-| `SharpInference.Diffusion` | SD1.5, SDXL, Flux, SD3 pipelines, VAE, LoRA, ControlNet |
-| `SharpInference.Audio` | Whisper STT, Kokoro TTS, voice conversion |
-| `SharpInference.Vision` | CLIP embeddings, YOLO detection, SAM segmentation |
-| `SharpInference.Video` | LTX-Video, Wan video generation |
-| `SharpInference.Server` | OpenAI-compatible REST API with SSE streaming |
-| `SharpInference.SwarmUI` | In-process SwarmUI backend extension |
+| `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline interfaces |
+| `HartsyInference.ModelHandler` | Safetensors/GGUF loaders, model registry, HuggingFace download |
+| `HartsyInference.Tokenizers` | CLIP, T5, Whisper tokenizers |
+| `HartsyInference.Cpu` | CPU backend with AVX2/AVX-512/NEON SIMD kernels |
+| `HartsyInference.Cuda` | CUDA backend with PTX kernels and cuBLAS |
+| `HartsyInference.Diffusion` | SD1.5, SDXL, Flux, SD3 pipelines, VAE, LoRA, ControlNet |
+| `HartsyInference.Audio` | Whisper STT, Kokoro TTS, voice conversion |
+| `HartsyInference.Vision` | CLIP embeddings, YOLO detection, SAM segmentation |
+| `HartsyInference.Video` | LTX-Video, Wan video generation |
+| `HartsyInference.Server` | OpenAI-compatible REST API with SSE streaming |
+| `HartsyInference.SwarmUI` | In-process SwarmUI backend extension |
 
 See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for dependency graph and minimum install examples.
 
@@ -248,7 +248,7 @@ AI coding agent instruction files for each role — see [CLAUDE.md](CLAUDE.md) f
   - **Linux:** `sudo apt install mesa-vulkan-drivers vulkan-tools` (AMD/Intel; NVIDIA blob ships its own ICD)
   - **Windows:** the AMD / Intel / NVIDIA driver ships Vulkan; no extra install
 - **GPU with FP16 compute** (`shaderFloat16`). Most discrete GPUs from 2019+ qualify.
-- Validation layers (optional, for debugging) — install the [LunarG Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and set `SHARPINFERENCE_VK_VALIDATION=1`.
+- Validation layers (optional, for debugging) — install the [LunarG Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and set `HARTSYINFERENCE_VK_VALIDATION=1`.
 - See [PHASE_3_5_VULKAN_BACKEND.md](docs/Checklists/PHASE_3_5_VULKAN_BACKEND.md) for current model support and acceptance status.
 
 ---
@@ -256,7 +256,7 @@ AI coding agent instruction files for each role — see [CLAUDE.md](CLAUDE.md) f
 ## Project Structure
 
 ```
-SharpInference/
+HartsyInference/
 ├── CLAUDE.md                  AI agent dispatcher
 ├── README.md                  ← You are here
 ├── src/                       Source code (one folder per NuGet package)

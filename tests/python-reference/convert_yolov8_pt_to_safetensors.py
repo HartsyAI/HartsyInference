@@ -1,5 +1,5 @@
 """
-Converts Ultralytics YOLOv8 .pt checkpoints to safetensors for SharpInference.Vision.
+Converts Ultralytics YOLOv8 .pt checkpoints to safetensors for HartsyInference.Vision.
 
 Folding: BatchNorm running stats + affine are folded into the preceding Conv2D weight
 and bias so inference becomes a plain Conv2D op (no BN kernel needed). The math:
@@ -7,7 +7,7 @@ and bias so inference becomes a plain Conv2D op (no BN kernel needed). The math:
     w_folded[c_out, ...] = w_conv[c_out, ...] * (gamma[c_out] / sqrt(var[c_out] + eps))
     b_folded[c_out]      = beta[c_out] - mean[c_out] * (gamma[c_out] / sqrt(var[c_out] + eps))
 
-Key renaming: nothing — Ultralytics' state dict keys already match SharpInference's
+Key renaming: nothing — Ultralytics' state dict keys already match HartsyInference's
 expected naming (`model.{layer}.cv1.conv.weight` etc.) once BN params are dropped.
 The detect head's three projection convs (`model.22.cv2.{0,1,2}.2.weight`) keep their
 plain `Conv2d` form (no BN to fold).
@@ -143,7 +143,7 @@ def convert(pt_path: str, out_path: str) -> None:
         print(f"    ... ({len(detect_keys) - 8} more)")
 
     print(f"Saving to {out_path}")
-    save_file(folded, out_path, metadata={"format": "sharpinference-yolo-folded-v1"})
+    save_file(folded, out_path, metadata={"format": "hartsyinference-yolo-folded-v1"})
     out_size = Path(out_path).stat().st_size
     print(f"  wrote {out_size / 1024 / 1024:.1f} MB")
 

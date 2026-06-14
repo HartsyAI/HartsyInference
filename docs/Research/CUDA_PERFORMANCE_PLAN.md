@@ -1,7 +1,7 @@
 # CUDA Performance Plan — Master Document
 
 > **Phase**: B (GPU performance optimization)
-> **Goal**: SharpInference C# CUDA backend within 1.0–1.5× of PyTorch + diffusers per kernel; end-to-end SDXL 1024² @ 20 steps in ≤ 5 s/step on RTX 3060.
+> **Goal**: HartsyInference C# CUDA backend within 1.0–1.5× of PyTorch + diffusers per kernel; end-to-end SDXL 1024² @ 20 steps in ≤ 5 s/step on RTX 3060.
 > **Output**: a peer-reviewable systems paper (target: MLSys / EuroSys / SC) describing the methodology, kernels, and measurement framework.
 > **Constraint**: every claim is grounded in a CSV under [`benchmarks/results/`](../../benchmarks/results/). No marketing numbers.
 
@@ -114,7 +114,7 @@ Deliverables (one-shot, no code):
 
 Build the harness *before* changing kernels. The cardinal rule: measure first.
 
-1. [`benchmarks/SharpInference.GpuBenchmarks/`](../../benchmarks/SharpInference.GpuBenchmarks/) — BenchmarkDotNet GPU project
+1. [`benchmarks/HartsyInference.GpuBenchmarks/`](../../benchmarks/HartsyInference.GpuBenchmarks/) — BenchmarkDotNet GPU project
    - `MatMulGpuBenchmarks` — F16/F32/BF16 cuBLAS at GEMM shapes from each model
    - `Conv2DGpuBenchmarks` — VAE + UNet conv shapes
    - `GroupNormGpuBenchmarks`, `LayerNormGpuBenchmarks`, `RmsNormGpuBenchmarks`
@@ -212,8 +212,8 @@ These are the falsifiable claims the experiments are designed to confirm or reje
 
 ## Out of Scope
 
-- **CPU backend optimization** — `SharpInference.Cpu` perf is tracked in `SIMD_INTRINSICS_DOTNET.md`; not part of this phase.
-- **Vulkan backend** — `SharpInference.Vulkan` is in `PHASE_3_5_VULKAN_BACKEND.md`; not Phase B.
+- **CPU backend optimization** — `HartsyInference.Cpu` perf is tracked in `SIMD_INTRINSICS_DOTNET.md`; not part of this phase.
+- **Vulkan backend** — `HartsyInference.Vulkan` is in `PHASE_3_5_VULKAN_BACKEND.md`; not Phase B.
 - **Per-block weight streaming for huge models** — covered in `PHASE_4_MODEL_BREADTH.md` follow-ups (Flux.2 Dev, Hunyuan Image 2.1, Qwen-Image at 12 GB).
 - **Pure inference compilation** (e.g. via TVM, Triton) — orthogonal track; would compete with the PTX kernels we're authoring.
 - **Audio / vision modalities** — Phase 5 / 6.

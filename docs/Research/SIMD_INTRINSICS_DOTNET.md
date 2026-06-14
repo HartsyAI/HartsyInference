@@ -7,7 +7,7 @@
 
 .NET 10 provides a mature, layered SIMD programming model through `System.Runtime.Intrinsics`. The three tiers are: (1) hardware-specific intrinsics (`Avx2`, `Avx512F`, `AdvSimd`), (2) cross-platform fixed-width vector types (`Vector128<T>`, `Vector256<T>`, `Vector512<T>`), and (3) high-level tensor operations (`TensorPrimitives`). The JIT compiler treats `IsSupported` checks as compile-time constants, eliminating dead branches so that a single method can contain paths for AVX-512, AVX2, NEON, and scalar fallback with zero runtime overhead from the dispatch logic itself.
 
-For SharpInference CPU kernels, the recommended strategy is:
+For HartsyInference CPU kernels, the recommended strategy is:
 - Use `TensorPrimitives` for standard element-wise and reduction operations (Add, Multiply, Dot, SoftMax, Sigmoid, Exp, etc.) -- it already dispatches to the best available SIMD width internally.
 - Write hand-rolled intrinsics only for fused multi-operation kernels (e.g., fused dequantize+GEMV, custom attention, GroupNorm) where TensorPrimitives cannot express the combined operation.
 - Always provide an AVX2 fallback for every AVX-512 path. Use `Vector512.IsHardwareAccelerated` (not `Avx512F.IsSupported`) to gate 512-bit paths, because .NET deliberately reports `IsHardwareAccelerated = false` on older CPUs (Skylake-X, Cascade Lake) where AVX-512 causes severe downclocking.
@@ -178,7 +178,7 @@ These two properties serve different purposes:
 
 **Critical distinction for AVX-512:** On Skylake-X and Cascade Lake, `Avx512F.IsSupported` may return `true` but `Vector512.IsHardwareAccelerated` returns `false`. The runtime deliberately suppresses 512-bit acceleration on these CPUs because AVX-512 causes significant frequency downclocking (see Section 6). On Ice Lake and newer, both return `true`.
 
-**Recommendation for SharpInference:** Gate all 512-bit paths on `Vector512.IsHardwareAccelerated` unless you have benchmarked the specific kernel on older hardware and determined the 512-bit path is still faster despite downclocking.
+**Recommendation for HartsyInference:** Gate all 512-bit paths on `Vector512.IsHardwareAccelerated` unless you have benchmarked the specific kernel on older hardware and determined the 512-bit path is still faster despite downclocking.
 
 Sources:
 - [Hardware Intrinsics in .NET 8 -- .NET Blog](https://devblogs.microsoft.com/dotnet/dotnet-8-hardware-intrinsics/)
@@ -189,7 +189,7 @@ Sources:
 
 **AI/ML-relevant methods (all available as both `float` and generic `<T>`):**
 
-| Method | Description | SharpInference Use |
+| Method | Description | HartsyInference Use |
 |---|---|---|
 | `Add` | Element-wise addition | Residual connections |
 | `Subtract` | Element-wise subtraction | General |
@@ -310,7 +310,7 @@ finally
 }
 ```
 
-**Alignment constants for SharpInference:**
+**Alignment constants for HartsyInference:**
 
 | Vector Width | Register Size | Recommended Alignment |
 |---|---|---|
@@ -353,7 +353,7 @@ AVX-512 instructions can cause CPU frequency reduction on certain Intel microarc
 | Alder Lake (client) | AVX-512 fused off by Intel; not available |
 | AMD Zen 4 | None -- no frequency penalty |
 
-**Implications for SharpInference:**
+**Implications for HartsyInference:**
 - .NET's `Vector512.IsHardwareAccelerated` already handles the worst cases by returning `false` on Skylake-X/Cascade Lake.
 - On Ice Lake server, there is still a modest (~5%) frequency penalty. Since inference workloads are sustained SIMD, the wider registers outweigh the penalty.
 - On Sapphire Rapids and AMD Zen 4, there is no downclocking concern at all.
@@ -445,7 +445,7 @@ Vector512<float> (64 bytes):
 
 ### Memory Layout for Tensor Buffers
 
-For SharpInference CPU kernels, tensor data should be stored in contiguous `float[]` or `NativeMemory`-allocated buffers. The layout is row-major (C-contiguous), matching the convention used by ONNX, PyTorch, and GGUF dequantized outputs.
+For HartsyInference CPU kernels, tensor data should be stored in contiguous `float[]` or `NativeMemory`-allocated buffers. The layout is row-major (C-contiguous), matching the convention used by ONNX, PyTorch, and GGUF dequantized outputs.
 
 For SIMD processing, the innermost dimension should ideally be a multiple of 16 (Vector512 width) to avoid scalar tail processing. Padding the innermost dimension to a multiple of 16 is acceptable if documented.
 
@@ -534,7 +534,7 @@ public sealed unsafe class AlignedBuffer<T> : IDisposable where T : unmanaged
 
 ```csharp
 /// <summary>
-/// Template for a SharpInference CPU kernel with full SIMD dispatch.
+/// Template for a HartsyInference CPU kernel with full SIMD dispatch.
 /// </summary>
 public static class KernelTemplate
 {
@@ -620,14 +620,14 @@ public static class KernelTemplate
 ## Open Questions
 
 - [ ] Exact performance of TensorPrimitives.SoftMax vs hand-rolled SoftMax with fused max-subtraction -- needs benchmarking on target hardware.
-- [ ] Whether `Avx10v1` should be a dispatch target separate from `Avx512F` in SharpInference, or if `Vector256/512.IsHardwareAccelerated` covers all cases.
+- [ ] Whether `Avx10v1` should be a dispatch target separate from `Avx512F` in HartsyInference, or if `Vector256/512.IsHardwareAccelerated` covers all cases.
 - [ ] Impact of .NET 10 tiered compilation on SIMD kernel performance -- do Tier 0 (quick-JIT) compilations of SIMD code cause performance cliffs that matter for inference warmup?
 
 ---
 
 ## Implementation Notes
 
-### For SharpInference.Cpu Kernel Authors
+### For HartsyInference.Cpu Kernel Authors
 
 1. **Always benchmark.** SIMD performance is highly dependent on the specific CPU, data size, and access pattern. Never assume wider is faster.
 
@@ -640,9 +640,9 @@ public static class KernelTemplate
    - Overlapping last vector (process `data[len - VectorSize .. len]`, may re-process some elements; safe for idempotent operations like ReLU)
    - Masked operations (AVX-512 only, via `Avx512F` mask registers)
 
-5. **Thread safety:** SIMD operations are inherently thread-safe (no shared state in registers). Parallelize over independent rows/channels using `Parallel.For` or the SharpInference thread pool.
+5. **Thread safety:** SIMD operations are inherently thread-safe (no shared state in registers). Parallelize over independent rows/channels using `Parallel.For` or the HartsyInference thread pool.
 
-6. **NuGet package:** `TensorPrimitives` is in `System.Numerics.Tensors` -- it ships in-box with .NET 8+ and is available as a NuGet package for older frameworks. For SharpInference targeting .NET 10, no additional package reference is needed.
+6. **NuGet package:** `TensorPrimitives` is in `System.Numerics.Tensors` -- it ships in-box with .NET 8+ and is available as a NuGet package for older frameworks. For HartsyInference targeting .NET 10, no additional package reference is needed.
 
 7. **Testing:** Every kernel must be tested with:
    - Length = 0 (empty span)

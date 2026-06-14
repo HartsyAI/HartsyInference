@@ -30,10 +30,10 @@ jobs:
             10.0.x
 
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore HartsyInference.sln
 
       - name: Build (Release)
-        run: dotnet build --configuration Release --no-restore
+        run: dotnet build HartsyInference.sln --configuration Release --no-restore
 
       - name: Run unit tests (no GPU, no checkpoints required)
         env:
@@ -42,6 +42,6 @@ jobs:
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: |
-          dotnet test --configuration Release --no-build \
+          dotnet test HartsyInference.sln --configuration Release --no-build \
             --filter "FullyQualifiedName!~Generation&FullyQualifiedName!~Img2Img&FullyQualifiedName!~Diff&FullyQualifiedName!~Ssim&FullyQualifiedName!~Vulkan&FullyQualifiedName!~Smoke" \
             --logger "console;verbosity=normal"

@@ -1,7 +1,7 @@
 # Phase 1 — Foundation (Core + ModelHandler + Cpu)
 
 > **Goal:** Tensor types work, models load from disk, basic CPU math operational.
-> **Packages:** SharpInference.Core, SharpInference.ModelHandler, SharpInference.Cpu
+> **Packages:** HartsyInference.Core, HartsyInference.ModelHandler, HartsyInference.Cpu
 
 ---
 
@@ -18,19 +18,19 @@
 
 - [x] Solution, Directory.Build.props, Directory.Packages.props, all 6 .csproj files (3 src + 3 test), CI pipeline, .gitignore, LICENSE
 
-## 4. Implementation — SharpInference.Core — ALL COMPLETE
+## 4. Implementation — HartsyInference.Core — ALL COMPLETE
 
 - [x] `DType.cs` (81L), `TensorShape.cs` (194L), `NativeBuffer.cs`, `MmapHandle.cs`, `Tensor.cs` (207L), `TensorView.cs`, `TensorPool.cs`, `DeviceKind.cs`
 - [x] `IBackend.cs` (103L), `BackendCapabilities.cs`, pipeline interfaces, `IScheduler.cs`, `IModel.cs`, `ModelConfig.cs`
-- [x] `Logs.cs`, exceptions (`SharpInferenceException`, `OutOfVramException`, `UnsupportedModelException`)
+- [x] `Logs.cs`, exceptions (`HartsyInferenceException`, `OutOfVramException`, `UnsupportedModelException`)
 
-## 5. Implementation — SharpInference.ModelHandler — ALL COMPLETE
+## 5. Implementation — HartsyInference.ModelHandler — ALL COMPLETE
 
 - [x] `SafeTensorsLoader.cs` (169L), `SafeTensorsWriter.cs`, `SafeTensorsShardLoader.cs`
 - [x] `GgufLoader.cs` (300L), `GgufDequantizer.cs` (Q4_0, Q8_0, Q4_K_M), `GgufMetadata.cs`
 - [x] `ModelRegistry.cs`, `ModelCacheStore.cs`, `ModelInfo.cs`, `HuggingFaceClient.cs`, `HuggingFaceModelIndex.cs`
 
-## 6. Implementation — SharpInference.Cpu — ALL COMPLETE
+## 6. Implementation — HartsyInference.Cpu — ALL COMPLETE
 
 - [x] `SimdDispatch.cs` (62L), `CpuBackend.cs` (202L)
 - [x] `MatMulKernels.cs` (131L), `Conv2DKernels.cs` (204L), `NormKernels.cs` (327L), `AttentionKernels.cs` (244L)

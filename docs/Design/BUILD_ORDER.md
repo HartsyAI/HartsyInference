@@ -166,13 +166,13 @@ Phase 10: Interactive / World Models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft)
 
 | Deliverable | Package | Description |
 |---|---|---|
-| `SharpInference.Interactive` (new package) | Interactive | New package for action-conditioned, real-time, frame-by-frame world models. Depends on Video + Diffusion + ModelHandler. |
+| `HartsyInference.Interactive` (new package) | Interactive | New package for action-conditioned, real-time, frame-by-frame world models. Depends on Video + Diffusion + ModelHandler. |
 | `IInteractiveSession` streaming loop | Interactive | Real-time event pump: (read action → encode → step → decode → present) at 25-40 FPS |
 | Action vocabs: keyboard, mouse, gamepad, camera-pose | Interactive | Per-model `IActionEncoder` implementations; reuse the Phase 9 abstraction |
 | Matrix-Game 2.0 pipeline (Skywork, MIT, 1.8B) | Interactive | First interactive world model. 540p @ 25 FPS, SkyReels-V2/Wan lineage. Apache/MIT-style permissive. |
 | Matrix-Game 3.0 pipeline (Skywork, Apache-2.0, 5B + MoE 28B) | Interactive | Flagship. 720p @ 40 FPS, memory-augmented DiT finetuned from Wan2.2-TI2V-5B (shares VAE with Lance video path). |
 | Oasis-500m pipeline (Decart+Etched, MIT, ~500M) | Interactive | Tiny Minecraft world model. Pedagogical / CI smoke-test target. Likely uses a discrete video tokenizer (VQ family). |
-| Hunyuan-GameCraft pipeline (Tencent, **restricted license**) | Interactive | Optional / gated on license acceptance — Tencent Hunyuan Community License excludes EU/UK/SK + 100M MAU cap. SharpInference does NOT bundle weights; user opts in. |
+| Hunyuan-GameCraft pipeline (Tencent, **restricted license**) | Interactive | Optional / gated on license acceptance — Tencent Hunyuan Community License excludes EU/UK/SK + 100M MAU cap. HartsyInference does NOT bundle weights; user opts in. |
 | Memory-augmented DiT cross-attention | Interactive | Matrix-Game 3.0 specific (extra cross-attn stream over stored past-frame latents); designed for reuse if future models add similar memory paths |
 | History-mask channel | Interactive | Binary mask channel (1=history, 0=predict) injected into latent input — GameCraft style |
 | Deferred-foundation backlog | Interactive (docs) | Explicit list of foundational pieces (AR KV-cache over interleaved video/action tokens, long-context spacetime RoPE, license-acceptance plumbing) deferred until a model that needs them is selected |

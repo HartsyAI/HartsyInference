@@ -78,40 +78,40 @@ Monolithic NuGet is wrong because:
 
 **NVIDIA image gen:**
 ```xml
-<PackageReference Include="SharpInference.Diffusion" />
-<PackageReference Include="SharpInference.Cuda" />
-<PackageReference Include="SharpInference.ModelHandler" />
+<PackageReference Include="HartsyInference.Diffusion" />
+<PackageReference Include="HartsyInference.Cuda" />
+<PackageReference Include="HartsyInference.ModelHandler" />
 ```
 
 **AMD image gen:**
 ```xml
-<PackageReference Include="SharpInference.Diffusion" />
-<PackageReference Include="SharpInference.Vulkan" />
-<PackageReference Include="SharpInference.ModelHandler" />
+<PackageReference Include="HartsyInference.Diffusion" />
+<PackageReference Include="HartsyInference.Vulkan" />
+<PackageReference Include="HartsyInference.ModelHandler" />
 ```
 
 **SwarmUI backend:**
 ```xml
-<PackageReference Include="SharpInference.SwarmUI" />
+<PackageReference Include="HartsyInference.SwarmUI" />
 ```
 
 **Audio-only (CPU):**
 ```xml
-<PackageReference Include="SharpInference.Audio" />
-<PackageReference Include="SharpInference.Cpu" />
+<PackageReference Include="HartsyInference.Audio" />
+<PackageReference Include="HartsyInference.Cpu" />
 ```
 
 **Max compatibility:**
 ```xml
-<PackageReference Include="SharpInference.Diffusion" />
-<PackageReference Include="SharpInference.Cuda" />
-<PackageReference Include="SharpInference.Vulkan" />
-<PackageReference Include="SharpInference.ModelHandler" />
+<PackageReference Include="HartsyInference.Diffusion" />
+<PackageReference Include="HartsyInference.Cuda" />
+<PackageReference Include="HartsyInference.Vulkan" />
+<PackageReference Include="HartsyInference.ModelHandler" />
 ```
 
 **Interactive world model (game-engine integration):**
 ```xml
-<PackageReference Include="SharpInference.Interactive" />
-<PackageReference Include="SharpInference.Cuda" />
+<PackageReference Include="HartsyInference.Interactive" />
+<PackageReference Include="HartsyInference.Cuda" />
 <!-- Brings Video + Diffusion + ModelHandler transitively -->
 ```

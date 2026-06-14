@@ -1,6 +1,6 @@
 # YuE — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: SharpInference.Audio (YuE pipeline)
+> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (YuE pipeline)
 
 ## Summary
 
@@ -302,11 +302,11 @@ Notes:
 The full lyrics-to-song pipeline as it should be implemented in C#:
 
 ```csharp
-// SharpInference.Audio.YuE — pseudocode (pure C#)
+// HartsyInference.Audio.YuE — pseudocode (pure C#)
 
 public sealed class YuEPipeline : IDisposable
 {
-    private readonly LlamaModel _stage1;          // SharpInference.Models.LlamaModel (dotLLM-style)
+    private readonly LlamaModel _stage1;          // HartsyInference.Models.LlamaModel (dotLLM-style)
     private readonly LlamaModel _stage2;
     private readonly XCodecDecoder _codec;        // 8-codebook → 16 kHz waveform
     private readonly XCodecEncoder? _codecEnc;    // only if ICL with audio prompt
@@ -465,20 +465,20 @@ A full **5-minute song** with the reference pipeline therefore takes ~25–35 mi
 
 **When to pick ACE-Step.** You want fast iteration (try 50 variations of a song in the time YuE generates one), are willing to accept less precise lyrical adherence, and care more about overall vibe / production than fine structural control. ACE-Step is the right default for casual / interactive use, especially on consumer hardware.
 
-In SharpInference, both pipelines should coexist in `SharpInference.Audio.Music` with a shared `IMusicGenerator` interface — they share the codec-decode → vocoder back-end but differ in the LM core.
+In HartsyInference, both pipelines should coexist in `HartsyInference.Audio.Music` with a shared `IMusicGenerator` interface — they share the codec-decode → vocoder back-end but differ in the LM core.
 
-### 11. C# Implementation Notes (SharpInference)
+### 11. C# Implementation Notes (HartsyInference)
 
 This section is the implementer's bridge.
 
 **Reuse dotLLM patterns aggressively.** Both S1 and S2 are stock LLaMA-2 decoder architectures with vocab/RoPE-scaling tweaks. dotLLM already implements LLaMA (see [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md)). The right plan is:
 
-1. **`SharpInference.Models.Llama`** — already needed for the dotLLM-shaped LLM modality. Build it once, parameterize for: hidden size, layers, heads, KV heads (GQA), FFN dim, RoPE base + scaling factor, vocab size.
-2. **`SharpInference.Audio.YuE.YuETokenizer`** — wraps the LLaMA BPE tokenizer plus the 1024 audio-cb0 IDs and ~64 control tokens. The audio IDs are pure integer offsets — no embedding fancy footwork; LLaMA's input-embedding table just has to be sized to the expanded vocab.
-3. **`SharpInference.Audio.YuE.YuES1Stage`** — owns the S1 model instance, the section parser, the per-section loop, the cb0-extraction post-processor.
-4. **`SharpInference.Audio.YuE.YuES2Stage`** — owns the S2 model instance, the cb0-prefix packing, batched chunk inference.
-5. **`SharpInference.Audio.XCodec.XCodecDecoder`** — 8-codebook RVQ table lookup (vector add) followed by a transposed-conv decoder. Cross-ref the GAN-vocoder code in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) — the architecture is closely related (DAC/EnCodec style). PTX kernel needs: transposed conv1d, leaky-ReLU/Snake activation, weight-normed conv1d.
-6. **`SharpInference.Audio.YuE.VocosUpsampler`** — optional ConvNeXt + ISTFT. Reuses STFT/ISTFT from `SharpInference.Audio.Dsp` (already needed for Whisper/Kokoro per `PHASE_5_AUDIO.md`).
+1. **`HartsyInference.Models.Llama`** — already needed for the dotLLM-shaped LLM modality. Build it once, parameterize for: hidden size, layers, heads, KV heads (GQA), FFN dim, RoPE base + scaling factor, vocab size.
+2. **`HartsyInference.Audio.YuE.YuETokenizer`** — wraps the LLaMA BPE tokenizer plus the 1024 audio-cb0 IDs and ~64 control tokens. The audio IDs are pure integer offsets — no embedding fancy footwork; LLaMA's input-embedding table just has to be sized to the expanded vocab.
+3. **`HartsyInference.Audio.YuE.YuES1Stage`** — owns the S1 model instance, the section parser, the per-section loop, the cb0-extraction post-processor.
+4. **`HartsyInference.Audio.YuE.YuES2Stage`** — owns the S2 model instance, the cb0-prefix packing, batched chunk inference.
+5. **`HartsyInference.Audio.XCodec.XCodecDecoder`** — 8-codebook RVQ table lookup (vector add) followed by a transposed-conv decoder. Cross-ref the GAN-vocoder code in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md) — the architecture is closely related (DAC/EnCodec style). PTX kernel needs: transposed conv1d, leaky-ReLU/Snake activation, weight-normed conv1d.
+6. **`HartsyInference.Audio.YuE.VocosUpsampler`** — optional ConvNeXt + ISTFT. Reuses STFT/ISTFT from `HartsyInference.Audio.Dsp` (already needed for Whisper/Kokoro per `PHASE_5_AUDIO.md`).
 
 **Key implementation gotchas:**
 
@@ -488,8 +488,8 @@ This section is the implementer's bridge.
 * **CFG (only for ICL variants).** Standard CFG: run a "conditional" forward and an "unconditional" forward (genre/lyric tokens replaced with the null prompt), combine: `logits = logits_uncond + w × (logits_cond - logits_uncond)` where `w ≈ 1.5`. This doubles per-step compute; only enable when targeting maximum quality. Cross-ref [CFG_AND_GUIDANCE.md](CFG_AND_GUIDANCE.md).
 * **Repetition penalty is mandatory.** Without `repetition_penalty=1.1`, S1 will fall into looping instrumental phrases — every implementer who has skipped it reports this. Implement it via the standard HF formula: divide logits of tokens that appear in the prior context by `1.1`.
 * **Codec decode is per-track.** Decode the vocal stream and the accompaniment stream *separately* through X-Codec, then mix. Do not try to decode "interleaved as one waveform" — that's not what X-Codec expects.
-* **GGUF / quantization path.** The community has already shipped GGUF S1 builds; once `SharpInference.GGUF` supports LLaMA-2 7B (which it must for dotLLM), YuE quantized inference is free. See [GGUF_BACKEND.md](GGUF_BACKEND.md) and [QUANTIZATION_DIFFUSION.md](QUANTIZATION_DIFFUSION.md) (note: diffusion is a different quantization story, but the GGUF format/loader is shared).
-* **No Python deps.** The reference pipeline pulls in `omegaconf`, `descript-audio-codec`, `transformers`. None survive — we re-implement the codec decoder from the X-Codec architecture spec and load weights from the bf16 safetensors directly (`SharpInference.Safetensors`).
+* **GGUF / quantization path.** The community has already shipped GGUF S1 builds; once `HartsyInference.GGUF` supports LLaMA-2 7B (which it must for dotLLM), YuE quantized inference is free. See [GGUF_BACKEND.md](GGUF_BACKEND.md) and [QUANTIZATION_DIFFUSION.md](QUANTIZATION_DIFFUSION.md) (note: diffusion is a different quantization story, but the GGUF format/loader is shared).
+* **No Python deps.** The reference pipeline pulls in `omegaconf`, `descript-audio-codec`, `transformers`. None survive — we re-implement the codec decoder from the X-Codec architecture spec and load weights from the bf16 safetensors directly (`HartsyInference.Safetensors`).
 
 **Validation plan** (in line with the project rule "validate against references"):
 
