@@ -1,25 +1,5 @@
 <Project>
 
-  <!--
-    TODO: REMOVE THIS FILE WHEN SHARPINFERENCE IS PUBLISHED AS A NUGET PACKAGE.
-
-    This target is a *development convenience* for the SwarmUI-HartsyInference extension.
-    The extension's csproj references HartsyInference DLLs via HintPath into this repo's
-    bin/Release/net8.0/ folders. When you rebuild a HartsyInference subproject, the
-    extension's runtime copies under SwarmUI/src/bin/extensions/... don't auto-update —
-    they were copied at extension build time and become stale.
-
-    Until HartsyInference ships as a NuGet package (where dependency updates flow through
-    normal `dotnet restore` + extension rebuild), this target mirrors freshly-built DLLs
-    into the extension's runtime folder so the next Swarm launch picks them up without
-    manual `cp` steps.
-
-    Once NuGet packaging lands:
-      1. The SwarmUI-HartsyInference.csproj will use PackageReference instead of HintPath.
-      2. NuGet's restore + the extension rebuild will handle dependency propagation.
-      3. Delete this file. The whole post-build copy mechanism becomes dead weight.
-  -->
-
   <!-- Pack the public-facing README into every packable project. PackageReadmeFile (set in
        Directory.Build.props) points at README.nuget.md — the clean, nuget.org-facing readme,
        distinct from the repo-root README.md which is the GitHub/contributor doc. The file must
@@ -28,45 +8,5 @@
   <ItemGroup Condition=" '$(IsPackable)' != 'false' ">
     <None Include="$(MSBuildThisFileDirectory)README.nuget.md" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
-
-  <PropertyGroup>
-    <!-- Override on command line if SwarmUI lives elsewhere. -->
-    <SwarmUIRoot Condition=" '$(SwarmUIRoot)' == '' ">$(MSBuildThisFileDirectory)..\SwarmUI</SwarmUIRoot>
-    <SwarmExtensionBin>$(SwarmUIRoot)\src\bin\extensions\SwarmExtensionSwarmUI-HartsyInference</SwarmExtensionBin>
-  </PropertyGroup>
-
-  <!-- Whitelist: the HartsyInference projects that the SwarmUI extension references via
-       HintPath. Anything else (Cli, Server, Interactive, tests, samples) is skipped.
-       NOTE: copy ONLY to the extension's own folder, never to Swarm's live_release/ — DLLs in
-       the host bin get loaded by the DEFAULT AssemblyLoadContext, which shadows the extension's
-       copies and triggers "ships X.dll but host already has it loaded" startup warnings
-       (plus silent version skew when the two copies differ). Extensions resolve their private
-       deps from their own folder via Swarm's SwarmExtensionLoadContext. -->
-  <ItemGroup>
-    <SwarmConsumedAssembly Include="HartsyInference.Core" />
-    <SwarmConsumedAssembly Include="HartsyInference.ModelHandler" />
-    <SwarmConsumedAssembly Include="HartsyInference.Tokenizers" />
-    <SwarmConsumedAssembly Include="HartsyInference.Diffusion" />
-    <SwarmConsumedAssembly Include="HartsyInference.Cpu" />
-    <SwarmConsumedAssembly Include="HartsyInference.Cuda" />
-    <SwarmConsumedAssembly Include="HartsyInference.Vulkan" />
-    <SwarmConsumedAssembly Include="HartsyInference.Video" />
-    <SwarmConsumedAssembly Include="HartsyInference.Audio" />
-    <SwarmConsumedAssembly Include="HartsyInference.Vision" />
-  </ItemGroup>
-
-  <Target Name="CopyToSwarmRuntimeFolders"
-          AfterTargets="Build"
-          Condition=" '$(Configuration)' == 'Release'
-                      AND '$(TargetFramework)' == 'net8.0'
-                      AND Exists('$(SwarmExtensionBin)')
-                      AND '@(SwarmConsumedAssembly->WithMetadataValue(`Identity`, `$(AssemblyName)`))' != '' ">
-    <Message Importance="high" Text="[SwarmAutoCopy] $(AssemblyName).dll → SwarmExtension/" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SwarmExtensionBin)" SkipUnchangedFiles="false" />
-    <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb"
-          DestinationFolder="$(SwarmExtensionBin)"
-          SkipUnchangedFiles="false"
-          Condition=" Exists('$(TargetDir)$(AssemblyName).pdb') " />
-  </Target>
 
 </Project>
