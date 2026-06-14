@@ -10,12 +10,12 @@ namespace SharpInference.ModelHandler.CheckpointConverters;
 /// <c>rotary_freqs</c> buffers if a repack included them (SharpInference recomputes RoPE at load).</summary>
 public sealed class OasisCheckpointConverter
 {
-    private static readonly string[] StripPrefixes = ["model.", "module."];
+    private static readonly string[] _stripPrefixes = ["model.", "module."];
 
     /// <summary>Pure key mapping: strips wrapper prefixes; <c>null</c> drops recomputed RoPE buffers.</summary>
     public static string? MapKey(string key)
     {
-        foreach (string prefix in StripPrefixes)
+        foreach (string prefix in _stripPrefixes)
             if (key.StartsWith(prefix, StringComparison.Ordinal))
             {
                 key = key[prefix.Length..];

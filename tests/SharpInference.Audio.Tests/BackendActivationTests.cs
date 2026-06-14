@@ -13,14 +13,14 @@ namespace SharpInference.Audio.Tests;
 /// snake vs snake-beta) and per-channel alpha/beta broadcast.</para></summary>
 public sealed unsafe class BackendActivationTests
 {
-    private static readonly float[] ProbePoints = [-8f, -3f, -1f, -0.5f, 0f, 0.5f, 1f, 3f, 8f];
+    private static readonly float[] _probePoints = [-8f, -3f, -1f, -0.5f, 0f, 0.5f, 1f, 3f, 8f];
 
     [Fact]
     public void Sigmoid_MatchesReferenceAtProbePoints()
     {
         using CpuBackend backend = new();
-        int n = ProbePoints.Length;
-        Tensor input = MakeInput(ProbePoints);
+        int n = _probePoints.Length;
+        Tensor input = MakeInput(_probePoints);
         Tensor output = new(input.Shape, DType.F32);
         try
         {
@@ -28,7 +28,7 @@ public sealed unsafe class BackendActivationTests
             float* op = (float*)output.DataPointer;
             for (int i = 0; i < n; i++)
             {
-                float x = ProbePoints[i];
+                float x = _probePoints[i];
                 float expected = x >= 0f ? 1f / (1f + MathF.Exp(-x)) : MathF.Exp(x) / (1f + MathF.Exp(x));
                 Assert.Equal(expected, op[i], precision: 5);
             }
@@ -72,8 +72,8 @@ public sealed unsafe class BackendActivationTests
     public void Tanh_MatchesReferenceAtProbePoints()
     {
         using CpuBackend backend = new();
-        int n = ProbePoints.Length;
-        Tensor input = MakeInput(ProbePoints);
+        int n = _probePoints.Length;
+        Tensor input = MakeInput(_probePoints);
         Tensor output = new(input.Shape, DType.F32);
         try
         {
@@ -81,7 +81,7 @@ public sealed unsafe class BackendActivationTests
             float* op = (float*)output.DataPointer;
             for (int i = 0; i < n; i++)
             {
-                float expected = MathF.Tanh(ProbePoints[i]);
+                float expected = MathF.Tanh(_probePoints[i]);
                 Assert.Equal(expected, op[i], precision: 5);
             }
         }

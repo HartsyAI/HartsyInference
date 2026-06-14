@@ -12,9 +12,9 @@ public class GroupNormGpuBenchmarks
 
     [ParamsSource(nameof(ShapeSource))]
     public int ShapeIndex { get; set; }
-    public IEnumerable<int> ShapeSource => Enumerable.Range(0, Shapes.Length);
+    public IEnumerable<int> ShapeSource => Enumerable.Range(0, _shapes.Length);
 
-    private static readonly (int N, int C, int H, int W, int Groups)[] Shapes =
+    private static readonly (int N, int C, int H, int W, int Groups)[] _shapes =
     [
         (1, 320, 128, 128, 32),
         (1, 640, 64, 64, 32),
@@ -27,7 +27,7 @@ public class GroupNormGpuBenchmarks
     public void Setup()
     {
         _fixture = new BenchmarkFixture();
-        (int N, int C, int H, int W, int _) = Shapes[ShapeIndex];
+        (int N, int C, int H, int W, int _) = _shapes[ShapeIndex];
         _input = BenchmarkFixture.AllocateF32(new TensorShape(N, C, H, W));
         _weight = BenchmarkFixture.AllocateF32(new TensorShape(C));
         _bias = BenchmarkFixture.AllocateF32(new TensorShape(C));
@@ -44,7 +44,7 @@ public class GroupNormGpuBenchmarks
     [Benchmark]
     public void GroupNorm()
     {
-        int groups = Shapes[ShapeIndex].Groups;
+        int groups = _shapes[ShapeIndex].Groups;
         _fixture!.Backend.GroupNorm(_output!, _input!, _weight!, _bias!, groups, 1e-6f);
         _fixture.Sync();
     }
@@ -54,7 +54,7 @@ public class GroupNormGpuBenchmarks
     [Benchmark]
     public void GroupNormSilu_Fused()
     {
-        int groups = Shapes[ShapeIndex].Groups;
+        int groups = _shapes[ShapeIndex].Groups;
         _fixture!.Backend.GroupNormSilu(_output!, _input!, _weight!, _bias!, groups, 1e-6f);
         _fixture.Sync();
     }
@@ -69,10 +69,10 @@ public class LayerNormGpuBenchmarks
 
     [ParamsSource(nameof(ShapeSource))]
     public int ShapeIndex { get; set; }
-    public IEnumerable<int> ShapeSource => Enumerable.Range(0, Shapes.Length);
+    public IEnumerable<int> ShapeSource => Enumerable.Range(0, _shapes.Length);
 
     /// <summary>(B, S, H) — DiT block sizes.</summary>
-    private static readonly (int B, int S, int H)[] Shapes =
+    private static readonly (int B, int S, int H)[] _shapes =
     [
         (1, 4096, 1280),  // SDXL spatial
         (1, 1024, 1536),  // SD3.5 Medium
@@ -85,7 +85,7 @@ public class LayerNormGpuBenchmarks
     public void Setup()
     {
         _fixture = new BenchmarkFixture();
-        (int B, int S, int H) = Shapes[ShapeIndex];
+        (int B, int S, int H) = _shapes[ShapeIndex];
         _input = BenchmarkFixture.AllocateF32(new TensorShape(B, S, H));
         _weight = BenchmarkFixture.AllocateF32(new TensorShape(H));
         _bias = BenchmarkFixture.AllocateF32(new TensorShape(H));
@@ -116,9 +116,9 @@ public class RmsNormGpuBenchmarks
 
     [ParamsSource(nameof(ShapeSource))]
     public int ShapeIndex { get; set; }
-    public IEnumerable<int> ShapeSource => Enumerable.Range(0, Shapes.Length);
+    public IEnumerable<int> ShapeSource => Enumerable.Range(0, _shapes.Length);
 
-    private static readonly (int B, int S, int H)[] Shapes =
+    private static readonly (int B, int S, int H)[] _shapes =
     [
         (1, 1024, 1536),  // SD3.5 Medium
         (1, 1024, 3072),  // Flux / Hunyuan / OmniGen2
@@ -131,7 +131,7 @@ public class RmsNormGpuBenchmarks
     public void Setup()
     {
         _fixture = new BenchmarkFixture();
-        (int B, int S, int H) = Shapes[ShapeIndex];
+        (int B, int S, int H) = _shapes[ShapeIndex];
         _input = BenchmarkFixture.AllocateF32(new TensorShape(B, S, H));
         _weight = BenchmarkFixture.AllocateF32(new TensorShape(H));
         _output = new Tensor(new TensorShape(B, S, H), DType.F32);

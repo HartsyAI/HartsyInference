@@ -26,11 +26,11 @@ public sealed class ClipTokenizer : IDisposable
     /// <summary>OpenAI CLIP pre-tokenization regex (mirrors `huggingface/transformers` <c>CLIPTokenizer</c>):
     /// matches the special tokens, English contractions, letter sequences, single digits, and runs of
     /// non-whitespace symbols. Letter sequences use <c>\p{L}</c> so unicode letters are kept together.</summary>
-    private static readonly Regex ClipPreTokenRegex = new(
+    private static readonly Regex _clipPreTokenRegex = new(
         @"<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly IReadOnlyDictionary<string, int> ClipSpecialTokens =
+    private static readonly IReadOnlyDictionary<string, int> _clipSpecialTokens =
         new Dictionary<string, int>
         {
             ["<|startoftext|>"] = StartOfTextId,
@@ -71,9 +71,9 @@ public sealed class ClipTokenizer : IDisposable
         return BpeTokenizer.Create(
             vocabStream,
             mergesStream,
-            preTokenizer: new RegexPreTokenizer(ClipPreTokenRegex, ClipSpecialTokens),
+            preTokenizer: new RegexPreTokenizer(_clipPreTokenRegex, _clipSpecialTokens),
             normalizer: LowercaseNormalizer.Instance,
-            specialTokens: ClipSpecialTokens,
+            specialTokens: _clipSpecialTokens,
             unknownToken: null,
             continuingSubwordPrefix: null,
             endOfWordSuffix: EndOfWordSuffix,

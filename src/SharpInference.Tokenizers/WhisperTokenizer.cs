@@ -45,7 +45,7 @@ public sealed class WhisperTokenizer : IDisposable
     // GPT-2 pre-tokenization regex (verbatim from HuggingFace whisper tokenizer.json
     // "pre_tokenizer" section). Splits on contractions, letter runs, digit runs,
     // non-whitespace symbol runs, and whitespace.
-    private static readonly Regex Gpt2PreTokenRegex = new(
+    private static readonly Regex _gpt2PreTokenRegex = new(
         @"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
         RegexOptions.Compiled);
 
@@ -54,10 +54,10 @@ public sealed class WhisperTokenizer : IDisposable
     /// to themselves; the remaining "non-printable" bytes are remapped above U+0100.
     /// This table is identical across GPT-2, RoBERTa, Whisper, and every model that
     /// uses byte-level BPE.</summary>
-    private static readonly char[] ByteToUnicode = BuildByteToUnicode();
+    private static readonly char[] _byteToUnicode = BuildByteToUnicode();
 
-    /// <summary>Reverse of <see cref="ByteToUnicode"/>: unicode codepoint → byte.</summary>
-    private static readonly Dictionary<char, byte> UnicodeToByte = BuildUnicodeToByte();
+    /// <summary>Reverse of <see cref="_byteToUnicode"/>: unicode codepoint → byte.</summary>
+    private static readonly Dictionary<char, byte> _unicodeToByte = BuildUnicodeToByte();
 
     /// <summary>Languages supported by Whisper, in the same order as the language
     /// token IDs (50259 + index). Used by <see cref="LanguageToTokenId"/>.</summary>
@@ -93,7 +93,7 @@ public sealed class WhisperTokenizer : IDisposable
         _bpe = BpeTokenizer.Create(
             vocabStream,
             mergesStream,
-            preTokenizer: new RegexPreTokenizer(Gpt2PreTokenRegex, _specialTokens),
+            preTokenizer: new RegexPreTokenizer(_gpt2PreTokenRegex, _specialTokens),
             normalizer: null,
             specialTokens: _specialTokens,
             unknownToken: null,
@@ -204,7 +204,7 @@ public sealed class WhisperTokenizer : IDisposable
         int n = 0;
         foreach (char c in raw)
         {
-            if (UnicodeToByte.TryGetValue(c, out byte b))
+            if (_unicodeToByte.TryGetValue(c, out byte b))
                 bytes[n++] = b;
             // Unknown codepoint: skip silently. Should not happen for valid BPE output.
         }

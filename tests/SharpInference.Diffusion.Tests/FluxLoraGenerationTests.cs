@@ -27,10 +27,10 @@ public sealed class FluxLoraGenerationTests
     private static string T5SpieceModelPath => TestPaths.Tokenizers.T5Spiece;
     private static string OutputDir => TestPaths.OutputDir;
 
-    private static readonly string? FluxAiToolkitLoraPath =
+    private static readonly string? _fluxAiToolkitLoraPath =
         Environment.GetEnvironmentVariable("FLUX_AITOOLKIT_LORA_PATH");
 
-    private static readonly string? FluxKohyaLoraPath =
+    private static readonly string? _fluxKohyaLoraPath =
         Environment.GetEnvironmentVariable("FLUX_KOHYA_LORA_PATH");
 
     private static string FluxDiffusersLoraPath => TestPaths.Lora.YearbookFluxSchnell;
@@ -43,14 +43,14 @@ public sealed class FluxLoraGenerationTests
     [Fact]
     public void AiToolkit_Flux_WithLora_GenerateImage_Cpu_Small()
     {
-        RunFluxLoraTest(FluxAiToolkitLoraPath, "FLUX_AITOOLKIT_LORA_PATH", LoraFormat.AiToolkitFlux, "aitk_lora");
+        RunFluxLoraTest(_fluxAiToolkitLoraPath, "FLUX_AITOOLKIT_LORA_PATH", LoraFormat.AiToolkitFlux, "aitk_lora");
     }
 
     /// <summary>GPU end-to-end visual diff (Vulkan backend). Generates the same prompt+seed twice — once baseline (no LoRA), once with the yearbook LoRA merged into the FP8 transformer weights via LoraStack. Saves both BMPs side-by-side so the LoRA effect can be visually confirmed. Skips when FLUX_DIFFUSERS_LORA_PATH (or FLUX_AITOOLKIT_LORA_PATH) is not set.</summary>
     [Fact]
     public void Yearbook_Flux_BaselineVsLora_GenerateImage_Gpu()
     {
-        string? loraPath = FluxDiffusersLoraPath ?? FluxAiToolkitLoraPath;
+        string? loraPath = FluxDiffusersLoraPath ?? _fluxAiToolkitLoraPath;
         if (string.IsNullOrEmpty(loraPath) || !File.Exists(loraPath))
         {
             _output.WriteLine("SKIPPED: set FLUX_DIFFUSERS_LORA_PATH (or FLUX_AITOOLKIT_LORA_PATH).");
@@ -220,7 +220,7 @@ public sealed class FluxLoraGenerationTests
     [Fact]
     public void Flux_Lora_KeyCoverage_AgainstRealCheckpoint()
     {
-        string? loraPath = FluxDiffusersLoraPath ?? FluxAiToolkitLoraPath ?? FluxKohyaLoraPath;
+        string? loraPath = FluxDiffusersLoraPath ?? _fluxAiToolkitLoraPath ?? _fluxKohyaLoraPath;
         if (string.IsNullOrEmpty(loraPath) || !File.Exists(loraPath))
         {
             _output.WriteLine("SKIPPED: set FLUX_DIFFUSERS_LORA_PATH (or FLUX_AITOOLKIT_LORA_PATH / FLUX_KOHYA_LORA_PATH).");
@@ -286,7 +286,7 @@ public sealed class FluxLoraGenerationTests
     [Fact]
     public void Kohya_Flux_WithLora_GenerateImage_Cpu_Small()
     {
-        RunFluxLoraTest(FluxKohyaLoraPath, "FLUX_KOHYA_LORA_PATH", LoraFormat.KohyaFlux, "kohya_lora");
+        RunFluxLoraTest(_fluxKohyaLoraPath, "FLUX_KOHYA_LORA_PATH", LoraFormat.KohyaFlux, "kohya_lora");
     }
 
     /// <summary>HuggingFace PEFT diffusers Flux LoRA test. Skips when FLUX_DIFFUSERS_LORA_PATH is not set. Validates the F5 format path (transformer.*.lora_A.weight identity-style mapping).</summary>

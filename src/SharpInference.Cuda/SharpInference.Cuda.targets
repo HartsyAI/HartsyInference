@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    Auto-imported by NuGet into any project that references the SharpInference.Cuda package,
+    directly or transitively (e.g. via the SharpInference meta-package). Copies the packed PTX
+    kernels into the consumer's build output under Ptx/, which is where CudaBackend resolves
+    them at runtime: Path.Combine(AppContext.BaseDirectory, "Ptx").
+
+    Without this, the package would restore and build fine but fail at runtime with
+    "PTX directory not found" — the classic native-sidecar packaging gap.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\ptx\*.ptx">
+      <Link>Ptx\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Pack>false</Pack>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+</Project>

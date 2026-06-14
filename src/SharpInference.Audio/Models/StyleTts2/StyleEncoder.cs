@@ -17,7 +17,7 @@ namespace SharpInference.Audio.Models.StyleTts2;
 public sealed unsafe class StyleEncoder : IDisposable
 {
     private const float LeakySlope = 0.2f;
-    private static readonly float InvSqrt2 = 1f / MathF.Sqrt(2f);
+    private static readonly float _invSqrt2 = 1f / MathF.Sqrt(2f);
     private readonly int _styleDim;
     private int _disposed;
 
@@ -162,7 +162,7 @@ public sealed unsafe class StyleEncoder : IDisposable
 internal sealed unsafe class ResBlk2D
 {
     private const float LeakySlope = 0.2f;
-    private static readonly float InvSqrt2 = 1f / MathF.Sqrt(2f);
+    private static readonly float _invSqrt2 = 1f / MathF.Sqrt(2f);
     private readonly int _inCh, _outCh;
     private readonly bool _learnedSc;
     private Tensor? _conv1W, _conv1B, _conv2W, _conv2B, _conv1x1W;
@@ -207,7 +207,7 @@ internal sealed unsafe class ResBlk2D
         float* rp = (float*)residual.DataPointer;
         float* sp = (float*)scd.DataPointer;
         long n = residual.ElementCount;
-        for (long i = 0; i < n; i++) rp[i] = (rp[i] + sp[i]) * InvSqrt2;
+        for (long i = 0; i < n; i++) rp[i] = (rp[i] + sp[i]) * _invSqrt2;
         scd.Dispose();
         return residual;
     }

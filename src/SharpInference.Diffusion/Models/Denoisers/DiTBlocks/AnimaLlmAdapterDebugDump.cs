@@ -8,11 +8,11 @@ namespace SharpInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// Python reference produced by <c>dump_anima_llm_adapter.py</c>. Mirrors <c>QwenImageVaeDebugDump</c>.</summary>
 internal static unsafe class AnimaLlmAdapterDebugDump
 {
-    private static readonly string? s_dumpDir = ResolveDir();
-    private static bool s_initialized;
-    private static readonly object s_lock = new();
+    private static readonly string? _dumpDir = ResolveDir();
+    private static bool _initialized;
+    private static readonly object _lock = new();
 
-    public static bool Enabled => s_dumpDir is not null;
+    public static bool Enabled => _dumpDir is not null;
 
     private static string? ResolveDir()
     {
@@ -22,23 +22,23 @@ internal static unsafe class AnimaLlmAdapterDebugDump
 
     private static void EnsureInit()
     {
-        if (s_initialized) return;
-        lock (s_lock)
+        if (_initialized) return;
+        lock (_lock)
         {
-            if (s_initialized) return;
-            if (s_dumpDir is not null)
-                Directory.CreateDirectory(Path.Combine(s_dumpDir, "layers"));
-            s_initialized = true;
+            if (_initialized) return;
+            if (_dumpDir is not null)
+                Directory.CreateDirectory(Path.Combine(_dumpDir, "layers"));
+            _initialized = true;
         }
     }
 
     /// <summary>Writes <paramref name="t"/>'s data as raw F32 little-endian to <c>{dumpDir}/layers/{safeName}.bin</c>.</summary>
     public static void Dump(string name, Tensor t)
     {
-        if (s_dumpDir is null) return;
+        if (_dumpDir is null) return;
         EnsureInit();
         string safe = name.Replace('.', '_').Replace('/', '_');
-        string path = Path.Combine(s_dumpDir, "layers", safe + ".bin");
+        string path = Path.Combine(_dumpDir, "layers", safe + ".bin");
         WriteRawF32(path, t);
     }
 

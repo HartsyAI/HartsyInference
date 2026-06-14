@@ -81,7 +81,7 @@ public sealed class ModelCacheStore
         try
         {
             string json = File.ReadAllText(_indexPath);
-            List<ModelInfo>? entries = JsonSerializer.Deserialize<List<ModelInfo>>(json, JsonOptions);
+            List<ModelInfo>? entries = JsonSerializer.Deserialize<List<ModelInfo>>(json, _jsonOptions);
             if (entries is not null)
             {
                 foreach (ModelInfo entry in entries)
@@ -98,7 +98,7 @@ public sealed class ModelCacheStore
     {
         try
         {
-            string json = JsonSerializer.Serialize(_index.Values.ToList(), JsonOptions);
+            string json = JsonSerializer.Serialize(_index.Values.ToList(), _jsonOptions);
             File.WriteAllText(_indexPath, json);
         }
         catch (Exception ex)
@@ -116,7 +116,7 @@ public sealed class ModelCacheStore
         return Path.Combine(home, ".sharpinference", "models");
     }
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,

@@ -24,7 +24,7 @@ public sealed class LtxVideoCheckpointConverter
     private const string TransformerPrefix = "model.diffusion_model.";
     private const string VaePrefix = "vae.";
 
-    private static readonly (string From, string To)[] TransformerRenames =
+    private static readonly (string From, string To)[] _transformerRenames =
     [
         ("patchify_proj", "proj_in"),
         ("adaln_single", "time_embed"),
@@ -34,7 +34,7 @@ public sealed class LtxVideoCheckpointConverter
 
     // Ordered — applied sequentially per key like the python script's replace chain; later sources never match
     // earlier outputs. Ported verbatim from diffusers convert_ltx_to_diffusers.py VAE_KEYS_RENAME_DICT.
-    private static readonly (string From, string To)[] VaeRenames =
+    private static readonly (string From, string To)[] _vaeRenames =
     [
         ("up_blocks.0", "mid_block"),
         ("up_blocks.1", "up_blocks.0"),
@@ -126,7 +126,7 @@ public sealed class LtxVideoCheckpointConverter
     {
         if (key.Contains("vae"))
             return (LtxBucket.Drop, null);
-        foreach ((string from, string to) in TransformerRenames)
+        foreach ((string from, string to) in _transformerRenames)
             key = key.Replace(from, to, StringComparison.Ordinal);
         return (LtxBucket.Transformer, key);
     }
@@ -134,7 +134,7 @@ public sealed class LtxVideoCheckpointConverter
     private static (LtxBucket, string?) MapVae(string key, bool originalNaming)
     {
         if (originalNaming)
-            foreach ((string from, string to) in VaeRenames)
+            foreach ((string from, string to) in _vaeRenames)
                 key = key.Replace(from, to, StringComparison.Ordinal);
         // Stats not renamed above (channel index, mean-of-stds) are metadata the decoder never reads.
         if (key.Contains("per_channel_statistics"))

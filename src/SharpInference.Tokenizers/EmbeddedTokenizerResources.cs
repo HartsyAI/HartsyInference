@@ -35,18 +35,18 @@ public static class EmbeddedTokenizerResources
     /// <summary>Llama-3.1 byte-level BPE merges. Pairs with <see cref="Llama3VocabName"/>.</summary>
     public const string Llama3MergesName = "SharpInference.Tokenizers.Resources.llama3_merges.txt";
 
-    private static readonly Assembly Asm = typeof(EmbeddedTokenizerResources).Assembly;
+    private static readonly Assembly _asm = typeof(EmbeddedTokenizerResources).Assembly;
 
     /// <summary>Opens the named embedded resource. Caller owns the returned stream.</summary>
     public static Stream Open(string logicalName)
     {
-        Stream? s = Asm.GetManifestResourceStream(logicalName);
+        Stream? s = _asm.GetManifestResourceStream(logicalName);
         if (s is null)
         {
             throw new InvalidOperationException(
                 $"Embedded tokenizer resource '{logicalName}' is missing from " +
-                $"{Asm.GetName().Name}. Available resources: " +
-                string.Join(", ", Asm.GetManifestResourceNames()));
+                $"{_asm.GetName().Name}. Available resources: " +
+                string.Join(", ", _asm.GetManifestResourceNames()));
         }
         return s;
     }
@@ -65,6 +65,6 @@ public static class EmbeddedTokenizerResources
     /// checkout without the asset files still compiles — callers that need Llama tokenization (HiDream)
     /// should check this and surface a clear "drop the assets in Resources/" message rather than NRE.</summary>
     public static bool HasLlama3Assets =>
-        Asm.GetManifestResourceStream(Llama3VocabName) is not null
-        && Asm.GetManifestResourceStream(Llama3MergesName) is not null;
+        _asm.GetManifestResourceStream(Llama3VocabName) is not null
+        && _asm.GetManifestResourceStream(Llama3MergesName) is not null;
 }

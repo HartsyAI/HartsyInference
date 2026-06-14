@@ -17,10 +17,10 @@ public class SdpaGpuBenchmarks
 
     [ParamsSource(nameof(ShapeSource))]
     public int ShapeIndex { get; set; }
-    public IEnumerable<int> ShapeSource => Enumerable.Range(0, Shapes.Length);
+    public IEnumerable<int> ShapeSource => Enumerable.Range(0, _shapes.Length);
 
     /// <summary>(B, H, Sq, Skv, D) — heads-leading layout used by our SDPA op.</summary>
-    private static readonly (int B, int H, int Sq, int Skv, int D)[] Shapes =
+    private static readonly (int B, int H, int Sq, int Skv, int D)[] _shapes =
     [
         // SDXL self-attention 32×32 (8 heads, head_dim=160 in some SDXL variants; using 80 for the
         // standard SDXL UNet)
@@ -45,7 +45,7 @@ public class SdpaGpuBenchmarks
     public void Setup()
     {
         _fixture = new BenchmarkFixture();
-        (int B, int H, int Sq, int Skv, int D) = Shapes[ShapeIndex];
+        (int B, int H, int Sq, int Skv, int D) = _shapes[ShapeIndex];
 
         _q = BenchmarkFixture.AllocateF32(new TensorShape(B, H, Sq, D), seed: 1);
         _k = BenchmarkFixture.AllocateF32(new TensorShape(B, H, Skv, D), seed: 2);
@@ -69,7 +69,7 @@ public class SdpaGpuBenchmarks
     [Benchmark]
     public void Sdpa_F32()
     {
-        int D = Shapes[ShapeIndex].D;
+        int D = _shapes[ShapeIndex].D;
         float scale = 1.0f / MathF.Sqrt(D);
         _fixture!.Backend.ScaledDotProductAttention(_outF32!, _q!, _k!, _v!, mask: null, scale);
         _fixture.Sync();
@@ -78,7 +78,7 @@ public class SdpaGpuBenchmarks
     [Benchmark]
     public void Sdpa_F16()
     {
-        int D = Shapes[ShapeIndex].D;
+        int D = _shapes[ShapeIndex].D;
         float scale = 1.0f / MathF.Sqrt(D);
         _fixture!.Backend.ScaledDotProductAttention(_outF16!, _qF16!, _kF16!, _vF16!, mask: null, scale);
         _fixture.Sync();

@@ -26,12 +26,12 @@ public sealed class OasisActionEncoder : IActionEncoder
     /// <summary>Expected payload size in bytes.</summary>
     public const int PayloadBytes = KeyCount + 2 * sizeof(float);
 
-    private static readonly ActionStreamSpec[] StreamSpecs =
+    private static readonly ActionStreamSpec[] _streamSpecs =
     [
         new("vpt", ActionStreamRole.TimestepAddon, ActionDim),
     ];
 
-    public IReadOnlyList<ActionStreamSpec> Streams => StreamSpecs;
+    public IReadOnlyList<ActionStreamSpec> Streams => _streamSpecs;
 
     /// <summary>Builds one 25-float action row directly (the convenient non-payload path for canned plans).
     /// <paramref name="keyStates"/> is the 23 binary keys in ACTION_KEYS order (camera slots excluded).</summary>

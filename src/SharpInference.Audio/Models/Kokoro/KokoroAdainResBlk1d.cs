@@ -41,7 +41,7 @@ internal sealed unsafe class KokoroAdainResBlk1d
     private readonly bool _learnedSc;
     private const int Kernel = 3;
     private const float LeakySlope = 0.2f;
-    private static readonly float InvSqrt2 = 1f / MathF.Sqrt(2f);
+    private static readonly float _invSqrt2 = 1f / MathF.Sqrt(2f);
 
     // AdaIN1d projections: fc.weight [2*dim, style_dim] + fc.bias [2*dim].
     private Tensor? _norm1FcW, _norm1FcB;
@@ -170,7 +170,7 @@ internal sealed unsafe class KokoroAdainResBlk1d
         float* rp = (float*)residual.DataPointer;
         float* sp = (float*)shortcut.DataPointer;
         long n = residual.ElementCount;
-        for (long i = 0; i < n; i++) op[i] = (rp[i] + sp[i]) * InvSqrt2;
+        for (long i = 0; i < n; i++) op[i] = (rp[i] + sp[i]) * _invSqrt2;
         residual.Dispose();
         shortcut.Dispose();
         return output;

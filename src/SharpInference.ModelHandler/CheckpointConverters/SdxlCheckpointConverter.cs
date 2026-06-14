@@ -31,15 +31,15 @@ public sealed class SdxlCheckpointConverter
     //   4,5: level 1 resnets + attention
     //   6: level 1 downsample
     //   7,8: level 2 resnets + attention
-    private static readonly int[] InputBlockToLevel = [0, 0, 0, 0, 1, 1, 1, 2, 2];
-    private static readonly int[] InputBlockToResnetIdx = [0, 0, 1, -1, 0, 1, -1, 0, 1];
-    private static readonly bool[] InputBlockIsDownsample = [false, false, false, true, false, false, true, false, false];
+    private static readonly int[] _inputBlockToLevel = [0, 0, 0, 0, 1, 1, 1, 2, 2];
+    private static readonly int[] _inputBlockToResnetIdx = [0, 0, 1, -1, 0, 1, -1, 0, 1];
+    private static readonly bool[] _inputBlockIsDownsample = [false, false, false, true, false, false, true, false, false];
 
     // Output blocks: 3 levels × 3 resnets = 9 total
-    private static readonly int[] OutputBlockToUpLevel = [0, 0, 0, 1, 1, 1, 2, 2, 2];
-    private static readonly int[] OutputBlockToResnetIdx = [0, 1, 2, 0, 1, 2, 0, 1, 2];
-    private static readonly bool[] OutputBlockHasUpsample = [false, false, true, false, false, true, false, false, false];
-    private static readonly bool[] OutputBlockHasAttention = [true, true, true, true, true, true, false, false, false];
+    private static readonly int[] _outputBlockToUpLevel = [0, 0, 0, 1, 1, 1, 2, 2, 2];
+    private static readonly int[] _outputBlockToResnetIdx = [0, 1, 2, 0, 1, 2, 0, 1, 2];
+    private static readonly bool[] _outputBlockHasUpsample = [false, false, true, false, false, true, false, false, false];
+    private static readonly bool[] _outputBlockHasAttention = [true, true, true, true, true, true, false, false, false];
 
     /// <summary>Converts a single-file SDXL checkpoint into separate per-component weight dictionaries.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
@@ -140,9 +140,9 @@ public sealed class SdxlCheckpointConverter
 
         if (blockIdx == 0) return "conv_in." + afterBlockIdx;
 
-        int level = InputBlockToLevel[blockIdx];
+        int level = _inputBlockToLevel[blockIdx];
 
-        if (InputBlockIsDownsample[blockIdx])
+        if (_inputBlockIsDownsample[blockIdx])
         {
             if (afterBlockIdx.StartsWith("0.op."))
                 return $"down_blocks.{level}.downsamplers.0.conv." + afterBlockIdx["0.op.".Length..];
@@ -153,7 +153,7 @@ public sealed class SdxlCheckpointConverter
         if (subDot < 0) return null;
         int subIdx = int.Parse(afterBlockIdx[..subDot]);
         string rest = afterBlockIdx[(subDot + 1)..];
-        int resnetIdx = InputBlockToResnetIdx[blockIdx];
+        int resnetIdx = _inputBlockToResnetIdx[blockIdx];
 
         if (subIdx == 0)
             return $"down_blocks.{level}.resnets.{resnetIdx}." + CheckpointConvertUtils.ConvertResNetSubKey(rest);
@@ -172,8 +172,8 @@ public sealed class SdxlCheckpointConverter
         int blockIdx = int.Parse(afterPrefix[..firstDot]);
         string afterBlockIdx = afterPrefix[(firstDot + 1)..];
 
-        int upLevel = OutputBlockToUpLevel[blockIdx];
-        int resnetIdx = OutputBlockToResnetIdx[blockIdx];
+        int upLevel = _outputBlockToUpLevel[blockIdx];
+        int resnetIdx = _outputBlockToResnetIdx[blockIdx];
 
         int subDot = afterBlockIdx.IndexOf('.');
         if (subDot < 0) return null;
@@ -184,7 +184,7 @@ public sealed class SdxlCheckpointConverter
             return $"up_blocks.{upLevel}.resnets.{resnetIdx}." + CheckpointConvertUtils.ConvertResNetSubKey(rest);
         if (subIdx == 1)
         {
-            if (OutputBlockHasAttention[blockIdx])
+            if (_outputBlockHasAttention[blockIdx])
                 return $"up_blocks.{upLevel}.attentions.{resnetIdx}." + rest;
             return $"up_blocks.{upLevel}.upsamplers.0.conv." + rest;
         }

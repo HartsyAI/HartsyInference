@@ -7,7 +7,7 @@ namespace SharpInference.Tests.Common;
 /// naming, no <c>final_layer.*</c>) plus the <c>dec_net.*</c> SimpleMLPAdaLN pixel decoder head.</summary>
 public static unsafe class ZetaChromaSyntheticWeights
 {
-    private static int s_seed = 15000;
+    private static int _seed = 15000;
 
     /// <summary>Builds the complete weight dict for a tiny Zeta-Chroma model.</summary>
     /// <param name="c">Zeta config; backbone dims are read from <c>c.Backbone</c>.</param>
@@ -93,7 +93,7 @@ public static unsafe class ZetaChromaSyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

@@ -16,7 +16,7 @@ public sealed unsafe class Codec_IQ4_NL : GgufCodecBase
     private const int HalfBlock = 16;
 
     /// <summary>Canonical ggml `kvalues_iq4nl` codepoint table — 16 signed integer values that act as the dequantization lookup. Verbatim from `ggml-quants.c`.</summary>
-    private static readonly sbyte[] KValues = new sbyte[]
+    private static readonly sbyte[] _kValues = new sbyte[]
     {
         -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
     };
@@ -24,7 +24,7 @@ public sealed unsafe class Codec_IQ4_NL : GgufCodecBase
     public override void DequantizeToF32(byte* src, float* dst, long elementCount)
     {
         long numBlocks = (elementCount + BlockElems - 1) / BlockElems;
-        fixed (sbyte* lookup = KValues)
+        fixed (sbyte* lookup = _kValues)
         {
             for (long b = 0; b < numBlocks; b++)
             {

@@ -22,7 +22,7 @@ public class PipelineDiagnosticTests
 {
     private static string ModelDir => TestPaths.Sd15.DiffusersDir;
 
-    private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
+    private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = true };
 
     [Fact(Skip = "Manual diagnostic — run explicitly with: dotnet test --filter DumpEarlyStageStats")]
     public unsafe void DumpEarlyStageStats()
@@ -374,7 +374,7 @@ public class PipelineDiagnosticTests
         image.Dispose();
 
         // Save
-        string json = JsonSerializer.Serialize(stats, JsonOpts);
+        string json = JsonSerializer.Serialize(stats, _jsonOpts);
         File.WriteAllText(outputPath, json);
         Console.WriteLine($"\nStats saved to {outputPath}");
         Console.WriteLine($"Total stats entries: {stats.Count}");

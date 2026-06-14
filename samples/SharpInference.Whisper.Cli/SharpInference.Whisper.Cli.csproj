@@ -5,6 +5,7 @@
     <RootNamespace>SharpInference.Whisper.Cli</RootNamespace>
     <AssemblyName>sharpinference-whisper</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

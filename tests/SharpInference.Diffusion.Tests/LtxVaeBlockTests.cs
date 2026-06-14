@@ -88,13 +88,13 @@ public unsafe class LtxVaeBlockTests
         AssertFinite(outT);
     }
 
-    private static int s_seed = 50;
+    private static int _seed = 50;
     private static Tensor R(int[] dims)
     {
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.2 - 0.1);
         return t;
     }

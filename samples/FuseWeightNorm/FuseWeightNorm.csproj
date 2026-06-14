@@ -5,6 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>SharpInference.Samples.FuseWeightNorm</RootNamespace>
     <AssemblyName>fuse-weight-norm</AssemblyName>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

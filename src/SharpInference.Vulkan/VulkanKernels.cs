@@ -28,7 +28,7 @@ public sealed class VulkanKernelRegistry : IDisposable
     private readonly Dictionary<KernelKey, VulkanKernel> _kernels = new();
     private readonly Dictionary<string, ulong> _modules = new(); // shader-name -> VkShaderModule (cached for re-spec)
 
-    private static readonly byte[] s_mainEntryUtf8 = Encoding.UTF8.GetBytes("main\0");
+    private static readonly byte[] _mainEntryUtf8 = Encoding.UTF8.GetBytes("main\0");
     private nint _mainEntry;
 
     public VulkanKernelRegistry(nint device, VulkanCapabilities caps, VulkanPipelineCache pipelineCache, VulkanDescriptorManager descMgr, string spvDir)
@@ -39,8 +39,8 @@ public sealed class VulkanKernelRegistry : IDisposable
         _descMgr = descMgr;
         _spvDir = spvDir;
 
-        _mainEntry = Marshal.AllocHGlobal(s_mainEntryUtf8.Length);
-        Marshal.Copy(s_mainEntryUtf8, 0, _mainEntry, s_mainEntryUtf8.Length);
+        _mainEntry = Marshal.AllocHGlobal(_mainEntryUtf8.Length);
+        Marshal.Copy(_mainEntryUtf8, 0, _mainEntry, _mainEntryUtf8.Length);
     }
 
     /// <summary>Builds (or returns cached) a pipeline for the given kernel + spec constants.</summary>

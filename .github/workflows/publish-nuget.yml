@@ -1,0 +1,80 @@
+name: Publish to NuGet
+
+# Auto-publishes the SharpInference packages to NuGet.org on every push to main that
+# touches source or packaging. Each run gets a unique prerelease version
+# (1.0.0-alpha.<run_number>) so versions never collide — NuGet.org forbids re-pushing
+# an existing version. Trigger manually via "Run workflow" to override the suffix.
+#
+# Requires one repository secret: NUGET_API_KEY (a Push-scoped key for SharpInference*).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'native/**'
+      - 'Directory.Build.props'
+      - 'Directory.Build.targets'
+      - 'Directory.Packages.props'
+      - '.github/workflows/publish-nuget.yml'
+  workflow_dispatch:
+    inputs:
+      version_suffix:
+        description: 'Prerelease suffix, e.g. alpha.5. Blank = alpha.<run_number>.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never run two publishes at once — a second run could try to push a version the
+  # first is still validating.
+  group: publish-nuget
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Pack + push to NuGet.org
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Compute version suffix
+        id: ver
+        run: |
+          SUFFIX="${{ github.event.inputs.version_suffix }}"
+          if [ -z "$SUFFIX" ]; then SUFFIX="alpha.${{ github.run_number }}"; fi
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: 1.0.0-$SUFFIX"
+
+      - name: Pack libraries + meta-package
+        env:
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: |
+          dotnet pack SharpInference.sln \
+            -c Release -o artifacts \
+            -p:VersionSuffix=${{ steps.ver.outputs.suffix }}
+          dotnet pack src/SharpInference.Meta/SharpInference.Meta.csproj \
+            -c Release -o artifacts \
+            -p:VersionSuffix=${{ steps.ver.outputs.suffix }}
+
+      - name: List packages
+        run: ls -1 artifacts/*.nupkg
+
+      - name: Push to NuGet.org
+        run: |
+          dotnet nuget push "artifacts/*.nupkg" \
+            --api-key "${{ secrets.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

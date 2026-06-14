@@ -7,7 +7,7 @@ namespace SharpInference.Tests.Common;
 /// ActionModules with the variant keyboard dims) and the Wan2.1 VAE decoder/encoder.</summary>
 public static unsafe class MatrixGame2SyntheticWeights
 {
-    private static int s_seed = 15000;
+    private static int _seed = 15000;
 
     public static Dictionary<string, Tensor> BuildTransformer(MatrixGame2Config c)
     {
@@ -139,7 +139,7 @@ public static unsafe class MatrixGame2SyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

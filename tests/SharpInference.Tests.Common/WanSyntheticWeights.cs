@@ -6,7 +6,7 @@ namespace SharpInference.Tests.Common;
 /// <summary>Shared synthetic-weight generator for the Wan-Video DiT (<see cref="WanVideoTransformer"/>). One source of truth for the Diffusion + Video test projects. (The Wan VAE reuses <see cref="LanceSyntheticWeights.BuildVae"/> — it's the same Wan2.2 decoder.)</summary>
 public static unsafe class WanSyntheticWeights
 {
-    private static int s_seed = 5000;
+    private static int _seed = 5000;
 
     public static Dictionary<string, Tensor> BuildTransformer(WanVideoConfig c)
     {
@@ -48,7 +48,7 @@ public static unsafe class WanSyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

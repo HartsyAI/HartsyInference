@@ -17,7 +17,7 @@ namespace SharpInference.Vision.Codec;
 /// descriptive message — callers can fall back to an external decoder or pre-convert images.</para></summary>
 public static class PngDecoder
 {
-    private static readonly byte[] PngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
+    private static readonly byte[] _pngSignature = [137, 80, 78, 71, 13, 10, 26, 10];
 
     /// <summary>Decodes a PNG file from disk.</summary>
     public static (byte[] rgb, int width, int height) DecodeFromFile(string path)
@@ -30,7 +30,7 @@ public static class PngDecoder
     /// <summary>Decodes a PNG from raw bytes. Returns HWC-packed RGB u8, the source width, and height.</summary>
     public static (byte[] rgb, int width, int height) Decode(ReadOnlySpan<byte> data)
     {
-        if (data.Length < 8 || !data.Slice(0, 8).SequenceEqual(PngSignature))
+        if (data.Length < 8 || !data.Slice(0, 8).SequenceEqual(_pngSignature))
             throw new ArgumentException("Not a PNG file — signature mismatch.", nameof(data));
 
         int offset = 8;

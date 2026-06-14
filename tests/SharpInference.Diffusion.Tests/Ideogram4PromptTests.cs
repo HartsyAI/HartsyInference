@@ -8,7 +8,7 @@ namespace SharpInference.Diffusion.Tests;
 /// <summary>Pure-logic tests for the structured prompt builder + Ideogram 4 JSON dialect (no GPU / checkpoint needed). Verifies the exact serialization Ideogram 4 was trained on: key order, compact separators, literal Unicode, uppercase hex, <c>[y_min,x_min,y_max,x_max]</c> bbox order, the <c>obj</c>/<c>text</c> discriminator, and the validator's mistake-rejection.</summary>
 public class Ideogram4PromptTests
 {
-    private static readonly Ideogram4Dialect Dialect = new();
+    private static readonly Ideogram4Dialect _dialect = new();
 
     [Fact]
     public void Serialize_FullPrompt_ExactJson()
@@ -22,7 +22,7 @@ public class Ideogram4PromptTests
             .Palette("#FF6B35", "#004E89")
             .Build();
 
-        string json = Dialect.Serialize(prompt);
+        string json = _dialect.Serialize(prompt);
 
         // Top-level key order, compact separators, literal unicode, uppercased hex, [y,x,y,x] bbox, obj/text discriminator.
         const string expected =
@@ -38,7 +38,7 @@ public class Ideogram4PromptTests
     public void Serialize_MinimalPrompt_OmitsOptionalKeys()
     {
         StructuredPrompt prompt = new() { Background = "a plain studio backdrop" };
-        string json = Dialect.Serialize(prompt);
+        string json = _dialect.Serialize(prompt);
         Assert.Equal(
             "{\"compositional_deconstruction\":{\"background\":\"a plain studio backdrop\",\"elements\":[]}}",
             json);
@@ -52,14 +52,14 @@ public class Ideogram4PromptTests
             Background = "bg",
             Style = new StyleBlock { Photo = "dslr", ArtStyle = "oil painting" },
         };
-        Assert.Throws<SharpInferenceException>(() => Dialect.Serialize(prompt));
+        Assert.Throws<SharpInferenceException>(() => _dialect.Serialize(prompt));
     }
 
     [Fact]
     public void Validate_RejectsMissingBackground()
     {
         StructuredPrompt prompt = new() { Summary = "x" };
-        Assert.Throws<SharpInferenceException>(() => Dialect.Serialize(prompt));
+        Assert.Throws<SharpInferenceException>(() => _dialect.Serialize(prompt));
     }
 
     [Theory]
@@ -69,7 +69,7 @@ public class Ideogram4PromptTests
     public void Validate_RejectsBadHex(string color)
     {
         StructuredPrompt prompt = new() { Background = "bg", ColorPalette = [color] };
-        Assert.Throws<SharpInferenceException>(() => Dialect.Serialize(prompt));
+        Assert.Throws<SharpInferenceException>(() => _dialect.Serialize(prompt));
     }
 
     [Fact]
@@ -80,7 +80,7 @@ public class Ideogram4PromptTests
             Background = "bg",
             Elements = [new ObjectElement { Description = "x", ColorPalette = ["#000000", "#111111", "#222222", "#333333", "#444444", "#555555"] }],
         };
-        Assert.Throws<SharpInferenceException>(() => Dialect.Serialize(prompt));
+        Assert.Throws<SharpInferenceException>(() => _dialect.Serialize(prompt));
     }
 
     [Fact]

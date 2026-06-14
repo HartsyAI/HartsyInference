@@ -16,11 +16,11 @@ public class MemoryAllocFreeBenchmarks
 
     [ParamsSource(nameof(SizeSource))]
     public int SizeIndex { get; set; }
-    public IEnumerable<int> SizeSource => Enumerable.Range(0, Sizes.Length);
+    public IEnumerable<int> SizeSource => Enumerable.Range(0, _sizes.Length);
 
     /// <summary>Common diffusion-pipeline allocation sizes. Small to large; covers the typical hot
     /// path (per-op activation buffers) plus the large weight-cache case.</summary>
-    private static readonly nuint[] Sizes =
+    private static readonly nuint[] _sizes =
     [
         4096,                          // tiny — single timestep embedding
         4 * 1024 * 1024,              // 4 MB — small activation
@@ -40,7 +40,7 @@ public class MemoryAllocFreeBenchmarks
     [Benchmark]
     public void AllocFree_Sync()
     {
-        ulong p = CudaMemory.Allocate(Sizes[SizeIndex]);
+        ulong p = CudaMemory.Allocate(_sizes[SizeIndex]);
         CudaMemory.Free(p);
     }
 
@@ -48,7 +48,7 @@ public class MemoryAllocFreeBenchmarks
     [Benchmark]
     public void AllocFree_Async()
     {
-        nuint size = Sizes[SizeIndex];
+        nuint size = _sizes[SizeIndex];
         nint stream = _fixture!.Backend.Stream.Handle;
         ulong p = CudaMemory.AllocateAsync(size, stream);
         CudaMemory.FreeAsync(p, stream);

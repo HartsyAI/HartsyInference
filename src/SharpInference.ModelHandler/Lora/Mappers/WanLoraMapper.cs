@@ -110,7 +110,7 @@ public static class WanLoraMapper
 
     private static bool TryClassifyRole(string key, out LoraRole role, out string root)
     {
-        foreach ((string suffix, LoraRole r) in SuffixRoles)
+        foreach ((string suffix, LoraRole r) in _suffixRoles)
         {
             if (key.EndsWith(suffix, StringComparison.Ordinal))
             {
@@ -124,7 +124,7 @@ public static class WanLoraMapper
         return false;
     }
 
-    private static readonly (string Suffix, LoraRole Role)[] SuffixRoles =
+    private static readonly (string Suffix, LoraRole Role)[] _suffixRoles =
     [
         (".lora_down.weight", LoraRole.Down),
         (".lora_up.weight", LoraRole.Up),

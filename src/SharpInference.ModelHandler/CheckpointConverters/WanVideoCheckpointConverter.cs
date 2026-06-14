@@ -19,11 +19,11 @@ namespace SharpInference.ModelHandler.CheckpointConverters;
 /// <c>vae/</c> folder layout (<c>AutoencoderKLWan</c> naming) is NOT supported.</para></summary>
 public sealed class WanVideoCheckpointConverter
 {
-    private static readonly string[] StripPrefixes = ["model.diffusion_model.", "diffusion_model.", "transformer.", "model."];
+    private static readonly string[] _stripPrefixes = ["model.diffusion_model.", "diffusion_model.", "transformer.", "model."];
 
     // Ported verbatim (and in order — the rules are applied sequentially per key, like the python script's
     // key.replace chain; the norm2→placeholder→norm3 swap depends on it) from diffusers convert_wan_to_diffusers.py.
-    private static readonly (string From, string To)[] OriginalRenames =
+    private static readonly (string From, string To)[] _originalRenames =
     [
         ("time_embedding.0", "condition_embedder.time_embedder.linear_1"),
         ("time_embedding.2", "condition_embedder.time_embedder.linear_2"),
@@ -92,7 +92,7 @@ public sealed class WanVideoCheckpointConverter
             return null;
         string mapped = StripPrefix(key);
         if (fromOriginalNaming)
-            foreach ((string from, string to) in OriginalRenames)
+            foreach ((string from, string to) in _originalRenames)
                 mapped = mapped.Replace(from, to, StringComparison.Ordinal);
         return mapped;
     }
@@ -157,7 +157,7 @@ public sealed class WanVideoCheckpointConverter
 
     private static string StripPrefix(string key)
     {
-        foreach (string prefix in StripPrefixes)
+        foreach (string prefix in _stripPrefixes)
             if (key.StartsWith(prefix, StringComparison.Ordinal))
                 return key[prefix.Length..];
         return key;

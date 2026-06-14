@@ -17,8 +17,8 @@ namespace SharpInference.Diffusion.Prompting.Dialects;
 /// Call <see cref="Validate"/> (or pass <c>validate: true</c> to <see cref="Serialize(StructuredPrompt, bool)"/>) to surface the common mistakes as actionable errors.</summary>
 public sealed class Ideogram4Dialect : IPromptDialect
 {
-    private static readonly Regex HexColor = new("^#[0-9A-Fa-f]{6}$", RegexOptions.Compiled);
-    private static readonly JsonWriterOptions WriterOptions = new()
+    private static readonly Regex _hexColor = new("^#[0-9A-Fa-f]{6}$", RegexOptions.Compiled);
+    private static readonly JsonWriterOptions _writerOptions = new()
     {
         Indented = false,
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
@@ -36,7 +36,7 @@ public sealed class Ideogram4Dialect : IPromptDialect
         if (validate) Validate(prompt);
 
         ArrayBufferWriter<byte> buffer = new();
-        using (Utf8JsonWriter writer = new(buffer, WriterOptions))
+        using (Utf8JsonWriter writer = new(buffer, _writerOptions))
         {
             writer.WriteStartObject();
 
@@ -140,7 +140,7 @@ public sealed class Ideogram4Dialect : IPromptDialect
         if (palette.Count > max)
             throw new SharpInferenceException($"{where} has {palette.Count} colors, max is {max}.");
         foreach (string c in palette)
-            if (!HexColor.IsMatch(c))
+            if (!_hexColor.IsMatch(c))
                 throw new SharpInferenceException($"{where}: '{c}' is not a #RRGGBB hex color (shorthand and non-hex are rejected).");
     }
 }

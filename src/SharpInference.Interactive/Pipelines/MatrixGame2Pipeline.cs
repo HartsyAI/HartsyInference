@@ -26,8 +26,8 @@ namespace SharpInference.Interactive.Pipelines;
 /// image-condition latent for padding frames encodes one black frame instead of the chunked causal video encode.</para></summary>
 public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
 {
-    private static readonly float[] ClipMean = [0.48145466f, 0.4578275f, 0.40821073f];
-    private static readonly float[] ClipStd = [0.26862954f, 0.26130258f, 0.27577711f];
+    private static readonly float[] _clipMean = [0.48145466f, 0.4578275f, 0.40821073f];
+    private static readonly float[] _clipStd = [0.26862954f, 0.26130258f, 0.27577711f];
 
     private readonly MatrixGame2Transformer _transformer;
     private readonly Wan21VaeDecoder _vae;
@@ -72,7 +72,7 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
                     float v00 = rgb24[(y0 * width + x0) * 3 + c], v01 = rgb24[(y0 * width + x1) * 3 + c];
                     float v10 = rgb24[(y1 * width + x0) * 3 + c], v11 = rgb24[(y1 * width + x1) * 3 + c];
                     float v = (v00 * (1 - fx) + v01 * fx) * (1 - fy) + (v10 * (1 - fx) + v11 * fx) * fy;
-                    pp[((long)c * size + y) * size + x] = (v / 255f - ClipMean[c]) / ClipStd[c];
+                    pp[((long)c * size + y) * size + x] = (v / 255f - _clipMean[c]) / _clipStd[c];
                 }
         Tensor hidden = _clip.EncodeHiddenStates(Backend, pixels);
         pixels.Dispose();

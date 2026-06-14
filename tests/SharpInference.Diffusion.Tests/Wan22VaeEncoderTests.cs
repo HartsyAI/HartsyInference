@@ -12,13 +12,13 @@ namespace SharpInference.Diffusion.Tests;
 public unsafe class Wan22VaeEncoderTests
 {
     private const int Dim = 8;
-    private static readonly int[] DimMult = [1, 2, 4, 4];
-    private static readonly bool[] TDown = [true, true, false];
+    private static readonly int[] _dimMult = [1, 2, 4, 4];
+    private static readonly bool[] _tDown = [true, true, false];
 
     private static Wan22VaeEncoder BuildEncoder()
     {
-        Wan22VaeEncoder enc = new(dim: Dim, zDim: 48, dimMult: DimMult, numResBlocks: 2, temperalDownsample: TDown);
-        enc.LoadWeights(LanceSyntheticWeights.BuildVaeEncoder(Dim, 48, DimMult, 2, TDown));
+        Wan22VaeEncoder enc = new(dim: Dim, zDim: 48, dimMult: _dimMult, numResBlocks: 2, temperalDownsample: _tDown);
+        enc.LoadWeights(LanceSyntheticWeights.BuildVaeEncoder(Dim, 48, _dimMult, 2, _tDown));
         return enc;
     }
 
@@ -45,8 +45,8 @@ public unsafe class Wan22VaeEncoderTests
     {
         CpuBackend backend = new();
         Wan22VaeEncoder enc = BuildEncoder();
-        Wan22VaeDecoder dec = new(dim: Dim, zDim: 48, dimMult: DimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
-        dec.LoadWeights(LanceSyntheticWeights.BuildVae(Dim, 48, DimMult, 2, [false, true, true]));
+        Wan22VaeDecoder dec = new(dim: Dim, zDim: 48, dimMult: _dimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
+        dec.LoadWeights(LanceSyntheticWeights.BuildVae(Dim, 48, _dimMult, 2, [false, true, true]));
 
         Tensor rgb = Rand5d(1, 3, 1, 32, 32, seed: 13);
         Tensor latent = enc.EncodeFrame(backend, rgb);

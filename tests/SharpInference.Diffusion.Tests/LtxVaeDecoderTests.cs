@@ -9,16 +9,16 @@ namespace SharpInference.Diffusion.Tests;
 public unsafe class LtxVaeDecoderTests
 {
     // Tiny config: latent 8ch, block_out [8,16,16,16], scaling [T,T,T,F], 1 layer/block, patch 2.
-    private static readonly int[] BlockOut = [8, 16, 16, 16];
-    private static readonly bool[] Scaling = [true, true, true, false];
-    private static readonly int[] Layers = [1, 1, 1, 1, 1];
+    private static readonly int[] _blockOut = [8, 16, 16, 16];
+    private static readonly bool[] _scaling = [true, true, true, false];
+    private static readonly int[] _layers = [1, 1, 1, 1, 1];
     private const int Latent = 8, OutCh = 3, Patch = 2;
 
     [Fact]
     public void Decode_BaseConfig_ProducesExpandedRgbAndIsFinite()
     {
         CpuBackend backend = new();
-        LtxVideoVaeDecoder decoder = new(Latent, OutCh, BlockOut, Scaling, Layers, Patch, isCausal: false);
+        LtxVideoVaeDecoder decoder = new(Latent, OutCh, _blockOut, _scaling, _layers, Patch, isCausal: false);
         decoder.LoadWeights(BuildVae());
 
         int tLat = 2;
@@ -37,9 +37,9 @@ public unsafe class LtxVaeDecoderTests
 
     private static Dictionary<string, Tensor> BuildVae()
     {
-        int[] bo = Rev(BlockOut);      // [16,16,16,8]
-        bool[] sc = Rev(Scaling);      // [F,T,T,T]
-        int[] ly = Rev(Layers);
+        int[] bo = Rev(_blockOut);      // [16,16,16,8]
+        bool[] sc = Rev(_scaling);      // [F,T,T,T]
+        int[] ly = Rev(_layers);
         Dictionary<string, Tensor> w = new();
         int output = bo[0];
 
@@ -79,13 +79,13 @@ public unsafe class LtxVaeDecoderTests
     private static int[] Rev(int[] a) { int[] r = (int[])a.Clone(); Array.Reverse(r); return r; }
     private static bool[] Rev(bool[] a) { bool[] r = (bool[])a.Clone(); Array.Reverse(r); return r; }
 
-    private static int s_seed = 200;
+    private static int _seed = 200;
     private static Tensor Rand(int[] dims)
     {
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.2 - 0.1);
         return t;
     }

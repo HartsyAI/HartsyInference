@@ -15,9 +15,14 @@
     <InternalsVisibleTo Include="SharpInference.Cuda.Tests" />
   </ItemGroup>
 
-  <!-- PTX kernel files shipped as content, loaded from disk at runtime -->
+  <!-- PTX kernel files, loaded from disk at runtime (CudaBackend: BaseDirectory/Ptx). -->
   <ItemGroup>
-    <Content Include="Ptx\*.ptx" CopyToOutputDirectory="PreserveNewest" />
+    <!-- One item, two jobs: copy PTX next to THIS project's own output (local build/tests),
+         AND pack it into the nupkg under ptx/. SharpInference.Cuda.targets then copies it
+         into a *consumer's* output at build time. -->
+    <Content Include="Ptx\*.ptx" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="ptx/" />
+    <!-- Ship the copy logic. build/ = direct package refs; buildTransitive/ = via meta-package. -->
+    <None Include="SharpInference.Cuda.targets" Pack="true" PackagePath="build/;buildTransitive/" Visible="false" />
   </ItemGroup>
 
 </Project>

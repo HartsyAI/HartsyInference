@@ -5,6 +5,8 @@
     <RootNamespace>SharpInference.Cli</RootNamespace>
     <AssemblyName>SharpInference.Cli</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Console app, not a library — excluded from the alpha NuGet release. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

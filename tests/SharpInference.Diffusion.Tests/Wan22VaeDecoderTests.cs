@@ -119,13 +119,13 @@ public unsafe class Wan22VaeDecoderTests
             Assert.True(MathF.Abs(a[i] - b[i]) < 1e-6f, $"idx {i}: full {a[i]} vs streamed {b[i]}");
     }
 
-    private static int s_seed = 100;
+    private static int _seed = 100;
 
     private static Tensor Rand(long[] dims)
     {
         Tensor t = new Tensor(new TensorShape(dims), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         // Small magnitudes keep the deep stack numerically tame (this is a structural/finiteness test).
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.2 - 0.1);
         return t;

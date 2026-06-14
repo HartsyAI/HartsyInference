@@ -44,10 +44,10 @@ namespace SharpInference.Diffusion.Utilities;
 public sealed unsafe class TaesdDecoder : IDisposable
 {
     /// <summary>Sequential indices where the 10 ResBlocks live in the decoder graph.</summary>
-    private static readonly int[] BlockSeqIndices = [3, 4, 5, 8, 9, 10, 13, 14, 15, 18];
+    private static readonly int[] _blockSeqIndices = [3, 4, 5, 8, 9, 10, 13, 14, 15, 18];
 
     /// <summary>Sequential indices of the post-upsample 3×3 convs (no bias).</summary>
-    private static readonly int[] UpsampleConvSeqIndices = [7, 12, 17];
+    private static readonly int[] _upsampleConvSeqIndices = [7, 12, 17];
 
     private readonly LatentArchitecture _arch;
     private readonly int _latentChannels;
@@ -125,15 +125,15 @@ public sealed unsafe class TaesdDecoder : IDisposable
                     $"Most likely a TAESD checkpoint for a different architecture was passed.");
             }
 
-            dec._blockConv0W = new Tensor[BlockSeqIndices.Length];
-            dec._blockConv0B = new Tensor[BlockSeqIndices.Length];
-            dec._blockConv2W = new Tensor[BlockSeqIndices.Length];
-            dec._blockConv2B = new Tensor[BlockSeqIndices.Length];
-            dec._blockConv4W = new Tensor[BlockSeqIndices.Length];
-            dec._blockConv4B = new Tensor[BlockSeqIndices.Length];
-            for (int b = 0; b < BlockSeqIndices.Length; b++)
+            dec._blockConv0W = new Tensor[_blockSeqIndices.Length];
+            dec._blockConv0B = new Tensor[_blockSeqIndices.Length];
+            dec._blockConv2W = new Tensor[_blockSeqIndices.Length];
+            dec._blockConv2B = new Tensor[_blockSeqIndices.Length];
+            dec._blockConv4W = new Tensor[_blockSeqIndices.Length];
+            dec._blockConv4B = new Tensor[_blockSeqIndices.Length];
+            for (int b = 0; b < _blockSeqIndices.Length; b++)
             {
-                int i = BlockSeqIndices[b];
+                int i = _blockSeqIndices[b];
                 dec._blockConv0W[b] = loader.GetTensor($"{i}.conv.0.weight");
                 dec._blockConv0B[b] = loader.GetTensor($"{i}.conv.0.bias");
                 dec._blockConv2W[b] = loader.GetTensor($"{i}.conv.2.weight");
@@ -142,10 +142,10 @@ public sealed unsafe class TaesdDecoder : IDisposable
                 dec._blockConv4B[b] = loader.GetTensor($"{i}.conv.4.bias");
             }
 
-            dec._upsampleConvW = new Tensor[UpsampleConvSeqIndices.Length];
-            for (int u = 0; u < UpsampleConvSeqIndices.Length; u++)
+            dec._upsampleConvW = new Tensor[_upsampleConvSeqIndices.Length];
+            for (int u = 0; u < _upsampleConvSeqIndices.Length; u++)
             {
-                dec._upsampleConvW[u] = loader.GetTensor($"{UpsampleConvSeqIndices[u]}.weight");
+                dec._upsampleConvW[u] = loader.GetTensor($"{_upsampleConvSeqIndices[u]}.weight");
             }
 
             dec._convOutW = loader.GetTensor("19.weight");

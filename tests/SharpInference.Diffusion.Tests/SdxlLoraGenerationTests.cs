@@ -22,7 +22,7 @@ public class SdxlLoraGenerationTests
 {
     private static string SdxlCheckpointPath => TestPaths.Sdxl.SingleFile;
 
-    private static readonly string? SdxlLoraPath =
+    private static readonly string? _sdxlLoraPath =
         Environment.GetEnvironmentVariable("SDXL_LORA_PATH");
 
     private static string TokenizerVocabPath => TestPaths.Tokenizers.ClipVocab;
@@ -36,9 +36,9 @@ public class SdxlLoraGenerationTests
     [Fact]
     public void SingleFile_WithLora_GenerateImage_Cpu_Small()
     {
-        if (string.IsNullOrEmpty(SdxlLoraPath) || !File.Exists(SdxlLoraPath))
+        if (string.IsNullOrEmpty(_sdxlLoraPath) || !File.Exists(_sdxlLoraPath))
         {
-            _output.WriteLine($"SKIPPED: Set SDXL_LORA_PATH to a Kohya-format SDXL LoRA .safetensors file (got '{SdxlLoraPath}').");
+            _output.WriteLine($"SKIPPED: Set SDXL_LORA_PATH to a Kohya-format SDXL LoRA .safetensors file (got '{_sdxlLoraPath}').");
             return;
         }
         if (!File.Exists(SdxlCheckpointPath))
@@ -70,9 +70,9 @@ public class SdxlLoraGenerationTests
 
             using CpuBackend backend = new();
 
-            _output.WriteLine($"[2/7] Loading LoRA: {Path.GetFileName(SdxlLoraPath)}");
+            _output.WriteLine($"[2/7] Loading LoRA: {Path.GetFileName(_sdxlLoraPath)}");
             sw.Restart();
-            using LoraFile lora = LoraFile.Load(SdxlLoraPath!);
+            using LoraFile lora = LoraFile.Load(_sdxlLoraPath!);
             using LoraStack stack = new();
             stack.Add(lora, strength: 1.0f);
             sw.Stop();

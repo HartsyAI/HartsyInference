@@ -6,7 +6,7 @@ namespace SharpInference.Tests.Common;
 /// <summary>Synthetic weights for the Oasis-500m DiT-S/2 and ViT-VAE structural tests.</summary>
 public static unsafe class OasisSyntheticWeights
 {
-    private static int s_seed = 12000;
+    private static int _seed = 12000;
 
     public static Dictionary<string, Tensor> BuildDit(OasisDitConfig c)
     {
@@ -70,7 +70,7 @@ public static unsafe class OasisSyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

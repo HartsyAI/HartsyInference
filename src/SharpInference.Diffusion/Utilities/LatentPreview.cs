@@ -169,41 +169,41 @@ public static unsafe class LatentPreview
 
     private static float[,]? GetFactors(LatentArchitecture arch) => arch switch
     {
-        LatentArchitecture.Sd15 => Sd15Factors,
-        LatentArchitecture.Sdxl => SdxlFactors,
-        LatentArchitecture.Sd3 => Sd3Factors,
-        LatentArchitecture.Flux => FluxFactors,
+        LatentArchitecture.Sd15 => _sd15Factors,
+        LatentArchitecture.Sdxl => _sdxlFactors,
+        LatentArchitecture.Sd3 => _sd3Factors,
+        LatentArchitecture.Flux => _fluxFactors,
         // Flux.2 uses Flux.1 factors as a starting point — replace with arch-specific
         // factors when published. Previews will be approximate but hue-trending correct.
-        LatentArchitecture.Flux2 => FluxFactors,
-        LatentArchitecture.Chroma => FluxFactors,
-        LatentArchitecture.ZImage => FluxFactors,
+        LatentArchitecture.Flux2 => _fluxFactors,
+        LatentArchitecture.Chroma => _fluxFactors,
+        LatentArchitecture.ZImage => _fluxFactors,
         // Anima uses the Qwen-Image VAE (16 ch). Flux factors are a reasonable approximation
         // for preview purposes; replace with Qwen-Image-specific factors when published.
-        LatentArchitecture.Anima => FluxFactors,
-        LatentArchitecture.FLite => Sd3Factors,
-        LatentArchitecture.AuraFlow => SdxlFactors,
-        LatentArchitecture.Wan => Wan22Factors,
-        LatentArchitecture.Ltx => LtxFactors,
+        LatentArchitecture.Anima => _fluxFactors,
+        LatentArchitecture.FLite => _sd3Factors,
+        LatentArchitecture.AuraFlow => _sdxlFactors,
+        LatentArchitecture.Wan => _wan22Factors,
+        LatentArchitecture.Ltx => _ltxFactors,
         _ => null,
     };
 
     private static float[] GetBias(LatentArchitecture arch) => arch switch
     {
-        LatentArchitecture.Sd3 => Sd3Bias,
+        LatentArchitecture.Sd3 => _sd3Bias,
         LatentArchitecture.Flux or LatentArchitecture.Flux2
             or LatentArchitecture.Chroma or LatentArchitecture.ZImage
-            or LatentArchitecture.Anima => FluxBias,
-        LatentArchitecture.FLite => Sd3Bias,
-        LatentArchitecture.Wan => Wan22Bias,
-        LatentArchitecture.Ltx => LtxBias,
-        _ => ZeroBias,
+            or LatentArchitecture.Anima => _fluxBias,
+        LatentArchitecture.FLite => _sd3Bias,
+        LatentArchitecture.Wan => _wan22Bias,
+        LatentArchitecture.Ltx => _ltxBias,
+        _ => _zeroBias,
     };
 
-    private static readonly float[] ZeroBias = [0f, 0f, 0f];
+    private static readonly float[] _zeroBias = [0f, 0f, 0f];
 
     // SD 1.5: 4×3, no bias. Source: comfy/latent_formats.py SD15.latent_rgb_factors.
-    private static readonly float[,] Sd15Factors = new float[,]
+    private static readonly float[,] _sd15Factors = new float[,]
     {
         {  0.298f,  0.207f,  0.208f },
         {  0.187f,  0.286f,  0.173f },
@@ -212,7 +212,7 @@ public static unsafe class LatentPreview
     };
 
     // SDXL: 4×3, no bias. Source: comfy/latent_formats.py SDXL.latent_rgb_factors.
-    private static readonly float[,] SdxlFactors = new float[,]
+    private static readonly float[,] _sdxlFactors = new float[,]
     {
         {  0.3651f,  0.4232f,  0.4341f },
         { -0.2533f, -0.0042f,  0.1068f },
@@ -221,7 +221,7 @@ public static unsafe class LatentPreview
     };
 
     // SD3: 16×3 + bias. Source: comfy/latent_formats.py SD3.latent_rgb_factors / _bias.
-    private static readonly float[,] Sd3Factors = new float[,]
+    private static readonly float[,] _sd3Factors = new float[,]
     {
         { -0.0645f,  0.0177f,  0.1052f },
         {  0.0028f,  0.0312f,  0.0650f },
@@ -240,10 +240,10 @@ public static unsafe class LatentPreview
         { -0.0749f, -0.0634f, -0.0456f },
         { -0.1418f, -0.1457f, -0.1259f },
     };
-    private static readonly float[] Sd3Bias = [-0.0571f, -0.1657f, -0.2512f];
+    private static readonly float[] _sd3Bias = [-0.0571f, -0.1657f, -0.2512f];
 
     // Flux.1: 16×3 + bias. Source: comfy/latent_formats.py Flux.latent_rgb_factors / _bias.
-    private static readonly float[,] FluxFactors = new float[,]
+    private static readonly float[,] _fluxFactors = new float[,]
     {
         { -0.0346f,  0.0244f,  0.0681f },
         {  0.0034f,  0.0210f,  0.0687f },
@@ -262,10 +262,10 @@ public static unsafe class LatentPreview
         { -0.0280f, -0.0881f, -0.0499f },
         { -0.1262f, -0.0982f, -0.0778f },
     };
-    private static readonly float[] FluxBias = [-0.0329f, -0.0718f, -0.0851f];
+    private static readonly float[] _fluxBias = [-0.0329f, -0.0718f, -0.0851f];
 
     // Wan2.2 video: 48×3 + bias. Source: comfy/latent_formats.py Wan22.latent_rgb_factors / _bias.
-    private static readonly float[,] Wan22Factors = new float[,]
+    private static readonly float[,] _wan22Factors = new float[,]
     {
         { 0.0119f, 0.0103f, 0.0046f },
         { -0.1062f, -0.0504f, 0.0165f },
@@ -316,10 +316,10 @@ public static unsafe class LatentPreview
         { 0.0504f, -0.0483f, -0.0356f },
         { -0.0837f, 0.0168f, 0.0055f },
     };
-    private static readonly float[] Wan22Bias = [0.0317f, -0.0878f, -0.1388f];
+    private static readonly float[] _wan22Bias = [0.0317f, -0.0878f, -0.1388f];
 
     // LTX-Video: 128×3 + bias. Source: comfy/latent_formats.py LTXV.latent_rgb_factors / _bias.
-    private static readonly float[,] LtxFactors = new float[,]
+    private static readonly float[,] _ltxFactors = new float[,]
     {
         { 0.011202f, -0.00063815f, -0.010021f },
         { 0.086031f, 0.065813f, 0.00095409f },
@@ -450,5 +450,5 @@ public static unsafe class LatentPreview
         { 0.038321f, 0.0096622f, -0.019268f },
         { -0.014605f, -0.0067032f, 0.0039675f },
     };
-    private static readonly float[] LtxBias = [-0.0571f, -0.1657f, -0.2512f];
+    private static readonly float[] _ltxBias = [-0.0571f, -0.1657f, -0.2512f];
 }

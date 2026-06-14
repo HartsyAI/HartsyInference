@@ -23,7 +23,7 @@ namespace SharpInference.ModelHandler.CheckpointConverters;
 /// <c>Kandinsky5Transformer.LoadWeights</c> contract are intentionally aligned 1:1.</summary>
 public sealed class Kandinsky5CheckpointConverter
 {
-    private static readonly string[] StripPrefixes = ["transformer.", "model."];
+    private static readonly string[] _stripPrefixes = ["transformer.", "model."];
 
     /// <summary>Result bundle. The Lite t2i model ships transformer + (CLIP + Qwen2.5-VL) text encoders
     /// + Flux VAE in separate sub-directories of the diffusers repo, so when given a single transformer
@@ -46,11 +46,11 @@ public sealed class Kandinsky5CheckpointConverter
                 continue;
 
             string trKey = key;
-            for (int i = 0; i < StripPrefixes.Length; i++)
+            for (int i = 0; i < _stripPrefixes.Length; i++)
             {
-                if (trKey.StartsWith(StripPrefixes[i], StringComparison.Ordinal))
+                if (trKey.StartsWith(_stripPrefixes[i], StringComparison.Ordinal))
                 {
-                    trKey = trKey[StripPrefixes[i].Length..];
+                    trKey = trKey[_stripPrefixes[i].Length..];
                     break;
                 }
             }

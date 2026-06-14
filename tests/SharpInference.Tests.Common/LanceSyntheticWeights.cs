@@ -6,7 +6,7 @@ namespace SharpInference.Tests.Common;
 /// <summary>Shared synthetic-weight generators for Lance + Wan2.2 VAE structural tests (image, video, decoder). One source of truth so the image and video test projects don't duplicate the weight-dict layout. Values are small random — these gate wiring/shape/finiteness, not numerics.</summary>
 public static unsafe class LanceSyntheticWeights
 {
-    private static int s_seed = 1000;
+    private static int _seed = 1000;
 
     /// <summary>Builds a full `LanceTransformer` weight dict for the given (tiny) config: embed/vae_in/vae_out/time_embedder/norms + per-layer MoT und + `_moe_gen` siblings.</summary>
     public static Dictionary<string, Tensor> BuildTransformer(LanceConfig c)
@@ -130,7 +130,7 @@ public static unsafe class LanceSyntheticWeights
     {
         Tensor t = new Tensor(new TensorShape(dims), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

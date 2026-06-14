@@ -22,11 +22,11 @@ public class MatMulGpuBenchmarks
     public int ShapeIndex { get; set; }
 
     /// <summary>Returns the indices into the shape grid. BenchmarkDotNet enumerates all values.</summary>
-    public IEnumerable<int> ShapeSource => Enumerable.Range(0, Shapes.Length);
+    public IEnumerable<int> ShapeSource => Enumerable.Range(0, _shapes.Length);
 
     /// <summary>Curated GEMM shapes relevant to diffusion inference. Format: (M, K, N) with output
     /// <c>[M, N]</c>. Comments reference where the shape appears in our code.</summary>
-    private static readonly (int M, int K, int N)[] Shapes =
+    private static readonly (int M, int K, int N)[] _shapes =
     [
         // SDXL UNet attention QKV projections at 64×64 (4096 spatial tokens), 1280 channels
         (4096, 1280, 1280),
@@ -55,7 +55,7 @@ public class MatMulGpuBenchmarks
     public void Setup()
     {
         _fixture = new BenchmarkFixture();
-        (int M, int K, int N) = Shapes[ShapeIndex];
+        (int M, int K, int N) = _shapes[ShapeIndex];
         _a = BenchmarkFixture.AllocateF32(new TensorShape(M, K), seed: 1);
         _b = BenchmarkFixture.AllocateF32(new TensorShape(K, N), seed: 2);
         _outF32 = new Tensor(new TensorShape(M, N), DType.F32);

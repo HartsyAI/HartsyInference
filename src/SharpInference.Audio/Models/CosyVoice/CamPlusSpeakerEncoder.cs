@@ -22,9 +22,9 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
     // TDNN frontend (dilated Conv1d + ReLU) → statistics pooling → two FC layers → 192.
     private Tensor?[] _tdnnW = new Tensor[5];
     private Tensor?[] _tdnnB = new Tensor[5];
-    private static readonly int[] TdnnChannels = [512, 512, 512, 512, 1536];
-    private static readonly int[] TdnnKernels = [5, 3, 3, 1, 1];
-    private static readonly int[] TdnnDilations = [1, 2, 3, 1, 1];
+    private static readonly int[] _tdnnChannels = [512, 512, 512, 512, 1536];
+    private static readonly int[] _tdnnKernels = [5, 3, 3, 1, 1];
+    private static readonly int[] _tdnnDilations = [1, 2, 3, 1, 1];
     private Tensor? _fc1W, _fc1B;       // 2*1536 → 192
     private Tensor? _fc2W, _fc2B;       // 192 → 192
 
@@ -58,10 +58,10 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
         for (int i = 0; i < 5; i++)
         {
             int t = (int)x.Shape[2];
-            int outCh = TdnnChannels[i];
-            int pad = (TdnnKernels[i] - 1) * TdnnDilations[i] / 2;
+            int outCh = _tdnnChannels[i];
+            int pad = (_tdnnKernels[i] - 1) * _tdnnDilations[i] / 2;
             Tensor nx = new(new TensorShape(1, outCh, t), DType.F32);
-            backend.Conv1d(nx, x, _tdnnW![i]!, _tdnnB![i], stride: 1, padLeft: pad, padRight: pad, dilation: TdnnDilations[i], groups: 1);
+            backend.Conv1d(nx, x, _tdnnW![i]!, _tdnnB![i], stride: 1, padLeft: pad, padRight: pad, dilation: _tdnnDilations[i], groups: 1);
             if (ownsX) x.Dispose();
             backend.LeakyRelu(nx, nx, 0f);     // ReLU (slope 0)
             x = nx;

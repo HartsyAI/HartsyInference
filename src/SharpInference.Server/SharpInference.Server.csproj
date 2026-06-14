@@ -8,6 +8,9 @@
     <!-- ASP.NET Core 10 packages require net10 runtime; this project does not multi-target. -->
     <TargetFrameworks></TargetFrameworks>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- Executable web server, not a consumable library — excluded from the alpha NuGet release.
+         Can be shipped later if a hosted-server package is wanted. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

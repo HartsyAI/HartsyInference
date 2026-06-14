@@ -8,12 +8,12 @@ namespace SharpInference.Diffusion.Tests;
 /// <summary>Pure-logic correctness tests for the generic reusable Lance backbone pieces — the Qwen2.5-VL <see cref="Multimodal3DRope"/> and the shared <see cref="DiTUtils.Sincos3DPositionEmbedding"/> — with no GPU/checkpoint. These guard the rotation invariants (identity at position 0, norm preservation, position sensitivity) that any model reusing them depends on.</summary>
 public unsafe class LanceBackboneTests
 {
-    private static readonly (int, int, int) Section = (16, 24, 24); // sums to 64 = head_dim/2 for head_dim 128
+    private static readonly (int, int, int) _section = (16, 24, 24); // sums to 64 = head_dim/2 for head_dim 128
 
     [Fact]
     public void Rope_AtPositionZero_IsIdentity()
     {
-        Multimodal3DRope rope = new(headDim: 128, theta: 1_000_000.0, section: Section);
+        Multimodal3DRope rope = new(headDim: 128, theta: 1_000_000.0, section: _section);
         int seq = 3, heads = 2, headDim = 128;
 
         Tensor pos = Zeros(seq, 3);   // all positions (t,h,w) = 0
@@ -37,7 +37,7 @@ public unsafe class LanceBackboneTests
     [Fact]
     public void Rope_PreservesPerHeadNorm()
     {
-        Multimodal3DRope rope = new(headDim: 128, theta: 1_000_000.0, section: Section);
+        Multimodal3DRope rope = new(headDim: 128, theta: 1_000_000.0, section: _section);
         int seq = 4, heads = 3, headDim = 128;
 
         Tensor pos = new Tensor(new TensorShape(seq, 3), DType.F32);
@@ -56,7 +56,7 @@ public unsafe class LanceBackboneTests
     [Fact]
     public void Rope_IsPositionSensitive()
     {
-        Multimodal3DRope rope = new(headDim: 128, theta: 1_000_000.0, section: Section);
+        Multimodal3DRope rope = new(headDim: 128, theta: 1_000_000.0, section: _section);
         int heads = 1, headDim = 128;
 
         Tensor posA = Zeros(1, 3);

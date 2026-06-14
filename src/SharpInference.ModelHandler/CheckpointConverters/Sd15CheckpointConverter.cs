@@ -30,19 +30,19 @@ public sealed class Sd15CheckpointConverter
     //   7,8: level 2 resnets + attention (1280ch)
     //   9: level 2 downsample
     //   10,11: level 3 resnets, NO attention (1280ch)
-    private static readonly int[] InputBlockToLevel =       [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3];
-    private static readonly int[] InputBlockToResnetIdx =   [0, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1];
-    private static readonly bool[] InputBlockIsDownsample = [false, false, false, true, false, false, true, false, false, true, false, false];
-    private static readonly bool[] InputBlockHasAttention = [false, true, true, false, true, true, false, true, true, false, false, false];
+    private static readonly int[] _inputBlockToLevel =       [0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3];
+    private static readonly int[] _inputBlockToResnetIdx =   [0, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1];
+    private static readonly bool[] _inputBlockIsDownsample = [false, false, false, true, false, false, true, false, false, true, false, false];
+    private static readonly bool[] _inputBlockHasAttention = [false, true, true, false, true, true, false, true, true, false, false, false];
 
     // Output blocks: 4 levels × 3 resnets = 12 total
     // Flat: 0-2 = up_blocks.0 (level 3, no attn), 3-5 = up_blocks.1 (attn), 6-8 = up_blocks.2 (attn), 9-11 = up_blocks.3 (attn)
-    private static readonly int[] OutputBlockToUpLevel =    [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3];
-    private static readonly int[] OutputBlockToResnetIdx =  [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2];
+    private static readonly int[] _outputBlockToUpLevel =    [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3];
+    private static readonly int[] _outputBlockToResnetIdx =  [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2];
     // UpBlockHasAttention = [false, true, true, true]
-    private static readonly bool[] OutputBlockHasAttention = [false, false, false, true, true, true, true, true, true, true, true, true];
+    private static readonly bool[] _outputBlockHasAttention = [false, false, false, true, true, true, true, true, true, true, true, true];
     // Upsample at last block of each level except the final level (up_blocks.3)
-    private static readonly bool[] OutputBlockHasUpsample =  [false, false, true, false, false, true, false, false, true, false, false, false];
+    private static readonly bool[] _outputBlockHasUpsample =  [false, false, true, false, false, true, false, false, true, false, false, false];
 
     /// <summary>Converts a single-file SD1.5 checkpoint into separate per-component weight dictionaries.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)
@@ -125,11 +125,11 @@ public sealed class Sd15CheckpointConverter
         string afterBlockIdx = afterPrefix[(firstDot + 1)..];
 
         if (blockIdx == 0) return "conv_in." + afterBlockIdx;
-        if (blockIdx >= InputBlockToLevel.Length) return null;
+        if (blockIdx >= _inputBlockToLevel.Length) return null;
 
-        int level = InputBlockToLevel[blockIdx];
+        int level = _inputBlockToLevel[blockIdx];
 
-        if (InputBlockIsDownsample[blockIdx])
+        if (_inputBlockIsDownsample[blockIdx])
         {
             if (afterBlockIdx.StartsWith("0.op."))
                 return $"down_blocks.{level}.downsamplers.0.conv." + afterBlockIdx["0.op.".Length..];
@@ -140,11 +140,11 @@ public sealed class Sd15CheckpointConverter
         if (subDot < 0) return null;
         int subIdx = int.Parse(afterBlockIdx[..subDot]);
         string rest = afterBlockIdx[(subDot + 1)..];
-        int resnetIdx = InputBlockToResnetIdx[blockIdx];
+        int resnetIdx = _inputBlockToResnetIdx[blockIdx];
 
         if (subIdx == 0)
             return $"down_blocks.{level}.resnets.{resnetIdx}." + CheckpointConvertUtils.ConvertResNetSubKey(rest);
-        if (subIdx == 1 && InputBlockHasAttention[blockIdx])
+        if (subIdx == 1 && _inputBlockHasAttention[blockIdx])
             return $"down_blocks.{level}.attentions.{resnetIdx}." + rest;
 
         return null;
@@ -159,10 +159,10 @@ public sealed class Sd15CheckpointConverter
         int blockIdx = int.Parse(afterPrefix[..firstDot]);
         string afterBlockIdx = afterPrefix[(firstDot + 1)..];
 
-        if (blockIdx >= OutputBlockToUpLevel.Length) return null;
+        if (blockIdx >= _outputBlockToUpLevel.Length) return null;
 
-        int upLevel = OutputBlockToUpLevel[blockIdx];
-        int resnetIdx = OutputBlockToResnetIdx[blockIdx];
+        int upLevel = _outputBlockToUpLevel[blockIdx];
+        int resnetIdx = _outputBlockToResnetIdx[blockIdx];
 
         int subDot = afterBlockIdx.IndexOf('.');
         if (subDot < 0) return null;
@@ -174,7 +174,7 @@ public sealed class Sd15CheckpointConverter
 
         if (subIdx == 1)
         {
-            if (OutputBlockHasAttention[blockIdx])
+            if (_outputBlockHasAttention[blockIdx])
                 return $"up_blocks.{upLevel}.attentions.{resnetIdx}." + rest;
             // No attention at this level → this is an upsample
             if (rest.StartsWith("conv."))

@@ -7,7 +7,7 @@ namespace SharpInference.Tests.Common;
 /// structural tests, emitting the exact §5 checkpoint key spellings (<c>decoder.*</c> / <c>encoder.*</c>).</summary>
 public static unsafe class AceStep15SyntheticWeights
 {
-    private static int s_seed = 21500;
+    private static int _seed = 21500;
 
     /// <summary>Tiny v1.5 config used across the tests: dim 16 (2 heads × 8, GQA 2:1), 2 DiT layers, SwiGLU 32,
     /// sliding window 3 (small enough that tiny sequences exercise the mask), 4-ch latents (in 12), patch 2.</summary>
@@ -97,7 +97,7 @@ public static unsafe class AceStep15SyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

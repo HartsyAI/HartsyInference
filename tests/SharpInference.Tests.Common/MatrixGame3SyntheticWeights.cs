@@ -7,7 +7,7 @@ namespace SharpInference.Tests.Common;
 /// <see cref="WanSyntheticWeights.BuildTransformer"/>) plus per-block ActionModule weights and the Plücker projection.</summary>
 public static unsafe class MatrixGame3SyntheticWeights
 {
-    private static int s_seed = 9000;
+    private static int _seed = 9000;
 
     public static Dictionary<string, Tensor> Build(MatrixGame3Config c,
         int actionStreamDim = 0, int actionHiddenSize = 0, int actionHeads = 0, int pluckerPatchDim = 0)
@@ -52,7 +52,7 @@ public static unsafe class MatrixGame3SyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

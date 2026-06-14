@@ -1,0 +1,18 @@
+<Project>
+
+  <!--
+    Auto-imported by NuGet into any project that references the SharpInference.Vulkan package,
+    directly or transitively (e.g. via the SharpInference meta-package). Copies the packed
+    SPIR-V shaders into the consumer's build output under Spirv/, which is where VulkanBackend
+    resolves them at runtime: Path.Combine(AppContext.BaseDirectory, "Spirv").
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\spirv\*.spv">
+      <Link>Spirv\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Pack>false</Pack>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
+
+</Project>

@@ -6,7 +6,7 @@ namespace SharpInference.Tests.Common;
 /// Tiny dims only — the Chroma backbone itself is covered by the existing Chroma tests.</summary>
 public static unsafe class ChromaRadianceSyntheticWeights
 {
-    private static int s_seed = 14000;
+    private static int _seed = 14000;
 
     /// <summary>NeRF head weights for the given dims. <paramref name="convFinalLayer"/> selects variant A
     /// (<c>nerf_final_layer_conv</c>, 3×3 conv) vs variant B (<c>nerf_final_layer</c>, per-pixel linear).</summary>
@@ -56,7 +56,7 @@ public static unsafe class ChromaRadianceSyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

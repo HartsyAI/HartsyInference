@@ -14,11 +14,11 @@ public class ElementwiseGpuBenchmarks
 
     [ParamsSource(nameof(SizeSource))]
     public int SizeIndex { get; set; }
-    public IEnumerable<int> SizeSource => Enumerable.Range(0, Sizes.Length);
+    public IEnumerable<int> SizeSource => Enumerable.Range(0, _sizes.Length);
 
     /// <summary>(B, C, H, W) — common diffusion activation shapes. Last entry is "small" to capture
     /// the launch-overhead floor.</summary>
-    private static readonly (int B, int C, int H, int W)[] Sizes =
+    private static readonly (int B, int C, int H, int W)[] _sizes =
     [
         (1, 4096, 1, 1280),    // [B, S, H] flattened — DiT block residual
         (1, 1280, 32, 32),     // SDXL UNet bottom level
@@ -30,7 +30,7 @@ public class ElementwiseGpuBenchmarks
     public void Setup()
     {
         _fixture = new BenchmarkFixture();
-        (int B, int C, int H, int W) = Sizes[SizeIndex];
+        (int B, int C, int H, int W) = _sizes[SizeIndex];
         _input = BenchmarkFixture.AllocateF32(new TensorShape(B, C, H, W));
         _output = new Tensor(new TensorShape(B, C, H, W), DType.F32);
         _bias = BenchmarkFixture.AllocateF32(new TensorShape(C));
@@ -62,7 +62,7 @@ public class ElementwiseGpuBenchmarks
     [Benchmark]
     public void BroadcastAdd()
     {
-        (int _, int C, int H, int W) = Sizes[SizeIndex];
+        (int _, int C, int H, int W) = _sizes[SizeIndex];
         _fixture!.Backend.BroadcastAdd(_input!, _bias!, C, H * W);
         _fixture.Sync();
     }

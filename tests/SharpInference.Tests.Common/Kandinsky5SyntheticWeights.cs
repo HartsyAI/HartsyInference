@@ -9,7 +9,7 @@ namespace SharpInference.Tests.Common;
 /// HunyuanVideo VAE (encoder + decoder + quant convs). One source of truth for the Diffusion + Video test projects.</summary>
 public static unsafe class Kandinsky5SyntheticWeights
 {
-    private static int s_seed = 7000;
+    private static int _seed = 7000;
 
     /// <summary>Tiny T2V config (visual_cond, 33-ch-style packing at 4 latent channels → 9-ch input).</summary>
     public static Kandinsky5Config TinyVideoConfig => new()
@@ -204,7 +204,7 @@ public static unsafe class Kandinsky5SyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

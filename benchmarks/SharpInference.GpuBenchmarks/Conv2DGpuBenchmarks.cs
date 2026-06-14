@@ -16,10 +16,10 @@ public class Conv2DGpuBenchmarks
     [ParamsSource(nameof(ShapeSource))]
     public int ShapeIndex { get; set; }
 
-    public IEnumerable<int> ShapeSource => Enumerable.Range(0, Shapes.Length);
+    public IEnumerable<int> ShapeSource => Enumerable.Range(0, _shapes.Length);
 
     /// <summary>(N, Cin, Cout, H, W, K, stride, pad). Output spatial dims derive from H/W and stride.</summary>
-    private static readonly (int N, int Cin, int Cout, int H, int W, int K, int Stride, int Pad)[] Shapes =
+    private static readonly (int N, int Cin, int Cout, int H, int W, int K, int Stride, int Pad)[] _shapes =
     [
         // SDXL UNet base level @ 1024² generation — 128² latent, 320 channels, 3×3
         (1, 320, 320, 128, 128, 3, 1, 1),
@@ -43,7 +43,7 @@ public class Conv2DGpuBenchmarks
     public void Setup()
     {
         _fixture = new BenchmarkFixture();
-        (int N, int Cin, int Cout, int H, int W, int K, int Stride, int Pad) = Shapes[ShapeIndex];
+        (int N, int Cin, int Cout, int H, int W, int K, int Stride, int Pad) = _shapes[ShapeIndex];
         _input = BenchmarkFixture.AllocateF32(new TensorShape(N, Cin, H, W), seed: 1);
         _weight = BenchmarkFixture.AllocateF32(new TensorShape(Cout, Cin, K, K), seed: 2);
         _bias = BenchmarkFixture.AllocateF32(new TensorShape(Cout), seed: 3);
@@ -64,7 +64,7 @@ public class Conv2DGpuBenchmarks
     [Benchmark]
     public void Conv2D_F32()
     {
-        (int _, int _, int _, int _, int _, int _, int Stride, int Pad) = Shapes[ShapeIndex];
+        (int _, int _, int _, int _, int _, int _, int Stride, int Pad) = _shapes[ShapeIndex];
         _fixture!.Backend.Conv2D(_output!, _input!, _weight!, _bias, Stride, Stride, Pad, Pad);
         _fixture.Sync();
     }

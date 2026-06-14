@@ -21,7 +21,7 @@ public sealed class MatrixGame3ActionEncoder : IActionEncoder
     public const int PayloadBytes = KeyboardDim + 2 * sizeof(float);
 
     private readonly float _maxMouseMagnitude;
-    private static readonly ActionStreamSpec[] StreamSpecs =
+    private static readonly ActionStreamSpec[] _streamSpecs =
     [
         new("keyboard", ActionStreamRole.PerBlockCrossAttn, KeyboardDim),
         new("mouse", ActionStreamRole.PerBlockSelfAttn, MouseDim),
@@ -29,7 +29,7 @@ public sealed class MatrixGame3ActionEncoder : IActionEncoder
 
     public MatrixGame3ActionEncoder(float maxMouseMagnitude = 1.0f) => _maxMouseMagnitude = maxMouseMagnitude;
 
-    public IReadOnlyList<ActionStreamSpec> Streams => StreamSpecs;
+    public IReadOnlyList<ActionStreamSpec> Streams => _streamSpecs;
 
     /// <summary>Packs raw inputs into the 14-byte payload this encoder consumes.</summary>
     public static void PackPayload(ReadOnlySpan<byte> keyStates, float mouseDx, float mouseDy, Span<byte> payload)

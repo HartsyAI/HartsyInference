@@ -6,7 +6,7 @@ namespace SharpInference.Tests.Common;
 /// <summary>Shared synthetic-weight generators for LTX-Video structural tests (DiT transformer + base VAE decoder). One source of truth so the Diffusion and Video test projects don't duplicate the weight-dict layout. Small random values — these gate wiring/shape/finiteness, not numerics.</summary>
 public static unsafe class LtxSyntheticWeights
 {
-    private static int s_seed = 4000;
+    private static int _seed = 4000;
 
     /// <summary>Builds a full <see cref="LtxVideoTransformer"/> weight dict for the given (tiny) config.</summary>
     public static Dictionary<string, Tensor> BuildTransformer(LtxVideoConfig c)
@@ -91,7 +91,7 @@ public static unsafe class LtxSyntheticWeights
         long[] d = Array.ConvertAll(dims, x => (long)x);
         Tensor t = new Tensor(new TensorShape(d), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(s_seed++);
+        Random rng = new(_seed++);
         for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
         return t;
     }

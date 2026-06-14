@@ -20,9 +20,14 @@
        The build is invoked manually (not as MSBuild target) because not every
        dev box has glslangValidator installed; CI handles compilation. -->
   <ItemGroup>
-    <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)">
+    <!-- One item, two jobs: copy SPIR-V next to THIS project's own output under Spirv/
+         (local build/tests), AND pack it into the nupkg under spirv/.
+         SharpInference.Vulkan.targets then copies it into a *consumer's* output. -->
+    <Content Include="..\..\native\vulkan\build\*.spv" Link="Spirv\%(Filename)%(Extension)" Pack="true" PackagePath="spirv/">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Ship the copy logic. build/ = direct package refs; buildTransitive/ = via meta-package. -->
+    <None Include="SharpInference.Vulkan.targets" Pack="true" PackagePath="build/;buildTransitive/" Visible="false" />
   </ItemGroup>
 
 </Project>

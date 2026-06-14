@@ -25,8 +25,8 @@ public sealed class YueCheckpointConverter
     // VALIDATION-GATED (pending a real xcodec_mini_infer key dump): the upstream SoundStream class names its
     // acoustic waveform decoder `decoder_2` (`decoder` is the semantic-reconstruction head); spellings here follow
     // the soundstream_hubert_new.py module names. If a dump shows different roots, extend these tables.
-    private static readonly string[] XCodecWrapperPrefixes = ["codec_model.", "generator.", "model."];
-    private static readonly string[] XCodecDropPrefixes =
+    private static readonly string[] _xCodecWrapperPrefixes = ["codec_model.", "generator.", "model."];
+    private static readonly string[] _xCodecDropPrefixes =
     [
         "semantic_model.", "encoder_semantic.", "decoder_semantic.", "decoder_semantic_2.",
         "fc_prior.", "fc_post1.", "fc_post2.", "fc_post_a.", "fc_post_s.", "discriminator.",
@@ -88,7 +88,7 @@ public sealed class YueCheckpointConverter
     /// Weight-norm pairs stay raw — the engine DAC blocks fuse them at load time.</summary>
     public static string? MapXCodecKey(string key)
     {
-        foreach (string prefix in XCodecWrapperPrefixes)
+        foreach (string prefix in _xCodecWrapperPrefixes)
         {
             if (key.StartsWith(prefix, StringComparison.Ordinal))
             {
@@ -96,7 +96,7 @@ public sealed class YueCheckpointConverter
                 break;
             }
         }
-        foreach (string prefix in XCodecDropPrefixes)
+        foreach (string prefix in _xCodecDropPrefixes)
         {
             if (key.StartsWith(prefix, StringComparison.Ordinal))
                 return null;

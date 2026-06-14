@@ -5,6 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>SharpInference.Samples.ConvertSafetensorsToGguf</RootNamespace>
     <AssemblyName>convert-safetensors-to-gguf</AssemblyName>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

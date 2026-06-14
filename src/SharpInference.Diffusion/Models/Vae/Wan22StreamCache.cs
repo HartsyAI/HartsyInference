@@ -4,12 +4,12 @@ namespace SharpInference.Diffusion.Models.Vae;
 
 /// <summary>Per-conv temporal cache for streaming Wan2.2 VAE decode (the <c>feat_cache</c> / <c>feat_idx</c> machine from <c>vae2_2.py</c>). The decode driver processes one latent frame per call; each <c>CausalConv3d</c> stashes the last <c>CACHE_T=2</c> frames of its input here so the next frame's causal convolution sees real left-context instead of zero padding — giving temporal continuity across the per-frame chunks without ever materializing the whole clip.
 ///
-/// <para>Slots are addressed by forward-traversal order (auto-sized on the first frame): call <see cref="NewFrame"/> before each latent frame, then <see cref="StepConv"/> / <see cref="StepTimeConv"/> in the exact same order every frame. A slot holds <c>null</c> (unused), the <see cref="RepMarker"/> sentinel (Resample temporal first-chunk), or a Tensor (the cached frames).</para></summary>
+/// <para>Slots are addressed by forward-traversal order (auto-sized on the first frame): call <see cref="NewFrame"/> before each latent frame, then <see cref="StepConv"/> / <see cref="StepTimeConv"/> in the exact same order every frame. A slot holds <c>null</c> (unused), the <see cref="_repMarker"/> sentinel (Resample temporal first-chunk), or a Tensor (the cached frames).</para></summary>
 public sealed unsafe class Wan22StreamCache : IDisposable
 {
     private const int CacheT = 2;
     /// <summary>Sentinel marking a Resample temporal slot that has been initialized but not yet cached (the upstream "Rep" string).</summary>
-    private static readonly object RepMarker = new();
+    private static readonly object _repMarker = new();
 
     private readonly List<object?> _slots = new();
     private int _idx;
@@ -48,11 +48,11 @@ public sealed unsafe class Wan22StreamCache : IDisposable
         object? slot = _slots[idx];
         if (slot is null)
         {
-            _slots[idx] = RepMarker;
+            _slots[idx] = _repMarker;
             return (true, null);
         }
 
-        bool isRep = ReferenceEquals(slot, RepMarker);
+        bool isRep = ReferenceEquals(slot, _repMarker);
         int avail = Math.Min(CacheT, FramesOf(convInput));
         Tensor cacheX = Vae3dLayout.SliceFrames(convInput, FramesOf(convInput) - avail, avail);
         if (FramesOf(cacheX) < 2 && !isRep)

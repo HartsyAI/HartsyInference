@@ -19,8 +19,8 @@ namespace SharpInference.ModelHandler.CheckpointConverters;
 /// MG-LightVAE pruned decoders are a follow-up. umT5-XXL ships separately.</para></summary>
 public sealed class MatrixGame3CheckpointConverter
 {
-    private static readonly string[] StudentPrefixes = ["student.", "generator."];
-    private static readonly string[] DropPrefixes = ["critic.", "fake_score.", "ema.", "discriminator."];
+    private static readonly string[] _studentPrefixes = ["student.", "generator."];
+    private static readonly string[] _dropPrefixes = ["critic.", "fake_score.", "ema.", "discriminator."];
 
     /// <summary>Result bucket: one dictionary holding the diffusers-renamed Wan core plus the original-named
     /// Matrix-Game additions, exactly what <c>MatrixGame3Transformer.LoadWeights</c> consumes.</summary>
@@ -40,10 +40,10 @@ public sealed class MatrixGame3CheckpointConverter
     /// <c>action_model</c>.</summary>
     public static string? MapKey(string key, bool fromOriginalNaming)
     {
-        foreach (string drop in DropPrefixes)
+        foreach (string drop in _dropPrefixes)
             if (key.StartsWith(drop, StringComparison.Ordinal))
                 return null;
-        foreach (string student in StudentPrefixes)
+        foreach (string student in _studentPrefixes)
             if (key.StartsWith(student, StringComparison.Ordinal))
                 key = key[student.Length..];
 
@@ -67,7 +67,7 @@ public sealed class MatrixGame3CheckpointConverter
 
         // If a student prefix exists, only that slice is the inference model.
         string? studentPrefix = null;
-        foreach (string candidate in StudentPrefixes)
+        foreach (string candidate in _studentPrefixes)
         {
             foreach (string key in allWeights.Keys)
                 if (key.StartsWith(candidate, StringComparison.Ordinal)) { studentPrefix = candidate; break; }
