@@ -5,7 +5,9 @@ name: Publish to NuGet
 # (1.0.0-alpha.<run_number>) so versions never collide — NuGet.org forbids re-pushing
 # an existing version. Trigger manually via "Run workflow" to override the suffix.
 #
-# Requires one repository secret: NUGET_API_KEY (a Push-scoped key for SharpInference*).
+# Auth uses NuGet Trusted Publishing (OIDC) — no API key/secret to store. A matching
+# Trusted Publisher policy must exist on nuget.org:
+#   Owner=kalebbroo  RepositoryOwner=HartsyAI  Repository=SharpInference  WorkflowFile=publish-nuget.yml
 
 on:
   push:
@@ -26,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write   # required for Trusted Publishing: lets the job request a GitHub OIDC token
 
 concurrency:
   # Never run two publishes at once — a second run could try to push a version the
@@ -72,9 +75,17 @@ jobs:
       - name: List packages
         run: ls -1 artifacts/*.nupkg
 
+      # Exchange the GitHub OIDC token for a short-lived (1-hour) NuGet API key.
+      # Run this right before the push so the key doesn't expire mid-job.
+      - name: NuGet login (OIDC -> temporary API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: kalebbroo   # nuget.org profile name (the policy owner), NOT an email
+
       - name: Push to NuGet.org
         run: |
           dotnet nuget push "artifacts/*.nupkg" \
-            --api-key "${{ secrets.NUGET_API_KEY }}" \
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
