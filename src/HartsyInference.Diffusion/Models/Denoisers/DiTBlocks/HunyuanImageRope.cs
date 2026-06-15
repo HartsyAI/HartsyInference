@@ -11,13 +11,14 @@ public sealed unsafe class HunyuanImageRope
     private readonly int _headDim;
 
     /// <summary>Creates a HunyuanImageRope.</summary>
-    /// <param name="axesDim">Per-axis dim split <c>(height, width)</c>. Each must be even. Default <c>[64, 64]</c>.</param>
+    /// <param name="axesDim">Per-axis dim split. 2 axes <c>(height, width)</c> for image (default <c>[64, 64]</c>);
+    /// 3 axes <c>(temporal, height, width)</c> for video (e.g. <c>[16, 56, 56]</c> for HunyuanVideo). Each must be even.</param>
     /// <param name="theta">RoPE base frequency. Default 256.</param>
     public HunyuanImageRope(int[]? axesDim = null, float theta = 256.0f)
     {
         _axesDim = axesDim ?? [64, 64];
-        if (_axesDim.Length != 2)
-            throw new ArgumentException("HunyuanImageRope requires exactly 2 axes (height, width).", nameof(axesDim));
+        if (_axesDim.Length < 1)
+            throw new ArgumentException("HunyuanImageRope requires at least 1 axis.", nameof(axesDim));
         _theta = theta;
         _headDim = 0;
         for (int i = 0; i < _axesDim.Length; i++)
@@ -33,30 +34,48 @@ public sealed unsafe class HunyuanImageRope
     /// <summary>Rotates Q and K in-place for image tokens only. Tokens are laid out row-major over <paramref name="hPacked"/> × <paramref name="wPacked"/>; token at index <c>r * W + c</c> uses position <c>(r, c)</c>. Both Q and K must be <c>[B, numHeads, imgSeqLen, headDim]</c> and <c>imgSeqLen == hPacked * wPacked</c>.</summary>
     public void ApplyImage(Tensor q, Tensor k, int batch, int numHeads, int hPacked, int wPacked)
     {
-        int imgSeqLen = hPacked * wPacked;
-        int halfDim = _headDim / 2;
-        float[] cosTable = new float[imgSeqLen * halfDim];
-        float[] sinTable = new float[imgSeqLen * halfDim];
-
-        for (int s = 0; s < imgSeqLen; s++)
-        {
-            int row = s / wPacked;
-            int col = s - row * wPacked;
-            FillTokenFreqs(cosTable, sinTable, s, height: row, width: col);
-        }
-
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, imgSeqLen);
+        Span<int> dims = stackalloc int[2] { hPacked, wPacked };
+        ApplyJoint(q, k, batch, numHeads, dims);
     }
 
-    private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx,
-        double height, double width)
+    /// <summary>Rotates Q and K in-place for image/video tokens laid out row-major over
+    /// <paramref name="packedDims"/> (e.g. <c>[h, w]</c> for image or <c>[t, h, w]</c> for video). The number
+    /// of dims must equal the axis count the rope was constructed with, and their product must equal the token
+    /// sequence length. Q and K are <c>[B, numHeads, seqLen, headDim]</c>. Text tokens are roped separately
+    /// (identity) by the caller — this rotates only the passed image/video tokens.</summary>
+    public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads, ReadOnlySpan<int> packedDims)
+    {
+        if (packedDims.Length != _axesDim.Length)
+            throw new ArgumentException($"packedDims has {packedDims.Length} dims but rope has {_axesDim.Length} axes.", nameof(packedDims));
+        int seqLen = 1;
+        for (int i = 0; i < packedDims.Length; i++) seqLen *= packedDims[i];
+        int halfDim = _headDim / 2;
+        float[] cosTable = new float[seqLen * halfDim];
+        float[] sinTable = new float[seqLen * halfDim];
+
+        Span<double> pos = stackalloc double[packedDims.Length];
+        for (int s = 0; s < seqLen; s++)
+        {
+            // Decode row-major coordinates for token s over packedDims.
+            int rem = s;
+            for (int axis = packedDims.Length - 1; axis >= 0; axis--)
+            {
+                pos[axis] = rem % packedDims[axis];
+                rem /= packedDims[axis];
+            }
+            FillTokenFreqs(cosTable, sinTable, s, pos);
+        }
+
+        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, seqLen);
+    }
+
+    private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx, ReadOnlySpan<double> positions)
     {
         int halfDim = _headDim / 2;
         int destOffset = seqIdx * halfDim;
         int freqOffset = 0;
 
-        Span<double> positions = stackalloc double[2] { height, width };
-        for (int axis = 0; axis < 2; axis++)
+        for (int axis = 0; axis < _axesDim.Length; axis++)
         {
             int axisDim = _axesDim[axis];
             int numPairs = axisDim / 2;

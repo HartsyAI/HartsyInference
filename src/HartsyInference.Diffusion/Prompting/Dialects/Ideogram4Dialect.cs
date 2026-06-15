@@ -112,6 +112,109 @@ public sealed class Ideogram4Dialect : IPromptDialect
         writer.WriteEndArray();
     }
 
+    /// <summary>Parses an Ideogram 4 structured-JSON caption back into a <see cref="StructuredPrompt"/> — the inverse of <see cref="Serialize(StructuredPrompt, bool)"/>. This is what a magic-prompt expander (an LLM that emits the JSON) feeds back into the builder. Lenient on key presence (missing optional keys → null/empty) but strict on shape: a malformed document or an element with no recognized <c>type</c> throws <see cref="HartsyInferenceException"/>. Does NOT validate schema constraints — call <see cref="Validate"/> (or serialize with <c>validate: true</c>) for that.</summary>
+    public StructuredPrompt Parse(string json)
+    {
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(json);
+        }
+        catch (JsonException ex)
+        {
+            throw new HartsyInferenceException($"Ideogram 4 prompt JSON is malformed: {ex.Message}", ex);
+        }
+
+        using (doc)
+        {
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                throw new HartsyInferenceException($"Ideogram 4 prompt JSON must be an object, got {root.ValueKind}.");
+
+            string? summary = root.TryGetProperty("high_level_description", out JsonElement hld) && hld.ValueKind == JsonValueKind.String
+                ? hld.GetString() : null;
+
+            StyleBlock? style = root.TryGetProperty("style_description", out JsonElement sd) && sd.ValueKind == JsonValueKind.Object
+                ? ParseStyle(sd) : null;
+
+            string? background = null;
+            List<PromptElement> elements = [];
+            if (root.TryGetProperty("compositional_deconstruction", out JsonElement cd) && cd.ValueKind == JsonValueKind.Object)
+            {
+                if (cd.TryGetProperty("background", out JsonElement bg) && bg.ValueKind == JsonValueKind.String)
+                    background = bg.GetString();
+                if (cd.TryGetProperty("elements", out JsonElement els) && els.ValueKind == JsonValueKind.Array)
+                    foreach (JsonElement el in els.EnumerateArray())
+                        elements.Add(ParseElement(el));
+            }
+
+            return new StructuredPrompt
+            {
+                Summary = summary,
+                Style = style,
+                Background = background,
+                Elements = elements,
+            };
+        }
+    }
+
+    private static StyleBlock ParseStyle(JsonElement sd)
+    {
+        return new StyleBlock
+        {
+            Aesthetics = GetStr(sd, "aesthetics"),
+            Lighting = GetStr(sd, "lighting"),
+            Medium = GetStr(sd, "medium"),
+            Photo = GetStr(sd, "photo"),
+            ArtStyle = GetStr(sd, "art_style"),
+            ColorPalette = ParsePalette(sd),
+        };
+    }
+
+    private static PromptElement ParseElement(JsonElement el)
+    {
+        if (el.ValueKind != JsonValueKind.Object || !el.TryGetProperty("type", out JsonElement typeEl) || typeEl.ValueKind != JsonValueKind.String)
+            throw new HartsyInferenceException("Each element must be an object with a string \"type\" (\"obj\" or \"text\").");
+
+        string type = typeEl.GetString()!;
+        BoundingBox? bbox = ParseBbox(el);
+        string desc = GetStr(el, "desc") ?? "";
+        IReadOnlyList<string> palette = ParsePalette(el);
+
+        return type switch
+        {
+            "obj" => new ObjectElement { Bbox = bbox, Description = desc, ColorPalette = palette },
+            "text" => new TextElement
+            {
+                Text = GetStr(el, "text") ?? throw new HartsyInferenceException("A text element must have a \"text\" string."),
+                Bbox = bbox,
+                Description = desc,
+                ColorPalette = palette,
+            },
+            _ => throw new HartsyInferenceException($"Unknown element type '{type}' (expected \"obj\" or \"text\")."),
+        };
+    }
+
+    private static BoundingBox? ParseBbox(JsonElement el)
+    {
+        if (!el.TryGetProperty("bbox", out JsonElement bb) || bb.ValueKind != JsonValueKind.Array)
+            return null;
+        int[] v = [.. bb.EnumerateArray().Select(e => e.GetInt32())];
+        if (v.Length != 4)
+            throw new HartsyInferenceException($"bbox must have 4 integers [y_min,x_min,y_max,x_max], got {v.Length}.");
+        return new BoundingBox(v[0], v[1], v[2], v[3]);
+    }
+
+    private static IReadOnlyList<string> ParsePalette(JsonElement parent)
+    {
+        if (!parent.TryGetProperty("color_palette", out JsonElement cp) || cp.ValueKind != JsonValueKind.Array)
+            return [];
+        return [.. cp.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)];
+    }
+
+    private static string? GetStr(JsonElement parent, string name)
+        => parent.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
     /// <summary>Validates the prompt against Ideogram's schema constraints, throwing <see cref="HartsyInferenceException"/> on the common mistakes (bad/short/lowercase hex, palette over limits, both photo+art_style set, missing background, malformed bbox).</summary>
     public static void Validate(StructuredPrompt prompt)
     {

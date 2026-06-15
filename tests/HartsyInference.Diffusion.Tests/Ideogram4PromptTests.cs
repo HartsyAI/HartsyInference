@@ -2,6 +2,7 @@ using Xunit;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Prompting.Dialects;
+using HartsyInference.Diffusion.Prompting.MagicPrompt;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -99,6 +100,95 @@ public class Ideogram4PromptTests
         Assert.Equal(0, y);
         Assert.Equal(512, w);
         Assert.Equal(768, h);
+    }
+
+    [Fact]
+    public void Parse_RoundTrips_FullPrompt()
+    {
+        // Serialize a rich prompt, parse it back, re-serialize — the JSON must be byte-identical.
+        // (Top-level ColorPalette is validated-but-not-serialized, so it legitimately doesn't survive.)
+        StructuredPrompt original = new StructuredPromptBuilder()
+            .Summary("A neon ramen shop at night")
+            .Style(s => s.Aesthetics("cyberpunk").ArtStyle("anime").Lighting("moody neon").Medium("digital illustration"))
+            .Background("wet city street")
+            .AddObject("a steaming bowl of ramen", new BoundingBox(600, 350, 950, 700), ["#FF6B35", "#F7C59F"])
+            .AddText("らーめん", new BoundingBox(50, 100, 200, 900), "glowing red sign")
+            .Build();
+
+        string json1 = _dialect.Serialize(original);
+        StructuredPrompt parsed = _dialect.Parse(json1);
+        string json2 = _dialect.Serialize(parsed);
+
+        Assert.Equal(json1, json2);
+    }
+
+    [Fact]
+    public void Parse_ReconstructsFields()
+    {
+        const string json =
+            "{\"high_level_description\":\"a cat\"," +
+            "\"style_description\":{\"lighting\":\"soft\",\"photo\":\"dslr\",\"color_palette\":[\"#FF0000\"]}," +
+            "\"compositional_deconstruction\":{\"background\":\"a room\",\"elements\":[" +
+            "{\"type\":\"obj\",\"bbox\":[10,20,30,40],\"desc\":\"a ginger cat\",\"color_palette\":[\"#ABCDEF\"]}," +
+            "{\"type\":\"text\",\"text\":\"HELLO\",\"desc\":\"poster\"}]}}";
+
+        StructuredPrompt p = _dialect.Parse(json);
+
+        Assert.Equal("a cat", p.Summary);
+        Assert.Equal("soft", p.Style!.Lighting);
+        Assert.Equal("dslr", p.Style.Photo);
+        Assert.Equal(new[] { "#FF0000" }, p.Style.ColorPalette);
+        Assert.Equal("a room", p.Background);
+        Assert.Equal(2, p.Elements.Count);
+        ObjectElement obj = Assert.IsType<ObjectElement>(p.Elements[0]);
+        Assert.Equal("a ginger cat", obj.Description);
+        Assert.Equal(new BoundingBox(10, 20, 30, 40), obj.Bbox);
+        Assert.Equal(new[] { "#ABCDEF" }, obj.ColorPalette);
+        TextElement txt = Assert.IsType<TextElement>(p.Elements[1]);
+        Assert.Equal("HELLO", txt.Text);
+        Assert.Null(txt.Bbox);
+    }
+
+    [Fact]
+    public void Parse_RejectsMalformedJsonAndUnknownType()
+    {
+        Assert.Throws<HartsyInferenceException>(() => _dialect.Parse("{not json"));
+        Assert.Throws<HartsyInferenceException>(() => _dialect.Parse("[1,2,3]"));
+        Assert.Throws<HartsyInferenceException>(() =>
+            _dialect.Parse("{\"compositional_deconstruction\":{\"background\":\"x\",\"elements\":[{\"type\":\"widget\"}]}}"));
+    }
+
+    [Fact]
+    public async Task DelegateMagicPromptExpander_ParsesLlmJson_AndValidates()
+    {
+        // Fake LLM that wraps the JSON in a ```json fence + prose (the expander must tolerate it).
+        const string llmReply =
+            "Sure! Here is the structured prompt:\n```json\n" +
+            "{\"high_level_description\":\"a cat on a mat\"," +
+            "\"compositional_deconstruction\":{\"background\":\"a sunny room\",\"elements\":[" +
+            "{\"type\":\"obj\",\"desc\":\"a ginger cat\"}]}}\n```\nHope that helps!";
+
+        DelegateMagicPromptExpander expander = new(
+            systemPrompt: "emit ideogram json",
+            complete: (_, _, _) => Task.FromResult(llmReply));
+
+        StructuredPrompt p = await expander.ExpandAsync("a cat");
+
+        Assert.Equal("a cat on a mat", p.Summary);
+        Assert.Equal("a sunny room", p.Background);
+        Assert.Equal("a ginger cat", Assert.IsType<ObjectElement>(Assert.Single(p.Elements)).Description);
+        // Re-serializing the expander's output must produce valid Ideogram JSON.
+        Assert.Contains("a cat on a mat", _dialect.Serialize(p));
+    }
+
+    [Fact]
+    public async Task DelegateMagicPromptExpander_ThrowsOnEmptyOrNonJsonResponse()
+    {
+        DelegateMagicPromptExpander empty = new("sys", (_, _, _) => Task.FromResult("   "));
+        await Assert.ThrowsAsync<HartsyInferenceException>(() => empty.ExpandAsync("x"));
+
+        DelegateMagicPromptExpander prose = new("sys", (_, _, _) => Task.FromResult("no json here"));
+        await Assert.ThrowsAsync<HartsyInferenceException>(() => prose.ExpandAsync("x"));
     }
 
     [Fact]

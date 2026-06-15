@@ -144,7 +144,12 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             Logs.Debug($"Step {steps - i}/{steps} (t={tVal:F4}, gw={gw:F1}) in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(steps - i, steps, stepSw.Elapsed.TotalMilliseconds));
+            // Tag the latent family for live-preview decoders (Flux.2 VAE, shared with Lens). The working
+            // latent is token-packed [1, nImg, 128], so no per-step Latent snapshot is provided.
+            onProgress?.Invoke(new GenerationProgress(steps - i, steps, stepSw.Elapsed.TotalMilliseconds)
+            {
+                LatentArch = LatentArchitecture.Flux2,
+            });
         }
 
         llmFull.Dispose();

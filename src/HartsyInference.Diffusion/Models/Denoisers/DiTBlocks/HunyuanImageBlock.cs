@@ -137,7 +137,7 @@ public sealed unsafe class HunyuanImageBlock
 
     /// <summary>Forward pass. Each stream's modulation produces 6 params; image-only RoPE is applied via <see cref="HunyuanImageRope"/> before <c>[img, txt]</c> joint-attention concat. Returns <c>(image, text)</c>.</summary>
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
-        HunyuanImageRope rope, int imgPackedH, int imgPackedW)
+        HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT = 1)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
@@ -216,7 +216,13 @@ public sealed unsafe class HunyuanImageBlock
         txtKNormed.Dispose();
         txtV.Dispose();
 
-        rope.ApplyImage(imgQMh, imgKMh, batch, _numHeads, imgPackedH, imgPackedW);
+        if (imgPackedT > 1)
+        {
+            Span<int> dims = stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW };
+            rope.ApplyJoint(imgQMh, imgKMh, batch, _numHeads, dims);
+        }
+        else
+            rope.ApplyImage(imgQMh, imgKMh, batch, _numHeads, imgPackedH, imgPackedW);
 
         Tensor jointQ = new Tensor(jointMhShape, DType.F32);
         Tensor jointK = new Tensor(jointMhShape, DType.F32);

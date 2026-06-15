@@ -81,7 +81,7 @@ public sealed unsafe class HunyuanImageSingleBlock
 
     /// <summary>Forward pass on concatenated <c>[image, text]</c> sequence. Image-only RoPE is applied to the image portion of joint Q/K. Returns <c>(image, text)</c>.</summary>
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
-        HunyuanImageRope rope, int imgPackedH, int imgPackedW)
+        HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT = 1)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
@@ -134,7 +134,7 @@ public sealed unsafe class HunyuanImageSingleBlock
         kNormed.Dispose();
         v.Dispose();
 
-        ApplyRopeToImagePortion(qMh, kMh, rope, batch, _numHeads, totalSeqLen, imgSeqLen, imgPackedH, imgPackedW);
+        ApplyRopeToImagePortion(qMh, kMh, rope, batch, _numHeads, totalSeqLen, imgSeqLen, imgPackedH, imgPackedW, imgPackedT);
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
@@ -216,7 +216,7 @@ public sealed unsafe class HunyuanImageSingleBlock
 
     /// <summary>Applies image-only RoPE to a joint <c>[B, H, S_img+S_txt, D]</c> Q/K. Image tokens occupy the first <paramref name="imgSeqLen"/> sequence positions.</summary>
     private static void ApplyRopeToImagePortion(Tensor qMh, Tensor kMh, HunyuanImageRope rope,
-        int batch, int numHeads, int totalSeqLen, int imgSeqLen, int imgPackedH, int imgPackedW)
+        int batch, int numHeads, int totalSeqLen, int imgSeqLen, int imgPackedH, int imgPackedW, int imgPackedT = 1)
     {
         int headDim = rope.HeadDim;
         TensorShape imgPortionShape = new TensorShape(batch, numHeads, imgSeqLen, headDim);
@@ -225,7 +225,13 @@ public sealed unsafe class HunyuanImageSingleBlock
         ExtractImagePortion(qImg, qMh, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
         ExtractImagePortion(kImg, kMh, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
 
-        rope.ApplyImage(qImg, kImg, batch, numHeads, imgPackedH, imgPackedW);
+        if (imgPackedT > 1)
+        {
+            Span<int> dims = stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW };
+            rope.ApplyJoint(qImg, kImg, batch, numHeads, dims);
+        }
+        else
+            rope.ApplyImage(qImg, kImg, batch, numHeads, imgPackedH, imgPackedW);
 
         WriteImagePortion(qMh, qImg, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
         WriteImagePortion(kMh, kImg, batch, numHeads, totalSeqLen, imgSeqLen, headDim);
