@@ -84,10 +84,10 @@ public sealed class ClipTokenizerTests : IDisposable
 
         Assert.True(eotPos > 0, "EOT token not found");
 
-        // All positions after EOT should be zero (padding)
+        // CLIP pads with EOT (pad_token == eos_token), not zero — matches HuggingFace CLIPTokenizer.
         for (int i = eotPos + 1; i < tokens.Length; i++)
         {
-            Assert.Equal(0, tokens[i]);
+            Assert.Equal(ClipTokenizer.EndOfTextId, tokens[i]);
         }
     }
 
@@ -96,13 +96,13 @@ public sealed class ClipTokenizerTests : IDisposable
     {
         if (!_modelsAvailable) return;
 
-        // Verified output from Microsoft.ML.Tokenizers BpeTokenizer with CLIP vocab/merges
-        // [49406, 64, 1153, 684, 64, 1481, 49407, 0, 0, ...]
+        // Verified against OpenAI CLIP (regex pre-tokenizer + </w> end-of-word suffix):
+        // [49406, 320, 1125, 539, 320, 2368, 49407, 49407, ...]
         int[] tokens = _tokenizer!.Encode("a photo of a cat");
 
         Assert.Equal(ClipTokenizer.StartOfTextId, tokens[0]);
 
-        int[] expectedContent = [64, 1153, 684, 64, 1481];
+        int[] expectedContent = [320, 1125, 539, 320, 2368];
         for (int i = 0; i < expectedContent.Length; i++)
         {
             Assert.Equal(expectedContent[i], tokens[i + 1]);
@@ -121,9 +121,10 @@ public sealed class ClipTokenizerTests : IDisposable
         Assert.Equal(ClipTokenizer.StartOfTextId, tokens[0]);
         Assert.Equal(ClipTokenizer.EndOfTextId, tokens[1]);
 
+        // CLIP pads with EOT (pad_token == eos_token), not zero — matches HuggingFace CLIPTokenizer.
         for (int i = 2; i < tokens.Length; i++)
         {
-            Assert.Equal(0, tokens[i]);
+            Assert.Equal(ClipTokenizer.EndOfTextId, tokens[i]);
         }
     }
 
@@ -146,11 +147,11 @@ public sealed class ClipTokenizerTests : IDisposable
 
         int[] tokens = _tokenizer!.Encode("123");
 
-        // SOT + digit tokens + EOT — digits tokenized as [16, 17, 18]
+        // SOT + digit tokens + EOT — OpenAI CLIP encodes "1</w>","2</w>","3</w>" as [272, 273, 274]
         Assert.Equal(ClipTokenizer.StartOfTextId, tokens[0]);
-        Assert.Equal(16, tokens[1]);
-        Assert.Equal(17, tokens[2]);
-        Assert.Equal(18, tokens[3]);
+        Assert.Equal(272, tokens[1]);
+        Assert.Equal(273, tokens[2]);
+        Assert.Equal(274, tokens[3]);
         Assert.Equal(ClipTokenizer.EndOfTextId, tokens[4]);
     }
 

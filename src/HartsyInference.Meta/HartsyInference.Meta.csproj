@@ -14,7 +14,7 @@
     <NoWarn>$(NoWarn);NU5128</NoWarn>
   </PropertyGroup>
 
-  <!-- Referenced projects become package dependencies of HartsyInference. Listing all 11 libs
+  <!-- Referenced projects become package dependencies of HartsyInference. Listing all 12 libs
        (rather than relying on transitivity) keeps the dependency set explicit and complete. -->
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
@@ -28,6 +28,7 @@
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
     <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
     <ProjectReference Include="..\HartsyInference.Interactive\HartsyInference.Interactive.csproj" />
+    <ProjectReference Include="..\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
   </ItemGroup>
 
 </Project>

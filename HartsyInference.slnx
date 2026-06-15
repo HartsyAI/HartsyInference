@@ -8,6 +8,7 @@
     <Project Path="src/HartsyInference.Diffusion/HartsyInference.Diffusion.csproj" />
     <Project Path="src/HartsyInference.Audio/HartsyInference.Audio.csproj" />
     <Project Path="src/HartsyInference.Vision/HartsyInference.Vision.csproj" />
+    <Project Path="src/HartsyInference.ThreeD/HartsyInference.ThreeD.csproj" />
     <Project Path="src/HartsyInference.Video/HartsyInference.Video.csproj" />
     <Project Path="src/HartsyInference.Server/HartsyInference.Server.csproj" />
     <Project Path="src/HartsyInference.Vulkan/HartsyInference.Vulkan.csproj" />
@@ -28,6 +29,7 @@
 
   <Folder Name="/samples/">
     <Project Path="samples/HartsyInference.Whisper.Cli/HartsyInference.Whisper.Cli.csproj" />
+    <Project Path="samples/HartsyInference.ThreeD.Cli/HartsyInference.ThreeD.Cli.csproj" />
   </Folder>
 
   <Folder Name="/benchmarks/">

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.ThreeD</PackageId>
+    <Description>3D asset generation for HartsyInference — image/text → mesh and Gaussian-splat. Representation-agnostic foundation (marching cubes, glTF/OBJ/PLY export, 3D sampling) plus model pipelines (Hunyuan3D-2 image→mesh).</Description>
+    <RootNamespace>HartsyInference.ThreeD</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Vision brings Diffusion (and Core/ModelHandler/Tokenizers) transitively; both listed
+       explicitly to keep the dependency set obvious. DINOv2 conditioning lives in Vision. -->
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+    <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
+  </ItemGroup>
+
+</Project>
