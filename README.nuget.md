@@ -73,7 +73,7 @@ Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()` — the
 | **Text-to-speech & voice** | Kokoro, F5-TTS, StyleTTS2, Bark, CosyVoice, Spark-TTS, VibeVoice, CSM |
 | **Music** | ACE-Step, MusicGen, YuE |
 | **Vision** | CLIP & SigLIP embeddings, YOLO detection, SAM segmentation, face detection |
-| **3D generation** | Hunyuan3D-2 image→mesh (flow-match DiT + ShapeVAE → marching cubes → glTF/OBJ/PLY) |
+| **3D generation** | Hunyuan3D-2 (flow-match DiT + ShapeVAE) & TripoSR (feed-forward triplane/NeRF) image→mesh → marching cubes → glTF/OBJ/PLY |
 
 Checkpoints load directly from `.safetensors` / `.gguf`, including quantized weights (GGUF, MXFP4/8, NVFP4, block-scaled).
 

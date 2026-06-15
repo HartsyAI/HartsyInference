@@ -143,11 +143,12 @@ internal sealed unsafe class Dinov2Layer
         _kW = Dinov2VisionEncoder.F32(w[$"{prefix}.attention.attention.key.weight"]); _kB = Dinov2VisionEncoder.F32(w[$"{prefix}.attention.attention.key.bias"]);
         _vW = Dinov2VisionEncoder.F32(w[$"{prefix}.attention.attention.value.weight"]); _vB = Dinov2VisionEncoder.F32(w[$"{prefix}.attention.attention.value.bias"]);
         _oW = Dinov2VisionEncoder.F32(w[$"{prefix}.attention.output.dense.weight"]); _oB = Dinov2VisionEncoder.F32(w[$"{prefix}.attention.output.dense.bias"]);
-        _ls1 = Dinov2VisionEncoder.F32(w[$"{prefix}.layer_scale1.lambda1"]);
+        // LayerScale is DINOv2-specific; plain DINO/DINOv1 (e.g. the TripoSR tokenizer) omits it → identity.
+        _ls1 = w.TryGetValue($"{prefix}.layer_scale1.lambda1", out Tensor? ls1) ? Dinov2VisionEncoder.F32(ls1) : null;
         _n2W = Dinov2VisionEncoder.F32(w[$"{prefix}.norm2.weight"]); _n2B = Dinov2VisionEncoder.F32(w[$"{prefix}.norm2.bias"]);
         _fc1W = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc1.weight"]); _fc1B = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc1.bias"]);
         _fc2W = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.weight"]); _fc2B = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.bias"]);
-        _ls2 = Dinov2VisionEncoder.F32(w[$"{prefix}.layer_scale2.lambda1"]);
+        _ls2 = w.TryGetValue($"{prefix}.layer_scale2.lambda1", out Tensor? ls2) ? Dinov2VisionEncoder.F32(ls2) : null;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -163,18 +164,19 @@ internal sealed unsafe class Dinov2Layer
 
         Tensor n1 = new(shape, DType.F32); backend.LayerNorm(n1, x, _n1W!, _n1B!, _eps);
         Tensor attn = Attention(backend, n1, batch, seq); n1.Dispose();
-        LayerScale(attn, _ls1!, batch, seq);
+        LayerScale(attn, _ls1, batch, seq);
         Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attn); attn.Dispose();
 
         Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
         Tensor mlp = Mlp(backend, n2, batch, seq); n2.Dispose();
-        LayerScale(mlp, _ls2!, batch, seq);
+        LayerScale(mlp, _ls2, batch, seq);
         Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
         return r2;
     }
 
-    private void LayerScale(Tensor t, Tensor gamma, int batch, int seq)
+    private void LayerScale(Tensor t, Tensor? gamma, int batch, int seq)
     {
+        if (gamma is null) return; // no LayerScale (plain DINO) → identity
         float* tp = (float*)t.DataPointer; float* g = (float*)gamma.DataPointer;
         for (long i = 0; i < (long)batch * seq; i++)
             for (int c = 0; c < _hidden; c++) tp[i * _hidden + c] *= g[c];

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
@@ -22,7 +23,7 @@ internal static class Program
             return args.Length == 0 ? 1 : 0;
         }
 
-        string? imagePath = null, modelPath = null, outPath = "output.glb", backendName = "cpu";
+        string? imagePath = null, modelPath = null, outPath = "output.glb", backendName = "cpu", type = "hunyuan3d";
         int steps = 0, grid = 0; int? seed = null;
         for (int i = 0; i < args.Length; i++)
         {
@@ -32,6 +33,7 @@ internal static class Program
                 case "-m" or "--model": modelPath = args[++i]; break;
                 case "-o" or "--out": outPath = args[++i]; break;
                 case "-b" or "--backend": backendName = args[++i]; break;
+                case "-t" or "--type": type = args[++i].ToLowerInvariant(); break;
                 case "--steps": steps = int.Parse(args[++i]); break;
                 case "--grid": grid = int.Parse(args[++i]); break;
                 case "--seed": seed = int.Parse(args[++i]); break;
@@ -55,20 +57,38 @@ internal static class Program
 
         using IBackend backend = CreateBackend(backendName);
 
-        Stopwatch sw = Stopwatch.StartNew();
-        Console.Error.WriteLine("loading checkpoint...");
-        using Hunyuan3DShapePipeline pipeline = Hunyuan3DShapePipeline.LoadFromPath(backend, modelPath);
-        Console.Error.WriteLine($"  loaded in {sw.Elapsed.TotalSeconds:F1}s");
-
         ImageTo3DRequest req = new()
         {
             ImageRgb = rgb, Width = w, Height = h,
             Steps = steps, GridResolution = grid, Seed = seed,
         };
+        void Progress(GenerationProgress p) => Console.Error.Write($"\r  step {p.Step}/{p.TotalSteps}");
 
-        sw.Restart();
-        Console.Error.WriteLine("generating...");
-        ThreeDResult result = pipeline.Generate(req, p => Console.Error.Write($"\r  step {p.Step}/{p.TotalSteps}"));
+        Stopwatch sw = Stopwatch.StartNew();
+        Console.Error.WriteLine($"loading {type} checkpoint...");
+        ThreeDResult result;
+        switch (type)
+        {
+            case "hunyuan3d":
+            {
+                using Hunyuan3DShapePipeline pipeline = Hunyuan3DShapePipeline.LoadFromPath(backend, modelPath);
+                Console.Error.WriteLine($"  loaded in {sw.Elapsed.TotalSeconds:F1}s");
+                sw.Restart(); Console.Error.WriteLine("generating...");
+                result = pipeline.Generate(req, Progress);
+                break;
+            }
+            case "triposr":
+            {
+                using TripoSrPipeline pipeline = TripoSrPipeline.LoadFromPath(backend, modelPath);
+                Console.Error.WriteLine($"  loaded in {sw.Elapsed.TotalSeconds:F1}s");
+                sw.Restart(); Console.Error.WriteLine("generating...");
+                result = pipeline.Generate(req, Progress);
+                break;
+            }
+            default:
+                Console.Error.WriteLine($"unknown --type '{type}' (use hunyuan3d or triposr)");
+                return 1;
+        }
         Console.Error.WriteLine($"\n  generated in {sw.Elapsed.TotalSeconds:F1}s (seed {result.Seed})");
 
         if (result.Mesh is null || result.Mesh.TriangleCount == 0)
@@ -96,14 +116,15 @@ internal static class Program
             hartsyinference-3d — Hunyuan3D-2 image → mesh (.glb)
 
             Usage:
-              hartsyinference-3d -i <image.png> -m <model-dir> [-o out.glb] [options]
+              hartsyinference-3d -i <image.png> -m <model-dir> [-t hunyuan3d|triposr] [-o out.glb] [options]
 
             Options:
               -i, --image <png>     input conditioning image (PNG)
-              -m, --model <dir>     directory containing the Hunyuan3D-2 .safetensors
+              -m, --model <dir>     directory containing the model .safetensors
+              -t, --type <name>     hunyuan3d | triposr  (default: hunyuan3d)
               -o, --out <glb>       output path (default: output.glb)
               -b, --backend <name>  cpu | cuda  (default: cpu)
-                  --steps <n>       denoise steps (default: model config)
+                  --steps <n>       denoise steps — Hunyuan3D only (default: model config)
                   --grid <n>        marching-cubes grid resolution (default: model config)
                   --seed <n>        RNG seed (default: random)
             """);
