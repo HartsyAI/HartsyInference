@@ -252,7 +252,13 @@ AR world models (Cosmos AR 13B, future bigger Oasis variants) attend over hundre
 
 Deferred until an AR world model is selected for implementation.
 
-### 11. License-acceptance plumbing
+### 11. License-acceptance plumbing — **NOT BUILT (superseded by owner decision, 2026-06-15)**
+
+> ⚠️ **This section is retained as reference only.** The owner decided the engine applies **no license gate**:
+> HartsyInference is MIT and ships no weights or model code; the user supplies weights into `/Models` like every
+> other model, and weight-license compliance is the user's responsibility. There is no `Licensing/` framework,
+> no `LicenseAcceptance`, no `LicenseNotAcceptedException`, and no acceptance endpoint. GameCraft (and any other
+> restricted-*weight* model) loads exactly like SD/Flux. The original plan below is kept for context.
 
 Some models we want to support (Hunyuan-GameCraft) have non-permissive licenses. HartsyInference must **not** bundle these weights and must require explicit license acceptance at load time. Plan:
 

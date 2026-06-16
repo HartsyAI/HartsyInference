@@ -1,6 +1,15 @@
 # Hunyuan-GameCraft 1.0 — Research Notes
 
-> Status: Complete (paper + repo + HF file tree captured; exact `.pt` tensor key dump still required — see Open Questions) | Last Updated: 2026-05-24 | Needed Before: HartsyInference.Interactive (Phase 10) — **gated on license acceptance, NOT default-bundled**
+> 🏗️ **Build status (2026-06-15): BUILT end-to-end — structural, numerics validation-pending.** See
+> [PHASE_10_INTERACTIVE.md §7](../Checklists/PHASE_10_INTERACTIVE.md). **Implementation decision:** the engine
+> applies **NO license gate** — it's MIT, ships no weights/Tencent code, and the user supplies weights into
+> `/Models` like every other model (weight-license compliance is the user's responsibility). The "License Warning"
+> and license-gate code in this doc are **reference only** and were NOT implemented. The model reuses the existing
+> HunyuanVideo MM-DiT (new `HunyuanVideoDit`, via N-axis rope on the image blocks), HunyuanVideo 3D VAE,
+> `LlamaStyleEncoder`/`ClipTextEncoder`, and `FlowMatchEulerDiscreteScheduler(shift=5)`; `.pt` weights load via
+> the new reusable `PytorchPickleLoader`.
+>
+> Status: Research complete (paper + repo + HF file tree captured; exact `.pt` tensor key dump done during the diff pass — see Open Questions) | Last Updated: 2026-05-24 | Built: 2026-06-15
 > Source of truth: [GitHub `Tencent-Hunyuan/Hunyuan-GameCraft-1.0`](https://github.com/Tencent-Hunyuan/Hunyuan-GameCraft-1.0), [arXiv 2506.17201](https://arxiv.org/abs/2506.17201), [HF `tencent/Hunyuan-GameCraft-1.0`](https://huggingface.co/tencent/Hunyuan-GameCraft-1.0), [project page](https://hunyuan-gamecraft.github.io/), [ROCm blog reproduction](https://rocm.blogs.amd.com/artificial-intelligence/hunyuan-gamecraft/README.html)
 > License: **Tencent Hunyuan Community License — RESTRICTED** (see warning below)
 > Related: [`FLUX_ARCHITECTURE.md`](FLUX_ARCHITECTURE.md) (dual-stream / single-stream MM-DiT lineage shared with HunyuanVideo), [`DIFFUSION_SCHEDULERS.md`](DIFFUSION_SCHEDULERS.md) (FlowMatchDiscrete shift formula), [`VAE_ARCHITECTURE.md`](VAE_ARCHITECTURE.md) (3D causal VAE patterns shared with HunyuanVideo), [`TEXT_ENCODERS.md`](TEXT_ENCODERS.md) (Llava-Llama-3-8B + CLIP-L dual encoder), [`CFG_AND_GUIDANCE.md`](CFG_AND_GUIDANCE.md) (CFG distillation), [`SAFETENSORS_FORMAT.md`](SAFETENSORS_FORMAT.md) (this model does **not** ship safetensors — see warning).

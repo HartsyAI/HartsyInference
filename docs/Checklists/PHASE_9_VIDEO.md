@@ -51,7 +51,7 @@ See [`docs/Research/INTERACTIVE_INFERENCE.md`](../Research/INTERACTIVE_INFERENCE
 
 ### 3e. Licensing
 
-- [ ] **`HartsyInference.ModelHandler/Licensing/ModelLicense.cs` + `LicenseAcceptance.cs`** — restricted-license plumbing. `ApacheLicense2` / `MitLicense` / `NvidiaOpenModelLicense` / `TencentHunyuanCommunityLicense` typed records. Checkpoint converters for restricted models throw `LicenseNotAcceptedException` until `LicenseAcceptance.Accept(...)` has been called with the required token (captured to a user-local file so it's a one-time acceptance). Required for Hunyuan-GameCraft (Phase 10) and Cosmos-Predict V2W (Phase 9). Permissively-licensed models skip this entirely.
+- [x] ~~License-acceptance plumbing (`Licensing/ModelLicense.cs` + `LicenseAcceptance.cs`)~~ — **DROPPED (owner decision, 2026-06-15).** The engine is MIT and ships no weights/model code; the user supplies weights into `/Models` like every other model, and weight-license compliance is the user's responsibility. No `Licensing/` framework is built — GameCraft / Cosmos / any restricted-weight model loads the same way as SD/Flux.
 
 ## 4. Implementation — LTX-Video
 

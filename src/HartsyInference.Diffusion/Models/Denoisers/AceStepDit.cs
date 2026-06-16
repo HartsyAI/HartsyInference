@@ -155,19 +155,24 @@ public sealed unsafe class AceStepDit : IDisposable
         (Tensor temb, Tensor tBlock) = TimeEmbed(backend, timestep);
         (float[] cos, float[] sin) = BuildRope(f);
         (float[] cosCross, float[] sinCross) = BuildRope((int)context.Shape[0]);
+        AceStepDebugDump.Dump("patch_embed", tokens);
+        AceStepDebugDump.Dump("tblock", tBlock);
 
         Tensor cur = tokens;
+        int li = 0;
         foreach (Block b in _blocks)
         {
             Tensor next = b.Forward(backend, cur, context, tBlock, cos, sin, cosCross, sinCross, f);
             cur.Dispose();
             cur = next;
+            AceStepDebugDump.Dump($"layers.{li++}", cur);
         }
 
         Tensor velocity = FinalLayer(backend, cur, temb, f);
         cur.Dispose();
         temb.Dispose();
         tBlock.Dispose();
+        AceStepDebugDump.DumpOutput(velocity);
         return velocity;
     }
 

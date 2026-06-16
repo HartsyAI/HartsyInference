@@ -120,7 +120,7 @@ Every area below needs a `docs/Research/` document **before** implementation beg
 
 ## Interactive / World Models (Phase 10)
 
-> Foundational design doc + one architecture doc per Tier-1 model. All Apache-2.0 / MIT except Hunyuan-GameCraft (Tencent Hunyuan Community License — restricted, license-acceptance gated).
+> Foundational design doc + one architecture doc per Tier-1 model. Engine code is MIT and ships no weights; Hunyuan-GameCraft's *weights* are under the Tencent Hunyuan Community License (restricted), but the engine applies **no license gate** — weight-license compliance is the user's responsibility, same as every model (owner decision, 2026-06-15).
 
 | Document | Needed Before |
 |---|---|

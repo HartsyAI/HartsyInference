@@ -45,6 +45,7 @@ HartsyInference/
 | `SafeTensors/SafeTensorsLoader.cs` | mmap + JSON header → TensorView dict |
 | `SafeTensors/SafeTensorsWriter.cs` | Save tensors to safetensors |
 | `SafeTensors/SafeTensorsShardLoader.cs` | Multi-file sharded models |
+| `PyTorch/PytorchPickleLoader.cs` / `PickleMachine.cs` | Torch `.pt` reader (ZIP + safe-subset pickle VM, no code exec) → Tensor dict — for `.pt`-only models (GameCraft, Cosmos) |
 | `Gguf/GgufLoader.cs` | GGUF header + metadata + tensor mmap |
 | `Gguf/GgufDequantizer.cs` | Dequantize Q4_0/Q8_0/Q4_K_M to F16/F32 |
 | `Gguf/GgufMetadata.cs` | Typed metadata key-value access |
@@ -166,6 +167,7 @@ HartsyInference/
 | `Detection/YoloPipeline.cs` / `YoloPostProcessor.cs` / `DetectionResult.cs` | YOLO detection |
 | `Segmentation/SamPipeline.cs` / `SamMaskDecoder.cs` | SAM segmentation |
 | `FaceDetection/FaceDetector.cs` / `LandmarkExtractor.cs` | Face detection and landmarks |
+| `Siglip/SiglipVisionEncoder.cs` / `Dinov2/Dinov2VisionEncoder.cs` | SigLIP + DINOv2 ViT towers (DINOv2 LayerScale optional → also serves DINOv1; conditioning for 3D models) |
 
 ---
 
@@ -185,17 +187,31 @@ HartsyInference/
 | `Memory/FrameHistoryBuffer.cs` | Rolling buffer of `(latent, camera_pose, frame_index)` |
 | `Memory/FrustumOverlapSelector.cs` / `MatrixGame3MemoryRetrieval.cs` | Camera-FOV memory selection (Matrix-Game 3.0 specific) |
 | `Models/Denoisers/DiTBlocks/MatrixGame2ActionModule.cs` / `MatrixGame3ActionModule.cs` | Per-block dual-stream (mouse=self-attn, keyboard=cross-attn) modules |
-| `Models/Denoisers/DiTBlocks/GameCraftCameraNet.cs` | GameCraft action-to-token CameraNet (PixelUnshuffle + Convs + PatchEmbed) |
+| `Models/GameCraftCameraNet.cs` | GameCraft action-to-token CameraNet (PixelUnshuffle + Convs + PatchEmbed + scale) |
 | `Pipelines/MatrixGame2Pipeline.cs` / `MatrixGame3StandardPipeline.cs` / `MatrixGame3InteractivePipeline.cs` | Skywork Matrix-Game pipelines |
 | `Pipelines/OasisPipeline.cs` | Decart/Etched Oasis-500m AR frame-by-frame Minecraft world model |
-| `Pipelines/HunyuanGameCraftPipeline.cs` | Tencent GameCraft pipeline — license-acceptance-gated at construction |
+| `Pipelines/GameCraftLatentBuilder.cs` | 33-ch composite `[noisy16 + history16 + mask1]` |
+| `Pipelines/HunyuanGameCraftPipeline.cs` / `Sessions/GameCraftFrameStepper.cs` | Tencent GameCraft pipeline + live `IFrameStepper`. No license gate — uses the HunyuanVideo MM-DiT (in Diffusion) + reused HunyuanVideo VAE / encoders / scheduler |
+
+---
+
+## src/HartsyInference.ThreeD/  (Phase 11 — 3D asset generation)
+
+| File | Description |
+|---|---|
+| `Geometry/Mesh.cs` / `ScalarField3D.cs` / `PointCloud.cs` / `GaussianSplatCloud.cs` / `Triplane.cs` | Representation-agnostic geometry types |
+| `Geometry/Ops/MarchingCubes.cs` / `MeshOps.cs` / `GridSampler.cs` / `SurfaceSampler.cs` | Mesh extraction (Bourke tables), normals, trilinear/triplane sampling, FPS |
+| `Io/GlbWriter.cs` / `ObjWriter.cs` / `PlyWriter.cs` | glTF 2.0 (primary), OBJ, PLY (mesh + 3DGS) export |
+| `Pipelines/ThreeDPipelineBase.cs` / `Requests/ImageTo3DRequest.cs` / `ThreeDResult.cs` | Pipeline scaffolding |
+| `Models/Hunyuan3D/*` | Hunyuan3D-2 image→mesh: VecSet flow-match DiT + ShapeVAE occupancy decoder + converter |
+| `Models/TripoSr/*` / `Pipelines/TripoSrPipeline.cs` | TripoSR image→mesh: triplane transformer + NeRF MLP decoder (feed-forward) |
 
 ## src/HartsyInference.Server/
 
 | File | Description |
 |---|---|
 | `Setup/HartsyInferenceServiceExtensions.cs` / `HartsyInferenceServerOptions.cs` | DI registration, server options |
-| `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement, **InteractiveSessionEndpoint** (WebSocket), **LicenseAcceptanceEndpoint** (`POST /v1/licenses/accept`) |
+| `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement, **InteractiveSessionEndpoint** (WebSocket) |
 | `Streaming/SseProgressStream.cs` / `AudioChunkStream.cs` / `InteractiveFrameStream.cs` | SSE progress, audio chunk streaming, interactive frame serialization (PNG / JPEG / raw RGB) |
 | `Queue/InferenceQueue.cs` / `InferenceQueueEntry.cs` | FIFO inference queue |
 | `Auth/ApiKeyMiddleware.cs` | Optional API key validation |

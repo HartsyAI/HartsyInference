@@ -115,7 +115,7 @@ Action-conditioned, real-time, frame-by-frame video generators — distinct from
 | **Matrix-Game 3.0** | Skywork | Apache-2.0 | 5B (+ 28B MoE variant), 720p @ 40 FPS, memory-augmented DiT finetuned from Wan2.2-TI2V-5B. Flagship; shares VAE with Lance video. See [MATRIX_GAME_3_ARCHITECTURE.md](../Research/MATRIX_GAME_3_ARCHITECTURE.md). |
 | **Matrix-Game 2.0** | Skywork | MIT | 1.8B, 540p @ 25 FPS, real-time on 12 GB GPUs. SkyReels-V2/Wan lineage. Entry-level world model. See [MATRIX_GAME_2_ARCHITECTURE.md](../Research/MATRIX_GAME_2_ARCHITECTURE.md). |
 | **Oasis-500m** | Decart + Etched | MIT | Tiny (~500M), autoregressive frame-by-frame Minecraft world model. Likely uses a discrete video tokenizer (VQ family). Pedagogical / CI smoke test. See [OASIS_ARCHITECTURE.md](../Research/OASIS_ARCHITECTURE.md). |
-| **Hunyuan-GameCraft 1.0** | Tencent | Tencent Hunyuan Community **(RESTRICTED)** | 13B, 704×1216 @ 33 frames, keyboard + camera-pose actions, hybrid history conditioning. **License forbidden in EU/UK/SK + 100M MAU cap.** Optional — gated on user license acceptance; HartsyInference does not bundle weights. See [HUNYUAN_GAMECRAFT_ARCHITECTURE.md](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md). |
+| **Hunyuan-GameCraft 1.0** 🔧 | Tencent | weights: Tencent Hunyuan Community | 12.5B, 704×1216 @ 33 frames, keyboard + camera-pose actions, hybrid history conditioning. **Built end-to-end (structural, numerics validation-pending, 2026-06-15).** No license gate — engine is MIT, ships no weights/Tencent code; weight-use is the user's responsibility (same as every model). See [PHASE_10_INTERACTIVE.md §7](../Checklists/PHASE_10_INTERACTIVE.md) + [HUNYUAN_GAMECRAFT_ARCHITECTURE.md](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md). |
 
 **Considered + deferred** (not in v1 of Phase 10):
 - **DIAMOND** (Alonso et al., MIT) — small (~381M) research-grade Atari / CS:GO world models. Useful as a reference for action-conditioning correctness but too narrow for shipping.
@@ -123,6 +123,21 @@ Action-conditioned, real-time, frame-by-frame video generators — distinct from
 - **DreamerV3** — RL world-model training framework; no deployable inference checkpoints. Wrong shape for our engine.
 - **V-JEPA 2** (Meta) — open and large but representation-only (predicts in embedding space, not pixels). Wrong modality for "world model that outputs frames."
 - **Genie 3, GameNGen, VideoPoet, Sora, ByteDance Yan** — closed weights as of 2026-05; revisit if released.
+
+### 3D Asset Generation (Phase 11)
+
+Image/text → 3D mesh (and later Gaussian splats) — the one previously-empty modality. New `HartsyInference.ThreeD`
+package with a representation-agnostic foundation (marching cubes, glTF/OBJ/PLY export, triplane/grid sampling,
+DINOv2 conditioning in Vision) reused across models. See [PHASE_11_THREED.md](../Checklists/PHASE_11_THREED.md).
+
+| Model | Org | License | Notes |
+|---|---|---|---|
+| **Hunyuan3D-2** (shape) 🔧 | Tencent | weights: Tencent Hunyuan | Image→mesh: flow-match VecSet DiT + ShapeVAE occupancy → marching cubes. Built structural, numerics validation-pending. See [HUNYUAN3D_2_ARCHITECTURE.md](../Research/HUNYUAN3D_2_ARCHITECTURE.md). |
+| **TripoSR** 🔧 | Stability/Tripo | MIT | Image→mesh, feed-forward LRM → triplane → NeRF MLP → marching cubes (deterministic — easiest to validate). Built structural, numerics validation-pending. See [TRIPOSR_ARCHITECTURE.md](../Research/TRIPOSR_ARCHITECTURE.md). |
+| **TRELLIS** ❌ | Microsoft | MIT | Image→Gaussian-splat + mesh. Deferred — needs sparse 3D conv/attention + flexicubes + splat rendering. |
+
+Reusable `.pt` (PyTorch pickle) checkpoint loader landed alongside GameCraft (`ModelHandler/PyTorch`), enabling
+`.pt`-only models (Cosmos, GameCraft) without a Python conversion step.
 
 ### Vision (Phase 3 extensions)
 

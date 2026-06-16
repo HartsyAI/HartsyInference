@@ -31,7 +31,8 @@ Monolithic NuGet is wrong because:
 | **Audio** | Whisper STT, Kokoro/Parler TTS, voice conversion, STFT/mel, vocoder | Core, ModelHandler |
 | **Vision** | CLIP image encoder, embeddings, YOLO, SAM, face detection | Core, ModelHandler |
 | **Video** | LTX-Video, Wan, Lance video, Cosmos-Predict V2W. 3D causal VAE, temporal attention, packed/varlen attention, distilled schedulers, discrete video tokenizers (Cosmos DV / VQ-GAN). Hosts the shared infra that Interactive consumes. | Diffusion |
-| **Interactive** | Action-conditioned, real-time, frame-by-frame world models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft). `IInteractiveSession` streaming loop, `IActionEncoder` abstractions, memory-augmented cross-attn primitive. Strictly user-driven runtime — does not appear in offline pipelines. | Video |
+| **Interactive** | Action-conditioned, real-time, frame-by-frame world models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft). `IInteractiveSession` streaming loop, `IActionEncoder` abstractions, memory-augmented cross-attn primitive, CameraNet. Strictly user-driven runtime — does not appear in offline pipelines. | Video |
+| **ThreeD** | 3D asset generation (image→mesh/splat). Representation-agnostic foundation: marching cubes, glTF/OBJ/PLY export, triplane/grid sampling, geometry types. Models: Hunyuan3D-2 (flow-match DiT + ShapeVAE) and TripoSR (triplane/NeRF LRM). | Diffusion, Vision |
 
 ### Application
 
@@ -61,7 +62,7 @@ Monolithic NuGet is wrong because:
        |       |       |
        \_______|_______/
                |
-          Video (future)
+          Video (Phase 9)         ThreeD (Phase 11 — Diffusion + Vision)
                |
         Interactive (Phase 10 — world models)
                |

@@ -15,6 +15,7 @@ Phase 7: Server (OpenAI-compatible API)
 Phase 8: SwarmUI extension
 Phase 9: Video (LTX-Video → Wan → Lance → Cosmos-Predict V2W) + shared interactive infra
 Phase 10: Interactive / World Models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft)
+Phase 11: 3D Asset Generation (Hunyuan3D-2, TripoSR) — new HartsyInference.ThreeD package
 ```
 
 ## Phase 1 — Foundation (Core + ModelHandler + Cpu)
@@ -172,7 +173,21 @@ Phase 10: Interactive / World Models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft)
 | Matrix-Game 2.0 pipeline (Skywork, MIT, 1.8B) | Interactive | First interactive world model. 540p @ 25 FPS, SkyReels-V2/Wan lineage. Apache/MIT-style permissive. |
 | Matrix-Game 3.0 pipeline (Skywork, Apache-2.0, 5B + MoE 28B) | Interactive | Flagship. 720p @ 40 FPS, memory-augmented DiT finetuned from Wan2.2-TI2V-5B (shares VAE with Lance video path). |
 | Oasis-500m pipeline (Decart+Etched, MIT, ~500M) | Interactive | Tiny Minecraft world model. Pedagogical / CI smoke-test target. Likely uses a discrete video tokenizer (VQ family). |
-| Hunyuan-GameCraft pipeline (Tencent, **restricted license**) | Interactive | Optional / gated on license acceptance — Tencent Hunyuan Community License excludes EU/UK/SK + 100M MAU cap. HartsyInference does NOT bundle weights; user opts in. |
+| Hunyuan-GameCraft pipeline (Tencent) | Interactive | **No license gate** — engine is MIT, ships no weights/Tencent code; user supplies weights into `/Models` like every other model. Weight-use is the user's responsibility. **Built structural / numerics validation-pending (2026-06-15).** |
 | Memory-augmented DiT cross-attention | Interactive | Matrix-Game 3.0 specific (extra cross-attn stream over stored past-frame latents); designed for reuse if future models add similar memory paths |
 | History-mask channel | Interactive | Binary mask channel (1=history, 0=predict) injected into latent input — GameCraft style |
-| Deferred-foundation backlog | Interactive (docs) | Explicit list of foundational pieces (AR KV-cache over interleaved video/action tokens, long-context spacetime RoPE, license-acceptance plumbing) deferred until a model that needs them is selected |
+| Deferred-foundation backlog | Interactive (docs) | Explicit list of foundational pieces (AR KV-cache over interleaved video/action tokens, long-context spacetime RoPE) deferred until a model that needs them is selected |
+
+## Phase 11 — 3D Asset Generation (Built — structural; numerics validation-pending)
+
+New `HartsyInference.ThreeD` package (deps: Diffusion + Vision). Reuse-first: the diffusion DiT/VAE/scheduler
+stack + a new representation-agnostic 3D foundation. See [PHASE_11_THREED.md](../Checklists/PHASE_11_THREED.md).
+
+| Step | Package | Notes |
+|---|---|---|
+| Representation-agnostic foundation | ThreeD | Geometry types, marching cubes (Bourke), glTF/OBJ/PLY export, triplane/grid sampling, FPS. CPU-tested. |
+| DINOv2 conditioning encoder | Vision | ViT tower (LayerScale optional → also serves DINOv1/TripoSR) |
+| Hunyuan3D-2 (image→mesh) | ThreeD | Flow-match VecSet DiT + ShapeVAE occupancy → marching cubes. 🔧 structural. |
+| TripoSR (image→mesh) | ThreeD | Feed-forward LRM → triplane → NeRF MLP → marching cubes (deterministic). 🔧 structural. |
+| Reusable `.pt` pickle loader | ModelHandler | Landed with GameCraft; enables `.pt`-only models (also used by future 3D checkpoints). |
+| Deferred | ThreeD | TRELLIS (Gaussian splats + sparse 3D ops), texture/PBR paint, splat rendering. |

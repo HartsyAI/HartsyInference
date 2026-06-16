@@ -93,29 +93,37 @@
 - [x] [`OasisCheckpointConverter.cs`](../../src/HartsyInference.ModelHandler/CheckpointConverters/OasisCheckpointConverter.cs) — 1:1 key pass-through (wrapper-prefix strip + recomputed `rotary_freqs` drop); key names validation-gated on first dump.
 - [ ] `OasisGenerationTests` — env-var-gated real-checkpoint entry (`OASIS_500M_PATH` / `OASIS_VAE_PATH`, 360×640, byte-compare vs Python reference). Structural tests are in: `OasisModelTests` (VAE round trip, causality + action-sensitivity gates), `OasisPipelineTests` (deterministic rollout), `DdimVPredSchedulerTests`.
 
-## 7. Implementation — Hunyuan-GameCraft 1.0 (RESTRICTED LICENSE)
+## 7. Implementation — Hunyuan-GameCraft 1.0 — **structural build, numerics validation-pending (2026-06-15)**
 
-> ⚠️ **License caveat:** Tencent Hunyuan Community License forbids use in EU/UK/SK and caps users at 100M MAU. HartsyInference will **not bundle weights**, **not auto-download**, and **will require explicit license acceptance at load time**. See [HUNYUAN_GAMECRAFT_ARCHITECTURE.md § License Warning](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md).
+> **License decision (owner):** GameCraft gets **no special treatment**. The engine is MIT, ships **no weights and no Tencent code**; the user supplies weights into `/Models` like every other model. → **No license-gate framework** was built; weight-use is the end user's responsibility, same as every checkpoint. (Supersedes the earlier license-gate plan — `TencentHunyuanCommunityLicense` / `LicenseAcceptance` / `LicenseAcceptanceEndpoint` are **not** built.)
+>
+> Target hardware: A100/H100 40+ GB / cloud GPU (12.5B). The 3060 is for CPU structural tests only. Spec: [HUNYUAN_GAMECRAFT_ARCHITECTURE.md](../Research/HUNYUAN_GAMECRAFT_ARCHITECTURE.md). All architecture dims/keys marked **[VG]** are reconciled against the real checkpoint during the diff pass (§9).
 
-> Target: A100/H100 40+ GB (12.5B params, 90 GB on disk). Implement last after Matrix-Game pipelines are stable.
+**Reuse-first outcome:** most of GameCraft is the existing foundation — HunyuanVideo 3D VAE, Llava (`LlamaStyleEncoder`), CLIP-L (`ClipTextEncoder`), `FlowMatchEulerDiscreteScheduler(shift=5)`, and the whole Interactive session/Plücker/Se3/memory stack. Genuinely new code: the `.pt` loader, the HunyuanVideo MM-DiT (via N-axis rope reuse of the image blocks), and the GameCraft-specific camera/action/latent parts.
 
-- [ ] `src/HartsyInference.Interactive/Pipelines/HunyuanGameCraftPipeline.cs` — full + distilled (50-step base + 8-step PCM-distilled). License-acceptance gate enforced at construction.
-- [ ] `src/HartsyInference.Video/Models/Denoisers/HunyuanVideoDit.cs` — HunyuanVideo MM-DiT minus one block per stream (19 double + 38 single, dim=3072, heads=24, head_dim=128, ffn_ratio=4.0, RoPE `[16,56,56]`, RMSNorm Q/K, GeGLU-tanh). Reusable for offline HunyuanVideo if/when added.
-- [ ] `src/HartsyInference.Interactive/Models/Denoisers/DiTBlocks/GameCraftCameraNet.cs` — `PixelUnshuffle(8) → Conv 384→192 → GN → ReLU → temporal pool → Conv 192→96 → GN → ReLU → Conv 96→16 → PatchEmbed → learnable scale → add to image tokens`. Token-addition fusion of action-derived camera information.
-- [ ] `src/HartsyInference.Video/Models/Vae/HunyuanVideoVaeDecoder.cs` — HunyuanVideo `884-16c-hy0801` 3D causal VAE: 16 latent channels, 8× spatial, 4× temporal. **Reusable with the offline HunyuanVideo pipeline.**
-- [ ] `src/HartsyInference.Diffusion/Models/TextEncoders/LlavaLlama3_8BEncoder.cs` — Llava-Llama-3-8B (4096-dim, `crop_start=95`, max_len 256). Plus existing CLIP-ViT-L (768 pooled).
-- [ ] `src/HartsyInference.Interactive/ActionEncoders/GameCraftActionEncoder.cs` — `(w/a/s/d, speed ∈ [0, 3])` → continuous `(d_trans, d_rot, α, β)` → 33 camera poses → 6-channel Plücker ray maps at full resolution. **Per-frame, not per-segment** — fundamentally different cadence from Matrix-Game.
-- [ ] `src/HartsyInference.Interactive/Pipelines/GameCraftLatentBuilder.cs` — assembles the 33-channel composite input `[noisy(16) + ref_history(16) + mask(1)]`. Model-specific input shape, not shared with other models.
-- [ ] `src/HartsyInference.Video/Schedulers/FlowMatchDiscreteScheduler.cs` — full + distilled, `shift=5.0` (SD3 time-shift), CFG=2.0 (base) / 1.0 (distilled).
-- [ ] `src/HartsyInference.ModelHandler/CheckpointConverters/HunyuanGameCraftCheckpointConverter.cs` — handles `mp_rank_00_model_states.pt` (PyTorch pickle, **not safetensors** — needs a one-off Python conversion script ships separately).
-- [ ] `src/HartsyInference.ModelHandler/Licensing/TencentHunyuanCommunityLicense.cs` — typed license record. Converter throws `LicenseNotAcceptedException` until `LicenseAcceptance.Accept(...)` has been called.
-- [ ] `tests/HartsyInference.Interactive.Tests/HunyuanGameCraftLicenseGateTests.cs` — verifies license enforcement is unbypassable (load without acceptance throws; load with acceptance proceeds).
-- [ ] `tests/HartsyInference.Interactive.Tests/HunyuanGameCraftGenerationTests.cs` — env-var-gated **and** license-acceptance-gated; VRAM probe ≥ 40 GB.
+New **reusable backend** (used by future models too):
+- [x] `src/HartsyInference.ModelHandler/PyTorch/PytorchPickleLoader.cs` (+ `PickleMachine.cs`) — safe-subset torch `.pt` reader → `Dictionary<string,Tensor>`. Reusable for any `.pt` model (Cosmos, …). Unit-tested. **Replaces the planned one-off Python conversion script.**
+- [x] `src/HartsyInference.Diffusion/Models/Denoisers/HunyuanVideoDit.cs` (+ `HunyuanVideoConfig.cs`; 3-axis rope) — 19 double + 38 single blocks, dim 3072, heads 24, RoPE `[16,56,56]`, 33-ch patchify → 16-ch velocity, camera-token fusion hook. **Reuses `HunyuanImageBlock`/`HunyuanImageSingleBlock`** via the generalized N-axis `HunyuanImageRope` (image 2D path byte-identical). Co-located in Diffusion (with the blocks + VAE) instead of Video to avoid a new cross-package dep. Reusable for an offline HunyuanVideo pipeline. CPU structural test passes.
+- [x] HunyuanVideo `884-16c-hy0801` 3D VAE — **already existed** (`Diffusion/Models/Vae/HunyuanVideoVae{Decoder,Encoder}`), reused as-is.
+- [x] Llava-Llama-3-8B + CLIP-L — **reused** existing `LlamaStyleEncoder` (`Llava3_8B` preset) + `ClipTextEncoder`; no new encoder file.
+- [x] Flow-match scheduler — **reused** `FlowMatchEulerDiscreteScheduler(shift=5)` (covers base 50-step / distilled 8-step); no new scheduler file.
+
+New **GameCraft-specific** parts (all CPU-tested):
+- [x] `src/HartsyInference.Interactive/ActionEncoders/GameCraftActionEncoder.cs` — `IActionEncoder` (PluckerMap); WASD+speed+mouse → cumulative pose (`Se3Math`) → 6-ch Plücker map (`PluckerEmbedding`). Per-chunk cadence.
+- [x] `src/HartsyInference.Interactive/Models/GameCraftCameraNet.cs` — PixelUnshuffle(8) → conv 384→192→96→16 (GN+ReLU) → temporal compress → PatchEmbed → scale → image-grid tokens.
+- [x] `src/HartsyInference.Interactive/Pipelines/GameCraftLatentBuilder.cs` — 33-ch composite `[noisy16 + history16 + mask1]`.
+- [x] `src/HartsyInference.Interactive/Pipelines/HunyuanGameCraftPipeline.cs` — `DenoiseChunk` (composite + camera tokens + DiT + 2-pass CFG + scheduler) + `GenerateChunk`/`DecodeLatentToFrames`. CPU end-to-end `DenoiseChunk` test passes.
+- [x] `src/HartsyInference.Interactive/Sessions/GameCraftFrameStepper.cs` — `IFrameStepper` for live sessions (history fed forward).
+- [x] `src/HartsyInference.ModelHandler/CheckpointConverters/HunyuanGameCraftCheckpointConverter.cs` — routes `.pt` keys → `{Dit, CameraNet, Vae, Llava, Clip}`. **No license gate.**
+
+Remaining (numeric pass, **[VG]**, needs cloud GPU + real checkpoint):
+- [ ] Reconcile the original→diffusers per-block key remap in the converter against the real `.pt`.
+- [ ] Reconcile timestep scaling, the txt token-refiner (currently a plain projection), the CameraNet temporal schedule, and GameCraft dims via the diff harness (§9).
+- [ ] Distilled (8-step / CFG 1.0) variant parity once base is ✅.
 
 ## 8. Server integration
 
 - [ ] `src/HartsyInference.Server/Endpoints/InteractiveSessionEndpoint.cs` — WebSocket endpoint that wraps `IInteractiveSession` (action input via inbound messages, frames via outbound messages). Per-connection session lifecycle.
-- [ ] `src/HartsyInference.Server/Endpoints/LicenseAcceptanceEndpoint.cs` — `POST /v1/licenses/accept` for restricted models. Required before any restricted-model load endpoint will succeed.
 - [ ] `src/HartsyInference.Server/Streaming/InteractiveFrameStream.cs` — frame-serialization adapter (PNG, JPEG, or raw RGB depending on Accept-Encoding).
 - [ ] Server test: `tests/HartsyInference.Server.Tests/InteractiveSessionWsTests.cs` — end-to-end smoke test with the Oasis-500m fixture model.
 
@@ -123,9 +131,8 @@
 
 - [ ] All `*GenerationTests` skip cleanly when env vars (`MATRIX_GAME_2_BASE_PATH`, `MATRIX_GAME_3_BASE_PATH`, `OASIS_500M_PATH`, `HUNYUAN_GAMECRAFT_PATH`) are missing.
 - [ ] All `*GenerationTests` perform a VRAM probe before allocating and skip when below the documented minimum.
-- [ ] Reference validation: each model has a `dump_*_full_forward.py` Python reference + `diff_*_layers.py` per-layer diff harness, mirroring SD3.5 / Z-Image / Lance conventions.
+- [ ] Reference validation: each model has a `dump_*_full_forward.py` Python reference + `diff_*_layers.py` per-layer diff harness, mirroring SD3.5 / Z-Image / Lance conventions. **GameCraft harness landed** (`dump_gamecraft_full_forward.py` + `diff_gamecraft_layers.py`, reference module TODO[VG]); env-gated `GameCraftRealCheckpointTests` validates the `.pt`→converter chain on real weights.
 - [ ] Performance gates per per-model doc (Matrix-Game 2.0: 25 FPS @ 540p on RTX 4090; Matrix-Game 3.0: ≥10 FPS @ 720p distilled on RTX 4090).
-- [ ] License-gate test: confirm Hunyuan-GameCraft refuses to load without prior acceptance, and that the accepted-token persists across process restarts.
 - [ ] Stress: 30-minute continuous interactive session — no memory leak, no VRAM bloat, p99 step latency within 2× of p50.
 
 ## 10. Deferred-foundation backlog (documented, not built v1)

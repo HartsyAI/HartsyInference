@@ -8,6 +8,12 @@ For architecture details, deviations, and per-model task lists, see
 [PHASE_4_MODEL_BREADTH.md](PHASE_4_MODEL_BREADTH.md) and
 [PHASE_3_DEVIATIONS.md](PHASE_3_DEVIATIONS.md).
 
+> **Other modalities** (this file tracks image only). Status for the other modalities lives in their phase
+> checklists: **video** → [PHASE_9_VIDEO.md](PHASE_9_VIDEO.md); **interactive / world models** (Matrix-Game 2/3,
+> Oasis 🔧; Hunyuan-GameCraft 🔧 built 2026-06-15) → [PHASE_10_INTERACTIVE.md](PHASE_10_INTERACTIVE.md);
+> **3D** (Hunyuan3D-2 + TripoSR 🔧 built 2026-06-14) → [PHASE_11_THREED.md](PHASE_11_THREED.md). 🔧 = built
+> structurally, numerics validation-pending — the same state most video/world models are in.
+
 ## Legend
 - ✅ end-to-end clean visual output verified
 - 🔧 implementation green, awaiting checkpoint download + first-run iteration
