@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -49,7 +50,8 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         int[] negativePromptTokenIds,
         TextToImageRequest request,
         Action<GenerationProgress>? onProgress = null,
-        IReadOnlyList<IpAdapterConditioning>? ipAdapters = null)
+        IReadOnlyList<IpAdapterConditioning>? ipAdapters = null,
+        ConditioningSchedule? conditioningSchedule = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -90,7 +92,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep);
 
         // 4. Denoise loop (both paths run the same loop from their respective startStep)
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, ipAdapters, onProgress);
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, ipAdapters, onProgress, conditioningSchedule);
 
         textEmbeddings.Dispose();
 
@@ -168,7 +170,8 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         int totalSteps,
         float cfgScale,
         IReadOnlyList<IpAdapterConditioning>? ipAdapters,
-        Action<GenerationProgress>? onProgress)
+        Action<GenerationProgress>? onProgress,
+        ConditioningSchedule? conditioningSchedule = null)
     {
         // IP-Adapter setup (same shape as SDXL — single adapter honored, weight-type +
         // start/end window applied per step).
@@ -239,17 +242,22 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
                 }
             }
 
+            // Per-step conditioning selection for alternation [a|b] / scheduling [a:b:when].
+            Tensor stepEmbeddings = conditioningSchedule is null
+                ? textEmbeddings
+                : conditioningSchedule.Variants[conditioningSchedule.Resolve(i, totalSteps)];
+
             Tensor noisePred;
             if (cfgScale > 1.0f)
             {
-                noisePred = ClassifierFreeGuidanceStep(scaledLatent, t, textEmbeddings, cfgScale,
+                noisePred = ClassifierFreeGuidanceStep(scaledLatent, t, stepEmbeddings, cfgScale,
                     activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);
             }
             else
             {
-                int seqLen = (int)textEmbeddings.Shape[1];
-                int hiddenSize = (int)textEmbeddings.Shape[2];
-                Tensor condEmb = CfgHelper.SliceBatchElement(textEmbeddings, 1, seqLen, hiddenSize);
+                int seqLen = (int)stepEmbeddings.Shape[1];
+                int hiddenSize = (int)stepEmbeddings.Shape[2];
+                Tensor condEmb = CfgHelper.SliceBatchElement(stepEmbeddings, 1, seqLen, hiddenSize);
                 noisePred = _unet.Forward(Backend, scaledLatent, t, condEmb, null, default,
                     null, null,
                     activeIpaTokens, activeIpaK, activeIpaV, activeIpaScales);

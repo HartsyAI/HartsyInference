@@ -224,7 +224,7 @@ public sealed unsafe class FluxTransformer : IDisposable
     /// <param name="wPacked">Packed image width (latent_w / 2).</param>
     /// <returns>Predicted velocity [B, imgSeqLen, 64].</returns>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, float sigma,
-        Tensor clipPooled, float guidanceScale, int txtSeqLen, int hPacked, int wPacked)
+        Tensor clipPooled, float guidanceScale, int txtSeqLen, int hPacked, int wPacked, Tensor? attnBias = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -256,7 +256,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         for (int i = 0; i < _config.Depth; i++)
         {
             BeforeBlockForward?.Invoke(i);
-            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, currentImg, currentTxt, temb, _rope);
+            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, currentImg, currentTxt, temb, _rope, attnBias);
 
             if (!ReferenceEquals(currentImg, imgTokens))
                 currentImg.Dispose();
@@ -283,7 +283,7 @@ public sealed unsafe class FluxTransformer : IDisposable
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
         {
             BeforeBlockForward?.Invoke(_config.Depth + i);
-            Tensor newX = _singleBlocks[i].Forward(backend, x, temb, _rope);
+            Tensor newX = _singleBlocks[i].Forward(backend, x, temb, _rope, attnBias);
             x.Dispose();
             x = newX;
         }

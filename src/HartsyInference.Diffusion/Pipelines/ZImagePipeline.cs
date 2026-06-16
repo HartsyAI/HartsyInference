@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -52,7 +53,8 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         TextToImageRequest request,
         float cfgScale = 1.0f,
         Tensor? negativeCaptionEmbeddings = null,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        RegionalPlan? regionalPlan = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -102,7 +104,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             // this inversion every step conditions on the OPPOSITE point in the schedule and the
             // model produces near-random output. See pipeline_z_image.py:506.
             float invertedSigma = 1.0f - sigma;
-            Tensor velocity = _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma);
+            Tensor velocity = _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma, regionalPlan, i - plan.StartStep);
 
             if (cfgScale > 1.0f)
             {

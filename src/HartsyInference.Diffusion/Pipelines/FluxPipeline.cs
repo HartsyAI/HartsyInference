@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -60,7 +61,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         TextToImageRequest request,
         float guidanceScale = 3.5f,
         Action<GenerationProgress>? onProgress = null,
-        Tensor? controlImage = null)
+        Tensor? controlImage = null,
+        RegionalPlan? regionalPlan = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -226,6 +228,25 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             Backend.PreloadWeights(_transformer.EnumerateWeights());
         }
 
+        // ── 4b. Regional conditioning: append region T5 streams + prepare per-step attention bias.
+        //    Image tokens follow the text tokens in Flux's joint [txt|img] attention, so the bias
+        //    rectangle starts at the (possibly extended) text length. Collapses to the base path
+        //    when no plan is given.
+        bool hasRegions = regionalPlan is not null && regionalPlan.Regions.Count > 0;
+        Tensor condStream = t5Embeddings;
+        int condTxtSeqLen = txtSeqLen;
+        Tensor? extendedT5 = null;
+        List<(int Start, int End)>? regionRanges = null;
+        List<float[]>? regionGridMasks = null;
+        float[]? regionWeights = null;
+        if (hasRegions)
+        {
+            (extendedT5, condTxtSeqLen, regionRanges, regionGridMasks) =
+                RegionalConditioningLayout.BuildTextStream(regionalPlan!, t5Embeddings, hPacked, wPacked);
+            condStream = extendedT5;
+            regionWeights = new float[regionalPlan!.Regions.Count];
+        }
+
         Logs.Info("Starting Flux denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -241,11 +262,20 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 ? packedLatent
                 : ConcatPackedFeatureDim(packedLatent, packedControl);
 
+            Tensor? regionBias = null;
+            if (hasRegions)
+            {
+                regionalPlan!.ResolveStep(i - startStep, regionWeights!);
+                regionBias = RegionalAttentionBias.Build(
+                    condTxtSeqLen + imgSeqLen, condTxtSeqLen, imgSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
+            }
+
             // Forward pass: velocity prediction
             Tensor velocityPred = _transformer.Forward(
-                Backend, transformerInput, t5Embeddings, sigma,
-                clipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked);
+                Backend, transformerInput, condStream, sigma,
+                clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, regionBias);
 
+            regionBias?.Dispose();
             if (transformerInput != packedLatent) transformerInput.Dispose();
 
             LogTensorStats($"Step {i+1} velocity", velocityPred);
@@ -308,6 +338,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 
         clipPooled.Dispose();
         t5Embeddings.Dispose();
+        extendedT5?.Dispose();
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
         packedControl?.Dispose();

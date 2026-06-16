@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -62,7 +63,8 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         int[] promptTokenIds,
         TextToImageRequest request,
         Ideogram4SamplerPreset? preset = null,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        RegionalPlan? regionalPlan = null)
     {
         ThrowIfDisposed();
         preset ??= Ideogram4SamplerPreset.Default20;
@@ -99,11 +101,25 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Logs.Info($"Prompt encoded in {sw.ElapsedMilliseconds}ms");
 
         // ── 2. Build the unified-sequence conditioning tensors ──
-        Tensor llmFull = PlaceTextFeatures(textFeatures, numText, seqLen, _config.LlmFeaturesDim);
+        // Regional conditioning appends each region's encoded features after the base text tokens
+        // so image tokens can be biased toward their region's prompt (RegionalAttentionBias). With
+        // no plan this collapses exactly to the base single-prompt path.
+        bool hasRegions = regionalPlan is not null && regionalPlan.Regions.Count > 0;
+        int effNumText = numText;
+        List<(int Start, int End)>? regionRanges = null;
+        List<float[]>? regionGridMasks = null;
+        float[]? regionWeights = null;
+        if (hasRegions)
+        {
+            (effNumText, regionRanges, regionGridMasks) = BuildRegionLayout(regionalPlan!, numText, numImageTokens, gridH, gridW);
+            regionWeights = new float[regionalPlan!.Regions.Count];
+        }
+        int effSeqLen = effNumText + numImageTokens;
+        Tensor llmFull = BuildLlmFull(textFeatures, numText, effSeqLen, _config.LlmFeaturesDim, hasRegions ? regionalPlan : null);
         textFeatures.Dispose();
-        Tensor posIds = BuildPositionIds(numText, gridH, gridW);              // [1, L, 3]
-        int[] indicator = BuildIndicator(numText, numImageTokens);            // [L]
-        Tensor posIdsImageOnly = SliceImagePositions(posIds, numText, numImageTokens);
+        Tensor posIds = BuildPositionIds(effNumText, gridH, gridW);           // [1, L, 3]
+        int[] indicator = BuildIndicator(effNumText, numImageTokens);         // [L]
+        Tensor posIdsImageOnly = SliceImagePositions(posIds, effNumText, numImageTokens);
         int[] indicatorImageOnly = new int[numImageTokens];
         Array.Fill(indicatorImageOnly, OutputImageIndicator);
         Tensor negLlm = new Tensor(new TensorShape(1, numImageTokens, _config.LlmFeaturesDim), DType.F32); // zeros
@@ -127,11 +143,19 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             float delta = sVal - tVal;
             float gw = preset.GuidanceSchedule[i];
 
-            // Positive pass: full sequence, keep image-token velocity.
-            Tensor posX = BuildConditionalLatent(z, numText, numImageTokens, latentDim);
-            Tensor posOut = _conditional.Forward(Backend, llmFull, posX, tVal, posIds, indicator, null);
+            // Positive pass: full sequence, keep image-token velocity. Regional bias (when present)
+            // steers each image token toward its region's appended conditioning columns.
+            Tensor posX = BuildConditionalLatent(z, effNumText, numImageTokens, latentDim);
+            Tensor? regionBias = null;
+            if (hasRegions)
+            {
+                regionalPlan!.ResolveStep(steps - 1 - i, regionWeights!);
+                regionBias = RegionalAttentionBias.Build(effSeqLen, effNumText, numImageTokens, regionRanges!, regionGridMasks!, regionWeights!);
+            }
+            Tensor posOut = _conditional.Forward(Backend, llmFull, posX, tVal, posIds, indicator, regionBias);
+            regionBias?.Dispose();
             posX.Dispose();
-            Tensor posV = SliceImageVelocity(posOut, numText, numImageTokens, latentDim);
+            Tensor posV = SliceImageVelocity(posOut, effNumText, numImageTokens, latentDim);
             posOut.Dispose();
 
             // Negative pass: image-only sequence, zeroed text, unconditional transformer.
@@ -180,16 +204,56 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return (rgb, request.Width, request.Height, seed);
     }
 
-    /// <summary>Places encoded text features <c>[1, numText, D]</c> into a full <c>[1, L, D]</c> tensor (text at the front, zeros at image positions).</summary>
-    private static Tensor PlaceTextFeatures(Tensor textFeatures, int numText, int seqLen, int dim)
+    /// <summary>Places encoded base text features <c>[1, numText, D]</c> (and any regional features) into a full <c>[1, seqLen, D]</c> tensor: base text at the front, region features immediately after, zeros at image positions.</summary>
+    private static Tensor BuildLlmFull(Tensor textFeatures, int numText, int seqLen, int dim, RegionalPlan? plan)
     {
         Tensor full = new Tensor(new TensorShape(1, seqLen, dim), DType.F32);
         float* dst = (float*)full.DataPointer;
         new Span<float>(dst, checked((int)((long)seqLen * dim))).Clear();
         float* src = (float*)textFeatures.DataPointer;
-        long bytes = (long)numText * dim * sizeof(float);
-        Buffer.MemoryCopy(src, dst, bytes, bytes);
+        long baseBytes = (long)numText * dim * sizeof(float);
+        Buffer.MemoryCopy(src, dst, baseBytes, baseBytes);
+        if (plan is not null)
+        {
+            long offsetTokens = numText;
+            foreach (RegionConditioning region in plan.Regions)
+            {
+                int len = (int)region.Cond.Shape[1];
+                float* regionSrc = (float*)region.Cond.DataPointer;
+                long regionBytes = (long)len * dim * sizeof(float);
+                Buffer.MemoryCopy(regionSrc, dst + offsetTokens * dim, regionBytes, regionBytes);
+                offsetTokens += len;
+            }
+        }
         return full;
+    }
+
+    /// <summary>Computes the regional layout for the unified sequence: the extended text-token count, each region's conditioning column range, and each region's image-grid mask (row-major <c>[numImg]</c>).</summary>
+    private (int ExtNumText, List<(int Start, int End)> Ranges, List<float[]> GridMasks) BuildRegionLayout(
+        RegionalPlan plan, int numText, int numImg, int gridH, int gridW)
+    {
+        List<(int Start, int End)> ranges = new List<(int Start, int End)>(plan.Regions.Count);
+        List<float[]> masks = new List<float[]>(plan.Regions.Count);
+        int cursor = numText;
+        foreach (RegionConditioning region in plan.Regions)
+        {
+            if ((int)region.Cond.Shape[2] != _config.LlmFeaturesDim)
+            {
+                throw new InvalidOperationException($"Region conditioning dim {region.Cond.Shape[2]} != LlmFeaturesDim {_config.LlmFeaturesDim}.");
+            }
+            int len = (int)region.Cond.Shape[1];
+            ranges.Add((cursor, cursor + len));
+            cursor += len;
+            Tensor latentMask = region.Mask.ToLatentMask(gridH, gridW);
+            float[] grid = latentMask.AsReadOnlySpan<float>().ToArray();
+            latentMask.Dispose();
+            if (grid.Length != numImg)
+            {
+                throw new InvalidOperationException($"Region grid mask length {grid.Length} != numImg {numImg}.");
+            }
+            masks.Add(grid);
+        }
+        return (cursor, ranges, masks);
     }
 
     /// <summary>Builds <c>[1, L, 3]</c> MRoPE positions: text tokens <c>(i, i, i)</c>; image tokens <c>(0, row, col) + IMAGE_POSITION_OFFSET</c>.</summary>

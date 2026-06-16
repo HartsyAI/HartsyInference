@@ -164,7 +164,7 @@ public sealed unsafe class FluxDoubleStreamBlock
     /// <param name="temb">Timestep embedding [B, hidden].</param>
     /// <param name="rope">Precomputed FluxRope (must have Precompute called for current resolution).</param>
     /// <returns>Updated (image, text) tensors.</returns>
-    public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb, FluxRope rope)
+    public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
@@ -265,7 +265,7 @@ public sealed unsafe class FluxDoubleStreamBlock
         // ── 8. Scaled dot-product attention ──
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
+        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, attnBias, scale);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();

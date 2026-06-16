@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Prompting;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -149,14 +150,15 @@ public sealed unsafe class ZImageTransformer : IDisposable
     /// <param name="captionEmbeddings">Qwen3-encoded caption [B, capRealLen, capFeatDim=2560].</param>
     /// <param name="sigma">Current sigma (flow-match noise level, 0..1).</param>
     /// <returns>Predicted velocity [B, in_channels, H, W] (in patch-space → unpatchified).</returns>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor captionEmbeddings, float sigma)
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor captionEmbeddings, float sigma,
+        RegionalPlan? regionalPlan = null, int regionalStep = 0)
     {
         int batch = (int)latent.Shape[0];
         int inChannels = (int)latent.Shape[1];
         int patch = _config.PatchSize;
 
         (Tensor imgTokens, Tensor tEmb, int hPacked, int wPacked) =
-            ForwardCore(backend, latent, captionEmbeddings, sigma);
+            ForwardCore(backend, latent, captionEmbeddings, sigma, regionalPlan, regionalStep);
         int imgRealLen = hPacked * wPacked;
 
         // ── 8. Final layer: AdaLN(scale only) → LayerNorm-no-affine + modulate → Linear → unpatchify ──
@@ -179,7 +181,8 @@ public sealed unsafe class ZImageTransformer : IDisposable
     /// applied). The caller owns both returned tensors; <c>tEmb</c> is returned so classic Z-Image can run its
     /// AdaLN final layer — Zeta-Chroma disposes it unused (its decoder head conditions on the tokens only).</summary>
     internal (Tensor imgTokens, Tensor tEmb, int hPacked, int wPacked) ForwardCore(
-        IBackend backend, Tensor latent, Tensor captionEmbeddings, float sigma)
+        IBackend backend, Tensor latent, Tensor captionEmbeddings, float sigma,
+        RegionalPlan? regionalPlan = null, int regionalStep = 0)
     {
         int batch = (int)latent.Shape[0];
         int inChannels = (int)latent.Shape[1];
@@ -196,7 +199,21 @@ public sealed unsafe class ZImageTransformer : IDisposable
         int imgRealLen = hPacked * wPacked;
         int imgPaddedLen = PadUpTo(imgRealLen, _config.SeqMultiOf);
 
-        int capRealLen = (int)captionEmbeddings.Shape[1];
+        // Regional conditioning: append region caption streams (so they share cap_embedder +
+        // context_refiner) and remember each region's caption-relative column range + image-grid
+        // mask. The [image|caption] attention bias is built below once padded lengths are known.
+        Tensor effCaption = captionEmbeddings;
+        bool ownsCaption = false;
+        List<(int Start, int End)>? regionCapRanges = null;
+        List<float[]>? regionGridMasks = null;
+        if (regionalPlan is not null && regionalPlan.Regions.Count > 0)
+        {
+            (effCaption, _, regionCapRanges, regionGridMasks) =
+                RegionalConditioningLayout.BuildTextStream(regionalPlan, captionEmbeddings, hPacked, wPacked);
+            ownsCaption = true;
+        }
+
+        int capRealLen = (int)effCaption.Shape[1];
         int capPaddedLen = PadUpTo(capRealLen, _config.SeqMultiOf);
 
         // ── 1. Timestep embedding ──
@@ -204,7 +221,11 @@ public sealed unsafe class ZImageTransformer : IDisposable
         ZImageDebugDump.Dump("t_embedder", tEmb);
 
         // ── 2. Caption embedding: cap_embedder + pad to multiple of 32 + context_refiner stack ──
-        Tensor capProjected = EmbedCaption(backend, captionEmbeddings, batch, capRealLen);
+        Tensor capProjected = EmbedCaption(backend, effCaption, batch, capRealLen);
+        if (ownsCaption)
+        {
+            effCaption.Dispose();
+        }
         ZImageDebugDump.Dump("cap_embedder", capProjected);
         Tensor capPadded = PadCaption(capProjected, capRealLen, capPaddedLen, batch);
         // PadCaption may return the input unchanged when paddedLen==realLen — only dispose if it allocated a new tensor.
@@ -266,15 +287,32 @@ public sealed unsafe class ZImageTransformer : IDisposable
         _rope.Precompute(fullPosIds);
         fullPosIds.Dispose();
 
+        // Build the regional attention bias for the [image|caption] main-layer sequence. Image
+        // tokens occupy [0, imgRealLen) (padded image tokens get no bias); region caption columns
+        // are offset past the padded image block.
+        Tensor? attnBias = null;
+        if (regionCapRanges is not null)
+        {
+            float[] regionWeights = new float[regionalPlan!.Regions.Count];
+            regionalPlan.ResolveStep(regionalStep, regionWeights);
+            List<(int Start, int End)> absRanges = new List<(int Start, int End)>(regionCapRanges.Count);
+            foreach ((int Start, int End) range in regionCapRanges)
+            {
+                absRanges.Add((imgPaddedLen + range.Start, imgPaddedLen + range.End));
+            }
+            attnBias = RegionalAttentionBias.Build(imgPaddedLen + capPaddedLen, 0, imgRealLen, absRanges, regionGridMasks!, regionWeights);
+        }
+
         // ── 6. Main layers ──
         Tensor x = concat;
         for (int i = 0; i < _layers.Length; i++)
         {
-            Tensor next = _layers[i].Forward(backend, x, tEmb, _rope);
+            Tensor next = _layers[i].Forward(backend, x, tEmb, _rope, attnBias);
             x.Dispose();
             x = next;
             ZImageDebugDump.Dump($"layers.{i}", x);
         }
+        attnBias?.Dispose();
 
         // ── 7. Slice off image portion (front of the [image, caption] sequence), trim pad tokens ──
         Tensor imageSlice = SliceImageFront(x, batch, imgPaddedLen, capPaddedLen, hidden);

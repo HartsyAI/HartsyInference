@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -61,7 +62,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null,
         IReadOnlyList<ControlNetConditioning>? controlNets = null,
         RefinerSwapConfig? refiner = null,
-        IReadOnlyList<IpAdapterConditioning>? ipAdapters = null)
+        IReadOnlyList<IpAdapterConditioning>? ipAdapters = null,
+        ConditioningSchedule? conditioningSchedule = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -162,7 +164,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Backend.PreloadWeights(_unet.EnumerateWeights());
         bool useF16 = (_unet.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32) == DType.F16;
         latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, pooledOutput!, sizeCondition, scheduler, useF16, startStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets,
-            refiner, swapStep, clipGForRefiner, refinerSizeConditionPos, refinerSizeConditionNeg, ipAdapters, onProgress);
+            refiner, swapStep, clipGForRefiner, refinerSizeConditionPos, refinerSizeConditionNeg, ipAdapters, onProgress, conditioningSchedule);
 
         textEmbeddings.Dispose();
         pooledOutput?.Dispose();
@@ -280,7 +282,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         float[]? refinerSizeConditionPos,
         float[]? refinerSizeConditionNeg,
         IReadOnlyList<IpAdapterConditioning>? ipAdapters,
-        Action<GenerationProgress>? onProgress)
+        Action<GenerationProgress>? onProgress,
+        ConditioningSchedule? conditioningSchedule = null)
     {
         bool useStepSwap = refiner is not null && swapStep < totalSteps && clipGForRefiner is not null;
         bool refinerUseF16 = useStepSwap
@@ -326,7 +329,12 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             // block schedule would break the residual addition.
             bool inRefinerPhase = useStepSwap && i >= swapStep;
             UNet activeUnet = inRefinerPhase ? refiner!.RefinerUnet : _unet;
-            Tensor activeTextEmb = inRefinerPhase ? clipGForRefiner! : textEmbeddings;
+            // Per-step conditioning selection (alternation/scheduling) applies only to the base
+            // phase; the refiner phase uses its own CLIP-G-only conditioning.
+            Tensor baseTextEmb = conditioningSchedule is null
+                ? textEmbeddings
+                : conditioningSchedule.Variants[conditioningSchedule.Resolve(i, totalSteps)];
+            Tensor activeTextEmb = inRefinerPhase ? clipGForRefiner! : baseTextEmb;
             float[] activeSizeCond = inRefinerPhase ? refinerSizeConditionPos! : sizeCondition;
             float[]? activeSizeCondUncond = inRefinerPhase ? refinerSizeConditionNeg : null;
             bool activeUseF16 = inRefinerPhase ? refinerUseF16 : useF16;

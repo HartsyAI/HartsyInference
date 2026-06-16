@@ -97,7 +97,7 @@ public sealed unsafe class FluxSingleStreamBlock
     /// <param name="temb">Timestep embedding [B, hidden].</param>
     /// <param name="rope">Precomputed FluxRope.</param>
     /// <returns>Updated x tensor [B, totalSeqLen, hidden].</returns>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope)
+    public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
@@ -156,7 +156,7 @@ public sealed unsafe class FluxSingleStreamBlock
         // ── 7. SDPA ──
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

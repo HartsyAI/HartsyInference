@@ -1,13 +1,13 @@
 # HartsyInference
 
-**A pure C#/.NET 10 AI inference engine for image, audio, vision, video, 3D, and interactive world models — with zero Python dependencies.**
+**A pure C#/.NET 10 AI inference engine for image, audio, vision, video, 3D, and interactive world models, with zero Python dependencies.**
 
 HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU**. No Python. No C++ wrappers. No external processes. Just NuGet packages. (An OpenAI-compatible REST server is [in progress](#openai-compatible-server-in-progress).)
 
 Designed to pair with [dotLLM](https://github.com/your-org/dotLLM) for LLM inference, forming a complete AI platform in pure .NET.
 
 > [!NOTE]
-> HartsyInference covers **everything that isn't an LLM** — diffusion image models, speech, music, vision, video, 3D mesh generation, and real-time playable world models. For text generation, pair it with dotLLM.
+> HartsyInference covers **everything that isn't an LLM**: diffusion image models, speech, music, vision, video, 3D mesh generation, and real-time playable world models. For text generation, pair it with dotLLM.
 
 ---
 
@@ -32,7 +32,7 @@ Designed to pair with [dotLLM](https://github.com/your-org/dotLLM) for LLM infer
 | | |
 |---|---|
 | **No Python** | The entire stack is C#. No `pip`, no `venv`, no subprocess marshalling, no GIL. |
-| **Pure C# CUDA** | GPU kernels are PTX, JIT-compiled through the CUDA Driver API via P/Invoke — no native shared libraries. |
+| **Pure C# CUDA** | GPU kernels are PTX, JIT-compiled through the CUDA Driver API via P/Invoke, with no native shared libraries. |
 | **Modular NuGet** | Pull in only the modality you need. `HartsyInference.Diffusion` for images, `HartsyInference.Audio` for speech, etc. |
 | **World models** | Real-time, action-conditioned interactive generation (keyboard / mouse / camera-pose → streamed frames). |
 | **Zero-alloc hot paths** | Tensor data in `NativeMemory.AlignedAlloc`, weights memory-mapped, `Span<T>` everywhere. |
@@ -44,7 +44,7 @@ Designed to pair with [dotLLM](https://github.com/your-org/dotLLM) for LLM infer
 
 | Pillar | What It Means |
 |---|---|
-| **Pure C#** | CUDA accessed via PTX through the CUDA Driver API P/Invoke — no native shared libraries |
+| **Pure C#** | CUDA accessed via PTX through the CUDA Driver API P/Invoke, with no native shared libraries |
 | **Eager execution** | No computation graphs; ops execute immediately for predictable memory and debugging |
 | **Zero-allocation hot paths** | Tensor data in `NativeMemory.AlignedAlloc`; model weights memory-mapped; `Span<T>` everywhere |
 | **Multi-backend** | One `IBackend` abstraction over CUDA, Vulkan, and SIMD CPU |
@@ -70,14 +70,14 @@ dotnet run -c Release --project src/HartsyInference.Cli -- \
 Run it on the GPU instead:
 
 ```bash
-# NVIDIA — CUDA backend (fastest)
+# NVIDIA: CUDA backend (fastest)
 dotnet run -c Release --project src/HartsyInference.Cli -- \
   --backend cuda \
   --prompt "a castle on a mountain at sunset, oil painting" \
   --negative "blurry, low quality" \
   --width 768 --height 768 --steps 25 --cfg 7.0 --seed 1234
 
-# AMD / Intel / NVIDIA — cross-vendor Vulkan backend
+# AMD / Intel / NVIDIA: cross-vendor Vulkan backend
 dotnet run -c Release --project src/HartsyInference.Cli -- \
   --backend vulkan --prompt "a fox in autumn leaves, studio ghibli style"
 ```
@@ -117,10 +117,10 @@ Options:
 Each modality is its own NuGet package. Expand a section below for the install reference and a minimal end-to-end example.
 
 > [!NOTE]
-> There is no one-line auto-loader yet — `PipelineFactory` is still scaffolding. Pipelines are constructed explicitly from pre-loaded components, exactly as the bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) do. Those programs are the authoritative, compile-tested usage references.
+> There is no one-line auto-loader yet. `PipelineFactory` is still scaffolding, so pipelines are constructed explicitly from pre-loaded components, exactly as the bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) do. Those programs are the authoritative, compile-tested usage references.
 
 <details>
-<summary><b>Image Generation</b> — diffusion text-to-image (SD1.5)</summary>
+<summary><b>Image Generation</b>: diffusion text-to-image (SD1.5)</summary>
 
 ```xml
 <PackageReference Include="HartsyInference.Diffusion" />
@@ -196,7 +196,7 @@ static Dictionary<string, Tensor> LoadF32(string path)
 </details>
 
 <details>
-<summary><b>Speech-to-Text</b> — Whisper transcription</summary>
+<summary><b>Speech-to-Text</b>: Whisper transcription</summary>
 
 ```xml
 <PackageReference Include="HartsyInference.Audio" />
@@ -220,7 +220,7 @@ Console.WriteLine(text);
 </details>
 
 <details>
-<summary><b>3D Generation</b> — image → mesh</summary>
+<summary><b>3D Generation</b>: image to mesh</summary>
 
 ```xml
 <PackageReference Include="HartsyInference.ThreeD" />
@@ -251,7 +251,7 @@ if (result.Mesh is not null)
 </details>
 
 <details>
-<summary><b>Interactive World Model</b> — real-time, action-conditioned</summary>
+<summary><b>Interactive World Model</b>: real-time, action-conditioned</summary>
 
 ```xml
 <PackageReference Include="HartsyInference.Interactive" />
@@ -283,61 +283,34 @@ await foreach (VideoFrame frame in session.ReadFramesAsync())
 
 ---
 
-## OpenAI-Compatible Server
+## OpenAI-Compatible Server (in progress)
 
-Host an OpenAI-compatible REST API in process — a drop-in replacement for `/v1/images/generations`, `/v1/audio/transcriptions`, and `/v1/audio/speech`, with SSE streaming for progress.
-
-<details>
-<summary><b>Host the server</b> — ASP.NET setup</summary>
-
-```xml
-<PackageReference Include="HartsyInference.Server" />
-<PackageReference Include="HartsyInference.Cuda" />
-```
+> [!WARNING]
+> The server host is scaffolding today. It boots and serves `/health` and `/ready`, but the OpenAI-compatible endpoints (`AddHartsyInference` / `MapHartsyInferenceEndpoints`) are not wired yet. The snippet below is the current state, not the finished API.
 
 ```csharp
-var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddHartsyInference(options =>
-{
-    options.ModelsDirectory = "~/.hartsyinference/models";
-    options.DefaultImageModel = "stabilityai/sdxl-base-1.0";
-});
+using HartsyInference.Server;
 
-var app = builder.Build();
-app.MapHartsyInferenceEndpoints();
+WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+
+// builder.Services.AddHartsyInference(options => { ... });   // planned
+
+WebApplication app = builder.Build();
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+app.MapGet("/ready", () => Results.Ok(new { status = "ready" }));
+
+// app.MapHartsyInferenceEndpoints();                          // planned: /v1/images/generations, etc.
 app.Run();
 ```
 
-</details>
-
-<details>
-<summary><b>Call it</b> — curl and OpenAI client examples</summary>
-
-```bash
-curl http://localhost:5000/v1/images/generations \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer local" \
-  -d '{
-        "model": "sdxl",
-        "prompt": "A cat in space, photorealistic",
-        "size": "1024x1024"
-      }'
-```
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:5000/v1", api_key="local")
-response = client.images.generate(prompt="A cat in space", model="sdxl", size="1024x1024")
-```
-
-</details>
+The planned surface is a drop-in replacement for `/v1/images/generations`, `/v1/audio/transcriptions`, and `/v1/audio/speech` with SSE streaming for progress. Until it lands, drive inference through the library APIs above or the bundled CLIs.
 
 ---
 
 ## Supported Models
 
 > [!NOTE]
-> **Status legend** — ✅ Complete · 🧪 Validation-pending (built end-to-end, numerics being verified) · 🏗️ Structural (interfaces wired, forward pass in progress)
+> **Status legend:** ✅ Complete · 🧪 Validation-pending (built end-to-end, numerics being verified) · 🏗️ Structural (interfaces wired, forward pass in progress)
 
 ### Image Generation
 
@@ -378,7 +351,7 @@ response = client.images.generate(prompt="A cat in space", model="sdxl", size="1
 | MusicGen | Music generation | ✅ |
 | F5-TTS | Voice cloning | 🏗️ |
 | YuE | Music (StableLM) | 🏗️ |
-| Codecs — Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck | Neural audio codecs | ✅ |
+| Codecs (Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck) | Neural audio codecs | ✅ |
 
 ### Vision
 
@@ -407,11 +380,11 @@ response = client.images.generate(prompt="A cat in space", model="sdxl", size="1
 | TripoSR | Image → mesh (triplane/NeRF) | 🏗️ |
 | Hunyuan3D-2 (Shape) | Image/Text → mesh | 🏗️ |
 
-> Built on a reusable mesh / splat / triplane foundation — marching cubes, plus glTF / OBJ / PLY export.
+> Built on a reusable mesh / splat / triplane foundation: marching cubes, plus glTF / OBJ / PLY export.
 
 ### World / Interactive Models
 
-Real-time, action-conditioned generators — keyboard / mouse / camera-pose input streams in, frames stream out.
+Real-time, action-conditioned generators. Keyboard / mouse / camera-pose input streams in, frames stream out.
 
 | Model | Scale / Target | Status |
 |---|---|---|
@@ -429,12 +402,12 @@ See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the fu
 > [!WARNING]
 > These are planned and **not yet implemented**. Tracking lives in the [roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md).
 
-- **Image** — ControlNet, IP-Adapter, LCM/Turbo distillation across more architectures, regional prompting
-- **Vision** — Grounding DINO, YOLO-World, OWLv2, Florence-2, RT-DETR, depth & pose estimation, OCR, tracking
-- **Video** — HunyuanVideo, CogVideoX, longer-context temporal generation
-- **3D** — Gaussian-splat output, texture synthesis, multi-view → mesh
-- **World models** — broader action spaces, longer memory horizons, multiplayer state
-- **Tooling** — quantized inference (MXFP4 / MXFP8 / NVFP4), model hot-swap, expanded CLI subcommands per modality
+- **Image:** ControlNet, IP-Adapter, LCM/Turbo distillation across more architectures, regional prompting
+- **Vision:** Grounding DINO, YOLO-World, OWLv2, Florence-2, RT-DETR, depth & pose estimation, OCR, tracking
+- **Video:** HunyuanVideo, CogVideoX, longer-context temporal generation
+- **3D:** Gaussian-splat output, texture synthesis, multi-view to mesh
+- **World models:** broader action spaces, longer memory horizons, multiplayer state
+- **Tooling:** quantized inference (MXFP4 / MXFP8 / NVFP4), model hot-swap, expanded CLI subcommands per modality
 
 ---
 
@@ -448,7 +421,7 @@ See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the fu
 | `HartsyInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
 | `HartsyInference.Cuda` | CUDA backend with PTX kernels and cuBLAS |
 | `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (SPIR-V compute) |
-| `HartsyInference.Diffusion` | Image pipelines — SD/SDXL/Flux/SD3/MMDiT/NextDiT, VAE, LoRA |
+| `HartsyInference.Diffusion` | Image pipelines (SD/SDXL/Flux/SD3/MMDiT/NextDiT), VAE, LoRA |
 | `HartsyInference.Audio` | STT, TTS, music, and neural audio codecs |
 | `HartsyInference.Vision` | CLIP/SigLIP/DINO embeddings, YOLO detection, SAM segmentation, face |
 | `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky video generation |
@@ -471,22 +444,22 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 - **NVIDIA GPU** with compute capability 8.0+ (RTX 30xx/40xx, A100, H100)
 
 ### Vulkan backend (NVIDIA / AMD / Intel, cross-vendor)
-- **Vulkan 1.3+ runtime** — almost always pre-installed by the GPU vendor driver
+- **Vulkan 1.3+ runtime**, almost always pre-installed by the GPU vendor driver
 - **GPU with FP16 compute** (`shaderFloat16`). Most discrete GPUs from 2019+ qualify.
 
 <details>
 <summary>Vulkan setup details &amp; validation layers</summary>
 
-- **Vulkan 1.3+ runtime** — almost always pre-installed by the GPU vendor driver
+- **Vulkan 1.3+ runtime**, almost always pre-installed by the GPU vendor driver
   - **Linux:** `sudo apt install mesa-vulkan-drivers vulkan-tools` (AMD/Intel; NVIDIA blob ships its own ICD)
   - **Windows:** the AMD / Intel / NVIDIA driver ships Vulkan; no extra install
-- Validation layers (optional, for debugging) — install the [LunarG Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and set `HARTSYINFERENCE_VK_VALIDATION=1`.
+- Validation layers (optional, for debugging): install the [LunarG Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and set `HARTSYINFERENCE_VK_VALIDATION=1`.
 - See [PHASE_3_5_VULKAN_BACKEND.md](docs/Checklists/PHASE_3_5_VULKAN_BACKEND.md) for current model support and acceptance status.
 
 </details>
 
 ### CPU backend (any platform)
-- No GPU required — AVX2 / AVX-512 / NEON SIMD with scalar fallback. Slowest, but universally available.
+- No GPU required. AVX2 / AVX-512 / NEON SIMD with scalar fallback. Slowest, but universally available.
 
 ---
 
@@ -509,7 +482,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 
 </details>
 
-**Research & Checklists** — technical research notes live in [`docs/Research/`](docs/Research/) (model formats, GPU/compute, diffusion architectures, text encoders, audio, vision). Phase-by-phase progress is tracked in [`docs/Checklists/`](docs/Checklists/). AI coding-agent instruction files are in [`docs/Agents/`](docs/Agents/) — see [CLAUDE.md](CLAUDE.md) for the dispatcher.
+**Research & Checklists:** technical research notes live in [`docs/Research/`](docs/Research/) (model formats, GPU/compute, diffusion architectures, text encoders, audio, vision). Phase-by-phase progress is tracked in [`docs/Checklists/`](docs/Checklists/). AI coding-agent instruction files are in [`docs/Agents/`](docs/Agents/); see [CLAUDE.md](CLAUDE.md) for the dispatcher.
 
 ---
 

@@ -96,7 +96,7 @@ public sealed unsafe class ZImageBlock
     /// <param name="x">Token sequence [B, seqLen, hidden].</param>
     /// <param name="tEmb">Timestep embedding [B, adaLNEmbedDim] — already through t_embedder.mlp (Linear → SiLU → Linear), output is NOT SiLU'd.</param>
     /// <param name="rope">Multi-axis RoPE precomputed for this seqLen, or null to skip.</param>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor tEmb, ZImageRope? rope)
+    public Tensor Forward(IBackend backend, Tensor x, Tensor tEmb, ZImageRope? rope, Tensor? attnBias = null)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
@@ -147,7 +147,7 @@ public sealed unsafe class ZImageBlock
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

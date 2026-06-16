@@ -31,6 +31,8 @@ Everything below is ordered to reach that bar with the least total work, closest
 
 **Deliverable T0 (1–2 days, unblocks everything):** a shared `tests/python-reference/_audio_harness.py` helper (synthetic-checkpoint writer + tap-dump + index.json, generalized from the Ideogram script) and a C# `AudioDebugDump` mirror of `Ideogram4DebugDump`. Every model below reuses it.
 
+> **PROGRESS (2026-06-15): the harness pattern is proven on ACE-Step v1's DiT core.** `AceStepDebugDump` + `dump_ace_step_dit.py` + `diff_ace_step_layers.py` + `AceStepDitDiffTests` are live and **match to ~1e-8 across every tap**. A useful variation was found: instead of Python generating weights (Ideogram pattern), the **C# test generates the synthetic checkpoint via the existing `*SyntheticWeights` helpers + `SafeTensorsWriter` and Python consumes it** — this avoids re-synthesizing large key surfaces (e.g. ACE's lyric Conformer) in Python. That's the template for every model below. Next: factor the shared Python utils out of `dump_ace_step_dit.py`, and add per-model `*DebugDump` classes.
+
 ---
 
 ## 2. Shared infrastructure (build once — many models block on these)
@@ -38,8 +40,8 @@ Everything below is ordered to reach that bar with the least total work, closest
 | # | Component | Needed by | Status | Effort |
 |---|---|---|---|---|
 | S1 | **Audio parity harness** (§1, T0) | ALL | none | S |
-| S2 | **EnCodec 32 kHz preset** (50 Hz frame; ratios per MUSICGEN doc) | MusicGen | EnCodec exists (24 kHz only) | S |
-| S3 | **EnCodec 16 kHz preset** | AudioGen | "" | S |
+| S2 | **EnCodec 32 kHz support** (MusicGen) — ⚠ **bigger than a preset:** `facebook/encodec_32khz` uses `time_group_norm` (GroupNorm, not weight-norm), **non-causal** convs, ratios `[8,5,4,4]`→50 Hz, `n_filters=64`, codebook_size **2048**. The current SeaNet (weight-norm + causal only, codebook 1024) needs GroupNorm conv blocks + non-causal padding + a 2048-codebook RVQ before a 32 kHz preset works. | MusicGen | EnCodec 24 kHz only | **M** |
+| S3 | **EnCodec 16 kHz support** (AudioGen) — same SeaNet additions as S2 at 16 kHz | AudioGen | "" | M |
 | S4 | **`dpmpp-3m-sde` scheduler** (order-3 multistep DPM++, EDM v-pred, polyexp σ) | Stable Audio Open 1.0 | missing (PingPong/Euler/DPM++2M exist) | M |
 | S5 | **`FourierFeatures1D` + `NumberConditioner`** (timing embed) | Stable Audio | missing | S |
 | S6 | **DCAE encoder** (mirror of `MusicDcaeDecoder`) | ACE-Step v1 edit/repaint | decoder only | M |

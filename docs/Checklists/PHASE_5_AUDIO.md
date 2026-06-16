@@ -331,7 +331,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`AceStepPipeline.cs`](../../src/HartsyInference.Diffusion/Pipelines/AceStepPipeline.cs) — denoise → pipeline latent scale (0.1786/−1.9091, NOT the diffusers 0.41407) → DCAE decode → de-standardize to log-mel [−11,3] → per-channel vocoder → 44.1 kHz stereo; [`AceStepCheckpointConverter`](../../src/HartsyInference.ModelHandler/CheckpointConverters/AceStepCheckpointConverter.cs) (SSL-head drop, weight-norm fusion w/ numeric test) + `TestPaths.AceStep`
 - [ ] Flow-edit / repaint algorithm (masked dual-conditioning velocity loop — needs the DCAE **encoder** first)
 - [x] Env-gated [`AceStepGenerationTests`](../../tests/HartsyInference.Diffusion.Tests/AceStepGenerationTests.cs) — `LoadSmoke` (cheap, mmap; key/shape validation vs the real checkpoint — **verified passing via a standalone console run 2026-06-11**) + `Generate` (full 27-step CPU inference → stereo WAV in `Output/`; double-gated on `HARTSYINFERENCE_RUN_ACE_E2E=1` because the F32 DiT cast peaks ~13 GB RSS — run from a bare terminal, not an IDE test runner). The converter gained `castToF32` (CPU kernels are F32-only; BF16 stays mmap-borrowed otherwise)
-- [ ] Python diff harness (`dump_ace_step_forward.py` + layer diff) — numeric parity vs the reference (the remaining gate to "validated")
+- [x] **DiT-core Python parity harness (2026-06-15)** — [`dump_ace_step_dit.py`](../../tests/python-reference/dump_ace_step_dit.py) + [`diff_ace_step_layers.py`](../../tests/python-reference/diff_ace_step_layers.py) + [`AceStepDitDiffTests.cs`](../../tests/HartsyInference.Diffusion.Tests/AceStepDitDiffTests.cs) + [`AceStepDebugDump`](../../src/HartsyInference.Diffusion/Models/Denoisers/AceStepDebugDump.cs). Self-contained CPU/synthetic (C# generates the tiny checkpoint via `AceStepSyntheticWeights` + `SafeTensorsWriter`, Python independently re-implements `AceStepDit.Forward`). **All taps (patch_embed/tblock/layers/velocity) match to ~1e-8** — validates LiteLA linear-attn, the interleaved-pair/half-concat RoPE quirk, GLUMBConv, cross-attn, AdaLN-6, patch-embed, final layer. Remaining: extend the harness over BuildContext/lyric-Conformer + DCAE decoder + vocoder, then a real-weight single-step diff on the cloud GPU.
 - [ ] GGUF Q4/Q8 DiT path for low-RAM boxes (community quants exist; would drop the 13 GB F32 requirement)
 
 ### Stable Audio Open
@@ -399,7 +399,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] VibeVoice DPM-Solver 20-step trajectory matches `vibevoice/schedule/dpm_solver.py` on identical seed within 1e-3
 - [ ] VibeVoice end-to-end multi-speaker (4-way) demo script reproduces the upstream demo audio (subjective listening + spectrogram comparison)
 - [ ] VibeVoice-Streaming-0.5B first-packet latency < 250 ms on RTX 3060 12GB; 90-min VRAM-stable on 1.5B
-- [ ] ACE-Step single-step DiT forward matches Python reference (avg_err < 1e-3)
+- [x] ACE-Step single-step DiT forward matches Python reference (avg_err < 1e-3) — **achieved ~1e-8 on synthetic weights** (`AceStepDitDiffTests` + `dump_ace_step_dit.py`); real-weight diff on GPU still pending
 - [ ] Each codec encoder/decoder round-trip on a 5s test clip — STOI > 0.95
 - [ ] Long-form (30 min audio) memory leak test for each STT pipeline
 - [ ] 1-hour streaming test for streaming TTS (CosyVoice 2, XTTS, Sesame CSM)

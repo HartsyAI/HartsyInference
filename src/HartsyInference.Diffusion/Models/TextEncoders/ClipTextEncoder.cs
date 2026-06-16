@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Prompting;
+using HartsyInference.Tokenizers;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
@@ -79,7 +81,8 @@ public sealed unsafe class ClipTextEncoder
     /// <param name="backend">Compute backend.</param>
     /// <param name="batchTokenIds">Token IDs [B, seqLen].</param>
     /// <param name="layersFromEnd">"CLIP skip": 1 (default) runs all transformer layers (standard last_hidden_state); 2 stops one layer early (penultimate, the "clip skip 2" many SD1.5 anime checkpoints were trained with); etc. Final layer norm is applied to whichever layer's output is taken, matching ComfyUI's <c>CLIPSetLastLayer</c> semantics. Clamped to [1, numLayers].</param>
-    public Tensor Encode(IBackend backend, ReadOnlySpan<int[]> batchTokenIds, int layersFromEnd = 1)
+    public Tensor Encode(IBackend backend, ReadOnlySpan<int[]> batchTokenIds, int layersFromEnd = 1,
+        IReadOnlyDictionary<int, Tensor>? inlineEmbeddings = null)
     {
         int batch = batchTokenIds.Length;
         int seqLen = batchTokenIds[0].Length;
@@ -88,7 +91,7 @@ public sealed unsafe class ClipTextEncoder
         // 1. Token embedding lookup + position embedding
         TensorShape hiddenShape = new TensorShape(batch, seqLen, hiddenSize);
         Tensor hidden = new Tensor(hiddenShape, DType.F32);
-        EmbedTokens(hidden, batchTokenIds, batch, seqLen, hiddenSize);
+        EmbedTokens(hidden, batchTokenIds, batch, seqLen, hiddenSize, inlineEmbeddings);
 
         // 2. Build causal attention mask [seqLen, seqLen]
         Tensor causalMask = BuildCausalMask(seqLen);
@@ -117,7 +120,8 @@ public sealed unsafe class ClipTextEncoder
     /// <param name="batchTokenIds">Token IDs [B, seqLen].</param>
     /// <param name="eosTokenPositions">Position of the EOS token in each batch element (for pooled output extraction).</param>
     /// <returns>Tuple of (penultimateHiddenStates [B, seqLen, hiddenSize], pooledOutput [B, projectionDim] or null).</returns>
-    public (Tensor hiddenStates, Tensor? pooledOutput) EncodePenultimate(IBackend backend, ReadOnlySpan<int[]> batchTokenIds, ReadOnlySpan<int> eosTokenPositions)
+    public (Tensor hiddenStates, Tensor? pooledOutput) EncodePenultimate(IBackend backend, ReadOnlySpan<int[]> batchTokenIds, ReadOnlySpan<int> eosTokenPositions,
+        IReadOnlyDictionary<int, Tensor>? inlineEmbeddings = null)
     {
         int batch = batchTokenIds.Length;
         int seqLen = batchTokenIds[0].Length;
@@ -126,7 +130,7 @@ public sealed unsafe class ClipTextEncoder
         // 1. Token embedding lookup + position embedding
         TensorShape hiddenShape = new TensorShape(batch, seqLen, hiddenSize);
         Tensor hidden = new Tensor(hiddenShape, DType.F32);
-        EmbedTokens(hidden, batchTokenIds, batch, seqLen, hiddenSize);
+        EmbedTokens(hidden, batchTokenIds, batch, seqLen, hiddenSize, inlineEmbeddings);
 
         // 2. Build causal attention mask
         Tensor causalMask = BuildCausalMask(seqLen);
@@ -163,6 +167,100 @@ public sealed unsafe class ClipTextEncoder
         normedFull.Dispose();
 
         return (penultimate, pooledOutput);
+    }
+
+    /// <summary>Encodes ComfyUI-weighted token chunks into hidden states <c>[1, seqLen*numChunks, hiddenSize]</c> with final layer norm. Each chunk is encoded independently, weighted via the empty-baseline formula (<see cref="EmphasisMath.ApplyComfy"/>), and concatenated along the sequence axis. Used by SD1.5.</summary>
+    public Tensor EncodeWeighted(IBackend backend, IReadOnlyList<int[]> tokenIdChunks, IReadOnlyList<float[]> tokenWeightChunks, int layersFromEnd = 1)
+    {
+        ValidateWeightedChunks(tokenIdChunks, tokenWeightChunks);
+        int hiddenSize = _config.HiddenSize;
+        int numChunks = tokenIdChunks.Count;
+        int seqLen = tokenIdChunks[0].Length;
+
+        int[] emptyChunk = BuildEmptyChunk(seqLen);
+        Tensor zEmpty = Encode(backend, new int[][] { emptyChunk }, layersFromEnd);
+        ReadOnlySpan<float> emptySpan = zEmpty.AsReadOnlySpan<float>();
+
+        Tensor result = new Tensor(new TensorShape(1, seqLen * numChunks, hiddenSize), DType.F32);
+        Span<float> resultSpan = result.AsSpan<float>();
+        for (int c = 0; c < numChunks; c++)
+        {
+            Tensor z = Encode(backend, new int[][] { tokenIdChunks[c] }, layersFromEnd);
+            Span<float> zSpan = z.AsSpan<float>();
+            EmphasisMath.ApplyComfy(zSpan, emptySpan, tokenWeightChunks[c], seqLen, hiddenSize);
+            zSpan.CopyTo(resultSpan.Slice(c * seqLen * hiddenSize, seqLen * hiddenSize));
+            z.Dispose();
+        }
+        zEmpty.Dispose();
+        return result;
+    }
+
+    /// <summary>Penultimate-layer variant of <see cref="EncodeWeighted"/> for SDXL/SD3. Returns weighted penultimate hidden states <c>[1, seqLen*numChunks, hiddenSize]</c> plus an unweighted pooled output taken from the first chunk's EOS (null when there is no text_projection).</summary>
+    public (Tensor hiddenStates, Tensor? pooledOutput) EncodeWeightedPenultimate(IBackend backend, IReadOnlyList<int[]> tokenIdChunks, IReadOnlyList<float[]> tokenWeightChunks, ReadOnlySpan<int> eosTokenPositions)
+    {
+        ValidateWeightedChunks(tokenIdChunks, tokenWeightChunks);
+        int hiddenSize = _config.HiddenSize;
+        int numChunks = tokenIdChunks.Count;
+        int seqLen = tokenIdChunks[0].Length;
+
+        int[] emptyChunk = BuildEmptyChunk(seqLen);
+        (Tensor zEmpty, _) = EncodePenultimate(backend, new int[][] { emptyChunk }, stackalloc int[] { 1 });
+        ReadOnlySpan<float> emptySpan = zEmpty.AsReadOnlySpan<float>();
+
+        Tensor result = new Tensor(new TensorShape(1, seqLen * numChunks, hiddenSize), DType.F32);
+        Span<float> resultSpan = result.AsSpan<float>();
+        Tensor? pooled = null;
+        Span<int> eosSpan = stackalloc int[1];
+        for (int c = 0; c < numChunks; c++)
+        {
+            eosSpan[0] = c < eosTokenPositions.Length ? eosTokenPositions[c] : 0;
+            (Tensor z, Tensor? chunkPooled) = EncodePenultimate(backend, new int[][] { tokenIdChunks[c] }, eosSpan);
+            Span<float> zSpan = z.AsSpan<float>();
+            EmphasisMath.ApplyComfy(zSpan, emptySpan, tokenWeightChunks[c], seqLen, hiddenSize);
+            zSpan.CopyTo(resultSpan.Slice(c * seqLen * hiddenSize, seqLen * hiddenSize));
+            z.Dispose();
+            if (c == 0)
+            {
+                pooled = chunkPooled;
+            }
+            else
+            {
+                chunkPooled?.Dispose();
+            }
+        }
+        zEmpty.Dispose();
+        return (result, pooled);
+    }
+
+    private static void ValidateWeightedChunks(IReadOnlyList<int[]> idChunks, IReadOnlyList<float[]> weightChunks)
+    {
+        if (idChunks.Count == 0)
+        {
+            throw new ArgumentException("At least one token chunk is required.", nameof(idChunks));
+        }
+        if (idChunks.Count != weightChunks.Count)
+        {
+            throw new ArgumentException($"id chunk count {idChunks.Count} must equal weight chunk count {weightChunks.Count}.");
+        }
+        int seqLen = idChunks[0].Length;
+        for (int c = 0; c < idChunks.Count; c++)
+        {
+            if (idChunks[c].Length != seqLen || weightChunks[c].Length != seqLen)
+            {
+                throw new ArgumentException($"All chunks must have equal length {seqLen}.");
+            }
+        }
+    }
+
+    private static int[] BuildEmptyChunk(int seqLen)
+    {
+        int[] chunk = new int[seqLen];
+        chunk[0] = ClipTokenizer.StartOfTextId;
+        for (int i = 1; i < seqLen; i++)
+        {
+            chunk[i] = ClipTokenizer.EndOfTextId;
+        }
+        return chunk;
     }
 
     /// <summary>Extracts pooled output: takes the hidden state at the EOS token position and projects through text_projection.</summary>
@@ -218,8 +316,9 @@ public sealed unsafe class ClipTextEncoder
         return pooled;
     }
 
-    /// <summary>Token embedding lookup + position embedding addition. Writes directly into the output tensor.</summary>
-    private void EmbedTokens(Tensor output, ReadOnlySpan<int[]> batchTokenIds, int batch, int seqLen, int hiddenSize)
+    /// <summary>Token embedding lookup + position embedding addition. Writes directly into the output tensor. When <paramref name="inlineEmbeddings"/> contains a token id (a textual-inversion placeholder), its <c>[hiddenSize]</c> vector replaces the token-embedding lookup before the position embedding is added.</summary>
+    private void EmbedTokens(Tensor output, ReadOnlySpan<int[]> batchTokenIds, int batch, int seqLen, int hiddenSize,
+        IReadOnlyDictionary<int, Tensor>? inlineEmbeddings = null)
     {
         float* outPtr = (float*)output.DataPointer;
         float* tokenPtr = (float*)_tokenEmbeddingWeight!.DataPointer;
@@ -232,9 +331,19 @@ public sealed unsafe class ClipTextEncoder
             {
                 int tokenId = tokenIds[s];
                 int outOffset = (b * seqLen + s) * hiddenSize;
-                int tokenOffset = tokenId * hiddenSize;
                 int posOffset = s * hiddenSize;
 
+                if (inlineEmbeddings is not null && inlineEmbeddings.TryGetValue(tokenId, out Tensor? embedding))
+                {
+                    float* embPtr = (float*)embedding.DataPointer;
+                    for (int h = 0; h < hiddenSize; h++)
+                    {
+                        outPtr[outOffset + h] = embPtr[h] + posPtr[posOffset + h];
+                    }
+                    continue;
+                }
+
+                int tokenOffset = tokenId * hiddenSize;
                 for (int h = 0; h < hiddenSize; h++)
                 {
                     outPtr[outOffset + h] = tokenPtr[tokenOffset + h] + posPtr[posOffset + h];
