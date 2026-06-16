@@ -47,7 +47,7 @@ jobs:
 
       - name: Diff tests (skip cleanly when no checkpoint)
         env:
-          # Models dir comes from runner-local config — never hard-coded in YAML
+          # Models dir comes from runner-local config, never hard-coded in YAML
           HARTSYINFERENCE_MODELS_DIR: ${{ vars.HARTSYINFERENCE_MODELS_DIR }}
         run: |
           dotnet test tests/HartsyInference.Diffusion.Tests/HartsyInference.Diffusion.Tests.csproj \

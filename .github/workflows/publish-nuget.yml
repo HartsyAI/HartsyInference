@@ -2,10 +2,10 @@ name: Publish to NuGet
 
 # Auto-publishes the HartsyInference packages to NuGet.org on every push to main that
 # touches source or packaging. Each run gets a unique prerelease version
-# (1.0.0-alpha.<run_number>) so versions never collide — NuGet.org forbids re-pushing
+# (1.0.0-alpha.<run_number>) so versions never collide; NuGet.org forbids re-pushing
 # an existing version. Trigger manually via "Run workflow" to override the suffix.
 #
-# Auth uses NuGet Trusted Publishing (OIDC) — no API key/secret to store. A matching
+# Auth uses NuGet Trusted Publishing (OIDC), so there is no API key/secret to store. A matching
 # Trusted Publisher policy must exist on nuget.org:
 #   Owner=kalebbroo  RepositoryOwner=HartsyAI  Repository=HartsyInference  WorkflowFile=publish-nuget.yml
 
@@ -31,7 +31,7 @@ permissions:
   id-token: write   # required for Trusted Publishing: lets the job request a GitHub OIDC token
 
 concurrency:
-  # Never run two publishes at once — a second run could try to push a version the
+  # Never run two publishes at once; a second run could try to push a version the
   # first is still validating.
   group: publish-nuget
   cancel-in-progress: false

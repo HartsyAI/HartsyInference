@@ -36,9 +36,10 @@ jobs:
         run: dotnet build HartsyInference.sln --configuration Release --no-restore
 
       - name: Run unit tests (no GPU, no checkpoints required)
+        shell: bash
         env:
           # The integration tests skip cleanly when a checkpoint path env-var
-          # is missing. CI never sets these — only the GPU runner does.
+          # is missing. CI never sets these; only the GPU runner does.
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: |

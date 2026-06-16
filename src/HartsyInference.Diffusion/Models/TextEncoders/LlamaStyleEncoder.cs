@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.TextEncoders;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
@@ -37,6 +38,12 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     /// <summary>Loads all weights from a HuggingFace-style key dict (keys like <c>model.layers.{i}.self_attn.q_proj.weight</c>). Cast to F32 sites are: token embedding (CPU lookup), RMSNorm scales (CPU pointer code expects float*), per-head q/k norms.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
+        // Normalize any ComfyUI quantization companions (fold fp8 weight_scale into Fp8ScaleFactor, drop
+        // comfy_quant blobs, fail clearly on still-unsupported U8 quants). No-op for plain BF16/F16/F32
+        // checkpoints. Without this, fp8_scaled encoders silently dropped their per-tensor scale and
+        // U8-packed quants died deep in a GEMM with an opaque "GPU cast from U8 to F32" error.
+        weights = TextEncoderQuantNormalizer.Normalize(weights);
+
         Tensor rawEmbed = weights["model.embed_tokens.weight"];
         _embedWeight = CastToF32IfNeeded(rawEmbed);
 
