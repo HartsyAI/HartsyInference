@@ -108,7 +108,7 @@ public sealed class CudaBackend : IBackend
         };
     }
 
-    // ── Linear Algebra -------------------------------------------------------
+    #region Linear Algebra
 
     /// <summary>Matrix multiply via cuBLAS GemmEx: output = a @ b. Supports mixed F32/F16/F8 dtypes.</summary>
     public unsafe void MatMul(Tensor output, Tensor a, Tensor b)
@@ -141,12 +141,7 @@ public sealed class CudaBackend : IBackend
             int gemmType = CublasDataType(gemmDtype);
             int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
-            CublasApi.cublasGemmEx(
-                _cublasHandle,
-                CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
-                N, M, K,
-                &alpha,
-                bPtr, gemmType, N,
+            CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N, N, M, K, &alpha, bPtr, gemmType, N,
                 aPtr, gemmType, K,
                 &beta,
                 pC, cType, N,
@@ -344,7 +339,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── Convolution ----------------------------------------------------------
+    #endregion
+
+    #region Convolution
 
     /// <summary>2D convolution via im2col + cuBLAS SGEMM. Supports arbitrary stride, padding, and kernel sizes.</summary>
     public unsafe void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
@@ -499,7 +496,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── Normalization --------------------------------------------------------
+    #endregion
+
+    #region Normalization
 
     public void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
@@ -906,7 +905,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── Attention ------------------------------------------------------------
+    #endregion
+
+    #region Attention
 
     /// <summary>Scaled dot-product attention via cuBLAS batched GEMM: softmax(Q @ K^T * scale) @ V.</summary>
     public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
@@ -1105,7 +1106,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── Activations ----------------------------------------------------------
+    #endregion
+
+    #region Activations
 
     public void Gelu(Tensor output, Tensor input)
     {
@@ -1203,7 +1206,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── Element-wise ---------------------------------------------------------
+    #endregion
+
+    #region Element-wise
 
     public void Add(Tensor output, Tensor a, Tensor b)
     {
@@ -1327,7 +1332,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── FP8 Helpers ─────────────────────────────────────────────────────────
+    #endregion
+
+    #region FP8 Helpers
 
     /// <summary>Resolves the dtype a single operand will end up at after fp8 → F16 fallback. Kept for callers (e.g. Conv2D's im2col elemSize) that need the per-operand answer without the joint-dtype rule; new code should prefer the two-operand overload.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1586,7 +1593,9 @@ public sealed class CudaBackend : IBackend
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
     }
 
-    // ── Transpose / Permute ---------------------------------------------------
+    #endregion
+
+    #region Transpose / Permute
 
     /// <summary>Batched 2D transpose: [B, D1, D2] -> [B, D2, D1] via PTX kernel.</summary>
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2)
@@ -1712,7 +1721,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── Shape Operations -----------------------------------------------------
+    #endregion
+
+    #region Shape Operations
 
     /// <summary>Concatenates tensors along the specified dimension.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
@@ -1796,7 +1807,9 @@ public sealed class CudaBackend : IBackend
         HartsyInference.Cpu.Kernels.ElementWiseKernels.Split(outputs, input, dim);
     }
 
-    // ── Sampling -------------------------------------------------------------
+    #endregion
+
+    #region Sampling
 
     public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW)
     {
@@ -1849,7 +1862,9 @@ public sealed class CudaBackend : IBackend
         throw new NotImplementedException("CUDA UpsampleBilinear2D not yet implemented");
     }
 
-    // ── Data Movement --------------------------------------------------------
+    #endregion
+
+    #region Data Movement
 
     /// <summary>Copies tensor data between host and device or device to device.</summary>
     public unsafe void CopyTo(Tensor destination, Tensor source)
@@ -1921,7 +1936,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    // ── Audio ----------------------------------------------------------------
+    #endregion
+
+    #region Audio
 
     public void Fft(Tensor output, Tensor input)
     {
@@ -1938,7 +1955,9 @@ public sealed class CudaBackend : IBackend
         throw new NotSupportedException("CUDA MelFilterbank not supported - use CPU backend for audio");
     }
 
-    // ── GPU Cache Management -------------------------------------------------
+    #endregion
+
+    #region GPU Cache Management
 
     /// <summary>Preloads weight tensors to GPU memory. Subsequent ops using these tensors skip H2D transfer.</summary>
     public void PreloadWeights(IEnumerable<Tensor> weights)
@@ -1977,7 +1996,9 @@ public sealed class CudaBackend : IBackend
         return GpuTransferHelper.GetStats();
     }
 
-    // ── Disposal -------------------------------------------------------------
+    #endregion
+
+    #region Disposal
 
     public void Dispose()
     {
@@ -2026,4 +2047,6 @@ public sealed class CudaBackend : IBackend
             }
         }
     }
+
+    #endregion
 }

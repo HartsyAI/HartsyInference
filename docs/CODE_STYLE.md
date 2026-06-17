@@ -205,6 +205,10 @@ public class Tensor { }
 
 Each public class, struct, record, enum, or interface gets its own file. Small private helper types can live in the same file as the type that uses them.
 
+### `#region` only when it earns its place
+
+`#region` is allowed but not required. Use it only when a file is large enough that grouping related members into named sections genuinely helps navigation (for example, a backend that implements many operation families). Do not sprinkle regions into ordinary files, and never use one to hide a single member. Name each region after the group it contains, and pair every `#region` with an `#endregion`.
+
 ### `sealed` by default
 
 Classes should be `sealed` unless they are explicitly designed for inheritance. This helps the JIT optimize method dispatch.
@@ -470,7 +474,6 @@ public long ElementCount => Shape.ElementCount;
 
 ## What NOT to Do
 
-- **Don't use `#region`** — ever
 - **Don't use `dynamic`** — ever
 - **Don't use `async void`** — except for event handlers (which we don't have)
 - **Don't use `Thread.Sleep`** — use `Task.Delay` if you must wait
