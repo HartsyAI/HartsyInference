@@ -164,7 +164,7 @@ internal sealed class SeaNetDecoder
             int tUp = t * ratio;     // (T_in - 1) * stride + K - padRight = T_in * stride
             Tensor up = new(new TensorShape(batch, dimOut, tUp), DType.F32);
             backend.ConvTranspose1d(up, x, _upsampleW[i]!, _upsampleB[i],
-                stride: ratio, padLeft: padLeftUp, padRight: padRightUp, dilation: 1);
+                stride: ratio, padLeft: padLeftUp, padRight: padRightUp, dilation: 1, groups: 1);
             x.Dispose();
             x = up;
             t = tUp;

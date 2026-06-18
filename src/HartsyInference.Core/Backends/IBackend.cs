@@ -131,13 +131,14 @@ public interface IBackend : IDisposable
         int stride, int padLeft, int padRight, int dilation, int groups);
 
     /// <summary>1D transposed convolution. Input/output channels-first;
-    /// <paramref name="weight"/> follows PyTorch convention <c>[C_in, C_out, K]</c>.
+    /// <paramref name="weight"/> follows PyTorch convention <c>[C_in, C_out / groups, K]</c>.
     /// Output length is <c>(T_in - 1) * stride + dilation * (K - 1) + 1 - padLeft - padRight</c>.
     /// For VibeVoice / EnCodec causal decoders pass <c>padLeft = 0</c>,
     /// <c>padRight = K - stride</c> to remove all trailing pad (matches
-    /// <c>trim_right_ratio = 1.0</c>).</summary>
+    /// <c>trim_right_ratio = 1.0</c>). Pass <paramref name="groups"/> equal to channels for
+    /// depthwise mode (e.g. BigVGAN anti-aliased upsampling with a shared lowpass filter).</summary>
     void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        int stride, int padLeft, int padRight, int dilation);
+        int stride, int padLeft, int padRight, int dilation, int groups);
 
     // ── Sampling ────────────────────────────────────────────────────────
 

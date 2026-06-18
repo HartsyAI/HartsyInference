@@ -139,10 +139,10 @@ public sealed class CpuBackend : IBackend
 
     /// <inheritdoc />
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        int stride, int padLeft, int padRight, int dilation)
+        int stride, int padLeft, int padRight, int dilation, int groups)
     {
         ThrowIfDisposed();
-        Conv1dKernels.ConvTranspose1d(output, input, weight, bias, stride, padLeft, padRight, dilation);
+        Conv1dKernels.ConvTranspose1d(output, input, weight, bias, stride, padLeft, padRight, dilation, groups);
     }
 
     /// <inheritdoc />

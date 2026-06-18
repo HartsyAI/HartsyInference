@@ -107,7 +107,7 @@ internal sealed class SnacDecoder
             int tUp = (t - 1) * stride + kUp - padLeft - padRight;
             Tensor up = new(new TensorShape(batch, dimOut, tUp), DType.F32);
             backend.ConvTranspose1d(up, x, _stageUpW[i]!, _stageUpB[i],
-                stride: stride, padLeft: padLeft, padRight: padRight, dilation: 1);
+                stride: stride, padLeft: padLeft, padRight: padRight, dilation: 1, groups: 1);
             x.Dispose();
             x = up;
             t = tUp;

@@ -162,7 +162,7 @@ public sealed unsafe class AdaMosHiFiGanV1
             int pad = (kernel - rate) / 2;
             int tOut = (tIn - 1) * rate + kernel - 2 * pad;
             Tensor up = new Tensor(new TensorShape(1, outC, tOut), DType.F32);
-            backend.ConvTranspose1d(up, cur, uw, ub, rate, pad, pad, 1);
+            backend.ConvTranspose1d(up, cur, uw, ub, rate, pad, pad, 1, 1);
             cur.Dispose();
 
             // Multi-receptive-field fusion: average of the per-kernel resblocks.

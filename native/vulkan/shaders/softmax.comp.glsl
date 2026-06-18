@@ -33,8 +33,8 @@ layout(push_constant) uniform Push {
     uint baseOffset;   // element offset for batched dispatches
 } pc;
 
-shared float warp_max[32];
-shared float warp_sum[32];
+shared float warp_max[64];
+shared float warp_sum[64];
 shared float gMax;
 shared float gSum;
 
@@ -51,7 +51,10 @@ void main() {
     if (subgroupElect()) warp_max[gl_SubgroupID] = maxv;
     barrier();
     if (gl_SubgroupID == 0u) {
-        float v = (gl_SubgroupInvocationID < gl_NumSubgroups) ? warp_max[gl_SubgroupInvocationID] : -3.4e38;
+        // Strided fold so gl_NumSubgroups > gl_SubgroupSize is handled (small-subgroup GPUs).
+        float v = -3.4e38;
+        for (uint k = gl_SubgroupInvocationID; k < gl_NumSubgroups; k += gl_SubgroupSize)
+            v = max(v, warp_max[k]);
         v = subgroupMax(v);
         if (subgroupElect()) gMax = v;
     }
@@ -66,7 +69,10 @@ void main() {
     if (subgroupElect()) warp_sum[gl_SubgroupID] = sum;
     barrier();
     if (gl_SubgroupID == 0u) {
-        float v = (gl_SubgroupInvocationID < gl_NumSubgroups) ? warp_sum[gl_SubgroupInvocationID] : 0.0;
+        // Strided fold so gl_NumSubgroups > gl_SubgroupSize is handled (small-subgroup GPUs).
+        float v = 0.0;
+        for (uint k = gl_SubgroupInvocationID; k < gl_NumSubgroups; k += gl_SubgroupSize)
+            v += warp_sum[k];
         v = subgroupAdd(v);
         if (subgroupElect()) gSum = v;
     }

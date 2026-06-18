@@ -31,7 +31,7 @@ public enum VkResult
     ErrorFormatNotSupported = -11,
     ErrorFragmentedPool = -12,
     ErrorUnknown = -13,
-    ErrorOutOfPoolMemory = -1000257000,
+    ErrorOutOfPoolMemory = -1000069000,
 }
 
 #pragma warning restore CA1707
@@ -98,8 +98,9 @@ public enum VkStructureType
     SemaphoreSubmitInfo = 1000314005,
     CommandBufferSubmitInfo = 1000314006,
 
-    PhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506000,
-    CooperativeMatrixPropertiesKHR = 1000506001,
+    CooperativeMatrixPropertiesKHR = 1000506000,
+    PhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506001,
+    PhysicalDeviceCooperativeMatrixPropertiesKHR = 1000506002,
 }
 
 /// <summary>VkBufferUsageFlags — bits we actually use.</summary>
@@ -277,7 +278,7 @@ public static class VkAccessFlags2
     public const ulong None = 0;
     public const ulong IndirectCommandRead = 0x00000001UL;
     public const ulong IndexRead = 0x00000002UL;
-    public const ulong UniformRead = 0x00000040UL;
+    public const ulong UniformRead = 0x00000008UL;
     public const ulong ShaderRead = 0x00000020UL;
     public const ulong ShaderWrite = 0x00000040UL;
     public const ulong TransferRead = 0x00000800UL;
@@ -286,8 +287,34 @@ public static class VkAccessFlags2
     public const ulong HostWrite = 0x00004000UL;
     public const ulong MemoryRead = 0x00008000UL;
     public const ulong MemoryWrite = 0x00010000UL;
-    public const ulong ShaderStorageRead = 0x100000000UL;
-    public const ulong ShaderStorageWrite = 0x200000000UL;
+    public const ulong ShaderSampledRead = 0x100000000UL;
+    public const ulong ShaderStorageRead = 0x200000000UL;
+    public const ulong ShaderStorageWrite = 0x400000000UL;
+}
+
+/// <summary>VkComponentTypeKHR — cooperative-matrix element types (only the FP types used here).</summary>
+public enum VkComponentTypeKHR
+{
+    Float16 = 0,
+    Float32 = 1,
+    Float64 = 2,
+    Sint8 = 3,
+    Sint16 = 4,
+    Sint32 = 5,
+    Sint64 = 6,
+    Uint8 = 7,
+    Uint16 = 8,
+    Uint32 = 9,
+    Uint64 = 10,
+}
+
+/// <summary>VkScopeKHR — execution scope a cooperative matrix spans. coopmat1 uses subgroup scope.</summary>
+public enum VkScopeKHR
+{
+    Device = 1,
+    Workgroup = 2,
+    Subgroup = 3,
+    QueueFamily = 5,
 }
 
 /// <summary>VK_WHOLE_SIZE constant for VkDeviceSize ranges.</summary>

@@ -100,20 +100,26 @@ public static class Conv1dKernels
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void ConvTranspose1d(
         Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        int stride, int padLeft, int padRight, int dilation)
+        int stride, int padLeft, int padRight, int dilation, int groups)
     {
         if (input.Shape.Rank != 3) throw new ArgumentException($"input must be rank-3, got {input.Shape}.");
         if (weight.Shape.Rank != 3) throw new ArgumentException($"weight must be rank-3, got {weight.Shape}.");
         if (output.Shape.Rank != 3) throw new ArgumentException($"output must be rank-3, got {output.Shape}.");
+        if (groups < 1) throw new ArgumentException($"groups must be >= 1, got {groups}.");
 
         int batch = (int)input.Shape[0];
         int cIn = (int)input.Shape[1];
         int tIn = (int)input.Shape[2];
-        int cOut = (int)weight.Shape[1];
+        // PyTorch ConvTranspose1d weight is [cIn, cOut/groups, K]; full cOut = ocPerG * groups.
+        int ocPerG = (int)weight.Shape[1];
+        int cOut = ocPerG * groups;
         int kernel = (int)weight.Shape[2];
 
         if ((int)weight.Shape[0] != cIn)
             throw new ArgumentException($"weight dim 0 ({weight.Shape[0]}) must equal cIn ({cIn}).");
+        if (cIn % groups != 0 || cOut % groups != 0)
+            throw new ArgumentException($"channels must divide groups: cIn={cIn}, cOut={cOut}, groups={groups}.");
+        int icPerG = cIn / groups;
 
         int tOutRaw = (tIn - 1) * stride + dilation * (kernel - 1) + 1;
         int tOut = tOutRaw - padLeft - padRight;
@@ -137,15 +143,18 @@ public static class Conv1dKernels
             }
         }
 
-        // Scatter accumulate.
+        // Scatter accumulate. Each input channel feeds only the output channels in its group.
         for (int b = 0; b < batch; b++)
         {
             for (int ic = 0; ic < cIn; ic++)
             {
+                int g = ic / icPerG;
+                int ocStart = g * ocPerG;
                 int inBase = (b * cIn + ic) * tIn;
-                for (int oc = 0; oc < cOut; oc++)
+                for (int ocLocal = 0; ocLocal < ocPerG; ocLocal++)
                 {
-                    int wBase = (ic * cOut + oc) * kernel;
+                    int oc = ocStart + ocLocal;
+                    int wBase = (ic * ocPerG + ocLocal) * kernel;
                     int outBase = (b * cOut + oc) * tOut;
                     for (int i = 0; i < tIn; i++)
                     {

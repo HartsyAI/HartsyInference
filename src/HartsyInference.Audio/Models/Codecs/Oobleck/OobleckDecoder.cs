@@ -101,7 +101,7 @@ internal sealed class OobleckDecoder
             int tUp = (t - 1) * stride + 2 * stride - 2 * pad;
             Tensor up = new(new TensorShape(batch, _dims[i + 1], tUp), DType.F32);
             backend.ConvTranspose1d(up, snk, _blockUpW[i]!, _blockUpB[i],
-                stride: stride, padLeft: pad, padRight: pad, dilation: 1);
+                stride: stride, padLeft: pad, padRight: pad, dilation: 1, groups: 1);
             snk.Dispose();
             x = up;
             t = tUp;

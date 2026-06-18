@@ -198,7 +198,7 @@ public sealed unsafe class AceStep15Dit : IDisposable
         backend.Transpose2D(channelsFirst, normed, s, dim);
         normed.Dispose();
         Tensor conv = new Tensor(new TensorShape(1, latCh, t), DType.F32);
-        backend.ConvTranspose1d(conv, channelsFirst, _projOutW!, _projOutB, _config.PatchSize, 0, 0, 1);
+        backend.ConvTranspose1d(conv, channelsFirst, _projOutW!, _projOutB, _config.PatchSize, 0, 0, 1, 1);
         channelsFirst.Dispose();
         Tensor output = new Tensor(new TensorShape(1, t, latCh), DType.F32);
         backend.Transpose2D(output, conv, latCh, t);

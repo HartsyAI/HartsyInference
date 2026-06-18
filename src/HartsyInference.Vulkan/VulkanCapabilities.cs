@@ -52,6 +52,10 @@ public sealed class VulkanCapabilities
 
     public required bool SupportsFp16 { get; init; }
     public required bool Storage16Bit { get; init; }
+
+    /// <summary>True if the device supports the integer dot-product feature (<c>shaderIntegerDotProduct</c>, core 1.3), enabling the INT8 GEMM path via <c>dotPacked4x8</c> — the cross-vendor DP4a/IMMA equivalent.</summary>
+    public required bool HasInt8DotProduct { get; init; }
+
     public required bool SubgroupSizeControl { get; init; }
     public required bool ComputeFullSubgroups { get; init; }
     public required bool Synchronization2 { get; init; }

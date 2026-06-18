@@ -1239,7 +1239,7 @@ public sealed class CudaBackend : IBackend
     }
 
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        int stride, int padLeft, int padRight, int dilation)
+        int stride, int padLeft, int padRight, int dilation, int groups)
     {
         throw new NotSupportedException("CUDA ConvTranspose1d not yet implemented — use CpuBackend for codec models.");
     }

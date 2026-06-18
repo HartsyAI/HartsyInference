@@ -591,6 +591,28 @@ public struct VkPhysicalDeviceCooperativeMatrixFeaturesKHR
     public uint cooperativeMatrixRobustBufferAccess;
 }
 
+/// <summary><c>VkCooperativeMatrixPropertiesKHR</c> — one supported cooperative-matrix
+/// configuration (shape + component types + scope), enumerated via
+/// <c>vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR</c>. The backend must confirm the
+/// shader's exact shape (16x16x16, F16 A/B, F32 accumulate, subgroup scope) is in this list
+/// before using coopmat — NVIDIA always reports it, but AMD RDNA3 / Intel Arc report
+/// different sets, so blindly assuming it miscomputes or fails to create the pipeline.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct VkCooperativeMatrixPropertiesKHR
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint MSize;
+    public uint NSize;
+    public uint KSize;
+    public VkComponentTypeKHR AType;
+    public VkComponentTypeKHR BType;
+    public VkComponentTypeKHR CType;
+    public VkComponentTypeKHR ResultType;
+    public uint saturatingAccumulation; // VkBool32
+    public VkScopeKHR scope;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct VkComputePipelineCreateInfo
 {

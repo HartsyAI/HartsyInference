@@ -41,8 +41,8 @@ layout(push_constant) uniform Push {
     float eps;
 } pc;
 
-shared float warp_sum[32];
-shared float warp_sqsum[32];
+shared float warp_sum[64];
+shared float warp_sqsum[64];
 shared float gMean;
 shared float gInvStd;
 
@@ -75,8 +75,12 @@ void main() {
     barrier();
 
     if (gl_SubgroupID == 0u) {
-        float w  = (gl_SubgroupInvocationID < gl_NumSubgroups) ? warp_sum[gl_SubgroupInvocationID]   : 0.0;
-        float w2 = (gl_SubgroupInvocationID < gl_NumSubgroups) ? warp_sqsum[gl_SubgroupInvocationID] : 0.0;
+        // Strided fold so gl_NumSubgroups > gl_SubgroupSize is handled (small-subgroup GPUs).
+        float w = 0.0, w2 = 0.0;
+        for (uint k = gl_SubgroupInvocationID; k < gl_NumSubgroups; k += gl_SubgroupSize) {
+            w  += warp_sum[k];
+            w2 += warp_sqsum[k];
+        }
         w  = subgroupAdd(w);
         w2 = subgroupAdd(w2);
         if (subgroupElect()) {

@@ -205,7 +205,7 @@ public sealed unsafe class Conv1dKernelTests
             try
             {
                 backend.ConvTranspose1d(output, input, weight, bias: null,
-                    stride: 2, padLeft: 0, padRight: 0, dilation: 1);
+                    stride: 2, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
 
                 float* op = (float*)output.DataPointer;
                 // i=0 (value=1) contributes to j=0, j=1. i=1 (value=2) contributes to j=2, j=3.
@@ -245,7 +245,7 @@ public sealed unsafe class Conv1dKernelTests
             try
             {
                 backend.ConvTranspose1d(output, input, weight, bias,
-                    stride: 2, padLeft: 0, padRight: 0, dilation: 1);
+                    stride: 2, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
 
                 float* op = (float*)output.DataPointer;
                 for (int j = 0; j < tOut; j++) Assert.Equal(2f, op[j], precision: 5);

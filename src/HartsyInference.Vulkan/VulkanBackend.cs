@@ -318,14 +318,14 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 36, 0u);
             BinaryWriteUInt(pc, 40, 0u);
 
-            // Five descriptor bindings:
-            //   0=A, 1=B, 2=C_fp16, 3=Bias (unused, placeholder), 4=C_fp32
-            // The shader writes to slot 2 OR slot 4 depending on OUTPUT_F32. The unused output
-            // binding is bound to outBuf as a placeholder so the descriptor count stays uniform.
-            ulong cFp16Handle = outputIsF32 ? outBuf.Handle : outBuf.Handle;   // outBuf is the real output
-            ulong cFp32Handle = outputIsF32 ? outBuf.Handle : outBuf.Handle;
-            ulong biasHandle  = outBuf.Handle;
-            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, cFp16Handle, biasHandle, cFp32Handle };
+            // Five descriptor bindings: 0=A, 1=B, 2=C_fp16, 3=Bias, 4=C_fp32.
+            // The shader writes slot 2 (fp16) OR slot 4 (fp32) selected by the OUTPUT_F32 spec
+            // constant; both point at the single real output buffer (allocated in output.DType,
+            // so exactly one binding's type matches and is written). Slots for the unwritten
+            // output and the unused bias bind to outBuf as placeholders to keep the descriptor
+            // count uniform; they are never read.
+            ulong outHandle = outBuf.Handle;
+            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, outHandle, outHandle };
 
             uint groupsX = (uint)((N + BN - 1) / BN);
             uint groupsY = (uint)((M + BM - 1) / BM);
@@ -602,6 +602,62 @@ public sealed class VulkanBackend : IBackend
         }
     }
 
+    /// <summary>INT8 quantized matmul via the integer dot-product extension (the cross-vendor DP4a /
+    /// IMMA equivalent): <c>output[M,N] = (a[M,K] @ b[N,K]^T) * scaleA * scaleB</c>, with <paramref name="a"/>
+    /// and <paramref name="b"/> INT8 and <paramref name="output"/> F32. <paramref name="b"/> follows the
+    /// Linear weight convention ([N,K], row n contiguous along K). Per-tensor symmetric scales; the int32
+    /// accumulation is dequantized to F32. Requires <see cref="VulkanCapabilities.HasInt8DotProduct"/> and
+    /// K a multiple of 4 (the dotPacked4x8 packing). One invocation per output element.</summary>
+    public void MatMulInt8(Tensor output, Tensor a, Tensor b, float scaleA, float scaleB)
+    {
+        using OpScope _ = EnterOp();
+        if (!Vk.HasInt8DotProduct)
+            throw new NotSupportedException("MatMulInt8 requires the integer dot-product feature; this device does not expose it.");
+        if (a.DType != DType.I8 || b.DType != DType.I8)
+            throw new ArgumentException($"MatMulInt8 requires I8 operands; got a={a.DType.Name}, b={b.DType.Name}.");
+        if (output.DType != DType.F32)
+            throw new ArgumentException($"MatMulInt8 output must be F32; got {output.DType.Name}.");
+
+        int M = (int)a.Shape[0];
+        int K = (int)a.Shape[a.Shape.Rank - 1];
+        int N = (int)b.Shape[0];
+        if ((int)b.Shape[b.Shape.Rank - 1] != K)
+            throw new ArgumentException($"MatMulInt8 inner-dim mismatch: a.K={K}, b.K={(int)b.Shape[b.Shape.Rank - 1]}.");
+        if ((K & 3) != 0)
+            throw new ArgumentException($"MatMulInt8 requires K % 4 == 0 (dotPacked4x8 packs 4 int8 per word); got K={K}.");
+
+        VulkanBuffer aBuf = GetBuffer(a);
+        VulkanBuffer bBuf = GetBuffer(b);
+        ulong outBytes = (ulong)((long)M * N * sizeof(float));
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            VulkanKernel k = GetKernel("matmul_int8", storageBufferCount: 3, new SpecConstant[]
+            {
+                SpecConstant.UInt(0, 16), SpecConstant.UInt(1, 16), SpecConstant.UInt(2, 1),
+            });
+
+            Span<byte> pc = stackalloc byte[5 * 4];
+            BinaryWriteUInt(pc, 0, (uint)M);
+            BinaryWriteUInt(pc, 4, (uint)N);
+            BinaryWriteUInt(pc, 8, (uint)K);
+            BinaryWriteFloat(pc, 12, scaleA);
+            BinaryWriteFloat(pc, 16, scaleB);
+
+            Span<ulong> bufs = stackalloc ulong[] { aBuf.Handle, bBuf.Handle, outBuf.Handle };
+            uint groupsX = (uint)((N + 15) / 16);
+            uint groupsY = (uint)((M + 15) / 16);
+            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
+
+            CacheOutput(output, outBuf);
+        }
+        catch
+        {
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     // ── Convolution ─────────────────────────────────────────────────────
 
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
@@ -629,6 +685,15 @@ public sealed class VulkanBackend : IBackend
 
         // im2col: rows = N*Cin*kH*kW, cols = N*outH*outW (per the shader's flat layout)
         long colElements = (long)batch * inCh * kH * kW * outH * outW;
+        // The im2col GLSL addresses the column buffer with 32-bit indices, and a single SSBO
+        // is bounded by maxStorageBufferRange (~4 GB on NVIDIA) regardless. Above int.MaxValue
+        // elements the index would wrap / the buffer can't be fully addressed, silently
+        // corrupting output. Fail loudly instead. (A full fix widens the shader to 64-bit
+        // workgroup-derived indexing; tracked separately.)
+        if (colElements > int.MaxValue)
+            throw new NotSupportedException(
+                $"Vulkan Conv2D im2col buffer needs {colElements} elements (N={batch}, Cin={inCh}, k={kH}x{kW}, out={outH}x{outW}), " +
+                "exceeding the shader's 32-bit index range. Use the CUDA backend or tile this convolution.");
         ulong colBytes = (ulong)(colElements * gemmDtype.SizeInBytes);
         VulkanBuffer colBuf = _xfer.AllocateDevice(colBytes);
 
@@ -1193,7 +1258,7 @@ public sealed class VulkanBackend : IBackend
     }
 
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        int stride, int padLeft, int padRight, int dilation)
+        int stride, int padLeft, int padRight, int dilation, int groups)
     {
         throw new NotSupportedException("Vulkan ConvTranspose1d not yet implemented — use CpuBackend for codec models.");
     }

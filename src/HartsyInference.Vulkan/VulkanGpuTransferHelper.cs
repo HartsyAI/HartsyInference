@@ -205,18 +205,31 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         }
     }
 
+    // Builds an atom-aligned VkMappedMemoryRange that fully covers the buffer's bytes.
+    // Aligning the offset DOWN must be compensated by extending the END to cover the data;
+    // computing size from buffer.Size alone (the old bug) can leave the tail bytes outside
+    // the range, so the GPU/CPU sees stale data at the end of any non-atom-aligned buffer.
+    private VkMappedMemoryRange AtomAlignedRange(VulkanBuffer buffer)
+    {
+        ulong atom = _caps.NonCoherentAtomSize;
+        ulong rawOffset = buffer.Allocation.Offset;
+        ulong start = AlignDown(rawOffset, atom);
+        ulong end = AlignUp(rawOffset + buffer.Size, atom);
+        return new VkMappedMemoryRange
+        {
+            sType = VkStructureType.MappedMemoryRange,
+            memory = buffer.Allocation.DeviceMemory,
+            offset = start,
+            size = end - start,
+        };
+    }
+
     private void FlushIfNonCoherent(VulkanBuffer buffer)
     {
         VkMemoryType mt = _memProps.GetMemoryType((int)buffer.Allocation.MemoryTypeIndex);
         if ((mt.propertyFlags & VkMemoryPropertyFlags.HostCoherent) != 0) return;
 
-        VkMappedMemoryRange range = new()
-        {
-            sType = VkStructureType.MappedMemoryRange,
-            memory = buffer.Allocation.DeviceMemory,
-            offset = AlignDown(buffer.Allocation.Offset, _caps.NonCoherentAtomSize),
-            size = AlignUp(buffer.Size, _caps.NonCoherentAtomSize),
-        };
+        VkMappedMemoryRange range = AtomAlignedRange(buffer);
         unsafe
         {
             VulkanApi.vkFlushMappedMemoryRanges(_device, 1, (nint)(&range))
@@ -229,13 +242,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         VkMemoryType mt = _memProps.GetMemoryType((int)buffer.Allocation.MemoryTypeIndex);
         if ((mt.propertyFlags & VkMemoryPropertyFlags.HostCoherent) != 0) return;
 
-        VkMappedMemoryRange range = new()
-        {
-            sType = VkStructureType.MappedMemoryRange,
-            memory = buffer.Allocation.DeviceMemory,
-            offset = AlignDown(buffer.Allocation.Offset, _caps.NonCoherentAtomSize),
-            size = AlignUp(buffer.Size, _caps.NonCoherentAtomSize),
-        };
+        VkMappedMemoryRange range = AtomAlignedRange(buffer);
         unsafe
         {
             VulkanApi.vkInvalidateMappedMemoryRanges(_device, 1, (nint)(&range))

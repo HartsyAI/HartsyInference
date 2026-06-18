@@ -95,7 +95,11 @@ layout(push_constant) uniform Push {
 //   MAX_BK * MAX_BN =  32 * 128 = 4096 floats = 16 KB
 //   total: 32 KB — within the 32 KB Vulkan-spec minimum and well under the
 //   48-64 KB available on RTX 3060 / RDNA / Arc.
-shared float Asub[MAX_BM * MAX_BK];
+// Asub is padded by one column (stride BK+1) so the register-load at `Asub[(threadRow+i)*BK+k]`,
+// which strides down columns across thread row-groups, does not all land in the same bank when
+// BK is a multiple of 32 (a 4-way conflict at BK=32). The pad shifts each row by a bank.
+// Bsub needs no pad: its warp-level conflict is intra-row (TN-stride), which row-padding can't fix.
+shared float Asub[MAX_BM * (MAX_BK + 1)];
 shared float Bsub[MAX_BK * MAX_BN];
 
 float silu(float x)        { return x / (1.0 + exp(-x)); }
@@ -130,7 +134,7 @@ void main() {
                 uint aIdx = TRANSPOSE_A ? (aCol * pc.lda + aRow) : (aRow * pc.lda + aCol);
                 v = TO_F32(A[pc.aOffset + aIdx]);
             }
-            Asub[lr * BK + lk] = v;
+            Asub[lr * (BK + 1) + lk] = v;
         }
         for (uint loadIdx = tid; loadIdx < BK * BN; loadIdx += threadsPerWg) {
             uint lk = loadIdx / BN;
@@ -150,7 +154,7 @@ void main() {
         for (uint k = 0; k < BK; ++k) {
             float aReg[MAX_TM];
             float bReg[MAX_TN];
-            for (uint i = 0; i < TM; ++i) aReg[i] = Asub[(threadRow + i) * BK + k];
+            for (uint i = 0; i < TM; ++i) aReg[i] = Asub[(threadRow + i) * (BK + 1) + k];
             for (uint j = 0; j < TN; ++j) bReg[j] = Bsub[k * BN + threadCol + j];
             for (uint i = 0; i < TM; ++i)
                 for (uint j = 0; j < TN; ++j)

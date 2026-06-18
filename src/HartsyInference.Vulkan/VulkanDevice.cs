@@ -45,11 +45,11 @@ public sealed class VulkanDevice : IDisposable
             if ((uint)ord >= (uint)phys.Length)
                 throw new ArgumentOutOfRangeException(nameof(deviceOrdinal), $"Vulkan device ordinal {ord} out of range; {phys.Length} device(s) present.");
             chosen = phys[ord];
-            (caps, memProps) = QueryAll(chosen);
+            (caps, memProps) = QueryAll(chosen, instance.Handle);
         }
         else
         {
-            (chosen, caps, memProps) = PickBest(phys);
+            (chosen, caps, memProps) = PickBest(phys, instance.Handle);
         }
 
         nint device = CreateLogicalDevice(chosen, caps);
@@ -62,7 +62,7 @@ public sealed class VulkanDevice : IDisposable
         return d;
     }
 
-    private static (nint, VulkanCapabilities, VkPhysicalDeviceMemoryProperties) PickBest(nint[] phys)
+    private static (nint, VulkanCapabilities, VkPhysicalDeviceMemoryProperties) PickBest(nint[] phys, nint instance)
     {
         nint best = 0;
         int bestScore = int.MinValue;
@@ -74,7 +74,7 @@ public sealed class VulkanDevice : IDisposable
         {
             try
             {
-                (VulkanCapabilities caps, VkPhysicalDeviceMemoryProperties mem) = QueryAll(pd);
+                (VulkanCapabilities caps, VkPhysicalDeviceMemoryProperties mem) = QueryAll(pd, instance);
                 int score = ScoreDevice(caps);
                 if (score > bestScore)
                 {
@@ -111,7 +111,7 @@ public sealed class VulkanDevice : IDisposable
         return score;
     }
 
-    private static unsafe (VulkanCapabilities, VkPhysicalDeviceMemoryProperties) QueryAll(nint pd)
+    private static unsafe (VulkanCapabilities, VkPhysicalDeviceMemoryProperties) QueryAll(nint pd, nint instance)
     {
         VkPhysicalDeviceSubgroupProperties subgroupProps = new()
         {
@@ -187,6 +187,14 @@ public sealed class VulkanDevice : IDisposable
 
         (bool hasMemoryBudget, bool hasPushDescriptor, bool hasCoopMatrix) = QueryDeviceExtensions(pd);
 
+        // The extension being present is not enough: the matmul_coopmat shader hard-codes a
+        // specific configuration (16x16x16, FP16 A/B, FP32 accumulate, subgroup scope). NVIDIA
+        // always reports it, but AMD RDNA3 / Intel Arc advertise different supported sets, so
+        // enumerate and confirm the exact shape before enabling the path. Otherwise pipeline
+        // creation fails or the matmul silently miscomputes on non-NVIDIA hardware.
+        if (hasCoopMatrix)
+            hasCoopMatrix = CoopMatShapeSupported(instance, pd);
+
         // Some drivers (notably older NVIDIA Linux blobs) advertise apiVersion 1.3+ but
         // return zeros for shaderFloat16 / timelineSemaphore / synchronization2 / etc.
         // when queried through the v1.2/v1.3 *promoted* feature structs. The features
@@ -204,6 +212,12 @@ public sealed class VulkanDevice : IDisposable
         bool sgs   = f13.subgroupSizeControl != 0 || atLeast13;
         bool cfs   = f13.computeFullSubgroups != 0 || atLeast13;
         bool sync2 = f13.synchronization2 != 0 || atLeast13;
+        // shaderIntegerDotProduct: like fp16/timeline/sync2, the NVIDIA Linux blob reports 0 through
+        // the promoted Vulkan13Features struct but accepts the feature on device-create (deviation
+        // #3). All NVIDIA/AMD/Intel GPUs exposing Vulkan 1.3 support integer dot product (DP4a HW),
+        // so fall back to the vendor + apiVersion check, mirroring the fp16 detection above.
+        bool int8dot = f13.shaderIntegerDotProduct != 0
+            || (atLeast13 && props2.properties.vendorID is 0x10DE or 0x1002 or 0x8086);
 
         VulkanCapabilities caps = new()
         {
@@ -236,6 +250,7 @@ public sealed class VulkanDevice : IDisposable
 
             SupportsFp16 = fp16,
             Storage16Bit = f11.storageBuffer16BitAccess != 0,
+            HasInt8DotProduct = int8dot,
             SubgroupSizeControl = sgs,
             ComputeFullSubgroups = cfs,
             Synchronization2 = sync2,
@@ -282,6 +297,38 @@ public sealed class VulkanDevice : IDisposable
         finally { Marshal.FreeHGlobal(block); }
     }
 
+    /// <summary>Confirms the device's enumerated cooperative-matrix configurations include the
+    /// one the <c>matmul_coopmat</c> shader uses: 16x16x16, FP16 A and B, FP32 accumulate
+    /// (C and Result), subgroup scope, non-saturating. The property query is a physical-device
+    /// extension command, so it is loaded via <c>vkGetInstanceProcAddr</c>.</summary>
+    private static unsafe bool CoopMatShapeSupported(nint instance, nint pd)
+    {
+        nint fp = VulkanApi.vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+        if (fp == 0) return false;
+        delegate* unmanaged<nint, uint*, VkCooperativeMatrixPropertiesKHR*, VkResult> query =
+            (delegate* unmanaged<nint, uint*, VkCooperativeMatrixPropertiesKHR*, VkResult>)fp;
+
+        uint count = 0;
+        if (query(pd, &count, null) != VkResult.Success || count == 0) return false;
+
+        VkCooperativeMatrixPropertiesKHR[] props = new VkCooperativeMatrixPropertiesKHR[count];
+        for (uint i = 0; i < count; i++) props[i].sType = VkStructureType.CooperativeMatrixPropertiesKHR;
+        fixed (VkCooperativeMatrixPropertiesKHR* p = props)
+        {
+            if (query(pd, &count, p) != VkResult.Success) return false;
+            for (uint i = 0; i < count; i++)
+            {
+                VkCooperativeMatrixPropertiesKHR e = p[i];
+                if (e.MSize == 16 && e.NSize == 16 && e.KSize == 16
+                    && e.AType == VkComponentTypeKHR.Float16 && e.BType == VkComponentTypeKHR.Float16
+                    && e.CType == VkComponentTypeKHR.Float32 && e.ResultType == VkComponentTypeKHR.Float32
+                    && e.scope == VkScopeKHR.Subgroup && e.saturatingAccumulation == 0)
+                    return true;
+            }
+        }
+        return false;
+    }
+
     private static unsafe nint CreateLogicalDevice(nint pd, VulkanCapabilities caps)
     {
         VkPhysicalDeviceVulkan11Features f11 = new()
@@ -304,6 +351,7 @@ public sealed class VulkanDevice : IDisposable
             subgroupSizeControl = caps.SubgroupSizeControl ? 1u : 0u,
             computeFullSubgroups = caps.ComputeFullSubgroups ? 1u : 0u,
             synchronization2 = caps.Synchronization2 ? 1u : 0u,
+            shaderIntegerDotProduct = caps.HasInt8DotProduct ? 1u : 0u,
             maintenance4 = 1u,
         };
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR fCoop = new()

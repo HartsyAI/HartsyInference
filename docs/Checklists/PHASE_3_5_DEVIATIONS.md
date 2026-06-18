@@ -336,6 +336,42 @@ The "Anticipated Categories" table previously claimed im2col used 64-bit indexin
 
 ---
 
+### 18. Cooperative-matrix sType constants were swapped (and the path wasn't shape-gated)
+
+**Found by**: the 2026-06-17 cross-vendor optimization pass. Two issues in the coopmat matmul path, both cross-vendor correctness:
+
+1. **Swapped sType values.** `VkStructureType.PhysicalDeviceCooperativeMatrixFeaturesKHR` was `1000506000` and `CooperativeMatrixPropertiesKHR` was `1000506001`; the spec is the reverse (`COOPERATIVE_MATRIX_PROPERTIES_KHR = 1000506000`, `PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR = 1000506001`). So at device creation the coopmat *features* struct was chained with the *properties* sType. NVIDIA's driver enables coopmat leniently regardless, so the 3060 tests passed, but a strict driver / AMD / Intel would not recognize the feature struct and fail to enable `cooperativeMatrix`. Fixed both (and added `PhysicalDeviceCooperativeMatrixPropertiesKHR = 1000506002`).
+
+2. **No shape enumeration.** `HasCooperativeMatrix` was set purely from the extension *name* being present. But the `matmul_coopmat` shader hard-codes one configuration: 16x16x16, FP16 A/B, FP32 accumulate (C/Result), subgroup scope. NVIDIA always reports that combo; AMD RDNA3 / Intel Arc advertise different sets, so blindly assuming it would fail pipeline creation or miscompute. Added `CoopMatShapeSupported` which loads `vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR` via `vkGetInstanceProcAddr`, enumerates `VkCooperativeMatrixPropertiesKHR`, and enables coopmat only when the exact combo is present.
+
+**Validated**: device-info reports `CoopMat=True` on the RTX 3060 (the enumeration finds the combo, confirming the new struct layout + `VkComponentTypeKHR`/`VkScopeKHR` enum values are correct) and `CoopMat=False` on llvmpipe (no coopmat, correctly disabled, falls back to tiled). The matmul-vs-CPU FP16 tests pass with coopmat enabled.
+
+### 19. Cross-subgroup reduction dropped partials when gl_NumSubgroups > subgroupSize
+
+The layernorm / rmsnorm / groupnorm / groupnorm_silu / softmax shaders already used subgroup reductions, but the second-stage cross-subgroup combine read `warp[gl_SubgroupInvocationID]` guarded by `< gl_NumSubgroups`. When a device's subgroup size is smaller than the subgroup count, the final-stage subgroup has fewer lanes than there are partials, so partials beyond `subgroupSize` were silently dropped. With `local_size = 256`: safe on NVIDIA (subgroup 32 -> 8 subgroups) and AMD (wave32/64), but **wrong on small-subgroup devices** (llvmpipe / older Intel: subgroup 8 -> 32 subgroups drops partials 8..31). The previous deviation #10 flagged the array-sizing risk; this is the read-side correctness bug.
+
+**Fix**: replaced the guarded single read with a strided fold (`for k = gl_SubgroupInvocationID; k < gl_NumSubgroups; k += gl_SubgroupSize`) so each final-stage lane accumulates its strided share of all partials, then one subgroup reduction combines them. Correct for any subgroup size. Also bumped the `warp_*` shared arrays from `[32]` to `[64]` to cover the worst case (local 256 with a pinned subgroup as small as 4).
+
+**Validated cross-vendor**: a new `VulkanCrossVendorTests` runs LayerNorm and RmsNorm at D=1024 (every subgroup holds real data — the discriminating case). On the RTX 3060 (subgroup 32) maxErr ~1e-7; **on llvmpipe (subgroup 8 -> 32 subgroups) maxErr ~1e-7 as well** — the exact configuration the old code got wrong now matches the CPU reference. Full suite: 38/38 on the 3060; on llvmpipe all compute tests pass (one pre-existing pipeline-cache test fails because software lavapipe returns an empty cache blob, unrelated to this work).
+
+### 20. INT8 dot-product GEMM (cross-vendor DP4a/IMMA path) + NVIDIA lies about `shaderIntegerDotProduct`
+
+Added a `matmul_int8` shader and `VulkanBackend.MatMulInt8` using the `GL_EXT_integer_dot_product` `dotPacked4x8` instruction — the cross-vendor equivalent of CUDA's INT8 tensor cores (DP4a / IMMA), HW-accelerated on NVIDIA (`integerDotProduct4x8BitPackedSignedAccelerated`), AMD, and Intel. Computes `C[M,N] = (A_i8 @ B_i8^T) * scaleA * scaleB`: int8 operands read as `int[]` (4 packed int8 per word, no 8-bit-storage extension needed), accumulated exactly in int32, then dequantized to F32.
+
+Two findings worth recording:
+
+1. **`dotPacked4x8` overload by sign.** With `uint` operands the function returns `uint` (the unsigned overload); for signed int8 the operands must be typed `int[]` so the SIGNED overload (`int` result) is selected. Same bytes, different interpretation — a reinterpret, not a conversion.
+
+2. **NVIDIA lies about `shaderIntegerDotProduct` too** (extends deviation #3). The 3060 reported `int8dot=False` through `VkPhysicalDeviceVulkan13Features` even though the feature is real (gpuinfo confirms it, and the GPU has had DP4a since Pascal). Applied the same vendor + apiVersion fallback used for fp16/timeline/sync2: enable when the flag is set OR (apiVersion >= 1.3 AND vendor is NVIDIA/AMD/Intel). Verified the feature is then accepted on device-create (no `VK_ERROR_FEATURE_NOT_PRESENT`).
+
+**Validated**: `VulkanInt8GemmTests` runs the kernel against an exact int64 reference (the integer dot is exact; only the final float scale rounds). On the RTX 3060: **maxErr = 0.000** (bit-exact) across 32x48x64, 17x20x64 (unaligned, exercises the bounds check), and 8x8x256 (large K), plus a K%4 rejection test. On llvmpipe (vendor not in the fallback, no dot-product support) the tests skip gracefully and device creation is unaffected — the correct "use where supported, absent cleanly elsewhere" cross-vendor behavior. Full suite 42/42 on the 3060. The kernel is the correct one-invocation-per-output baseline (like the CUDA MMA kernel started naive); tiling for bandwidth can layer onto the verified dot-product path later, and pipeline integration (quantized weight loading) is the next step.
+
+### Note: subgroup reductions and coopmat were already implemented
+
+The research survey ([`../Research/VULKAN_OPTIMIZATION.md`](../Research/VULKAN_OPTIMIZATION.md)) listed "implement subgroup reductions" and "make coopmat the default matmul" as top recommendations, but both were already present in the backend (the research agents inferred shared-memory trees without reading the shaders). The actual high-value work was the cross-vendor *correctness* of those existing paths (#18, #19), not new implementation.
+
+---
+
 ## Anticipated Categories (kept for reference)
 
 The CUDA backend's experience suggested the following classes of issues; mapping how each played out in Phase 3.5:

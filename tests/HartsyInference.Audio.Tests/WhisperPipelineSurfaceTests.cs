@@ -94,7 +94,7 @@ public sealed class WhisperPipelineSurfaceTests
         public void Elu(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, float a) => throw new NotImplementedException();
         public void Snake(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, HartsyInference.Core.Tensors.Tensor a, HartsyInference.Core.Tensors.Tensor? b) => throw new NotImplementedException();
         public void Conv1d(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, HartsyInference.Core.Tensors.Tensor w, HartsyInference.Core.Tensors.Tensor? b, int s, int pl, int pr, int d, int g) => throw new NotImplementedException();
-        public void ConvTranspose1d(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, HartsyInference.Core.Tensors.Tensor w, HartsyInference.Core.Tensors.Tensor? b, int s, int pl, int pr, int d) => throw new NotImplementedException();
+        public void ConvTranspose1d(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, HartsyInference.Core.Tensors.Tensor w, HartsyInference.Core.Tensors.Tensor? b, int s, int pl, int pr, int d, int g) => throw new NotImplementedException();
         public void Add(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor a, HartsyInference.Core.Tensors.Tensor b) => throw new NotImplementedException();
         public void Mul(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor a, HartsyInference.Core.Tensors.Tensor b) => throw new NotImplementedException();
         public void Scale(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, float s) => throw new NotImplementedException();

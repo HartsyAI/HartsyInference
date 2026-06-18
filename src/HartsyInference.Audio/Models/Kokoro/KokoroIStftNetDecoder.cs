@@ -251,7 +251,7 @@ public sealed unsafe class KokoroIStftNetDecoder
         int inLen = (int)x.Shape[2];
         int outLen = (inLen - 1) * stride + (kernel - 1) + 1 - 2 * pad;
         Tensor outT = new(new TensorShape(1, outCh, outLen), DType.F32);
-        backend.ConvTranspose1d(outT, x, w, _upsB[i], stride: stride, padLeft: pad, padRight: pad, dilation: 1);
+        backend.ConvTranspose1d(outT, x, w, _upsB[i], stride: stride, padLeft: pad, padRight: pad, dilation: 1, groups: 1);
         return outT;
     }
 

@@ -349,7 +349,12 @@ public sealed class VulkanBuffer : IDisposable
     {
         if (Allocation.MappedPointer == 0)
             throw new InvalidOperationException("VulkanBuffer is not host-visible — cannot map. Use staging upload instead.");
-        return new Span<T>((void*)Allocation.MappedPointer, (int)(Size / (ulong)sizeof(T)));
+        // Size is a 64-bit VkDeviceSize; a >2 GB buffer (or >2^31 byte elements) overflows
+        // a Span's int length. Fail loudly instead of silently truncating to a partial view.
+        ulong count = Size / (ulong)sizeof(T);
+        if (count > int.MaxValue)
+            throw new InvalidOperationException($"VulkanBuffer has {count} elements of {typeof(T).Name}, exceeding Span's int.MaxValue length. Access it in chunks.");
+        return new Span<T>((void*)Allocation.MappedPointer, (int)count);
     }
 
     public void Dispose()

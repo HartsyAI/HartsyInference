@@ -6,6 +6,7 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
@@ -103,7 +104,7 @@ public class QwenImageGenerationTests
 
             _output.WriteLine("[5/7] Loading Qwen-Image VAE...");
             sw.Restart();
-            VaeDecoder vae = new VaeDecoder(VaeConfig.QwenImage);
+            QwenImageVaeDecoder vae = new QwenImageVaeDecoder(VaeConfig.QwenImage);
             vae.LoadWeights(CastWeightsToF32(vaeWeights));
             sw.Stop();
             _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms");
