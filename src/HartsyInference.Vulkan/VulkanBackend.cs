@@ -603,12 +603,13 @@ public sealed class VulkanBackend : IBackend
     }
 
     /// <summary>INT8 quantized matmul via the integer dot-product extension (the cross-vendor DP4a /
-    /// IMMA equivalent): <c>output[M,N] = (a[M,K] @ b[N,K]^T) * scaleA * scaleB</c>, with <paramref name="a"/>
+    /// IMMA equivalent): <c>output[m,n] = (a[M,K] @ b[N,K]^T) * scaleA[m] * scaleB[n]</c>, with <paramref name="a"/>
     /// and <paramref name="b"/> INT8 and <paramref name="output"/> F32. <paramref name="b"/> follows the
-    /// Linear weight convention ([N,K], row n contiguous along K). Per-tensor symmetric scales; the int32
-    /// accumulation is dequantized to F32. Requires <see cref="VulkanCapabilities.HasInt8DotProduct"/> and
-    /// K a multiple of 4 (the dotPacked4x8 packing). One invocation per output element.</summary>
-    public void MatMulInt8(Tensor output, Tensor a, Tensor b, float scaleA, float scaleB)
+    /// Linear weight convention ([N,K], row n contiguous along K). Scales are <b>per row</b>: <paramref name="scaleA"/>
+    /// is F32 length M (per token/activation row), <paramref name="scaleB"/> is F32 length N (per output channel) —
+    /// the standard scheme for accurate INT8 inference. The int32 accumulation is exact; only the dequant rounds.
+    /// Requires <see cref="VulkanCapabilities.HasInt8DotProduct"/> and K a multiple of 4. Shared-memory tiled.</summary>
+    public void MatMulInt8(Tensor output, Tensor a, Tensor b, Tensor scaleA, Tensor scaleB)
     {
         using OpScope _ = EnterOp();
         if (!Vk.HasInt8DotProduct)
@@ -617,6 +618,8 @@ public sealed class VulkanBackend : IBackend
             throw new ArgumentException($"MatMulInt8 requires I8 operands; got a={a.DType.Name}, b={b.DType.Name}.");
         if (output.DType != DType.F32)
             throw new ArgumentException($"MatMulInt8 output must be F32; got {output.DType.Name}.");
+        if (scaleA.DType != DType.F32 || scaleB.DType != DType.F32)
+            throw new ArgumentException($"MatMulInt8 scales must be F32; got scaleA={scaleA.DType.Name}, scaleB={scaleB.DType.Name}.");
 
         int M = (int)a.Shape[0];
         int K = (int)a.Shape[a.Shape.Rank - 1];
@@ -625,28 +628,38 @@ public sealed class VulkanBackend : IBackend
             throw new ArgumentException($"MatMulInt8 inner-dim mismatch: a.K={K}, b.K={(int)b.Shape[b.Shape.Rank - 1]}.");
         if ((K & 3) != 0)
             throw new ArgumentException($"MatMulInt8 requires K % 4 == 0 (dotPacked4x8 packs 4 int8 per word); got K={K}.");
+        if (scaleA.ElementCount != M)
+            throw new ArgumentException($"MatMulInt8 scaleA must have M={M} elements; got {scaleA.ElementCount}.");
+        if (scaleB.ElementCount != N)
+            throw new ArgumentException($"MatMulInt8 scaleB must have N={N} elements; got {scaleB.ElementCount}.");
 
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
+        VulkanBuffer saBuf = GetBuffer(scaleA);
+        VulkanBuffer sbBuf = GetBuffer(scaleB);
         ulong outBytes = (ulong)((long)M * N * sizeof(float));
         VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
         try
         {
-            VulkanKernel k = GetKernel("matmul_int8", storageBufferCount: 3, new SpecConstant[]
+            // Shared-memory tiled: BM x BN output block per workgroup, TM x TN per invocation.
+            // local = (BN/TN, BM/TM) = (16, 16) = 256 threads. BKP is the K tile in packed-int32
+            // units (real K per tile = BKP*4). Tiles are fixed; small shapes just bounds-check out.
+            const uint BM = 64, BN = 64, BKP = 8, TM = 4, TN = 4;
+            VulkanKernel k = GetKernel("matmul_int8", storageBufferCount: 5, new SpecConstant[]
             {
-                SpecConstant.UInt(0, 16), SpecConstant.UInt(1, 16), SpecConstant.UInt(2, 1),
+                SpecConstant.UInt(0, BN / TN), SpecConstant.UInt(1, BM / TM), SpecConstant.UInt(2, 1),
+                SpecConstant.UInt(10, BM), SpecConstant.UInt(11, BN), SpecConstant.UInt(12, BKP),
+                SpecConstant.UInt(13, TM), SpecConstant.UInt(14, TN),
             });
 
-            Span<byte> pc = stackalloc byte[5 * 4];
+            Span<byte> pc = stackalloc byte[3 * 4];
             BinaryWriteUInt(pc, 0, (uint)M);
             BinaryWriteUInt(pc, 4, (uint)N);
             BinaryWriteUInt(pc, 8, (uint)K);
-            BinaryWriteFloat(pc, 12, scaleA);
-            BinaryWriteFloat(pc, 16, scaleB);
 
-            Span<ulong> bufs = stackalloc ulong[] { aBuf.Handle, bBuf.Handle, outBuf.Handle };
-            uint groupsX = (uint)((N + 15) / 16);
-            uint groupsY = (uint)((M + 15) / 16);
+            Span<ulong> bufs = stackalloc ulong[] { aBuf.Handle, bBuf.Handle, outBuf.Handle, saBuf.Handle, sbBuf.Handle };
+            uint groupsX = (uint)(((long)N + BN - 1) / BN);
+            uint groupsY = (uint)(((long)M + BM - 1) / BM);
             Dispatch(k, bufs, pc, groupsX, groupsY, 1);
 
             CacheOutput(output, outBuf);
