@@ -30,6 +30,13 @@ public sealed unsafe class QkNorm
         if (_weight is not null) yield return _weight;
     }
 
+    /// <summary>The learnable per-head scale weight (F32, shape [headDim]). Used by backends that run
+    /// QK-norm through <c>RmsNorm</c> directly rather than the scalar <see cref="Forward"/> path.</summary>
+    public Tensor Weight => _weight!;
+
+    /// <summary>RMSNorm epsilon.</summary>
+    public float Eps => _eps;
+
     /// <summary>Applies per-head RMSNorm in-place. Data is treated as numVectors contiguous vectors of length headDim.</summary>
     /// <param name="output">Output tensor, same size as input.</param>
     /// <param name="input">Input tensor laid out as [numVectors * headDim] contiguous floats.</param>

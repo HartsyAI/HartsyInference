@@ -46,6 +46,275 @@ public interface IBackend : IDisposable
     /// AdaIN1d is the core style-conditioning primitive in Kokoro and StyleTTS 2.</summary>
     void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps);
 
+    // ── DiT transformer glue ────────────────────────────────────────────
+    // These keep the per-block modulation math GPU-resident in diffusion transformers
+    // (Ideogram 4, etc.). Default implementations are scalar-F32 CPU loops that also serve
+    // as the numerical reference; CudaBackend overrides them with PTX kernels.
+
+    /// <summary>Broadcast affine over the last dim: <c>out[b,s,d] = in[b,s,d] * scale[b,d] + (shift?[b,d] ?? 0)</c>.
+    /// Input/output are <c>[B, S, D]</c>; <paramref name="scale"/> and <paramref name="shift"/> are <c>[B, D]</c>
+    /// broadcast over the sequence axis. With <paramref name="shift"/> null this is a pure broadcast multiply
+    /// (the scale-only modulation used by Ideogram 4's adaLN blocks).</summary>
+    unsafe void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
+            throw new NotSupportedException("AffineBroadcastLastDim default fallback only supports F32.");
+        int rank = input.Shape.Rank;
+        int dim = (int)input.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
+        long total = input.ElementCount;
+        float* pIn = (float*)input.DataPointer;
+        float* pOut = (float*)output.DataPointer;
+        float* pScale = (float*)scale.DataPointer;
+        float* pShift = shift is null ? null : (float*)shift.DataPointer;
+        for (long i = 0; i < total; i++)
+        {
+            int d = (int)(i % dim);
+            long row = i / dim;
+            int b = (int)(row / seqLen);
+            long pIdx = (long)b * dim + d;
+            float v = pIn[i] * pScale[pIdx];
+            if (pShift != null) v += pShift[pIdx];
+            pOut[i] = v;
+        }
+    }
+
+    /// <summary>Gated residual over the last dim: <c>out[b,s,d] = residual[b,s,d] + gate[b,d] * value[b,s,d]</c>.
+    /// <paramref name="gate"/> is <c>[B, D]</c> broadcast over the sequence axis.</summary>
+    unsafe void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
+    {
+        if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
+            throw new NotSupportedException("GatedResidualLastDim default fallback only supports F32.");
+        int rank = value.Shape.Rank;
+        int dim = (int)value.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)value.Shape[rank - 2] : 1;
+        long total = value.ElementCount;
+        float* pRes = (float*)residual.DataPointer;
+        float* pVal = (float*)value.DataPointer;
+        float* pGate = (float*)gate.DataPointer;
+        float* pOut = (float*)output.DataPointer;
+        for (long i = 0; i < total; i++)
+        {
+            int d = (int)(i % dim);
+            long row = i / dim;
+            int b = (int)(row / seqLen);
+            long pIdx = (long)b * dim + d;
+            pOut[i] = pRes[i] + pGate[pIdx] * pVal[i];
+        }
+    }
+
+    /// <summary>AdaLN modulation split (scale-only, tanh-gated). <paramref name="proj"/> is <c>[B, 4*D]</c> =
+    /// chunk(scale_msa, gate_msa, scale_mlp, gate_mlp); writes four <c>[B, D]</c> tensors applying
+    /// <c>1 + x</c> to scales and <c>tanh(x)</c> to gates (Ideogram 4's ComputeModulation).</summary>
+    unsafe void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
+    {
+        if (proj.DType != DType.F32)
+            throw new NotSupportedException("ModulationSplit4 default fallback only supports F32.");
+        int dim = (int)scaleMsa.Shape[scaleMsa.Shape.Rank - 1];
+        int batch = (int)(scaleMsa.ElementCount / dim);
+        float* pProj = (float*)proj.DataPointer;
+        float* sMsa = (float*)scaleMsa.DataPointer;
+        float* gMsa = (float*)gateMsa.DataPointer;
+        float* sMlp = (float*)scaleMlp.DataPointer;
+        float* gMlp = (float*)gateMlp.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            long src = (long)b * 4 * dim;
+            long dst = (long)b * dim;
+            for (int d = 0; d < dim; d++)
+            {
+                sMsa[dst + d] = 1.0f + pProj[src + d];
+                gMsa[dst + d] = MathF.Tanh(pProj[src + dim + d]);
+                sMlp[dst + d] = 1.0f + pProj[src + 2 * dim + d];
+                gMlp[dst + d] = MathF.Tanh(pProj[src + 3 * dim + d]);
+            }
+        }
+    }
+
+    /// <summary>Classifier-free-guidance combine + Euler step, in-place on <paramref name="z"/>:
+    /// <c>v = guidance*pos + (1-guidance)*neg; z += v*delta</c>. Flat element-wise over the latent.</summary>
+    unsafe void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
+    {
+        if (z.DType != DType.F32 || pos.DType != DType.F32 || neg.DType != DType.F32)
+            throw new NotSupportedException("CfgEulerStep default fallback only supports F32.");
+        long count = z.ElementCount;
+        float* pZ = (float*)z.DataPointer;
+        float* pPos = (float*)pos.DataPointer;
+        float* pNeg = (float*)neg.DataPointer;
+        for (long i = 0; i < count; i++)
+        {
+            float v = guidance * pPos[i] + (1.0f - guidance) * pNeg[i];
+            pZ[i] = pZ[i] + v * delta;
+        }
+    }
+
+    /// <summary>In-place rotary position embedding on <paramref name="q"/> and <paramref name="k"/>, both
+    /// <c>[B, L, numHeads, headDim]</c>. <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>
+    /// broadcast over heads. <c>out[i] = x[i]*cos[i] + rotate_half(x)[i]*sin[i]</c> with
+    /// <c>rotate_half(x) = cat(-x[half:], x[:half])</c> (Ideogram 4's ApplyRotary).</summary>
+    unsafe void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
+    {
+        if (q.DType != DType.F32 || k.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("ApplyRope default fallback only supports F32.");
+        int batch = (int)q.Shape[0];
+        int seqLen = (int)q.Shape[1];
+        int numHeads = (int)q.Shape[2];
+        int headDim = (int)q.Shape[3];
+        int half = headDim / 2;
+        float* qPtr = (float*)q.DataPointer;
+        float* kPtr = (float*)k.DataPointer;
+        float* cosPtr = (float*)cos.DataPointer;
+        float* sinPtr = (float*)sin.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int s = 0; s < seqLen; s++)
+            {
+                long freqBase = ((long)b * seqLen + s) * headDim;
+                for (int h = 0; h < numHeads; h++)
+                {
+                    long vecOff = (((long)b * seqLen + s) * numHeads + h) * headDim;
+                    RotateHalfInPlace(qPtr + vecOff, cosPtr + freqBase, sinPtr + freqBase, half);
+                    RotateHalfInPlace(kPtr + vecOff, cosPtr + freqBase, sinPtr + freqBase, half);
+                }
+            }
+        }
+
+        static void RotateHalfInPlace(float* vec, float* cos, float* sin, int half)
+        {
+            for (int i = 0; i < half; i++)
+            {
+                float lower = vec[i];
+                float upper = vec[i + half];
+                vec[i] = lower * cos[i] - upper * sin[i];
+                vec[i + half] = upper * cos[i + half] + lower * sin[i + half];
+            }
+        }
+    }
+
+    /// <summary>Copies a contiguous last-dim slice: <c>out[row, d] = in[row, offset + d]</c> for
+    /// <c>d in [0, outDim)</c>, where <c>outDim</c> is the output's last dim and the input's last dim
+    /// is the row stride. Splits a fused tensor (e.g. QKV <c>[B,L,3H]</c>) into a contiguous chunk.</summary>
+    unsafe void SliceLastDim(Tensor output, Tensor input, int offset)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("SliceLastDim default fallback only supports F32.");
+        // outDim is the slice width over the row, derived from row count (not the output's last dim,
+        // which may be split into [.., heads, headDim]). rows = input rows = output rows.
+        int inDim = (int)input.Shape[input.Shape.Rank - 1];
+        long rows = input.ElementCount / inDim;
+        int outDim = (int)(output.ElementCount / rows);
+        long total = output.ElementCount;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (long i = 0; i < total; i++)
+        {
+            int d = (int)(i % outDim);
+            long row = i / outDim;
+            pOut[i] = pIn[row * inDim + offset + d];
+        }
+    }
+
+    /// <summary>Per-row scalar multiply: <c>out[row, c] = in[row, c] * rowMask[row]</c>. <paramref name="rowMask"/>
+    /// has one value per row (rows = input element count / last dim). Token masking for DiT embeddings.</summary>
+    unsafe void MaskRows(Tensor output, Tensor input, Tensor rowMask)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || rowMask.DType != DType.F32)
+            throw new NotSupportedException("MaskRows default fallback only supports F32.");
+        int channels = (int)input.Shape[input.Shape.Rank - 1];
+        long total = input.ElementCount;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        float* pMask = (float*)rowMask.DataPointer;
+        for (long i = 0; i < total; i++)
+            pOut[i] = pIn[i] * pMask[i / channels];
+    }
+
+    /// <summary>Element-wise add scalar: <c>out[i] = in[i] + c</c>.</summary>
+    unsafe void AddScalar(Tensor output, Tensor input, float scalar)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("AddScalar default fallback only supports F32.");
+        long n = input.ElementCount;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (long i = 0; i < n; i++) pOut[i] = pIn[i] + scalar;
+    }
+
+    /// <summary>Non-affine LayerNorm over the last dim: per row, zero mean and unit variance (biased var),
+    /// no learned scale/bias.</summary>
+    unsafe void LayerNormNoAffine(Tensor output, Tensor input, float eps)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("LayerNormNoAffine default fallback only supports F32.");
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long rows = input.ElementCount / dim;
+        float* pIn = (float*)input.DataPointer;
+        float* pOut = (float*)output.DataPointer;
+        for (long r = 0; r < rows; r++)
+        {
+            long off = r * dim;
+            float mean = 0f;
+            for (int d = 0; d < dim; d++) mean += pIn[off + d];
+            mean /= dim;
+            float var = 0f;
+            for (int d = 0; d < dim; d++) { float diff = pIn[off + d] - mean; var += diff * diff; }
+            var /= dim;
+            float invStd = 1.0f / MathF.Sqrt(var + eps);
+            for (int d = 0; d < dim; d++) pOut[off + d] = (pIn[off + d] - mean) * invStd;
+        }
+    }
+
+    /// <summary>In-place index-add of embedding rows: <c>h[row, d] += table[indices[row], d]</c>.
+    /// <paramref name="indices"/> is an I32 tensor of length rows; <paramref name="table"/> is <c>[numRows, dim]</c>.
+    /// Keeps the indicator embedding GPU-resident (no host gather of the weight).</summary>
+    unsafe void IndexAddRows(Tensor h, Tensor table, Tensor indices)
+    {
+        if (h.DType != DType.F32 || table.DType != DType.F32)
+            throw new NotSupportedException("IndexAddRows default fallback only supports F32.");
+        if (indices.DType != DType.I32)
+            throw new NotSupportedException("IndexAddRows requires I32 indices.");
+        int dim = (int)h.Shape[h.Shape.Rank - 1];
+        long rows = h.ElementCount / dim;
+        float* pH = (float*)h.DataPointer;
+        float* pTable = (float*)table.DataPointer;
+        int* pIdx = (int*)indices.DataPointer;
+        for (long r = 0; r < rows; r++)
+        {
+            long off = r * dim;
+            long tOff = (long)pIdx[r] * dim;
+            for (int d = 0; d < dim; d++) pH[off + d] += pTable[tOff + d];
+        }
+    }
+
+    /// <summary>Scatter rows after a zeroed head block: <c>output = [zeros(headRows), input]</c> along the row
+    /// axis. Builds the conditional latent (text rows zeroed, image rows = current latent).</summary>
+    unsafe void ScatterRowsAfter(Tensor output, Tensor input, int headRows)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("ScatterRowsAfter default fallback only supports F32.");
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long total = output.ElementCount;
+        long headElems = (long)headRows * dim;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (long i = 0; i < total; i++)
+            pOut[i] = i < headElems ? 0f : pIn[i - headElems];
+    }
+
+    /// <summary>Contiguous row-block slice: copies <c>output.ElementCount</c> elements starting at row
+    /// <paramref name="rowOffset"/> of <paramref name="input"/> into <paramref name="output"/>.</summary>
+    unsafe void SliceRows(Tensor output, Tensor input, int rowOffset)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("SliceRows default fallback only supports F32.");
+        int dim = (int)output.Shape[output.Shape.Rank - 1];
+        long elemOffset = (long)rowOffset * dim;
+        long total = output.ElementCount;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (long i = 0; i < total; i++) pOut[i] = pIn[elemOffset + i];
+    }
+
     // ── Attention ───────────────────────────────────────────────────────
 
     /// <summary>Scaled dot-product attention: output = softmax(Q @ K^T / sqrt(d)) @ V</summary>

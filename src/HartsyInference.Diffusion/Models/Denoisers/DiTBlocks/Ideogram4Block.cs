@@ -96,37 +96,52 @@ public sealed unsafe class Ideogram4Block
         if (_adalnBias is not null) yield return _adalnBias;
     }
 
-    /// <summary>Forward pass. <paramref name="x"/> is <c>[B, L, hidden]</c>; <paramref name="adalnInput"/> is the shared conditioning <c>[B, adalnDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>; <paramref name="attentionMask"/> is optional (null = full attention, correct for single-prompt B=1).</summary>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor adalnInput, Tensor cos, Tensor sin,
-        Ideogram4Mrope rope, Tensor? attentionMask)
+    /// <summary>Forward pass. <paramref name="x"/> is <c>[B, L, hidden]</c>; <paramref name="adalnInput"/> is the shared conditioning <c>[B, adalnDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>; <paramref name="attentionMask"/> is optional (null = full attention, correct for single-prompt B=1).
+    ///
+    /// <para>Fully backend-op based: every step is an <see cref="IBackend"/> call so the activation stays
+    /// GPU-resident across the whole block (no <c>DataPointer</c> reads, no per-op device syncs).</para></summary>
+    public Tensor Forward(IBackend backend, Tensor x, Tensor adalnInput, Tensor cos, Tensor sin, Tensor? attentionMask)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         TensorShape shape = new TensorShape(batch, seqLen, _hidden);
+        long total = (long)batch * seqLen * _hidden;
 
-        // ── Modulation: chunk(4) → scale_msa, gate_msa, scale_mlp, gate_mlp ──
-        (Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp) = ComputeModulation(backend, adalnInput, batch);
+        // ── Modulation: adaln_modulation(c) → chunk(4) → (1+scale, tanh(gate)) ──
+        TensorShape projShape = new TensorShape(batch, 4 * _hidden);
+        Tensor proj = new Tensor(projShape, adalnInput.DType);
+        backend.Linear(proj, adalnInput, _adalnWeight!, _adalnBias);
+        TensorShape modShape = new TensorShape(batch, _hidden);
+        Tensor scaleMsa = new Tensor(modShape, DType.F32);
+        Tensor gateMsa = new Tensor(modShape, DType.F32);
+        Tensor scaleMlp = new Tensor(modShape, DType.F32);
+        Tensor gateMlp = new Tensor(modShape, DType.F32);
+        backend.ModulationSplit4(scaleMsa, gateMsa, scaleMlp, gateMlp, proj);
+        proj.Dispose();
 
-        // ── Attention sublayer ──
+        // ── Attention sublayer: attn = attention(norm1(x) * scale_msa); x += gate_msa * norm2(attn) ──
         Tensor norm1 = new Tensor(shape, x.DType);
         backend.RmsNorm(norm1, x, _attnNorm1!, _eps);
-        Tensor mod1 = ApplyScale(norm1, scaleMsa, batch, seqLen, _hidden);
+        Tensor mod1 = new Tensor(shape, x.DType);
+        backend.AffineBroadcastLastDim(mod1, norm1, scaleMsa, null);
         norm1.Dispose();
 
-        Tensor attn = Attention(backend, mod1, cos, sin, rope, attentionMask, batch, seqLen);
+        Tensor attn = Attention(backend, mod1, cos, sin, attentionMask, batch, seqLen);
         mod1.Dispose();
 
         Tensor attnNormed = new Tensor(shape, x.DType);
         backend.RmsNorm(attnNormed, attn, _attnNorm2!, _eps);
         attn.Dispose();
 
-        Tensor afterAttn = ApplyGatedResidual(x, attnNormed, gateMsa, batch, seqLen, _hidden);
+        Tensor afterAttn = new Tensor(shape, x.DType);
+        backend.GatedResidualLastDim(afterAttn, x, attnNormed, gateMsa);
         attnNormed.Dispose();
 
-        // ── MLP sublayer ──
+        // ── MLP sublayer: x += gate_mlp * norm2(feed_forward(norm1(x) * scale_mlp)) ──
         Tensor norm2 = new Tensor(shape, x.DType);
         backend.RmsNorm(norm2, afterAttn, _ffnNorm1!, _eps);
-        Tensor mod2 = ApplyScale(norm2, scaleMlp, batch, seqLen, _hidden);
+        Tensor mod2 = new Tensor(shape, x.DType);
+        backend.AffineBroadcastLastDim(mod2, norm2, scaleMlp, null);
         norm2.Dispose();
 
         Tensor mlp = ForwardSwiGlu(backend, mod2, batch, seqLen);
@@ -136,7 +151,8 @@ public sealed unsafe class Ideogram4Block
         backend.RmsNorm(mlpNormed, mlp, _ffnNorm2!, _eps);
         mlp.Dispose();
 
-        Tensor result = ApplyGatedResidual(afterAttn, mlpNormed, gateMlp, batch, seqLen, _hidden);
+        Tensor result = new Tensor(shape, x.DType);
+        backend.GatedResidualLastDim(result, afterAttn, mlpNormed, gateMlp);
         afterAttn.Dispose();
         mlpNormed.Dispose();
 
@@ -147,48 +163,46 @@ public sealed unsafe class Ideogram4Block
         return result;
     }
 
-    /// <summary>Self-attention: fused QKV → per-head QK-RMSNorm → MRoPE → SDPA → output proj.</summary>
+    /// <summary>Self-attention: fused QKV → per-head QK-RMSNorm → MRoPE → SDPA → output proj. All backend
+    /// ops; reshape-to-heads is free (outputs allocated with the consumer's shape, identical byte layout)
+    /// and the head permutes reuse <c>Permute0213</c>.</summary>
     private Tensor Attention(IBackend backend, Tensor input, Tensor cos, Tensor sin,
-        Ideogram4Mrope rope, Tensor? attentionMask, int batch, int seqLen)
+        Tensor? attentionMask, int batch, int seqLen)
     {
         TensorShape flat = new TensorShape(batch, seqLen, _hidden);
-        TensorShape fused = new TensorShape(batch, seqLen, 3 * _hidden);
-        Tensor qkv = new Tensor(fused, input.DType);
+        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mh = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        long headsTotal = (long)batch * seqLen * _hidden;
+
+        Tensor qkv = new Tensor(new TensorShape(batch, seqLen, 3 * _hidden), input.DType);
         backend.Linear(qkv, input, _qkvWeight!, null);
 
-        // Split fused [B, L, 3*hidden] (layout [q|k|v]) into three [B, L, hidden] chunks.
-        Tensor q = SliceChunk(qkv, 0, batch, seqLen);
-        Tensor k = SliceChunk(qkv, 1, batch, seqLen);
-        Tensor v = SliceChunk(qkv, 2, batch, seqLen);
+        // Split fused [B, L, 3*hidden] (layout [q|k|v]) directly into [B, L, numHeads, headDim] chunks —
+        // the slice is a contiguous gather and the reshape is just the declared output shape.
+        Tensor q = new Tensor(heads, DType.F32);
+        Tensor k = new Tensor(heads, DType.F32);
+        Tensor v = new Tensor(heads, DType.F32);
+        backend.SliceLastDim(q, qkv, 0);
+        backend.SliceLastDim(k, qkv, _hidden);
+        backend.SliceLastDim(v, qkv, 2 * _hidden);
         qkv.Dispose();
 
-        // Reshape to [B, L, numHeads, headDim] (logical) for QK-norm + RoPE.
-        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        Tensor qH = new Tensor(heads, DType.F32);
-        Tensor kH = new Tensor(heads, DType.F32);
-        ReshapeFlatToHeads(qH, q);
-        ReshapeFlatToHeads(kH, k);
+        Tensor qN = new Tensor(heads, DType.F32);
+        Tensor kN = new Tensor(heads, DType.F32);
+        backend.RmsNorm(qN, q, _normQ.Weight, _normQ.Eps);
+        backend.RmsNorm(kN, k, _normK.Weight, _normK.Eps);
         q.Dispose();
         k.Dispose();
 
-        int totalVecs = batch * seqLen * _numHeads;
-        Tensor qN = new Tensor(heads, DType.F32);
-        Tensor kN = new Tensor(heads, DType.F32);
-        _normQ.Forward(qN, qH, totalVecs);
-        _normK.Forward(kN, kH, totalVecs);
-        qH.Dispose();
-        kH.Dispose();
+        backend.ApplyRope(qN, kN, cos, sin);
 
-        rope.ApplyRotary(qN, kN, cos, sin);
-
-        // Permute to [B, numHeads, L, headDim] for SDPA.
-        TensorShape mh = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        // Permute [B, L, numHeads, headDim] → [B, numHeads, L, headDim] for SDPA.
         Tensor qMh = new Tensor(mh, DType.F32);
         Tensor kMh = new Tensor(mh, DType.F32);
         Tensor vMh = new Tensor(mh, DType.F32);
-        PermuteBshdToBhsd(qMh, qN, batch, seqLen);
-        PermuteBshdToBhsd(kMh, kN, batch, seqLen);
-        ReshapeFlatToBhsd(vMh, v, batch, seqLen);
+        backend.Permute0213(qMh, qN, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kMh, kN, seqLen, _numHeads, _headDim);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         qN.Dispose();
         kN.Dispose();
         v.Dispose();
@@ -200,8 +214,9 @@ public sealed unsafe class Ideogram4Block
         kMh.Dispose();
         vMh.Dispose();
 
+        // Permute back [B, numHeads, L, headDim] → [B, L, numHeads, headDim]; declared flat [B, L, hidden].
         Tensor attnFlat = new Tensor(flat, DType.F32);
-        PermuteBhsdToBsh(attnFlat, attnOut, batch, seqLen);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
         Tensor projected = new Tensor(flat, input.DType);
@@ -233,151 +248,6 @@ public sealed unsafe class Ideogram4Block
         backend.Linear(output, combined, _w2!, null);
         combined.Dispose();
         return output;
-    }
-
-    /// <summary>Computes the 4 modulation vectors from <c>adaln_modulation(c)</c>, applying <c>tanh</c> to gates and <c>1 + ·</c> to scales. Each returned tensor is <c>[B, hidden]</c>.</summary>
-    private (Tensor ScaleMsa, Tensor GateMsa, Tensor ScaleMlp, Tensor GateMlp) ComputeModulation(IBackend backend, Tensor adalnInput, int batch)
-    {
-        int four = 4 * _hidden;
-        TensorShape projShape = new TensorShape(batch, four);
-        Tensor proj = new Tensor(projShape, adalnInput.DType);
-        backend.Linear(proj, adalnInput, _adalnWeight!, _adalnBias);
-
-        Tensor scaleMsa = new Tensor(new TensorShape(batch, _hidden), DType.F32);
-        Tensor gateMsa = new Tensor(new TensorShape(batch, _hidden), DType.F32);
-        Tensor scaleMlp = new Tensor(new TensorShape(batch, _hidden), DType.F32);
-        Tensor gateMlp = new Tensor(new TensorShape(batch, _hidden), DType.F32);
-
-        float* p = (float*)proj.DataPointer;
-        float* sMsa = (float*)scaleMsa.DataPointer;
-        float* gMsa = (float*)gateMsa.DataPointer;
-        float* sMlp = (float*)scaleMlp.DataPointer;
-        float* gMlp = (float*)gateMlp.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int src = b * four;
-            int dst = b * _hidden;
-            for (int d = 0; d < _hidden; d++)
-            {
-                sMsa[dst + d] = 1.0f + p[src + d];
-                gMsa[dst + d] = MathF.Tanh(p[src + _hidden + d]);
-                sMlp[dst + d] = 1.0f + p[src + 2 * _hidden + d];
-                gMlp[dst + d] = MathF.Tanh(p[src + 3 * _hidden + d]);
-            }
-        }
-        proj.Dispose();
-        return (scaleMsa, gateMsa, scaleMlp, gateMlp);
-    }
-
-    /// <summary><c>out = input * scale[b]</c> (scale already includes the <c>+1</c>), broadcast over the sequence.</summary>
-    private static Tensor ApplyScale(Tensor input, Tensor scale, int batch, int seqLen, int hidden)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hidden);
-        Tensor output = new Tensor(shape, input.DType);
-        float* inPtr = (float*)input.DataPointer;
-        float* scPtr = (float*)scale.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int rowOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                    outPtr[rowOff + d] = inPtr[rowOff + d] * scPtr[condBase + d];
-            }
-        }
-        return output;
-    }
-
-    /// <summary><c>out = residual + gate[b] * value</c>, gate broadcast over the sequence.</summary>
-    private static Tensor ApplyGatedResidual(Tensor residual, Tensor value, Tensor gate, int batch, int seqLen, int hidden)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hidden);
-        Tensor output = new Tensor(shape, residual.DType);
-        float* resPtr = (float*)residual.DataPointer;
-        float* valPtr = (float*)value.DataPointer;
-        float* gatePtr = (float*)gate.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int rowOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                    outPtr[rowOff + d] = resPtr[rowOff + d] + gatePtr[condBase + d] * valPtr[rowOff + d];
-            }
-        }
-        return output;
-    }
-
-    /// <summary>Extracts chunk <paramref name="which"/> (0=q, 1=k, 2=v) from a fused <c>[B, L, 3*hidden]</c> tensor into a new <c>[B, L, hidden]</c>.</summary>
-    private Tensor SliceChunk(Tensor fused, int which, int batch, int seqLen)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, _hidden);
-        Tensor output = new Tensor(shape, DType.F32);
-        float* src = (float*)fused.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        int stride = 3 * _hidden;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long srcOff = ((long)b * seqLen + s) * stride + (long)which * _hidden;
-                long dstOff = ((long)b * seqLen + s) * _hidden;
-                Buffer.MemoryCopy(src + srcOff, dst + dstOff, _hidden * sizeof(float), _hidden * sizeof(float));
-            }
-        }
-        return output;
-    }
-
-    private void ReshapeFlatToHeads(Tensor output, Tensor input)
-    {
-        long bytes = input.Shape.ElementCount * sizeof(float);
-        Buffer.MemoryCopy(input.DataPointer, output.DataPointer, bytes, bytes);
-    }
-
-    private void ReshapeFlatToBhsd(Tensor output, Tensor input, int batch, int seqLen)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-                for (int h = 0; h < _numHeads; h++)
-                {
-                    long inOff = ((long)b * seqLen + s) * _hidden + (long)h * _headDim;
-                    long outOff = (((long)b * _numHeads + h) * seqLen + s) * _headDim;
-                    Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, _headDim * sizeof(float), _headDim * sizeof(float));
-                }
-    }
-
-    private void PermuteBshdToBhsd(Tensor output, Tensor input, int batch, int seqLen)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-                for (int h = 0; h < _numHeads; h++)
-                {
-                    long inOff = (((long)b * seqLen + s) * _numHeads + h) * _headDim;
-                    long outOff = (((long)b * _numHeads + h) * seqLen + s) * _headDim;
-                    Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, _headDim * sizeof(float), _headDim * sizeof(float));
-                }
-    }
-
-    private void PermuteBhsdToBsh(Tensor output, Tensor input, int batch, int seqLen)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int s = 0; s < seqLen; s++)
-                for (int h = 0; h < _numHeads; h++)
-                {
-                    long inOff = (((long)b * _numHeads + h) * seqLen + s) * _headDim;
-                    long outOff = ((long)b * seqLen + s) * _hidden + (long)h * _headDim;
-                    Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, _headDim * sizeof(float), _headDim * sizeof(float));
-                }
     }
 
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)

@@ -36,6 +36,9 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _groupnormSiluF16Module;
     private readonly CudaModule _castModule;
 
+    // ── DiT glue Modules ─────────────────────────────────────────────────
+    private readonly CudaModule _ditF32Module;
+
     // ── Elementwise F32 function handles ─────────────────────────────────
     private readonly nint _addF32;
     private readonly nint _mulF32;
@@ -106,6 +109,22 @@ public sealed class CudaKernels : IDisposable
     // ── Cast function handles ────────────────────────────────────────────
     private readonly nint _castF32ToF16;
     private readonly nint _castF16ToF32;
+
+    // ── DiT glue function handles (F32) ──────────────────────────────────
+    private readonly nint _ditRmsNormF32;
+    private readonly nint _ditAffineBroadcastF32;
+    private readonly nint _ditGatedResidualF32;
+    private readonly nint _ditModulation4F32;
+    private readonly nint _ditCfgEulerF32;
+    private readonly nint _ditTanhF32;
+    private readonly nint _ditRopeF32;
+    private readonly nint _ditSliceLastDimF32;
+    private readonly nint _ditRowScaleF32;
+    private readonly nint _ditAddScalarF32;
+    private readonly nint _ditLayerNormNoAffineF32;
+    private readonly nint _ditIndexAddF32;
+    private readonly nint _ditScatterRowsAfterF32;
+    private readonly nint _ditSliceRowsF32;
 
     // ── FP8 Cast Modules + Handles ────────────────────────────────────────
     private readonly CudaModule _castF8Module;
@@ -248,6 +267,23 @@ public sealed class CudaKernels : IDisposable
         _castBf16ToF32 = _castBf16Module.GetFunction("cast_bf16_to_f32");
         _castF32ToBf16 = _castBf16Module.GetFunction("cast_f32_to_bf16");
 
+        // ── DiT glue (F32) ───────────────────────────────────────────────
+        _ditF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_f32.ptx"));
+        _ditRmsNormF32 = _ditF32Module.GetFunction("dit_rmsnorm_f32");
+        _ditAffineBroadcastF32 = _ditF32Module.GetFunction("dit_affine_broadcast_lastdim_f32");
+        _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
+        _ditModulation4F32 = _ditF32Module.GetFunction("dit_modulation4_f32");
+        _ditCfgEulerF32 = _ditF32Module.GetFunction("dit_cfg_euler_f32");
+        _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
+        _ditRopeF32 = _ditF32Module.GetFunction("dit_rope_f32");
+        _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
+        _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
+        _ditAddScalarF32 = _ditF32Module.GetFunction("dit_add_scalar_f32");
+        _ditLayerNormNoAffineF32 = _ditF32Module.GetFunction("dit_layernorm_noaffine_f32");
+        _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
+        _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
+        _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
+
         // ── GGUF Dequant ─────────────────────────────────────────────────
         _dequantQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
         _dequantQ8_0ToF16 = _dequantQ8_0Module.GetFunction("dequant_q8_0_to_f16");
@@ -377,6 +413,257 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
             sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchRmsNormImpl(nint func, ulong output, ulong input, ulong weight,
+        int normDim, int totalRows, float eps, nint stream)
+    {
+        ulong outArg = output, inArg = input, wArg = weight;
+        uint normDimArg = (uint)normDim, rowsArg = (uint)totalRows;
+        float epsArg = eps;
+
+        void** args = stackalloc void*[6];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &wArg;
+        args[3] = &normDimArg;
+        args[4] = &rowsArg;
+        args[5] = &epsArg;
+
+        uint gridDim = (uint)totalRows;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchAffineBroadcastImpl(nint func, ulong output, ulong input, ulong scale, ulong shift,
+        int seqLen, int dim, long total, nint stream)
+    {
+        ulong outArg = output, inArg = input, scaleArg = scale, shiftArg = shift;
+        uint seqArg = (uint)seqLen, dimArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[7];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &scaleArg;
+        args[3] = &shiftArg;
+        args[4] = &seqArg;
+        args[5] = &dimArg;
+        args[6] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchGatedResidualImpl(nint func, ulong output, ulong residual, ulong value, ulong gate,
+        int seqLen, int dim, long total, nint stream)
+    {
+        ulong outArg = output, resArg = residual, valArg = value, gateArg = gate;
+        uint seqArg = (uint)seqLen, dimArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[7];
+        args[0] = &outArg;
+        args[1] = &resArg;
+        args[2] = &valArg;
+        args[3] = &gateArg;
+        args[4] = &seqArg;
+        args[5] = &dimArg;
+        args[6] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchModulation4Impl(nint func, ulong scaleMsa, ulong gateMsa, ulong scaleMlp, ulong gateMlp,
+        ulong proj, int dim, int batch, nint stream)
+    {
+        ulong sMsaArg = scaleMsa, gMsaArg = gateMsa, sMlpArg = scaleMlp, gMlpArg = gateMlp, projArg = proj;
+        uint dimArg = (uint)dim, batchArg = (uint)batch;
+
+        void** args = stackalloc void*[7];
+        args[0] = &sMsaArg;
+        args[1] = &gMsaArg;
+        args[2] = &sMlpArg;
+        args[3] = &gMlpArg;
+        args[4] = &projArg;
+        args[5] = &dimArg;
+        args[6] = &batchArg;
+
+        uint total = (uint)(batch * dim);
+        uint gridDim = (total + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchCfgEulerImpl(nint func, ulong z, ulong pos, ulong neg,
+        float guidance, float delta, int count, nint stream)
+    {
+        ulong zArg = z, posArg = pos, negArg = neg;
+        float gArg = guidance, dArg = delta;
+        uint countArg = (uint)count;
+
+        void** args = stackalloc void*[6];
+        args[0] = &zArg;
+        args[1] = &posArg;
+        args[2] = &negArg;
+        args[3] = &gArg;
+        args[4] = &dArg;
+        args[5] = &countArg;
+
+        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchRopeImpl(nint func, ulong x, ulong cos, ulong sin,
+        int numHeads, int headDim, long totalVecs, nint stream)
+    {
+        ulong xArg = x, cosArg = cos, sinArg = sin;
+        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim;
+        ulong vecsArg = (ulong)totalVecs;
+
+        void** args = stackalloc void*[6];
+        args[0] = &xArg;
+        args[1] = &cosArg;
+        args[2] = &sinArg;
+        args[3] = &headsArg;
+        args[4] = &headDimArg;
+        args[5] = &vecsArg;
+
+        long threads = totalVecs * (headDim / 2);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchRowScaleImpl(nint func, ulong output, ulong input, ulong rowScale,
+        int channels, long total, nint stream)
+    {
+        ulong outArg = output, inArg = input, scaleArg = rowScale;
+        uint chArg = (uint)channels;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[5];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &scaleArg;
+        args[3] = &chArg;
+        args[4] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchLayerNormNoAffineImpl(nint func, ulong output, ulong input,
+        int dim, int totalRows, float eps, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint dimArg = (uint)dim, rowsArg = (uint)totalRows;
+        float epsArg = eps;
+
+        void** args = stackalloc void*[5];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &dimArg;
+        args[3] = &rowsArg;
+        args[4] = &epsArg;
+
+        uint gridDim = (uint)totalRows;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchIndexAddImpl(nint func, ulong h, ulong table, ulong indices,
+        int dim, long total, nint stream)
+    {
+        ulong hArg = h, tableArg = table, idxArg = indices;
+        uint dimArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[5];
+        args[0] = &hArg;
+        args[1] = &tableArg;
+        args[2] = &idxArg;
+        args[3] = &dimArg;
+        args[4] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchScatterRowsAfterImpl(nint func, ulong output, ulong input,
+        int headRows, int dim, long total, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint headArg = (uint)headRows, dimArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[5];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &headArg;
+        args[3] = &dimArg;
+        args[4] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchSliceRowsImpl(nint func, ulong output, ulong input,
+        long elemOffset, long total, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        ulong offArg = (ulong)elemOffset, totalArg = (ulong)total;
+
+        void** args = stackalloc void*[4];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &offArg;
+        args[3] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchSliceLastDimImpl(nint func, ulong output, ulong input,
+        int outDim, int inDim, int offset, long total, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint outDimArg = (uint)outDim, inDimArg = (uint)inDim, offsetArg = (uint)offset;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[6];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &outDimArg;
+        args[3] = &inDimArg;
+        args[4] = &offsetArg;
+        args[5] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
     }
 
     private unsafe void LaunchSoftmaxImpl(nint func, ulong data, int rowLen, int totalRows, nint stream)
@@ -659,6 +946,64 @@ public sealed class CudaKernels : IDisposable
         int normDim, int totalRows, float eps, nint stream)
         => LaunchLayerNormImpl(_layernormBf16, output, input, weight, bias, normDim, totalRows, eps, stream);
 
+    // ── DiT glue Launches (F32) ─────────────────────────────────────────
+
+    /// <summary>Launches RMSNorm: one block per row, reduces over <paramref name="normDim"/>, applies weight. Also serves per-head QK-RMSNorm (rows = B*L*heads, normDim = headDim).</summary>
+    public void LaunchRmsNorm(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
+        => LaunchRmsNormImpl(_ditRmsNormF32, output, input, weight, normDim, totalRows, eps, stream);
+
+    /// <summary>Launches broadcast affine over the last dim: out[b,s,d] = in[b,s,d]*scale[b,d] + shift[b,d] (shift optional, pass 0 to skip).</summary>
+    public void LaunchAffineBroadcastLastDim(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
+        => LaunchAffineBroadcastImpl(_ditAffineBroadcastF32, output, input, scale, shift, seqLen, dim, total, stream);
+
+    /// <summary>Launches gated residual over the last dim: out[b,s,d] = residual[b,s,d] + gate[b,d]*value[b,s,d].</summary>
+    public void LaunchGatedResidualLastDim(ulong output, ulong residual, ulong value, ulong gate, int seqLen, int dim, long total, nint stream)
+        => LaunchGatedResidualImpl(_ditGatedResidualF32, output, residual, value, gate, seqLen, dim, total, stream);
+
+    /// <summary>Launches AdaLN modulation split: proj[B,4D] → (1+scale_msa, tanh(gate_msa), 1+scale_mlp, tanh(gate_mlp)), each [B,D].</summary>
+    public void LaunchModulation4(ulong scaleMsa, ulong gateMsa, ulong scaleMlp, ulong gateMlp, ulong proj, int dim, int batch, nint stream)
+        => LaunchModulation4Impl(_ditModulation4F32, scaleMsa, gateMsa, scaleMlp, gateMlp, proj, dim, batch, stream);
+
+    /// <summary>Launches CFG combine + Euler step in-place on z: z[i] += delta*(guidance*pos[i] + (1-guidance)*neg[i]).</summary>
+    public void LaunchCfgEuler(ulong z, ulong pos, ulong neg, float guidance, float delta, int count, nint stream)
+        => LaunchCfgEulerImpl(_ditCfgEulerF32, z, pos, neg, guidance, delta, count, stream);
+
+    /// <summary>Launches tanh: output[i] = tanh(input[i]) (F32).</summary>
+    public void LaunchTanh(ulong output, ulong input, int count, nint stream)
+        => LaunchUnaryImpl(_ditTanhF32, output, input, count, stream);
+
+    /// <summary>Launches in-place rotary embedding on x [B,L,numHeads,headDim]; cos/sin [B,L,headDim].</summary>
+    public void LaunchRope(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream)
+        => LaunchRopeImpl(_ditRopeF32, x, cos, sin, numHeads, headDim, totalVecs, stream);
+
+    /// <summary>Launches last-dim slice: out[row,d] = in[row, offset+d], in row stride = inDim.</summary>
+    public void LaunchSliceLastDim(ulong output, ulong input, int outDim, int inDim, int offset, long total, nint stream)
+        => LaunchSliceLastDimImpl(_ditSliceLastDimF32, output, input, outDim, inDim, offset, total, stream);
+
+    /// <summary>Launches per-row scalar multiply: out[row,c] = in[row,c] * rowScale[row] (token masking).</summary>
+    public void LaunchRowScale(ulong output, ulong input, ulong rowScale, int channels, long total, nint stream)
+        => LaunchRowScaleImpl(_ditRowScaleF32, output, input, rowScale, channels, total, stream);
+
+    /// <summary>Launches add-scalar: out[i] = in[i] + c (F32).</summary>
+    public void LaunchAddScalar(ulong output, ulong input, float c, int count, nint stream)
+        => LaunchScaleImpl(_ditAddScalarF32, output, input, c, count, stream);
+
+    /// <summary>Launches non-affine LayerNorm: per-row zero-mean unit-variance, no scale/bias.</summary>
+    public void LaunchLayerNormNoAffine(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
+        => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF32, output, input, dim, totalRows, eps, stream);
+
+    /// <summary>Launches index-add of embedding rows in-place: h[row,d] += table[indices[row], d].</summary>
+    public void LaunchIndexAdd(ulong h, ulong table, ulong indices, int dim, long total, nint stream)
+        => LaunchIndexAddImpl(_ditIndexAddF32, h, table, indices, dim, total, stream);
+
+    /// <summary>Launches scatter-rows-after: output = [zeros(headRows), input] along the row axis.</summary>
+    public void LaunchScatterRowsAfter(ulong output, ulong input, int headRows, int dim, long total, nint stream)
+        => LaunchScatterRowsAfterImpl(_ditScatterRowsAfterF32, output, input, headRows, dim, total, stream);
+
+    /// <summary>Launches contiguous row-block slice: output[i] = input[elemOffset + i].</summary>
+    public void LaunchSliceRows(ulong output, ulong input, long elemOffset, long total, nint stream)
+        => LaunchSliceRowsImpl(_ditSliceRowsF32, output, input, elemOffset, total, stream);
+
     // ── Fused GroupNorm+SiLU Launches ───────────────────────────────────
 
     /// <summary>Launches fused GroupNorm+SiLU: normalize, affine, then SiLU in one kernel (F32).</summary>
@@ -889,6 +1234,7 @@ public sealed class CudaKernels : IDisposable
         _groupnormSiluModule?.Dispose();
         _groupnormSiluF16Module?.Dispose();
         _castModule?.Dispose();
+        _ditF32Module?.Dispose();
         _castF8Module?.Dispose();
         _castBf16Module?.Dispose();
         _dequantQ8_0Module?.Dispose();

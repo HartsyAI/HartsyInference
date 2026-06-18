@@ -66,6 +66,9 @@ public sealed record LtxVideo2Config
 
     // ── Sampling defaults ──
     public int TimestepScaleMultiplier { get; init; } = 1000;
+    /// <summary>Scale multiplier for the a2v/v2a cross-attn gate timestep. The gate AdaLN sees
+    /// <c>timestep · (CrossAttnTimestepScaleMultiplier / TimestepScaleMultiplier)</c>.</summary>
+    public int CrossAttnTimestepScaleMultiplier { get; init; } = 1000;
     public float TimestepShift { get; init; } = 1.0f;
     public int NumInferenceSteps { get; init; } = 50;
     public float GuidanceScale { get; init; } = 3.0f;

@@ -24,15 +24,8 @@ internal static partial class CublasApi
     // ── FP32 GEMM ───────────────────────────────────────────────────────
 
     [LibraryImport(LibName, EntryPoint = "cublasSgemm_v2")]
-    internal static unsafe partial int cublasSgemm(
-        nint handle,
-        int transa, int transb,
-        int m, int n, int k,
-        float* alpha,
-        ulong A, int lda,
-        ulong B, int ldb,
-        float* beta,
-        ulong C, int ldc);
+    internal static unsafe partial int cublasSgemm(nint handle, int transa, int transb, int m, int n, int k, float* alpha, ulong A, int lda,
+        ulong B, int ldb, float* beta, ulong C, int ldc);
 
     // ── FP16 GEMM ───────────────────────────────────────────────────────
 

@@ -35,6 +35,11 @@ internal static unsafe class GpuTransferHelper
     private static long _hits;
     private static long _misses;
 
+    /// <summary>Count of lazy D2H sync callbacks fired (each forces a cuStreamSynchronize + device-to-host copy).
+    /// A residency-health metric: during a fully GPU-resident denoise loop this must stay at ~0. Reset via
+    /// <see cref="ResetSyncCount"/> and read via <see cref="GetSyncCount"/>.</summary>
+    private static long _d2hSyncs;
+
     /// <summary>Sets the CUDA stream handle used for FreeAsync and sync-before-D2H in lazy callbacks.</summary>
     public static void SetStream(nint stream) => _streamHandle = stream;
 
@@ -136,6 +141,7 @@ internal static unsafe class GpuTransferHelper
         {
             if (_activationCache.Remove(tensor, out (ulong gpuPtr, nuint bytes) cached))
             {
+                _d2hSyncs++;
                 _context?.EnsureCurrent();
                 CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
                 CudaMemory.CopyDeviceToHost(cpuPtr, cached.gpuPtr, cached.bytes);
@@ -266,4 +272,11 @@ internal static unsafe class GpuTransferHelper
     {
         return (_cachedBytes, _hits, _misses);
     }
+
+    /// <summary>Number of lazy D2H sync callbacks fired since the last reset. Each one is a full GPU stall plus a
+    /// device-to-host copy; a GPU-resident hot loop should fire none.</summary>
+    public static long GetSyncCount() => _d2hSyncs;
+
+    /// <summary>Resets the D2H sync counter (call at the start of a region you want to measure for residency).</summary>
+    public static void ResetSyncCount() => _d2hSyncs = 0;
 }

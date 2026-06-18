@@ -4,51 +4,75 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>LTX-2.3 audio/video rotary position embedding (<c>LTX2AudioVideoRotaryPosEmbed</c> +
 /// <c>apply_interleaved_rotary_emb</c> in diffusers <c>transformer_ltx2.py</c>). Same interleaved-pair complex form
-/// and full-dim apply as <see cref="LtxRope"/> (LTX-1), but the per-token coordinates are computed in <b>pixel /
-/// time space</b>: each latent patch's <c>[start, end)</c> bounds are scaled by the VAE factors, the temporal axis
-/// is shifted by <c>causal_offset</c> and divided by fps (video) or converted to seconds (audio), the patch
-/// midpoint is taken, then normalized by the base data shape. Used for video self-attn (dim 4096, 3 axes), audio
-/// self-attn (dim 2048, 1 axis), and the two cross-modal attentions (dim 2048 each, video- and audio-coordinated).</summary>
+/// and full-dim apply as <see cref="LtxRope"/> (LTX-1); the per-token coordinates are computed in <b>pixel / time
+/// space</b> (latent patch <c>[start, end)</c> bounds × VAE scale factors, temporal axis shifted by
+/// <c>causal_offset</c> and divided by fps for video or converted to seconds for audio, then patch-midpoint and
+/// base-shape normalized). Four flavors are needed by the DiT: video self (dim 4096, 3 axes), audio self (dim 2048,
+/// 1 axis), and the two cross-modal attentions (dim 2048, 1 <b>temporal-only</b> axis — the cross-attn rope uses
+/// only <c>coords[:, 0]</c>). The audio cross rope is numerically identical to the audio self rope.</summary>
 ///
-/// <remarks>Per axis there are <c>dim / (2·numAxes)</c> log-spaced frequencies (<c>θ^linspace(0,1,n)·π/2</c>); the
-/// phase is <c>freq·(normCoord·2−1)</c>. cos/sin are <c>[S, dim]</c> with the per-axis values interleaved
-/// (k-outer, axis-inner) and pair-duplicated; a leading <c>dim % (2·numAxes)</c> identity pad (cos=1, sin=0) fills
-/// the remainder. <see cref="ApplyRotary"/> matches <see cref="LtxRope.ApplyRotary"/> exactly.</remarks>
+/// <remarks>Per axis there are <c>dim / (2·numAxes)</c> log-spaced frequencies (<c>θ^linspace(0,1,n)·π/2</c>);
+/// phase = <c>freq·(normCoord·2−1)</c>. cos/sin are <c>[S, dim]</c> with per-axis values interleaved (k-outer,
+/// axis-inner) and pair-duplicated, a leading <c>dim % (2·numAxes)</c> identity pad (cos=1, sin=0) filling the
+/// remainder. <see cref="ApplyRotary"/> matches <see cref="LtxRope.ApplyRotary"/> exactly.</remarks>
 public sealed unsafe class LtxVideo2Rope
 {
     public enum Modality { Video, Audio }
 
     private readonly Modality _modality;
+    private readonly bool _temporalOnly;    // video cross-attn: use only the temporal axis (1-axis rope)
     private readonly int _dim;
-    private readonly double _theta;
     private readonly int _baseFrames, _baseHeight, _baseWidth;
     private readonly int _patchSize, _patchSizeT;
     private readonly int _causalOffset;
     private readonly int[] _scaleFactors;   // video: (t, h, w); audio: (t,)
     private readonly int _samplingRate, _hopLength;
-    private readonly int _numAxes;          // 3 video, 1 audio
+    private readonly int _numAxes;          // 3 (video self), 1 (audio / video-cross)
     private readonly int _freqsPerAxis;     // dim / (2 · numAxes)
     private readonly int _pad;              // dim % (2 · numAxes)
-    private readonly double[] _freqBase;    // length freqsPerAxis: theta^linspace(0,1,n) · π/2
+    private readonly double[] _freqBase;    // theta^linspace(0,1,n) · π/2
 
-    /// <summary>Video constructor: 3-axis (frame, height, width) RoPE.</summary>
-    public static LtxVideo2Rope ForVideo(int dim, double theta, int baseFrames, int baseHeight, int baseWidth,
+    /// <summary>Video self-attention RoPE: 3 axes (frame, height, width).</summary>
+    public static LtxVideo2Rope ForVideoSelf(int dim, double theta, int baseFrames, int baseHeight, int baseWidth,
         int[] scaleFactors, int causalOffset, int patchSize = 1, int patchSizeT = 1) =>
-        new(Modality.Video, dim, theta, baseFrames, baseHeight, baseWidth, scaleFactors, causalOffset,
-            samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
+        new(Modality.Video, temporalOnly: false, dim, theta, baseFrames, baseHeight, baseWidth, scaleFactors,
+            causalOffset, samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
 
-    /// <summary>Audio constructor: 1-axis (time) RoPE; coordinates are in seconds.</summary>
+    /// <summary>Video cross-attention RoPE: 1 temporal-only axis (uses <c>coords[:, 0]</c>).</summary>
+    public static LtxVideo2Rope ForVideoCross(int dim, double theta, int baseFrames, int baseHeight, int baseWidth,
+        int[] scaleFactors, int causalOffset, int patchSize = 1, int patchSizeT = 1) =>
+        new(Modality.Video, temporalOnly: true, dim, theta, baseFrames, baseHeight, baseWidth, scaleFactors,
+            causalOffset, samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
+
+    /// <summary>Audio RoPE (self and cross are identical): 1 axis, coordinates in seconds.</summary>
     public static LtxVideo2Rope ForAudio(int dim, double theta, int baseFrames, int audioScaleFactor,
         int causalOffset, int samplingRate, int hopLength, int patchSizeT = 1) =>
-        new(Modality.Audio, dim, theta, baseFrames, baseHeight: 0, baseWidth: 0, [audioScaleFactor], causalOffset,
-            samplingRate, hopLength, patchSize: 1, patchSizeT);
+        new(Modality.Audio, temporalOnly: false, dim, theta, baseFrames, baseHeight: 0, baseWidth: 0,
+            [audioScaleFactor], causalOffset, samplingRate, hopLength, patchSize: 1, patchSizeT);
 
-    private LtxVideo2Rope(Modality modality, int dim, double theta, int baseFrames, int baseHeight, int baseWidth,
-        int[] scaleFactors, int causalOffset, int samplingRate, int hopLength, int patchSize, int patchSizeT)
+    /// <summary>Text-connector 1D RoPE (<c>LTX2RotaryPosEmbed1d</c>): 1 axis, coordinate = <c>pos / base_seq_len</c>
+    /// (the base sequence length is stored in the frame-base slot).</summary>
+    public static LtxVideo2Rope ForConnector1d(int dim, double theta, int baseSeqLen) =>
+        new(Modality.Audio, temporalOnly: false, dim, theta, baseFrames: baseSeqLen, baseHeight: 0, baseWidth: 0,
+            [1], causalOffset: 0, samplingRate: 0, hopLength: 0, patchSize: 1, patchSizeT: 1);
+
+    /// <summary>Builds connector cos/sin <c>[seqLen, dim]</c> with positions <c>i / base_seq_len</c>.</summary>
+    public (Tensor Cos, Tensor Sin) BuildConnector(int seqLen)
+    {
+        (Tensor cos, Tensor sin) = Alloc(seqLen);
+        float* cp = (float*)cos.DataPointer;
+        float* sp = (float*)sin.DataPointer;
+        for (int i = 0; i < seqLen; i++)
+            WriteToken(cp, sp, i, [(double)i / _baseFrames]);
+        return (cos, sin);
+    }
+
+    private LtxVideo2Rope(Modality modality, bool temporalOnly, int dim, double theta, int baseFrames, int baseHeight,
+        int baseWidth, int[] scaleFactors, int causalOffset, int samplingRate, int hopLength, int patchSize, int patchSizeT)
     {
         _modality = modality;
+        _temporalOnly = temporalOnly;
         _dim = dim;
-        _theta = theta;
         _baseFrames = baseFrames;
         _baseHeight = baseHeight;
         _baseWidth = baseWidth;
@@ -58,7 +82,7 @@ public sealed unsafe class LtxVideo2Rope
         _hopLength = hopLength;
         _patchSize = patchSize;
         _patchSizeT = patchSizeT;
-        _numAxes = modality == Modality.Video ? 3 : 1;
+        _numAxes = (modality == Modality.Video && !temporalOnly) ? 3 : 1;
         int numRopeElems = _numAxes * 2;
         _freqsPerAxis = dim / numRopeElems;
         _pad = dim % numRopeElems;
@@ -67,13 +91,14 @@ public sealed unsafe class LtxVideo2Rope
         for (int k = 0; k < _freqsPerAxis; k++)
         {
             double exp = _freqsPerAxis == 1 ? 0.0 : (double)k / (_freqsPerAxis - 1);  // linspace(0,1,n)
-            _freqBase[k] = Math.Pow(_theta, exp) * Math.PI / 2.0;
+            _freqBase[k] = Math.Pow(theta, exp) * Math.PI / 2.0;
         }
     }
 
     public int Dim => _dim;
 
-    /// <summary>Builds video cos/sin <c>[F·H·W, dim]</c> for a latent grid (row-major <c>(f,h,w)</c>).</summary>
+    /// <summary>Builds video cos/sin <c>[F·H·W, dim]</c> (row-major <c>(f,h,w)</c>). For the temporal-only (cross)
+    /// flavor each token's single coordinate is its frame midpoint; otherwise all three axes are written.</summary>
     public (Tensor Cos, Tensor Sin) BuildVideo(int numFrames, int height, int width, double fps)
     {
         if (_modality != Modality.Video) throw new InvalidOperationException("BuildVideo on an audio RoPE.");
@@ -82,13 +107,10 @@ public sealed unsafe class LtxVideo2Rope
         float* cp = (float*)cos.DataPointer;
         float* sp = (float*)sin.DataPointer;
 
-        int sfT = _scaleFactors[0], sfH = _scaleFactors[1], sfW = _scaleFactors[2];
+        int sfH = _scaleFactors[1], sfW = _scaleFactors[2];
         for (int fi = 0; fi < numFrames; fi++)
         {
-            // Temporal: pixel bounds, causal shift+clamp, divide by fps; then midpoint and base-normalize.
-            double tStart = Math.Max(0.0, (double)fi * _patchSizeT * sfT + _causalOffset - sfT) / fps;
-            double tEnd = Math.Max(0.0, (double)(fi + 1) * _patchSizeT * sfT + _causalOffset - sfT) / fps;
-            double normT = ((tStart + tEnd) / 2.0) / _baseFrames;
+            double normT = VideoTemporalNorm(fi, fps);
             for (int hi = 0; hi < height; hi++)
             {
                 double normH = (((double)hi + 0.5) * _patchSize * sfH) / _baseHeight;
@@ -96,7 +118,8 @@ public sealed unsafe class LtxVideo2Rope
                 {
                     double normW = (((double)wi + 0.5) * _patchSize * sfW) / _baseWidth;
                     long token = ((long)fi * height + hi) * width + wi;
-                    WriteToken(cp, sp, token, [normT, normH, normW]);
+                    if (_temporalOnly) WriteToken(cp, sp, token, [normT]);
+                    else WriteToken(cp, sp, token, [normT, normH, normW]);
                 }
             }
         }
@@ -118,11 +141,19 @@ public sealed unsafe class LtxVideo2Rope
             int f = fi + shift;
             double startMel = Math.Max(0.0, (double)f * sf + _causalOffset - sf);
             double endMel = Math.Max(0.0, (double)(f + _patchSizeT) * sf + _causalOffset - sf);
-            double startS = startMel * melToSec, endS = endMel * melToSec;
-            double norm = ((startS + endS) / 2.0) / _baseFrames;
+            double norm = ((startMel * melToSec + endMel * melToSec) / 2.0) / _baseFrames;
             WriteToken(cp, sp, fi, [norm]);
         }
         return (cos, sin);
+    }
+
+    /// <summary>Video temporal patch-midpoint coordinate (pixel bounds, causal shift+clamp, ÷ fps), base-normalized.</summary>
+    private double VideoTemporalNorm(int fi, double fps)
+    {
+        int sfT = _scaleFactors[0];
+        double tStart = Math.Max(0.0, (double)fi * _patchSizeT * sfT + _causalOffset - sfT) / fps;
+        double tEnd = Math.Max(0.0, (double)(fi + 1) * _patchSizeT * sfT + _causalOffset - sfT) / fps;
+        return ((tStart + tEnd) / 2.0) / _baseFrames;
     }
 
     /// <summary>Writes one token's cos/sin row: leading identity pad, then k-outer/axis-inner interleaved pairs.</summary>

@@ -744,33 +744,410 @@ public sealed class CudaBackend : IBackend
     public unsafe void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RmsNorm");
-        _context.EnsureCurrent(); // DataPointer access below triggers lazy D2H — needs context bound.
-        // CPU fallback — T5 encoding runs once per generation, not a bottleneck.
-        // DataPointer access triggers D2H copy for GPU-cached tensors.
+        _context.EnsureCurrent();
         int rank = input.Shape.Rank;
         long lastDim = input.Shape[rank - 1];
         long outerSize = input.ElementCount / lastDim;
 
-        float* pIn = (float*)input.DataPointer;
-        float* pOut = (float*)output.DataPointer;
-        float* pWeight = (float*)weight.DataPointer;
+        // GPU path: F32 activation + F32 weight. Keeps data resident — one block per row,
+        // shared-mem reduction. Also serves per-head QK-RMSNorm (rows = B*L*heads, dim = headDim).
+        if (input.DType == DType.F32 && weight.DType == DType.F32)
+        {
+            EnsureKernels();
+            ulong pOut = 0, pIn = 0, pWeight = 0;
+            bool cachedOutput = false;
+            try
+            {
+                pIn = GpuTransferHelper.CopyToDevice(input);
+                pWeight = GpuTransferHelper.CopyToDevice(weight);
+                nuint outBytes = GpuTransferHelper.ByteSize(output);
+                pOut = GpuTransferHelper.AllocateDevice(outBytes);
+                _kernels!.LaunchRmsNorm(pOut, pIn, pWeight, (int)lastDim, (int)outerSize, eps, _stream.Handle);
+                GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+                cachedOutput = true;
+            }
+            finally
+            {
+                if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+                GpuTransferHelper.FreeDevice(pIn);
+                GpuTransferHelper.FreeDevice(pWeight);
+            }
+            return;
+        }
 
+        // CPU fallback for non-F32 (DataPointer access triggers lazy D2H for cached tensors).
+        float* pInCpu = (float*)input.DataPointer;
+        float* pOutCpu = (float*)output.DataPointer;
+        float* pWeightCpu = (float*)weight.DataPointer;
         for (long outer = 0; outer < outerSize; outer++)
         {
             long baseIdx = outer * lastDim;
-
             float sumSq = 0f;
             for (long i = 0; i < lastDim; i++)
             {
-                float val = pIn[baseIdx + i];
+                float val = pInCpu[baseIdx + i];
                 sumSq += val * val;
             }
             float invRms = 1.0f / MathF.Sqrt(sumSq / lastDim + eps);
-
             for (long i = 0; i < lastDim; i++)
+                pOutCpu[baseIdx + i] = pInCpu[baseIdx + i] * invRms * pWeightCpu[i];
+        }
+    }
+
+    public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
+            throw new NotSupportedException("CUDA AffineBroadcastLastDim supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int rank = input.Shape.Rank;
+        int dim = (int)input.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
+
+        ulong pOut = 0, pIn = 0, pScale = 0, pShift = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pScale = GpuTransferHelper.CopyToDevice(scale);
+            if (shift is not null) pShift = GpuTransferHelper.CopyToDevice(shift);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAffineBroadcastLastDim(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pScale);
+            if (shift is not null) GpuTransferHelper.FreeDevice(pShift);
+        }
+    }
+
+    public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
+    {
+        if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
+            throw new NotSupportedException("CUDA GatedResidualLastDim supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int rank = value.Shape.Rank;
+        int dim = (int)value.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)value.Shape[rank - 2] : 1;
+
+        ulong pOut = 0, pRes = 0, pVal = 0, pGate = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pRes = GpuTransferHelper.CopyToDevice(residual);
+            pVal = GpuTransferHelper.CopyToDevice(value);
+            pGate = GpuTransferHelper.CopyToDevice(gate);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchGatedResidualLastDim(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pRes);
+            GpuTransferHelper.FreeDevice(pVal);
+            GpuTransferHelper.FreeDevice(pGate);
+        }
+    }
+
+    public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
+    {
+        if (proj.DType != DType.F32)
+            throw new NotSupportedException("CUDA ModulationSplit4 supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = (int)scaleMsa.Shape[scaleMsa.Shape.Rank - 1];
+        int batch = (int)(scaleMsa.ElementCount / dim);
+
+        ulong pProj = 0, pSMsa = 0, pGMsa = 0, pSMlp = 0, pGMlp = 0;
+        bool cached = false;
+        try
+        {
+            pProj = GpuTransferHelper.CopyToDevice(proj);
+            nuint bytes = GpuTransferHelper.ByteSize(scaleMsa);
+            pSMsa = GpuTransferHelper.AllocateDevice(bytes);
+            pGMsa = GpuTransferHelper.AllocateDevice(bytes);
+            pSMlp = GpuTransferHelper.AllocateDevice(bytes);
+            pGMlp = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchModulation4(pSMsa, pGMsa, pSMlp, pGMlp, pProj, dim, batch, _stream.Handle);
+            GpuTransferHelper.CacheActivation(scaleMsa, pSMsa, bytes);
+            GpuTransferHelper.CacheActivation(gateMsa, pGMsa, bytes);
+            GpuTransferHelper.CacheActivation(scaleMlp, pSMlp, bytes);
+            GpuTransferHelper.CacheActivation(gateMlp, pGMlp, bytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached)
             {
-                pOut[baseIdx + i] = pIn[baseIdx + i] * invRms * pWeight[i];
+                GpuTransferHelper.FreeDevice(pSMsa);
+                GpuTransferHelper.FreeDevice(pGMsa);
+                GpuTransferHelper.FreeDevice(pSMlp);
+                GpuTransferHelper.FreeDevice(pGMlp);
             }
+            GpuTransferHelper.FreeDevice(pProj);
+        }
+    }
+
+    public void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
+    {
+        if (z.DType != DType.F32 || pos.DType != DType.F32 || neg.DType != DType.F32)
+            throw new NotSupportedException("CUDA CfgEulerStep supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pZ = 0, pPos = 0, pNeg = 0;
+        try
+        {
+            pZ = GpuTransferHelper.CopyToDevice(z);
+            pPos = GpuTransferHelper.CopyToDevice(pos);
+            pNeg = GpuTransferHelper.CopyToDevice(neg);
+            _kernels!.LaunchCfgEuler(pZ, pPos, pNeg, guidance, delta, (int)z.ElementCount, _stream.Handle);
+
+            // In-place on z: clear stale callbacks before re-caching so the old sync callback
+            // doesn't FreeAsync the buffer we're keeping resident (pitfall #17).
+            z._gpuSyncCallback = null;
+            z._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(z, pZ, GpuTransferHelper.ByteSize(z));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pPos);
+            GpuTransferHelper.FreeDevice(pNeg);
+        }
+    }
+
+    public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
+    {
+        if (q.DType != DType.F32 || k.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA ApplyRope supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int numHeads = (int)q.Shape[2];
+        int headDim = (int)q.Shape[3];
+        long totalVecs = q.ElementCount / headDim;
+
+        ulong pQ = 0, pK = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(q);
+            pK = GpuTransferHelper.CopyToDevice(k);
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchRope(pQ, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+            _kernels!.LaunchRope(pK, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+
+            // In-place on q and k: clear stale callbacks before re-caching (pitfall #17).
+            q._gpuSyncCallback = null;
+            q._gpuDisposeCallback = null;
+            k._gpuSyncCallback = null;
+            k._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(q, pQ, GpuTransferHelper.ByteSize(q));
+            GpuTransferHelper.CacheActivation(k, pK, GpuTransferHelper.ByteSize(k));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCos);
+            GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
+    public void SliceLastDim(Tensor output, Tensor input, int offset)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA SliceLastDim supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int inDim = (int)input.Shape[input.Shape.Rank - 1];
+        long rows = input.ElementCount / inDim;
+        int outDim = (int)(output.ElementCount / rows);
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchSliceLastDim(pOut, pIn, outDim, inDim, offset, output.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    public void MaskRows(Tensor output, Tensor input, Tensor rowMask)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32 || rowMask.DType != DType.F32)
+            throw new NotSupportedException("CUDA MaskRows supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int channels = (int)input.Shape[input.Shape.Rank - 1];
+
+        ulong pOut = 0, pIn = 0, pMask = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pMask = GpuTransferHelper.CopyToDevice(rowMask);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchRowScale(pOut, pIn, pMask, channels, input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pMask);
+        }
+    }
+
+    public void AddScalar(Tensor output, Tensor input, float scalar)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA AddScalar supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAddScalar(pOut, pIn, scalar, (int)input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA LayerNormNoAffine supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long rows = input.ElementCount / dim;
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchLayerNormNoAffine(pOut, pIn, dim, (int)rows, eps, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    public void IndexAddRows(Tensor h, Tensor table, Tensor indices)
+    {
+        if (h.DType != DType.F32 || table.DType != DType.F32)
+            throw new NotSupportedException("CUDA IndexAddRows supports F32 only.");
+        if (indices.DType != DType.I32)
+            throw new NotSupportedException("CUDA IndexAddRows requires I32 indices.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = (int)h.Shape[h.Shape.Rank - 1];
+
+        ulong pH = 0, pTable = 0, pIdx = 0;
+        try
+        {
+            pH = GpuTransferHelper.CopyToDevice(h);
+            pTable = GpuTransferHelper.CopyToDevice(table);
+            pIdx = GpuTransferHelper.CopyToDevice(indices);
+            _kernels!.LaunchIndexAdd(pH, pTable, pIdx, dim, h.ElementCount, _stream.Handle);
+
+            // In-place on h: clear stale callbacks before re-caching (pitfall #17).
+            h._gpuSyncCallback = null;
+            h._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(h, pH, GpuTransferHelper.ByteSize(h));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pTable);
+            GpuTransferHelper.FreeDevice(pIdx);
+        }
+    }
+
+    public void ScatterRowsAfter(Tensor output, Tensor input, int headRows)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA ScatterRowsAfter supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchScatterRowsAfter(pOut, pIn, headRows, dim, output.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    public void SliceRows(Tensor output, Tensor input, int rowOffset)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("CUDA SliceRows supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = (int)output.Shape[output.Shape.Rank - 1];
+        long elemOffset = (long)rowOffset * dim;
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchSliceRows(pOut, pIn, elemOffset, output.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
         }
     }
 
@@ -1219,7 +1596,27 @@ public sealed class CudaBackend : IBackend
 
     public void Tanh(Tensor output, Tensor input)
     {
-        throw new NotSupportedException("CUDA Tanh not yet implemented — use CpuBackend for LSTM activations.");
+        if (input.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Tanh currently supports F32 only — got {input.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchTanh(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
     }
 
     public void Elu(Tensor output, Tensor input, float alpha)
@@ -2063,6 +2460,13 @@ public sealed class CudaBackend : IBackend
     {
         return GpuTransferHelper.GetStats();
     }
+
+    /// <summary>Number of lazy device-to-host syncs fired since the last <see cref="ResetD2hSyncCount"/>.
+    /// Each is a full GPU stall plus a copy; a GPU-resident denoise loop should fire none. Residency metric.</summary>
+    public long GetD2hSyncCount() => GpuTransferHelper.GetSyncCount();
+
+    /// <summary>Resets the device-to-host sync counter (call before a region you want to measure for residency).</summary>
+    public void ResetD2hSyncCount() => GpuTransferHelper.ResetSyncCount();
 
     #endregion
 
