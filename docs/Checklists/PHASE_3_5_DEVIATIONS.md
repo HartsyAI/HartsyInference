@@ -298,6 +298,44 @@ upgrading to fix #2 if Intel iGPU support becomes a deployment target.
 
 ---
 
+### 13. Wrong `VkAccessFlags2` sync2 constants weakened every compute barrier
+
+**Found by**: the 2026-06-17 Vulkan bug-audit sweep (sibling of the CUDA cuBLASLt-constant find). Three `VkAccessFlags2` values in `VulkanEnums.cs` were wrong, and two of them are used by `RecordGlobalComputeBarrier`, the barrier emitted between every compute dispatch:
+
+| Constant | Was | Should be (spec) | Note |
+|---|---|---|---|
+| `UniformRead` | `0x40` | `0x08` | `0x40` collides with `ShaderWrite`; unused, latent |
+| `ShaderStorageRead` | `0x100000000` | `0x200000000` | `0x100000000` is actually `SHADER_SAMPLED_READ` |
+| `ShaderStorageWrite` | `0x200000000` | `0x400000000` | `0x200000000` is actually `SHADER_STORAGE_READ` |
+
+So the compute-to-compute barrier requested `srcAccess = SHADER_STORAGE_READ` (should be WRITE) and `dstAccess = SHADER_SAMPLED_READ` (should be STORAGE_READ) — the storage write-to-read hazard it exists to cover was not actually specified. NVIDIA's driver appears to over-flush on a compute barrier, so the 33-test suite passed both before and after, but it is a genuine spec violation that could surface as intermittent wrong results on a stricter driver or under load. Same wrong access masks also fed the transfer-to-compute barrier in `VulkanGpuTransferHelper`.
+
+**Fix**: corrected all three to spec values, added `ShaderSampledRead = 0x100000000` for completeness, and pinned them with `VulkanConstantTests` (CPU-only regression). Validated: 33/33 Vulkan tests pass on the RTX 3060.
+
+### 14. `ErrorOutOfPoolMemory` had the wrong VkResult value
+
+`VkResult.ErrorOutOfPoolMemory` was `-1000257000` (an unrelated maintenance-range code); spec value is `-1000069000`. Still negative so `ThrowOnError` still threw, but the error would render as the raw int instead of the name. Also note `AllocateSet` compares against the literal `-1000257000` for the out-of-pool retry path, which therefore matched the (wrong) enum but not a real driver `VK_ERROR_OUT_OF_POOL_MEMORY`. Fixed the enum; the literal in `AllocateSet` also checks `r == VkResult.ErrorOutOfPoolMemory`, so the retry still fires.
+
+### 15. `nonCoherentAtomSize` flush/invalidate range could miss the buffer tail
+
+`FlushIfNonCoherent` / `InvalidateIfNonCoherent` aligned the offset down but computed `size` from `buffer.Size` rounded up independently, so for a buffer whose offset was not already atom-aligned, `alignedOffset + alignedSize` could end before the real data end, leaving the tail un-flushed (silent stale data). Fixed with `start = AlignDown(off, atom); end = AlignUp(off + size, atom); size = end - start`. Latent on the RTX 3060 (all host-visible memory types here are `HOST_COHERENT`, so both methods early-return), but a real corruption bug on a non-coherent driver/ReBAR path.
+
+### 16. `VulkanBuffer.AsSpan<T>` truncated 64-bit sizes to int
+
+`new Span<T>(ptr, (int)(Size / sizeof(T)))` silently truncated the element count for buffers above `int.MaxValue` elements (the Vulkan analogue of the CUDA im2col int32 overflow). Now throws a clear error above `int.MaxValue` instead of returning a partial view.
+
+### 17. im2col 32-bit indexing reassessed (corrects the "no incident" claim below)
+
+The "Anticipated Categories" table previously claimed im2col used 64-bit indexing "from day one". The audit found the shader's `uint64_t total` is only used for the bounds check; the actual index variables (`linear`, `perImage`, `inIdx`, `outIdx`) are 32-bit `uint`. Unlike CUDA this is **bounded by `maxStorageBufferRange`** (~4 GB on NVIDIA): a column buffer large enough to overflow a 32-bit element index cannot be fully addressed by a shader anyway, so it is a robustness gap rather than the silent-corruption-at-1024² that CUDA had. Mitigation shipped: a C# guard in `VulkanBackend` Conv2D that throws a clear `NotSupportedException` when `colElements > int.MaxValue` instead of silently corrupting. A full fix (widen the shader to 64-bit workgroup-derived indexing, `linear = uint64_t(gl_WorkGroupID.x) * local_size + gl_LocalInvocationID.x`) is deferred because no SPIR-V compiler was available in the audit environment to rebuild and validate the `.spv`.
+
+### Deferred / noted (not fixed this pass)
+
+- **Descriptor pool `FlipPool` resets without a timeline wait** (`VulkanDescriptorManager`). A real hazard only on the allocated-set fallback path; the hot path uses push descriptors (`PushDescriptorActive`, core on the 3060), so it does not trigger here. A correct fix threads the command-stream timeline into the descriptor manager and waits on the last-allocated tick before reset. Deferred.
+- **coopmat dead-code ternaries** (`outputIsF32 ? outBuf.Handle : outBuf.Handle`) were simplified to a single output handle with a clarifying comment; functionally correct before and after.
+- **Per-dispatch global barrier serializes independent SDPA heads** — a perf opportunity (scope the barrier to the written buffer), not a correctness bug. See [`../Research/VULKAN_OPTIMIZATION.md`](../Research/VULKAN_OPTIMIZATION.md) §2.3.
+
+---
+
 ## Anticipated Categories (kept for reference)
 
 The CUDA backend's experience suggested the following classes of issues; mapping how each played out in Phase 3.5:
