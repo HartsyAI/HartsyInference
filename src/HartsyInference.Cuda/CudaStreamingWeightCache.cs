@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
@@ -9,6 +10,10 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     private readonly CudaContext _context;
     private readonly nint _computeStream;
     private readonly nint _uploadStream;
+    private readonly HashSet<nint> _pinnedHostPtrs = new();
+
+    /// <summary>Opt-in: page-lock each weight's host source before uploading so <c>cuMemcpyHtoDAsync</c> is genuinely asynchronous and overlaps with compute (pageable sources silently force a synchronous staging copy that overlaps with nothing). Defaults to <c>false</c>. Only beneficial when weights are re-uploaded across steps (block-swap); for a one-shot preload the registration cost is not amortized. Requires the CPU weight tensors to stay resident (do not dispose them) for the lifetime of the stream.</summary>
+    public bool PinUploadSource { get; set; }
 
     /// <summary>Constructs a streaming cache bound to a compute stream and upload
     /// stream. Both streams should be created with <c>CU_STREAM_NON_BLOCKING</c>
@@ -70,7 +75,12 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
             ulong dptr = CudaMemory.AllocateAsync(byteSize, _uploadStream);
             unsafe
             {
-                CudaDriverApi.cuMemcpyHtoDAsync(dptr, (nint)weight.DataPointer, byteSize, _uploadStream).ThrowOnError();
+                nint hostSrc = (nint)weight.DataPointer;
+                if (PinUploadSource)
+                {
+                    TryPinHostSource(hostSrc, byteSize);
+                }
+                CudaDriverApi.cuMemcpyHtoDAsync(dptr, hostSrc, byteSize, _uploadStream).ThrowOnError();
             }
             // Register immediately even though the upload is in flight: ops won't
             // read these tensors until AwaitWeights gates the compute stream on
@@ -133,6 +143,42 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
                 CudaDriverApi.cuMemFreeAsync(dptr, _computeStream).ThrowOnError();
             }
         }
+    }
+
+    /// <summary>Best-effort page-locks a host source range so the subsequent async H2D truly overlaps. Treats "already registered" (overlapping page with a prior registration) as success. Only ranges this cache registered are tracked for later unregistration.</summary>
+    private void TryPinHostSource(nint hostSrc, nuint byteSize)
+    {
+        if (hostSrc == 0 || _pinnedHostPtrs.Contains(hostSrc))
+        {
+            return;
+        }
+        int rc = CudaDriverApi.cuMemHostRegister(hostSrc, byteSize, CudaDriverApi.CU_MEMHOSTREGISTER_PORTABLE);
+        if (rc == 0)
+        {
+            _pinnedHostPtrs.Add(hostSrc);
+        }
+        else if (rc != CudaDriverApi.CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED)
+        {
+            // A genuine failure (e.g. invalid range): leave the source pageable. The
+            // upload still works, just without overlap. Don't throw — pinning is an
+            // optimization, not a correctness requirement.
+            Logs.Warning($"cuMemHostRegister failed for weight source (rc={rc}); uploading without pinning.");
+        }
+    }
+
+    /// <summary>Unregisters every host source this cache page-locked. Call before tearing down the backend so pinned pages are released back to the OS.</summary>
+    public void UnregisterPinnedSources()
+    {
+        if (_pinnedHostPtrs.Count == 0)
+        {
+            return;
+        }
+        _context.EnsureCurrent();
+        foreach (nint ptr in _pinnedHostPtrs)
+        {
+            CudaDriverApi.cuMemHostUnregister(ptr);
+        }
+        _pinnedHostPtrs.Clear();
     }
 
     /// <inheritdoc/>

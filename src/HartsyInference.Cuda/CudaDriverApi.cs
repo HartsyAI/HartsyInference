@@ -125,6 +125,33 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemcpyDtoHAsync_v2")]
     internal static partial int cuMemcpyDtoHAsync(nint dst, ulong src, nuint bytes, nint stream);
 
+    // ── Pinned (page-locked) host memory ────────────────────────────────
+    //
+    // The GPU copy engine cannot DMA out of pageable host memory; the driver
+    // stages it through a temporary pinned buffer and the "async" copy silently
+    // becomes synchronous, overlapping with nothing. Pinning the source makes
+    // cuMemcpyHtoDAsync truly async (and ~2x faster on PCIe). cuMemHostRegister
+    // page-locks an existing allocation in place (no extra copy, no extra memory).
+
+    /// <summary>Allocates a fresh page-locked host buffer. Flags: PORTABLE=1, DEVICEMAP=2, WRITECOMBINED=4.</summary>
+    [LibraryImport(LibName, EntryPoint = "cuMemHostAlloc")]
+    internal static partial int cuMemHostAlloc(out nint pp, nuint bytes, uint flags);
+
+    [LibraryImport(LibName, EntryPoint = "cuMemFreeHost")]
+    internal static partial int cuMemFreeHost(nint p);
+
+    /// <summary>Page-locks an existing host range in place. Flags: PORTABLE=1, DEVICEMAP=2, READONLY=8.</summary>
+    [LibraryImport(LibName, EntryPoint = "cuMemHostRegister_v2")]
+    internal static partial int cuMemHostRegister(nint p, nuint bytes, uint flags);
+
+    [LibraryImport(LibName, EntryPoint = "cuMemHostUnregister")]
+    internal static partial int cuMemHostUnregister(nint p);
+
+    internal const uint CU_MEMHOSTREGISTER_PORTABLE = 1;
+
+    /// <summary>cuMemHostRegister returns this when the range (rounded to host pages) overlaps an already-registered region. Safe to treat as "already pinned" and continue.</summary>
+    internal const int CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED = 712;
+
     // ── Stream Management ───────────────────────────────────────────────
 
     [LibraryImport(LibName)]
@@ -168,6 +195,47 @@ internal static partial class CudaDriverApi
 
     [LibraryImport(LibName)]
     internal static partial int cuEventSynchronize(nint hEvent);
+
+    // ── Graph Management (capture / replay) ─────────────────────────────
+    //
+    // A captured graph records a fixed sequence of stream work and replays it with
+    // a single cuGraphLaunch, collapsing thousands of per-kernel CPU launch calls
+    // into one. Capture forbids synchronous operations on the stream (no CPU
+    // readback, no blocking sync, no sync cuMemAlloc) for its whole duration — so
+    // only graphable fixed kernel chains qualify, not a step that interleaves
+    // CPU-side scheduler/CFG math or lazy device-to-host syncs.
+
+    /// <summary>Begins capturing work issued to <paramref name="stream"/> into a graph. Mode: GLOBAL=0, THREAD_LOCAL=1, RELAXED=2.</summary>
+    [LibraryImport(LibName, EntryPoint = "cuStreamBeginCapture_v2")]
+    internal static partial int cuStreamBeginCapture(nint stream, int mode);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuStreamEndCapture(nint stream, out nint graph);
+
+    /// <summary>Returns the capture status of a stream (0 = none, 1 = active, 2 = invalidated).</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuStreamIsCapturing(nint stream, out int captureStatus);
+
+    /// <summary>Instantiates an executable graph. <paramref name="flags"/> = 0 is the default.</summary>
+    [LibraryImport(LibName, EntryPoint = "cuGraphInstantiateWithFlags")]
+    internal static partial int cuGraphInstantiate(out nint graphExec, nint graph, ulong flags);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuGraphLaunch(nint graphExec, nint stream);
+
+    /// <summary>Updates an instantiated graph in place from a re-captured graph of identical topology. Returns CUDA_SUCCESS on success; a non-zero result means the topology changed and the caller must re-instantiate.</summary>
+    [LibraryImport(LibName, EntryPoint = "cuGraphExecUpdate_v2")]
+    internal static partial int cuGraphExecUpdate(nint graphExec, nint graph, nint resultInfo);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuGraphExecDestroy(nint graphExec);
+
+    [LibraryImport(LibName)]
+    internal static partial int cuGraphDestroy(nint graph);
+
+    internal const int CU_STREAM_CAPTURE_MODE_GLOBAL = 0;
+    internal const int CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1;
+    internal const int CU_STREAM_CAPTURE_MODE_RELAXED = 2;
 
     // ── Memory Info ─────────────────────────────────────────────────────
 

@@ -13,6 +13,15 @@ This is the master tracking document for Phase B. It supersedes the optimization
 - [`FLASH_ATTENTION.md`](FLASH_ATTENTION.md) — algorithm reference (existing, unchanged)
 - [`BENCHMARKING.md`](BENCHMARKING.md) — earlier procedural notes (existing, superseded by this doc + the run scripts under `benchmarks/`)
 
+### Technique survey docs (2026-06-16 literature sweep)
+
+A four-axis research sweep across algorithmic, quantization, kernel, and memory/serving techniques (2023-2026), each scoped to what a custom C# + PTX + cuBLAS/cuBLASLt engine can actually adopt. These feed the B4 optimization phases below.
+
+- [`STEP_ACCELERATION.md`](STEP_ACCELERATION.md) — algorithmic / step-level: step distillation (LCM/Turbo/DMD2/Hyper-SD/PCM/TCD), training-free feature caching (DeepCache/TeaCache/FBCache), CFG distillation, solver efficiency, video/audio/3D specifics. Highest single-model leverage (~2-10x).
+- [`QUANTIZATION_LOW_PRECISION_INFERENCE.md`](QUANTIZATION_LOW_PRECISION_INFERENCE.md) — PTQ method families, GGUF/NF4 weight-only, FP8/cuBLASLt mechanics, SVDQuant/NVFP4/MXFP4, INT8/INT4 GEMM, SageAttention. Ampere-first ranking (INT8 is the only native low-precision compute on the 3060).
+- [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) — `mma.sync`/`ldmatrix`/`cp.async` tensor-core PTX, FA2-vs-FA3, Hopper TMA/wgmma/clusters, CUDA Graphs via Driver API, cuBLASLt epilogue fusion, megakernels, occupancy micro-opts, implicit-GEMM/Winograd conv.
+- [`MEMORY_SCHEDULING_SERVING.md`](MEMORY_SCHEDULING_SERVING.md) — stream-ordered + VMM + caching allocators, pinned/async transfer overlap, block-swap weight streaming (the key 12 GB enabler), VAE tiling, multi-stream/CFG batching, feature caching + video AR KV-cache.
+
 ---
 
 ## Methodology
@@ -154,12 +163,20 @@ Guard against confirmation bias: if the actual hot kernel doesn't match the pred
 
 Each B4.x is a self-contained subphase: benchmarks before, implementation, benchmarks after, accuracy validation, deviation entry, results commit.
 
-- **B4.1 — FlashAttention 2 PTX kernel** — biggest single predicted gain
-- **B4.2 — Conv2D cuDNN Winograd path** — second-biggest gain on conv-heavy models (SDXL VAE)
-- **B4.3 — Kernel fusion** — Conv2D+bias+act, Linear+bias+act, RMSNorm+modulate
-- **B4.4 — Memory pool** — eliminate per-op alloc/free
-- **B4.5 — CUDA Graphs** — capture step, replay
-- **B4.6 — F16/BF16 audit + Tensor Core utilization sweep**
+- **B4.1 — FlashAttention 2 PTX kernel** — biggest single predicted gain. Diffusion is non-causal/fixed-seqlen, so one kernel parameterized by `(seqlen_q, seqlen_kv, head_dim)` covers self + cross attention (drops all mask/varlen machinery). See [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §2.
+- **B4.2 — Conv2D cuDNN Winograd path** — second-biggest gain on conv-heavy models (SDXL VAE). Survey note: prefer hand-rolled implicit-GEMM (drop im2col materialization) + Winograd F(2x2,3x3) in PTX over a cuDNN runtime dependency (no-native-libs pillar); [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §7.
+- **B4.3 — Kernel fusion** — Conv2D+bias+act, Linear+bias+act, RMSNorm+modulate. **cuBLASLt epilogue fusion (bias+GELU/ReLU) is the lowest-effort first move** (descriptor P/Invoke, no new PTX); fused AdaLN/modulation is the highest-value diffusion-specific hand-rolled fusion. [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §5.
+- **B4.4 — Memory pool** — eliminate per-op alloc/free. Survey path: stream-ordered pool (`cuMemAllocAsync` + capped `RELEASE_THRESHOLD`) first, then a size-class caching suballocator; VMM expandable-segments only if fragmentation OOMs appear. [`MEMORY_SCHEDULING_SERVING.md`](MEMORY_SCHEDULING_SERVING.md) §1-3.
+- **B4.5 — CUDA Graphs** — capture step, replay. Patch per-step scalars via `cuGraphExecKernelNodeSetParams` (never re-instantiate); bucket by shape; allocate outside capture. [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §4.
+- **B4.6 — F16/BF16 audit + Tensor Core utilization sweep** — depends on a `mma.sync` + `ldmatrix` + `cp.async` + XOR-swizzle GEMM core (the dependency for everything fast); INT8 IMMA is the only native low-precision compute on the 3060. [`QUANTIZATION_LOW_PRECISION_INFERENCE.md`](QUANTIZATION_LOW_PRECISION_INFERENCE.md).
+
+Survey-informed candidate subphases (new; prioritize against B3 profiling before committing):
+
+- **B4.7 — Block-swap weight streaming** — pinned double-buffer + transfer stream + event-gated prefetch over the existing weight cache. The enabler for unquantized Flux 12B / video models on 12 GB; hides ~all PCIe latency when per-block compute > per-block transfer. Highest impact for the dev box. [`MEMORY_SCHEDULING_SERVING.md`](MEMORY_SCHEDULING_SERVING.md) §4-5.
+- **B4.8 — Training-free step/feature acceleration** — guidance-distilled single-pass CFG, TeaCache/FBCache residual caching, LCM/TCD consistency schedulers, DPM-Solver++/UniPC. Pure loop/forward code or loadable weights, often 2-10x, orthogonal to kernel work. [`STEP_ACCELERATION.md`](STEP_ACCELERATION.md).
+- **B4.9 — VAE tiling** — spatial (image) + temporal/spatial with causal feature cache (video). Removes the binding high-res/video activation peak (SD-VAE hits ~60 GB at 4k). Mostly host tile loops over existing kernels + a linear-blend pass. [`MEMORY_SCHEDULING_SERVING.md`](MEMORY_SCHEDULING_SERVING.md) §6.
+- **B4.10 — Rolling KV-cache for AR world models** — block-causal mask + fixed-window K/V ring buffers for Matrix-Game/Oasis/CausVid; the O(TL)-vs-O(T^2) difference for interactive use. [`MEMORY_SCHEDULING_SERVING.md`](MEMORY_SCHEDULING_SERVING.md) §8.
+- **B4.11 — L2 persistence + 128-bit vectorized loads** — cheap Driver-only / address-math micro-opts (~20% where hot data fits; 4x fewer load instructions). [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §6.
 
 ### B5 — Final Validation + Tech Paper
 
@@ -227,3 +244,4 @@ These exclusions are intentional. The paper's contribution is the *measurement f
 | Date (UTC) | Subphase | What changed |
 |---|---|---|
 | 2026-05-07 | B0 | Planning docs written and approved |
+| 2026-06-16 | B0 | Four-axis technique survey added: STEP_ACCELERATION, QUANTIZATION_LOW_PRECISION_INFERENCE, DEEP_KERNEL_OPTIMIZATION, MEMORY_SCHEDULING_SERVING. B4 roadmap extended with survey-informed candidate subphases B4.7-B4.11 (block-swap streaming, step/feature acceleration, VAE tiling, rolling KV-cache, L2 persistence). No code changes. |

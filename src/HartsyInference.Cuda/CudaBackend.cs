@@ -19,6 +19,9 @@ public sealed class CudaBackend : IBackend
     private readonly CudaKernels? _kernels;
     private nint _cublasHandle;
     private Fp8GemmExecutor? _fp8Executor;
+    private LtGemmExecutor? _ltGemmExecutor;
+    private TensorCoreGemm? _tensorCoreGemm;
+    private readonly string? _ptxDir;
     private bool _disposed;
 
     /// <summary>The device this backend targets.</summary>
@@ -40,6 +43,13 @@ public sealed class CudaBackend : IBackend
     /// <inheritdoc/>
     public IStreamingWeightCache? StreamingCache => _streamingCache;
 
+    /// <summary>Opt-in: page-lock weight host sources before streaming uploads so async H2D truly overlaps with compute (see <see cref="CudaStreamingWeightCache.PinUploadSource"/>). Defaults to <c>false</c>. Beneficial for block-swap workloads that re-upload weights across steps.</summary>
+    public bool EnablePinnedWeightUploads
+    {
+        get => _streamingCache.PinUploadSource;
+        set => _streamingCache.PinUploadSource = value;
+    }
+
     /// <summary>The cuBLAS handle for GEMM operations.</summary>
     public nint CublasHandle => _cublasHandle;
 
@@ -53,6 +63,34 @@ public sealed class CudaBackend : IBackend
         {
             _fp8Executor ??= new Fp8GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
             return _fp8Executor;
+        }
+    }
+
+    /// <summary>Opt-in flag for fusing the Linear bias add into the cuBLASLt GEMM epilogue (works on every targeted SM, including the RTX 3060). Defaults to <c>false</c> until benchmarked on hardware; when on, a Linear with bias runs as a single <c>cublasLtMatmul</c> instead of <c>cublasGemmEx</c> + a separate <c>BiasAdd</c> launch. The result is numerically equivalent to the unfused path.</summary>
+    public bool EnableEpilogueFusion { get; set; }
+
+    /// <summary>Lazily-initialized general-precision cuBLASLt GEMM executor used by the epilogue-fusion path.</summary>
+    public LtGemmExecutor LtGemm
+    {
+        get
+        {
+            _ltGemmExecutor ??= new LtGemmExecutor();
+            return _ltGemmExecutor;
+        }
+    }
+
+    /// <summary>Opt-in flag for the hand-written tensor-core HGEMM in the F16 Linear path. Defaults to <c>false</c>. The kernel is validated bit-exact against cuBLAS (<c>TensorCoreGemmTests</c>) but is the unoptimized one-warp-per-tile baseline, so it is opt-in pending a perf comparison against cuBLAS on the target GPU. Only dispatches when operands and output are F16 and dimensions are aligned (M%16, N%8, K%16 == 0); otherwise falls through to cuBLAS.</summary>
+    public bool EnableTensorCoreGemm { get; set; }
+
+    /// <summary>Lazily-initialized tensor-core HGEMM launcher. Requires PTX directory and SM 8.0+.</summary>
+    public TensorCoreGemm TensorCoreGemm
+    {
+        get
+        {
+            _tensorCoreGemm ??= new TensorCoreGemm(
+                _ptxDir ?? throw new InvalidOperationException("TensorCoreGemm requires a PTX directory; construct CudaBackend with ptxDir."),
+                _context.ComputeCapabilityMajor);
+            return _tensorCoreGemm;
         }
     }
 
@@ -71,6 +109,7 @@ public sealed class CudaBackend : IBackend
         // explicit cuEventRecord/cuStreamWaitEvent for the parts that *do* need to sync.
         _uploadStream = new CudaStream(nonBlocking: true);
         _streamingCache = new CudaStreamingWeightCache(_context, _stream.Handle, _uploadStream.Handle);
+        _ptxDir = ptxDir;
         Device = DeviceKind.Cuda(deviceOrdinal);
 
         // Initialize cuBLAS
@@ -227,38 +266,67 @@ public sealed class CudaBackend : IBackend
             int gemmType = CublasDataType(gemmDtype);
             int outputType = CublasDataType(output.DType);
 
-            // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
-            // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N]
-            CublasApi.cublasGemmEx(
-                _cublasHandle,
-                CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                N, M, K,
-                &alpha,
-                weightPtr, gemmType, K,
-                inputPtr, gemmType, K,
-                &beta,
-                pOutput, outputType, N,
-                CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
-
-            // Add bias on GPU if present (cast bias to match output dtype if needed)
+            // Bias prep shared by the fused-epilogue path and the separate-add fallback:
+            // both want one bias value per output channel N, in the output dtype.
+            ulong biasDevicePtr = 0;
             if (bias is not null)
             {
-                int totalElements = M * N;
-                ulong biasPtr = pBias;
-
+                biasDevicePtr = pBias;
                 if (output.DType != bias!.DType)
                 {
                     pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
                     CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
-                    biasPtr = pBiasCast;
+                    biasDevicePtr = pBiasCast;
                 }
+            }
 
+            // Tensor-core HGEMM path (opt-in, validation-pending): F16 operands+output,
+            // aligned dims. Produces the GEMM only; bias is added by the block below.
+            bool ltBiasFused = false;
+            if (EnableTensorCoreGemm
+                && gemmDtype == DType.F16 && output.DType == DType.F16
+                && TensorCoreGemm.IsSupported && Cuda.TensorCoreGemm.IsAligned(M, N, K))
+            {
+                TensorCoreGemm.Run(a: inputPtr, b: weightPtr, c: pOutput, m: M, n: N, k: K, alpha: alpha, stream: _stream.Handle);
+            }
+            // Fused path: fold the bias into the cuBLASLt epilogue, saving a BiasAdd launch
+            // plus an output-sized HBM round-trip. Only worthwhile when there is a bias to fuse.
+            else if (EnableEpilogueFusion && bias is not null && LtGemm.IsSupported)
+            {
+                LtGemm.Run(
+                    weight: weightPtr, input: inputPtr, outPtr: pOutput,
+                    m: M, n: N, k: K, alpha: alpha,
+                    abType: gemmType, dType: outputType,
+                    biasPtr: biasDevicePtr, epilogue: CublasLtApi.CUBLASLT_EPILOGUE_BIAS,
+                    stream: _stream.Handle);
+                ltBiasFused = true;
+            }
+            else
+            {
+                // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
+                // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N]
+                CublasApi.cublasGemmEx(
+                    _cublasHandle,
+                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                    N, M, K,
+                    &alpha,
+                    weightPtr, gemmType, K,
+                    inputPtr, gemmType, K,
+                    &beta,
+                    pOutput, outputType, N,
+                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            }
+
+            // Bias add for every GEMM path except the cuBLASLt epilogue, which already fused it.
+            if (bias is not null && !ltBiasFused)
+            {
+                int totalElements = M * N;
                 if (output.DType == DType.F16)
-                    _kernels!.LaunchBiasAddF16(pOutput, biasPtr, N, 1, totalElements, _stream.Handle);
+                    _kernels!.LaunchBiasAddF16(pOutput, biasDevicePtr, N, 1, totalElements, _stream.Handle);
                 else if (output.DType == DType.BF16)
-                    _kernels!.LaunchBiasAddBf16(pOutput, biasPtr, N, 1, totalElements, _stream.Handle);
+                    _kernels!.LaunchBiasAddBf16(pOutput, biasDevicePtr, N, 1, totalElements, _stream.Handle);
                 else
-                    _kernels!.LaunchBiasAdd(pOutput, biasPtr, N, 1, totalElements, _stream.Handle);
+                    _kernels!.LaunchBiasAdd(pOutput, biasDevicePtr, N, 1, totalElements, _stream.Handle);
             }
 
             GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
@@ -2012,12 +2080,25 @@ public sealed class CudaBackend : IBackend
             _context.EnsureCurrent();
 
             GpuTransferHelper.EvictAll();
+            _streamingCache.UnregisterPinnedSources();
             _kernels?.Dispose();
 
             if (_fp8Executor is not null)
             {
                 _fp8Executor.Dispose();
                 _fp8Executor = null;
+            }
+
+            if (_ltGemmExecutor is not null)
+            {
+                _ltGemmExecutor.Dispose();
+                _ltGemmExecutor = null;
+            }
+
+            if (_tensorCoreGemm is not null)
+            {
+                _tensorCoreGemm.Dispose();
+                _tensorCoreGemm = null;
             }
 
             if (_cublasHandle != 0)

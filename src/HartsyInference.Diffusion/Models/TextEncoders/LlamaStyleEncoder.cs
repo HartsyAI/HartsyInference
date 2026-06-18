@@ -20,6 +20,10 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     // Lazy-built by EnsureRopeTable so we only allocate a table sized to the longest prompt actually used.
     private float[]? _ropeCos;
     private float[]? _ropeSin;
+    // Gemma-3-style second rope table for LOCAL (sliding-window) layers, built from LocalRopeTheta.
+    // Null unless the config sets LocalRopeTheta > 0.
+    private float[]? _ropeCosLocal;
+    private float[]? _ropeSinLocal;
     private int _ropeBuiltForMaxLen;
 
     private int _disposed;
@@ -94,7 +98,8 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         // 3. Layer loop — each block reads `hidden`, allocates a new tensor, returns it. Old hidden disposed.
         for (int i = 0; i < _config.NumLayers; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, _ropeCos!, _ropeSin!, seqLen);
+            (float[] rcos, float[] rsin) = RopeForLayer(i);
+            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, rcos, rsin, seqLen);
             hidden.Dispose();
             hidden = next;
         }
@@ -162,7 +167,8 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
 
         for (int i = 0; i < _config.NumLayers; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, _ropeCos!, _ropeSin!, seqLen);
+            (float[] rcos, float[] rsin) = RopeForLayer(i);
+            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, rcos, rsin, seqLen);
             hidden.Dispose();
             hidden = next;
 
@@ -221,6 +227,15 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
                 Buffer.MemoryCopy(embedPtr + src, outPtr + dst, H * sizeof(float), H * sizeof(float));
             }
         }
+
+        // Gemma-family "normalizer": scale embeddings by sqrt(HiddenSize). No-op for Llama/Qwen/Mistral
+        // (EmbeddingScale defaults to 1.0).
+        if (_config.EmbeddingScale != 1.0f)
+        {
+            float scale = _config.EmbeddingScale;
+            long total = (long)batch * seqLen * H;
+            for (long i = 0; i < total; i++) outPtr[i] *= scale;
+        }
         return output;
     }
 
@@ -253,21 +268,45 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         while (rounded < targetLen) rounded <<= 1;
         targetLen = Math.Min(rounded, _config.MaxPositionEmbeddings);
 
-        _ropeCos = new float[targetLen * halfDim];
-        _ropeSin = new float[targetLen * halfDim];
+        (_ropeCos, _ropeSin) = BuildRopeTable(targetLen, halfDim, _config.RopeTheta);
+        // Gemma 3 interleaves LOCAL (sliding) layers that use a smaller rope base frequency than the
+        // GLOBAL/full layers. Build the second table only when the config asks for it.
+        if (_config.LocalRopeTheta > 0f)
+            (_ropeCosLocal, _ropeSinLocal) = BuildRopeTable(targetLen, halfDim, _config.LocalRopeTheta);
 
-        // freqs[k] = 1 / theta^(2k / headDim), k in [0, halfDim)
+        _ropeBuiltForMaxLen = targetLen;
+    }
+
+    /// <summary>Precomputes a RoPE cos/sin table for a given base frequency. freqs[k] = 1 / theta^(2k/headDim).</summary>
+    private (float[] Cos, float[] Sin) BuildRopeTable(int targetLen, int halfDim, float theta)
+    {
+        float[] cos = new float[targetLen * halfDim];
+        float[] sin = new float[targetLen * halfDim];
         for (int p = 0; p < targetLen; p++)
         {
             for (int k = 0; k < halfDim; k++)
             {
-                double freq = 1.0 / Math.Pow(_config.RopeTheta, (double)(2 * k) / _config.HeadDim);
+                double freq = 1.0 / Math.Pow(theta, (double)(2 * k) / _config.HeadDim);
                 double angle = p * freq;
-                _ropeCos[p * halfDim + k] = (float)Math.Cos(angle);
-                _ropeSin[p * halfDim + k] = (float)Math.Sin(angle);
+                cos[p * halfDim + k] = (float)Math.Cos(angle);
+                sin[p * halfDim + k] = (float)Math.Sin(angle);
             }
         }
-        _ropeBuiltForMaxLen = targetLen;
+        return (cos, sin);
+    }
+
+    /// <summary>Selects the rope table for layer <paramref name="layerIndex"/>: the LOCAL table for
+    /// non-"full" layers when a local table exists (Gemma 3), else the global table. When
+    /// <see cref="LlamaStyleEncoderConfig.LayerAttentionTypes"/> is unset, every layer uses the global table.</summary>
+    private (float[] Cos, float[] Sin) RopeForLayer(int layerIndex)
+    {
+        if (_ropeCosLocal is not null
+            && _config.LayerAttentionTypes is { } types && layerIndex < types.Length
+            && !string.Equals(types[layerIndex], "full", StringComparison.Ordinal))
+        {
+            return (_ropeCosLocal, _ropeSinLocal!);
+        }
+        return (_ropeCos!, _ropeSin!);
     }
 
     private static Tensor CastToF32IfNeeded(Tensor t) =>
@@ -375,6 +414,13 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             {
                 _qHeadNorm = CastToF32IfNeeded(weights[$"{prefix}.self_attn.q_norm.weight"]);
                 _kHeadNorm = CastToF32IfNeeded(weights[$"{prefix}.self_attn.k_norm.weight"]);
+                // Gemma 3's per-head q/k norms are Gemma RMSNorms (scale stored as offset from 1). Qwen3
+                // (RmsNormScalePlusOne=false) stores them directly, so this only fires for the Gemma path.
+                if (_config.RmsNormScalePlusOne)
+                {
+                    AddOneInPlace(_qHeadNorm);
+                    AddOneInPlace(_kHeadNorm);
+                }
             }
 
             _gateProj = weights[$"{prefix}.mlp.gate_proj.weight"];

@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
@@ -16,12 +17,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 {
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly QwenImageTransformer _transformer;
-    private readonly VaeDecoder _vaeDecoder;
+    private readonly QwenImageVaeDecoder _vaeDecoder;
     private readonly QwenImageConfig _config;
 
     /// <summary>Creates a Qwen-Image pipeline. Caller is responsible for the lifetime of the components — they may be reused across pipelines.</summary>
     public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
-        QwenImageTransformer transformer, VaeDecoder vaeDecoder, QwenImageConfig config)
+        QwenImageTransformer transformer, QwenImageVaeDecoder vaeDecoder, QwenImageConfig config)
         : base(backend)
     {
         _textEncoder = textEncoder;
@@ -161,16 +162,17 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         Tensor unpacked = UnpackLatent(packedLatent, latentH, latentW, _config.InChannels, _config.PatchSize);
         packedLatent.Dispose();
 
-        VaeConfig vaeConfig = VaeConfig.QwenImage;
-        Tensor scaled2 = new Tensor(unpacked.Shape, DType.F32);
-        ApplyVaeShiftScale(scaled2, unpacked, vaeConfig.ShiftFactor ?? 0.0f, vaeConfig.ScalingFactor);
-        unpacked.Dispose();
-
+        // The QwenImage VAE is the WAN-2.1-family 3D causal autoencoder (decoder.conv1/upsamples/…), NOT a
+        // diffusers AutoencoderKL — it must decode through QwenImageVaeDecoder (same as AnimaPipeline). The
+        // per-channel latent un-normalization (latents_mean/std from VaeConfig.QwenImage) happens INSIDE
+        // QwenImageVaeDecoder.Decode → UndoScaling, so we pass the unpacked latent directly (no scalar
+        // shift/scale here — VaeConfig.QwenImage's scale=1/shift=0 made the old ApplyVaeShiftScale a no-op
+        // anyway, and it skipped the real per-channel step).
         Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
-        Logs.Info("Decoding latents to image (tiled F32 path)...");
+        Logs.Info("Decoding latents to image (QwenImage 3D-causal VAE)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, scaled2);
-        scaled2.Dispose();
+        Tensor image = _vaeDecoder.Decode(Backend, unpacked);
+        unpacked.Dispose();
         vaeSw.Stop();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 

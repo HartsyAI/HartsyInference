@@ -75,6 +75,9 @@ internal static partial class CublasLtApi
 
     internal const int CUBLASLT_MATMUL_DESC_TRANSA = 3;
     internal const int CUBLASLT_MATMUL_DESC_TRANSB = 4;
+    internal const int CUBLASLT_MATMUL_DESC_EPILOGUE = 7;
+    internal const int CUBLASLT_MATMUL_DESC_BIAS_POINTER = 8;
+    internal const int CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE = 32;
     internal const int CUBLASLT_MATMUL_DESC_A_SCALE_POINTER = 17;
     internal const int CUBLASLT_MATMUL_DESC_B_SCALE_POINTER = 18;
     internal const int CUBLASLT_MATMUL_DESC_C_SCALE_POINTER = 19;
@@ -89,7 +92,21 @@ internal static partial class CublasLtApi
 
     // ── Preference Attributes ───────────────────────────────────────────
 
-    internal const int CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 0;
+    internal const int CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES = 1;
+
+    // ── Epilogue values (cublasLtEpilogue_t) ────────────────────────────
+    // Fuse bias and/or activation into the GEMM epilogue, removing a separate
+    // elementwise kernel launch plus an activation-sized HBM round-trip per GEMM.
+    // BIAS is bit-equivalent to a separate per-output-channel bias add; RELU/GELU
+    // are the cuBLASLt fused activations (GELU is the erf-exact form), only safe to
+    // request when they match the model's activation.
+
+    internal const int CUBLASLT_EPILOGUE_DEFAULT = 1;
+    internal const int CUBLASLT_EPILOGUE_RELU = 2;
+    internal const int CUBLASLT_EPILOGUE_BIAS = 4;
+    internal const int CUBLASLT_EPILOGUE_RELU_BIAS = 6;
+    internal const int CUBLASLT_EPILOGUE_GELU = 32;
+    internal const int CUBLASLT_EPILOGUE_GELU_BIAS = 36;
 
     // ── Default workspace size (cuBLASLt recommends 32 MiB on Hopper, 4 MiB on Ada) ───────
 

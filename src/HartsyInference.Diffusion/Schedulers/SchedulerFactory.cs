@@ -13,6 +13,7 @@ public static class SchedulerFactory
         "ddim" => new DdimScheduler(),
         "dpm++2m" or "dpmpp2m" => new DpmPlusPlus2MScheduler(),
         "lcm" => new LcmScheduler(),
+        "tcd" => new TcdScheduler(),
         _ => new EulerDiscreteScheduler(),
     };
 }

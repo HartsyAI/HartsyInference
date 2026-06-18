@@ -1,0 +1,225 @@
+// HartsyInference tensor-core HGEMM - mma.sync.m16n8k16, FP32 accumulate, F16 in/out.
+//
+// VALIDATED: TensorCoreGemmTests confirms this is bit-exact against cuBLAS HGEMM on
+// SM 8.6 (RTX 3060) across 16x8x16, 64x64x64, 128x320x64 (avg_err = max_err = 0).
+// This is the simple one-warp-per-tile baseline (no shared-memory tiling, ldmatrix,
+// or cp.async pipelining yet), so it exercises the tensor cores correctly but is not
+// yet bandwidth-optimal; those optimizations layer onto this verified fragment layout.
+//
+// Computes  C[M,N] = alpha * A[M,K] * B^T  where B is stored row-major [N,K] (the
+// Linear weight), i.e. C[m,n] = alpha * sum_k A[m,k] * B[n,k]. This matches
+// CudaBackend.Linear's CUBLAS_OP_T weight convention.
+//
+// Requires M%16==0, N%8==0, K%16==0 (no bounds checks - the launcher guarantees this
+// or falls back to cuBLAS). One warp (32 threads) computes one 16x8 output tile.
+// Grid: x = N/8, y = M/16, block = 32.
+
+.version 7.0
+.target sm_80
+.address_size 64
+
+.visible .entry hgemm_mma_sm80(
+    .param .u64 p_A,       // f16 [M,K] row-major
+    .param .u64 p_B,       // f16 [N,K] row-major (weight)
+    .param .u64 p_C,       // f16 [M,N] row-major (output)
+    .param .u32 p_M,
+    .param .u32 p_N,
+    .param .u32 p_K,
+    .param .f32 p_alpha
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %h<32>;
+    .reg .b32   %r<64>;
+    .reg .f32   %f<16>;
+    .reg .b64   %rd<48>;
+
+    ld.param.u64 %rd1, [p_A];
+    ld.param.u64 %rd2, [p_B];
+    ld.param.u64 %rd3, [p_C];
+    ld.param.u32 %r1, [p_M];
+    ld.param.u32 %r2, [p_N];
+    ld.param.u32 %r3, [p_K];
+    ld.param.f32 %f15, [p_alpha];
+
+    // lane = %laneid; gid = lane>>2; tid = lane&3
+    mov.u32 %r4, %laneid;
+    shr.u32 %r5, %r4, 2;        // gid (0..7)
+    and.b32 %r6, %r4, 3;        // tid (0..3)
+
+    // tileRow = ctaid.y*16 ; tileCol = ctaid.x*8
+    mov.u32 %r7, %ctaid.y;
+    mul.lo.u32 %r8, %r7, 16;    // tileRow
+    mov.u32 %r9, %ctaid.x;
+    mul.lo.u32 %r10, %r9, 8;    // tileCol
+
+    // tid2 = tid*2
+    mul.lo.u32 %r11, %r6, 2;
+
+    // Accumulators c0..c3 = 0
+    mov.f32 %f1, 0f00000000;
+    mov.f32 %f2, 0f00000000;
+    mov.f32 %f3, 0f00000000;
+    mov.f32 %f4, 0f00000000;
+
+    // n for this lane's B column = tileCol + gid
+    add.u32 %r12, %r10, %r5;    // nB
+
+    // K loop: kBase = 0; step 16
+    mov.u32 %r13, 0;            // kBase
+
+LOOP_K:
+    setp.ge.u32 %p1, %r13, %r3;
+    @%p1 bra END_K;
+
+    // ---- Load A fragment (8 halves -> 4 regs) ----
+    // rows: rA_lo = tileRow+gid ; rA_hi = tileRow+gid+8
+    add.u32 %r14, %r8, %r5;     // rA_lo
+    add.u32 %r15, %r14, 8;      // rA_hi
+    // cols: cA0 = kBase+tid2 ; cA1 = +1 ; cA8 = +8 ; cA9 = +9
+    add.u32 %r16, %r13, %r11;   // cA0
+    add.u32 %r17, %r16, 1;      // cA1
+    add.u32 %r18, %r16, 8;      // cA8
+    add.u32 %r19, %r16, 9;      // cA9
+
+    // A[m,k] byte addr = base + (m*K + k)*2
+    // a0=(rA_lo,cA0) a1=(rA_lo,cA1) a2=(rA_hi,cA0) a3=(rA_hi,cA1)
+    // a4=(rA_lo,cA8) a5=(rA_lo,cA9) a6=(rA_hi,cA8) a7=(rA_hi,cA9)
+    mul.lo.u32 %r20, %r14, %r3; // rA_lo*K
+    mul.lo.u32 %r21, %r15, %r3; // rA_hi*K
+
+    // a0
+    add.u32 %r22, %r20, %r16;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h1, [%rd11];
+    // a1
+    add.u32 %r22, %r20, %r17;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h2, [%rd11];
+    // a2
+    add.u32 %r22, %r21, %r16;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h3, [%rd11];
+    // a3
+    add.u32 %r22, %r21, %r17;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h4, [%rd11];
+    // a4
+    add.u32 %r22, %r20, %r18;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h5, [%rd11];
+    // a5
+    add.u32 %r22, %r20, %r19;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h6, [%rd11];
+    // a6
+    add.u32 %r22, %r21, %r18;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h7, [%rd11];
+    // a7
+    add.u32 %r22, %r21, %r19;
+    mul.wide.u32 %rd10, %r22, 2;
+    add.s64 %rd11, %rd1, %rd10;
+    ld.global.b16 %h8, [%rd11];
+
+    // Pack A regs: ra0={a0,a1} ra1={a2,a3} ra2={a4,a5} ra3={a6,a7}
+    mov.b32 %r30, {%h1, %h2};
+    mov.b32 %r31, {%h3, %h4};
+    mov.b32 %r32, {%h5, %h6};
+    mov.b32 %r33, {%h7, %h8};
+
+    // ---- Load B fragment (4 halves -> 2 regs) ----
+    // B[n,k] byte addr = base + (n*K + k)*2 ; n = nB (tileCol+gid)
+    // rows(k): kB0=kBase+tid2 ; kB1=+1 ; kB8=+8 ; kB9=+9
+    add.u32 %r40, %r13, %r11;   // kB0
+    add.u32 %r41, %r40, 1;      // kB1
+    add.u32 %r42, %r40, 8;      // kB8
+    add.u32 %r43, %r40, 9;      // kB9
+    mul.lo.u32 %r44, %r12, %r3; // nB*K
+
+    // b0
+    add.u32 %r45, %r44, %r40;
+    mul.wide.u32 %rd10, %r45, 2;
+    add.s64 %rd11, %rd2, %rd10;
+    ld.global.b16 %h11, [%rd11];
+    // b1
+    add.u32 %r45, %r44, %r41;
+    mul.wide.u32 %rd10, %r45, 2;
+    add.s64 %rd11, %rd2, %rd10;
+    ld.global.b16 %h12, [%rd11];
+    // b2
+    add.u32 %r45, %r44, %r42;
+    mul.wide.u32 %rd10, %r45, 2;
+    add.s64 %rd11, %rd2, %rd10;
+    ld.global.b16 %h13, [%rd11];
+    // b3
+    add.u32 %r45, %r44, %r43;
+    mul.wide.u32 %rd10, %r45, 2;
+    add.s64 %rd11, %rd2, %rd10;
+    ld.global.b16 %h14, [%rd11];
+
+    mov.b32 %r34, {%h11, %h12};  // rb0
+    mov.b32 %r35, {%h13, %h14};  // rb1
+
+    // ---- MMA accumulate ----
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
+        {%f1, %f2, %f3, %f4},
+        {%r30, %r31, %r32, %r33},
+        {%r34, %r35},
+        {%f1, %f2, %f3, %f4};
+
+    add.u32 %r13, %r13, 16;
+    bra LOOP_K;
+
+END_K:
+    // ---- Apply alpha, convert to f16, store ----
+    // c0=(tileRow+gid, tileCol+tid2) c1=(..,+1)
+    // c2=(tileRow+gid+8, tileCol+tid2) c3=(..,+1)
+    mul.f32 %f1, %f1, %f15;
+    mul.f32 %f2, %f2, %f15;
+    mul.f32 %f3, %f3, %f15;
+    mul.f32 %f4, %f4, %f15;
+    cvt.rn.f16.f32 %h20, %f1;
+    cvt.rn.f16.f32 %h21, %f2;
+    cvt.rn.f16.f32 %h22, %f3;
+    cvt.rn.f16.f32 %h23, %f4;
+
+    add.u32 %r50, %r8, %r5;     // mC_lo = tileRow+gid
+    add.u32 %r51, %r50, 8;      // mC_hi
+    add.u32 %r52, %r10, %r11;   // nC0 = tileCol+tid2
+    add.u32 %r53, %r52, 1;      // nC1
+
+    // C[m,n] byte addr = base + (m*N + n)*2
+    mul.lo.u32 %r54, %r50, %r2; // mC_lo*N
+    mul.lo.u32 %r55, %r51, %r2; // mC_hi*N
+
+    // c0 -> (mC_lo, nC0)
+    add.u32 %r56, %r54, %r52;
+    mul.wide.u32 %rd20, %r56, 2;
+    add.s64 %rd21, %rd3, %rd20;
+    st.global.b16 [%rd21], %h20;
+    // c1 -> (mC_lo, nC1)
+    add.u32 %r56, %r54, %r53;
+    mul.wide.u32 %rd20, %r56, 2;
+    add.s64 %rd21, %rd3, %rd20;
+    st.global.b16 [%rd21], %h21;
+    // c2 -> (mC_hi, nC0)
+    add.u32 %r56, %r55, %r52;
+    mul.wide.u32 %rd20, %r56, 2;
+    add.s64 %rd21, %rd3, %rd20;
+    st.global.b16 [%rd21], %h22;
+    // c3 -> (mC_hi, nC1)
+    add.u32 %r56, %r55, %r53;
+    mul.wide.u32 %rd20, %r56, 2;
+    add.s64 %rd21, %rd3, %rd20;
+    st.global.b16 [%rd21], %h23;
+
+    ret;
+}

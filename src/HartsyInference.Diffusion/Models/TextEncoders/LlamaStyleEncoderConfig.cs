@@ -30,6 +30,13 @@ public sealed record LlamaStyleEncoderConfig
     /// <summary>RoPE base frequency (theta). Qwen3 uses 1,000,000; original Llama uses 10,000.</summary>
     public float RopeTheta { get; init; } = 1_000_000f;
 
+    /// <summary>RoPE base frequency for LOCAL (sliding-window) layers — the layers marked non-"full" in
+    /// <see cref="LayerAttentionTypes"/>. 0 = disabled (every layer uses <see cref="RopeTheta"/>). Gemma 3
+    /// uses 10000 for local layers and <see cref="RopeTheta"/> (1e6) for global/full layers; earlier Gemma/
+    /// Llama families use a single theta and leave this 0. NOTE: applying this requires the dual-rope-table
+    /// path in the encoder forward (Phase 1b) — setting it alone does nothing until that lands.</summary>
+    public float LocalRopeTheta { get; init; } = 0f;
+
     /// <summary>Maximum sequence length the RoPE table is precomputed for. Acts as a cap on prompt length.</summary>
     public int MaxPositionEmbeddings { get; init; } = 8192;
 
@@ -72,6 +79,12 @@ public sealed record LlamaStyleEncoderConfig
     /// <c>post_feedforward_layernorm</c> after the FFN. Result: 4 norms per block instead of 2.
     /// Llama / Qwen use 2 norms.</summary>
     public bool HasFfnSandwichNorms { get; init; } = false;
+
+    /// <summary>Multiplier applied to token embeddings right after lookup (the Gemma "normalizer").
+    /// Gemma-family models scale embeddings by sqrt(HiddenSize); Llama/Qwen/Mistral leave this 1.0.
+    /// (HF computes <c>sqrt(hidden)</c> in the activation dtype, so bf16 rounding can shift it slightly —
+    /// a parity-test detail, not a structural one.)</summary>
+    public float EmbeddingScale { get; init; } = 1.0f;
 
     // ────────────────────────────────────────────────────────────────────
     // GPT-OSS additions (MoE FFN, attention sinks, sliding window per-layer,
@@ -379,9 +392,60 @@ public sealed record LlamaStyleEncoderConfig
         Activation = MlpActivation.GeluTanh,
         RmsNormScalePlusOne = true,
         HasFfnSandwichNorms = true,
+        EmbeddingScale = 48f, // sqrt(2304) — Gemma normalizer (was previously missing here)
         EosTokenId = 1,
         BosTokenId = 2,
     };
+
+    /// <summary>Gemma 3 12B (text tower) — LTX-2's conditioning text encoder, and the Gemma-3 path that a
+    /// future Lumina-class wiring would reuse. Verified against <c>google/gemma-3-12b</c> config
+    /// (<c>text_config</c>): 48 layers, hidden=3840, GQA 16:8, head_dim=256, intermediate=15360,
+    /// vocab=262208, rms_eps=1e-6. Gemma specifics: GeGLU (tanh-GELU), RMSNorm stored as (1+w), pre+post
+    /// sandwich norms, per-head QK-norm (new in Gemma 3), embeddings ×sqrt(hidden). Attention interleaves
+    /// LOCAL (sliding-1024, rope θ=1e4) and GLOBAL (rope θ=1e6) layers, 5 local : 1 global (every 6th layer
+    /// full) — see <see cref="LayerAttentionTypes"/> + <see cref="LocalRopeTheta"/>. attn_logit_softcapping
+    /// is null in Gemma 3 (removed vs Gemma 2).
+    ///
+    /// <para>PARITY STATUS: the dual local/global rope theta + per-head QK-norm (+1) require the encoder
+    /// forward's per-layer rope path (Phase 1b) — until that lands this preset runs every layer at θ=1e6,
+    /// which is NOT Gemma-3-correct. Sliding-window masking is approximated as full attention (only affects
+    /// &gt;1024-token prompts).</para></summary>
+    public static LlamaStyleEncoderConfig Gemma3_12B => new()
+    {
+        HiddenSize = 3840,
+        NumLayers = 48,
+        NumQueryHeads = 16,
+        NumKvHeads = 8,
+        HeadDim = 256,
+        IntermediateSize = 15360,
+        VocabSize = 262208,
+        RmsNormEps = 1e-6f,
+        RopeTheta = 1_000_000f,
+        LocalRopeTheta = 10_000f,
+        MaxPositionEmbeddings = 131072,
+        QkHeadNorm = true,
+        AttentionBias = false,
+        HasFinalNorm = true,
+        Activation = MlpActivation.GeluTanh,
+        RmsNormScalePlusOne = true,
+        HasFfnSandwichNorms = true,
+        EmbeddingScale = 61.96773f, // sqrt(3840)
+        SlidingWindow = 1024,
+        LayerAttentionTypes = Gemma3LayerTypes(48),
+        EosTokenId = 1,
+        BosTokenId = 2,
+    };
+
+    /// <summary>Builds Gemma 3's interleaved attention-type pattern: every <paramref name="pattern"/>-th
+    /// layer (1-indexed) is "full" (global), the rest "sliding" (local). Gemma 3 uses pattern=6 (5 local :
+    /// 1 global). Consumed by the encoder's per-layer rope/window selection.</summary>
+    private static string[] Gemma3LayerTypes(int numLayers, int pattern = 6)
+    {
+        string[] types = new string[numLayers];
+        for (int i = 0; i < numLayers; i++)
+            types[i] = (i + 1) % pattern == 0 ? "full" : "sliding";
+        return types;
+    }
 
     /// <summary>GPT-OSS preset (<c>openai/gpt-oss-20b</c>, re-published in <c>microsoft/Lens/text_encoder/</c>).
     /// 24 layers, hidden=2880, GQA 64:8, head_dim=64 (Q proj output = 4096 ≠ hidden=2880), intermediate=2880

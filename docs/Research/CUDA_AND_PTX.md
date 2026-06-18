@@ -731,10 +731,11 @@ ld.global.v4.b32 {%r0, %r1, %r2, %r3}, [%rd_ptr];
 
 - [ ] LibraryImport source-gen with ulong CUdeviceptr edge cases
 - [ ] CUmodule caching strategy (cache and reuse expected best practice)
-- [ ] Whether `cp.async` (Ampere) provides measurable benefit over explicit ld.global + st.shared for our tile sizes
-- [ ] Optimal number of pipeline stages (double-buffering vs triple-buffering) for shared memory tiles in the Conv2D GEMM loop
+- [ ] Whether `cp.async` (Ampere) provides measurable benefit over explicit ld.global + st.shared for our tile sizes — research: yes for tensor-core GEMM/FA2 pipelines (it is the standard multistage pattern, N=3 optimal at large tiles); see [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §1
+- [ ] Optimal number of pipeline stages (double-buffering vs triple-buffering) for shared memory tiles in the Conv2D GEMM loop — research: 3-stage optimal for the SGEMM/FA2 mainloop on Ada/Ampere; [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §1-2
 - [ ] Whether to ship separate `.ptx` files per target (sm_80, sm_86, sm_89) or use a single sm_80 target with runtime JIT (sacrificing Ada 2x FP32)
-- [ ] Tensor Core (WMMA / MMA) instructions in PTX for the implicit GEMM — massive speedup but significant complexity
+- [ ] Tensor Core (WMMA / MMA) instructions in PTX for the implicit GEMM — massive speedup but significant complexity. Research answer: use `mma.sync.aligned.m16n8k16` (not `wmma`) + `ldmatrix` + XOR-swizzled SMEM; reaches >=95% of cuBLAS by hand. Full layout/fragment math and copyable references in [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §1
+- [ ] Native FA2 in PTX for non-causal diffusion attention (single kernel over `seqlen_q/seqlen_kv/head_dim`); see [`DEEP_KERNEL_OPTIMIZATION.md`](DEEP_KERNEL_OPTIMIZATION.md) §2 and [`FLASH_ATTENTION.md`](FLASH_ATTENTION.md)
 
 ---
 

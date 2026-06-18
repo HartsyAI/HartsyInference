@@ -37,6 +37,9 @@ public static unsafe class CfgHelper
         return slice;
     }
 
+    /// <summary>Whether classifier-free guidance has any effect at this scale. At <c>scale ≤ 1</c> the combine reduces to the conditional output (<c>uncond + 1·(cond − uncond) = cond</c>), so the unconditional forward pass is wasted work. Guidance-distilled checkpoints (Flux-dev, SDXL-Turbo, LCM/TCD) run at scale 0-1; gating the uncond pass on this halves per-step compute and activation memory for them. A small epsilon avoids running a pass that contributes nothing at scale ≈ 1.</summary>
+    public static bool IsGuidanceActive(float scale) => scale > 1.0f + 1e-4f;
+
     /// <summary>Applies classifier-free guidance: <c>output = uncond + scale * (cond - uncond)</c>. Both inputs must be F32 and have identical shape; output is allocated F32 with that same shape. The inputs are NOT disposed — caller owns the lifetime.</summary>
     public static Tensor ApplyCfg(Tensor uncond, Tensor cond, float scale)
     {

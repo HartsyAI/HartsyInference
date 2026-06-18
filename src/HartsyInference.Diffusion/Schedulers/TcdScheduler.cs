@@ -4,12 +4,9 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Schedulers;
 
-/// <summary>Latent Consistency Model (LCM) scheduler. Enables 1-4 step inference by treating the diffusion process as a consistency mapping rather than iterative denoising. Compatible with LCM-LoRA fine-tuned models and Hyper-SD distilled models. Uses DDPM-style noise schedule with configurable original inference steps.</summary>
-public sealed unsafe class LcmScheduler : IScheduler
+/// <summary>Trajectory Consistency Distillation (TCD) scheduler. Like <see cref="LcmScheduler"/> it uses the consistency boundary mapping, but instead of re-noising fully to the next timestep it jumps to an intermediate state <c>s = floor((1-eta)·t_prev)</c> controlled by <see cref="Eta"/>, then optionally adds stochasticity. <c>Eta=0</c> is deterministic (DDIM-like on the consistency estimate); <c>Eta=1</c> reduces to LCM full re-noise. The tunable fraction is why TCD holds quality across 4-50 steps where LCM degrades past ~8. Compatible with TCD-LoRA and the same distilled checkpoints LCM-LoRA targets.</summary>
+public sealed unsafe class TcdScheduler : IScheduler
 {
-    // LCM boundary-condition constants (diffusers LCMScheduler defaults). sigma_data
-    // fixes the consistency-function skip/out scaling; timestep_scaling maps the
-    // discrete timestep into the continuous boundary formula.
     private const float SigmaData = 0.5f;
     private const float TimestepScaling = 10.0f;
 
@@ -21,11 +18,14 @@ public sealed unsafe class LcmScheduler : IScheduler
     private float[] _alphasCumprod = [];
     private int _numInferenceSteps;
 
-    /// <summary>Seed for the per-step noise re-injection. Set to the generation seed before sampling for reproducibility; each step derives a distinct deterministic stream from it.</summary>
+    /// <summary>Stochasticity parameter (gamma) in [0, 1]. 0 = deterministic, 1 = LCM-equivalent full re-noise. The TCD paper's default sweet spot is ~0.3.</summary>
+    public float Eta { get; set; } = 0.3f;
+
+    /// <summary>Seed for per-step noise; set to the generation seed for reproducibility.</summary>
     public int Seed { get; set; }
 
     /// <summary>Name of this scheduler.</summary>
-    public string Name => "lcm";
+    public string Name => "tcd";
 
     /// <summary>Number of configured inference steps.</summary>
     public int NumInferenceSteps => _numInferenceSteps;
@@ -33,81 +33,77 @@ public sealed unsafe class LcmScheduler : IScheduler
     /// <summary>The computed timestep schedule.</summary>
     public ReadOnlySpan<float> Timesteps => _timesteps;
 
-    /// <summary>Initial noise sigma (always 1.0 for LCM).</summary>
+    /// <summary>Initial noise sigma (always 1.0 for TCD).</summary>
     public float InitialNoiseSigma => 1.0f;
 
-    /// <summary>Creates an LCM scheduler.</summary>
+    /// <summary>Creates a TCD scheduler.</summary>
     /// <param name="numTrainTimesteps">Total timesteps in the training schedule (typically 1000).</param>
     /// <param name="betaStart">Starting beta value (0.00085 for SD).</param>
     /// <param name="betaEnd">Ending beta value (0.012 for SD).</param>
-    /// <param name="originalInferenceSteps">Original inference steps the LCM was distilled from (typically 50).</param>
-    public LcmScheduler(int numTrainTimesteps = 1000, float betaStart = 0.00085f, float betaEnd = 0.012f,
+    /// <param name="originalInferenceSteps">Original inference steps the model was distilled from (typically 50).</param>
+    public TcdScheduler(int numTrainTimesteps = 1000, float betaStart = 0.00085f, float betaEnd = 0.012f,
         int originalInferenceSteps = 50)
     {
         _numTrainTimesteps = numTrainTimesteps;
         _betaStart = betaStart;
         _betaEnd = betaEnd;
         _originalInferenceSteps = originalInferenceSteps;
-
         ComputeAlphasCumprod();
     }
 
-    /// <summary>Sets the timestep schedule for the given number of inference steps (typically 1-4 for LCM).</summary>
+    /// <summary>Sets the timestep schedule (descending) for the given number of inference steps, selecting a subset of the distilled origin schedule.</summary>
     public void SetTimesteps(int numInferenceSteps)
     {
         _numInferenceSteps = numInferenceSteps;
-
-        // LCM uses a subset of the original training schedule
-        // Evenly-spaced timesteps from the original schedule
         int stepRatio = _numTrainTimesteps / _originalInferenceSteps;
-        float[] lcmOriginTimesteps = new float[_originalInferenceSteps];
+        float[] originTimesteps = new float[_originalInferenceSteps];
         for (int i = 0; i < _originalInferenceSteps; i++)
         {
-            lcmOriginTimesteps[i] = (float)((i + 1) * stepRatio - 1);
+            originTimesteps[i] = (i + 1) * stepRatio - 1;
         }
 
-        // Select the subset of timesteps for the desired inference steps
         _timesteps = new float[numInferenceSteps];
         float skippingStep = (float)_originalInferenceSteps / numInferenceSteps;
         for (int i = 0; i < numInferenceSteps; i++)
         {
             int idx = Math.Min((int)(skippingStep * (i + 1)) - 1, _originalInferenceSteps - 1);
-            _timesteps[numInferenceSteps - 1 - i] = lcmOriginTimesteps[idx];
+            _timesteps[numInferenceSteps - 1 - i] = originTimesteps[idx];
         }
     }
 
-    /// <summary>Performs one LCM step. The model predicts epsilon; LCM recovers x0, applies the consistency boundary scaling, then for every step except the last re-noises to the next (less noisy) level with fresh Gaussian noise. The final step returns the clean estimate directly.</summary>
-    public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
+    /// <summary>Performs one TCD step. Recovers x0 from the epsilon prediction, applies the consistency boundary scaling, jumps to the intermediate state s, then for non-final steps with Eta &gt; 0 adds stochasticity toward the next timestep.</summary>
+    public void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {
         int timestep = (int)_timesteps[stepIndex];
         bool isLast = stepIndex + 1 >= _numInferenceSteps;
+        int prevTimestep = isLast ? 0 : (int)_timesteps[stepIndex + 1];
+
+        // Intermediate state s controlled by Eta: floor((1-eta)·t_prev).
+        int timestepS = (int)MathF.Floor((1.0f - Eta) * prevTimestep);
 
         float alphaProdT = _alphasCumprod[timestep];
+        float alphaProdTPrev = _alphasCumprod[prevTimestep];
+        float alphaProdS = _alphasCumprod[timestepS];
         float betaProdT = 1.0f - alphaProdT;
+        float betaProdS = 1.0f - alphaProdS;
+
         float sqrtAlphaProdT = MathF.Sqrt(alphaProdT);
         float sqrtBetaProdT = MathF.Sqrt(betaProdT);
+        float sqrtAlphaProdS = MathF.Sqrt(alphaProdS);
+        float sqrtBetaProdS = MathF.Sqrt(betaProdS);
 
-        // Consistency-function boundary scalings: denoised = c_out·x0 + c_skip·sample.
         float scaledTimestep = timestep * TimestepScaling;
         float denom = scaledTimestep * scaledTimestep + SigmaData * SigmaData;
         float cSkip = (SigmaData * SigmaData) / denom;
         float cOut = scaledTimestep / MathF.Sqrt(denom);
 
-        // Re-noise coefficients for the next (less noisy) timestep, if any.
-        float sqrtAlphaProdTPrev = 1.0f;
-        float sqrtBetaProdTPrev = 0.0f;
-        if (!isLast)
-        {
-            int prevTimestep = (int)_timesteps[stepIndex + 1];
-            float alphaProdTPrev = _alphasCumprod[prevTimestep];
-            sqrtAlphaProdTPrev = MathF.Sqrt(alphaProdTPrev);
-            sqrtBetaProdTPrev = MathF.Sqrt(1.0f - alphaProdTPrev);
-        }
+        // Stochastic re-noise from s to t_prev (only when Eta > 0 and not the last step).
+        bool stochastic = Eta > 0.0f && !isLast;
+        float renoiseSignal = stochastic ? MathF.Sqrt(alphaProdTPrev / alphaProdS) : 0.0f;
+        float renoiseNoise = stochastic ? MathF.Sqrt(1.0f - alphaProdTPrev / alphaProdS) : 0.0f;
 
         int count = (int)sample.ElementCount;
-        // Fresh Gaussian noise for re-injection. Derive a distinct deterministic stream
-        // per step so reruns with the same Seed are bit-reproducible.
-        Tensor? noise = isLast ? null : SeedGenerator.CreateNoise(sample.Shape, unchecked(Seed * 9973 + stepIndex + 1));
+        Tensor? noise = stochastic ? SeedGenerator.CreateNoise(sample.Shape, unchecked(Seed * 9973 + stepIndex + 1)) : null;
         try
         {
             float* modelPtr = (float*)modelOutput.DataPointer;
@@ -117,11 +113,13 @@ public sealed unsafe class LcmScheduler : IScheduler
 
             for (int i = 0; i < count; i++)
             {
-                float predX0 = (samplePtr[i] - sqrtBetaProdT * modelPtr[i]) / sqrtAlphaProdT;
+                float eps = modelPtr[i];
+                float predX0 = (samplePtr[i] - sqrtBetaProdT * eps) / sqrtAlphaProdT;
                 float denoised = cOut * predX0 + cSkip * samplePtr[i];
+                float predNoisedS = sqrtAlphaProdS * denoised + sqrtBetaProdS * eps;
                 outPtr[i] = noisePtr is null
-                    ? denoised
-                    : sqrtAlphaProdTPrev * denoised + sqrtBetaProdTPrev * noisePtr[i];
+                    ? predNoisedS
+                    : renoiseSignal * predNoisedS + renoiseNoise * noisePtr[i];
             }
         }
         finally
@@ -130,8 +128,8 @@ public sealed unsafe class LcmScheduler : IScheduler
         }
     }
 
-    /// <summary>Adds noise to a clean sample (forward diffusion) for img2img starts: <c>noisy = sqrt(alpha_t)·sample + sqrt(1-alpha_t)·noise</c>.</summary>
-    public unsafe void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
+    /// <summary>Adds noise to a clean sample (forward diffusion) for img2img starts.</summary>
+    public void AddNoise(Tensor output, Tensor sample, Tensor noise, int stepIndex)
     {
         int timestep = (int)_timesteps[stepIndex];
         float sqrtAlphaCumprod = MathF.Sqrt(_alphasCumprod[timestep]);
@@ -152,15 +150,12 @@ public sealed unsafe class LcmScheduler : IScheduler
     {
         _alphasCumprod = new float[_numTrainTimesteps];
         float cumprod = 1.0f;
-
         for (int i = 0; i < _numTrainTimesteps; i++)
         {
-            // Scaled linear schedule: beta = (sqrt(beta_start) + i * (sqrt(beta_end) - sqrt(beta_start)) / (T-1))^2
             float t = (float)i / (_numTrainTimesteps - 1);
             float sqrtBeta = MathF.Sqrt(_betaStart) + t * (MathF.Sqrt(_betaEnd) - MathF.Sqrt(_betaStart));
             float beta = sqrtBeta * sqrtBeta;
-            float alpha = 1.0f - beta;
-            cumprod *= alpha;
+            cumprod *= 1.0f - beta;
             _alphasCumprod[i] = cumprod;
         }
     }
