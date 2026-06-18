@@ -26,16 +26,16 @@ layout(constant_id = 14) const uint TN = 4;    // register tile cols
 #define MAX_TM 4
 #define MAX_TN 4
 
-layout(set = 0, binding = 0) readonly buffer A_ { int A[]; };   // M x (K/4) packed int8
-layout(set = 0, binding = 1) readonly buffer B_ { int B[]; };   // N x (K/4) packed int8
-layout(set = 0, binding = 2) writeonly buffer C_ { float C[]; }; // M x N fp32
+layout(set = 0, binding = 0) readonly buffer A_  { int A[]; };     // M x (K/4) packed int8
+layout(set = 0, binding = 1) readonly buffer B_  { int B[]; };     // N x (K/4) packed int8
+layout(set = 0, binding = 2) writeonly buffer C_ { float C[]; };   // M x N fp32
+layout(set = 0, binding = 3) readonly buffer SA_ { float sA[]; };  // per-row (per-M) activation scale
+layout(set = 0, binding = 4) readonly buffer SB_ { float sB[]; };  // per-row (per-N) weight scale
 
 layout(push_constant) uniform Push {
     uint M;
     uint N;
     uint K;
-    float scaleA;
-    float scaleB;
 } pc;
 
 // Padded stride (BKP+1) so the register column-load across rows is bank-conflict-free.
@@ -90,13 +90,12 @@ void main() {
         barrier();
     }
 
-    float s = pc.scaleA * pc.scaleB;
     for (uint i = 0; i < TM; i++) {
         for (uint j = 0; j < TN; j++) {
             uint gRow = blockRow + threadRow + i;
             uint gCol = blockCol + threadCol + j;
             if (gRow < pc.M && gCol < pc.N)
-                C[gRow * pc.N + gCol] = float(acc[i * TN + j]) * s;
+                C[gRow * pc.N + gCol] = float(acc[i * TN + j]) * sA[gRow] * sB[gCol];
         }
     }
 }

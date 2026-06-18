@@ -364,7 +364,15 @@ Two findings worth recording:
 
 2. **NVIDIA lies about `shaderIntegerDotProduct` too** (extends deviation #3). The 3060 reported `int8dot=False` through `VkPhysicalDeviceVulkan13Features` even though the feature is real (gpuinfo confirms it, and the GPU has had DP4a since Pascal). Applied the same vendor + apiVersion fallback used for fp16/timeline/sync2: enable when the flag is set OR (apiVersion >= 1.3 AND vendor is NVIDIA/AMD/Intel). Verified the feature is then accepted on device-create (no `VK_ERROR_FEATURE_NOT_PRESENT`).
 
-**Validated**: `VulkanInt8GemmTests` runs the kernel against an exact int64 reference (the integer dot is exact; only the final float scale rounds). On the RTX 3060: **maxErr = 0.000** (bit-exact) across 32x48x64, 17x20x64 (unaligned, exercises the bounds check), and 8x8x256 (large K), plus a K%4 rejection test. On llvmpipe (vendor not in the fallback, no dot-product support) the tests skip gracefully and device creation is unaffected — the correct "use where supported, absent cleanly elsewhere" cross-vendor behavior. Full suite 42/42 on the 3060. The kernel is the correct one-invocation-per-output baseline (like the CUDA MMA kernel started naive); tiling for bandwidth can layer onto the verified dot-product path later, and pipeline integration (quantized weight loading) is the next step.
+**Validated**: `VulkanInt8GemmTests` runs the kernel against an exact int64 reference (the integer dot is exact; only the final float scale rounds). On the RTX 3060: **maxErr = 0.000** (bit-exact) across single-tile (32x48x64, 17x20x64 unaligned), multiple-K-tile (8x8x256), and multi-tile (128x96x128 aligned, 130x70x96 partial-edge) shapes, plus a K%4 rejection test. On llvmpipe (vendor not in the fallback, no dot-product support) the tests skip gracefully and device creation is unaffected — the correct "use where supported, absent cleanly elsewhere" cross-vendor behavior.
+
+**Two follow-ups landed on the verified dot-product path:**
+
+1. **Shared-memory tiling.** The kernel was upgraded from one-invocation-per-output to a shared-memory-tiled register-microtile design (BM=BN=64, TM=TN=4, BKP=8 packed-K, bank-padded shared tiles) mirroring `matmul_tiled`. Because integer accumulation is exact and associative, this is bit-identical to the naive version — confirmed maxErr=0.000 across all shapes including multi-tile and partial-edge.
+
+2. **Per-row scales + quantization wiring (the path to real use).** `MatMulInt8` now takes per-row scale tensors (`scaleA` length M per token, `scaleB` length N per output channel) instead of scalars — the standard accurate INT8 scheme. Added `Int8Quantizer.RowwiseSymmetric(Tensor) -> (I8, scale)` so an FP weight or activation tensor can be quantized for the GEMM. An end-to-end test (random FP with per-row magnitude variation -> quantize both operands -> `MatMulInt8` -> compare to the FP matmul) shows **0.53%-0.55% relative Frobenius error** at 64x96x128 and 96x128x256, well under the 2% gate. Full suite 46/46 on the 3060.
+
+Remaining future work: tile-size selection per shape, and wiring the quantizer into a model-loading path so a pipeline transparently uses INT8 weights.
 
 ### Note: subgroup reductions and coopmat were already implemented
 
