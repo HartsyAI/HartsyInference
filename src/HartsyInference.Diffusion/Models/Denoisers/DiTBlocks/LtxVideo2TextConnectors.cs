@@ -211,8 +211,10 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
             return outT;
         }
 
-        /// <summary>Gathers valid tokens to the front and fills the remaining (flipped-mask) positions with the
-        /// tiled learnable registers, matching the reference register-replacement.</summary>
+        /// <summary>Gathers valid token rows to the front (order preserved) and fills the remaining positions with the
+        /// tiled learnable registers (register at position <c>i</c> = <c>learnable_registers[i % numRegisters]</c>).
+        /// This is the net result of the reference's gather + flipped-mask replacement, and is correct regardless of
+        /// which side the text was padded on (the reference assumes Gemma's left padding; our pipeline right-pads).</summary>
         private Tensor ReplacePaddingWithRegisters(Tensor features, ReadOnlySpan<float> validMask, int seq)
         {
             float* fp = (float*)features.DataPointer;
@@ -220,7 +222,6 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
             Tensor o = new(new TensorShape(seq, _dim), DType.F32);
             float* op = (float*)o.DataPointer;
 
-            // Gather valid token rows to the front.
             int nv = 0;
             for (int i = 0; i < seq; i++)
                 if (validMask[i] != 0f)
@@ -228,21 +229,10 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
                     Buffer.MemoryCopy(fp + (long)i * _dim, op + (long)nv * _dim, (long)_dim * 4, (long)_dim * 4);
                     nv++;
                 }
-            // flipped_mask[i] = validMask[seq-1-i]; where it is 1, keep the gathered (front-packed) value, else
-            // overwrite with the tiled register at row (i % numRegisters).
-            for (int i = 0; i < seq; i++)
+            for (int i = nv; i < seq; i++)
             {
-                bool keep = validMask[seq - 1 - i] != 0f;
-                if (!keep)
-                {
-                    int reg = i % _numRegisters;
-                    Buffer.MemoryCopy(rp + (long)reg * _dim, op + (long)i * _dim, (long)_dim * 4, (long)_dim * 4);
-                }
-                else if (i >= nv)
-                {
-                    // Gathered region only filled [0, nv); a kept position beyond it would read stale memory — zero it.
-                    new Span<float>(op + (long)i * _dim, _dim).Clear();
-                }
+                int reg = i % _numRegisters;
+                Buffer.MemoryCopy(rp + (long)reg * _dim, op + (long)i * _dim, (long)_dim * 4, (long)_dim * 4);
             }
             return o;
         }

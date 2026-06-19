@@ -29,12 +29,23 @@ public sealed class LtxVideo2CheckpointConverter
     private const string TextEncoderPrefix = "text_encoder.";
 
     // DiT sub-module renames (original Lightricks → the diffusers-style names LtxVideo2Transformer reads). Applied
-    // sequentially per key. The connector subtrees and the q_norm/k_norm QK-norms are intentionally NOT renamed —
-    // the connector and attention code read those names verbatim.
+    // sequentially per key via substring replace, so ORDER MATTERS: the most specific patterns come first so a
+    // shorter one (e.g. "adaln_single") can't corrupt a longer key (e.g. "prompt_adaln_single") that contains it.
+    // The connector subtrees and the q_norm/k_norm QK-norms are intentionally NOT renamed — the connector and
+    // attention code read those names verbatim. Verified against the checkpoint header's `model.diffusion_model.*`
+    // top-level module names (adaln_single → time_embed, etc.).
     private static readonly (string From, string To)[] _ditRenames =
     [
-        ("patchify_proj", "proj_in"),
+        ("av_ca_video_scale_shift_adaln_single", "av_cross_attn_video_scale_shift"),
+        ("av_ca_audio_scale_shift_adaln_single", "av_cross_attn_audio_scale_shift"),
+        ("av_ca_a2v_gate_adaln_single", "av_cross_attn_video_a2v_gate"),
+        ("av_ca_v2a_gate_adaln_single", "av_cross_attn_audio_v2a_gate"),
+        ("audio_prompt_adaln_single", "audio_prompt_adaln"),
+        ("prompt_adaln_single", "prompt_adaln"),
+        ("audio_adaln_single", "audio_time_embed"),
+        ("adaln_single", "time_embed"),
         ("audio_patchify_proj", "audio_proj_in"),
+        ("patchify_proj", "proj_in"),
     ];
 
     /// <summary>Destination bucket for a checkpoint key.</summary>
@@ -113,19 +124,12 @@ public sealed class LtxVideo2CheckpointConverter
         return (Ltx2Bucket.Transformer, key);
     }
 
-    private static (Ltx2Bucket, string?) MapVae(string key)
-    {
-        if (key.Contains("per_channel_statistics", StringComparison.Ordinal))
-            return (Ltx2Bucket.Drop, null);
-        return (Ltx2Bucket.Vae, key);
-    }
+    // The per-channel latent statistics (`per_channel_statistics.mean-of-means` / `std-of-means`) are kept and routed
+    // to the VAE bucket: the decoder's LoadWeights ignores them (it looks up specific decoder.* keys), but the loader
+    // extracts them from the bucket to pass as the decoder's latent un-normalization (mean/std) ctor args.
+    private static (Ltx2Bucket, string?) MapVae(string key) => (Ltx2Bucket.Vae, key);
 
-    private static (Ltx2Bucket, string?) MapAudioVae(string key)
-    {
-        if (key.Contains("per_channel_statistics", StringComparison.Ordinal))
-            return (Ltx2Bucket.Drop, null);
-        return (Ltx2Bucket.AudioVae, key);
-    }
+    private static (Ltx2Bucket, string?) MapAudioVae(string key) => (Ltx2Bucket.AudioVae, key);
 
     /// <summary>Routes a flat weight dictionary (single file or merged shards) into the per-component buckets.</summary>
     public static ConvertedWeights Convert(Dictionary<string, Tensor> allWeights)

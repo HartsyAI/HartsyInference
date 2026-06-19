@@ -240,13 +240,20 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         float* sp = (float*)tokens.DataPointer;
         float* dp = (float*)outT.DataPointer;
         bool denorm = _audioLatentsMean is not null && _audioLatentsStd is not null;
+        // The latent stats are stored over the packed feature axis (channel·mel = 128). Index by the packed feature
+        // when the stat length matches that; fall back to per-channel if a [channels]-length stat is supplied.
+        bool perFeature = denorm && _audioLatentsMean!.Length == channels * mel;
         long frameStride = (long)mel;
         for (int fI = 0; fI < frames; fI++)
             for (int c = 0; c < channels; c++)
                 for (int mI = 0; mI < mel; mI++)
                 {
                     float v = sp[(long)fI * channels * mel + (long)c * mel + mI];
-                    if (denorm) v = v * _audioLatentsStd![c] + _audioLatentsMean![c];
+                    if (denorm)
+                    {
+                        int si = perFeature ? c * mel + mI : c;
+                        v = v * _audioLatentsStd![si] + _audioLatentsMean![si];
+                    }
                     dp[(((long)c * frames + fI)) * frameStride + mI] = v;
                 }
         return outT;
