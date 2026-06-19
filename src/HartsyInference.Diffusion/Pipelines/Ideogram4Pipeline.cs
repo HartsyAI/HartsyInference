@@ -134,10 +134,12 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // ── 5. Denoise loop (both transformers resident) ──
         Backend.PreloadWeights(_conditional.EnumerateWeights());
         Backend.PreloadWeights(_unconditional.EnumerateWeights());
+        LogVram("after DiT weight preload");
 
         for (int i = steps - 1; i >= 0; i--)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
+            Backend.ResetD2hSyncCount();
             float tVal = schedule.Map(grid[i + 1]);
             float sVal = schedule.Map(grid[i]);
             float delta = sVal - tVal;
@@ -167,7 +169,10 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             negV.Dispose();
 
             stepSw.Stop();
-            Logs.Debug($"Step {steps - i}/{steps} (t={tVal:F4}, gw={gw:F1}) in {stepSw.ElapsedMilliseconds}ms");
+            (long freeB, long totalB) = Backend.GetVramInfo();
+            long syncs = Backend.GetD2hSyncCount();
+            string vram = totalB > 0 ? $"{(totalB - freeB) / 1073741824.0:F1}/{totalB / 1073741824.0:F1} GiB used" : "n/a";
+            Logs.Info($"[Ideogram4] step {steps - i}/{steps} t={tVal:F3} gw={gw:F1} {stepSw.ElapsedMilliseconds}ms | VRAM {vram} | D2H syncs {syncs}");
             // Tag the latent family for live-preview decoders (Flux.2 VAE, shared with Lens). The working
             // latent is token-packed [1, nImg, 128], so no per-step Latent snapshot is provided.
             onProgress?.Invoke(new GenerationProgress(steps - i, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -193,7 +198,11 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
 
         // ── 8. VAE decode ──
         Logs.Verbose("Decoding latents (Flux.2 VAE, tiled)...");
+        Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeIn);
+        Backend.Sync();
+        vaeSw.Stop();
+        Logs.Info($"[Ideogram4] VAE decode in {vaeSw.ElapsedMilliseconds}ms");
         vaeIn.Dispose();
 
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
@@ -318,6 +327,14 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Tensor outV = new Tensor(new TensorShape(1, numImg, dim), DType.F32);
         Backend.SliceRows(outV, full, numText);
         return outV;
+    }
+
+    /// <summary>Logs current device VRAM usage at an Info-level checkpoint (no-op detail on the CPU backend).</summary>
+    private void LogVram(string stage)
+    {
+        (long freeB, long totalB) = Backend.GetVramInfo();
+        if (totalB > 0)
+            Logs.Info($"[Ideogram4] VRAM {stage}: {(totalB - freeB) / 1073741824.0:F1}/{totalB / 1073741824.0:F1} GiB used ({freeB / 1073741824.0:F1} free)");
     }
 
     /// <summary>Applies the fixed per-channel latent norm in-place: <c>z[...,c] = z[...,c]·Scale[c] + Shift[c]</c> on a <c>[1, nImg, 128]</c> packed latent.</summary>

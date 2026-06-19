@@ -8,6 +8,16 @@ public interface IBackend : IDisposable
     /// <summary>The device this backend targets.</summary>
     DeviceKind Device { get; }
 
+    /// <summary>Count of lazy device-to-host syncs since the last <see cref="ResetD2hSyncCount"/>. A residency
+    /// metric: a fully GPU-resident denoise loop fires ~0. Returns 0 for backends with no device sync (CPU).</summary>
+    long GetD2hSyncCount() => 0;
+
+    /// <summary>Resets the D2H sync counter. No-op on backends without a device sync.</summary>
+    void ResetD2hSyncCount() { }
+
+    /// <summary>Device memory (free, total) in bytes; (0,0) when not applicable (CPU backend).</summary>
+    (long FreeBytes, long TotalBytes) GetVramInfo() => (0, 0);
+
     /// <summary>Capabilities of this backend.</summary>
     BackendCapabilities Capabilities { get; }
 

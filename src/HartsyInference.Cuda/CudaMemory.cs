@@ -83,6 +83,14 @@ public static class CudaMemory
         }
     }
 
+    /// <summary>Returns (free, total) device memory in bytes via <c>cuMemGetInfo</c>. (0,0) on failure.</summary>
+    public static (long FreeBytes, long TotalBytes) GetMemInfo()
+    {
+        if (CudaDriverApi.cuMemGetInfo(out nuint freeBytes, out nuint totalBytes) == 0)
+            return ((long)freeBytes, (long)totalBytes);
+        return (0, 0);
+    }
+
     /// <summary>Frees device memory.</summary>
     public static void Free(ulong dptr)
     {

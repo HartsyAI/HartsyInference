@@ -2473,6 +2473,13 @@ public sealed class CudaBackend : IBackend
     /// <summary>Resets the device-to-host sync counter (call before a region you want to measure for residency).</summary>
     public void ResetD2hSyncCount() => GpuTransferHelper.ResetSyncCount();
 
+    /// <summary>Device memory (free, total) in bytes via cuMemGetInfo.</summary>
+    public (long FreeBytes, long TotalBytes) GetVramInfo()
+    {
+        _context.EnsureCurrent();
+        return CudaMemory.GetMemInfo();
+    }
+
     #endregion
 
     #region Disposal
