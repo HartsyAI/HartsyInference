@@ -166,6 +166,12 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
             Tensor next = _blocks[i].Forward(backend, cur, adalnInput, cos, sin, attentionMask);
             cur.Dispose();
             cur = next;
+            // Flush the stream once per block. The block's intermediates are freed with
+            // cuMemFreeAsync, which only reclaims into the allocator pool when the stream is
+            // synchronized; without this the fully sync-free forward lets the host race ahead and
+            // strands every block's transients (SDPA scores ~GB each) until VRAM fills (pitfall #18).
+            // No device-to-host copy happens here — it only waits + reclaims, so cost is negligible.
+            backend.Sync();
             Ideogram4DebugDump.Dump($"layers.{i}", cur);
         }
         cos.Dispose();
