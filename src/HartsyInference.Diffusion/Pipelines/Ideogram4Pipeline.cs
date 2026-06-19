@@ -161,8 +161,8 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             // Negative pass: image-only sequence, zeroed text, unconditional transformer.
             Tensor negV = _unconditional.Forward(Backend, negLlm, z, tVal, posIdsImageOnly, indicatorImageOnly, null);
 
-            // v = gw·pos + (1−gw)·neg ; z = z + v·delta
-            CombineAndStep(z, posV, negV, gw, delta);
+            // v = gw·pos + (1−gw)·neg ; z = z + v·delta — in-place on the GPU-resident latent.
+            Backend.CfgEulerStep(z, posV, negV, gw, delta);
             posV.Dispose();
             negV.Dispose();
 
@@ -302,42 +302,22 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Builds the conditional-pass latent <c>[1, L, 128]</c> = <c>[zeros(numText) ; z]</c>.</summary>
-    private static Tensor BuildConditionalLatent(Tensor z, int numText, int numImg, int dim)
+    /// <summary>Builds the conditional latent <c>[1, numText+numImg, dim]</c>: text rows zeroed (masked out
+    /// downstream), image rows = the current latent <paramref name="z"/>. GPU-resident scatter.</summary>
+    private Tensor BuildConditionalLatent(Tensor z, int numText, int numImg, int dim)
     {
         int seqLen = numText + numImg;
         Tensor x = new Tensor(new TensorShape(1, seqLen, dim), DType.F32);
-        float* dst = (float*)x.DataPointer;
-        new Span<float>(dst, checked((int)((long)numText * dim))).Clear();
-        float* src = (float*)z.DataPointer;
-        long bytes = (long)numImg * dim * sizeof(float);
-        Buffer.MemoryCopy(src, dst + (long)numText * dim, bytes, bytes);
+        Backend.ScatterRowsAfter(x, z, numText);
         return x;
     }
 
-    /// <summary>Slices image-token velocity rows <c>[numText..L)</c> out of <c>[1, L, 128]</c> into <c>[1, numImg, 128]</c>.</summary>
-    private static Tensor SliceImageVelocity(Tensor full, int numText, int numImg, int dim)
+    /// <summary>Slices image-token velocity rows <c>[numText..L)</c> out of <c>[1, L, 128]</c> into <c>[1, numImg, 128]</c>. GPU-resident.</summary>
+    private Tensor SliceImageVelocity(Tensor full, int numText, int numImg, int dim)
     {
         Tensor outV = new Tensor(new TensorShape(1, numImg, dim), DType.F32);
-        float* src = (float*)full.DataPointer;
-        float* dst = (float*)outV.DataPointer;
-        long bytes = (long)numImg * dim * sizeof(float);
-        Buffer.MemoryCopy(src + (long)numText * dim, dst, bytes, bytes);
+        Backend.SliceRows(outV, full, numText);
         return outV;
-    }
-
-    /// <summary>In-place Euler step on <paramref name="z"/>: <c>z += (gw·pos + (1−gw)·neg)·delta</c>.</summary>
-    private static void CombineAndStep(Tensor z, Tensor posV, Tensor negV, float gw, float delta)
-    {
-        long n = z.Shape.ElementCount;
-        float* zp = (float*)z.DataPointer;
-        float* pp = (float*)posV.DataPointer;
-        float* np = (float*)negV.DataPointer;
-        float negW = 1.0f - gw;
-        for (long i = 0; i < n; i++)
-        {
-            float v = gw * pp[i] + negW * np[i];
-            zp[i] += v * delta;
-        }
     }
 
     /// <summary>Applies the fixed per-channel latent norm in-place: <c>z[...,c] = z[...,c]·Scale[c] + Shift[c]</c> on a <c>[1, nImg, 128]</c> packed latent.</summary>

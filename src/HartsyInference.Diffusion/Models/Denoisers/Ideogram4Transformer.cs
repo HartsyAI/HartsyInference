@@ -112,32 +112,44 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         if (indicator.Length != batch * seqLen)
             throw new ArgumentException($"indicator length {indicator.Length} != B*L {batch * seqLen}.", nameof(indicator));
 
+        // Per-token role masks (built on CPU from the indicator; no GPU read, so no device sync).
+        Tensor imageMask = BuildRowMask(indicator, OutputImageIndicator, batch, seqLen);
+        Tensor textMask = BuildRowMask(indicator, LlmTokenIndicator, batch, seqLen);
+
         // ── Masked image embedding: x *= image_mask; input_proj(x); *= image_mask ──
-        Tensor xMasked = ApplyTokenMask(x, indicator, OutputImageIndicator, batch, seqLen, _config.InChannels);
+        Tensor xMasked = new Tensor(x.Shape, DType.F32);
+        backend.MaskRows(xMasked, x, imageMask);
         Tensor xProjRaw = new Tensor(hidShape, DType.F32);
         backend.Linear(xProjRaw, xMasked, _inputProjW!, _inputProjB);
         xMasked.Dispose();
-        Tensor xProj = ApplyTokenMask(xProjRaw, indicator, OutputImageIndicator, batch, seqLen, emb);
+        Tensor xProj = new Tensor(hidShape, DType.F32);
+        backend.MaskRows(xProj, xProjRaw, imageMask);
         xProjRaw.Dispose();
         Ideogram4DebugDump.Dump("input_proj", xProj);
 
         // ── Masked text embedding: llm_cond_proj(llm_cond_norm(llm_features)); *= text_mask ──
-        Tensor llmMasked = ApplyTokenMask(llmFeatures, indicator, LlmTokenIndicator, batch, seqLen, _config.LlmFeaturesDim);
+        Tensor llmMasked = new Tensor(llmFeatures.Shape, DType.F32);
+        backend.MaskRows(llmMasked, llmFeatures, textMask);
         Tensor llmNorm = new Tensor(new TensorShape(batch, seqLen, _config.LlmFeaturesDim), DType.F32);
         backend.RmsNorm(llmNorm, llmMasked, _llmCondNormW!, 1e-6f);
         llmMasked.Dispose();
         Tensor llmProjRaw = new Tensor(hidShape, DType.F32);
         backend.Linear(llmProjRaw, llmNorm, _llmCondProjW!, _llmCondProjB);
         llmNorm.Dispose();
-        Tensor llmProj = ApplyTokenMask(llmProjRaw, indicator, LlmTokenIndicator, batch, seqLen, emb);
+        Tensor llmProj = new Tensor(hidShape, DType.F32);
+        backend.MaskRows(llmProj, llmProjRaw, textMask);
         llmProjRaw.Dispose();
+        imageMask.Dispose();
+        textMask.Dispose();
 
         // ── h = image_emb + text_emb + image_indicator_embedding ──
         Tensor h = new Tensor(hidShape, DType.F32);
         backend.Add(h, xProj, llmProj);
         xProj.Dispose();
         llmProj.Dispose();
-        AddImageIndicator(h, indicator, batch, seqLen, emb);
+        Tensor indicatorIdx = BuildIndicatorIndices(indicator, batch, seqLen);
+        backend.IndexAddRows(h, _imageIndicatorW!, indicatorIdx);
+        indicatorIdx.Dispose();
         Ideogram4DebugDump.Dump("hidden_in", h);
 
         // ── Shared AdaLN conditioning: adaln_input = silu(adaln_proj(t_embedding(t))) ──
@@ -151,7 +163,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         Tensor cur = h;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, cur, adalnInput, cos, sin, _rope, attentionMask);
+            Tensor next = _blocks[i].Forward(backend, cur, adalnInput, cos, sin, attentionMask);
             cur.Dispose();
             cur = next;
             Ideogram4DebugDump.Dump($"layers.{i}", cur);
@@ -177,25 +189,17 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         backend.Linear(scaleRaw, silu, _finalAdalnW!, _finalAdalnB);
         silu.Dispose();
 
+        Tensor scalePlus1 = new Tensor(new TensorShape(batch, emb), DType.F32);
+        backend.AddScalar(scalePlus1, scaleRaw, 1.0f);
+        scaleRaw.Dispose();
+
         Tensor normed = new Tensor(new TensorShape(batch, seqLen, emb), DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, emb, 1e-6f);
+        backend.LayerNormNoAffine(normed, x, 1e-6f);
 
         Tensor modulated = new Tensor(new TensorShape(batch, seqLen, emb), DType.F32);
-        float* normPtr = (float*)normed.DataPointer;
-        float* scalePtr = (float*)scaleRaw.DataPointer;
-        float* outPtr = (float*)modulated.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * emb;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int rowOff = (b * seqLen + s) * emb;
-                for (int d = 0; d < emb; d++)
-                    outPtr[rowOff + d] = normPtr[rowOff + d] * (1.0f + scalePtr[condBase + d]);
-            }
-        }
+        backend.AffineBroadcastLastDim(modulated, normed, scalePlus1, null);
         normed.Dispose();
-        scaleRaw.Dispose();
+        scalePlus1.Dispose();
 
         Tensor outVel = new Tensor(new TensorShape(batch, seqLen, _config.InChannels), DType.F32);
         backend.Linear(outVel, modulated, _finalLinearW!, _finalLinearB);
@@ -249,43 +253,26 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         }
     }
 
-    /// <summary>Zeroes channels at positions whose indicator != <paramref name="keepRole"/>; copies through otherwise. Returns a new tensor.</summary>
-    private static Tensor ApplyTokenMask(Tensor input, int[] indicator, int keepRole, int batch, int seqLen, int channels)
+    /// <summary>Builds a per-row F32 mask (1 where <paramref name="keepRole"/> matches, else 0), shape <c>[B*L]</c>,
+    /// for <see cref="IBackend.MaskRows"/>. CPU-only (reads the indicator, writes a fresh tensor) so no device sync.</summary>
+    private static Tensor BuildRowMask(int[] indicator, int keepRole, int batch, int seqLen)
     {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, channels), input.DType);
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int pos = b * seqLen + s;
-                long rowOff = (long)pos * channels;
-                if (indicator[pos] == keepRole)
-                    Buffer.MemoryCopy(inPtr + rowOff, outPtr + rowOff, (long)channels * sizeof(float), (long)channels * sizeof(float));
-                else
-                    new Span<float>(outPtr + rowOff, channels).Clear();
-            }
-        }
-        return output;
+        Tensor mask = new Tensor(new TensorShape(batch * seqLen), DType.F32);
+        float* p = (float*)mask.DataPointer;
+        for (int pos = 0; pos < batch * seqLen; pos++)
+            p[pos] = indicator[pos] == keepRole ? 1.0f : 0.0f;
+        return mask;
     }
 
-    /// <summary>Adds the <c>embed_image_indicator</c> row in-place: row 1 for image tokens, row 0 for everything else.</summary>
-    private void AddImageIndicator(Tensor h, int[] indicator, int batch, int seqLen, int emb)
+    /// <summary>Builds per-token I32 indices into <c>embed_image_indicator</c> (row 1 for image tokens, row 0 otherwise),
+    /// shape <c>[B*L]</c>, for <see cref="IBackend.IndexAddRows"/>.</summary>
+    private static Tensor BuildIndicatorIndices(int[] indicator, int batch, int seqLen)
     {
-        float* hPtr = (float*)h.DataPointer;
-        float* wPtr = (float*)_imageIndicatorW!.DataPointer; // [2, emb]
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int pos = b * seqLen + s;
-                int row = indicator[pos] == OutputImageIndicator ? 1 : 0;
-                float* src = wPtr + (long)row * emb;
-                float* dst = hPtr + (long)pos * emb;
-                for (int d = 0; d < emb; d++) dst[d] += src[d];
-            }
-        }
+        Tensor idx = new Tensor(new TensorShape(batch * seqLen), DType.I32);
+        int* p = (int*)idx.DataPointer;
+        for (int pos = 0; pos < batch * seqLen; pos++)
+            p[pos] = indicator[pos] == OutputImageIndicator ? 1 : 0;
+        return idx;
     }
 
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
