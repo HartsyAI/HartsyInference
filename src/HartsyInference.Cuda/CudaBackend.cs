@@ -118,6 +118,11 @@ public sealed class CudaBackend : IBackend
 
         // Give GpuTransferHelper the stream handle for FreeAsync and lazy-sync callbacks
         GpuTransferHelper.SetStream(_stream.Handle);
+        // Route transient allocations (op outputs, dtype casts, scratch) through the stream-ordered pool on the
+        // same compute stream, so they reuse the memory their cuMemFreeAsync frees return instead of stranding it
+        // in the pool — without this the GPU fills with pool-locked bytes and every op OOM-retries with a full
+        // drain+trim (the Ideogram-4 ~100s/step thrash). Persistent weights/workspaces stay on the sync allocator.
+        CudaMemory.SetComputeStream(_stream.Handle);
         // ...and the context, so its lazy callbacks (which fire on whatever thread
         // later reads/disposes a tensor — possibly the GC finalizer thread) can bind
         // the primary context before issuing CUDA Driver API calls.

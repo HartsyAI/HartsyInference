@@ -38,7 +38,7 @@ public sealed unsafe class Fp8GemmExecutor : IDisposable
 
         CublasLtApi.cublasLtCreate(out _ltHandle).ThrowOnError();
         _workspaceBytes = (nuint)CublasLtApi.DefaultWorkspaceBytes;
-        _workspace = CudaMemory.Allocate(_workspaceBytes);
+        _workspace = CudaMemory.AllocatePersistent(_workspaceBytes);
     }
 
     /// <summary>Runs an FP8 Linear GEMM on Ada+ matching <see cref="CudaBackend"/>'s row-major convention: <c>output[M, N] = input[M, K] · weight^T[N, K]</c>. Per-tensor weight scale is folded into the cuBLAS alpha (a separate device pointer for the descriptor's A_SCALE_POINTER attribute could be wired later for true cublasLt-style per-tensor scaling, but for the typical ComfyUI fp8_scaled / BFL distilled case where every weight already has a single scalar Fp8ScaleFactor, alpha-folding is exact).

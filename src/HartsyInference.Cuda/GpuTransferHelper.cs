@@ -94,10 +94,13 @@ internal static unsafe class GpuTransferHelper
             return activation.gpuPtr;
         }
 
-        // 3. Cache miss — fresh H2D transfer
+        // 3. Cache miss — fresh H2D transfer. The buffer is a transient (the caller frees it via the async
+        // FreeDevice), so allocate it from the stream-ordered pool. cuMemAllocAsync is stream-ordered, so sync the
+        // stream before the synchronous host→device copy to guarantee the allocation has completed.
         _misses++;
         nuint byteSize = ByteSize(cpuTensor);
         ulong dptr = CudaMemory.Allocate(byteSize);
+        if (_streamHandle != 0) SyncStream();
         CudaMemory.CopyHostToDevice(dptr, cpuTensor.DataPointer, byteSize);
         return dptr;
     }
@@ -169,7 +172,9 @@ internal static unsafe class GpuTransferHelper
             return; // Already cached
 
         nuint byteSize = ByteSize(weight);
-        ulong dptr = CudaMemory.Allocate(byteSize);
+        // Resident weights are freed with the synchronous Free (FreeWeights/FreeAllCached), so they must be
+        // allocated synchronously too — keep them out of the stream-ordered transient pool.
+        ulong dptr = CudaMemory.AllocatePersistent(byteSize);
         CudaMemory.CopyHostToDevice(dptr, weight.DataPointer, byteSize);
 
         RegisterCachedWeight(weight, dptr, byteSize);

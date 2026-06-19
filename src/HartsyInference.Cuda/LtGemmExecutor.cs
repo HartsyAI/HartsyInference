@@ -26,7 +26,7 @@ public sealed unsafe class LtGemmExecutor : IDisposable
         }
         IsSupported = true;
         _workspaceBytes = (nuint)CublasLtApi.DefaultWorkspaceBytes;
-        _workspace = CudaMemory.Allocate(_workspaceBytes);
+        _workspace = CudaMemory.AllocatePersistent(_workspaceBytes);
     }
 
     /// <summary>Runs <c>output[M, N] = activation(alpha · input[M, K] · weight^T[N, K] + bias)</c> with the chosen epilogue. The heuristic algorithm is queried per call; for the inference shape set this is cheap relative to the GEMM, but a future optimization could cache the algo by (m, n, k, dtype).</summary>
