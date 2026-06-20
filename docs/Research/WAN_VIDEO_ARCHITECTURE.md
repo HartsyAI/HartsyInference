@@ -1,6 +1,6 @@
 # Wan-Video Architecture — Research Notes
 
-> **Status:** Transformer + reuse mapped (ported from diffusers); pipeline scoped | **Last Updated:** 2026-06-10 | **Target:** Wan2.2 **TI2V-5B** (the variant whose VAE we already built)
+> **Status:** Transformer + reuse mapped (ported from diffusers); pipeline scoped. TI2V-5B/T2V/I2V/A14B/VACE/Animate built. **Wan2.2-S2V researched (not built) — see the S2V section below.** | **Last Updated:** 2026-06-19 | **Target:** Wan2.2 **TI2V-5B** (the variant whose VAE we already built)
 >
 > **Sources (verbatim):** diffusers `models/transformers/transformer_wan.py`, `pipelines/wan/pipeline_wan.py`. Config: [`Wan-AI/Wan2.2-TI2V-5B-Diffusers`](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers). License: Apache-2.0.
 
@@ -61,3 +61,61 @@ umT5 encode (text_dim 4096, max_seq 512) → flow-match (UniPC/FlowMatchEuler, *
 - `get_1d_rotary_pos_embed` exact freq formula (standard `θ^(−2i/dim)`) — confirm vs diffusers.
 - umT5 vs T5 tokenizer/encoder specifics (Wan uses umT5-XXL).
 - flow_shift per resolution (5.0/3.0) + guidance default.
+
+---
+
+# Wan2.2-S2V (Speech-to-Video) — Research
+
+> **Status:** Phases S1–S3 BUILT (structural, CPU-tested, validation-pending) — `WanS2VAudioEncoder`, `WanS2VTransformer` (audio injector reusing the `WanAnimateFaceBlock` pattern), `WanS2VPipeline` (single-chunk, accepts pre-computed audio features). **Remaining: S0 Wav2Vec2 front-end, reference/motion-frame identity conditioning, multi-chunk autoregression, converter + SwarmUI.** | **Added:** 2026-06-19 / built 2026-06-20 | **Target:** `Wan-AI/Wan2.2-S2V-14B` (audio-driven cinematic video).
+>
+> **⚠️ Source caveat:** Wan2.2-S2V is **NOT in the vendored diffusers** (`tests/python-reference/.venv/.../diffusers/` has `transformer_wan{,_vace,_animate}.py` but **no S2V**). This section is **reconstructed from the original Wan repo** ([github.com/Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2), modules under `wan/modules/s2v/` — `model_s2v.py`, `audio_encoder.py`, `motioner.py`) and the model card. **Every config value / layer index below is provisional and must be confirmed against the real repo + the `Wan-AI/Wan2.2-S2V-14B` checkpoint header before/while implementing.** Treat this as a map, not gospel.
+
+## What it is
+
+Audio-driven (speech/song) video generation: given a **reference image** (identity/scene), an **audio clip**, and a **text prompt**, it generates a talking/performing character lip-/motion-synced to the audio, with optional **pose-video** driving (like Animate). It generates **long videos by chunks** (autoregressive over the audio), each chunk conditioned on the audio window + the previous chunk's tail frames.
+
+## Backbone = Wan2.1-14B (already built)
+
+S2V is the **Wan2.1 T2V-14B DiT** (umT5 cross-attn, per-head 3D RoPE, 6-param AdaLN, FP32 LN) over the **Wan2.1 16-ch VAE** (8× spatial / 4× temporal — already built as `Wan21VaeDecoder`/`Encoder`). Provisional config: `dim 5120, heads 40, head_dim 128, layers 40, ffn 13824, text_dim 4096, in/out 16` (≈ our `WanVideoConfig.T2V_14B`). So the **base DiT, umT5, and VAE all reuse what we have.** Net-new is the audio path + the motion/reference conditioning + the chunked loop.
+
+## Net-new components (the S2V delta)
+
+1. **Audio feature extractor — Wav2Vec2.** S2V runs a frozen **Wav2Vec2** (the model card uses `TencentGameMate/chinese-wav2vec2-base`, hidden 768, 12 layers; some configs use wav2vec2-large, hidden 1024) over the raw waveform (16 kHz) to get per-timestep audio features. It harvests **multiple hidden layers** (stacked, like our Gemma 49-layer harvest for LTX-2), then resamples to the **video fps** so there is one audio feature group per output frame. *Not currently in the engine* (we have Whisper for STT, not wav2vec2). This is the heaviest net-new dependency.
+
+2. **`CausalAudioEncoder`.** A small **causal Conv1d** stack (over the frame/time axis, like the Animate face encoder) that maps the stacked wav2vec2 features → **per-frame audio tokens at the DiT inner dim** (5120). Possibly with a learnable per-layer weight over the stacked wav2vec2 layers. *(Directly analogous to `WanAnimateFaceEncoder` — reuse that pattern.)*
+
+3. **`AudioInjector` (audio cross-attention).** A set of **extra cross-attention modules inserted at specific DiT block indices** (`audio_inject_layers`, e.g. every Nth of the 40 blocks). At each injection point the latent hidden states **cross-attend to the per-frame audio tokens**, temporally aligned (each latent frame's tokens attend that frame's audio token group — **the exact `WanAnimateFaceBlock` temporal-alignment pattern, T∣S**). Some variants add **AdaIN** modulation (`enable_adain`) — an adaptive instance norm conditioned on a pooled audio/global vector. The injected output is added back to the hidden states (residual), like the face adapter.
+
+4. **Reference + motion-frame conditioning (`motioner`).** The reference image is VAE-encoded; long-video continuity uses **"motion frames"** — the last K frames of the previous chunk (VAE-encoded) prepended/concatenated as clean conditioning (zero-padded for the first chunk). Likely realized as extra latent-channel concat (so `in_channels > 16`) and/or a FramePack-style packing. **This is the fuzziest part** — confirm the exact channel layout + masking from `motioner.py`.
+
+5. **Chunked autoregressive pipeline.** Outer loop over audio windows: per chunk → take the audio segment + previous motion frames + reference → denoise one clip → carry its tail frames as the next chunk's motion conditioning. Optional **FramePack** mode for efficiency.
+
+## Reuse map (S2V)
+
+| Need | Reuse (already built) |
+|---|---|
+| Base 14B DiT (blocks, RoPE, AdaLN, output) | `WanVideoTransformer` / `WanVideoBlock` / `WanRope` / `WanDitOps` |
+| 16-ch VAE decode + **multi-frame encode** | `Wan21VaeDecoder` / `Wan21VaeEncoder.Encode` (Phase 0) |
+| umT5 text | `T5TextEncoder` + `T5TextEncoderConfig.Umt5Xxl` |
+| Per-frame audio → DiT-dim tokens (causal Conv1d) | **`WanAnimateFaceEncoder` pattern** |
+| Temporally-aligned audio cross-attn (T∣S) | **`WanAnimateFaceBlock` pattern** |
+| Flow-match Euler + CFG + frame streaming | `LancePipelineCommon` / `VideoFrame` |
+| Raw audio I/O, mel/resample DSP | `HartsyInference.Audio/Dsp` (resampler, STFT) |
+
+## S2V Implementation Plan (phased)
+
+> Bar: structural + CPU-tested with synthetic weights, validation-pending (the project standard). Each phase compiles + has a tiny-config test before the next.
+
+- **Phase S0 — Wav2Vec2 audio encoder (the gating prerequisite).** Port a CTC-less Wav2Vec2 feature extractor: the conv feature encoder (7 strided Conv1d + GroupNorm/LayerNorm) + the transformer encoder (N layers, the standard MHSA+FFN our backend already does), exposing **all hidden states** (multi-layer harvest). Config preset from the real checkpoint (base 768/12L vs large 1024/24L — confirm). **Largest net-new piece; ~2 files + test.** *Fallback to de-risk:* first accept **pre-computed audio features** (`[T_audio, layers, dim]`) so S1–S3 can be built/tested before Wav2Vec2 lands (same pattern as pipelines that take pre-encoded embeds).
+- **Phase S1 — `WanS2VAudioEncoder`** (CausalAudioEncoder): stacked-layer weighting → causal Conv1d stack → per-frame audio tokens `[T_frames, dim]`. Reuse the `WanAnimateFaceEncoder` Conv1d/causal-pad scaffolding. Test: shape + finite.
+- **Phase S2 — `WanS2VTransformer`** = base `WanVideoTransformer` + an `AudioInjector` (a `WanAnimateFaceBlock`-style cross-attn at the `audio_inject_layers`, added residually; + optional AdaIN) + the reference/motion-frame latent concat (config `in_channels` bump). Reuses `WanDitOps`/`WanVideoBlock` like `WanVaceTransformer`/`WanAnimateTransformer`. Test: tiny-config forward with synthetic audio tokens → finite velocity (verify audio influences output).
+- **Phase S3 — `WanS2VPipeline`** (chunked): reference VAE-encode → per-chunk { audio window → S1 tokens → S2 denoise with motion frames → decode → carry tail frames }. First a **single-chunk** path (simplest), then the autoregressive multi-chunk loop + optional FramePack. Test: single-chunk E2E (synthetic weights) → frames.
+- **Phase S4 — converter + SwarmUI + tests.** `WanVideoCheckpointConverter` additions for the S2V keys (audio_injector / audio_encoder / motioner); SwarmUI loader (audio param input, wav2vec2 side-model) + compat class; checklist + memory.
+
+## S2V Open questions (must confirm against the real repo before/while building)
+
+- **Wav2Vec2 variant + config** (chinese-wav2vec2-base 768/12 vs large 1024/24), which hidden layers are harvested, and the feature→fps resampling rule.
+- **`audio_inject_layers`** — exact block indices + count; whether AdaIN is on (`enable_adain`, `adain_mode`) and what conditions it.
+- **Motion-frame / reference channel layout** (`motioner.py`): how many motion frames, exact `in_channels`, mask channels, FramePack vs plain concat, first-chunk zero-padding.
+- **Chunk scheduling**: clip length, audio-window↔frame mapping, overlap, and how the previous tail conditions the next chunk.
+- Provisional 14B config numbers vs the actual `Wan-AI/Wan2.2-S2V-14B` checkpoint header.

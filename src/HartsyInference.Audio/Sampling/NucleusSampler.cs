@@ -14,7 +14,7 @@ public static class NucleusSampler
     /// <paramref name="maskToken"/> (if in range) is forced to zero probability — used for ancestral /
     /// repetition re-rolls. Deterministic for a fixed RNG state.</summary>
     public static int Draw(Span<float> logits, int count, float temperature, int topK, float topP,
-        ref uint rng, int maskToken = -1)
+        ref uint rng, int maskToken = -1, float minP = 0f)
     {
         float temp = temperature > 0 ? temperature : 1f;
         float[] probs = new float[count];
@@ -36,13 +36,16 @@ public static class NucleusSampler
         for (int i = 0; i < count; i++) probs[i] *= inv;
         if ((uint)maskToken < (uint)count) probs[maskToken] = 0f;
 
-        // top-k + top-p over an index list sorted by probability (descending).
+        // top-k + top-p (+ optional min-p) over an index list sorted by probability (descending).
         int[] order = ArgsortDescending(probs, count);
         int k = topK > 0 ? Math.Min(topK, count) : count;
+        float minPThreshold = minP > 0f ? minP * probs[order[0]] : 0f;
         float cumulative = 0f;
         int keep = 0;
         for (int rank = 0; rank < k; rank++)
         {
+            // min-p: drop tail tokens whose probability is below minP × top probability.
+            if (minPThreshold > 0f && rank > 0 && probs[order[rank]] < minPThreshold) break;
             cumulative += probs[order[rank]];
             keep = rank + 1;
             if (topP > 0 && topP < 1f && cumulative >= topP) break;

@@ -68,63 +68,49 @@ internal sealed unsafe class UnidirectionalLstm
         Tensor currentSeq = x;
         bool ownsCurrent = false;
 
-        // Per-step input buffer reused across all timesteps of the current layer.
-        // Allocate once at the max dim (max of InputDim and HiddenDim).
-        int maxDim = Math.Max(InputDim, HiddenDim);
-        Tensor stepIn = new(new TensorShape(batch, maxDim), DType.F32);
-
-        try
+        for (int layer = 0; layer < NumLayers; layer++)
         {
-            for (int layer = 0; layer < NumLayers; layer++)
+            int dimIn = layer == 0 ? InputDim : HiddenDim;
+            // Per-step input buffer, sized to THIS layer's input dim (layer 0 may differ from HiddenDim).
+            Tensor stepIn = new(new TensorShape(batch, dimIn), DType.F32);
+            Tensor h = ZeroAllocate(batch, HiddenDim);
+            Tensor c = ZeroAllocate(batch, HiddenDim);
+            Tensor nextSeq = new(new TensorShape(batch, t, HiddenDim), DType.F32);
+
+            float* srcSeqPtr = (float*)currentSeq.DataPointer;
+            float* dstSeqPtr = (float*)nextSeq.DataPointer;
+
+            for (int step = 0; step < t; step++)
             {
-                int dimIn = layer == 0 ? InputDim : HiddenDim;
-                Tensor h = ZeroAllocate(batch, HiddenDim);
-                Tensor c = ZeroAllocate(batch, HiddenDim);
-                Tensor nextSeq = new(new TensorShape(batch, t, HiddenDim), DType.F32);
-
-                float* srcSeqPtr = (float*)currentSeq.DataPointer;
-                float* dstSeqPtr = (float*)nextSeq.DataPointer;
-
-                for (int step = 0; step < t; step++)
+                float* dp = (float*)stepIn.DataPointer;
+                for (int b = 0; b < batch; b++)
                 {
-                    // Copy current-layer input at this timestep into stepIn.
-                    float* dp = (float*)stepIn.DataPointer;
-                    for (int b = 0; b < batch; b++)
-                    {
-                        int srcBase = (b * t + step) * dimIn;
-                        int dstBase = b * dimIn;
-                        for (int k = 0; k < dimIn; k++) dp[dstBase + k] = srcSeqPtr[srcBase + k];
-                    }
-
-                    // Reshape stepIn view to [B, dimIn] for the LSTM cell.
-                    Tensor stepInView = stepIn.Reshape(new TensorShape(batch, dimIn));
-
-                    (Tensor hNew, Tensor cNew) = _layers[layer].Step(backend, stepInView, h, c, batch);
-                    h.Dispose();
-                    c.Dispose();
-                    h = hNew;
-                    c = cNew;
-
-                    // Copy h into nextSeq at [:, step, :].
-                    float* hp = (float*)h.DataPointer;
-                    for (int b = 0; b < batch; b++)
-                    {
-                        int srcBase = b * HiddenDim;
-                        int dstBase = (b * t + step) * HiddenDim;
-                        for (int k = 0; k < HiddenDim; k++) dstSeqPtr[dstBase + k] = hp[srcBase + k];
-                    }
+                    int srcBase = (b * t + step) * dimIn;
+                    int dstBase = b * dimIn;
+                    for (int k = 0; k < dimIn; k++) dp[dstBase + k] = srcSeqPtr[srcBase + k];
                 }
 
+                (Tensor hNew, Tensor cNew) = _layers[layer].Step(backend, stepIn, h, c, batch);
                 h.Dispose();
                 c.Dispose();
-                if (ownsCurrent) currentSeq.Dispose();
-                currentSeq = nextSeq;
-                ownsCurrent = true;
+                h = hNew;
+                c = cNew;
+
+                float* hp = (float*)h.DataPointer;
+                for (int b = 0; b < batch; b++)
+                {
+                    int srcBase = b * HiddenDim;
+                    int dstBase = (b * t + step) * HiddenDim;
+                    for (int k = 0; k < HiddenDim; k++) dstSeqPtr[dstBase + k] = hp[srcBase + k];
+                }
             }
-        }
-        finally
-        {
+
+            h.Dispose();
+            c.Dispose();
             stepIn.Dispose();
+            if (ownsCurrent) currentSeq.Dispose();
+            currentSeq = nextSeq;
+            ownsCurrent = true;
         }
 
         return ownsCurrent ? currentSeq : x;

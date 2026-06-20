@@ -255,6 +255,16 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] **BiCodec encoder (cloning) + w2v-BERT feature extractor** — encode-side (reference→tokens) for zero-shot voice cloning; deferred (attribute generation works without it).
 - [ ] **Checkpoint validation** — `SparkAudio/Spark-TTS-0.5B` (3.95 GB): reconcile `added_tokens.json` IDs + BiCodec state-dict keys, then env-gated generation test.
 
+### Chatterbox (Resemble AI) — CORE BUILT (T3 + voice encoder, synthetic-forward verified); S3Gen reuse-wiring pending
+> `ResembleAI/chatterbox` (MIT). T3 Llama LM → S3 tokens (25 Hz FSQ 6561) → S3Gen (CosyVoice2 flow + HiFTNet)
+> → 24 kHz. Research: [`CHATTERBOX_ARCHITECTURE.md`](../Research/CHATTERBOX_ARCHITECTURE.md). Files under [`Models/Chatterbox/`](../../src/HartsyInference.Audio/Models/Chatterbox/). **Maximal reuse:** S3Gen = the existing CosyVoice `ConditionalCfm` + `HiFTNetVocoder` + `CosyVoiceFlow` + `S3Tokenizer` + `CamPlusSpeakerEncoder`.
+- [x] [`ChatterboxConfig.cs`](../../src/HartsyInference.Audio/Models/Chatterbox/ChatterboxConfig.cs) — T3 `Llama_520M` (1024/30L/16 MHA/head_dim 64/SwiGLU 4096/θ=500000) + vocabs + token ids + gen defaults. **Tested.**
+- [x] [`ChatterboxT3.cs`](../../src/HartsyInference.Audio/Models/Chatterbox/ChatterboxT3.cs) — headless `Qwen2Model` + text/speech embeds + learned positions + `speech_head` + cond encoder (speaker `Linear(256→1024)` + exaggeration `Linear(1→1024)`); `[cond++text++speech]` prefill + AR speech-token gen (rep-penalty + min-p + top-p). **Synthetic-weights forward verified** (generates valid in-range tokens).
+- [x] [`ChatterboxVoiceEncoder.cs`](../../src/HartsyInference.Audio/Models/Chatterbox/ChatterboxVoiceEncoder.cs) — GE2E 3-layer LSTM (40→256) + proj + L2-norm, reusing `UnidirectionalLstm`. **Synthetic-weights forward verified** (finite + L2-normalized).
+- [x] **Fixed shared `UnidirectionalLstm` bug** — multi-layer with `InputDim < HiddenDim` reshaped the per-step buffer to too-few elements (only worked when input dim == hidden); now allocates per-layer at `dimIn`. Kokoro/EnCodec LSTM tests still green.
+- [x] `min_p` added to `NucleusSampler` (backward-compatible) + `t3` learned-position handling.
+- [ ] **S3Gen pipeline wiring** — `ChatterboxPipeline` assembling T3 tokens → `CosyVoiceFlow` → `HiFTNetVocoder` (the reused stack, needs a Chatterbox-tuned config: cosine CFM schedule + cfg 0.7 + 10 steps + HiFT [8,5,3]); prompt-speech perceiver resampler; llama3 RoPE scaling; Perth watermark. Deferred.
+
 ### ChatTTS
 - [ ] `ChatTtsGpt.cs` — single LLaMA-style 20L × 768, 4-codebook GFSQ output
 - [ ] `ChatTtsDvaeDecoder.cs` — 12-layer dilated ConvNeXt
@@ -285,6 +295,16 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`NeuTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/NeuTtsPipeline.cs) — prompt prefix + speech-gen-start + ref codes → AR (top-k, min-new EOS suppression, stop at SpeechGenEnd) → codes → NeuCodec decode → 24 kHz PCM.
 - [ ] **Reconcile on checkpoint load:** NeuCodec key spelling, the RoPE convention (torchtune vs interleaved), the iSTFT "same"-padding edge handling, and the FSQ project_out presence; NeuCodec **encoder** (ref-audio → codes) for live cloning is deferred (caller supplies pre-encoded ref codes).
 - [ ] eSpeak phonemizer + Qwen tokenizer for the prompt — token-ids-in for now (caller phonemizes/tokenizes), same convention as the other TTS models.
+
+### Zonos-v0.1 (transformer) — BUILT (structural, synthetic-forward verified); checkpoint-gated
+> `Zyphra/Zonos-v0.1-transformer` (~2B). Llama-style GQA decoder (**LayerNorm**, interleaved RoPE) → 9-codebook
+> DAC 44.1 kHz (k+1 delay) conditioned on a phoneme + speaker + controls prefix. Research:
+> [`ZONOS_ARCHITECTURE.md`](../Research/ZONOS_ARCHITECTURE.md). Files under [`Models/Zonos/`](../../src/HartsyInference.Audio/Models/Zonos/) + [`ZonosPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosPipeline.cs).
+- [x] [`ZonosConfig.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosConfig.cs) — backbone (2048/26L/GQA 16:4/head_dim 128/SwiGLU 8192/θ=10000) + codebooks (9, in-vocab 1026, out-vocab 1025, EOS 1024, masked 1025) + delay k+1 + CFG 2.0. **Tested.**
+- [x] [`ZonosBackbone.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosBackbone.cs) — 26 LayerNorm blocks **reusing `DiaAttention` + `DiaMlp`** (split fused `in_proj`, remap `fc1/fc2` at load). **Synthetic-weights forward verified** (finite).
+- [x] [`ZonosCodebooks.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosCodebooks.cs) — 9 summed embeddings + 9 stacked heads. **Tested.** [`ZonosFourierConditioner.cs`](../../src/HartsyInference.Audio/Models/Zonos/ZonosFourierConditioner.cs) — Gaussian random-feature cos/sin. **Tested.**
+- [x] [`ZonosPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ZonosPipeline.cs) — cond/uncond backbones (shared weights) → delayed-AR over 9 codebooks → CFG → cb0 EOS + 9-step flush → revert → DAC decode.
+- [ ] **Reconcile/deferred:** espeak-ng phonemization + the full conditioning-prefix assembly (speaker/integer/passthrough conditioners), ResNet293 speaker encoder, the NovelAI "unified" sampler, and the interleaved-RoPE convention check.
 
 ### Higgs Audio v2
 - [ ] Llama-3.2-3B with DualFFN (per-token-type routing) — extended dotLLM
