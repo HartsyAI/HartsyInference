@@ -52,6 +52,49 @@ public unsafe class WanS2VPipelineTests
         Assert.Equal(32, h);
     }
 
+    [Fact]
+    public void GenerateChunked_ReferenceAndMotion_ProducesFrames()
+    {
+        CpuBackend backend = new();
+        // Reference-conditioned S2V: InChannels = 2·z (noisy + reference broadcast).
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = 2, HeadDim = 12, InChannels = 96, OutChannels = 48, VaeLatentChannels = 48,
+            TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 4, PatchSize = (1, 2, 2),
+            VaeSpatialCompression = 16, VaeTemporalCompression = 4,
+            NumInferenceSteps = 2, GuidanceScale = 5, FlowShift = 5,
+        };
+        int[] inject = [0, 2];
+        const int numLayers = 3, audioDim = 10, tokens = 3;
+
+        WanS2VTransformer transformer = new(cfg, inject);
+        transformer.LoadWeights(WanSyntheticWeights.BuildS2VTransformer(cfg, inject));
+        WanS2VAudioEncoder audioEnc = new(numLayers, audioDim, cfg.InnerDim, tokensPerFrame: tokens);
+        audioEnc.LoadWeights(WanSyntheticWeights.BuildAudioEncoder("audio_encoder", numLayers, audioDim, cfg.InnerDim, tokens), "audio_encoder");
+
+        int[] dimMult = [1, 2, 4, 4];
+        Wan22VaeDecoder vae = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
+        vae.LoadWeights(LanceSyntheticWeights.BuildVae(8, 48, dimMult, 2, [false, true, true]));
+        Wan22VaeEncoder enc = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalDownsample: [true, true, false]);
+        enc.LoadWeights(LanceSyntheticWeights.BuildVaeEncoder(8, 48, dimMult, 2, [true, true, false]));
+
+        WanS2VPipeline pipeline = new(backend, transformer, audioEnc, vae, cfg, enc);
+
+        Tensor promptEmbeds = RandRows(3, cfg.TextDim, seed: 1);
+        Tensor negEmbeds = RandRows(2, cfg.TextDim, seed: 2);
+        Tensor audio = Rand3d(3, numLayers, audioDim, seed: 9);   // 3 latent frames total → 2 clips (gt 2, motion 1)
+        byte[] reference = new byte[32 * 32 * 3];
+        new Random(5).NextBytes(reference);
+        TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 2, CfgScale = 5, Seed = 42 };
+
+        (byte[][] frames, int w, int h, _) = pipeline.GenerateChunked(
+            promptEmbeds, negEmbeds, audio, reference, req, framesPerClip: 5, motionFrames: 1);
+        Assert.True(frames.Length > 5, $"multi-chunk should extend past one clip: {frames.Length}");
+        Assert.Equal(32, w);
+        Assert.Equal(32, h);
+        foreach (byte[] f in frames) Assert.Equal(32 * 32 * 3, f.Length);
+    }
+
     private static Tensor RandRows(int rows, int cols, int seed)
     {
         Tensor t = new Tensor(new TensorShape(rows, cols), DType.F32);
