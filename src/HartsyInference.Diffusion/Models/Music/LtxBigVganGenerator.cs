@@ -4,12 +4,20 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Music;
 
-/// <summary>LTX-2 audio vocoder generator — a BigVGAN-v2 head used twice by <c>LtxAudioVocoder</c> (the main
-/// stage-1 generator <c>vocoder.vocoder.*</c> and the bandwidth-extension generator <c>vocoder.bwe_generator.*</c>).
-/// Structure mirrors <see cref="AdaMosHiFiGanV1"/>'s HiFi-GAN head but every activation is an anti-aliased
-/// SnakeBeta (BigVGAN-v2 "AMP"): <c>conv_in</c> (k7) → N × [<c>ConvTranspose1d</c> upsample (channels halve each
-/// stage) → mean of <c>resnets_per_upsample</c> multi-receptive-field <see cref="ResBlock"/>s] →
-/// anti-aliased <c>act_out</c> → <c>conv_out</c> (k7) → optional tanh.</summary>
+/// <summary>The per-stage activation family used by an <see cref="LtxBigVganGenerator"/>. <see cref="SnakeBeta"/> is
+/// the anti-aliased BigVGAN-v2 "AMP" path (the LTX-2.X BWE dual-stage vocoder); <see cref="LeakyRelu"/> is the plain
+/// HiFi-GAN path with parameter-free leaky-ReLU activations (the LTX-2 single-stage vocoder).</summary>
+public enum LtxVocoderActivation { SnakeBeta, LeakyRelu }
+
+/// <summary>LTX-2 audio vocoder generator — a HiFi-GAN/BigVGAN head. Used by <c>LtxAudioVocoder</c> as the BWE
+/// dual-stage's main generator (<c>vocoder.vocoder.*</c>) and bandwidth-extension generator
+/// (<c>vocoder.bwe_generator.*</c>), or standalone as the single-stage vocoder (<c>vocoder.*</c>). Real-checkpoint
+/// naming (the single-file Lightricks weights): <c>conv_pre</c> (k7) → N × [optional pre-upsample leaky-ReLU →
+/// <c>ConvTranspose1d</c> upsample (channels halve each stage) → mean of <c>resnets_per_upsample</c>
+/// multi-receptive-field <see cref="ResBlock"/>s under <c>resblocks.*</c>] → <c>act_post</c> → <c>conv_post</c>
+/// (k7) → optional tanh. With <see cref="LtxVocoderActivation.SnakeBeta"/> every activation is an anti-aliased
+/// SnakeBeta and there is no pre-upsample activation; with <see cref="LtxVocoderActivation.LeakyRelu"/> the
+/// activations are parameter-free leaky-ReLUs and a pre-upsample leaky-ReLU is applied each stage.</summary>
 ///
 /// <remarks>The anti-aliasing (<see cref="AntiAlias"/>) upsamples ×2 with a Kaiser-windowed sinc lowpass, applies
 /// SnakeBeta, then downsamples ×2 — killing the harmonics SnakeBeta injects above Nyquist. The lowpass filters are
@@ -27,22 +35,32 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
     private readonly int[] _resnetKernels;
     private readonly int[][] _resnetDilations;
     private readonly bool _applyTanh;
+    private readonly LtxVocoderActivation _activation;
+    private readonly float _leakySlope;
+    private readonly float _actPostSlope;
     private readonly AntiAlias _aa;
 
     private Tensor? _convInW, _convInB;
     private (Tensor W, Tensor? B)[] _ups = [];
     private ResBlock[] _resnets = [];
-    private AntiAliasAct _actOut = null!;
+    private AntiAliasAct? _actOut;
     private Tensor? _convOutW, _convOutB;
     private readonly List<IDisposable> _owned = [];
 
-    /// <param name="applyTanh">Apply a final tanh (<c>final_act_fn == "tanh"</c>). The LTX-2 main and BWE
-    /// generators both use <c>final_act_fn == None</c>, so pass <c>false</c> for them.</param>
+    /// <param name="applyTanh">Apply a final tanh (<c>final_act_fn == "tanh"</c>). The BWE main/extension
+    /// generators use <c>final_act_fn == None</c> (pass <c>false</c>); the single-stage vocoder uses tanh.</param>
+    /// <param name="activation">The per-stage activation family. <see cref="LtxVocoderActivation.SnakeBeta"/> for the
+    /// BWE generators, <see cref="LtxVocoderActivation.LeakyRelu"/> for the single-stage vocoder.</param>
+    /// <param name="leakySlope">Negative slope of the pre-upsample and resblock leaky-ReLUs (reference 0.1).</param>
+    /// <param name="actPostSlope">Negative slope of the final pre-<c>conv_post</c> leaky-ReLU. The reference uses a
+    /// bare <c>nn.LeakyReLU()</c> here (default 0.01), NOT the configured negative slope.</param>
     public LtxBigVganGenerator(
         int inChannels, int hiddenChannels, int outChannels,
         int[] upsampleFactors, int[] upsampleKernels,
         int[] resnetKernels, int[][] resnetDilations,
-        bool applyTanh = false, int antialiasRatio = 2, int antialiasKernelSize = 12)
+        bool applyTanh = false, int antialiasRatio = 2, int antialiasKernelSize = 12,
+        LtxVocoderActivation activation = LtxVocoderActivation.SnakeBeta,
+        float leakySlope = 0.1f, float actPostSlope = 0.01f)
     {
         if (upsampleFactors.Length != upsampleKernels.Length)
             throw new ArgumentException("upsampleFactors and upsampleKernels must be the same length.");
@@ -56,6 +74,9 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         _resnetKernels = resnetKernels;
         _resnetDilations = resnetDilations;
         _applyTanh = applyTanh;
+        _activation = activation;
+        _leakySlope = leakySlope;
+        _actPostSlope = actPostSlope;
         _aa = new AntiAlias(antialiasRatio, antialiasKernelSize);
         _owned.Add(_aa);
     }
@@ -65,8 +86,8 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _convInW = w[$"{prefix}.conv_in.weight"];
-        _convInB = Get(w, $"{prefix}.conv_in.bias");
+        _convInW = w[$"{prefix}.conv_pre.weight"];
+        _convInB = Get(w, $"{prefix}.conv_pre.bias");
 
         int numUps = _upsampleFactors.Length;
         int resPerUp = _resnetKernels.Length;
@@ -79,17 +100,21 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             int outC = channels / 2;
             for (int j = 0; j < resPerUp; j++)
             {
-                ResBlock rb = new(outC, _resnetKernels[j], _resnetDilations[j], _aa);
-                rb.LoadWeights(w, $"{prefix}.resnets.{i * resPerUp + j}", _owned);
+                ResBlock rb = new(outC, _resnetKernels[j], _resnetDilations[j], _aa, _activation, _leakySlope);
+                rb.LoadWeights(w, $"{prefix}.resblocks.{i * resPerUp + j}", _owned);
                 _resnets[i * resPerUp + j] = rb;
             }
             channels = outC;
         }
 
-        _actOut = new AntiAliasAct(_aa);
-        _actOut.LoadWeights(w, $"{prefix}.act_out", _owned);
-        _convOutW = w[$"{prefix}.conv_out.weight"];
-        _convOutB = Get(w, $"{prefix}.conv_out.bias");
+        // The single-stage (leaky-ReLU) vocoder's act_post is a parameter-free LeakyReLU; only SnakeBeta loads weights.
+        if (_activation == LtxVocoderActivation.SnakeBeta)
+        {
+            _actOut = new AntiAliasAct(_aa);
+            _actOut.LoadWeights(w, $"{prefix}.act_post", _owned);
+        }
+        _convOutW = w[$"{prefix}.conv_post.weight"];
+        _convOutB = Get(w, $"{prefix}.conv_post.bias");
     }
 
     /// <summary>Decode flattened input frames <c>[1, inChannels, T]</c> → waveform <c>[1, outChannels,
@@ -105,7 +130,8 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         int channels = _hiddenChannels;
         for (int i = 0; i < numUps; i++)
         {
-            // For snakebeta there is no pre-upsample activation (activations live inside the AMP resblocks).
+            // SnakeBeta puts all activations inside the AMP resblocks; leaky-ReLU applies one before each upsample.
+            if (_activation == LtxVocoderActivation.LeakyRelu) backend.LeakyRelu(cur, cur, _leakySlope);
             (Tensor uw, Tensor? ub) = _ups[i];
             int outC = channels / 2;
             int stride = _upsampleFactors[i], kernel = _upsampleKernels[i];
@@ -131,7 +157,9 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             channels = outC;
         }
 
-        Tensor act = _actOut.Forward(backend, cur);
+        Tensor act;
+        if (_actOut is not null) { act = _actOut.Forward(backend, cur); }
+        else { act = new Tensor(cur.Shape, DType.F32); backend.LeakyRelu(act, cur, _actPostSlope); }  // bare LeakyReLU (0.01)
         cur.Dispose();
         Tensor wav = Conv(backend, act, _convOutW!, _convOutB, _outChannels, padL: 3, padR: 3, dilation: 1);
         act.Dispose();
@@ -176,17 +204,21 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         private readonly int _kernel;
         private readonly int[] _dilations;
         private readonly AntiAlias _aa;
+        private readonly LtxVocoderActivation _activation;
+        private readonly float _leakySlope;
         private (Tensor W, Tensor? B)[] _convs1 = [];
         private (Tensor W, Tensor? B)[] _convs2 = [];
         private AntiAliasAct[] _acts1 = [];
         private AntiAliasAct[] _acts2 = [];
 
-        public ResBlock(int channels, int kernel, int[] dilations, AntiAlias aa)
+        public ResBlock(int channels, int kernel, int[] dilations, AntiAlias aa, LtxVocoderActivation activation, float leakySlope)
         {
             _channels = channels;
             _kernel = kernel;
             _dilations = dilations;
             _aa = aa;
+            _activation = activation;
+            _leakySlope = leakySlope;
         }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, List<IDisposable> owned)
@@ -194,12 +226,17 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             int n = _dilations.Length;
             _convs1 = new (Tensor, Tensor?)[n];
             _convs2 = new (Tensor, Tensor?)[n];
-            _acts1 = new AntiAliasAct[n];
-            _acts2 = new AntiAliasAct[n];
             for (int j = 0; j < n; j++)
             {
                 _convs1[j] = (w[$"{p}.convs1.{j}.weight"], Get(w, $"{p}.convs1.{j}.bias"));
                 _convs2[j] = (w[$"{p}.convs2.{j}.weight"], Get(w, $"{p}.convs2.{j}.bias"));
+            }
+            // Leaky-ReLU activations are parameter-free; only SnakeBeta has loadable alpha/beta (+ antialias filters).
+            if (_activation != LtxVocoderActivation.SnakeBeta) return;
+            _acts1 = new AntiAliasAct[n];
+            _acts2 = new AntiAliasAct[n];
+            for (int j = 0; j < n; j++)
+            {
                 _acts1[j] = new AntiAliasAct(_aa);
                 _acts1[j].LoadWeights(w, $"{p}.acts1.{j}", owned);
                 _acts2[j] = new AntiAliasAct(_aa);
@@ -209,15 +246,14 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
 
         public Tensor Forward(IBackend backend, Tensor x)
         {
-            int t = (int)x.Shape[2];
             Tensor cur = Clone(x);
             for (int j = 0; j < _dilations.Length; j++)
             {
                 int d = _dilations[j];
-                Tensor a1 = _acts1[j].Forward(backend, cur);
+                Tensor a1 = Act(backend, _acts1, j, cur);
                 Tensor h1 = Conv(backend, a1, _convs1[j].W, _convs1[j].B, _channels, d * (_kernel - 1) / 2, d * (_kernel - 1) / 2, d);
                 a1.Dispose();
-                Tensor a2 = _acts2[j].Forward(backend, h1);
+                Tensor a2 = Act(backend, _acts2, j, h1);
                 h1.Dispose();
                 Tensor h2 = Conv(backend, a2, _convs2[j].W, _convs2[j].B, _channels, (_kernel - 1) / 2, (_kernel - 1) / 2, 1);
                 a2.Dispose();
@@ -226,6 +262,15 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
                 cur = h2;
             }
             return cur;
+        }
+
+        /// <summary>Applies the j-th activation out-of-place: anti-aliased SnakeBeta, or a parameter-free leaky-ReLU.</summary>
+        private Tensor Act(IBackend backend, AntiAliasAct[] acts, int j, Tensor x)
+        {
+            if (_activation == LtxVocoderActivation.SnakeBeta) return acts[j].Forward(backend, x);
+            Tensor o = new(x.Shape, DType.F32);
+            backend.LeakyRelu(o, x, _leakySlope);
+            return o;
         }
 
         private static Tensor Clone(Tensor x)

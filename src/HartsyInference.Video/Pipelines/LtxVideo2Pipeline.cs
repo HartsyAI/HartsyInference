@@ -228,7 +228,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             for (int s = 0; s < samples; s++) pcm[c][s] = wp[(long)c * samples + s];
         }
         wave.Dispose();
-        sampleRate = 48000;
+        sampleRate = _vocoder.SampleRate;   // 48 kHz (BWE) or 24 kHz (single-stage), set at LoadWeights
         return pcm;
     }
 

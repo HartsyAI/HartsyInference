@@ -4,20 +4,23 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Music;
 
-/// <summary>LTX-2 audio vocoder with bandwidth extension (<c>vocoder.*</c>) — turns the audio VAE's log-mel
-/// spectrogram into a 48 kHz stereo waveform. Two-stage BigVGAN: (1) the main <see cref="LtxBigVganGenerator"/>
-/// (<c>vocoder.vocoder.*</c>) renders a low-rate waveform from the mel; (2) a causal STFT re-derives a 64-bin
-/// log-mel from that waveform, the BWE generator (<c>vocoder.bwe_generator.*</c>) predicts a high-rate residual,
-/// and a Hann-windowed sinc <see cref="Resampler"/> upsamples the stage-1 waveform to add as the low-band skip.
-/// Output = <c>clamp(residual + skip, -1, 1)</c>, cropped to the exact 48 kHz length.</summary>
+/// <summary>LTX-2 audio vocoder (<c>vocoder.*</c>) — turns the audio VAE's log-mel spectrogram into a stereo
+/// waveform. Two checkpoint variants are auto-detected from the weight keys:</summary>
 ///
-/// <remarks>Mirrors diffusers' <c>LTX2VocoderWithBWE</c>. The mel input is <c>[1, audioChannels, frames, melBins]</c>
-/// (audioChannels·melBins = the generator's flattened input channels). The STFT bases (<c>forward_basis</c>) and mel
-/// filterbank (<c>mel_basis</c>) are loaded from the checkpoint. Batch-1; stereo is carried as audioChannels = 2.
-/// Numerics validation-pending (no reference activations captured yet).</remarks>
+/// <remarks><para><b>BWE dual-stage</b> (diffusers <c>LTX2VocoderWithBWE</c>, the LTX-2.3 22B checkpoint, 48 kHz):
+/// (1) the main anti-aliased SnakeBeta <see cref="LtxBigVganGenerator"/> (<c>vocoder.vocoder.*</c>) renders a
+/// low-rate waveform; (2) a causal STFT re-derives a 64-bin log-mel, the BWE generator (<c>vocoder.bwe_generator.*</c>)
+/// predicts a high-rate residual, and a Hann-windowed sinc <see cref="Resampler"/> upsamples the stage-1 waveform as
+/// the low-band skip. Output = <c>clamp(residual + skip, -1, 1)</c>, cropped to the exact 48 kHz length.</para>
+/// <para><b>Single-stage</b> (diffusers <c>LTX2Vocoder</c>, the LTX-2 19B checkpoint, 24 kHz): one leaky-ReLU
+/// HiFi-GAN generator (<c>vocoder.*</c>) with a final tanh; no BWE/STFT/resampler.</para>
+/// <para>The mel input is <c>[1, audioChannels, frames, melBins]</c> (audioChannels·melBins = the generator's
+/// flattened input channels). The STFT bases (<c>forward_basis</c>) and mel filterbank (<c>mel_basis</c>) are loaded
+/// from the checkpoint. Batch-1; stereo is carried as audioChannels = 2. Numerics validation-pending (the anti-alias
+/// lowpass filters are recomputed rather than loaded; no reference activations captured yet).</para></remarks>
 public sealed unsafe class LtxAudioVocoder : IDisposable
 {
-    // mel_stft config.
+    // mel_stft config (BWE only).
     private const int FilterLength = 512;
     private const int HopLength = 80;
     private const int WindowLength = 512;
@@ -27,44 +30,76 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
     private const int OutputSamplingRate = 48000;
 
     private readonly int _audioChannels;
-    private readonly LtxBigVganGenerator _main;
-    private readonly LtxBigVganGenerator _bwe;
-    private readonly Resampler _resampler;
+    private LtxBigVganGenerator? _main;
+    private LtxBigVganGenerator? _bwe;
+    private LtxBigVganGenerator? _single;
+    private Resampler? _resampler;
 
     private Tensor? _forwardBasis;   // [NumFreqs*2, 1, FilterLength]
     private Tensor? _melBasis;       // [NumMelChannels, NumFreqs]
 
-    public LtxAudioVocoder(int audioChannels = 2)
-    {
-        _audioChannels = audioChannels;
-        _main = new LtxBigVganGenerator(
-            inChannels: 128, hiddenChannels: 1536, outChannels: audioChannels,
-            upsampleFactors: [5, 2, 2, 2, 2, 2], upsampleKernels: [11, 4, 4, 4, 4, 4],
-            resnetKernels: [3, 7, 11], resnetDilations: [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
-            applyTanh: false);
-        _bwe = new LtxBigVganGenerator(
-            inChannels: 128, hiddenChannels: 512, outChannels: audioChannels,
-            upsampleFactors: [6, 5, 2, 2, 2], upsampleKernels: [12, 11, 4, 4, 4],
-            resnetKernels: [3, 7, 11], resnetDilations: [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
-            applyTanh: false);
-        _resampler = new Resampler(OutputSamplingRate / InputSamplingRate, audioChannels);
-    }
+    /// <summary>Output waveform sample rate, known after <see cref="LoadWeights"/> (48 kHz BWE / 24 kHz single).</summary>
+    public int SampleRate { get; private set; }
 
+    public LtxAudioVocoder(int audioChannels = 2) => _audioChannels = audioChannels;
+
+    /// <summary>Detects the variant from the checkpoint keys and builds the matching generator stack. The BWE main
+    /// generator lives under <c>vocoder.vocoder.*</c>; the single-stage generator lives under <c>vocoder.*</c> (so
+    /// the BWE marker <c>vocoder.bwe_generator.*</c> must be probed first).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _main.LoadWeights(w, "vocoder.vocoder");
-        _bwe.LoadWeights(w, "vocoder.bwe_generator");
-        _forwardBasis = w["vocoder.mel_stft.stft_fn.forward_basis"];
-        _melBasis = AsF32(w["vocoder.mel_stft.mel_basis"]);
+        if (w.ContainsKey("vocoder.bwe_generator.conv_pre.weight"))
+        {
+            _main = new LtxBigVganGenerator(
+                inChannels: 128, hiddenChannels: 1536, outChannels: _audioChannels,
+                upsampleFactors: [5, 2, 2, 2, 2, 2], upsampleKernels: [11, 4, 4, 4, 4, 4],
+                resnetKernels: [3, 7, 11], resnetDilations: [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                applyTanh: false);
+            _bwe = new LtxBigVganGenerator(
+                inChannels: 128, hiddenChannels: 512, outChannels: _audioChannels,
+                upsampleFactors: [6, 5, 2, 2, 2], upsampleKernels: [12, 11, 4, 4, 4],
+                resnetKernels: [3, 7, 11], resnetDilations: [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                applyTanh: false);
+            _resampler = new Resampler(OutputSamplingRate / InputSamplingRate, _audioChannels);
+            _main.LoadWeights(w, "vocoder.vocoder");
+            _bwe.LoadWeights(w, "vocoder.bwe_generator");
+            _forwardBasis = w["vocoder.mel_stft.stft_fn.forward_basis"];
+            _melBasis = AsF32(w["vocoder.mel_stft.mel_basis"]);
+            SampleRate = OutputSamplingRate;
+            return;
+        }
+        if (w.ContainsKey("vocoder.conv_pre.weight"))
+        {
+            _single = new LtxBigVganGenerator(
+                inChannels: 128, hiddenChannels: 1024, outChannels: _audioChannels,
+                upsampleFactors: [6, 5, 2, 2, 2], upsampleKernels: [16, 15, 8, 4, 4],
+                resnetKernels: [3, 7, 11], resnetDilations: [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+                applyTanh: true, activation: LtxVocoderActivation.LeakyRelu);
+            _single.LoadWeights(w, "vocoder");
+            SampleRate = 24000;
+            return;
+        }
+        throw new KeyNotFoundException(
+            "No LTX-2 vocoder weights found: expected either 'vocoder.bwe_generator.conv_pre.weight' (BWE) " +
+            "or 'vocoder.conv_pre.weight' (single-stage).");
     }
 
-    /// <summary>Vocode a log-mel spectrogram <c>[1, audioChannels, frames, melBins]</c> into a 48 kHz waveform
-    /// <c>[1, audioChannels, samples]</c> in [-1, 1]. Caller owns the returned tensor.</summary>
+    /// <summary>Vocode a log-mel spectrogram <c>[1, audioChannels, frames, melBins]</c> into a waveform
+    /// <c>[1, audioChannels, samples]</c> in [-1, 1] at <see cref="SampleRate"/>. Caller owns the returned tensor.</summary>
     public Tensor Forward(IBackend backend, Tensor mel)
     {
+        // Single-stage: one generator (it applies the final tanh) and we are done.
+        if (_single is not null)
+        {
+            Tensor sIn = FlattenMel(mel);
+            Tensor sOut = _single.Forward(backend, sIn);
+            sIn.Dispose();
+            return sOut;
+        }
+
         // 1. Stage-1 generator: flatten (audioChannels, melBins) → input channels, then render the low-rate waveform.
         Tensor mainIn = FlattenMel(mel);
-        Tensor x = _main.Forward(backend, mainIn);   // [1, audioChannels, numSamples]
+        Tensor x = _main!.Forward(backend, mainIn);   // [1, audioChannels, numSamples]
         mainIn.Dispose();
 
         int numSamples = (int)x.Shape[2];
@@ -83,11 +118,11 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         // 3. BWE generator on the new mel → high-rate residual [1, audioChannels, bweSamples].
         Tensor bweIn = FlattenMel(TransposeLast(logMel));   // [1, C, frames, mel] → [1, C*mel, frames]
         logMel.Dispose();
-        Tensor residual = _bwe.Forward(backend, bweIn);
+        Tensor residual = _bwe!.Forward(backend, bweIn);
         bweIn.Dispose();
 
         // 4. Residual + resampled stage-1 skip, clamped and cropped to the exact output length.
-        Tensor skip = _resampler.Forward(backend, x);
+        Tensor skip = _resampler!.Forward(backend, x);
         int outputSamples = (int)((long)numSamples * OutputSamplingRate / InputSamplingRate);
         Tensor waveform = AddClampCrop(residual, skip, outputSamples);
         residual.Dispose();
@@ -225,9 +260,10 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
 
     public void Dispose()
     {
-        _main.Dispose();
-        _bwe.Dispose();
-        _resampler.Dispose();
+        _main?.Dispose();
+        _bwe?.Dispose();
+        _single?.Dispose();
+        _resampler?.Dispose();
     }
 
     /// <summary>Hann-windowed sinc resampler (the reference's <c>UpSample1d(window_type="hann")</c>): replicate-pad,
