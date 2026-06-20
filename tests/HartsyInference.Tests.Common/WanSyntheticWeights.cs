@@ -86,6 +86,34 @@ public static unsafe class WanSyntheticWeights
         return w;
     }
 
+    /// <summary>Base transformer weights + the S2V audio injector blocks (face-block-style cross-attn at the given layers).</summary>
+    public static Dictionary<string, Tensor> BuildS2VTransformer(WanVideoConfig c, int[] injectLayers)
+    {
+        Dictionary<string, Tensor> w = BuildTransformer(c);
+        int dim = c.InnerDim;
+        for (int i = 0; i < injectLayers.Length; i++)
+        {
+            string p = $"audio_injector.{i}";
+            w[$"{p}.to_q.weight"] = R([dim, dim]); w[$"{p}.to_q.bias"] = R([dim]);
+            w[$"{p}.to_k.weight"] = R([dim, dim]); w[$"{p}.to_k.bias"] = R([dim]);
+            w[$"{p}.to_v.weight"] = R([dim, dim]); w[$"{p}.to_v.bias"] = R([dim]);
+            w[$"{p}.to_out.weight"] = R([dim, dim]); w[$"{p}.to_out.bias"] = R([dim]);
+            w[$"{p}.norm_q.weight"] = R([c.HeadDim]); w[$"{p}.norm_k.weight"] = R([c.HeadDim]);
+        }
+        return w;
+    }
+
+    /// <summary>Synthetic weights for a <c>WanS2VAudioEncoder</c> (layer-weights + two causal Conv1ds).</summary>
+    public static Dictionary<string, Tensor> BuildAudioEncoder(string p, int numLayers, int audioDim, int dim, int tokens, int kernel = 3)
+    {
+        return new Dictionary<string, Tensor>
+        {
+            [$"{p}.layer_weights"] = R([numLayers]),
+            [$"{p}.conv1.weight"] = R([dim, audioDim, kernel]), [$"{p}.conv1.bias"] = R([dim]),
+            [$"{p}.conv2.weight"] = R([dim * tokens, dim, kernel]), [$"{p}.conv2.bias"] = R([dim * tokens]),
+        };
+    }
+
     private static Tensor R(int[] dims)
     {
         long[] d = Array.ConvertAll(dims, x => (long)x);

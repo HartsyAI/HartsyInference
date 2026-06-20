@@ -151,4 +151,13 @@ public sealed record WanVideoConfig
         FfnDim = 8960, NumLayers = 30, VaeSpatialCompression = 8, FlowShift = 3.0f,
         VaceLayers = [0, 5, 10, 15, 20, 25], VaceInChannels = 96,
     };
+
+    /// <summary>Wan2.2-S2V-14B (speech-to-video): the Wan2.1-14B backbone with the audio injector. Config values are
+    /// provisional (reconstructed from the original Wan repo, not diffusers — see <c>WAN_VIDEO_ARCHITECTURE.md</c>).
+    /// <c>InChannels</c> stays at the VAE z here (audio+text); the pipeline may bump it to concat a reference latent.</summary>
+    public static WanVideoConfig S2V_14B => new()
+    {
+        NumHeads = 40, HeadDim = 128, InChannels = 16, OutChannels = 16, VaeLatentChannels = 16,
+        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f,
+    };
 }
