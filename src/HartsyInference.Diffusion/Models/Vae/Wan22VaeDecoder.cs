@@ -41,7 +41,8 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         _zDim = zDim;
         _dimMult = dimMult ?? [1, 2, 4, 4];
         _numResBlocks = numResBlocks;
-        _temperalUpsample = temperalUpsample ?? [false, true, true];
+        // Real wan2.2_vae: time_conv on decoder up-stages 0 and 1 (verified from the checkpoint header).
+        _temperalUpsample = temperalUpsample ?? [true, true, false];
     }
 
     private int[] BuildDims()
@@ -79,6 +80,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
             bool tUp = i < _temperalUpsample.Length && _temperalUpsample[i];
             int mult = _numResBlocks + 1;
 
+            // Real wan2.2_vae uses NESTED decoder.upsamples.{i}.upsamples.{j} (verified from the checkpoint header).
             Wan22ResidualBlock[] res = new Wan22ResidualBlock[mult];
             int cur = inDim;
             for (int j = 0; j < mult; j++)

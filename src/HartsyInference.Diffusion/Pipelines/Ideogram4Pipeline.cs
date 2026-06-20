@@ -164,6 +164,21 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             // Negative pass: image-only sequence, zeroed text, unconditional transformer.
             Tensor negV = _unconditional.Forward(Backend, negLlm, z, tVal, posIdsImageOnly, indicatorImageOnly, null);
 
+            // Conditioning-effect probe (profile-gated): relative RMS difference between the conditional
+            // and unconditional velocities. ~0 means the prompt has no effect (encoder/feature bug);
+            // a substantial value means text conditioning is live. Reads DataPointer (a D2H sync), so
+            // it only runs under HARTSY_DIT_PROFILE=1.
+            double cfgDelta = -1;
+            if (HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.Enabled)
+            {
+                float* pp = (float*)posV.DataPointer;
+                float* np = (float*)negV.DataPointer;
+                long nv = posV.ElementCount;
+                double sd = 0, sn = 0;
+                for (long e = 0; e < nv; e++) { double d = pp[e] - np[e]; sd += d * d; sn += (double)np[e] * np[e]; }
+                cfgDelta = Math.Sqrt(sd / nv) / (Math.Sqrt(sn / nv) + 1e-9);
+            }
+
             // v = gw·pos + (1−gw)·neg ; z = z + v·delta — in-place on the GPU-resident latent.
             Backend.CfgEulerStep(z, posV, negV, gw, delta);
             posV.Dispose();
@@ -174,7 +189,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             long syncs = Backend.GetD2hSyncCount();
             string vram = totalB > 0 ? $"{(totalB - freeB) / 1073741824.0:F1}/{totalB / 1073741824.0:F1} GiB used" : "n/a";
             string profile = HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.Enabled
-                ? $" | attn {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.AttentionMs:F0}ms mlp {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.MlpMs:F0}ms (both passes)"
+                ? $" | attn {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.AttentionMs:F0}ms mlp {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.MlpMs:F0}ms (both passes) | cfgΔ {cfgDelta:F3}"
                 : "";
             Logs.Info($"[Ideogram4] step {steps - i}/{steps} t={tVal:F3} gw={gw:F1} {stepSw.ElapsedMilliseconds}ms | VRAM {vram} | D2H syncs {syncs}{profile}");
             // Tag the latent family for live-preview decoders (Flux.2 VAE, shared with Lens). The working

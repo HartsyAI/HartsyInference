@@ -40,6 +40,16 @@ public class LtxVideo2CheckpointConverterTests
     }
 
     [Theory]
+    // Original single-file Lightricks VAE (flat up_blocks.0..6) → the diffusers grouping the decoder reads.
+    // Real keys verified from the ltx-2 checkpoint header.
+    [InlineData("vae.decoder.up_blocks.0.res_blocks.0.conv1.conv.weight", B.Vae, "decoder.mid_block.resnets.0.conv1.conv.weight")]
+    [InlineData("vae.decoder.up_blocks.6.res_blocks.4.conv2.conv.bias", B.Vae, "decoder.up_blocks.2.resnets.4.conv2.conv.bias")]
+    [InlineData("vae.decoder.up_blocks.1.conv.conv.weight", B.Vae, "decoder.up_blocks.0.upsamplers.0.conv.conv.weight")]
+    [InlineData("vae.decoder.up_blocks.3.conv.conv.weight", B.Vae, "decoder.up_blocks.1.upsamplers.0.conv.conv.weight")]
+    [InlineData("vae.decoder.up_blocks.5.conv.conv.weight", B.Vae, "decoder.up_blocks.2.upsamplers.0.conv.conv.weight")]
+    [InlineData("vae.decoder.up_blocks.4.res_blocks.2.conv1.conv.weight", B.Vae, "decoder.up_blocks.1.resnets.2.conv1.conv.weight")]
+    [InlineData("vae.per_channel_statistics.mean-of-means", B.Vae, "latents_mean")]
+    [InlineData("vae.per_channel_statistics.std-of-means", B.Vae, "latents_std")]
     [InlineData("vae.decoder.conv_in.conv.weight", B.Vae, "decoder.conv_in.conv.weight")]
     [InlineData("vae.latents_mean", B.Vae, "latents_mean")]
     [InlineData("audio_vae.decoder.conv_out.conv.weight", B.AudioVae, "decoder.conv_out.conv.weight")]

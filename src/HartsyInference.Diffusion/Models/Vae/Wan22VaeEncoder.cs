@@ -51,7 +51,8 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
         _zDim = zDim;
         _dimMult = dimMult ?? [1, 2, 4, 4];
         _numResBlocks = numResBlocks;
-        _temperalDownsample = temperalDownsample ?? [true, true, false];
+        // Real wan2.2_vae: time_conv on encoder down-stages 1 and 2 (verified from the checkpoint header).
+        _temperalDownsample = temperalDownsample ?? [false, true, true];
     }
 
     private int[] BuildDims()
@@ -79,6 +80,7 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
             bool downFlag = i != _dimMult.Length - 1;
             bool tDown = i < _temperalDownsample.Length && _temperalDownsample[i];
 
+            // Real wan2.2_vae uses NESTED encoder.downsamples.{i}.downsamples.{j} (verified from the checkpoint header).
             Wan22ResidualBlock[] res = new Wan22ResidualBlock[_numResBlocks];
             int cur = inDim;
             for (int j = 0; j < _numResBlocks; j++)
