@@ -41,6 +41,29 @@ public unsafe class Wan22VaeEncoderTests
     }
 
     [Fact]
+    public void Encode_MultiFrameClip_TemporallyCompresses()
+    {
+        CpuBackend backend = new();
+        Wan22VaeEncoder enc = BuildEncoder();
+        // 5 pixel frames → (5-1)/4 + 1 = 2 latent frames (two temporal stride-2 downsample stages).
+        Tensor rgb = Rand5d(1, 3, 5, 32, 32, seed: 23);
+
+        Tensor latent = enc.Encode(backend, rgb);
+
+        Assert.Equal(48, (int)latent.Shape[1]);
+        Assert.Equal(2, (int)latent.Shape[2]);     // temporal compression 4×
+        Assert.Equal(2, (int)latent.Shape[3]);
+        Assert.Equal(2, (int)latent.Shape[4]);
+        float* p = (float*)latent.DataPointer;
+        for (long i = 0; i < latent.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
+
+        // A single frame through Encode matches the EncodeFrame path (1 latent frame).
+        Tensor one = Rand5d(1, 3, 1, 32, 32, seed: 24);
+        Tensor lat1 = enc.Encode(backend, one);
+        Assert.Equal(1, (int)lat1.Shape[2]);
+    }
+
+    [Fact]
     public void EncodeThenDecode_RoundTripsShapes()
     {
         CpuBackend backend = new();

@@ -242,6 +242,73 @@ public unsafe class WanVideoPipelineTests
         Assert.Equal(5, frames.Length);
     }
 
+    [Fact]
+    public void GenerateImageToVideoConcat_FirstLastFrame_ProducesFrames()
+    {
+        CpuBackend backend = new();
+        // FLF2V: 36-style concat + CLIP image embeds covering BOTH first and last frames (514 tokens).
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = 2, HeadDim = 12, InChannels = 100, OutChannels = 48, VaeLatentChannels = 48,
+            TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 1, PatchSize = (1, 2, 2),
+            VaeSpatialCompression = 16, VaeTemporalCompression = 4,
+            NumInferenceSteps = 2, GuidanceScale = 5, FlowShift = 5,
+            ImageDim = 10, AddedKvProjDim = 10,
+        };
+        WanVideoTransformer transformer = new(cfg);
+        transformer.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+
+        int[] dimMult = [1, 2, 4, 4];
+        Wan22VaeDecoder vae = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
+        vae.LoadWeights(LanceSyntheticWeights.BuildVae(8, 48, dimMult, 2, [false, true, true]));
+        Wan22VaeEncoder encoder = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalDownsample: [true, true, false]);
+        encoder.LoadWeights(LanceSyntheticWeights.BuildVaeEncoder(8, 48, dimMult, 2, [true, true, false]));
+
+        WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder);
+
+        Tensor promptEmbeds = RandRows(3, cfg.TextDim, seed: 1);
+        Tensor negEmbeds = RandRows(2, cfg.TextDim, seed: 2);
+        Tensor imageEmbeds = RandRows(10, cfg.ImageDim, seed: 3);   // first+last CLIP tokens
+        byte[] firstFrame = new byte[32 * 32 * 3]; new Random(7).NextBytes(firstFrame);
+        byte[] lastFrame = new byte[32 * 32 * 3]; new Random(9).NextBytes(lastFrame);
+        TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 2, CfgScale = 5, Seed = 42 };
+
+        (byte[][] frames, _, _, _) = pipeline.GenerateImageToVideoConcat(
+            promptEmbeds, negEmbeds, imageEmbeds, firstFrame, req, numFrames: 5, onProgress: null, lastRgb24: lastFrame);
+        Assert.Equal(5, frames.Length);
+    }
+
+    [Fact]
+    public void GenerateVideoToVideo_TinyConfig_ProducesFrames()
+    {
+        CpuBackend backend = new();
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = 2, HeadDim = 12, InChannels = 48, OutChannels = 48, VaeLatentChannels = 48,
+            TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 1, PatchSize = (1, 2, 2),
+            VaeSpatialCompression = 16, VaeTemporalCompression = 4,
+            NumInferenceSteps = 4, GuidanceScale = 5, FlowShift = 5,
+        };
+        WanVideoTransformer transformer = new(cfg);
+        transformer.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+
+        int[] dimMult = [1, 2, 4, 4];
+        Wan22VaeDecoder vae = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
+        vae.LoadWeights(LanceSyntheticWeights.BuildVae(8, 48, dimMult, 2, [false, true, true]));
+        Wan22VaeEncoder encoder = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalDownsample: [true, true, false]);
+        encoder.LoadWeights(LanceSyntheticWeights.BuildVaeEncoder(8, 48, dimMult, 2, [true, true, false]));
+
+        WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder);
+
+        Tensor promptEmbeds = RandRows(3, cfg.TextDim, seed: 1);
+        Tensor negEmbeds = RandRows(2, cfg.TextDim, seed: 2);
+        Tensor clip = Rand5d(1, 3, 5, 32, 32, seed: 9);   // 5 frames → 2 latent frames
+        TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 4, CfgScale = 5, Seed = 42 };
+
+        (byte[][] frames, _, _, _) = pipeline.GenerateVideoToVideo(promptEmbeds, negEmbeds, clip, strength: 0.6f, req);
+        Assert.Equal(5, frames.Length);
+    }
+
     private static Tensor RandRows(int rows, int cols, int seed)
     {
         Tensor t = new Tensor(new TensorShape(rows, cols), DType.F32);

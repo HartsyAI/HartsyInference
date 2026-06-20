@@ -72,6 +72,12 @@ public sealed record WanVideoConfig
     /// <summary>Default flow-match shift (5.0 for 720p, 3.0 for 480p).</summary>
     public float FlowShift { get; init; } = 5.0f;
 
+    /// <summary>VACE control-branch layer indices (the main-block indices where the VACE hints are added back).</summary>
+    public int[] VaceLayers { get; init; } = [];
+
+    /// <summary>VACE control patch-embed input channels (Wan VACE: 96 = inactive-latent 16 + reactive-latent 16 + space-to-depth mask 64).</summary>
+    public int VaceInChannels { get; init; } = 96;
+
     /// <summary>Default sampling steps.</summary>
     public int NumInferenceSteps { get; init; } = 50;
 
@@ -128,5 +134,21 @@ public sealed record WanVideoConfig
     {
         NumHeads = 40, HeadDim = 128, InChannels = 36, OutChannels = 16, VaeLatentChannels = 16,
         FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f, BoundaryRatio = 0.9f,
+    };
+
+    /// <summary>Wan2.1 VACE-14B: T2V-14B + the VACE control branch (8 hint layers, 96-ch control patch embed).</summary>
+    public static WanVideoConfig Vace_14B => new()
+    {
+        NumHeads = 40, HeadDim = 128, InChannels = 16, OutChannels = 16, VaeLatentChannels = 16,
+        FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f,
+        VaceLayers = [0, 5, 10, 15, 20, 25, 30, 35], VaceInChannels = 96,
+    };
+
+    /// <summary>Wan2.1 VACE-1.3B: T2V-1.3B + the VACE control branch (6 hint layers within the 30-layer DiT).</summary>
+    public static WanVideoConfig Vace_1_3B => new()
+    {
+        NumHeads = 12, HeadDim = 128, InChannels = 16, OutChannels = 16, VaeLatentChannels = 16,
+        FfnDim = 8960, NumLayers = 30, VaeSpatialCompression = 8, FlowShift = 3.0f,
+        VaceLayers = [0, 5, 10, 15, 20, 25], VaceInChannels = 96,
     };
 }

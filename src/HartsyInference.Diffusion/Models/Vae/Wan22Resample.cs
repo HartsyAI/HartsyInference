@@ -31,7 +31,7 @@ public sealed unsafe class Wan22Resample
     private readonly Wan22ResampleMode _mode;
     private Tensor? _convW, _convB;
     private CausalConv3d? _timeConv;            // upsample3d temporal branch (dim → 2·dim, kernel (3,1,1))
-    private Tensor? _downTimeW, _downTimeB;     // downsample3d temporal branch (stride-2 — held for preload, streaming follow-up)
+    private CausalConv3d? _downTimeConv;        // downsample3d temporal branch (dim → dim, kernel (3,1,1), strideT 2, causal)
 
     public Wan22Resample(int dim, bool temporal = false)
         : this(dim, temporal ? Wan22ResampleMode.Upsample3d : Wan22ResampleMode.Upsample2d)
@@ -56,8 +56,9 @@ public sealed unsafe class Wan22Resample
         }
         else if (_mode == Wan22ResampleMode.Downsample3d)
         {
-            weights.TryGetValue($"{prefix}.time_conv.weight", out _downTimeW);
-            weights.TryGetValue($"{prefix}.time_conv.bias", out _downTimeB);
+            weights.TryGetValue($"{prefix}.time_conv.bias", out Tensor? tb);
+            // CausalConv3d(dim→dim, kernel (3,1,1), strideT 2, causal padT 1): halves T per stage.
+            _downTimeConv = new CausalConv3d(weights[$"{prefix}.time_conv.weight"], tb, strideT: 2, padT: 1, padH: 0, padW: 0);
         }
     }
 
@@ -66,17 +67,27 @@ public sealed unsafe class Wan22Resample
         if (_convW is not null) yield return _convW;
         if (_convB is not null) yield return _convB;
         if (_timeConv is not null) foreach (Tensor t in _timeConv.EnumerateWeights()) yield return t;
-        if (_downTimeW is not null) yield return _downTimeW;
-        if (_downTimeB is not null) yield return _downTimeB;
+        if (_downTimeConv is not null) foreach (Tensor t in _downTimeConv.EnumerateWeights()) yield return t;
     }
 
     /// <summary>Resample. Upsample modes return <c>[B, C, Tout, 2H, 2W]</c> (time_conv doubles T from chunk 2 on);
     /// downsample modes return <c>[B, C, T, H/2, W/2]</c> (first-chunk semantics — temporal stride deferred to the
     /// encoder streaming follow-up).</summary>
-    public Tensor Forward(IBackend backend, Tensor x, Wan22StreamCache? cache = null)
+    public Tensor Forward(IBackend backend, Tensor x, Wan22StreamCache? cache = null, bool applyTemporal = false)
     {
         if (_mode is Wan22ResampleMode.Downsample2d or Wan22ResampleMode.Downsample3d)
-            return DownsampleSpatial(backend, x);
+        {
+            Tensor spatial = DownsampleSpatial(backend, x);
+            // Whole-clip encode: apply the causal stride-2 temporal conv to halve T (skipped on the single-frame
+            // / first-chunk path, where it leaves T unchanged).
+            if (_mode == Wan22ResampleMode.Downsample3d && applyTemporal && _downTimeConv is not null && (int)spatial.Shape[2] > 1)
+            {
+                Tensor td = _downTimeConv.Forward(backend, spatial);
+                spatial.Dispose();
+                return td;
+            }
+            return spatial;
+        }
 
         Tensor spatialIn = x;
         bool ownsSpatialIn = false;

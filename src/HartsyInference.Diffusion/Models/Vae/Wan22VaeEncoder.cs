@@ -142,10 +142,25 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
     {
         if (rgb.Shape.Rank != 5 || rgb.Shape[1] != 3 || rgb.Shape[2] != 1)
             throw new ArgumentException($"expected RGB [1,3,1,H,W]; got {rgb.Shape}.", nameof(rgb));
+        return EncodeCore(backend, rgb);
+    }
+
+    /// <summary>Encodes a full RGB clip <c>[1, 3, T, H, W]</c> in [-1, 1] to the normalized latent
+    /// <c>[1, 48, (T−1)/4+1, H/16, W/16]</c> (whole-clip causal path: the temporal stride-2 downsample convs run over
+    /// the full clip, so the latent temporal dim matches the pipeline's grid math). For VACE control video / V2V input.</summary>
+    public Tensor Encode(IBackend backend, Tensor rgb)
+    {
+        if (rgb.Shape.Rank != 5 || rgb.Shape[1] != 3)
+            throw new ArgumentException($"expected RGB [1,3,T,H,W]; got {rgb.Shape}.", nameof(rgb));
+        return EncodeCore(backend, rgb);
+    }
+
+    private Tensor EncodeCore(IBackend backend, Tensor rgb)
+    {
         if (rgb.Shape[3] % 16 != 0 || rgb.Shape[4] % 16 != 0)
             throw new ArgumentException("H and W must be divisible by 16.", nameof(rgb));
 
-        Tensor x = Wan22VaePatch.Patchify(rgb, 2);                       // [1,12,1,H/2,W/2]
+        Tensor x = Wan22VaePatch.Patchify(rgb, 2);                       // [1,12,T,H/2,W/2]
         Tensor h = _convIn!.Forward(backend, x);
         x.Dispose();
 
@@ -160,7 +175,7 @@ public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
             }
             if (s.Resample is not null)
             {
-                Tensor down = s.Resample.Forward(backend, main);
+                Tensor down = s.Resample.Forward(backend, main, applyTemporal: true);
                 main.Dispose();
                 main = down;
             }

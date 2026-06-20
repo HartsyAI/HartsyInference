@@ -210,7 +210,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     /// first frame. Honors the MoE expert switch when a second expert was supplied.</summary>
     public (byte[][] frames, int width, int height, int seed) GenerateImageToVideoConcat(
         Tensor promptEmbeds, Tensor negativeEmbeds, Tensor? imageEmbeds, ReadOnlySpan<byte> condRgb24,
-        TextToImageRequest request, int numFrames, Action<GenerationProgress>? onProgress = null)
+        TextToImageRequest request, int numFrames, Action<GenerationProgress>? onProgress = null,
+        byte[]? lastRgb24 = null)
     {
         ThrowIfDisposed();
         if (_encoder is null)
@@ -242,11 +243,14 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // Build the fixed [1, 20, T, H, W] conditioning: [mask(4), cond-latent(16)]. The first frame is VAE-encoded
         // into latent frame 0; the remaining frames are zero, and the mask marks frame 0 as known.
         Backend.PreloadWeights(_encoder.EnumerateWeights());
-        Tensor frame0 = _encoder.EncodeRgbFrame(Backend, condRgb24, request.Width, request.Height);   // [1,16,1,hLat,wLat]
+        Tensor frame0 = _encoder.EncodeRgbFrame(Backend, condRgb24, request.Width, request.Height);   // [1,z,1,hLat,wLat]
+        Tensor? frameLast = lastRgb24 is not null
+            ? _encoder.EncodeRgbFrame(Backend, lastRgb24, request.Width, request.Height) : null;
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
-        Tensor condition = BuildI2VCondition(frame0, latentCh, tp, tLat, hLat, wLat);                 // [1,20,tLat,hLat,wLat]
+        Tensor condition = BuildI2VCondition(frame0, frameLast, latentCh, tp, tLat, hLat, wLat);      // [1,tp+z,tLat,hLat,wLat]
         frame0.Dispose();
+        frameLast?.Dispose();
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         if (_transformer2 is not null) Backend.PreloadWeights(_transformer2.EnumerateWeights());
@@ -298,10 +302,91 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         return (frames, request.Width, request.Height, seed);
     }
 
-    /// <summary>Builds the <c>[1, 20, T, H, W]</c> I2V conditioning <c>[mask(4), cond-latent(16)]</c>: the VAE-encoded
-    /// first frame occupies latent frame 0, the rest are zero, and the 4 mask channels are 1 at frame 0 (known) and 0
-    /// elsewhere — a structural stand-in for diffusers' temporal mask interleave (validation-gated).</summary>
-    private static Tensor BuildI2VCondition(Tensor frame0, int latentCh, int temporalFactor, int tLat, int hLat, int wLat)
+    /// <summary>Video-to-video: VAE-encodes <paramref name="rgbClip"/> <c>[1, 3, T, H, W]</c>, noises it to the
+    /// flow-match start determined by <paramref name="strength"/> (1 = full re-generation, &lt;1 = stay closer to the
+    /// input), and runs the standard T2V denoise from that step (img2img-for-video). Honors the MoE expert switch.</summary>
+    public (byte[][] frames, int width, int height, int seed) GenerateVideoToVideo(
+        Tensor promptEmbeds, Tensor negativeEmbeds, Tensor rgbClip, float strength, TextToImageRequest request,
+        Action<GenerationProgress>? onProgress = null)
+    {
+        ThrowIfDisposed();
+        if (_encoder is null)
+            throw new InvalidOperationException("Video2Video needs a Wan VAE encoder.");
+        if (rgbClip.Shape.Rank != 5 || rgbClip.Shape[1] != 3)
+            throw new ArgumentException($"rgbClip must be [1,3,T,H,W]; got {rgbClip.Shape}.", nameof(rgbClip));
+
+        int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
+        int pixT = (int)rgbClip.Shape[2], pixH = (int)rgbClip.Shape[3], pixW = (int)rgbClip.Shape[4];
+        if (pixH % sp != 0 || pixW % sp != 0)
+            throw new ArgumentException($"clip H/W must be divisible by {sp}.");
+        if ((pixT - 1) % tp != 0)
+            throw new ArgumentException($"clip frame count must satisfy (T-1) % {tp} == 0; got {pixT}.");
+        strength = Math.Clamp(strength, 0f, 1f);
+
+        int seed = request.Seed ?? SeedGenerator.RandomSeed();
+        int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
+        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
+        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        float shift = _config.FlowShift;
+        int startStep = Math.Clamp((int)Math.Round((1f - strength) * steps), 0, steps - 1);
+
+        Logs.Info($"Wan-Video V2V: {pixT}f {pixW}x{pixH}, strength={strength}, start step {startStep}/{steps}, " +
+            $"cfg={guidance}, seed={seed} (latent {latentCh}x{tLat}x{hLat}x{wLat}, shift={shift})");
+        Logs.Warning("Wan-Video V2V pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
+
+        Backend.PreloadWeights(_encoder.EnumerateWeights());
+        Tensor real = _encoder.Encode(Backend, rgbClip);                 // [1, z, tLat, hLat, wLat]
+        Backend.Sync();
+        Backend.FreeWeights(_encoder.EnumerateWeights());
+
+        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        float sigma0 = tsteps[startStep];
+        Tensor noise = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
+        Tensor latents = new Tensor(real.Shape, DType.F32);
+        long n = real.Shape.ElementCount;
+        float* rp = (float*)real.DataPointer, np = (float*)noise.DataPointer, lp = (float*)latents.DataPointer;
+        for (long i = 0; i < n; i++) lp[i] = (1f - sigma0) * rp[i] + sigma0 * np[i];   // flow-match noising
+        real.Dispose(); noise.Dispose();
+
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        if (_transformer2 is not null) Backend.PreloadWeights(_transformer2.EnumerateWeights());
+        for (int k = startStep; k < steps; k++)
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            float t = tsteps[k], dt = t - tsteps[k + 1], tEmb = t * 1000f;
+            WanVideoTransformer expert = Expert(tEmb);
+            Tensor vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb);
+            Tensor vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb);
+            LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
+            vCond.Dispose(); vUncond.Dispose();
+            sw.Stop();
+            onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
+            {
+                Latent = latents,
+                LatentArch = LatentArchitecture.Wan,
+            });
+        }
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+
+        Tensor rgb;
+        try { rgb = _vae.Decode(Backend, latents); }
+        finally { latents.Dispose(); }
+        int f = (int)rgb.Shape[2];
+        byte[][] frames = new byte[f][];
+        for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
+        rgb.Dispose();
+        Logs.Info($"Wan-Video V2V complete ({frames.Length} frames, seed={seed})");
+        return (frames, pixW, pixH, seed);
+    }
+
+    /// <summary>Builds the <c>[1, tp+z, T, H, W]</c> I2V conditioning <c>[mask(tp), cond-latent(z)]</c>: the VAE-encoded
+    /// first frame occupies latent frame 0 (and <paramref name="frameLast"/>, when given, the last latent frame for
+    /// first-last-frame I2V), the rest are zero; the mask channels are 1 on the known frame(s) and 0 elsewhere — a
+    /// structural stand-in for diffusers' temporal mask interleave (validation-gated).</summary>
+    private static Tensor BuildI2VCondition(Tensor frame0, Tensor? frameLast, int latentCh, int temporalFactor,
+        int tLat, int hLat, int wLat)
     {
         int maskCh = temporalFactor;
         int condCh = maskCh + latentCh;
@@ -310,13 +395,25 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         long frame = (long)hLat * wLat;
         long perChannel = (long)tLat * frame;
         new Span<float>(op, (int)((long)condCh * perChannel)).Clear();
-        // Mask channels (0..maskCh): 1 at latent frame 0.
+        int lastFrame = tLat - 1;
+        // Mask channels: 1 at latent frame 0 (and the last latent frame for FLF2V).
         for (int m = 0; m < maskCh; m++)
+        {
             for (long p = 0; p < frame; p++) op[(long)m * perChannel + p] = 1f;
-        // Cond-latent channels (maskCh..condCh): VAE first-frame latent at frame 0.
+            if (frameLast is not null)
+                for (long p = 0; p < frame; p++) op[(long)m * perChannel + (long)lastFrame * frame + p] = 1f;
+        }
+        // Cond-latent channels: first-frame latent at frame 0, optional last-frame latent at the last frame.
         float* fp = (float*)frame0.DataPointer;   // [1, latentCh, 1, hLat, wLat]
         for (int c = 0; c < latentCh; c++)
             Buffer.MemoryCopy(fp + (long)c * frame, op + ((long)(maskCh + c) * perChannel), frame * 4, frame * 4);
+        if (frameLast is not null)
+        {
+            float* lp = (float*)frameLast.DataPointer;
+            for (int c = 0; c < latentCh; c++)
+                Buffer.MemoryCopy(lp + (long)c * frame,
+                    op + ((long)(maskCh + c) * perChannel + (long)lastFrame * frame), frame * 4, frame * 4);
+        }
         return o;
     }
 

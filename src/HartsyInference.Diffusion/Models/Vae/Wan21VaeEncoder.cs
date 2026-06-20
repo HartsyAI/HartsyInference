@@ -122,6 +122,20 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
     {
         if (rgb.Shape.Rank != 5 || rgb.Shape[1] != 3 || rgb.Shape[2] != 1)
             throw new ArgumentException($"expected RGB [1,3,1,H,W]; got {rgb.Shape}.", nameof(rgb));
+        return EncodeCore(backend, rgb);
+    }
+
+    /// <summary>Encodes a full RGB clip <c>[1, 3, T, H, W]</c> in [-1, 1] to the normalized latent
+    /// <c>[1, 16, (T−1)/4+1, H/8, W/8]</c> (whole-clip causal temporal compression). For VACE / Video2Video.</summary>
+    public Tensor Encode(IBackend backend, Tensor rgb)
+    {
+        if (rgb.Shape.Rank != 5 || rgb.Shape[1] != 3)
+            throw new ArgumentException($"expected RGB [1,3,T,H,W]; got {rgb.Shape}.", nameof(rgb));
+        return EncodeCore(backend, rgb);
+    }
+
+    private Tensor EncodeCore(IBackend backend, Tensor rgb)
+    {
         if (rgb.Shape[3] % 8 != 0 || rgb.Shape[4] % 8 != 0)
             throw new ArgumentException("H and W must be divisible by 8.", nameof(rgb));
 
@@ -136,7 +150,7 @@ public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
             }
             if (s.Resample is not null)
             {
-                Tensor down = s.Resample.Forward(backend, h);
+                Tensor down = s.Resample.Forward(backend, h, applyTemporal: true);
                 h.Dispose();
                 h = down;
             }
