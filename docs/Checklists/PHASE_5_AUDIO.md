@@ -182,6 +182,18 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] `vocos-mel-24khz` vocoder — [`Vocos.cs`](../../src/HartsyInference.Audio/Models/Vocoders/Vocos.cs): Conv embed → 8 ConvNeXt blocks → mag/phase head → iSTFT
 - **Validated:** `F5TtsSmokeTests` + `F5ForwardLiveTest` (skip/early-exit when checkpoint absent).
 
+### Dia-1.6B (Nari Labs) — BUILT (structural, synthetic-forward verified); checkpoint-gated
+> `nari-labs/Dia-1.6B` — a T5/Whisper-style **encoder-decoder** TTS (the **first cross-attention transformer
+> in the Audio package**) generating a 9-codebook DAC grid (delay pattern) → 44.1 kHz. Research:
+> [`DIA_TTS_ARCHITECTURE.md`](../Research/DIA_TTS_ARCHITECTURE.md). Files under [`Models/Dia/`](../../src/HartsyInference.Audio/Models/Dia/) + [`DiaPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/DiaPipeline.cs).
+- [x] [`DiaConfig.cs`](../../src/HartsyInference.Audio/Models/Dia/DiaConfig.cs) — `Dia1_6B` (enc 12L/1024/MHA, dec 18L/2048/GQA 16:4 self + 16:16 cross, head_dim 128, 9 channels, audio vocab 1028, delay `[0,8..15]`, CFG 3.0). **Tested.**
+- [x] [`DiaAttention.cs`](../../src/HartsyInference.Audio/Models/Dia/DiaAttention.cs) + [`DiaHeads.cs`](../../src/HartsyInference.Audio/Models/Dia/DiaHeads.cs) — parameterized attention (encoder self non-causal MHA, decoder self causal GQA + RoPE + KV-cache, decoder cross-attn over precomputed encoder K/V) reusing `RotaryEmbedding` + `ScaledDotProductAttention` + `ProjectLinear`.
+- [x] [`DiaMlp.cs`](../../src/HartsyInference.Audio/Models/Dia/DiaMlp.cs) (fused gate_up SwiGLU) + [`DiaEncoder.cs`](../../src/HartsyInference.Audio/Models/Dia/DiaEncoder.cs) + [`DiaDecoder.cs`](../../src/HartsyInference.Audio/Models/Dia/DiaDecoder.cs) (9 summed channel embeds + fused `logits_dense` → 9×1028 head).
+- [x] [`MusicGenDelay.Apply`](../../src/HartsyInference.Audio/Models/Music/MusicGenDelay.cs) BOS/PAD overload (distinct lead-in vs tail fill). **Tested** (round-trip).
+- [x] [`DiaPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/DiaPipeline.cs) — cond+uncond encode → per-branch cross-KV → CFG delayed-AR decode (two decoders sharing weights) → channel-0 EOS + flush → revert delay → DAC decode → 44.1 kHz.
+- [x] **Synthetic-weight forward verified** ([`DiaTests`](../../tests/HartsyInference.Audio.Tests/DiaTests.cs)) — tiny config runs encoder + cross-attn decoder step to finite output (exercises every net-new attention flavor).
+- [ ] **Reconcile on checkpoint load:** original-repo `DenseGeneral` fused-tensor reshape vs HF key layout, RoPE on cross-attn (currently off), and audio-prompt voice cloning (prefix DAC codes). eSpeak byte tokenization is caller-side.
+
 ### XTTS-v2
 - [ ] `XttsGpt.cs` — GPT-2-style 30L × 1024
 - [ ] `XttsTokenizer.cs` — shared BPE + `[<lang>]` prefix tokens + per-language romanizers (pinyin, cutlet)
