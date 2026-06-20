@@ -140,6 +140,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             Backend.ResetD2hSyncCount();
+            HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.Reset();
             float tVal = schedule.Map(grid[i + 1]);
             float sVal = schedule.Map(grid[i]);
             float delta = sVal - tVal;
@@ -172,7 +173,10 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             (long freeB, long totalB) = Backend.GetVramInfo();
             long syncs = Backend.GetD2hSyncCount();
             string vram = totalB > 0 ? $"{(totalB - freeB) / 1073741824.0:F1}/{totalB / 1073741824.0:F1} GiB used" : "n/a";
-            Logs.Info($"[Ideogram4] step {steps - i}/{steps} t={tVal:F3} gw={gw:F1} {stepSw.ElapsedMilliseconds}ms | VRAM {vram} | D2H syncs {syncs}");
+            string profile = HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.Enabled
+                ? $" | attn {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.AttentionMs:F0}ms mlp {HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.MlpMs:F0}ms (both passes)"
+                : "";
+            Logs.Info($"[Ideogram4] step {steps - i}/{steps} t={tVal:F3} gw={gw:F1} {stepSw.ElapsedMilliseconds}ms | VRAM {vram} | D2H syncs {syncs}{profile}");
             // Tag the latent family for live-preview decoders (Flux.2 VAE, shared with Lens). The working
             // latent is token-packed [1, nImg, 128], so no per-step Latent snapshot is provided.
             onProgress?.Invoke(new GenerationProgress(steps - i, steps, stepSw.Elapsed.TotalMilliseconds)

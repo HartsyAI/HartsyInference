@@ -1448,15 +1448,18 @@ public sealed class CudaBackend : IBackend
                 }
                 else
                 {
-                    CublasApi.cublasSgemm(
+                    // F32 QK^T via TF32 tensor cores (~8x over FP32 CUDA cores). TF32 keeps the F32
+                    // exponent range, so raw pre-softmax scores can't overflow the way F16 would.
+                    CublasApi.cublasGemmEx(
                         _cublasHandle,
                         CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
                         (int)Skv, (int)Sq, (int)D,
                         &alpha,
-                        kPtr, (int)D,
-                        qPtr, (int)D,
+                        kPtr, CublasApi.CUDA_R_32F, (int)D,
+                        qPtr, CublasApi.CUDA_R_32F, (int)D,
                         &beta,
-                        sPtr, (int)Skv).ThrowOnCublasError();
+                        sPtr, CublasApi.CUDA_R_32F, (int)Skv,
+                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
             }
 
@@ -1519,15 +1522,17 @@ public sealed class CudaBackend : IBackend
                 }
                 else
                 {
-                    CublasApi.cublasSgemm(
+                    // attn_weights @ V via TF32 tensor cores (~8x over FP32 CUDA cores).
+                    CublasApi.cublasGemmEx(
                         _cublasHandle,
                         CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
                         (int)D, (int)Sq, (int)Skv,
                         &one,
-                        vPtr, (int)D,
-                        sPtr, (int)Skv,
+                        vPtr, CublasApi.CUDA_R_32F, (int)D,
+                        sPtr, CublasApi.CUDA_R_32F, (int)Skv,
                         &zero,
-                        oPtr, (int)D).ThrowOnCublasError();
+                        oPtr, CublasApi.CUDA_R_32F, (int)D,
+                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                 }
             }
 

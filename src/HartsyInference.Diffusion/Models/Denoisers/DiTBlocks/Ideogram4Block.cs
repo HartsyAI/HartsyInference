@@ -126,7 +126,10 @@ public sealed unsafe class Ideogram4Block
         backend.AffineBroadcastLastDim(mod1, norm1, scaleMsa, null);
         norm1.Dispose();
 
+        System.Diagnostics.Stopwatch? attnSw = null;
+        if (Ideogram4Profile.Enabled) { backend.Sync(); attnSw = System.Diagnostics.Stopwatch.StartNew(); }
         Tensor attn = Attention(backend, mod1, cos, sin, attentionMask, batch, seqLen);
+        if (Ideogram4Profile.Enabled) { backend.Sync(); Ideogram4Profile.AttentionMs += attnSw!.Elapsed.TotalMilliseconds; }
         mod1.Dispose();
 
         Tensor attnNormed = new Tensor(shape, x.DType);
@@ -144,7 +147,10 @@ public sealed unsafe class Ideogram4Block
         backend.AffineBroadcastLastDim(mod2, norm2, scaleMlp, null);
         norm2.Dispose();
 
+        System.Diagnostics.Stopwatch? mlpSw = null;
+        if (Ideogram4Profile.Enabled) { backend.Sync(); mlpSw = System.Diagnostics.Stopwatch.StartNew(); }
         Tensor mlp = ForwardSwiGlu(backend, mod2, batch, seqLen);
+        if (Ideogram4Profile.Enabled) { backend.Sync(); Ideogram4Profile.MlpMs += mlpSw!.Elapsed.TotalMilliseconds; }
         mod2.Dispose();
 
         Tensor mlpNormed = new Tensor(shape, x.DType);
