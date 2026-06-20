@@ -279,6 +279,13 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`DemucsConvBlock.cs`](../../src/HartsyInference.Audio/Models/Demucs/DemucsConvBlock.cs) — HEnc/HDec 1D+2D GLU conv block (Conv2D/ConvTranspose2d/Conv1d + GELU + plain GLU). **Synthetic-forward verified** (enc + dec). [`HtDemucsConfig.cs`](../../src/HartsyInference.Audio/Models/Demucs/HtDemucsConfig.cs) tested.
 - [ ] **Staged:** the full `HtDemucs` assembly (STFT→cac→dual-branch→freq-collapse+time-inject merge→transformer→decode→mask→iSTFT→sum — the bit-exact-risky merge needs a reference run), DConv residual, `freq_emb`, and the `.th` bag loader (reuse the GameCraft `.pt` pickle loader).
 
+### Resemble Enhance — audio FX (enhance/denoise): LCFM core BUILT + verified; denoiser/UnivNet staged
+> Speech enhancer: a 2D-STFT denoiser + an LCFM (latent CFM + IRMAE) + UnivNet vocoder. Research: [`RESEMBLE_ENHANCE_ARCHITECTURE.md`](../Research/RESEMBLE_ENHANCE_ARCHITECTURE.md). Files under [`Models/ResembleEnhance/`](../../src/HartsyInference.Audio/Models/ResembleEnhance/) + [`ResembleEnhancePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ResembleEnhancePipeline.cs).
+- [x] [`ResembleWnEstimator.cs`](../../src/HartsyInference.Audio/Models/ResembleEnhance/ResembleWnEstimator.cs) — the WN CFM velocity net (30 dilated gated layers, InstanceNorm local cond + sinusoidal time global), implementing `ICfmEstimator`. Synthetic-forward verified.
+- [x] [`ResembleIrmaeDecoder.cs`](../../src/HartsyInference.Audio/Models/ResembleEnhance/ResembleIrmaeDecoder.cs) — IRMAE latent→mel decoder (res-stacks + head). Synthetic-forward verified.
+- [x] [`ResembleEnhancePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/ResembleEnhancePipeline.cs) — **reuses the CosyVoice `ConditionalCfm`** (CFG off) to solve the latent CFM, then IRMAE-decodes → enhanced mel. Synthetic-forward verified (mel → mel).
+- [ ] **Staged:** the 2D-STFT denoiser UNet (denoise-only path / mel pre-conditioner), the UnivNet LVCNet vocoder, slaney-dB mel front-end, midpoint/rk4 + exponential time-mapping (currently euler), τ-prior, and the DeepSpeed `.pt` loader.
+
 ### ChatTTS
 - [ ] `ChatTtsGpt.cs` — single LLaMA-style 20L × 768, 4-codebook GFSQ output
 - [ ] `ChatTtsDvaeDecoder.cs` — 12-layer dilated ConvNeXt
