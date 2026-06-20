@@ -18,6 +18,8 @@ public sealed unsafe class WanVideoBlock
     private Tensor?[] _q = new Tensor?[2], _qB = new Tensor?[2], _k = new Tensor?[2], _kB = new Tensor?[2],
         _v = new Tensor?[2], _vB = new Tensor?[2], _o = new Tensor?[2], _oB = new Tensor?[2], _nq = new Tensor?[2], _nk = new Tensor?[2];
     private Tensor? _ffProjW, _ffProjB, _ffOutW, _ffOutB;
+    // I2V image cross-attention KV (cross-attn to CLIP image context); present only when the checkpoint ships them.
+    private Tensor? _addK, _addKB, _addV, _addVB, _normAddedK;
 
     public WanVideoBlock(WanVideoConfig c, bool crossAttnNorm)
     {
@@ -33,6 +35,13 @@ public sealed unsafe class WanVideoBlock
         _scaleShift = LoadF32(w, $"{prefix}.scale_shift_table");   // [1,6,dim] → flat 6*dim
         LoadAttn(w, $"{prefix}.attn1", 0);
         LoadAttn(w, $"{prefix}.attn2", 1);
+        // I2V image cross-attention (only present in image-conditioned checkpoints).
+        if (w.TryGetValue($"{prefix}.attn2.add_k_proj.weight", out Tensor? addK))
+        {
+            _addK = addK; w.TryGetValue($"{prefix}.attn2.add_k_proj.bias", out _addKB);
+            _addV = w[$"{prefix}.attn2.add_v_proj.weight"]; w.TryGetValue($"{prefix}.attn2.add_v_proj.bias", out _addVB);
+            _normAddedK = LoadF32(w, $"{prefix}.attn2.norm_added_k.weight");
+        }
         if (_crossAttnNorm) { _norm2W = LoadF32(w, $"{prefix}.norm2.weight"); w.TryGetValue($"{prefix}.norm2.bias", out _norm2B); }
         _ffProjW = w[$"{prefix}.ffn.net.0.proj.weight"]; w.TryGetValue($"{prefix}.ffn.net.0.proj.bias", out _ffProjB);
         _ffOutW = w[$"{prefix}.ffn.net.2.weight"]; w.TryGetValue($"{prefix}.ffn.net.2.bias", out _ffOutB);
@@ -57,6 +66,7 @@ public sealed unsafe class WanVideoBlock
             foreach (Tensor? t in new[] { _q[i], _qB[i], _k[i], _kB[i], _v[i], _vB[i], _o[i], _oB[i], _nq[i], _nk[i] })
                 if (t is not null) yield return t;
         foreach (Tensor? t in new[] { _ffProjW, _ffProjB, _ffOutW, _ffOutB }) if (t is not null) yield return t;
+        foreach (Tensor? t in new[] { _addK, _addKB, _addV, _addVB, _normAddedK }) if (t is not null) yield return t;
     }
 
     /// <summary>Forward over <c>[S, dim]</c>. <paramref name="temb"/> is the per-block modulation <c>[G, 6, dim]</c>
@@ -67,7 +77,7 @@ public sealed unsafe class WanVideoBlock
     /// mutates the hidden state in place). <paramref name="selfAttnMask"/> is an optional additive mask broadcastable
     /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
-        Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null)
+        Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0)
     {
         int s = (int)hidden.Shape[0];
         (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(temb);
@@ -80,10 +90,9 @@ public sealed unsafe class WanVideoBlock
         Tensor h1 = GatedAdd(hidden, attn1, gateMsa, s, tokensPerGroup);
         attn1.Dispose();
 
-        // 2. cross-attn
-        int l = (int)encoder.Shape[0];
+        // 2. cross-attn (to umT5 text, plus optional CLIP image context for I2V)
         Tensor n2 = LayerNorm(h1, _norm2W, _norm2B, s);
-        Tensor attn2 = Attention(backend, n2, encoder, 1, applyRope: false, rope, cos, sin, s, l);
+        Tensor attn2 = CrossAttention(backend, n2, encoder, imageContextLen);
         n2.Dispose();
         Tensor h2 = AddRows(h1, attn2, s);
         h1.Dispose();
@@ -133,6 +142,72 @@ public sealed unsafe class WanVideoBlock
         Tensor outT = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(outT, flat, _o[idx]!, _oB[idx]);
         flat.Dispose();
         return outT;
+    }
+
+    /// <summary>Cross-attention to the umT5 text context, with an optional CLIP image branch (I2V): the first
+    /// <paramref name="imageContextLen"/> encoder rows are the projected image context (attended via
+    /// <c>add_k_proj</c>/<c>add_v_proj</c>), the rest are text. Both branches share the query; their per-head outputs
+    /// are summed before the output projection (matching diffusers' WanAttnProcessor).</summary>
+    private Tensor CrossAttention(IBackend backend, Tensor qInput, Tensor encoder, int imageContextLen)
+    {
+        int sq = (int)qInput.Shape[0];
+        int l = (int)encoder.Shape[0];
+        int textLen = l - imageContextLen;
+
+        Tensor q = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(q, qInput, _q[1]!, _qB[1]);
+        Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq[1]!, _eps); q.Dispose();
+        Tensor qMh = ToBhsd(qn, sq); qn.Dispose();
+
+        Tensor textRows = imageContextLen > 0 ? SliceRows(encoder, imageContextLen, textLen) : encoder;
+        Tensor flat = AttnBranch(backend, qMh, textRows, _k[1]!, _kB[1], _v[1]!, _vB[1], _nk[1]!, sq, textLen);
+        if (imageContextLen > 0) textRows.Dispose();
+
+        if (imageContextLen > 0 && _addK is not null)
+        {
+            Tensor imgRows = SliceRows(encoder, 0, imageContextLen);
+            Tensor flatImg = AttnBranch(backend, qMh, imgRows, _addK!, _addKB, _addV!, _addVB, _normAddedK!, sq, imageContextLen);
+            imgRows.Dispose();
+            AddInPlace(flat, flatImg);
+            flatImg.Dispose();
+        }
+        qMh.Dispose();
+
+        Tensor outT = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(outT, flat, _o[1]!, _oB[1]);
+        flat.Dispose();
+        return outT;
+    }
+
+    /// <summary>One cross-attention KV branch: project + QK-norm the key, SDPA against the shared multi-head query
+    /// <paramref name="qMh"/> <c>[1, heads, sq, headDim]</c>, return the flattened <c>[sq, dim]</c> (pre output-proj).</summary>
+    private Tensor AttnBranch(IBackend backend, Tensor qMh, Tensor kvRows, Tensor kW, Tensor? kB, Tensor vW, Tensor? vB,
+        Tensor kNorm, int sq, int sk)
+    {
+        Tensor k = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(k, kvRows, kW, kB);
+        Tensor v = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(v, kvRows, vW, vB);
+        Tensor kn = new Tensor(k.Shape, DType.F32); backend.RmsNorm(kn, k, kNorm, _eps); k.Dispose();
+        Tensor kMh = ToBhsd(kn, sk); kn.Dispose();
+        Tensor vMh = ToBhsd(v, sk); v.Dispose();
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
+        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, scale);
+        kMh.Dispose(); vMh.Dispose();
+        Tensor flat = FromBhsd(attn, sq); attn.Dispose();
+        return flat;
+    }
+
+    private Tensor SliceRows(Tensor x, int start, int len)
+    {
+        Tensor o = new Tensor(new TensorShape(len, _dim), DType.F32);
+        Buffer.MemoryCopy((float*)x.DataPointer + (long)start * _dim, (float*)o.DataPointer,
+            (long)len * _dim * 4, (long)len * _dim * 4);
+        return o;
+    }
+
+    private void AddInPlace(Tensor acc, Tensor add)
+    {
+        long n = acc.Shape.ElementCount;
+        float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
+        for (long i = 0; i < n; i++) ap[i] += dp[i];
     }
 
     private Tensor Ffn(IBackend backend, Tensor x, int s)

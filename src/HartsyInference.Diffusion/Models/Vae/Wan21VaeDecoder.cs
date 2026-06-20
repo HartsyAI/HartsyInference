@@ -14,7 +14,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <para>Decode: <c>z·std+mean → conv2(16→16) → conv1(16→384) → [Res,Attn,Res] → stage0 res×3+up3d → stage1 res×3+up3d
 /// → stage2 res×3+up2d → stage3 res×3 → head(RMS,SiLU,conv→3)</c>. T&gt;1 streams per latent frame via the shared
 /// temporal cache (frames = (T−1)·4 + 1).</para></summary>
-public sealed unsafe class Wan21VaeDecoder
+public sealed unsafe class Wan21VaeDecoder : IWanVaeDecoder
 {
     private readonly int _zDim;
     private readonly int _dim;

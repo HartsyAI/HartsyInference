@@ -120,6 +120,50 @@ public unsafe class WanVideoTransformerTests
         Assert.Throws<ArgumentException>(() => transformer.Forward(backend, latent, encoder, [0f, 0.5f, 0.5f]));
     }
 
+    [Fact]
+    public void Transformer_ImageConditioned_ProducesLatentShape()
+    {
+        CpuBackend backend = new();
+        // I2V-shaped tiny config: 36-style concat input (InChannels) but 8-ch output, CLIP image cross-attn.
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = 2, HeadDim = 12, InChannels = 12, OutChannels = 8, VaeLatentChannels = 8,
+            TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 2, PatchSize = (1, 2, 2),
+            ImageDim = 10, AddedKvProjDim = 10,
+        };
+        WanVideoTransformer transformer = new(cfg);
+        transformer.LoadWeights(BuildWanImage(cfg));
+
+        Tensor latent = RandRows5d(1, cfg.InChannels, 2, 4, 4, seed: 41);
+        Tensor encoder = RandRows(3, cfg.TextDim, seed: 42);
+        Tensor imageEmbeds = RandRows(5, cfg.ImageDim, seed: 43);   // 5 CLIP tokens
+
+        Tensor outVel = transformer.Forward(backend, latent, encoder, [0.5f], imageEmbeds);
+
+        Assert.Equal(cfg.OutChannels, (int)outVel.Shape[1]);
+        Assert.Equal(2, (int)outVel.Shape[2]);
+        float* p = (float*)outVel.DataPointer;
+        for (long i = 0; i < outVel.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
+    }
+
+    private static Dictionary<string, Tensor> BuildWanImage(WanVideoConfig c)
+    {
+        Dictionary<string, Tensor> w = BuildWan(c);
+        int dim = c.InnerDim, img = c.ImageDim;
+        w["condition_embedder.image_embedder.norm1.weight"] = R([img]); w["condition_embedder.image_embedder.norm1.bias"] = R([img]);
+        w["condition_embedder.image_embedder.ff.net.0.proj.weight"] = R([img, img]); w["condition_embedder.image_embedder.ff.net.0.proj.bias"] = R([img]);
+        w["condition_embedder.image_embedder.ff.net.2.weight"] = R([dim, img]); w["condition_embedder.image_embedder.ff.net.2.bias"] = R([dim]);
+        w["condition_embedder.image_embedder.norm2.weight"] = R([dim]); w["condition_embedder.image_embedder.norm2.bias"] = R([dim]);
+        for (int i = 0; i < c.NumLayers; i++)
+        {
+            string p = $"blocks.{i}";
+            w[$"{p}.attn2.add_k_proj.weight"] = R([dim, dim]); w[$"{p}.attn2.add_k_proj.bias"] = R([dim]);
+            w[$"{p}.attn2.add_v_proj.weight"] = R([dim, dim]); w[$"{p}.attn2.add_v_proj.bias"] = R([dim]);
+            w[$"{p}.attn2.norm_added_k.weight"] = R([dim]);
+        }
+        return w;
+    }
+
     private static Dictionary<string, Tensor> BuildWan(WanVideoConfig c)
     {
         int dim = c.InnerDim, ff = c.FfnDim;

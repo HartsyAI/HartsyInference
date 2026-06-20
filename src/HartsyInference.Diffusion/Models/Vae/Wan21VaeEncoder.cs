@@ -11,7 +11,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <para><b>Scope:</b> the single-frame / first-chunk path (one RGB frame → one latent frame) — what Matrix-Game 2.0
 /// needs for the conditioning image. The temporal stride-2 <c>time_conv</c>s are skipped on the first chunk;
 /// multi-frame streaming encode is the shared Wan-family follow-up. Numerics validation-pending.</para></summary>
-public sealed unsafe class Wan21VaeEncoder
+public sealed unsafe class Wan21VaeEncoder : IWanVaeEncoder
 {
     private readonly int _zDim;
     private readonly int _dim;

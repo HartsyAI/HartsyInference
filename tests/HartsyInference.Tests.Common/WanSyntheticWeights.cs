@@ -24,6 +24,15 @@ public static unsafe class WanSyntheticWeights
             ["condition_embedder.text_embedder.linear_1.weight"] = R([dim, c.TextDim]), ["condition_embedder.text_embedder.linear_1.bias"] = R([dim]),
             ["condition_embedder.text_embedder.linear_2.weight"] = R([dim, dim]), ["condition_embedder.text_embedder.linear_2.bias"] = R([dim]),
         };
+        if (c.HasImageConditioning)
+        {
+            int img = c.ImageDim;
+            w["condition_embedder.image_embedder.norm1.weight"] = R([img]); w["condition_embedder.image_embedder.norm1.bias"] = R([img]);
+            w["condition_embedder.image_embedder.ff.net.0.proj.weight"] = R([img, img]); w["condition_embedder.image_embedder.ff.net.0.proj.bias"] = R([img]);
+            w["condition_embedder.image_embedder.ff.net.2.weight"] = R([dim, img]); w["condition_embedder.image_embedder.ff.net.2.bias"] = R([dim]);
+            w["condition_embedder.image_embedder.norm2.weight"] = R([dim]); w["condition_embedder.image_embedder.norm2.bias"] = R([dim]);
+            if (c.PosEmbedSeqLen > 0) w["condition_embedder.image_embedder.pos_embed"] = R([1, c.PosEmbedSeqLen, img]);
+        }
         for (int i = 0; i < c.NumLayers; i++)
         {
             string p = $"blocks.{i}";
@@ -36,6 +45,12 @@ public static unsafe class WanSyntheticWeights
                 w[$"{p}.{a}.to_v.weight"] = R([dim, dim]); w[$"{p}.{a}.to_v.bias"] = R([dim]);
                 w[$"{p}.{a}.to_out.0.weight"] = R([dim, dim]); w[$"{p}.{a}.to_out.0.bias"] = R([dim]);
                 w[$"{p}.{a}.norm_q.weight"] = R([dim]); w[$"{p}.{a}.norm_k.weight"] = R([dim]);
+            }
+            if (c.HasImageConditioning)
+            {
+                w[$"{p}.attn2.add_k_proj.weight"] = R([dim, dim]); w[$"{p}.attn2.add_k_proj.bias"] = R([dim]);
+                w[$"{p}.attn2.add_v_proj.weight"] = R([dim, dim]); w[$"{p}.attn2.add_v_proj.bias"] = R([dim]);
+                w[$"{p}.attn2.norm_added_k.weight"] = R([dim]);
             }
             w[$"{p}.ffn.net.0.proj.weight"] = R([ff, dim]); w[$"{p}.ffn.net.0.proj.bias"] = R([ff]);
             w[$"{p}.ffn.net.2.weight"] = R([dim, ff]); w[$"{p}.ffn.net.2.bias"] = R([dim]);

@@ -18,7 +18,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// shortcut) → [Res,Attn,Res] → head(RMS,SiLU,conv→96) → quant conv1(96→96, 1×1×1) → μ = first 48 → (μ−mean)/std</c>.
 /// Spatial: patchify 2 × three stride-2 stages = 16×. Loads from the same <c>wan22_vae.safetensors</c> as the decoder
 /// (keys <c>encoder.*</c> + top-level <c>conv1.*</c>).</para></summary>
-public sealed unsafe class Wan22VaeEncoder
+public sealed unsafe class Wan22VaeEncoder : IWanVaeEncoder
 {
     private readonly int _zDim;
     private readonly int _dim;

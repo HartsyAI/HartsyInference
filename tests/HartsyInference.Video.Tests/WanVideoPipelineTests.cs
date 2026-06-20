@@ -138,6 +138,110 @@ public unsafe class WanVideoPipelineTests
         Assert.Throws<InvalidOperationException>(() => noEncoder.EncodeFirstFrame(firstFrame, 32, 32));
     }
 
+    [Fact]
+    public void GenerateFromEmbeddings_MoEDualExpert_ProducesFrames()
+    {
+        CpuBackend backend = new();
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = 2, HeadDim = 12, InChannels = 48, OutChannels = 48, VaeLatentChannels = 48,
+            TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 2, PatchSize = (1, 2, 2),
+            VaeSpatialCompression = 16, VaeTemporalCompression = 4,
+            NumInferenceSteps = 4, GuidanceScale = 5, FlowShift = 5, BoundaryRatio = 0.5f,
+        };
+        WanVideoTransformer highNoise = new(cfg); highNoise.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+        WanVideoTransformer lowNoise = new(cfg); lowNoise.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+
+        int[] dimMult = [1, 2, 4, 4];
+        bool[] tUp = [false, true, true];
+        Wan22VaeDecoder vae = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalUpsample: tUp);
+        vae.LoadWeights(LanceSyntheticWeights.BuildVae(8, 48, dimMult, 2, tUp));
+
+        WanVideoPipeline pipeline = new(backend, highNoise, vae, cfg, transformer2: lowNoise);
+
+        Tensor promptEmbeds = RandRows(3, cfg.TextDim, seed: 1);
+        Tensor negEmbeds = RandRows(2, cfg.TextDim, seed: 2);
+        TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 4, CfgScale = 5, Seed = 42 };
+
+        (byte[][] frames, int w, int h, _) = pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, req, numFrames: 5);
+        Assert.Equal(5, frames.Length);
+        Assert.Equal(32, w);
+        Assert.Equal(32, h);
+    }
+
+    [Fact]
+    public void GenerateImageToVideoConcat_ClipConditioned_ProducesFrames()
+    {
+        CpuBackend backend = new();
+        // I2V-CLIP: model input = concat(noise 48, mask 4, cond-latent 48) = 100; output/latent = 48; CLIP image cross-attn.
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = 2, HeadDim = 12, InChannels = 100, OutChannels = 48, VaeLatentChannels = 48,
+            TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 1, PatchSize = (1, 2, 2),
+            VaeSpatialCompression = 16, VaeTemporalCompression = 4,
+            NumInferenceSteps = 2, GuidanceScale = 5, FlowShift = 5,
+            ImageDim = 10, AddedKvProjDim = 10,
+        };
+        WanVideoTransformer transformer = new(cfg);
+        transformer.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+
+        int[] dimMult = [1, 2, 4, 4];
+        Wan22VaeDecoder vae = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
+        vae.LoadWeights(LanceSyntheticWeights.BuildVae(8, 48, dimMult, 2, [false, true, true]));
+        Wan22VaeEncoder encoder = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalDownsample: [true, true, false]);
+        encoder.LoadWeights(LanceSyntheticWeights.BuildVaeEncoder(8, 48, dimMult, 2, [true, true, false]));
+
+        WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder);
+
+        Tensor promptEmbeds = RandRows(3, cfg.TextDim, seed: 1);
+        Tensor negEmbeds = RandRows(2, cfg.TextDim, seed: 2);
+        Tensor imageEmbeds = RandRows(5, cfg.ImageDim, seed: 3);   // 5 CLIP tokens
+        byte[] firstFrame = new byte[32 * 32 * 3];
+        new Random(7).NextBytes(firstFrame);
+        TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 2, CfgScale = 5, Seed = 42 };
+
+        (byte[][] frames, int w, int h, _) = pipeline.GenerateImageToVideoConcat(
+            promptEmbeds, negEmbeds, imageEmbeds, firstFrame, req, numFrames: 5);
+        Assert.Equal(5, frames.Length);
+        Assert.Equal(32, w);
+        Assert.Equal(32, h);
+        foreach (byte[] f in frames) Assert.Equal(32 * 32 * 3, f.Length);
+    }
+
+    [Fact]
+    public void GenerateImageToVideoConcat_NoClip_A14BStyle_ProducesFrames()
+    {
+        CpuBackend backend = new();
+        // Wan2.2 I2V-A14B style: 36-ch concat input, NO CLIP image embedder, no add_k/v (ImageDim=0).
+        WanVideoConfig cfg = new()
+        {
+            NumHeads = 2, HeadDim = 12, InChannels = 100, OutChannels = 48, VaeLatentChannels = 48,
+            TextDim = 16, FreqDim = 16, FfnDim = 32, NumLayers = 1, PatchSize = (1, 2, 2),
+            VaeSpatialCompression = 16, VaeTemporalCompression = 4,
+            NumInferenceSteps = 2, GuidanceScale = 5, FlowShift = 5,
+        };
+        WanVideoTransformer transformer = new(cfg);
+        transformer.LoadWeights(WanSyntheticWeights.BuildTransformer(cfg));
+
+        int[] dimMult = [1, 2, 4, 4];
+        Wan22VaeDecoder vae = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalUpsample: [false, true, true]);
+        vae.LoadWeights(LanceSyntheticWeights.BuildVae(8, 48, dimMult, 2, [false, true, true]));
+        Wan22VaeEncoder encoder = new(dim: 8, zDim: 48, dimMult: dimMult, numResBlocks: 2, temperalDownsample: [true, true, false]);
+        encoder.LoadWeights(LanceSyntheticWeights.BuildVaeEncoder(8, 48, dimMult, 2, [true, true, false]));
+
+        WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder);
+
+        Tensor promptEmbeds = RandRows(3, cfg.TextDim, seed: 1);
+        Tensor negEmbeds = RandRows(2, cfg.TextDim, seed: 2);
+        byte[] firstFrame = new byte[32 * 32 * 3];
+        new Random(8).NextBytes(firstFrame);
+        TextToImageRequest req = new() { Prompt = "x", Width = 32, Height = 32, Steps = 2, CfgScale = 5, Seed = 42 };
+
+        (byte[][] frames, _, _, _) = pipeline.GenerateImageToVideoConcat(
+            promptEmbeds, negEmbeds, imageEmbeds: null, firstFrame, req, numFrames: 5);
+        Assert.Equal(5, frames.Length);
+    }
+
     private static Tensor RandRows(int rows, int cols, int seed)
     {
         Tensor t = new Tensor(new TensorShape(rows, cols), DType.F32);

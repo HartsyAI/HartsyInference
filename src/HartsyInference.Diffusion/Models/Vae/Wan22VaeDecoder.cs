@@ -8,7 +8,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <para><b>Scope:</b> this implements the <b>image / first-chunk</b> decode path (T=1), which is fully <b>stateless</b> — the upstream driver decodes frame 0 with <c>first_chunk=True</c> and a fresh all-None cache, so every conv zero-pads and the temporal <c>time_conv</c> is skipped. Multi-frame video (chunks 2+, <c>feat_cache</c> streaming) is a documented follow-up. <b>Numeric output is validation-pending vs the real checkpoint</b> (no weights available in this environment); structure + shapes are CPU-tested.</para>
 ///
 /// <para>Decode: <c>z·std+mean → conv2(48→48) → conv1(48→1024) → [Res,Attn,Res] → 4 up-stages → head(RMS,SiLU,conv→12) → unpatchify(2) → RGB</c>. Spatial 8× (3 upsampling stages) × unpatchify 2× = 16×.</para></summary>
-public sealed unsafe class Wan22VaeDecoder
+public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
 {
     private readonly int _zDim;
     private readonly int _dim;
