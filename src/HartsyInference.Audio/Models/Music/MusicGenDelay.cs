@@ -23,6 +23,23 @@ public static class MusicGenDelay
         return delayed;
     }
 
+    /// <summary>Delay-stage variant with distinct fills for the lead-in vs the tail — Dia uses audio-BOS
+    /// before a codebook's content starts and audio-PAD after the real frames end (BOS takes precedence).</summary>
+    public static int[,] Apply(int[,] real, int[] delay, int preFill, int postFill)
+    {
+        int t = real.GetLength(0);
+        int k = real.GetLength(1);
+        int max = Max(delay);
+        int[,] delayed = new int[t + max, k];
+        for (int s = 0; s < t + max; s++)
+            for (int c = 0; c < k; c++)
+            {
+                int src = s - delay[c];
+                delayed[s, c] = src < 0 ? preFill : src >= t ? postFill : real[src, c];
+            }
+        return delayed;
+    }
+
     /// <summary>Reads <paramref name="tReal"/> real frames back out of the delayed grid
     /// <paramref name="delayed"/> <c>[Tg, K]</c>: <c>real[j,k] = delayed[j+delay[k],k]</c>.</summary>
     public static int[,] Revert(int[,] delayed, int[] delay, int tReal)

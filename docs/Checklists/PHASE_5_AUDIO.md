@@ -101,6 +101,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] `SNAC` decoder + encoder with hierarchical RVQ ([Models/Codecs/Snac/](../../src/HartsyInference.Audio/Models/Codecs/Snac/) — covers Orpheus TTS; 24/32/44.1 kHz presets)
 - [x] `WavTokenizer` encoder + decoder with iSTFT head ([Models/Codecs/WavTokenizer/](../../src/HartsyInference.Audio/Models/Codecs/WavTokenizer/) — single 4096-entry codebook)
 - [x] `BiCodec` semantic + global encoders ([Models/Codecs/BiCodec/](../../src/HartsyInference.Audio/Models/Codecs/BiCodec/) — covers Spark-TTS)
+- [x] `NeuCodec` decode path ([Models/Codecs/NeuCodec/](../../src/HartsyInference.Audio/Models/Codecs/NeuCodec/) — covers NeuTTS Air; single FSQ codebook `4^8=65536`, Vocos-transformer backbone + iSTFT head, 16 kHz in / 24 kHz out). Encoder (ref-audio → codes) deferred.
 - [x] FSQ codec primitives ([Models/Codecs/Fsq.cs](../../src/HartsyInference.Audio/Models/Codecs/Fsq.cs) — parity-aware tanh bound + base-L packing)
 - [x] Weight-norm fusion — runtime via [Models/Codecs/WeightNormFusion.cs](../../src/HartsyInference.Audio/Models/Codecs/WeightNormFusion.cs); offline CLI at [samples/FuseWeightNorm/](../../samples/FuseWeightNorm/)
 - [x] **Streaming codec wrapper** ([Models/Codecs/StreamingCodec.cs](../../src/HartsyInference.Audio/Models/Codecs/StreamingCodec.cs)) — generic `StreamingCodecEncoder<T>` / `StreamingCodecDecoder<T>` over any of the 9 codecs, for live-mic encode and live-playback decode use cases.
@@ -141,6 +142,17 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`MoonshinePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/MoonshinePipeline.cs) — Conv1D front-end + RoPE encoder/decoder ([`MoonshineEncoder`](../../src/HartsyInference.Audio/Models/Moonshine/MoonshineEncoder.cs)/[`MoonshineDecoder`](../../src/HartsyInference.Audio/Models/Moonshine/MoonshineDecoder.cs)) + SentencePiece byte-fallback BPE ([`MoonshineTokenizer`](../../src/HartsyInference.Audio/Models/Moonshine/MoonshineTokenizer.cs))
 - [x] Hallucination guard — **approximated** via a token-count cap proportional to encoder-seconds (`MoonshinePipeline`); the dynamic rate-based ~6.5 tok/s ceiling is not yet enforced
 - **Validated:** `MoonshineEndToEndTests` transcribes canonical JFK audio (real end-to-end; skip-gated on cache/network).
+
+### Kyutai STT (delayed-streams) — BUILT (structural); checkpoint-gated validation pending
+> `kyutai/stt-1b-en_fr` + `kyutai/stt-2.6b-en`. Helium = `Qwen2Model` (attn-bias off) driven headless via
+> `ForwardEmbeds`; audio in via the built Mimi (32-codebook DSM variant). Research: [`KYUTAI_DSM_ARCHITECTURE.md`](../Research/KYUTAI_DSM_ARCHITECTURE.md). Files under [`Models/Kyutai/`](../../src/HartsyInference.Audio/Models/Kyutai/) + [`KyutaiSttPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/KyutaiSttPipeline.cs).
+- [x] [`KyutaiSttConfig.cs`](../../src/HartsyInference.Audio/Models/Kyutai/KyutaiSttConfig.cs) — `Stt1B` (16L/16 heads/head_dim 128/vocab 8001) + `Stt2_6B` (48L/32 heads/head_dim 64/vocab 4001) Helium presets + DSM params (32 codebooks, 2049 codebook-vocab, audio offsets, silence-prefix/delay). **Tested.**
+- [x] [`MimiConfig.Mimi24kHzDsm`](../../src/HartsyInference.Audio/Models/Codecs/Mimi/MimiConfig.cs) — 32-codebook (1 semantic + 31 acoustic) DSM variant.
+- [x] [`KyutaiSttModel.cs`](../../src/HartsyInference.Audio/Models/Kyutai/KyutaiSttModel.cs) — shared `embed_tokens` table (text + 32×2049 audio rows) + headless Helium; per-frame input = text-row + Σ audio-code rows; tied head projects over text-vocab rows. Audio-offset math **tested**.
+- [x] [`KyutaiSttPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/KyutaiSttPipeline.cs) — silence-pad → Mimi encode → per-frame Helium step → greedy text token → PAD-stripped token ids out.
+- [ ] **Reconcile on checkpoint load:** gated MLP ships fused `fc1`/`fc2` (split to gate|up for our Qwen2 layer), shared-embedding double-nested key, the WORD-boundary token id, and the 32-vs-8 codebook count + Mimi 12.5 Hz frame rate (shared Mimi reconcile with CSM).
+- [ ] SentencePiece tokenizer (text decode) — token-ids-out for now (caller decodes), same convention as SparkTTS/Orpheus.
+- [ ] Word-level timestamps from the WORD/PAD stream + delay subtraction; streaming `IAsyncEnumerable` surface.
 
 ### SenseVoice + FireRedASR
 - [ ] `SenseVoiceEncoder.cs` — 50-layer SANM encoder + LFR frontend + CTC head
@@ -202,6 +214,17 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] **Checkpoint converter + first-run validation** — bucket `llm.pt` / `flow.pt` / `hift.pt` (+ `campplus.onnx` / `speech_tokenizer_v2.onnx`) into the per-component LoadWeights dicts; reconcile exact state-dict keys (LM head/embedding, flow estimator topology, CAM++ D-TDNN, HiFTNet source-inject params) against the real weights, then env-gated `CosyVoiceGenerationTests`.
 - [ ] **CosyVoice 1** (300M custom TransformerLM + VQ-4096 + UNet1D CFM) — out of scope for this pass; CV2 shipped first.
 
+### Kyutai TTS (delayed-streams) — SCAFFOLD COMPLETE (depformer); checkpoint-gated
+> `kyutai/tts-1.6b-en_fr`. Moshi RQ-Transformer: temporal Helium (`Qwen2Model` headless, RoPE θ=10000) +
+> the **depformer** (RoPE-free per-step-weighted depth transformer over 32 codebooks) + Mimi decode. Research:
+> [`KYUTAI_DSM_ARCHITECTURE.md`](../Research/KYUTAI_DSM_ARCHITECTURE.md). Files under [`Models/Kyutai/`](../../src/HartsyInference.Audio/Models/Kyutai/) + [`KyutaiTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/KyutaiTtsPipeline.cs).
+- [x] [`KyutaiTtsConfig.cs`](../../src/HartsyInference.Audio/Models/Kyutai/KyutaiTtsConfig.cs) — temporal Helium (2048/16L, θ=10000, SwiGLU 8448) + depth sub-config + delays (text/cb0=0, acoustic=2) + stream delay (16 steps) + speaker dim. **Tested.**
+- [x] [`MoshiDepthConfig.cs`](../../src/HartsyInference.Audio/Models/Kyutai/MoshiDepthConfig.cs) — depformer (dim 1024 / 4L / 16 heads / FFN 3072 / dep_q 32 / low-rank 128) + the per-step weight-set schedule (11 sets: cb 0–7 unique, 8–15→8, 16–23→9, 24–31→10). **Tested.**
+- [x] [`MoshiDelay.cs`](../../src/HartsyInference.Audio/Models/Kyutai/MoshiDelay.cs) — per-codebook delay Apply/Revert. **Exact + tested.**
+- [x] [`MoshiDepthTransformer.cs`](../../src/HartsyInference.Audio/Models/Kyutai/MoshiDepthTransformer.cs) — AR over 32 codebooks: per-step input projection over low-rank embeddings → per-set RMSNorm + no-RoPE causal attention (reuses `backend.ScaledDotProductAttention`) + SwiGLU → per-step head → `NucleusSampler`.
+- [x] [`KyutaiTtsModel.cs`](../../src/HartsyInference.Audio/Models/Kyutai/KyutaiTtsModel.cs) + [`KyutaiTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/KyutaiTtsPipeline.cs) — temporal step over summed text+audio embeds → depformer frame → Mimi decode → 24 kHz PCM.
+- [ ] **Reconcile on checkpoint load:** depformer weight-key layout (per-step sets / low-rank / multi-linear), the delayed-coordinate handling (wire `MoshiDelay` into the gen loop), the PAD/EPAD/WORD text state machine + 2-step lookahead stream, and **speaker cross-attention** (the decoder-only backbone has no cross-attn sublayer yet — runs unconditioned now), plus CFG/control LUT conditioners.
+
 ### IndexTTS 1.5 + 2
 - [ ] `IndexT2sGpt.cs` — 24L × 1280
 - [ ] `IndexS2MelDit.cs` — 13L × 512 with WaveNet final layer (non-causal — no streaming)
@@ -226,6 +249,30 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] `ChatTtsSpeakerLatent.cs` — sample from `spk_stat.pt` Gaussian
 - [ ] Vocos vocoder (shared with F5-TTS)
 - [ ] 61 paralinguistic special tokens; sampling defaults differ for RefineText vs InferCode
+
+### Orpheus TTS — BUILT (single-softmax Llama + SNAC); checkpoint-gated validation pending
+> `canopylabs/orpheus-3b-0.1-ft` — a Llama-3.2-3B causal LM that emits SNAC 24 kHz audio tokens through one
+> extended-vocab softmax. **Maximal reuse:** backbone is `Qwen2Model` with `AttentionBias` off (the CSM
+> Llama path); sampling is the shared `NucleusSampler` (repetition penalty pre-shapes the logit buffer, its
+> documented usage); decode is the built SNAC. Files under [`Models/Orpheus/`](../../src/HartsyInference.Audio/Models/Orpheus/) + [`OrpheusPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/OrpheusPipeline.cs).
+- [x] [`OrpheusConfig.cs`](../../src/HartsyInference.Audio/Models/Orpheus/OrpheusConfig.cs) — `Orpheus3B` preset (Llama-3.2-3B dims + extended vocab 156,940 + the framing/audio token-id constants) + SNAC codec. **Tested** (preset shape).
+- [x] [`OrpheusCodeFrames.cs`](../../src/HartsyInference.Audio/Models/Orpheus/OrpheusCodeFrames.cs) — flat-stream parse (crop before last `CodeStart`, drop EOS, trim to 7) + 7→3 hierarchical redistribution (1/2/4 with per-position `base+p*4096` offset). **Exact + tested** (the Orpheus analog of `MusicGenDelay`).
+- [x] **SNAC 24 kHz preset corrected** to the real `hubertsiuzdak/snac_24khz` (3 codebooks, strides `[4,2,1]`) — it was mis-set to 4; Orpheus's 7=1+2+4 packing confirms 3.
+- [x] [`OrpheusPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/OrpheusPipeline.cs) — text-ids-in → human-frame wrap → AR loop (rep-penalty + nucleus draw, stop at EndOfSpeech) → extract → redistribute → SNAC decode → 24 kHz PCM.
+- [ ] `OrpheusTokenizer` — Llama BPE of `"{voice}: {text}"`; token-ids-in for now (caller tokenizes), same convention as SparkTTS/CosyVoice.
+- [ ] **Checkpoint validation** — reconcile the Llama-3.2 "llama3" RoPE NTK-by-parts rescale (factor 32, the CSM-shared deferral) + exact extended vocab rows, bucket weights into the backbone/SNAC LoadWeights, then env-gated generation test.
+
+### NeuTTS Air — BUILT (decode path); checkpoint-gated validation pending
+> `neuphonic/neutts-air` — a Qwen2.5-0.5B LM (vocab extended to 217,652 with 65,536 `<|speech_N|>` tokens)
+> emitting a single NeuCodec FSQ stream, decoded to 24 kHz. Voice cloning conditions on reference NeuCodec
+> codes in the prompt. **Reuse:** stock `Qwen2Model` + `NucleusSampler` (top-k=50) + the new `NeuCodecDecoder`
+> (which itself reuses `Fsq`, `IStft`, Moonshine `RotaryEmbedding`, and `IBackend` conv/norm/attn). Files under
+> [`Models/NeuTts/`](../../src/HartsyInference.Audio/Models/NeuTts/) + [`Models/Codecs/NeuCodec/`](../../src/HartsyInference.Audio/Models/Codecs/NeuCodec/) + [`NeuTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/NeuTtsPipeline.cs).
+- [x] [`NeuTtsConfig.cs`](../../src/HartsyInference.Audio/Models/NeuTts/NeuTtsConfig.cs) — `Air` preset (Qwen2.5-0.5B + vocab 217652) + speech-token base 151671 + framing token ids + sampling (top-k 50, temp 1.0, min-new 50). **Tested.**
+- [x] [`NeuCodecConfig.cs`](../../src/HartsyInference.Audio/Models/Codecs/NeuCodec/NeuCodecConfig.cs) + [`NeuCodecDecoder.cs`](../../src/HartsyInference.Audio/Models/Codecs/NeuCodec/NeuCodecDecoder.cs) — FSQ `4^8` de-quant → project-out → fc_post_a → Conv embed + 2 ResNet pre-net + 12 RoPE transformer blocks + final LN + 2 ResNet post-net → iSTFT head. **FSQ vocab + config tested.**
+- [x] [`NeuTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/NeuTtsPipeline.cs) — prompt prefix + speech-gen-start + ref codes → AR (top-k, min-new EOS suppression, stop at SpeechGenEnd) → codes → NeuCodec decode → 24 kHz PCM.
+- [ ] **Reconcile on checkpoint load:** NeuCodec key spelling, the RoPE convention (torchtune vs interleaved), the iSTFT "same"-padding edge handling, and the FSQ project_out presence; NeuCodec **encoder** (ref-audio → codes) for live cloning is deferred (caller supplies pre-encoded ref codes).
+- [ ] eSpeak phonemizer + Qwen tokenizer for the prompt — token-ids-in for now (caller phonemizes/tokenizes), same convention as the other TTS models.
 
 ### Higgs Audio v2
 - [ ] Llama-3.2-3B with DualFFN (per-token-type routing) — extended dotLLM
@@ -343,14 +390,18 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] `dpmpp-3m-sde` scheduler (Open 1.0 v-prediction)
 - [ ] Pingpong scheduler (Open Small distilled)
 
-### MusicGen + AudioGen
-- [ ] `MusicGenCausalLm.cs` — decoder-only, sum-of-K embeddings input, sinusoidal pos, GELU 4× FFN, K parallel heads
-- [ ] T5-base text encoder
-- [ ] EnCodec 32kHz 4-codebook (music) / EnCodec 16kHz 4-codebook (audio)
-- [ ] Delay-pattern state machine (default `[0,1,2,3]`; stereo `[0,0,1,1,2,2,3,3]`)
-- [ ] CFG two-stream batched (uncond + 3.0*(cond-uncond))
-- [ ] Melody conditioning (chromagram extractor + argmax-and-zero + cross-attn prepend)
-- [ ] Stereo variants (8 codebooks, paired delay)
+### MusicGen + AudioGen — BUILT (text-only mono); checkpoint-gated validation pending
+> One generic stack serves both — they share the AudioCraft recipe and differ only in codec config. Files
+> under [`Models/Music/`](../../src/HartsyInference.Audio/Models/Music/) + [`MusicGenPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/MusicGenPipeline.cs).
+- [x] `MusicGenDecoder.cs` — decoder-only, sum-of-K embeddings input, sinusoidal pos, GELU 4× FFN, K parallel heads, cross-attn to precomputed T5 states ([Models/Music/MusicGenDecoder.cs](../../src/HartsyInference.Audio/Models/Music/MusicGenDecoder.cs))
+- [x] T5-base text encoder — **out of the Audio package by design**: the pipeline takes precomputed `[1,T,768]` cross-attn states (same no-text-encoder-dependency convention as Kokoro/F5), caller supplies T5
+- [x] EnCodec 32kHz 4-codebook (music, [`EnCodecConfig.EnCodec32kHz`](../../src/HartsyInference.Audio/Models/Codecs/EnCodec/EnCodecConfig.cs)) / EnCodec 16kHz 4-codebook (audio, `EnCodecConfig.EnCodec16kHz`) — both 2048-entry, 50 Hz, non-causal; `n_filters` for the 16 kHz codec is the one value to reconcile on first checkpoint load
+- [x] Delay-pattern state machine (default `[0,1,2,3]`; stereo `[0,0,1,1,2,2,3,3]`) — [`MusicGenDelay.cs`](../../src/HartsyInference.Audio/Models/Music/MusicGenDelay.cs); Apply/Revert/IsActive **exact + tested** (`MusicGenTests`)
+- [x] CFG two-stream (cond + g*(cond-uncond)) — `MusicGenPipeline` (cond + null-cross uncond branch, special token masked out of every active codebook's draw)
+- [x] `MusicGenConfig.AudioGen` preset (medium dims 1536/48/24 + 16 kHz codec) — AudioGen is served verbatim by `MusicGenPipeline`; no separate pipeline (would duplicate). Smoke: `CodecSmokeTests` (32k/16k presets) + `MusicGenTests`.
+- [ ] Melody conditioning (chromagram extractor + argmax-and-zero + cross-attn prepend) — deferred
+- [ ] Stereo variants (8 codebooks, paired delay) — config supports the paired delay; stereo decode path deferred
+- [ ] **Checkpoint validation** — bucket `facebook/musicgen-medium` + `facebook/audiogen-medium` weights into the decoder/codec LoadWeights dicts, then env-gated generation test
 
 ### YuE — SCAFFOLD COMPLETE (Stage-1, first music model); checkpoint-gated
 > **First music model.** Files under [`Models/Music/`](../../src/HartsyInference.Audio/Models/Music/) + [`YuePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/YuePipeline.cs). Built almost entirely from reuse — the codec-LM music models live in the Audio package since they reuse its codecs + LM infra (the diffusion music models — ACE-Step/Stable Audio/DiffRhythm/AudioLDM2 — will go in the Diffusion package).

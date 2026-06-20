@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.Codecs.BiCodec;
 using HartsyInference.Audio.Models.Codecs.Dac;
 using HartsyInference.Audio.Models.Codecs.EnCodec;
 using HartsyInference.Audio.Models.Codecs.Mimi;
+using HartsyInference.Audio.Models.Codecs.NeuCodec;
 using HartsyInference.Audio.Models.Codecs.Snac;
 using HartsyInference.Audio.Models.Codecs.WavTokenizer;
 using HartsyInference.Audio.Models.Codecs.XCodec;
@@ -13,6 +14,7 @@ using WavTokenizerModel = HartsyInference.Audio.Models.Codecs.WavTokenizer.WavTo
 using BiCodecModel = HartsyInference.Audio.Models.Codecs.BiCodec.BiCodec;
 using XCodecModel = HartsyInference.Audio.Models.Codecs.XCodec.XCodec;
 using MimiModel = HartsyInference.Audio.Models.Codecs.Mimi.Mimi;
+using NeuCodecModel = HartsyInference.Audio.Models.Codecs.NeuCodec.NeuCodecDecoder;
 
 namespace HartsyInference.Audio.Tests.Fixtures;
 
@@ -47,7 +49,7 @@ public static class CodecCatalog
     [
         new(
             Key: "encodec_24khz",
-            Description: "Meta EnCodec 24 kHz mono (Bark / MusicGen / AudioGen)",
+            Description: "Meta EnCodec 24 kHz mono (Bark)",
             Construct: () => new EnCodecModel(EnCodecConfig.EnCodec24kHz),
             GetSampleRate: o => ((EnCodecModel)o).SampleRate,
             GetFrameRate: o => ((EnCodecModel)o).FrameRate,
@@ -55,6 +57,26 @@ public static class CodecCatalog
             ExpectedSampleRate: 24_000,
             ExpectedFrameRate: 75,
             ExpectedMaxCodebooks: 32),
+        new(
+            Key: "encodec_32khz",
+            Description: "Meta EnCodec 32 kHz mono (MusicGen)",
+            Construct: () => new EnCodecModel(EnCodecConfig.EnCodec32kHz),
+            GetSampleRate: o => ((EnCodecModel)o).SampleRate,
+            GetFrameRate: o => ((EnCodecModel)o).FrameRate,
+            GetMaxCodebooks: o => ((EnCodecModel)o).MaxCodebooks,
+            ExpectedSampleRate: 32_000,
+            ExpectedFrameRate: 50,           // 32000 / (8*5*4*4=640) = 50
+            ExpectedMaxCodebooks: 4),
+        new(
+            Key: "encodec_16khz",
+            Description: "Meta EnCodec 16 kHz mono (AudioGen)",
+            Construct: () => new EnCodecModel(EnCodecConfig.EnCodec16kHz),
+            GetSampleRate: o => ((EnCodecModel)o).SampleRate,
+            GetFrameRate: o => ((EnCodecModel)o).FrameRate,
+            GetMaxCodebooks: o => ((EnCodecModel)o).MaxCodebooks,
+            ExpectedSampleRate: 16_000,
+            ExpectedFrameRate: 50,           // 16000 / (8*5*4*2=320) = 50
+            ExpectedMaxCodebooks: 4),
         new(
             Key: "dac_44khz",
             Description: "Descript Audio Codec 44.1 kHz (IndexTTS / Higgs Audio acoustic)",
@@ -87,14 +109,14 @@ public static class CodecCatalog
             ExpectedMaxCodebooks: 12),
         new(
             Key: "snac_24khz",
-            Description: "SNAC 24 kHz hierarchical RVQ (Orpheus TTS)",
+            Description: "SNAC 24 kHz hierarchical RVQ (Orpheus TTS) — 3 codebooks, strides [4,2,1]",
             Construct: () => new SnacModel(SnacConfig.Snac24kHz),
             GetSampleRate: o => ((SnacModel)o).SampleRate,
             GetFrameRate: o => ((SnacModel)o).FrameRate,
             GetMaxCodebooks: o => ((SnacModel)o).NCodebooks,
             ExpectedSampleRate: 24_000,
             ExpectedFrameRate: 46,           // 24000 / (2*4*8*8) = 46.875 ≈ 46 with int division
-            ExpectedMaxCodebooks: 4),
+            ExpectedMaxCodebooks: 3),
         new(
             Key: "snac_32khz",
             Description: "SNAC 32 kHz",
@@ -145,6 +167,16 @@ public static class CodecCatalog
             ExpectedSampleRate: 16_000,
             ExpectedFrameRate: 50,
             ExpectedMaxCodebooks: 8),
+        new(
+            Key: "neucodec_24khz",
+            Description: "Neuphonic NeuCodec decode (NeuTTS Air) — single FSQ codebook 4^8=65536",
+            Construct: () => new NeuCodecModel(NeuCodecConfig.Default),
+            GetSampleRate: o => ((NeuCodecModel)o).SampleRate,
+            GetFrameRate: o => ((NeuCodecModel)o).FrameRate,
+            GetMaxCodebooks: o => ((NeuCodecModel)o).NCodebooks,
+            ExpectedSampleRate: 24_000,
+            ExpectedFrameRate: 50,
+            ExpectedMaxCodebooks: 1),
         new(
             Key: "mimi_24khz",
             Description: "Kyutai Mimi (Sesame CSM / Moshi)",

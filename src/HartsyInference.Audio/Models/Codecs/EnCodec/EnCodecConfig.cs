@@ -2,10 +2,12 @@ namespace HartsyInference.Audio.Models.Codecs.EnCodec;
 
 /// <summary>Configuration for Meta's EnCodec neural audio codec
 /// (<c>facebookresearch/encodec</c>, Défossez et al. 2022). Defaults match the
-/// <c>encodec_24khz</c> checkpoint that ships with Bark, MusicGen-small/medium/large
-/// (mono variant), and AudioGen-medium.
+/// <c>encodec_24khz</c> checkpoint that ships with Bark (24 kHz mono, 1024-entry codebooks).
+/// MusicGen mono uses the distinct <c>encodec_32khz</c> codec (<see cref="EnCodec32kHz"/>) and
+/// AudioGen uses <c>encodec_16khz</c> (<see cref="EnCodec16kHz"/>); both are non-causal with
+/// 2048-entry codebooks and a 50 Hz token rate.
 ///
-/// <para>The 24 kHz mono variant downsamples by <c>5*4*4*2 = 320</c> → 75 Hz latent frame
+/// <para>The 24 kHz mono variant downsamples by <c>8*5*4*2 = 320</c> → 75 Hz latent frame
 /// rate, with up to 32 residual-VQ codebooks of 1024 entries each. Operational
 /// bandwidth is set per generation via <see cref="ActiveBandwidthKbps"/> which selects
 /// the leading <c>N</c> codebooks (each codebook = ~0.75 kbps).</para></summary>
@@ -107,4 +109,35 @@ public sealed record EnCodecConfig
 
     /// <summary>EnCodec 24 kHz preset matching <c>facebook/encodec_24khz</c>.</summary>
     public static EnCodecConfig EnCodec24kHz => new();
+
+    /// <summary>EnCodec 32 kHz preset matching <c>facebook/encodec_32khz</c> — the codec MusicGen mono
+    /// consumes. Non-causal SEANet (<c>n_filters=64</c>), ratios <c>[8,5,4,4]</c> → 640× downsample → 50 Hz,
+    /// 4 codebooks of 2048 entries (2.2 kbps). See AUDIO_CODECS.md "EnCodec 32k".</summary>
+    public static EnCodecConfig EnCodec32kHz => new()
+    {
+        SampleRate = 32_000,
+        NFilters = 64,
+        Ratios = [8, 5, 4, 4],
+        Causal = false,
+        VqCodebookSize = 2_048,
+        VqMaxCodebooks = 4,
+        ActiveCodebooks = 4,
+        KbpsPerCodebook = 0.55,
+    };
+
+    /// <summary>EnCodec 16 kHz preset matching <c>facebook/encodec_16khz</c> — the codec AudioGen consumes.
+    /// Non-causal SEANet, ratios <c>[8,5,4,2]</c> → 320× downsample → 50 Hz, 4 codebooks of 2048 entries.
+    /// <c>NFilters</c> is the one value to reconcile against the checkpoint on first load (64 assumed, matching
+    /// the 32 kHz mono and Mimi 16 kHz codecs). See AUDIO_CODECS.md "EnCodec 16k".</summary>
+    public static EnCodecConfig EnCodec16kHz => new()
+    {
+        SampleRate = 16_000,
+        NFilters = 64,
+        Ratios = [8, 5, 4, 2],
+        Causal = false,
+        VqCodebookSize = 2_048,
+        VqMaxCodebooks = 4,
+        ActiveCodebooks = 4,
+        KbpsPerCodebook = 0.55,
+    };
 }

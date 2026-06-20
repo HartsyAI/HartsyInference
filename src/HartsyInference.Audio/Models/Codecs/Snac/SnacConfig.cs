@@ -28,14 +28,16 @@ public sealed record SnacConfig
     public IReadOnlyList<int> EncoderRates { get; init; } = [2, 4, 8, 8];
     public IReadOnlyList<int> DecoderRates { get; init; } = [8, 8, 4, 2];
 
-    public int NCodebooks { get; init; } = 4;
+    public int NCodebooks { get; init; } = 3;
     public int CodebookSize { get; init; } = 4_096;
     public int CodebookDim { get; init; } = 8;
 
     /// <summary>Per-codebook temporal stride. Codebook <c>i</c> processes the latent at
     /// <c>1/VqStrides[i]</c> of the bottleneck frame rate, via avg-pool down on encode
-    /// and repeat-interleave up on decode. Bigger stride = coarser timescale.</summary>
-    public IReadOnlyList<int> VqStrides { get; init; } = [4, 2, 1, 1];
+    /// and repeat-interleave up on decode. Bigger stride = coarser timescale. The 24 kHz
+    /// speech model uses <c>[4,2,1]</c> → per super-frame the 3 codebooks emit 1/2/4 codes
+    /// (the 7-code group Orpheus packs).</summary>
+    public IReadOnlyList<int> VqStrides { get; init; } = [4, 2, 1];
 
     public int ResidualKernelSize { get; init; } = 7;
     public int StemKernelSize { get; init; } = 7;
