@@ -265,6 +265,20 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] `min_p` added to `NucleusSampler` (backward-compatible) + `t3` learned-position handling.
 - [ ] **S3Gen pipeline wiring** — `ChatterboxPipeline` assembling T3 tokens → `CosyVoiceFlow` → `HiFTNetVocoder` (the reused stack, needs a Chatterbox-tuned config: cosine CFM schedule + cfg 0.7 + 10 steps + HiFT [8,5,3]); prompt-speech perceiver resampler; llama3 RoPE scaling; Perth watermark. Deferred.
 
+### Fish-Speech 1.5 / OpenAudio S1 — BUILT (DualAR + firefly decoder, synthetic-forward verified)
+> DualAR text2semantic (slow Llama + fast depth transformer) + firefly-gan-vq codec. Research: [`FISH_SPEECH_ARCHITECTURE.md`](../Research/FISH_SPEECH_ARCHITECTURE.md). Files under [`Models/FishSpeech/`](../../src/HartsyInference.Audio/Models/FishSpeech/) + [`FishSpeechPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/FishSpeechPipeline.cs).
+- [x] [`FishSpeechDualAr.cs`](../../src/HartsyInference.Audio/Models/FishSpeech/FishSpeechDualAr.cs) — slow + fast both **reuse `Qwen2Model`** (headless); dual summed-codebook embedding (offset table, ×1/√(N+1)); slow→semantic, fast depth-AR→8 codebooks. Synthetic-forward verified (valid semantic + codebooks).
+- [x] [`FireflyDecoder.cs`](../../src/HartsyInference.Audio/Models/FishSpeech/FireflyDecoder.cs) — codebook dequant → **reused `VitsHiFiGan`** (firefly upsample) → 44.1 kHz. Synthetic-forward verified.
+- [x] [`FishSpeechPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/FishSpeechPipeline.cs) — text prefill → AR frames → firefly decode.
+- [ ] **Staged:** firefly grouped-residual **FSQ** (levels (8,5,5,5)) + ConvNeXt resample + SiLU (current uses learned embeds + LeakyReLU), Fish fused `wqkv`/`w1w2w3` key adapter, BPE tokenizer + special-token ids, and the openaudio-s1 DAC-codec variant (Snake + RVQ).
+
+### Demucs (HTDemucs) — audio FX (stem separation): novel components BUILT + verified; full assembly staged
+> Hybrid Transformer Demucs v4 — dual-branch U-Net + cross-domain transformer → 4 stereo stems. Research:
+> [`HTDEMUCS_ARCHITECTURE.md`](../Research/HTDEMUCS_ARCHITECTURE.md). Files under [`Models/Demucs/`](../../src/HartsyInference.Audio/Models/Demucs/).
+- [x] [`DemucsCrossTransformer.cs`](../../src/HartsyInference.Audio/Models/Demucs/DemucsCrossTransformer.cs) — the defining cross-domain transformer (self/cross alternating, 2D/1D sin pos-emb, gated LayerScale), reusing SDPA + `DiaHeads`. **Synthetic-forward verified.**
+- [x] [`DemucsConvBlock.cs`](../../src/HartsyInference.Audio/Models/Demucs/DemucsConvBlock.cs) — HEnc/HDec 1D+2D GLU conv block (Conv2D/ConvTranspose2d/Conv1d + GELU + plain GLU). **Synthetic-forward verified** (enc + dec). [`HtDemucsConfig.cs`](../../src/HartsyInference.Audio/Models/Demucs/HtDemucsConfig.cs) tested.
+- [ ] **Staged:** the full `HtDemucs` assembly (STFT→cac→dual-branch→freq-collapse+time-inject merge→transformer→decode→mask→iSTFT→sum — the bit-exact-risky merge needs a reference run), DConv residual, `freq_emb`, and the `.th` bag loader (reuse the GameCraft `.pt` pickle loader).
+
 ### ChatTTS
 - [ ] `ChatTtsGpt.cs` — single LLaMA-style 20L × 768, 4-codebook GFSQ output
 - [ ] `ChatTtsDvaeDecoder.cs` — 12-layer dilated ConvNeXt
@@ -320,6 +334,15 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`CsmPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/CsmPipeline.cs) — frame loop (re-embedded context) → Mimi 24 kHz decode. Conversational `Segment` history is token-IDs-in (caller assembles).
 - [ ] **Aggressive streaming + persistent KV cache** (~50 ms/frame) — current path re-feeds context per frame (correct, not yet streaming-optimized).
 - [ ] **Checkpoint validation** — `sesame/csm-1b`: reconcile HF key names + decoder-side audio embeddings + Llama-3.2 RoPE rescaling (scale_factor=32), then env-gated generation test.
+
+### RVC v2 — BUILT (HuBERT + NSF synthesizer, synthetic-forward verified); RMVPE staged
+> `SynthesizerTrnMs768NSFsid`. Content (the built `Hubert`) + F0 → content+pitch encoder → reused `VitsFlow`
+> → NSF-HiFi-GAN. Research: [`RVC_ARCHITECTURE.md`](../Research/RVC_ARCHITECTURE.md). Files under [`Models/Rvc/`](../../src/HartsyInference.Audio/Models/Rvc/) + [`RvcPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/RvcPipeline.cs).
+- [x] **NSF source injection added to `VitsHiFiGan`** (`noise_convs` + optional `harSource`; backward-compatible) — reuses `NsfVocoderDsp.GenerateHarmonicSource`. The plain-HiFiGAN consumers (Piper/MeloTTS/OpenVoice/SoVITS) stay green.
+- [x] [`RvcTextEncoder.cs`](../../src/HartsyInference.Audio/Models/Rvc/RvcTextEncoder.cs) — emb_phone(768→192)+emb_pitch(256→192) front-end → **reused `VitsTextEncoder` layers**.
+- [x] [`RvcPitch.cs`](../../src/HartsyInference.Audio/Models/Rvc/RvcPitch.cs) — mel coarse-pitch quantization + octave shift. **Exact + tested.**
+- [x] [`RvcPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/RvcPipeline.cs) — content + F0 → enc_p → reused `VitsFlow` → NSF `VitsHiFiGan` → audio. **Synthetic-forward verified.**
+- [ ] **Staged:** RMVPE pitch extraction (caller supplies F0), FAISS index-retrieval blend, v1 (256-d ContentVec).
 
 ### GPT-SoVITS v2 — BUILT (3 stages, all synthetic-forward verified); enc_p MRTE + ref_enc staged
 > Two-stage (T2S GPT → SoVITS) + cn-HuBERT content encoder. Research: [`GPT_SOVITS_ARCHITECTURE.md`](../Research/GPT_SOVITS_ARCHITECTURE.md). Files under [`Models/Hubert/`](../../src/HartsyInference.Audio/Models/Hubert/) + [`Models/GptSoVits/`](../../src/HartsyInference.Audio/Models/GptSoVits/).

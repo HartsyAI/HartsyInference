@@ -1,0 +1,139 @@
+using HartsyInference.Audio.Models.FishSpeech;
+using HartsyInference.Audio.Models.LanguageModels.Qwen2;
+using HartsyInference.Audio.Models.Vits;
+using HartsyInference.Audio.Streaming;
+using HartsyInference.Cpu;
+using HartsyInference.Core.Tensors;
+using Xunit;
+
+namespace HartsyInference.Audio.Tests;
+
+/// <summary>Tests for Fish-Speech 1.5: config, a DualAR synthetic-weights frame generation (slow semantic +
+/// fast 8-codebook depth AR → valid tokens), and a firefly decoder forward (codes → finite audio).</summary>
+public sealed unsafe class FishSpeechTests
+{
+    private static uint _rng = 0xF15Au;
+    private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.2f; }
+    private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
+    private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
+    private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
+    private static Tensor F3(int a, int b, int c) => Fill(new Tensor(new TensorShape(a, b, c), DType.F32));
+    private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
+
+    [Fact]
+    public void V1_5_Config()
+    {
+        FishSpeechConfig c = FishSpeechConfig.V1_5;
+        Assert.Equal(1_024, c.Backbone.HiddenSize);
+        Assert.Equal(24, c.Backbone.NumHiddenLayers);
+        Assert.Equal(2, c.Backbone.NumKeyValueHeads);
+        Assert.Equal(8, c.NumCodebooks);
+        Assert.Equal(1_024, c.CodebookSize);
+        Assert.Equal(4, c.Fast.NumHiddenLayers);
+    }
+
+    [Fact]
+    public void DualAr_SyntheticForward_GeneratesSemanticAndCodebooks()
+    {
+        FishSpeechConfig c = new()
+        {
+            Backbone = TinyQwen(h: 16, layers: 2, vocab: 12),
+            Fast = TinyQwen(h: 16, layers: 2, vocab: 6),
+            NumCodebooks = 4, CodebookSize = 6, TextVocab = 12,
+        };
+        using CpuBackend backend = new();
+        using FishSpeechDualAr m = new(c);
+        m.LoadWeights(Weights(c));
+        using StreamingKvCache slow = new(c.Backbone.NumHiddenLayers, 1, c.Backbone.NumKeyValueHeads, 8, c.Backbone.HeadDim);
+        uint rng = 7;
+        Span<int> zero = stackalloc int[c.NumCodebooks];
+        using Tensor e = m.EmbedFrame(3, zero);
+        (int sem, int[] codes) = m.GenerateFrame(backend, e, 0, slow, ref rng);
+        Assert.InRange(sem, 0, c.TextVocab - 1);
+        Assert.Equal(c.NumCodebooks, codes.Length);
+        foreach (int code in codes) Assert.InRange(code, 0, c.CodebookSize - 1);
+    }
+
+    [Fact]
+    public void FireflyDecoder_SyntheticForward_CodesToFiniteAudio()
+    {
+        int nb = 4, cbs = 6, inDim = 8;
+        using CpuBackend backend = new();
+        VitsConfig genCfg = new()
+        {
+            InterChannels = inDim, UpsampleInitialChannel = 16, UpsampleRates = [2, 2], UpsampleKernelSizes = [4, 4],
+            ResBlock = "1", ResBlockKernelSizes = [3], ResBlockDilations = [[1]], SampleRate = 44_100,
+        };
+        FireflyDecoder dec = new(nb, cbs, inputDim: inDim, genConfig: genCfg);
+        dec.LoadWeights(FireflyWeights(nb, cbs, inDim));
+        int t = 3;
+        int[,] codes = new int[nb, t];
+        for (int i = 0; i < nb; i++) for (int j = 0; j < t; j++) codes[i, j] = (i + j) % cbs;
+        float[] audio = dec.Decode(backend, codes, t);
+        Assert.True(audio.Length > 0);
+        foreach (float s in audio) Assert.True(float.IsFinite(s));
+    }
+
+    private static Qwen2Config TinyQwen(int h, int layers, int vocab) => new()
+    {
+        HiddenSize = h, NumHiddenLayers = layers, NumAttentionHeads = 2, NumKeyValueHeads = 1,
+        IntermediateSize = 32, VocabSize = vocab, MaxPositionEmbeddings = 64,
+        AttentionBias = false, TieWordEmbeddings = false,
+    };
+
+    private static Dictionary<string, Tensor> Weights(FishSpeechConfig c)
+    {
+        int h = c.Backbone.HiddenSize;
+        Dictionary<string, Tensor> w = new()
+        {
+            ["embeddings.weight"] = F2(c.TextVocab, h),
+            ["codebook_embeddings.weight"] = F2(c.NumCodebooks * c.CodebookSize, h),
+            ["output.weight"] = F2(c.TextVocab, h),
+            ["fast_embeddings.weight"] = F2(c.CodebookSize, c.Fast.HiddenSize),
+            ["fast_output.weight"] = F2(c.CodebookSize, c.Fast.HiddenSize),
+            ["fast_norm.weight"] = Ones(c.Fast.HiddenSize),
+        };
+        AddQwen(w, "model", c.Backbone);
+        AddQwen(w, "fast_model", c.Fast);
+        return w;
+    }
+
+    private static void AddQwen(Dictionary<string, Tensor> w, string prefix, Qwen2Config c)
+    {
+        int h = c.HiddenSize, kv = c.NumKeyValueHeads * c.HeadDim;
+        w[$"{prefix}.norm.weight"] = Ones(h);
+        for (int i = 0; i < c.NumHiddenLayers; i++)
+        {
+            string p = $"{prefix}.layers.{i}";
+            w[$"{p}.input_layernorm.weight"] = Ones(h);
+            w[$"{p}.post_attention_layernorm.weight"] = Ones(h);
+            w[$"{p}.self_attn.q_proj.weight"] = F2(h, h);
+            w[$"{p}.self_attn.k_proj.weight"] = F2(kv, h);
+            w[$"{p}.self_attn.v_proj.weight"] = F2(kv, h);
+            w[$"{p}.self_attn.o_proj.weight"] = F2(h, h);
+            w[$"{p}.mlp.gate_proj.weight"] = F2(c.IntermediateSize, h);
+            w[$"{p}.mlp.up_proj.weight"] = F2(c.IntermediateSize, h);
+            w[$"{p}.mlp.down_proj.weight"] = F2(h, c.IntermediateSize);
+        }
+    }
+
+    private static Dictionary<string, Tensor> FireflyWeights(int nb, int cbs, int inDim)
+    {
+        // Tiny HiFi-GAN: upsample [2,2], resblock "1" single kernel.
+        Dictionary<string, Tensor> w = new()
+        {
+            ["head.conv_pre.weight"] = F3(16, inDim, 7), ["head.conv_pre.bias"] = F1(16),
+            ["head.conv_post.weight"] = F3(1, 4, 7), ["head.conv_post.bias"] = F1(1),
+        };
+        for (int i = 0; i < nb; i++) w[$"quantizer.codebook_emb.{i}.weight"] = F2(cbs, inDim);
+        int[] rates = [2, 2]; int[] kernels = [4, 4]; int init = 16;
+        for (int i = 0; i < rates.Length; i++)
+        {
+            int inCh = init >> i, outCh = inCh >> 1;
+            w[$"head.ups.{i}.weight"] = F3(inCh, outCh, kernels[i]); w[$"head.ups.{i}.bias"] = F1(outCh);
+            w[$"head.resblocks.{i}.convs1.0.weight"] = F3(outCh, outCh, 3); w[$"head.resblocks.{i}.convs1.0.bias"] = F1(outCh);
+            w[$"head.resblocks.{i}.convs2.0.weight"] = F3(outCh, outCh, 3); w[$"head.resblocks.{i}.convs2.0.bias"] = F1(outCh);
+        }
+        return w;
+    }
+}
