@@ -75,3 +75,7 @@ codebook-0 == codec_eos (2150). max_new_tokens 2048 (code) / 8192 (1.7B-CustomVo
 **Assessment:** the most complex model in the AudioLab set — Qwen3 (q/k-norm + 3D mRoPE) + MTP + a full
 from-scratch Snake/ConvNeXt causal vocoder + ECAPA. Build in stages: (a) Qwen3 backbone + mRoPE (reusable),
 (b) MTP CodePredictor, (c) codec decoder, (d) pipeline + modes, (e) ECAPA (last).
+
+## C# build status (2026-06-20) — stage (a) done
+- [x] **`Qwen3Model`** ([`Models/LanguageModels/Qwen3/`](../../src/HartsyInference.Audio/Models/LanguageModels/Qwen3/)) — headless Qwen3 decoder: per-head **q_norm/k_norm** (RMSNorm over head_dim, pre-RoPE), **decoupled head_dim** (q/k/v sized n_heads·head_dim), GQA, SwiGLU, no QKV bias. Reuses `DiaHeads`/`RotaryEmbedding`/`WhisperOps`. **Synthetic-forward verified** (q/k-norm + GQA + RoPE finite). Reusable by Qwen3-TTS talker + code-predictor AND future Qwen3 image/text models. `Qwen3Config.Talker1_7B`/`CodePredictor` presets.
+- [ ] **Staged (b–e):** the talker's dual embedding (text + codec) + `codec_head` + `text_projection`, the **3D interleaved mRoPE** (mrope_section [24,20,20] — currently 1D RoPE), the 5-layer **MTP CodePredictor** (15 codebooks), the custom **Snake/ConvNeXt causal-conv codec decoder** (split-RVQ + ConvNeXt upsample + DAC DecoderBlocks), the Mimi encoder reuse, the **ECAPA-TDNN** speaker encoder, and the 3 modes (clone/custom_voice/voice_design).

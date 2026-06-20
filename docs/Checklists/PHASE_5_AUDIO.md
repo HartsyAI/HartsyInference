@@ -237,6 +237,11 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`KyutaiTtsModel.cs`](../../src/HartsyInference.Audio/Models/Kyutai/KyutaiTtsModel.cs) + [`KyutaiTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/KyutaiTtsPipeline.cs) — temporal step over summed text+audio embeds → depformer frame → Mimi decode → 24 kHz PCM.
 - [ ] **Reconcile on checkpoint load:** depformer weight-key layout (per-step sets / low-rank / multi-linear), the delayed-coordinate handling (wire `MoshiDelay` into the gen loop), the PAD/EPAD/WORD text state machine + 2-step lookahead stream, and **speaker cross-attention** (the decoder-only backbone has no cross-attn sublayer yet — runs unconditioned now), plus CFG/control LUT conditioners.
 
+### Qwen3-TTS — backbone (stage a) BUILT + verified; talker/MTP/vocoder/ECAPA staged
+> Alibaba Qwen3-TTS (12 Hz). The most complex AudioLab model (5 net-new components). Research: [`QWEN3_TTS_ARCHITECTURE.md`](../Research/QWEN3_TTS_ARCHITECTURE.md). Backbone under [`Models/LanguageModels/Qwen3/`](../../src/HartsyInference.Audio/Models/LanguageModels/Qwen3/).
+- [x] [`Qwen3Model.cs`](../../src/HartsyInference.Audio/Models/LanguageModels/Qwen3/Qwen3Model.cs) — reusable headless Qwen3 decoder: **per-head q_norm/k_norm** (RMSNorm over head_dim, pre-RoPE) + **decoupled head_dim** + GQA + SwiGLU, reusing `DiaHeads`/`RotaryEmbedding`/`WhisperOps`. **Synthetic-forward verified.** `Talker1_7B`/`CodePredictor` presets. (Also unlocks future Qwen3 image/text models.)
+- [ ] **Staged:** talker dual embedding (text + codec) + `codec_head` + `text_projection`; **3D interleaved mRoPE** (currently 1D); 5-layer **MTP CodePredictor** (15 codebooks); the custom **Snake/ConvNeXt causal-conv codec decoder** (split-RVQ); Mimi encoder reuse; **ECAPA-TDNN** speaker encoder; clone/custom_voice/voice_design modes.
+
 ### IndexTTS 1.5 + 2
 - [ ] `IndexT2sGpt.cs` — 24L × 1280
 - [ ] `IndexS2MelDit.cs` — 13L × 512 with WaveNet final layer (non-causal — no streaming)
@@ -478,6 +483,18 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] Melody conditioning (chromagram extractor + argmax-and-zero + cross-attn prepend) — deferred
 - [ ] Stereo variants (8 codebooks, paired delay) — config supports the paired delay; stereo decode path deferred
 - [ ] **Checkpoint validation** — bucket `facebook/musicgen-medium` + `facebook/audiogen-medium` weights into the decoder/codec LoadWeights dicts, then env-gated generation test
+
+### HeartMuLa (HeartMuLa-oss-3B) — BUILT (LM reuses verified CSM); HeartCodec + MuQ staged
+> Music/song generation = the CSM two-transformer pattern (Llama-3B global + Llama-300M depth, 8 codebooks vocab
+> 8197, 48 kHz) + a flow-matching HeartCodec + MuQ-MuLan style cond. Research: [`HEARTMULA_ARCHITECTURE.md`](../Research/HEARTMULA_ARCHITECTURE.md).
+- [x] [`HeartMulaConfig.cs`](../../src/HartsyInference.Audio/Models/HeartMula/HeartMulaConfig.cs) + [`HeartMulaPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/HeartMulaPipeline.cs) — **LM reuses the verified `CsmModel`** (dual transformer + codebook heads); lyrics → AR 8-codebook frames. **Config + construct tested.**
+- [ ] **Staged:** HeartCodec flow-matching RVQ decoder (reuse `ConditionalCfm`), MuQ-MuLan style embedder, sharded-safetensors load.
+
+### PocketTTS (Kyutai pocket-tts) — RESEARCHED + config skeleton; config-gated (continuous-latent)
+> ~100M CPU TTS, **continuous-latent AR** (NOT a discrete codec-LM) + per-frame flow-matching over a continuous-Mimi
+> VAE. Research: [`POCKET_TTS_ARCHITECTURE.md`](../Research/POCKET_TTS_ARCHITECTURE.md).
+- [x] [`PocketTtsConfig.cs`](../../src/HartsyInference.Audio/Models/PocketTts/PocketTtsConfig.cs) — documented skeleton (24 kHz/12.5 Hz, 26 voices, LSD steps; `DModel`/`LatentDim` placeholders). **Config tested.**
+- [ ] **Deferred (config-gated):** the continuous-latent AR loop + flow-matching/LSD head (reuse `ConditionalCfm`) + continuous-Mimi path (reuse built `Mimi`, bypass RVQ) — implementation waits on the checkpoint's exact dims (NOT public).
 
 ### YuE — SCAFFOLD COMPLETE (Stage-1, first music model); checkpoint-gated
 > **First music model.** Files under [`Models/Music/`](../../src/HartsyInference.Audio/Models/Music/) + [`YuePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/YuePipeline.cs). Built almost entirely from reuse — the codec-LM music models live in the Audio package since they reuse its codecs + LM infra (the diffusion music models — ACE-Step/Stable Audio/DiffRhythm/AudioLDM2 — will go in the Diffusion package).
