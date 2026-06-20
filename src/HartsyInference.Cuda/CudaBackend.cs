@@ -266,7 +266,30 @@ public sealed class CudaBackend : IBackend
             // inside CastOnGpu's F8→F32 path.
             DType gemmDtype = ResolveGemmDtype(input.DType, weight.DType);
             ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
-            ulong weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
+
+            // Weight cast (fp8/quant → BF16/F16): identical every forward, so for a preloaded weight we
+            // compute it once and cache it. Re-casting the whole 9.3B weight set per Linear per step was the
+            // dominant cost on the fp8 path (GEMMs themselves are tensor-core). pWeightCast stays 0 when the
+            // cached copy is used so the finally block won't free the persistent cast.
+            ulong weightPtr;
+            if (weight.DType == gemmDtype)
+            {
+                weightPtr = pWeight;
+            }
+            else if (GpuTransferHelper.IsWeightCached(weight))
+            {
+                if (!GpuTransferHelper.TryGetWeightCast(weight, out weightPtr))
+                {
+                    nuint castBytes = (nuint)(weight.ElementCount * gemmDtype.SizeInBytes);
+                    weightPtr = GpuTransferHelper.AllocateDevice(castBytes);
+                    CastOnGpu(weightPtr, pWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
+                    GpuTransferHelper.CacheWeightCast(weight, weightPtr, castBytes);
+                }
+            }
+            else
+            {
+                weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
+            }
 
             int gemmType = CublasDataType(gemmDtype);
             int outputType = CublasDataType(output.DType);

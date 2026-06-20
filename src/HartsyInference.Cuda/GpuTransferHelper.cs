@@ -13,6 +13,12 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Cache mapping Tensor object references to GPU activation data from previous ops.</summary>
     private static readonly Dictionary<Tensor, (ulong gpuPtr, nuint bytes)> _activationCache = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>Cache of dtype-upcast copies of preloaded weights (e.g. fp8 → BF16 for tensor-core GEMM).
+    /// The cast result is identical every forward, so it is computed once and reused — avoiding a per-Linear
+    /// re-cast of the whole 9.3B weight set on every denoise step. Keyed by the source weight tensor; freed
+    /// alongside its weight in <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>.</summary>
+    private static readonly Dictionary<Tensor, ulong> _weightCastCache = new(ReferenceEqualityComparer.Instance);
+
     /// <summary>Set of GPU pointers that belong to either cache (skip in FreeDevice).</summary>
     private static readonly HashSet<ulong> _cachedPointers = new();
 
@@ -165,6 +171,18 @@ internal static unsafe class GpuTransferHelper
         };
     }
 
+    /// <summary>Returns a cached dtype-upcast of a weight (e.g. fp8→BF16), if one was already computed.</summary>
+    public static bool TryGetWeightCast(Tensor weight, out ulong castPtr) => _weightCastCache.TryGetValue(weight, out castPtr);
+
+    /// <summary>Records a dtype-upcast of a weight so subsequent forwards reuse it instead of re-casting.
+    /// The pointer is tracked as cached so <see cref="FreeDevice"/> won't reclaim it as a transient.</summary>
+    public static void CacheWeightCast(Tensor weight, ulong castPtr, nuint byteSize)
+    {
+        _weightCastCache[weight] = castPtr;
+        _cachedPointers.Add(castPtr);
+        _cachedBytes += (long)byteSize;
+    }
+
     /// <summary>Uploads a weight tensor to GPU and caches it for future CopyToDevice calls.</summary>
     public static void PreloadWeight(Tensor weight)
     {
@@ -234,6 +252,11 @@ internal static unsafe class GpuTransferHelper
                 CudaMemory.Free(dptr);
                 _cachedBytes -= (long)ByteSize(weight);
             }
+            if (_weightCastCache.Remove(weight, out ulong castPtr))
+            {
+                _cachedPointers.Remove(castPtr);
+                CudaMemory.Free(castPtr);
+            }
         }
     }
 
@@ -253,6 +276,7 @@ internal static unsafe class GpuTransferHelper
         }
         _weightCache.Clear();
         _activationCache.Clear();
+        _weightCastCache.Clear();
         _cachedPointers.Clear();
         _cachedBytes = 0;
         _hits = 0;
