@@ -13,8 +13,9 @@ public sealed unsafe class VitsHiFiGan
     private readonly VitsConfig _cfg;
     private readonly ResBlock[] _resblocks;
     private readonly int _numKernels;
-    private Tensor? _convPreW, _convPreB, _convPostW, _convPostB;
+    private Tensor? _convPreW, _convPreB, _convPostW, _convPostB, _condW, _condB;
     private readonly Tensor?[] _upW, _upB;
+    private readonly Tensor?[] _noiseConvW, _noiseConvB;     // NSF source-injection convs (RVC GeneratorNSF), optional
 
     public VitsHiFiGan(VitsConfig cfg)
     {
@@ -22,6 +23,7 @@ public sealed unsafe class VitsHiFiGan
         _numKernels = cfg.ResBlockKernelSizes.Count;
         int stages = cfg.UpsampleRates.Count;
         _upW = new Tensor?[stages]; _upB = new Tensor?[stages];
+        _noiseConvW = new Tensor?[stages]; _noiseConvB = new Tensor?[stages];
         _resblocks = new ResBlock[stages * _numKernels];
         for (int i = 0; i < stages; i++)
         {
@@ -36,18 +38,36 @@ public sealed unsafe class VitsHiFiGan
     {
         _convPreW = VitsWeights.Conv(w, $"{prefix}.conv_pre"); _convPreB = VitsWeights.Bias(w, $"{prefix}.conv_pre");
         _convPostW = VitsWeights.Conv(w, $"{prefix}.conv_post"); _convPostB = VitsWeights.Bias(w, $"{prefix}.conv_post");
+        if (w.ContainsKey($"{prefix}.cond.weight") || w.ContainsKey($"{prefix}.cond.weight_g"))
+        {
+            _condW = VitsWeights.Conv(w, $"{prefix}.cond"); _condB = VitsWeights.Bias(w, $"{prefix}.cond");
+        }
         for (int i = 0; i < _upW.Length; i++)
         {
             _upW[i] = VitsWeights.Conv(w, $"{prefix}.ups.{i}"); _upB[i] = VitsWeights.Bias(w, $"{prefix}.ups.{i}");
+            if (w.ContainsKey($"{prefix}.noise_convs.{i}.weight") || w.ContainsKey($"{prefix}.noise_convs.{i}.weight_g"))
+            {
+                _noiseConvW[i] = VitsWeights.Conv(w, $"{prefix}.noise_convs.{i}"); _noiseConvB[i] = VitsWeights.Bias(w, $"{prefix}.noise_convs.{i}");
+            }
         }
         for (int i = 0; i < _resblocks.Length; i++) _resblocks[i].LoadWeights(w, $"{prefix}.resblocks.{i}");
     }
 
-    public float[] Forward(IBackend backend, Tensor z, int t)
+    public float[] Forward(IBackend backend, Tensor z, int t, Tensor? g = null, Tensor? harSource = null)
     {
         int ch = _cfg.UpsampleInitialChannel;
         Tensor x = new(new TensorShape(1, ch, t), DType.F32);
         backend.Conv1d(x, z, _convPreW!, _convPreB, 1, 3, 3, 1, 1);     // conv_pre k7
+
+        // Speaker conditioning: x += cond(g), broadcast over time.
+        if (g is not null && _condW is not null)
+        {
+            Tensor gc = new(new TensorShape(1, ch, 1), DType.F32);
+            backend.Conv1d(gc, g, _condW, _condB, 1, 0, 0, 1, 1);
+            float* xp2 = (float*)x.DataPointer; float* gp = (float*)gc.DataPointer;
+            for (int c = 0; c < ch; c++) for (int j = 0; j < t; j++) xp2[(long)c * t + j] += gp[c];
+            gc.Dispose();
+        }
 
         int curT = t;
         for (int i = 0; i < _cfg.UpsampleRates.Count; i++)
@@ -89,7 +109,7 @@ public sealed unsafe class VitsHiFiGan
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] own = [_convPreW, _convPreB, _convPostW, _convPostB];
+        Tensor?[] own = [_convPreW, _convPreB, _convPostW, _convPostB, _condW, _condB];
         foreach (Tensor? t in own) if (t is not null) yield return t;
         foreach (Tensor? t in _upW) if (t is not null) yield return t;
         foreach (Tensor? t in _upB) if (t is not null) yield return t;

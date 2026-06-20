@@ -26,6 +26,13 @@ public sealed unsafe class VitsTextEncoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "enc_p")
     {
         _emb = VitsWeights.Conv(w, $"{prefix}.emb");     // [n_vocab, hidden] (no .weight_g; plain .weight)
+        LoadWeightsLayersOnly(w, prefix);
+    }
+
+    /// <summary>Loads only the encoder layers + projection (no phoneme embedding) — used by MeloTTS, which
+    /// supplies its own summed phoneme/tone/language/BERT embedding via <see cref="ForwardFromEmbedding"/>.</summary>
+    public void LoadWeightsLayersOnly(IReadOnlyDictionary<string, Tensor> w, string prefix = "enc_p")
+    {
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.encoder", i);
         _projW = VitsWeights.Conv(w, $"{prefix}.proj"); _projB = VitsWeights.Bias(w, $"{prefix}.proj");
     }
@@ -41,7 +48,14 @@ public sealed unsafe class VitsTextEncoder
         float* ep = (float*)_emb!.DataPointer;
         for (int j = 0; j < t; j++)
             for (int c = 0; c < h; c++) xp[(long)c * t + j] = ep[(long)tokens[j] * h + c] * scale;
+        return ForwardFromEmbedding(backend, x, t);
+    }
 
+    /// <summary>Runs the encoder layers + projection over a prebuilt input embedding <c>[1, hidden, T]</c>
+    /// (takes ownership). The MeloTTS entry point (caller sums phoneme + tone + language + BERT embeddings).</summary>
+    public (Tensor Hidden, Tensor MP, Tensor LogsP) ForwardFromEmbedding(IBackend backend, Tensor embed, int t)
+    {
+        Tensor x = embed;
         for (int i = 0; i < _layers.Length; i++)
         {
             Tensor next = _layers[i].Forward(backend, x, t);

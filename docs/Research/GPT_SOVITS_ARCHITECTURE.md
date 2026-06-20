@@ -806,3 +806,23 @@ This is the canonical way to produce "what HuBERT semantic IDs does this audio c
 - [Medium: GPT-SoVITS inference walkthrough (alex)](https://medium.com/@alex1923221/gpt-sovits-audio-inference-process-analysis-bce1f8d3ec20) — English code walkthrough.
 - [OpenVINO blog: enabling GPT-SoVITS](https://blog.openvino.ai/blog-posts/openvino-enable-digital-human-tts-gpt-sovits) — Inference graph decomposition (t2s_encoder / first_stage / stage_decoder).
 - [v2 features wiki](https://github.com/RVC-Boss/GPT-SoVITS/wiki/GPT%E2%80%90SoVITS%E2%80%90v2%E2%80%90features-(%E6%96%B0%E7%89%B9%E6%80%A7)) | [v3/v4 features wiki](https://github.com/RVC-Boss/GPT-SoVITS/wiki/GPT%E2%80%90SoVITS%E2%80%90v3v4%E2%80%90features-(%E6%96%B0%E7%89%B9%E6%80%A7)) — Official version-feature pages.
+
+---
+
+## C# build status (2026-06-20)
+
+Built under `src/HartsyInference.Audio/Models/Hubert/` + `Models/GptSoVits/`. **Corrections applied** vs the
+original doc above: the T2S transformer is **post-LayerNorm with no final LN** (`norm_first=False`); cn-HuBERT
+taps **`last_hidden_state`** (not an intermediate layer); SoVITS `enc_q` is **n_layers=16**.
+
+- [x] **`Hubert`** — 7-conv extractor (GroupNorm after conv 0, GELU) + feature projection + grouped pos-conv
+  embed (k128/g16) + 12 post-LN transformer layers → `last_hidden_state [1,768,T]`. Reuses `IBackend` conv/
+  norm/SDPA + `DiaHeads`. Synthetic-forward verified. **Shared with RVC.**
+- [x] **`Text2Semantic`** (T2S) — post-LN GPT (512/24L/16h/FFN2048/ReLU), sinusoidal `alpha` positions, biased
+  fused-QKV, text-bidirectional/audio-causal mask, top-k + rep-penalty(1.35) AR over semantic vocab 1025
+  (EOS 1024). Reuses `NucleusSampler`. Synthetic-forward verified.
+- [x] **`SoVitsSynthesizer`** — semantic VQ dequant (codebook `[1024,768]`, ×2 nearest) → ssl_proj → prior →
+  sample z_p → **reused g-conditioned `VitsFlow` + `VitsHiFiGan`** (32 kHz). Synthetic-forward verified.
+- [ ] **Staged:** full SoVITS `enc_p` (dual attention encoders + **MRTE** cross-attn replacing the structural
+  conv prior), the `ref_enc` MelStyleEncoder (produces `ge` — currently caller-supplied), Chinese-RoBERTa BERT
+  frontend + phoneme tokenizer, and exact `quantizer.vq.*` / ckpt-`"weight"` key reconciliation.

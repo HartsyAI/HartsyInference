@@ -28,16 +28,32 @@ public sealed unsafe class VitsFlow
         for (int i = 0; i < _nFlows; i++) _layers[i].LoadWeights(w, $"{prefix}.flows.{2 * i}");
     }
 
-    /// <summary>Reverse pass: applies (flip, coupling) for each flow in reverse order.</summary>
-    public Tensor Reverse(IBackend backend, Tensor zP, int t)
+    /// <summary>Reverse pass: applies (flip, coupling) for each flow in reverse order. <paramref name="g"/>
+    /// is the optional speaker embedding for the WaveNet conditioning.</summary>
+    public Tensor Reverse(IBackend backend, Tensor zP, int t, Tensor? g = null)
     {
         Tensor x = Clone(zP);
         for (int i = _nFlows - 1; i >= 0; i--)
         {
             FlipChannels(x, _channels, t);
-            Tensor next = _layers[i].Reverse(backend, x, t);
+            Tensor next = _layers[i].Apply(backend, x, t, g, reverse: true);
             x.Dispose();
             x = next;
+        }
+        return x;
+    }
+
+    /// <summary>Forward pass: applies (coupling, flip) for each flow in order — used by the OpenVoice tone
+    /// converter to map the posterior into the prior latent under the source speaker.</summary>
+    public Tensor Forward(IBackend backend, Tensor z, int t, Tensor? g = null)
+    {
+        Tensor x = Clone(z);
+        for (int i = 0; i < _nFlows; i++)
+        {
+            Tensor next = _layers[i].Apply(backend, x, t, g, reverse: false);
+            x.Dispose();
+            x = next;
+            FlipChannels(x, _channels, t);
         }
         return x;
     }
@@ -87,17 +103,17 @@ public sealed unsafe class VitsFlow
             _wn.LoadWeights(w, $"{prefix}.enc");
         }
 
-        public Tensor Reverse(IBackend backend, Tensor x, int t)
+        public Tensor Apply(IBackend backend, Tensor x, int t, Tensor? g, bool reverse)
         {
             // Split x → x0 (first half, conditioning), x1 (second half, transformed).
             Tensor x0 = SliceChannels(x, 0, _half, t);
             Tensor h = new(new TensorShape(1, _hidden, t), DType.F32);
             backend.Conv1d(h, x0, _preW!, _preB, 1, 0, 0, 1, 1);
-            Tensor hOut = _wn.Forward(backend, h, t); h.Dispose();
+            Tensor hOut = _wn.Forward(backend, h, t, g); h.Dispose();
             Tensor m = new(new TensorShape(1, _half, t), DType.F32);
             backend.Conv1d(m, hOut, _postW!, _postB, 1, 0, 0, 1, 1); hOut.Dispose();
 
-            // x1 = x1 - m (mean-only, logs=0). Reassemble [x0, x1].
+            // mean-only (logs=0): reverse x1 = x1 - m; forward x1 = x1 + m. Reassemble [x0, x1].
             Tensor outT = new(x.Shape, DType.F32);
             float* xp = (float*)x.DataPointer;
             float* mp = (float*)m.DataPointer;
@@ -105,7 +121,10 @@ public sealed unsafe class VitsFlow
             Buffer.MemoryCopy((void*)x0.DataPointer, op, (long)_half * t * 4, (long)_half * t * 4);
             for (int c = 0; c < _half; c++)
                 for (int j = 0; j < t; j++)
-                    op[(long)(_half + c) * t + j] = xp[(long)(_half + c) * t + j] - mp[(long)c * t + j];
+                {
+                    float x1 = xp[(long)(_half + c) * t + j], mv = mp[(long)c * t + j];
+                    op[(long)(_half + c) * t + j] = reverse ? x1 - mv : x1 + mv;
+                }
             x0.Dispose(); m.Dispose();
             return outT;
         }

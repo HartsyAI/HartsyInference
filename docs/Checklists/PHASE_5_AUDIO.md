@@ -321,18 +321,21 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] **Aggressive streaming + persistent KV cache** (~50 ms/frame) — current path re-feeds context per frame (correct, not yet streaming-optimized).
 - [ ] **Checkpoint validation** — `sesame/csm-1b`: reconcile HF key names + decoder-side audio embeddings + Llama-3.2 RoPE rescaling (scale_factor=32), then env-gated generation test.
 
-### GPT-SoVITS
-- [ ] T2S GPT (predict semantic tokens from text + reference)
-- [ ] SoVITS SynthesizerTrn (VITS posterior + flow + decoder + duration predictor + Stochastic Duration Predictor)
-- [ ] `cn-hubert` HuBERT-base for semantic token extraction
-- [ ] BERT auxiliary (Chinese-RoBERTa for zh, custom for other langs)
-- [ ] ref_enc (mel ResNet + attention pool) for speaker conditioning
-- [ ] Per-language phoneme tokenizers: pinyin (zh), ARPABET (en), pyopenjtalk romaji (ja)
+### GPT-SoVITS v2 — BUILT (3 stages, all synthetic-forward verified); enc_p MRTE + ref_enc staged
+> Two-stage (T2S GPT → SoVITS) + cn-HuBERT content encoder. Research: [`GPT_SOVITS_ARCHITECTURE.md`](../Research/GPT_SOVITS_ARCHITECTURE.md). Files under [`Models/Hubert/`](../../src/HartsyInference.Audio/Models/Hubert/) + [`Models/GptSoVits/`](../../src/HartsyInference.Audio/Models/GptSoVits/).
+- [x] **`cn-HuBERT`** ([`Hubert.cs`](../../src/HartsyInference.Audio/Models/Hubert/Hubert.cs)) — 7-conv extractor (GroupNorm-0, GELU) + grouped pos-conv + 12 post-LN transformer layers → `last_hidden_state`. **Shared with RVC.** Synthetic-forward verified.
+- [x] **T2S GPT** ([`Text2Semantic.cs`](../../src/HartsyInference.Audio/Models/GptSoVits/Text2Semantic.cs)) — post-LN 24L/512/16h transformer, sinusoidal `alpha` positions, biased fused-QKV, text-bidir/audio-causal mask, top-k + rep-penalty(1.35) AR. Synthetic-forward verified (valid semantic tokens).
+- [x] **SoVITS** ([`SoVitsSynthesizer.cs`](../../src/HartsyInference.Audio/Models/GptSoVits/SoVitsSynthesizer.cs)) — semantic VQ dequant (`[1024,768]`, ×2) → ssl_proj → prior → **reused g-conditioned `VitsFlow` + `VitsHiFiGan`** (32 kHz). Synthetic-forward verified (finite audio from semantic tokens + `ge`).
+- [ ] **Staged:** full `enc_p` (dual attention encoders + **MRTE** cross-attn — currently a structural conv prior), `ref_enc` MelStyleEncoder (produces `ge`, caller-supplied now), Chinese-RoBERTa BERT + phoneme tokenizers, exact `quantizer.vq.*`/ckpt-`"weight"` key reconciliation.
 
-### OpenVoice v2
-- [ ] Tone Color Converter (residual flow over mel)
-- [ ] Tone Color Extractor (Conv1D + attention pool → speaker embedding)
-- [ ] Stage 1 dispatches to MeloTTS (below)
+### OpenVoice v2 — BUILT (Tone Color Converter, synthetic-forward verified)
+> The converter reuses the VITS posterior + flow + HiFi-GAN with **speaker (`g`) conditioning** (added this
+> pass to `VitsWaveNet`/`VitsFlow`/`VitsHiFiGan` — also completing the multispeaker path for Piper/MeloTTS).
+> Stage-1 base TTS = MeloTTS (built above). Files under [`Models/Vits/`](../../src/HartsyInference.Audio/Models/Vits/) + [`OpenVoicePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/OpenVoicePipeline.cs).
+- [x] **`g` conditioning added** to `VitsWaveNet` (cond_layer slice into the gate), `VitsFlow` (forward + reverse, `g` passthrough), `VitsHiFiGan` (cond after conv_pre) — all backward-compatible (`g=null` keeps single-speaker green).
+- [x] [`VitsPosteriorEncoder.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsPosteriorEncoder.cs) (`enc_q`: pre → WN(g) → proj → sample) — the VC inference entry, reuses `VitsWaveNet`.
+- [x] [`OpenVoicePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/OpenVoicePipeline.cs) — `Convert`: posterior(g_src) → flow.Forward(g_src) → flow.Reverse(g_tgt) → decoder(g_tgt). **Synthetic-forward verified** (finite audio through the full g-conditioned path).
+- [ ] **Staged:** the tone-color extractor (reference → speaker embedding) — caller supplies `g_src`/`g_tgt` for now.
 
 ### VITS SynthesizerTrn (shared core) + Piper — BUILT (full graph, synthetic-forward verified); SDP staged
 > The reusable VITS TTS core behind Piper, MeloTTS, GPT-SoVITS (SoVITS half), and OpenVoice. Research:
@@ -346,13 +349,12 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] **Full-graph synthetic-weights forward verified** ([`VitsTests`](../../tests/HartsyInference.Audio.Tests/VitsTests.cs)) — tiny config runs text-encoder → DP → length-reg → flow → HiFi-GAN to finite audio.
 - [ ] **Staged:** the **stochastic duration predictor** (DDSConv + ConvFlow rational-quadratic spline — Piper's default `use_sdp=True`), multispeaker `g` conditioning, and direct ONNX load. espeak phonemization is caller-side.
 
-### MeloTTS — reuses the VITS core above
-- [ ] `MeloTtsTextEncoder.cs` — Transformer over phonemes + BERT aux concat
-- [ ] `MeloTtsFlow.cs` — coupling layers with WaveNet residual stack
-- [ ] `MeloTtsStochasticDurationPredictor.cs` — normalizing flow over duration
-- [ ] `MeloTtsHifiGanDecoder.cs` — 44.1 kHz output (hop=512)
-- [ ] Per-language BERT loaders (XLM-R / Chinese-RoBERTa / Japanese-RoBERTa)
-- [ ] Per-language speaker embeddings (`spk2id` table)
+### MeloTTS — BUILT (reuses the VITS core; synthetic-forward verified)
+> MyShell MeloTTS = VITS + an extended text encoder (tone/language/BERT) + multispeaker. Files under
+> [`Models/MeloTts/`](../../src/HartsyInference.Audio/Models/MeloTts/) + [`MeloTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/MeloTtsPipeline.cs).
+- [x] [`MeloTtsTextEncoder.cs`](../../src/HartsyInference.Audio/Models/MeloTts/MeloTtsTextEncoder.cs) — summed phoneme + tone + language + `bert_proj`(1024→h) + `ja_bert_proj`(768→h) embedding → **reuses `VitsTextEncoder` layers** via its new embedding-in entry point (`ForwardFromEmbedding` + `LoadWeightsLayersOnly`). **Synthetic-forward verified** (finite prior).
+- [x] [`MeloTtsConfig.cs`](../../src/HartsyInference.Audio/Models/MeloTts/MeloTtsConfig.cs) (wraps `VitsConfig` core + tone/lang counts + BERT dims + `sdp_ratio`) + [`MeloTtsPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/MeloTtsPipeline.cs) — encoder → **reused** `VitsDurationPredictor` + `VitsFlow` + `VitsHiFiGan`.
+- [ ] **Staged:** SDP/DP blend (`sdp_ratio`), TransformerCouplingBlock flow option, multispeaker `g` conditioning, per-language BERT + phonemizer (caller-side).
 
 ### StyleTTS 2 — BUILT (reuses validated Kokoro stack); checkpoint-gated for the new style modules
 > The parent architecture of Kokoro. PLBERT + TextEncoder + ProsodyPredictor + iSTFTNet decoder are reused **verbatim** from the (validated, end-to-end-tested) Kokoro modules — only the runtime style path is new. Files under [`Models/StyleTts2/`](../../src/HartsyInference.Audio/Models/StyleTts2/) + [`StyleTts2Pipeline.cs`](../../src/HartsyInference.Audio/Pipelines/StyleTts2Pipeline.cs).
