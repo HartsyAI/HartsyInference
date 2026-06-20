@@ -334,7 +334,19 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] Tone Color Extractor (Conv1D + attention pool → speaker embedding)
 - [ ] Stage 1 dispatches to MeloTTS (below)
 
-### MeloTTS
+### VITS SynthesizerTrn (shared core) + Piper — BUILT (full graph, synthetic-forward verified); SDP staged
+> The reusable VITS TTS core behind Piper, MeloTTS, GPT-SoVITS (SoVITS half), and OpenVoice. Research:
+> [`VITS_ARCHITECTURE.md`](../Research/VITS_ARCHITECTURE.md). Files under [`Models/Vits/`](../../src/HartsyInference.Audio/Models/Vits/) + [`PiperPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/PiperPipeline.cs).
+- [x] [`VitsTextEncoder.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsTextEncoder.cs) — emb + 6 layers of **relative-position MHA** (computed directly, no pad-reshape) + Conv FFN + proj → (m_p, logs_p).
+- [x] [`VitsWaveNet.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsWaveNet.cs) (dilated gated WN) + [`VitsFlow.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsFlow.cs) (ResidualCouplingLayer mean-only + Flip, reverse pass).
+- [x] [`VitsDurationPredictor.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsDurationPredictor.cs) (deterministic) + [`VitsLengthRegulator.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsLengthRegulator.cs) (intersperse + monotonic expand). **Exact + tested.**
+- [x] [`VitsHiFiGan.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsHiFiGan.cs) — conv_pre + ConvTranspose upsamplers + MRF ResBlock1/2 + conv_post + tanh (reuses `IBackend.Conv1d`/`ConvTranspose1d` with dilation).
+- [x] [`VitsWeights.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsWeights.cs) — weight-norm fuse (g/v → weight) at load. [`VitsSynthesizer.cs`](../../src/HartsyInference.Audio/Models/Vits/VitsSynthesizer.cs) assembles the full infer graph.
+- [x] [`PiperPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/PiperPipeline.cs) — medium/high presets + Piper phoneme interspersing (BOS 1 / blank 0 / EOS 2).
+- [x] **Full-graph synthetic-weights forward verified** ([`VitsTests`](../../tests/HartsyInference.Audio.Tests/VitsTests.cs)) — tiny config runs text-encoder → DP → length-reg → flow → HiFi-GAN to finite audio.
+- [ ] **Staged:** the **stochastic duration predictor** (DDSConv + ConvFlow rational-quadratic spline — Piper's default `use_sdp=True`), multispeaker `g` conditioning, and direct ONNX load. espeak phonemization is caller-side.
+
+### MeloTTS — reuses the VITS core above
 - [ ] `MeloTtsTextEncoder.cs` — Transformer over phonemes + BERT aux concat
 - [ ] `MeloTtsFlow.cs` — coupling layers with WaveNet residual stack
 - [ ] `MeloTtsStochasticDurationPredictor.cs` — normalizing flow over duration
