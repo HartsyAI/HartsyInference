@@ -80,6 +80,24 @@ public sealed unsafe class VitsHiFiGan
             backend.ConvTranspose1d(up, x, _upW[i]!, _upB[i], stride, pad, pad, 1, 1);
             x.Dispose();
 
+            // NSF source injection (RVC GeneratorNSF): downsample har_source to this stage and add.
+            if (harSource is not null && _noiseConvW[i] is not null)
+            {
+                int strideF0 = 1;
+                for (int r = i + 1; r < _cfg.UpsampleRates.Count; r++) strideF0 *= _cfg.UpsampleRates[r];
+                int nk = i + 1 < _cfg.UpsampleRates.Count ? strideF0 * 2 : 1;
+                int npad = i + 1 < _cfg.UpsampleRates.Count ? strideF0 / 2 : 0;
+                int srcLen = (int)harSource.Shape[2];
+                int sOutT = (srcLen + 2 * npad - (nk - 1) - 1) / strideF0 + 1;
+                Tensor src = new(new TensorShape(1, outCh, sOutT), DType.F32);
+                backend.Conv1d(src, harSource, _noiseConvW[i]!, _noiseConvB[i], strideF0, npad, npad, 1, 1);
+                float* upP = (float*)up.DataPointer; float* sP = (float*)src.DataPointer;
+                int copyT = Math.Min(outT, sOutT);
+                for (int c = 0; c < outCh; c++)
+                    for (int j = 0; j < copyT; j++) upP[(long)c * outT + j] += sP[(long)c * sOutT + j];
+                src.Dispose();
+            }
+
             // MRF: average the num_kernels resblocks.
             Tensor acc = new(new TensorShape(1, outCh, outT), DType.F32);
             float* accP = (float*)acc.DataPointer;
@@ -113,6 +131,8 @@ public sealed unsafe class VitsHiFiGan
         foreach (Tensor? t in own) if (t is not null) yield return t;
         foreach (Tensor? t in _upW) if (t is not null) yield return t;
         foreach (Tensor? t in _upB) if (t is not null) yield return t;
+        foreach (Tensor? t in _noiseConvW) if (t is not null) yield return t;
+        foreach (Tensor? t in _noiseConvB) if (t is not null) yield return t;
         foreach (ResBlock r in _resblocks) foreach (Tensor t in r.EnumerateWeights()) yield return t;
     }
 
