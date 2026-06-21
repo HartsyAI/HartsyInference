@@ -121,6 +121,73 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         return hidden;
     }
 
+    /// <summary>Looks up token embeddings <c>[1, seqLen, hidden]</c> (F32). Exposed so multimodal callers (Qwen3-VL)
+    /// can splice merged vision tokens into the sequence before running <see cref="EncodeEmbedsMrope"/>.</summary>
+    public Tensor LookupEmbeddings(int[] tokenIds)
+    {
+        ThrowIfDisposed();
+        return EmbeddingLookup([tokenIds], 1, tokenIds.Length);
+    }
+
+    /// <summary>Runs the decoder over caller-supplied <c>inputsEmbeds [1, seqLen, hidden]</c> with a precomputed
+    /// per-token RoPE <c>(cos, sin)</c> table (sized <c>seqLen · headDim/2</c>) — this is how Qwen3-VL's
+    /// <b>interleaved M-RoPE</b> is driven (the 3D position ids collapse into one split-half table identical in shape to
+    /// the 1D table, so every <see cref="LlamaBlock"/> applies it unchanged). Optional Qwen3-VL <b>deepstack</b>
+    /// injection adds <paramref name="deepstackFeatures"/>[i] to the visual-token positions after decoder layer i (for
+    /// the first <c>deepstackFeatures.Count</c> layers). Returns the final hidden state (post <c>model.norm</c>) as
+    /// <c>[1, seqLen, hidden]</c>.</summary>
+    /// <param name="visualMask">Length-<c>seqLen</c> mask, true at image-token positions (the order matches the rows of each deepstack feature tensor).</param>
+    public Tensor EncodeEmbedsMrope(IBackend backend, Tensor inputsEmbeds, float[] ropeCos, float[] ropeSin,
+        IReadOnlyList<Tensor>? deepstackFeatures = null, bool[]? visualMask = null)
+    {
+        ThrowIfDisposed();
+        if (inputsEmbeds.Shape.Rank != 3 || inputsEmbeds.Shape[0] != 1)
+            throw new ArgumentException($"inputsEmbeds must be [1, seqLen, hidden], got {inputsEmbeds.Shape}.", nameof(inputsEmbeds));
+        int seqLen = (int)inputsEmbeds.Shape[1];
+        int H = _config.HiddenSize;
+
+        Tensor hidden = new Tensor(new TensorShape(1, seqLen, H), DType.F32);
+        long bytes = (long)seqLen * H * sizeof(float);
+        Buffer.MemoryCopy((void*)inputsEmbeds.DataPointer, (void*)hidden.DataPointer, bytes, bytes);
+
+        Tensor causalMask = BuildCausalMask(seqLen);
+        for (int i = 0; i < _config.NumLayers; i++)
+        {
+            Tensor next = _blocks[i].Forward(backend, hidden, causalMask, ropeCos, ropeSin, seqLen);
+            hidden.Dispose();
+            hidden = next;
+            if (deepstackFeatures is not null && i < deepstackFeatures.Count && visualMask is not null)
+                InjectDeepstack(hidden, deepstackFeatures[i], visualMask, seqLen, H);
+        }
+        causalMask.Dispose();
+
+        if (_config.HasFinalNorm)
+        {
+            Tensor output = new Tensor(new TensorShape(1, seqLen, H), DType.F32);
+            backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps);
+            hidden.Dispose();
+            return output;
+        }
+        return hidden;
+    }
+
+    /// <summary>Adds <paramref name="features"/> (one row per visual token, in sequence order) to the hidden state at
+    /// the positions flagged by <paramref name="visualMask"/>. Mirrors Qwen3-VL's <c>_deepstack_process</c>.</summary>
+    private static void InjectDeepstack(Tensor hidden, Tensor features, bool[] visualMask, int seqLen, int H)
+    {
+        float* hp = (float*)hidden.DataPointer;
+        float* fp = (float*)features.DataPointer;
+        int visIdx = 0;
+        for (int s = 0; s < seqLen; s++)
+        {
+            if (!visualMask[s]) continue;
+            long ho = (long)s * H;
+            long fo = (long)visIdx * H;
+            for (int d = 0; d < H; d++) hp[ho + d] += fp[fo + d];
+            visIdx++;
+        }
+    }
+
     /// <summary>Encodes a prompt and concatenates hidden states from selected intermediate layers along the feature axis. Used by Flux.2 Klein (layers 9, 18, 27 → 7680 dim for Qwen3-4B). HuggingFace indexing: <c>k=0</c> is the embedding output (pre-layer-0); <c>k=1..N</c> is post-layer-(k−1). Final RMSNorm is NOT applied to intermediate outputs (matches HF — only the last hidden state passes through <c>model.norm</c>).</summary>
     /// <param name="layerIndices">Layer indices in HuggingFace convention: 0 = embeddings, k = post-layer-(k-1). Must be sorted ascending and within [0, NumLayers].</param>
     /// <param name="interleavedLayout">Channel ordering of the concatenated taps. <c>false</c> (default) = <b>tap-major</b>

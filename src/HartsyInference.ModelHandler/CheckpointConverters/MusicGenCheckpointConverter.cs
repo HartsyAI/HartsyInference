@@ -74,6 +74,34 @@ public sealed class MusicGenCheckpointConverter
         return (ConvertEnCodec(raw), loader);
     }
 
+    /// <summary>Loads the T5-base text encoder weights — either the <c>text_encoder.*</c> subset of a combined
+    /// MusicGen / AudioGen file or a standalone HF T5 dump. Only the <c>text_encoder.</c> prefix is stripped; the
+    /// inner HF T5 key names (<c>shared.weight</c>, <c>encoder.block.{i}.layer.*</c>, <c>encoder.final_layer_norm.*</c>)
+    /// are what <c>T5TextEncoder.LoadWeights</c> already consumes for the standalone (Flux/SD3) path, so no further
+    /// remapping is needed. Caller owns the loader. Pair with <see cref="T5TextEncoderConfig.T5Base"/>.</summary>
+    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadTextEncoder(string path, bool castToF32 = false)
+    {
+        SafeTensorsLoader loader = new();
+        loader.Load(path);
+        bool combined = false;
+        foreach (string key in loader.Descriptors.Keys)
+        {
+            if (key.StartsWith("text_encoder.", StringComparison.Ordinal))
+            {
+                combined = true;
+                break;
+            }
+        }
+        Dictionary<string, Tensor> weights = new();
+        foreach (string key in loader.Descriptors.Keys)
+        {
+            if (combined && !key.StartsWith("text_encoder.", StringComparison.Ordinal)) continue;
+            string stripped = combined ? key["text_encoder.".Length..] : key;
+            weights[stripped] = CodecKeyUtils.MaybeCast(loader.GetTensor(key), castToF32);
+        }
+        return (weights, loader);
+    }
+
     /// <summary>Converts an EnCodec weight dictionary from HF <c>transformers</c> naming to the Meta naming the engine
     /// <c>EnCodec</c> loads; Meta-named dictionaries pass through. Weight-norm pairs are kept raw — the engine fuses.</summary>
     public static Dictionary<string, Tensor> ConvertEnCodec(Dictionary<string, Tensor> raw)
