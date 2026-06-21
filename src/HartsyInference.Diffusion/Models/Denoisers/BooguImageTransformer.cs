@@ -1,0 +1,422 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+
+namespace HartsyInference.Diffusion.Models.Denoisers;
+
+/// <summary>Boogu-Image diffusion transformer (<c>BooguImageTransformer2DModel</c>). An OmniGen2/Lumina-Image-2.0
+/// lineage joint transformer with a dual-stream stage and a reference-image edit path. See
+/// <c>docs/Research/BOOGU_IMAGE.md</c> for the full architecture.
+///
+/// <para>Reuses <see cref="OmniGen2Block"/> for the single-stream, noise-refiner, ref-image-refiner (modulated) and
+/// context-refiner (non-modulated) blocks — they are byte-for-byte the same Lumina sandwich-norm block — and
+/// <see cref="BooguImageDoubleBlock"/> for the new dual-stream blocks. RoPE tables are precomputed once per forward
+/// (via <see cref="OmniGen2Rope.BuildTableFromPositions"/>) and shared across every block, which also lets the edit
+/// path express its reference-image <c>pe_shift</c> position offsets.</para>
+///
+/// <para>Forward (per guidance condition, batch = 1): context-refine the caption → patch-embed + refine the noise
+/// image (and reference image for edits) → 8 dual-stream blocks → fuse <c>[instruct, ref, noise]</c> → 32 single-stream
+/// blocks → <c>LuminaLayerNormContinuous</c> output norm on the noise-image tail → unpatchify to <c>[B, 16, H, W]</c>.</para></summary>
+public sealed unsafe class BooguImageTransformer : IDisposable
+{
+    private readonly BooguImageConfig _config;
+    private readonly OmniGen2Rope _rope;
+
+    private readonly OmniGen2Block[] _contextRefiner;
+    private readonly OmniGen2Block[] _noiseRefiner;
+    private readonly OmniGen2Block[] _refImageRefiner;
+    private readonly BooguImageDoubleBlock[] _doubleBlocks;
+    private readonly OmniGen2Block[] _singleBlocks;
+
+    private Tensor? _xEmbedderW, _xEmbedderB;
+    private Tensor? _refPatchEmbedderW, _refPatchEmbedderB;
+    private Tensor? _timeEmbed1W, _timeEmbed1B, _timeEmbed2W, _timeEmbed2B;
+    private Tensor? _captionNormW, _captionLinearW, _captionLinearB;
+    private Tensor? _normOutLin1W, _normOutLin1B, _normOutLin2W, _normOutLin2B;
+    private Tensor? _imageIndexEmbedding;
+
+    private int _disposed;
+
+    /// <summary>Creates a Boogu-Image transformer with the geometry in <paramref name="config"/>
+    /// (see <see cref="BooguImageConfig.V01"/>).</summary>
+    public BooguImageTransformer(BooguImageConfig config)
+    {
+        _config = config;
+        if (config.HeadDim != config.AxesDimRope[0] + config.AxesDimRope[1] + config.AxesDimRope[2])
+            throw new ArgumentException("sum(axes_dim_rope) must equal head_dim.");
+        _rope = new OmniGen2Rope(config.AxesDimRope, config.RopeTheta);
+
+        int ffn = config.FfnInnerDim;
+        int cond = config.ConditioningDim;
+
+        _contextRefiner = new OmniGen2Block[config.NumRefinerLayers];
+        _noiseRefiner = new OmniGen2Block[config.NumRefinerLayers];
+        _refImageRefiner = new OmniGen2Block[config.NumRefinerLayers];
+        for (int i = 0; i < config.NumRefinerLayers; i++)
+        {
+            _contextRefiner[i] = NewBlock(config, ffn, cond, modulation: false);
+            _noiseRefiner[i] = NewBlock(config, ffn, cond, modulation: true);
+            _refImageRefiner[i] = NewBlock(config, ffn, cond, modulation: true);
+        }
+
+        _doubleBlocks = new BooguImageDoubleBlock[config.NumDoubleStreamLayers];
+        for (int i = 0; i < config.NumDoubleStreamLayers; i++)
+            _doubleBlocks[i] = new BooguImageDoubleBlock(config.HiddenSize, config.NumAttentionHeads,
+                config.NumKvHeads, config.HeadDim, ffn, cond, config.NormEps, config.QkNormEps);
+
+        _singleBlocks = new OmniGen2Block[config.NumSingleStreamLayers];
+        for (int i = 0; i < config.NumSingleStreamLayers; i++)
+            _singleBlocks[i] = NewBlock(config, ffn, cond, modulation: true);
+    }
+
+    private static OmniGen2Block NewBlock(BooguImageConfig c, int ffn, int cond, bool modulation) =>
+        new OmniGen2Block(c.HiddenSize, c.NumAttentionHeads, c.NumKvHeads, c.HeadDim, ffn, cond, modulation,
+            c.NormEps, c.QkNormEps);
+
+    /// <summary>Config accessor.</summary>
+    public BooguImageConfig Config => _config;
+
+    /// <summary>Loads weights from a diffusers-style key dict (prefix already stripped to bare keys).</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
+    {
+        _xEmbedderW = w["x_embedder.weight"];
+        w.TryGetValue("x_embedder.bias", out _xEmbedderB);
+        w.TryGetValue("ref_image_patch_embedder.weight", out _refPatchEmbedderW);
+        w.TryGetValue("ref_image_patch_embedder.bias", out _refPatchEmbedderB);
+
+        _timeEmbed1W = w["time_caption_embed.timestep_embedder.linear_1.weight"];
+        _timeEmbed1B = w["time_caption_embed.timestep_embedder.linear_1.bias"];
+        _timeEmbed2W = w["time_caption_embed.timestep_embedder.linear_2.weight"];
+        _timeEmbed2B = w["time_caption_embed.timestep_embedder.linear_2.bias"];
+
+        _captionNormW = F32(w["time_caption_embed.caption_embedder.0.weight"]);
+        _captionLinearW = w["time_caption_embed.caption_embedder.1.weight"];
+        _captionLinearB = w["time_caption_embed.caption_embedder.1.bias"];
+
+        _normOutLin1W = w["norm_out.linear_1.weight"];
+        _normOutLin1B = w["norm_out.linear_1.bias"];
+        _normOutLin2W = w["norm_out.linear_2.weight"];
+        _normOutLin2B = w["norm_out.linear_2.bias"];
+
+        w.TryGetValue("image_index_embedding", out _imageIndexEmbedding);
+
+        for (int i = 0; i < _contextRefiner.Length; i++) _contextRefiner[i].LoadWeights(w, $"context_refiner.{i}");
+        for (int i = 0; i < _noiseRefiner.Length; i++) _noiseRefiner[i].LoadWeights(w, $"noise_refiner.{i}");
+        for (int i = 0; i < _refImageRefiner.Length; i++) _refImageRefiner[i].LoadWeights(w, $"ref_image_refiner.{i}");
+        for (int i = 0; i < _doubleBlocks.Length; i++) _doubleBlocks[i].LoadWeights(w, $"double_stream_layers.{i}");
+        for (int i = 0; i < _singleBlocks.Length; i++) _singleBlocks[i].LoadWeights(w, $"single_stream_layers.{i}");
+    }
+
+    /// <summary>Enumerates every weight tensor for GPU preload.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        Tensor?[] top =
+        [
+            _xEmbedderW, _xEmbedderB, _refPatchEmbedderW, _refPatchEmbedderB,
+            _timeEmbed1W, _timeEmbed1B, _timeEmbed2W, _timeEmbed2B,
+            _captionNormW, _captionLinearW, _captionLinearB,
+            _normOutLin1W, _normOutLin1B, _normOutLin2W, _normOutLin2B, _imageIndexEmbedding,
+        ];
+        foreach (Tensor? t in top) if (t is not null) yield return t;
+        foreach (OmniGen2Block b in _contextRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (OmniGen2Block b in _noiseRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (OmniGen2Block b in _refImageRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (BooguImageDoubleBlock b in _doubleBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (OmniGen2Block b in _singleBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+    }
+
+    /// <summary>Predicts the flow-match velocity for one denoising step.</summary>
+    /// <param name="backend">Compute backend.</param>
+    /// <param name="latent">Noise latent <c>[1, in_channels, H, W]</c>.</param>
+    /// <param name="timestep">Flow-match timestep <c>t'</c> in <c>[0, 1]</c>.</param>
+    /// <param name="instructionHidden">Qwen3-VL final hidden states <c>[1, T, instruction_feat_dim]</c>.</param>
+    /// <param name="refLatents">Optional reference-image latents <c>[1, in_channels, Hr, Wr]</c> for editing (null for T2I).</param>
+    /// <returns>Predicted velocity <c>[1, in_channels, H, W]</c>.</returns>
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor instructionHidden,
+        IReadOnlyList<Tensor>? refLatents = null)
+    {
+        ThrowIfDisposed();
+        if (latent.Shape.Rank != 4 || latent.Shape[0] != 1)
+            throw new ArgumentException($"Latent must be [1, C, H, W], got {latent.Shape}.", nameof(latent));
+        if (instructionHidden.Shape.Rank != 3 || instructionHidden.Shape[0] != 1)
+            throw new ArgumentException($"instructionHidden must be [1, T, dim], got {instructionHidden.Shape}.", nameof(instructionHidden));
+
+        int batch = 1;
+        int inChannels = (int)latent.Shape[1];
+        int latentH = (int)latent.Shape[2];
+        int latentW = (int)latent.Shape[3];
+        int patch = _config.PatchSize;
+        int hidden = _config.HiddenSize;
+        int cond = _config.ConditioningDim;
+        int capLen = (int)instructionHidden.Shape[1];
+        int hPacked = latentH / patch;
+        int wPacked = latentW / patch;
+        int imgLen = hPacked * wPacked;
+        int outChannels = _config.OutChannels ?? inChannels;
+
+        if (latentH % patch != 0 || latentW % patch != 0)
+            throw new ArgumentException($"Latent {latentH}x{latentW} not divisible by patch {patch}.", nameof(latent));
+
+        // ── timestep + caption embedding ──
+        Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch, cond);
+        Tensor caption = new Tensor(new TensorShape(batch, capLen, hidden), DType.F32);
+        {
+            Tensor capNorm = new Tensor(new TensorShape(batch, capLen, _config.InstructionFeatDim), DType.F32);
+            backend.RmsNorm(capNorm, instructionHidden, _captionNormW!, _config.NormEps);
+            backend.Linear(caption, capNorm, _captionLinearW!, _captionLinearB);
+            capNorm.Dispose();
+        }
+
+        // ── reference image grids (edit) ──
+        int refCount = refLatents?.Count ?? 0;
+        int[] refHTok = new int[refCount];
+        int[] refWTok = new int[refCount];
+        int totalRefLen = 0;
+        for (int j = 0; j < refCount; j++)
+        {
+            Tensor r = refLatents![j];
+            refHTok[j] = (int)r.Shape[2] / patch;
+            refWTok[j] = (int)r.Shape[3] / patch;
+            totalRefLen += refHTok[j] * refWTok[j];
+        }
+        int combinedImgLen = totalRefLen + imgLen;
+        int jointLen = capLen + combinedImgLen;
+
+        // ── RoPE position ids (caption | refs | noise) with pe_shift offsets ──
+        (int[] jt, int[] jh, int[] jw) = BuildJointPositionIds(capLen, refHTok, refWTok, hPacked, wPacked);
+        (float[] jointCos, float[] jointSin) = _rope.BuildTableFromPositions(jt, jh, jw);
+        (float[] ctxCos, float[] ctxSin) = _rope.BuildTableFromPositions(jt[..capLen], jh[..capLen], jw[..capLen]);
+        (float[] combCos, float[] combSin) = _rope.BuildTableFromPositions(jt[capLen..], jh[capLen..], jw[capLen..]);
+        int[] noiseTimeIds = jt[(capLen + totalRefLen)..];
+        int[] noiseHIds = jh[(capLen + totalRefLen)..];
+        int[] noiseWIds = jw[(capLen + totalRefLen)..];
+        (float[] noiseCos, float[] noiseSin) = _rope.BuildTableFromPositions(noiseTimeIds, noiseHIds, noiseWIds);
+
+        // ── context refiner (text) ──
+        for (int i = 0; i < _contextRefiner.Length; i++)
+        {
+            Tensor next = _contextRefiner[i].Forward(backend, caption, _rope, ctxCos, ctxSin, null);
+            caption.Dispose();
+            caption = next;
+        }
+
+        // ── noise image patch embed + refine ──
+        Tensor imgFlat = DiTUtils.PatchifyNCHW(latent, patch);
+        Tensor noiseImg = new Tensor(new TensorShape(batch, imgLen, hidden), DType.F32);
+        backend.Linear(noiseImg, imgFlat, _xEmbedderW!, _xEmbedderB);
+        imgFlat.Dispose();
+        for (int i = 0; i < _noiseRefiner.Length; i++)
+        {
+            Tensor next = _noiseRefiner[i].Forward(backend, noiseImg, _rope, noiseCos, noiseSin, temb);
+            noiseImg.Dispose();
+            noiseImg = next;
+        }
+
+        // ── reference image patch embed + refine (edit) → combined image [ref, noise] ──
+        Tensor combinedImg;
+        if (refCount > 0)
+        {
+            Tensor refTokens = BuildRefImageTokens(backend, refLatents!, refHTok, refWTok, totalRefLen, hidden, patch);
+            int[] refTimeIds = jt[capLen..(capLen + totalRefLen)];
+            int[] refHIds = jh[capLen..(capLen + totalRefLen)];
+            int[] refWIds = jw[capLen..(capLen + totalRefLen)];
+            (float[] refCos, float[] refSin) = _rope.BuildTableFromPositions(refTimeIds, refHIds, refWIds);
+            for (int i = 0; i < _refImageRefiner.Length; i++)
+            {
+                Tensor next = _refImageRefiner[i].Forward(backend, refTokens, _rope, refCos, refSin, temb);
+                refTokens.Dispose();
+                refTokens = next;
+            }
+            combinedImg = DiTUtils.ConcatAlongSeqDim(refTokens, noiseImg);
+            refTokens.Dispose();
+            noiseImg.Dispose();
+        }
+        else
+        {
+            combinedImg = noiseImg;
+        }
+
+        // ── dual-stream stage ──
+        Tensor instruct = caption;
+        Tensor image = combinedImg;
+        for (int i = 0; i < _doubleBlocks.Length; i++)
+        {
+            (Tensor newImage, Tensor newInstruct) = _doubleBlocks[i].Forward(backend, image, instruct, _rope,
+                jointCos, jointSin, combCos, combSin, capLen, temb);
+            image.Dispose();
+            instruct.Dispose();
+            image = newImage;
+            instruct = newInstruct;
+        }
+
+        // ── fuse [instruct, image] → single-stream stack ──
+        Tensor joint = DiTUtils.ConcatAlongSeqDim(instruct, image);
+        instruct.Dispose();
+        image.Dispose();
+        for (int i = 0; i < _singleBlocks.Length; i++)
+        {
+            Tensor next = _singleBlocks[i].Forward(backend, joint, _rope, jointCos, jointSin, temb);
+            joint.Dispose();
+            joint = next;
+        }
+
+        // ── keep the noise-image tail, output norm, unpatchify ──
+        Tensor noiseTail = SliceTail(joint, capLen + totalRefLen, imgLen, hidden);
+        joint.Dispose();
+
+        Tensor normed = ApplyOutputNorm(backend, noiseTail, temb, batch, imgLen, hidden, cond);
+        noiseTail.Dispose();
+        temb.Dispose();
+
+        Tensor projOut = new Tensor(new TensorShape(batch, imgLen, patch * patch * outChannels), DType.F32);
+        backend.Linear(projOut, normed, _normOutLin2W!, _normOutLin2B);
+        normed.Dispose();
+
+        Tensor velocity = DiTUtils.UnpatchifyToNCHW(projOut, outChannels, hPacked, wPacked, patch);
+        projOut.Dispose();
+        return velocity;
+    }
+
+    /// <summary>Patch-embeds the reference latents, concatenates them into one <c>[1, totalRefLen, hidden]</c> tensor,
+    /// and adds the per-image <c>image_index_embedding[j]</c> to each image's tokens.</summary>
+    private Tensor BuildRefImageTokens(IBackend backend, IReadOnlyList<Tensor> refLatents, int[] refHTok, int[] refWTok,
+        int totalRefLen, int hidden, int patch)
+    {
+        Tensor combined = new Tensor(new TensorShape(1, totalRefLen, hidden), DType.F32);
+        float* dst = (float*)combined.DataPointer;
+        float* idx = _imageIndexEmbedding is null ? null : (float*)_imageIndexEmbedding.DataPointer;
+        int shift = 0;
+        for (int j = 0; j < refLatents.Count; j++)
+        {
+            int len = refHTok[j] * refWTok[j];
+            Tensor flat = DiTUtils.PatchifyNCHW(refLatents[j], patch);
+            Tensor emb = new Tensor(new TensorShape(1, len, hidden), DType.F32);
+            backend.Linear(emb, flat, _refPatchEmbedderW!, _refPatchEmbedderB);
+            flat.Dispose();
+            float* src = (float*)emb.DataPointer;
+            for (int s = 0; s < len; s++)
+                for (int d = 0; d < hidden; d++)
+                {
+                    float add = idx is null ? 0f : idx[j * hidden + d];
+                    dst[(shift + s) * hidden + d] = src[s * hidden + d] + add;
+                }
+            emb.Dispose();
+            shift += len;
+        }
+        return combined;
+    }
+
+    /// <summary>Builds the joint-sequence position ids <c>(time, height, width)</c> for <c>[caption | refs | noise]</c>,
+    /// matching <c>rope.py</c>: caption token <c>i → (i,i,i)</c>; each reference image's tokens get a running
+    /// time-axis offset <c>pe_shift</c> (starts at <c>capLen</c>, advances by <c>max(refH,refW)</c>); the noise image
+    /// uses the offset after all references.</summary>
+    private static (int[] t, int[] h, int[] w) BuildJointPositionIds(int capLen, int[] refHTok, int[] refWTok,
+        int hPacked, int wPacked)
+    {
+        int totalRef = 0;
+        for (int j = 0; j < refHTok.Length; j++) totalRef += refHTok[j] * refWTok[j];
+        int total = capLen + totalRef + hPacked * wPacked;
+        int[] t = new int[total];
+        int[] h = new int[total];
+        int[] w = new int[total];
+
+        for (int i = 0; i < capLen; i++) { t[i] = i; h[i] = i; w[i] = i; }
+
+        int peShift = capLen;
+        int pos = capLen;
+        for (int j = 0; j < refHTok.Length; j++)
+        {
+            for (int r = 0; r < refHTok[j]; r++)
+                for (int c = 0; c < refWTok[j]; c++)
+                {
+                    t[pos] = peShift; h[pos] = r; w[pos] = c; pos++;
+                }
+            peShift += Math.Max(refHTok[j], refWTok[j]);
+        }
+
+        for (int r = 0; r < hPacked; r++)
+            for (int c = 0; c < wPacked; c++)
+            {
+                t[pos] = peShift; h[pos] = r; w[pos] = c; pos++;
+            }
+        return (t, h, w);
+    }
+
+    /// <summary>Sinusoidal(t·scale) → Linear(256→cond) → SiLU → Linear(cond→cond). Returns <c>temb [B, cond]</c>.</summary>
+    private Tensor ComputeTimestepEmbedding(IBackend backend, float timestep, int batch, int cond)
+    {
+        const int freqDim = 256;
+        Tensor sin = new Tensor(new TensorShape(batch, freqDim), DType.F32);
+        DiTUtils.SinusoidalTimestepEmbedding(sin, timestep * _config.TimestepScale, batch, freqDim);
+
+        Tensor proj1 = new Tensor(new TensorShape(batch, cond), DType.F32);
+        backend.Linear(proj1, sin, _timeEmbed1W!, _timeEmbed1B);
+        sin.Dispose();
+        Tensor act = new Tensor(new TensorShape(batch, cond), DType.F32);
+        backend.Silu(act, proj1);
+        proj1.Dispose();
+        Tensor proj2 = new Tensor(new TensorShape(batch, cond), DType.F32);
+        backend.Linear(proj2, act, _timeEmbed2W!, _timeEmbed2B);
+        act.Dispose();
+        return proj2;
+    }
+
+    /// <summary>LuminaLayerNormContinuous: <c>scale = Linear_1(SiLU(temb))</c>; <c>x = LayerNorm(x)·(1+scale)</c>.
+    /// (linear_2 is applied separately by the caller as proj_out.)</summary>
+    private Tensor ApplyOutputNorm(IBackend backend, Tensor x, Tensor temb, int batch, int seqLen, int hidden, int cond)
+    {
+        Tensor act = new Tensor(new TensorShape(batch, cond), DType.F32);
+        backend.Silu(act, temb);
+        Tensor scale = new Tensor(new TensorShape(batch, hidden), DType.F32);
+        backend.Linear(scale, act, _normOutLin1W!, _normOutLin1B);
+        act.Dispose();
+
+        Tensor ln = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
+        DiTUtils.LayerNormNoAffine(ln, x, batch, seqLen, hidden, _config.OutNormEps);
+
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
+        float* lp = (float*)ln.DataPointer, sp = (float*)scale.DataPointer, op = (float*)output.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            int cb = b * hidden;
+            for (int s = 0; s < seqLen; s++)
+            {
+                int vb = (b * seqLen + s) * hidden;
+                for (int d = 0; d < hidden; d++)
+                    op[vb + d] = lp[vb + d] * (1.0f + sp[cb + d]);
+            }
+        }
+        ln.Dispose();
+        scale.Dispose();
+        return output;
+    }
+
+    /// <summary>Extracts the trailing <paramref name="tailLen"/> tokens (the noise image) from a <c>[1, S, hidden]</c>
+    /// joint sequence starting at <paramref name="start"/>.</summary>
+    private static Tensor SliceTail(Tensor joint, int start, int tailLen, int hidden)
+    {
+        Tensor output = new Tensor(new TensorShape(1, tailLen, hidden), DType.F32);
+        long bytes = (long)tailLen * hidden * sizeof(float);
+        float* src = (float*)joint.DataPointer + (long)start * hidden;
+        Buffer.MemoryCopy(src, (void*)output.DataPointer, bytes, bytes);
+        return output;
+    }
+
+    private static Tensor F32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+
+    private void ThrowIfDisposed() =>
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            _xEmbedderW = _xEmbedderB = _refPatchEmbedderW = _refPatchEmbedderB = null;
+            _timeEmbed1W = _timeEmbed1B = _timeEmbed2W = _timeEmbed2B = null;
+            _captionNormW = _captionLinearW = _captionLinearB = null;
+            _normOutLin1W = _normOutLin1B = _normOutLin2W = _normOutLin2B = null;
+            _imageIndexEmbedding = null;
+        }
+        GC.SuppressFinalize(this);
+    }
+}
