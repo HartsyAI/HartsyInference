@@ -135,10 +135,9 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer access triggers D2H, Dispose frees GPU memory.</summary>
     public static void CacheActivation(Tensor tensor, ulong gpuPtr, nuint byteSize)
     {
-        // Capture CPU buffer pointer before setting callbacks.
-        // Tensor is freshly created (no existing callback), so DataPointer is safe here.
-        void* cpuPtr = tensor.DataPointer;
-
+        // Do NOT touch tensor.DataPointer here: that would force the lazy host buffer to allocate (and zero) for
+        // every GPU-resident activation, the exact host malloc+memset cost we are avoiding. The host buffer is
+        // allocated only if/when CPU code actually reads the tensor, inside the sync callback below.
         _activationCache[tensor] = (gpuPtr, byteSize);
         _cachedPointers.Add(gpuPtr);
 
@@ -153,6 +152,8 @@ internal static unsafe class GpuTransferHelper
                 _d2hSyncs++;
                 _context?.EnsureCurrent();
                 CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
+                // Allocate the host destination only now, on the first real CPU read of this activation.
+                void* cpuPtr = tensor.EnsureHostBuffer();
                 CudaMemory.CopyDeviceToHost(cpuPtr, cached.gpuPtr, cached.bytes);
                 _cachedPointers.Remove(cached.gpuPtr);
                 CudaMemory.FreeAsync(cached.gpuPtr, _streamHandle);

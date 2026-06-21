@@ -10,22 +10,33 @@ public sealed unsafe class Tensor : IDisposable
     private NativeBuffer? _ownedBuffer;
     private nint _dataPointer;
 
+    /// <summary>For owned tensors: the host buffer is allocated lazily on first CPU access (see <see cref="EnsureHostBuffer"/>).
+    /// This byte size is kept so the allocation can happen later. Zero for borrowed tensors.</summary>
+    private readonly long _byteSize;
+
+    /// <summary>True when this tensor owns its (lazily allocated) host buffer; false when it borrows an external pointer
+    /// (mmap'd weights, pooled buffers, reshapes/views). Drives <see cref="OwnsMemory"/> and the lazy-alloc path.</summary>
+    private readonly bool _ownsLazy;
+
+    /// <summary>Set once on Dispose so the lazy host-buffer path can't resurrect freed memory.</summary>
+    private bool _disposed;
+
     /// <summary>Backend-set callback: copies GPU→CPU then frees GPU pointer. Invoked lazily on first CPU data access.</summary>
     internal Action? _gpuSyncCallback;
 
     /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
     internal Action? _gpuDisposeCallback;
 
-    /// <summary>Creates a new tensor with freshly allocated unmanaged memory, zeroed.</summary>
+    /// <summary>Creates a new owned tensor. The host buffer is NOT allocated here; it is allocated (zeroed) lazily on the
+    /// first CPU access via <see cref="DataPointer"/>/<see cref="AsSpan{T}"/>/etc. GPU-resident activations (whose data
+    /// lives on the device and is freed without ever being read on the host) therefore never pay for a host malloc+memset.</summary>
     public Tensor(TensorShape shape, DType dtype, DeviceKind device = default)
     {
         Shape = shape;
         DType = dtype;
         Device = device;
-
-        long byteSize = dtype.ComputeByteCount(shape.ElementCount);
-        _ownedBuffer = new NativeBuffer((nuint)byteSize);
-        _dataPointer = (nint)_ownedBuffer.Pointer;
+        _byteSize = dtype.ComputeByteCount(shape.ElementCount);
+        _ownsLazy = true;
     }
 
     /// <summary>Creates a tensor that borrows memory from an external pointer (e.g., mmap'd weights).</summary>
@@ -35,7 +46,9 @@ public sealed unsafe class Tensor : IDisposable
         Shape = shape;
         DType = dtype;
         Device = device;
+        _byteSize = dtype.ComputeByteCount(shape.ElementCount);
         _ownedBuffer = null;
+        _ownsLazy = false;
     }
 
     /// <summary>Shape and strides of this tensor.</summary>
@@ -50,23 +63,41 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Total number of elements across all dimensions.</summary>
     public long ElementCount => Shape.ElementCount;
 
-    /// <summary>Whether this tensor owns its memory or borrows it from a mmap/view.</summary>
-    public bool OwnsMemory => _ownedBuffer is not null;
+    /// <summary>Whether this tensor owns its memory or borrows it from a mmap/view. True even before the lazy host
+    /// buffer has been allocated, since ownership is a property of how the tensor was constructed, not of allocation timing.</summary>
+    public bool OwnsMemory => _ownsLazy;
+
+    /// <summary>Ensures the owned host buffer exists (allocating it zeroed on first call) and returns its pointer. For
+    /// borrowed tensors the external pointer is returned as-is. This is the single lazy-allocation chokepoint: GPU
+    /// activations that are never read on the host skip it entirely and so never allocate host memory. The CUDA D2H
+    /// sync callback also calls this to obtain a destination buffer at sync time.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void* EnsureHostBuffer()
+    {
+        nint ptr = _dataPointer;
+        if (ptr != 0)
+            return (void*)ptr;
+        if (_disposed || !_ownsLazy)
+            throw new ObjectDisposedException(nameof(Tensor));
+        NativeBuffer buffer = new NativeBuffer((nuint)_byteSize);
+        _ownedBuffer = buffer;
+        ptr = (nint)buffer.Pointer;
+        _dataPointer = ptr;
+        return (void*)ptr;
+    }
 
     /// <summary>Per-tensor scale for ComfyUI-style <c>fp8_scaled</c> quantization, where the real value of each weight is <c>fp8_byte_decoded * Fp8ScaleFactor</c>. Default 1.0 means no extra scaling. Non-1 values are folded into cuBLAS' <c>alpha</c> at GEMM call sites so scaling happens for free during matmul.</summary>
     public float Fp8ScaleFactor { get; set; } = 1.0f;
 
-    /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first.</summary>
+    /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise
+    /// the owned host buffer is allocated (zeroed) on first access.</summary>
     public void* DataPointer
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get
         {
             EnsureCpuData();
-            nint ptr = _dataPointer;
-            if (ptr == 0)
-                throw new ObjectDisposedException(nameof(Tensor));
-            return (void*)ptr;
+            return EnsureHostBuffer();
         }
     }
 
@@ -75,11 +106,9 @@ public sealed unsafe class Tensor : IDisposable
     public Span<T> AsSpan<T>() where T : unmanaged
     {
         EnsureCpuData();
-        nint ptr = _dataPointer;
-        if (ptr == 0)
-            throw new ObjectDisposedException(nameof(Tensor));
+        void* ptr = EnsureHostBuffer();
         int count = (int)(DType.ComputeByteCount(Shape.ElementCount) / sizeof(T));
-        return new Span<T>((void*)ptr, count);
+        return new Span<T>(ptr, count);
     }
 
     /// <summary>Returns a read-only span over the tensor data.</summary>
@@ -87,11 +116,9 @@ public sealed unsafe class Tensor : IDisposable
     public ReadOnlySpan<T> AsReadOnlySpan<T>() where T : unmanaged
     {
         EnsureCpuData();
-        nint ptr = _dataPointer;
-        if (ptr == 0)
-            throw new ObjectDisposedException(nameof(Tensor));
+        void* ptr = EnsureHostBuffer();
         int count = (int)(DType.ComputeByteCount(Shape.ElementCount) / sizeof(T));
-        return new ReadOnlySpan<T>((void*)ptr, count);
+        return new ReadOnlySpan<T>(ptr, count);
     }
 
     /// <summary>Creates a zero-alloc TensorRef view of this tensor for use in kernel implementations.</summary>
@@ -99,9 +126,7 @@ public sealed unsafe class Tensor : IDisposable
     public TensorRef AsRef()
     {
         EnsureCpuData();
-        nint ptr = _dataPointer;
-        if (ptr == 0)
-            throw new ObjectDisposedException(nameof(Tensor));
+        nint ptr = (nint)EnsureHostBuffer();
         return new TensorRef(ptr, Shape, DType, Device);
     }
 
@@ -410,6 +435,7 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Frees owned memory via atomic pointer exchange. If GPU data is cached, frees it without D2H copy. Borrowed tensors are no-ops.</summary>
     public void Dispose()
     {
+        _disposed = true;
         nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
         Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
         Interlocked.Exchange(ref _gpuSyncCallback, null);
@@ -424,6 +450,7 @@ public sealed unsafe class Tensor : IDisposable
 
     ~Tensor()
     {
+        _disposed = true;
         nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
         Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
         Interlocked.Exchange(ref _gpuSyncCallback, null);

@@ -96,9 +96,9 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     /// <summary>Caches an op's output buffer with the tensor — avoids D2H. Sets lazy-sync + dispose callbacks for CPU access.</summary>
     public unsafe void CacheActivation(Tensor tensor, VulkanBuffer buffer)
     {
-        // Capture the CPU buffer pointer up front before installing callbacks.
-        // The Tensor must have a CPU-owned buffer (created via the standard Tensor ctor); verified by Tensor.OwnsMemory.
-        void* cpuPtr = tensor.DataPointer;
+        // Do NOT touch tensor.DataPointer here: that would force the lazy host buffer to allocate (and zero) for
+        // every GPU-resident activation. The host buffer is allocated only if/when CPU code actually reads the
+        // tensor, inside the sync callback below (via Tensor.EnsureHostBuffer).
         ulong byteSize = (ulong)ByteSize(tensor);
 
         // Old callbacks may close over an earlier GPU buffer (in-place ops on the same Tensor). Clear before re-cache.
@@ -111,7 +111,6 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         VulkanGpuTransferHelper self = this;
         Tensor capturedTensor = tensor;
         VulkanBuffer capturedBuffer = buffer;
-        nint capturedCpuPtr = (nint)cpuPtr;
         ulong capturedSize = byteSize;
 
         // Lazy sync: when CPU code reads the tensor, wait for the stream, copy back, free GPU buffer.
@@ -120,7 +119,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
             if (self._activationCache.Remove(capturedTensor, out VulkanBuffer? cached))
             {
                 self._stream.WaitIdleHost();
-                self.DownloadToHost(capturedCpuPtr, cached, capturedSize);
+                self.DownloadToHost((nint)capturedTensor.EnsureHostBuffer(), cached, capturedSize);
                 self._cachedBuffers.Remove(cached);
                 self._stream.DeferredFree(cached);
             }
