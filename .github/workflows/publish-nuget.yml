@@ -75,6 +75,27 @@ jobs:
       - name: List packages
         run: ls -1 artifacts/*.nupkg
 
+      # Refuse to publish a partial release. The meta-package 'HartsyInference' pins its dependencies to
+      # the EXACT same version of every sub-package, so if a pack/push drops even one sub-package, the
+      # meta resolves to a version whose deps don't exist on the feed and every consumer restore breaks
+      # with NU1102. Verify the full set is present BEFORE pushing so a partial pack can never ship.
+      - name: Verify complete package set
+        run: |
+          VER="1.0.0-${{ steps.ver.outputs.suffix }}"
+          EXPECTED="HartsyInference HartsyInference.Core HartsyInference.Cpu HartsyInference.Cuda HartsyInference.Vulkan HartsyInference.ModelHandler HartsyInference.Tokenizers HartsyInference.Diffusion HartsyInference.Audio HartsyInference.Vision HartsyInference.Video HartsyInference.Interactive HartsyInference.ThreeD"
+          missing=0
+          for pkg in $EXPECTED; do
+            if [ ! -f "artifacts/${pkg}.${VER}.nupkg" ]; then
+              echo "MISSING: artifacts/${pkg}.${VER}.nupkg"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "::error::Incomplete package set for ${VER} — refusing to publish a partial release (would brick consumer restores via the meta-package)."
+            exit 1
+          fi
+          echo "All 13 packages present for ${VER}."
+
       # Exchange the GitHub OIDC token for a short-lived (1-hour) NuGet API key.
       # Run this right before the push so the key doesn't expire mid-job.
       - name: NuGet login (OIDC -> temporary API key)
