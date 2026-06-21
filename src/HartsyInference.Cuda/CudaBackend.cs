@@ -116,6 +116,37 @@ public sealed class CudaBackend : IBackend
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();
         CublasApi.cublasSetStream(_cublasHandle, _stream.Handle).ThrowOnCublasError();
 
+        // Report which cuBLAS we actually loaded. Blackwell (SM 12.x) tensor-core GEMM needs CUDA 12.8+
+        // cuBLAS (version >= 120800); an older system cuBLAS silently falls back to a ~6 TFLOPS generic
+        // path — the cause of the Ideogram-4 ~50x slowdown vs ComfyUI (which bundles its own 12.8 cuBLAS).
+        try
+        {
+            int cublasVer = -1;
+            if (CublasApi.cublasGetVersion(_cublasHandle, out int v) == 0) cublasVer = v;
+            string cublasPath = "(path unknown)";
+            if (OperatingSystem.IsLinux() && File.Exists("/proc/self/maps"))
+            {
+                foreach (string line in File.ReadLines("/proc/self/maps"))
+                {
+                    if (line.IndexOf("libcublas", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    int slash = line.IndexOf('/');
+                    cublasPath = slash >= 0 ? line[slash..].Trim() : line.Trim();
+                    break;
+                }
+            }
+            HartsyInference.Core.Logging.Logs.Info($"[Cuda] cuBLAS version {cublasVer} (~{cublasVer / 10000}.{(cublasVer / 100) % 100}) loaded from {cublasPath}.");
+            if (_context.ComputeCapabilityMajor >= 12 && cublasVer is >= 0 and < 120800)
+            {
+                HartsyInference.Core.Logging.Logs.Warning($"[Cuda] cuBLAS {cublasVer} predates Blackwell (SM {_context.ComputeCapabilityMajor}.x) support (need >= 120800 / CUDA 12.8). " +
+                    "GEMMs will run a slow non-tensor-core fallback. Fix: point LD_LIBRARY_PATH at a CUDA 12.8+ libcublas " +
+                    "(e.g. PyTorch's bundled nvidia/cublas/lib) or install the CUDA 12.8+ runtime.");
+            }
+        }
+        catch (Exception ex)
+        {
+            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] couldn't query cuBLAS version: {ex.Message}");
+        }
+
         // Give GpuTransferHelper the stream handle for FreeAsync and lazy-sync callbacks
         GpuTransferHelper.SetStream(_stream.Handle);
         // Route transient allocations (op outputs, dtype casts, scratch) through the stream-ordered pool on the

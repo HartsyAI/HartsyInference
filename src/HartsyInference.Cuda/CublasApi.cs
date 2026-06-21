@@ -21,6 +21,9 @@ internal static partial class CublasApi
     [LibraryImport(LibName, EntryPoint = "cublasGetStream_v2")]
     internal static partial int cublasGetStream(nint handle, out nint stream);
 
+    [LibraryImport(LibName, EntryPoint = "cublasGetVersion_v2")]
+    internal static partial int cublasGetVersion(nint handle, out int version);
+
     // ── FP32 GEMM ───────────────────────────────────────────────────────
 
     [LibraryImport(LibName, EntryPoint = "cublasSgemm_v2")]
