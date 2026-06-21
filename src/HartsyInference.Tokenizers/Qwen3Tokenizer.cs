@@ -87,8 +87,14 @@ public sealed class Qwen3Tokenizer : IDisposable
     /// <summary>Token id for <c>&lt;|im_end|&gt;</c>.</summary>
     public const int ImEndId = 151645;
 
-    /// <summary>Encodes a single user prompt using the Qwen3 chat template (matches <c>apply_chat_template([{role:"user",content:prompt}], add_generation_prompt=True, enable_thinking=False)</c>). Required by Flux.2 Klein — the diffusion text encoder receives chat-formatted hidden states; raw prompt encoding produces wrong conditioning. Format: <c>&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n&lt;think&gt;\n\n&lt;/think&gt;\n\n</c>. Right-padded with <see cref="BosTokenId"/> to maxLength.</summary>
-    public int[] EncodeChat(string prompt)
+    /// <summary>Encodes a single user prompt using the Qwen3 chat template (matches <c>apply_chat_template([{role:"user",content:prompt}], add_generation_prompt=True)</c>). The diffusion text encoder receives chat-formatted hidden states; raw prompt encoding produces wrong conditioning.
+    /// <para>Two model families differ in the assistant generation prefix:</para>
+    /// <list type="bullet">
+    ///   <item><b>Flux.2 Klein</b> (Qwen3 text, <paramref name="includeThinkBlock"/> = true, default): <c>…&lt;|im_start|&gt;assistant\n&lt;think&gt;\n\n&lt;/think&gt;\n\n</c> (the <c>enable_thinking=False</c> rendering of the Qwen3 text template).</item>
+    ///   <item><b>Ideogram 4</b> (Qwen3-VL-8B-Instruct, <paramref name="includeThinkBlock"/> = false): <c>…&lt;|im_start|&gt;assistant\n</c> with NO think block — the VL-Instruct template emits no <c>&lt;think&gt;</c> tags and no default system message (verified against <c>Qwen/Qwen3-VL-8B-Instruct</c> tokenizer_config + upstream <c>pipeline_ideogram4.py</c>).</item>
+    /// </list>
+    /// Format: <c>&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n[think]</c>. Right-padded with <see cref="BosTokenId"/> to maxLength.</summary>
+    public int[] EncodeChat(string prompt, bool includeThinkBlock = true)
     {
         ThrowIfDisposed();
 
@@ -99,7 +105,7 @@ public sealed class Qwen3Tokenizer : IDisposable
         ids.Add(ImEndId);
         AppendBpe(ids, "\n");
         ids.Add(ImStartId);
-        AppendBpe(ids, "assistant\n<think>\n\n</think>\n\n");
+        AppendBpe(ids, includeThinkBlock ? "assistant\n<think>\n\n</think>\n\n" : "assistant\n");
 
         int realLen = ids.Count;
         if (realLen > _maxLength)

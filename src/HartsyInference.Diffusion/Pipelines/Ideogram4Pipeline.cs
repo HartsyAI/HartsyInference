@@ -97,6 +97,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         if ((int)textFeatures.Shape[2] != _config.LlmFeaturesDim)
             throw new InvalidOperationException($"Encoder produced {textFeatures.Shape[2]}-dim features, expected {_config.LlmFeaturesDim} (13 × 4096). Check the tap-layer indices / encoder preset.");
         Backend.Sync();
+        LogEncoderStats(textFeatures);
         Backend.FreeWeights(_textEncoder.EnumerateWeights());
         Logs.Info($"Prompt encoded in {sw.ElapsedMilliseconds}ms");
 
@@ -346,6 +347,35 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Tensor outV = new Tensor(new TensorShape(1, numImg, dim), DType.F32);
         Backend.SliceRows(outV, full, numText);
         return outV;
+    }
+
+    /// <summary>Diagnostic: logs summary stats of the Qwen3-VL encoder output. The text features are already
+    /// host-synced (BuildLlmFull reads them on CPU), so this is nearly free. Run two DIFFERENT prompts and compare:
+    /// identical stats ⇒ the encoder is producing prompt-independent features (weight-load / tokenization bug);
+    /// differing stats but an image that still ignores the prompt ⇒ the bug is downstream in the DiT conditioning
+    /// or MRoPE. NaN/inf &gt; 0 ⇒ the encoder forward is numerically broken.</summary>
+    private static void LogEncoderStats(Tensor textFeatures)
+    {
+        float* tf = (float*)textFeatures.DataPointer;
+        long n = textFeatures.ElementCount;
+        if (n == 0) return;
+        double sum = 0, sumsq = 0;
+        float mn = float.MaxValue, mx = float.MinValue;
+        long badCount = 0;
+        for (long e = 0; e < n; e++)
+        {
+            float v = tf[e];
+            if (float.IsNaN(v) || float.IsInfinity(v)) { badCount++; continue; }
+            sum += v; sumsq += (double)v * v;
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+        }
+        long good = n - badCount;
+        double mean = good > 0 ? sum / good : 0;
+        double std = good > 0 ? Math.Sqrt(Math.Max(0, sumsq / good - mean * mean)) : 0;
+        Logs.Info($"[Ideogram4] textFeatures [{textFeatures.Shape[1]}x{textFeatures.Shape[2]}] " +
+            $"mean={mean:F5} std={std:F5} min={mn:F4} max={mx:F4} nan/inf={badCount} " +
+            $"first=[{tf[0]:F4}, {tf[1]:F4}, {tf[2]:F4}, {tf[3]:F4}]");
     }
 
     /// <summary>Logs current device VRAM usage at an Info-level checkpoint (no-op detail on the CPU backend).</summary>
