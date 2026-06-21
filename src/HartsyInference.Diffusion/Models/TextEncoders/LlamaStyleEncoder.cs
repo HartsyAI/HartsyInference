@@ -123,8 +123,14 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
 
     /// <summary>Encodes a prompt and concatenates hidden states from selected intermediate layers along the feature axis. Used by Flux.2 Klein (layers 9, 18, 27 → 7680 dim for Qwen3-4B). HuggingFace indexing: <c>k=0</c> is the embedding output (pre-layer-0); <c>k=1..N</c> is post-layer-(k−1). Final RMSNorm is NOT applied to intermediate outputs (matches HF — only the last hidden state passes through <c>model.norm</c>).</summary>
     /// <param name="layerIndices">Layer indices in HuggingFace convention: 0 = embeddings, k = post-layer-(k-1). Must be sorted ascending and within [0, NumLayers].</param>
-    /// <returns>F32 tensor of shape <c>[batch, seqLen, layerIndices.Length × hiddenSize]</c>. Channels are arranged as <c>[layer_0_features, layer_1_features, ..., layer_N_features]</c> per token (matching diffusers' <c>permute(0, 2, 1, 3).reshape(B, S, N*H)</c>).</returns>
-    public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices)
+    /// <param name="interleavedLayout">Channel ordering of the concatenated taps. <c>false</c> (default) = <b>tap-major</b>
+    /// <c>[layer0(H) | layer1(H) | …]</c> (diffusers' <c>permute(0,2,1,3).reshape(B,S,N*H)</c>, used by Flux.2 Klein).
+    /// <c>true</c> = <b>hidden-major</b> <c>c = h*K + layerSlot</c> (upstream Ideogram 4's <c>permute(stack,(1,2,3,0)).reshape</c>
+    /// and ComfyUI's <c>permute(0,2,3,1).reshape(B,S,H*N)</c>) — the 13 tap values of hidden-dim 0, then of hidden-dim 1, …
+    /// Ideogram 4's <c>llm_cond_norm</c>/<c>llm_cond_proj</c> were trained on this order, so feeding tap-major scrambles
+    /// every input channel of the projection. For a single tap (<c>K=1</c>) the two layouts are identical.</param>
+    /// <returns>F32 tensor of shape <c>[batch, seqLen, layerIndices.Length × hiddenSize]</c>.</returns>
+    public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices, bool interleavedLayout = false)
     {
         ThrowIfDisposed();
         if (layerIndices is null || layerIndices.Length == 0)
@@ -161,7 +167,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         // Capture layer index 0 (embeddings) before any block runs.
         if (layerIndices[requestIdx] == 0)
         {
-            ScatterLayerSlice(hidden, output, requestIdx, batch, seqLen, H, K);
+            ScatterLayerSlice(hidden, output, requestIdx, batch, seqLen, H, K, interleavedLayout);
             requestIdx++;
         }
 
@@ -176,7 +182,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             int hfLayerIndex = i + 1;
             while (requestIdx < K && layerIndices[requestIdx] == hfLayerIndex)
             {
-                ScatterLayerSlice(hidden, output, requestIdx, batch, seqLen, H, K);
+                ScatterLayerSlice(hidden, output, requestIdx, batch, seqLen, H, K, interleavedLayout);
                 requestIdx++;
             }
             if (requestIdx >= K) break; // No more layers to capture — early exit.
@@ -187,8 +193,11 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         return output;
     }
 
-    /// <summary>Copies a layer's <c>[B, S, H]</c> hidden state into channels <c>[layerSlot*H .. layerSlot*H + H)</c> of an output tensor of shape <c>[B, S, K*H]</c>.</summary>
-    private static void ScatterLayerSlice(Tensor src, Tensor dst, int layerSlot, int batch, int seqLen, int H, int K)
+    /// <summary>Scatters a layer's <c>[B, S, H]</c> hidden state into an output tensor of shape <c>[B, S, K*H]</c>.
+    /// Tap-major (<paramref name="interleaved"/> = false): a contiguous block <c>[layerSlot*H .. layerSlot*H + H)</c>.
+    /// Hidden-major (<paramref name="interleaved"/> = true): strided, channel <c>h*K + layerSlot</c> for each <c>h</c>
+    /// (the layout Ideogram 4's <c>llm_cond_proj</c> expects).</summary>
+    private static void ScatterLayerSlice(Tensor src, Tensor dst, int layerSlot, int batch, int seqLen, int H, int K, bool interleaved)
     {
         float* sp = (float*)src.DataPointer;
         float* dp = (float*)dst.DataPointer;
@@ -198,8 +207,18 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             for (int s = 0; s < seqLen; s++)
             {
                 long srcOff = ((long)b * seqLen + s) * H;
-                long dstOff = ((long)b * seqLen + s) * (K * H) + (long)layerSlot * H;
-                Buffer.MemoryCopy(sp + srcOff, dp + dstOff, bytesPerToken, bytesPerToken);
+                long tokenBase = ((long)b * seqLen + s) * (K * H);
+                if (interleaved)
+                {
+                    // Hidden-major: dst[h*K + layerSlot] = src[h].
+                    for (int h = 0; h < H; h++)
+                        dp[tokenBase + (long)h * K + layerSlot] = sp[srcOff + h];
+                }
+                else
+                {
+                    // Tap-major: contiguous H-wide block per layer.
+                    Buffer.MemoryCopy(sp + srcOff, dp + tokenBase + (long)layerSlot * H, bytesPerToken, bytesPerToken);
+                }
             }
         }
     }

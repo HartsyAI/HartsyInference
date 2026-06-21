@@ -92,12 +92,23 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode prompt: Qwen3-VL 13-layer concat → [1, numText, llmFeaturesDim] ──
+        // Diagnostic: log the token ids so they can be compared 1:1 against a reference
+        // transformers Qwen3-VL run (tests/python-reference/dump_qwen3vl_ideogram4_encoder.py).
+        // A token-id mismatch ⇒ tokenizer/chat-template bug; a match with differing encoder
+        // features ⇒ encoder forward/weight-load bug.
+        LogTokenIds(promptTokenIds);
         Backend.PreloadWeights(_textEncoder.EnumerateWeights());
-        Tensor textFeatures = _textEncoder.EncodeMultiLayer(Backend, [promptTokenIds], Ideogram4Config.QwenActivationLayersHf);
+        // interleavedLayout: true — Ideogram 4 concatenates the 13 taps HIDDEN-MAJOR (c = h*13 + tap), matching
+        // upstream pipeline_ideogram4.py (permute(stack,(1,2,3,0)).reshape) and ComfyUI (permute(0,2,3,1)). The
+        // llm_cond_norm/llm_cond_proj weights are trained on this order; tap-major scrambles every input channel.
+        Tensor textFeatures = _textEncoder.EncodeMultiLayer(Backend, [promptTokenIds], Ideogram4Config.QwenActivationLayersHf, interleavedLayout: true);
         if ((int)textFeatures.Shape[2] != _config.LlmFeaturesDim)
             throw new InvalidOperationException($"Encoder produced {textFeatures.Shape[2]}-dim features, expected {_config.LlmFeaturesDim} (13 × 4096). Check the tap-layer indices / encoder preset.");
         Backend.Sync();
         LogEncoderStats(textFeatures);
+        // When IDEOGRAM4_DEBUG_DIR is set, dump the raw encoder output so it can be diffed
+        // element-wise against the transformers Qwen3-VL reference (same tokens).
+        HartsyInference.Diffusion.Models.Denoisers.Ideogram4DebugDump.Dump("textFeatures", textFeatures);
         Backend.FreeWeights(_textEncoder.EnumerateWeights());
         Logs.Info($"Prompt encoded in {sw.ElapsedMilliseconds}ms");
 
@@ -347,6 +358,16 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Tensor outV = new Tensor(new TensorShape(1, numImg, dim), DType.F32);
         Backend.SliceRows(outV, full, numText);
         return outV;
+    }
+
+    /// <summary>Diagnostic: logs the prompt token ids (count + a head/tail window) so they can be compared
+    /// 1:1 against a reference transformers Qwen3-VL tokenization of the same prompt + chat template.</summary>
+    private static void LogTokenIds(int[] ids)
+    {
+        int head = Math.Min(24, ids.Length);
+        string headStr = string.Join(",", ids[..head]);
+        string tailStr = ids.Length > 24 ? " … " + string.Join(",", ids[^Math.Min(8, ids.Length)..]) : "";
+        Logs.Info($"[Ideogram4] promptTokens count={ids.Length} ids=[{headStr}{tailStr}]");
     }
 
     /// <summary>Diagnostic: logs summary stats of the Qwen3-VL encoder output. The text features are already
