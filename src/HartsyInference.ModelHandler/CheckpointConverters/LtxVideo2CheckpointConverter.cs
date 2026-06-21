@@ -48,24 +48,12 @@ public sealed class LtxVideo2CheckpointConverter
         ("patchify_proj", "proj_in"),
     ];
 
-    // Video-VAE regroup: the single-file LTX-2 VAE is in ORIGINAL Lightricks naming — a FLAT decoder.up_blocks.0..6
-    // list (verified from the ltx-2 checkpoint header): index 0 = mid (5 res blocks), then odd = upsample conv, even =
-    // up-stage res blocks. The LtxVideo2VaeDecoder consumes the diffusers grouping (mid_block / up_blocks.{i}.upsamplers
-    // / resnets). Applied as an ordered substring replace (ascending so an earlier output is never re-matched). The
+    // Video-VAE regroup: the single-file LTX-2 VAE is in ORIGINAL Lightricks naming — a FLAT decoder.up_blocks.0..N
+    // list (verified from the 19B [N=6] and 22B [N=8] checkpoint headers): index 0 = the mid block's res blocks, then
+    // odd = an upsample conv, even>0 = an up-stage's res blocks. The count varies per model (3 up-stages for the 19B, 4
+    // for the 22B), so the regroup is INDEX-PARITY based (see RegroupUpBlock) rather than a fixed table. The
+    // LtxVideo2VaeDecoder consumes the diffusers grouping (mid_block / up_blocks.{k}.upsamplers.0 / resnets); the
     // encoder (down_blocks.*) is carried through unrenamed (the decoder doesn't read it).
-    private static readonly (string From, string To)[] _videoVaeRenames =
-    [
-        ("up_blocks.0", "mid_block"),
-        ("up_blocks.1", "up_blocks.0.upsamplers.0"),
-        ("up_blocks.2", "up_blocks.0"),
-        ("up_blocks.3", "up_blocks.1.upsamplers.0"),
-        ("up_blocks.4", "up_blocks.1"),
-        ("up_blocks.5", "up_blocks.2.upsamplers.0"),
-        ("up_blocks.6", "up_blocks.2"),
-        ("res_blocks", "resnets"),
-        ("per_channel_statistics.mean-of-means", "latents_mean"),
-        ("per_channel_statistics.std-of-means", "latents_std"),
-    ];
 
     /// <summary>Destination bucket for a checkpoint key.</summary>
     public enum Ltx2Bucket
@@ -149,20 +137,45 @@ public sealed class LtxVideo2CheckpointConverter
     // other stats entries are dropped.
     private static (Ltx2Bucket, string?) MapVae(string key)
     {
-        bool original = key.Contains("up_blocks.", StringComparison.Ordinal)
-            || key.Contains("res_blocks", StringComparison.Ordinal)
-            || key.StartsWith("per_channel_statistics", StringComparison.Ordinal);
+        // Already-diffusers keys (folder shards) carry the grouping words and must NOT be regrouped.
+        bool diffusersAlready = key.Contains("resnets", StringComparison.Ordinal)
+            || key.Contains("upsamplers", StringComparison.Ordinal)
+            || key.Contains("mid_block", StringComparison.Ordinal);
+        bool original = !diffusersAlready
+            && (key.Contains("up_blocks.", StringComparison.Ordinal)
+                || key.Contains("res_blocks", StringComparison.Ordinal)
+                || key.StartsWith("per_channel_statistics", StringComparison.Ordinal));
         if (original)
         {
             // Drop the stats we don't consume (channel index, mean-of-stds, …) — keep only the two renamed below.
-            if (key.StartsWith("per_channel_statistics", StringComparison.Ordinal)
-                && !key.EndsWith("mean-of-means", StringComparison.Ordinal)
-                && !key.EndsWith("std-of-means", StringComparison.Ordinal))
+            if (key.StartsWith("per_channel_statistics", StringComparison.Ordinal))
+            {
+                if (key.EndsWith("mean-of-means", StringComparison.Ordinal)) return (Ltx2Bucket.Vae, "latents_mean");
+                if (key.EndsWith("std-of-means", StringComparison.Ordinal)) return (Ltx2Bucket.Vae, "latents_std");
                 return (Ltx2Bucket.Drop, null);
-            foreach ((string from, string to) in _videoVaeRenames)
-                key = key.Replace(from, to, StringComparison.Ordinal);
+            }
+            key = RegroupUpBlock(key);
+            key = key.Replace("res_blocks", "resnets", StringComparison.Ordinal);
         }
         return (Ltx2Bucket.Vae, key);
+    }
+
+    /// <summary>Maps an original flat <c>up_blocks.{i}</c> token to the diffusers grouping by index parity: index 0 is
+    /// the mid block; odd i is the (i−1)/2-th up-stage's upsampler; even i&gt;0 is the (i/2−1)-th up-stage's resnets.
+    /// Handles any up-block count (19B has 7, 22B has 9). Keys without an <c>up_blocks.</c> token pass through.</summary>
+    private static string RegroupUpBlock(string key)
+    {
+        const string tok = "up_blocks.";
+        int at = key.IndexOf(tok, StringComparison.Ordinal);
+        if (at < 0) return key;
+        int numStart = at + tok.Length, numEnd = numStart;
+        while (numEnd < key.Length && char.IsDigit(key[numEnd])) numEnd++;
+        if (numEnd == numStart) return key;
+        int i = int.Parse(key.AsSpan(numStart, numEnd - numStart));
+        string mapped = i == 0 ? "mid_block"
+            : (i % 2 == 1) ? $"up_blocks.{(i - 1) / 2}.upsamplers.0"
+            : $"up_blocks.{i / 2 - 1}";
+        return string.Concat(key.AsSpan(0, at), mapped, key.AsSpan(numEnd));
     }
 
     private static (Ltx2Bucket, string?) MapAudioVae(string key) => (Ltx2Bucket.AudioVae, key);

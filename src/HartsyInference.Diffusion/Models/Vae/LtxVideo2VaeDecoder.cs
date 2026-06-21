@@ -45,6 +45,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
     private LtxVaeResnetBlock3d[] _midResnets = [];
     private UpStage[] _upStages = [];
     private int _lastChannel;                    // channels into conv_out
+    private bool[] _temporalScaleInferred = [];  // per up-stage: does it upscale the temporal axis (st0 == 2)?
 
     public LtxVideo2VaeDecoder(
         int latentChannels = 128, int outChannels = 3,
@@ -71,62 +72,105 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _latentsStd = latentsStd;
     }
 
-    /// <summary>Output frames for a given latent frame count: <c>(T_lat − 1)·8 + 1</c> (3 temporal upsamplers ×2).</summary>
+    /// <summary>Output frames for a given latent frame count: each temporally-scaling up-stage maps T → T·2−1.</summary>
     public int OutputFrames(int latentFrames)
     {
         int t = latentFrames;
-        foreach (bool s in _scalingRev) if (s) t = t * 2 - 1;
+        foreach (bool s in _temporalScaleInferred) if (s) t = t * 2 - 1;
         return t;
     }
 
+    /// <summary>Loads the decoder, INFERRING its full structure (number of mid/up resnets, per-stage channels, and
+    /// each upsampler's stride + channel-upscale) from the weight shapes. This makes one decoder cover every LTX-2 VAE
+    /// variant — the 19B (3 spatio-temporal up-stages) and the 22B (4 up-stages with mixed spatial/temporal/
+    /// spatio-temporal upsamplers, irregular channels) — without the caller knowing the config. The constructor's
+    /// block_out_channels/layers_per_block/etc. are ignored here in favour of the checkpoint's own shapes.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        int output = _blockOutRev[0];
         _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], Bias(w, "decoder.conv_in.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
+        int output = (int)w["decoder.conv_in.conv.weight"].Shape[0];   // mid / conv_in output channels
 
-        _midResnets = new LtxVaeResnetBlock3d[_layersRev[0]];
-        for (int j = 0; j < _midResnets.Length; j++)
+        int nMid = CountResnets(w, "decoder.mid_block");
+        _midResnets = new LtxVaeResnetBlock3d[nMid];
+        for (int j = 0; j < nMid; j++)
         {
             _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal);
             _midResnets[j].LoadWeights(w, $"decoder.mid_block.resnets.{j}");
         }
 
-        _upStages = new UpStage[_blockOutRev.Length];
-        for (int i = 0; i < _blockOutRev.Length; i++)
+        List<UpStage> stages = [];
+        List<bool> temporal = [];
+        for (int i = 0; ; i++)
         {
-            int upscale = _upscaleRev[i];
-            int inNom = output / upscale;             // nominal block in  (diffusers: output_channel // upscale)
-            int outNom = _blockOutRev[i] / upscale;   // nominal block out (diffusers: block_out[i] // upscale)
-            UpStage stage = new();
             string p = $"decoder.up_blocks.{i}";
-            if (inNom != outNom)
+            bool hasUp = w.ContainsKey($"{p}.upsamplers.0.conv.conv.weight");
+            int nRes = CountResnets(w, p);
+            if (!hasUp && nRes == 0) break;                    // no more up-stages
+
+            UpStage stage = new();
+            int outNom;
+            if (hasUp)
             {
-                // Not exercised by the LTX-2 checkpoint (in==out), but kept faithful to LTX2VideoUpBlock3d.
-                stage.ConvIn = new LtxVaeResnetBlock3d(inNom, outNom, timestepCond: false, isCausal: _isCausal);
-                stage.ConvIn.LoadWeights(w, $"{p}.conv_in");
-            }
-            if (_scalingRev[i])
-            {
-                // Upsampler in_channels = out·upscale (= the real incoming channel count); it reduces to outNom.
-                stage.Upsampler = new LtxVaeUpsampler3d(outNom * upscale, (2, 2, 2),
-                    upscaleFactor: upscale, residual: _residualRev[i], isCausal: _isCausal);
+                // Upsampler conv weight is [outNom·strideProd, output(=incoming)]; invert to recover the geometry.
+                Tensor uw = w[$"{p}.upsamplers.0.conv.conv.weight"];
+                int convOut = (int)uw.Shape[0], convIn = (int)uw.Shape[1];
+                // Resnet channel (in==out) is the stage's nominal out; falls back to convIn/strideProd if no resnets.
+                outNom = nRes > 0 ? (int)w[$"{p}.resnets.0.conv1.conv.weight"].Shape[0] : convIn;
+                int strideProd = convOut / outNom;             // diffusers: convOut = outNom · ∏stride
+                int upscale = convIn / outNom;                 // diffusers: convIn  = outNom · upscale
+                (int T, int H, int W) stride = StrideFromProduct(strideProd);
+                stage.Upsampler = new LtxVaeUpsampler3d(convIn, stride, upscaleFactor: upscale,
+                    residual: true, isCausal: _isCausal);
                 stage.Upsampler.LoadWeights(w, $"{p}.upsamplers.0");
+                temporal.Add(stride.T == 2);
             }
-            stage.Resnets = new LtxVaeResnetBlock3d[_layersRev[i + 1]];
-            for (int j = 0; j < stage.Resnets.Length; j++)
+            else
+            {
+                outNom = (int)w[$"{p}.resnets.0.conv1.conv.weight"].Shape[0];
+                if (output != outNom)
+                {
+                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal);
+                    stage.ConvIn.LoadWeights(w, $"{p}.conv_in");
+                }
+                temporal.Add(false);
+            }
+
+            stage.Resnets = new LtxVaeResnetBlock3d[nRes];
+            for (int j = 0; j < nRes; j++)
             {
                 stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal);
                 stage.Resnets[j].LoadWeights(w, $"{p}.resnets.{j}");
             }
-            _upStages[i] = stage;
+            stages.Add(stage);
             output = outNom;
         }
+        _upStages = [.. stages];
+        _temporalScaleInferred = [.. temporal];
 
         _lastChannel = output;
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
     }
+
+    /// <summary>Counts the contiguous <c>{prefix}.resnets.{j}.conv1.conv.weight</c> entries present in the dict.</summary>
+    private static int CountResnets(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        int n = 0;
+        while (w.ContainsKey($"{prefix}.resnets.{n}.conv1.conv.weight")) n++;
+        return n;
+    }
+
+    /// <summary>Maps an upsampler's stride product to its (T,H,W) stride, per diffusers <c>upsample_type</c>:
+    /// 8 = spatio-temporal (2,2,2); 4 = spatial (1,2,2); 2 = temporal (2,1,1); 1 = identity.</summary>
+    private static (int T, int H, int W) StrideFromProduct(int strideProd) => strideProd switch
+    {
+        8 => (2, 2, 2),
+        4 => (1, 2, 2),
+        2 => (2, 1, 1),
+        1 => (1, 1, 1),
+        _ => throw new NotSupportedException($"Unexpected LTX-2 VAE upsampler stride product {strideProd}."),
+    };
 
     public IEnumerable<Tensor> EnumerateWeights()
     {

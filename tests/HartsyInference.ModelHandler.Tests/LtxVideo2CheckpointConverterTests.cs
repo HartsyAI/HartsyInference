@@ -48,6 +48,13 @@ public class LtxVideo2CheckpointConverterTests
     [InlineData("vae.decoder.up_blocks.3.conv.conv.weight", B.Vae, "decoder.up_blocks.1.upsamplers.0.conv.conv.weight")]
     [InlineData("vae.decoder.up_blocks.5.conv.conv.weight", B.Vae, "decoder.up_blocks.2.upsamplers.0.conv.conv.weight")]
     [InlineData("vae.decoder.up_blocks.4.res_blocks.2.conv1.conv.weight", B.Vae, "decoder.up_blocks.1.resnets.2.conv1.conv.weight")]
+    // 22B/2.3: 9 up_blocks (4 up-stages). Index-parity regroup must handle up_blocks.7 (upsample) and .8 (resnets).
+    [InlineData("vae.decoder.up_blocks.0.res_blocks.1.conv2.conv.bias", B.Vae, "decoder.mid_block.resnets.1.conv2.conv.bias")]
+    [InlineData("vae.decoder.up_blocks.7.conv.conv.weight", B.Vae, "decoder.up_blocks.3.upsamplers.0.conv.conv.weight")]
+    [InlineData("vae.decoder.up_blocks.8.res_blocks.3.conv2.conv.bias", B.Vae, "decoder.up_blocks.3.resnets.3.conv2.conv.bias")]
+    // Already-diffusers folder-shard keys must pass through unchanged (not re-grouped).
+    [InlineData("vae.decoder.up_blocks.2.resnets.0.conv1.conv.weight", B.Vae, "decoder.up_blocks.2.resnets.0.conv1.conv.weight")]
+    [InlineData("vae.decoder.mid_block.resnets.0.conv1.conv.weight", B.Vae, "decoder.mid_block.resnets.0.conv1.conv.weight")]
     [InlineData("vae.per_channel_statistics.mean-of-means", B.Vae, "latents_mean")]
     [InlineData("vae.per_channel_statistics.std-of-means", B.Vae, "latents_std")]
     [InlineData("vae.decoder.conv_in.conv.weight", B.Vae, "decoder.conv_in.conv.weight")]
