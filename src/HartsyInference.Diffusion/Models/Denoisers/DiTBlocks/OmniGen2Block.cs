@@ -234,6 +234,149 @@ public sealed unsafe class OmniGen2Block
         return output;
     }
 
+    /// <summary>Table-driven forward: identical to <see cref="Forward"/> but rotates Q/K with a caller-supplied
+    /// precomputed <c>(cos, sin)</c> RoPE table (sized <c>seqLen · headDim/2</c>) instead of deriving positions from a
+    /// <see cref="RopeApplyMode"/>. Used by Boogu-Image, whose edit path assigns non-default position ids
+    /// (reference-image <c>pe_shift</c> offsets) that the mode-based builders don't cover. Numerically equal to the
+    /// mode-based path when fed the table that mode would have produced.</summary>
+    public Tensor Forward(IBackend backend, Tensor hidden, OmniGen2Rope rope,
+        ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, Tensor? temb)
+    {
+        int batch = (int)hidden.Shape[0];
+        int seqLen = (int)hidden.Shape[1];
+        TensorShape hShape = new TensorShape(batch, seqLen, _hiddenSize);
+
+        Tensor? gateMsa = null, scaleMlp = null, gateMlp = null;
+        Tensor norm1Out;
+        if (_modulation)
+        {
+            if (temb is null)
+                throw new InvalidOperationException("OmniGen2Block: temb is required when modulation=true.");
+            (norm1Out, gateMsa, scaleMlp, gateMlp) = ApplyLuminaRmsNormZero(backend, hidden, temb, batch, seqLen);
+        }
+        else
+        {
+            norm1Out = new Tensor(hShape, DType.F32);
+            backend.RmsNorm(norm1Out, hidden, _norm1Weight!, _normEps);
+        }
+
+        Tensor attnOut = ComputeSelfAttentionWithTable(backend, norm1Out, rope, ropeCos, ropeSin, batch, seqLen);
+        norm1Out.Dispose();
+
+        Tensor norm2Out = new Tensor(hShape, DType.F32);
+        backend.RmsNorm(norm2Out, attnOut, _norm2Weight!, _normEps);
+        attnOut.Dispose();
+
+        Tensor afterAttn;
+        if (_modulation)
+        {
+            afterAttn = ApplyTanhGatedResidual(hidden, norm2Out, gateMsa!, batch, seqLen);
+            norm2Out.Dispose();
+        }
+        else
+        {
+            afterAttn = new Tensor(hShape, DType.F32);
+            backend.Add(afterAttn, hidden, norm2Out);
+            norm2Out.Dispose();
+        }
+
+        Tensor ffnNorm1Out = new Tensor(hShape, DType.F32);
+        backend.RmsNorm(ffnNorm1Out, afterAttn, _ffnNorm1Weight!, _normEps);
+
+        Tensor mlpInput;
+        if (_modulation)
+        {
+            mlpInput = ApplyMlpScale(ffnNorm1Out, scaleMlp!, batch, seqLen);
+            ffnNorm1Out.Dispose();
+        }
+        else
+        {
+            mlpInput = ffnNorm1Out;
+        }
+
+        Tensor mlpOut = ApplyLuminaSwiGluFfn(backend, mlpInput, batch, seqLen);
+        mlpInput.Dispose();
+
+        Tensor ffnNorm2Out = new Tensor(hShape, DType.F32);
+        backend.RmsNorm(ffnNorm2Out, mlpOut, _ffnNorm2Weight!, _normEps);
+        mlpOut.Dispose();
+
+        Tensor output;
+        if (_modulation)
+        {
+            output = ApplyTanhGatedResidual(afterAttn, ffnNorm2Out, gateMlp!, batch, seqLen);
+            ffnNorm2Out.Dispose();
+            afterAttn.Dispose();
+            gateMsa!.Dispose();
+            scaleMlp!.Dispose();
+            gateMlp!.Dispose();
+        }
+        else
+        {
+            output = new Tensor(hShape, DType.F32);
+            backend.Add(output, afterAttn, ffnNorm2Out);
+            afterAttn.Dispose();
+            ffnNorm2Out.Dispose();
+        }
+
+        return output;
+    }
+
+    private Tensor ComputeSelfAttentionWithTable(IBackend backend, Tensor input, OmniGen2Rope rope,
+        ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int batch, int seqLen)
+    {
+        int qDim = _numQHeads * _headDim;
+        int kvDim = _numKvHeads * _headDim;
+
+        TensorShape qShape = new TensorShape(batch, seqLen, qDim);
+        TensorShape kvShape = new TensorShape(batch, seqLen, kvDim);
+        Tensor qProj = new Tensor(qShape, DType.F32);
+        Tensor kProj = new Tensor(kvShape, DType.F32);
+        Tensor vProj = new Tensor(kvShape, DType.F32);
+        backend.Linear(qProj, input, _toQWeight!, null);
+        backend.Linear(kProj, input, _toKWeight!, null);
+        backend.Linear(vProj, input, _toVWeight!, null);
+
+        Tensor qNormed = new Tensor(qShape, DType.F32);
+        Tensor kNormed = new Tensor(kvShape, DType.F32);
+        _normQ.Forward(qNormed, qProj, batch * seqLen * _numQHeads);
+        _normK.Forward(kNormed, kProj, batch * seqLen * _numKvHeads);
+        qProj.Dispose();
+        kProj.Dispose();
+
+        Tensor qMh = DiTUtils.ReshapeToMultiHead(qNormed, batch, seqLen, _numQHeads, _headDim);
+        Tensor kMh = DiTUtils.ReshapeToMultiHead(kNormed, batch, seqLen, _numKvHeads, _headDim);
+        Tensor vMh = DiTUtils.ReshapeToMultiHead(vProj, batch, seqLen, _numKvHeads, _headDim);
+        qNormed.Dispose();
+        kNormed.Dispose();
+        vProj.Dispose();
+
+        rope.Apply(qMh, ropeCos, ropeSin, batch, _numQHeads, seqLen);
+        rope.Apply(kMh, ropeCos, ropeSin, batch, _numKvHeads, seqLen);
+
+        Tensor kRepeated = RepeatHeads(kMh, batch, _numKvHeads, _kvGroupSize, seqLen, _headDim);
+        Tensor vRepeated = RepeatHeads(vMh, batch, _numKvHeads, _kvGroupSize, seqLen, _headDim);
+        kMh.Dispose();
+        vMh.Dispose();
+
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
+        backend.ScaledDotProductAttention(attnMh, qMh, kRepeated, vRepeated, null, scale);
+        qMh.Dispose();
+        kRepeated.Dispose();
+        vRepeated.Dispose();
+
+        TensorShape outShape = new TensorShape(batch, seqLen, _hiddenSize);
+        Tensor attnFlat = new Tensor(outShape, DType.F32);
+        DiTUtils.ReshapeFromMultiHead(attnFlat, attnMh, batch, seqLen, _numQHeads, _headDim);
+        attnMh.Dispose();
+
+        Tensor projected = new Tensor(outShape, DType.F32);
+        backend.Linear(projected, attnFlat, _toOutWeight!, null);
+        attnFlat.Dispose();
+        return projected;
+    }
+
     private (Tensor normed, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp) ApplyLuminaRmsNormZero(
         IBackend backend, Tensor input, Tensor temb, int batch, int seqLen)
     {

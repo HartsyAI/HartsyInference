@@ -413,6 +413,89 @@ public static unsafe class DiTUtils
         return output;
     }
 
+    /// <summary>Patchifies <c>[B, C, H, W]</c> → <c>[B, (H/p)·(W/p), p²·C]</c> with channel-inner ordering inside each
+    /// patch (<c>(py, px, c)</c>), matching the upstream einops <c>'c (h p1) (w p2) -&gt; (h w) (p1 p2 c)'</c> used by
+    /// Lumina/OmniGen2/Boogu patch embedders. Reusable across patch-2 latent DiTs.</summary>
+    public static Tensor PatchifyNCHW(Tensor latent, int patch)
+    {
+        int batch = (int)latent.Shape[0];
+        int channels = (int)latent.Shape[1];
+        int height = (int)latent.Shape[2];
+        int width = (int)latent.Shape[3];
+        int hPacked = height / patch;
+        int wPacked = width / patch;
+        int imgSeqLen = hPacked * wPacked;
+        int patchVolume = patch * patch * channels;
+
+        Tensor result = new Tensor(new TensorShape(batch, imgSeqLen, patchVolume), DType.F32);
+        float* src = (float*)latent.DataPointer;
+        float* dst = (float*)result.DataPointer;
+        long chwStride = (long)channels * height * width;
+        long hwStride = (long)height * width;
+
+        for (int b = 0; b < batch; b++)
+        {
+            float* batchSrc = src + b * chwStride;
+            float* batchDst = dst + (long)b * imgSeqLen * patchVolume;
+            for (int hp = 0; hp < hPacked; hp++)
+                for (int wp = 0; wp < wPacked; wp++)
+                {
+                    float* tokenDst = batchDst + ((long)hp * wPacked + wp) * patchVolume;
+                    int outIdx = 0;
+                    for (int py = 0; py < patch; py++)
+                    {
+                        int srcRow = hp * patch + py;
+                        for (int px = 0; px < patch; px++)
+                        {
+                            int srcCol = wp * patch + px;
+                            for (int c = 0; c < channels; c++)
+                                tokenDst[outIdx++] = batchSrc[c * hwStride + srcRow * width + srcCol];
+                        }
+                    }
+                }
+        }
+        return result;
+    }
+
+    /// <summary>Inverse of <see cref="PatchifyNCHW"/>: <c>[B, (H/p)·(W/p), p²·C]</c> → <c>[B, C, H, W]</c>.</summary>
+    public static Tensor UnpatchifyToNCHW(Tensor tokens, int channels, int hPacked, int wPacked, int patch)
+    {
+        int batch = (int)tokens.Shape[0];
+        int height = hPacked * patch;
+        int width = wPacked * patch;
+        int imgSeqLen = hPacked * wPacked;
+        int patchVolume = patch * patch * channels;
+
+        Tensor result = new Tensor(new TensorShape(batch, channels, height, width), DType.F32);
+        float* src = (float*)tokens.DataPointer;
+        float* dst = (float*)result.DataPointer;
+        long chwStride = (long)channels * height * width;
+        long hwStride = (long)height * width;
+
+        for (int b = 0; b < batch; b++)
+        {
+            float* batchSrc = src + (long)b * imgSeqLen * patchVolume;
+            float* batchDst = dst + b * chwStride;
+            for (int hp = 0; hp < hPacked; hp++)
+                for (int wp = 0; wp < wPacked; wp++)
+                {
+                    float* tokenSrc = batchSrc + ((long)hp * wPacked + wp) * patchVolume;
+                    int srcIdx = 0;
+                    for (int py = 0; py < patch; py++)
+                    {
+                        int dstRow = hp * patch + py;
+                        for (int px = 0; px < patch; px++)
+                        {
+                            int dstCol = wp * patch + px;
+                            for (int c = 0; c < channels; c++)
+                                batchDst[c * hwStride + dstRow * width + dstCol] = tokenSrc[srcIdx++];
+                        }
+                    }
+                }
+        }
+        return result;
+    }
+
     /// <summary>Pads the last dimension with zeros: [B, S, currentDim] → [B, S, targetDim].</summary>
     public static Tensor PadLastDim(Tensor input, int currentDim, int targetDim)
     {

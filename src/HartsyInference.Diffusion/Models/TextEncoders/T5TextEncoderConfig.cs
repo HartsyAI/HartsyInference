@@ -56,6 +56,23 @@ public sealed record T5TextEncoderConfig
         VocabSize = 32128,
     };
 
+    /// <summary>Original T5 v1.0 base encoder preset (`google/t5-base`) — the text encoder MusicGen / AudioGen
+    /// condition on. Unlike the v1.1 / UMT5 presets above, v1.0 uses a NON-gated feed-forward (single <c>wi</c>
+    /// projection) with ReLU activation, and shares block 0's relative position bias across all layers. Standard
+    /// 32k T5 SentencePiece vocab (Google's <c>t5_spiece.model</c>, not the 256k multilingual one).</summary>
+    public static T5TextEncoderConfig T5Base => new()
+    {
+        DModel = 768,
+        DFf = 3072,
+        DKv = 64,
+        NumHeads = 12,
+        NumLayers = 12,
+        VocabSize = 32128,
+        GatedFeedForward = false,
+        UseReluActivation = true,
+        // UsePerLayerPositionBias stays false: T5 v1.0 learns the bias in block 0 and shares it.
+    };
+
     /// <summary>Pile-T5-XL (UMT5) encoder preset for AuraFlow text encoding (`EleutherAI/pile-t5-xl`).
     /// <c>d_model = 2048</c> matches AuraFlow's <c>joint_attention_dim = 2048</c>. UMT5 differs from
     /// T5 v1.1 in TWO ways for the encoder path: (1) the SentencePiece vocabulary (different token IDs

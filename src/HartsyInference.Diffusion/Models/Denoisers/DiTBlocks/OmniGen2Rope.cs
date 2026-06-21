@@ -156,6 +156,25 @@ public sealed unsafe class OmniGen2Rope
         }
     }
 
+    /// <summary>Builds an interleaved <c>(cos, sin)</c> table from explicit per-token position ids
+    /// <c>(time, height, width)</c>. Generalizes <see cref="BuildTextTable"/>/<see cref="BuildImageTable"/>/
+    /// <see cref="BuildJointTable"/> to arbitrary layouts — used by Boogu-Image's edit path, where reference and
+    /// noise image tokens carry running time-axis offsets (<c>pe_shift</c>) that the fixed builders don't cover.
+    /// The three id spans must have equal length (the sequence length).</summary>
+    public (float[] cos, float[] sin) BuildTableFromPositions(
+        ReadOnlySpan<int> timeIds, ReadOnlySpan<int> heightIds, ReadOnlySpan<int> widthIds)
+    {
+        int seqLen = timeIds.Length;
+        if (heightIds.Length != seqLen || widthIds.Length != seqLen)
+            throw new ArgumentException("OmniGen2Rope.BuildTableFromPositions requires equal-length id spans.");
+        int halfDim = _headDim / 2;
+        float[] cos = new float[seqLen * halfDim];
+        float[] sin = new float[seqLen * halfDim];
+        for (int s = 0; s < seqLen; s++)
+            FillTokenFreqs(cos, sin, s, timeIds[s], heightIds[s], widthIds[s]);
+        return (cos, sin);
+    }
+
     private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx,
         double time, double height, double width)
     {
