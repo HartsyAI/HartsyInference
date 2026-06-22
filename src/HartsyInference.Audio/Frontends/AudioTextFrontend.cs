@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 using HartsyInference.Tokenizers;
 
@@ -54,5 +55,14 @@ public static class AudioTextFrontend
     {
         ArgumentNullException.ThrowIfNull(text);
         return [.. RequireLlama().EncodeRaw(text)];
+    }
+
+    /// <summary>Bark: BERT WordPiece ids shifted by <paramref name="textEncodingOffset"/>
+    /// (<c>BarkConfig.TextEncodingOffset</c>). The pipeline appends its own semantic-infer token. The caller
+    /// supplies the BERT tokenizer (loaded from the model's bert-base-multilingual-cased vocab.txt).</summary>
+    public static int[] BarkText(BertWordPieceTokenizer tokenizer, string text, int textEncodingOffset)
+    {
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        return [.. tokenizer.EncodeRaw(text ?? "").Select(id => id + textEncodingOffset)];
     }
 }

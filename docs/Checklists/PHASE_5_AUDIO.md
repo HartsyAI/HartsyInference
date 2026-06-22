@@ -166,13 +166,13 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 
 ## 6. Text-to-Speech (TTS)
 
-### Kokoro (first TTS to ship) — BUILT (real iSTFTNet audio); G2P pending
+### Kokoro (first TTS to ship) — BUILT (real iSTFTNet audio); English G2P BUILT
 - [x] `PlBertEncoder` — [`KokoroPlBert.cs`](../../src/HartsyInference.Audio/Models/Kokoro/KokoroPlBert.cs): ALBERT with weight sharing — one shared `AlbertLayer` instance looped 12× in the forward pass
 - [x] [`KokoroTextEncoder.cs`](../../src/HartsyInference.Audio/Models/Kokoro/KokoroTextEncoder.cs) — Embed + Conv1D × 3 (ChannelLN + LeakyReLU) + BiLSTM
 - [x] [`KokoroProsodyPredictor.cs`](../../src/HartsyInference.Audio/Models/Kokoro/KokoroProsodyPredictor.cs) — DurationEncoder (3× BiLSTM + AdaLayerNorm) + duration LSTM + projection + F0/N AdaINResBlock chains
 - [x] [`KokoroIStftNetDecoder.cs`](../../src/HartsyInference.Audio/Models/Kokoro/KokoroIStftNetDecoder.cs) — **real iSTFTNet generator forward** (replaces the prior sine placeholder). Full chain: F0/N convs + asr_res → encode/decode AdainResBlk1d → HnNSF harmonic source (9 harmonics, deterministic phase accumulation + fixed-seed Gaussian noise, `tanh(Linear[9→1])`) → forward STFT → two ConvTranspose1d upsamples (10×, 6×) with per-level noise injection + 3-kernel MRF AdaIN/**Snake** resblocks → `conv_post` → magnitude(`exp`)/phase(`sin`) iSTFT head. Mirrors StyleTTS2 `kokoro/istftnet.py` Decoder+Generator. Required a non-power-of-two direct-DFT fallback in [`Fft.cs`](../../src/HartsyInference.Audio/Preprocessing/Fft.cs) for the n_fft=20 synthesis transform. See [HIFIGAN_VOCODER.md](../Research/HIFIGAN_VOCODER.md).
 - [x] [`KokoroPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/KokoroPipeline.cs) — end-to-end `Synthesize` (voice-pack load → tokenize → PLBERT → TextEncoder → duration predict → length-regulate → F0/N predict → decoder). Now produces real iSTFTNet speech.
-- [ ] G2P backed by [G2P_PHONEMIZATION.md](../Research/G2P_PHONEMIZATION.md) (English-first) — **not built**; the pipeline accepts pre-phonemized IPA strings only (callers phonemize externally via misaki / eSpeak-NG). `KokoroPhonemeTokenizer` is IPA→token, not text→IPA. **Next Kokoro deliverable.**
+- [x] **English G2P BUILT (2026-06-21)** — [`EnglishG2P.cs`](../../src/HartsyInference.Audio/Frontends/EnglishG2P.cs) + [`ArpabetToIpa.cs`](../../src/HartsyInference.Audio/Frontends/ArpabetToIpa.cs): CMUdict→IPA (stress marks, AH0→ə/ER0→ɚ) + integer normalization + letter-to-sound OOV fallback. `ToIpa(text)` → the IPA string `KokoroPhonemeTokenizer` consumes. Approximation of misaki (intelligible, not bit-exact; stress before vowel not syllable); consumer supplies the public-domain `cmudict.dict`. 6 tests pass (in-memory dict). Chinese/Japanese still phased per [G2P_PHONEMIZATION.md](../Research/G2P_PHONEMIZATION.md).
 - **Validated:** `KokoroFoundationTests` + `KokoroPipelineSmokeTests` (6 tests) load all 548 tensors and run the full real generator to finite non-degenerate 24 kHz audio; skip cleanly when the cache is missing. Numeric reference-diff vs Python (§9) still pending a checkpoint-paired run.
 
 ### F5-TTS — BUILT
@@ -209,7 +209,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`BarkFineModel.cs`](../../src/HartsyInference.Audio/Models/Bark/BarkFineModel.cs) — non-causal refiner: 8 codebook embeds summed + 7 heads, iterative argmax fill of codebooks 2..7.
 - [x] [`BarkConfig.cs`](../../src/HartsyInference.Audio/Models/Bark/BarkConfig.cs) — Full/Small presets + the Bark token-offset constants. **Tested**.
 - [x] [`BarkPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/BarkPipeline.cs) — semantic → coarse (de-interleave 2 codebooks) → fine → EnCodec 24 kHz decode → audio.
-- [ ] `BarkTokenizer.cs` (mBERT WordPiece + `+10048` offset) — token-IDs-in for now; caller tokenizes.
+- [x] **BERT WordPiece tokenizer BUILT (2026-06-21)** — [`BertWordPieceTokenizer.cs`](../../src/HartsyInference.Tokenizers/BertWordPieceTokenizer.cs) (mBERT-cased, raw ids, no special tokens) + [`AudioTextFrontend.BarkText`](../../src/HartsyInference.Audio/Frontends/AudioTextFrontend.cs) applies the `+10048` offset. Consumer supplies `vocab.txt`. 2 tests pass.
 - [ ] `BarkSpeakerPrompt.cs` (3-stream speaker-prompt history) + checkpoint validation (`suno/bark`).
 
 ### CosyVoice 2 — SCAFFOLD COMPLETE (non-streaming); checkpoint-gated validation pending
@@ -347,14 +347,15 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] **Aggressive streaming + persistent KV cache** (~50 ms/frame) — current path re-feeds context per frame (correct, not yet streaming-optimized).
 - [ ] **Checkpoint validation** — `sesame/csm-1b`: reconcile HF key names + decoder-side audio embeddings + Llama-3.2 RoPE rescaling (scale_factor=32), then env-gated generation test.
 
-### RVC v2 — BUILT (HuBERT + NSF synthesizer, synthetic-forward verified); RMVPE staged
+### RVC v2 — BUILT (HuBERT + NSF synthesizer, synthetic-forward verified); F0 extraction BUILT (YIN)
 > `SynthesizerTrnMs768NSFsid`. Content (the built `Hubert`) + F0 → content+pitch encoder → reused `VitsFlow`
 > → NSF-HiFi-GAN. Research: [`RVC_ARCHITECTURE.md`](../Research/RVC_ARCHITECTURE.md). Files under [`Models/Rvc/`](../../src/HartsyInference.Audio/Models/Rvc/) + [`RvcPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/RvcPipeline.cs).
 - [x] **NSF source injection added to `VitsHiFiGan`** (`noise_convs` + optional `harSource`; backward-compatible) — reuses `NsfVocoderDsp.GenerateHarmonicSource`. The plain-HiFiGAN consumers (Piper/MeloTTS/OpenVoice/SoVITS) stay green.
 - [x] [`RvcTextEncoder.cs`](../../src/HartsyInference.Audio/Models/Rvc/RvcTextEncoder.cs) — emb_phone(768→192)+emb_pitch(256→192) front-end → **reused `VitsTextEncoder` layers**.
 - [x] [`RvcPitch.cs`](../../src/HartsyInference.Audio/Models/Rvc/RvcPitch.cs) — mel coarse-pitch quantization + octave shift. **Exact + tested.**
 - [x] [`RvcPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/RvcPipeline.cs) — content + F0 → enc_p → reused `VitsFlow` → NSF `VitsHiFiGan` → audio. **Synthetic-forward verified.**
-- [ ] **Staged:** RMVPE pitch extraction (caller supplies F0), FAISS index-retrieval blend, v1 (256-d ContentVec).
+- [x] **F0 extraction BUILT (2026-06-21)** — [`F0Estimator.cs`](../../src/HartsyInference.Audio/Dsp/F0Estimator.cs): pure-C# YIN (`EstimateYin`, 16 kHz / hop 320 → 50 Hz, aligned with HuBERT content frames), the RMVPE stand-in — caller no longer must supply F0. 5 tests pass (recovers 120/220/440 Hz sine within 5 Hz; silence unvoiced).
+- [ ] **Staged:** RMVPE neural pitch (higher accuracy), FAISS index-retrieval blend, v1 (256-d ContentVec).
 
 ### GPT-SoVITS v2 — BUILT (3 stages, all synthetic-forward verified); enc_p MRTE + ref_enc staged
 > Two-stage (T2S GPT → SoVITS) + cn-HuBERT content encoder. Research: [`GPT_SOVITS_ARCHITECTURE.md`](../Research/GPT_SOVITS_ARCHITECTURE.md). Files under [`Models/Hubert/`](../../src/HartsyInference.Audio/Models/Hubert/) + [`Models/GptSoVits/`](../../src/HartsyInference.Audio/Models/GptSoVits/).
@@ -475,7 +476,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 > One generic stack serves both — they share the AudioCraft recipe and differ only in codec config. Files
 > under [`Models/Music/`](../../src/HartsyInference.Audio/Models/Music/) + [`MusicGenPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/MusicGenPipeline.cs).
 - [x] `MusicGenDecoder.cs` — decoder-only, sum-of-K embeddings input, sinusoidal pos, GELU 4× FFN, K parallel heads, cross-attn to precomputed T5 states ([Models/Music/MusicGenDecoder.cs](../../src/HartsyInference.Audio/Models/Music/MusicGenDecoder.cs))
-- [x] T5-base text encoder — **out of the Audio package by design**: the pipeline takes precomputed `[1,T,768]` cross-attn states (same no-text-encoder-dependency convention as Kokoro/F5), caller supplies T5
+- [x] T5-base text encoder — pipeline takes precomputed `[1,T,768]` cross-attn states (caller supplies T5). Engine now ships the pieces to build it: [`T5TextEncoderConfig.T5Base`](../../src/HartsyInference.Diffusion/Models/TextEncoders/T5TextEncoderConfig.cs) (v1.0 google/t5-base: non-gated, ReLU, 32k vocab — embedded t5_spiece) + [`MusicGenCheckpointConverter.LoadTextEncoder`](../../src/HartsyInference.ModelHandler/CheckpointConverters/MusicGenCheckpointConverter.cs) (extracts `text_encoder.*` from the combined checkpoint). **Added 2026-06-21** — lifts the consumer EngineGap; AudioGen reuses verbatim.
 - [x] EnCodec 32kHz 4-codebook (music, [`EnCodecConfig.EnCodec32kHz`](../../src/HartsyInference.Audio/Models/Codecs/EnCodec/EnCodecConfig.cs)) / EnCodec 16kHz 4-codebook (audio, `EnCodecConfig.EnCodec16kHz`) — both 2048-entry, 50 Hz, non-causal; `n_filters` for the 16 kHz codec is the one value to reconcile on first checkpoint load
 - [x] Delay-pattern state machine (default `[0,1,2,3]`; stereo `[0,0,1,1,2,2,3,3]`) — [`MusicGenDelay.cs`](../../src/HartsyInference.Audio/Models/Music/MusicGenDelay.cs); Apply/Revert/IsActive **exact + tested** (`MusicGenTests`)
 - [x] CFG two-stream (cond + g*(cond-uncond)) — `MusicGenPipeline` (cond + null-cross uncond branch, special token masked out of every active codebook's draw)
@@ -501,6 +502,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`YueStage1Lm.cs`](../../src/HartsyInference.Audio/Models/Music/YueStage1Lm.cs) — **reuses `Qwen2Model`** (Llama-2-7B: bias-off + MHA via `NumKeyValueHeads == NumAttentionHeads`) + shared `NucleusSampler`; emits the interleaved **dual-track** `[vocal_cb0, accomp_cb0, …]` stream and parses it into the two per-track codebook-0 streams. Mandatory `repetition_penalty=1.1` applied.
 - [x] [`YueConfig.cs`](../../src/HartsyInference.Audio/Models/Music/YueConfig.cs) — Stage-1 (Llama-2-7B) + Stage-2 (~1.5B) presets + extended-vocab audio-token bases. **Tested**.
 - [x] [`YuePipeline.cs`](../../src/HartsyInference.Audio/Pipelines/YuePipeline.cs) — Stage-1 → cb0 → **built `XCodec`** 16 kHz decode.
+- [x] **mm tokenizer BUILT (2026-06-21)** — [`YueTokenizer.cs`](../../src/HartsyInference.Tokenizers/YueTokenizer.cs): SentencePiece + YuE special tokens resolved from the loaded `tokenizer.model`; `EncodeStage1Prompt(genre, lyrics)`. Lyrics can now be encoded. Special-token strings + Stage-1 token-sequence parity still need bit-exact validation against `infer.py` (the audio-token bases in `YueConfig` remain placeholders pending that).
 - [ ] **Stage-2 residual upsampler** (cb0 → 8 codebooks) — reuses `Qwen2Model` again; currently codebooks 1..7 are zero-filled (decodes cb0 semantic content only). The accompaniment track + mix also ride on Stage-2.
 - [ ] **Vocos 16→44.1 kHz upsampler** + CoT/ICL prompt variants + long-context RoPE scaling.
 - [ ] **Checkpoint validation** — `m-a-p/YuE-s1-7B-*` + `xcodec_mini_infer`: reconcile the tokenizer audio-token bases + HF key names, then env-gated test.
