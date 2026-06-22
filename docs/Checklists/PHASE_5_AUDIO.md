@@ -151,7 +151,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] [`KyutaiSttModel.cs`](../../src/HartsyInference.Audio/Models/Kyutai/KyutaiSttModel.cs) — shared `embed_tokens` table (text + 32×2049 audio rows) + headless Helium; per-frame input = text-row + Σ audio-code rows; tied head projects over text-vocab rows. Audio-offset math **tested**.
 - [x] [`KyutaiSttPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/KyutaiSttPipeline.cs) — silence-pad → Mimi encode → per-frame Helium step → greedy text token → PAD-stripped token ids out.
 - [ ] **Reconcile on checkpoint load:** gated MLP ships fused `fc1`/`fc2` (split to gate|up for our Qwen2 layer), shared-embedding double-nested key, the WORD-boundary token id, and the 32-vs-8 codebook count + Mimi 12.5 Hz frame rate (shared Mimi reconcile with CSM).
-- [ ] SentencePiece tokenizer (text decode) — token-ids-out for now (caller decodes), same convention as SparkTTS/Orpheus.
+- [x] **SentencePiece text decoder BUILT (2026-06-21)** — [`KyutaiSttTokenizer.cs`](../../src/HartsyInference.Tokenizers/KyutaiSttTokenizer.cs): `Decode(ids)` → text (ML.Tokenizers `SentencePieceTokenizer`, ▁→space) + `Encode`. Consumer supplies the model's `text.model`. Compile-verified (SentencePiece can't be hand-crafted tiny for a unit test); runtime decode validated when the real spm is present.
 - [ ] Word-level timestamps from the WORD/PAD stream + delay subtraction; streaming `IAsyncEnumerable` surface.
 
 ### SenseVoice + FireRedASR
