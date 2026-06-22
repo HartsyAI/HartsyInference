@@ -601,3 +601,32 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - **Reference-diff validation for the shipped models** (Whisper WER, Kokoro/F5/VibeVoice numeric matches in §9) — all download-gated; current tests assert structural correctness + skip cleanly.
 - **Per-codec streaming caches** with proper context propagation (current `StreamingCodecEncoder<T>` is causal-naive — re-encodes each chunk fresh). Acceptable for chunk_size ≥ 200 ms; sub-200 ms live use needs per-codec cache wiring (Mimi-specific is the highest-priority).
 - **TTS / music pipelines** that consume these codecs (Bark / MusicGen / Sesame CSM / Orpheus / IndexTTS / Higgs Audio / Spark-TTS / YuE) — separate work items, codec foundation is in place.
+
+## 13. Engine Staged-Component Build-Out (2026-06-22)
+
+Completed the full neural build-out of every previously **staged / checkpoint-gated** component across the 19 AudioLab models, so the SwarmUI-AudioLab extension can wire each model end-to-end (numeric parity remains the usual checkpoint-download follow-up). All structural, synthetic-forward verified.
+
+### Built + verified this pass (parallel agent build, then central integration)
+
+- **CosyVoice 2** — real S3 tokenizer RoPE encoder + `UpsampleConformerEncoder` (replaced both conv-subsample scaffolds).
+- **GPT-SoVITS** — real `enc_p` (MRTE cross-attention + dual encoders) + `ref_enc` MelStyleEncoder (replaced the structural conv prior).
+- **VITS core** — Stochastic Duration Predictor (DDSConv + ConvFlow rational-quadratic spline, inverse pass) wired into `VitsSynthesizer` (`UseSdp`).
+- **Fish-Speech / OpenAudio-S1** — real firefly grouped-residual FSQ + SiLU generator + the modded-DAC codec variant + byte-BPE `FishSpeechTokenizer` (asset-loaded).
+- **StyleTTS 2** — real `StyleTransformer1d` diffusion network (AdaLN + self/cross-attention) replacing the denoiser scaffold.
+- **Demucs (HTDemucs)** — full assembly (STFT→cac→dual-branch encode→freq-collapse/time-inject merge→cross-transformer→decode→iSTFT+time-sum→4 stems) + DConv + pipeline.
+- **Resemble Enhance** — 2D-STFT denoiser UNet + UnivNet LVCNet vocoder + midpoint-solver enhance path.
+- **Qwen3-TTS** — talker (dual-embed + codec head) + MTP code-predictor + custom Snake/ConvNeXt split-RVQ vocoder (×1920) + ECAPA-TDNN + 3D mRoPE + 3-mode pipeline.
+- **HeartMuLa** — HeartCodec flow-matching RVQ decoder (48 kHz) + MuQ-MuLan style embedder, wired into the CSM pipeline.
+- **PocketTTS** — continuous-latent FlowLMModel + per-frame flow head + RVQ-bypass `MimiContinuousLatent` (all dims config-parameterized for the gated checkpoint).
+- **Speaker/pitch encoders** — Zonos ResNet293 + full 7-conditioner prefix, RVC RMVPE pitch extractor, OpenVoice tone-color encoder + linear-spectrogram extractor, NeuCodec encoder.
+- **Chatterbox** — end-to-end pipeline wiring T3 → S3Gen (reuses CosyVoice flow + HiFTNet) → 24 kHz.
+
+### Integration result
+- Library: **0 warnings / 0 errors** (net8.0 + net10.0).
+- Tests: **357 passed / 5 skipped / 0 failed** (both TFMs).
+- 4 integration bugs found + fixed by central verification: ECAPA + Zonos attentive-stat-pooling allocated rank-2 (overran `BatchedMatMul`, which needs rank-3); FishDac DAC residual unit's pointwise conv was padded as if k=7; plus a Qwen3-TTS tiny-config mRoPE-section mismatch (made `MropeSection` configurable).
+
+### Remaining (genuinely checkpoint/asset-gated — not buildable without the weights)
+- Numeric parity vs Python references for every component (download-gated, the standing convention).
+- Exact state-dict key reconciliation + tokenizer/control-token assets (vocab files, `added_tokens.json` ids) per model.
+- Kyutai STT engine republish + the extension-side handler tweak.
