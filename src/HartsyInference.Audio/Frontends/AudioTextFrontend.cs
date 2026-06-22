@@ -9,18 +9,23 @@ namespace HartsyInference.Audio.Frontends;
 /// pipeline adds its own control/special tokens.</summary>
 public static class AudioTextFrontend
 {
-    /// <summary>Llama-3 BPE, shared by Orpheus / CSM / FishSpeech. Asset may be absent — see <see cref="RequireLlama"/>.</summary>
-    private static readonly Lazy<LlamaTokenizer> _llama = new(() => new LlamaTokenizer(maxLength: 8192));
-
-    private static LlamaTokenizer RequireLlama()
+    /// <summary>Llama-3 byte-level BPE, shared by Orpheus / CSM / FishSpeech. Built from the embedded canonical
+    /// <c>tokenizer.json</c> via <see cref="HfTokenizerJson"/> (reusing the engine's own BPE core), so the
+    /// family-specific split regex + <c>ignore_merges</c> reproduce HF token ids exactly.</summary>
+    private static readonly Lazy<GgufTokenizer> _llama = new(() =>
     {
-        if (!EmbeddedTokenizerResources.HasLlama3Assets)
+        using Stream json = EmbeddedTokenizerResources.OpenLlama3TokenizerJson();
+        return HfTokenizerJson.LoadByteLevelBpe(json);
+    });
+
+    private static GgufTokenizer RequireLlama()
+    {
+        if (!EmbeddedTokenizerResources.HasLlama3TokenizerJson)
         {
             throw new InvalidOperationException(
-                "Llama-3 tokenizer assets are not embedded in HartsyInference.Tokenizers, so the Llama-family "
-                + "audio front-ends (Orpheus, CSM, FishSpeech) can't tokenize text. Extract vocab.json + merges.txt "
-                + "from a Llama-3 tokenizer.json and drop them in HartsyInference.Tokenizers/Resources/ as "
-                + "llama3_vocab.json + llama3_merges.txt, then rebuild.");
+                "The Llama-3 tokenizer.json is not embedded in HartsyInference.Tokenizers, so the Llama-family "
+                + "audio front-ends (Orpheus, CSM, FishSpeech) can't tokenize text. Drop a Llama-3.x tokenizer.json "
+                + "in HartsyInference.Tokenizers/Resources/ as llama3_tokenizer.json, then rebuild.");
         }
         return _llama.Value;
     }
@@ -46,7 +51,7 @@ public static class AudioTextFrontend
     {
         ArgumentNullException.ThrowIfNull(text);
         string prompt = string.IsNullOrWhiteSpace(voice) ? text : $"{voice}: {text}";
-        return [.. RequireLlama().EncodeRaw(prompt)];
+        return RequireLlama().EncodeOrdinary(prompt);
     }
 
     /// <summary>CSM (Sesame): plain Llama-3 BPE of the text. Multi-turn conversation history, when used,
@@ -54,7 +59,7 @@ public static class AudioTextFrontend
     public static int[] CsmText(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        return [.. RequireLlama().EncodeRaw(text)];
+        return RequireLlama().EncodeOrdinary(text);
     }
 
     /// <summary>Bark: BERT WordPiece ids shifted by <paramref name="textEncodingOffset"/>

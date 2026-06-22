@@ -33,7 +33,24 @@ public sealed unsafe class GenericTransformer : IDisposable
         for (int i = 0; i < cfg.NumLayers; i++) _layers[i] = new Layer(cfg);
     }
 
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+    // F32 for the host-side embedding gather and the norm/bias vectors. Dequantizes quantized GGUF tensors
+    // (rare for norms; possible for the embed table) so loading never throws on a quant dtype.
+    /// <summary>Projection dispatch. Float weights always take cuBLAS <see cref="IBackend.Linear"/>. Quantized
+    /// weights take the low-VRAM <see cref="IBackend.QuantizedMatMul"/> when <paramref name="lowVram"/> is set
+    /// (weight stays compressed, transient dequant), else the faster <see cref="IBackend.Linear"/> path (which
+    /// dequants + caches an F16 weight).</summary>
+    internal static void Project(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool lowVram)
+    {
+        if (weight.DType.IsQuantized && lowVram) backend.QuantizedMatMul(output, input, weight, bias);
+        else backend.Linear(output, input, weight, bias);
+    }
+
+    private static Tensor EnsureF32(Tensor t)
+    {
+        if (t.DType == DType.F32) return t;
+        if (t.DType.IsQuantized) return HartsyInference.ModelHandler.Gguf.GgufDequantizer.Dequantize(t, DType.F32);
+        return t.CastTo(DType.F32);
+    }
 
     /// <summary>Loads weights from an HF-style key dict. <paramref name="prefix"/> is everything up to (not
     /// including) <c>embed_tokens</c> (e.g. <c>"model"</c> for a standalone checkpoint).</summary>
@@ -43,7 +60,9 @@ public sealed unsafe class GenericTransformer : IDisposable
         _embed = EnsureF32(w[$"{prefix}.embed_tokens.weight"]);
         _finalNorm = EnsureF32(w[$"{prefix}.norm.weight"]);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}");
-        if (!_cfg.TieWordEmbeddings) _lmHead = EnsureF32(w[lmHeadKey ?? "lm_head.weight"]);
+        // lm_head stays in its loaded dtype (quant kept for the dequant/fused matmul path); the matmul backend
+        // handles quantized weights. Only the embed table is forced to F32 (host gather).
+        if (!_cfg.TieWordEmbeddings) _lmHead = w[lmHeadKey ?? "lm_head.weight"];
     }
 
     /// <summary>Loads a headless transformer body — decoder layers + final RMSNorm only, no
@@ -94,12 +113,10 @@ public sealed unsafe class GenericTransformer : IDisposable
             throw new ArgumentException($"Invalid layer range [{startLayer}, {last}) for a stack of {_layers.Length}.");
 
         int d = _cfg.HeadDim;
-        int kvLen = posStart + t;
 
         Tensor cos = new(new TensorShape(1, t, d), DType.F32);
         Tensor sin = new(new TensorShape(1, t, d), DType.F32);
         BuildRope(cos, sin, t, posStart, d, _cfg.RopeTheta);
-        Tensor? mask = t > 1 ? BuildCausalMask(t, posStart, kvLen) : null;
 
         try
         {
@@ -107,7 +124,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             bool ownsHidden = false;
             for (int i = startLayer; i < last; i++)
             {
-                Tensor next = _layers[i].Forward(backend, hidden, t, posStart, kvLen, cache, i, cos, sin, mask);
+                Tensor next = _layers[i].Forward(backend, hidden, t, posStart, cache, i, cos, sin);
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
@@ -134,7 +151,71 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             cos.Dispose();
             sin.Dispose();
-            mask?.Dispose();
+        }
+    }
+
+    /// <summary>Batched decode step for continuous batching: <paramref name="embeds"/> is <c>[1, B, hidden]</c>
+    /// (one decode token per active sequence), <paramref name="positions"/>[b] is sequence b's absolute position
+    /// (== its KV length), and <paramref name="caches"/>[b] is sequence b's own KV cache. Returns the post-norm
+    /// hidden state <c>[1, B, hidden]</c>; ready for <see cref="ProjectLogits"/> (rows = B). The heavy
+    /// projections/MLP run as one batched GEMM over all B tokens; attention is per-sequence (each token attends
+    /// only its own prefix). Advances each cache by 1.</summary>
+    public Tensor ForwardBatchDecode(IBackend backend, Tensor embeds, ReadOnlySpan<int> positions, FixedKvCache[] caches)
+    {
+        ThrowIfDisposed();
+        int b = (int)embeds.Shape[1];
+        if (positions.Length != b || caches.Length != b)
+            throw new ArgumentException($"positions ({positions.Length}) / caches ({caches.Length}) must match batch B={b}.");
+        int d = _cfg.HeadDim;
+
+        Tensor cos = new(new TensorShape(1, b, d), DType.F32);
+        Tensor sin = new(new TensorShape(1, b, d), DType.F32);
+        BuildRopeBatched(cos, sin, positions, d, _cfg.RopeTheta);
+        try
+        {
+            Tensor hidden = embeds;
+            bool ownsHidden = false;
+            for (int i = 0; i < _layers.Length; i++)
+            {
+                Tensor next = _layers[i].ForwardBatchDecode(backend, hidden, b, positions, cos, sin, caches, i);
+                if (ownsHidden) hidden.Dispose();
+                hidden = next;
+                ownsHidden = true;
+            }
+            for (int s = 0; s < b; s++) caches[s].AdvanceLength(1);
+
+            Tensor normed = new(new TensorShape(1, b, _cfg.HiddenSize), DType.F32);
+            backend.RmsNorm(normed, hidden, _finalNorm!, _cfg.RmsNormEps);
+            if (ownsHidden) hidden.Dispose();
+            return normed;
+        }
+        finally
+        {
+            cos.Dispose();
+            sin.Dispose();
+        }
+    }
+
+    /// <summary>Per-row RoPE table for a ragged decode batch: row b uses absolute position <paramref name="positions"/>[b]
+    /// (same split-half layout as <see cref="BuildRope"/>, so both RoPE styles consume it identically).</summary>
+    private static void BuildRopeBatched(Tensor cos, Tensor sin, ReadOnlySpan<int> positions, int headDim, float theta)
+    {
+        int half = headDim / 2;
+        float* pc = (float*)cos.DataPointer;
+        float* ps = (float*)sin.DataPointer;
+        for (int s = 0; s < positions.Length; s++)
+        {
+            int pos = positions[s];
+            long baseOff = (long)s * headDim;
+            for (int i = 0; i < half; i++)
+            {
+                double freq = 1.0 / Math.Pow(theta, (double)(2 * i) / headDim);
+                double angle = pos * freq;
+                float c = (float)Math.Cos(angle);
+                float si = (float)Math.Sin(angle);
+                pc[baseOff + i] = c; pc[baseOff + i + half] = c;
+                ps[baseOff + i] = si; ps[baseOff + i + half] = si;
+            }
         }
     }
 
@@ -144,7 +225,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         Tensor headW = _lmHead ?? _embed ?? throw new InvalidOperationException("weights not loaded.");
         Tensor logits = new(new TensorShape(1, t, _cfg.VocabSize), DType.F32);
-        backend.Linear(logits, hidden, headW, bias: null);
+        Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
         return logits;
     }
 
@@ -188,21 +269,6 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
     }
 
-    /// <summary>Additive causal mask <c>[1, 1, T_q, T_k]</c> (0 below diagonal, -1e30 above); query row q is at
-    /// absolute position <c>posStart+q</c>.</summary>
-    private static Tensor BuildCausalMask(int tq, int qOffset, int tk)
-    {
-        Tensor mask = new(new TensorShape(1, 1, tq, tk), DType.F32);
-        float* p = (float*)mask.DataPointer;
-        const float negInf = -1e30f;
-        for (int q = 0; q < tq; q++)
-        {
-            int absQ = qOffset + q;
-            for (int k = 0; k < tk; k++) p[q * tk + k] = k <= absQ ? 0f : negInf;
-        }
-        return mask;
-    }
-
     private void ThrowIfDisposed()
     {
         if (_disposed != 0) throw new ObjectDisposedException(nameof(GenericTransformer));
@@ -229,12 +295,14 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
         {
+            // Norms and biases are forced to F32; projection weights keep their loaded dtype (quant or float)
+            // so the matmul backend can dequant-on-the-fly (or run a fused quantized GEMV) without an F32 copy.
             _inNorm = EnsureF32(w[$"{prefix}.input_layernorm.weight"]);
             _postNorm = EnsureF32(w[$"{prefix}.post_attention_layernorm.weight"]);
-            _qW = EnsureF32(w[$"{prefix}.self_attn.q_proj.weight"]);
-            _kW = EnsureF32(w[$"{prefix}.self_attn.k_proj.weight"]);
-            _vW = EnsureF32(w[$"{prefix}.self_attn.v_proj.weight"]);
-            _oW = EnsureF32(w[$"{prefix}.self_attn.o_proj.weight"]);
+            _qW = w[$"{prefix}.self_attn.q_proj.weight"];
+            _kW = w[$"{prefix}.self_attn.k_proj.weight"];
+            _vW = w[$"{prefix}.self_attn.v_proj.weight"];
+            _oW = w[$"{prefix}.self_attn.o_proj.weight"];
             if (_cfg.AttentionBias)
             {
                 _qB = EnsureF32(w[$"{prefix}.self_attn.q_proj.bias"]);
@@ -246,9 +314,9 @@ public sealed unsafe class GenericTransformer : IDisposable
                 _qNorm = EnsureF32(w[$"{prefix}.self_attn.q_norm.weight"]);
                 _kNorm = EnsureF32(w[$"{prefix}.self_attn.k_norm.weight"]);
             }
-            _gateW = EnsureF32(w[$"{prefix}.mlp.gate_proj.weight"]);
-            _upW = EnsureF32(w[$"{prefix}.mlp.up_proj.weight"]);
-            _downW = EnsureF32(w[$"{prefix}.mlp.down_proj.weight"]);
+            _gateW = w[$"{prefix}.mlp.gate_proj.weight"];
+            _upW = w[$"{prefix}.mlp.up_proj.weight"];
+            _downW = w[$"{prefix}.mlp.down_proj.weight"];
         }
 
         public IEnumerable<Tensor> EnumerateWeights()
@@ -257,8 +325,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             foreach (Tensor? t in all) if (t is not null) yield return t;
         }
 
-        public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart, int kvLen,
-            IKvCache cache, int layerIndex, Tensor cos, Tensor sin, Tensor? mask)
+        public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
+            IKvCache cache, int layerIndex, Tensor cos, Tensor sin)
         {
             int h = _cfg.HiddenSize;
             int hq = _cfg.NumHeads;
@@ -275,9 +343,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor q = new(new TensorShape(1, t, hq, d), DType.F32);
             Tensor k = new(new TensorShape(1, t, hkv, d), DType.F32);
             Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
-            backend.Linear(q, pre, _qW!, _qB);
-            backend.Linear(k, pre, _kW!, _kB);
-            backend.Linear(v, pre, _vW!, _vB);
+            Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
+            Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
+            Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
             pre.Dispose();
 
             // Optional per-head Q/K RMSNorm over the head_dim (rows = T·heads), before RoPE (Qwen3).
@@ -312,31 +380,25 @@ public sealed unsafe class GenericTransformer : IDisposable
 
             cache.AppendStep(backend, layerIndex, kMh, vMh);
             kMh.Dispose(); vMh.Dispose();
-            Tensor kFull = cache.KeyPrefix(layerIndex);
+            Tensor kFull = cache.KeyPrefix(layerIndex);   // [1, Hkv, kvLen, D] (cache-owned)
             Tensor vFull = cache.ValuePrefix(layerIndex);
 
-            Tensor kRep, vRep;
-            bool ownsRep = group != 1;
-            if (!ownsRep) { kRep = kFull; vRep = vFull; }
-            else
-            {
-                kRep = new(new TensorShape(1, hq, kvLen, d), DType.F32);
-                vRep = new(new TensorShape(1, hq, kvLen, d), DType.F32);
-                backend.RepeatKvHeads(kRep, kFull, hkv, group);
-                backend.RepeatKvHeads(vRep, vFull, hkv, group);
-            }
-
+            // FlashAttention: GQA-aware (no K/V replication) online-softmax, causal via the absolute query
+            // offset (decode t=1 naturally attends the whole prefix; prefill t>1 is per-row causal). No score
+            // matrix, no causal-mask tensor.
+            // kFull/vFull may be a fixed-capacity buffer whose seq stride exceeds the valid length, so pass the
+            // valid key count (posStart + t) explicitly; the kernel reads the stride from the tensor shape.
+            int kvLen = posStart + t;
             float scale = 1f / MathF.Sqrt(d);
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, scale);
+            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale);
             qMh.Dispose();
-            if (ownsRep) { kRep.Dispose(); vRep.Dispose(); }
 
             Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
             backend.Permute0213(attnFlat, attn, hq, t, d);
             attn.Dispose();
             Tensor attnOut = new(flat, DType.F32);
-            backend.Linear(attnOut, attnFlat, _oW!, null);
+            Project(backend, attnOut, attnFlat, _oW!, null, _cfg.LowVramQuant);
             attnFlat.Dispose();
 
             Tensor afterAttn = new(flat, DType.F32);
@@ -348,18 +410,126 @@ public sealed unsafe class GenericTransformer : IDisposable
 
             TensorShape ff = new(1, t, _cfg.IntermediateSize);
             Tensor gate = new(ff, DType.F32);
-            backend.Linear(gate, preMlp, _gateW!, null);
+            Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
             Tensor gateAct = new(ff, DType.F32);
             backend.Silu(gateAct, gate);
             gate.Dispose();
             Tensor up = new(ff, DType.F32);
-            backend.Linear(up, preMlp, _upW!, null);
+            Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
             preMlp.Dispose();
             Tensor comb = new(ff, DType.F32);
             backend.Mul(comb, gateAct, up);
             gateAct.Dispose(); up.Dispose();
             Tensor mlpOut = new(flat, DType.F32);
-            backend.Linear(mlpOut, comb, _downW!, null);
+            Project(backend, mlpOut, comb, _downW!, null, _cfg.LowVramQuant);
+            comb.Dispose();
+
+            Tensor result = new(flat, DType.F32);
+            backend.Add(result, afterAttn, mlpOut);
+            afterAttn.Dispose(); mlpOut.Dispose();
+            return result;
+        }
+
+        /// <summary>Batched decode (one token per sequence): projections/MLP run as a single GEMM over all B
+        /// tokens; attention is looped per sequence (each token attends only its own KV prefix via the scalar
+        /// FlashAttention). <paramref name="hidden"/> is <c>[1, B, hidden]</c>.</summary>
+        public Tensor ForwardBatchDecode(IBackend backend, Tensor hidden, int b, ReadOnlySpan<int> positions,
+            Tensor cos, Tensor sin, FixedKvCache[] caches, int layerIndex)
+        {
+            int h = _cfg.HiddenSize;
+            int hq = _cfg.NumHeads;
+            int hkv = _cfg.NumKvHeads;
+            int d = _cfg.HeadDim;
+            int group = _cfg.KvGroup;
+            TensorShape flat = new(1, b, h);
+
+            Tensor pre = new(flat, DType.F32);
+            backend.RmsNorm(pre, hidden, _inNorm!, _cfg.RmsNormEps);
+
+            Tensor q = new(new TensorShape(1, b, hq, d), DType.F32);
+            Tensor k = new(new TensorShape(1, b, hkv, d), DType.F32);
+            Tensor v = new(new TensorShape(1, b, hkv, d), DType.F32);
+            Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
+            Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
+            Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+            pre.Dispose();
+
+            if (_cfg.QkNorm)
+            {
+                Tensor qN = new(new TensorShape(1, b, hq, d), DType.F32);
+                Tensor kN = new(new TensorShape(1, b, hkv, d), DType.F32);
+                backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                q.Dispose(); k.Dispose();
+                q = qN; k = kN;
+            }
+
+            // RoPE per row (each row b is one token at its own absolute position).
+            if (_cfg.Rope == RopeStyle.Interleaved)
+            {
+                backend.ApplyRopeInterleaved(q, cos, sin);
+                backend.ApplyRopeInterleaved(k, cos, sin);
+            }
+            else
+            {
+                backend.ApplyRopeSingle(q, cos, sin);
+                backend.ApplyRopeSingle(k, cos, sin);
+            }
+
+            float scale = 1f / MathF.Sqrt(d);
+            Tensor[] segs = new Tensor[b];
+            for (int s = 0; s < b; s++)
+            {
+                // Slice this sequence's single token out of the batched projections. q rows are head-major
+                // [B, Hq, D]; [1,Hq,1,D] and [1,1,Hq,D] share memory (Tq=1), so the slice doubles as the
+                // multi-head layout FlashAttention wants and the [1,1,Hq,D] piece Concat reassembles.
+                Tensor qMh = new(new TensorShape(1, hq, 1, d), DType.F32);
+                Tensor kMh = new(new TensorShape(1, hkv, 1, d), DType.F32);
+                Tensor vMh = new(new TensorShape(1, hkv, 1, d), DType.F32);
+                backend.SliceRows(qMh, q, s * hq);
+                backend.SliceRows(kMh, k, s * hkv);
+                backend.SliceRows(vMh, v, s * hkv);
+
+                FixedKvCache cache = caches[s];
+                cache.AppendStep(backend, layerIndex, kMh, vMh);
+                kMh.Dispose(); vMh.Dispose();
+                int kvLen = cache.CurrentLength + 1;   // append did not advance; +1 for the just-written token
+                Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
+                backend.FlashAttention(attnSeg, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
+                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale);
+                qMh.Dispose();
+                segs[s] = attnSeg;
+            }
+
+            Tensor attnConcat = new(new TensorShape(1, b, hq, d), DType.F32);
+            backend.Concat(attnConcat, segs, dim: 1);
+            foreach (Tensor seg in segs) seg.Dispose();
+
+            Tensor attnOut = new(flat, DType.F32);   // o_proj reads attnConcat as [B, QDim]
+            Project(backend, attnOut, attnConcat, _oW!, null, _cfg.LowVramQuant);
+            attnConcat.Dispose();
+
+            Tensor afterAttn = new(flat, DType.F32);
+            backend.Add(afterAttn, hidden, attnOut);
+            attnOut.Dispose();
+
+            Tensor preMlp = new(flat, DType.F32);
+            backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
+
+            TensorShape ff = new(1, b, _cfg.IntermediateSize);
+            Tensor gate = new(ff, DType.F32);
+            Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
+            Tensor gateAct = new(ff, DType.F32);
+            backend.Silu(gateAct, gate);
+            gate.Dispose();
+            Tensor up = new(ff, DType.F32);
+            Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
+            preMlp.Dispose();
+            Tensor comb = new(ff, DType.F32);
+            backend.Mul(comb, gateAct, up);
+            gateAct.Dispose(); up.Dispose();
+            Tensor mlpOut = new(flat, DType.F32);
+            Project(backend, mlpOut, comb, _downW!, null, _cfg.LowVramQuant);
             comb.Dispose();
 
             Tensor result = new(flat, DType.F32);

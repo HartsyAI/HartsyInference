@@ -68,6 +68,13 @@ public sealed record TransformerConfig
     /// text). The Qwen3-TTS audio backbone uses <see cref="RopeStyle.Interleaved"/>.</summary>
     public RopeStyle Rope { get; init; } = RopeStyle.SplitHalf;
 
+    /// <summary>For quantized (GGUF) weights: when <c>false</c> (default) the dequantized F16 weight is cached
+    /// per weight (fast decode, but the weight set occupies F16-sized VRAM); when <c>true</c> the low-VRAM
+    /// <see cref="IBackend.QuantizedMatMul"/> path is used (weights stay compressed on-device, dequant is
+    /// transient per call), trading decode speed for a much smaller footprint so large models fit. No effect on
+    /// float weights.</summary>
+    public bool LowVramQuant { get; init; }
+
     /// <summary>Total Q projection output dim — <see cref="NumHeads"/> × <see cref="HeadDim"/>.</summary>
     public int QDim => NumHeads * HeadDim;
 

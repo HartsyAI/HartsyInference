@@ -39,4 +39,12 @@
     <EmbeddedResource Include="Resources\llama3_merges.txt"  LogicalName="HartsyInference.Tokenizers.Resources.llama3_merges.txt"  Condition="Exists('Resources\llama3_merges.txt')" />
   </ItemGroup>
 
+  <!-- Canonical Llama-3 tokenizer.json (~17 MB), the single artifact the Llama-3.x repos ship. Consumed by
+       HfTokenizerJson to build the byte-level BPE core directly (Orpheus / CSM audio front-ends), so no manual
+       vocab.json + merges.txt extraction is needed. Conditional so a checkout without the asset still compiles;
+       EmbeddedTokenizerResources.HasLlama3TokenizerJson reports whether it was embedded. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\llama3_tokenizer.json" LogicalName="HartsyInference.Tokenizers.Resources.llama3_tokenizer.json" Condition="Exists('Resources\llama3_tokenizer.json')" />
+  </ItemGroup>
+
 </Project>

@@ -73,6 +73,14 @@ public sealed class GgufMetadata
         return null;
     }
 
+    /// <summary>Gets an int32/uint32 array metadata value (e.g. <c>tokenizer.ggml.token_type</c>), or null.</summary>
+    public int[]? GetIntArray(string key)
+    {
+        if (_values.TryGetValue(key, out object? value) && value is int[] arr)
+            return arr;
+        return null;
+    }
+
     /// <summary>Checks if a metadata key exists.</summary>
     public bool ContainsKey(string key) => _values.ContainsKey(key);
 

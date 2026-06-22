@@ -53,13 +53,29 @@
 - Note: repo `Qwen3Model` is the **TTS** backbone (interleaved RoPE), so it is NOT a parity oracle for HF Qwen3 **text** (split-half) — Qwen3 text correctness is proved by the e2e run, not CPU parity.
 - Deferred to later milestones: `Rblback`/fixed-buffer KV (M2), migrating audio models onto the core + encoder unification (M4), `LanguagePipelineBase`. Cosmetic: `Qwen2Tokenizer.Decode` leaks GPT-2 byte-level space marker `Ġ` (tokens correct; byte-level decode is a Tokenizers-package fix).
 
-## M2 — Quantized inference (CUDA first)
+## M2 — Quantized (GGUF) inference (CUDA first) — ✅ DONE (2026-06-22)
 
-- [ ] `DequantMatMul` Q8_0 → Q4_K_M → Q6_K (build on `native/cuda/kernels/dequant_q8`/`dequant_q4k`)
-- [ ] Quantized GEMV (decode) + GEMM (prefill); R4 weight repacking at load
-- [ ] GGUF → `TransformerConfig` + converter path through ModelHandler
-- [ ] Validate logits vs llama.cpp (clean-room, reference only)
-- [ ] Vulkan + CPU dequant-matmul fallbacks
+Most of the GGUF/quant stack already existed (loader, key-remap, all quant DTypes, CPU codecs, GPU dequant
+kernels Q8_0/Q4_K/Q5_K/Q6_K, quantized `Linear`). M2 added the wiring + a low-VRAM path:
+- [x] **Wave A — GGUF LLMs run.** `GgufConfigFactory.FromGguf` (metadata→`TransformerConfig`; infers
+      bias/qk-norm/tie + vocab); `GenericTransformer.LoadWeights` keeps proj weights quantized (only embed +
+      norms forced to F32); `GgufLanguageModel.Load` (owns the GGUF mmap; relabels GGUF `[in,out]`→`[out,in]`;
+      F32 fallback for non-GPU quant types e.g. Q5_0 in a Q4_K_M mix); harness `arch=gguf`.
+      Validated on RTX 3060: Qwen2.5-0.5B **Q8_0 and Q4_K_M** → coherent text, EOS, resident (~52 tok/s).
+- [x] **Wave B — low-VRAM path.** `IBackend.QuantizedMatMul` (CUDA override = `LinearImpl` with
+      `cacheWeightCast:false` → quant weight stays resident-compressed, F16 dequant is transient per call;
+      default throws). `TransformerConfig.LowVramQuant` opt-in routes quant projections to it (default = fast
+      F16-cached `Linear`). Parity: `CudaQuantizedMatMulTests` (Q8_0/Q4_K/Q6_K == `Linear`) + e2e byte-identical
+      to the fast path. Tradeoff measured: fast 54 tok/s vs low-VRAM 16 tok/s (per-token re-dequant).
+- [x] GGUF→`TransformerConfig` (factory, no separate converter needed — `LlamaKeyMapper` already maps Qwen).
+- [x] Full solution builds; LLM (9) + CUDA (53) tests green.
+- **Deviation from plan:** Wave B is "transient dequant + cuBLAS, no F16 cache" — it DOES materialize F16
+      transiently per op (not a true in-kernel fused GEMV). It delivers the resident low-VRAM footprint
+      (weights stay quantized) but is slower (per-token re-dequant) and the F16 transient is not zero. A true
+      fused in-kernel dequant-GEMV (faster decode + zero transient) is the documented follow-up.
+- Deferred: true fused GEMV kernels; quantized embed/lm_head GPU gather (embed dequants to F32 on load, which
+      dominates small-model VRAM); Vulkan quant path; logits-vs-llama.cpp numeric check (parity vs our F16
+      path used instead).
 
 ## M3 — Architecture coverage
 

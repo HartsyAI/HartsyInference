@@ -235,8 +235,20 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias. Supports mixed F32/F16/F8 dtypes.</summary>
-    public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    /// <summary>Linear layer via cuBLAS GemmEx with transpose: output = input × weight^T + bias. Supports mixed F32/F16/F8 dtypes.
+    /// For a quantized weight the dequantized F16 cast is cached per preloaded weight (fast, but the cast occupies
+    /// F16-sized VRAM).</summary>
+    public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+        => LinearImpl(output, input, weight, bias, cacheWeightCast: true);
+
+    /// <summary>Fused quantized matmul (the low-VRAM path): same GEMM as <see cref="Linear"/> but the dequantized
+    /// F16 weight is a transient buffer freed immediately, never cached. The quantized weight bytes stay resident
+    /// (preloaded), so a Q4/Q5/Q6/Q8 model keeps its on-device footprint at the quant size instead of expanding to
+    /// F16. Trades a per-call dequant (memory-bound, cheap) for the VRAM saving.</summary>
+    public void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
+        => LinearImpl(output, input, quantWeight, bias, cacheWeightCast: false);
+
+    private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast)
     {
         using NvtxRange _nvtx = NvtxRange.Push("Linear");
         _context.EnsureCurrent();
@@ -307,7 +319,7 @@ public sealed class CudaBackend : IBackend
             {
                 weightPtr = pWeight;
             }
-            else if (GpuTransferHelper.IsWeightCached(weight))
+            else if (cacheWeightCast && GpuTransferHelper.IsWeightCached(weight))
             {
                 if (!GpuTransferHelper.TryGetWeightCast(weight, out weightPtr))
                 {
@@ -2247,6 +2259,73 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>FlashAttention (online-softmax, GQA-aware, no materialized score matrix). Requires F32 and a
+    /// power-of-two head dimension (true for the 64/128 head dims we run); falls back to the base CPU reference
+    /// otherwise.</summary>
+    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale)
+    {
+        int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
+        int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
+        bool pow2 = d > 0 && (d & (d - 1)) == 0 && d <= 1024;
+        if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !pow2)
+        {
+            ((IBackend)this).FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale);
+            return;
+        }
+
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+        }
+    }
+
+    /// <summary>In-place KV-cache append (device-to-device strided write); keeps the fixed-capacity cache buffer
+    /// GPU-resident with no reallocation.</summary>
+    public unsafe void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
+    {
+        if (buffer.DType != DType.F32 || newKv.DType != DType.F32)
+        {
+            ((IBackend)this).KvCacheAppend(buffer, newKv, offset);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int h = (int)buffer.Shape[1], maxSeq = (int)buffer.Shape[2], d = (int)buffer.Shape[3], tNew = (int)newKv.Shape[2];
+        ulong pBuf = 0, pNew = 0;
+        try
+        {
+            pBuf = GpuTransferHelper.CopyToDevice(buffer);
+            pNew = GpuTransferHelper.CopyToDevice(newKv);
+            _kernels!.LaunchKvAppend(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle);
+            // buffer is updated in place; it is a cache-owned resident activation, so re-cache its pointer.
+            buffer._gpuSyncCallback = null;
+            buffer._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(buffer, pBuf, GpuTransferHelper.ByteSize(buffer));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pNew);
         }
     }
 

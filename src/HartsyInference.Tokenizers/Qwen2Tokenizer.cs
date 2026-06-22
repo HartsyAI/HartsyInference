@@ -3,8 +3,16 @@ using Microsoft.ML.Tokenizers;
 namespace HartsyInference.Tokenizers;
 
 /// <summary>Qwen2/Qwen2.5(-VL) byte-level BPE tokenizer with the ChatML template, used by Lance (chat-templated T2I/T2V prompts) and HunyuanImage 2.1 (Qwen2.5-VL MLLM encoder). Qwen2.5 and Qwen3 share the same base BPE vocab/merges (151,936 entries), so the default constructor reuses the embedded Qwen3 assets; pass explicit paths when a checkpoint ships its own <c>vocab.json</c>/<c>merges.txt</c> (Lance does).</summary>
-public sealed class Qwen2Tokenizer : IDisposable
+public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
 {
+    private static readonly Dictionary<string, int> SpecialTokens = new(StringComparer.Ordinal)
+    {
+        ["<|endoftext|>"] = EndOfTextId, ["<|im_start|>"] = ImStartId, ["<|im_end|>"] = ImEndId,
+        ["<|vision_start|>"] = VisionStartId, ["<|vision_end|>"] = VisionEndId,
+        ["<|vision_pad|>"] = VisionPadId, ["<|image_pad|>"] = ImagePadId, ["<|video_pad|>"] = VideoPadId,
+    };
+    private static readonly string[] SpecialLiterals = [.. SpecialTokens.Keys.OrderByDescending(s => s.Length)];
+
     /// <summary>Vocabulary size (matches Qwen2.5-VL's <c>config.json</c>).</summary>
     public const int VocabSize = 151936;
 
@@ -61,15 +69,61 @@ public sealed class Qwen2Tokenizer : IDisposable
         return _tokenizer.EncodeToIds(text);
     }
 
-    /// <summary>Decodes token ids back to text. Control tokens (id ≥ <see cref="EndOfTextId"/>) are dropped so
-    /// generated assistant text renders without ChatML markers.</summary>
+    /// <summary>Decodes token ids back to text. Control tokens (id ≥ <see cref="EndOfTextId"/>) are dropped, and
+    /// the GPT-2 byte-level mapping is reversed via <see cref="ByteLevelCodec"/> (so spaces render correctly
+    /// instead of leaking <c>Ġ</c>).</summary>
     public string Decode(IReadOnlyList<int> ids)
     {
         ThrowIfDisposed();
         List<int> filtered = new(ids.Count);
         foreach (int id in ids) if (id < EndOfTextId) filtered.Add(id);
-        return _tokenizer.Decode(filtered) ?? string.Empty;
+        string raw = _tokenizer.Decode(filtered) ?? string.Empty;
+        return ByteLevelCodec.Decode(raw);
     }
+
+    // ── ILlmTokenizer ────────────────────────────────────────────────────────────────────────────────
+    /// <summary>Ordinary BPE encode (no special-token handling).</summary>
+    public int[] EncodeOrdinary(string text) { ThrowIfDisposed(); return [.. _tokenizer.EncodeToIds(text)]; }
+
+    /// <summary>Special-aware encode: when <paramref name="addSpecial"/>, ChatML/vision control-token literals
+    /// in <paramref name="text"/> map to their ids; otherwise plain BPE.</summary>
+    public int[] Encode(string text, bool addSpecial)
+    {
+        ThrowIfDisposed();
+        if (!addSpecial) return EncodeOrdinary(text);
+        List<int> ids = new(text.Length / 3 + 8);
+        int i = 0;
+        while (i < text.Length)
+        {
+            string? hit = null;
+            foreach (string lit in SpecialLiterals)
+                if (i + lit.Length <= text.Length && string.CompareOrdinal(text, i, lit, 0, lit.Length) == 0) { hit = lit; break; }
+            if (hit is not null) { ids.Add(SpecialTokens[hit]); i += hit.Length; continue; }
+            int next = text.Length;
+            foreach (string lit in SpecialLiterals) { int idx = text.IndexOf(lit, i, StringComparison.Ordinal); if (idx >= 0 && idx < next) next = idx; }
+            ids.AddRange(EncodeOrdinary(text[i..next]));
+            i = next;
+        }
+        return [.. ids];
+    }
+
+    /// <summary>Special-token id by literal, or null.</summary>
+    public int? SpecialId(string token) => SpecialTokens.TryGetValue(token, out int id) ? id : null;
+
+    /// <summary>Qwen has no dedicated BOS token.</summary>
+    public int? BosId => null;
+
+    /// <summary>Qwen2/2.5 EOS is <c>&lt;|im_end|&gt;</c>.</summary>
+    public int? EosId => ImEndId;
+
+    /// <summary>Stop ids: end-of-turn and end-of-text.</summary>
+    public IReadOnlyList<int> StopIds => [ImEndId, EndOfTextId];
+
+    /// <summary>No BOS literal.</summary>
+    public string? BosToken => null;
+
+    /// <summary>EOS literal.</summary>
+    public string? EosToken => "<|im_end|>";
 
     /// <summary>Encodes a prompt with the Qwen2.5 ChatML template, returning the raw (unpadded, variable-length) token ids. Format: <c>&lt;|im_start|&gt;system\n{system}&lt;|im_end|&gt;\n&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;</c>, plus a trailing <c>\n&lt;|im_start|&gt;assistant\n</c> when <paramref name="addGenerationPrompt"/> is true (Lance uses true; HunyuanImage 2.1's encode template uses false).</summary>
     /// <param name="systemPrompt">System message; null uses <see cref="DefaultSystemPrompt"/>. Pass an empty string to omit the system turn entirely.</param>

@@ -110,11 +110,12 @@ public sealed unsafe class AudioEncodersTests
     {
         OpenVoiceSpeakerConfig c = new()
         {
-            NumMels = 32,
+            SpecChannels = 64,
             Channels = [16, 32],
             KernelSize = 3,
             Stride = 2,
-            NormGroups = 4,
+            Padding = 1,
+            GruHidden = 8,
             Gin = 256,
         };
         using CpuBackend backend = new();
@@ -122,8 +123,8 @@ public sealed unsafe class AudioEncodersTests
         enc.LoadWeights(OpenVoiceWeights(c));
 
         int t = 60;
-        using Tensor mel = F3(1, c.NumMels, t);
-        using Tensor g = enc.Extract(backend, mel, t);
+        using Tensor spec = F3(1, c.SpecChannels, t);
+        using Tensor g = enc.Extract(backend, spec, t);
         Assert.Equal(1, (int)g.Shape[0]);
         Assert.Equal(256, (int)g.Shape[1]);
         Assert.Equal(1, (int)g.Shape[2]);
@@ -287,19 +288,28 @@ public sealed unsafe class AudioEncodersTests
     private static Dictionary<string, Tensor> OpenVoiceWeights(OpenVoiceSpeakerConfig c)
     {
         string p = "ref_enc";
-        Dictionary<string, Tensor> w = new();
-        int inC = c.NumMels;
+        Dictionary<string, Tensor> w = new()
+        {
+            [$"{p}.layernorm.weight"] = F1(c.SpecChannels),
+            [$"{p}.layernorm.bias"] = F1(c.SpecChannels),
+        };
+        int inC = 1, freq = c.SpecChannels;
         for (int i = 0; i < c.Channels.Count; i++)
         {
             int outC = c.Channels[i];
-            w[$"{p}.convs.{i}.conv.weight"] = F3(outC, inC, c.KernelSize);
-            w[$"{p}.convs.{i}.norm.weight"] = F1(outC);
-            w[$"{p}.convs.{i}.norm.bias"] = F1(outC);
+            w[$"{p}.convs.{i}.weight_g"] = F4(outC, 1, 1, 1);
+            w[$"{p}.convs.{i}.weight_v"] = F4(outC, inC, c.KernelSize, c.KernelSize);
+            w[$"{p}.convs.{i}.bias"] = F1(outC);
             inC = outC;
+            freq = (freq + 2 * c.Padding - c.KernelSize) / c.Stride + 1;
         }
-        w[$"{p}.attn.weight"] = F2(1, inC);
-        w[$"{p}.attn.bias"] = F1(1);
-        w[$"{p}.proj.weight"] = F2(c.Gin, inC);
+        int gruIn = c.Channels[^1] * freq;
+        int g3 = 3 * c.GruHidden;
+        w[$"{p}.gru.weight_ih_l0"] = F2(g3, gruIn);
+        w[$"{p}.gru.weight_hh_l0"] = F2(g3, c.GruHidden);
+        w[$"{p}.gru.bias_ih_l0"] = F1(g3);
+        w[$"{p}.gru.bias_hh_l0"] = F1(g3);
+        w[$"{p}.proj.weight"] = F2(c.Gin, c.GruHidden);
         w[$"{p}.proj.bias"] = F1(c.Gin);
         return w;
     }

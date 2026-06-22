@@ -42,6 +42,9 @@ public sealed class CudaKernels : IDisposable
     // ── Language-model (decoder LLM) glue Module + handles ───────────────
     private readonly CudaModule _lmF32Module;
     private readonly nint _lmRepeatKvF32;
+    private readonly nint _lmKvAppendF32;
+    private readonly CudaModule _flashAttnF32Module;
+    private readonly nint _flashAttnF32;
 
     // ── Elementwise F32 function handles ─────────────────────────────────
     private readonly nint _addF32;
@@ -291,6 +294,9 @@ public sealed class CudaKernels : IDisposable
         // ── Language-model glue (F32) ────────────────────────────────────
         _lmF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "lm_f32.ptx"));
         _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
+        _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
+        _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
+        _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
 
         // ── GGUF Dequant ─────────────────────────────────────────────────
         _dequantQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
@@ -990,6 +996,47 @@ public sealed class CudaKernels : IDisposable
     public void LaunchRepeatKv(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
         => LaunchRepeatKvImpl(_lmRepeatKvF32, output, input, kvHeads, group, seqLen, headDim, total, stream);
 
+    /// <summary>Launches FlashAttention (one block per (b, q-head, q-row); blockDim = headDim; shared mem =
+    /// headDim floats). <paramref name="lk"/> is the K/V buffer seq stride; <paramref name="kvLen"/> the valid
+    /// key count.</summary>
+    public unsafe void LaunchFlashAttention(ulong outPtr, ulong q, ulong k, ulong v,
+        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, nint stream)
+    {
+        ulong outArg = outPtr, qArg = q, kArg = k, vArg = v;
+        uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
+        uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
+        int causalArg = causal ? 1 : 0, offArg = qOffset;
+        float scaleArg = scale;
+
+        void** args = stackalloc void*[15];
+        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
+        args[4] = &bArg; args[5] = &hqArg; args[6] = &tqArg; args[7] = &dArg;
+        args[8] = &hkvArg; args[9] = &lkArg; args[10] = &kvLenArg; args[11] = &grpArg;
+        args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg;
+
+        uint gridDim = (uint)((long)batch * hq * tq);
+        uint sharedBytes = (uint)(headDim * sizeof(float));
+        CudaDriverApi.cuLaunchKernel(
+            _flashAttnF32, gridDim, 1, 1, (uint)headDim, 1, 1,
+            sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches in-place KV-cache append: copies newKv [1,H,tNew,D] into buffer [1,H,maxSeq,D] at offset.</summary>
+    public unsafe void LaunchKvAppend(ulong buffer, ulong newKv, int heads, int maxSeq, int tNew, int headDim, int offset, nint stream)
+    {
+        ulong bufArg = buffer, newArg = newKv;
+        uint hArg = (uint)heads, maxArg = (uint)maxSeq, tArg = (uint)tNew, dArg = (uint)headDim, offArg = (uint)offset;
+        ulong total = (ulong)heads * (ulong)tNew * (ulong)headDim;
+        ulong totalArg = total;
+
+        void** args = stackalloc void*[8];
+        args[0] = &bufArg; args[1] = &newArg; args[2] = &hArg; args[3] = &maxArg;
+        args[4] = &tArg; args[5] = &dArg; args[6] = &offArg; args[7] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmKvAppendF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Launches gated residual over the last dim: out[b,s,d] = residual[b,s,d] + gate[b,d]*value[b,s,d].</summary>
     public void LaunchGatedResidualLastDim(ulong output, ulong residual, ulong value, ulong gate, int seqLen, int dim, long total, nint stream)
         => LaunchGatedResidualImpl(_ditGatedResidualF32, output, residual, value, gate, seqLen, dim, total, stream);
@@ -1270,6 +1317,7 @@ public sealed class CudaKernels : IDisposable
         _castModule?.Dispose();
         _ditF32Module?.Dispose();
         _lmF32Module?.Dispose();
+        _flashAttnF32Module?.Dispose();
         _castF8Module?.Dispose();
         _castBf16Module?.Dispose();
         _dequantQ8_0Module?.Dispose();

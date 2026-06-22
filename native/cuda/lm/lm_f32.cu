@@ -41,4 +41,30 @@ __global__ void lm_repeat_kv_f32(
     output[i] = input[inIdx];
 }
 
+// ── KV cache in-place append ────────────────────────────────────────────────
+// Writes newKv [1, H, tNew, D] into a fixed-capacity buffer [1, H, maxSeq, D] at sequence offset, so a KV
+// cache can grow without reallocating (the Concat-grown cache is O(n^2); this is O(tNew) per step).
+// One thread per source element.
+__global__ void lm_kv_append_f32(
+    float* __restrict__ buffer,
+    const float* __restrict__ newKv,
+    unsigned int heads,
+    unsigned int maxSeq,
+    unsigned int tNew,
+    unsigned int headDim,
+    unsigned int offset,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    unsigned int d = (unsigned int)(i % headDim);
+    unsigned long long rem = i / headDim;
+    unsigned int ti = (unsigned int)(rem % tNew);
+    unsigned int h = (unsigned int)(rem / tNew);
+
+    unsigned long long bufIdx = (((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d;
+    buffer[bufIdx] = newKv[i];
+}
+
 } // extern "C"

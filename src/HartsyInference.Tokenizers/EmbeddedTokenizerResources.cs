@@ -35,6 +35,11 @@ public static class EmbeddedTokenizerResources
     /// <summary>Llama-3.1 byte-level BPE merges. Pairs with <see cref="Llama3VocabName"/>.</summary>
     public const string Llama3MergesName = "HartsyInference.Tokenizers.Resources.llama3_merges.txt";
 
+    /// <summary>Canonical Llama-3 <c>tokenizer.json</c> (the single artifact the Llama-3.x repos ship; vocab
+    /// 128,256). Consumed via <see cref="HfTokenizerJson"/> to build the byte-level BPE core directly — used by
+    /// the Orpheus / CSM audio front-ends. Shared by every Llama-3.x model (3 / 3.1 / 3.2 use one tokenizer).</summary>
+    public const string Llama3TokenizerJsonName = "HartsyInference.Tokenizers.Resources.llama3_tokenizer.json";
+
     private static readonly Assembly _asm = typeof(EmbeddedTokenizerResources).Assembly;
 
     /// <summary>Opens the named embedded resource. Caller owns the returned stream.</summary>
@@ -59,6 +64,11 @@ public static class EmbeddedTokenizerResources
     public static Stream OpenQwen3Merges() => Open(Qwen3MergesName);
     public static Stream OpenLlama3Vocab() => Open(Llama3VocabName);
     public static Stream OpenLlama3Merges() => Open(Llama3MergesName);
+    public static Stream OpenLlama3TokenizerJson() => Open(Llama3TokenizerJsonName);
+
+    /// <summary>True when the canonical Llama-3 <c>tokenizer.json</c> is embedded in this build.</summary>
+    public static bool HasLlama3TokenizerJson =>
+        _asm.GetManifestResourceStream(Llama3TokenizerJsonName) is not null;
 
     /// <summary>True when the Llama-3.1 tokenizer assets are embedded in this build. They ship separately
     /// from the source tree (the vocab.json is ~5 MB) and are included via a conditional csproj glob, so a

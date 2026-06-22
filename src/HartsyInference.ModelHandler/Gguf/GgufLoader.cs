@@ -173,6 +173,18 @@ public sealed class GgufLoader : IDisposable
                     return (arr, offset);
                 }
 
+                // Integer arrays (UINT32/INT32) — needed for e.g. tokenizer.ggml.token_type. Collect as int[].
+                if (elemType == 4 || elemType == 5)
+                {
+                    int[] ints = new int[count];
+                    for (ulong i = 0; i < count; i++)
+                    {
+                        ints[i] = *(int*)(ptr + offset);
+                        offset += 4;
+                    }
+                    return (ints, offset);
+                }
+
                 // For other arrays, skip the data
                 for (ulong i = 0; i < count; i++)
                 {

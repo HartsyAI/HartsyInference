@@ -9,29 +9,25 @@ namespace HartsyInference.LLM.Generation;
 
 /// <summary>End-to-end LLM text generation: chat template → tokenize → GPU-resident prefill → autoregressive
 /// decode (per-token sampler chain) → stop on EOS/limit → detokenize. Composes a <see cref="GenericTransformer"/>,
-/// a <see cref="Qwen2Tokenizer"/> (whose vocab covers Qwen2.5 and Qwen3), an <see cref="IChatTemplate"/>, and a
-/// backend-selected <see cref="IBackend"/>. The pipeline does not own the model or tokenizer (passed in).</summary>
+/// an <see cref="ILlmTokenizer"/> (any model family), an <see cref="IChatTemplate"/>, and a backend-selected
+/// <see cref="IBackend"/>. Stop tokens come from the tokenizer. The pipeline does not own the model/tokenizer.</summary>
 public sealed class TextGenerationPipeline
 {
     private readonly GenericTransformer _model;
-    private readonly Qwen2Tokenizer _tokenizer;
+    private readonly ILlmTokenizer _tokenizer;
     private readonly IChatTemplate _template;
     private readonly IBackend _backend;
+    private readonly HashSet<int> _stopIds;
 
-    /// <summary>Qwen end-of-turn token (<c>&lt;|im_end|&gt;</c>).</summary>
-    public const int ImEndId = 151645;
-
-    /// <summary>Qwen end-of-text token (<c>&lt;|endoftext|&gt;</c>).</summary>
-    public const int EndOfTextId = 151643;
-
-    /// <summary>Creates the pipeline. <paramref name="template"/> defaults to ChatML (Qwen2.5 / Qwen3).</summary>
-    public TextGenerationPipeline(GenericTransformer model, Qwen2Tokenizer tokenizer, IBackend backend,
+    /// <summary>Creates the pipeline. <paramref name="template"/> defaults to ChatML when not supplied.</summary>
+    public TextGenerationPipeline(GenericTransformer model, ILlmTokenizer tokenizer, IBackend backend,
         IChatTemplate? template = null)
     {
         _model = model;
         _tokenizer = tokenizer;
         _backend = backend;
         _template = template ?? new ChatMlTemplate();
+        _stopIds = [.. tokenizer.StopIds];
     }
 
     /// <summary>Generates text for <paramref name="request"/>. <paramref name="onToken"/> is invoked with each
@@ -44,11 +40,14 @@ public sealed class TextGenerationPipeline
         TransformerConfig cfg = _model.Config;
         SamplerChain sampler = SamplerChain.FromOptions(request.Sampling);
         List<int> generated = new(request.MaxTokens);
+        HashSet<int> stops = _stopIds;
+        if (request.StopTokenIds is not null) { stops = [.. _stopIds]; foreach (int s in request.StopTokenIds) stops.Add(s); }
 
-        using KvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim);
+        // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation.
+        int maxSeq = promptIds.Length + request.MaxTokens + 1;
+        using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxSeq);
 
         bool stopped = false;
-        // Prefill: run the whole prompt, sample the first token from the last position's logits.
         int next;
         using (Tensor hidden = _model.Forward(_backend, promptIds, 0, cache))
         using (Tensor logits = _model.ProjectLogits(_backend, hidden, promptIds.Length))
@@ -59,7 +58,7 @@ public sealed class TextGenerationPipeline
 
         for (int step = 0; step < request.MaxTokens; step++)
         {
-            if (IsStop(next, request.StopTokenIds)) { stopped = true; break; }
+            if (stops.Contains(next)) { stopped = true; break; }
             generated.Add(next);
             onToken?.Invoke(next);
 
@@ -82,22 +81,19 @@ public sealed class TextGenerationPipeline
     {
         if (request.RawTokenIds is not null) return [.. request.RawTokenIds];
         if (request.Messages is not null) return _template.Encode(_tokenizer, request.Messages, addGenerationPrompt: true);
-        if (request.Prompt is not null) return ChatMlTemplate.EncodeSingleTurn(_tokenizer, request.Prompt, request.SystemPrompt);
+        if (request.Prompt is not null)
+        {
+            List<ChatMessage> messages = new(2);
+            if (!string.IsNullOrEmpty(request.SystemPrompt)) messages.Add(ChatMessage.System(request.SystemPrompt));
+            messages.Add(ChatMessage.User(request.Prompt));
+            return _template.Encode(_tokenizer, messages, addGenerationPrompt: true);
+        }
         throw new ArgumentException("Request must set RawTokenIds, Messages, or Prompt.", nameof(request));
     }
 
     private static unsafe Span<float> LastRow(Tensor logits, int t, int vocab)
     {
-        // Last position row of a [1, T, vocab] logits tensor.
         float* p = (float*)logits.DataPointer;
         return new Span<float>(p + (long)(t - 1) * vocab, vocab);
-    }
-
-    private static bool IsStop(int tokenId, IReadOnlyList<int>? extra)
-    {
-        if (tokenId == ImEndId || tokenId == EndOfTextId) return true;
-        if (extra is not null)
-            for (int i = 0; i < extra.Count; i++) if (extra[i] == tokenId) return true;
-        return false;
     }
 }

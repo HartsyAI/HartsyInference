@@ -1,0 +1,548 @@
+using System.Globalization;
+
+namespace HartsyInference.LLM.ChatTemplates;
+
+/// <summary>Expression AST + recursive-descent parser + value runtime for <see cref="JinjaEngine"/>.</summary>
+internal abstract class Expr
+{
+    public abstract object? Eval(JinjaEngine.Scope scope);
+}
+
+/// <summary>Dynamic-typed value helpers (string / bool / long / double / null / list / dict).</summary>
+internal static class Values
+{
+    public static bool Truthy(object? v) => v switch
+    {
+        null => false,
+        bool b => b,
+        string s => s.Length > 0,
+        long l => l != 0,
+        double d => d != 0,
+        System.Collections.ICollection c => c.Count > 0,
+        _ => true,
+    };
+
+    public static string ToStr(object? v) => v switch
+    {
+        null => string.Empty,
+        bool b => b ? "True" : "False",
+        string s => s,
+        long l => l.ToString(CultureInfo.InvariantCulture),
+        double d => d.ToString(CultureInfo.InvariantCulture),
+        _ => v.ToString() ?? string.Empty,
+    };
+
+    public static List<object?> AsList(object? v) => v switch
+    {
+        null => [],
+        List<object?> l => l,
+        System.Collections.IEnumerable e and not string => [.. e.Cast<object?>()],
+        _ => throw new InvalidOperationException($"Value is not iterable: {v.GetType().Name}"),
+    };
+
+    public static bool Eq(object? a, object? b)
+    {
+        if (a is null || b is null) return a is null && b is null;
+        if (a is long la && b is long lb) return la == lb;
+        if (a is bool ba && b is bool bb) return ba == bb;
+        if (IsNum(a) && IsNum(b)) return ToD(a) == ToD(b);
+        return string.Equals(ToStr(a), ToStr(b), StringComparison.Ordinal) && a is string == b is string
+            || (a is string && b is string && (string)a == (string)b);
+    }
+
+    public static bool In(object? item, object? container) => container switch
+    {
+        string s => s.Contains(ToStr(item), StringComparison.Ordinal),
+        Dictionary<string, object?> d => d.ContainsKey(ToStr(item)),
+        System.Collections.IEnumerable e => e.Cast<object?>().Any(x => Eq(x, item)),
+        _ => false,
+    };
+
+    public static bool IsNum(object? v) => v is long or double or int;
+    public static double ToD(object? v) => v switch { long l => l, int i => i, double d => d, _ => 0 };
+}
+
+// ── Literal / variable / unary / binary / ternary ──────────────────────────────────────────────────────
+internal sealed class LiteralExpr(object? value) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope) => value;
+}
+
+internal sealed class VarExpr(string name) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope) => scope.Get(name);
+    public string GetName() => name;
+}
+
+internal sealed class MemberExpr(Expr target, string name) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        object? t = target.Eval(scope);
+        return t is Dictionary<string, object?> d && d.TryGetValue(name, out object? v) ? v : null;
+    }
+    public string Name => name;
+    public Expr Target => target;
+}
+
+internal sealed class IndexExpr(Expr target, Expr index) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        object? t = target.Eval(scope);
+        object? k = index.Eval(scope);
+        if (t is Dictionary<string, object?> d) return d.TryGetValue(Values.ToStr(k), out object? v) ? v : null;
+        if (t is List<object?> l && k is long i && i >= 0 && i < l.Count) return l[(int)i];
+        return null;
+    }
+}
+
+internal sealed class UnaryNotExpr(Expr inner) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope) => !Values.Truthy(inner.Eval(scope));
+}
+
+internal sealed class SliceExpr(Expr target, Expr? start, Expr? stop) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        object? t = target.Eval(scope);
+        List<object?> list = t is string s ? [.. s.Select(ch => (object?)ch.ToString())] : Values.AsList(t);
+        int n = list.Count;
+        int lo = Norm(start?.Eval(scope), 0, n);
+        int hi = Norm(stop?.Eval(scope), n, n);
+        if (lo < 0) lo = 0; if (hi > n) hi = n; if (hi < lo) hi = lo;
+        List<object?> slice = list.GetRange(lo, hi - lo);
+        return t is string ? string.Concat(slice.Select(Values.ToStr)) : slice;
+    }
+    private static int Norm(object? v, int def, int n)
+    {
+        if (v is null) return def;
+        int i = (int)Values.ToD(v);
+        return i < 0 ? n + i : i;
+    }
+}
+
+internal sealed class BinaryExpr(string op, Expr left, Expr right) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        if (op == "and") return Values.Truthy(left.Eval(scope)) ? right.Eval(scope) : left.Eval(scope);
+        if (op == "or") { object? l = left.Eval(scope); return Values.Truthy(l) ? l : right.Eval(scope); }
+
+        object? a = left.Eval(scope);
+        object? b = right.Eval(scope);
+        return op switch
+        {
+            "==" => Values.Eq(a, b),
+            "!=" => !Values.Eq(a, b),
+            "in" => Values.In(a, b),
+            "notin" => !Values.In(a, b),
+            "<" => Values.ToD(a) < Values.ToD(b),
+            ">" => Values.ToD(a) > Values.ToD(b),
+            "<=" => Values.ToD(a) <= Values.ToD(b),
+            ">=" => Values.ToD(a) >= Values.ToD(b),
+            "~" => Values.ToStr(a) + Values.ToStr(b),
+            "+" => Values.IsNum(a) && Values.IsNum(b) ? (object)((long)Values.ToD(a) + (long)Values.ToD(b)) : Values.ToStr(a) + Values.ToStr(b),
+            "-" => (object)((long)Values.ToD(a) - (long)Values.ToD(b)),
+            _ => throw new NotSupportedException($"Jinja operator '{op}'"),
+        };
+    }
+}
+
+internal sealed class TernaryExpr(Expr cond, Expr ifTrue, Expr ifFalse) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope) => Values.Truthy(cond.Eval(scope)) ? ifTrue.Eval(scope) : ifFalse.Eval(scope);
+}
+
+internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        object? v = inner.Eval(scope);
+        switch (name)
+        {
+            case "trim": return Values.ToStr(v).Trim();
+            case "lower": return Values.ToStr(v).ToLowerInvariant();
+            case "upper": return Values.ToStr(v).ToUpperInvariant();
+            case "length": case "count": return (long)Values.AsList(v).Count;
+            case "list": return Values.AsList(v);
+            case "string": return Values.ToStr(v);
+            case "default": return Values.Truthy(v) ? v : (args.Count > 0 ? args[0].Eval(scope) : v);
+            default: throw new NotSupportedException($"Jinja filter '{name}'");
+        }
+    }
+}
+
+/// <summary>A keyword argument <c>name=value</c> in a call. Evaluates to its value so positional consumers work;
+/// <see cref="CallExpr"/> for <c>namespace(...)</c> inspects the name.</summary>
+internal sealed class NamedArgExpr(string name, Expr value) : Expr
+{
+    public string Name => name;
+    public Expr Value => value;
+    public override object? Eval(JinjaEngine.Scope scope) => value.Eval(scope);
+}
+
+internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        // Method calls on the result of a member access (e.g. content.strip()).
+        if (callee is MemberExpr m)
+        {
+            object? target = m.Target.Eval(scope);
+            string s = Values.ToStr(target);
+            object? Arg(int idx) => idx < args.Count ? args[idx].Eval(scope) : null;
+            return m.Name switch
+            {
+                "strip" => s.Trim(),
+                "lstrip" => s.TrimStart(),
+                "rstrip" => s.TrimEnd(),
+                "lower" => s.ToLowerInvariant(),
+                "upper" => s.ToUpperInvariant(),
+                "title" => CultureInfo.InvariantCulture.TextInfo.ToTitleCase(s),
+                "capitalize" => s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s[1..].ToLowerInvariant(),
+                "startswith" => s.StartsWith(Values.ToStr(Arg(0)), StringComparison.Ordinal),
+                "endswith" => s.EndsWith(Values.ToStr(Arg(0)), StringComparison.Ordinal),
+                "replace" => s.Replace(Values.ToStr(Arg(0)), Values.ToStr(Arg(1))),
+                "split" => SplitString(s, Arg(0)),
+                "get" => target is Dictionary<string, object?> d ? (d.TryGetValue(Values.ToStr(Arg(0)), out object? gv) ? gv : Arg(1)) : Arg(1),
+                _ => throw new NotSupportedException($"Jinja method '{m.Name}'"),
+            };
+        }
+        // Bare function calls templates use: raise_exception, namespace, strftime_now.
+        if (callee is VarExpr v)
+        {
+            switch (v.GetName())
+            {
+                case "raise_exception" or "raise":
+                    throw new InvalidOperationException("chat template raised: " + (args.Count > 0 ? Values.ToStr(args[0].Eval(scope)) : ""));
+                case "namespace":
+                {
+                    Dictionary<string, object?> ns = new();
+                    foreach (Expr a in args)
+                        if (a is NamedArgExpr na) ns[na.Name] = na.Value.Eval(scope);
+                    return ns;
+                }
+                case "strftime_now":
+                    // Date-string helper used in some default system prompts; value is not load-bearing.
+                    return "01 Jan 2025";
+            }
+        }
+        throw new NotSupportedException("Unsupported Jinja call expression.");
+    }
+
+    private static List<object?> SplitString(string s, object? sep)
+    {
+        string[] parts = sep is null
+            ? s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            : s.Split(Values.ToStr(sep));
+        List<object?> list = new(parts.Length);
+        foreach (string p in parts) list.Add(p);
+        return list;
+    }
+}
+
+internal static class ExprParser
+{
+    public static Expr ParseExpr(string src)
+    {
+        Tokenizer tz = new(src);
+        Expr e = ParseTernary(tz);
+        tz.ExpectEnd();
+        return e;
+    }
+
+    private static Expr ParseTernary(Tokenizer t)
+    {
+        Expr e = ParseOr(t);
+        if (t.TryKeyword("if"))
+        {
+            Expr cond = ParseOr(t);
+            t.ExpectKeyword("else");
+            Expr other = ParseTernary(t);
+            return new TernaryExpr(cond, e, other);
+        }
+        return e;
+    }
+
+    private static Expr ParseOr(Tokenizer t)
+    {
+        Expr e = ParseAnd(t);
+        while (t.TryKeyword("or")) e = new BinaryExpr("or", e, ParseAnd(t));
+        return e;
+    }
+
+    private static Expr ParseAnd(Tokenizer t)
+    {
+        Expr e = ParseNot(t);
+        while (t.TryKeyword("and")) e = new BinaryExpr("and", e, ParseNot(t));
+        return e;
+    }
+
+    private static Expr ParseNot(Tokenizer t)
+    {
+        if (t.TryKeyword("not")) return new UnaryNotExpr(ParseNot(t));
+        return ParseComparison(t);
+    }
+
+    private static Expr ParseComparison(Tokenizer t)
+    {
+        Expr e = ParseConcat(t);
+        while (true)
+        {
+            if (t.TryKeyword("is"))
+            {
+                bool neg = t.TryKeyword("not");
+                string test = t.ReadIdent();
+                // 'is none'/'is not none' may also appear as 'is not none'; 'defined' etc. take no args.
+                e = new IsTestExpr(e, test, neg);
+                continue;
+            }
+            if (t.TrySymbol("==")) e = new BinaryExpr("==", e, ParseConcat(t));
+            else if (t.TrySymbol("!=")) e = new BinaryExpr("!=", e, ParseConcat(t));
+            else if (t.TrySymbol("<=")) e = new BinaryExpr("<=", e, ParseConcat(t));
+            else if (t.TrySymbol(">=")) e = new BinaryExpr(">=", e, ParseConcat(t));
+            else if (t.TrySymbol("<")) e = new BinaryExpr("<", e, ParseConcat(t));
+            else if (t.TrySymbol(">")) e = new BinaryExpr(">", e, ParseConcat(t));
+            else if (t.TryKeyword("not")) { t.ExpectKeyword("in"); e = new BinaryExpr("notin", e, ParseConcat(t)); }
+            else if (t.TryKeyword("in")) e = new BinaryExpr("in", e, ParseConcat(t));
+            else break;
+        }
+        return e;
+    }
+
+    private static Expr ParseConcat(Tokenizer t)
+    {
+        Expr e = ParsePostfix(t);
+        while (true)
+        {
+            if (t.TrySymbol("~")) e = new BinaryExpr("~", e, ParsePostfix(t));
+            else if (t.TrySymbol("+")) e = new BinaryExpr("+", e, ParsePostfix(t));
+            else if (t.TrySymbol("-")) e = new BinaryExpr("-", e, ParsePostfix(t));
+            else break;
+        }
+        return e;
+    }
+
+    private static Expr ParsePostfix(Tokenizer t)
+    {
+        Expr e = ParsePrimary(t);
+        while (true)
+        {
+            if (t.TrySymbol("."))
+            {
+                string name = t.ReadIdent();
+                e = new MemberExpr(e, name);
+            }
+            else if (t.TrySymbol("["))
+            {
+                Expr? start = null;
+                if (!t.TrySymbol(":"))
+                {
+                    start = ParseTernary(t);
+                    if (t.TrySymbol("]")) { e = new IndexExpr(e, start); continue; }
+                    t.ExpectSymbol(":");
+                }
+                Expr? stop = t.TrySymbol("]") ? null : ParseTernary(t);
+                if (stop is not null) t.ExpectSymbol("]");
+                e = new SliceExpr(e, start, stop);
+            }
+            else if (t.TrySymbol("("))
+            {
+                List<Expr> args = ParseArgs(t);
+                e = new CallExpr(e, args);
+            }
+            else if (t.TrySymbol("|"))
+            {
+                string fname = t.ReadIdent();
+                List<Expr> args = t.TrySymbol("(") ? ParseArgs(t) : [];
+                e = new FilterExpr(e, fname, args);
+            }
+            else break;
+        }
+        return e;
+    }
+
+    private static List<Expr> ParseArgs(Tokenizer t)
+    {
+        List<Expr> args = [];
+        if (t.TrySymbol(")")) return args;
+        do
+        {
+            // Keyword argument: ident '=' expr (but not '==', which is a comparison).
+            int save = t.Save();
+            if (t.TryReadIdent(out string name) && !t.PeekSymbol("==") && t.TrySymbol("="))
+                args.Add(new NamedArgExpr(name, ParseTernary(t)));
+            else { t.Restore(save); args.Add(ParseTernary(t)); }
+        } while (t.TrySymbol(","));
+        t.ExpectSymbol(")");
+        return args;
+    }
+
+    private static Expr ParsePrimary(Tokenizer t)
+    {
+        if (t.TryString(out string str)) return new LiteralExpr(str);
+        if (t.TryNumber(out long num)) return new LiteralExpr(num);
+        if (t.TrySymbol("("))
+        {
+            Expr e = ParseTernary(t);
+            t.ExpectSymbol(")");
+            return e;
+        }
+        if (t.TrySymbol("["))
+        {
+            List<Expr> items = [];
+            if (!t.TrySymbol("]"))
+            {
+                do { items.Add(ParseTernary(t)); } while (t.TrySymbol(","));
+                t.ExpectSymbol("]");
+            }
+            return new ListLiteralExpr(items);
+        }
+        string ident = t.ReadIdent();
+        return ident switch
+        {
+            "true" or "True" => new LiteralExpr(true),
+            "false" or "False" => new LiteralExpr(false),
+            "none" or "None" or "null" => new LiteralExpr(null),
+            _ => new VarExpr(ident),
+        };
+    }
+}
+
+internal sealed class ListLiteralExpr(List<Expr> items) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope) => items.Select(e => e.Eval(scope)).ToList();
+}
+
+/// <summary>Jinja <c>is</c> tests: <c>defined</c>, <c>none</c>, <c>string</c>, <c>mapping</c>, <c>iterable</c>
+/// (with optional <c>not</c>). <c>defined</c> uses scope membership so a missing variable reads as undefined.</summary>
+internal sealed class IsTestExpr(Expr target, string test, bool negated) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope)
+    {
+        bool result = test switch
+        {
+            "defined" => target is VarExpr v ? scope.Has(v.GetName()) : target.Eval(scope) is not null,
+            "undefined" => target is VarExpr v2 ? !scope.Has(v2.GetName()) : target.Eval(scope) is null,
+            "none" => target.Eval(scope) is null,
+            "string" => target.Eval(scope) is string,
+            "mapping" => target.Eval(scope) is Dictionary<string, object?>,
+            "iterable" => target.Eval(scope) is System.Collections.IEnumerable,
+            "number" => Values.IsNum(target.Eval(scope)),
+            _ => throw new NotSupportedException($"Jinja 'is {test}' test"),
+        };
+        return negated ? !result : result;
+    }
+}
+
+/// <summary>Tiny tokenizer for Jinja expression source (identifiers, strings, ints, symbols, keywords).</summary>
+internal sealed class Tokenizer
+{
+    private readonly string _s;
+    private int _p;
+
+    public Tokenizer(string s) { _s = s; _p = 0; }
+
+    private void SkipWs() { while (_p < _s.Length && char.IsWhiteSpace(_s[_p])) _p++; }
+
+    public void ExpectEnd() { SkipWs(); if (_p < _s.Length) throw new FormatException($"Trailing input in Jinja expr at {_p}: '{_s[_p..]}'"); }
+
+    public bool TrySymbol(string sym)
+    {
+        SkipWs();
+        if (_p + sym.Length <= _s.Length && string.CompareOrdinal(_s, _p, sym, 0, sym.Length) == 0)
+        {
+            // Avoid matching '<' when the text is '<=' etc. — caller order handles multi-char first.
+            _p += sym.Length;
+            return true;
+        }
+        return false;
+    }
+
+    public void ExpectSymbol(string sym) { if (!TrySymbol(sym)) throw new FormatException($"Expected '{sym}' in Jinja expr near {_p}."); }
+
+    public int Save() => _p;
+    public void Restore(int p) => _p = p;
+
+    public bool PeekSymbol(string sym)
+    {
+        int save = _p; SkipWs();
+        bool hit = _p + sym.Length <= _s.Length && string.CompareOrdinal(_s, _p, sym, 0, sym.Length) == 0;
+        _p = save; return hit;
+    }
+
+    public bool TryReadIdent(out string ident)
+    {
+        int save = _p; SkipWs();
+        if (_p < _s.Length && (char.IsLetter(_s[_p]) || _s[_p] == '_'))
+        {
+            int start = _p; _p++;
+            while (_p < _s.Length && IsIdentChar(_s[_p])) _p++;
+            ident = _s[start.._p]; return true;
+        }
+        _p = save; ident = string.Empty; return false;
+    }
+
+    public bool TryKeyword(string kw)
+    {
+        SkipWs();
+        int start = _p;
+        if (_p + kw.Length <= _s.Length && string.CompareOrdinal(_s, _p, kw, 0, kw.Length) == 0)
+        {
+            int end = _p + kw.Length;
+            if (end == _s.Length || !IsIdentChar(_s[end])) { _p = end; return true; }
+        }
+        _p = start;
+        return false;
+    }
+
+    public void ExpectKeyword(string kw) { if (!TryKeyword(kw)) throw new FormatException($"Expected keyword '{kw}' in Jinja expr near {_p}."); }
+
+    public bool TryString(out string value)
+    {
+        SkipWs();
+        value = string.Empty;
+        if (_p >= _s.Length || (_s[_p] != '\'' && _s[_p] != '"')) return false;
+        char q = _s[_p++];
+        System.Text.StringBuilder sb = new();
+        while (_p < _s.Length && _s[_p] != q)
+        {
+            if (_s[_p] == '\\' && _p + 1 < _s.Length)
+            {
+                _p++;
+                sb.Append(_s[_p] switch { 'n' => '\n', 't' => '\t', 'r' => '\r', '\\' => '\\', '\'' => '\'', '"' => '"', char o => o });
+                _p++;
+            }
+            else sb.Append(_s[_p++]);
+        }
+        if (_p >= _s.Length) throw new FormatException("Unterminated string in Jinja expr.");
+        _p++; // closing quote
+        value = sb.ToString();
+        return true;
+    }
+
+    public bool TryNumber(out long value)
+    {
+        SkipWs();
+        value = 0;
+        int start = _p;
+        while (_p < _s.Length && char.IsDigit(_s[_p])) _p++;
+        if (_p == start) return false;
+        value = long.Parse(_s.AsSpan(start, _p - start), CultureInfo.InvariantCulture);
+        return true;
+    }
+
+    public string ReadIdent()
+    {
+        SkipWs();
+        int start = _p;
+        if (_p < _s.Length && (char.IsLetter(_s[_p]) || _s[_p] == '_')) _p++;
+        else throw new FormatException($"Expected identifier in Jinja expr near {_p}: '{_s[_p..]}'");
+        while (_p < _s.Length && IsIdentChar(_s[_p])) _p++;
+        return _s[start.._p];
+    }
+
+    private static bool IsIdentChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+}

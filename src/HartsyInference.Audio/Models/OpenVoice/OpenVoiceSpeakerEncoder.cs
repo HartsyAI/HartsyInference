@@ -1,30 +1,34 @@
+using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.OpenVoice;
 
-/// <summary>OpenVoice tone-color extractor — the <c>ReferenceEncoder</c> that turns a reference mel into the
-/// speaker conditioning vector <c>g [1, gin, 1]</c> (gin 256) the OpenVoice tone converter is conditioned on.
-/// It is a stack of stride-2 Conv1d layers (channels-first over the mel time axis) with GroupNorm + ReLU,
-/// followed by an attention pool over time that collapses the variable-length sequence to a single token, then
-/// a Linear projection to <c>gin</c>.
+/// <summary>OpenVoice V2 tone-color extractor — the converter's <c>ReferenceEncoder</c> that turns a reference
+/// <b>linear spectrogram</b> into the speaker conditioning vector <c>g [1, gin, 1]</c> (gin 256). Faithful to
+/// <c>myshell-ai/OpenVoiceV2/converter</c>: a LayerNorm over the spectrogram bins, a six-layer weight-normed
+/// Conv2d stack (filters 32/32/64/64/128/128, kernel 3×3, stride 2×2, pad 1) with ReLU, a single-layer GRU
+/// (hidden 128) over the flattened (channel-major × frequency) features, and a Linear to <c>gin</c> taken from
+/// the GRU's final hidden state.
 ///
-/// <para>Reuses the shared <see cref="IBackend"/> Conv1d / GroupNorm / Linear ops and
-/// <see cref="WhisperOps"/> helpers. Input is a mel <c>[1, nMels, T]</c> (channels-first); output is
-/// <c>[1, gin, 1]</c> so it drops straight into the tone converter's <c>g</c> slot.</para>
-///
-/// <para>Structural scaffold (validation-pending): the layer count / channel schedule and the attention-pool
-/// formulation are captured from <c>docs/Research/CHATTERBOX_ARCHITECTURE.md</c>'s sibling tone-color notes;
-/// the precise checkpoint key spelling is a reconcile item against the downloaded <c>config.json</c>/
-/// <c>checkpoint.pth</c>.</para></summary>
+/// <para>Input is a linear spectrogram <c>[1, specChannels, T]</c> (channels-first, as
+/// <see cref="LinearSpectrogram.Extract"/> produces); output is <c>[1, gin, 1]</c> so it drops straight into
+/// the tone converter's <c>g</c> slot. Reuses <see cref="IBackend.Conv2D"/> / <see cref="IBackend.LayerNorm"/>,
+/// the shared <see cref="WeightNorm"/> composition, the <see cref="Gru"/> layer, and
+/// <see cref="WhisperOps.ProjectLinear"/>.</para></summary>
 public sealed unsafe class OpenVoiceSpeakerEncoder : IDisposable
 {
-    private readonly OpenVoiceSpeakerConfig _cfg;
-    private readonly ConvLayer[] _convs;
+    private const float LayerNormEps = 1e-5f;
 
-    private Tensor? _attnW, _attnB;     // attention pool Linear(lastC → 1)
-    private Tensor? _projW, _projB;     // Linear(lastC → gin)
+    private readonly OpenVoiceSpeakerConfig _cfg;
+    private readonly Tensor?[] _convW;
+    private readonly Tensor?[] _convB;
+    private readonly int _gruInputDim;
+    private readonly Gru _gru;
+
+    private Tensor? _lnW, _lnB;         // LayerNorm over the spec bins
+    private Tensor? _projW, _projB;     // Linear(gruHidden → gin)
     private int _disposed;
 
     public OpenVoiceSpeakerConfig Config => _cfg;
@@ -32,118 +36,95 @@ public sealed unsafe class OpenVoiceSpeakerEncoder : IDisposable
     public OpenVoiceSpeakerEncoder(OpenVoiceSpeakerConfig cfg)
     {
         _cfg = cfg;
-        _convs = new ConvLayer[cfg.Channels.Count];
+        _convW = new Tensor[cfg.Channels.Count];
+        _convB = new Tensor[cfg.Channels.Count];
+        // The frequency axis is halved by every stride-2 conv; the GRU consumes channel-major × frequency.
+        int freq = cfg.SpecChannels;
+        for (int i = 0; i < cfg.Channels.Count; i++) freq = Down(freq);
+        _gruInputDim = cfg.Channels[^1] * freq;
+        _gru = new Gru(_gruInputDim, cfg.GruHidden);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "ref_enc")
     {
-        int inC = _cfg.NumMels;
-        for (int i = 0; i < _convs.Length; i++)
+        _lnW = WhisperOps.EnsureF32(w[$"{prefix}.layernorm.weight"]);
+        _lnB = WhisperOps.EnsureF32(w[$"{prefix}.layernorm.bias"]);
+        for (int i = 0; i < _convW.Length; i++)
         {
-            int outC = _cfg.Channels[i];
             string cp = $"{prefix}.convs.{i}";
-            _convs[i] = new ConvLayer
-            {
-                ConvW = WhisperOps.EnsureF32(w[$"{cp}.conv.weight"]),
-                ConvB = TryGet(w, $"{cp}.conv.bias"),
-                NormW = WhisperOps.EnsureF32(w[$"{cp}.norm.weight"]),
-                NormB = WhisperOps.EnsureF32(w[$"{cp}.norm.bias"]),
-                OutC = outC,
-            };
-            inC = outC;
+            _convW[i] = WeightNorm.Compose(w, cp);     // weight_g / weight_v → dense [out, in, 3, 3]
+            _convB[i] = w.TryGetValue($"{cp}.bias", out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
         }
-        _attnW = WhisperOps.EnsureF32(w[$"{prefix}.attn.weight"]);
-        _attnB = TryGet(w, $"{prefix}.attn.bias");
+        _gru.LoadWeights(w, $"{prefix}.gru");
         _projW = WhisperOps.EnsureF32(w[$"{prefix}.proj.weight"]);
-        _projB = TryGet(w, $"{prefix}.proj.bias");
+        _projB = w.TryGetValue($"{prefix}.proj.bias", out Tensor? pb) ? WhisperOps.EnsureF32(pb) : null;
     }
 
-    /// <summary>Extracts the tone-color vector <c>g [1, gin, 1]</c> from a mel <c>[1, nMels, t]</c>.</summary>
-    public Tensor Extract(IBackend backend, Tensor mel, int t)
+    /// <summary>Extracts the tone-color vector <c>g [1, gin, 1]</c> from a linear spectrogram
+    /// <c>[1, specChannels, t]</c>.</summary>
+    public Tensor Extract(IBackend backend, Tensor spec, int t)
     {
-        if (_attnW is null) throw new InvalidOperationException("OpenVoiceSpeakerEncoder weights not loaded.");
+        if (_lnW is null) throw new InvalidOperationException("OpenVoiceSpeakerEncoder weights not loaded.");
+        int specCh = _cfg.SpecChannels;
 
-        Tensor x = new(mel.Shape, DType.F32);
-        backend.CopyTo(x, mel);
-        int curT = t, curC = _cfg.NumMels;
+        // [1, spec, T] → [1, T, spec], LayerNorm over the spec bins, then view as NCHW [1, 1, T, spec].
+        Tensor xTl = new(new TensorShape(1, t, specCh), DType.F32);
+        backend.Transpose2D(xTl, spec, specCh, t);
+        Tensor ln = new(xTl.Shape, DType.F32);
+        backend.LayerNorm(ln, xTl, _lnW!, _lnB!, LayerNormEps);
+        xTl.Dispose();
 
-        foreach (ConvLayer layer in _convs)
+        Tensor x = ln.Reshape(new TensorShape(1, 1, t, specCh));
+        int curH = t, curW = specCh;
+        for (int i = 0; i < _convW.Length; i++)
         {
-            int k = _cfg.KernelSize;
-            int stride = _cfg.Stride;
-            int pad = k / 2;
-            int outT = (curT + 2 * pad - (k - 1) - 1) / stride + 1;
-            if (outT < 1) outT = 1;
-            Tensor conv = new(new TensorShape(1, layer.OutC, outT), DType.F32);
-            backend.Conv1d(conv, x, layer.ConvW!, layer.ConvB, stride, pad, pad, 1, 1);
+            int outC = _cfg.Channels[i];
+            int outH = Down(curH), outW = Down(curW);
+            Tensor conv = new(new TensorShape(1, outC, outH, outW), DType.F32);
+            backend.Conv2D(conv, x, _convW[i]!, _convB[i], _cfg.Stride, _cfg.Stride, _cfg.Padding, _cfg.Padding);
             x.Dispose();
-            Tensor n = new(conv.Shape, DType.F32);
-            backend.GroupNorm(n, conv, layer.NormW!, layer.NormB!, _cfg.NormGroups, 1e-5f);
-            conv.Dispose();
-            backend.LeakyRelu(n, n, 0f);
-            x = n;
-            curT = outT;
-            curC = layer.OutC;
+            backend.LeakyRelu(conv, conv, 0f);     // ReLU
+            x = conv;
+            curH = outH; curW = outW;
         }
 
-        // Attention pool over time. x is [1, curC, curT]; to [1, curT, curC] for the scoring Linear.
-        Tensor xCl = new(new TensorShape(1, curT, curC), DType.F32);
-        backend.Transpose2D(xCl, x, curC, curT);
-        Tensor score = WhisperOps.ProjectLinear(backend, xCl, _attnW!, _attnB, 1, curT, curC, 1);
-
-        // Softmax over time.
-        float* scp = (float*)score.DataPointer;
-        float maxV = float.NegativeInfinity;
-        for (int ti = 0; ti < curT; ti++) if (scp[ti] > maxV) maxV = scp[ti];
-        float sum = 0f;
-        for (int ti = 0; ti < curT; ti++) { float e = MathF.Exp(scp[ti] - maxV); scp[ti] = e; sum += e; }
-        float inv = sum > 0 ? 1f / sum : 0f;
-        for (int ti = 0; ti < curT; ti++) scp[ti] *= inv;
-
-        // Weighted sum over time → [1, 1, curC].
-        Tensor pooled = new(new TensorShape(1, 1, curC), DType.F32);
-        float* pp = (float*)pooled.DataPointer;
-        float* xclp = (float*)xCl.DataPointer;
-        for (int c = 0; c < curC; c++)
-        {
-            float acc = 0f;
-            for (int ti = 0; ti < curT; ti++) acc += scp[ti] * xclp[(long)ti * curC + c];
-            pp[c] = acc;
-        }
-        score.Dispose();
-        xCl.Dispose();
+        // torch: out.transpose(1,2).view(N, T', C*F) → feature index = channel-major × frequency.
+        int lastC = _cfg.Channels[^1];
+        int featDim = lastC * curW;
+        Tensor seq = new(new TensorShape(1, curH, featDim), DType.F32);
+        float* xp = (float*)x.DataPointer;
+        float* sp = (float*)seq.DataPointer;
+        for (int h = 0; h < curH; h++)
+            for (int c = 0; c < lastC; c++)
+                for (int f = 0; f < curW; f++)
+                    sp[(long)h * featDim + c * curW + f] = xp[((long)c * curH + h) * curW + f];
         x.Dispose();
 
-        // Project to gin → [1, 1, gin] → [1, gin, 1].
-        Tensor proj = WhisperOps.ProjectLinear(backend, pooled, _projW!, _projB, 1, 1, curC, _cfg.Gin);
-        pooled.Dispose();
+        Tensor last = _gru.LastHidden(backend, seq, 1, curH);     // [1, gruHidden]
+        seq.Dispose();
+        Tensor last3 = last.Reshape(new TensorShape(1, 1, _cfg.GruHidden));
+        Tensor proj = WhisperOps.ProjectLinear(backend, last3, _projW!, _projB, 1, 1, _cfg.GruHidden, _cfg.Gin);
+        last.Dispose();
         return proj.Reshape(new TensorShape(1, _cfg.Gin, 1));
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] top = [_attnW, _attnB, _projW, _projB];
+        Tensor?[] top = [_lnW, _lnB, _projW, _projB];
         foreach (Tensor? x in top) if (x is not null) yield return x;
-        foreach (ConvLayer c in _convs) foreach (Tensor t in c.All()) yield return t;
+        for (int i = 0; i < _convW.Length; i++)
+        {
+            if (_convW[i] is not null) yield return _convW[i]!;
+            if (_convB[i] is not null) yield return _convB[i]!;
+        }
+        foreach (Tensor t in _gru.EnumerateWeights()) yield return t;
     }
 
-    private static Tensor? TryGet(IReadOnlyDictionary<string, Tensor> w, string key)
-        => w.TryGetValue(key, out Tensor? t) ? WhisperOps.EnsureF32(t) : null;
+    private int Down(int dim) => (dim + 2 * _cfg.Padding - _cfg.KernelSize) / _cfg.Stride + 1;
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         GC.SuppressFinalize(this);
-    }
-
-    private sealed class ConvLayer
-    {
-        public Tensor? ConvW, ConvB, NormW, NormB;
-        public int OutC;
-        public IEnumerable<Tensor> All()
-        {
-            Tensor?[] a = [ConvW, ConvB, NormW, NormB];
-            foreach (Tensor? t in a) if (t is not null) yield return t;
-        }
     }
 }

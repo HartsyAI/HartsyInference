@@ -28,17 +28,22 @@ public sealed class AudioTextFrontendTests
     public void DiaBytes_Null_Throws()
         => Assert.Throws<ArgumentNullException>(() => AudioTextFrontend.DiaBytes(null!));
 
-    // The Llama-3 vocab/merges are a conditional ~5 MB embedded asset absent from a default checkout
-    // (EmbeddedTokenizerResources.HasLlama3Assets). These run once llama3_vocab.json + llama3_merges.txt
-    // are dropped into HartsyInference.Tokenizers/Resources/.
-    private const string LlamaAssetSkip =
-        "Pending Llama-3 tokenizer asset (llama3_vocab.json + llama3_merges.txt) in HartsyInference.Tokenizers/Resources.";
+    // The Orpheus / CSM front-ends tokenize via the embedded Llama-3 tokenizer.json (HfTokenizerJson →
+    // GgufTokenizer). The asset is a conditional ~17 MB embedded resource; if a checkout omits it these
+    // skip cleanly (return) rather than fail.
+    private static GgufTokenizer? TryLlama()
+    {
+        if (!EmbeddedTokenizerResources.HasLlama3TokenizerJson) return null;
+        using Stream json = EmbeddedTokenizerResources.OpenLlama3TokenizerJson();
+        return HfTokenizerJson.LoadByteLevelBpe(json);
+    }
 
-    [Fact(Skip = LlamaAssetSkip)]
+    [Fact]
     public void OrpheusText_PrependsVoicePrefix_MatchesLlamaBpe()
     {
-        using LlamaTokenizer llama = new(maxLength: 8192);
-        int[] expected = [.. llama.EncodeRaw("tara: hello world")];
+        GgufTokenizer? llama = TryLlama();
+        if (llama is null) return;
+        int[] expected = llama.EncodeOrdinary("tara: hello world");
 
         int[] ids = AudioTextFrontend.OrpheusText("hello world", "tara");
 
@@ -46,11 +51,12 @@ public sealed class AudioTextFrontendTests
         Assert.Equal(expected, ids);
     }
 
-    [Fact(Skip = LlamaAssetSkip)]
+    [Fact]
     public void OrpheusText_EmptyVoice_TokenizesBareText()
     {
-        using LlamaTokenizer llama = new(maxLength: 8192);
-        int[] bare = [.. llama.EncodeRaw("hello world")];
+        GgufTokenizer? llama = TryLlama();
+        if (llama is null) return;
+        int[] bare = llama.EncodeOrdinary("hello world");
 
         int[] withVoice = AudioTextFrontend.OrpheusText("hello world", "tara");
         int[] noVoice = AudioTextFrontend.OrpheusText("hello world", "");
@@ -59,11 +65,12 @@ public sealed class AudioTextFrontendTests
         Assert.NotEqual(bare, withVoice); // the voice prefix really changes the id stream
     }
 
-    [Fact(Skip = LlamaAssetSkip)]
+    [Fact]
     public void CsmText_IsPlainLlamaBpe()
     {
-        using LlamaTokenizer llama = new(maxLength: 8192);
-        int[] expected = [.. llama.EncodeRaw("the quick brown fox")];
+        GgufTokenizer? llama = TryLlama();
+        if (llama is null) return;
+        int[] expected = llama.EncodeOrdinary("the quick brown fox");
 
         int[] ids = AudioTextFrontend.CsmText("the quick brown fox");
 
