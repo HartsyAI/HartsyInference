@@ -130,7 +130,7 @@ public sealed class Qwen3VlVisionTowerTests
 
     // ── synthetic weights ──
 
-    private static Dictionary<string, Tensor> BuildVisionWeights(Qwen3VlVisionConfig c)
+    internal static Dictionary<string, Tensor> BuildVisionWeights(Qwen3VlVisionConfig c)
     {
         Dictionary<string, Tensor> w = new();
         int H = c.HiddenSize, inter = c.IntermediateSize, merged = H * c.SpatialMergeSize * c.SpatialMergeSize;
@@ -167,7 +167,7 @@ public sealed class Qwen3VlVisionTowerTests
         return w;
     }
 
-    private static Dictionary<string, Tensor> BuildLmWeights(LlamaStyleEncoderConfig c)
+    internal static Dictionary<string, Tensor> BuildLmWeights(LlamaStyleEncoderConfig c)
     {
         Dictionary<string, Tensor> w = new();
         int H = c.HiddenSize, qd = c.NumQueryHeads * c.HeadDim, kvd = c.NumKvHeads * c.HeadDim, inter = c.IntermediateSize;

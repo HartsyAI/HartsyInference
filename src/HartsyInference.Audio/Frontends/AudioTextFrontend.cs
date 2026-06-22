@@ -3,26 +3,12 @@ using HartsyInference.Tokenizers;
 
 namespace HartsyInference.Audio.Frontends;
 
-/// <summary>
-/// Text front-ends for the token-based audio pipelines. The Audio pipelines are deliberately
-/// "codec-downstream" — their inference methods take int token ids, not raw text, so a caller that
-/// only has user text cannot drive them directly. This composes the existing engine tokenizers
-/// (<see cref="LlamaTokenizer"/>, …) into the exact id stream each pipeline expects.
-///
-/// <para>Each method returns the RAW text ids only — the pipeline still adds its own control/special
-/// tokens internally (e.g. <c>OrpheusPipeline.Synthesize</c> wraps the ids with
-/// <c>StartOfHuman … EndOfText, EndOfHuman</c>). Keep this split so the special-token contract stays
-/// owned by the pipeline/config, not duplicated here.</para>
-///
-/// <para>Tokenizers are reused across calls (embedded vocab/merges, no per-call state). They are
-/// process-lifetime singletons; their <c>Dispose</c> is a no-op over the underlying ML tokenizer.</para>
-/// </summary>
+/// <summary>Text front-ends for the token-based audio pipelines (which take token ids, not raw text):
+/// composes the engine tokenizers into each pipeline's id stream. Returns the RAW text ids only — the
+/// pipeline adds its own control/special tokens.</summary>
 public static class AudioTextFrontend
 {
-    /// <summary>Llama-3 BPE, shared by Orpheus / CSM / FishSpeech. 8192 max covers long passages.
-    /// The Llama-3 vocab/merges are a conditional embedded asset (~5 MB) that may be absent from a checkout
-    /// (see <see cref="EmbeddedTokenizerResources.HasLlama3Assets"/>); we surface a clear "drop the assets"
-    /// message via <see cref="RequireLlama"/> rather than letting the ctor throw a cryptic resource error.</summary>
+    /// <summary>Llama-3 BPE, shared by Orpheus / CSM / FishSpeech. Asset may be absent — see <see cref="RequireLlama"/>.</summary>
     private static readonly Lazy<LlamaTokenizer> _llama = new(() => new LlamaTokenizer(maxLength: 8192));
 
     private static LlamaTokenizer RequireLlama()

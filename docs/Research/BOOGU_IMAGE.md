@@ -332,10 +332,24 @@ Implementation notes (the parity-sensitive parts):
   ids `[24,20,20]`, inject deepstack features, and tap the final hidden state. This requires an
   embeds-input + M-RoPE + deepstack path on `LlamaStyleEncoder` (a shared, parity-validated addition).
 
-This is a sizeable standalone subsystem; it is specced here in full and is the remaining work for the
-multimodal **edit** conditioning. The DiT-side edit path (reference image via the VAE latent stream:
-`ref_image_patch_embedder` → `ref_image_refiner` → concat) is already implemented and tested, so edits
-driven by self-descriptive instructions work today; the vision tower adds image-aware conditioning.
+**Built (2026-06-21), structural — numeric parity pending.** `Qwen3VlVisionConfig`,
+`Qwen3VlImageProcessor` (smart-resize → CLIP-normalize → merge-block patch flatten + `grid_thw`),
+`Qwen3VlVisionEncoder` (patch-embed, bilinear-interpolated learned pos-embed, 2D split-half RoPE, 27
+full-attention blocks, final + deepstack post-shuffle mergers) and `Qwen3VlMultimodalEncoder`
+(`get_rope_index` 3D positions → interleaved M-RoPE table, vision-token splice into the LM embeds,
+deepstack injection). The LM path reuses `LlamaStyleEncoder`'s decoder blocks via the additive
+`EncodeEmbedsMrope` / `LookupEmbeddings` methods (the interleaved M-RoPE collapses to one split-half
+per-token table, so each `LlamaBlock` applies it unchanged). `BooguImageCheckpointConverter.LoadVisionTower`
+buckets the `visual.*` weights. This is a reusable subsystem (also unblocks Lance / OmniGen2 edit).
+
+> While validating the multimodal path a latent **engine-wide CPU SDPA bug** was found and fixed: a
+> rank-2 `[Sq, Skv]` causal mask (the standard `LlamaStyleEncoder` shape) was mis-indexed for attention
+> heads > 0 (the kernel read `mask.Shape[0]/[1]` as batch/head and computed an out-of-bounds offset
+> `h·Sq·Skv`), yielding a flaky NaN. `AttentionKernels.ScaledDotProductAttention` now branches on mask
+> rank (2 → broadcast over B and H; 3 → per-head; 4 → per-batch/head). Rank-4 behavior is unchanged.
+
+The DiT-side edit path (reference image via the VAE latent stream: `ref_image_patch_embedder` →
+`ref_image_refiner` → concat) is independent and also implemented + tested.
 
 ## 8. Pipeline surface
 

@@ -52,14 +52,31 @@ public static class AttentionKernels
                     float* vHead = pV + b * kvBatchStride + h * kvHeadStride;
                     float* oHead = pOut + b * qBatchStride + h * qHeadStride;
 
-                    // Determine mask offset for this (b, h) pair
-                    // Mask shape can be [B, H, Sq, Skv] or [1, 1, Sq, Skv] or [1, H, Sq, Skv] etc.
+                    // Determine mask offset for this (b, h) pair. The mask rank decides how to broadcast:
+                    //   rank 2  [Sq, Skv]            → shared across all B and H (the causal-mask case)
+                    //   rank 3  [H|1, Sq, Skv]       → per-head, shared across B
+                    //   rank 4  [B|1, H|1, Sq, Skv]  → per-batch / per-head
+                    // The previous code assumed rank 4 unconditionally and, for a rank-2 mask, mis-read
+                    // Shape[0]/Shape[1] as B/H — producing an out-of-bounds offset (h·Sq·Skv) for every head > 0.
                     long maskBhOffset = 0;
                     if (pMask != null && mask != null)
                     {
-                        long maskB = mask.Shape[0] > 1 ? b : 0;
-                        long maskH = mask.Shape[1] > 1 ? h : 0;
-                        maskBhOffset = maskB * mask.Shape[1] * Sq * Skv + maskH * Sq * Skv;
+                        long maskRank = mask.Shape.Rank;
+                        if (maskRank == 2)
+                        {
+                            maskBhOffset = 0;
+                        }
+                        else if (maskRank == 3)
+                        {
+                            long maskH = mask.Shape[0] > 1 ? h : 0;
+                            maskBhOffset = maskH * Sq * Skv;
+                        }
+                        else
+                        {
+                            long maskB = mask.Shape[0] > 1 ? b : 0;
+                            long maskH = mask.Shape[1] > 1 ? h : 0;
+                            maskBhOffset = maskB * mask.Shape[1] * Sq * Skv + maskH * Sq * Skv;
+                        }
                     }
 
                     for (long qi = 0; qi < Sq; qi++)
