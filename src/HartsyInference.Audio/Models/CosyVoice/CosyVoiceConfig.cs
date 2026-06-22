@@ -78,6 +78,18 @@ public sealed record CosyVoiceFlowConfig
     /// the flow's input projection). 512 in CV2's flow.pt.</summary>
     public int InputSize { get; init; } = 512;
 
+    /// <summary>UpsampleConformerEncoder model width (output_size). 512 in CV2's flow.pt.</summary>
+    public int EncoderOutputSize { get; init; } = 512;
+
+    /// <summary>Self-attention heads inside the flow's UpsampleConformerEncoder. 8.</summary>
+    public int EncoderNumHeads { get; init; } = 8;
+
+    /// <summary>Conformer blocks before the 2× time upsample. 6 in CV2.</summary>
+    public int EncoderNumPreBlocks { get; init; } = 6;
+
+    /// <summary>Conformer blocks after the 2× time upsample. 4 in CV2.</summary>
+    public int EncoderNumPostBlocks { get; init; } = 4;
+
     /// <summary>UNet1D estimator channel widths per level. [256, 256] in CV2.</summary>
     public int[] UnetChannels { get; init; } = [256, 256];
 

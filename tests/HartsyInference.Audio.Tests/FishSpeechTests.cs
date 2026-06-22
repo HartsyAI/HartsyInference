@@ -1,6 +1,5 @@
 using HartsyInference.Audio.Models.FishSpeech;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
-using HartsyInference.Audio.Models.Vits;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
@@ -57,18 +56,23 @@ public sealed unsafe class FishSpeechTests
     [Fact]
     public void FireflyDecoder_SyntheticForward_CodesToFiniteAudio()
     {
-        int nb = 4, cbs = 6, inDim = 8;
+        // Tiny firefly: FSQ levels [2,2] (vocab 4), 3 residual quantizers, quantizer upsample [2], SiLU gen
+        // upsample [2,2]. Channel bookkeeping is checkpoint-driven, so the weights below define the shapes.
+        int nq = 3;
+        int[] levels = [2, 2];
         using CpuBackend backend = new();
-        VitsConfig genCfg = new()
+        FireflyConfig cfg = new()
         {
-            InterChannels = inDim, UpsampleInitialChannel = 16, UpsampleRates = [2, 2], UpsampleKernelSizes = [4, 4],
-            ResBlock = "1", ResBlockKernelSizes = [3], ResBlockDilations = [[1]], SampleRate = 44_100,
+            FsqLevels = levels, QuantizerUpsampleFactors = [2],
+            UpsampleInitialChannel = 16, UpsampleRates = [2, 2], UpsampleKernelSizes = [4, 4],
+            ResBlockKernelSizes = [3], ResBlockDilations = [[1]], SampleRate = 44_100,
         };
-        FireflyDecoder dec = new(nb, cbs, inputDim: inDim, genConfig: genCfg);
-        dec.LoadWeights(FireflyWeights(nb, cbs, inDim));
+        FireflyDecoder dec = new(nq, FishSpeechCodecTests.FsqVocab(levels), config: cfg);
+        dec.LoadWeights(FishSpeechCodecTests.FireflyWeights(levels, qUp: [2], genInit: 16, genRates: [2, 2], genKernels: [4, 4]));
         int t = 3;
-        int[,] codes = new int[nb, t];
-        for (int i = 0; i < nb; i++) for (int j = 0; j < t; j++) codes[i, j] = (i + j) % cbs;
+        int cbVocab = FishSpeechCodecTests.FsqVocab(levels);
+        int[,] codes = new int[nq, t];
+        for (int i = 0; i < nq; i++) for (int j = 0; j < t; j++) codes[i, j] = (i + j) % cbVocab;
         float[] audio = dec.Decode(backend, codes, t);
         Assert.True(audio.Length > 0);
         foreach (float s in audio) Assert.True(float.IsFinite(s));
@@ -117,23 +121,4 @@ public sealed unsafe class FishSpeechTests
         }
     }
 
-    private static Dictionary<string, Tensor> FireflyWeights(int nb, int cbs, int inDim)
-    {
-        // Tiny HiFi-GAN: upsample [2,2], resblock "1" single kernel.
-        Dictionary<string, Tensor> w = new()
-        {
-            ["head.conv_pre.weight"] = F3(16, inDim, 7), ["head.conv_pre.bias"] = F1(16),
-            ["head.conv_post.weight"] = F3(1, 4, 7), ["head.conv_post.bias"] = F1(1),
-        };
-        for (int i = 0; i < nb; i++) w[$"quantizer.codebook_emb.{i}.weight"] = F2(cbs, inDim);
-        int[] rates = [2, 2]; int[] kernels = [4, 4]; int init = 16;
-        for (int i = 0; i < rates.Length; i++)
-        {
-            int inCh = init >> i, outCh = inCh >> 1;
-            w[$"head.ups.{i}.weight"] = F3(inCh, outCh, kernels[i]); w[$"head.ups.{i}.bias"] = F1(outCh);
-            w[$"head.resblocks.{i}.convs1.0.weight"] = F3(outCh, outCh, 3); w[$"head.resblocks.{i}.convs1.0.bias"] = F1(outCh);
-            w[$"head.resblocks.{i}.convs2.0.weight"] = F3(outCh, outCh, 3); w[$"head.resblocks.{i}.convs2.0.bias"] = F1(outCh);
-        }
-        return w;
-    }
 }

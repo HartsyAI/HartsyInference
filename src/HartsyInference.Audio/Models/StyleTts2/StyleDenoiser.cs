@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Audio.Models.StyleTts2;
 
 /// <summary>The KDiffusion (EDM) denoiser <c>D(x, σ)</c> for StyleTTS 2's style sampler. Applies the
-/// Karras preconditioning around the <c>StyleTransformer1d</c> network and classifier-free guidance:
+/// Karras preconditioning around the <see cref="StyleTransformer1d"/> network and classifier-free guidance:
 ///
 /// <code>
 ///   c_in   = 1/√(σ² + σ_data²)
@@ -17,8 +17,9 @@ namespace HartsyInference.Audio.Models.StyleTts2;
 /// </code>
 ///
 /// <para>The preconditioning + CFG combine are exact (unit-tested via a stub network); the
-/// <c>StyleTransformer1d</c> network forward is a checkpoint-gated scaffold (3-layer 1-D transformer over
-/// the length-1 256-d latent with timestep embedding + cross-attention to the PLBERT features).</para></summary>
+/// <see cref="StyleTransformer1d"/> network forward is the real 3-layer 1-D transformer over the length-1
+/// 256-d latent with timestep embedding + cross-attention to the PLBERT features. When no transformer
+/// weights are loaded the network returns a zero velocity, so the sampler still runs deterministically.</para></summary>
 public sealed unsafe class StyleDenoiser : IStyleDenoiser
 {
     private readonly StyleTts2Config _cfg;
@@ -26,10 +27,8 @@ public sealed unsafe class StyleDenoiser : IStyleDenoiser
     private Tensor? _textEmb;          // [1, seq, 768] PLBERT features (conditioning)
     private Tensor? _refStyle;         // [1, 256] reference style (optional)
 
-    // StyleTransformer1d scaffold weights.
-    private Tensor? _timeW1, _timeB1, _timeW2, _timeB2;
-    private Tensor? _inProjW, _inProjB, _outProjW, _outProjB;
-    private Tensor? _crossKvW, _crossKvB;     // text(768) → 2·dim for a single cross-attn read
+    // The diffusion network. Null until LoadWeights / SetNetwork; Network() then zero-falls-back.
+    private StyleTransformer1d? _net;
 
     public StyleDenoiser(StyleTts2Config cfg)
     {
@@ -37,15 +36,61 @@ public sealed unsafe class StyleDenoiser : IStyleDenoiser
         _dim = cfg.StyleDim;
     }
 
+    /// <summary>Builds the <see cref="StyleTransformer1d"/> from a converted <c>diffusion.*</c> state dict
+    /// (archinetai <c>audio-diffusion-pytorch</c> naming). Missing keys leave the corresponding sub-block as a
+    /// no-op so partial/pre-reconciliation checkpoints still load. Weights are pre-cast to F32.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "diffusion")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        _timeW1 = TryGet(w, $"{p}to_time.0.weight"); _timeB1 = TryGet(w, $"{p}to_time.0.bias");
-        _timeW2 = TryGet(w, $"{p}to_time.2.weight"); _timeB2 = TryGet(w, $"{p}to_time.2.bias");
-        _inProjW = TryGet(w, $"{p}to_in.weight"); _inProjB = TryGet(w, $"{p}to_in.bias");
-        _outProjW = TryGet(w, $"{p}to_out.weight"); _outProjB = TryGet(w, $"{p}to_out.bias");
-        _crossKvW = TryGet(w, $"{p}cross.to_kv.weight"); _crossKvB = TryGet(w, $"{p}cross.to_kv.bias");
+        string b = $"{p}unet.";
+
+        Tensor? timeW1 = TryGet(w, $"{p}to_time.0.weight"), timeB1 = TryGet(w, $"{p}to_time.0.bias");
+        Tensor? timeW2 = TryGet(w, $"{p}to_time.2.weight"), timeB2 = TryGet(w, $"{p}to_time.2.bias");
+        Tensor? inW = TryGet(w, $"{p}to_in.weight") ?? TryGet(w, $"{b}to_in.weight");
+        Tensor? inB = TryGet(w, $"{p}to_in.bias") ?? TryGet(w, $"{b}to_in.bias");
+        Tensor? outW = TryGet(w, $"{p}to_out.weight") ?? TryGet(w, $"{b}to_out.weight");
+        Tensor? outB = TryGet(w, $"{p}to_out.bias") ?? TryGet(w, $"{b}to_out.bias");
+
+        int numLayers = 3;
+        int numHeads = 8;
+        int headFeatures = 64;
+        int multiplier = 2;
+
+        StyleTransformerLayer[] layers = new StyleTransformerLayer[numLayers];
+        for (int i = 0; i < numLayers; i++)
+        {
+            string lp = $"{b}blocks.{i}.";
+            layers[i] = new StyleTransformerLayer
+            {
+                AdaLnW = TryGet(w, $"{lp}attention.norm.to_scale_shift.weight") ?? TryGet(w, $"{lp}norm1.to_scale_shift.weight"),
+                AdaLnB = TryGet(w, $"{lp}attention.norm.to_scale_shift.bias") ?? TryGet(w, $"{lp}norm1.to_scale_shift.bias"),
+                SelfNormW = TryGet(w, $"{lp}attention.norm.weight") ?? TryGet(w, $"{lp}norm1.weight"),
+                SelfNormB = TryGet(w, $"{lp}attention.norm.bias") ?? TryGet(w, $"{lp}norm1.bias"),
+                SelfQW = TryGet(w, $"{lp}attention.to_q.weight"), SelfQB = TryGet(w, $"{lp}attention.to_q.bias"),
+                SelfKW = TryGet(w, $"{lp}attention.to_k.weight"), SelfKB = TryGet(w, $"{lp}attention.to_k.bias"),
+                SelfVW = TryGet(w, $"{lp}attention.to_v.weight"), SelfVB = TryGet(w, $"{lp}attention.to_v.bias"),
+                SelfOW = TryGet(w, $"{lp}attention.to_out.weight"), SelfOB = TryGet(w, $"{lp}attention.to_out.bias"),
+                CrossNormW = TryGet(w, $"{lp}cross_attention.norm.weight") ?? TryGet(w, $"{lp}norm2.weight"),
+                CrossNormB = TryGet(w, $"{lp}cross_attention.norm.bias") ?? TryGet(w, $"{lp}norm2.bias"),
+                CrossQW = TryGet(w, $"{lp}cross_attention.to_q.weight"), CrossQB = TryGet(w, $"{lp}cross_attention.to_q.bias"),
+                CrossKW = TryGet(w, $"{lp}cross_attention.to_k.weight"), CrossKB = TryGet(w, $"{lp}cross_attention.to_k.bias"),
+                CrossVW = TryGet(w, $"{lp}cross_attention.to_v.weight"), CrossVB = TryGet(w, $"{lp}cross_attention.to_v.bias"),
+                CrossOW = TryGet(w, $"{lp}cross_attention.to_out.weight"), CrossOB = TryGet(w, $"{lp}cross_attention.to_out.bias"),
+                FfNormW = TryGet(w, $"{lp}feed_forward.norm.weight") ?? TryGet(w, $"{lp}norm3.weight"),
+                FfNormB = TryGet(w, $"{lp}feed_forward.norm.bias") ?? TryGet(w, $"{lp}norm3.bias"),
+                FfW1 = TryGet(w, $"{lp}feed_forward.block.0.weight"), FfB1 = TryGet(w, $"{lp}feed_forward.block.0.bias"),
+                FfW2 = TryGet(w, $"{lp}feed_forward.block.2.weight"), FfB2 = TryGet(w, $"{lp}feed_forward.block.2.bias"),
+            };
+        }
+
+        _net = new StyleTransformer1d(
+            _dim, numHeads, headFeatures, _dim, multiplier, layers,
+            timeW1, timeB1, timeW2, timeB2, inW, inB, outW, outB);
     }
+
+    /// <summary>Injects an already-constructed network (used by tests with synthetic weights, and by a
+    /// converter that builds the <see cref="StyleTransformer1d"/> itself).</summary>
+    public void SetNetwork(StyleTransformer1d net) => _net = net;
 
     private static Tensor? TryGet(IReadOnlyDictionary<string, Tensor> w, string key)
         => w.TryGetValue(key, out Tensor? t) ? WhisperOps.EnsureF32(t) : null;
@@ -55,6 +100,8 @@ public sealed unsafe class StyleDenoiser : IStyleDenoiser
     {
         _textEmb = textEmb;
         _refStyle = refStyle;
+        if (_net is not null)
+            _net.SetReferenceStyle(refStyle is not null ? refStyle.Reshape(new TensorShape(1, 1, _dim)) : null);
     }
 
     public Tensor Denoise(IBackend backend, Tensor x, float sigma)
@@ -101,88 +148,17 @@ public sealed unsafe class StyleDenoiser : IStyleDenoiser
         return outT;
     }
 
-    /// <summary>StyleTransformer1d network (scaffold): timestep embedding → input projection →
-    /// (when conditioned) a mean-pooled cross-attention read of the PLBERT text features → output
-    /// projection. The full 3-layer self/cross-attention stack is checkpoint-gated; this preserves the
-    /// I/O contract and the conditioning dependency so the EDM/CFG wrapper + sampler are exercisable.</summary>
+    /// <summary>One forward of the <see cref="StyleTransformer1d"/>. The conditional call passes the PLBERT
+    /// text features as cross-attention context; the unconditional (CFG) call passes null context (the
+    /// learned <c>FixedEmbedding</c> path collapses to the no-context branch here).</summary>
     private Tensor Network(IBackend backend, Tensor scaledX, float cNoise, bool conditioned)
     {
-        // If weights aren't present (pre-checkpoint), fall back to an identity-shaped zero velocity so
-        // the sampler still runs deterministically.
-        if (_inProjW is null)
+        if (_net is null)
             return new Tensor(scaledX.Shape, DType.F32);
-
-        Tensor x3 = scaledX.Reshape(new TensorShape(1, 1, _dim));
-        Tensor h = WhisperOps.ProjectLinear(backend, x3, _inProjW!, _inProjB, 1, 1, _dim, _dim);
-
-        // Add the timestep embedding.
-        Tensor tEmb = TimeEmbedding(backend, cNoise);
-        float* hp = (float*)h.DataPointer;
-        float* tp = (float*)tEmb.DataPointer;
-        for (int i = 0; i < _dim; i++) hp[i] += tp[i];
-        tEmb.Dispose();
-
-        // Conditioning: add a mean-pooled cross read of the text features (and reference style).
-        if (conditioned && _textEmb is not null && _crossKvW is not null)
-        {
-            float[] ctx = MeanPoolText(backend, _textEmb);
-            for (int i = 0; i < _dim; i++) hp[i] += ctx[i];
-        }
-
-        Tensor outT = WhisperOps.ProjectLinear(backend, h, _outProjW!, _outProjB, 1, 1, _dim, _dim);
-        h.Dispose();
-        return outT.Reshape(scaledX.Shape);
-    }
-
-    private Tensor TimeEmbedding(IBackend backend, float cNoise)
-    {
-        int half = _dim / 2;
-        Tensor sin = new(new TensorShape(1, 1, _dim), DType.F32);
-        float* sp = (float*)sin.DataPointer;
-        double logBase = Math.Log(10000.0) / Math.Max(1, half - 1);
-        for (int i = 0; i < half; i++)
-        {
-            double freq = Math.Exp(-logBase * i);
-            sp[i] = (float)Math.Sin(cNoise * freq);
-            sp[half + i] = (float)Math.Cos(cNoise * freq);
-        }
-        if (_timeW1 is null) return sin;
-        Tensor h1 = WhisperOps.ProjectLinear(backend, sin, _timeW1!, _timeB1, 1, 1, _dim, _dim);
-        sin.Dispose();
-        backend.Silu(h1, h1);
-        Tensor h2 = WhisperOps.ProjectLinear(backend, h1, _timeW2!, _timeB2, 1, 1, _dim, _dim);
-        h1.Dispose();
-        return h2;
-    }
-
-    private float[] MeanPoolText(IBackend backend, Tensor textEmb)
-    {
-        int seq = (int)textEmb.Shape[1];
-        int dim = (int)textEmb.Shape[2];
-        float[] pooled = new float[dim];
-        float* tp = (float*)textEmb.DataPointer;
-        for (int s = 0; s < seq; s++)
-            for (int d = 0; d < dim; d++)
-                pooled[d] += tp[(long)s * dim + d];
-        for (int d = 0; d < dim; d++) pooled[d] /= seq;
-
-        // Project text dim → style dim via the cross to_kv weight (use the first `dim` rows as a read).
-        Tensor pooledT = new(new TensorShape(1, 1, dim), DType.F32);
-        float* pp = (float*)pooledT.DataPointer;
-        for (int d = 0; d < dim; d++) pp[d] = pooled[d];
-        int kvOut = (int)_crossKvW!.Shape[0];
-        Tensor proj = WhisperOps.ProjectLinear(backend, pooledT, _crossKvW!, _crossKvB, 1, 1, dim, kvOut);
-        pooledT.Dispose();
-        float[] result = new float[_dim];
-        float* prp = (float*)proj.DataPointer;
-        for (int d = 0; d < _dim && d < kvOut; d++) result[d] = prp[d];
-        proj.Dispose();
-        return result;
+        Tensor? context = conditioned ? _textEmb : null;
+        return _net.Forward(backend, scaledX, cNoise, context);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
-    {
-        Tensor?[] all = [_timeW1, _timeB1, _timeW2, _timeB2, _inProjW, _inProjB, _outProjW, _outProjB, _crossKvW, _crossKvB];
-        foreach (Tensor? t in all) if (t is not null) yield return t;
-    }
+        => _net is not null ? _net.EnumerateWeights() : Array.Empty<Tensor>();
 }

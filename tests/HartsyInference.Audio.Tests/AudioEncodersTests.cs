@@ -1,0 +1,352 @@
+using HartsyInference.Audio.Models.Codecs.NeuCodec;
+using HartsyInference.Audio.Models.OpenVoice;
+using HartsyInference.Audio.Models.Rvc;
+using HartsyInference.Audio.Models.Zonos;
+using HartsyInference.Cpu;
+using HartsyInference.Core.Tensors;
+using Xunit;
+
+namespace HartsyInference.Audio.Tests;
+
+/// <summary>Synthetic-weight forward tests for the net-new neural encoders: Zonos speaker encoder + prefix
+/// conditioner, RVC RMVPE pitch extractor, OpenVoice tone-color extractor + linear spectrogram, and the
+/// NeuCodec FSQ encoder. Each test loads random weights into a tiny config and asserts finite output /
+/// valid token ranges. Mirrors the synthetic-weight pattern in <see cref="HubertTests"/>.</summary>
+public sealed unsafe class AudioEncodersTests
+{
+    private static uint _rng = 0x51A3u;
+    private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.2f; }
+    private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
+    private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
+    private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
+    private static Tensor F3(int a, int b, int c) => Fill(new Tensor(new TensorShape(a, b, c), DType.F32));
+    private static Tensor F4(int a, int b, int c, int d) => Fill(new Tensor(new TensorShape(a, b, c, d), DType.F32));
+
+    private static void AssertFinite(Tensor t)
+    {
+        float* p = (float*)t.DataPointer;
+        for (long i = 0; i < t.ElementCount; i++) Assert.True(float.IsFinite(p[i]));
+    }
+
+    [Fact]
+    public void ZonosSpeakerEncoder_SyntheticForward_Produces128dEmbedding()
+    {
+        ZonosSpeakerConfig c = new()
+        {
+            BaseWidth = 8,
+            StageWidths = [8, 16],
+            StageBlocks = [1, 1],
+            PooledFreq = 40,        // 80-mel, strides [1,2] → 40
+            NormGroups = 4,
+            BottleneckDim = 32,
+            EmbedDim = 128,
+        };
+        using CpuBackend backend = new();
+        using ZonosSpeakerEncoder enc = new(c);
+        enc.LoadWeights(ZonosSpeakerWeights(c));
+
+        int t = 48;
+        using Tensor mel = F3(1, c.NumMels, t);
+        using Tensor emb = enc.Embed(backend, mel, t);
+        Assert.Equal(1, (int)emb.Shape[0]);
+        Assert.Equal(128, (int)emb.Shape[1]);
+        AssertFinite(emb);
+    }
+
+    [Fact]
+    public void ZonosConditioning_SyntheticForward_BuildsPrefix()
+    {
+        using CpuBackend backend = new();
+        using ZonosConditioning cond = new();
+        cond.LoadWeights(ZonosCondWeights(phonemeVocab: 64, numLanguages: 8));
+
+        int[] phonemes = [4, 5, 6, 7, 8];
+        using Tensor speaker = F2(1, ZonosConditioning.SpeakerDim);
+        float[] emotion = new float[ZonosConditioning.EmotionDim];
+        for (int i = 0; i < emotion.Length; i++) emotion[i] = 0.1f * i;
+
+        using Tensor prefix = cond.BuildPrefix(backend, phonemes, speaker, emotion,
+            fmax: 22050f, pitchStd: 45f, speakingRate: 15f, languageId: 3);
+
+        Assert.Equal(ZonosConditioning.DModel, (int)prefix.Shape[1]);
+        Assert.Equal(phonemes.Length + 6, (int)prefix.Shape[2]);
+        AssertFinite(prefix);
+    }
+
+    [Fact]
+    public void RvcRmvpe_SyntheticForward_ProducesPerFrameHz()
+    {
+        RvcRmvpeConfig c = new()
+        {
+            MelBins = 32,
+            NFft = 512,
+            WinLength = 512,
+            HopLength = 160,
+            StemChannels = 4,
+            EncoderChannels = [8, 16],
+            IntermediateBlocks = 1,
+            NormGroups = 2,
+            GruHidden = 16,
+            NumBins = 360,
+        };
+        using CpuBackend backend = new();
+        using RvcRmvpe rmvpe = new(c);
+        rmvpe.LoadWeights(RmvpeWeights(c));
+
+        float[] pcm = new float[16_000];
+        for (int i = 0; i < pcm.Length; i++) pcm[i] = 0.3f * MathF.Sin(2f * MathF.PI * 220f * i / 16_000f);
+
+        float[] f0 = rmvpe.ExtractF0(backend, pcm);
+        Assert.True(f0.Length > 0);
+        foreach (float v in f0)
+        {
+            Assert.True(float.IsFinite(v));
+            Assert.True(v >= 0f && v < 4000f);
+        }
+    }
+
+    [Fact]
+    public void OpenVoiceSpeakerEncoder_SyntheticForward_ProducesG()
+    {
+        OpenVoiceSpeakerConfig c = new()
+        {
+            NumMels = 32,
+            Channels = [16, 32],
+            KernelSize = 3,
+            Stride = 2,
+            NormGroups = 4,
+            Gin = 256,
+        };
+        using CpuBackend backend = new();
+        using OpenVoiceSpeakerEncoder enc = new(c);
+        enc.LoadWeights(OpenVoiceWeights(c));
+
+        int t = 60;
+        using Tensor mel = F3(1, c.NumMels, t);
+        using Tensor g = enc.Extract(backend, mel, t);
+        Assert.Equal(1, (int)g.Shape[0]);
+        Assert.Equal(256, (int)g.Shape[1]);
+        Assert.Equal(1, (int)g.Shape[2]);
+        AssertFinite(g);
+    }
+
+    [Fact]
+    public void LinearSpectrogram_ProducesCorrectShape()
+    {
+        float[] pcm = new float[8_000];
+        for (int i = 0; i < pcm.Length; i++) pcm[i] = 0.2f * MathF.Sin(2f * MathF.PI * 200f * i / 22_050f);
+        int nFft = 512, hop = 128;
+        using Tensor spec = LinearSpectrogram.Extract(pcm, nFft, hop);
+        Assert.Equal(1, (int)spec.Shape[0]);
+        Assert.Equal(nFft / 2 + 1, (int)spec.Shape[1]);
+        Assert.Equal(pcm.Length / hop + 1, (int)spec.Shape[2]);
+        AssertFinite(spec);
+    }
+
+    [Fact]
+    public void NeuCodecEncoder_SyntheticForward_ProducesValidFsqTokens()
+    {
+        NeuCodecEncoderConfig c = new()
+        {
+            Ngf = 4,
+            DownRatios = [2, 2, 4],         // 16× downsample
+            ResidualUnitsPerStage = 1,
+            ResidualDilations = [1],
+            ResidualKernel = 7,
+            StemKernel = 7,
+            FinalKernel = 3,
+            FcInDim = 8,
+            FsqLevels = [4, 4, 4, 4, 4, 4, 4, 4],
+            FsqDim = 8,
+        };
+        using CpuBackend backend = new();
+        using NeuCodecEncoder enc = new(c);
+        enc.LoadWeights(NeuCodecEncoderWeights(c));
+
+        float[] pcm = new float[4_096];
+        for (int i = 0; i < pcm.Length; i++) pcm[i] = 0.25f * MathF.Sin(2f * MathF.PI * 150f * i / 16_000f);
+
+        int[] tokens = enc.Encode(backend, pcm);
+        Assert.True(tokens.Length > 0);
+        int vocab = 1;
+        foreach (int lvl in c.FsqLevels) vocab *= lvl;
+        foreach (int tok in tokens) Assert.True(tok >= 0 && tok < vocab);
+    }
+
+    // ── synthetic weight dictionaries ──
+
+    private static Dictionary<string, Tensor> ZonosSpeakerWeights(ZonosSpeakerConfig c)
+    {
+        string p = "speaker_encoder";
+        Dictionary<string, Tensor> w = new()
+        {
+            [$"{p}.stem.conv.weight"] = F4(c.BaseWidth, 1, 3, 3),
+            [$"{p}.stem.norm.weight"] = F1(c.BaseWidth),
+            [$"{p}.stem.norm.bias"] = F1(c.BaseWidth),
+        };
+        int inC = c.BaseWidth;
+        for (int s = 0; s < c.StageBlocks.Count; s++)
+        {
+            int outC = c.StageWidths[s];
+            int stride = s == 0 ? 1 : 2;
+            for (int b = 0; b < c.StageBlocks[s]; b++)
+            {
+                string bp = $"{p}.stages.{s}.blocks.{b}";
+                int blockStride = b == 0 ? stride : 1;
+                int blockIn = b == 0 ? inC : outC;
+                w[$"{bp}.conv1.weight"] = F4(outC, blockIn, 3, 3);
+                w[$"{bp}.norm1.weight"] = F1(outC);
+                w[$"{bp}.norm1.bias"] = F1(outC);
+                w[$"{bp}.conv2.weight"] = F4(outC, outC, 3, 3);
+                w[$"{bp}.norm2.weight"] = F1(outC);
+                w[$"{bp}.norm2.bias"] = F1(outC);
+                if (blockStride != 1 || blockIn != outC)
+                    w[$"{bp}.downsample.weight"] = F4(outC, blockIn, 1, 1);
+            }
+            inC = outC;
+        }
+        int poolIn = c.StageWidths[^1] * c.PooledFreq;
+        w[$"{p}.asp.attention.weight"] = F2(poolIn, poolIn);
+        w[$"{p}.asp.attention.bias"] = F1(poolIn);
+        w[$"{p}.asp.score.weight"] = F2(poolIn, poolIn);
+        w[$"{p}.asp.score.bias"] = F1(poolIn);
+        w[$"{p}.bottleneck.weight"] = F2(c.BottleneckDim, 2 * poolIn);
+        w[$"{p}.bottleneck.bias"] = F1(c.BottleneckDim);
+        w[$"{p}.bottleneck_norm.weight"] = F1(c.BottleneckDim);
+        w[$"{p}.bottleneck_norm.bias"] = F1(c.BottleneckDim);
+        w[$"{p}.lda.weight"] = F2(c.EmbedDim, c.BottleneckDim);
+        w[$"{p}.lda.bias"] = F1(c.EmbedDim);
+        return w;
+    }
+
+    private static Dictionary<string, Tensor> ZonosCondWeights(int phonemeVocab, int numLanguages)
+    {
+        int d = ZonosConditioning.DModel;
+        string p = "prefix_conditioner";
+        Dictionary<string, Tensor> w = new()
+        {
+            [$"{p}.conditioners.0.phoneme_embedder.weight"] = F2(phonemeVocab, d),
+            [$"{p}.conditioners.1.project.weight"] = F2(d, ZonosConditioning.SpeakerDim),
+            [$"{p}.conditioners.1.project.bias"] = F1(d),
+            [$"{p}.conditioners.2.weight"] = F2(d / 2, ZonosConditioning.EmotionDim),
+            [$"{p}.conditioners.3.weight"] = F2(d / 2, 1),
+            [$"{p}.conditioners.4.weight"] = F2(d / 2, 1),
+            [$"{p}.conditioners.5.weight"] = F2(d / 2, 1),
+            [$"{p}.conditioners.6.int_embedder.weight"] = F2(numLanguages, d),
+            [$"{p}.project.weight"] = F2(d, d),
+            [$"{p}.project.bias"] = F1(d),
+            [$"{p}.norm.weight"] = F1(d),
+            [$"{p}.norm.bias"] = F1(d),
+        };
+        return w;
+    }
+
+    private static Dictionary<string, Tensor> RmvpeWeights(RvcRmvpeConfig c)
+    {
+        Dictionary<string, Tensor> w = new()
+        {
+            ["stem.conv.weight"] = F4(c.StemChannels, 1, 3, 3),
+            ["stem.norm.weight"] = F1(c.StemChannels),
+            ["stem.norm.bias"] = F1(c.StemChannels),
+        };
+        int inC = c.StemChannels;
+        for (int i = 0; i < c.EncoderChannels.Count; i++)
+        {
+            int outC = c.EncoderChannels[i];
+            w[$"encoder.{i}.conv.weight"] = F4(outC, inC, 3, 3);
+            w[$"encoder.{i}.norm.weight"] = F1(outC);
+            w[$"encoder.{i}.norm.bias"] = F1(outC);
+            inC = outC;
+        }
+        for (int i = 0; i < c.IntermediateBlocks; i++)
+        {
+            string bp = $"intermediate.{i}";
+            w[$"{bp}.conv1.weight"] = F4(inC, inC, 3, 3);
+            w[$"{bp}.norm1.weight"] = F1(inC);
+            w[$"{bp}.norm1.bias"] = F1(inC);
+            w[$"{bp}.conv2.weight"] = F4(inC, inC, 3, 3);
+            w[$"{bp}.norm2.weight"] = F1(inC);
+            w[$"{bp}.norm2.bias"] = F1(inC);
+        }
+        for (int i = 0; i < c.EncoderChannels.Count; i++)
+        {
+            int outC = i == c.EncoderChannels.Count - 1 ? c.StemChannels : c.EncoderChannels[c.EncoderChannels.Count - 2 - i];
+            // ConvTranspose1d weight is [C_in, C_out/groups, K]; here we use Conv2d transpose [C_in, C_out, kH, kW].
+            w[$"decoder.{i}.up.weight"] = F4(inC, outC, 2, 2);
+            w[$"decoder.{i}.norm.weight"] = F1(outC);
+            w[$"decoder.{i}.norm.bias"] = F1(outC);
+            inC = outC;
+        }
+        int gruIn = c.StemChannels * c.MelBins;
+        AddBiLstm(w, "gru", gruIn, c.GruHidden);
+        w["fc.weight"] = F2(c.NumBins, 2 * c.GruHidden);
+        w["fc.bias"] = F1(c.NumBins);
+        return w;
+    }
+
+    private static Dictionary<string, Tensor> OpenVoiceWeights(OpenVoiceSpeakerConfig c)
+    {
+        string p = "ref_enc";
+        Dictionary<string, Tensor> w = new();
+        int inC = c.NumMels;
+        for (int i = 0; i < c.Channels.Count; i++)
+        {
+            int outC = c.Channels[i];
+            w[$"{p}.convs.{i}.conv.weight"] = F3(outC, inC, c.KernelSize);
+            w[$"{p}.convs.{i}.norm.weight"] = F1(outC);
+            w[$"{p}.convs.{i}.norm.bias"] = F1(outC);
+            inC = outC;
+        }
+        w[$"{p}.attn.weight"] = F2(1, inC);
+        w[$"{p}.attn.bias"] = F1(1);
+        w[$"{p}.proj.weight"] = F2(c.Gin, inC);
+        w[$"{p}.proj.bias"] = F1(c.Gin);
+        return w;
+    }
+
+    private static Dictionary<string, Tensor> NeuCodecEncoderWeights(NeuCodecEncoderConfig c)
+    {
+        string p = "encoder";
+        Dictionary<string, Tensor> w = new()
+        {
+            [$"{p}.stem.weight"] = F3(c.Ngf, 1, c.StemKernel),
+        };
+        int dim = c.Ngf;
+        for (int i = 0; i < c.DownRatios.Count; i++)
+        {
+            int outDim = dim * 2;
+            string sp = $"{p}.stages.{i}";
+            for (int j = 0; j < c.ResidualUnitsPerStage; j++)
+            {
+                string up = $"{sp}.res.{j}";
+                w[$"{up}.snake1.alpha"] = F1(dim);
+                w[$"{up}.snake1.beta"] = F1(dim);
+                w[$"{up}.conv1.weight"] = F3(dim, dim, c.ResidualKernel);
+                w[$"{up}.snake2.alpha"] = F1(dim);
+                w[$"{up}.snake2.beta"] = F1(dim);
+                w[$"{up}.conv2.weight"] = F3(dim, dim, 1);
+            }
+            w[$"{sp}.down_snake.alpha"] = F1(dim);
+            w[$"{sp}.down_snake.beta"] = F1(dim);
+            w[$"{sp}.down.weight"] = F3(outDim, dim, 2 * c.DownRatios[i]);
+            dim = outDim;
+        }
+        w[$"{p}.final_snake.alpha"] = F1(dim);
+        w[$"{p}.final_snake.beta"] = F1(dim);
+        w[$"{p}.final_conv.weight"] = F3(c.FcInDim, dim, c.FinalKernel);
+        w["fc_prior.weight"] = F2(c.FsqDim, c.FcInDim);
+        return w;
+    }
+
+    private static void AddBiLstm(Dictionary<string, Tensor> w, string prefix, int inDim, int hidden)
+    {
+        w[$"{prefix}.weight_ih_l0"] = F2(4 * hidden, inDim);
+        w[$"{prefix}.weight_hh_l0"] = F2(4 * hidden, hidden);
+        w[$"{prefix}.bias_ih_l0"] = F1(4 * hidden);
+        w[$"{prefix}.bias_hh_l0"] = F1(4 * hidden);
+        w[$"{prefix}.weight_ih_l0_reverse"] = F2(4 * hidden, inDim);
+        w[$"{prefix}.weight_hh_l0_reverse"] = F2(4 * hidden, hidden);
+        w[$"{prefix}.bias_ih_l0_reverse"] = F1(4 * hidden);
+        w[$"{prefix}.bias_hh_l0_reverse"] = F1(4 * hidden);
+    }
+}

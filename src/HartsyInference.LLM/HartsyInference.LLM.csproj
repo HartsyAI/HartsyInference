@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.LLM</PackageId>
+    <Description>Native LLM text generation for HartsyInference — a config-driven generic decoder transformer (Qwen2/Qwen3 and beyond), device-resident KV cache, sampler chain, chat templates, and a text-generation pipeline. Pure C#, programs against IBackend.</Description>
+    <RootNamespace>HartsyInference.LLM</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -13,6 +13,7 @@ public sealed unsafe class VitsSynthesizer : IDisposable
     private readonly VitsConfig _cfg;
     private readonly VitsTextEncoder _enc;
     private readonly VitsDurationPredictor _dp;
+    private readonly VitsStochasticDurationPredictor? _sdp;
     private readonly VitsFlow _flow;
     private readonly VitsHiFiGan _dec;
     private int _disposed;
@@ -22,6 +23,7 @@ public sealed unsafe class VitsSynthesizer : IDisposable
         _cfg = cfg;
         _enc = new VitsTextEncoder(cfg);
         _dp = new VitsDurationPredictor(cfg);
+        _sdp = cfg.UseSdp ? new VitsStochasticDurationPredictor(cfg) : null;
         _flow = new VitsFlow(cfg);
         _dec = new VitsHiFiGan(cfg);
     }
@@ -31,7 +33,8 @@ public sealed unsafe class VitsSynthesizer : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _enc.LoadWeights(w);
-        _dp.LoadWeights(w);
+        if (_sdp is not null) _sdp.LoadWeights(w);
+        else _dp.LoadWeights(w);
         _flow.LoadWeights(w);
         _dec.LoadWeights(w);
     }
@@ -45,7 +48,9 @@ public sealed unsafe class VitsSynthesizer : IDisposable
         float ls = lengthScale ?? _cfg.LengthScale, ns = noiseScale ?? _cfg.NoiseScale;
 
         (Tensor hidden, Tensor mP, Tensor logsP) = _enc.Forward(backend, tokens);
-        float[] logw = _dp.Forward(backend, hidden, tx);
+        float[] logw = _sdp is not null
+            ? _sdp.Forward(backend, hidden, tx, _cfg.NoiseScaleW, seed)
+            : _dp.Forward(backend, hidden, tx);
         hidden.Dispose();
 
         int[] durations = VitsLengthRegulator.Durations(logw, ls);
@@ -77,7 +82,8 @@ public sealed unsafe class VitsSynthesizer : IDisposable
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor t in _enc.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _dp.EnumerateWeights()) yield return t;
+        if (_sdp is not null) { foreach (Tensor t in _sdp.EnumerateWeights()) yield return t; }
+        else { foreach (Tensor t in _dp.EnumerateWeights()) yield return t; }
         foreach (Tensor t in _flow.EnumerateWeights()) yield return t;
         foreach (Tensor t in _dec.EnumerateWeights()) yield return t;
     }

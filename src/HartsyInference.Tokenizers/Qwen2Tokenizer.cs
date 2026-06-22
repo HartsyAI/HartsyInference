@@ -61,6 +61,16 @@ public sealed class Qwen2Tokenizer : IDisposable
         return _tokenizer.EncodeToIds(text);
     }
 
+    /// <summary>Decodes token ids back to text. Control tokens (id ≥ <see cref="EndOfTextId"/>) are dropped so
+    /// generated assistant text renders without ChatML markers.</summary>
+    public string Decode(IReadOnlyList<int> ids)
+    {
+        ThrowIfDisposed();
+        List<int> filtered = new(ids.Count);
+        foreach (int id in ids) if (id < EndOfTextId) filtered.Add(id);
+        return _tokenizer.Decode(filtered) ?? string.Empty;
+    }
+
     /// <summary>Encodes a prompt with the Qwen2.5 ChatML template, returning the raw (unpadded, variable-length) token ids. Format: <c>&lt;|im_start|&gt;system\n{system}&lt;|im_end|&gt;\n&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;</c>, plus a trailing <c>\n&lt;|im_start|&gt;assistant\n</c> when <paramref name="addGenerationPrompt"/> is true (Lance uses true; HunyuanImage 2.1's encode template uses false).</summary>
     /// <param name="systemPrompt">System message; null uses <see cref="DefaultSystemPrompt"/>. Pass an empty string to omit the system turn entirely.</param>
     public int[] EncodeChat(string prompt, string? systemPrompt = null, bool addGenerationPrompt = true)

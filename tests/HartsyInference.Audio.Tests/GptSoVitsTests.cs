@@ -53,16 +53,18 @@ public sealed unsafe class GptSoVitsTests
     [Fact]
     public void SoVits_SyntheticForward_SemanticTokensToFiniteAudio()
     {
-        int gin = 4, ssl = 6;
+        int gin = 4, ssl = 6, mrteHidden = 8;
         VitsConfig core = new()
         {
-            InterChannels = 8, HiddenChannels = 8, GinChannels = gin, FlowLayers = 2, FlowFlows = 2, FlowKernelSize = 3,
+            InterChannels = 8, HiddenChannels = 8, FilterChannels = 16, NumHeads = 2, WindowSize = 2,
+            GinChannels = gin, FlowLayers = 2, FlowFlows = 2, FlowKernelSize = 3,
             ResBlock = "2", ResBlockKernelSizes = [3], ResBlockDilations = [[1, 2]],
             UpsampleRates = [4, 4], UpsampleInitialChannel = 16, UpsampleKernelSizes = [8, 8], SampleRate = 32_000,
         };
         using CpuBackend backend = new();
-        using SoVitsSynthesizer sv = new(core, sslDim: ssl);
-        sv.LoadWeights(SoVitsWeights(core, gin, ssl, codebookSize: 5));
+        using SoVitsSynthesizer sv = new(core, sslDim: ssl, sslLayers: 2, textLayers: 2, enc2Layers: 2,
+            mrteHidden: mrteHidden, mrteHeads: 2);
+        sv.LoadWeights(SoVitsWeights(core, gin, ssl, mrteHidden, codebookSize: 5));
 
         int[] semantic = [2, 0, 4];
         using Tensor ge = F3(1, gin, 1);
@@ -71,30 +73,37 @@ public sealed unsafe class GptSoVitsTests
         foreach (float s in audio) Assert.True(float.IsFinite(s));
     }
 
-    private static Dictionary<string, Tensor> SoVitsWeights(VitsConfig c, int gin, int ssl, int codebookSize)
+    private static Dictionary<string, Tensor> SoVitsWeights(VitsConfig c, int gin, int ssl, int mrteHidden, int codebookSize)
     {
-        int h = c.HiddenChannels, inter = c.InterChannels, half = inter / 2;
+        int h = c.HiddenChannels, inter = c.InterChannels, half = inter / 2, f = c.FilterChannels, kc = h / c.NumHeads, win = c.WindowSize;
         Dictionary<string, Tensor> w = new()
         {
             ["quantizer.vq.layers.0._codebook.embed"] = F2(codebookSize, ssl),
-            ["enc_p.ssl_proj.weight"] = F3(inter, ssl, 1), ["enc_p.ssl_proj.bias"] = F1(inter),
-            ["enc_p.encoder_ssl_proj.weight"] = F3(inter, inter, 1), ["enc_p.encoder_ssl_proj.bias"] = F1(inter),
-            ["enc_p.proj.weight"] = F3(2 * inter, inter, 1), ["enc_p.proj.bias"] = F1(2 * inter),
+            ["enc_p.ssl_proj.weight"] = F3(h, ssl, 1), ["enc_p.ssl_proj.bias"] = F1(h),
+            ["enc_p.text_embedding.weight"] = F2(codebookSize, h),
+            ["enc_p.proj.weight"] = F3(2 * inter, h, 1), ["enc_p.proj.bias"] = F1(2 * inter),
+            ["enc_p.mrte.c_pre.weight"] = F3(h, h, 1), ["enc_p.mrte.c_pre.bias"] = F1(h),
+            ["enc_p.mrte.c_post.weight"] = F3(h, mrteHidden, 1), ["enc_p.mrte.c_post.bias"] = F1(h),
+            ["enc_p.mrte.cross_attention.conv_q.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.cross_attention.conv_q.bias"] = F1(mrteHidden),
+            ["enc_p.mrte.cross_attention.conv_k.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.cross_attention.conv_k.bias"] = F1(mrteHidden),
+            ["enc_p.mrte.cross_attention.conv_v.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.cross_attention.conv_v.bias"] = F1(mrteHidden),
+            ["enc_p.mrte.cross_attention.conv_o.weight"] = F3(mrteHidden, mrteHidden, 1), ["enc_p.mrte.cross_attention.conv_o.bias"] = F1(mrteHidden),
+            ["enc_p.mrte.text_pre.weight"] = F3(h, gin, 1), ["enc_p.mrte.text_pre.bias"] = F1(h),
             ["dec.conv_pre.weight"] = F3(c.UpsampleInitialChannel, inter, 7), ["dec.conv_pre.bias"] = F1(c.UpsampleInitialChannel),
             ["dec.cond.weight"] = F3(c.UpsampleInitialChannel, gin, 1), ["dec.cond.bias"] = F1(c.UpsampleInitialChannel),
             ["dec.conv_post.weight"] = F3(1, c.UpsampleInitialChannel >> c.UpsampleRates.Count, 7), ["dec.conv_post.bias"] = F1(1),
         };
         for (int i = 0; i < c.FlowFlows; i++)
         {
-            string f = $"flow.flows.{2 * i}";
-            w[$"{f}.pre.weight"] = F3(h, half, 1); w[$"{f}.pre.bias"] = F1(h);
-            w[$"{f}.post.weight"] = F3(half, h, 1); w[$"{f}.post.bias"] = F1(half);
-            w[$"{f}.enc.cond_layer.weight"] = F3(2 * h * c.FlowLayers, gin, 1); w[$"{f}.enc.cond_layer.bias"] = F1(2 * h * c.FlowLayers);
+            string fp = $"flow.flows.{2 * i}";
+            w[$"{fp}.pre.weight"] = F3(h, half, 1); w[$"{fp}.pre.bias"] = F1(h);
+            w[$"{fp}.post.weight"] = F3(half, h, 1); w[$"{fp}.post.bias"] = F1(half);
+            w[$"{fp}.enc.cond_layer.weight"] = F3(2 * h * c.FlowLayers, gin, 1); w[$"{fp}.enc.cond_layer.bias"] = F1(2 * h * c.FlowLayers);
             for (int j = 0; j < c.FlowLayers; j++)
             {
-                w[$"{f}.enc.in_layers.{j}.weight"] = F3(2 * h, h, c.FlowKernelSize); w[$"{f}.enc.in_layers.{j}.bias"] = F1(2 * h);
+                w[$"{fp}.enc.in_layers.{j}.weight"] = F3(2 * h, h, c.FlowKernelSize); w[$"{fp}.enc.in_layers.{j}.bias"] = F1(2 * h);
                 int rs = j < c.FlowLayers - 1 ? 2 * h : h;
-                w[$"{f}.enc.res_skip_layers.{j}.weight"] = F3(rs, h, 1); w[$"{f}.enc.res_skip_layers.{j}.bias"] = F1(rs);
+                w[$"{fp}.enc.res_skip_layers.{j}.weight"] = F3(rs, h, 1); w[$"{fp}.enc.res_skip_layers.{j}.bias"] = F1(rs);
             }
         }
         for (int i = 0; i < c.UpsampleRates.Count; i++)
@@ -104,7 +113,27 @@ public sealed unsafe class GptSoVitsTests
             for (int dn = 0; dn < c.ResBlockDilations[0].Count; dn++)
             { w[$"dec.resblocks.{i}.convs1.{dn}.weight"] = F3(outCh, outCh, 3); w[$"dec.resblocks.{i}.convs1.{dn}.bias"] = F1(outCh); }
         }
+        AddEncoder(w, "enc_p.encoder_ssl", 2, h, f, kc, win);
+        AddEncoder(w, "enc_p.encoder_text", 2, h, f, kc, win);
+        AddEncoder(w, "enc_p.encoder2", 2, h, f, kc, win);
         return w;
+    }
+
+    private static void AddEncoder(Dictionary<string, Tensor> w, string p, int layers, int h, int f, int kc, int win)
+    {
+        for (int i = 0; i < layers; i++)
+        {
+            w[$"{p}.attn_layers.{i}.conv_q.weight"] = F3(h, h, 1); w[$"{p}.attn_layers.{i}.conv_q.bias"] = F1(h);
+            w[$"{p}.attn_layers.{i}.conv_k.weight"] = F3(h, h, 1); w[$"{p}.attn_layers.{i}.conv_k.bias"] = F1(h);
+            w[$"{p}.attn_layers.{i}.conv_v.weight"] = F3(h, h, 1); w[$"{p}.attn_layers.{i}.conv_v.bias"] = F1(h);
+            w[$"{p}.attn_layers.{i}.conv_o.weight"] = F3(h, h, 1); w[$"{p}.attn_layers.{i}.conv_o.bias"] = F1(h);
+            w[$"{p}.attn_layers.{i}.emb_rel_k"] = F3(1, 2 * win + 1, kc);
+            w[$"{p}.attn_layers.{i}.emb_rel_v"] = F3(1, 2 * win + 1, kc);
+            w[$"{p}.norm_layers_1.{i}.gamma"] = F1(h); w[$"{p}.norm_layers_1.{i}.beta"] = F1(h);
+            w[$"{p}.norm_layers_2.{i}.gamma"] = F1(h); w[$"{p}.norm_layers_2.{i}.beta"] = F1(h);
+            w[$"{p}.ffn_layers.{i}.conv_1.weight"] = F3(f, h, 3); w[$"{p}.ffn_layers.{i}.conv_1.bias"] = F1(f);
+            w[$"{p}.ffn_layers.{i}.conv_2.weight"] = F3(h, f, 3); w[$"{p}.ffn_layers.{i}.conv_2.bias"] = F1(h);
+        }
     }
 
     private static Dictionary<string, Tensor> Weights(Text2SemanticConfig c)

@@ -20,23 +20,38 @@
 - [ ] `MOE_INFERENCE.md` — router + expert dispatch *(deferred to M5)*
 - [x] Reuse: DOTLLM_ARCHITECTURE, FLASH_ATTENTION, GGUF_FORMAT, T5_ARCHITECTURE, QWEN3_TTS_ARCHITECTURE
 
-## M0 — Decode performance spike (GATING BLOCKER)
+## M0 — Decode performance spike (GATING BLOCKER) — ✅ GO (2026-06-22)
 
-- [ ] Prototype GPU-resident, fused-per-layer decode on existing `Qwen3Model` (CUDA, 3060)
-- [ ] Measure tokens/sec vs per-op auto-transfer baseline; confirm viability
-- [ ] Decide overlap with diffusion GPU-residency work (Ideogram4 pattern)
-- [ ] **Go/no-go gate for M1+**
+- [x] GPU-resident decode built: `Qwen2ResidentDecoder` (100% `IBackend` ops) + `DeviceKvCache`
+      (Concat-grown) + new `IBackend.RepeatKvHeads` (`lm_f32.ptx`) + `ApplyRopeSingle` (GQA RoPE)
+- [x] Reused the Ideogram4 residency machinery (activation cache + stream pools + `GetD2hSyncCount`)
+- [x] CPU parity tests green (`Qwen2ResidentDecoderTests`): resident == `Qwen2Model` within 2e-3, argmax agrees
+- [x] Harness `samples/HartsyInference.TextGen.Cli` (3-way matrix, D2H instrumentation)
+- [x] **Measured on RTX 3060 (Qwen2.5-0.5B-Instruct, greedy):**
+      - resident: **72.6 tok/s decode, 77 ms prefill, 0 transformer D2H syncs**, coherent text, stops at EOS
+      - cuda-ref (non-resident `Qwen2Model`): 0.59 tok/s, 2170 ms prefill, 2208 D2H syncs
+      - cpu-ref: 0.64 tok/s
+      - **~123× faster decode than the non-resident path; all three emit identical token ids (correct)**
+      - VibeVoice-1.5B run also confirmed residency (34.9 tok/s, 0 syncs, identical ids vs ref)
+- [x] **GO** — residency works, decode is compute-bound, far past the 10× gate. Proceed to M1.
+- Note: residency hinges on no `DataPointer` reads of activations + preloaded weights (the existing
+  `Qwen2Model` re-transposes/re-allocates weights per call via `WhisperOps.ProjectLinear`, defeating the
+  weight cache — that is the gap M1 closes by moving the generic transformer onto this resident pattern).
 
-## M1 — Generic transformer + F16/F32 decode
+## M1 — Generic transformer + F32 decode (new `HartsyInference.LLM` package) — ✅ DONE (2026-06-22)
 
-- [ ] `TransformerConfig` + presets (Qwen2/Qwen3 first)
-- [ ] `GenericTransformer` + `DecoderLayer` + `Attention` + `Mlp` + `RotaryEmbedding` + `TransformerForwardState`
-- [ ] Port/refactor `Audio/Models/LanguageModels/{Qwen2,Qwen3}` into the core (Audio consumes presets)
-- [ ] Promote `StreamingKvCache` → `KvCache` (TensorRef hot path, `Rollback`)
-- [ ] `SamplerChain` (promote `NucleusSampler`; add penalties + greedy argmax)
-- [ ] `IChatTemplate` registry (extract from tokenizer classes)
-- [ ] `TextGenerationPipeline` + `LanguagePipelineBase` + request/result types
-- [ ] Validate text-out vs HF on a small model (greedy, fixed seed)
+- [x] New package `HartsyInference.LLM` (deps Core/ModelHandler/Tokenizers) + `HartsyInference.LLM.Tests`, both in slnx
+- [x] `TransformerConfig` (record) + presets `Qwen2_5_0_5B`/`Qwen2_5_1_5B`/`Qwen3_0_6B` — matrix axes: AttentionBias, QkNorm, decoupled HeadDim, TieWordEmbeddings
+- [x] `GenericTransformer` (resident forward + inner `Layer`): generalizes the M0 decoder with per-head q/k RMSNorm + decoupled head_dim + optional QKV bias; 100% `IBackend` ops
+- [x] `KvCache` (device-resident, `Concat`-grown) in the LLM package (M0 `DeviceKvCache` moved here)
+- [x] `SamplerChain` + `ISamplerStep` (Temperature/RepetitionPenalty/TopK/TopP/MinP/Greedy) + `SamplingOptions` (clean-room)
+- [x] `IChatTemplate` + `ChatMlTemplate` + `ChatTemplateRegistry` (ChatML; emits token ids; golden-matches `Qwen2Tokenizer.EncodeChat`)
+- [x] `TextGenerationPipeline` + `GenerationRequest`/`GenerationResult`; `Qwen2Tokenizer.Decode` added
+- [x] Deleted M0 spike artifacts (`Qwen2ResidentDecoder`, Audio `DeviceKvCache`, `Qwen2ResidentDecoderTests`); repointed `TextGen.Cli` to the LLM pipeline
+- [x] Tests green (9/9 on net8.0 + net10.0): Qwen2 parity vs `Qwen2Model` (~2e-3), Qwen3 structural, sampler, template golden, GQA layout. Full solution builds clean.
+- [x] **Validated on RTX 3060 (greedy):** Qwen2.5-0.5B-Instruct — coherent, identical token ids to M0; **Qwen3-0.6B** — coherent text, proving the q/k-norm + decoupled-head-dim + **split-half RoPE** path. Both GPU-resident (only the per-token logits read crosses H2D/D2H).
+- Note: repo `Qwen3Model` is the **TTS** backbone (interleaved RoPE), so it is NOT a parity oracle for HF Qwen3 **text** (split-half) — Qwen3 text correctness is proved by the e2e run, not CPU parity.
+- Deferred to later milestones: `Rblback`/fixed-buffer KV (M2), migrating audio models onto the core + encoder unification (M4), `LanguagePipelineBase`. Cosmetic: `Qwen2Tokenizer.Decode` leaks GPT-2 byte-level space marker `Ġ` (tokens correct; byte-level decode is a Tokenizers-package fix).
 
 ## M2 — Quantized inference (CUDA first)
 

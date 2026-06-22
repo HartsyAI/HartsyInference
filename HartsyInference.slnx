@@ -13,6 +13,7 @@
     <Project Path="src/HartsyInference.Server/HartsyInference.Server.csproj" />
     <Project Path="src/HartsyInference.Vulkan/HartsyInference.Vulkan.csproj" />
     <Project Path="src/HartsyInference.Cli/HartsyInference.Cli.csproj" />
+    <Project Path="src/HartsyInference.LLM/HartsyInference.LLM.csproj" />
   </Folder>
 
   <Folder Name="/tests/">
@@ -25,11 +26,13 @@
     <Project Path="tests/HartsyInference.Audio.Tests/HartsyInference.Audio.Tests.csproj" />
     <Project Path="tests/HartsyInference.Vision.Tests/HartsyInference.Vision.Tests.csproj" />
     <Project Path="tests/HartsyInference.Vulkan.Tests/HartsyInference.Vulkan.Tests.csproj" />
+    <Project Path="tests/HartsyInference.LLM.Tests/HartsyInference.LLM.Tests.csproj" />
   </Folder>
 
   <Folder Name="/samples/">
     <Project Path="samples/HartsyInference.Whisper.Cli/HartsyInference.Whisper.Cli.csproj" />
     <Project Path="samples/HartsyInference.ThreeD.Cli/HartsyInference.ThreeD.Cli.csproj" />
+    <Project Path="samples/HartsyInference.TextGen.Cli/HartsyInference.TextGen.Cli.csproj" />
   </Folder>
 
   <Folder Name="/benchmarks/">
