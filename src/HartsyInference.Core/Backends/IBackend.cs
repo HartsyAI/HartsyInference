@@ -201,6 +201,43 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>In-place rotary position embedding on a single tensor <paramref name="x"/> of shape
+    /// <c>[B, L, numHeads, headDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>
+    /// broadcast over heads. Same rotate-half math as <see cref="ApplyRope"/> but for one tensor — required for
+    /// grouped-query attention where Q and K have different head counts (the paired overload would mis-stride K).</summary>
+    unsafe void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("ApplyRopeSingle default fallback only supports F32.");
+        int batch = (int)x.Shape[0];
+        int seqLen = (int)x.Shape[1];
+        int numHeads = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        int half = headDim / 2;
+        float* xPtr = (float*)x.DataPointer;
+        float* cosPtr = (float*)cos.DataPointer;
+        float* sinPtr = (float*)sin.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int s = 0; s < seqLen; s++)
+            {
+                long freqBase = ((long)b * seqLen + s) * headDim;
+                for (int h = 0; h < numHeads; h++)
+                {
+                    long vecOff = (((long)b * seqLen + s) * numHeads + h) * headDim;
+                    float* vec = xPtr + vecOff;
+                    float* c = cosPtr + freqBase;
+                    float* si = sinPtr + freqBase;
+                    for (int i = 0; i < half; i++)
+                    {
+                        float lower = vec[i];
+                        float upper = vec[i + half];
+                        vec[i] = lower * c[i] - upper * si[i];
+                        vec[i + half] = upper * c[i + half] + lower * si[i + half];
+                    }
+                }
+            }
+    }
+
     /// <summary>Copies a contiguous last-dim slice: <c>out[row, d] = in[row, offset + d]</c> for
     /// <c>d in [0, outDim)</c>, where <c>outDim</c> is the output's last dim and the input's last dim
     /// is the row stride. Splits a fused tensor (e.g. QKV <c>[B,L,3H]</c>) into a contiguous chunk.</summary>
@@ -382,6 +419,33 @@ public interface IBackend : IDisposable
 
     /// <summary>4D permute swapping dims 1 and 2: [B, S, H, D] → [B, H, S, D].</summary>
     void Permute0213(Tensor output, Tensor input, int s, int h, int d);
+
+    /// <summary>Grouped-query attention K/V head repeat. Expands <paramref name="input"/> <c>[B, Hkv, L, D]</c>
+    /// to <paramref name="output"/> <c>[B, Hkv*groupSize, L, D]</c> using the block pattern (output head
+    /// <c>h*groupSize + g</c> = input head <c>h</c>), matching HF <c>repeat_kv</c>. Keeps the tensor
+    /// GPU-resident on backends that override this; the default fallback is a host copy.</summary>
+    unsafe void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("RepeatKvHeads default fallback only supports F32.");
+        int batch = (int)input.Shape[0];
+        int seqLen = (int)input.Shape[2];
+        int headDim = (int)input.Shape[3];
+        long perHead = (long)seqLen * headDim;
+        float* ip = (float*)input.DataPointer;
+        float* op = (float*)output.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int h = 0; h < kvHeads; h++)
+            {
+                long srcOff = ((long)b * kvHeads + h) * perHead;
+                for (int g = 0; g < groupSize; g++)
+                {
+                    int qHead = h * groupSize + g;
+                    long dstOff = ((long)b * (kvHeads * groupSize) + qHead) * perHead;
+                    Buffer.MemoryCopy(ip + srcOff, op + dstOff, perHead * 4, perHead * 4);
+                }
+            }
+    }
 
     /// <summary>GEGLU activation: splits input in half along last dim, applies GELU gate. Output has half the elements of input.</summary>
     void GeGlu(Tensor output, Tensor input);

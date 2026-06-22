@@ -39,6 +39,10 @@ public sealed class CudaKernels : IDisposable
     // ── DiT glue Modules ─────────────────────────────────────────────────
     private readonly CudaModule _ditF32Module;
 
+    // ── Language-model (decoder LLM) glue Module + handles ───────────────
+    private readonly CudaModule _lmF32Module;
+    private readonly nint _lmRepeatKvF32;
+
     // ── Elementwise F32 function handles ─────────────────────────────────
     private readonly nint _addF32;
     private readonly nint _mulF32;
@@ -284,6 +288,10 @@ public sealed class CudaKernels : IDisposable
         _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
 
+        // ── Language-model glue (F32) ────────────────────────────────────
+        _lmF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "lm_f32.ptx"));
+        _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
+
         // ── GGUF Dequant ─────────────────────────────────────────────────
         _dequantQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
         _dequantQ8_0ToF16 = _dequantQ8_0Module.GetFunction("dequant_q8_0_to_f16");
@@ -471,6 +479,28 @@ public sealed class CudaKernels : IDisposable
         args[1] = &resArg;
         args[2] = &valArg;
         args[3] = &gateArg;
+        args[4] = &seqArg;
+        args[5] = &dimArg;
+        args[6] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    private unsafe void LaunchRepeatKvImpl(nint func, ulong output, ulong input,
+        int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint kvArg = (uint)kvHeads, groupArg = (uint)group, seqArg = (uint)seqLen, dimArg = (uint)headDim;
+        ulong totalArg = (ulong)total;
+
+        void** args = stackalloc void*[7];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &kvArg;
+        args[3] = &groupArg;
         args[4] = &seqArg;
         args[5] = &dimArg;
         args[6] = &totalArg;
@@ -956,6 +986,10 @@ public sealed class CudaKernels : IDisposable
     public void LaunchAffineBroadcastLastDim(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
         => LaunchAffineBroadcastImpl(_ditAffineBroadcastF32, output, input, scale, shift, seqLen, dim, total, stream);
 
+    /// <summary>Launches GQA K/V head repeat (block pattern): [B,Hkv,L,D] → [B,Hkv*group,L,D].</summary>
+    public void LaunchRepeatKv(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
+        => LaunchRepeatKvImpl(_lmRepeatKvF32, output, input, kvHeads, group, seqLen, headDim, total, stream);
+
     /// <summary>Launches gated residual over the last dim: out[b,s,d] = residual[b,s,d] + gate[b,d]*value[b,s,d].</summary>
     public void LaunchGatedResidualLastDim(ulong output, ulong residual, ulong value, ulong gate, int seqLen, int dim, long total, nint stream)
         => LaunchGatedResidualImpl(_ditGatedResidualF32, output, residual, value, gate, seqLen, dim, total, stream);
@@ -1235,6 +1269,7 @@ public sealed class CudaKernels : IDisposable
         _groupnormSiluF16Module?.Dispose();
         _castModule?.Dispose();
         _ditF32Module?.Dispose();
+        _lmF32Module?.Dispose();
         _castF8Module?.Dispose();
         _castBf16Module?.Dispose();
         _dequantQ8_0Module?.Dispose();

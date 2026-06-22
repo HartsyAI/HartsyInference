@@ -1019,6 +1019,39 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>In-place rotary embedding on a single GPU-resident tensor <c>[B, L, numHeads, headDim]</c>.
+    /// Used by grouped-query attention where Q and K differ in head count (the paired <see cref="ApplyRope"/>
+    /// would mis-stride K). cos/sin are <c>[B, L, headDim]</c>.</summary>
+    public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA ApplyRopeSingle supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int numHeads = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        long totalVecs = x.ElementCount / headDim;
+
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchRope(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+
+            // In-place: clear stale callbacks before re-caching (pitfall #17).
+            x._gpuSyncCallback = null;
+            x._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCos);
+            GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
     public void SliceLastDim(Tensor output, Tensor input, int offset)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32)
@@ -2176,6 +2209,36 @@ public sealed class CudaBackend : IBackend
                 _kernels!.LaunchPermute0213F16(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
             else
                 _kernels!.LaunchPermute0213(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>GQA K/V head repeat (block pattern): [B, Hkv, L, D] → [B, Hkv*groupSize, L, D]. GPU-resident
+    /// (device-to-device gather), so the decode loop never leaves the device for the grouped-query expand.</summary>
+    public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        int seqLen = (int)input.Shape[2];
+        int headDim = (int)input.Shape[3];
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchRepeatKv(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
