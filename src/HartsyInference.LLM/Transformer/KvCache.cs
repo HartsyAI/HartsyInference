@@ -16,7 +16,7 @@ namespace HartsyInference.LLM.Transformer;
 /// <para>Usage: read <see cref="CurrentLength"/> for the position offset before the layer loop,
 /// <see cref="Append"/> each layer's new K/V during the loop, then <see cref="AdvanceLength"/> once after all
 /// layers.</para></summary>
-public sealed class KvCache : IDisposable
+public sealed class KvCache : IKvCache, IDisposable
 {
     private readonly Tensor?[] _k;
     private readonly Tensor?[] _v;
@@ -57,7 +57,7 @@ public sealed class KvCache : IDisposable
     /// <paramref name="newV"/> are <c>[B, num_kv_heads, tNew, head_dim]</c>. The cache takes a fresh resident
     /// copy (concat), so the caller still owns and may dispose the inputs. Does not change
     /// <see cref="CurrentLength"/> — call <see cref="AdvanceLength"/> after all layers.</summary>
-    public void Append(IBackend backend, int layer, Tensor newK, Tensor newV)
+    public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)
     {
         ThrowIfDisposed();
         _k[layer] = Grow(backend, _k[layer], newK);
@@ -81,14 +81,14 @@ public sealed class KvCache : IDisposable
     }
 
     /// <summary>The layer's resident K prefix <c>[B, num_kv_heads, len, head_dim]</c>.</summary>
-    public Tensor GetK(int layer)
+    public Tensor KeyPrefix(int layer)
     {
         ThrowIfDisposed();
         return _k[layer] ?? throw new InvalidOperationException($"Layer {layer} K not populated.");
     }
 
     /// <summary>The layer's resident V prefix <c>[B, num_kv_heads, len, head_dim]</c>.</summary>
-    public Tensor GetV(int layer)
+    public Tensor ValuePrefix(int layer)
     {
         ThrowIfDisposed();
         return _v[layer] ?? throw new InvalidOperationException($"Layer {layer} V not populated.");

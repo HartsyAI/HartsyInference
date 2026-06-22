@@ -1,5 +1,17 @@
 namespace HartsyInference.LLM.Transformer;
 
+/// <summary>RoPE pairing convention. <see cref="SplitHalf"/> (Llama/Qwen2/HF-Qwen3-text rotate_half: pairs
+/// dim <c>i</c> with <c>i+half</c>) vs <see cref="Interleaved"/> (GPT-J: pairs adjacent dims <c>2i, 2i+1</c>,
+/// used by the Qwen3-TTS audio backbone and Moonshine). Not interchangeable.</summary>
+public enum RopeStyle
+{
+    /// <summary>Llama / Qwen2 / HF Qwen3-text rotate_half (dim i paired with i+half).</summary>
+    SplitHalf,
+
+    /// <summary>GPT-J interleaved (adjacent dims 2i, 2i+1).</summary>
+    Interleaved,
+}
+
 /// <summary>Architecture description for the config-driven <see cref="GenericTransformer"/> — one record that
 /// covers the dense decoder-LLM family (Qwen2, Qwen3, and Llama-lineage models) so a new model is a preset
 /// plus a checkpoint key mapping, not a new transformer class.
@@ -51,6 +63,10 @@ public sealed record TransformerConfig
 
     /// <summary>Whether <c>lm_head</c> shares the embedding table (no separate <c>lm_head.weight</c>).</summary>
     public bool TieWordEmbeddings { get; init; } = true;
+
+    /// <summary>RoPE pairing convention. Default <see cref="RopeStyle.SplitHalf"/> (Qwen2 / Llama / HF Qwen3
+    /// text). The Qwen3-TTS audio backbone uses <see cref="RopeStyle.Interleaved"/>.</summary>
+    public RopeStyle Rope { get; init; } = RopeStyle.SplitHalf;
 
     /// <summary>Total Q projection output dim — <see cref="NumHeads"/> × <see cref="HeadDim"/>.</summary>
     public int QDim => NumHeads * HeadDim;

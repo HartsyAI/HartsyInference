@@ -1,4 +1,6 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Streaming;
 
@@ -22,10 +24,13 @@ namespace HartsyInference.Audio.Streaming;
 /// pipelines don't need this — they consume the LM cache through the dotLLM dependency
 /// directly. This cache is for in-house transformer paths that bypass dotLLM (e.g. the
 /// non-LM decoders inside the audio models themselves).</para></summary>
-public sealed class StreamingKvCache : IDisposable
+public sealed class StreamingKvCache : IKvCache, IDisposable
 {
     private readonly Tensor[] _k;
     private readonly Tensor[] _v;
+    // Per-layer populated-prefix tensors for the IKvCache contract (cache-owned, refreshed on AppendStep).
+    private readonly Tensor?[] _prefixK;
+    private readonly Tensor?[] _prefixV;
     private int _currentLength;
     private int _disposed;
 
@@ -58,6 +63,8 @@ public sealed class StreamingKvCache : IDisposable
 
         _k = new Tensor[numLayers];
         _v = new Tensor[numLayers];
+        _prefixK = new Tensor?[numLayers];
+        _prefixV = new Tensor?[numLayers];
         TensorShape shape = new(batch, numKvHeads, maxSequenceLength, headDim);
         for (int i = 0; i < numLayers; i++)
         {
@@ -113,6 +120,49 @@ public sealed class StreamingKvCache : IDisposable
         WriteAtOffset(_v[layerIndex], newV, _currentLength, tNew);
     }
 
+    /// <summary><see cref="IKvCache"/> append: writes the new K/V into the pre-allocated buffer (host memcpy)
+    /// and refreshes the layer's cache-owned populated prefix used by <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/>.
+    /// <paramref name="backend"/> is unused (host cache). Does not advance the position counter.</summary>
+    public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)
+    {
+        Append(layer, newK, newV);
+        int len = _currentLength + (int)newK.Shape[2];
+        _prefixK[layer]?.Dispose();
+        _prefixV[layer]?.Dispose();
+        _prefixK[layer] = SlicePrefix(_k[layer], len);
+        _prefixV[layer] = SlicePrefix(_v[layer], len);
+    }
+
+    /// <summary><see cref="IKvCache"/> populated K prefix <c>[B, num_kv_heads, len, head_dim]</c> (cache-owned).</summary>
+    public Tensor KeyPrefix(int layer)
+    {
+        ThrowIfDisposed();
+        return _prefixK[layer] ?? throw new InvalidOperationException($"Layer {layer} prefix not populated.");
+    }
+
+    /// <summary><see cref="IKvCache"/> populated V prefix <c>[B, num_kv_heads, len, head_dim]</c> (cache-owned).</summary>
+    public Tensor ValuePrefix(int layer)
+    {
+        ThrowIfDisposed();
+        return _prefixV[layer] ?? throw new InvalidOperationException($"Layer {layer} prefix not populated.");
+    }
+
+    /// <summary>Copies the first <paramref name="len"/> sequence positions of a padded <c>[B, H, T_max, D]</c>
+    /// buffer into a packed <c>[B, H, len, D]</c> tensor (per <c>(b, h)</c> contiguous memcpy).</summary>
+    private unsafe Tensor SlicePrefix(Tensor padded, int len)
+    {
+        Tensor outT = new(new TensorShape(BatchSize, NumKvHeads, len, HeadDim), padded.DType);
+        int elemBytes = padded.DType.SizeInBytes;
+        long perCopy = (long)len * HeadDim * elemBytes;
+        long srcStride = (long)MaxSequenceLength * HeadDim * elemBytes;
+        long dstStride = (long)len * HeadDim * elemBytes;
+        byte* sp = (byte*)padded.DataPointer;
+        byte* dp = (byte*)outT.DataPointer;
+        for (int bh = 0; bh < BatchSize * NumKvHeads; bh++)
+            Buffer.MemoryCopy(sp + bh * srcStride, dp + bh * dstStride, perCopy, perCopy);
+        return outT;
+    }
+
     /// <summary>Advances the shared sequence position. Call once after every layer has
     /// been written for the current step.</summary>
     public void AdvanceLength(int by)
@@ -131,6 +181,11 @@ public sealed class StreamingKvCache : IDisposable
     {
         ThrowIfDisposed();
         _currentLength = 0;
+        for (int i = 0; i < _prefixK.Length; i++)
+        {
+            _prefixK[i]?.Dispose(); _prefixK[i] = null;
+            _prefixV[i]?.Dispose(); _prefixV[i] = null;
+        }
     }
 
     public void Dispose()
@@ -138,6 +193,8 @@ public sealed class StreamingKvCache : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (Tensor t in _k) t.Dispose();
         foreach (Tensor t in _v) t.Dispose();
+        foreach (Tensor? t in _prefixK) t?.Dispose();
+        foreach (Tensor? t in _prefixV) t?.Dispose();
     }
 
     private void ValidateNewTensor(Tensor newKv, string paramName)

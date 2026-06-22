@@ -69,11 +69,16 @@
 - [ ] Flash-attention (causal/GQA/cache) CUDA + Vulkan; CPU keeps tiled SDPA
 - [ ] RoPE scaling kernels (linear/NTK/YaRN/llama3)
 
-## M4 — Encoder unification (kill duplication)
+## M4 — Audio decoder unification (kill duplication) — ✅ DONE (2026-06-22)
 
-- [ ] Re-target Diffusion `T5TextEncoder` / `ClipTextEncoder` / `LlamaStyleEncoder` onto generic core (encoder mode)
-- [ ] Re-target Audio Qwen3-TTS talker / YuE / Higgs onto generic core
-- [ ] Delete duplicated transformer/encoder code; re-run affected diffusion + audio tests
+- [x] `IKvCache` abstraction (LLM); device `KvCache` + host `StreamingKvCache` both implement it (`AppendStep`/`KeyPrefix`/`ValuePrefix`); `GenericTransformer` is cache-agnostic
+- [x] `GenericTransformer` grew: `LoadWeightsHeadless`, `ForwardEmbeds(applyFinalNorm/startLayer/endLayer)`, `RopeStyle` (SplitHalf | Interleaved) + `IBackend.ApplyRopeInterleaved` (CPU default)
+- [x] Audio→LLM package edge (no cycles)
+- [x] Audio `Qwen2Model` + `Qwen3Model` reimplemented as **thin wrappers** over `GenericTransformer` (Qwen2 = split-half/bias; Qwen3 = interleaved/qk-norm/decoupled-headDim); public API unchanged so the ~10 consumers (VibeVoice, CSM, Kyutai, Spark, YuE, Fish-Speech, PocketTTS, Chatterbox, CosyVoice, Qwen3-TTS talker+MTP) are untouched
+- [x] Deleted duplicate internals: `Qwen2DecoderLayer/Attention/Mlp/Qwen2RotaryEmbedding` + Qwen3 `Layer`/`HeadRmsNorm`. `GenericTransformer` is now the single Qwen-family decoder implementation
+- [x] **Zero regression:** full Audio suite 357 pass / 5 gated-skip, LLM 9 pass, full solution builds; e2e Qwen2.5-0.5B + Qwen3-0.6B emit byte-identical token ids vs pre-migration
+- Note: dual-embedding/dual-head/MTP stay consumer-side (they wrap the headless decoder). Qwen3 3D mRoPE remains unimplemented (was never implemented — wrapper preserves the prior 1D interleaved behavior).
+- Deferred (owner decision): T5/CLIP/LlamaStyleEncoder stay standalone (structurally different / already config-driven). Resident GPU interleaved-rope kernel is a follow-up (CPU default keeps Qwen3 audio correct, matching prior behavior).
 
 ## M5 — MoE + serving
 

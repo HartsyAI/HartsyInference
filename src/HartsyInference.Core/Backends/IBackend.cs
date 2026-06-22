@@ -201,6 +201,44 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>In-place <b>interleaved (GPT-J)</b> rotary embedding on a single tensor <paramref name="x"/> of
+    /// shape <c>[B, L, numHeads, headDim]</c>: adjacent dims are rotated in pairs <c>(2i, 2i+1)</c> sharing
+    /// frequency <c>i</c>. <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c> (only the
+    /// first <c>headDim/2</c> entries per position are read). Used by the Qwen3-TTS audio backbone / Moonshine;
+    /// NOT interchangeable with the split-half <see cref="ApplyRopeSingle"/>.</summary>
+    unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("ApplyRopeInterleaved default fallback only supports F32.");
+        int batch = (int)x.Shape[0];
+        int seqLen = (int)x.Shape[1];
+        int numHeads = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        int half = headDim / 2;
+        float* xPtr = (float*)x.DataPointer;
+        float* cosPtr = (float*)cos.DataPointer;
+        float* sinPtr = (float*)sin.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int s = 0; s < seqLen; s++)
+            {
+                long freqBase = ((long)b * seqLen + s) * headDim;
+                for (int h = 0; h < numHeads; h++)
+                {
+                    long vecOff = (((long)b * seqLen + s) * numHeads + h) * headDim;
+                    float* vec = xPtr + vecOff;
+                    float* c = cosPtr + freqBase;
+                    float* si = sinPtr + freqBase;
+                    for (int i = 0; i < half; i++)
+                    {
+                        float xe = vec[2 * i];
+                        float xo = vec[2 * i + 1];
+                        vec[2 * i] = xe * c[i] - xo * si[i];
+                        vec[2 * i + 1] = xo * c[i] + xe * si[i];
+                    }
+                }
+            }
+    }
+
     /// <summary>In-place rotary position embedding on a single tensor <paramref name="x"/> of shape
     /// <c>[B, L, numHeads, headDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>
     /// broadcast over heads. Same rotate-half math as <see cref="ApplyRope"/> but for one tensor — required for

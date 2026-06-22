@@ -46,6 +46,17 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (!_cfg.TieWordEmbeddings) _lmHead = EnsureF32(w[lmHeadKey ?? "lm_head.weight"]);
     }
 
+    /// <summary>Loads a headless transformer body — decoder layers + final RMSNorm only, no
+    /// <c>embed_tokens</c> / <c>lm_head</c>. Used when an outer model owns the embedding table(s) and output
+    /// head(s) and drives the body via <see cref="ForwardEmbeds"/> (e.g. Sesame CSM, Kyutai, Qwen3-TTS).
+    /// Do not call <see cref="Forward"/> or <see cref="ProjectLogits"/> on a headless instance.</summary>
+    public void LoadWeightsHeadless(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        ThrowIfDisposed();
+        _finalNorm = EnsureF32(w[$"{prefix}.norm.weight"]);
+        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}");
+    }
+
     /// <summary>All weight tensors (stable references) for <see cref="IBackend.PreloadWeights"/> /
     /// <see cref="IBackend.FreeWeights"/>.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
@@ -59,7 +70,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Token-IDs-in path: host embedding gather (one tiny H2D), then the resident transformer.
     /// Returns the final <c>[1, T, hidden]</c> hidden state (post final RMSNorm).</summary>
-    public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, KvCache cache)
+    public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
     {
         ThrowIfDisposed();
         int t = tokenIds.Length;
@@ -70,11 +81,18 @@ public sealed unsafe class GenericTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Embedding-in path. Runs the full decoder stack GPU-resident and returns the normed
-    /// <c>[1, T, hidden]</c> hidden state. <paramref name="posStart"/> = <see cref="KvCache.CurrentLength"/>.</summary>
-    public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, KvCache cache)
+    /// <summary>Embedding-in path. Runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack)
+    /// and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/>
+    /// is true (else the raw last-layer hidden). <paramref name="posStart"/> = <see cref="IKvCache.CurrentLength"/>.
+    /// The cache advances once per call (after the layers run), matching the reference decoder.</summary>
+    public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
+        bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null)
     {
         ThrowIfDisposed();
+        int last = endLayer ?? _layers.Length;
+        if (startLayer < 0 || last > _layers.Length || startLayer > last)
+            throw new ArgumentException($"Invalid layer range [{startLayer}, {last}) for a stack of {_layers.Length}.");
+
         int d = _cfg.HeadDim;
         int kvLen = posStart + t;
 
@@ -87,7 +105,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             Tensor hidden = embeds;
             bool ownsHidden = false;
-            for (int i = 0; i < _layers.Length; i++)
+            for (int i = startLayer; i < last; i++)
             {
                 Tensor next = _layers[i].Forward(backend, hidden, t, posStart, kvLen, cache, i, cos, sin, mask);
                 if (ownsHidden) hidden.Dispose();
@@ -96,10 +114,21 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             cache.AdvanceLength(t);
 
-            Tensor normed = new(new TensorShape(1, t, _cfg.HiddenSize), DType.F32);
-            backend.RmsNorm(normed, hidden, _finalNorm!, _cfg.RmsNormEps);
-            if (ownsHidden) hidden.Dispose();
-            return normed;
+            if (applyFinalNorm)
+            {
+                Tensor normed = new(new TensorShape(1, t, _cfg.HiddenSize), DType.F32);
+                backend.RmsNorm(normed, hidden, _finalNorm!, _cfg.RmsNormEps);
+                if (ownsHidden) hidden.Dispose();
+                return normed;
+            }
+            if (!ownsHidden)
+            {
+                // No layers ran (or range empty): return an owned copy so the caller never shares the input.
+                Tensor copy = new(embeds.Shape, DType.F32);
+                backend.CopyTo(copy, embeds);
+                return copy;
+            }
+            return hidden;
         }
         finally
         {
@@ -229,7 +258,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart, int kvLen,
-            KvCache cache, int layerIndex, Tensor cos, Tensor sin, Tensor? mask)
+            IKvCache cache, int layerIndex, Tensor cos, Tensor sin, Tensor? mask)
         {
             int h = _cfg.HiddenSize;
             int hq = _cfg.NumHeads;
@@ -262,8 +291,16 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            backend.ApplyRopeSingle(q, cos, sin);
-            backend.ApplyRopeSingle(k, cos, sin);
+            if (_cfg.Rope == RopeStyle.Interleaved)
+            {
+                backend.ApplyRopeInterleaved(q, cos, sin);
+                backend.ApplyRopeInterleaved(k, cos, sin);
+            }
+            else
+            {
+                backend.ApplyRopeSingle(q, cos, sin);
+                backend.ApplyRopeSingle(k, cos, sin);
+            }
 
             Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32);
             Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32);
@@ -273,10 +310,10 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.Permute0213(vMh, v, t, hkv, d);
             q.Dispose(); k.Dispose(); v.Dispose();
 
-            cache.Append(backend, layerIndex, kMh, vMh);
+            cache.AppendStep(backend, layerIndex, kMh, vMh);
             kMh.Dispose(); vMh.Dispose();
-            Tensor kFull = cache.GetK(layerIndex);
-            Tensor vFull = cache.GetV(layerIndex);
+            Tensor kFull = cache.KeyPrefix(layerIndex);
+            Tensor vFull = cache.ValuePrefix(layerIndex);
 
             Tensor kRep, vRep;
             bool ownsRep = group != 1;
