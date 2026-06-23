@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelHandler.PyTorch;
 using HartsyInference.ModelHandler.SafeTensors;
 
 namespace HartsyInference.ModelHandler.CheckpointConverters;
@@ -35,18 +36,13 @@ public sealed class MusicGenCheckpointConverter
         return CodecKeyUtils.StripPrefix(key, "decoder.");
     }
 
-    /// <summary>Loads the MusicGen decoder safetensors (combined or standalone layout). Caller owns the loader.</summary>
+    /// <summary>Loads the MusicGen decoder safetensors (combined or standalone layout). Caller owns the loader.
+    /// For AudioGen (which ships PyTorch <c>.bin</c> pickles, not safetensors) use <see cref="LoadDecoderAny"/>.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadDecoder(string path, bool castToF32 = false)
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
-        Dictionary<string, Tensor> weights = new();
-        foreach (string key in loader.Descriptors.Keys)
-        {
-            string? mapped = MapDecoderKey(key);
-            if (mapped is not null) weights[mapped] = CodecKeyUtils.MaybeCast(loader.GetTensor(key), castToF32);
-        }
-        return (weights, loader);
+        return (MapDecoderWeights(loader.GetAllTensors(), castToF32), loader);
     }
 
     /// <summary>Loads an EnCodec safetensors — either <c>facebook/encodec_32khz</c> standalone or the
@@ -55,23 +51,7 @@ public sealed class MusicGenCheckpointConverter
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
-        bool combined = false;
-        foreach (string key in loader.Descriptors.Keys)
-        {
-            if (key.StartsWith("audio_encoder.", StringComparison.Ordinal))
-            {
-                combined = true;
-                break;
-            }
-        }
-        Dictionary<string, Tensor> raw = new();
-        foreach (string key in loader.Descriptors.Keys)
-        {
-            if (combined && !key.StartsWith("audio_encoder.", StringComparison.Ordinal)) continue;
-            string stripped = combined ? key["audio_encoder.".Length..] : key;
-            raw[stripped] = CodecKeyUtils.MaybeCast(loader.GetTensor(key), castToF32);
-        }
-        return (ConvertEnCodec(raw), loader);
+        return (MapEnCodecWeights(loader.GetAllTensors(), castToF32), loader);
     }
 
     /// <summary>Loads the T5-base text encoder weights — either the <c>text_encoder.*</c> subset of a combined
@@ -83,23 +63,93 @@ public sealed class MusicGenCheckpointConverter
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
-        bool combined = false;
-        foreach (string key in loader.Descriptors.Keys)
+        return (MapTextEncoderWeights(loader.GetAllTensors(), castToF32), loader);
+    }
+
+    // ── Format-agnostic loaders (safetensors OR PyTorch .bin/.pt pickle) ──────────────────────────────────────
+    // AudioGen (facebook/audiogen-medium) and the standalone google/t5-base it pairs with ship as PyTorch pickles,
+    // not safetensors. These dispatch by file extension and apply the same key mapping as the safetensors loaders.
+
+    /// <summary>Loads the MusicGen / AudioGen decoder from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle.
+    /// Caller owns (and must dispose) the returned loader.</summary>
+    public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadDecoderAny(string path, bool castToF32 = false)
+    {
+        (Dictionary<string, Tensor> raw, IDisposable loader) = LoadAny(path);
+        return (MapDecoderWeights(raw, castToF32), loader);
+    }
+
+    /// <summary>Loads EnCodec from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle (AudioGen pairs with the
+    /// 16 kHz EnCodec). Caller owns (and must dispose) the returned loader.</summary>
+    public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadEnCodecAny(string path, bool castToF32 = false)
+    {
+        (Dictionary<string, Tensor> raw, IDisposable loader) = LoadAny(path);
+        return (MapEnCodecWeights(raw, castToF32), loader);
+    }
+
+    /// <summary>Loads the T5-base text encoder from a <c>.safetensors</c> OR <c>.bin</c>/<c>.pt</c> pickle (the
+    /// standalone <c>google/t5-base</c> AudioGen fetches separately ships a <c>pytorch_model.bin</c>). Caller owns
+    /// (and must dispose) the returned loader. Pair with <see cref="T5TextEncoderConfig.T5Base"/>.</summary>
+    public static (Dictionary<string, Tensor> Weights, IDisposable Loader) LoadTextEncoderAny(string path, bool castToF32 = false)
+    {
+        (Dictionary<string, Tensor> raw, IDisposable loader) = LoadAny(path);
+        return (MapTextEncoderWeights(raw, castToF32), loader);
+    }
+
+    /// <summary>Reads every tensor from a checkpoint file, choosing the reader by extension: <c>.safetensors</c> →
+    /// <see cref="SafeTensorsLoader"/>, otherwise (<c>.bin</c>/<c>.pt</c>/<c>.pth</c>) → <see cref="PytorchPickleLoader"/>.</summary>
+    private static (Dictionary<string, Tensor> Raw, IDisposable Loader) LoadAny(string path)
+    {
+        if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
         {
-            if (key.StartsWith("text_encoder.", StringComparison.Ordinal))
-            {
-                combined = true;
-                break;
-            }
+            SafeTensorsLoader st = new();
+            st.Load(path);
+            return (st.GetAllTensors(), st);
         }
+        PytorchPickleLoader pt = new();
+        pt.Load(path);
+        return (pt.GetAllTensors(), pt);
+    }
+
+    /// <summary>Applies <see cref="MapDecoderKey"/> across a raw name→tensor dictionary (any source format).</summary>
+    public static Dictionary<string, Tensor> MapDecoderWeights(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
+    {
         Dictionary<string, Tensor> weights = new();
-        foreach (string key in loader.Descriptors.Keys)
+        foreach ((string key, Tensor value) in raw)
+        {
+            string? mapped = MapDecoderKey(key);
+            if (mapped is not null) weights[mapped] = CodecKeyUtils.MaybeCast(value, castToF32);
+        }
+        return weights;
+    }
+
+    /// <summary>Strips the combined <c>audio_encoder.</c> envelope (if present) then remaps EnCodec HF naming to
+    /// Meta naming via <see cref="ConvertEnCodec"/>. Source-format agnostic.</summary>
+    public static Dictionary<string, Tensor> MapEnCodecWeights(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
+    {
+        bool combined = raw.Keys.Any(k => k.StartsWith("audio_encoder.", StringComparison.Ordinal));
+        Dictionary<string, Tensor> stripped = new();
+        foreach ((string key, Tensor value) in raw)
+        {
+            if (combined && !key.StartsWith("audio_encoder.", StringComparison.Ordinal)) continue;
+            string name = combined ? key["audio_encoder.".Length..] : key;
+            stripped[name] = CodecKeyUtils.MaybeCast(value, castToF32);
+        }
+        return ConvertEnCodec(stripped);
+    }
+
+    /// <summary>Strips the combined <c>text_encoder.</c> envelope (if present); the inner HF T5 names are what
+    /// <c>T5TextEncoder.LoadWeights</c> consumes directly. Source-format agnostic.</summary>
+    public static Dictionary<string, Tensor> MapTextEncoderWeights(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
+    {
+        bool combined = raw.Keys.Any(k => k.StartsWith("text_encoder.", StringComparison.Ordinal));
+        Dictionary<string, Tensor> weights = new();
+        foreach ((string key, Tensor value) in raw)
         {
             if (combined && !key.StartsWith("text_encoder.", StringComparison.Ordinal)) continue;
-            string stripped = combined ? key["text_encoder.".Length..] : key;
-            weights[stripped] = CodecKeyUtils.MaybeCast(loader.GetTensor(key), castToF32);
+            string name = combined ? key["text_encoder.".Length..] : key;
+            weights[name] = CodecKeyUtils.MaybeCast(value, castToF32);
         }
-        return (weights, loader);
+        return weights;
     }
 
     /// <summary>Converts an EnCodec weight dictionary from HF <c>transformers</c> naming to the Meta naming the engine

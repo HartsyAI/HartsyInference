@@ -75,6 +75,26 @@ public sealed class MelSpectrogramExtractor
         NormScale: 1f,
         PowerSpectrum: false);
 
+    /// <summary>CosyVoice 2 flow-matching mel conditioning (matcha <c>mel_spectrogram</c>): 24kHz, n_fft=1920,
+    /// hop=480, win=1920, 80 mel bins, fmax=8000, magnitude spectrum, natural log clamped at 1e-5. The reference
+    /// reflect-pads the audio by <c>(n_fft - hop)/2</c> (center=False); callers should pre-pad to match.</summary>
+    public static Config CosyVoice2FlowConfig() => new(
+        SampleRate: 24_000,
+        NFft: 1_920,
+        WinLength: 1_920,
+        HopLength: 480,
+        NMels: 80,
+        Fmin: 0.0,
+        Fmax: 8000.0,
+        Norm: Normalization.None,
+        DropLastStftFrame: false,
+        LogBase: LogBase.Natural,
+        LogFloor: 1e-5f,
+        DynamicRangeDb: 0f,
+        NormOffset: 0f,
+        NormScale: 1f,
+        PowerSpectrum: false);
+
     /// <summary>Standard HiFiGAN preset: 22.05kHz, n_fft=1024, hop=256, 80 mel bins.
     /// Magnitude spectrum, no normalization.</summary>
     public static Config HifiGan22kConfig() => new(

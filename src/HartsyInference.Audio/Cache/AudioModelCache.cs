@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 
 namespace HartsyInference.Audio.Cache;
 
@@ -94,6 +95,22 @@ public static class AudioModelCache
     /// that loads at startup time and doesn't want to plumb async through.</summary>
     public static string Get(string hfRepoId, string filename, string revision = "main")
         => GetAsync(hfRepoId, filename, revision).GetAwaiter().GetResult();
+
+    /// <summary>Throws if <paramref name="filePath"/>'s SHA-256 does not match the pinned
+    /// <paramref name="expectedHex"/> (case-insensitive). Used to verify a repacked single-file
+    /// model against the hash recorded in its repack manifest.</summary>
+    public static void VerifySha256(string filePath, string expectedHex)
+    {
+        using FileStream fs = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1 << 20, FileOptions.SequentialScan);
+        byte[] hash = SHA256.HashData(fs);
+        string actual = Convert.ToHexString(hash);
+        if (!actual.Equals(expectedHex, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"SHA-256 mismatch for '{filePath}': expected {expectedHex}, got {actual}. " +
+                "The cached file may be corrupt or stale; delete it to force a re-download.");
+        }
+    }
 
     private static async Task<string> DownloadAsync(
         string hfRepoId,

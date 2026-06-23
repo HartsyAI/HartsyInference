@@ -19,4 +19,12 @@
     <InternalsVisibleTo Include="HartsyInference.Audio.Tests" />
   </ItemGroup>
 
+  <!-- GPT-SoVITS Chinese G2P: per-character default pinyin (initial + tone-3 final) from pypinyin (~430 KB).
+       Drives the (validated) PinyinPhonemizer for the common, non-polyphone path; g2pW refines polyphones. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Frontends\Resources\pinyin_char_dict.txt" LogicalName="HartsyInference.Audio.Frontends.Resources.pinyin_char_dict.txt" />
+    <!-- GPT-SoVITS English G2P: CMUdict (word → ARPAbet). OOV beyond letter-spelling needs the g2p_en LTS (future). -->
+    <EmbeddedResource Include="Frontends\Resources\cmudict.rep" LogicalName="HartsyInference.Audio.Frontends.Resources.cmudict.rep" />
+  </ItemGroup>
+
 </Project>

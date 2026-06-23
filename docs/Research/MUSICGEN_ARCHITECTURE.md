@@ -283,6 +283,7 @@ AudioGen (the released `facebook/audiogen-medium`) is architecturally **identica
 4. **No stereo variant.** All AudioGen outputs are mono.
 5. **No formal max-duration limit** documented, but the sinusoidal positional embeddings cap things at ~30 s for the same reason. In practice it is used for 5–10 s clips.
 6. The original 2022 AudioGen paper (arXiv:2209.15352) describes a different multi-stream architecture with no delay pattern; **that design was discarded** in favor of the MusicGen recipe for the public release. Cite the 2306.05284 paper for architecture, the 2209.15352 paper only for training data and task framing.
+7. **Checkpoint format**: unlike `facebook/musicgen-*` (combined safetensors), `facebook/audiogen-medium` ships PyTorch **`.bin` pickles** and pairs with a separately-fetched `google/t5-base`. `MusicGenCheckpointConverter` therefore exposes format-agnostic loaders — `LoadDecoderAny` / `LoadEnCodecAny` / `LoadTextEncoderAny` dispatch by extension to `SafeTensorsLoader` or `PytorchPickleLoader` and apply the same key mapping. Fetch t5-base with `AudioModelCache.Get("google/t5-base", "pytorch_model.bin")`. Covered by `AudioGenLoaderTests`.
 
 ### Memory and Performance (consumer GPU, fp16 inference)
 

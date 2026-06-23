@@ -34,7 +34,10 @@ shared `codebook_embeddings` with per-book offset `i·codebook_size`; **summed**
 - [x] **`FireflyDecoder`** — codebook dequant → **reused `VitsHiFiGan`** (firefly upsample config) → 44.1 kHz.
   Synthetic-forward verified.
 - [x] **`FishSpeechPipeline`** — text prefill → AR frames → firefly decode.
+- [x] **`FishSpeechTokenizer`** — byte-level BPE with both layouts: HF `tokenizer.json` **and** the repo's
+  `tokenizer.tiktoken` (`<base64-bytes> <rank>` lines, tiktoken merge-by-rank); special tokens via an explicit
+  list or sibling `special_tokens.json`, resolving `<|semantic:i|>`/`<|im_end|>` ids. `Load()` auto-dispatches by
+  extension. Covered by `FishSpeechCodecTests`.
 - [ ] **Staged/reconcile:** firefly's grouped-residual **FSQ** (levels (8,5,5,5)) + ConvNeXt resample + **SiLU**
   activation (current decoder uses learned codebook embeds + LeakyReLU), Fish's fused `wqkv`/`w1w2w3` key adapter
-  (vs Qwen2 split keys), the encoder (ref→tokens), the BPE tokenizer + `<|semantic:i|>`/`<|im_end|>` ids, and
-  the openaudio-s1 DAC-codec variant (Snake decoder + RVQ).
+  (vs Qwen2 split keys), the encoder (ref→tokens), and the openaudio-s1 DAC-codec variant (Snake decoder + RVQ).

@@ -25,10 +25,12 @@ public sealed class KokoroPipelineSmokeTests
 
     private static bool CacheReady()
     {
-        string repo = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
-        return File.Exists(Path.Combine(repo, "model.safetensors"))
-            && File.Exists(Path.Combine(repo, "config.json"))
-            && File.Exists(Path.Combine(repo, "voices", "af_heart.bin"));
+        // Weights load from the single-file repack repo; voice packs still come from hexgrad.
+        string weights = AudioModelCache.GetRepoDirectory("Hartsy/kokoro-82m-safetensors");
+        string voices = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M");
+        return File.Exists(Path.Combine(weights, "kokoro-82m.safetensors"))
+            && File.Exists(Path.Combine(weights, "config.json"))
+            && File.Exists(Path.Combine(voices, "voices", "af_heart.bin"));
     }
 
     [Fact]

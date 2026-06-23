@@ -61,4 +61,59 @@ public sealed unsafe class CudaFlashAttentionTests
         _output.WriteLine($"prefill={prefill}: max |SDPA - Flash| = {maxDiff:E3}");
         Assert.True(maxDiff <= 2e-3f, $"CUDA FlashAttention diverges from SDPA by {maxDiff:E3} (prefill={prefill}).");
     }
+
+    /// <summary>FixedKvCache case: the K/V buffer's seq stride (maxSeq) exceeds the valid key count, and the
+    /// head config matches Llama-3.2 (Hq=32, Hkv=8, group=4, headDim=64). Flash must read only the first kvLen
+    /// keys at the buffer stride. Compared against an inline online-softmax reference.</summary>
+    [Fact]
+    public void Flash_StridedBuffer_LlamaGqa_MatchesReference()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        const int hq = 32, hkv = 8, d = 64, group = hq / hkv, tq = 12, kvLen = 12, stride = 40;
+        float scale = 1f / MathF.Sqrt(d);
+
+        using CudaBackend backend = new(0, ptxDir);
+        using Tensor q = Rnd(1, hq, tq, d);
+        using Tensor kBuf = Rnd(1, hkv, stride, d);   // full buffer; only first kvLen rows are valid
+        using Tensor vBuf = Rnd(1, hkv, stride, d);
+        using Tensor outT = new(new TensorShape(1, hq, tq, d), DType.F32);
+        ((IBackend)backend).FlashAttention(outT, q, kBuf, vBuf, kvLen, group, causal: true, qOffset: 0, scale);
+        backend.Sync();
+
+        float* qp = (float*)q.DataPointer, kp = (float*)kBuf.DataPointer, vp = (float*)vBuf.DataPointer, op = (float*)outT.DataPointer;
+        float max = 0f;
+        for (int h = 0; h < hq; h++)
+        {
+            int kvh = h / group;
+            for (int r = 0; r < tq; r++)
+            {
+                int kMax = Math.Min(kvLen - 1, r);          // causal, qOffset 0
+                float m = float.NegativeInfinity, denom = 0f;
+                float[] acc = new float[d];
+                for (int k = 0; k <= kMax; k++)
+                {
+                    float dot = 0f;
+                    long qBase = ((long)h * tq + r) * d;
+                    long kBase = ((long)kvh * stride + k) * d;   // buffer stride
+                    for (int e = 0; e < d; e++) dot += qp[qBase + e] * kp[kBase + e];
+                    dot *= scale;
+                    float nm = MathF.Max(m, dot);
+                    float corr = m <= float.NegativeInfinity ? 0f : MathF.Exp(m - nm);
+                    float w = MathF.Exp(dot - nm);
+                    denom = denom * corr + w;
+                    long vBase = ((long)kvh * stride + k) * d;
+                    for (int e = 0; e < d; e++) acc[e] = acc[e] * corr + w * vp[vBase + e];
+                    m = nm;
+                }
+                long oBase = ((long)h * tq + r) * d;
+                for (int e = 0; e < d; e++) max = MathF.Max(max, MathF.Abs(acc[e] / denom - op[oBase + e]));
+            }
+        }
+        _output.WriteLine($"strided Llama-GQA: max |ref - flash| = {max:E3}");
+        Assert.True(max <= 2e-3f, $"CUDA strided FlashAttention diverges from reference by {max:E3}");
+    }
 }

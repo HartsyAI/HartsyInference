@@ -14,9 +14,15 @@ namespace HartsyInference.LLM.Generation;
 /// sequence (single-sequence path) on admission, then all decode in lockstep via
 /// <see cref="GenericTransformer.ForwardBatchDecode"/>.
 ///
-/// <para>Token-identical to running each request through <see cref="TextGenerationPipeline"/> alone (same
-/// weights, same per-sequence sampler, same add→forward→sample cycle) — batching changes throughput, not
-/// output. Chunked/batched prefill and dynamic mid-flight admission build on this.</para></summary>
+/// <para>Numerically equivalent to running each request through <see cref="TextGenerationPipeline"/> alone:
+/// same weights, same per-sequence sampler, same add→forward→sample cycle. On a backend whose GEMM is
+/// batch-invariant (the CPU backend computes each output row in a fixed reduction order regardless of batch
+/// size) the output is bit-for-bit token-identical to single-sequence decode, and the
+/// <c>ContinuousBatchTests</c> assert exactly that. On CUDA, cuBLAS may dispatch a different kernel for a
+/// batched (M=B) GEMM than for the single-row (M=1) decode, so per-row logits can differ at the ~1e-3 level;
+/// this is invisible except when a greedy argmax sits on a near-tie, where it can flip a token and the
+/// sequences then diverge (the batched sequences still stay identical to <em>each other</em> — the path is
+/// deterministic, not buggy). Chunked/batched prefill and dynamic mid-flight admission build on this.</para></summary>
 public sealed class ContinuousBatchScheduler
 {
     private readonly GenericTransformer _model;

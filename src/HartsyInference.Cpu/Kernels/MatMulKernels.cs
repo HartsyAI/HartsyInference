@@ -7,10 +7,24 @@ public static class MatMulKernels
 {
     private const int TileSize = 32;
 
+    /// <summary>These kernels read tensor data as <c>float*</c>. A non-F32 tensor (e.g. bf16/f16 weights loaded
+    /// straight from a checkpoint) has half the bytes per element, so casting its pointer to <c>float*</c> reads
+    /// off the end of the allocation and corrupts the heap. Fail loudly instead: the CPU backend is F32-only, so
+    /// callers must cast weights to F32 (e.g. <see cref="Tensor.CastTo"/>) before dispatching here.</summary>
+    private static void RequireF32(Tensor output, Tensor a, Tensor b, Tensor? bias, string op)
+    {
+        if (output.DType != DType.F32 || a.DType != DType.F32 || b.DType != DType.F32 ||
+            (bias is not null && bias.DType != DType.F32))
+            throw new ArgumentException(
+                $"{op}: the CPU backend is F32-only (got output={output.DType}, a={a.DType}, b={b.DType}" +
+                $"{(bias is not null ? $", bias={bias.DType}" : "")}). Cast non-F32 weights to F32 first.");
+    }
+
     /// <summary>Performs 2D general matrix multiplication: output[M,N] = a[M,K] @ b[K,N]. Uses a tiled approach with AVX2 vectorization for the inner accumulation loop. Both input matrices are expected in row-major layout.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void MatMul(Tensor output, Tensor a, Tensor b)
     {
+        RequireF32(output, a, b, null, nameof(MatMul));
         int M = (int)a.Shape[0];
         int K = (int)a.Shape[1];
         int N = (int)b.Shape[1];
@@ -91,6 +105,7 @@ public static class MatMulKernels
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void LinearTransB(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
+        RequireF32(output, input, weight, bias, nameof(LinearTransB));
         int N = (int)weight.Shape[0]; // outDim
         int K = (int)weight.Shape[1]; // inDim
         int M = (int)(input.ElementCount / K); // batch*seqLen

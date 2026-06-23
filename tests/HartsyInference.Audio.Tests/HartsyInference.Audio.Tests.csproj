@@ -13,6 +13,15 @@
     <PackageReference Include="coverlet.collector" />
   </ItemGroup>
 
+  <!-- Several audio models contain unmanaged ops that are not yet safe to run concurrently across test
+       collections: under xunit's default parallelism a latent out-of-bounds write in one model corrupts a
+       neighbouring tensor allocation and crashes an unrelated test with an AccessViolationException. The suite
+       passes 372/372 sequentially, so force single-threaded execution (xunit.runner.json) until the underlying
+       op is hardened. -->
+  <ItemGroup>
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Audio\HartsyInference.Audio.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />

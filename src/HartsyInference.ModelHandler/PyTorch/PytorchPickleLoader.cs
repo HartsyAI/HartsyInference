@@ -25,8 +25,12 @@ public sealed class PytorchPickleLoader : IDisposable
     /// <summary>Path of the loaded checkpoint.</summary>
     public string FilePath { get; private set; } = string.Empty;
 
-    /// <summary>Opens the <c>.pt</c> ZIP, parses <c>data.pkl</c>, and materializes every tensor into owned memory.</summary>
-    public unsafe void Load(string filePath)
+    /// <summary>Opens the <c>.pt</c> ZIP, parses <c>data.pkl</c>, and materializes every tensor into owned memory.
+    /// <para>When <paramref name="recursiveFlatten"/> is true, a multi-module checkpoint — a dict whose values
+    /// are themselves state-dicts (e.g. Kokoro's <c>{bert:{…}, predictor:{…}, decoder:{…}}</c>) — is flattened
+    /// into fully-qualified dotted keys (<c>bert.embeddings.weight</c>, …) covering EVERY module. The default
+    /// (false) keeps the legacy behavior: load top-level tensors, else descend one wrapper envelope.</para></summary>
+    public unsafe void Load(string filePath, bool recursiveFlatten = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         FilePath = filePath;
@@ -40,7 +44,15 @@ public sealed class PytorchPickleLoader : IDisposable
 
         object? root = new PickleMachine(pickle).Run();
         Dictionary<string, PickleTensor> metas = [];
-        FlattenStateDict(root, metas);
+        if (recursiveFlatten)
+        {
+            FlattenStateDictRecursive(root, "", metas);
+            if (metas.Count == 0) throw new InvalidOperationException("No tensors found in checkpoint.");
+        }
+        else
+        {
+            FlattenStateDict(root, metas);
+        }
 
         Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
         foreach ((string name, PickleTensor meta) in metas)
@@ -117,6 +129,28 @@ public sealed class PytorchPickleLoader : IDisposable
                 if (outMap.Count > 0) return;
             }
         if (outMap.Count == 0) throw new InvalidOperationException("No tensors found in checkpoint.");
+    }
+
+    /// <summary>Recursively flattens nested dicts into fully-qualified dotted keys, visiting every module
+    /// (unlike <see cref="FlattenStateDict"/>, which descends only one wrapper and drops the prefix). Non-tensor,
+    /// non-dict leaves (version ints, metadata) are ignored.</summary>
+    private static void FlattenStateDictRecursive(object? node, string prefix, Dictionary<string, PickleTensor> outMap)
+    {
+        if (node is PickleTensor t)
+        {
+            if (prefix.Length > 0)
+            {
+                outMap[prefix] = t;
+            }
+            return;
+        }
+        if (node is Dictionary<string, object?> dict)
+        {
+            foreach ((string k, object? v) in dict)
+            {
+                FlattenStateDictRecursive(v, prefix.Length == 0 ? k : $"{prefix}.{k}", outMap);
+            }
+        }
     }
 
     public void Dispose()

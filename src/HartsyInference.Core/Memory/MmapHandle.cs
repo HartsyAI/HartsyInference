@@ -43,8 +43,13 @@ public sealed unsafe class MmapHandle : IDisposable
         if (!File.Exists(filePath))
             throw new FileNotFoundException($"Model file not found: {filePath}", filePath);
 
-        long fileLength = new FileInfo(filePath).Length;
-        MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+        // Open the file ourselves and measure the stream so the length follows symlinks to the
+        // real target. FileInfo.Length reports the link's own size for a symlink, which yields a
+        // truncated mapping and a bogus "invalid header length" on otherwise-valid weight files.
+        FileStream fs = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        long fileLength = fs.Length;
+        MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(
+            fs, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, leaveOpen: false);
         MemoryMappedViewAccessor accessor = mmf.CreateViewAccessor(0, fileLength, MemoryMappedFileAccess.Read);
 
         byte* pointer = null;

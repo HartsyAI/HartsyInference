@@ -104,6 +104,47 @@ public sealed unsafe class FishSpeechCodecTests
         Assert.Equal("hi", decoded);
     }
 
+    [Fact]
+    public void Tokenizer_LoadsTiktokenFile_MergesByRankAndRoundTrips()
+    {
+        // A minimal tiktoken file: each line is "<base64-bytes> <rank>". Single bytes for "hi" plus the merged
+        // token "hi" at a higher rank, so BPE must prefer the longest merge available.
+        static string B64(string s) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(s));
+        string path = Path.Combine(Path.GetTempPath(), $"fish_{Guid.NewGuid():N}.tiktoken");
+        string[] lines =
+        [
+            $"{B64("h")} 0",
+            $"{B64("i")} 1",
+            $"{B64("a")} 2",
+            $"{B64("hi")} 3",   // merged token: rank 3 > singles, but BPE merges any available pair
+        ];
+        File.WriteAllLines(path, lines);
+        try
+        {
+            FishSpeechTokenizer tok = new();
+            // Specials are not in the tiktoken file; supply them (assigned ids after the base vocab).
+            tok.LoadTiktoken(path, ["<|im_start|>", "<|im_end|>", "<|semantic:0|>", "<|semantic:1|>"]);
+
+            Assert.Equal(4, tok.SpecialId("<|im_start|>"));   // base ranks 0..3 → specials start at 4
+            Assert.Equal(5, tok.ImEndId);
+            Assert.Equal(6, tok.SemanticBeginId);
+            Assert.Equal(7, tok.SemanticId(1));
+
+            // "hi" merges to the single id-3 token; specials are peeled off intact.
+            int[] ids = tok.Encode("<|im_start|>hi<|im_end|>");
+            Assert.Equal(new[] { 4, 3, 5 }, ids);
+
+            // Decode drops specials and reconstructs the byte payload.
+            Assert.Equal("hi", tok.Decode(ids));
+
+            // Plain Load() must auto-dispatch to the tiktoken branch by extension.
+            FishSpeechTokenizer viaLoad = new();
+            viaLoad.Load(path);
+            Assert.Equal(new[] { 3 }, viaLoad.Encode("hi"));
+        }
+        finally { File.Delete(path); }
+    }
+
     private static string ByteSymbol(byte b)
     {
         // Mirror FishSpeechTokenizer's GPT-2 byte→unicode table for single-byte tokens.

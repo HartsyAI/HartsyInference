@@ -53,13 +53,23 @@ namespace HartsyInference.Audio.Pipelines;
 /// + style paths are however fully wired.</para></summary>
 public sealed class KokoroPipeline : IDisposable
 {
+    // Single-file repack hosted by tools/repack: the official hexgrad checkpoint flattened +
+    // inner-`module.`-stripped into one safetensors with the flat keys the submodules expect.
+    // Voice packs still come from the original hexgrad repo (see _repoDir), so only the heavy
+    // weights load from here.
+    private const string RepackRepo = "Hartsy/kokoro-82m-safetensors";
+    private const string RepackFile = "kokoro-82m.safetensors";
+    // sha256 of RepackFile, pinned from out/kokoro-82m.manifest.json once the file is published.
+    // Empty until then; when non-empty, LoadAsync verifies the download against it.
+    private const string RepackSha256 = "";
+
     private readonly KokoroConfig _cfg;
     private readonly KokoroPhonemeTokenizer _tokenizer;
     private readonly KokoroPlBert _plBert;
     private readonly KokoroTextEncoder _textEncoder;
     private readonly KokoroProsodyPredictor _predictor;
     private readonly KokoroIStftNetDecoder _decoder;
-    private readonly SafeTensorsLoader? _loader;
+    private readonly IDisposable? _loader;
     private readonly Dictionary<string, KokoroVoicePack> _voicePackCache = new(StringComparer.Ordinal);
     private readonly string _repoDir;
     private int _disposed;
@@ -69,7 +79,7 @@ public sealed class KokoroPipeline : IDisposable
 
     private KokoroPipeline(KokoroConfig cfg, KokoroPhonemeTokenizer tok, KokoroPlBert plBert,
         KokoroTextEncoder textEnc, KokoroProsodyPredictor pred, KokoroIStftNetDecoder dec,
-        SafeTensorsLoader? loader, string repoDir)
+        IDisposable? loader, string repoDir)
     {
         _cfg = cfg;
         _tokenizer = tok;
@@ -91,21 +101,27 @@ public sealed class KokoroPipeline : IDisposable
     {
     }
 
-    /// <summary>Loads the Kokoro-82M pipeline. Downloads the model.safetensors + config.json
-    /// into the HartsyInference cache on first use. Voice packs are loaded lazily by
-    /// <see cref="Synthesize"/>.</summary>
+    /// <summary>Loads the Kokoro-82M pipeline. Downloads the weights (<c>kokoro-v1_0.pth</c>) + config.json
+    /// into the HartsyInference cache on first use. Voice packs are loaded lazily by <see cref="Synthesize"/>.
+    /// <para>The weights are the repacked single-file safetensors produced by <c>tools/repack</c>:
+    /// the offline step did the recursive flatten + inner-<c>module.</c> strip that the runtime used to
+    /// do, so the file already carries the fully-qualified dotted keys (<c>bert.embeddings.…</c>,
+    /// <c>bert_encoder.weight</c>, …) the submodules' <c>LoadWeights</c> expect.</para></summary>
     public static async Task<KokoroPipeline> LoadAsync(CancellationToken ct = default)
     {
-        Task<string> tfWeights = AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "model.safetensors", ct: ct);
-        Task<string> tfConfig = AudioModelCache.GetAsync("hexgrad/Kokoro-82M", "config.json", ct: ct);
+        Task<string> tfWeights = AudioModelCache.GetAsync(RepackRepo, RepackFile, ct: ct);
+        Task<string> tfConfig = AudioModelCache.GetAsync(RepackRepo, "config.json", ct: ct);
         await Task.WhenAll(tfWeights, tfConfig).ConfigureAwait(false);
+
+        if (RepackSha256.Length != 0)
+            AudioModelCache.VerifySha256(tfWeights.Result, RepackSha256);
 
         KokoroConfig cfg = KokoroConfig.V1;
         KokoroPhonemeTokenizer tok = KokoroPhonemeTokenizer.LoadFromConfig(tfConfig.Result);
 
         SafeTensorsLoader loader = new();
         loader.Load(tfWeights.Result);
-        IReadOnlyDictionary<string, Tensor> weights = loader.GetAllTensors();
+        Dictionary<string, Tensor> weights = loader.GetAllTensors();
 
         KokoroPlBert plBert = new(cfg);
         plBert.LoadWeights(weights);

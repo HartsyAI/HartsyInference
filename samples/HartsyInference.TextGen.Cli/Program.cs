@@ -76,6 +76,15 @@ else
     safeLoader.LoadDirectory(repoDir);
     Dictionary<string, Tensor> weights = safeLoader.GetAllTensors();
 
+    // Checkpoints ship bf16/f16 weights. The CUDA backend dequantizes on-device, but the CPU backend is
+    // F32-only, so cast up front for cpu (otherwise the F32 kernels would read past the half-width buffers).
+    if (cuda is null)
+    {
+        foreach (string key in weights.Keys.ToList())
+            if (weights[key].DType != DType.F32)
+                weights[key] = weights[key].CastTo(DType.F32);
+    }
+
     string vocabPath = Path.Combine(repoDir, "vocab.json");
     string mergesPath = Path.Combine(repoDir, "merges.txt");
     tokenizer = File.Exists(vocabPath) && File.Exists(mergesPath)
@@ -100,6 +109,13 @@ GenerationRequest request = new()
     MaxTokens = genTokens,
     Sampling = SamplingOptions.Default with { Greedy = true },
 };
+if (Environment.GetEnvironmentVariable("HARTSY_RAW") == "1")
+{
+    // Bypass the chat template: feed the prompt as raw tokens (BOS + text) to isolate the forward pass.
+    int[] raw = tokenizer.Encode(prompt, addSpecial: true);
+    Console.WriteLine($"RAW ids ({raw.Length}): {string.Join(",", raw)}");
+    request = request with { Prompt = null, RawTokenIds = raw };
+}
 
 if (Environment.GetEnvironmentVariable("HARTSY_DEBUG_PROMPT") == "1")
 {
@@ -154,14 +170,106 @@ if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_BATCH"), out int bat
         totalTokens += r.TokenIds.Count;
         if (!r.TokenIds.SequenceEqual(result.TokenIds)) allMatch = false;
     }
+
+    // T1 discriminator: all requests are identical, so the only difference between the batch sequences is
+    // their position in the batched GEMM (M-row). If they diverge FROM EACH OTHER the batch path is
+    // nondeterministic (a real bug). If they agree with each other but differ from single-seq, the cause is
+    // M=B vs M=1 GEMM-kernel numerics (benign). Report seq-to-seq identity and the first divergence step.
+    List<int> seq0 = [.. batchResults[0].TokenIds];
+    bool seqsMatchEachOther = batchResults.All(r => r.TokenIds.SequenceEqual(seq0));
+    int firstSeqDivergence = -1;
+    for (int s = 1; s < batchResults.Count && firstSeqDivergence < 0; s++)
+    {
+        IReadOnlyList<int> rs = batchResults[s].TokenIds;
+        int m = Math.Min(seq0.Count, rs.Count);
+        for (int t = 0; t < m; t++) if (rs[t] != seq0[t]) { firstSeqDivergence = t; break; }
+        if (firstSeqDivergence < 0 && rs.Count != seq0.Count) firstSeqDivergence = m;
+    }
+    int firstVsSingle = -1;
+    {
+        int m = Math.Min(seq0.Count, result.TokenIds.Count);
+        for (int t = 0; t < m; t++) if (seq0[t] != result.TokenIds[t]) { firstVsSingle = t; break; }
+        if (firstVsSingle < 0 && seq0.Count != result.TokenIds.Count) firstVsSingle = m;
+    }
+
     Console.WriteLine();
     Console.WriteLine($"--- continuous batch (N={batchN}) ---");
     Console.WriteLine($"  aggregate     : {totalTokens} tokens in {bsec:F2}s ({totalTokens / bsec:F2} tok/s aggregate)");
     Console.WriteLine($"  per-seq tok/s : {totalTokens / bsec / batchN:F2}  (single-seq was {n / sec:F2})");
     Console.WriteLine($"  speedup vs N× single-seq : {(totalTokens / bsec) / (n / sec):F2}x");
-    Console.WriteLine($"  token-identical to single-seq: {allMatch}");
+    Console.WriteLine($"  token-identical to single-seq: {allMatch}  (first divergence step: {firstVsSingle})");
+    Console.WriteLine($"  batch seqs identical to EACH OTHER: {seqsMatchEachOther}  (first divergence step: {firstSeqDivergence})");
+    Console.WriteLine($"  >>> diagnosis: {(seqsMatchEachOther ? (allMatch ? "batch == single (no divergence)" : "deterministic batch, differs from single => GEMM M-variance (numerics)") : "NONDETERMINISTIC batch => real bug")}");
     if (cuda is not null)
         Console.WriteLine($"  total D2H syncs: {cuda.GetD2hSyncCount()}");
+}
+
+// ── HARTSY_DIAG=1: logit-level diagnosis of single vs batched decode (T2 bn=1 equivalence, T3 delta).
+// Replays the single-seq token trajectory through both the single decode path (Forward, t=1) and the batched
+// decode path (ForwardBatchDecode with B copies), comparing the post-projection logit rows step by step.
+if (Environment.GetEnvironmentVariable("HARTSY_DIAG") == "1")
+{
+    TransformerConfig dcfg = model.Config;
+    int[] pIds = result.PromptTokens > 0
+        ? (template ?? new ChatMlTemplate()).Encode(tokenizer, [ChatMessage.User(prompt)], addGenerationPrompt: true)
+        : tokenizer.Encode(prompt, addSpecial: true);
+    int diagB = 2;
+    int vocab = dcfg.VocabSize;
+    int maxSeq = pIds.Length + result.TokenIds.Count + 2;
+
+    // Single path: one FixedKvCache; batch path: diagB caches fed identical tokens.
+    using FixedKvCache sCache = new(dcfg.NumLayers, 1, dcfg.NumKvHeads, dcfg.HeadDim, maxSeq);
+    FixedKvCache[] bCaches = new FixedKvCache[diagB];
+    for (int i = 0; i < diagB; i++) bCaches[i] = new FixedKvCache(dcfg.NumLayers, 1, dcfg.NumKvHeads, dcfg.HeadDim, maxSeq);
+
+    // Prefill both with the prompt.
+    int sNext, bNext;
+    using (Tensor h = model.Forward(backend, pIds, 0, sCache))
+    using (Tensor lg = model.ProjectLogits(backend, h, pIds.Length))
+        sNext = ArgMax(lg.AsReadOnlySpan<float>(), (pIds.Length - 1) * vocab, vocab);
+    for (int i = 0; i < diagB; i++)
+        using (Tensor h = model.Forward(backend, pIds, 0, bCaches[i]))
+            _ = h; // prefill only; batch path re-derives its own first token below
+    bNext = sNext;
+
+    Console.WriteLine();
+    Console.WriteLine($"=== HARTSY_DIAG: single vs batched (B={diagB}) logit comparison ===");
+    Console.WriteLine("step  argmax(single)  argmax(batch)  maxAbsDiff   single top1-top2 margin   flip?");
+    int flips = 0;
+    int steps = Math.Min(result.TokenIds.Count, 32);
+    for (int step = 0; step < steps; step++)
+    {
+        // Single decode of one token.
+        float[] sRow;
+        using (Tensor h = model.Forward(backend, [sNext], sCache.CurrentLength, sCache))
+        using (Tensor lg = model.ProjectLogits(backend, h, 1))
+            sRow = lg.AsReadOnlySpan<float>().Slice(0, vocab).ToArray();
+
+        // Batched decode of the SAME token across B identical sequences.
+        float[] bRow;
+        int[] toks = new int[diagB];
+        int[] poss = new int[diagB];
+        for (int i = 0; i < diagB; i++) { toks[i] = bNext; poss[i] = bCaches[i].CurrentLength; }
+        using (Tensor emb = new(new TensorShape(1, diagB, dcfg.HiddenSize), DType.F32))
+        {
+            model.EmbedLookup(emb, toks);
+            using Tensor h = model.ForwardBatchDecode(backend, emb, poss, bCaches);
+            using Tensor lg = model.ProjectLogits(backend, h, diagB);
+            bRow = lg.AsReadOnlySpan<float>().Slice(0, vocab).ToArray(); // row 0
+        }
+
+        int sArg = ArgMax(sRow, 0, vocab), bArg = ArgMax(bRow, 0, vocab);
+        float maxDiff = 0f; for (int j = 0; j < vocab; j++) maxDiff = MathF.Max(maxDiff, MathF.Abs(sRow[j] - bRow[j]));
+        float margin = Top1MinusTop2(sRow, vocab);
+        bool flip = sArg != bArg; if (flip) flips++;
+        if (flip || step < 3 || maxDiff > margin * 0.5f)
+            Console.WriteLine($"{step,4}  {sArg,13}  {bArg,12}  {maxDiff,10:E3}   {margin,22:E3}   {(flip ? "FLIP" : "")}");
+        sNext = sArg; bNext = bArg; // follow each path's own greedy choice
+    }
+    Console.WriteLine($"  total argmax flips in {steps} steps: {flips}");
+    Console.WriteLine("  interpretation: tiny maxAbsDiff (~1e-3 or less) with flips only where margin <= maxAbsDiff confirms");
+    Console.WriteLine("  benign GEMM M-variance (M=B vs M=1 kernel rounding), not a logic bug.");
+    for (int i = 0; i < diagB; i++) bCaches[i].Dispose();
 }
 
 (tokenizer as IDisposable)?.Dispose();
@@ -169,6 +277,20 @@ ggufModel?.Dispose();
 if (ggufModel is null) model.Dispose();
 safeLoader?.Dispose();
 return 0;
+
+static int ArgMax(ReadOnlySpan<float> v, int offset, int n)
+{
+    int best = 0; float bv = v[offset];
+    for (int i = 1; i < n; i++) { float x = v[offset + i]; if (x > bv) { bv = x; best = i; } }
+    return best;
+}
+
+static float Top1MinusTop2(ReadOnlySpan<float> v, int n)
+{
+    float t1 = float.NegativeInfinity, t2 = float.NegativeInfinity;
+    for (int i = 0; i < n; i++) { float x = v[i]; if (x > t1) { t2 = t1; t1 = x; } else if (x > t2) t2 = x; }
+    return t1 - t2;
+}
 
 static (TransformerConfig, string, string) ResolveModel(string arch)
 {

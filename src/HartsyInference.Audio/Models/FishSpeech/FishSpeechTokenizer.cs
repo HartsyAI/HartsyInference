@@ -33,6 +33,9 @@ public sealed class FishSpeechTokenizer
     private readonly Dictionary<byte, char> _byteEncoder;
     private int _semanticBeginId = -1;
     private bool _loaded;
+    // tiktoken vocabs carry no explicit merge list: BPE merges greedily by the rank (id) of the *merged* token,
+    // not by a pair rank. This flag switches EncodeChunk to that algorithm.
+    private bool _tiktokenMode;
 
     public FishSpeechTokenizer()
     {
@@ -61,6 +64,16 @@ public sealed class FishSpeechTokenizer
     {
         if (string.IsNullOrWhiteSpace(vocabPath)) throw new ArgumentException("vocabPath required.", nameof(vocabPath));
         if (!File.Exists(vocabPath)) throw new FileNotFoundException("tokenizer asset not found.", vocabPath);
+
+        // Fish-Speech / OpenAudio checkpoints ship a tiktoken file (one `<base64-bytes> <rank>` per line), not a
+        // JSON vocab. Dispatch by extension, or by sniffing the first non-whitespace byte (JSON starts with '{'
+        // or '['); anything else is treated as tiktoken.
+        if (vocabPath.EndsWith(".tiktoken", StringComparison.OrdinalIgnoreCase) || !LooksLikeJson(vocabPath))
+        {
+            LoadTiktoken(vocabPath);
+            return;
+        }
+
         using FileStream fs = File.OpenRead(vocabPath);
         using JsonDocument doc = JsonDocument.Parse(fs);
         JsonElement root = doc.RootElement;
@@ -93,6 +106,55 @@ public sealed class FishSpeechTokenizer
         {
             int rank = 0;
             foreach ((string a, string b) in merges) _mergeRanks[(a, b)] = rank++;
+        }
+        ResolveSpecials();
+    }
+
+    /// <summary>Loads a tiktoken vocab: one <c>&lt;base64-bytes&gt; &lt;rank&gt;</c> line per mergeable token (the
+    /// rank is the token id). Special tokens are not in the file; pass them via <paramref name="specialTokens"/>
+    /// (assigned contiguous ids after the base vocab) or drop a sibling <c>special_tokens.json</c> (a JSON array
+    /// of strings, or a <c>{token: id}</c> object) next to the tiktoken file. With neither, only the base BPE is
+    /// loaded and <see cref="ImEndId"/>/<see cref="SemanticBeginId"/> stay -1.</summary>
+    public void LoadTiktoken(string tiktokenPath, IEnumerable<string>? specialTokens = null)
+    {
+        if (string.IsNullOrWhiteSpace(tiktokenPath)) throw new ArgumentException("tiktokenPath required.", nameof(tiktokenPath));
+        if (!File.Exists(tiktokenPath)) throw new FileNotFoundException("tiktoken asset not found.", tiktokenPath);
+
+        _tiktokenMode = true;
+        int maxRank = -1;
+        foreach (string line in File.ReadLines(tiktokenPath))
+        {
+            if (line.Length == 0) continue;
+            int sp = line.IndexOf(' ');
+            if (sp <= 0) continue;
+            byte[] raw;
+            try { raw = Convert.FromBase64String(line[..sp]); }
+            catch (FormatException) { continue; }
+            if (!int.TryParse(line.AsSpan(sp + 1), out int rank)) continue;
+            // Store the token as its byte-level-encoded string so BPE merges (and Decode) stay byte-reversible,
+            // exactly as the JSON path does.
+            StringBuilder sb = new(raw.Length);
+            foreach (byte b in raw) sb.Append(_byteEncoder[b]);
+            AddToken(sb.ToString(), rank);
+            if (rank > maxRank) maxRank = rank;
+        }
+        if (_tokenToId.Count == 0) throw new InvalidDataException($"No tiktoken entries parsed from {tiktokenPath}.");
+
+        // Special tokens: explicit list wins; else a sibling special_tokens.json; else none.
+        IEnumerable<string>? specials = specialTokens;
+        if (specials is null)
+        {
+            string sib = Path.Combine(Path.GetDirectoryName(tiktokenPath) ?? ".", "special_tokens.json");
+            if (File.Exists(sib)) LoadSpecialTokensJson(sib, maxRank + 1);
+        }
+        if (specials is not null)
+        {
+            int next = maxRank + 1;
+            foreach (string s in specials)
+            {
+                if (!_tokenToId.ContainsKey(s)) AddToken(s, next++);
+                RegisterSpecial(s);
+            }
         }
         ResolveSpecials();
     }
@@ -198,6 +260,45 @@ public sealed class FishSpeechTokenizer
         }
     }
 
+    private void LoadSpecialTokensJson(string path, int nextId)
+    {
+        using FileStream fs = File.OpenRead(path);
+        using JsonDocument doc = JsonDocument.Parse(fs);
+        JsonElement root = doc.RootElement;
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement e in root.EnumerateArray())
+            {
+                string? tok = e.ValueKind == JsonValueKind.String ? e.GetString()
+                    : e.TryGetProperty("content", out JsonElement c) ? c.GetString() : null;
+                if (string.IsNullOrEmpty(tok)) continue;
+                if (!_tokenToId.ContainsKey(tok)) AddToken(tok, nextId++);
+                RegisterSpecial(tok);
+            }
+        }
+        else if (root.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty p in root.EnumerateObject())
+            {
+                int id = p.Value.ValueKind == JsonValueKind.Number ? p.Value.GetInt32() : nextId++;
+                AddToken(p.Name, id);
+                RegisterSpecial(p.Name);
+            }
+        }
+    }
+
+    private static bool LooksLikeJson(string path)
+    {
+        using FileStream fs = File.OpenRead(path);
+        int b;
+        while ((b = fs.ReadByte()) != -1)
+        {
+            if (b is ' ' or '\t' or '\r' or '\n' or 0xEF or 0xBB or 0xBF) continue; // skip whitespace + UTF-8 BOM
+            return b is '{' or '[';
+        }
+        return false;
+    }
+
     private void AddToken(string token, int id)
     {
         _tokenToId[token] = id;
@@ -249,10 +350,13 @@ public sealed class FishSpeechTokenizer
         {
             int bestRank = int.MaxValue, bestIdx = -1;
             for (int i = 0; i < parts.Count - 1; i++)
-                if (_mergeRanks.TryGetValue((parts[i], parts[i + 1]), out int r) && r < bestRank)
-                {
-                    bestRank = r; bestIdx = i;
-                }
+            {
+                // JSON merges: rank of the (left,right) pair. tiktoken: rank (id) of the merged token itself.
+                bool found = _tiktokenMode
+                    ? _tokenToId.TryGetValue(parts[i] + parts[i + 1], out int r)
+                    : _mergeRanks.TryGetValue((parts[i], parts[i + 1]), out r);
+                if (found && r < bestRank) { bestRank = r; bestIdx = i; }
+            }
             if (bestIdx < 0) break;
             parts[bestIdx] += parts[bestIdx + 1];
             parts.RemoveAt(bestIdx + 1);

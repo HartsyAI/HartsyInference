@@ -2,12 +2,10 @@
 
 **A pure C#/.NET 10 AI inference engine for image, audio, vision, video, 3D, and interactive world models, with zero Python dependencies.**
 
-HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU**. No Python. No C++ wrappers. No external processes. Just NuGet packages. (An OpenAI-compatible REST server is [in progress](#openai-compatible-server-in-progress).)
-
-Designed to pair with [dotLLM](https://github.com/your-org/dotLLM) for LLM inference, forming a complete AI platform in pure .NET.
+HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU**. No Python. No C++ wrappers. No external processes. Just NuGet packages. It's a complete pure-C# inference engine: LLMs + diffusion image models + speech/music + vision + video + 3D + interactive worlds. (An OpenAI-compatible REST server is [in progress](#openai-compatible-server-in-progress).)
 
 > [!NOTE]
-> HartsyInference covers **everything that isn't an LLM**: diffusion image models, speech, music, vision, video, 3D mesh generation, and real-time playable world models. For text generation, pair it with dotLLM.
+> HartsyInference ships with **native LLM text generation** (Qwen, Llama, Mistral, quantized GGUF inference), plus diffusion image models, speech-to-text, text-to-speech, music generation, vision embeddings & detection, video generation, 3D mesh, and real-time interactive world models — all in C#.
 
 ---
 
@@ -82,33 +80,51 @@ dotnet run -c Release --project src/HartsyInference.Cli -- \
   --backend vulkan --prompt "a fox in autumn leaves, studio ghibli style"
 ```
 
+The CLI is a multi-task dispatcher (`--task image|text|music|vision|video|3d|interactive`). Pick the model for
+**any** task with the unified `--model` flag (and `--model-path` for a local checkpoint):
+
+```bash
+# Text generation with a local Qwen3 safetensors checkpoint
+dotnet run -c Release --project src/HartsyInference.Cli -- \
+  --task text --model qwen3 --model-path /models/Qwen3-0.6B \
+  --backend cuda --prompt "In one sentence, what is a transformer?" --text-max-tokens 80
+
+# Image generation, selecting the model by its ComfyUI-layout name
+dotnet run -c Release --project src/HartsyInference.Cli -- \
+  --task image --model StabilityAI/sd-v1-5 --prompt "a fox in autumn leaves"
+```
+
 <details>
 <summary><b>All CLI options</b></summary>
 
 ```text
-Usage: HartsyInference.Cli [options]
+Usage: HartsyInference.Cli --task <task> [options]
 
-Options:
+Tasks:
+  --task image|text|music|vision|video|3d|interactive   (default: image)
+
+Global:
+  --model <name>              Model for ANY task (unified selector; overrides the per-task --*-model flags)
+  --model-path <path>         Path to a model checkpoint/dir (any task)
   --backend cpu|vulkan|cuda   Backend to run on (default: cpu)
-  --prompt "..."              Positive prompt
-  --negative "..."            Negative prompt
-  --width N                   Image width  (default: 256)
-  --height N                  Image height (default: 256)
-  --steps N                   Diffusion steps (default: 20)
-  --cfg N.N                   CFG scale (default: 7.5)
-  --seed N                    RNG seed (default: 42)
   --models <dir>              Override Models root (default: <repo>/Models)
   --output <dir>              Override Output dir   (default: <repo>/Output)
   -h, --help                  Show this help
+
+Image task:
+  --prompt "..."  --negative "..."  --width N  --height N  --steps N  --cfg N.N  --seed N
+
+Text task:
+  --text-model qwen2|qwen3|gguf   --text-model-path <path>   --prompt "..."   --text-max-tokens N
 ```
 
 </details>
 
 > [!TIP]
-> Models are resolved from a ComfyUI-style layout under `<repo>/Models` (e.g. `Models/StabilityAI/sd-v1-5`). Override the root with `--models /path/to/models`. Generated images land in `<repo>/Output`.
+> Image models are resolved from a ComfyUI-style layout under `<repo>/Models` (e.g. `Models/StabilityAI/sd-v1-5`). Override the root with `--models /path/to/models`. Generated images land in `<repo>/Output`. Every per-task `--*-model` flag still works as an alias for `--model`.
 
 > [!IMPORTANT]
-> The CLI is a focused SD1.5 demo. The **full breadth of models** (audio, vision, video, 3D, world models) is exposed through the library API and the OpenAI-compatible server described below.
+> The `image` and `text` tasks run end-to-end today (image is wired to the SD1.5 pipeline; text drives the config-driven LLM transformer). `music`, `vision`, `video`, `3d`, and `interactive` are placeholders in the CLI — that **full breadth of models** is exposed through the library API, the per-modality samples under [`samples/`](samples/), and the OpenAI-compatible server described below.
 
 ---
 
@@ -192,6 +208,49 @@ static Dictionary<string, Tensor> LoadF32(string path)
     return weights;
 }
 ```
+
+</details>
+
+<details>
+<summary><b>Text Generation</b>: LLM text generation (Qwen, Llama, Mistral, quantized GGUF)</summary>
+
+```xml
+<PackageReference Include="HartsyInference.LLM" />
+<PackageReference Include="HartsyInference.Tokenizers" />
+<PackageReference Include="HartsyInference.Cuda" />
+```
+
+```csharp
+using HartsyInference.Core.Backends;
+using HartsyInference.Cuda;
+using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Sampling;
+
+// CUDA backend (use `new CpuBackend()` for CPU).
+using IBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: "Ptx");
+
+// Load a quantized GGUF model. Its tokenizer and chat template are read from the file.
+using GgufLanguageModel model = GgufLanguageModel.Load("models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf");
+backend.PreloadWeights(model.Transformer.EnumerateWeights());   // keep weights GPU-resident (CUDA)
+
+// Pipeline order is (model, tokenizer, backend, template).
+TextGenerationPipeline pipeline = new(model.Transformer, model.Tokenizer, backend, model.Template);
+
+GenerationRequest request = new()
+{
+    Prompt = "What is the capital of France?",
+    MaxTokens = 100,
+    Sampling = SamplingOptions.Default with { Temperature = 0.7f, TopP = 0.95f },   // or `with { Greedy = true }`
+};
+
+GenerationResult result = pipeline.Generate(request);
+Console.WriteLine(result.Text);
+```
+
+> For an F32/bf16 **safetensors** checkpoint (no GGUF), build a `GenericTransformer` from a `TransformerConfig`
+> preset, call `LoadWeights`, and pair it with a `Qwen2Tokenizer(vocabPath, mergesPath)` — see
+> [`samples/HartsyInference.TextGen.Cli`](samples/HartsyInference.TextGen.Cli) for the exact, compile-tested flow.
+> On the CPU backend, cast weights to F32 first (the CPU kernels are F32-only).
 
 </details>
 
@@ -312,6 +371,16 @@ The planned surface is a drop-in replacement for `/v1/images/generations`, `/v1/
 > [!NOTE]
 > **Status legend:** ✅ Complete · 🧪 Validation-pending (built end-to-end, numerics being verified) · 🏗️ Structural (interfaces wired, forward pass in progress)
 
+### Language / Text Generation
+
+| Model | Category | Status |
+|---|---|---|
+| Qwen2.5 (0.5B → 7B) | LLM (native inference) | ✅ |
+| Qwen3 (0.6B → 7B) | LLM (native inference) | ✅ |
+| Llama-3.x | LLM (native inference) | 🏗️ |
+| Mistral (dense) | LLM (native inference) | 🏗️ |
+| Quantized GGUF (Q4/Q8) | LLM (quantized inference, all models) | ✅ |
+
 ### Image Generation
 
 | Model | Architecture | Status |
@@ -336,7 +405,7 @@ The planned surface is a drop-in replacement for `/v1/images/generations`, `/v1/
 | Z-Image Turbo | NextDiT (Qwen3-4B) | 🏗️ |
 | Anima | Cosmos-Predict2-2B (T=1) | 🏗️ |
 
-### Audio
+### Audio & Music
 
 | Model | Category | Status |
 |---|---|---|
@@ -348,9 +417,13 @@ The planned surface is a drop-in replacement for `/v1/images/generations`, `/v1/
 | Spark-TTS | Text-to-speech (BiCodec) | ✅ |
 | CosyVoice | Text-to-speech (Qwen LM + flow) | ✅ |
 | VibeVoice | Text-to-speech (diffusion) | ✅ |
+| Fish-Speech / OpenAudio | Text-to-speech (DualAR + tiktoken tokenizer) | 🧪 |
 | MusicGen | Music generation | ✅ |
+| AudioGen | Sound-effect generation (MusicGen-arch, .bin + T5) | 🧪 |
+| ACE-Step | Music generation (flow-matching) | ✅ |
+| YuE | Music generation (dual-stage Llama) | ✅ |
+| Stable Audio Open | Music generation | 🏗️ |
 | F5-TTS | Voice cloning | 🏗️ |
-| YuE | Music (StableLM) | 🏗️ |
 | Codecs (Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck) | Neural audio codecs | ✅ |
 
 ### Vision
@@ -417,12 +490,13 @@ See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the fu
 |---|---|
 | `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline interfaces |
 | `HartsyInference.ModelHandler` | Safetensors / GGUF / PyTorch loaders, quantization, LoRA, model registry, HuggingFace download |
-| `HartsyInference.Tokenizers` | CLIP, T5, Whisper, SentencePiece tokenizers |
+| `HartsyInference.Tokenizers` | CLIP, T5, Whisper, SentencePiece, Qwen, Llama tokenizers |
 | `HartsyInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
 | `HartsyInference.Cuda` | CUDA backend with PTX kernels and cuBLAS |
 | `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (SPIR-V compute) |
+| `HartsyInference.LLM` | Native LLM text generation (Qwen, Llama, Mistral, GGUF inference, chat templates) |
 | `HartsyInference.Diffusion` | Image pipelines (SD/SDXL/Flux/SD3/MMDiT/NextDiT), VAE, LoRA |
-| `HartsyInference.Audio` | STT, TTS, music, and neural audio codecs |
+| `HartsyInference.Audio` | STT, TTS, music generation, and neural audio codecs |
 | `HartsyInference.Vision` | CLIP/SigLIP/DINO embeddings, YOLO detection, SAM segmentation, face |
 | `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky video generation |
 | `HartsyInference.ThreeD` | Image/text → 3D mesh; glTF/OBJ/PLY export, marching cubes |

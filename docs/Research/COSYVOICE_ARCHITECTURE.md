@@ -430,7 +430,7 @@ Notes for the implementer of `HartsyInference.Audio` CosyVoice pipeline.
 
 3. **Speech tokenizer FSQ — small and pure C#.** This is the simplest of all the components.
    - Port the encoder (6 Transformer blocks with RoPE) using our existing Conformer/Transformer kernels (Parakeet shares this).
-   - Replace the 80-mel input STFT with our `MelSpectrogram` from `HartsyInference.Audio.Preprocessing`.
+   - **Feature, implemented:** the three input encoders consume *different* features and `CosyVoicePipeline` now computes each separately from the raw reference audio — do **not** share one mel: the S3 speech tokenizer takes a **128-bin** Whisper log-mel @16 kHz (`MelSpectrogramExtractor.WhisperConfig(128)`), CAM++ takes an 80-bin **Kaldi** fbank @16 kHz + CMN (`KaldiFbankExtractor`, validated against `torchaudio.compliance.kaldi.fbank` to ~7e-4), and the flow's reference conditioning takes an 80-bin matcha mel @24 kHz (`MelSpectrogramExtractor.CosyVoice2FlowConfig()`).
    - Implement FSQ as pure scalar arithmetic — see exact formula in §4. Two `Linear` layers + `tanh` + `round` + base-3 packing. **No CUDA kernel needed**, but for batched inference we can keep it on GPU via `ITensorPrimitives.Tanh` + a custom `RoundAndPackBase3` PTX kernel (~30 LOC). A SIMD AVX2 CPU path is also viable for clip-by-clip use.
 
 4. **Speaker encoder (CAM++).** ~7M parameters of D-TDNN + context-aware masking. Plan to share the D-TDNN scaffold with our **Parakeet** Conformer encoder work (D-TDNN ≈ a TDNN + dense skip + lightweight context attention; the Conformer's TDNN-style conv module is the closest existing building block). Roughly 1-2 days of porting; reference weights from `campplus.onnx`.

@@ -1,0 +1,32 @@
+{
+  "tool_version": "1",
+  "name": "kokoro-82m",
+  "source_repo": "hexgrad/Kokoro-82M",
+  "revision": "main",
+  "license": "apache-2.0",
+  "redistribute": false,
+  "target_repo": "Hartsy/kokoro-82m-safetensors",
+  "output_file": "kokoro-82m.safetensors",
+  "output_sha256": "2a9046e33ad44c13f203c2c0fea95f5fc9d1299f3e5cc1b4a6563c75585dd7de",
+  "tensor_count": 548,
+  "dtype_cast": null,
+  "sources": [
+    {
+      "file": "kokoro-v1_0.pth",
+      "sha256": "496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4"
+    }
+  ],
+  "components": [
+    {
+      "source_file": "kokoro-v1_0.pth",
+      "prefix": "",
+      "flatten": true,
+      "transforms": [
+        "strip_inner_module"
+      ]
+    }
+  ],
+  "extra_files": [
+    "config.json"
+  ]
+}
