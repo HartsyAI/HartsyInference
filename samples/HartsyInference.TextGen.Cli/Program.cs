@@ -101,6 +101,14 @@ GenerationRequest request = new()
     Sampling = SamplingOptions.Default with { Greedy = true },
 };
 
+if (Environment.GetEnvironmentVariable("HARTSY_DEBUG_PROMPT") == "1")
+{
+    List<ChatMessage> dbgMsgs = [ChatMessage.User(prompt)];
+    int[] pids = (template ?? new ChatMlTemplate()).Encode(tokenizer, dbgMsgs, addGenerationPrompt: true);
+    Console.WriteLine($"DEBUG prompt ids ({pids.Length}): {string.Join(",", pids)}");
+    Console.WriteLine($"DEBUG prompt decode: [{tokenizer.Decode(pids)}]");
+}
+
 cuda?.ResetD2hSyncCount();
 backend.Sync();
 Stopwatch sw = Stopwatch.StartNew();

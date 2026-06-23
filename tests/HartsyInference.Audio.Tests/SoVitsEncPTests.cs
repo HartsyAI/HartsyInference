@@ -38,7 +38,8 @@ public sealed unsafe class SoVitsEncPTests
     [Fact]
     public void EncP_SyntheticForward_ProducesFinitePrior()
     {
-        int gin = 4, ssl = 6, mrteHidden = 8, mrteHeads = 2;
+        // ge is added directly in the MRTE channel space, so gin_channels == mrte hidden_size.
+        int gin = 8, ssl = 6, mrteHidden = 8, mrteHeads = 2;
         VitsConfig core = new()
         {
             InterChannels = 4, HiddenChannels = 4, FilterChannels = 8, NumHeads = 2,
@@ -69,8 +70,8 @@ public sealed unsafe class SoVitsEncPTests
     {
         return new Dictionary<string, Tensor>
         {
-            ["ref_enc.spectral.0.weight"] = F2(hidden, nMels), ["ref_enc.spectral.0.bias"] = F1(hidden),
-            ["ref_enc.spectral.3.weight"] = F2(hidden, hidden), ["ref_enc.spectral.3.bias"] = F1(hidden),
+            ["ref_enc.spectral.0.fc.weight"] = F2(hidden, nMels), ["ref_enc.spectral.0.fc.bias"] = F1(hidden),
+            ["ref_enc.spectral.3.fc.weight"] = F2(hidden, hidden), ["ref_enc.spectral.3.fc.bias"] = F1(hidden),
             ["ref_enc.temporal.0.conv1.conv.weight"] = F3(2 * hidden, hidden, kernel),
             ["ref_enc.temporal.0.conv1.conv.bias"] = F1(2 * hidden),
             ["ref_enc.temporal.1.conv1.conv.weight"] = F3(2 * hidden, hidden, kernel),
@@ -79,7 +80,7 @@ public sealed unsafe class SoVitsEncPTests
             ["ref_enc.slf_attn.w_ks.weight"] = F2(hidden, hidden), ["ref_enc.slf_attn.w_ks.bias"] = F1(hidden),
             ["ref_enc.slf_attn.w_vs.weight"] = F2(hidden, hidden), ["ref_enc.slf_attn.w_vs.bias"] = F1(hidden),
             ["ref_enc.slf_attn.fc.weight"] = F2(hidden, hidden), ["ref_enc.slf_attn.fc.bias"] = F1(hidden),
-            ["ref_enc.fc.weight"] = F2(styleDim, hidden), ["ref_enc.fc.bias"] = F1(styleDim),
+            ["ref_enc.fc.fc.weight"] = F2(styleDim, hidden), ["ref_enc.fc.fc.bias"] = F1(styleDim),
         };
     }
 
@@ -91,13 +92,14 @@ public sealed unsafe class SoVitsEncPTests
             ["enc_p.ssl_proj.weight"] = F3(h, ssl, 1), ["enc_p.ssl_proj.bias"] = F1(h),
             ["enc_p.text_embedding.weight"] = F2(codebook, h),
             ["enc_p.proj.weight"] = F3(2 * inter, h, 1), ["enc_p.proj.bias"] = F1(2 * inter),
-            ["enc_p.mrte.c_pre.weight"] = F3(h, h, 1), ["enc_p.mrte.c_pre.bias"] = F1(h),
+            // c_pre/text_pre lift h→mrte_hidden; cross-attention runs in mrte_hidden; c_post maps back to h.
+            ["enc_p.mrte.c_pre.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.c_pre.bias"] = F1(mrteHidden),
             ["enc_p.mrte.c_post.weight"] = F3(h, mrteHidden, 1), ["enc_p.mrte.c_post.bias"] = F1(h),
-            ["enc_p.mrte.cross_attention.conv_q.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.cross_attention.conv_q.bias"] = F1(mrteHidden),
-            ["enc_p.mrte.cross_attention.conv_k.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.cross_attention.conv_k.bias"] = F1(mrteHidden),
-            ["enc_p.mrte.cross_attention.conv_v.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.cross_attention.conv_v.bias"] = F1(mrteHidden),
+            ["enc_p.mrte.cross_attention.conv_q.weight"] = F3(mrteHidden, mrteHidden, 1), ["enc_p.mrte.cross_attention.conv_q.bias"] = F1(mrteHidden),
+            ["enc_p.mrte.cross_attention.conv_k.weight"] = F3(mrteHidden, mrteHidden, 1), ["enc_p.mrte.cross_attention.conv_k.bias"] = F1(mrteHidden),
+            ["enc_p.mrte.cross_attention.conv_v.weight"] = F3(mrteHidden, mrteHidden, 1), ["enc_p.mrte.cross_attention.conv_v.bias"] = F1(mrteHidden),
             ["enc_p.mrte.cross_attention.conv_o.weight"] = F3(mrteHidden, mrteHidden, 1), ["enc_p.mrte.cross_attention.conv_o.bias"] = F1(mrteHidden),
-            ["enc_p.mrte.text_pre.weight"] = F3(h, gin, 1), ["enc_p.mrte.text_pre.bias"] = F1(h),
+            ["enc_p.mrte.text_pre.weight"] = F3(mrteHidden, h, 1), ["enc_p.mrte.text_pre.bias"] = F1(mrteHidden),
         };
         AddEncoder(w, "enc_p.encoder_ssl", 2, h, f, kc, win);
         AddEncoder(w, "enc_p.encoder_text", 2, h, f, kc, win);

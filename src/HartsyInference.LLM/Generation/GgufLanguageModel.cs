@@ -59,8 +59,20 @@ public sealed class GgufLanguageModel : IDisposable
         int? eot = meta.ContainsKey("tokenizer.ggml.eot_token_id") ? (int)meta.GetUInt32("tokenizer.ggml.eot_token_id") : null;
         List<int> extraStops = [];
         if (eot is int e) extraStops.Add(e);
-        return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops);
+
+        // Pre-tokenizer family decides the regex split + ignore_merges. The GPT-2/Qwen default keeps word
+        // spaces and newline runs; the Llama-3 family (llama-bpe) uses a different split (case-insensitive
+        // contractions, digits in groups of ≤3, newline-aware whitespace) and emits whole in-vocab pre-tokens
+        // directly (ignore_merges). Wrong split → wrong token ids → garbage output.
+        string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
+        bool llama3Family = pre is "llama-bpe" or "llama3" or "smaug-bpe";
+        string? preRegex = llama3Family ? Llama3PreTokenRegex : null;
+        return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, preRegex, ignoreMerges: llama3Family);
     }
+
+    // Llama-3 / GPT-4 byte-level pre-token split (matches llama.cpp LLAMA3 + HF tokenizer.json).
+    private const string Llama3PreTokenRegex =
+        @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
     /// <summary>Loads the GGUF at <paramref name="path"/>. Set <paramref name="lowVramQuant"/> to keep weights
     /// compressed on-device (low VRAM, slower decode) instead of caching dequantized F16 weights.</summary>
