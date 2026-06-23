@@ -53,7 +53,8 @@ public sealed unsafe class GptSoVitsTests
     [Fact]
     public void SoVits_SyntheticForward_SemanticTokensToFiniteAudio()
     {
-        int gin = 4, ssl = 6, mrteHidden = 8;
+        // GPT-SoVITS adds ge directly in the MRTE channel space, so gin_channels == mrte hidden_size.
+        int gin = 8, ssl = 6, mrteHidden = 8;
         VitsConfig core = new()
         {
             InterChannels = 8, HiddenChannels = 8, FilterChannels = 16, NumHeads = 2, WindowSize = 2,
@@ -67,8 +68,9 @@ public sealed unsafe class GptSoVitsTests
         sv.LoadWeights(SoVitsWeights(core, gin, ssl, mrteHidden, codebookSize: 5));
 
         int[] semantic = [2, 0, 4];
+        int[] phonemes = [1, 0, 2, 1];
         using Tensor ge = F3(1, gin, 1);
-        float[] audio = sv.Forward(backend, semantic, ge, seed: 4);
+        float[] audio = sv.Forward(backend, semantic, phonemes, ge, seed: 4);
         Assert.True(audio.Length > 0);
         foreach (float s in audio) Assert.True(float.IsFinite(s));
     }

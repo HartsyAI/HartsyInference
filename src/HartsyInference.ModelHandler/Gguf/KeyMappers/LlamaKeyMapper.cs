@@ -76,6 +76,9 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
             return $"model.layers.{blockIdx}.{mappedSuffix}";
         }
 
+        // rope_freqs.weight is the precomputed per-frequency multiplier llama.cpp bakes from Llama-3 rope
+        // scaling; keep it (the LLM applies it via RopeFrequencyBuilder). Other rope_* tensors are unused.
+        if (ggufKey.Equals("rope_freqs.weight", StringComparison.Ordinal)) return "model.rope_freqs.weight";
         if (ggufKey.StartsWith("rope_", StringComparison.Ordinal)) return null;
         if (ggufKey.StartsWith("position_embd.", StringComparison.Ordinal)) return null;
 

@@ -470,6 +470,48 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Gathers rows: <c>output[m] = input[rowIndices[m]]</c>, where a "row" is the last-dim-sized
+    /// vector. <paramref name="output"/> is <c>[M, K]</c>, <paramref name="input"/> <c>[N, K]</c>,
+    /// <paramref name="rowIndices"/> length M. Used for MoE expert dispatch (collect the tokens routed to one
+    /// expert into a contiguous group). The CUDA backend overrides this; the default is a host gather.</summary>
+    unsafe void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("GatherRows default fallback only supports F32.");
+        int k = (int)input.Shape[input.Shape.Rank - 1];
+        int m = rowIndices.Length;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (int row = 0; row < m; row++)
+        {
+            long src = (long)rowIndices[row] * k;
+            long dst = (long)row * k;
+            Buffer.MemoryCopy(pIn + src, pOut + dst, (long)k * 4, (long)k * 4);
+        }
+    }
+
+    /// <summary>Scatter-add with per-row scale: <c>output[rowIndices[m]] += scales[m] * input[m]</c>.
+    /// <paramref name="input"/> is <c>[M, K]</c>, <paramref name="output"/> <c>[N, K]</c> (must be pre-zeroed /
+    /// already accumulating), <paramref name="rowIndices"/> + <paramref name="scales"/> length M. Used to combine
+    /// each MoE expert's weighted contribution back into the per-token output. Within one call the indices are
+    /// distinct; calling once per expert into the same output accumulates the mixture. CUDA backend overrides.</summary>
+    unsafe void ScatterAddWeightedRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices, ReadOnlySpan<float> scales)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("ScatterAddWeightedRows default fallback only supports F32.");
+        int k = (int)input.Shape[input.Shape.Rank - 1];
+        int m = rowIndices.Length;
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (int row = 0; row < m; row++)
+        {
+            float s = scales[row];
+            long dst = (long)rowIndices[row] * k;
+            long src = (long)row * k;
+            for (int j = 0; j < k; j++) pOut[dst + j] += s * pIn[src + j];
+        }
+    }
+
     /// <summary>In-place KV-cache append: writes <paramref name="newKv"/> <c>[1, H, tNew, D]</c> into the
     /// fixed-capacity <paramref name="buffer"/> <c>[1, H, maxSeq, D]</c> starting at sequence position
     /// <paramref name="offset"/> (per head). Lets a KV cache grow without reallocating (O(tNew)/step vs the

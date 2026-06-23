@@ -12,7 +12,9 @@ public sealed record Text2SemanticConfig
     public int HeadDim => Hidden / NumHeads;     // 32
     public int FfnDim { get; init; } = 2_048;    // hidden * 4
 
-    public int PhonemeVocab { get; init; } = 732;     // v2
+    // s1's AR phoneme vocab is 512 (distinct from the s2 SoVITS text_embedding's 732 — GPT-SoVITS uses
+    // different phoneme symbol sets for the two stages). Confirmed vs s1bert25hz ar_text_embedding [512, 512].
+    public int PhonemeVocab { get; init; } = 512;
     public int SemanticVocab { get; init; } = 1_025;  // 1024 codes + EOS
     public int EosToken { get; init; } = 1_024;
     public int BertDim { get; init; } = 1_024;        // chinese-roberta-wwm-ext-large

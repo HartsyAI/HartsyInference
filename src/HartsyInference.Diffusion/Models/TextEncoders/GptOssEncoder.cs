@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
@@ -274,44 +275,20 @@ public sealed unsafe class GptOssEncoder : IDisposable
         while (rounded < targetLen) rounded <<= 1;
         targetLen = Math.Min(rounded, _config.MaxPositionEmbeddings);
 
-        // Base (extrapolation) inverse frequencies: inv_freq[k] = base^-(2k/dim).
-        double[] invFreq = new double[halfDim];
-        for (int k = 0; k < halfDim; k++)
-            invFreq[k] = 1.0 / Math.Pow(_config.RopeTheta, (double)(2 * k) / dim);
-
-        double attentionScaling = 1.0;
-        if (_config.RopeScaling == RopeScalingType.Yarn)
-        {
-            double factor = _config.YarnFactor;
-            double betaFast = _config.YarnBetaFast;
-            double betaSlow = _config.YarnBetaSlow;
-            double origMaxPos = _config.YarnOriginalMaxPosition;
-            double logBase = Math.Log(_config.RopeTheta);
-
-            // find_correction_dim: dimension index at which a given rotation count completes.
-            double FindCorrectionDim(double numRotations) =>
-                (dim * Math.Log(origMaxPos / (numRotations * 2.0 * Math.PI))) / (2.0 * logBase);
-
-            // truncate=false for GPT-OSS → no floor/ceil, just clamp into [0, dim-1].
-            double low = Math.Max(FindCorrectionDim(betaFast), 0.0);
-            double high = Math.Min(FindCorrectionDim(betaSlow), dim - 1);
-            double rampDenom = high == low ? 0.001 : high - low;
-
-            for (int k = 0; k < halfDim; k++)
+        // Inverse frequencies + YaRN mscale via the shared RopeFrequencyBuilder (the same scaling math the LLM
+        // decoder uses; this encoder was the original source of the ported YaRN). YaRN is position-independent,
+        // so currentSeqLen is irrelevant here.
+        RopeScaling ropeScaling = _config.RopeScaling == RopeScalingType.Yarn
+            ? new RopeScaling
             {
-                // linear_ramp_factor over dim//2 indices, clamped to [0, 1].
-                double ramp = (k - low) / rampDenom;
-                if (ramp < 0.0) ramp = 0.0;
-                else if (ramp > 1.0) ramp = 1.0;
-                double extrapolationFactor = 1.0 - ramp;       // 1 → keep, 0 → fully scaled
-                double extrapolation = invFreq[k];             // original
-                double interpolation = invFreq[k] / factor;    // scaled by 1/factor
-                invFreq[k] = interpolation * (1.0 - extrapolationFactor) + extrapolation * extrapolationFactor;
+                Type = RopeScalingType.Yarn,
+                Factor = _config.YarnFactor,
+                BetaFast = _config.YarnBetaFast,
+                BetaSlow = _config.YarnBetaSlow,
+                OriginalContextLength = _config.YarnOriginalMaxPosition,
             }
-
-            // Inferred attention_factor (mscale) = get_mscale(factor) = 0.1·ln(factor)+1 for factor > 1.
-            attentionScaling = factor <= 1.0 ? 1.0 : 0.1 * Math.Log(factor) + 1.0;
-        }
+            : RopeScaling.None;
+        (double[] invFreq, double attentionScaling) = RopeFrequencyBuilder.Build(dim, _config.RopeTheta, ropeScaling, targetLen);
 
         _ropeCos = new float[targetLen * halfDim];
         _ropeSin = new float[targetLen * halfDim];

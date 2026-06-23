@@ -70,7 +70,7 @@ public sealed unsafe class ChatterboxPipelineTests
         using ChatterboxT3 t3 = new(cfg);
         using CosyVoiceFlow flow = new(cosyCfg);
         using HiFTNetVocoder vocoder = new(hiftCfg);
-        using CamPlusSpeakerEncoder spkEnc = new(mel, camDim);
+        using CamPlusSpeakerEncoder spkEnc = new(camDim);
         using ChatterboxPipeline pipe = new(cfg, t3, flow, vocoder, spkEnc);
 
         t3.LoadWeights(T3Weights(cfg));

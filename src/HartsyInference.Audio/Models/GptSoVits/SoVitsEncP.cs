@@ -140,32 +140,34 @@ public sealed unsafe class SoVitsEncP
     /// text key/value), project back to <c>hidden</c>, then add the broadcast speaker embedding <c>ge</c>.</summary>
     private Tensor Mrte(IBackend backend, Tensor ssl, int t, Tensor text, int tt, Tensor ge)
     {
-        // Lift SSL into the MRTE channel space (c_pre: hidden → mrte_hidden).
+        // c_pre / text_pre lift ssl (query) and text (key/value) into the MRTE channel space (hidden → mrte_hidden).
+        Tensor sslEnc = new(new TensorShape(1, _mrteHidden, t), DType.F32);
+        backend.Conv1d(sslEnc, ssl, _mrteCInW!, _mrteCInB, 1, 0, 0, 1, 1);
+        Tensor textEnc = new(new TensorShape(1, _mrteHidden, tt), DType.F32);
+        backend.Conv1d(textEnc, text, _mrteGeW!, _mrteGeB, 1, 0, 0, 1, 1);     // _mrteGeW = mrte.text_pre
+
         Tensor q = new(new TensorShape(1, _mrteHidden, t), DType.F32);
-        backend.Conv1d(q, ssl, _mrteCrossQW!, _mrteCrossQB, 1, 0, 0, 1, 1);
+        backend.Conv1d(q, sslEnc, _mrteCrossQW!, _mrteCrossQB, 1, 0, 0, 1, 1);
         Tensor k = new(new TensorShape(1, _mrteHidden, tt), DType.F32);
-        backend.Conv1d(k, text, _mrteCrossKW!, _mrteCrossKB, 1, 0, 0, 1, 1);
+        backend.Conv1d(k, textEnc, _mrteCrossKW!, _mrteCrossKB, 1, 0, 0, 1, 1);
         Tensor v = new(new TensorShape(1, _mrteHidden, tt), DType.F32);
-        backend.Conv1d(v, text, _mrteCrossVW!, _mrteCrossVB, 1, 0, 0, 1, 1);
+        backend.Conv1d(v, textEnc, _mrteCrossVW!, _mrteCrossVB, 1, 0, 0, 1, 1);
+        textEnc.Dispose();
 
         Tensor attn = CrossAttention(q, t, k, v, tt);
         q.Dispose(); k.Dispose(); v.Dispose();
         Tensor o = new(new TensorShape(1, _mrteHidden, t), DType.F32);
         backend.Conv1d(o, attn, _mrteCrossOW!, _mrteCrossOB, 1, 0, 0, 1, 1); attn.Dispose();
 
-        // c_post: mrte_hidden → hidden, then add the (channel-projected) speaker embedding broadcast over time.
+        // x = cross_attention(...) + ssl_enc + ge  (all in mrte_hidden; ge [1, mrte_hidden, 1] broadcast over time).
+        float* op = (float*)o.DataPointer, sp = (float*)sslEnc.DataPointer, gp = (float*)ge.DataPointer;
+        for (int c = 0; c < _mrteHidden; c++)
+            for (int j = 0; j < t; j++) op[(long)c * t + j] += sp[(long)c * t + j] + gp[c];
+        sslEnc.Dispose();
+
+        // c_post: mrte_hidden → hidden.
         Tensor outT = new(new TensorShape(1, _hidden, t), DType.F32);
         backend.Conv1d(outT, o, _mrteCOutW!, _mrteCOutB, 1, 0, 0, 1, 1); o.Dispose();
-        if (_mrteGeW is not null)
-        {
-            Tensor geProj = new(new TensorShape(1, _hidden, 1), DType.F32);
-            backend.Conv1d(geProj, ge, _mrteGeW, _mrteGeB, 1, 0, 0, 1, 1);
-            float* op = (float*)outT.DataPointer;
-            float* gp = (float*)geProj.DataPointer;
-            for (int c = 0; c < _hidden; c++)
-                for (int j = 0; j < t; j++) op[(long)c * t + j] += gp[c];
-            geProj.Dispose();
-        }
         return outT;
     }
 
@@ -232,9 +234,10 @@ public sealed unsafe class SoVitsEncP
             _kW = VitsWeights.Conv(w, $"{prefix}.attn_layers.{i}.conv_k"); _kB = VitsWeights.Bias(w, $"{prefix}.attn_layers.{i}.conv_k");
             _vW = VitsWeights.Conv(w, $"{prefix}.attn_layers.{i}.conv_v"); _vB = VitsWeights.Bias(w, $"{prefix}.attn_layers.{i}.conv_v");
             _oW = VitsWeights.Conv(w, $"{prefix}.attn_layers.{i}.conv_o"); _oB = VitsWeights.Bias(w, $"{prefix}.attn_layers.{i}.conv_o");
-            _relK = w[$"{prefix}.attn_layers.{i}.emb_rel_k"]; _relV = w[$"{prefix}.attn_layers.{i}.emb_rel_v"];
-            _norm1G = w[$"{prefix}.norm_layers_1.{i}.gamma"]; _norm1B = w[$"{prefix}.norm_layers_1.{i}.beta"];
-            _norm2G = w[$"{prefix}.norm_layers_2.{i}.gamma"]; _norm2B = w[$"{prefix}.norm_layers_2.{i}.beta"];
+            // EnsureF32: fp16 checkpoints (GPT-SoVITS s2) store these directly (not via VitsWeights).
+            _relK = WhisperOps.EnsureF32(w[$"{prefix}.attn_layers.{i}.emb_rel_k"]); _relV = WhisperOps.EnsureF32(w[$"{prefix}.attn_layers.{i}.emb_rel_v"]);
+            _norm1G = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_1.{i}.gamma"]); _norm1B = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_1.{i}.beta"]);
+            _norm2G = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_2.{i}.gamma"]); _norm2B = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_2.{i}.beta"]);
             _ffn1W = VitsWeights.Conv(w, $"{prefix}.ffn_layers.{i}.conv_1"); _ffn1B = VitsWeights.Bias(w, $"{prefix}.ffn_layers.{i}.conv_1");
             _ffn2W = VitsWeights.Conv(w, $"{prefix}.ffn_layers.{i}.conv_2"); _ffn2B = VitsWeights.Bias(w, $"{prefix}.ffn_layers.{i}.conv_2");
         }
@@ -275,13 +278,16 @@ public sealed unsafe class SoVitsEncP
                     float maxS = float.NegativeInfinity;
                     for (int j = 0; j < t; j++)
                     {
-                        int rel = Math.Clamp(j - i, -w, w) + w;
+                        // Relative-position embeddings are zero-padded outside ±window (not clamped to the edge).
+                        int delta = j - i;
+                        bool inWin = delta >= -w && delta <= w;
+                        int rel = delta + w;
                         float dot = 0, relDot = 0;
                         for (int c = 0; c < kc; c++)
                         {
                             float qv = qp[(long)(chBase + c) * t + i];
                             dot += qv * kp[(long)(chBase + c) * t + j];
-                            relDot += qv * rk[(long)rel * kc + c];
+                            if (inWin) relDot += qv * rk[(long)rel * kc + c];
                         }
                         float s = (dot + relDot) * invSqrt;
                         scores[j] = s;
@@ -296,8 +302,9 @@ public sealed unsafe class SoVitsEncP
                         for (int j = 0; j < t; j++)
                         {
                             float p = scores[j] * inv;
-                            int rel = Math.Clamp(j - i, -w, w) + w;
-                            acc += p * (vp[(long)(chBase + c) * t + j] + rv[(long)rel * kc + c]);
+                            int delta = j - i;
+                            float rvc = (delta >= -w && delta <= w) ? rv[(long)(delta + w) * kc + c] : 0f;
+                            acc += p * (vp[(long)(chBase + c) * t + j] + rvc);
                         }
                         op[(long)(chBase + c) * t + i] = acc;
                     }

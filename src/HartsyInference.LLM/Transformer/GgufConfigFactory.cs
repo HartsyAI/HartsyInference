@@ -1,3 +1,4 @@
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.Gguf;
 
@@ -59,7 +60,40 @@ public static class GgufConfigFactory
             TieWordEmbeddings = tied,
             // HF Qwen2/Qwen3 text models use split-half rotate_half (matches llama.cpp NEOX rope for these archs).
             Rope = RopeStyle.SplitHalf,
+            RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
+        };
+    }
+
+    /// <summary>RoPE scaling from GGUF: the precomputed <c>rope_freqs.weight</c> per-frequency multiplier when
+    /// present (llama.cpp bakes Llama-3 scaling there), else the <c>{arch}.rope.scaling.*</c> metadata
+    /// (yarn/linear). Returns <see cref="RopeScaling.None"/> for standard RoPE (Qwen/Mistral).</summary>
+    private static unsafe RopeScaling BuildRopeScaling(GgufMetadata metadata, string arch,
+        IReadOnlyDictionary<string, Tensor> weights, int headDim)
+    {
+        if (weights.TryGetValue("model.rope_freqs.weight", out Tensor? rf))
+        {
+            Tensor f32 = rf.DType == DType.F32 ? rf : rf.CastTo(DType.F32);
+            int n = Math.Min(headDim / 2, (int)f32.ElementCount);
+            float[] factors = new float[n];
+            float* p = (float*)f32.DataPointer;
+            for (int i = 0; i < n; i++) factors[i] = p[i];
+            return new RopeScaling { Type = RopeScalingType.Llama3, InvFreqFactors = factors };
+        }
+
+        string type = (metadata.GetString($"{arch}.rope.scaling.type") ?? "").ToLowerInvariant();
+        if (type.Length == 0 || type == "none") return RopeScaling.None;
+
+        double factor = metadata.GetFloat32($"{arch}.rope.scaling.factor", 1f);
+        double origCtx = metadata.GetUInt32($"{arch}.rope.scaling.original_context_length", 0u);
+        double attn = metadata.ContainsKey($"{arch}.rope.scaling.attn_factor")
+            ? metadata.GetFloat32($"{arch}.rope.scaling.attn_factor")
+            : double.NaN;
+        return type switch
+        {
+            "linear" => new RopeScaling { Type = RopeScalingType.Linear, Factor = factor },
+            "yarn" => new RopeScaling { Type = RopeScalingType.Yarn, Factor = factor, OriginalContextLength = origCtx, AttentionFactor = attn },
+            _ => RopeScaling.None,
         };
     }
 

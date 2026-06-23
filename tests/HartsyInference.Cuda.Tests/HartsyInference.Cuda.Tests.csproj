@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.LLM\HartsyInference.LLM.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
     <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>

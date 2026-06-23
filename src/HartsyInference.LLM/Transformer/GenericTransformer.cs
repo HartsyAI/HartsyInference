@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -59,7 +60,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         _embed = EnsureF32(w[$"{prefix}.embed_tokens.weight"]);
         _finalNorm = EnsureF32(w[$"{prefix}.norm.weight"]);
-        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}");
+        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
         // lm_head stays in its loaded dtype (quant kept for the dequant/fused matmul path); the matmul backend
         // handles quantized weights. Only the embed table is forced to F32 (host gather).
         if (!_cfg.TieWordEmbeddings) _lmHead = w[lmHeadKey ?? "lm_head.weight"];
@@ -73,7 +74,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     {
         ThrowIfDisposed();
         _finalNorm = EnsureF32(w[$"{prefix}.norm.weight"]);
-        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}");
+        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
     /// <summary>All weight tensors (stable references) for <see cref="IBackend.PreloadWeights"/> /
@@ -116,7 +117,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         Tensor cos = new(new TensorShape(1, t, d), DType.F32);
         Tensor sin = new(new TensorShape(1, t, d), DType.F32);
-        BuildRope(cos, sin, t, posStart, d, _cfg.RopeTheta);
+        BuildRope(cos, sin, t, posStart, d, _cfg.RopeTheta, _cfg.RopeScaling);
 
         try
         {
@@ -170,7 +171,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         Tensor cos = new(new TensorShape(1, b, d), DType.F32);
         Tensor sin = new(new TensorShape(1, b, d), DType.F32);
-        BuildRopeBatched(cos, sin, positions, d, _cfg.RopeTheta);
+        BuildRopeBatched(cos, sin, positions, d, _cfg.RopeTheta, _cfg.RopeScaling);
         try
         {
             Tensor hidden = embeds;
@@ -198,9 +199,12 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Per-row RoPE table for a ragged decode batch: row b uses absolute position <paramref name="positions"/>[b]
     /// (same split-half layout as <see cref="BuildRope"/>, so both RoPE styles consume it identically).</summary>
-    private static void BuildRopeBatched(Tensor cos, Tensor sin, ReadOnlySpan<int> positions, int headDim, float theta)
+    private static void BuildRopeBatched(Tensor cos, Tensor sin, ReadOnlySpan<int> positions, int headDim, float theta, RopeScaling scaling)
     {
         int half = headDim / 2;
+        int maxPos = 0;
+        for (int s = 0; s < positions.Length; s++) maxPos = Math.Max(maxPos, positions[s]);
+        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(headDim, theta, scaling, maxPos + 1);
         float* pc = (float*)cos.DataPointer;
         float* ps = (float*)sin.DataPointer;
         for (int s = 0; s < positions.Length; s++)
@@ -209,10 +213,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             long baseOff = (long)s * headDim;
             for (int i = 0; i < half; i++)
             {
-                double freq = 1.0 / Math.Pow(theta, (double)(2 * i) / headDim);
-                double angle = pos * freq;
-                float c = (float)Math.Cos(angle);
-                float si = (float)Math.Sin(angle);
+                double angle = pos * invFreq[i];
+                float c = (float)(Math.Cos(angle) * mscale);
+                float si = (float)(Math.Sin(angle) * mscale);
                 pc[baseOff + i] = c; pc[baseOff + i + half] = c;
                 ps[baseOff + i] = si; ps[baseOff + i + half] = si;
             }
@@ -248,9 +251,10 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>,
     /// <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of
     /// <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2 / Qwen3 / Llama).</summary>
-    private static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, float theta)
+    private static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, float theta, RopeScaling scaling)
     {
         int half = headDim / 2;
+        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(headDim, theta, scaling, posStart + t);
         float* pc = (float*)cos.DataPointer;
         float* ps = (float*)sin.DataPointer;
         for (int s = 0; s < t; s++)
@@ -259,10 +263,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             long baseOff = (long)s * headDim;
             for (int i = 0; i < half; i++)
             {
-                double freq = 1.0 / Math.Pow(theta, (double)(2 * i) / headDim);
-                double angle = pos * freq;
-                float c = (float)Math.Cos(angle);
-                float si = (float)Math.Sin(angle);
+                double angle = pos * invFreq[i];
+                float c = (float)(Math.Cos(angle) * mscale);
+                float si = (float)(Math.Sin(angle) * mscale);
                 pc[baseOff + i] = c; pc[baseOff + i + half] = c;
                 ps[baseOff + i] = si; ps[baseOff + i + half] = si;
             }
@@ -290,10 +293,11 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW;
         private Tensor? _qNorm, _kNorm;
         private Tensor? _gateW, _upW, _downW;
+        private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
 
         public Layer(TransformerConfig cfg) => _cfg = cfg;
 
-        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, int layerIndex)
         {
             // Norms and biases are forced to F32; projection weights keep their loaded dtype (quant or float)
             // so the matmul backend can dequant-on-the-fly (or run a fused quantized GEMV) without an F32 copy.
@@ -314,15 +318,52 @@ public sealed unsafe class GenericTransformer : IDisposable
                 _qNorm = EnsureF32(w[$"{prefix}.self_attn.q_norm.weight"]);
                 _kNorm = EnsureF32(w[$"{prefix}.self_attn.k_norm.weight"]);
             }
-            _gateW = w[$"{prefix}.mlp.gate_proj.weight"];
-            _upW = w[$"{prefix}.mlp.up_proj.weight"];
-            _downW = w[$"{prefix}.mlp.down_proj.weight"];
+            if (_cfg.IsMoeLayer(layerIndex))
+            {
+                _moe = new MoeFeedForward(_cfg.Moe!, _cfg.HiddenSize, _cfg.LowVramQuant);
+                _moe.LoadWeights(w, prefix);
+            }
+            else
+            {
+                _gateW = w[$"{prefix}.mlp.gate_proj.weight"];
+                _upW = w[$"{prefix}.mlp.up_proj.weight"];
+                _downW = w[$"{prefix}.mlp.down_proj.weight"];
+            }
+        }
+
+        /// <summary>FFN: routes to the dense SwiGLU or the MoE block. Consumes (disposes) <paramref name="preMlp"/>
+        /// <c>[1, n, hidden]</c> and returns the FFN output <c>[1, n, hidden]</c>.</summary>
+        private Tensor Mlp(IBackend backend, Tensor preMlp, int n)
+        {
+            if (_moe is not null)
+            {
+                Tensor moeOut = _moe.Forward(backend, preMlp, n);
+                preMlp.Dispose();
+                return moeOut;
+            }
+            TensorShape ff = new(1, n, _cfg.IntermediateSize);
+            Tensor gate = new(ff, DType.F32);
+            Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
+            Tensor gateAct = new(ff, DType.F32);
+            backend.Silu(gateAct, gate);
+            gate.Dispose();
+            Tensor up = new(ff, DType.F32);
+            Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
+            preMlp.Dispose();
+            Tensor comb = new(ff, DType.F32);
+            backend.Mul(comb, gateAct, up);
+            gateAct.Dispose(); up.Dispose();
+            Tensor mlpOut = new(new TensorShape(1, n, _cfg.HiddenSize), DType.F32);
+            Project(backend, mlpOut, comb, _downW!, null, _cfg.LowVramQuant);
+            comb.Dispose();
+            return mlpOut;
         }
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
             Tensor?[] all = [_inNorm, _postNorm, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
+            if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
@@ -407,22 +448,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
             Tensor preMlp = new(flat, DType.F32);
             backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
-
-            TensorShape ff = new(1, t, _cfg.IntermediateSize);
-            Tensor gate = new(ff, DType.F32);
-            Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
-            Tensor gateAct = new(ff, DType.F32);
-            backend.Silu(gateAct, gate);
-            gate.Dispose();
-            Tensor up = new(ff, DType.F32);
-            Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
-            preMlp.Dispose();
-            Tensor comb = new(ff, DType.F32);
-            backend.Mul(comb, gateAct, up);
-            gateAct.Dispose(); up.Dispose();
-            Tensor mlpOut = new(flat, DType.F32);
-            Project(backend, mlpOut, comb, _downW!, null, _cfg.LowVramQuant);
-            comb.Dispose();
+            Tensor mlpOut = Mlp(backend, preMlp, t);
 
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
@@ -515,22 +541,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
             Tensor preMlp = new(flat, DType.F32);
             backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
-
-            TensorShape ff = new(1, b, _cfg.IntermediateSize);
-            Tensor gate = new(ff, DType.F32);
-            Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
-            Tensor gateAct = new(ff, DType.F32);
-            backend.Silu(gateAct, gate);
-            gate.Dispose();
-            Tensor up = new(ff, DType.F32);
-            Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
-            preMlp.Dispose();
-            Tensor comb = new(ff, DType.F32);
-            backend.Mul(comb, gateAct, up);
-            gateAct.Dispose(); up.Dispose();
-            Tensor mlpOut = new(flat, DType.F32);
-            Project(backend, mlpOut, comb, _downW!, null, _cfg.LowVramQuant);
-            comb.Dispose();
+            Tensor mlpOut = Mlp(backend, preMlp, b);
 
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);

@@ -415,7 +415,9 @@ public sealed unsafe class CamPlusSpeakerEncoder : IDisposable
                     int end = Math.Min(s + seg, T);
                     double segSum = 0;
                     for (int j = s; j < end; j++) segSum += p[baseI + j];
-                    float segMean = (float)(segSum / (end - s));
+                    // ONNX AveragePool (ceil_mode, no pad) divides by the kernel size, not the valid count —
+                    // CosyVoice2 deploys the ONNX, so partial windows divide by seg_len too.
+                    float segMean = (float)(segSum / seg);
                     for (int j = s; j < end; j++) op[baseI + j] = (float)mean + segMean;
                 }
             }

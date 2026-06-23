@@ -1,3 +1,5 @@
+using HartsyInference.Core.Rope;
+
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
 /// <summary>Configuration for Llama-family decoder transformers used as text encoders for diffusion conditioning (Qwen3 in Flux.2 Klein, Mistral-Small-3 in Flux.2 Dev). Run as an encoder: single forward pass with the final hidden states harvested as conditioning. No autoregressive generation, no KV cache, no sampling.</summary>

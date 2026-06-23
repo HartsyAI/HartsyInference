@@ -78,6 +78,30 @@ public sealed unsafe class Text2Semantic : IDisposable
         return y.GetRange(prefix.Length, y.Count - prefix.Length);
     }
 
+    /// <summary>Computes the prefill (first-step) logits over the semantic vocab for the given text + BERT +
+    /// audio prefix, before any sampling. Exposed for numeric validation against the reference s1 forward.</summary>
+    public float[] FirstStepLogits(IBackend backend, ReadOnlySpan<int> phonemes, Tensor bert, ReadOnlySpan<int> prefix)
+    {
+        int h = _cfg.Hidden, tx = phonemes.Length;
+        Tensor xText = BuildTextEmbed(backend, phonemes, bert, tx);
+        List<int> y = new(prefix.Length);
+        for (int i = 0; i < prefix.Length; i++) y.Add(prefix[i]);
+        int ty = y.Count, total = tx + ty;
+        Tensor seq = AssembleSequence(xText, tx, y, ty, h);
+        xText.Dispose();
+        Tensor mask = BuildMask(tx, ty);
+        Tensor hid = seq;
+        for (int i = 0; i < _layers.Length; i++) { Tensor n = _layers[i].Forward(backend, hid, total, mask); hid.Dispose(); hid = n; }
+        mask.Dispose();
+        Tensor last = SliceLast(hid, h); hid.Dispose();
+        Tensor logitsT = WhisperOps.ProjectLinear(backend, last, _predW!, null, 1, 1, h, _cfg.SemanticVocab);
+        last.Dispose();
+        float[] result = new float[_cfg.SemanticVocab];
+        new Span<float>((void*)logitsT.DataPointer, _cfg.SemanticVocab).CopyTo(result);
+        logitsT.Dispose();
+        return result;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] own = [_textEmb, _audioEmb, _bertW, _bertB, _predW];
@@ -121,14 +145,14 @@ public sealed unsafe class Text2Semantic : IDisposable
 
     private static void AddSinusoidal(float* x, int t, int h, float alpha)
     {
-        float scale = MathF.Sqrt(h);
+        // SinePositionalEmbedding: x_scale = 1.0 (scale=False), output = x + alpha * pe (interleaved sin/cos).
         for (int j = 0; j < t; j++)
             for (int c = 0; c < h; c++)
             {
                 int pair = c / 2;
                 float div = MathF.Exp(-(2f * pair / h) * MathF.Log(10000f));
                 float pe = (c % 2 == 0) ? MathF.Sin(j * div) : MathF.Cos(j * div);
-                x[(long)j * h + c] = x[(long)j * h + c] * scale + alpha * pe;
+                x[(long)j * h + c] += alpha * pe;
             }
     }
 

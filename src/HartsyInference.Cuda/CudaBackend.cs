@@ -2329,6 +2329,86 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    private static unsafe ulong UploadInts(ReadOnlySpan<int> values)
+    {
+        nuint bytes = (nuint)((long)values.Length * sizeof(int));
+        ulong dptr = GpuTransferHelper.AllocateDevice(bytes);
+        fixed (int* p = values) CudaDriverApi.cuMemcpyHtoD(dptr, (nint)p, bytes).ThrowOnError();
+        return dptr;
+    }
+
+    private static unsafe ulong UploadFloats(ReadOnlySpan<float> values)
+    {
+        nuint bytes = (nuint)((long)values.Length * sizeof(float));
+        ulong dptr = GpuTransferHelper.AllocateDevice(bytes);
+        fixed (float* p = values) CudaDriverApi.cuMemcpyHtoD(dptr, (nint)p, bytes).ThrowOnError();
+        return dptr;
+    }
+
+    /// <summary>MoE row-gather: output[m] = input[rowIndices[m]] (collect an expert's routed tokens).</summary>
+    public unsafe void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+        {
+            ((IBackend)this).GatherRows(output, input, rowIndices);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int k = (int)input.Shape[input.Shape.Rank - 1];
+        ulong total = (ulong)rowIndices.Length * (ulong)k;
+        ulong pIn = 0, pIdx = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pIdx = UploadInts(rowIndices);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchGatherRows(pOut, pIn, pIdx, k, total, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIdx);
+        }
+    }
+
+    /// <summary>MoE weighted scatter-add (in place): output[rowIndices[m]] += scales[m]·input[m]. Output must be a
+    /// resident, already-accumulating activation (pre-zeroed, then one call per expert).</summary>
+    public unsafe void ScatterAddWeightedRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices, ReadOnlySpan<float> scales)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+        {
+            ((IBackend)this).ScatterAddWeightedRows(output, input, rowIndices, scales);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int k = (int)input.Shape[input.Shape.Rank - 1];
+        ulong total = (ulong)rowIndices.Length * (ulong)k;
+        ulong pIn = 0, pIdx = 0, pScale = 0, pOut = 0;
+        try
+        {
+            pOut = GpuTransferHelper.CopyToDevice(output);   // resident accumulator (cache hit)
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pIdx = UploadInts(rowIndices);
+            pScale = UploadFloats(scales);
+            _kernels!.LaunchScatterAddWeightedRows(pOut, pIn, pIdx, pScale, k, total, _stream.Handle);
+            output._gpuSyncCallback = null;
+            output._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(output, pOut, GpuTransferHelper.ByteSize(output));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pIdx);
+            GpuTransferHelper.FreeDevice(pScale);
+        }
+    }
+
     /// <summary>GEGLU activation: output[i] = input[i] * GELU(input[i + outputElements]) via PTX kernel.</summary>
     public void GeGlu(Tensor output, Tensor input)
     {

@@ -33,8 +33,9 @@ public sealed unsafe class SoVitsRefEnc
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "ref_enc")
     {
-        _spec1W = Lin(w, $"{prefix}.spectral.0"); _spec1B = WhisperOps.EnsureF32(w[$"{prefix}.spectral.0.bias"]);
-        _spec2W = Lin(w, $"{prefix}.spectral.3"); _spec2B = WhisperOps.EnsureF32(w[$"{prefix}.spectral.3.bias"]);
+        // MelStyleEncoder wraps each spectral/fc Linear in a LinearNorm (weight lives under a `.fc` submodule).
+        _spec1W = Lin(w, $"{prefix}.spectral.0.fc"); _spec1B = WhisperOps.EnsureF32(w[$"{prefix}.spectral.0.fc.bias"]);
+        _spec2W = Lin(w, $"{prefix}.spectral.3.fc"); _spec2B = WhisperOps.EnsureF32(w[$"{prefix}.spectral.3.fc.bias"]);
         _glu1W = WhisperOps.EnsureF32(w[$"{prefix}.temporal.0.conv1.conv.weight"]);
         _glu1B = w.TryGetValue($"{prefix}.temporal.0.conv1.conv.bias", out Tensor? g1b) ? WhisperOps.EnsureF32(g1b) : null;
         _glu2W = WhisperOps.EnsureF32(w[$"{prefix}.temporal.1.conv1.conv.weight"]);
@@ -53,7 +54,7 @@ public sealed unsafe class SoVitsRefEnc
             _attnVW = Lin(w, $"{prefix}.slf_attn.w_vs"); _attnVB = Bias(w, $"{prefix}.slf_attn.w_vs");
         }
         _attnOW = Lin(w, $"{prefix}.slf_attn.fc"); _attnOB = Bias(w, $"{prefix}.slf_attn.fc");
-        _fcW = Lin(w, $"{prefix}.fc"); _fcB = Bias(w, $"{prefix}.fc");
+        _fcW = Lin(w, $"{prefix}.fc.fc"); _fcB = Bias(w, $"{prefix}.fc.fc");
     }
 
     /// <summary>Encodes a reference spec <c>[1, nMels, t]</c> → speaker embedding <c>ge [1, styleDim, 1]</c>.</summary>
@@ -106,7 +107,8 @@ public sealed unsafe class SoVitsRefEnc
     private Tensor SelfAttention(IBackend backend, Tensor x, int t)
     {
         int hd = _hidden / _nHead;
-        float scale = 1f / MathF.Sqrt(hd);
+        // StyleSpeech MultiHeadAttention temperature is sqrt(d_model), not sqrt(head_dim).
+        float scale = 1f / MathF.Sqrt(_hidden);
         Tensor q, k, v;
         if (_fusedQkv)
         {
@@ -132,6 +134,9 @@ public sealed unsafe class SoVitsRefEnc
         Tensor ctx = new(new TensorShape(1, t, _hidden), DType.F32);
         WhisperOps.ReshapeFromMultiHead4D(ctx, ctx4, 1, t, _nHead, hd); ctx4.Dispose();
         Tensor outT = WhisperOps.ProjectLinear(backend, ctx, _attnOW!, _attnOB, 1, t, _hidden, _hidden); ctx.Dispose();
+        // StyleSpeech MultiHeadAttention adds the input residual after the output projection.
+        float* op = (float*)outT.DataPointer, xp = (float*)x.DataPointer;
+        for (long i = 0; i < outT.ElementCount; i++) op[i] += xp[i];
         return outT;
     }
 

@@ -1,3 +1,5 @@
+using HartsyInference.Core.Rope;
+
 namespace HartsyInference.LLM.Transformer;
 
 /// <summary>RoPE pairing convention. <see cref="SplitHalf"/> (Llama/Qwen2/HF-Qwen3-text rotate_half: pairs
@@ -10,6 +12,47 @@ public enum RopeStyle
 
     /// <summary>GPT-J interleaved (adjacent dims 2i, 2i+1).</summary>
     Interleaved,
+}
+
+/// <summary>How the MoE router turns expert logits into selection scores. <see cref="Softmax"/> (Qwen2-MoE /
+/// Qwen3-MoE / Mixtral: softmax over all experts, then top-k) vs <see cref="Sigmoid"/> (DeepSeek-V3:
+/// independent sigmoid per expert).</summary>
+public enum MoeScoring
+{
+    /// <summary>Softmax over all expert logits, then top-k (Qwen/Mixtral).</summary>
+    Softmax,
+
+    /// <summary>Independent sigmoid per expert, then top-k (DeepSeek-V3).</summary>
+    Sigmoid,
+}
+
+/// <summary>Mixture-of-Experts feed-forward configuration. The dense SwiGLU FFN is replaced (on MoE layers) by a
+/// router that selects <see cref="NumExpertsPerTok"/> of <see cref="NumExperts"/> experts per token plus optional
+/// always-on shared expert(s). Mirrors the HF config fields (<c>num_experts</c>, <c>num_experts_per_tok</c>,
+/// <c>norm_topk_prob</c>, <c>moe_intermediate_size</c>, <c>shared_expert_intermediate_size</c>).</summary>
+public sealed record MoeConfig
+{
+    /// <summary>Number of routed experts.</summary>
+    public required int NumExperts { get; init; }
+
+    /// <summary>Experts selected per token (top-k).</summary>
+    public required int NumExpertsPerTok { get; init; }
+
+    /// <summary>Per-expert SwiGLU inner dimension (often smaller than the dense <see cref="TransformerConfig.IntermediateSize"/>).</summary>
+    public required int MoeIntermediateSize { get; init; }
+
+    /// <summary>Whether the top-k routing weights are renormalized to sum to 1 (Qwen3-MoE / Mixtral: true).</summary>
+    public bool NormTopKProb { get; init; } = true;
+
+    /// <summary>Router scoring function.</summary>
+    public MoeScoring Scoring { get; init; } = MoeScoring.Softmax;
+
+    /// <summary>Always-on shared expert FFN inner dimension (Qwen2-MoE / DeepSeek). 0 disables the shared expert.</summary>
+    public int SharedExpertIntermediateSize { get; init; }
+
+    /// <summary>Layers <c>[0, FirstDenseLayers)</c> stay dense; the rest are MoE (DeepSeek <c>first_k_dense_replace</c>).
+    /// 0 (default) makes every layer MoE.</summary>
+    public int FirstDenseLayers { get; init; }
 }
 
 /// <summary>Architecture description for the config-driven <see cref="GenericTransformer"/> — one record that
@@ -50,6 +93,11 @@ public sealed record TransformerConfig
     /// <summary>RoPE base frequency.</summary>
     public float RopeTheta { get; init; } = 1_000_000f;
 
+    /// <summary>RoPE inverse-frequency scaling (long-context extrapolation). Default <see cref="RopeScaling.None"/>
+    /// (standard RoPE for Qwen/Mistral). Llama-3.x, yarn, and Phi-longrope models set this; required for them to
+    /// produce coherent output. Applied host-side in the cos/sin table via <see cref="RopeFrequencyBuilder"/>.</summary>
+    public RopeScaling RopeScaling { get; init; } = RopeScaling.None;
+
     /// <summary>RMSNorm epsilon.</summary>
     public float RmsNormEps { get; init; } = 1e-6f;
 
@@ -83,6 +131,12 @@ public sealed record TransformerConfig
 
     /// <summary>Query heads per KV group (GQA repeat factor).</summary>
     public int KvGroup => NumHeads / NumKvHeads;
+
+    /// <summary>Mixture-of-Experts FFN config, or <c>null</c> for a dense SwiGLU FFN (Qwen2/Qwen3/Llama dense).</summary>
+    public MoeConfig? Moe { get; init; }
+
+    /// <summary>Whether layer <paramref name="layerIndex"/> uses the MoE FFN (vs dense SwiGLU).</summary>
+    public bool IsMoeLayer(int layerIndex) => Moe is not null && layerIndex >= Moe.FirstDenseLayers;
 
     // ── Presets ──────────────────────────────────────────────────────────────────────────────────────
 

@@ -42,7 +42,10 @@ public sealed unsafe class OpenVoicePipeline : IDisposable
         _enc.LoadWeights(w);
         _flow.LoadWeights(w);
         _dec.LoadWeights(w);
-        _refEnc.LoadWeights(w);
+        // The reference (tone-color) encoder is optional: callers that pass precomputed speaker embeddings to
+        // Convert(...) don't need it. Load it only when its weights are present; ExtractSpeaker /
+        // ConvertWithReferences throw clearly if invoked without it.
+        if (w.ContainsKey("ref_enc.layernorm.weight")) _refEnc.LoadWeights(w);
     }
 
     /// <summary>Extracts the tone-color embedding <c>g [1, gin, 1]</c> from a reference linear spectrogram

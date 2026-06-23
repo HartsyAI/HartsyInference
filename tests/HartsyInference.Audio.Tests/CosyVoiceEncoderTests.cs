@@ -49,29 +49,28 @@ public sealed unsafe class CosyVoiceEncoderTests
     public void S3Tokenizer_SyntheticWeights_ProducesValidTokens()
     {
         using CpuBackend backend = new();
-        const int hidden = 32, numHeads = 8;            // matches the encoder's 8-head default
-        const int melBins = 80, melLen = 64;
+        // S3TokenizerV2 fixed dims: 128-mel in, 1280 state, 20 heads, 6 blocks, MLP 4x.
+        const int nState = 1280, ff = 5120, melBins = 128, melLen = 64;
 
         Dictionary<string, Tensor> w = new();
-        // Conv stem: 80 → hidden (stride 2), hidden → hidden (stride 2). Kernel 3.
-        w["subsample.0.weight"] = Random(new TensorShape(hidden, melBins, 3), 1);
-        w["subsample.0.bias"] = Random(new TensorShape(hidden), 2);
-        w["subsample.1.weight"] = Random(new TensorShape(hidden, hidden, 3), 3);
-        w["subsample.1.bias"] = Random(new TensorShape(hidden), 4);
+        w["encoder.conv1.weight"] = Random(new TensorShape(nState, melBins, 3), 1);
+        w["encoder.conv1.bias"] = Random(new TensorShape(nState), 2);
+        w["encoder.conv2.weight"] = Random(new TensorShape(nState, nState, 3), 3);
+        w["encoder.conv2.bias"] = Random(new TensorShape(nState), 4);
         for (int i = 0; i < 6; i++)
         {
-            string e = $"encoders.{i}";
-            AddNorm(w, $"{e}.norm1", hidden, 10 + i * 30);
-            AddLinear(w, $"{e}.self_attn.linear_q", hidden, hidden, 12 + i * 30);
-            AddLinear(w, $"{e}.self_attn.linear_k", hidden, hidden, 14 + i * 30);
-            AddLinear(w, $"{e}.self_attn.linear_v", hidden, hidden, 16 + i * 30);
-            AddLinear(w, $"{e}.self_attn.linear_out", hidden, hidden, 18 + i * 30);
-            AddNorm(w, $"{e}.norm2", hidden, 20 + i * 30);
-            AddLinear(w, $"{e}.feed_forward.w_1", hidden * 2, hidden, 22 + i * 30);
-            AddLinear(w, $"{e}.feed_forward.w_2", hidden, hidden * 2, 24 + i * 30);
+            string e = $"encoder.blocks.{i}";
+            AddNorm(w, $"{e}.attn_ln", nState, 10 + i * 30);
+            AddLinear(w, $"{e}.attn.query", nState, nState, 12 + i * 30);
+            w[$"{e}.attn.key.weight"] = Random(new TensorShape(nState, nState), 14 + i * 30);   // key: no bias
+            AddLinear(w, $"{e}.attn.value", nState, nState, 16 + i * 30);
+            AddLinear(w, $"{e}.attn.out", nState, nState, 18 + i * 30);
+            w[$"{e}.attn.fsmn_block.weight"] = Random(new TensorShape(nState, 1, 31), 19 + i * 30);
+            AddNorm(w, $"{e}.mlp_ln", nState, 20 + i * 30);
+            AddLinear(w, $"{e}.mlp.0", ff, nState, 22 + i * 30);
+            AddLinear(w, $"{e}.mlp.2", nState, ff, 24 + i * 30);
         }
-        AddNorm(w, "after_norm", hidden, 500);
-        AddLinear(w, "quantizer.project_down", 8, hidden, 600);
+        AddLinear(w, "quantizer._codebook.project_down", 8, nState, 600);
 
         using S3Tokenizer s3 = new();
         s3.LoadWeights(w);
@@ -83,7 +82,6 @@ public sealed unsafe class CosyVoiceEncoderTests
             $"expected ~{melLen / 4} tokens, got {tokens.Length}");
         foreach (int tok in tokens)
             Assert.InRange(tok, 0, s3.VocabSize - 1);
-        _ = numHeads;
         foreach (Tensor t in w.Values) t.Dispose();
     }
 

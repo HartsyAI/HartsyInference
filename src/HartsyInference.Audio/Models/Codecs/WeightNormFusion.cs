@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs;
@@ -18,8 +19,22 @@ public static unsafe class WeightNormFusion
 {
     public static Tensor Fuse(Tensor weightG, Tensor weightV)
     {
-        if (weightV.DType != DType.F32 || weightG.DType != DType.F32)
-            throw new ArgumentException($"WeightNormFusion expects F32 tensors; got weightG={weightG.DType}, weightV={weightV.DType}.");
+        // fp16 checkpoints (e.g. GPT-SoVITS s2) store weight_norm params in F16 — cast up before fusing.
+        Tensor gF = WhisperOps.EnsureF32(weightG);
+        Tensor vF = WhisperOps.EnsureF32(weightV);
+        try
+        {
+            return FuseF32(gF, vF);
+        }
+        finally
+        {
+            if (!ReferenceEquals(gF, weightG)) gF.Dispose();
+            if (!ReferenceEquals(vF, weightV)) vF.Dispose();
+        }
+    }
+
+    private static Tensor FuseF32(Tensor weightG, Tensor weightV)
+    {
         if (weightV.Shape.Rank < 1) throw new ArgumentException($"weightV must be at least rank-1, got {weightV.Shape}.");
 
         int outCh = (int)weightV.Shape[0];

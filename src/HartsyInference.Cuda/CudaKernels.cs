@@ -43,6 +43,8 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _lmF32Module;
     private readonly nint _lmRepeatKvF32;
     private readonly nint _lmKvAppendF32;
+    private readonly nint _lmGatherRowsF32;
+    private readonly nint _lmScatterAddWeightedRowsF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
 
@@ -295,6 +297,8 @@ public sealed class CudaKernels : IDisposable
         _lmF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "lm_f32.ptx"));
         _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
         _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
+        _lmGatherRowsF32 = _lmF32Module.GetFunction("lm_gather_rows_f32");
+        _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
         _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
 
@@ -1035,6 +1039,30 @@ public sealed class CudaKernels : IDisposable
 
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmKvAppendF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches MoE row-gather: output[m,j] = input[rowIndices[m], j]. total = M·K.</summary>
+    public unsafe void LaunchGatherRows(ulong outPtr, ulong inPtr, ulong idxPtr, int k, ulong total, nint stream)
+    {
+        ulong outArg = outPtr, inArg = inPtr, idxArg = idxPtr;
+        uint kArg = (uint)k;
+        ulong totalArg = total;
+        void** args = stackalloc void*[5];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &idxArg; args[3] = &kArg; args[4] = &totalArg;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmGatherRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches MoE weighted scatter-add: output[rowIndices[m], j] += scales[m]·input[m,j]. total = M·K.</summary>
+    public unsafe void LaunchScatterAddWeightedRows(ulong outPtr, ulong inPtr, ulong idxPtr, ulong scalePtr, int k, ulong total, nint stream)
+    {
+        ulong outArg = outPtr, inArg = inPtr, idxArg = idxPtr, scaleArg = scalePtr;
+        uint kArg = (uint)k;
+        ulong totalArg = total;
+        void** args = stackalloc void*[6];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &idxArg; args[3] = &scaleArg; args[4] = &kArg; args[5] = &totalArg;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmScatterAddWeightedRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches gated residual over the last dim: out[b,s,d] = residual[b,s,d] + gate[b,d]*value[b,s,d].</summary>

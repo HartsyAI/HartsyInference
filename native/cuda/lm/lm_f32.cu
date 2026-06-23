@@ -67,4 +67,37 @@ __global__ void lm_kv_append_f32(
     buffer[bufIdx] = newKv[i];
 }
 
+// ── MoE expert dispatch: gather + weighted scatter-add ──────────────────────
+// gather: output[m, j] = input[rowIndices[m], j]   (collect an expert's routed tokens into a contiguous group)
+__global__ void lm_gather_rows_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    const int* __restrict__ rowIndices,
+    unsigned int K,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    unsigned int j = (unsigned int)(i % K);
+    unsigned int m = (unsigned int)(i / K);
+    output[i] = input[(unsigned long long)rowIndices[m] * K + j];
+}
+
+// scatter-add: output[rowIndices[m], j] += scales[m] * input[m, j]   (combine an expert's weighted output back)
+// Indices within a call are distinct, so no atomics; call once per expert into the same (accumulating) output.
+__global__ void lm_scatter_add_weighted_rows_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    const int* __restrict__ rowIndices,
+    const float* __restrict__ scales,
+    unsigned int K,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    unsigned int j = (unsigned int)(i % K);
+    unsigned int m = (unsigned int)(i / K);
+    output[(unsigned long long)rowIndices[m] * K + j] += scales[m] * input[i];
+}
+
 } // extern "C"
