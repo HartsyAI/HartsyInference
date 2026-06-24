@@ -1,9 +1,12 @@
 name: Publish to NuGet
 
 # Auto-publishes the HartsyInference packages to NuGet.org on every push to main that
-# touches source or packaging. Each run gets a unique prerelease version
-# (1.0.0-alpha.<run_number>) so versions never collide; NuGet.org forbids re-pushing
-# an existing version. Trigger manually via "Run workflow" to override the suffix.
+# touches source or packaging. The version is 1.0.0-<VersionSuffix>, read from
+# Directory.Build.props (the single source of truth) — bump <VersionSuffix> there before
+# each release and pin the SAME version in the SwarmUI extension csproj so all three match.
+# NuGet.org forbids re-pushing an existing version, but the push step uses --skip-duplicate,
+# so pushing without bumping is a harmless no-op. Trigger manually via "Run workflow" to
+# override the suffix for a one-off.
 #
 # Auth uses NuGet Trusted Publishing (OIDC), so there is no API key/secret to store. A matching
 # Trusted Publisher policy must exist on nuget.org:
@@ -56,7 +59,16 @@ jobs:
         id: ver
         run: |
           SUFFIX="${{ github.event.inputs.version_suffix }}"
-          if [ -z "$SUFFIX" ]; then SUFFIX="alpha.${{ github.run_number }}"; fi
+          # Single source of truth = <VersionSuffix> in Directory.Build.props. A manual "Run workflow"
+          # with a version_suffix input still overrides it. (We no longer use github.run_number, so the
+          # published version always matches the props file and the extension's pinned version.)
+          if [ -z "$SUFFIX" ]; then
+            SUFFIX=$(sed -n 's:.*<VersionSuffix>\(.*\)</VersionSuffix>.*:\1:p' Directory.Build.props | head -1)
+          fi
+          if [ -z "$SUFFIX" ]; then
+            echo "::error::Could not read <VersionSuffix> from Directory.Build.props."
+            exit 1
+          fi
           echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
           echo "Publishing version: 1.0.0-$SUFFIX"
 
