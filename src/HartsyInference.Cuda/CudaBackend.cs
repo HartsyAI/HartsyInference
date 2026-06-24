@@ -1262,7 +1262,27 @@ public sealed class CudaBackend : IBackend
 
     public void LeakyRelu(Tensor output, Tensor input, float slope)
     {
-        throw new NotImplementedException("CudaBackend.LeakyRelu not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2.");
+        if (input.DType != DType.F32)
+            throw new NotSupportedException($"CUDA LeakyRelu currently supports F32 only — got {input.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAudioLeakyRelu(pOut, pIn, slope, (int)input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
     }
 
     /// <summary>Fused GroupNorm + SiLU via single PTX kernel. Eliminates intermediate allocation.</summary>

@@ -11,10 +11,12 @@
   </PropertyGroup>
 
   <!-- SINGLE SOURCE OF TRUTH for the published version. CI (publish-nuget.yml) reads VersionSuffix
-       from here and publishes 1.0.0-<VersionSuffix>. Bump this ONCE before each push (the push of this
-       file is what triggers the publish), then pin the SAME version in the SwarmUI extension csproj.
-       Pushing without bumping is harmless: NuGet push uses --skip-duplicate, so it just re-publishes
-       nothing. A manual "Run workflow" with a version_suffix input still overrides this. -->
+       from here and publishes 1.0.0 plus this suffix. Bump it ONCE before each push (pushing this file
+       is what triggers the publish), then pin the SAME version in the SwarmUI extension csproj.
+       Pushing without bumping is harmless: the NuGet push uses skip-duplicate, so it just re-publishes
+       nothing. A manual "Run workflow" with a version_suffix input still overrides this.
+       (Note: never put a double-hyphen in this XML comment; it makes MSBuild fail to parse this file,
+       which blanks TargetFrameworks and breaks restore with "Invalid framework identifier".) -->
   <PropertyGroup>
     <VersionPrefix>1.0.0</VersionPrefix>
     <VersionSuffix>alpha.37</VersionSuffix>

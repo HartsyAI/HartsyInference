@@ -4,6 +4,7 @@
 //   * sigmoid       — 1 / (1 + exp(-x)), used by LSTM gates + streaming TTS EOS classifier
 //   * tanh          — used by LSTM cell + output gate; also useful as a general activation
 //   * elu           — x if x>=0 else alpha*(exp(x)-1); SEANet residual block activation
+//   * leaky_relu    — x if x>=0 else slope*x; StyleTTS 2 / HiFi-GAN / VITS (slope=0.2)
 //   * snake         — x + sin(alpha*x)^2 / alpha           (vanilla, DAC/SNAC/Stable Audio)
 //   * snake_beta    — x + sin(alpha*x)^2 / (beta + 1e-8)   (BigVGAN-v2 variant)
 //
@@ -52,6 +53,20 @@ extern "C" __global__ void audio_elu_f32(
     if (i >= count) return;
     float x = input[i];
     output[i] = (x >= 0.0f) ? x : (alpha * (expf(x) - 1.0f));
+}
+
+// Leaky ReLU: x if x>=0 else slope*x. StyleTTS 2 text encoder + decoder and the
+// HiFi-GAN MRF blocks use slope=0.2; also the general fallback for VITS/OpenVoice.
+extern "C" __global__ void audio_leaky_relu_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    float slope,
+    int count)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    float x = input[i];
+    output[i] = (x >= 0.0f) ? x : (slope * x);
 }
 
 extern "C" __global__ void audio_snake_f32(

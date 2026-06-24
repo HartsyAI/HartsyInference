@@ -48,6 +48,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _audioActF32Module;
     private readonly nint _audioSigmoidF32;
     private readonly nint _audioEluF32;
+    private readonly nint _audioLeakyReluF32;
     private readonly nint _audioSnakeF32;
     private readonly nint _audioSnakeBetaF32;
 
@@ -313,6 +314,7 @@ public sealed class CudaKernels : IDisposable
         _audioActF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "audio_activations_f32.ptx"));
         _audioSigmoidF32 = _audioActF32Module.GetFunction("audio_sigmoid_f32");
         _audioEluF32 = _audioActF32Module.GetFunction("audio_elu_f32");
+        _audioLeakyReluF32 = _audioActF32Module.GetFunction("audio_leaky_relu_f32");
         _audioSnakeF32 = _audioActF32Module.GetFunction("audio_snake_f32");
         _audioSnakeBetaF32 = _audioActF32Module.GetFunction("audio_snake_beta_f32");
 
@@ -473,6 +475,19 @@ public sealed class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &inArg; args[2] = &alphaArg; args[3] = &countArg;
         uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
         CudaDriverApi.cuLaunchKernel(_audioEluF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches Leaky ReLU (x if x&gt;=0 else slope*x) over <paramref name="count"/> F32 elements.
+    /// StyleTTS 2 / Kokoro / HiFi-GAN / VITS use slope=0.2.</summary>
+    public unsafe void LaunchAudioLeakyRelu(ulong output, ulong input, float slope, int count, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        float slopeArg = slope;
+        int countArg = count;
+        void** args = stackalloc void*[4];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &slopeArg; args[3] = &countArg;
+        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(_audioLeakyReluF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches the Snake activation x + sin²(αx)/α over [B,C,T] F32, α per-channel.

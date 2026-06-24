@@ -91,6 +91,42 @@ public sealed unsafe class AudioActivationKernelTests
     }
 
     [Fact]
+    public void LeakyRelu_Cpu_Vs_Cuda()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        // slope=0.2 is the StyleTTS 2 / Kokoro / HiFi-GAN value.
+        using Tensor input = Random(new TensorShape(512), seed: 12, lo: -4f, hi: 4f);
+        using Tensor cpuOut = new Tensor(new TensorShape(512), DType.F32);
+        using Tensor cudaOut = new Tensor(new TensorShape(512), DType.F32);
+
+        IBackend cpu = new CpuBackend();
+        cpu.LeakyRelu(cpuOut, input, 0.2f);
+        cpu.Dispose();
+
+        RunCuda(c => c.LeakyRelu(cudaOut, input, 0.2f), cudaOut);
+        AssertClose(cpuOut, cudaOut, 1e-6f, "LeakyRelu");
+    }
+
+    [Fact]
+    public void LeakyRelu_InPlace_Cpu_Vs_Cuda()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        // Kokoro's text encoder calls LeakyRelu in-place (output == input). Verify aliasing is safe.
+        using Tensor seed = Random(new TensorShape(257), seed: 13, lo: -4f, hi: 4f);
+        using Tensor cpuBuf = new Tensor(new TensorShape(257), DType.F32);
+        using Tensor cudaBuf = new Tensor(new TensorShape(257), DType.F32);
+        Buffer.MemoryCopy((void*)seed.DataPointer, (void*)cpuBuf.DataPointer, 257 * 4, 257 * 4);
+        Buffer.MemoryCopy((void*)seed.DataPointer, (void*)cudaBuf.DataPointer, 257 * 4, 257 * 4);
+
+        IBackend cpu = new CpuBackend();
+        cpu.LeakyRelu(cpuBuf, cpuBuf, 0.2f);
+        cpu.Dispose();
+
+        RunCuda(c => c.LeakyRelu(cudaBuf, cudaBuf, 0.2f), cudaBuf);
+        AssertClose(cpuBuf, cudaBuf, 1e-6f, "LeakyRelu[in-place]");
+    }
+
+    [Fact]
     public void Snake_Cpu_Vs_Cuda()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
