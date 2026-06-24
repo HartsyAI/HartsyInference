@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Codecs;
+using HartsyInference.Audio.Models.Codecs.EnCodec;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.SafeTensors;
 
@@ -82,7 +83,7 @@ public static class Program
             else if (gCount == axis1 && v32.Shape.Rank == 3)
             {
                 // ConvTranspose1d case.
-                fused = Models.Codecs.EnCodec.WeightNormFusionT.Fuse(g32, v32);
+                fused = WeightNormFusionT.Fuse(g32, v32);
             }
             else
             {

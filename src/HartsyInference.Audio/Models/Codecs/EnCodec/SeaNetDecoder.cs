@@ -250,7 +250,7 @@ internal sealed class SeaNetDecoder
 ///
 /// <para>Fused weight is computed as
 /// <c>w[ic, oc, k] = g[oc] * v[ic, oc, k] / ||v[:, oc, :]||_2</c>.</para></summary>
-internal static unsafe class WeightNormFusionT
+public static unsafe class WeightNormFusionT
 {
     public static Tensor Fuse(Tensor weightG, Tensor weightV)
     {

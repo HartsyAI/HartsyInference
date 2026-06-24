@@ -101,8 +101,8 @@ public sealed class KokoroPipeline : IDisposable
     {
     }
 
-    /// <summary>Loads the Kokoro-82M pipeline. Downloads the weights (<c>kokoro-v1_0.pth</c>) + config.json
-    /// into the HartsyInference cache on first use. Voice packs are loaded lazily by <see cref="Synthesize"/>.
+    /// <summary>Loads the Kokoro-82M pipeline. Downloads the repacked weights (<c>kokoro-82m.safetensors</c>) +
+    /// config.json into the HartsyInference cache on first use. Voice packs are loaded lazily by <see cref="Synthesize"/>.
     /// <para>The weights are the repacked single-file safetensors produced by <c>tools/repack</c>:
     /// the offline step did the recursive flatten + inner-<c>module.</c> strip that the runtime used to
     /// do, so the file already carries the fully-qualified dotted keys (<c>bert.embeddings.…</c>,
