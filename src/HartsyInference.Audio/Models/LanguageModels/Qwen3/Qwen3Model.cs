@@ -42,7 +42,9 @@ public sealed class Qwen3Model : IDisposable
             AttentionBias = false,
             QkNorm = true,
             TieWordEmbeddings = true,
-            Rope = RopeStyle.Interleaved,
+            // NeoX split-half RoPE (rotate_half), matching real Qwen3 / Qwen3-TTS. The "interleaved" in the
+            // model's rope_scaling refers to mRoPE *section* interleaving, NOT the dim-pairing convention.
+            Rope = RopeStyle.SplitHalf,
         });
     }
 

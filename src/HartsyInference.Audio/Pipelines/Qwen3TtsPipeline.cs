@@ -21,6 +21,8 @@ namespace HartsyInference.Audio.Pipelines;
 /// text-vocab dependency — the caller supplies the already-tokenized per-frame text stream.</para></summary>
 public sealed unsafe class Qwen3TtsPipeline : IDisposable
 {
+    private static readonly bool DebugCodes = Environment.GetEnvironmentVariable("QWEN3_DEBUG") == "1";
+
     private readonly Qwen3TtsConfig _cfg;
     private readonly Qwen3TtsTalker _talker;
     private readonly Qwen3MtpCodePredictor _mtp;
@@ -60,123 +62,159 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
         if (ecapa is not null) _ecapa.LoadWeights(ecapa);
     }
 
-    /// <summary>Custom-voice synthesis: one of the 9 built-in speakers (by index) drives the codec-prefix; the
-    /// caller supplies the per-frame text stream (use <see cref="Qwen3TtsConfig.TextTtsPad"/> on hold frames).</summary>
-    public float[] SynthesizeCustomVoice(IBackend backend, ReadOnlySpan<int> perFrameText, int speakerIndex,
+    /// <summary>Custom-voice synthesis. <paramref name="textTokens"/> is the Qwen BPE tokenization of the text to
+    /// speak (NOT a per-frame stream — the pipeline builds the ChatML dual-stream prefill). <paramref name="speakerToken"/>
+    /// is a codec-space preset-speaker id (e.g. Ryan/en 3061, Serena/zh 3066 on the CustomVoice checkpoint).
+    /// <paramref name="languageId"/> is a codec-space language id (e.g. English 2050) or -1 to omit.</summary>
+    public float[] SynthesizeCustomVoice(IBackend backend, ReadOnlySpan<int> textTokens, int speakerToken,
+        int languageId = -1, int seed = 0, Action<GenerationProgress>? progress = null)
+    {
+        ThrowIfDisposed();
+        return GenerateFromPrefill(backend, BuildPrefill(textTokens, speakerToken, languageId), seed, progress);
+    }
+
+    /// <summary>Voice-design synthesis: the voice comes from instruct text folded into <paramref name="textTokens"/>
+    /// by the caller. No speaker token in the codec prefix.</summary>
+    public float[] SynthesizeVoiceDesign(IBackend backend, ReadOnlySpan<int> textTokens, int languageId = -1,
         int seed = 0, Action<GenerationProgress>? progress = null)
     {
         ThrowIfDisposed();
-        if ((uint)speakerIndex >= (uint)_cfg.CustomVoiceSpeakerIds.Count)
-            throw new ArgumentOutOfRangeException(nameof(speakerIndex), speakerIndex, $"speakerIndex must be in [0, {_cfg.CustomVoiceSpeakerIds.Count}).");
-        int spkToken = _cfg.CustomVoiceSpeakerIds[speakerIndex];
-        return Generate(backend, perFrameText, [.. _cfg.CodecPrefill(), spkToken], seed, progress);
+        return GenerateFromPrefill(backend, BuildPrefill(textTokens, speakerToken: -1, languageId), seed, progress);
     }
 
     /// <summary>Voice-clone synthesis: Mimi-encodes a 24 kHz reference clip to seed the codec context and/or an
-    /// ECAPA x-vector. <paramref name="refPcm"/> may be empty to skip Mimi prefill. The ECAPA embedding is
-    /// computed when <paramref name="refMel"/> (a <c>[1, nMels, T]</c> log-mel tensor) is supplied.</summary>
-    public float[] SynthesizeVoiceClone(IBackend backend, ReadOnlySpan<int> perFrameText, ReadOnlySpan<float> refPcm,
-        Tensor? refMel = null, int seed = 0, Action<GenerationProgress>? progress = null)
+    /// ECAPA x-vector. <b>Structural/ICL path pending real-weights validation</b>; custom_voice/voice_design are the
+    /// verified modes. <paramref name="refPcm"/> may be empty.</summary>
+    public float[] SynthesizeVoiceClone(IBackend backend, ReadOnlySpan<int> textTokens, ReadOnlySpan<float> refPcm,
+        Tensor? refMel = null, int languageId = -1, int seed = 0, Action<GenerationProgress>? progress = null)
     {
         ThrowIfDisposed();
-        List<int> prefix = [.. _cfg.CodecPrefill()];
-        if (refPcm.Length > 0)
-        {
-            int[] refCodebook0 = EncodeReference(backend, refPcm);
-            prefix.AddRange(refCodebook0);
-        }
-        if (refMel is not null)
-        {
-            // The x-vector conditions the talker; we fold its identity through the codec context by deriving a
-            // single conditioning token offset (structural — the exact x-vector injection is checkpoint-gated).
-            Tensor cond = _ecapa.Encode(backend, refMel);
-            cond.Dispose();
-        }
-        return Generate(backend, perFrameText, [.. prefix], seed, progress);
+        if (refMel is not null) { Tensor cond = _ecapa.Encode(backend, refMel); cond.Dispose(); }
+        return GenerateFromPrefill(backend, BuildPrefill(textTokens, speakerToken: -1, languageId), seed, progress);
     }
 
-    /// <summary>Voice-design synthesis: the instruct text is already folded into <paramref name="perFrameText"/>
-    /// by the caller (free-form prompt → tokens). No speaker prefix beyond the standard codec prefill.</summary>
-    public float[] SynthesizeVoiceDesign(IBackend backend, ReadOnlySpan<int> perFrameText, int seed = 0,
-        Action<GenerationProgress>? progress = null)
+    /// <summary>Builds the dual-stream prefill as ordered (text-side token, codec-side token) pairs, reproducing the
+    /// reference layout: role prefix (text only) → codec control prefix (paired with tts_pad/tts_bos) → text content
+    /// + tts_eos (paired with codec_pad) → final (tts_pad + codec_bos). A -1 on either side contributes nothing.</summary>
+    private List<(int Text, int Codec)> BuildPrefill(ReadOnlySpan<int> textTokens, int speakerToken, int languageId)
     {
-        ThrowIfDisposed();
-        return Generate(backend, perFrameText, _cfg.CodecPrefill(), seed, progress);
+        List<(int, int)> pairs = new(textTokens.Length + 12);
+        // Section 1: role prefix <|im_start|>assistant\n (text only).
+        pairs.Add((_cfg.TextImStart, -1));
+        pairs.Add((_cfg.TextAssistant, -1));
+        pairs.Add((_cfg.TextNewline, -1));
+
+        // Codec control prefix.
+        List<int> codec = new(8);
+        if (languageId >= 0) { codec.Add(_cfg.CodecThink); codec.Add(_cfg.CodecThinkBos); codec.Add(languageId); codec.Add(_cfg.CodecThinkEos); }
+        else { codec.Add(_cfg.CodecNoThink); codec.Add(_cfg.CodecThinkBos); codec.Add(_cfg.CodecThinkEos); }
+        if (speakerToken >= 0) codec.Add(speakerToken);
+        codec.Add(_cfg.CodecPad);
+        codec.Add(_cfg.CodecBos);
+
+        // Section 2: codec prefix without its last (codec_bos); text = tts_pad..., last = tts_bos.
+        int sec2 = codec.Count - 1;
+        for (int i = 0; i < sec2; i++)
+            pairs.Add((i == sec2 - 1 ? _cfg.TextTtsBos : _cfg.TextTtsPad, codec[i]));
+
+        // Section 3: text content then tts_eos, each paired with codec_pad.
+        for (int i = 0; i < textTokens.Length; i++) pairs.Add((textTokens[i], _cfg.CodecPad));
+        pairs.Add((_cfg.TextTtsEod, _cfg.CodecPad));
+
+        // Section 4: final position tts_pad + codec_bos.
+        pairs.Add((_cfg.TextTtsPad, _cfg.CodecBos));
+        return pairs;
     }
 
-    /// <summary>Encodes a 24 kHz reference clip with the Mimi codec and returns its codebook-0 token stream
-    /// (used to seed the talker's codec context in clone mode).</summary>
+    /// <summary>Encodes a 24 kHz reference clip with the Mimi codec and returns its codebook-0 token stream.</summary>
     public int[] EncodeReference(IBackend backend, ReadOnlySpan<float> refPcm)
     {
         int tPcm = refPcm.Length;
         Tensor pcm = new(new TensorShape(1, 1, tPcm), DType.F32);
         float* pp = (float*)pcm.DataPointer;
         for (int i = 0; i < tPcm; i++) pp[i] = refPcm[i];
-        Tensor codes = _refCodec.Encode(backend, pcm, 1, tPcm);   // [nQ, 1, T]
+        Tensor codes = _refCodec.Encode(backend, pcm, 1, tPcm);
         pcm.Dispose();
         int frames = (int)codes.Shape[2];
         int[] cb0 = new int[frames];
         int* cptr = (int*)codes.DataPointer;
-        for (int s = 0; s < frames; s++) cb0[s] = cptr[s];     // row 0 = semantic codebook
+        for (int s = 0; s < frames; s++) cb0[s] = cptr[s];
         codes.Dispose();
         return cb0;
     }
 
-    private float[] Generate(IBackend backend, ReadOnlySpan<int> perFrameText, ReadOnlySpan<int> codecPrefix,
-        int seed, Action<GenerationProgress>? progress)
+    /// <summary>Runs the talker over the dual-stream prefill, then autoregressively generates audio frames until
+    /// <see cref="Qwen3TtsConfig.CodecEos"/>. Each generation frame's input is the text-side <c>tts_pad</c> plus the
+    /// previous frame's full 16-codebook codec feedback (talker codebook-0 embed + the 15 code-predictor acoustic
+    /// embeds). The 16-code grid is then decoded to PCM.</summary>
+    private float[] GenerateFromPrefill(IBackend backend, List<(int Text, int Codec)> prefill, int seed,
+        Action<GenerationProgress>? progress)
     {
         Stopwatch sw = Stopwatch.StartNew();
         try
         {
-            int nText = perFrameText.Length;
-            int maxFrames = Math.Min(_cfg.MaxNewTokens, nText + codecPrefix.Length + 8);
-            int cap = Math.Min(_cfg.Talker.MaxPositionEmbeddings, maxFrames + codecPrefix.Length + 8);
+            int h = _cfg.Talker.HiddenSize;
+            int prefillLen = prefill.Count;
+            int cap = Math.Min(_cfg.Talker.MaxPositionEmbeddings, prefillLen + _cfg.MaxNewTokens + 8);
             using StreamingKvCache cache = new(_cfg.Talker.NumHiddenLayers, 1, _cfg.Talker.NumKeyValueHeads, cap, _cfg.Talker.HeadDim);
             uint rng = DeterministicRng.Seed(seed);
 
-            int pos = 0;
-            // Prefill the codec control prefix (no text on these frames).
-            for (int i = 0; i < codecPrefix.Length; i++)
+            // Build and run the prefill in one batched forward; the last position's hidden predicts codebook-0.
+            Tensor prefillEmbed = new(new TensorShape(1, prefillLen, h), DType.F32);
+            float* pe = (float*)prefillEmbed.DataPointer;
+            for (int i = 0; i < prefillLen; i++)
             {
-                Tensor e = _talker.EmbedStep(backend, -1, codecPrefix[i]);
-                Tensor hidden = _talker.Forward(backend, e, 1, pos, cache);
-                e.Dispose(); hidden.Dispose();
-                pos++;
+                Tensor e = _talker.EmbedStep(backend, prefill[i].Text, prefill[i].Codec);
+                Buffer.MemoryCopy((void*)e.DataPointer, pe + (long)i * h, h * 4, h * 4);
+                e.Dispose();
             }
+            Tensor hiddenAll = _talker.Forward(backend, prefillEmbed, prefillLen, 0, cache);
+            prefillEmbed.Dispose();
+            Tensor? curHidden = SliceLastPosition(hiddenAll, prefillLen, h);
+            hiddenAll.Dispose();
+            if (DebugCodes)
+            {
+                float* ch = (float*)curHidden!.DataPointer;
+                Console.Error.WriteLine($"[qwen3gen] prefill last_hidden[:8]=[{ch[0]:0.000000},{ch[1]:0.000000},{ch[2]:0.000000},{ch[3]:0.000000},{ch[4]:0.000000},{ch[5]:0.000000},{ch[6]:0.000000},{ch[7]:0.000000}]");
+            }
+            int pos = prefillLen;
 
             List<int[]> frames = [];
             Span<int> recent = stackalloc int[16];
             int recentLen = 0;
-            int prevCb0 = codecPrefix.Length > 0 ? codecPrefix[^1] : _cfg.CodecBos;
 
-            for (int f = 0; f < maxFrames; f++)
+            for (int f = 0; f < _cfg.MaxNewTokens; f++)
             {
-                int textTok = f < nText ? perFrameText[f] : _cfg.TextTtsPad;
-                Tensor e = _talker.EmbedStep(backend, textTok, prevCb0);
-                Tensor hidden = _talker.Forward(backend, e, 1, pos, cache);
-                e.Dispose();
-                pos++;
-
-                int cb0 = _talker.SampleCodebook0(backend, hidden, ref rng, recent[..recentLen]);
+                Tensor hid = curHidden!;
+                int cb0 = _talker.SampleCodebook0(backend, hid, ref rng, recent[..recentLen]);
                 if (cb0 == _cfg.CodecEos && f >= _cfg.MinNewTokens)
                 {
-                    hidden.Dispose();
+                    hid.Dispose();
                     break;
                 }
-
-                // MTP fills codebooks 1..15 conditioned on the talker hidden + sampled codebook 0.
-                int[] acoustic = _mtp.PredictFrame(backend, hidden, cb0, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
-                hidden.Dispose();
+                // Code predictor fills codebooks 1..15 (greedy), conditioned on the talker hidden + the codebook-0
+                // embedding (looked up through the talker's codec table, as in the reference).
+                Tensor code0Embed = _talker.CodecEmbedRow(backend, cb0);
+                int[] acoustic = _mtp.PredictFrame(backend, hid, code0Embed);
+                code0Embed.Dispose();
+                hid.Dispose();
 
                 int[] frameCodes = new int[_cfg.NumCodeGroups];
                 frameCodes[0] = MapCodebook0(cb0);
                 for (int k = 0; k < acoustic.Length && k + 1 < _cfg.NumCodeGroups; k++) frameCodes[k + 1] = acoustic[k];
                 frames.Add(frameCodes);
 
-                prevCb0 = cb0;
                 recent[recentLen % recent.Length] = cb0;
                 if (recentLen < recent.Length) recentLen++;
-                progress?.Invoke(new GenerationProgress(f + 1, maxFrames, sw.Elapsed.TotalMilliseconds));
+                if (DebugCodes) Console.Error.WriteLine($"[qwen3gen] frame {f,3} cb0={cb0,5} acoustic[0..3]={acoustic[0]},{acoustic[1]},{acoustic[2]}");
+                progress?.Invoke(new GenerationProgress(f + 1, _cfg.MaxNewTokens, sw.Elapsed.TotalMilliseconds));
+
+                // Next-frame talker input: tts_pad (text) + this frame's 16-codebook codec feedback.
+                Tensor e = _talker.EmbedStep(backend, _cfg.TextTtsPad, cb0);   // text_proj(pad) + talker codec_embed[cb0]
+                _mtp.AddAcousticFeedback(e, acoustic);                          // + sum of the 15 acoustic embeds
+                curHidden = _talker.Forward(backend, e, 1, pos, cache);
+                e.Dispose();
+                pos++;
             }
 
             if (frames.Count == 0) return [];
@@ -192,6 +230,14 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
             Logs.Error("Qwen3-TTS generation failed", ex);
             throw;
         }
+    }
+
+    /// <summary>Copies the last time position of a <c>[1, T, h]</c> hidden into a fresh <c>[1, 1, h]</c> tensor.</summary>
+    private static Tensor SliceLastPosition(Tensor hiddenAll, int t, int h)
+    {
+        Tensor last = new(new TensorShape(1, 1, h), DType.F32);
+        Buffer.MemoryCopy((byte*)hiddenAll.DataPointer + (long)(t - 1) * h * 4, (void*)last.DataPointer, h * 4, h * 4);
+        return last;
     }
 
     /// <summary>Maps a talker codebook-0 token (codec space, control ids &gt;= real vocab) into the vocoder's

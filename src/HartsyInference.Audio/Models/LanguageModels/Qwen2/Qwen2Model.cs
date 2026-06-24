@@ -45,6 +45,7 @@ public sealed class Qwen2Model : IDisposable
         VocabSize = cfg.VocabSize,
         MaxPositionEmbeddings = cfg.MaxPositionEmbeddings,
         RopeTheta = cfg.RopeTheta,
+        RopeScaling = cfg.RopeScaling ?? HartsyInference.Core.Rope.RopeScaling.None,
         RmsNormEps = cfg.RmsNormEps,
         AttentionBias = cfg.AttentionBias,
         QkNorm = false,

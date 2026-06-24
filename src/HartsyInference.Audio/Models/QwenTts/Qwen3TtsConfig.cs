@@ -62,6 +62,7 @@ public sealed record Qwen3TtsConfig
     public int CodecRealVocab { get; init; } = 2_048;
 
     // ── Text special ids ────────────────────────────────────────────────
+    public int TextNewline { get; init; } = 198;   // "\n"
     public int TextImStart { get; init; } = 151_644;
     public int TextImEnd { get; init; } = 151_645;
     public int TextAssistant { get; init; } = 77_091;

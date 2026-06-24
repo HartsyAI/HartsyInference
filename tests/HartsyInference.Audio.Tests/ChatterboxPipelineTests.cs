@@ -132,12 +132,16 @@ public sealed unsafe class ChatterboxPipelineTests
             ["spk_embed_affine_layer.weight"] = Rand(new TensorShape(mel, c.SpeakerEmbedDim), 4),
             ["spk_embed_affine_layer.bias"] = Rand(new TensorShape(mel), 5),
         };
-        // UpsampleConformerEncoder.
-        AddLinear(w, "encoder.embed.out.0", outSize, inputSize, 20);
-        BuildConformer(w, "encoder.encoders", c.EncoderNumPreBlocks, outSize, 100);
-        w["encoder.up_layer.weight"] = Rand(new TensorShape(outSize, outSize, 4), 700);
-        w["encoder.up_layer.bias"] = Rand(new TensorShape(outSize), 701);
-        BuildConformer(w, "encoder.up_encoders", c.EncoderNumPostBlocks, outSize, 2_000);
+        // UpsampleConformerEncoder (CosyVoice 2 rel-pos Transformer encoder).
+        AddLinear(w, "encoder.embed.out.0", outSize, inputSize, 20);     // embed Linear
+        AddNorm(w, "encoder.embed.out.1", outSize, 25);                  // embed LayerNorm
+        AddConv(w, "encoder.pre_lookahead_layer.conv1", outSize, outSize, 4, 30);
+        AddConv(w, "encoder.pre_lookahead_layer.conv2", outSize, outSize, 3, 40);
+        BuildRelPosBlocks(w, "encoder.encoders", c.EncoderNumPreBlocks, outSize, c.EncoderNumHeads, 100);
+        AddConv(w, "encoder.up_layer.conv", outSize, outSize, 5, 700);   // Upsample1D conv (kernel = ratio*2+1)
+        AddLinear(w, "encoder.up_embed.out.0", outSize, outSize, 710);   // up_embed Linear
+        AddNorm(w, "encoder.up_embed.out.1", outSize, 715);              // up_embed LayerNorm
+        BuildRelPosBlocks(w, "encoder.up_encoders", c.EncoderNumPostBlocks, outSize, c.EncoderNumHeads, 2_000);
         AddNorm(w, "encoder.after_norm", outSize, 9_000);
         // CFM estimator (CausalConditionalDecoder).
         string e = "decoder.estimator";
@@ -258,33 +262,25 @@ public sealed unsafe class ChatterboxPipelineTests
         AddLinear(w, $"{prefix}.ff2", ch, ch * 2, seed + 14);
     }
 
-    private static void BuildConformer(Dictionary<string, Tensor> w, string stack, int blocks, int c, int seedBase)
+    private static void BuildRelPosBlocks(Dictionary<string, Tensor> w, string stack, int blocks, int c, int numHeads, int seedBase)
     {
         const int ffDim = 2;
+        int headDim = c / numHeads;
         for (int i = 0; i < blocks; i++)
         {
             string b = $"{stack}.{i}";
             int s = seedBase + i * 200;
-            AddNorm(w, $"{b}.norm_ff_macaron", c, s);
-            AddLinear(w, $"{b}.feed_forward_macaron.w_1", c * ffDim, c, s + 2);
-            AddLinear(w, $"{b}.feed_forward_macaron.w_2", c, c * ffDim, s + 4);
-            AddNorm(w, $"{b}.norm_mha", c, s + 6);
-            AddLinear(w, $"{b}.self_attn.linear_q", c, c, s + 8);
-            AddLinear(w, $"{b}.self_attn.linear_k", c, c, s + 10);
-            AddLinear(w, $"{b}.self_attn.linear_v", c, c, s + 12);
-            AddLinear(w, $"{b}.self_attn.linear_out", c, c, s + 14);
-            AddNorm(w, $"{b}.norm_conv", c, s + 16);
-            w[$"{b}.conv_module.pointwise_conv1.weight"] = Rand(new TensorShape(2 * c, c, 1), s + 18);
-            w[$"{b}.conv_module.pointwise_conv1.bias"] = Rand(new TensorShape(2 * c), s + 19);
-            w[$"{b}.conv_module.depthwise_conv.weight"] = Rand(new TensorShape(c, 1, 5), s + 20);
-            w[$"{b}.conv_module.depthwise_conv.bias"] = Rand(new TensorShape(c), s + 21);
-            AddNorm(w, $"{b}.conv_module.norm", c, s + 22);
-            w[$"{b}.conv_module.pointwise_conv2.weight"] = Rand(new TensorShape(c, c, 1), s + 24);
-            w[$"{b}.conv_module.pointwise_conv2.bias"] = Rand(new TensorShape(c), s + 25);
-            AddNorm(w, $"{b}.norm_ff", c, s + 26);
-            AddLinear(w, $"{b}.feed_forward.w_1", c * ffDim, c, s + 28);
-            AddLinear(w, $"{b}.feed_forward.w_2", c, c * ffDim, s + 30);
-            AddNorm(w, $"{b}.norm_final", c, s + 32);
+            AddNorm(w, $"{b}.norm_mha", c, s);
+            AddLinear(w, $"{b}.self_attn.linear_q", c, c, s + 2);
+            AddLinear(w, $"{b}.self_attn.linear_k", c, c, s + 4);
+            AddLinear(w, $"{b}.self_attn.linear_v", c, c, s + 6);
+            AddLinear(w, $"{b}.self_attn.linear_out", c, c, s + 8);
+            AddLinear(w, $"{b}.self_attn.linear_pos", c, c, s + 10, bias: false);
+            w[$"{b}.self_attn.pos_bias_u"] = Rand(new TensorShape(numHeads, headDim), s + 12);
+            w[$"{b}.self_attn.pos_bias_v"] = Rand(new TensorShape(numHeads, headDim), s + 13);
+            AddNorm(w, $"{b}.norm_ff", c, s + 14);
+            AddLinear(w, $"{b}.feed_forward.w_1", c * ffDim, c, s + 16);
+            AddLinear(w, $"{b}.feed_forward.w_2", c, c * ffDim, s + 18);
         }
     }
 }

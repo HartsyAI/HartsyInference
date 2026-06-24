@@ -66,6 +66,10 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
     public IReadOnlyList<int> EncodeRaw(string text)
     {
         ThrowIfDisposed();
+        // TODO(byte-level): same bug Qwen3Tokenizer.EncodeRaw was fixed for — BpeTokenizer.Create(vocab,
+        // merges) drops leading spaces (" there" -> "there" not "Ġthere"), so space-prefixed words mis-
+        // tokenize. Route through ByteLevelCodec.Encode(text) before EncodeToIds, then re-validate the
+        // consumers (Lance T2I/T2V, HunyuanImage 2.1) since their conditioning tokens WILL change.
         return _tokenizer.EncodeToIds(text);
     }
 

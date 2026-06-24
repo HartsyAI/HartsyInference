@@ -110,8 +110,8 @@ public sealed unsafe class Qwen3TtsTests
         using Qwen3MtpCodePredictor mtp = new(cfg);
         mtp.LoadWeights(MtpWeights(cfg));
         using Tensor talkerHidden = F3(1, 1, cfg.Talker.HiddenSize);
-        uint rng = 0x55u;
-        int[] codes = mtp.PredictFrame(backend, talkerHidden, 5, 0.9f, 50, 1.0f, ref rng);
+        using Tensor code0Embed = F3(1, 1, cfg.Talker.HiddenSize);
+        int[] codes = mtp.PredictFrame(backend, talkerHidden, code0Embed);
         Assert.Equal(cfg.MtpCodebooks, codes.Length);
         foreach (int c in codes) Assert.InRange(c, 0, cfg.MtpVocabSize - 1);
     }
@@ -185,12 +185,14 @@ public sealed unsafe class Qwen3TtsTests
     private static Dictionary<string, Tensor> TalkerWeights(Qwen3TtsConfig cfg)
     {
         int h = cfg.Talker.HiddenSize;
+        // Keys mirror the real Qwen/Qwen3-TTS-12Hz checkpoint: embeddings + norm + layers under talker.model.*,
+        // codec_head + text_projection (linear_fc1/fc2) under talker.*.
         Dictionary<string, Tensor> w = new()
         {
-            ["talker.text_embedding.weight"] = F2(cfg.TextVocabSize, h),
-            ["talker.codec_embedding.weight"] = F2(cfg.CodecVocabSize, h),
-            ["talker.text_projection.0.weight"] = F2(h, h),
-            ["talker.text_projection.2.weight"] = F2(h, h),
+            ["talker.model.text_embedding.weight"] = F2(cfg.TextVocabSize, h),
+            ["talker.model.codec_embedding.weight"] = F2(cfg.CodecVocabSize, h),
+            ["talker.text_projection.linear_fc1.weight"] = F2(h, h),
+            ["talker.text_projection.linear_fc2.weight"] = F2(h, h),
             ["talker.codec_head.weight"] = F2(cfg.CodecHeadOut, h),
         };
         AddBackbone(w, cfg.Talker, "talker.model");
@@ -200,36 +202,46 @@ public sealed unsafe class Qwen3TtsTests
     private static Dictionary<string, Tensor> MtpWeights(Qwen3TtsConfig cfg)
     {
         int mh = cfg.CodePredictor.HiddenSize;
+        // Real layout: small_to_mtp_projection + lm_heads under talker.code_predictor.*; body + per-codebook
+        // codec_embedding under talker.code_predictor.model.*.
         Dictionary<string, Tensor> w = new()
         {
-            ["code_predictor.small_to_mtp_projection.weight"] = F2(mh, cfg.Talker.HiddenSize),
+            ["talker.code_predictor.small_to_mtp_projection.weight"] = F2(mh, cfg.Talker.HiddenSize),
         };
         for (int k = 0; k < cfg.MtpCodebooks; k++)
         {
-            w[$"code_predictor.codec_embedding.{k}.weight"] = F2(cfg.MtpVocabSize, mh);
-            w[$"code_predictor.lm_head.{k}.weight"] = F2(cfg.MtpVocabSize, mh);
+            w[$"talker.code_predictor.model.codec_embedding.{k}.weight"] = F2(cfg.MtpVocabSize, cfg.Talker.HiddenSize);
+            w[$"talker.code_predictor.lm_head.{k}.weight"] = F2(cfg.MtpVocabSize, mh);
         }
-        AddBackbone(w, cfg.CodePredictor, "code_predictor.model");
+        AddBackbone(w, cfg.CodePredictor, "talker.code_predictor.model");
         return w;
     }
 
     private static Dictionary<string, Tensor> VocoderWeights(Qwen3TtsVocoderConfig vc)
     {
-        Dictionary<string, Tensor> w = new()
-        {
-            ["vocoder.quantizer.semantic.codebook"] = F2(vc.SemanticCodebookSize, vc.SemanticCodebookDim),
-            ["vocoder.quantizer.semantic.in_proj.weight"] = F2(vc.LatentDim, vc.SemanticCodebookDim),
-        };
+        // Mirrors the real Qwen3-TTS-Tokenizer-V2 decoder.* tree: EMA split-RVQ (rvq_first + rvq_rest, each with
+        // one output_proj) → pre_conv → pre_transformer (input_proj, LayerScale layers, norm, output_proj) →
+        // upsample.{i}.{0=conv,1=convnext} → decoder.decoder.{0=conv,1..N=blocks,N+1=snake,N+2=conv}.
+        Dictionary<string, Tensor> w = new();
+        AddEmaCodebook(w, "decoder.quantizer.rvq_first.vq.layers.0._codebook", vc.SemanticCodebookSize, vc.SemanticCodebookDim);
+        w["decoder.quantizer.rvq_first.output_proj.weight"] = F3(vc.LatentDim, vc.SemanticCodebookDim, 1);
         for (int k = 0; k < vc.AcousticCodebooks; k++)
-        {
-            w[$"vocoder.quantizer.acoustic.{k}.codebook"] = F2(vc.AcousticCodebookSize, vc.AcousticCodebookDim);
-            w[$"vocoder.quantizer.acoustic.{k}.in_proj.weight"] = F2(vc.LatentDim, vc.AcousticCodebookDim);
-        }
-        // Transformer.
+            AddEmaCodebook(w, $"decoder.quantizer.rvq_rest.vq.layers.{k}._codebook", vc.AcousticCodebookSize, vc.AcousticCodebookDim);
+        w["decoder.quantizer.rvq_rest.output_proj.weight"] = F3(vc.LatentDim, vc.AcousticCodebookDim, 1);
+
+        // pre_conv: latentDim → convnextDim (applied before the transformer in the real graph).
+        w["decoder.pre_conv.conv.weight"] = F3(vc.ConvNeXtDim, vc.LatentDim, vc.PreConvKernel);
+
+        // pre_transformer wrappers + LayerScale layers.
+        w["decoder.pre_transformer.input_proj.weight"] = F2(vc.TransformerDim, vc.ConvNeXtDim);
+        w["decoder.pre_transformer.input_proj.bias"] = Zeros(vc.TransformerDim);
+        w["decoder.pre_transformer.output_proj.weight"] = F2(vc.ConvNeXtDim, vc.TransformerDim);
+        w["decoder.pre_transformer.output_proj.bias"] = Zeros(vc.ConvNeXtDim);
+        w["decoder.pre_transformer.norm.weight"] = Ones(vc.TransformerDim);
         int dim = vc.TransformerDim, hd = vc.TransformerHeadDim, heads = vc.TransformerHeads;
         for (int i = 0; i < vc.TransformerLayers; i++)
         {
-            string p = $"vocoder.transformer.layers.{i}";
+            string p = $"decoder.pre_transformer.layers.{i}";
             w[$"{p}.input_layernorm.weight"] = Ones(dim);
             w[$"{p}.post_attention_layernorm.weight"] = Ones(dim);
             w[$"{p}.self_attn.q_proj.weight"] = F2(heads * hd, dim);
@@ -239,48 +251,59 @@ public sealed unsafe class Qwen3TtsTests
             w[$"{p}.mlp.gate_proj.weight"] = F2(vc.TransformerFfnDim, dim);
             w[$"{p}.mlp.up_proj.weight"] = F2(vc.TransformerFfnDim, dim);
             w[$"{p}.mlp.down_proj.weight"] = F2(dim, vc.TransformerFfnDim);
-            w[$"{p}.layer_scale_1.scale"] = Ones(dim);
-            w[$"{p}.layer_scale_2.scale"] = Ones(dim);
+            w[$"{p}.self_attn_layer_scale.scale"] = Ones(dim);
+            w[$"{p}.mlp_layer_scale.scale"] = Ones(dim);
         }
-        // pre_conv: transformerDim → convnextDim.
-        w["vocoder.pre_conv.weight"] = F3(vc.ConvNeXtDim, vc.TransformerDim, vc.PreConvKernel);
-        // upsample stages.
+
+        // upsample.{i}: .0 transposed conv + .1 convnext.
         for (int i = 0; i < vc.ConvNeXtUpsampleRates.Count; i++)
         {
-            string p = $"vocoder.upsample.{i}";
+            string p = $"decoder.upsample.{i}";
             int rate = vc.ConvNeXtUpsampleRates[i];
-            w[$"{p}.conv.weight"] = F3(vc.ConvNeXtDim, vc.ConvNeXtDim, rate * 2);   // [Cin, Cout, K]
-            AddConvNeXt(w, $"{p}.convnext", vc.ConvNeXtDim);
+            w[$"{p}.0.conv.weight"] = F3(vc.ConvNeXtDim, vc.ConvNeXtDim, rate * 2);
+            AddConvNeXt(w, $"{p}.1", vc.ConvNeXtDim);
         }
-        // decoder in_conv convnextDim→decoderInChannels.
-        w["vocoder.decoder.in_conv.weight"] = F3(vc.DecoderInChannels, vc.ConvNeXtDim, vc.DecoderInKernel);
+
+        // decoder.decoder.*: 0 in_conv, 1..N blocks, N+1 final snake, N+2 out_conv.
+        w["decoder.decoder.0.conv.weight"] = F3(vc.DecoderInChannels, vc.ConvNeXtDim, vc.DecoderInKernel);
         int ch = vc.DecoderInChannels;
         for (int i = 0; i < vc.UpsampleRates.Count; i++)
         {
             int outCh = ch / 2;
             int rate = vc.UpsampleRates[i];
-            string p = $"vocoder.decoder.blocks.{i}";
-            w[$"{p}.snake.alpha"] = F3(1, ch, 1);
-            w[$"{p}.up_conv.weight"] = F3(ch, outCh, rate * 2);
+            string p = $"decoder.decoder.{i + 1}.block";
+            w[$"{p}.0.alpha"] = Ones(ch);
+            w[$"{p}.0.beta"] = Ones(ch);
+            w[$"{p}.1.conv.weight"] = F3(ch, outCh, rate * 2);
             for (int r = 0; r < vc.ResidualDilations.Count; r++)
             {
-                string rp = $"{p}.residuals.{r}";
-                w[$"{rp}.snake1.alpha"] = F3(1, outCh, 1);
-                w[$"{rp}.conv1.weight"] = F3(outCh, outCh, vc.ResidualKernel);
-                w[$"{rp}.snake2.alpha"] = F3(1, outCh, 1);
-                w[$"{rp}.conv2.weight"] = F3(outCh, outCh, 1);
+                string rp = $"{p}.{r + 2}";
+                w[$"{rp}.act1.alpha"] = Ones(outCh);
+                w[$"{rp}.act1.beta"] = Ones(outCh);
+                w[$"{rp}.conv1.conv.weight"] = F3(outCh, outCh, vc.ResidualKernel);
+                w[$"{rp}.act2.alpha"] = Ones(outCh);
+                w[$"{rp}.act2.beta"] = Ones(outCh);
+                w[$"{rp}.conv2.conv.weight"] = F3(outCh, outCh, 1);
             }
             ch = outCh;
         }
-        w["vocoder.decoder.final_snake.alpha"] = F3(1, ch, 1);
-        w["vocoder.decoder.out_conv.weight"] = F3(1, ch, vc.OutKernel);
+        int snakeIdx = vc.UpsampleRates.Count + 1;
+        w[$"decoder.decoder.{snakeIdx}.alpha"] = Ones(ch);
+        w[$"decoder.decoder.{snakeIdx}.beta"] = Ones(ch);
+        w[$"decoder.decoder.{snakeIdx + 1}.conv.weight"] = F3(1, ch, vc.OutKernel);
         return w;
+    }
+
+    private static void AddEmaCodebook(Dictionary<string, Tensor> w, string prefix, int size, int dim)
+    {
+        w[$"{prefix}.embedding_sum"] = F2(size, dim);
+        w[$"{prefix}.cluster_usage"] = Ones(size);   // usage 1 → normalized codebook == embedding_sum
     }
 
     private static void AddConvNeXt(Dictionary<string, Tensor> w, string p, int c)
     {
         int hidden = c * 2;
-        w[$"{p}.dwconv.weight"] = F3(c, 1, 7);          // depthwise [C,1,K]
+        w[$"{p}.dwconv.conv.weight"] = F3(c, 1, 7);     // depthwise [C,1,K]
         w[$"{p}.norm.weight"] = Ones(c);
         w[$"{p}.norm.bias"] = Zeros(c);
         w[$"{p}.pwconv1.weight"] = F2(hidden, c);

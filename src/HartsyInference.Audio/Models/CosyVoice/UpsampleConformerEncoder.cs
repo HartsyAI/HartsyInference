@@ -5,30 +5,40 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Audio.Models.CosyVoice;
 
 /// <summary>The CosyVoice 2 flow-matching token encoder
-/// (<c>cosyvoice/transformer/upsample_encoder.py:UpsampleConformerEncoder</c>). Embedded speech tokens
-/// enter at 25 Hz; an <c>input_layer</c> linear lifts them to the model width, a stack of pre-up conformer
-/// blocks contextualizes them, a <c>ConvTranspose1d</c> (stride = <see cref="TokenMelRatio"/>, default 2)
-/// upsamples 25 Hz → 50 Hz, and a second stack of post-up conformer blocks refines the upsampled stream.
-/// The output feeds <c>encoder_proj</c> to produce the mel conditioning <c>μ</c>.
+/// (<c>cosyvoice/transformer/upsample_encoder.py:UpsampleConformerEncoder</c>), reimplemented to match the
+/// real checkpoint exactly. Pipeline: <c>embed</c> (Linear → LayerNorm → ×√d scale, plus a relative-position
+/// table) → <c>pre_lookahead_layer</c> (two causal-ish convs + residual) → 6 relative-position Transformer
+/// blocks → <c>up_layer</c> (<see cref="Upsample1D"/>: nearest ×2 + left-pad + conv) → <c>up_embed</c>
+/// (Linear → LayerNorm → ×√d) → 4 relative-position Transformer blocks → <c>after_norm</c>. Output feeds
+/// <c>encoder_proj</c> for the mel conditioning μ.
 ///
-/// <para>Each conformer block is the macaron-FFN sandwich:
-/// <c>x += ½·FFN(x); x += MHSA(x); x += Conv(x); x += ½·FFN(x); x = LayerNorm(x)</c>, matching the
-/// WeNet/ESPnet conformer the FunAudioLLM repo derives from. Self-attention here uses plain scaled
-/// dot-product (the v2 flow encoder dropped the learned relative-position bias of v1); the conv module is
-/// the standard pointwise→GLU→depthwise→norm→SiLU→pointwise stack.</para></summary>
+/// <para><b>Block</b> (ESPnet <c>ConformerEncoderLayer</c> with <c>macaron_style=False</c>,
+/// <c>use_cnn_module=False</c>): <c>x += RelPosMHSA(norm_mha(x)); x += FFN(norm_ff(x))</c>. Sub-layer norms
+/// use eps 1e-12; the encoder-level <c>after_norm</c> and the embed LayerNorms use eps 1e-5. Attention is
+/// Transformer-XL relative position (linear_pos + pos_bias_u/v + rel_shift), NOT plain dot-product.</para></summary>
 public sealed unsafe class UpsampleConformerEncoder : IDisposable
 {
     public const int TokenMelRatio = 2;
+    private const float BlockNormEps = 1e-12f;
+    private const float EmbedNormEps = 1e-5f;
 
     private readonly int _outputSize;
     private readonly int _numHeads;
-    private readonly ConformerBlock[] _preBlocks;
-    private readonly ConformerBlock[] _postBlocks;
+    private readonly int _headDim;
+    private readonly RelPosBlock[] _preBlocks;
+    private readonly RelPosBlock[] _postBlocks;
     private int _disposed;
 
-    private Tensor? _inLinearW, _inLinearB;          // input_size → outputSize
-    private Tensor? _upConvW, _upConvB;              // ConvTranspose1d [outputSize, outputSize, k]
-    private Tensor? _afterNormW, _afterNormB;        // final LayerNorm (optional)
+    // embed: Linear(input→output) + LayerNorm.
+    private Tensor? _embLinW, _embLinB, _embLnW, _embLnB;
+    // pre_lookahead_layer: conv1 (kernel = k1, right-pad k1-1) + conv2 (kernel = k2, left-pad k2-1).
+    private Tensor? _plConv1W, _plConv1B, _plConv2W, _plConv2B;
+    // up_layer (Upsample1D): conv (kernel = k, stride 1) over a nearest-×ratio + left-pad signal.
+    private Tensor? _upConvW, _upConvB;
+    // up_embed: Linear + LayerNorm.
+    private Tensor? _upEmbLinW, _upEmbLinB, _upEmbLnW, _upEmbLnB;
+    // after_norm.
+    private Tensor? _afterNormW, _afterNormB;
 
     public UpsampleConformerEncoder(int outputSize, int numHeads, int numPreBlocks, int numPostBlocks)
     {
@@ -36,106 +46,212 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
             throw new ArgumentException($"outputSize {outputSize} must be divisible by numHeads {numHeads}.");
         _outputSize = outputSize;
         _numHeads = numHeads;
-        _preBlocks = new ConformerBlock[numPreBlocks];
-        _postBlocks = new ConformerBlock[numPostBlocks];
-        for (int i = 0; i < numPreBlocks; i++) _preBlocks[i] = new ConformerBlock(outputSize, numHeads);
-        for (int i = 0; i < numPostBlocks; i++) _postBlocks[i] = new ConformerBlock(outputSize, numHeads);
+        _headDim = outputSize / numHeads;
+        _preBlocks = new RelPosBlock[numPreBlocks];
+        _postBlocks = new RelPosBlock[numPostBlocks];
+        for (int i = 0; i < numPreBlocks; i++) _preBlocks[i] = new RelPosBlock(outputSize, numHeads);
+        for (int i = 0; i < numPostBlocks; i++) _postBlocks[i] = new RelPosBlock(outputSize, numHeads);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        _inLinearW = WhisperOps.EnsureF32(w[$"{p}embed.out.0.weight"]);
-        _inLinearB = w.TryGetValue($"{p}embed.out.0.bias", out Tensor? ib) ? WhisperOps.EnsureF32(ib) : null;
-        for (int i = 0; i < _preBlocks.Length; i++)
-            _preBlocks[i].LoadWeights(w, $"{p}encoders.{i}");
-        _upConvW = WhisperOps.EnsureF32(w[$"{p}up_layer.weight"]);
-        _upConvB = w.TryGetValue($"{p}up_layer.bias", out Tensor? ub) ? WhisperOps.EnsureF32(ub) : null;
-        for (int i = 0; i < _postBlocks.Length; i++)
-            _postBlocks[i].LoadWeights(w, $"{p}up_encoders.{i}");
-        if (w.TryGetValue($"{p}after_norm.weight", out Tensor? anw))
-        {
-            _afterNormW = WhisperOps.EnsureF32(anw);
-            _afterNormB = WhisperOps.EnsureF32(w[$"{p}after_norm.bias"]);
-        }
+        _embLinW = WhisperOps.EnsureF32(w[$"{p}embed.out.0.weight"]);
+        _embLinB = TryGet(w, $"{p}embed.out.0.bias");
+        _embLnW = WhisperOps.EnsureF32(w[$"{p}embed.out.1.weight"]);
+        _embLnB = WhisperOps.EnsureF32(w[$"{p}embed.out.1.bias"]);
+
+        _plConv1W = WhisperOps.EnsureF32(w[$"{p}pre_lookahead_layer.conv1.weight"]);
+        _plConv1B = TryGet(w, $"{p}pre_lookahead_layer.conv1.bias");
+        _plConv2W = WhisperOps.EnsureF32(w[$"{p}pre_lookahead_layer.conv2.weight"]);
+        _plConv2B = TryGet(w, $"{p}pre_lookahead_layer.conv2.bias");
+
+        for (int i = 0; i < _preBlocks.Length; i++) _preBlocks[i].LoadWeights(w, $"{p}encoders.{i}");
+
+        _upConvW = WhisperOps.EnsureF32(w[$"{p}up_layer.conv.weight"]);
+        _upConvB = TryGet(w, $"{p}up_layer.conv.bias");
+
+        _upEmbLinW = WhisperOps.EnsureF32(w[$"{p}up_embed.out.0.weight"]);
+        _upEmbLinB = TryGet(w, $"{p}up_embed.out.0.bias");
+        _upEmbLnW = WhisperOps.EnsureF32(w[$"{p}up_embed.out.1.weight"]);
+        _upEmbLnB = WhisperOps.EnsureF32(w[$"{p}up_embed.out.1.bias"]);
+
+        for (int i = 0; i < _postBlocks.Length; i++) _postBlocks[i].LoadWeights(w, $"{p}up_encoders.{i}");
+
+        _afterNormW = WhisperOps.EnsureF32(w[$"{p}after_norm.weight"]);
+        _afterNormB = WhisperOps.EnsureF32(w[$"{p}after_norm.bias"]);
     }
 
     /// <summary>Forwards embedded speech tokens <c>[1, T, inputSize]</c> → upsampled features
     /// <c>[1, T·<see cref="TokenMelRatio"/>, outputSize]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor tokenEmb, int inputSize)
     {
-        if (_inLinearW is null) throw new InvalidOperationException("UpsampleConformerEncoder weights not loaded.");
+        if (_embLinW is null) throw new InvalidOperationException("UpsampleConformerEncoder weights not loaded.");
         int t = (int)tokenEmb.Shape[1];
 
-        Tensor x = WhisperOps.ProjectLinear(backend, tokenEmb, _inLinearW!, _inLinearB, 1, t, inputSize, _outputSize);
+        // embed: Linear → LayerNorm(1e-5) → ×√d, plus the relative-position table for length t.
+        Tensor x = Embed(backend, tokenEmb, inputSize, _embLinW!, _embLinB, _embLnW!, _embLnB!);
+        Tensor posPre = BuildRelPos(t);
+        x = PreLookahead(backend, x, t);
         for (int i = 0; i < _preBlocks.Length; i++)
         {
-            Tensor next = _preBlocks[i].Forward(backend, x, t, _outputSize);
+            Tensor next = _preBlocks[i].Forward(backend, x, posPre, t);
             x.Dispose();
             x = next;
         }
+        posPre.Dispose();
 
+        // up_layer (Upsample1D): nearest ×ratio → left-pad → conv.
         Tensor up = Upsample(backend, x, t);
         x.Dispose();
-        int tUp = (int)up.Shape[1];
+        int tUp = t * TokenMelRatio;
+
+        // up_embed: Linear → LayerNorm → ×√d, plus the relative-position table for length tUp.
+        Tensor xu = Embed(backend, up, _outputSize, _upEmbLinW!, _upEmbLinB, _upEmbLnW!, _upEmbLnB!);
+        up.Dispose();
+        Tensor posUp = BuildRelPos(tUp);
         for (int i = 0; i < _postBlocks.Length; i++)
         {
-            Tensor next = _postBlocks[i].Forward(backend, up, tUp, _outputSize);
-            up.Dispose();
-            up = next;
+            Tensor next = _postBlocks[i].Forward(backend, xu, posUp, tUp);
+            xu.Dispose();
+            xu = next;
         }
+        posUp.Dispose();
 
-        if (_afterNormW is not null)
-        {
-            Tensor normed = new(up.Shape, DType.F32);
-            backend.LayerNorm(normed, up, _afterNormW!, _afterNormB!, 1e-5f);
-            up.Dispose();
-            up = normed;
-        }
-        return up;
+        Tensor outT = new(xu.Shape, DType.F32);
+        backend.LayerNorm(outT, xu, _afterNormW!, _afterNormB!, EmbedNormEps);
+        xu.Dispose();
+        return outT;
     }
 
-    /// <summary>ConvTranspose1d time-upsample (stride = ratio) on a channels-last <c>[1, T, C]</c>
-    /// sequence; transposes to channels-first for the conv and back.</summary>
-    private Tensor Upsample(IBackend backend, Tensor seq, int t)
+    /// <summary>Linear(in→out) → LayerNorm(eps 1e-5) → scale by √outputSize (the ESPnet rel-pos xscale).</summary>
+    private Tensor Embed(IBackend backend, Tensor input, int inDim, Tensor linW, Tensor? linB, Tensor lnW, Tensor lnB)
+    {
+        int t = (int)input.Shape[1];
+        Tensor lin = WhisperOps.ProjectLinear(backend, input, linW, linB, 1, t, inDim, _outputSize);
+        Tensor normed = new(lin.Shape, DType.F32);
+        backend.LayerNorm(normed, lin, lnW, lnB, EmbedNormEps);
+        lin.Dispose();
+        float scale = MathF.Sqrt(_outputSize);
+        float* np = (float*)normed.DataPointer;
+        long n = normed.ElementCount;
+        for (long i = 0; i < n; i++) np[i] *= scale;
+        return normed;
+    }
+
+    /// <summary>PreLookaheadLayer: transpose → right-pad(k1-1) → conv1 → LeakyReLU → left-pad(k2-1) → conv2 →
+    /// transpose, added to the input residual. All on a channels-first <c>[1, C, T]</c> view.</summary>
+    private Tensor PreLookahead(IBackend backend, Tensor seq, int t)
     {
         int c = _outputSize;
+        int k1 = (int)_plConv1W!.Shape[2];
+        int k2 = (int)_plConv2W!.Shape[2];
+
         Tensor chFirst = new(new TensorShape(1, c, t), DType.F32);
         backend.Transpose2D(chFirst, seq, t, c);
 
+        // conv1 (kernel k1) with right pad k1-1 keeps length t.
+        Tensor c1 = new(new TensorShape(1, c, t), DType.F32);
+        backend.Conv1d(c1, chFirst, _plConv1W!, _plConv1B, stride: 1, padLeft: 0, padRight: k1 - 1, dilation: 1, groups: 1);
+        chFirst.Dispose();
+        backend.LeakyRelu(c1, c1, 0.01f);
+
+        // conv2 (kernel k2) with left pad k2-1 keeps length t.
+        Tensor c2 = new(new TensorShape(1, c, t), DType.F32);
+        backend.Conv1d(c2, c1, _plConv2W!, _plConv2B, stride: 1, padLeft: k2 - 1, padRight: 0, dilation: 1, groups: 1);
+        c1.Dispose();
+
+        Tensor outSeq = new(new TensorShape(1, t, c), DType.F32);
+        backend.Transpose2D(outSeq, c2, c, t);
+        c2.Dispose();
+
+        // Residual add (channels-last).
+        float* op = (float*)outSeq.DataPointer;
+        float* sp = (float*)seq.DataPointer;
+        long n = outSeq.ElementCount;
+        for (long i = 0; i < n; i++) op[i] += sp[i];
+        return outSeq;
+    }
+
+    /// <summary>Upsample1D: nearest-neighbour ×ratio upsample, left-pad by ratio·2, then conv (kernel k,
+    /// stride 1, no pad) → exactly ratio·T frames. Channels-last in/out.</summary>
+    private Tensor Upsample(IBackend backend, Tensor seq, int t)
+    {
+        int c = _outputSize;
+        int ratio = TokenMelRatio;
         int k = (int)_upConvW!.Shape[2];
-        // ConvTranspose1d output length: (T-1)*stride - 2*pad + (k-1) + 1. Pad to keep ratio·T frames.
-        int pad = (k - TokenMelRatio) / 2;
-        int outLen = (t - 1) * TokenMelRatio - 2 * pad + (k - 1) + 1;
-        Tensor upCh = new(new TensorShape(1, c, outLen), DType.F32);
-        backend.ConvTranspose1d(upCh, chFirst, _upConvW!, _upConvB, stride: TokenMelRatio, padLeft: pad, padRight: pad, dilation: 1, groups: 1);
+
+        // Channels-first [1, C, T].
+        Tensor chFirst = new(new TensorShape(1, c, t), DType.F32);
+        backend.Transpose2D(chFirst, seq, t, c);
+
+        // Nearest upsample ×ratio then left-pad by ratio·2 → length ratio·T + ratio·2.
+        int padL = ratio * 2;
+        int upLen = ratio * t;
+        int paddedLen = upLen + padL;
+        Tensor padded = new(new TensorShape(1, c, paddedLen), DType.F32);
+        float* pp = (float*)padded.DataPointer;
+        float* cf = (float*)chFirst.DataPointer;
+        for (int ch = 0; ch < c; ch++)
+        {
+            float* dst = pp + (long)ch * paddedLen;
+            float* src = cf + (long)ch * t;
+            for (int j = 0; j < padL; j++) dst[j] = 0f;
+            for (int j = 0; j < upLen; j++) dst[padL + j] = src[j / ratio];   // nearest
+        }
         chFirst.Dispose();
 
-        int tUp = t * TokenMelRatio;
-        Tensor up = new(new TensorShape(1, tUp, c), DType.F32);
-        // Transpose back, cropping/clamping to exactly ratio·T frames.
-        Tensor cropped = upCh;
-        if (outLen != tUp)
-        {
-            cropped = new(new TensorShape(1, c, tUp), DType.F32);
-            float* sp = (float*)upCh.DataPointer;
-            float* dp = (float*)cropped.DataPointer;
-            int copy = Math.Min(outLen, tUp);
-            for (int ch = 0; ch < c; ch++)
-                Buffer.MemoryCopy(sp + (long)ch * outLen, dp + (long)ch * tUp, (long)tUp * 4, (long)copy * 4);
-            upCh.Dispose();
-        }
-        backend.Transpose2D(up, cropped, c, tUp);
-        cropped.Dispose();
-        return up;
+        // conv (kernel k, stride 1, no pad) → paddedLen - k + 1 = ratio·T (since padL = ratio·2 = k - 1).
+        int outLen = paddedLen - k + 1;
+        Tensor convOut = new(new TensorShape(1, c, outLen), DType.F32);
+        backend.Conv1d(convOut, padded, _upConvW!, _upConvB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        padded.Dispose();
+
+        Tensor outSeq = new(new TensorShape(1, outLen, c), DType.F32);
+        backend.Transpose2D(outSeq, convOut, c, outLen);
+        convOut.Dispose();
+        return outSeq;
     }
+
+    /// <summary>Builds the ESPnet relative-position table <c>[1, 2T-1, outputSize]</c>: index 0 is relative
+    /// position +(T-1), descending through 0 to -(T-1). Even dims sin, odd dims cos, with the standard
+    /// 1/10000^(2k/d) frequencies.</summary>
+    private Tensor BuildRelPos(int t)
+    {
+        int d = _outputSize;
+        int len = 2 * t - 1;
+        Tensor pe = new(new TensorShape(1, len, d), DType.F32);
+        float* p = (float*)pe.DataPointer;
+        int half = d / 2;
+        for (int i = 0; i < len; i++)
+        {
+            // i in [0, T-1] → position (T-1-i) (positive, flipped); i in [T, 2T-2] → position -(i-T+1).
+            int pos = i < t ? (t - 1 - i) : -(i - t + 1);
+            float* row = p + (long)i * d;
+            for (int k = 0; k < half; k++)
+            {
+                double inv = Math.Exp(-(2.0 * k / d) * Math.Log(10000.0));
+                double angle = pos * inv;
+                row[2 * k] = (float)Math.Sin(angle);
+                row[2 * k + 1] = (float)Math.Cos(angle);
+            }
+        }
+        return pe;
+    }
+
+    private static Tensor? TryGet(IReadOnlyDictionary<string, Tensor> w, string key)
+        => w.TryGetValue(key, out Tensor? t) ? WhisperOps.EnsureF32(t) : null;
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] core = [_inLinearW, _inLinearB, _upConvW, _upConvB, _afterNormW, _afterNormB];
+        Tensor?[] core =
+        [
+            _embLinW, _embLinB, _embLnW, _embLnB, _plConv1W, _plConv1B, _plConv2W, _plConv2B,
+            _upConvW, _upConvB, _upEmbLinW, _upEmbLinB, _upEmbLnW, _upEmbLnB, _afterNormW, _afterNormB,
+        ];
         foreach (Tensor? t in core) if (t is not null) yield return t;
-        foreach (ConformerBlock b in _preBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
-        foreach (ConformerBlock b in _postBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (RelPosBlock b in _preBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (RelPosBlock b in _postBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
     public void Dispose()
@@ -145,21 +261,18 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
     }
 }
 
-/// <summary>One macaron-FFN conformer block operating on a channels-last <c>[1, T, C]</c> sequence:
-/// half-step FFN → MHSA → conv module → half-step FFN → final LayerNorm, each sub-layer residual.</summary>
-internal sealed unsafe class ConformerBlock
+/// <summary>One CosyVoice 2 relative-position Transformer encoder block (ESPnet ConformerEncoderLayer with no
+/// macaron FFN and no conv module): <c>x += RelPosMHSA(norm_mha(x), pos); x += FFN(norm_ff(x))</c>. Sub-layer
+/// LayerNorms use eps 1e-12. The FFN is <c>Linear → SiLU → Linear</c> with scale 1.0.</summary>
+internal sealed unsafe class RelPosBlock
 {
-    private const float FfnScale = 0.5f;
-
+    private const float NormEps = 1e-12f;
     private readonly int _channels, _numHeads, _headDim;
 
-    private Tensor? _ff1NormW, _ff1NormB, _ff1W1, _ff1B1, _ff1W2, _ff1B2;
-    private Tensor? _attnNormW, _attnNormB, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB;
-    private Tensor? _convNormW, _convNormB, _pw1W, _pw1B, _dwW, _dwB, _convLnW, _convLnB, _pw2W, _pw2B;
-    private Tensor? _ff2NormW, _ff2NormB, _ff2W1, _ff2B1, _ff2W2, _ff2B2;
-    private Tensor? _finalNormW, _finalNormB;
+    private Tensor? _mhaNormW, _mhaNormB, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _posW, _posBiasU, _posBiasV;
+    private Tensor? _ffNormW, _ffNormB, _ffW1, _ffB1, _ffW2, _ffB2;
 
-    public ConformerBlock(int channels, int numHeads)
+    public RelPosBlock(int channels, int numHeads)
     {
         _channels = channels;
         _numHeads = numHeads;
@@ -168,189 +281,131 @@ internal sealed unsafe class ConformerBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _ff1NormW = WhisperOps.EnsureF32(w[$"{prefix}.norm_ff_macaron.weight"]);
-        _ff1NormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_ff_macaron.bias"]);
-        _ff1W1 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward_macaron.w_1.weight"]); _ff1B1 = TryBias(w, $"{prefix}.feed_forward_macaron.w_1.bias");
-        _ff1W2 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward_macaron.w_2.weight"]); _ff1B2 = TryBias(w, $"{prefix}.feed_forward_macaron.w_2.bias");
+        _mhaNormW = WhisperOps.EnsureF32(w[$"{prefix}.norm_mha.weight"]);
+        _mhaNormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_mha.bias"]);
+        _qW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_q.weight"]); _qB = TryGet(w, $"{prefix}.self_attn.linear_q.bias");
+        _kW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_k.weight"]); _kB = TryGet(w, $"{prefix}.self_attn.linear_k.bias");
+        _vW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_v.weight"]); _vB = TryGet(w, $"{prefix}.self_attn.linear_v.bias");
+        _oW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_out.weight"]); _oB = TryGet(w, $"{prefix}.self_attn.linear_out.bias");
+        _posW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_pos.weight"]);   // no bias
+        _posBiasU = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.pos_bias_u"]);       // [H, d]
+        _posBiasV = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.pos_bias_v"]);       // [H, d]
 
-        _attnNormW = WhisperOps.EnsureF32(w[$"{prefix}.norm_mha.weight"]);
-        _attnNormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_mha.bias"]);
-        _qW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_q.weight"]); _qB = TryBias(w, $"{prefix}.self_attn.linear_q.bias");
-        _kW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_k.weight"]); _kB = TryBias(w, $"{prefix}.self_attn.linear_k.bias");
-        _vW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_v.weight"]); _vB = TryBias(w, $"{prefix}.self_attn.linear_v.bias");
-        _oW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.linear_out.weight"]); _oB = TryBias(w, $"{prefix}.self_attn.linear_out.bias");
-
-        _convNormW = WhisperOps.EnsureF32(w[$"{prefix}.norm_conv.weight"]);
-        _convNormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_conv.bias"]);
-        _pw1W = WhisperOps.EnsureF32(w[$"{prefix}.conv_module.pointwise_conv1.weight"]); _pw1B = TryBias(w, $"{prefix}.conv_module.pointwise_conv1.bias");
-        _dwW = WhisperOps.EnsureF32(w[$"{prefix}.conv_module.depthwise_conv.weight"]); _dwB = TryBias(w, $"{prefix}.conv_module.depthwise_conv.bias");
-        _convLnW = WhisperOps.EnsureF32(w[$"{prefix}.conv_module.norm.weight"]);
-        _convLnB = WhisperOps.EnsureF32(w[$"{prefix}.conv_module.norm.bias"]);
-        _pw2W = WhisperOps.EnsureF32(w[$"{prefix}.conv_module.pointwise_conv2.weight"]); _pw2B = TryBias(w, $"{prefix}.conv_module.pointwise_conv2.bias");
-
-        _ff2NormW = WhisperOps.EnsureF32(w[$"{prefix}.norm_ff.weight"]);
-        _ff2NormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_ff.bias"]);
-        _ff2W1 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward.w_1.weight"]); _ff2B1 = TryBias(w, $"{prefix}.feed_forward.w_1.bias");
-        _ff2W2 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward.w_2.weight"]); _ff2B2 = TryBias(w, $"{prefix}.feed_forward.w_2.bias");
-
-        _finalNormW = WhisperOps.EnsureF32(w[$"{prefix}.norm_final.weight"]);
-        _finalNormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_final.bias"]);
+        _ffNormW = WhisperOps.EnsureF32(w[$"{prefix}.norm_ff.weight"]);
+        _ffNormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_ff.bias"]);
+        _ffW1 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward.w_1.weight"]); _ffB1 = TryGet(w, $"{prefix}.feed_forward.w_1.bias");
+        _ffW2 = WhisperOps.EnsureF32(w[$"{prefix}.feed_forward.w_2.weight"]); _ffB2 = TryGet(w, $"{prefix}.feed_forward.w_2.bias");
     }
 
-    private static Tensor? TryBias(IReadOnlyDictionary<string, Tensor> w, string key)
-        => w.TryGetValue(key, out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
-
-    /// <summary>Forwards a <c>[1, T, C]</c> sequence; returns a new owned <c>[1, T, C]</c> tensor.</summary>
-    public Tensor Forward(IBackend backend, Tensor seq, int t, int c)
+    public Tensor Forward(IBackend backend, Tensor seq, Tensor posEmb, int t)
     {
+        int c = _channels;
         Tensor x = new(seq.Shape, DType.F32);
         backend.CopyTo(x, seq);
 
-        ApplyFfn(backend, x, t, c, _ff1NormW!, _ff1NormB!, _ff1W1!, _ff1B1, _ff1W2!, _ff1B2, FfnScale);
-        ApplyAttention(backend, x, t, c);
-        ApplyConvModule(backend, x, t, c);
-        ApplyFfn(backend, x, t, c, _ff2NormW!, _ff2NormB!, _ff2W1!, _ff2B1, _ff2W2!, _ff2B2, FfnScale);
-
-        Tensor outT = new(x.Shape, DType.F32);
-        backend.LayerNorm(outT, x, _finalNormW!, _finalNormB!, 1e-5f);
-        x.Dispose();
-        return outT;
-    }
-
-    private static void ApplyFfn(IBackend backend, Tensor x, int t, int c, Tensor normW, Tensor normB,
-        Tensor w1, Tensor? b1, Tensor w2, Tensor? b2, float scale)
-    {
+        // Self-attention sub-layer.
         Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, normW, normB, 1e-5f);
-        int ffDim = (int)w1.Shape[0];
-        Tensor h = WhisperOps.ProjectLinear(backend, normed, w1, b1, 1, t, c, ffDim);
+        backend.LayerNorm(normed, x, _mhaNormW!, _mhaNormB!, NormEps);
+        Tensor att = RelPosAttention(backend, normed, posEmb, t, c);
         normed.Dispose();
+        Add(x, att); att.Dispose();
+
+        // Feed-forward sub-layer (scale 1.0).
+        Tensor normed2 = new(x.Shape, DType.F32);
+        backend.LayerNorm(normed2, x, _ffNormW!, _ffNormB!, NormEps);
+        int ffDim = (int)_ffW1!.Shape[0];
+        Tensor h = WhisperOps.ProjectLinear(backend, normed2, _ffW1!, _ffB1, 1, t, c, ffDim);
+        normed2.Dispose();
         backend.Silu(h, h);
-        Tensor o = WhisperOps.ProjectLinear(backend, h, w2, b2, 1, t, ffDim, c);
+        Tensor ff = WhisperOps.ProjectLinear(backend, h, _ffW2!, _ffB2, 1, t, ffDim, c);
         h.Dispose();
-        AddScaled(x, o, scale);
-        o.Dispose();
+        Add(x, ff); ff.Dispose();
+        return x;
     }
 
-    private void ApplyAttention(IBackend backend, Tensor x, int t, int c)
+    /// <summary>Transformer-XL relative-position multi-head attention (ESPnet
+    /// RelPositionMultiHeadedAttention): per head, <c>scores = ((q+u)·kᵀ + rel_shift((q+v)·pᵀ)) / √d</c>,
+    /// softmax, then <c>·v</c>. <paramref name="posEmb"/> is <c>[1, 2T-1, C]</c>.</summary>
+    private Tensor RelPosAttention(IBackend backend, Tensor x, Tensor posEmb, int t, int c)
     {
-        Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, _attnNormW!, _attnNormB!, 1e-5f);
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _qW!, _qB, 1, t, c, c);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _kW!, _kB, 1, t, c, c);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _vW!, _vB, 1, t, c, c);
-        normed.Dispose();
+        int h = _numHeads, d = _headDim, posLen = 2 * t - 1;
+        Tensor q = WhisperOps.ProjectLinear(backend, x, _qW!, _qB, 1, t, c, c);
+        Tensor k = WhisperOps.ProjectLinear(backend, x, _kW!, _kB, 1, t, c, c);
+        Tensor v = WhisperOps.ProjectLinear(backend, x, _vW!, _vB, 1, t, c, c);
+        Tensor p = WhisperOps.ProjectLinear(backend, posEmb, _posW!, null, 1, posLen, c, c);
 
-        Tensor qH = new(new TensorShape(1, _numHeads, t, _headDim), DType.F32);
-        Tensor kH = new(new TensorShape(1, _numHeads, t, _headDim), DType.F32);
-        Tensor vH = new(new TensorShape(1, _numHeads, t, _headDim), DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(qH, q, 1, t, _numHeads, _headDim);
-        WhisperOps.ReshapeToMultiHead4D(kH, k, 1, t, _numHeads, _headDim);
-        WhisperOps.ReshapeToMultiHead4D(vH, v, 1, t, _numHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer, pp = (float*)p.DataPointer;
+        float* bu = (float*)_posBiasU!.DataPointer, bv = (float*)_posBiasV!.DataPointer;
 
-        Tensor attn = new(new TensorShape(1, _numHeads, t, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qH, kH, vH, mask: null, 1f / MathF.Sqrt(_headDim));
-        qH.Dispose(); kH.Dispose(); vH.Dispose();
+        Tensor outMerged = new(new TensorShape(1, t, c), DType.F32);
+        float* om = (float*)outMerged.DataPointer;
+        float invSqrtD = 1f / MathF.Sqrt(d);
+        float[] scores = new float[t];   // reused per (head, query) row
 
-        Tensor merged = new(new TensorShape(1, t, c), DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(merged, attn, 1, t, _numHeads, _headDim);
-        attn.Dispose();
-        Tensor o = WhisperOps.ProjectLinear(backend, merged, _oW!, _oB, 1, t, c, c);
-        merged.Dispose();
-        AddScaled(x, o, 1f);
-        o.Dispose();
-    }
-
-    /// <summary>Conformer conv module: LN → pointwise(2C) → GLU → depthwise(k) → LayerNorm → SiLU →
-    /// pointwise(C), residual into <paramref name="x"/>. Runs on a channels-first view internally.</summary>
-    private void ApplyConvModule(IBackend backend, Tensor x, int t, int c)
-    {
-        Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, _convNormW!, _convNormB!, 1e-5f);
-
-        // [1, T, C] → [1, C, T].
-        Tensor chFirst = new(new TensorShape(1, c, t), DType.F32);
-        backend.Transpose2D(chFirst, normed, t, c);
-        normed.Dispose();
-
-        // pointwise_conv1: C → 2C, then GLU halves back to C.
-        Tensor pw1 = new(new TensorShape(1, 2 * c, t), DType.F32);
-        backend.Conv1d(pw1, chFirst, _pw1W!, _pw1B, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        chFirst.Dispose();
-        Tensor glu = new(new TensorShape(1, c, t), DType.F32);
-        Glu(glu, pw1, c, t);
-        pw1.Dispose();
-
-        // depthwise_conv: groups = C, kernel k, "same" padding.
-        int k = (int)_dwW!.Shape[2];
-        int pad = (k - 1) / 2;
-        Tensor dw = new(new TensorShape(1, c, t), DType.F32);
-        backend.Conv1d(dw, glu, _dwW!, _dwB, stride: 1, padLeft: pad, padRight: pad, dilation: 1, groups: c);
-        glu.Dispose();
-
-        // norm (LayerNorm over channels) → SiLU. Transpose to channels-last for the LN, then back.
-        Tensor dwSeq = new(new TensorShape(1, t, c), DType.F32);
-        backend.Transpose2D(dwSeq, dw, c, t);
-        dw.Dispose();
-        Tensor dwNorm = new(dwSeq.Shape, DType.F32);
-        backend.LayerNorm(dwNorm, dwSeq, _convLnW!, _convLnB!, 1e-5f);
-        dwSeq.Dispose();
-        backend.Silu(dwNorm, dwNorm);
-        Tensor dwChFirst = new(new TensorShape(1, c, t), DType.F32);
-        backend.Transpose2D(dwChFirst, dwNorm, t, c);
-        dwNorm.Dispose();
-
-        // pointwise_conv2: C → C.
-        Tensor pw2 = new(new TensorShape(1, c, t), DType.F32);
-        backend.Conv1d(pw2, dwChFirst, _pw2W!, _pw2B, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        dwChFirst.Dispose();
-
-        // Back to channels-last and residual add.
-        Tensor outSeq = new(new TensorShape(1, t, c), DType.F32);
-        backend.Transpose2D(outSeq, pw2, c, t);
-        pw2.Dispose();
-        AddScaled(x, outSeq, 1f);
-        outSeq.Dispose();
-    }
-
-    /// <summary>GLU over a channels-first <c>[1, 2C, T]</c>: out[c] = in[c] · sigmoid(in[c+C]).</summary>
-    private static void Glu(Tensor dst, Tensor src, int c, int t)
-    {
-        float* sp = (float*)src.DataPointer;
-        float* dp = (float*)dst.DataPointer;
-        for (int ch = 0; ch < c; ch++)
+        for (int head = 0; head < h; head++)
         {
-            long aOff = (long)ch * t;
-            long bOff = (long)(ch + c) * t;
-            for (int j = 0; j < t; j++)
+            int hOff = head * d;
+            float* buH = bu + (long)head * d;
+            float* bvH = bv + (long)head * d;
+            for (int i = 0; i < t; i++)
             {
-                float gate = 1f / (1f + MathF.Exp(-sp[bOff + j]));
-                dp[aOff + j] = sp[aOff + j] * gate;
+                float* qi = qp + (long)i * c + hOff;   // q[i, head, :]
+                // matrix_ac[i,j] = (q_i + u)·k_j ; matrix_bd[i,j] = (q_i + v)·p_(T-1-i+j)  (rel_shift).
+                float maxS = float.NegativeInfinity;
+                for (int j = 0; j < t; j++)
+                {
+                    float* kj = kp + (long)j * c + hOff;
+                    int posIdx = (t - 1) - i + j;       // rel_shift gather
+                    float* pj = pp + (long)posIdx * c + hOff;
+                    float ac = 0f, bd = 0f;
+                    for (int e = 0; e < d; e++)
+                    {
+                        ac += (qi[e] + buH[e]) * kj[e];
+                        bd += (qi[e] + bvH[e]) * pj[e];
+                    }
+                    float s = (ac + bd) * invSqrtD;
+                    scores[j] = s;
+                    if (s > maxS) maxS = s;
+                }
+                // softmax over j.
+                float sum = 0f;
+                for (int j = 0; j < t; j++) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }
+                float invSum = 1f / sum;
+                // out[i, head, :] = Σ_j softmax_j · v_j.
+                float* oi = om + (long)i * c + hOff;
+                for (int e = 0; e < d; e++) oi[e] = 0f;
+                for (int j = 0; j < t; j++)
+                {
+                    float a = scores[j] * invSum;
+                    float* vj = vp + (long)j * c + hOff;
+                    for (int e = 0; e < d; e++) oi[e] += a * vj[e];
+                }
             }
         }
+        q.Dispose(); k.Dispose(); v.Dispose(); p.Dispose();
+
+        Tensor o = WhisperOps.ProjectLinear(backend, outMerged, _oW!, _oB, 1, t, c, c);
+        outMerged.Dispose();
+        return o;
     }
 
-    private static void AddScaled(Tensor dst, Tensor src, float scale)
+    private static void Add(Tensor dst, Tensor src)
     {
         float* dp = (float*)dst.DataPointer;
         float* sp = (float*)src.DataPointer;
         long n = dst.ElementCount;
-        if (scale == 1f)
-            for (long i = 0; i < n; i++) dp[i] += sp[i];
-        else
-            for (long i = 0; i < n; i++) dp[i] += scale * sp[i];
+        for (long i = 0; i < n; i++) dp[i] += sp[i];
     }
+
+    private static Tensor? TryGet(IReadOnlyDictionary<string, Tensor> w, string key)
+        => w.TryGetValue(key, out Tensor? t) ? WhisperOps.EnsureF32(t) : null;
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] all =
         [
-            _ff1NormW, _ff1NormB, _ff1W1, _ff1B1, _ff1W2, _ff1B2,
-            _attnNormW, _attnNormB, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB,
-            _convNormW, _convNormB, _pw1W, _pw1B, _dwW, _dwB, _convLnW, _convLnB, _pw2W, _pw2B,
-            _ff2NormW, _ff2NormB, _ff2W1, _ff2B1, _ff2W2, _ff2B2,
-            _finalNormW, _finalNormB,
+            _mhaNormW, _mhaNormB, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _posW, _posBiasU, _posBiasV,
+            _ffNormW, _ffNormB, _ffW1, _ffB1, _ffW2, _ffB2,
         ];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }

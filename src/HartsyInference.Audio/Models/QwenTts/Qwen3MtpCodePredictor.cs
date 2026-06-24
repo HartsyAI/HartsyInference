@@ -42,59 +42,102 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
         _lmHeadB = new Tensor?[n];
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "code_predictor")
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "talker.code_predictor")
     {
+        // Real layout: small_to_mtp_projection + the 15 lm_heads sit under `talker.code_predictor.*`; the body
+        // and the 15 per-codebook codec_embedding tables sit under `talker.code_predictor.model.*`.
         _smallToMtpW = WhisperOps.EnsureF32(w[$"{prefix}.small_to_mtp_projection.weight"]);
         _smallToMtpB = TryGet(w, $"{prefix}.small_to_mtp_projection.bias");
         for (int k = 0; k < _cfg.MtpCodebooks; k++)
         {
-            _codecEmbedding[k] = WhisperOps.EnsureF32(w[$"{prefix}.codec_embedding.{k}.weight"]);
+            _codecEmbedding[k] = WhisperOps.EnsureF32(w[$"{prefix}.model.codec_embedding.{k}.weight"]);
             _lmHeadW[k] = WhisperOps.EnsureF32(w[$"{prefix}.lm_head.{k}.weight"]);
             _lmHeadB[k] = TryGet(w, $"{prefix}.lm_head.{k}.bias");
         }
         _body.LoadWeightsHeadless(w, $"{prefix}.model");
     }
 
-    /// <summary>Predicts the 15 acoustic codebook tokens for one frame given the talker hidden
-    /// <c>[1,1,talkerHidden]</c> and the already-sampled codebook-0 token (used as the depth-0 condition).
-    /// Returns the 15 codebook tokens in order (codebooks 1..15).</summary>
-    public int[] PredictFrame(IBackend backend, Tensor talkerHidden, int codebook0Token, float temperature, int topK, float topP, ref uint rng)
+    /// <summary>Adds the 15 acoustic codebook embeddings of a frame to a talker-hidden vector <paramref name="dst"/>
+    /// (<c>[1,1,talkerHidden]</c>). Together with the talker's codebook-0 embed this forms the per-frame codec
+    /// feedback the talker consumes for the next frame. The code_predictor codec_embedding rows are talker-hidden
+    /// width.</summary>
+    public unsafe void AddAcousticFeedback(Tensor dst, ReadOnlySpan<int> acoustic)
     {
+        float* d = (float*)dst.DataPointer;
+        int h = (int)dst.Shape[dst.Shape.Rank - 1];
+        for (int g = 0; g < _cfg.MtpCodebooks && g < acoustic.Length; g++)
+        {
+            Tensor? emb = _codecEmbedding[g];
+            if (emb is null) continue;
+            int code = acoustic[g];
+            if ((uint)code >= (uint)emb.Shape[0]) continue;
+            float* e = (float*)emb.DataPointer + (long)code * h;
+            for (int i = 0; i < h; i++) d[i] += e[i];
+        }
+    }
+
+    /// <summary>Predicts the 15 acoustic codebook tokens (codebooks 1..15) for one frame, matching the reference
+    /// code-predictor: a streaming depth transformer over positions [talker_hidden, code0_embed, code1_embed, ...],
+    /// each input projected from talker width into MTP width by <c>small_to_mtp_projection</c>. Position 0 (the
+    /// talker hidden) makes no prediction; position 1 (codebook-0 embedded through the talker's codec table)
+    /// predicts codebook 1; each later position embeds the previous codebook through the code-predictor's own
+    /// <c>codec_embedding</c> table. Greedy (argmax), as in the reference.</summary>
+    public int[] PredictFrame(IBackend backend, Tensor talkerHidden, Tensor code0Embed)
+    {
+        int talkerH = _cfg.Talker.HiddenSize;
         int mtpHidden = _mtp.HiddenSize;
         int depth = _cfg.MtpCodebooks;
-        int cap = depth + 1;
         int[] codes = new int[depth];
 
-        // Depth-0 conditioning: the talker hidden projected into the MTP width.
-        Tensor cond = WhisperOps.ProjectLinear(backend, talkerHidden, _smallToMtpW!, _smallToMtpB, 1, 1, _cfg.Talker.HiddenSize, mtpHidden);
+        using StreamingKvCache cache = new(_mtp.NumHiddenLayers, 1, _mtp.NumKeyValueHeads, depth + 2, _mtp.HeadDim);
 
-        using StreamingKvCache cache = new(_mtp.NumHiddenLayers, 1, _mtp.NumKeyValueHeads, cap, _mtp.HeadDim);
-        int prevToken = codebook0Token;
-        for (int k = 0; k < depth; k++)
+        // Position 0: projected talker hidden (builds KV, no prediction).
+        Tensor cond = WhisperOps.ProjectLinear(backend, talkerHidden, _smallToMtpW!, _smallToMtpB, 1, 1, talkerH, mtpHidden);
+        Tensor h0 = _body.ForwardEmbeds(backend, cond, 1, 0, cache);
+        cond.Dispose(); h0.Dispose();
+
+        // Position 1: codebook-0 embedded via the talker table, projected -> predict codebook 1.
+        Tensor proj1 = WhisperOps.ProjectLinear(backend, code0Embed, _smallToMtpW!, _smallToMtpB, 1, 1, talkerH, mtpHidden);
+        Tensor h1 = _body.ForwardEmbeds(backend, proj1, 1, 1, cache);
+        proj1.Dispose();
+        codes[0] = ArgmaxHead(backend, h1, 0, mtpHidden);
+        h1.Dispose();
+
+        // Positions 2..15: previous codebook embedded via code_predictor.codec_embedding[g-1], projected.
+        for (int g = 1; g < depth; g++)
         {
-            // Depth 0 input is the projected talker hidden; later steps embed the previous codebook token.
-            Tensor stepInput = k == 0 ? cond : LookupEmbedding(k, prevToken, mtpHidden);
-            Tensor hidden = _body.ForwardEmbeds(backend, stepInput, 1, k, cache);
-            stepInput.Dispose();
-
-            Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _lmHeadW[k]!, _lmHeadB[k], 1, 1, mtpHidden, _cfg.MtpVocabSize);
+            Tensor emb = CodecEmbedRow(g - 1, codes[g - 1], talkerH);
+            Tensor proj = WhisperOps.ProjectLinear(backend, emb, _smallToMtpW!, _smallToMtpB, 1, 1, talkerH, mtpHidden);
+            emb.Dispose();
+            Tensor hidden = _body.ForwardEmbeds(backend, proj, 1, g + 1, cache);
+            proj.Dispose();
+            codes[g] = ArgmaxHead(backend, hidden, g, mtpHidden);
             hidden.Dispose();
-            int tok = NucleusSampler.Draw(new Span<float>((void*)logits.DataPointer, _cfg.MtpVocabSize),
-                _cfg.MtpVocabSize, temperature, topK, topP, ref rng);
-            logits.Dispose();
-            codes[k] = tok;
-            prevToken = tok;
         }
         return codes;
     }
 
-    private Tensor LookupEmbedding(int k, int token, int mtpHidden)
+    /// <summary>Projects the MTP hidden through <c>lm_head[g]</c> and returns the argmax (greedy) codebook token.</summary>
+    private int ArgmaxHead(IBackend backend, Tensor hidden, int g, int mtpHidden)
     {
-        Tensor emb = new(new TensorShape(1, 1, mtpHidden), DType.F32);
-        int vocab = _cfg.MtpVocabSize;
+        Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _lmHeadW[g]!, _lmHeadB[g], 1, 1, mtpHidden, _cfg.MtpVocabSize);
+        float* p = (float*)logits.DataPointer;
+        int best = 0; float bestV = float.NegativeInfinity;
+        for (int i = 0; i < _cfg.MtpVocabSize; i++) { if (p[i] > bestV) { bestV = p[i]; best = i; } }
+        logits.Dispose();
+        return best;
+    }
+
+    /// <summary>Returns the code-predictor's <c>codec_embedding[g]</c> row for <paramref name="token"/> as
+    /// <c>[1,1,talkerHidden]</c> (the table is talker-hidden width and is projected by the caller).</summary>
+    private Tensor CodecEmbedRow(int g, int token, int width)
+    {
+        Tensor emb = new(new TensorShape(1, 1, width), DType.F32);
+        Tensor table = _codecEmbedding[g]!;
+        int vocab = (int)table.Shape[0];
         int clamped = (uint)token < (uint)vocab ? token : 0;
-        float* src = (float*)_codecEmbedding[k]!.DataPointer + (long)clamped * mtpHidden;
-        Buffer.MemoryCopy(src, (void*)emb.DataPointer, mtpHidden * 4, mtpHidden * 4);
+        float* src = (float*)table.DataPointer + (long)clamped * width;
+        Buffer.MemoryCopy(src, (void*)emb.DataPointer, width * 4, width * 4);
         return emb;
     }
 

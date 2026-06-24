@@ -14,8 +14,8 @@ namespace HartsyInference.Audio.Models.Chatterbox;
 public sealed record ChatterboxConfig
 {
     /// <summary>T3 backbone — the "Llama_520M" preset (hidden 1024 / 30L / 16 heads MHA / head_dim 64 /
-    /// SwiGLU 4096 / RoPE θ=500000 / RMSNorm 1e-5, no bias, untied). Uses llama3 RoPE scaling (factor 8) —
-    /// a checkpoint-reconcile item, the same deferral as CSM / Orpheus.</summary>
+    /// SwiGLU 4096 / RoPE θ=500000 / RMSNorm 1e-5, no bias, untied), with Llama-3 NTK-by-parts RoPE scaling
+    /// (factor 8, low 1, high 4, original context 8192) applied through the shared <c>Core.Rope</c> path.</summary>
     public Qwen2Config T3 { get; init; } = new()
     {
         HiddenSize = 1_024,
@@ -26,6 +26,14 @@ public sealed record ChatterboxConfig
         VocabSize = 8_194,           // speech head/embedding size (dummy for the headless backbone)
         MaxPositionEmbeddings = 131_072,
         RopeTheta = 500_000f,
+        RopeScaling = new HartsyInference.Core.Rope.RopeScaling
+        {
+            Type = HartsyInference.Core.Rope.RopeScalingType.Llama3,
+            Factor = 8.0,
+            LowFreqFactor = 1.0,
+            HighFreqFactor = 4.0,
+            OriginalContextLength = 8_192,
+        },
         RmsNormEps = 1e-5f,
         AttentionBias = false,
         TieWordEmbeddings = false,

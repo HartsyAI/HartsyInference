@@ -67,14 +67,22 @@ internal static unsafe class WeightNorm
         return result;
     }
 
-    /// <summary>Convenience: pulls <c>{prefix}.weight_g</c> and <c>{prefix}.weight_v</c>
-    /// from <paramref name="w"/> and composes them. Throws if either is missing.</summary>
+    /// <summary>Convenience: pulls the magnitude/direction pair from <paramref name="w"/> and composes them.
+    /// Accepts both serialization formats: the legacy <c>torch.nn.utils.weight_norm</c> names
+    /// (<c>{prefix}.weight_g</c> / <c>{prefix}.weight_v</c>) and the newer (PyTorch &gt;= 2.1)
+    /// <c>torch.nn.utils.parametrizations.weight_norm</c> names
+    /// (<c>{prefix}.parametrizations.weight.original0</c> = g / <c>.original1</c> = v). Throws if neither
+    /// pair is present.</summary>
     public static Tensor Compose(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        if (!w.TryGetValue($"{prefix}.weight_g", out Tensor? g))
-            throw new KeyNotFoundException($"WeightNorm.Compose: missing '{prefix}.weight_g'.");
-        if (!w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
-            throw new KeyNotFoundException($"WeightNorm.Compose: missing '{prefix}.weight_v'.");
-        return Compose(g, v);
+        // Legacy format.
+        if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g) && w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
+            return Compose(g, v);
+        // New parametrizations format (original0 = g/magnitude, original1 = v/direction).
+        if (w.TryGetValue($"{prefix}.parametrizations.weight.original0", out Tensor? g2)
+            && w.TryGetValue($"{prefix}.parametrizations.weight.original1", out Tensor? v2))
+            return Compose(g2, v2);
+        throw new KeyNotFoundException(
+            $"WeightNorm.Compose: missing weight-norm pair for '{prefix}' (looked for '.weight_g'/'.weight_v' and '.parametrizations.weight.original0'/'.original1').");
     }
 }

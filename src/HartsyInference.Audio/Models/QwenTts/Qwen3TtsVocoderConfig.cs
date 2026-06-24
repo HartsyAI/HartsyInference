@@ -16,8 +16,8 @@ public sealed record Qwen3TtsVocoderConfig
     /// <summary>Acoustic codebook size (codebooks 1..15).</summary>
     public int AcousticCodebookSize { get; init; } = 2_048;
 
-    /// <summary>Acoustic codebook embedding dim.</summary>
-    public int AcousticCodebookDim { get; init; } = 512;
+    /// <summary>Acoustic codebook embedding dim (same 256 as semantic in the real Tokenizer-V2 codec).</summary>
+    public int AcousticCodebookDim { get; init; } = 256;
 
     /// <summary>Number of acoustic codebooks.</summary>
     public int AcousticCodebooks { get; init; } = 15;
@@ -37,7 +37,7 @@ public sealed record Qwen3TtsVocoderConfig
     public float TransformerRopeTheta { get; init; } = 10_000f;
     public int SlidingWindow { get; init; } = 72;
     public float LayerScaleInit { get; init; } = 0.01f;
-    public int TransformerFfnDim { get; init; } = 2_048;
+    public int TransformerFfnDim { get; init; } = 1_024;
     public float RmsNormEps { get; init; } = 1e-6f;
 
     // ── Upsample [2,2] ConvNeXt stage ───────────────────────────────────

@@ -78,7 +78,10 @@ public sealed class Qwen3Tokenizer : IDisposable
     public IReadOnlyList<int> EncodeRaw(string text)
     {
         ThrowIfDisposed();
-        return _tokenizer.EncodeToIds(text);
+        // ML.Tokenizers' BpeTokenizer.Create(vocab, merges) does NOT apply the GPT-2 byte-level pre-tokenizer,
+        // so it drops leading spaces (" there" -> "there") instead of mapping them to the Ġ-prefixed vocab keys
+        // ("Ġthere"). Pre-encode the text into GPT-2 byte space so the byte-level vocab/merges match exactly.
+        return _tokenizer.EncodeToIds(ByteLevelCodec.Encode(text));
     }
 
     /// <summary>Token id for <c>&lt;|im_start|&gt;</c>.</summary>
@@ -124,6 +127,12 @@ public sealed class Qwen3Tokenizer : IDisposable
 
     private void AppendBpe(List<int> dst, string text)
     {
+        // TODO(byte-level): this path does NOT byte-level encode (unlike EncodeRaw, which routes through
+        // ByteLevelCodec.Encode). ML.Tokenizers' BpeTokenizer.Create(vocab, merges) drops leading spaces
+        // (" there" -> "there" instead of "Ġthere"), so EncodeChat produces wrong tokens for the image
+        // models (Flux.2 Klein, Ideogram4). Verified against the Qwen3-TTS C reference that the byte-level
+        // fix is required for exact parity. Apply ByteLevelCodec.Encode here too and re-validate Klein/
+        // Ideogram4 conditioning (their output WILL change), then remove this note.
         IReadOnlyList<int> ids = _tokenizer.EncodeToIds(text);
         for (int i = 0; i < ids.Count; i++) dst.Add(ids[i]);
     }

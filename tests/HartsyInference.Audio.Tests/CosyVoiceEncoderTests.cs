@@ -94,12 +94,15 @@ public sealed unsafe class CosyVoiceEncoderTests
         const int preBlocks = 2, postBlocks = 1;
 
         Dictionary<string, Tensor> w = new();
-        AddLinear(w, "embed.out.0", outputSize, inputSize, 1);
-        BuildConformer(w, "encoders", preBlocks, outputSize, 100);
-        // up_layer ConvTranspose1d: [Cin, Cout, K] = [out, out, 4], stride 2.
-        w["up_layer.weight"] = Random(new TensorShape(outputSize, outputSize, 4), 700);
-        w["up_layer.bias"] = Random(new TensorShape(outputSize), 701);
-        BuildConformer(w, "up_encoders", postBlocks, outputSize, 2000);
+        AddLinear(w, "embed.out.0", outputSize, inputSize, 1);   // embed Linear
+        AddNorm(w, "embed.out.1", outputSize, 6);                // embed LayerNorm
+        AddConv(w, "pre_lookahead_layer.conv1", outputSize, outputSize, 4, 10);
+        AddConv(w, "pre_lookahead_layer.conv2", outputSize, outputSize, 3, 20);
+        BuildRelPosBlocks(w, "encoders", preBlocks, outputSize, numHeads, 100);
+        AddConv(w, "up_layer.conv", outputSize, outputSize, 5, 700);   // Upsample1D conv (kernel = ratio*2+1)
+        AddLinear(w, "up_embed.out.0", outputSize, outputSize, 710);   // up_embed Linear
+        AddNorm(w, "up_embed.out.1", outputSize, 715);                 // up_embed LayerNorm
+        BuildRelPosBlocks(w, "up_encoders", postBlocks, outputSize, numHeads, 2000);
         AddNorm(w, "after_norm", outputSize, 9000);
 
         using UpsampleConformerEncoder enc = new(outputSize, numHeads, preBlocks, postBlocks);
@@ -114,35 +117,31 @@ public sealed unsafe class CosyVoiceEncoderTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
-    private static void BuildConformer(Dictionary<string, Tensor> w, string stack, int blocks, int c, int seedBase)
+    private static void AddConv(Dictionary<string, Tensor> w, string prefix, int outCh, int inCh, int kernel, int seed)
+    {
+        w[$"{prefix}.weight"] = Random(new TensorShape(outCh, inCh, kernel), seed);
+        w[$"{prefix}.bias"] = Random(new TensorShape(outCh), seed + 1);
+    }
+
+    private static void BuildRelPosBlocks(Dictionary<string, Tensor> w, string stack, int blocks, int c, int numHeads, int seedBase)
     {
         const int ffDim = 2;            // tiny FFN inner dim
+        int headDim = c / numHeads;
         for (int i = 0; i < blocks; i++)
         {
             string b = $"{stack}.{i}";
             int s = seedBase + i * 200;
-            AddNorm(w, $"{b}.norm_ff_macaron", c, s);
-            AddLinear(w, $"{b}.feed_forward_macaron.w_1", c * ffDim, c, s + 2);
-            AddLinear(w, $"{b}.feed_forward_macaron.w_2", c, c * ffDim, s + 4);
-            AddNorm(w, $"{b}.norm_mha", c, s + 6);
-            AddLinear(w, $"{b}.self_attn.linear_q", c, c, s + 8);
-            AddLinear(w, $"{b}.self_attn.linear_k", c, c, s + 10);
-            AddLinear(w, $"{b}.self_attn.linear_v", c, c, s + 12);
-            AddLinear(w, $"{b}.self_attn.linear_out", c, c, s + 14);
-            AddNorm(w, $"{b}.norm_conv", c, s + 16);
-            // pointwise_conv1: C → 2C (kernel 1).
-            w[$"{b}.conv_module.pointwise_conv1.weight"] = Random(new TensorShape(2 * c, c, 1), s + 18);
-            w[$"{b}.conv_module.pointwise_conv1.bias"] = Random(new TensorShape(2 * c), s + 19);
-            // depthwise_conv: groups = C, weight [C, 1, K].
-            w[$"{b}.conv_module.depthwise_conv.weight"] = Random(new TensorShape(c, 1, 5), s + 20);
-            w[$"{b}.conv_module.depthwise_conv.bias"] = Random(new TensorShape(c), s + 21);
-            AddNorm(w, $"{b}.conv_module.norm", c, s + 22);
-            w[$"{b}.conv_module.pointwise_conv2.weight"] = Random(new TensorShape(c, c, 1), s + 24);
-            w[$"{b}.conv_module.pointwise_conv2.bias"] = Random(new TensorShape(c), s + 25);
-            AddNorm(w, $"{b}.norm_ff", c, s + 26);
-            AddLinear(w, $"{b}.feed_forward.w_1", c * ffDim, c, s + 28);
-            AddLinear(w, $"{b}.feed_forward.w_2", c, c * ffDim, s + 30);
-            AddNorm(w, $"{b}.norm_final", c, s + 32);
+            AddNorm(w, $"{b}.norm_mha", c, s);
+            AddLinear(w, $"{b}.self_attn.linear_q", c, c, s + 2);
+            AddLinear(w, $"{b}.self_attn.linear_k", c, c, s + 4);
+            AddLinear(w, $"{b}.self_attn.linear_v", c, c, s + 6);
+            AddLinear(w, $"{b}.self_attn.linear_out", c, c, s + 8);
+            AddLinear(w, $"{b}.self_attn.linear_pos", c, c, s + 10, bias: false);
+            w[$"{b}.self_attn.pos_bias_u"] = Random(new TensorShape(numHeads, headDim), s + 12);
+            w[$"{b}.self_attn.pos_bias_v"] = Random(new TensorShape(numHeads, headDim), s + 13);
+            AddNorm(w, $"{b}.norm_ff", c, s + 14);
+            AddLinear(w, $"{b}.feed_forward.w_1", c * ffDim, c, s + 16);
+            AddLinear(w, $"{b}.feed_forward.w_2", c, c * ffDim, s + 18);
         }
     }
 }

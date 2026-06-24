@@ -45,6 +45,10 @@ public sealed record Qwen2Config
     /// <summary>RoPE base frequency. 1e6 across Qwen2.5 (long-context preset).</summary>
     public float RopeTheta { get; init; } = 1_000_000f;
 
+    /// <summary>Optional RoPE scaling (e.g. Llama-3 NTK-by-parts). Null = no scaling (the Qwen2.5 default).
+    /// Chatterbox's T3 ("Llama_520M") sets Llama-3 scaling (factor 8) on its theta-500000 RoPE.</summary>
+    public HartsyInference.Core.Rope.RopeScaling? RopeScaling { get; init; }
+
     /// <summary>RMSNorm epsilon. 1e-6 across Qwen2.5.</summary>
     public float RmsNormEps { get; init; } = 1e-6f;
 

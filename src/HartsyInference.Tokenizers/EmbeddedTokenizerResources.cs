@@ -40,6 +40,10 @@ public static class EmbeddedTokenizerResources
     /// the Orpheus / CSM audio front-ends. Shared by every Llama-3.x model (3 / 3.1 / 3.2 use one tokenizer).</summary>
     public const string Llama3TokenizerJsonName = "HartsyInference.Tokenizers.Resources.llama3_tokenizer.json";
 
+    /// <summary>Chatterbox text <c>tokenizer.json</c> (plain-char BPE, vocab 704, Whitespace pre-tokenizer).
+    /// Consumed by <see cref="ChatterboxEnTokenizer"/>; embedded so Chatterbox TTS ships self-contained.</summary>
+    public const string ChatterboxTokenizerJsonName = "HartsyInference.Tokenizers.Resources.chatterbox_tokenizer.json";
+
     private static readonly Assembly _asm = typeof(EmbeddedTokenizerResources).Assembly;
 
     /// <summary>Opens the named embedded resource. Caller owns the returned stream.</summary>
@@ -65,6 +69,7 @@ public static class EmbeddedTokenizerResources
     public static Stream OpenLlama3Vocab() => Open(Llama3VocabName);
     public static Stream OpenLlama3Merges() => Open(Llama3MergesName);
     public static Stream OpenLlama3TokenizerJson() => Open(Llama3TokenizerJsonName);
+    public static Stream OpenChatterboxTokenizerJson() => Open(ChatterboxTokenizerJsonName);
 
     /// <summary>True when the canonical Llama-3 <c>tokenizer.json</c> is embedded in this build.</summary>
     public static bool HasLlama3TokenizerJson =>

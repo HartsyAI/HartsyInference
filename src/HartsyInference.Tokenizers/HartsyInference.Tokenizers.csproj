@@ -27,6 +27,9 @@
     <EmbeddedResource Include="Resources\umt5_spiece.model" LogicalName="HartsyInference.Tokenizers.Resources.umt5_spiece.model" />
     <EmbeddedResource Include="Resources\qwen3_vocab.json"  LogicalName="HartsyInference.Tokenizers.Resources.qwen3_vocab.json" />
     <EmbeddedResource Include="Resources\qwen3_merges.txt"  LogicalName="HartsyInference.Tokenizers.Resources.qwen3_merges.txt" />
+    <!-- Chatterbox text tokenizer.json (~25 KB, plain-char BPE, vocab 704). Small enough to always embed so
+         Chatterbox TTS is self-contained (the user supplies only the model weights). -->
+    <EmbeddedResource Include="Resources\chatterbox_tokenizer.json" LogicalName="HartsyInference.Tokenizers.Resources.chatterbox_tokenizer.json" />
   </ItemGroup>
 
   <!-- Llama-3.1 tokenizer assets (HiDream's fourth text encoder). These ship separately from the

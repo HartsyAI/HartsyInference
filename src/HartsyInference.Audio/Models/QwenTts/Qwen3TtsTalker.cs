@@ -46,12 +46,15 @@ public sealed unsafe class Qwen3TtsTalker : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string backbonePrefix = "talker.model",
         string talkerPrefix = "talker")
     {
-        _textEmbedding = WhisperOps.EnsureF32(w[$"{talkerPrefix}.text_embedding.weight"]);
-        _codecEmbedding = WhisperOps.EnsureF32(w[$"{talkerPrefix}.codec_embedding.weight"]);
-        _textProjW1 = WhisperOps.EnsureF32(w[$"{talkerPrefix}.text_projection.0.weight"]);
-        _textProjB1 = TryGet(w, $"{talkerPrefix}.text_projection.0.bias");
-        _textProjW2 = WhisperOps.EnsureF32(w[$"{talkerPrefix}.text_projection.2.weight"]);
-        _textProjB2 = TryGet(w, $"{talkerPrefix}.text_projection.2.bias");
+        // Real Qwen3-TTS layout: the dual embeddings + final norm + decoder layers live under `talker.model.*`,
+        // while the codec head and the text-projection MLP (named linear_fc1/linear_fc2) sit one level up under
+        // `talker.*`.
+        _textEmbedding = WhisperOps.EnsureF32(w[$"{backbonePrefix}.text_embedding.weight"]);
+        _codecEmbedding = WhisperOps.EnsureF32(w[$"{backbonePrefix}.codec_embedding.weight"]);
+        _textProjW1 = WhisperOps.EnsureF32(w[$"{talkerPrefix}.text_projection.linear_fc1.weight"]);
+        _textProjB1 = TryGet(w, $"{talkerPrefix}.text_projection.linear_fc1.bias");
+        _textProjW2 = WhisperOps.EnsureF32(w[$"{talkerPrefix}.text_projection.linear_fc2.weight"]);
+        _textProjB2 = TryGet(w, $"{talkerPrefix}.text_projection.linear_fc2.bias");
         _codecHeadW = WhisperOps.EnsureF32(w[$"{talkerPrefix}.codec_head.weight"]);
         _codecHeadB = TryGet(w, $"{talkerPrefix}.codec_head.bias");
         _backbone.LoadWeightsHeadless(w, backbonePrefix);
@@ -106,12 +109,37 @@ public sealed unsafe class Qwen3TtsTalker : IDisposable
         return tok;
     }
 
+    /// <summary>Returns the talker's codec embedding row for <paramref name="codecToken"/> as <c>[1,1,h]</c>.
+    /// The code predictor embeds codebook-0 through this table (then projects to MTP width).</summary>
+    public Tensor CodecEmbedRow(IBackend backend, int codecToken)
+    {
+        int h = _cfg.Talker.HiddenSize;
+        Tensor row = new(new TensorShape(1, 1, h), DType.F32);
+        if (codecToken >= 0)
+        {
+            float* src = (float*)_codecEmbedding!.DataPointer + (long)codecToken * h;
+            Buffer.MemoryCopy(src, (void*)row.DataPointer, h * 4, h * 4);
+        }
+        return row;
+    }
+
+    /// <summary>Adds the talker's codebook-0 codec embedding row to <paramref name="dst"/> (channels <c>[h]</c>).
+    /// Used by the per-frame talker feedback (codebook-0 part of the 16-code sum).</summary>
+    public void AddCodecEmbed(Tensor dst, int codecToken)
+    {
+        if (codecToken < 0) return;
+        int h = _cfg.Talker.HiddenSize;
+        float* d = (float*)dst.DataPointer;
+        float* cp = (float*)_codecEmbedding!.DataPointer + (long)codecToken * h;
+        for (int i = 0; i < h; i++) d[i] += cp[i];
+    }
+
     private Tensor ProjectText(IBackend backend, Tensor x)
     {
         int h = _cfg.Talker.HiddenSize;
         int mid = (int)_textProjW1!.Shape[0];
         Tensor a = WhisperOps.ProjectLinear(backend, x, _textProjW1!, _textProjB1, 1, 1, h, mid);
-        backend.Gelu(a, a);
+        backend.Silu(a, a);   // Qwen3-TTS text_projection is fc1 -> SiLU -> fc2 (verified vs reference)
         Tensor o = WhisperOps.ProjectLinear(backend, a, _textProjW2!, _textProjB2, 1, 1, mid, h);
         a.Dispose();
         return o;
