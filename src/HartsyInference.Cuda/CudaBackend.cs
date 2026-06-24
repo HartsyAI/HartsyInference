@@ -1257,7 +1257,40 @@ public sealed class CudaBackend : IBackend
 
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
     {
-        throw new NotImplementedException("CudaBackend.AdaInstanceNorm1d not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2 prosody and decoder paths.");
+        if (input.DType != DType.F32 || gamma.DType != DType.F32 || beta.DType != DType.F32)
+            throw new NotSupportedException($"CUDA AdaInstanceNorm1d supports F32 only — got input {input.DType}, gamma {gamma.DType}, beta {beta.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        // input: [B, C, T] channels-first; gamma/beta: [B, C] (per-batch) or [C] (broadcast).
+        int batch = (int)input.Shape[0];
+        int channels = (int)input.Shape[1];
+        int t = (int)input.Shape[2];
+        int totalRows = batch * channels;
+        bool perBatch = gamma.Shape.Rank == 2;
+
+        ulong pOut = 0, pIn = 0, pG = 0, pB = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pG = GpuTransferHelper.CopyToDevice(gamma);
+            pB = GpuTransferHelper.CopyToDevice(beta);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchAudioAdaInstanceNorm1d(pOut, pIn, pG, pB, t, totalRows, channels, perBatch, eps, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pG);
+            GpuTransferHelper.FreeDevice(pB);
+        }
     }
 
     public void LeakyRelu(Tensor output, Tensor input, float slope)

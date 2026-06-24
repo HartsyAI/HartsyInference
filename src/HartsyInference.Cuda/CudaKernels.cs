@@ -52,6 +52,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _audioSnakeF32;
     private readonly nint _audioSnakeBetaF32;
 
+    // ── Adaptive InstanceNorm 1D Module + handle (Kokoro / StyleTTS 2, F32) ──
+    private readonly CudaModule _audioAdain1dF32Module;
+    private readonly nint _audioAdain1dF32;
+
     // ── Language-model (decoder LLM) glue Module + handles ───────────────
     private readonly CudaModule _lmF32Module;
     private readonly nint _lmRepeatKvF32;
@@ -318,6 +322,9 @@ public sealed class CudaKernels : IDisposable
         _audioSnakeF32 = _audioActF32Module.GetFunction("audio_snake_f32");
         _audioSnakeBetaF32 = _audioActF32Module.GetFunction("audio_snake_beta_f32");
 
+        _audioAdain1dF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "adain1d_f32.ptx"));
+        _audioAdain1dF32 = _audioAdain1dF32Module.GetFunction("audio_adain1d_f32");
+
         // ── Language-model glue (F32) ────────────────────────────────────
         _lmF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "lm_f32.ptx"));
         _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
@@ -513,6 +520,28 @@ public sealed class CudaKernels : IDisposable
             args[3] = &batchArg; args[4] = &chArg; args[5] = &tArg;
             CudaDriverApi.cuLaunchKernel(_audioSnakeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
         }
+    }
+
+    /// <summary>Launches Adaptive InstanceNorm 1D over [B,C,T] F32: per-(batch,channel) row,
+    /// normalize across T then affine by (1+gamma)/beta. <paramref name="perBatch"/>=1 when
+    /// gamma/beta are [B,C], else 0 ([C], broadcast over batch). One block per row.</summary>
+    public unsafe void LaunchAudioAdaInstanceNorm1d(ulong output, ulong input, ulong gamma, ulong beta,
+        int dim, int totalRows, int channels, bool perBatch, float eps, nint stream)
+    {
+        ulong outArg = output, inArg = input, gammaArg = gamma, betaArg = beta;
+        uint dimArg = (uint)dim, rowsArg = (uint)totalRows, chArg = (uint)channels;
+        int perBatchArg = perBatch ? 1 : 0;
+        float epsArg = eps;
+
+        void** args = stackalloc void*[9];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &gammaArg; args[3] = &betaArg;
+        args[4] = &dimArg; args[5] = &rowsArg; args[6] = &chArg; args[7] = &perBatchArg; args[8] = &epsArg;
+
+        uint gridDim = (uint)totalRows;
+        uint sharedMem = BlockSize * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(
+            _audioAdain1dF32, gridDim, 1, 1, BlockSize, 1, 1,
+            sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     private unsafe void LaunchGroupNormImpl(nint func, ulong output, ulong input, ulong weight, ulong bias,
@@ -1476,6 +1505,7 @@ public sealed class CudaKernels : IDisposable
         _ditF32Module?.Dispose();
         _audioConvF32Module?.Dispose();
         _audioActF32Module?.Dispose();
+        _audioAdain1dF32Module?.Dispose();
         _lmF32Module?.Dispose();
         _flashAttnF32Module?.Dispose();
         _castF8Module?.Dispose();

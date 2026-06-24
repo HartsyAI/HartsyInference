@@ -13,6 +13,7 @@ PTX_OUT="${THIS_DIR}/../../../src/HartsyInference.Cuda/Ptx"
 KERNELS=(
     "conv1d_f32"
     "audio_activations_f32"
+    "adain1d_f32"
 )
 
 INSTALL=true

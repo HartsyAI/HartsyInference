@@ -127,6 +127,30 @@ public sealed unsafe class AudioActivationKernelTests
     }
 
     [Fact]
+    public void AdaInstanceNorm1d_Cpu_Vs_Cuda()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        // [B, C, T] channels-first; gamma/beta either [B,C] (per-batch) or [C] (broadcast).
+        foreach (bool perBatch in new[] { true, false })
+        {
+            const int B = 2, C = 32, T = 97;
+            using Tensor input = Random(new TensorShape(B, C, T), seed: 14, lo: -3f, hi: 3f);
+            TensorShape affineShape = perBatch ? new TensorShape(B, C) : new TensorShape(C);
+            using Tensor gamma = Random(affineShape, seed: 15, lo: -0.8f, hi: 0.8f);
+            using Tensor beta = Random(affineShape, seed: 16, lo: -0.8f, hi: 0.8f);
+            using Tensor cpuOut = new Tensor(new TensorShape(B, C, T), DType.F32);
+            using Tensor cudaOut = new Tensor(new TensorShape(B, C, T), DType.F32);
+
+            IBackend cpu = new CpuBackend();
+            cpu.AdaInstanceNorm1d(cpuOut, input, gamma, beta, 1e-5f);
+            cpu.Dispose();
+
+            RunCuda(c => c.AdaInstanceNorm1d(cudaOut, input, gamma, beta, 1e-5f), cudaOut);
+            AssertClose(cpuOut, cudaOut, 1e-4f, $"AdaInstanceNorm1d[perBatch={perBatch}]");
+        }
+    }
+
+    [Fact]
     public void Snake_Cpu_Vs_Cuda()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
