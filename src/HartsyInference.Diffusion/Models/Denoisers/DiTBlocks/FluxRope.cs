@@ -114,6 +114,28 @@ public sealed unsafe class FluxRope
         }
     }
 
+    /// <summary>Applies RoPE rotation to a single Q or K tensor in-place. Use this for grouped-query attention, where
+    /// Q and K have different head counts (so the two-tensor <see cref="Forward"/> can't rotate both at once). Tensor
+    /// must be <c>[B, numHeads, seqLen, headDim]</c>; <see cref="Precompute"/> must have been called for this seqLen.</summary>
+    public void ForwardSingle(Tensor qOrK, int batch, int numHeads, int seqLen)
+    {
+        if (_cosCache == null || _sinCache == null)
+            throw new InvalidOperationException("FluxRope.Precompute must be called before ForwardSingle.");
+
+        int halfDim = _headDim / 2;
+        float* ptr = (float*)qOrK.DataPointer;
+        fixed (float* cosPtr = _cosCache, sinPtr = _sinCache)
+        {
+            for (int b = 0; b < batch; b++)
+                for (int h = 0; h < numHeads; h++)
+                    for (int s = 0; s < seqLen; s++)
+                    {
+                        int vecOffset = ((b * numHeads + h) * seqLen + s) * _headDim;
+                        ApplyRotation(ptr + vecOffset, cosPtr + s * halfDim, sinPtr + s * halfDim, halfDim);
+                    }
+        }
+    }
+
     /// <summary>Applies 2x2 rotation to each adjacent pair of elements in a vector. x[2i]' = cos * x[2i] - sin * x[2i+1], x[2i+1]' = sin * x[2i] + cos * x[2i+1].</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void ApplyRotation(float* vec, float* cos, float* sin, int halfDim)

@@ -249,6 +249,11 @@ public sealed record LlamaStyleEncoderConfig
     /// <see cref="LlamaStyleEncoder.EncodeMultiLayer"/> (M-RoPE collapses to standard RoPE for text-only input).</summary>
     public static LlamaStyleEncoderConfig Qwen3_VL_8B => Qwen3_8B with { RopeTheta = 5_000_000f };
 
+    /// <summary>Qwen3-VL-4B language tower (hidden 2560, 36 layers, GQA 32:8, head_dim 128) — Krea 2's text encoder,
+    /// consumed via a 12-layer hidden-state tap. Same as <see cref="Qwen3_4B"/> but with the Qwen3-VL M-RoPE base
+    /// (5e6); the vision tower is unused (Krea 2 is text-to-image).</summary>
+    public static LlamaStyleEncoderConfig Qwen3_VL_4B => Qwen3_4B with { RopeTheta = 5_000_000f };
+
     /// <summary>Llama-3.1-8B-Instruct preset, used as HiDream-I1's fourth text encoder (text_encoder_4).
     /// 32 layers, hidden=4096, GQA 32:8, head_dim=128, intermediate=14336, vocab=128256. Standard Llama:
     /// NO per-head Q/K norm (distinguishes it from Qwen3-8B, which is otherwise dimensionally similar),

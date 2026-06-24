@@ -57,6 +57,7 @@
 - [x] [LANCE_ARCHITECTURE](../Research/LANCE_ARCHITECTURE.md) — ByteDance unified multimodal (MoT dual-stream + MaPE + Wan2.2 3D causal VAE + 3-way CFG flow-match). Covers both the Phase 4 image variant (`Lance_3B`) and the Phase 9 video variant (`Lance_3B_Video`); the two share a backbone, so the image pipeline lands first to amortize the net-new infra.
 - [x] [IDEOGRAM4_ARCHITECTURE](../Research/IDEOGRAM4_ARCHITECTURE.md) — `ideogram-oss` 9.3B single-stream unified-sequence DiT (non-commercial, 2026-06). Qwen3-VL-8B 13-layer-tap text encoder, 3D sectioned MRoPE `(24,20,20)`, scale-only tanh-gated AdaLN + sandwich norms, logit-normal scheduler, asymmetric CFG, Flux.2 VAE + fixed-constant latent norm, structured-JSON prompting. Flags ComfyUI mistakes (Gemma-4 is a magic-prompt LLM not an encoder; the "unconditional" file is likely repackaged weights). Plus [STRUCTURED_PROMPT_BUILDER](../Research/STRUCTURED_PROMPT_BUILDER.md) — model-agnostic structured/regional prompt builder.
 - [x] [MICROSOFT_LENS_ARCHITECTURE](../Research/MICROSOFT_LENS_ARCHITECTURE.md) — Microsoft Research's 3.8B dual-stream MMDiT (MIT, 2026-05-25). 48 layers / hidden 1536 / GPT-OSS MoE multi-layer (layers 5/11/17/23) text encoder + Flux.2 semantic VAE + flow-match Euler with empirical mu + norm-rescaled CFG. Covers all three weight variants (Lens RL-tuned, Lens-Turbo distilled, Lens-Base SFT-only — same architecture, different sampling defaults). Documents net-new infra: real top-k MoE routing for GPT-OSS (HiDream's MoE today is single-expert fallback), MXFP4 dequant-at-load, alternating sliding-128 / full-attention masks.
+- [x] [KREA2](../Research/KREA2.md) — Krea 2 (Krea, open weights, 2026). 12.9B single-stream MMDiT flow-match T2I (28 blocks / hidden 6144 / 48 heads / GQA 12 kv / head_dim 128). Net-new vs prior models: **sigmoid output-gate attention** (`attn·sigmoid(to_gate(x))`), a **6-way `scale_shift_table` modulation** (shared `time_mod_proj` + per-block additive table, raw gates), and a **text-fusion stage** (12 tapped Qwen3-VL-4B decoder layers → 2 layerwise blocks across the layer axis → `Linear(12→1)` projector → 2 refiner blocks across tokens). Heavy reuse: Qwen3-VL-4B `LlamaStyleEncoder` 12-layer tap, **Qwen-Image VAE**, flow-match Euler dynamic shift (`256/6400/0.5/1.15`), Flux-convention 3-axis RoPE `(32,48,48)` θ=1000, zero-centered RMSNorm via `RmsNormScalePlusOne`. Base (28 steps, CFG 4.5) + Turbo/TDM (8 steps, no CFG) share one architecture (`is_distilled` toggles only the shift). Build plan in the research doc § 8.
 
 ## 2. Planning
 
@@ -658,6 +659,35 @@ Open-weight 9.3B single-stream DiT from `ideogram-oss` (non-commercial license, 
 - `vae/flux2-vae.safetensors` (~336 MB) — reused as-is.
 - ⚠ `gemma4_e4b_it_fp8_scaled.safetensors` is ComfyUI's **magic-prompt LLM, NOT a conditioning encoder** — do not load it as a text encoder.
 - ⚠ Official `ideogram-ai/ideogram-4-nf4` uses bitsandbytes NF4 — **skip** (managed dependency); fp8/fp8_scaled/nvfp4 cover the weights.
+
+### Krea 2 (Krea, single-stream MMDiT flow-match T2I) — RESEARCH COMPLETE, NOT STARTED
+
+12.9B open-weights model (Krea 2 Community License, 2026). Full architecture in
+[`KREA2.md`](../Research/KREA2.md). Base (28 steps, CFG 4.5) + Turbo/TDM (8 steps, no CFG); a Turbo LoRA also ships.
+
+**Architecture (config-verified):** single-stream MMDiT, 28 blocks, hidden 6144, 48 heads / 12 kv heads (GQA),
+head_dim 128, SwiGLU inner 16384, 3-axis RoPE `(32,48,48)` θ=1000 (Flux `use_real` convention), zero-centered
+RMSNorm (`weight+1`), v-pred flow-matching. Text encoder Qwen3-VL-4B (hidden 2560), tokenizer Qwen2. VAE =
+Qwen-Image (`AutoencoderKLQwenImage`, 16ch f8). Scheduler = flow-match Euler with resolution-aware exp shift
+(`256/6400/0.5/1.15`; Turbo pins `mu=1.15`).
+
+**Net-new components (the only genuinely new code):**
+- [ ] **Sigmoid output-gate attention** — GQA + per-head zero-center RMSNorm Q/K + RoPE, then `attn_out · sigmoid(to_gate(x))` before `to_out`.
+- [ ] **6-way `scale_shift_table` modulation** — shared `temb_mod = time_mod_proj(gelu_tanh(time_embed(t)))` of width `6·hidden` + per-block additive `[6,hidden]` table → `prescale/preshift/pregate/postscale/postshift/postgate`; raw (un-tanh'd) multiplicative gates.
+- [ ] **Text-fusion stage** (`Krea2TextFusion`) — input `[B,S,12,2560]`: 2 layerwise blocks across the 12-layer axis → `Linear(12→1)` projector → 2 refiner blocks across tokens; then `Krea2TextProjection` (RMSNorm → Linear → gelu_tanh → Linear) into hidden 6144.
+- [ ] **`Krea2FinalLayer`** — adaptive zero-center RMSNorm from `temb + table[2,hidden]` → `Linear(6144→64)` → unpatchify.
+
+**Reused (no new code):** `LlamaStyleEncoder` (add a `Qwen3_VL_4B` preset; `EncodeMultiLayer` taps
+`(2,5,8,11,14,17,20,23,26,29,32,35)` → view `[B,S,12,2560]`), `QwenImageVaeDecoder`/`Encoder`,
+`FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift`, `FluxRope`, `RmsNormScalePlusOne`, SwiGLU/GQA/QkNorm
+patterns, `DiTUtils.PatchifyNCHW`/`UnpatchifyToNCHW`, the Qwen-Image chat template (34-token prefix drop).
+
+**Build files:** `Krea2Config` (Base/Turbo presets), `DiTBlocks/Krea2Block` + `DiTBlocks/Krea2TextFusion`,
+`Krea2Transformer`, `Krea2Pipeline` (CFG dual-pass Base / single-pass Turbo), `Krea2CheckpointConverter` (diffusers
+folder keys + the short-name single-file keys), `Krea2TransformerTests` + `Krea2GenerationTests` +
+`tests/python-reference` parity dumps. SwarmUI: `Krea2Loader` + core compat `"krea-2"` (detect by
+`text_fusion.projector.weight` + `transformer_blocks.0.attn.to_gate.weight`; VaeFamily `VaeQwenImage`), Qwen3-VL-4B +
+Qwen-Image VAE side models. Estimated size ≈ the Z-Image build.
 
 ### Structured Prompt Builder (model-agnostic, reused across models) — IMPLEMENTED (core + Ideogram dialect + NL dialect)
 
