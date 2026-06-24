@@ -1694,13 +1694,27 @@ public sealed class CudaBackend : IBackend
 
     public void Sigmoid(Tensor output, Tensor input)
     {
-        // Sigmoid / Tanh / Snake PTX kernels and Conv1d / ConvTranspose1d PTX kernels
-        // are not yet implemented. Audio models that use any of these (every codec in
-        // PHASE_5_AUDIO §4) currently must run those layers on CpuBackend; the rest of
-        // the pipeline (attention, matmul, cast) can stay on GPU. PTX work tracked under
-        // Phase 5 §3 "PTX kernels" in PHASE_5_AUDIO.md (conv_transpose1d.ptx +
-        // snake_activation.ptx are explicitly listed).
-        throw new NotSupportedException("CUDA Sigmoid not yet implemented — use CpuBackend for LSTM activations.");
+        if (input.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Sigmoid currently supports F32 only — got {input.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAudioSigmoid(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
     }
 
     public void Tanh(Tensor output, Tensor input)
@@ -1730,24 +1744,134 @@ public sealed class CudaBackend : IBackend
 
     public void Elu(Tensor output, Tensor input, float alpha)
     {
-        throw new NotSupportedException("CUDA Elu not yet implemented — use CpuBackend for SEANet codec models.");
+        if (input.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Elu currently supports F32 only — got {input.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAudioElu(pOut, pIn, alpha, (int)input.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
     }
 
     public void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta)
     {
-        throw new NotSupportedException("CUDA Snake not yet implemented — use CpuBackend for snake-using vocoders.");
+        if (input.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Snake currently supports F32 only — got {input.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        // Snake operates on [B, C, T] with per-channel alpha (and optional per-channel beta).
+        int batch = (int)input.Shape[0], channels = (int)input.Shape[1], timeDim = (int)input.Shape[2];
+
+        ulong pOut = 0, pIn = 0, pAlpha = 0, pBeta = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pAlpha = GpuTransferHelper.CopyToDevice(alpha);
+            pBeta = beta is null ? 0 : GpuTransferHelper.CopyToDevice(beta);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAudioSnake(pOut, pIn, pAlpha, pBeta, batch, channels, timeDim, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pAlpha);
+            if (pBeta != 0) GpuTransferHelper.FreeDevice(pBeta);
+        }
     }
 
     public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
-        throw new NotSupportedException("CUDA Conv1d not yet implemented — use CpuBackend for codec models.");
+        if (input.DType != DType.F32 || weight.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Conv1d currently supports F32 only — got input {input.DType}, weight {weight.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
+        int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2], kernel = (int)weight.Shape[2];
+
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchConv1d(pOut, pIn, pW, pB, batch, cIn, cOut, tIn, tOut, kernel,
+                stride, padLeft, dilation, groups, bias is null ? 0 : 1, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pW);
+            if (pB != 0) GpuTransferHelper.FreeDevice(pB);
+        }
     }
 
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
-        throw new NotSupportedException("CUDA ConvTranspose1d not yet implemented — use CpuBackend for codec models.");
+        if (input.DType != DType.F32 || weight.DType != DType.F32)
+            throw new NotSupportedException($"CUDA ConvTranspose1d currently supports F32 only — got input {input.DType}, weight {weight.DType}.");
+        if (groups != 1)
+            throw new NotSupportedException($"CUDA ConvTranspose1d currently supports groups=1 only — got groups={groups}; use CpuBackend for grouped transposed convs.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        // ConvTranspose1d weight is [C_in, C_out, K].
+        int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
+        int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2], kernel = (int)weight.Shape[2];
+
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            _kernels!.LaunchConvTranspose1d(pOut, pIn, pW, pB, batch, cIn, cOut, tIn, tOut, kernel,
+                stride, padLeft, dilation, bias is null ? 0 : 1, _stream.Handle);
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pW);
+            if (pB != 0) GpuTransferHelper.FreeDevice(pB);
+        }
     }
 
     public void Silu(Tensor output, Tensor input)

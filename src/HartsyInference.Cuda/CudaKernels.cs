@@ -39,6 +39,18 @@ public sealed class CudaKernels : IDisposable
     // ── DiT glue Modules ─────────────────────────────────────────────────
     private readonly CudaModule _ditF32Module;
 
+    // ── Audio conv Module + handles (codec/TTS Conv1d + ConvTranspose1d, F32) ─
+    private readonly CudaModule _audioConvF32Module;
+    private readonly nint _conv1dF32;
+    private readonly nint _convTranspose1dF32;
+
+    // ── Audio activation Module + handles (Sigmoid / Elu / Snake, F32) ───
+    private readonly CudaModule _audioActF32Module;
+    private readonly nint _audioSigmoidF32;
+    private readonly nint _audioEluF32;
+    private readonly nint _audioSnakeF32;
+    private readonly nint _audioSnakeBetaF32;
+
     // ── Language-model (decoder LLM) glue Module + handles ───────────────
     private readonly CudaModule _lmF32Module;
     private readonly nint _lmRepeatKvF32;
@@ -293,6 +305,17 @@ public sealed class CudaKernels : IDisposable
         _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
 
+        // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
+        _audioConvF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "conv1d_f32.ptx"));
+        _conv1dF32 = _audioConvF32Module.GetFunction("conv1d_f32");
+        _convTranspose1dF32 = _audioConvF32Module.GetFunction("conv_transpose1d_f32");
+
+        _audioActF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "audio_activations_f32.ptx"));
+        _audioSigmoidF32 = _audioActF32Module.GetFunction("audio_sigmoid_f32");
+        _audioEluF32 = _audioActF32Module.GetFunction("audio_elu_f32");
+        _audioSnakeF32 = _audioActF32Module.GetFunction("audio_snake_f32");
+        _audioSnakeBetaF32 = _audioActF32Module.GetFunction("audio_snake_beta_f32");
+
         // ── Language-model glue (F32) ────────────────────────────────────
         _lmF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "lm_f32.ptx"));
         _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
@@ -383,6 +406,98 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches Conv1d (F32, channels-first [B,C,T]). One thread per output element.
+    /// Pass <paramref name="bias"/>=0 / <paramref name="hasBias"/>=0 when there is no bias.</summary>
+    public unsafe void LaunchConv1d(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int cIn, int cOut, int tIn, int tOut, int kernel, int stride, int padLeft,
+        int dilation, int groups, int hasBias, nint stream)
+    {
+        ulong outArg = output, inArg = input, wArg = weight, bArg = bias;
+        int batchArg = batch, cInArg = cIn, cOutArg = cOut, tInArg = tIn, tOutArg = tOut;
+        int kArg = kernel, strideArg = stride, padArg = padLeft, dilArg = dilation, groupsArg = groups, biasArg = hasBias;
+
+        void** args = stackalloc void*[15];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &wArg; args[3] = &bArg;
+        args[4] = &batchArg; args[5] = &cInArg; args[6] = &cOutArg; args[7] = &tInArg; args[8] = &tOutArg;
+        args[9] = &kArg; args[10] = &strideArg; args[11] = &padArg; args[12] = &dilArg; args[13] = &groupsArg; args[14] = &biasArg;
+
+        uint total = (uint)(batch * cOut * tOut);
+        uint gridDim = (total + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            _conv1dF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches ConvTranspose1d (F32, channels-first [B,C,T], weight [C_in,C_out,K]).
+    /// Groups are not supported by this kernel; callers must pass groups=1.</summary>
+    public unsafe void LaunchConvTranspose1d(ulong output, ulong input, ulong weight, ulong bias,
+        int batch, int cIn, int cOut, int tIn, int tOut, int kernel, int stride, int padLeft,
+        int dilation, int hasBias, nint stream)
+    {
+        ulong outArg = output, inArg = input, wArg = weight, bArg = bias;
+        int batchArg = batch, cInArg = cIn, cOutArg = cOut, tInArg = tIn, tOutArg = tOut;
+        int kArg = kernel, strideArg = stride, padArg = padLeft, dilArg = dilation, biasArg = hasBias;
+
+        void** args = stackalloc void*[14];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &wArg; args[3] = &bArg;
+        args[4] = &batchArg; args[5] = &cInArg; args[6] = &cOutArg; args[7] = &tInArg; args[8] = &tOutArg;
+        args[9] = &kArg; args[10] = &strideArg; args[11] = &padArg; args[12] = &dilArg; args[13] = &biasArg;
+
+        uint total = (uint)(batch * cOut * tOut);
+        uint gridDim = (total + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(
+            _convTranspose1dF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches an elementwise audio activation (Sigmoid) over <paramref name="count"/> F32 elements.</summary>
+    public unsafe void LaunchAudioSigmoid(ulong output, ulong input, int count, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        int countArg = count;
+        void** args = stackalloc void*[3];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &countArg;
+        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(_audioSigmoidF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches the audio Elu activation over <paramref name="count"/> F32 elements.</summary>
+    public unsafe void LaunchAudioElu(ulong output, ulong input, float alpha, int count, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        float alphaArg = alpha;
+        int countArg = count;
+        void** args = stackalloc void*[4];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &alphaArg; args[3] = &countArg;
+        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(_audioEluF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches the Snake activation x + sin²(αx)/α over [B,C,T] F32, α per-channel.
+    /// When <paramref name="beta"/>≠0, uses the β-divisor variant x + sin²(αx)/(β+ε).</summary>
+    public unsafe void LaunchAudioSnake(ulong output, ulong input, ulong alpha, ulong beta,
+        int batch, int channels, int timeDim, nint stream)
+    {
+        ulong outArg = output, inArg = input, alphaArg = alpha, betaArg = beta;
+        int batchArg = batch, chArg = channels, tArg = timeDim;
+        uint total = (uint)(batch * channels * timeDim);
+        uint gridDim = (total + BlockSize - 1) / BlockSize;
+        if (beta != 0)
+        {
+            void** args = stackalloc void*[7];
+            args[0] = &outArg; args[1] = &inArg; args[2] = &alphaArg; args[3] = &betaArg;
+            args[4] = &batchArg; args[5] = &chArg; args[6] = &tArg;
+            CudaDriverApi.cuLaunchKernel(_audioSnakeBetaF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        }
+        else
+        {
+            void** args = stackalloc void*[6];
+            args[0] = &outArg; args[1] = &inArg; args[2] = &alphaArg;
+            args[3] = &batchArg; args[4] = &chArg; args[5] = &tArg;
+            CudaDriverApi.cuLaunchKernel(_audioSnakeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        }
     }
 
     private unsafe void LaunchGroupNormImpl(nint func, ulong output, ulong input, ulong weight, ulong bias,
@@ -1344,6 +1459,8 @@ public sealed class CudaKernels : IDisposable
         _groupnormSiluF16Module?.Dispose();
         _castModule?.Dispose();
         _ditF32Module?.Dispose();
+        _audioConvF32Module?.Dispose();
+        _audioActF32Module?.Dispose();
         _lmF32Module?.Dispose();
         _flashAttnF32Module?.Dispose();
         _castF8Module?.Dispose();
