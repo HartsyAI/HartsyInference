@@ -20,11 +20,93 @@ namespace HartsyInference.ModelHandler.CheckpointConverters;
 /// config (<c>features</c>/<c>heads</c>/… ) and raw weight keys; add a single-file key remap when that layout is needed.</para></summary>
 public sealed class Krea2CheckpointConverter
 {
-    /// <summary>Loads the Krea 2 transformer from <c>{root}/transformer/</c> (or a <c>krea2*</c> single file). fp8 folded.</summary>
+    /// <summary>Loads the Krea 2 transformer from <c>{root}/transformer/</c> (or a <c>krea2*</c> single file). fp8 folded.
+    /// Keys are normalized to the diffusers <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/>
+    /// convention via <see cref="RemapTransformerKey"/> (handles both the released <b>raw</b> Comfy single-file naming
+    /// — <c>blocks.N.*</c> / <c>txtfusion.*</c> / <c>tmlp</c> / <c>tproj</c> / <c>last.*</c> — and an already-diffusers
+    /// folder, which passes through).</summary>
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadTransformer(string rootPath)
     {
         string[] shards = DiscoverShards(Path.Combine(rootPath, "transformer"), rootPath, "krea2");
-        return LoadShards(shards, 1200, StripTransformerPrefix);
+        return LoadShards(shards, 1200, k => RemapTransformerKey(StripTransformerPrefix(k)));
+    }
+
+    /// <summary>Maps a Krea 2 transformer weight key to the diffusers convention the engine's
+    /// <see cref="HartsyInference.Diffusion.Models.Denoisers.Krea2Transformer"/> consumes. The released checkpoints use
+    /// the model's original ("raw") names; this rewrites them. Already-diffusers keys are returned unchanged.
+    ///
+    /// <para>Top level: <c>first→img_in</c>, <c>tmlp.0/2→time_embed.linear_1/2</c>, <c>tproj.1→time_mod_proj</c>,
+    /// <c>txtmlp.0.scale→txt_in.norm.weight</c>, <c>txtmlp.1/3→txt_in.linear_1/2</c>, <c>txtfusion→text_fusion</c>,
+    /// <c>last.modulation.lin→final_layer.scale_shift_table</c>, <c>last.norm.scale→final_layer.norm.weight</c>,
+    /// <c>last.linear→final_layer.linear</c>. Blocks: <c>blocks.N→transformer_blocks.N</c> with the per-block sub-map
+    /// (<c>prenorm/postnorm.scale→norm1/norm2.weight</c>, <c>attn.w{q,k,v,o}→attn.to_{q,k,v,out.0}</c>,
+    /// <c>attn.gate→attn.to_gate</c>, <c>attn.qknorm.{q,k}norm.scale→attn.norm_{q,k}.weight</c>,
+    /// <c>mlp.{gate,up,down}→ff.{gate,up,down}</c>, <c>mod.lin→scale_shift_table</c>).</para></summary>
+    public static string RemapTransformerKey(string key)
+    {
+        // Already-diffusers keys pass through.
+        if (key.StartsWith("img_in.", StringComparison.Ordinal) || key.StartsWith("transformer_blocks.", StringComparison.Ordinal)
+            || key.StartsWith("text_fusion.", StringComparison.Ordinal) || key.StartsWith("time_embed.", StringComparison.Ordinal)
+            || key.StartsWith("time_mod_proj.", StringComparison.Ordinal) || key.StartsWith("txt_in.", StringComparison.Ordinal)
+            || key.StartsWith("final_layer.", StringComparison.Ordinal))
+            return key;
+
+        // Top-level renames.
+        if (key == "first.weight") return "img_in.weight";
+        if (key == "first.bias") return "img_in.bias";
+        if (key == "tmlp.0.weight") return "time_embed.linear_1.weight";
+        if (key == "tmlp.0.bias") return "time_embed.linear_1.bias";
+        if (key == "tmlp.2.weight") return "time_embed.linear_2.weight";
+        if (key == "tmlp.2.bias") return "time_embed.linear_2.bias";
+        if (key == "tproj.1.weight") return "time_mod_proj.weight";
+        if (key == "tproj.1.bias") return "time_mod_proj.bias";
+        if (key == "txtmlp.0.scale") return "txt_in.norm.weight";
+        if (key == "txtmlp.1.weight") return "txt_in.linear_1.weight";
+        if (key == "txtmlp.1.bias") return "txt_in.linear_1.bias";
+        if (key == "txtmlp.3.weight") return "txt_in.linear_2.weight";
+        if (key == "txtmlp.3.bias") return "txt_in.linear_2.bias";
+        if (key == "txtfusion.projector.weight") return "text_fusion.projector.weight";
+        if (key == "last.modulation.lin") return "final_layer.scale_shift_table";
+        if (key == "last.norm.scale") return "final_layer.norm.weight";
+        if (key == "last.linear.weight") return "final_layer.linear.weight";
+        if (key == "last.linear.bias") return "final_layer.linear.bias";
+
+        // Block streams: blocks.N → transformer_blocks.N; txtfusion.{layerwise,refiner}_blocks.N → text_fusion.…
+        if (key.StartsWith("blocks.", StringComparison.Ordinal))
+            return RemapBlockSubKey("transformer_blocks.", key["blocks.".Length..]);
+        if (key.StartsWith("txtfusion.layerwise_blocks.", StringComparison.Ordinal))
+            return RemapBlockSubKey("text_fusion.layerwise_blocks.", key["txtfusion.layerwise_blocks.".Length..]);
+        if (key.StartsWith("txtfusion.refiner_blocks.", StringComparison.Ordinal))
+            return RemapBlockSubKey("text_fusion.refiner_blocks.", key["txtfusion.refiner_blocks.".Length..]);
+
+        return key; // unknown — leave as-is so a missing-key error surfaces the real name.
+    }
+
+    /// <summary>Rewrites <c>{index}.{rawSub}</c> within a block to <c>{outPrefix}{index}.{diffusersSub}</c>.</summary>
+    private static string RemapBlockSubKey(string outPrefix, string rest)
+    {
+        int dot = rest.IndexOf('.');
+        if (dot < 0) return outPrefix + rest;
+        string idx = rest[..dot];
+        string sub = rest[(dot + 1)..];
+        string mapped = sub switch
+        {
+            "prenorm.scale" => "norm1.weight",
+            "postnorm.scale" => "norm2.weight",
+            "mod.lin" => "scale_shift_table",
+            "attn.wq.weight" => "attn.to_q.weight",
+            "attn.wk.weight" => "attn.to_k.weight",
+            "attn.wv.weight" => "attn.to_v.weight",
+            "attn.wo.weight" => "attn.to_out.0.weight",
+            "attn.gate.weight" => "attn.to_gate.weight",
+            "attn.qknorm.qnorm.scale" => "attn.norm_q.weight",
+            "attn.qknorm.knorm.scale" => "attn.norm_k.weight",
+            "mlp.gate.weight" => "ff.gate.weight",
+            "mlp.up.weight" => "ff.up.weight",
+            "mlp.down.weight" => "ff.down.weight",
+            _ => sub,
+        };
+        return $"{outPrefix}{idx}.{mapped}";
     }
 
     /// <summary>Loads the Qwen-Image VAE from <c>{root}/vae/</c> (keys consumed directly by <c>QwenImageVaeDecoder</c>).</summary>
