@@ -128,7 +128,7 @@ public sealed unsafe class VitsTests
             {
                 string rb = $"dec.resblocks.{i * c.ResBlockKernelSizes.Count + k}";
                 for (int dn = 0; dn < c.ResBlockDilations[k].Count; dn++)
-                { w[$"{rb}.convs1.{dn}.weight"] = F3(outCh, outCh, c.ResBlockKernelSizes[k]); w[$"{rb}.convs1.{dn}.bias"] = F1(outCh); }
+                { w[$"{rb}.convs.{dn}.weight"] = F3(outCh, outCh, c.ResBlockKernelSizes[k]); w[$"{rb}.convs.{dn}.bias"] = F1(outCh); }
             }
         }
         return w;

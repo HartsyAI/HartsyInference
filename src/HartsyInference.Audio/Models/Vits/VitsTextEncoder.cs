@@ -143,13 +143,17 @@ public sealed unsafe class VitsTextEncoder
                     float maxS = float.NegativeInfinity;
                     for (int j = 0; j < t; j++)
                     {
-                        int rel = Math.Clamp(j - i, -w, w) + w;     // [0, 2w]
+                        // VITS uses learned relative embeddings only within ±window; positions outside the window are
+                        // zero-padded (NOT clamped to the edge embedding).
+                        int diff = j - i;
+                        bool inWindow = diff >= -w && diff <= w;
+                        int rel = diff + w;     // valid only when inWindow
                         float dot = 0, relDot = 0;
                         for (int c = 0; c < kc; c++)
                         {
                             float qv = qp[(long)(chBase + c) * t + i];
                             dot += qv * kp[(long)(chBase + c) * t + j];
-                            relDot += qv * rk[(long)rel * kc + c];
+                            if (inWindow) relDot += qv * rk[(long)rel * kc + c];
                         }
                         float s = (dot + relDot) * invSqrt;
                         scores[j] = s;
@@ -164,8 +168,10 @@ public sealed unsafe class VitsTextEncoder
                         for (int j = 0; j < t; j++)
                         {
                             float p = scores[j] * inv;
-                            int rel = Math.Clamp(j - i, -w, w) + w;
-                            acc += p * (vp[(long)(chBase + c) * t + j] + rv[(long)rel * kc + c]);
+                            int diff = j - i;
+                            bool inWindow = diff >= -w && diff <= w;
+                            float relV = inWindow ? rv[(long)(diff + w) * kc + c] : 0f;
+                            acc += p * (vp[(long)(chBase + c) * t + j] + relV);
                         }
                         op[(long)(chBase + c) * t + i] = acc;
                     }

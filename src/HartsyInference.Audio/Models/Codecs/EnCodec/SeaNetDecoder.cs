@@ -215,9 +215,11 @@ internal sealed class SeaNetDecoder
 
     private static Tensor LoadFusedConvWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
+        // Accept both weight-normed (weight_g/weight_v) and pre-composed (weight) checkpoints; the Kyutai DSM
+        // Mimi (tokenizer-e351c8d8) ships composed conv weights.
+        if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g) && w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
+            return WeightNormFusion.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
+        return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
 
     /// <summary>ConvTranspose1d weight has shape <c>[C_in, C_out, K]</c>. WeightNormFusion
@@ -230,9 +232,9 @@ internal sealed class SeaNetDecoder
     /// dimension).</summary>
     private static Tensor LoadFusedConvTransposeWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusionT.Fuse(g, v);
+        if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g) && w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
+            return WeightNormFusionT.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
+        return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
 
     private static int GetExtraRightPadding(int tIn, int kernel, int stride, int padTotal)

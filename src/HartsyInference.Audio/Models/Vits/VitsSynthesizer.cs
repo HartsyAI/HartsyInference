@@ -33,7 +33,7 @@ public sealed unsafe class VitsSynthesizer : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _enc.LoadWeights(w);
-        if (_sdp is not null) _sdp.LoadWeights(w);
+        if (_sdp is not null) _sdp.LoadWeights(w, _cfg.SdpPrefix);
         else _dp.LoadWeights(w);
         _flow.LoadWeights(w);
         _dec.LoadWeights(w);

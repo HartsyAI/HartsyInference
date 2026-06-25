@@ -13,4 +13,8 @@ public interface IPhonemizer
     /// <summary>Returns the phonemization as the raw per-phoneme mnemonics the engine produced, for callers that map
     /// mnemonics directly to model tokens rather than going through IPA.</summary>
     IReadOnlyList<string> PhonemizeToMnemonics(string text, string language);
+
+    /// <summary>Phonemizes <paramref name="text"/> to IPA and maps it to model token ids via <paramref name="idMap"/>
+    /// (e.g. a Piper voice's phoneme id map).</summary>
+    int[] PhonemizeToIds(string text, string language, PhonemeIdMap idMap);
 }

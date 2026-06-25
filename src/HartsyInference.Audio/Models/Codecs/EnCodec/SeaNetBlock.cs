@@ -137,9 +137,10 @@ internal sealed unsafe class SeaNetBlock
     /// conv weights.</summary>
     private static Tensor LoadFusedConvWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
+        // Accept weight-normed (weight_g/weight_v) and pre-composed (weight) conv checkpoints.
+        if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g) && w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
+            return WeightNormFusion.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
+        return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
 
     /// <summary>Replicates the upstream <c>get_extra_padding_for_conv1d</c> stride-alignment

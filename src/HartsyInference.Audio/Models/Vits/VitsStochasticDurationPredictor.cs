@@ -26,6 +26,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
     private DdsConv? _convs;
     private ConvFlow[]? _flows;
     private Tensor? _eaM, _eaLogs;
+    private float[]? _eaScale;     // exp(-logs) per channel; folded into a graph constant by the ONNX export
 
     public VitsStochasticDurationPredictor(VitsConfig cfg)
     {
@@ -45,13 +46,39 @@ public sealed unsafe class VitsStochasticDurationPredictor
         _convs.LoadWeights(w, $"{prefix}.convs");
 
         // self.flows = [ElementwiseAffine(2)] + n_flows×[ConvFlow, Flip]; ConvFlow at index 2*j+1.
-        _eaM = w[$"{prefix}.flows.0.m"]; _eaLogs = w[$"{prefix}.flows.0.logs"];
+        // The inference reverse drops the first ConvFlow (index 1) and folds a zero ElementwiseAffine `logs`, so a
+        // real Piper export omits `flows.1.*` and `flows.0.logs`; both are optional here (logs absent => identity).
+        _eaM = w[$"{prefix}.flows.0.m"];
+        _eaLogs = w.TryGetValue($"{prefix}.flows.0.logs", out Tensor? eaLogs) ? eaLogs : null;
+        _eaScale = ResolveEaScale(w, prefix);
         _flows = new ConvFlow[_nFlows];
         for (int j = 0; j < _nFlows; j++)
         {
+            if (!w.ContainsKey($"{prefix}.flows.{2 * j + 1}.pre.weight")) continue; // unused dropped flow (index 1)
             _flows[j] = new ConvFlow(_filter, _kernel, _flowLayers, NumBins);
             _flows[j].LoadWeights(w, $"{prefix}.flows.{2 * j + 1}");
         }
+    }
+
+    // The ElementwiseAffine reverse needs exp(-logs). When the raw `logs` parameter is present, compute it; when the
+    // ONNX export folded exp(-logs) into a graph constant (named like ".../flows.0/Exp_output_0"), use it directly.
+    private static float[]? ResolveEaScale(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        if (w.TryGetValue($"{prefix}.flows.0.logs", out Tensor? logs))
+        {
+            float* lp = (float*)logs.DataPointer;
+            return [MathF.Exp(-lp[0]), MathF.Exp(-lp[1])];
+        }
+        foreach (KeyValuePair<string, Tensor> kv in w)
+        {
+            if (kv.Key.Contains("flows.0", StringComparison.Ordinal) && kv.Key.Contains("Exp", StringComparison.Ordinal)
+                && kv.Value.ElementCount == 2)
+            {
+                float* ep = (float*)kv.Value.DataPointer;
+                return [ep[0], ep[1]];
+            }
+        }
+        return null; // identity (logs == 0)
     }
 
     /// <summary>Predicts log-durations from the encoder hidden <c>[1, hidden, T]</c> → <c>float[T]</c>.</summary>
@@ -116,10 +143,9 @@ public sealed unsafe class VitsStochasticDurationPredictor
     private void ElementwiseAffineReverse(float* z, int t)
     {
         float* m = (float*)_eaM!.DataPointer;
-        float* logs = (float*)_eaLogs!.DataPointer;
         for (int c = 0; c < 2; c++)
         {
-            float mc = m[c], invs = MathF.Exp(-logs[c]);
+            float mc = m[c], invs = _eaScale is not null ? _eaScale[c] : 1f;
             for (int j = 0; j < t; j++) z[(long)c * t + j] = (z[(long)c * t + j] - mc) * invs;
         }
     }
@@ -309,9 +335,19 @@ public sealed unsafe class VitsStochasticDurationPredictor
 
         private static float Gelu(float x)
         {
-            // tanh approximation (PyTorch GELU default is exact erf, but the tanh form matches within tolerance).
-            float x3 = x * x * x;
-            return 0.5f * x * (1f + MathF.Tanh(0.7978845608f * (x + 0.044715f * x3)));
+            // Exact erf-based GELU to match PyTorch's default nn.GELU() (the tanh approximation biases the spline
+            // parameters enough to shift durations).
+            return 0.5f * x * (1f + Erf(x * 0.7071067811865476f));
+        }
+
+        // Abramowitz-Stegun 7.1.26 erf approximation (max abs error ~1.5e-7).
+        private static float Erf(float x)
+        {
+            float sign = MathF.Sign(x);
+            float ax = MathF.Abs(x);
+            float tt = 1f / (1f + 0.3275911f * ax);
+            float y = 1f - (((((1.061405429f * tt - 1.453152027f) * tt) + 1.421413741f) * tt - 0.284496736f) * tt + 0.254829592f) * tt * MathF.Exp(-ax * ax);
+            return sign * y;
         }
 
         private static unsafe void AddInPlace(Tensor dst, Tensor src)

@@ -159,9 +159,11 @@ public sealed unsafe class VitsHiFiGan
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
         {
+            // ResBlock1 uses two conv lists (`convs1` dilated + `convs2` dilation-1); ResBlock2 uses a single `convs`.
+            string conv1 = _type1 ? "convs1" : "convs";
             for (int j = 0; j < _dilations.Length; j++)
             {
-                _c1W[j] = VitsWeights.Conv(w, $"{prefix}.convs1.{j}"); _c1B[j] = VitsWeights.Bias(w, $"{prefix}.convs1.{j}");
+                _c1W[j] = VitsWeights.Conv(w, $"{prefix}.{conv1}.{j}"); _c1B[j] = VitsWeights.Bias(w, $"{prefix}.{conv1}.{j}");
                 if (_type1)
                 {
                     _c2W[j] = VitsWeights.Conv(w, $"{prefix}.convs2.{j}"); _c2B[j] = VitsWeights.Bias(w, $"{prefix}.convs2.{j}");

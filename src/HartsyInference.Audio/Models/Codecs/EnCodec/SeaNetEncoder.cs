@@ -241,9 +241,11 @@ internal sealed class SeaNetEncoder
 
     private static Tensor LoadFusedConvWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
+        // Weight-normed checkpoints store weight_g/weight_v; others (e.g. the Kyutai DSM Mimi
+        // tokenizer-e351c8d8) ship the already-composed conv.weight. Accept both.
+        if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g) && w.TryGetValue($"{prefix}.weight_v", out Tensor? v))
+            return WeightNormFusion.Fuse(WhisperOps.EnsureF32(g), WhisperOps.EnsureF32(v));
+        return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
 
     private static int GetExtraRightPadding(int tIn, int kernel, int stride, int padTotal)

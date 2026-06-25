@@ -97,6 +97,94 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
         return outT;
     }
 
+    /// <summary>Greedy autoregressive generation. Runs the delayed-streams frame loop: per frame it reads the
+    /// (delayed) feedback codes from a ring cache, embeds + runs the backbone over the whole prefix, samples the
+    /// text token (argmax), lets the <paramref name="scheduler"/> decide the actual text to feed, runs the
+    /// depformer for the 32 audio codes (forced silent during the <paramref name="delaySteps"/> text-lead), and
+    /// emits acoustic-delay-corrected codes. Returns <c>[32, nFrames]</c> Mimi codes (warmup frames trimmed).
+    /// cfg <paramref name="cfgCoef"/>=1.0 only (single forward). TODO(perf): O(n²) full-prefix re-run per frame;
+    /// add a streaming KV cache to the backbone.</summary>
+    public int[,] Generate(IBackend backend, KyutaiTextScheduler scheduler, IEnumerable<KyutaiTextScheduler.Entry> entries,
+        Tensor cross, Tensor sumCond, int maxFrames = 250, int delaySteps = 16, int finalPadding = 4)
+    {
+        int[] delays = new int[1 + NumCodebooks];
+        for (int k = 1; k < 1 + NumCodebooks; k++) delays[k] = 2;   // [0(text),0(cb0),2×31]
+        int maxDelay = 2, ct = maxFrames + maxDelay + 2;
+        int[] initial = new int[1 + NumCodebooks];
+        initial[0] = TextCard;                                       // text initial = 8000
+        for (int k = 1; k < 1 + NumCodebooks; k++) initial[k] = AudioCard;  // audio initial = 2048
+        int[,] cache = new int[1 + NumCodebooks, ct];
+
+        KyutaiTextScheduler.State state = scheduler.NewState(entries);
+        List<Tensor> frameEmbeds = new();
+        List<int[]> emitted = new();
+        try
+        {
+            for (int offset = 0; offset < maxFrames; offset++)
+            {
+                int textIn = offset <= delays[0] ? initial[0] : cache[0, offset % ct];
+                int[] audioIn = new int[NumCodebooks];
+                for (int k = 0; k < NumCodebooks; k++)
+                    audioIn[k] = offset <= delays[1 + k] ? initial[1 + k] : cache[1 + k, offset % ct];
+
+                frameEmbeds.Add(EmbedFrame(backend, textIn, audioIn));
+                Tensor tout = ForwardText(backend, frameEmbeds, sumCond, cross, out Tensor textLogits);
+                int t = frameEmbeds.Count;
+                int textTok = ArgMaxRow((float*)textLogits.DataPointer + (long)(t - 1) * TextCard, TextCard);
+                textLogits.Dispose();
+                Tensor lastCtx = LastFrame(tout); tout.Dispose();
+
+                int outTok = scheduler.Process(offset, state, textTok, out _);
+
+                int[] audio = new int[NumCodebooks];
+                if (offset >= delaySteps)
+                {
+                    using Tensor logits = Depformer.DecodeFrameGreedy(backend, lastCtx, outTok, out audio);
+                }
+                lastCtx.Dispose();
+                for (int q = 0; q < NumCodebooks; q++)
+                    if (offset < delays[1 + q] + delaySteps) audio[q] = -1;   // forced silence in the text-lead
+
+                int wpos = (offset + 1) % ct;
+                cache[0, wpos] = outTok;
+                for (int k = 0; k < NumCodebooks; k++) cache[1 + k, wpos] = audio[k];
+
+                if (offset + 1 > maxDelay)
+                {
+                    int[] frame = new int[NumCodebooks];
+                    for (int k = 0; k < NumCodebooks; k++)
+                        frame[k] = cache[1 + k, ((offset + 1 - maxDelay + delays[1 + k]) % ct + ct) % ct];
+                    emitted.Add(frame);
+                }
+
+                if (state.EndStep is int es && offset >= es + delaySteps + finalPadding) break;
+            }
+        }
+        finally { foreach (Tensor e in frameEmbeds) e.Dispose(); }
+
+        // Trim warmup frames whose codes are still the forced-silence / initial tokens (any codebook < 0 or >= card).
+        int start = 0;
+        while (start < emitted.Count && !IsValidFrame(emitted[start])) start++;
+        int n = emitted.Count - start;
+        int[,] codes = new int[NumCodebooks, n];
+        for (int f = 0; f < n; f++)
+            for (int k = 0; k < NumCodebooks; k++) codes[k, f] = emitted[start + f][k];
+        return codes;
+    }
+
+    private static bool IsValidFrame(int[] frame)
+    {
+        foreach (int c in frame) if (c < 0 || c >= AudioCard) return false;
+        return true;
+    }
+
+    private static int ArgMaxRow(float* row, int n)
+    {
+        int best = 0; float bv = row[0];
+        for (int i = 1; i < n; i++) if (row[i] > bv) { bv = row[i]; best = i; }
+        return best;
+    }
+
     private static Tensor Row(Tensor table, int row)
     {
         Tensor outT = new(new TensorShape(1, 1, Dim), DType.F32);

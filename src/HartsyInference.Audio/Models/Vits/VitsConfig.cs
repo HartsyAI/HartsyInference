@@ -25,6 +25,9 @@ public sealed record VitsConfig
     public int DpFilterChannels { get; init; } = 256;   // deterministic DP
     public int DpKernelSize { get; init; } = 3;
     public int SdpFlows { get; init; } = 4;
+    /// <summary>State-dict prefix of the stochastic duration predictor. Real VITS/Piper checkpoints store it under
+    /// <c>dp</c>; the synthetic-weight tests use <c>sdp</c>, which stays the default.</summary>
+    public string SdpPrefix { get; init; } = "sdp";
 
     // ── Flow ──
     public int FlowLayers { get; init; } = 4;           // WN layers per coupling
@@ -37,7 +40,7 @@ public sealed record VitsConfig
     public IReadOnlyList<int> ResBlockKernelSizes { get; init; } = [3, 5, 7];
     public IReadOnlyList<IReadOnlyList<int>> ResBlockDilations { get; init; } = [[1, 2], [2, 6], [3, 12]];
     public IReadOnlyList<int> UpsampleRates { get; init; } = [8, 8, 4];     // ∏ = 256 = hop
-    public int UpsampleInitialChannel { get; init; } = 512;
+    public int UpsampleInitialChannel { get; init; } = 256;                 // Piper "medium" (high uses 512)
     public IReadOnlyList<int> UpsampleKernelSizes { get; init; } = [16, 16, 8];
 
     public int GinChannels { get; init; } = 0;          // 0 = single-speaker
@@ -54,16 +57,19 @@ public sealed record VitsConfig
         get { int p = 1; for (int i = 0; i < UpsampleRates.Count; i++) p *= UpsampleRates[i]; return p; }
     }
 
-    /// <summary>Piper "medium" preset (22.05 kHz, resblock 2, 3-stage [8,8,4] upsampler, SDP).</summary>
-    public static VitsConfig PiperMedium => new();
+    /// <summary>Piper "medium" preset (22.05 kHz, resblock 2, 3-stage [8,8,4] upsampler, SDP). Piper stores the
+    /// stochastic duration predictor under the <c>dp</c> prefix.</summary>
+    public static VitsConfig PiperMedium => new() { SdpPrefix = "dp" };
 
     /// <summary>Piper "high" preset (resblock 1, 4-stage upsampler).</summary>
     public static VitsConfig PiperHigh => new()
     {
+        SdpPrefix = "dp",
         ResBlock = "1",
         ResBlockKernelSizes = [3, 7, 11],
         ResBlockDilations = [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
         UpsampleRates = [8, 8, 2, 2],
         UpsampleKernelSizes = [16, 16, 4, 4],
+        UpsampleInitialChannel = 512,
     };
 }

@@ -113,7 +113,7 @@ public sealed unsafe class GptSoVitsTests
             int inCh = c.UpsampleInitialChannel >> i, outCh = inCh >> 1;
             w[$"dec.ups.{i}.weight"] = F3(inCh, outCh, c.UpsampleKernelSizes[i]); w[$"dec.ups.{i}.bias"] = F1(outCh);
             for (int dn = 0; dn < c.ResBlockDilations[0].Count; dn++)
-            { w[$"dec.resblocks.{i}.convs1.{dn}.weight"] = F3(outCh, outCh, 3); w[$"dec.resblocks.{i}.convs1.{dn}.bias"] = F1(outCh); }
+            { w[$"dec.resblocks.{i}.convs.{dn}.weight"] = F3(outCh, outCh, 3); w[$"dec.resblocks.{i}.convs.{dn}.bias"] = F1(outCh); }
         }
         AddEncoder(w, "enc_p.encoder_ssl", 2, h, f, kc, win);
         AddEncoder(w, "enc_p.encoder_text", 2, h, f, kc, win);
