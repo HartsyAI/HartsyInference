@@ -48,6 +48,7 @@ public sealed class ChatterboxEndToEndTests
         _out.WriteLine($"Merged {merged.Count} tensors (t3. + s3gen.).");
 
         ChatterboxConfig cfg = ChatterboxConfig.Default;
+        if (int.TryParse(Environment.GetEnvironmentVariable("CHATTERBOX_MAXNEW"), out int mn)) cfg = cfg with { MaxNewTokens = mn };
         CosyVoiceConfig cosy = CosyVoiceConfig.V2_0_5B;   // Chatterbox S3Gen == CosyVoice2-0.5B
         using ChatterboxT3 t3 = new(cfg);
         using CosyVoiceFlow flow = new(cosy);

@@ -104,10 +104,12 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         bool useCfg = cfgScale > 1.0f;
 
         // Encode positive prompt
+        // SD3 is specified against the penultimate CLIP layer; request.ClipSkip overrides (2 = penultimate).
+        int clipSkip = request.ClipSkip ?? 2;
         (Tensor condContext, Tensor condPooled) = EncodePrompt(
             promptTokenIdsL, promptTokenIdsG, promptTokenIdsT5,
             promptEosPositionL, promptEosPositionG,
-            promptAttentionMaskT5);
+            promptAttentionMaskT5, clipSkip);
 
         // Project context through transformer's context_embedder
         Tensor condProjected = _transformer.ProjectContext(Backend, condContext);
@@ -122,7 +124,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             (Tensor negContext, Tensor negPooled) = EncodePrompt(
                 negativePromptTokenIdsL, negativePromptTokenIdsG, negativePromptTokenIdsT5,
                 negativeEosPositionL, negativeEosPositionG,
-                negativeAttentionMaskT5);
+                negativeAttentionMaskT5, clipSkip);
 
             uncondProjected = _transformer.ProjectContext(Backend, negContext);
             negContext.Dispose();
@@ -288,19 +290,19 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
     private (Tensor context, Tensor pooled) EncodePrompt(
         int[] tokenIdsL, int[] tokenIdsG, int[]? tokenIdsT5,
         int eosPositionL, int eosPositionG,
-        int[]? attentionMaskT5)
+        int[]? attentionMaskT5, int clipSkip = 2)
     {
         int seqLenClip = tokenIdsL.Length;
 
         // CLIP-L: penultimate hidden [1, 77, 768] + pooled [1, 768]
         int[][] batchTokenIdsL = [tokenIdsL];
         int[] eosPositionsL = [eosPositionL];
-        (Tensor clipLHidden, Tensor? clipLPooled) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, eosPositionsL);
+        (Tensor clipLHidden, Tensor? clipLPooled) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, eosPositionsL, clipSkip);
 
         // CLIP-G: penultimate hidden [1, 77, 1280] + pooled [1, 1280]
         int[][] batchTokenIdsG = [tokenIdsG];
         int[] eosPositionsG = [eosPositionG];
-        (Tensor clipGHidden, Tensor? clipGPooled) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositionsG);
+        (Tensor clipGHidden, Tensor? clipGPooled) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositionsG, clipSkip);
 
         // Combine pooled: concat(clip_l_pooled, clip_g_pooled, dim=-1) → [1, 2048]
         Tensor pooled = ConcatPooled(clipLPooled!, clipGPooled!);

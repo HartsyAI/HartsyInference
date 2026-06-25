@@ -115,12 +115,14 @@ public sealed unsafe class ClipTextEncoder
         return normed;
     }
 
-    /// <summary>Encodes token IDs and returns the penultimate hidden state (layer -2 output, before final layer norm). Used by SDXL for both CLIP-L and CLIP-G. Also returns pooled output [B, projectionDim] from the EOS token if text_projection weight exists.</summary>
+    /// <summary>Encodes token IDs and returns a hidden state taken <paramref name="layersFromEnd"/> layers from the end (before final layer norm). Used by SDXL/SD3 for CLIP-L and CLIP-G. Also returns pooled output [B, projectionDim] from the EOS token if text_projection weight exists.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="batchTokenIds">Token IDs [B, seqLen].</param>
     /// <param name="eosTokenPositions">Position of the EOS token in each batch element (for pooled output extraction).</param>
-    /// <returns>Tuple of (penultimateHiddenStates [B, seqLen, hiddenSize], pooledOutput [B, projectionDim] or null).</returns>
+    /// <param name="layersFromEnd">"CLIP skip": 2 (default) returns the penultimate layer output, the layer SDXL/SD3 are specified against; 1 returns the final layer output; higher values stop earlier. Clamped to [1, numLayers]. The pooled output is always taken from the full last_hidden_state regardless of this value, matching diffusers/ComfyUI.</param>
+    /// <returns>Tuple of (hiddenStates [B, seqLen, hiddenSize], pooledOutput [B, projectionDim] or null).</returns>
     public (Tensor hiddenStates, Tensor? pooledOutput) EncodePenultimate(IBackend backend, ReadOnlySpan<int[]> batchTokenIds, ReadOnlySpan<int> eosTokenPositions,
+        int layersFromEnd = 2,
         IReadOnlyDictionary<int, Tensor>? inlineEmbeddings = null)
     {
         int batch = batchTokenIds.Length;
@@ -135,27 +137,33 @@ public sealed unsafe class ClipTextEncoder
         // 2. Build causal attention mask
         Tensor causalMask = BuildCausalMask(seqLen);
 
-        // 3. Run through transformer layers, stop one before the end for penultimate output
+        // 3. Run every transformer layer, but snapshot the hidden state at the CLIP-skip layer
+        //    (layersFromEnd=2 → penultimate). Pooled output always comes from the full last layer,
+        //    so we never stop early — we just take a copy at the requested depth.
         int numLayers = _layers.Length;
-        for (int i = 0; i < numLayers - 1; i++)
+        int layersToCapture = numLayers - Math.Clamp(layersFromEnd, 1, numLayers) + 1;
+        Tensor? captured = null;
+        for (int i = 0; i < numLayers; i++)
         {
             Tensor layerOut = _layers[i].Forward(backend, hidden, causalMask);
             hidden.Dispose();
             hidden = layerOut;
+
+            // Snapshot before subsequent layers mutate `hidden` (before final LN).
+            if (i + 1 == layersToCapture)
+            {
+                captured = hidden.To(hidden.Device);
+            }
         }
-
-        // Save penultimate hidden state (before last transformer layer and final LN)
-        Tensor penultimate = hidden.To(hidden.Device);
-
-        // Run the final transformer layer for pooled output extraction
-        Tensor lastLayerOut = _layers[numLayers - 1].Forward(backend, hidden, causalMask);
-        hidden.Dispose();
         causalMask.Dispose();
 
-        // Apply final layer norm to get the full last_hidden_state (needed for pooled output)
+        // captured is non-null because layersToCapture ∈ [1, numLayers].
+        Tensor skipped = captured!;
+
+        // Apply final layer norm to the full last-layer output to get last_hidden_state for pooling.
         Tensor normedFull = new Tensor(hiddenShape, DType.F32);
-        backend.LayerNorm(normedFull, lastLayerOut, _finalLayerNormWeight!, _finalLayerNormBias!, _config.LayerNormEps);
-        lastLayerOut.Dispose();
+        backend.LayerNorm(normedFull, hidden, _finalLayerNormWeight!, _finalLayerNormBias!, _config.LayerNormEps);
+        hidden.Dispose();
 
         // Extract pooled output from EOS token position, then apply text_projection
         Tensor? pooledOutput = null;
@@ -166,7 +174,7 @@ public sealed unsafe class ClipTextEncoder
 
         normedFull.Dispose();
 
-        return (penultimate, pooledOutput);
+        return (skipped, pooledOutput);
     }
 
     /// <summary>Encodes ComfyUI-weighted token chunks into hidden states <c>[1, seqLen*numChunks, hiddenSize]</c> with final layer norm. Each chunk is encoded independently, weighted via the empty-baseline formula (<see cref="EmphasisMath.ApplyComfy"/>), and concatenated along the sequence axis. Used by SD1.5.</summary>
@@ -196,7 +204,7 @@ public sealed unsafe class ClipTextEncoder
     }
 
     /// <summary>Penultimate-layer variant of <see cref="EncodeWeighted"/> for SDXL/SD3. Returns weighted penultimate hidden states <c>[1, seqLen*numChunks, hiddenSize]</c> plus an unweighted pooled output taken from the first chunk's EOS (null when there is no text_projection).</summary>
-    public (Tensor hiddenStates, Tensor? pooledOutput) EncodeWeightedPenultimate(IBackend backend, IReadOnlyList<int[]> tokenIdChunks, IReadOnlyList<float[]> tokenWeightChunks, ReadOnlySpan<int> eosTokenPositions)
+    public (Tensor hiddenStates, Tensor? pooledOutput) EncodeWeightedPenultimate(IBackend backend, IReadOnlyList<int[]> tokenIdChunks, IReadOnlyList<float[]> tokenWeightChunks, ReadOnlySpan<int> eosTokenPositions, int layersFromEnd = 2)
     {
         ValidateWeightedChunks(tokenIdChunks, tokenWeightChunks);
         int hiddenSize = _config.HiddenSize;
@@ -204,7 +212,7 @@ public sealed unsafe class ClipTextEncoder
         int seqLen = tokenIdChunks[0].Length;
 
         int[] emptyChunk = BuildEmptyChunk(seqLen);
-        (Tensor zEmpty, _) = EncodePenultimate(backend, new int[][] { emptyChunk }, stackalloc int[] { 1 });
+        (Tensor zEmpty, _) = EncodePenultimate(backend, new int[][] { emptyChunk }, stackalloc int[] { 1 }, layersFromEnd);
         ReadOnlySpan<float> emptySpan = zEmpty.AsReadOnlySpan<float>();
 
         Tensor result = new Tensor(new TensorShape(1, seqLen * numChunks, hiddenSize), DType.F32);
@@ -214,7 +222,7 @@ public sealed unsafe class ClipTextEncoder
         for (int c = 0; c < numChunks; c++)
         {
             eosSpan[0] = c < eosTokenPositions.Length ? eosTokenPositions[c] : 0;
-            (Tensor z, Tensor? chunkPooled) = EncodePenultimate(backend, new int[][] { tokenIdChunks[c] }, eosSpan);
+            (Tensor z, Tensor? chunkPooled) = EncodePenultimate(backend, new int[][] { tokenIdChunks[c] }, eosSpan, layersFromEnd);
             Span<float> zSpan = z.AsSpan<float>();
             EmphasisMath.ApplyComfy(zSpan, emptySpan, tokenWeightChunks[c], seqLen, hiddenSize);
             zSpan.CopyTo(resultSpan.Slice(c * seqLen * hiddenSize, seqLen * hiddenSize));

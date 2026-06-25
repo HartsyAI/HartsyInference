@@ -120,12 +120,14 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
         // 1. Dual CLIP text encoding (shared by both paths)
         Logs.Info("Encoding text with dual CLIP encoders...");
+        // SDXL is specified against the penultimate CLIP layer; request.ClipSkip overrides (2 = penultimate).
+        int clipSkip = request.ClipSkip ?? 2;
         int[][] batchTokenIdsL = [negativePromptTokenIdsL, promptTokenIdsL];
-        (Tensor clipLHidden, _) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, [0, 0]);
+        (Tensor clipLHidden, _) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, [0, 0], clipSkip);
 
         int[][] batchTokenIdsG = [negativePromptTokenIdsG, promptTokenIdsG];
         int[] eosPositions = [negativeEosPositionG, promptEosPositionG];
-        (Tensor clipGHidden, Tensor? pooledOutput) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositions);
+        (Tensor clipGHidden, Tensor? pooledOutput) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositions, clipSkip);
 
         Tensor textEmbeddings = CfgHelper.ConcatLastDim(clipLHidden, clipGHidden);
         clipLHidden.Dispose();

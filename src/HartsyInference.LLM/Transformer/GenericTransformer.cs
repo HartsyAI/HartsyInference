@@ -123,10 +123,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             Tensor hidden = embeds;
             bool ownsHidden = false;
-            bool gtTrace = Environment.GetEnvironmentVariable("GT_LAYER_TRACE") == "1";
             for (int i = startLayer; i < last; i++)
             {
-                if (gtTrace) Console.Error.WriteLine($"[gt] layer {i} t={t} posStart={posStart} hidden=[{hidden.Shape[0]},{hidden.Shape[1]},{hidden.Shape[2]}] cfg.HeadDim={_cfg.HeadDim} inter={_cfg.IntermediateSize}");
                 Tensor next = _layers[i].Forward(backend, hidden, t, posStart, cache, i, cos, sin);
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
