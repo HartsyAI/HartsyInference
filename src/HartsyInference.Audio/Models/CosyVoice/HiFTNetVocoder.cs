@@ -111,9 +111,11 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
 
         // 1. F0 → NSF harmonic source → forward STFT.
         Tensor f0 = _f0.Forward(backend, mel);                       // [1, 1, T_mel] Hz
-        float[] harSource = NsfVocoderDsp.GenerateHarmonicSource(f0, upProd * hop, _cfg.SampleRate, Harmonics, _mSourceW!, _mSourceB!, SineAmp, NoiseStd, VoicedThreshold);
+        // Deterministic (no-noise) NSF source for parity validation; production stays stochastic.
+        int noiseSeed = Environment.GetEnvironmentVariable("HIFT_DETERMINISTIC") == "1" ? -1 : 0;
+        float[] harSource = NsfVocoderDsp.GenerateHarmonicSource(f0, upProd * hop, _cfg.SampleRate, Harmonics, _mSourceW!, _mSourceB!, SineAmp, NoiseStd, VoicedThreshold, noiseSeed);
         f0.Dispose();
-        Tensor sStft = NsfVocoderDsp.ForwardStftMagPhase(harSource, nFft, hop);    // [1, n_fft+2, frames_src]
+        Tensor sStft = NsfVocoderDsp.ForwardStftRealImag(harSource, nFft, hop);    // [1, n_fft+2, frames_src] = cat([Re, Im])
 
         // 2. conv_pre.
         int tMel = (int)mel.Shape[2];
@@ -155,10 +157,9 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
         }
         sStft.Dispose();
 
-        backend.LeakyRelu(x, x, LeakySlope);
-        Tensor xpad = NsfVocoderDsp.ReflectionPadLeft1(x);
-        x.Dispose();
-        x = xpad;
+        // Post-loop activation uses LeakyReLU's DEFAULT slope (0.01), not the in-loop 0.1; and there is NO
+        // extra reflection pad here — the only reflection pad is inside the loop on the last upsample.
+        backend.LeakyRelu(x, x, 0.01f);
 
         int frames = (int)x.Shape[2];
         Tensor post = new(new TensorShape(1, nFft + 2, frames), DType.F32);

@@ -143,19 +143,30 @@ public sealed unsafe class ChatterboxPipelineTests
         AddNorm(w, "encoder.up_embed.out.1", outSize, 715);              // up_embed LayerNorm
         BuildRelPosBlocks(w, "encoder.up_encoders", c.EncoderNumPostBlocks, outSize, c.EncoderNumHeads, 2_000);
         AddNorm(w, "encoder.after_norm", outSize, 9_000);
-        // CFM estimator (CausalConditionalDecoder).
+        // CFM estimator — CausalConditionalDecoder (Matcha U-Net: 1 down + N mid + 1 up).
         string e = "decoder.estimator";
-        AddLinear(w, $"{e}.time_mlp.1", ch, ch, 3_000);
-        AddLinear(w, $"{e}.time_mlp.3", ch, ch, 3_010);
-        AddConv(w, $"{e}.in_conv", ch, mel * 4, 3, 3_020);
+        int inCh = mel * 4, timeDim = ch * 4, inner = c.NumHeads * c.AttentionHeadDim, nb = c.NumBlocks;
+        AddLinear(w, $"{e}.time_mlp.linear_1", timeDim, inCh, 3_000);
+        AddLinear(w, $"{e}.time_mlp.linear_2", timeDim, timeDim, 3_010);
+        // down block.
+        AddMatchaResnet(w, $"{e}.down_blocks.0.0", inCh, ch, timeDim, 3_100);
+        for (int j = 0; j < nb; j++) AddMatchaTransformer(w, $"{e}.down_blocks.0.1.{j}", ch, inner, 3_200 + j * 40);
+        AddConv(w, $"{e}.down_blocks.0.2", ch, ch, 3, 3_400);
+        // mid blocks.
         for (int i = 0; i < c.NumMidBlocks; i++)
         {
-            int s = 4_000 + i * 200;
-            AddResnet(w, $"{e}.blocks.{i}.resnet", ch, s);
-            AddAttn(w, $"{e}.blocks.{i}.attn", ch, c.NumHeads * c.AttentionHeadDim, s + 50);
+            int s = 4_000 + i * 300;
+            AddMatchaResnet(w, $"{e}.mid_blocks.{i}.0", ch, ch, timeDim, s);
+            for (int j = 0; j < nb; j++) AddMatchaTransformer(w, $"{e}.mid_blocks.{i}.1.{j}", ch, inner, s + 100 + j * 40);
         }
-        AddNorm(w, $"{e}.out_norm", ch, 8_000);
-        AddConv(w, $"{e}.out_conv", mel, ch, 3, 8_010);
+        // up block (resnet input is 2·ch from skip concat).
+        AddMatchaResnet(w, $"{e}.up_blocks.0.0", 2 * ch, ch, timeDim, 7_000);
+        for (int j = 0; j < nb; j++) AddMatchaTransformer(w, $"{e}.up_blocks.0.1.{j}", ch, inner, 7_200 + j * 40);
+        AddConv(w, $"{e}.up_blocks.0.2", ch, ch, 3, 7_400);
+        // final.
+        AddConv(w, $"{e}.final_block.block.0", ch, ch, 3, 8_000);
+        AddNorm(w, $"{e}.final_block.block.2", ch, 8_010);
+        AddConv(w, $"{e}.final_proj", mel, ch, 1, 8_020);
         return w;
     }
 
@@ -241,25 +252,27 @@ public sealed unsafe class ChatterboxPipelineTests
         }
     }
 
-    private static void AddResnet(Dictionary<string, Tensor> w, string prefix, int ch, int seed)
+    private static void AddMatchaResnet(Dictionary<string, Tensor> w, string prefix, int inCh, int outCh, int timeDim, int seed)
     {
-        AddNorm(w, $"{prefix}.norm1", ch, seed);
-        AddConv(w, $"{prefix}.conv1", ch, ch, 3, seed + 2);
-        AddNorm(w, $"{prefix}.norm2", ch, seed + 4);
-        AddConv(w, $"{prefix}.conv2", ch, ch, 3, seed + 6);
-        AddLinear(w, $"{prefix}.time_emb", ch, ch, seed + 8);
+        AddConv(w, $"{prefix}.block1.block.0", outCh, inCh, 3, seed);          // CausalConv1d
+        AddNorm(w, $"{prefix}.block1.block.2", outCh, seed + 2);               // LayerNorm
+        AddConv(w, $"{prefix}.block2.block.0", outCh, outCh, 3, seed + 4);
+        AddNorm(w, $"{prefix}.block2.block.2", outCh, seed + 6);
+        AddLinear(w, $"{prefix}.mlp.1", outCh, timeDim, seed + 8);             // time-emb proj
+        AddConv(w, $"{prefix}.res_conv", outCh, inCh, 1, seed + 10);          // 1×1 residual conv
     }
 
-    private static void AddAttn(Dictionary<string, Tensor> w, string prefix, int ch, int attnDim, int seed)
+    private static void AddMatchaTransformer(Dictionary<string, Tensor> w, string prefix, int ch, int inner, int seed)
     {
+        int ffInner = ch * 4;
         AddNorm(w, $"{prefix}.norm1", ch, seed);
-        AddLinear(w, $"{prefix}.to_q", attnDim, ch, seed + 2);
-        AddLinear(w, $"{prefix}.to_k", attnDim, ch, seed + 4);
-        AddLinear(w, $"{prefix}.to_v", attnDim, ch, seed + 6);
-        AddLinear(w, $"{prefix}.to_out", ch, attnDim, seed + 8);
-        AddNorm(w, $"{prefix}.norm2", ch, seed + 10);
-        AddLinear(w, $"{prefix}.ff1", ch * 2, ch, seed + 12);
-        AddLinear(w, $"{prefix}.ff2", ch, ch * 2, seed + 14);
+        AddLinear(w, $"{prefix}.attn1.to_q", inner, ch, seed + 2, bias: false);
+        AddLinear(w, $"{prefix}.attn1.to_k", inner, ch, seed + 4, bias: false);
+        AddLinear(w, $"{prefix}.attn1.to_v", inner, ch, seed + 6, bias: false);
+        AddLinear(w, $"{prefix}.attn1.to_out.0", ch, inner, seed + 8);         // has bias
+        AddNorm(w, $"{prefix}.norm3", ch, seed + 10);
+        AddLinear(w, $"{prefix}.ff.net.0.proj", ffInner, ch, seed + 12);       // GELU proj
+        AddLinear(w, $"{prefix}.ff.net.2", ch, ffInner, seed + 14);
     }
 
     private static void BuildRelPosBlocks(Dictionary<string, Tensor> w, string stack, int blocks, int c, int numHeads, int seedBase)
