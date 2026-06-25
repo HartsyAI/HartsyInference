@@ -36,6 +36,7 @@ public sealed unsafe class ChatterboxT3DecodeCrashTests
         {
             T3 = baseCfg.T3 with { NumHiddenLayers = layers },
             MaxNewTokens = 4,
+            StopSpeechToken = 999_999,   // unreachable → force the full AR decode (don't stop early)
         };
         using ChatterboxT3 t3 = new(cfg);
 

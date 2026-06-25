@@ -42,9 +42,12 @@ public sealed class ChatterboxEndToEndTests
             ?? Path.Combine(Path.GetTempPath(), "chatterbox_out.wav");
 
         // Merge the separate checkpoint files under the prefixes ChatterboxPipeline.LoadWeights expects.
+        // The loaders mmap the files and the tensors BORROW that memory, so the loaders MUST stay alive for
+        // the whole pipeline run — otherwise a GC finalizes the mmap and the weight tensors dangle (→ AV).
+        List<SafeTensorsLoader> loaders = new();
         Dictionary<string, Tensor> merged = new();
-        MergeInto(merged, Path.Combine(dir, "t3_cfg.safetensors"), "t3.");
-        MergeInto(merged, Path.Combine(dir, "s3gen.safetensors"), "s3gen.");
+        MergeInto(merged, loaders, Path.Combine(dir, "t3_cfg.safetensors"), "t3.");
+        MergeInto(merged, loaders, Path.Combine(dir, "s3gen.safetensors"), "s3gen.");
         _out.WriteLine($"Merged {merged.Count} tensors (t3. + s3gen.).");
 
         ChatterboxConfig cfg = ChatterboxConfig.Default;
@@ -85,12 +88,17 @@ public sealed class ChatterboxEndToEndTests
         WavFile.WriteMono16(outWav, pcm, cfg.SampleRate);
         _out.WriteLine($"Generated {pcm.Length} samples ({pcm.Length / (double)cfg.SampleRate:0.00}s) in {secs:0.0}s. RMS={rms:0.0000} peak={peak:0.0000}. WAV: {outWav}");
         Assert.True(rms > 1e-4, "output should not be silent");
+        GC.KeepAlive(loaders);       // keep the mmap-backing loaders alive until synthesis completes
+        GC.KeepAlive(condLoader);
+        foreach (SafeTensorsLoader l in loaders) l.Dispose();
+        condLoader.Dispose();
     }
 
-    private static void MergeInto(Dictionary<string, Tensor> dst, string path, string prefix)
+    private static void MergeInto(Dictionary<string, Tensor> dst, List<SafeTensorsLoader> keepAlive, string path, string prefix)
     {
         SafeTensorsLoader loader = new();
         loader.Load(path);
+        keepAlive.Add(loader);
         foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
             dst[prefix + kv.Key] = kv.Value;
     }

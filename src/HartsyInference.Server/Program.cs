@@ -6,14 +6,16 @@ public sealed class Program
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-        // TODO: builder.Services.AddHartsyInference(options => { ... });
+        builder.Services.AddHartsyInference(options =>
+        {
+            // Bind from the "HartsyInference" configuration section (appsettings.json / env vars).
+            builder.Configuration.GetSection("HartsyInference").Bind(options);
+        });
 
         WebApplication app = builder.Build();
 
-        app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
-        app.MapGet("/ready", () => Results.Ok(new { status = "ready" }));
-
-        // TODO: app.MapHartsyInferenceEndpoints();
+        // Maps /health, /ready, /v1/models*, /v1/images/* (and optional API-key auth over /v1).
+        app.MapHartsyInferenceEndpoints();
 
         app.Run();
     }
