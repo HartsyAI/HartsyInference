@@ -65,6 +65,16 @@ public sealed unsafe class OnnxWeightLoader : IDisposable
         return new Dictionary<string, Tensor>(_tensors);
     }
 
+    /// <summary>Like <see cref="GetAllTensors"/> but with anonymized weight-norm-fused weights (<c>onnx::Conv_NNNN</c>)
+    /// renamed to their recovered module names via <see cref="OnnxWeightNameResolver"/>, so they match the PyTorch
+    /// weight keys a model loader expects.</summary>
+    public Dictionary<string, Tensor> GetResolvedTensors()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (Model is null) throw new InvalidOperationException("Call Load before GetResolvedTensors.");
+        return OnnxWeightNameResolver.Resolve(Model, _tensors);
+    }
+
     private static TensorShape ToShape(long[] dims)
         => dims.Length == 0 ? new TensorShape(1) : new TensorShape(dims);     // 0-d scalar → [1]
 
