@@ -20,6 +20,11 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>8-bit floating point E5M2 (5-bit exponent, 2-bit mantissa). Wider range, lower precision than E4M3.</summary>
     public static readonly DType F8E5M2 = new("F8_E5M2", 1, false);
 
+    /// <summary>4-bit floating point E2M1 (1 sign, 2 exponent, 1 mantissa), packed 2 elements per byte with a
+    /// separate block-scale tensor. The resident format for native tensor-core FP4 GEMM on Blackwell
+    /// (cuBLASLt <c>CUDA_R_4F_E2M1</c>). Block byte size 1 covers 2 elements; scales are stored separately.</summary>
+    public static readonly DType F4E2M1 = new("F4_E2M1", 0, true, 1, 2);
+
     // ── Legacy 32-block quants (ggml type IDs 2-9) ─────────────────────
 
     /// <summary>4-bit quantization, 32 values per block: 2 bytes FP16 scale + 16 bytes packed nibbles. Reconstruction: <c>x = scale * (q - 8)</c> where q ∈ [0..15].</summary>
@@ -120,6 +125,9 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
 
     /// <summary>Whether this dtype is an FP8 format.</summary>
     public bool IsFp8 => this == F8E4M3 || this == F8E5M2;
+
+    /// <summary>Whether this dtype is the FP4 (e2m1) tensor-core format.</summary>
+    public bool IsFp4 => this == F4E2M1;
 
     /// <summary>Computes total byte count for a given element count. Asserts block alignment for quantized types.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -7,8 +7,9 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// helpers for the tiled VAE wrappers. Both <see cref="VaeTiledDecoder"/> (tiles + blends in pixel
 /// space) and <see cref="VaeTiledEncoder"/> (tiles in pixel space, blends in latent space) use these.
 /// Every method operates generically on F32 [B, C, H, W] tensors with the channel count passed in,
-/// so the same code serves 3-channel RGB and N-channel latents.</summary>
-internal static unsafe class VaeTiling
+/// so the same code serves 3-channel RGB and N-channel latents. Also reused by the Vision upscaler
+/// (RRDBNet tiling), where the spatial scale factor is the upscale ratio rather than the VAE's 8x.</summary>
+public static unsafe class VaeTiling
 {
     /// <summary>Extracts a tile [B, C, tileH, tileW] from <paramref name="source"/> at position (startH, startW).</summary>
     public static Tensor ExtractTile(Tensor source, int batch, int channels, int startH, int startW, int tileH, int tileW)
