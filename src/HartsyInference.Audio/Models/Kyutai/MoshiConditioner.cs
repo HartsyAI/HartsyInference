@@ -1,0 +1,88 @@
+using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
+
+namespace HartsyInference.Audio.Models.Kyutai;
+
+/// <summary>Moshi/Kyutai <c>ConditionProvider</c> + <c>ConditionFuser</c> for the TTS model. Two LUT conditioners
+/// (<c>control</c> "ok" and <c>cfg</c> the guidance scale) are summed into a per-step offset added to the stream
+/// embedding; the <c>speaker_wavs</c> tensor conditioner projects a precomputed voice embedding and (with a
+/// sinusoidal positional embedding) forms the cross-attention source. Each conditioner is an embedding/identity
+/// followed by an <c>output_proj</c> Linear; masked positions fall back to a learnt padding (only relevant when a
+/// condition is absent, which this path does not exercise). Validated in <c>KyutaiConditionerParityTests</c>.</summary>
+public sealed unsafe class MoshiConditioner : IDisposable
+{
+    public const int Dim = 2048, CfgInner = 16, SpeakerDim = 512;
+    private static readonly string[] CfgValues = ["1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0"];
+
+    private Tensor? _cfgEmbed, _cfgProj, _controlEmbed, _controlProj, _speakerProj;
+    private int _disposed;
+
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "condition_provider.conditioners")
+    {
+        _cfgEmbed = WhisperOps.EnsureF32(w[$"{prefix}.cfg.embed.weight"]);          // [8,16]
+        _cfgProj = WhisperOps.EnsureF32(w[$"{prefix}.cfg.output_proj.weight"]);     // [2048,16]
+        _controlEmbed = WhisperOps.EnsureF32(w[$"{prefix}.control.embed.weight"]);  // [2,2048]
+        _controlProj = WhisperOps.EnsureF32(w[$"{prefix}.control.output_proj.weight"]); // [2048,2048]
+        _speakerProj = WhisperOps.EnsureF32(w[$"{prefix}.speaker_wavs.output_proj.weight"]); // [2048,512]
+    }
+
+    /// <summary>The cfg LUT bin for a guidance coefficient (e.g. 2.0 → 2); -1 if not a supported value.</summary>
+    public static int CfgBin(float coef)
+    {
+        string key = coef.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+        return Array.IndexOf(CfgValues, key);
+    }
+
+    /// <summary>Per-step sum offset: <c>control_proj(control_embed[0]) + cfg_proj(cfg_embed[cfgBin])</c> → [1,1,2048].</summary>
+    public Tensor ComputeSum(IBackend backend, int cfgBin)
+    {
+        Tensor ctrlRow = EmbedRow(_controlEmbed!, 0, Dim);
+        Tensor ctrl = WhisperOps.ProjectLinear(backend, ctrlRow, _controlProj!, null, 1, 1, Dim, Dim);
+        ctrlRow.Dispose();
+        Tensor cfgRow = EmbedRow(_cfgEmbed!, cfgBin, CfgInner);
+        Tensor cfg = WhisperOps.ProjectLinear(backend, cfgRow, _cfgProj!, null, 1, 1, CfgInner, Dim);
+        cfgRow.Dispose();
+        backend.Add(ctrl, ctrl, cfg);
+        cfg.Dispose();
+        return ctrl;   // [1,1,Dim]
+    }
+
+    /// <summary>Cross-attention source from a voice embedding <paramref name="voice"/> <c>[1,T,512]</c>:
+    /// <c>speaker_proj(voice) + sin_pos_emb</c> → <c>[1,T,2048]</c>.</summary>
+    public Tensor ComputeCross(IBackend backend, Tensor voice)
+    {
+        int t = (int)voice.Shape[1];
+        Tensor proj = WhisperOps.ProjectLinear(backend, voice, _speakerProj!, null, 1, t, SpeakerDim, Dim);
+        AddSinEmbedding(proj, t);
+        return proj;   // [1,t,Dim]
+    }
+
+    private static Tensor EmbedRow(Tensor table, int row, int width)
+    {
+        Tensor outT = new(new TensorShape(1, 1, width), DType.F32);
+        Buffer.MemoryCopy((float*)table.DataPointer + (long)row * width, (void*)outT.DataPointer, width * 4, width * 4);
+        return outT;
+    }
+
+    // Adds create_sin_embedding(positions, Dim): phase = pos / 10000^(i/(half-1)); cat([cos, sin]).
+    private static void AddSinEmbedding(Tensor x, int t)
+    {
+        int half = Dim / 2;
+        float* p = (float*)x.DataPointer;
+        for (int s = 0; s < t; s++)
+            for (int i = 0; i < half; i++)
+            {
+                double phase = s / Math.Pow(10000.0, (double)i / (half - 1));
+                long b = (long)s * Dim;
+                p[b + i] += (float)Math.Cos(phase);
+                p[b + half + i] += (float)Math.Sin(phase);
+            }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        GC.SuppressFinalize(this);
+    }
+}
