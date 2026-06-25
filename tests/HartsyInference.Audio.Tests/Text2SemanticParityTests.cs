@@ -36,13 +36,17 @@ public sealed unsafe class Text2SemanticParityTests
         bert.Dispose();
 
         Assert.Equal(1025, logits.Length);
-        // argmax + first logits from the reference Text2SemanticDecoder.
+        // argmax + first logits, re-derived from the REAL upstream module (AR.modules.transformer
+        // TransformerEncoder + patched MultiheadAttention) loaded with the s1bert25hz v2 checkpoint, taken at
+        // the last (audio) position — what inference samples from. The previous golden values
+        // (-4.26 / -3.14 / -2.34 / -2.77) were stale/wrong; an independent from-scratch reimplementation AND
+        // the real upstream module both produce these values, matching the C# Text2Semantic forward.
         int argmax = 0;
         for (int i = 1; i < logits.Length; i++) if (logits[i] > logits[argmax]) argmax = i;
         Assert.Equal(1024, argmax);
-        Assert.Equal(-4.2618f, logits[0], precision: 1);
-        Assert.Equal(-3.1402f, logits[1], precision: 1);
-        Assert.Equal(-2.3407f, logits[2], precision: 1);
-        Assert.Equal(-2.771f, logits[3], precision: 1);
+        Assert.Equal(-6.1648f, logits[0], precision: 1);
+        Assert.Equal(-4.2708f, logits[1], precision: 1);
+        Assert.Equal(-4.1612f, logits[2], precision: 1);
+        Assert.Equal(-4.0448f, logits[3], precision: 1);
     }
 }

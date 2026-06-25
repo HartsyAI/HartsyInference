@@ -102,6 +102,10 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
     }
 
     /// <summary>Synthesizes a waveform from an <c>[1, 80, T_mel]</c> log-mel.</summary>
+    // TODO(gpu-residency): the NSF source generation, forward STFT, source injection, and the iSTFT head
+    // (NsfVocoderDsp.*) run as host C# DSP over `(float*)DataPointer`, so this vocoder syncs device→host and
+    // breaks GPU residency on CUDA. Port the harmonic-source / STFT / iSTFT to PTX kernels (or keep DSP on host
+    // but batch the syncs) to keep the mel→wav path on-device.
     public float[] Forward(IBackend backend, Tensor mel)
     {
         int nFft = _cfg.IstftNFft;

@@ -8,6 +8,9 @@ namespace HartsyInference.Audio.Dsp;
 /// Kokoro's iSTFTNet decoder and CosyVoice's HiFTNet (and any future iSTFT vocoder). Centralizing these
 /// avoids a per-model copy of the same harmonic-source / STFT / overlap-add math: each model differs
 /// only in parameters (upsample scale, n_fft, hop, harmonic count), passed as arguments here.</summary>
+// TODO(gpu-residency): every method here is host C# DSP over `(float*)DataPointer` (harmonic source, FFT/STFT,
+// iSTFT overlap-add). On CUDA these force device→host syncs and break GPU residency for the HiFTNet vocoder.
+// Port the harmonic-source + STFT + iSTFT to PTX kernels for a fully on-device mel→wav path.
 public static unsafe class NsfVocoderDsp
 {
     /// <summary>SourceModuleHnNSF harmonic-plus-noise source: nearest-upsamples F0 by

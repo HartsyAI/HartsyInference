@@ -31,6 +31,8 @@ public sealed unsafe class ChatterboxPerceiver : IDisposable
         _outW = WhisperOps.EnsureF32(w[$"{prefix}.attn.proj_out.weight"]); _outB = WhisperOps.EnsureF32(w[$"{prefix}.attn.proj_out.bias"]);
     }
 
+    // TODO(gpu-residency): ToHeads/FromHeads and the residual add use host `(float*)DataPointer` loops, forcing
+    // device→host syncs on CUDA. Runs once per synthesis (cheap), but port to backend ops/PTX for full residency.
     /// <summary>Resamples prompt-speech embeddings <c>[1, T, 1024]</c> → conditioning <c>[1, 32, 1024]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor promptEmb)
     {

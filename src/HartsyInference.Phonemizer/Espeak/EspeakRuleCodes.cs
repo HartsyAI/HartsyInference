@@ -1,4 +1,4 @@
-namespace HartsyInference.Audio.Frontends.Espeak;
+namespace HartsyInference.Phonemizer.Espeak;
 
 /// <summary>Byte opcodes and flag bits used inside a compiled espeak-ng <c>*_dict</c> file, ported verbatim from
 /// espeak-ng v1.50 <c>translate.h</c>. These drive <see cref="EspeakDictFile"/> (dictionary layout) and

@@ -93,6 +93,12 @@ public sealed unsafe class CausalConditionalDecoder : ICfmEstimator
         _finalProjB = WhisperOps.EnsureF32(w[$"{p}final_proj.bias"]);
     }
 
+    // TODO(gpu-residency): this estimator is the CFM ODE hot path — it runs once per Euler step (×NumEulerSteps,
+    // typically 10) per generated frame, so it dominates flow runtime. The helpers below (PackInput, ConcatChannels,
+    // Mish, ExactGelu, the time-embedding sinusoid, and MatchaTransformerBlock.ToHeads/FromHeads) read tensor
+    // data via host `(float*)DataPointer`, which forces a device→host sync on CUDA and breaks GPU residency
+    // (same anti-pattern that made Ideogram4 slow before its dit_f32.ptx kernels). To go fully GPU-resident,
+    // port these element-wise/reshape ops to PTX kernels / backend ops so the whole estimator stays on-device.
     public Tensor Estimate(IBackend backend, Tensor x, Tensor mu, float t, Tensor spk, Tensor cond)
     {
         int tt = (int)x.Shape[2];

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Phonemizer</PackageId>
+    <Description>Pure-C# text-to-phoneme frontend for HartsyInference TTS pipelines. Ships a from-scratch port of the espeak-ng rule engine (compiled-dictionary reader + letter-to-sound interpreter + IPA mapping) behind a small IPhonemizer interface, so it can be swapped for a native espeak-ng binding or removed entirely without touching the model code.</Description>
+    <RootNamespace>HartsyInference.Phonemizer</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Dedicated test project needs the internal dictionary/interpreter types to verify
+         per-layer correctness against real espeak-ng data without lifting them to public. -->
+    <InternalsVisibleTo Include="HartsyInference.Phonemizer.Tests" />
+  </ItemGroup>
+
+</Project>

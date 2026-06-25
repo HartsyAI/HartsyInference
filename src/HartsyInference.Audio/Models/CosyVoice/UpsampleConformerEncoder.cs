@@ -82,6 +82,10 @@ public sealed unsafe class UpsampleConformerEncoder : IDisposable
         _afterNormB = WhisperOps.EnsureF32(w[$"{p}after_norm.bias"]);
     }
 
+    // TODO(gpu-residency): Embed (xscale), PreLookahead (residual), Upsample (nearest), BuildRelPos, and the
+    // RelPosBlock rel-pos attention (scores/softmax/bias) all use host `(float*)DataPointer` loops, which force
+    // device→host syncs on CUDA and break GPU residency. Port these to PTX kernels / backend ops for a fully
+    // on-device flow encoder.
     /// <summary>Forwards embedded speech tokens <c>[1, T, inputSize]</c> → upsampled features
     /// <c>[1, T·<see cref="TokenMelRatio"/>, outputSize]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor tokenEmb, int inputSize)

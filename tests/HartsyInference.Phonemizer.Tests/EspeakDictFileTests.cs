@@ -1,7 +1,7 @@
-using HartsyInference.Audio.Frontends.Espeak;
+using HartsyInference.Phonemizer.Espeak;
 using Xunit;
 
-namespace HartsyInference.Audio.Tests;
+namespace HartsyInference.Phonemizer.Tests;
 
 /// <summary>Structural parser tests for the compiled espeak-ng dictionary reader. Gated on a real
 /// <c>en_dict</c> being present (set <c>ESPEAK_DATA_DIR</c> to an <c>espeak-ng-data</c> directory). Validates that

@@ -40,11 +40,45 @@ public sealed unsafe class Hubert : IDisposable
         _fpNormB = WhisperOps.EnsureF32(w[$"{prefix}feature_projection.layer_norm.bias"]);
         _fpW = WhisperOps.EnsureF32(w[$"{prefix}feature_projection.projection.weight"]);
         _fpB = WhisperOps.EnsureF32(w[$"{prefix}feature_projection.projection.bias"]);
-        _posConvW = WhisperOps.EnsureF32(w[$"{prefix}encoder.pos_conv_embed.conv.weight"]);
+        // pos_conv is weight-normed in the real wav2vec2/HuBERT checkpoints (dim=2 → one magnitude per kernel
+        // position). Compose weight_g[1,1,k]·weight_v[out,in,k]/‖weight_v[:,:,k]‖ when the raw conv.weight is absent.
+        _posConvW = w.TryGetValue($"{prefix}encoder.pos_conv_embed.conv.weight", out Tensor? pcw)
+            ? WhisperOps.EnsureF32(pcw)
+            : ComposePosConvWeightNorm(
+                WhisperOps.EnsureF32(w[$"{prefix}encoder.pos_conv_embed.conv.weight_g"]),
+                WhisperOps.EnsureF32(w[$"{prefix}encoder.pos_conv_embed.conv.weight_v"]));
         _posConvB = w.TryGetValue($"{prefix}encoder.pos_conv_embed.conv.bias", out Tensor? pb) ? WhisperOps.EnsureF32(pb) : null;
         _encNormW = WhisperOps.EnsureF32(w[$"{prefix}encoder.layer_norm.weight"]);
         _encNormB = WhisperOps.EnsureF32(w[$"{prefix}encoder.layer_norm.bias"]);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}encoder.layers.{i}");
+    }
+
+    /// <summary>Composes a <c>weight_norm(dim=2)</c> grouped Conv1d weight: for each kernel position k,
+    /// <c>W[:,:,k] = V[:,:,k] · g[0,0,k] / ‖V[:,:,k]‖_F</c>. <paramref name="g"/> is <c>[1,1,K]</c>,
+    /// <paramref name="v"/> is <c>[outC, inC/groups, K]</c>.</summary>
+    private static Tensor ComposePosConvWeightNorm(Tensor g, Tensor v)
+    {
+        int outC = (int)v.Shape[0], inC = (int)v.Shape[1], k = (int)v.Shape[2];
+        Tensor outT = new(v.Shape, DType.F32);
+        float* gp = (float*)g.DataPointer, vp = (float*)v.DataPointer, op = (float*)outT.DataPointer;
+        for (int kk = 0; kk < k; kk++)
+        {
+            double sumSq = 0;
+            for (int o = 0; o < outC; o++)
+                for (int i = 0; i < inC; i++)
+                {
+                    float val = vp[((long)o * inC + i) * k + kk];
+                    sumSq += (double)val * val;
+                }
+            float scale = (float)(gp[kk] / (Math.Sqrt(sumSq) + 1e-12));
+            for (int o = 0; o < outC; o++)
+                for (int i = 0; i < inC; i++)
+                {
+                    long idx = ((long)o * inC + i) * k + kk;
+                    op[idx] = vp[idx] * scale;
+                }
+        }
+        return outT;
     }
 
     /// <summary>Encodes 16 kHz mono PCM <c>[1, 1, T_pcm]</c> → content features <c>[1, hidden, T]</c>.</summary>

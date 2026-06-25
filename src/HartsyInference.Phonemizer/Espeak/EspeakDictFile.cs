@@ -1,7 +1,7 @@
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 
-namespace HartsyInference.Audio.Frontends.Espeak;
+namespace HartsyInference.Phonemizer.Espeak;
 
 /// <summary>Parses a compiled espeak-ng <c>&lt;lang&gt;_dict</c> file into the in-memory indices espeak builds at load
 /// time (ported from <c>LoadDictionary</c> + <c>InitGroups</c> in espeak-ng v1.50 <c>dictionary.c</c>). The on-disk
