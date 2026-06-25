@@ -17,6 +17,7 @@ public sealed unsafe class ChatterboxT3 : IDisposable
 {
     private readonly ChatterboxConfig _cfg;
     private readonly Qwen2Model _backbone;
+    private readonly ChatterboxPerceiver _perceiver = new();
     private Tensor? _textEmb, _speechEmb, _textPos, _speechPos, _speechHead, _spkrEncW, _spkrEncB, _emotionFcW;
     private int _disposed;
 
@@ -39,11 +40,12 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         _spkrEncW = WhisperOps.EnsureF32(w["cond_enc.spkr_enc.weight"]);
         _spkrEncB = w.TryGetValue("cond_enc.spkr_enc.bias", out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
         _emotionFcW = WhisperOps.EnsureF32(w["cond_enc.emotion_adv_fc.weight"]);
+        if (w.ContainsKey("cond_enc.perceiver.pre_attention_query")) _perceiver.LoadWeights(w);
     }
 
     /// <summary>Builds the conditioning prefix embeddings <c>[1, 2, hidden]</c> = [speaker_proj, emotion_proj]
     /// (the prompt-speech perceiver branch is deferred).</summary>
-    public Tensor BuildCond(IBackend backend, Tensor speakerEmbed, float exaggeration)
+    public Tensor BuildCond(IBackend backend, Tensor speakerEmbed, float exaggeration, ReadOnlySpan<int> promptSpeechTokens)
     {
         int h = _cfg.T3.HiddenSize;
         Tensor spkRow = speakerEmbed.Reshape(new TensorShape(1, 1, _cfg.SpeakerEmbedDim));
@@ -53,20 +55,45 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         Tensor emo = WhisperOps.ProjectLinear(backend, emoIn, _emotionFcW!, null, 1, 1, 1, h);
         emoIn.Dispose();
 
-        Tensor cond = new(new TensorShape(1, 2, h), DType.F32);
-        Buffer.MemoryCopy((void*)spk.DataPointer, (void*)cond.DataPointer, h * 4, h * 4);
-        Buffer.MemoryCopy((void*)emo.DataPointer, (byte*)cond.DataPointer + h * 4, h * 4, h * 4);
+        // Cond-prompt: speech_emb(prompt) + speech_pos_emb(0..) → Perceiver resampler → 32 tokens. The reference
+        // assembles cond as cat([speaker(1), perceiver_prompt(32), emotion(1)]).
+        Tensor? promptOut = null;
+        int promptLen = 0;
+        if (promptSpeechTokens.Length > 0)
+        {
+            int pn = promptSpeechTokens.Length;
+            Tensor promptEmb = new(new TensorShape(1, pn, h), DType.F32);
+            float* pe = (float*)promptEmb.DataPointer;
+            for (int i = 0; i < pn; i++) AddEmbPlusPos(pe + (long)i * h, _speechEmb!, promptSpeechTokens[i], _speechPos!, i, h);
+            promptOut = _perceiver.Forward(backend, promptEmb);   // [1, 32, h]
+            promptEmb.Dispose();
+            promptLen = (int)promptOut.Shape[1];
+        }
+
+        int condLen = 1 + promptLen + 1;
+        Tensor cond = new(new TensorShape(1, condLen, h), DType.F32);
+        byte* dst = (byte*)cond.DataPointer;
+        Buffer.MemoryCopy((void*)spk.DataPointer, dst, h * 4, h * 4);
+        long off = (long)h * 4;
+        if (promptOut is not null)
+        {
+            long pbytes = (long)promptLen * h * 4;
+            Buffer.MemoryCopy((void*)promptOut.DataPointer, dst + off, pbytes, pbytes);
+            off += pbytes;
+            promptOut.Dispose();
+        }
+        Buffer.MemoryCopy((void*)emo.DataPointer, dst + off, h * 4, h * 4);
         spk.Dispose(); emo.Dispose();
         return cond;
     }
 
     /// <summary>Autoregressively generates S3 speech tokens from text token ids + a speaker embedding.</summary>
     public List<int> GenerateSpeechTokens(IBackend backend, ReadOnlySpan<int> textTokens, Tensor speakerEmbed,
-        float exaggeration, int maxNew, int seed = 0)
+        float exaggeration, int maxNew, int seed = 0, ReadOnlySpan<int> promptSpeechTokens = default)
     {
         if (_textEmb is null) throw new InvalidOperationException("ChatterboxT3 not loaded.");
         int h = _cfg.T3.HiddenSize;
-        Tensor cond = BuildCond(backend, speakerEmbed, exaggeration);
+        Tensor cond = BuildCond(backend, speakerEmbed, exaggeration, promptSpeechTokens);
         int condLen = (int)cond.Shape[1];
         int tt = textTokens.Length;
 
@@ -139,6 +166,7 @@ public sealed unsafe class ChatterboxT3 : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _backbone.Dispose();
+        _perceiver.Dispose();
         GC.SuppressFinalize(this);
     }
 }

@@ -6,6 +6,8 @@ using HartsyInference.Audio.Models.Chatterbox;
 using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Cpu;
+using HartsyInference.Cuda;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tokenizers;
@@ -31,7 +33,7 @@ public sealed class ChatterboxEndToEndTests
 
     [Fact]
     [Trait("Category", "Integration")]
-    public void Text_To_Wav_OnRealWeights()
+    public unsafe void Text_To_Wav_OnRealWeights()
     {
         string? dir = Environment.GetEnvironmentVariable("CHATTERBOX_DIR");
         if (string.IsNullOrEmpty(dir) || !File.Exists(Path.Combine(dir, "t3_cfg.safetensors")))
@@ -69,16 +71,30 @@ public sealed class ChatterboxEndToEndTests
         IReadOnlyDictionary<string, Tensor> conds = condLoader.GetAllTensors();
         using Tensor refSpk = Flatten(conds["t3_speaker_emb"], cfg.SpeakerEmbedDim);   // [256]
         Tensor flowSpk = conds["flow_embedding"];                                       // [1,192]
+        Tensor promptTok = conds["t3_cond_prompt_speech_tokens"];                       // [1,150] int32
+        int[] t3Prompt = new int[promptTok.ElementCount];
+        int* ptp = (int*)promptTok.DataPointer;
+        for (int i = 0; i < t3Prompt.Length; i++) t3Prompt[i] = ptp[i];
 
         using Stream tokStream = File.OpenRead(Path.Combine(dir, "tokenizer.json"));
         ChatterboxEnTokenizer tok = new(tokStream);
         int[] textTokens = tok.EncodeWithStartStop(text);   // wraps with START(255)/STOP(0) text tokens
         _out.WriteLine($"Text: \"{text}\" -> {textTokens.Length} tokens.");
 
-        using CpuBackend backend = new();
+        // CUDA when CHATTERBOX_CUDA=1 (weights stay host-resident, ops copy to device per call → small VRAM);
+        // else CPU. The matmul-heavy T3 transformer benefits most from the GPU.
+        IBackend backend;
+        if (Environment.GetEnvironmentVariable("CHATTERBOX_CUDA") == "1")
+        {
+            string ptx = Environment.GetEnvironmentVariable("CHATTERBOX_PTX")
+                ?? throw new InvalidOperationException("CHATTERBOX_CUDA=1 requires CHATTERBOX_PTX (Ptx dir).");
+            backend = new CudaBackend(0, ptx);
+            _out.WriteLine($"Backend: CUDA (ptx={ptx}).");
+        }
+        else backend = new CpuBackend();
         long t0 = Environment.TickCount64;
         float[] pcm = pipe.Synthesize(backend, textTokens, refSpk, cfg.Exaggeration, seed: 0,
-            flowSpeakerEmbed: flowSpk);
+            flowSpeakerEmbed: flowSpk, t3PromptSpeechTokens: t3Prompt);
         double secs = (Environment.TickCount64 - t0) / 1000.0;
 
         Assert.NotEmpty(pcm);
@@ -90,6 +106,7 @@ public sealed class ChatterboxEndToEndTests
         Assert.True(rms > 1e-4, "output should not be silent");
         GC.KeepAlive(loaders);       // keep the mmap-backing loaders alive until synthesis completes
         GC.KeepAlive(condLoader);
+        (backend as IDisposable)?.Dispose();
         foreach (SafeTensorsLoader l in loaders) l.Dispose();
         condLoader.Dispose();
     }

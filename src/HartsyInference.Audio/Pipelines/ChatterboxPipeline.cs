@@ -60,7 +60,8 @@ public sealed class ChatterboxPipeline : IDisposable
         int seed = 0,
         Tensor? flowSpeakerEmbed = null,
         Tensor? referenceMel = null,
-        Action<GenerationProgress>? progress = null)
+        Action<GenerationProgress>? progress = null,
+        ReadOnlySpan<int> t3PromptSpeechTokens = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(backend);
@@ -69,9 +70,10 @@ public sealed class ChatterboxPipeline : IDisposable
 
         progress?.Invoke(new GenerationProgress(0, 3, 0));
 
-        // Stage 1: T3 — text tokens + voice-encoder embedding → S3 speech tokens.
+        // Stage 1: T3 — text tokens + voice-encoder embedding (+ optional perceiver-resampled cond-prompt
+        // speech tokens) → S3 speech tokens.
         List<int> speechTokens = _t3.GenerateSpeechTokens(backend, textTokens, refSpeakerEmbed,
-            exaggeration, _cfg.MaxNewTokens, seed);
+            exaggeration, _cfg.MaxNewTokens, seed, t3PromptSpeechTokens);
         Logs.Info($"Chatterbox: T3 emitted {speechTokens.Count} speech tokens in {sw.ElapsedMilliseconds}ms.");
         progress?.Invoke(new GenerationProgress(1, 3, sw.Elapsed.TotalMilliseconds));
 
