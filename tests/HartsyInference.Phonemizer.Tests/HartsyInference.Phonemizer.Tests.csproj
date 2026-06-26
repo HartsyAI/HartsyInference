@@ -17,4 +17,8 @@
     <ProjectReference Include="..\..\src\HartsyInference.Phonemizer\HartsyInference.Phonemizer.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Fixtures\en_ipa_parity.tsv" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

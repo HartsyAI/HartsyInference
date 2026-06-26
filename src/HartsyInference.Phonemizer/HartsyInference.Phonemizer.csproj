@@ -16,4 +16,10 @@
     <InternalsVisibleTo Include="HartsyInference.Phonemizer.Tests" />
   </ItemGroup>
 
+  <!-- Phoneme-mnemonic -> IPA map, generated offline by aligning espeak-ng's ascii and IPA phoneme output
+       over an 8k-word corpus. Lets the phonemizer emit the IPA the TTS models were trained on. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\ipa_phoneme_map.tsv" LogicalName="HartsyInference.Phonemizer.Resources.ipa_phoneme_map.tsv" />
+  </ItemGroup>
+
 </Project>
