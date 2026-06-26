@@ -2442,14 +2442,15 @@ public sealed class CudaBackend : IBackend
     /// <summary>FlashAttention (online-softmax, GQA-aware, no materialized score matrix). Requires F32 and a
     /// power-of-two head dimension (true for the 64/128 head dims we run); falls back to the base CPU reference
     /// otherwise.</summary>
-    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale)
+    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f)
     {
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
-        bool pow2 = d > 0 && (d & (d - 1)) == 0 && d <= 1024;
-        if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !pow2)
+        // The kernel pads the block to the next power of two >= D, so any D up to 1024 works (Phi-3 D=96 etc.).
+        bool kernelOk = d > 0 && d <= 1024;
+        if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk)
         {
-            ((IBackend)this).FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale);
+            AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap);
             return;
         }
 
@@ -2464,7 +2465,7 @@ public sealed class CudaBackend : IBackend
             pV = GpuTransferHelper.CopyToDevice(value);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, _stream.Handle);
+            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -2550,6 +2551,36 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIdx);
+        }
+    }
+
+    /// <summary>Per-row argmax over the last dim: indices[r] = argmax_c input[r,c]. The reduction runs on-device
+    /// (one block per row); only the resulting indices (one int per row) sync back, not the full logit rows.</summary>
+    public unsafe void ArgMaxLastDim(Tensor indices, Tensor input)
+    {
+        if (input.DType != DType.F32 || indices.DType != DType.I32)
+        {
+            ((IBackend)this).ArgMaxLastDim(indices, input);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int c = (int)input.Shape[input.Shape.Rank - 1];
+        int rows = (int)(input.ElementCount / c);
+        ulong pIn = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = (nuint)((long)rows * sizeof(int));
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchArgMaxLastDim(pOut, pIn, rows, c, _stream.Handle);
+            GpuTransferHelper.CacheActivation(indices, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
     }
 

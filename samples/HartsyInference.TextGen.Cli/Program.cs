@@ -52,7 +52,8 @@ if (arch == "gguf")
     Console.WriteLine($"=== HartsyInference.LLM — arch=gguf, backend={backendName}, genTokens={genTokens} ===");
     Console.WriteLine($"Loading GGUF {ggufPath} ...");
     bool lowVram = Environment.GetEnvironmentVariable("HARTSY_LOWVRAM") == "1";
-    ggufModel = GgufLanguageModel.Load(ggufPath, lowVram);
+    // The CPU backend is F32-only; widen the GGUF's quantized projections to F32 at load for it.
+    ggufModel = GgufLanguageModel.Load(ggufPath, lowVram, dequantizeToF32: cuda is null);
     model = ggufModel.Transformer;
     TransformerConfig c = ggufModel.Config;
     Console.WriteLine($"  lowVramQuant={lowVram} (set HARTSY_LOWVRAM=1 to keep weights compressed on-device)");

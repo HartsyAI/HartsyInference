@@ -185,6 +185,18 @@ public sealed class GgufLoader : IDisposable
                     return (ints, offset);
                 }
 
+                // Float32 arrays — needed for SentencePiece tokenizer.ggml.scores. Collect as float[].
+                if (elemType == 6)
+                {
+                    float[] floats = new float[count];
+                    for (ulong i = 0; i < count; i++)
+                    {
+                        floats[i] = *(float*)(ptr + offset);
+                        offset += 4;
+                    }
+                    return (floats, offset);
+                }
+
                 // For other arrays, skip the data
                 for (ulong i = 0; i < count; i++)
                 {

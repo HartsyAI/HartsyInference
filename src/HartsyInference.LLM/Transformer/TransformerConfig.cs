@@ -14,6 +14,17 @@ public enum RopeStyle
     Interleaved,
 }
 
+/// <summary>Gated-FFN activation. <see cref="Silu"/> (Llama/Qwen/Mistral SwiGLU) vs <see cref="GeluTanh"/>
+/// (Gemma's GeGLU — the tanh-approximation GELU, <c>gelu_pytorch_tanh</c>).</summary>
+public enum ActivationKind
+{
+    /// <summary>SiLU / swish gate (SwiGLU). Llama, Qwen, Mistral.</summary>
+    Silu,
+
+    /// <summary>tanh-approximation GELU gate (GeGLU). Gemma 2 / Gemma 3.</summary>
+    GeluTanh,
+}
+
 /// <summary>How the MoE router turns expert logits into selection scores. <see cref="Softmax"/> (Qwen2-MoE /
 /// Qwen3-MoE / Mixtral: softmax over all experts, then top-k) vs <see cref="Sigmoid"/> (DeepSeek-V3:
 /// independent sigmoid per expert).</summary>
@@ -116,6 +127,58 @@ public sealed record TransformerConfig
     /// text). The Qwen3-TTS audio backbone uses <see cref="RopeStyle.Interleaved"/>.</summary>
     public RopeStyle Rope { get; init; } = RopeStyle.SplitHalf;
 
+    /// <summary>Gated-FFN activation. Default SiLU (SwiGLU); Gemma uses <see cref="ActivationKind.GeluTanh"/>.</summary>
+    public ActivationKind Activation { get; init; } = ActivationKind.Silu;
+
+    /// <summary>Gemma "sandwich norm": an extra RMSNorm on the attention output and on the FFN output, each
+    /// applied <i>before</i> the residual add (in addition to the pre-attn / pre-FFN norms). false for the
+    /// standard pre-norm layout (Qwen/Llama).</summary>
+    public bool SandwichNorm { get; init; }
+
+    /// <summary>Gemma's <c>(1 + weight)</c> RMSNorm: the norm weight is offset by 1 (the GGUF/HF weight stores
+    /// the centered value). Baked into the loaded norm weights at load time, so the runtime norm op is unchanged.</summary>
+    public bool RmsNormAddOne { get; init; }
+
+    /// <summary>Multiplier applied to token embeddings after lookup. 1 for Qwen/Llama; Gemma uses
+    /// <c>sqrt(HiddenSize)</c> (the embedding normalizer).</summary>
+    public float EmbeddingScale { get; init; } = 1f;
+
+    /// <summary>Attention score scale numerator: when &gt; 0 the scale is <c>1/sqrt(QueryPreAttnScalar)</c>
+    /// (Gemma's <c>query_pre_attn_scalar</c>, which can differ from head_dim, e.g. Gemma-2-27B); 0 (default)
+    /// uses the standard <c>1/sqrt(HeadDim)</c>.</summary>
+    public float QueryPreAttnScalar { get; init; }
+
+    /// <summary>Gemma-3 dual-RoPE: local (sliding-window) layers use this base frequency while global layers use
+    /// <see cref="RopeTheta"/>. 0 (default) means a single RoPE base for all layers.</summary>
+    public float RopeLocalTheta { get; init; }
+
+    /// <summary>Sliding-window layer pattern: layer <c>i</c> is a global (full-attention) layer when this is
+    /// 0 (all global) or <c>(i+1) % pattern == 0</c>; otherwise it is a local (sliding-window) layer. Gemma-2
+    /// alternates (pattern 2); Gemma-3 is 5 local : 1 global (pattern 6).</summary>
+    public int SlidingWindowPattern { get; init; }
+
+    /// <summary>Sliding-window span for local layers (Gemma-2 4096, Gemma-3 512/1024). Only affects sequences
+    /// longer than the window; shorter contexts are unaffected (every position is in-window).</summary>
+    public int SlidingWindow { get; init; }
+
+    /// <summary>Attention-logit soft-cap (Gemma-2 = 50): scores are capped via <c>cap·tanh(score/cap)</c> before
+    /// the softmax. 0 (default) disables it. Requires the soft-capping attention path.</summary>
+    public float AttnLogitSoftcap { get; init; }
+
+    /// <summary>Final-logit soft-cap (Gemma-2 = 30): output logits are capped via <c>cap·tanh(logit/cap)</c>.
+    /// 0 (default) disables it.</summary>
+    public float FinalLogitSoftcap { get; init; }
+
+    /// <summary>Whether layer <paramref name="i"/> uses global (full) attention vs a local sliding window.</summary>
+    public bool IsGlobalLayer(int i) => SlidingWindowPattern <= 0 || (i + 1) % SlidingWindowPattern == 0;
+
+    /// <summary>RoPE base frequency for layer <paramref name="i"/> (Gemma-3 dual-RoPE: local layers use
+    /// <see cref="RopeLocalTheta"/>, global use <see cref="RopeTheta"/>).</summary>
+    public float RopeThetaFor(int i) => RopeLocalTheta > 0 && !IsGlobalLayer(i) ? RopeLocalTheta : RopeTheta;
+
+    /// <summary>Attention score scale: <c>1/sqrt(QueryPreAttnScalar)</c> when set, else <c>1/sqrt(HeadDim)</c>.</summary>
+    public float AttnScale => 1f / MathF.Sqrt(QueryPreAttnScalar > 0 ? QueryPreAttnScalar : HeadDim);
+
     /// <summary>For quantized (GGUF) weights: when <c>false</c> (default) the dequantized F16 weight is cached
     /// per weight (fast decode, but the weight set occupies F16-sized VRAM); when <c>true</c> the low-VRAM
     /// <see cref="IBackend.QuantizedMatMul"/> path is used (weights stay compressed on-device, dequant is
@@ -163,5 +226,31 @@ public sealed record TransformerConfig
         HiddenSize = 1_024, NumLayers = 28, NumHeads = 16, NumKvHeads = 8, HeadDim = 128,
         IntermediateSize = 3_072, VocabSize = 151_936, MaxPositionEmbeddings = 40_960,
         AttentionBias = false, QkNorm = true, TieWordEmbeddings = true,
+    };
+
+    /// <summary>Gemma-3-1B-it: decoupled head_dim 256 (4·256=1024 ≠ hidden 1152), MQA (1 KV head), Q/K norm,
+    /// GeGLU, sandwich + (1+w) norms, embedding scale √1152, dual-RoPE (local 10k / global 1M, 5:1 pattern),
+    /// no logit soft-cap. Exercises the full Gemma-3 surface.</summary>
+    public static TransformerConfig Gemma3_1B => new()
+    {
+        HiddenSize = 1_152, NumLayers = 26, NumHeads = 4, NumKvHeads = 1, HeadDim = 256,
+        IntermediateSize = 6_912, VocabSize = 262_144, MaxPositionEmbeddings = 32_768,
+        RopeTheta = 1_000_000f, RmsNormEps = 1e-6f, AttentionBias = false, QkNorm = true, TieWordEmbeddings = true,
+        Activation = ActivationKind.GeluTanh, SandwichNorm = true, RmsNormAddOne = true,
+        EmbeddingScale = 33.941124f /* sqrt(1152) */, QueryPreAttnScalar = 256f,
+        RopeLocalTheta = 10_000f, SlidingWindowPattern = 6, SlidingWindow = 512,
+    };
+
+    /// <summary>Gemma-2-2B-it: head_dim 256, GQA (8/4), GeGLU, sandwich + (1+w) norms, embedding scale √2304,
+    /// attn/final logit soft-cap (50/30), alternating sliding window (pattern 2, window 4096), single RoPE 10k.</summary>
+    public static TransformerConfig Gemma2_2B => new()
+    {
+        HiddenSize = 2_304, NumLayers = 26, NumHeads = 8, NumKvHeads = 4, HeadDim = 256,
+        IntermediateSize = 9_216, VocabSize = 256_000, MaxPositionEmbeddings = 8_192,
+        RopeTheta = 10_000f, RmsNormEps = 1e-6f, AttentionBias = false, QkNorm = false, TieWordEmbeddings = true,
+        Activation = ActivationKind.GeluTanh, SandwichNorm = true, RmsNormAddOne = true,
+        EmbeddingScale = 48f /* sqrt(2304) */, QueryPreAttnScalar = 256f,
+        SlidingWindowPattern = 2, SlidingWindow = 4_096,
+        AttnLogitSoftcap = 50f, FinalLogitSoftcap = 30f,
     };
 }

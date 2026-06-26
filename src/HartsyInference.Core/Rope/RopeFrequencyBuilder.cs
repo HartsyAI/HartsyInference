@@ -36,11 +36,14 @@ public static class RopeFrequencyBuilder
 
         double[] invFreq = ComputeInvFreq(dim, effectiveTheta);
 
-        // Explicit per-frequency multiplier (GGUF rope_freqs.weight) wins over the formula — reproduces llama.cpp.
+        // Explicit per-frequency factors (GGUF rope_freqs.weight) win over the formula — reproduces llama.cpp.
+        // ggml stores these as DIVISORS (its "freq_factors": ~1 for high frequencies rising to the rope-scaling
+        // factor, e.g. 32 for Llama-3.2, on the low frequencies) and applies them as theta = theta_base /
+        // freq_factor. This matches HF _compute_llama3_parameters, which divides inv_freq by the same factor.
         if (s.InvFreqFactors is { Count: > 0 } factors)
         {
             int n = Math.Min(half, factors.Count);
-            for (int k = 0; k < n; k++) invFreq[k] *= factors[k];
+            for (int k = 0; k < n; k++) invFreq[k] /= factors[k];
             return (invFreq, InferMscale(s));
         }
 

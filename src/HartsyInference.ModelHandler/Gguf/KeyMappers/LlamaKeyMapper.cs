@@ -1,6 +1,6 @@
 namespace HartsyInference.ModelHandler.Gguf.KeyMappers;
 
-/// <summary>Llama-family GGUF mapper for **text encoders** (Qwen3-4B, Mistral-Small-3, Ministral3B, Qwen2.5-VL, etc.) used as conditioning encoders in Z-Image / Flux.2 / ERNIE-Image.
+/// <summary>GGUF mapper for the llama.cpp **dense-decoder family** — <c>llama</c>, <c>qwen2</c> and <c>qwen3</c> all share one tensor-naming dialect, so one mapper covers them all (declared via <see cref="Architectures"/>). Serves both standalone decoder LLMs (<see cref="HartsyInference.LLM.Transformer.GenericTransformer"/>) and the same models used as conditioning **text encoders** (Qwen3-4B, Mistral-Small-3, Ministral3B, Qwen2.5-VL, etc.) in Z-Image / Flux.2 / ERNIE-Image. Architecture-specific differences (QKV bias on Qwen2, q/k-norm on Qwen3, tied embeddings) are not naming differences — they surface only as tensor *presence* and are detected structurally downstream, so the mechanical remap below is identical for the whole family.
 ///
 /// <para>llama.cpp's GGUF naming is its own dialect — keys like <c>blk.{i}.attn_q.weight</c>, <c>blk.{i}.ffn_gate.weight</c>, <c>token_embd.weight</c>, <c>output_norm.weight</c>. <see cref="HartsyInference.Diffusion.Models.TextEncoders.LlamaStyleEncoder"/> expects HuggingFace transformers naming: <c>model.layers.{i}.self_attn.q_proj.weight</c>, <c>model.layers.{i}.mlp.gate_proj.weight</c>, <c>model.embed_tokens.weight</c>, <c>model.norm.weight</c>. We rewrite at the GGUF level.</para>
 ///
@@ -24,6 +24,11 @@ namespace HartsyInference.ModelHandler.Gguf.KeyMappers;
 public sealed class LlamaKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "llama";
+
+    // llama.cpp's convert_hf_to_gguf.py emits an identical blk.N.attn_*/ffn_* dialect for these dense decoders,
+    // so the single remap below is exact for all three. Registering them explicitly means a Qwen2/Qwen3 GGUF
+    // resolves here by name instead of via the key-heuristic fallback (which would otherwise log a warning).
+    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {

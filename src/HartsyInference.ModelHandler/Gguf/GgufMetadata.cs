@@ -81,6 +81,14 @@ public sealed class GgufMetadata
         return null;
     }
 
+    /// <summary>Gets a float32 array metadata value (e.g. <c>tokenizer.ggml.scores</c> for SentencePiece), or null.</summary>
+    public float[]? GetFloatArray(string key)
+    {
+        if (_values.TryGetValue(key, out object? value) && value is float[] arr)
+            return arr;
+        return null;
+    }
+
     /// <summary>Checks if a metadata key exists.</summary>
     public bool ContainsKey(string key) => _values.ContainsKey(key);
 

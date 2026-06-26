@@ -60,6 +60,17 @@ public sealed class GgufLanguageModel : IDisposable
         List<int> extraStops = [];
         if (eot is int e) extraStops.Add(e);
 
+        // SentencePiece (tokenizer.ggml.model == "llama"): Gemma, Llama-1/2. Score-driven merges + byte fallback,
+        // a different algorithm from byte-level BPE, so route to the SPM tokenizer.
+        string tokModel = meta.GetString("tokenizer.ggml.model") ?? "gpt2";
+        if (tokModel == "llama")
+        {
+            float[]? scores = meta.GetFloatArray("tokenizer.ggml.scores")
+                ?? throw new NotSupportedException("SentencePiece GGUF missing tokenizer.ggml.scores.");
+            bool addSpacePrefix = meta.GetBool("tokenizer.ggml.add_space_prefix", true);
+            return new SpmGgufTokenizer(tokens, scores, tokenType, bos, eos, extraStops, addSpacePrefix);
+        }
+
         // Pre-tokenizer family decides the regex split + ignore_merges. The GPT-2/Qwen default keeps word
         // spaces and newline runs; the Llama-3 family (llama-bpe) uses a different split (case-insensitive
         // contractions, digits in groups of ≤3, newline-aware whitespace) and emits whole in-vocab pre-tokens
@@ -75,8 +86,10 @@ public sealed class GgufLanguageModel : IDisposable
         @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
     /// <summary>Loads the GGUF at <paramref name="path"/>. Set <paramref name="lowVramQuant"/> to keep weights
-    /// compressed on-device (low VRAM, slower decode) instead of caching dequantized F16 weights.</summary>
-    public static GgufLanguageModel Load(string path, bool lowVramQuant = false)
+    /// compressed on-device (low VRAM, slower decode) instead of caching dequantized F16 weights. Set
+    /// <paramref name="dequantizeToF32"/> for the CPU backend, which is F32-only and cannot consume the quantized
+    /// projection weights the CUDA path keeps compressed — every quantized/half tensor is widened to F32 at load.</summary>
+    public static GgufLanguageModel Load(string path, bool lowVramQuant = false, bool dequantizeToF32 = false)
     {
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(path);
         try
@@ -93,11 +106,19 @@ public sealed class GgufLanguageModel : IDisposable
                     t = t.Reshape(new TensorShape((int)t.Shape[1], (int)t.Shape[0]));
                 // Quant formats the GPU matmul/dequant path doesn't handle (e.g. Q5_0 tensors inside a Q4_K_M
                 // mix) are dequantized to F32 up front; the supported formats stay quantized for the
-                // dequant-to-F16 / fused-GEMV path.
-                if (t.DType.IsQuantized && !GpuSupportedQuant.Contains(t.DType.Name))
+                // dequant-to-F16 / fused-GEMV path. The CPU backend is F32-only, so dequantizeToF32 widens
+                // everything (quantized and half-float) to F32 instead.
+                if (t.DType.IsQuantized && (dequantizeToF32 || !GpuSupportedQuant.Contains(t.DType.Name)))
                     t = GgufDequantizer.Dequantize(t, DType.F32);
+                else if (dequantizeToF32 && t.DType.IsFloatingPoint && t.DType != DType.F32)
+                    t = t.CastTo(DType.F32);
                 weights[kv.Key] = t;
             }
+
+            // Phi-3 fuses q/k/v into one attn_qkv tensor and gate/up into one ffn_up tensor; split them into the
+            // separate projections the transformer expects (contiguous row-byte copy, dtype-preserving → works
+            // on the quantized weights without dequant).
+            if (handle.Architecture == "phi3") SplitFusedPhi(weights, handle.Metadata);
 
             TransformerConfig config = GgufConfigFactory.FromGguf(handle.Metadata, weights, lowVramQuant);
             GenericTransformer transformer = new(config);
@@ -116,6 +137,52 @@ public sealed class GgufLanguageModel : IDisposable
             handle.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Splits Phi-3's fused <c>qkv_proj</c> (→ q/k/v) and <c>gate_up_proj</c> (→ gate/up) into the
+    /// separate per-projection tensors. Rows are contiguous in the (possibly quantized) layout, so each split is
+    /// a byte-range copy that preserves the dtype.</summary>
+    private static unsafe void SplitFusedPhi(Dictionary<string, Tensor> w, GgufMetadata meta)
+    {
+        int hq = (int)meta.GetUInt32("phi3.attention.head_count");
+        int hkv = (int)meta.GetUInt32("phi3.attention.head_count_kv", (uint)hq);
+        int hidden = (int)meta.GetUInt32("phi3.embedding_length");
+        int headDim = (int)meta.GetUInt32("phi3.rope.dimension_count", (uint)(hidden / Math.Max(1, hq)));
+        int ffn = (int)meta.GetUInt32("phi3.feed_forward_length");
+        int layers = (int)meta.GetUInt32("phi3.block_count");
+        int qRows = hq * headDim, kvRows = hkv * headDim;
+
+        for (int i = 0; i < layers; i++)
+        {
+            string p = $"model.layers.{i}";
+            if (w.TryGetValue($"{p}.self_attn.qkv_proj.weight", out Tensor? qkv))
+            {
+                w[$"{p}.self_attn.q_proj.weight"] = SliceRows(qkv, 0, qRows);
+                w[$"{p}.self_attn.k_proj.weight"] = SliceRows(qkv, qRows, kvRows);
+                w[$"{p}.self_attn.v_proj.weight"] = SliceRows(qkv, qRows + kvRows, kvRows);
+                w.Remove($"{p}.self_attn.qkv_proj.weight");
+            }
+            if (w.TryGetValue($"{p}.mlp.gate_up_proj.weight", out Tensor? gu))
+            {
+                w[$"{p}.mlp.gate_proj.weight"] = SliceRows(gu, 0, ffn);
+                w[$"{p}.mlp.up_proj.weight"] = SliceRows(gu, ffn, ffn);
+                w.Remove($"{p}.mlp.gate_up_proj.weight");
+            }
+        }
+    }
+
+    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of a rank-2 tensor into a new tensor of the same
+    /// dtype. A row is contiguous in both float and block-quantized layouts (quant blocks run along the column
+    /// dim), so this is a plain byte-range copy that works on quantized weights.</summary>
+    private static unsafe Tensor SliceRows(Tensor src, int startRow, int numRows)
+    {
+        int inDim = (int)src.Shape[1];
+        long rowBytes = src.DType.ComputeByteCount(inDim);
+        Tensor outp = new(new TensorShape(numRows, inDim), src.DType);
+        byte* s = (byte*)src.DataPointer + (long)startRow * rowBytes;
+        long bytes = (long)numRows * rowBytes;
+        Buffer.MemoryCopy(s, (void*)outp.DataPointer, bytes, bytes);
+        return outp;
     }
 
     public void Dispose()

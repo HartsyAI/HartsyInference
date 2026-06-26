@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 
 namespace HartsyInference.LLM.ChatTemplates;
 
@@ -39,6 +40,72 @@ internal static class Values
         System.Collections.IEnumerable e and not string => [.. e.Cast<object?>()],
         _ => throw new InvalidOperationException($"Value is not iterable: {v.GetType().Name}"),
     };
+
+    /// <summary>Serializes a value to compact JSON for the <c>tojson</c> filter (used by the tool-calling blocks
+    /// of the Qwen/Llama templates). Handles the value graph the engine produces: null / bool / long / double /
+    /// string / List / Dictionary.</summary>
+    public static string ToJson(object? v)
+    {
+        StringBuilder sb = new();
+        WriteJson(sb, v);
+        return sb.ToString();
+    }
+
+    private static void WriteJson(StringBuilder sb, object? v)
+    {
+        switch (v)
+        {
+            case null: sb.Append("null"); break;
+            case bool b: sb.Append(b ? "true" : "false"); break;
+            case long l: sb.Append(l.ToString(CultureInfo.InvariantCulture)); break;
+            case int i: sb.Append(i.ToString(CultureInfo.InvariantCulture)); break;
+            case double d: sb.Append(d.ToString("R", CultureInfo.InvariantCulture)); break;
+            case string s: WriteJsonString(sb, s); break;
+            case Dictionary<string, object?> dict:
+                sb.Append('{');
+                bool firstK = true;
+                foreach (KeyValuePair<string, object?> kv in dict)
+                {
+                    if (!firstK) sb.Append(", ");
+                    firstK = false;
+                    WriteJsonString(sb, kv.Key);
+                    sb.Append(": ");
+                    WriteJson(sb, kv.Value);
+                }
+                sb.Append('}');
+                break;
+            default:
+                sb.Append('[');
+                bool firstE = true;
+                foreach (object? e in AsList(v))
+                {
+                    if (!firstE) sb.Append(", ");
+                    firstE = false;
+                    WriteJson(sb, e);
+                }
+                sb.Append(']');
+                break;
+        }
+    }
+
+    private static void WriteJsonString(StringBuilder sb, string s)
+    {
+        sb.Append('"');
+        foreach (char c in s)
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                    else sb.Append(c);
+                    break;
+            }
+        sb.Append('"');
+    }
 
     public static bool Eq(object? a, object? b)
     {
@@ -145,6 +212,10 @@ internal sealed class BinaryExpr(string op, Expr left, Expr right) : Expr
             "~" => Values.ToStr(a) + Values.ToStr(b),
             "+" => Values.IsNum(a) && Values.IsNum(b) ? (object)((long)Values.ToD(a) + (long)Values.ToD(b)) : Values.ToStr(a) + Values.ToStr(b),
             "-" => (object)((long)Values.ToD(a) - (long)Values.ToD(b)),
+            "*" => (object)((long)Values.ToD(a) * (long)Values.ToD(b)),
+            "//" => (object)((long)Values.ToD(a) / (long)Values.ToD(b)),
+            "/" => (object)(Values.ToD(a) / Values.ToD(b)),
+            "%" => (object)((long)Values.ToD(a) % (long)Values.ToD(b)),
             _ => throw new NotSupportedException($"Jinja operator '{op}'"),
         };
     }
@@ -165,7 +236,19 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
             case "trim": return Values.ToStr(v).Trim();
             case "lower": return Values.ToStr(v).ToLowerInvariant();
             case "upper": return Values.ToStr(v).ToUpperInvariant();
-            case "length": case "count": return (long)Values.AsList(v).Count;
+            // length/count: char count for strings, element count for sequences/dicts (Jinja semantics).
+            case "length": case "count":
+                return v is string sLen ? (long)sLen.Length : (long)Values.AsList(v).Count;
+            case "first":
+                if (v is string sFirst) return sFirst.Length > 0 ? sFirst[0].ToString() : "";
+                { List<object?> lf = Values.AsList(v); return lf.Count > 0 ? lf[0] : null; }
+            case "last":
+                if (v is string sLast) return sLast.Length > 0 ? sLast[^1].ToString() : "";
+                { List<object?> ll = Values.AsList(v); return ll.Count > 0 ? ll[^1] : null; }
+            case "join":
+                { string sep = args.Count > 0 ? Values.ToStr(args[0].Eval(scope)) : "";
+                  return string.Join(sep, Values.AsList(v).Select(Values.ToStr)); }
+            case "tojson": return Values.ToJson(v);
             case "list": return Values.AsList(v);
             case "string": return Values.ToStr(v);
             case "default": return Values.Truthy(v) ? v : (args.Count > 0 ? args[0].Eval(scope) : v);
@@ -314,12 +397,28 @@ internal static class ExprParser
 
     private static Expr ParseConcat(Tokenizer t)
     {
+        Expr e = ParseMulDiv(t);
+        while (true)
+        {
+            if (t.TrySymbol("~")) e = new BinaryExpr("~", e, ParseMulDiv(t));
+            else if (t.TrySymbol("+")) e = new BinaryExpr("+", e, ParseMulDiv(t));
+            else if (t.TrySymbol("-")) e = new BinaryExpr("-", e, ParseMulDiv(t));
+            else break;
+        }
+        return e;
+    }
+
+    /// <summary>Multiplicative level (binds tighter than +/-): <c>*</c>, <c>//</c> (int div), <c>/</c>, <c>%</c>
+    /// (modulo — used by chat templates like Gemma's <c>loop.index0 % 2</c>). <c>//</c> is tried before <c>/</c>.</summary>
+    private static Expr ParseMulDiv(Tokenizer t)
+    {
         Expr e = ParsePostfix(t);
         while (true)
         {
-            if (t.TrySymbol("~")) e = new BinaryExpr("~", e, ParsePostfix(t));
-            else if (t.TrySymbol("+")) e = new BinaryExpr("+", e, ParsePostfix(t));
-            else if (t.TrySymbol("-")) e = new BinaryExpr("-", e, ParsePostfix(t));
+            if (t.TrySymbol("*")) e = new BinaryExpr("*", e, ParsePostfix(t));
+            else if (t.TrySymbol("//")) e = new BinaryExpr("//", e, ParsePostfix(t));
+            else if (t.TrySymbol("/")) e = new BinaryExpr("/", e, ParsePostfix(t));
+            else if (t.TrySymbol("%")) e = new BinaryExpr("%", e, ParsePostfix(t));
             else break;
         }
         return e;

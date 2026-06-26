@@ -34,10 +34,16 @@ internal readonly struct EspeakPhoneme
     public const byte TypeStress = 1;
     public const byte TypeVowel = 2;
     public const byte TypeLiquid = 3;
+    public const byte TypeStop = 4;
+    public const byte TypeVStop = 5;
+    public const byte TypeFricative = 6;
+    public const byte TypeVFricative = 7;
+    public const byte TypeNasal = 8;
     public const byte TypeInvalid = 15;
 
     // Phoneme flag bits (phoneme.h phFLAGBIT_*).
     public const uint FlagUnstressed = 1U << 1;
+    public const uint FlagVoiced = 1U << 4;
     public const uint FlagNonSyllabic = 1U << 20;
 
     /// <summary>Reads a 16-byte phoneme record from <paramref name="data"/> at <paramref name="offset"/>.</summary>

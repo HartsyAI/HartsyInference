@@ -60,7 +60,10 @@ internal sealed class SeaNetDecoder
         _upsampleB = new Tensor?[_stages];
         _stageBlocks = new SeaNetBlock[_stages][];
 
-        int seqIdx = 2;     // after initial conv (0) + LSTM (1)
+        // Sequential index of the first stage: initial conv is 0; the LSTM occupies slot 1 ONLY when present
+        // (EnCodec). Mimi has no LSTM (transformer-of-codecs instead), so its stages start at 1 — the upsample
+        // convtr/blocks/final conv shift down by one accordingly.
+        int seqIdx = _lstm is not null ? 2 : 1;
         for (int i = 0; i < _stages; i++)
         {
             int dimIn = cfg.NFilters * (1 << (_stages - i));
@@ -86,8 +89,9 @@ internal sealed class SeaNetDecoder
         // LSTM (Sequential index 1) — absent when cfg.LstmLayers == 0 (Mimi case).
         _lstm?.LoadWeights(w, $"{_prefix}.model.1.lstm");
 
-        // Per stage: ELU at idx, upsample at idx+1, residual blocks at idx+2..idx+1+N.
-        int seqIdx = 2;
+        // Per stage: ELU at idx, upsample at idx+1, residual blocks at idx+2..idx+1+N. Start at 1 when there is
+        // no LSTM (Mimi) so the indices match the checkpoint (see constructor note).
+        int seqIdx = _lstm is not null ? 2 : 1;
         for (int i = 0; i < _stages; i++)
         {
             seqIdx++;   // skip ELU

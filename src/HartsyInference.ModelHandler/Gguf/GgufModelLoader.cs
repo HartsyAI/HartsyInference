@@ -26,7 +26,13 @@ public sealed class GgufModelLoader : IDisposable
 
         public required IGgufKeyMapper Mapper { get; init; }
         public required IReadOnlyDictionary<string, Tensor> Weights { get; init; }
+        /// <summary>The GGUF's own <c>general.architecture</c> (e.g. "qwen2", "gemma3"), or the resolved mapper's
+        /// name when the file declared none. This is the real model architecture, not the mapper that handles it
+        /// (one mapper, e.g. the llama-family mapper, serves several architectures).</summary>
         public required string Architecture { get; init; }
+        /// <summary>The display name of the <see cref="IGgufKeyMapper"/> that remapped this file's tensor keys.
+        /// Often differs from <see cref="Architecture"/> (e.g. arch "qwen2" handled by the "llama"-family mapper).</summary>
+        public required string MapperName { get; init; }
         public required GgufMetadata Metadata { get; init; }
 
         internal void AttachLoader(GgufLoader loader) => _loader = loader;
@@ -62,13 +68,17 @@ public sealed class GgufModelLoader : IDisposable
                 remapped[targetKey] = loader.GetTensor(kv.Key);
             }
 
-            Logs.Info($"GGUF loaded: arch={mapper.Architecture}, tensors={remapped.Count} (dropped {dropped} metadata-only), file={Path.GetFileName(path)}.");
+            string realArch = string.IsNullOrEmpty(architecture) ? mapper.Architecture : architecture;
+            string mapperNote = string.Equals(realArch, mapper.Architecture, StringComparison.OrdinalIgnoreCase)
+                ? "" : $" (mapper={mapper.Architecture})";
+            Logs.Info($"GGUF loaded: arch={realArch}{mapperNote}, tensors={remapped.Count} (dropped {dropped} metadata-only), file={Path.GetFileName(path)}.");
 
             LoadedGgufModel result = new()
             {
                 Mapper = mapper,
                 Weights = remapped,
-                Architecture = mapper.Architecture,
+                Architecture = realArch,
+                MapperName = mapper.Architecture,
                 Metadata = loader.Metadata,
             };
             result.AttachLoader(loader);

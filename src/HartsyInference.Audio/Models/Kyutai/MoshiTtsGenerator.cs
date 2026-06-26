@@ -9,8 +9,10 @@ namespace HartsyInference.Audio.Models.Kyutai;
 /// temporal backbone, <see cref="MoshiDepformer"/> depth transformer, <see cref="MoshiConditioner"/>) plus the
 /// input embeddings. Per frame the temporal input is <c>Σ emb[k](audioCode_k) + text_emb(textToken) +
 /// sum_condition</c>; the text embedding DEMUXES the multiplexed second stream (<c>out1</c>/<c>out2</c>). The
-/// backbone (run over the whole prefix each step — TODO(perf): add a streaming KV cache like upstream) yields
-/// the per-frame context that drives the depformer.</summary>
+/// backbone runs one token per frame through a streaming <c>FixedKvCache</c> (see <see cref="StepText"/> /
+/// <see cref="MoshiTransformer.StepForward"/>) — O(n), not the O(n²) full-prefix re-run — yielding the per-frame
+/// context that drives the depformer. Greedy text sampling uses the device-resident
+/// <see cref="IBackend.ArgMaxLastDim"/>.</summary>
 public sealed unsafe class MoshiTtsGenerator : IDisposable
 {
     public const int Dim = 2048, TextCard = 8000, AudioCard = 2048, NumCodebooks = 32;
@@ -154,7 +156,12 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
 
                 using Tensor frameEmbed = EmbedFrame(backend, textIn, audioIn);
                 Tensor lastCtx = StepText(backend, frameEmbed, sumCond, crossKv, selfCache, offset, out Tensor textLogits);
-                int textTok = ArgMaxRow((float*)textLogits.DataPointer, TextCard);   // textLogits is [1,1,TextCard]
+                int textTok;
+                using (Tensor textIdx = new(new TensorShape(1), DType.I32))   // device-resident argmax; only the id syncs back
+                {
+                    backend.ArgMaxLastDim(textIdx, textLogits);               // textLogits is [1,1,TextCard]
+                    textTok = ((int*)textIdx.DataPointer)[0];
+                }
                 textLogits.Dispose();
 
                 int outTok = scheduler.Process(offset, state, textTok, out _);
@@ -198,13 +205,6 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     {
         foreach (int c in frame) if (c < 0 || c >= AudioCard) return false;
         return true;
-    }
-
-    private static int ArgMaxRow(float* row, int n)
-    {
-        int best = 0; float bv = row[0];
-        for (int i = 1; i < n; i++) if (row[i] > bv) { bv = row[i]; best = i; }
-        return best;
     }
 
     private static Tensor Row(Tensor table, int row)

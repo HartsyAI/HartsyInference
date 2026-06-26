@@ -9,8 +9,11 @@ namespace HartsyInference.ModelHandler.Gguf;
 /// <para><b>Discovery</b>: Mappers self-register at static-ctor time of <see cref="GgufKeyMapperRegistry"/>. To add a new architecture, drop a new file in <c>Gguf/KeyMappers/</c>, implement this interface, and add a <c>Register</c> call in the registry. No other files need changes.</para></summary>
 public interface IGgufKeyMapper
 {
-    /// <summary>The <c>general.architecture</c> metadata value this mapper handles. Lower-case (matching ggml convention). Examples: <c>"flux"</c>, <c>"sd3"</c>, <c>"sdxl"</c>, <c>"sd15"</c>, <c>"flite"</c>, <c>"chroma"</c>, <c>"auraflow"</c>, <c>"zimage"</c>.</summary>
+    /// <summary>The <c>general.architecture</c> metadata value this mapper handles. Lower-case (matching ggml convention). Examples: <c>"flux"</c>, <c>"sd3"</c>, <c>"sdxl"</c>, <c>"sd15"</c>, <c>"flite"</c>, <c>"chroma"</c>, <c>"auraflow"</c>, <c>"zimage"</c>. This is also the mapper's canonical display name.</summary>
     string Architecture { get; }
+
+    /// <summary>Every <c>general.architecture</c> value this mapper handles, when one mapper covers a whole family that shares an identical GGUF tensor-naming dialect (e.g. llama.cpp emits the same <c>blk.N.attn_q.*</c> dialect for <c>llama</c>, <c>qwen2</c> and <c>qwen3</c> dense decoders). Defaults to just <see cref="Architecture"/>. Declaring the family here makes <see cref="GgufKeyMapperRegistry.GetByArchitecture"/> resolve every member directly instead of relying on the key-heuristic fallback.</summary>
+    IReadOnlyCollection<string> Architectures => [Architecture];
 
     /// <summary>Heuristic fallback when GGUF metadata doesn't set <c>general.architecture</c> (some city96 dumps don't). Matches against tensor-name patterns. Return true if this mapper recognizes the file from its keys alone.</summary>
     bool MatchesByKeys(IEnumerable<string> tensorNames);

@@ -53,13 +53,29 @@ public sealed unsafe class GenericTransformer : IDisposable
         return t.CastTo(DType.F32);
     }
 
+    /// <summary>Loads an RMSNorm weight to F32, optionally baking Gemma's <c>(1 + weight)</c> offset into a
+    /// fresh tensor (so the runtime norm op is the standard one and no borrowed GGUF mmap / cached weight is
+    /// mutated in place).</summary>
+    private static Tensor LoadNorm(Tensor t, bool addOne)
+    {
+        Tensor f = EnsureF32(t);
+        if (!addOne) return f;
+        Tensor outp = new(f.Shape, DType.F32);
+        long n = f.ElementCount;
+        float* src = (float*)f.DataPointer;
+        float* dst = (float*)outp.DataPointer;
+        for (long i = 0; i < n; i++) dst[i] = src[i] + 1f;
+        if (!ReferenceEquals(f, t)) f.Dispose();   // free the transient cast/dequant
+        return outp;
+    }
+
     /// <summary>Loads weights from an HF-style key dict. <paramref name="prefix"/> is everything up to (not
     /// including) <c>embed_tokens</c> (e.g. <c>"model"</c> for a standalone checkpoint).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string? lmHeadKey = null)
     {
         ThrowIfDisposed();
         _embed = EnsureF32(w[$"{prefix}.embed_tokens.weight"]);
-        _finalNorm = EnsureF32(w[$"{prefix}.norm.weight"]);
+        _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
         // lm_head stays in its loaded dtype (quant kept for the dequant/fused matmul path); the matmul backend
         // handles quantized weights. Only the embed table is forced to F32 (host gather).
@@ -73,7 +89,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     public void LoadWeightsHeadless(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         ThrowIfDisposed();
-        _finalNorm = EnsureF32(w[$"{prefix}.norm.weight"]);
+        _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
@@ -115,9 +131,18 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         int d = _cfg.HeadDim;
 
+        // Global RoPE table (all layers when single-base; the full-attention layers under Gemma-3 dual-RoPE).
         Tensor cos = new(new TensorShape(1, t, d), DType.F32);
         Tensor sin = new(new TensorShape(1, t, d), DType.F32);
         BuildRope(cos, sin, t, posStart, d, _cfg.RopeTheta, _cfg.RopeScaling);
+        // Gemma-3 dual-RoPE: local (sliding-window) layers use a smaller base frequency. Built once, reused.
+        Tensor? cosLocal = null, sinLocal = null;
+        if (_cfg.RopeLocalTheta > 0)
+        {
+            cosLocal = new(new TensorShape(1, t, d), DType.F32);
+            sinLocal = new(new TensorShape(1, t, d), DType.F32);
+            BuildRope(cosLocal, sinLocal, t, posStart, d, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+        }
 
         try
         {
@@ -125,7 +150,10 @@ public sealed unsafe class GenericTransformer : IDisposable
             bool ownsHidden = false;
             for (int i = startLayer; i < last; i++)
             {
-                Tensor next = _layers[i].Forward(backend, hidden, t, posStart, cache, i, cos, sin);
+                bool global = _cfg.IsGlobalLayer(i);
+                Tensor lc = global ? cos : cosLocal ?? cos;
+                Tensor ls = global ? sin : sinLocal ?? sin;
+                Tensor next = _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls);
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
@@ -152,6 +180,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             cos.Dispose();
             sin.Dispose();
+            cosLocal?.Dispose();
+            sinLocal?.Dispose();
         }
     }
 
@@ -172,13 +202,23 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor cos = new(new TensorShape(1, b, d), DType.F32);
         Tensor sin = new(new TensorShape(1, b, d), DType.F32);
         BuildRopeBatched(cos, sin, positions, d, _cfg.RopeTheta, _cfg.RopeScaling);
+        Tensor? cosLocal = null, sinLocal = null;
+        if (_cfg.RopeLocalTheta > 0)
+        {
+            cosLocal = new(new TensorShape(1, b, d), DType.F32);
+            sinLocal = new(new TensorShape(1, b, d), DType.F32);
+            BuildRopeBatched(cosLocal, sinLocal, positions, d, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+        }
         try
         {
             Tensor hidden = embeds;
             bool ownsHidden = false;
             for (int i = 0; i < _layers.Length; i++)
             {
-                Tensor next = _layers[i].ForwardBatchDecode(backend, hidden, b, positions, cos, sin, caches, i);
+                bool global = _cfg.IsGlobalLayer(i);
+                Tensor lc = global ? cos : cosLocal ?? cos;
+                Tensor ls = global ? sin : sinLocal ?? sin;
+                Tensor next = _layers[i].ForwardBatchDecode(backend, hidden, b, positions, lc, ls, caches, i);
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
@@ -194,6 +234,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             cos.Dispose();
             sin.Dispose();
+            cosLocal?.Dispose();
+            sinLocal?.Dispose();
         }
     }
 
@@ -229,6 +271,14 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor headW = _lmHead ?? _embed ?? throw new InvalidOperationException("weights not loaded.");
         Tensor logits = new(new TensorShape(1, t, _cfg.VocabSize), DType.F32);
         Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
+        // Gemma-2 final-logit soft-cap: cap·tanh(logit/cap), elementwise in place.
+        if (_cfg.FinalLogitSoftcap > 0f)
+        {
+            float cap = _cfg.FinalLogitSoftcap;
+            backend.Scale(logits, logits, 1f / cap);
+            backend.Tanh(logits, logits);
+            backend.Scale(logits, logits, cap);
+        }
         return logits;
     }
 
@@ -245,6 +295,13 @@ public sealed unsafe class GenericTransformer : IDisposable
             if ((uint)id >= (uint)_cfg.VocabSize)
                 throw new ArgumentException($"token id {id} out of range [0, {_cfg.VocabSize}).");
             Buffer.MemoryCopy(ep + (long)id * h, op + (long)s * h, h * 4, h * 4);
+        }
+        // Gemma scales token embeddings by sqrt(hidden) (the embedding normalizer); 1.0 for Qwen/Llama.
+        if (_cfg.EmbeddingScale != 1f)
+        {
+            float scale = _cfg.EmbeddingScale;
+            long total = (long)tokenIds.Length * h;
+            for (long i = 0; i < total; i++) op[i] *= scale;
         }
     }
 
@@ -289,7 +346,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     private sealed class Layer
     {
         private readonly TransformerConfig _cfg;
-        private Tensor? _inNorm, _postNorm;
+        private Tensor? _inNorm, _postNorm;       // pre-attn norm; pre-MLP norm (Gemma: pre_feedforward)
+        private Tensor? _postAttnNorm, _postFfnNorm;   // Gemma sandwich norms (post-attn / post-FFN, pre-residual)
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW;
         private Tensor? _qNorm, _kNorm;
         private Tensor? _gateW, _upW, _downW;
@@ -301,8 +359,20 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             // Norms and biases are forced to F32; projection weights keep their loaded dtype (quant or float)
             // so the matmul backend can dequant-on-the-fly (or run a fused quantized GEMV) without an F32 copy.
-            _inNorm = EnsureF32(w[$"{prefix}.input_layernorm.weight"]);
-            _postNorm = EnsureF32(w[$"{prefix}.post_attention_layernorm.weight"]);
+            bool addOne = _cfg.RmsNormAddOne;
+            _inNorm = LoadNorm(w[$"{prefix}.input_layernorm.weight"], addOne);
+            if (_cfg.SandwichNorm)
+            {
+                // Gemma layout: input → attn → post_attention_layernorm → +res → pre_feedforward_layernorm →
+                // mlp → post_feedforward_layernorm → +res. The pre-MLP norm reuses the _postNorm slot.
+                _postAttnNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
+                _postNorm = LoadNorm(w[$"{prefix}.pre_feedforward_layernorm.weight"], addOne);
+                _postFfnNorm = LoadNorm(w[$"{prefix}.post_feedforward_layernorm.weight"], addOne);
+            }
+            else
+            {
+                _postNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
+            }
             _qW = w[$"{prefix}.self_attn.q_proj.weight"];
             _kW = w[$"{prefix}.self_attn.k_proj.weight"];
             _vW = w[$"{prefix}.self_attn.v_proj.weight"];
@@ -315,8 +385,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             if (_cfg.QkNorm)
             {
-                _qNorm = EnsureF32(w[$"{prefix}.self_attn.q_norm.weight"]);
-                _kNorm = EnsureF32(w[$"{prefix}.self_attn.k_norm.weight"]);
+                _qNorm = LoadNorm(w[$"{prefix}.self_attn.q_norm.weight"], _cfg.RmsNormAddOne);
+                _kNorm = LoadNorm(w[$"{prefix}.self_attn.k_norm.weight"], _cfg.RmsNormAddOne);
             }
             if (_cfg.IsMoeLayer(layerIndex))
             {
@@ -345,7 +415,8 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor gate = new(ff, DType.F32);
             Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
             Tensor gateAct = new(ff, DType.F32);
-            backend.Silu(gateAct, gate);
+            if (_cfg.Activation == ActivationKind.GeluTanh) backend.Gelu(gateAct, gate);   // Gemma GeGLU
+            else backend.Silu(gateAct, gate);                                              // SwiGLU
             gate.Dispose();
             Tensor up = new(ff, DType.F32);
             Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
@@ -361,7 +432,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _gateW, _upW, _downW];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
         }
@@ -430,9 +501,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             // kFull/vFull may be a fixed-capacity buffer whose seq stride exceeds the valid length, so pass the
             // valid key count (posStart + t) explicitly; the kernel reads the stride from the tensor shape.
             int kvLen = posStart + t;
-            float scale = 1f / MathF.Sqrt(d);
+            float scale = _cfg.AttnScale;
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale);
+            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap);
             qMh.Dispose();
 
             Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
@@ -442,6 +513,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             Project(backend, attnOut, attnFlat, _oW!, null, _cfg.LowVramQuant);
             attnFlat.Dispose();
 
+            attnOut = ApplySandwich(backend, attnOut, _postAttnNorm, flat);   // Gemma post-attn norm (pre-residual)
             Tensor afterAttn = new(flat, DType.F32);
             backend.Add(afterAttn, hidden, attnOut);
             attnOut.Dispose();
@@ -450,10 +522,22 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
             Tensor mlpOut = Mlp(backend, preMlp, t);
 
+            mlpOut = ApplySandwich(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
             afterAttn.Dispose(); mlpOut.Dispose();
             return result;
+        }
+
+        /// <summary>Gemma sandwich norm: when <paramref name="norm"/> is set, RMSNorms <paramref name="x"/>
+        /// (disposing it) and returns the normed tensor; otherwise returns <paramref name="x"/> unchanged.</summary>
+        private Tensor ApplySandwich(IBackend backend, Tensor x, Tensor? norm, TensorShape shape)
+        {
+            if (norm is null) return x;
+            Tensor normed = new(shape, DType.F32);
+            backend.RmsNorm(normed, x, norm, _cfg.RmsNormEps);
+            x.Dispose();
+            return normed;
         }
 
         /// <summary>Batched decode (one token per sequence): projections/MLP run as a single GEMM over all B
@@ -502,7 +586,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 backend.ApplyRopeSingle(k, cos, sin);
             }
 
-            float scale = 1f / MathF.Sqrt(d);
+            float scale = _cfg.AttnScale;
             Tensor[] segs = new Tensor[b];
             for (int s = 0; s < b; s++)
             {
@@ -522,7 +606,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 int kvLen = cache.CurrentLength + 1;   // append did not advance; +1 for the just-written token
                 Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
                 backend.FlashAttention(attnSeg, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
-                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale);
+                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap);
                 qMh.Dispose();
                 segs[s] = attnSeg;
             }
@@ -535,6 +619,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             Project(backend, attnOut, attnConcat, _oW!, null, _cfg.LowVramQuant);
             attnConcat.Dispose();
 
+            attnOut = ApplySandwich(backend, attnOut, _postAttnNorm, flat);
             Tensor afterAttn = new(flat, DType.F32);
             backend.Add(afterAttn, hidden, attnOut);
             attnOut.Dispose();
@@ -543,6 +628,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
             Tensor mlpOut = Mlp(backend, preMlp, b);
 
+            mlpOut = ApplySandwich(backend, mlpOut, _postFfnNorm, flat);
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
             afterAttn.Dispose(); mlpOut.Dispose();

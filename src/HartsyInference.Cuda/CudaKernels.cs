@@ -62,6 +62,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmKvAppendF32;
     private readonly nint _lmGatherRowsF32;
     private readonly nint _lmScatterAddWeightedRowsF32;
+    private readonly nint _lmArgMaxLastDimF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
 
@@ -331,6 +332,7 @@ public sealed class CudaKernels : IDisposable
         _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
         _lmGatherRowsF32 = _lmF32Module.GetFunction("lm_gather_rows_f32");
         _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
+        _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
         _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
 
@@ -1163,24 +1165,28 @@ public sealed class CudaKernels : IDisposable
     /// headDim floats). <paramref name="lk"/> is the K/V buffer seq stride; <paramref name="kvLen"/> the valid
     /// key count.</summary>
     public unsafe void LaunchFlashAttention(ulong outPtr, ulong q, ulong k, ulong v,
-        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, nint stream)
+        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap, nint stream)
     {
         ulong outArg = outPtr, qArg = q, kArg = k, vArg = v;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
         int causalArg = causal ? 1 : 0, offArg = qOffset;
-        float scaleArg = scale;
+        float scaleArg = scale, softcapArg = softcap;
 
-        void** args = stackalloc void*[15];
+        void** args = stackalloc void*[16];
         args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
         args[4] = &bArg; args[5] = &hqArg; args[6] = &tqArg; args[7] = &dArg;
         args[8] = &hkvArg; args[9] = &lkArg; args[10] = &kvLenArg; args[11] = &grpArg;
-        args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg;
+        args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg; args[15] = &softcapArg;
 
+        // Block threads = next power of two >= headDim, so the kernel's tree reduction is always power-of-two
+        // and non-pow2 head dims (e.g. Phi-3's 96) work; padding threads contribute 0.
+        uint blockThreads = 1;
+        while (blockThreads < (uint)headDim) blockThreads <<= 1;
         uint gridDim = (uint)((long)batch * hq * tq);
-        uint sharedBytes = (uint)(headDim * sizeof(float));
+        uint sharedBytes = blockThreads * sizeof(float);
         CudaDriverApi.cuLaunchKernel(
-            _flashAttnF32, gridDim, 1, 1, (uint)headDim, 1, 1,
+            _flashAttnF32, gridDim, 1, 1, blockThreads, 1, 1,
             sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -1222,6 +1228,19 @@ public sealed class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &inArg; args[2] = &idxArg; args[3] = &scaleArg; args[4] = &kArg; args[5] = &totalArg;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmScatterAddWeightedRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches per-row argmax over the last dim: indices[r] = argmax_c input[r,c]. One block per row,
+    /// <paramref name="blockThreads"/> threads (power-of-two), shared mem for the (value,index) reduction.</summary>
+    public unsafe void LaunchArgMaxLastDim(ulong idxPtr, ulong inPtr, int rows, int c, nint stream)
+    {
+        ulong outArg = idxPtr, inArg = inPtr;
+        uint cArg = (uint)c;
+        void** args = stackalloc void*[3];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &cArg;
+        uint blockThreads = BlockSize;   // 256, power of two; threads beyond C just hold -FLT_MAX sentinels
+        uint sharedBytes = blockThreads * (uint)(sizeof(float) + sizeof(int));
+        CudaDriverApi.cuLaunchKernel(_lmArgMaxLastDimF32, (uint)rows, 1, 1, blockThreads, 1, 1, sharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches gated residual over the last dim: out[b,s,d] = residual[b,s,d] + gate[b,d]*value[b,s,d].</summary>

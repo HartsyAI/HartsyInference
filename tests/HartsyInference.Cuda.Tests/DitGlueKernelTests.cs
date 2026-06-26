@@ -351,4 +351,57 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(slCpu, slCuda, 1e-6f, "SliceRows");
         AssertClose(z, slCuda, 1e-6f, "SliceRows-recovers-z");
     }
+
+    [Fact]
+    public void ArgMaxLastDim_Cpu_Vs_Cuda()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+
+        // Cover the Kyutai shapes (text head C=8000, depformer C=2048) plus small / tie cases.
+        foreach ((int rows, int c) in new[] { (1, 8000), (1, 2048), (4, 2048), (3, 17), (1, 1), (2, 257) })
+        {
+            using Tensor input = Random(new TensorShape(rows, c), seed: 700 + c);
+            using Tensor cpuIdx = new Tensor(new TensorShape(rows), DType.I32);
+            using Tensor cudaIdx = new Tensor(new TensorShape(rows), DType.I32);
+
+            IBackend cpu = new CpuBackend();
+            cpu.ArgMaxLastDim(cpuIdx, input);
+            cpu.Dispose();
+
+            // I32 output: force the device→host sync by reading the int buffer while the context is alive.
+            using (CudaBackend cuda = new CudaBackend(0, PtxDir()))
+            {
+                cuda.ArgMaxLastDim(cudaIdx, input);
+                cuda.Sync();
+                _ = *(int*)cudaIdx.DataPointer;
+            }
+
+            int* a = (int*)cpuIdx.DataPointer;
+            int* b = (int*)cudaIdx.DataPointer;
+            for (int r = 0; r < rows; r++)
+                Assert.True(a[r] == b[r], $"ArgMaxLastDim[{rows}x{c}] row {r}: cpu={a[r]} cuda={b[r]}");
+            _output.WriteLine($"ArgMaxLastDim[{rows}x{c}]: matched ({rows} rows).");
+        }
+
+        // Explicit tie: lowest index must win on both backends.
+        using (Tensor tie = new Tensor(new TensorShape(1, 8), DType.F32))
+        {
+            float* p = (float*)tie.DataPointer;
+            for (int i = 0; i < 8; i++) p[i] = 0.5f;
+            p[3] = 0.9f; p[6] = 0.9f;   // tie at index 3 and 6 → expect 3
+            using Tensor cpuIdx = new Tensor(new TensorShape(1), DType.I32);
+            using Tensor cudaIdx = new Tensor(new TensorShape(1), DType.I32);
+            IBackend cpu = new CpuBackend();
+            cpu.ArgMaxLastDim(cpuIdx, tie);
+            cpu.Dispose();
+            using (CudaBackend cuda = new CudaBackend(0, PtxDir()))
+            {
+                cuda.ArgMaxLastDim(cudaIdx, tie);
+                cuda.Sync();
+                _ = *(int*)cudaIdx.DataPointer;
+            }
+            Assert.Equal(3, ((int*)cpuIdx.DataPointer)[0]);
+            Assert.Equal(3, ((int*)cudaIdx.DataPointer)[0]);
+        }
+    }
 }

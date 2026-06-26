@@ -41,6 +41,9 @@ internal sealed class EspeakStress
     private readonly int _unstressedWd1;
     private readonly int _unstressedWd2;
 
+    /// <summary>The language stress flags, consulted by the phoneme-list reduction pass.</summary>
+    public int StressFlags => _stressFlags;
+
     public EspeakStress(EspeakPhonemeTable phonemeTable, int stressRule = 2, int stressFlags = 0, int unstressedWd1 = 1, int unstressedWd2 = 3)
     {
         _phon = phonemeTable;

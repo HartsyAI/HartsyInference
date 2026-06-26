@@ -60,6 +60,19 @@ public sealed class JinjaAndTokenizerTests
     }
 
     [Fact]
+    public void Jinja_StringLiteralContainingBraces_NotMistakenForCloseTag()
+    {
+        // Regression: Qwen2/2.5/3 tool-call templates embed '{{' and '}}' inside a quoted string literal.
+        // The lexer must skip string literals when scanning for the block-closing '}}' / '%}', otherwise it
+        // truncates the expression mid-string → "Unterminated string in Jinja expr". (JinjaEngine.cs Lexer)
+        const string tmpl =
+            "{{- \"<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call>\" }}";
+        JinjaEngine engine = new(tmpl);
+        string outp = engine.Render(new Dictionary<string, object?>());
+        Assert.Equal("<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>", outp);
+    }
+
+    [Fact]
     public void Jinja_CommentsAndSlice()
     {
         JinjaEngine engine = new("{# header #}{% for m in messages[1:] %}{{ m['content'] }}{% endfor %}");

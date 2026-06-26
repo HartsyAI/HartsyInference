@@ -54,7 +54,7 @@ public sealed class JinjaEngine
                 if (c == '#') // comment {# ... #} — strip entirely (honoring whitespace-control)
                 {
                     if (open > i) segs.Add(new Seg(SegKind.Text, t[i..open], false, false));
-                    int cc = t.IndexOf("#}", open + 2, StringComparison.Ordinal);
+                    int cc = FindClose(t, open + 2, "#}");
                     if (cc < 0) throw new FormatException($"Unclosed Jinja comment at {open}.");
                     string cInner = t[(open + 2)..cc];
                     // Emit a no-op stmt segment carrying only whitespace-control so adjacent text trims apply.
@@ -69,7 +69,7 @@ public sealed class JinjaEngine
                 }
                 if (open > i) segs.Add(new Seg(SegKind.Text, t[i..open], false, false));
                 string closeTok = c == '{' ? "}}" : "%}";
-                int close = t.IndexOf(closeTok, open + 2, StringComparison.Ordinal);
+                int close = FindClose(t, open + 2, closeTok);
                 if (close < 0) throw new FormatException($"Unclosed Jinja tag at {open}.");
                 string inner = t[(open + 2)..close];
                 bool trimL = inner.StartsWith('-');
@@ -88,6 +88,28 @@ public sealed class JinjaEngine
                     segs[k + 1] = segs[k + 1] with { Value = segs[k + 1].Value.TrimStart() };
             }
             return segs;
+        }
+
+        /// <summary>Finds the block-closing token (<c>}}</c>, <c>%}</c> or <c>#}</c>) starting at <paramref name="start"/>,
+        /// skipping over any single- or double-quoted string literals so a close token embedded inside a string
+        /// (e.g. Qwen's tool-call template, which contains <c>}}</c> inside a quoted example) is not mistaken for
+        /// the real block end. Honors backslash escapes inside strings. Returns the index of the token, or -1.</summary>
+        private static int FindClose(string t, int start, string closeTok)
+        {
+            char quote = '\0';
+            for (int p = start; p < t.Length; p++)
+            {
+                char ch = t[p];
+                if (quote != '\0') // inside a string literal
+                {
+                    if (ch == '\\') { p++; continue; } // skip escaped char
+                    if (ch == quote) quote = '\0';
+                    continue;
+                }
+                if (ch == '\'' || ch == '"') { quote = ch; continue; }
+                if (ch == closeTok[0] && p + 1 < t.Length && t[p + 1] == closeTok[1]) return p;
+            }
+            return -1;
         }
     }
 

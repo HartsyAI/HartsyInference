@@ -15,8 +15,11 @@ namespace HartsyInference.Audio.Models.Kyutai;
 /// stored as <c>alpha</c> (eps 1e-5). A final <c>out_norm</c> RMSNorm precedes the text head.
 ///
 /// <para>Validated numerically against the real <c>kyutai/tts-1.6b-en_fr</c> backbone (see
-/// <c>KyutaiBackboneParityTests</c>). TODO(gpu-residency): the head-split / weight-slice helpers below loop on
-/// host pointers; fold them into backend kernels so a CUDA run stays device-resident.</para></summary>
+/// <c>KyutaiBackboneParityTests</c>). Generation uses <see cref="StepForward"/> (one token at a time through a
+/// <c>FixedKvCache</c>); cross K/V are precomputed once via <see cref="PrecomputeCrossKv"/>. The remaining
+/// host-pointer helpers are not residency hot spots: <c>SliceRows</c>/<c>FlattenAlpha</c> run once at load time
+/// on host weights, and <c>SplitQkv</c>/<c>FlattenHeads</c> are single-row copies at the <c>t=1</c> step (the
+/// data is already contiguous in the right layout).</para></summary>
 public sealed unsafe class MoshiTransformer : IDisposable
 {
     public const int Dim = 2048, Heads = 16, HeadDim = 128, GateInner = 5632;

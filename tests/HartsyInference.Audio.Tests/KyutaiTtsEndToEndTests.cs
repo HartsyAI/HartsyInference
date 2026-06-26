@@ -108,5 +108,42 @@ public sealed unsafe class KyutaiTtsEndToEndTests
         (backend as IDisposable)?.Dispose();
     }
 
+    /// <summary>Validates the SEANet half of the Kyutai DSM Mimi loader (Blocker 3): the DSM checkpoint ships 1
+    /// residual block per stage (<c>ResidualDilations=[1]</c>) and has no LSTM, so the SEANet encoder/decoder
+    /// residual count AND the decoder sequential-index offset must match the checkpoint. Before the fix the
+    /// decoder looked for the upsample convtr at a block index and threw immediately; now the SEANet stack loads
+    /// and the only remaining gap is the transformer-of-codecs key layout (see note below). Gated on
+    /// <c>KYUTAI_MIMI</c>; runs in seconds.
+    ///
+    /// <para>NOTE: full decode additionally needs <c>MimiTransformer</c> reconciled to the DSM layout
+    /// (<c>encoder_transformer.transformer.layers.*</c> with LayerNorm <c>norm1/norm2</c>, fused
+    /// <c>self_attn.in_proj_weight</c>, <c>linear1/linear2</c> FFN, and <c>layer_scale_1/2</c>) — a separate
+    /// architecture change that needs its own numerical reference (none is dumped yet). When that lands, this
+    /// test should be promoted to assert finite decoded PCM.</para></summary>
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void DsmMimi_SeaNetLayout_Loads()
+    {
+        string? mp = Environment.GetEnvironmentVariable("KYUTAI_MIMI");
+        if (Missing(mp)) return;
+
+        using SafeTensorsLoader mimiW = new(); mimiW.Load(mp!);
+        Mimi mimi = new(MimiConfig.Mimi24kHzDsm);
+        try
+        {
+            mimi.LoadWeights(mimiW.GetAllTensors());
+            _out.WriteLine("DSM Mimi fully loaded (SEANet + transformer-of-codecs).");
+        }
+        catch (System.Collections.Generic.KeyNotFoundException e)
+        {
+            // The SEANet residual-count + decoder seqIdx fix must let loading get PAST SEANet; any remaining
+            // KeyNotFound must be in the transformer-of-codecs, NOT the encoder/decoder SEANet stack.
+            Assert.Contains("transformer", e.Message);
+            Assert.DoesNotContain("encoder.model", e.Message);
+            Assert.DoesNotContain("decoder.model", e.Message);
+            _out.WriteLine($"SEANet residual/seqIdx layout loads; transformer-of-codecs reconcile pending: {e.Message}");
+        }
+    }
+
     private static bool Missing(string? p) => string.IsNullOrEmpty(p) || !File.Exists(p);
 }

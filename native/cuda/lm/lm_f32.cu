@@ -100,4 +100,54 @@ __global__ void lm_scatter_add_weighted_rows_f32(
     output[(unsigned long long)rowIndices[m] * K + j] += scales[m] * input[i];
 }
 
+// ── Per-row argmax over the last dim ────────────────────────────────────────
+// indices[r] = argmax_c input[r, c]   (first max on ties, matching the CPU reference).
+// One block per row; each thread scans a strided slice, then a tree reduction keeps the
+// (value, index) pair with the lowest index on ties. Keeps greedy token sampling GPU-resident
+// so only the chosen index (one int per row) leaves the device, not the C-wide logit vector.
+// Launch: grid = rows, block = min(C, 256). Shared mem = blockDim.x * (sizeof(float)+sizeof(int)).
+__global__ void lm_argmax_lastdim_f32(
+    int* __restrict__ indices,
+    const float* __restrict__ input,
+    unsigned int C)
+{
+    extern __shared__ unsigned char smem[];
+    float* sVal = (float*)smem;
+    int* sIdx = (int*)(sVal + blockDim.x);
+
+    unsigned int row = blockIdx.x;
+    const float* in = input + (unsigned long long)row * C;
+
+    float bestVal = -3.402823466e38f;   // -FLT_MAX
+    int bestIdx = 0;
+    for (unsigned int c = threadIdx.x; c < C; c += blockDim.x)
+    {
+        float v = in[c];
+        if (v > bestVal) { bestVal = v; bestIdx = (int)c; }
+    }
+    sVal[threadIdx.x] = bestVal;
+    sIdx[threadIdx.x] = bestIdx;
+    __syncthreads();
+
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1)
+    {
+        if (threadIdx.x < stride)
+        {
+            float ov = sVal[threadIdx.x + stride];
+            int oi = sIdx[threadIdx.x + stride];
+            float cv = sVal[threadIdx.x];
+            int ci = sIdx[threadIdx.x];
+            // Take the larger value; on an exact tie take the smaller index (matches the CPU "first max").
+            // The lower index is NOT always the left partner after the strided scan, so compare indices explicitly.
+            if (ov > cv || (ov == cv && oi < ci))
+            {
+                sVal[threadIdx.x] = ov;
+                sIdx[threadIdx.x] = oi;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) indices[row] = sIdx[0];
+}
+
 } // extern "C"

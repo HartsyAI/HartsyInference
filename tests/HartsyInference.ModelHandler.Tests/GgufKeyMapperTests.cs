@@ -22,6 +22,49 @@ public sealed class GgufKeyMapperTests
     }
 
     [Fact]
+    public void GetByArchitecture_Qwen2AndQwen3ResolveToLlamaFamilyMapper()
+    {
+        // llama.cpp emits an identical tensor dialect for llama/qwen2/qwen3 dense decoders, so the one mapper
+        // declares all three. These must resolve by NAME (no key-heuristic fallback, no warning) and map the
+        // QKV bias that Qwen2 carries.
+        IGgufKeyMapper? llama = GgufKeyMapperRegistry.GetByArchitecture("llama");
+        IGgufKeyMapper? qwen2 = GgufKeyMapperRegistry.GetByArchitecture("qwen2");
+        IGgufKeyMapper? qwen3 = GgufKeyMapperRegistry.GetByArchitecture("qwen3");
+        Assert.NotNull(llama);
+        Assert.Same(llama, qwen2);
+        Assert.Same(llama, qwen3);
+        Assert.Equal("model.layers.0.self_attn.q_proj.bias", qwen2!.MapKey("blk.0.attn_q.bias"));
+    }
+
+    [Fact]
+    public void GetByArchitecture_GemmaFamilyResolvesToGemmaMapper_WithSandwichNormKeys()
+    {
+        IGgufKeyMapper? gemma = GgufKeyMapperRegistry.GetByArchitecture("gemma");
+        IGgufKeyMapper? gemma2 = GgufKeyMapperRegistry.GetByArchitecture("gemma2");
+        IGgufKeyMapper? gemma3 = GgufKeyMapperRegistry.GetByArchitecture("gemma3");
+        Assert.NotNull(gemma);
+        Assert.Same(gemma, gemma2);
+        Assert.Same(gemma, gemma3);
+        // Gemma's sandwich + Q/K norms map to the HF names the transformer loader expects.
+        Assert.Equal("model.layers.0.post_attention_layernorm.weight", gemma3!.MapKey("blk.0.post_attention_norm.weight"));
+        Assert.Equal("model.layers.0.pre_feedforward_layernorm.weight", gemma3.MapKey("blk.0.ffn_norm.weight"));
+        Assert.Equal("model.layers.0.post_feedforward_layernorm.weight", gemma3.MapKey("blk.0.post_ffw_norm.weight"));
+        Assert.Equal("model.layers.0.self_attn.q_norm.weight", gemma3.MapKey("blk.0.attn_q_norm.weight"));
+    }
+
+    [Fact]
+    public void GetByArchitecture_Phi3ResolvesToPhiMapper_WithFusedKeys()
+    {
+        IGgufKeyMapper? phi = GgufKeyMapperRegistry.GetByArchitecture("phi3");
+        Assert.NotNull(phi);
+        Assert.Equal("phi3", phi!.Architecture);
+        // Phi-3 fuses qkv and gate+up; the mapper routes them to fused names that the loader splits downstream.
+        Assert.Equal("model.layers.0.self_attn.qkv_proj.weight", phi.MapKey("blk.0.attn_qkv.weight"));
+        Assert.Equal("model.layers.0.mlp.gate_up_proj.weight", phi.MapKey("blk.0.ffn_up.weight"));
+        Assert.Equal("model.rope_factors_long.weight", phi.MapKey("rope_factors_long.weight"));
+    }
+
+    [Fact]
     public void GetByArchitecture_FluxReturnsFluxMapper()
     {
         IGgufKeyMapper? m = GgufKeyMapperRegistry.GetByArchitecture("flux");

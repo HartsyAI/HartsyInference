@@ -371,6 +371,31 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>Per-row argmax over the last dim: <c>indices[r] = argmax_c input[r, c]</c> (first max on ties).
+    /// <paramref name="input"/> is <c>[.., C]</c> (rows = product of the leading dims); <paramref name="indices"/>
+    /// is an I32 tensor of length rows. Keeps greedy sampling GPU-resident: the winning token is reduced on-device
+    /// so only the row's index (one int), not the full C-wide logit vector, needs to cross to the host.</summary>
+    unsafe void ArgMaxLastDim(Tensor indices, Tensor input)
+    {
+        if (input.DType != DType.F32)
+            throw new NotSupportedException("ArgMaxLastDim default fallback only supports F32.");
+        if (indices.DType != DType.I32)
+            throw new NotSupportedException("ArgMaxLastDim requires I32 indices.");
+        int c = (int)input.Shape[input.Shape.Rank - 1];
+        long rows = input.ElementCount / c;
+        if (indices.ElementCount < rows)
+            throw new ArgumentException($"ArgMaxLastDim indices length {indices.ElementCount} < rows {rows}.");
+        float* pIn = (float*)input.DataPointer;
+        int* pIdx = (int*)indices.DataPointer;
+        for (long r = 0; r < rows; r++)
+        {
+            float* row = pIn + r * c;
+            int best = 0; float bv = row[0];
+            for (int i = 1; i < c; i++) if (row[i] > bv) { bv = row[i]; best = i; }
+            pIdx[r] = best;
+        }
+    }
+
     /// <summary>Scatter rows after a zeroed head block: <c>output = [zeros(headRows), input]</c> along the row
     /// axis. Builds the conditional latent (text rows zeroed, image rows = current latent).</summary>
     unsafe void ScatterRowsAfter(Tensor output, Tensor input, int headRows)
@@ -420,55 +445,11 @@ public interface IBackend : IDisposable
     /// <paramref name="key"/>/<paramref name="value"/> are <c>[B, Hkv, Lk, D]</c>; <paramref name="output"/> is
     /// <c>[B, Hq, Tq, D]</c>. Query head <c>h</c> reads kv head <c>h / kvGroup</c>. When <paramref name="causal"/>,
     /// query row <c>r</c> (absolute position <c>qOffset + r</c>) attends keys <c>0 .. qOffset+r</c>; otherwise all
-    /// <c>Lk</c> keys. The CUDA backend overrides this with a kernel; the default is a correct CPU reference.</summary>
-    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale)
-    {
-        if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
-            throw new NotSupportedException("FlashAttention default fallback only supports F32.");
-        int b = (int)query.Shape[0];
-        int hq = (int)query.Shape[1];
-        int tq = (int)query.Shape[2];
-        int d = (int)query.Shape[3];
-        int hkv = (int)key.Shape[1];
-        int lk = (int)key.Shape[2];        // buffer seq stride (>= kvLen for a fixed-capacity cache)
-        int group = kvGroup <= 0 ? 1 : kvGroup;
-
-        float* qp = (float*)query.DataPointer;
-        float* kp = (float*)key.DataPointer;
-        float* vp = (float*)value.DataPointer;
-        float* op = (float*)output.DataPointer;
-        float* acc = stackalloc float[d];
-
-        for (int bi = 0; bi < b; bi++)
-            for (int h = 0; h < hq; h++)
-            {
-                int hkvIdx = h / group;
-                if (hkvIdx >= hkv) hkvIdx = hkv - 1;
-                for (int r = 0; r < tq; r++)
-                {
-                    long qBase = (((long)bi * hq + h) * tq + r) * d;
-                    int kMax = causal ? Math.Min(kvLen - 1, qOffset + r) : kvLen - 1;
-                    float m = float.NegativeInfinity, l = 0f;
-                    for (int x = 0; x < d; x++) acc[x] = 0f;
-                    for (int k = 0; k <= kMax; k++)
-                    {
-                        long kBase = (((long)bi * hkv + hkvIdx) * lk + k) * d;
-                        float score = 0f;
-                        for (int x = 0; x < d; x++) score += qp[qBase + x] * kp[kBase + x];
-                        score *= scale;
-                        float newM = MathF.Max(m, score);
-                        float corr = m == float.NegativeInfinity ? 0f : MathF.Exp(m - newM);
-                        float p = MathF.Exp(score - newM);
-                        l = l * corr + p;
-                        long vBase = (((long)bi * hkv + hkvIdx) * lk + k) * d;
-                        for (int x = 0; x < d; x++) acc[x] = acc[x] * corr + p * vp[vBase + x];
-                        m = newM;
-                    }
-                    float inv = l > 0f ? 1f / l : 0f;
-                    for (int x = 0; x < d; x++) op[qBase + x] = acc[x] * inv;
-                }
-            }
-    }
+    /// <c>Lk</c> keys. When <paramref name="softcap"/> &gt; 0, each logit is soft-capped via
+    /// <c>softcap·tanh(score/softcap)</c> before the softmax (Gemma-2 attention-logit soft-cap); 0 disables it.
+    /// The CUDA backend overrides this with a kernel; the default is a correct CPU reference.</summary>
+    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f)
+        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap);
 
     /// <summary>Gathers rows: <c>output[m] = input[rowIndices[m]]</c>, where a "row" is the last-dim-sized
     /// vector. <paramref name="output"/> is <c>[M, K]</c>, <paramref name="input"/> <c>[N, K]</c>,

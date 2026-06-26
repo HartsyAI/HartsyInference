@@ -92,13 +92,16 @@ public sealed class RopeScalingTests
     }
 
     [Fact]
-    public void InvFreqFactors_MultiplyBaseDirectly()
+    public void InvFreqFactors_DivideBase_MatchingGgmlFreqFactors()
     {
+        // GGUF rope_freqs.weight stores ggml "freq_factors": divisors (~1 on high frequencies rising to the
+        // rope-scaling factor, e.g. 32 on low ones for Llama-3.2). ggml applies theta = theta_base /
+        // freq_factor, so the builder must DIVIDE the base inv_freq by them (not multiply).
         float[] factors = new float[Dim / 2];
-        for (int i = 0; i < factors.Length; i++) factors[i] = 0.5f + i * 0.01f;
+        for (int i = 0; i < factors.Length; i++) factors[i] = i < 16 ? 1f : Math.Min(32f, 1f + (i - 15) * 4f);
         (double[] inv, _) = RopeFrequencyBuilder.Build(Dim, Theta, new RopeScaling { Type = RopeScalingType.Llama3, InvFreqFactors = factors }, 128);
         double[] expect = BaseInvFreq(Dim, Theta);
-        for (int i = 0; i < expect.Length; i++) expect[i] *= factors[i];
+        for (int i = 0; i < expect.Length; i++) expect[i] /= factors[i];
         AssertClose(inv, expect, 1e-6, "factors");
     }
 

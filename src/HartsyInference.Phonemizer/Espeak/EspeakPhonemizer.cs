@@ -17,8 +17,10 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakIpaMap _ipa;
     private readonly EspeakVoiceVariant _variant;
     private readonly byte _tCode, _tFlapCode;
+    private readonly EspeakPhonemeList? _plist;
+    private readonly EspeakPhonemeRenderer? _renderer;
 
-    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant)
+    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant, EspeakPhonemeIndex? index)
     {
         _lookup = lookup;
         _rules = rules;
@@ -28,6 +30,13 @@ public sealed class EspeakPhonemizer : IPhonemizer
         _variant = variant;
         _tCode = (byte)phon.CodeForMnemonic('t');                       // "t"
         _tFlapCode = (byte)phon.CodeForMnemonic('t' | ('#' << 8));      // "t#" flap allophone
+        if (index is not null)
+        {
+            // Exact allophone + IPA path: run espeak's phoneme-program VM over the clause phoneme list.
+            EspeakPhonemeInterpreter interp = new(phon, index);
+            _plist = new EspeakPhonemeList(phon, interp, stress.StressFlags);
+            _renderer = new EspeakPhonemeRenderer(interp);
+        }
     }
 
     /// <summary>Resolves the <c>espeak-ng-data</c> directory from the <c>ESPEAK_DATA_DIR</c> environment variable, then
@@ -66,13 +75,18 @@ public sealed class EspeakPhonemizer : IPhonemizer
             EspeakVoiceVariant variant = EspeakVoiceVariant.Resolve(dataDir, language);
             EspeakDictFile dict = EspeakDictFile.Load(Path.Combine(dataDir, $"{variant.DictName}_dict"));
             EspeakPhonemeTable phon = EspeakPhonemeTable.Load(Path.Combine(dataDir, "phontab"), variant.PhonemeTable);
+            string phonindex = Path.Combine(dataDir, "phonindex");
+            EspeakPhonemeIndex? index = File.Exists(phonindex) ? EspeakPhonemeIndex.Load(phonindex) : null;
             return new EspeakPhonemizer(
                 new EspeakWordLookup(dict, variant.DictCondition),
                 new EspeakTranslator(dict, phon, EspeakLetters.Latin(), variant.DictCondition),
-                new EspeakStress(phon),
+                // English language options (tr_languages.c L('e','n')): first-syllable stress, reduce consecutive
+                // unstressed vowels in unstressed words to diminished (stress_flags 0x08).
+                new EspeakStress(phon, stressRule: 0, stressFlags: 0x08),
                 phon,
                 EspeakIpaMap.Load(variant.PhonemeTable),
-                variant);
+                variant,
+                index);
         }
         catch (Exception ex) when (ex is not HartsyInferenceException)
         {
@@ -84,13 +98,19 @@ public sealed class EspeakPhonemizer : IPhonemizer
     /// <inheritdoc/>
     public string PhonemizeToIpa(string text, string language)
     {
-        List<string> wordIpa = new();
+        List<IReadOnlyList<byte>> words = new();
         foreach (string word in SplitWords(text))
+            words.Add(PhonemizeWord(word));
+
+        if (_plist is not null && _renderer is not null)
         {
-            List<byte> codes = PhonemizeWord(word);
-            wordIpa.Add(_ipa.ToIpa(codes, _phon));
+            // Exact path: build the clause phoneme list (allophones + reduction) and render via the phoneme programs.
+            List<EspeakPhonemeListEntry> list = _plist.Build(words);
+            return _renderer.Render(list);
         }
-        return string.Join(" ", wordIpa);
+
+        // Fallback: per-word mnemonic -> IPA map (used only when phonindex is unavailable).
+        return string.Join(" ", words.Select(c => _ipa.ToIpa((List<byte>)c, _phon)));
     }
 
     /// <inheritdoc/>
