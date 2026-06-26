@@ -15,14 +15,19 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakStress _stress;
     private readonly EspeakPhonemeTable _phon;
     private readonly EspeakIpaMap _ipa;
+    private readonly EspeakVoiceVariant _variant;
+    private readonly byte _tCode, _tFlapCode;
 
-    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakPhonemeTable phon, EspeakIpaMap ipa)
+    private EspeakPhonemizer(EspeakWordLookup lookup, EspeakTranslator rules, EspeakStress stress, EspeakPhonemeTable phon, EspeakIpaMap ipa, EspeakVoiceVariant variant)
     {
         _lookup = lookup;
         _rules = rules;
         _stress = stress;
         _phon = phon;
         _ipa = ipa;
+        _variant = variant;
+        _tCode = (byte)phon.CodeForMnemonic('t');                       // "t"
+        _tFlapCode = (byte)phon.CodeForMnemonic('t' | ('#' << 8));      // "t#" flap allophone
     }
 
     /// <summary>Resolves the <c>espeak-ng-data</c> directory from the <c>ESPEAK_DATA_DIR</c> environment variable, then
@@ -58,15 +63,16 @@ public sealed class EspeakPhonemizer : IPhonemizer
     {
         try
         {
-            string dictName = LanguageToDict(language);
-            EspeakDictFile dict = EspeakDictFile.Load(Path.Combine(dataDir, dictName));
-            EspeakPhonemeTable phon = EspeakPhonemeTable.Load(Path.Combine(dataDir, "phontab"), PhonemeTableName(language));
+            EspeakVoiceVariant variant = EspeakVoiceVariant.Resolve(dataDir, language);
+            EspeakDictFile dict = EspeakDictFile.Load(Path.Combine(dataDir, $"{variant.DictName}_dict"));
+            EspeakPhonemeTable phon = EspeakPhonemeTable.Load(Path.Combine(dataDir, "phontab"), variant.PhonemeTable);
             return new EspeakPhonemizer(
-                new EspeakWordLookup(dict),
-                new EspeakTranslator(dict, phon, EspeakLetters.Latin()),
+                new EspeakWordLookup(dict, variant.DictCondition),
+                new EspeakTranslator(dict, phon, EspeakLetters.Latin(), variant.DictCondition),
                 new EspeakStress(phon),
                 phon,
-                EspeakIpaMap.Load());
+                EspeakIpaMap.Load(variant.PhonemeTable),
+                variant);
         }
         catch (Exception ex) when (ex is not HartsyInferenceException)
         {
@@ -134,8 +140,39 @@ public sealed class EspeakPhonemizer : IPhonemizer
                 codes = stemCodes;
             }
         }
-        return _stress.SetWordStress(codes, dflags, tonic: -1, control: 0);
+        List<byte> stressed = _stress.SetWordStress(codes, dflags, tonic: -1, control: 0);
+        if (_variant.ReduceT) ApplyFlapT(stressed);
+        return stressed;
     }
+
+    // American flap-t (option reduce_t): t -> t# (rendered ɾ) when it sits between a vowel and a following unstressed
+    // vowel. Unstressed vowels carry no preceding stress phoneme, so "next phoneme is directly a vowel" detects them.
+    private void ApplyFlapT(List<byte> codes)
+    {
+        if (_tCode == 0 || _tFlapCode == 0) return;
+        for (int i = 1; i < codes.Count - 1; i++)
+        {
+            if (codes[i] != _tCode) continue;
+            if (IsVowel(codes[i + 1]) && PrevIsVowel(codes, i))
+                codes[i] = _tFlapCode;
+        }
+    }
+
+    private bool PrevIsVowel(List<byte> codes, int i)
+    {
+        for (int j = i - 1; j >= 0; j--)
+        {
+            if (IsStress(codes[j])) continue;
+            return IsVowel(codes[j]);
+        }
+        return false;
+    }
+
+    private bool IsVowel(byte code)
+        => _phon.TryGet(code, out EspeakPhoneme ph) && ph.Type == EspeakPhoneme.TypeVowel
+           && (ph.PhFlags & EspeakPhoneme.FlagNonSyllabic) == 0;
+
+    private bool IsStress(byte code) => _phon.TryGet(code, out EspeakPhoneme ph) && ph.Type == EspeakPhoneme.TypeStress;
 
     private const int WordStart = 2;
 
@@ -176,16 +213,5 @@ public sealed class EspeakPhonemizer : IPhonemizer
             else
                 i++;
         }
-    }
-
-    private static string LanguageToDict(string language) => $"{PhonemeTableName(language)}_dict";
-
-    private static string PhonemeTableName(string language)
-    {
-        // espeak voice names map to dictionary/table names; English dialects share the 'en' data.
-        string lang = language.ToLowerInvariant();
-        if (lang.StartsWith("en", StringComparison.Ordinal)) return "en";
-        int dash = lang.IndexOf('-');
-        return dash > 0 ? lang[..dash] : lang;
     }
 }

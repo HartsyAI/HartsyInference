@@ -105,3 +105,4 @@ appsettings.*.json
 ## Caches anywhere in the tree (runtime cuda-libs, hf hub, etc.)
 .cache/
 /.claude/
+*.log

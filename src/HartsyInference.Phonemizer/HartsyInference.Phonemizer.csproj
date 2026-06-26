@@ -20,6 +20,10 @@
        over an 8k-word corpus. Lets the phonemizer emit the IPA the TTS models were trained on. -->
   <ItemGroup>
     <EmbeddedResource Include="Resources\ipa_phoneme_map.tsv" LogicalName="HartsyInference.Phonemizer.Resources.ipa_phoneme_map.tsv" />
+    <!-- WithCulture=false: the ".en"/".en-us" infixes look like culture codes, which MSBuild would otherwise treat as
+         satellite resources instead of embedding them in the main assembly. -->
+    <EmbeddedResource Include="Resources\ipa_phoneme_map.en.tsv" WithCulture="false" LogicalName="HartsyInference.Phonemizer.Resources.ipa_phoneme_map.en.tsv" />
+    <EmbeddedResource Include="Resources\ipa_phoneme_map.en-us.tsv" WithCulture="false" LogicalName="HartsyInference.Phonemizer.Resources.ipa_phoneme_map.en-us.tsv" />
   </ItemGroup>
 
 </Project>

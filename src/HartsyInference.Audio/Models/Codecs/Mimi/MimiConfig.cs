@@ -52,7 +52,11 @@ public sealed record MimiConfig
     public static MimiConfig Mimi24kHz => new();
 
     /// <summary>Mimi preset for the Kyutai delayed-streams models (STT / TTS), which set
-    /// <c>num_quantizers=32</c> (1 semantic + 31 acoustic) vs the published 8-codebook Mimi. ⚠️ The 32-vs-8
-    /// codebook count is config-authoritative but should be confirmed against a reference run.</summary>
-    public static MimiConfig Mimi24kHzDsm => new() { AcousticCodebooks = 31 };
+    /// <c>num_quantizers=32</c> (1 semantic + 31 acoustic) vs the published 8-codebook Mimi. The DSM Mimi
+    /// checkpoint ships <b>one</b> SEANet residual block per stage (<c>n_residual_layers=1</c>), so
+    /// <see cref="ResidualDilations"/> is <c>[1]</c> here (a single block, dilation 1) — not the
+    /// <c>[1, 1]</c> default. <c>NResidualLayers = ResidualDilations.Count</c> (see <c>Mimi.LiftToEnCodec</c>),
+    /// so the default would request a second block's weight keys that don't exist in the checkpoint.
+    /// ⚠️ The 32-vs-8 codebook count is config-authoritative but should be confirmed against a reference run.</summary>
+    public static MimiConfig Mimi24kHzDsm => new() { AcousticCodebooks = 31, ResidualDilations = [1] };
 }

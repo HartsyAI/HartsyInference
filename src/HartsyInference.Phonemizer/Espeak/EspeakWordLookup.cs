@@ -32,11 +32,11 @@ internal sealed class EspeakWordLookup
     private readonly byte[] _data;
     private int _dictCondition;
 
-    public EspeakWordLookup(EspeakDictFile dict)
+    public EspeakWordLookup(EspeakDictFile dict, int dictCondition = 0)
     {
         _dict = dict;
         _data = dict.Data;
-        _dictCondition = 0;
+        _dictCondition = dictCondition;
     }
 
     /// <summary>Looks up <paramref name="word"/> (already lowercased, no surrounding spaces). On a hit, returns true
@@ -124,7 +124,13 @@ internal sealed class EspeakWordLookup
     }
 
     // Port of TransposeAlphabet for Latin languages (no frequent-pair compression): transpose then pack 6 bits/char.
-    // Returns the key bytes (null-terminated) and wlen (compressed length | 0x40 when packed, else plain strlen).
+    // Returns the lookup buffer and wlen (compressed length | 0x40 when packed, else plain strlen).
+    //
+    // IMPORTANT (espeak fidelity): espeak compresses the word IN PLACE and copies the compressed bytes back WITHOUT a
+    // null terminator, so the buffer keeps the tail of the original (longer) word. HashDictionary then hashes
+    // "compressed prefix + original tail" (up to the original null), while the entry match uses only the compressed
+    // bytes. We replicate that exactly: the returned buffer is [compressed prefix][original tail][0]; the caller hashes
+    // the whole thing but matches only the first `wlen & 0x3f` bytes.
     private static byte[] TransposeAlphabet(string word, out int wlen)
     {
         Span<byte> buf = stackalloc byte[EspeakRuleCodes.WordBytes];
@@ -155,8 +161,12 @@ internal sealed class EspeakWordLookup
             }
             if (bits > 0)
                 outBuf[o++] = (byte)(acc << (8 - bits));
-            byte[] key = new byte[o + 1];
+
+            // [compressed o bytes][leftover original word bytes from o..len][0]
+            byte[] key = new byte[word.Length + 1];
             outBuf[..o].CopyTo(key);
+            for (int i = o; i < word.Length; i++)
+                key[i] = (byte)word[i];
             wlen = o | 0x40;
             return key;
         }

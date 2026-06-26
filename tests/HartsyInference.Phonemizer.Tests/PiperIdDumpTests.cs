@@ -15,7 +15,13 @@ public sealed class PiperIdDumpTests
         string? cfg = Environment.GetEnvironmentVariable("PIPER_CFG");
         if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(cfg) || !File.Exists(cfg)) return;
 
-        EspeakPhonemizer phon = EspeakPhonemizer.FromDataDirectory(dir, "en");
+        System.Reflection.Assembly asm = typeof(EspeakPhonemizer).Assembly;
+        File.WriteAllText("/tmp/cs_resources.txt", string.Join("\n", asm.GetManifestResourceNames().Where(n => n.Contains("ipa"))));
+
+        EspeakVoiceVariant v = EspeakVoiceVariant.Resolve(dir, "en-us");
+        File.WriteAllText("/tmp/cs_variant.txt", $"dict={v.DictName} table={v.PhonemeTable} cond=0x{v.DictCondition:x} reduceT={v.ReduceT} replaces={v.Replaces.Count}");
+
+        EspeakPhonemizer phon = EspeakPhonemizer.FromDataDirectory(dir, "en-us");
         using FileStream fs = File.OpenRead(cfg);
         PhonemeIdMap idMap = PhonemeIdMap.FromPiperConfig(fs);
 

@@ -54,6 +54,18 @@ internal sealed unsafe class SeaNetBlock
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
+        // Fail fast with a self-explaining message when the residual block this object was
+        // constructed for is absent from the checkpoint. This is the common per-checkpoint
+        // mismatch: NResidualLayers = ResidualDilations.Count over-counts the blocks (e.g. the
+        // Kyutai DSM Mimi ships 1 block/stage but the default config implies 2), so the loader
+        // would otherwise throw a bare KeyNotFoundException deep inside LoadFusedConvWeight.
+        string conv1 = $"{_prefix}.block.1.conv.conv";
+        if (!w.ContainsKey($"{conv1}.weight") && !w.ContainsKey($"{conv1}.weight_g"))
+            throw new InvalidOperationException(
+                $"SeaNet residual block '{_prefix}': expected conv key '{conv1}.weight[_g]' not found in the " +
+                $"checkpoint. The checkpoint likely has fewer residual blocks per stage than NResidualLayers=" +
+                $"{_cfg.NResidualLayers} (= ResidualDilations.Count). Reduce ResidualDilations on the config preset.");
+
         // PyTorch state-dict keys for the SEANet block convs follow the Sequential
         // index ordering, with the SConv1d wrapper adding ".conv.conv" to reach the
         // bare nn.Conv1d. Weight-norm: keys end with weight_g + weight_v (no fused

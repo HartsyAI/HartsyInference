@@ -22,15 +22,15 @@ internal sealed class EspeakTranslator
     private int _wordStressedCount;
     private bool _expectVerb;
 
-    public EspeakTranslator(EspeakDictFile dict, EspeakPhonemeTable phonemeTable, EspeakLetters letters)
+    public EspeakTranslator(EspeakDictFile dict, EspeakPhonemeTable phonemeTable, EspeakLetters letters, int dictCondition = 0)
     {
         _dict = dict;
         _phon = phonemeTable;
         _letters = letters;
         _data = dict.Data;
 
-        // Base/English language defaults. Non-Latin languages override these from their voice file when wired.
-        _dictCondition = 0;
+        // Variant rules (e.g. en-us) enable extra dictionary conditions; default English (en-gb) sets none.
+        _dictCondition = dictCondition;
         _toneNumbers = false;
         _loptSuffix = 0;
         _expectVerb = false;
