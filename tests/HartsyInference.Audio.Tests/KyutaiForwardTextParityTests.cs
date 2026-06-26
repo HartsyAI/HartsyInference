@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using HartsyInference.Audio.Models.Kyutai;
 using HartsyInference.Cpu;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.SafeTensors;
 using Xunit;
@@ -43,7 +44,7 @@ public sealed unsafe class KyutaiForwardTextParityTests
 
         using MoshiTtsGenerator gen = new();
         gen.LoadWeights(w);
-        using CpuBackend backend = new();
+        IBackend backend = Environment.GetEnvironmentVariable("GSV_CUDA")=="1" ? new HartsyInference.Cuda.CudaBackend(0, Environment.GetEnvironmentVariable("GSV_PTX")!) : new CpuBackend();
 
         List<Tensor> frames = new();
         for (int f = 0; f < t; f++)

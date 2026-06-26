@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Kyutai;
 
@@ -61,7 +62,11 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
         float* xp = (float*)x.DataPointer;
         for (int k = 0; k < NumCodebooks && k < audioCodes.Length; k++)
         {
-            float* row = (float*)_emb[k]!.DataPointer + (long)audioCodes[k] * Dim;
+            int code = audioCodes[k];
+            // moshi's ScaledEmbedding maps the zero token (-1) to a zero contribution (is_zero); the
+            // initial/special token (AudioCard=2048) is a real row. Anything < 0 must NOT index the table.
+            if (code == _zeroToken || code < 0) continue;
+            float* row = (float*)_emb[k]!.DataPointer + (long)code * Dim;
             for (int i = 0; i < Dim; i++) xp[i] += row[i];
         }
         return x;
@@ -88,6 +93,24 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
         return transformerOut;
     }
 
+    /// <summary>Streaming single-frame step (the O(n) replacement for <see cref="ForwardText"/> in the generation
+    /// loop): adds <paramref name="sumCond"/> to the frame embedding, runs the backbone's
+    /// <see cref="MoshiTransformer.StepForward"/> with the persistent <paramref name="selfCache"/> /
+    /// <paramref name="crossKv"/> at position <paramref name="pos"/>, and projects the single output row to the
+    /// text head. Returns the per-frame context <c>[1,1,2048]</c> (feed straight to the depformer);
+    /// <paramref name="textLogits"/> is <c>[1,1,8000]</c>.</summary>
+    public Tensor StepText(IBackend backend, Tensor frameEmbed, Tensor? sumCond, MoshiTransformer.CrossKvCache crossKv,
+        FixedKvCache selfCache, int pos, out Tensor textLogits)
+    {
+        Tensor seq;
+        if (sumCond is null) { seq = frameEmbed; }
+        else { seq = new(new TensorShape(1, 1, Dim), DType.F32); backend.Add(seq, frameEmbed, sumCond); }
+        Tensor tout = Backbone.StepForward(backend, seq, crossKv, selfCache, pos);
+        if (!ReferenceEquals(seq, frameEmbed)) seq.Dispose();
+        textLogits = WhisperOps.ProjectLinear(backend, tout, _textLinear!, null, 1, 1, Dim, TextCard);
+        return tout;
+    }
+
     /// <summary>Last-frame context slice <c>[1,1,2048]</c> from a <c>[1,T,2048]</c> transformer_out (for the depformer).</summary>
     public static Tensor LastFrame(Tensor transformerOut)
     {
@@ -102,8 +125,9 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
     /// text token (argmax), lets the <paramref name="scheduler"/> decide the actual text to feed, runs the
     /// depformer for the 32 audio codes (forced silent during the <paramref name="delaySteps"/> text-lead), and
     /// emits acoustic-delay-corrected codes. Returns <c>[32, nFrames]</c> Mimi codes (warmup frames trimmed).
-    /// cfg <paramref name="cfgCoef"/>=1.0 only (single forward). TODO(perf): O(n²) full-prefix re-run per frame;
-    /// add a streaming KV cache to the backbone.</summary>
+    /// cfg <paramref name="cfgCoef"/>=1.0 only (single forward). O(n) streaming: cross K/V are precomputed once
+    /// and self-attention runs through a <see cref="FixedKvCache"/>, so each frame is a single-token backbone
+    /// step rather than a full-prefix re-run.</summary>
     public int[,] Generate(IBackend backend, KyutaiTextScheduler scheduler, IEnumerable<KyutaiTextScheduler.Entry> entries,
         Tensor cross, Tensor sumCond, int maxFrames = 250, int delaySteps = 16, int finalPadding = 4)
     {
@@ -116,9 +140,10 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
         int[,] cache = new int[1 + NumCodebooks, ct];
 
         KyutaiTextScheduler.State state = scheduler.NewState(entries);
-        List<Tensor> frameEmbeds = new();
         List<int[]> emitted = new();
-        try
+        using MoshiTransformer.CrossKvCache crossKv = Backbone.PrecomputeCrossKv(backend, cross);
+        using FixedKvCache selfCache = new(numLayers: 16, batch: 1,
+            numKvHeads: MoshiTransformer.Heads, headDim: MoshiTransformer.HeadDim, maxSequenceLength: maxFrames + 1);
         {
             for (int offset = 0; offset < maxFrames; offset++)
             {
@@ -127,12 +152,10 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
                 for (int k = 0; k < NumCodebooks; k++)
                     audioIn[k] = offset <= delays[1 + k] ? initial[1 + k] : cache[1 + k, offset % ct];
 
-                frameEmbeds.Add(EmbedFrame(backend, textIn, audioIn));
-                Tensor tout = ForwardText(backend, frameEmbeds, sumCond, cross, out Tensor textLogits);
-                int t = frameEmbeds.Count;
-                int textTok = ArgMaxRow((float*)textLogits.DataPointer + (long)(t - 1) * TextCard, TextCard);
+                using Tensor frameEmbed = EmbedFrame(backend, textIn, audioIn);
+                Tensor lastCtx = StepText(backend, frameEmbed, sumCond, crossKv, selfCache, offset, out Tensor textLogits);
+                int textTok = ArgMaxRow((float*)textLogits.DataPointer, TextCard);   // textLogits is [1,1,TextCard]
                 textLogits.Dispose();
-                Tensor lastCtx = LastFrame(tout); tout.Dispose();
 
                 int outTok = scheduler.Process(offset, state, textTok, out _);
 
@@ -160,7 +183,6 @@ public sealed unsafe class MoshiTtsGenerator : IDisposable
                 if (state.EndStep is int es && offset >= es + delaySteps + finalPadding) break;
             }
         }
-        finally { foreach (Tensor e in frameEmbeds) e.Dispose(); }
 
         // Trim warmup frames whose codes are still the forced-silence / initial tokens (any codebook < 0 or >= card).
         int start = 0;

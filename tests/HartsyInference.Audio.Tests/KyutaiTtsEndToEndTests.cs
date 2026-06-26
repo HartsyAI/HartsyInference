@@ -33,7 +33,7 @@ public sealed unsafe class KyutaiTtsEndToEndTests
         string? wp = Environment.GetEnvironmentVariable("KYUTAI_TTS_WEIGHTS");
         string? mp = Environment.GetEnvironmentVariable("KYUTAI_MIMI");
         string? sp = Environment.GetEnvironmentVariable("KYUTAI_SPM");
-        if (Missing(wp) || Missing(mp) || Missing(sp)) return;
+        if (Missing(wp) || Missing(sp)) return;   // Mimi (mp) is best-effort below
 
         using SafeTensorsLoader ttsW = new(); ttsW.Load(wp!);
         using MoshiTtsGenerator gen = new();

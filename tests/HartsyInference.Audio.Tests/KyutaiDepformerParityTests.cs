@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using HartsyInference.Audio.Models.Kyutai;
 using HartsyInference.Cpu;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.SafeTensors;
 using Xunit;
@@ -39,7 +40,7 @@ public sealed unsafe class KyutaiDepformerParityTests
 
         using MoshiDepformer dep = new();
         dep.LoadWeights(w);
-        using CpuBackend backend = new();
+        IBackend backend = Environment.GetEnvironmentVariable("GSV_CUDA")=="1" ? new HartsyInference.Cuda.CudaBackend(0, Environment.GetEnvironmentVariable("GSV_PTX")!) : new CpuBackend();
         using Tensor logits = dep.DecodeFrameGreedy(backend, tout, textToken, out int[] tokens);
 
         float* a = (float*)logits.DataPointer; float* b = (float*)refLogits.DataPointer;

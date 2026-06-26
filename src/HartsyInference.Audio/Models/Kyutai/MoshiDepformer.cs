@@ -158,12 +158,25 @@ public sealed unsafe class MoshiDepformer : IDisposable
         return o;
     }
 
-    // text demux embedding: feeding a normal token (< TextCard) gives out1(emb_lookup(token)).
+    // Demuxing text embedding (depformer cb-0 input): the fed text token packs two streams as
+    // (second+1)·card + main; y = out1(emb[main]) + (second≥0 ? out2(emb[second]) : 0). Mirrors the temporal
+    // text_emb demux. (The depformer parity test only exercised a small non-multiplexed token, so this path
+    // was previously untested.)
     private Tensor TextEmbed(IBackend backend, int token)
     {
-        Tensor look = LowRankLookup(_textW!, token, LowRank);   // [1,1,128]
-        Tensor y = WhisperOps.ProjectLinear(backend, look, _textOut1!, null, 1, 1, LowRank, Dim);
-        look.Dispose();
+        if (token < 0) return new Tensor(new TensorShape(1, 1, Dim), DType.F32);   // zero token → zeros
+        int card = TextCard + 1;
+        int main = token % card, second = token / card - 1;
+        Tensor lookMain = LowRankLookup(_textW!, main, LowRank);   // [1,1,128]
+        Tensor y = WhisperOps.ProjectLinear(backend, lookMain, _textOut1!, null, 1, 1, LowRank, Dim);
+        lookMain.Dispose();
+        if (second >= 0)
+        {
+            Tensor lookSecond = LowRankLookup(_textW!, second, LowRank);
+            Tensor r = WhisperOps.ProjectLinear(backend, lookSecond, _textOut2!, null, 1, 1, LowRank, Dim);
+            lookSecond.Dispose();
+            backend.Add(y, y, r); r.Dispose();
+        }
         return y;
     }
 

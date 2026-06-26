@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using HartsyInference.Audio.Models.Kyutai;
 using HartsyInference.Cpu;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.SafeTensors;
 using Xunit;
@@ -39,7 +40,7 @@ public sealed unsafe class KyutaiConditionerParityTests
 
         using MoshiConditioner cond = new();
         cond.LoadWeights(w);
-        using CpuBackend backend = new();
+        IBackend backend = Environment.GetEnvironmentVariable("GSV_CUDA")=="1" ? new HartsyInference.Cuda.CudaBackend(0, Environment.GetEnvironmentVariable("GSV_PTX")!) : new CpuBackend();
         using Tensor sum = cond.ComputeSum(backend, MoshiConditioner.CfgBin(2.0f));
         using Tensor cross = cond.ComputeCross(backend, voice);
 
