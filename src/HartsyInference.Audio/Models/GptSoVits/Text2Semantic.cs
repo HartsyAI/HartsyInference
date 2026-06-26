@@ -41,6 +41,10 @@ public sealed unsafe class Text2Semantic : IDisposable
     /// <summary>Autoregressively generates target semantic tokens. <paramref name="phonemes"/> + the BERT
     /// feature <c>[BertDim, Tx]</c> form the (bidirectional) text span; <paramref name="prefix"/> is the
     /// reference's semantic tokens. Returns the generated tokens (EOS stripped).</summary>
+    // TODO(perf): this AR loop re-feeds the FULL [text + audio] sequence through all 24 layers every step
+    // (no KV cache) → O(n²) and the dominant cost of GPT-SoVITS inference (~55 s for 50 tokens). The upstream
+    // uses a per-layer K/V cache (T2STransformer.process_prompt + decode_next_token). Port a StreamingKvCache
+    // here (prefill the prompt once, then decode one token at a time) for a large speedup.
     public List<int> Generate(IBackend backend, ReadOnlySpan<int> phonemes, Tensor bert, ReadOnlySpan<int> prefix,
         int maxNew, int seed = 0)
     {

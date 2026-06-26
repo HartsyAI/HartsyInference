@@ -56,6 +56,22 @@ public sealed unsafe class Hubert : IDisposable
     /// <summary>Composes a <c>weight_norm(dim=2)</c> grouped Conv1d weight: for each kernel position k,
     /// <c>W[:,:,k] = V[:,:,k] · g[0,0,k] / ‖V[:,:,k]‖_F</c>. <paramref name="g"/> is <c>[1,1,K]</c>,
     /// <paramref name="v"/> is <c>[outC, inC/groups, K]</c>.</summary>
+    /// <summary>Exact (erf-based) GELU in place: <c>0.5·x·(1 + erf(x/√2))</c> (Abramowitz-Stegun 7.1.26,
+    /// max abs error ≈ 1.5e-7). HuBERT/wav2vec2 use the exact GELU, not the tanh approximation.</summary>
+    internal static void ExactGelu(float* p, long n)
+    {
+        const float a1 = 0.254829592f, a2 = -0.284496736f, a3 = 1.421413741f, a4 = -1.453152027f, a5 = 1.061405429f, pp = 0.3275911f, invSqrt2 = 0.70710678f;
+        for (long i = 0; i < n; i++)
+        {
+            float x = p[i], z = x * invSqrt2;
+            float sign = z < 0 ? -1f : 1f, az = MathF.Abs(z);
+            float tt = 1f / (1f + pp * az);
+            float poly = ((((a5 * tt + a4) * tt + a3) * tt + a2) * tt + a1) * tt;
+            float erf = sign * (1f - poly * MathF.Exp(-az * az));
+            p[i] = 0.5f * x * (1f + erf);
+        }
+    }
+
     private static Tensor ComposePosConvWeightNorm(Tensor g, Tensor v)
     {
         int outC = (int)v.Shape[0], inC = (int)v.Shape[1], k = (int)v.Shape[2];
@@ -103,16 +119,13 @@ public sealed unsafe class Hubert : IDisposable
         Tensor posOut = new(new TensorShape(1, _cfg.Hidden, tFrames + 1), DType.F32);   // "same"+1 (k even)
         backend.Conv1d(posOut, hcf, _posConvW!, _posConvB, 1, pad, pad, 1, _cfg.PosConvGroups);
         hcf.Dispose();
-        // Drop the last element (wav2vec2 num_pad_remove=1 for even kernel) + GELU, add to h.
+        // Drop the last element (wav2vec2 num_pad_remove=1 for even kernel) + exact GELU, add to h.
+        ExactGelu((float*)posOut.DataPointer, posOut.ElementCount);
         float* pp = (float*)posOut.DataPointer;
         float* hp = (float*)h.DataPointer;
         for (int c = 0; c < _cfg.Hidden; c++)
             for (int j = 0; j < tFrames; j++)
-            {
-                float v = pp[(long)c * (tFrames + 1) + j];
-                float gelu = 0.5f * v * (1f + MathF.Tanh(0.7978845608f * (v + 0.044715f * v * v * v)));
-                hp[(long)j * _cfg.Hidden + c] += gelu;
-            }
+                hp[(long)j * _cfg.Hidden + c] += pp[(long)c * (tFrames + 1) + j];
         posOut.Dispose();
 
         // Encoder pre-stack LayerNorm (post-norm variant applies it here), then 12 layers.
@@ -146,17 +159,15 @@ public sealed unsafe class Hubert : IDisposable
 
             if (i == 0)   // GroupNorm after conv 0 (feat_extract_norm="group")
             {
-                Tensor gn = new(cur.Shape, DType.F32);
-                backend.GroupNorm(gn, cur, _gnW!, _gnB!, outCh, _cfg.NormEps);   // groups == channels
-                cur.Dispose(); cur = gn;
+                // The CPU GroupNorm expects rank-4 [N,C,H,W]; present cur [1,C,T] as [1,C,T,1] so each channel
+                // (groups == channels) is normalized over time. (A rank-3 input gives W=0 → broken norm.)
+                Tensor cur4 = cur.Reshape(new TensorShape(1, outCh, outT, 1));
+                Tensor gn = new(new TensorShape(1, outCh, outT, 1), DType.F32);
+                backend.GroupNorm(gn, cur4, _gnW!, _gnB!, outCh, _cfg.NormEps);
+                cur.Dispose(); cur = gn.Reshape(new TensorShape(1, outCh, outT));
             }
-            // GELU activation after each conv.
-            float* cp = (float*)cur.DataPointer;
-            for (long n = 0; n < cur.ElementCount; n++)
-            {
-                float v = cp[n];
-                cp[n] = 0.5f * v * (1f + MathF.Tanh(0.7978845608f * (v + 0.044715f * v * v * v)));
-            }
+            // GELU activation after each conv (exact erf — HuBERT uses the exact GELU, not the tanh approx).
+            ExactGelu((float*)cur.DataPointer, cur.ElementCount);
         }
         tFrames = curT;
         return cur;
@@ -221,9 +232,8 @@ public sealed unsafe class Hubert : IDisposable
             backend.LayerNorm(n1, afterAttn, _ln1W!, _ln1B!, _cfg.NormEps); afterAttn.Dispose();
 
             Tensor f1 = WhisperOps.ProjectLinear(backend, n1, _ff1W!, _ff1B, 1, t, h, _cfg.FfnDim);
-            Tensor act = new(f1.Shape, DType.F32);
-            backend.Gelu(act, f1); f1.Dispose();
-            Tensor f2 = WhisperOps.ProjectLinear(backend, act, _ff2W!, _ff2B, 1, t, _cfg.FfnDim, h); act.Dispose();
+            ExactGelu((float*)f1.DataPointer, f1.ElementCount);   // exact erf GELU (HuBERT hidden_act="gelu")
+            Tensor f2 = WhisperOps.ProjectLinear(backend, f1, _ff2W!, _ff2B, 1, t, _cfg.FfnDim, h); f1.Dispose();
             Tensor afterFf = new(x.Shape, DType.F32);
             backend.Add(afterFf, n1, f2); n1.Dispose(); f2.Dispose();
             Tensor outT = new(x.Shape, DType.F32);
