@@ -19,7 +19,8 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **ResembleEnhance** | 🔬 | Modules synthetic-verified + converter built; real-weight mel→mel parity pending. |
 | **F5-TTS** | 🔧 | Built + wired in SwarmUI; parity dump pending. |
 | **HeartMuLa** | 🔧 | Built + wired; parity pending. |
-| **VibeVoice / SparkTTS / NeuTTS / Orpheus / MeloTTS / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
+| **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#: g2p ids exact, BERT bit-exact, audio corr 0.9993 (len exact) vs the noise-0 reference. `MeloTts` facade (LoadFromFiles/LoadAsync/SynthesizeText) + gated parity test. |
+| **VibeVoice / SparkTTS / NeuTTS / Orpheus / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
 | **Zonos** | ⛔ | Blocked: espeak phonemes + ResNet293 speaker encoder + NovelAI sampler. Deferred. |
 
 ## STT

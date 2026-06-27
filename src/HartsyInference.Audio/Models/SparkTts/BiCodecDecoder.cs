@@ -1,6 +1,5 @@
 using HartsyInference.Audio.Layers;
-using HartsyInference.Audio.Models.Codecs;
-using HartsyInference.Audio.Models.Vocoders;
+using HartsyInference.Audio.Models.Codecs.Dac;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -8,219 +7,260 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Audio.Models.SparkTts;
 
 /// <summary>BiCodec decode side (Spark-TTS) — reconstructs a 16 kHz waveform from the LM's global +
-/// semantic tokens. The semantic VQ stream provides time-varying content; the 32 global FSQ tokens
-/// provide a time-invariant speaker d-vector. A DAC-style HiFi-GAN wave generator (Snake1d + transposed
-/// convs at rates [8,5,4,2]) conditioned on the d-vector produces the audio.
-///
-/// <para><b>Reuse:</b> global dequant is the shared <see cref="Fsq.Dequantize"/>; the MRF blocks are the
-/// shared <see cref="SnakeResBlock"/>; upsampling/activation route through the backend (`ConvTranspose1d`,
-/// `Snake`, `Conv1d`). <b>Checkpoint-reconciliation pending:</b> exact BiCodec key names + the
-/// Vocos-ConvNeXt prenet detail need the 626 MB <c>BiCodec/model.safetensors</c>; the speaker
-/// conditioning here is a FiLM-lite add (the full AdaLayerNorm prenet is the deferred piece). The token
-/// dequant + wave-gen structure are exercisable once weights load.</para></summary>
+/// semantic tokens, faithfully mirroring <c>BiCodec.detokenize</c>:
+/// <code>
+///   z_q      = quantizer.detokenize(semantic)        # codebook[idx] (8-D) → out_project WNConv1d(8→1024)
+///   d_vector = speaker_encoder.detokenize(global)    # FSQ idx→6-D → project_out(6→128) → flatten 32·128 → project(→1024)
+///   x        = prenet(z_q, d_vector)                 # linear_pre → 2× downsample VocosBackbone → AdaLN VocosBackbone(×12) → linear
+///   x        = x + d_vector[..., None]
+///   wav      = decoder(x)                            # DAC-style HiFi-GAN WaveGenerator
+/// </code>
+/// PostNet is training-only (not on the decode path). The wave generator is the descript-audio-codec
+/// decoder, reused verbatim via <see cref="DacDecoder"/>; the PreNet (Vocos ConvNeXt backbone with
+/// AdaLayerNorm conditioning) is Spark-specific. Semantic VQ is <b>factorized</b> (codebook is 8-D,
+/// projected up), and the global d-vector flattens the 32 FSQ codes (not mean-pooling).</summary>
 public sealed unsafe class BiCodecDecoder : IDisposable
 {
     private readonly SparkBiCodecConfig _cfg;
-    private readonly int _numUp;
-    private readonly int[] _levelChannels;
+    private readonly DacDecoder _waveGen;
     private int _disposed;
 
-    private Tensor? _semanticCodebook;   // [SemanticVocab, semDim] VQ embedding (factorized → projected)
-    private Tensor? _globalProjW, _globalProjB;   // FSQ d-vector → globalDim
-    private Tensor? _convPreW, _convPreB;
-    private Tensor? _condProjW, _condProjB;        // d-vector → base channels (FiLM-lite bias)
-    private Tensor?[] _upsW;
-    private Tensor?[] _upsB;
-    private SnakeResBlock[] _resBlocks;
-    private Tensor? _convPostW, _convPostB;
+    // Semantic factorized VQ.
+    private Tensor? _codebook;        // [codebook_size, codebook_dim]  (8-D)
+    private Tensor? _vqOutW, _vqOutB; // out_project WNConv1d(codebook_dim → 1024, k=1) — composed weight [1024, 8, 1]
+
+    // Global FSQ d-vector path.
+    private Tensor? _fsqProjOutW, _fsqProjOutB;   // ResidualFSQ.project_out Linear(6 → latent_dim=128)
+    private Tensor? _spkProjW, _spkProjB;         // SpeakerEncoder.project Linear(latent*token_num=4096 → 1024)
+
+    // PreNet.
+    private Tensor? _linPreW, _linPreB;           // Linear(1024 → vocos_dim=384)
+    private VocosBackbone[] _downsample = [];     // 2 plain-LN backbones (2 ConvNeXt each), each preceded by SamplingBlock(×3)
+    private VocosBackbone? _mainBackbone;         // 12-layer AdaLN backbone conditioned on the d-vector
+    private Tensor? _linW, _linB;                 // Linear(vocos_dim=384 → 1024)
 
     public BiCodecDecoder(SparkBiCodecConfig cfg)
     {
         _cfg = cfg;
-        _numUp = cfg.UpsampleRates.Length;
-        _levelChannels = new int[_numUp];
-        for (int i = 0; i < _numUp; i++) _levelChannels[i] = cfg.UpsampleInitialChannel >> (i + 1);
-        _upsW = new Tensor[_numUp];
-        _upsB = new Tensor[_numUp];
-        _resBlocks = new SnakeResBlock[_numUp * cfg.ResBlockKernelSizes.Length];
-        for (int i = 0; i < _numUp; i++)
-            for (int j = 0; j < cfg.ResBlockKernelSizes.Length; j++)
-                _resBlocks[i * cfg.ResBlockKernelSizes.Length + j] =
-                    new SnakeResBlock(_levelChannels[i], cfg.ResBlockKernelSizes[j], cfg.ResBlockDilationSizes[j]);
+        DacConfig dac = new()
+        {
+            DecoderDim = cfg.WaveGenChannels,
+            DecoderRates = cfg.UpsampleRates,
+            DecoderKernelSizes = cfg.UpsampleKernelSizes,
+            ResidualKernelSize = 7,
+            StemKernelSize = 7,
+            DecoderFinalKernelSize = 7,
+            ResidualDilations = [1, 3, 9],
+            Channels = 1,
+            TransposeWeightNormDim0 = true,   // descript/Spark WNConvTranspose1d norms over dim 0 (C_in)
+        };
+        _waveGen = new DacDecoder(dac, "decoder");
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        _semanticCodebook = WhisperOps.EnsureF32(w[$"{p}quantizer.codebook.weight"]);
-        _globalProjW = WhisperOps.EnsureF32(w[$"{p}speaker_proj.weight"]);
-        _globalProjB = w.TryGetValue($"{p}speaker_proj.bias", out Tensor? gb) ? WhisperOps.EnsureF32(gb) : null;
-        _convPreW = WeightNorm.Compose(w, $"{p}generator.conv_pre");
-        _convPreB = WhisperOps.EnsureF32(w[$"{p}generator.conv_pre.bias"]);
-        _condProjW = WhisperOps.EnsureF32(w[$"{p}generator.cond_proj.weight"]);
-        _condProjB = w.TryGetValue($"{p}generator.cond_proj.bias", out Tensor? cb) ? WhisperOps.EnsureF32(cb) : null;
-        for (int i = 0; i < _numUp; i++)
+
+        _codebook = WhisperOps.EnsureF32(w[$"{p}quantizer.codebook.weight"]);
+        _vqOutW = WeightNorm.Compose(w, $"{p}quantizer.out_project");
+        _vqOutB = WhisperOps.EnsureF32(w[$"{p}quantizer.out_project.bias"]);
+
+        _fsqProjOutW = WhisperOps.EnsureF32(w[$"{p}speaker_encoder.quantizer.project_out.weight"]);
+        _fsqProjOutB = WhisperOps.EnsureF32(w[$"{p}speaker_encoder.quantizer.project_out.bias"]);
+        _spkProjW = WhisperOps.EnsureF32(w[$"{p}speaker_encoder.project.weight"]);
+        _spkProjB = WhisperOps.EnsureF32(w[$"{p}speaker_encoder.project.bias"]);
+
+        _linPreW = WhisperOps.EnsureF32(w[$"{p}prenet.linear_pre.weight"]);
+        _linPreB = WhisperOps.EnsureF32(w[$"{p}prenet.linear_pre.bias"]);
+        _downsample = new VocosBackbone[_cfg.DownsampleStages];
+        for (int i = 0; i < _cfg.DownsampleStages; i++)
         {
-            _upsW[i] = WeightNorm.Compose(w, $"{p}generator.ups.{i}");
-            _upsB[i] = WhisperOps.EnsureF32(w[$"{p}generator.ups.{i}.bias"]);
+            _downsample[i] = new VocosBackbone(_cfg.VocosDim, _cfg.VocosIntermediate, numLayers: 2, conditionDim: 0);
+            _downsample[i].LoadWeights(w, $"{p}prenet.downsample.{i}.1");
         }
-        for (int i = 0; i < _resBlocks.Length; i++) _resBlocks[i].LoadWeights(w, $"{p}generator.resblocks.{i}");
-        _convPostW = WeightNorm.Compose(w, $"{p}generator.conv_post");
-        _convPostB = WhisperOps.EnsureF32(w[$"{p}generator.conv_post.bias"]);
+        _mainBackbone = new VocosBackbone(_cfg.VocosDim, _cfg.VocosIntermediate, _cfg.PrenetLayers, conditionDim: _cfg.GlobalDim);
+        _mainBackbone.LoadWeights(w, $"{p}prenet.vocos_backbone");
+        _linW = WhisperOps.EnsureF32(w[$"{p}prenet.linear.weight"]);
+        _linB = WhisperOps.EnsureF32(w[$"{p}prenet.linear.bias"]);
+
+        _waveGen.LoadWeights(ToDac(w, p));
     }
 
     /// <summary>Decodes global + semantic token streams to a 16 kHz waveform.</summary>
     public float[] Decode(IBackend backend, IReadOnlyList<int> globalTokens, IReadOnlyList<int> semanticTokens)
     {
-        if (_semanticCodebook is null) throw new InvalidOperationException("BiCodecDecoder weights not loaded.");
+        if (_codebook is null) throw new InvalidOperationException("BiCodecDecoder weights not loaded.");
+        int tFrames = Math.Max(1, semanticTokens.Count);
 
-        // 1. Speaker d-vector from the 32 global FSQ tokens.
-        Tensor dVector = GlobalDVector(backend, globalTokens);
+        using Tensor zq = SemanticZq(backend, semanticTokens, tFrames);   // [1, 1024, T]
+        using Tensor dVector = SpeakerDVector(backend, globalTokens);     // [1, GlobalDim]
 
-        // 2. Semantic VQ embeddings → [1, semDim, T].
-        Tensor feat = SemanticFeatures(semanticTokens);
+        using Tensor preOut = Prenet(backend, zq, dVector, tFrames);      // [1, 1024, T]
+        AddBroadcastChannel(preOut, dVector);                            // x + d_vector[..., None]
 
-        // 3. conv_pre → base channels, + FiLM-lite speaker conditioning.
-        int t = (int)feat.Shape[2];
-        Tensor x = new(new TensorShape(1, _cfg.UpsampleInitialChannel, t), DType.F32);
-        backend.Conv1d(x, feat, _convPreW!, _convPreB, stride: 1, padLeft: 3, padRight: 3, dilation: 1, groups: 1);
-        feat.Dispose();
-        AddSpeakerBias(backend, x, dVector);
-        dVector.Dispose();
+        using Tensor wav = _waveGen.Forward(backend, preOut, batch: 1, tFrames: tFrames);  // [1, 1, T*hop], tanh'd
+        int n = (int)wav.Shape[2];
+        float[] audio = new float[n];
+        float* wp = (float*)wav.DataPointer;
+        for (int i = 0; i < n; i++) audio[i] = wp[i];
+        return audio;
+    }
 
-        // 4. Upsample stages: ConvTranspose1d + Snake-MRF average.
-        int numKernels = _cfg.ResBlockKernelSizes.Length;
-        for (int i = 0; i < _numUp; i++)
+    /// <summary>Diagnostics — returns the decode-path intermediates (z_q, d-vector, prenet output before the
+    /// d-vector add) for layer-by-layer parity checks. Caller disposes.</summary>
+    public (Tensor Zq, Tensor DVec, Tensor PrenetOut) DecodeIntermediates(IBackend backend,
+        IReadOnlyList<int> globalTokens, IReadOnlyList<int> semanticTokens)
+    {
+        int t = Math.Max(1, semanticTokens.Count);
+        Tensor zq = SemanticZq(backend, semanticTokens, t);
+        Tensor dVec = SpeakerDVector(backend, globalTokens);
+        Tensor pre = Prenet(backend, zq, dVec, t);
+        return (zq, dVec, pre);
+    }
+
+    // ── Semantic VQ: codebook[idx] (8-D) → out_project WNConv1d(8→1024, k=1). ──
+    private Tensor SemanticZq(IBackend backend, IReadOnlyList<int> tokens, int t)
+    {
+        int cdim = (int)_codebook!.Shape[1];               // codebook_dim = 8
+        int vocab = (int)_codebook.Shape[0];
+        Tensor codes = new(new TensorShape(1, cdim, t), DType.F32);   // channels-first [1, 8, T]
+        float* cp = (float*)codes.DataPointer;
+        float* cb = (float*)_codebook.DataPointer;
+        for (int i = 0; i < t; i++)
         {
-            backend.LeakyRelu(x, x, 0.1f);
-            Tensor xUp = UpsampleConvT(backend, x, i);
-            x.Dispose();
-            x = xUp;
-            Tensor acc = _resBlocks[i * numKernels].Forward(backend, x);
-            for (int j = 1; j < numKernels; j++)
+            int code = i < tokens.Count ? tokens[i] : 0;
+            if ((uint)code >= (uint)vocab) code = 0;
+            float* row = cb + (long)code * cdim;
+            for (int c = 0; c < cdim; c++) cp[(long)c * t + i] = row[c];
+        }
+        int outDim = (int)_vqOutW!.Shape[0];
+        Tensor zq = new(new TensorShape(1, outDim, t), DType.F32);
+        backend.Conv1d(zq, codes, _vqOutW!, _vqOutB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        codes.Dispose();
+        return zq;
+    }
+
+    // ── Global FSQ → d-vector. Each token: idx → 6-D code (level k → (k - L/2)/(L/2)) →
+    //    project_out(6→128); flatten the 32×128 codes → project(4096→1024). ──
+    private Tensor SpeakerDVector(IBackend backend, IReadOnlyList<int> tokens)
+    {
+        int[] levels = _cfg.FsqLevels;
+        int dim = levels.Length;                  // 6
+        int tokenNum = _cfg.TokenNum;             // 32
+        int latent = _cfg.LatentDim;              // 128
+
+        // FSQ index → centered code per axis (basis = cumprod([1] + levels[:-1])).
+        Tensor codes = new(new TensorShape(1, tokenNum, dim), DType.F32);
+        float* cdp = (float*)codes.DataPointer;
+        for (int n = 0; n < tokenNum; n++)
+        {
+            int idx = n < tokens.Count ? tokens[n] : 0;
+            int basis = 1;
+            for (int d = 0; d < dim; d++)
             {
-                Tensor rb = _resBlocks[i * numKernels + j].Forward(backend, x);
-                AddInPlace(acc, rb);
-                rb.Dispose();
+                int L = levels[d];
+                int level = (idx / basis) % L;
+                int half = L / 2;
+                cdp[(long)n * dim + d] = (level - half) / (float)half;
+                basis *= L;
             }
+        }
+        // project_out: Linear(6 → latent) applied per token → [1, 32, 128] (token-major).
+        Tensor proj = WhisperOps.ProjectLinear(backend, codes, _fsqProjOutW!, _fsqProjOutB, 1, tokenNum, dim, latent);
+        codes.Dispose();
+        // Reference flattens AFTER transpose to [128, 32] (channel-major): flat[c*token_num + n] = proj[n, c].
+        Tensor flat = new(new TensorShape(1, 1, tokenNum * latent), DType.F32);
+        float* pp = (float*)proj.DataPointer;
+        float* fp = (float*)flat.DataPointer;
+        for (int n = 0; n < tokenNum; n++)
+            for (int c = 0; c < latent; c++) fp[(long)c * tokenNum + n] = pp[(long)n * latent + c];
+        proj.Dispose();
+        Tensor dVec = WhisperOps.ProjectLinear(backend, flat, _spkProjW!, _spkProjB, 1, 1, tokenNum * latent, _cfg.GlobalDim);
+        flat.Dispose();
+        return dVec.Reshape(new TensorShape(1, _cfg.GlobalDim));
+    }
+
+    // ── PreNet: linear_pre → 2× (SamplingBlock×3 + VocosBackbone) → AdaLN VocosBackbone(×12) → linear. ──
+    private Tensor Prenet(IBackend backend, Tensor zq, Tensor dVector, int t)
+    {
+        int vd = _cfg.VocosDim;
+        // linear_pre over channels-last: [1,1024,T] → [1,T,1024] → Linear(1024→384) → [1,T,384].
+        Tensor zqTC = Transpose(zq, 1024, t);
+        Tensor x = WhisperOps.ProjectLinear(backend, zqTC, _linPreW!, _linPreB, 1, t, (int)_linPreW!.Shape[1], vd); // [1,T,384]
+        zqTC.Dispose();
+
+        // 2 downsample stages. SamplingBlock(ratio=1) transposes [1,T,C]→[1,C,T] and scales ×3.
+        foreach (VocosBackbone bb in _downsample)
+        {
+            Tensor cf = Transpose(x, t, vd);     // [1,384,T]
             x.Dispose();
-            Scale(acc, 1f / numKernels);
-            x = acc;
+            Scale(cf, 3f);
+            Tensor outTc = bb.Run(backend, cf, t, null);  // → [1,T,384]
+            cf.Dispose();
+            x = outTc;
         }
 
-        // 5. conv_post → 1-ch waveform → tanh.
-        backend.LeakyRelu(x, x, 0.01f);
-        int outLen = (int)x.Shape[2];
-        Tensor wave = new(new TensorShape(1, 1, outLen), DType.F32);
-        backend.Conv1d(wave, x, _convPostW!, _convPostB, stride: 1, padLeft: 3, padRight: 3, dilation: 1, groups: 1);
+        // Main AdaLN backbone (input channels-first).
+        Tensor xCf = Transpose(x, t, vd);        // [1,384,T]
         x.Dispose();
+        Tensor mainTc = _mainBackbone!.Run(backend, xCf, t, dVector);  // [1,T,384]
+        xCf.Dispose();
 
-        float[] audio = new float[outLen];
-        float* wp = (float*)wave.DataPointer;
-        for (int i = 0; i < outLen; i++) audio[i] = MathF.Tanh(wp[i]);
-        wave.Dispose();
-        return audio;
+        // linear(384→1024) → transpose → [1,1024,T].
+        Tensor lin = WhisperOps.ProjectLinear(backend, mainTc, _linW!, _linB, 1, t, vd, (int)_linW!.Shape[0]);  // [1,T,1024]
+        mainTc.Dispose();
+        Tensor outCf = Transpose(lin, t, (int)_linW!.Shape[0]);  // [1,1024,T]
+        lin.Dispose();
+        return outCf;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] core = [_semanticCodebook, _globalProjW, _globalProjB, _convPreW, _convPreB, _condProjW, _condProjB, _convPostW, _convPostB];
-        foreach (Tensor? x in core) if (x is not null) yield return x;
-        for (int i = 0; i < _numUp; i++)
-        {
-            if (_upsW[i] is not null) yield return _upsW[i]!;
-            if (_upsB[i] is not null) yield return _upsB[i]!;
-        }
-        foreach (SnakeResBlock r in _resBlocks) foreach (Tensor t in r.EnumerateWeights()) yield return t;
+        Tensor?[] own = [_codebook, _vqOutW, _vqOutB, _fsqProjOutW, _fsqProjOutB, _spkProjW, _spkProjB,
+            _linPreW, _linPreB, _linW, _linB];
+        foreach (Tensor? x in own) if (x is not null) yield return x;
+        foreach (VocosBackbone bb in _downsample) foreach (Tensor t in bb.EnumerateWeights()) yield return t;
+        if (_mainBackbone is not null) foreach (Tensor t in _mainBackbone.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _waveGen.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>32 global FSQ codes → dequant → mean-pool → linear → speaker d-vector <c>[1, globalDim]</c>.</summary>
-    private Tensor GlobalDVector(IBackend backend, IReadOnlyList<int> globalTokens)
+    // Re-key the BiCodec "decoder.*" tensors into the bare names DacDecoder expects ("decoder.model.*" stay as-is).
+    private static Dictionary<string, Tensor> ToDac(IReadOnlyDictionary<string, Tensor> w, string p)
     {
-        int n = globalTokens.Count;
-        int d = _cfg.FsqLevels.Length;
-        Tensor codes = new(new TensorShape(1, n), DType.F32);
-        float* cp = (float*)codes.DataPointer;
-        for (int i = 0; i < n; i++) cp[i] = globalTokens[i];
-        Tensor zHat = new(new TensorShape(1, n, d), DType.F32);
-        Fsq.Dequantize(zHat, codes, _cfg.FsqLevels);
-        codes.Dispose();
-
-        // Mean-pool over the 32 tokens → [1, 1, d], then project to globalDim.
-        Tensor pooled = new(new TensorShape(1, 1, d), DType.F32);
-        float* zp = (float*)zHat.DataPointer;
-        float* pp = (float*)pooled.DataPointer;
-        for (int j = 0; j < d; j++)
-        {
-            double s = 0;
-            for (int i = 0; i < n; i++) s += zp[i * d + j];
-            pp[j] = (float)(s / Math.Max(1, n));
-        }
-        zHat.Dispose();
-        Tensor dVec = WhisperOps.ProjectLinear(backend, pooled, _globalProjW!, _globalProjB, 1, 1, d, _cfg.GlobalDim);
-        pooled.Dispose();
-        return dVec.Reshape(new TensorShape(1, _cfg.GlobalDim));
+        if (p.Length == 0) return w as Dictionary<string, Tensor> ?? new Dictionary<string, Tensor>(w);
+        Dictionary<string, Tensor> outW = new(w.Count);
+        foreach ((string k, Tensor v) in w)
+            if (k.StartsWith($"{p}decoder.", StringComparison.Ordinal)) outW[k[p.Length..]] = v;
+        return outW;
     }
 
-    /// <summary>Semantic VQ codes → codebook lookup → channels-first <c>[1, semDim, T]</c>.</summary>
-    private Tensor SemanticFeatures(IReadOnlyList<int> semanticTokens)
+    // x [1, C, T] += bias [1, C] broadcast over T.
+    private static void AddBroadcastChannel(Tensor x, Tensor bias)
     {
-        int t = Math.Max(1, semanticTokens.Count);
-        int dim = (int)_semanticCodebook!.Shape[1];
-        Tensor feat = new(new TensorShape(1, dim, t), DType.F32);
-        float* fp = (float*)feat.DataPointer;
-        float* cb = (float*)_semanticCodebook.DataPointer;
-        int vocab = (int)_semanticCodebook.Shape[0];
-        for (int i = 0; i < semanticTokens.Count; i++)
-        {
-            int code = semanticTokens[i];
-            if ((uint)code >= (uint)vocab) code = 0;
-            float* row = cb + (long)code * dim;
-            for (int c = 0; c < dim; c++) fp[(long)c * t + i] = row[c];   // channels-first
-        }
-        return feat;
-    }
-
-    private void AddSpeakerBias(IBackend backend, Tensor x, Tensor dVector)
-    {
-        int baseCh = (int)x.Shape[1];
-        int t = (int)x.Shape[2];
-        Tensor dv3 = dVector.Reshape(new TensorShape(1, 1, _cfg.GlobalDim));
-        Tensor bias = WhisperOps.ProjectLinear(backend, dv3, _condProjW!, _condProjB, 1, 1, _cfg.GlobalDim, baseCh);
+        int c = (int)x.Shape[1], t = (int)x.Shape[2];
         float* xp = (float*)x.DataPointer;
         float* bp = (float*)bias.DataPointer;
-        for (int c = 0; c < baseCh; c++)
+        for (int ci = 0; ci < c; ci++)
         {
-            float add = bp[c];
-            long off = (long)c * t;
+            float add = bp[ci];
+            long off = (long)ci * t;
             for (int j = 0; j < t; j++) xp[off + j] += add;
         }
-        bias.Dispose();
     }
 
-    private Tensor UpsampleConvT(IBackend backend, Tensor x, int i)
+    // [1, A, B] → [1, B, A] contiguous.
+    internal static Tensor Transpose(Tensor x, int a, int b)
     {
-        Tensor wgt = _upsW[i]!;
-        int outCh = (int)wgt.Shape[1];
-        int kernel = (int)wgt.Shape[2];
-        int stride = _cfg.UpsampleRates[i];
-        int pad = (kernel - stride) / 2;
-        int inLen = (int)x.Shape[2];
-        int outLen = (inLen - 1) * stride + (kernel - 1) + 1 - 2 * pad;
-        Tensor outT = new(new TensorShape(1, outCh, outLen), DType.F32);
-        backend.ConvTranspose1d(outT, x, wgt, _upsB[i], stride: stride, padLeft: pad, padRight: pad, dilation: 1, groups: 1);
-        return outT;
+        Tensor o = new(new TensorShape(1, b, a), DType.F32);
+        float* xp = (float*)x.DataPointer;
+        float* op = (float*)o.DataPointer;
+        for (int i = 0; i < a; i++)
+            for (int j = 0; j < b; j++)
+                op[(long)j * a + i] = xp[(long)i * b + j];
+        return o;
     }
 
-    private static void AddInPlace(Tensor dst, Tensor src)
-    {
-        float* dp = (float*)dst.DataPointer;
-        float* sp = (float*)src.DataPointer;
-        long n = Math.Min(dst.ElementCount, src.ElementCount);
-        for (long i = 0; i < n; i++) dp[i] += sp[i];
-    }
-
-    private static void Scale(Tensor x, float f)
+    internal static void Scale(Tensor x, float f)
     {
         float* p = (float*)x.DataPointer;
         long n = x.ElementCount;

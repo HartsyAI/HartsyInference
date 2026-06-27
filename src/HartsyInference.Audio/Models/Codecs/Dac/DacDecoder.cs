@@ -125,17 +125,27 @@ internal sealed class DacDecoder
             x.Dispose();
             x = snk;
 
-            // WNConvTranspose1d(dim → dim/2, k=2*stride, stride=stride, padding=ceil(s/2), output_padding=s%2).
+            // WNConvTranspose1d(dim → dim/2). Either k=2*stride with descript's output_padding=s%2, or
+            // explicit kernel sizes with padding=(k-stride)/2 and no output padding (Spark BiCodec).
             int stride = _strides[i];
-            int kUp = 2 * stride;
-            int padding = (stride + 1) / 2;            // ceil(stride/2)
-            int outputPadding = stride % 2;
-            // Map to padLeft/padRight: PyTorch's effective output length is
-            //   (T_in - 1) * stride + K - 2*padding + output_padding.
-            // Our IBackend formula is (T_in - 1) * stride + K - padLeft - padRight
-            // (with dilation=1). Algebraically padLeft + padRight = 2*padding - output_padding.
-            int padLeft = padding;
-            int padRight = padding - outputPadding;
+            int padLeft, padRight, kUp;
+            if (_cfg.DecoderKernelSizes is not null)
+            {
+                kUp = _cfg.DecoderKernelSizes[i];
+                int padding = (kUp - stride) / 2;
+                padLeft = padding;
+                padRight = padding;
+            }
+            else
+            {
+                kUp = 2 * stride;
+                int padding = (stride + 1) / 2;        // ceil(stride/2)
+                int outputPadding = stride % 2;
+                // PyTorch length = (T_in-1)*stride + K - 2*padding + output_padding; our backend uses
+                // (T_in-1)*stride + K - padLeft - padRight, so padLeft + padRight = 2*padding - output_padding.
+                padLeft = padding;
+                padRight = padding - outputPadding;
+            }
             int dimOut = dim / 2;
             int tUp = (t - 1) * stride + kUp - padLeft - padRight;
             Tensor up = new(new TensorShape(batch, dimOut, tUp), DType.F32);
@@ -198,10 +208,11 @@ internal sealed class DacDecoder
         return WeightNormFusion.Fuse(g, v);
     }
 
-    private static Tensor LoadFusedTransposeWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    private Tensor LoadFusedTransposeWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
         Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusionT.Fuse(g, v);
+        // descript/Spark norm over dim 0 (C_in) — weight_g is [C_in,1,1], same composition as a regular conv.
+        return _cfg.TransposeWeightNormDim0 ? WeightNormFusion.Fuse(g, v) : WeightNormFusionT.Fuse(g, v);
     }
 }

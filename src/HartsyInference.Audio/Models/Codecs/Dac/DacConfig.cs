@@ -72,6 +72,17 @@ public sealed record DacConfig
     /// Always <c>[1, 3, 9]</c> — three blocks with exponentially-growing receptive fields.</summary>
     public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 3, 9];
 
+    /// <summary>Explicit per-stage transposed-conv kernel sizes. Null (default) derives <c>2 × stride</c> per
+    /// stage with descript's <c>output_padding = stride % 2</c>. Provide explicit sizes (e.g. Spark BiCodec
+    /// <c>[16, 11, 8, 4]</c>) to use the <c>padding = (kernel - stride) / 2</c>, no-output-padding convention.</summary>
+    public IReadOnlyList<int>? DecoderKernelSizes { get; init; } = null;
+
+    /// <summary>How the decoder's transposed-conv <c>weight_norm</c> is composed. Default (false) uses the
+    /// per-output-channel convention (EnCodec/SeaNet, <c>weight_g</c> sized C_out). Set true for the
+    /// descript-audio-codec default (and Spark-TTS BiCodec), whose <c>WNConvTranspose1d</c> norms over
+    /// dim 0 with <c>weight_g</c> sized <c>[C_in, 1, 1]</c>.</summary>
+    public bool TransposeWeightNormDim0 { get; init; } = false;
+
     /// <summary>Convenience — the latent dimension at the encoder output (= bottleneck
     /// channels = <c>EncoderDim * 2^len(EncoderRates)</c>). 64 * 16 = 1024 for the
     /// published configs.</summary>

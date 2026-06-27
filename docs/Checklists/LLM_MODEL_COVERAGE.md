@@ -301,3 +301,104 @@ soft_emb_norm → input_projection → splice 256 embeddings at `<image_soft_tok
 | Llama-3.2-Vision (11B) | 4 | ❌ build-defer |
 | nomic-embed / bge / MiniLM | 5 | ✅ |
 | GPT-OSS | 5 | ❌/⚠️ |
+
+---
+
+# Completion plan — what's left to claim FULL LLM support
+
+**Definition of "full LLM support":** every architecture family that Ollama / llama.cpp can run is either
+(a) **verified e2e** on available hardware, or (b) **build-complete + slice/reference-validated** with e2e marked
+build-defer for >12 GB. That spans six families — dense decoders, MoE, MLA, VLMs, embeddings/rerankers, and the
+**non-attention** families (SSM, RWKV, hybrid, encoder-decoder). Phases 0–5 cover the first four for the common /
+SOTA models. Phases 6–9 below are the remainder. Status legend: `[ ]` todo · `[~]` build-defer · `[x]` done.
+
+## Phase 6 — Transformer-family completion (tractable + verifiable on the 3060)
+- [x] **6a. Decoder-based embeddings — VALIDATED (cosine = 1.0).** `DecoderEmbeddingModel` (`HartsyInference.LLM.Embeddings`):
+      runs the verified `GenericTransformer` decoder (`ForwardEmbeds(applyFinalNorm:true)`, headless — no lm_head needed),
+      pools the final hidden states (last-token default per `pooling_type`, or mean) + L2-normalize. No new arch — pure reuse.
+      Reference-validated vs HF transformers (`tests/python-reference/dump_decoder_embedding_ref.py`, shared ids):
+      **Qwen3-Embedding-0.6B (qwen3, last-token) cosine = 1.000000** (maxdiff 7e-5). E2E semantic: cos(cat,kitten)=0.84 >
+      cos(cat,car)=0.33. Covers gte-Qwen2 / e5-mistral / LLM2Vec (qwen2/llama-arch + pooling). Also made `GgufLanguageModel.Load`
+      **tolerant of chat-template parse failures** (Qwen3-Embedding's template uses Python slicing the Jinja engine rejects →
+      falls back to ChatML so embedding/raw-completion loads succeed). `embed` CLI auto-routes bert vs decoder by GGUF arch.
+- [x] **6b. nomic-bert VALIDATED (cosine = 1.0).** Generalized `BertEmbeddingModel` to a config-driven encoder covering
+      both families (detected from metadata + tensor presence): position = absolute table (bge) vs **rotary** (nomic,
+      `rope.freq_base`); QKV = separate vs **fused `attn_qkv`** (split into q/k/v at load); MLP = GELU vs **SwiGLU**
+      (`ffn_gate`·`ffn_up`, SiLU gate); biases present (bge) vs **none** (nomic, `Wopt`). Reference-validated vs HF
+      (`trust_remote_code`, shared ids): **nomic-embed-text-v1.5 cosine = 1.000000** (maxdiff 0.0; GELU-gate gave 0.97 →
+      SiLU/swiglu was the fix). bge/all-MiniLM still cosine 1.0 (unaffected). `jina-bert-v2` (ALiBi) + mxbai remain (add
+      an ALiBi position-bias mode); nomic covers the popular rotary-BERT embedder.
+- [x] **6c. Rerankers VALIDATED.** bge-reranker-v2-m3 (xlm-roberta, arch `bert`) reuses the `BertEmbeddingModel` encoder
+      verbatim + a cross-encoder head: `BertEmbeddingModel.Score` runs the encoder, takes the CLS token, and applies
+      `cls` (dense) → tanh → `cls.output` (→1 logit). The out_proj is stored rank-1 `[hidden]` → reshaped to `[1,hidden]`.
+      Validated vs HF `XLMRobertaForSequenceClassification` (shared ids): relevant pair logit **4.63 (HF 4.61, FP16)**,
+      irrelevant pair **−11.0435 (HF −11.0435, exact)** — correct ranking + magnitudes. The xlm-roberta SPM tokenizer
+      (unigram + precompiled_charsmap) for self-contained pair encoding is the remaining e2e-convenience piece; the model
+      math is validated. `embed` CLI gained `HARTSY_RERANK=1`.
+- [ ] **6d. Exotic IQ-quant codecs**: IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_S / IQ1_M / IQ4_XS (only IQ4_NL
+      exists). Each is a `Gguf/Codecs/Codec_*.cs` + decode test vs an F32 reference. Rare but needed for "every Ollama quant".
+
+## Phase 7 — New architecture families (genuinely new model code — the real frontier)
+The config-driven transformer does NOT cover these; each needs new core primitives. All have small variants that fit the 3060.
+- [x] **7a. Mamba-1 (SSM) VALIDATED (cosine = 1.0).** `MambaModel` (`HartsyInference.LLM.Ssm`) — the engine's first
+      non-transformer arch. Block = RMSNorm → in_proj → [x,z] → causal depthwise Conv1d → SiLU → x_proj → (dt,B,C) →
+      dt_proj+softplus → **selective scan** (hₜ = exp(δA)·hₜ₋₁ + δB·xₜ; yₜ = C·hₜ + D·xₜ) → y·SiLU(z) → out_proj +
+      residual. Linear projections via `IBackend`; conv/softplus/scan/gate host-side (the scan is sequential). Registered
+      `mamba`/`mamba2` as passthrough. Reference-validated vs HF `MambaForCausalLM` (`tests/python-reference/dump_mamba_ref.py`,
+      shared ids): **mamba-130m next-token logits cosine = 1.000000, argmax matches** ("The capital of France is"→" in").
+      **Key bug found:** GGUF `ssm_a` already stores `A = −exp(A_log)` (llama.cpp bakes the −exp at conversion) — use it
+      directly, don't re-apply −exp (caught by diffing GGUF vs HF weights: ssm_a cosine −0.18 → −exp(A_log) cosine 1.0).
+      Mamba-2 + Falcon-Mamba reuse this path (Mamba-2 has scalar-A heads — a small variant).
+- [ ] **7b. RWKV v6/v7** — WKV linear-attention recurrence + token-shift. New: WKV op, time/channel-mix blocks,
+      `rwkv6`/`rwkv7` mapper. Verify: RWKV-1.6B/3B.
+- [ ] **7c. Hybrid SSM+attention** — Jamba, Zamba2, Granite-4.0, Nemotron-H (Mamba blocks interleaved with attention +
+      MoE). Composes 7a + the existing attention/MoE once 7a lands. Some fit at Q4.
+- [x] **7d. T5/FLAN-T5 seq2seq VALIDATED (cosine = 1.0).** `T5Model` (`HartsyInference.LLM.Seq2Seq`) — full
+      encoder-decoder from a `t5` GGUF. Handled T5 quirks: inner attn dim = n_heads·key_length (≠ d_model); **no 1/√d
+      scaling** (attention via `ScaledDotProductAttention` with scale=1 + an additive per-head mask carrying the
+      **relative-position bias**, bucketed — bidirectional for the encoder, causal/unidirectional for decoder self-attn,
+      none for cross-attn; weights on block 0, shared); T5LayerNorm = RMSNorm; GeGLU FFN; untied lm_head (no logit scale).
+      Reference-validated vs HF `T5ForConditionalGeneration` (`tests/python-reference/dump_t5_ref.py`, shared ids):
+      **flan-t5-small encoder cosine = 1.000000, decoder first-token cosine = 1.000000** (argmax 644 "Das"). **E2E
+      greedy translation**: "translate English to German: The house is wonderful." → **"Das Haus ist schön."** BART (same
+      encoder-decoder shape, learned abs-pos instead of rel-bias) is a near-variant.
+
+## Phase 8 — Build-defer completions (real code gaps; verify needs >12 GB hardware)
+- [~] **8a. DeepSeek-V3 / Kimi-K2 routing + q-LoRA** — add to the MLA path: **sigmoid** router + `e_score_correction_bias`
+      + **group-limited top-k** (node-limited routing) + **q-LoRA** (`q_a_proj`/`q_a_norm`/`q_b_proj` split; current MLA is
+      direct-q only). Mapper keys exist. The only same-family proxy (DeepSeek-V2-Lite) uses softmax/direct-q, so the V3
+      routing itself is verify-deferred.
+- [~] **8b. Llama-3.2-Vision (mllama) cross-attention** — `MllamaVisionEncoder` + a **gated cross-attention decoder layer**
+      (Q=text, K/V=cached vision, tanh gates, q/k RMSNorm) at layers `[3,8,13,18,23,28,33,38]` + `mllama` mapper. No <12 GB
+      proxy. (Full spec in Phase 4.)
+- [~] **8c. GPT-OSS** — `FlashAttention` per-head **sink logit** (seed the softmax denominator) + reuse o200k tokenizer +
+      existing MoE. 20B+ only, no small variant to reference-check.
+- [~] **8d. Verify-on-bigger-GPU (code already done)**: Mixtral 8x7B, Qwen3-MoE, Qwen2.5-VL-7B+, DeepSeek-V2-Lite e2e.
+
+## Phase 9 — Production / serving quality (cross-cutting, mostly optional)
+- [ ] **9a. Batch>1 / continuous batching / paged KV** — throughput for a server (`FixedKvCache` is single-sequence today).
+- [ ] **9b. Speculative decoding** (draft model + verify) — latency.
+- [ ] **9c. Long-context stress** — >32 k correctness, sliding-window-attention masks at scale (scaling math already verified).
+- [ ] **9d. CPU GGUF parity tests** + fix the pre-existing `GgufRoundTripTests.RoundTrip_SimpleF32` expectation (declared
+      arch vs passthrough — committed-code mismatch, not introduced by VLM/embedding work).
+- [ ] **9e. (optional) Tool-calling / grammar-constrained / structured-output decode** — JSON-schema / GBNF guided sampling.
+
+## Remaining-work summary (the short list)
+| Item | Kind | Effort | Verifiable@3060 |
+|---|---|---|---|
+| 6a decoder-embeddings, 6b/6c BERT variants + reranker | reuse | low | ✅ |
+| 6d exotic IQ-quant codecs | codec | low–med | ✅ (decode test) |
+| 7a Mamba/SSM | **new arch** | high | ✅ (small) |
+| 7b RWKV | **new arch** | high | ✅ (small) |
+| 7c hybrid SSM+attn | compose | med | partial |
+| 7d T5/BART seq2seq | new decode path | med | ✅ (small) |
+| 8a DeepSeek-V3 routing+q-LoRA | code gap | med | ❌ defer |
+| 8b mllama cross-attn | code gap | high | ❌ defer |
+| 8c GPT-OSS sinks | code gap | low | ❌ defer |
+| 8d Mixtral/Qwen-MoE/Qwen2.5-VL-7B e2e | verify only | — | ❌ (>12 GB) |
+| 9a–9e serving/quality | infra | varies | ✅ |
+
+**Bottom line:** transformer-family LLMs (dense, MoE, MLA, VLM, embeddings) are effectively complete for common/SOTA
+models. To claim *full* support the open frontier is: **Phase 7 (Mamba/RWKV/hybrid/seq2seq — the only families the engine
+fundamentally cannot run yet)**, the **Phase 6** cheap reuse wins, and finishing the **Phase 8** code gaps (verify when
+bigger hardware is available).

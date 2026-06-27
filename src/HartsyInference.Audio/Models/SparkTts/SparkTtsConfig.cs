@@ -35,13 +35,14 @@ public sealed record SparkTtsConfig
     /// <summary>Output sample rate.</summary>
     public int SampleRate { get; init; } = 16_000;
 
-    // ── Token-ID offsets into the LM vocab (reconcile against added_tokens.json) ──
-    public int SemanticTokenBase { get; init; } = 151_661;            // <|bicodec_semantic_0|>
-    public int GlobalTokenBase { get; init; } = 151_661 + 8_192;      // <|bicodec_global_0|>
-    public int EosTokenId { get; init; } = 151_645;                   // standard Qwen2.5 EOS
-    public int StartGlobalTokenId { get; init; } = 151_653;
-    public int EndGlobalTokenId { get; init; } = 151_654;
-    public int StartSemanticTokenId { get; init; } = 151_655;
+    // ── Token-ID offsets into the LM vocab (reconciled against the real added_tokens.json) ──
+    public int GlobalTokenBase { get; init; } = 151_665;              // <|bicodec_global_0|>     .. 155760
+    public int SemanticTokenBase { get; init; } = 155_761;            // <|bicodec_semantic_0|>   .. 163952
+    public int EosTokenId { get; init; } = 151_645;                   // <|im_end|>
+    public int StartGlobalTokenId { get; init; } = 165_150;
+    public int EndGlobalTokenId { get; init; } = 165_156;
+    public int StartSemanticTokenId { get; init; } = 165_151;
+    public int EndSemanticTokenId { get; init; } = 165_157;           // generation stop marker
 
     /// <summary>BiCodec wave-generator (semantic+global tokens → 16 kHz waveform) config.</summary>
     public SparkBiCodecConfig BiCodec { get; init; } = new();
@@ -58,30 +59,37 @@ public sealed record SparkTtsConfig
     };
 }
 
-/// <summary>BiCodec decode-side config — a DAC-style HiFi-GAN wave generator (Snake1d + transposed convs)
-/// fed by Vocos/ConvNeXt prenet conditioned on a global speaker d-vector. Reuses the same op families as
-/// the DAC decoder + Vocos.</summary>
+/// <summary>BiCodec decode-side config (matches <c>BiCodec/config.yaml</c>). A Vocos ConvNeXt PreNet
+/// (AdaLayerNorm-conditioned on the speaker d-vector) feeds a DAC-style HiFi-GAN wave generator (Snake1d +
+/// transposed convs). Factorized semantic VQ (8-D codebook → 1024) + global FSQ (6×4 levels) → d-vector.</summary>
 public sealed record SparkBiCodecConfig
 {
-    /// <summary>Semantic VQ embedding dim (factorized codebook projected up).</summary>
+    /// <summary>Semantic VQ output dim after <c>out_project</c> (codebook is 8-D, projected up).</summary>
     public int SemanticDim { get; init; } = 1_024;
 
     /// <summary>Global FSQ levels — 6 channels × 4 levels = 4096 codes.</summary>
     public int[] FsqLevels { get; init; } = [4, 4, 4, 4, 4, 4];
 
-    /// <summary>Global speaker d-vector dim (FSQ → linear → 1024).</summary>
+    /// <summary>Speaker-encoder latent dim per token (FSQ <c>project_out</c> target).</summary>
+    public int LatentDim { get; init; } = 128;
+
+    /// <summary>Number of global tokens per utterance (flattened latent·token_num → d-vector).</summary>
+    public int TokenNum { get; init; } = 32;
+
+    /// <summary>Global speaker d-vector dim (<c>project</c> output, also the PreNet condition dim).</summary>
     public int GlobalDim { get; init; } = 1_024;
 
-    /// <summary>Wave-generator base channels.</summary>
-    public int UpsampleInitialChannel { get; init; } = 1_024;
+    /// <summary>PreNet Vocos ConvNeXt hidden dim / MLP intermediate / main-backbone layer count.</summary>
+    public int VocosDim { get; init; } = 384;
+    public int VocosIntermediate { get; init; } = 2_048;
+    public int PrenetLayers { get; init; } = 12;
 
-    /// <summary>Transposed-conv upsample rates [8, 5, 4, 2] (product 320 = hop).</summary>
-    public int[] UpsampleRates { get; init; } = [8, 5, 4, 2];
-    public int[] UpsampleKernelSizes { get; init; } = [16, 11, 8, 4];
-    public int[] ResBlockKernelSizes { get; init; } = [3, 7, 11];
-    public int[][] ResBlockDilationSizes { get; init; } = [[1, 3, 5], [1, 3, 5], [1, 3, 5]];
+    /// <summary>PreNet downsample stages (<c>sample_ratios=[1,1]</c> — structural, no resolution change).</summary>
+    public int DownsampleStages { get; init; } = 2;
 
-    /// <summary>Prenet ConvNeXt block count (Vocos backbone conditioned on the d-vector).</summary>
-    public int PrenetBlocks { get; init; } = 12;
-    public int MelBins { get; init; } = 80;
+    /// <summary>Wave-generator base channels, transposed-conv upsample rates [8,5,4,2] (∏ = 320 = hop), and the
+    /// explicit kernel sizes [16,11,8,4] (the rate-5 stage uses kernel 11, not 2×5).</summary>
+    public int WaveGenChannels { get; init; } = 1_536;
+    public IReadOnlyList<int> UpsampleRates { get; init; } = [8, 5, 4, 2];
+    public IReadOnlyList<int> UpsampleKernelSizes { get; init; } = [16, 11, 8, 4];
 }

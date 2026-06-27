@@ -31,5 +31,24 @@ public sealed class BertWordPieceTokenizer : IDisposable
     public IReadOnlyList<int> EncodeRaw(string text)
         => _tokenizer.EncodeToIds(text ?? "", addSpecialTokens: false);
 
+    /// <summary>Encodes text to WordPiece ids WITH <c>[CLS]</c>/<c>[SEP]</c> (standard BERT input).</summary>
+    public IReadOnlyList<int> EncodeWithSpecial(string text)
+        => _tokenizer.EncodeToIds(text ?? "", addSpecialTokens: true);
+
+    /// <summary>Returns the WordPiece token strings (continuation pieces keep their <c>##</c> prefix), no specials —
+    /// used to group sub-tokens into words (MeloTTS g2p).</summary>
+    public IReadOnlyList<string> Tokens(string text)
+    {
+        IReadOnlyList<EncodedToken> toks = _tokenizer.EncodeToTokens(text ?? "", out _);
+        List<string> outList = new(toks.Count);
+        foreach (EncodedToken tk in toks)
+        {
+            string v = tk.Value;
+            if (v is "[CLS]" or "[SEP]" or "[PAD]" or "[UNK]" or "[MASK]") continue; // drop specials; keep ## pieces
+            outList.Add(v);
+        }
+        return outList;
+    }
+
     public void Dispose() { }
 }

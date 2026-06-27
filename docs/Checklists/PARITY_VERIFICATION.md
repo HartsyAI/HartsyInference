@@ -136,12 +136,15 @@ Add a row to **§ Bugs found** for every real bug, with how it was caught.
 
 ---
 
-## LLM / TEXT ENCODERS — see [`PHASE_12_LANGUAGE.md`](PHASE_12_LANGUAGE.md)
+## LLM / TEXT ENCODERS / VLMs / EMBEDDINGS — see [`MODEL_STATUS_LLM.md`](MODEL_STATUS_LLM.md), [`LLM_MODEL_COVERAGE.md`](LLM_MODEL_COVERAGE.md)
 | Model | Parity | Notes |
 |---|---|---|
-| **GenericTransformer** (Qwen2/Qwen3/Llama-3) | ✅ | Has parity tests; backs the text encoders + native LLM (Phase 12). Llama-3 RoPE NTK-by-parts validated. |
-| **T5 / UMT5 / Pile-T5 (AuraFlow) / BERT / SigLIP / Qwen3-VL vision tower** | 🔬 | Text/vision encoders with diff tests (`T5EncoderDiff`, `BertModel`, `Siglip`, `Qwen3VlVisionTower`). Pile-T5 = UMT5 (per-layer rel-attn-bias). See [[pile_t5_is_umt5]]. |
-| **Native LLM (Phase 12)** | 🚧 | Plan: one config-driven transformer backing both LLM + text encoders; CUDA-first quant; GPU-resident decode is the gating blocker. See [[llm-language-package-plan]]. |
+| **Native LLM decoders** (`GenericTransformer`) | ✅ | Verified e2e on 3060: Llama1/2/3.x, Mistral, TinyLlama, SmolLM, Yi, Qwen2/2.5/3, Gemma-2/3, Phi-3.5/4-mini, StableLM-2, Granite-3, Command-R7B, OLMoE, Granite-MoE. Config-driven (preset + key-map). See [[llm-model-coverage-plan]]. |
+| **VLMs** (Gemma-3, SmolVLM2, LLaVA, Qwen2.5-VL) | ✅ | Vision towers reference-validated **corr=1.0** (per-stage torch dumps) + e2e correct. `SiglipVlmEncoder` (SigLIP/CLIP) + `Qwen25VlEncoder`. |
+| **Embeddings** (bge-small CLS, all-MiniLM mean) | ✅ | `BertEmbeddingModel`, **cosine=1.000000** vs HF transformers. Quant decode Q8/Q5/Q4/Q3 all >0.99 vs F32. |
+| **T5 / UMT5 / Pile-T5 (AuraFlow) / BERT / SigLIP / Qwen3-VL vision tower** | 🔬 | Encoder diff tests (`T5EncoderDiff`, `BertModel`, `Siglip`, `Qwen3VlVisionTower`). Pile-T5 = UMT5. See [[pile_t5_is_umt5]]. |
+| **MoE / MLA build-defer** (Mixtral, Qwen3-MoE, DeepSeek-V2-Lite/V3, Kimi) | 🚧 | Built + slice/unit-tested; e2e pending >12 GB hardware (V2-Lite loads, OOMs at preload). |
+| **Remaining for FULL support** | 🚧 | Phase 6 (decoder-embeddings, rerankers, IQ-quants), Phase 7 (**Mamba/SSM, RWKV, hybrids, T5 seq2seq — new arch code**), Phase 8 (DeepSeek-V3 routing, mllama cross-attn, GPT-OSS sinks), Phase 9 (batch>1, spec-decode). See [LLM_MODEL_COVERAGE.md § Completion plan](LLM_MODEL_COVERAGE.md). |
 
 ---
 

@@ -4,10 +4,16 @@ using HartsyInference.ModelHandler.Gguf;
 
 namespace HartsyInference.LLM.Embeddings;
 
-/// <summary>A BERT-family text-embedding model loaded from a llama.cpp <c>bert</c> GGUF (bge, all-MiniLM, nomic,
-/// e5, …). Runs the bidirectional post-norm encoder, pools the token states (CLS / mean per the GGUF
-/// <c>bert.pooling_type</c>), and L2-normalizes — producing a sentence embedding. Reuses the engine's
-/// Linear / LayerNorm / FlashAttention (non-causal) primitives.</summary>
+/// <summary>A BERT-family text-embedding model loaded from a llama.cpp encoder GGUF (<c>bert</c>, <c>nomic-bert</c>,
+/// …). Runs the bidirectional post-norm encoder and pools the token states (CLS / mean per <c>pooling_type</c>),
+/// then L2-normalizes. Config-driven over the family differences (detected from metadata + tensor presence):
+/// <list type="bullet">
+/// <item>position: absolute table (bge, all-MiniLM) vs rotary (nomic-bert)</item>
+/// <item>QKV: separate <c>attn_q/k/v</c> (bge) vs fused <c>attn_qkv</c> (nomic, split at load)</item>
+/// <item>MLP: GELU (bge) vs GeGLU <c>ffn_gate·ffn_up</c> (nomic)</item>
+/// <item>biases: present (bge) vs none on the linears (nomic)</item>
+/// </list>
+/// Reuses the engine's Linear / LayerNorm / FlashAttention (non-causal) primitives.</summary>
 public sealed unsafe class BertEmbeddingModel : IDisposable
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
@@ -23,15 +29,21 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
     public float Eps { get; }
     /// <summary>0 = none, 1 = mean, 2 = CLS (llama.cpp pooling type).</summary>
     public int PoolingType { get; }
-    /// <summary>The model's WordPiece vocabulary (from <c>tokenizer.ggml.tokens</c>), or null if absent.</summary>
+    public bool UseRope { get; }       // nomic-bert: rotary position (no absolute table)
+    public float RopeBase { get; }
+    public bool UseGeGlu { get; }      // nomic-bert: gated GELU MLP
     public string[]? Vocab { get; }
+    /// <summary>True if this GGUF carries a reranker classification head (<c>cls.*</c>) — call <see cref="Score"/>.</summary>
+    public bool HasRerankHead { get; }
 
     private BertEmbeddingModel(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w,
-        int hidden, int layers, int heads, int inter, int maxPos, float eps, int pooling, string[]? vocab)
+        int hidden, int layers, int heads, int inter, int maxPos, float eps, int pooling, string[]? vocab,
+        bool useRope, float ropeBase, bool useGeGlu, bool hasRerankHead)
     {
         _handle = handle; _w = w;
         Hidden = hidden; NumLayers = layers; NumHeads = heads; HeadDim = hidden / heads; Intermediate = inter;
         MaxPos = maxPos; Eps = eps <= 0f ? 1e-12f : eps; PoolingType = pooling; Vocab = vocab;
+        UseRope = useRope; RopeBase = ropeBase; UseGeGlu = useGeGlu; HasRerankHead = hasRerankHead;
     }
 
     private static Tensor Relabel(Tensor t)
@@ -41,71 +53,79 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         return outp;
     }
 
+    /// <summary>Slices rows <c>[r0, r0+rows)</c> of a row-major <c>[R, in]</c> weight into an owned <c>[rows, in]</c>.</summary>
+    private static Tensor SliceRows(Tensor t, int r0, int rows)
+    {
+        int inDim = (int)t.Shape[1];
+        Tensor outp = new(new TensorShape(rows, inDim), DType.F32);
+        Buffer.MemoryCopy((byte*)t.DataPointer + (long)r0 * inDim * 4, (void*)outp.DataPointer, (long)rows * inDim * 4, (long)rows * inDim * 4);
+        return outp;
+    }
+
     public static BertEmbeddingModel Load(string ggufPath)
     {
         (Dictionary<string, Tensor> w, GgufModelLoader.LoadedGgufModel handle) = GgufModelLoader.LoadDequantized(ggufPath, DType.F32);
         try
         {
+            string arch = (handle.Metadata.GetString("general.architecture") ?? "bert").ToLowerInvariant();
             // nn.Linear weights are ggml ne=[in,out] with raw bytes already row-major [out,in] → relabel for Linear.
             foreach (string key in w.Keys.ToList())
             {
                 if (!key.EndsWith(".weight", StringComparison.Ordinal) || w[key].Shape.Rank != 2) continue;
-                if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_output")
-                    || key.Contains("ffn_up") || key.Contains("ffn_down"))
+                if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_qkv")
+                    || key.Contains("attn_output") || key.Contains("ffn_up") || key.Contains("ffn_down") || key.Contains("ffn_gate")
+                    || key == "cls.weight" || key == "cls.output.weight")   // reranker classification head
                     w[key] = Relabel(w[key]);
             }
-            if (Environment.GetEnvironmentVariable("HARTSY_BERT_DEBUG") == "1")
-                Console.Error.WriteLine("[bert keys] " + string.Join(" ", w.Keys.Where(k => !k.StartsWith("blk.")).OrderBy(k => k)));
             GgufMetadata m = handle.Metadata;
-            int hidden = (int)m.GetUInt32("bert.embedding_length");
-            int layers = (int)m.GetUInt32("bert.block_count");
-            int heads = (int)m.GetUInt32("bert.attention.head_count");
-            int inter = (int)m.GetUInt32("bert.feed_forward_length");
-            int maxPos = (int)m.GetUInt32("bert.context_length", 512u);
-            float eps = m.GetFloat32("bert.attention.layer_norm_epsilon", 1e-12f);
-            int pooling = (int)m.GetUInt32("bert.pooling_type", 2u);
+            int hidden = (int)m.GetUInt32($"{arch}.embedding_length");
+            int layers = (int)m.GetUInt32($"{arch}.block_count");
+            int heads = (int)m.GetUInt32($"{arch}.attention.head_count");
+            int inter = (int)m.GetUInt32($"{arch}.feed_forward_length");
+            int maxPos = (int)m.GetUInt32($"{arch}.context_length", 512u);
+            float eps = m.GetFloat32($"{arch}.attention.layer_norm_epsilon", 1e-12f);
+            int pooling = (int)m.GetUInt32($"{arch}.pooling_type", 2u);
+            float ropeBase = m.GetFloat32($"{arch}.rope.freq_base", 0f);
+            bool useRope = !w.ContainsKey("position_embd.weight") && ropeBase > 0f;
+            bool useGeGlu = w.ContainsKey("blk.0.ffn_gate.weight");
+
+            // Fused QKV (nomic) → split the relabeled [3*hidden, hidden] into separate q/k/v weights (order q,k,v).
+            for (int i = 0; i < layers; i++)
+            {
+                string qkv = $"blk.{i}.attn_qkv.weight";
+                if (!w.ContainsKey(qkv)) continue;
+                Tensor f = w[qkv];
+                ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_q.weight"] = SliceRows(f, 0, hidden);
+                ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_k.weight"] = SliceRows(f, hidden, hidden);
+                ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_v.weight"] = SliceRows(f, 2 * hidden, hidden);
+            }
+
+            // Reranker out_proj (hidden→1) is stored as a rank-1 [hidden] vector → reshape to [1, hidden] for Linear.
+            if (w.ContainsKey("cls.output.weight") && w["cls.output.weight"].Shape.Rank == 1)
+            {
+                Tensor o = w["cls.output.weight"];
+                Tensor r = new(new TensorShape(1, (int)o.Shape[0]), DType.F32);
+                Buffer.MemoryCopy((void*)o.DataPointer, (void*)r.DataPointer, o.ElementCount * 4, o.ElementCount * 4);
+                ((Dictionary<string, Tensor>)w)["cls.output.weight"] = r;
+            }
             string[]? vocab = m.GetStringArray("tokenizer.ggml.tokens");
-            return new BertEmbeddingModel(handle, w, hidden, layers, heads, inter, maxPos, eps, pooling, vocab);
+            bool hasRerankHead = w.ContainsKey("cls.weight") && w.ContainsKey("cls.output.weight");
+            return new BertEmbeddingModel(handle, w, hidden, layers, heads, inter, maxPos, eps, pooling, vocab, useRope, ropeBase, useGeGlu, hasRerankHead);
         }
         catch { handle.Dispose(); throw; }
     }
 
     private Tensor W(string key) => _w[key];
+    private Tensor? Wopt(string key) => _w.TryGetValue(key, out Tensor? t) ? t : null;
 
     /// <summary>Encodes WordPiece token ids (including <c>[CLS]</c>/<c>[SEP]</c>) into a pooled, L2-normalized
     /// sentence embedding of length <see cref="Hidden"/>.</summary>
     public float[] Encode(IBackend backend, IReadOnlyList<int> ids)
     {
-        int seq = ids.Count, hidden = Hidden, heads = NumHeads, hd = HeadDim;
-        TensorShape flat = new(1, seq, hidden);
-
-        // 1. Embeddings: token + absolute position + token-type(segment 0), then LayerNorm.
-        Tensor emb = new(flat, DType.F32);
-        float* e = (float*)emb.DataPointer;
-        float* tok = (float*)W("token_embd.weight").DataPointer;       // [vocab, hidden]
-        float* pos = (float*)W("position_embd.weight").DataPointer;    // [maxPos, hidden]
-        float* typ = (float*)W("token_types.weight").DataPointer;      // [2, hidden]
-        for (int s = 0; s < seq; s++)
-        {
-            float* dst = e + (long)s * hidden;
-            float* tsrc = tok + (long)ids[s] * hidden;
-            float* psrc = pos + (long)s * hidden;
-            for (int c = 0; c < hidden; c++) dst[c] = tsrc[c] + psrc[c] + typ[c];   // type[0]
-        }
-        Tensor normed = new(flat, DType.F32);
-        backend.LayerNorm(normed, emb, W("token_embd_norm.weight"), W("token_embd_norm.bias"), Eps);
-        emb.Dispose();
-
-        Tensor h = normed;
-        for (int i = 0; i < NumLayers; i++)
-        {
-            Tensor next = Block(backend, h, i, seq);
-            h.Dispose(); h = next;
-        }
-
-        // Pool + L2 normalize.
-        float* hp = (float*)h.DataPointer;   // [seq, hidden] (D2H sync)
-        backend.Sync();
+        int hidden = Hidden;
+        using Tensor h = RunEncoder(backend, ids);
+        float* hp = (float*)h.DataPointer; backend.Sync();
+        int seq = ids.Count;
         float[] outv = new float[hidden];
         if (PoolingType == 1)   // mean over tokens
         {
@@ -116,15 +136,71 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         {
             for (int c = 0; c < hidden; c++) outv[c] = hp[c];
         }
-        h.Dispose();
         double norm = 0; for (int c = 0; c < hidden; c++) norm += (double)outv[c] * outv[c];
         float inv = (float)(1.0 / Math.Sqrt(norm + 1e-12));
         for (int c = 0; c < hidden; c++) outv[c] *= inv;
         return outv;
     }
 
-    /// <summary>One post-norm BERT block: bidirectional self-attention → +res → LayerNorm → FFN(GELU) → +res → LayerNorm.</summary>
-    private Tensor Block(IBackend backend, Tensor x, int i, int seq)
+    /// <summary>Reranker (cross-encoder) relevance score for a (query, document) token sequence: runs the encoder,
+    /// takes the CLS token (0), and applies the classification head (<c>cls</c> dense → tanh → <c>cls.output</c> → 1
+    /// logit). Higher = more relevant. Requires <see cref="HasRerankHead"/>.</summary>
+    public float Score(IBackend backend, IReadOnlyList<int> ids)
+    {
+        if (!HasRerankHead) throw new InvalidOperationException("This GGUF has no reranker head (cls.*).");
+        int hidden = Hidden;
+        using Tensor h = RunEncoder(backend, ids);
+        // CLS token (0) → dense → tanh → out_proj → scalar logit.
+        using Tensor cls = new(new TensorShape(1, 1, hidden), DType.F32);
+        backend.Sync();
+        Buffer.MemoryCopy((void*)h.DataPointer, (void*)cls.DataPointer, (long)hidden * 4, (long)hidden * 4);
+        using Tensor dense = new(new TensorShape(1, 1, hidden), DType.F32);
+        backend.Linear(dense, cls, W("cls.weight"), Wopt("cls.bias"));
+        backend.Tanh(dense, dense);
+        int outDim = (int)W("cls.output.weight").Shape[0];
+        using Tensor logit = new(new TensorShape(1, 1, outDim), DType.F32);
+        backend.Linear(logit, dense, W("cls.output.weight"), Wopt("cls.output.bias"));
+        backend.Sync();
+        return ((float*)logit.DataPointer)[0];
+    }
+
+    /// <summary>Runs the embeddings + all encoder blocks, returning the final hidden state <c>[1, seq, hidden]</c>.</summary>
+    private Tensor RunEncoder(IBackend backend, IReadOnlyList<int> ids)
+    {
+        int seq = ids.Count, hidden = Hidden;
+        TensorShape flat = new(1, seq, hidden);
+
+        // 1. Embeddings: token + (absolute position, unless rotary) + token-type(segment 0), then LayerNorm.
+        Tensor emb = new(flat, DType.F32);
+        float* e = (float*)emb.DataPointer;
+        float* tok = (float*)W("token_embd.weight").DataPointer;       // [vocab, hidden]
+        float* pos = UseRope ? null : (float*)W("position_embd.weight").DataPointer;
+        float* typ = (float*)W("token_types.weight").DataPointer;      // [2, hidden]
+        for (int s = 0; s < seq; s++)
+        {
+            float* dst = e + (long)s * hidden;
+            float* tsrc = tok + (long)ids[s] * hidden;
+            float* psrc = pos is null ? null : pos + (long)s * hidden;
+            for (int c = 0; c < hidden; c++) dst[c] = tsrc[c] + (psrc is null ? 0f : psrc[c]) + typ[c];
+        }
+        Tensor normed = new(flat, DType.F32);
+        backend.LayerNorm(normed, emb, W("token_embd_norm.weight"), W("token_embd_norm.bias"), Eps);
+        emb.Dispose();
+
+        (float[]? cos, float[]? sin) = UseRope ? BuildRope(seq) : (null, null);
+
+        Tensor h = normed;
+        for (int i = 0; i < NumLayers; i++)
+        {
+            Tensor next = Block(backend, h, i, seq, cos, sin);
+            h.Dispose(); h = next;
+        }
+        return h;
+    }
+
+    /// <summary>One post-norm block: (optionally rotary) bidirectional self-attention → +res → LayerNorm →
+    /// FFN (GELU or GeGLU) → +res → LayerNorm. Biases are optional (nomic-bert has none on the linears).</summary>
+    private Tensor Block(IBackend backend, Tensor x, int i, int seq, float[]? cos, float[]? sin)
     {
         int hidden = Hidden, heads = NumHeads, hd = HeadDim;
         string p = $"blk.{i}";
@@ -133,9 +209,15 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         Tensor q = new(new TensorShape(1, seq, heads, hd), DType.F32);
         Tensor k = new(new TensorShape(1, seq, heads, hd), DType.F32);
         Tensor v = new(new TensorShape(1, seq, heads, hd), DType.F32);
-        backend.Linear(q, x, W($"{p}.attn_q.weight"), W($"{p}.attn_q.bias"));
-        backend.Linear(k, x, W($"{p}.attn_k.weight"), W($"{p}.attn_k.bias"));
-        backend.Linear(v, x, W($"{p}.attn_v.weight"), W($"{p}.attn_v.bias"));
+        backend.Linear(q, x, W($"{p}.attn_q.weight"), Wopt($"{p}.attn_q.bias"));
+        backend.Linear(k, x, W($"{p}.attn_k.weight"), Wopt($"{p}.attn_k.bias"));
+        backend.Linear(v, x, W($"{p}.attn_v.weight"), Wopt($"{p}.attn_v.bias"));
+        if (UseRope)
+        {
+            backend.Sync();
+            ApplyRope(q, cos!, sin!, seq, heads, hd);
+            ApplyRope(k, cos!, sin!, seq, heads, hd);
+        }
 
         Tensor qM = new(new TensorShape(1, heads, seq, hd), DType.F32);
         Tensor kM = new(new TensorShape(1, heads, seq, hd), DType.F32);
@@ -151,7 +233,7 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         backend.Permute0213(attnFlat, attn, heads, seq, hd);
         attn.Dispose();
         Tensor attnOut = new(flat, DType.F32);
-        backend.Linear(attnOut, attnFlat, W($"{p}.attn_output.weight"), W($"{p}.attn_output.bias"));
+        backend.Linear(attnOut, attnFlat, W($"{p}.attn_output.weight"), Wopt($"{p}.attn_output.bias"));
         attnFlat.Dispose();
 
         Tensor afterAttn = new(flat, DType.F32);
@@ -161,13 +243,23 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         backend.LayerNorm(normed1, afterAttn, W($"{p}.attn_output_norm.weight"), W($"{p}.attn_output_norm.bias"), Eps);
         afterAttn.Dispose();
 
-        Tensor up = new(new TensorShape(1, seq, Intermediate), DType.F32);
-        backend.Linear(up, normed1, W($"{p}.ffn_up.weight"), W($"{p}.ffn_up.bias"));
+        // FFN: GeGLU (down(gelu(gate)·up)) for nomic, else plain GELU (down(gelu(up))).
         Tensor act = new(new TensorShape(1, seq, Intermediate), DType.F32);
-        backend.Gelu(act, up);
+        Tensor up = new(new TensorShape(1, seq, Intermediate), DType.F32);
+        backend.Linear(up, normed1, W($"{p}.ffn_up.weight"), Wopt($"{p}.ffn_up.bias"));
+        if (UseGeGlu)
+        {
+            // nomic-bert's gated MLP is SwiGLU (SiLU gate), per its "swiglu" activation config.
+            Tensor gate = new(new TensorShape(1, seq, Intermediate), DType.F32);
+            backend.Linear(gate, normed1, W($"{p}.ffn_gate.weight"), Wopt($"{p}.ffn_gate.bias"));
+            backend.Silu(gate, gate);
+            backend.Mul(act, gate, up);
+            gate.Dispose();
+        }
+        else backend.Gelu(act, up);
         up.Dispose();
         Tensor down = new(flat, DType.F32);
-        backend.Linear(down, act, W($"{p}.ffn_down.weight"), W($"{p}.ffn_down.bias"));
+        backend.Linear(down, act, W($"{p}.ffn_down.weight"), Wopt($"{p}.ffn_down.bias"));
         act.Dispose();
         Tensor afterFfn = new(flat, DType.F32);
         backend.Add(afterFfn, normed1, down);
@@ -176,6 +268,40 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         backend.LayerNorm(result, afterFfn, W($"{p}.layer_output_norm.weight"), W($"{p}.layer_output_norm.bias"), Eps);
         afterFfn.Dispose();
         return result;
+    }
+
+    /// <summary>Standard rotary cos/sin tables [seq, headDim] (NeoX rotate-half, base <see cref="RopeBase"/>).</summary>
+    private (float[] cos, float[] sin) BuildRope(int seq)
+    {
+        int hd = HeadDim, half = hd / 2;
+        float[] cos = new float[seq * hd], sin = new float[seq * hd];
+        for (int p = 0; p < seq; p++)
+            for (int i = 0; i < half; i++)
+            {
+                float ang = p / MathF.Pow(RopeBase, (2f * i) / hd);
+                float c = MathF.Cos(ang), s = MathF.Sin(ang);
+                cos[p * hd + i] = c; cos[p * hd + i + half] = c;
+                sin[p * hd + i] = s; sin[p * hd + i + half] = s;
+            }
+        return (cos, sin);
+    }
+
+    private static void ApplyRope(Tensor t, float[] cos, float[] sin, int seq, int heads, int hd)
+    {
+        float* pp = (float*)t.DataPointer;   // [1, seq, heads, hd]
+        int half = hd / 2;
+        float[] tmp = new float[hd];
+        for (int s = 0; s < seq; s++)
+            for (int h = 0; h < heads; h++)
+            {
+                float* row = pp + ((long)s * heads + h) * hd;
+                for (int e = 0; e < hd; e++) tmp[e] = row[e];
+                for (int e = 0; e < hd; e++)
+                {
+                    float rot = e < half ? -tmp[e + half] : tmp[e - half];
+                    row[e] = tmp[e] * cos[s * hd + e] + rot * sin[s * hd + e];
+                }
+            }
     }
 
     public void Dispose()

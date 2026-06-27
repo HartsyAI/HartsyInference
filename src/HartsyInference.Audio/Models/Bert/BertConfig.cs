@@ -18,4 +18,11 @@ public sealed record BertConfig
 
     /// <summary>chinese-roberta-wwm-ext-large preset (GPT-SoVITS).</summary>
     public static BertConfig ChineseRobertaWwmExtLarge => new();
+
+    /// <summary>bert-base-uncased preset (MeloTTS English prosody BERT): 12 layers, hidden 768, 12 heads,
+    /// intermediate 3072, vocab 30522.</summary>
+    public static BertConfig BaseUncased => new()
+    {
+        Hidden = 768, NumLayers = 12, NumHeads = 12, Intermediate = 3072, VocabSize = 30522,
+    };
 }

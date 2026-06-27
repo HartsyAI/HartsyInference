@@ -134,9 +134,20 @@ public sealed class GgufLanguageModel : IDisposable
 
             ILlmTokenizer tokenizer = BuildTokenizer(handle.Metadata);
             string? chatTemplate = handle.Metadata.GetString("tokenizer.chat_template");
-            IChatTemplate template = !string.IsNullOrWhiteSpace(chatTemplate)
-                ? new JinjaChatTemplate(chatTemplate)
-                : new ChatMlTemplate();
+            // Compile the model's Jinja template if present, but stay tolerant: some models (e.g. embedding models)
+            // ship templates using constructs the engine doesn't support (Python slicing). Those models are still
+            // usable for raw completion / embeddings, so fall back to ChatML rather than failing the whole load.
+            IChatTemplate template;
+            if (!string.IsNullOrWhiteSpace(chatTemplate))
+            {
+                try { template = new JinjaChatTemplate(chatTemplate); }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[WRN] GGUF: chat template did not compile ({ex.Message}); falling back to ChatML (raw completion / embeddings still work).");
+                    template = new ChatMlTemplate();
+                }
+            }
+            else template = new ChatMlTemplate();
 
             return new GgufLanguageModel(handle, config, transformer, tokenizer, template);
         }

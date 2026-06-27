@@ -46,6 +46,13 @@ if (arch == "embed")
     return HartsyInference.TextGen.Cli.EmbedRunner.Run(backendName, args.Length > 3 ? args[3] : "A photo of a cat.");
 }
 
+// ── Mamba (SSM) mode: hartsyinference-textgen mamba [backend] ──────────────────────────────────────
+// HARTSY_MODEL_DIR = a mamba .gguf; HARTSY_MAMBA_IDS = comma-separated token ids; dumps the next-token logits.
+if (arch == "mamba")
+{
+    return HartsyInference.TextGen.Cli.MambaRunner.Run(backendName);
+}
+
 using IBackend backend = backendName == "cpu"
     ? new CpuBackend()
     : new CudaBackend(deviceOrdinal: 0, ptxDir: Path.Combine(AppContext.BaseDirectory, "Ptx"));

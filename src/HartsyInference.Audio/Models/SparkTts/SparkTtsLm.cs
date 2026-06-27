@@ -37,7 +37,7 @@ public sealed unsafe class SparkTtsLm : IDisposable
     /// indices (absolute LM token IDs mapped back through the config bases).</summary>
     /// <param name="maxTokens">Hard cap on generated tokens (~ 50 Hz × seconds).</param>
     public (List<int> Global, List<int> Semantic) GenerateAudioTokens(IBackend backend,
-        ReadOnlySpan<int> promptTokenIds, int maxTokens = 1500, int seed = 0)
+        ReadOnlySpan<int> promptTokenIds, int maxTokens = 1500, int seed = 0, bool greedy = false)
     {
         ThrowIfDisposed();
         int promptLen = promptTokenIds.Length;
@@ -61,12 +61,20 @@ public sealed unsafe class SparkTtsLm : IDisposable
             Tensor logits = _backbone.ProjectLogits(backend, last, batch: 1, t: 1);
             last.Dispose();
 
-            int next = NucleusSampler.Draw(
-                new Span<float>((void*)logits.DataPointer, vocab), vocab,
-                _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+            Span<float> logitSpan = new((void*)logits.DataPointer, vocab);
+            int next;
+            if (greedy)
+            {
+                next = 0; float best = float.NegativeInfinity;
+                for (int i = 0; i < vocab; i++) if (logitSpan[i] > best) { best = logitSpan[i]; next = i; }
+            }
+            else
+            {
+                next = NucleusSampler.Draw(logitSpan, vocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+            }
             logits.Dispose();
 
-            if (next == _cfg.EosTokenId) break;
+            if (next == _cfg.EosTokenId || next == _cfg.EndSemanticTokenId) break;
 
             if (next >= _cfg.GlobalTokenBase && next < _cfg.GlobalTokenBase + _cfg.GlobalVocab)
                 global.Add(next - _cfg.GlobalTokenBase);
