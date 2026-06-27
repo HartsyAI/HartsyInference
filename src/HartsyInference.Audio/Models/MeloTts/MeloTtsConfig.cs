@@ -8,8 +8,18 @@ namespace HartsyInference.Audio.Models.MeloTts;
 /// (MeloTTS deltas).</summary>
 public sealed record MeloTtsConfig
 {
-    /// <summary>The shared VITS core config (hidden 192, gin 256 for multispeaker).</summary>
-    public VitsConfig Core { get; init; } = new() { GinChannels = 256, NumSpeakers = 1, SampleRate = 44_100, NumVocab = 256 };
+    /// <summary>The shared VITS core config (hidden 192, gin 256 multispeaker, 44.1 kHz HiFi-GAN-V1 with the extra
+    /// upsample stage: ResBlock1, rates [8,8,2,2,2] (∏ = 512 = hop), init 512).</summary>
+    public VitsConfig Core { get; init; } = new()
+    {
+        GinChannels = 256, NumSpeakers = 1, SampleRate = 44_100, NumVocab = 256,
+        ResBlock = "1",
+        ResBlockKernelSizes = [3, 7, 11],
+        ResBlockDilations = [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        UpsampleRates = [8, 8, 2, 2, 2],
+        UpsampleKernelSizes = [16, 16, 8, 2, 2],
+        UpsampleInitialChannel = 512,
+    };
 
     public int NumTones { get; init; } = 16;
     public int NumLanguages { get; init; } = 10;

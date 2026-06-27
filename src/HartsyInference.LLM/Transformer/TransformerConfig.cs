@@ -66,6 +66,34 @@ public sealed record MoeConfig
     public int FirstDenseLayers { get; init; }
 }
 
+/// <summary>Multi-head Latent Attention (DeepSeek-V2/V3, Kimi-K2). Instead of per-head K/V projections, the
+/// keys/values are compressed to a shared low-rank latent (<see cref="KvLoraRank"/>) plus a small shared RoPE
+/// key (<see cref="QkRopeHeadDim"/>), then up-projected per head. Queries are either projected directly
+/// (<see cref="QLoraRank"/> = 0, DeepSeek-V2-Lite) or themselves compressed/up-projected (larger models). Each
+/// head's Q/K split into a no-position part (<see cref="QkNopeHeadDim"/>) and a RoPE part
+/// (<see cref="QkRopeHeadDim"/>); attention scores use the full <see cref="QkHeadDim"/> but the value/output use
+/// <see cref="VHeadDim"/>.</summary>
+public sealed record MlaConfig
+{
+    /// <summary>Compressed KV latent rank (DeepSeek-V2-Lite: 512).</summary>
+    public required int KvLoraRank { get; init; }
+
+    /// <summary>Compressed query rank, or 0 for a direct query projection (DeepSeek-V2-Lite = 0).</summary>
+    public int QLoraRank { get; init; }
+
+    /// <summary>Per-head no-position (non-RoPE) Q/K dimension (DeepSeek-V2-Lite: 128).</summary>
+    public required int QkNopeHeadDim { get; init; }
+
+    /// <summary>Per-head RoPE Q/K dimension — the decoupled rotary part (DeepSeek-V2-Lite: 64).</summary>
+    public required int QkRopeHeadDim { get; init; }
+
+    /// <summary>Per-head value/output dimension (DeepSeek-V2-Lite: 128).</summary>
+    public required int VHeadDim { get; init; }
+
+    /// <summary>Full per-head Q/K dimension used for the attention scores: nope + rope.</summary>
+    public int QkHeadDim => QkNopeHeadDim + QkRopeHeadDim;
+}
+
 /// <summary>Architecture description for the config-driven <see cref="GenericTransformer"/> — one record that
 /// covers the dense decoder-LLM family (Qwen2, Qwen3, and Llama-lineage models) so a new model is a preset
 /// plus a checkpoint key mapping, not a new transformer class.
@@ -91,6 +119,14 @@ public sealed record TransformerConfig
     /// <summary>Per-head dimension. Decoupled from <see cref="HiddenSize"/> / <see cref="NumHeads"/> — Qwen3
     /// projects Q to <c>NumHeads · HeadDim</c> which need not equal <see cref="HiddenSize"/>.</summary>
     public required int HeadDim { get; init; }
+
+    /// <summary>RoPE rotary dimension: how many leading dims of each head are rotated (partial rotary). 0 (default)
+    /// = full (<see cref="HeadDim"/>). Phi-4-mini (96 of 128) and StableLM-2 use partial rotary; the remaining
+    /// dims pass through unrotated.</summary>
+    public int RotaryDim { get; init; }
+
+    /// <summary>Effective rotary dimension (<see cref="RotaryDim"/> if set, else the full <see cref="HeadDim"/>).</summary>
+    public int EffRotaryDim => RotaryDim > 0 && RotaryDim < HeadDim ? RotaryDim : HeadDim;
 
     /// <summary>SwiGLU feed-forward inner dimension.</summary>
     public required int IntermediateSize { get; init; }
@@ -120,6 +156,11 @@ public sealed record TransformerConfig
     /// reshape into heads, before RoPE). <c>true</c> for Qwen3, <c>false</c> for Qwen2/Llama.</summary>
     public bool QkNorm { get; init; }
 
+    /// <summary>When <see cref="QkNorm"/> is set: <c>false</c> (Qwen3) normalizes each head over
+    /// <see cref="HeadDim"/>; <c>true</c> (OLMoE) normalizes the whole Q vector over <see cref="QDim"/> (and K
+    /// over <see cref="KvDim"/>) before splitting into heads. Detected from the q_norm weight length.</summary>
+    public bool QkNormFullDim { get; init; }
+
     /// <summary>Whether <c>lm_head</c> shares the embedding table (no separate <c>lm_head.weight</c>).</summary>
     public bool TieWordEmbeddings { get; init; } = true;
 
@@ -138,6 +179,20 @@ public sealed record TransformerConfig
     /// <summary>Gemma's <c>(1 + weight)</c> RMSNorm: the norm weight is offset by 1 (the GGUF/HF weight stores
     /// the centered value). Baked into the loaded norm weights at load time, so the runtime norm op is unchanged.</summary>
     public bool RmsNormAddOne { get; init; }
+
+    /// <summary>Use LayerNorm (mean-centered) instead of RMSNorm for all norms. <c>true</c> for Cohere
+    /// (Command-R / cohere2); the GGUF carries no norm bias, so a zero bias is supplied.</summary>
+    public bool UseLayerNorm { get; init; }
+
+    /// <summary>Parallel residual (GPT-NeoX / Cohere): attention and the FFN both read the <i>same</i> normed
+    /// input and their outputs are summed into the residual once (a single norm per layer, no pre-FFN norm),
+    /// instead of the sequential pre-norm path. <c>true</c> for Cohere.</summary>
+    public bool ParallelResidual { get; init; }
+
+    /// <summary>Cohere2 interleaves sliding-window layers (with RoPE) and full-attention "global" layers that use
+    /// <b>no</b> positional encoding (NoPE). When <c>true</c>, RoPE is skipped on the global layers
+    /// (<see cref="IsGlobalLayer"/>). <c>false</c> for everything else.</summary>
+    public bool NoRopeOnGlobalLayers { get; init; }
 
     /// <summary>Multiplier applied to token embeddings after lookup. 1 for Qwen/Llama; Gemma uses
     /// <c>sqrt(HiddenSize)</c> (the embedding normalizer).</summary>
@@ -161,6 +216,19 @@ public sealed record TransformerConfig
     /// longer than the window; shorter contexts are unaffected (every position is in-window).</summary>
     public int SlidingWindow { get; init; }
 
+    /// <summary>Granite's direct attention-score multiplier (its <c>attention.scale</c>, e.g. 0.015625), used in
+    /// place of <c>1/sqrt(HeadDim)</c>. 0 (default) means the standard scale. Takes precedence over
+    /// <see cref="QueryPreAttnScalar"/>.</summary>
+    public float AttentionMultiplier { get; init; }
+
+    /// <summary>Granite's residual multiplier (its <c>residual_scale</c>, e.g. 0.22): each sublayer output is
+    /// scaled by this before being added to the residual stream. 1 (default) is a no-op.</summary>
+    public float ResidualMultiplier { get; init; } = 1f;
+
+    /// <summary>Granite's logit scaling (its <c>logit_scale</c>, e.g. 8.0): final logits are divided by this.
+    /// 1 (default) is a no-op.</summary>
+    public float LogitScale { get; init; } = 1f;
+
     /// <summary>Attention-logit soft-cap (Gemma-2 = 50): scores are capped via <c>cap·tanh(score/cap)</c> before
     /// the softmax. 0 (default) disables it. Requires the soft-capping attention path.</summary>
     public float AttnLogitSoftcap { get; init; }
@@ -176,8 +244,10 @@ public sealed record TransformerConfig
     /// <see cref="RopeLocalTheta"/>, global use <see cref="RopeTheta"/>).</summary>
     public float RopeThetaFor(int i) => RopeLocalTheta > 0 && !IsGlobalLayer(i) ? RopeLocalTheta : RopeTheta;
 
-    /// <summary>Attention score scale: <c>1/sqrt(QueryPreAttnScalar)</c> when set, else <c>1/sqrt(HeadDim)</c>.</summary>
-    public float AttnScale => 1f / MathF.Sqrt(QueryPreAttnScalar > 0 ? QueryPreAttnScalar : HeadDim);
+    /// <summary>Attention score scale: Granite's direct <see cref="AttentionMultiplier"/> if set, else
+    /// <c>1/sqrt(QueryPreAttnScalar)</c> when set, else the standard <c>1/sqrt(HeadDim)</c>.</summary>
+    public float AttnScale => AttentionMultiplier > 0 ? AttentionMultiplier
+        : 1f / MathF.Sqrt(QueryPreAttnScalar > 0 ? QueryPreAttnScalar : HeadDim);
 
     /// <summary>For quantized (GGUF) weights: when <c>false</c> (default) the dequantized F16 weight is cached
     /// per weight (fast decode, but the weight set occupies F16-sized VRAM); when <c>true</c> the low-VRAM
@@ -197,6 +267,14 @@ public sealed record TransformerConfig
 
     /// <summary>Mixture-of-Experts FFN config, or <c>null</c> for a dense SwiGLU FFN (Qwen2/Qwen3/Llama dense).</summary>
     public MoeConfig? Moe { get; init; }
+
+    /// <summary>Multi-head Latent Attention config (DeepSeek-V2/V3, Kimi-K2), or <c>null</c> for standard
+    /// per-head Q/K/V attention. When set, the layer uses the latent-KV attention path.</summary>
+    public MlaConfig? Mla { get; init; }
+
+    /// <summary>Per-routed-expert output scale (DeepSeek <c>routed_scaling_factor</c> / <c>expert_weights_scale</c>);
+    /// 1 (default) is a no-op. Applied to the combined routed-expert contribution.</summary>
+    public float ExpertWeightsScale { get; init; } = 1f;
 
     /// <summary>Whether layer <paramref name="layerIndex"/> uses the MoE FFN (vs dense SwiGLU).</summary>
     public bool IsMoeLayer(int layerIndex) => Moe is not null && layerIndex >= Moe.FirstDenseLayers;

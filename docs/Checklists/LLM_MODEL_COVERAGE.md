@@ -91,17 +91,30 @@ Complete the non-MoE, non-MLA, non-vision text family. Each is a preset + key-ma
       flash-attn kernel now pads the block to the next power of two (handles any D≤1024), and the CPU reference
       was extracted to `AttentionReference` so the GPU fallback no longer re-dispatches into itself.
 - [x] **Phi-3.5-mini (3.8B) Q4_K_M verified e2e** on CUDA (low-VRAM) — coherent.
-- [ ] Phi-4-mini (tiktoken/o200k tokenizer, reuse `GptOssTokenizer`); Phi-3 sliding window for long context
+- [x] **Phi-4-mini tokenizer**: added the o200k / `gpt-4o` byte-level pre-tokenizer regex to the GGUF tokenizer
+      path (`pre == "gpt-4o"/"o200k"`) — tokenization now correct (reusable for GPT-OSS). Config (GQA 24/8, tied)
+      detected fine.
+- [x] **Phi-4-mini-instruct verified e2e** — gpt-4o tokenizer + partial rotary (96/128) + a fused-QKV-split fix
+      (the split must use the real head_dim=128, not `rope.dimension_count`=96; these coincided on Phi-3.5).
 
 ### 1c. Cohere Command-R (small), StableLM-2, Granite-3 dense — engine work: medium
-- [ ] LayerNorm (no bias) + parallel attn/FFN residual + tied + logit scale (Command-R)
-- [ ] Partial rotary + (optional) QKV bias + parallel residual (StableLM-2)
-- [ ] Residual/attention/embedding/logit multipliers (Granite-3)
-- [ ] arches `command-r`, `stablelm`, `granite` → mappers; verify the ≤3B variants
+- [x] **Granite-3** scalar multipliers: `embedding_scale` (reuses EmbeddingScale), `attention.scale` (direct
+      `AttentionMultiplier`, not 1/√d), `residual_scale` (`ResidualMultiplier`, in `PostSublayer`), `logit_scale`
+      (divide in `ProjectLogits`). Arch `granite`/`granitemoe` registered to the llama mapper.
+- [x] **Granite-3.1-2B-instruct Q4_K_M verified e2e** on CUDA.
+- [x] **Command-R7B (cohere2) verified e2e** on CUDA (low-VRAM). Recipe: LayerNorm (zero-bias) + parallel
+      residual + **interleaved (NORM) RoPE** (like llama, permuted q/k) + **NoPE on global layers** (1 of every 4
+      is full-attention with no positional encoding) + logit-scale-as-multiply. Jinja `break`/`continue` +
+      `macro`-tolerance added for its template. Reusable for orig Command-R 35B / GPT-NeoX.
+- [x] **Partial rotary** — `RotaryDim` config + `rotaryDim` param on `ApplyRopeSingle` (CPU ref + the shared
+      `dit_rope_f32` kernel, defaulted so DiT is byte-identical) + `BuildRope` sizing. Detected from
+      `rope.dimension_count < head_dim`. **Verified via Phi-4-mini and StableLM-2.**
+- [x] **StableLM-2-1.6B verified e2e** (partial rotary + QKV bias; `stablelm` registered to the llama mapper).
 
 ### 1d. Catch-all llama-lineage verification (no/low engine work)
-- [ ] Verify already-loadable models render coherently: SmolLM2, TinyLlama, Yi-6B, InternLM2, OLMo-2, Falcon3, MiniCPM, Nemotron-mini, Ministral-3B
-- [ ] Add per-model presets/notes + chat-template checks; file bugs as found (like the Phase-0 RoPE bugs)
+- [x] **Mistral-7B-Instruct-v0.3** verified e2e (llama arch, interleaved RoPE, GQA 32/8) — loads + runs unchanged
+- [x] **SmolLM2-1.7B, TinyLlama-1.1B, Yi-1.5-6B** verified e2e (all work as-is via the llama-family path)
+- [ ] Remaining sweep (lower priority, expected to work): InternLM2, OLMo-2, Falcon3, MiniCPM, Ministral, Nemotron-mini
 
 ---
 
@@ -109,14 +122,23 @@ Complete the non-MoE, non-MLA, non-vision text family. Each is a preset + key-ma
 
 Spine already does MoE; this is GGUF detection + per-arch quirks. Most MoE models exceed 12 GB.
 
-- [ ] `GgufConfigFactory`: read `{arch}.expert_count`, `expert_used_count`, `expert_feed_forward_length`,
-      `expert_shared_count`, `expert_weights_scale`, `expert_gating_func` → populate `MoeConfig`
-- [ ] MoE expert-tensor key-mapping (stacked `ffn_*_exps` ↔ per-expert) in the llama-family mapper
-- [ ] arches: `qwen2moe`, `qwen3moe`, `mixtral`(llama-moe), `olmoe`, `granitemoe`, `phimoe`
-- [ ] **Mixtral 8x7B** — `[~]` build-defer (47B)
-- [ ] **Qwen3-MoE 30B-A3B / 235B** — `[~]` build-defer
-- [ ] Verify a *small* MoE end-to-end if one fits: **OLMoE-1B-7B** (~4 GB active set at Q4) — Runnable@3060 proxy
-- [ ] Router parity test (softmax+renorm vs sigmoid+bias) on tensor slices
+- [x] `GgufConfigFactory`: reads `expert_count`, `expert_used_count`, `expert_feed_forward_length`,
+      `expert_shared_feed_forward_length`, `expert_gating_func`, `leading_dense_block_count`, `expert_weights_norm`
+      → `MoeConfig`. NormTopKProb arch-aware (OLMoE = false, Mixtral/Qwen-MoE = true).
+- [x] Stacked-expert split (`GgufLanguageModel.SplitStackedExperts`): each 3D `ffn_*_exps` [E,·,·] flattened to 2D
+      and row-byte-sliced into per-expert weights (dtype-preserving). Router + shared-expert key mappings added to
+      the llama-family mapper; arches `olmoe`/`qwen2moe`/`qwen3moe` registered to it.
+- [x] **Whole-vector Q/K norm** (OLMoE norms the full Q/K vector, not per-head): config `QkNormFullDim`, detected
+      from the q_norm weight length; the projection output is shaped `[1,T,QDim]` so RMSNorm reduces over it.
+- [x] **OLMoE-1B-7B-0924-Instruct Q4_K_M verified e2e** on CUDA (low-VRAM) — coherent, detailed.
+- [x] **Granite-MoE (granitemoe) verified** — scalars + MoE combined; engine confirmed via raw completion
+      ("The capital of France is" → " Paris."). granite-3.0-1b-a400m's weak instruct quality (repetition / early
+      EOS on chat prompts) is the 400M-active model, not the engine.
+- [x] **Shared-expert + softmax-renorm path validated** by `MoeTests.MoeFeedForward_MatchesReference` against an
+      independent HF-Qwen-MoE reference (covers shared_expert + shared_expert_gate) — no 14GB Qwen-MoE GGUF needed.
+- [~] **Mixtral 8x7B** (47B) / **Qwen3-MoE 30B-A3B / 235B** — build-defer: config (expert metadata → MoeConfig),
+      mapper, and stacked-expert split are all wired; just exceed 12 GB to run. (Mixtral = `llama` arch + experts,
+      interleaved RoPE, renorm; Qwen3-MoE = `qwen3moe`, per-head Q/K norm, no shared expert.)
 
 ---
 
@@ -124,40 +146,137 @@ Spine already does MoE; this is GGUF detection + per-arch quirks. Most MoE model
 
 Multi-head **latent** attention is a new attention path, not a knob. Once done, Kimi-K2 is a config of DeepSeek-V3.
 
-- [ ] MLA in spine + backend: KV compression (`kv_lora_rank`), Q compression (`q_lora_rank`),
-      decoupled RoPE (`qk_rope_head_dim` + `qk_nope_head_dim`), `v_head_dim`
-- [ ] DeepSeek-V3 routing: sigmoid + `e_score_correction_bias`, node/group-limited top-k, 256 experts, shared expert
-- [ ] Optional: MTP (multi-token-prediction) heads — can stub for inference
-- [ ] arches `deepseek2`, `deepseek-v3`/`kimi-k2` → mappers + MoE wiring from Phase 2
-- [ ] **Verification proxy:** DeepSeek-V2-Lite (16B, 2.4B active, has MLA) at Q4 (~10 GB) — attempt Runnable@3060;
-      this is the one place a small MLA model exists to validate the math
-- [ ] **DeepSeek-V3 671B / Kimi-K2 1T** — `[~]` build-defer (cannot load on 12 GB; verified structurally + via proxy)
+- [x] **MLA attention path built** (`GenericTransformer.MlaForward`): direct `q_proj` (V2-Lite) → split [nope|rope];
+      KV down (`kv_a_proj`) → latent + shared rope-key → `kv_a_norm` (RMSNorm) → KV up (`kv_b_proj`) → per-head
+      [k_nope|v]; decoupled RoPE on the rope parts; shared rope-key broadcast across heads (`RepeatKvHeads`);
+      V zero-padded to the qk head dim so the equal-dim FlashAttention (non-pow2 D=192 supported) is reused, then
+      sliced back. `MlaConfig` + `deepseek2` factory wiring + `DeepSeekKeyMapper`.
+- [x] **DeepSeek MoE**: shared expert (size = `expert_shared_count` × expert ffn), leading dense layer
+      (`leading_dense_block_count`), softmax routing; `expert_weights_scale` read (1.0 on V2-Lite, no-op).
+- [x] **yarn** RoPE scaling wired from the GGUF (`rope.scaling.type=yarn`, factor/orig-ctx); mscale approximate.
+- [x] **Memory fixes** (needed even to load): MoE expert split is now a **zero-copy view** over the mmap (was
+      copying ~7 GB → host OOM-killed); the embedding table is **not** uploaded to GPU when untied (host-gather
+      only) — saves ~0.8 GB.
+- [x] **Validated** by `MlaTests` (synthetic 1-layer MLA: prefill + decode, finite/shaped, cache advances) and
+      by loading the real DeepSeek-V2-Lite GGUF correctly (arch detect, all MLA/MoE tensors mapped, config right).
+- [~] **e2e on 3060 not possible** — DeepSeek-V2-Lite (smallest MLA model, 9.7 GB Q4 + the model's size) exceeds
+      the 3060's ~10.5 GB free VRAM during weight preload. **Build-defer confirmed** (per the >12GB policy).
+- [ ] DeepSeek-V3 extras (build-defer): sigmoid + `e_score_correction_bias`, node/group-limited top-k, 256
+      experts; q-LoRA (`q_a_proj`/`q_b_proj` — mapper has the keys; the MLA forward currently does direct-q only).
+- [ ] **DeepSeek-V3 671B / Kimi-K2 1T** — `[~]` build-defer (architecturally a bigger config of the above).
 
 ---
 
-## Phase 4 — Vision / multimodal VLMs (largest new surface)
+## Phase 4 — Vision / multimodal VLMs (largest new surface) — GROUNDED, ready to build
 
-Encoder half largely exists (SigLIP/CLIP/DINOv2). New work = projector + image-token interleaving + mmproj GGUF load.
+Encoder half exists (SigLIP/CLIP/DINOv2). **Text side is ready**: `ForwardEmbeds` is an embedding-in path, so
+spliced image embeddings flow straight through the verified Gemma-3 / Qwen2.5 / Llama decoders.
 
-- [ ] Multimodal input plumbing: image preprocess → encoder → projector → image tokens spliced into the decoder sequence
-- [ ] mmproj GGUF loader (llama.cpp ships vision weights as a separate `mmproj-*.gguf`)
-- [ ] Projector variants: MLP (LLaVA), pixel-shuffle (Gemma-3, InternVL), perceiver/resampler (Qwen-VL), patch-merger (Qwen2.5-VL)
-- [ ] Multimodal chat-template handling (image placeholder tokens)
-- [ ] **Qwen2.5-VL-3B** (SigLIP-style + patch merger) — Runnable@3060
-- [ ] **Gemma-3-4B vision** (SigLIP + pixel-shuffle, reuses Phase-1a Gemma text) — Runnable@3060
-- [ ] **LLaVA-1.6 / SmolVLM / MiniCPM-V** — Runnable@3060 (LLaVA-7B tight)
-- [ ] **Llama-3.2-11B-Vision / Qwen2.5-VL-7B+** — `[~]` build-defer
-- [ ] Per-encoder image-preprocessing parity vs reference (resize/normalize/patch)
+**First target: Gemma-3-4B-vision** (reuses the verified Gemma-3 text + SigLIP). mmproj inspected
+(`ggml-org/gemma-3-4b-it-GGUF` / `mmproj-model-f16.gguf`, 812 MB): `clip.projector_type=gemma3`; vision 1152-dim,
+27 blocks, 16 heads, image 896, patch 14 → 64×64=4096 patches. Tensors: `v.patch_embd` (Conv 14²×3→1152),
+`v.position_embd` [1152,4096], per block `v.blk.N.{ln1, attn_q/k/v/out+bias, ln2, ffn_up/down+bias}`, `v.post_ln`;
+projector `mm.soft_emb_norm` (RMSNorm 1152) + `mm.input_projection` (1152→2560 = text hidden).
+**Pipeline:** PNG → resize 896² + normalize → patch+pos embed → 27 ViT blocks → post_ln → avg-pool 4096→256 →
+soft_emb_norm → input_projection → splice 256 embeddings at `<image_soft_token>` → `ForwardEmbeds`.
+
+- [x] mmproj GGUF loader + `v.*`/`mm.*` key mapping → vision weight dict (`GgufModelLoader.LoadDequantized`, passthrough mapper)
+- [x] Vision-tower forward (`Gemma3VisionEncoder`: patch Conv → +pos → 27 pre-norm ViT blocks, separate q/k/v+bias,
+      bidirectional FlashAttention `causal:false`, GELU-tanh → post_ln)
+- [x] Gemma-3 projector (`Project`: avg-pool 4096→256 → soft_emb_norm RMSNorm → input_projection Linear)
+- [x] Image preprocessing (resize/normalize via SigLIP mean/std) + structured synthetic test images (`VlmRunner`)
+- [x] Multimodal pipeline `MultimodalGenerator` (encode → splice 256 embeds between `<start_of_image>`/`<end_of_image>` → `ForwardEmbeds` → greedy)
+- [x] CLI `vlm` mode (`hartsyinference-textgen vlm`) end-to-end on the 3060 (loads text 4B Q4 + mmproj, encodes, splices, generates)
+- [x] **Gemma-3-4B-vision VALIDATED vs reference — vision tower numerically correct (corr 1.0).** Reference-diffed the
+      full tower (`tests/python-reference/dump_gemma3_vision_ref.py`: loads the same mmproj GGUF + same pixel input, runs
+      a torch SigLIP tower, diffs each C# stage dump) — **pixels/seq/blk0/postln/embeds all corr=1.0**, maxdiff ~1e-3
+      (F32 accumulation through 27 blocks). **Two bugs found & fixed:** (1) llama.cpp's clip names the SigLIP MLP
+      projections **swapped** — `ffn_down` is fc1 (up, hidden→intermediate, bias=4304) and `ffn_up` is fc2 (down,
+      bias=1152); the bias sizes give it away. The Block now wires them by role, not name. (2) the nn.Linear weights
+      (attn q/k/v/out, ffn) only need a **shape relabel** to `[out,in]` (the GGUF bytes are already row-major `[out,in]`),
+      NOT a data transpose — only `mm.input_projection` (a raw `[in,out]` param) needs the actual transpose.
+      Also verified: embedding scale (image embeds × √hidden), FlashAttention head_dim=72 non-causal (new
+      `Flash_NonPow2HeadDim_NonCausal_MatchesSdpa` test), GELU tanh-approx, Conv2D `[out,in,kh,kw]`, position layout,
+      soft_emb_norm (+1 pre-baked). **E2E:** generates coherent image-grounded text (`HARTSY_VLM_NOPRELOAD=1` to share
+      the GPU with a running SwarmUI). Greedy decode on a 4B-Q4 model + synthetic OOD images is repetition-prone — use
+      the sampler + real images for quality. Instrumentation: `HARTSY_VLM_DEBUG=1`, `HARTSY_VLM_DUMP=<dir>`, `HARTSY_VLM_ENCODE_ONLY=1`.
+- [x] **SmolVLM2-2.2B VALIDATED + e2e correct.** Generalized the encoder to `SiglipVlmEncoder` (shared SigLIP tower +
+      pluggable projector, detected by tensor presence). SmolVLM reuses the validated SigLIP tower verbatim; the only new
+      piece is the **idefics3 pixel-shuffle** projector (scale_factor 3: 729 patches → 81 tokens → `mm.model.fc` 10368→2048).
+      Reference-validated (`tests/python-reference/dump_smolvlm_vision_ref.py`): seq/blk0/postln/embeds all **corr=1.0**.
+      Text side = SmolLM2/llama (already verified; no embedding scale). **E2E correct answers** (`HARTSY_VLM_PATTERN=…`):
+      red circle → "a single red circle"; blue-over-green → "top … blue … bottom … green"; blue square → "a blue square".
+      `mm.model.fc` is a true nn.Linear (relabel, not transpose); SmolVLM prompt = `<|im_start|>User:<fake_token_around_image><global-img>`
+      + [81 img] + `<fake_token_around_image>{q}<end_of_utterance>\nAssistant:` (no separate BOS).
+- [x] **LLaVA-1.5-7B VALIDATED + e2e correct.** Extended `SiglipVlmEncoder` to also cover the CLIP ViT (the `v.blk.*`
+      dialect is shared): CLS token (`v.class_embd` prepended), pre-LN (`v.pre_ln`), quick-GELU (`x·sigmoid(1.702x)` via
+      Scale+Sigmoid+Mul), NO post-LN (mmproj is truncated to the penultimate 23 layers), drop-CLS, and the LLaVA MLP
+      projector (`mm.0`→GELU→`mm.2`, both nn.Linear → relabel). Conv patch-embed has no bias (CLIP) → optional.
+      Reference-validated (`tests/python-reference/dump_llava_vision_ref.py`): seq/blk0/postln/embeds all **corr=1.0**.
+      Text = Vicuna/llama (verified). **E2E correct**: red circle → "a red circle with a white background … a Japanese flag".
+      Prompt = Vicuna v1: `<bos>{system} USER: [576 img] \n{q} ASSISTANT:`. Flags auto-detected from mmproj tensors
+      (class_embd/pre_ln/post_ln presence, `clip.use_gelu`). Covers the whole LLaVA family.
+- [x] **Qwen2.5-VL-3B VALIDATED + e2e correct.** New `Qwen25VlEncoder` (own ViT, doesn't share the SigLIP/CLIP path):
+      Conv3D patch embed (2 temporal conv weights, summed since a single image fills both frames), **2D vision RoPE**
+      (no position table; per-patch (h,w) freqs, merge-permuted), **window attention** (full only on layers 7/15/23/31 via
+      `n_wa_pattern=8`; patches reordered into window-contiguous merge-units, block-diagonal mask), **RMSNorm** (no bias),
+      **SwiGLU** MLP, and a **2×2 patch-merger** (`mm.0`→GELU→`mm.2`, 5120→2048). Patchify in merge-block order; rope +
+      window reorder/un-reorder host-side. `IVlmImageEncoder` interface lets `MultimodalGenerator` hold either encoder.
+      Reference-validated (`tests/python-reference/dump_qwen25vl_vision_ref.py`): embed/embed_win/blk0/postln/embeds all
+      **corr=1.0**. Text = Qwen2.5/qwen2 (verified). **E2E correct**: red circle → "a red circle"; blue/green halves →
+      "top … blue … bottom … green". Prompt = ChatML `<|im_start|>user\n<|vision_start|> [img] <|vision_end|>{q}<|im_end|>…`.
+      Dynamic resolution (grid from pixel size; `HARTSY_VLM_IMGSIZE` for the test).
+- [x] **Production wiring (sampler + image preprocessing).** `MultimodalGenerator` now runs through the real
+      `SamplerChain` (temperature/top-p/repetition-penalty over decode history; greedy still selectable), default a light
+      sampler. Added reusable `VlmImagePreprocessor` (bilinear resize any `[H,W,3]` → `size×size` + per-channel normalize,
+      no Vision dependency) so callers feed arbitrary images; CLI gained `HARTSY_VLM_PNG=<file>` (real PNG decode via
+      `Vision.Codec.PngDecoder` → preprocess → e2e). Verified: 400×300 PNG → SmolVLM → "a red circle".
+- [x] **Qwen2.5-VL-7B — covered by existing code (build-defer verification).** Same `Qwen25VlEncoder` + qwen2 text as the
+      validated 3B; only the size differs, so it is build-complete. 7B-Q4 (~4.5 GB) + vision likely fits the 3060 when the
+      GPU is free; e2e verification deferred (no functional gap, just hardware/time).
+- [~] **Llama-3.2-11B-Vision (mllama) — build-deferred as a DESIGN SPEC (no small proxy → unverifiable; not coding
+      unvalidated guesswork).** Unlike every VLM above, mllama does NOT splice image tokens into the sequence — it injects
+      vision features via **gated cross-attention layers** interleaved in the text decoder (`cross_attention_layers =
+      [3,8,13,18,23,28,33,38]` for 11B). **To build (when an mllama-capable GPU/reference is available):** (1)
+      `MllamaVisionEncoder` — its own ViT (tiled 560px, patch 14, 32 local + 8 global gated layers, pre/post tile position
+      embeds, `class_embedding`, returns hidden states from multiple layers concatenated → a projector). (2) Core decoder
+      change: a **cross-attention layer** variant in `GenericTransformer` where Q comes from text, K/V from the (cached)
+      vision features, with a learned `tanh` gate on both the attn and FFN outputs (`cross_attn_attn_gate`,
+      `cross_attn_mlp_gate`) and q/k RMSNorm. (3) mllama key-mapper + config flag marking which layers are cross-attn. The
+      gated cross-attn decoder layer is the only genuinely new core primitive; the rest reuses the existing decoder + a
+      CLIP-family ViT. Deferred because there is no <12 GB mllama variant to validate against (the build-defer policy relies
+      on small same-arch proxies; mllama has none) and correctness can't be reference-checked on the 3060.
+- [x] Per-encoder image-preprocessing — `VlmImagePreprocessor` (bilinear + normalize); per-model mean/std read from mmproj
+      metadata. (Qwen2.5-VL dynamic-resolution smart-resize not replicated; fixed-square is sufficient for the synthetic
+      harness and typical square inputs.)
 
 ---
 
 ## Phase 5 — Cross-cutting coverage (interleave as needed)
 
 - [ ] **CPU GGUF** dequant path (also unblocks reference-free CPU parity tests) — overlaps Phase-0 cleanup
-- [ ] **More quant formats**: Q4_0/Q5_0/Q4_1, Q2_K/Q3_K, IQ-quants — coverage for the Ollama library
-- [ ] **Embedding models** (encoder mode, no causal mask, mean/CLS pooling): nomic-embed, bge, all-MiniLM, `BertWordPieceTokenizer` reuse
-- [ ] **GPT-OSS** specifics: attention sinks + `GptOssTokenizer` (o200k) — dense, ~20B build-defer / 3060 if a small variant exists
-- [ ] Longer-context tests (rope-scaling correctness at >8k), batch>1 throughput, optional speculative decoding
+- [x] **Quant formats — codecs present + decode-validated.** `Gguf/Codecs/` already has Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q8_1,
+      Q2_K/Q3_K/Q4_K/Q5_K/Q6_K, and IQ4_NL (rarer IQ2/IQ3/IQ1 mapped but no codec yet). **Verified by decoding bge-small
+      in each quant and comparing the embedding to the HF F32 reference (cosine):** Q8_0 0.99994, Q5_K_M 0.99800,
+      Q4_K_M 0.99709, Q3_K_M 0.99363 — all confirm correct decode. Q2_K 0.641 (output finite/normalized; the codec
+      byte-matches ggml `dequantize_row_q2_K`, so this is genuine 2-bit degradation on a 33 M-param model, not a bug —
+      Q2_K is not recommended for tiny models). Higher IQ-quants (IQ2_XXS/IQ3_S/etc.) remain unimplemented (rare).
+- [x] **Embedding models VALIDATED (cosine = 1.0).** `BertEmbeddingModel` (`HartsyInference.LLM.Embeddings`): bidirectional
+      post-norm BERT encoder (token + abs-position + token-type embeds → LayerNorm; per-layer self-attn via FlashAttention
+      `causal:false` → +res → LayerNorm → GELU FFN → +res → LayerNorm), then pooling (CLS / mean per `bert.pooling_type`)
+      + L2-normalize. Registered `bert`/`nomic-bert` as **passthrough** architectures so the GGUF loader keeps verbatim
+      tensor names (the llama key-heuristic was mangling them). nn.Linear weights relabeled `[out,in]` like the VLM path.
+      Reference-validated vs HF transformers (`tests/python-reference/dump_bert_embedding_ref.py`, same token ids):
+      **bge-small-en-v1.5 (CLS) cosine=1.000000**, **all-MiniLM-L6-v2 (mean) cosine=1.000000**. E2E via the GGUF-vocab
+      `BertWordPieceTokenizer` (`embed` CLI mode): cos(cat,kitten)=0.91 > cos(cat,car)=0.78. Covers bge/MiniLM/nomic/e5-BERT.
+- [~] **GPT-OSS — build-defer design (20B/120B, no small variant → unverifiable).** Two specifics: (1) **attention sinks** —
+      each head has a learned per-head sink logit included in the softmax denominator but not the weighted value sum
+      (`softmax([scores, sink])`, drop the sink column from the output). This is a small `FlashAttention` change: an optional
+      `float* sinkPerHead` that seeds the running denominator with `exp(sink - rowmax)`. (2) o200k tokenizer — already have the
+      `gpt-4o`/o200k pre-tokenizer regex from Phi-4-mini, reuse for GPT-OSS. MoE (sigmoid/top-k) reuses the existing MoE path.
+      Deferred: dense 20B+ won't fit the 3060 and there's no small GPT-OSS to reference-check the sink math.
+- [x] Long-context / rope-scaling — covered: linear/YaRN/llama3/longrope scaling all wired + verified during Phase 1/3
+      (Phi LongRope, DeepSeek YaRN, llama3 rope_freqs divisor fix). Batch>1 throughput + speculative decoding remain optional/future.
 - [ ] Keep `docs/Checklists/PARITY_VERIFICATION.md` updated with each model's verified/pending status
 
 ---
@@ -169,11 +288,15 @@ Encoder half largely exists (SigLIP/CLIP/DINOv2). New work = projector + image-t
 | Llama 1/2/3.x, Mistral, TinyLlama, SmolLM, Yi | 0/1d | ✅ |
 | Qwen2 / Qwen2.5 / Qwen3 (dense) | 0 | ✅ |
 | Gemma 2 / 3 (text) | 1a | ✅ verified (Gemma-3-1B, Gemma-2-2B) |
-| Phi-3 / Phi-3.5-mini | 1b | ✅ verified (Phi-3.5-mini); Phi-4-mini pending (o200k tokenizer) |
-| Command-R, StableLM-2, Granite-3 | 1c | ✅ (small) |
-| Mixtral, Qwen-MoE, OLMoE | 2 | OLMoE ✅; rest `[~]` |
-| DeepSeek-V2-Lite | 3 | ⚠️ tight |
-| DeepSeek-V3, Kimi-K2 | 3 | ❌ build-defer |
+| Phi-3 / Phi-3.5-mini / Phi-4-mini | 1b | ✅ verified (all three) |
+| StableLM-2 | 1c | ✅ verified (1.6B) |
+| Granite-3 | 1c | ✅ verified (3.1-2B) |
+| Command-R (cohere2) | 1c | ✅ verified (Command-R7B) |
+| OLMoE, Granite-MoE | 2 | ✅ verified | 
+| Qwen-MoE shared-expert path | 2 | ✅ unit-test-verified (HF reference) |
+| Mixtral, Qwen3-MoE | 2 | `[~]` build-defer (wired; >12GB) |
+| DeepSeek-V2-Lite | 3 | built + unit-tested; loads but OOMs 12GB GPU at preload |
+| DeepSeek-V3, Kimi-K2 | 3 | `[~]` build-defer (MLA + DeepSeek-MoE done; V3 sigmoid/group-routing + q-LoRA TODO) |
 | Qwen2.5-VL, Gemma-3-vision, LLaVA, MiniCPM-V | 4 | ✅ (small) |
 | Llama-3.2-Vision (11B) | 4 | ❌ build-defer |
 | nomic-embed / bge / MiniLM | 5 | ✅ |

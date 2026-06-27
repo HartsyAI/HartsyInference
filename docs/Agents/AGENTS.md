@@ -7,6 +7,9 @@
 1. Read `docs/CODE_STYLE.md` — mandatory, no exceptions
 2. Read `docs/Design/CORE_DESIGN.md` — architecture overview
 3. Check `docs/Checklists/` — find the active phase (earliest with unchecked items)
+4. For model coverage, read the per-modality status docs indexed in `docs/Checklists/MODEL_STATUS.md`
+   (Image / Audio / Video / World / 3D / Vision / LLM); `docs/Checklists/PARITY_VERIFICATION.md` is the
+   real-weight parity authority
 
 ## Task Routing
 

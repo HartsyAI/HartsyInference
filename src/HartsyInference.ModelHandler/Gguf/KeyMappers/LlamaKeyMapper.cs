@@ -25,10 +25,11 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
 {
     public string Architecture => "llama";
 
-    // llama.cpp's convert_hf_to_gguf.py emits an identical blk.N.attn_*/ffn_* dialect for these dense decoders,
-    // so the single remap below is exact for all three. Registering them explicitly means a Qwen2/Qwen3 GGUF
-    // resolves here by name instead of via the key-heuristic fallback (which would otherwise log a warning).
-    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3"];
+    // llama.cpp's convert_hf_to_gguf.py emits an identical blk.N.attn_*/ffn_* dialect across these decoders, so
+    // the single remap below is exact for all of them. The MoE members (olmoe, qwen2moe, qwen3moe, and Mixtral
+    // under the plain "llama" arch) add the stacked-expert + router tensors handled below; the dense members
+    // simply never carry those keys. Registering each explicitly resolves it by name (no heuristic-fallback warning).
+    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {
@@ -75,6 +76,17 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
                 "ffn_gate.weight" => "mlp.gate_proj.weight",
                 "ffn_up.weight" => "mlp.up_proj.weight",
                 "ffn_down.weight" => "mlp.down_proj.weight",
+                // MoE: the router and the stacked per-expert tensors. The *_exps tensors are 3D [E, ·, ·] and are
+                // split into per-expert 2D projections downstream (GgufLanguageModel). Shared-expert tensors
+                // (Qwen-MoE) map to the shared_expert.* names the MoE block expects.
+                "ffn_gate_inp.weight" => "mlp.gate.weight",                    // router
+                "ffn_gate_exps.weight" => "mlp.gate_exps.weight",             // stacked → split
+                "ffn_up_exps.weight" => "mlp.up_exps.weight",
+                "ffn_down_exps.weight" => "mlp.down_exps.weight",
+                "ffn_gate_shexp.weight" => "mlp.shared_expert.gate_proj.weight",
+                "ffn_up_shexp.weight" => "mlp.shared_expert.up_proj.weight",
+                "ffn_down_shexp.weight" => "mlp.shared_expert.down_proj.weight",
+                "ffn_gate_inp_shexp.weight" => "mlp.shared_expert_gate.weight",
                 _ => null,
             };
             if (mappedSuffix is null) return null;

@@ -65,6 +65,33 @@ public sealed class GgufKeyMapperTests
     }
 
     [Fact]
+    public void GetByArchitecture_MoeArchesResolveToLlamaMapper_WithExpertKeys()
+    {
+        IGgufKeyMapper? llama = GgufKeyMapperRegistry.GetByArchitecture("llama");
+        foreach (string moeArch in new[] { "olmoe", "qwen2moe", "qwen3moe" })
+            Assert.Same(llama, GgufKeyMapperRegistry.GetByArchitecture(moeArch));
+        // Router + stacked-expert + shared-expert tensors map to the names the MoE block / split expect.
+        Assert.Equal("model.layers.0.mlp.gate.weight", llama!.MapKey("blk.0.ffn_gate_inp.weight"));
+        Assert.Equal("model.layers.0.mlp.gate_exps.weight", llama.MapKey("blk.0.ffn_gate_exps.weight"));
+        Assert.Equal("model.layers.0.mlp.down_exps.weight", llama.MapKey("blk.0.ffn_down_exps.weight"));
+        Assert.Equal("model.layers.0.mlp.shared_expert.up_proj.weight", llama.MapKey("blk.0.ffn_up_shexp.weight"));
+    }
+
+    [Fact]
+    public void GetByArchitecture_Deepseek2ResolvesToDeepSeekMapper_WithMlaKeys()
+    {
+        IGgufKeyMapper? ds = GgufKeyMapperRegistry.GetByArchitecture("deepseek2");
+        Assert.NotNull(ds);
+        Assert.Equal("deepseek2", ds!.Architecture);
+        // MLA + DeepSeek-MoE tensors map to the names the transformer's MLA + MoE paths expect.
+        Assert.Equal("model.layers.0.self_attn.kv_a_proj.weight", ds.MapKey("blk.0.attn_kv_a_mqa.weight"));
+        Assert.Equal("model.layers.0.self_attn.kv_a_norm.weight", ds.MapKey("blk.0.attn_kv_a_norm.weight"));
+        Assert.Equal("model.layers.0.self_attn.kv_b_proj.weight", ds.MapKey("blk.0.attn_kv_b.weight"));
+        Assert.Equal("model.layers.0.self_attn.q_proj.weight", ds.MapKey("blk.0.attn_q.weight"));
+        Assert.Equal("model.layers.0.mlp.shared_expert.down_proj.weight", ds.MapKey("blk.0.ffn_down_shexp.weight"));
+    }
+
+    [Fact]
     public void GetByArchitecture_FluxReturnsFluxMapper()
     {
         IGgufKeyMapper? m = GgufKeyMapperRegistry.GetByArchitecture("flux");

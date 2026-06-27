@@ -38,8 +38,9 @@ public sealed class EspeakParitySweepTests
         File.WriteAllText(Path.Combine(Path.GetTempPath(), "espeak_parity_sweep.txt"),
             $"exact {exact}/{total} = {rate:P1}\n\n{misses}");
 
-        // Baseline ~65%. Remaining misses are English stress-syllable accuracy, unstressed-vowel reduction
-        // (ɒ->ə, a->ɐ), and -s suffix voicing (ps vs pz) — tracked espeak refinements that will raise this floor.
-        Assert.True(rate >= 0.62, $"parity {exact}/{total} = {rate:P1} below floor");
+        // ~95% after the phoneme-program VM (data-driven allophones/IPA) + recursive suffix handling + flag-only
+        // dictionary fallthrough + prefix stripping (with confirm_prefix + stem stress lock). Remaining misses are a
+        // long tail of per-word rule-interpreter vowel choices (ɑː/ə/æ, -ier/-y) and noun/verb stress homographs.
+        Assert.True(rate >= 0.94, $"parity {exact}/{total} = {rate:P1} below floor");
     }
 }

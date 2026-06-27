@@ -333,7 +333,7 @@ return captured   # list of 4 tensors, each [B, S_txt, 2880]
 
 **Net-new infra required for this in HartsyInference:**
 
-1. **MoE FFN with sparse routing.** Top-4-of-32 expert selection, sparse dispatch through SwiGLU MLPs (each expert is a SwiGLU pair). HiDream already has a `NumRoutedExperts`/`NumActivatedExperts` config but the routing/dispatch primitive itself in HiDream is "single-expert fallback" today (see `MODEL_STATUS.md`) — we'd need the real top-k router. This is the single biggest infrastructure ask.
+1. **MoE FFN with sparse routing.** Top-4-of-32 expert selection, sparse dispatch through SwiGLU MLPs (each expert is a SwiGLU pair). HiDream already has a `NumRoutedExperts`/`NumActivatedExperts` config but the routing/dispatch primitive itself in HiDream is "single-expert fallback" today (see `MODEL_STATUS_IMAGE.md`) — we'd need the real top-k router. This is the single biggest infrastructure ask.
 
 2. **Grouped-Query Attention (64 Q heads : 8 KV heads).** `LlamaStyleEncoder` already supports GQA, so this is a config flag.
 

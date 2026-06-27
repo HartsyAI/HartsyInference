@@ -34,6 +34,7 @@ public static class GgufKeyMapperRegistry
         // Gemma before Llama: Gemma's heuristic (sandwich norms) is a strict superset of the llama-family keys.
         Register(r, new GemmaKeyMapper());
         Register(r, new PhiKeyMapper());
+        Register(r, new DeepSeekKeyMapper());
         Register(r, new LlamaKeyMapper());
         Register(r, new PassthroughKeyMapper());
         return r;

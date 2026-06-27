@@ -37,3 +37,4 @@
 | API examples | Try to compile snippets |
 | Research status | Component built but research still "Draft"? |
 | Checklist | Code done but items unchecked? |
+| Model status | Model verified e2e but still 🔧 in its per-modality status doc? See `docs/Checklists/MODEL_STATUS.md` (index) + `PARITY_VERIFICATION.md` |

@@ -29,6 +29,23 @@ string backendName = args.Length > 1 ? args[1] : "cuda";
 int genTokens = args.Length > 2 && int.TryParse(args[2], out int g) ? g : 64;
 string prompt = args.Length > 3 ? args[3] : "In one sentence, what is a transformer in machine learning?";
 
+// ── VLM mode: hartsyinference-textgen vlm [backend] [genTokens] ["question"] ───────────────────────
+// HARTSY_MODEL_DIR = Gemma-3 text .gguf, HARTSY_MMPROJ = mmproj-*.gguf. A synthetic solid-colour image
+// (HARTSY_VLM_COLOR = r,g,b in 0..255, default a strong red) is fed so the answer is checkable without an
+// image decoder. HARTSY_LOWVRAM keeps the text weights compressed.
+if (arch == "vlm")
+{
+    return HartsyInference.TextGen.Cli.VlmRunner.Run(backendName, genTokens, args.Length > 3 ? args[3] : "What is the main color of this image? Answer in one word.");
+}
+
+// ── Embedding mode: hartsyinference-textgen embed [backend] [_] ["text"] ──────────────────────────
+// HARTSY_MODEL_DIR = a BERT-family embedding .gguf (bge / all-MiniLM / nomic). HARTSY_EMBED_IDS (comma-separated
+// token ids incl. [CLS]/[SEP]) feeds exact ids for reference parity; HARTSY_EMBED_DUMP writes the embedding f32.
+if (arch == "embed")
+{
+    return HartsyInference.TextGen.Cli.EmbedRunner.Run(backendName, args.Length > 3 ? args[3] : "A photo of a cat.");
+}
+
 using IBackend backend = backendName == "cpu"
     ? new CpuBackend()
     : new CudaBackend(deviceOrdinal: 0, ptxDir: Path.Combine(AppContext.BaseDirectory, "Ptx"));

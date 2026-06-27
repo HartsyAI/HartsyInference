@@ -168,10 +168,19 @@ public sealed class JinjaEngine
                     ["index0"] = (long)idx, ["index"] = (long)(idx + 1),
                     ["first"] = idx == 0, ["last"] = idx == items.Count - 1, ["length"] = (long)items.Count,
                 });
-                foreach (Node n in body) n.Render(sb, child);
+                try { foreach (Node n in body) n.Render(sb, child); }
+                catch (LoopContinue) { continue; }
+                catch (LoopBreak) { break; }
             }
         }
     }
+
+    /// <summary>Signals for Jinja <c>{% break %}</c> / <c>{% continue %}</c>, caught by the enclosing <see cref="ForNode"/>.</summary>
+    internal sealed class LoopBreak : Exception { }
+    internal sealed class LoopContinue : Exception { }
+
+    internal sealed class BreakNode : Node { public override void Render(StringBuilder sb, Scope scope) => throw new LoopBreak(); }
+    internal sealed class ContinueNode : Node { public override void Render(StringBuilder sb, Scope scope) => throw new LoopContinue(); }
 
     // ── Parser (segments → nodes) ────────────────────────────────────────────────────────────────────
     internal static class Parser
@@ -232,6 +241,27 @@ public sealed class JinjaEngine
                     case "generation": case "endgeneration": // {% generation %} markers (assistant-mask) — ignore
                     case "#comment": // stripped comment placeholder
                         i++; break;
+                    case "break": nodes.Add(new BreakNode()); i++; break;
+                    case "continue": nodes.Add(new ContinueNode()); i++; break;
+                    case "macro":
+                    {
+                        // Macro definitions (e.g. Cohere's RAG/tool document_turn) are skipped wholesale — the
+                        // basic chat path never invokes them. Skip the body without parsing it (it may use
+                        // constructs only meaningful inside a macro), honoring nesting. Full macro support TODO.
+                        i++;
+                        int depth = 1;
+                        while (i < segs.Count && depth > 0)
+                        {
+                            if (segs[i].Kind == SegKind.Stmt)
+                            {
+                                string w = FirstWord(segs[i].Value);
+                                if (w == "macro") depth++;
+                                else if (w == "endmacro") depth--;
+                            }
+                            i++;
+                        }
+                        break;
+                    }
                     default:
                         throw new NotSupportedException($"Unsupported Jinja statement '{kw}' in: {s.Value}");
                 }

@@ -1,6 +1,9 @@
 # Model Support Roadmap
 
 > Back to [Core Design](CORE_DESIGN.md)
+>
+> This is the forward-looking *plan*. For the current built-vs-verified state of each model, see the
+> per-modality status docs indexed in [`../Checklists/MODEL_STATUS.md`](../Checklists/MODEL_STATUS.md).
 
 ## Phase 1 — Initial Support (Months 1–4)
 

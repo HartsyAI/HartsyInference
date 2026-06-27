@@ -28,9 +28,17 @@ public static class GgufConfigFactory
         int headDim = (int)metadata.GetUInt32($"{arch}.attention.key_length", 0u);
         if (headDim == 0) headDim = hidden / heads;
 
+        // Partial rotary: rope.dimension_count < head_dim (Phi-4-mini 96<128, StableLM). 0 → full rotary.
+        int ropeDimCount = (int)metadata.GetUInt32($"{arch}.rope.dimension_count", 0u);
+        int rotaryDim = ropeDimCount > 0 && ropeDimCount < headDim ? ropeDimCount : 0;
+
         int maxPos = (int)metadata.GetUInt32($"{arch}.context_length", 32_768u);
         float ropeTheta = metadata.GetFloat32($"{arch}.rope.freq_base", 1_000_000f);
-        float rmsEps = metadata.GetFloat32($"{arch}.attention.layer_norm_rms_epsilon", 1e-6f);
+        // RMSNorm models use layer_norm_rms_epsilon; the LayerNorm models (Cohere) use layer_norm_epsilon.
+        float rmsEps = metadata.ContainsKey($"{arch}.attention.layer_norm_rms_epsilon")
+            ? metadata.GetFloat32($"{arch}.attention.layer_norm_rms_epsilon")
+            : metadata.GetFloat32($"{arch}.attention.layer_norm_epsilon", 1e-6f);
+        if (rmsEps <= 0f) rmsEps = 1e-6f;   // some DeepSeek GGUFs store 0.0 → use a sane default
 
         // Vocab from the embedding table. GGUF stores token_embd with dims [hidden, vocab] (reverse of the
         // safetensors [vocab, hidden] order), so derive it from the total element count to be order-agnostic.
@@ -40,7 +48,9 @@ public static class GgufConfigFactory
 
         // Structural feature detection from the remapped layer-0 keys.
         bool attentionBias = weights.ContainsKey("model.layers.0.self_attn.q_proj.bias");
-        bool qkNorm = weights.ContainsKey("model.layers.0.self_attn.q_norm.weight");
+        bool qkNorm = weights.TryGetValue("model.layers.0.self_attn.q_norm.weight", out Tensor? qNormW);
+        // Q/K norm width: head_dim (Qwen3 per-head) vs the full Q dim heads·head_dim (OLMoE whole-vector norm).
+        bool qkNormFull = qkNorm && qNormW!.ElementCount == (long)heads * headDim;
         bool tied = !weights.ContainsKey("lm_head.weight");
 
         // Gemma family knobs. Most are architectural constants (GeGLU, (1+w) norm, embedding scale, sandwich
@@ -55,9 +65,75 @@ public static class GgufConfigFactory
         float localTheta = isGemma3 ? metadata.GetFloat32($"{arch}.rope.local_freq_base", 10_000f) : 0f;
         int swWindow = (int)metadata.GetUInt32($"{arch}.attention.sliding_window", 0u);
         int swPattern = (int)metadata.GetUInt32($"{arch}.attention.sliding_window_pattern",
-            isGemma3 ? 6u : isGemma2 ? 2u : 0u);
+            isGemma3 ? 6u : isGemma2 ? 2u : arch == "cohere2" ? 4u : 0u);
         float attnCap = isGemma2 ? metadata.GetFloat32($"{arch}.attn_logit_softcapping", 0f) : 0f;
         float finalCap = isGemma2 ? metadata.GetFloat32($"{arch}.final_logit_softcapping", 0f) : 0f;
+
+        // Granite: scalar multipliers (embedding/attention/residual/logit). Granite shares the llama tensor
+        // dialect; these knobs are all no-ops (1/standard) for other archs.
+        bool isGranite = arch.StartsWith("granite", StringComparison.Ordinal);
+        float graniteEmbScale = isGranite ? metadata.GetFloat32($"{arch}.embedding_scale", 1f) : embScale;
+        float attnMultiplier = isGranite ? metadata.GetFloat32($"{arch}.attention.scale", 0f) : 0f;
+        float residualMul = isGranite ? metadata.GetFloat32($"{arch}.residual_scale", 1f) : 1f;
+
+        // Cohere (Command-R / cohere2): LayerNorm + parallel residual + a logit MULTIPLIER (so divide by its
+        // reciprocal). Granite's logit_scale is a divisor; Cohere's is a multiplier — hence the inverse here.
+        bool isCohere = arch == "cohere2" || arch == "command-r";
+        float logitScale = isGranite ? metadata.GetFloat32($"{arch}.logit_scale", 1f)
+            : isCohere ? 1f / metadata.GetFloat32($"{arch}.logit_scale", 1f)
+            : 1f;
+
+        // DeepSeek-V2/V3 (deepseek2) Multi-head Latent Attention: head_dim (key_length) is the full qk dim
+        // (nope + rope); the rope part is rope.dimension_count; value/output use value_length. q_lora_rank=0
+        // means a direct query projection (V2-Lite).
+        bool isDeepseek = arch == "deepseek2";
+        MlaConfig? mla = null;
+        if (isDeepseek)
+        {
+            int kvLora = (int)metadata.GetUInt32($"{arch}.attention.kv_lora_rank");
+            int qkRope = (int)metadata.GetUInt32($"{arch}.rope.dimension_count");
+            int vDim = (int)metadata.GetUInt32($"{arch}.attention.value_length");
+            int qLora = (int)metadata.GetUInt32($"{arch}.attention.q_lora_rank", 0u);
+            mla = new MlaConfig
+            {
+                KvLoraRank = kvLora, QLoraRank = qLora,
+                QkNopeHeadDim = headDim - qkRope, QkRopeHeadDim = qkRope, VHeadDim = vDim,
+            };
+        }
+        float expertWeightsScale = isDeepseek ? metadata.GetFloat32($"{arch}.expert_weights_scale", 1f) : 1f;
+
+        // Mixture-of-Experts: the spine already implements the routed FFN; wire it from the GGUF expert metadata.
+        // The stacked per-expert tensors are split downstream (GgufLanguageModel). Covers Mixtral / Qwen-MoE /
+        // OLMoE (softmax routing, optional shared expert). DeepSeek's sigmoid+MLA routing is a later phase.
+        int expertCount = (int)metadata.GetUInt32($"{arch}.expert_count", 0u);
+        MoeConfig? moe = null;
+        if (expertCount > 0)
+        {
+            int expertUsed = (int)metadata.GetUInt32($"{arch}.expert_used_count", 2u);
+            int expertFfn = (int)metadata.GetUInt32($"{arch}.expert_feed_forward_length", (uint)intermediate);
+            // Shared-expert size: explicit key, else (DeepSeek) expert_shared_count fused experts of expertFfn each.
+            int sharedFfn = (int)metadata.GetUInt32($"{arch}.expert_shared_feed_forward_length", 0u);
+            if (sharedFfn == 0)
+                sharedFfn = (int)metadata.GetUInt32($"{arch}.expert_shared_count", 0u) * expertFfn;
+            // expert_gating_func: 1 = softmax (Mixtral/Qwen/OLMoE), 2 = sigmoid (DeepSeek-V3).
+            bool sigmoid = metadata.GetUInt32($"{arch}.expert_gating_func", 1u) == 2u;
+            int firstDense = (int)metadata.GetUInt32($"{arch}.leading_dense_block_count", 0u);
+            // Top-k weight renormalization: Mixtral / Qwen-MoE renormalize the selected experts' weights to sum
+            // to 1; OLMoE does not (matches llama.cpp's per-arch norm_w). Honor an explicit GGUF flag when present.
+            bool normTopK = metadata.ContainsKey($"{arch}.expert_weights_norm")
+                ? metadata.GetBool($"{arch}.expert_weights_norm")
+                : arch != "olmoe";
+            moe = new MoeConfig
+            {
+                NumExperts = expertCount,
+                NumExpertsPerTok = expertUsed,
+                MoeIntermediateSize = expertFfn,
+                SharedExpertIntermediateSize = sharedFfn,
+                Scoring = sigmoid ? MoeScoring.Sigmoid : MoeScoring.Softmax,
+                NormTopKProb = normTopK,
+                FirstDenseLayers = firstDense,
+            };
+        }
 
         return new TransformerConfig
         {
@@ -66,6 +142,10 @@ public static class GgufConfigFactory
             NumHeads = heads,
             NumKvHeads = kvHeads,
             HeadDim = headDim,
+            // MLA ropes only its decoupled rope-part itself, so the standard partial-rotary path is off for it.
+            RotaryDim = isDeepseek ? 0 : rotaryDim,
+            Mla = mla,
+            ExpertWeightsScale = expertWeightsScale,
             IntermediateSize = intermediate,
             VocabSize = vocab,
             MaxPositionEmbeddings = maxPos,
@@ -73,13 +153,14 @@ public static class GgufConfigFactory
             RmsNormEps = rmsEps,
             AttentionBias = attentionBias,
             QkNorm = qkNorm,
+            QkNormFullDim = qkNormFull,
             TieWordEmbeddings = tied,
             // RoPE pairing depends on how llama.cpp's converter laid out the Q/K weights for this arch:
             //   - llama family (incl. Mistral): convert_hf_to_gguf.py PERMUTES wq/wk so that ggml NORM rope
             //     (interleaved adjacent pairs 2i,2i+1) reproduces HF rotate_half → we must apply Interleaved.
             //   - qwen2/qwen3: no permute, ggml uses NEOX rope (split-half pairs i,i+half) → SplitHalf.
             // Using the wrong pairing leaves attention rotating mismatched dimensions → coherent-looking garbage.
-            Rope = arch == "llama" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
+            Rope = arch is "llama" or "cohere2" or "command-r" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
             RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
             // Gemma family (all default to no-op for Qwen/Llama).
@@ -88,13 +169,21 @@ public static class GgufConfigFactory
             // llama.cpp's GGUF converter already bakes Gemma's (1+w) offset into the stored norm weights, so the
             // GGUF path uses them directly. RmsNormAddOne is only for loading raw (centered) HF safetensors.
             RmsNormAddOne = false,
-            EmbeddingScale = embScale,
+            EmbeddingScale = graniteEmbScale,
             QueryPreAttnScalar = queryPreAttn,
+            AttentionMultiplier = attnMultiplier,
+            ResidualMultiplier = residualMul,
+            LogitScale = logitScale,
+            UseLayerNorm = isCohere,
+            ParallelResidual = isCohere,
+            // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
+            NoRopeOnGlobalLayers = arch == "cohere2",
             RopeLocalTheta = localTheta,
             SlidingWindow = swWindow,
             SlidingWindowPattern = swPattern,
             AttnLogitSoftcap = attnCap,
             FinalLogitSoftcap = finalCap,
+            Moe = moe,
         };
     }
 

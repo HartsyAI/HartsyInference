@@ -573,7 +573,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] Code review per package (audio buffer boundaries, streaming thread safety, KV cache correctness)
 - [ ] Benchmark report comparing HartsyInference vs Python reference for each model
 - [ ] License audit — flag non-commercial models (XTTS = CPML, AudioLDM2 = CC-BY-NC-SA, SparkTTS = CC-BY-NC-SA) in model registry; surface to users. VibeVoice is **MIT** (commercially permissive — surface as such).
-- [ ] Update `MODEL_STATUS.md` with audio model coverage
+- [x] Audio model coverage tracked in [`MODEL_STATUS_AUDIO.md`](MODEL_STATUS_AUDIO.md)
 - [ ] Merge to main branch
 
 ## 12. Status Summary (2026-05-29)

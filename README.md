@@ -556,6 +556,8 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 
 </details>
 
+**Model status:** which models are built versus **verified end-to-end** is tracked per modality, indexed in [`docs/Checklists/MODEL_STATUS.md`](docs/Checklists/MODEL_STATUS.md) ([Image](docs/Checklists/MODEL_STATUS_IMAGE.md), [Audio](docs/Checklists/MODEL_STATUS_AUDIO.md), [Video](docs/Checklists/MODEL_STATUS_VIDEO.md), [World](docs/Checklists/MODEL_STATUS_WORLD.md), [3D](docs/Checklists/MODEL_STATUS_3D.md), [Vision](docs/Checklists/MODEL_STATUS_VISION.md), [LLM](docs/Checklists/MODEL_STATUS_LLM.md)). The cross-modality real-weight parity authority is [`docs/Checklists/PARITY_VERIFICATION.md`](docs/Checklists/PARITY_VERIFICATION.md).
+
 **Research & Checklists:** technical research notes live in [`docs/Research/`](docs/Research/) (model formats, GPU/compute, diffusion architectures, text encoders, audio, vision). Phase-by-phase progress is tracked in [`docs/Checklists/`](docs/Checklists/). AI coding-agent instruction files are in [`docs/Agents/`](docs/Agents/); see [CLAUDE.md](CLAUDE.md) for the dispatcher.
 
 ---

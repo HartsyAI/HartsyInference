@@ -37,8 +37,10 @@ internal sealed class EspeakPhonemeInterpreter
         int nReturn = 0;
         List<byte> ipa = new();
 
+        int steps = 0;
         while (endFlag != 1)
         {
+            if (++steps > 4096 || prog < 0 || prog >= _prog.Length) break; // guard against malformed jumps
             int instn = _prog[prog];
             int instn2 = (instn >> 8) & 0xf;
             switch (instn >> 12)
@@ -62,6 +64,9 @@ internal sealed class EspeakPhonemeInterpreter
                     }
                     else if (instn2 == EspeakProgram.ParamIpaName)
                     {
+                        // espeak writes ipa_string from index 0, so a later i_IPA_NAME overwrites an earlier one
+                        // (e.g. a rhotic vowel becomes non-rhotic when a separate ɹ follows).
+                        ipa.Clear();
                         for (int ix = 0; ix < data && ix < 16; ix += 2)
                         {
                             prog++;
@@ -89,11 +94,15 @@ internal sealed class EspeakPhonemeInterpreter
                     {
                         bool orFlag = false, truth = true;
                         int cur = instn;
-                        while ((cur & EspeakProgram.InstnConditionMask) == EspeakProgram.InstnConditionTag)
+                        int condGuard = 0;
+                        while (prog >= 0 && prog < _prog.Length && (cur & EspeakProgram.InstnConditionMask) == EspeakProgram.InstnConditionTag)
                         {
+                            if (++condGuard > 64) break; // guard against malformed condition chains
                             bool truth2 = InterpretCondition(list, pos, prog, control);
                             prog += NumInstnWords(prog);
+                            if (prog < 0 || prog >= _prog.Length) break;
                             if (_prog[prog] == EspeakProgram.InstnNot) { truth2 = !truth2; prog++; }
+                            if (prog < 0 || prog >= _prog.Length) break;
                             truth = orFlag ? (truth || truth2) : (truth && truth2);
                             orFlag = (cur & EspeakProgram.InstnOr) != 0;
                             cur = _prog[prog];
@@ -156,7 +165,11 @@ internal sealed class EspeakPhonemeInterpreter
     }
 
     private EspeakPhonemeListEntry At(IReadOnlyList<EspeakPhonemeListEntry> list, int i)
-        => i >= 0 && i < list.Count ? list[i] : new EspeakPhonemeListEntry(1, _pause) { Type = EspeakPhoneme.TypePause };
+        => i >= 0 && i < list.Count
+            ? list[i]
+            // Out-of-range acts as a clause boundary: SourceIx != 0 stops the boundary-seeking scans
+            // (isFinalVowel / isAfterStress / CountVowelPosition / nextVowel) from running off the list end.
+            : new EspeakPhonemeListEntry(1, _pause) { Type = EspeakPhoneme.TypePause, SourceIx = 1 };
 
     // Port of InterpretCondition. progPos points at the condition instruction word.
     private bool InterpretCondition(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int progPos, int control)
@@ -315,6 +328,7 @@ internal sealed class EspeakPhonemeInterpreter
                 int c = instn & 0x0f00;
                 return c is 0x600 or 0x0d00 ? 2 : 1;
             default:
+                if (progPos + 2 >= _prog.Length) return 2;
                 int instn2 = _prog[progPos + 2];
                 if ((instn2 >> 12) == 0xf) return 4;
                 return instn2 == EspeakProgram.InstnContinue ? 3 : 2;

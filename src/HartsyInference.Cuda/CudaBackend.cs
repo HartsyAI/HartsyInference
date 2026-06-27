@@ -1034,7 +1034,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>In-place rotary embedding on a single GPU-resident tensor <c>[B, L, numHeads, headDim]</c>.
     /// Used by grouped-query attention where Q and K differ in head count (the paired <see cref="ApplyRope"/>
     /// would mis-stride K). cos/sin are <c>[B, L, headDim]</c>.</summary>
-    public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin)
+    public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("CUDA ApplyRopeSingle supports F32 only.");
@@ -1050,7 +1050,7 @@ public sealed class CudaBackend : IBackend
             pX = GpuTransferHelper.CopyToDevice(x);
             pCos = GpuTransferHelper.CopyToDevice(cos);
             pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchRope(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+            _kernels!.LaunchRope(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle, rotaryDim);
 
             // In-place: clear stale callbacks before re-caching (pitfall #17).
             x._gpuSyncCallback = null;

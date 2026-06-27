@@ -275,6 +275,8 @@ internal sealed class EspeakStress
     {
         switch (_stressRule)
         {
+            // No case for STRESSPOSN_1L (0): English relies on the dictionary plus the "guess complete stress
+            // pattern" pass below to place primary stress; espeak's switch likewise has no case 0.
             case 8:
                 if (syllableWeight[1] > 0 || syllableWeight[2] == 0) break;
                 goto case 1;

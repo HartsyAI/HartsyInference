@@ -164,15 +164,19 @@ __global__ void dit_tanh_f32(
 // out[i+half] = upper*cos[i+half] + lower*sin[i+half]
 // where lower = x[i], upper = x[i+half] (originals). Each thread owns one i and writes both
 // halves from originals — race-free, no snapshot needed. Matches Ideogram4Mrope.ApplyOne.
+// rotaryDim: number of leading dims of each head to rotate (NEOX pairing (i, i+rotaryDim/2)); the rest pass
+// through. 0 (or >= headDim) means full rotary — the default, identical to the original kernel (DiT path).
 __global__ void dit_rope_f32(
     float* __restrict__ x,
     const float* __restrict__ cos,
     const float* __restrict__ sin,
     unsigned int numHeads,
     unsigned int headDim,
-    unsigned long long totalVecs)
+    unsigned long long totalVecs,
+    unsigned int rotaryDim)
 {
-    unsigned int half = headDim >> 1;
+    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
+    unsigned int half = rdim >> 1;   // rotate pairs (i, i+half) for i < half; cos/sin stride stays headDim
     unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     unsigned long long total = totalVecs * (unsigned long long)half;
     if (gid >= total) return;

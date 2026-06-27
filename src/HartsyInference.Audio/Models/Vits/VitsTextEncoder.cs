@@ -52,12 +52,35 @@ public sealed unsafe class VitsTextEncoder
     }
 
     /// <summary>Runs the encoder layers + projection over a prebuilt input embedding <c>[1, hidden, T]</c>
-    /// (takes ownership). The MeloTTS entry point (caller sums phoneme + tone + language + BERT embeddings).</summary>
-    public (Tensor Hidden, Tensor MP, Tensor LogsP) ForwardFromEmbedding(IBackend backend, Tensor embed, int t)
+    /// (takes ownership). The MeloTTS entry point (caller sums phoneme + tone + language + BERT embeddings). When a
+    /// speaker embedding <paramref name="g"/> <c>[1, gin, 1]</c> and the <paramref name="spkW"/>/<paramref name="spkB"/>
+    /// <c>spk_emb_linear</c> weights are supplied, <c>x += spk_emb_linear(g)</c> is added before layer
+    /// <paramref name="condLayerIdx"/> (VITS2 speaker-conditioned encoder).</summary>
+    public (Tensor Hidden, Tensor MP, Tensor LogsP) ForwardFromEmbedding(IBackend backend, Tensor embed, int t,
+        Tensor? g = null, Tensor? spkW = null, Tensor? spkB = null, int condLayerIdx = 2)
     {
         Tensor x = embed;
+        float[]? gProj = null;
+        if (g is not null && spkW is not null)
+        {
+            int h = _cfg.HiddenChannels, gin = _cfg.GinChannels;
+            gProj = new float[h];
+            float* gp = (float*)g.DataPointer, sw = (float*)spkW.DataPointer, sb = spkB is null ? null : (float*)spkB.DataPointer;
+            for (int c = 0; c < h; c++)
+            {
+                float acc = sb is null ? 0f : sb[c];
+                for (int k = 0; k < gin; k++) acc += sw[(long)c * gin + k] * gp[k];
+                gProj[c] = acc;
+            }
+        }
         for (int i = 0; i < _layers.Length; i++)
         {
+            if (gProj is not null && i == condLayerIdx)
+            {
+                float* xp = (float*)x.DataPointer;
+                for (int c = 0; c < _cfg.HiddenChannels; c++)
+                    for (int j = 0; j < t; j++) xp[(long)c * t + j] += gProj[c];
+            }
             Tensor next = _layers[i].Forward(backend, x, t);
             x.Dispose(); x = next;
         }

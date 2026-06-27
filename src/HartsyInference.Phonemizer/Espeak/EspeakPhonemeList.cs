@@ -139,6 +139,14 @@ internal sealed class EspeakPhonemeList
                 }
                 else unstressCount = 0;
             }
+
+            // Append a linking phoneme (e.g. the rhotic ɹ that a rhotic vowel inserts before a following vowel).
+            int append = phdata.Param[EspeakProgram.ParamAppendPhoneme];
+            if (append > 0 && _phon.TryGet(append, out EspeakPhoneme ap))
+            {
+                list.Insert(j + 1, new EspeakPhonemeListEntry(append, ap) { Type = ap.Type });
+                j++; // don't reinterpret the inserted phoneme as a change site
+            }
         }
     }
 }

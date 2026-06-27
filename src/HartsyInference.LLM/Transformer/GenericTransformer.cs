@@ -20,6 +20,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     private readonly Layer[] _layers;
     private Tensor? _embed;
     private Tensor? _finalNorm;
+    private Tensor? _finalNormBias;   // zero bias for the LayerNorm path (Cohere)
     private Tensor? _lmHead;   // null when tied — reuse _embed.
     private int _disposed;
 
@@ -69,6 +70,35 @@ public sealed unsafe class GenericTransformer : IDisposable
         return outp;
     }
 
+    /// <summary>A zeroed bias vector of length <paramref name="n"/> for the LayerNorm path (models that use
+    /// LayerNorm but ship no norm bias, e.g. Cohere).</summary>
+    private static Tensor ZeroBias(int n)
+    {
+        Tensor b = new(new TensorShape(n), DType.F32);
+        float* p = (float*)b.DataPointer;
+        for (int i = 0; i < n; i++) p[i] = 0f;
+        return b;
+    }
+
+    /// <summary>A zeroed tensor of the given shape (used to pad MLA's value heads up to the q/k head dim so the
+    /// shared FlashAttention kernel, which assumes equal k/v dims, can be reused).</summary>
+    private static Tensor ZeroTensor(TensorShape shape)
+    {
+        Tensor z = new(shape, DType.F32);
+        long n = z.ElementCount;
+        float* p = (float*)z.DataPointer;
+        for (long i = 0; i < n; i++) p[i] = 0f;
+        return z;
+    }
+
+    /// <summary>Normalizes <paramref name="input"/> with <paramref name="weight"/> using LayerNorm (mean-centered,
+    /// Cohere) or RMSNorm (everything else).</summary>
+    private static void Normalize(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool layerNorm, float eps)
+    {
+        if (layerNorm) backend.LayerNorm(output, input, weight, bias!, eps);
+        else backend.RmsNorm(output, input, weight, eps);
+    }
+
     /// <summary>Loads weights from an HF-style key dict. <paramref name="prefix"/> is everything up to (not
     /// including) <c>embed_tokens</c> (e.g. <c>"model"</c> for a standalone checkpoint).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string? lmHeadKey = null)
@@ -76,6 +106,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         _embed = EnsureF32(w[$"{prefix}.embed_tokens.weight"]);
         _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
+        if (_cfg.UseLayerNorm) _finalNormBias = ZeroBias(_cfg.HiddenSize);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
         // lm_head stays in its loaded dtype (quant kept for the dequant/fused matmul path); the matmul backend
         // handles quantized weights. Only the embed table is forced to F32 (host gather).
@@ -90,6 +121,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     {
         ThrowIfDisposed();
         _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
+        if (_cfg.UseLayerNorm) _finalNormBias = ZeroBias(_cfg.HiddenSize);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
@@ -97,8 +129,12 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <see cref="IBackend.FreeWeights"/>.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        if (_embed is not null) yield return _embed;
+        // The embedding table is gathered host-side. Upload it to the GPU only when it doubles as the (tied)
+        // lm_head; when the model has a separate lm_head, _embed is host-only — skip it (saves real VRAM, e.g.
+        // ~0.8 GB for DeepSeek-V2-Lite's 102k×2048 F32 table).
+        if (_embed is not null && _cfg.TieWordEmbeddings) yield return _embed;
         if (_finalNorm is not null) yield return _finalNorm;
+        if (_finalNormBias is not null) yield return _finalNormBias;
         if (_lmHead is not null) yield return _lmHead;
         foreach (Layer l in _layers)
             foreach (Tensor t in l.EnumerateWeights()) yield return t;
@@ -130,18 +166,20 @@ public sealed unsafe class GenericTransformer : IDisposable
             throw new ArgumentException($"Invalid layer range [{startLayer}, {last}) for a stack of {_layers.Length}.");
 
         int d = _cfg.HeadDim;
+        // MLA ropes only its decoupled rope-part, so the cos/sin table is sized to that (full rotary over it).
+        int ropeTableDim = _cfg.Mla is not null ? _cfg.Mla.QkRopeHeadDim : d;
 
         // Global RoPE table (all layers when single-base; the full-attention layers under Gemma-3 dual-RoPE).
-        Tensor cos = new(new TensorShape(1, t, d), DType.F32);
-        Tensor sin = new(new TensorShape(1, t, d), DType.F32);
-        BuildRope(cos, sin, t, posStart, d, _cfg.RopeTheta, _cfg.RopeScaling);
+        Tensor cos = new(new TensorShape(1, t, ropeTableDim), DType.F32);
+        Tensor sin = new(new TensorShape(1, t, ropeTableDim), DType.F32);
+        BuildRope(cos, sin, t, posStart, ropeTableDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
         // Gemma-3 dual-RoPE: local (sliding-window) layers use a smaller base frequency. Built once, reused.
         Tensor? cosLocal = null, sinLocal = null;
         if (_cfg.RopeLocalTheta > 0)
         {
             cosLocal = new(new TensorShape(1, t, d), DType.F32);
             sinLocal = new(new TensorShape(1, t, d), DType.F32);
-            BuildRope(cosLocal, sinLocal, t, posStart, d, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+            BuildRope(cosLocal, sinLocal, t, posStart, d, _cfg.RotaryDim, _cfg.RopeLocalTheta, _cfg.RopeScaling);
         }
 
         try
@@ -153,7 +191,9 @@ public sealed unsafe class GenericTransformer : IDisposable
                 bool global = _cfg.IsGlobalLayer(i);
                 Tensor lc = global ? cos : cosLocal ?? cos;
                 Tensor ls = global ? sin : sinLocal ?? sin;
-                Tensor next = _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls);
+                Tensor next = _cfg.Mla is not null
+                    ? _layers[i].MlaForward(backend, hidden, t, posStart, cache, i, cos, sin)
+                    : _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls);
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
@@ -163,7 +203,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             if (applyFinalNorm)
             {
                 Tensor normed = new(new TensorShape(1, t, _cfg.HiddenSize), DType.F32);
-                backend.RmsNorm(normed, hidden, _finalNorm!, _cfg.RmsNormEps);
+                Normalize(backend, normed, hidden, _finalNorm!, _finalNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
                 if (ownsHidden) hidden.Dispose();
                 return normed;
             }
@@ -201,13 +241,13 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         Tensor cos = new(new TensorShape(1, b, d), DType.F32);
         Tensor sin = new(new TensorShape(1, b, d), DType.F32);
-        BuildRopeBatched(cos, sin, positions, d, _cfg.RopeTheta, _cfg.RopeScaling);
+        BuildRopeBatched(cos, sin, positions, d, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
         Tensor? cosLocal = null, sinLocal = null;
         if (_cfg.RopeLocalTheta > 0)
         {
             cosLocal = new(new TensorShape(1, b, d), DType.F32);
             sinLocal = new(new TensorShape(1, b, d), DType.F32);
-            BuildRopeBatched(cosLocal, sinLocal, positions, d, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+            BuildRopeBatched(cosLocal, sinLocal, positions, d, _cfg.RotaryDim, _cfg.RopeLocalTheta, _cfg.RopeScaling);
         }
         try
         {
@@ -226,7 +266,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             for (int s = 0; s < b; s++) caches[s].AdvanceLength(1);
 
             Tensor normed = new(new TensorShape(1, b, _cfg.HiddenSize), DType.F32);
-            backend.RmsNorm(normed, hidden, _finalNorm!, _cfg.RmsNormEps);
+            Normalize(backend, normed, hidden, _finalNorm!, _finalNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
             if (ownsHidden) hidden.Dispose();
             return normed;
         }
@@ -241,12 +281,13 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Per-row RoPE table for a ragged decode batch: row b uses absolute position <paramref name="positions"/>[b]
     /// (same split-half layout as <see cref="BuildRope"/>, so both RoPE styles consume it identically).</summary>
-    private static void BuildRopeBatched(Tensor cos, Tensor sin, ReadOnlySpan<int> positions, int headDim, float theta, RopeScaling scaling)
+    private static void BuildRopeBatched(Tensor cos, Tensor sin, ReadOnlySpan<int> positions, int headDim, int rotaryDim, float theta, RopeScaling scaling)
     {
-        int half = headDim / 2;
+        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
+        int half = rdim / 2;
         int maxPos = 0;
         for (int s = 0; s < positions.Length; s++) maxPos = Math.Max(maxPos, positions[s]);
-        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(headDim, theta, scaling, maxPos + 1);
+        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, scaling, maxPos + 1);
         float* pc = (float*)cos.DataPointer;
         float* ps = (float*)sin.DataPointer;
         for (int s = 0; s < positions.Length; s++)
@@ -271,6 +312,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor headW = _lmHead ?? _embed ?? throw new InvalidOperationException("weights not loaded.");
         Tensor logits = new(new TensorShape(1, t, _cfg.VocabSize), DType.F32);
         Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
+        // Granite divides the logits by logit_scale.
+        if (_cfg.LogitScale != 1f) backend.Scale(logits, logits, 1f / _cfg.LogitScale);
         // Gemma-2 final-logit soft-cap: cap·tanh(logit/cap), elementwise in place.
         if (_cfg.FinalLogitSoftcap > 0f)
         {
@@ -308,10 +351,13 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>,
     /// <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of
     /// <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2 / Qwen3 / Llama).</summary>
-    private static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, float theta, RopeScaling scaling)
+    private static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
     {
-        int half = headDim / 2;
-        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(headDim, theta, scaling, posStart + t);
+        // Partial rotary: build the table for the first rotaryDim dims (half = rotaryDim/2 duplicated), leaving the
+        // rest of each headDim-strided row untouched (the kernel never reads it). 0/full → the whole head.
+        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
+        int half = rdim / 2;
+        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, scaling, posStart + t);
         float* pc = (float*)cos.DataPointer;
         float* ps = (float*)sin.DataPointer;
         for (int s = 0; s < t; s++)
@@ -348,8 +394,10 @@ public sealed unsafe class GenericTransformer : IDisposable
         private readonly TransformerConfig _cfg;
         private Tensor? _inNorm, _postNorm;       // pre-attn norm; pre-MLP norm (Gemma: pre_feedforward)
         private Tensor? _postAttnNorm, _postFfnNorm;   // Gemma sandwich norms (post-attn / post-FFN, pre-residual)
+        private Tensor? _normBias;                // zero bias for the LayerNorm path (Cohere has no norm bias)
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW;
         private Tensor? _qNorm, _kNorm;
+        private Tensor? _kvAProj, _kvANorm, _kvBProj;   // MLA: KV down-proj (+latent norm) and up-proj
         private Tensor? _gateW, _upW, _downW;
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
 
@@ -361,7 +409,12 @@ public sealed unsafe class GenericTransformer : IDisposable
             // so the matmul backend can dequant-on-the-fly (or run a fused quantized GEMV) without an F32 copy.
             bool addOne = _cfg.RmsNormAddOne;
             _inNorm = LoadNorm(w[$"{prefix}.input_layernorm.weight"], addOne);
-            if (_cfg.SandwichNorm)
+            if (_cfg.UseLayerNorm) _normBias = ZeroBias(_cfg.HiddenSize);
+            if (_cfg.ParallelResidual)
+            {
+                // Cohere / GPT-NeoX: one norm per layer; attention and FFN both read it, no pre-FFN norm.
+            }
+            else if (_cfg.SandwichNorm)
             {
                 // Gemma layout: input → attn → post_attention_layernorm → +res → pre_feedforward_layernorm →
                 // mlp → post_feedforward_layernorm → +res. The pre-MLP norm reuses the _postNorm slot.
@@ -372,6 +425,17 @@ public sealed unsafe class GenericTransformer : IDisposable
             else
             {
                 _postNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
+            }
+            if (_cfg.Mla is not null)
+            {
+                // MLA (DeepSeek-V2-Lite uses a direct q_proj): q_proj, KV down (a) + latent norm + KV up (b), o_proj.
+                _qW = w[$"{prefix}.self_attn.q_proj.weight"];
+                _kvAProj = w[$"{prefix}.self_attn.kv_a_proj.weight"];
+                _kvANorm = LoadNorm(w[$"{prefix}.self_attn.kv_a_norm.weight"], addOne);
+                _kvBProj = w[$"{prefix}.self_attn.kv_b_proj.weight"];
+                _oW = w[$"{prefix}.self_attn.o_proj.weight"];
+                LoadFfn(w, prefix, layerIndex);
+                return;
             }
             _qW = w[$"{prefix}.self_attn.q_proj.weight"];
             _kW = w[$"{prefix}.self_attn.k_proj.weight"];
@@ -388,6 +452,12 @@ public sealed unsafe class GenericTransformer : IDisposable
                 _qNorm = LoadNorm(w[$"{prefix}.self_attn.q_norm.weight"], _cfg.RmsNormAddOne);
                 _kNorm = LoadNorm(w[$"{prefix}.self_attn.k_norm.weight"], _cfg.RmsNormAddOne);
             }
+            LoadFfn(w, prefix, layerIndex);
+        }
+
+        /// <summary>Loads the per-layer FFN: the MoE block on MoE layers, else the dense SwiGLU projections.</summary>
+        private void LoadFfn(IReadOnlyDictionary<string, Tensor> w, string prefix, int layerIndex)
+        {
             if (_cfg.IsMoeLayer(layerIndex))
             {
                 _moe = new MoeFeedForward(_cfg.Moe!, _cfg.HiddenSize, _cfg.LowVramQuant);
@@ -432,7 +502,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _gateW, _upW, _downW];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _kvAProj, _kvANorm, _kvBProj, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
         }
@@ -448,19 +518,24 @@ public sealed unsafe class GenericTransformer : IDisposable
             TensorShape flat = new(1, t, h);
 
             Tensor pre = new(flat, DType.F32);
-            backend.RmsNorm(pre, hidden, _inNorm!, _cfg.RmsNormEps);
+            Normalize(backend, pre, hidden, _inNorm!, _normBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
 
             // Q/K/V projections written straight into head layout [1, T, heads, D] (Linear derives N from the
-            // weight, not the output rank, so the byte-identical reshape is free and stays resident).
-            Tensor q = new(new TensorShape(1, t, hq, d), DType.F32);
-            Tensor k = new(new TensorShape(1, t, hkv, d), DType.F32);
+            // weight, not the output rank, so the byte-identical reshape is free and stays resident). For OLMoE's
+            // whole-vector Q/K norm the projection output is shaped [1, T, QDim] so the following RMSNorm reduces
+            // over the full vector (RmsNorm reduces over the input's last dim).
+            bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
+            Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, t, hq, d), DType.F32);
+            Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, t, hkv, d), DType.F32);
             Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
             Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
             Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
             Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
-            pre.Dispose();
+            if (!_cfg.ParallelResidual) pre.Dispose();   // parallel residual reuses `pre` for the FFN below
 
-            // Optional per-head Q/K RMSNorm over the head_dim (rows = T·heads), before RoPE (Qwen3).
+            // Q/K RMSNorm before RoPE: per-head over head_dim (Qwen3, q is [1,T,Hq,D]) or whole-vector over QDim
+            // (OLMoE, q is [1,T,QDim]) — same call, the input's last dim sets the reduction width. Output is
+            // always head-shaped for RoPE.
             if (_cfg.QkNorm)
             {
                 Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
@@ -471,15 +546,19 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            if (_cfg.Rope == RopeStyle.Interleaved)
+            // Cohere2's global (full-attention) layers use no positional encoding; all other layers/models rope.
+            if (!(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
             {
-                backend.ApplyRopeInterleaved(q, cos, sin);
-                backend.ApplyRopeInterleaved(k, cos, sin);
-            }
-            else
-            {
-                backend.ApplyRopeSingle(q, cos, sin);
-                backend.ApplyRopeSingle(k, cos, sin);
+                if (_cfg.Rope == RopeStyle.Interleaved)
+                {
+                    backend.ApplyRopeInterleaved(q, cos, sin);
+                    backend.ApplyRopeInterleaved(k, cos, sin);
+                }
+                else
+                {
+                    backend.ApplyRopeSingle(q, cos, sin, _cfg.RotaryDim);
+                    backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
+                }
             }
 
             Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32);
@@ -513,7 +592,22 @@ public sealed unsafe class GenericTransformer : IDisposable
             Project(backend, attnOut, attnFlat, _oW!, null, _cfg.LowVramQuant);
             attnFlat.Dispose();
 
-            attnOut = ApplySandwich(backend, attnOut, _postAttnNorm, flat);   // Gemma post-attn norm (pre-residual)
+            if (_cfg.ParallelResidual)
+            {
+                // Cohere / GPT-NeoX: attention and the FFN both read the same normed `pre`; their outputs are
+                // summed into the residual once. No post-attn norm, no intermediate residual, no pre-FFN norm.
+                attnOut = PostSublayer(backend, attnOut, null, flat);   // applies the residual multiplier if any
+                Tensor mlpPar = Mlp(backend, pre, t);                   // consumes `pre`
+                mlpPar = PostSublayer(backend, mlpPar, null, flat);
+                Tensor sum1 = new(flat, DType.F32);
+                backend.Add(sum1, hidden, attnOut);
+                Tensor parResult = new(flat, DType.F32);
+                backend.Add(parResult, sum1, mlpPar);
+                attnOut.Dispose(); mlpPar.Dispose(); sum1.Dispose();
+                return parResult;
+            }
+
+            attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);   // Gemma post-attn norm (pre-residual)
             Tensor afterAttn = new(flat, DType.F32);
             backend.Add(afterAttn, hidden, attnOut);
             attnOut.Dispose();
@@ -522,22 +616,131 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
             Tensor mlpOut = Mlp(backend, preMlp, t);
 
-            mlpOut = ApplySandwich(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
+            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
             afterAttn.Dispose(); mlpOut.Dispose();
             return result;
         }
 
-        /// <summary>Gemma sandwich norm: when <paramref name="norm"/> is set, RMSNorms <paramref name="x"/>
-        /// (disposing it) and returns the normed tensor; otherwise returns <paramref name="x"/> unchanged.</summary>
-        private Tensor ApplySandwich(IBackend backend, Tensor x, Tensor? norm, TensorShape shape)
+        /// <summary>Multi-head Latent Attention forward (DeepSeek-V2/V3). Q is projected directly (V2-Lite);
+        /// K/V come from a compressed latent (down-proj → RMSNorm → up-proj) plus a shared RoPE key. Each head's
+        /// Q/K is [no-position | rope] (rope applied only to the rope part); scores use the full qk head dim while
+        /// values use v_head_dim. To reuse the equal-dim FlashAttention kernel, V is zero-padded up to the qk head
+        /// dim and the output sliced back. (Naive decode: caches the per-head decompressed K/V.)</summary>
+        public Tensor MlaForward(IBackend backend, Tensor hidden, int t, int posStart,
+            IKvCache cache, int layerIndex, Tensor cos, Tensor sin)
         {
-            if (norm is null) return x;
-            Tensor normed = new(shape, DType.F32);
-            backend.RmsNorm(normed, x, norm, _cfg.RmsNormEps);
-            x.Dispose();
-            return normed;
+            MlaConfig mla = _cfg.Mla!;
+            int h = _cfg.HiddenSize;
+            int hq = _cfg.NumHeads;
+            int qkHead = mla.QkHeadDim;        // nope + rope (cache/flash head dim)
+            int qkNope = mla.QkNopeHeadDim;
+            int qkRope = mla.QkRopeHeadDim;
+            int vDim = mla.VHeadDim;
+            int kvLora = mla.KvLoraRank;
+            TensorShape flat = new(1, t, h);
+
+            Tensor pre = new(flat, DType.F32);
+            Normalize(backend, pre, hidden, _inNorm!, _normBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+
+            // Query (direct projection): [1,t,hq,qkHead] laid out [q_nope | q_rope] per head.
+            Tensor q = new(new TensorShape(1, t, hq, qkHead), DType.F32);
+            Project(backend, q, pre, _qW!, null, _cfg.LowVramQuant);
+
+            // KV down-projection → compressed latent (kvLora) + shared rope key (qkRope).
+            Tensor kvA = new(new TensorShape(1, t, kvLora + qkRope), DType.F32);
+            Project(backend, kvA, pre, _kvAProj!, null, _cfg.LowVramQuant);
+            pre.Dispose();
+            Tensor kvLatent = new(new TensorShape(1, t, kvLora), DType.F32);
+            backend.SliceLastDim(kvLatent, kvA, 0);
+            Tensor kRope = new(new TensorShape(1, t, 1, qkRope), DType.F32);   // one shared rope "head"
+            backend.SliceLastDim(kRope, kvA, kvLora);
+            kvA.Dispose();
+            Tensor kvLatentN = new(new TensorShape(1, t, kvLora), DType.F32);
+            backend.RmsNorm(kvLatentN, kvLatent, _kvANorm!, _cfg.RmsNormEps);
+            kvLatent.Dispose();
+
+            // KV up-projection → per-head [k_nope | v].
+            Tensor kvB = new(new TensorShape(1, t, hq, qkNope + vDim), DType.F32);
+            Project(backend, kvB, kvLatentN, _kvBProj!, null, _cfg.LowVramQuant);
+            kvLatentN.Dispose();
+
+            // Split q and kv_b into their parts (per-head, via the head-dim-strided slice).
+            Tensor qNope = new(new TensorShape(1, t, hq, qkNope), DType.F32); backend.SliceLastDim(qNope, q, 0);
+            Tensor qRope = new(new TensorShape(1, t, hq, qkRope), DType.F32); backend.SliceLastDim(qRope, q, qkNope);
+            q.Dispose();
+            Tensor kNope = new(new TensorShape(1, t, hq, qkNope), DType.F32); backend.SliceLastDim(kNope, kvB, 0);
+            Tensor v = new(new TensorShape(1, t, hq, vDim), DType.F32); backend.SliceLastDim(v, kvB, qkNope);
+            kvB.Dispose();
+
+            // Decoupled RoPE on the rope parts only (cos/sin are sized to qkRope).
+            backend.ApplyRopeSingle(qRope, cos, sin);
+            backend.ApplyRopeSingle(kRope, cos, sin);
+
+            // Move to head-major [1, heads, t, d] for the broadcast / concat / cache / attention.
+            Tensor qNopeMh = new(new TensorShape(1, hq, t, qkNope), DType.F32); backend.Permute0213(qNopeMh, qNope, t, hq, qkNope);
+            Tensor qRopeMh = new(new TensorShape(1, hq, t, qkRope), DType.F32); backend.Permute0213(qRopeMh, qRope, t, hq, qkRope);
+            Tensor kNopeMh = new(new TensorShape(1, hq, t, qkNope), DType.F32); backend.Permute0213(kNopeMh, kNope, t, hq, qkNope);
+            Tensor vMh = new(new TensorShape(1, hq, t, vDim), DType.F32); backend.Permute0213(vMh, v, t, hq, vDim);
+            Tensor kRopeMh = new(new TensorShape(1, 1, t, qkRope), DType.F32); backend.Permute0213(kRopeMh, kRope, t, 1, qkRope);
+            qNope.Dispose(); qRope.Dispose(); kNope.Dispose(); v.Dispose(); kRope.Dispose();
+
+            // Broadcast the shared rope key across all heads.
+            Tensor kRopeB = new(new TensorShape(1, hq, t, qkRope), DType.F32);
+            backend.RepeatKvHeads(kRopeB, kRopeMh, 1, hq);
+            kRopeMh.Dispose();
+
+            // Assemble full per-head q/k [nope|rope] and v padded to qkHead.
+            Tensor qFull = new(new TensorShape(1, hq, t, qkHead), DType.F32); backend.Concat(qFull, [qNopeMh, qRopeMh], dim: 3);
+            Tensor kFull = new(new TensorShape(1, hq, t, qkHead), DType.F32); backend.Concat(kFull, [kNopeMh, kRopeB], dim: 3);
+            Tensor vPad = ZeroTensor(new TensorShape(1, hq, t, qkHead - vDim));
+            Tensor vFull = new(new TensorShape(1, hq, t, qkHead), DType.F32); backend.Concat(vFull, [vMh, vPad], dim: 3);
+            qNopeMh.Dispose(); qRopeMh.Dispose(); kNopeMh.Dispose(); kRopeB.Dispose(); vMh.Dispose(); vPad.Dispose();
+
+            cache.AppendStep(backend, layerIndex, kFull, vFull);
+            kFull.Dispose(); vFull.Dispose();
+            int kvLen = posStart + t;
+            float scale = 1f / MathF.Sqrt(qkHead);   // MLA softmax scale (yarn mscale carried in cos/sin)
+            Tensor attn = new(new TensorShape(1, hq, t, qkHead), DType.F32);
+            backend.FlashAttention(attn, qFull, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
+                kvLen, 1, causal: true, qOffset: posStart, scale);
+            qFull.Dispose();
+
+            // Keep only the real v_head_dim of each head's output (the zero-padded tail contributes 0).
+            Tensor attnV = new(new TensorShape(1, hq, t, vDim), DType.F32); backend.SliceLastDim(attnV, attn, 0);
+            attn.Dispose();
+            Tensor attnFlat = new(new TensorShape(1, t, hq * vDim), DType.F32); backend.Permute0213(attnFlat, attnV, hq, t, vDim);
+            attnV.Dispose();
+            Tensor attnOut = new(flat, DType.F32); Project(backend, attnOut, attnFlat, _oW!, null, _cfg.LowVramQuant);
+            attnFlat.Dispose();
+
+            Tensor afterAttn = new(flat, DType.F32);
+            backend.Add(afterAttn, hidden, attnOut);
+            attnOut.Dispose();
+            Tensor preMlp = new(flat, DType.F32);
+            backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
+            Tensor mlpOut = Mlp(backend, preMlp, t);
+            Tensor result = new(flat, DType.F32);
+            backend.Add(result, afterAttn, mlpOut);
+            afterAttn.Dispose(); mlpOut.Dispose();
+            return result;
+        }
+
+        /// <summary>Post-processes a sublayer output before it is added to the residual stream: Gemma's sandwich
+        /// RMSNorm (when <paramref name="norm"/> is set) followed by Granite's residual multiplier (when not 1).
+        /// Both are no-ops for plain Qwen/Llama. Consumes/returns the (possibly replaced) tensor.</summary>
+        private Tensor PostSublayer(IBackend backend, Tensor x, Tensor? norm, TensorShape shape)
+        {
+            if (norm is not null)
+            {
+                Tensor normed = new(shape, DType.F32);
+                backend.RmsNorm(normed, x, norm, _cfg.RmsNormEps);
+                x.Dispose();
+                x = normed;
+            }
+            if (_cfg.ResidualMultiplier != 1f) backend.Scale(x, x, _cfg.ResidualMultiplier);
+            return x;
         }
 
         /// <summary>Batched decode (one token per sequence): projections/MLP run as a single GEMM over all B
@@ -554,15 +757,16 @@ public sealed unsafe class GenericTransformer : IDisposable
             TensorShape flat = new(1, b, h);
 
             Tensor pre = new(flat, DType.F32);
-            backend.RmsNorm(pre, hidden, _inNorm!, _cfg.RmsNormEps);
+            Normalize(backend, pre, hidden, _inNorm!, _normBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
 
-            Tensor q = new(new TensorShape(1, b, hq, d), DType.F32);
-            Tensor k = new(new TensorShape(1, b, hkv, d), DType.F32);
+            bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
+            Tensor q = new(fullNorm ? new TensorShape(1, b, _cfg.QDim) : new TensorShape(1, b, hq, d), DType.F32);
+            Tensor k = new(fullNorm ? new TensorShape(1, b, _cfg.KvDim) : new TensorShape(1, b, hkv, d), DType.F32);
             Tensor v = new(new TensorShape(1, b, hkv, d), DType.F32);
             Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
             Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
             Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
-            pre.Dispose();
+            if (!_cfg.ParallelResidual) pre.Dispose();
 
             if (_cfg.QkNorm)
             {
@@ -574,16 +778,19 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            // RoPE per row (each row b is one token at its own absolute position).
-            if (_cfg.Rope == RopeStyle.Interleaved)
+            // RoPE per row (each row b is one token at its own absolute position); skipped on Cohere2 NoPE layers.
+            if (!(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
             {
-                backend.ApplyRopeInterleaved(q, cos, sin);
-                backend.ApplyRopeInterleaved(k, cos, sin);
-            }
-            else
-            {
-                backend.ApplyRopeSingle(q, cos, sin);
-                backend.ApplyRopeSingle(k, cos, sin);
+                if (_cfg.Rope == RopeStyle.Interleaved)
+                {
+                    backend.ApplyRopeInterleaved(q, cos, sin);
+                    backend.ApplyRopeInterleaved(k, cos, sin);
+                }
+                else
+                {
+                    backend.ApplyRopeSingle(q, cos, sin, _cfg.RotaryDim);
+                    backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
+                }
             }
 
             float scale = _cfg.AttnScale;
@@ -619,7 +826,20 @@ public sealed unsafe class GenericTransformer : IDisposable
             Project(backend, attnOut, attnConcat, _oW!, null, _cfg.LowVramQuant);
             attnConcat.Dispose();
 
-            attnOut = ApplySandwich(backend, attnOut, _postAttnNorm, flat);
+            if (_cfg.ParallelResidual)
+            {
+                attnOut = PostSublayer(backend, attnOut, null, flat);
+                Tensor mlpPar = Mlp(backend, pre, b);
+                mlpPar = PostSublayer(backend, mlpPar, null, flat);
+                Tensor sum1 = new(flat, DType.F32);
+                backend.Add(sum1, hidden, attnOut);
+                Tensor parResult = new(flat, DType.F32);
+                backend.Add(parResult, sum1, mlpPar);
+                attnOut.Dispose(); mlpPar.Dispose(); sum1.Dispose();
+                return parResult;
+            }
+
+            attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
             Tensor afterAttn = new(flat, DType.F32);
             backend.Add(afterAttn, hidden, attnOut);
             attnOut.Dispose();
@@ -628,7 +848,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
             Tensor mlpOut = Mlp(backend, preMlp, b);
 
-            mlpOut = ApplySandwich(backend, mlpOut, _postFfnNorm, flat);
+            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
             afterAttn.Dispose(); mlpOut.Dispose();

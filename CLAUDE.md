@@ -11,6 +11,10 @@ HartsyInference is a pure C#/.NET 10 AI inference engine for non-LLM modalities 
 3. Read the specialized agent file matching your task (routing table is in `AGENTS.md`)
 4. Check `docs/Checklists/` — find the active phase (earliest with unchecked items)
 
+To see which models are built vs **verified end-to-end**, read the per-modality status docs indexed in
+`docs/Checklists/MODEL_STATUS.md` (Image / Audio / Video / World / 3D / Vision / LLM). The cross-modality
+real-weight parity authority is `docs/Checklists/PARITY_VERIFICATION.md`.
+
 For deeper context on specific areas, read:
 - `docs/Design/CORE_DESIGN.md` — architecture overview, design pillars
 - `docs/Design/BUILD_ORDER.md` — phase dependencies and sequencing

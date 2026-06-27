@@ -726,21 +726,24 @@ public sealed class CudaKernels : IDisposable
     }
 
     private unsafe void LaunchRopeImpl(nint func, ulong x, ulong cos, ulong sin,
-        int numHeads, int headDim, long totalVecs, nint stream)
+        int numHeads, int headDim, long totalVecs, int rotaryDim, nint stream)
     {
+        // rotaryDim 0 (or >= headDim) = full rotary; else partial (rotate the first rotaryDim dims of each head).
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
         ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim;
+        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim, rotArg = (uint)rdim;
         ulong vecsArg = (ulong)totalVecs;
 
-        void** args = stackalloc void*[6];
+        void** args = stackalloc void*[7];
         args[0] = &xArg;
         args[1] = &cosArg;
         args[2] = &sinArg;
         args[3] = &headsArg;
         args[4] = &headDimArg;
         args[5] = &vecsArg;
+        args[6] = &rotArg;
 
-        long threads = totalVecs * (headDim / 2);
+        long threads = totalVecs * (rdim / 2);
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
@@ -1260,8 +1263,8 @@ public sealed class CudaKernels : IDisposable
         => LaunchUnaryImpl(_ditTanhF32, output, input, count, stream);
 
     /// <summary>Launches in-place rotary embedding on x [B,L,numHeads,headDim]; cos/sin [B,L,headDim].</summary>
-    public void LaunchRope(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream)
-        => LaunchRopeImpl(_ditRopeF32, x, cos, sin, numHeads, headDim, totalVecs, stream);
+    public void LaunchRope(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream, int rotaryDim = 0)
+        => LaunchRopeImpl(_ditRopeF32, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
 
     /// <summary>Launches last-dim slice: out[row,d] = in[row, offset+d], in row stride = inDim.</summary>
     public void LaunchSliceLastDim(ulong output, ulong input, int outDim, int inDim, int offset, long total, nint stream)

@@ -16,7 +16,6 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private readonly EspeakPhonemeTable _phon;
     private readonly EspeakIpaMap _ipa;
     private readonly EspeakVoiceVariant _variant;
-    private readonly byte _tCode, _tFlapCode;
     private readonly EspeakPhonemeList? _plist;
     private readonly EspeakPhonemeRenderer? _renderer;
 
@@ -28,8 +27,6 @@ public sealed class EspeakPhonemizer : IPhonemizer
         _phon = phon;
         _ipa = ipa;
         _variant = variant;
-        _tCode = (byte)phon.CodeForMnemonic('t');                       // "t"
-        _tFlapCode = (byte)phon.CodeForMnemonic('t' | ('#' << 8));      // "t#" flap allophone
         if (index is not null)
         {
             // Exact allophone + IPA path: run espeak's phoneme-program VM over the clause phoneme list.
@@ -132,67 +129,98 @@ public sealed class EspeakPhonemizer : IPhonemizer
         List<byte> codes;
         uint dflags = 0;
 
-        if (_lookup.Lookup(lower, out EspeakLookupResult r))
+        bool found = _lookup.Lookup(lower, out EspeakLookupResult r);
+        if (found && r.Phonemes.Count > 0)
         {
             codes = r.Phonemes;
             dflags = r.Flags;
         }
         else
         {
+            if (found) dflags = r.Flags; // flag-only dictionary entry: keep its flags, pronounce via the rules
             byte[] buf = BuildBuffer(lower);
-            codes = _rules.TranslateRules(buf, WordStart, out int endType, out List<byte> endPhonemes);
-            if (endType != 0)
+            codes = TranslateWithEndings(buf, WordStart, ref dflags, 0);
+        }
+        // Flapping (t/d -> ɾ), voicing assimilation, and vowel reduction are applied data-driven by the phoneme-program
+        // VM during rendering (EspeakPhonemeList), so no separate flap-t post-process is needed.
+        return _stress.SetWordStress(codes, dflags, tonic: -1, control: 0);
+    }
+
+    // Translates a word buffer by rules, handling a matched prefix or suffix by stripping it and re-translating the
+    // stem. The stem is re-translated recursively so stacked affixes resolve (e.g. "killings" = kill+ing+s,
+    // "nonpayment" = non+payment), matching espeak's repeated TranslateWord on the stem. Stripping the prefix and
+    // re-translating the stem at a word boundary is what lets the stem keep its own (primary) stress.
+    private List<byte> TranslateWithEndings(byte[] buf, int start, ref uint dflags, int depth)
+    {
+        List<byte> codes = _rules.TranslateRules(buf, start, out int endType, out List<byte> endPhonemes);
+        if (endType == 0 || depth >= 8)
+            return codes;
+
+        if ((endType & EspeakRuleCodes.SufxP) != 0)
+        {
+            if (PrefixIsLexicalized(buf, start))
             {
-                // A suffix was matched: strip it, re-translate the (possibly respelled) stem, then append the suffix.
-                _rules.RemoveEnding(buf, WordStart, endType);
-                string stem = ReadWord(buf, WordStart);
-                List<byte> stemCodes;
-                if (_lookup.Lookup(stem, out EspeakLookupResult rs))
-                {
-                    stemCodes = rs.Phonemes;
-                    dflags = rs.Flags;
-                }
-                else
-                {
-                    stemCodes = _rules.TranslateRules(buf, WordStart);
-                }
-                stemCodes.AddRange(endPhonemes);
-                codes = stemCodes;
+                // The word minus a standard suffix is a known word (e.g. "outfit" + s), so it is lexicalized: don't
+                // strip the prefix. Re-translate suppressing prefix detection and handle the suffix normally below.
+                codes = _rules.TranslateRules(buf, start, out endType, out endPhonemes, EspeakTranslator.FlagNoPrefix);
+                if (endType == 0)
+                    return codes;
+            }
+            else
+            {
+                // Standard prefix (non-, dis-, re-, un-, ...): the prefix rule matched after consuming its letters, so
+                // the stem begins at start + length. Put a space before the stem so it re-translates at a word boundary
+                // (its word-start stress rules fire), then prepend the prefix phonemes (lighter stress).
+                int nChars = endType & 0xf;
+                int stemStart = start + nChars;
+                byte saved = buf[stemStart - 1];
+                buf[stemStart - 1] = (byte)' ';
+                uint stemFlags = 0;
+                List<byte> stem = TranslateWithEndings(buf, stemStart, ref stemFlags, depth + 1);
+                buf[stemStart - 1] = saved;
+                // Lock the stem's own stress (its primary may be positional) before prepending the lighter-stressed
+                // prefix, so the final pass doesn't move the primary onto the prefix.
+                stem = _stress.SetWordStress(stem, stemFlags, tonic: -1, control: 0);
+                endPhonemes.AddRange(stem);
+                return endPhonemes;
             }
         }
-        List<byte> stressed = _stress.SetWordStress(codes, dflags, tonic: -1, control: 0);
-        if (_variant.ReduceT) ApplyFlapT(stressed);
-        return stressed;
-    }
 
-    // American flap-t (option reduce_t): t -> t# (rendered ɾ) when it sits between a vowel and a following unstressed
-    // vowel. Unstressed vowels carry no preceding stress phoneme, so "next phoneme is directly a vowel" detects them.
-    private void ApplyFlapT(List<byte> codes)
-    {
-        if (_tCode == 0 || _tFlapCode == 0) return;
-        for (int i = 1; i < codes.Count - 1; i++)
+        // Standard suffix: strip it, re-translate the (possibly respelled) stem, then append the suffix phonemes.
+        _rules.RemoveEnding(buf, start, endType);
+        string stemWord = ReadWord(buf, start);
+        List<byte> stemCodes;
+        bool stemFound = _lookup.Lookup(stemWord, out EspeakLookupResult rs);
+        if (stemFound && rs.Phonemes.Count > 0)
         {
-            if (codes[i] != _tCode) continue;
-            if (IsVowel(codes[i + 1]) && PrevIsVowel(codes, i))
-                codes[i] = _tFlapCode;
+            stemCodes = rs.Phonemes;
+            dflags = rs.Flags;
         }
-    }
-
-    private bool PrevIsVowel(List<byte> codes, int i)
-    {
-        for (int j = i - 1; j >= 0; j--)
+        else
         {
-            if (IsStress(codes[j])) continue;
-            return IsVowel(codes[j]);
+            // A flag-only stem entry still carries the stem's stress flags (e.g. "outfit" pins syllable 1); keep
+            // them so adding "-s" doesn't lose the stress pin, then pronounce the stem via the rules.
+            if (stemFound) dflags = rs.Flags;
+            stemCodes = TranslateWithEndings(buf, start, ref dflags, depth + 1);
         }
-        return false;
+        stemCodes.AddRange(endPhonemes);
+        return stemCodes;
     }
 
-    private bool IsVowel(byte code)
-        => _phon.TryGet(code, out EspeakPhoneme ph) && ph.Type == EspeakPhoneme.TypeVowel
-           && (ph.PhFlags & EspeakPhoneme.FlagNonSyllabic) == 0;
-
-    private bool IsStress(byte code) => _phon.TryGet(code, out EspeakPhoneme ph) && ph.Type == EspeakPhoneme.TypeStress;
+    // espeak confirm_prefix: returns true if removing a standard suffix from the word at <paramref name="start"/>
+    // leaves a word that is in the dictionary (so the word is lexicalized and the prefix should not be stripped, e.g.
+    // "outfit" + s). Suppresses prefix detection during the check and restores the buffer afterwards.
+    private bool PrefixIsLexicalized(byte[] buf, int start)
+    {
+        _rules.TranslateRules(buf, start, out int sufType, out _, EspeakTranslator.FlagNoPrefix);
+        if (sufType == 0 || (sufType & EspeakRuleCodes.SufxP) != 0)
+            return false;
+        byte[] save = (byte[])buf.Clone();
+        _rules.RemoveEnding(buf, start, sufType);
+        string stem = ReadWord(buf, start);
+        Array.Copy(save, buf, buf.Length);
+        return _lookup.Lookup(stem, out _);
+    }
 
     private const int WordStart = 2;
 

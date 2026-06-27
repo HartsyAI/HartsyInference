@@ -77,13 +77,18 @@ public sealed class GgufLanguageModel : IDisposable
         // directly (ignore_merges). Wrong split → wrong token ids → garbage output.
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
         bool llama3Family = pre is "llama-bpe" or "llama3" or "smaug-bpe";
-        string? preRegex = llama3Family ? Llama3PreTokenRegex : null;
+        bool gpt4o = pre is "gpt-4o" or "o200k";   // o200k_base split (Phi-4, GPT-OSS, GPT-4o)
+        string? preRegex = llama3Family ? Llama3PreTokenRegex : gpt4o ? Gpt4oPreTokenRegex : null;
         return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, preRegex, ignoreMerges: llama3Family);
     }
 
     // Llama-3 / GPT-4 byte-level pre-token split (matches llama.cpp LLAMA3 + HF tokenizer.json).
     private const string Llama3PreTokenRegex =
         @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+    // o200k_base / gpt-4o byte-level pre-token split (tiktoken o200k pat_str — Phi-4, GPT-OSS, GPT-4o).
+    private const string Gpt4oPreTokenRegex =
+        @"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
     /// <summary>Loads the GGUF at <paramref name="path"/>. Set <paramref name="lowVramQuant"/> to keep weights
     /// compressed on-device (low VRAM, slower decode) instead of caching dequantized F16 weights. Set
@@ -121,6 +126,9 @@ public sealed class GgufLanguageModel : IDisposable
             if (handle.Architecture == "phi3") SplitFusedPhi(weights, handle.Metadata);
 
             TransformerConfig config = GgufConfigFactory.FromGguf(handle.Metadata, weights, lowVramQuant);
+            // MoE: GGUF stacks all experts into one 3D tensor per projection; split them into the per-expert 2D
+            // weights the MoE block loads (reshape to 2D + contiguous row-byte slice, dtype-preserving).
+            if (config.Moe is not null) SplitStackedExperts(weights, config);
             GenericTransformer transformer = new(config);
             transformer.LoadWeights(weights, "model");
 
@@ -147,7 +155,10 @@ public sealed class GgufLanguageModel : IDisposable
         int hq = (int)meta.GetUInt32("phi3.attention.head_count");
         int hkv = (int)meta.GetUInt32("phi3.attention.head_count_kv", (uint)hq);
         int hidden = (int)meta.GetUInt32("phi3.embedding_length");
-        int headDim = (int)meta.GetUInt32("phi3.rope.dimension_count", (uint)(hidden / Math.Max(1, hq)));
+        // Real head_dim (key_length, else hidden/heads) — NOT rope.dimension_count, which is the (possibly
+        // smaller) partial-rotary width and differs from head_dim on Phi-4-mini (96 vs 128).
+        int headDim = (int)meta.GetUInt32("phi3.attention.key_length", 0u);
+        if (headDim == 0) headDim = hidden / Math.Max(1, hq);
         int ffn = (int)meta.GetUInt32("phi3.feed_forward_length");
         int layers = (int)meta.GetUInt32("phi3.block_count");
         int qRows = hq * headDim, kvRows = hkv * headDim;
@@ -171,6 +182,38 @@ public sealed class GgufLanguageModel : IDisposable
         }
     }
 
+    /// <summary>Splits each MoE layer's stacked expert tensors (<c>gate_exps</c>/<c>up_exps</c>/<c>down_exps</c>,
+    /// shape <c>[E, ·, ·]</c>) into the per-expert 2D <c>experts.{i}.{gate,up,down}_proj</c> weights the MoE block
+    /// loads. Each expert occupies a contiguous block, so a flatten-to-2D + per-expert row-byte copy works on the
+    /// quantized weights with no dequant.</summary>
+    private static void SplitStackedExperts(Dictionary<string, Tensor> w, TransformerConfig cfg)
+    {
+        int e = cfg.Moe!.NumExperts;
+        int hidden = cfg.HiddenSize;
+        int inter = cfg.Moe.MoeIntermediateSize;
+        for (int i = 0; i < cfg.NumLayers; i++)
+        {
+            if (!cfg.IsMoeLayer(i)) continue;
+            string p = $"model.layers.{i}.mlp";
+            SplitExperts(w, $"{p}.gate_exps.weight", $"{p}.experts.{{0}}.gate_proj.weight", e, inter, hidden);
+            SplitExperts(w, $"{p}.up_exps.weight", $"{p}.experts.{{0}}.up_proj.weight", e, inter, hidden);
+            SplitExperts(w, $"{p}.down_exps.weight", $"{p}.experts.{{0}}.down_proj.weight", e, hidden, inter);
+        }
+    }
+
+    /// <summary>Splits one stacked expert tensor (flattened to <c>[E·outDim, inDim]</c>) into <paramref name="e"/>
+    /// per-expert <c>[outDim, inDim]</c> tensors keyed by <paramref name="targetFormat"/> (a <c>{0}</c> expert-index
+    /// placeholder), then removes the stacked source.</summary>
+    private static void SplitExperts(Dictionary<string, Tensor> w, string stackedKey, string targetFormat,
+        int e, int outDim, int inDim)
+    {
+        if (!w.TryGetValue(stackedKey, out Tensor? stacked)) return;
+        Tensor flat = stacked.Reshape(new TensorShape(e * outDim, inDim));
+        for (int x = 0; x < e; x++)
+            w[targetFormat.Replace("{0}", x.ToString())] = SliceRows(flat, x * outDim, outDim);
+        w.Remove(stackedKey);
+    }
+
     /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of a rank-2 tensor into a new tensor of the same
     /// dtype. A row is contiguous in both float and block-quantized layouts (quant blocks run along the column
     /// dim), so this is a plain byte-range copy that works on quantized weights.</summary>
@@ -178,11 +221,11 @@ public sealed class GgufLanguageModel : IDisposable
     {
         int inDim = (int)src.Shape[1];
         long rowBytes = src.DType.ComputeByteCount(inDim);
-        Tensor outp = new(new TensorShape(numRows, inDim), src.DType);
+        // Zero-copy view over the source's memory (the GGUF mmap). Splitting a large MoE checkpoint into hundreds
+        // of per-expert tensors must not duplicate the weights in host RAM — the views borrow the mmap, which the
+        // GgufLanguageModel keeps alive, and each is uploaded to the GPU exactly once like any other weight.
         byte* s = (byte*)src.DataPointer + (long)startRow * rowBytes;
-        long bytes = (long)numRows * rowBytes;
-        Buffer.MemoryCopy(s, (void*)outp.DataPointer, bytes, bytes);
-        return outp;
+        return new Tensor((void*)s, new TensorShape(numRows, inDim), src.DType, src.Device);
     }
 
     public void Dispose()

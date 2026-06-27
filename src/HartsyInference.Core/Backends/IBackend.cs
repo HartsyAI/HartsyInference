@@ -243,7 +243,7 @@ public interface IBackend : IDisposable
     /// <c>[B, L, numHeads, headDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>
     /// broadcast over heads. Same rotate-half math as <see cref="ApplyRope"/> but for one tensor — required for
     /// grouped-query attention where Q and K have different head counts (the paired overload would mis-stride K).</summary>
-    unsafe void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin)
+    unsafe void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("ApplyRopeSingle default fallback only supports F32.");
@@ -251,7 +251,11 @@ public interface IBackend : IDisposable
         int seqLen = (int)x.Shape[1];
         int numHeads = (int)x.Shape[2];
         int headDim = (int)x.Shape[3];
-        int half = headDim / 2;
+        // Partial rotary (Phi-4 / StableLM): rotate only the first rotaryDim dims of each head (NEOX pairing
+        // (i, i+half), half = rotaryDim/2), leaving the rest unchanged. 0 / full = the whole head. cos/sin keep
+        // headDim stride (only their first rotaryDim entries are read).
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
+        int half = rdim / 2;
         float* xPtr = (float*)x.DataPointer;
         float* cosPtr = (float*)cos.DataPointer;
         float* sinPtr = (float*)sin.DataPointer;

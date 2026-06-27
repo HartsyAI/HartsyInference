@@ -22,7 +22,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
     private const float MinDerivative = 1e-3f;
 
     private readonly int _hidden, _filter, _kernel, _ddsLayers, _flowLayers, _nFlows;
-    private Tensor? _preW, _preB, _projW, _projB;
+    private Tensor? _preW, _preB, _projW, _projB, _condW, _condB;
     private DdsConv? _convs;
     private ConvFlow[]? _flows;
     private Tensor? _eaM, _eaLogs;
@@ -42,6 +42,8 @@ public sealed unsafe class VitsStochasticDurationPredictor
     {
         _preW = VitsWeights.Conv(w, $"{prefix}.pre"); _preB = VitsWeights.Bias(w, $"{prefix}.pre");
         _projW = VitsWeights.Conv(w, $"{prefix}.proj"); _projB = VitsWeights.Bias(w, $"{prefix}.proj");
+        if (w.ContainsKey($"{prefix}.cond.weight") || w.ContainsKey($"{prefix}.cond.weight_g"))
+        { _condW = VitsWeights.Conv(w, $"{prefix}.cond"); _condB = VitsWeights.Bias(w, $"{prefix}.cond"); }
         _convs = new DdsConv(_filter, _kernel, _ddsLayers);
         _convs.LoadWeights(w, $"{prefix}.convs");
 
@@ -81,15 +83,26 @@ public sealed unsafe class VitsStochasticDurationPredictor
         return null; // identity (logs == 0)
     }
 
-    /// <summary>Predicts log-durations from the encoder hidden <c>[1, hidden, T]</c> → <c>float[T]</c>.</summary>
-    public float[] Forward(IBackend backend, Tensor x, int t, float noiseScaleW, int seed)
+    /// <summary>Predicts log-durations from the encoder hidden <c>[1, hidden, T]</c> → <c>float[T]</c>. When a
+    /// speaker embedding <paramref name="g"/> <c>[1, gin, 1]</c> and a <c>cond</c> layer are present, <c>cond(g)</c>
+    /// is added after <c>pre(x)</c> (MeloTTS/Bert-VITS2).</summary>
+    public float[] Forward(IBackend backend, Tensor x, int t, float noiseScaleW, int seed, Tensor? g = null)
     {
         if (_preW is null || _convs is null || _flows is null)
             throw new InvalidOperationException("VitsStochasticDurationPredictor weights not loaded.");
 
-        // Conditioner: cond = proj(convs(pre(x))) — feeds every ConvFlow's spline-parameter network.
+        // Conditioner: cond = proj(convs(pre(x) + cond(g))) — feeds every ConvFlow's spline-parameter network.
         Tensor h = new(new TensorShape(1, _filter, t), DType.F32);
         backend.Conv1d(h, x, _preW!, _preB, 1, 0, 0, 1, 1);
+        if (g is not null && _condW is not null)
+        {
+            Tensor cg = new(new TensorShape(1, _filter, 1), DType.F32);
+            backend.Conv1d(cg, g, _condW, _condB, 1, 0, 0, 1, 1);
+            float* hp = (float*)h.DataPointer, cp = (float*)cg.DataPointer;
+            for (int ch = 0; ch < _filter; ch++)
+                for (int j = 0; j < t; j++) hp[(long)ch * t + j] += cp[ch];
+            cg.Dispose();
+        }
         Tensor convOut = _convs.Forward(backend, h, t);
         h.Dispose();
         Tensor cond = new(new TensorShape(1, _filter, t), DType.F32);
@@ -122,7 +135,7 @@ public sealed unsafe class VitsStochasticDurationPredictor
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] heads = [_preW, _preB, _projW, _projB, _eaM, _eaLogs];
+        Tensor?[] heads = [_preW, _preB, _projW, _projB, _eaM, _eaLogs, _condW, _condB];
         foreach (Tensor? t in heads) if (t is not null) yield return t;
         if (_convs is not null) foreach (Tensor t in _convs.EnumerateWeights()) yield return t;
         if (_flows is not null) foreach (ConvFlow f in _flows) foreach (Tensor t in f.EnumerateWeights()) yield return t;

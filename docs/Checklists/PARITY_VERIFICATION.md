@@ -2,9 +2,13 @@
 
 > One living checklist for **every** model HartsyInference targets (all modalities), tracking the
 > **numerical parity verification loop**: load the real checkpoint → dump a reference from the upstream
-> implementation → diff the C# output → fix bugs → check it off. This is distinct from
-> [`MODEL_STATUS.md`](MODEL_STATUS.md) (which tracks whether a model is *built*); this tracks whether it has
-> been *proven correct against real weights*.
+> implementation → diff the C# output → fix bugs → check it off. This is distinct from the per-modality
+> status docs indexed in [`MODEL_STATUS.md`](MODEL_STATUS.md) (which track whether a model is *built*);
+> this tracks whether it has been *proven correct against real weights*.
+>
+> **Per-type status docs:** [Image](MODEL_STATUS_IMAGE.md) · [Audio](MODEL_STATUS_AUDIO.md) ·
+> [Video](MODEL_STATUS_VIDEO.md) · [World](MODEL_STATUS_WORLD.md) · [3D](MODEL_STATUS_3D.md) ·
+> [Vision](MODEL_STATUS_VISION.md) · [LLM](MODEL_STATUS_LLM.md).
 
 ---
 
@@ -107,12 +111,12 @@ Add a row to **§ Bugs found** for every real bug, with how it was caught.
 
 ---
 
-## IMAGE (diffusion) — see [`MODEL_STATUS.md`](MODEL_STATUS.md) for build detail
+## IMAGE (diffusion) — see [`MODEL_STATUS_IMAGE.md`](MODEL_STATUS_IMAGE.md) for build detail
 | Model | Parity | Notes |
 |---|---|---|
 | **SD 1.5 / SDXL / SD3.5 / Flux (Dev/Schnell/Krea) / Z-Image / Flux.2 Klein** | ✅ | Clean visual output verified end-to-end. Many plumbing bugs fixed (SD3 #31-35, Z-Image #25-30 in PHASE_3_DEVIATIONS). |
 | **Ideogram 4** (9.3B DiT) | 🔬 | ~1e-7 parity on 3060 after the GPU-residency rewrite (`dit_f32.ptx`). A100 timing pending. See [[ideogram4-gpu-residency]]. |
-| **Qwen-Image / Chroma / ChromaRadiance / ZetaChroma / ERNIE-Image / Hunyuan-Image / Lumina-2 / HiDream / Kandinsky-5 / Anima / OmniGen-2 / F-Lite / AuraFlow / Krea-2 / Boogu-Image / Microsoft Lens / Lance-image / Flux.2 Dev (32B)** | 🔧 | Built end-to-end, numerics validation-pending (need Python-parity dumps + checkpoint download; several gated on VRAM). Status detail per model in `MODEL_STATUS.md`. |
+| **Qwen-Image / Chroma / ChromaRadiance / ZetaChroma / ERNIE-Image / Hunyuan-Image / Lumina-2 / HiDream / Kandinsky-5 / Anima / OmniGen-2 / F-Lite / AuraFlow / Krea-2 / Boogu-Image / Microsoft Lens / Lance-image / Flux.2 Dev (32B)** | 🔧 | Built end-to-end, numerics validation-pending (need Python-parity dumps + checkpoint download; several gated on VRAM). Status detail per model in [`MODEL_STATUS_IMAGE.md`](MODEL_STATUS_IMAGE.md). |
 
 ---
 

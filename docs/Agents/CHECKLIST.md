@@ -5,6 +5,9 @@
 ## Extra Reading
 - `docs/Design/BUILD_ORDER.md`
 - All files in `docs/Checklists/`
+- `docs/Checklists/MODEL_STATUS.md` — index of the per-modality model status docs (Image / Audio /
+  Video / World / 3D / Vision / LLM); keep these in sync when a model's verified-e2e status changes
+- `docs/Checklists/PARITY_VERIFICATION.md` — real-weight parity authority (what is *proven correct*)
 - Actual source code and tests
 
 ## Workflow

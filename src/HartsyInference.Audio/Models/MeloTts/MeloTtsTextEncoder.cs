@@ -14,7 +14,7 @@ public sealed unsafe class MeloTtsTextEncoder
     private readonly MeloTtsConfig _cfg;
     private readonly int _h;
     private readonly VitsTextEncoder _core;
-    private Tensor? _emb, _toneEmb, _langEmb, _bertW, _bertB, _jaBertW, _jaBertB;
+    private Tensor? _emb, _toneEmb, _langEmb, _bertW, _bertB, _jaBertW, _jaBertB, _spkW, _spkB;
 
     public MeloTtsTextEncoder(MeloTtsConfig cfg)
     {
@@ -30,6 +30,8 @@ public sealed unsafe class MeloTtsTextEncoder
         _langEmb = VitsWeights.Conv(w, $"{prefix}.language_emb");
         _bertW = VitsWeights.Conv(w, $"{prefix}.bert_proj"); _bertB = VitsWeights.Bias(w, $"{prefix}.bert_proj");
         _jaBertW = VitsWeights.Conv(w, $"{prefix}.ja_bert_proj"); _jaBertB = VitsWeights.Bias(w, $"{prefix}.ja_bert_proj");
+        if (w.TryGetValue($"{prefix}.encoder.spk_emb_linear.weight", out Tensor? sw))
+        { _spkW = sw; _spkB = w.TryGetValue($"{prefix}.encoder.spk_emb_linear.bias", out Tensor? sb) ? sb : null; }
         _core.LoadWeightsLayersOnly(w, prefix);
     }
 
@@ -37,7 +39,7 @@ public sealed unsafe class MeloTtsTextEncoder
     /// <paramref name="bert"/> is <c>[BertDim, T]</c> and <paramref name="jaBert"/> is <c>[JaBertDim, T]</c>
     /// (channels-first); pass zero tensors when a language's BERT stream is unused.</summary>
     public (Tensor Hidden, Tensor MP, Tensor LogsP) Forward(IBackend backend, ReadOnlySpan<int> phonemes,
-        ReadOnlySpan<int> tones, ReadOnlySpan<int> languages, Tensor bert, Tensor jaBert)
+        ReadOnlySpan<int> tones, ReadOnlySpan<int> languages, Tensor bert, Tensor jaBert, Tensor? g = null)
     {
         int t = phonemes.Length;
         float scale = MathF.Sqrt(_h);
@@ -55,6 +57,8 @@ public sealed unsafe class MeloTtsTextEncoder
         float* lp = (float*)_langEmb!.DataPointer;
         float* bp = (float*)bertProj.DataPointer;
         float* jp = (float*)jaProj.DataPointer;
+        // h = (emb(p) + tone_emb(t) + lang_emb(l) + bert_proj + ja_bert_proj) * sqrt(hidden) — the whole sum
+        // (BERT projections included) is scaled by sqrt(hidden), per melo models.py TextEncoder.forward.
         for (int j = 0; j < t; j++)
             for (int c = 0; c < _h; c++)
             {
@@ -63,12 +67,12 @@ public sealed unsafe class MeloTtsTextEncoder
                 xp[(long)c * t + j] = sum * scale;
             }
         bertProj.Dispose(); jaProj.Dispose();
-        return _core.ForwardFromEmbedding(backend, embed, t);
+        return _core.ForwardFromEmbedding(backend, embed, t, g, _spkW, _spkB);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] own = [_emb, _toneEmb, _langEmb, _bertW, _bertB, _jaBertW, _jaBertB];
+        Tensor?[] own = [_emb, _toneEmb, _langEmb, _bertW, _bertB, _jaBertW, _jaBertB, _spkW, _spkB];
         foreach (Tensor? t in own) if (t is not null) yield return t;
         foreach (Tensor t in _core.EnumerateWeights()) yield return t;
     }

@@ -584,12 +584,13 @@ $L__BB5_5:
 	.param .u64 dit_rope_f32_param_2,
 	.param .u32 dit_rope_f32_param_3,
 	.param .u32 dit_rope_f32_param_4,
-	.param .u64 dit_rope_f32_param_5
+	.param .u64 dit_rope_f32_param_5,
+	.param .u32 dit_rope_f32_param_6
 )
 {
-	.reg .pred 	%p<4>;
+	.reg .pred 	%p<5>;
 	.reg .f32 	%f<12>;
-	.reg .b32 	%r<15>;
+	.reg .b32 	%r<18>;
 	.reg .b64 	%rd<43>;
 
 
@@ -599,21 +600,25 @@ $L__BB5_5:
 	ld.param.u32 	%r1, [dit_rope_f32_param_3];
 	ld.param.u32 	%r2, [dit_rope_f32_param_4];
 	ld.param.u64 	%rd16, [dit_rope_f32_param_5];
-	mov.u32 	%r3, %ctaid.x;
-	mov.u32 	%r4, %ntid.x;
-	mul.wide.u32 	%rd17, %r3, %r4;
-	mov.u32 	%r5, %tid.x;
-	cvt.u64.u32 	%rd18, %r5;
+	ld.param.u32 	%r3, [dit_rope_f32_param_6];
+	add.s32 	%r4, %r3, -1;
+	setp.lt.u32 	%p1, %r4, %r2;
+	selp.b32 	%r5, %r3, %r2, %p1;
+	shr.u32 	%r6, %r5, 1;
+	mov.u32 	%r7, %ctaid.x;
+	mov.u32 	%r8, %ntid.x;
+	mul.wide.u32 	%rd17, %r7, %r8;
+	mov.u32 	%r9, %tid.x;
+	cvt.u64.u32 	%rd18, %r9;
 	add.s64 	%rd1, %rd17, %rd18;
-	shr.u32 	%r6, %r2, 1;
 	cvt.u64.u32 	%rd2, %r6;
 	mul.lo.s64 	%rd19, %rd2, %rd16;
-	setp.ge.u64 	%p1, %rd1, %rd19;
-	@%p1 bra 	$L__BB6_8;
+	setp.ge.u64 	%p2, %rd1, %rd19;
+	@%p2 bra 	$L__BB6_8;
 
 	and.b64  	%rd20, %rd1, -4294967296;
-	setp.eq.s64 	%p2, %rd20, 0;
-	@%p2 bra 	$L__BB6_3;
+	setp.eq.s64 	%p3, %rd20, 0;
+	@%p3 bra 	$L__BB6_3;
 
 	div.u64 	%rd40, %rd1, %rd2;
 	mul.lo.s64 	%rd21, %rd40, %rd2;
@@ -621,28 +626,28 @@ $L__BB5_5:
 	bra.uni 	$L__BB6_4;
 
 $L__BB6_3:
-	cvt.u32.u64 	%r7, %rd2;
-	cvt.u32.u64 	%r8, %rd1;
-	div.u32 	%r9, %r8, %r7;
-	mul.lo.s32 	%r10, %r9, %r7;
-	sub.s32 	%r11, %r8, %r10;
-	cvt.u64.u32 	%rd40, %r9;
-	cvt.u64.u32 	%rd41, %r11;
+	cvt.u32.u64 	%r10, %rd2;
+	cvt.u32.u64 	%r11, %rd1;
+	div.u32 	%r12, %r11, %r10;
+	mul.lo.s32 	%r13, %r12, %r10;
+	sub.s32 	%r14, %r11, %r13;
+	cvt.u64.u32 	%rd40, %r12;
+	cvt.u64.u32 	%rd41, %r14;
 
 $L__BB6_4:
 	cvt.u64.u32 	%rd9, %r1;
 	and.b64  	%rd22, %rd40, -4294967296;
-	setp.eq.s64 	%p3, %rd22, 0;
-	@%p3 bra 	$L__BB6_6;
+	setp.eq.s64 	%p4, %rd22, 0;
+	@%p4 bra 	$L__BB6_6;
 
 	div.u64 	%rd42, %rd40, %rd9;
 	bra.uni 	$L__BB6_7;
 
 $L__BB6_6:
-	cvt.u32.u64 	%r12, %rd9;
-	cvt.u32.u64 	%r13, %rd40;
-	div.u32 	%r14, %r13, %r12;
-	cvt.u64.u32 	%rd42, %r14;
+	cvt.u32.u64 	%r15, %rd9;
+	cvt.u32.u64 	%r16, %rd40;
+	div.u32 	%r17, %r16, %r15;
+	cvt.u64.u32 	%rd42, %r17;
 
 $L__BB6_7:
 	cvt.u64.u32 	%rd23, %r2;

@@ -1,6 +1,12 @@
 # MeloTTS — Architecture Research Notes
 
-> Status: Complete | Last Updated: 2026-05-17 | Needed Before: HartsyInference.Audio (MeloTTS pipeline, also stage 1 of OpenVoice)
+> Status: Complete | Last Updated: 2026-06-27 | Needed Before: HartsyInference.Audio (MeloTTS pipeline, also stage 1 of OpenVoice)
+>
+> **2026-06-27 implementation corrections (verified against the real English-v3 checkpoint + melo source):**
+> (1) the text-encoder embedding scale multiplies the WHOLE sum incl. both BERT projections by sqrt(hidden), not just the id embeddings;
+> (2) non-Chinese languages (incl. English) put their 768-dim BERT on the `ja_bert` slot with the 1024 `bert` slot = zeros (no padding);
+> (3) English-v3 uses a TRANSFORMER coupling flow (TransformerCouplingBlock), not WaveNet residual coupling;
+> (4) the C# text encoder is validated BIT-EXACT (m_p/logs_p corr 1.000000) vs the reference with these corrections. See [[melotts-build]] memory.
 
 ## Summary
 
@@ -60,8 +66,11 @@ tone_emb  = tone_embedding(tone)  # (B, T, hidden)
 lang_emb  = lang_embedding(lang)  # (B, T, hidden)
 bert_emb  = Conv1d(1024, 192, k=1)(bert)        # transpose handled in code
 ja_emb    = Conv1d( 768, 192, k=1)(ja_bert)
-h = (x_emb + tone_emb + lang_emb) * sqrt(hidden) + bert_emb + ja_emb
-h = transformer_encoder(h, mask)                 # 6 layers
+# VERIFIED against melo models.py TextEncoder.forward (2026-06): the WHOLE sum (BERT projections
+# included) is scaled by sqrt(hidden) — NOT just the id embeddings. Scaling only the ids gives wrong m_p.
+h = (x_emb + tone_emb + lang_emb + bert_emb + ja_emb) * sqrt(hidden)
+h = transformer_encoder(h, mask, g)              # 6 layers; g (speaker) added via spk_emb_linear before
+                                                 # layer cond_layer_idx=2 (use_spk_conditioned_encoder)
 stats   = Conv1d(hidden, 2*inter_channels, 1)(h) # → (B, 2*192, T)
 m_p, logs_p = chunk(stats, 2, dim=1)
 ```
@@ -75,6 +84,13 @@ Key fact: **the BERT vector for each phoneme is the BERT hidden state of the *gr
 WaveNet stack over mel-spectrogram: `pre = Conv1d(spec=1025, 192, k=1)`; `enc = WN(192, k=5, dilation=1, n_layers=16, gin_channels=256)`; `proj = Conv1d(192, 2*192, k=1)` → splits to `(m_q, logs_q)`. The WaveNet (`modules.py::WN`) is the standard non-causal dilated WaveNet residual stack used throughout VITS: each layer has a dilated Conv1d, gated activation `tanh ⊙ sigmoid`, a residual Conv1d, and a skip Conv1d; speaker embedding `g` is added at every layer. **Do not implement — never invoked at inference.**
 
 ### Flow (`ResidualCouplingBlock` — default) or `TransformerCouplingBlock`
+
+> **VERIFIED (2026-06): MeloTTS-English-v3 uses the TRANSFORMER coupling flow, not residual coupling.** The
+> checkpoint has `flow.flows.{0,2,4,6}.enc.attn_layers.*.conv_{q,k,v,o}` (FFT attention blocks) + `.pre`(96→192) /
+> `.post`(192→96) convs + `enc.spk_emb_linear` (speaker cond), i.e. `TransformerCouplingBlock` with 4
+> `TransformerCouplingLayer`s (mean-only). Each coupling's `enc` is a 3-layer FFT block (rel-pos attn window=4,
+> FFN kernel=**5**, cond_layer_idx=2) — structurally the text encoder block but kernel-5 FFN. The WaveNet
+> residual-coupling description below applies to the older residual-flow configs; do not assume it for English-v3.
 
 The default Mel-only configs use the residual coupling flow with `n_flow_layer=4`:
 
@@ -218,21 +234,19 @@ MeloTTS uses a **different pretrained BERT per language**, loaded via HuggingFac
 
 The TextEncoder always projects via `Conv1d(1024, 192, k=1)` on the main `bert` slot, and `Conv1d(768, 192, k=1)` on the `ja_bert` slot. This means:
 
-- **Chinese always uses the 1024-channel slot** (hidden=1024 ChineseRoBERTa).
-- **Everything else (EN/JA/FR/ES/KR) is hidden=768**, but the model still expects 1024 channels on the main BERT input. The implementation zero-pads or projects the 768-dim BERT up to 1024 (zero-pads the last 256 channels) before feeding into the Conv1d(1024→192). For Japanese, the BERT is passed on the `ja_bert` 768-channel slot instead, and the main `bert` is zeros.
+- **Chinese (only) uses the 1024-channel `bert` slot** (hidden=1024 ChineseRoBERTa).
+- **Everything else (EN/JP/FR/ES/KR, all hidden=768) is passed on the `ja_bert` 768-channel slot, and the 1024-channel `bert` slot is set to ZEROS** — NOT zero-padded to 1024. VERIFIED against `melo/utils.py::get_text_for_tts_infer` (2026-06): `if language_str == "ZH": ja_bert = zeros(768) ; elif language_str in [JP,EN,ZH_MIX_EN,KR,SP,ES,FR,...]: ja_bert = bert ; bert = zeros(1024)`. The earlier "pad EN to 1024" note was wrong.
 
-This is fiddly: the **two-slot design** (`bert` 1024-ch + `ja_bert` 768-ch) is a hardcoded artifact of Bert-VITS2 supporting both Chinese RoBERTa-large and Japanese tohoku-BERT simultaneously. MeloTTS keeps the layout. At inference, the Python code passes:
+This is the **two-slot design** (`bert` 1024-ch + `ja_bert` 768-ch), a hardcoded artifact of Bert-VITS2 supporting both Chinese RoBERTa-large and Japanese tohoku-BERT. At inference the Python code passes:
 
 | Language | `bert` slot (1024-ch) | `ja_bert` slot (768-ch) |
 |----------|------------------------|----------------------------|
 | ZH, ZH_MIX_EN | Chinese RoBERTa-large hidden | zeros |
-| EN | bert-base-uncased hidden, **padded to 1024 with zeros** | zeros |
+| EN | **zeros** | **bert-base-uncased hidden** |
 | JP | zeros | tohoku-BERT-base-v3 hidden |
-| FR | French BERT hidden, padded to 1024 | zeros |
-| ES | Spanish BERT hidden, padded to 1024 | zeros |
-| KR | Korean BERT hidden, padded to 1024 | zeros |
+| FR / ES / KR | zeros | that language's BERT hidden (768) |
 
-(Pad direction must match the reference — inspect each `text/<lang>_bert.py` to confirm whether zeros go on the trailing or leading channels. Default in Bert-VITS2 is trailing.)
+(So for every non-Chinese language the 768-dim BERT goes straight into the `ja_bert` slot; no padding. Only Chinese, which has a genuinely 1024-dim BERT, uses the `bert` slot.)
 
 BERT input is the **orthographic text** tokenized with the BERT's own tokenizer. The hidden states from a chosen layer (usually penultimate, `output_hidden_states=True; states[-3]` in some reference forks; check per-file) are mean-pooled per word, then repeated to match phoneme count via `word2ph`. Output shape: `(B, hidden, T_phoneme)`.
 
@@ -588,12 +602,12 @@ Inference-relevant keys under "model":
    g = emb_g(sid).unsqueeze(-1)              # (1, 256, 1)
 
 7. TEXT ENCODE
-   x_enc = embedding(x) * sqrt(192)
-         + tone_emb(tones)
-         + lang_emb(lang)
-         + Conv1d(1024,192,1)(bert)
-         + Conv1d( 768,192,1)(ja_bert)
-   x_enc = transformer_encoder(x_enc, mask, g)   # 6 layers, 2 heads, FFN=768
+   x_enc = ( embedding(x)
+           + tone_emb(tones)
+           + lang_emb(lang)
+           + Conv1d(1024,192,1)(bert)      # bert slot (zeros for non-Chinese)
+           + Conv1d( 768,192,1)(ja_bert) ) * sqrt(192)   # the WHOLE sum is scaled by sqrt(192)
+   x_enc = transformer_encoder(x_enc, mask, g)   # 6 layers, 2 heads, FFN=768; g via spk_emb_linear @ layer 2
    stats = Conv1d(192, 384, 1)(x_enc)
    m_p, logs_p = chunk(stats, 2, dim=1)          # (1, 192, T) each
    x_mask = sequence_mask(x_len)                  # (1, 1, T)

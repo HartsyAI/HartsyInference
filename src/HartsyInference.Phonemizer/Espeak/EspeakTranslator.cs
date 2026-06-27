@@ -137,9 +137,10 @@ internal sealed class EspeakTranslator
             if (match1.Points > 0)
             {
                 int et = match1.EndType & ~EspeakRuleCodes.SufxUnpron;
-                // A standard suffix ending was found (and it isn't a prefix): return the stem so far and hand the
-                // suffix phonemes back so the caller can remove the ending and re-translate the stem.
-                if (et != 0 && (et & EspeakRuleCodes.SufxP) == 0 && match1.PhonemesOffset >= 0)
+                // A suffix ending, or (unless suppressed) a standard prefix, was found: return the phonemes so far plus
+                // the affix phonemes/type so the caller can strip the affix and re-translate the stem.
+                bool isPrefix = (et & EspeakRuleCodes.SufxP) != 0;
+                if (et != 0 && match1.PhonemesOffset >= 0 && (!isPrefix || (wordFlags & FlagNoPrefix) == 0))
                 {
                     endType = et;
                     endPhonemes = ReadCodes(match1.PhonemesOffset);
@@ -742,6 +743,7 @@ internal sealed class EspeakTranslator
 
     // word_flags bits used by the matcher.
     private const int FlagUnpronTest = unchecked((int)0x80000000);
+    public const int FlagNoPrefix = 0x40000000; // suppress returning a prefix match (used while re-translating a stem)
     private const int FlagFirstUpper = 0x2;
 
     // Suffix flags (translate.h). SufxE/SufxI are spelling-change markers; the FlagSufx* are end-flags.

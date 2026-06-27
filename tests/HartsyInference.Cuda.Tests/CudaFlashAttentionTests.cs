@@ -62,6 +62,45 @@ public sealed unsafe class CudaFlashAttentionTests
         Assert.True(maxDiff <= 2e-3f, $"CUDA FlashAttention diverges from SDPA by {maxDiff:E3} (prefill={prefill}).");
     }
 
+    /// <summary>Vision-tower regime: non-power-of-two head_dim (SigLIP/Gemma-3 = 72) and bidirectional
+    /// (non-causal) attention over many patch tokens. Exercises the block-padding path that the decode tests
+    /// (d=64, causal) never hit. Compared against SDPA with an all-visible mask.</summary>
+    [Theory]
+    [InlineData(72, 16, 64)]   // Gemma-3 SigLIP: head_dim 72, 16 heads
+    [InlineData(80, 4, 33)]    // another non-pow2 head_dim, odd key count
+    public void Flash_NonPow2HeadDim_NonCausal_MatchesSdpa(int d, int heads, int lk)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+
+        float scale = 1f / MathF.Sqrt(d);
+        using CudaBackend backend = new(0, ptxDir);
+        IBackend b = backend;
+        using Tensor q = Rnd(1, heads, lk, d);
+        using Tensor k = Rnd(1, heads, lk, d);
+        using Tensor v = Rnd(1, heads, lk, d);
+
+        using Tensor mask = new(new TensorShape(1, 1, lk, lk), DType.F32);   // all visible (bidirectional)
+        float* mp = (float*)mask.DataPointer;
+        for (long i = 0; i < mask.ElementCount; i++) mp[i] = 0f;
+        using Tensor refOut = new(new TensorShape(1, heads, lk, d), DType.F32);
+        b.ScaledDotProductAttention(refOut, q, k, v, mask, scale);
+        backend.Sync();
+
+        using Tensor flashOut = new(new TensorShape(1, heads, lk, d), DType.F32);
+        b.FlashAttention(flashOut, q, k, v, lk, 1, causal: false, qOffset: 0, scale);
+        backend.Sync();
+
+        float* a = (float*)refOut.DataPointer;
+        float* f = (float*)flashOut.DataPointer;
+        float maxDiff = 0f;
+        for (long i = 0; i < refOut.ElementCount; i++) maxDiff = MathF.Max(maxDiff, MathF.Abs(a[i] - f[i]));
+        _output.WriteLine($"d={d} heads={heads} lk={lk}: max |SDPA - Flash| = {maxDiff:E3}");
+        Assert.True(maxDiff <= 2e-3f, $"CUDA non-causal FlashAttention (d={d}) diverges from SDPA by {maxDiff:E3}.");
+    }
+
     /// <summary>FixedKvCache case: the K/V buffer's seq stride (maxSeq) exceeds the valid key count, and the
     /// head config matches Llama-3.2 (Hq=32, Hkv=8, group=4, headDim=64). Flash must read only the first kvLen
     /// keys at the buffer stride. Compared against an inline online-softmax reference.</summary>
