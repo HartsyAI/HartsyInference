@@ -140,11 +140,9 @@ internal sealed unsafe class F5DitBlock
         // 6. FF: Linear → GELU → Linear (ff_mult=2).
         Tensor ff1 = WhisperOps.ProjectLinear(backend, normed2, _ffW1!, _ffB1, 1, t, dim, ffInner);
         normed2.Dispose();
-        Tensor ffAct = new(ff1.Shape, DType.F32);
-        backend.Gelu(ffAct, ff1);
+        F5Ops.TanhGeluInPlace(ff1);   // F5 FeedForward uses nn.GELU(approximate="tanh")
+        Tensor ff2 = WhisperOps.ProjectLinear(backend, ff1, _ffW2!, _ffB2, 1, t, ffInner, dim);
         ff1.Dispose();
-        Tensor ff2 = WhisperOps.ProjectLinear(backend, ffAct, _ffW2!, _ffB2, 1, t, ffInner, dim);
-        ffAct.Dispose();
 
         // 7. Gated residual: x = x + gate_mlp * ff_out
         Tensor outX = new(x.Shape, DType.F32);

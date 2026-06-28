@@ -11,9 +11,12 @@ public static class AttentionReference
     /// <paramref name="key"/>/<paramref name="value"/> are <c>[B, Hkv, Lk, D]</c>; <paramref name="output"/> is
     /// <c>[B, Hq, Tq, D]</c>. Query head <c>h</c> reads kv head <c>h / kvGroup</c>. When <paramref name="causal"/>,
     /// query row <c>r</c> (absolute position <c>qOffset + r</c>) attends keys <c>0 .. qOffset+r</c>. When
-    /// <paramref name="softcap"/> &gt; 0 each logit is soft-capped via <c>softcap·tanh(score/softcap)</c>.</summary>
+    /// <paramref name="softcap"/> &gt; 0 each logit is soft-capped via <c>softcap·tanh(score/softcap)</c>.
+    /// When <paramref name="sink"/> is non-null (a <c>[Hq]</c> F32 tensor of per-head sink logits, GPT-OSS),
+    /// each head's sink joins the softmax denominator but contributes no value
+    /// (<c>softmax([scores, sink])</c> with the sink column dropped from the weighted sum).</summary>
     public static unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value,
-        int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f)
+        int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null)
     {
         if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
             throw new NotSupportedException("FlashAttention reference only supports F32.");
@@ -29,6 +32,7 @@ public static class AttentionReference
         float* kp = (float*)key.DataPointer;
         float* vp = (float*)value.DataPointer;
         float* op = (float*)output.DataPointer;
+        float* sp = sink is null ? null : (float*)sink.DataPointer;
         float* acc = stackalloc float[d];
 
         for (int bi = 0; bi < b; bi++)
@@ -55,6 +59,17 @@ public static class AttentionReference
                         l = l * corr + p;
                         long vBase = (((long)bi * hkv + hkvIdx) * lk + k) * d;
                         for (int x = 0; x < d; x++) acc[x] = acc[x] * corr + p * vp[vBase + x];
+                        m = newM;
+                    }
+                    if (sp != null)
+                    {
+                        // Per-head sink: a learned logit in the softmax denominator with zero value.
+                        float sv = sp[h];
+                        float newM = MathF.Max(m, sv);
+                        float corr = m == float.NegativeInfinity ? 0f : MathF.Exp(m - newM);
+                        float p = MathF.Exp(sv - newM);
+                        l = l * corr + p;
+                        for (int x = 0; x < d; x++) acc[x] *= corr;
                         m = newM;
                     }
                     float inv = l > 0f ? 1f / l : 0f;

@@ -52,6 +52,10 @@ public sealed record Qwen2Config
     /// <summary>RMSNorm epsilon. 1e-6 across Qwen2.5.</summary>
     public float RmsNormEps { get; init; } = 1e-6f;
 
+    /// <summary>RoPE pairing convention. <c>SplitHalf</c> for Qwen2/Llama; <c>Interleaved</c> for the GPT-J /
+    /// fish-speech (complex <c>view_as_complex</c>) convention.</summary>
+    public HartsyInference.LLM.Transformer.RopeStyle Rope { get; init; } = HartsyInference.LLM.Transformer.RopeStyle.SplitHalf;
+
     /// <summary>Whether Q/K/V projections carry biases. <c>true</c> for Qwen2/Qwen2.5 (its defining
     /// feature). Set <c>false</c> to reuse this exact transformer for <b>Llama-3.2</b>-family backbones
     /// (e.g. Sesame CSM), which have no attention bias. The O projection never has a bias either way.</summary>

@@ -397,6 +397,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _normBias;                // zero bias for the LayerNorm path (Cohere has no norm bias)
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW;
         private Tensor? _qNorm, _kNorm;
+        private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
         private Tensor? _kvAProj, _kvANorm, _kvBProj;   // MLA: KV down-proj (+latent norm) and up-proj
         private Tensor? _gateW, _upW, _downW;
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
@@ -452,6 +453,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 _qNorm = LoadNorm(w[$"{prefix}.self_attn.q_norm.weight"], _cfg.RmsNormAddOne);
                 _kNorm = LoadNorm(w[$"{prefix}.self_attn.k_norm.weight"], _cfg.RmsNormAddOne);
             }
+            if (_cfg.AttnSink) _sink = EnsureF32(w[$"{prefix}.self_attn.sinks.weight"]);
             LoadFfn(w, prefix, layerIndex);
         }
 
@@ -502,7 +504,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _kvAProj, _kvANorm, _kvBProj, _gateW, _upW, _downW];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _sink, _kvAProj, _kvANorm, _kvBProj, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
         }
@@ -582,7 +584,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             int kvLen = posStart + t;
             float scale = _cfg.AttnScale;
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap);
+            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink);
             qMh.Dispose();
 
             Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
@@ -813,7 +815,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 int kvLen = cache.CurrentLength + 1;   // append did not advance; +1 for the just-written token
                 Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
                 backend.FlashAttention(attnSeg, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
-                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap);
+                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap, _sink);
                 qMh.Dispose();
                 segs[s] = attnSeg;
             }

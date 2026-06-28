@@ -451,9 +451,11 @@ public interface IBackend : IDisposable
     /// query row <c>r</c> (absolute position <c>qOffset + r</c>) attends keys <c>0 .. qOffset+r</c>; otherwise all
     /// <c>Lk</c> keys. When <paramref name="softcap"/> &gt; 0, each logit is soft-capped via
     /// <c>softcap·tanh(score/softcap)</c> before the softmax (Gemma-2 attention-logit soft-cap); 0 disables it.
+    /// When <paramref name="sink"/> is non-null (a <c>[Hq]</c> F32 tensor, GPT-OSS attention sinks), each head's
+    /// sink logit joins the softmax denominator but contributes no value.
     /// The CUDA backend overrides this with a kernel; the default is a correct CPU reference.</summary>
-    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f)
-        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap);
+    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null)
+        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink);
 
     /// <summary>Gathers rows: <c>output[m] = input[rowIndices[m]]</c>, where a "row" is the last-dim-sized
     /// vector. <paramref name="output"/> is <c>[M, K]</c>, <paramref name="input"/> <c>[N, K]</c>,

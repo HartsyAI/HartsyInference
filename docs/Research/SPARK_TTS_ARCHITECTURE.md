@@ -17,6 +17,21 @@ This document covers the model + pipeline. The BiCodec codec module is also cros
 
 Sources: [arXiv:2503.01710 (paper)](https://arxiv.org/abs/2503.01710), [HTML version](https://arxiv.org/html/2503.01710v1), [SparkAudio/Spark-TTS-0.5B HF](https://huggingface.co/SparkAudio/Spark-TTS-0.5B), [SparkAudio/Spark-TTS GitHub](https://github.com/SparkAudio/Spark-TTS), [VoxBox](https://github.com/SparkAudio/VoxBox), [demo page](https://sparkaudio.github.io/spark-tts/).
 
+> **Verified-implementation corrections (2026-06-27, bit-exact against real weights).** A few details below
+> differ from the actual checkpoint and were corrected during the C# port:
+> - **Token IDs** (the placeholders in §2.2/§2.5 were wrong). From the real `added_tokens.json`, **global tokens
+>   precede semantic**: `<|bicodec_global_0|>`=151665 (..155760), `<|bicodec_semantic_0|>`=155761 (..163952);
+>   start/end_global=165150/165156, start/end_semantic=165151/165157, end_content=165152, end_style_label=165153.
+>   Generation stops on `<|end_semantic_token|>`(165157) or `<|im_end|>`(151645).
+> - **BiCodec decode path** (`detokenize`): `quantizer.detokenize` → `speaker_encoder.detokenize` → `prenet(z_q, d_vector)`
+>   → `x + d_vector[...,None]` → `decoder`. **PostNet is NOT used on the decode path** (training only).
+> - **Semantic VQ is factorized**: the codebook is 8-D (`[8192, 8]`); decode = embedding lookup then `out_project`
+>   WNConv1d(8→1024). The d-vector flattens the 32 global codes **channel-major** (transpose to `[128, 32]` first),
+>   NOT mean-pooling.
+> - **Wave generator** uses descript's default `weight_norm` (dim 0, `weight_g` `[C_in,1,1]`) and explicit
+>   `kernel_sizes=[16,11,8,4]` with `padding=(k-stride)/2`, no output_padding (the rate-5 stage's kernel is 11, not 10).
+> - The LLM `model.safetensors` ships **F32** on disk (not bf16, despite `torch_dtype`).
+
 ## Detailed Findings
 
 ### 1. Variants

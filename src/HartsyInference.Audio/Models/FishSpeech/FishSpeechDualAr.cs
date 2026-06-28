@@ -31,15 +31,55 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _backbone.LoadWeightsHeadless(w, "model");
+        // The fish-speech checkpoint is a Llama variant with FUSED keys and no "model." prefix:
+        // layers.{i}.attention.wqkv (fused q|k|v), .wo; feed_forward.w1/w3/w2 (gate/up/down); attention_norm /
+        // ffn_norm; final norm. Remap to the split keys Qwen2Model expects (no biases — AttentionBias=false).
+        _backbone.LoadWeightsHeadless(Remap(w, "layers", _cfg.Backbone, "model"), "model");
+        _fast.LoadWeightsHeadless(Remap(w, "fast_layers", _cfg.Fast, "fast_model"), "fast_model");
+
         _textEmb = WhisperOps.EnsureF32(w["embeddings.weight"]);
         _codebookEmb = WhisperOps.EnsureF32(w["codebook_embeddings.weight"]);
         _slowHead = WhisperOps.EnsureF32(w["output.weight"]);
-        _fast.LoadWeightsHeadless(w, "fast_model");
         _fastEmb = WhisperOps.EnsureF32(w["fast_embeddings.weight"]);
         _fastOut = WhisperOps.EnsureF32(w["fast_output.weight"]);
         _fastNorm = WhisperOps.EnsureF32(w["fast_norm.weight"]);
         _fastProjIn = w.TryGetValue("fast_project_in.weight", out Tensor? p) ? WhisperOps.EnsureF32(p) : null;
+    }
+
+    // Converts the fish Llama keys (one of slow "layers" / fast "fast_layers") into the split keys Qwen2Model
+    // wants under {dstPrefix}.*, slicing the fused wqkv into q/k/v by head counts.
+    private static Dictionary<string, Tensor> Remap(IReadOnlyDictionary<string, Tensor> w, string src,
+        Qwen2Config cfg, string dstPrefix)
+    {
+        int q = cfg.NumAttentionHeads * cfg.HeadDim, kv = cfg.NumKeyValueHeads * cfg.HeadDim;
+        Dictionary<string, Tensor> outW = new();
+        for (int i = 0; ; i++)
+        {
+            if (!w.TryGetValue($"{src}.{i}.attention.wqkv.weight", out Tensor? wqkv)) break;
+            Tensor f = WhisperOps.EnsureF32(wqkv);
+            int inDim = (int)f.Shape[1];
+            string p = $"{dstPrefix}.layers.{i}";
+            outW[$"{p}.self_attn.q_proj.weight"] = SliceRows(f, 0, q, inDim);
+            outW[$"{p}.self_attn.k_proj.weight"] = SliceRows(f, q, kv, inDim);
+            outW[$"{p}.self_attn.v_proj.weight"] = SliceRows(f, q + kv, kv, inDim);
+            outW[$"{p}.self_attn.o_proj.weight"] = WhisperOps.EnsureF32(w[$"{src}.{i}.attention.wo.weight"]);
+            outW[$"{p}.mlp.gate_proj.weight"] = WhisperOps.EnsureF32(w[$"{src}.{i}.feed_forward.w1.weight"]);
+            outW[$"{p}.mlp.up_proj.weight"] = WhisperOps.EnsureF32(w[$"{src}.{i}.feed_forward.w3.weight"]);
+            outW[$"{p}.mlp.down_proj.weight"] = WhisperOps.EnsureF32(w[$"{src}.{i}.feed_forward.w2.weight"]);
+            outW[$"{p}.input_layernorm.weight"] = WhisperOps.EnsureF32(w[$"{src}.{i}.attention_norm.weight"]);
+            outW[$"{p}.post_attention_layernorm.weight"] = WhisperOps.EnsureF32(w[$"{src}.{i}.ffn_norm.weight"]);
+        }
+        string finalNorm = src == "fast_layers" ? "fast_norm.weight" : "norm.weight";
+        outW[$"{dstPrefix}.norm.weight"] = WhisperOps.EnsureF32(w[finalNorm]);
+        return outW;
+    }
+
+    private static Tensor SliceRows(Tensor src, int rowStart, int rowCount, int cols)
+    {
+        Tensor o = new(new TensorShape(rowCount, cols), DType.F32);
+        Buffer.MemoryCopy((float*)src.DataPointer + (long)rowStart * cols, (void*)o.DataPointer,
+            (long)rowCount * cols * 4, (long)rowCount * cols * 4);
+        return o;
     }
 
     /// <summary>Builds the summed input embedding for one frame: <c>text_emb(sem) + Σ codebook_emb(code_i +
@@ -57,8 +97,11 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
             float* row = cb + (long)(codes[i] + i * _cfg.CodebookSize) * h;
             for (int c = 0; c < h; c++) op[c] += row[c];
         }
-        float scale = 1f / MathF.Sqrt(n + 1);
-        for (int c = 0; c < h; c++) op[c] *= scale;
+        if (_cfg.ScaleCodebookEmbeddings)
+        {
+            float scale = 1f / MathF.Sqrt(n + 1);
+            for (int c = 0; c < h; c++) op[c] *= scale;
+        }
         return outT;
     }
 
@@ -98,6 +141,26 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         }
         depthIn.Dispose();
         return (semantic, codes);
+    }
+
+    /// <summary>Diagnostics — runs the full-sequence slow path (summed embed → backbone → slow head) and returns
+    /// the token logits <c>[1, T, vocab]</c> for parity checks. <paramref name="codes"/> is per-frame codebook ids.</summary>
+    public Tensor DebugSlowLogits(IBackend backend, int[] semantics, int[][] codes)
+    {
+        int t = semantics.Length, h = HiddenSize;
+        Tensor embed = new(new TensorShape(1, t, h), DType.F32);
+        float* ep = (float*)embed.DataPointer;
+        for (int i = 0; i < t; i++)
+        {
+            using Tensor fe = EmbedFrame(semantics[i], codes[i]);
+            Buffer.MemoryCopy((void*)fe.DataPointer, ep + (long)i * h, h * 4, h * 4);
+        }
+        using StreamingKvCache cache = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, t + 1, _cfg.Backbone.HeadDim);
+        Tensor hidden = _backbone.ForwardEmbeds(backend, embed, 1, t, 0, cache);
+        embed.Dispose();
+        Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _slowHead!, null, 1, t, h, _cfg.TextVocab);
+        hidden.Dispose();
+        return logits;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

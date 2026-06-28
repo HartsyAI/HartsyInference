@@ -103,6 +103,42 @@ public sealed unsafe class F5Dit : IDisposable
         return vec;
     }
 
+    /// <summary>Diagnostics — returns copies of the text-stem output, the DiT input embedding, the block-0
+    /// output, and the post-all-blocks hidden, for per-component parity checks. Caller disposes.</summary>
+    public (Tensor TextEmb, Tensor XInput, Tensor Block0, Tensor PreNorm) DebugForward(
+        IBackend backend, Tensor noisyMel, Tensor condMel, ReadOnlySpan<int> textIds, float timestep)
+    {
+        int t = (int)noisyMel.Shape[2];
+        Tensor timeEmb = _timeEmb.Forward(backend, timestep);
+        Tensor textHidden = _textEmb.Forward(backend, textIds, t, false);
+        Tensor textCopy = Clone(textHidden);
+        Tensor x = _inputEmb.Forward(backend, noisyMel, condMel, textHidden, t, false);
+        textHidden.Dispose();
+        Tensor xInputCopy = Clone(x);
+
+        Tensor block0 = _blocks[0].Forward(backend, x, timeEmb, t, _ropeCos!, _ropeSin!);
+        x.Dispose();
+        Tensor block0Copy = Clone(block0);
+        x = block0;
+        for (int i = 1; i < _blocks.Length; i++)
+        {
+            Tensor next = _blocks[i].Forward(backend, x, timeEmb, t, _ropeCos!, _ropeSin!);
+            x.Dispose();
+            x = next;
+        }
+        timeEmb.Dispose();
+        Tensor preNorm = Clone(x);
+        x.Dispose();
+        return (textCopy, xInputCopy, block0Copy, preNorm);
+    }
+
+    private static Tensor Clone(Tensor t)
+    {
+        Tensor c = new(t.Shape, DType.F32);
+        Buffer.MemoryCopy((void*)t.DataPointer, (void*)c.DataPointer, t.ElementCount * 4, t.ElementCount * 4);
+        return c;
+    }
+
     /// <summary>AdaLayerNorm_Final: <c>x = LN_no_affine(x) * (1 + scale) + shift</c>
     /// where scale, shift come from a single Linear(dim → 2*dim) of <c>silu(time_emb)</c>.</summary>
     private Tensor ApplyFinalAdaLn(IBackend backend, Tensor x, Tensor linW, Tensor linB, Tensor siluTime, int t)
@@ -210,10 +246,12 @@ internal sealed unsafe class F5TimestepEmbedding
         float* sp = (float*)sinEmb.DataPointer;
         int half = freqDim / 2;
         float factor = MathF.Log(10_000f) / (half - 1);
+        // Upstream SinusPositionEmbedding scales the timestep by 1000 before the sinusoid (scale=1000).
+        const float scale = 1000f;
         for (int i = 0; i < half; i++)
         {
             float w = MathF.Exp(-factor * i);
-            float angle = timestep * w;
+            float angle = scale * timestep * w;
             sp[i] = MathF.Sin(angle);
             sp[half + i] = MathF.Cos(angle);
         }

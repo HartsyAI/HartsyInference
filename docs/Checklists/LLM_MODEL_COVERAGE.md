@@ -349,8 +349,17 @@ The config-driven transformer does NOT cover these; each needs new core primitiv
       **Key bug found:** GGUF `ssm_a` already stores `A = −exp(A_log)` (llama.cpp bakes the −exp at conversion) — use it
       directly, don't re-apply −exp (caught by diffing GGUF vs HF weights: ssm_a cosine −0.18 → −exp(A_log) cosine 1.0).
       Mamba-2 + Falcon-Mamba reuse this path (Mamba-2 has scalar-A heads — a small variant).
-- [ ] **7b. RWKV v6/v7** — WKV linear-attention recurrence + token-shift. New: WKV op, time/channel-mix blocks,
-      `rwkv6`/`rwkv7` mapper. Verify: RWKV-1.6B/3B.
+- [x] **7b. RWKV-6 VALIDATED (cosine 1.0) — C# port runs + matches.** `RwkvModel`
+      (`HartsyInference.LLM.Ssm`): LayerNorm blocks; time-mix = data-dependent token-shift via LoRA (`time_mix_w1/w2`)
+      → r/k/v/g + data-dependent per-channel decay (`time_mix_decay` + decay LoRA) → **WKV6 outer-product state
+      recurrence** (`out = r·(u·kv + S)`, `S = w·S + kv`) → per-head GroupNorm (eps 64e-5) → gate → out; channel-mix =
+      token-shift → squared-ReLU gated MLP. **Key finding:** GGUF pre-divides deep-layer output weights by
+      2^(layer//rescale_every_n_layers) → apply runtime `x *= 0.5` every 6 layers. **Algorithm reference-validated**:
+      a Python reference from the GGUF weights (`tests/python-reference/dump_rwkv6_ref.py`) matches the official `rwkv`
+      pip package (loading the .pth) at **cosine = 1.000000, argmax 281** on rwkv-6-world-1.6b. The C# `RwkvModel` runs
+      and **matches at cosine = 1.000000, argmax 281** (maxdiff 1e-4). To fit the 1.6B F32 model in limited host RAM,
+      the [out,in] relabels are **no-copy `Reshape` views** (originals held alive) rather than copies — copies would
+      double the 6.4 GB model and OOM. RWKV-7 is a near-variant (generalized delta rule).
 - [ ] **7c. Hybrid SSM+attention** — Jamba, Zamba2, Granite-4.0, Nemotron-H (Mamba blocks interleaved with attention +
       MoE). Composes 7a + the existing attention/MoE once 7a lands. Some fit at Q4.
 - [x] **7d. T5/FLAN-T5 seq2seq VALIDATED (cosine = 1.0).** `T5Model` (`HartsyInference.LLM.Seq2Seq`) — full

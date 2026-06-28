@@ -15,12 +15,14 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Qwen3-TTS** | ✅ | Bit-exact (RoPE split-half + byte-level tokenizer fixes). |
 | **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime; 7 VITS bugs fixed (affect all VITS). Espeak phonemization is the only gap. |
 | **Kokoro** (StyleTTS2) | ✅ | ~1e-4 on the CUDA path (added `audio_leaky_relu` / `audio_adain1d` kernels). Loader 404s until repacked. |
+| **F5-TTS** (v1 Base) | ✅ | Flow-matching DiT verified bit-exact: velocity corr 1.0, full CFM sample loop (generated mel) corr 1.0, Vocos corr 0.9999. 4 bugs fixed (ConvNeXt filler-mask, ×1000 timestep scale, erf/tanh GELU split, cond-anchored CFG + end-only ref-clamp). |
 | **Kyutai TTS** (tts-1.6b-en_fr) | 🔬 | All numerical cores verified (backbone 1.3e-4, depformer 32/32, conditioner ~1e-8). Greedy e2e diverges by argmax cascade (not a bug); Mimi decode reconcile in progress. |
 | **ResembleEnhance** | 🔬 | Modules synthetic-verified + converter built; real-weight mel→mel parity pending. |
 | **F5-TTS** | 🔧 | Built + wired in SwarmUI; parity dump pending. |
 | **HeartMuLa** | 🔧 | Built + wired; parity pending. |
 | **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#: g2p ids exact, BERT bit-exact, audio corr 0.9993 (len exact) vs the noise-0 reference. `MeloTts` facade (LoadFromFiles/LoadAsync/SynthesizeText) + gated parity test. |
-| **VibeVoice / SparkTTS / NeuTTS / Orpheus / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
+| **Spark-TTS-0.5B** | ✅ | Real-weight e2e bit-exact, fully in-engine (controllable mode): LM logits corr 1.0 (top-1 100%), greedy tokens 32/32 global + 179/179 semantic match Python, BiCodec wav corr 1.0 (factorized VQ, FSQ d-vector, AdaLN PreNet all corr 1.0). `SparkTtsPipeline.LoadFromDirectory`/`LoadAsync` + `SynthesizeControllable(text, gender, pitch, speed)`; `SparkTtsTokenizer` reuses the shared BPE + ByteLevelCodec. Zero-shot cloning would need the BiCodec encoder side (wav2vec2 + ECAPA), not built. |
+| **VibeVoice / NeuTTS / Orpheus / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
 | **Zonos** | ⛔ | Blocked: espeak phonemes + ResNet293 speaker encoder + NovelAI sampler. Deferred. |
 
 ## STT

@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -15,10 +16,10 @@ namespace HartsyInference.Audio.Models.F5Tts;
 ///         <see cref="F5Ops.Grn"/> instead of layer-scale.</item>
 /// </list></para>
 ///
-/// <para>Per the upstream impl, padding positions are masked to zero AROUND each ConvNeXt
-/// block — for our v1 zero-shot voice clone path the text input is always dense to the
-/// padded length (every position is valid), so we skip masking. This is a simplification
-/// that matches every reference inference invocation in the F5-TTS Python repo.</para></summary>
+/// <para>Per the upstream impl, the filler/padding positions (the text is shorter than the mel length, so
+/// the tail is padded) are masked to zero before AND after every ConvNeXt block, so the depthwise conv never
+/// leaks across the text→filler boundary. This masking is required for parity — text is essentially always
+/// shorter than the audio.</para></summary>
 internal sealed unsafe class F5TextEmbedding
 {
     private readonly F5TtsConfig _cfg;
@@ -60,23 +61,17 @@ internal sealed unsafe class F5TextEmbedding
         float* hp = (float*)textHidden.DataPointer;
         float* ep = (float*)_embedWeight.DataPointer;
 
-        // 1. Token embed lookup. Upstream adds +1 to every token id (use 0 as filler).
-        //    Positions beyond textIds.Length stay 0.
+        // 1. Token embed lookup. Upstream adds +1 to every token id (use 0 as filler), then looks up the row —
+        //    row 0 is the (learned, generally non-zero) filler embedding, NOT a zero vector. drop_text (CFG
+        //    uncond) sets every id to 0 so the whole valid region maps to that filler row.
         int validLen = Math.Min(textIds.Length, seqLen);
         for (int t = 0; t < seqLen; t++)
         {
             int rowOff = t * textDim;
             int id = (t < validLen) ? textIds[t] + 1 : 0;
             if (dropText) id = 0;
-            if (id == 0)
-            {
-                for (int d = 0; d < textDim; d++) hp[rowOff + d] = 0f;
-            }
-            else
-            {
-                int eOff = id * textDim;
-                for (int d = 0; d < textDim; d++) hp[rowOff + d] = ep[eOff + d];
-            }
+            int eOff = id * textDim;
+            for (int d = 0; d < textDim; d++) hp[rowOff + d] = ep[eOff + d];
         }
 
         // 2. Add sinusoidal positional embedding from the precomputed freqs table.
@@ -88,16 +83,33 @@ internal sealed unsafe class F5TextEmbedding
             for (int d = 0; d < textDim; d++) hp[rowOff + d] += fp[freqOff + d];
         }
 
-        // 3. 4 ConvNeXt-V2 blocks at text_dim=512.
+        // Upstream masks the filler/padding positions (text shorter than the mel length) to zero before AND
+        // after every ConvNeXt block (so the depthwise conv never leaks across the text→filler boundary). The
+        // mask is the ORIGINAL text length even under drop_text (text_mask is computed before the CFG zeroing).
+        int maskFrom = validLen;
+        ZeroTail(hp, maskFrom, seqLen, textDim);
+
+        // 3. 4 ConvNeXt-V2 blocks at text_dim=512, re-masking the filler tail after each.
         Tensor running = textHidden;
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, running, seqLen, textDim);
             running.Dispose();
             running = next;
+            ZeroTail((float*)running.DataPointer, maskFrom, seqLen, textDim);
         }
 
         return running;
+    }
+
+    // Zeroes rows [from, seqLen) — the filler/padding positions upstream masks out.
+    private static void ZeroTail(float* hp, int from, int seqLen, int dim)
+    {
+        for (int t = from; t < seqLen; t++)
+        {
+            int row = t * dim;
+            for (int d = 0; d < dim; d++) hp[row + d] = 0f;
+        }
     }
 
     /// <summary>Computes the same sinusoidal table that <c>precompute_freqs_cis</c> returns
@@ -198,17 +210,15 @@ internal sealed unsafe class F5ConvNeXtV2Block
         Tensor h1 = WhisperOps.ProjectLinear(backend, normed, _pwConv1W!, _pwConv1B, 1, t, dim, _intermediate);
         normed.Dispose();
 
-        // GELU activation.
-        Tensor act = new(h1.Shape, DType.F32);
-        backend.Gelu(act, h1);
-        h1.Dispose();
+        // GELU activation — the ConvNeXt stem uses the EXACT erf GELU (nn.GELU() default), unlike the DiT FF.
+        Activations.ErfGelu(h1);
 
         // GRN (Global Response Normalization) — operates in place on [1, T, intermediate].
-        F5Ops.Grn(act, _grnGamma!, _grnBeta!, 1, t, _intermediate);
+        F5Ops.Grn(h1, _grnGamma!, _grnBeta!, 1, t, _intermediate);
 
         // pwconv2 (intermediate → dim)
-        Tensor h2 = WhisperOps.ProjectLinear(backend, act, _pwConv2W!, _pwConv2B, 1, t, _intermediate, dim);
-        act.Dispose();
+        Tensor h2 = WhisperOps.ProjectLinear(backend, h1, _pwConv2W!, _pwConv2B, 1, t, _intermediate, dim);
+        h1.Dispose();
 
         // Residual add (channels-last).
         Tensor outX = new(x.Shape, DType.F32);

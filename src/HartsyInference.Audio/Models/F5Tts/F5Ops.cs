@@ -24,6 +24,21 @@ internal static unsafe class F5Ops
         }
     }
 
+    /// <summary>Tanh-approximation GELU in place (<c>nn.GELU(approximate="tanh")</c>) — the variant F5-TTS's
+    /// FeedForward uses: <c>0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))</c>. (The ConvNeXt text stem uses the
+    /// exact erf GELU instead.)</summary>
+    public static void TanhGeluInPlace(Tensor t)
+    {
+        const float c = 0.7978845608028654f;   // sqrt(2/pi)
+        float* p = (float*)t.DataPointer;
+        long n = t.ElementCount;
+        for (long i = 0; i < n; i++)
+        {
+            float x = p[i];
+            p[i] = 0.5f * x * (1f + MathF.Tanh(c * (x + 0.044715f * x * x * x)));
+        }
+    }
+
     /// <summary>SiLU activation in place: <c>x * sigmoid(x)</c>.</summary>
     public static void SiluInPlace(Tensor t)
     {

@@ -1168,19 +1168,20 @@ public sealed class CudaKernels : IDisposable
     /// headDim floats). <paramref name="lk"/> is the K/V buffer seq stride; <paramref name="kvLen"/> the valid
     /// key count.</summary>
     public unsafe void LaunchFlashAttention(ulong outPtr, ulong q, ulong k, ulong v,
-        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap, nint stream)
+        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap, ulong sink, nint stream)
     {
-        ulong outArg = outPtr, qArg = q, kArg = k, vArg = v;
+        ulong outArg = outPtr, qArg = q, kArg = k, vArg = v, sinkArg = sink;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
         int causalArg = causal ? 1 : 0, offArg = qOffset;
         float scaleArg = scale, softcapArg = softcap;
 
-        void** args = stackalloc void*[16];
+        void** args = stackalloc void*[17];
         args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
         args[4] = &bArg; args[5] = &hqArg; args[6] = &tqArg; args[7] = &dArg;
         args[8] = &hkvArg; args[9] = &lkArg; args[10] = &kvLenArg; args[11] = &grpArg;
         args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg; args[15] = &softcapArg;
+        args[16] = &sinkArg;
 
         // Block threads = next power of two >= headDim, so the kernel's tree reduction is always power-of-two
         // and non-pow2 head dims (e.g. Phi-3's 96) work; padding threads contribute 0.

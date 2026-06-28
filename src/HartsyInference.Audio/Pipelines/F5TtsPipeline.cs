@@ -33,11 +33,12 @@ namespace HartsyInference.Audio.Pipelines;
 ///   audio = vocos(x[T_ref:])
 /// </code></para>
 ///
-/// <para><b>Status:</b> this pipeline is wired up but not yet validated against an
-/// actual reference audio (the upstream impl involves a few subtle bits around the
-/// in-context infill masking + CFG that need numerical reference dumps to confirm).
-/// The single-DiT-forward smoke test passes; full E2E with audible output is a
-/// follow-up.</para></summary>
+/// <para><b>Status:</b> numerically validated against the upstream F5-TTS. The DiT velocity is bit-exact
+/// (corr 1.0) and the full flow-matching sample loop matches <c>CFM.sample</c> to corr 1.0 on the generated
+/// mel; Vocos is corr 0.9999. Key fixes for parity: the ConvNeXt text stem masks the filler tail, the
+/// timestep sinusoid is scaled by 1000, the text stem uses exact-erf GELU while the DiT FFN uses tanh GELU,
+/// and CFG is cond-anchored (<c>pred + (pred − null)·cfg</c>) with the reference region replaced only at the
+/// end (no per-step anchoring).</para></summary>
 public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
 {
     private readonly F5TtsConfig _cfg;
@@ -128,66 +129,58 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     /// matches Vocos's own feature extractor). <paramref name="refText"/> is the text
     /// spoken in the reference audio (used to align the joint character sequence).
     ///
-    /// <para><b>Status:</b> the pipeline is wired up structurally but the duration
-    /// heuristic, CFG mixing, and in-context infill masking all need numerical
-    /// validation against the upstream Python reference before producing audible
-    /// output reliably. The single-DiT-forward path
-    /// (<see cref="SmokeForward"/>) is tested and works.</para></summary>
+    /// <para>The sample loop is numerically validated against <c>CFM.sample</c> (generated mel corr 1.0). The
+    /// produced audio is at the vocoder's native scale; F5's reference pipeline additionally rescales it to the
+    /// reference clip's loudness (out of scope here).</para></summary>
     public float[] Generate(IBackend backend, Tensor refMel, string refText, string targetText, F5TtsOptions? options = null)
+    {
+        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refText), _tokenizer.Encode(targetText), options);
+        float[] audio = _vocos.Forward(backend, mel);
+        mel.Dispose();
+        return audio;
+    }
+
+    /// <summary>Runs the flow-matching sample loop and returns the generated target mel <c>[1, mel_dim, T_tgt]</c>
+    /// (pre-vocoder). Mirrors <c>CFM.sample</c>: the reference region evolves freely under the fixed masked
+    /// conditioning and is sliced off at the end (so no per-step anchoring is needed). <paramref name="initialNoise"/>
+    /// injects a deterministic <c>[1, mel_dim, T_total]</c> noise tensor (else a seeded Gaussian is built).</summary>
+    public Tensor GenerateMel(IBackend backend, Tensor refMel, int[] refIds, int[] targetIds,
+        F5TtsOptions? options = null, Tensor? initialNoise = null)
     {
         ThrowIfDisposed();
         F5TtsOptions opts = options ?? new F5TtsOptions();
 
         int tRef = (int)refMel.Shape[2];
-        int[] refIds = _tokenizer.Encode(refText);
-        int[] targetIds = _tokenizer.Encode(targetText);
 
-        // Duration heuristic: target frames = ref_frames * len(target_text) / len(ref_text) / speed
+        // Duration heuristic: target frames = ref_frames * len(target_text) / len(ref_text) / speed.
         int tTarget = (int)Math.Round((double)tRef * targetIds.Length / Math.Max(1, refIds.Length) / opts.Speed);
         if (tTarget < 1) tTarget = 1;
-        int tTotal = tRef + tTarget;
+        int tTotal = initialNoise is not null ? (int)initialNoise.Shape[2] : tRef + tTarget;
 
-        // Build cond_mel: [ref_mel, zeros(tTarget)] along the time dim.
-        Tensor condMel = ConcatRefAndZeros(refMel, tTarget, _cfg.MelDim);
+        // step_cond: [ref_mel, zeros] along time — the masked conditioning held fixed across all steps.
+        Tensor condMel = ConcatRefAndZeros(refMel, tTotal - tRef, _cfg.MelDim);
+        Tensor x = initialNoise ?? BuildNoise(_cfg.MelDim, tTotal, opts.Seed);
 
-        // Build initial noise on the full timeline (the ref portion gets clamped back to
-        // the reference values at every step — equivalent to running flow matching only
-        // over the target portion).
-        Tensor x = BuildNoise(_cfg.MelDim, tTotal, opts.Seed);
-
-        // Joint text token ids: refIds ++ targetIds.
         int[] jointIds = new int[refIds.Length + targetIds.Length];
         Array.Copy(refIds, jointIds, refIds.Length);
         Array.Copy(targetIds, 0, jointIds, refIds.Length, targetIds.Length);
 
         F5SwaySamplingScheduler sched = new(opts.Steps, opts.SwayCoef);
-
-        // Flow-matching Euler with CFG.
         for (int step = 0; step < sched.Steps; step++)
         {
             float t = sched.Timesteps[step];
             float dt = sched.Deltas[step];
-
-            // Conditional forward
             Tensor vCond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: false, dropText: false);
-            // Unconditional forward (for CFG)
             Tensor vUncond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: true, dropText: true);
-
-            // v = v_uncond + cfg * (v_cond - v_uncond)
-            // (Equivalent to F5-TTS's convention with their cfg_strength meaning.)
-            ApplyCfgAndStep(x, vCond, vUncond, opts.CfgStrength, dt, refMel, tRef);
+            ApplyCfgAndStep(x, vCond, vUncond, opts.CfgStrength, dt);
             vCond.Dispose();
             vUncond.Dispose();
         }
 
-        // Slice the target portion of x and vocode through Vocos.
         Tensor targetMel = SliceTargetPortion(x, tRef, tTotal);
-        x.Dispose();
+        if (!ReferenceEquals(x, initialNoise)) x.Dispose();
         condMel.Dispose();
-
-        float[] audio = _vocos.Forward(backend, targetMel);
-        targetMel.Dispose();
-        return audio;
+        return targetMel;
     }
 
     private static unsafe Tensor ConcatRefAndZeros(Tensor refMel, int tTarget, int melDim)
@@ -235,32 +228,21 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         return z ^ (z >> 14);
     }
 
-    private static unsafe void ApplyCfgAndStep(Tensor x, Tensor vCond, Tensor vUncond, float cfg, float dt, Tensor refMel, int tRef)
+    private static unsafe void ApplyCfgAndStep(Tensor x, Tensor vCond, Tensor vUncond, float cfg, float dt)
     {
-        // vCond and vUncond come out as [1, T, mel_dim] (channels-last) from the DiT.
-        // x is [1, mel_dim, T] (channels-first). Walk over both layouts in step.
+        // vCond/vUncond are [1, T, mel_dim] (channels-last); x is [1, mel_dim, T] (channels-first).
+        // F5's CFG is cond-anchored: v = pred + (pred - null) * cfg  (NOT the standard uncond + cfg*(cond-uncond)).
         int t = (int)x.Shape[2];
         int melDim = (int)x.Shape[1];
         float* xp = (float*)x.DataPointer;
         float* cp = (float*)vCond.DataPointer;
         float* up = (float*)vUncond.DataPointer;
-        float* rp = (float*)refMel.DataPointer;
-
         for (int tt = 0; tt < t; tt++)
-        {
             for (int d = 0; d < melDim; d++)
             {
-                int xIdx = d * t + tt;                  // [1, mel_dim, T]
-                int vIdx = tt * melDim + d;             // [1, T, mel_dim]
-                float v = up[vIdx] + cfg * (cp[vIdx] - up[vIdx]);
-                xp[xIdx] += dt * v;
+                float v = cp[tt * melDim + d] + cfg * (cp[tt * melDim + d] - up[tt * melDim + d]);
+                xp[d * t + tt] += dt * v;
             }
-        }
-
-        // Clamp the reference portion back to the original reference mel (in-context infill).
-        for (int d = 0; d < melDim; d++)
-            for (int tt = 0; tt < tRef; tt++)
-                xp[d * t + tt] = rp[d * tRef + tt];
     }
 
     private static unsafe Tensor SliceTargetPortion(Tensor x, int tRef, int tTotal)

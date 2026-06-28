@@ -79,6 +79,10 @@ public static class GgufConfigFactory
         // Cohere (Command-R / cohere2): LayerNorm + parallel residual + a logit MULTIPLIER (so divide by its
         // reciprocal). Granite's logit_scale is a divisor; Cohere's is a multiplier — hence the inverse here.
         bool isCohere = arch == "cohere2" || arch == "command-r";
+
+        // GPT-OSS: MoE decoder with learned per-head attention sinks (a logit in the softmax denominator that
+        // carries no value). Sigmoid routing + the o200k tokenizer come from the existing MoE/tokenizer paths.
+        bool isGptOss = arch is "gpt-oss" or "gptoss";
         float logitScale = isGranite ? metadata.GetFloat32($"{arch}.logit_scale", 1f)
             : isCohere ? 1f / metadata.GetFloat32($"{arch}.logit_scale", 1f)
             : 1f;
@@ -183,6 +187,7 @@ public static class GgufConfigFactory
             SlidingWindowPattern = swPattern,
             AttnLogitSoftcap = attnCap,
             FinalLogitSoftcap = finalCap,
+            AttnSink = isGptOss,
             Moe = moe,
         };
     }

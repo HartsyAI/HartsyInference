@@ -50,7 +50,7 @@ public sealed class Qwen2Model : IDisposable
         AttentionBias = cfg.AttentionBias,
         QkNorm = false,
         TieWordEmbeddings = cfg.TieWordEmbeddings,
-        Rope = RopeStyle.SplitHalf,
+        Rope = cfg.Rope,
     };
 
     /// <summary>Loads all LM weights (embed_tokens + layers + final norm + optional lm_head).

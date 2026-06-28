@@ -16,6 +16,7 @@ public sealed record FishSpeechConfig
         HiddenSize = 1_024, NumHiddenLayers = 24, NumAttentionHeads = 16, NumKeyValueHeads = 2,
         IntermediateSize = 4_096, VocabSize = 102_048, MaxPositionEmbeddings = 8_192,
         RopeTheta = 1_000_000f, RmsNormEps = 1e-6f, AttentionBias = false, TieWordEmbeddings = false,
+        Rope = HartsyInference.LLM.Transformer.RopeStyle.Interleaved,
     };
 
     /// <summary>Fast/depth transformer over the codebook axis (shared weights across depth steps).</summary>
@@ -24,11 +25,16 @@ public sealed record FishSpeechConfig
         HiddenSize = 1_024, NumHiddenLayers = 4, NumAttentionHeads = 16, NumKeyValueHeads = 2,
         IntermediateSize = 4_096, VocabSize = 1_024, MaxPositionEmbeddings = 16,
         RopeTheta = 1_000_000f, RmsNormEps = 1e-6f, AttentionBias = false, TieWordEmbeddings = false,
+        Rope = HartsyInference.LLM.Transformer.RopeStyle.Interleaved,
     };
 
     public int NumCodebooks { get; init; } = 8;
     public int CodebookSize { get; init; } = 1_024;
     public int TextVocab { get; init; } = 102_048;
+
+    /// <summary>Whether to scale the summed text+codebook embedding by <c>1/√(N+1)</c>. The shipped
+    /// fish-speech-1.5 checkpoint loads with <c>scale_codebook_embeddings=False</c> (verified at runtime).</summary>
+    public bool ScaleCodebookEmbeddings { get; init; } = false;
 
     // Sampling (inference.py defaults).
     public float Temperature { get; init; } = 1.0f;

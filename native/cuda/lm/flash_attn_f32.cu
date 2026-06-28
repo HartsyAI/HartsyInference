@@ -20,7 +20,8 @@ extern "C" __global__ void lm_flash_attn_f32(
     const float* __restrict__ V,
     unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
     unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
-    int causal, int qOffset, float scale, float softcap)
+    int causal, int qOffset, float scale, float softcap,
+    const float* __restrict__ sink)
 {
     unsigned int idx = blockIdx.x;
     unsigned int r = idx % Tq; idx /= Tq;
@@ -65,6 +66,20 @@ extern "C" __global__ void lm_flash_attn_f32(
         acc = acc * corr + p * vval;
         m = newM;
         __syncthreads();   // ensure all threads read sdata[0] before the next key overwrites it
+    }
+
+    // GPT-OSS attention sink: a learned per-head logit that joins the softmax denominator but contributes
+    // no value (softmax([scores, sink]) with the sink column dropped from the weighted sum). Seeding the
+    // denominator with exp(sink - rowmax) lets a head attend to "nothing" by bleeding probability mass off.
+    if (sink != nullptr)
+    {
+        float sv = sink[h];
+        float newM = fmaxf(m, sv);
+        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float p = __expf(sv - newM);
+        l = l * corr + p;
+        acc = acc * corr;   // sink value is implicitly zero
+        m = newM;
     }
 
     if (tid < D) out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;

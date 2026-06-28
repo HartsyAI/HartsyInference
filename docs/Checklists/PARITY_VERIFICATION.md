@@ -78,10 +78,12 @@ Add a row to **§ Bugs found** for every real bug, with how it was caught.
 | **Piper** (VITS) | ✅ | corr 0.9998 vs onnxruntime | 7 VITS bugs fixed (affect all VITS). See [[piper-vits-parity]]. Phonemization (espeak) is the only gap. |
 | **Kokoro** (StyleTTS2) | ✅ | ~1e-4 (CUDA path) | Added `audio_leaky_relu`/`audio_adain1d` CUDA kernels. Vocoder DSP is pure C#. See [[kokoro-cuda-path-complete]]. Loader 404s until repacked — see [[audio-repack-tool]]. |
 | **CosyVoice 2** | ✅ | == Chatterbox S3Gen (shared) | Validated via the Chatterbox rewrite. |
-| **F5-TTS** | 🔧 | — | Built + wired in SwarmUI; parity dump pending. |
+| **F5-TTS** (v1 Base) | ✅ | DiT velocity corr 1.0 (maxAbs 2e-5) · full CFM sample-loop generated mel corr 1.0 (maxAbs 7e-5) · Vocos corr 0.9999 | Flow-matching DiT + Sway-Euler + cond-anchored CFG, all bit-exact vs the upstream `DiT`/`CFM.sample`. See [[f5tts-build]]. |
 | **HeartMuLa** | 🔧 | — | Built + wired; parity pending. |
 | **ResembleEnhance** | 🔬 | modules synthetic-verified; checkpoint converter built | Mel→mel structural green; real-weight parity pending. |
-| **VibeVoice / SparkTTS / NeuTTS / Orpheus / MeloTTS / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | — | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
+| **Spark-TTS-0.5B** | ✅ | LM logits corr 1.0 (top-1 100%) · greedy tokens 32/32 global + 179/179 semantic · BiCodec z_q/d_vector/prenet/wav all corr 1.0 | Fully in-engine controllable mode (`SparkTtsPipeline.SynthesizeControllable`). BiCodecDecoder rewritten (factorized VQ, FSQ d-vector flatten, AdaLN PreNet); reuses `DacDecoder` (added dim-0 weightnorm + explicit-kernel opt-ins). `SparkTtsTokenizer` reuses BpeTokenizer+ByteLevelCodec. See [[sparktts-build]]. |
+| **MeloTTS** (English-v3) | ✅ | g2p ids exact · BERT features rmse 0.0 · text-enc + DP corr 1.0 · audio corr 0.9993 (len exact) | Real-weight e2e in pure C#. `MeloTts` facade (LoadFromFiles/LoadAsync/SynthesizeText). Built VitsFftBlock + VitsTransformerFlow. See [[melotts-build]]. |
+| **VibeVoice / NeuTTS / Orpheus / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | — | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
 | **Zonos** | ⛔ | — | Blocked: espeak phonemes + ResNet293 speaker encoder + NovelAI sampler. Deferred. |
 
 ### STT
@@ -164,6 +166,16 @@ Real bugs surfaced by the parity loop — kept here so the patterns repeat-catch
 | GPT-SoVITS | HuBERT pos_conv weight-norm (dim=2) loader; GroupNorm needs rank-4; tanh→exact-erf GELU | HuBERT output ~zeros; diff vs PyTorch | `ComposePosConvWeightNorm`, rank-4 reshape, `ExactGelu` → 1.07e-5 |
 | Qwen3-TTS | RoPE interleaved vs **split-half NeoX**; tokenizer dropped leading spaces (no GPT-2 byte-level) | bit-exact diff failed | `RopeStyle.SplitHalf` + `ByteLevelCodec.Encode` |
 | Piper / all VITS | 7 VITS bugs (rel-pos attn zero-pad, folded EA `exp(-logs)`, resblock conv naming, …) | corr vs onnxruntime | fixed → 0.9998 |
+| Spark-TTS (BiCodec) | decoder was a structural guess: 1024-D codebook (really **factorized 8-D**), mean-pooled d-vector, FiLM-lite, skipped the AdaLN PreNet | wav corr 0.04; per-layer dumps localized it | rewrote `BiCodecDecoder` to the real `detokenize` (PostNet is training-only) → wav corr 1.0 |
+| Spark-TTS (BiCodec) | d-vector flattened the 32 FSQ codes **token-major**; reference transposes to `[128,32]` first (channel-major) | d_vector corr 0.22 while z_q was 1.0 | flatten channel-major → corr 1.0 |
+| Spark-TTS (DAC wavegen) | reused `DacDecoder` assumed `k=2·stride` + per-C_out transpose weight-norm; Spark uses explicit kernels `[16,11,8,4]` + dim-0 (descript) weight-norm | ConvTranspose output length off by 1; then `WeightNormFusionT` C_out/C_in mismatch | added `DecoderKernelSizes` + `TransposeWeightNormDim0` opt-ins to `DacConfig` (defaults unchanged) |
+| Spark-TTS (LM) | config token-ID bases were all placeholders (assumed semantic-before-global) | reconciling vs the real `added_tokens.json` | global=151665, semantic=155761; fixed config + a now-wrong test assertion |
+| MeloTTS | test-harness fortran-order npy bug (transposed torch tensor saved F-contiguous, C# read C-order) misread the BERT input | m_p corr 0.907 while logs_p was 1.0 | `np.ascontiguousarray` on every dump → text-enc bit-exact |
+| MeloTTS | `VitsDurationPredictor` did norm→ReLU; VITS DP is conv→**ReLU→norm** (Piper never hit it, uses SDP) | durations collapsed (62 vs 216 frames) | fixed order → DP corr 1.0 |
+| F5-TTS | ConvNeXt text stem didn't mask the filler tail (text shorter than mel); a stale comment claimed it was unnecessary | text-stem output corr 0.62; per-stage dumps localized it | zero the filler tail before AND after every ConvNeXt block → corr 1.0 |
+| F5-TTS | timestep sinusoid missing the ×1000 scale (`SinusPositionEmbedding(scale=1000)`); feeds AdaLN in every block | textemb/xinput corr 1.0 but block0 corr 0.87 (exploding over 22 blocks) | scale t by 1000 before the sinusoid → block0 corr 1.0 |
+| F5-TTS | ConvNeXt stem used tanh GELU; it needs **exact erf** (`nn.GELU()`), while the DiT FFN needs **tanh** (`approximate="tanh"`) — they were swapped | velocity maxAbs 0.0015 (corr already 1.0) | erf in the stem, tanh in the FFN → maxAbs 2e-5 |
+| F5-TTS | pipeline CFG was uncond-anchored (`uncond+cfg·(cond−uncond)`) and clamped the ref region every step | n/a (caught reading `CFM.sample`) | F5 is cond-anchored (`pred+cfg·(pred−null)`); ref region replaced only at the end → sample loop corr 1.0 |
 | Engine-wide | CPU SDPA rank-2 causal mask mis-indexed for heads > 0 (OOB → flaky NaN) | Found while validating Boogu-Image's `LlamaStyleEncoder` | `AttentionKernels` branches on mask rank |
 | Engine-wide | `WhisperOps.ProjectLinear`/`BatchedMatMul` heap-corrupt on rank-2 input | ECAPA/Zonos stat-pooling crashes | Always pass `[1,seqLen,inDim]`. See [[projectlinear-needs-rank3]] |
 | Engine-wide | CPU MatMul/Linear heap-corrupt on bf16/f16 weights | Audio loaders | Cast to F32 first (`RequireF32`). See [[cpu-kernels-f32-only]] |

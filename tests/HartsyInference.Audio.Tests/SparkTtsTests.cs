@@ -1,7 +1,11 @@
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.SparkTts;
+using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Sampling;
+using HartsyInference.Cpu;
+using HartsyInference.Tokenizers;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Audio.Tests;
 
@@ -10,6 +14,42 @@ namespace HartsyInference.Audio.Tests;
 /// decode need the ~3.95 GB checkpoint.</summary>
 public sealed class SparkTtsTests
 {
+    private readonly ITestOutputHelper _out;
+    public SparkTtsTests(ITestOutputHelper o) => _out = o;
+
+    /// <summary>Real-weight end-to-end, fully in-engine (controllable mode): text + coarse style → Spark prompt
+    /// tokenizer (Qwen2.5 BPE + added tokens) → Qwen2.5-0.5B greedy AR → 32 global + N semantic BiCodec tokens →
+    /// 16 kHz waveform. Gated on <c>SPARK_DIR</c> (the Spark-TTS-0.5B root holding <c>LLM/</c> and <c>BiCodec/</c>).
+    /// Greedy is deterministic; logits, BiCodec decode, and these token streams were validated bit-exact against
+    /// the reference. First asserts the tokenizer reproduces the validated prompt ids, then the audio.</summary>
+    [Fact]
+    public void EndToEnd_RealWeights_ControllablePrompt()
+    {
+        string? dir = Environment.GetEnvironmentVariable("SPARK_DIR");
+        if (string.IsNullOrEmpty(dir) || !Directory.Exists(Path.Combine(dir, "LLM"))) return;
+
+        const string text = "Hello, this is a test of the speech synthesizer.";
+
+        // Tokenizer parity: the in-engine prompt build + tokenize must reproduce the validated 20 ids.
+        SparkTtsTokenizer tok = SparkTtsTokenizer.FromDirectory(Path.Combine(dir, "LLM"));
+        int[] gotIds = tok.Encode(SparkTtsPipeline.BuildControllablePrompt(text, "male", "moderate", "moderate"));
+        int[] wantIds = [165143, 165146, 9707, 11, 419, 374, 264, 1273, 315, 279, 8806, 51289, 3135, 13,
+            165152, 165147, 165033, 164967, 164988, 165153];
+        Assert.Equal(wantIds, gotIds);
+
+        using SparkTtsPipeline pipe = SparkTtsPipeline.LoadFromDirectory(dir);
+        using CpuBackend backend = new();
+        float[] audio = pipe.SynthesizeControllable(backend, text, "male", "moderate", "moderate",
+            maxTokens: 800, greedy: true);
+
+        Assert.True(audio.Length > 0 && audio.Length % 320 == 0);   // hop 320 → 16 kHz
+        double sumSq = 0;
+        foreach (float a in audio) { Assert.True(float.IsFinite(a)); sumSq += (double)a * a; }
+        double rms = Math.Sqrt(sumSq / audio.Length);
+        _out.WriteLine($"{audio.Length} samples ({audio.Length / 16000.0:F2}s) rms={rms:F4}");
+        Assert.True(rms > 0.01, $"audio near-silent (rms {rms:F4})");
+    }
+
     [Fact]
     public void Config_V0_5B_HasExpectedValues()
     {
@@ -21,8 +61,9 @@ public sealed class SparkTtsTests
         Assert.Equal(4_096, c.GlobalVocab);
         Assert.Equal(32, c.NumGlobalTokens);
         Assert.Equal(16_000, c.SampleRate);
-        // Semantic tokens precede global tokens in the extended vocab.
-        Assert.True(c.GlobalTokenBase >= c.SemanticTokenBase + c.SemanticVocab);
+        // Real added_tokens.json layout: global tokens precede semantic tokens, contiguously.
+        Assert.Equal(151_665, c.GlobalTokenBase);
+        Assert.Equal(c.GlobalTokenBase + c.GlobalVocab, c.SemanticTokenBase);
         // BiCodec global FSQ levels multiply to the global vocab.
         int fsq = 1;
         foreach (int l in c.BiCodec.FsqLevels) fsq *= l;

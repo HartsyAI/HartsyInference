@@ -233,6 +233,11 @@ public sealed record TransformerConfig
     /// the softmax. 0 (default) disables it. Requires the soft-capping attention path.</summary>
     public float AttnLogitSoftcap { get; init; }
 
+    /// <summary>GPT-OSS attention sinks: each layer carries a learned per-head <c>self_attn.sinks</c> logit that
+    /// joins the softmax denominator but contributes no value (lets a head attend to "nothing"). When true the
+    /// per-layer sink tensor is loaded and passed to FlashAttention.</summary>
+    public bool AttnSink { get; init; }
+
     /// <summary>Final-logit soft-cap (Gemma-2 = 30): output logits are capped via <c>cap·tanh(logit/cap)</c>.
     /// 0 (default) disables it.</summary>
     public float FinalLogitSoftcap { get; init; }

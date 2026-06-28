@@ -15,9 +15,8 @@ namespace HartsyInference.Audio.Tests;
 /// without going off the edge of the precomputed table, and that the output has the
 /// expected shape.
 ///
-/// <para>End-to-end "generate audible speech" is a follow-up — see the F5TtsPipeline
-/// class header for the status of the duration heuristic, CFG mixing, and reference-
-/// alignment bits that still need numerical validation against the upstream Python.</para></summary>
+/// <para>The DiT velocity and the full CFM sample loop are numerically validated against upstream F5-TTS
+/// (both corr 1.0) — see PARITY_VERIFICATION. The gated real-weight test below guards the loaded forward.</para></summary>
 public sealed class F5TtsSmokeTests
 {
     [Fact]
@@ -70,29 +69,44 @@ public sealed class F5TtsSmokeTests
             Assert.Equal((float)i / 8, sched.Timesteps[i], precision: 5);
     }
 
-    [Fact(Skip = "F5-TTS forward currently hangs in time_embed.ProjectLinear — needs " +
-                "next-session debugging. Set HARTSYINFERENCE_F5_FORCE=1 to attempt anyway " +
-                "(will likely hang the test host).")]
+    /// <summary>Real-weight DiT forward on the F5TTS_v1_Base checkpoint. Gated on <c>F5_DIT</c> (path to
+    /// <c>model_1250000.safetensors</c>; falls back to the model cache). The full numerical parity (DiT velocity
+    /// corr 1.0 and the CFM sample loop corr 1.0 vs upstream) is recorded in PARITY_VERIFICATION; this guards the
+    /// loaded forward against regressions — asserting finite output of the right shape and a non-degenerate
+    /// velocity magnitude (the reference velocity has std ≈ 1.5).</summary>
     [Trait("Category", "Integration")]
-    public async Task F5Dit_SingleForward_ProducesCorrectShape()
+    [Fact]
+    public unsafe void F5Dit_RealWeights_VelocityIsFiniteAndSane()
     {
-        // The F5-TTS forward path compiles and the model loads correctly (all 366 tensors
-        // resolved against the safetensors), but the very first ProjectLinear call inside
-        // F5TimestepEmbedding hangs. The hang is in a 256→1024 projection on a 1×1×256
-        // input — there's no shape reason for it to hang, so it's almost certainly a
-        // memory-layout mistake elsewhere (likely in EnsureF32 / Reshape view sharing on
-        // the mmap-backed safetensors tensors) that we'll diagnose next session by:
-        //   1. Running each Linear projection on a small synthetic input first.
-        //   2. Comparing output of each module against the upstream Python f5_tts.
-        // For now: model structure compiles, weights load, config matches upstream.
-        string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
-        string ditPath = Path.Combine(repoDir, "F5TTS_v1_Base", "model_1250000.safetensors");
-        if (!File.Exists(ditPath)) return;
+        string? path = Environment.GetEnvironmentVariable("F5_DIT");
+        if (string.IsNullOrEmpty(path))
+        {
+            string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
+            path = Path.Combine(repoDir, "F5TTS_v1_Base", "model_1250000.safetensors");
+        }
+        if (!File.Exists(path)) return;
 
-        using F5TtsPipeline pipeline = await F5TtsPipeline.LoadAsync();
+        F5TtsConfig cfg = F5TtsConfig.V1Base;
+        using ModelHandler.SafeTensors.SafeTensorsLoader ld = new();
+        ld.Load(path);
+        using F5Dit dit = new(cfg);
+        dit.LoadWeights(ld.GetAllTensors());
         using CpuBackend backend = new();
-        Tensor v = pipeline.SmokeForward(backend, t: 8, textLen: 5);
-        Assert.Equal(3, v.Shape.Rank);
-        v.Dispose();
+
+        int t = 80;
+        using Tensor noisy = new(new TensorShape(1, cfg.MelDim, t), DType.F32);
+        using Tensor cond = new(new TensorShape(1, cfg.MelDim, t), DType.F32);
+        float* np_ = (float*)noisy.DataPointer; float* cp = (float*)cond.DataPointer;
+        for (int i = 0; i < cfg.MelDim * t; i++) { np_[i] = MathF.Sin(i * 0.013f); cp[i] = MathF.Cos(i * 0.017f) * 0.5f; }
+        int[] text = new int[30];
+        for (int i = 0; i < text.Length; i++) text[i] = (i * 37 + 11) % 2545;
+
+        using Tensor v = dit.Forward(backend, noisy, cond, text, timestep: 0.3f);
+        Assert.Equal(new TensorShape(1, t, cfg.MelDim), v.Shape);
+        float* vp = (float*)v.DataPointer;
+        double sumSq = 0;
+        for (long i = 0; i < v.ElementCount; i++) { Assert.True(float.IsFinite(vp[i])); sumSq += (double)vp[i] * vp[i]; }
+        double std = Math.Sqrt(sumSq / v.ElementCount);
+        Assert.InRange(std, 0.3, 5.0);   // reference velocity std ≈ 1.5; guards against a silent regression
     }
 }
