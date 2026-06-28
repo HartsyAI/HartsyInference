@@ -296,11 +296,11 @@ soft_emb_norm → input_projection → splice 256 embeddings at `<image_soft_tok
 | Qwen-MoE shared-expert path | 2 | ✅ unit-test-verified (HF reference) |
 | Mixtral, Qwen3-MoE | 2 | `[~]` build-defer (wired; >12GB) |
 | DeepSeek-V2-Lite | 3 | built + unit-tested; loads but OOMs 12GB GPU at preload |
-| DeepSeek-V3, Kimi-K2 | 3 | `[~]` build-defer (MLA + DeepSeek-MoE done; V3 sigmoid/group-routing + q-LoRA TODO) |
+| DeepSeek-V3, Kimi-K2 | 3/8a | `[~]` build-defer (MLA + DeepSeek-MoE + V3 sigmoid/group-routing + q-LoRA all done & slice-verified; e2e >12 GB) |
 | Qwen2.5-VL, Gemma-3-vision, LLaVA, MiniCPM-V | 4 | ✅ (small) |
-| Llama-3.2-Vision (11B) | 4 | ❌ build-defer |
+| Llama-3.2-Vision (11B) | 4/8b | `[~]` gated cross-attn layer done & slice-verified; vision encoder + e2e build-defer |
 | nomic-embed / bge / MiniLM | 5 | ✅ |
-| GPT-OSS | 5 | ❌/⚠️ |
+| GPT-OSS | 5/8c | `[~]` sinks done & slice-verified; 20B+ e2e build-defer |
 
 ---
 
@@ -373,15 +373,31 @@ The config-driven transformer does NOT cover these; each needs new core primitiv
       encoder-decoder shape, learned abs-pos instead of rel-bias) is a near-variant.
 
 ## Phase 8 — Build-defer completions (real code gaps; verify needs >12 GB hardware)
-- [~] **8a. DeepSeek-V3 / Kimi-K2 routing + q-LoRA** — add to the MLA path: **sigmoid** router + `e_score_correction_bias`
-      + **group-limited top-k** (node-limited routing) + **q-LoRA** (`q_a_proj`/`q_a_norm`/`q_b_proj` split; current MLA is
-      direct-q only). Mapper keys exist. The only same-family proxy (DeepSeek-V2-Lite) uses softmax/direct-q, so the V3
-      routing itself is verify-deferred.
-- [~] **8b. Llama-3.2-Vision (mllama) cross-attention** — `MllamaVisionEncoder` + a **gated cross-attention decoder layer**
-      (Q=text, K/V=cached vision, tanh gates, q/k RMSNorm) at layers `[3,8,13,18,23,28,33,38]` + `mllama` mapper. No <12 GB
-      proxy. (Full spec in Phase 4.)
-- [~] **8c. GPT-OSS** — `FlashAttention` per-head **sink logit** (seed the softmax denominator) + reuse o200k tokenizer +
-      existing MoE. 20B+ only, no small variant to reference-check.
+- [x] **8a. DeepSeek-V3 / Kimi-K2 routing + q-LoRA — BUILT + slice-verified.** Added to the MLA path: **q-LoRA**
+      query (`q_a_proj → q_a_norm RMSNorm → q_b_proj`, detected from `MlaConfig.QLoraRank > 0`; the direct-q V2-Lite
+      path is unchanged) and DeepSeek-V3 **node-limited routing** in `MoeFeedForward` — sigmoid + per-expert
+      `e_score_correction_bias` (selection only), group top-2-sum scoring, top-`expert_group_used_count` group masking,
+      raw-sigmoid routing weights, renorm, and `routed_scaling_factor`. `GgufConfigFactory` reads `expert_group_count`
+      /`expert_group_used_count`; `DeepSeekKeyMapper` maps `exp_probs_b.bias` + the q_a/q_b keys.
+      **Verified** by `MoeTests.MoeFeedForward_GroupLimitedRouting_MatchesDeepSeekV3Reference` (independent port of HF
+      `DeepseekV3MoE.gate noaux_tc`, maxdiff ≤1e-4) and `MlaTests.Mla_QLora_QueryBlock_MatchesReference`
+      (q-LoRA arithmetic vs host reference) + `Mla_QLora_PrefillAndDecode_StayFinite`. Full e2e deferred (671B/1T; the
+      only same-family proxy V2-Lite uses softmax/direct-q so it can't exercise V3 routing anyway).
+- [~] **8b. Llama-3.2-Vision (mllama) cross-attention — gated cross-attn layer BUILT + verified; encoder + e2e deferred.**
+      The one genuinely new core primitive, `MllamaCrossAttentionLayer` (Q=text, K/V=vision, bidirectional GQA
+      FlashAttention, q/k RMSNorm, two learned `tanh` scalar gates, gated residual + gated FFN), is built and
+      **numerically verified** (`MllamaCrossAttentionTests`: independent host reference maxdiff ≤1e-4 + the
+      tanh(0)-gate identity no-op property). `MllamaKeyMapper` (registered, maps the `cross_attn_*` + gate keys) and
+      `TransformerConfig.CrossAttnLayers`/`IsCrossAttnLayer` are wired. **Still deferred:** the tiled `MllamaVisionEncoder`
+      (560px ViT, local+global gated layers, multi-layer concat) and the decode-loop integration + the real 11B-Q4 CPU
+      e2e (gated on the user downloading the model + mmproj).
+- [x] **8c. GPT-OSS attention sinks — BUILT + verified.** `FlashAttention` gained an optional per-head **sink logit**
+      that seeds the softmax denominator (`exp(sink − rowmax)`) but contributes no value (CPU `AttentionReference` +
+      `flash_attn_f32.cu` kernel, PTX recompiled), mirroring the Gemma-2 `softcap` plumbing through `IBackend` /
+      `CudaBackend` / `LaunchFlashAttention`. `gpt-oss` registered to the llama-family mapper (+ `attn_sinks` key);
+      `GgufConfigFactory` sets `AttnSink`; the per-layer `_sink` tensor is threaded into both attention call sites.
+      **Verified** by `FlashAttentionTests.Flash_Sink_MatchesAugmentedSoftmax` (vs an explicit `softmax([scores,sink])`
+      reference, + the negative-sink→no-sink and dominant-sink→0 limits). Full 20B+ e2e deferred (no small variant).
 - [~] **8d. Verify-on-bigger-GPU (code already done)**: Mixtral 8x7B, Qwen3-MoE, Qwen2.5-VL-7B+, DeepSeek-V2-Lite e2e.
 
 ## Phase 9 — Production / serving quality (cross-cutting, mostly optional)
@@ -401,9 +417,9 @@ The config-driven transformer does NOT cover these; each needs new core primitiv
 | 7b RWKV | **new arch** | high | ✅ (small) |
 | 7c hybrid SSM+attn | compose | med | partial |
 | 7d T5/BART seq2seq | new decode path | med | ✅ (small) |
-| 8a DeepSeek-V3 routing+q-LoRA | code gap | med | ❌ defer |
-| 8b mllama cross-attn | code gap | high | ❌ defer |
-| 8c GPT-OSS sinks | code gap | low | ❌ defer |
+| 8a DeepSeek-V3 routing+q-LoRA | **done** (slice-verified) | med | ✅ slice / ❌ e2e defer |
+| 8b mllama cross-attn | **layer done** (slice-verified); encoder+e2e defer | high | ✅ layer / ❌ e2e defer |
+| 8c GPT-OSS sinks | **done** (slice-verified) | low | ✅ slice / ❌ e2e defer |
 | 8d Mixtral/Qwen-MoE/Qwen2.5-VL-7B e2e | verify only | — | ❌ (>12 GB) |
 | 9a–9e serving/quality | infra | varies | ✅ |
 

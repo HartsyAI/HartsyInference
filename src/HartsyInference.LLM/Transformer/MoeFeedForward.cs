@@ -21,6 +21,7 @@ public sealed class MoeFeedForward
     private Tensor _routerW = null!;                 // [E, hidden]
     private Tensor[] _gateW = null!, _upW = null!, _downW = null!;   // per expert
     private Tensor? _shGateW, _shUpW, _shDownW, _shGateScoreW;       // shared expert (optional)
+    private float[]? _correctionBias;                // DeepSeek-V3 e_score_correction_bias [E] (selection only)
 
     public MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     {
@@ -32,6 +33,14 @@ public sealed class MoeFeedForward
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _routerW = w[$"{prefix}.mlp.gate.weight"];
+        // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
+        // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
+        // llama.cpp keeps router biases F32, so a direct host copy is exact.
+        if (w.TryGetValue($"{prefix}.mlp.gate.e_score_correction_bias", out Tensor? cb))
+        {
+            if (cb.DType != DType.F32) throw new NotSupportedException("MoE correction bias must be F32.");
+            _correctionBias = HostCopy(cb, _moe.NumExperts);
+        }
         int e = _moe.NumExperts;
         _gateW = new Tensor[e];
         _upW = new Tensor[e];
@@ -84,7 +93,10 @@ public sealed class MoeFeedForward
         List<int>[] expertTokens = new List<int>[e];
         List<float>[] expertWeights = new List<float>[e];
         for (int i = 0; i < e; i++) { expertTokens[i] = []; expertWeights[i] = []; }
-        Route(logits, n, e, topK, expertTokens, expertWeights);
+        if (_moe.ExpertGroupCount > 0)
+            RouteGroupLimited(logits, n, e, topK, expertTokens, expertWeights);
+        else
+            Route(logits, n, e, topK, expertTokens, expertWeights);
 
         // 3. Output accumulator, seeded with the shared expert (if any).
         Tensor output = new(new TensorShape(1, n, _hidden), DType.F32);
@@ -196,6 +208,85 @@ public sealed class MoeFeedForward
                 int ex = pick[kk];
                 float wt = score[ex];
                 if (_moe.NormTopKProb) wt /= wsum;
+                expertTokens[ex].Add(t);
+                expertWeights[ex].Add(wt);
+            }
+        }
+    }
+
+    /// <summary>DeepSeek-V3 / Kimi-K2 node-limited (group-limited) routing (HF <c>noaux_tc</c>): sigmoid scores +
+    /// per-expert correction bias form the SELECTION score; experts are partitioned into groups, each group scored
+    /// by the sum of its top-2 selection scores; only the top <c>ExpertGroupUsedCount</c> groups are eligible; the
+    /// per-token top-k is taken over the kept groups; the routing WEIGHT is the raw sigmoid score (no bias),
+    /// optionally renormalized over the selected experts, then scaled by <c>RoutedScalingFactor</c>.</summary>
+    private void RouteGroupLimited(float[] logits, int n, int e, int topK, List<int>[] expertTokens, List<float>[] expertWeights)
+    {
+        int nGroup = _moe.ExpertGroupCount;
+        int topkGroup = _moe.ExpertGroupUsedCount;
+        int perGroup = e / nGroup;
+        float scale = _moe.RoutedScalingFactor;
+        float[] sig = new float[e];        // raw sigmoid → the routing weight
+        float[] choice = new float[e];     // sigmoid + correction bias → the selection score
+        float[] tmp = new float[e];        // choice masked to 0 outside kept groups (HF masked_fill)
+        float[] groupScore = new float[nGroup];
+        bool[] groupKept = new bool[nGroup];
+        int[] pick = new int[topK];
+        for (int t = 0; t < n; t++)
+        {
+            long baseOff = (long)t * e;
+            for (int i = 0; i < e; i++)
+            {
+                float s = 1f / (1f + MathF.Exp(-logits[baseOff + i]));
+                sig[i] = s;
+                choice[i] = s + (_correctionBias is not null ? _correctionBias[i] : 0f);
+            }
+            // Group score = sum of the top-2 selection scores in the group.
+            for (int g = 0; g < nGroup; g++)
+            {
+                int gb = g * perGroup;
+                float top1 = float.NegativeInfinity, top2 = float.NegativeInfinity;
+                for (int j = 0; j < perGroup; j++)
+                {
+                    float v = choice[gb + j];
+                    if (v > top1) { top2 = top1; top1 = v; }
+                    else if (v > top2) top2 = v;
+                }
+                groupScore[g] = top1 + top2;
+                groupKept[g] = false;
+            }
+            // Keep the top `topkGroup` groups (ties → lower index, matching torch.topk).
+            for (int kk = 0; kk < topkGroup; kk++)
+            {
+                int bestG = -1; float bestV = float.NegativeInfinity;
+                for (int g = 0; g < nGroup; g++)
+                {
+                    if (groupKept[g]) continue;
+                    if (groupScore[g] > bestV) { bestV = groupScore[g]; bestG = g; }
+                }
+                if (bestG >= 0) groupKept[bestG] = true;
+            }
+            for (int i = 0; i < e; i++) tmp[i] = groupKept[i / perGroup] ? choice[i] : 0f;
+            // Per-token top-k over the masked selection scores.
+            float wsum = 0f;
+            for (int kk = 0; kk < topK; kk++)
+            {
+                int best = -1; float bestVal = float.NegativeInfinity;
+                for (int i = 0; i < e; i++)
+                {
+                    bool already = false;
+                    for (int j = 0; j < kk; j++) if (pick[j] == i) { already = true; break; }
+                    if (already) continue;
+                    if (tmp[i] > bestVal) { bestVal = tmp[i]; best = i; }
+                }
+                pick[kk] = best;
+                wsum += sig[best];
+            }
+            for (int kk = 0; kk < topK; kk++)
+            {
+                int ex = pick[kk];
+                float wt = sig[ex];
+                if (_moe.NormTopKProb) wt /= wsum + 1e-20f;
+                wt *= scale;
                 expertTokens[ex].Add(t);
                 expertWeights[ex].Add(wt);
             }

@@ -12,6 +12,7 @@ public sealed unsafe class MoeTests
     private static uint _rng = 0x6C0FFEEu;
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.5f; }
     private static Tensor F2(int a, int b) { Tensor t = new(new TensorShape(a, b), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
+    private static Tensor F1(int a) { Tensor t = new(new TensorShape(a), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static float[] Host(Tensor t) { float[] r = new float[t.ElementCount]; float* p = (float*)t.DataPointer; for (long i = 0; i < r.Length; i++) r[i] = p[i]; return r; }
 
     [Fact]
@@ -54,6 +55,113 @@ public sealed unsafe class MoeTests
         Assert.True(max <= 1e-4f, $"MoE diverges from reference by {max:E3}");
 
         foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    /// <summary>Validates the DeepSeek-V3 / Kimi-K2 node-limited (group-limited) routing — sigmoid + per-expert
+    /// correction bias for selection, group top-2-sum scoring, top-group masking, raw-sigmoid routing weights,
+    /// renorm, and <c>routed_scaling_factor</c> — against an independent port of HF DeepSeek-V3 <c>noaux_tc</c>.</summary>
+    [Fact]
+    public void MoeFeedForward_GroupLimitedRouting_MatchesDeepSeekV3Reference()
+    {
+        const int hidden = 16, inter = 24, e = 8, topK = 4, n = 6, nGroup = 4, topkGroup = 2;
+        const float scaling = 2.5f;
+        MoeConfig moe = new()
+        {
+            NumExperts = e, NumExpertsPerTok = topK, MoeIntermediateSize = inter,
+            NormTopKProb = true, Scoring = MoeScoring.Sigmoid,
+            ExpertGroupCount = nGroup, ExpertGroupUsedCount = topkGroup, RoutedScalingFactor = scaling,
+        };
+
+        const string p = "model.layers.0";
+        Dictionary<string, Tensor> w = new()
+        {
+            [$"{p}.mlp.gate.weight"] = F2(e, hidden),
+            [$"{p}.mlp.gate.e_score_correction_bias"] = F1(e),
+        };
+        for (int i = 0; i < e; i++)
+        {
+            w[$"{p}.mlp.experts.{i}.gate_proj.weight"] = F2(inter, hidden);
+            w[$"{p}.mlp.experts.{i}.up_proj.weight"] = F2(inter, hidden);
+            w[$"{p}.mlp.experts.{i}.down_proj.weight"] = F2(hidden, inter);
+        }
+
+        using CpuBackend backend = new();
+        MoeFeedForward moeFf = new(moe, hidden, lowVram: false);
+        moeFf.LoadWeights(w, p);
+
+        using Tensor x = F2(n, hidden);
+        using Tensor outActual = moeFf.Forward(backend, Reshape(x, n, hidden), n);
+
+        float[] expected = GroupRoutingReference(Host(x), w, p, moe, hidden, inter, e, topK, n, nGroup, topkGroup, scaling);
+        float* a = (float*)outActual.DataPointer;
+        float max = 0f;
+        for (int i = 0; i < expected.Length; i++) max = MathF.Max(max, MathF.Abs(expected[i] - a[i]));
+        Assert.True(max <= 1e-4f, $"Group-limited MoE diverges from DeepSeek-V3 reference by {max:E3}");
+
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    // Independent port of HF DeepSeekV3 MoEGate (noaux_tc) + weighted expert combine.
+    private static float[] GroupRoutingReference(float[] x, Dictionary<string, Tensor> w, string p, MoeConfig moe,
+        int hidden, int inter, int e, int topK, int n, int nGroup, int topkGroup, float scaling)
+    {
+        float[] router = Host(w[$"{p}.mlp.gate.weight"]);
+        float[] bias = Host(w[$"{p}.mlp.gate.e_score_correction_bias"]);
+        float[][] eg = new float[e][], eu = new float[e][], ed = new float[e][];
+        for (int i = 0; i < e; i++)
+        {
+            eg[i] = Host(w[$"{p}.mlp.experts.{i}.gate_proj.weight"]);
+            eu[i] = Host(w[$"{p}.mlp.experts.{i}.up_proj.weight"]);
+            ed[i] = Host(w[$"{p}.mlp.experts.{i}.down_proj.weight"]);
+        }
+        int perGroup = e / nGroup;
+        float[] outp = new float[n * hidden];
+        for (int t = 0; t < n; t++)
+        {
+            ReadOnlySpan<float> xt = x.AsSpan(t * hidden, hidden);
+            float[] sig = new float[e], choice = new float[e];
+            for (int i = 0; i < e; i++)
+            {
+                sig[i] = 1f / (1f + MathF.Exp(-Dot(xt, router, i * hidden, hidden)));
+                choice[i] = sig[i] + bias[i];
+            }
+            float[] groupScore = new float[nGroup];
+            for (int g = 0; g < nGroup; g++)
+            {
+                float t1 = float.NegativeInfinity, t2 = float.NegativeInfinity;
+                for (int j = 0; j < perGroup; j++) { float v = choice[g * perGroup + j]; if (v > t1) { t2 = t1; t1 = v; } else if (v > t2) t2 = v; }
+                groupScore[g] = t1 + t2;
+            }
+            bool[] kept = new bool[nGroup];
+            for (int kk = 0; kk < topkGroup; kk++)
+            {
+                int bg = -1; float bv = float.NegativeInfinity;
+                for (int g = 0; g < nGroup; g++) if (!kept[g] && groupScore[g] > bv) { bv = groupScore[g]; bg = g; }
+                if (bg >= 0) kept[bg] = true;
+            }
+            float[] tmp = new float[e];
+            for (int i = 0; i < e; i++) tmp[i] = kept[i / perGroup] ? choice[i] : 0f;
+            int[] pick = new int[topK];
+            float wsum = 0f;
+            for (int kk = 0; kk < topK; kk++)
+            {
+                int best = -1; float bv = float.NegativeInfinity;
+                for (int i = 0; i < e; i++)
+                {
+                    bool taken = false; for (int j = 0; j < kk; j++) if (pick[j] == i) { taken = true; break; }
+                    if (!taken && tmp[i] > bv) { bv = tmp[i]; best = i; }
+                }
+                pick[kk] = best; wsum += sig[best];
+            }
+            for (int kk = 0; kk < topK; kk++)
+            {
+                int ex = pick[kk];
+                float wt = sig[ex] / (wsum + 1e-20f) * scaling;
+                float[] hvec = SwiGlu(xt, eg[ex], eu[ex], ed[ex], hidden, inter);
+                for (int j = 0; j < hidden; j++) outp[t * hidden + j] += wt * hvec[j];
+            }
+        }
+        return outp;
     }
 
     private static Tensor Reshape(Tensor x, int n, int hidden)

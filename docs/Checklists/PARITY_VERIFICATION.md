@@ -83,7 +83,9 @@ Add a row to **§ Bugs found** for every real bug, with how it was caught.
 | **ResembleEnhance** | 🔬 | modules synthetic-verified; checkpoint converter built | Mel→mel structural green; real-weight parity pending. |
 | **Spark-TTS-0.5B** | ✅ | LM logits corr 1.0 (top-1 100%) · greedy tokens 32/32 global + 179/179 semantic · BiCodec z_q/d_vector/prenet/wav all corr 1.0 | Fully in-engine controllable mode (`SparkTtsPipeline.SynthesizeControllable`). BiCodecDecoder rewritten (factorized VQ, FSQ d-vector flatten, AdaLN PreNet); reuses `DacDecoder` (added dim-0 weightnorm + explicit-kernel opt-ins). `SparkTtsTokenizer` reuses BpeTokenizer+ByteLevelCodec. See [[sparktts-build]]. |
 | **MeloTTS** (English-v3) | ✅ | g2p ids exact · BERT features rmse 0.0 · text-enc + DP corr 1.0 · audio corr 0.9993 (len exact) | Real-weight e2e in pure C#. `MeloTts` facade (LoadFromFiles/LoadAsync/SynthesizeText). Built VitsFftBlock + VitsTransformerFlow. See [[melotts-build]]. |
-| **VibeVoice / NeuTTS / Orpheus / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | — | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
+| **FishSpeech 1.5** | 🔬 | slow DualAR LM (24-layer Llama) logits corr 1.0 | Key adapter (fused wqkv/w1w2w3→split), interleaved RoPE, no embed-scale. Fast depth-LM + firefly-gan-vq codec remain. See [[dia-fishspeech-build]]. |
+| **Dia-1.6B** | 🔬 | encoder (12-layer) corr 1.0 | DenseGeneral transpose adapter + split-half RoPE + attention scale=1.0 + mlp key rename. Decoder (cross-attn / 9-ch / fused head) + DAC remain. See [[dia-fishspeech-build]]. |
+| **VibeVoice / NeuTTS / Orpheus / Bark / StyleTTS2** | 🔧 | — | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
 | **Zonos** | ⛔ | — | Blocked: espeak phonemes + ResNet293 speaker encoder + NovelAI sampler. Deferred. |
 
 ### STT
@@ -146,7 +148,10 @@ Add a row to **§ Bugs found** for every real bug, with how it was caught.
 | **Embeddings** (bge-small CLS, all-MiniLM mean) | ✅ | `BertEmbeddingModel`, **cosine=1.000000** vs HF transformers. Quant decode Q8/Q5/Q4/Q3 all >0.99 vs F32. |
 | **T5 / UMT5 / Pile-T5 (AuraFlow) / BERT / SigLIP / Qwen3-VL vision tower** | 🔬 | Encoder diff tests (`T5EncoderDiff`, `BertModel`, `Siglip`, `Qwen3VlVisionTower`). Pile-T5 = UMT5. See [[pile_t5_is_umt5]]. |
 | **MoE / MLA build-defer** (Mixtral, Qwen3-MoE, DeepSeek-V2-Lite/V3, Kimi) | 🚧 | Built + slice/unit-tested; e2e pending >12 GB hardware (V2-Lite loads, OOMs at preload). |
-| **Remaining for FULL support** | 🚧 | Phase 6 (decoder-embeddings, rerankers, IQ-quants), Phase 7 (**Mamba/SSM, RWKV, hybrids, T5 seq2seq — new arch code**), Phase 8 (DeepSeek-V3 routing, mllama cross-attn, GPT-OSS sinks), Phase 9 (batch>1, spec-decode). See [LLM_MODEL_COVERAGE.md § Completion plan](LLM_MODEL_COVERAGE.md). |
+| **DeepSeek-V3 / Kimi-K2 routing + q-LoRA** (Phase 8a) | 🔬 | **Slice-verified**: group-limited `noaux_tc` routing (sigmoid + e_score bias + group top-2-sum + routed_scaling) matches an independent HF port (`MoeTests.MoeFeedForward_GroupLimitedRouting_MatchesDeepSeekV3Reference`, maxdiff ≤1e-4); q-LoRA query block matches a host ref (`MlaTests.Mla_QLora_QueryBlock_MatchesReference`). Full e2e >12 GB. |
+| **GPT-OSS attention sinks** (Phase 8c) | 🔬 | **Slice-verified**: per-head sink logit (CPU `AttentionReference` + `flash_attn_f32.cu`, PTX recompiled) matches an explicit `softmax([scores,sink])` reference + the two limits (`FlashAttentionTests.Flash_Sink_MatchesAugmentedSoftmax`). 20B+ e2e deferred. |
+| **Llama-3.2-Vision (mllama) gated cross-attn** (Phase 8b) | 🔬 | **Slice-verified**: `MllamaCrossAttentionLayer` (Q=text, K/V=vision, bidirectional GQA, q/k RMSNorm, tanh gates, gated residual+FFN) matches a host reference + the tanh(0) no-op identity (`MllamaCrossAttentionTests`). Tiled vision encoder + decode integration + 11B-Q4 CPU e2e still build-defer. |
+| **Remaining for FULL support** | 🚧 | Phase 6 (decoder-embeddings, rerankers, IQ-quants), Phase 7 (**Mamba/SSM, RWKV, hybrids, T5 seq2seq — new arch code**), Phase 8 e2e (mllama vision encoder + DeepSeek-V3/GPT-OSS/mllama full-model runs on >12 GB), Phase 9 (batch>1, spec-decode). See [LLM_MODEL_COVERAGE.md § Completion plan](LLM_MODEL_COVERAGE.md). |
 
 ---
 
@@ -176,6 +181,11 @@ Real bugs surfaced by the parity loop — kept here so the patterns repeat-catch
 | F5-TTS | timestep sinusoid missing the ×1000 scale (`SinusPositionEmbedding(scale=1000)`); feeds AdaLN in every block | textemb/xinput corr 1.0 but block0 corr 0.87 (exploding over 22 blocks) | scale t by 1000 before the sinusoid → block0 corr 1.0 |
 | F5-TTS | ConvNeXt stem used tanh GELU; it needs **exact erf** (`nn.GELU()`), while the DiT FFN needs **tanh** (`approximate="tanh"`) — they were swapped | velocity maxAbs 0.0015 (corr already 1.0) | erf in the stem, tanh in the FFN → maxAbs 2e-5 |
 | F5-TTS | pipeline CFG was uncond-anchored (`uncond+cfg·(cond−uncond)`) and clamped the ref region every step | n/a (caught reading `CFM.sample`) | F5 is cond-anchored (`pred+cfg·(pred−null)`); ref region replaced only at the end → sample loop corr 1.0 |
+| FishSpeech | checkpoint is fused-key Llama (`attention.wqkv`, `feed_forward.w1/w2/w3`, `attention_norm`) wired to `Qwen2Model` (split keys) | `LoadWeights` would KeyNotFound | key adapter: slice wqkv→q/k/v, rename w1/w3/w2→gate/up/down + norms |
+| FishSpeech | fish Llama uses interleaved (complex `view_as_complex`) RoPE; `Qwen2Model` was split-half | slow logits corr 0.84 | added `Qwen2Config.Rope`; set `Interleaved` for fish → corr 1.0 |
+| FishSpeech | C# scaled the summed codebook embedding by 1/√(N+1); the shipped checkpoint loads `scale_codebook_embeddings=False` | (folded into the corr-1.0 fix) | config-gated the scale off |
+| Dia | published checkpoint is nari-native `DenseGeneral` (`q_proj` `[in,h,k]`, `o_proj` `[h,k,out]`, `wi_fused` `[in,2,ffn]`), prefix `encoder.*` not `model.encoder.*` | encoder corr 0.35 | `DiaWeights.Adapt`: flatten + transpose to `[out,in]`, rename `wi_fused`/`wo` |
+| Dia | C# used GPT-J interleaved RoPE + `1/√head_dim` attn scale; Dia uses split-half RoPE + **scale 1.0** | encoder corr 0.35 → 0.35 | `RopeSplitHalfInPlace` + `scale=1.0` → encoder corr 1.0 |
 | Engine-wide | CPU SDPA rank-2 causal mask mis-indexed for heads > 0 (OOB → flaky NaN) | Found while validating Boogu-Image's `LlamaStyleEncoder` | `AttentionKernels` branches on mask rank |
 | Engine-wide | `WhisperOps.ProjectLinear`/`BatchedMatMul` heap-corrupt on rank-2 input | ECAPA/Zonos stat-pooling crashes | Always pass `[1,seqLen,inDim]`. See [[projectlinear-needs-rank3]] |
 | Engine-wide | CPU MatMul/Linear heap-corrupt on bf16/f16 weights | Audio loaders | Cast to F32 first (`RequireF32`). See [[cpu-kernels-f32-only]] |

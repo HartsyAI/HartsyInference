@@ -67,6 +67,9 @@ public sealed unsafe class DiaDecoder : IDisposable
             x.Dispose();
             x = next;
         }
+        // Every layer appended its K/V at the shared CurrentLength; advance once per step so the next step's
+        // self-attention sees this position (Append does not advance the counter itself).
+        cache.AdvanceLength(1);
         Tensor normed = new(x.Shape, DType.F32);
         backend.RmsNorm(normed, x, _finalNorm!, _cfg.NormEps); x.Dispose();
 

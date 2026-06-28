@@ -34,7 +34,9 @@ Qwen-MoE shared-expert path is unit-test-verified against an HF reference (no 14
 | **Mixtral 8x7B** (47B) | `llama` arch + experts, interleaved RoPE, renorm; config + mapper + stacked-expert split wired. |
 | **Qwen3-MoE 30B-A3B / 235B** | `qwen3moe`, per-head Q/K norm, no shared expert; wired. |
 | **DeepSeek-V2-Lite** | MLA + DeepSeek-MoE built + `MlaTests` pass; loads but OOMs the 3060 at preload. |
-| **DeepSeek-V3 671B / Kimi-K2 1T** | MLA + MoE done; V3 sigmoid / group-routing + q-LoRA still TODO. Architecturally a bigger config of the above. |
+| **DeepSeek-V3 671B / Kimi-K2 1T** | MLA + MoE + **V3 node-limited routing (sigmoid + e_score bias + group top-k + routed_scaling) + q-LoRA query** all built & **slice-verified** (`MoeTests` group-routing vs HF `noaux_tc`, `MlaTests` q-LoRA block vs host ref). e2e >12 GB. |
+| **GPT-OSS 20B / 120B** | Per-head **attention sinks** built (CPU+CUDA, PTX recompiled) & **slice-verified** (`FlashAttentionTests.Flash_Sink_*`); `gpt-oss` arch/mapper/config wired. MoE + o200k tokenizer reused. e2e 20B+ deferred. |
+| **Llama-3.2-Vision (mllama)** | **Gated cross-attention layer** (`MllamaCrossAttentionLayer`) built & **slice-verified** (`MllamaCrossAttentionTests`: host-ref parity + tanh(0) no-op); `mllama` mapper + `CrossAttnLayers` config wired. Tiled vision encoder + decode integration + 11B-Q4 CPU e2e still build-defer. |
 
 ## VLMs (vision-language) — verified end-to-end (✅)
 
@@ -90,7 +92,9 @@ What's left, by phase:
 - **Phase 7 — NEW architecture families (the real frontier, new core code):** Mamba/Mamba-2 (SSM selective scan),
   RWKV v6/v7 (WKV recurrence), hybrids (Jamba/Zamba2/Granite-4), encoder-decoder seq2seq (T5/BART). These are the only
   families the engine fundamentally cannot run yet; all have small variants that fit the 3060.
-- **Phase 8 — build-defer code gaps (verify needs >12 GB):** DeepSeek-V3/Kimi sigmoid+group-routing+q-LoRA;
-  Llama-3.2-Vision cross-attention; GPT-OSS attention sinks; e2e of Mixtral/Qwen3-MoE/Qwen2.5-VL-7B.
+- **Phase 8 — build-defer code gaps (the new primitives are now built + slice-verified; full e2e still needs >12 GB):**
+  DeepSeek-V3/Kimi sigmoid+group-routing+q-LoRA ✅ slice-verified; GPT-OSS attention sinks ✅ slice-verified;
+  Llama-3.2-Vision gated cross-attention layer ✅ slice-verified (vision encoder + e2e still deferred); remaining e2e of
+  Mixtral/Qwen3-MoE/Qwen2.5-VL-7B/DeepSeek-V2-Lite needs a bigger GPU.
 - **Phase 9 — serving/quality (optional):** batch>1 / paged KV, speculative decode, long-context stress, CPU GGUF
   parity tests + the pre-existing `RoundTrip_SimpleF32` test fix, tool-calling/grammar-constrained decode.

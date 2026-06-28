@@ -122,6 +122,10 @@ public static class GgufConfigFactory
             // expert_gating_func: 1 = softmax (Mixtral/Qwen/OLMoE), 2 = sigmoid (DeepSeek-V3).
             bool sigmoid = metadata.GetUInt32($"{arch}.expert_gating_func", 1u) == 2u;
             int firstDense = (int)metadata.GetUInt32($"{arch}.leading_dense_block_count", 0u);
+            // DeepSeek-V3 / Kimi-K2 node-limited routing: experts partitioned into expert_group_count groups, the
+            // top expert_group_used_count groups eligible per token. 0 = flat top-k (V2-Lite, Mixtral, Qwen-MoE).
+            int groupCount = (int)metadata.GetUInt32($"{arch}.expert_group_count", 0u);
+            int groupUsed = (int)metadata.GetUInt32($"{arch}.expert_group_used_count", 0u);
             // Top-k weight renormalization: Mixtral / Qwen-MoE renormalize the selected experts' weights to sum
             // to 1; OLMoE does not (matches llama.cpp's per-arch norm_w). Honor an explicit GGUF flag when present.
             bool normTopK = metadata.ContainsKey($"{arch}.expert_weights_norm")
@@ -136,6 +140,10 @@ public static class GgufConfigFactory
                 Scoring = sigmoid ? MoeScoring.Sigmoid : MoeScoring.Softmax,
                 NormTopKProb = normTopK,
                 FirstDenseLayers = firstDense,
+                ExpertGroupCount = groupCount,
+                ExpertGroupUsedCount = groupUsed,
+                // DeepSeek's routed_scaling_factor is GGUF's expert_weights_scale (applied to the routed weights).
+                RoutedScalingFactor = groupCount > 0 ? expertWeightsScale : 1f,
             };
         }
 

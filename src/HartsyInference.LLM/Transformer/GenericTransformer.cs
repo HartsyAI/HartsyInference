@@ -399,6 +399,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _qNorm, _kNorm;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
         private Tensor? _kvAProj, _kvANorm, _kvBProj;   // MLA: KV down-proj (+latent norm) and up-proj
+        private Tensor? _qAProj, _qANorm, _qBProj;      // MLA q-LoRA: Q down-proj (+norm) and up-proj (DeepSeek-V3/Kimi)
         private Tensor? _gateW, _upW, _downW;
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
 
@@ -429,8 +430,18 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             if (_cfg.Mla is not null)
             {
-                // MLA (DeepSeek-V2-Lite uses a direct q_proj): q_proj, KV down (a) + latent norm + KV up (b), o_proj.
-                _qW = w[$"{prefix}.self_attn.q_proj.weight"];
+                // MLA: KV down (a) + latent norm + KV up (b), o_proj. The query is either a direct projection
+                // (V2-Lite, q_lora_rank=0) or compressed via q-LoRA: q_a_proj → q_a_norm → q_b_proj (V3 / Kimi-K2).
+                if (_cfg.Mla.QLoraRank > 0)
+                {
+                    _qAProj = w[$"{prefix}.self_attn.q_a_proj.weight"];
+                    _qANorm = LoadNorm(w[$"{prefix}.self_attn.q_a_norm.weight"], addOne);
+                    _qBProj = w[$"{prefix}.self_attn.q_b_proj.weight"];
+                }
+                else
+                {
+                    _qW = w[$"{prefix}.self_attn.q_proj.weight"];
+                }
                 _kvAProj = w[$"{prefix}.self_attn.kv_a_proj.weight"];
                 _kvANorm = LoadNorm(w[$"{prefix}.self_attn.kv_a_norm.weight"], addOne);
                 _kvBProj = w[$"{prefix}.self_attn.kv_b_proj.weight"];
@@ -504,7 +515,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _sink, _kvAProj, _kvANorm, _kvBProj, _gateW, _upW, _downW];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _sink, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
         }
@@ -646,9 +657,23 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor pre = new(flat, DType.F32);
             Normalize(backend, pre, hidden, _inNorm!, _normBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
 
-            // Query (direct projection): [1,t,hq,qkHead] laid out [q_nope | q_rope] per head.
+            // Query: [1,t,hq,qkHead] laid out [q_nope | q_rope] per head. Direct projection (V2-Lite) or q-LoRA
+            // (DeepSeek-V3 / Kimi-K2): q_a_proj → q_a_norm (RMSNorm) → q_b_proj.
             Tensor q = new(new TensorShape(1, t, hq, qkHead), DType.F32);
-            Project(backend, q, pre, _qW!, null, _cfg.LowVramQuant);
+            if (mla.QLoraRank > 0)
+            {
+                Tensor qA = new(new TensorShape(1, t, mla.QLoraRank), DType.F32);
+                Project(backend, qA, pre, _qAProj!, null, _cfg.LowVramQuant);
+                Tensor qAN = new(new TensorShape(1, t, mla.QLoraRank), DType.F32);
+                backend.RmsNorm(qAN, qA, _qANorm!, _cfg.RmsNormEps);
+                qA.Dispose();
+                Project(backend, q, qAN, _qBProj!, null, _cfg.LowVramQuant);
+                qAN.Dispose();
+            }
+            else
+            {
+                Project(backend, q, pre, _qW!, null, _cfg.LowVramQuant);
+            }
 
             // KV down-projection → compressed latent (kvLora) + shared rope key (qkRope).
             Tensor kvA = new(new TensorShape(1, t, kvLora + qkRope), DType.F32);

@@ -64,6 +64,20 @@ public sealed record MoeConfig
     /// <summary>Layers <c>[0, FirstDenseLayers)</c> stay dense; the rest are MoE (DeepSeek <c>first_k_dense_replace</c>).
     /// 0 (default) makes every layer MoE.</summary>
     public int FirstDenseLayers { get; init; }
+
+    /// <summary>DeepSeek-V3 / Kimi-K2 node-limited (group-limited) routing: the experts are partitioned into
+    /// <see cref="ExpertGroupCount"/> groups; only the top <see cref="ExpertGroupUsedCount"/> groups (scored by the
+    /// sum of their top-2 experts) are eligible for the per-token top-k. 0 (default) disables grouping (flat top-k).
+    /// When grouped, the router adds a per-expert correction bias (a <c>exp_probs_b</c> layer tensor) to the
+    /// selection scores only, and the routing weight stays the raw sigmoid score scaled by
+    /// <see cref="RoutedScalingFactor"/>.</summary>
+    public int ExpertGroupCount { get; init; }
+
+    /// <summary>Number of expert groups kept per token under group-limited routing (DeepSeek-V3 <c>topk_group</c>).</summary>
+    public int ExpertGroupUsedCount { get; init; }
+
+    /// <summary>Multiplier applied to the routed-expert weights (DeepSeek-V3 <c>routed_scaling_factor</c>, default 1).</summary>
+    public float RoutedScalingFactor { get; init; } = 1f;
 }
 
 /// <summary>Multi-head Latent Attention (DeepSeek-V2/V3, Kimi-K2). Instead of per-head K/V projections, the
@@ -283,6 +297,15 @@ public sealed record TransformerConfig
 
     /// <summary>Whether layer <paramref name="layerIndex"/> uses the MoE FFN (vs dense SwiGLU).</summary>
     public bool IsMoeLayer(int layerIndex) => Moe is not null && layerIndex >= Moe.FirstDenseLayers;
+
+    /// <summary>Layer indices that are gated cross-attention layers (Llama-3.2-Vision / mllama:
+    /// <c>[3,8,13,18,23,28,33,38]</c> for 11B). Empty for every text-only model. A cross-attention layer reads the
+    /// encoded image features via <see cref="HartsyInference.LLM.Multimodal.MllamaCrossAttentionLayer"/> instead of
+    /// the causal self-attention path.</summary>
+    public IReadOnlySet<int> CrossAttnLayers { get; init; } = System.Collections.Immutable.ImmutableHashSet<int>.Empty;
+
+    /// <summary>Whether layer <paramref name="layerIndex"/> is a gated cross-attention layer (mllama).</summary>
+    public bool IsCrossAttnLayer(int layerIndex) => CrossAttnLayers.Contains(layerIndex);
 
     // ── Presets ──────────────────────────────────────────────────────────────────────────────────────
 

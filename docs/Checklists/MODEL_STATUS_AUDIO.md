@@ -22,7 +22,9 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **HeartMuLa** | 🔧 | Built + wired; parity pending. |
 | **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#: g2p ids exact, BERT bit-exact, audio corr 0.9993 (len exact) vs the noise-0 reference. `MeloTts` facade (LoadFromFiles/LoadAsync/SynthesizeText) + gated parity test. |
 | **Spark-TTS-0.5B** | ✅ | Real-weight e2e bit-exact, fully in-engine (controllable mode): LM logits corr 1.0 (top-1 100%), greedy tokens 32/32 global + 179/179 semantic match Python, BiCodec wav corr 1.0 (factorized VQ, FSQ d-vector, AdaLN PreNet all corr 1.0). `SparkTtsPipeline.LoadFromDirectory`/`LoadAsync` + `SynthesizeControllable(text, gender, pitch, speed)`; `SparkTtsTokenizer` reuses the shared BPE + ByteLevelCodec. Zero-shot cloning would need the BiCodec encoder side (wav2vec2 + ECAPA), not built. |
-| **VibeVoice / NeuTTS / Orpheus / Bark / Dia / FishSpeech / StyleTTS2** | 🔧 | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
+| **FishSpeech 1.5** | 🔬 | Slow DualAR LM (24-layer Llama) verified bit-exact (logits corr 1.0): fused-key adapter + interleaved RoPE + no embed-scale. Fast depth-LM + firefly-gan-vq codec remain. |
+| **Dia-1.6B** | 🔬 | Encoder (12-layer) verified bit-exact (corr 1.0): DenseGeneral transpose adapter + split-half RoPE + attn scale 1.0. Decoder (cross-attn/9-ch/fused head) + DAC remain. |
+| **VibeVoice / NeuTTS / Orpheus / Bark / StyleTTS2** | 🔧 | Built (varying completeness); no real-weight parity yet. Orpheus/NeuTTS are phoneme-id-blocked (caller supplies ids). |
 | **Zonos** | ⛔ | Blocked: espeak phonemes + ResNet293 speaker encoder + NovelAI sampler. Deferred. |
 
 ## STT

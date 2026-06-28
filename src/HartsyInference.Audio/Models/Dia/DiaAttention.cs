@@ -54,8 +54,9 @@ public sealed unsafe class DiaAttention
 
         if (_useRope)
         {
-            RotaryEmbedding.ApplyInPlace(qMh, _qHeads, t, _headDim, _headDim, posStart, cos!, sin!);
-            RotaryEmbedding.ApplyInPlace(kMh, _kvHeads, t, _headDim, _headDim, posStart, cos!, sin!);
+            // Dia uses split-half (NeoX) RoPE (chunk(x, 2)), not the GPT-J interleaved form.
+            DiaWeights.RopeSplitHalfInPlace(qMh, _qHeads, t, _headDim, posStart, cos!, sin!);
+            DiaWeights.RopeSplitHalfInPlace(kMh, _kvHeads, t, _headDim, posStart, cos!, sin!);
         }
 
         Tensor kUse, vUse;
@@ -112,8 +113,9 @@ public sealed unsafe class DiaAttention
             DiaHeads.RepeatKv(kRep, kMh, _kvHeads, group, kvLen, _headDim);
             DiaHeads.RepeatKv(vRep, vMh, _kvHeads, group, kvLen, _headDim);
         }
+        // Dia applies NO 1/sqrt(head_dim) scaling (the reference passes scale=1.0).
         Tensor attn = new(new TensorShape(1, _qHeads, t, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, 1f / MathF.Sqrt(_headDim));
+        backend.ScaledDotProductAttention(attn, qMh, kRep, vRep, mask, 1f);
         if (group != 1) { kRep.Dispose(); vRep.Dispose(); }
         Tensor flat = new(new TensorShape(1, t, _qHeads * _headDim), DType.F32);
         DiaHeads.HeadsToFlat(flat, attn, t, _qHeads, _headDim); attn.Dispose();

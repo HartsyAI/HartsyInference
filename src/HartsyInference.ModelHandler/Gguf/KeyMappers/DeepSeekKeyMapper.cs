@@ -47,6 +47,7 @@ public sealed class DeepSeekKeyMapper : IGgufKeyMapper
                 "ffn_up.weight" => "mlp.up_proj.weight",
                 "ffn_down.weight" => "mlp.down_proj.weight",
                 "ffn_gate_inp.weight" => "mlp.gate.weight",                   // router
+                "exp_probs_b.bias" => "mlp.gate.e_score_correction_bias",     // V3/Kimi node-limited router bias
                 "ffn_gate_exps.weight" => "mlp.gate_exps.weight",            // stacked → split
                 "ffn_up_exps.weight" => "mlp.up_exps.weight",
                 "ffn_down_exps.weight" => "mlp.down_exps.weight",

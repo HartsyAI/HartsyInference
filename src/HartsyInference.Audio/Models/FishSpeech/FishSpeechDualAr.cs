@@ -17,7 +17,7 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
     private readonly FishSpeechConfig _cfg;
     private readonly Qwen2Model _backbone;
     private readonly Qwen2Model _fast;
-    private Tensor? _textEmb, _codebookEmb, _slowHead, _fastEmb, _fastOut, _fastNorm, _fastProjIn;
+    private Tensor? _textEmb, _codebookEmb, _slowHead, _fastEmb, _fastOut, _fastNorm, _fastProjIn, _slowNorm;
     private int _disposed;
 
     public FishSpeechDualAr(FishSpeechConfig cfg)
@@ -43,6 +43,7 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         _fastEmb = WhisperOps.EnsureF32(w["fast_embeddings.weight"]);
         _fastOut = WhisperOps.EnsureF32(w["fast_output.weight"]);
         _fastNorm = WhisperOps.EnsureF32(w["fast_norm.weight"]);
+        _slowNorm = WhisperOps.EnsureF32(w["norm.weight"]);   // slow final RMSNorm (for the slow head; the fast model takes the PRE-norm hidden)
         _fastProjIn = w.TryGetValue("fast_project_in.weight", out Tensor? p) ? WhisperOps.EnsureF32(p) : null;
     }
 
@@ -110,10 +111,16 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         StreamingKvCache slowCache, ref uint rng)
     {
         int h = HiddenSize, n = _cfg.NumCodebooks;
-        Tensor hidden = _backbone.ForwardEmbeds(backend, frameEmbed, 1, 1, posStart, slowCache);
+        // norm_fastlayer_input=False: the fast model consumes the PRE-final-norm slow hidden, while the slow head
+        // is applied to the POST-norm hidden (output(norm(x))). So skip the final norm here and apply it only
+        // for the slow head.
+        Tensor hidden = _backbone.ForwardEmbeds(backend, frameEmbed, 1, 1, posStart, slowCache, applyFinalNorm: false);
+        Tensor slowPost = new(hidden.Shape, DType.F32);
+        backend.RmsNorm(slowPost, hidden, _slowNorm!, _cfg.Backbone.RmsNormEps);
 
         // Slow head → semantic token.
-        Tensor slowLogits = WhisperOps.ProjectLinear(backend, hidden, _slowHead!, null, 1, 1, h, _cfg.TextVocab);
+        Tensor slowLogits = WhisperOps.ProjectLinear(backend, slowPost, _slowHead!, null, 1, 1, h, _cfg.TextVocab);
+        slowPost.Dispose();
         int semantic = NucleusSampler.Draw(new Span<float>((void*)slowLogits.DataPointer, _cfg.TextVocab),
             _cfg.TextVocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
         slowLogits.Dispose();
@@ -163,9 +170,33 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         return logits;
     }
 
+    /// <summary>Diagnostics — runs the fast depth transformer over the full codebook axis (slow hidden at
+    /// position 0 + the first N-1 codebook embeddings) and returns the per-position codebook logits
+    /// <c>[1, N, codebook_size]</c>. <paramref name="hidden"/> is the slow PRE-norm hidden.</summary>
+    public Tensor DebugFastLogits(IBackend backend, float[] hidden, int[] prevCodes)
+    {
+        int dim = _cfg.Fast.HiddenSize, n = _cfg.NumCodebooks;
+        Tensor x = new(new TensorShape(1, n, dim), DType.F32);
+        float* xp = (float*)x.DataPointer;
+        for (int c = 0; c < dim; c++) xp[c] = hidden[c];               // pos 0 = slow hidden (fast_project_in = identity)
+        float* fe = (float*)_fastEmb!.DataPointer;
+        for (int i = 0; i < n - 1; i++)
+            for (int c = 0; c < dim; c++) xp[(long)(i + 1) * dim + c] = fe[(long)prevCodes[i] * dim + c];
+
+        using StreamingKvCache cache = new(_cfg.Fast.NumHiddenLayers, 1, _cfg.Fast.NumKeyValueHeads, n + 1, _cfg.Fast.HeadDim);
+        Tensor hid = _fast.ForwardEmbeds(backend, x, 1, n, 0, cache, applyFinalNorm: false);
+        x.Dispose();
+        Tensor normed = new(hid.Shape, DType.F32);
+        backend.RmsNorm(normed, hid, _fastNorm!, _cfg.Fast.RmsNormEps);
+        hid.Dispose();
+        Tensor logits = WhisperOps.ProjectLinear(backend, normed, _fastOut!, null, 1, n, dim, _cfg.CodebookSize);
+        normed.Dispose();
+        return logits;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] own = [_textEmb, _codebookEmb, _slowHead, _fastEmb, _fastOut, _fastNorm, _fastProjIn];
+        Tensor?[] own = [_textEmb, _codebookEmb, _slowHead, _fastEmb, _fastOut, _fastNorm, _fastProjIn, _slowNorm];
         foreach (Tensor? t in own) if (t is not null) yield return t;
         foreach (Tensor t in _backbone.EnumerateWeights()) yield return t;
         foreach (Tensor t in _fast.EnumerateWeights()) yield return t;
