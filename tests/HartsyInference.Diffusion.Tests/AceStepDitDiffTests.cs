@@ -20,6 +20,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Run order: this test (writes weights + C# dumps) → <c>python3 tests/python-reference/dump_ace_step_dit.py</c>
 /// → <c>python3 tests/python-reference/diff_ace_step_layers.py</c>. (Lyric Conformer + BuildContext are validated
 /// separately; here the context is fed directly so the DiT math is isolated.)</summary>
+[Collection("AceStepParity")]
 public unsafe class AceStepDitDiffTests
 {
     private readonly ITestOutputHelper _output;

@@ -8,44 +8,33 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// Same pattern as <see cref="Ideogram4DebugDump"/>.</summary>
 internal static unsafe class AceStepDebugDump
 {
-    private static readonly string? _dumpDir = Resolve();
-    private static bool _initialized;
-    private static readonly object _lock = new();
+    // Resolved per call (NOT cached): the DiT/DCAE/vocoder parity tests each set ACE_STEP_DEBUG_DIR to their own
+    // dir, and a static-cached value would pin whichever test ran first — so the others would dump to the wrong
+    // place and fail. Reading the env each call keeps every test's dumps in its own directory.
+    public static bool Enabled => CurrentDir() is not null;
 
-    public static bool Enabled => _dumpDir is not null;
-
-    private static string? Resolve()
+    private static string? CurrentDir()
     {
         string? dir = Environment.GetEnvironmentVariable("ACE_STEP_DEBUG_DIR");
         return string.IsNullOrEmpty(dir) ? null : dir;
     }
 
-    private static void EnsureInit()
-    {
-        if (_initialized) return;
-        lock (_lock)
-        {
-            if (_initialized) return;
-            if (_dumpDir is not null)
-                Directory.CreateDirectory(Path.Combine(_dumpDir, "layers"));
-            _initialized = true;
-        }
-    }
-
     /// <summary>Writes the tensor's data as raw F32 to <c>{dumpDir}/layers/{safeName}.bin</c>.</summary>
     public static void Dump(string name, Tensor t)
     {
-        if (_dumpDir is null) return;
-        EnsureInit();
-        WriteRawF32(Path.Combine(_dumpDir, "layers", name.Replace('.', '_') + ".bin"), t);
+        string? dir = CurrentDir();
+        if (dir is null) return;
+        Directory.CreateDirectory(Path.Combine(dir, "layers"));
+        WriteRawF32(Path.Combine(dir, "layers", name.Replace('.', '_') + ".bin"), t);
     }
 
     /// <summary>Writes the final velocity at <c>{dumpDir}/output_velocity.bin</c>.</summary>
     public static void DumpOutput(Tensor t)
     {
-        if (_dumpDir is null) return;
-        EnsureInit();
-        WriteRawF32(Path.Combine(_dumpDir, "output_velocity.bin"), t);
+        string? dir = CurrentDir();
+        if (dir is null) return;
+        Directory.CreateDirectory(Path.Combine(dir, "layers"));
+        WriteRawF32(Path.Combine(dir, "output_velocity.bin"), t);
     }
 
     private static void WriteRawF32(string path, Tensor t)

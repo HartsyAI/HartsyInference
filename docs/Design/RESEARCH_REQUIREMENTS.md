@@ -21,6 +21,7 @@ Every area below needs a `docs/Research/` document **before** implementation beg
 | [SPIRV_COMPUTE_SHADERS.md](../Research/SPIRV_COMPUTE_SHADERS.md) | Vulkan / Spirv ✅ |
 | [VULKAN_MEMORY_MANAGEMENT.md](../Research/VULKAN_MEMORY_MANAGEMENT.md) | Vulkan ✅ |
 | [SIMD_INTRINSICS_DOTNET.md](../Research/SIMD_INTRINSICS_DOTNET.md) | Cpu |
+| [MULTI_GPU_PARALLELISM.md](../Research/MULTI_GPU_PARALLELISM.md) ✅ | LLM multi-GPU sharding (Kimi-K2 / DeepSeek-V3 / large MoE across 2-N GPUs) |
 
 ## CPU Kernel Algorithms
 

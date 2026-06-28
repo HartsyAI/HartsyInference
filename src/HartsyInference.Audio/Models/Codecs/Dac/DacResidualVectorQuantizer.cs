@@ -231,9 +231,7 @@ internal sealed unsafe class DacResidualVectorQuantizer
 
     private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
+        return WeightNormFusion.Compose(w, prefix);
     }
 
     /// <summary>L2-normalizes each row of a 2D codebook tensor. Cached once at load time

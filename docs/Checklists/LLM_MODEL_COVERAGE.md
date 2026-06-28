@@ -297,8 +297,8 @@ soft_emb_norm → input_projection → splice 256 embeddings at `<image_soft_tok
 | Mixtral, Qwen3-MoE | 2 | `[~]` build-defer (wired; >12GB) |
 | DeepSeek-V2-Lite | 3 | built + unit-tested; loads but OOMs 12GB GPU at preload |
 | DeepSeek-V3, Kimi-K2 | 3/8a | `[~]` build-defer (MLA + DeepSeek-MoE + V3 sigmoid/group-routing + q-LoRA all done & slice-verified; e2e >12 GB) |
-| Qwen2.5-VL, Gemma-3-vision, LLaVA, MiniCPM-V | 4 | ✅ (small) |
-| Llama-3.2-Vision (11B) | 4/8b | `[~]` gated cross-attn layer done & slice-verified; vision encoder + e2e build-defer |
+| Qwen2.5-VL (3B + 7B), Gemma-3-vision, LLaVA, MiniCPM-V | 4 | ✅ |
+| Llama-3.2-Vision (11B) | 4/8b | ✅ verified e2e (tower cos=1.0; red→red, blue square→blue square) |
 | nomic-embed / bge / MiniLM | 5 | ✅ |
 | GPT-OSS | 5/8c | `[~]` sinks done & slice-verified; 20B+ e2e build-defer |
 
@@ -383,14 +383,17 @@ The config-driven transformer does NOT cover these; each needs new core primitiv
       `DeepseekV3MoE.gate noaux_tc`, maxdiff ≤1e-4) and `MlaTests.Mla_QLora_QueryBlock_MatchesReference`
       (q-LoRA arithmetic vs host reference) + `Mla_QLora_PrefillAndDecode_StayFinite`. Full e2e deferred (671B/1T; the
       only same-family proxy V2-Lite uses softmax/direct-q so it can't exercise V3 routing anyway).
-- [~] **8b. Llama-3.2-Vision (mllama) cross-attention — gated cross-attn layer BUILT + verified; encoder + e2e deferred.**
-      The one genuinely new core primitive, `MllamaCrossAttentionLayer` (Q=text, K/V=vision, bidirectional GQA
-      FlashAttention, q/k RMSNorm, two learned `tanh` scalar gates, gated residual + gated FFN), is built and
-      **numerically verified** (`MllamaCrossAttentionTests`: independent host reference maxdiff ≤1e-4 + the
-      tanh(0)-gate identity no-op property). `MllamaKeyMapper` (registered, maps the `cross_attn_*` + gate keys) and
-      `TransformerConfig.CrossAttnLayers`/`IsCrossAttnLayer` are wired. **Still deferred:** the tiled `MllamaVisionEncoder`
-      (560px ViT, local+global gated layers, multi-layer concat) and the decode-loop integration + the real 11B-Q4 CPU
-      e2e (gated on the user downloading the model + mmproj).
+- [x] **8b. Llama-3.2-Vision (mllama) — VERIFIED e2e on the 3060.** red circle→"red", blue square→"a blue square with
+      a white outline…" (leafspark Q4_K_M + mmproj, low-VRAM). The `MllamaVisionEncoder` (560px ViT, class embd, pre/post
+      tile + dual-gated position embeds, 32 local + 8 gated-global blocks, intermediate-concat `[3,7,15,23,30]`→7680→
+      `mm.0`→4096) is **reference-validated cos=1.000000 on every stage** (`dump_mllama_vision_ref.py`). The
+      `MllamaCrossAttentionLayer` (Q=text, K/V=vision, GQA, q/k RMSNorm, gated residual+FFN) is slice-verified
+      (`MllamaCrossAttentionTests`); the decode loop routes the cross-attn layers `[3,8,13,18,23,28,33,38]` and threads
+      `crossStates` through `ForwardEmbeds`; `MllamaGenerator` runs the splice-free e2e. **Bring-up findings:** Ollama's
+      converter **pre-tanh's all gates** at conversion (and writes `1−tanh` for `position_embd.gate`, splitting HF's
+      single shared gate into two) → the forward multiplies gates directly, no tanh; the clip MLP names are swapped
+      (`ffn_down`=fc1/up); the converter's q/k permute is a no-op since the vision tower has no RoPE. `MllamaKeyMapper`
+      passes the mmproj `v.*`/`mm.*` through (the mmproj is also arch=`mllama`).
 - [x] **8c. GPT-OSS attention sinks — BUILT + verified.** `FlashAttention` gained an optional per-head **sink logit**
       that seeds the softmax denominator (`exp(sink − rowmax)`) but contributes no value (CPU `AttentionReference` +
       `flash_attn_f32.cu` kernel, PTX recompiled), mirroring the Gemma-2 `softcap` plumbing through `IBackend` /
@@ -418,7 +421,7 @@ The config-driven transformer does NOT cover these; each needs new core primitiv
 | 7c hybrid SSM+attn | compose | med | partial |
 | 7d T5/BART seq2seq | new decode path | med | ✅ (small) |
 | 8a DeepSeek-V3 routing+q-LoRA | **done** (slice-verified) | med | ✅ slice / ❌ e2e defer |
-| 8b mllama cross-attn | **layer done** (slice-verified); encoder+e2e defer | high | ✅ layer / ❌ e2e defer |
+| 8b mllama (Llama-3.2-Vision) | **DONE** — tower cos=1.0 + e2e verified | high | ✅ |
 | 8c GPT-OSS sinks | **done** (slice-verified) | low | ✅ slice / ❌ e2e defer |
 | 8d Mixtral/Qwen-MoE/Qwen2.5-VL-7B e2e | verify only | — | ❌ (>12 GB) |
 | 9a–9e serving/quality | infra | varies | ✅ |

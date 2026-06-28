@@ -51,8 +51,14 @@ internal sealed class OobleckDecoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _stemW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.conv1");
-        _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.conv1.bias"]);
+        // Real descript / ACE-Step 1.5 layout is a flat nn.Sequential:
+        //   layers.0            = stem WNConv1d  (latent -> dims[0], k=7)
+        //   layers.{1..n}       = DecoderBlock i  (Sequential: [Snake, WNConvTranspose1d, ResUnit×3])
+        //   layers.{n+1}        = final Snake
+        //   layers.{n+2}        = output WNConv1d (-> audio_channels, k=7, bias=False)
+        // Inside a DecoderBlock: .layers.0 Snake, .layers.1 ConvTranspose, .layers.{2,3,4} ResUnits.
+        _stemW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.0");
+        _stemB = WhisperOps.EnsureF32(w[$"{_prefix}.layers.0.bias"]);
 
         int n = _strides.Length;
         _blockSnakeAlpha = new Tensor?[n];
@@ -62,20 +68,20 @@ internal sealed class OobleckDecoder
         _blockUnits = new OobleckResidualUnit[n][];
         for (int i = 0; i < n; i++)
         {
-            string blk = $"{_prefix}.block.{i}";
-            (_blockSnakeAlpha[i], _blockSnakeBeta[i]) = OobleckOps.LoadSnake(w, $"{blk}.snake1", _dims[i]);
-            _blockUpW[i] = OobleckOps.LoadFusedTransposeWeight(w, $"{blk}.conv_t1");
-            _blockUpB[i] = WhisperOps.EnsureF32(w[$"{blk}.conv_t1.bias"]);
+            string blk = $"{_prefix}.layers.{i + 1}";
+            (_blockSnakeAlpha[i], _blockSnakeBeta[i]) = OobleckOps.LoadSnake(w, $"{blk}.layers.0", _dims[i]);
+            _blockUpW[i] = OobleckOps.LoadFusedTransposeWeight(w, $"{blk}.layers.1");
+            _blockUpB[i] = WhisperOps.EnsureF32(w[$"{blk}.layers.1.bias"]);
             _blockUnits[i] = new OobleckResidualUnit[3];
             for (int j = 0; j < 3; j++)
             {
-                _blockUnits[i][j] = new OobleckResidualUnit($"{blk}.res_unit{j + 1}", _dims[i + 1], dilation: j == 0 ? 1 : j == 1 ? 3 : 9);
+                _blockUnits[i][j] = new OobleckResidualUnit($"{blk}.layers.{j + 2}", _dims[i + 1], dilation: j == 0 ? 1 : j == 1 ? 3 : 9);
                 _blockUnits[i][j].LoadWeights(w);
             }
         }
 
-        (_finalSnakeAlpha, _finalSnakeBeta) = OobleckOps.LoadSnake(w, $"{_prefix}.snake1", _dims[^1]);
-        _outW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.conv2");   // bias=False upstream
+        (_finalSnakeAlpha, _finalSnakeBeta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.{n + 1}", _dims[^1]);
+        _outW = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.{n + 2}");   // bias=False upstream
     }
 
     /// <summary>Forward — latent <c>[B, latent_dim, T]</c> → PCM <c>[B, audio_channels, T · hop]</c>.</summary>

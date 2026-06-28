@@ -23,6 +23,11 @@ public sealed class MllamaKeyMapper : IGgufKeyMapper
         if (ggufKey.Equals("token_embd.weight", StringComparison.Ordinal)) return "model.embed_tokens.weight";
         if (ggufKey.Equals("output_norm.weight", StringComparison.Ordinal)) return "model.norm.weight";
         if (ggufKey.Equals("output.weight", StringComparison.Ordinal)) return "lm_head.weight";
+        if (ggufKey.Equals("rope_freqs.weight", StringComparison.Ordinal)) return "model.rope_freqs.weight";
+        // The companion mmproj GGUF is also arch=mllama: pass its vision tower (`v.*`) + projector (`mm.*`)
+        // tensors through verbatim for the MllamaVisionEncoder.
+        if (ggufKey.StartsWith("v.", StringComparison.Ordinal) || ggufKey.StartsWith("mm.", StringComparison.Ordinal))
+            return ggufKey;
 
         if (ggufKey.StartsWith("blk.", StringComparison.Ordinal))
         {

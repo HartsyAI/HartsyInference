@@ -19,7 +19,7 @@
        which blanks TargetFrameworks and breaks restore with "Invalid framework identifier".) -->
   <PropertyGroup>
     <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix>alpha.39</VersionSuffix>
+    <VersionSuffix>alpha.40</VersionSuffix>
   </PropertyGroup>
 
   <!-- Package metadata shared across all projects -->

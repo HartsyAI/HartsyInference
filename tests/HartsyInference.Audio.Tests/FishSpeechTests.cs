@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.PyTorch;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;
@@ -16,6 +17,41 @@ public sealed unsafe class FishSpeechTests
     private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
+
+    /// <summary>Real-weight Fish-Speech 1.5 DualAR LM: loads <c>model.pth</c> (fused-key Llama, adapted to the
+    /// Qwen2 split layout) and runs the slow + fast forwards, asserting finite logits of the right shape.
+    /// Gated on <c>FISH_CKPT</c>. The slow LM is bit-exact (corr 1.0) and the fast LM corr 0.9999 vs the
+    /// upstream `DualARTransformer` — see PARITY_VERIFICATION; this guards the key adapter + interleaved RoPE.</summary>
+    [Fact]
+    public void RealWeights_DualAr_SlowAndFast_AreFinite()
+    {
+        string? path = Environment.GetEnvironmentVariable("FISH_CKPT");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+
+        FishSpeechConfig cfg = FishSpeechConfig.V1_5;
+        using PytorchPickleLoader ld = new(); ld.Load(path);
+        using FishSpeechDualAr dual = new(cfg); dual.LoadWeights(ld.GetAllTensors());
+        using CpuBackend backend = new();
+
+        int t = 6;
+        int[] sems = new int[t];
+        int[][] codes = new int[t][];
+        for (int i = 0; i < t; i++) { codes[i] = new int[cfg.NumCodebooks]; for (int c = 0; c < cfg.NumCodebooks; c++) codes[i][c] = (i * 13 + c) % cfg.CodebookSize; }
+        using Tensor slow = dual.DebugSlowLogits(backend, sems, codes);
+        Assert.Equal(new TensorShape(1, t, cfg.TextVocab), slow.Shape);
+
+        float[] hid = new float[cfg.Backbone.HiddenSize];
+        for (int i = 0; i < hid.Length; i++) hid[i] = MathF.Sin(i * 0.01f);
+        int[] prev = new int[cfg.NumCodebooks - 1];
+        for (int i = 0; i < prev.Length; i++) prev[i] = (i * 37) % cfg.CodebookSize;
+        using Tensor fast = dual.DebugFastLogits(backend, hid, prev);
+        Assert.Equal(new TensorShape(1, cfg.NumCodebooks, cfg.CodebookSize), fast.Shape);
+
+        float* sp = (float*)slow.DataPointer;
+        for (long i = 0; i < slow.ElementCount; i++) Assert.True(float.IsFinite(sp[i]));
+        float* fp = (float*)fast.DataPointer;
+        for (long i = 0; i < fast.ElementCount; i++) Assert.True(float.IsFinite(fp[i]));
+    }
     private static Tensor F3(int a, int b, int c) => Fill(new Tensor(new TensorShape(a, b, c), DType.F32));
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 

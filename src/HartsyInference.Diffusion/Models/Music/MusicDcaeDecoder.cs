@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Diffusion.Models.Music;
 
@@ -130,6 +131,7 @@ public sealed unsafe class MusicDcaeDecoder
         int deepest = _blockOut[^1];
         Tensor h = Conv3x3(backend, latent, _convInW!, _convInB, deepest);
         AddRepeatInterleaveChannels(h, latent, deepest / _latentChannels);
+        AceStepDebugDump.Dump("dcae.conv_in", h);
 
         for (int i = _stages.Length - 1; i >= 0; i--)
         {
@@ -140,6 +142,7 @@ public sealed unsafe class MusicDcaeDecoder
                 h.Dispose();
                 h = next;
             }
+            AceStepDebugDump.Dump($"dcae.stage.{i}", h);
             // NOTE: blocks run before this stage's own upsample? No — diffusers stores [upsample, blocks...] per stage
             // and executes stages in reverse, so the upsample of stage i fires when ENTERING stage i from stage i+1.
             if (i > 0 && _stages[i - 1].Upsample is UpsampleConv up)
@@ -147,13 +150,16 @@ public sealed unsafe class MusicDcaeDecoder
                 Tensor upsampled = UpsampleInterpolateConv(backend, h, up);
                 h.Dispose();
                 h = upsampled;
+                AceStepDebugDump.Dump($"dcae.upsample.{i - 1}", h);
             }
         }
 
         RmsNormChannels(h, _normOutW!, _normOutB);
+        AceStepDebugDump.Dump("dcae.norm_out", h);
         Relu(h);
         Tensor mel = Conv3x3(backend, h, _convOutW!, _convOutB, _outChannels);
         h.Dispose();
+        AceStepDebugDump.Dump("dcae.conv_out", mel);
         return mel;
     }
 

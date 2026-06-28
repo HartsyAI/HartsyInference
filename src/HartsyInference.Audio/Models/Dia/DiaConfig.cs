@@ -55,7 +55,9 @@ public sealed record DiaConfig
     public float TopP { get; init; } = 0.95f;
     public int TopK { get; init; } = 45;
 
-    public DacConfig Codec { get; init; } = DacConfig.Dac44kHz;
+    // Dia decodes through the descript-native DAC-44kHz checkpoint, whose WNConvTranspose1d uses dim-0
+    // weight-norm (weight_g sized C_in), so compose those over dim 0.
+    public DacConfig Codec { get; init; } = DacConfig.Dac44kHz with { TransposeWeightNormDim0 = true };
 
     public static DiaConfig Dia1_6B => new();
 }

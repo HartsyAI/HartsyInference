@@ -20,8 +20,10 @@ namespace HartsyInference.Diffusion.Tests;
 /// (~13 GB RSS peak) and takes minutes, so it additionally requires <c>HARTSYINFERENCE_RUN_ACE_E2E=1</c>; run it from
 /// a bare terminal, not inside an IDE test runner:
 /// <code>HARTSYINFERENCE_RUN_ACE_E2E=1 dotnet test tests/HartsyInference.Diffusion.Tests -f net10.0 --filter AceStepGenerationTests.Generate</code>
-/// Output lands in <c>Output/ace_step_*.wav</c>. Numeric parity vs the Python reference is still
-/// validation-pending — this proves the plumbing end-to-end on real weights.</summary>
+/// <c>Generate_OnCuda_HighPrecision_WritesWav</c> runs the same pipeline on the 3060 (bf16 + HighPrecisionGemm,
+/// gate <c>HARTSYINFERENCE_RUN_ACE_GPU=1</c>). Output lands in <c>Output/ace_step_*.wav</c>. The three NN components
+/// are numerically parity-verified separately (AceStep{Dit,Dcae,Vocoder}DiffTests, corr ~1.0 vs numpy refs); these
+/// tests prove the plumbing end-to-end on real weights.</summary>
 public unsafe class AceStepGenerationTests
 {
     private readonly ITestOutputHelper _output;
@@ -116,6 +118,73 @@ public unsafe class AceStepGenerationTests
         WriteWavStereo(wavPath, left, right, rate);
         _output.WriteLine($"Wrote {wavPath} ({left.Length / (double)rate:F1}s)");
         Assert.True(left.Length > rate * 5);
+    }
+
+    /// <summary>End-to-end generation on the GPU (RTX 3060 / 12 GB). The DiT/DCAE/vocoder weights stay <b>bf16</b>
+    /// (resident ≈ 7 GB — an F32 cast is 14 GB and will not fit), and <see cref="CudaBackend.HighPrecisionGemm"/> is
+    /// enabled so the bf16-weight × F32-activation GEMMs run at F32 compute (otherwise the latent NaNs over the CFG
+    /// loop). The safetensors loaders are kept alive through Generate because the bf16 weights borrow their mmap.
+    /// Gated by <c>HARTSYINFERENCE_RUN_ACE_GPU=1</c> and a working CUDA device; far faster than the CPU path
+    /// (≈27 s for 4 s / 8 steps on a 3060).</summary>
+    [Fact]
+    public void Generate_OnCuda_HighPrecision_WritesWav()
+    {
+        string root = TestPaths.AceStep.RootDir;
+        if (!Directory.Exists(root)) { _output.WriteLine($"SKIPPED: ACE-Step checkpoint not found at {root}."); return; }
+        if (Environment.GetEnvironmentVariable("HARTSYINFERENCE_RUN_ACE_GPU") != "1")
+        { _output.WriteLine("SKIPPED: set HARTSYINFERENCE_RUN_ACE_GPU=1 (runs the 3.5B DiT on CUDA, needs a GPU)."); return; }
+
+        HartsyInference.Cuda.CudaBackend cuda;
+        try { cuda = new HartsyInference.Cuda.CudaBackend(0, Path.Combine(AppContext.BaseDirectory, "Ptx")); cuda.HighPrecisionGemm = true; }
+        catch (Exception ex) { _output.WriteLine($"SKIPPED: no usable CUDA device ({ex.Message})."); return; }
+
+        using (cuda)
+        {
+            // UMT5 text features (encoded on the GPU like everything else).
+            T5Tokenizer t5Tokenizer = T5Tokenizer.CreateUmt5(maxLength: 256);
+            T5TextEncoder umt5 = new(T5TextEncoderConfig.Umt5Base);
+            SafeTensorsLoader umt5Loader = new();
+            umt5Loader.Load(Path.Combine(TestPaths.AceStep.Umt5BaseDir, "model.safetensors"));
+            umt5.LoadWeights(umt5Loader.GetAllTensors());
+            int[] promptIds = t5Tokenizer.Encode("lo-fi hip hop, mellow piano, calm, 90 BPM");
+            Tensor textBatch = umt5.Encode(cuda, [promptIds]);
+            Tensor textEmbeds = CfgHelper.SliceBatchElement(textBatch, 0, promptIds.Length, 768);
+            textBatch.Dispose();
+
+            AceStepLyricTokenizer lyricTokenizer = new(TestPaths.AceStep.LyricVocabPath, TestPaths.AceStep.LyricMergesPath);
+            int[] lyricIds = lyricTokenizer.TokenizeLyrics("[inst]");
+
+            // Load bf16 (castToF32: false) — keep the loaders alive through Generate (the weights borrow their mmap).
+            (Dictionary<string, Tensor> ditW, SafeTensorsLoader ditLoader) = AceStepCheckpointConverter.LoadTransformer(TestPaths.AceStep.TransformerPath, castToF32: false);
+            using AceStepDit dit = new(AceStepConfig.V1);
+            dit.LoadWeights(ditW);
+
+            (Dictionary<string, Tensor> dcaeW, SafeTensorsLoader dcaeLoader) = AceStepCheckpointConverter.LoadDcae(TestPaths.AceStep.DcaePath, castToF32: false);
+            MusicDcaeDecoder dcae = new();
+            dcae.LoadWeights(dcaeW);
+
+            (Dictionary<string, Tensor> vocW, SafeTensorsLoader vocLoader) = AceStepCheckpointConverter.LoadVocoder(TestPaths.AceStep.VocoderPath, castToF32: false);
+            AdaMosHiFiGanV1 vocoder = new();
+            vocoder.LoadWeights(vocW);
+
+            AceStepPipeline pipeline = new(cuda, dit, dcae, vocoder, AceStepConfig.V1);
+            (float[] left, float[] right, int rate, int seed) = pipeline.Generate(
+                textEmbeds, lyricIds, durationSeconds: 4, steps: 8, guidance: 7f,
+                guidanceMode: AceStepPipeline.GuidanceMode.Cfg, seed: 0,
+                onProgress: p => _output.WriteLine($"step {p.Step}/{p.TotalSteps} ({p.ElapsedMs / 1000:F0}s)"));
+
+            Directory.CreateDirectory(TestPaths.OutputDir);
+            string wavPath = Path.Combine(TestPaths.OutputDir, $"ace_step_gpu_seed{seed}.wav");
+            WriteWavStereo(wavPath, left, right, rate);
+
+            double rms = 0; foreach (float a in left) rms += (double)a * a; rms = Math.Sqrt(rms / left.Length);
+            _output.WriteLine($"Wrote {wavPath} ({left.Length / (double)rate:F1}s, rms={rms:F4})");
+            Assert.All(left, a => Assert.True(float.IsFinite(a)));   // HighPrecisionGemm keeps the loop finite
+            Assert.True(rms > 1e-4, "GPU output is silent");
+            Assert.True(left.Length > rate * 3);
+
+            umt5Loader.Dispose(); ditLoader.Dispose(); dcaeLoader.Dispose(); vocLoader.Dispose();
+        }
     }
 
     private static void WriteWavStereo(string path, float[] left, float[] right, int sampleRate)

@@ -131,8 +131,6 @@ internal sealed unsafe class DacResidualUnit
     /// <c>.conv.conv</c> like EnCodec's SConv1d wrapper).</summary>
     private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
+        return WeightNormFusion.Compose(w, prefix);
     }
 }

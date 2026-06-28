@@ -5,6 +5,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.SafeTensors;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;
@@ -19,6 +20,40 @@ public sealed unsafe class DiaTests
     private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor F(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
+
+    /// <summary>Real-weight Dia-1.6B transformer: byte text → encoder → decoder step (cross-attn + 9-channel
+    /// fused head). Gated on <c>DIA_CKPT</c> (the nari-native <c>model.safetensors</c>). The full encoder +
+    /// decoder are bit-exact (corr 1.0) vs the upstream <c>DiaModel</c> — see PARITY_VERIFICATION; this guards
+    /// the <see cref="DiaWeights"/> DenseGeneral adapter + KV-cache wiring against regressions.</summary>
+    [Fact]
+    public void RealWeights_EncoderDecoderForward_IsFinite()
+    {
+        string? path = Environment.GetEnvironmentVariable("DIA_CKPT");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+
+        DiaConfig cfg = DiaConfig.Dia1_6B;
+        using SafeTensorsLoader ld = new(); ld.Load(path);
+        Dictionary<string, Tensor> w = DiaWeights.Adapt(ld.GetAllTensors());
+        using CpuBackend backend = new();
+
+        using DiaEncoder enc = new(cfg); enc.LoadWeights(w, "encoder");
+        int[] text = [1, 72, 101, 108, 108, 111, 2];
+        using Tensor encOut = enc.Forward(backend, text);
+        Assert.Equal(new TensorShape(1, text.Length, cfg.EncoderDim), encOut.Shape);
+
+        using DiaDecoder dec = new(cfg); dec.LoadWeights(w, "decoder", "decoder.logits_dense.weight");
+        dec.PrecomputeCrossKv(backend, encOut, text.Length);
+        using StreamingKvCache cache = new(cfg.DecoderLayers, 1, cfg.DecoderSelfKvHeads, 8, cfg.HeadDim);
+        int[] bos = new int[cfg.Channels];
+        for (int c = 0; c < cfg.Channels; c++) bos[c] = 1026;   // BOS in every channel
+        for (int step = 0; step < 3; step++)
+        {
+            using Tensor logits = dec.StepLogits(backend, bos, step, cache);
+            Assert.Equal(new TensorShape(1, 1, cfg.Channels * cfg.AudioVocab), logits.Shape);
+            float* lp = (float*)logits.DataPointer;
+            for (long i = 0; i < logits.ElementCount; i++) Assert.True(float.IsFinite(lp[i]));
+        }
+    }
 
     [Fact]
     public void Dia1_6B_EncoderDecoderPresets()

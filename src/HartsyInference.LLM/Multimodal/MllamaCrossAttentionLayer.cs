@@ -23,6 +23,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
 {
     private readonly int _hidden, _numHeads, _numKvHeads, _headDim, _inter;
     private readonly float _rmsEps;
+    private readonly bool _lowVram;
 
     private Tensor _inNorm = null!, _postAttnNorm = null!;
     private Tensor _qW = null!, _kW = null!, _vW = null!, _oW = null!;
@@ -30,10 +31,10 @@ public sealed unsafe class MllamaCrossAttentionLayer
     private Tensor _gateW = null!, _upW = null!, _downW = null!;
     private float _attnGate, _mlpGate;   // raw (pre-tanh) learned scalar gates
 
-    public MllamaCrossAttentionLayer(int hidden, int numHeads, int numKvHeads, int headDim, int intermediate, float rmsEps)
+    public MllamaCrossAttentionLayer(int hidden, int numHeads, int numKvHeads, int headDim, int intermediate, float rmsEps, bool lowVram = false)
     {
         _hidden = hidden; _numHeads = numHeads; _numKvHeads = numKvHeads; _headDim = headDim;
-        _inter = intermediate; _rmsEps = rmsEps;
+        _inter = intermediate; _rmsEps = rmsEps; _lowVram = lowVram;
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
@@ -65,19 +66,19 @@ public sealed unsafe class MllamaCrossAttentionLayer
         backend.RmsNorm(pre, text, _inNorm, _rmsEps);
 
         Tensor q = new(new TensorShape(1, t, hq, d), DType.F32);
-        GenericTransformer.Project(backend, q, pre, _qW, null, lowVram: false);
+        GenericTransformer.Project(backend, q, pre, _qW, null, lowVram: _lowVram);
         pre.Dispose();
         Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
         backend.RmsNorm(qN, q, _qNorm, _rmsEps);   // q-norm over the head dim
         q.Dispose();
 
         Tensor k = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
-        GenericTransformer.Project(backend, k, vision, _kW, null, lowVram: false);
+        GenericTransformer.Project(backend, k, vision, _kW, null, lowVram: _lowVram);
         Tensor kN = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         backend.RmsNorm(kN, k, _kNorm, _rmsEps);
         k.Dispose();
         Tensor v = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
-        GenericTransformer.Project(backend, v, vision, _vW, null, lowVram: false);
+        GenericTransformer.Project(backend, v, vision, _vW, null, lowVram: _lowVram);
 
         // Head-major [1, heads, seq, d] for the GQA FlashAttention (bidirectional: no causal mask).
         Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32); backend.Permute0213(qMh, qN, t, hq, d);
@@ -93,7 +94,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
         backend.Permute0213(attnFlat, attn, hq, t, d);
         attn.Dispose();
         Tensor attnOut = new(flat, DType.F32);
-        GenericTransformer.Project(backend, attnOut, attnFlat, _oW, null, lowVram: false);
+        GenericTransformer.Project(backend, attnOut, attnFlat, _oW, null, lowVram: _lowVram);
         attnFlat.Dispose();
 
         // Gated residual: text + tanh(attn_gate) · attnOut.
@@ -118,19 +119,28 @@ public sealed unsafe class MllamaCrossAttentionLayer
     {
         TensorShape ff = new(1, t, _inter);
         Tensor gate = new(ff, DType.F32);
-        GenericTransformer.Project(backend, gate, x, _gateW, null, lowVram: false);
+        GenericTransformer.Project(backend, gate, x, _gateW, null, lowVram: _lowVram);
         Tensor act = new(ff, DType.F32);
         backend.Silu(act, gate);
         gate.Dispose();
         Tensor up = new(ff, DType.F32);
-        GenericTransformer.Project(backend, up, x, _upW, null, lowVram: false);
+        GenericTransformer.Project(backend, up, x, _upW, null, lowVram: _lowVram);
         Tensor comb = new(ff, DType.F32);
         backend.Mul(comb, act, up);
         act.Dispose(); up.Dispose();
         Tensor outp = new(new TensorShape(1, t, _hidden), DType.F32);
-        GenericTransformer.Project(backend, outp, comb, _downW, null, lowVram: false);
+        GenericTransformer.Project(backend, outp, comb, _downW, null, lowVram: _lowVram);
         comb.Dispose();
         return outp;
+    }
+
+    /// <summary>The loaded weight tensors (for GPU residency / lifetime management by the host transformer).</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        yield return _inNorm; yield return _postAttnNorm;
+        yield return _qW; yield return _kW; yield return _vW; yield return _oW;
+        yield return _qNorm; yield return _kNorm;
+        yield return _gateW; yield return _upW; yield return _downW;
     }
 
     private static float Scalar(Tensor t)

@@ -38,6 +38,20 @@ if (arch == "vlm")
     return HartsyInference.TextGen.Cli.VlmRunner.Run(backendName, genTokens, args.Length > 3 ? args[3] : "What is the main color of this image? Answer in one word.");
 }
 
+// ── mllama vision-tower validation: hartsyinference-textgen mllamavis [backend] ───────────────────────
+// HARTSY_MMPROJ = the mllama mmproj .gguf, HARTSY_MLLAMA_PIXELS = a raw [3,560,560] f32 (e.g. ref_pixels.f32),
+// HARTSY_MLLAMA_DUMP = dir for cs_*.f32 stage dumps to diff against dump_mllama_vision_ref.py.
+if (arch == "mllamavis")
+{
+    return HartsyInference.TextGen.Cli.MllamaVisRunner.Run(backendName);
+}
+
+// ── mllama (Llama-3.2-Vision) e2e: hartsyinference-textgen mllama [backend] [genTokens] ["question"] ──
+if (arch == "mllama")
+{
+    return HartsyInference.TextGen.Cli.MllamaRunner.Run(backendName, genTokens, args.Length > 3 ? args[3] : "What color is the shape in this image? Answer in one word.");
+}
+
 // ── Embedding mode: hartsyinference-textgen embed [backend] [_] ["text"] ──────────────────────────
 // HARTSY_MODEL_DIR = a BERT-family embedding .gguf (bge / all-MiniLM / nomic). HARTSY_EMBED_IDS (comma-separated
 // token ids incl. [CLS]/[SEP]) feeds exact ids for reference parity; HARTSY_EMBED_DUMP writes the embedding f32.

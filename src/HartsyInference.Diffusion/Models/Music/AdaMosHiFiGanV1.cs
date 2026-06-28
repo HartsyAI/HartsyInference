@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Diffusion.Models.Music;
 
@@ -144,13 +145,16 @@ public sealed unsafe class AdaMosHiFiGanV1
                 h.Dispose();
                 h = next;
             }
+            AceStepDebugDump.Dump($"voc.stage.{i}", h);
         }
         LayerNormChannels(h, _backboneNormW!, _backboneNormB);
+        AceStepDebugDump.Dump("voc.backbone_norm", h);
 
         // HiFi-GAN head.
         int preK = (int)_convPreW!.Shape[2];
         Tensor cur = Conv(backend, h, _convPreW, _convPreB, (int)_convPreW.Shape[0], t, pad: preK / 2);
         h.Dispose();
+        AceStepDebugDump.Dump("voc.conv_pre", cur);
         int numKernels = _resblockKernels.Length;
         for (int i = 0; i < _upsampleRates.Length; i++)
         {
@@ -164,6 +168,7 @@ public sealed unsafe class AdaMosHiFiGanV1
             Tensor up = new Tensor(new TensorShape(1, outC, tOut), DType.F32);
             backend.ConvTranspose1d(up, cur, uw, ub, rate, pad, pad, 1, 1);
             cur.Dispose();
+            AceStepDebugDump.Dump($"voc.upsample.{i}", up);
 
             // Multi-receptive-field fusion: average of the per-kernel resblocks.
             Tensor sum = new Tensor(up.Shape, DType.F32);
@@ -181,6 +186,7 @@ public sealed unsafe class AdaMosHiFiGanV1
             float* smp = (float*)sum.DataPointer;
             for (long e = 0; e < sum.Shape.ElementCount; e++) smp[e] *= invK;
             cur = sum;
+            AceStepDebugDump.Dump($"voc.mrf.{i}", cur);
         }
         backend.Silu(cur, cur);
         int postK = (int)_convPostW!.Shape[2];
@@ -188,6 +194,7 @@ public sealed unsafe class AdaMosHiFiGanV1
         cur.Dispose();
         float* wp = (float*)wav.DataPointer;
         for (long e = 0; e < wav.Shape.ElementCount; e++) wp[e] = MathF.Tanh(wp[e]);
+        AceStepDebugDump.Dump("voc.waveform", wav);
         return wav;
     }
 

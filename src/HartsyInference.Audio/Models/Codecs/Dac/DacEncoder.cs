@@ -182,8 +182,6 @@ internal sealed unsafe class DacEncoder
 
     private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
-        Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
-        return WeightNormFusion.Fuse(g, v);
+        return WeightNormFusion.Compose(w, prefix);
     }
 }

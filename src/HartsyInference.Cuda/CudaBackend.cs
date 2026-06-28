@@ -69,6 +69,12 @@ public sealed class CudaBackend : IBackend
     /// <summary>Opt-in flag for fusing the Linear bias add into the cuBLASLt GEMM epilogue (works on every targeted SM, including the RTX 3060). Defaults to <c>false</c> until benchmarked on hardware; when on, a Linear with bias runs as a single <c>cublasLtMatmul</c> instead of <c>cublasGemmEx</c> + a separate <c>BiasAdd</c> launch. The result is numerically equivalent to the unfused path.</summary>
     public bool EnableEpilogueFusion { get; set; }
 
+    /// <summary>Opt-in: run mixed bf16/f32 GEMMs at F32 compute precision (cast the bf16 weight UP to F32 rather
+    /// than truncating the F32 activation DOWN to bf16). Default <c>false</c> preserves the bf16 Tensor-Core fast
+    /// path. Turn ON for precision-sensitive models whose bf16 weights stay resident to fit VRAM but whose
+    /// activations must keep full F32 mantissa across many layers/steps (e.g. ACE-Step's 3.5B DiT on a 12 GB 3060).</summary>
+    public bool HighPrecisionGemm { get; set; }
+
     /// <summary>Lazily-initialized general-precision cuBLASLt GEMM executor used by the epilogue-fusion path.</summary>
     public LtGemmExecutor LtGemm
     {
@@ -314,12 +320,16 @@ public sealed class CudaBackend : IBackend
             // compute it once and cache it. Re-casting the whole 9.3B weight set per Linear per step was the
             // dominant cost on the fp8 path (GEMMs themselves are tensor-core). pWeightCast stays 0 when the
             // cached copy is used so the finally block won't free the persistent cast.
+            // HighPrecisionGemm upcasts a bf16 weight to F32 for the GEMM. Caching that cast would keep a full
+            // F32 copy of every weight resident (≈2× the bf16 footprint — 14 GB for a 3.5B DiT, OOM on a 12 GB
+            // 3060). Force the transient path so only one weight is F32 at a time, freed each call.
+            bool hipUpcast = HighPrecisionGemm && weight.DType == DType.BF16 && gemmDtype == DType.F32;
             ulong weightPtr;
             if (weight.DType == gemmDtype)
             {
                 weightPtr = pWeight;
             }
-            else if (cacheWeightCast && GpuTransferHelper.IsWeightCached(weight))
+            else if (cacheWeightCast && !hipUpcast && GpuTransferHelper.IsWeightCached(weight))
             {
                 if (!GpuTransferHelper.TryGetWeightCast(weight, out weightPtr))
                 {
@@ -1855,25 +1865,29 @@ public sealed class CudaBackend : IBackend
     public void Conv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
-        if (input.DType != DType.F32 || weight.DType != DType.F32)
-            throw new NotSupportedException($"CUDA Conv1d currently supports F32 only — got input {input.DType}, weight {weight.DType}.");
+        if (output.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Conv1d writes F32 output — got output {output.DType}.");
         _context.EnsureCurrent();
         EnsureKernels();
 
         int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
         int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2], kernel = (int)weight.Shape[2];
 
-        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        // The conv1d_f32 kernel is F32; bf16/f16 inputs (e.g. ACE-Step's GLUMBConv on bf16 weights) are cast on-device.
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0, inCast = 0, wCast = 0, bCast = 0;
         bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
             pW = GpuTransferHelper.CopyToDevice(weight);
             pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
+            ulong inF32 = CastIfNeeded(pIn, input.DType, DType.F32, (int)input.ElementCount, out inCast);
+            ulong wF32 = CastIfNeeded(pW, weight.DType, DType.F32, (int)weight.ElementCount, out wCast);
+            ulong bF32 = bias is null ? 0 : CastIfNeeded(pB, bias.DType, DType.F32, (int)bias.ElementCount, out bCast);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchConv1d(pOut, pIn, pW, pB, batch, cIn, cOut, tIn, tOut, kernel,
+            _kernels!.LaunchConv1d(pOut, inF32, wF32, bF32, batch, cIn, cOut, tIn, tOut, kernel,
                 stride, padLeft, dilation, groups, bias is null ? 0 : 1, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -1885,14 +1899,17 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             if (pB != 0) GpuTransferHelper.FreeDevice(pB);
+            if (inCast != 0) CudaMemory.FreeAsync(inCast, _stream.Handle);
+            if (wCast != 0) CudaMemory.FreeAsync(wCast, _stream.Handle);
+            if (bCast != 0) CudaMemory.FreeAsync(bCast, _stream.Handle);
         }
     }
 
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
-        if (input.DType != DType.F32 || weight.DType != DType.F32)
-            throw new NotSupportedException($"CUDA ConvTranspose1d currently supports F32 only — got input {input.DType}, weight {weight.DType}.");
+        if (output.DType != DType.F32)
+            throw new NotSupportedException($"CUDA ConvTranspose1d writes F32 output — got output {output.DType}.");
         if (groups != 1)
             throw new NotSupportedException($"CUDA ConvTranspose1d currently supports groups=1 only — got groups={groups}; use CpuBackend for grouped transposed convs.");
         _context.EnsureCurrent();
@@ -1902,17 +1919,21 @@ public sealed class CudaBackend : IBackend
         int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
         int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2], kernel = (int)weight.Shape[2];
 
-        ulong pOut = 0, pIn = 0, pW = 0, pB = 0;
+        // The conv_transpose1d_f32 kernel is F32; bf16/f16 inputs are cast on-device first.
+        ulong pOut = 0, pIn = 0, pW = 0, pB = 0, inCast = 0, wCast = 0, bCast = 0;
         bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
             pW = GpuTransferHelper.CopyToDevice(weight);
             pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
+            ulong inF32 = CastIfNeeded(pIn, input.DType, DType.F32, (int)input.ElementCount, out inCast);
+            ulong wF32 = CastIfNeeded(pW, weight.DType, DType.F32, (int)weight.ElementCount, out wCast);
+            ulong bF32 = bias is null ? 0 : CastIfNeeded(pB, bias.DType, DType.F32, (int)bias.ElementCount, out bCast);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchConvTranspose1d(pOut, pIn, pW, pB, batch, cIn, cOut, tIn, tOut, kernel,
+            _kernels!.LaunchConvTranspose1d(pOut, inF32, wF32, bF32, batch, cIn, cOut, tIn, tOut, kernel,
                 stride, padLeft, dilation, bias is null ? 0 : 1, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -1924,6 +1945,9 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             if (pB != 0) GpuTransferHelper.FreeDevice(pB);
+            if (inCast != 0) CudaMemory.FreeAsync(inCast, _stream.Handle);
+            if (wCast != 0) CudaMemory.FreeAsync(wCast, _stream.Handle);
+            if (bCast != 0) CudaMemory.FreeAsync(bCast, _stream.Handle);
         }
     }
 
@@ -2130,6 +2154,8 @@ public sealed class CudaBackend : IBackend
             return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
         }
         if (a == DType.F16 || b == DType.F16) return DType.F16;
+        if (HighPrecisionGemm && (a == DType.BF16 || b == DType.BF16) && (a == DType.F32 || b == DType.F32))
+            return DType.F32;
         if (a == DType.BF16 || b == DType.BF16) return DType.BF16;
         return a == DType.F32 || b == DType.F32 ? DType.F32 : a;
     }
@@ -2146,7 +2172,7 @@ public sealed class CudaBackend : IBackend
             castOut = 0;
             return srcPtr;
         }
-        castOut = CudaMemory.Allocate((nuint)(elementCount * dstDtype.SizeInBytes));
+        castOut = CudaMemory.Allocate((nuint)((long)elementCount * dstDtype.SizeInBytes));
         CastOnGpu(castOut, srcPtr, srcDtype, dstDtype, elementCount);
         return castOut;
     }
@@ -2164,7 +2190,7 @@ public sealed class CudaBackend : IBackend
         }
         if (srcDtype.IsQuantized && dstDtype == DType.F32)
         {
-            ulong tempF16 = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
+            ulong tempF16 = CudaMemory.Allocate((nuint)((long)count * DType.F16.SizeInBytes));
             try
             {
                 LaunchGgufDequantToF16(tempF16, input, srcDtype, count);
@@ -2179,8 +2205,8 @@ public sealed class CudaBackend : IBackend
         if (srcDtype.IsQuantized && dstDtype == DType.BF16)
         {
             // quant → F16 → F32 → BF16. F32 staging needed because BF16 conversion goes through F32 in our kernel set.
-            ulong tempF16 = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
-            ulong tempF32 = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            ulong tempF16 = CudaMemory.Allocate((nuint)((long)count * DType.F16.SizeInBytes));
+            ulong tempF32 = CudaMemory.Allocate((nuint)((long)count * DType.F32.SizeInBytes));
             try
             {
                 LaunchGgufDequantToF16(tempF16, input, srcDtype, count);
@@ -2202,7 +2228,7 @@ public sealed class CudaBackend : IBackend
         else if (srcDtype.IsFp8 && dstDtype == DType.F32)
         {
             // F8 → F16 → F32 (two-step via temp buffer)
-            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
+            ulong temp = CudaMemory.Allocate((nuint)((long)count * DType.F16.SizeInBytes));
             _kernels!.LaunchCastF8E4M3ToF16(temp, input, count, _stream.Handle);
             _kernels!.LaunchCastF16ToF32(output, temp, count, _stream.Handle);
             CudaMemory.FreeAsync(temp, _stream.Handle);
@@ -2212,7 +2238,7 @@ public sealed class CudaBackend : IBackend
             // F8 → F32 → BF16 (the values FP8 represents are within F16 range, so we could go
             // F8→F16 first, but the F16→BF16 path also goes via F32; folding them avoids a
             // redundant intermediate). FP8 max ≈ 448, well within BF16's range.
-            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            ulong temp = CudaMemory.Allocate((nuint)((long)count * DType.F32.SizeInBytes));
             // F8 → F32 (re-uses the two-step F8→F16→F32 ladder via recursion).
             CastOnGpu(temp, input, srcDtype, DType.F32, count);
             _kernels!.LaunchCastF32ToBf16(output, temp, count, _stream.Handle);
@@ -2224,8 +2250,8 @@ public sealed class CudaBackend : IBackend
             // Going through F32 then F16 catches saturation at the F16 stage (which clips to ±Inf,
             // then the F16→F8 stage maps Inf to FP8's NaN encoding — so over-range values are
             // marked rather than wrapping silently).
-            ulong temp32 = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
-            ulong temp16 = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
+            ulong temp32 = CudaMemory.Allocate((nuint)((long)count * DType.F32.SizeInBytes));
+            ulong temp16 = CudaMemory.Allocate((nuint)((long)count * DType.F16.SizeInBytes));
             _kernels!.LaunchCastBf16ToF32(temp32, input, count, _stream.Handle);
             _kernels!.LaunchCastF32ToF16(temp16, temp32, count, _stream.Handle);
             _kernels!.LaunchCastF16ToF8E4M3(output, temp16, count, _stream.Handle);
@@ -2239,7 +2265,7 @@ public sealed class CudaBackend : IBackend
         else if (srcDtype == DType.F32 && dstDtype.IsFp8)
         {
             // F32 → F16 → F8 (two-step via temp buffer)
-            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F16.SizeInBytes));
+            ulong temp = CudaMemory.Allocate((nuint)((long)count * DType.F16.SizeInBytes));
             _kernels!.LaunchCastF32ToF16(temp, input, count, _stream.Handle);
             _kernels!.LaunchCastF16ToF8E4M3(output, temp, count, _stream.Handle);
             CudaMemory.FreeAsync(temp, _stream.Handle);
@@ -2251,7 +2277,7 @@ public sealed class CudaBackend : IBackend
         else if (srcDtype == DType.BF16 && dstDtype == DType.F16)
         {
             // BF16 → F32 → F16 (lossy via temp F32 buffer)
-            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            ulong temp = CudaMemory.Allocate((nuint)((long)count * DType.F32.SizeInBytes));
             _kernels!.LaunchCastBf16ToF32(temp, input, count, _stream.Handle);
             _kernels!.LaunchCastF32ToF16(output, temp, count, _stream.Handle);
             CudaMemory.FreeAsync(temp, _stream.Handle);
@@ -2259,7 +2285,7 @@ public sealed class CudaBackend : IBackend
         else if (srcDtype == DType.F16 && dstDtype == DType.BF16)
         {
             // F16 → F32 → BF16 (round-trip via F32)
-            ulong temp = CudaMemory.Allocate((nuint)(count * DType.F32.SizeInBytes));
+            ulong temp = CudaMemory.Allocate((nuint)((long)count * DType.F32.SizeInBytes));
             _kernels!.LaunchCastF16ToF32(temp, input, count, _stream.Handle);
             _kernels!.LaunchCastF32ToBf16(output, temp, count, _stream.Handle);
             CudaMemory.FreeAsync(temp, _stream.Handle);

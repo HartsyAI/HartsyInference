@@ -46,7 +46,7 @@ public sealed class OobleckVae : IAudioLatentDecoder, IAudioLatentEncoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _decoder.LoadWeights(w);
-        if (w.ContainsKey("encoder.conv1.weight_g"))
+        if (w.ContainsKey("encoder.layers.0.weight_g"))
         {
             _encoder = new OobleckEncoder(_config, "encoder");
             _encoder.LoadWeights(w);

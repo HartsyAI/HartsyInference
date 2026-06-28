@@ -91,6 +91,15 @@ public sealed unsafe class GenericTransformer : IDisposable
         return z;
     }
 
+    /// <summary>Returns an owned copy of <paramref name="hidden"/> (used to pass a layer through unchanged, e.g. an
+    /// mllama cross-attention layer with no image present).</summary>
+    private static Tensor CopyHidden(IBackend backend, Tensor hidden)
+    {
+        Tensor copy = new(hidden.Shape, DType.F32);
+        backend.CopyTo(copy, hidden);
+        return copy;
+    }
+
     /// <summary>Normalizes <paramref name="input"/> with <paramref name="weight"/> using LayerNorm (mean-centered,
     /// Cohere) or RMSNorm (everything else).</summary>
     private static void Normalize(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool layerNorm, float eps)
@@ -158,7 +167,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// is true (else the raw last-layer hidden). <paramref name="posStart"/> = <see cref="IKvCache.CurrentLength"/>.
     /// The cache advances once per call (after the layers run), matching the reference decoder.</summary>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
-        bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null)
+        bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null,
+        Tensor? crossStates = null, int crossLen = 0)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;
@@ -191,9 +201,21 @@ public sealed unsafe class GenericTransformer : IDisposable
                 bool global = _cfg.IsGlobalLayer(i);
                 Tensor lc = global ? cos : cosLocal ?? cos;
                 Tensor ls = global ? sin : sinLocal ?? sin;
-                Tensor next = _cfg.Mla is not null
-                    ? _layers[i].MlaForward(backend, hidden, t, posStart, cache, i, cos, sin)
-                    : _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls);
+                Tensor next;
+                if (_cfg.IsCrossAttnLayer(i))
+                {
+                    // mllama: cross-attend the vision features. With no image present the layer is skipped (HF masks
+                    // it out), so the hidden state passes through unchanged.
+                    next = crossStates is not null
+                        ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen)
+                        : CopyHidden(backend, hidden);
+                }
+                else
+                {
+                    next = _cfg.Mla is not null
+                        ? _layers[i].MlaForward(backend, hidden, t, posStart, cache, i, cos, sin)
+                        : _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls);
+                }
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
@@ -402,6 +424,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _qAProj, _qANorm, _qBProj;      // MLA q-LoRA: Q down-proj (+norm) and up-proj (DeepSeek-V3/Kimi)
         private Tensor? _gateW, _upW, _downW;
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
+        private Multimodal.MllamaCrossAttentionLayer? _crossAttn;   // non-null on mllama gated cross-attention layers
 
         public Layer(TransformerConfig cfg) => _cfg = cfg;
 
@@ -410,6 +433,15 @@ public sealed unsafe class GenericTransformer : IDisposable
             // Norms and biases are forced to F32; projection weights keep their loaded dtype (quant or float)
             // so the matmul backend can dequant-on-the-fly (or run a fused quantized GEMV) without an F32 copy.
             bool addOne = _cfg.RmsNormAddOne;
+            // mllama gated cross-attention layer (Llama-3.2-Vision): a self-contained block that reads vision
+            // features instead of the causal text K/V. Loads its own weights and skips the self-attn/FFN path.
+            if (_cfg.IsCrossAttnLayer(layerIndex))
+            {
+                _crossAttn = new Multimodal.MllamaCrossAttentionLayer(
+                    _cfg.HiddenSize, _cfg.NumHeads, _cfg.NumKvHeads, _cfg.HeadDim, _cfg.IntermediateSize, _cfg.RmsNormEps, _cfg.LowVramQuant);
+                _crossAttn.LoadWeights(w, prefix);
+                return;
+            }
             _inNorm = LoadNorm(w[$"{prefix}.input_layernorm.weight"], addOne);
             if (_cfg.UseLayerNorm) _normBias = ZeroBias(_cfg.HiddenSize);
             if (_cfg.ParallelResidual)
@@ -518,7 +550,14 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _sink, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
+            if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
         }
+
+        /// <summary>mllama gated cross-attention forward: reads the encoded <paramref name="vision"/> features
+        /// (<c>[1, L, hidden]</c>) instead of the causal text K/V. Used at the cross-attention layer indices; the
+        /// self-attention <see cref="Forward"/> path is bypassed for these layers.</summary>
+        public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen)
+            => _crossAttn!.Forward(backend, hidden, t, vision, visionLen);
 
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
             IKvCache cache, int layerIndex, Tensor cos, Tensor sin)

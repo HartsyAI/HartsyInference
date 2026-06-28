@@ -17,6 +17,16 @@ namespace HartsyInference.Audio.Models.Codecs;
 /// disposed.</para></summary>
 public static unsafe class WeightNormFusion
 {
+    /// <summary>Loads a (possibly weight-normed) conv weight at <paramref name="prefix"/>: fuses
+    /// <c>weight_g</c>+<c>weight_v</c> when present, otherwise returns the already-fused <c>weight</c>
+    /// (checkpoints with weight-norm removed, e.g. the HuggingFace <c>descript/dac_44khz</c> export).</summary>
+    public static Tensor Compose(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g))
+            return Fuse(g, w[$"{prefix}.weight_v"]);
+        return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
+    }
+
     public static Tensor Fuse(Tensor weightG, Tensor weightV)
     {
         // fp16 checkpoints (e.g. GPT-SoVITS s2) store weight_norm params in F16 — cast up before fusing.

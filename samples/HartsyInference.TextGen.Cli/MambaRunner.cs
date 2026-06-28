@@ -28,7 +28,7 @@ public static class MambaRunner
 
         float[] logits = model.ForwardLastLogits(backend, ids);
         int argmax = 0; for (int i = 1; i < logits.Length; i++) if (logits[i] > logits[argmax]) argmax = i;
-        var top5 = logits.Select((v, i) => (i, v)).OrderByDescending(t => t.v).Take(5).ToArray();
+        (int i, float v)[] top5 = logits.Select((v, i) => (i, v)).OrderByDescending(t => t.v).Take(5).ToArray();
         Console.WriteLine($"  argmax token = {argmax} (logit {logits[argmax]:F4})");
         Console.WriteLine($"  top5 = [{string.Join(", ", top5.Select(t => $"{t.i}:{t.v:F3}"))}]");
 

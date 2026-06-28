@@ -126,11 +126,22 @@ public static class VlmRunner
         return img;
     }
 
-    /// <summary>True if the mmproj is a Qwen2.5-VL merger (filename heuristic for the harness; production detects via
-    /// the <c>clip.projector_type=qwen2.5vl_merger</c> metadata).</summary>
+    /// <summary>True if the mmproj is a Qwen2.5-VL merger. Detects via the <c>clip.projector_type</c> metadata
+    /// (robust to arbitrary file names like unsloth's <c>mmproj-F16.gguf</c>), falling back to the filename.</summary>
     private static bool IsQwen25Vl(string mmprojPath)
-        => Path.GetFileName(mmprojPath).Replace(".", "").Replace("-", "").Contains("qwen25vl", StringComparison.OrdinalIgnoreCase)
-        || Path.GetFileName(mmprojPath).Contains("Qwen2.5-VL", StringComparison.OrdinalIgnoreCase);
+    {
+        try
+        {
+            using ModelHandler.Gguf.GgufLoader probe = new();
+            probe.Load(mmprojPath);
+            string proj = (probe.Metadata.GetString("clip.projector_type") ?? "").ToLowerInvariant();
+            if (proj.Contains("qwen")) return true;                 // qwen2.5vl_merger / qwen2vl_merger
+            if (proj.Length > 0) return false;                      // a known non-Qwen projector → trust it
+        }
+        catch { /* fall through to the filename heuristic */ }
+        return Path.GetFileName(mmprojPath).Replace(".", "").Replace("-", "").Contains("qwen25vl", StringComparison.OrdinalIgnoreCase)
+            || Path.GetFileName(mmprojPath).Contains("Qwen2.5-VL", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static int[]? ParseColor(string? s)
     {

@@ -17,8 +17,10 @@ namespace HartsyInference.Audio.Models.Codecs.Oobleck;
 /// <c>alpha</c>/<c>beta</c> parameters of shape <c>[1, dim, 1]</c> — both are exponentiated once at
 /// load time, then fed to <see cref="IBackend.Snake"/>'s snake-beta path (divisor = beta + ε).</para>
 ///
-/// <para>State-dict keys: <c>{prefix}.snake1.{alpha,beta}</c>, <c>{prefix}.conv1.{weight_g,weight_v,bias}</c>,
-/// <c>{prefix}.snake2.{alpha,beta}</c>, <c>{prefix}.conv2.{weight_g,weight_v,bias}</c>.</para></summary>
+/// <para>State-dict keys (real ACE-Step 1.5 / descript <c>nn.Sequential</c> layout — the residual
+/// unit is itself a <c>Sequential</c> of [Snake, WNConv1d k=7, Snake, WNConv1d k=1]):
+/// <c>{prefix}.layers.0.{alpha,beta}</c>, <c>{prefix}.layers.1.{weight_g,weight_v,bias}</c>,
+/// <c>{prefix}.layers.2.{alpha,beta}</c>, <c>{prefix}.layers.3.{weight_g,weight_v,bias}</c>.</para></summary>
 internal sealed class OobleckResidualUnit
 {
     private const int Kernel = 7;
@@ -41,12 +43,12 @@ internal sealed class OobleckResidualUnit
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        (_snake1Alpha, _snake1Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.snake1", _dim);
-        _conv1W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.conv1");
-        _conv1B = WhisperOps.EnsureF32(w[$"{_prefix}.conv1.bias"]);
-        (_snake2Alpha, _snake2Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.snake2", _dim);
-        _conv2W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.conv2");
-        _conv2B = WhisperOps.EnsureF32(w[$"{_prefix}.conv2.bias"]);
+        (_snake1Alpha, _snake1Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.0", _dim);
+        _conv1W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.1");
+        _conv1B = WhisperOps.EnsureF32(w[$"{_prefix}.layers.1.bias"]);
+        (_snake2Alpha, _snake2Beta) = OobleckOps.LoadSnake(w, $"{_prefix}.layers.2", _dim);
+        _conv2W = OobleckOps.LoadFusedWeight(w, $"{_prefix}.layers.3");
+        _conv2B = WhisperOps.EnsureF32(w[$"{_prefix}.layers.3.bias"]);
     }
 
     /// <summary>Forward — channels-first <c>[B, dim, T]</c>. Returns a fresh tensor; input is NOT disposed.</summary>

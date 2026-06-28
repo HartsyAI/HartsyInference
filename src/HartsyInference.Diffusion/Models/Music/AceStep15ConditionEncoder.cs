@@ -63,22 +63,32 @@ public sealed unsafe class AceStep15ConditionEncoder
     /// <paramref name="textHidden"/> and <paramref name="lyricHidden"/> are per-token Qwen3-Embedding-0.6B states
     /// <c>[T, 1024]</c>; <paramref name="timbreLatent"/> is a reference-audio Oobleck latent <c>[T_ref, 64]</c>
     /// (time-major), null for plain text-to-music.</summary>
+    /// <summary>Validates a hidden-states tensor as [T, hidden] or [1, T, hidden] (the latter is what
+    /// <c>CfgHelper.SliceBatchElement</c> emits) and returns the sequence length T.</summary>
+    private static int SeqLen(Tensor t, int hidden, string param, string label)
+    {
+        int rank = t.Shape.Rank;
+        bool ok = (rank == 2 && (int)t.Shape[1] == hidden)
+               || (rank == 3 && (int)t.Shape[0] == 1 && (int)t.Shape[2] == hidden);
+        if (!ok)
+            throw new ArgumentException($"{label} states must be [T, {hidden}] (or [1, T, {hidden}]); got {t.Shape}.", param);
+        return (int)t.Shape[rank - 2];
+    }
+
     public Tensor EncodeConditions(IBackend backend, Tensor textHidden, Tensor? lyricHidden, Tensor? timbreLatent)
     {
-        if (textHidden.Shape.Rank != 2 || (int)textHidden.Shape[1] != _c.TextHiddenDim)
-            throw new ArgumentException($"text states must be [T, {_c.TextHiddenDim}]; got {textHidden.Shape}.", nameof(textHidden));
+        // Accept [T, H] or the [1, T, H] that CfgHelper.SliceBatchElement produces (the standard upstream
+        // path: qwen.Encode → SliceBatchElement). backend.Linear runs on the flat buffer, so no reshape needed.
+        int tText = SeqLen(textHidden, _c.TextHiddenDim, nameof(textHidden), "text");
         int dim = _c.HiddenSize;
-        int tText = (int)textHidden.Shape[0];
 
         Tensor text = new Tensor(new TensorShape(1, tText, dim), DType.F32);
         backend.Linear(text, textHidden, _textProjW!, null);
 
         Tensor? lyric = null;
-        if (lyricHidden is not null && lyricHidden.Shape[0] > 0)
+        if (lyricHidden is not null && (lyricHidden.Shape.Rank == 2 ? lyricHidden.Shape[0] : lyricHidden.Shape[1]) > 0)
         {
-            if (lyricHidden.Shape.Rank != 2 || (int)lyricHidden.Shape[1] != _c.TextHiddenDim)
-                throw new ArgumentException($"lyric states must be [L, {_c.TextHiddenDim}]; got {lyricHidden.Shape}.", nameof(lyricHidden));
-            int l = (int)lyricHidden.Shape[0];
+            int l = SeqLen(lyricHidden, _c.TextHiddenDim, nameof(lyricHidden), "lyric");
             Tensor embedded = new Tensor(new TensorShape(1, l, dim), DType.F32);
             backend.Linear(embedded, lyricHidden, _lyricEmbedW!, _lyricEmbedB);
             lyric = RunEncoder(backend, embedded, _lyricLayers, _lyricNorm!);

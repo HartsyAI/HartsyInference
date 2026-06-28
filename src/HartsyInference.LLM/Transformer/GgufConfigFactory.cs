@@ -83,6 +83,19 @@ public static class GgufConfigFactory
         // GPT-OSS: MoE decoder with learned per-head attention sinks (a logit in the softmax denominator that
         // carries no value). Sigmoid routing + the o200k tokenizer come from the existing MoE/tokenizer paths.
         bool isGptOss = arch is "gpt-oss" or "gptoss";
+
+        // mllama (Llama-3.2-Vision): some decoder layers are gated cross-attention (read vision features) instead
+        // of causal self-attention. Detect them by tensor presence (robust to the Ollama-converter metadata
+        // naming) — any layer carrying a cross_attn q-projection is a cross-attention layer.
+        System.Collections.Immutable.ImmutableHashSet<int> crossAttnLayers =
+            System.Collections.Immutable.ImmutableHashSet<int>.Empty;
+        if (arch == "mllama")
+        {
+            System.Collections.Immutable.ImmutableHashSet<int>.Builder b = System.Collections.Immutable.ImmutableHashSet.CreateBuilder<int>();
+            for (int i = 0; i < layers; i++)
+                if (weights.ContainsKey($"model.layers.{i}.cross_attn.q_proj.weight")) b.Add(i);
+            crossAttnLayers = b.ToImmutable();
+        }
         float logitScale = isGranite ? metadata.GetFloat32($"{arch}.logit_scale", 1f)
             : isCohere ? 1f / metadata.GetFloat32($"{arch}.logit_scale", 1f)
             : 1f;
@@ -172,7 +185,7 @@ public static class GgufConfigFactory
             //     (interleaved adjacent pairs 2i,2i+1) reproduces HF rotate_half → we must apply Interleaved.
             //   - qwen2/qwen3: no permute, ggml uses NEOX rope (split-half pairs i,i+half) → SplitHalf.
             // Using the wrong pairing leaves attention rotating mismatched dimensions → coherent-looking garbage.
-            Rope = arch is "llama" or "cohere2" or "command-r" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
+            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
             RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
             // Gemma family (all default to no-op for Qwen/Llama).
@@ -196,6 +209,7 @@ public static class GgufConfigFactory
             AttnLogitSoftcap = attnCap,
             FinalLogitSoftcap = finalCap,
             AttnSink = isGptOss,
+            CrossAttnLayers = crossAttnLayers,
             Moe = moe,
         };
     }

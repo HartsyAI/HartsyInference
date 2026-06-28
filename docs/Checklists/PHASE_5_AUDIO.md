@@ -183,7 +183,10 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] `vocos-mel-24khz` vocoder — [`Vocos.cs`](../../src/HartsyInference.Audio/Models/Vocoders/Vocos.cs): Conv embed → 8 ConvNeXt blocks → mag/phase head → iSTFT
 - **Validated:** `F5TtsSmokeTests` + `F5ForwardLiveTest` (skip/early-exit when checkpoint absent).
 
-### Dia-1.6B (Nari Labs) — BUILT (structural, synthetic-forward verified); checkpoint-gated
+### Dia-1.6B (Nari Labs) — 🔬 TRANSFORMER VERIFIED bit-exact (encoder + decoder corr 1.0); DAC wiring remains
+> Real-weight parity vs the upstream `DiaModel`: encoder (12L) + decoder (18L, cross-attn / 9-channel summed embeddings / fused `logits_dense`) both corr 1.0. New `DiaWeights.cs` adapts the nari-native DenseGeneral layout ([in,h,k]→[out,in], `wi_fused`/`wo`/`logits_dense` rename+transpose) and provides split-half RoPE. 5 bugs (split-half RoPE, attn scale 1.0, DenseGeneral transpose, prefix `encoder.`/`decoder.`, missing `cache.AdvanceLength()`). Remaining: download + wire DAC 44.1kHz 9cb (shared `DacDecoder` ✅) + the delay-pattern AR loop. See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md) + memory `dia-fishspeech-build`.
+
+### Dia-1.6B — (prior scaffold notes)
 > `nari-labs/Dia-1.6B` — a T5/Whisper-style **encoder-decoder** TTS (the **first cross-attention transformer
 > in the Audio package**) generating a 9-codebook DAC grid (delay pattern) → 44.1 kHz. Research:
 > [`DIA_TTS_ARCHITECTURE.md`](../Research/DIA_TTS_ARCHITECTURE.md). Files under [`Models/Dia/`](../../src/HartsyInference.Audio/Models/Dia/) + [`DiaPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/DiaPipeline.cs).
@@ -271,7 +274,10 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [x] `min_p` added to `NucleusSampler` (backward-compatible) + `t3` learned-position handling.
 - [ ] **S3Gen pipeline wiring** — `ChatterboxPipeline` assembling T3 tokens → `CosyVoiceFlow` → `HiFTNetVocoder` (the reused stack, needs a Chatterbox-tuned config: cosine CFM schedule + cfg 0.7 + 10 steps + HiFT [8,5,3]); prompt-speech perceiver resampler; llama3 RoPE scaling; Perth watermark. Deferred.
 
-### Fish-Speech 1.5 / OpenAudio S1 — BUILT (DualAR + firefly decoder, synthetic-forward verified)
+### Fish-Speech 1.5 — 🔬 DualAR LM VERIFIED (slow corr 1.0, fast corr 0.9999); firefly codec remains
+> Real-weight parity vs the upstream `DualARTransformer`: slow backbone (24L Llama) logits bit-exact, fast depth-LM (4L) corr 0.9999. The checkpoint is a fused-key Llama; `FishSpeechDualAr.Remap` adapts it to the Qwen2 split layout. 4 fixes: key adapter (wqkv/w1w2w3/norm renames), interleaved RoPE (new `Qwen2Config.Rope`), `scale_codebook_embeddings=False`, and the fast model takes the PRE-norm slow hidden (`norm_fastlayer_input=False`). Remaining: the firefly-gan-vq codec (FSQ + HiFiGAN-SiLU — a separate reconcile). See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md) + memory `dia-fishspeech-build`.
+
+### Fish-Speech 1.5 / OpenAudio S1 — (prior scaffold notes)
 > DualAR text2semantic (slow Llama + fast depth transformer) + firefly-gan-vq codec. Research: [`FISH_SPEECH_ARCHITECTURE.md`](../Research/FISH_SPEECH_ARCHITECTURE.md). Files under [`Models/FishSpeech/`](../../src/HartsyInference.Audio/Models/FishSpeech/) + [`FishSpeechPipeline.cs`](../../src/HartsyInference.Audio/Pipelines/FishSpeechPipeline.cs).
 - [x] [`FishSpeechDualAr.cs`](../../src/HartsyInference.Audio/Models/FishSpeech/FishSpeechDualAr.cs) — slow + fast both **reuse `Qwen2Model`** (headless); dual summed-codebook embedding (offset table, ×1/√(N+1)); slow→semantic, fast depth-AR→8 codebooks. Synthetic-forward verified (valid semantic + codebooks).
 - [x] [`FireflyDecoder.cs`](../../src/HartsyInference.Audio/Models/FishSpeech/FireflyDecoder.cs) — codebook dequant → **reused `VitsHiFiGan`** (firefly upsample) → 44.1 kHz. Synthetic-forward verified.

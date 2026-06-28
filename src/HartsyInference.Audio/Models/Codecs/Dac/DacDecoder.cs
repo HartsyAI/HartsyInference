@@ -203,6 +203,7 @@ internal sealed class DacDecoder
 
     private static Tensor LoadFusedWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
+        if (!w.ContainsKey($"{prefix}.weight_g")) return WeightNormFusion.Compose(w, prefix);
         Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
         Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
         return WeightNormFusion.Fuse(g, v);
@@ -210,6 +211,7 @@ internal sealed class DacDecoder
 
     private Tensor LoadFusedTransposeWeight(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
+        if (!w.ContainsKey($"{prefix}.weight_g")) return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);   // already fused
         Tensor g = WhisperOps.EnsureF32(w[$"{prefix}.weight_g"]);
         Tensor v = WhisperOps.EnsureF32(w[$"{prefix}.weight_v"]);
         // descript/Spark norm over dim 0 (C_in) — weight_g is [C_in,1,1], same composition as a regular conv.

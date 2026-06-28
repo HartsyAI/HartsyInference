@@ -48,18 +48,22 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
         // U8-packed quants died deep in a GEMM with an opaque "GPU cast from U8 to F32" error.
         weights = TextEncoderQuantNormalizer.Normalize(weights);
 
-        Tensor rawEmbed = weights["model.embed_tokens.weight"];
+        // Some checkpoints ship the decoder under a `model.` wrapper (full Causal-LM exports), others ship it
+        // bare (e.g. Qwen3-Embedding-0.6B: `embed_tokens.weight`, `layers.N.*`, `norm.weight`). Auto-detect.
+        string prefix = weights.ContainsKey("model.embed_tokens.weight") ? "model." : "";
+
+        Tensor rawEmbed = weights[$"{prefix}embed_tokens.weight"];
         _embedWeight = CastToF32IfNeeded(rawEmbed);
 
         if (_config.HasFinalNorm)
         {
-            Tensor rawFinalNorm = weights["model.norm.weight"];
+            Tensor rawFinalNorm = weights[$"{prefix}norm.weight"];
             _finalNormWeight = CastToF32IfNeeded(rawFinalNorm);
             if (_config.RmsNormScalePlusOne) AddOneInPlace(_finalNormWeight);
         }
 
         for (int i = 0; i < _config.NumLayers; i++)
-            _blocks[i].LoadWeights(weights, $"model.layers.{i}");
+            _blocks[i].LoadWeights(weights, $"{prefix}layers.{i}");
 
         Logs.Verbose($"LlamaStyleEncoder loaded: {_config.NumLayers} layers, hidden={_config.HiddenSize}, " +
                   $"q_heads={_config.NumQueryHeads}, kv_heads={_config.NumKvHeads}, head_dim={_config.HeadDim}");

@@ -17,7 +17,12 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// song ≈ 2585 DiT tokens). Encode UMT5 upstream with the shared <c>T5TextEncoder</c>
 /// (<c>T5TextEncoderConfig.Umt5Base</c>) and tokenize lyrics with <c>AceStepLyricTokenizer</c>.
 /// <b>Status: built, first-run validation pending</b> — guidance defaults (CFG 7.0 / 27 steps) per the model card;
-/// APG momentum drifts from the Python reference by design (validation uses plain CFG).</summary>
+/// APG momentum drifts from the Python reference by design (validation uses plain CFG).
+/// <para><b>CUDA (3060/12 GB):</b> runs end-to-end with bf16 weights resident (F32 won't fit), but the bf16 GEMM
+/// truncates F32 activations and the latent NaNs over the CFG loop. The caller MUST set
+/// <c>CudaBackend.HighPrecisionGemm = true</c> before constructing this pipeline — it upcasts bf16 weights to F32 for
+/// the GEMM (weights stay bf16-resident) and yields finite audio (verified: 4 s / 8 steps ≈ 27 s on a 3060). The
+/// Diffusion package can't reference the Cuda backend, so this is wired at the call site (SwarmUI loader / tests).</para></summary>
 public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
 {
     /// <summary>Guidance modes (research § 2.9).</summary>

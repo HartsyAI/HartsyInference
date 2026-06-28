@@ -24,6 +24,7 @@ public sealed unsafe class DiaPipeline : IDisposable
     private readonly DiaDecoder _decCond;
     private readonly DiaDecoder _decUncond;
     private readonly DacModel _dac;
+    private IDisposable[] _retain = [];   // weight mmaps held for the pipeline's lifetime
     private int _disposed;
 
     public DiaPipeline(DiaConfig cfg)
@@ -37,13 +38,47 @@ public sealed unsafe class DiaPipeline : IDisposable
 
     public int SampleRate => _cfg.Codec.SampleRate;
 
-    /// <summary>Loads the encoder + decoder (both CFG branches share the same weight tensors) and DAC.</summary>
+    /// <summary>Loads the encoder + decoder (both CFG branches share the same weight tensors) and DAC. The Dia
+    /// checkpoint is the nari-native DenseGeneral layout — it is run through <see cref="DiaWeights.Adapt"/> here
+    /// (transposes the projections to <c>[out,in]</c>, renames the fused MLP / logits head) and the real key
+    /// prefixes are <c>encoder.</c> / <c>decoder.</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> model, IReadOnlyDictionary<string, Tensor> dac)
     {
-        _encoder.LoadWeights(model);
-        _decCond.LoadWeights(model);
-        _decUncond.LoadWeights(model);
+        Dictionary<string, Tensor> m = DiaWeights.Adapt(model);
+        _encoder.LoadWeights(m, "encoder");
+        _decCond.LoadWeights(m, "decoder", "decoder.logits_dense.weight");
+        _decUncond.LoadWeights(m, "decoder", "decoder.logits_dense.weight");
         _dac.LoadWeights(dac);
+    }
+
+    /// <summary>Builds a pipeline from local files: the Dia <c>model.safetensors</c> and the descript DAC-44kHz
+    /// checkpoint (<c>.pth</c>/<c>.safetensors</c>).</summary>
+    public static DiaPipeline LoadFromFiles(string diaSafetensors, string dacPath, DiaConfig? config = null)
+    {
+        DiaConfig cfg = config ?? DiaConfig.Dia1_6B;
+        DiaPipeline p = new(cfg);
+        List<IDisposable> retain = new();
+        IReadOnlyDictionary<string, Tensor> diaW = LoadAny(diaSafetensors, retain);
+        IReadOnlyDictionary<string, Tensor> dac = LoadAny(dacPath, retain);
+        p.LoadWeights(diaW, dac);
+        // The pass-through weights (embeddings / norms) borrow the loaders' mmaps — keep them alive.
+        p._retain = retain.ToArray();
+        return p;
+    }
+
+    private static Dictionary<string, Tensor> LoadAny(string path, List<IDisposable> retain)
+    {
+        if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+        {
+            HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader l = new();
+            l.Load(path);
+            retain.Add(l);
+            return l.GetAllTensors();
+        }
+        HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader pk = new();
+        pk.Load(path, recursiveFlatten: true);
+        retain.Add(pk);
+        return pk.GetAllTensors();
     }
 
     /// <summary>Generates 44.1 kHz mono PCM from byte-level text token ids (UTF-8 bytes, speaker tags inline).</summary>
@@ -168,6 +203,7 @@ public sealed unsafe class DiaPipeline : IDisposable
         _encoder.Dispose();
         _decCond.Dispose();
         _decUncond.Dispose();
+        foreach (IDisposable d in _retain) d.Dispose();
         GC.SuppressFinalize(this);
     }
 
