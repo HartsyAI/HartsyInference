@@ -25,6 +25,13 @@ public sealed record NeuTtsConfig
     /// <summary>Generation stop token (<c>&lt;|SPEECH_GENERATION_END|&gt;</c>).</summary>
     public int SpeechGenEnd { get; init; } = 151_670;
 
+    /// <summary>LM token id used as the text-replace placeholder in the prompt framing.</summary>
+    public int TextReplace { get; init; } = 151_665;
+    /// <summary>LM token id used as the speech-replace placeholder in the prompt framing.</summary>
+    public int SpeechReplace { get; init; } = 151_668;
+    /// <summary>Maximum prompt + AR generation length (hard cap).</summary>
+    public int MaxContext { get; init; } = 2_048;
+
     // ── Sampling (matches neutts.py _infer_torch, NOT generation_config.json) ──
     public float Temperature { get; init; } = 1.0f;
     public int TopK { get; init; } = 50;
@@ -36,5 +43,40 @@ public sealed record NeuTtsConfig
     public static NeuTtsConfig Air => new()
     {
         Llm = Qwen2Config.Qwen25_0_5B with { VocabSize = 217_652 },
+    };
+
+    /// <summary>NeuTTS Nano preset (the reference DEFAULT) — a Llama-3 backbone (hidden 576 / 24L / 9 query
+    /// heads / 3 KV heads MHA-via-GQA / head_dim 64 / SwiGLU 2304 / RoPE θ=500000 / no bias / tied head),
+    /// vocab 194,256, with Llama-3 linear RoPE scaling (factor 32) applied through the shared
+    /// <c>Core.Rope</c> path. The speech/text control tokens use the nano token block.</summary>
+    public static NeuTtsConfig Nano => new()
+    {
+        Llm = new Qwen2Config
+        {
+            HiddenSize = 576,
+            NumHiddenLayers = 24,
+            NumAttentionHeads = 9,
+            NumKeyValueHeads = 3,
+            IntermediateSize = 2_304,
+            VocabSize = 194_256,
+            MaxPositionEmbeddings = 2_048,
+            RopeTheta = 500_000f,
+            RopeScaling = new HartsyInference.Core.Rope.RopeScaling
+            {
+                Type = HartsyInference.Core.Rope.RopeScalingType.Llama3,
+                Factor = 32.0,
+                LowFreqFactor = 1.0,
+                HighFreqFactor = 4.0,
+            },
+            AttentionBias = false,
+            TieWordEmbeddings = true,
+        },
+        SpeechTokenBase = 128_262,
+        SpeechGenStart = 128_260,
+        SpeechGenEnd = 128_261,
+        TextPromptStart = 128_257,
+        TextPromptEnd = 128_258,
+        TextReplace = 128_256,
+        SpeechReplace = 128_259,
     };
 }

@@ -31,9 +31,43 @@ public sealed record ResembleEnhanceConfig
     // ── Solver / inference ──
     public int Nfe { get; init; } = 64;                  // function evals
     public string Solver { get; init; } = "midpoint";    // euler / midpoint / rk4
-    public float Lambd { get; init; } = 0.5f;            // denoiser blend
+    public float Lambd { get; init; } = 1.0f;            // denoiser blend (CLI default value)
     public float Tau { get; init; } = 0.5f;              // prior temperature
     public int TimeMappingDivisor { get; init; } = 4;
+
+    // ── Denoiser (UNet) ──
+    /// <summary>Base hidden channel width of the denoiser UNet.</summary>
+    public int DenoiserHiddenDim { get; init; } = 16;
+    /// <summary>Number of down/up sampling blocks in the denoiser UNet.</summary>
+    public int DenoiserNumBlocks { get; init; } = 4;
+    /// <summary>Number of bottleneck (middle) blocks in the denoiser UNet.</summary>
+    public int DenoiserNumMiddleBlocks { get; init; } = 2;
+    /// <summary>Convolution kernel size used throughout the denoiser UNet.</summary>
+    public int DenoiserKernel { get; init; } = 3;
+
+    // ── UnivNet vocoder ──
+    /// <summary>UnivNet base channel count (nc).</summary>
+    public int UnivNetNc { get; init; } = 96;
+    /// <summary>Extra latent dimension fed into the vocoder.</summary>
+    public int VocoderExtraDim { get; init; } = 32;
+
+    // ── IRMAE / latent ──
+    /// <summary>Number of intermediate residual MLP (IRM) layers in the IRMAE.</summary>
+    public int NumIrms { get; init; } = 4;
+    /// <summary>Group count for IRMAE GroupNorm layers.</summary>
+    public int IrmaeGroupNorm { get; init; } = 32;
+    /// <summary>Force a Gaussian prior on the IRMAE latent.</summary>
+    public bool ForceGaussianPrior { get; init; } = false;
+
+    // ── CFM / STFT ──
+    /// <summary>Minimum sigma for the OT-CFM probability path.</summary>
+    public float CfmSigma { get; init; } = 1e-4f;
+    /// <summary>STFT window size (samples).</summary>
+    public int WinSize { get; init; } = 2_048;
+    /// <summary>Floor applied to STFT magnitudes before log scaling.</summary>
+    public float StftMagnitudeMin { get; init; } = 1e-4f;
+    /// <summary>Pre-emphasis coefficient applied to the input waveform.</summary>
+    public float Preemphasis { get; init; } = 0.97f;
 
     public static ResembleEnhanceConfig Default => new();
 }

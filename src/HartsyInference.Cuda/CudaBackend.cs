@@ -2468,22 +2468,22 @@ public sealed class CudaBackend : IBackend
     /// <summary>FlashAttention (online-softmax, GQA-aware, no materialized score matrix). Requires F32 and a
     /// power-of-two head dimension (true for the 64/128 head dims we run); falls back to the base CPU reference
     /// otherwise.</summary>
-    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0)
+    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
         // The kernel pads the block to the next power of two >= D, so any D up to 1024 works (Phi-3 D=96 etc.).
         bool kernelOk = d > 0 && d <= 1024;
         if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk
-            || (sink is not null && sink.DType != DType.F32))
+            || (sink is not null && sink.DType != DType.F32) || (alibiSlopes is not null && alibiSlopes.DType != DType.F32))
         {
-            AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow);
+            AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
             return;
         }
 
         _context.EnsureCurrent();
         EnsureKernels();
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, pSink = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, pSink = 0, pAlibi = 0;
         bool cachedOutput = false;
         try
         {
@@ -2491,9 +2491,10 @@ public sealed class CudaBackend : IBackend
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
             if (sink is not null) pSink = GpuTransferHelper.CopyToDevice(sink);
+            if (alibiSlopes is not null) pAlibi = GpuTransferHelper.CopyToDevice(alibiSlopes);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, _stream.Handle);
+            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }

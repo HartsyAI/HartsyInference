@@ -68,8 +68,19 @@ public sealed record OrpheusConfig
             AttentionBias = false,
             TieWordEmbeddings = true,
             BosTokenId = 128_000,
+            // EOS used as the AR inference stop (end-of-speech). A config.json-driven converter must NOT
+            // overwrite this with 128009 (end-of-text) or 128001 (Llama-3.2 eot); those would break the
+            // SNAC super-frame parse which relies on stopping at EndOfSpeech.
             EosTokenId = 128_258,
-            PadTokenId = 128_263,
+            PadTokenId = 128_004,
+            RopeScaling = new HartsyInference.Core.Rope.RopeScaling
+            {
+                Type = HartsyInference.Core.Rope.RopeScalingType.Llama3,
+                Factor = 32.0,
+                OriginalContextLength = 8_192,
+                LowFreqFactor = 1.0,
+                HighFreqFactor = 4.0,
+            },
         },
     };
 }

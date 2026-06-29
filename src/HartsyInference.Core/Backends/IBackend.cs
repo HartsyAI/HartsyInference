@@ -455,9 +455,12 @@ public interface IBackend : IDisposable
     /// sink logit joins the softmax denominator but contributes no value.
     /// When <paramref name="slidingWindow"/> &gt; 0, each query additionally attends only the most recent
     /// <c>slidingWindow</c> keys (Gemma-2/3, Cohere2, GPT-OSS local layers); 0 = full causal prefix.
+    /// When <paramref name="alibiSlopes"/> is non-null (a <c>[Hq]</c> F32 tensor), each head adds the ALiBi linear
+    /// distance penalty <c>slope_h·(k_pos − q_pos)</c> to its scores (MPT/BLOOM/Falcon-classic/Jais); these models
+    /// use no RoPE.
     /// The CUDA backend overrides this with a kernel; the default is a correct CPU reference.</summary>
-    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0)
-        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow);
+    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
+        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
 
     /// <summary>Gathers rows: <c>output[m] = input[rowIndices[m]]</c>, where a "row" is the last-dim-sized
     /// vector. <paramref name="output"/> is <c>[M, K]</c>, <paramref name="input"/> <c>[N, K]</c>,

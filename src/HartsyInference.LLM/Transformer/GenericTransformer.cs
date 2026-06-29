@@ -425,6 +425,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW;
         private Tensor? _qNorm, _kNorm, _qNormBias, _kNormBias;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
+        private Tensor? _alibiSlopes;   // ALiBi: per-head slopes [Hq] (MPT/BLOOM/Falcon-classic); these models use no RoPE
         private Tensor? _kvAProj, _kvANorm, _kvBProj;   // MLA: KV down-proj (+latent norm) and up-proj
         private Tensor? _qAProj, _qANorm, _qBProj;      // MLA q-LoRA: Q down-proj (+norm) and up-proj (DeepSeek-V3/Kimi)
         private Tensor? _gateW, _upW, _downW;
@@ -510,6 +511,14 @@ public sealed unsafe class GenericTransformer : IDisposable
                 }
             }
             if (_cfg.AttnSink) _sink = EnsureF32(w[$"{prefix}.self_attn.sinks.weight"]);
+            // ALiBi slopes are a config constant (geometric per-head schedule), not a checkpoint tensor — materialize
+            // a small [Hq] device tensor so the attention kernel can add the per-head distance bias.
+            if (_cfg.AlibiMaxBias > 0f && _cfg.AlibiSlopes.Count >= _cfg.NumHeads)
+            {
+                _alibiSlopes = new Tensor(new TensorShape(_cfg.NumHeads), DType.F32);
+                float* ap = (float*)_alibiSlopes.DataPointer;
+                for (int i = 0; i < _cfg.NumHeads; i++) ap[i] = _cfg.AlibiSlopes[i];
+            }
             LoadFfn(w, prefix, layerIndex);
         }
 
@@ -523,14 +532,31 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             else
             {
-                _gateW = w[$"{prefix}.mlp.gate_proj.weight"];
+                // Non-gated FFN (GPT-2 / Falcon / Nemotron) has no gate_proj — only up (fc1) and down (fc2).
+                if (_cfg.GatedFfn) _gateW = w[$"{prefix}.mlp.gate_proj.weight"];
                 _upW = w[$"{prefix}.mlp.up_proj.weight"];
                 _downW = w[$"{prefix}.mlp.down_proj.weight"];
             }
         }
 
-        /// <summary>FFN: routes to the dense SwiGLU or the MoE block. Consumes (disposes) <paramref name="preMlp"/>
-        /// <c>[1, n, hidden]</c> and returns the FFN output <c>[1, n, hidden]</c>.</summary>
+        /// <summary>Applies the configured FFN activation to <paramref name="inp"/> into <paramref name="outp"/>
+        /// (same shape): SiLU (SwiGLU), tanh-GELU (GeGLU / GPT-2-lineage), ReLU, or ReLU² (Nemotron).</summary>
+        private void Activate(IBackend backend, Tensor outp, Tensor inp)
+        {
+            switch (_cfg.Activation)
+            {
+                case ActivationKind.GeluTanh: backend.Gelu(outp, inp); break;
+                case ActivationKind.Relu: backend.Clamp(outp, inp, 0f, float.PositiveInfinity); break;
+                case ActivationKind.ReluSquared:
+                    backend.Clamp(outp, inp, 0f, float.PositiveInfinity);
+                    backend.Mul(outp, outp, outp);   // relu(x)² (elementwise, alias-safe)
+                    break;
+                default: backend.Silu(outp, inp); break;   // SiLU / SwiGLU
+            }
+        }
+
+        /// <summary>FFN: routes to the dense SwiGLU/GeGLU, the non-gated MLP, or the MoE block. Consumes (disposes)
+        /// <paramref name="preMlp"/> <c>[1, n, hidden]</c> and returns the FFN output <c>[1, n, hidden]</c>.</summary>
         private Tensor Mlp(IBackend backend, Tensor preMlp, int n)
         {
             if (_moe is not null)
@@ -540,18 +566,29 @@ public sealed unsafe class GenericTransformer : IDisposable
                 return moeOut;
             }
             TensorShape ff = new(1, n, _cfg.IntermediateSize);
-            Tensor gate = new(ff, DType.F32);
-            Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
-            Tensor gateAct = new(ff, DType.F32);
-            if (_cfg.Activation == ActivationKind.GeluTanh) backend.Gelu(gateAct, gate);   // Gemma GeGLU
-            else backend.Silu(gateAct, gate);                                              // SwiGLU
-            gate.Dispose();
             Tensor up = new(ff, DType.F32);
             Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
+            Tensor comb;
+            if (_cfg.GatedFfn)
+            {
+                // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)).
+                Tensor gate = new(ff, DType.F32);
+                Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
+                Tensor gateAct = new(ff, DType.F32);
+                Activate(backend, gateAct, gate);
+                gate.Dispose();
+                comb = new(ff, DType.F32);
+                backend.Mul(comb, gateAct, up);
+                gateAct.Dispose(); up.Dispose();
+            }
+            else
+            {
+                // Non-gated MLP (GPT-2 / Falcon / BLOOM / MPT / Nemotron): down(act(up(x))).
+                comb = new(ff, DType.F32);
+                Activate(backend, comb, up);
+                up.Dispose();
+            }
             preMlp.Dispose();
-            Tensor comb = new(ff, DType.F32);
-            backend.Mul(comb, gateAct, up);
-            gateAct.Dispose(); up.Dispose();
             Tensor mlpOut = new(new TensorShape(1, n, _cfg.HiddenSize), DType.F32);
             Project(backend, mlpOut, comb, _downW!, null, _cfg.LowVramQuant);
             comb.Dispose();
@@ -560,7 +597,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _upW, _downW];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
@@ -619,8 +656,9 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            // Cohere2's global (full-attention) layers use no positional encoding; all other layers/models rope.
-            if (!(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
+            // ALiBi models use no positional encoding (the bias is added in attention); Cohere2's global
+            // (full-attention) layers also skip RoPE; all other layers/models rope.
+            if (_cfg.AlibiMaxBias <= 0f && !(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
@@ -658,7 +696,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             // the full causal prefix (window 0). No-op for non-SWA models.
             int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink, window);
+            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink, window, _alibiSlopes);
             qMh.Dispose();
 
             Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
@@ -878,8 +916,8 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            // RoPE per row (each row b is one token at its own absolute position); skipped on Cohere2 NoPE layers.
-            if (!(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
+            // RoPE per row (each row b is one token at its own absolute position); skipped on ALiBi + Cohere2 NoPE layers.
+            if (_cfg.AlibiMaxBias <= 0f && !(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
@@ -914,7 +952,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
                 Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
                 backend.FlashAttention(attnSeg, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
-                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap, _sink, window);
+                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap, _sink, window, _alibiSlopes);
                 qMh.Dispose();
                 segs[s] = attnSeg;
             }

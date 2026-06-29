@@ -14,15 +14,24 @@ public enum RopeStyle
     Interleaved,
 }
 
-/// <summary>Gated-FFN activation. <see cref="Silu"/> (Llama/Qwen/Mistral SwiGLU) vs <see cref="GeluTanh"/>
-/// (Gemma's GeGLU — the tanh-approximation GELU, <c>gelu_pytorch_tanh</c>).</summary>
+/// <summary>FFN activation. For a gated FFN (<see cref="TransformerConfig.GatedFfn"/> = true) this is the gate
+/// activation: <see cref="Silu"/> (Llama/Qwen/Mistral SwiGLU) vs <see cref="GeluTanh"/> (Gemma's GeGLU,
+/// <c>gelu_pytorch_tanh</c>). For a non-gated FFN (GPT-2 / Falcon / BLOOM / MPT / Nemotron) it is applied to the
+/// single up-projection: <see cref="GeluTanh"/> (the ggml <c>gelu</c> tanh-approx, GPT-2/Falcon/BLOOM),
+/// <see cref="Relu"/>, or <see cref="ReluSquared"/> (Nemotron's <c>relu²</c>).</summary>
 public enum ActivationKind
 {
     /// <summary>SiLU / swish gate (SwiGLU). Llama, Qwen, Mistral.</summary>
     Silu,
 
-    /// <summary>tanh-approximation GELU gate (GeGLU). Gemma 2 / Gemma 3.</summary>
+    /// <summary>tanh-approximation GELU (GeGLU gate, or the non-gated FFN act of GPT-2/Falcon/BLOOM).</summary>
     GeluTanh,
+
+    /// <summary>ReLU (non-gated FFN). Some StarCoder / older arches.</summary>
+    Relu,
+
+    /// <summary>ReLU² (squared ReLU, non-gated FFN). Nemotron.</summary>
+    ReluSquared,
 }
 
 /// <summary>How the MoE router turns expert logits into selection scores. <see cref="Softmax"/> (Qwen2-MoE /
@@ -190,8 +199,13 @@ public sealed record TransformerConfig
     /// text). The Qwen3-TTS audio backbone uses <see cref="RopeStyle.Interleaved"/>.</summary>
     public RopeStyle Rope { get; init; } = RopeStyle.SplitHalf;
 
-    /// <summary>Gated-FFN activation. Default SiLU (SwiGLU); Gemma uses <see cref="ActivationKind.GeluTanh"/>.</summary>
+    /// <summary>FFN activation. Default SiLU (SwiGLU); Gemma uses <see cref="ActivationKind.GeluTanh"/>.</summary>
     public ActivationKind Activation { get; init; } = ActivationKind.Silu;
+
+    /// <summary>Whether the FFN is gated (SwiGLU/GeGLU: <c>down(act(gate(x)) · up(x))</c>, the Llama/Qwen/Gemma
+    /// default) or a plain non-gated MLP (<c>down(act(up(x)))</c>, no <c>gate_proj</c>) for GPT-2 / Falcon /
+    /// BLOOM / MPT / Nemotron / StarCoder.</summary>
+    public bool GatedFfn { get; init; } = true;
 
     /// <summary>Gemma "sandwich norm": an extra RMSNorm on the attention output and on the FFN output, each
     /// applied <i>before</i> the residual add (in addition to the pre-attn / pre-FFN norms). false for the
@@ -255,6 +269,16 @@ public sealed record TransformerConfig
     /// the softmax. 0 (default) disables it. Requires the soft-capping attention path.</summary>
     public float AttnLogitSoftcap { get; init; }
 
+    /// <summary>ALiBi (Attention with Linear Biases) maximum bias (llama.cpp <c>max_alibi_bias</c>, typically 8).
+    /// When &gt; 0 the model uses NO RoPE; instead each head adds a per-head linear distance penalty
+    /// <c>-slope_h·(q_pos − k_pos)</c> to the attention scores (the geometric slope schedule of MPT / BLOOM /
+    /// Falcon-classic / Jais / RefAct). 0 (default) = RoPE/standard attention, no ALiBi.</summary>
+    public float AlibiMaxBias { get; init; }
+
+    /// <summary>Per-head ALiBi slopes for <see cref="NumHeads"/> heads (geometric schedule from
+    /// <see cref="AlibiMaxBias"/>), or an empty array when ALiBi is off. Computed once at config build.</summary>
+    public IReadOnlyList<float> AlibiSlopes { get; init; } = System.Array.Empty<float>();
+
     /// <summary>GPT-OSS attention sinks: each layer carries a learned per-head <c>self_attn.sinks</c> logit that
     /// joins the softmax denominator but contributes no value (lets a head attend to "nothing"). When true the
     /// per-layer sink tensor is loaded and passed to FlashAttention.</summary>
@@ -314,6 +338,23 @@ public sealed record TransformerConfig
 
     /// <summary>Whether layer <paramref name="layerIndex"/> is a gated cross-attention layer (mllama).</summary>
     public bool IsCrossAttnLayer(int layerIndex) => CrossAttnLayers.Contains(layerIndex);
+
+    /// <summary>Computes the per-head ALiBi slopes (llama.cpp / the original ALiBi paper's geometric schedule):
+    /// with <c>n2 = 2^floor(log2(nHead))</c>, <c>m0 = 2^(−maxBias/n2)</c>, <c>m1 = 2^(−maxBias/2/n2)</c>, head
+    /// <c>h</c> gets <c>m0^(h+1)</c> for <c>h &lt; n2</c> else <c>m1^(2(h−n2)+1)</c> (handles non-power-of-two
+    /// head counts).</summary>
+    public static float[] ComputeAlibiSlopes(int nHead, float maxBias)
+    {
+        float[] slopes = new float[nHead];
+        if (maxBias <= 0f || nHead <= 0) return slopes;
+        int n2 = 1;
+        while (n2 * 2 <= nHead) n2 *= 2;   // 2^floor(log2(nHead))
+        double m0 = Math.Pow(2.0, -maxBias / n2);
+        double m1 = Math.Pow(2.0, -(maxBias / 2.0) / n2);
+        for (int h = 0; h < nHead; h++)
+            slopes[h] = (float)(h < n2 ? Math.Pow(m0, h + 1) : Math.Pow(m1, 2 * (h - n2) + 1));
+        return slopes;
+    }
 
     // ── Presets ──────────────────────────────────────────────────────────────────────────────────────
 

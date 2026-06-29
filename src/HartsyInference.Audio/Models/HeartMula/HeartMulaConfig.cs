@@ -54,6 +54,9 @@ public sealed record HeartMulaConfig
     /// <summary>MuQ-MuLan style-conditioning embedding dimension (projected via muq_linear).</summary>
     public int MuqDim { get; init; } = 512;
 
+    /// <summary>Llama-3 end-of-text token appended to the encoded tags/lyrics token stream (mirrors music_generation.py).</summary>
+    public int TextEosToken { get; init; } = 128_001;
+
     // ── HeartCodec (HeartCodec-oss): 48 kHz, 12.5 Hz, 8-codebook RVQ ──
     public int CodecNumQuantizers { get; init; } = 8;
     public int CodecCodebookSize { get; init; } = 8_192;

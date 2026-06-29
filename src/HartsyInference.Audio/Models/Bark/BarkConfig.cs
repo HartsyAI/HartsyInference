@@ -36,6 +36,13 @@ public sealed record BarkConfig
     public int TopK { get; init; } = 0;            // Bark uses top-p only by default
     public float TopP { get; init; } = 1.0f;
 
+    /// <summary>Minimum EOS probability before the semantic stage may stop early (upstream default 0.2).</summary>
+    public float MinEosP { get; init; } = 0.2f;
+    /// <summary>Max coarse-history tokens carried into the coarse stage context window (upstream default 630).</summary>
+    public int MaxCoarseHistory { get; init; } = 630;
+    /// <summary>Number of fine codebooks taken as given (conditioning) before the fine stage predicts the rest.</summary>
+    public int NCodesGiven { get; init; } = 1;
+
     public static BarkConfig Full => new() { Stage = GptConfig.BarkFull };
     public static BarkConfig Small => new() { Stage = GptConfig.BarkSmall };
 }

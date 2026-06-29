@@ -36,6 +36,15 @@ public sealed record MusicGenConfig
     /// <c>[0,0,1,1,2,2,3,3]</c>.</summary>
     public int[] DelayPattern { get; init; } = [0, 1, 2, 3];
 
+    /// <summary>Output audio channels. Mono is 1; stereo variants use 2 (NumCodebooks doubles to 8).</summary>
+    public int AudioChannels { get; init; } = 1;
+
+    /// <summary>Number of chroma bins used by the melody conditioner (12 pitch classes).</summary>
+    public int NumChroma { get; init; } = 12;
+
+    /// <summary>Chroma sequence length (frames) for the melody conditioner.</summary>
+    public int ChromaLength { get; init; } = 235;
+
     public float Temperature { get; init; } = 1.0f;
     public int TopK { get; init; } = 250;
     public float TopP { get; init; } = 0.0f;
@@ -45,4 +54,16 @@ public sealed record MusicGenConfig
     public static MusicGenConfig Medium => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24 };
     public static MusicGenConfig Large => new() { Hidden = 2_048, NumLayers = 48, NumHeads = 32 };
     public static MusicGenConfig AudioGen => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24, CodecSampleRate = 16_000 };
+
+    /// <summary>Melody-conditioned medium variant (text + chroma conditioning).</summary>
+    public static MusicGenConfig Melody => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24 };
+
+    /// <summary>Stereo small: 8 codebooks (2 channels x 4) with the doubled delay pattern.</summary>
+    public static MusicGenConfig StereoSmall => new() { Hidden = 1_024, NumLayers = 24, NumHeads = 16, AudioChannels = 2, NumCodebooks = 8, DelayPattern = [0, 0, 1, 1, 2, 2, 3, 3] };
+
+    /// <summary>Stereo medium: 8 codebooks (2 channels x 4) with the doubled delay pattern.</summary>
+    public static MusicGenConfig StereoMedium => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24, AudioChannels = 2, NumCodebooks = 8, DelayPattern = [0, 0, 1, 1, 2, 2, 3, 3] };
+
+    /// <summary>Stereo large: 8 codebooks (2 channels x 4) with the doubled delay pattern.</summary>
+    public static MusicGenConfig StereoLarge => new() { Hidden = 2_048, NumLayers = 48, NumHeads = 32, AudioChannels = 2, NumCodebooks = 8, DelayPattern = [0, 0, 1, 1, 2, 2, 3, 3] };
 }

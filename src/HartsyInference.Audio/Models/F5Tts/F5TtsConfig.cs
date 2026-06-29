@@ -62,6 +62,24 @@ public sealed record F5TtsConfig
     /// <summary>RoPE base frequency. 10000.</summary>
     public float RopeTheta { get; init; } = 10_000f;
 
+    /// <summary>Whether the text branch zero-masks padded positions. True for v1 base.</summary>
+    public bool TextMaskPadding { get; init; } = true;
+
+    /// <summary>Per-block attention head override for the input convolution position
+    /// embedding (null for v1 base; v0 base used 1).</summary>
+    public int? PeAttnHead { get; init; } = null;
+
+    /// <summary>QK-norm variant for attention (null = none for v1 base).</summary>
+    public string? QkNorm { get; init; } = null;
+
     /// <summary>Default F5-TTS v1 Base preset (SWivid/F5-TTS, F5TTS_v1_Base).</summary>
     public static F5TtsConfig V1Base => new();
+
+    /// <summary>F5-TTS v0 Base preset (SWivid/F5-TTS, F5TTS_Base). Identical to the v1
+    /// base except text padding is not masked and PeAttnHead = 1.</summary>
+    public static F5TtsConfig F5TTS_Base => new()
+    {
+        TextMaskPadding = false,
+        PeAttnHead = 1,
+    };
 }

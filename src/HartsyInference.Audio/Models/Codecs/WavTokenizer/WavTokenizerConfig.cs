@@ -15,20 +15,30 @@ public sealed record WavTokenizerConfig
 {
     public int SampleRate { get; init; } = 24_000;
     public int Channels { get; init; } = 1;
-    public int EncoderDim { get; init; } = 64;
+    public int EncoderDim { get; init; } = 32;
     public IReadOnlyList<int> EncoderRates { get; init; } = [8, 5, 4, 2];
     public int LatentDim { get; init; } = 512;
     public int CodebookSize { get; init; } = 4_096;
-    public int CodebookDim { get; init; } = 8;
-    public int ResidualKernelSize { get; init; } = 7;
+
+    /// <summary>VQ codebook dimension. 512 (no factorized codebook; RVQ runs at LatentDim).</summary>
+    public int CodebookDim { get; init; } = 512;
+    public int ResidualKernelSize { get; init; } = 3;
     public int StemKernelSize { get; init; } = 7;
-    public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 3, 9];
+
+    /// <summary>EnCodec-style residual dilations (dilation_base 2, n_residual_layers 1).</summary>
+    public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 2];
+
+    /// <summary>Number of LSTM layers in the SEANet encoder.</summary>
+    public int EncoderLstmLayers { get; init; } = 2;
+
+    /// <summary>Number of AdaNorm conditioning embeddings in the ConvNeXt decoder head.</summary>
+    public int AdaNormNumEmbeddings { get; init; } = 4;
 
     /// <summary>iSTFT n_fft. 1280 for the 24 kHz WavTokenizer head (matches Vocos).</summary>
     public int NFft { get; init; } = 1_280;
     public int HopLength { get; init; } = 320;
     public int HeadDim { get; init; } = 768;
-    public int HeadConvNeXtBlocks { get; init; } = 8;
+    public int HeadConvNeXtBlocks { get; init; } = 12;
     public int HeadFfnRatio { get; init; } = 3;
 
     public int FrameRate
@@ -42,4 +52,13 @@ public sealed record WavTokenizerConfig
     }
 
     public static WavTokenizerConfig WavTokenizer24kHz => new();
+
+    /// <summary>40 tokens/s variant (24 kHz / 600 hop): EncoderRates [6,5,5,4], 2400-point
+    /// iSTFT, 600 hop, same ConvNeXt backbone dims as the default.</summary>
+    public static WavTokenizerConfig Frame40 => new()
+    {
+        EncoderRates = [6, 5, 5, 4],
+        NFft = 2_400,
+        HopLength = 600,
+    };
 }

@@ -20,7 +20,7 @@ public static class AttentionReference
     /// of Gemma-2/3, Cohere2, GPT-OSS. 0 = no window (attend the whole causal prefix).</summary>
     public static unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value,
         int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null,
-        int slidingWindow = 0)
+        int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
         if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
             throw new NotSupportedException("FlashAttention reference only supports F32.");
@@ -37,6 +37,7 @@ public static class AttentionReference
         float* vp = (float*)value.DataPointer;
         float* op = (float*)output.DataPointer;
         float* sp = sink is null ? null : (float*)sink.DataPointer;
+        float* alp = alibiSlopes is null ? null : (float*)alibiSlopes.DataPointer;
         float* acc = stackalloc float[d];
 
         for (int bi = 0; bi < b; bi++)
@@ -58,6 +59,8 @@ public static class AttentionReference
                         float score = 0f;
                         for (int x = 0; x < d; x++) score += qp[qBase + x] * kp[kBase + x];
                         score *= scale;
+                        // ALiBi: per-head linear distance penalty slope·(k_pos − q_pos) (≤ 0 under causality).
+                        if (alp != null) score += alp[h] * (k - (qOffset + r));
                         if (softcap > 0f) score = softcap * MathF.Tanh(score / softcap);
                         float newM = MathF.Max(m, score);
                         float corr = m == float.NegativeInfinity ? 0f : MathF.Exp(m - newM);

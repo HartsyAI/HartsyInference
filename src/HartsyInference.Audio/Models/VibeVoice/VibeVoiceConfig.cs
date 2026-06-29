@@ -2,8 +2,8 @@ namespace HartsyInference.Audio.Models.VibeVoice;
 
 /// <summary>Configuration for VibeVoice (Microsoft Research, 2025) — long-form multi-speaker
 /// TTS built on Qwen2.5 + next-token-diffusion. Fields verified against the public
-/// safetensors layout of <c>vibevoice/VibeVoice-1.5B</c>, <c>vibevoice/VibeVoice-Large</c>,
-/// and <c>vibevoice/VibeVoice-Streaming-0.5B</c>.
+/// safetensors layout of <c>microsoft/VibeVoice-1.5B</c>, <c>microsoft/VibeVoice-Large</c>,
+/// and <c>microsoft/VibeVoice-Realtime-0.5B</c>.
 ///
 /// <para>VibeVoice is a composition: a Qwen2.5 LM (1.5B / 7B / 0.5B-streaming) drives an
 /// autoregressive loop over a 5-token constrained vocabulary
@@ -175,6 +175,10 @@ public sealed record VibeVoiceTokenizerConfig
     /// reference. Inference doesn't use it — kept for parity / parameter-count audits.</summary>
     public float WeightInitValue { get; init; } = 1e-2f;
 
+    /// <summary>Per-corpus normalization scale applied to input audio before encoding. 0.0
+    /// disables it (no normalization) for the published checkpoints.</summary>
+    public float CorpusNormalize { get; init; } = 0.0f;
+
     /// <summary>Acoustic VAE preset (encoder + decoder, vae_dim=64, gaussian sampling).</summary>
     public static VibeVoiceTokenizerConfig AcousticDefault => new();
 
@@ -212,7 +216,7 @@ public sealed record VibeVoiceDecoderConfig
     /// <summary>RoPE theta. 1e6 across all VibeVoice variants (long-context preset).</summary>
     public float RopeTheta { get; init; } = 1_000_000f;
 
-    /// <summary>Maximum positions. 65536 (1.5B) / 32768 (7B / 0.5B).</summary>
+    /// <summary>Maximum positions. 65536 (1.5B) / 32768 (7B) / 8192 (0.5B realtime).</summary>
     public required int MaxPositionEmbeddings { get; init; }
 
     /// <summary>Qwen2.5 vocab size — 151936 (1.5B / 0.5B) or 152064 (7B). VibeVoice does
@@ -221,7 +225,7 @@ public sealed record VibeVoiceDecoderConfig
     public required int VocabSize { get; init; }
 
     /// <summary>Whether <c>lm_head.weight</c> is tied to <c>embed_tokens.weight</c>. True for
-    /// 1.5B and 0.5B, false for 7B.</summary>
+    /// 1.5B, false for 7B and the 0.5B realtime variant.</summary>
     public bool TieWordEmbeddings { get; init; } = true;
 
     /// <summary>RMSNorm epsilon inside the LM. 1e-6 (Qwen2 default).</summary>
@@ -263,9 +267,9 @@ public sealed record VibeVoiceDecoderConfig
         NumAttentionHeads = 14,
         NumKeyValueHeads = 2,
         IntermediateSize = 4_864,
-        MaxPositionEmbeddings = 32_768,
+        MaxPositionEmbeddings = 8_192,
         VocabSize = 151_936,
-        TieWordEmbeddings = true,
+        TieWordEmbeddings = false,
     };
 }
 

@@ -66,7 +66,7 @@ public sealed record BiCodecConfig
     public int SemanticCodebookSize { get; init; } = 8_192;
     public int SemanticCodebookDim { get; init; } = 8;
     public int GlobalTokens { get; init; } = 32;
-    public IReadOnlyList<int> GlobalFsqLevels { get; init; } = [8, 8, 8, 5, 5];     // 12800 vocab; Spark uses [4, 4, 4, 4, 4, 4] for 4096 in some configs
+    public IReadOnlyList<int> GlobalFsqLevels { get; init; } = [4, 4, 4, 4, 4, 4];   // reference fsq_levels [4,4,4,4,4,4]; full speaker/semantic encoder rewrite is Phase 4
     public int GlobalQueryHeads { get; init; } = 8;
     public static BiCodecConfig Default => new();
 }

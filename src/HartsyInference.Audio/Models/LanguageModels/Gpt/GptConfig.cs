@@ -14,6 +14,10 @@ public sealed record GptConfig
     public int HeadDim => Hidden / NumHeads;
     public int MlpDim => 4 * Hidden;
 
+    /// <summary>Whether linear/attention projections carry bias. Real Bark/GPT-2 checkpoints are bias-free (false).</summary>
+    // PARITY-TODO: GptBackbone must honor Bias.
+    public bool Bias { get; init; } = false;
+
     /// <summary>Bark full preset (hidden 1024 / 24 layers / 16 heads).</summary>
     public static GptConfig BarkFull => new() { Hidden = 1_024, NumLayers = 24, NumHeads = 16 };
 

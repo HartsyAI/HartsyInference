@@ -31,6 +31,10 @@ public sealed record MoonshineConfig
     /// <summary>Convenience: head dimension.</summary>
     public int HeadDim => HiddenSize / NumHeads;
 
+    /// <summary>Kernel-optimization hint (<c>pad_head_dim_to_multiple_of</c>) that pads the
+    /// effective head dim up to this multiple. Does not change stored weights.</summary>
+    public int PadHeadDimToMultipleOf { get; init; } = 8;
+
     /// <summary>FFN inner dim. Standard Llama-style 4 * HiddenSize.</summary>
     public int IntermediateSize { get; init; } = 1664;
 
@@ -71,6 +75,12 @@ public sealed record MoonshineConfig
 
     /// <summary>Padding token. Also 2 (Moonshine reuses EOS as pad).</summary>
     public int PadTokenId { get; init; } = 2;
+
+    /// <summary>Decoder start token id. 1 (same as BOS for Moonshine).</summary>
+    public int DecoderStartTokenId { get; init; } = 1;
+
+    /// <summary>Whether the decoder input embeddings and the output LM head share weights. True for Moonshine.</summary>
+    public bool TieWordEmbeddings { get; init; } = true;
 
     // ── Audio front-end (Conv1D stem) ──────────────────────────────────────────
 

@@ -6,9 +6,12 @@ namespace HartsyInference.Audio.Models.QwenTts;
 public sealed record EcapaConfig
 {
     /// <summary>Mel-bin count of the input feature sequence.</summary>
-    public int InputChannels { get; init; } = 80;
+    public int InputChannels { get; init; } = 128;
 
     public int StemChannels { get; init; } = 512;
+
+    /// <summary>Kernel size of the TDNN stem (Conv1d) layer.</summary>
+    public int StemKernelSize { get; init; } = 5;
 
     /// <summary>Per-SE-Res2Block output channel counts.</summary>
     public IReadOnlyList<int> Channels { get; init; } = [512, 512, 512];
@@ -20,10 +23,13 @@ public sealed record EcapaConfig
     public int SeBottleneck { get; init; } = 128;
 
     /// <summary>Final speaker-embedding dimension.</summary>
-    public int EmbeddingDim { get; init; } = 192;
+    public int EmbeddingDim { get; init; } = 2_048;
 
     /// <summary>Talker speaker-conditioning width the embedding is projected to.</summary>
     public int ConditioningDim { get; init; } = 2_048;
+
+    /// <summary>Input waveform sample rate (Hz) for mel-feature extraction.</summary>
+    public int SampleRate { get; init; } = 24_000;
 
     public static EcapaConfig Default => new();
 }

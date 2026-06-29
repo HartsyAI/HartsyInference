@@ -35,6 +35,26 @@ public sealed record StyleTts2Config
     /// diffusion variant). False for single-speaker LJSpeech (diffusion-only, no speech encoders).</summary>
     public bool MultiSpeaker { get; init; } = true;
 
+    /// <summary>Number of layers in the diffusion style transformer.</summary>
+    public int TransformerNumLayers { get; init; } = 3;
+
+    /// <summary>Number of attention heads in the diffusion style transformer.</summary>
+    public int TransformerNumHeads { get; init; } = 8;
+
+    /// <summary>Per-head feature dim in the diffusion style transformer.</summary>
+    public int TransformerHeadFeatures { get; init; } = 64;
+
+    /// <summary>Feed-forward expansion multiplier in the diffusion style transformer.</summary>
+    public int TransformerMultiplier { get; init; } = 2;
+
+    /// <summary>Style mixing weight applied to the predicted acoustic style component.</summary>
+    public float Alpha { get; init; } = 0.3f;
+
+    /// <summary>Style mixing weight applied to the predicted prosodic style component.</summary>
+    public float Beta { get; init; } = 0.7f;
+
+    // NOTE: The LibriTTS HiFi-GAN decoder selector (vs the iSTFTNet decoder) is Phase 4.
+
     public static StyleTts2Config LibriTts => new() { MultiSpeaker = true };
-    public static StyleTts2Config LjSpeech => new() { MultiSpeaker = false, DiffusionSteps = 5, EmbeddingScale = 1.5f };
+    public static StyleTts2Config LjSpeech => new() { MultiSpeaker = false, DiffusionSteps = 5, EmbeddingScale = 1.0f };
 }

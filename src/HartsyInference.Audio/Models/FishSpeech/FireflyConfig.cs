@@ -28,5 +28,26 @@ public sealed record FireflyConfig
 
     public int SampleRate { get; init; } = 44_100;
 
+    /// <summary>Number of residual groups in the grouped-residual FSQ quantizer.</summary>
+    public int NGroups { get; init; } = 8;
+
+    /// <summary>Number of codebooks per quantizer group.</summary>
+    public int QuantizerNCodebooks { get; init; } = 1;
+
+    /// <summary>Quantizer input/projection dimension.</summary>
+    public int QuantizerInputDim { get; init; } = 512;
+
+    /// <summary>Number of mel channels feeding the generator backbone.</summary>
+    public int NumMels { get; init; } = 512;
+
+    /// <summary>Mel/STFT hop length (waveform samples per latent frame).</summary>
+    public int HopLength { get; init; } = 512;
+
+    /// <summary>Pre-convolution (input stem) kernel size.</summary>
+    public int PreConvKernelSize { get; init; } = 13;
+
+    /// <summary>Post-convolution (output stem) kernel size.</summary>
+    public int PostConvKernelSize { get; init; } = 13;
+
     public static FireflyConfig V1_5 => new();
 }

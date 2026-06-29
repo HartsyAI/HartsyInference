@@ -14,6 +14,8 @@ namespace HartsyInference.Audio.Models.Zonos;
 public sealed record ZonosConfig
 {
     // ── Backbone ──
+    // NOTE: Only the transformer variant is configured here. The Zonos hybrid (Mamba2 SSM) variant
+    // needs Phase 4 support; do not add Mamba2/hybrid fields until then.
     public int Hidden { get; init; } = 2_048;
     public int NumLayers { get; init; } = 26;
     public int NumHeads { get; init; } = 16;
@@ -23,6 +25,8 @@ public sealed record ZonosConfig
     public float NormEps { get; init; } = 1e-5f;     // LayerNorm
     public float RopeTheta { get; init; } = 10_000f; // interleaved
     public int MaxPositions { get; init; } = 16_384;
+    /// <summary>Vocab sizes are padded up to a multiple of this (matches the reference embed/head padding).</summary>
+    public int PadVocabToMultipleOf { get; init; } = 8;
 
     // ── Codec / codebooks ──
     public int Channels { get; init; } = 9;
@@ -45,10 +49,28 @@ public sealed record ZonosConfig
     // ── Conditioning ──
     public int SpeakerDim { get; init; } = 128;
     public int EmotionDim { get; init; } = 8;
-    public int NumLanguages { get; init; } = 105;
+    /// <summary>Number of valid language ids. The IntegerConditioner range is -1..126 (the -1 "unknown"
+    /// id plus 0..126), so there are 127 valid ids. See <see cref="MinLang"/> / <see cref="MaxLang"/>.</summary>
+    public int NumLanguages { get; init; } = 127;
+    /// <summary>Inclusive minimum language id (the -1 "unknown" / unconditioned id).</summary>
+    public int MinLang { get; init; } = -1;
+    /// <summary>Inclusive maximum language id.</summary>
+    public int MaxLang { get; init; } = 126;
+
+    // IntegerConditioner / FourierConditioner ranges. Each conditioner stores both its inclusive
+    // min_val and max_val (the reference keeps both to normalize the input before the embedding).
+    /// <summary>Fmax conditioner inclusive minimum (Hz).</summary>
+    public float FmaxMin { get; init; } = 0f;
     public float FmaxMax { get; init; } = 24_000f;
+    /// <summary>Pitch-std conditioner inclusive minimum.</summary>
+    public float PitchStdMin { get; init; } = 0f;
     public float PitchStdMax { get; init; } = 400f;
+    /// <summary>Speaking-rate conditioner inclusive minimum.</summary>
+    public float SpeakingRateMin { get; init; } = 0f;
     public float SpeakingRateMax { get; init; } = 40f;
+
+    /// <summary>Conditioner output projection type ("linear" in the reference).</summary>
+    public string Projection { get; init; } = "linear";
 
     // ── Generation ──
     public float CfgScale { get; init; } = 2.0f;

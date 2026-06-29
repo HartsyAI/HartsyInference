@@ -13,6 +13,8 @@ public sealed record BertConfig
     public int MaxPositions { get; init; } = 512;
     public int TypeVocab { get; init; } = 2;
     public float LayerNormEps { get; init; } = 1e-12f;
+    /// <summary>Padding token id used to mask out positions in the attention mask.</summary>
+    public int PadTokenId { get; init; } = 0;
 
     public int HeadDim => Hidden / NumHeads;     // 64
 
@@ -24,5 +26,19 @@ public sealed record BertConfig
     public static BertConfig BaseUncased => new()
     {
         Hidden = 768, NumLayers = 12, NumHeads = 12, Intermediate = 3072, VocabSize = 30522,
+    };
+
+    /// <summary>cl-tohoku/bert-base-japanese-v3 preset (MeloTTS Japanese prosody BERT): 12 layers, hidden 768,
+    /// 12 heads, intermediate 3072, vocab 32768.</summary>
+    public static BertConfig JapaneseV3 => new()
+    {
+        Hidden = 768, NumLayers = 12, NumHeads = 12, Intermediate = 3072, VocabSize = 32768,
+    };
+
+    /// <summary>hfl/chinese-roberta-wwm-ext preset (base size): 12 layers, hidden 768, 12 heads,
+    /// intermediate 3072, vocab 21128.</summary>
+    public static BertConfig ChineseRobertaWwmExtBase => new()
+    {
+        Hidden = 768, NumLayers = 12, NumHeads = 12, Intermediate = 3072, VocabSize = 21128,
     };
 }

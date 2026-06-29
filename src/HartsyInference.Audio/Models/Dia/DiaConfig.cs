@@ -45,6 +45,8 @@ public sealed record DiaConfig
     public int MaxDelay => 15;
 
     public float RopeTheta { get; init; } = 10_000f;
+    /// <summary>Minimum RoPE timescale; matches the Dia reference config (rope_min_timescale = 1).</summary>
+    public int RopeMinTimescale { get; init; } = 1;
     public float NormEps { get; init; } = 1e-5f;
     public int MaxText { get; init; } = 1_024;
     public int MaxAudio { get; init; } = 3_072;

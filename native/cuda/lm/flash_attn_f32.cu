@@ -21,7 +21,8 @@ extern "C" __global__ void lm_flash_attn_f32(
     unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
     unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
     int causal, int qOffset, float scale, float softcap,
-    const float* __restrict__ sink, int slidingWindow)
+    const float* __restrict__ sink, int slidingWindow,
+    const float* __restrict__ alibiSlopes)
 {
     unsigned int idx = blockIdx.x;
     unsigned int r = idx % Tq; idx /= Tq;
@@ -59,6 +60,8 @@ extern "C" __global__ void lm_flash_attn_f32(
             __syncthreads();
         }
         float score = sdata[0] * scale;
+        // ALiBi: per-head linear distance penalty slope·(k_pos − q_pos) (≤ 0 under causality). No RoPE on these models.
+        if (alibiSlopes != nullptr) score += alibiSlopes[h] * (float)(k - (int)(qOffset + r));
         // Gemma-2 attention-logit soft-cap: cap·tanh(score/cap), applied to each logit before the softmax.
         if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 

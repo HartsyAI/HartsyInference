@@ -41,7 +41,9 @@ public sealed record NeuCodecConfig
     public int NFft { get; init; } = 1_920;               // hop_length * 4
     public int Win { get; init; } = 1_920;
 
-    /// <summary>Single codebook of 65536 codes.</summary>
+    /// <summary>Single codebook of 65536 codes. The reference constructor's nominal VQ args are
+    /// codebook_size 16384 / codebook_dim 16, but those are unused under FSQ; the effective FSQ count
+    /// (product of <see cref="FsqLevels"/> = 65536) is what we store here.</summary>
     public int CodebookSize { get; init; } = 65_536;
 
     public static NeuCodecConfig Default => new();

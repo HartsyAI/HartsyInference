@@ -95,6 +95,31 @@ public sealed record EnCodecConfig
     /// when loading.</summary>
     public int ActiveCodebooks { get; init; } = 8;
 
+    /// <summary>Whether the SEANet residual block uses a learned 1x1 conv shortcut on the
+    /// skip path (HF <c>EncodecConfig.use_conv_shortcut</c>). True in the published 24/16 kHz
+    /// checkpoints. The 32 kHz checkpoint sets this False, but flipping it is a Phase 4 behavior
+    /// change and is deliberately left at True on the 32 kHz preset for now.</summary>
+    public bool UseConvShortcut { get; init; } = true;
+
+    /// <summary>Whether the input waveform is loudness-normalized before encoding and the gain
+    /// restored after decoding (HF <c>EncodecConfig.normalize</c>). False for the streaming
+    /// 24/32/16 kHz models; True for the offline 48 kHz multi-band variant.</summary>
+    public bool Normalize { get; init; } = false;
+
+    /// <summary>Optional fixed chunk length in seconds for chunked (non-streaming) encoding
+    /// (HF <c>EncodecConfig.chunk_length_s</c>). Null = process the whole signal at once
+    /// (streaming 24/32/16 kHz); 1.0 for the 48 kHz variant.</summary>
+    public double? ChunkLengthS { get; init; } = null;
+
+    /// <summary>Fractional overlap between successive chunks when <see cref="ChunkLengthS"/> is set
+    /// (HF <c>EncodecConfig.overlap</c>). 0.01 in the published config.</summary>
+    public double Overlap { get; init; } = 0.01;
+
+    /// <summary>Fraction of the right-side padding to trim after a transposed-conv upsample in the
+    /// decoder (HF <c>EncodecConfig.trim_right_ratio</c>). 1.0 trims all right padding, matching the
+    /// published checkpoints.</summary>
+    public double TrimRightRatio { get; init; } = 1.0;
+
     /// <summary>Convenience: the latent frame rate (downsampled sample rate).
     /// 24000 / 320 = 75 Hz for the published config.</summary>
     public int FrameRate
@@ -123,6 +148,8 @@ public sealed record EnCodecConfig
         VqMaxCodebooks = 4,
         ActiveCodebooks = 4,
         KbpsPerCodebook = 0.55,
+        // NOTE: the real 32 kHz checkpoint sets use_conv_shortcut=false. Flipping UseConvShortcut
+        // here is a behavior change deferred to Phase 4, so it is intentionally left at the True default.
     };
 
     /// <summary>EnCodec 16 kHz preset matching <c>facebook/encodec_16khz</c> — the codec AudioGen consumes.
@@ -139,5 +166,22 @@ public sealed record EnCodecConfig
         VqMaxCodebooks = 4,
         ActiveCodebooks = 4,
         KbpsPerCodebook = 0.55,
+    };
+
+    /// <summary>EnCodec 48 kHz preset matching <c>facebook/encodec_48khz</c> — the offline multi-band,
+    /// stereo variant. Symmetric (non-causal) SEANet (<c>n_filters=32</c>), ratios <c>[8,5,4,2]</c> → 320×
+    /// downsample, time-group-norm convs, 1024-entry codebooks. Loudness-normalized with 1.0 s chunks
+    /// (<see cref="Normalize"/>=True, <see cref="ChunkLengthS"/>=1.0). See AUDIO_CODECS.md "EnCodec 48k".</summary>
+    public static EnCodecConfig EnCodec48kHz => new()
+    {
+        SampleRate = 48_000,
+        Channels = 2,
+        NFilters = 32,
+        Ratios = [8, 5, 4, 2],
+        Causal = false,
+        Norm = "time_group_norm",
+        VqCodebookSize = 1_024,
+        Normalize = true,
+        ChunkLengthS = 1.0,
     };
 }

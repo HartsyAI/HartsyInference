@@ -28,12 +28,24 @@ public sealed record VitsConfig
     /// <summary>State-dict prefix of the stochastic duration predictor. Real VITS/Piper checkpoints store it under
     /// <c>dp</c>; the synthetic-weight tests use <c>sdp</c>, which stays the default.</summary>
     public string SdpPrefix { get; init; } = "sdp";
+    /// <summary>Number of rational-quadratic spline bins in the stochastic duration predictor's flows.</summary>
+    public int DurationPredictorFlowBins { get; init; } = 10;
+    /// <summary>Tail bound for the unconstrained rational-quadratic spline in the duration predictor.</summary>
+    public float DurationPredictorTailBound { get; init; } = 5.0f;
+    /// <summary>Channel multiplier for the depth-separable conv stacks in the stochastic duration predictor.</summary>
+    public int DepthSeparableChannels { get; init; } = 2;
+    /// <summary>Number of depth-separable conv layers in the stochastic duration predictor.</summary>
+    public int DepthSeparableNumLayers { get; init; } = 3;
 
     // ── Flow ──
     public int FlowLayers { get; init; } = 4;           // WN layers per coupling
     public int FlowFlows { get; init; } = 4;            // coupling+flip pairs
     public int FlowKernelSize { get; init; } = 5;
     public int FlowDilationRate { get; init; } = 1;
+
+    // ── Posterior encoder ──
+    /// <summary>Number of WaveNet residual layers in the posterior (spectrogram) encoder. Set per checkpoint.</summary>
+    public int PosteriorEncoderNumWavenetLayers { get; init; } = 16;
 
     // ── HiFi-GAN decoder ──
     public string ResBlock { get; init; } = "2";        // medium
@@ -46,6 +58,8 @@ public sealed record VitsConfig
     public int GinChannels { get; init; } = 0;          // 0 = single-speaker
     public int NumSpeakers { get; init; } = 1;
     public int SampleRate { get; init; } = 22_050;
+    /// <summary>Whether the HiFi-GAN decoder uses spectral norm instead of weight norm on its convs.</summary>
+    public bool UseSpectralNorm { get; init; } = false;
 
     // ── Inference scales ──
     public float NoiseScale { get; init; } = 0.667f;
@@ -72,4 +86,13 @@ public sealed record VitsConfig
         UpsampleKernelSizes = [16, 16, 4, 4],
         UpsampleInitialChannel = 512,
     };
+
+    /// <summary>Stock LJSpeech single-speaker VITS preset (the original 22.05 kHz config defaults).</summary>
+    public static VitsConfig LjsBase => new();
+
+    /// <summary>Facebook MMS-TTS preset (16 kHz, compact 38-token uroman vocab).</summary>
+    public static VitsConfig MmsTts => new() { SampleRate = 16_000, NumVocab = 38 };
+
+    /// <summary>VCTK multi-speaker VITS preset (256-d global speaker conditioning, 109 speakers).</summary>
+    public static VitsConfig VctkBase => new() { GinChannels = 256, NumSpeakers = 109 };
 }

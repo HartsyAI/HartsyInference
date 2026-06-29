@@ -44,6 +44,16 @@ public sealed record SparkTtsConfig
     public int StartSemanticTokenId { get; init; } = 165_151;
     public int EndSemanticTokenId { get; init; } = 165_157;           // generation stop marker
 
+    // ── Controllable-TTS control tokens (optional; only used by the attribute-controlled path) ──
+    /// <summary>Plain zero-shot/voice-clone TTS task marker (<c>&lt;|task_tts|&gt;</c>).</summary>
+    public int TaskTts { get; init; } = 165_137;
+    /// <summary>Attribute-controlled TTS task marker (<c>&lt;|task_controllable_tts|&gt;</c>).</summary>
+    public int TaskControllableTts { get; init; } = 165_143;
+    /// <summary>Start-of-content marker wrapping the synthesized text (<c>&lt;|start_content|&gt;</c>).</summary>
+    public int StartContent { get; init; } = 165_146;
+    /// <summary>End-of-content marker wrapping the synthesized text (<c>&lt;|end_content|&gt;</c>).</summary>
+    public int EndContent { get; init; } = 165_152;
+
     /// <summary>BiCodec wave-generator (semantic+global tokens → 16 kHz waveform) config.</summary>
     public SparkBiCodecConfig BiCodec { get; init; } = new();
 

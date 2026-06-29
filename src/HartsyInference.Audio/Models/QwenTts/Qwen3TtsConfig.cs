@@ -73,15 +73,30 @@ public sealed record Qwen3TtsConfig
     public int TextTtsEod { get; init; } = 151_673;
 
     // ── Modes / sampling ────────────────────────────────────────────────
-    /// <summary>The 9 built-in custom-voice speaker ids (codec-space tokens prefixed before generation).</summary>
-    public IReadOnlyList<int> CustomVoiceSpeakerIds { get; init; } = [2_075, 2_076, 2_077, 2_078, 2_079, 2_080, 2_081, 2_082, 2_083];
+    /// <summary>The built-in custom-voice speaker ids (codec-space tokens prefixed before generation). Verified
+    /// ids: Ryan 3061, Serena 3066, Ono-Anna 2873, Sohee 2864. The remaining entries are unverified placeholders.</summary>
+    public IReadOnlyList<int> CustomVoiceSpeakerIds { get; init; } =
+    [
+        3_061, // Ryan (verified)
+        3_066, // Serena (verified)
+        2_873, // Ono-Anna (verified)
+        2_864, // Sohee (verified)
+        2_079, // unverified
+        2_080, // unverified
+        2_081, // unverified
+        2_082, // unverified
+        2_083, // unverified
+    ];
 
     public float Temperature { get; init; } = 0.9f;
     public int TopK { get; init; } = 50;
     public float TopP { get; init; } = 1.0f;
     public float RepetitionPenalty { get; init; } = 1.05f;
     public int MinNewTokens { get; init; } = 2;
-    public int MaxNewTokens { get; init; } = 2_048;
+    public int MaxNewTokens { get; init; } = 8_192;
+
+    /// <summary>mRoPE temporal position-id increment per second of generated audio.</summary>
+    public int PositionIdPerSeconds { get; init; } = 13;
 
     /// <summary>Auto codec prefill written before the talker starts emitting: [nothink, think_bos, think_eos, pad, bos].</summary>
     public int[] CodecPrefill() => [CodecNoThink, CodecThinkBos, CodecThinkEos, CodecPad, CodecBos];

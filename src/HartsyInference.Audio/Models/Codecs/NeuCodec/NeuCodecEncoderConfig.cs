@@ -33,5 +33,19 @@ public sealed record NeuCodecEncoderConfig
     /// <summary>FSQ code-vector dimension (== FsqLevels.Count).</summary>
     public int FsqDim { get; init; } = 8;
 
+    /// <summary>Optional semantic branch: input feature dim fed to the semantic encoder (e.g. distilled HuBERT features).</summary>
+    public int SemanticEncoderInputDim { get; init; } = 1_024;
+
+    /// <summary>Optional semantic branch: hidden width of the semantic encoder.</summary>
+    public int SemanticEncoderHiddenDim { get; init; } = 1_024;
+
+    /// <summary>Optional semantic branch: output dim of the semantic encoder.</summary>
+    public int SemanticEncoderOutDim { get; init; } = 1_024;
+
+    /// <summary>Optional semantic branch: dim of the post-acoustic <c>fc_post_a</c> projection.</summary>
+    public int FcPostADim { get; init; } = 1_024;
+
     public static NeuCodecEncoderConfig Default => new();
+
+    // A DistillNeuCodec preset (SQCodec + DistillHubert) is Phase 4.
 }

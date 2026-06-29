@@ -37,6 +37,7 @@ public sealed record FishSpeechConfig
     public bool ScaleCodebookEmbeddings { get; init; } = false;
 
     // Sampling (inference.py defaults).
+    // PARITY-TODO: audit suggests Temperature 0.7 / TopP 0.7 / RepetitionPenalty 1.2 (verify on weights).
     public float Temperature { get; init; } = 1.0f;
     public float TopP { get; init; } = 0.9f;
     public int TopK { get; init; } = 30;
@@ -46,4 +47,17 @@ public sealed record FishSpeechConfig
     public int SampleRate { get; init; } = 44_100;
 
     public static FishSpeechConfig V1_5 => new();
+
+    /// <summary>Fish-Speech 1.4 preset: 32k vocab and a 4096 context window (otherwise identical to 1.5).</summary>
+    public static FishSpeechConfig V1_4 => new()
+    {
+        Backbone = new()
+        {
+            HiddenSize = 1_024, NumHiddenLayers = 24, NumAttentionHeads = 16, NumKeyValueHeads = 2,
+            IntermediateSize = 4_096, VocabSize = 32_000, MaxPositionEmbeddings = 4_096,
+            RopeTheta = 1_000_000f, RmsNormEps = 1e-6f, AttentionBias = false, TieWordEmbeddings = false,
+            Rope = HartsyInference.LLM.Transformer.RopeStyle.Interleaved,
+        },
+        TextVocab = 32_000,
+    };
 }

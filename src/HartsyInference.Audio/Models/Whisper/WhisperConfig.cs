@@ -38,6 +38,12 @@ public sealed record WhisperConfig
     /// <summary>Layer-norm epsilon. HuggingFace default 1e-5.</summary>
     public float LayerNormEps { get; init; } = 1e-5f;
 
+    /// <summary>Padding token id. 50257 for &lt;=v2, 50256 for v3+ (HuggingFace pad_token_id).</summary>
+    public int PadTokenId { get; init; } = 50_257;
+
+    /// <summary>Whether to scale token embeddings by sqrt(HiddenSize). Stock Whisper does not.</summary>
+    public bool ScaleEmbedding { get; init; } = false;
+
     /// <summary>Convenience: head dimension. Always 64.</summary>
     public int HeadDim => HiddenSize / NumHeads;
 
@@ -127,6 +133,7 @@ public sealed record WhisperConfig
     {
         VocabSize = 51_866,
         NumMelBins = 128,
+        PadTokenId = 50_256,
     };
 
     /// <summary>large-v3-turbo — distilled to 4 decoder layers; otherwise identical to v3.</summary>
@@ -143,4 +150,16 @@ public sealed record WhisperConfig
 
     /// <summary>distil-small.en — 12/2, 80 mel, English-only.</summary>
     public static WhisperConfig DistilSmallEn => Small with { DecoderLayers = 2 };
+
+    /// <summary>tiny.en — English-only tiny; identical shape to <see cref="Tiny"/>.</summary>
+    public static WhisperConfig TinyEn => Tiny;
+
+    /// <summary>base.en — English-only base; identical shape to <see cref="Base"/>.</summary>
+    public static WhisperConfig BaseEn => Base;
+
+    /// <summary>small.en — English-only small; identical shape to <see cref="Small"/>.</summary>
+    public static WhisperConfig SmallEn => Small;
+
+    /// <summary>medium.en — English-only medium; identical shape to <see cref="Medium"/>.</summary>
+    public static WhisperConfig MediumEn => Medium;
 }

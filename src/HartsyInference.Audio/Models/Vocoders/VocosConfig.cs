@@ -28,6 +28,17 @@ public sealed record VocosConfig
     /// <summary>LayerNorm epsilon (Vocos uses 1e-6, NOT the standard 1e-5).</summary>
     public float LayerNormEps { get; init; } = 1e-6f;
 
+    /// <summary>Initial value for the per-block LayerScale (gamma). Null means the upstream
+    /// default of 1/NumLayers.</summary>
+    public float? LayerScaleInitValue { get; init; } = null;
+
+    /// <summary>Number of embeddings for the AdaLayerNorm conditioning. Null for the mel backbone
+    /// (plain LayerNorm), 4 for the encodec backbone (conditioned on bandwidth id).</summary>
+    public int? AdaNormNumEmbeddings { get; init; } = null;
+
+    /// <summary>STFT/iSTFT padding mode: "center" for the mel release, "same" for the encodec release.</summary>
+    public string Padding { get; init; } = "center";
+
     // ── iSTFT head ─────────────────────────────────────────────────────────────
 
     /// <summary>FFT size used by the synthesis iSTFT.</summary>
@@ -54,4 +65,19 @@ public sealed record VocosConfig
     /// <summary>Standard preset: <c>charactr/vocos-mel-24khz</c>. 24 kHz mono, 100 mel input,
     /// 512 hidden, 8 ConvNeXt blocks, n_fft=1024, hop=256.</summary>
     public static VocosConfig Mel24k => new();
+
+    /// <summary>EnCodec preset: <c>charactr/vocos-encodec-24khz</c>. 24 kHz mono, 128 input channels,
+    /// 384 hidden, 1152 intermediate, 8 ConvNeXt blocks, n_fft=1280, hop=320, AdaLayerNorm with
+    /// 4 bandwidth embeddings, "same" STFT padding.</summary>
+    public static VocosConfig Encodec24k => new()
+    {
+        InputChannels = 128,
+        HiddenDim = 384,
+        IntermediateDim = 1_152,
+        NumLayers = 8,
+        NFft = 1_280,
+        HopLength = 320,
+        AdaNormNumEmbeddings = 4,
+        Padding = "same",
+    };
 }

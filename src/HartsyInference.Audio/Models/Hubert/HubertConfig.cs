@@ -21,6 +21,15 @@ public sealed record HubertConfig
     public float NormEps { get; init; } = 1e-5f;
     public int SampleRate { get; init; } = 16_000;
 
+    /// <summary>Whether the feature-extractor conv layers carry a bias term (base = false, large = true).</summary>
+    public bool ConvBias { get; init; } = false;
+    /// <summary>Feature-extractor normalization mode: "group" (GroupNorm on layer 0 only) or "layer" (LayerNorm on every conv layer).</summary>
+    public string FeatExtractNorm { get; init; } = "group";
+    /// <summary>Use the pre-LayerNorm (stable) transformer variant (true on the large model). The forward path for this is Phase 4.</summary>
+    public bool DoStableLayerNorm { get; init; } = false;
+    /// <summary>Optional final projection dim (e.g. ContentVec projects to 256); null = no projection.</summary>
+    public int? FinalProjDim { get; init; } = null;
+
     /// <summary>Total conv downsample factor (320 → 50 Hz at 16 kHz).</summary>
     public int Downsample
     {
@@ -28,4 +37,26 @@ public sealed record HubertConfig
     }
 
     public static HubertConfig ChineseHubertBase => new();
+
+    /// <summary>HuBERT-Base trained on LibriSpeech 960h (same base dims as <see cref="ChineseHubertBase"/>).</summary>
+    public static HubertConfig HubertBaseLs960 => new();
+
+    /// <summary>HuBERT-Large trained on Libri-Light 60k: wider/deeper stack with conv bias, per-layer
+    /// feature-extractor LayerNorm, and the pre-LN (stable) transformer variant. Stable-LN forward path is Phase 4.</summary>
+    public static HubertConfig HubertLargeLl60k => new()
+    {
+        Hidden = 1024,
+        NumLayers = 24,
+        NumHeads = 16,
+        FfnDim = 4_096,
+        ConvBias = true,
+        FeatExtractNorm = "layer",
+        DoStableLayerNorm = true,
+    };
+
+    /// <summary>ContentVec content encoder: HuBERT-Base with a final projection to 256 dims.</summary>
+    public static HubertConfig ContentVec => new()
+    {
+        FinalProjDim = 256,
+    };
 }
