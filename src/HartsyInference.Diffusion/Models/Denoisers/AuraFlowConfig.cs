@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// - **No biases on attention or FFN linears** (`bias=False`, `out_bias=False`).
 /// - **SwiGLU FFN** with `mlp_dim = find_multiple(int(2*4*dim/3), 256)` = **8192** for v0.3 (NOT 4×hidden).
 /// - **8 register tokens** prepended to text after `context_embedder` (anti-attn-artifact trick from <https://huggingface.co/papers/2309.16588>).
-/// - **Patch embed is a `nn.Linear`** over flattened patches (not Conv2d). Uses learned `pos_embed.pos_embed` of shape `[1, pos_embed_max_size, embed_dim]` selected via `pe_selection_index_based_on_dim` against a √1024=32×32 grid.
+/// - **Patch embed is a `nn.Linear`** over flattened patches (not Conv2d). Uses learned `pos_embed.pos_embed` of shape `[1, pos_embed_max_size, embed_dim]` selected via `pe_selection_index_based_on_dim` against a √pos_embed_max_size grid (v0.3 = √9216 = 96×96; v0.2 = √4096 = 64×64).
 /// - **`caption_projection_dim` = `inner_dim`** (3072 = 12*256) in the released v0.3 checkpoint.
 /// - **`joint_attention_dim` = 2048** matches Pile-T5-XL hidden_size.
 /// </summary>
@@ -46,8 +46,10 @@ public sealed record AuraFlowConfig
     /// <summary>Caption projection dim — projects context to <see cref="HiddenSize"/>. v0.3 = 3072 = inner_dim.</summary>
     public int CaptionProjectionDim { get; init; } = 3072;
 
-    /// <summary>Maximum positional-embedding grid size (`pos_embed_max_size`). 1024 = 32×32 grid for v0.3.</summary>
-    public int PosEmbedMaxSize { get; init; } = 1024;
+    /// <summary>Maximum positional-embedding grid size (`pos_embed_max_size`). The learned `pos_embed.pos_embed`
+    /// weight is <c>[1, pos_embed_max_size, embed_dim]</c>, so this MUST match the checkpoint or the weight will
+    /// truncate/mismatch on load. v0.3 = <b>9216</b> (96×96 grid), v0.2 = <b>4096</b> (64×64 grid).</summary>
+    public int PosEmbedMaxSize { get; init; } = 9216;
 
     /// <summary>Number of register tokens prepended to text after `context_embedder`. v0.3 = 8.</summary>
     public int NumRegisterTokens { get; init; } = 8;
@@ -63,7 +65,7 @@ public sealed record AuraFlowConfig
 
     /// <summary>fal/AuraFlow-v0.3 preset (~6.8B params). Defaults match diffusers
     /// <c>AuraFlowTransformer2DModel.__init__</c> (transformer_qwenimage.py:303-317):
-    /// 12 heads × 256 head_dim = 3072 inner_dim, 4 + 32 blocks, joint_dim=2048, pos_embed_max_size=1024, 8 register tokens.</summary>
+    /// 12 heads × 256 head_dim = 3072 inner_dim, 4 + 32 blocks, joint_dim=2048, pos_embed_max_size=9216, 8 register tokens.</summary>
     public static AuraFlowConfig V03 => new()
     {
         HiddenSize = 3072,
@@ -76,9 +78,13 @@ public sealed record AuraFlowConfig
         OutChannels = 4,
         ContextDim = 2048,
         CaptionProjectionDim = 3072,
-        PosEmbedMaxSize = 1024,
+        PosEmbedMaxSize = 9216,
         NumRegisterTokens = 8,
         MlpDim = 8192,
         UseQkNorm = true,
     };
+
+    /// <summary>fal/AuraFlow-v0.2 preset. Architecturally identical to <see cref="V03"/> except for the
+    /// positional-embedding grid: v0.2 ships <c>pos_embed_max_size=4096</c> (64×64) vs v0.3's 9216 (96×96).</summary>
+    public static AuraFlowConfig V02 => V03 with { PosEmbedMaxSize = 4096 };
 }

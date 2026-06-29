@@ -2468,7 +2468,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>FlashAttention (online-softmax, GQA-aware, no materialized score matrix). Requires F32 and a
     /// power-of-two head dimension (true for the 64/128 head dims we run); falls back to the base CPU reference
     /// otherwise.</summary>
-    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null)
+    public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0)
     {
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
         int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
@@ -2477,7 +2477,7 @@ public sealed class CudaBackend : IBackend
         if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk
             || (sink is not null && sink.DType != DType.F32))
         {
-            AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink);
+            AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow);
             return;
         }
 
@@ -2493,7 +2493,7 @@ public sealed class CudaBackend : IBackend
             if (sink is not null) pSink = GpuTransferHelper.CopyToDevice(sink);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, _stream.Handle);
+            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }

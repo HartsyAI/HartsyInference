@@ -47,7 +47,7 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
                     headsNum: config.ActionHeads, vaeTimeCompressionRatio: config.VaeTemporalCompression,
                     windowsSize: config.ActionWindowSize, ropeTheta: config.ActionRopeTheta, eps: config.Eps);
         }
-        _rope = new WanRope(config.HeadDim, config.RopeTheta, config.RopeMaxSeqLen);
+        _rope = new WanRope(config.HeadDim, config.RopeTheta, config.RopeMaxSeqLen, config.SigmaTheta, config.NumHeads);
         _patchVec = config.InChannels * config.PatchSize.T * config.PatchSize.H * config.PatchSize.W;
     }
 
@@ -131,7 +131,11 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, frameTimesteps, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
-        Tensor encoderProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        // Upstream zero-pads / truncates the umT5 context to text_len before the text_embedder MLP (zero rows become
+        // bias-valued keys the cross-attention still sees), so enforce TextLen here.
+        Tensor encoderFixed = PadOrTruncateRows(encoder, _config.TextLen, _config.TextDim);
+        Tensor encoderProj = WanDitOps.TextEmbed(backend, encoderFixed, dim, _textW1!, _textB1, _textW2!, _textB2);
+        if (!ReferenceEquals(encoderFixed, encoder)) encoderFixed.Dispose();
 
         int tokensPerGroup = s / gt;
         int[] frameIdx = ropeFrameIndices.ToArray();
@@ -190,6 +194,21 @@ public sealed unsafe class MatrixGame3Transformer : IDisposable
         float* ppf = (float*)proj.DataPointer;
         for (long i = 0; i < (long)s * dim; i++) hd[i] += ppf[i];
         proj.Dispose();
+    }
+
+    /// <summary>Zero-pads (or truncates) <paramref name="rows"/> <c>[n, dim]</c> to exactly <paramref name="targetRows"/>
+    /// rows, matching upstream's <c>torch.cat([u, zeros(text_len - n, dim)])</c>. Returns the input unchanged when it
+    /// already has the right row count.</summary>
+    private static Tensor PadOrTruncateRows(Tensor rows, int targetRows, int dim)
+    {
+        int n = (int)rows.Shape[0];
+        if (n == targetRows || rows.DType != DType.F32) return rows;   // raw copy below assumes F32 storage
+        Tensor o = new Tensor(new TensorShape(targetRows, dim), DType.F32);
+        float* dst = (float*)o.DataPointer;
+        for (long i = 0; i < (long)targetRows * dim; i++) dst[i] = 0f;
+        int copyRows = Math.Min(n, targetRows);
+        Buffer.MemoryCopy((float*)rows.DataPointer, dst, (long)targetRows * dim * 4, (long)copyRows * dim * 4);
+        return o;
     }
 
     private static Tensor SliceFrames(Tensor tokens, int skipFrames, int frames, int tokensPerFrame, int dim)

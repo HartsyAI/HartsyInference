@@ -43,16 +43,47 @@ public sealed record HunyuanVideoConfig
     /// <summary>Pooled CLIP-L dim (768) feeding the global modulation vector.</summary>
     public int PooledEmbedDim { get; init; } = 768;
 
+    /// <summary>Whether the model consumes a separate guidance-scale embedding (HunyuanVideo distill-guidance path).
+    /// Plain HunyuanVideo sets <c>guidance_embeds=True</c> and feeds <see cref="EmbeddedGuidanceScale"/> through a
+    /// <c>guidance_in</c> MLP into the modulation vector. GameCraft sets <c>guidance_embed=False</c> and relies on
+    /// classifier-free guidance instead.</summary>
+    public bool GuidanceEmbed { get; init; } = false;
+
+    /// <summary>Embedded guidance scalar fed through the <c>guidance_in</c> MLP when <see cref="GuidanceEmbed"/> is
+    /// true (plain HunyuanVideo). Diffusers default is <b>6.0</b>. Ignored when guidance is not embedded.</summary>
+    public float EmbeddedGuidanceScale { get; init; } = 6.0f;
+
+    /// <summary>Flow-match sampling shift (<c>--flow-shift-eval-video</c>). 5.0 for both GameCraft variants.</summary>
+    public float FlowShift { get; init; } = 5.0f;
+
+    /// <summary>Default sampler steps (<c>--infer-steps</c>): 50 base, 8 distilled.</summary>
+    public int InferSteps { get; init; } = 50;
+
+    /// <summary>Default classifier-free guidance scale (<c>--cfg-scale</c>): 2.0 base, 1.0 distilled.</summary>
+    public float CfgScale { get; init; } = 2.0f;
+
     /// <summary>Head dim (derived).</summary>
     public int HeadDim => HiddenSize / NumHeads;
 
-    /// <summary>Hunyuan-GameCraft base (50-step, CFG 2.0).</summary>
-    public static HunyuanVideoConfig GameCraftBase => new()
+    /// <summary>Plain HunyuanVideo T2V preset (HYVideo-T/2: 20 double + 40 single blocks, 13B). 16-channel input
+    /// (no action conditioning), embedded guidance (<c>guidance_embeds=True</c>, scale 6.0), flow shift 7.0, 50
+    /// steps. Matches <c>hunyuanvideo-community/HunyuanVideo</c>.</summary>
+    public static HunyuanVideoConfig T2V => new()
     {
-        HiddenSize = 3072, NumHeads = 24, NumDoubleBlocks = 19, NumSingleBlocks = 38,
-        MlpDim = 12288, InChannels = 33, OutChannels = 16, RopeAxesDim = [16, 56, 56],
+        HiddenSize = 3072, NumHeads = 24, NumDoubleBlocks = 20, NumSingleBlocks = 40,
+        MlpDim = 12288, InChannels = 16, OutChannels = 16, RopeAxesDim = [16, 56, 56],
+        GuidanceEmbed = true, EmbeddedGuidanceScale = 6.0f, FlowShift = 7.0f, InferSteps = 50, CfgScale = 1.0f,
     };
 
-    /// <summary>Hunyuan-GameCraft distilled (PCM, 8-step, CFG 1.0) — same architecture, different weights.</summary>
-    public static HunyuanVideoConfig GameCraftDistilled => GameCraftBase;
+    /// <summary>Hunyuan-GameCraft base (HYVideo-T/2: 20 double + 40 single blocks; 50-step, CFG 2.0).</summary>
+    public static HunyuanVideoConfig GameCraftBase => new()
+    {
+        HiddenSize = 3072, NumHeads = 24, NumDoubleBlocks = 20, NumSingleBlocks = 40,
+        MlpDim = 12288, InChannels = 33, OutChannels = 16, RopeAxesDim = [16, 56, 56],
+        GuidanceEmbed = false, FlowShift = 5.0f, InferSteps = 50, CfgScale = 2.0f,
+    };
+
+    /// <summary>Hunyuan-GameCraft distilled (PCM): identical architecture to <see cref="GameCraftBase"/>, different
+    /// weights and sampler settings (8-step, CFG 1.0).</summary>
+    public static HunyuanVideoConfig GameCraftDistilled => GameCraftBase with { InferSteps = 8, CfgScale = 1.0f };
 }

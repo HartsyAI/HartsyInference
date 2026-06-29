@@ -48,6 +48,7 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
     {
         if (ggufKey.Equals("token_embd.weight", StringComparison.Ordinal)) return "model.embed_tokens.weight";
         if (ggufKey.Equals("output_norm.weight", StringComparison.Ordinal)) return "model.norm.weight";
+        if (ggufKey.Equals("output_norm.bias", StringComparison.Ordinal)) return "model.norm.bias";   // LayerNorm bias (StableLM/GPT-2-lineage)
         if (ggufKey.Equals("output.weight", StringComparison.Ordinal)) return "lm_head.weight";
 
         if (ggufKey.StartsWith("blk.", StringComparison.Ordinal))
@@ -70,7 +71,9 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
                 "attn_output.weight" => "self_attn.o_proj.weight",
                 "attn_output.bias" => "self_attn.o_proj.bias",
                 "attn_q_norm.weight" => "self_attn.q_norm.weight",
+                "attn_q_norm.bias" => "self_attn.q_norm.bias",   // StableLM qk-LayerNorm bias
                 "attn_k_norm.weight" => "self_attn.k_norm.weight",
+                "attn_k_norm.bias" => "self_attn.k_norm.bias",
                 "attn_sinks.weight" => "self_attn.sinks.weight",   // GPT-OSS per-head attention sinks
                 "attn_sinks" => "self_attn.sinks.weight",
                 "ffn_norm.weight" => "post_attention_layernorm.weight",

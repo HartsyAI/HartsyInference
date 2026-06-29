@@ -70,16 +70,30 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         // FLUX.1 Tools detection: vanilla Flux has x_embed input dim 64 (16 latent channels
-        // × 2×2 packing). Canny / Depth / Fill variants have 128 (32 channels — noise + a
-        // VAE-encoded control image, concatenated along the channel dim before patchify).
-        // The control image is required for Tools variants and forbidden for vanilla.
-        bool isToolsModel = _transformer.XEmbedInputDim == 128;
+        // × 2×2 packing). Canny / Depth have 128 (64 noise + 64 packed VAE-encoded control,
+        // concatenated along the feature dim before the transformer). FLUX.1 Fill has 384
+        // (64 noise + 320 = packed masked-image latent + packed mask). Detect Tools as any
+        // x_embedder wider than the vanilla 64.
+        bool isToolsModel = _transformer.XEmbedInputDim > 64;
+        // Fill requires masked-image + mask conditioning (in_channels 384), which is a
+        // distinct prep from the single-control-image concat used by Canny/Depth.
+        bool isFillModel = _transformer.XEmbedInputDim >= 384;
+        if (isFillModel)
+        {
+            // The masked-latent + packed-mask conditioning path is not yet wired. Diagnose
+            // explicitly rather than silently concatenating a 64-wide control (which would
+            // mis-shape the 384-wide x_embedder).
+            throw new NotImplementedException(
+                "This Flux checkpoint is FLUX.1 Fill (x_embedder input dim 384), which requires masked-image + " +
+                "mask conditioning (64 noise + 320 packed masked-latent+mask). That conditioning path is not yet " +
+                "implemented; Canny / Depth (input dim 128) are supported. See PARAM_PARITY_FIX_PLAN.md Phase 1.6.");
+        }
         if (isToolsModel)
         {
             if (controlImage is null)
             {
                 throw new InvalidOperationException(
-                    "This Flux checkpoint is a FLUX.1 Tools variant (Canny / Depth / Fill — x_embedder input dim is 128) and requires a control image. Pass one via the controlImage parameter; for Canny it should be the canny-edge map of the user's reference image, for Depth a depth-map estimate, for Fill the masked-image + mask conditioning.");
+                    "This Flux checkpoint is a FLUX.1 Tools variant (Canny / Depth — x_embedder input dim is 128) and requires a control image. Pass one via the controlImage parameter; for Canny it should be the canny-edge map of the user's reference image, for Depth a depth-map estimate.");
             }
             if (_vaeEncoder is null)
             {

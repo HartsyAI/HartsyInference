@@ -9,9 +9,13 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// stride 20) → 6 ViT blocks → LayerNorm → linear Gaussian bottleneck (1024 → 2·16, μ taken deterministically) →
 /// linear 16 → 1024 → 12 ViT blocks → LayerNorm → linear patch predictor (1024 → 1200) → unpatchify. ViT blocks use
 /// affine LayerNorm, fused-QKV self-attention (bias) with 2-D axial "pixel" RoPE over the first 32 of 64 head dims
-/// (<see cref="AxialRope2D"/> dimPerAxis 16), and a GELU-tanh MLP ×4. The latent scaling factor (20/255) is applied by
+/// (<see cref="AxialRope2D"/> dimPerAxis 16), and a 4× MLP. The latent scaling factor (20/255) is applied by
 /// the pipeline, not here. 360×640 is the only supported resolution upstream; any H/W divisible by the patch works
-/// structurally. Numerics validation-pending. See <c>docs/Research/OASIS_ARCHITECTURE.md</c> § 5.</summary>
+/// structurally. Numerics validation-pending. See <c>docs/Research/OASIS_ARCHITECTURE.md</c> § 5.
+/// <para><b>Known follow-up:</b> upstream's <c>vae.py</c> uses timm's default <c>nn.GELU</c> (exact/erf) in the MLP,
+/// but this path calls <c>backend.Gelu</c> which is the tanh approximation (≤1.5e-4 abs difference). A faithful fix
+/// needs a backend erf-GELU kernel (CPU + CUDA); deferred to avoid breaking GPU residency with a CPU fallback. The DiT
+/// MLP correctly uses tanh-GELU. Tracked in <c>docs/Checklists/PARITY_VERIFICATION.md</c>.</para></summary>
 public sealed unsafe class OasisVitVae
 {
     private readonly int _latentDim;

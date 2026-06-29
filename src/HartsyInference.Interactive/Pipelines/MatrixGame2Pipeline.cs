@@ -112,7 +112,7 @@ public sealed unsafe class MatrixGame2Pipeline : DiffusionPipelineBase
         Logs.Warning("Matrix-Game 2 pipeline is first-run-validation pending — numerics unverified vs the reference.");
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
-        FlowMatchDmdScheduler scheduler = new(_config.DenoisingStepList, _config.TimestepShift);
+        FlowMatchDmdScheduler scheduler = new(_config.DenoisingStepList, _config.TimestepShift, _config.WarpDenoisingStep);
 
         // Image-condition latents: seed frame 0, one encoded black frame replicated for the padding positions.
         Tensor seedLatent = _encoder.EncodeRgbFrame(Backend, seedRgb24, width, height);

@@ -83,6 +83,22 @@ public sealed record FluxConfig
         InChannels = 128,
     };
 
+    /// <summary>FLUX.1 Fill preset. Same 12B Dev shape (19+38 blocks, guidance embedding) BUT with a 384-channel
+    /// <c>x_embedder</c> input: 64 packed noise + 320 packed conditioning (masked-image latent 64 + mask 256),
+    /// vs Canny/Depth's 128 (64 + 64). The pipeline detects Fill by <see cref="FluxTransformer.XEmbedInputDim"/>
+    /// ≥ 384 at load time. The masked-image + mask conditioning prep differs from the single-control-image concat
+    /// used by Canny/Depth (see <c>PARAM_PARITY_FIX_PLAN.md</c> Phase 1.6).</summary>
+    public static FluxConfig Flux1Fill => new()
+    {
+        HiddenSize = 3072,
+        NumHeads = 24,
+        HeadDim = 128,
+        Depth = 19,
+        DepthSingleBlocks = 38,
+        GuidanceEmbed = true,
+        InChannels = 384,
+    };
+
     /// <summary>Auto-detects config from weight key count. Counts transformer_blocks.* and single_transformer_blocks.* prefixes.</summary>
     public static FluxConfig FromWeights(IReadOnlyDictionary<string, object> keys)
     {

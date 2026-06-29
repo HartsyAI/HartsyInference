@@ -59,6 +59,11 @@ public sealed record RopeScaling
     /// <summary>YaRN slow-rotation boundary (HF <c>beta_slow</c>, default 1).</summary>
     public double BetaSlow { get; init; } = 1.0;
 
+    /// <summary>DeepSeek YaRN <c>mscale_all_dim</c> (GGUF <c>rope.scaling.yarn_log_multiplier</c>): the attention
+    /// mscale is <c>1 + YarnLogMultiplier·ln(factor)</c> and enters the attention <i>score</i> scale squared
+    /// (DeepSeek-V2/V3 MLA). 0 (default) means the standard YaRN mscale. Not used by the cos/sin layout itself.</summary>
+    public double YarnLogMultiplier { get; init; }
+
     /// <summary>Explicit attention scaling (mscale) baked into cos/sin. <c>NaN</c> = infer per-type
     /// (YaRN: 0.1·ln(factor)+1; others: 1).</summary>
     public double AttentionFactor { get; init; } = double.NaN;

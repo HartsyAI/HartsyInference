@@ -30,7 +30,7 @@ public sealed unsafe class HunyuanGameCraftPipelineTests
         cameraNet.LoadWeights(BuildCameraWeights(cfg.HiddenSize));
 
         // Hlat=Wlat=2 → full image 16×16; tLat=2 → T_pix=5 → camera tokens align to the DiT image grid (S_img=2).
-        GameCraftActionEncoder actionEnc = new(fx: 8, fy: 8, cx: 8, cy: 8, height: 16, width: 16, fps: 25);
+        GameCraftActionEncoder actionEnc = new(fx: 8, fy: 8, cx: 8, cy: 8, height: 16, width: 16, framesPerChunk: 25);
         HunyuanVideoVaeDecoder vaeDec = new(); // unloaded; DenoiseChunk does not use it
 
         using HunyuanGameCraftPipeline pipeline = new(cpu, dit, vaeDec, cameraNet, actionEnc, cfg,
@@ -65,8 +65,8 @@ public sealed unsafe class HunyuanGameCraftPipelineTests
             ["camera_in.encode_second.0.weight"] = T(r, 96, 192, 1, 1), ["camera_in.encode_second.0.bias"] = T(r, 96),
             ["camera_in.encode_second.1.weight"] = Ones(96), ["camera_in.encode_second.1.bias"] = Zeros(96),
             ["camera_in.final_proj.weight"] = T(r, 16, 96, 1, 1), ["camera_in.final_proj.bias"] = T(r, 16),
-            ["camera_in.patch_embed.proj.weight"] = T(r, hidden, 16 * 2 * 2), ["camera_in.patch_embed.proj.bias"] = T(r, hidden),
-            ["camera_in.scale"] = Ones(hidden),
+            ["camera_in.camera_in.proj.weight"] = T(r, hidden, 16 * 2 * 2), ["camera_in.camera_in.proj.bias"] = T(r, hidden),
+            ["camera_in.scale"] = Ones(1),
         };
     }
 

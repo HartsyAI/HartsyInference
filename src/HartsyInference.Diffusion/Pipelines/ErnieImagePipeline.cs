@@ -43,11 +43,12 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     /// <param name="vaeBnMean">Optional <c>[1, 32, 1, 1]</c> running-mean tensor for the Flux2 VAE BN-style un-normalization. Pass <c>null</c> to skip un-normalization.</param>
     /// <param name="vaeBnVar">Optional running-var tensor (same shape as <paramref name="vaeBnMean"/>).</param>
     /// <param name="vaeBnEps">Numerical epsilon used in <c>std = sqrt(var + eps)</c>. Default 1e-5 (matches diffusers' BN default).</param>
-    /// <param name="schedulerShift">Flow-match scheduler shift. Default 1.0 (no shift) — set per the model's <c>scheduler_config.json</c>.</param>
+    /// <param name="schedulerShift">Flow-match scheduler shift. Default <b>4.0</b> per ERNIE-Image's
+    /// <c>scheduler_config.json</c> (<c>shift=4.0</c>, static); ERNIE-Image-Turbo may differ.</param>
     public ErnieImagePipeline(IBackend backend, IErnieTextEncoder textEncoder, ErnieImageTransformer transformer,
         VaeDecoder vaeDecoder, ErnieImageConfig config,
         Tensor? vaeBnMean = null, Tensor? vaeBnVar = null, float vaeBnEps = 1e-5f,
-        float schedulerShift = 1.0f)
+        float schedulerShift = 4.0f)
         : base(backend)
     {
         _textEncoder = textEncoder;

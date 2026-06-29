@@ -106,6 +106,12 @@ public sealed record MlaConfig
 
     /// <summary>Full per-head Q/K dimension used for the attention scores: nope + rope.</summary>
     public int QkHeadDim => QkNopeHeadDim + QkRopeHeadDim;
+
+    /// <summary>Pre-computed softmax score scale (DeepSeek YaRN: <c>mscale²/√QkHeadDim</c> where
+    /// <c>mscale = 1 + yarn_log_multiplier·ln(factor)</c>). 0 (default) falls back to the plain
+    /// <c>1/√QkHeadDim</c>. llama.cpp folds the YaRN <c>mscale²</c> into the attention score scale (not the
+    /// cos/sin), so for DeepSeek long-context the cos/sin mscale is left neutral and this carries it.</summary>
+    public float AttnScale { get; init; }
 }
 
 /// <summary>Architecture description for the config-driven <see cref="GenericTransformer"/> — one record that
@@ -121,7 +127,9 @@ public sealed record TransformerConfig
     /// <summary>Residual-stream width.</summary>
     public required int HiddenSize { get; init; }
 
-    /// <summary>Number of decoder layers.</summary>
+    /// <summary>Number of decoder layers actually run for next-token decoding. For models with Multi-Token
+    /// Prediction (DeepSeek-V3 / GLM-4-MoE / bailingmoe2) this already excludes the trailing
+    /// <c>nextn_predict_layers</c> MTP layer(s) — those are speculative-draft heads, not part of the main path.</summary>
     public required int NumLayers { get; init; }
 
     /// <summary>Number of attention query heads.</summary>

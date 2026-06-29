@@ -19,6 +19,11 @@ public static class GgufConfigFactory
         if (arch.Length == 0) throw new ArgumentException("GGUF metadata has no general.architecture.", nameof(metadata));
 
         int layers = RequireUInt(metadata, $"{arch}.block_count");
+        // Multi-Token-Prediction: DeepSeek-V3 / GLM-4-MoE / bailingmoe2 store nextn_predict_layers extra trailing
+        // layers used only as speculative-draft heads. They are NOT part of the main decode path (running them as
+        // normal decoder layers corrupts the output), so exclude them from the layer count. 0 for everything else.
+        int nextn = (int)metadata.GetUInt32($"{arch}.nextn_predict_layers", 0u);
+        int decoderLayers = layers - nextn;
         int hidden = RequireUInt(metadata, $"{arch}.embedding_length");
         int heads = RequireUInt(metadata, $"{arch}.attention.head_count");
         int kvHeads = (int)metadata.GetUInt32($"{arch}.attention.head_count_kv", (uint)heads);
@@ -64,8 +69,10 @@ public static class GgufConfigFactory
         float queryPreAttn = metadata.GetFloat32($"{arch}.attention.query_pre_attn_scalar", 0f);
         float localTheta = isGemma3 ? metadata.GetFloat32($"{arch}.rope.local_freq_base", 10_000f) : 0f;
         int swWindow = (int)metadata.GetUInt32($"{arch}.attention.sliding_window", 0u);
+        // Sliding-window layer cadence. GPT-OSS alternates SWA every other layer (period 2); Gemma-3 = 5 local : 1
+        // global (6); Gemma-2 alternates (2); Cohere2 = 3 local : 1 global (4). 0 = all-global.
         int swPattern = (int)metadata.GetUInt32($"{arch}.attention.sliding_window_pattern",
-            isGemma3 ? 6u : isGemma2 ? 2u : arch == "cohere2" ? 4u : 0u);
+            isGemma3 ? 6u : isGemma2 ? 2u : arch == "cohere2" ? 4u : arch is "gpt-oss" or "gptoss" ? 2u : 0u);
         float attnCap = isGemma2 ? metadata.GetFloat32($"{arch}.attn_logit_softcapping", 0f) : 0f;
         float finalCap = isGemma2 ? metadata.GetFloat32($"{arch}.final_logit_softcapping", 0f) : 0f;
 
@@ -79,6 +86,10 @@ public static class GgufConfigFactory
         // Cohere (Command-R / cohere2): LayerNorm + parallel residual + a logit MULTIPLIER (so divide by its
         // reciprocal). Granite's logit_scale is a divisor; Cohere's is a multiplier — hence the inverse here.
         bool isCohere = arch == "cohere2" || arch == "command-r";
+        // StableLM uses LayerNorm (weight + bias) for all norms — including its optional per-head q/k norm — but a
+        // standard *sequential* pre-norm residual (not Cohere's parallel residual). Partial rotary and QKV bias are
+        // detected structurally above.
+        bool isStablelm = arch == "stablelm";
 
         // GPT-OSS: MoE decoder with learned per-head attention sinks (a logit in the softmax denominator that
         // carries no value). Sigmoid routing + the o200k tokenizer come from the existing MoE/tokenizer paths.
@@ -109,12 +120,33 @@ public static class GgufConfigFactory
         {
             int kvLora = (int)metadata.GetUInt32($"{arch}.attention.kv_lora_rank");
             int qkRope = (int)metadata.GetUInt32($"{arch}.rope.dimension_count");
-            int vDim = (int)metadata.GetUInt32($"{arch}.attention.value_length");
             int qLora = (int)metadata.GetUInt32($"{arch}.attention.q_lora_rank", 0u);
+            // DeepSeek-V2/V3 carry separate MLA head dims (key_length_mla=192 / value_length_mla=128) distinct
+            // from the non-MLA key_length/value_length. Prefer the *_mla keys when present (llama.cpp uses
+            // n_embd_head_k_mla / _v_mla for the MLA path), else fall back to the standard head dims.
+            int qkHead = (int)metadata.GetUInt32($"{arch}.attention.key_length_mla", 0u);
+            if (qkHead == 0) qkHead = headDim;
+            int vDim = (int)metadata.GetUInt32($"{arch}.attention.value_length_mla", 0u);
+            if (vDim == 0) vDim = (int)metadata.GetUInt32($"{arch}.attention.value_length");
+            // DeepSeek YaRN folds mscale² into the attention score scale: kq_scale = mscale²/√qkHead,
+            // mscale = 1 + yarn_log_multiplier·ln(factor). The cos/sin mscale is left neutral (attn_factor=1 in
+            // BuildRopeScaling). 0 → GenericTransformer uses the plain 1/√qkHead.
+            float mlaScale = 0f;
+            if ((metadata.GetString($"{arch}.rope.scaling.type") ?? "").ToLowerInvariant() == "yarn")
+            {
+                double f = metadata.GetFloat32($"{arch}.rope.scaling.factor", 1f);
+                double logMul = metadata.GetFloat32($"{arch}.rope.scaling.yarn_log_multiplier", 0f);
+                if (f > 1.0 && logMul != 0.0)
+                {
+                    double mscale = 1.0 + logMul * Math.Log(f);
+                    mlaScale = (float)(mscale * mscale / Math.Sqrt(qkHead));
+                }
+            }
             mla = new MlaConfig
             {
                 KvLoraRank = kvLora, QLoraRank = qLora,
-                QkNopeHeadDim = headDim - qkRope, QkRopeHeadDim = qkRope, VHeadDim = vDim,
+                QkNopeHeadDim = qkHead - qkRope, QkRopeHeadDim = qkRope, VHeadDim = vDim,
+                AttnScale = mlaScale,
             };
         }
         float expertWeightsScale = isDeepseek ? metadata.GetFloat32($"{arch}.expert_weights_scale", 1f) : 1f;
@@ -139,11 +171,13 @@ public static class GgufConfigFactory
             // top expert_group_used_count groups eligible per token. 0 = flat top-k (V2-Lite, Mixtral, Qwen-MoE).
             int groupCount = (int)metadata.GetUInt32($"{arch}.expert_group_count", 0u);
             int groupUsed = (int)metadata.GetUInt32($"{arch}.expert_group_used_count", 0u);
-            // Top-k weight renormalization: Mixtral / Qwen-MoE renormalize the selected experts' weights to sum
-            // to 1; OLMoE does not (matches llama.cpp's per-arch norm_w). Honor an explicit GGUF flag when present.
+            // Top-k weight renormalization (llama.cpp's per-arch `norm_w` passed to build_moe_ffn): Mixtral
+            // (llama arch) and Qwen3-MoE renormalize the selected experts' weights to sum to 1; OLMoE and
+            // *Qwen2-MoE* do NOT (qwen2moe is build_moe_ffn(..., false) upstream). Honor an explicit GGUF flag
+            // when present, else default per arch.
             bool normTopK = metadata.ContainsKey($"{arch}.expert_weights_norm")
                 ? metadata.GetBool($"{arch}.expert_weights_norm")
-                : arch != "olmoe";
+                : arch is not ("olmoe" or "qwen2moe");
             moe = new MoeConfig
             {
                 NumExperts = expertCount,
@@ -156,14 +190,16 @@ public static class GgufConfigFactory
                 ExpertGroupCount = groupCount,
                 ExpertGroupUsedCount = groupUsed,
                 // DeepSeek's routed_scaling_factor is GGUF's expert_weights_scale (applied to the routed weights).
-                RoutedScalingFactor = groupCount > 0 ? expertWeightsScale : 1f,
+                // llama.cpp scales the routed-expert weights unconditionally (not only under group routing), so
+                // honor the scale whenever it is set — dots1 / bailingmoe / deepseek-v1 scale without grouping.
+                RoutedScalingFactor = expertWeightsScale,
             };
         }
 
         return new TransformerConfig
         {
             HiddenSize = hidden,
-            NumLayers = layers,
+            NumLayers = decoderLayers,
             NumHeads = heads,
             NumKvHeads = kvHeads,
             HeadDim = headDim,
@@ -199,7 +235,7 @@ public static class GgufConfigFactory
             AttentionMultiplier = attnMultiplier,
             ResidualMultiplier = residualMul,
             LogitScale = logitScale,
-            UseLayerNorm = isCohere,
+            UseLayerNorm = isCohere || isStablelm,
             ParallelResidual = isCohere,
             // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
             NoRopeOnGlobalLayers = arch == "cohere2",
@@ -256,10 +292,22 @@ public static class GgufConfigFactory
         double attn = metadata.ContainsKey($"{arch}.rope.scaling.attn_factor")
             ? metadata.GetFloat32($"{arch}.rope.scaling.attn_factor")
             : double.NaN;
+        // YaRN NTK-by-parts boundaries + DeepSeek's mscale_all_dim — honor GGUF overrides (else the record
+        // defaults 32 / 1 / 0). DeepSeek folds the mscale into the attention score scale (see the deepseek2
+        // branch in FromGguf), so here we leave the cos/sin mscale neutral (attn_factor = 1) for it.
+        double betaFast = metadata.GetFloat32($"{arch}.rope.scaling.yarn_beta_fast", 32f);
+        double betaSlow = metadata.GetFloat32($"{arch}.rope.scaling.yarn_beta_slow", 1f);
+        double yarnLogMul = metadata.GetFloat32($"{arch}.rope.scaling.yarn_log_multiplier", 0f);
+        bool isDeepseek = arch == "deepseek2";
         return type switch
         {
             "linear" => new RopeScaling { Type = RopeScalingType.Linear, Factor = factor },
-            "yarn" => new RopeScaling { Type = RopeScalingType.Yarn, Factor = factor, OriginalContextLength = origCtx, AttentionFactor = attn },
+            "yarn" => new RopeScaling
+            {
+                Type = RopeScalingType.Yarn, Factor = factor, OriginalContextLength = origCtx,
+                BetaFast = betaFast, BetaSlow = betaSlow, YarnLogMultiplier = yarnLogMul,
+                AttentionFactor = isDeepseek ? 1.0 : attn,
+            },
             _ => RopeScaling.None,
         };
     }

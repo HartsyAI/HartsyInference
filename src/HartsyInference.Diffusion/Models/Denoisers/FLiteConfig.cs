@@ -75,12 +75,14 @@ public sealed record FLiteConfig
         RopeMaxGrid = 512,
     };
 
-    /// <summary>F-Lite-7B distilled preset. Same architectural shape as <see cref="V1"/> per the technical report; the 7B was produced by knowledge distillation from the 10B with reduced depth + width. **Exact numbers held until config.json from the 7B repo is observed**; placeholder values are scaled-down guesses pending verification.</summary>
+    /// <summary>F-Lite-7B preset. Verified against `Freepik/F-Lite-7B/dit_model/config.json`: same width as the
+    /// 10B (<c>hidden_size=3072, num_heads=12</c>) with depth cut from 40 to <b>28</b>. (The earlier 2560/10/32
+    /// values were placeholder guesses and would mis-shape the real 7B checkpoint.)</summary>
     public static FLiteConfig V1_7B => new()
     {
-        HiddenSize = 2560,
-        NumHeads = 10,
-        Depth = 32,
+        HiddenSize = 3072,
+        NumHeads = 12,
+        Depth = 28,
         InChannels = 16,
         PatchSize = 2,
         MlpRatio = 4.0f,

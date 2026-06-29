@@ -1,19 +1,25 @@
 namespace HartsyInference.Interactive.Camera;
 
-/// <summary>Plücker ray-map construction for camera-conditioned world models: per pixel, the camera ray's world-space
-/// origin and unit direction — a 6-channel <c>(H, W, 6)</c> map laid out <c>[o_x, o_y, o_z, d_x, d_y, d_z]</c>.
-/// Ported from Matrix-Game-3 <c>utils/cam_utils.py:get_plucker_embeddings</c> (Matrix-Game 3.0 builds these per frame
-/// and projects pixel blocks into DiT tokens; GameCraft uses the same 6-channel rays at full resolution).</summary>
+/// <summary>Plücker ray-map construction for camera-conditioned world models: per pixel, a 6-channel <c>(H, W, 6)</c>
+/// map of the camera ray. Two layouts are supported via <paramref name="moment"/>:
+/// <list type="bullet">
+/// <item><b>Default (<c>moment=false</c>)</b> — <c>[o_x, o_y, o_z, d_x, d_y, d_z]</c> (origin + unit direction).
+/// Matches Matrix-Game-3 <c>utils/cam_utils.py:get_plucker_embeddings</c> (<c>cat([rays_o, rays_d])</c>).</item>
+/// <item><b><c>moment=true</c></b> — <c>[m_x, m_y, m_z, d_x, d_y, d_z]</c> where <c>m = o × d</c> (the true Plücker
+/// moment). Matches Hunyuan-GameCraft <c>ray_condition</c> (<c>cat([cross(rays_o, rays_d), rays_d])</c>).</item>
+/// </list>
+/// The two upstream models genuinely differ here, so the layout is an explicit per-call choice.</summary>
 public static class PluckerEmbedding
 {
     /// <summary>Channels per pixel.</summary>
     public const int Channels = 6;
 
-    /// <summary>Fills <paramref name="destination"/> (<c>height·width·6</c> floats, (h, w, c) layout) with the ray
-    /// origin + unit direction of every pixel under <paramref name="cameraToWorld"/> (row-major 4×4) and the pinhole
-    /// intrinsics. Pixel centers are sampled at <c>(x + 0.5, y + 0.5)</c>.</summary>
+    /// <summary>Fills <paramref name="destination"/> (<c>height·width·6</c> floats, (h, w, c) layout) with the per-pixel
+    /// ray under <paramref name="cameraToWorld"/> (row-major 4×4) and the pinhole intrinsics. Pixel centers are sampled
+    /// at <c>(x + 0.5, y + 0.5)</c>. The first 3 channels are the ray origin (<paramref name="moment"/>=false) or the
+    /// Plücker moment <c>o × d</c> (<paramref name="moment"/>=true); the last 3 are the unit world-space direction.</summary>
     public static void Compute(ReadOnlySpan<float> cameraToWorld,
-        float fx, float fy, float cx, float cy, int height, int width, Span<float> destination)
+        float fx, float fy, float cx, float cy, int height, int width, Span<float> destination, bool moment = false)
     {
         if (cameraToWorld.Length < 16) throw new ArgumentException("cameraToWorld must hold 16 floats.", nameof(cameraToWorld));
         if (destination.Length < height * width * Channels)
@@ -34,9 +40,19 @@ public static class PluckerEmbedding
                 float dwy = cameraToWorld[4] * dxc + cameraToWorld[5] * dyc + cameraToWorld[6] * dzc;
                 float dwz = cameraToWorld[8] * dxc + cameraToWorld[9] * dyc + cameraToWorld[10] * dzc;
                 int baseIdx = (yPix * width + xPix) * Channels;
-                destination[baseIdx + 0] = ox;
-                destination[baseIdx + 1] = oy;
-                destination[baseIdx + 2] = oz;
+                if (moment)
+                {
+                    // Plücker moment m = o × d (GameCraft ray_condition layout).
+                    destination[baseIdx + 0] = oy * dwz - oz * dwy;
+                    destination[baseIdx + 1] = oz * dwx - ox * dwz;
+                    destination[baseIdx + 2] = ox * dwy - oy * dwx;
+                }
+                else
+                {
+                    destination[baseIdx + 0] = ox;
+                    destination[baseIdx + 1] = oy;
+                    destination[baseIdx + 2] = oz;
+                }
                 destination[baseIdx + 3] = dwx;
                 destination[baseIdx + 4] = dwy;
                 destination[baseIdx + 5] = dwz;

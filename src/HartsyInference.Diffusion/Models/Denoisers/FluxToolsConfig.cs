@@ -9,7 +9,11 @@ public sealed record FluxToolsConfig
     /// <summary>Specific tool variant.</summary>
     public required FluxToolVariant Variant { get; init; }
 
-    /// <summary>Number of additional input channels for conditioning (0 for Redux/Kontext which use embedding conditioning, varies for Fill/Canny/Depth which use spatial conditioning).</summary>
+    /// <summary>Number of additional <b>packed</b> input channels concatenated onto the 64-wide packed noise token
+    /// before the transformer's <c>x_embedder</c> (so the effective <c>in_channels</c> = 64 + this). Spatial-
+    /// conditioning variants: Canny / Depth = <b>64</b> (a 16-ch VAE latent, 2×2-packed → 64; in_channels 128);
+    /// Fill = <b>320</b> (packed masked-image latent 64 + packed mask 256; in_channels 384); Kontext = <b>64</b>
+    /// (reference-image latent, packed). Embedding-conditioning variants (Redux) = 0.</summary>
     public int AdditionalInChannels { get; init; }
 
     /// <summary>Whether this variant requires a condition image input.</summary>
@@ -22,25 +26,25 @@ public sealed record FluxToolsConfig
     /// <summary>Flux.1 Fill preset (inpainting/outpainting). Accepts masked latent as additional input channels.</summary>
     public static FluxToolsConfig Fill => new()
     {
-        TransformerConfig = FluxConfig.Dev,
+        TransformerConfig = FluxConfig.Flux1Fill,
         Variant = FluxToolVariant.Fill,
-        AdditionalInChannels = 1 + 16, // mask (1ch) + masked latent (16ch)
+        AdditionalInChannels = 320, // packed masked-latent (64) + packed mask (256) → in_channels 384
     };
 
     /// <summary>Flux.1 Canny preset (edge-guided generation). Accepts canny edge map.</summary>
     public static FluxToolsConfig Canny => new()
     {
-        TransformerConfig = FluxConfig.Dev,
+        TransformerConfig = FluxConfig.Flux1Tools,
         Variant = FluxToolVariant.Canny,
-        AdditionalInChannels = 1, // single-channel edge map
+        AdditionalInChannels = 64, // 16-ch VAE latent of the edge map, 2×2-packed → in_channels 128
     };
 
     /// <summary>Flux.1 Depth preset (depth-guided generation). Accepts depth map.</summary>
     public static FluxToolsConfig Depth => new()
     {
-        TransformerConfig = FluxConfig.Dev,
+        TransformerConfig = FluxConfig.Flux1Tools,
         Variant = FluxToolVariant.Depth,
-        AdditionalInChannels = 1, // single-channel depth map
+        AdditionalInChannels = 64, // 16-ch VAE latent of the depth map, 2×2-packed → in_channels 128
     };
 
     /// <summary>Flux.1 Redux preset (image variation). Uses CLIP/SigLIP image embeddings as conditioning.</summary>
@@ -56,7 +60,7 @@ public sealed record FluxToolsConfig
     {
         TransformerConfig = FluxConfig.Dev,
         Variant = FluxToolVariant.Kontext,
-        AdditionalInChannels = 16, // reference image latent
+        AdditionalInChannels = 64, // 16-ch reference-image latent, 2×2-packed
     };
 }
 

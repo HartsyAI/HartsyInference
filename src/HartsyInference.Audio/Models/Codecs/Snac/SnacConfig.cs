@@ -61,25 +61,31 @@ public sealed record SnacConfig
     /// <summary>SNAC 24 kHz — Orpheus TTS preset (<c>hubertsiuzdak/snac_24khz</c>).</summary>
     public static SnacConfig Snac24kHz => new();
 
-    /// <summary>SNAC 32 kHz preset.</summary>
+    /// <summary>SNAC 32 kHz preset (<c>hubertsiuzdak/snac_32khz</c>). Rates / strides match the published
+    /// checkpoint; NOT numerically validated. The 32 kHz and 44.1 kHz models add a windowed LocalMHA
+    /// (attn_window_size 32) in the encoder/decoder; wiring that block is Phase 4.</summary>
     public static SnacConfig Snac32kHz => new()
     {
         SampleRate = 32_000,
-        EncoderRates = [2, 4, 8, 8],
-        DecoderRates = [8, 8, 4, 2],
+        EncoderDim = 64,
+        DecoderDim = 1_536,
+        EncoderRates = [2, 3, 8, 8],
+        DecoderRates = [8, 8, 3, 2],
         NCodebooks = 4,
-        VqStrides = [4, 2, 1, 1],
+        VqStrides = [8, 4, 2, 1],
     };
 
-    /// <summary>SNAC 44.1 kHz preset (music-focused, 3 codebooks).</summary>
+    /// <summary>SNAC 44.1 kHz preset (<c>hubertsiuzdak/snac_44khz</c>, music-focused). Published checkpoint
+    /// uses 4 codebooks with strides [8,4,2,1]; the old [3,3,7,7] values were library constructor defaults.
+    /// NOT numerically validated. LocalMHA (attn_window_size 32) wiring is Phase 4.</summary>
     public static SnacConfig Snac44kHz => new()
     {
         SampleRate = 44_100,
         EncoderDim = 64,
         DecoderDim = 1_536,
-        EncoderRates = [3, 3, 7, 7],
-        DecoderRates = [7, 7, 3, 3],
-        NCodebooks = 3,
-        VqStrides = [8, 4, 2],
+        EncoderRates = [2, 3, 8, 8],
+        DecoderRates = [8, 8, 3, 2],
+        NCodebooks = 4,
+        VqStrides = [8, 4, 2, 1],
     };
 }

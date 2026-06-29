@@ -61,6 +61,29 @@ public sealed record LtxVideoConfig
     /// <summary>Default CFG guidance scale.</summary>
     public float GuidanceScale { get; init; } = 3.0f;
 
-    /// <summary>The base LTX-Video preset.</summary>
+    /// <summary>Whether the VAE decoder is timestep-conditioned (0.9.1+ and all 13B variants). When true the
+    /// pipeline must decode at <see cref="DecodeTimestep"/> / <see cref="DecodeNoiseScale"/>; the 0.9.0 base VAE
+    /// is not timestep-conditioned.</summary>
+    public bool VaeTimestepConditioned { get; init; }
+
+    /// <summary>VAE decode timestep (0.9.1+/13B). Reference default 0.05.</summary>
+    public float DecodeTimestep { get; init; } = 0.05f;
+
+    /// <summary>VAE decode noise scale (0.9.1+/13B). Reference default 0.025.</summary>
+    public float DecodeNoiseScale { get; init; } = 0.025f;
+
+    /// <summary>The base LTX-Video 0.9.0 preset (2B): 28 layers, head_dim 64, cross-attn 2048, non-timestep VAE.</summary>
     public static LtxVideoConfig V09 => new();
+
+    /// <summary>LTX-Video 0.9.7 / 0.9.8 preset (13B). Verified against
+    /// <c>Lightricks/LTX-Video-0.9.7-distilled/transformer/config.json</c>: <c>attention_head_dim=128</c>
+    /// (inner 4096), <c>num_layers=48</c>, <c>cross_attention_dim=4096</c>. The 13B VAE is timestep-conditioned
+    /// (decode at 0.05 / 0.025). 0.9.8 shares this transformer shape.</summary>
+    public static LtxVideoConfig V097 => new()
+    {
+        HeadDim = 128,
+        NumLayers = 48,
+        CrossAttentionDim = 4096,
+        VaeTimestepConditioned = true,
+    };
 }

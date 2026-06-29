@@ -48,7 +48,10 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         _bnVar = bnVar;
         _bnEps = bnEps;
         _config = config;
-        _hiddenLayers = hiddenLayers ?? [9, 18, 27];
+        // Text-encoder hidden-state taps differ by encoder (BFL flux2 text_encoder.py):
+        // Mistral-Small (Dev) taps [10,20,30]; Qwen3 (Klein) taps [9,18,27].
+        _hiddenLayers = hiddenLayers ??
+            (config.TextEncoderType == Flux2TextEncoderType.Mistral ? [10, 20, 30] : [9, 18, 27]);
     }
 
     /// <summary>Generates an image from pre-tokenized prompt input. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>:
@@ -115,7 +118,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Text encoder forward ───────────────────────────────────
-        Logs.Info("Encoding text with Qwen3 (multi-layer hidden states)...");
+        Logs.Info($"Encoding text with {(_config.TextEncoderType == Flux2TextEncoderType.Mistral ? "Mistral-Small" : "Qwen3")} (multi-layer hidden states, layers [{string.Join(",", _hiddenLayers)}])...");
         int[][] batchedTokenIds = [promptTokenIds];
         Tensor textEmbeddings = _textEncoder.EncodeMultiLayer(Backend, batchedTokenIds, _hiddenLayers);
         int txtSeqLen = (int)textEmbeddings.Shape[1];

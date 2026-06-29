@@ -92,6 +92,12 @@ public sealed record Kandinsky5Config
     /// <summary>QK-norm epsilon (RMSNorm default 1e-5).</summary>
     public float QkNormEps { get; init; } = 1e-5f;
 
+    /// <summary>Attention implementation the checkpoint was trained with (<c>attention_type</c> in the reference
+    /// config). <c>"regular"</c> = dense attention (T2I-Lite and the 5s video checkpoints); <c>"nabla"</c> = the
+    /// NABLA sparse attention used by the longer (10s) video checkpoints. Pipelines should key any sparse-attention
+    /// warning off this field, not off the requested frame count.</summary>
+    public string AttentionType { get; init; } = "regular";
+
     /// <summary>Lite preset (kandinskylab/Kandinsky-5.0-T2I-Lite-sft-Diffusers; ~6B params).
     /// Source: <c>transformer/config.json</c> — model_dim=2560, ff_dim=10240, 2 text blocks + 50 visual blocks,
     /// axes_dims=[32,48,48] (head_dim=128, num_heads=20), in_text_dim=3584 (Qwen2.5-VL), in_text_dim2=768 (CLIP-L),

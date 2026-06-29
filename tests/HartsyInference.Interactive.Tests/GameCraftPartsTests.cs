@@ -17,7 +17,7 @@ public sealed unsafe class GameCraftPartsTests
     [Fact]
     public void ActionEncoder_ProducesFinitePluckerMap()
     {
-        using GameCraftActionEncoder enc = new(fx: 8, fy: 8, cx: 8, cy: 8, height: 16, width: 16, fps: 25);
+        using GameCraftActionEncoder enc = new(fx: 8, fy: 8, cx: 8, cy: 8, height: 16, width: 16, framesPerChunk: 25);
         Assert.Single(enc.Streams);
         Assert.Equal(ActionStreamRole.PluckerMap, enc.Streams[0].Role);
         Assert.Equal(16 * 16 * 6, enc.Streams[0].FloatsPerFrame);
@@ -82,8 +82,8 @@ public sealed unsafe class GameCraftPartsTests
             ["camera_in.encode_second.0.weight"] = T(r, 96, 192, 1, 1), ["camera_in.encode_second.0.bias"] = T(r, 96),
             ["camera_in.encode_second.1.weight"] = Ones(96), ["camera_in.encode_second.1.bias"] = Zeros(96),
             ["camera_in.final_proj.weight"] = T(r, 16, 96, 1, 1), ["camera_in.final_proj.bias"] = T(r, 16),
-            ["camera_in.patch_embed.proj.weight"] = T(r, hidden, 16 * 2 * 2), ["camera_in.patch_embed.proj.bias"] = T(r, hidden),
-            ["camera_in.scale"] = Ones(hidden),
+            ["camera_in.camera_in.proj.weight"] = T(r, hidden, 16 * 2 * 2), ["camera_in.camera_in.proj.bias"] = T(r, hidden),
+            ["camera_in.scale"] = Ones(1),
         };
     }
 

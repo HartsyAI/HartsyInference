@@ -50,24 +50,28 @@ public sealed record Sd3Config
         UseQkNorm = false, // Original SD3 Medium release may not have QK-norm
     };
 
-    /// <summary>SD3.5 Medium preset (2.5B params, 24 layers, 1536 hidden, dual attention + QK-norm).</summary>
+    /// <summary>SD3.5 Medium preset (2.5B params, 24 layers, 1536 hidden, MMDiT-X dual attention + QK-norm).
+    /// <c>dual_attention_layers = [0..12]</c> (13 layers) and <c>pos_embed_max_size = 384</c> per the reference
+    /// <c>stabilityai/stable-diffusion-3.5-medium</c> transformer config (Large uses 192 and no dual attention).</summary>
     public static Sd3Config Medium35 => new()
     {
         Depth = 24,
         HiddenSize = 1536,
         NumHeads = 24,
         UseQkNorm = true,
-        DualAttentionLayers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        PosEmbedMaxSize = 384,
+        DualAttentionLayers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     };
 
-    /// <summary>SD3.5 Large preset (8B params, 38 layers, 2432 hidden, dual attention + QK-norm).</summary>
+    /// <summary>SD3.5 Large preset (8B params, 38 layers, 2432 hidden, QK-norm). SD3.5 Large is plain MMDiT —
+    /// the MMDiT-X dual-attention feature is Medium-only, so <c>dual_attention_layers = []</c> (none) here.</summary>
     public static Sd3Config Large35 => new()
     {
         Depth = 38,
         HiddenSize = 2432,
         NumHeads = 38,
         UseQkNorm = true,
-        DualAttentionLayers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        DualAttentionLayers = null,
     };
 
     /// <summary>Auto-detects config from a weight tensor shape. Key formula: depth = patch_embed_weight.shape[0] / 64.</summary>

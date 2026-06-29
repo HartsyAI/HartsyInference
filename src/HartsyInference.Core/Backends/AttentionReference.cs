@@ -14,9 +14,13 @@ public static class AttentionReference
     /// <paramref name="softcap"/> &gt; 0 each logit is soft-capped via <c>softcap·tanh(score/softcap)</c>.
     /// When <paramref name="sink"/> is non-null (a <c>[Hq]</c> F32 tensor of per-head sink logits, GPT-OSS),
     /// each head's sink joins the softmax denominator but contributes no value
-    /// (<c>softmax([scores, sink])</c> with the sink column dropped from the weighted sum).</summary>
+    /// (<c>softmax([scores, sink])</c> with the sink column dropped from the weighted sum).
+    /// When <paramref name="slidingWindow"/> &gt; 0, query row <c>r</c> additionally only attends the most recent
+    /// <c>slidingWindow</c> keys (absolute positions <c>qAbs-slidingWindow+1 .. qAbs</c>) — local-attention layers
+    /// of Gemma-2/3, Cohere2, GPT-OSS. 0 = no window (attend the whole causal prefix).</summary>
     public static unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value,
-        int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null)
+        int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null,
+        int slidingWindow = 0)
     {
         if (output.DType != DType.F32 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32)
             throw new NotSupportedException("FlashAttention reference only supports F32.");
@@ -44,9 +48,11 @@ public static class AttentionReference
                 {
                     long qBase = (((long)bi * hq + h) * tq + r) * d;
                     int kMax = causal ? Math.Min(kvLen - 1, qOffset + r) : kvLen - 1;
+                    // Sliding-window local attention: drop keys older than `slidingWindow` positions back.
+                    int kMin = slidingWindow > 0 ? Math.Max(0, qOffset + r - slidingWindow + 1) : 0;
                     float m = float.NegativeInfinity, l = 0f;
                     for (int x = 0; x < d; x++) acc[x] = 0f;
-                    for (int k = 0; k <= kMax; k++)
+                    for (int k = kMin; k <= kMax; k++)
                     {
                         long kBase = (((long)bi * hkv + hkvIdx) * lk + k) * d;
                         float score = 0f;

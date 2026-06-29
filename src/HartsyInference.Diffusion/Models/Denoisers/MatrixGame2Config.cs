@@ -84,6 +84,16 @@ public sealed record MatrixGame2Config
     /// <summary>Flow-match timestep shift the student was distilled against.</summary>
     public float TimestepShift { get; init; } = 5.0f;
 
+    /// <summary>Whether <see cref="DenoisingStepList"/> entries are warped through the shifted sigma grid before use
+    /// (upstream <c>warp_denoising_step</c>; true for all shipped variants). False treats them as raw timesteps.</summary>
+    public bool WarpDenoisingStep { get; init; } = true;
+
+    /// <summary>Leading frames pinned in the rolling KV cache (upstream <c>sink_size</c>; 0 in all shipped variants).</summary>
+    public int SinkSize { get; init; } = 0;
+
+    /// <summary>Noise added to the cached context frames (upstream <c>context_noise</c>; 0 in all shipped variants).</summary>
+    public float ContextNoise { get; init; } = 0f;
+
     /// <summary>Wan2.1 VAE spatial compression.</summary>
     public int VaeSpatialCompression { get; init; } = 8;
 

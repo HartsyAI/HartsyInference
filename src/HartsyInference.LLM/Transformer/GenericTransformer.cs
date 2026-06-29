@@ -80,6 +80,11 @@ public sealed unsafe class GenericTransformer : IDisposable
         return b;
     }
 
+    /// <summary>Loads a LayerNorm bias (F32) under <paramref name="key"/>, or a zeroed length-<paramref name="n"/>
+    /// vector when the checkpoint ships none (Cohere has no norm bias; StableLM / GPT-2-lineage do).</summary>
+    private static Tensor LoadBiasOrZero(IReadOnlyDictionary<string, Tensor> w, string key, int n)
+        => w.TryGetValue(key, out Tensor? b) ? EnsureF32(b) : ZeroBias(n);
+
     /// <summary>A zeroed tensor of the given shape (used to pad MLA's value heads up to the q/k head dim so the
     /// shared FlashAttention kernel, which assumes equal k/v dims, can be reused).</summary>
     private static Tensor ZeroTensor(TensorShape shape)
@@ -115,7 +120,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         _embed = EnsureF32(w[$"{prefix}.embed_tokens.weight"]);
         _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
-        if (_cfg.UseLayerNorm) _finalNormBias = ZeroBias(_cfg.HiddenSize);
+        if (_cfg.UseLayerNorm) _finalNormBias = LoadBiasOrZero(w, $"{prefix}.norm.bias", _cfg.HiddenSize);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
         // lm_head stays in its loaded dtype (quant kept for the dequant/fused matmul path); the matmul backend
         // handles quantized weights. Only the embed table is forced to F32 (host gather).
@@ -130,7 +135,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     {
         ThrowIfDisposed();
         _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
-        if (_cfg.UseLayerNorm) _finalNormBias = ZeroBias(_cfg.HiddenSize);
+        if (_cfg.UseLayerNorm) _finalNormBias = LoadBiasOrZero(w, $"{prefix}.norm.bias", _cfg.HiddenSize);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
     }
 
@@ -416,9 +421,9 @@ public sealed unsafe class GenericTransformer : IDisposable
         private readonly TransformerConfig _cfg;
         private Tensor? _inNorm, _postNorm;       // pre-attn norm; pre-MLP norm (Gemma: pre_feedforward)
         private Tensor? _postAttnNorm, _postFfnNorm;   // Gemma sandwich norms (post-attn / post-FFN, pre-residual)
-        private Tensor? _normBias;                // zero bias for the LayerNorm path (Cohere has no norm bias)
+        private Tensor? _normBias, _postNormBias;   // LayerNorm biases (input / pre-MLP); zero for Cohere, real for StableLM
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW;
-        private Tensor? _qNorm, _kNorm;
+        private Tensor? _qNorm, _kNorm, _qNormBias, _kNormBias;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
         private Tensor? _kvAProj, _kvANorm, _kvBProj;   // MLA: KV down-proj (+latent norm) and up-proj
         private Tensor? _qAProj, _qANorm, _qBProj;      // MLA q-LoRA: Q down-proj (+norm) and up-proj (DeepSeek-V3/Kimi)
@@ -443,7 +448,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 return;
             }
             _inNorm = LoadNorm(w[$"{prefix}.input_layernorm.weight"], addOne);
-            if (_cfg.UseLayerNorm) _normBias = ZeroBias(_cfg.HiddenSize);
+            if (_cfg.UseLayerNorm) _normBias = LoadBiasOrZero(w, $"{prefix}.input_layernorm.bias", _cfg.HiddenSize);
             if (_cfg.ParallelResidual)
             {
                 // Cohere / GPT-NeoX: one norm per layer; attention and FFN both read it, no pre-FFN norm.
@@ -458,7 +463,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             else
             {
+                // Sequential pre-norm: a pre-MLP norm (StableLM/GPT-2-lineage carry a LayerNorm bias here too).
                 _postNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
+                if (_cfg.UseLayerNorm) _postNormBias = LoadBiasOrZero(w, $"{prefix}.post_attention_layernorm.bias", _cfg.HiddenSize);
             }
             if (_cfg.Mla is not null)
             {
@@ -495,6 +502,12 @@ public sealed unsafe class GenericTransformer : IDisposable
             {
                 _qNorm = LoadNorm(w[$"{prefix}.self_attn.q_norm.weight"], _cfg.RmsNormAddOne);
                 _kNorm = LoadNorm(w[$"{prefix}.self_attn.k_norm.weight"], _cfg.RmsNormAddOne);
+                // StableLM's per-head q/k norm is LayerNorm (with an optional bias), not RMSNorm.
+                if (_cfg.UseLayerNorm)
+                {
+                    _qNormBias = LoadBiasOrZero(w, $"{prefix}.self_attn.q_norm.bias", (int)_qNorm.ElementCount);
+                    _kNormBias = LoadBiasOrZero(w, $"{prefix}.self_attn.k_norm.bias", (int)_kNorm.ElementCount);
+                }
             }
             if (_cfg.AttnSink) _sink = EnsureF32(w[$"{prefix}.self_attn.sinks.weight"]);
             LoadFfn(w, prefix, layerIndex);
@@ -547,7 +560,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _sink, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _upW, _downW];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _upW, _downW];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
@@ -592,8 +605,16 @@ public sealed unsafe class GenericTransformer : IDisposable
             {
                 Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
                 Tensor kN = new(new TensorShape(1, t, hkv, d), DType.F32);
-                backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
-                backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                if (_cfg.UseLayerNorm)   // StableLM: q/k LayerNorm (with optional bias), not RMSNorm
+                {
+                    backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
+                    backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                }
+                else
+                {
+                    backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                    backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                }
                 q.Dispose(); k.Dispose();
                 q = qN; k = kN;
             }
@@ -633,8 +654,11 @@ public sealed unsafe class GenericTransformer : IDisposable
             // valid key count (posStart + t) explicitly; the kernel reads the stride from the tensor shape.
             int kvLen = posStart + t;
             float scale = _cfg.AttnScale;
+            // Local (sliding-window) layers attend only the most recent SlidingWindow keys; global layers attend
+            // the full causal prefix (window 0). No-op for non-SWA models.
+            int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
             Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
-            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink);
+            backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink, window);
             qMh.Dispose();
 
             Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
@@ -665,7 +689,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             attnOut.Dispose();
 
             Tensor preMlp = new(flat, DType.F32);
-            backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
+            Normalize(backend, preMlp, afterAttn, _postNorm!, _postNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
             Tensor mlpOut = Mlp(backend, preMlp, t);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
@@ -767,7 +791,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             cache.AppendStep(backend, layerIndex, kFull, vFull);
             kFull.Dispose(); vFull.Dispose();
             int kvLen = posStart + t;
-            float scale = 1f / MathF.Sqrt(qkHead);   // MLA softmax scale (yarn mscale carried in cos/sin)
+            // MLA softmax scale: DeepSeek YaRN folds mscale²/√qkHead into the score scale (cos/sin left neutral);
+            // 0 → the plain 1/√qkHead (V2-Lite / no long-context scaling).
+            float scale = mla.AttnScale > 0f ? mla.AttnScale : 1f / MathF.Sqrt(qkHead);
             Tensor attn = new(new TensorShape(1, hq, t, qkHead), DType.F32);
             backend.FlashAttention(attn, qFull, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
                 kvLen, 1, causal: true, qOffset: posStart, scale);
@@ -785,7 +811,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.Add(afterAttn, hidden, attnOut);
             attnOut.Dispose();
             Tensor preMlp = new(flat, DType.F32);
-            backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
+            Normalize(backend, preMlp, afterAttn, _postNorm!, _postNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
             Tensor mlpOut = Mlp(backend, preMlp, t);
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
@@ -838,8 +864,16 @@ public sealed unsafe class GenericTransformer : IDisposable
             {
                 Tensor qN = new(new TensorShape(1, b, hq, d), DType.F32);
                 Tensor kN = new(new TensorShape(1, b, hkv, d), DType.F32);
-                backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
-                backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                if (_cfg.UseLayerNorm)
+                {
+                    backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
+                    backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                }
+                else
+                {
+                    backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                    backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                }
                 q.Dispose(); k.Dispose();
                 q = qN; k = kN;
             }
@@ -877,9 +911,10 @@ public sealed unsafe class GenericTransformer : IDisposable
                 cache.AppendStep(backend, layerIndex, kMh, vMh);
                 kMh.Dispose(); vMh.Dispose();
                 int kvLen = cache.CurrentLength + 1;   // append did not advance; +1 for the just-written token
+                int window = _cfg.SlidingWindow > 0 && !_cfg.IsGlobalLayer(layerIndex) ? _cfg.SlidingWindow : 0;
                 Tensor attnSeg = new(new TensorShape(1, 1, hq, d), DType.F32);
                 backend.FlashAttention(attnSeg, qMh, cache.KeyPrefix(layerIndex), cache.ValuePrefix(layerIndex),
-                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap, _sink);
+                    kvLen, group, causal: true, qOffset: cache.CurrentLength, scale, _cfg.AttnLogitSoftcap, _sink, window);
                 qMh.Dispose();
                 segs[s] = attnSeg;
             }
@@ -911,7 +946,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             attnOut.Dispose();
 
             Tensor preMlp = new(flat, DType.F32);
-            backend.RmsNorm(preMlp, afterAttn, _postNorm!, _cfg.RmsNormEps);
+            Normalize(backend, preMlp, afterAttn, _postNorm!, _postNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
             Tensor mlpOut = Mlp(backend, preMlp, b);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);

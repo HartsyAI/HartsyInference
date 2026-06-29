@@ -21,7 +21,7 @@ extern "C" __global__ void lm_flash_attn_f32(
     unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
     unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
     int causal, int qOffset, float scale, float softcap,
-    const float* __restrict__ sink)
+    const float* __restrict__ sink, int slidingWindow)
 {
     unsigned int idx = blockIdx.x;
     unsigned int r = idx % Tq; idx /= Tq;
@@ -42,9 +42,13 @@ extern "C" __global__ void lm_flash_attn_f32(
 
     int kMax = causal ? (int)(qOffset + r) : (int)kvLen - 1;
     if (kMax > (int)kvLen - 1) kMax = (int)kvLen - 1;
+    // Sliding-window local attention (Gemma-2/3, Cohere2, GPT-OSS local layers): only the most recent
+    // `slidingWindow` keys are visible. 0 = no window (full causal prefix).
+    int kMin = (slidingWindow > 0) ? ((int)(qOffset + r) - slidingWindow + 1) : 0;
+    if (kMin < 0) kMin = 0;
 
     float m = -INF_F, l = 0.0f, acc = 0.0f;
-    for (int k = 0; k <= kMax; k++)
+    for (int k = kMin; k <= kMax; k++)
     {
         size_t kvBase = (((size_t)b * Hkv + hkv) * Lk + (unsigned int)k) * D;
         sdata[tid] = (tid < D) ? qv * K[kvBase + tid] : 0.0f;

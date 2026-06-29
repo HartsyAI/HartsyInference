@@ -21,11 +21,15 @@ public sealed record QwenImageConfig
     /// <summary>Number of latent channels.</summary>
     public int InChannels { get; init; } = 16;
 
-    /// <summary>Qwen VL text encoder context dimension.</summary>
-    public int ContextDim { get; init; } = 4096;
+    /// <summary>Qwen VL text encoder context dimension. Qwen-Image's `joint_attention_dim` is <b>3584</b>
+    /// (= Qwen2.5-VL-7B hidden size), NOT 4096 — the text in-projection weight is shaped against this, so it
+    /// must match the encoder hidden dim or the projection will mis-shape on load.</summary>
+    public int ContextDim { get; init; } = 3584;
 
-    /// <summary>Pooled projection dimension.</summary>
-    public int PooledProjectionDim { get; init; } = 2048;
+    /// <summary>Pooled projection dimension (`pooled_projection_dim` = 768 in the diffusers config). Qwen-Image's
+    /// MMDiT does not use a pooled-CLIP conditioning path the way SD3/Flux do, so this is largely vestigial, but
+    /// the value mirrors the reference config.</summary>
+    public int PooledProjectionDim { get; init; } = 768;
 
     /// <summary>MLP ratio for feed-forward blocks.</summary>
     public float MlpRatio { get; init; } = 4.0f;

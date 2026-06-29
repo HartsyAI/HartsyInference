@@ -453,9 +453,11 @@ public interface IBackend : IDisposable
     /// <c>softcap·tanh(score/softcap)</c> before the softmax (Gemma-2 attention-logit soft-cap); 0 disables it.
     /// When <paramref name="sink"/> is non-null (a <c>[Hq]</c> F32 tensor, GPT-OSS attention sinks), each head's
     /// sink logit joins the softmax denominator but contributes no value.
+    /// When <paramref name="slidingWindow"/> &gt; 0, each query additionally attends only the most recent
+    /// <c>slidingWindow</c> keys (Gemma-2/3, Cohere2, GPT-OSS local layers); 0 = full causal prefix.
     /// The CUDA backend overrides this with a kernel; the default is a correct CPU reference.</summary>
-    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null)
-        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink);
+    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0)
+        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow);
 
     /// <summary>Gathers rows: <c>output[m] = input[rowIndices[m]]</c>, where a "row" is the last-dim-sized
     /// vector. <paramref name="output"/> is <c>[M, K]</c>, <paramref name="input"/> <c>[N, K]</c>,

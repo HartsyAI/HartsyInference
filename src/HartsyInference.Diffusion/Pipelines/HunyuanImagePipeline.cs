@@ -159,7 +159,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         TensorShape latentShape = new(1, inChannels, latentH, latentW);
         Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
 
-        FlowMatchEulerDiscreteScheduler scheduler = new(3.0f);
+        FlowMatchEulerDiscreteScheduler scheduler = new(_config.SamplingShift);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 

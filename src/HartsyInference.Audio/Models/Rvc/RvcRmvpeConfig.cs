@@ -3,16 +3,17 @@ using HartsyInference.Audio.Preprocessing;
 namespace HartsyInference.Audio.Models.Rvc;
 
 /// <summary>Configuration for <see cref="RvcRmvpe"/>. Defaults follow the standard RMVPE: 16 kHz in, 128-mel
-/// front-end (n_fft 2048 / hop 160, ~100 Hz frame rate), a 360-bin cents grid starting at C1 (32.70 Hz) with
-/// 20-cent spacing. The UNet channel schedule is a structurally-faithful compact stand-in; the official model
-/// is deeper (reconcile against <c>rmvpe.pt</c>).</summary>
+/// front-end (n_fft = win_length 1024 / hop 160, ~100 Hz frame rate), a 360-bin cents grid whose first bin sits
+/// at 31.70 Hz (cents base 1997.3794, freq = 10 * 2^(cents/1200)) with 20-cent spacing. The UNet channel
+/// schedule is a structurally-faithful compact stand-in; the official model is deeper (reconcile against
+/// <c>rmvpe.pt</c>, Phase 4).</summary>
 public sealed record RvcRmvpeConfig
 {
     public int SampleRate { get; init; } = 16_000;
     public int MelBins { get; init; } = 128;
-    public int NFft { get; init; } = 2_048;
+    public int NFft { get; init; } = 1_024;
     public int HopLength { get; init; } = 160;
-    public int WinLength { get; init; } = 2_048;
+    public int WinLength { get; init; } = 1_024;
     public double Fmin { get; init; } = 30.0;
     public double Fmax { get; init; } = 8_000.0;
 
@@ -25,8 +26,8 @@ public sealed record RvcRmvpeConfig
     /// <summary>Number of pitch-classification bins.</summary>
     public int NumBins { get; init; } = 360;
 
-    /// <summary>Frequency of the first (lowest) pitch bin — C1.</summary>
-    public float FirstFreqHz { get; init; } = 32.70f;
+    /// <summary>Frequency of the first (lowest) pitch bin (cents base 1997.3794 -> 31.70 Hz).</summary>
+    public float FirstFreqHz { get; init; } = 31.70f;
 
     /// <summary>Cents between adjacent bins (360 bins × 20 cents ≈ 6 octaves).</summary>
     public float CentsPerBin { get; init; } = 20f;
@@ -34,8 +35,9 @@ public sealed record RvcRmvpeConfig
     /// <summary>Half-width (in bins) of the local weighted-average decode window.</summary>
     public int LocalAverageWindow { get; init; } = 4;
 
-    /// <summary>Posterior peak below which a frame is reported unvoiced (0 Hz).</summary>
-    public float VoicingThreshold { get; init; } = 0.3f;
+    /// <summary>Posterior peak below which a frame is reported unvoiced (0 Hz). RMVPE uses 0.03
+    /// (<c>to_local_average_cents</c> thred); 0.3 was a 10x error that silenced most voiced frames.</summary>
+    public float VoicingThreshold { get; init; } = 0.03f;
 
     public MelSpectrogramExtractor.Config MelConfig() => new(
         SampleRate: SampleRate,

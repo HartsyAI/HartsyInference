@@ -25,7 +25,7 @@ public sealed record BarkConfig
     public int SemanticInferToken { get; init; } = 129_599;
     public int TextPadToken { get; init; } = 129_595;
     public int CoarseSemanticPadToken { get; init; } = 12_048;
-    public int CoarseInferToken { get; init; } = 12_051;
+    public int CoarseInferToken { get; init; } = 12_050;     // upstream bark/generation.py COARSE_INFER_TOKEN
 
     public int SampleRate { get; init; } = 24_000;
 

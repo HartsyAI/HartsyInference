@@ -208,6 +208,8 @@ public sealed class MoeFeedForward
                 int ex = pick[kk];
                 float wt = score[ex];
                 if (_moe.NormTopKProb) wt /= wsum;
+                // llama.cpp scales the routed weights by w_scale unconditionally (1.0 is a no-op for Qwen/Mixtral).
+                wt *= _moe.RoutedScalingFactor;
                 expertTokens[ex].Add(t);
                 expertWeights[ex].Add(wt);
             }
