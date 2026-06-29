@@ -93,4 +93,66 @@ public sealed class JinjaAndTokenizerTests
         // 'Ġ' (U+0120) is space, 'Ċ' (U+010A) is newline in GPT-2 byte-level space.
         Assert.Equal(" the\n", ByteLevelCodec.Decode("ĠtheĊ"));
     }
+
+    // ── JinjaChatTemplate: normalize-and-retry for strict / system-less templates ───────────────────────
+
+    /// <summary>A Mistral-v0.3-style template: no system role, strict user/assistant alternation. Raises
+    /// (via the template's own raise_exception) the moment a system message appears or two same-role turns
+    /// are adjacent — exactly the conditions JinjaChatTemplate.Encode must normalize away.</summary>
+    private const string MistralStyleTemplate =
+        "{{- bos_token }}" +
+        "{%- for message in messages %}" +
+        "{%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}" +
+        "{{- raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}" +
+        "{%- endif %}" +
+        "{%- if message['role'] == 'user' %}{{- '[INST] ' + message['content'] + ' [/INST]' }}" +
+        "{%- elif message['role'] == 'assistant' %}{{- ' ' + message['content'] + eos_token }}" +
+        "{%- endif %}" +
+        "{%- endfor %}";
+
+    /// <summary>Captures the rendered string handed to the tokenizer so tests can assert on the prompt text.</summary>
+    private sealed class CapturingTokenizer : ILlmTokenizer
+    {
+        public string Last = "";
+        public int[] Encode(string text, bool addSpecial) { Last = text; return [text.Length]; }
+        public int[] EncodeOrdinary(string text) => [text.Length];
+        public string Decode(IReadOnlyList<int> ids) => "";
+        public int? SpecialId(string token) => null;
+        public int? BosId => null;
+        public int? EosId => null;
+        public IReadOnlyList<int> StopIds => [];
+        public string? BosToken => "<s>";
+        public string? EosToken => "</s>";
+    }
+
+    [Fact]
+    public void JinjaChatTemplate_FoldsSystemIntoFirstUser_ForSystemlessTemplate()
+    {
+        JinjaChatTemplate template = new(MistralStyleTemplate);
+        CapturingTokenizer tok = new();
+        // [system, user] would make the template raise (system where user must be); Encode must fold + retry.
+        template.Encode(tok, [ChatMessage.System("You are helpful."), ChatMessage.User("Hi")], addGenerationPrompt: true);
+        Assert.Equal("<s>[INST] You are helpful.\n\nHi [/INST]", tok.Last);
+    }
+
+    [Fact]
+    public void JinjaChatTemplate_MergesConsecutiveSameRole_ForStrictTemplate()
+    {
+        JinjaChatTemplate template = new(MistralStyleTemplate);
+        CapturingTokenizer tok = new();
+        // Two adjacent user turns (e.g. an orphaned user message from a failed prior turn) would break
+        // strict alternation; Encode must merge them into one.
+        template.Encode(tok, [ChatMessage.User("A"), ChatMessage.User("B")], addGenerationPrompt: true);
+        Assert.Equal("<s>[INST] A\n\nB [/INST]", tok.Last);
+    }
+
+    [Fact]
+    public void JinjaChatTemplate_LeavesValidConversationUntouched()
+    {
+        JinjaChatTemplate template = new(MistralStyleTemplate);
+        CapturingTokenizer tok = new();
+        // Already valid (user/assistant/user) — no raise, so the original render is used as-is.
+        template.Encode(tok, [ChatMessage.User("A"), ChatMessage.Assistant("B"), ChatMessage.User("C")], addGenerationPrompt: false);
+        Assert.Equal("<s>[INST] A [/INST] B</s>[INST] C [/INST]", tok.Last);
+    }
 }

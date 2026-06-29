@@ -65,10 +65,10 @@ public sealed record EnCodecConfig
     /// 24 kHz model. False for the symmetric (offline) 48 kHz multi-band variant.</summary>
     public bool Causal { get; init; } = true;
 
-    /// <summary>Conv pad mode — <c>"constant"</c> (zero) or <c>"reflect"</c>. EnCodec
-    /// uses <c>"reflect"</c> by default, but the streaming-compatible models switch to
-    /// <c>"constant"</c>. We default to <c>"constant"</c> for portability.</summary>
-    public string PadMode { get; init; } = "constant";
+    /// <summary>Conv pad mode — <c>"constant"</c> (zero) or <c>"reflect"</c>. The published EnCodec
+    /// checkpoints (24/32/16 kHz) all use <c>"reflect"</c> (HF <c>EncodecConfig.pad_mode</c> default);
+    /// the Kyutai DSM Mimi, which ships composed conv weights, uses <c>"constant"</c>.</summary>
+    public string PadMode { get; init; } = "reflect";
 
     /// <summary>Layer-norm style on the convs. <c>"weight_norm"</c> in EnCodec (we fuse
     /// at load time so this is purely informational). <c>"none"</c> for codecs that

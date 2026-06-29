@@ -166,7 +166,7 @@ public static class CodecCatalog
             GetMaxCodebooks: o => ((XCodecModel)o).NCodebooks,
             ExpectedSampleRate: 16_000,
             ExpectedFrameRate: 50,
-            ExpectedMaxCodebooks: 8),
+            ExpectedMaxCodebooks: 12),
         new(
             Key: "neucodec_24khz",
             Description: "Neuphonic NeuCodec decode (NeuTTS Air) — single FSQ codebook 4^8=65536",

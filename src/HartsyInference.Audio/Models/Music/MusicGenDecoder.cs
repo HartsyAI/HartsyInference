@@ -121,12 +121,15 @@ public sealed unsafe class MusicGenDecoder : IDisposable
 
     private static void AddSinusoid(float* row, int pos, int h)
     {
+        // Matches HF MusicgenSinusoidalPositionalEmbedding.get_embedding:
+        //   emb = exp(arange(half) * -(log(10000)/(half-1)))
+        //   pos_emb = cat([cos(pos*emb), sin(pos*emb)])   ← COS first, then SIN.
         int half = h / 2;
         for (int i = 0; i < half; i++)
         {
             double freq = Math.Exp(-Math.Log(10000.0) * i / Math.Max(1, half - 1));
-            row[i] += (float)Math.Sin(pos * freq);
-            row[half + i] += (float)Math.Cos(pos * freq);
+            row[i] += (float)Math.Cos(pos * freq);
+            row[half + i] += (float)Math.Sin(pos * freq);
         }
     }
 

@@ -10,9 +10,13 @@ namespace HartsyInference.Audio.Models.Music;
 /// <c>docs/Research/YUE_ARCHITECTURE.md</c>.
 ///
 /// <para><b>Reuse:</b> both LLaMA-2 decoders are plain bias-off Llama bodies → reuse <see cref="Qwen2Model"/>
-/// (<see cref="Qwen2Config.AttentionBias"/> = false, MHA via <c>NumKeyValueHeads == NumAttentionHeads</c>);
-/// sampling reuses <see cref="Sampling.NucleusSampler"/>; codec decode reuses the built
-/// <see cref="XCodec"/>. The same "LLaMA emits codec tokens → codec decode" shape as Spark-TTS / CosyVoice.</para>
+/// (<see cref="Qwen2Config.AttentionBias"/> = false; Stage-1 is <b>GQA</b> with 4 KV heads per the real
+/// config.json, not MHA); sampling reuses <see cref="Sampling.NucleusSampler"/>. The same "LLaMA emits codec
+/// tokens" shape as Spark-TTS / CosyVoice.
+///
+/// <para><b>Parity:</b> Stage-1 LM verified vs real <c>m-a-p/YuE-s1-7B-anneal-en-cot</c> weights (teacher-forced
+/// logits corr 1.0, argmax 8/8). The codec decode (<see cref="XCodec"/>) is NOT runnable: the engine's DAC-style
+/// XCodec is wrong-architecture for the real SoundStream/EMA-VQ codec — see PARITY_VERIFICATION.md.</para>
 ///
 /// <para><b>Checkpoint-reconciliation pending:</b> the extended-vocab audio-token base IDs come from the
 /// YuE tokenizer; they are config fields here. The Vocos 16→44.1 kHz upsampler is deferred.</para></summary>
@@ -42,10 +46,12 @@ public sealed record YueConfig
 
     public static YueConfig V1 => new()
     {
+        // Real m-a-p/YuE-s1-7B-anneal-en-cot config.json: LLaMA-2-7B body but GQA with 4 KV heads
+        // (k/v_proj are [512, 4096] = 4 heads x 128 head_dim, NOT MHA) and the YuE-extended vocab is 83968.
         Stage1 = new Qwen2Config
         {
-            HiddenSize = 4_096, NumHiddenLayers = 32, NumAttentionHeads = 32, NumKeyValueHeads = 32,
-            IntermediateSize = 11_008, VocabSize = 100_000, MaxPositionEmbeddings = 16_384,
+            HiddenSize = 4_096, NumHiddenLayers = 32, NumAttentionHeads = 32, NumKeyValueHeads = 4,
+            IntermediateSize = 11_008, VocabSize = 83_968, MaxPositionEmbeddings = 16_384,
             RopeTheta = 10_000f, RmsNormEps = 1e-5f, TieWordEmbeddings = false, AttentionBias = false,
         },
         Stage2 = new Qwen2Config

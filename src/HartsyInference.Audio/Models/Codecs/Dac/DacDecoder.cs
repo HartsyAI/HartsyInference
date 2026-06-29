@@ -178,6 +178,8 @@ internal sealed class DacDecoder
             stride: 1, padLeft: finalPad, padRight: finalPad, dilation: 1, groups: 1);
         activated.Dispose();
 
+        // descript / Spark BiCodec clamp the waveform with a final tanh; the YuE x-codec decoder_2 leaves it raw.
+        if (!_cfg.DecoderFinalTanh) return pcmRaw;
         Tensor pcm = new(pcmRaw.Shape, DType.F32);
         backend.Tanh(pcm, pcmRaw);
         pcmRaw.Dispose();

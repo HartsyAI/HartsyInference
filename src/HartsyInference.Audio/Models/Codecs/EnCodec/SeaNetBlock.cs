@@ -82,17 +82,15 @@ internal sealed unsafe class SeaNetBlock
     {
         if (_conv1W is null) throw new InvalidOperationException($"SeaNetBlock '{_prefix}' weights not loaded.");
 
-        // Path 1: ELU(x) → Conv1d(dim → hidden, k=residual_kernel_size, dilation=d) causal.
+        // Path 1: ELU(x) → Conv1d(dim → hidden, k=residual_kernel_size, dilation=d).
         Tensor a1 = new(x.Shape, DType.F32);
         backend.Elu(a1, x, _cfg.EluAlpha);
 
-        int padTotal1 = (_kernelSize - 1) * _dilation;     // stride=1, so causal pad = (k-1)*d
-        int extraRight1 = GetExtraRightPadding(t, _kernelSize, 1, padTotal1);
-        int t1 = t + padTotal1 + extraRight1 - _dilation * (_kernelSize - 1);
-        Tensor mid = new(new TensorShape(batch, _hidden, t1), DType.F32);
-        backend.Conv1d(mid, a1, _conv1W!, _conv1B,
-            stride: 1, padLeft: padTotal1, padRight: extraRight1,
-            dilation: _dilation, groups: 1);
+        // stride=1 → the conv preserves T. Padding is causal (left-only) for the 24 kHz model, symmetric for the
+        // non-causal 32/16 kHz codecs, and zero- or reflect-filled per cfg.PadMode (matches EncodecConv1d.forward).
+        int t1 = t;
+        Tensor mid = EnCodecConvPad.PaddedConv(backend, a1, _conv1W!, _conv1B,
+            batch, _dim, t, _hidden, _kernelSize, _dilation, _cfg.Causal, _cfg.PadMode);
         a1.Dispose();
 
         // Path 2: ELU(mid) → Conv1d(hidden → dim, k=1). With k=1 the conv preserves T.

@@ -39,6 +39,13 @@ public sealed record T5TextEncoderConfig
     /// if false (v1.1 default), GELU.</summary>
     public bool UseReluActivation { get; init; } = false;
 
+    /// <summary>Attention score scale. T5 (all versions, per the Mesh-TensorFlow "avoid scaling before softmax"
+    /// design) uses <b>1.0</b> — the query is NOT divided by <c>sqrt(head_dim)</c>; the relative position bias and
+    /// initialization compensate. Set this to <c>1.0f</c> for a faithful T5 (MusicGen's <c>google/t5-base</c> needs
+    /// it). Left <c>null</c> the block falls back to <c>1/sqrt(head_dim)</c> (the prior engine default kept for the
+    /// already-shipping Flux/SD3 T5-XXL path until that path is bit-exactly re-validated).</summary>
+    public float? AttentionScale { get; init; }
+
     /// <summary>If true, each encoder layer has its own learned relative position bias (UMT5 convention,
     /// used by Pile-T5-XL / AuraFlow). If false (T5 v1.1 default), only block 0 has a learned bias and
     /// every subsequent block shares it. Using the wrong mode produces a perfect-looking transformer
@@ -70,6 +77,7 @@ public sealed record T5TextEncoderConfig
         VocabSize = 32128,
         GatedFeedForward = false,
         UseReluActivation = true,
+        AttentionScale = 1.0f,   // faithful T5: no 1/sqrt(head_dim) scaling.
         // UsePerLayerPositionBias stays false: T5 v1.0 learns the bias in block 0 and shares it.
     };
 

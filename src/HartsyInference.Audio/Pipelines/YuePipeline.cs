@@ -36,15 +36,10 @@ public sealed unsafe class YuePipeline : IDisposable
         Logs.Info($"YuE S1: {vocal.Count} frames (vocal+accomp cb0) in {sw.ElapsedMilliseconds}ms.");
         if (vocal.Count == 0) return [];
 
-        // Build the 8-codebook code grid for X-Codec. Stage-2 (the residual upsampler) is the deferred
-        // piece — codebooks 1..7 are zero-filled here, so this decodes the cb0 (semantic) content only.
-        int t = vocal.Count;
-        Tensor codes = new(new TensorShape(1, _cfg.NumCodebooks, t), DType.F32);
-        float* cp = (float*)codes.DataPointer;
-        for (int j = 0; j < t; j++) cp[j] = vocal[j];   // codebook 0 = Stage-1 vocal stream
-
-        Tensor audioT = _xcodec.Decode(backend, codes, batch: 1, tFrames: t);
-        codes.Dispose();
+        // YuE Stage-1 emits only the vocal codebook-0 stream; upstream decodes it through x-codec with n_q=1
+        // (CodecManipulator("xcodec", 0, 1)). Codebook 0's index 0 is a valid codeword (not silence), so we
+        // must NOT zero-fill the residual codebooks — decode exactly cb0. Stage-2 (residual upsample) is deferred.
+        Tensor audioT = _xcodec.DecodeCb0(backend, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(vocal));
 
         int n = (int)audioT.Shape[audioT.Shape.Rank - 1];
         float[] audio = new float[n];

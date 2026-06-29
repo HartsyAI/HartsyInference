@@ -299,7 +299,7 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
             switch (v.GetName())
             {
                 case "raise_exception" or "raise":
-                    throw new InvalidOperationException("chat template raised: " + (args.Count > 0 ? Values.ToStr(args[0].Eval(scope)) : ""));
+                    throw new ChatTemplateRaiseException("chat template raised: " + (args.Count > 0 ? Values.ToStr(args[0].Eval(scope)) : ""));
                 case "namespace":
                 {
                     Dictionary<string, object?> ns = new();

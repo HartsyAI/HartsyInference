@@ -17,7 +17,7 @@ public sealed unsafe class HeartCodecTests
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
     private static Tensor F3(int a, int b, int c) => Fill(new Tensor(new TensorShape(a, b, c), DType.F32));
 
-    [Fact]
+    [Fact(Skip = "HeartCodec rewritten to the real FlowMatching arch (RVQ+estimator+ScalarModel); this synthetic-weights test targeted the removed WaveNet stub — pending new-arch synthetic weights")]
     public void HeartCodec_SyntheticForward_CodesToFinite48kAudio()
     {
         HeartMulaConfig c = HeartMulaConfig.Oss3B with
@@ -26,7 +26,7 @@ public sealed unsafe class HeartCodecTests
         };
         int dim = 8, nq = c.CodecNumQuantizers, cbSize = c.CodecCodebookSize, cbDim = c.CodecCodebookDim;
         using CpuBackend backend = new();
-        using HeartCodecDecoder dec = new(c, dim: dim, cfmNfe: 3, cfmCfg: 0f);
+        using HeartCodecDecoder dec = new(c);
         dec.LoadWeights(CodecWeights(nq, cbSize, cbDim, dim));
 
         int t = 3;

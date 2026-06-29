@@ -90,15 +90,18 @@ public sealed unsafe class CsmModel : IDisposable
         frame[0] = c0;
         if (c0 == _cfg.AudioEosToken) { last.Dispose(); return frame; }
 
-        // Decoder fills codebooks 1..7, conditioned on projection(backbone hidden) + c0 embedding.
+        // Decoder fills codebooks 1..7. Upstream `generate_frame`: build curr_h = [last_h, embed(c0), …] in the
+        // backbone hidden space, apply `projection` to the WHOLE sequence, run the depth decoder over it (fresh
+        // KV cache, max len = num_codebooks), and matmul the last hidden by `audio_head[i-1]`. The decoder input
+        // is the full backbone-hidden (3072) — no truncation.
         int dh = _cfg.Decoder.HiddenSize;
-        Tensor projected = WhisperOps.ProjectLinear(backend, last, _projW!, bias: null, 1, 1, bh, dh);
-        last.Dispose();
 
         List<int> decoderSeq = new() { c0 };
         for (int cb = 1; cb < _cfg.NumCodebooks; cb++)
         {
-            Tensor decInput = BuildDecoderInput(projected, decoderSeq, dh);
+            Tensor curr = BuildDecoderSequence(last, decoderSeq, bh);     // [1, 1+seq, bh]
+            Tensor decInput = WhisperOps.ProjectLinear(backend, curr, _projW!, bias: null, 1, (int)curr.Shape[1], bh, dh);
+            curr.Dispose();
             int dt = (int)decInput.Shape[1];
             using StreamingKvCache dCache = new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, dt, _cfg.Decoder.HeadDim);
             Tensor dHidden = _decoder.ForwardEmbeds(backend, decInput, 1, dt, 0, dCache);
@@ -112,8 +115,53 @@ public sealed unsafe class CsmModel : IDisposable
             frame[cb] = cbVal;
             decoderSeq.Add(cbVal);
         }
-        projected.Dispose();
+        last.Dispose();
         return frame;
+    }
+
+    /// <summary>Teacher-forced parity probe (not used in inference). Runs the backbone over
+    /// <paramref name="contextEmbeds"/>, returns the codebook-0 logits, then runs the depth decoder with the
+    /// codebooks teacher-forced to <paramref name="forcedCodes"/> (length = <see cref="CsmConfig.NumCodebooks"/>;
+    /// <c>forcedCodes[0]</c> is c0). Returns <c>(c0Logits[vocab], decoderLogits[NumCodebooks-1][vocab])</c>.</summary>
+    public (float[] C0, float[][] Dec) DebugFrameLogits(IBackend backend, Tensor contextEmbeds, ReadOnlySpan<int> forcedCodes)
+    {
+        int bt = (int)contextEmbeds.Shape[1];
+        int bh = _cfg.Backbone.HiddenSize;
+        int vocab = _cfg.AudioVocab;
+        using StreamingKvCache bCache = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, bt, _cfg.Backbone.HeadDim);
+        Tensor hidden = _backbone.ForwardEmbeds(backend, contextEmbeds, 1, bt, 0, bCache);
+        Tensor last = SliceLast(hidden, bh);
+        hidden.Dispose();
+
+        Tensor c0Logits = WhisperOps.ProjectLinear(backend, last, _c0Head!, bias: null, 1, 1, bh, vocab);
+        float[] c0 = new float[vocab];
+        new Span<float>((void*)c0Logits.DataPointer, vocab).CopyTo(c0);
+        c0Logits.Dispose();
+
+        int dh = _cfg.Decoder.HiddenSize;
+        float[][] dec = new float[_cfg.NumCodebooks - 1][];
+        List<int> decoderSeq = new() { forcedCodes[0] };
+        for (int cb = 1; cb < _cfg.NumCodebooks; cb++)
+        {
+            Tensor curr = BuildDecoderSequence(last, decoderSeq, bh);
+            Tensor decInput = WhisperOps.ProjectLinear(backend, curr, _projW!, bias: null, 1, (int)curr.Shape[1], bh, dh);
+            curr.Dispose();
+            int dt = (int)decInput.Shape[1];
+            using StreamingKvCache dCache = new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, dt, _cfg.Decoder.HeadDim);
+            Tensor dHidden = _decoder.ForwardEmbeds(backend, decInput, 1, dt, 0, dCache);
+            decInput.Dispose();
+            Tensor dLast = SliceLast(dHidden, dh);
+            dHidden.Dispose();
+            Tensor cbLogits = WhisperOps.ProjectLinear(backend, dLast, _audioHead[cb - 1]!, bias: null, 1, 1, dh, vocab);
+            dLast.Dispose();
+            float[] row = new float[vocab];
+            new Span<float>((void*)cbLogits.DataPointer, vocab).CopyTo(row);
+            cbLogits.Dispose();
+            dec[cb - 1] = row;
+            decoderSeq.Add(forcedCodes[cb]);
+        }
+        last.Dispose();
+        return (c0, dec);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -127,23 +175,22 @@ public sealed unsafe class CsmModel : IDisposable
         foreach (Tensor? hd in _audioHead) if (hd is not null) yield return hd;
     }
 
-    /// <summary>Decoder input = projected backbone hidden, then the per-codebook embeddings of the
-    /// already-sampled codebooks of this frame.</summary>
-    private Tensor BuildDecoderInput(Tensor projected, List<int> seq, int dh)
+    /// <summary>Decoder sequence (in backbone-hidden space, pre-projection) = the backbone last hidden, then the
+    /// per-codebook audio embedding of each already-sampled codebook value of this frame. Codebook <c>j</c> uses
+    /// audio table <c>j</c> (upstream <c>_embed_audio(j, code)</c> = <c>audio_embeddings(code + j·vocab)</c>).</summary>
+    private Tensor BuildDecoderSequence(Tensor lastHidden, List<int> seq, int bh)
     {
         int n = 1 + seq.Count;
-        Tensor outT = new(new TensorShape(1, n, dh), DType.F32);
+        Tensor outT = new(new TensorShape(1, n, bh), DType.F32);
         float* op = (float*)outT.DataPointer;
-        Buffer.MemoryCopy((void*)projected.DataPointer, op, dh * 4, dh * 4);
+        Buffer.MemoryCopy((void*)lastHidden.DataPointer, op, bh * 4, bh * 4);
         for (int i = 0; i < seq.Count; i++)
         {
-            // Reuse the backbone audio-embed tables sliced to the decoder dim (scaffold — the real model
-            // has a decoder-side audio embedding; reconcile key on checkpoint).
             float* tab = (float*)_audioEmbed[i]!.DataPointer;
             int id = Math.Clamp(seq[i], 0, _cfg.AudioVocab - 1);
-            float* row = tab + (long)id * _cfg.Backbone.HiddenSize;
-            float* dst = op + (long)(i + 1) * dh;
-            for (int c = 0; c < dh; c++) dst[c] = row[c];   // truncate/borrow first dh dims
+            float* row = tab + (long)id * bh;
+            float* dst = op + (long)(i + 1) * bh;
+            for (int c = 0; c < bh; c++) dst[c] = row[c];
         }
         return outT;
     }

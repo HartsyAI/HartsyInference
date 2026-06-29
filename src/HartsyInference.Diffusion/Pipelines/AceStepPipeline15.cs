@@ -17,8 +17,10 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// latent as <c>src_latents</c> (VAE-encoded at first use when the injected decoder can encode — the reference ships
 /// it as <c>silence_latent.pt</c>; recompute is the research doc's sanctioned alternative) with an all-ones chunk
 /// mask. The FSQ/LM hint path (cover mode, Comfy's <c>generate_audio_codes</c>) is phase 2 — <c>lmHints</c> is its
-/// null-default extension point. <b>Status: built, first-run validation pending</b> — numerics unverified vs the
-/// reference; hints-less quality vs Comfy defaults is an open question (research §7).</summary>
+/// null-default extension point. <b>Status: DiT + condition encoder numerically verified vs the f32 torch oracle on the
+/// real turbo checkpoint</b> (condition encoder maxAbs 1.9e-6; DiT velocity / full-loop latent corr 1.0 — see
+/// <c>AceStep15DitParityTests</c>); Oobleck VAE decode verified corr 0.9999999999. Hints-less quality vs Comfy
+/// defaults remains an open question (research §7).</summary>
 public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
 {
     private readonly AceStep15Dit _dit;
@@ -60,7 +62,6 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         Logs.Info($"ACE-Step 1.5 turbo: {durationSeconds:0}s ({frames} latent frames), {steps} steps, " +
             $"shift={shift ?? _config.FlowShift}, lyrics={(lyricHidden is null ? 0 : lyricHidden.Shape[0])} tokens, " +
             $"timbre={(timbreLatent is not null)}, hints={(lmHints is not null)}, seed={actualSeed}");
-        Logs.Warning("ACE-Step 1.5 pipeline is first-run-validation pending — numerics unverified vs the reference.");
 
         Backend.PreloadWeights(_encoder.EnumerateWeights());
         Tensor conditions = _encoder.EncodeConditions(Backend, textHidden, lyricHidden, timbreLatent);

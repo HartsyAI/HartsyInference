@@ -28,7 +28,8 @@ public sealed unsafe class T5TextEncoder : IDisposable
         _blocks = new T5Block[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
         {
-            _blocks[i] = new T5Block(config.DModel, config.NumHeads, config.DKv, config.LayerNormEpsilon);
+            _blocks[i] = new T5Block(config.DModel, config.NumHeads, config.DKv, config.LayerNormEpsilon,
+                config.GatedFeedForward, config.UseReluActivation, config.AttentionScale);
         }
         if (config.UsePerLayerPositionBias)
         {

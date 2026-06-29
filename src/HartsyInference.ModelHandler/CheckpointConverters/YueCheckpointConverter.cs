@@ -26,10 +26,12 @@ public sealed class YueCheckpointConverter
     // acoustic waveform decoder `decoder_2` (`decoder` is the semantic-reconstruction head); spellings here follow
     // the soundstream_hubert_new.py module names. If a dump shows different roots, extend these tables.
     private static readonly string[] _xCodecWrapperPrefixes = ["codec_model.", "generator.", "model."];
+    // fc_post2 is KEPT — it is the 1024->256 acoustic projection on the YuE decode path (the wave decoder's
+    // input). Only the semantic-reconstruction branch and the encoder/quantizer-train extras are dropped.
     private static readonly string[] _xCodecDropPrefixes =
     [
-        "semantic_model.", "encoder_semantic.", "decoder_semantic.", "decoder_semantic_2.",
-        "fc_prior.", "fc_post1.", "fc_post2.", "fc_post_a.", "fc_post_s.", "discriminator.",
+        "semantic_model.", "encoder_semantic.", "decoder_semantic.", "decoder_semantic_2.", "encoder.",
+        "fc_prior.", "fc_post1.", "fc_post_a.", "fc_post_s.", "discriminator.",
     ];
 
     /// <summary>Loads a Stage-1 LM checkpoint (<c>m-a-p/YuE-s1-7B-anneal-en-cot</c> and siblings). <paramref name="path"/>

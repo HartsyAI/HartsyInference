@@ -15,7 +15,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <c>scale_shift_table</c> [1,6,2048] plus the shared <c>time_proj</c> output (NOT one global table; §5's
 /// 19-keys-per-layer count includes the per-layer table), then RMSNorm <c>norm_out</c> AdaLN'd by the model-level
 /// 2-chunk <c>scale_shift_table</c> + temb and ConvTranspose1d de-patchify (<c>proj_out.1</c>, 2048→64, k2 s2).
-/// Numerics validation-pending vs the Python reference.</summary>
+/// Numerically verified vs the f32 torch oracle on the real turbo checkpoint (velocity corr 1.0, maxAbs 5.1e-6 —
+/// see <c>AceStep15DitParityTests</c>).</summary>
 public sealed unsafe class AceStep15Dit : IDisposable
 {
     private readonly AceStep15Config _config;

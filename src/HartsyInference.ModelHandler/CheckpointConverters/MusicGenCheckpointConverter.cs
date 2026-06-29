@@ -160,12 +160,26 @@ public sealed class MusicGenCheckpointConverter
         foreach ((string key, Tensor value) in raw)
             normalized[CodecKeyUtils.NormalizeWeightNormKey(key)] = value;
 
+        // The decoder's upsampling convs are PyTorch ConvTranspose1d (EncodecConvTranspose1d). In the HF Sequential
+        // they are every top-level `decoder.layers.{i}.conv.*` EXCEPT the first (index 0, the latent→bottleneck
+        // stem) and the last (the bottleneck→audio projection). They CANNOT be told apart from regular Conv1d by
+        // the `weight_g` shape: HF/AudioCraft weight-norm both convs with the default `dim=0`, giving
+        // `weight_g = [out_or_in, 1, 1]` in either case. So we identify them structurally by their Sequential
+        // index: the min and max top-level `decoder.layers.{i}.conv` indices are the Conv1d stem/head; all the
+        // others are ConvTranspose1d. (`.block.` convs inside resnet blocks are always Conv1d.)
         HashSet<string> transposeModules = new(StringComparer.Ordinal);
-        foreach ((string key, Tensor value) in normalized)
+        SortedSet<int> decoderTopConvIdx = new();
+        foreach (string key in normalized.Keys)
         {
-            if (key.EndsWith(".conv.weight_g", StringComparison.Ordinal) &&
-                value.Shape.Rank == 3 && value.Shape[0] == 1 && value.Shape[1] > 1)
-                transposeModules.Add(key[..^".weight_g".Length]);
+            if (TryParseDecoderTopConvIndex(key, out int idx)) decoderTopConvIdx.Add(idx);
+        }
+        if (decoderTopConvIdx.Count > 2)
+        {
+            int first = decoderTopConvIdx.Min;
+            int last = decoderTopConvIdx.Max;
+            foreach (int idx in decoderTopConvIdx)
+                if (idx != first && idx != last)
+                    transposeModules.Add($"decoder.layers.{idx}.conv");
         }
 
         Dictionary<string, Tensor> result = new(normalized.Count);
@@ -177,6 +191,22 @@ public sealed class MusicGenCheckpointConverter
             if (mapped is not null) result[mapped] = value;
         }
         return result;
+    }
+
+    /// <summary>True when <paramref name="key"/> is a top-level decoder conv parameter
+    /// (<c>decoder.layers.{i}.conv.*</c>, NOT a resnet-block <c>.block.</c> conv), parsing the Sequential index
+    /// <paramref name="idx"/>. Used to classify which top-level decoder convs are <c>ConvTranspose1d</c>.</summary>
+    private static bool TryParseDecoderTopConvIndex(string key, out int idx)
+    {
+        idx = -1;
+        const string pre = "decoder.layers.";
+        if (!key.StartsWith(pre, StringComparison.Ordinal)) return false;
+        string rest = key[pre.Length..];
+        int dot = rest.IndexOf('.');
+        if (dot < 0) return false;
+        if (!int.TryParse(rest[..dot], out idx)) return false;
+        // Top-level conv only: the immediate next segment must be "conv" (a `.block.` resnet conv is nested deeper).
+        return rest[(dot + 1)..].StartsWith("conv.", StringComparison.Ordinal);
     }
 
     /// <summary>Pure EnCodec key mapping (testable without files). <paramref name="transposeConv"/> marks the key's

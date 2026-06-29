@@ -13,21 +13,27 @@ namespace HartsyInference.Tokenizers;
 /// ~100 tokens) against the reference per the M5 checklist before treating output as faithful.</para></summary>
 public sealed class YueTokenizer : IDisposable
 {
+    // The YuE structural / audio markers are SentencePiece CONTROL symbols spelled with ANGLE brackets
+    // (<SOA>, <EOA>, <stage_1>, …) — verified against the real mm_tokenizer_v0.2 tokenizer.model. They are
+    // NOT encodable via EncodeToIds (control symbols byte-fall-back, e.g. "<SOA>" -> [529,6156,29909,29958]),
+    // and Microsoft.ML.Tokenizers does not surface them through SpecialTokens. Their ids are a fixed, stable
+    // part of the mm_tokenizer_v0.2 vocab; we pin them and confirm each via a Decode(id) round-trip at load.
     /// <summary>Start-of-audio: hands off from the text prompt to cb0 generation.</summary>
-    public const string SoaPiece = "[SOA]";
+    public const string SoaPiece = "<SOA>";
     /// <summary>End-of-audio: stops cb0 generation.</summary>
-    public const string EoaPiece = "[EOA]";
-    public const string Stage1Piece = "[stage_1]";
-    public const string StartOfSegmentPiece = "[start_of_segment]";
-    public const string EndOfSegmentPiece = "[end_of_segment]";
+    public const string EoaPiece = "<EOA>";
+    public const string Stage1Piece = "<stage_1>";
+
+    // Fixed mm_tokenizer_v0.2 ids for the YuE control symbols (verified by Decode round-trip below).
+    private const int SoaId = 32_001;
+    private const int EoaId = 32_002;
+    private const int Stage1Id = 32_013;
 
     private readonly SentencePieceTokenizer _sp;
 
     public int Soa { get; }
     public int Eoa { get; }
     public int Stage1 { get; }
-    public int StartOfSegment { get; }
-    public int EndOfSegment { get; }
 
     public YueTokenizer(string tokenizerModelPath)
     {
@@ -38,25 +44,24 @@ public sealed class YueTokenizer : IDisposable
         using FileStream fs = File.OpenRead(tokenizerModelPath);
         _sp = SentencePieceTokenizer.Create(fs, addBeginningOfSentence: false, addEndOfSentence: false)
             ?? throw new InvalidOperationException($"Failed to load YuE SentencePiece tokenizer from '{tokenizerModelPath}'.");
-        Soa = ResolveSpecial(SoaPiece);
-        Eoa = ResolveSpecial(EoaPiece);
-        Stage1 = ResolveSpecial(Stage1Piece);
-        StartOfSegment = ResolveSpecial(StartOfSegmentPiece);
-        EndOfSegment = ResolveSpecial(EndOfSegmentPiece);
+        Soa = ResolveControl(SoaId, SoaPiece);
+        Eoa = ResolveControl(EoaId, EoaPiece);
+        Stage1 = ResolveControl(Stage1Id, Stage1Piece);
     }
 
-    /// <summary>Resolves a special token's id from the loaded model. A non-single result means the file
-    /// isn't the YuE mm tokenizer (or carries the markers under different strings) — fail with guidance.</summary>
-    private int ResolveSpecial(string piece)
+    /// <summary>Confirms a pinned control-symbol id maps back to its expected angle-bracket piece via
+    /// <c>Decode</c> (the reliable piece-&gt;id direction for SP control symbols). A mismatch means the file
+    /// isn't the YuE mm tokenizer — fail with guidance.</summary>
+    private int ResolveControl(int id, string expectedPiece)
     {
-        IReadOnlyList<int> ids = _sp.EncodeToIds(piece);
-        if (ids.Count != 1)
+        string decoded = _sp.Decode([id]);
+        if (decoded != expectedPiece)
         {
             throw new InvalidOperationException(
-                $"YuE tokenizer.model does not carry the special token '{piece}' as a single piece (got {ids.Count} ids). "
+                $"YuE tokenizer.model id {id} decodes to '{decoded}', expected '{expectedPiece}'. "
                 + "Supply the YuE mm tokenizer (mm_tokenizer_v0.2_hf/tokenizer.model from m-a-p/xcodec_mini_infer).");
         }
-        return ids[0];
+        return id;
     }
 
     /// <summary>The Stage-1 instruction + genre + lyrics text (no special tokens). Pure/testable; matches
@@ -64,12 +69,11 @@ public sealed class YueTokenizer : IDisposable
     public static string BuildStage1PromptText(string genre, string lyrics)
         => $"Generate music from the given lyrics segment by segment.\n[Genre] {(genre ?? "").Trim()}\n{(lyrics ?? "").Trim()}";
 
-    /// <summary>Encodes the full Stage-1 prompt: instruction+genre+lyrics text, then the segment + stage-1 +
-    /// start-of-audio markers that hand off to cb0 generation.</summary>
+    /// <summary>Encodes the full Stage-1 prompt: instruction+genre+lyrics text, then the stage-1 +
+    /// start-of-audio markers that hand off to cb0 generation (YuE infer.py CoT order: … &lt;stage_1&gt; &lt;SOA&gt;).</summary>
     public int[] EncodeStage1Prompt(string genre, string lyrics)
     {
         List<int> ids = [.. _sp.EncodeToIds(BuildStage1PromptText(genre, lyrics))];
-        ids.Add(StartOfSegment);
         ids.Add(Stage1);
         ids.Add(Soa);
         return [.. ids];

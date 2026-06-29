@@ -68,6 +68,11 @@ public sealed record DacConfig
     /// <summary>Decoder final-conv kernel size. 7 in the published checkpoints.</summary>
     public int DecoderFinalKernelSize { get; init; } = 7;
 
+    /// <summary>Whether the decoder appends a final <c>tanh</c> on the waveform. True for the published
+    /// descript-audio-codec / Spark BiCodec decoders. The YuE x-codec <c>decoder_2</c> (dac2.Decoder) has its
+    /// <c>nn.Tanh()</c> commented out — set false there so the raw conv output is returned.</summary>
+    public bool DecoderFinalTanh { get; init; } = true;
+
     /// <summary>Per-residual-unit dilations applied within an Encoder/DecoderBlock.
     /// Always <c>[1, 3, 9]</c> — three blocks with exponentially-growing receptive fields.</summary>
     public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 3, 9];

@@ -10,6 +10,11 @@ public sealed unsafe class T5Block
     private readonly int _numHeads;
     private readonly int _headDim;
     private readonly float _eps;
+    private readonly float _attnScale;
+    // FFN flavor: v1.1/UMT5 use a gated FFN (wi_0/wi_1, GELU gate); v1.0 (google/t5-base, MusicGen) uses a
+    // single wi projection with a ReLU activation. Both share the wo output projection and the layer_norm.
+    private readonly bool _gatedFeedForward;
+    private readonly bool _useReluActivation;
 
     // Self-attention sublayer
     private Tensor? _attnNormWeight;
@@ -18,18 +23,22 @@ public sealed unsafe class T5Block
     private Tensor? _vWeight;
     private Tensor? _oWeight;
 
-    // GEGLU FFN sublayer
+    // FFN sublayer. v1.1/UMT5 gated: wi_0 (gate, GELU) + wi_1 (linear); v1.0 non-gated: single wi (ReLU).
     private Tensor? _ffnNormWeight;
-    private Tensor? _wi0Weight;  // gate projection (goes through GeLU)
-    private Tensor? _wi1Weight;  // linear projection
+    private Tensor? _wi0Weight;  // gate projection (goes through GeLU) — gated mode only
+    private Tensor? _wi1Weight;  // linear projection — gated mode only
+    private Tensor? _wiWeight;   // single projection — non-gated (v1.0) mode only
     private Tensor? _woWeight;   // output projection
 
-    public T5Block(int dModel, int numHeads, int headDim, float eps)
+    public T5Block(int dModel, int numHeads, int headDim, float eps, bool gatedFeedForward = true, bool useReluActivation = false, float? attentionScale = null)
     {
         _dModel = dModel;
         _numHeads = numHeads;
         _headDim = headDim;
         _eps = eps;
+        _gatedFeedForward = gatedFeedForward;
+        _useReluActivation = useReluActivation;
+        _attnScale = attentionScale ?? (1.0f / MathF.Sqrt(headDim));
     }
 
     /// <summary>Loads weights for this block from named tensors using T5 HuggingFace naming.</summary>
@@ -43,10 +52,18 @@ public sealed unsafe class T5Block
         _vWeight = weights[$"{prefix}.layer.0.SelfAttention.v.weight"];
         _oWeight = weights[$"{prefix}.layer.0.SelfAttention.o.weight"];
 
-        // FFN sublayer (layer.1) — named DenseReluDense despite using GEGLU in v1.1
+        // FFN sublayer (layer.1) — named DenseReluDense regardless of flavor. v1.1/UMT5 store a gated pair
+        // (wi_0 + wi_1); the original v1.0 (google/t5-base, MusicGen) stores a single wi with ReLU.
         _ffnNormWeight = EnsureF32(weights[$"{prefix}.layer.1.layer_norm.weight"]);
-        _wi0Weight = weights[$"{prefix}.layer.1.DenseReluDense.wi_0.weight"];
-        _wi1Weight = weights[$"{prefix}.layer.1.DenseReluDense.wi_1.weight"];
+        if (_gatedFeedForward)
+        {
+            _wi0Weight = weights[$"{prefix}.layer.1.DenseReluDense.wi_0.weight"];
+            _wi1Weight = weights[$"{prefix}.layer.1.DenseReluDense.wi_1.weight"];
+        }
+        else
+        {
+            _wiWeight = weights[$"{prefix}.layer.1.DenseReluDense.wi.weight"];
+        }
         _woWeight = weights[$"{prefix}.layer.1.DenseReluDense.wo.weight"];
     }
 
@@ -61,6 +78,7 @@ public sealed unsafe class T5Block
         if (_ffnNormWeight is not null) yield return _ffnNormWeight;
         if (_wi0Weight is not null) yield return _wi0Weight;
         if (_wi1Weight is not null) yield return _wi1Weight;
+        if (_wiWeight is not null) yield return _wiWeight;
         if (_woWeight is not null) yield return _woWeight;
     }
 
@@ -103,9 +121,9 @@ public sealed unsafe class T5Block
         // Build combined mask: positionBias + attentionMask
         Tensor? combinedMask = BuildAttentionMask(positionBias, attentionMask, batch, seqLen);
 
-        float scale = 1.0f / MathF.Sqrt(_headDim);
+        // T5 uses NO 1/sqrt(d) scaling (scale=1.0); the prior engine default is kept for configs that don't set it.
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, combinedMask, scale);
+        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, combinedMask, _attnScale);
         queryMh.Dispose();
         keyMh.Dispose();
         valueMh.Dispose();
@@ -126,32 +144,50 @@ public sealed unsafe class T5Block
         backend.Add(attnResidual, input, attnProjected);
         attnProjected.Dispose();
 
-        // --- GEGLU FFN sublayer ---
+        // --- FFN sublayer ---
 
         // RMSNorm
         Tensor ffnNormed = new Tensor(hidShape, DType.F32);
         backend.RmsNorm(ffnNormed, attnResidual, _ffnNormWeight!, _eps);
 
-        // GEGLU: gate = GeLU(x @ wi_0^T), linear = x @ wi_1^T, output = (gate * linear) @ wo^T
-        int dFf = (int)_wi0Weight!.Shape[0]; // wi_0 is [dFf, dModel]
-        TensorShape ffShape = new TensorShape(batch, seqLen, dFf);
+        Tensor gated;
+        if (_gatedFeedForward)
+        {
+            // GEGLU (v1.1/UMT5): gate = GeLU(x @ wi_0^T), linear = x @ wi_1^T, gated = gate * linear.
+            int dFf = (int)_wi0Weight!.Shape[0]; // wi_0 is [dFf, dModel]
+            TensorShape ffShape = new TensorShape(batch, seqLen, dFf);
 
-        Tensor gateProj = new Tensor(ffShape, DType.F32);
-        backend.Linear(gateProj, ffnNormed, _wi0Weight!, null);
-        Tensor linearProj = new Tensor(ffShape, DType.F32);
-        backend.Linear(linearProj, ffnNormed, _wi1Weight!, null);
-        ffnNormed.Dispose();
+            Tensor gateProj = new Tensor(ffShape, DType.F32);
+            backend.Linear(gateProj, ffnNormed, _wi0Weight!, null);
+            Tensor linearProj = new Tensor(ffShape, DType.F32);
+            backend.Linear(linearProj, ffnNormed, _wi1Weight!, null);
+            ffnNormed.Dispose();
 
-        // Apply GeLU to gate projection
-        Tensor gateActivated = new Tensor(ffShape, DType.F32);
-        backend.Gelu(gateActivated, gateProj);
-        gateProj.Dispose();
+            Tensor gateActivated = new Tensor(ffShape, DType.F32);
+            backend.Gelu(gateActivated, gateProj);
+            gateProj.Dispose();
 
-        // Element-wise multiply: gated = gelu(gate) * linear
-        Tensor gated = new Tensor(ffShape, DType.F32);
-        backend.Mul(gated, gateActivated, linearProj);
-        gateActivated.Dispose();
-        linearProj.Dispose();
+            gated = new Tensor(ffShape, DType.F32);
+            backend.Mul(gated, gateActivated, linearProj);
+            gateActivated.Dispose();
+            linearProj.Dispose();
+        }
+        else
+        {
+            // Non-gated (v1.0 DenseReluDense): gated = ReLU(x @ wi^T). MusicGen uses ReLU; the flag would let a
+            // GELU-activated non-gated variant share this path if one ever ships.
+            int dFf = (int)_wiWeight!.Shape[0]; // wi is [dFf, dModel]
+            TensorShape ffShape = new TensorShape(batch, seqLen, dFf);
+
+            Tensor proj = new Tensor(ffShape, DType.F32);
+            backend.Linear(proj, ffnNormed, _wiWeight!, null);
+            ffnNormed.Dispose();
+
+            gated = new Tensor(ffShape, DType.F32);
+            if (_useReluActivation) backend.LeakyRelu(gated, proj, 0f); // slope=0 → ReLU
+            else backend.Gelu(gated, proj);
+            proj.Dispose();
+        }
 
         // Output projection
         Tensor ffnOutput = new Tensor(hidShape, DType.F32);

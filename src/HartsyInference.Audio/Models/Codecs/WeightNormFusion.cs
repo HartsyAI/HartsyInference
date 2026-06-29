@@ -24,6 +24,10 @@ public static unsafe class WeightNormFusion
     {
         if (w.TryGetValue($"{prefix}.weight_g", out Tensor? g))
             return Fuse(g, w[$"{prefix}.weight_v"]);
+        // PyTorch >=2.1 `torch.nn.utils.parametrizations.weight_norm` stores g/v as
+        // `parametrizations.weight.original0` (g, [out,1,1]) / `original1` (v, [out,in,k]).
+        if (w.TryGetValue($"{prefix}.parametrizations.weight.original0", out Tensor? g2))
+            return Fuse(g2, w[$"{prefix}.parametrizations.weight.original1"]);
         return WhisperOps.EnsureF32(w[$"{prefix}.weight"]);
     }
 

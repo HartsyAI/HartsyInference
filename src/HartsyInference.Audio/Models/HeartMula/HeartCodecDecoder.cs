@@ -1,210 +1,240 @@
-using HartsyInference.Audio.Dsp;
-using HartsyInference.Audio.Models.CosyVoice;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.HeartMula;
 
-/// <summary>HeartCodec decoder: 48 kHz / 12.5 Hz, 8-codebook RVQ (codebook_size 8192, codebook_dim 32). The
-/// integer codes are dequantized by a per-book learned codebook lookup that is summed into a continuous
-/// latent (each book has its own <c>out_proj</c> 1×1 conv back to the codec dim, like DAC). That latent
-/// conditions a <b>flow-matching</b> reconstruction head (SQ-Codec style): a multi-scale causal conv
-/// velocity network is integrated by the reused OT-CFM Euler solver (<see cref="ConditionalCfm"/>) from
-/// noise to the codec feature, then a transposed-conv upsampling stack (<c>downsample [3,4,4,4,5]</c>
-/// reversed, dim 512, causal) lifts it to the 48 kHz waveform. See
-/// <c>docs/Research/HEARTMULA_ARCHITECTURE.md</c>.
+/// <summary>HeartCodec decoder (48 kHz, 12.5 Hz, 8-codebook RVQ). The real architecture (upstream
+/// <c>heartlib.heartcodec</c>) is a <b>flow-matching</b> codec, not a WaveNet:
+/// <list type="number">
+///   <item><see cref="HeartCodecRvq"/> — ResidualVQ decode: code grid <c>[8,T]</c> → summed quantized vectors
+///   → <c>project_out</c> → <c>[1,T,512]</c>.</item>
+///   <item><c>cond_feature_emb</c> (Linear 512→512) + nearest 2× upsample → conditioning <c>mu [1,2T,512]</c>.</item>
+///   <item><see cref="HeartCodecEstimator"/> velocity net integrated by a fixed Euler CFM ODE (10 steps,
+///   guidance 1.25, classifier-free with a zeroed-conditioning negative branch) from Gaussian noise to the
+///   codec latent <c>[1,2T,256]</c>.</item>
+///   <item>reshape <c>[1,2T,256]→[2,2T,128]</c> (the 256-D latent is two 128-D channels) then
+///   <see cref="HeartCodecScalarModel"/> decodes each to a 48 kHz waveform (1920× per frame), yielding a
+///   2-channel (stereo) output.</item>
+/// </list>
 ///
-/// <para><b>Reuse:</b> the codebook-lookup + per-book out_proj mirror <c>DacResidualVectorQuantizer</c>; the
-/// velocity net is an <see cref="ICfmEstimator"/> driven by the existing solver; the upsample stack uses
-/// <c>backend.ConvTranspose1d</c> with causal trailing-pad removal (<c>padRight = K - stride</c>).</para>
-///
-/// <para><b>Keys</b> (HeartCodec checkpoint): <c>quantizer.quantizers.{q}.codebook.weight</c> /
-/// <c>.out_proj.{weight,bias}</c>; <c>flow.net.*</c> (the CFM velocity net, WaveNet-style); <c>decoder.in.*</c>,
-/// <c>decoder.ups.{i}.*</c>, <c>decoder.out.*</c> (the transposed-conv upsampler). Parameterized from
-/// <see cref="HeartMulaConfig"/>.</para></summary>
+/// <para>Keys (HeartCodec checkpoint, prefix usually <c>""</c>): <c>flow_matching.vq_embed.*</c>,
+/// <c>flow_matching.cond_feature_emb.*</c>, <c>flow_matching.estimator.*</c>, <c>scalar_model.*</c>.</para></summary>
 public sealed unsafe class HeartCodecDecoder : IDisposable
 {
-    // downsample [3,4,4,4,5] reversed gives the upsample strides; product 960 = 48000 / (12.5 * 4)
-    // upsampled per the flow-feature rate (the flow net runs at 4× the 12.5 Hz code rate).
-    private static readonly int[] UpStrides = [5, 4, 4, 4, 3];
+    private const int CondDim = 512;
+    private const int LatentDim = 256;    // estimator out_channels
+    private const int NumSteps = 10;
+    private const float Guidance = 1.25f;
 
     private readonly HeartMulaConfig _cfg;
-    private readonly int _nq, _codebookSize, _codebookDim, _dim;
-    private readonly int _cfmNfe;
-    private readonly float _cfmCfg;
-
-    private readonly Tensor?[] _codebooks;        // [q] → [codebook_size, codebook_dim]
-    private readonly Tensor?[] _outProjW;         // [q] → 1×1 conv codebook_dim → dim
-    private readonly Tensor?[] _outProjB;
-
-    private readonly HeartCodecCfmEstimator _flow;
-    private readonly ConditionalCfm _cfm;
-
-    // Transposed-conv upsampler.
-    private Tensor? _inW, _inB, _outW, _outB;
-    private readonly Tensor?[] _upW, _upB;
+    private readonly HeartCodecRvq _rvq;
+    private readonly HeartCodecEstimator _estimator;
+    private readonly HeartCodecScalarModel _scalar;
+    private Tensor? _condW, _condB;       // cond_feature_emb Linear [512,512]
     private int _disposed;
 
-    public HeartCodecDecoder(HeartMulaConfig cfg, int dim = 512, int cfmNfe = 10, float cfmCfg = 0f)
+    public HeartCodecDecoder(HeartMulaConfig cfg)
     {
         _cfg = cfg;
-        _nq = cfg.CodecNumQuantizers;
-        _codebookSize = cfg.CodecCodebookSize;
-        _codebookDim = cfg.CodecCodebookDim;
-        _dim = dim;
-        _cfmNfe = cfmNfe;
-        _cfmCfg = cfmCfg;
-        _codebooks = new Tensor?[_nq];
-        _outProjW = new Tensor?[_nq];
-        _outProjB = new Tensor?[_nq];
-        _upW = new Tensor?[UpStrides.Length];
-        _upB = new Tensor?[UpStrides.Length];
-        _flow = new HeartCodecCfmEstimator(dim);
-        _cfm = new ConditionalCfm(_flow, dim);
+        _rvq = new HeartCodecRvq(cfg.CodecNumQuantizers, cfg.CodecCodebookSize, cfg.CodecCodebookDim, CondDim);
+        _estimator = new HeartCodecEstimator();
+        _scalar = new HeartCodecScalarModel();
     }
 
     public int SampleRate => _cfg.Lm.SampleRate;
 
-    /// <summary>Per-frame upsampling ratio from the flow feature to the waveform (∏ of the transposed strides).</summary>
-    public int HopSize { get { int h = 1; foreach (int s in UpStrides) h *= s; return h; } }
-
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        for (int q = 0; q < _nq; q++)
-        {
-            string qp = $"{p}quantizer.quantizers.{q}";
-            _codebooks[q] = WhisperOps.EnsureF32(w[$"{qp}.codebook.weight"]);
-            _outProjW[q] = WhisperOps.EnsureF32(w[$"{qp}.out_proj.weight"]);
-            _outProjB[q] = Bias(w, $"{qp}.out_proj.bias");
-        }
-
-        _flow.LoadWeights(w, $"{p}flow.net");
-
-        _inW = WhisperOps.EnsureF32(w[$"{p}decoder.in.weight"]);
-        _inB = Bias(w, $"{p}decoder.in.bias");
-        for (int i = 0; i < UpStrides.Length; i++)
-        {
-            _upW[i] = WhisperOps.EnsureF32(w[$"{p}decoder.ups.{i}.weight"]);
-            _upB[i] = Bias(w, $"{p}decoder.ups.{i}.bias");
-        }
-        _outW = WhisperOps.EnsureF32(w[$"{p}decoder.out.weight"]);
-        _outB = Bias(w, $"{p}decoder.out.bias");
+        _rvq.LoadWeights(w, $"{p}flow_matching.vq_embed");
+        _condW = WhisperOps.EnsureF32(w[$"{p}flow_matching.cond_feature_emb.weight"]);
+        _condB = WhisperOps.EnsureF32(w[$"{p}flow_matching.cond_feature_emb.bias"]);
+        _estimator.LoadWeights(w, $"{p}flow_matching.estimator");
+        _scalar.LoadWeights(w, $"{p}scalar_model");
     }
 
-    /// <summary>Decodes an 8-codebook grid <c>[NumCodebooks, T]</c> into a 48 kHz mono waveform. RVQ dequant
-    /// → flow-matching head (CFM-solved codec feature) → transposed-conv upsampler.</summary>
+    /// <summary>Decodes an 8-codebook grid <c>[NumCodebooks, T]</c> into a mono 48 kHz waveform (the two codec
+    /// channels averaged). Use <see cref="DecodeStereo"/> for the raw 2-channel output.</summary>
     public float[] Decode(IBackend backend, int[,] codes, int seed)
     {
-        ThrowIfDisposed();
-        if (_codebooks[0] is null) throw new InvalidOperationException("HeartCodecDecoder weights not loaded.");
-        int nb = codes.GetLength(0);
-        int t = codes.GetLength(1);
-        if (nb != _nq) throw new ArgumentException($"codes has {nb} books, expected {_nq}.", nameof(codes));
-        if (t <= 0) return [];
-
-        // RVQ dequant → continuous latent [1, dim, T], the CFM conditioning (mu).
-        Tensor mu = Dequantize(backend, codes, t);
-
-        // Flow-matching reconstruction head: integrate noise → codec feature conditioned on mu.
-        Tensor spk = new(new TensorShape(1, _dim, t), DType.F32);     // unused conditioning (zeros)
-        Tensor cond = new(new TensorShape(1, _dim, t), DType.F32);
-        Tensor feat = _cfm.Solve(backend, mu, spk, cond, _cfmNfe, _cfmCfg, seed);
-        mu.Dispose(); spk.Dispose(); cond.Dispose();
-
-        // Transposed-conv upsampler → waveform.
-        float[] wave = Upsample(backend, feat, t);
-        feat.Dispose();
-        return wave;
+        float[][] stereo = DecodeStereo(backend, codes, seed);
+        if (stereo.Length == 0 || stereo[0].Length == 0) return [];
+        int n = stereo[0].Length;
+        float[] mono = new float[n];
+        for (int i = 0; i < n; i++) mono[i] = 0.5f * (stereo[0][i] + stereo[1][i]);
+        return mono;
     }
 
-    /// <summary>Per-book codebook lookup summed into the codec latent. Each book's <c>codebook_dim</c>
-    /// vector is mapped to the codec dim by its <c>out_proj</c> 1×1 conv and accumulated (RVQ residual sum).</summary>
-    private Tensor Dequantize(IBackend backend, int[,] codes, int t)
+    /// <summary>Full flow-matching decode of a code grid <c>[8,T]</c> → 2-channel waveform <c>float[2][]</c>.</summary>
+    public float[][] DecodeStereo(IBackend backend, int[,] codes, int seed)
     {
-        Tensor latent = new(new TensorShape(1, _dim, t), DType.F32);
-        float* lp = (float*)latent.DataPointer;
-        long n = (long)_dim * t;
-        for (long i = 0; i < n; i++) lp[i] = 0f;
+        ThrowIfDisposed();
+        if (_condW is null) throw new InvalidOperationException("HeartCodecDecoder weights not loaded.");
+        int t = codes.GetLength(1);
+        if (t <= 0) return [[], []];
 
-        for (int q = 0; q < _nq; q++)
+        // 1. RVQ decode → [1,T,512]; cond_feature_emb Linear; nearest 2x → mu [1,2T,512].
+        Tensor rvq = _rvq.Decode(backend, codes, t);
+        Tensor cond = WhisperOps.ProjectLinear(backend, rvq, _condW!, _condB, 1, t, CondDim, CondDim);
+        rvq.Dispose();
+        int t2 = 2 * t;
+        Tensor mu = NearestUpsample2x(cond, t, CondDim);
+        cond.Dispose();
+
+        // 2. CFM Euler with CFG → latent [1, 2T, 256].
+        Tensor latent = SolveEulerCfg(backend, mu, t2, seed);
+        mu.Dispose();
+
+        // 3. reshape [1,2T,256] → [2,2T,128] (channels), scalar-decode each.
+        Tensor chan = ReshapeToChannels(latent, t2);   // [2,128,2T] (already transposed to [B,C,L])
+        latent.Dispose();
+        Tensor wav = _scalar.Decode(backend, chan);     // [2,1,L]
+        chan.Dispose();
+
+        int samples = (int)wav.Shape[2];
+        float[][] outp = [new float[samples], new float[samples]];
+        float* wp = (float*)wav.DataPointer;
+        for (int ch = 0; ch < 2; ch++)
+            for (int i = 0; i < samples; i++)
+                outp[ch][i] = wp[(long)ch * 1 * samples + i];
+        wav.Dispose();
+        return outp;
+    }
+
+    // ── components exposed for parity testing ──
+    public Tensor RvqDecode(IBackend backend, int[,] codes, int t) => _rvq.Decode(backend, codes, t);
+
+    public Tensor CondEmb(IBackend backend, Tensor rvqOut, int t)
+    {
+        Tensor cond = WhisperOps.ProjectLinear(backend, rvqOut, _condW!, _condB, 1, t, CondDim, CondDim);
+        Tensor mu = NearestUpsample2x(cond, t, CondDim);
+        cond.Dispose();
+        return mu;
+    }
+
+    public Tensor EstimatorForward(IBackend backend, Tensor input, float[] timestep) =>
+        _estimator.Forward(backend, input, timestep);
+
+    public Tensor ScalarDecode(IBackend backend, Tensor latentBCL) => _scalar.Decode(backend, latentBCL);
+
+    /// <summary>Fixed-Euler OT-CFM ODE (upstream <c>FlowMatching.solve_euler</c>) with classifier-free guidance.
+    /// Integrates from Gaussian noise (t=0) to the codec latent (t=1) in <see cref="NumSteps"/> steps. The
+    /// in-context region is empty (start segment), so the noise-blend term and incontext branch are zero.</summary>
+    public Tensor SolveEulerCfg(IBackend backend, Tensor mu, int t2, int seed)
+    {
+        // initial latent noise x [1, 2T, 256].
+        Tensor x = GaussianNoise(1, t2, LatentDim, seed);
+
+        // Estimator input = cat(x, incontext(0), mu) over the feature dim → [B, 2T, 256+256+512=1024].
+        // CFG batches it ×2 with mu replaced by zeros on the negative branch.
+        int inCh = 2 * LatentDim + CondDim;
+        float dt = 1f / NumSteps;
+        float tcur = 0f;
+        float* xp = (float*)x.DataPointer;
+        float* mup = (float*)mu.DataPointer;
+
+        for (int step = 0; step < NumSteps; step++)
         {
-            Tensor quant = new(new TensorShape(1, _codebookDim, t), DType.F32);
-            float* qp = (float*)quant.DataPointer;
-            float* cb = (float*)_codebooks[q]!.DataPointer;
-            for (int ti = 0; ti < t; ti++)
+            // Build CFG input [2, 2T, 1024]: row0 = uncond (mu=0), row1 = cond (mu).
+            Tensor input = new(new TensorShape(2, t2, inCh), DType.F32);
+            float* ip = (float*)input.DataPointer;
+            for (int ti = 0; ti < t2; ti++)
             {
-                int idx = codes[q, ti];
-                if ((uint)idx >= (uint)_codebookSize)
-                    throw new ArgumentOutOfRangeException(nameof(codes), idx, $"code at book {q}, t {ti} out of range [0,{_codebookSize}).");
-                int rowBase = idx * _codebookDim;
-                for (int d = 0; d < _codebookDim; d++) qp[(long)d * t + ti] = cb[rowBase + d];
+                long xo = (long)ti * LatentDim;
+                long muo = (long)ti * CondDim;
+                // uncond row (batch 0).
+                long b0 = ((long)0 * t2 + ti) * inCh;
+                for (int c = 0; c < LatentDim; c++) ip[b0 + c] = xp[xo + c];           // x
+                for (int c = 0; c < LatentDim; c++) ip[b0 + LatentDim + c] = 0f;       // incontext
+                for (int c = 0; c < CondDim; c++) ip[b0 + 2 * LatentDim + c] = 0f;     // mu zeroed
+                // cond row (batch 1).
+                long b1 = ((long)1 * t2 + ti) * inCh;
+                for (int c = 0; c < LatentDim; c++) ip[b1 + c] = xp[xo + c];
+                for (int c = 0; c < LatentDim; c++) ip[b1 + LatentDim + c] = 0f;
+                for (int c = 0; c < CondDim; c++) ip[b1 + 2 * LatentDim + c] = mup[muo + c];
             }
 
-            Tensor proj = new(new TensorShape(1, _dim, t), DType.F32);
-            backend.Conv1d(proj, quant, _outProjW[q]!, _outProjB[q], 1, 0, 0, 1, 1);
-            quant.Dispose();
-
-            float* pp = (float*)proj.DataPointer;
-            for (long i = 0; i < n; i++) lp[i] += pp[i];
-            proj.Dispose();
+            Tensor dphi = _estimator.Forward(backend, input, [tcur, tcur]);   // [2, 2T, 256]
+            input.Dispose();
+            float* dp = (float*)dphi.DataPointer;
+            // CFG: v = uncond + guidance * (cond - uncond); x += dt * v.
+            for (int ti = 0; ti < t2; ti++)
+            {
+                long un = ((long)0 * t2 + ti) * LatentDim;
+                long co = ((long)1 * t2 + ti) * LatentDim;
+                long xo = (long)ti * LatentDim;
+                for (int c = 0; c < LatentDim; c++)
+                {
+                    float u = dp[un + c], cc = dp[co + c];
+                    float v = u + Guidance * (cc - u);
+                    xp[xo + c] += dt * v;
+                }
+            }
+            dphi.Dispose();
+            tcur += dt;
         }
-        return latent;
+        return x;   // [1, 2T, 256]
     }
 
-    private float[] Upsample(IBackend backend, Tensor feat, int t)
+    // nearest-neighbor 2x upsample over the time axis of [1, t, dim] → [1, 2t, dim].
+    private static Tensor NearestUpsample2x(Tensor x, int t, int dim)
     {
-        // in conv: dim → dim (causal, kernel from weight).
-        int inK = (int)_inW!.Shape[2];
-        Tensor cur = new(new TensorShape(1, _dim, t), DType.F32);
-        backend.Conv1d(cur, feat, _inW!, _inB, 1, inK - 1, 0, 1, 1);
-
-        int curLen = t;
-        for (int i = 0; i < UpStrides.Length; i++)
+        Tensor outp = new(new TensorShape(1, 2 * t, dim), DType.F32);
+        float* sp = (float*)x.DataPointer; float* dp = (float*)outp.DataPointer;
+        for (int ti = 0; ti < t; ti++)
         {
-            int stride = UpStrides[i];
-            int k = (int)_upW[i]!.Shape[2];
-            int outCh = (int)_upW[i]!.Shape[1];     // ConvTranspose weight [C_in, C_out, K]
-            // Causal transposed conv: padRight = K - stride removes trailing pad → outLen = curLen * stride.
-            int outLen = (curLen - 1) * stride + (k - 1) + 1 - (k - stride);
-            Tensor up = new(new TensorShape(1, outCh, outLen), DType.F32);
-            backend.ConvTranspose1d(up, cur, _upW[i]!, _upB[i], stride, 0, k - stride, 1, 1);
-            cur.Dispose();
-            // SiLU between upsampling stages.
-            backend.Silu(up, up);
-            cur = up;
-            curLen = outLen;
+            long src = (long)ti * dim;
+            for (int r = 0; r < 2; r++)
+            {
+                long dst = (long)(ti * 2 + r) * dim;
+                for (int c = 0; c < dim; c++) dp[dst + c] = sp[src + c];
+            }
         }
+        return outp;
+    }
 
-        // out conv: dim → 1 (mono), causal.
-        int outK = (int)_outW!.Shape[2];
-        Tensor wav = new(new TensorShape(1, 1, curLen), DType.F32);
-        backend.Conv1d(wav, cur, _outW!, _outB, 1, outK - 1, 0, 1, 1);
-        cur.Dispose();
+    // [1, 2T, 256] → reshape [1,2T,2,128] → permute [1,2,2T,128] → [2,2T,128] → transpose to [2,128,2T].
+    private static Tensor ReshapeToChannels(Tensor latent, int t2)
+    {
+        int half = LatentDim / 2;   // 128
+        Tensor outp = new(new TensorShape(2, half, t2), DType.F32);
+        float* lp = (float*)latent.DataPointer;   // [1, 2T, 256]
+        float* op = (float*)outp.DataPointer;     // [2, 128, 2T]
+        for (int ti = 0; ti < t2; ti++)
+            for (int ch = 0; ch < 2; ch++)
+                for (int c = 0; c < half; c++)
+                {
+                    float val = lp[(long)ti * LatentDim + ch * half + c];
+                    op[((long)ch * half + c) * t2 + ti] = val;
+                }
+        return outp;
+    }
 
-        float[] result = new float[curLen];
-        float* wp = (float*)wav.DataPointer;
-        for (int i = 0; i < curLen; i++) result[i] = MathF.Tanh(wp[i]);
-        wav.Dispose();
-        return result;
+    private static Tensor GaussianNoise(int b, int t, int dim, int seed)
+    {
+        Tensor x = new(new TensorShape(b, t, dim), DType.F32);
+        float* xp = (float*)x.DataPointer;
+        long n = (long)b * t * dim;
+        Random rng = new(seed);
+        for (long i = 0; i < n; i += 2)
+        {
+            double u1 = 1.0 - rng.NextDouble();
+            double u2 = rng.NextDouble();
+            double r = Math.Sqrt(-2.0 * Math.Log(u1));
+            xp[i] = (float)(r * Math.Cos(2.0 * Math.PI * u2));
+            if (i + 1 < n) xp[i + 1] = (float)(r * Math.Sin(2.0 * Math.PI * u2));
+        }
+        return x;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        for (int q = 0; q < _nq; q++)
-        {
-            Tensor?[] qs = [_codebooks[q], _outProjW[q], _outProjB[q]];
-            foreach (Tensor? t in qs) if (t is not null) yield return t;
-        }
-        foreach (Tensor t in _flow.EnumerateWeights()) yield return t;
-        Tensor?[] own = [_inW, _inB, _outW, _outB];
-        foreach (Tensor? t in own) if (t is not null) yield return t;
-        for (int i = 0; i < UpStrides.Length; i++)
-        {
-            if (_upW[i] is not null) yield return _upW[i]!;
-            if (_upB[i] is not null) yield return _upB[i]!;
-        }
+        foreach (Tensor t in _rvq.EnumerateWeights()) yield return t;
+        if (_condW is not null) yield return _condW;
+        if (_condB is not null) yield return _condB;
+        foreach (Tensor t in _estimator.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _scalar.EnumerateWeights()) yield return t;
     }
 
     public void Dispose()
@@ -217,7 +247,4 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
     {
         if (_disposed != 0) throw new ObjectDisposedException(nameof(HeartCodecDecoder));
     }
-
-    private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        w.TryGetValue(key, out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
 }

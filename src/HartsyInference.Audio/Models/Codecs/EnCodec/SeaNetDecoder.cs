@@ -113,23 +113,26 @@ internal sealed class SeaNetDecoder
         _finalB = WhisperOps.EnsureF32(w[$"{_prefix}.model.{seqIdx}.conv.conv.bias"]);
     }
 
+    /// <summary>Optional per-Sequential-index activation hook for parity debugging (key = HF layer index).
+    /// Not used in production paths.</summary>
+    internal Action<int, Tensor>? DebugStageHook { get; set; }
+
     /// <summary>Forward — <paramref name="latent"/> channels-first
     /// <c>[batch, latent_dim, T_frames]</c>. Returns <c>[batch, 1, T_frames * 320]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames)
     {
         if (_initialW is null) throw new InvalidOperationException("SeaNetDecoder weights not loaded.");
 
-        // Initial projection: causal Conv1d(latent_dim → maxChannels, k=kernel_size).
+        // Initial projection Conv1d(latent_dim → maxChannels, k=kernel_size). stride=1 so extra padding is 0;
+        // padding is causal (left-only) for the 24 kHz model and symmetric for the non-causal 32/16 kHz codecs.
         int maxChannels = _cfg.NFilters * (1 << _stages);
-        int padTotalInit = _cfg.KernelSize - 1;
-        int extraRightInit = GetExtraRightPadding(tFrames, _cfg.KernelSize, 1, padTotalInit);
-        int tInit = tFrames + padTotalInit + extraRightInit - (_cfg.KernelSize - 1);
-        Tensor x = new(new TensorShape(batch, maxChannels, tInit), DType.F32);
-        backend.Conv1d(x, latent, _initialW!, _initialB,
-            stride: 1, padLeft: padTotalInit, padRight: extraRightInit, dilation: 1, groups: 1);
+        int tInit = tFrames;     // stride=1, length preserved
+        Tensor x = EnCodecConvPad.PaddedConv(backend, latent, _initialW!, _initialB,
+            batch, _cfg.LatentDim, tFrames, maxChannels, _cfg.KernelSize, dilation: 1, _cfg.Causal, _cfg.PadMode);
 
         int t = tInit;
         int dim = maxChannels;
+        DebugStageHook?.Invoke(0, x);
 
         // LSTM bottleneck on channels-last [B, T, dim], residual add, back to channels-first.
         // Skipped entirely when _lstm is null (Mimi — transformer-of-codecs replaces it).
@@ -148,24 +151,30 @@ internal sealed class SeaNetDecoder
             cl2.Dispose();
             x = cf;
         }
+        DebugStageHook?.Invoke(1, x);
 
         // Upsample stages.
+        int dbgIdx = _lstm is not null ? 2 : 1;
         for (int i = 0; i < _stages; i++)
         {
+            dbgIdx++;   // ELU index
+            int convtrDbg = dbgIdx;
             // ELU.
             Tensor activated = new(x.Shape, DType.F32);
             backend.Elu(activated, x, _cfg.EluAlpha);
             x.Dispose();
             x = activated;
 
-            // ConvTranspose1d(dim → dim/2, k=ratio*2, stride=ratio). Causal trim:
-            // padLeft = 0, padRight = K - stride.
+            // ConvTranspose1d(dim → dim/2, k=ratio*2, stride=ratio). padding_total = K - stride.
+            // Causal: trim all from the right (padRight = padTotal, padLeft = 0). Non-causal: symmetric trim
+            // (padRight = padTotal/2, padLeft = padTotal - padRight). Matches EncodecConvTranspose1d.forward.
             int ratio = _ratios[i];
             int kUp = ratio * 2;
-            int padLeftUp = 0;
-            int padRightUp = kUp - ratio;
+            int padTotalUp = kUp - ratio;
+            int padRightUp = _cfg.Causal ? padTotalUp : padTotalUp / 2;
+            int padLeftUp = padTotalUp - padRightUp;
             int dimOut = dim / 2;
-            int tUp = t * ratio;     // (T_in - 1) * stride + K - padRight = T_in * stride
+            int tUp = (t - 1) * ratio + kUp - padLeftUp - padRightUp;  // == t*ratio
             Tensor up = new(new TensorShape(batch, dimOut, tUp), DType.F32);
             backend.ConvTranspose1d(up, x, _upsampleW[i]!, _upsampleB[i],
                 stride: ratio, padLeft: padLeftUp, padRight: padRightUp, dilation: 1, groups: 1);
@@ -173,6 +182,8 @@ internal sealed class SeaNetDecoder
             x = up;
             t = tUp;
             dim = dimOut;
+            DebugStageHook?.Invoke(convtrDbg, x);
+            dbgIdx++;   // convtr index consumed
 
             // Residual blocks.
             foreach (SeaNetBlock block in _stageBlocks[i])
@@ -181,6 +192,8 @@ internal sealed class SeaNetDecoder
                 x.Dispose();
                 x = next;
             }
+            DebugStageHook?.Invoke(dbgIdx, x);
+            dbgIdx++;   // resblock index consumed
         }
 
         // Final ELU.
@@ -188,13 +201,9 @@ internal sealed class SeaNetDecoder
         backend.Elu(activatedFinal, x, _cfg.EluAlpha);
         x.Dispose();
 
-        // Final Conv1d(n_filters → channels=1, k=last_kernel_size).
-        int padTotalFinal = _cfg.LastKernelSize - 1;
-        int extraRightFinal = GetExtraRightPadding(t, _cfg.LastKernelSize, 1, padTotalFinal);
-        int tOut = t + padTotalFinal + extraRightFinal - (_cfg.LastKernelSize - 1);
-        Tensor pcm = new(new TensorShape(batch, _cfg.Channels, tOut), DType.F32);
-        backend.Conv1d(pcm, activatedFinal, _finalW!, _finalB,
-            stride: 1, padLeft: padTotalFinal, padRight: extraRightFinal, dilation: 1, groups: 1);
+        // Final Conv1d(n_filters → channels=1, k=last_kernel_size). stride=1 → length preserved.
+        Tensor pcm = EnCodecConvPad.PaddedConv(backend, activatedFinal, _finalW!, _finalB,
+            batch, _cfg.NFilters, t, _cfg.Channels, _cfg.LastKernelSize, dilation: 1, _cfg.Causal, _cfg.PadMode);
         activatedFinal.Dispose();
 
         return pcm;
@@ -249,13 +258,73 @@ internal sealed class SeaNetDecoder
     }
 }
 
+/// <summary>Shared stride-1 conv helper for the EnCodec SEANet decoder + residual block. Reproduces
+/// <c>EncodecConv1d.forward</c>: split <paramref name="padTotal"/> into (left, right) per the causal flag,
+/// then pad the channels-first input either with zeros (<c>"constant"</c>) or by edge reflection
+/// (<c>"reflect"</c>, the published-checkpoint default), and run the backend conv with no further padding.
+/// Reflect uses PyTorch semantics (excludes the edge sample): <c>pad[i] = x[reflect_index]</c>.</summary>
+internal static unsafe class EnCodecConvPad
+{
+    public static (int Left, int Right) Split(int padTotal, bool causal)
+    {
+        if (causal) return (padTotal, 0);
+        int right = padTotal / 2;
+        return (padTotal - right, right);
+    }
+
+    /// <summary>Stride-1, dilation-aware conv with EnCodec padding. <paramref name="x"/> is
+    /// <c>[B, C_in, T]</c>; output is <c>[B, C_out, T]</c> (length preserved). Caller owns the result.</summary>
+    public static Tensor PaddedConv(IBackend backend, Tensor x, Tensor weight, Tensor? bias,
+        int batch, int cIn, int t, int cOut, int kernel, int dilation, bool causal, string padMode, float eluUnused = 0)
+    {
+        int padTotal = (kernel - 1) * dilation;
+        (int padLeft, int padRight) = Split(padTotal, causal);
+        bool reflect = padMode == "reflect" && padTotal > 0 && t > 1;
+        if (!reflect)
+        {
+            Tensor outZ = new(new TensorShape(batch, cOut, t), DType.F32);
+            backend.Conv1d(outZ, x, weight, bias, stride: 1, padLeft: padLeft, padRight: padRight, dilation: dilation, groups: 1);
+            return outZ;
+        }
+        // Manual reflect pad → conv with zero pad. (PyTorch reflect clamps pad < T; EnCodec never exceeds it here.)
+        int tp = t + padLeft + padRight;
+        Tensor padded = new(new TensorShape(batch, cIn, tp), DType.F32);
+        float* sp = (float*)x.DataPointer;
+        float* dp = (float*)padded.DataPointer;
+        for (int b = 0; b < batch; b++)
+            for (int c = 0; c < cIn; c++)
+            {
+                float* src = sp + ((long)b * cIn + c) * t;
+                float* dst = dp + ((long)b * cIn + c) * tp;
+                for (int i = 0; i < padLeft; i++) dst[i] = src[ReflectIndex(padLeft - i, t)];
+                for (int i = 0; i < t; i++) dst[padLeft + i] = src[i];
+                for (int i = 0; i < padRight; i++) dst[padLeft + t + i] = src[ReflectIndex(t - 2 - i, t)];
+            }
+        Tensor outR = new(new TensorShape(batch, cOut, t), DType.F32);
+        backend.Conv1d(outR, padded, weight, bias, stride: 1, padLeft: 0, padRight: 0, dilation: dilation, groups: 1);
+        padded.Dispose();
+        return outR;
+    }
+
+    private static int ReflectIndex(int idx, int t)
+    {
+        // Mirror into [0, t-1] without repeating the edge (PyTorch 'reflect').
+        if (t == 1) return 0;
+        int period = 2 * (t - 1);
+        int m = ((idx % period) + period) % period;
+        return m < t ? m : period - m;
+    }
+}
+
 /// <summary>WeightNormFusion variant for PyTorch's <c>ConvTranspose1d</c>. The
-/// transpose-conv weight has layout <c>[C_in, C_out, K]</c> — so the "kept" axis (the
-/// one we DON'T sum over for the L2 norm) is axis 1, not axis 0. The companion
-/// <c>weight_g</c> has shape <c>[1, C_out, 1]</c> with one scalar per output channel.
+/// transpose-conv weight has layout <c>[C_in, C_out, K]</c>. Both Meta AudioCraft and HF
+/// <c>transformers</c> apply <c>nn.utils.weight_norm</c> with the DEFAULT <c>dim=0</c>, so the
+/// norm is taken per <b>input</b> channel (axis 0) over the (C_out, K) slice — NOT per output
+/// channel. The companion <c>weight_g</c> therefore has shape <c>[C_in, 1, 1]</c> (one scalar
+/// per input channel).
 ///
 /// <para>Fused weight is computed as
-/// <c>w[ic, oc, k] = g[oc] * v[ic, oc, k] / ||v[:, oc, :]||_2</c>.</para></summary>
+/// <c>w[ic, oc, k] = g[ic] * v[ic, oc, k] / ||v[ic, :, :]||_2</c>.</para></summary>
 public static unsafe class WeightNormFusionT
 {
     public static Tensor Fuse(Tensor weightG, Tensor weightV)
@@ -264,36 +333,28 @@ public static unsafe class WeightNormFusionT
         int cIn = (int)weightV.Shape[0];
         int cOut = (int)weightV.Shape[1];
         int kernel = (int)weightV.Shape[2];
-        if (weightG.ElementCount != cOut)
-            throw new ArgumentException($"WeightNormFusionT expects weightG with {cOut} elements (C_out), got {weightG.ElementCount}.");
+        if (weightG.ElementCount != cIn)
+            throw new ArgumentException($"WeightNormFusionT expects weightG with {cIn} elements (C_in, weight_norm dim=0), got {weightG.ElementCount}.");
 
         Tensor fused = new(weightV.Shape, DType.F32);
         float* vp = (float*)weightV.DataPointer;
         float* gp = (float*)weightG.DataPointer;
         float* fp = (float*)fused.DataPointer;
 
-        // Compute per-out-channel norm over (cIn, kernel) and apply.
-        for (int oc = 0; oc < cOut; oc++)
+        // Compute per-in-channel norm over (cOut, kernel) and apply (weight_norm dim=0).
+        for (int ic = 0; ic < cIn; ic++)
         {
             double sumSq = 0d;
-            for (int ic = 0; ic < cIn; ic++)
+            int baseIdx = ic * cOut * kernel;
+            for (int j = 0; j < cOut * kernel; j++)
             {
-                for (int k = 0; k < kernel; k++)
-                {
-                    float v = vp[(ic * cOut + oc) * kernel + k];
-                    sumSq += (double)v * v;
-                }
+                float v = vp[baseIdx + j];
+                sumSq += (double)v * v;
             }
             float norm = MathF.Sqrt((float)sumSq);
-            float scale = gp[oc] * (norm > 0f ? 1f / norm : 0f);
-            for (int ic = 0; ic < cIn; ic++)
-            {
-                for (int k = 0; k < kernel; k++)
-                {
-                    int idx = (ic * cOut + oc) * kernel + k;
-                    fp[idx] = vp[idx] * scale;
-                }
-            }
+            float scale = gp[ic] * (norm > 0f ? 1f / norm : 0f);
+            for (int j = 0; j < cOut * kernel; j++)
+                fp[baseIdx + j] = vp[baseIdx + j] * scale;
         }
         return fused;
     }

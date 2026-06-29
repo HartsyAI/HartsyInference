@@ -78,6 +78,9 @@ public sealed class EnCodec
         return pcm;
     }
 
+    /// <summary>Parity-debug only: installs a per-decoder-stage activation hook (HF Sequential index → tensor).</summary>
+    public void SetDecoderDebugHook(Action<int, Tensor>? hook) => _decoder.DebugStageHook = hook;
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor t in _encoder.EnumerateWeights()) yield return t;

@@ -39,10 +39,11 @@ public sealed unsafe class MusicGenBlock : IDisposable
         _crossOW = WhisperOps.EnsureF32(w[$"{prefix}.encoder_attn.out_proj.weight"]);
         _finalLnW = WhisperOps.EnsureF32(w[$"{prefix}.final_layer_norm.weight"]);
         _finalLnB = WhisperOps.EnsureF32(w[$"{prefix}.final_layer_norm.bias"]);
+        // MusicGen FFN linears are bias-free (the HF checkpoint has no fc1.bias/fc2.bias); load if present.
         _fc1W = WhisperOps.EnsureF32(w[$"{prefix}.fc1.weight"]);
-        _fc1B = WhisperOps.EnsureF32(w[$"{prefix}.fc1.bias"]);
+        _fc1B = w.TryGetValue($"{prefix}.fc1.bias", out Tensor? fc1b) ? WhisperOps.EnsureF32(fc1b) : null;
         _fc2W = WhisperOps.EnsureF32(w[$"{prefix}.fc2.weight"]);
-        _fc2B = WhisperOps.EnsureF32(w[$"{prefix}.fc2.bias"]);
+        _fc2B = w.TryGetValue($"{prefix}.fc2.bias", out Tensor? fc2b) ? WhisperOps.EnsureF32(fc2b) : null;
     }
 
     /// <summary>Runs the layer. <paramref name="hidden"/> is <c>[1, T, hidden]</c>; <paramref name="cross"/>

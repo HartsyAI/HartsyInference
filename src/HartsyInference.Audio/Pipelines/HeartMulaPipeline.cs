@@ -28,7 +28,10 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
 
     public HeartCodecDecoder Codec => _codec;
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w) => _lm.LoadWeights(w);
+    /// <summary>Loads the LM weights from the **raw** HeartMuLa checkpoint (torchtune layout). The keys are
+    /// remapped onto the engine layout by <see cref="HeartMulaCheckpointConverter"/> first.</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w) =>
+        _lm.LoadWeights(HeartMulaCheckpointConverter.Remap(w, _cfg));
 
     /// <summary>Loads the HeartCodec decoder weights (separate checkpoint from the LM). Call before
     /// <see cref="Generate"/>; <see cref="GenerateCodes"/> alone needs only the LM weights.</summary>
@@ -52,7 +55,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
             Tensor ctx = BuildContext(lyricsTokens, frames, muqLmEmbed);
             int[] codes = _lm.GenerateFrame(backend, ctx, ref rng);
             ctx.Dispose();
-            if (codes[0] == _cfg.Lm.AudioEosToken) break;
+            if (codes[0] >= _cfg.Lm.AudioEosToken) break;   // upstream stops on codebook-0 >= audio_eos_id
             frames.Add(codes);
         }
 
@@ -101,6 +104,17 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
             Buffer.MemoryCopy((void*)e.DataPointer, cp + (long)row++ * h, h * 4, h * 4); e.Dispose();
         }
         return ctx;
+    }
+
+    /// <summary>Parity probe: builds the prompt-frame context from <paramref name="lyricsTokens"/> (text in the
+    /// last column, audio columns empty/masked — matching the upstream frame-0 input) and returns the
+    /// teacher-forced codebook logits for <paramref name="forcedCodes"/>. Not used in inference.</summary>
+    public (float[] C0, float[][] Dec) DebugFrameLogits(IBackend backend, ReadOnlySpan<int> lyricsTokens, ReadOnlySpan<int> forcedCodes)
+    {
+        ThrowIfDisposed();
+        Tensor ctx = BuildContext(lyricsTokens, new List<int[]>(), null);
+        try { return _lm.DebugFrameLogits(backend, ctx, forcedCodes); }
+        finally { ctx.Dispose(); }
     }
 
     public IEnumerable<Tensor> EnumerateWeights() => _lm.EnumerateWeights();
