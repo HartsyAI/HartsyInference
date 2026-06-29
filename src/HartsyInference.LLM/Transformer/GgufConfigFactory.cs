@@ -90,6 +90,19 @@ public static class GgufConfigFactory
         // standard *sequential* pre-norm residual (not Cohere's parallel residual). Partial rotary and QKV bias are
         // detected structurally above.
         bool isStablelm = arch == "stablelm";
+        // OLMo-2: post-norm residual (attn/FFN read the raw residual, output normed before the add — no input or
+        // pre-FFN norm), whole-vector q/k RMSNorm (auto-detected), SwiGLU, untied. Otherwise llama-dialect.
+        bool isOlmo2 = arch == "olmo2";
+        // GPT-2 lineage: LayerNorm (with bias) everywhere, learned absolute position embeddings (no RoPE),
+        // non-gated GELU FFN with biases, biased attention (QKV + output). Fused QKV is split before this runs.
+        bool isGpt2 = arch == "gpt2";
+        // BLOOM: the GPT-2 dialect but with ALiBi (no positions) + a word-embedding LayerNorm (token_embd_norm).
+        bool isBloom = arch == "bloom";
+        // ALiBi slopes (max_alibi_bias, default 8 for BLOOM/MPT/Falcon-classic/Jais). 0 → no ALiBi.
+        float alibiMaxBias = isBloom ? metadata.GetFloat32($"{arch}.attention.max_alibi_bias", 8f) : 0f;
+        // Nemotron: LayerNorm (the GGUF bakes its LayerNorm1p +1 offset into the stored weight, like Gemma) +
+        // non-gated squared-ReLU FFN + partial rotary (auto-detected). No projection biases.
+        bool isNemotron = arch == "nemotron";
 
         // GPT-OSS: MoE decoder with learned per-head attention sinks (a logit in the softmax denominator that
         // carries no value). Sigmoid routing + the o200k tokenizer come from the existing MoE/tokenizer paths.
@@ -221,11 +234,12 @@ public static class GgufConfigFactory
             //     (interleaved adjacent pairs 2i,2i+1) reproduces HF rotate_half → we must apply Interleaved.
             //   - qwen2/qwen3: no permute, ggml uses NEOX rope (split-half pairs i,i+half) → SplitHalf.
             // Using the wrong pairing leaves attention rotating mismatched dimensions → coherent-looking garbage.
-            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
+            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
             RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
-            // Gemma family (all default to no-op for Qwen/Llama).
-            Activation = isGemma ? ActivationKind.GeluTanh : ActivationKind.Silu,
+            // Activation: Gemma/GPT-2/BLOOM = tanh-approx GELU; Nemotron = squared ReLU; everything else SwiGLU SiLU.
+            Activation = isNemotron ? ActivationKind.ReluSquared
+                : isGemma || isGpt2 || isBloom ? ActivationKind.GeluTanh : ActivationKind.Silu,
             SandwichNorm = sandwich,
             // llama.cpp's GGUF converter already bakes Gemma's (1+w) offset into the stored norm weights, so the
             // GGUF path uses them directly. RmsNormAddOne is only for loading raw (centered) HF safetensors.
@@ -235,7 +249,14 @@ public static class GgufConfigFactory
             AttentionMultiplier = attnMultiplier,
             ResidualMultiplier = residualMul,
             LogitScale = logitScale,
-            UseLayerNorm = isCohere || isStablelm,
+            UseLayerNorm = isCohere || isStablelm || isGpt2 || isBloom || isNemotron,
+            NormPlacement = isOlmo2 ? NormPlacement.PostNorm : NormPlacement.PreNorm,
+            GatedFfn = !(isGpt2 || isBloom || isNemotron),
+            FfnBias = isGpt2 || isBloom,
+            AbsolutePositionEmbeddings = isGpt2,
+            EmbeddingLayerNorm = isBloom,
+            AlibiMaxBias = alibiMaxBias,
+            AlibiSlopes = alibiMaxBias > 0f ? TransformerConfig.ComputeAlibiSlopes(heads, alibiMaxBias) : System.Array.Empty<float>(),
             ParallelResidual = isCohere,
             // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
             NoRopeOnGlobalLayers = arch == "cohere2",

@@ -34,6 +34,19 @@ public enum ActivationKind
     ReluSquared,
 }
 
+/// <summary>Where the per-sublayer norm sits relative to the residual. <see cref="PreNorm"/> (Llama/Qwen/Gemma:
+/// norm the input to attn/FFN) vs <see cref="PostNorm"/> (OLMo-2: attn/FFN read the <i>raw</i> residual and their
+/// output is normed before the add — <c>x = x + norm(attn(x))</c>, <c>x = x + norm(mlp(x))</c>; no input/pre-FFN
+/// norm).</summary>
+public enum NormPlacement
+{
+    /// <summary>Pre-norm: normalize the input to each sublayer (Llama/Qwen/Gemma/most).</summary>
+    PreNorm,
+
+    /// <summary>Post-norm: sublayers read the raw residual; their output is normed before the residual add (OLMo-2).</summary>
+    PostNorm,
+}
+
 /// <summary>How the MoE router turns expert logits into selection scores. <see cref="Softmax"/> (Qwen2-MoE /
 /// Qwen3-MoE / Mixtral: softmax over all experts, then top-k) vs <see cref="Sigmoid"/> (DeepSeek-V3:
 /// independent sigmoid per expert).</summary>
@@ -206,6 +219,24 @@ public sealed record TransformerConfig
     /// default) or a plain non-gated MLP (<c>down(act(up(x)))</c>, no <c>gate_proj</c>) for GPT-2 / Falcon /
     /// BLOOM / MPT / Nemotron / StarCoder.</summary>
     public bool GatedFfn { get; init; } = true;
+
+    /// <summary>Whether the output (o_proj) and FFN (up/down/gate) projections carry a bias. <c>true</c> for the
+    /// GPT-2 / Falcon / BLOOM / MPT / StarCoder lineage; <c>false</c> for Llama/Qwen/Gemma. Loaded only when the
+    /// bias tensors are present, so a stray <c>true</c> on a biasless model is harmless.</summary>
+    public bool FfnBias { get; init; }
+
+    /// <summary>Absolute learned position embeddings (GPT-2 / StarCoder): a <c>position_embd</c> table is added to
+    /// the token embeddings and the model uses NO RoPE. <c>false</c> (default) = RoPE / ALiBi.</summary>
+    public bool AbsolutePositionEmbeddings { get; init; }
+
+    /// <summary>BLOOM's word-embedding LayerNorm: a LayerNorm (weight + bias) applied to the token embeddings
+    /// <i>before</i> the first decoder block. <c>false</c> (default) for everything else.</summary>
+    public bool EmbeddingLayerNorm { get; init; }
+
+    /// <summary>Norm placement relative to the residual. Default <see cref="NormPlacement.PreNorm"/>
+    /// (Llama/Qwen/Gemma); OLMo-2 uses <see cref="NormPlacement.PostNorm"/> (attn/FFN read the raw residual,
+    /// their output is normed before the add — no input/pre-FFN norm).</summary>
+    public NormPlacement NormPlacement { get; init; } = NormPlacement.PreNorm;
 
     /// <summary>Gemma "sandwich norm": an extra RMSNorm on the attention output and on the FFN output, each
     /// applied <i>before</i> the residual add (in addition to the pre-attn / pre-FFN norms). false for the

@@ -124,6 +124,9 @@ public sealed class GgufLanguageModel : IDisposable
             // separate projections the transformer expects (contiguous row-byte copy, dtype-preserving → works
             // on the quantized weights without dequant).
             if (handle.Architecture == "phi3") SplitFusedPhi(weights, handle.Metadata);
+            // GPT-2 / BLOOM fuse q/k/v (weight + bias) into one attn_qkv tensor laid out [q|k|v]; split before the
+            // config factory reads tensor presence (so the QKV bias is detected). Runs before FromGguf.
+            if (handle.Architecture is "gpt2" or "bloom") SplitFusedGpt2(weights, handle.Metadata, handle.Architecture);
 
             TransformerConfig config = GgufConfigFactory.FromGguf(handle.Metadata, weights, lowVramQuant);
             // MoE: GGUF stacks all experts into one 3D tensor per projection; split them into the per-expert 2D
@@ -191,6 +194,47 @@ public sealed class GgufLanguageModel : IDisposable
                 w.Remove($"{p}.mlp.gate_up_proj.weight");
             }
         }
+    }
+
+    /// <summary>Splits GPT-2's fused <c>qkv_proj</c> (weight + bias) into separate q/k/v projections. GPT-2 is MHA
+    /// and lays the fused tensor out as <c>[full_q | full_k | full_v]</c> contiguous rows, so each split is a
+    /// byte-range view (weights, dtype-preserving) or a float slice (the F32 bias).</summary>
+    private static unsafe void SplitFusedGpt2(Dictionary<string, Tensor> w, GgufMetadata meta, string arch)
+    {
+        int hidden = (int)meta.GetUInt32($"{arch}.embedding_length");
+        int hq = (int)meta.GetUInt32($"{arch}.attention.head_count");
+        int hkv = (int)meta.GetUInt32($"{arch}.attention.head_count_kv", (uint)hq);
+        int headDim = hidden / Math.Max(1, hq);
+        int layers = (int)meta.GetUInt32($"{arch}.block_count");
+        int qRows = hq * headDim, kvRows = hkv * headDim;
+
+        for (int i = 0; i < layers; i++)
+        {
+            string p = $"model.layers.{i}";
+            if (w.TryGetValue($"{p}.self_attn.qkv_proj.weight", out Tensor? qkv))
+            {
+                w[$"{p}.self_attn.q_proj.weight"] = SliceRows(qkv, 0, qRows);
+                w[$"{p}.self_attn.k_proj.weight"] = SliceRows(qkv, qRows, kvRows);
+                w[$"{p}.self_attn.v_proj.weight"] = SliceRows(qkv, qRows + kvRows, kvRows);
+                w.Remove($"{p}.self_attn.qkv_proj.weight");
+            }
+            if (w.TryGetValue($"{p}.self_attn.qkv_proj.bias", out Tensor? qkvb))
+            {
+                w[$"{p}.self_attn.q_proj.bias"] = SliceVec(qkvb, 0, qRows);
+                w[$"{p}.self_attn.k_proj.bias"] = SliceVec(qkvb, qRows, kvRows);
+                w[$"{p}.self_attn.v_proj.bias"] = SliceVec(qkvb, qRows + kvRows, kvRows);
+                w.Remove($"{p}.self_attn.qkv_proj.bias");
+            }
+        }
+    }
+
+    /// <summary>Zero-copy view of <paramref name="count"/> elements of a 1-D tensor starting at <paramref name="start"/>
+    /// (used to split a fused F32 bias vector).</summary>
+    private static unsafe Tensor SliceVec(Tensor src, int start, int count)
+    {
+        long elemBytes = src.DType.ComputeByteCount(1);
+        byte* s = (byte*)src.DataPointer + (long)start * elemBytes;
+        return new Tensor((void*)s, new TensorShape(count), src.DType, src.Device);
     }
 
     /// <summary>Splits each MoE layer's stacked expert tensors (<c>gate_exps</c>/<c>up_exps</c>/<c>down_exps</c>,

@@ -34,6 +34,7 @@ public static class GgufKeyMapperRegistry
         // Gemma before Llama: Gemma's heuristic (sandwich norms) is a strict superset of the llama-family keys.
         Register(r, new GemmaKeyMapper());
         Register(r, new PhiKeyMapper());
+        Register(r, new Gpt2KeyMapper());
         Register(r, new DeepSeekKeyMapper());
         // mllama before llama: its cross_attn_* keys are a strict superset of the llama-family signature.
         Register(r, new MllamaKeyMapper());

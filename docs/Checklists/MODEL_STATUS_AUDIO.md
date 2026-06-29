@@ -19,7 +19,6 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Kyutai TTS** (tts-1.6b-en_fr) | 🔬 | All numerical cores verified (backbone 1.3e-4, depformer 32/32, conditioner ~1e-8). Greedy e2e diverges by argmax cascade (not a bug); Mimi decode reconcile in progress. |
 | **ResembleEnhance** | 🔬 | Modules synthetic-verified + converter built; real-weight mel→mel parity pending. |
 | **F5-TTS** | 🔧 | Built + wired in SwarmUI; parity dump pending. |
-| **HeartMuLa** | 🔧 | Built + wired; parity pending. |
 | **MeloTTS** (English-v3) | ✅ | Real-weight e2e in pure C#: g2p ids exact, BERT bit-exact, audio corr 0.9993 (len exact) vs the noise-0 reference. `MeloTts` facade (LoadFromFiles/LoadAsync/SynthesizeText) + gated parity test. |
 | **Spark-TTS-0.5B** | ✅ | Real-weight e2e bit-exact, fully in-engine (controllable mode): LM logits corr 1.0 (top-1 100%), greedy tokens 32/32 global + 179/179 semantic match Python, BiCodec wav corr 1.0 (factorized VQ, FSQ d-vector, AdaLN PreNet all corr 1.0). `SparkTtsPipeline.LoadFromDirectory`/`LoadAsync` + `SynthesizeControllable(text, gender, pitch, speed)`; `SparkTtsTokenizer` reuses the shared BPE + ByteLevelCodec. Zero-shot cloning would need the BiCodec encoder side (wav2vec2 + ECAPA), not built. |
 | **FishSpeech 1.5** | 🔬 | DualAR LM verified: slow (24-layer) corr 1.0, fast depth-LM (4-layer) corr 0.9999. fused-key adapter + interleaved RoPE + no embed-scale + pre-norm fast input. Only the firefly-gan-vq codec remains. |
@@ -45,14 +44,16 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **S3Tokenizer** | ✅ | From the `s3tokenizer` package. |
 | **Vocos / vocoders** | ✅ | Test passes. |
 | **GPT-SoVITS HuBERT / CosyVoice sub-encoders** | ✅ | Validated above. |
-| **ACE-Step** (music DiT 3.5B) | 🔬 | DiT parity ~1e-8; E2E gen env-gated (13 GB F32 cast, bare terminal only). |
+| **ACE-Step v1** (music DiT 3.5B) | ✅ | DiT ~1e-8 + DCAE decoder corr 1.0 + vocoder corr 1.0; full e2e on CUDA/3060 (bf16 + `HighPrecisionGemm`) writes finite audio. |
+| **ACE-Step v1.5 turbo** (music DiT 2B) | ✅ | DiT/cond-encoder/8-step loop all corr 1.0 (~1e-6) vs torch oracle on the real Comfy-Org turbo weights; Oobleck VAE corr 0.9999999999; e2e finite tonal stereo on CUDA. |
 | **Mimi** (codec) | 🔬 | SeaNet composed-weight load fixed (DSM checkpoint); DSM 32-cb decode reconcile in progress. Shared with CSM. |
-| **MusicGen / AudioGen** | 🔧 | Decoder LM built; codec-blocked (needs 32 kHz / 16 kHz EnCodec). Parity pending. |
-| **YuE** (music) | 🔧 | Stage-1 built; Stage-2 residual upsampler + dual-track mixing pending. |
+| **MusicGen / AudioGen** | ✅ | T5-base corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; e2e on CUDA writes music-like audio. 5 bugs fixed (T5/EnCodec). |
+| **YuE** (music, Stage-1) | ✅ | Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. Stage-2 multi-codebook out of scope. |
+| **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). |
 | **RVC** (voice conversion) | 🔧 | RMVPE front-end built; parity pending. |
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
 | **CSM** (Sesame) | 🔧 | Uses Mimi; parity pending. |
-| **Stable Audio Open / DiffRhythm / AudioLDM 2 / ACE-Step v1.5 + XL** | ❌/🔧 | Music roadmap; see [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) for the per-model build state and ROI order. |
+| **Stable Audio Open / DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md) for the per-model build state and ROI order. |
 | **PocketTTS** (continuous-latent) | ⛔ | Gated `kyutai/pocket-tts`; config dims are placeholders. Reuses the moshi backbone. |
 
 ## Notes

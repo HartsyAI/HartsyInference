@@ -19,6 +19,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     private readonly TransformerConfig _cfg;
     private readonly Layer[] _layers;
     private Tensor? _embed;
+    private Tensor? _posEmbed;   // GPT-2/StarCoder absolute position table [maxPos, hidden] (host gather); null otherwise
+    private Tensor? _embedNorm, _embedNormBias;   // BLOOM word-embedding LayerNorm (applied before the first block)
     private Tensor? _finalNorm;
     private Tensor? _finalNormBias;   // zero bias for the LayerNorm path (Cohere)
     private Tensor? _lmHead;   // null when tied — reuse _embed.
@@ -119,6 +121,12 @@ public sealed unsafe class GenericTransformer : IDisposable
     {
         ThrowIfDisposed();
         _embed = EnsureF32(w[$"{prefix}.embed_tokens.weight"]);
+        if (_cfg.AbsolutePositionEmbeddings) _posEmbed = EnsureF32(w[$"{prefix}.embed_positions.weight"]);
+        if (_cfg.EmbeddingLayerNorm)
+        {
+            _embedNorm = EnsureF32(w[$"{prefix}.embed_norm.weight"]);
+            _embedNormBias = EnsureF32(w[$"{prefix}.embed_norm.bias"]);
+        }
         _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
         if (_cfg.UseLayerNorm) _finalNormBias = LoadBiasOrZero(w, $"{prefix}.norm.bias", _cfg.HiddenSize);
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
@@ -147,6 +155,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         // lm_head; when the model has a separate lm_head, _embed is host-only — skip it (saves real VRAM, e.g.
         // ~0.8 GB for DeepSeek-V2-Lite's 102k×2048 F32 table).
         if (_embed is not null && _cfg.TieWordEmbeddings) yield return _embed;
+        if (_embedNorm is not null) { yield return _embedNorm; yield return _embedNormBias!; }
         if (_finalNorm is not null) yield return _finalNorm;
         if (_finalNormBias is not null) yield return _finalNormBias;
         if (_lmHead is not null) yield return _lmHead;
@@ -180,6 +189,21 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (startLayer < 0 || last > _layers.Length || startLayer > last)
             throw new ArgumentException($"Invalid layer range [{startLayer}, {last}) for a stack of {_layers.Length}.");
 
+        // Absolute position embeddings (GPT-2/StarCoder): add posEmbed[posStart+s] to each token embedding,
+        // host-side (the embeds buffer is host F32 on the token path). These models use no RoPE.
+        if (_posEmbed is not null)
+        {
+            int h = _cfg.HiddenSize;
+            float* ep = (float*)embeds.DataPointer;
+            float* pp = (float*)_posEmbed.DataPointer;
+            for (int s = 0; s < t; s++)
+            {
+                long src = (long)(posStart + s) * h;
+                long dst = (long)s * h;
+                for (int j = 0; j < h; j++) ep[dst + j] += pp[src + j];
+            }
+        }
+
         int d = _cfg.HeadDim;
         // MLA ropes only its decoupled rope-part, so the cos/sin table is sized to that (full rotary over it).
         int ropeTableDim = _cfg.Mla is not null ? _cfg.Mla.QkRopeHeadDim : d;
@@ -197,10 +221,20 @@ public sealed unsafe class GenericTransformer : IDisposable
             BuildRope(cosLocal, sinLocal, t, posStart, d, _cfg.RotaryDim, _cfg.RopeLocalTheta, _cfg.RopeScaling);
         }
 
+        // BLOOM applies a LayerNorm to the token embeddings before the first block.
+        Tensor work = embeds;
+        bool ownsWork = false;
+        if (_embedNorm is not null)
+        {
+            work = new(embeds.Shape, DType.F32);
+            backend.LayerNorm(work, embeds, _embedNorm, _embedNormBias!, _cfg.RmsNormEps);
+            ownsWork = true;
+        }
+
         try
         {
-            Tensor hidden = embeds;
-            bool ownsHidden = false;
+            Tensor hidden = work;
+            bool ownsHidden = ownsWork;
             for (int i = startLayer; i < last; i++)
             {
                 bool global = _cfg.IsGlobalLayer(i);
@@ -411,7 +445,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _embed = null; _finalNorm = null; _lmHead = null;
+        _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null;
     }
 
     /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual
@@ -422,13 +456,14 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _inNorm, _postNorm;       // pre-attn norm; pre-MLP norm (Gemma: pre_feedforward)
         private Tensor? _postAttnNorm, _postFfnNorm;   // Gemma sandwich norms (post-attn / post-FFN, pre-residual)
         private Tensor? _normBias, _postNormBias;   // LayerNorm biases (input / pre-MLP); zero for Cohere, real for StableLM
-        private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW;
+        private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB;
         private Tensor? _qNorm, _kNorm, _qNormBias, _kNormBias;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
         private Tensor? _alibiSlopes;   // ALiBi: per-head slopes [Hq] (MPT/BLOOM/Falcon-classic); these models use no RoPE
         private Tensor? _kvAProj, _kvANorm, _kvBProj;   // MLA: KV down-proj (+latent norm) and up-proj
         private Tensor? _qAProj, _qANorm, _qBProj;      // MLA q-LoRA: Q down-proj (+norm) and up-proj (DeepSeek-V3/Kimi)
         private Tensor? _gateW, _upW, _downW;
+        private Tensor? _gateB, _upB, _downB;   // FFN biases (GPT-2 / Falcon / BLOOM / MPT lineage)
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
         private Multimodal.MllamaCrossAttentionLayer? _crossAttn;   // non-null on mllama gated cross-attention layers
 
@@ -448,6 +483,15 @@ public sealed unsafe class GenericTransformer : IDisposable
                 _crossAttn.LoadWeights(w, prefix);
                 return;
             }
+            if (_cfg.NormPlacement == NormPlacement.PostNorm)
+            {
+                // OLMo-2: no input / pre-FFN norm. The attention and FFN outputs are each RMSNorm'd before being
+                // added to the residual (post_attention_norm / post_ffw_norm, mapped to the sandwich-norm slots).
+                _postAttnNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
+                _postFfnNorm = LoadNorm(w[$"{prefix}.post_feedforward_layernorm.weight"], addOne);
+            }
+            else
+            {
             _inNorm = LoadNorm(w[$"{prefix}.input_layernorm.weight"], addOne);
             if (_cfg.UseLayerNorm) _normBias = LoadBiasOrZero(w, $"{prefix}.input_layernorm.bias", _cfg.HiddenSize);
             if (_cfg.ParallelResidual)
@@ -467,6 +511,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 // Sequential pre-norm: a pre-MLP norm (StableLM/GPT-2-lineage carry a LayerNorm bias here too).
                 _postNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
                 if (_cfg.UseLayerNorm) _postNormBias = LoadBiasOrZero(w, $"{prefix}.post_attention_layernorm.bias", _cfg.HiddenSize);
+            }
             }
             if (_cfg.Mla is not null)
             {
@@ -498,6 +543,8 @@ public sealed unsafe class GenericTransformer : IDisposable
                 _qB = EnsureF32(w[$"{prefix}.self_attn.q_proj.bias"]);
                 _kB = EnsureF32(w[$"{prefix}.self_attn.k_proj.bias"]);
                 _vB = EnsureF32(w[$"{prefix}.self_attn.v_proj.bias"]);
+                // GPT-2 / Falcon / BLOOM also bias the output projection (Qwen2 does not — load only if present).
+                if (w.TryGetValue($"{prefix}.self_attn.o_proj.bias", out Tensor? ob)) _oB = EnsureF32(ob);
             }
             if (_cfg.QkNorm)
             {
@@ -536,6 +583,13 @@ public sealed unsafe class GenericTransformer : IDisposable
                 if (_cfg.GatedFfn) _gateW = w[$"{prefix}.mlp.gate_proj.weight"];
                 _upW = w[$"{prefix}.mlp.up_proj.weight"];
                 _downW = w[$"{prefix}.mlp.down_proj.weight"];
+                // FFN biases (GPT-2 / Falcon / BLOOM / MPT). Loaded only when present.
+                if (_cfg.FfnBias)
+                {
+                    if (_cfg.GatedFfn && w.TryGetValue($"{prefix}.mlp.gate_proj.bias", out Tensor? gb)) _gateB = EnsureF32(gb);
+                    if (w.TryGetValue($"{prefix}.mlp.up_proj.bias", out Tensor? ub)) _upB = EnsureF32(ub);
+                    if (w.TryGetValue($"{prefix}.mlp.down_proj.bias", out Tensor? db)) _downB = EnsureF32(db);
+                }
             }
         }
 
@@ -567,13 +621,13 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             TensorShape ff = new(1, n, _cfg.IntermediateSize);
             Tensor up = new(ff, DType.F32);
-            Project(backend, up, preMlp, _upW!, null, _cfg.LowVramQuant);
+            Project(backend, up, preMlp, _upW!, _upB, _cfg.LowVramQuant);
             Tensor comb;
             if (_cfg.GatedFfn)
             {
                 // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)).
                 Tensor gate = new(ff, DType.F32);
-                Project(backend, gate, preMlp, _gateW!, null, _cfg.LowVramQuant);
+                Project(backend, gate, preMlp, _gateW!, _gateB, _cfg.LowVramQuant);
                 Tensor gateAct = new(ff, DType.F32);
                 Activate(backend, gateAct, gate);
                 gate.Dispose();
@@ -590,14 +644,14 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             preMlp.Dispose();
             Tensor mlpOut = new(new TensorShape(1, n, _cfg.HiddenSize), DType.F32);
-            Project(backend, mlpOut, comb, _downW!, null, _cfg.LowVramQuant);
+            Project(backend, mlpOut, comb, _downW!, _downB, _cfg.LowVramQuant);
             comb.Dispose();
             return mlpOut;
         }
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _upW, _downW];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _downW, _downB];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
@@ -608,6 +662,15 @@ public sealed unsafe class GenericTransformer : IDisposable
         /// self-attention <see cref="Forward"/> path is bypassed for these layers.</summary>
         public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen)
             => _crossAttn!.Forward(backend, hidden, t, vision, visionLen);
+
+        /// <summary>Pre-sublayer norm: for pre-norm models (Llama/Qwen/Gemma) normalizes <paramref name="inp"/>
+        /// into <paramref name="outp"/>; for post-norm models (OLMo-2) the sublayer reads the raw residual, so this
+        /// copies through unchanged (the norm is applied to the sublayer <i>output</i> instead, via PostSublayer).</summary>
+        private void PreSublayer(IBackend backend, Tensor outp, Tensor inp, Tensor? norm, Tensor? bias)
+        {
+            if (_cfg.NormPlacement == NormPlacement.PostNorm) backend.CopyTo(outp, inp);
+            else Normalize(backend, outp, inp, norm!, bias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+        }
 
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
             IKvCache cache, int layerIndex, Tensor cos, Tensor sin)
@@ -620,7 +683,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             TensorShape flat = new(1, t, h);
 
             Tensor pre = new(flat, DType.F32);
-            Normalize(backend, pre, hidden, _inNorm!, _normBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+            PreSublayer(backend, pre, hidden, _inNorm, _normBias);
 
             // Q/K/V projections written straight into head layout [1, T, heads, D] (Linear derives N from the
             // weight, not the output rank, so the byte-identical reshape is free and stays resident). For OLMoE's
@@ -656,9 +719,9 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            // ALiBi models use no positional encoding (the bias is added in attention); Cohere2's global
-            // (full-attention) layers also skip RoPE; all other layers/models rope.
-            if (_cfg.AlibiMaxBias <= 0f && !(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
+            // ALiBi / absolute-position models use no RoPE (bias added in attention / positions added to embeds);
+            // Cohere2's global (full-attention) layers also skip RoPE; all other layers/models rope.
+            if (_cfg.AlibiMaxBias <= 0f && !_cfg.AbsolutePositionEmbeddings && !(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
@@ -703,7 +766,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.Permute0213(attnFlat, attn, hq, t, d);
             attn.Dispose();
             Tensor attnOut = new(flat, DType.F32);
-            Project(backend, attnOut, attnFlat, _oW!, null, _cfg.LowVramQuant);
+            Project(backend, attnOut, attnFlat, _oW!, _oB, _cfg.LowVramQuant);
             attnFlat.Dispose();
 
             if (_cfg.ParallelResidual)
@@ -727,7 +790,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             attnOut.Dispose();
 
             Tensor preMlp = new(flat, DType.F32);
-            Normalize(backend, preMlp, afterAttn, _postNorm!, _postNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+            PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
             Tensor mlpOut = Mlp(backend, preMlp, t);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
@@ -756,7 +819,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             TensorShape flat = new(1, t, h);
 
             Tensor pre = new(flat, DType.F32);
-            Normalize(backend, pre, hidden, _inNorm!, _normBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+            PreSublayer(backend, pre, hidden, _inNorm, _normBias);
 
             // Query: [1,t,hq,qkHead] laid out [q_nope | q_rope] per head. Direct projection (V2-Lite) or q-LoRA
             // (DeepSeek-V3 / Kimi-K2): q_a_proj → q_a_norm (RMSNorm) → q_b_proj.
@@ -849,7 +912,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.Add(afterAttn, hidden, attnOut);
             attnOut.Dispose();
             Tensor preMlp = new(flat, DType.F32);
-            Normalize(backend, preMlp, afterAttn, _postNorm!, _postNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+            PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
             Tensor mlpOut = Mlp(backend, preMlp, t);
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
@@ -887,7 +950,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             TensorShape flat = new(1, b, h);
 
             Tensor pre = new(flat, DType.F32);
-            Normalize(backend, pre, hidden, _inNorm!, _normBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+            PreSublayer(backend, pre, hidden, _inNorm, _normBias);
 
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
             Tensor q = new(fullNorm ? new TensorShape(1, b, _cfg.QDim) : new TensorShape(1, b, hq, d), DType.F32);
@@ -916,8 +979,8 @@ public sealed unsafe class GenericTransformer : IDisposable
                 q = qN; k = kN;
             }
 
-            // RoPE per row (each row b is one token at its own absolute position); skipped on ALiBi + Cohere2 NoPE layers.
-            if (_cfg.AlibiMaxBias <= 0f && !(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
+            // RoPE per row (each row b is one token at its own absolute position); skipped on ALiBi / abs-pos / Cohere2 NoPE layers.
+            if (_cfg.AlibiMaxBias <= 0f && !_cfg.AbsolutePositionEmbeddings && !(_cfg.NoRopeOnGlobalLayers && _cfg.IsGlobalLayer(layerIndex)))
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
@@ -962,7 +1025,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             foreach (Tensor seg in segs) seg.Dispose();
 
             Tensor attnOut = new(flat, DType.F32);   // o_proj reads attnConcat as [B, QDim]
-            Project(backend, attnOut, attnConcat, _oW!, null, _cfg.LowVramQuant);
+            Project(backend, attnOut, attnConcat, _oW!, _oB, _cfg.LowVramQuant);
             attnConcat.Dispose();
 
             if (_cfg.ParallelResidual)
@@ -984,7 +1047,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             attnOut.Dispose();
 
             Tensor preMlp = new(flat, DType.F32);
-            Normalize(backend, preMlp, afterAttn, _postNorm!, _postNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+            PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
             Tensor mlpOut = Mlp(backend, preMlp, b);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);

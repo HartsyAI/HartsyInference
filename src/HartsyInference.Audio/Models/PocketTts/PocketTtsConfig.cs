@@ -15,25 +15,29 @@ namespace HartsyInference.Audio.Models.PocketTts;
 /// deferred until the config is read from the checkpoint.</para></summary>
 public sealed record PocketTtsConfig
 {
+    // Real dims from the kyutai-labs/pocket-tts `english.yaml` (sig a0ac5076), confirmed against the
+    // without-voice-cloning safetensors. The earlier "dims NOT public" note was wrong; they are in the repo YAML.
     public int SampleRate { get; init; } = 24_000;       // = mimi.sample_rate
-    public int FrameRateHz { get; init; } = 12;          // 12.5 Hz Mimi frame rate
+    public int FrameRateHz { get; init; } = 12;          // 12.5 Hz Mimi frame rate (float; 12 is a truncation)
 
-    // ── Flow-LM backbone (streaming transformer over continuous latents) — dims NOT public ──
-    public int DModel { get; init; } = 0;                // RECONCILE: config.flow_lm.transformer.d_model
-    public int NumLayers { get; init; } = 6;             // distilled released model ≈ 6 layers
-    public int LatentDim { get; init; } = 0;             // RECONCILE: config.mimi.quantizer.dimension
+    // ── Flow-LM backbone (streaming transformer over continuous latents) ──
+    // PARITY-TODO: this transformer is LayerNorm + plain-GELU MLP + fused-QKV (moshi ProjectedTransformer),
+    // NOT Qwen2 RMSNorm+SwiGLU. ToTransformerConfig() below is a stopgap and must be replaced.
+    public int DModel { get; init; } = 1_024;            // flow_lm.transformer.d_model
+    public int NumLayers { get; init; } = 6;             // flow_lm.transformer.num_layers
+    public int LatentDim { get; init; } = 32;            // mimi.inner_dim (continuous latent)
 
-    /// <summary>Attention query heads of the Flow-LM transformer. RECONCILE: config.flow_lm.transformer.num_heads.</summary>
-    public int NumHeads { get; init; } = 0;
+    /// <summary>Attention query heads of the Flow-LM transformer.</summary>
+    public int NumHeads { get; init; } = 16;             // flow_lm.transformer.num_heads
 
     /// <summary>Attention key/value heads (GQA). Defaults to <see cref="NumHeads"/> (MHA) when 0.</summary>
-    public int NumKvHeads { get; init; } = 0;
+    public int NumKvHeads { get; init; } = 0;            // MHA (no GQA)
 
-    /// <summary>SwiGLU FFN inner dim of the Flow-LM transformer. RECONCILE: config.flow_lm.transformer.ffn_dim.</summary>
-    public int FfnDim { get; init; } = 0;
+    /// <summary>FFN inner dim of the Flow-LM transformer = d_model * hidden_scale (4).</summary>
+    public int FfnDim { get; init; } = 4_096;            // flow_lm.transformer.hidden_scale=4 -> 4*1024
 
-    /// <summary>Text-token vocabulary size (SentencePiece). RECONCILE: config.flow_lm.conditioner.tokenizer.</summary>
-    public int VocabSize { get; init; } = 0;
+    /// <summary>Text-token vocabulary size (SentencePiece). flow_lm.lookup_table.n_bins.</summary>
+    public int VocabSize { get; init; } = 4_000;
 
     /// <summary>RoPE base frequency for the Flow-LM transformer.</summary>
     public float RopeTheta { get; init; } = 10_000f;
@@ -44,18 +48,27 @@ public sealed record PocketTtsConfig
     /// <summary>Hard cap on text-prefix + primed-prompt + generated frames the KV cache addresses.</summary>
     public int MaxSequenceLength { get; init; } = 4_096;
 
-    // ── Per-frame flow-matching / LSD head ──
-    /// <summary>Per-frame latent sampling refinement steps (Lagrangian self-distillation).</summary>
-    public int LsdDecodeSteps { get; init; } = 4;
+    // ── Per-frame flow-matching / LSD head (flow_lm.flow_net = SimpleMLPAdaLN) ──
+    /// <summary>Per-frame latent sampling refinement steps. Reference DEFAULT_LSD_DECODE_STEPS = 1.</summary>
+    public int LsdDecodeSteps { get; init; } = 1;
 
-    /// <summary>Hidden width of the per-frame flow head MLP. Defaults to <see cref="DModel"/> when 0.</summary>
-    public int FlowHeadDim { get; init; } = 0;
+    /// <summary>Hidden width of the per-frame flow head (flow.dim). 512.</summary>
+    public int FlowHeadDim { get; init; } = 512;
 
-    /// <summary>Latent classifier-free-guidance scale applied inside the per-frame flow solver. ≤ 0 disables CFG.</summary>
-    public float LatentCfgScale { get; init; } = 1.0f;
+    /// <summary>Number of flow-head residual blocks (flow.depth). 6.</summary>
+    public int FlowDepth { get; init; } = 6;
 
     /// <summary>Sinusoidal time-embedding width fed to the flow head's time conditioning.</summary>
-    public int TimeEmbedDim { get; init; } = 0;
+    public int TimeEmbedDim { get; init; } = 256;
+
+    // ── Sampling (pocket_tts/default_parameters.py) ──
+    public float Temperature { get; init; } = 0.7f;
+    public float EosThreshold { get; init; } = -4.0f;
+    public int MaxTokenPerChunk { get; init; } = 50;
+
+    /// <summary>PARITY-TODO: the real flow_net (SimpleMLPAdaLN) has NO latent CFG; this field only feeds the
+    /// current stopgap <c>PocketTtsFlowHead</c> and is dropped once the flow head is rewritten to flow_net.</summary>
+    public float LatentCfgScale { get; init; } = 1.0f;
 
     /// <summary>Max generated audio frames per <c>Generate</c> call (safety bound on the AR loop).</summary>
     public int MaxFrames { get; init; } = 1_500;

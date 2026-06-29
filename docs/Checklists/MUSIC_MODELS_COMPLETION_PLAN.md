@@ -32,6 +32,15 @@ Everything below is ordered to reach that bar with the least total work, closest
 **Deliverable T0 (1–2 days, unblocks everything):** a shared `tests/python-reference/_audio_harness.py` helper (synthetic-checkpoint writer + tap-dump + index.json, generalized from the Ideogram script) and a C# `AudioDebugDump` mirror of `Ideogram4DebugDump`. Every model below reuses it.
 
 > **PROGRESS (2026-06-15): the harness pattern is proven on ACE-Step v1's DiT core.** `AceStepDebugDump` + `dump_ace_step_dit.py` + `diff_ace_step_layers.py` + `AceStepDitDiffTests` are live and **match to ~1e-8 across every tap**. A useful variation was found: instead of Python generating weights (Ideogram pattern), the **C# test generates the synthetic checkpoint via the existing `*SyntheticWeights` helpers + `SafeTensorsWriter` and Python consumes it** — this avoids re-synthesizing large key surfaces (e.g. ACE's lyric Conformer) in Python. That's the template for every model below. Next: factor the shared Python utils out of `dump_ace_step_dit.py`, and add per-model `*DebugDump` classes.
+>
+> **PROGRESS (2026-06-28/29): the whole music lineup is now verified end-to-end on the 3060** (see [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md) for numbers + the bugs table; [[music-models-sweep]] memory):
+> - **ACE-Step v1** ✅ — DiT ~1e-8 + DCAE corr 1.0 + vocoder corr 1.0; full e2e on CUDA (bf16 + new `CudaBackend.HighPrecisionGemm` flag, which upcasts bf16×f32 GEMMs to F32 so the 3.5B fits 12 GB without NaNs). `AceStep{Dit,Dcae,Vocoder}DiffTests`.
+> - **ACE-Step v1.5 turbo** ✅ — DiT/cond-encoder/8-step loop all corr 1.0 (~1e-6) vs a torch oracle on the real Comfy-Org turbo weights; Oobleck VAE corr 0.9999999999; **zero C# bugs** (the 3 fixes were loader-only: Oobleck Sequential keys, `LlamaStyleEncoder` `model.` prefix auto-detect, `EncodeConditions` accepting `[1,T,H]`). `AceStep15DitParityTests`.
+> - **MusicGen-small** ✅ — T5 corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; music-like e2e. **S2 (EnCodec 32 kHz) is DONE** — the real `facebook/musicgen-small` combined file ships the transformers-layout EnCodec; reconciled the converter + SeaNet (reflect padding, convtr weight-norm dim-0). 5 bugs fixed. `MusicGenParityTests`.
+> - **YuE Stage-1** ✅ — 7B LM corr 1.0 (argmax 8/8) + **XCodec rewritten to the real SoundStream EMA-VQ-12 arch**, decode corr 1.0 → 16 kHz vocal audio. (Stage-2 multi-codebook still scoped out.)
+> - **HeartMuLa** ✅ — 3B CSM-LM corr 0.9996+ + **HeartCodec rewritten to the real FlowMatching arch** (RVQ + 24+6 adaLN-single estimator + SQ-Codec ScalarModel): estimator corr 1.0 + ScalarModel corr 1.0 → 48 kHz audio; runs on CPU + CUDA. 2 codec bugs fixed (rank-2 `ProjectLinear` heap-corruption + in-place-block use-after-free).
+>
+> Remaining music work: Stable Audio Open / DiffRhythm / AudioLDM 2 / ACE-Step XL (not started); YuE Stage-2; full GPU-residency for the HeartCodec manual loops (perf only); publish engine **alpha.40** so the SwarmUI AudioLab extension picks up all of the above.
 
 ---
 
@@ -68,8 +77,8 @@ Reusable as-is (confirmed present): **T5TextEncoder** (+ `Umt5Base`, `T5Large` p
 6. Optional: GGUF Q4/Q8 DiT path (drops the 13 GB F32 requirement).
 **DoD:** parity green; real-weight E2E song on GPU matches reference spectrally; edit/repaint working.
 
-### M2 — MusicGen + AudioGen (decoder done; codec-blocked) → **quick win**
-**State:** decoder LM (small/med/large), delay pattern, CFG, pipeline, converter all built + structural tests. **Blocking bug:** decodes with 24 kHz EnCodec but MusicGen needs **32 kHz/50 Hz** → wrong-rate/garbled audio. AudioGen needs 16 kHz.
+### M2 — MusicGen + AudioGen → **MusicGen ✅ DONE (2026-06-28)**
+**State: MusicGen-small fully verified e2e** (T5 corr 1.0 · decoder logits corr 0.999999 · EnCodec-32k decode corr 1.0; music-like audio). The 32 kHz EnCodec blocker is resolved — the real combined `model.safetensors` ships the transformers-layout EnCodec, reconciled in the converter + SeaNet (reflect padding + convtr weight-norm dim-0). **AudioGen** (16 kHz) reuses the same pipeline/codec path and is the small remaining follow-up. See the top progress note + `MusicGenParityTests`.
 **Tasks:**
 1. **S2 (EnCodec 32 kHz)** + wire into `MusicGenPipeline`; verify output length = 32 kHz × duration.
 2. **S3 (EnCodec 16 kHz)** → AudioGen is then "MusicGen with a different codec," same pipeline.

@@ -29,7 +29,7 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
     // the single remap below is exact for all of them. The MoE members (olmoe, qwen2moe, qwen3moe, and Mixtral
     // under the plain "llama" arch) add the stacked-expert + router tensors handled below; the dense members
     // simply never carry those keys. Registering each explicitly resolves it by name (no heuristic-fallback warning).
-    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "gpt-oss", "gptoss"];
+    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmo2", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "internlm2", "nemotron", "gpt-oss", "gptoss"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {
@@ -78,6 +78,9 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
                 "attn_sinks" => "self_attn.sinks.weight",
                 "ffn_norm.weight" => "post_attention_layernorm.weight",
                 "ffn_norm.bias" => "post_attention_layernorm.bias",
+                // OLMo-2 post-norm: norm applied to the attention / FFN output (mapped to the sandwich-norm slots).
+                "post_attention_norm.weight" => "post_attention_layernorm.weight",
+                "post_ffw_norm.weight" => "post_feedforward_layernorm.weight",
                 "ffn_gate.weight" => "mlp.gate_proj.weight",
                 "ffn_up.weight" => "mlp.up_proj.weight",
                 "ffn_down.weight" => "mlp.down_proj.weight",
