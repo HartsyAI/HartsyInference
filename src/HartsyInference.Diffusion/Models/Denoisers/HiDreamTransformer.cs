@@ -6,9 +6,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>HiDream-I1 image transformer (HiDreamImageTransformer2DModel) — text-to-image only.
 /// <para>Architecture: 16 double-stream blocks (joint MM-attention) + 32 single-stream blocks
-/// (parallel image+text attention), MoE SwiGLU FFN with shared + 4 routed experts on the image side
-/// (currently <i>single-expert fallback</i> — see <see cref="HiDreamBlock"/> for the design decision and
-/// the <c>// TODO: full MoE routing</c> markers), 3-axis RoPE on (layer-id, row, col).</para>
+/// (parallel image+text attention), MoE SwiGLU FFN with a shared expert + top-2-of-4 routed experts on the
+/// image side (see <see cref="HiDreamBlock"/> for the gate softmax / top-k renorm), 3-axis RoPE on
+/// (layer-id, row, col).</para>
 /// <para>Text conditioning is the concatenation of:
 /// <list type="bullet">
 /// <item>The last two Llama-3.1 hidden states projected through <c>caption_projection[0]</c> (forming the "initial encoder hidden states");</item>
@@ -54,12 +54,14 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         _doubleBlocks = new HiDreamBlock[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
             _doubleBlocks[i] = new HiDreamBlock(hidden, numHeads, headDim, ffDim,
-                isSingle: false, numRoutedExperts: config.NumRoutedExperts, qkNormEps: config.RmsNormEps);
+                isSingle: false, numRoutedExperts: config.NumRoutedExperts,
+                numActivatedExperts: config.NumActivatedExperts, qkNormEps: config.RmsNormEps);
 
         _singleBlocks = new HiDreamBlock[config.NumSingleLayers];
         for (int i = 0; i < config.NumSingleLayers; i++)
             _singleBlocks[i] = new HiDreamBlock(hidden, numHeads, headDim, ffDim,
-                isSingle: true, numRoutedExperts: config.NumRoutedExperts, qkNormEps: config.RmsNormEps);
+                isSingle: true, numRoutedExperts: config.NumRoutedExperts,
+                numActivatedExperts: config.NumActivatedExperts, qkNormEps: config.RmsNormEps);
 
         _rope = new HiDreamRope(config.AxesDimsRope, (int)config.RopeTheta);
     }

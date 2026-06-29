@@ -40,18 +40,20 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
+        int width = request.Width ?? GenerationDefaults.Generic.Width;
+        int height = request.Height ?? GenerationDefaults.Generic.Height;
         const int totalDownscale = 32;   // VAE 16× × transformer patch 2×
-        if (request.Width % totalDownscale != 0 || request.Height % totalDownscale != 0)
+        if (width % totalDownscale != 0 || height % totalDownscale != 0)
             throw new ArgumentException($"Width and height must be divisible by {totalDownscale} for Lance.");
 
-        int vaeLatentH = request.Height / 16, vaeLatentW = request.Width / 16;
+        int vaeLatentH = height / 16, vaeLatentW = width / 16;
         int gridT = 1, gridH = vaeLatentH / 2, gridW = vaeLatentW / 2;
         int nVae = gridT * gridH * gridW;
-        int steps = request.Steps > 0 ? request.Steps : _config.NumTimesteps;
-        float cfg = request.CfgScale > 0 ? request.CfgScale : _config.CfgTextScale;
+        int steps = request.Steps ?? _config.NumTimesteps;
+        float cfg = request.CfgScale ?? _config.CfgTextScale;
         float shift = _config.ImageTimestepShift;
 
-        Logs.Info($"Lance T2I: {request.Width}x{request.Height}, {steps} steps, cfg={cfg}, seed={seed} (grid {gridT}x{gridH}x{gridW}, {nVae} tokens)");
+        Logs.Info($"Lance T2I: {width}x{height}, {steps} steps, cfg={cfg}, seed={seed} (grid {gridT}x{gridH}x{gridW}, {nVae} tokens)");
         Logs.Warning("Lance pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -105,7 +107,7 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
 
         sw.Stop();
         Logs.Info($"Lance T2I complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
-        return (bytes, request.Width, request.Height, seed);
+        return (bytes, width, height, seed);
     }
 
     /// <summary>Converts decoded RGB <c>[1,3,1,H,W]</c> in [-1,1] to interleaved RGB bytes [0,255].</summary>

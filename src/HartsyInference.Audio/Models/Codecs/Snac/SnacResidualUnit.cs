@@ -15,6 +15,7 @@ internal sealed unsafe class SnacResidualUnit
     private readonly int _dim;
     private readonly int _kernel;
     private readonly int _dilation;
+    private readonly int _groups;
 
     private Tensor? _snake1Alpha;
     private Tensor? _snake2Alpha;
@@ -23,12 +24,13 @@ internal sealed unsafe class SnacResidualUnit
     private Tensor? _conv2W;
     private Tensor? _conv2B;
 
-    public SnacResidualUnit(string prefix, int dim, int kernel, int dilation)
+    public SnacResidualUnit(string prefix, int dim, int kernel, int dilation, int groups = 1)
     {
         _prefix = prefix;
         _dim = dim;
         _kernel = kernel;
         _dilation = dilation;
+        _groups = groups;
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
@@ -52,7 +54,7 @@ internal sealed unsafe class SnacResidualUnit
         int tConv1 = t + 2 * pad - _dilation * (_kernel - 1);
         Tensor mid = new(new TensorShape(batch, _dim, tConv1), DType.F32);
         backend.Conv1d(mid, a1, _conv1W!, _conv1B,
-            stride: 1, padLeft: pad, padRight: pad, dilation: _dilation, groups: 1);
+            stride: 1, padLeft: pad, padRight: pad, dilation: _dilation, groups: _groups);
         a1.Dispose();
 
         Tensor a2 = new(mid.Shape, DType.F32);

@@ -10,7 +10,7 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Lumina-Image-2.0 text-to-image pipeline (Alpha-VLLM, Apache 2.0). Accepts pre-computed Gemma-2 caption embeddings (text-encoder forward is owned by a separate component, since HartsyInference's <see cref="Models.TextEncoders.LlamaStyleEncoder"/> does not yet implement Gemma-2-specific features like GeGLU MLP and attention soft-capping) and orchestrates the NextDiT transformer with a static-shift flow-match Euler scheduler.
+/// <summary>Lumina-Image-2.0 text-to-image pipeline (Alpha-VLLM, Apache 2.0). Accepts pre-computed Gemma-2 caption embeddings (text-encoder forward is owned by a separate component, since HartsyInference's <see cref="Models.TextEncoders.LlamaStyleEncoder"/> does not yet implement Gemma-2-specific features like GeGLU MLP and attention soft-capping) and orchestrates the NextDiT transformer with a dynamic-shift flow-match Euler scheduler (shift derived from the image token count, matching diffusers <c>calculate_shift</c>).
 /// <para>The diffusers pipeline (<c>pipeline_lumina2.py</c>) inverts the timestep before feeding it to the transformer (<c>1 - t / num_train_timesteps</c>) and negates the predicted velocity before the scheduler step — both behaviors are replicated here for parity. Default sampling: 30 steps, cfg_scale=4.0 with a negative prompt (matches the diffusers default). Only t2i is supported.</para>
 /// </summary>
 public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
@@ -34,12 +34,16 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
     /// <param name="cfgScale">Classifier-free guidance scale. Lumina 2.0's diffusers default is 4.0 with a negative prompt.</param>
     /// <param name="negativeCaptionEmbeddings">Negative-prompt embeddings for CFG. Required when <paramref name="cfgScale"/> &gt; 1.0.</param>
     /// <param name="onProgress">Optional progress callback per step.</param>
+    /// <param name="cfgNormalization">Lumina-2.0's <c>cfg_normalization</c> (diffusers default TRUE): rescale the guided prediction back to the conditional's per-token L2 norm. See <see cref="CfgHelper.ApplyCfgNormalized"/>.</param>
+    /// <param name="cfgTruncRatio">Lumina-2.0's <c>cfg_trunc_ratio</c> (diffusers default 1.0): for steps where the step-progress fraction <c>(i+1)/steps</c> exceeds this ratio, guidance is skipped and only the conditional prediction is used. At 1.0 the gate never fires (never-skip), so it is a no-op at the default.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromEmbeddings(
         Tensor captionEmbeddings,
         TextToImageRequest request,
         float cfgScale = 4.0f,
         Tensor? negativeCaptionEmbeddings = null,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        bool cfgNormalization = true,
+        float cfgTruncRatio = 1.0f)
     {
         ThrowIfDisposed();
 
@@ -49,17 +53,23 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
                 nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        int width = request.Width ?? GenerationDefaults.Lumina2.Width;
+        int height = request.Height ?? GenerationDefaults.Lumina2.Height;
         int latentH = height / _config.VaeDownscaleFactor;
         int latentW = width / _config.VaeDownscaleFactor;
-        int steps = request.Steps;
+        int steps = request.Steps ?? GenerationDefaults.Lumina2.Steps;
 
         Logs.Info($"Lumina 2.0 t2i: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
-        FlowMatchEulerDiscreteScheduler scheduler = new(_config.SchedulerShift);
+
+        // VALIDATION-PENDING: verify against diffusers Lumina2Pipeline dynamic shift (retrieve_timesteps -> calculate_shift):
+        // base_shift=0.5, max_shift=1.15, base_image_seq_len=256, max_image_seq_len=4096; image_seq_len = (H/patch)*(W/patch);
+        // mu = base + (max-base)*(image_seq_len-256)/(4096-256); shift = exp(mu) feeds the flow-match scheduler.
+        // Replaces the previous static _config.SchedulerShift (~6.0).
+        int imageSeqLen = (latentH / _config.PatchSize) * (latentW / _config.PatchSize);
+        FlowMatchEulerDiscreteScheduler scheduler = FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imageSeqLen);
         scheduler.SetTimesteps(steps);
 
         Tensor latent = BuildInitialLatent(scheduler, latentShape, seed);
@@ -75,10 +85,17 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             float invertedSigma = 1.0f - sigma;
             Tensor velocity = _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma);
 
-            if (cfgScale > 1.0f)
+            // VALIDATION-PENDING: verify against diffusers Lumina2Pipeline (pipeline_lumina2.py:724-757):
+            // do_classifier_free_truncation = (i+1)/num_inference_steps > cfg_trunc_ratio. When truncated, guidance is
+            // skipped and the conditional prediction is used directly (noise_pred = noise_pred_cond). Otherwise CFG is
+            // combined and, when cfg_normalization is on, rescaled back to the conditional's per-token L2 norm.
+            bool doClassifierFreeTruncation = (float)(i + 1) / steps > cfgTruncRatio;
+            if (cfgScale > 1.0f && !doClassifierFreeTruncation)
             {
                 Tensor uncondVelocity = _transformer.Forward(Backend, latent, negativeCaptionEmbeddings!, invertedSigma);
-                Tensor combined = CfgHelper.ApplyCfg(uncondVelocity, velocity, cfgScale);
+                Tensor combined = cfgNormalization
+                    ? CfgHelper.ApplyCfgNormalized(uncondVelocity, velocity, cfgScale)
+                    : CfgHelper.ApplyCfg(uncondVelocity, velocity, cfgScale);
                 uncondVelocity.Dispose();
                 velocity.Dispose();
                 velocity = combined;

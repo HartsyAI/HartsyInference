@@ -76,7 +76,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             throw new InvalidOperationException(
                 "This pipeline was constructed with the legacy CLIP+T5 encoders — use the CLIP/T5 GenerateFromTokens overload.");
 
-        bool useCfg = request.CfgScale > 1.0f;
+        bool useCfg = (request.CfgScale ?? GenerationDefaults.HunyuanImage.CfgScale) > 1.0f;
         if (useCfg && (negativePromptTokenIdsQwen is null || negativeAttentionMaskQwen is null))
             throw new ArgumentException("Negative prompt tokens + mask are required when CfgScale > 1.", nameof(negativePromptTokenIdsQwen));
 
@@ -113,7 +113,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             throw new InvalidOperationException(
                 "This pipeline was constructed with the Qwen2.5-VL encoder — use the Qwen GenerateFromTokens overload.");
 
-        bool useCfg = request.CfgScale > 1.0f;
+        bool useCfg = (request.CfgScale ?? GenerationDefaults.HunyuanImage.CfgScale) > 1.0f;
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
 
         Logs.Info("Encoding text with T5-XXL (legacy per-token context path)...");
@@ -136,15 +136,12 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private (byte[] rgbData, int width, int height, int seed) Denoise(Tensor condText, Tensor? uncondText,
         TextToImageRequest request, int seed, Action<GenerationProgress>? onProgress)
     {
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.HunyuanImage.Resolve(request);
         const int VaeDownscale = 32;
         if (width % VaeDownscale != 0 || height % VaeDownscale != 0)
             throw new ArgumentException($"Hunyuan Image: width and height must be divisible by {VaeDownscale}.");
         int latentH = height / VaeDownscale;
         int latentW = width / VaeDownscale;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f;
         int patch = _config.PatchSize;
         int inChannels = _config.InChannels;

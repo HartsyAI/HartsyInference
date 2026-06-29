@@ -52,6 +52,11 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the 16-channel Flux VAE, packed (2×2 patchify), and combined with fresh packed noise via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Requires a <see cref="VaeEncoder"/>.</item>
     /// </list>
     /// Strength=0 short-circuits to byte-identical pass-through.
+    /// <para>True-CFG (diffusers <c>true_cfg_scale</c>): when <paramref name="trueCfgScale"/> &gt; 1 and a negative
+    /// T5 token stream is supplied, a second unconditional transformer forward runs each step against the negative
+    /// CLIP-pooled + negative T5 conditioning and the two velocity predictions are combined via standard CFG
+    /// (<c>neg + scale·(pos − neg)</c>). This is layered ON TOP of Flux's embedded distilled guidance, which still
+    /// rides along on both passes. When the trigger is not met, the path is byte-identical to the single-pass loop.</para>
     /// </summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsL,
@@ -62,7 +67,12 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         float guidanceScale = 3.5f,
         Action<GenerationProgress>? onProgress = null,
         Tensor? controlImage = null,
-        RegionalPlan? regionalPlan = null)
+        RegionalPlan? regionalPlan = null,
+        int[]? negPromptTokenIdsL = null,
+        int negPromptEosPositionL = 0,
+        int[]? negPromptTokenIdsT5 = null,
+        int[]? negPromptAttentionMaskT5 = null,
+        float trueCfgScale = 1.0f)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -108,11 +118,9 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         }
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, _, int width, int height) = GenerationDefaults.FluxDev.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
         if (plan.PassThrough)
@@ -156,6 +164,43 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (T5 seqLen={txtSeqLen})");
         LogTensorStats("CLIP pooled", clipPooled);
         LogTensorStats("T5 embeddings", t5Embeddings);
+
+        // ── 1b. True-CFG negative conditioning (diffusers true_cfg_scale) ──
+        // VALIDATION-PENDING: verify vs diffusers FluxPipeline true_cfg. diffusers Flux
+        // runs a real unconditional pass only when true_cfg_scale > 1 AND a negative prompt
+        // is supplied, combining the two velocity predictions via standard CFG
+        // (neg + scale*(pos - neg)) in ADDITION to the model's embedded distilled guidance,
+        // which still rides along on BOTH passes (same guidanceScale fed to each forward).
+        // When doTrueCfg is false the loop below is byte-identical to the single-pass path.
+        bool doTrueCfg = trueCfgScale > 1f && negPromptTokenIdsT5 is not null;
+        Tensor? negClipPooled = null;
+        Tensor? negT5Embeddings = null;
+        if (doTrueCfg)
+        {
+            Logs.Info($"Flux true-CFG enabled (true_cfg_scale={trueCfgScale}); encoding negative prompt...");
+            int[][] negBatchTokenIdsL = [negPromptTokenIdsL ?? promptTokenIdsL];
+            Tensor negClipLHidden = _clipL.Encode(Backend, negBatchTokenIdsL);
+            negClipPooled = ExtractEosHiddenState(negClipLHidden, negPromptEosPositionL);
+            negClipLHidden.Dispose();
+
+            int[][] negBatchTokenIdsT5 = [negPromptTokenIdsT5!];
+            int[][]? negBatchMaskT5 = negPromptAttentionMaskT5 is not null ? [negPromptAttentionMaskT5] : null;
+            negT5Embeddings = _t5.Encode(Backend, negBatchTokenIdsT5, negBatchMaskT5);
+            LogTensorStats("Neg CLIP pooled", negClipPooled);
+            LogTensorStats("Neg T5 embeddings", negT5Embeddings);
+
+            // The negative T5 stream must match the positive's sequence length so the
+            // transformer's joint [txt|img] attention and the velocity shapes line up for
+            // the CFG combine. The Flux T5 encoder pads/truncates to a fixed max length, so
+            // positive and negative streams share txtSeqLen; guard rather than silently
+            // mis-combine if a caller ever supplies a divergent length.
+            if ((int)negT5Embeddings.Shape[1] != txtSeqLen)
+            {
+                throw new InvalidOperationException(
+                    $"True-CFG negative T5 seqLen ({negT5Embeddings.Shape[1]}) must equal positive T5 seqLen ({txtSeqLen}). " +
+                    "Tokenize the negative prompt with the same max length as the positive prompt.");
+            }
+        }
 
         // Free T5 weights from GPU now that text encoding is done. T5-XXL is ~5 GB —
         // keeping it cached through sampling + VAE decode would OOM 12 GB cards on Flux.
@@ -284,10 +329,26 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                     condTxtSeqLen + imgSeqLen, condTxtSeqLen, imgSeqLen, regionRanges!, regionGridMasks!, regionWeights!);
             }
 
-            // Forward pass: velocity prediction
+            // Forward pass: conditional velocity prediction (embedded distilled guidance rides along).
             Tensor velocityPred = _transformer.Forward(
                 Backend, transformerInput, condStream, sigma,
                 clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, regionBias);
+
+            // True-CFG: run a second forward with the negative conditioning (same noisy latent,
+            // same timestep, same embedded guidanceScale) and combine with standard CFG. The
+            // negative pass uses the base T5 length (no regional extension); regional plans
+            // extend only the positive stream, so true-CFG runs against the unextended negative.
+            // VALIDATION-PENDING: verify vs diffusers FluxPipeline true_cfg.
+            if (doTrueCfg)
+            {
+                Tensor velocityNeg = _transformer.Forward(
+                    Backend, transformerInput, negT5Embeddings!, sigma,
+                    negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null);
+                Tensor combined = CfgHelper.ApplyCfg(velocityNeg, velocityPred, trueCfgScale);
+                velocityNeg.Dispose();
+                velocityPred.Dispose();
+                velocityPred = combined;
+            }
 
             regionBias?.Dispose();
             if (transformerInput != packedLatent) transformerInput.Dispose();
@@ -352,6 +413,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 
         clipPooled.Dispose();
         t5Embeddings.Dispose();
+        negClipPooled?.Dispose();
+        negT5Embeddings?.Dispose();
         extendedT5?.Dispose();
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
@@ -432,7 +495,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"Flux ({baseMode}) {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
-        return (rgbData, request.Width, request.Height, seed);
+        return (rgbData, width, height, seed);
     }
 
     /// <summary>Picks <c>prefetchAhead</c> for the streaming controller based on how much VRAM

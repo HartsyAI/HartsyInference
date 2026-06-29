@@ -67,11 +67,11 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        int width = request.Width ?? GenerationDefaults.ZImageTurbo.Width;
+        int height = request.Height ?? GenerationDefaults.ZImageTurbo.Height;
         int latentH = height / _config.VaeDownscaleFactor;
         int latentW = width / _config.VaeDownscaleFactor;
-        int steps = request.Steps;
+        int steps = request.Steps ?? GenerationDefaults.ZImageTurbo.Steps;
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
         if (plan.PassThrough)

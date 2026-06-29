@@ -71,12 +71,9 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
         TensorShape latentShape = new TensorShape(1, 4, latentH, latentW);
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
@@ -106,8 +103,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
                 int refinerSteps = (int)MathF.Round(steps * refinerStrength);
                 swapStep = Math.Clamp(steps - refinerSteps, startStep, steps);
                 useStepSwap = swapStep < steps;
-                refinerSizeConditionPos = [request.Height, request.Width, 0f, 0f, refiner.AestheticScore];
-                refinerSizeConditionNeg = [request.Height, request.Width, 0f, 0f, refiner.NegativeAestheticScore];
+                refinerSizeConditionPos = [height, width, 0f, 0f, refiner.AestheticScore];
+                refinerSizeConditionNeg = [height, width, 0f, 0f, refiner.NegativeAestheticScore];
             }
         }
 
@@ -140,9 +137,9 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // 2. ADM size conditioning (orig_size = target_size = request resolution; no crop)
         float[] sizeCondition =
         [
-            request.Height, request.Width,
+            height, width,
             0f, 0f,
-            request.Height, request.Width,
+            height, width,
         ];
 
         // 3. Set up scheduler

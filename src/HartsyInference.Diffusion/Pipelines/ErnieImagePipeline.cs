@@ -73,17 +73,16 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         ThrowIfDisposed();
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.ErnieImage.Resolve(request);
         // ERNIE-Image: VAE is 8× spatial, then a 2×2 patchify in pipeline → effective 16× downscale.
         int effectiveDownscale = 16;
-        if (request.Width % effectiveDownscale != 0 || request.Height % effectiveDownscale != 0)
+        if (width % effectiveDownscale != 0 || height % effectiveDownscale != 0)
             throw new ArgumentException($"Width and height must be divisible by {effectiveDownscale} for ERNIE-Image.");
 
-        int latentH = request.Height / effectiveDownscale;
-        int latentW = request.Width / effectiveDownscale;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        int latentH = height / effectiveDownscale;
+        int latentW = width / effectiveDownscale;
 
-        Logs.Info($"ERNIE-Image: Generating {request.Width}x{request.Height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Logs.Info($"ERNIE-Image: Generating {width}x{height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode prompts ─────────────────────────────────────────────
@@ -192,7 +191,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
 
         sw.Stop();
         Logs.Info($"ERNIE-Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
-        return (rgb, request.Width, request.Height, seed);
+        return (rgb, width, height, seed);
     }
 
     /// <summary>Runs the text encoder for a single (already padded) batch of token ids.</summary>

@@ -18,7 +18,10 @@ namespace HartsyInference.ModelHandler.CheckpointConverters;
 ///
 /// <para>The VAE rename table targets the released 0.9 base VAE (the variant <c>LtxVideoVaeDecoder</c> implements). The
 /// 0.9.1+ timestep-conditioned decoder additionally renames <c>last_time_embedder→time_embedder</c> /
-/// <c>last_scale_shift_table→scale_shift_table</c> (included), but its restructured block layout is validation-pending.</para></summary>
+/// <c>last_scale_shift_table→scale_shift_table</c> (included). The per-block <c>decoder.{mid_block,up_blocks.N}.time_embedder.*</c>
+    /// and decoder-level <c>decoder.time_embedder.*</c>/<c>decoder.scale_shift_table</c> keys pass through to the now
+    /// timestep-conditioned <c>LtxVideoVaeDecoder</c> (consumed when built with <c>timestepConditioned: true</c>);
+    /// numerics validation-pending vs diffusers LTXPipeline 0.9.7.</para></summary>
 public sealed class LtxVideoCheckpointConverter
 {
     private const string TransformerPrefix = "model.diffusion_model.";

@@ -109,7 +109,7 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
         rgb.Dispose();
 
         Logs.Info($"Kandinsky5-Video complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width, request.Height, seed);
+        return (frames, request.Width ?? 768, request.Height ?? 512, seed);
     }
 
     /// <summary>Runs the flow-match denoise loop and returns the model-space latent <c>[1, 16, T_lat, H_lat, W_lat]</c>.</summary>
@@ -120,16 +120,17 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
 
+        int width = request.Width ?? 768, height = request.Height ?? 512;
         int sp = _vae.Config.SpatialCompression;                       // 8
         int tp = _vae.Config.TemporalCompression;                      // 4
         (int _, int pH, int pW) = _config.PatchSize;
-        if (request.Width % (sp * pW) != 0 || request.Height % (sp * pH) != 0)
+        if (width % (sp * pW) != 0 || height % (sp * pH) != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp * pW} for Kandinsky 5 video.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {tp} == 0; got {numFrames}.");
 
         int tLat = (numFrames - 1) / tp + 1;
-        int hLat = request.Height / sp, wLat = request.Width / sp;
+        int hLat = height / sp, wLat = width / sp;
         int latCh = _config.InVisualDim;
         if (firstFrameLatent is not null &&
             (firstFrameLatent.Shape.Rank != 5 || firstFrameLatent.Shape[0] != 1 || firstFrameLatent.Shape[1] != latCh
@@ -138,16 +139,16 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
                 $"firstFrameLatent must be [1,{latCh},1,{hLat},{wLat}]; got {firstFrameLatent.Shape}.",
                 nameof(firstFrameLatent));
 
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        int steps = request.Steps ?? 50;
+        float cfgScale = request.CfgScale ?? 5.0f;
         bool useCfg = cfgScale > 1.0f;
         if (useCfg && (negQwenEmbeds is null || negClipPooled is null))
             throw new ArgumentException(
                 "cfgScale > 1.0 requires both negQwenEmbeds and negClipPooled.", nameof(negQwenEmbeds));
 
-        (float scaleT, float scaleH, float scaleW) = GetRopeScaleFactor(request.Height, request.Width);
+        (float scaleT, float scaleH, float scaleW) = GetRopeScaleFactor(height, width);
         string mode = firstFrameLatent is null ? "T2V" : "I2V";
-        Logs.Info($"Kandinsky5-Video {mode}: {numFrames}f {request.Width}x{request.Height}, {steps} steps, " +
+        Logs.Info($"Kandinsky5-Video {mode}: {numFrames}f {width}x{height}, {steps} steps, " +
                   $"cfg={cfgScale}, seed={seed} (latent {latCh}x{tLat}x{hLat}x{wLat}, shift={_schedulerShift}, " +
                   $"rope_scale=({scaleT},{scaleH},{scaleW}))");
         Logs.Warning("Kandinsky5-Video is first-run-validation pending — numerics unverified vs the reference checkpoint.");

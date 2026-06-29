@@ -6,11 +6,12 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
 
-/// <summary>Wan-Video (Wan-AI, Apache-2.0) text-to-video pipeline — Wan2.2 TI2V-5B. Maximum reuse: the DiT denoises directly in VAE-latent space <c>[1,48,T,H,W]</c> (the transformer patchifies/unpatchifies internally), and the VAE is the **already-built <see cref="Wan22VaeDecoder"/>** (z=48, 16×/4×, streaming). Flow-match Euler + 2-way text CFG; reuses <see cref="LancePipelineCommon"/> + frame streaming.
+/// <summary>Wan-Video (Wan-AI, Apache-2.0) text-to-video pipeline — Wan2.2 TI2V-5B. Maximum reuse: the DiT denoises directly in VAE-latent space <c>[1,48,T,H,W]</c> (the transformer patchifies/unpatchifies internally), and the VAE is the **already-built <see cref="Wan22VaeDecoder"/>** (z=48, 16×/4×, streaming). UniPC multistep (flow sigmas) + 2-way text CFG; reuses <see cref="LancePipelineCommon"/> + frame streaming.
 ///
 /// <para>Takes pre-computed umT5 features (encode upstream with the shared T5 encoder). <c>T_lat = (num_frames−1)/4 + 1</c>; latent <c>H/16 × W/16</c>. <b>Status: built, first-run validation pending</b> — the flow-match shift (5.0/3.0), scheduler (UniPC vs Euler), and DiT timestep scaling are validation-gated.</para></summary>
 public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
@@ -74,7 +75,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"Wan-Video T2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width, request.Height, seed);
+        return (frames, request.Width ?? 832, request.Height ?? 480, seed);
     }
 
     /// <summary>Streams decoded frames (pull-based → memory bounded; pair with an <c>IVideoEncoder</c>).
@@ -129,25 +130,26 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
+        int width = request.Width ?? 832, height = request.Height ?? 480;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
-        if (request.Width % sp != 0 || request.Height % sp != 0)
+        if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-Video.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {tp} == 0; got {numFrames}.");
 
         int tLat = (numFrames - 1) / tp + 1;
-        int hLat = request.Height / sp, wLat = request.Width / sp;
+        int hLat = height / sp, wLat = width / sp;
         if (firstFrameLatent is not null &&
             (firstFrameLatent.Shape.Rank != 5 || firstFrameLatent.Shape[0] != 1 || firstFrameLatent.Shape[1] != _config.InChannels
              || firstFrameLatent.Shape[2] != 1 || firstFrameLatent.Shape[3] != hLat || firstFrameLatent.Shape[4] != wLat))
             throw new ArgumentException($"firstFrameLatent must be [1,{_config.InChannels},1,{hLat},{wLat}]; got {firstFrameLatent.Shape}.", nameof(firstFrameLatent));
 
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = _config.FlowShift;
 
         string mode = firstFrameLatent is null ? "T2V" : "I2V";
-        Logs.Info($"Wan-Video {mode}: {numFrames}f {request.Width}x{request.Height}, {steps} steps, cfg={guidance}, seed={seed} (latent {_config.InChannels}x{tLat}x{hLat}x{wLat}, shift={shift})");
+        Logs.Info($"Wan-Video {mode}: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (latent {_config.InChannels}x{tLat}x{hLat}x{wLat}, shift={shift})");
         Logs.Warning("Wan-Video pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
@@ -156,14 +158,17 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // I2V-concat) transformer in_channels.
         int latentCh = _config.VaeLatentChannels;
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        // VALIDATION-PENDING: Wan 2.2 ships UniPCMultistepScheduler (solver_order=2, bh2, predict_x0=true,
+        // use_flow_sigmas=true, time_shift_type="exponential"); verify the UniPC sigma grid + bh2 update-coefficients
+        // against diffusers WanPipeline at the configured step count (e.g. 50).
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        scheduler.SetTimesteps(steps, shift);
         float[]? frameTs = firstFrameLatent is null ? null : new float[tLat];
 
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            float t = tsteps[k], dt = t - tsteps[k + 1];
-            float tEmb = t * 1000f;   // DiT timestep scaling (validation-gated)
+            float tEmb = scheduler.Timesteps[k];   // sigma·1000 (DiT timestep scaling, validation-gated)
             WanVideoTransformer expert = Expert(tEmb);
             Tensor vCond, vUncond;
             if (firstFrameLatent is null)
@@ -182,7 +187,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, frameTs);
                 modelInput.Dispose();
             }
-            LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
+            // Fold CFG into vCond, then take a UniPC predictor/corrector step in place.
+            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            scheduler.Step(latents, vCond);
             vCond.Dispose();
             vUncond.Dispose();
             sw.Stop();
@@ -224,28 +231,29 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 + "Use a Wan I2V config preset (e.g. I2V_14B_480p / I2V_A14B), or the TI2V firstFrameLatent path.");
         if (_config.HasImageConditioning && imageEmbeds is null)
             throw new ArgumentException("This variant has CLIP image conditioning — imageEmbeds is required.", nameof(imageEmbeds));
-        if (request.Width % sp != 0 || request.Height % sp != 0)
+        int width = request.Width ?? 832, height = request.Height ?? 480;
+        if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-Video.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {tp} == 0; got {numFrames}.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (numFrames - 1) / tp + 1;
-        int hLat = request.Height / sp, wLat = request.Width / sp;
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int hLat = height / sp, wLat = width / sp;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = _config.FlowShift;
 
-        Logs.Info($"Wan-Video I2V ({(imageEmbeds is null ? "concat" : "CLIP")}): {numFrames}f {request.Width}x{request.Height}, " +
+        Logs.Info($"Wan-Video I2V ({(imageEmbeds is null ? "concat" : "CLIP")}): {numFrames}f {width}x{height}, " +
             $"{steps} steps, cfg={guidance}, seed={seed} (latent {latentCh}x{tLat}x{hLat}x{wLat}, shift={shift})");
         Logs.Warning("Wan-Video I2V pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         // Build the fixed [1, 20, T, H, W] conditioning: [mask(4), cond-latent(16)]. The first frame is VAE-encoded
         // into latent frame 0; the remaining frames are zero, and the mask marks frame 0 as known.
         Backend.PreloadWeights(_encoder.EnumerateWeights());
-        Tensor frame0 = _encoder.EncodeRgbFrame(Backend, condRgb24, request.Width, request.Height);   // [1,z,1,hLat,wLat]
+        Tensor frame0 = _encoder.EncodeRgbFrame(Backend, condRgb24, width, height);   // [1,z,1,hLat,wLat]
         Tensor? frameLast = lastRgb24 is not null
-            ? _encoder.EncodeRgbFrame(Backend, lastRgb24, request.Width, request.Height) : null;
+            ? _encoder.EncodeRgbFrame(Backend, lastRgb24, width, height) : null;
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
         Tensor condition = BuildI2VCondition(frame0, frameLast, latentCh, tp, tLat, hLat, wLat);      // [1,tp+z,tLat,hLat,wLat]
@@ -255,13 +263,15 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         if (_transformer2 is not null) Backend.PreloadWeights(_transformer2.EnumerateWeights());
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
+        // shift) — verify the I2V concat path's UniPC trajectory vs diffusers WanImageToVideoPipeline.
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        scheduler.SetTimesteps(steps, shift);
 
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            float t = tsteps[k], dt = t - tsteps[k + 1];
-            float tEmb = t * 1000f;
+            float tEmb = scheduler.Timesteps[k];
             WanVideoTransformer expert = Expert(tEmb);
             Tensor modelInput = ConcatChannels(latents, condition);   // [1, 2z+tp, tLat, hLat, wLat]
             Tensor vCond, vUncond;
@@ -276,7 +286,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, [tEmb]);
             }
             modelInput.Dispose();
-            LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
+            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
@@ -299,7 +310,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"Wan-Video I2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width, request.Height, seed);
+        return (frames, width, height, seed);
     }
 
     /// <summary>Video-to-video: VAE-encodes <paramref name="rgbClip"/> <c>[1, 3, T, H, W]</c>, noises it to the
@@ -325,8 +336,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = _config.FlowShift;
         int startStep = Math.Clamp((int)Math.Round((1f - strength) * steps), 0, steps - 1);
 
@@ -339,8 +350,15 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
 
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
-        float sigma0 = tsteps[startStep];
+        // Use the UniPC sigma grid (shift-warped flow sigmas) for the noising start so the V2V init matches the
+        // scheduler the denoise loop runs on.
+        // VALIDATION-PENDING: Wan V2V still Euler-steps here. UniPC is a stateful predictor/corrector whose multistep
+        // history starts at step 0; a mid-trajectory start (startStep > 0) needs the diffusers
+        // begin_index / init-timestep handling to seed the history correctly. Match WanVideoPipeline.RunDenoise once
+        // the partial-trajectory UniPC start is designed + verified vs diffusers WanVideoToVideoPipeline.
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        scheduler.SetTimesteps(steps, shift);
+        float sigma0 = scheduler.Sigmas[startStep];
         Tensor noise = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
         Tensor latents = new Tensor(real.Shape, DType.F32);
         long n = real.Shape.ElementCount;
@@ -353,7 +371,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         for (int k = startStep; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            float t = tsteps[k], dt = t - tsteps[k + 1], tEmb = t * 1000f;
+            float t = scheduler.Sigmas[k], dt = t - scheduler.Sigmas[k + 1], tEmb = scheduler.Timesteps[k];
             WanVideoTransformer expert = Expert(tEmb);
             Tensor vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb);
             Tensor vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb);

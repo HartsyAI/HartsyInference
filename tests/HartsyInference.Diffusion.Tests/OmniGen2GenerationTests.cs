@@ -123,7 +123,7 @@ public sealed class OmniGen2GenerationTests
                 Stopwatch genSw = Stopwatch.StartNew();
                 (byte[] rgb, int outW, int outH, int seed) = pipeline.GenerateFromEmbeddings(
                     promptEmbeds, request, cfgScale, null,
-                    progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
+                    onProgress: progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
                 genSw.Stop();
                 _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1}s (seed={seed})");
 

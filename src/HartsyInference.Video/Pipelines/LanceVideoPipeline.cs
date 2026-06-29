@@ -47,7 +47,7 @@ public sealed unsafe class LanceVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"Lance T2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width, request.Height, seed);
+        return (frames, request.Width ?? 848, request.Height ?? 480, seed);
     }
 
     /// <summary>Streams decoded frames one at a time (pull-based → memory bounded to a single VAE frame-group; natural backpressure). Pair with an <c>IVideoEncoder</c> to write an MP4/frame-sequence without holding the whole clip.</summary>
@@ -82,21 +82,22 @@ public sealed unsafe class LanceVideoPipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
+        int width = request.Width ?? 848, height = request.Height ?? 480;
         const int totalDownscale = 32;
-        if (request.Width % totalDownscale != 0 || request.Height % totalDownscale != 0)
+        if (width % totalDownscale != 0 || height % totalDownscale != 0)
             throw new ArgumentException($"Width and height must be divisible by {totalDownscale} for Lance video.");
         if (numFrames < 1 || (numFrames - 1) % _config.VaeDownsampleTemporal != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {_config.VaeDownsampleTemporal} == 0 (e.g. 1, 5, 9, … 121); got {numFrames}.");
 
-        int vaeLatentH = request.Height / 16, vaeLatentW = request.Width / 16;
+        int vaeLatentH = height / 16, vaeLatentW = width / 16;
         int gridT = (numFrames - 1) / _config.VaeDownsampleTemporal + 1;
         int gridH = vaeLatentH / 2, gridW = vaeLatentW / 2;
         int nVae = gridT * gridH * gridW;
-        int steps = request.Steps > 0 ? request.Steps : _config.NumTimesteps;
-        float cfg = request.CfgScale > 0 ? request.CfgScale : _config.CfgTextScale;
+        int steps = request.Steps ?? _config.NumTimesteps;
+        float cfg = request.CfgScale ?? _config.CfgTextScale;
         float shift = _config.VideoTimestepShift;
 
-        Logs.Info($"Lance T2V denoise: {numFrames}f {request.Width}x{request.Height}, {steps} steps, cfg={cfg}, seed={seed} (grid {gridT}x{gridH}x{gridW}, {nVae} tokens)");
+        Logs.Info($"Lance T2V denoise: {numFrames}f {width}x{height}, {steps} steps, cfg={cfg}, seed={seed} (grid {gridT}x{gridH}x{gridW}, {nVae} tokens)");
         Logs.Warning("Lance video pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());

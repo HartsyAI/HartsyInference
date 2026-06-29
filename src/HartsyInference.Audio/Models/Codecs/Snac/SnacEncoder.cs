@@ -4,21 +4,25 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
-/// <summary>SNAC encoder. Structure parallels <see cref="Dac.DacEncoder"/>:
+/// <summary>SNAC encoder, matching the official hubertsiuzdak/snac <c>Encoder</c> (snac/layers.py):
 /// <code>
-///   stem: WNConv1d(1 → encoder_dim, k=7, padding=3)
-///   for stride in encoder_rates:
-///     d *= 2
-///     EncoderBlock(d, stride) = 3 × SnacResidualUnit + Snake + WNConv1d down
-///   Snake + WNConv1d(d_max → latent_dim, k=7, padding=3)
+///   block.0          : WNConv1d(1 -> encoder_dim, k7, pad3)
+///   block.{i+1}      : EncoderBlock(stride) = 3 x ResidualUnit(groups) + Snake + WNConv1d down
+///   [LocalMHA]       : only when attn_window_size != null (Phase 4, not wired)
+///   block.{N+1}      : WNConv1d(d_model -> d_model, k7, pad3, groups = d_model if depthwise)
 /// </code>
-/// SNAC's final projection uses a kernel of 7 (vs DAC's 3); padding adjusts accordingly.</summary>
+/// There is NO Snake before the final conv (unlike DAC). With <c>depthwise=true</c> the residual-unit first
+/// conv uses groups = block input dim, and the final conv uses groups = d_model.
+///
+/// PARITY-TODO: only used for the encode (audio -> codes) path; verify against real snac_24khz weights
+/// (Orpheus uses decode only, and <see cref="Snac"/> loads this tolerantly).</summary>
 internal sealed unsafe class SnacEncoder
 {
     private readonly SnacConfig _cfg;
     private readonly string _prefix;
     private readonly int _nStages;
     private readonly int[] _strides;
+    private readonly bool _depthwise;
 
     private Tensor? _stemW;
     private Tensor? _stemB;
@@ -26,7 +30,6 @@ internal sealed unsafe class SnacEncoder
     private readonly Tensor?[] _downsampleSnakeAlpha;
     private readonly Tensor?[] _downsampleW;
     private readonly Tensor?[] _downsampleB;
-    private Tensor? _finalSnakeAlpha;
     private Tensor? _finalProjW;
     private Tensor? _finalProjB;
 
@@ -36,6 +39,10 @@ internal sealed unsafe class SnacEncoder
         _prefix = prefix;
         _nStages = cfg.EncoderRates.Count;
         _strides = [.. cfg.EncoderRates];
+        _depthwise = cfg.Depthwise;
+
+        if (cfg.AttnWindowSize is not null)
+            throw new NotSupportedException("SNAC LocalMHA (attn_window_size) encode is not wired yet (Phase 4 PARITY-TODO).");
 
         _stageUnits = new SnacResidualUnit[_nStages][];
         _downsampleSnakeAlpha = new Tensor?[_nStages];
@@ -47,6 +54,7 @@ internal sealed unsafe class SnacEncoder
         {
             dim *= 2;
             int innerDim = dim / 2;
+            int groups = _depthwise ? innerDim : 1;
             _stageUnits[i] = new SnacResidualUnit[cfg.ResidualDilations.Count];
             for (int j = 0; j < cfg.ResidualDilations.Count; j++)
             {
@@ -54,7 +62,8 @@ internal sealed unsafe class SnacEncoder
                     prefix: $"{prefix}.block.{i + 1}.block.{j}",
                     dim: innerDim,
                     kernel: cfg.ResidualKernelSize,
-                    dilation: cfg.ResidualDilations[j]);
+                    dilation: cfg.ResidualDilations[j],
+                    groups: groups);
             }
         }
     }
@@ -79,10 +88,10 @@ internal sealed unsafe class SnacEncoder
             _downsampleB[i] = WhisperOps.EnsureF32(w[$"{_prefix}.block.{i + 1}.block.{convIdx}.bias"]);
         }
 
-        int finalDim = _cfg.EncoderDim * (1 << _nStages);
-        _finalSnakeAlpha = WhisperOps.EnsureF32(w[$"{_prefix}.block.{_nStages + 1}.alpha"]).Reshape(new TensorShape(finalDim));
-        _finalProjW = LoadFusedWeight(w, $"{_prefix}.block.{_nStages + 2}");
-        _finalProjB = WhisperOps.EnsureF32(w[$"{_prefix}.block.{_nStages + 2}.bias"]);
+        // Final conv sits directly after the encoder blocks (no Snake). attn would shift this index by 1.
+        int finalIdx = _nStages + 1;
+        _finalProjW = LoadFusedWeight(w, $"{_prefix}.block.{finalIdx}");
+        _finalProjB = WhisperOps.EnsureF32(w[$"{_prefix}.block.{finalIdx}.bias"]);
     }
 
     public Tensor Forward(IBackend backend, Tensor pcm, int batch, int tPcm)
@@ -90,7 +99,7 @@ internal sealed unsafe class SnacEncoder
         if (_stemW is null) throw new InvalidOperationException("SnacEncoder weights not loaded.");
 
         int stemPad = _cfg.StemKernelSize / 2;
-        int tStem = tPcm + 2 * stemPad - (_cfg.StemKernelSize - 1);
+        int tStem = tPcm;
         Tensor x = new(new TensorShape(batch, _cfg.EncoderDim, tStem), DType.F32);
         backend.Conv1d(x, pcm, _stemW!, _stemB,
             stride: 1, padLeft: stemPad, padRight: stemPad, dilation: 1, groups: 1);
@@ -128,16 +137,14 @@ internal sealed unsafe class SnacEncoder
             dim = dimOut;
         }
 
-        Tensor preProj = new(x.Shape, DType.F32);
-        backend.Snake(preProj, x, _finalSnakeAlpha!, null);
-        x.Dispose();
-
+        // Final conv (no preceding Snake). groups = d_model when depthwise.
         int finalPad = _cfg.StemKernelSize / 2;
-        int tFinal = t + 2 * finalPad - (_cfg.StemKernelSize - 1);
+        int tFinal = t;
+        int finalGroups = _depthwise ? dim : 1;
         Tensor latent = new(new TensorShape(batch, _cfg.LatentDim, tFinal), DType.F32);
-        backend.Conv1d(latent, preProj, _finalProjW!, _finalProjB,
-            stride: 1, padLeft: finalPad, padRight: finalPad, dilation: 1, groups: 1);
-        preProj.Dispose();
+        backend.Conv1d(latent, x, _finalProjW!, _finalProjB,
+            stride: 1, padLeft: finalPad, padRight: finalPad, dilation: 1, groups: finalGroups);
+        x.Dispose();
         return latent;
     }
 
@@ -153,7 +160,6 @@ internal sealed unsafe class SnacEncoder
             if (_downsampleW[i] is not null) yield return _downsampleW[i]!;
             if (_downsampleB[i] is not null) yield return _downsampleB[i]!;
         }
-        if (_finalSnakeAlpha is not null) yield return _finalSnakeAlpha;
         if (_finalProjW is not null) yield return _finalProjW;
         if (_finalProjB is not null) yield return _finalProjB;
     }

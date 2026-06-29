@@ -83,12 +83,12 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 "Chroma requires the tokenizer attention mask for the negative prompt as well.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        int width = request.Width ?? GenerationDefaults.Chroma.Width;
+        int height = request.Height ?? GenerationDefaults.Chroma.Height;
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        int steps = request.Steps ?? _config.DefaultSteps;
+        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
         bool useCfg = cfgScale > 1.0f;
 
         Logs.Info($"Chroma: Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
@@ -137,7 +137,13 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         scheduler.SetTimesteps(steps);
 
         // ── 3. Build initial packed latent ────────────────────────────────
-        Tensor packedLatent = PackLatent(SeedGenerator.CreateNoise(latentShape, seed), latentH, latentW);
+        // Honor a caller-supplied initial noise tensor (img2img / fixed-seed reproduction) when present;
+        // otherwise sample fresh noise from the seed. The caller's tensor is in unpacked latent layout
+        // [1, 16, latentH, latentW]; PackLatent takes ownership and disposes it.
+        Tensor initialNoise = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
+        if (!initialNoise.Shape.Equals(latentShape))
+            throw new ArgumentException($"InitialNoise shape {initialNoise.Shape} != expected {latentShape}.");
+        Tensor packedLatent = PackLatent(initialNoise, latentH, latentW);
         float initSigma = scheduler.InitialNoiseSigma;
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
@@ -242,7 +248,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Runs classifier-free guidance: <c>noise_pred = uncond + cfg_scale * (cond - uncond)</c>.</summary>
+    /// <summary>Runs classifier-free guidance with Chroma's cond-anchored convention: <c>noise_pred = cond + cfg_scale * (cond - uncond)</c>. Chroma does real dual-pass CFG against a negative prompt; only the combine baseline differs from the standard formula.</summary>
     private Tensor ClassifierFreeGuidanceStep(
         Tensor packedLatent, float sigma,
         Tensor condContext, Tensor condMask,
@@ -262,7 +268,8 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // Touch txtSeqLen so the field isn't flagged unused (it remains for callers that need to introspect).
         _ = txtSeqLen;
 
-        Tensor output = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
+        // VALIDATION-PENDING: Chroma uses cond-anchored CFG (cond + scale*(cond - uncond)); verify combine vs reference pipeline_chroma.py.
+        Tensor output = CfgHelper.ApplyCfgCondAnchored(condNoise, uncondNoise, cfgScale);
         uncondNoise.Dispose();
         condNoise.Dispose();
         return output;

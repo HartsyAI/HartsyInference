@@ -79,6 +79,12 @@ public sealed class ModelManager : IDisposable
         if (!_pipelines.TryGetValue(modelId, out DiffusionPipelineBase? pipeline))
             throw new InvalidOperationException($"Model '{modelId}' is not loaded. POST /v1/models/load first.");
 
+        // VALIDATION-PENDING: verify vs diffusers FluxPipeline true_cfg. When a Flux dispatch
+        // branch is added here, tokenize req.NegativePrompt with the CLIP-L + T5 tokenizers
+        // (same as the positive prompt) and pass the negative tokens to
+        // FluxPipeline.GenerateFromTokens along with trueCfgScale: req.CfgScale (Flux ignores
+        // the embedded-guidance CfgScale field otherwise), and an empty negative prompt must stay
+        // single-pass (doTrueCfg gates on trueCfgScale > 1 AND a non-null negative T5 stream).
         if (pipeline is not SdxlPipeline sdxl)
             throw new NotSupportedException($"Image generation over HTTP currently supports SDXL pipelines; '{modelId}' is {pipeline.GetType().Name}.");
 

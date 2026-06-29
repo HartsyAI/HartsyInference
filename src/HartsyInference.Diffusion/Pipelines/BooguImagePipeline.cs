@@ -56,11 +56,9 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
                 nameof(negativeInstructionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, _, int width, int height) = GenerationDefaults.Generic.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
         int seqLen = (latentH / _config.PatchSize) * (latentW / _config.PatchSize);
 
         Logs.Info($"Boogu-Image t2i: {width}x{height}, {steps} steps, tg={textGuidanceScale}, seed={seed}");
@@ -139,11 +137,9 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             throw new ArgumentException("dropAllEmbeddings is required when imageGuidanceScale > 1.0.", nameof(dropAllEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, _, int width, int height) = GenerationDefaults.Generic.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
         int seqLen = (latentH / _config.PatchSize) * (latentW / _config.PatchSize);
 
         Logs.Info($"Boogu-Image edit: {width}x{height}, {steps} steps, tg={textGuidanceScale}, ig={imageGuidanceScale}, refs={referenceImages.Count}, seed={seed}");

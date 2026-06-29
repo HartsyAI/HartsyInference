@@ -63,12 +63,9 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         ThrowIfDisposed();
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
         float strength = Math.Clamp(request.Strength, 0f, 1f);
 
         Tensor source = request.SourceImage;
@@ -106,13 +103,13 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         //    The aesthetic_score differs between cond/uncond branches, so we build two arrays.
         float[] sizeConditionPos =
         [
-            request.Height, request.Width,
+            height, width,
             0f, 0f,
             request.AestheticScore,
         ];
         float[] sizeConditionNeg =
         [
-            request.Height, request.Width,
+            height, width,
             0f, 0f,
             request.NegativeAestheticScore,
         ];

@@ -70,15 +70,16 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int numFrames, double frameRate = 24.0, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        int width = request.Width ?? 768, height = request.Height ?? 512;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
-        if (request.Width % sp != 0 || request.Height % sp != 0)
+        if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for LTX-2.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {tp} == 0; got {numFrames}.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (numFrames - 1) / tp + 1;
-        int hLat = request.Height / sp, wLat = request.Width / sp;
+        int hLat = height / sp, wLat = width / sp;
         int sv = tLat * hLat * wLat;
         int videoChannels = _config.InChannels;
 
@@ -87,14 +88,14 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int audioFrames = Math.Max(1, (int)Math.Round(durationS * audioLatentsPerSecond));
         int audioChannels = _config.AudioInChannels;   // 8 latent ch × 16 mel-latent bins (patch-1 pack)
 
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
 
         // Dynamic flow-match shift (LTX-2 scheduler: base_seq 1024 → base_shift 0.95, max_seq 4096 → max_shift 2.05).
         double m = (2.05 - 0.95) / (4096 - 1024), bShift = 0.95 - m * 1024;
         float shift = (float)Math.Exp(sv * m + bShift);
 
-        Logs.Info($"LTX-2 T2V+A: {numFrames}f {request.Width}x{request.Height}, {steps} steps, cfg={guidance}, " +
+        Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, " +
             $"seed={seed} (video {tLat}x{hLat}x{wLat}={sv} tokens, audio {audioFrames} tokens, shift={shift:F3})");
         Logs.Warning("LTX-2 pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
@@ -160,7 +161,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         audioLat.Dispose();
 
         Logs.Info($"LTX-2 complete ({frames.Length} frames" + (audio is not null ? " + audio" : "") + $", seed={seed})");
-        return new Ltx2Result(frames, request.Width, request.Height, seed, audio, audioSampleRate);
+        return new Ltx2Result(frames, width, height, seed, audio, audioSampleRate);
     }
 
     /// <summary>Runs Gemma over the (register-padded) tokens, relayouts the 49 hidden states into the connector's

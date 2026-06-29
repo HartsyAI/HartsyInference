@@ -17,8 +17,9 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// §Zeta-Chroma):
 /// <list type="bullet">
 ///   <item><b>x0 prediction</b> — converted per step via <see cref="X0Prediction.ToVelocity"/>
-///         (<c>v = (x_t − x0) / t</c>, ComfyUI <c>NextDiTPixelSpace</c>), then standard CFG on v
-///         (<see cref="CfgHelper.ApplyCfg"/> — NOT Z-Image's non-standard cond-baseline formula; item 8).</item>
+///         (<c>v = (x_t − x0) / t</c>, ComfyUI <c>NextDiTPixelSpace</c>), then Chroma-family cond-anchored CFG on v
+///         (<see cref="CfgHelper.ApplyCfgCondAnchored"/>, <c>cond + scale·(cond − uncond)</c> — NOT Z-Image's
+///         non-standard cond-baseline formula; item 8).</item>
 ///   <item><b>Timestep inversion</b> — the transformer is conditioned on <c>1 − sigma</c>, inheriting Z-Image's
 ///         convention (item 7).</item>
 ///   <item><b>Flow-match Euler</b>, static shift 3.0 (item 9), default 50 steps, CFG 5.0.</item>
@@ -59,9 +60,9 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
                 "negativeCaptionEmbeddings is required when cfgScale > 1.0.", nameof(negativeCaptionEmbeddings));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
-        int steps = request.Steps;
+        int width = request.Width ?? GenerationDefaults.Chroma.Width;
+        int height = request.Height ?? GenerationDefaults.Chroma.Height;
+        int steps = request.Steps ?? _config.DefaultSteps;
         int patch = _transformer.PatchSize;
         bool useCfg = cfgScale > 1.0f;
 
@@ -115,9 +116,9 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
                 Tensor uncondV = X0Prediction.ToVelocity(uncondX0, pixels, sigma);
                 uncondX0.Dispose();
 
-                // Standard CFG on velocity — assumed (validation-gated, item 8); deliberately NOT
-                // ZImagePipeline's cond-baseline variant.
-                Tensor combined = CfgHelper.ApplyCfg(uncondV, velocity, cfgScale);
+                // VALIDATION-PENDING: Chroma-family cond-anchored CFG (cond + scale*(cond - uncond)) on velocity
+                // (validation-gated, item 8); deliberately NOT ZImagePipeline's cond-baseline variant. Verify vs reference.
+                Tensor combined = CfgHelper.ApplyCfgCondAnchored(velocity, uncondV, cfgScale);
                 uncondV.Dispose();
                 velocity.Dispose();
                 velocity = combined;

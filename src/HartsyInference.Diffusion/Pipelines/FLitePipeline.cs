@@ -50,14 +50,14 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         ThrowIfDisposed();
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        int width = request.Width ?? GenerationDefaults.FLite.Width;
+        int height = request.Height ?? GenerationDefaults.FLite.Height;
         int latentH = height / 8;
         int latentW = width / 8;
         int hPacked = latentH / _config.PatchSize;
         int wPacked = latentW / _config.PatchSize;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        int steps = request.Steps ?? _config.DefaultSteps;
+        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
         Logs.Info($"F-Lite: {width}x{height} (latent {latentH}x{latentW}), {steps} steps, cfg={cfgScale}, seed={seed}.");
         Stopwatch totalSw = Stopwatch.StartNew();

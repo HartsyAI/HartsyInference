@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
@@ -51,8 +52,8 @@ public sealed unsafe class WanVacePipeline : DiffusionPipelineBase
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = _config.FlowShift;
         float[] scales = new float[_config.VaceLayers.Length];
         for (int i = 0; i < scales.Length; i++) scales[i] = controlScale;
@@ -71,15 +72,19 @@ public sealed unsafe class WanVacePipeline : DiffusionPipelineBase
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
+        // shift) — verify the VACE control path's UniPC trajectory vs the diffusers Wan VACE pipeline.
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        scheduler.SetTimesteps(steps, shift);
 
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            float t = tsteps[k], dt = t - tsteps[k + 1], tEmb = t * 1000f;
+            float tEmb = scheduler.Timesteps[k];
             Tensor vCond = _transformer.Forward(Backend, latents, control, promptEmbeds, tEmb, scales);
             Tensor vUncond = _transformer.Forward(Backend, latents, control, negativeEmbeds, tEmb, scales);
-            LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
+            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)

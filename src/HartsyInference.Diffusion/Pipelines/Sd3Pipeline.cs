@@ -69,12 +69,9 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sd35.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
 
         Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
         if (plan.PassThrough)

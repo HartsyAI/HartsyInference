@@ -44,6 +44,24 @@ public sealed record SnacConfig
     public int DecoderFinalKernelSize { get; init; } = 7;
     public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 3, 9];
 
+    /// <summary>NoiseBlock injection in each decoder block (a 1x1 conv whose output scales per-frame
+    /// Gaussian noise added back to the signal). True for the published snac_24khz/32khz/44khz checkpoints.</summary>
+    public bool Noise { get; init; } = true;
+
+    /// <summary>Scale applied to the NoiseBlock contribution. 1.0 in production. Set to 0 to make decode
+    /// deterministic (the noise add becomes a no-op), which is how the parity test matches a torch oracle
+    /// that has <c>torch.randn</c> stubbed to zeros. The NoiseBlock conv weights still load either way.</summary>
+    public float NoiseScale { get; init; } = 1.0f;
+
+    /// <summary>Depthwise residual/initial convs (groups = channels). True for the published checkpoints.
+    /// When true the decoder's initial conv splits into a depthwise k7 conv plus a pointwise k1 conv, the
+    /// residual-unit first conv uses groups=dim, and the encoder's final conv uses groups=d_model.</summary>
+    public bool Depthwise { get; init; } = true;
+
+    /// <summary>Local windowed multi-head attention window inserted after the encoder/decoder initial convs.
+    /// Null for snac_24khz; 32 for the 32 kHz and 44.1 kHz checkpoints. Wiring LocalMHA is Phase 4 (PARITY-TODO).</summary>
+    public int? AttnWindowSize { get; init; } = null;
+
     /// <summary>Convenience — latent dim at the encoder bottleneck. <c>EncoderDim * 2^len(EncoderRates)</c>.</summary>
     public int LatentDim => EncoderDim * (1 << EncoderRates.Count);
 
@@ -73,6 +91,7 @@ public sealed record SnacConfig
         DecoderRates = [8, 8, 3, 2],
         NCodebooks = 4,
         VqStrides = [8, 4, 2, 1],
+        AttnWindowSize = 32,
     };
 
     /// <summary>SNAC 44.1 kHz preset (<c>hubertsiuzdak/snac_44khz</c>, music-focused). Published checkpoint
@@ -87,5 +106,6 @@ public sealed record SnacConfig
         DecoderRates = [8, 8, 3, 2],
         NCodebooks = 4,
         VqStrides = [8, 4, 2, 1],
+        AttnWindowSize = 32,
     };
 }

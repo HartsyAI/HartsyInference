@@ -68,16 +68,15 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         ThrowIfDisposed();
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / 8;
-        int latentW = request.Width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Kandinsky5Image.Resolve(request);
+        int latentH = height / 8;
+        int latentW = width / 8;
         bool useCfg = cfgScale > 1.0f;
         if (useCfg && (negQwenEmbeds is null || negClipPooled is null))
             throw new ArgumentException(
                 "cfgScale > 1.0 requires both negQwenEmbeds and negClipPooled.", nameof(negQwenEmbeds));
 
-        Logs.Info($"Kandinsky5: Generating {request.Width}x{request.Height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Logs.Info($"Kandinsky5: Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Initial noise latent [B, 16, latentH, latentW] ──
@@ -157,7 +156,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
 
         sw.Stop();
         Logs.Info($"Kandinsky5: complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
-        return (rgbData, request.Width, request.Height, seed);
+        return (rgbData, width, height, seed);
     }
 
     /// <summary>Inverse of the VAE encoder's normalization: <c>x = x / scale + shift</c>. Flux/Kandinsky 5

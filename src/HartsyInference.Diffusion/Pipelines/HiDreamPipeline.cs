@@ -64,12 +64,9 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.HiDreamFull.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f;
 
         Logs.Info($"HiDream t2i: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");

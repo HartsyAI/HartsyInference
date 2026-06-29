@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
@@ -78,33 +79,37 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         int z = _config.VaeLatentChannels;
         if (_config.InChannels != 2 * z)
             throw new InvalidOperationException($"Reference-conditioned S2V needs InChannels == 2·z ({2 * z}); got {_config.InChannels}.");
+        int width = request.Width ?? 832, height = request.Height ?? 480;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
-        if (request.Width % sp != 0 || request.Height % sp != 0)
+        if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp}.");
         if ((framesPerClip - 1) % tp != 0)
             throw new ArgumentException($"framesPerClip must satisfy (n-1) % {tp} == 0; got {framesPerClip}.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int hLat = request.Height / sp, wLat = request.Width / sp;
+        int hLat = height / sp, wLat = width / sp;
         int gtPerClip = (framesPerClip - 1) / tp + 1;
         int totalLat = (int)audioFeaturesFull.Shape[0];
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = _config.FlowShift;
         int motionLat = Math.Clamp(motionFrames, 0, gtPerClip - 1);
 
-        Logs.Info($"Wan-S2V (chunked): {request.Width}x{request.Height}, clip {gtPerClip} latent frames, {totalLat} total, " +
+        Logs.Info($"Wan-S2V (chunked): {width}x{height}, clip {gtPerClip} latent frames, {totalLat} total, " +
             $"motion {motionLat}, {steps} steps, seed={seed}");
         Logs.Warning("Wan-S2V chunked pipeline is reconstructed + validation-pending (motioner layout provisional).");
 
         // Reference latent (broadcast across each clip's frames as the conditioning half of the input).
         Backend.PreloadWeights(_encoder.EnumerateWeights());
-        Tensor refLatent = _encoder.EncodeRgbFrame(Backend, referenceRgb24, request.Width, request.Height);   // [1,z,1,hLat,wLat]
+        Tensor refLatent = _encoder.EncodeRgbFrame(Backend, referenceRgb24, width, height);   // [1,z,1,hLat,wLat]
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
+        // shift) — verify the S2V per-clip UniPC trajectory (with motion-frame re-imposition each step) vs the
+        // diffusers Wan S2V pipeline. A fresh trajectory is started per clip via SetTimesteps.
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
         List<byte[]> allFrames = new();
         Tensor? prevTail = null;   // [1,z,motionLat,hLat,wLat] clean latent carried between clips
         int clipStart = 0, clipIdx = 0;
@@ -118,16 +123,18 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             audioClip.Dispose();
 
             Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, z, gt, hLat, wLat]), seed + clipIdx);
+            scheduler.SetTimesteps(steps, shift);
             for (int k = 0; k < steps; k++)
             {
                 Stopwatch sw = Stopwatch.StartNew();
-                float t = tsteps[k], dt = t - tsteps[k + 1], tEmb = t * 1000f;
+                float tEmb = scheduler.Timesteps[k];
                 if (prevTail is not null && motionLat > 0) ImposeMotionFrames(latents, prevTail, motionLat);
                 Tensor modelInput = ConcatReference(latents, refLatent, z);   // [1, 2z, gt, hLat, wLat]
                 Tensor vCond = _transformer.Forward(Backend, modelInput, audioTokens, promptEmbeds, tEmb);
                 Tensor vUncond = _transformer.Forward(Backend, modelInput, audioTokens, negativeEmbeds, tEmb);
                 modelInput.Dispose();
-                LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
+                LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+                scheduler.Step(latents, vCond);
                 vCond.Dispose(); vUncond.Dispose();
                 sw.Stop();
                 onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds) { Latent = latents, LatentArch = LatentArchitecture.Wan });
@@ -157,7 +164,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         prevTail?.Dispose();
         refLatent.Dispose();
         Logs.Info($"Wan-S2V chunked complete ({allFrames.Count} frames, {clipIdx} clips, seed={seed})");
-        return (allFrames.ToArray(), request.Width, request.Height, seed);
+        return (allFrames.ToArray(), width, height, seed);
     }
 
     /// <summary>Concatenates the reference latent (frame 0, broadcast across all <c>gt</c> frames) as channels [z,2z).</summary>
@@ -228,21 +235,22 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        int width = request.Width ?? 832, height = request.Height ?? 480;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
-        if (request.Width % sp != 0 || request.Height % sp != 0)
+        if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-S2V.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {tp} == 0; got {numFrames}.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int tLat = (numFrames - 1) / tp + 1, hLat = request.Height / sp, wLat = request.Width / sp, latentCh = _config.VaeLatentChannels;
+        int tLat = (numFrames - 1) / tp + 1, hLat = height / sp, wLat = width / sp, latentCh = _config.VaeLatentChannels;
         if ((int)audioFeatures.Shape[0] != tLat)
             throw new ArgumentException($"audioFeatures must have {tLat} frame groups (latent frames); got {audioFeatures.Shape[0]}.", nameof(audioFeatures));
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = _config.FlowShift;
 
-        Logs.Info($"Wan-S2V: {numFrames}f {request.Width}x{request.Height}, {steps} steps, cfg={guidance}, seed={seed} " +
+        Logs.Info($"Wan-S2V: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} " +
             $"(latent {latentCh}x{tLat}x{hLat}x{wLat})");
         Logs.Warning("Wan-S2V pipeline is reconstructed + first-run-validation pending — reference/multi-chunk not modeled.");
 
@@ -251,15 +259,19 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
+        // shift) — verify the single-clip S2V UniPC trajectory vs the diffusers Wan S2V pipeline.
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        scheduler.SetTimesteps(steps, shift);
 
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
-            float t = tsteps[k], dt = t - tsteps[k + 1], tEmb = t * 1000f;
+            float tEmb = scheduler.Timesteps[k];
             Tensor vCond = _transformer.Forward(Backend, latents, audioTokens, promptEmbeds, tEmb);
             Tensor vUncond = _transformer.Forward(Backend, latents, audioTokens, negativeEmbeds, tEmb);
-            LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
+            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
@@ -281,6 +293,6 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = VideoRgbFrames.ExtractFrame(rgb, i);
         rgb.Dispose();
         Logs.Info($"Wan-S2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width, request.Height, seed);
+        return (frames, width, height, seed);
     }
 }

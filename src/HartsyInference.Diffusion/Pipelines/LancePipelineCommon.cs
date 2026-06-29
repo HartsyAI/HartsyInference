@@ -67,6 +67,18 @@ public static unsafe class LancePipelineCommon
         }
     }
 
+    /// <summary>Folds 2-way CFG into <paramref name="cond"/> in place: <c>cond ← uncond + cfg·(cond − uncond)</c>.
+    /// Use this to produce the single combined velocity that a stateful scheduler (e.g.
+    /// <c>FlowUniPCMultistepScheduler</c>) steps with, instead of <see cref="EulerCfgStep"/> which combines and steps
+    /// in one pass.</summary>
+    public static void CfgCombineInPlace(Tensor cond, Tensor uncond, float cfg)
+    {
+        long n = cond.Shape.ElementCount;
+        float* c = (float*)cond.DataPointer;
+        float* u = (float*)uncond.DataPointer;
+        for (long i = 0; i < n; i++) c[i] = u[i] + cfg * (c[i] - u[i]);
+    }
+
     /// <summary>Channel-last <c>[T,H,W,C]</c> → <c>[1,C,T,H,W]</c> for the VAE decode handoff.</summary>
     public static Tensor ChannelLastToBcthw(Tensor cl)
     {

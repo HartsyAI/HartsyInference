@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
 
 namespace HartsyInference.Audio.Models.Codecs.Snac;
 
@@ -27,6 +28,7 @@ public sealed class Snac
     private readonly SnacEncoder _encoder;
     private readonly SnacResidualVectorQuantizer _quantizer;
     private readonly SnacDecoder _decoder;
+    private bool _encoderLoaded;
 
     public Snac(SnacConfig config)
     {
@@ -43,9 +45,22 @@ public sealed class Snac
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _encoder.LoadWeights(w);
+        w = NormalizeKeys(w);
+
+        // Quantizer + decoder are the Orpheus (decode) path and must load. The encoder is only needed for
+        // the audio->codes path; load it tolerantly so a (PARITY-TODO) encoder-structure mismatch cannot
+        // break decode. Encode() throws a clear error if the encoder failed to load.
         _quantizer.LoadWeights(w, "quantizer");
         _decoder.LoadWeights(w);
+        try
+        {
+            _encoder.LoadWeights(w);
+            _encoderLoaded = true;
+        }
+        catch (KeyNotFoundException)
+        {
+            _encoderLoaded = false;
+        }
     }
 
     /// <summary>Encodes PCM to hierarchical codes. <paramref name="pcm"/> is
@@ -54,6 +69,8 @@ public sealed class Snac
     /// disposal of every returned tensor.</summary>
     public Tensor[] Encode(IBackend backend, Tensor pcm, int batch, int tPcm)
     {
+        if (!_encoderLoaded)
+            throw new InvalidOperationException("SNAC encoder weights did not load (structure reconcile pending, PARITY-TODO). Decode is available; encode is not.");
         Tensor latent = _encoder.Forward(backend, pcm, batch, tPcm);
         int tFrames = (int)latent.Shape[2];
         Tensor[] codes = _quantizer.Encode(backend, latent, batch, tFrames);
@@ -70,6 +87,21 @@ public sealed class Snac
         Tensor pcm = _decoder.Forward(backend, latent, batch, tFrames);
         latent.Dispose();
         return pcm;
+    }
+
+    /// <summary>Maps torch >= 2.1 <c>*.parametrizations.weight.original0/1</c> weight-norm keys (the format the
+    /// real hubertsiuzdak/snac checkpoints ship) to the classic <c>weight_g</c>/<c>weight_v</c> pair the
+    /// encoder/decoder loaders expect. No-op when the dict already uses the classic names.</summary>
+    private static IReadOnlyDictionary<string, Tensor> NormalizeKeys(IReadOnlyDictionary<string, Tensor> w)
+    {
+        bool needs = false;
+        foreach (string k in w.Keys)
+            if (k.Contains(".parametrizations.weight.", StringComparison.Ordinal)) { needs = true; break; }
+        if (!needs) return w;
+
+        Dictionary<string, Tensor> d = new(w.Count);
+        foreach (KeyValuePair<string, Tensor> kv in w) d[CodecKeyUtils.NormalizeWeightNormKey(kv.Key)] = kv.Value;
+        return d;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

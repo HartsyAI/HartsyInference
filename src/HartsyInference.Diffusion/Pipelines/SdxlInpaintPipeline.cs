@@ -58,12 +58,11 @@ public sealed unsafe class SdxlInpaintPipeline : DiffusionPipelineBase
         ThrowIfDisposed();
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / 8;
-        int latentW = request.Width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Sdxl.Resolve(request);
+        int latentH = height / 8;
+        int latentW = width / 8;
 
-        Logs.Info($"SDXL Inpaint: {request.Width}x{request.Height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Logs.Info($"SDXL Inpaint: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
 
         // TODO: Implement inpainting pipeline:
         // 1. Encode text with dual CLIP (same as SdxlPipeline)

@@ -8,7 +8,14 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <item>Double-stream (joint MM-attention): image and text get separate Q/K/V projections, RMSNorm Q/K, RoPE on the image side, joint SDPA over the concatenated sequence, separate output projections, separate FFNs (MoE on the image side, vanilla SwiGLU on the text side). 12-way AdaLN modulation (6 per stream).</item>
 /// <item>Single-stream: text is already concatenated to the image sequence by the caller; one set of Q/K/V projections, one SDPA, one MoE FFN on the joint sequence. 6-way AdaLN modulation.</item>
 /// </list>
-/// <para><b>MoE design decision (single-expert fallback):</b> the MoE FFN in HiDream uses softmax gating, top-k=2 selection out of 4 routed experts plus a shared expert. HartsyInference's <see cref="IBackend"/> doesn't yet expose grouped-GEMM / expert-dispatch / sort-scatter primitives needed for an efficient routed MoE forward, and per-token expert routing on the CPU would require allocations on the inference hot path. To keep the model loadable and forward-shape-correct without expanding the backend surface, this block uses a <i>single-expert routed path</i>: it loads <c>experts[0]</c>'s SwiGLU weights as the only routed expert and adds the shared expert. All four expert tensors are still loaded into <see cref="EnumerateWeights"/> so the GPU preload byte count and the checkpoint-conversion path stay honest, but only <c>experts[0]</c> participates in the forward pass. The shape of the output is correct; the values diverge from a true MoE forward in proportion to how often the trained gate routed to experts[1..3] vs experts[0]. See the <c>// TODO: full MoE routing</c> markers below for the call sites a future routed implementation must replace.</para></summary>
+/// <para><b>MoE FFN (full top-k routing):</b> the image-side FFN is HiDream's sparse MoE — a softmax gate over
+/// <c>num_routed_experts</c> (4) experts, top-k (<c>num_activated_experts</c> = 2) selection per token with the
+/// selected gate weights renormalized to sum to 1, plus an always-on shared expert added on top. Because the
+/// <see cref="IBackend"/> exposes no grouped-GEMM / sort-scatter expert-dispatch primitive, this block runs the
+/// routed forward densely (every expert evaluated for every token) and zeroes non-selected experts via the
+/// per-token gate weight — numerically identical to a true sparse dispatch, just with extra compute. The
+/// single-expert path (shared + experts[0]) is kept only as a fallback when <c>num_activated_experts &lt;= 1</c>.
+/// See <see cref="MoeForward"/> for the routing/renorm formula.</para></summary>
 public sealed unsafe class HiDreamBlock
 {
     private readonly int _hiddenSize;
@@ -17,6 +24,7 @@ public sealed unsafe class HiDreamBlock
     private readonly int _ffDim;
     private readonly bool _isSingle;
     private readonly float _qkNormEps;
+    private readonly int _numActivatedExperts;
 
     // AdaLN: 12 params (double) or 6 params (single). All produced from a single SiLU+Linear MLP.
     private Tensor? _adaLnLinearWeight, _adaLnLinearBias;
@@ -39,9 +47,8 @@ public sealed unsafe class HiDreamBlock
     // SwiGLU: w1 = gate-up, w3 = up, w2 = down. shared has hidden_dim/2; routed experts have hidden_dim.
     private Tensor? _sharedW1, _sharedW2, _sharedW3;
 
-    // Routed experts. Stored as flat arrays so EnumerateWeights() reports every expert tensor (full
-    // checkpoint footprint), even though the forward pass only uses _experts[0] under the single-expert
-    // fallback. Slot 0 is the active expert; the rest are "weights-only" placeholders.
+    // Routed experts. Stored as flat arrays; all participate in the top-k routed forward (and all are
+    // reported by EnumerateWeights for the full checkpoint footprint / GPU preload).
     private Tensor[]? _expertW1;
     private Tensor[]? _expertW2;
     private Tensor[]? _expertW3;
@@ -57,10 +64,11 @@ public sealed unsafe class HiDreamBlock
     /// <param name="headDim">Per-head dim.</param>
     /// <param name="ffDim">SwiGLU inner dim. Diffusers uses 4 * hiddenSize for HiDream.</param>
     /// <param name="isSingle">True for single-stream blocks (only image-side modules).</param>
-    /// <param name="numRoutedExperts">Number of routed experts in the MoE FFN. Used only for weight enumeration; the single-expert fallback always runs experts[0].</param>
+    /// <param name="numRoutedExperts">Number of routed experts in the MoE FFN (HiDream: 4). All are loaded and participate in routing.</param>
+    /// <param name="numActivatedExperts">Top-k experts selected per token during the routed forward (HiDream: 2). If &lt;= 1, routing collapses to top-1 (argmax expert).</param>
     /// <param name="qkNormEps">RMSNorm epsilon for the per-stream Q/K norms.</param>
     public HiDreamBlock(int hiddenSize, int numHeads, int headDim, int ffDim,
-        bool isSingle, int numRoutedExperts, float qkNormEps = 1e-6f)
+        bool isSingle, int numRoutedExperts, int numActivatedExperts, float qkNormEps = 1e-6f)
     {
         _hiddenSize = hiddenSize;
         _numHeads = numHeads;
@@ -69,6 +77,7 @@ public sealed unsafe class HiDreamBlock
         _isSingle = isSingle;
         _qkNormEps = qkNormEps;
         _numRoutedExperts = numRoutedExperts;
+        _numActivatedExperts = numActivatedExperts;
     }
 
     /// <summary>Loads all weights for this block from the converted (diffusers-style) state dict.</summary>
@@ -133,9 +142,8 @@ public sealed unsafe class HiDreamBlock
         }
     }
 
-    /// <summary>Yields every weight tensor in this block — including all routed experts even though the
-    /// single-expert fallback only consumes <c>experts[0]</c>. This keeps the GPU preload footprint and
-    /// checkpoint-conversion path honest, and matches what a future full-MoE forward will need anyway.</summary>
+    /// <summary>Yields every weight tensor in this block, including all routed experts (all of which
+    /// participate in the top-k routed forward).</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_adaLnLinearWeight is not null) yield return _adaLnLinearWeight;
@@ -233,8 +241,8 @@ public sealed unsafe class HiDreamBlock
         Tensor imgFfnIn = AdaLNModulation.ApplyModulation(imgPreFfn, mods[3], mods[4], batch, imgSeqLen, _hiddenSize);
         imgPreFfn.Dispose();
 
-        // TODO: full MoE routing — currently using single-expert path (shared + experts[0]).
-        Tensor imgFfnOut = MoeForwardSingleExpert(backend, imgFfnIn, batch, imgSeqLen);
+        // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
+        Tensor imgFfnOut = MoeForward(backend, imgFfnIn, batch, imgSeqLen);
         imgFfnIn.Dispose();
 
         Tensor imgFinal = AdaLNModulation.ApplyGatedResidual(imgAfterAttn, imgFfnOut, mods[5], batch, imgSeqLen, _hiddenSize);
@@ -294,8 +302,8 @@ public sealed unsafe class HiDreamBlock
         Tensor ffnIn = AdaLNModulation.ApplyModulation(preFfn, mods[3], mods[4], batch, seqLen, _hiddenSize);
         preFfn.Dispose();
 
-        // TODO: full MoE routing — currently using single-expert path (shared + experts[0]).
-        Tensor ffnOut = MoeForwardSingleExpert(backend, ffnIn, batch, seqLen);
+        // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
+        Tensor ffnOut = MoeForward(backend, ffnIn, batch, seqLen);
         ffnIn.Dispose();
 
         Tensor result = AdaLNModulation.ApplyGatedResidual(afterAttn, ffnOut, mods[5], batch, seqLen, _hiddenSize);
@@ -485,34 +493,51 @@ public sealed unsafe class HiDreamBlock
         return outProj;
     }
 
-    /// <summary>Single-expert MoE forward (fallback). Computes `shared_expert(x) + gate_weight_for_e0 *
-    /// experts[0](x)` for every token, where the per-token gate weight comes from the softmax-and-pick
-    /// of the routing logits restricted to experts[0]. Shape is correct; values diverge from a true
-    /// top-k=2 MoE forward in proportion to how often the trained gate selects experts[1..3].
-    /// TODO: full MoE routing.</summary>
-    private Tensor MoeForwardSingleExpert(IBackend backend, Tensor input, int batch, int seqLen)
+    /// <summary>MoE SwiGLU FFN: <c>shared_experts(x) + sum_k(topk_weight_k * experts[idx_k](x))</c>.
+    /// <para>Mirrors diffusers HiDream <c>MoEGate</c> + <c>MOEFeedForwardSwiGLU</c>:
+    /// the gate Linear produces <c>[B, S, num_routed_experts]</c> logits; softmax is taken over the
+    /// expert axis (dim=-1); the top-k (= <c>num_activated_experts</c>) experts per token are selected and
+    /// their gate weights are renormalized to sum to 1 (<c>topk_weight / (topk_weight.sum(-1) + 1e-20)</c>,
+    /// the <c>norm_topk_prob=True</c> path HiDream uses since top_k &gt; 1). Each token is then run through its
+    /// selected experts and the outputs are weighted by the renormalized gate weights and summed. The shared
+    /// (always-on) expert output is added on top.</para>
+    /// <para>VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel. This eager per-token-mask
+    /// implementation runs <i>all</i> routed experts densely (no grouped-GEMM dispatch — the backend has no
+    /// scatter/gather expert primitive) and zeroes the non-selected experts' contributions via the per-token
+    /// gate weight, which is numerically identical to a true top-k dispatch but does extra compute. If
+    /// <c>num_activated_experts &lt;= 1</c> the routing collapses to top-1 (each token routes to its single
+    /// argmax expert with renormalized weight 1) plus the shared expert.</para></summary>
+    private Tensor MoeForward(IBackend backend, Tensor input, int batch, int seqLen)
     {
         TensorShape inShape = new TensorShape(batch, seqLen, _hiddenSize);
 
-        // Shared expert: SwiGLU at hidden_dim/2
+        // Shared (always-on) expert: SwiGLU at hidden_dim/2.
         int sharedDim = (_ffDim + 1) / 2; // ff_dim // 2 in Python (integer division of 4*hidden / 2)
         Tensor shared = SwiGluForward(backend, input, _sharedW1!, _sharedW3!, _sharedW2!, batch, seqLen, sharedDim);
 
-        // Routed expert 0 only (single-expert fallback)
-        Tensor expert0 = SwiGluForward(backend, input, _expertW1![0], _expertW3![0], _expertW2![0], batch, seqLen, _ffDim);
-
-        // Per-token gate weight for expert 0: softmax(input @ gate_weight^T)[..., 0]
+        // Gate logits: input @ gate_weight^T → [B, S, num_routed_experts].
         Tensor gateLogits = new Tensor(new TensorShape(batch, seqLen, _numRoutedExperts), DType.F32);
         backend.Linear(gateLogits, input, _moeGateWeight!, null);
-        Tensor gateWeights = new Tensor(new TensorShape(batch, seqLen), DType.F32);
-        ComputeExpert0SoftmaxWeight(gateLogits, gateWeights, batch, seqLen, _numRoutedExperts);
+
+        // Per-token, per-expert renormalized top-k gate weights (0 for non-selected experts). [B, S, E].
+        // With top-k=1 (or fewer) this collapses to the single-expert fallback (each token routes to its
+        // single argmax expert with weight 1 after renorm) plus the shared expert.
+        Tensor gateWeights = new Tensor(new TensorShape(batch, seqLen, _numRoutedExperts), DType.F32);
+        int activeK = _numActivatedExperts <= 1 ? 1 : _numActivatedExperts;
+        ComputeTopKGateWeights(gateLogits, gateWeights, batch, seqLen, _numRoutedExperts, activeK);
         gateLogits.Dispose();
 
-        // Combine: out = shared + gate0 * expert0
+        // Accumulate the shared expert, then add each routed expert weighted by its (possibly zero) gate.
         Tensor combined = new Tensor(inShape, DType.F32);
-        ApplyGatedExpert(combined, shared, expert0, gateWeights, batch, seqLen, _hiddenSize);
+        CopyTensor(combined, shared, batch * seqLen * _hiddenSize);
         shared.Dispose();
-        expert0.Dispose();
+
+        for (int e = 0; e < _numRoutedExperts; e++)
+        {
+            Tensor expertOut = SwiGluForward(backend, input, _expertW1![e], _expertW3![e], _expertW2![e], batch, seqLen, _ffDim);
+            AccumulateGatedExpert(combined, expertOut, gateWeights, e, batch, seqLen, _hiddenSize, _numRoutedExperts);
+            expertOut.Dispose();
+        }
         gateWeights.Dispose();
         return combined;
     }
@@ -572,45 +597,98 @@ public sealed unsafe class HiDreamBlock
         rope.Forward(q, k, batch, q.ShapeValue(1), seqLen);
     }
 
-    /// <summary>Reads the softmax of routing logits and emits the per-token weight for expert 0.</summary>
-    private static void ComputeExpert0SoftmaxWeight(Tensor logits, Tensor weights, int batch, int seqLen, int numExperts)
+    /// <summary>Computes the per-token, per-expert renormalized top-k gate weights from routing logits.
+    /// <para>Matches diffusers HiDream <c>MoEGate</c>: <c>scores = softmax(logits, dim=-1)</c>; pick the top-k
+    /// experts by score; renormalize the selected weights to sum to 1 (<c>norm_topk_prob=True</c> path:
+    /// <c>w_k / (sum_k w_k + 1e-20)</c>). The output <paramref name="weights"/> is dense <c>[B, S, E]</c> with the
+    /// renormalized weight at each selected expert slot and 0 elsewhere, so a dense per-expert accumulation
+    /// reproduces the sparse top-k dispatch exactly.</para>
+    /// VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel (softmax axis = expert dim,
+    /// top-k renorm denominator includes the 1e-20 epsilon).</summary>
+    private static void ComputeTopKGateWeights(Tensor logits, Tensor weights, int batch, int seqLen, int numExperts, int topK)
     {
         float* lp = (float*)logits.DataPointer;
         float* wp = (float*)weights.DataPointer;
+        Span<float> probs = stackalloc float[numExperts];
+        int k = Math.Min(topK, numExperts);
+
         for (int b = 0; b < batch; b++)
         {
             for (int s = 0; s < seqLen; s++)
             {
                 int off = (b * seqLen + s) * numExperts;
+
+                // softmax over the expert axis.
                 float maxLogit = lp[off];
                 for (int e = 1; e < numExperts; e++)
                     if (lp[off + e] > maxLogit) maxLogit = lp[off + e];
                 float sum = 0f;
                 for (int e = 0; e < numExperts; e++)
-                    sum += MathF.Exp(lp[off + e] - maxLogit);
-                wp[b * seqLen + s] = MathF.Exp(lp[off + 0] - maxLogit) / sum;
+                {
+                    float ex = MathF.Exp(lp[off + e] - maxLogit);
+                    probs[e] = ex;
+                    sum += ex;
+                }
+                for (int e = 0; e < numExperts; e++)
+                {
+                    probs[e] /= sum;
+                    wp[off + e] = 0f;
+                }
+
+                // top-k selection (k small — simple repeated argmax over a copy).
+                float denom = 0f;
+                for (int kk = 0; kk < k; kk++)
+                {
+                    int best = -1;
+                    float bestVal = float.NegativeInfinity;
+                    for (int e = 0; e < numExperts; e++)
+                    {
+                        if (wp[off + e] != 0f) continue; // already selected
+                        if (probs[e] > bestVal)
+                        {
+                            bestVal = probs[e];
+                            best = e;
+                        }
+                    }
+                    // Mark selected with its (pre-renorm) prob; renormalize after the loop.
+                    wp[off + best] = bestVal;
+                    denom += bestVal;
+                }
+
+                // Renormalize the selected weights to sum to 1 (norm_topk_prob path).
+                denom += 1e-20f;
+                for (int e = 0; e < numExperts; e++)
+                    if (wp[off + e] != 0f) wp[off + e] /= denom;
             }
         }
     }
 
-    /// <summary>output = shared + gate0 * expert0, broadcasting gate0 ([B, S]) over the hidden dim.</summary>
-    private static void ApplyGatedExpert(Tensor output, Tensor shared, Tensor expert0, Tensor gate0,
-        int batch, int seqLen, int hiddenSize)
+    /// <summary>output += gate[..., expert] * expertOut, broadcasting the per-token scalar gate weight over
+    /// the hidden dim. Non-selected tokens have a 0 gate weight so they contribute nothing.</summary>
+    private static void AccumulateGatedExpert(Tensor output, Tensor expertOut, Tensor gateWeights, int expert,
+        int batch, int seqLen, int hiddenSize, int numExperts)
     {
         float* op = (float*)output.DataPointer;
-        float* sp = (float*)shared.DataPointer;
-        float* ep = (float*)expert0.DataPointer;
-        float* gp = (float*)gate0.DataPointer;
+        float* ep = (float*)expertOut.DataPointer;
+        float* gp = (float*)gateWeights.DataPointer;
         for (int b = 0; b < batch; b++)
         {
             for (int s = 0; s < seqLen; s++)
             {
-                float g = gp[b * seqLen + s];
+                float g = gp[(b * seqLen + s) * numExperts + expert];
+                if (g == 0f) continue;
                 int off = (b * seqLen + s) * hiddenSize;
                 for (int d = 0; d < hiddenSize; d++)
-                    op[off + d] = sp[off + d] + g * ep[off + d];
+                    op[off + d] += g * ep[off + d];
             }
         }
+    }
+
+    /// <summary>Copies <paramref name="count"/> floats from <paramref name="src"/> into <paramref name="dst"/>.</summary>
+    private static void CopyTensor(Tensor dst, Tensor src, int count)
+    {
+        long bytes = (long)count * sizeof(float);
+        Buffer.MemoryCopy((float*)src.DataPointer, (float*)dst.DataPointer, bytes, bytes);
     }
 }
 

@@ -49,15 +49,12 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         ThrowIfDisposed();
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.Generic.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
         int hPacked = latentH / _config.PatchSize;
         int wPacked = latentW / _config.PatchSize;
         int imageSeqLen = hPacked * wPacked;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
         bool useCfg = cfgScale > 1.0f && negativeTokenIds is not null;
 
         Logs.Info($"Krea 2 t2i: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}, distilled={_config.IsDistilled}");
@@ -100,7 +97,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             {
                 Tensor cond = _transformer.Forward(Backend, latent, t, condHidden);
                 Tensor uncond = _transformer.Forward(Backend, latent, t, uncondHidden!);
-                noisePred = CfgHelper.ApplyCfg(uncond, cond, cfgScale);
+                // VALIDATION-PENDING: Krea 2 uses cond-anchored CFG (cond + scale*(cond - uncond)); guidance_scale=4.5 here ≈ 5.5 under the standard uncond-anchored convention. Verify vs reference.
+                noisePred = CfgHelper.ApplyCfgCondAnchored(cond, uncond, cfgScale);
                 uncond.Dispose();
                 cond.Dispose();
             }

@@ -36,7 +36,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
     {
         Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, frameRate, onProgress, out int seed);
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, latent); }
+        try { rgb = DecodeLatent(latent, seed); }
         finally { latent.Dispose(); }
 
         int f = (int)rgb.Shape[2];
@@ -44,7 +44,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
         rgb.Dispose();
         Logs.Info($"LTX-Video T2V complete ({frames.Length} frames, seed={seed})");
-        return (frames, request.Width, request.Height, seed);
+        return (frames, request.Width ?? 768, request.Height ?? 512, seed);
     }
 
     /// <summary>Streams decoded frames (pull-based → memory bounded; pair with an <c>IVideoEncoder</c>).</summary>
@@ -53,9 +53,9 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, frameRate, onProgress, out _);
+        Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, frameRate, onProgress, out int seed);
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, latent); }
+        try { rgb = DecodeLatent(latent, seed); }
         finally { latent.Dispose(); }
 
         try
@@ -71,23 +71,50 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         finally { rgb.Dispose(); }
     }
 
+    /// <summary>Decodes the VAE-ready latent to RGB. For the base 0.9.0 VAE (<c>VaeTimestepConditioned=false</c>)
+    /// this is a plain decode. For the timestep-conditioned VAE (0.9.1+ / 13B) it first blends Gaussian noise into the
+    /// latent at <c>DecodeNoiseScale</c> and decodes at <c>DecodeTimestep</c>.</summary>
+    private Tensor DecodeLatent(Tensor latent, int seed)
+    {
+        if (!_config.VaeTimestepConditioned)
+            return _vae.Decode(Backend, latent);
+
+        // VALIDATION-PENDING: verify vs diffusers LTXPipeline 0.9.7 — diffusers blends pre-decode:
+        //   noise = randn_like(latents)
+        //   latents = (1 - decode_noise_scale) * latents + decode_noise_scale * noise
+        // then vae.decode(latents, timestep=decode_timestep). The 1000× timestep_scale_multiplier is applied
+        // *inside* the decoder, so we pass the raw decode_timestep (0.05) here.
+        float s = _config.DecodeNoiseScale;
+        // Distinct, reproducible noise stream from the sampling latent noise (seed offset).
+        Tensor noise = SeedGenerator.CreateNoise(latent.Shape, unchecked(seed ^ 0x5EED_DEC0));
+        float* lp = (float*)latent.DataPointer;
+        float* np = (float*)noise.DataPointer;
+        long n = latent.Shape.ElementCount;
+        for (long i = 0; i < n; i++) lp[i] = (1f - s) * lp[i] + s * np[i];
+        noise.Dispose();
+
+        Logs.Info($"LTX-Video timestep-conditioned VAE decode (t={_config.DecodeTimestep:F3}, noise_scale={s:F3})");
+        return _vae.Decode(Backend, latent, _config.DecodeTimestep);
+    }
+
     /// <summary>Runs the flow-match denoise loop and returns the VAE-ready latent <c>[1,128,T_lat,H_lat,W_lat]</c>.</summary>
     private Tensor RunDenoise(Tensor promptEmbeds, Tensor negativeEmbeds, TextToImageRequest request, int numFrames, int frameRate,
         Action<GenerationProgress>? onProgress, out int seed)
     {
         ThrowIfDisposed();
         seed = request.Seed ?? SeedGenerator.RandomSeed();
+        int width = request.Width ?? 768, height = request.Height ?? 512;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
-        if (request.Width % sp != 0 || request.Height % sp != 0)
+        if (width % sp != 0 || height % sp != 0)
             throw new ArgumentException($"Width/height must be divisible by {sp} for LTX-Video.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {tp} == 0; got {numFrames}.");
 
         int tLat = (numFrames - 1) / tp + 1;
-        int hLat = request.Height / sp, wLat = request.Width / sp;
+        int hLat = height / sp, wLat = width / sp;
         int s = tLat * hLat * wLat;
-        int steps = request.Steps > 0 ? request.Steps : _config.NumInferenceSteps;
-        float guidance = request.CfgScale > 0 ? request.CfgScale : _config.GuidanceScale;
+        int steps = request.Steps ?? _config.NumInferenceSteps;
+        float guidance = request.CfgScale ?? _config.GuidanceScale;
 
         // RoPE interpolation scale = (vae_temporal/frame_rate, vae_spatial, vae_spatial).
         (double T, double H, double W) interp = ((double)tp / frameRate, sp, sp);
@@ -95,7 +122,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         double m = (1.16 - 0.5) / (4096 - 256), bShift = 0.5 - m * 256;
         float shift = (float)Math.Exp(s * m + bShift);
 
-        Logs.Info($"LTX-Video T2V: {numFrames}f {request.Width}x{request.Height}, {steps} steps, cfg={guidance}, seed={seed} (grid {tLat}x{hLat}x{wLat}, {s} tokens, shift={shift:F3})");
+        Logs.Info($"LTX-Video T2V: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (grid {tLat}x{hLat}x{wLat}, {s} tokens, shift={shift:F3})");
         Logs.Warning("LTX-Video pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());

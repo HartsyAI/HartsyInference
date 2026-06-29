@@ -75,19 +75,21 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             throw new ArgumentException($"Prompt has {promptTokenIds.Length} tokens, exceeds MaxTextTokens={_config.MaxTextTokens}.", nameof(promptTokenIds));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
+        int width = request.Width ?? GenerationDefaults.Generic.Width;
+        int height = request.Height ?? GenerationDefaults.Generic.Height;
         int patch = _config.PatchSize * _config.VaeScaleFactor; // 2 × 8 = 16
-        if (request.Width % patch != 0 || request.Height % patch != 0)
+        if (width % patch != 0 || height % patch != 0)
             throw new ArgumentException($"Width and height must be divisible by {patch} for Ideogram 4.");
 
-        int gridH = request.Height / patch;
-        int gridW = request.Width / patch;
+        int gridH = height / patch;
+        int gridW = width / patch;
         int numImageTokens = gridH * gridW;
         int numText = promptTokenIds.Length;
         int seqLen = numText + numImageTokens;
         int latentDim = _config.InChannels;
         int steps = preset.NumSteps;
 
-        Logs.Info($"Ideogram 4: generating {request.Width}x{request.Height}, preset={preset.Name} ({steps} steps), seed={seed}");
+        Logs.Info($"Ideogram 4: generating {width}x{height}, preset={preset.Name} ({steps} steps), seed={seed}");
         Logs.Warning("Ideogram 4 runs TWO 9.3B transformers concurrently (asymmetric CFG) — expect very high VRAM use.");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -140,7 +142,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Tensor z = SeedGenerator.CreateNoise(new TensorShape(1, numImageTokens, latentDim), seed);
 
         // ── 4. Schedule ──
-        LogitNormalSchedule schedule = LogitNormalSchedule.ForResolution(request.Height, request.Width, preset.Mu, preset.Std);
+        LogitNormalSchedule schedule = LogitNormalSchedule.ForResolution(height, width, preset.Mu, preset.Std);
         float[] grid = LogitNormalSchedule.MakeStepIntervals(steps);
 
         // ── 5. Denoise loop (both transformers resident) ──
@@ -241,7 +243,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
 
         sw.Stop();
         Logs.Info($"Ideogram 4 generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
-        return (rgb, request.Width, request.Height, seed);
+        return (rgb, width, height, seed);
     }
 
     /// <summary>Places encoded base text features <c>[1, numText, D]</c> (and any regional features) into a full <c>[1, seqLen, D]</c> tensor: base text at the front, region features immediately after, zeros at image positions.</summary>

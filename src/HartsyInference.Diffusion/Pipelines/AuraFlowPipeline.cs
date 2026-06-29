@@ -56,12 +56,11 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         ThrowIfDisposed();
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int latentH = request.Height / 8;
-        int latentW = request.Width / 8;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        (int steps, float cfgScale, int width, int height) = GenerationDefaults.AuraFlow.Resolve(request);
+        int latentH = height / 8;
+        int latentW = width / 8;
 
-        Logs.Info($"AuraFlow: Generating {request.Width}x{request.Height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Logs.Info($"AuraFlow: Generating {width}x{height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode text with Pile-T5-XL ───────────────────────────────
@@ -175,6 +174,6 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"AuraFlow image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
-        return (rgbData, request.Width, request.Height, seed);
+        return (rgbData, width, height, seed);
     }
 }

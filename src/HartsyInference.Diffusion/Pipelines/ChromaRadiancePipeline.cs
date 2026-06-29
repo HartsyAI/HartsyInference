@@ -71,10 +71,10 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                 "Chroma Radiance requires the tokenizer attention mask for the negative prompt as well.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int width = request.Width;
-        int height = request.Height;
-        int steps = request.Steps;
-        float cfgScale = request.CfgScale;
+        int width = request.Width ?? GenerationDefaults.Chroma.Width;
+        int height = request.Height ?? GenerationDefaults.Chroma.Height;
+        int steps = request.Steps ?? _config.DefaultSteps;
+        float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
         bool useCfg = cfgScale > 1.0f;
 
         // Pixel-space: pad dimensions up to the 16-px patch grid, crop the output back at the end.
@@ -153,7 +153,8 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                 Tensor uncondV = X0Prediction.ToVelocity(uncondX0, pixels, sigma);
                 uncondX0.Dispose();
 
-                Tensor combined = CfgHelper.ApplyCfg(uncondV, velocity, cfgScale);
+                // VALIDATION-PENDING: Chroma-family cond-anchored CFG (cond + scale*(cond - uncond)) on velocity; verify vs reference.
+                Tensor combined = CfgHelper.ApplyCfgCondAnchored(velocity, uncondV, cfgScale);
                 uncondV.Dispose();
                 velocity.Dispose();
                 velocity = combined;
