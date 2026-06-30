@@ -14,6 +14,7 @@ PTX_OUT="${THIS_DIR}/../../../src/HartsyInference.Cuda/Ptx"
 KERNELS=(
     "lm_f32"
     "flash_attn_f32"
+    "flash_attn_f32_split"
 )
 
 INSTALL=true

@@ -54,11 +54,26 @@ extern "C" __global__ void lm_flash_attn_f32(
         size_t kvBase = (((size_t)b * Hkv + hkv) * Lk + (unsigned int)k) * D;
         sdata[tid] = (tid < D) ? qv * K[kvBase + tid] : 0.0f;
         __syncthreads();
-        for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+        // Cross-warp portion of the Q·K reduction stays in shared memory (needs a barrier per step).
+        for (unsigned int s = blockDim.x >> 1; s >= 32; s >>= 1)
         {
             if (tid < s) sdata[tid] += sdata[tid + s];
             __syncthreads();
         }
+        // Final 32→1 within warp 0 via register shuffle — lanes of a warp are implicitly synchronized,
+        // so this needs NO __syncthreads, removing ~5 of the ~8 per-key barriers (the dominant cost in
+        // the decode loop). blockDim.x is a power of two ≥ 64 for every head dim we run (next-pow2 ≥ D,
+        // D ∈ {64,72,80,96,128,256}), so after the loop warp 0 holds 32 valid partial sums (padding
+        // lanes were seeded to 0 above) and a full-mask shuffle is safe.
+        if (tid < 32)
+        {
+            float v = sdata[tid];
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1)
+                v += __shfl_down_sync(0xffffffffu, v, off);
+            if (tid == 0) sdata[0] = v;
+        }
+        __syncthreads();
         float score = sdata[0] * scale;
         // ALiBi: per-head distance penalty. Causal decoders (BLOOM/MPT) use the linear slope·(k_pos − q_pos) (≤ 0
         // since k ≤ q). Bidirectional encoders (jina-bert-v2) use the SYMMETRIC form −slope·|k_pos − q_pos| (both

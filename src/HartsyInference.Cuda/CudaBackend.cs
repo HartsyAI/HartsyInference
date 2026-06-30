@@ -1464,8 +1464,32 @@ public sealed class CudaBackend : IBackend
             }
             else
             {
+                // F32 activation path: the kernel reads weight/bias as F32. Norm params are often stored
+                // in a narrower dtype (e.g. the Flux.2 VAE ships BF16 norm weights while the latent stays
+                // F32) — cast them up to F32 first, else the kernel reinterprets BF16/F16 bytes as F32 and
+                // produces a wrong affine (washed-out decode). Mirrors the F16/BF16 paths above.
+                ulong wPtr = pW;
+                ulong bPtr = pB;
+                if (weight.DType == DType.BF16 || weight.DType == DType.F16)
+                {
+                    pWCast = CudaMemory.Allocate((nuint)(weight.ElementCount * 4));
+                    if (weight.DType == DType.BF16)
+                        _kernels!.LaunchCastBf16ToF32(pWCast, pW, (int)weight.ElementCount, _stream.Handle);
+                    else
+                        _kernels!.LaunchCastF16ToF32(pWCast, pW, (int)weight.ElementCount, _stream.Handle);
+                    wPtr = pWCast;
+                }
+                if (bias.DType == DType.BF16 || bias.DType == DType.F16)
+                {
+                    pBCast = CudaMemory.Allocate((nuint)(bias.ElementCount * 4));
+                    if (bias.DType == DType.BF16)
+                        _kernels!.LaunchCastBf16ToF32(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
+                    else
+                        _kernels!.LaunchCastF16ToF32(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
+                    bPtr = pBCast;
+                }
                 _kernels!.LaunchGroupNormSilu(
-                    pOut, pIn, pW, pB,
+                    pOut, pIn, wPtr, bPtr,
                     batch, channels, spatial, groups, eps,
                     _stream.Handle);
             }
@@ -2603,7 +2627,50 @@ public sealed class CudaBackend : IBackend
             if (alibiSlopes is not null) pAlibi = GpuTransferHelper.CopyToDevice(alibiSlopes);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
+
+            // Flash-decoding (split-K) for the plain path: when the base grid (b·hq·tq) under-occupies the
+            // GPU — the decode case, e.g. 32 blocks on 128 SMs — split the key axis across more blocks and
+            // merge with a combine kernel. Numerically exact vs the monolithic kernel (same per-key scores,
+            // online-softmax merge). Sink/ALiBi/soft-cap/sliding-window keep the proven monolithic path.
+            int baseBlocks = b * hq * tq;
+            bool plain = pSink == 0 && pAlibi == 0 && softcap <= 0f && slidingWindow <= 0;
+            bool forceSplit = EnvFlag("HARTSY_FLASH_SPLIT_FORCE");
+            int splits = 1;
+            if (!EnvFlag("HARTSY_FLASH_SPLIT_OFF")
+                && plain && kvLen >= (forceSplit ? 8 : 1024) && (forceSplit || baseBlocks < 2 * _context.MultiprocessorCount))
+            {
+                int target = forceSplit ? 4 * baseBlocks : 2 * _context.MultiprocessorCount;
+                int g = (target + baseBlocks - 1) / baseBlocks;
+                int minChunk = forceSplit ? 1 : 256;
+                int maxG = Math.Max(1, kvLen / minChunk);
+                g = Math.Clamp(g, 1, Math.Min(32, maxG));
+                if (g >= 2) splits = g;
+            }
+
+            if (splits >= 2)
+            {
+                int chunk = (kvLen + splits - 1) / splits;
+                splits = (kvLen + chunk - 1) / chunk;   // exact # of non-empty chunks covering kvLen
+                long n = baseBlocks;
+                ulong pM = 0, pL = 0, pAcc = 0;
+                try
+                {
+                    pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
+                    pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
+                    pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
+                    _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
+                        kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, splits, chunk, _stream.Handle);
+                    _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
+                }
+                finally
+                {
+                    GpuTransferHelper.FreeDevice(pM); GpuTransferHelper.FreeDevice(pL); GpuTransferHelper.FreeDevice(pAcc);
+                }
+            }
+            else
+            {
+                _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, softcap, pSink, slidingWindow, pAlibi, _stream.Handle);
+            }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }

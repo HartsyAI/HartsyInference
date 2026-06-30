@@ -65,6 +65,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmArgMaxLastDimF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
+    private readonly CudaModule _flashAttnF32SplitModule;
+    private readonly nint _flashAttnF32Split;
+    private readonly nint _flashAttnF32Combine;
 
     // ── Elementwise F32 function handles ─────────────────────────────────
     private readonly nint _addF32;
@@ -339,6 +342,9 @@ public sealed class CudaKernels : IDisposable
         _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
         _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
+        _flashAttnF32SplitModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
+        _flashAttnF32Split = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_split");
+        _flashAttnF32Combine = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_combine");
 
         // ── GGUF Dequant ─────────────────────────────────────────────────
         _dequantQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
@@ -1200,6 +1206,56 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             _flashAttnF32, gridDim, 1, 1, blockThreads, 1, 1,
             sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Flash-decoding split phase (plain path: no sink/alibi/softcap/window). Launches
+    /// <c>batch·hq·tq·splits</c> blocks; each computes the partial online-softmax state (m, l, Σp·V) for
+    /// its key chunk into the scratch buffers. <paramref name="chunk"/> = ceil(kvLen / splits).</summary>
+    public unsafe void LaunchFlashAttentionSplit(ulong partialM, ulong partialL, ulong partialAcc,
+        ulong q, ulong k, ulong v, int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen,
+        int kvGroup, bool causal, int qOffset, float scale, int splits, int chunk, nint stream)
+    {
+        ulong pmArg = partialM, plArg = partialL, paArg = partialAcc, qArg = q, kArg = k, vArg = v;
+        uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
+        uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
+        int causalArg = causal ? 1 : 0, offArg = qOffset;
+        float scaleArg = scale;
+        uint gArg = (uint)splits, chunkArg = (uint)chunk;
+
+        void** args = stackalloc void*[19];
+        args[0] = &pmArg; args[1] = &plArg; args[2] = &paArg; args[3] = &qArg; args[4] = &kArg; args[5] = &vArg;
+        args[6] = &bArg; args[7] = &hqArg; args[8] = &tqArg; args[9] = &dArg;
+        args[10] = &hkvArg; args[11] = &lkArg; args[12] = &kvLenArg; args[13] = &grpArg;
+        args[14] = &causalArg; args[15] = &offArg; args[16] = &scaleArg;
+        args[17] = &gArg; args[18] = &chunkArg;
+
+        uint blockThreads = 1;
+        while (blockThreads < (uint)headDim) blockThreads <<= 1;
+        uint gridDim = (uint)((long)batch * hq * tq * splits);
+        uint sharedBytes = blockThreads * sizeof(float);
+        CudaDriverApi.cuLaunchKernel(
+            _flashAttnF32Split, gridDim, 1, 1, blockThreads, 1, 1,
+            sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Flash-decoding combine phase: merges the <paramref name="splits"/> chunk partials per query
+    /// into the final output via online softmax. Launches <c>batch·hq·tq</c> blocks.</summary>
+    public unsafe void LaunchFlashAttentionCombine(ulong outPtr, ulong partialM, ulong partialL,
+        ulong partialAcc, int batch, int hq, int tq, int headDim, int splits, nint stream)
+    {
+        ulong outArg = outPtr, pmArg = partialM, plArg = partialL, paArg = partialAcc;
+        uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim, gArg = (uint)splits;
+
+        void** args = stackalloc void*[9];
+        args[0] = &outArg; args[1] = &pmArg; args[2] = &plArg; args[3] = &paArg;
+        args[4] = &bArg; args[5] = &hqArg; args[6] = &tqArg; args[7] = &dArg; args[8] = &gArg;
+
+        uint blockThreads = 1;
+        while (blockThreads < (uint)headDim) blockThreads <<= 1;
+        uint gridDim = (uint)((long)batch * hq * tq);
+        CudaDriverApi.cuLaunchKernel(
+            _flashAttnF32Combine, gridDim, 1, 1, blockThreads, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches in-place KV-cache append: copies newKv [1,H,tNew,D] into buffer [1,H,maxSeq,D] at offset.</summary>

@@ -149,12 +149,12 @@ aligned shapes. Risk: PTX fragment layout was authored from docs, never hardware
 gate test is load-bearing.
 
 - [ ] Gate: `TensorCoreGemmTests` green on an SM 8.0+ GPU (diffs vs cuBLAS).
-- [ ] A/B microbench across the aligned GEMM shape grid, off vs on. **Also compare against cuBLAS**:
-      if cuBLAS already wins on these shapes, the honest result is "keep cuBLAS, leave off" and that
-      is fine to record.
-- [ ] A/B e2e on an F16 model; gate SSIM/parity.
-- [ ] Decision: default-on only where it measurably beats cuBLAS; otherwise document as available-but-off.
-- [ ] Commit `run_post_tcgemm_{date}_{gpu}/`, fill ledger.
+- [x] A/B microbench across the aligned GEMM shape grid, off vs on. **cuBLAS wins every shape** on both
+      GPUs (TC 0.23× median on 3060, 0.67× on 4090). Honest result: keep cuBLAS.
+- [~] A/B e2e on an F16 model — skipped; microbench is decisive (TC slower on every shape, both GPUs),
+      no e2e could flip a 1.4–7× per-op deficit.
+- [x] Decision: **available-but-off** — cuBLAS wins, so `EnableTensorCoreGemm` stays default-off.
+- [x] Ledger filled (raw in scratchpad). No full-grid result dir — focused Linear_F16_Bias probe.
 
 ---
 
@@ -190,12 +190,16 @@ The one algorithmic loss no flag fixes. Two steps, smallest first.
 - [ ] **5a, low-risk quick win**: replace the bottom of the per-key tree reduction (`s < 32`) with
       `__shfl_down_sync`, removing ~5 of ~8 `__syncthreads()` per key. Gate: bit-close to current
       output (avg_err < 1e-5 F32). A/B `SdpaGpuBenchmarks` vs sequence length.
-- [ ] **5b, real fix**: keys-in-parallel rewrite (warp owns a strip of keys, full Q·K dot in
-      registers, single warp reduction for the online-softmax V accumulation). This aligns with the
-      Phase B4.1 FA2 plan; coordinate so we do not write the kernel twice. Gate vs the materialize-S
-      reference and vs `F.scaled_dot_product_attention` at model shapes.
-- [ ] A/B e2e: LLM tok/s (decode + prefill), long-context especially.
-- [ ] Commit `run_post_attn_{date}_{gpu}/`, fill ledger.
+- [x] **5b, real fix**: implemented as **flash-decoding (split-K)** rather than a per-thread keys-parallel
+      rewrite — in this kernel *thread t owns output dim t*, so a "thread owns a key" layout hits the
+      acc[D]-per-thread register wall (exactly what Phase B4.1's tiled tensor-core FA2 solves; that is a
+      *different* kernel, `attention/flash_attention_f16.cu`, for the diffusion SDPA path — no overlap).
+      Split-K keeps the proven inner loop, splits the key axis across more blocks to fill the GPU, and
+      merges with a combine kernel. **Gate PASS 5/5 both GPUs** (forced-split through CudaFlashAttentionTests);
+      **1.3–1.56× decode speedup** at kvLen≥2048. New `native/cuda/lm/flash_attn_f32_split.cu`.
+- [~] A/B e2e: LLM tok/s — microbench (`FlashAttn_Decode_F32`) done; full LLM tok/s needs a loaded GGUF
+      (separate harness). Decode microbench is the representative probe and shows the win.
+- [x] Ledger filled (raw in scratchpad). No `run_post_attn_*` full-grid dir — focused decode probe.
 
 ---
 
@@ -204,14 +208,15 @@ The one algorithmic loss no flag fixes. Two steps, smallest first.
 Question to settle: **do we want low-VRAM quantized diffusion?** Today only LLMs get on-the-fly
 dequant; diffusion quants are load-size-only. If yes, the backend method already exists.
 
-- [ ] First **measure the cost** of the dequant-per-op design on the existing LLM path: at M=1
-      (decode), time `QuantizedMatMul`'s dequant kernel vs the GEMM (`HARTSY_PROFILE=1`). If dequant
-      dominates, that caps the win and informs whether a fused dequant-GEMM is worth it later.
-- [ ] Decision point (record in the Decision Log below):
-  - **(a)** Wire `QuantizedMatMul` into the diffusion `Linear` path behind a low-VRAM flag (mirror
-    the GGUF-on-LLM pattern). Measure it/s cost vs VRAM saved on a Flux GGUF/FP8 checkpoint.
-  - **(b)** Leave as-is; document that diffusion quants shrink disk/load only, not inference VRAM.
-- [ ] If (a): gate parity, A/B it/s + VRAM peak, commit `run_post_diffquant_{date}_{gpu}/`.
+- [x] **Measured** the dequant-per-op cost (`QuantMatMulGpuBenchmarks`, Q4_K, resident weights, M∈{1,1k,4k}
+      both GPUs): dequant is ~constant ~1–2 ms (O(N·K), a full weight-sized memory pass), adding **+30–67%
+      per op at diffusion M** — it does NOT amortize because the diffusion GEMM is itself weight-memory-bound.
+      Also found: in the **re-upload-per-step** (streaming/block-swap) regime, Q4_K halves H2D → quant is faster.
+- [x] Decision recorded (see Decision Log): **default (b) load-only; (a) as an opt-in low-VRAM flag.**
+- [ ] **Follow-up (scoped, not started):** wire (a) — loader keeps GGUF weights quantized under a diffusion
+      `LowVramQuant` flag + diffusion `Linear`→`QuantizedMatMul`; gate parity on a Flux/Chroma GGUF, A/B it/s
+      + VRAM peak. Deferred: needs a diffusion-GGUF checkpoint to validate, and the streaming-regime win is
+      where it pays off (fused dequant-GEMM would cut the resident-weight overhead — pursue only if needed).
 
 Deferred (note, do not start unless measurement justifies): fused dequant-into-GEMM, and wiring the
 Vulkan int8 GEMM to real weights. Neither ComfyUI nor diffusers does these for diffusion; only pursue
@@ -232,13 +237,21 @@ dir. Keep negative results.
 | 2026-06-30 | 3060 | 2 epilogue | EPILOGUE on | Linear_F16_Bias ×10 | mean ms | off | mixed | −41%…+10% | **gate PASS** | `scratchpad ab_epi` | no consistent win |
 | 2026-06-30 | 4090 | 2 epilogue | EPILOGUE on | Linear_F16_Bias ×10 | mean ms | off | mixed | −30%…**+42%** | **gate PASS** | `scratchpad ab_epi` | shapes 6/7/8 regress |
 | | | 2 epilogue | — | — | finding | — | — | — | — | — | Flag swaps cublasGemmEx→**cublasLtMatmul** (different per-shape algo heuristics), not just bias-fusion. Pure bias saving < noise. **Keep default-off**; only worth per-shape selection, not a global flip. Eyeball deltas (8 iters, contaminated box) — a clean-box Welch t-test could refine per-shape, but sign-flips rule out default-on. |
-| | | 3 tcgemm | TENSORCORE on | aligned GEMM | GFLOP/s | | | | | | vs cuBLAS too |
+| 2026-06-30 | 3060 | 3 tcgemm | TENSORCORE on | Linear_F16_Bias ×10 | mean μs | cuBLAS | TC-HGEMM | **+240…+549%** | **gate PASS 9/9** | `scratchpad ab_tc` | TC **0.23× median** — cuBLAS wins 3–7× |
+| 2026-06-30 | 4090 | 3 tcgemm | TENSORCORE on | Linear_F16_Bias ×10 | mean μs | cuBLAS | TC-HGEMM | **+44…+132%** | **gate PASS 9/9** | `scratchpad ab_tc` | TC **0.67× median** — cuBLAS wins 1.4–2.3× |
+| | | 3 tcgemm | — | — | finding | — | — | — | — | — | Hand-written HGEMM is correct (9/9 vs cuBLAS both GPUs) but is the unoptimized one-warp-per-tile baseline; cuBLAS wins every shape. **Keep cuBLAS, `EnableTensorCoreGemm` stays default-off.** Beating cuBLAS would need real tiling/shared-mem staging/multi-warp — not worth it since cuBLAS already wins. |
 | 2026-06-30 | 4090 | 4 fp8native | FP8_NATIVE on | Linear_FP8_Native ×10 | mean ms | cast-F16 | native | **median −16% (1.19×), best −49% (1.96×)** | **gate PASS (rel_err 7e-5)** | `scratchpad ab_fp8` | 8/10 shapes faster; s6 (SD3.5) 0.72×, s8 (Lumina2) 0.98× regress. **Net win** — recommend on for Ada FP8. |
 | 2026-06-30 | 4090 | 4 fp8native | FP8_NATIVE on | (structural) | VRAM | +2 B/param | +0 | weight stays FP8-only | n/a | — | Native path returns BEFORE the cached-F16-weight block → no resident F16 cast. Not visible in single-weight microbench; quantify on a full FP8 DiT e2e (it/s + peak VRAM). |
 | 2026-06-30 | 3060 | 4 fp8native | — | — | — | — | — | N/A | n/a | — | SM 8.6 (pre-Ada): native path unsupported, gate SKIPS, dispatch falls back to cast-F16. |
-| | | 5a attn | — | SDPA vs Skv | ms | | | | | | warp-shuffle |
-| | | 5b attn | — | LLM decode | tok/s | | | | | | keys-parallel |
-| | | 6 diffquant | LOWVRAM diff | Flux GGUF | it/s / VRAM | | | | | | policy (a) |
+| 2026-06-30 | 3060 | 5a attn | warp-shuffle | FlashAttn decode F32 | μs | committed | 5a | +2.3% / +3.5% / **−3.5%** (kv 512/2k/8k) | **gate PASS** | `scratchpad ab_fa` | marginal; helps only long ctx |
+| 2026-06-30 | 4090 | 5a attn | warp-shuffle | FlashAttn decode F32 | μs | committed | 5a | +0.9% / **−3.8% / −5.1%** (kv 512/2k/8k) | **gate PASS** | `scratchpad ab_fa` | ~5% at kv=8192, neutral short |
+| | | 5a attn | — | — | finding | — | — | — | — | — | Removes ~5/8 per-key barriers; gain scales with KV len but is small (kernel is memory-bound on K/V global loads, not sync-bound). **Correctness gated 5/5 both GPUs** via CudaFlashAttentionTests. Real win is **5b keys-parallel** (deferred; coordinate w/ Phase B4.1 FA2). Built via on-box **nvrtc 12.9** (no nvcc) → compute_80 PTX, toolchain gated against nvcc PTX. |
+| 2026-06-30 | 3060 | 5b attn | flash-decoding | FlashAttn decode F32 | μs | monolithic | split-K | **−31% / −24%** (kv 2k/8k) | **gate PASS 5/5** | `scratchpad ab_fd` | **1.45× / 1.32×**; kv512 stays mono |
+| 2026-06-30 | 4090 | 5b attn | flash-decoding | FlashAttn decode F32 | μs | monolithic | split-K | **−36% / −25%** (kv 2k/8k) | **gate PASS 5/5** | `scratchpad ab_fd` | **1.56× / 1.33×** decode win |
+| | | 5b attn | — | — | finding | — | — | — | — | — | Split-K fills the GPU when the base grid (b·hq·tq, e.g. 32 blocks decode) under-occupies it. New `flash_attn_f32_split.cu` (split+combine), exact vs monolithic (gated 5/5 both GPUs via forced-split). Auto-dispatches for the **plain** path (no sink/alibi/softcap/window → those keep monolithic) when occupancy-limited + kvLen≥1024. Kill switch `HARTSY_FLASH_SPLIT_OFF`. Built via nvrtc 12.9. |
+| 2026-06-30 | 3060 | 6 diffquant | (measure) | Q4_K deq+GEMM, K3072×N12288 | µs overhead | F16 GEMM | +dequant | **+85% (M1) / +32% (M1k) / +16% (M4k)** | n/a | `scratchpad probe_quant` | resident weights |
+| 2026-06-30 | 4090 | 6 diffquant | (measure) | Q4_K deq+GEMM | µs overhead | F16 GEMM | +dequant | **+89% (M1) / +67% (M1k) / +46% (M4k)** | n/a | `scratchpad probe_quant` | dequant ≈ GEMM (both mem-bound) |
+| | | 6 diffquant | — | — | finding | — | — | — | — | — | Dequant is ~constant (~1–2 ms, O(N·K)) = a full weight-sized memory pass, so it ~doubles per-op memory traffic and does **not** amortize at diffusion M (worse on fast GPUs). Also measured: when weights are **re-uploaded per step** (block-swap/streaming — the actual OOM case), Q4_K halves H2D so quant is *faster* there. |
 
 ---
 
@@ -252,7 +265,7 @@ dir. Keep negative results.
 | 2026-06-30 | Stage 0 scope = C# microbench both GPUs | no torch on box (python parity ceiling deferred → point `--py-venv` at a ComfyUI venv); C# e2e not implemented in harness | |
 | 2026-06-30 | Fixed engine bug: `CudaLibraryResolver` didn't resolve `cublasLt` | `[LibraryImport("cublasLt")]` needs the versioned soname (`libcublasLt.so.12`); no unversioned `.so` exists, so epilogue/FP8/Lt-GEMM threw `DllNotFoundException`. Dormant because all are default-off. Stage 2 gate was failing on this, not on math. | |
 | 2026-06-30 | Added `Linear_F16_Bias` microbench | existing grid only calls raw `MatMul` (no bias) → epilogue fusion never engaged; needed a bias-GEMM probe for the Stage 2 A/B | |
-| | Stage 6 (a) wire diffusion quant **/** (b) leave load-only | (fill after Stage 6 measurement) | |
+| 2026-06-30 | **Default = (b) load-only; (a) recommended as an opt-in low-VRAM flag** | Measured (resident weights): per-op Q4_K dequant adds 30–67% at diffusion M (it's a full weight-sized memory pass, ≈ the GEMM's own traffic — doesn't amortize). So it must NOT be default. BUT in the genuine OOM/streaming regime where weights are re-uploaded per step, Q4_K halves H2D and is faster — so (a) is worth wiring as opt-in (mirror LLM `LowVramQuant`) for users who otherwise can't fit the model. Full wiring (loader keeps-quantized + diffusion `Linear`→`QuantizedMatMul`) is a scoped follow-up needing diffusion-GGUF test weights to gate parity. | |
 
 ---
 
