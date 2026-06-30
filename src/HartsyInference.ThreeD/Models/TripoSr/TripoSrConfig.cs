@@ -1,20 +1,24 @@
 namespace HartsyInference.ThreeD.Models.TripoSr;
 
 /// <summary>TripoSR (Stability AI / Tripo, MIT) configuration — a feed-forward single-image→3D LRM: a DINO
-/// image tokenizer feeds a triplane transformer that produces a triplane, decoded by a NeRF MLP into
-/// density+color and meshed via marching cubes. Deterministic (no diffusion). Dims marked here track the
-/// public TripoSR checkpoint and are <b>validation-gated</b> (see the research notes).</summary>
+/// ViT-B/16 image tokenizer feeds a diffusers <c>Transformer1D</c> over learned triplane tokens, the result
+/// is upsampled (ConvTranspose2d) into a triplane and decoded by a <c>NeRFMLP</c> into density+color, meshed
+/// via marching cubes. Deterministic (no diffusion). Dims match the public <c>stabilityai/TripoSR</c>
+/// <c>config.yaml</c>.</summary>
 public sealed record TripoSrConfig
 {
-    // --- Triplane ---
-    /// <summary>Channels per triplane plane.</summary>
+    // --- Triplane (Triplane1DTokenizer + TriplaneUpsampleNetwork) ---
+    /// <summary>Channels per upsampled triplane plane (post-upsample, NeRF input is 3× this).</summary>
     public required int TriplaneChannels { get; init; }
 
-    /// <summary>Triplane spatial resolution (H = W).</summary>
-    public required int TriplaneResolution { get; init; }
+    /// <summary>Pre-upsample plane size (learned-token grid; ConvTranspose2d k2/s2 doubles it).</summary>
+    public required int PlaneSize { get; init; }
 
-    // --- Image→triplane transformer ---
-    /// <summary>Transformer hidden width.</summary>
+    /// <summary>Backbone channel width = Triplane1DTokenizer <c>num_channels</c>.</summary>
+    public required int NumChannels { get; init; }
+
+    // --- Transformer1D backbone ---
+    /// <summary>Inner transformer width (= NumHeads × HeadDim).</summary>
     public required int Width { get; init; }
 
     /// <summary>Number of transformer blocks.</summary>
@@ -23,39 +27,48 @@ public sealed record TripoSrConfig
     /// <summary>Attention heads.</summary>
     public required int NumHeads { get; init; }
 
-    /// <summary>Image token dim (DINO hidden) projected to <see cref="Width"/>.</summary>
-    public required int ImageTokenDim { get; init; }
+    /// <summary>Per-head dim (scale = 1/√HeadDim).</summary>
+    public required int HeadDim { get; init; }
 
-    /// <summary>FFN intermediate size.</summary>
-    public required int MlpDim { get; init; }
+    /// <summary>Cross-attention key/value dim (DINO hidden = 768).</summary>
+    public required int CrossAttentionDim { get; init; }
 
-    // --- NeRF decoder ---
-    /// <summary>NeRF MLP hidden width.</summary>
+    /// <summary>GroupNorm groups in the Transformer1D input norm.</summary>
+    public int NormNumGroups { get; init; } = 32;
+
+    // --- NeRF decoder (NeRFMLP) ---
+    /// <summary>NeRF MLP hidden width (n_neurons).</summary>
     public required int NerfHidden { get; init; }
 
-    /// <summary>NeRF MLP hidden-layer count (excludes the final density+rgb projection).</summary>
-    public required int NerfLayers { get; init; }
+    /// <summary>Number of 64→64 hidden Linears between the input and output Linears (n_hidden_layers − 1).</summary>
+    public required int NerfMidLayers { get; init; }
 
-    // --- Extraction ---
-    /// <summary>Density iso level for marching cubes.</summary>
-    public float DensityThreshold { get; init; } = 10f;
+    // --- Renderer / extraction (TriplaneNeRFRenderer) ---
+    /// <summary>Scene half-extent; query grid spans [−Radius, Radius]³ (config <c>renderer.radius</c>).</summary>
+    public float Radius { get; init; } = 0.87f;
+
+    /// <summary>Additive bias before the density exp activation (<c>density_bias</c>).</summary>
+    public float DensityBias { get; init; } = -1.0f;
+
+    /// <summary>Iso level on the activated density for marching cubes (TSR <c>extract_mesh</c> default).</summary>
+    public float DensityThreshold { get; init; } = 25f;
 
     /// <summary>Default marching-cubes grid resolution per axis.</summary>
     public int GridResolution { get; init; } = 256;
 
-    /// <summary>Half-extent of the query cube in object space (grid spans [-Bound, Bound]³).</summary>
-    public float BoundingBox { get; init; } = 1.0f;
+    /// <summary>Upsampled triplane resolution (PlaneSize × 2).</summary>
+    public int TriplaneResolution => PlaneSize * 2;
 
-    /// <summary>Number of triplane tokens the transformer produces (3 planes × res²).</summary>
-    public int TriplaneTokens => 3 * TriplaneResolution * TriplaneResolution;
+    /// <summary>Number of triplane tokens the backbone processes (3 planes × PlaneSize²).</summary>
+    public int TriplaneTokens => 3 * PlaneSize * PlaneSize;
 
-    /// <summary>Default config for the public <c>stabilityai/TripoSR</c> checkpoint. <b>Validation-gated.</b>
-    /// Pairs with a DINO ViT-B/16 tokenizer (ImageTokenDim = 768).</summary>
+    /// <summary>Default config for the public <c>stabilityai/TripoSR</c> checkpoint. Pairs with a DINO
+    /// ViT-B/16 tokenizer (CrossAttentionDim = 768) at a 512px conditioning image.</summary>
     public static TripoSrConfig TripoSr => new()
     {
-        TriplaneChannels = 40, TriplaneResolution = 64,
-        Width = 1024, Depth = 16, NumHeads = 16, ImageTokenDim = 768, MlpDim = 4096,
-        NerfHidden = 64, NerfLayers = 9,
-        DensityThreshold = 10f, GridResolution = 256, BoundingBox = 1.0f,
+        TriplaneChannels = 40, PlaneSize = 32, NumChannels = 1024,
+        Width = 1024, Depth = 16, NumHeads = 16, HeadDim = 64, CrossAttentionDim = 768, NormNumGroups = 32,
+        NerfHidden = 64, NerfMidLayers = 8,
+        Radius = 0.87f, DensityBias = -1.0f, DensityThreshold = 25f, GridResolution = 256,
     };
 }

@@ -5,23 +5,28 @@ using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models.TripoSr;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
-using HartsyInference.Vision.Dinov2;
+using HartsyInference.Vision.DinoVit;
 using Xunit;
 
 namespace HartsyInference.ThreeD.Tests;
 
-/// <summary>CPU structural tests for TripoSR (image→triplane transformer + triplane NeRF decoder + pipeline)
-/// using tiny synthetic weights. Validates shapes, finiteness, and the deterministic feed-forward flow.</summary>
+/// <summary>CPU structural tests for TripoSR (Transformer1D backbone + triplane NeRF decoder + pipeline)
+/// using tiny synthetic weights with the real checkpoint key layout. Validates shapes, finiteness, and the
+/// deterministic feed-forward flow without needing the real checkpoint.</summary>
 public sealed unsafe class TripoSrModelTests
 {
-    private static Dinov2Preset TinyDino => Hunyuan3DSyntheticWeights.TinyDino; // hidden 32, 2 layers, image 28/14
+    private static DinoViTConfig TinyDino => new()
+    {
+        HiddenSize = 32, NumLayers = 2, NumHeads = 4, IntermediateSize = 64,
+        ImageSize = 32, NativeImageSize = 16, PatchSize = 16, LayerNormEps = 1e-12f,
+    };
 
     private static TripoSrConfig TinyConfig => new()
     {
-        TriplaneChannels = 8, TriplaneResolution = 8,
-        Width = 32, Depth = 2, NumHeads = 4, ImageTokenDim = 32, MlpDim = 64,
-        NerfHidden = 16, NerfLayers = 2,
-        DensityThreshold = 0f, GridResolution = 12, BoundingBox = 1f,
+        TriplaneChannels = 8, PlaneSize = 4, NumChannels = 8,
+        Width = 32, Depth = 2, NumHeads = 4, HeadDim = 8, CrossAttentionDim = 32, NormNumGroups = 4,
+        NerfHidden = 16, NerfMidLayers = 2,
+        Radius = 0.87f, DensityBias = -1.0f, DensityThreshold = 0f, GridResolution = 12,
     };
 
     [Fact]
@@ -32,7 +37,7 @@ public sealed unsafe class TripoSrModelTests
         TripoSrTransformer tr = new(c);
         tr.LoadWeights(BuildTransformer(c));
 
-        using Tensor tokens = new(new TensorShape(1, 5, c.ImageTokenDim), DType.F32);
+        using Tensor tokens = new(new TensorShape(1, 5, c.CrossAttentionDim), DType.F32);
         Fill(tokens, 0.03f);
         Triplane plane = tr.Forward(cpu, tokens);
         Assert.Equal(c.TriplaneChannels, plane.Channels);
@@ -55,7 +60,7 @@ public sealed unsafe class TripoSrModelTests
         for (int i = 0; i < n; i++) feat[i] = (float)(r.NextDouble() * 0.2 - 0.1);
         Triplane tri = new() { Features = feat, Channels = c.TriplaneChannels, Height = c.TriplaneResolution, Width = c.TriplaneResolution };
 
-        ScalarField3D field = dec.DecodeDensityField(cpu, tri, resolution: 10, bound: 1f, chunkSize: 64);
+        ScalarField3D field = dec.DecodeDensityField(cpu, tri, resolution: 10, chunkSize: 64);
         Assert.Equal(10 * 10 * 10, field.Values.Length);
         Assert.All(field.Values, v => Assert.True(float.IsFinite(v)));
     }
@@ -64,10 +69,10 @@ public sealed unsafe class TripoSrModelTests
     public void Pipeline_Generate_RunsEndToEnd()
     {
         using IBackend cpu = new CpuBackend();
-        Dinov2Preset dp = TinyDino;
+        DinoViTConfig dp = TinyDino;
         TripoSrConfig c = TinyConfig;
 
-        Dinov2VisionEncoder dino = new(dp); dino.LoadWeights(Hunyuan3DSyntheticWeights.BuildDino(dp));
+        DinoViTEncoder dino = new(dp); dino.LoadWeights(BuildDino(dp));
         TripoSrTransformer tr = new(c); tr.LoadWeights(BuildTransformer(c));
         TriplaneNerfDecoder dec = new(c); dec.LoadWeights(BuildDecoder(c));
         using TripoSrPipeline pipeline = new(cpu, dino, tr, dec, c);
@@ -82,24 +87,57 @@ public sealed unsafe class TripoSrModelTests
             Assert.Equal(result.Mesh.VertexCount * 3, result.Mesh.VertexColors!.Length);
     }
 
+    private static Dictionary<string, Tensor> BuildDino(DinoViTConfig c)
+    {
+        int h = c.HiddenSize, inter = c.IntermediateSize, np = c.NativePatchGrid * c.NativePatchGrid;
+        Random r = new(33);
+        Dictionary<string, Tensor> w = new()
+        {
+            ["embeddings.cls_token"] = T(r, 1, 1, h),
+            ["embeddings.position_embeddings"] = T(r, 1, 1 + np, h),
+            ["embeddings.patch_embeddings.projection.weight"] = T(r, h, 3, c.PatchSize, c.PatchSize),
+            ["embeddings.patch_embeddings.projection.bias"] = T(r, h),
+            ["layernorm.weight"] = T(r, h), ["layernorm.bias"] = T(r, h),
+        };
+        for (int i = 0; i < c.NumLayers; i++)
+        {
+            string p = $"encoder.layer.{i}";
+            w[$"{p}.layernorm_before.weight"] = T(r, h); w[$"{p}.layernorm_before.bias"] = T(r, h);
+            foreach (string proj in new[] { "query", "key", "value" })
+            { w[$"{p}.attention.attention.{proj}.weight"] = T(r, h, h); w[$"{p}.attention.attention.{proj}.bias"] = T(r, h); }
+            w[$"{p}.attention.output.dense.weight"] = T(r, h, h); w[$"{p}.attention.output.dense.bias"] = T(r, h);
+            w[$"{p}.layernorm_after.weight"] = T(r, h); w[$"{p}.layernorm_after.bias"] = T(r, h);
+            w[$"{p}.intermediate.dense.weight"] = T(r, inter, h); w[$"{p}.intermediate.dense.bias"] = T(r, inter);
+            w[$"{p}.output.dense.weight"] = T(r, h, inter); w[$"{p}.output.dense.bias"] = T(r, h);
+        }
+        return w;
+    }
+
     private static Dictionary<string, Tensor> BuildTransformer(TripoSrConfig c)
     {
-        int w = c.Width, t = c.TriplaneTokens;
+        int w = c.Width, cc = c.NumChannels, ps = c.PlaneSize, inner = 4 * w;
         Random r = new(44);
         Dictionary<string, Tensor> wts = new()
         {
-            ["triplane_pos"] = T(r, 1, t, w),
-            ["image_proj.weight"] = T(r, w, c.ImageTokenDim), ["image_proj.bias"] = T(r, w),
-            ["out_proj.weight"] = T(r, c.TriplaneChannels, w), ["out_proj.bias"] = T(r, c.TriplaneChannels),
+            ["tokenizer.embeddings"] = T(r, 3, cc, ps, ps),
+            ["backbone.norm.weight"] = T(r, cc), ["backbone.norm.bias"] = T(r, cc),
+            ["backbone.proj_in.weight"] = T(r, w, cc), ["backbone.proj_in.bias"] = T(r, w),
+            ["backbone.proj_out.weight"] = T(r, cc, w), ["backbone.proj_out.bias"] = T(r, cc),
+            ["post_processor.upsample.weight"] = T(r, cc, c.TriplaneChannels, 2, 2),
+            ["post_processor.upsample.bias"] = T(r, c.TriplaneChannels),
         };
         for (int i = 0; i < c.Depth; i++)
         {
-            string p = $"blocks.{i}";
-            foreach (string a in new[] { "self_attn", "cross_attn" })
-                foreach (string proj in new[] { "q", "k", "v", "o" })
-                { wts[$"{p}.{a}.{proj}.weight"] = T(r, w, w); wts[$"{p}.{a}.{proj}.bias"] = T(r, w); }
-            wts[$"{p}.mlp.fc1.weight"] = T(r, c.MlpDim, w); wts[$"{p}.mlp.fc1.bias"] = T(r, c.MlpDim);
-            wts[$"{p}.mlp.fc2.weight"] = T(r, w, c.MlpDim); wts[$"{p}.mlp.fc2.bias"] = T(r, w);
+            string p = $"backbone.transformer_blocks.{i}";
+            wts[$"{p}.norm1.weight"] = T(r, w); wts[$"{p}.norm1.bias"] = T(r, w);
+            wts[$"{p}.attn1.to_q.weight"] = T(r, w, w); wts[$"{p}.attn1.to_k.weight"] = T(r, w, w); wts[$"{p}.attn1.to_v.weight"] = T(r, w, w);
+            wts[$"{p}.attn1.to_out.0.weight"] = T(r, w, w); wts[$"{p}.attn1.to_out.0.bias"] = T(r, w);
+            wts[$"{p}.norm2.weight"] = T(r, w); wts[$"{p}.norm2.bias"] = T(r, w);
+            wts[$"{p}.attn2.to_q.weight"] = T(r, w, w); wts[$"{p}.attn2.to_k.weight"] = T(r, w, c.CrossAttentionDim); wts[$"{p}.attn2.to_v.weight"] = T(r, w, c.CrossAttentionDim);
+            wts[$"{p}.attn2.to_out.0.weight"] = T(r, w, w); wts[$"{p}.attn2.to_out.0.bias"] = T(r, w);
+            wts[$"{p}.norm3.weight"] = T(r, w); wts[$"{p}.norm3.bias"] = T(r, w);
+            wts[$"{p}.ff.net.0.proj.weight"] = T(r, 2 * inner, w); wts[$"{p}.ff.net.0.proj.bias"] = T(r, 2 * inner);
+            wts[$"{p}.ff.net.2.weight"] = T(r, w, inner); wts[$"{p}.ff.net.2.bias"] = T(r, w);
         }
         return wts;
     }
@@ -110,11 +148,15 @@ public sealed unsafe class TripoSrModelTests
         Random r = new(55);
         Dictionary<string, Tensor> wts = new()
         {
-            ["fc_in.weight"] = T(r, hid, feat), ["fc_in.bias"] = T(r, hid),
-            ["fc_out.weight"] = T(r, 4, hid), ["fc_out.bias"] = T(r, 4),
+            ["layers.0.weight"] = T(r, hid, feat), ["layers.0.bias"] = T(r, hid),
         };
-        for (int i = 0; i < c.NerfLayers; i++)
-        { wts[$"fc_hidden.{i}.weight"] = T(r, hid, hid); wts[$"fc_hidden.{i}.bias"] = T(r, hid); }
+        for (int i = 0; i < c.NerfMidLayers; i++)
+        {
+            int idx = 2 * (i + 1);
+            wts[$"layers.{idx}.weight"] = T(r, hid, hid); wts[$"layers.{idx}.bias"] = T(r, hid);
+        }
+        int outIdx = 2 * (c.NerfMidLayers + 1);
+        wts[$"layers.{outIdx}.weight"] = T(r, 4, hid); wts[$"layers.{outIdx}.bias"] = T(r, 4);
         return wts;
     }
 

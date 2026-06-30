@@ -59,8 +59,9 @@ public static class AttentionReference
                         float score = 0f;
                         for (int x = 0; x < d; x++) score += qp[qBase + x] * kp[kBase + x];
                         score *= scale;
-                        // ALiBi: per-head linear distance penalty slope·(k_pos − q_pos) (≤ 0 under causality).
-                        if (alp != null) score += alp[h] * (k - (qOffset + r));
+                        // ALiBi: causal decoders use slope·(k−q) (≤0); bidirectional encoders (jina-bert-v2) use the
+                        // symmetric −slope·|k−q| (selected by !causal; reduces to the causal form when k ≤ q).
+                        if (alp != null) { int rel = k - (qOffset + r); score += alp[h] * (causal ? rel : -Math.Abs(rel)); }
                         if (softcap > 0f) score = softcap * MathF.Tanh(score / softcap);
                         float newM = MathF.Max(m, score);
                         float corr = m == float.NegativeInfinity ? 0f : MathF.Exp(m - newM);

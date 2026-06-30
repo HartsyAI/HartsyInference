@@ -44,6 +44,14 @@ public sealed class MultimodalGenerator
             int[] post = _text.Tokenizer.Encode($"<|vision_end|>{question}<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
             return (pre, post);
         }
+        if (_vision.Family == "internvl")
+        {
+            // InternVL (Qwen2 LLM, ChatML): "<|im_start|>system\n…<|im_end|>\n<|im_start|>user\n<img> [image] </img>\n{q}<|im_end|>\n<|im_start|>assistant\n"
+            int[] pre = _text.Tokenizer.Encode(
+                "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<img>", addSpecial: true);
+            int[] post = _text.Tokenizer.Encode($"</img>\n{question}<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
+            return (pre, post);
+        }
         if (_vision.Family == "llava")
         {
             // LLaVA-1.5 (Vicuna v1): "<bos>{system} USER: [image]\n{q} ASSISTANT:"

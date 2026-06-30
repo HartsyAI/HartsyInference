@@ -17,6 +17,11 @@ public enum VlmProjectorKind
     /// <summary>LLaVA: drop the CLS token, then a 2-layer MLP (<c>mm.0</c> → GELU → <c>mm.2</c>) over the patch
     /// tokens. No token reduction (576 patches → 576 image tokens).</summary>
     Llava,
+    /// <summary>InternVL (InternViT + dynamic high-res): drop the CLS token, pixel-shuffle the patch grid
+    /// (scale_factor → fold s×s into channels, same mapping as Idefics3), then LayerNorm (<c>mm.model.mlp.0</c>) →
+    /// Linear (<c>mm.model.mlp.1</c>) → GELU → Linear (<c>mm.model.mlp.3</c>). The InternViT blocks carry LayerScale
+    /// (<c>ls1</c>/<c>ls2</c>).</summary>
+    InternVL,
 }
 
 /// <summary>The vision tower + connector of llama.cpp <c>mmproj-*.gguf</c> VLMs. Covers both ViT flavours that
@@ -35,6 +40,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
     {
         VlmProjectorKind.Idefics3 => "idefics3",
         VlmProjectorKind.Llava => "llava",
+        VlmProjectorKind.InternVL => "internvl",
         _ => "gemma3",
     };
 
@@ -57,6 +63,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
     public bool HasPostLn { get; }      // SigLIP applies a final layernorm; CLIP/LLaVA uses the penultimate layer
     public bool UseQuickGelu { get; }   // CLIP MLP activation = x·sigmoid(1.702x); SigLIP = GELU-tanh
     public int ScaleFactor { get; }     // projector reduction factor (Gemma-3 avg-pool size; Idefics3 pixel-shuffle; LLaVA 1)
+    public bool FfnUpIsFc1 { get; }     // true (InternViT): ffn_up = fc1 (up). false (clip SigLIP/CLIP): names swapped, ffn_down = fc1.
     public int TokensPerImage { get; }
     public int ProjectionDim { get; }   // text hidden size
     public VlmProjectorKind Projector { get; }
@@ -67,13 +74,13 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
     private SiglipVlmEncoder(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w,
         int hidden, int layers, int heads, int inter, int patch, int image, int projDim,
         float[] mean, float[] std, float eps, VlmProjectorKind projector, int scaleFactor,
-        bool hasCls, bool hasPreLn, bool hasPostLn, bool quickGelu)
+        bool hasCls, bool hasPreLn, bool hasPostLn, bool quickGelu, bool ffnUpIsFc1)
     {
         _handle = handle; _w = w;
         Hidden = hidden; NumLayers = layers; NumHeads = heads; HeadDim = hidden / heads; Intermediate = inter;
         PatchSize = patch; ImageSize = image; PatchGrid = (image - patch) / patch + 1; NumPatches = PatchGrid * PatchGrid;
         ProjectionDim = projDim; ImageMean = mean; ImageStd = std; LayerNormEps = eps <= 0f ? 1e-6f : eps;
-        Projector = projector; ScaleFactor = scaleFactor;
+        Projector = projector; ScaleFactor = scaleFactor; FfnUpIsFc1 = ffnUpIsFc1;
         HasClsToken = hasCls; SeqLen = NumPatches + (hasCls ? 1 : 0); HasPreLn = hasPreLn; HasPostLn = hasPostLn; UseQuickGelu = quickGelu;
         TokensPerImage = projector == VlmProjectorKind.Llava ? NumPatches : (PatchGrid / scaleFactor) * (PatchGrid / scaleFactor);
     }
@@ -110,7 +117,8 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         try
         {
             // Detect the connector by which projector tensors are present.
-            VlmProjectorKind projector = w.ContainsKey("mm.model.fc.weight") ? VlmProjectorKind.Idefics3
+            VlmProjectorKind projector = w.ContainsKey("mm.model.mlp.0.weight") ? VlmProjectorKind.InternVL
+                : w.ContainsKey("mm.model.fc.weight") ? VlmProjectorKind.Idefics3
                 : w.ContainsKey("mm.0.weight") ? VlmProjectorKind.Llava
                 : VlmProjectorKind.Gemma3;
 
@@ -129,7 +137,8 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
                     w[key] = TransposeWeight(w[key]);
                 else if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_out")
                     || key.Contains("ffn_up") || key.Contains("ffn_down") || key.Contains("mm.model.fc")
-                    || key == "mm.0.weight" || key == "mm.2.weight")
+                    || key == "mm.0.weight" || key == "mm.2.weight"
+                    || key == "mm.model.mlp.1.weight" || key == "mm.model.mlp.3.weight")   // InternVL projector Linears
                     w[key] = Relabel(w[key]);
             }
             GgufMetadata m = handle.Metadata;
@@ -140,7 +149,9 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             int patch = (int)m.GetUInt32("clip.vision.patch_size");
             int image = (int)m.GetUInt32("clip.vision.image_size");
             // Text hidden: Gemma-3/SmolVLM expose projection_dim = text hidden; LLaVA's mm.2 output is the text hidden.
-            int projDim = projector == VlmProjectorKind.Llava ? (int)w["mm.2.weight"].Shape[0] : (int)m.GetUInt32("clip.vision.projection_dim");
+            int projDim = projector == VlmProjectorKind.Llava ? (int)w["mm.2.weight"].Shape[0]
+                : projector == VlmProjectorKind.InternVL ? (int)w["mm.model.mlp.3.weight"].Shape[0]
+                : (int)m.GetUInt32("clip.vision.projection_dim");
             float eps = m.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-6f);
             float[] mean = m.GetFloatArray("clip.vision.image_mean") ?? [0.5f, 0.5f, 0.5f];
             float[] std = m.GetFloatArray("clip.vision.image_std") ?? [0.5f, 0.5f, 0.5f];
@@ -148,6 +159,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             int scaleFactor = projector switch
             {
                 VlmProjectorKind.Idefics3 => (int)m.GetUInt32("clip.vision.projector.scale_factor", 3u),
+                VlmProjectorKind.InternVL => (int)m.GetUInt32("clip.vision.projector.scale_factor", 2u),
                 VlmProjectorKind.Llava => 1,
                 // Gemma-3: pool size = grid / sqrt(mm_tokens_per_image).
                 _ => grid / (int)MathF.Round(MathF.Sqrt(m.GetUInt32("clip.vision.mm_tokens_per_image", 256u))),
@@ -156,8 +168,11 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             bool hasPreLn = w.ContainsKey("v.pre_ln.weight");
             bool hasPostLn = w.ContainsKey("v.post_ln.weight");
             bool quickGelu = !m.GetBool("clip.use_gelu", true);   // CLIP: use_gelu=false → quick-gelu
+            // MLP wiring: clip swaps the SigLIP/CLIP fc1/fc2 names (ffn_down = up), but InternViT uses the natural
+            // names (ffn_up = up). Decide by the relabeled out-dim: the fc1 (up) projection produces `intermediate`.
+            bool ffnUpIsFc1 = (int)w["v.blk.0.ffn_up.weight"].Shape[0] == inter;
             return new SiglipVlmEncoder(handle, w, hidden, layers, heads, inter, patch, image, projDim, mean, std, eps,
-                projector, scaleFactor, hasCls, hasPreLn, hasPostLn, quickGelu);
+                projector, scaleFactor, hasCls, hasPreLn, hasPostLn, quickGelu, ffnUpIsFc1);
         }
         catch { handle.Dispose(); throw; }
     }
@@ -245,6 +260,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         {
             VlmProjectorKind.Idefics3 => ProjectIdefics3(backend, h),
             VlmProjectorKind.Llava => ProjectLlava(backend, h, cls),
+            VlmProjectorKind.InternVL => ProjectInternVL(backend, h, cls),
             _ => ProjectGemma3(backend, h),
         };
         Dbg(backend, "embeds", img, ProjectionDim);
@@ -289,6 +305,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         Tensor attnOut = new(flat, DType.F32);
         backend.Linear(attnOut, attnFlat, W($"{p}.attn_out.weight"), W($"{p}.attn_out.bias"));
         attnFlat.Dispose();
+        ApplyLayerScale(backend, attnOut, $"{p}.ls1.weight");   // InternViT: per-channel LayerScale before the residual
 
         Tensor afterAttn = new(flat, DType.F32);
         backend.Add(afterAttn, x, attnOut);
@@ -297,20 +314,35 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         Tensor ln2 = new(flat, DType.F32);
         backend.LayerNorm(ln2, afterAttn, W($"{p}.ln2.weight"), W($"{p}.ln2.bias"), LayerNormEps);
         // MLP. clip swaps the names: `ffn_down` is fc1 (up, hidden→intermediate), `ffn_up` is fc2 (down).
+        // fc1 (up, hidden→intermediate) and fc2 (down). clip swaps the names for SigLIP/CLIP (ffn_down = fc1);
+        // InternViT uses the natural names (ffn_up = fc1). FfnUpIsFc1 picks the right tensor per role.
+        string upKey = FfnUpIsFc1 ? $"{p}.ffn_up" : $"{p}.ffn_down";
+        string downKey = FfnUpIsFc1 ? $"{p}.ffn_down" : $"{p}.ffn_up";
         Tensor up = new(new TensorShape(1, seqLen, Intermediate), DType.F32);
-        backend.Linear(up, ln2, W($"{p}.ffn_down.weight"), W($"{p}.ffn_down.bias"));
+        backend.Linear(up, ln2, W($"{upKey}.weight"), W($"{upKey}.bias"));
         ln2.Dispose();
         Tensor act = new(new TensorShape(1, seqLen, Intermediate), DType.F32);
         if (UseQuickGelu) QuickGelu(backend, act, up); else backend.Gelu(act, up);
         up.Dispose();
         Tensor down = new(flat, DType.F32);
-        backend.Linear(down, act, W($"{p}.ffn_up.weight"), W($"{p}.ffn_up.bias"));
+        backend.Linear(down, act, W($"{downKey}.weight"), W($"{downKey}.bias"));
         act.Dispose();
+        ApplyLayerScale(backend, down, $"{p}.ls2.weight");   // InternViT: per-channel LayerScale before the residual
 
         Tensor result = new(flat, DType.F32);
         backend.Add(result, afterAttn, down);
         afterAttn.Dispose(); down.Dispose();
         return result;
+    }
+
+    /// <summary>InternViT LayerScale: scales the sublayer output by a learned per-channel vector (<c>ls1</c>/<c>ls2</c>,
+    /// shape <c>[hidden]</c>) before the residual add. No-op when the tensor is absent (SigLIP/CLIP/LLaVA).</summary>
+    private void ApplyLayerScale(IBackend backend, Tensor x, string lsKey)
+    {
+        Tensor? ls = Wopt(lsKey);
+        if (ls is null) return;
+        using Tensor scale = ls.Reshape(new TensorShape(1, Hidden));   // [hidden] → [1, hidden] for last-dim broadcast
+        backend.AffineBroadcastLastDim(x, x, scale, null);
     }
 
     /// <summary>Quick-GELU (CLIP): <c>x · sigmoid(1.702 x)</c>, composed from Scale + Sigmoid + Mul.</summary>
@@ -381,6 +413,47 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         Tensor img = new(new TensorShape(1, nTok, ProjectionDim), DType.F32);
         backend.Linear(img, folded, W("mm.model.fc.weight"), null);
         folded.Dispose();
+        return img;
+    }
+
+    /// <summary>InternVL projector: drop the CLS token, pixel-shuffle the patch grid (fold s×s neighbours into the
+    /// channel dim — same mapping as Idefics3, reducing tokens by s²) → LayerNorm (<c>mm.model.mlp.0</c>) →
+    /// Linear (<c>mm.model.mlp.1</c>) → GELU → Linear (<c>mm.model.mlp.3</c>) into the text hidden size.</summary>
+    private Tensor ProjectInternVL(IBackend backend, Tensor h, int cls)
+    {
+        int hidden = Hidden, grid = PatchGrid, s = ScaleFactor, outGrid = grid / s, nTok = outGrid * outGrid, shuf = hidden * s * s;
+
+        // Pixel-shuffle host-side over the patch tokens (skipping the leading CLS row). Identical fold to Idefics3:
+        // out[oh*outGrid+ow][(sh*s+sb)*hidden + e] = patch[(s*oh+sh)*grid + (s*ow+sb)][e].
+        Tensor folded = new(new TensorShape(1, nTok, shuf), DType.F32);
+        float* src = (float*)h.DataPointer;   // [1, seqLen, hidden] (D2H sync on CUDA); patches start at row `cls`
+        float* dst = (float*)folded.DataPointer;
+        for (int oh = 0; oh < outGrid; oh++)
+            for (int ow = 0; ow < outGrid; ow++)
+            {
+                long outBase = ((long)oh * outGrid + ow) * shuf;
+                for (int sh = 0; sh < s; sh++)
+                    for (int sb = 0; sb < s; sb++)
+                    {
+                        long inPatch = (long)(s * oh + sh) * grid + (s * ow + sb);
+                        long inBase = (cls + inPatch) * hidden;
+                        long off = outBase + (long)(sh * s + sb) * hidden;
+                        for (int e = 0; e < hidden; e++) dst[off + e] = src[inBase + e];
+                    }
+            }
+
+        Tensor normed = new(new TensorShape(1, nTok, shuf), DType.F32);
+        backend.LayerNorm(normed, folded, W("mm.model.mlp.0.weight"), W("mm.model.mlp.0.bias"), 1e-5f);
+        folded.Dispose();
+        Tensor h1 = new(new TensorShape(1, nTok, ProjectionDim), DType.F32);
+        backend.Linear(h1, normed, W("mm.model.mlp.1.weight"), Wopt("mm.model.mlp.1.bias"));
+        normed.Dispose();
+        Tensor act = new(new TensorShape(1, nTok, ProjectionDim), DType.F32);
+        backend.Gelu(act, h1);
+        h1.Dispose();
+        Tensor img = new(new TensorShape(1, nTok, ProjectionDim), DType.F32);
+        backend.Linear(img, act, W("mm.model.mlp.3.weight"), Wopt("mm.model.mlp.3.bias"));
+        act.Dispose();
         return img;
     }
 

@@ -48,5 +48,33 @@ public static class GridSampler
         }
     }
 
+    /// <summary>Samples one feature plane <c>[channels, h, w]</c> like PyTorch
+    /// <c>F.grid_sample(align_corners=False, padding_mode="zeros", mode="bilinear")</c>: grid coords
+    /// <paramref name="gx"/>,<paramref name="gy"/> are in [−1,1] (gx→width, gy→height); samples outside the
+    /// plane contribute 0. This is the convention triplane NeRF renderers use (not the [0,1]+clamp
+    /// <see cref="BilinearPlane"/>).</summary>
+    public static void GridSamplePlane(ReadOnlySpan<float> plane, int channels, int h, int w, float gx, float gy, Span<float> dst)
+    {
+        // align_corners=False: pixel = ((coord+1)*size - 1) / 2
+        float fx = ((gx + 1f) * w - 1f) * 0.5f;
+        float fy = ((gy + 1f) * h - 1f) * 0.5f;
+        int x0 = (int)MathF.Floor(fx), y0 = (int)MathF.Floor(fy);
+        int x1 = x0 + 1, y1 = y0 + 1;
+        float tx = fx - x0, ty = fy - y0;
+        float w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty), w01 = (1 - tx) * ty, w11 = tx * ty;
+        bool x0ok = x0 >= 0 && x0 < w, x1ok = x1 >= 0 && x1 < w, y0ok = y0 >= 0 && y0 < h, y1ok = y1 >= 0 && y1 < h;
+        int plane2d = h * w;
+        for (int c = 0; c < channels; c++)
+        {
+            int b = c * plane2d;
+            float acc = 0f;
+            if (y0ok && x0ok) acc += w00 * plane[b + y0 * w + x0];
+            if (y0ok && x1ok) acc += w10 * plane[b + y0 * w + x1];
+            if (y1ok && x0ok) acc += w01 * plane[b + y1 * w + x0];
+            if (y1ok && x1ok) acc += w11 * plane[b + y1 * w + x1];
+            dst[c] = acc;
+        }
+    }
+
     private static int Lin(int x, int y, int z, int resX, int resY) => x + resX * (y + resY * z);
 }

@@ -60,8 +60,14 @@ extern "C" __global__ void lm_flash_attn_f32(
             __syncthreads();
         }
         float score = sdata[0] * scale;
-        // ALiBi: per-head linear distance penalty slope·(k_pos − q_pos) (≤ 0 under causality). No RoPE on these models.
-        if (alibiSlopes != nullptr) score += alibiSlopes[h] * (float)(k - (int)(qOffset + r));
+        // ALiBi: per-head distance penalty. Causal decoders (BLOOM/MPT) use the linear slope·(k_pos − q_pos) (≤ 0
+        // since k ≤ q). Bidirectional encoders (jina-bert-v2) use the SYMMETRIC form −slope·|k_pos − q_pos| (both
+        // directions penalized; reduces to the causal form when k ≤ q). Selected by !causal. No RoPE on these models.
+        if (alibiSlopes != nullptr)
+        {
+            int rel = k - (int)(qOffset + r);
+            score += alibiSlopes[h] * (causal ? (float)rel : -(float)(rel < 0 ? -rel : rel));
+        }
         // Gemma-2 attention-logit soft-cap: cap·tanh(score/cap), applied to each logit before the softmax.
         if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 

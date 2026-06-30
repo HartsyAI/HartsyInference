@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelHandler.Gguf;
 
 namespace HartsyInference.LLM.Embeddings;
@@ -31,25 +32,53 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
     public int PoolingType { get; }
     public bool UseRope { get; }       // nomic-bert: rotary position (no absolute table)
     public float RopeBase { get; }
-    public bool UseGeGlu { get; }      // nomic-bert: gated GELU MLP
+    public bool UseGeGlu { get; }      // gated MLP (nomic = SwiGLU/SiLU gate; jina-bert-v2 = GEGLU/GELU gate)
+    public bool GateIsGelu { get; }    // jina-bert-v2: the gate activation is GELU (GEGLU), not SiLU (SwiGLU)
+    public bool UseAlibi { get; }      // jina-bert-v2: symmetric ALiBi bias, no position table, no RoPE
+    private readonly Tensor? _alibiSlopes;
+    public bool PreNormRms { get; }    // neo-bert: pre-norm RMSNorm blocks + a single final RMSNorm (no per-sublayer post-LN, no token-type/embedding norm)
+    public int MoeEveryN { get; }      // nomic-bert-moe: every Nth block replaces the dense FFN with a routed MoE FFN (0 = dense everywhere)
+    public int NumExperts { get; }
+    public int ExpertsUsed { get; }
+    private bool IsMoeLayer(int i) => MoeEveryN > 0 && (i % MoeEveryN) == (MoeEveryN - 1);
     public string[]? Vocab { get; }
     /// <summary>True if this GGUF carries a reranker classification head (<c>cls.*</c>) — call <see cref="Score"/>.</summary>
     public bool HasRerankHead { get; }
 
     private BertEmbeddingModel(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w,
         int hidden, int layers, int heads, int inter, int maxPos, float eps, int pooling, string[]? vocab,
-        bool useRope, float ropeBase, bool useGeGlu, bool hasRerankHead)
+        bool useRope, float ropeBase, bool useGeGlu, bool hasRerankHead, bool gateIsGelu, bool useAlibi, Tensor? alibiSlopes,
+        bool preNormRms, int moeEveryN, int numExperts, int expertsUsed)
     {
         _handle = handle; _w = w;
         Hidden = hidden; NumLayers = layers; NumHeads = heads; HeadDim = hidden / heads; Intermediate = inter;
         MaxPos = maxPos; Eps = eps <= 0f ? 1e-12f : eps; PoolingType = pooling; Vocab = vocab;
         UseRope = useRope; RopeBase = ropeBase; UseGeGlu = useGeGlu; HasRerankHead = hasRerankHead;
+        GateIsGelu = gateIsGelu; UseAlibi = useAlibi; _alibiSlopes = alibiSlopes; PreNormRms = preNormRms;
+        MoeEveryN = moeEveryN; NumExperts = numExperts; ExpertsUsed = expertsUsed;
     }
 
     private static Tensor Relabel(Tensor t)
     {
         Tensor outp = new(new TensorShape((int)t.Shape[1], (int)t.Shape[0]), DType.F32);
         Buffer.MemoryCopy((void*)t.DataPointer, (void*)outp.DataPointer, outp.ElementCount * 4, t.ElementCount * 4);
+        return outp;
+    }
+
+    /// <summary>Copies <paramref name="rows"/> rows from <paramref name="src"/> (starting at <paramref name="srcR0"/>)
+    /// into <paramref name="dst"/> (starting at <paramref name="dstR0"/>); both are row-major <c>[·, inDim]</c>. Used
+    /// to de-interleave neo-bert's per-head fused QKV into contiguous q/k/v.</summary>
+    private static void CopyRows(Tensor src, int srcR0, Tensor dst, int dstR0, int rows, int inDim)
+    {
+        Buffer.MemoryCopy((byte*)src.DataPointer + (long)srcR0 * inDim * 4, (byte*)dst.DataPointer + (long)dstR0 * inDim * 4,
+            (long)rows * inDim * 4, (long)rows * inDim * 4);
+    }
+
+    /// <summary>Owned copy of <paramref name="count"/> elements of a 1-D tensor starting at <paramref name="start"/>.</summary>
+    private static Tensor SliceVec1d(Tensor t, int start, int count)
+    {
+        Tensor outp = new(new TensorShape(count), DType.F32);
+        Buffer.MemoryCopy((byte*)t.DataPointer + (long)start * 4, (void*)outp.DataPointer, (long)count * 4, (long)count * 4);
         return outp;
     }
 
@@ -83,21 +112,81 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
             int heads = (int)m.GetUInt32($"{arch}.attention.head_count");
             int inter = (int)m.GetUInt32($"{arch}.feed_forward_length");
             int maxPos = (int)m.GetUInt32($"{arch}.context_length", 512u);
-            float eps = m.GetFloat32($"{arch}.attention.layer_norm_epsilon", 1e-12f);
+            // neo-bert: pre-norm RMSNorm encoder (RoPE, fused QKV, SwiGLU, final-norm only) — uses rms_epsilon.
+            bool isNeoBert = arch == "neo-bert";
+            float eps = isNeoBert
+                ? m.GetFloat32($"{arch}.attention.layer_norm_rms_epsilon", 1e-6f)
+                : m.GetFloat32($"{arch}.attention.layer_norm_epsilon", 1e-12f);
             int pooling = (int)m.GetUInt32($"{arch}.pooling_type", 2u);
             float ropeBase = m.GetFloat32($"{arch}.rope.freq_base", 0f);
             bool useRope = !w.ContainsKey("position_embd.weight") && ropeBase > 0f;
             bool useGeGlu = w.ContainsKey("blk.0.ffn_gate.weight");
+            // jina-bert-v2: no position table, no RoPE — bidirectional symmetric ALiBi instead, and its gated MLP is
+            // GEGLU (GELU gate), not nomic-bert's SwiGLU (SiLU gate). ALiBi max bias is hardcoded 8 in llama.cpp.
+            bool isJina = arch == "jina-bert-v2";
+            bool useAlibi = isJina;
+            bool gateIsGelu = isJina;
+            // neo-bert: SwiGLU stored as a single fused ffn_up of width 2·ffn (gate | up). Split it into the
+            // gate/up halves the gated MLP path expects (SiLU gate). Mirrors the fused-QKV split below.
+            if (isNeoBert)
+            {
+                for (int i = 0; i < layers; i++)
+                {
+                    string upKey = $"blk.{i}.ffn_up.weight";
+                    if (!w.ContainsKey(upKey)) continue;
+                    Tensor fu = w[upKey];   // already relabeled to [2·ffn, hidden]
+                    ((Dictionary<string, Tensor>)w)[$"blk.{i}.ffn_gate.weight"] = SliceRows(fu, 0, inter);
+                    ((Dictionary<string, Tensor>)w)[upKey] = SliceRows(fu, inter, inter);
+                }
+                useGeGlu = true;   // gated (SiLU) MLP after the split
+            }
+            Tensor? alibiSlopes = null;
+            if (useAlibi)
+            {
+                float[] slopes = TransformerConfig.ComputeAlibiSlopes(heads, m.GetFloat32($"{arch}.attention.max_alibi_bias", 8f));
+                alibiSlopes = new Tensor(new TensorShape(heads), DType.F32);
+                fixed (float* sp = slopes) Buffer.MemoryCopy(sp, (void*)alibiSlopes.DataPointer, (long)heads * 4, (long)heads * 4);
+            }
 
-            // Fused QKV (nomic) → split the relabeled [3*hidden, hidden] into separate q/k/v weights (order q,k,v).
+            // Fused QKV → separate q/k/v. Two different output layouts:
+            //   nomic  → [all_q | all_k | all_v] contiguous (order q,k,v).
+            //   neo-bert → PER-HEAD interleaved [h0:(q|k|v) | h1:(q|k|v) | …] (its qkv reshapes to
+            //              [heads, 3·dim_head] then chunks 3) — de-interleave by gathering each head's q/k/v slice.
+            int dh = hidden / heads;
             for (int i = 0; i < layers; i++)
             {
                 string qkv = $"blk.{i}.attn_qkv.weight";
                 if (!w.ContainsKey(qkv)) continue;
                 Tensor f = w[qkv];
-                ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_q.weight"] = SliceRows(f, 0, hidden);
-                ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_k.weight"] = SliceRows(f, hidden, hidden);
-                ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_v.weight"] = SliceRows(f, 2 * hidden, hidden);
+                if (isNeoBert)
+                {
+                    Tensor q = new(new TensorShape(hidden, hidden), DType.F32);
+                    Tensor k = new(new TensorShape(hidden, hidden), DType.F32);
+                    Tensor v = new(new TensorShape(hidden, hidden), DType.F32);
+                    for (int hh = 0; hh < heads; hh++)
+                    {
+                        CopyRows(f, hh * 3 * dh + 0 * dh, q, hh * dh, dh, hidden);
+                        CopyRows(f, hh * 3 * dh + 1 * dh, k, hh * dh, dh, hidden);
+                        CopyRows(f, hh * 3 * dh + 2 * dh, v, hh * dh, dh, hidden);
+                    }
+                    ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_q.weight"] = q;
+                    ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_k.weight"] = k;
+                    ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_v.weight"] = v;
+                }
+                else
+                {
+                    ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_q.weight"] = SliceRows(f, 0, hidden);
+                    ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_k.weight"] = SliceRows(f, hidden, hidden);
+                    ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_v.weight"] = SliceRows(f, 2 * hidden, hidden);
+                    string qkvB = $"blk.{i}.attn_qkv.bias";   // nomic-bert-moe: fused QKV bias → split alongside (order q,k,v)
+                    if (w.ContainsKey(qkvB))
+                    {
+                        Tensor fb = w[qkvB];
+                        ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_q.bias"] = SliceVec1d(fb, 0, hidden);
+                        ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_k.bias"] = SliceVec1d(fb, hidden, hidden);
+                        ((Dictionary<string, Tensor>)w)[$"blk.{i}.attn_v.bias"] = SliceVec1d(fb, 2 * hidden, hidden);
+                    }
+                }
             }
 
             // Reranker out_proj (hidden→1) is stored as a rank-1 [hidden] vector → reshape to [1, hidden] for Linear.
@@ -108,9 +197,32 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
                 Buffer.MemoryCopy((void*)o.DataPointer, (void*)r.DataPointer, o.ElementCount * 4, o.ElementCount * 4);
                 ((Dictionary<string, Tensor>)w)["cls.output.weight"] = r;
             }
+            // nomic-bert-moe: every Nth block is a routed MoE FFN (router ffn_gate_inp → top-k of expert_count
+            // non-gated GELU experts). The stacked expert tensors are expert-major ([E, out, in] in memory), so each
+            // expert's [out, in] Linear weight is a contiguous byte-range; the router weight relabels [in,E]→[E,in].
+            int moeEveryN = (int)m.GetUInt32($"{arch}.moe_every_n_layers", 0u);
+            int numExperts = (int)m.GetUInt32($"{arch}.expert_count", 0u);
+            int expertsUsed = (int)m.GetUInt32($"{arch}.expert_used_count", 2u);
+            if (moeEveryN > 0 && numExperts > 0)
+            {
+                // Note: ffn_gate_inp (rank-2 router) is already relabeled [in,E]→[E,in] by the relabel loop above;
+                // the rank-3 *_exps tensors are skipped there (Rank != 2) and split per-expert here.
+                for (int i = 0; i < layers; i++)
+                {
+                    string upx = $"blk.{i}.ffn_up_exps.weight", dnx = $"blk.{i}.ffn_down_exps.weight";
+                    if (!w.ContainsKey(upx)) continue;
+                    Tensor up = w[upx].Reshape(new TensorShape(numExperts * inter, hidden));    // [E·ff, hidden] = per-expert [ff,hidden]
+                    Tensor dn = w[dnx].Reshape(new TensorShape(numExperts * hidden, inter));    // [E·hidden, ff] = per-expert [hidden,ff]
+                    for (int e = 0; e < numExperts; e++)
+                    {
+                        ((Dictionary<string, Tensor>)w)[$"blk.{i}.ffn_up.{e}.weight"] = SliceRows(up, e * inter, inter);
+                        ((Dictionary<string, Tensor>)w)[$"blk.{i}.ffn_down.{e}.weight"] = SliceRows(dn, e * hidden, hidden);
+                    }
+                }
+            }
             string[]? vocab = m.GetStringArray("tokenizer.ggml.tokens");
             bool hasRerankHead = w.ContainsKey("cls.weight") && w.ContainsKey("cls.output.weight");
-            return new BertEmbeddingModel(handle, w, hidden, layers, heads, inter, maxPos, eps, pooling, vocab, useRope, ropeBase, useGeGlu, hasRerankHead);
+            return new BertEmbeddingModel(handle, w, hidden, layers, heads, inter, maxPos, eps, pooling, vocab, useRope, ropeBase, useGeGlu, hasRerankHead, gateIsGelu, useAlibi, alibiSlopes, isNeoBert, moeEveryN, numExperts, expertsUsed);
         }
         catch { handle.Dispose(); throw; }
     }
@@ -170,32 +282,167 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         int seq = ids.Count, hidden = Hidden;
         TensorShape flat = new(1, seq, hidden);
 
-        // 1. Embeddings: token + (absolute position, unless rotary) + token-type(segment 0), then LayerNorm.
+        // 1. Embeddings: token + (absolute position, unless rotary/ALiBi) + token-type(segment 0). BERT-family then
+        //    applies the embedding LayerNorm; neo-bert has neither token-type nor embedding norm (its first block's
+        //    pre-norm handles it).
         Tensor emb = new(flat, DType.F32);
         float* e = (float*)emb.DataPointer;
         float* tok = (float*)W("token_embd.weight").DataPointer;       // [vocab, hidden]
-        float* pos = UseRope ? null : (float*)W("position_embd.weight").DataPointer;
-        float* typ = (float*)W("token_types.weight").DataPointer;      // [2, hidden]
+        float* pos = (UseRope || UseAlibi) ? null : (float*)W("position_embd.weight").DataPointer;
+        Tensor? typT = Wopt("token_types.weight");   // [2, hidden]; absent on neo-bert
+        float* typ = typT is null ? null : (float*)typT.DataPointer;
         for (int s = 0; s < seq; s++)
         {
             float* dst = e + (long)s * hidden;
             float* tsrc = tok + (long)ids[s] * hidden;
             float* psrc = pos is null ? null : pos + (long)s * hidden;
-            for (int c = 0; c < hidden; c++) dst[c] = tsrc[c] + (psrc is null ? 0f : psrc[c]) + typ[c];
+            for (int c = 0; c < hidden; c++) dst[c] = tsrc[c] + (psrc is null ? 0f : psrc[c]) + (typ is null ? 0f : typ[c]);
         }
-        Tensor normed = new(flat, DType.F32);
-        backend.LayerNorm(normed, emb, W("token_embd_norm.weight"), W("token_embd_norm.bias"), Eps);
-        emb.Dispose();
+        Tensor normed;
+        if (PreNormRms) { normed = emb; }   // neo-bert: no embedding norm; pre-norm blocks normalize internally
+        else
+        {
+            normed = new(flat, DType.F32);
+            backend.LayerNorm(normed, emb, W("token_embd_norm.weight"), W("token_embd_norm.bias"), Eps);
+            emb.Dispose();
+        }
 
         (float[]? cos, float[]? sin) = UseRope ? BuildRope(seq) : (null, null);
 
         Tensor h = normed;
         for (int i = 0; i < NumLayers; i++)
         {
-            Tensor next = Block(backend, h, i, seq, cos, sin);
+            Tensor next = PreNormRms ? NeoBlock(backend, h, i, seq, cos, sin) : Block(backend, h, i, seq, cos, sin);
             h.Dispose(); h = next;
         }
+        if (PreNormRms)   // neo-bert: a single final RMSNorm over the encoder output
+        {
+            Tensor fin = new(flat, DType.F32);
+            backend.RmsNorm(fin, h, W("enc.output_norm.weight"), Eps);
+            h.Dispose(); h = fin;
+        }
         return h;
+    }
+
+    /// <summary>nomic-bert-moe routed FFN: a softmax router (<c>ffn_gate_inp</c>) selects the top-K of
+    /// <see cref="NumExperts"/> non-gated GELU experts per token; the selected experts' renormalized weights blend
+    /// their <c>down(gelu(up(x)))</c> outputs. Returns <c>[1, seq, hidden]</c>.</summary>
+    private Tensor MoeFfn(IBackend backend, Tensor normed1, int i, int seq)
+    {
+        int hidden = Hidden, inter = Intermediate, E = NumExperts, K = ExpertsUsed;
+        string p = $"blk.{i}";
+        TensorShape flat = new(1, seq, hidden);
+
+        Tensor logits = new(new TensorShape(1, seq, E), DType.F32);
+        backend.Linear(logits, normed1, W($"{p}.ffn_gate_inp.weight"), null);
+        backend.Sync();
+        float* lp = (float*)logits.DataPointer;
+        // Per-token softmax over all experts → top-K → renormalize the kept weights to sum 1.
+        float[] wts = new float[seq * E];
+        for (int s = 0; s < seq; s++)
+        {
+            float mx = float.NegativeInfinity;
+            for (int e = 0; e < E; e++) mx = MathF.Max(mx, lp[s * E + e]);
+            float sum = 0; float[] sm = new float[E];
+            for (int e = 0; e < E; e++) { sm[e] = MathF.Exp(lp[s * E + e] - mx); sum += sm[e]; }
+            for (int e = 0; e < E; e++) sm[e] /= sum;
+            // nomic-bert-moe uses the RAW softmax weights for the top-k (llama.cpp build_moe_ffn norm_w=false) —
+            // the kept weights are NOT renormalized to sum 1.
+            int[] top = Enumerable.Range(0, E).OrderByDescending(e => sm[e]).Take(K).ToArray();
+            foreach (int e in top) wts[s * E + e] = sm[e];
+        }
+        logits.Dispose();
+
+        float[] acc = new float[seq * hidden];
+        for (int e = 0; e < E; e++)
+        {
+            bool any = false; for (int s = 0; s < seq; s++) if (wts[s * E + e] != 0f) { any = true; break; }
+            if (!any) continue;
+            Tensor up = new(new TensorShape(1, seq, inter), DType.F32);
+            backend.Linear(up, normed1, W($"{p}.ffn_up.{e}.weight"), null);
+            backend.Gelu(up, up);
+            Tensor de = new(flat, DType.F32);
+            backend.Linear(de, up, W($"{p}.ffn_down.{e}.weight"), null);
+            backend.Sync();
+            float* dp = (float*)de.DataPointer;
+            for (int s = 0; s < seq; s++)
+            {
+                float wv = wts[s * E + e]; if (wv == 0f) continue;
+                for (int c = 0; c < hidden; c++) acc[s * hidden + c] += wv * dp[s * hidden + c];
+            }
+            up.Dispose(); de.Dispose();
+        }
+        Tensor outp = new(flat, DType.F32);
+        float* op = (float*)outp.DataPointer;
+        for (int x = 0; x < seq * hidden; x++) op[x] = acc[x];
+        return outp;
+    }
+
+    /// <summary>One neo-bert pre-norm block: RMSNorm → RoPE self-attn (bidirectional) → +res → RMSNorm → SwiGLU
+    /// FFN → +res. No biases anywhere; the fused QKV and SwiGLU gate/up are split at load.</summary>
+    private Tensor NeoBlock(IBackend backend, Tensor x, int i, int seq, float[]? cos, float[]? sin)
+    {
+        int hidden = Hidden, heads = NumHeads, hd = HeadDim;
+        string p = $"blk.{i}";
+        TensorShape flat = new(1, seq, hidden);
+
+        Tensor n1 = new(flat, DType.F32);
+        backend.RmsNorm(n1, x, W($"{p}.attn_norm.weight"), Eps);
+
+        Tensor q = new(new TensorShape(1, seq, heads, hd), DType.F32);
+        Tensor k = new(new TensorShape(1, seq, heads, hd), DType.F32);
+        Tensor v = new(new TensorShape(1, seq, heads, hd), DType.F32);
+        backend.Linear(q, n1, W($"{p}.attn_q.weight"), null);
+        backend.Linear(k, n1, W($"{p}.attn_k.weight"), null);
+        backend.Linear(v, n1, W($"{p}.attn_v.weight"), null);
+        n1.Dispose();
+        if (UseRope)
+        {
+            // neo-bert uses the interleaved (complex view_as_complex) RoPE — pairs (2i, 2i+1) — not NeoX rotate-half.
+            backend.Sync();
+            ApplyRopeInterleaved(q, RopeBase, seq, heads, hd);
+            ApplyRopeInterleaved(k, RopeBase, seq, heads, hd);
+        }
+
+        Tensor qM = new(new TensorShape(1, heads, seq, hd), DType.F32);
+        Tensor kM = new(new TensorShape(1, heads, seq, hd), DType.F32);
+        Tensor vM = new(new TensorShape(1, heads, seq, hd), DType.F32);
+        backend.Permute0213(qM, q, seq, heads, hd);
+        backend.Permute0213(kM, k, seq, heads, hd);
+        backend.Permute0213(vM, v, seq, heads, hd);
+        q.Dispose(); k.Dispose(); v.Dispose();
+        Tensor attn = new(new TensorShape(1, heads, seq, hd), DType.F32);
+        backend.FlashAttention(attn, qM, kM, vM, seq, 1, causal: false, qOffset: 0, 1f / MathF.Sqrt(hd));
+        qM.Dispose(); kM.Dispose(); vM.Dispose();
+        Tensor attnFlat = new(flat, DType.F32);
+        backend.Permute0213(attnFlat, attn, heads, seq, hd);
+        attn.Dispose();
+        Tensor attnOut = new(flat, DType.F32);
+        backend.Linear(attnOut, attnFlat, W($"{p}.attn_output.weight"), null);
+        attnFlat.Dispose();
+
+        Tensor afterAttn = new(flat, DType.F32);
+        backend.Add(afterAttn, x, attnOut);
+        attnOut.Dispose();
+
+        Tensor n2 = new(flat, DType.F32);
+        backend.RmsNorm(n2, afterAttn, W($"{p}.ffn_norm.weight"), Eps);
+        Tensor act = new(new TensorShape(1, seq, Intermediate), DType.F32);
+        Tensor up = new(new TensorShape(1, seq, Intermediate), DType.F32);
+        Tensor gate = new(new TensorShape(1, seq, Intermediate), DType.F32);
+        backend.Linear(up, n2, W($"{p}.ffn_up.weight"), null);
+        backend.Linear(gate, n2, W($"{p}.ffn_gate.weight"), null);
+        n2.Dispose();
+        backend.Silu(gate, gate);
+        backend.Mul(act, gate, up);
+        gate.Dispose(); up.Dispose();
+        Tensor down = new(flat, DType.F32);
+        backend.Linear(down, act, W($"{p}.ffn_down.weight"), null);
+        act.Dispose();
+        Tensor result = new(flat, DType.F32);
+        backend.Add(result, afterAttn, down);
+        afterAttn.Dispose(); down.Dispose();
+        return result;
     }
 
     /// <summary>One post-norm block: (optionally rotary) bidirectional self-attention → +res → LayerNorm →
@@ -227,7 +474,8 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         backend.Permute0213(vM, v, seq, heads, hd);
         q.Dispose(); k.Dispose(); v.Dispose();
         Tensor attn = new(new TensorShape(1, heads, seq, hd), DType.F32);
-        backend.FlashAttention(attn, qM, kM, vM, seq, 1, causal: false, qOffset: 0, 1f / MathF.Sqrt(hd));
+        backend.FlashAttention(attn, qM, kM, vM, seq, 1, causal: false, qOffset: 0, 1f / MathF.Sqrt(hd),
+            softcap: 0f, sink: null, slidingWindow: 0, alibiSlopes: _alibiSlopes);
         qM.Dispose(); kM.Dispose(); vM.Dispose();
         Tensor attnFlat = new(flat, DType.F32);
         backend.Permute0213(attnFlat, attn, heads, seq, hd);
@@ -243,24 +491,29 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
         backend.LayerNorm(normed1, afterAttn, W($"{p}.attn_output_norm.weight"), W($"{p}.attn_output_norm.bias"), Eps);
         afterAttn.Dispose();
 
-        // FFN: GeGLU (down(gelu(gate)·up)) for nomic, else plain GELU (down(gelu(up))).
-        Tensor act = new(new TensorShape(1, seq, Intermediate), DType.F32);
-        Tensor up = new(new TensorShape(1, seq, Intermediate), DType.F32);
-        backend.Linear(up, normed1, W($"{p}.ffn_up.weight"), Wopt($"{p}.ffn_up.bias"));
-        if (UseGeGlu)
+        // FFN: routed MoE on MoE layers (nomic-bert-moe), else dense — GeGLU (down(act(gate)·up)) or plain GELU.
+        Tensor down;
+        if (IsMoeLayer(i)) down = MoeFfn(backend, normed1, i, seq);
+        else
         {
-            // nomic-bert's gated MLP is SwiGLU (SiLU gate), per its "swiglu" activation config.
-            Tensor gate = new(new TensorShape(1, seq, Intermediate), DType.F32);
-            backend.Linear(gate, normed1, W($"{p}.ffn_gate.weight"), Wopt($"{p}.ffn_gate.bias"));
-            backend.Silu(gate, gate);
-            backend.Mul(act, gate, up);
-            gate.Dispose();
+            Tensor act = new(new TensorShape(1, seq, Intermediate), DType.F32);
+            Tensor up = new(new TensorShape(1, seq, Intermediate), DType.F32);
+            backend.Linear(up, normed1, W($"{p}.ffn_up.weight"), Wopt($"{p}.ffn_up.bias"));
+            if (UseGeGlu)
+            {
+                // Gated MLP: nomic-bert = SwiGLU (SiLU gate); jina-bert-v2 = GEGLU (GELU gate). down(act(gate)·up).
+                Tensor gate = new(new TensorShape(1, seq, Intermediate), DType.F32);
+                backend.Linear(gate, normed1, W($"{p}.ffn_gate.weight"), Wopt($"{p}.ffn_gate.bias"));
+                if (GateIsGelu) backend.Gelu(gate, gate); else backend.Silu(gate, gate);
+                backend.Mul(act, gate, up);
+                gate.Dispose();
+            }
+            else backend.Gelu(act, up);
+            up.Dispose();
+            down = new(flat, DType.F32);
+            backend.Linear(down, act, W($"{p}.ffn_down.weight"), Wopt($"{p}.ffn_down.bias"));
+            act.Dispose();
         }
-        else backend.Gelu(act, up);
-        up.Dispose();
-        Tensor down = new(flat, DType.F32);
-        backend.Linear(down, act, W($"{p}.ffn_down.weight"), Wopt($"{p}.ffn_down.bias"));
-        act.Dispose();
         Tensor afterFfn = new(flat, DType.F32);
         backend.Add(afterFfn, normed1, down);
         normed1.Dispose(); down.Dispose();
@@ -284,6 +537,28 @@ public sealed unsafe class BertEmbeddingModel : IDisposable
                 sin[p * hd + i] = s; sin[p * hd + i + half] = s;
             }
         return (cos, sin);
+    }
+
+    /// <summary>Interleaved (GPT-J / complex) RoPE: rotates each adjacent pair (2i, 2i+1) by pos·θ_i where
+    /// θ_i = base^(−2i/hd). Matches NeoBERT's <c>view_as_complex(x.reshape(...,-1,2))</c> rotary (distinct from the
+    /// NeoX rotate-half in <see cref="ApplyRope"/>).</summary>
+    private static void ApplyRopeInterleaved(Tensor t, float ropeBase, int seq, int heads, int hd)
+    {
+        float* pp = (float*)t.DataPointer;   // [1, seq, heads, hd]
+        int half = hd / 2;
+        for (int s = 0; s < seq; s++)
+            for (int h = 0; h < heads; h++)
+            {
+                float* row = pp + ((long)s * heads + h) * hd;
+                for (int i = 0; i < half; i++)
+                {
+                    float ang = s / MathF.Pow(ropeBase, (2f * i) / hd);
+                    float c = MathF.Cos(ang), sn = MathF.Sin(ang);
+                    float x0 = row[2 * i], x1 = row[2 * i + 1];
+                    row[2 * i] = x0 * c - x1 * sn;
+                    row[2 * i + 1] = x0 * sn + x1 * c;
+                }
+            }
     }
 
     private static void ApplyRope(Tensor t, float[] cos, float[] sin, int seq, int heads, int hd)

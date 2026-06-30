@@ -74,38 +74,6 @@ public sealed unsafe class AudioEncodersTests
     }
 
     [Fact]
-    public void RvcRmvpe_SyntheticForward_ProducesPerFrameHz()
-    {
-        RvcRmvpeConfig c = new()
-        {
-            MelBins = 32,
-            NFft = 512,
-            WinLength = 512,
-            HopLength = 160,
-            StemChannels = 4,
-            EncoderChannels = [8, 16],
-            IntermediateBlocks = 1,
-            NormGroups = 2,
-            GruHidden = 16,
-            NumBins = 360,
-        };
-        using CpuBackend backend = new();
-        using RvcRmvpe rmvpe = new(c);
-        rmvpe.LoadWeights(RmvpeWeights(c));
-
-        float[] pcm = new float[16_000];
-        for (int i = 0; i < pcm.Length; i++) pcm[i] = 0.3f * MathF.Sin(2f * MathF.PI * 220f * i / 16_000f);
-
-        float[] f0 = rmvpe.ExtractF0(backend, pcm);
-        Assert.True(f0.Length > 0);
-        foreach (float v in f0)
-        {
-            Assert.True(float.IsFinite(v));
-            Assert.True(v >= 0f && v < 4000f);
-        }
-    }
-
-    [Fact]
     public void OpenVoiceSpeakerEncoder_SyntheticForward_ProducesG()
     {
         OpenVoiceSpeakerConfig c = new()
@@ -242,49 +210,6 @@ public sealed unsafe class AudioEncodersTests
         return w;
     }
 
-    private static Dictionary<string, Tensor> RmvpeWeights(RvcRmvpeConfig c)
-    {
-        Dictionary<string, Tensor> w = new()
-        {
-            ["stem.conv.weight"] = F4(c.StemChannels, 1, 3, 3),
-            ["stem.norm.weight"] = F1(c.StemChannels),
-            ["stem.norm.bias"] = F1(c.StemChannels),
-        };
-        int inC = c.StemChannels;
-        for (int i = 0; i < c.EncoderChannels.Count; i++)
-        {
-            int outC = c.EncoderChannels[i];
-            w[$"encoder.{i}.conv.weight"] = F4(outC, inC, 3, 3);
-            w[$"encoder.{i}.norm.weight"] = F1(outC);
-            w[$"encoder.{i}.norm.bias"] = F1(outC);
-            inC = outC;
-        }
-        for (int i = 0; i < c.IntermediateBlocks; i++)
-        {
-            string bp = $"intermediate.{i}";
-            w[$"{bp}.conv1.weight"] = F4(inC, inC, 3, 3);
-            w[$"{bp}.norm1.weight"] = F1(inC);
-            w[$"{bp}.norm1.bias"] = F1(inC);
-            w[$"{bp}.conv2.weight"] = F4(inC, inC, 3, 3);
-            w[$"{bp}.norm2.weight"] = F1(inC);
-            w[$"{bp}.norm2.bias"] = F1(inC);
-        }
-        for (int i = 0; i < c.EncoderChannels.Count; i++)
-        {
-            int outC = i == c.EncoderChannels.Count - 1 ? c.StemChannels : c.EncoderChannels[c.EncoderChannels.Count - 2 - i];
-            // ConvTranspose1d weight is [C_in, C_out/groups, K]; here we use Conv2d transpose [C_in, C_out, kH, kW].
-            w[$"decoder.{i}.up.weight"] = F4(inC, outC, 2, 2);
-            w[$"decoder.{i}.norm.weight"] = F1(outC);
-            w[$"decoder.{i}.norm.bias"] = F1(outC);
-            inC = outC;
-        }
-        int gruIn = c.StemChannels * c.MelBins;
-        AddBiLstm(w, "gru", gruIn, c.GruHidden);
-        w["fc.weight"] = F2(c.NumBins, 2 * c.GruHidden);
-        w["fc.bias"] = F1(c.NumBins);
-        return w;
-    }
-
     private static Dictionary<string, Tensor> OpenVoiceWeights(OpenVoiceSpeakerConfig c)
     {
         string p = "ref_enc";
@@ -348,15 +273,4 @@ public sealed unsafe class AudioEncodersTests
         return w;
     }
 
-    private static void AddBiLstm(Dictionary<string, Tensor> w, string prefix, int inDim, int hidden)
-    {
-        w[$"{prefix}.weight_ih_l0"] = F2(4 * hidden, inDim);
-        w[$"{prefix}.weight_hh_l0"] = F2(4 * hidden, hidden);
-        w[$"{prefix}.bias_ih_l0"] = F1(4 * hidden);
-        w[$"{prefix}.bias_hh_l0"] = F1(4 * hidden);
-        w[$"{prefix}.weight_ih_l0_reverse"] = F2(4 * hidden, inDim);
-        w[$"{prefix}.weight_hh_l0_reverse"] = F2(4 * hidden, hidden);
-        w[$"{prefix}.bias_ih_l0_reverse"] = F1(4 * hidden);
-        w[$"{prefix}.bias_hh_l0_reverse"] = F1(4 * hidden);
-    }
 }

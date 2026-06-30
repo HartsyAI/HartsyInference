@@ -188,7 +188,20 @@ public static class GgufConfigFactory
         if (expertCount > 0)
         {
             int expertUsed = (int)metadata.GetUInt32($"{arch}.expert_used_count", 2u);
+            // Routed-expert FFN width. Some GGUFs (e.g. older Qwen1.5-MoE imatrix quants) omit
+            // expert_feed_forward_length; the dense feed_forward_length (the shared-expert size) is then WRONG for
+            // the routed experts. The stacked expert tensor is authoritative: its ggml shape is [hidden, expert_ff,
+            // E], so derive expert_ff from dim 1 of any layer's up_exps/gate_exps when present.
             int expertFfn = (int)metadata.GetUInt32($"{arch}.expert_feed_forward_length", (uint)intermediate);
+            for (int li = 0; li < layers; li++)
+            {
+                if (weights.TryGetValue($"model.layers.{li}.mlp.up_exps.weight", out Tensor? upx)
+                    || weights.TryGetValue($"model.layers.{li}.mlp.gate_exps.weight", out upx))
+                {
+                    if (upx.Shape.Rank == 3) expertFfn = (int)upx.Shape[1];
+                    break;
+                }
+            }
             // Shared-expert size: explicit key, else (DeepSeek) expert_shared_count fused experts of expertFfn each.
             int sharedFfn = (int)metadata.GetUInt32($"{arch}.expert_shared_feed_forward_length", 0u);
             if (sharedFfn == 0)

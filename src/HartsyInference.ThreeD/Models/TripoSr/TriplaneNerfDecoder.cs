@@ -6,47 +6,50 @@ using HartsyInference.ThreeD.Models.Hunyuan3D;
 
 namespace HartsyInference.ThreeD.Models.TripoSr;
 
-/// <summary>NeRF MLP that decodes a <see cref="Triplane"/> into density + color at any 3D point: the point is
-/// projected onto the three planes, bilinearly sampled (<see cref="GridSampler.BilinearPlane"/>), the three
-/// feature vectors are concatenated, and an MLP maps them to <c>[density, r, g, b]</c> (rgb via sigmoid).
-/// Reused by any triplane/LRM model. Density over a grid → <see cref="ScalarField3D"/> for marching cubes.
-/// <para><b>Numerics validation-pending</b> — plane→axis mapping, density activation, and MLP depth are
-/// validation-gated. Structurally green on synthetic weights.</para></summary>
+/// <summary>TripoSR <c>NeRFMLP</c> + <c>TriplaneNeRFRenderer.query_triplane</c>: a 3D point in [−R,R]³ is
+/// scaled to [−1,1], projected onto the three planes (XY/XZ/YZ), grid-sampled
+/// (<see cref="GridSampler.GridSamplePlane"/>, align_corners=False, zeros pad), concatenated to 3·C features,
+/// and run through a SiLU MLP (<c>layers.0,2,…</c>) → density (1) + features (3). Density activation is
+/// <c>exp(density + DensityBias)</c>; color is <c>sigmoid(features)</c>.</summary>
 public sealed unsafe class TriplaneNerfDecoder
 {
     private readonly TripoSrConfig _cfg;
-    private Tensor? _inW, _inB;        // 3*C → hidden
-    private Tensor[]? _hiddenW, _hiddenB; // hidden → hidden ×NerfLayers
-    private Tensor? _outW, _outB;      // hidden → 4 (density + rgb)
+    private Tensor? _inW, _inB;            // layers.0 : 3C -> hidden
+    private Tensor[]? _midW, _midB;        // layers.2,4,… : hidden -> hidden
+    private Tensor? _outW, _outB;          // layers.{2(mid+1)} : hidden -> 4
 
     public TriplaneNerfDecoder(TripoSrConfig cfg) => _cfg = cfg;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
-        _inW = Hunyuan3DDit.F32(w[$"{p}fc_in.weight"]); _inB = Hunyuan3DDit.F32(w[$"{p}fc_in.bias"]);
-        _hiddenW = new Tensor[_cfg.NerfLayers]; _hiddenB = new Tensor[_cfg.NerfLayers];
-        for (int i = 0; i < _cfg.NerfLayers; i++)
+        _inW = Hunyuan3DDit.F32(w[$"{p}layers.0.weight"]); _inB = Hunyuan3DDit.F32(w[$"{p}layers.0.bias"]);
+        _midW = new Tensor[_cfg.NerfMidLayers]; _midB = new Tensor[_cfg.NerfMidLayers];
+        for (int i = 0; i < _cfg.NerfMidLayers; i++)
         {
-            _hiddenW[i] = Hunyuan3DDit.F32(w[$"{p}fc_hidden.{i}.weight"]);
-            _hiddenB[i] = Hunyuan3DDit.F32(w[$"{p}fc_hidden.{i}.bias"]);
+            int idx = 2 * (i + 1);
+            _midW[i] = Hunyuan3DDit.F32(w[$"{p}layers.{idx}.weight"]);
+            _midB[i] = Hunyuan3DDit.F32(w[$"{p}layers.{idx}.bias"]);
         }
-        _outW = Hunyuan3DDit.F32(w[$"{p}fc_out.weight"]); _outB = Hunyuan3DDit.F32(w[$"{p}fc_out.bias"]);
+        int outIdx = 2 * (_cfg.NerfMidLayers + 1);
+        _outW = Hunyuan3DDit.F32(w[$"{p}layers.{outIdx}.weight"]); _outB = Hunyuan3DDit.F32(w[$"{p}layers.{outIdx}.bias"]);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] head = [_inW, _inB, _outW, _outB];
         foreach (Tensor? t in head) if (t is not null) yield return t;
-        if (_hiddenW is not null) foreach (Tensor t in _hiddenW) yield return t;
-        if (_hiddenB is not null) foreach (Tensor t in _hiddenB) yield return t;
+        if (_midW is not null) foreach (Tensor t in _midW) yield return t;
+        if (_midB is not null) foreach (Tensor t in _midB) yield return t;
     }
 
-    /// <summary>Decodes the density field over a <paramref name="resolution"/>³ grid in <c>[-bound, bound]³</c>,
-    /// evaluating points in chunks. Output feeds marching cubes at <see cref="TripoSrConfig.DensityThreshold"/>.</summary>
-    public ScalarField3D DecodeDensityField(IBackend backend, Triplane tri, int resolution, float bound, int chunkSize = 32768)
+    /// <summary>Decodes the activated density field over a <paramref name="resolution"/>³ grid spanning
+    /// [−R,R]³ in <b>ij order</b> (x outermost, z innermost — matches TSR's grid_vertices). Feeds marching
+    /// cubes at <see cref="TripoSrConfig.DensityThreshold"/>.</summary>
+    public ScalarField3D DecodeDensityField(IBackend backend, Triplane tri, int resolution, int chunkSize = 32768)
     {
         int res = resolution;
+        float r = _cfg.Radius;
         long total = (long)res * res * res;
         float[] values = new float[total];
         float[] coords = new float[chunkSize * 3];
@@ -57,20 +60,21 @@ public sealed unsafe class TriplaneNerfDecoder
             for (int i = 0; i < count; i++)
             {
                 long lin = produced + i;
-                int x = (int)(lin % res), y = (int)((lin / res) % res), z = (int)(lin / ((long)res * res));
-                coords[i * 3] = Map(x, res, bound); coords[i * 3 + 1] = Map(y, res, bound); coords[i * 3 + 2] = Map(z, res, bound);
+                // ij order: index = (ix·res + iy)·res + iz
+                int iz = (int)(lin % res), iy = (int)((lin / res) % res), ix = (int)(lin / ((long)res * res));
+                coords[i * 3] = Map(ix, res, r); coords[i * 3 + 1] = Map(iy, res, r); coords[i * 3 + 2] = Map(iz, res, r);
             }
             Tensor outp = Evaluate(backend, tri, coords.AsSpan(0, count * 3), count); // [1, count, 4]
             float* op = (float*)outp.DataPointer;
-            for (int i = 0; i < count; i++) values[produced + i] = op[i * 4]; // density channel
+            for (int i = 0; i < count; i++) values[produced + i] = MathF.Exp(op[i * 4] + _cfg.DensityBias);
             outp.Dispose();
             produced += count;
         }
-        return new ScalarField3D { Values = values, ResX = res, ResY = res, ResZ = res, Min = (-bound, -bound, -bound), Max = (bound, bound, bound) };
+        return new ScalarField3D { Values = values, ResX = res, ResY = res, ResZ = res, Min = (-r, -r, -r), Max = (r, r, r) };
     }
 
-    /// <summary>Samples per-point RGB (sigmoid of the color channels) at <paramref name="points"/>
-    /// (3*count xyz). Used to color mesh vertices.</summary>
+    /// <summary>Samples per-point RGB (<c>sigmoid(features)</c>) at <paramref name="points"/> (3·count xyz in
+    /// [−R,R]³). Used to color mesh vertices.</summary>
     public float[] DecodeColors(IBackend backend, Triplane tri, ReadOnlySpan<float> points, int count)
     {
         Tensor outp = Evaluate(backend, tri, points, count);
@@ -82,9 +86,9 @@ public sealed unsafe class TriplaneNerfDecoder
         return rgb;
     }
 
-    /// <summary>Runs the MLP over <paramref name="count"/> points, returning <c>[1, count, 4]</c>
-    /// (<c>[density, r, g, b]</c>, rgb pre-sigmoid).</summary>
-    private Tensor Evaluate(IBackend backend, Triplane tri, ReadOnlySpan<float> coords, int count)
+    /// <summary>Runs the MLP over <paramref name="count"/> points (xyz in [−R,R]³), returning <c>[1, count, 4]</c>
+    /// (<c>[density_raw, r, g, b]</c>; density pre-exp, rgb pre-sigmoid). Exposed for parity testing.</summary>
+    public Tensor Evaluate(IBackend backend, Triplane tri, ReadOnlySpan<float> coords, int count)
     {
         int c = tri.Channels, feat = 3 * c, hidden = _cfg.NerfHidden;
         Tensor f = new(new TensorShape(1, count, feat), DType.F32);
@@ -93,10 +97,10 @@ public sealed unsafe class TriplaneNerfDecoder
         Tensor h = new(new TensorShape(1, count, hidden), DType.F32);
         backend.Linear(h, f, _inW!, _inB!); f.Dispose();
         Silu(backend, ref h);
-        for (int i = 0; i < _cfg.NerfLayers; i++)
+        for (int i = 0; i < _cfg.NerfMidLayers; i++)
         {
             Tensor nh = new(new TensorShape(1, count, hidden), DType.F32);
-            backend.Linear(nh, h, _hiddenW![i], _hiddenB![i]); h.Dispose();
+            backend.Linear(nh, h, _midW![i], _midB![i]); h.Dispose();
             h = nh; Silu(backend, ref h);
         }
         Tensor outp = new(new TensorShape(1, count, 4), DType.F32);
@@ -107,25 +111,21 @@ public sealed unsafe class TriplaneNerfDecoder
     private void SampleTriplane(Triplane tri, ReadOnlySpan<float> coords, int count, Tensor dst)
     {
         int c = tri.Channels, h = tri.Height, wd = tri.Width;
-        float bound = _cfg.BoundingBox;
+        float r = _cfg.Radius;
         float* dp = (float*)dst.DataPointer;
         ReadOnlySpan<float> features = tri.Features;
         Span<float> tmp = stackalloc float[c];
         for (int i = 0; i < count; i++)
         {
-            float nx = (coords[i * 3] + bound) / (2 * bound);
-            float ny = (coords[i * 3 + 1] + bound) / (2 * bound);
-            float nz = (coords[i * 3 + 2] + bound) / (2 * bound);
+            // scale_tensor([-R,R] -> [-1,1]) == p / R
+            float gx = coords[i * 3] / r, gy = coords[i * 3 + 1] / r, gz = coords[i * 3 + 2] / r;
             long fbase = (long)i * 3 * c;
-            // Plane 0=XY (nx,ny), 1=XZ (nx,nz), 2=YZ (ny,nz).
-            SamplePlane(features, tri.PlaneOffset(0), c, h, wd, nx, ny, tmp); CopyTo(tmp, dp, fbase + 0 * c);
-            SamplePlane(features, tri.PlaneOffset(1), c, h, wd, nx, nz, tmp); CopyTo(tmp, dp, fbase + 1 * c);
-            SamplePlane(features, tri.PlaneOffset(2), c, h, wd, ny, nz, tmp); CopyTo(tmp, dp, fbase + 2 * c);
+            // indices2D stack: plane0 (x,y), plane1 (x,z), plane2 (y,z); first coord -> width, second -> height.
+            GridSampler.GridSamplePlane(features.Slice(tri.PlaneOffset(0), c * h * wd), c, h, wd, gx, gy, tmp); CopyTo(tmp, dp, fbase + 0 * c);
+            GridSampler.GridSamplePlane(features.Slice(tri.PlaneOffset(1), c * h * wd), c, h, wd, gx, gz, tmp); CopyTo(tmp, dp, fbase + 1 * c);
+            GridSampler.GridSamplePlane(features.Slice(tri.PlaneOffset(2), c * h * wd), c, h, wd, gy, gz, tmp); CopyTo(tmp, dp, fbase + 2 * c);
         }
     }
-
-    private static void SamplePlane(ReadOnlySpan<float> features, int offset, int c, int h, int w, float u, float v, Span<float> dst)
-        => GridSampler.BilinearPlane(features.Slice(offset, c * h * w), c, h, w, u, v, dst);
 
     private static void CopyTo(ReadOnlySpan<float> src, float* dst, long offset)
     {
@@ -138,5 +138,5 @@ public sealed unsafe class TriplaneNerfDecoder
     }
 
     private static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
-    private static float Map(int i, int res, float bound) => -bound + (res > 1 ? i / (float)(res - 1) : 0f) * (2f * bound);
+    private static float Map(int i, int res, float r) => -r + (res > 1 ? i / (float)(res - 1) : 0f) * (2f * r);
 }

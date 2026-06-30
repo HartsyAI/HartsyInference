@@ -8,6 +8,7 @@ using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Models.TripoSr;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.Vision.Dinov2;
+using HartsyInference.Vision.DinoVit;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
@@ -19,31 +20,31 @@ namespace HartsyInference.ThreeD.Pipelines;
 /// awaits the reference-diff pass.</para></summary>
 public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
 {
-    private readonly Dinov2VisionEncoder _dino;
+    private readonly DinoViTEncoder _dino;
     private readonly Dinov2ImagePreprocessor _preprocessor;
     private readonly TripoSrTransformer _transformer;
     private readonly TriplaneNerfDecoder _decoder;
     private readonly TripoSrConfig _cfg;
     private readonly List<IDisposable> _ownedLoaders = [];
 
-    public TripoSrPipeline(IBackend backend, Dinov2VisionEncoder dino, TripoSrTransformer transformer, TriplaneNerfDecoder decoder, TripoSrConfig cfg)
+    public TripoSrPipeline(IBackend backend, DinoViTEncoder dino, TripoSrTransformer transformer, TriplaneNerfDecoder decoder, TripoSrConfig cfg)
         : base(backend)
     {
         _dino = dino;
         _transformer = transformer;
         _decoder = decoder;
         _cfg = cfg;
-        _preprocessor = new Dinov2ImagePreprocessor(dino.Preset.ImageSize);
+        _preprocessor = new Dinov2ImagePreprocessor(dino.Config.ImageSize);
     }
 
     /// <summary>Loads a TripoSR pipeline from a local checkpoint path (directory of <c>.safetensors</c> or a
-    /// single file). Defaults to <see cref="TripoSrConfig.TripoSr"/> + <see cref="Dinov2Preset.Base"/>
-    /// (the DINO ViT tokenizer). <b>Numerics validation-pending</b> — converter tables + dims are validation-gated.</summary>
-    public static TripoSrPipeline LoadFromPath(IBackend backend, string modelPath, TripoSrConfig? cfg = null, Dinov2Preset? dinoPreset = null)
+    /// single file). Defaults to <see cref="TripoSrConfig.TripoSr"/> + the <c>facebook/dino-vitb16</c>
+    /// tokenizer at 512px.</summary>
+    public static TripoSrPipeline LoadFromPath(IBackend backend, string modelPath, TripoSrConfig? cfg = null, DinoViTConfig? dinoCfg = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         TripoSrConfig config = cfg ?? TripoSrConfig.TripoSr;
-        Dinov2Preset dp = dinoPreset ?? Dinov2Preset.Base;
+        DinoViTConfig dp = dinoCfg ?? DinoViTConfig.DinoVitB16_512;
 
         string[] files = Directory.Exists(modelPath)
             ? Directory.GetFiles(modelPath, "*.safetensors", SearchOption.AllDirectories)
@@ -61,7 +62,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
         }
 
         TripoSrCheckpointConverter.ConvertedWeights w = TripoSrCheckpointConverter.Convert(all);
-        Dinov2VisionEncoder dino = new(dp); dino.LoadWeights(w.Dino);
+        DinoViTEncoder dino = new(dp); dino.LoadWeights(w.Dino);
         TripoSrTransformer transformer = new(config); transformer.LoadWeights(w.Transformer);
         TriplaneNerfDecoder decoder = new(config); decoder.LoadWeights(w.Decoder);
 
@@ -94,7 +95,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
 
         // 3. Triplane → density field → mesh.
         Backend.PreloadWeights(_decoder.EnumerateWeights());
-        ScalarField3D density = _decoder.DecodeDensityField(Backend, tri, gridRes, _cfg.BoundingBox);
+        ScalarField3D density = _decoder.DecodeDensityField(Backend, tri, gridRes);
         float threshold = request.IsoLevel != 0f ? request.IsoLevel : _cfg.DensityThreshold;
 
         // Marching cubes treats "inside" as value < iso; the surface is density > threshold, so extract on
