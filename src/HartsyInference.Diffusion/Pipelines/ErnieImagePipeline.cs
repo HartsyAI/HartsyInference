@@ -55,8 +55,11 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _config = config;
-        _vaeBnMean = vaeBnMean;
-        _vaeBnVar = vaeBnVar;
+        // ApplyBnUnnormalize reads these as raw F32 (`(float*)DataPointer`), but the Flux2 VAE ships them as BF16.
+        // Cast to F32 here so a BF16/F16 tensor isn't reinterpreted as F32 (which read garbage + ran off the end of
+        // the 256-byte BF16 buffer → NaN in ~25 of 128 channels → flat-black output).
+        _vaeBnMean = vaeBnMean is not null && vaeBnMean.DType != DType.F32 ? vaeBnMean.CastTo(DType.F32) : vaeBnMean;
+        _vaeBnVar = vaeBnVar is not null && vaeBnVar.DType != DType.F32 ? vaeBnVar.CastTo(DType.F32) : vaeBnVar;
         _vaeBnEps = vaeBnEps;
         _schedulerShift = schedulerShift;
     }
@@ -101,6 +104,8 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
             (uncondEmb, uncondLens) = EncodeBatch(negativePromptTokenIds, negativeRealLen);
         }
         Logs.Info($"Text encoded in {sw.ElapsedMilliseconds}ms");
+        ErnieDiag("condEmb", condEmb);
+        if (uncondEmb is not null) ErnieDiag("uncondEmb", uncondEmb);
 
         // ── 2. Initial noise: [1, 128, latentH, latentW]. The transformer expects 128-channel latents already. ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
@@ -145,6 +150,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
                 noisePred = _transformer.Forward(Backend, latent, t, condEmb, condLens);
             }
 
+            if (i == 0) ErnieDiag("noisePred[0]", noisePred);
             Tensor newLatent = new Tensor(latentShape, DType.F32);
             scheduler.Step(newLatent, noisePred, latent, i);
             noisePred.Dispose();
@@ -156,6 +162,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
+        ErnieDiag("finalLatent", latent);
         condEmb.Dispose();
         uncondEmb?.Dispose();
 
@@ -170,11 +177,13 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
             Tensor unnormed = ApplyBnUnnormalize(latent, _vaeBnMean, _vaeBnVar, _vaeBnEps);
             latent.Dispose();
             latent = unnormed;
+            ErnieDiag("latent_postBN", latent);
         }
 
         // ── 7. Unpatchify [1, 128, latentH, latentW] → [1, 32, 2*latentH, 2*latentW] before VAE decode ──
         Tensor vaeIn = UnpatchifyLatent(latent);
         latent.Dispose();
+        ErnieDiag("vaeIn", vaeIn);
 
         // ── 8. VAE decode ─────────────────────────────────────────────────
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
@@ -192,6 +201,24 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"ERNIE-Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Temporary diagnostic: logs mean/std/min/max/NaN of a tensor (forces D2H). Localizes the
+    /// flat-black-output bug (conditioning vs velocity vs latent vs BN-unnorm vs VAE). Remove once ERNIE is verified.</summary>
+    private static unsafe void ErnieDiag(string name, Tensor t)
+    {
+        ReadOnlySpan<float> s = t.AsReadOnlySpan<float>();
+        double sum = 0, sum2 = 0; float min = float.MaxValue, max = float.MinValue; int nan = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            float v = s[i];
+            if (float.IsNaN(v) || float.IsInfinity(v)) { nan++; continue; }
+            sum += v; sum2 += (double)v * v; if (v < min) min = v; if (v > max) max = v;
+        }
+        int n = s.Length - nan;
+        double mean = n > 0 ? sum / n : 0;
+        double std = n > 0 ? Math.Sqrt(Math.Max(0, sum2 / n - mean * mean)) : 0;
+        HartsyInference.Core.Logging.Logs.Info($"[DIAG] {name} {t.Shape}: mean={mean:F4} std={std:F4} min={min:F4} max={max:F4} nan/inf={nan}/{s.Length}");
     }
 
     /// <summary>Runs the text encoder for a single (already padded) batch of token ids.</summary>

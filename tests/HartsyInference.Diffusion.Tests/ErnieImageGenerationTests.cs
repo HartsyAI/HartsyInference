@@ -35,6 +35,12 @@ public class ErnieImageGenerationTests
         RunGenerationTest(TestPaths.ErnieImage.V1Dir, "ernie_image_v1_512_cfg",
             width: 512, height: 512, steps: 28, cfgScale: 4.0f);
 
+    /// <summary>Fast diagnostic: 512 / 4 steps / no-CFG to read the [DIAG] conditioning/velocity/latent/VAE stats.</summary>
+    [Fact]
+    public void ErnieImage_Diag_512_4step() =>
+        RunGenerationTest(TestPaths.ErnieImage.V1Dir, "ernie_image_diag_512_4step",
+            width: 512, height: 512, steps: 4, cfgScale: 1.0f);
+
     [Fact]
     public void ErnieImage_V1Turbo_Gpu_512_8Steps() =>
         RunGenerationTest(TestPaths.ErnieImage.V1TurboDir, "ernie_image_v1_turbo_512_8steps",

@@ -209,8 +209,12 @@ public static class TestPaths
     /// the same format Diffusers' pipeline accepts via <c>prompt_embeds</c>.</summary>
     public static class Lumina2
     {
-        public static string Transformer       => Resolve("LUMINA2_TRANSFORMER_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "lumina2_transformer.safetensors"));
-        public static string Vae               => Resolve("LUMINA2_VAE_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "vae.safetensors"));
+        // Lumina2CheckpointConverter + Lumina2Transformer.LoadWeights expect the DIFFUSERS key naming
+        // (split attn.to_q/k/v, feed_forward.linear_1/2/3, time_caption_embed, norm_out) — the original AlphaVLLM
+        // single-file (`lumina2_transformer.safetensors`: fused attention.qkv, t_embedder, final_layer) does NOT load.
+        // Use the diffusers-format weights from Alpha-VLLM/Lumina-Image-2.0 (transformer/ merged + vae/). Verified ✅.
+        public static string Transformer       => Resolve("LUMINA2_TRANSFORMER_PATH", Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "lumina2_transformer_diffusers.safetensors"));
+        public static string Vae               => Resolve("LUMINA2_VAE_PATH",         Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "vae_diffusers", "vae.safetensors"));
         public static string PromptEmbeds      => Resolve("LUMINA2_PROMPT_EMBEDS",    Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "TestEmbeddings", "prompt.bin"));
         public static string NegPromptEmbeds   => Resolve("LUMINA2_NEG_PROMPT_EMBEDS",Path.Combine(ModelsDir, "Stable-Diffusion", "Lumina2", "TestEmbeddings", "neg_prompt.bin"));
     }
