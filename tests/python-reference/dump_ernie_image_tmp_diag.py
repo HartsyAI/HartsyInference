@@ -68,7 +68,9 @@ text_lens = torch.tensor([TEXT_LEN], dtype=torch.long)
 timestep = torch.tensor([500.0], dtype=torch.float32)
 save(latent, f"{OUT_DIR}/inputs/latent.bin")
 save(text_embeds, f"{OUT_DIR}/inputs/text_embeds.bin")
-save(text_lens.to(torch.int32), f"{OUT_DIR}/inputs/text_lens.bin")
+# NOTE: write text_lens as RAW int32 (NOT via save(), which .float()s everything;
+# the C# ErnieImageDiffTests reads this as int32). This was the original-infra bug.
+text_lens.to(torch.int32).cpu().numpy().tofile(f"{OUT_DIR}/inputs/text_lens.bin")
 save(timestep, f"{OUT_DIR}/inputs/timestep.bin")
 print(f"Saved inputs latent{tuple(latent.shape)} text{tuple(text_embeds.shape)} t={float(timestep)}", flush=True)
 

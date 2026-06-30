@@ -21,6 +21,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **Qwen-Image** (20B MMDiT) | ✅ | Clean photoreal astronaut-on-horse @1024 (Q4_K GGUF + Qwen2.5-VL fp8 TE). 4 bugs fixed (final-layer scale/shift, conditioning template+drop, GGUF shape relabel, weight-cast OOM) + GPU-residency perf rewrite. See PARITY §Bugs. |
 | **Anima** (Cosmos-Predict2 2B) | ✅ | Clean on-prompt anime @512 on the 3060 (Qwen3-0.6B embeds). |
 | **Lumina-Image 2.0** (2B NextDiT) | ✅ | Clean on-prompt mountain-lake @512 (53s). Needs the DIFFUSERS-format weights (`Alpha-VLLM/Lumina-Image-2.0` transformer+vae), not the original AlphaVLLM single-file. |
+| **Chroma** (8.9B fp8) | ✅ | Clean on-prompt astronaut-on-horse @512 (painterly/ink style). Transformer numerically verified vs diffusers (corr ≥0.999 all components). The earlier noise was a bad experimental checkpoint (symlink → `do_not_use/…exp`); re-pointed. |
 
 ## Numerically verified, full e2e pending (🔬)
 

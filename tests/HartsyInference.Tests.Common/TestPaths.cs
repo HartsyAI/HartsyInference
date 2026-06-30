@@ -168,6 +168,33 @@ public static class TestPaths
         public static string Vae           => Resolve("QWEN_IMAGE_VAE_PATH",    Path.Combine(ModelsDir, "VAE", "qwen_image_vae.safetensors"));
     }
 
+    /// <summary>Qwen-Image-Edit (20B). Image-conditioned editing branch of Qwen-Image; reuses the Qwen-Image transformer
+    /// arch + the Qwen2.5-VL-7B encoder + 16-ch VAE. A Q5_K_M GGUF is staged (SwarmUI repack). The edit path needs a
+    /// reference-image conditioning pipeline (not yet built — see MODEL_STATUS_IMAGE §Edit variants).</summary>
+    public static class QwenImageEdit
+    {
+        public static string Gguf => Resolve("QWEN_IMAGE_EDIT_GGUF", Path.Combine(ModelsDir, "Stable-Diffusion", "QwenImageEdit", "qwen-image-edit-2511-Q5_K_M.gguf"));
+    }
+
+    /// <summary>Krea 2 (12.9B single-stream MMDiT). fp8_scaled checkpoints staged as
+    /// <c>Krea2/{Base,Turbo}/</c> each with the transformer file in root + <c>text_encoder/</c> (Qwen3-VL-4B) +
+    /// <c>vae/</c> (Qwen-Image VAE) — the dir layout <see cref="HartsyInference.ModelHandler.CheckpointConverters.Krea2CheckpointConverter"/> expects (pass the dir as rootPath).</summary>
+    public static class Krea2
+    {
+        public static string BaseDir  => Resolve("KREA2_BASE_DIR",  Path.Combine(ModelsDir, "Stable-Diffusion", "Krea2", "Base"));
+        public static string TurboDir => Resolve("KREA2_TURBO_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "Krea2", "Turbo"));
+    }
+
+    /// <summary>Boogu-Image 0.1 (10B OmniGen2/Lumina lineage). Comfy fp8_scaled, staged as <c>Boogu/{Base,Turbo,Edit}/</c>
+    /// each with <c>transformer/</c> (fp8) + <c>mllm/</c> (Qwen3-VL-8B) + <c>vae/</c> (Flux VAE) — the layout
+    /// <see cref="HartsyInference.ModelHandler.CheckpointConverters.BooguImageCheckpointConverter"/> expects.</summary>
+    public static class Boogu
+    {
+        public static string BaseDir  => Resolve("BOOGU_BASE_DIR",  Path.Combine(ModelsDir, "Stable-Diffusion", "Boogu", "Base"));
+        public static string TurboDir => Resolve("BOOGU_TURBO_DIR", Path.Combine(ModelsDir, "Stable-Diffusion", "Boogu", "Turbo"));
+        public static string EditDir  => Resolve("BOOGU_EDIT_DIR",  Path.Combine(ModelsDir, "Stable-Diffusion", "Boogu", "Edit"));
+    }
+
     /// <summary>Anima (Cosmos-Predict2 2B Text2Image derivative by CircleStone Labs / Comfy Org). The
     /// transformer is shipped as a single-file safetensors (<c>anima-preview3-base.safetensors</c>);
     /// the Qwen-3 0.6B text encoder and Qwen-Image VAE are loaded separately.</summary>

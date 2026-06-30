@@ -93,17 +93,34 @@ Today the four flags are public properties set only inside tests. To A/B them in
 in `run_benchmarks.sh` without recompiling, wire them to env vars (convention: `HARTSY_*`, matching
 `HARTSY_PROFILE`). Default stays off when the var is unset.
 
-- [ ] In `CudaBackend` construction, read and apply:
+- [x] In `CudaBackend` construction, read and apply (via `EnvFlag()`, [CudaBackend.cs](../../src/HartsyInference.Cuda/CudaBackend.cs)):
   - `HARTSY_EPILOGUE_FUSION=1` → `EnableEpilogueFusion`
   - `HARTSY_TENSORCORE_GEMM=1` → `EnableTensorCoreGemm`
   - `HARTSY_FP8_NATIVE=1` → `EnableNativeFp8Gemm`
   - `HARTSY_HIGH_PRECISION_GEMM=1` → `HighPrecisionGemm`
-  - `HARTSY_LOWVRAM_QUANT=1` → default for `TransformerConfig.LowVramQuant`
-- [ ] Log the resolved flag set once at startup (so every result dir self-documents its config).
-- [ ] Add a `--flags` passthrough column to `run_benchmarks.sh` result naming.
+  - `HARTSY_LOWVRAM_QUANT=1` → default for `TransformerConfig.LowVramQuant` (env default on the `init` property)
+- [x] Log the resolved flag set once at startup (`[Cuda] perf flags: …`).
+- [x] `run_benchmarks.sh` result naming: `--tag` (→ `run_<tag>_<utc>_<gpu>`); slug honors the *visible* GPU
+      under `CUDA_VISIBLE_DEVICES`; resolved flags + `LD_LIBRARY_PATH` recorded in `software.txt`.
 
-Acceptance: setting a var flips the path (verify via the startup log + NVTX kernel names); unset
-reproduces Stage 0 exactly.
+Acceptance: **met** — setting a var flips the path (verified via the startup flag log); unset reproduces
+Stage 0 (smoke fingerprint shows all `HARTSY_*=0`).
+
+> **Stage-0 prerequisite: the benchmark harness was non-functional and produced silent `NA`.** Five bugs,
+> all of which blocked *any* real microbench number, fixed in `run_benchmarks.sh` / the bench project
+> (2026-06-30, RTX 3060):
+> 1. **Missing cuBLAS path** — no system CUDA toolkit; the engine loads `libcublas`/`libcublasLt` by bare
+>    soname from `LD_LIBRARY_PATH` (a torch venv's `nvidia/cublas/lib`). BDN runs each benchmark in a
+>    **child process**, which without the path threw `CUDA is not available` → every result `NA`. Harness
+>    now preflights cuBLAS and auto-detects/prepends a bundle (or fails loud).
+> 2. **Multi-target run** — bench project is `net8.0;net10.0`; `dotnet run/build` needs `-f net10.0`.
+> 3. **`--exporters json,markdown,csv`** was one comma-joined token (BDN rejects it) → space-separated.
+> 4. **`find … | head` under `set -o pipefail`** — SIGPIPE 141 silently aborted the run mid-way.
+> 5. **Stray git worktree** (`.claude/worktrees/…`) holds a duplicate bench `.csproj`; BDN's by-name
+>    project search then aborts. Harness hides duplicates for the run and restores on exit (incl. the
+>    success path — do **not** `trap - EXIT`).
+> Net: identical inputs now yield real timings (3060: MatMul_F32 ≈ 5.2 ms, F16 ≈ 2.1 ms at one shape),
+> 0 `NA`, worktree untouched.
 
 ---
 
@@ -199,7 +216,9 @@ dir. Keep negative results.
 
 | Date (UTC) | GPU | Stage | Config (flags) | Shape / Model | Metric | Baseline | New | Δ% | Gate | Result dir | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| | | 0 baseline | all off | (microbench grid) | GFLOP/s | | (ref) | — | n/a | `run_baseline_…` | |
+| 2026-06-30 | 3060 | 0 baseline | all off | 86-row microbench grid | mean ms | (ref) | — | n/a | n/a | `run_baseline_2026-06-30T080551Z_nvidia-geforce-rtx-3060` | MatMul_F16 2.2–15.7 ms; Sdpa_F16 2.2–25.9 ms (s1=long-seq). 0 NA. SHA 6bba440 + dirty. |
+| 2026-06-30 | 4090 | 0 baseline | all off | 86-row microbench grid | mean ms | (ref) | — | n/a | n/a | `run_baseline_2026-06-30T080914Z_nvidia-geforce-rtx-4090` | Only **~1.3–1.6× faster than 3060** on GEMM/SDPA → likely **host/launch-bound**, not compute-bound, at these shapes. |
+| | | 0 caveats | all off | — | — | — | — | — | — | — | Box contaminated (ComfyUI+rustdesk resident, accepted); 5 trials → some shapes ±20–36% (e.g. MatMul_F32 s1). Marginal wins on noisy shapes won't clear α=0.01. Python parity ceiling not run (no torch; use `--py-venv`→ComfyUI venv). |
 | | | 2 epilogue | EPILOGUE on | DiT Linear+bias | ms/op | | | | pass/fail | | |
 | | | 3 tcgemm | TENSORCORE on | aligned GEMM | GFLOP/s | | | | | | vs cuBLAS too |
 | | | 4 fp8native | FP8_NATIVE on | Flux FP8 | it/s | | | | | | + VRAM peak |
@@ -215,6 +234,9 @@ dir. Keep negative results.
 | Date | Decision | Rationale | By |
 |---|---|---|---|
 | 2026-06-30 | Plan created; cheap-switch-first ordering | fast paths already built but default-off; measure before building anything new | |
+| 2026-06-30 | Stage 1 done; harness repaired (5 bugs) before Stage 0 | `run_benchmarks.sh` produced silent `NA` (BDN child had no cuBLAS path) — had to fix it to get any baseline | |
+| 2026-06-30 | Both 3060 **and** 4090 are on the dev box | Stage 4 native FP8 (SM 8.9) is runnable locally; plan's "Ada may be unavailable" no longer applies | |
+| 2026-06-30 | Stage 0 scope = C# microbench both GPUs | no torch on box (python parity ceiling deferred → point `--py-venv` at a ComfyUI venv); C# e2e not implemented in harness | |
 | | Stage 6 (a) wire diffusion quant **/** (b) leave load-only | (fill after Stage 6 measurement) | |
 
 ---

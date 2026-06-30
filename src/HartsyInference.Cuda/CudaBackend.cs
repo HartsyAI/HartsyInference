@@ -1739,6 +1739,21 @@ public sealed class CudaBackend : IBackend
                     else
                         _kernels!.LaunchAdd(scoresBuf, scoresBuf, pMask, (int)scoreElements, _stream.Handle);
                 }
+                else if (maskElements == B * Sq * Skv && B > 1)
+                {
+                    // [B, 1, Sq, Skv] mask: per-batch, broadcast over heads. Add each batch's [Sq,Skv] block to all H
+                    // head-blocks for that batch. (B=1 is already caught by the Sq*Skv branch above.) One add per (b,h).
+                    for (long bh = 0; bh < totalHeads; bh++)
+                    {
+                        long b = bh / H;
+                        ulong sPtr = scoresBuf + (ulong)(bh * strideScores * elemSize);
+                        ulong mPtr = pMask + (ulong)(b * Sq * Skv * elemSize);
+                        if (isF16)
+                            _kernels!.LaunchAddF16(sPtr, sPtr, mPtr, (int)(Sq * Skv), _stream.Handle);
+                        else
+                            _kernels!.LaunchAdd(sPtr, sPtr, mPtr, (int)(Sq * Skv), _stream.Handle);
+                    }
+                }
             }
 
             // Softmax

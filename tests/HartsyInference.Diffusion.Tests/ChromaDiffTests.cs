@@ -94,6 +94,9 @@ public unsafe class ChromaDiffTests
                 : (IBackend)new CpuBackend();
             if (useGpu)
             {
+                // DIAGNOSTIC: match production ChromaPipeline memory strategy — transient fp8→bf16 upcasts
+                // (cached casts = ~18GB on top of the 9GB resident fp8 → OOM on a 24GB card).
+                ((CudaBackend)backend).CacheWeightCasts = false;
                 ((CudaBackend)backend).PreloadWeights(transformer.EnumerateWeights());
                 _output.WriteLine($"  GPU backend ready: {backend.Capabilities.Name}");
             }

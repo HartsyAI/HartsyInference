@@ -410,23 +410,30 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Builds the attention mask <c>[B, 1, 1, totalSeq]</c> (broadcasts to <c>[B, H, S, totalSeq]</c> in SDPA). Uses the additive convention: 0 for valid positions, large-negative for padded text positions. Image positions are always valid.</summary>
+    /// <summary>Builds the additive key-padding attention mask <c>[B, 1, totalSeq, totalSeq]</c> (broadcasts over heads
+    /// in SDPA): 0 for valid keys, large-negative for padded text keys; same for every query row. Image keys are always
+    /// valid. NOTE: this is tiled across the query (Sq) dimension on purpose — a <c>[B,1,1,Skv]</c> mask's element count
+    /// (<c>B·Skv</c>) matches NEITHER SDPA mask branch (<c>Sq·Skv</c> / <c>B·H·Sq·Skv</c>) and was silently dropped, so
+    /// every image token attended to the padded text keys → washed-out/hazy output. With Sq tiled, B=1 hits the existing
+    /// <c>Sq·Skv</c> branch and B>1 (CFG) hits the new <c>B·Sq·Skv</c> branch (both broadcast over heads).</summary>
     private static Tensor BuildAttentionMask(int batch, int nImg, int textMax, int[] textLens)
     {
         int totalSeq = nImg + textMax;
-        TensorShape shape = new TensorShape(batch, 1, 1, totalSeq);
+        TensorShape shape = new TensorShape(batch, 1, totalSeq, totalSeq);
         Tensor mask = new Tensor(shape, DType.F32);
+        mask.AsSpan<float>().Clear();   // valid positions = 0 (additive convention)
         const float negInf = -1e30f;
         float* p = (float*)mask.DataPointer;
         for (int b = 0; b < batch; b++)
         {
-            long off = (long)b * totalSeq;
-            // Image tokens: always valid.
-            for (int i = 0; i < nImg; i++) p[off + i] = 0f;
-            // Text tokens: valid up to textLens[b].
             int validText = Math.Clamp(textLens[b], 0, textMax);
-            for (int t = 0; t < validText; t++) p[off + nImg + t] = 0f;
-            for (int t = validText; t < textMax; t++) p[off + nImg + t] = negInf;
+            if (validText >= textMax) continue;   // no padding → all-zero mask for this batch
+            long bBase = (long)b * totalSeq * totalSeq;
+            for (int qi = 0; qi < totalSeq; qi++)
+            {
+                long rowOff = bBase + (long)qi * totalSeq + nImg;   // text keys start at column nImg
+                for (int t = validText; t < textMax; t++) p[rowOff + t] = negInf;
+            }
         }
         return mask;
     }
