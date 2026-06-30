@@ -301,6 +301,7 @@ public sealed class VulkanBackend : IBackend
                 SpecConstant.Bool(13, transposeA),
                 SpecConstant.Bool(14, transposeB),
                 SpecConstant.Bool(15, outputIsF32),
+                SpecConstant.Bool(16, bias is not null),
             };
 
             VulkanKernel k = GetKernel(shader, storageBufferCount: 5, spec);
@@ -318,14 +319,23 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 36, 0u);
             BinaryWriteUInt(pc, 40, 0u);
 
-            // Five descriptor bindings: 0=A, 1=B, 2=C_fp16, 3=Bias, 4=C_fp32.
+            // Five descriptor bindings: 0=A, 1=B, 2=C_fp16, 3=Bias(FP32), 4=C_fp32.
             // The shader writes slot 2 (fp16) OR slot 4 (fp32) selected by the OUTPUT_F32 spec
             // constant; both point at the single real output buffer (allocated in output.DType,
-            // so exactly one binding's type matches and is written). Slots for the unwritten
-            // output and the unused bias bind to outBuf as placeholders to keep the descriptor
-            // count uniform; they are never read.
+            // so exactly one binding's type matches and is written). The unwritten output slot
+            // binds to outBuf as a placeholder. Slot 3 carries the per-column bias as FP32 when
+            // HAS_BIAS — the shader adds it in the epilogue (fused, no extra dispatch). The bias is
+            // cast to FP32 once and cached (preloaded weight), matching the coopmat accumulator type.
             ulong outHandle = outBuf.Handle;
-            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, outHandle, outHandle };
+            VulkanBuffer? biasF32Owned = null;
+            ulong biasHandle = outHandle;
+            if (bias is not null)
+            {
+                (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, biasRaw!, DType.F32);
+                biasF32Owned = owned;
+                biasHandle = biasF32.Handle;
+            }
+            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, biasHandle, outHandle };
 
             uint groupsX = (uint)((N + BN - 1) / BN);
             uint groupsY = (uint)((M + BM - 1) / BM);
@@ -333,12 +343,7 @@ public sealed class VulkanBackend : IBackend
 
             CacheOutput(output, outBuf);
 
-            // Bias fold-in via BroadcastAdd: output[m, n] += bias[n] for all (m, n).
-            // BroadcastAdd's index formula `c = (i / spatial) % channels` with spatial=1 and
-            // channels=N produces `c = i % N`, which is exactly the column index for a flat
-            // [M, N] buffer. Adds one extra dispatch but keeps the coopmat shader simple.
-            if (bias is not null)
-                BroadcastAdd(output, bias, channels: N, spatial: 1);
+            if (biasF32Owned is not null) _xfer.FreeDevice(biasF32Owned);
         }
         catch
         {
@@ -353,6 +358,10 @@ public sealed class VulkanBackend : IBackend
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
         if (src.DType == want) return (srcBuf, null);
+
+        // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
+        if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer cachedCast)) return (cachedCast, null);
+        bool cacheThis = _xfer.ShouldCacheCast(src);
 
         long elements = src.ElementCount;
         ulong outBytes = (ulong)(elements * want.SizeInBytes);
@@ -369,7 +378,7 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteFloat(pc, 4, src.Fp8ScaleFactor);
             Span<ulong> bufs = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
             Dispatch(k, bufs, pc, GroupCount(elements, LOCAL_X_1D));
-            return (dst, dst);
+            return FinishCast(src, want, dst, cacheThis);
         }
 
         string shader;
@@ -388,7 +397,7 @@ public sealed class VulkanBackend : IBackend
             Span<ulong> bufs2 = stackalloc ulong[] { mid.Handle, dst.Handle };
             Dispatch(kk, bufs2, pc2, GroupCount(elements, LOCAL_X_1D));
             _xfer.FreeDevice(mid);
-            return (dst, dst);
+            return FinishCast(src, want, dst, cacheThis);
         }
         else
         {
@@ -405,6 +414,19 @@ public sealed class VulkanBackend : IBackend
         BinaryWriteUInt(push, 0, (uint)elements);
         Span<ulong> b = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
         Dispatch(kernel, b, push, GroupCount(elements, LOCAL_X_1D));
+        return FinishCast(src, want, dst, cacheThis);
+    }
+
+    /// <summary>Tail of <see cref="CastIfNeeded"/>: when <paramref name="dst"/> is a preloaded weight's cast,
+    /// promote it to the weight-cast cache and return it as non-owned (the caller must not free it); otherwise
+    /// return it as a caller-owned temporary.</summary>
+    private (VulkanBuffer buf, VulkanBuffer? owned) FinishCast(Tensor src, DType want, VulkanBuffer dst, bool cacheThis)
+    {
+        if (cacheThis)
+        {
+            _xfer.StoreWeightCast(src, want, dst);
+            return (dst, null);
+        }
         return (dst, dst);
     }
 
