@@ -134,7 +134,17 @@ public sealed class VulkanBackend : IBackend
     /// timeline-semaphore advances and deferred-free buffers can be reclaimed; otherwise large
     /// models accumulate hundreds of allocations between submits and exhaust the heap.</summary>
     private int _dispatchesSinceSubmit;
+    /// <summary>Dispatches recorded by the current outermost op — reset at op entry, read by the profiler.
+    /// Kept separate from <see cref="_dispatchesSinceSubmit"/> (which resets only on an actual submit) so
+    /// batching submits across ops doesn't corrupt the per-op dispatch count the profiler reports.</summary>
+    private int _dispatchesThisOp;
     private const int FLUSH_THRESHOLD = 8;
+
+    /// <summary>When set, submit a command buffer at the end of every op (the old behavior). Default off:
+    /// submits are batched until <see cref="FLUSH_THRESHOLD"/> dispatches accumulate, cutting one
+    /// <c>vkQueueSubmit2</c> per tiny op — the dominant per-dispatch host cost for small-op-heavy workloads.</summary>
+    private static readonly bool _submitPerOp =
+        Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_SUBMIT_PER_OP") == "1";
 
     private unsafe void Dispatch(
         VulkanKernel kernel,
@@ -173,6 +183,7 @@ public sealed class VulkanBackend : IBackend
         _stream.RecordGlobalComputeBarrier();
 
         _dispatchesSinceSubmit++;
+        _dispatchesThisOp++;
         // CRITICAL: do NOT drain transients here. Multi-dispatch ops like SDPA (24 heads × 3
         // dispatches) reference the same Q/K/V upload buffers across many dispatches. Draining
         // mid-op would tag those buffers for deferred-free, then the next flush completes them
@@ -203,6 +214,7 @@ public sealed class VulkanBackend : IBackend
             _b = b;
             _opName = opName;
             _startTicks = b._profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            if (b._opNestingDepth == 0) b._dispatchesThisOp = 0;
             b._opNestingDepth++;
         }
 
@@ -211,8 +223,17 @@ public sealed class VulkanBackend : IBackend
             _b._opNestingDepth--;
             if (_b._opNestingDepth == 0)
             {
-                int dispatches = _b._dispatchesSinceSubmit;
-                _b.DrainAndFlush();
+                int dispatches = _b._dispatchesThisOp;
+                // Tag this op's transient uploads for deferred-free at the op boundary (safe — every
+                // dispatch that referenced them is already recorded). Submitting, however, is batched:
+                // only flush the command buffer once enough dispatches accumulate, so a stream of tiny
+                // ops costs one vkQueueSubmit2 instead of one each. Sync()/lazy-sync still force a flush.
+                _b._xfer.DrainTransients();
+                if (_submitPerOp || _b._dispatchesSinceSubmit >= FLUSH_THRESHOLD)
+                {
+                    _b._stream.SubmitAndAdvance();
+                    _b._dispatchesSinceSubmit = 0;
+                }
                 if (_b._profiler.IsEnabled)
                     _b._profiler.Record(_opName, System.Diagnostics.Stopwatch.GetTimestamp() - _startTicks, dispatches);
             }

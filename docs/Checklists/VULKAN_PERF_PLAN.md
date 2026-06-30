@@ -167,18 +167,27 @@ Linear dispatches (Q/K/V are ~21% of Linears → ~14% of total). Needs a tensor 
 
 ---
 
-## Stage 4 — Per-dispatch binding overhead
+## Stage 4 — Per-dispatch binding overhead (IN PROGRESS)
 
-The remaining lever once dispatch count is minimized: make each surviving dispatch cheaper.
+The remaining lever once dispatch count is minimized: make each surviving dispatch cheaper. Measured floor
+(2026-06-30, 4090, tiny Linears, no per-op Sync): **~48 µs/dispatch** of host overhead before this stage.
 
-- [ ] Profile the per-dispatch cost breakdown (descriptor update vs barrier vs record) with NVTX/Vulkan
-      timestamps.
-- [ ] Evaluate descriptor-update batching / a descriptor cache keyed by (pipeline, buffer set).
-- [ ] Coalesce compute-to-compute barriers where dependencies allow (avoid a full barrier between
-      independent dispatches).
+- [x] **Submit batching (DONE):** the per-op path was issuing a `vkQueueSubmit2` at the end of *every* op
+      (`OpScope.Dispose`). Now transients drain per op (correctness) but the submit is batched until
+      `FLUSH_THRESHOLD` dispatches accumulate; `Sync()`/lazy-sync force-flush. **−15.2% on tiny-op host wall
+      (97.4 → 82.6 ms, 48 → 41 µs/dispatch).** Escape hatch `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1`. Gate: 39
+      smoke/leak/int8 green. (Big-shape FFN bench Syncs per call, so it's unaffected — this targets the
+      attention/norm-heavy parts and the 3060.)
+- [ ] **Descriptor-set recycling (NEXT):** the remaining ~41 µs/dispatch still pays a per-dispatch
+      `vkAllocateDescriptorSets` + `vkUpdateDescriptorSets` + bind. Replace the allocate-fresh-every-dispatch
+      pool with an in-flight-safe ring (hand out pre-allocated sets, recycle by timeline tick). Higher risk
+      (reusing a set still referenced by an in-flight submit corrupts output) — validate on e2e before
+      shipping, not just the microbench.
+- [ ] Coalesce compute-to-compute barriers where dependencies allow (the global barrier after every dispatch
+      is conservative). Lower host-side value (one barrier struct is cheap); mainly a GPU-serialization win, so
+      only matters where GPU-bound.
 - [ ] Re-evaluate push descriptors **per vendor** — a measured regression on NVIDIA (deviation #12),
       possibly a win on AMD/Intel. Keep `HARTSYINFERENCE_VK_PUSH_DESCRIPTORS` opt-in.
-- [ ] A/B each independently; commit, fill ledger.
 
 ---
 
@@ -213,7 +222,8 @@ only if a long-context or LLM-on-Vulkan workload shifts the profile.
 | | | 1 fp8-fuse | WEIGHT_FP8 on | Flux FFN Linear | dispatches | 3 | | | pass/fail | + VRAM (weights stay FP8) |
 | 2026-06-30 | 4090 | 2 bias-fuse | `HAS_BIAS` spec-const in matmul_coopmat | Flux FFN FP8 Linear, M=1024 K=3072 N=12288 | ms/call, dispatches | 2.82 ms, 2 disp | **2.45 ms, 1 disp** | **−13.1%** (vs 1b) | **pass** | Fuse per-column bias into the coopmat epilogue via a stride-0 broadcast accumulator load (keeps tensor cores). Bias cast to FP32 once + cached. Gate: `Backend_Linear_FP8Weight_CachedCast_Matches_Cpu` (F16 out) + `Backend_Linear_FluxShape_F32_Matches_Cpu` (F32 out) + full smoke/leak/int8 (39) green. **Cumulative 1b+2: 3.65 → 2.45 ms (−32.9%), 3 → 1 dispatch.** |
 | | | 3 qkv-fuse | — | Flux attn | dispatches/wall | | | | pass/fail | ~14% of Linears |
-| | | 4 dispatch | — | per-dispatch | µs | | | | | descriptor/barrier |
+| 2026-06-30 | 4090 | 4 submit-batch | `HARTSYINFERENCE_VK_SUBMIT_PER_OP` off (default batched) | 2000 tiny Linears (M=16 K=64 N=64), no per-op Sync | host-wall, µs/dispatch | 97.4 ms, 48 µs/disp (submit-per-op) | **82.6 ms, 41 µs/disp** | **−15.2%** | **pass** | Was submitting one `vkQueueSubmit2` per op (`OpScope.Dispose`). Now drains transients per op but batches the submit until `FLUSH_THRESHOLD`(8) dispatches; `Sync()`/lazy-sync still force-flush. Helps small-op-heavy workloads (attention/norms, the 3060). Big-shape FFN bench unaffected (it Syncs per call). Gate: smoke/leak/int8 (39) green. Escape hatch: `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1`. |
+| | | 4 descriptor | — | per-dispatch | µs | 41 | | | | NEXT: descriptor-set recycling (avoid per-dispatch `vkAllocateDescriptorSets`) — needs in-flight-safe reuse; best validated on e2e. |
 
 ---
 

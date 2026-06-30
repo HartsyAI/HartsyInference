@@ -44,4 +44,36 @@ public sealed class VulkanLinearProfileMeasurement
         input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
         // backend.Dispose() (via using) triggers the profiler dump.
     }
+
+    /// <summary>Stage-4 probe: many TINY Linears so per-call time is dominated by per-dispatch host overhead
+    /// (descriptor alloc/update/bind + barrier + command record), not GEMM compute or upload. Reveals the
+    /// floor the descriptor/barrier levers target. Run with HARTSYINFERENCE_VK_PROFILE=1.</summary>
+    [Fact]
+    public unsafe void Measure_TinyLinear_DispatchOverhead()
+    {
+        const int M = 16, K = 64, N = 64;   // coopmat-eligible, negligible compute
+        const int iters = 2000;
+
+        using VulkanBackend backend = new();
+
+        Tensor weight = new(new TensorShape(N, K), DType.F16);
+        Tensor bias = new(new TensorShape(N), DType.F16);
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor output = new(new TensorShape(M, N), DType.F16);
+        Half* ip = (Half*)input.DataPointer;
+        for (long i = 0; i < (long)M * K; i++) ip[i] = (Half)(((i * 13) % 17 - 8) * 0.01f);
+        Half* wp = (Half*)weight.DataPointer;
+        for (long i = 0; i < (long)N * K; i++) wp[i] = (Half)(((i * 7) % 13 - 6) * 0.01f);
+
+        backend.PreloadWeights(new[] { weight, bias });
+
+        for (int i = 0; i < 20; i++) { backend.Linear(output, input, weight, bias); }
+        backend.Sync();
+        for (int i = 0; i < iters; i++) { backend.Linear(output, input, weight, bias); }
+        backend.Sync();
+
+        _out.WriteLine($"Ran {iters}+20 tiny Linears at M={M},K={K},N={N}. Per-call avg ≈ per-dispatch host overhead.");
+
+        input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
+    }
 }
