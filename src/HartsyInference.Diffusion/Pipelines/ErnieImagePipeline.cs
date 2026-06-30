@@ -107,6 +107,13 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         ErnieDiag("condEmb", condEmb);
         if (uncondEmb is not null) ErnieDiag("uncondEmb", uncondEmb);
 
+        // Free the text-encoder weights from VRAM now: they are only needed for the encode above, and
+        // the ERNIE-Image TE (Ministral-3B, ~7.7 GB BF16) cannot coexist with the FP8 transformer
+        // (~7.5 GB) on a 12 GB card. The encoded embeddings (condEmb/uncondEmb) are separate tensors and
+        // remain valid. No-op on backends without a weight cache.
+        Backend.Sync();
+        Backend.FreeWeights(_textEncoder.EnumerateWeights());
+
         // ── 2. Initial noise: [1, 128, latentH, latentW]. The transformer expects 128-channel latents already. ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
@@ -166,10 +173,9 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         condEmb.Dispose();
         uncondEmb?.Dispose();
 
-        // ── 5. Free transformer + text encoder weights from VRAM before VAE decode ──
+        // ── 5. Free transformer weights from VRAM before VAE decode (TE was already freed post-encode) ──
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
-        Backend.FreeWeights(_textEncoder.EnumerateWeights());
 
         // ── 6. BN-style un-normalization (Flux2 VAE ships running mean/var) ──
         if (_vaeBnMean is not null && _vaeBnVar is not null)
@@ -186,10 +192,14 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         ErnieDiag("vaeIn", vaeIn);
 
         // ── 8. VAE decode ─────────────────────────────────────────────────
-        // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
-        Logs.Verbose("Decoding latents to image (tiled F32 path)...");
+        // Full (non-tiled) decode: the tiled path produced horizontal BANDING — its non-stride-aligned last-tile
+        // overlap (latent rows 0/56/64 at 1024) exceeds the fixed overlapLatent=8 tent blend, and per-tile GroupNorm
+        // statistics differ across the seam → a ~50/50 average of two differently-normalized decodes. ERNIE's latent is
+        // small ([1,32,≤128,≤128]) so a full decode fits the 4090 (the ✅ Flux.2 path also decodes full). Reverted to
+        // DecodeTiled only if a future high-res case OOMs.
+        Logs.Verbose("Decoding latents to image (full F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeIn);
+        Tensor image = _vaeDecoder.Decode(Backend, vaeIn);
         vaeIn.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");

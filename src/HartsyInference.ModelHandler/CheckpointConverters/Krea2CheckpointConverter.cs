@@ -44,6 +44,20 @@ public sealed class Krea2CheckpointConverter
     /// <c>mlp.{gate,up,down}→ff.{gate,up,down}</c>, <c>mod.lin→scale_shift_table</c>).</para></summary>
     public static string RemapTransformerKey(string key)
     {
+        // fp8 scale companions (`.weight_scale` / `.scale_weight`) must remap to the SAME base key as their
+        // `.weight` so ApplyFp8ScaledDequant can pair them (e.g. raw `blocks.0.attn.wq.weight_scale` →
+        // `transformer_blocks.0.attn.to_q.weight_scale`, matching `…attn.to_q.weight`). Remap the underlying
+        // weight name, then restore the scale suffix. Without this the scale is dropped and fp8 weights stay
+        // ~250–900× too large → noise.
+        foreach (string suffix in new[] { ".weight_scale", ".scale_weight" })
+        {
+            if (key.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                string mappedWeight = RemapTransformerKey(key[..^suffix.Length] + ".weight");
+                return mappedWeight[..^".weight".Length] + suffix;
+            }
+        }
+
         // Already-diffusers keys pass through.
         if (key.StartsWith("img_in.", StringComparison.Ordinal) || key.StartsWith("transformer_blocks.", StringComparison.Ordinal)
             || key.StartsWith("text_fusion.", StringComparison.Ordinal) || key.StartsWith("time_embed.", StringComparison.Ordinal)

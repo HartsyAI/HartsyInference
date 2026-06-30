@@ -147,10 +147,14 @@ public class ErnieImageGenerationTests
                     using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
                     (nuint freeBytes, nuint totalBytes) = backend.Context.GetMemoryInfo();
                     double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-                    const double MinRequiredGb = 14.0;
+                    // The published ERNIE-Image transformer is FP8 E4M3 (~7.5 GB on disk). With
+                    // CacheWeightCasts=false (transient per-GEMM fp8→bf16 cast, no resident F16 cache) the
+                    // resident footprint is ~8 GB + activations, which fits a 12 GB card (RTX 3060). The VAE
+                    // uploads lazily during decode after the transformer weights are freed. ~10 GB is a safe gate.
+                    const double MinRequiredGb = 10.0;
                     if (freeGb < MinRequiredGb)
                     {
-                        _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB to fit ERNIE-Image FP16 transformer (~13.8 GB) + VAE + text encoder. Free up GPU memory or use a larger card. The implementation is end-to-end ready; this test will run when sufficient VRAM is available.");
+                        _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB to fit the ERNIE-Image FP8 transformer (~8 GB resident) + VAE + text encoder. Free up GPU memory or use a larger card. The implementation is end-to-end ready; this test will run when sufficient VRAM is available.");
                         return;
                     }
                     // Low-VRAM: transient per-GEMM fp8→F16 weight cast (no resident F16 cache). Keeps the FP8

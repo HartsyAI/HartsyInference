@@ -22,6 +22,8 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **Anima** (Cosmos-Predict2 2B) | ✅ | Clean on-prompt anime @512 on the 3060 (Qwen3-0.6B embeds). |
 | **Lumina-Image 2.0** (2B NextDiT) | ✅ | Clean on-prompt mountain-lake @512 (53s). Needs the DIFFUSERS-format weights (`Alpha-VLLM/Lumina-Image-2.0` transformer+vae), not the original AlphaVLLM single-file. |
 | **Chroma** (8.9B fp8) | ✅ | Clean on-prompt astronaut-on-horse @512 (painterly/ink style). Transformer numerically verified vs diffusers (corr ≥0.999 all components). The earlier noise was a bad experimental checkpoint (symlink → `do_not_use/…exp`); re-pointed. |
+| **Krea 2 Turbo** (12.9B MMDiT, fp8) | ✅ | Sharp photoreal astronaut-on-horse @1024, 8-step (std 66.5, grid 0.042). Impl fully cross-checked vs ComfyUI `krea2/model.py` (RoPE/modulation/sigmoid-gate attn/text-fusion/scheduler all match). Fix: `Krea2CheckpointConverter` renamed fp8 `.weight` keys but not their `.weight_scale` companions → scales dropped → weights ~250-900× too large → noise; added a scale-suffix pre-pass. Base/CFG path shares the same converter+transformer (untested; CFG anchoring `Krea2Pipeline.cs:100` validation-pending). |
+| **ERNIE-Image** (8B fp8) | ✅ | Sharp full-contrast astronaut-on-horse @512-cfg (std 60.9, grid 0.069). 4 bugs fixed: flat-black (BF16-BN-cast NaN), SDPA mask-drop (general fix), VAE banding (non-tiled decode), and the WASHOUT = `CudaBackend.GroupNormSilu` F32 path didn't cast BF16 affine weights → wrong VAE GroupNorm → 4-5× low contrast. Transformer was byte-perfect on a std-ratio diff. See PARITY §ERNIE. |
 
 ## Numerically verified, full e2e pending (🔬)
 
@@ -38,18 +40,13 @@ per-model architecture notes and build plans.
 | Model | Notes |
 |---|---|
 | **Flux.2 Dev (32B)** | Needs GGUF Q4 + per-block streaming to fit 12 GB. |
-| **Qwen-Image** | Dual-stream DiT + 3-axis RoPE + Qwen2.5-VL encode; awaits ≥22 GB VRAM or Q4_K GGUF. |
-| **Chroma / ChromaRadiance / ZetaChroma** | T5-only pipelines; await `chroma_v1.safetensors` + variants. |
-| **ERNIE-Image** | Ministral-3B encoder via `LlamaStyleEncoder`; awaits ≥14 GB VRAM or Q4_K GGUF. |
-| **Hunyuan Image 2.1** | 17B; needs ≥36 GB (A100/H100) or future Q4_K GGUF. |
-| **Lumina-Image-2.0** | NextDiT family (Z-Image sibling); 2B fits 12 GB. |
+| **ChromaRadiance / ZetaChroma** | Chroma variants (base Chroma now ✅). T5-only pipelines; await variant checkpoints. |
+| **Hunyuan Image 2.1** | 17B; **BLOCKED on 24GB** — 35GB bf16 + fp8/GGUF repacks use incompatible original-Tencent keys. Needs an fp8-diffusers-naming quant or a GGUF/K-quant reader. |
 | **HiDream i1 (Full / Dev)** | Quad-encoder; MoE FFN is single-expert fallback (full routing pending). |
 | **Kandinsky 5.0 Lite** | Dual Qwen2.5-VL + CLIP-L embeds. |
-| **Anima (Cosmos-Predict2)** | Image-only invariant; img2img/inpaint + LoRA added; DiT ControlNet/IP-Adapter deferred engine-wide. |
 | **OmniGen 2** | Joint-stream RoPE; t2i only. |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
-| **Krea 2 (Base / Turbo)** | 12.9B single-stream MMDiT; sigmoid output-gate attn + 6-way modulation + text-fusion. SwarmUI wired. **TODO: download fp8/GGUF (26 GB bf16 won't fit 24 GB) + write e2e generation test (only a transformer structural test exists).** |
-| **Boogu-Image 0.1 (Base / Turbo)** | 10B OmniGen2/Lumina-2 lineage + Qwen3-VL-8B vision tower (built). **TODO: download fp8/GGUF + e2e generation test (only a structural test exists).** |
+| **Boogu-Image 0.1 (Base / Turbo)** | 10B OmniGen2/Lumina-2 lineage + Qwen3-VL-8B (built). fp8 downloaded + TestPaths added. **TODO: write e2e test (needs OmniGen2 instruction-encode: 1-layer MLLM tap `mean` + template). ⚠ `BooguImageCheckpointConverter` likely has the SAME fp8 `.weight_scale`-companion remap bug Krea-2 had — check it renames scale keys alongside weight keys.** |
 
 ## Edit / image-conditioned variants (🔧 — to download + e2e test)
 

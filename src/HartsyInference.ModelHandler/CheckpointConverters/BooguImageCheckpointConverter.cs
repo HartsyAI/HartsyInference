@@ -25,7 +25,10 @@ public sealed class BooguImageCheckpointConverter
         return LoadShards(shards, 2200, StripTransformerPrefix);
     }
 
-    /// <summary>Loads the FLUX VAE from <c>{root}/vae/</c> (diffusers keys, consumed directly by <c>VaeEncoder</c>/<c>VaeDecoder</c> + <c>VaeConfig.Flux</c>).</summary>
+    /// <summary>Loads the FLUX.1 VAE from <c>{root}/vae/</c>. Boogu ships the Comfy/ldm single-file VAE
+    /// (<c>flux1_vae_bf16.safetensors</c>) with bare ldm keys (<c>decoder.mid.block_1.*</c>, <c>encoder.down.*</c>),
+    /// so each key is remapped to the diffusers convention via <see cref="CheckpointConvertUtils.ConvertVaeKey"/>
+    /// for <c>VaeEncoder</c>/<c>VaeDecoder</c> + <c>VaeConfig.Flux</c>.</summary>
     public static (Dictionary<string, Tensor> Weights, IReadOnlyList<SafeTensorsLoader> Loaders) LoadVae(string rootPath)
     {
         string dir = Path.Combine(rootPath, "vae");
@@ -35,7 +38,7 @@ public sealed class BooguImageCheckpointConverter
         if (shards.Length == 0)
             throw new FileNotFoundException($"No VAE .safetensors found under {dir}.");
         Array.Sort(shards);
-        return LoadShards(shards, 400, k => k);
+        return LoadShardsRemap(shards, 400, k => CheckpointConvertUtils.ConvertVaeKey(k));
     }
 
     /// <summary>Loads + remaps the Qwen3-VL-8B language tower from <c>{root}/mllm/</c> to the <c>LlamaStyleEncoder</c>
