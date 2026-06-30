@@ -17,6 +17,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **Flux Dev / Schnell / Krea** | ✅ | Photoreal across all three. |
 | **Z-Image Turbo / Base** | ✅ | Clean photoreal; 8 plumbing bugs fixed (PHASE_3_DEVIATIONS #25-30). |
 | **Flux.2 Klein 4B** | ✅ | Clean astronaut. |
+| **AuraFlow v0.3** | ✅ | Clean on-prompt horse+rider @1024 (`calcuis/aura` fp8). Two fixes: Pile-T5-XL attn scale 1.0 + correct `pile_t5xl_spiece.model` tokenizer. See PARITY §Bugs. |
 
 ## Numerically verified, full e2e pending (🔬)
 
@@ -33,7 +34,6 @@ per-model architecture notes and build plans.
 | Model | Notes |
 |---|---|
 | **Flux.2 Dev (32B)** | Needs GGUF Q4 + per-block streaming to fit 12 GB. |
-| **AuraFlow v0.3** | Full impl + diff harness; awaits checkpoint. |
 | **Qwen-Image** | Dual-stream DiT + 3-axis RoPE + Qwen2.5-VL encode; awaits ≥22 GB VRAM or Q4_K GGUF. |
 | **Chroma / ChromaRadiance / ZetaChroma** | T5-only pipelines; await `chroma_v1.safetensors` + variants. |
 | **ERNIE-Image** | Ministral-3B encoder via `LlamaStyleEncoder`; awaits ≥14 GB VRAM or Q4_K GGUF. |

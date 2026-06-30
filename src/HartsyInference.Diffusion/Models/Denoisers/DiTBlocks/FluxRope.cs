@@ -91,26 +91,26 @@ public sealed unsafe class FluxRope
         if (_cosCache == null || _sinCache == null)
             throw new InvalidOperationException("FluxRope.Precompute must be called before Forward.");
 
-        int halfDim = _headDim / 2;
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
+        // DIAGNOSTIC (HARTSY_SKIP_ROPE=1): skip rope entirely to isolate the D2H-sync-barrier cost from GPU work.
+        if (Environment.GetEnvironmentVariable("HARTSY_SKIP_ROPE") == "1") return;
 
+        int halfDim = _headDim / 2;
+        // q/k are [B, numHeads, seqLen, headDim]; each (b,h,s) vector rotates independently → parallelize over
+        // the flattened b*h*s space. Single-threaded this loop dominates DiT inference (billions of element-ops
+        // per forward across all blocks); identical math, so verified models (Flux/Ideogram) stay bit-exact.
+        nint qBase = (nint)q.DataPointer, kBase = (nint)k.DataPointer;
+        long rows = (long)batch * numHeads * seqLen;
         fixed (float* cosPtr = _cosCache, sinPtr = _sinCache)
         {
-            for (int b = 0; b < batch; b++)
+            nint cosBase = (nint)cosPtr, sinBase = (nint)sinPtr;
+            System.Threading.Tasks.Parallel.For(0, rows, row =>
             {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    for (int s = 0; s < seqLen; s++)
-                    {
-                        int vecOffset = ((b * numHeads + h) * seqLen + s) * _headDim;
-                        int freqIdx = s * halfDim;
-
-                        ApplyRotation(qPtr + vecOffset, cosPtr + freqIdx, sinPtr + freqIdx, halfDim);
-                        ApplyRotation(kPtr + vecOffset, cosPtr + freqIdx, sinPtr + freqIdx, halfDim);
-                    }
-                }
-            }
+                long s = row % seqLen;
+                int vecOffset = (int)(row * _headDim);
+                int freqIdx = (int)(s * halfDim);
+                ApplyRotation((float*)qBase + vecOffset, (float*)cosBase + freqIdx, (float*)sinBase + freqIdx, halfDim);
+                ApplyRotation((float*)kBase + vecOffset, (float*)cosBase + freqIdx, (float*)sinBase + freqIdx, halfDim);
+            });
         }
     }
 
@@ -123,16 +123,17 @@ public sealed unsafe class FluxRope
             throw new InvalidOperationException("FluxRope.Precompute must be called before ForwardSingle.");
 
         int halfDim = _headDim / 2;
-        float* ptr = (float*)qOrK.DataPointer;
+        nint ptrBase = (nint)qOrK.DataPointer;
+        long rows = (long)batch * numHeads * seqLen;
         fixed (float* cosPtr = _cosCache, sinPtr = _sinCache)
         {
-            for (int b = 0; b < batch; b++)
-                for (int h = 0; h < numHeads; h++)
-                    for (int s = 0; s < seqLen; s++)
-                    {
-                        int vecOffset = ((b * numHeads + h) * seqLen + s) * _headDim;
-                        ApplyRotation(ptr + vecOffset, cosPtr + s * halfDim, sinPtr + s * halfDim, halfDim);
-                    }
+            nint cosBase = (nint)cosPtr, sinBase = (nint)sinPtr;
+            System.Threading.Tasks.Parallel.For(0, rows, row =>
+            {
+                long s = row % seqLen;
+                int vecOffset = (int)(row * _headDim);
+                ApplyRotation((float*)ptrBase + vecOffset, (float*)cosBase + (int)(s * halfDim), (float*)sinBase + (int)(s * halfDim), halfDim);
+            });
         }
     }
 

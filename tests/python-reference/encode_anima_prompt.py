@@ -26,7 +26,10 @@ from transformers import AutoTokenizer
 from transformers.models.qwen3 import Qwen3Config, Qwen3Model
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-WEIGHTS = os.path.join(REPO_ROOT, "Models/text_encoders/qwen_3_600m.safetensors")
+# Local checkpoint name; falls back to the historical SwarmUI name if the symlink differs.
+_W1 = os.path.join(REPO_ROOT, "Models/text_encoders/qwen_3_06b_base.safetensors")
+_W2 = os.path.join(REPO_ROOT, "Models/text_encoders/qwen_3_600m.safetensors")
+WEIGHTS = _W1 if os.path.exists(_W1) else _W2
 TOKENIZER_DIR = os.path.join(REPO_ROOT, "Models/Tokenizers/Qwen3")
 T5_SPM = os.path.join(REPO_ROOT, "Models/Tokenizers/T5/t5_xxl_spiece.model")
 OUT_DIR = os.path.join(REPO_ROOT, "Models/Stable-Diffusion/Anima/TestEmbeddings")
@@ -69,8 +72,19 @@ def main():
     # ── 1. Load tokenizer ──
     print(f"\nLoading tokenizer from {TOKENIZER_DIR}")
     tok = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
-    pos_ids = tok(prompt, return_tensors="pt", add_special_tokens=True).input_ids
-    neg_ids = tok(neg_prompt, return_tensors="pt", add_special_tokens=True).input_ids
+
+    def encode_ids(text):
+        ids = tok(text, return_tensors="pt", add_special_tokens=True).input_ids
+        # Qwen3 has no BOS; an empty string yields a zero-length sequence which crashes the
+        # attention-mask builder and gives the DiT cross-attn no K/V. The CFG unconditional
+        # branch needs at least one token, so fall back to a single <|endoftext|> (151643).
+        if ids.shape[1] == 0:
+            eos = tok.eos_token_id if tok.eos_token_id is not None else 151643
+            ids = torch.tensor([[eos]], dtype=torch.long)
+        return ids
+
+    pos_ids = encode_ids(prompt)
+    neg_ids = encode_ids(neg_prompt)
     print(f"  pos ids: {pos_ids.shape} = {pos_ids.tolist()}")
     print(f"  neg ids: {neg_ids.shape} = {neg_ids.tolist()}")
 

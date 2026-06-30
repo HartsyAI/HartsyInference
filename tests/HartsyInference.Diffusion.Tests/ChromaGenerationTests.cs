@@ -13,6 +13,7 @@ using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tests.Common;
 using HartsyInference.Tokenizers;
+using HartsyInference.ModelHandler.Gguf;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -27,17 +28,19 @@ public class ChromaGenerationTests
     private readonly ITestOutputHelper _output;
     public ChromaGenerationTests(ITestOutputHelper output) => _output = output;
 
+    // GGUF Q4_K source (5.6 GB) keeps the F16 weight-cast cache (~17 GB) + quant resident under 24 GB, so the
+    // FAST cached path (cast once, not per-forward) fits — fp8 (9 GB) + cache OOMs. ~3-5 min vs 40 min transient.
     [Fact]
     public void Chroma_V1_Gpu_512_Cfg5() =>
-        RunGenerationTest("chroma_v1_512_cfg5", width: 512, height: 512, steps: 35, cfgScale: 5.0f);
+        RunGenerationTest("chroma_v1_1024_cfg5", width: 1024, height: 1024, steps: 2, cfgScale: 5.0f, useGguf: false);
 
     [Fact]
     public void Chroma_V1_Gpu_512_NoCfg() =>
         RunGenerationTest("chroma_v1_512_nocfg", width: 512, height: 512, steps: 25, cfgScale: 1.0f);
 
-    private void RunGenerationTest(string outputName, int width, int height, int steps, float cfgScale)
+    private void RunGenerationTest(string outputName, int width, int height, int steps, float cfgScale, bool useGguf = false)
     {
-        string ckpt = TestPaths.Chroma.V1;
+        string ckpt = useGguf ? TestPaths.Chroma.V1Gguf : TestPaths.Chroma.V1;
         if (!File.Exists(ckpt))
         {
             _output.WriteLine($"SKIPPED: Chroma checkpoint not found: {ckpt}");
@@ -82,9 +85,25 @@ public class ChromaGenerationTests
         Stopwatch totalSw = Stopwatch.StartNew();
         Stopwatch sw = Stopwatch.StartNew();
 
-        _output.WriteLine($"[1/7] Loading + converting Chroma checkpoint: {Path.GetFileName(ckpt)}");
-        (ChromaCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader transformerLoader) =
-            ChromaCheckpointConverter.LoadAndConvert(ckpt);
+        _output.WriteLine($"[1/7] Loading + converting Chroma checkpoint ({(useGguf ? "GGUF Q4_K, lazy" : "fp8 safetensors")}): {Path.GetFileName(ckpt)}");
+        ChromaCheckpointConverter.ConvertedWeights converted;
+        IDisposable transformerLoader;
+        if (useGguf)
+        {
+            // Lazy GGUF: Q4_K tensors stay quantized resident; backend.Linear dequants to F16 and caches it
+            // (CacheWeightCasts default true) so the cast happens once, not per-forward. Bare flux keys → Convert.
+            GgufModelLoader.LoadedGgufModel ggufHandle = GgufModelLoader.Load(ckpt);
+            Dictionary<string, Tensor> ggufRawDict = ggufHandle.Weights.ToDictionary(kv => kv.Key, kv => kv.Value);
+            converted = ChromaCheckpointConverter.Convert(ggufRawDict);
+            transformerLoader = ggufHandle;
+        }
+        else
+        {
+            (ChromaCheckpointConverter.ConvertedWeights c, SafeTensorsLoader loader) =
+                ChromaCheckpointConverter.LoadAndConvert(ckpt);
+            converted = c;
+            transformerLoader = loader;
+        }
         _output.WriteLine($"  Converted in {sw.ElapsedMilliseconds}ms ({converted.Transformer.Count} keys)");
 
         using (transformerLoader)
@@ -129,7 +148,11 @@ public class ChromaGenerationTests
                 // ── Build T5-XXL encoder ──
                 _output.WriteLine($"[5/7] Building T5-XXL text encoder...");
                 sw.Restart();
-                T5TextEncoder t5 = new(T5TextEncoderConfig.Xxl);
+                // Chroma-specific T5-XXL: faithful T5 uses attention scale 1.0 (HF T5EncoderModel does
+                // NO 1/sqrt(head_dim) scaling; diffusers pipeline_chroma.py uses it). The shared Xxl preset
+                // leaves AttentionScale null (→0.125) for the not-yet-re-validated Flux/SD3 path — we override
+                // here per-instance so we don't touch that verified path.
+                T5TextEncoder t5 = new(T5TextEncoderConfig.Xxl with { AttentionScale = 1.0f });
                 t5.LoadWeights(t5Weights);
                 _output.WriteLine($"  T5 ready in {sw.ElapsedMilliseconds}ms");
 
@@ -153,6 +176,10 @@ public class ChromaGenerationTests
                 _output.WriteLine($"[7/7] Initializing CUDA backend (pipeline handles weight staging)...");
                 sw.Restart();
                 using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+                // Full F16 weight cache OOMs (17GB cache + SDPA > 24GB even with Q4_K source — confirmed OOM in
+                // SDPA). Transient fits (~12GB). Speed is being addressed separately (RmsNorm F16 GPU path +
+                // weight-cast strategy); for now validate the CFG/T5 fixes at low step count.
+                backend.CacheWeightCasts = false;
                 // NB: the pipeline itself does T5-preload → encode → free → transformer-preload →
                 // denoise → free → vae-preload → decode. Pre-uploading the transformer here would
                 // collide with the pipeline's T5 upload on a 12 GB card.

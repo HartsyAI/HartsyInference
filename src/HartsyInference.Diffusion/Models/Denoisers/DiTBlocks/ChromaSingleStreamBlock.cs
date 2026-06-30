@@ -88,55 +88,57 @@ public sealed unsafe class ChromaSingleStreamBlock
     /// <param name="temb">Modulation slice [B, 3, hidden] (shift, scale, gate).</param>
     /// <param name="rope">Precomputed FluxRope for the joint sequence.</param>
     /// <param name="attentionMask">Optional [B, totalSeqLen] mask (1=keep, 0=mask).</param>
+    // GPU-residency rewrite (Chroma-only): all glue runs as IBackend GPU ops; only RoPE stays on the CPU
+    // (interleaved/GPT-J convention, no CUDA kernel — ~5s/run). Mirrors ChromaDoubleStreamBlock; batch is always 1
+    // for Chroma. Full plan: docs/Checklists/TODO_CHROMA_GPU_RESIDENCY.md
     public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? attentionMask)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
+        float scale = 1.0f / MathF.Sqrt(_headDim);
 
-        // ── 1. Slice modulation rows ──
+        // ── 1. Slice modulation rows (CPU; tiny [B, hidden] tensors): shift, scale, gate ──
         Tensor[] mod = SliceModRows(temb, batch, rowCount: 3);
 
-        // ── 2. LayerNorm (no affine) + modulate ──
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
-        Tensor normed = new Tensor(shape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, _hiddenSize);
-        Tensor modulated = AdaLNModulation.ApplyModulation(normed, mod[0], mod[1], batch, seqLen, _hiddenSize);
-        normed.Dispose();
-
-        // ── 3. Q/K/V + MLP projection (parallel) ──
-        Tensor q = new Tensor(shape, DType.F32);
-        backend.Linear(q, modulated, _toQWeight!, _toQBias);
-        Tensor k = new Tensor(shape, DType.F32);
-        backend.Linear(k, modulated, _toKWeight!, _toKBias);
-        Tensor v = new Tensor(shape, DType.F32);
-        backend.Linear(v, modulated, _toVWeight!, _toVBias);
+        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpDim);
+
+        // ── 2. LayerNorm (no affine) + modulate: x*(1+scale)+shift ──
+        Tensor modulated = NormModulate(backend, x, mod[0], mod[1], shape);
+
+        // ── 3. Q/K/V + MLP projection (parallel). Q/K/V declared [B, S, H, D] for per-head RMSNorm ──
+        Tensor q = new Tensor(heads, DType.F32);
+        backend.Linear(q, modulated, _toQWeight!, _toQBias);
+        Tensor k = new Tensor(heads, DType.F32);
+        backend.Linear(k, modulated, _toKWeight!, _toKBias);
+        Tensor v = new Tensor(heads, DType.F32);
+        backend.Linear(v, modulated, _toVWeight!, _toVBias);
         Tensor mlpInput = new Tensor(mlpShape, DType.F32);
         backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();
 
-        // ── 4. QK-Norm ──
-        int totalVectors = batch * seqLen * _numHeads;
-        Tensor qNormed = new Tensor(q.Shape, DType.F32);
-        Tensor kNormed = new Tensor(k.Shape, DType.F32);
-        _normQ.Forward(qNormed, q, totalVectors);
-        _normK.Forward(kNormed, k, totalVectors);
+        // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
+        Tensor qNormed = new Tensor(heads, DType.F32);
+        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
+        Tensor kNormed = new Tensor(heads, DType.F32);
+        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
-        // ── 5. Reshape to multi-head ──
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        // ── 5. Permute [B, S, H, D] → [B, H, S, D] ──
         Tensor qMh = new Tensor(mhShape, DType.F32);
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        Tensor vMh = new Tensor(mhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(qMh, qNormed, batch, seqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(kMh, kNormed, batch, seqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
         qNormed.Dispose();
+        Tensor kMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
         kNormed.Dispose();
+        Tensor vMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         v.Dispose();
 
-        // ── 6. RoPE ──
+        // ── 6. RoPE (CPU FluxRope — interleaved convention; see class note) ──
         rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
 
         // ── 7. SDPA (with optional mask) ──
@@ -144,7 +146,6 @@ public sealed unsafe class ChromaSingleStreamBlock
             ? BuildSdpaMask(attentionMask, batch, seqLen)
             : null;
 
-        float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, sdpaMask, scale);
         qMh.Dispose();
@@ -152,9 +153,9 @@ public sealed unsafe class ChromaSingleStreamBlock
         vMh.Dispose();
         sdpaMask?.Dispose();
 
-        // ── 8. Reshape attention back to [B, S, hidden] ──
+        // ── 8. Permute attention back [B, H, S, D] → [B, S, hidden] ──
         Tensor attnFlat = new Tensor(shape, DType.F32);
-        DiTUtils.ReshapeFromMultiHead(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
         // ── 9. GELU(tanh) on MLP input ──
@@ -162,11 +163,11 @@ public sealed unsafe class ChromaSingleStreamBlock
         backend.Gelu(mlpActivated, mlpInput);
         mlpInput.Dispose();
 
-        // ── 10. Concat [attn, gelu(mlp)] → proj_out ──
+        // ── 10. Concat [attn, gelu(mlp)] along the feature dim → proj_out ──
         int concatDim = _hiddenSize + _mlpDim;
         TensorShape concatShape = new TensorShape(batch, seqLen, concatDim);
         Tensor concatted = new Tensor(concatShape, DType.F32);
-        ConcatAlongFeatureDim(concatted, attnFlat, mlpActivated, batch, seqLen, _hiddenSize, _mlpDim);
+        backend.Concat(concatted, new Tensor[] { attnFlat, mlpActivated }, 2);
         attnFlat.Dispose();
         mlpActivated.Dispose();
 
@@ -175,12 +176,28 @@ public sealed unsafe class ChromaSingleStreamBlock
         concatted.Dispose();
 
         // ── 11. Gated residual: x = x + gate * proj_out ──
-        Tensor result = AdaLNModulation.ApplyGatedResidual(x, projected, mod[2], batch, seqLen, _hiddenSize);
+        Tensor result = new Tensor(shape, DType.F32);
+        backend.GatedResidualLastDim(result, x, projected, mod[2]);
         projected.Dispose();
 
         for (int i = 0; i < mod.Length; i++) mod[i].Dispose();
 
         return result;
+    }
+
+    /// <summary>LayerNorm (no affine, eps=1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c> on the
+    /// GPU. <c>AffineBroadcastLastDim</c> is <c>x*scale+shift</c>, so the scale is pre-incremented by 1.</summary>
+    private static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
+    {
+        Tensor normed = new Tensor(shape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, 1e-6f);
+        Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        Tensor output = new Tensor(shape, DType.F32);
+        backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
+        normed.Dispose();
+        scalePlus1.Dispose();
+        return output;
     }
 
     private static Tensor[] SliceModRows(Tensor temb, int batch, int rowCount)
@@ -232,29 +249,5 @@ public sealed unsafe class ChromaSingleStreamBlock
             }
         }
         return outMask;
-    }
-
-    private static void ConcatAlongFeatureDim(Tensor output, Tensor first, Tensor second,
-        int batch, int seqLen, int firstDim, int secondDim)
-    {
-        float* firstPtr = (float*)first.DataPointer;
-        float* secondPtr = (float*)second.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int totalDim = firstDim + secondDim;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int outOffset = (b * seqLen + s) * totalDim;
-                int firstOffset = (b * seqLen + s) * firstDim;
-                int secondOffset = (b * seqLen + s) * secondDim;
-
-                Buffer.MemoryCopy(firstPtr + firstOffset, outPtr + outOffset,
-                    firstDim * sizeof(float), firstDim * sizeof(float));
-                Buffer.MemoryCopy(secondPtr + secondOffset, outPtr + outOffset + firstDim,
-                    secondDim * sizeof(float), secondDim * sizeof(float));
-            }
-        }
     }
 }

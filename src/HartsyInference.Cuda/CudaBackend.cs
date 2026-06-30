@@ -56,6 +56,13 @@ public sealed class CudaBackend : IBackend
     /// <summary>Opt-in flag for the native cuBLASLt FP8 GEMM path on Ada+ (SM 8.9+) GPUs. Defaults to <c>false</c> — on Ampere and below the path is unsupported and the existing cast-to-F16 fallback is correct. The native path is gated on this flag because it has not been end-to-end validated on Ada hardware in CI; flip on after benchmarking against the F16 fallback.</summary>
     public bool EnableNativeFp8Gemm { get; set; }
 
+    /// <summary>Low-VRAM lever. When <c>true</c> (default) the per-weight fp8/quant→F16 GEMM cast is computed
+    /// once and kept resident for every preloaded/uploaded weight — fastest, but it keeps BOTH the fp8 weight
+    /// (~1 byte/param) and its F16 cast (~2 bytes/param) on the device, ≈3× the fp8 footprint. Set <c>false</c>
+    /// to force the transient path (one weight cast at a time, freed per GEMM): ~3× less weight VRAM at the cost
+    /// of re-casting each step. Needed to fit large fp8 DiTs (e.g. AuraFlow 6.8B) on a single 24 GB card.</summary>
+    public bool CacheWeightCasts { get; set; } = true;
+
     /// <summary>Lazily-initialized FP8 GEMM executor. Exposed for diagnostic and benchmarking callers; production GEMM dispatch goes through <see cref="MatMul"/> / <see cref="Linear"/>.</summary>
     public Fp8GemmExecutor Fp8Executor
     {
@@ -329,7 +336,7 @@ public sealed class CudaBackend : IBackend
             {
                 weightPtr = pWeight;
             }
-            else if (cacheWeightCast && !hipUpcast && GpuTransferHelper.IsWeightCached(weight))
+            else if (cacheWeightCast && CacheWeightCasts && !hipUpcast && GpuTransferHelper.IsWeightCached(weight))
             {
                 if (!GpuTransferHelper.TryGetWeightCast(weight, out weightPtr))
                 {
@@ -856,22 +863,62 @@ public sealed class CudaBackend : IBackend
             return;
         }
 
-        // CPU fallback for non-F32 (DataPointer access triggers lazy D2H for cached tensors).
-        float* pInCpu = (float*)input.DataPointer;
-        float* pOutCpu = (float*)output.DataPointer;
-        float* pWeightCpu = (float*)weight.DataPointer;
-        for (long outer = 0; outer < outerSize; outer++)
+        // GPU path for non-F32 input/weight: cast operands to F32 on-device, run the F32 RMSNorm kernel, cast
+        // the result back to the output dtype. This replaces a CPU loop over millions of activation elements
+        // per norm (with a blocking D2H sync) that was the dominant cost of the fp8/quant DiT path — dozens of
+        // norms per block × tens of blocks × every forward. Same math as the F32 kernel, so numerically matches.
+        EnsureKernels();
         {
-            long baseIdx = outer * lastDim;
-            float sumSq = 0f;
-            for (long i = 0; i < lastDim; i++)
+            ulong pIn = 0, pWeight = 0, pInF32 = 0, pWeightF32 = 0, pOutF32 = 0, pOut = 0;
+            bool cachedOutput = false;
+            try
             {
-                float val = pInCpu[baseIdx + i];
-                sumSq += val * val;
+                pIn = GpuTransferHelper.CopyToDevice(input);
+                pWeight = GpuTransferHelper.CopyToDevice(weight);
+
+                ulong inF32 = pIn;
+                if (input.DType != DType.F32)
+                {
+                    pInF32 = CudaMemory.Allocate((nuint)(input.ElementCount * 4));
+                    CastOnGpu(pInF32, pIn, input.DType, DType.F32, (int)input.ElementCount);
+                    inF32 = pInF32;
+                }
+                ulong wF32 = pWeight;
+                if (weight.DType != DType.F32)
+                {
+                    pWeightF32 = CudaMemory.Allocate((nuint)(weight.ElementCount * 4));
+                    CastOnGpu(pWeightF32, pWeight, weight.DType, DType.F32, (int)weight.ElementCount);
+                    wF32 = pWeightF32;
+                }
+
+                if (output.DType == DType.F32)
+                {
+                    nuint outBytes = GpuTransferHelper.ByteSize(output);
+                    pOut = GpuTransferHelper.AllocateDevice(outBytes);
+                    _kernels!.LaunchRmsNorm(pOut, inF32, wF32, (int)lastDim, (int)outerSize, eps, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+                    cachedOutput = true;
+                }
+                else
+                {
+                    pOutF32 = CudaMemory.Allocate((nuint)(output.ElementCount * 4));
+                    _kernels!.LaunchRmsNorm(pOutF32, inF32, wF32, (int)lastDim, (int)outerSize, eps, _stream.Handle);
+                    nuint outBytes = GpuTransferHelper.ByteSize(output);
+                    pOut = GpuTransferHelper.AllocateDevice(outBytes);
+                    CastOnGpu(pOut, pOutF32, DType.F32, output.DType, (int)output.ElementCount);
+                    GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+                    cachedOutput = true;
+                }
             }
-            float invRms = 1.0f / MathF.Sqrt(sumSq / lastDim + eps);
-            for (long i = 0; i < lastDim; i++)
-                pOutCpu[baseIdx + i] = pInCpu[baseIdx + i] * invRms * pWeightCpu[i];
+            finally
+            {
+                if (pInF32 != 0) GpuTransferHelper.FreeDevice(pInF32);
+                if (pWeightF32 != 0) GpuTransferHelper.FreeDevice(pWeightF32);
+                if (pOutF32 != 0) GpuTransferHelper.FreeDevice(pOutF32);
+                if (!cachedOutput && pOut != 0) GpuTransferHelper.FreeDevice(pOut);
+                GpuTransferHelper.FreeDevice(pIn);
+                GpuTransferHelper.FreeDevice(pWeight);
+            }
         }
     }
 
@@ -3008,6 +3055,9 @@ public sealed class CudaBackend : IBackend
         if (!_disposed)
         {
             _disposed = true;
+
+            if (NvtxRange.ProfileEnabled)
+                NvtxRange.DumpProfile(Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt");
 
             // Bind context on the disposing thread so cuMemFree / cublasDestroy /
             // cuStreamDestroy don't hit CUDA_ERROR_INVALID_CONTEXT. Disposal can run

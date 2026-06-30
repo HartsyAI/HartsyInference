@@ -34,7 +34,7 @@ public class AuraFlowGenerationTests
 
     [Fact]
     public void AuraFlow_V03_Gpu_512_Cfg() =>
-        RunGenerationTest("auraflow_v03_512_cfg", width: 512, height: 512, steps: 28, cfgScale: 3.5f);
+        RunGenerationTest("auraflow_v03_1024_cfg", width: 1024, height: 1024, steps: 28, cfgScale: 3.5f);
 
     private void RunGenerationTest(string outputName, int width, int height, int steps, float cfgScale)
     {
@@ -192,7 +192,11 @@ public class AuraFlowGenerationTests
                 _output.WriteLine($"[7/7] Initializing CUDA backend + preloading transformer...");
                 sw.Restart();
                 using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
-                backend.PreloadWeights(transformer.EnumerateWeights());
+                // AuraFlow 6.8B fp8 + Pile-T5-XL exceeds 24 GB if every weight keeps a resident F16 cast.
+                // Low-VRAM mode: transient per-GEMM weight cast (one at a time, freed) keeps it ~9 GB.
+                backend.CacheWeightCasts = false;
+                // (Preload would re-introduce the resident cast, so it stays off here.)
+                // backend.PreloadWeights(transformer.EnumerateWeights());
                 _output.WriteLine($"  Backend ready in {sw.ElapsedMilliseconds}ms (device: {backend.Capabilities.Name})");
 
                 using AuraFlowPipeline pipeline = new(backend, t5, transformer, vae, config);

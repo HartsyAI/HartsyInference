@@ -7,6 +7,7 @@ namespace HartsyInference.Diffusion.Schedulers;
 public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
 {
     private readonly float _shift;
+    private readonly float? _shiftTerminal;
     private float[] _sigmas;
     private float[] _timesteps;
     private int _numInferenceSteps;
@@ -28,9 +29,12 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
 
     /// <summary>Creates a flow-match Euler scheduler with the specified shift value.</summary>
     /// <param name="shift">Schedule shift parameter. 3.0 for SD3 Medium, dynamic for Flux.</param>
-    public FlowMatchEulerDiscreteScheduler(float shift = 3.0f)
+    /// <param name="shiftTerminal">Optional terminal sigma to stretch the schedule's last non-zero step to
+    /// (diffusers <c>shift_terminal</c>). Qwen-Image sets 0.02; Flux/SD3 leave it null (no stretch).</param>
+    public FlowMatchEulerDiscreteScheduler(float shift = 3.0f, float? shiftTerminal = null)
     {
         _shift = shift;
+        _shiftTerminal = shiftTerminal;
         _sigmas = Array.Empty<float>();
         _timesteps = Array.Empty<float>();
     }
@@ -53,6 +57,19 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
             // Apply shift: sigma = shift * t / (1 + (shift - 1) * t)
             float sigma = _shift * t / (1.0f + (_shift - 1.0f) * t);
             _sigmas[i] = sigma;
+        }
+
+        // Optional terminal stretch (diffusers stretch_shift_to_terminal): rescale the non-zero sigmas so the
+        // last one lands exactly on shiftTerminal, keeping sigma[0]≈1. Index N stays the appended terminal 0.
+        // one_minus_z = 1 - sigma; scale = one_minus_z[last] / (1 - shiftTerminal); sigma = 1 - one_minus_z/scale.
+        if (_shiftTerminal is float terminal && numInferenceSteps > 0)
+        {
+            float oneMinusLast = 1.0f - _sigmas[numInferenceSteps - 1];
+            float scale = oneMinusLast / (1.0f - terminal);
+            for (int i = 0; i < numInferenceSteps; i++)
+            {
+                _sigmas[i] = 1.0f - (1.0f - _sigmas[i]) / scale;
+            }
         }
 
         // Timesteps are sigmas scaled to 0-1000 range (for model conditioning)
@@ -105,12 +122,14 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     /// <param name="maxSeqLen">Max sequence length for shift calculation. Default: 4096.</param>
     /// <param name="baseShift">Base shift value. Default: 0.5.</param>
     /// <param name="maxShift">Max shift value. Default: 1.15.</param>
+    /// <param name="shiftTerminal">Optional diffusers <c>shift_terminal</c> (Qwen-Image 0.02); null for Flux.</param>
     public static FlowMatchEulerDiscreteScheduler CreateWithDynamicShift(
         int imageSeqLen,
         int baseSeqLen = 256,
         int maxSeqLen = 4096,
         float baseShift = 0.5f,
-        float maxShift = 1.15f)
+        float maxShift = 1.15f,
+        float? shiftTerminal = null)
     {
         // Linear interpolation of mu based on image sequence length
         float m = (maxShift - baseShift) / (maxSeqLen - baseSeqLen);
@@ -120,6 +139,6 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         // Flux uses exponential shift: shift = exp(mu)
         float shift = MathF.Exp(mu);
 
-        return new FlowMatchEulerDiscreteScheduler(shift);
+        return new FlowMatchEulerDiscreteScheduler(shift, shiftTerminal);
     }
 }
