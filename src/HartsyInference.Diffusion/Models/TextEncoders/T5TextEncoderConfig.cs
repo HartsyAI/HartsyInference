@@ -98,6 +98,7 @@ public sealed record T5TextEncoderConfig
         NumLayers = 24,
         VocabSize = 32128,
         UsePerLayerPositionBias = true,
+        AttentionScale = 1.0f,   // faithful T5/Pile-T5: no 1/sqrt(head_dim) scaling (matches T5Base).
     };
 
     /// <summary>umT5-base encoder preset (`google/umt5-base`) used by ACE-Step's style/genre conditioning — 12 layers,

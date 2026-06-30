@@ -11,6 +11,7 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.Gguf;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tests.Common;
 using HartsyInference.Tokenizers;
@@ -28,9 +29,15 @@ public class QwenImageGenerationTests
     public void QwenImage_V1_Gpu_512_NoCfg_Smoke() =>
         RunGenerationTest("qwen_image_v1_512_smoke", width: 512, height: 512, steps: 8, cfgScale: 1.0f);
 
-    private void RunGenerationTest(string outputName, int width, int height, int steps, float cfgScale)
+    /// <summary>Real e2e via the Q4_K_M GGUF (~13 GB) — fits the 4090 where the 20 GB fp8 single-file does not.
+    /// 1024-native, true-CFG. This is the runnable Qwen-Image path on 24 GB hardware.</summary>
+    [Fact]
+    public void QwenImage_V1_Gpu_1024_Cfg_Gguf() =>
+        RunGenerationTest("qwen_image_v1_1024_gguf", width: 1024, height: 1024, steps: 28, cfgScale: 4.0f, useGguf: true);
+
+    private void RunGenerationTest(string outputName, int width, int height, int steps, float cfgScale, bool useGguf = false)
     {
-        string transformerPath = TestPaths.QwenImage.V1;
+        string transformerPath = useGguf ? TestPaths.QwenImage.V1Gguf : TestPaths.QwenImage.V1;
         string textEncoderPath = TestPaths.QwenImage.TextEncoder;
         string vaePath = TestPaths.QwenImage.Vae;
 
@@ -61,9 +68,27 @@ public class QwenImageGenerationTests
         Stopwatch totalSw = Stopwatch.StartNew();
         Stopwatch sw = Stopwatch.StartNew();
 
-        _output.WriteLine($"[1/7] Loading + converting transformer: {Path.GetFileName(transformerPath)}");
-        (QwenImageCheckpointConverter.ConvertedWeights converted, SafeTensorsLoader transformerLoader) =
-            QwenImageCheckpointConverter.LoadAndConvert(transformerPath);
+        _output.WriteLine($"[1/7] Loading + converting transformer ({(useGguf ? "GGUF Q4_K, lazy" : "safetensors")}): {Path.GetFileName(transformerPath)}");
+        QwenImageCheckpointConverter.ConvertedWeights converted;
+        IDisposable transformerLoader;
+        if (useGguf)
+        {
+            // Lazy GGUF load (Flux pattern): keeps Q4_K/Q5_K/Q6_K tensors quantized; CudaBackend.Linear
+            // dequants per-GEMM on the GPU. Identity key-map → bare diffusers keys → converter. The GGUF is
+            // transformer-only, so converted.TextEncoder/.Vae come back empty and fall through to the standalone
+            // safetensors loads below. Handle must stay alive (mmap views) until LoadWeights copies to GPU.
+            GgufModelLoader.LoadedGgufModel ggufHandle = GgufModelLoader.Load(transformerPath);
+            Dictionary<string, Tensor> ggufRawDict = ggufHandle.Weights.ToDictionary(kv => kv.Key, kv => kv.Value);
+            converted = QwenImageCheckpointConverter.Convert(ggufRawDict);
+            transformerLoader = ggufHandle;
+        }
+        else
+        {
+            (QwenImageCheckpointConverter.ConvertedWeights c, SafeTensorsLoader loader) =
+                QwenImageCheckpointConverter.LoadAndConvert(transformerPath);
+            converted = c;
+            transformerLoader = loader;
+        }
         sw.Stop();
         _output.WriteLine($"  Converted in {sw.ElapsedMilliseconds}ms (transformer={converted.Transformer.Count}, " +
             $"text_encoder={converted.TextEncoder.Count}, vae={converted.Vae.Count})");
@@ -117,10 +142,12 @@ public class QwenImageGenerationTests
 
             (nuint freeBytes, nuint totalBytes) = backend.Context.GetMemoryInfo();
             double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-            const double MinRequiredGb = 22.0;
+            // GGUF Q4_K transformer stays ~7 GB resident (GPU dequant per-GEMM); the encoder loads+frees before
+            // denoise. FP8 single-file needs ~20 GB resident for the transformer alone.
+            double MinRequiredGb = useGguf ? 14.0 : 22.0;
             if (freeGb < MinRequiredGb)
             {
-                _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB to fit Qwen-Image at FP8 (transformer ~20 GB) + Qwen2.5-VL-7B + 16-channel VAE. The implementation is end-to-end ready; this test will run on a larger card or once a GGUF Q4_K Qwen-Image checkpoint is wired in (transformer ~6 GB → fits 12 GB).");
+                _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB. GGUF Q4_K path fits ~14 GB; FP8 single-file needs ~22 GB (transformer ~20 GB) + Qwen2.5-VL-7B + 16-channel VAE.");
                 transformer.Dispose();
                 textEncoder.Dispose();
                 return;

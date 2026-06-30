@@ -81,7 +81,7 @@ public static class TestPaths
         /// <summary>BF16 single-file from <c>fal/AuraFlow-v0.3</c>. Transformer-only — needs separate Pile-T5-XL.</summary>
         public static string V03         => Resolve("AURAFLOW_V03_PATH",       Path.Combine(ModelsDir, "Stable-Diffusion", "AuraFlow", "aura_flow_0.3.safetensors"));
         public static string PileT5XlDir => Resolve("PILE_T5_XL_DIR",          Path.Combine(ModelsDir, "text_encoders", "pile-t5-xl"));
-        public static string PileT5XlSpiece => Resolve("PILE_T5_XL_SPIECE",    Path.Combine(Tokenizers.T5XxlSpiece));  // UMT5 vocab compatible
+        public static string PileT5XlSpiece => Resolve("PILE_T5_XL_SPIECE",    Path.Combine(ModelsDir, "Tokenizers", "T5", "pile_t5xl_spiece.model"));  // Pile-T5 uses its OWN LLaMA-derived SentencePiece (vocab 32000) — NOT t5_xxl_spiece (different token ids). Fixes AuraFlow off-prompt conditioning.
         public static string Vae         => Resolve("AURAFLOW_VAE_PATH",       Path.Combine(ModelsDir, "VAE", "aura_vae.safetensors"));
         public static string SdxlVae     => Resolve("SDXL_VAE_PATH",           Path.Combine(ModelsDir, "VAE", "sdxl_vae.safetensors"));
     }
@@ -92,6 +92,8 @@ public static class TestPaths
     public static class Chroma
     {
         public static string V1          => Resolve("CHROMA_V1_PATH",          Path.Combine(ModelsDir, "Stable-Diffusion", "Chroma", "Chroma1-HD-fp8mixed-final.safetensors"));
+        /// <summary>Q4_K_M GGUF (`silveroxides/Chroma1-HD-GGUF`, 5.6 GB). Lets the FAST cached weight-cast path fit 24 GB where fp8+cache OOMs.</summary>
+        public static string V1Gguf      => Resolve("CHROMA_V1_GGUF",          Path.Combine(ModelsDir, "Stable-Diffusion", "Chroma", "Chroma1-HD-Q4_K_M.gguf"));
         public static string T5XxlSpiece => Tokenizers.T5XxlSpiece;
         /// <summary>Source for a 16-channel VAE — defaults to Flux Dev FP8 single-file (which bundles a Flux VAE under <c>vae.*</c> keys).</summary>
         public static string VaePath     => Resolve("CHROMA_VAE_PATH",         Vae.FluxVaeSource);
@@ -160,6 +162,8 @@ public static class TestPaths
     public static class QwenImage
     {
         public static string V1            => Resolve("QWEN_IMAGE_V1_PATH",     Path.Combine(ModelsDir, "Stable-Diffusion", "QwenImage", "qwen_image_v1.safetensors"));
+        /// <summary>Q4_K_M GGUF (QuantStack/Qwen-Image-GGUF) — ~13 GB, fits the 4090 where the 20 GB fp8 single-file does not. Bare diffusers keys, identity key-map.</summary>
+        public static string V1Gguf        => Resolve("QWEN_IMAGE_V1_GGUF",     Path.Combine(ModelsDir, "Stable-Diffusion", "QwenImage", "Qwen_Image-Q4_K_M.gguf"));
         public static string TextEncoder   => Resolve("QWEN_IMAGE_TE_PATH",     Path.Combine(ModelsDir, "text_encoders", "qwen2_5_vl_7b.safetensors"));
         public static string Vae           => Resolve("QWEN_IMAGE_VAE_PATH",    Path.Combine(ModelsDir, "VAE", "qwen_image_vae.safetensors"));
     }

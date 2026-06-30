@@ -27,8 +27,8 @@ public class ErnieImageGenerationTests
 
     [Fact]
     public void ErnieImage_V1_Gpu_512_NoCfg() =>
-        RunGenerationTest(TestPaths.ErnieImage.V1Dir, "ernie_image_v1_512_nocfg",
-            width: 512, height: 512, steps: 25, cfgScale: 1.0f);
+        RunGenerationTest(TestPaths.ErnieImage.V1Dir, "ernie_image_v1_1024_nocfg",
+            width: 1024, height: 1024, steps: 25, cfgScale: 1.0f);
 
     [Fact]
     public void ErnieImage_V1_Gpu_512_Cfg() =>
@@ -147,10 +147,18 @@ public class ErnieImageGenerationTests
                         _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB to fit ERNIE-Image FP16 transformer (~13.8 GB) + VAE + text encoder. Free up GPU memory or use a larger card. The implementation is end-to-end ready; this test will run when sufficient VRAM is available.");
                         return;
                     }
-                    backend.PreloadWeights(transformer.EnumerateWeights());
+                    // Low-VRAM: transient per-GEMM fp8→F16 weight cast (no resident F16 cache). Keeps the FP8
+                    // transformer ~8 GB resident instead of ~24 GB, so it fits the 4090. Same lever as AuraFlow/Chroma.
+                    backend.CacheWeightCasts = false;
                     _output.WriteLine($"  Backend ready in {sw.ElapsedMilliseconds}ms (device: {backend.Capabilities.Name})");
 
-                    using ErnieImagePipeline pipeline = new(backend, textEncoder, transformer, vae, config);
+                    // ERNIE's Flux2 VAE ships BatchNorm running stats (bn.running_mean/var, eps 1e-4); the
+                    // pipeline must un-normalize the latent with them before decode or the image is in the wrong
+                    // latent scale. Wire them through (skipped entirely if absent → previously a silent no-op).
+                    vaeWeights.TryGetValue("bn.running_mean", out Tensor? bnMean);
+                    vaeWeights.TryGetValue("bn.running_var", out Tensor? bnVar);
+                    using ErnieImagePipeline pipeline = new(backend, textEncoder, transformer, vae, config,
+                        vaeBnMean: bnMean, vaeBnVar: bnVar, vaeBnEps: 1e-4f);
 
                     TextToImageRequest request = new()
                     {

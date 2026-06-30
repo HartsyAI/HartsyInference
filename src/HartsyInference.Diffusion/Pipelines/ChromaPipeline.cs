@@ -268,8 +268,10 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // Touch txtSeqLen so the field isn't flagged unused (it remains for callers that need to introspect).
         _ = txtSeqLen;
 
-        // VALIDATION-PENDING: Chroma uses cond-anchored CFG (cond + scale*(cond - uncond)); verify combine vs reference pipeline_chroma.py.
-        Tensor output = CfgHelper.ApplyCfgCondAnchored(condNoise, uncondNoise, cfgScale);
+        // Chroma uses STANDARD uncond-anchored CFG: uncond + scale*(cond - uncond). Both diffusers
+        // pipeline_chroma.py and ComfyUI use this; the prior cond-anchored form over-guided by one (cond-uncond)
+        // unit (cfg behaved like cfg+1 → over-saturation). Verified against the reference implementations.
+        Tensor output = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
         uncondNoise.Dispose();
         condNoise.Dispose();
         return output;

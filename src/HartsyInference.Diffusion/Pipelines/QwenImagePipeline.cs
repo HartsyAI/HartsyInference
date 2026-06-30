@@ -98,8 +98,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         TensorShape packedShape = new TensorShape(1, imgSeqLen, patchDim);
 
+        // Qwen-Image scheduler constants (Qwen/Qwen-Image scheduler_config.json) — NOT Flux's defaults:
+        // max_image_seq_len 8192 (Flux 4096), max_shift 0.9 (Flux 1.15); base 256 / 0.5 match.
+        // shift_terminal 0.02 is applied inside SetTimesteps below.
         FlowMatchEulerDiscreteScheduler scheduler =
-            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen);
+            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(
+                imgSeqLen, baseSeqLen: 256, maxSeqLen: 8192, baseShift: 0.5f, maxShift: 0.9f, shiftTerminal: 0.02f);
         scheduler.SetTimesteps(steps);
 
         Tensor unpackedNoise = SeedGenerator.CreateNoise(latentShape, seed);

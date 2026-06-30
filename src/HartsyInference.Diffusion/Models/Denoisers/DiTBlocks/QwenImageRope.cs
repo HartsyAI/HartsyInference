@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>3-axis rotary positional embedding for Qwen-Image (<c>QwenEmbedRope</c>). Splits the head dimension into <c>(frame, height, width)</c> sub-bands (default <c>[16, 56, 56]</c>) and rotates each pair of features by <c>theta = position * (1 / base^(2k/axisDim))</c>. Image tokens are positioned at <c>[0, h, w]</c> for a single-frame layout (<c>scale_rope=False</c>: positions span <c>[0, H)</c> and <c>[0, W)</c>). Text tokens use linearly-increasing positions starting at <c>max(H, W)</c>, mirroring diffusers' <c>txt_freqs = pos_freqs[max_vid_index : max_vid_index + max_txt_seq_len]</c>. The two streams are rotated separately before joint-attention concatenation. Apply order matches Flux's complex polar interpretation: pairs are <c>(real, imag)</c> at indices <c>(2i, 2i+1)</c>.</summary>
+/// <summary>3-axis rotary positional embedding for Qwen-Image (<c>QwenEmbedRope</c>). Splits the head dimension into <c>(frame, height, width)</c> sub-bands (default <c>[16, 56, 56]</c>) and rotates each pair of features by <c>theta = position * (1 / base^(2k/axisDim))</c>. Image tokens use CENTERED positions <c>[0, h-(H-H//2), w-(W-W//2)]</c> for a single-frame layout (<c>scale_rope=True</c>, which diffusers hardcodes). Text tokens use linearly-increasing positions starting at <c>max(H//2, W//2)</c>, mirroring diffusers' <c>txt_freqs = pos_freqs[max_vid_index : max_vid_index + max_txt_seq_len]</c>. The two streams are rotated separately before joint-attention concatenation. Apply order matches Flux's complex polar interpretation: pairs are <c>(real, imag)</c> at indices <c>(2i, 2i+1)</c>.</summary>
 public sealed unsafe class QwenImageRope
 {
     private readonly int[] _axesDim;
@@ -35,11 +35,16 @@ public sealed unsafe class QwenImageRope
         float[] cosTable = new float[imgSeqLen * halfDim];
         float[] sinTable = new float[imgSeqLen * halfDim];
 
+        // scale_rope=True (diffusers QwenImageTransformer2DModel hardcodes it): spatial positions are CENTERED.
+        // height = row - (H - H//2), width = col - (W - W//2); frame axis stays 0 (not centered). For even dims
+        // this is row - H/2 / col - W/2. Centering matters for non-square images and the frame sub-band of cross-attn.
+        int hCenter = hPacked - hPacked / 2;
+        int wCenter = wPacked - wPacked / 2;
         for (int s = 0; s < imgSeqLen; s++)
         {
             int row = s / wPacked;
             int col = s - row * wPacked;
-            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: row, width: col);
+            FillTokenFreqs(cosTable, sinTable, s, frame: 0, height: row - hCenter, width: col - wCenter);
         }
 
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, imgSeqLen);
@@ -62,8 +67,9 @@ public sealed unsafe class QwenImageRope
     }
 
     /// <summary>Computes the position offset to use when calling <see cref="ApplyText"/>. Matches diffusers'
-    /// <c>scale_rope=False</c> mode where text starts at <c>max_vid_index = max(height, width)</c> after the image grid.</summary>
-    public static int ComputeTextPositionStart(int hPacked, int wPacked) => Math.Max(hPacked, wPacked);
+    /// <c>scale_rope=True</c> mode where text starts at <c>max_vid_index = max(height//2, width//2)</c>
+    /// (the centered image grid's max index), used as the single scalar across all three axes for text.</summary>
+    public static int ComputeTextPositionStart(int hPacked, int wPacked) => Math.Max(hPacked / 2, wPacked / 2);
 
     private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx,
         double frame, double height, double width)
