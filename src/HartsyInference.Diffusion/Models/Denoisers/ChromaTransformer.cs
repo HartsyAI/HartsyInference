@@ -157,7 +157,8 @@ public sealed unsafe class ChromaTransformer : IDisposable
             txtSeqLen, hPacked, wPacked, attentionMask);
 
         // ── 11. Final norm (ChromaAdaLayerNormContinuousPruned) ──
-        // temb_final = modTable[:, -2:, :]  → row 0 = scale, row 1 = shift
+        // temb_final = modTable[:, -2:, :] → row 0 (=-2) = SHIFT, row 1 (=-1) = SCALE (ComfyUI Chroma
+        // get_modulations("final") = (mod[-2], mod[-1]) → LastLayer `shift, scale = vec`). ApplyContinuousNorm consumes it in that order.
         Tensor finalScaleShift = SliceModSlab(modTable, batch, _config.ModIndexLength - 2, rowCount: 2, hidden);
         modTable.Dispose();
 

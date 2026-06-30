@@ -335,8 +335,11 @@ public sealed record TransformerConfig
     /// per weight (fast decode, but the weight set occupies F16-sized VRAM); when <c>true</c> the low-VRAM
     /// <see cref="IBackend.QuantizedMatMul"/> path is used (weights stay compressed on-device, dequant is
     /// transient per call), trading decode speed for a much smaller footprint so large models fit. No effect on
-    /// float weights.</summary>
-    public bool LowVramQuant { get; init; }
+    /// float weights.
+    /// <para>Default is taken from the <c>HARTSY_LOWVRAM_QUANT</c> env var (set "1" to enable) so it can be
+    /// flipped for A/B benchmarking without recompiling (see docs/Checklists/QUANT_GEMM_PERF_PLAN.md);
+    /// an explicit <c>init</c> value always overrides the env default.</para></summary>
+    public bool LowVramQuant { get; init; } = Environment.GetEnvironmentVariable("HARTSY_LOWVRAM_QUANT") == "1";
 
     /// <summary>Total Q projection output dim — <see cref="NumHeads"/> × <see cref="HeadDim"/>.</summary>
     public int QDim => NumHeads * HeadDim;

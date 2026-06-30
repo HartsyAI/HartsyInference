@@ -164,7 +164,9 @@ public unsafe class ErnieImageDiffTests
         foreach (KeyValuePair<string, Tensor> kvp in weights)
         {
             DType dt = kvp.Value.DType;
-            f32[kvp.Key] = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
+            // DIAGNOSTIC: also decode FP8 (E4M3/E5M2) checkpoints to F32 for the CPU diff path.
+            f32[kvp.Key] = (dt == DType.F16 || dt == DType.BF16 || dt == DType.F8E4M3 || dt == DType.F8E5M2)
+                ? kvp.Value.CastTo(DType.F32) : kvp.Value;
         }
         return f32;
     }

@@ -107,6 +107,9 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Reads a <c>HARTSY_*</c> boolean env var (set "1" to enable), mirroring <see cref="Profiling.NvtxRange.ProfileEnabled"/>. Unset or any non-"1" value is treated as off.</summary>
+    private static bool EnvFlag(string name) => Environment.GetEnvironmentVariable(name) == "1";
+
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
     {
@@ -124,6 +127,18 @@ public sealed class CudaBackend : IBackend
         _streamingCache = new CudaStreamingWeightCache(_context, _stream.Handle, _uploadStream.Handle);
         _ptxDir = ptxDir;
         Device = DeviceKind.Cuda(deviceOrdinal);
+
+        // Stage-1 perf-flag wiring (see docs/Checklists/QUANT_GEMM_PERF_PLAN.md). The opt-in GEMM/quant
+        // fast paths default OFF; the HARTSY_* env vars flip them on for A/B benchmarking in real pipelines
+        // without recompiling (mirrors HARTSY_PROFILE). Unset/!="1" => off, reproducing the baseline exactly.
+        EnableEpilogueFusion = EnvFlag("HARTSY_EPILOGUE_FUSION");
+        EnableTensorCoreGemm = EnvFlag("HARTSY_TENSORCORE_GEMM");
+        EnableNativeFp8Gemm = EnvFlag("HARTSY_FP8_NATIVE");
+        HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
+        // Each result dir self-documents the config it ran under: log the resolved flag set once.
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
+            $"NativeFp8Gemm={EnableNativeFp8Gemm} HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts}.");
 
         // Initialize cuBLAS
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();

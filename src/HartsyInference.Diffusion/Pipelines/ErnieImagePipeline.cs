@@ -207,6 +207,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     /// flat-black-output bug (conditioning vs velocity vs latent vs BN-unnorm vs VAE). Remove once ERNIE is verified.</summary>
     private static unsafe void ErnieDiag(string name, Tensor t)
     {
+        if (Environment.GetEnvironmentVariable("ERNIE_DIAG") is null) return;  // env-gated: off in production
         ReadOnlySpan<float> s = t.AsReadOnlySpan<float>();
         double sum = 0, sum2 = 0; float min = float.MaxValue, max = float.MinValue; int nan = 0;
         for (int i = 0; i < s.Length; i++)

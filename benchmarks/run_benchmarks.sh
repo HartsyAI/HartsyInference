@@ -29,6 +29,7 @@ DEVICE="cuda:0"
 TRIALS=5
 OUT_BASE="$REPO_ROOT/benchmarks/results"
 PY_VENV=""
+TAG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --trials) TRIALS="$2"; shift 2 ;;
         --out-base) OUT_BASE="$2"; shift 2 ;;
         --py-venv) PY_VENV="$2"; shift 2 ;;
+        --tag) TAG="$2"; shift 2 ;;
         -h|--help)
             grep '^#' "$0" | sed 's|^# \?||'
             exit 0
@@ -61,13 +63,22 @@ fi
 
 # ── Identifiers ─────────────────────────────────────────────────────────────
 TIMESTAMP_UTC=$(date -u +%Y-%m-%dT%H%M%SZ)
-GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -n1)
+# The benchmark fixture binds CUDA device ordinal 0, so when CUDA_VISIBLE_DEVICES masks the GPUs the
+# run actually executes on the FIRST visible physical index. Slug that GPU's name (not nvidia-smi's
+# default GPU 0) so a 4090 run on a dual-GPU box isn't mislabelled as the 3060. Honors CUDA_DEVICE_ORDER.
+PHYS_IDX="${CUDA_VISIBLE_DEVICES:-}"; PHYS_IDX="${PHYS_IDX%%,*}"
+[[ -z "$PHYS_IDX" ]] && PHYS_IDX=0
+GPU_NAME=$(nvidia-smi -i "$PHYS_IDX" --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -n1)
+[[ -z "$GPU_NAME" ]] && GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -n1)
 GPU_SLUG=$(echo "$GPU_NAME" \
     | tr '[:upper:]' '[:lower:]' \
     | tr ' /(),' '-----' \
     | tr -s '-' \
     | sed 's/^-//;s/-$//')
-RUN_ID="run_${TIMESTAMP_UTC}_${GPU_SLUG}"
+# --tag names the A/B run per the perf-plan convention: `run_baseline_…`, `run_post_epilogue_…`, etc.
+RUN_PREFIX="run"
+[[ -n "$TAG" ]] && RUN_PREFIX="run_${TAG}"
+RUN_ID="${RUN_PREFIX}_${TIMESTAMP_UTC}_${GPU_SLUG}"
 
 STAGING="$(mktemp -d -t hartsyinference_bench_XXXXXX)"
 echo "[run_benchmarks] staging dir: $STAGING"
@@ -104,6 +115,13 @@ echo "[1/6] Capturing hardware + software fingerprints..."
     fi
     echo "## git rev"; git rev-parse HEAD 2>/dev/null || echo "no git"
     echo "## git status (uncommitted)"; git status --porcelain 2>/dev/null || true
+    echo "## perf flags (HARTSY_*) — the A/B config this run executed under"
+    echo "run_tag=${TAG:-<none>}"
+    echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} (phys idx ${PHYS_IDX}, ${GPU_NAME})"
+    for v in HARTSY_EPILOGUE_FUSION HARTSY_TENSORCORE_GEMM HARTSY_FP8_NATIVE \
+             HARTSY_HIGH_PRECISION_GEMM HARTSY_LOWVRAM_QUANT HARTSY_PROFILE; do
+        echo "${v}=${!v:-0}"
+    done
 } > "$STAGING/software.txt"
 
 {
@@ -114,9 +132,12 @@ echo "[1/6] Capturing hardware + software fingerprints..."
 } > "$STAGING/digests.txt"
 
 # ── 2. C# build (Release) ───────────────────────────────────────────────────
-echo "[2/6] Building HartsyInference.GpuBenchmarks (Release)..."
+# The bench project multi-targets (net8.0;net10.0), so dotnet run/build must pin a framework or they
+# abort with "Your project targets multiple frameworks". net10.0 is the primary target (see CLAUDE.md).
+BENCH_TFM="${BENCH_TFM:-net10.0}"
+echo "[2/6] Building HartsyInference.GpuBenchmarks (Release, $BENCH_TFM)..."
 dotnet build benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj -c Release \
-    -v minimal > "$STAGING/dotnet_build.log" 2>&1
+    -f "$BENCH_TFM" -v minimal > "$STAGING/dotnet_build.log" 2>&1
 
 # ── 3. C# microbenchmarks ───────────────────────────────────────────────────
 echo "[3/6] Running C# microbenchmarks ($TRIALS trials each)..."
@@ -125,7 +146,7 @@ if [[ "$SMOKE" -eq 1 ]]; then
     FILTER='*MatMul*'
 fi
 
-dotnet run --no-build -c Release --project benchmarks/HartsyInference.GpuBenchmarks -- \
+dotnet run --no-build -c Release -f "$BENCH_TFM" --project benchmarks/HartsyInference.GpuBenchmarks -- \
     --filter "$FILTER" \
     --warmupCount 1 --iterationCount "$TRIALS" \
     --exporters json,markdown,csv \
