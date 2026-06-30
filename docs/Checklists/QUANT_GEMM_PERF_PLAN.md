@@ -133,9 +133,12 @@ HBM round-trip per Linear. Pure upside where a bias exists.
 - [ ] A/B microbench: GEMM-with-bias shapes, `HARTSY_EPILOGUE_FUSION` off vs on.
 - [ ] A/B e2e: a bias-heavy model (any DiT). Watch launch count drop in the NVTX timeline.
 - [ ] Gate e2e correctness (SSIM / parity green).
-- [ ] If win confirmed (t-test α=0.01) and no regression → record; consider making default-on in a
-      follow-up once it has run clean across devices.
-- [ ] Commit `run_post_epilogue_{date}_{gpu}/`, fill ledger.
+- [x] If win confirmed (t-test α=0.01) and no regression → record; consider making default-on in a
+      follow-up once it has run clean across devices. **Result: NOT a win** — see ledger. The flag swaps
+      the GEMM backend (cublasGemmEx→cublasLtMatmul); deltas swing −41%…+42% by shape on the two GPUs,
+      so it stays default-off. Gate (correctness) passes on both 3060 and 4090.
+- [x] Ledger filled. (No `run_post_epilogue_*` committed — A/B was a focused `Linear_F16_Bias` probe,
+      not a full-grid run; raw logs in the session scratchpad.)
 
 ---
 
@@ -161,15 +164,22 @@ Hypothesis: `cublasLtMatmul` FP8 tensor-core GEMM (our ComfyUI `--fast` equivale
 cast-FP8→F16-then-HGEMM for the FP8 diffusion models, and saves the cached-F16-weight VRAM. Only runs
 where `Fp8Executor.IsSupported` (SM 8.9+).
 
-- [ ] **New gate test** `Fp8NativeGemmTests`: diff the `EnableNativeFp8Gemm` path against the
-      cast-then-F16 path through `Linear` on real FP8 weights (avg_err at FP8 noise level, ~1e-2 rel).
-- [ ] A/B microbench: FP8 GEMM shapes (Flux 3072-wide etc.), off vs on, on the Ada box.
+- [x] **New gate test** `Fp8NativeGemmTests` ([tests/…/Fp8NativeGemmTests.cs](../../tests/HartsyInference.Cuda.Tests/Fp8NativeGemmTests.cs)):
+      diffs the `EnableNativeFp8Gemm` path vs the cast-then-F16 path through `Linear` on identical FP8
+      operands. **PASS on 4090** (rel_err 7–8e-5, ≪ 1e-2 tol — first real-Ada validation of `Fp8GemmExecutor`,
+      previously "untested locally"); **correctly SKIPS on 3060** (SM 8.6). Required the cublasLt resolver fix.
+- [x] A/B microbench: `Linear_FP8_Native` ×10 shapes, off vs on, 4090. **Median 1.19× (best 1.96×),
+      8/10 shapes faster.** Net win.
 - [ ] A/B e2e: Flux Dev FP8 / a Chroma or Lumina2 FP8 checkpoint. Log **both** it/s and VRAM peak
-      (this stage is where the cached-F16-cast VRAM cost should disappear).
-- [ ] Gate image quality (SSIM vs the F16-cast path).
-- [ ] Commit `run_post_fp8native_{date}_{ada-gpu}/`, fill ledger.
+      (this stage is where the cached-F16-cast VRAM cost should disappear). **PENDING — e2e harness not
+      wired; needs a real FP8 checkpoint + the generation path. This is where the VRAM win is quantified.**
+- [ ] Gate image quality (SSIM vs the F16-cast path). **PENDING (with e2e).**
+- [ ] Commit `run_post_fp8native_{date}_{ada-gpu}/`, fill ledger. (Microbench rows filled; raw in scratchpad.)
+- [x] 3060 (SM 8.6): unsupported, recorded "N/A, pre-Ada", gate SKIPS — confirmed.
 
-Note: on the 3060 (SM 8.6) this path is unsupported; record "N/A, pre-Ada" and skip.
+**Decision pending (user):** default-on for Ada FP8 (SM 8.9+)? Net win + VRAM saving + matches ComfyUI
+`--fast`; the two regressing shapes (s6/s8) argue for either accepting them or a per-shape guard. A
+clean-box re-measure would firm up the marginal shapes before flipping the default.
 
 ---
 
@@ -219,10 +229,13 @@ dir. Keep negative results.
 | 2026-06-30 | 3060 | 0 baseline | all off | 86-row microbench grid | mean ms | (ref) | — | n/a | n/a | `run_baseline_2026-06-30T080551Z_nvidia-geforce-rtx-3060` | MatMul_F16 2.2–15.7 ms; Sdpa_F16 2.2–25.9 ms (s1=long-seq). 0 NA. SHA 6bba440 + dirty. |
 | 2026-06-30 | 4090 | 0 baseline | all off | 86-row microbench grid | mean ms | (ref) | — | n/a | n/a | `run_baseline_2026-06-30T080914Z_nvidia-geforce-rtx-4090` | Only **~1.3–1.6× faster than 3060** on GEMM/SDPA → likely **host/launch-bound**, not compute-bound, at these shapes. |
 | | | 0 caveats | all off | — | — | — | — | — | — | — | Box contaminated (ComfyUI+rustdesk resident, accepted); 5 trials → some shapes ±20–36% (e.g. MatMul_F32 s1). Marginal wins on noisy shapes won't clear α=0.01. Python parity ceiling not run (no torch; use `--py-venv`→ComfyUI venv). |
-| | | 2 epilogue | EPILOGUE on | DiT Linear+bias | ms/op | | | | pass/fail | | |
+| 2026-06-30 | 3060 | 2 epilogue | EPILOGUE on | Linear_F16_Bias ×10 | mean ms | off | mixed | −41%…+10% | **gate PASS** | `scratchpad ab_epi` | no consistent win |
+| 2026-06-30 | 4090 | 2 epilogue | EPILOGUE on | Linear_F16_Bias ×10 | mean ms | off | mixed | −30%…**+42%** | **gate PASS** | `scratchpad ab_epi` | shapes 6/7/8 regress |
+| | | 2 epilogue | — | — | finding | — | — | — | — | — | Flag swaps cublasGemmEx→**cublasLtMatmul** (different per-shape algo heuristics), not just bias-fusion. Pure bias saving < noise. **Keep default-off**; only worth per-shape selection, not a global flip. Eyeball deltas (8 iters, contaminated box) — a clean-box Welch t-test could refine per-shape, but sign-flips rule out default-on. |
 | | | 3 tcgemm | TENSORCORE on | aligned GEMM | GFLOP/s | | | | | | vs cuBLAS too |
-| | | 4 fp8native | FP8_NATIVE on | Flux FP8 | it/s | | | | | | + VRAM peak |
-| | | 4 fp8native | FP8_NATIVE on | Flux FP8 | VRAM GB | | | | | | |
+| 2026-06-30 | 4090 | 4 fp8native | FP8_NATIVE on | Linear_FP8_Native ×10 | mean ms | cast-F16 | native | **median −16% (1.19×), best −49% (1.96×)** | **gate PASS (rel_err 7e-5)** | `scratchpad ab_fp8` | 8/10 shapes faster; s6 (SD3.5) 0.72×, s8 (Lumina2) 0.98× regress. **Net win** — recommend on for Ada FP8. |
+| 2026-06-30 | 4090 | 4 fp8native | FP8_NATIVE on | (structural) | VRAM | +2 B/param | +0 | weight stays FP8-only | n/a | — | Native path returns BEFORE the cached-F16-weight block → no resident F16 cast. Not visible in single-weight microbench; quantify on a full FP8 DiT e2e (it/s + peak VRAM). |
+| 2026-06-30 | 3060 | 4 fp8native | — | — | — | — | — | N/A | n/a | — | SM 8.6 (pre-Ada): native path unsupported, gate SKIPS, dispatch falls back to cast-F16. |
 | | | 5a attn | — | SDPA vs Skv | ms | | | | | | warp-shuffle |
 | | | 5b attn | — | LLM decode | tok/s | | | | | | keys-parallel |
 | | | 6 diffquant | LOWVRAM diff | Flux GGUF | it/s / VRAM | | | | | | policy (a) |
@@ -237,6 +250,8 @@ dir. Keep negative results.
 | 2026-06-30 | Stage 1 done; harness repaired (5 bugs) before Stage 0 | `run_benchmarks.sh` produced silent `NA` (BDN child had no cuBLAS path) — had to fix it to get any baseline | |
 | 2026-06-30 | Both 3060 **and** 4090 are on the dev box | Stage 4 native FP8 (SM 8.9) is runnable locally; plan's "Ada may be unavailable" no longer applies | |
 | 2026-06-30 | Stage 0 scope = C# microbench both GPUs | no torch on box (python parity ceiling deferred → point `--py-venv` at a ComfyUI venv); C# e2e not implemented in harness | |
+| 2026-06-30 | Fixed engine bug: `CudaLibraryResolver` didn't resolve `cublasLt` | `[LibraryImport("cublasLt")]` needs the versioned soname (`libcublasLt.so.12`); no unversioned `.so` exists, so epilogue/FP8/Lt-GEMM threw `DllNotFoundException`. Dormant because all are default-off. Stage 2 gate was failing on this, not on math. | |
+| 2026-06-30 | Added `Linear_F16_Bias` microbench | existing grid only calls raw `MatMul` (no bias) → epilogue fusion never engaged; needed a bias-GEMM probe for the Stage 2 A/B | |
 | | Stage 6 (a) wire diffusion quant **/** (b) leave load-only | (fill after Stage 6 measurement) | |
 
 ---

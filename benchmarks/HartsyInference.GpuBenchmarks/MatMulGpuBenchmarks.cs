@@ -14,6 +14,10 @@ public class MatMulGpuBenchmarks
     private BenchmarkFixture? _fixture;
     private Tensor? _a, _b, _outF32, _outF16;
     private Tensor? _aF16, _bF16;
+    // Linear-with-bias operands ([N,K] weight, [N] bias) for the epilogue-fusion A/B (HARTSY_EPILOGUE_FUSION).
+    private Tensor? _wF16, _biasF16, _outLinF16;
+    // FP8 operands ([M,K] input, [N,K] weight, F16 out) for the native-FP8 A/B (HARTSY_FP8_NATIVE, Ada only).
+    private Tensor? _inF8, _wF8, _outF8Lin;
 
     /// <summary>Index into a curated shape grid. Each index maps to a (M, K, N) triple drawn from a
     /// real diffusion model's hot path. Intentionally not a Cartesian explosion — that would multiply
@@ -62,6 +66,15 @@ public class MatMulGpuBenchmarks
         _aF16 = BenchmarkFixture.AllocateF16(new TensorShape(M, K), seed: 1);
         _bF16 = BenchmarkFixture.AllocateF16(new TensorShape(K, N), seed: 2);
         _outF16 = new Tensor(new TensorShape(M, N), DType.F16);
+        // Linear: out[M,N] = input[M,K] · weight[N,K]^T + bias[N]. Weight is row-major [outDim, inDim].
+        _wF16 = BenchmarkFixture.AllocateF16(new TensorShape(N, K), seed: 3);
+        _biasF16 = BenchmarkFixture.AllocateF16(new TensorShape(N), seed: 4);
+        _outLinF16 = new Tensor(new TensorShape(M, N), DType.F16);
+        // FP8 operands for the native-FP8 A/B. Both input and weight must be FP8 for the cublasLtMatmul
+        // path to dispatch; output is F16. On Ampere this falls back to cast-then-F16 (same as flag off).
+        _inF8 = BenchmarkFixture.AllocateF8E4M3(new TensorShape(M, K), seed: 1);
+        _wF8 = BenchmarkFixture.AllocateF8E4M3(new TensorShape(N, K), seed: 3);
+        _outF8Lin = new Tensor(new TensorShape(M, N), DType.F16);
     }
 
     [GlobalCleanup]
@@ -69,6 +82,8 @@ public class MatMulGpuBenchmarks
     {
         _a?.Dispose(); _b?.Dispose(); _outF32?.Dispose();
         _aF16?.Dispose(); _bF16?.Dispose(); _outF16?.Dispose();
+        _wF16?.Dispose(); _biasF16?.Dispose(); _outLinF16?.Dispose();
+        _inF8?.Dispose(); _wF8?.Dispose(); _outF8Lin?.Dispose();
         _fixture?.Dispose();
     }
 
@@ -85,6 +100,26 @@ public class MatMulGpuBenchmarks
     public void MatMul_F16()
     {
         _fixture!.Backend.MatMul(_outF16!, _aF16!, _bF16!);
+        _fixture.Sync();
+    }
+
+    /// <summary>F16 Linear (GEMM + bias). With <c>HARTSY_EPILOGUE_FUSION=1</c> the bias folds into the
+    /// cuBLASLt epilogue (one launch); without it, this is cublasGemmEx + a separate BiasAdd. This is the
+    /// A/B probe for Stage 2 of the quant/GEMM perf plan.</summary>
+    [Benchmark]
+    public void Linear_F16_Bias()
+    {
+        _fixture!.Backend.Linear(_outLinF16!, _aF16!, _wF16!, _biasF16!);
+        _fixture.Sync();
+    }
+
+    /// <summary>FP8 Linear (E4M3 input + weight → F16 out). With <c>HARTSY_FP8_NATIVE=1</c> on Ada+ this
+    /// dispatches the native cublasLtMatmul FP8 tensor-core path; otherwise (or on Ampere) it casts the
+    /// FP8 operands up to F16 and runs cublasGemmEx. The A/B probe for Stage 4 of the quant/GEMM perf plan.</summary>
+    [Benchmark]
+    public void Linear_FP8_Native()
+    {
+        _fixture!.Backend.Linear(_outF8Lin!, _inF8!, _wF8!, bias: null);
         _fixture.Sync();
     }
 }

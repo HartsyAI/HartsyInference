@@ -67,6 +67,15 @@ public sealed class BenchmarkFixture : IDisposable
         }
     }
 
+    /// <summary>Allocates an FP8 E4M3 tensor (engine's <c>FloatToFp8E4M3</c> rounding via
+    /// <see cref="Tensor.CastTo"/>). Source values are in [-1, 1], comfortably inside E4M3 range.</summary>
+    public static unsafe Tensor AllocateF8E4M3(TensorShape shape, int seed = 12345)
+    {
+        Tensor f32 = AllocateF32(shape, seed);
+        try { return f32.CastTo(DType.F8E4M3); }
+        finally { f32.Dispose(); }
+    }
+
     /// <summary>Synchronizes the GPU stream — required between iterations to make BenchmarkDotNet's
     /// timing reflect the kernel time and not just the launch time.</summary>
     public void Sync() => Backend.Sync();

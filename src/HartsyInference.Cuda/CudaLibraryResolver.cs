@@ -56,6 +56,34 @@ public static class CudaLibraryResolver
             }
         }
 
+        // cuBLASLt ships as a SEPARATE library from cuBLAS (libcublasLt.so.N) and, like cuBLAS, only as a
+        // versioned soname — there is no unversioned libcublasLt.so — so the bare [LibraryImport("cublasLt")]
+        // name fails to load without this case. Exercised by the epilogue-fusion, native-FP8, and general
+        // Lt-GEMM paths (all default-off, which is why this was dormant until perf flags got turned on).
+        if (libraryName == "cublasLt")
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                if (NativeLibrary.TryLoad("cublasLt64_13.dll", out nint handle))
+                    return handle;
+                if (NativeLibrary.TryLoad("cublasLt64_12.dll", out handle))
+                    return handle;
+                if (NativeLibrary.TryLoad("cublasLt64_11.dll", out handle))
+                    return handle;
+                return NativeLibrary.Load("cublasLt64_13.dll");
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                if (NativeLibrary.TryLoad("libcublasLt.so.13", out nint handle))
+                    return handle;
+                if (NativeLibrary.TryLoad("libcublasLt.so.12", out handle))
+                    return handle;
+                if (NativeLibrary.TryLoad("libcublasLt.so.11", out handle))
+                    return handle;
+                return NativeLibrary.Load("libcublasLt.so.13");
+            }
+        }
+
         return 0;
     }
 }
