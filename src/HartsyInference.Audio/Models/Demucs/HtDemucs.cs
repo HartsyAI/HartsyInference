@@ -71,14 +71,15 @@ public sealed unsafe class HtDemucs
         }
         _xf.LoadWeights(w, "crosstransformer");
         if (w.TryGetValue("freq_emb.embedding.weight", out Tensor? fe)) _freqEmb = WhisperOps.EnsureF32(fe);
-        _upW = WhisperOps.EnsureF32(w["crosstransformer.channel_upsampler.weight"]);
-        _upB = Bias(w, "crosstransformer.channel_upsampler.bias");
-        _downW = WhisperOps.EnsureF32(w["crosstransformer.channel_downsampler.weight"]);
-        _downB = Bias(w, "crosstransformer.channel_downsampler.bias");
-        _upWt = WhisperOps.EnsureF32(w["crosstransformer.channel_upsampler_t.weight"]);
-        _upBt = Bias(w, "crosstransformer.channel_upsampler_t.bias");
-        _downWt = WhisperOps.EnsureF32(w["crosstransformer.channel_downsampler_t.weight"]);
-        _downBt = Bias(w, "crosstransformer.channel_downsampler_t.bias");
+        // The channel (up/down)samplers are top-level modules in HTDemucs, NOT inside the crosstransformer.
+        _upW = WhisperOps.EnsureF32(w["channel_upsampler.weight"]);
+        _upB = Bias(w, "channel_upsampler.bias");
+        _downW = WhisperOps.EnsureF32(w["channel_downsampler.weight"]);
+        _downB = Bias(w, "channel_downsampler.bias");
+        _upWt = WhisperOps.EnsureF32(w["channel_upsampler_t.weight"]);
+        _upBt = Bias(w, "channel_upsampler_t.bias");
+        _downWt = WhisperOps.EnsureF32(w["channel_downsampler_t.weight"]);
+        _downBt = Bias(w, "channel_downsampler_t.bias");
     }
 
     /// <summary>Separates a stereo waveform into 4 stereo stems. Input waveform <c>[1, C, L]</c> (channels-first,

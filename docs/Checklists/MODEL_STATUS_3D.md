@@ -14,7 +14,7 @@ Concise status for 3D-generation (image → mesh) models. Build detail lives in
 
 | Model | Notes |
 |---|---|
-| **Hunyuan3D-2** | image → mesh. Architecture fully reverse-engineered from the real checkpoint: it is a **Flux-lineage MMDiT** (16 double + 32 single stream blocks, QK-RMSNorm, no RoPE) conditioned by a **DINOv2-giant** (1536-dim, 40 layers, SwiGLU; bundled in the ckpt) + a VecSet **ShapeVAE** (`post_kl` → 16 qk-normed self-attn resblocks → cross-attn `geo_decoder` w/ 51-dim Fourier point queries → `output_proj`) + FlowMatchEuler scheduler. The current C# scaffold is the wrong architecture (simple AdaLN DiT) and needs a from-scratch rebuild reusing the engine's Flux blocks. |
+| **Hunyuan3D-2** | image → mesh. Architecture fully reverse-engineered: **Flux-lineage MMDiT** (16 double + 32 single stream blocks, QK-RMSNorm, no RoPE) conditioned by a **DINOv2-giant** (1536-dim, 40 layers, SwiGLU; bundled in the ckpt) + a VecSet **ShapeVAE** (`post_kl` → 16 qk-normed self-attn resblocks → cross-attn `geo_decoder` w/ 51-dim Fourier point queries → `output_proj`) + FlowMatchEuler scheduler. **Conditioner verified** (DINOv2-giant SwiGLU, corr 1.0). DiT + VAE + pipeline are the wrong architecture in the C# scaffold and need a from-scratch rebuild reusing the engine's Flux blocks (validate on CUDA). Rebuild spec in [PHASE_11_THREED.md](PHASE_11_THREED.md) § 2. |
 
 ## Foundation
 

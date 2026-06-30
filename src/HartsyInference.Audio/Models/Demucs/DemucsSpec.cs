@@ -25,13 +25,15 @@ public static unsafe class DemucsSpec
         freq = half;                                  // Nyquist bin dropped → nfft/2 freq rows
         int le = (length + hop - 1) / hop;            // ceil(length / hop)
         time = le;
-        // Center-style reflect pad. Pad enough that, after trimming FrameTrim frames off the front, at least `le`
-        // frames remain (the backend STFT frames center=False, so we pad explicitly here).
-        int padLeft = hop / 2 * 3;
-        int padRight = padLeft + le * hop - length;
-        int padded = length + padLeft + padRight;
-        int needFrames = time + FrameTrim;
-        while ((padded - nfft) / hop + 1 < needFrames) { padRight += hop; padded += hop; }
+        // demucs `_spec`: manual reflect-pad (pad = hop//2*3 left; pad + le*hop - L right) THEN `spectro` runs
+        // torch.stft(center=True) which reflect-pads ANOTHER nfft/2 each side. We replicate the two successive
+        // reflects exactly (a single combined reflect is NOT identical), then frame center=False, then trim the
+        // first 2 frames (z[..., 2:2+le]).
+        int manualL = hop / 2 * 3;
+        int manualR = manualL + le * hop - length;
+        int m = length + manualL + manualR;           // length after the manual pad
+        int centerPad = half;                         // torch.stft(center=True) reflect pad
+        int padded = m + 2 * centerPad;
         float* wp = (float*)wav.DataPointer;
 
         Tensor window = HannTensor(nfft);
@@ -39,6 +41,8 @@ public static unsafe class DemucsSpec
         Tensor outT = new(new TensorShape(1, 2 * channels, freq, time), DType.F32);
         float* op = (float*)outT.DataPointer;
 
+        Tensor manual = new(new TensorShape(m), DType.F32);
+        float* mp = (float*)manual.DataPointer;
         Tensor frame = new(new TensorShape(padded), DType.F32);
         float* fp = (float*)frame.DataPointer;
         int rawFrames = (padded - nfft) / hop + 1;
@@ -47,7 +51,9 @@ public static unsafe class DemucsSpec
 
         for (int c = 0; c < channels; c++)
         {
-            ReflectPad(wp + (long)c * length, length, fp, padLeft, padRight);
+            // Two-step reflect: original → manual pad → center=True pad.
+            ReflectPad(wp + (long)c * length, length, mp, manualL, manualR);
+            ReflectPad(mp, m, fp, centerPad, centerPad);
             backend.Stft(stftOut, frame, nfft, hop, window);
             // Keep frames [FrameTrim, FrameTrim+time) and freq bins [0, freq) (Nyquist at index `half` dropped).
             for (int t = 0; t < time; t++)
@@ -64,7 +70,7 @@ public static unsafe class DemucsSpec
             }
         }
 
-        window.Dispose(); frame.Dispose(); stftOut.Dispose();
+        window.Dispose(); frame.Dispose(); stftOut.Dispose(); manual.Dispose();
         return outT;
     }
 
