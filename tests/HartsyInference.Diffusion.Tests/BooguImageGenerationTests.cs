@@ -30,10 +30,17 @@ public sealed class BooguImageGenerationTests
     private readonly ITestOutputHelper _output;
     public BooguImageGenerationTests(ITestOutputHelper output) => _output = output;
 
-    // Verbatim from pipeline_boogu.py (BOOGU_IMAGE.md §5).
+    // Verbatim from pipeline_boogu.py / ComfyUI comfy/text_encoders/boogu.py. The T2I system prompt conditions the
+    // (non-empty) positive instruction; the DROP system prompt conditions the empty negative/uncond instruction
+    // (comfy BooguTokenizer routes empty text → llama_template_drop). The chat template adds NO generation prompt and
+    // ends with a trailing newline after the final <|im_end|>.
     private const string T2ISystem =
         "You are a helpful assistant that generates high-quality images based on user instructions. " +
         "The instructions are as follows.";
+    private const string DropSystem =
+        "Describe the key features of the input image (color, shape, size, texture, objects, background), " +
+        "then explain how the user's text instruction should alter or modify the image. Generate a new image " +
+        "that meets the user's requirements while maintaining consistency with the original input where appropriate.";
 
     [Fact]
     public void BooguImage_Base_Gpu_1024_Cfg() =>
@@ -43,7 +50,12 @@ public sealed class BooguImageGenerationTests
     public void BooguImage_Turbo_Gpu_1024_NoCfg() =>
         RunGenerationTest(TestPaths.Boogu.TurboDir, "boogu_turbo_1024", steps: 4, textGuidance: 1.0f);
 
-    private void RunGenerationTest(string rootDir, string outputName, int steps, float textGuidance)
+    // Fast GPU-residency feedback loop: 512x512, 4 steps, NO CFG (~4 forwards). Not a quality test.
+    [Fact]
+    public void BooguImage_Base_Gpu_512_Fast() =>
+        RunGenerationTest(TestPaths.Boogu.BaseDir, "boogu_base_512fast", steps: 4, textGuidance: 1.0f, width: 512, height: 512);
+
+    private void RunGenerationTest(string rootDir, string outputName, int steps, float textGuidance, int width = 1024, int height = 1024)
     {
         if (!Directory.Exists(rootDir)) { _output.WriteLine($"SKIPPED: Boogu dir not found: {rootDir}"); return; }
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(BooguImageGenerationTests).Assembly.Location)!, "Ptx");
@@ -67,11 +79,15 @@ public sealed class BooguImageGenerationTests
             VaeDecoder vae = new(VaeConfig.Flux);
             vae.LoadWeights(CastF32(vaeWeights));
 
-            _output.WriteLine("[3/6] Tokenizing (Qwen3-VL chat template, Boogu T2I system, NO drop)...");
+            _output.WriteLine("[3/6] Tokenizing (Qwen3-VL chat template: no gen-prompt, trailing newline, DROP system for neg)...");
             using Qwen2Tokenizer tokenizer = new();
             string prompt = "A photograph of an astronaut riding a horse";
-            int[] promptTokens = tokenizer.EncodeChat(prompt, systemPrompt: T2ISystem, addGenerationPrompt: true);
-            int[] negTokens = tokenizer.EncodeChat("", systemPrompt: T2ISystem, addGenerationPrompt: true);
+            // Reference template: <|im_start|>system\n{sys}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n
+            // (NO generation prompt; trailing newline after the last <|im_end|>). EncodeChat(addGenerationPrompt:false)
+            // yields everything up to and including the last <|im_end|>; append the trailing newline token.
+            int[] nl = tokenizer.EncodeOrdinary("\n");
+            int[] promptTokens = [.. tokenizer.EncodeChat(prompt, systemPrompt: T2ISystem, addGenerationPrompt: false), .. nl];
+            int[] negTokens = [.. tokenizer.EncodeChat("", systemPrompt: DropSystem, addGenerationPrompt: false), .. nl];
             _output.WriteLine($"  prompt tokens={promptTokens.Length} neg tokens={negTokens.Length}");
 
             _output.WriteLine("[4/6] CUDA backend...");
@@ -95,9 +111,9 @@ public sealed class BooguImageGenerationTests
             _output.WriteLine($"  Encoded instr={instr.Shape} neg={(negInstr is null ? "(none)" : negInstr.Shape.ToString())} in {encSw.Elapsed.TotalSeconds:F1}s");
 
             using BooguImagePipeline pipeline = new(backend, transformer, vae, vaeEncoder: null, config);
-            TextToImageRequest request = new() { Prompt = prompt, Width = 1024, Height = 1024, Steps = steps, Seed = 42 };
+            TextToImageRequest request = new() { Prompt = prompt, Width = width, Height = height, Steps = steps, Seed = 42 };
 
-            _output.WriteLine($"[6/6] Generating 1024x1024, {steps} steps, tg={textGuidance}...");
+            _output.WriteLine($"[6/6] Generating {width}x{height}, {steps} steps, tg={textGuidance}...");
             Stopwatch gen = Stopwatch.StartNew();
             (byte[] rgb, int w, int h, int seed) = pipeline.GenerateFromEmbeddings(instr, request, textGuidance, negInstr,
                 p => _output.WriteLine($"  Step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));

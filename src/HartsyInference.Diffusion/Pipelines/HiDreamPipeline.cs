@@ -98,6 +98,15 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
+        // Free the text-encoder weights from VRAM now that conditioning is computed — the 17 GB fp8
+        // transformer must fit the 4090 alone (T5 ~5 GB + Llama ~8 GB would not co-reside with it). The
+        // computed conditioning tensors (condT5/condLlama/condPooled) are separate activations and survive.
+        Backend.Sync();
+        Backend.FreeWeights(_clipL.EnumerateWeights());
+        Backend.FreeWeights(_clipG.EnumerateWeights());
+        Backend.FreeWeights(_t5.EnumerateWeights());
+        Backend.FreeWeights(_llama.EnumerateWeights());
+
         // ── 2. Set up flow-match scheduler ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_config.SchedulerShift);
@@ -161,11 +170,10 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         HiDreamTransformer.DumpFinalLatent(latent);
 
-        // Free transformer + text-encoder weights from VRAM before VAE decode (Phase 3 deviations #18).
+        // Free transformer weights from VRAM before VAE decode (text encoders were already freed after
+        // the encode step). Phase 3 deviations #18.
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
-        Backend.FreeWeights(_t5.EnumerateWeights());
-        Backend.FreeWeights(_llama.EnumerateWeights());
 
         // ── 5. VAE decode ──
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");

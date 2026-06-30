@@ -99,13 +99,18 @@ the weight FP8-resident in VRAM. One change attacks dispatch count, memory traff
 strictly better than caching the F16 cast (Stage 1b) where it's feasible. This is the Vulkan analogue of
 CUDA's deferred "fused dequant-GEMM."
 
+> **Re-scoped after Stage 1b + 2 (2026-06-30):** the dispatch-count win Stage 1 targeted is **already
+> captured** — Stage 1b caches the FP8→F16 cast (0 extra dispatches after warmup) and Stage 2 fused bias, so
+> a FP8 Linear is already at **1 dispatch**. In-shader FP8 dequant no longer reduces dispatches; its only
+> remaining benefit is **VRAM** (weights stay FP8-resident instead of doubling with the F16 cast cache). It is
+> also the most complex/risky shader change (coopmat can't `coopMatLoad` FP8 directly — needs a shared-memory
+> stage: load FP8 → dequant → `coopMatLoad` F16 from shared). **Now LOWER priority than Stage 4**; do it only
+> when VRAM is the binding constraint (large models near capacity), or pair with the low-VRAM flag.
+
 - [ ] Add an FP8 (and later GGUF-quant) load path to the coopmat GEMM shader (spec-const `WEIGHT_FP8`),
-      dequant in the tile load. Keep a non-fused fallback for unsupported dtypes.
-- [ ] Gate: new diff test (fused FP8-matmul vs cast-then-coopmat) within FP8 noise (~1e-2 rel); existing
-      `VulkanVsCuda` Linear within 1e-3 stays green.
-- [ ] A/B microbench: Flux FFN FP8 Linear, off vs on — expect **3 → 2 dispatches** and a per-call drop ≈
-      the weight-cast memory pass (~1 ms at this shape).
-- [ ] A/B e2e Flux Schnell; gate SSIM; log wall-clock + VRAM (weights stay FP8 → ~½ the F16 footprint).
+      dequant via a shared-memory tile stage. Keep a non-fused fallback for unsupported dtypes.
+- [ ] Gate: new diff test (fused FP8-matmul vs cast-then-coopmat) within FP8 noise (~1e-2 rel).
+- [ ] A/B microbench + e2e: expect **VRAM ↓ ~½ weight footprint**, wall-clock ≈ flat (dispatch already 1).
 - [ ] Commit, fill ledger.
 
 ### Stage 1b — ✅ DONE (2026-06-30): cache the F16 weight cast (mirror CUDA `CacheWeightCasts`)
@@ -126,18 +131,25 @@ which is not installed on this box (sudo-gated). This is the pure-C# lever.
 
 ---
 
-## Stage 2 — Fuse bias into the coopmat matmul
+## Stage 2 — ✅ DONE (2026-06-30): Fuse bias into the coopmat matmul
 
-Hypothesis: a `HAS_BIAS` spec-const path in `matmul_coopmat.comp.glsl` removes the follow-up `BroadcastAdd`
-dispatch (~1 of the 3 per Linear, ~1,000 dispatches/generation per the Phase-C estimate).
+A `HAS_BIAS` spec-const path in `matmul_coopmat.comp.glsl` removes the follow-up `BroadcastAdd` dispatch.
 
-- [ ] Add `HAS_BIAS` to the coopmat shader; bind the bias buffer; add in the epilogue.
-- [ ] Gate: vs-unfused diff (bit-close); `VulkanVsCuda` green.
-- [ ] A/B microbench (with Stage 1 on): **2 → 1 dispatch** per Linear.
-- [ ] A/B e2e; gate SSIM. Commit, fill ledger.
+- [x] Added `HAS_BIAS` (constant_id = 16) to the coopmat shader. Bias added in the epilogue via a
+      **stride-0 row-major `coopMatLoad`** — broadcasts the 16 per-column bias values across all 16 rows of
+      the accumulator fragment, then `acc = acc + biasFrag`. Binding 3 redeclared `float bias[]` (FP32, the
+      accumulator type — no per-element f16 conversion). Compiled with glslangValidator 16.3.0.
+- [x] C#: `SpecConstant.Bool(16, bias is not null)` + bind the FP32 bias buffer at slot 3 in
+      `TryDispatchCoopmat`; bias cast to FP32 once and cached (preloaded weight). Removed the `BroadcastAdd`.
+- [x] Gate: `Backend_Linear_FP8Weight_CachedCast_Matches_Cpu` (F16 output) + `Backend_Linear_FluxShape_F32_Matches_Cpu`
+      (F32 output, fused F32 bias) + full smoke/leak/int8 suite (39 tests) green.
+- [x] A/B microbench (4090, with 1b on): **2.82 → 2.45 ms (−13.1%), 2 → 1 dispatch** per Linear.
+- [ ] A/B e2e Flux Schnell + SSIM — NOT run this session (e2e needs the Diffusion project, which a concurrent
+      edit was breaking, plus a model checkpoint). Re-run when the tree is clean.
 
-> After Stages 1 + 2: a FP8 Linear goes **3 dispatches → 1** (fused dequant-matmul-bias). That is the
-> headline target — it removes the two non-compute dispatches that the overhead-bound diagnosis blames.
+> **Headline target achieved (1b + 2): a FP8 Linear goes 3 dispatches → 1** (cached dequant + matmul + fused
+> bias), keeping the coopmat tensor-core path. Cumulative −32.9% on the FFN microbench. The remaining cost is
+> the coopmat compute itself (probe: tensor-core-bound at this shape) + per-dispatch host overhead (Stage 4).
 
 ---
 
@@ -215,6 +227,9 @@ only if a long-context or LLM-on-Vulkan workload shifts the profile.
 | 2026-06-30 | Cross-vendor deferred | NVIDIA-only box; AMD/Intel needs other hardware |
 | 2026-06-30 | Landed Stage 1b first (before Stage 1) | In-shader FP8 dequant + bias fusion both need `glslangValidator` to recompile shaders — not installed on this box (sudo-gated). The weight-cast cache is the pure-C# lever and lands the dispatch-count + memory-pass win now. Measured −22.7% on the 4090 FFN microbench. |
 | 2026-06-30 | Keep coopmat; do NOT fall back to tiled to cut the bias dispatch | Probe: tiled (1 fused-bias dispatch) is 2.7× slower than coopmat (2 dispatches) at the Flux FFN shape — tensor-core compute dominates here, not host dispatch overhead. The remaining win is fusing bias into the coopmat shader (Stage 2), which needs glslang. |
+| 2026-06-30 | Stage 2 bias via stride-0 broadcast coopmat load | Per-column bias add to a cooperative-matrix accumulator can't index elements (lane→(i,j) mapping is opaque). A stride-0 row-major `coopMatLoad(biasFrag, bias, outCol, 0, RowMajor)` broadcasts bias[outCol+j] to every row; `acc + biasFrag` then matches BroadcastAdd. Works on NVIDIA (verified F16 + F32 output). |
+| 2026-06-30 | glslang obtained via Khronos prebuilt binary (no root) | `glslang-tools` apt package is sudo-gated and unavailable non-interactively. Downloaded the official `glslang-main-linux-Release.zip` (v16.3.0) from KhronosGroup/glslang releases to a local dir and ran build.sh with `GLSLANG=<path>`. spirv-val absent → build.sh skips validation (still emits valid SPIR-V; verified by NVIDIA driver accepting the module + green correctness gates). |
+| 2026-06-30 | Stage 1 (in-shader FP8) demoted below Stage 4 | With 1b caching the cast, Stage 1 no longer cuts dispatches — VRAM-only benefit, highest shader complexity. |
 
 ---
 

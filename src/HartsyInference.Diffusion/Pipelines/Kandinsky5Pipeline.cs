@@ -121,6 +121,14 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
                 noisePred = _transformer.Forward(Backend, latent, t, qwenEmbeds, clipPooled);
             }
 
+            if (i == 0 || i == steps / 2 || i == steps - 1)
+                Logs.Info($"[K5DIAG] step {i}: t={t:F2} sigma_idx noisePred.std={StdOf(noisePred):F4} latent.std={StdOf(latent):F4}");
+            if (i == 0)
+            {
+                Models.Denoisers.Kandinsky5DebugDump.Dump("step0_latent", latent);
+                Models.Denoisers.Kandinsky5DebugDump.Dump("step0_velocity", noisePred);
+            }
+
             Tensor newLatent = new Tensor(latentShape, DType.F32);
             scheduler.Step(newLatent, noisePred, latent, i);
             noisePred.Dispose();
@@ -132,6 +140,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
+        Logs.Info($"[K5DIAG] final latent.std={StdOf(latent):F4}");
         Kandinsky5Transformer.DumpFinalLatent(latent);
 
         // ── 4. Free transformer weights before VAE decode (mirrors AuraFlow / Flux pattern). ──
@@ -157,6 +166,18 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"Kandinsky5: complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgbData, width, height, seed);
+    }
+
+    private static unsafe float StdOf(Tensor t)
+    {
+        long n = t.ElementCount;
+        float* p = (float*)t.DataPointer;
+        double mean = 0;
+        for (long i = 0; i < n; i++) mean += p[i];
+        mean /= n;
+        double var = 0;
+        for (long i = 0; i < n; i++) { double d = p[i] - mean; var += d * d; }
+        return (float)Math.Sqrt(var / n);
     }
 
     /// <summary>Inverse of the VAE encoder's normalization: <c>x = x / scale + shift</c>. Flux/Kandinsky 5

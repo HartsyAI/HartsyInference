@@ -22,11 +22,11 @@ public sealed unsafe class BooguImageTransformer : IDisposable
     private readonly BooguImageConfig _config;
     private readonly OmniGen2Rope _rope;
 
-    private readonly OmniGen2Block[] _contextRefiner;
-    private readonly OmniGen2Block[] _noiseRefiner;
-    private readonly OmniGen2Block[] _refImageRefiner;
+    private readonly BooguImageSingleBlock[] _contextRefiner;
+    private readonly BooguImageSingleBlock[] _noiseRefiner;
+    private readonly BooguImageSingleBlock[] _refImageRefiner;
     private readonly BooguImageDoubleBlock[] _doubleBlocks;
-    private readonly OmniGen2Block[] _singleBlocks;
+    private readonly BooguImageSingleBlock[] _singleBlocks;
 
     private Tensor? _xEmbedderW, _xEmbedderB;
     private Tensor? _refPatchEmbedderW, _refPatchEmbedderB;
@@ -49,9 +49,9 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         int ffn = config.FfnInnerDim;
         int cond = config.ConditioningDim;
 
-        _contextRefiner = new OmniGen2Block[config.NumRefinerLayers];
-        _noiseRefiner = new OmniGen2Block[config.NumRefinerLayers];
-        _refImageRefiner = new OmniGen2Block[config.NumRefinerLayers];
+        _contextRefiner = new BooguImageSingleBlock[config.NumRefinerLayers];
+        _noiseRefiner = new BooguImageSingleBlock[config.NumRefinerLayers];
+        _refImageRefiner = new BooguImageSingleBlock[config.NumRefinerLayers];
         for (int i = 0; i < config.NumRefinerLayers; i++)
         {
             _contextRefiner[i] = NewBlock(config, ffn, cond, modulation: false);
@@ -64,13 +64,13 @@ public sealed unsafe class BooguImageTransformer : IDisposable
             _doubleBlocks[i] = new BooguImageDoubleBlock(config.HiddenSize, config.NumAttentionHeads,
                 config.NumKvHeads, config.HeadDim, ffn, cond, config.NormEps, config.QkNormEps);
 
-        _singleBlocks = new OmniGen2Block[config.NumSingleStreamLayers];
+        _singleBlocks = new BooguImageSingleBlock[config.NumSingleStreamLayers];
         for (int i = 0; i < config.NumSingleStreamLayers; i++)
             _singleBlocks[i] = NewBlock(config, ffn, cond, modulation: true);
     }
 
-    private static OmniGen2Block NewBlock(BooguImageConfig c, int ffn, int cond, bool modulation) =>
-        new OmniGen2Block(c.HiddenSize, c.NumAttentionHeads, c.NumKvHeads, c.HeadDim, ffn, cond, modulation,
+    private static BooguImageSingleBlock NewBlock(BooguImageConfig c, int ffn, int cond, bool modulation) =>
+        new BooguImageSingleBlock(c.HiddenSize, c.NumAttentionHeads, c.NumKvHeads, c.HeadDim, ffn, cond, modulation,
             c.NormEps, c.QkNormEps);
 
     /// <summary>Config accessor.</summary>
@@ -118,11 +118,11 @@ public sealed unsafe class BooguImageTransformer : IDisposable
             _normOutLin1W, _normOutLin1B, _normOutLin2W, _normOutLin2B, _imageIndexEmbedding,
         ];
         foreach (Tensor? t in top) if (t is not null) yield return t;
-        foreach (OmniGen2Block b in _contextRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
-        foreach (OmniGen2Block b in _noiseRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
-        foreach (OmniGen2Block b in _refImageRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (BooguImageSingleBlock b in _contextRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (BooguImageSingleBlock b in _noiseRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (BooguImageSingleBlock b in _refImageRefiner) foreach (Tensor t in b.EnumerateWeights()) yield return t;
         foreach (BooguImageDoubleBlock b in _doubleBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
-        foreach (OmniGen2Block b in _singleBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
+        foreach (BooguImageSingleBlock b in _singleBlocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
     /// <summary>Predicts the flow-match velocity for one denoising step.</summary>
@@ -261,7 +261,9 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         }
 
         // ── keep the noise-image tail, output norm, unpatchify ──
-        Tensor noiseTail = SliceTail(joint, capLen + totalRefLen, imgLen, hidden);
+        // GPU-resident row slice of the noise image tokens (the trailing imgLen rows of the joint sequence).
+        Tensor noiseTail = new Tensor(new TensorShape(batch, imgLen, hidden), DType.F32);
+        backend.SliceRows(noiseTail, joint, capLen + totalRefLen);
         joint.Dispose();
 
         Tensor normed = ApplyOutputNorm(backend, noiseTail, temb, batch, imgLen, hidden, cond);
@@ -362,7 +364,8 @@ public sealed unsafe class BooguImageTransformer : IDisposable
     }
 
     /// <summary>LuminaLayerNormContinuous: <c>scale = Linear_1(SiLU(temb))</c>; <c>x = LayerNorm(x)·(1+scale)</c>.
-    /// (linear_2 is applied separately by the caller as proj_out.)</summary>
+    /// (linear_2 is applied separately by the caller as proj_out.) GPU-resident: <c>LayerNormNoAffine</c> then
+    /// <c>AddScalar(scale, 1)</c> + <c>AffineBroadcastLastDim</c> (no shift) — bit-for-bit the old CPU affine.</summary>
     private Tensor ApplyOutputNorm(IBackend backend, Tensor x, Tensor temb, int batch, int seqLen, int hidden, int cond)
     {
         Tensor act = new Tensor(new TensorShape(batch, cond), DType.F32);
@@ -372,33 +375,15 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         act.Dispose();
 
         Tensor ln = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
-        DiTUtils.LayerNormNoAffine(ln, x, batch, seqLen, hidden, _config.OutNormEps);
+        backend.LayerNormNoAffine(ln, x, _config.OutNormEps);
 
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
-        float* lp = (float*)ln.DataPointer, sp = (float*)scale.DataPointer, op = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int cb = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vb = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                    op[vb + d] = lp[vb + d] * (1.0f + sp[cb + d]);
-            }
-        }
-        ln.Dispose();
+        Tensor scalePlus1 = new Tensor(new TensorShape(batch, hidden), DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
         scale.Dispose();
-        return output;
-    }
-
-    /// <summary>Extracts the trailing <paramref name="tailLen"/> tokens (the noise image) from a <c>[1, S, hidden]</c>
-    /// joint sequence starting at <paramref name="start"/>.</summary>
-    private static Tensor SliceTail(Tensor joint, int start, int tailLen, int hidden)
-    {
-        Tensor output = new Tensor(new TensorShape(1, tailLen, hidden), DType.F32);
-        long bytes = (long)tailLen * hidden * sizeof(float);
-        float* src = (float*)joint.DataPointer + (long)start * hidden;
-        Buffer.MemoryCopy(src, (void*)output.DataPointer, bytes, bytes);
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
+        backend.AffineBroadcastLastDim(output, ln, scalePlus1, null);
+        ln.Dispose();
+        scalePlus1.Dispose();
         return output;
     }
 

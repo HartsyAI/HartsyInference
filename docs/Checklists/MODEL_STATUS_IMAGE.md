@@ -23,6 +23,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **Lumina-Image 2.0** (2B NextDiT) | ✅ | Clean on-prompt mountain-lake @512 (53s). Needs the DIFFUSERS-format weights (`Alpha-VLLM/Lumina-Image-2.0` transformer+vae), not the original AlphaVLLM single-file. |
 | **Chroma** (8.9B fp8) | ✅ | Clean on-prompt astronaut-on-horse @512 (painterly/ink style). Transformer numerically verified vs diffusers (corr ≥0.999 all components). The earlier noise was a bad experimental checkpoint (symlink → `do_not_use/…exp`); re-pointed. |
 | **Krea 2 Turbo** (12.9B MMDiT, fp8) | ✅ | Sharp photoreal astronaut-on-horse @1024, 8-step (std 66.5, grid 0.042). Impl fully cross-checked vs ComfyUI `krea2/model.py` (RoPE/modulation/sigmoid-gate attn/text-fusion/scheduler all match). Fix: `Krea2CheckpointConverter` renamed fp8 `.weight` keys but not their `.weight_scale` companions → scales dropped → weights ~250-900× too large → noise; added a scale-suffix pre-pass. Base/CFG path shares the same converter+transformer (untested; CFG anchoring `Krea2Pipeline.cs:100` validation-pending). |
+| **Boogu-Image 0.1 Base** (10B, fp8) | ✅ | Sharp photoreal astronaut-on-horse @1024-cfg (std 97.8, grid 0.038), **~6 min** (under the 10-min bar). Qwen3-VL-8B final-hidden-state conditioning (Boogu T2I system, no drop) + Flux VAE. Fixes: VAE bare-ldm key remap (`ConvertVaeKey`) + **GPU-residency rewrite of the 8 double-stream blocks** (CPU glue `LuminaRmsNormZero`/`AffineScaleShift` → GPU ops; GPU util 7%→72%; single blocks were already GPU-resident). |
 | **ERNIE-Image** (8B fp8) | ✅ | Sharp full-contrast astronaut-on-horse @512-cfg (std 60.9, grid 0.069). 4 bugs fixed: flat-black (BF16-BN-cast NaN), SDPA mask-drop (general fix), VAE banding (non-tiled decode), and the WASHOUT = `CudaBackend.GroupNormSilu` F32 path didn't cast BF16 affine weights → wrong VAE GroupNorm → 4-5× low contrast. Transformer was byte-perfect on a std-ratio diff. See PARITY §ERNIE. |
 
 ## Numerically verified, full e2e pending (🔬)
@@ -46,7 +47,7 @@ per-model architecture notes and build plans.
 | **Kandinsky 5.0 Lite** | Dual Qwen2.5-VL + CLIP-L embeds. |
 | **OmniGen 2** | Joint-stream RoPE; t2i only. |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
-| **Boogu-Image 0.1 (Base / Turbo)** | 10B OmniGen2/Lumina-2 lineage + Qwen3-VL-8B (built). fp8 downloaded + TestPaths added. **TODO: write e2e test (needs OmniGen2 instruction-encode: 1-layer MLLM tap `mean` + template). ⚠ `BooguImageCheckpointConverter` likely has the SAME fp8 `.weight_scale`-companion remap bug Krea-2 had — check it renames scale keys alongside weight keys.** |
+| **Boogu-Image 0.1 Turbo** | Base is ✅ (above); Turbo shares the identical code path (same config/TE/VAE, 4-step, tg=1.0) — just needs a verification run. **Edit** variant needs the Qwen3-VL vision tower (ref-image conditioning) — not yet wired. |
 
 ## Edit / image-conditioned variants (🔧 — to download + e2e test)
 

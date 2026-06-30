@@ -9,7 +9,15 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <c>(self_attn_params, ff_params)</c>, then each into <c>(shift, scale, gate)</c>; runs
 /// non-affine LayerNorm then modulates pre-attention/pre-FFN; the post-attention/post-FFN combine
 /// is <c>x + gate * sub_out</c>. Self-attention only — Q/K/V/Out all biased; QK norm is RMSNorm with
-/// learnable scale. Self-attention applies 1D RoPE on Q and K.</summary>
+/// learnable scale. Self-attention applies 1D RoPE on Q and K.
+///
+/// GPU-residency rewrite (mirrors the verified QwenImageBlock / ChromaDoubleStreamBlock): every glue op
+/// (LayerNorm / AdaLN modulation / QK-norm / reshape-to-heads / gated residual / modulation split) runs as an
+/// IBackend GPU op so the activation stays device-resident across the whole block — no per-op DataPointer
+/// reads / D2H sync barriers (the old DiTUtils/AdaLNModulation CPU path D2H-synced every multi-MB intermediate
+/// ~10× per block × 52 blocks × every step, which was the host-bound cost). The only op left on the host is
+/// RoPE: <see cref="Kandinsky5Rope"/> is interleaved (GPT-J pairing) and the CUDA ApplyRope kernel is rotate-half
+/// (NEOX) — no match — so the single fused Q/K rotation stays on the CPU (one sync per attention).</summary>
 public sealed unsafe class Kandinsky5EncoderBlock
 {
     private readonly int _modelDim;
@@ -91,133 +99,87 @@ public sealed unsafe class Kandinsky5EncoderBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         int dim = _modelDim;
+        float attnScale = 1.0f / MathF.Sqrt(_headDim);
 
-        Tensor[] mod = ProduceModulation(backend, temb, batch, dim);
+        Tensor[] mod = Kandinsky5BlockOps.ProduceModulation(backend, temb, _modWeight!, _modBias, batch, _timeDim, dim, 6);
         Tensor saShift = mod[0], saScale = mod[1], saGate = mod[2];
         Tensor ffShift = mod[3], ffScale = mod[4], ffGate = mod[5];
 
-        // ── Self-attention sub-block ──
-        Tensor saIn = LayerNormModulate(x, saShift, saScale, batch, seqLen, dim);
+        TensorShape flat = new TensorShape(batch, seqLen, dim);
+        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mh = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
-        Tensor q = NewTensor(batch, seqLen, dim);
-        Tensor k = NewTensor(batch, seqLen, dim);
-        Tensor v = NewTensor(batch, seqLen, dim);
+        // ── Self-attention sub-block ──
+        Tensor saIn = Kandinsky5BlockOps.NormModulate(backend, x, saShift, saScale, flat);
+
+        Tensor q = new Tensor(heads, DType.F32);
         backend.Linear(q, saIn, _qWeight!, _qBias);
+        Tensor k = new Tensor(heads, DType.F32);
         backend.Linear(k, saIn, _kWeight!, _kBias);
+        Tensor v = new Tensor(heads, DType.F32);
         backend.Linear(v, saIn, _vWeight!, _vBias);
         saIn.Dispose();
 
-        Tensor qMh = DiTUtils.ReshapeToMultiHead(q, batch, seqLen, _numHeads, _headDim);
-        Tensor kMh = DiTUtils.ReshapeToMultiHead(k, batch, seqLen, _numHeads, _headDim);
-        Tensor vMh = DiTUtils.ReshapeToMultiHead(v, batch, seqLen, _numHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        // QK-norm (per-head RMSNorm over the last dim = headDim).
+        Tensor qn = new Tensor(heads, DType.F32);
+        backend.RmsNorm(qn, q, _qNormWeight!, _qkNormEps);
+        q.Dispose();
+        Tensor kn = new Tensor(heads, DType.F32);
+        backend.RmsNorm(kn, k, _kNormWeight!, _qkNormEps);
+        k.Dispose();
 
-        // QK-norm (RMSNorm) — apply across the head_dim axis on each [B,H,S] vector.
-        ApplyRmsNormPerHead(backend, qMh, _qNormWeight!, batch, _numHeads, seqLen);
-        ApplyRmsNormPerHead(backend, kMh, _kNormWeight!, batch, _numHeads, seqLen);
+        // Permute [B, S, H, D] → [B, H, S, D] for RoPE + SDPA.
+        Tensor qMh = new Tensor(mh, DType.F32);
+        backend.Permute0213(qMh, qn, seqLen, _numHeads, _headDim);
+        qn.Dispose();
+        Tensor kMh = new Tensor(mh, DType.F32);
+        backend.Permute0213(kMh, kn, seqLen, _numHeads, _headDim);
+        kn.Dispose();
+        Tensor vMh = new Tensor(mh, DType.F32);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
+        v.Dispose();
 
-        // Apply RoPE on Q and K.
         rope.Apply(qMh, kMh, batch, _numHeads, seqLen);
 
-        Tensor attnMh = NewTensor4D(batch, _numHeads, seqLen, _headDim);
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
+        Tensor attnMh = new Tensor(mh, DType.F32);
+        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, attnScale);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor attnFlat = DiTUtils.ReshapeFromMultiHead(attnMh, batch, seqLen, _numHeads, _headDim);
+        // Permute back [B, H, S, D] → [B, S, hidden].
+        Tensor attnFlat = new Tensor(flat, DType.F32);
+        backend.Permute0213(attnFlat, attnMh, _numHeads, seqLen, _headDim);
         attnMh.Dispose();
 
-        Tensor attnOut = NewTensor(batch, seqLen, dim);
+        Tensor attnOut = new Tensor(flat, DType.F32);
         backend.Linear(attnOut, attnFlat, _outWeight!, _outBias);
         attnFlat.Dispose();
 
-        Tensor afterAttn = AdaLNModulation.ApplyGatedResidual(x, attnOut, saGate, batch, seqLen, dim);
+        Tensor afterAttn = new Tensor(flat, DType.F32);
+        backend.GatedResidualLastDim(afterAttn, x, attnOut, saGate);
         attnOut.Dispose();
 
         // ── Feed-forward sub-block ──
-        Tensor ffIn = LayerNormModulate(afterAttn, ffShift, ffScale, batch, seqLen, dim);
+        Tensor ffInT = Kandinsky5BlockOps.NormModulate(backend, afterAttn, ffShift, ffScale, flat);
 
-        Tensor ffMid = NewTensor(batch, seqLen, _ffDim);
-        backend.Linear(ffMid, ffIn, _ffIn!, null);
-        ffIn.Dispose();
+        Tensor ffMid = new Tensor(new TensorShape(batch, seqLen, _ffDim), DType.F32);
+        backend.Linear(ffMid, ffInT, _ffIn!, null);
+        ffInT.Dispose();
 
-        Tensor ffAct = NewTensor(batch, seqLen, _ffDim);
+        Tensor ffAct = new Tensor(new TensorShape(batch, seqLen, _ffDim), DType.F32);
         backend.Gelu(ffAct, ffMid);
         ffMid.Dispose();
 
-        Tensor ffOut = NewTensor(batch, seqLen, dim);
+        Tensor ffOut = new Tensor(flat, DType.F32);
         backend.Linear(ffOut, ffAct, _ffOut!, null);
         ffAct.Dispose();
 
-        Tensor result = AdaLNModulation.ApplyGatedResidual(afterAttn, ffOut, ffGate, batch, seqLen, dim);
+        Tensor result = new Tensor(flat, DType.F32);
+        backend.GatedResidualLastDim(result, afterAttn, ffOut, ffGate);
         ffOut.Dispose();
         afterAttn.Dispose();
 
         for (int i = 0; i < mod.Length; i++) mod[i].Dispose();
         return result;
-    }
-
-    /// <summary>Computes <c>Linear(SiLU(temb)) → 6 * model_dim</c> then chunks into 6 <c>[B, model_dim]</c> tensors
-    /// in the order produced by diffusers' two-level chunk: <c>(self_attn_shift, self_attn_scale, self_attn_gate,
-    /// ff_shift, ff_scale, ff_gate)</c>.</summary>
-    private Tensor[] ProduceModulation(IBackend backend, Tensor temb, int batch, int dim)
-    {
-        int outDim = 6 * dim;
-
-        Tensor activated = new Tensor(new TensorShape(batch, _timeDim), DType.F32);
-        backend.Silu(activated, temb);
-
-        Tensor projected = new Tensor(new TensorShape(batch, outDim), DType.F32);
-        backend.Linear(projected, activated, _modWeight!, _modBias);
-        activated.Dispose();
-
-        Tensor[] result = new Tensor[6];
-        float* projPtr = (float*)projected.DataPointer;
-        for (int p = 0; p < 6; p++)
-        {
-            Tensor slot = new Tensor(new TensorShape(batch, dim), DType.F32);
-            float* slotPtr = (float*)slot.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                int srcOffset = b * outDim + p * dim;
-                int dstOffset = b * dim;
-                for (int d = 0; d < dim; d++)
-                    slotPtr[dstOffset + d] = projPtr[srcOffset + d];
-            }
-            result[p] = slot;
-        }
-
-        projected.Dispose();
-        return result;
-    }
-
-    /// <summary>Non-affine LayerNorm followed by <c>x * (1 + scale) + shift</c>.</summary>
-    private static Tensor LayerNormModulate(Tensor x, Tensor shift, Tensor scale, int batch, int seqLen, int dim)
-    {
-        Tensor normed = new Tensor(new TensorShape(batch, seqLen, dim), DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, dim);
-        Tensor modulated = AdaLNModulation.ApplyModulation(normed, shift, scale, batch, seqLen, dim);
-        normed.Dispose();
-        return modulated;
-    }
-
-    private static Tensor NewTensor(int batch, int seqLen, int dim) =>
-        new Tensor(new TensorShape(batch, seqLen, dim), DType.F32);
-
-    private static Tensor NewTensor4D(int b, int h, int s, int d) =>
-        new Tensor(new TensorShape(b, h, s, d), DType.F32);
-
-    /// <summary>Applies RMSNorm across the last dim of a <c>[B, H, S, D]</c> tensor in-place using the
-    /// per-head learnable scale weight. Uses the backend RmsNorm op by reshaping the leading dims as a
-    /// single "row" dimension — RmsNorm normalizes the last axis only.</summary>
-    private void ApplyRmsNormPerHead(IBackend backend, Tensor input, Tensor weight, int batch, int numHeads, int seqLen)
-    {
-        Tensor output = new Tensor(input.Shape, DType.F32);
-        backend.RmsNorm(output, input, weight, _qkNormEps);
-
-        long bytes = input.ElementCount * sizeof(float);
-        Buffer.MemoryCopy((void*)output.DataPointer, (void*)input.DataPointer, bytes, bytes);
-        output.Dispose();
     }
 }
 
@@ -226,9 +188,10 @@ public sealed unsafe class Kandinsky5EncoderBlock
 /// <c>Linear(time_embed → 9 * model_dim)</c> after SiLU; chunks into
 /// <c>(self_attn_params, cross_attn_params, ff_params)</c>; each into <c>(shift, scale, gate)</c>.
 ///
-/// Three sub-blocks: (1) self-attention with 3D RoPE on Q/K, (2) cross-attention to text (no RoPE,
-/// no QK-norm scaling on the rope path), (3) FFN. All sub-LayerNorms are non-affine; QKV/out linears
-/// are biased; FFN is bias-free <c>Linear → GELU → Linear</c>; QK norm is RMSNorm.</summary>
+/// Three sub-blocks: (1) self-attention with 3D RoPE on Q/K, (2) cross-attention to text (no RoPE),
+/// (3) FFN. All sub-LayerNorms are non-affine; QKV/out linears are biased; FFN is bias-free
+/// <c>Linear → GELU → Linear</c>; QK norm is RMSNorm. GPU-resident — see <see cref="Kandinsky5EncoderBlock"/>
+/// for the rationale (only RoPE stays on the host).</summary>
 public sealed unsafe class Kandinsky5DecoderBlock
 {
     private readonly int _modelDim;
@@ -321,160 +284,181 @@ public sealed unsafe class Kandinsky5DecoderBlock
         int sV = (int)visual.Shape[1];
         int sT = (int)text.Shape[1];
         int dim = _modelDim;
+        float attnScale = 1.0f / MathF.Sqrt(_headDim);
 
-        Tensor[] mod = ProduceModulation(backend, temb, batch, dim);
+        Tensor[] mod = Kandinsky5BlockOps.ProduceModulation(backend, temb, _modWeight!, _modBias, batch, _timeDim, dim, 9);
         // Order: (sa_shift, sa_scale, sa_gate, xa_shift, xa_scale, xa_gate, ff_shift, ff_scale, ff_gate).
         Tensor saShift = mod[0], saScale = mod[1], saGate = mod[2];
         Tensor xaShift = mod[3], xaScale = mod[4], xaGate = mod[5];
         Tensor ffShift = mod[6], ffScale = mod[7], ffGate = mod[8];
 
-        // ── 1. Self-attention with 3D RoPE on Q/K ──
-        Tensor saIn = LayerNormModulate(visual, saShift, saScale, batch, sV, dim);
+        TensorShape vFlat = new TensorShape(batch, sV, dim);
+        TensorShape vHeads = new TensorShape(batch, sV, _numHeads, _headDim);
+        TensorShape vMh = new TensorShape(batch, _numHeads, sV, _headDim);
+        TensorShape tHeads = new TensorShape(batch, sT, _numHeads, _headDim);
+        TensorShape tMh = new TensorShape(batch, _numHeads, sT, _headDim);
 
-        Tensor q = NewTensor(batch, sV, dim);
-        Tensor k = NewTensor(batch, sV, dim);
-        Tensor v = NewTensor(batch, sV, dim);
+        // ── 1. Self-attention with 3D RoPE on Q/K ──
+        Tensor saIn = Kandinsky5BlockOps.NormModulate(backend, visual, saShift, saScale, vFlat);
+
+        Tensor q = new Tensor(vHeads, DType.F32);
         backend.Linear(q, saIn, _saQ!, _saQB);
+        Tensor k = new Tensor(vHeads, DType.F32);
         backend.Linear(k, saIn, _saK!, _saKB);
+        Tensor v = new Tensor(vHeads, DType.F32);
         backend.Linear(v, saIn, _saV!, _saVB);
         saIn.Dispose();
 
-        Tensor qMh = DiTUtils.ReshapeToMultiHead(q, batch, sV, _numHeads, _headDim);
-        Tensor kMh = DiTUtils.ReshapeToMultiHead(k, batch, sV, _numHeads, _headDim);
-        Tensor vMh = DiTUtils.ReshapeToMultiHead(v, batch, sV, _numHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        Tensor qn = new Tensor(vHeads, DType.F32);
+        backend.RmsNorm(qn, q, _saQNorm!, _qkNormEps);
+        q.Dispose();
+        Tensor kn = new Tensor(vHeads, DType.F32);
+        backend.RmsNorm(kn, k, _saKNorm!, _qkNormEps);
+        k.Dispose();
 
-        ApplyRmsNormPerHead(backend, qMh, _saQNorm!);
-        ApplyRmsNormPerHead(backend, kMh, _saKNorm!);
+        Tensor qMh = new Tensor(vMh, DType.F32);
+        backend.Permute0213(qMh, qn, sV, _numHeads, _headDim);
+        qn.Dispose();
+        Tensor kMh = new Tensor(vMh, DType.F32);
+        backend.Permute0213(kMh, kn, sV, _numHeads, _headDim);
+        kn.Dispose();
+        Tensor vMhT = new Tensor(vMh, DType.F32);
+        backend.Permute0213(vMhT, v, sV, _numHeads, _headDim);
+        v.Dispose();
+
         rope.Apply(qMh, kMh, batch, _numHeads, sV);
 
-        Tensor attnMh = NewTensor4D(batch, _numHeads, sV, _headDim);
-        float saScaleVal = 1.0f / MathF.Sqrt(_headDim);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, saScaleVal);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor attnMh = new Tensor(vMh, DType.F32);
+        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMhT, null, attnScale);
+        qMh.Dispose(); kMh.Dispose(); vMhT.Dispose();
 
-        Tensor attnFlat = DiTUtils.ReshapeFromMultiHead(attnMh, batch, sV, _numHeads, _headDim);
+        Tensor attnFlat = new Tensor(vFlat, DType.F32);
+        backend.Permute0213(attnFlat, attnMh, _numHeads, sV, _headDim);
         attnMh.Dispose();
 
-        Tensor saOut = NewTensor(batch, sV, dim);
+        Tensor saOut = new Tensor(vFlat, DType.F32);
         backend.Linear(saOut, attnFlat, _saO!, _saOB);
         attnFlat.Dispose();
 
-        Tensor afterSa = AdaLNModulation.ApplyGatedResidual(visual, saOut, saGate, batch, sV, dim);
+        Tensor afterSa = new Tensor(vFlat, DType.F32);
+        backend.GatedResidualLastDim(afterSa, visual, saOut, saGate);
         saOut.Dispose();
 
         // ── 2. Cross-attention to text (no RoPE) ──
-        Tensor xaIn = LayerNormModulate(afterSa, xaShift, xaScale, batch, sV, dim);
+        Tensor xaIn = Kandinsky5BlockOps.NormModulate(backend, afterSa, xaShift, xaScale, vFlat);
 
-        Tensor qX = NewTensor(batch, sV, dim);
+        Tensor qX = new Tensor(vHeads, DType.F32);
         backend.Linear(qX, xaIn, _xaQ!, _xaQB);
         xaIn.Dispose();
 
-        Tensor kX = NewTensor(batch, sT, dim);
-        Tensor vX = NewTensor(batch, sT, dim);
+        Tensor kX = new Tensor(tHeads, DType.F32);
         backend.Linear(kX, text, _xaK!, _xaKB);
+        Tensor vX = new Tensor(tHeads, DType.F32);
         backend.Linear(vX, text, _xaV!, _xaVB);
 
-        Tensor qXMh = DiTUtils.ReshapeToMultiHead(qX, batch, sV, _numHeads, _headDim);
-        Tensor kXMh = DiTUtils.ReshapeToMultiHead(kX, batch, sT, _numHeads, _headDim);
-        Tensor vXMh = DiTUtils.ReshapeToMultiHead(vX, batch, sT, _numHeads, _headDim);
-        qX.Dispose(); kX.Dispose(); vX.Dispose();
+        Tensor qXn = new Tensor(vHeads, DType.F32);
+        backend.RmsNorm(qXn, qX, _xaQNorm!, _qkNormEps);
+        qX.Dispose();
+        Tensor kXn = new Tensor(tHeads, DType.F32);
+        backend.RmsNorm(kXn, kX, _xaKNorm!, _qkNormEps);
+        kX.Dispose();
 
-        ApplyRmsNormPerHead(backend, qXMh, _xaQNorm!);
-        ApplyRmsNormPerHead(backend, kXMh, _xaKNorm!);
+        Tensor qXMh = new Tensor(vMh, DType.F32);
+        backend.Permute0213(qXMh, qXn, sV, _numHeads, _headDim);
+        qXn.Dispose();
+        Tensor kXMh = new Tensor(tMh, DType.F32);
+        backend.Permute0213(kXMh, kXn, sT, _numHeads, _headDim);
+        kXn.Dispose();
+        Tensor vXMh = new Tensor(tMh, DType.F32);
+        backend.Permute0213(vXMh, vX, sT, _numHeads, _headDim);
+        vX.Dispose();
 
-        Tensor xaMh = NewTensor4D(batch, _numHeads, sV, _headDim);
-        float xaScaleVal = 1.0f / MathF.Sqrt(_headDim);
-        backend.ScaledDotProductAttention(xaMh, qXMh, kXMh, vXMh, null, xaScaleVal);
+        Tensor xaMh = new Tensor(vMh, DType.F32);
+        backend.ScaledDotProductAttention(xaMh, qXMh, kXMh, vXMh, null, attnScale);
         qXMh.Dispose(); kXMh.Dispose(); vXMh.Dispose();
 
-        Tensor xaFlat = DiTUtils.ReshapeFromMultiHead(xaMh, batch, sV, _numHeads, _headDim);
+        Tensor xaFlat = new Tensor(vFlat, DType.F32);
+        backend.Permute0213(xaFlat, xaMh, _numHeads, sV, _headDim);
         xaMh.Dispose();
 
-        Tensor xaOut = NewTensor(batch, sV, dim);
+        Tensor xaOut = new Tensor(vFlat, DType.F32);
         backend.Linear(xaOut, xaFlat, _xaO!, _xaOB);
         xaFlat.Dispose();
 
-        Tensor afterXa = AdaLNModulation.ApplyGatedResidual(afterSa, xaOut, xaGate, batch, sV, dim);
+        Tensor afterXa = new Tensor(vFlat, DType.F32);
+        backend.GatedResidualLastDim(afterXa, afterSa, xaOut, xaGate);
         xaOut.Dispose();
         afterSa.Dispose();
 
         // ── 3. Feed-forward ──
-        Tensor ffIn = LayerNormModulate(afterXa, ffShift, ffScale, batch, sV, dim);
+        Tensor ffInT = Kandinsky5BlockOps.NormModulate(backend, afterXa, ffShift, ffScale, vFlat);
 
-        Tensor ffMid = NewTensor(batch, sV, _ffDim);
-        backend.Linear(ffMid, ffIn, _ffIn!, null);
-        ffIn.Dispose();
+        Tensor ffMid = new Tensor(new TensorShape(batch, sV, _ffDim), DType.F32);
+        backend.Linear(ffMid, ffInT, _ffIn!, null);
+        ffInT.Dispose();
 
-        Tensor ffAct = NewTensor(batch, sV, _ffDim);
+        Tensor ffAct = new Tensor(new TensorShape(batch, sV, _ffDim), DType.F32);
         backend.Gelu(ffAct, ffMid);
         ffMid.Dispose();
 
-        Tensor ffOut = NewTensor(batch, sV, dim);
+        Tensor ffOut = new Tensor(vFlat, DType.F32);
         backend.Linear(ffOut, ffAct, _ffOut!, null);
         ffAct.Dispose();
 
-        Tensor result = AdaLNModulation.ApplyGatedResidual(afterXa, ffOut, ffGate, batch, sV, dim);
+        Tensor result = new Tensor(vFlat, DType.F32);
+        backend.GatedResidualLastDim(result, afterXa, ffOut, ffGate);
         ffOut.Dispose();
         afterXa.Dispose();
 
         for (int i = 0; i < mod.Length; i++) mod[i].Dispose();
         return result;
     }
+}
 
-    private Tensor[] ProduceModulation(IBackend backend, Tensor temb, int batch, int dim)
+/// <summary>Shared GPU-resident modulation helpers for the Kandinsky 5 encoder/decoder blocks. Keeps the AdaLN
+/// math on the device (no host DataPointer reads): the modulation projection is split with <c>SliceLastDim</c>
+/// and modulation is <c>LayerNormNoAffine → x*(1+scale)+shift</c> via <c>AddScalar</c> + <c>AffineBroadcastLastDim</c>,
+/// bit-identical to the prior CPU <c>DiTUtils</c>/<c>AdaLNModulation</c> path.</summary>
+internal static class Kandinsky5BlockOps
+{
+    /// <summary>Computes <c>Linear(SiLU(temb)) → count * model_dim</c> then slices into <paramref name="count"/>
+    /// <c>[B, dim]</c> tensors (chunk order matches diffusers' nested <c>torch.chunk</c>), all on the GPU.</summary>
+    public static Tensor[] ProduceModulation(IBackend backend, Tensor temb, Tensor modWeight, Tensor? modBias,
+        int batch, int timeDim, int dim, int count)
     {
-        int outDim = 9 * dim;
+        int outDim = count * dim;
 
-        Tensor activated = new Tensor(new TensorShape(batch, _timeDim), DType.F32);
+        Tensor activated = new Tensor(new TensorShape(batch, timeDim), DType.F32);
         backend.Silu(activated, temb);
 
         Tensor projected = new Tensor(new TensorShape(batch, outDim), DType.F32);
-        backend.Linear(projected, activated, _modWeight!, _modBias);
+        backend.Linear(projected, activated, modWeight, modBias);
         activated.Dispose();
 
-        Tensor[] result = new Tensor[9];
-        float* projPtr = (float*)projected.DataPointer;
-        for (int p = 0; p < 9; p++)
+        Tensor[] result = new Tensor[count];
+        for (int p = 0; p < count; p++)
         {
             Tensor slot = new Tensor(new TensorShape(batch, dim), DType.F32);
-            float* slotPtr = (float*)slot.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                int srcOffset = b * outDim + p * dim;
-                int dstOffset = b * dim;
-                for (int d = 0; d < dim; d++)
-                    slotPtr[dstOffset + d] = projPtr[srcOffset + d];
-            }
+            backend.SliceLastDim(slot, projected, p * dim);
             result[p] = slot;
         }
-
         projected.Dispose();
         return result;
     }
 
-    private static Tensor LayerNormModulate(Tensor x, Tensor shift, Tensor scale, int batch, int seqLen, int dim)
+    /// <summary>Non-affine LayerNorm (eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, all on
+    /// the GPU. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>, so the scale tensor is pre-incremented
+    /// by 1 via <c>AddScalar</c> to reproduce the <c>(1+scale)</c> factor.</summary>
+    public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
     {
-        Tensor normed = new Tensor(new TensorShape(batch, seqLen, dim), DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, x, batch, seqLen, dim);
-        Tensor modulated = AdaLNModulation.ApplyModulation(normed, shift, scale, batch, seqLen, dim);
+        Tensor normed = new Tensor(shape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, 1e-6f);
+        Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        Tensor output = new Tensor(shape, DType.F32);
+        backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
         normed.Dispose();
-        return modulated;
-    }
-
-    private static Tensor NewTensor(int batch, int seqLen, int dim) =>
-        new Tensor(new TensorShape(batch, seqLen, dim), DType.F32);
-
-    private static Tensor NewTensor4D(int b, int h, int s, int d) =>
-        new Tensor(new TensorShape(b, h, s, d), DType.F32);
-
-    private void ApplyRmsNormPerHead(IBackend backend, Tensor input, Tensor weight)
-    {
-        Tensor output = new Tensor(input.Shape, DType.F32);
-        backend.RmsNorm(output, input, weight, _qkNormEps);
-
-        long bytes = input.ElementCount * sizeof(float);
-        Buffer.MemoryCopy((void*)output.DataPointer, (void*)input.DataPointer, bytes, bytes);
-        output.Dispose();
+        scalePlus1.Dispose();
+        return output;
     }
 }

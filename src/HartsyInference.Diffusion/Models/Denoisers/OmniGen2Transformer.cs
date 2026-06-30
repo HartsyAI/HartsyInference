@@ -36,12 +36,12 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     private readonly OmniGen2Block[] _mainBlocks;
 
     private Tensor? _xEmbedderWeight, _xEmbedderBias;
-    private Tensor? _captionEmbedderWeight, _captionEmbedderBias;
-    private Tensor? _timeProj1Weight, _timeProj1Bias;
-    private Tensor? _timeProj2Weight, _timeProj2Bias;
-    private Tensor? _normOutLinearWeight, _normOutLinearBias;
-    private Tensor? _normOutNormWeight;
-    private Tensor? _projOutWeight, _projOutBias;
+    private Tensor? _captionNormWeight;                       // time_caption_embed.caption_embedder.0 (RMSNorm over text_feat_dim)
+    private Tensor? _captionEmbedderWeight, _captionEmbedderBias; // time_caption_embed.caption_embedder.1 (Linear text_feat_dim → hidden)
+    private Tensor? _timeProj1Weight, _timeProj1Bias;        // time_caption_embed.timestep_embedder.linear_1 (256 → 1024)
+    private Tensor? _timeProj2Weight, _timeProj2Bias;        // time_caption_embed.timestep_embedder.linear_2 (1024 → 1024)
+    private Tensor? _normOutLinearWeight, _normOutLinearBias; // norm_out.linear_1 (AdaLN: conditioning → hidden)
+    private Tensor? _projOutWeight, _projOutBias;            // norm_out.linear_2 (hidden → p²·out_channels)
     private Tensor? _imageIndexEmbedding;
 
     private int _disposed;
@@ -85,20 +85,24 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     {
         weights.TryGetValue("x_embedder.weight", out _xEmbedderWeight);
         weights.TryGetValue("x_embedder.bias", out _xEmbedderBias);
-        weights.TryGetValue("caption_embedder.weight", out _captionEmbedderWeight);
-        weights.TryGetValue("caption_embedder.bias", out _captionEmbedderBias);
 
-        weights.TryGetValue("time_caption_embed.time_proj.0.weight", out _timeProj1Weight);
-        weights.TryGetValue("time_caption_embed.time_proj.0.bias", out _timeProj1Bias);
-        weights.TryGetValue("time_caption_embed.time_proj.2.weight", out _timeProj2Weight);
-        weights.TryGetValue("time_caption_embed.time_proj.2.bias", out _timeProj2Bias);
+        // caption_embedder is nested under time_caption_embed: Sequential(RMSNorm(text_feat_dim), Linear(text_feat_dim → hidden)).
+        _captionNormWeight = CastToF32IfNeeded(weights["time_caption_embed.caption_embedder.0.weight"]);
+        weights.TryGetValue("time_caption_embed.caption_embedder.1.weight", out _captionEmbedderWeight);
+        weights.TryGetValue("time_caption_embed.caption_embedder.1.bias", out _captionEmbedderBias);
 
-        weights.TryGetValue("norm_out.linear.weight", out _normOutLinearWeight);
-        weights.TryGetValue("norm_out.linear.bias", out _normOutLinearBias);
-        weights.TryGetValue("norm_out.norm.weight", out _normOutNormWeight);
+        // timestep_embedder: TimestepEmbedding(256 → 1024 → 1024), SiLU between the two linears.
+        weights.TryGetValue("time_caption_embed.timestep_embedder.linear_1.weight", out _timeProj1Weight);
+        weights.TryGetValue("time_caption_embed.timestep_embedder.linear_1.bias", out _timeProj1Bias);
+        weights.TryGetValue("time_caption_embed.timestep_embedder.linear_2.weight", out _timeProj2Weight);
+        weights.TryGetValue("time_caption_embed.timestep_embedder.linear_2.bias", out _timeProj2Bias);
 
-        weights.TryGetValue("proj_out.weight", out _projOutWeight);
-        weights.TryGetValue("proj_out.bias", out _projOutBias);
+        // norm_out = LuminaLayerNormContinuous: linear_1 is the AdaLN scale (conditioning → hidden), the norm is a
+        // non-affine LayerNorm (no weight/bias, eps 1e-6), linear_2 is the output projection (hidden → p²·out_channels).
+        weights.TryGetValue("norm_out.linear_1.weight", out _normOutLinearWeight);
+        weights.TryGetValue("norm_out.linear_1.bias", out _normOutLinearBias);
+        weights.TryGetValue("norm_out.linear_2.weight", out _projOutWeight);
+        weights.TryGetValue("norm_out.linear_2.bias", out _projOutBias);
 
         weights.TryGetValue("image_index_embedding", out _imageIndexEmbedding);
 
@@ -115,6 +119,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     {
         if (_xEmbedderWeight is not null) yield return _xEmbedderWeight;
         if (_xEmbedderBias is not null) yield return _xEmbedderBias;
+        if (_captionNormWeight is not null) yield return _captionNormWeight;
         if (_captionEmbedderWeight is not null) yield return _captionEmbedderWeight;
         if (_captionEmbedderBias is not null) yield return _captionEmbedderBias;
         if (_timeProj1Weight is not null) yield return _timeProj1Weight;
@@ -123,7 +128,6 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         if (_timeProj2Bias is not null) yield return _timeProj2Bias;
         if (_normOutLinearWeight is not null) yield return _normOutLinearWeight;
         if (_normOutLinearBias is not null) yield return _normOutLinearBias;
-        if (_normOutNormWeight is not null) yield return _normOutNormWeight;
         if (_projOutWeight is not null) yield return _projOutWeight;
         if (_projOutBias is not null) yield return _projOutBias;
         if (_imageIndexEmbedding is not null) yield return _imageIndexEmbedding;
@@ -139,7 +143,8 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     /// <summary>Forward pass — predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="latent">Input latent <c>[B, in_channels, H, W]</c>.</param>
-    /// <param name="timestep">Flow-match timestep in <c>[0, 1]</c>.</param>
+    /// <param name="timestep">Flow-match sigma in <c>[0, 1]</c> (1 = pure noise, 0 = clean). OmniGen2 internally
+    /// embeds <c>(1 - sigma)</c> and negates its output, so this is the raw scheduler sigma, not sigma·1000.</param>
     /// <param name="textEmbeds">Caption embeddings <c>[B, T, text_feat_dim]</c>.</param>
     /// <param name="textSeqLen">Number of valid caption tokens (textEmbeds.Shape[1]).</param>
     /// <returns>Predicted velocity <c>[B, out_channels, H, W]</c>.</returns>
@@ -176,10 +181,13 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         backend.Linear(imgTokens, imgFlat, _xEmbedderWeight!, _xEmbedderBias);
         imgFlat.Dispose();
 
-        // ── 3. Caption embed: Linear(text_feat_dim → hidden) ──
+        // ── 3. Caption embed: RMSNorm(text_feat_dim) → Linear(text_feat_dim → hidden) ──
+        Tensor txtNormed = new(textEmbeds.Shape, DType.F32);
+        backend.RmsNorm(txtNormed, textEmbeds, _captionNormWeight!, _config.NormEps);
         TensorShape txtEmbShape = new(batch, textSeqLen, hidden);
         Tensor txtTokens = new(txtEmbShape, DType.F32);
-        backend.Linear(txtTokens, textEmbeds, _captionEmbedderWeight!, _captionEmbedderBias);
+        backend.Linear(txtTokens, txtNormed, _captionEmbedderWeight!, _captionEmbedderBias);
+        txtNormed.Dispose();
 
         // ── 4. Timestep embedding: sinusoidal(t * scale) → SiLU MLP → conditioning ──
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch, conditioningDim);
@@ -231,7 +239,9 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         backend.Linear(projOut, normedOut, _projOutWeight!, _projOutBias);
         normedOut.Dispose();
 
-        // ── 12. Unpatchify [B, S_img, p²·C_out] → [B, C_out, H, W] ──
+        // ── 12. Unpatchify [B, S_img, p²·C_out] → [B, C_out, H, W], negating per upstream's `return -output`.
+        //        OmniGen2's forward flips the flow direction (timestep = 1 - sigma) and negates the velocity so the
+        //        sign matches the flow-match Euler step x_next = x + v·(σ_next − σ). ──
         Tensor velocity = UnpatchifyTokens(projOut, batch, outChannels, hPacked, wPacked, patch);
         projOut.Dispose();
 
@@ -322,7 +332,8 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
                             int dstCol = wp * patch + px;
                             for (int c = 0; c < channels; c++)
                             {
-                                batchDst[c * hwStride + dstRow * width + dstCol] = tokenSrc[srcIdx++];
+                                // Negate here to realize upstream OmniGen2's `return -output`.
+                                batchDst[c * hwStride + dstRow * width + dstCol] = -tokenSrc[srcIdx++];
                             }
                         }
                     }
@@ -334,16 +345,19 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
 
     /// <summary>Builds the conditioning vector <c>temb [B, conditioning_dim]</c>: sinusoidal embedding of the
     /// scaled timestep, fed through the two-layer SiLU MLP <c>time_proj.{0,2}</c>.</summary>
-    private Tensor ComputeTimestepEmbedding(IBackend backend, float timestep, int batch, int conditioningDim)
+    private Tensor ComputeTimestepEmbedding(IBackend backend, float sigma, int batch, int conditioningDim)
     {
-        int hiddenSize = _config.HiddenSize;
-        float scaledT = timestep * _config.TimestepScale;
+        // OmniGen2 (per ComfyUI/upstream forward) flips the flow-match sigma: the embedded timestep is
+        // (1 - sigma), then time_proj's Timesteps applies scale=timestep_scale to a 256-dim sinusoid
+        // (frequency_embedding_size=256, flip_sin_to_cos=True, downscale_freq_shift=0).
+        const int FrequencyEmbeddingSize = 256;
+        float scaledT = (1.0f - sigma) * _config.TimestepScale;
 
-        TensorShape sinShape = new(batch, hiddenSize);
+        TensorShape sinShape = new(batch, FrequencyEmbeddingSize);
         Tensor sinusoidal = new(sinShape, DType.F32);
-        DiTUtils.SinusoidalTimestepEmbedding(sinusoidal, scaledT, batch, hiddenSize);
+        DiTUtils.SinusoidalTimestepEmbedding(sinusoidal, scaledT, batch, FrequencyEmbeddingSize);
 
-        // time_proj.0: Linear(hidden → conditioning_dim)
+        // timestep_embedder.linear_1: Linear(256 → conditioning_dim)
         TensorShape projShape = new(batch, conditioningDim);
         Tensor proj1 = new(projShape, DType.F32);
         backend.Linear(proj1, sinusoidal, _timeProj1Weight!, _timeProj1Bias);
@@ -353,16 +367,16 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         backend.Silu(act, proj1);
         proj1.Dispose();
 
-        // time_proj.2: Linear(conditioning_dim → conditioning_dim)
+        // timestep_embedder.linear_2: Linear(conditioning_dim → conditioning_dim)
         Tensor proj2 = new(projShape, DType.F32);
         backend.Linear(proj2, act, _timeProj2Weight!, _timeProj2Bias);
         act.Dispose();
         return proj2;
     }
 
-    /// <summary>Lumina-style "RMSNormZero" final layer: <c>Linear(silu(temb)) → scale [B, hidden]</c>, then
-    /// <c>RMSNorm(x) * (1 + scale)</c>. Mirrors <c>OmniGen2RMSNorm</c> + <c>Lumina2AdaLayerNormZero</c> applied
-    /// just before <c>proj_out</c>.</summary>
+    /// <summary>LuminaLayerNormContinuous final layer (mirrors diffusers <c>norm_out</c>): the AdaLN scale is
+    /// <c>Linear(silu(temb))</c> via <c>norm_out.linear_1</c> (conditioning → hidden); the norm is a non-affine
+    /// LayerNorm (no weight/bias, eps 1e-6); output is <c>LayerNorm(x) * (1 + scale)</c>. GPU-resident.</summary>
     private Tensor ApplyFinalNorm(IBackend backend, Tensor x, Tensor temb, int batch, int seqLen, int hidden, int conditioningDim)
     {
         TensorShape actShape = new(batch, conditioningDim);
@@ -375,29 +389,25 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         activated.Dispose();
 
         TensorShape rmsShape = new(batch, seqLen, hidden);
-        Tensor rms = new(rmsShape, DType.F32);
-        backend.RmsNorm(rms, x, _normOutNormWeight!, _config.NormEps);
+        Tensor normed = new(rmsShape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, FinalNormEps);
+
+        Tensor scalePlus1 = new(scaleShape, DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        scale.Dispose();
 
         Tensor output = new(rmsShape, DType.F32);
-        float* rmsPtr = (float*)rms.DataPointer;
-        float* sclPtr = (float*)scale.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int sclBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vecBase = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                {
-                    outPtr[vecBase + d] = rmsPtr[vecBase + d] * (1.0f + sclPtr[sclBase + d]);
-                }
-            }
-        }
-        rms.Dispose();
-        scale.Dispose();
+        backend.AffineBroadcastLastDim(output, normed, scalePlus1, null);
+        normed.Dispose();
+        scalePlus1.Dispose();
         return output;
     }
+
+    /// <summary>Epsilon for the non-affine final LayerNorm (diffusers <c>LuminaLayerNormContinuous(eps=1e-6)</c>).</summary>
+    private const float FinalNormEps = 1e-6f;
+
+    private static Tensor? CastToF32IfNeeded(Tensor? t) =>
+        t is null ? null : t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private static int ComputeFfnInnerDim(OmniGen2Config config)
     {
@@ -415,11 +425,11 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             _xEmbedderWeight = _xEmbedderBias = null;
+            _captionNormWeight = null;
             _captionEmbedderWeight = _captionEmbedderBias = null;
             _timeProj1Weight = _timeProj1Bias = null;
             _timeProj2Weight = _timeProj2Bias = null;
             _normOutLinearWeight = _normOutLinearBias = null;
-            _normOutNormWeight = null;
             _projOutWeight = _projOutBias = null;
             _imageIndexEmbedding = null;
         }

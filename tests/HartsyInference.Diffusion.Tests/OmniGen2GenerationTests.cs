@@ -9,6 +9,7 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tests.Common;
 
@@ -33,7 +34,7 @@ public sealed class OmniGen2GenerationTests
 
     [Fact]
     public void OmniGen2_V1_Gpu_512_NoCfg() =>
-        RunGenerationTest("omnigen2_v1_512_nocfg", width: 512, height: 512, steps: 25, cfgScale: 1.0f);
+        RunGenerationTest("omnigen2_v1_512_nocfg", width: 512, height: 512, steps: 25, cfgScale: 5.0f);
 
     private void RunGenerationTest(string outputName, int width, int height, int steps, float cfgScale)
     {
@@ -75,7 +76,13 @@ public sealed class OmniGen2GenerationTests
         {
             using (loader)
             {
-                Dictionary<string, Tensor> transformerWeights = CastWeightsToF32(converted.Transformer);
+                // Cast the transformer weights to BF16 (8 GB, same footprint as the native F16): the big
+                // attention/FFN linears stay BF16-resident on the GPU and the GEMM runs in BF16 (ResolveGemmDtype
+                // picks BF16 for BF16-weight × F32-activation). BF16 has F32's exponent range, so CFG-amplified
+                // activations can't overflow the way F16 (max 65504) does — F16 produced NaN→all-black at cfg=5.
+                // Casting to F32 instead would need ~16 GB (OOM on the 12 GB 3060). The block/transformer load
+                // paths cast only the tiny norm weights to F32. ComfyUI likewise runs OmniGen2 in BF16.
+                Dictionary<string, Tensor> transformerWeights = CastWeightsToBf16(converted.Transformer);
 
                 sw.Restart();
                 OmniGen2Config config = OmniGen2Config.V1;
@@ -86,7 +93,9 @@ public sealed class OmniGen2GenerationTests
                 sw.Restart();
                 using SafeTensorsLoader vaeLoader = new();
                 vaeLoader.Load(TestPaths.OmniGen2.Vae);
-                Dictionary<string, Tensor> vaeWeights = CastWeightsToF32(vaeLoader.GetAllTensors());
+                // The staged VAE is the original (ldm) Flux autoencoder naming (decoder.mid.block_1, decoder.up.N.block.M);
+                // VaeDecoder expects diffusers naming, so remap each key via the shared ConvertVaeKey helper.
+                Dictionary<string, Tensor> vaeWeights = ConvertVaeWeights(vaeLoader.GetAllTensors());
                 VaeDecoder vae = new(VaeConfig.Flux);
                 vae.LoadWeights(vaeWeights);
                 _output.WriteLine($"[3/5] VAE ready in {sw.ElapsedMilliseconds}ms");
@@ -95,16 +104,22 @@ public sealed class OmniGen2GenerationTests
                 using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
                 (nuint freeBytes, nuint totalBytes) = backend.Context.GetMemoryInfo();
                 double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-                const double MinRequiredGb = 12.0;
+                const double MinRequiredGb = 9.5;
                 if (freeGb < MinRequiredGb)
                 {
-                    _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB for OmniGen 2 FP16 transformer + VAE + Qwen2.5-VL.");
+                    _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB for the OmniGen 2 FP16 transformer (8 GB resident) + Flux VAE.");
                     return;
                 }
                 backend.PreloadWeights(transformer.EnumerateWeights());
                 _output.WriteLine($"[4/5] Backend + preload ready in {sw.ElapsedMilliseconds}ms");
 
                 using Tensor promptEmbeds = LoadF32Tensor(TestPaths.OmniGen2.PromptEmbeds, config.TextFeatDim);
+
+                // Negative (empty-prompt) embeddings sit beside the positive ones; needed only when CFG is active.
+                string negativePath = Path.Combine(Path.GetDirectoryName(TestPaths.OmniGen2.PromptEmbeds)!, "negative.bin");
+                Tensor? negativeEmbeds = (cfgScale > 1.0f && File.Exists(negativePath))
+                    ? LoadF32Tensor(negativePath, config.TextFeatDim)
+                    : null;
 
                 using OmniGen2Pipeline pipeline = new(backend, transformer, vae, config);
 
@@ -122,8 +137,9 @@ public sealed class OmniGen2GenerationTests
                 _output.WriteLine($"\n[5/5] Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed=42...");
                 Stopwatch genSw = Stopwatch.StartNew();
                 (byte[] rgb, int outW, int outH, int seed) = pipeline.GenerateFromEmbeddings(
-                    promptEmbeds, request, cfgScale, null,
+                    promptEmbeds, request, cfgScale, negativeEmbeds,
                     onProgress: progress => _output.WriteLine($"  Step {progress.Step}/{progress.TotalSteps} ({progress.ElapsedMs:F0}ms)"));
+                negativeEmbeds?.Dispose();
                 genSw.Stop();
                 _output.WriteLine($"\nGeneration complete in {genSw.Elapsed.TotalSeconds:F1}s (seed={seed})");
 
@@ -161,6 +177,35 @@ public sealed class OmniGen2GenerationTests
             Buffer.MemoryCopy(src, (void*)result.DataPointer, data.Length, data.Length);
         }
         return result;
+    }
+
+    /// <summary>Remaps an original (ldm) Flux VAE state dict to diffusers naming via <see cref="CheckpointConvertUtils.ConvertVaeKey"/>
+    /// and casts to F32. Keys the converter doesn't recognize (e.g. quant_conv, which the decoder doesn't use) are dropped.</summary>
+    private static Dictionary<string, Tensor> ConvertVaeWeights(Dictionary<string, Tensor> weights)
+    {
+        Dictionary<string, Tensor> result = new(weights.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in weights)
+        {
+            string? diffusersKey = CheckpointConvertUtils.ConvertVaeKey(kvp.Key);
+            if (diffusersKey is null)
+                continue;
+            DType dt = kvp.Value.DType;
+            result[diffusersKey] = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
+        }
+        return result;
+    }
+
+    /// <summary>Casts F16/F32 weights to BF16 (others passed through). BF16 keeps the 8 GB footprint of F16 but
+    /// has F32's exponent range, so the GEMM can't overflow when CFG amplifies activations.</summary>
+    private static Dictionary<string, Tensor> CastWeightsToBf16(Dictionary<string, Tensor> weights)
+    {
+        Dictionary<string, Tensor> bf16 = new(weights.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in weights)
+        {
+            DType dt = kvp.Value.DType;
+            bf16[kvp.Key] = (dt == DType.F16 || dt == DType.F32) ? kvp.Value.CastTo(DType.BF16) : kvp.Value;
+        }
+        return bf16;
     }
 
     private static Dictionary<string, Tensor> CastWeightsToF32(Dictionary<string, Tensor> weights)

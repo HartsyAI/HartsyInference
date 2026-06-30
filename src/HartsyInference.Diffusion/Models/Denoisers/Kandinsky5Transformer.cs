@@ -405,31 +405,26 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         backend.Linear(mod, activated, _outModWeight!, _outModBias);
         activated.Dispose();
 
-        Tensor normed = new Tensor(new TensorShape(batch, numPatches, dim), DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, visual, batch, numPatches, dim);
-
-        // Apply modulation: out = norm * (1 + scale) + shift.
+        // GPU-resident modulation: out = norm * (1 + scale) + shift.
         // mod chunk order is (shift, scale) per `torch.chunk(self.modulation(...), 2, dim=-1)`.
-        Tensor modulated = new Tensor(new TensorShape(batch, numPatches, dim), DType.F32);
-        float* nPtr = (float*)normed.DataPointer;
-        float* mPtr = (float*)mod.DataPointer;
-        float* outPtr = (float*)modulated.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int modBase = b * 2 * dim;
-            for (int s = 0; s < numPatches; s++)
-            {
-                int rowOff = (b * numPatches + s) * dim;
-                for (int d = 0; d < dim; d++)
-                {
-                    float shift = mPtr[modBase + d];
-                    float scale = mPtr[modBase + dim + d];
-                    outPtr[rowOff + d] = nPtr[rowOff + d] * (1.0f + scale) + shift;
-                }
-            }
-        }
-        normed.Dispose();
+        Tensor shift = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.SliceLastDim(shift, mod, 0);
+        Tensor scale = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.SliceLastDim(scale, mod, dim);
         mod.Dispose();
+
+        Tensor normed = new Tensor(new TensorShape(batch, numPatches, dim), DType.F32);
+        backend.LayerNormNoAffine(normed, visual, 1e-6f);
+
+        Tensor scalePlus1 = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        scale.Dispose();
+
+        Tensor modulated = new Tensor(new TensorShape(batch, numPatches, dim), DType.F32);
+        backend.AffineBroadcastLastDim(modulated, normed, scalePlus1, shift);
+        normed.Dispose();
+        scalePlus1.Dispose();
+        shift.Dispose();
 
         Tensor projected = new Tensor(new TensorShape(batch, numPatches, patchOutDim), DType.F32);
         backend.Linear(projected, modulated, _outProjWeight!, _outProjBias);
