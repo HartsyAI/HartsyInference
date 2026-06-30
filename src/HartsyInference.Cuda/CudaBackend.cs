@@ -1496,6 +1496,34 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>GPU cast FP16 → FP32 via PTX kernel.</summary>
+    /// <summary>Dequantizes a GGUF-quantized weight tensor (Q4_K / Q5_K / Q6_K / Q8_0 / fp8) to a host-readable
+    /// F32 tensor using the SAME on-GPU <see cref="CastOnGpu"/> path that <c>Linear</c> uses per GEMM. Test/tooling
+    /// hook for validating the GPU dequant kernels against a reference — not a hot path.</summary>
+    public Tensor DequantizeToF32(Tensor quant)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int count = (int)quant.ElementCount;
+        Tensor output = new Tensor(new TensorShape(count), DType.F32);
+        ulong pIn = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(quant);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            CastOnGpu(pOut, pIn, quant.DType, DType.F32, count);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+            return output;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     public void CastToF32(Tensor output, Tensor input)
     {
         _context.EnsureCurrent();

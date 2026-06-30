@@ -213,8 +213,11 @@ public sealed unsafe class QwenImageTransformer : IDisposable
                 int vecOffset = (b * seqLen + s) * dim;
                 for (int d = 0; d < dim; d++)
                 {
-                    float shift = modPtr[modBase + d];
-                    float scale = modPtr[modBase + dim + d];
+                    // AdaLayerNormContinuous (Qwen-Image norm_out / ComfyUI LastLayer): `scale, shift = chunk(emb, 2)`
+                    // — SCALE is the first half, SHIFT the second. (NOT the AdaLayerNormZero [shift,scale] order the
+                    // per-block modulation uses.) Was swapped → distorted final velocity.
+                    float scale = modPtr[modBase + d];
+                    float shift = modPtr[modBase + dim + d];
                     outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
                 }
             }

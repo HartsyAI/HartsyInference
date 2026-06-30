@@ -10,6 +10,13 @@ public sealed unsafe class Tensor : IDisposable
     private NativeBuffer? _ownedBuffer;
     private nint _dataPointer;
 
+    /// <summary>Optional owner object kept alive for the lifetime of this tensor. For tensors that borrow an
+    /// external pointer (e.g. an mmap'd weight file), this roots the owner (e.g. the <c>MmapHandle</c>) so its
+    /// finalizer can't run — and unmap the memory out from under the borrowed pointer — while the tensor is still
+    /// reachable. Without this, a loader whose tensors outlive the loader reference itself (a common pattern when a
+    /// helper returns only the tensor dictionary) would dangle the moment a GC collects the loader.</summary>
+    private object? _keepAlive;
+
     /// <summary>For owned tensors: the host buffer is allocated lazily on first CPU access (see <see cref="EnsureHostBuffer"/>).
     /// This byte size is kept so the allocation can happen later. Zero for borrowed tensors.</summary>
     private readonly long _byteSize;
@@ -50,6 +57,13 @@ public sealed unsafe class Tensor : IDisposable
         _ownedBuffer = null;
         _ownsLazy = false;
     }
+
+    /// <summary>Roots <paramref name="owner"/> for this tensor's lifetime (see <see cref="_keepAlive"/>). Used by
+    /// borrowing loaders to pin the backing store (e.g. an <c>MmapHandle</c>) against premature GC/finalization.</summary>
+    internal void SetKeepAlive(object? owner) => _keepAlive = owner;
+
+    /// <summary>The owner object (if any) kept alive for this tensor's lifetime. See <see cref="SetKeepAlive"/>.</summary>
+    internal object? KeepAliveOwner => _keepAlive;
 
     /// <summary>Shape and strides of this tensor.</summary>
     public TensorShape Shape { get; }
@@ -445,6 +459,7 @@ public sealed unsafe class Tensor : IDisposable
         {
             buffer.Dispose();
         }
+        _keepAlive = null;
         GC.SuppressFinalize(this);
     }
 

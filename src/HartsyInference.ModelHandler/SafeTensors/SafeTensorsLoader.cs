@@ -56,7 +56,12 @@ public sealed class SafeTensorsLoader : IDisposable
             throw new KeyNotFoundException($"Tensor '{name}' not found in safetensors file '{FilePath}'.");
 
         void* dataPtr = _handle.PointerAt(descriptor.DataOffset);
-        return new Tensor(dataPtr, descriptor.Shape, descriptor.DType);
+        Tensor tensor = new Tensor(dataPtr, descriptor.Shape, descriptor.DType);
+        // Root the mmap so the borrowed pointer can't dangle if the caller keeps the tensor but drops the loader
+        // reference (e.g. a helper that returns only GetAllTensors()). Explicit Dispose() still tears it down — the
+        // documented "don't dispose the loader while using its tensors" contract is unchanged.
+        tensor.SetKeepAlive(_handle);
+        return tensor;
     }
 
     /// <summary>Returns all tensors as a dictionary of name → Tensor. All tensors borrow mmap memory.</summary>

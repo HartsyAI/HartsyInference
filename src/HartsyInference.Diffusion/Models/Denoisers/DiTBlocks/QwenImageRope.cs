@@ -66,6 +66,41 @@ public sealed unsafe class QwenImageRope
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, txtSeqLen);
     }
 
+    /// <summary>Rotates Q and K in-place for the JOINT <c>[txt, img]</c> sequence in one pass — text occupies rows
+    /// <c>0..txtSeqLen</c> (positions <c>positionStart + s</c> on all three axes), image occupies rows
+    /// <c>txtSeqLen..txtSeqLen+H·W</c> (centered <c>[0, row-Hc, col-Wc]</c>). Bit-identical to calling
+    /// <see cref="ApplyText"/> then <see cref="ApplyImage"/> on the separate streams before concatenation, since RoPE
+    /// is per-row independent. Used by the GPU-resident block path, which concatenates <c>[txt, img]</c> on the GPU
+    /// first (contiguous row-concat) and then ropes the joint tensor once — avoiding a per-stream CPU round-trip.
+    /// Both Q and K must be <c>[B, numHeads, txtSeqLen + H·W, headDim]</c>.</summary>
+    public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads,
+        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart)
+    {
+        int imgSeqLen = imgPackedH * imgPackedW;
+        int totalSeqLen = txtSeqLen + imgSeqLen;
+        int halfDim = _headDim / 2;
+        float[] cosTable = new float[totalSeqLen * halfDim];
+        float[] sinTable = new float[totalSeqLen * halfDim];
+
+        // Text rows first (matches the [txt, img] concat order).
+        for (int s = 0; s < txtSeqLen; s++)
+        {
+            int pos = txtPositionStart + s;
+            FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
+        }
+        // Then image rows with centered spatial positions (scale_rope=True), frame axis 0.
+        int hCenter = imgPackedH - imgPackedH / 2;
+        int wCenter = imgPackedW - imgPackedW / 2;
+        for (int si = 0; si < imgSeqLen; si++)
+        {
+            int row = si / imgPackedW;
+            int col = si - row * imgPackedW;
+            FillTokenFreqs(cosTable, sinTable, txtSeqLen + si, frame: 0, height: row - hCenter, width: col - wCenter);
+        }
+
+        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);
+    }
+
     /// <summary>Computes the position offset to use when calling <see cref="ApplyText"/>. Matches diffusers'
     /// <c>scale_rope=True</c> mode where text starts at <c>max_vid_index = max(height//2, width//2)</c>
     /// (the centered image grid's max index), used as the single scalar across all three axes for text.</summary>

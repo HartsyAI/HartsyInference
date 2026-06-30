@@ -106,3 +106,4 @@ appsettings.*.json
 .cache/
 /.claude/
 *.log
+/Models

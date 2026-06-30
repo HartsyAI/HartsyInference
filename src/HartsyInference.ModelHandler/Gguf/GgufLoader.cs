@@ -104,7 +104,10 @@ public sealed class GgufLoader : IDisposable
             throw new KeyNotFoundException($"Tensor '{name}' not found in GGUF file '{FilePath}'.");
 
         void* dataPtr = _handle.PointerAt(desc.AbsoluteOffset);
-        return new Tensor(dataPtr, desc.Shape, desc.DType);
+        Tensor tensor = new Tensor(dataPtr, desc.Shape, desc.DType);
+        // Root the mmap against premature GC/finalization while the borrowed pointer is in use (see SafeTensorsLoader).
+        tensor.SetKeepAlive(_handle);
+        return tensor;
     }
 
     private static unsafe (string Key, object Value, long BytesRead) ReadMetadataKv(byte* ptr, long remaining)

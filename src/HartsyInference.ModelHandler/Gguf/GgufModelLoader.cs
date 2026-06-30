@@ -91,6 +91,26 @@ public sealed class GgufModelLoader : IDisposable
         }
     }
 
+    /// <summary>Relabels every rank-2 tensor's shape from GGUF's <c>[in, out]</c> (ggml <c>ne</c>) order to the
+    /// <c>[out, in]</c> order the rest of the engine assumes for a matrix weight (matmul reads <c>N=Shape[0]</c>,
+    /// <c>K=Shape[1]</c>; embeddings/heads are <c>[vocab, hidden]</c>). The underlying data is already row-major
+    /// <c>[out, in]</c> — identical to an HF safetensors weight — so this is a pure metadata swap (a <see cref="Tensor.Reshape"/>
+    /// that keeps borrowing the GGUF mmap, valid for quantized dtypes too since it touches no bytes). Diffusion GGUF
+    /// converters must run their input through this before mapping keys, exactly as <c>GgufLanguageModel</c> does for
+    /// LLM weights; skipping it leaves every Linear transposed and the first matmul derives a degenerate <c>M=0</c>.</summary>
+    public static Dictionary<string, Tensor> RelabelRank2ToPyTorchOrder(IReadOnlyDictionary<string, Tensor> ggufWeights)
+    {
+        Dictionary<string, Tensor> relabeled = new(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Tensor> kv in ggufWeights)
+        {
+            Tensor t = kv.Value;
+            if (t.Shape.Rank == 2)
+                t = t.Reshape(new TensorShape((int)t.Shape[1], (int)t.Shape[0]));
+            relabeled[kv.Key] = t;
+        }
+        return relabeled;
+    }
+
     /// <summary>Convenience wrapper that loads + immediately dequantizes every quantized tensor to <paramref name="targetDtype"/>. Use this when the rest of the pipeline can't yet handle quantized inputs (current default — GPU dequant on the fly is Phase D).</summary>
     public static (Dictionary<string, Tensor> weights, LoadedGgufModel handle) LoadDequantized(string path, DType targetDtype)
     {
