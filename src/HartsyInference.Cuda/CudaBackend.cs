@@ -824,8 +824,27 @@ public sealed class CudaBackend : IBackend
             }
             else
             {
+                // F32-input path: the kernel reads weight/bias as F32, so cast F16/BF16 affine UP to F32 first.
+                // (A model cast to F16 keeps F16 norm affine; without this the F32 kernel reinterprets the F16
+                // bytes → garbage affine → near-zero output. Same dtype-mismatch class as GroupNormSilu.)
+                ulong wPtr = pW;
+                ulong bPtr = pB;
+                if (weight.DType == DType.F16 || weight.DType == DType.BF16)
+                {
+                    pWCast = CudaMemory.Allocate((nuint)(weight.ElementCount * 4));
+                    if (weight.DType == DType.F16) _kernels!.LaunchCastF16ToF32(pWCast, pW, (int)weight.ElementCount, _stream.Handle);
+                    else _kernels!.LaunchCastBf16ToF32(pWCast, pW, (int)weight.ElementCount, _stream.Handle);
+                    wPtr = pWCast;
+                }
+                if (bias.DType == DType.F16 || bias.DType == DType.BF16)
+                {
+                    pBCast = CudaMemory.Allocate((nuint)(bias.ElementCount * 4));
+                    if (bias.DType == DType.F16) _kernels!.LaunchCastF16ToF32(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
+                    else _kernels!.LaunchCastBf16ToF32(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
+                    bPtr = pBCast;
+                }
                 _kernels!.LaunchLayerNorm(
-                    pOut, pIn, pW, pB,
+                    pOut, pIn, wPtr, bPtr,
                     normDim, totalRows, eps,
                     _stream.Handle);
             }

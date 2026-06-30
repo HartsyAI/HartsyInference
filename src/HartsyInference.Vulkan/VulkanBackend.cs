@@ -134,7 +134,17 @@ public sealed class VulkanBackend : IBackend
     /// timeline-semaphore advances and deferred-free buffers can be reclaimed; otherwise large
     /// models accumulate hundreds of allocations between submits and exhaust the heap.</summary>
     private int _dispatchesSinceSubmit;
+    /// <summary>Dispatches recorded by the current outermost op — reset at op entry, read by the profiler.
+    /// Kept separate from <see cref="_dispatchesSinceSubmit"/> (which resets only on an actual submit) so
+    /// batching submits across ops doesn't corrupt the per-op dispatch count the profiler reports.</summary>
+    private int _dispatchesThisOp;
     private const int FLUSH_THRESHOLD = 8;
+
+    /// <summary>When set, submit a command buffer at the end of every op (the old behavior). Default off:
+    /// submits are batched until <see cref="FLUSH_THRESHOLD"/> dispatches accumulate, cutting one
+    /// <c>vkQueueSubmit2</c> per tiny op — the dominant per-dispatch host cost for small-op-heavy workloads.</summary>
+    private static readonly bool _submitPerOp =
+        Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_SUBMIT_PER_OP") == "1";
 
     private unsafe void Dispatch(
         VulkanKernel kernel,
@@ -173,6 +183,7 @@ public sealed class VulkanBackend : IBackend
         _stream.RecordGlobalComputeBarrier();
 
         _dispatchesSinceSubmit++;
+        _dispatchesThisOp++;
         // CRITICAL: do NOT drain transients here. Multi-dispatch ops like SDPA (24 heads × 3
         // dispatches) reference the same Q/K/V upload buffers across many dispatches. Draining
         // mid-op would tag those buffers for deferred-free, then the next flush completes them
@@ -203,6 +214,7 @@ public sealed class VulkanBackend : IBackend
             _b = b;
             _opName = opName;
             _startTicks = b._profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            if (b._opNestingDepth == 0) b._dispatchesThisOp = 0;
             b._opNestingDepth++;
         }
 
@@ -211,8 +223,17 @@ public sealed class VulkanBackend : IBackend
             _b._opNestingDepth--;
             if (_b._opNestingDepth == 0)
             {
-                int dispatches = _b._dispatchesSinceSubmit;
-                _b.DrainAndFlush();
+                int dispatches = _b._dispatchesThisOp;
+                // Tag this op's transient uploads for deferred-free at the op boundary (safe — every
+                // dispatch that referenced them is already recorded). Submitting, however, is batched:
+                // only flush the command buffer once enough dispatches accumulate, so a stream of tiny
+                // ops costs one vkQueueSubmit2 instead of one each. Sync()/lazy-sync still force a flush.
+                _b._xfer.DrainTransients();
+                if (_submitPerOp || _b._dispatchesSinceSubmit >= FLUSH_THRESHOLD)
+                {
+                    _b._stream.SubmitAndAdvance();
+                    _b._dispatchesSinceSubmit = 0;
+                }
                 if (_b._profiler.IsEnabled)
                     _b._profiler.Record(_opName, System.Diagnostics.Stopwatch.GetTimestamp() - _startTicks, dispatches);
             }
@@ -246,12 +267,19 @@ public sealed class VulkanBackend : IBackend
     /// where big tiles would leave most threads idle (e.g. SDPA per-head 64×64 matmuls).
     /// MAX_BM/BN/BK/TM/TN in the shader (matmul_tiled.comp.glsl) cap what's selectable here —
     /// keep them in sync if you bump these values.</summary>
-    private static (uint BM, uint BN, uint BK, uint TM, uint TN) PickMatmulTile(long M, long N, long K)
+    private (uint BM, uint BN, uint BK, uint TM, uint TN) PickMatmulTile(long M, long N, long K)
     {
-        if (M >= 128 && N >= 128) return (128, 128, 32, 8, 8);   // 16×16 = 256 threads/wg, 32 KB shared
-        if (M >= 64  && N >= 64)  return ( 64,  64, 16, 8, 8);   //  8× 8 =  64 threads/wg
-        return (32, 32, 16, 4, 4);                               //  8× 8 =  64 threads/wg, small shapes
+        // matmul_tiled's shared arrays are FP32 and sized BM*(BK+1) + BK*BN (see the shader). The 128
+        // tile needs 33,280 B — over the 32 KB Vulkan-spec minimum — so on AMD GCN / Intel-class devices
+        // we must fall to a tile that fits, or pipeline creation is invalid. NVIDIA (48–64 KB) keeps 128.
+        uint shmem = Vk.MaxComputeSharedMemoryBytes;
+        if (M >= 128 && N >= 128 && TileSharedBytes(128, 128, 32) <= shmem) return (128, 128, 32, 8, 8);
+        if (M >= 64  && N >= 64  && TileSharedBytes(64, 64, 16) <= shmem)   return ( 64,  64, 16, 8, 8);
+        return (32, 32, 16, 4, 4);   // (32*17 + 16*32)*4 = 4,224 B — fits even a 16 KB shared-mem floor
     }
+
+    /// <summary>Shared-memory bytes matmul_tiled's FP32 Asub+Bsub consume for a tile (must stay ≤ device limit).</summary>
+    private static uint TileSharedBytes(uint BM, uint BN, uint BK) => (BM * (BK + 1) + BK * BN) * sizeof(float);
 
     /// <summary>Attempts the cooperative-matrix matmul fast path. Returns true when the kernel
     /// was dispatched (op is fully handled). Returns false when the path doesn't apply and the
@@ -283,6 +311,17 @@ public sealed class VulkanBackend : IBackend
         uint BN = (N >= 64) ? 64u : (N >= 32 ? 32u : 16u);
         // SUBGROUP_SIZE matches what we pin via VkPipelineShaderStageRequiredSubgroupSizeCreateInfo.
         uint subgroupSize = Vk.SubgroupSize;
+        // Workgroup invocations = (BM/16)*(BN/16) * subgroupSize. On NVIDIA (subgroup 32) a 64×64 tile is
+        // 16*32 = 512 — fine. On AMD wave64 it's 16*64 = 1024, and on small devices that can exceed
+        // maxComputeWorkGroupInvocations / sizeX. Shrink the tile (never below the 16×16 fragment, which is
+        // always one subgroup ≤ the limit) so the dispatch stays valid cross-vendor. No-op on NVIDIA.
+        uint maxInvocations = Math.Min(Vk.MaxComputeWorkGroupInvocations, Vk.MaxComputeWorkGroupSizeX);
+        while ((BM > FRAG || BN > FRAG) && (BM / FRAG) * (BN / FRAG) * subgroupSize > maxInvocations)
+        {
+            if (BN >= BM && BN > FRAG) BN /= 2;
+            else if (BM > FRAG) BM /= 2;
+            else BN /= 2;
+        }
         // subgroups per workgroup = (BM/16) * (BN/16). Workgroup size = subgroups * subgroupSize.
         uint subgroups = (BM / FRAG) * (BN / FRAG);
         uint localX = subgroups * subgroupSize;
@@ -301,6 +340,7 @@ public sealed class VulkanBackend : IBackend
                 SpecConstant.Bool(13, transposeA),
                 SpecConstant.Bool(14, transposeB),
                 SpecConstant.Bool(15, outputIsF32),
+                SpecConstant.Bool(16, bias is not null),
             };
 
             VulkanKernel k = GetKernel(shader, storageBufferCount: 5, spec);
@@ -318,14 +358,23 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteUInt(pc, 36, 0u);
             BinaryWriteUInt(pc, 40, 0u);
 
-            // Five descriptor bindings: 0=A, 1=B, 2=C_fp16, 3=Bias, 4=C_fp32.
+            // Five descriptor bindings: 0=A, 1=B, 2=C_fp16, 3=Bias(FP32), 4=C_fp32.
             // The shader writes slot 2 (fp16) OR slot 4 (fp32) selected by the OUTPUT_F32 spec
             // constant; both point at the single real output buffer (allocated in output.DType,
-            // so exactly one binding's type matches and is written). Slots for the unwritten
-            // output and the unused bias bind to outBuf as placeholders to keep the descriptor
-            // count uniform; they are never read.
+            // so exactly one binding's type matches and is written). The unwritten output slot
+            // binds to outBuf as a placeholder. Slot 3 carries the per-column bias as FP32 when
+            // HAS_BIAS — the shader adds it in the epilogue (fused, no extra dispatch). The bias is
+            // cast to FP32 once and cached (preloaded weight), matching the coopmat accumulator type.
             ulong outHandle = outBuf.Handle;
-            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, outHandle, outHandle };
+            VulkanBuffer? biasF32Owned = null;
+            ulong biasHandle = outHandle;
+            if (bias is not null)
+            {
+                (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, biasRaw!, DType.F32);
+                biasF32Owned = owned;
+                biasHandle = biasF32.Handle;
+            }
+            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, biasHandle, outHandle };
 
             uint groupsX = (uint)((N + BN - 1) / BN);
             uint groupsY = (uint)((M + BM - 1) / BM);
@@ -333,12 +382,7 @@ public sealed class VulkanBackend : IBackend
 
             CacheOutput(output, outBuf);
 
-            // Bias fold-in via BroadcastAdd: output[m, n] += bias[n] for all (m, n).
-            // BroadcastAdd's index formula `c = (i / spatial) % channels` with spatial=1 and
-            // channels=N produces `c = i % N`, which is exactly the column index for a flat
-            // [M, N] buffer. Adds one extra dispatch but keeps the coopmat shader simple.
-            if (bias is not null)
-                BroadcastAdd(output, bias, channels: N, spatial: 1);
+            if (biasF32Owned is not null) _xfer.FreeDevice(biasF32Owned);
         }
         catch
         {
@@ -353,6 +397,10 @@ public sealed class VulkanBackend : IBackend
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
         if (src.DType == want) return (srcBuf, null);
+
+        // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
+        if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer cachedCast)) return (cachedCast, null);
+        bool cacheThis = _xfer.ShouldCacheCast(src);
 
         long elements = src.ElementCount;
         ulong outBytes = (ulong)(elements * want.SizeInBytes);
@@ -369,7 +417,7 @@ public sealed class VulkanBackend : IBackend
             BinaryWriteFloat(pc, 4, src.Fp8ScaleFactor);
             Span<ulong> bufs = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
             Dispatch(k, bufs, pc, GroupCount(elements, LOCAL_X_1D));
-            return (dst, dst);
+            return FinishCast(src, want, dst, cacheThis);
         }
 
         string shader;
@@ -388,7 +436,7 @@ public sealed class VulkanBackend : IBackend
             Span<ulong> bufs2 = stackalloc ulong[] { mid.Handle, dst.Handle };
             Dispatch(kk, bufs2, pc2, GroupCount(elements, LOCAL_X_1D));
             _xfer.FreeDevice(mid);
-            return (dst, dst);
+            return FinishCast(src, want, dst, cacheThis);
         }
         else
         {
@@ -405,6 +453,19 @@ public sealed class VulkanBackend : IBackend
         BinaryWriteUInt(push, 0, (uint)elements);
         Span<ulong> b = stackalloc ulong[] { srcBuf.Handle, dst.Handle };
         Dispatch(kernel, b, push, GroupCount(elements, LOCAL_X_1D));
+        return FinishCast(src, want, dst, cacheThis);
+    }
+
+    /// <summary>Tail of <see cref="CastIfNeeded"/>: when <paramref name="dst"/> is a preloaded weight's cast,
+    /// promote it to the weight-cast cache and return it as non-owned (the caller must not free it); otherwise
+    /// return it as a caller-owned temporary.</summary>
+    private (VulkanBuffer buf, VulkanBuffer? owned) FinishCast(Tensor src, DType want, VulkanBuffer dst, bool cacheThis)
+    {
+        if (cacheThis)
+        {
+            _xfer.StoreWeightCast(src, want, dst);
+            return (dst, null);
+        }
         return (dst, dst);
     }
 

@@ -107,7 +107,12 @@ public class Kandinsky5GenerationTests
 
         try
         {
-            Dictionary<string, Tensor> transformerWeights = CastWeightsToF32(converted.Transformer);
+            // Cast the BF16 transformer to F16 (12 GB, fits the 24 GB card directly, native F16 cuBLAS GEMM).
+            // F32 would be 24 GB (OOM); the BF16+CacheWeightCasts=false transient path produced a BLANK image
+            // (the transient dequant path is validated for fp8/GGUF, not BF16) — F16 sidesteps it.
+            Dictionary<string, Tensor> transformerWeights = new(converted.Transformer.Count);
+            foreach (KeyValuePair<string, Tensor> kvp in converted.Transformer)
+                transformerWeights[kvp.Key] = kvp.Value.DType == DType.BF16 ? kvp.Value.CastTo(DType.F16) : kvp.Value;
 
             // ── 2. Build transformer ──
             sw.Restart();
@@ -128,6 +133,9 @@ public class Kandinsky5GenerationTests
             // ── 4. Initialize CUDA backend + preload transformer (probe VRAM before/after) ──
             sw.Restart();
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            // BF16 transformer (12 GB): transient per-GEMM dequant instead of a resident F32 weight cache
+            // (which would need 24 GB). Mirrors the fp8 model tests (Boogu/Krea2/Qwen-GGUF).
+            backend.CacheWeightCasts = false;
             (nuint freeBefore, nuint totalVram) = backend.Context.GetMemoryInfo();
             _output.WriteLine($"[4/6] Backend ready (device: {backend.Capabilities.Name})");
             _output.WriteLine($"  VRAM before preload: {freeBefore / (1024 * 1024)} MiB free / {totalVram / (1024 * 1024)} MiB total");

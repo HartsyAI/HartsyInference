@@ -36,6 +36,9 @@ layout(constant_id = 14) const bool TRANSPOSE_B = false;
 // Allows Flux's F32-output Linears to use the coopmat tensor-core path without the dtype
 // byte-clobbering bug from PHASE_3_5_DEVIATIONS.md #1.
 layout(constant_id = 15) const bool OUTPUT_F32 = false;
+// When true, add a per-column bias[n] in the epilogue (binding 3, FP32), removing the separate
+// BroadcastAdd dispatch the host used to chain after the matmul. See VULKAN_PERF_PLAN.md Stage 2.
+layout(constant_id = 16) const bool HAS_BIAS = false;
 
 const uint FRAG_M = 16;   // coopmat M (rows of A / D)
 const uint FRAG_N = 16;   // coopmat N (cols of B / D)
@@ -44,7 +47,7 @@ const uint FRAG_K = 16;   // coopmat K (cols of A / rows of B)
 layout(set = 0, binding = 0) readonly buffer A_     { float16_t A[]; };
 layout(set = 0, binding = 1) readonly buffer B_     { float16_t B[]; };
 layout(set = 0, binding = 2)          buffer C_     { float16_t C[]; };       // fp16 output (used when OUTPUT_F32=false)
-layout(set = 0, binding = 3) readonly buffer Bias_  { float16_t bias[]; };    // unused; bound for descriptor uniformity
+layout(set = 0, binding = 3) readonly buffer Bias_  { float     bias[]; };       // per-column bias (FP32) when HAS_BIAS; else placeholder
 layout(set = 0, binding = 4)          buffer Cf32_  { float     Cf32[]; };    // fp32 output (used when OUTPUT_F32=true)
 
 layout(push_constant) uniform Push {
@@ -128,6 +131,15 @@ void main() {
         else
             coopMatLoad(cFrag, C,    cOff, pc.ldc, gl_CooperativeMatrixLayoutRowMajor);
         for (int i = 0; i < acc.length(); i++) acc[i] = acc[i] + pc.beta * cFrag[i];
+    }
+
+    // Fused bias: add per-column bias[outCol + j] to every row. A stride-0 row-major coopmat load
+    // broadcasts the 16 bias values across all 16 rows — element (i, j) reads bias[outCol + j] for
+    // every i — so the fragment add lands the same value in each row's column, matching BroadcastAdd.
+    if (HAS_BIAS) {
+        coopmat<float, gl_ScopeSubgroup, FRAG_M, FRAG_N, gl_MatrixUseAccumulator> biasFrag;
+        coopMatLoad(biasFrag, bias, outCol, 0, gl_CooperativeMatrixLayoutRowMajor);
+        acc = acc + biasFrag;
     }
 
     uint cOffStore = pc.cOffset + outRow * pc.ldc + outCol;

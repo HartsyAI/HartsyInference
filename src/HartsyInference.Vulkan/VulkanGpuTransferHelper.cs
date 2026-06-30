@@ -8,6 +8,14 @@ public sealed class VulkanGpuTransferHelper : IDisposable
 {
     private readonly Dictionary<Tensor, VulkanBuffer> _weightCache = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Tensor, VulkanBuffer> _activationCache = new(ReferenceEqualityComparer.Instance);
+    /// <summary>Per-weight dtype-cast cache: keyed by the original weight Tensor (reference equality),
+    /// inner key is the target dtype name. Lets a preloaded FP8 (or F32) weight be dequantized/cast to
+    /// the GEMM dtype <b>once</b> instead of on every Linear — mirrors CUDA's <c>CacheWeightCasts</c>.
+    /// Removes the per-call cast dispatch AND a full weight-sized memory pass. Costs extra VRAM (the cast
+    /// copy alongside the original); opt out with HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1 on low VRAM.</summary>
+    private readonly Dictionary<Tensor, Dictionary<string, VulkanBuffer>> _weightCastCache = new(ReferenceEqualityComparer.Instance);
+    private static readonly bool _cacheWeightCasts =
+        Environment.GetEnvironmentVariable("HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE") != "1";
     private readonly HashSet<VulkanBuffer> _cachedBuffers = new();
     /// <summary>Uncached upload buffers from CopyToDevice cache-misses (typically streamed weights).
     /// Drained when the engine flushes the command stream — they must outlive every recorded
@@ -252,6 +260,39 @@ public sealed class VulkanGpuTransferHelper : IDisposable
     private static ulong AlignUp(ulong v, ulong a) => (v + a - 1) & ~(a - 1);
     private static ulong AlignDown(ulong v, ulong a) => v & ~(a - 1);
 
+    /// <summary>True when <paramref name="weight"/> is a preloaded weight whose dtype-cast result is worth
+    /// caching (i.e. caching is enabled and the tensor lives in the permanent weight cache). Activations
+    /// are never cached this way — they change every step, so the key would never hit.</summary>
+    public bool ShouldCacheCast(Tensor weight) => _cacheWeightCasts && _weightCache.ContainsKey(weight);
+
+    /// <summary>Returns a previously-cached dtype-cast of <paramref name="weight"/> for <paramref name="want"/>, if present.</summary>
+    public bool TryGetWeightCast(Tensor weight, DType want, out VulkanBuffer buffer)
+    {
+        buffer = null!;
+        if (!_cacheWeightCasts) return false;
+        if (_weightCastCache.TryGetValue(weight, out Dictionary<string, VulkanBuffer>? inner)
+            && inner.TryGetValue(want.Name, out VulkanBuffer? hit))
+        {
+            buffer = hit;
+            _hits++;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Caches the cast result <paramref name="buffer"/> for (<paramref name="weight"/>, <paramref name="want"/>). The buffer is promoted to a cached buffer so <see cref="FreeDevice"/> won't reclaim it.</summary>
+    public void StoreWeightCast(Tensor weight, DType want, VulkanBuffer buffer)
+    {
+        if (!_weightCastCache.TryGetValue(weight, out Dictionary<string, VulkanBuffer>? inner))
+        {
+            inner = new Dictionary<string, VulkanBuffer>();
+            _weightCastCache[weight] = inner;
+        }
+        inner[want.Name] = buffer;
+        _cachedBuffers.Add(buffer);
+        _cachedBytes += (long)buffer.Size;
+    }
+
     /// <summary>Uploads a weight tensor to GPU and caches it permanently.</summary>
     public void PreloadWeight(Tensor weight)
     {
@@ -283,6 +324,15 @@ public sealed class VulkanGpuTransferHelper : IDisposable
                 _cachedBytes -= (long)buf.Size;
                 buf.Dispose();
             }
+            if (_weightCastCache.Remove(w, out Dictionary<string, VulkanBuffer>? casts))
+            {
+                foreach (VulkanBuffer cast in casts.Values)
+                {
+                    _cachedBuffers.Remove(cast);
+                    _cachedBytes -= (long)cast.Size;
+                    cast.Dispose();
+                }
+            }
         }
     }
 
@@ -307,6 +357,7 @@ public sealed class VulkanGpuTransferHelper : IDisposable
         _transientBuffers.Clear();
         _weightCache.Clear();
         _activationCache.Clear();
+        _weightCastCache.Clear();
         _cachedBuffers.Clear();
         _cachedBytes = 0;
         _hits = 0;

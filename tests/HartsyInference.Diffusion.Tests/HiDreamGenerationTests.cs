@@ -10,7 +10,9 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.CheckpointConverters.Utils;
 using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelHandler.TextEncoders;
 using HartsyInference.Tests.Common;
 using HartsyInference.Tokenizers;
 
@@ -83,8 +85,10 @@ public sealed class HiDreamGenerationTests
                 _output.WriteLine($"[2/7] Transformer loaded in {sw.ElapsedMilliseconds}ms");
 
                 sw.Restart();
+                // The staged VAE is the FLUX.1 ae in single-file ldm naming (decoder.mid.block_1.*); remap each key
+                // to the diffusers convention VaeDecoder expects (decoder.mid_block.resnets.0.*) before loading.
                 VaeDecoder vae = new(VaeConfig.Flux);
-                vae.LoadWeights(CastWeightsToF32(LoadStandalone(TestPaths.HiDream.Vae)));
+                vae.LoadWeights(CastWeightsToF32(RemapVaeKeys(LoadStandalone(TestPaths.HiDream.Vae))));
                 _output.WriteLine($"[3/7] VAE loaded in {sw.ElapsedMilliseconds}ms");
 
                 sw.Restart();
@@ -92,28 +96,36 @@ public sealed class HiDreamGenerationTests
                 clipL.LoadWeights(LoadStandalone(TestPaths.HiDream.ClipL), "text_model");
                 ClipTextEncoder clipG = new(ClipTextEncoderConfig.SdxlClipG);
                 clipG.LoadWeights(LoadStandalone(TestPaths.HiDream.ClipG), "text_model");
+                // T5-XXL and Llama-3.1 are staged as fp8_e4m3fn_scaled (fp8 weights + per-tensor .scale_weight
+                // companions). TextEncoderQuantNormalizer folds each scale into Tensor.Fp8ScaleFactor (applied as the
+                // cuBLAS GEMM alpha under CacheWeightCasts=false) and drops the companions; without this the encoders
+                // would run fp8 weights at scale 1.0 and emit garbage conditioning.
                 T5TextEncoder t5 = new(T5TextEncoderConfig.Xxl);
-                t5.LoadWeights(LoadStandalone(TestPaths.HiDream.T5));
+                t5.LoadWeights(TextEncoderQuantNormalizer.Normalize(LoadStandalone(TestPaths.HiDream.T5)));
                 // HiDream's fourth text encoder is Llama-3.1-8B-Instruct, run as a feature extractor.
                 // Uses the dedicated Llama31_8B preset: 32 layers (Qwen3-8B's 36 would over-read the
                 // layer harvest), no per-head QK-norm (Qwen3 has it; Llama doesn't), theta=500k.
                 LlamaStyleEncoder llama = new(LlamaStyleEncoderConfig.Llama31_8B);
-                llama.LoadWeights(LoadStandalone(TestPaths.HiDream.Llama));
+                llama.LoadWeights(TextEncoderQuantNormalizer.Normalize(LoadStandalone(TestPaths.HiDream.Llama)));
                 _output.WriteLine($"[4/7] Quad text encoders loaded in {sw.ElapsedMilliseconds}ms");
 
                 sw.Restart();
                 using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+                // fp8 transformer (~17 GB) + fp8_scaled T5/Llama → transient per-GEMM dequant. Caching an F32/BF16
+                // dequant of every weight (CacheWeightCasts default) would roughly double VRAM and OOM the 4090.
+                backend.CacheWeightCasts = false;
                 (nuint freeBytes, nuint totalBytes) = backend.Context.GetMemoryInfo();
                 double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-                const double MinRequiredGb = 30.0;
+                const double MinRequiredGb = 20.0;
                 if (freeGb < MinRequiredGb)
                 {
-                    _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB to fit HiDream i1 transformer + four text encoders.");
+                    _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM (total {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB); need ≥{MinRequiredGb} GB for the fp8 HiDream i1 transformer (text encoders are encoded then freed before it loads).");
                     transformer.Dispose();
                     return;
                 }
-                backend.PreloadWeights(transformer.EnumerateWeights());
-                _output.WriteLine($"[5/7] Backend + preload ready in {sw.ElapsedMilliseconds}ms");
+                // The transformer is preloaded inside the pipeline right before the denoise loop (after the text
+                // encoders are encoded + freed) so it never co-resides with the encoders. Do NOT preload it here.
+                _output.WriteLine($"[5/7] Backend ready in {sw.ElapsedMilliseconds}ms");
 
                 using ClipTokenizer clipTokenizer = new(TestPaths.Tokenizers.ClipVocab, TestPaths.Tokenizers.ClipMerges);
                 using T5Tokenizer t5Tokenizer = new(TestPaths.Tokenizers.T5XxlSpiece, maxLength: 256);
@@ -200,6 +212,18 @@ public sealed class HiDreamGenerationTests
         {
             _output.WriteLine($"SKIPPED: HiDreamPipeline body has unfinished sections — {nie.Message}");
         }
+    }
+
+    private static Dictionary<string, Tensor> RemapVaeKeys(Dictionary<string, Tensor> raw)
+    {
+        Dictionary<string, Tensor> mapped = new(raw.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in raw)
+        {
+            if (kvp.Key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || kvp.Key == "scaled_fp8") continue;
+            string? m = CheckpointConvertUtils.ConvertVaeKey(kvp.Key);
+            if (m is not null) mapped[m] = kvp.Value;
+        }
+        return mapped;
     }
 
     private static Dictionary<string, Tensor> LoadStandalone(string path)

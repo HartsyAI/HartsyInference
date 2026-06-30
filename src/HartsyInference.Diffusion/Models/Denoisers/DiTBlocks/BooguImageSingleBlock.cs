@@ -3,23 +3,26 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>OmniGen2 single-stream transformer block (<c>OmniGen2TransformerBlock</c> from
-/// <c>VectorSpaceLab/OmniGen2/omnigen2/models/transformers/transformer_omnigen2.py</c>). Each block holds a
-/// self-attention layer with grouped-query attention (Q heads = <c>NumAttentionHeads</c>, KV heads =
-/// <c>NumKvHeads</c>, with K/V repeat-interleaved up to Q head count before SDPA — the upstream code does the
-/// same to avoid the slow MATH SDPA path), per-head RMSNorm on Q and K (<c>qk_norm="rms_norm"</c>), a SwiGLU
-/// (Lumina-style) FFN with three bias-free linears, and four norms: <c>norm1</c> (LuminaRMSNormZero when
-/// <see cref="_modulation"/>; plain RMSNorm otherwise), <c>norm2</c>, <c>ffn_norm1</c>, <c>ffn_norm2</c>.
-/// <para>Modulated forward (used by <c>noise_refiner</c> and the joint <c>layers</c> stack):
+/// <summary>GPU-resident single-stream transformer block for Boogu-Image — numerically a drop-in for the table-driven
+/// <see cref="OmniGen2Block"/> forward (same Lumina sandwich-norm block), used for Boogu's <c>single_stream_layers</c>
+/// and the three refiner stacks (<c>context_refiner</c> non-modulated, <c>noise_refiner</c> / <c>ref_image_refiner</c>
+/// modulated). It exists separately from <see cref="OmniGen2Block"/> only so the Boogu perf rewrite can move all glue
+/// to the GPU without touching the shared block (which the OmniGen2 model also uses).
+///
+/// <para>Modulated forward (<c>noise_refiner</c> / <c>ref_image_refiner</c> / <c>single_stream_layers</c>):
 /// <code>
 /// (norm_h, gate_msa, scale_mlp, gate_mlp) = norm1(h, temb)            // RMSNormZero: shift=None
-/// h = h + tanh(gate_msa).unsqueeze(1) * norm2(attn(norm_h))
-/// h = h + tanh(gate_mlp).unsqueeze(1) * ffn_norm2(ffn(ffn_norm1(h) * (1 + scale_mlp.unsqueeze(1))))
-/// </code></para>
-/// <para>Non-modulated forward (used by <c>context_refiner</c>): same structure with no gates and no MLP scale.</para>
-/// <para>RoPE is applied to Q and K outside the block (in the transformer's RoPE pass) before this method is
-/// called — the block expects already-rotated Q/K in its internal attention call.</para></summary>
-public sealed unsafe class OmniGen2Block
+/// h = h + tanh(gate_msa) * norm2(attn(norm_h))
+/// h = h + tanh(gate_mlp) * ffn_norm2(ffn(ffn_norm1(h) * (1 + scale_mlp)))
+/// </code>
+/// Non-modulated forward (<c>context_refiner</c>): same structure with no gates and no MLP scale.</para>
+///
+/// <para>GPU-residency (mirrors <see cref="BooguImageDoubleBlock"/> / the verified <see cref="QwenImageBlock"/>): every
+/// glue op runs as an <see cref="IBackend"/> GPU op (RMSNorm-zero split via <c>SliceLastDim</c>, <c>(1+scale)</c> via
+/// <c>AddScalar</c>+<c>AffineBroadcastLastDim</c>, tanh gate via <c>Tanh</c>+<c>GatedResidualLastDim</c>, heads via
+/// <c>Permute0213</c>+<c>RepeatKvHeads</c>+SDPA). Only the interleaved-pairing RoPE stays on the CPU
+/// (<c>rope.Apply</c>) — bit-for-bit the old path.</para></summary>
+public sealed unsafe class BooguImageSingleBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numQHeads;
@@ -46,17 +49,8 @@ public sealed unsafe class OmniGen2Block
     private Tensor? _ffnNorm1Weight;
     private Tensor? _ffnNorm2Weight;
 
-    /// <summary>Creates an OmniGen2 block.</summary>
-    /// <param name="hiddenSize">Model hidden dimension (2520 for V1).</param>
-    /// <param name="numAttentionHeads">Number of Q heads (21 for V1).</param>
-    /// <param name="numKvHeads">Number of KV heads for GQA (7 for V1).</param>
-    /// <param name="headDim">Per-head dim (= hiddenSize / numAttentionHeads = 120 for V1).</param>
-    /// <param name="ffnInnerDim">Lumina-rounded FFN inner dim (caller computes via <c>multiple_of</c> + optional multiplier).</param>
-    /// <param name="conditioningDim">Time-embedding dim fed into the modulation linear (<c>min(hidden, 1024)</c>).</param>
-    /// <param name="modulation">When true, <c>norm1</c> is <c>LuminaRMSNormZero</c> and gates are applied; when false, plain RMSNorm and no gates (used by <c>context_refiner</c>).</param>
-    /// <param name="normEps">RMSNorm epsilon (1e-5 for V1).</param>
-    /// <param name="qkNormEps">Per-head Q/K RMSNorm epsilon (1e-5 for V1).</param>
-    public OmniGen2Block(int hiddenSize, int numAttentionHeads, int numKvHeads, int headDim, int ffnInnerDim,
+    /// <summary>Creates a Boogu single-stream block. Geometry matches <see cref="OmniGen2Block"/>.</summary>
+    public BooguImageSingleBlock(int hiddenSize, int numAttentionHeads, int numKvHeads, int headDim, int ffnInnerDim,
         int conditioningDim, bool modulation, float normEps = 1e-5f, float qkNormEps = 1e-5f)
     {
         if (numAttentionHeads * headDim != hiddenSize)
@@ -78,14 +72,10 @@ public sealed unsafe class OmniGen2Block
         _normK = new QkNorm(headDim, qkNormEps);
     }
 
-    /// <summary>Whether this block applies AdaRMSNorm-Zero modulation. Read by callers that want to skip
-    /// passing temb to non-modulated <c>context_refiner</c> blocks.</summary>
+    /// <summary>Whether this block applies AdaRMSNorm-Zero modulation.</summary>
     public bool Modulation => _modulation;
 
-    /// <summary>Loads weights using the diffusers / upstream Python naming (<c>{prefix}.attn.to_q.weight</c>,
-    /// <c>{prefix}.feed_forward.linear_1.weight</c>, <c>{prefix}.norm1.linear.weight</c>, etc.). All linears in
-    /// the attention path and the FFN are bias-free; only the modulation linear has bias (matching upstream
-    /// <c>LuminaRMSNormZero(linear, bias=True)</c>).</summary>
+    /// <summary>Loads weights using the diffusers / upstream Python naming (identical to <see cref="OmniGen2Block"/>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
         _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
@@ -116,7 +106,7 @@ public sealed unsafe class OmniGen2Block
         _ffnNorm2Weight = CastToF32IfNeeded(weights[$"{prefix}.ffn_norm2.weight"]);
     }
 
-    /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
+    /// <summary>Enumerates all weight tensors for GPU preloading (identical set to <see cref="OmniGen2Block"/>).</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_toQWeight is not null) yield return _toQWeight;
@@ -139,106 +129,9 @@ public sealed unsafe class OmniGen2Block
         if (_ffnNorm2Weight is not null) yield return _ffnNorm2Weight;
     }
 
-    /// <summary>Forward pass.</summary>
-    /// <param name="backend">Compute backend.</param>
-    /// <param name="hidden">Block input <c>[B, S, hiddenSize]</c>. Caller owns the lifetime — this method allocates a new output tensor.</param>
-    /// <param name="rope">Shared 3-axis RoPE.</param>
-    /// <param name="ropeMode">How to position tokens for RoPE. Either <see cref="RopeApplyMode.Text"/> (positions <c>(s,s,s)</c>) or <see cref="RopeApplyMode.Image"/> (positions <c>(timeOffset, row, col)</c>).</param>
-    /// <param name="hPacked">Image-mode only: packed grid height (latent_h / patch).</param>
-    /// <param name="wPacked">Image-mode only: packed grid width (latent_w / patch).</param>
-    /// <param name="timeOffset">Image-mode only: time-axis offset (= text caption length).</param>
-    /// <param name="temb">Conditioning <c>[B, conditioningDim]</c> for modulated blocks; ignored when <see cref="Modulation"/> is false.</param>
-    public Tensor Forward(IBackend backend, Tensor hidden, OmniGen2Rope rope, RopeApplyMode ropeMode,
-        int hPacked, int wPacked, int timeOffset, Tensor? temb)
-    {
-        int batch = (int)hidden.Shape[0];
-        int seqLen = (int)hidden.Shape[1];
-        TensorShape hShape = new TensorShape(batch, seqLen, _hiddenSize);
-
-        Tensor? gateMsa = null;
-        Tensor? scaleMlp = null;
-        Tensor? gateMlp = null;
-        Tensor norm1Out;
-        if (_modulation)
-        {
-            if (temb is null)
-                throw new InvalidOperationException("OmniGen2Block: temb is required when modulation=true.");
-            (norm1Out, gateMsa, scaleMlp, gateMlp) = ApplyLuminaRmsNormZero(backend, hidden, temb, batch, seqLen);
-        }
-        else
-        {
-            norm1Out = new Tensor(hShape, DType.F32);
-            backend.RmsNorm(norm1Out, hidden, _norm1Weight!, _normEps);
-        }
-
-        Tensor attnOut = ComputeSelfAttention(backend, norm1Out, rope, ropeMode, hPacked, wPacked, timeOffset, batch, seqLen);
-        norm1Out.Dispose();
-
-        Tensor norm2Out = new Tensor(hShape, DType.F32);
-        backend.RmsNorm(norm2Out, attnOut, _norm2Weight!, _normEps);
-        attnOut.Dispose();
-
-        Tensor afterAttn;
-        if (_modulation)
-        {
-            afterAttn = ApplyTanhGatedResidual(backend, hidden, norm2Out, gateMsa!, batch);
-            norm2Out.Dispose();
-        }
-        else
-        {
-            afterAttn = new Tensor(hShape, DType.F32);
-            backend.Add(afterAttn, hidden, norm2Out);
-            norm2Out.Dispose();
-        }
-
-        Tensor ffnNorm1Out = new Tensor(hShape, DType.F32);
-        backend.RmsNorm(ffnNorm1Out, afterAttn, _ffnNorm1Weight!, _normEps);
-
-        Tensor mlpInput;
-        if (_modulation)
-        {
-            mlpInput = ApplyMlpScale(backend, ffnNorm1Out, scaleMlp!, batch, seqLen);
-            ffnNorm1Out.Dispose();
-        }
-        else
-        {
-            mlpInput = ffnNorm1Out;
-        }
-
-        Tensor mlpOut = ApplyLuminaSwiGluFfn(backend, mlpInput, batch, seqLen);
-        mlpInput.Dispose();
-
-        Tensor ffnNorm2Out = new Tensor(hShape, DType.F32);
-        backend.RmsNorm(ffnNorm2Out, mlpOut, _ffnNorm2Weight!, _normEps);
-        mlpOut.Dispose();
-
-        Tensor output;
-        if (_modulation)
-        {
-            output = ApplyTanhGatedResidual(backend, afterAttn, ffnNorm2Out, gateMlp!, batch);
-            ffnNorm2Out.Dispose();
-            afterAttn.Dispose();
-
-            gateMsa!.Dispose();
-            scaleMlp!.Dispose();
-            gateMlp!.Dispose();
-        }
-        else
-        {
-            output = new Tensor(hShape, DType.F32);
-            backend.Add(output, afterAttn, ffnNorm2Out);
-            afterAttn.Dispose();
-            ffnNorm2Out.Dispose();
-        }
-
-        return output;
-    }
-
-    /// <summary>Table-driven forward: identical to <see cref="Forward"/> but rotates Q/K with a caller-supplied
-    /// precomputed <c>(cos, sin)</c> RoPE table (sized <c>seqLen · headDim/2</c>) instead of deriving positions from a
-    /// <see cref="RopeApplyMode"/>. Used by Boogu-Image, whose edit path assigns non-default position ids
-    /// (reference-image <c>pe_shift</c> offsets) that the mode-based builders don't cover. Numerically equal to the
-    /// mode-based path when fed the table that mode would have produced.</summary>
+    /// <summary>Table-driven forward (matches <see cref="OmniGen2Block.Forward(IBackend, Tensor, OmniGen2Rope,
+    /// ReadOnlySpan{float}, ReadOnlySpan{float}, Tensor?)"/>): rotates Q/K with the caller-supplied precomputed
+    /// <c>(cos, sin)</c> RoPE table. Caller owns <paramref name="hidden"/>; a new output tensor is returned.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, OmniGen2Rope rope,
         ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, Tensor? temb)
     {
@@ -251,7 +144,7 @@ public sealed unsafe class OmniGen2Block
         if (_modulation)
         {
             if (temb is null)
-                throw new InvalidOperationException("OmniGen2Block: temb is required when modulation=true.");
+                throw new InvalidOperationException("BooguImageSingleBlock: temb is required when modulation=true.");
             (norm1Out, gateMsa, scaleMlp, gateMlp) = ApplyLuminaRmsNormZero(backend, hidden, temb, batch, seqLen);
         }
         else
@@ -325,6 +218,8 @@ public sealed unsafe class OmniGen2Block
     private Tensor ComputeSelfAttentionWithTable(IBackend backend, Tensor input, OmniGen2Rope rope,
         ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int batch, int seqLen)
     {
+        // Q/K/V projected into [B, S, H, D] (byte-identical to [B, S, H·D]) so RmsNorm QK-norm normalizes over the
+        // head dim and Permute0213 needs no reshape view.
         Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
         backend.Linear(q, input, _toQWeight!, null);
         Tensor k = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
@@ -349,6 +244,7 @@ public sealed unsafe class OmniGen2Block
         backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
         v.Dispose();
 
+        // RoPE (CPU; interleaved pairing — see class note).
         rope.Apply(qMh, ropeCos, ropeSin, batch, _numQHeads, seqLen);
         rope.Apply(kMh, ropeCos, ropeSin, batch, _numKvHeads, seqLen);
 
@@ -356,15 +252,12 @@ public sealed unsafe class OmniGen2Block
         backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroupSize);
         Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
         backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroupSize);
-        kMh.Dispose();
-        vMh.Dispose();
+        kMh.Dispose(); vMh.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
         backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
-        qMh.Dispose();
-        kRep.Dispose();
-        vRep.Dispose();
+        qMh.Dispose(); kRep.Dispose(); vRep.Dispose();
 
         Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
         backend.Permute0213(attnFlat, attnMh, _numQHeads, seqLen, _headDim);
@@ -376,12 +269,14 @@ public sealed unsafe class OmniGen2Block
         return projected;
     }
 
+    /// <summary>Lumina <c>RMSNormZero</c>, GPU-resident. Chunks the <c>[B, 4·hidden]</c> modulation projection into
+    /// <c>(scale_msa, gate_msa, scale_mlp, gate_mlp)</c> via <c>SliceLastDim</c>, returns <c>RmsNorm(x)·(1+scale_msa)</c>
+    /// and the three remaining chunks. Bit-for-bit the old CPU split.</summary>
     private (Tensor normed, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp) ApplyLuminaRmsNormZero(
         IBackend backend, Tensor input, Tensor temb, int batch, int seqLen)
     {
         Tensor activated = new Tensor(new TensorShape(batch, _conditioningDim), DType.F32);
         backend.Silu(activated, temb);
-
         Tensor projected = new Tensor(new TensorShape(batch, 4 * _hiddenSize), DType.F32);
         backend.Linear(projected, activated, _norm1ModulationWeight!, _norm1ModulationBias);
         activated.Dispose();
@@ -406,77 +301,9 @@ public sealed unsafe class OmniGen2Block
         scaleMsa.Dispose();
         Tensor normed = new Tensor(hShape, DType.F32);
         backend.AffineBroadcastLastDim(normed, rms, scalePlus1, null);
-        rms.Dispose();
-        scalePlus1.Dispose();
+        rms.Dispose(); scalePlus1.Dispose();
 
         return (normed, gateMsa, scaleMlp, gateMlp);
-    }
-
-    private Tensor ComputeSelfAttention(IBackend backend, Tensor input, OmniGen2Rope rope, RopeApplyMode ropeMode,
-        int hPacked, int wPacked, int timeOffset, int batch, int seqLen)
-    {
-        // Q/K/V projected as [B, S, H, D] (byte-identical to [B, S, H·D]) so QK-norm RmsNorm normalizes over the
-        // head dim and Permute0213 needs no reshape view. GPU-resident; only the interleaved RoPE stays on the CPU.
-        Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
-        backend.Linear(q, input, _toQWeight!, null);
-        Tensor k = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
-        backend.Linear(k, input, _toKWeight!, null);
-        Tensor v = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
-        backend.Linear(v, input, _toVWeight!, null);
-
-        Tensor qn = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
-        backend.RmsNorm(qn, q, _normQ.Weight, _normQ.Eps);
-        q.Dispose();
-        Tensor kn = new Tensor(new TensorShape(batch, seqLen, _numKvHeads, _headDim), DType.F32);
-        backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
-        k.Dispose();
-
-        Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
-        backend.Permute0213(qMh, qn, seqLen, _numQHeads, _headDim);
-        qn.Dispose();
-        Tensor kMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
-        backend.Permute0213(kMh, kn, seqLen, _numKvHeads, _headDim);
-        kn.Dispose();
-        Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
-        backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
-        v.Dispose();
-
-        if (ropeMode == RopeApplyMode.Text)
-        {
-            rope.ApplyText(qMh, kMh, batch, _numQHeads, _numKvHeads, seqLen);
-        }
-        else if (ropeMode == RopeApplyMode.Image)
-        {
-            rope.ApplyImage(qMh, kMh, batch, _numQHeads, _numKvHeads, hPacked, wPacked, timeOffset);
-        }
-        else if (ropeMode == RopeApplyMode.Joint)
-        {
-            int txtSeqLen = seqLen - hPacked * wPacked;
-            rope.ApplyJoint(qMh, kMh, batch, _numQHeads, _numKvHeads, txtSeqLen, hPacked, wPacked);
-        }
-
-        Tensor kRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
-        backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroupSize);
-        Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
-        backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroupSize);
-        kMh.Dispose();
-        vMh.Dispose();
-
-        float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
-        qMh.Dispose();
-        kRep.Dispose();
-        vRep.Dispose();
-
-        Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.Permute0213(attnFlat, attnMh, _numQHeads, seqLen, _headDim);
-        attnMh.Dispose();
-
-        Tensor projected = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.Linear(projected, attnFlat, _toOutWeight!, null);
-        attnFlat.Dispose();
-        return projected;
     }
 
     private Tensor ApplyLuminaSwiGluFfn(IBackend backend, Tensor input, int batch, int seqLen)
@@ -496,14 +323,13 @@ public sealed unsafe class OmniGen2Block
         h1Activated.Dispose();
         h3.Dispose();
 
-        TensorShape outShape = new TensorShape(batch, seqLen, _hiddenSize);
-        Tensor output = new Tensor(outShape, DType.F32);
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
         backend.Linear(output, gated, _ffnLinear2Weight!, null);
         gated.Dispose();
         return output;
     }
 
-    /// <summary>MLP scale <c>out = input · (1 + scale_mlp)</c>, GPU-resident (<c>AddScalar</c> + <c>AffineBroadcastLastDim</c>).</summary>
+    /// <summary>MLP scale <c>out = input·(1 + scale_mlp)</c>, GPU-resident (<c>AddScalar</c>+<c>AffineBroadcastLastDim</c>).</summary>
     private Tensor ApplyMlpScale(IBackend backend, Tensor input, Tensor scaleMlp, int batch, int seqLen)
     {
         Tensor scalePlus1 = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
@@ -514,9 +340,8 @@ public sealed unsafe class OmniGen2Block
         return output;
     }
 
-    /// <summary>Applies <c>residual + tanh(gate).unsqueeze(1) * value</c> matching the upstream OmniGen2 block
-    /// (<c>hidden = hidden + gate.tanh().unsqueeze(1) * x</c>). Gate is <c>[B, hiddenSize]</c>, broadcast over the
-    /// sequence axis. GPU-resident (<c>Tanh</c> + <c>GatedResidualLastDim</c>).</summary>
+    /// <summary>Tanh-gated residual <c>out = residual + tanh(gate)·value</c>, GPU-resident
+    /// (<c>Tanh</c>+<c>GatedResidualLastDim</c>). <paramref name="gate"/> is <c>[B, hidden]</c> broadcast over seq.</summary>
     private Tensor ApplyTanhGatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor gate, int batch)
     {
         Tensor gateTanh = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
@@ -529,20 +354,4 @@ public sealed unsafe class OmniGen2Block
 
     private static Tensor CastToF32IfNeeded(Tensor t) =>
         t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-}
-
-/// <summary>How an <see cref="OmniGen2Block"/> should rotate Q/K. Picked at the call site: text-stream blocks
-/// (<c>context_refiner</c>) use <see cref="Text"/>; image-stream blocks (<c>noise_refiner</c>) use <see cref="Image"/>;
-/// the joint <c>layers</c> stack uses <see cref="Joint"/> which rotates each token according to whether it falls in
-/// the text or image partition.</summary>
-public enum RopeApplyMode
-{
-    /// <summary>No rotation (only used for diagnostic / ablation paths; production code should pick a real mode).</summary>
-    None,
-    /// <summary>Apply text-stream RoPE: position <c>(s, s, s)</c> per token.</summary>
-    Text,
-    /// <summary>Apply image-stream RoPE: position <c>(timeOffset, row, col)</c> per token.</summary>
-    Image,
-    /// <summary>Apply joint-sequence RoPE for <c>[text || image]</c>. The block derives <c>txtSeqLen = seqLen - hPacked * wPacked</c>.</summary>
-    Joint,
 }

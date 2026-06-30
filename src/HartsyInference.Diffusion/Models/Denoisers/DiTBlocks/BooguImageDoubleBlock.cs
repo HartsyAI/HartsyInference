@@ -20,7 +20,18 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// self-attention (<c>img_self_attn</c>) is an ordinary GQA block attention over the image tokens with image RoPE.</para>
 ///
 /// <para>Assumes a single valid (unpadded) sequence per batch element — inference runs each guidance condition as its
-/// own forward, so all tokens are valid and the joint/self attention masks are all-true (passed as null to SDPA).</para></summary>
+/// own forward, so all tokens are valid and the joint/self attention masks are all-true (passed as null to SDPA).</para>
+///
+/// <para>GPU-residency rewrite (mirrors the verified <see cref="QwenImageBlock"/> / <see cref="ChromaDoubleStreamBlock"/>):
+/// every glue op — Lumina RMSNorm-zero, affine scale/shift, tanh-gated residual, per-head QK-norm, reshape-to-heads,
+/// joint concat/split, GQA K/V repeat — runs as an <see cref="IBackend"/> GPU op so the activation stays device-resident
+/// across the whole block (no per-op <c>DataPointer</c> reads / D2H sync barriers, which dominated the old
+/// ~27 s/forward). The chunk-splits of the modulation projection are GPU last-dim slices (<c>SliceLastDim</c>); the
+/// Lumina <c>(1+scale)</c> factor is reproduced by <c>AddScalar(scale, 1)</c> + <c>AffineBroadcastLastDim</c>, and the
+/// tanh gate by <c>Tanh</c> + <c>GatedResidualLastDim</c> — bit-for-bit the old CPU math. The only op left on the CPU is
+/// RoPE: <see cref="OmniGen2Rope"/> rotates interleaved pairs <c>(2i, 2i+1)</c> from precomputed per-token tables in
+/// head-major <c>[B, H, S, D]</c> layout, which the CUDA rotate-half (NEOX) kernel does not match — so the two
+/// per-stream rotations stay on <c>rope.Apply</c> (its D2H/H2D for Q,K is coherent with the activation cache).</para></summary>
 public sealed unsafe class BooguImageDoubleBlock
 {
     private readonly int _hidden;
@@ -186,15 +197,15 @@ public sealed unsafe class BooguImageDoubleBlock
         // ── image residual updates ──
         Tensor imgAttnNormed = RmsNorm(backend, imgAttn, _imgAttnNorm!, batch, imgLen);
         imgAttn.Dispose();
-        Tensor image1 = TanhGatedResidual(image, imgAttnNormed, imgGateMsa, batch, imgLen);
+        Tensor image1 = TanhGatedResidual(backend, image, imgAttnNormed, imgGateMsa, batch, imgLen);
         imgAttnNormed.Dispose();
 
         Tensor imgSelfNormed = RmsNorm(backend, imgSelf, _imgSelfAttnNorm!, batch, imgLen);
         imgSelf.Dispose();
-        Tensor image2 = TanhGatedResidual(image1, imgSelfNormed, imgGateSelf, batch, imgLen);
+        Tensor image2 = TanhGatedResidual(backend, image1, imgSelfNormed, imgGateSelf, batch, imgLen);
         imgSelfNormed.Dispose(); image1.Dispose();
 
-        Tensor imgMlpIn = AffineScaleShift(imgN2, imgScaleMlp, imgShiftMlp, batch, imgLen);
+        Tensor imgMlpIn = AffineScaleShift(backend, imgN2, imgScaleMlp, imgShiftMlp, batch, imgLen);
         imgN2.Dispose();
         Tensor imgFfNorm1 = RmsNorm(backend, imgMlpIn, _imgFfnNorm1!, batch, imgLen);
         imgMlpIn.Dispose();
@@ -202,16 +213,16 @@ public sealed unsafe class BooguImageDoubleBlock
         imgFfNorm1.Dispose();
         Tensor imgMlpNormed = RmsNorm(backend, imgMlp, _imgFfnNorm2!, batch, imgLen);
         imgMlp.Dispose();
-        Tensor imageOut = TanhGatedResidual(image2, imgMlpNormed, imgGateMlp, batch, imgLen);
+        Tensor imageOut = TanhGatedResidual(backend, image2, imgMlpNormed, imgGateMlp, batch, imgLen);
         imgMlpNormed.Dispose(); image2.Dispose();
 
         // ── instruction residual updates ──
         Tensor insAttnNormed = RmsNorm(backend, insAttn, _insAttnNorm!, batch, insLen);
         insAttn.Dispose();
-        Tensor instruct1 = TanhGatedResidual(instruct, insAttnNormed, insGateMsa, batch, insLen);
+        Tensor instruct1 = TanhGatedResidual(backend, instruct, insAttnNormed, insGateMsa, batch, insLen);
         insAttnNormed.Dispose();
 
-        Tensor insMlpIn = AffineScaleShift(insN2, insScaleMlp, insShiftMlp, batch, insLen);
+        Tensor insMlpIn = AffineScaleShift(backend, insN2, insScaleMlp, insShiftMlp, batch, insLen);
         insN2.Dispose();
         Tensor insFfNorm1 = RmsNorm(backend, insMlpIn, _insFfnNorm1!, batch, insLen);
         insMlpIn.Dispose();
@@ -219,7 +230,7 @@ public sealed unsafe class BooguImageDoubleBlock
         insFfNorm1.Dispose();
         Tensor insMlpNormed = RmsNorm(backend, insMlp, _insFfnNorm2!, batch, insLen);
         insMlp.Dispose();
-        Tensor instructOut = TanhGatedResidual(instruct1, insMlpNormed, insGateMlp, batch, insLen);
+        Tensor instructOut = TanhGatedResidual(backend, instruct1, insMlpNormed, insGateMlp, batch, insLen);
         insMlpNormed.Dispose(); instruct1.Dispose();
 
         imgGateMsa.Dispose(); imgScaleMlp.Dispose(); imgGateMlp.Dispose(); imgShiftMlp.Dispose(); imgGateSelf.Dispose();
@@ -229,7 +240,10 @@ public sealed unsafe class BooguImageDoubleBlock
     }
 
     /// <summary>Joint cross-attention. Returns the attention output split into <c>(instruct[B,capLen,H], image[B,imgLen,H])</c>
-    /// after all projections (per-stream out + parent to_out).</summary>
+    /// after all projections (per-stream out + parent to_out). GPU-resident: per-stream Q/K/V Linear into
+    /// <c>[B, S, H, D]</c> heads-layout tensors, RMSNorm QK-norm over the head dim, joint <c>Concat</c> on the sequence
+    /// axis, <c>Permute0213</c> to <c>[B, H, S, D]</c>, CPU RoPE, GQA <c>RepeatKvHeads</c>, SDPA, permute back, and
+    /// <c>SliceRows</c> splits.</summary>
     private (Tensor instruct, Tensor image) JointAttention(IBackend backend, Tensor imgN1, Tensor insN1, OmniGen2Rope rope,
         ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int capLen, int batch, int imgLen, int insLen)
     {
@@ -237,63 +251,75 @@ public sealed unsafe class BooguImageDoubleBlock
         int kvDim = _numKvHeads * _headDim;
         int jointLen = insLen + imgLen;
 
-        // Per-stream Q/K/V.
-        Tensor imgQ = Linear(backend, imgN1, _jiImgToQ!, batch, imgLen, qDim);
-        Tensor imgK = Linear(backend, imgN1, _jiImgToK!, batch, imgLen, kvDim);
-        Tensor imgV = Linear(backend, imgN1, _jiImgToV!, batch, imgLen, kvDim);
-        Tensor insQ = Linear(backend, insN1, _jiInsToQ!, batch, insLen, qDim);
-        Tensor insK = Linear(backend, insN1, _jiInsToK!, batch, insLen, kvDim);
-        Tensor insV = Linear(backend, insN1, _jiInsToV!, batch, insLen, kvDim);
+        // Per-stream Q/K/V projected directly into [B, S, H, D] (byte-identical to [B, S, qDim]) so RmsNorm
+        // QK-norm normalizes over the head dim and Permute0213 needs no reshape view.
+        Tensor imgQ = LinearHeads(backend, imgN1, _jiImgToQ!, batch, imgLen, _numQHeads);
+        Tensor imgK = LinearHeads(backend, imgN1, _jiImgToK!, batch, imgLen, _numKvHeads);
+        Tensor imgV = LinearHeads(backend, imgN1, _jiImgToV!, batch, imgLen, _numKvHeads);
+        Tensor insQ = LinearHeads(backend, insN1, _jiInsToQ!, batch, insLen, _numQHeads);
+        Tensor insK = LinearHeads(backend, insN1, _jiInsToK!, batch, insLen, _numKvHeads);
+        Tensor insV = LinearHeads(backend, insN1, _jiInsToV!, batch, insLen, _numKvHeads);
 
-        // Concat [instruct, image] along sequence.
-        Tensor q = DiTUtils.ConcatAlongSeqDim(insQ, imgQ);
-        Tensor k = DiTUtils.ConcatAlongSeqDim(insK, imgK);
-        Tensor v = DiTUtils.ConcatAlongSeqDim(insV, imgV);
-        imgQ.Dispose(); imgK.Dispose(); imgV.Dispose(); insQ.Dispose(); insK.Dispose(); insV.Dispose();
+        // QK-norm (per-head RMSNorm over the last dim = headDim).
+        Tensor imgQn = RmsNormHeads(backend, imgQ, _jiNormQ, batch, imgLen, _numQHeads);
+        imgQ.Dispose();
+        Tensor imgKn = RmsNormHeads(backend, imgK, _jiNormK, batch, imgLen, _numKvHeads);
+        imgK.Dispose();
+        Tensor insQn = RmsNormHeads(backend, insQ, _jiNormQ, batch, insLen, _numQHeads);
+        insQ.Dispose();
+        Tensor insKn = RmsNormHeads(backend, insK, _jiNormK, batch, insLen, _numKvHeads);
+        insK.Dispose();
 
-        // qk-norm.
-        Tensor qN = new Tensor(new TensorShape(batch, jointLen, qDim), DType.F32);
-        Tensor kN = new Tensor(new TensorShape(batch, jointLen, kvDim), DType.F32);
-        _jiNormQ.Forward(qN, q, batch * jointLen * _numQHeads);
-        _jiNormK.Forward(kN, k, batch * jointLen * _numKvHeads);
-        q.Dispose(); k.Dispose();
+        // Concat [instruct, image] along the sequence dim (contiguous in [B, S, *] layout).
+        Tensor qJoint = new Tensor(new TensorShape(batch, jointLen, qDim), DType.F32);
+        backend.Concat(qJoint, new Tensor[] { insQn, imgQn }, 1);
+        Tensor kJoint = new Tensor(new TensorShape(batch, jointLen, kvDim), DType.F32);
+        backend.Concat(kJoint, new Tensor[] { insKn, imgKn }, 1);
+        Tensor vJoint = new Tensor(new TensorShape(batch, jointLen, kvDim), DType.F32);
+        backend.Concat(vJoint, new Tensor[] { insV, imgV }, 1);
+        insQn.Dispose(); imgQn.Dispose(); insKn.Dispose(); imgKn.Dispose(); insV.Dispose(); imgV.Dispose();
 
-        Tensor attnFlat = GqaAttention(backend, qN, kN, v, rope, ropeCos, ropeSin, batch, jointLen);
-        qN.Dispose(); kN.Dispose(); v.Dispose();
+        Tensor attnFlat = GqaAttention(backend, qJoint, kJoint, vJoint, rope, ropeCos, ropeSin, batch, jointLen);
+        qJoint.Dispose(); kJoint.Dispose(); vJoint.Dispose();
 
-        // Split, per-stream output projections, parent to_out, then return split halves.
-        (Tensor insPart, Tensor imgPart) = DiTUtils.SplitAlongSeqDim(attnFlat, capLen);
+        // Split [instruct, image], per-stream output projections, parent to_out, then return split halves.
+        Tensor insPart = new Tensor(new TensorShape(batch, capLen, _hidden), DType.F32);
+        backend.SliceRows(insPart, attnFlat, 0);
+        Tensor imgPart = new Tensor(new TensorShape(batch, imgLen, _hidden), DType.F32);
+        backend.SliceRows(imgPart, attnFlat, capLen);
         attnFlat.Dispose();
+
         Tensor insProj = Linear(backend, insPart, _jiInsOut!, batch, insLen, _hidden);
         Tensor imgProj = Linear(backend, imgPart, _jiImgOut!, batch, imgLen, _hidden);
         insPart.Dispose(); imgPart.Dispose();
 
-        Tensor merged = DiTUtils.ConcatAlongSeqDim(insProj, imgProj);
+        Tensor merged = new Tensor(new TensorShape(batch, jointLen, _hidden), DType.F32);
+        backend.Concat(merged, new Tensor[] { insProj, imgProj }, 1);
         insProj.Dispose(); imgProj.Dispose();
         Tensor outProj = Linear(backend, merged, _jiToOut!, batch, jointLen, _hidden);
         merged.Dispose();
 
-        (Tensor insOut, Tensor imgOut) = DiTUtils.SplitAlongSeqDim(outProj, capLen);
+        Tensor insOut = new Tensor(new TensorShape(batch, capLen, _hidden), DType.F32);
+        backend.SliceRows(insOut, outProj, 0);
+        Tensor imgOut = new Tensor(new TensorShape(batch, imgLen, _hidden), DType.F32);
+        backend.SliceRows(imgOut, outProj, capLen);
         outProj.Dispose();
         return (insOut, imgOut);
     }
 
-    /// <summary>Image self-attention (ordinary GQA block attention with image RoPE).</summary>
+    /// <summary>Image self-attention (ordinary GQA block attention with image RoPE). GPU-resident, same primitives as
+    /// <see cref="JointAttention"/> but over a single stream.</summary>
     private Tensor SelfAttention(IBackend backend, Tensor x, OmniGen2Rope rope,
         ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int batch, int seqLen)
     {
-        int qDim = _numQHeads * _headDim;
-        int kvDim = _numKvHeads * _headDim;
+        Tensor q = LinearHeads(backend, x, _saToQ!, batch, seqLen, _numQHeads);
+        Tensor k = LinearHeads(backend, x, _saToK!, batch, seqLen, _numKvHeads);
+        Tensor v = LinearHeads(backend, x, _saToV!, batch, seqLen, _numKvHeads);
 
-        Tensor q = Linear(backend, x, _saToQ!, batch, seqLen, qDim);
-        Tensor k = Linear(backend, x, _saToK!, batch, seqLen, kvDim);
-        Tensor v = Linear(backend, x, _saToV!, batch, seqLen, kvDim);
-
-        Tensor qN = new Tensor(new TensorShape(batch, seqLen, qDim), DType.F32);
-        Tensor kN = new Tensor(new TensorShape(batch, seqLen, kvDim), DType.F32);
-        _saNormQ.Forward(qN, q, batch * seqLen * _numQHeads);
-        _saNormK.Forward(kN, k, batch * seqLen * _numKvHeads);
-        q.Dispose(); k.Dispose();
+        Tensor qN = RmsNormHeads(backend, q, _saNormQ, batch, seqLen, _numQHeads);
+        q.Dispose();
+        Tensor kN = RmsNormHeads(backend, k, _saNormK, batch, seqLen, _numKvHeads);
+        k.Dispose();
 
         Tensor attnFlat = GqaAttention(backend, qN, kN, v, rope, ropeCos, ropeSin, batch, seqLen);
         qN.Dispose(); kN.Dispose(); v.Dispose();
@@ -303,20 +329,25 @@ public sealed unsafe class BooguImageDoubleBlock
         return outProj;
     }
 
-    /// <summary>Reshape to multi-head, apply the precomputed RoPE table, GQA repeat-interleave K/V, SDPA, reshape back
-    /// to <c>[B, S, hidden]</c>. Inputs are flat <c>[B, S, qDim]</c> / <c>[B, S, kvDim]</c> already qk-normed.</summary>
+    /// <summary>Permute to <c>[B, H, S, D]</c>, apply the precomputed RoPE table (CPU), GQA repeat-interleave K/V, SDPA,
+    /// permute back to <c>[B, S, hidden]</c>. <paramref name="qFlat"/> is <c>[B, S, qDim]</c> and
+    /// <paramref name="kFlat"/>/<paramref name="vFlat"/> are <c>[B, S, kvDim]</c>, already QK-normed.</summary>
     private Tensor GqaAttention(IBackend backend, Tensor qFlat, Tensor kFlat, Tensor vFlat, OmniGen2Rope rope,
         ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int batch, int seqLen)
     {
-        Tensor qMh = DiTUtils.ReshapeToMultiHead(qFlat, batch, seqLen, _numQHeads, _headDim);
-        Tensor kMh = DiTUtils.ReshapeToMultiHead(kFlat, batch, seqLen, _numKvHeads, _headDim);
-        Tensor vMh = DiTUtils.ReshapeToMultiHead(vFlat, batch, seqLen, _numKvHeads, _headDim);
+        Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
+        backend.Permute0213(qMh, qFlat, seqLen, _numQHeads, _headDim);
+        Tensor kMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
+        backend.Permute0213(kMh, kFlat, seqLen, _numKvHeads, _headDim);
+        Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
+        backend.Permute0213(vMh, vFlat, seqLen, _numKvHeads, _headDim);
 
+        // RoPE (CPU; interleaved pairing — see class note). In-place on the head-major Q/K.
         rope.Apply(qMh, ropeCos, ropeSin, batch, _numQHeads, seqLen);
         rope.Apply(kMh, ropeCos, ropeSin, batch, _numKvHeads, seqLen);
 
-        Tensor kRep = RepeatKvHeads(kMh, batch, _numKvHeads, _kvGroup, seqLen, _headDim);
-        Tensor vRep = RepeatKvHeads(vMh, batch, _numKvHeads, _kvGroup, seqLen, _headDim);
+        Tensor kRep = RepeatKv(backend, kMh, batch, seqLen);
+        Tensor vRep = RepeatKv(backend, vMh, batch, seqLen);
         kMh.Dispose(); vMh.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
@@ -324,11 +355,26 @@ public sealed unsafe class BooguImageDoubleBlock
         backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
         qMh.Dispose(); kRep.Dispose(); vRep.Dispose();
 
-        Tensor attnFlat = DiTUtils.ReshapeFromMultiHead(attnMh, batch, seqLen, _numQHeads, _headDim);
+        Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
+        backend.Permute0213(attnFlat, attnMh, _numQHeads, seqLen, _headDim);
         attnMh.Dispose();
         return attnFlat;
     }
 
+    /// <summary>GQA K/V head repeat to Q head count on the GPU (<c>[B, Hkv, S, D]</c> → <c>[B, Hq, S, D]</c>). When the
+    /// group is 1 the input is already at full head count, so it is returned as a device-to-device copy via
+    /// <c>RepeatKvHeads</c> (group 1).</summary>
+    private Tensor RepeatKv(IBackend backend, Tensor kvMh, int batch, int seqLen)
+    {
+        Tensor output = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroup, seqLen, _headDim), DType.F32);
+        backend.RepeatKvHeads(output, kvMh, _numKvHeads, _kvGroup);
+        return output;
+    }
+
+    /// <summary>Lumina <c>RMSNormZero</c>, GPU-resident. <c>SiLU(temb)</c> → modulation <c>Linear</c> → split the
+    /// <c>[B, 4·hidden]</c> projection into four <c>[B, hidden]</c> chunks (<c>SliceLastDim</c>) → <c>RmsNorm(x)</c>
+    /// scaled by <c>(1 + chunk0)</c> (<c>AddScalar</c> + <c>AffineBroadcastLastDim</c>). Returns the normed tensor and
+    /// chunks 1/2/3 (the gates / scales the caller consumes). Bit-for-bit the old CPU split + scale.</summary>
     private (Tensor normed, Tensor c1, Tensor c2, Tensor c3) LuminaRmsNormZero(IBackend backend, Tensor x, Tensor temb,
         Tensor modLin, Tensor modBias, Tensor normW, int batch, int seqLen)
     {
@@ -340,75 +386,50 @@ public sealed unsafe class BooguImageDoubleBlock
 
         TensorShape paramShape = new TensorShape(batch, _hidden);
         Tensor c0 = new Tensor(paramShape, DType.F32);
+        backend.SliceLastDim(c0, projected, 0);
         Tensor c1 = new Tensor(paramShape, DType.F32);
+        backend.SliceLastDim(c1, projected, _hidden);
         Tensor c2 = new Tensor(paramShape, DType.F32);
+        backend.SliceLastDim(c2, projected, 2 * _hidden);
         Tensor c3 = new Tensor(paramShape, DType.F32);
-        float* pp = (float*)projected.DataPointer;
-        float* p0 = (float*)c0.DataPointer, p1 = (float*)c1.DataPointer, p2 = (float*)c2.DataPointer, p3 = (float*)c3.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int src = b * 4 * _hidden;
-            int dst = b * _hidden;
-            for (int d = 0; d < _hidden; d++)
-            {
-                p0[dst + d] = pp[src + d];
-                p1[dst + d] = pp[src + _hidden + d];
-                p2[dst + d] = pp[src + 2 * _hidden + d];
-                p3[dst + d] = pp[src + 3 * _hidden + d];
-            }
-        }
+        backend.SliceLastDim(c3, projected, 3 * _hidden);
         projected.Dispose();
 
         TensorShape hShape = new TensorShape(batch, seqLen, _hidden);
         Tensor rms = new Tensor(hShape, DType.F32);
         backend.RmsNorm(rms, x, normW, _normEps);
+
+        Tensor scalePlus1 = new Tensor(paramShape, DType.F32);
+        backend.AddScalar(scalePlus1, c0, 1.0f);
+        c0.Dispose();
         Tensor normed = new Tensor(hShape, DType.F32);
-        float* rp = (float*)rms.DataPointer, np = (float*)normed.DataPointer, sp = (float*)c0.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int cb = b * _hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vb = (b * seqLen + s) * _hidden;
-                for (int d = 0; d < _hidden; d++)
-                    np[vb + d] = rp[vb + d] * (1.0f + sp[cb + d]);
-            }
-        }
-        rms.Dispose(); c0.Dispose();
+        backend.AffineBroadcastLastDim(normed, rms, scalePlus1, null);
+        rms.Dispose(); scalePlus1.Dispose();
         return (normed, c1, c2, c3);
     }
 
-    private Tensor AffineScaleShift(Tensor input, Tensor scale, Tensor shift, int batch, int seqLen)
+    /// <summary>Affine modulation <c>out = (1 + scale)·input + shift</c>, GPU-resident
+    /// (<c>AddScalar</c> + <c>AffineBroadcastLastDim</c>). <paramref name="scale"/>/<paramref name="shift"/> are
+    /// <c>[B, hidden]</c> broadcast over the sequence axis.</summary>
+    private Tensor AffineScaleShift(IBackend backend, Tensor input, Tensor scale, Tensor shift, int batch, int seqLen)
     {
+        Tensor scalePlus1 = new Tensor(new TensorShape(batch, _hidden), DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
         Tensor output = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
-        float* ip = (float*)input.DataPointer, scp = (float*)scale.DataPointer, shp = (float*)shift.DataPointer, op = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int cb = b * _hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vb = (b * seqLen + s) * _hidden;
-                for (int d = 0; d < _hidden; d++)
-                    op[vb + d] = (1.0f + scp[cb + d]) * ip[vb + d] + shp[cb + d];
-            }
-        }
+        backend.AffineBroadcastLastDim(output, input, scalePlus1, shift);
+        scalePlus1.Dispose();
         return output;
     }
 
-    private Tensor TanhGatedResidual(Tensor residual, Tensor value, Tensor gate, int batch, int seqLen)
+    /// <summary>Tanh-gated residual <c>out = residual + tanh(gate)·value</c>, GPU-resident (<c>Tanh</c> +
+    /// <c>GatedResidualLastDim</c>). <paramref name="gate"/> is <c>[B, hidden]</c> broadcast over the sequence axis.</summary>
+    private Tensor TanhGatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor gate, int batch, int seqLen)
     {
+        Tensor gateTanh = new Tensor(new TensorShape(batch, _hidden), DType.F32);
+        backend.Tanh(gateTanh, gate);
         Tensor output = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
-        float* rp = (float*)residual.DataPointer, vp = (float*)value.DataPointer, gp = (float*)gate.DataPointer, op = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int gb = b * _hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vb = (b * seqLen + s) * _hidden;
-                for (int d = 0; d < _hidden; d++)
-                    op[vb + d] = rp[vb + d] + MathF.Tanh(gp[gb + d]) * vp[vb + d];
-            }
-        }
+        backend.GatedResidualLastDim(output, residual, value, gateTanh);
+        gateTanh.Dispose();
         return output;
     }
 
@@ -438,37 +459,28 @@ public sealed unsafe class BooguImageDoubleBlock
         return output;
     }
 
-    private static Tensor Linear(IBackend backend, Tensor input, Tensor weight, int batch, int seqLen, int outDim)
+    /// <summary>Linear projection whose output is declared <c>[B, S, numHeads, headDim]</c> (byte-identical to
+    /// <c>[B, S, numHeads·headDim]</c>) so the following RmsNorm normalizes over the head dim.</summary>
+    private Tensor LinearHeads(IBackend backend, Tensor input, Tensor weight, int batch, int seqLen, int numHeads)
     {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, outDim), DType.F32);
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, numHeads, _headDim), DType.F32);
         backend.Linear(output, input, weight, null);
         return output;
     }
 
-    private static Tensor RepeatKvHeads(Tensor input, int batch, int kvHeads, int groupSize, int seqLen, int headDim)
+    /// <summary>Per-head RMSNorm over the head dim using the QK-norm scale weight (<c>backend.RmsNorm</c> on the
+    /// <c>[B, S, H, D]</c> heads-layout tensor). Numerically equal to the scalar <see cref="QkNorm.Forward"/>.</summary>
+    private Tensor RmsNormHeads(IBackend backend, Tensor input, QkNorm qkNorm, int batch, int seqLen, int numHeads)
     {
-        if (groupSize == 1)
-        {
-            Tensor copy = new Tensor(new TensorShape(batch, kvHeads, seqLen, headDim), DType.F32);
-            long bytes = (long)batch * kvHeads * seqLen * headDim * sizeof(float);
-            Buffer.MemoryCopy((void*)input.DataPointer, (void*)copy.DataPointer, bytes, bytes);
-            return copy;
-        }
-        int qHeads = kvHeads * groupSize;
-        Tensor output = new Tensor(new TensorShape(batch, qHeads, seqLen, headDim), DType.F32);
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long perHead = (long)seqLen * headDim * sizeof(float);
-        for (int b = 0; b < batch; b++)
-            for (int kv = 0; kv < kvHeads; kv++)
-            {
-                long src = ((long)b * kvHeads + kv) * seqLen * headDim;
-                for (int g = 0; g < groupSize; g++)
-                {
-                    long dst = ((long)b * qHeads + kv * groupSize + g) * seqLen * headDim;
-                    Buffer.MemoryCopy(inPtr + src, outPtr + dst, perHead, perHead);
-                }
-            }
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, numHeads, _headDim), DType.F32);
+        backend.RmsNorm(output, input, qkNorm.Weight, qkNorm.Eps);
+        return output;
+    }
+
+    private static Tensor Linear(IBackend backend, Tensor input, Tensor weight, int batch, int seqLen, int outDim)
+    {
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, outDim), DType.F32);
+        backend.Linear(output, input, weight, null);
         return output;
     }
 

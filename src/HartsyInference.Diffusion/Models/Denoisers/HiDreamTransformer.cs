@@ -188,7 +188,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         // encoder_hidden_states[-2]], dim=1) where encoder_hidden_states is the post-projection list
         // with T5 appended at the end. The "[-1]" is T5; "[-2]" is the last selected Llama layer.
         Tensor lastLlama = llamaProj[^1];
-        Tensor initialEncoder = DiTUtils.ConcatAlongSeqDim(t5Proj, lastLlama);
+        Tensor initialEncoder = ConcatSeq(backend, t5Proj, lastLlama);
         int initialEncoderSeqLen = (int)initialEncoder.Shape[1];
         HiDreamDebugDump.Dump("initial_encoder", initialEncoder);
 
@@ -214,7 +214,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             // the block's text output may grow because we concatenated a fresh llama layer beneath
             // it; we re-slice after the block). The per-block llama is appended fresh.
             Tensor curLlama = llamaProj[blockId];
-            Tensor blockEncoderIn = DiTUtils.ConcatAlongSeqDim(curEncoder, curLlama);
+            Tensor blockEncoderIn = ConcatSeq(backend, curEncoder, curLlama);
 
             (Tensor newImg, Tensor newEncoderFull) = _doubleBlocks[b].ForwardDouble(
                 backend, curImg, blockEncoderIn, temb, _rope, doubleStreamTotalSeqLen);
@@ -223,7 +223,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
 
             // Re-slice the encoder back to its initial-encoder length so the next block sees a
             // matching shape (the [llama] tail was scratch).
-            Tensor reslicedEncoder = SliceFirstSeqTokens(newEncoderFull, initialEncoderSeqLen);
+            Tensor reslicedEncoder = SliceSeq(backend, newEncoderFull, initialEncoderSeqLen);
             newEncoderFull.Dispose();
 
             if (!ReferenceEquals(curImg, imgTokens)) curImg.Dispose();
@@ -237,7 +237,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         if (!ReferenceEquals(curEncoder, initialEncoder)) initialEncoder.Dispose();
 
         // ── 7. Switch to single-stream: concat current image with the running encoder, then per-block llama ──
-        Tensor jointBeforeSingle = DiTUtils.ConcatAlongSeqDim(curImg, curEncoder);
+        Tensor jointBeforeSingle = ConcatSeq(backend, curImg, curEncoder);
         if (!ReferenceEquals(curImg, imgTokens)) curImg.Dispose();
         else imgTokens.Dispose();
         curEncoder.Dispose();
@@ -254,14 +254,14 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         for (int b = 0; b < _singleBlocks.Length; b++)
         {
             Tensor curLlama = llamaProj[blockId];
-            Tensor blockIn = DiTUtils.ConcatAlongSeqDim(curJoint, curLlama);
+            Tensor blockIn = ConcatSeq(backend, curJoint, curLlama);
 
             Tensor newJointFull = _singleBlocks[b].ForwardSingle(
                 backend, blockIn, temb, _rope, imgSeqLen, singleStreamTotalSeqLen);
             blockIn.Dispose();
 
             // Slice off the appended llama tail.
-            Tensor resliced = SliceFirstSeqTokens(newJointFull, singleStreamBaseSeqLen);
+            Tensor resliced = SliceSeq(backend, newJointFull, singleStreamBaseSeqLen);
             newJointFull.Dispose();
 
             curJoint.Dispose();
@@ -271,7 +271,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         }
 
         // ── 8. Extract image tokens (first imgSeqLen of curJoint) ──
-        Tensor imgFinal = SliceFirstSeqTokens(curJoint, imgSeqLen);
+        Tensor imgFinal = SliceSeq(backend, curJoint, imgSeqLen);
         curJoint.Dispose();
 
         // Free per-layer projections.
@@ -451,7 +451,8 @@ public sealed unsafe class HiDreamTransformer : IDisposable
     }
 
     /// <summary>Unpatchifies [B, S, p²*C] → [B, C, H, W] (matching diffusers' inference branch, which
-    /// permutes (0, 5, 1, 3, 2, 4) on the [B, pH, pW, p, p, C] view).</summary>
+    /// permutes (0, 5, 1, 3, 2, 4) on the [B, pH, pW, p, p, C] view). The value is <b>negated</b> to match the
+    /// ComfyUI reference, which returns <c>-output</c> (HiDream's velocity-prediction sign convention).</summary>
     private static Tensor UnpatchifyLatent(Tensor input, int batch, int channels, int patH, int patW, int patchSize)
     {
         int height = patH * patchSize;
@@ -484,7 +485,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
                             {
                                 int srcIdx = inBase + patchPixel * channels + c;
                                 int dstIdx = ((b * channels + c) * height + yPx) * width + xPx;
-                                outPtr[dstIdx] = inPtr[srcIdx];
+                                outPtr[dstIdx] = -inPtr[srcIdx];
                             }
                         }
                     }
@@ -494,8 +495,20 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         return output;
     }
 
-    /// <summary>Slices the first <paramref name="firstSeqLen"/> sequence positions of a [B, S, D] tensor.</summary>
-    private static Tensor SliceFirstSeqTokens(Tensor input, int firstSeqLen)
+    /// <summary>GPU-resident concat of two [B, S1, D] and [B, S2, D] tensors along the sequence dim → [B, S1+S2, D].</summary>
+    private static Tensor ConcatSeq(IBackend backend, Tensor a, Tensor b)
+    {
+        int batch = (int)a.Shape[0];
+        int dim = (int)a.Shape[2];
+        int total = (int)a.Shape[1] + (int)b.Shape[1];
+        Tensor output = new Tensor(new TensorShape(batch, total, dim), DType.F32);
+        backend.Concat(output, new Tensor[] { a, b }, 1);
+        return output;
+    }
+
+    /// <summary>GPU-resident slice of the first <paramref name="firstSeqLen"/> sequence positions of a [B, S, D]
+    /// tensor (contiguous row-block, <see cref="IBackend.SliceRows"/>).</summary>
+    private static Tensor SliceSeq(IBackend backend, Tensor input, int firstSeqLen)
     {
         int batch = (int)input.Shape[0];
         int dim = (int)input.Shape[2];
@@ -503,17 +516,8 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         if (firstSeqLen > totalSeq)
             throw new ArgumentOutOfRangeException(nameof(firstSeqLen),
                 $"firstSeqLen={firstSeqLen} exceeds totalSeq={totalSeq}");
-        TensorShape outShape = new TensorShape(batch, firstSeqLen, dim);
-        Tensor output = new Tensor(outShape, DType.F32);
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            long srcOff = (long)b * totalSeq * dim;
-            long dstOff = (long)b * firstSeqLen * dim;
-            long bytes = (long)firstSeqLen * dim * sizeof(float);
-            Buffer.MemoryCopy(inPtr + srcOff, outPtr + dstOff, bytes, bytes);
-        }
+        Tensor output = new Tensor(new TensorShape(batch, firstSeqLen, dim), DType.F32);
+        backend.SliceRows(output, input, 0);
         return output;
     }
 

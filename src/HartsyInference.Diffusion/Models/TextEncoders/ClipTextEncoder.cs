@@ -165,12 +165,10 @@ public sealed unsafe class ClipTextEncoder
         backend.LayerNorm(normedFull, hidden, _finalLayerNormWeight!, _finalLayerNormBias!, _config.LayerNormEps);
         hidden.Dispose();
 
-        // Extract pooled output from EOS token position, then apply text_projection
-        Tensor? pooledOutput = null;
-        if (_textProjectionWeight is not null && _config.ProjectionDim > 0)
-        {
-            pooledOutput = ExtractPooledOutput(normedFull, eosTokenPositions, batch, seqLen, hiddenSize);
-        }
+        // Extract pooled output from EOS token position (raw EOS hidden when there's no text_projection,
+        // projected when there is — handled inside ExtractPooledOutput). Always non-null now so dual-pooled
+        // models (HiDream/SD3 concat CLIP-L + CLIP-G pooled) don't NRE on CLIP-L's missing projection.
+        Tensor pooledOutput = ExtractPooledOutput(normedFull, eosTokenPositions, batch, seqLen, hiddenSize);
 
         normedFull.Dispose();
 
@@ -292,6 +290,12 @@ public sealed unsafe class ClipTextEncoder
                 dstPtr[dstOffset + d] = srcPtr[srcOffset + d];
             }
         }
+
+        // No text_projection (CLIP-L in HiDream's quad-encoder, and SDXL where CLIP-L pooled is unused):
+        // the pooled output IS the raw EOS hidden state [B, hiddenSize]. Only projected encoders (CLIP-G /
+        // SD3 CLIP-L) run the matmul below. Safe for SD3/SDXL — they only consume pooled where a projection exists.
+        if (_textProjectionWeight is null || projDim <= 0)
+            return eosHidden;
 
         // Project through text_projection. The stored weight is `nn.Linear(hidden, proj).weight`,
         // shape `[proj, hidden]` (PyTorch's `out_features, in_features` convention), and forward is

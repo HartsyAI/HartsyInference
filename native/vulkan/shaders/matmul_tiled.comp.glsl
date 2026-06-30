@@ -88,19 +88,21 @@ layout(push_constant) uniform Push {
     uint cOffset;
 } pc;
 
-// Shared tiles sized for the maximum supported (BM, BK, BN). When the host picks smaller
-// spec-const values, the unused area of these arrays is simply left untouched; total
-// shared-memory cost is the static size, not the spec-const size.
-//   MAX_BM * MAX_BK = 128 * 32 = 4096 floats = 16 KB
-//   MAX_BK * MAX_BN =  32 * 128 = 4096 floats = 16 KB
-//   total: 32 KB — within the 32 KB Vulkan-spec minimum and well under the
-//   48-64 KB available on RTX 3060 / RDNA / Arc.
+// Shared tiles sized by the SPECIALIZED (BM, BK, BN), not the MAX — so a small tile costs only its
+// own shared memory. This matters cross-vendor: the largest tile (128×128×32) needs
+//   Asub: BM*(BK+1) = 128*33 = 4224 floats   +   Bsub: BK*BN = 32*128 = 4096 floats
+//   = 8320 floats = 33,280 bytes — which EXCEEDS the 32,768-byte (32 KB) Vulkan-spec minimum.
+// On AMD GCN / Intel Arc / low-end iGPU (exactly 32 KB shared) a MAX-sized static array would make
+// every matmul_tiled pipeline invalid — and tiled is the only GEMM fallback when coopmat is absent.
+// Spec-const sizing lets the host (PickMatmulTile) drop to a 64×64×16 tile (8,448 bytes) or 32×32×16
+// (4,224 bytes) that fits, so those devices still run. On NVIDIA (48–64 KB) the host still picks the
+// 128 tile, so this is behaviour-neutral there.
 // Asub is padded by one column (stride BK+1) so the register-load at `Asub[(threadRow+i)*BK+k]`,
 // which strides down columns across thread row-groups, does not all land in the same bank when
 // BK is a multiple of 32 (a 4-way conflict at BK=32). The pad shifts each row by a bank.
 // Bsub needs no pad: its warp-level conflict is intra-row (TN-stride), which row-padding can't fix.
-shared float Asub[MAX_BM * (MAX_BK + 1)];
-shared float Bsub[MAX_BK * MAX_BN];
+shared float Asub[BM * (BK + 1)];
+shared float Bsub[BK * BN];
 
 float silu(float x)        { return x / (1.0 + exp(-x)); }
 float gelu_tanh(float x)   { return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x))); }

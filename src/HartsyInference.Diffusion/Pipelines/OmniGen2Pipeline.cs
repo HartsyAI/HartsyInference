@@ -60,7 +60,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         // takes priority. If the caller left it at the default but supplied a non-default generic cfgScale,
         // honour the generic value so the legacy request.CfgScale path keeps working.
         float effectiveTextGuidance =
-            (Math.Abs(textGuidanceScale - 4.0f) < 1e-6f && cfgScale > 1.0f)
+            Math.Abs(textGuidanceScale - 4.0f) < 1e-6f
                 ? cfgScale
                 : textGuidanceScale;
 
@@ -98,7 +98,9 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            float t = timesteps[i];
+            // scheduler.Timesteps are sigma·1000; OmniGen2Transformer wants the raw flow-match sigma in [0,1]
+            // (it flips to 1 - sigma internally and negates its output to match scheduler.Step's x + v·dt).
+            float t = timesteps[i] / 1000.0f;
 
             Tensor velocity = _transformer.Forward(Backend, latent, t, captionEmbeddings, textSeqLen);
 

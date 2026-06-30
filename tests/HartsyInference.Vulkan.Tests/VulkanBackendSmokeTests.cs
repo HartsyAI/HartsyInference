@@ -412,6 +412,68 @@ public sealed class VulkanBackendSmokeTests
         input.Dispose(); weight.Dispose(); bias.Dispose(); output.Dispose();
     }
 
+    /// <summary>Gate for the Stage-1b weight-cast cache: a preloaded FP8 weight feeds two consecutive
+    /// Linears (first call populates the cast cache, second reuses it). Both outputs must match the CPU
+    /// reference (computed from the same FP8→F16 dequant) — catches a stale/aliased/freed cached cast.</summary>
+    [Fact]
+    public void Backend_Linear_FP8Weight_CachedCast_Matches_Cpu()
+    {
+        if (!VulkanAvailable())
+            return;
+        using VulkanBackend backend = new();
+
+        const int M = 256, K = 512, N = 256;   // multiples of 16 → coopmat fast path
+        Tensor input = new(new TensorShape(M, K), DType.F16);
+        Tensor weightF32 = new(new TensorShape(N, K), DType.F32);
+        Tensor bias = new(new TensorShape(N), DType.F16);
+
+        Random rng = new(7);
+        Span<Half> iS = input.AsSpan<Half>();
+        Span<float> wS = weightF32.AsSpan<float>();
+        Span<Half> bS = bias.AsSpan<Half>();
+        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.1f);
+        for (int i = 0; i < N * K; i++) wS[i] = (float)(rng.NextDouble() * 2 - 1) * 0.05f;
+        for (int i = 0; i < N; i++) bS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.01f);
+
+        // FP8 weight + the exact F16 values the GPU dequant produces (reference uses the same cast).
+        Tensor weightFp8 = weightF32.CastTo(DType.F8E4M3);
+        Tensor weightF16Ref = weightFp8.CastTo(DType.F16);
+        ReadOnlySpan<Half> wRef = weightF16Ref.AsReadOnlySpan<Half>();
+
+        backend.PreloadWeights(new[] { weightFp8, bias });
+
+        int[] mProbes = { 0, 1, 16, 17, 128, M - 1 };
+        int[] nProbes = { 0, 1, 16, 17, 200, N - 1 };
+
+        for (int call = 0; call < 2; call++)
+        {
+            Tensor output = new(new TensorShape(M, N), DType.F16);
+            backend.Linear(output, input, weightFp8, bias);
+            backend.Sync();
+            ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
+
+            int errs = 0, firstM = -1, firstN = -1; float maxAbs = 0;
+            foreach (int m in mProbes)
+            foreach (int n in nProbes)
+            {
+                float acc = 0;
+                for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wRef[n * K + k];
+                acc += (float)bS[n];
+                float err = MathF.Abs((float)oS[m * N + n] - acc);
+                if (err > 5e-2f)
+                {
+                    if (errs == 0) { firstM = m; firstN = n; }
+                    errs++; maxAbs = MathF.Max(maxAbs, err);
+                }
+            }
+            Assert.True(errs == 0,
+                $"Cached-cast Linear call {call}: {errs} probe diffs, first out[{firstM},{firstN}] maxAbsErr={maxAbs:G6}");
+            output.Dispose();
+        }
+
+        input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); bias.Dispose();
+    }
+
     /// <summary>Matmul at Flux DiT dimensions (M=32, K=3072, N=3072) — checks accumulator precision survives ~3K-deep dot products without overflowing.</summary>
     [Fact]
     public void Backend_MatMul_LargeFp16_Matches_Cpu()
