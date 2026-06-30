@@ -29,7 +29,7 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
     // the single remap below is exact for all of them. The MoE members (olmoe, qwen2moe, qwen3moe, and Mixtral
     // under the plain "llama" arch) add the stacked-expert + router tensors handled below; the dense members
     // simply never carry those keys. Registering each explicitly resolves it by name (no heuristic-fallback warning).
-    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmo2", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "internlm2", "nemotron", "gpt-oss", "gptoss"];
+    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmo2", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "internlm2", "nemotron", "starcoder2", "exaone", "gpt-oss", "gptoss"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {
@@ -84,6 +84,10 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
                 "ffn_gate.weight" => "mlp.gate_proj.weight",
                 "ffn_up.weight" => "mlp.up_proj.weight",
                 "ffn_down.weight" => "mlp.down_proj.weight",
+                // FFN biases (StarCoder2 / GPT-2-lineage non-gated MLP). Llama/Qwen/Gemma have none.
+                "ffn_gate.bias" => "mlp.gate_proj.bias",
+                "ffn_up.bias" => "mlp.up_proj.bias",
+                "ffn_down.bias" => "mlp.down_proj.bias",
                 // MoE: the router and the stacked per-expert tensors. The *_exps tensors are 3D [E, ·, ·] and are
                 // split into per-expert 2D projections downstream (GgufLanguageModel). Shared-expert tensors
                 // (Qwen-MoE) map to the shared_expert.* names the MoE block expects.

@@ -103,6 +103,9 @@ public static class GgufConfigFactory
         // Nemotron: LayerNorm (the GGUF bakes its LayerNorm1p +1 offset into the stored weight, like Gemma) +
         // non-gated squared-ReLU FFN + partial rotary (auto-detected). No projection biases.
         bool isNemotron = arch == "nemotron";
+        // StarCoder2: LayerNorm (with bias) + RoPE + GQA + biased attention (QKV + output) + non-gated GELU FFN
+        // with biases. Like GPT-2 but RoPE instead of absolute positions and separate (not fused) q/k/v.
+        bool isStarcoder2 = arch == "starcoder2";
 
         // GPT-OSS: MoE decoder with learned per-head attention sinks (a logit in the softmax denominator that
         // carries no value). Sigmoid routing + the o200k tokenizer come from the existing MoE/tokenizer paths.
@@ -234,12 +237,12 @@ public static class GgufConfigFactory
             //     (interleaved adjacent pairs 2i,2i+1) reproduces HF rotate_half → we must apply Interleaved.
             //   - qwen2/qwen3: no permute, ggml uses NEOX rope (split-half pairs i,i+half) → SplitHalf.
             // Using the wrong pairing leaves attention rotating mismatched dimensions → coherent-looking garbage.
-            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
+            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" or "exaone" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
             RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
             // Activation: Gemma/GPT-2/BLOOM = tanh-approx GELU; Nemotron = squared ReLU; everything else SwiGLU SiLU.
             Activation = isNemotron ? ActivationKind.ReluSquared
-                : isGemma || isGpt2 || isBloom ? ActivationKind.GeluTanh : ActivationKind.Silu,
+                : isGemma || isGpt2 || isBloom || isStarcoder2 ? ActivationKind.GeluTanh : ActivationKind.Silu,
             SandwichNorm = sandwich,
             // llama.cpp's GGUF converter already bakes Gemma's (1+w) offset into the stored norm weights, so the
             // GGUF path uses them directly. RmsNormAddOne is only for loading raw (centered) HF safetensors.
@@ -249,10 +252,10 @@ public static class GgufConfigFactory
             AttentionMultiplier = attnMultiplier,
             ResidualMultiplier = residualMul,
             LogitScale = logitScale,
-            UseLayerNorm = isCohere || isStablelm || isGpt2 || isBloom || isNemotron,
+            UseLayerNorm = isCohere || isStablelm || isGpt2 || isBloom || isNemotron || isStarcoder2,
             NormPlacement = isOlmo2 ? NormPlacement.PostNorm : NormPlacement.PreNorm,
-            GatedFfn = !(isGpt2 || isBloom || isNemotron),
-            FfnBias = isGpt2 || isBloom,
+            GatedFfn = !(isGpt2 || isBloom || isNemotron || isStarcoder2),
+            FfnBias = isGpt2 || isBloom || isStarcoder2,
             AbsolutePositionEmbeddings = isGpt2,
             EmbeddingLayerNorm = isBloom,
             AlibiMaxBias = alibiMaxBias,
