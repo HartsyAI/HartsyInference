@@ -1,17 +1,26 @@
-using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Audio.Models.Whisper;
 
 namespace HartsyInference.Audio.Models.FishSpeech;
 
-/// <summary>Firefly HiFi-GAN generator (Fish-Speech 1.5). Same MRF topology as the VITS generator
-/// (<c>conv_pre</c> → N <c>ConvTranspose1d</c> upsample stages each fused with <c>num_kernels</c> ResBlock1
-/// branches → <c>conv_post</c> → tanh) but with <b>SiLU</b> activations throughout instead of LeakyReLU — the one
-/// architectural divergence that prevents reusing <see cref="Vits.VitsHiFiGan"/>. Input is the firefly quantizer's
-/// <c>[1, inputChannels, T]</c> decoder feature; output is mono 44.1 kHz PCM with a final <c>tanh</c>.</summary>
+/// <summary>Firefly HiFi-GAN generator (Fish-Speech 1.5, fish-speech <c>firefly.HiFiGANGenerator</c>).
+/// <code>
+///   x = conv_pre(z)                                    # FishConvNet k=13, causal, weight-norm
+///   for i in 0..num_upsamples:
+///       x = silu(x); x = ups[i](x)                     # FishTransConvNet, weight-norm
+///       x = resblocks[i](x)                            # ParallelBlock = mean of 3 ResBlock1 (k=3/7/11)
+///   x = silu(x); x = conv_post(x); x = tanh(x)         # FishConvNet k=13, causal, weight-norm
+/// </code>
+/// Every conv is a <c>FishConvNet</c> (causal constant left-pad) or <c>FishTransConvNet</c> (transpose + right-trim),
+/// all weight-normed (<c>...conv.parametrizations.weight.original0/1</c>), with <b>SiLU</b> activations and a final
+/// <c>tanh</c>. Input is the firefly quantizer's <c>[1, numMels, T]</c> feature; output is mono 44.1 kHz PCM.</summary>
 public sealed unsafe class FireflySiluGenerator
 {
     private readonly int _initChannels;
+    private readonly int _numMels;
+    private readonly int _preK;
+    private readonly int _postK;
     private readonly int[] _upRates;
     private readonly int[] _upKernels;
     private readonly int[] _resKernels;
@@ -20,11 +29,15 @@ public sealed unsafe class FireflySiluGenerator
 
     private Tensor? _convPreW, _convPreB, _convPostW, _convPostB;
     private readonly Tensor?[] _upW, _upB;
-    private readonly ResBlock[] _resblocks;
+    private readonly ResBlock1[][] _resblocks;     // [stage][kernelBranch]
 
-    public FireflySiluGenerator(int initChannels, int[] upRates, int[] upKernels, int[] resKernels, int[][] resDilations)
+    public FireflySiluGenerator(int initChannels, int[] upRates, int[] upKernels, int[] resKernels, int[][] resDilations,
+        int numMels = 512, int preConvKernelSize = 13, int postConvKernelSize = 13)
     {
         _initChannels = initChannels;
+        _numMels = numMels;
+        _preK = preConvKernelSize;
+        _postK = postConvKernelSize;
         _upRates = upRates;
         _upKernels = upKernels;
         _resKernels = resKernels;
@@ -32,55 +45,59 @@ public sealed unsafe class FireflySiluGenerator
         _numKernels = resKernels.Length;
         int stages = upRates.Length;
         _upW = new Tensor?[stages]; _upB = new Tensor?[stages];
-        _resblocks = new ResBlock[stages * _numKernels];
+        _resblocks = new ResBlock1[stages][];
         for (int i = 0; i < stages; i++)
         {
             int ch = initChannels >> (i + 1);
+            _resblocks[i] = new ResBlock1[_numKernels];
             for (int k = 0; k < _numKernels; k++)
-                _resblocks[i * _numKernels + k] = new ResBlock(ch, resKernels[k], resDilations[k]);
+                _resblocks[i][k] = new ResBlock1(ch, resKernels[k], resDilations[k]);
         }
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _convPreW = WhisperOps.EnsureF32(w[$"{prefix}.conv_pre.weight"]);
-        _convPreB = w.TryGetValue($"{prefix}.conv_pre.bias", out Tensor? cpb) ? WhisperOps.EnsureF32(cpb) : null;
-        _convPostW = WhisperOps.EnsureF32(w[$"{prefix}.conv_post.weight"]);
-        _convPostB = w.TryGetValue($"{prefix}.conv_post.bias", out Tensor? cqb) ? WhisperOps.EnsureF32(cqb) : null;
+        _convPreW = FireflyOps.LoadConvWeight(w, $"{prefix}.conv_pre.conv");
+        _convPreB = WhisperOps.EnsureF32(w[$"{prefix}.conv_pre.conv.bias"]);
+        _convPostW = FireflyOps.LoadConvWeight(w, $"{prefix}.conv_post.conv");
+        _convPostB = WhisperOps.EnsureF32(w[$"{prefix}.conv_post.conv.bias"]);
         for (int i = 0; i < _upW.Length; i++)
         {
-            _upW[i] = WhisperOps.EnsureF32(w[$"{prefix}.ups.{i}.weight"]);
-            _upB[i] = w.TryGetValue($"{prefix}.ups.{i}.bias", out Tensor? ub) ? WhisperOps.EnsureF32(ub) : null;
+            _upW[i] = FireflyOps.LoadTransConvWeight(w, $"{prefix}.ups.{i}.conv");
+            _upB[i] = WhisperOps.EnsureF32(w[$"{prefix}.ups.{i}.conv.bias"]);
+            for (int k = 0; k < _numKernels; k++)
+                _resblocks[i][k].LoadWeights(w, $"{prefix}.resblocks.{i}.blocks.{k}");
         }
-        for (int i = 0; i < _resblocks.Length; i++) _resblocks[i].LoadWeights(w, $"{prefix}.resblocks.{i}");
     }
+
+    /// <summary>Optional per-stage activation hook for parity debugging (key = stage name). Not used in production.</summary>
+    public Action<string, Tensor>? DebugHook { get; set; }
 
     public float[] Forward(IBackend backend, Tensor z, int t)
     {
+        // conv_pre: FishConvNet k=preK, causal.
         int ch = _initChannels;
-        int preK = (int)_convPreW!.Shape[2];
-        int prePad = (preK - 1) / 2;
-        int preT = t + 2 * prePad - (preK - 1);
-        Tensor x = new(new TensorShape(1, ch, preT), DType.F32);
-        backend.Conv1d(x, z, _convPreW!, _convPreB, 1, prePad, prePad, 1, 1);
+        Tensor x = FireflyOps.CausalConv(backend, z, _convPreW!, _convPreB, _numMels, t, ch, _preK, dilation: 1, groups: 1);
+        int curT = t;
+        DebugHook?.Invoke("h_conv_pre", x);
 
-        int curT = preT;
         for (int i = 0; i < _upRates.Length; i++)
         {
-            SiluInPlace(backend, x);
+            backend.Silu(x, x);
             int stride = _upRates[i], kernel = _upKernels[i];
-            int pad = (kernel - stride) / 2;
-            int outCh = ch >> 1, outT = (curT - 1) * stride + (kernel - 1) + 1 - 2 * pad;
-            Tensor up = new(new TensorShape(1, outCh, outT), DType.F32);
-            backend.ConvTranspose1d(up, x, _upW[i]!, _upB[i], stride, pad, pad, 1, 1);
+            int outCh = ch >> 1;
+            Tensor up = FireflyOps.TransConv(backend, x, _upW[i]!, _upB[i], ch, curT, outCh, kernel, stride);
             x.Dispose();
+            int outT = (int)up.Shape[2];
+            DebugHook?.Invoke($"h_up_{i}", up);
 
+            // ParallelBlock: mean of the per-kernel ResBlock1 outputs.
             Tensor acc = new(new TensorShape(1, outCh, outT), DType.F32);
             float* accP = (float*)acc.DataPointer;
             for (long n = 0; n < acc.ElementCount; n++) accP[n] = 0f;
             for (int k = 0; k < _numKernels; k++)
             {
-                Tensor rb = _resblocks[i * _numKernels + k].Forward(backend, up, outCh, outT);
+                Tensor rb = _resblocks[i][k].Forward(backend, up, outCh, outT);
                 float* rp = (float*)rb.DataPointer;
                 for (long n = 0; n < (long)outCh * outT; n++) accP[n] += rp[n];
                 rb.Dispose();
@@ -89,18 +106,16 @@ public sealed unsafe class FireflySiluGenerator
             for (long n = 0; n < (long)outCh * outT; n++) accP[n] *= inv;
             up.Dispose();
             x = acc; ch = outCh; curT = outT;
+            DebugHook?.Invoke($"h_res_{i}", x);
         }
 
-        SiluInPlace(backend, x);
-        int postK = (int)_convPostW!.Shape[2];
-        int postPad = (postK - 1) / 2;
-        int postT = curT + 2 * postPad - (postK - 1);
-        Tensor post = new(new TensorShape(1, 1, postT), DType.F32);
-        backend.Conv1d(post, x, _convPostW!, _convPostB, 1, postPad, postPad, 1, 1);
+        backend.Silu(x, x);
+        // conv_post: FishConvNet k=postK, causal → 1 channel.
+        Tensor post = FireflyOps.CausalConv(backend, x, _convPostW!, _convPostB, ch, curT, 1, _postK, dilation: 1, groups: 1);
         x.Dispose();
         float* pp = (float*)post.DataPointer;
-        float[] audio = new float[postT];
-        for (int j = 0; j < postT; j++) audio[j] = MathF.Tanh(pp[j]);
+        float[] audio = new float[curT];
+        for (int j = 0; j < curT; j++) audio[j] = MathF.Tanh(pp[j]);
         post.Dispose();
         return audio;
     }
@@ -111,23 +126,21 @@ public sealed unsafe class FireflySiluGenerator
         foreach (Tensor? t in own) if (t is not null) yield return t;
         foreach (Tensor? t in _upW) if (t is not null) yield return t;
         foreach (Tensor? t in _upB) if (t is not null) yield return t;
-        foreach (ResBlock r in _resblocks) foreach (Tensor t in r.EnumerateWeights()) yield return t;
+        foreach (ResBlock1[] stage in _resblocks)
+            foreach (ResBlock1 r in stage)
+                foreach (Tensor t in r.EnumerateWeights()) yield return t;
     }
 
-    private static void SiluInPlace(IBackend backend, Tensor x)
-    {
-        backend.Silu(x, x);
-    }
-
-    /// <summary>HiFi-GAN ResBlock1 with SiLU activations — three dilated branches, each <c>SiLU → dilated Conv1d
-    /// → SiLU → Conv1d</c> added back as a residual.</summary>
-    private sealed class ResBlock
+    /// <summary>Firefly <c>ResBlock1</c>: three branches, each <c>SiLU → FishConvNet(dilation[j]) → SiLU →
+    /// FishConvNet(dilation[j])</c> added back as a residual. Both convs in a branch share the branch dilation
+    /// (fish-speech sets <c>convs2</c> dilation = <c>convs1</c> dilation, unlike vanilla HiFi-GAN).</summary>
+    private sealed class ResBlock1
     {
         private readonly int _ch, _kernel;
         private readonly int[] _dilations;
         private readonly Tensor?[] _c1W, _c1B, _c2W, _c2B;
 
-        public ResBlock(int ch, int kernel, int[] dilations)
+        public ResBlock1(int ch, int kernel, int[] dilations)
         {
             _ch = ch; _kernel = kernel; _dilations = dilations;
             _c1W = new Tensor?[dilations.Length]; _c1B = new Tensor?[dilations.Length];
@@ -138,10 +151,10 @@ public sealed unsafe class FireflySiluGenerator
         {
             for (int j = 0; j < _dilations.Length; j++)
             {
-                _c1W[j] = WhisperOps.EnsureF32(w[$"{prefix}.convs1.{j}.weight"]);
-                _c1B[j] = w.TryGetValue($"{prefix}.convs1.{j}.bias", out Tensor? b1) ? WhisperOps.EnsureF32(b1) : null;
-                _c2W[j] = WhisperOps.EnsureF32(w[$"{prefix}.convs2.{j}.weight"]);
-                _c2B[j] = w.TryGetValue($"{prefix}.convs2.{j}.bias", out Tensor? b2) ? WhisperOps.EnsureF32(b2) : null;
+                _c1W[j] = FireflyOps.LoadConvWeight(w, $"{prefix}.convs1.{j}.conv");
+                _c1B[j] = WhisperOps.EnsureF32(w[$"{prefix}.convs1.{j}.conv.bias"]);
+                _c2W[j] = FireflyOps.LoadConvWeight(w, $"{prefix}.convs2.{j}.conv");
+                _c2B[j] = WhisperOps.EnsureF32(w[$"{prefix}.convs2.{j}.conv.bias"]);
             }
         }
 
@@ -151,18 +164,15 @@ public sealed unsafe class FireflySiluGenerator
             Buffer.MemoryCopy((void*)input.DataPointer, (void*)x.DataPointer, input.ElementCount * 4, input.ElementCount * 4);
             for (int j = 0; j < _dilations.Length; j++)
             {
-                int d = _dilations[j], pad = d * (_kernel - 1) / 2;
+                int d = _dilations[j];
                 Tensor a1 = new(x.Shape, DType.F32);
                 backend.Silu(a1, x);
-                Tensor c1 = new(new TensorShape(1, ch, t), DType.F32);
-                backend.Conv1d(c1, a1, _c1W[j]!, _c1B[j], 1, pad, pad, d, 1);
+                Tensor c1 = FireflyOps.CausalConv(backend, a1, _c1W[j]!, _c1B[j], ch, t, ch, _kernel, dilation: d, groups: 1);
                 a1.Dispose();
                 Tensor a2 = new(c1.Shape, DType.F32);
                 backend.Silu(a2, c1);
                 c1.Dispose();
-                int pad2 = (_kernel - 1) / 2;
-                Tensor c2 = new(new TensorShape(1, ch, t), DType.F32);
-                backend.Conv1d(c2, a2, _c2W[j]!, _c2B[j], 1, pad2, pad2, 1, 1);
+                Tensor c2 = FireflyOps.CausalConv(backend, a2, _c2W[j]!, _c2B[j], ch, t, ch, _kernel, dilation: d, groups: 1);
                 a2.Dispose();
                 float* xp = (float*)x.DataPointer; float* c2p = (float*)c2.DataPointer;
                 for (long n = 0; n < (long)ch * t; n++) xp[n] += c2p[n];

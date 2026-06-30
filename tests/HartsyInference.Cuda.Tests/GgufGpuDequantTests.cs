@@ -34,6 +34,40 @@ public sealed class GgufGpuDequantTests
     }
 
     [Fact]
+    public unsafe void Q4_0_GpuDequant_MatchesCpu()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int blocks = 4;
+        const int totalElems = blocks * 32;
+        Tensor src = new Tensor(new TensorShape(totalElems), DType.Q4_0);
+        try
+        {
+            FillQ4_0(src, blocks);
+            using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
+            using Tensor gpuOut = RunGpuDequant(src, totalElems);
+            CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
+        }
+        finally { src.Dispose(); }
+    }
+
+    [Fact]
+    public unsafe void Q5_0_GpuDequant_MatchesCpu()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int blocks = 4;
+        const int totalElems = blocks * 32;
+        Tensor src = new Tensor(new TensorShape(totalElems), DType.Q5_0);
+        try
+        {
+            FillQ5_0(src, blocks);
+            using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
+            using Tensor gpuOut = RunGpuDequant(src, totalElems);
+            CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
+        }
+        finally { src.Dispose(); }
+    }
+
+    [Fact]
     public unsafe void Q4_K_GpuDequant_MatchesCpu()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -131,6 +165,8 @@ public sealed class GgufGpuDequantTests
             nint stream = backend.Stream.Handle;
 
             if (src.DType == DType.Q8_0) kernels.LaunchDequantQ8_0ToF16(devDst, devSrc, totalElems, stream);
+            else if (src.DType == DType.Q4_0) kernels.LaunchDequantQ4_0ToF16(devDst, devSrc, totalElems, stream);
+            else if (src.DType == DType.Q5_0) kernels.LaunchDequantQ5_0ToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q4_K) kernels.LaunchDequantQ4_KToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q5_K) kernels.LaunchDequantQ5_KToF16(devDst, devSrc, totalElems, stream);
             else if (src.DType == DType.Q6_K) kernels.LaunchDequantQ6_KToF16(devDst, devSrc, totalElems, stream);
@@ -175,6 +211,32 @@ public sealed class GgufGpuDequantTests
             *(Half*)block = (Half)(0.5f + 0.1f * b);
             sbyte* qs = (sbyte*)(block + 2);
             for (int i = 0; i < 32; i++) qs[i] = (sbyte)((i + b) - 16);
+        }
+    }
+
+    private static unsafe void FillQ4_0(Tensor t, int blocks)
+    {
+        byte* p = (byte*)t.DataPointer;
+        for (int b = 0; b < blocks; b++)
+        {
+            byte* block = p + b * 18;
+            *(Half*)block = (Half)(0.25f + 0.1f * b);
+            byte* qs = block + 2;
+            for (int i = 0; i < 16; i++) qs[i] = (byte)((i * 7 + b * 13) & 0xFF);   // mix both nibbles
+        }
+    }
+
+    private static unsafe void FillQ5_0(Tensor t, int blocks)
+    {
+        byte* p = (byte*)t.DataPointer;
+        for (int b = 0; b < blocks; b++)
+        {
+            byte* block = p + b * 22;
+            *(Half*)block = (Half)(0.3f + 0.05f * b);
+            uint qh = 0xA5A5_5A5Au ^ (uint)(b * 0x1234567);   // exercise the 5th-bit path across all 32 positions
+            block[2] = (byte)qh; block[3] = (byte)(qh >> 8); block[4] = (byte)(qh >> 16); block[5] = (byte)(qh >> 24);
+            byte* qs = block + 6;
+            for (int i = 0; i < 16; i++) qs[i] = (byte)((i * 11 + b * 17) & 0xFF);
         }
     }
 

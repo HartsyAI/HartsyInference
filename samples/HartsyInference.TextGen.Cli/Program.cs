@@ -70,6 +70,10 @@ if (arch == "mamba2")
 {
     return HartsyInference.TextGen.Cli.Mamba2Runner.Run(backendName);
 }
+if (arch == "rwkv7")
+{
+    return HartsyInference.TextGen.Cli.Rwkv7Runner.Run(backendName);
+}
 
 using IBackend backend = backendName == "cpu"
     ? new CpuBackend()

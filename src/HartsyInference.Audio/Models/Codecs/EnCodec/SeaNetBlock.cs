@@ -40,6 +40,12 @@ internal sealed unsafe class SeaNetBlock
     private Tensor? _conv2W;
     private Tensor? _conv2B;
 
+    // Optional learned 1x1 shortcut conv (HF use_conv_shortcut=True; present in the 24/48 kHz checkpoints,
+    // absent in the 32/16 kHz ones which use an identity skip). Detected by key presence at load time so the
+    // validated identity-skip codecs are untouched.
+    private Tensor? _shortcutW;
+    private Tensor? _shortcutB;
+
     public SeaNetBlock(EnCodecConfig cfg, string prefix, int dim, int dilation)
     {
         _cfg = cfg;
@@ -74,6 +80,15 @@ internal sealed unsafe class SeaNetBlock
         _conv1B = WhisperOps.EnsureF32(w[$"{_prefix}.block.1.conv.conv.bias"]);
         _conv2W = LoadFusedConvWeight(w, $"{_prefix}.block.3.conv.conv");
         _conv2B = WhisperOps.EnsureF32(w[$"{_prefix}.block.3.conv.conv.bias"]);
+
+        // Learned shortcut conv (k=1, dim→dim). Present only when use_conv_shortcut=True (24/48 kHz). When the
+        // keys are absent the skip path stays a plain identity add, matching the validated 32/16 kHz codecs.
+        string sc = $"{_prefix}.shortcut.conv.conv";
+        if (w.ContainsKey($"{sc}.weight") || w.ContainsKey($"{sc}.weight_g"))
+        {
+            _shortcutW = LoadFusedConvWeight(w, sc);
+            _shortcutB = WhisperOps.EnsureF32(w[$"{sc}.bias"]);
+        }
     }
 
     /// <summary>Forward — <paramref name="x"/> channels-first <c>[B, dim, T]</c>.
@@ -104,6 +119,23 @@ internal sealed unsafe class SeaNetBlock
             dilation: 1, groups: 1);
         a2.Dispose();
 
+        // Skip path: identity (true_skip) or a learned 1×1 conv shortcut (use_conv_shortcut). The shortcut maps
+        // dim→dim with k=1 so it preserves T; it operates on the ORIGINAL block input x (HF: shortcut(residual)).
+        Tensor residual;
+        bool ownResidual;
+        if (_shortcutW is not null)
+        {
+            residual = new(new TensorShape(batch, _dim, t), DType.F32);
+            backend.Conv1d(residual, x, _shortcutW!, _shortcutB,
+                stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+            ownResidual = true;
+        }
+        else
+        {
+            residual = x;
+            ownResidual = false;
+        }
+
         // Residual add. proj should have T_out == T_in (extra right pad of conv1 + 1×1
         // means proj T equals x T plus the extra-right alignment). Trim if needed.
         int tProj = (int)proj.Shape[2];
@@ -111,7 +143,7 @@ internal sealed unsafe class SeaNetBlock
         if (tProj == t)
         {
             result = new(x.Shape, DType.F32);
-            backend.Add(result, x, proj);
+            backend.Add(result, residual, proj);
         }
         else
         {
@@ -129,16 +161,17 @@ internal sealed unsafe class SeaNetBlock
                     for (int j = take; j < t; j++) dp[dstBase + j] = 0f;
                 }
             result = new(x.Shape, DType.F32);
-            backend.Add(result, x, projTrim);
+            backend.Add(result, residual, projTrim);
             projTrim.Dispose();
         }
+        if (ownResidual) residual.Dispose();
         proj.Dispose();
         return result;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] all = [_conv1W, _conv1B, _conv2W, _conv2B];
+        Tensor?[] all = [_conv1W, _conv1B, _conv2W, _conv2B, _shortcutW, _shortcutB];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 

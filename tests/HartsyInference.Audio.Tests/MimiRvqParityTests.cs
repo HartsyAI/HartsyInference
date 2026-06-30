@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using HartsyInference.Audio.Models.Codecs.Mimi;
+using MimiModel = HartsyInference.Audio.Models.Codecs.Mimi.Mimi;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.SafeTensors;
@@ -58,5 +59,48 @@ public sealed unsafe class MimiRvqParityTests
         Assert.True(corr > 0.9999, $"RVQ corr too low ({corr:F6}).");
         Assert.True(mx < 1e-3, $"RVQ maxAbs too high ({mx:E4}).");
         quant.Dispose();
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void FullDecode_MatchesTransformers()
+    {
+        string? wPath = Environment.GetEnvironmentVariable("MIMI_WEIGHTS");
+        string? refP = Environment.GetEnvironmentVariable("MIMI_REF_IO");
+        if (string.IsNullOrEmpty(wPath) || !File.Exists(wPath) || string.IsNullOrEmpty(refP) || !File.Exists(refP))
+            return;
+
+        SafeTensorsLoader wl = new(); wl.Load(wPath);
+        IReadOnlyDictionary<string, Tensor> w = wl.GetAllTensors();
+        SafeTensorsLoader rl = new(); rl.Load(refP);
+        IReadOnlyDictionary<string, Tensor> r = rl.GetAllTensors();
+
+        Tensor codesRef = r["codes"];   // [1,32,T] int32
+        Tensor audioRef = r["audio_out"];
+        int nq = (int)codesRef.Shape[1];
+        int t = (int)codesRef.Shape[2];
+
+        MimiModel mimi = new(MimiConfig.Mimi24kHz with { AcousticCodebooks = nq - 1 });   // 1 semantic + (nq-1) acoustic
+        mimi.LoadWeights(w);
+
+        using CpuBackend backend = new();
+        Tensor pcm = mimi.Decode(backend, codesRef, batch: 1, tFrames: t);
+        _out.WriteLine($"my pcm {pcm.Shape}  ref {audioRef.Shape}");
+        Assert.Equal((int)audioRef.ElementCount, (int)pcm.ElementCount);
+
+        float* a = (float*)pcm.DataPointer; float* b = (float*)audioRef.DataPointer;
+        long n = pcm.ElementCount;
+        double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, mx2 = 0;
+        for (long i = 0; i < n; i++)
+        {
+            double x = a[i], y = b[i];
+            sa += x; sb += y; saa += x * x; sbb += y * y; sab += x * y;
+            mx2 = Math.Max(mx2, Math.Abs(x - y));
+        }
+        double cov = sab - sa * sb / n, va = saa - sa * sa / n, vb = sbb - sb * sb / n;
+        double corr2 = cov / (Math.Sqrt(va * vb) + 1e-12);
+        _out.WriteLine($"Mimi full decode corr={corr2:F6}  maxAbs={mx2:E4}");
+        Assert.True(corr2 > 0.999, $"full decode corr too low ({corr2:F6}).");
+        pcm.Dispose();
     }
 }

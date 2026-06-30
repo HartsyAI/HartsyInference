@@ -2374,6 +2374,10 @@ public sealed class CudaBackend : IBackend
     {
         if (srcDtype == DType.Q8_0)
             _kernels!.LaunchDequantQ8_0ToF16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.Q4_0)
+            _kernels!.LaunchDequantQ4_0ToF16(output, input, count, _stream.Handle);
+        else if (srcDtype == DType.Q5_0)
+            _kernels!.LaunchDequantQ5_0ToF16(output, input, count, _stream.Handle);
         else if (srcDtype == DType.Q4_K)
             _kernels!.LaunchDequantQ4_KToF16(output, input, count, _stream.Handle);
         else if (srcDtype == DType.Q5_K)
@@ -2381,7 +2385,7 @@ public sealed class CudaBackend : IBackend
         else if (srcDtype == DType.Q6_K)
             _kernels!.LaunchDequantQ6_KToF16(output, input, count, _stream.Handle);
         else
-            throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
+            throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
     }
 
     /// <summary>Implements CastF8E4M3ToF16 using the PTX cast kernel on GPU.</summary>

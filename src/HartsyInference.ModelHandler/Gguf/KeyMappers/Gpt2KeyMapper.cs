@@ -12,7 +12,10 @@ public sealed class Gpt2KeyMapper : IGgufKeyMapper
 
     // BLOOM shares the exact GPT-2 tensor dialect (fused attn_qkv + LayerNorm/FFN biases), differing only in
     // ALiBi-vs-abs-pos (config) and an extra word-embedding LayerNorm (token_embd_norm, mapped below).
-    public IReadOnlyCollection<string> Architectures => ["gpt2", "bloom"];
+    // GPT-NeoX (Pythia/Dolly/RedPajama) shares the exact GPT-2 tensor dialect (fused attn_qkv + LayerNorm/FFN
+    // biases + untied output) — it differs only in config (NEOX rope + partial rotary + parallel residual instead
+    // of absolute positions), so the same mechanical remap applies.
+    public IReadOnlyCollection<string> Architectures => ["gpt2", "bloom", "gptneox"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {

@@ -96,9 +96,10 @@ public sealed record EnCodecConfig
     public int ActiveCodebooks { get; init; } = 8;
 
     /// <summary>Whether the SEANet residual block uses a learned 1x1 conv shortcut on the
-    /// skip path (HF <c>EncodecConfig.use_conv_shortcut</c>). True in the published 24/16 kHz
-    /// checkpoints. The 32 kHz checkpoint sets this False, but flipping it is a Phase 4 behavior
-    /// change and is deliberately left at True on the 32 kHz preset for now.</summary>
+    /// skip path (HF <c>EncodecConfig.use_conv_shortcut</c>). True in the published 24/48 kHz
+    /// checkpoints; the 32/16 kHz checkpoints use an identity skip. Informational only:
+    /// <see cref="SeaNetBlock"/> auto-detects the shortcut by checkpoint key presence
+    /// (<c>...shortcut.conv.conv.*</c>), so the flag value does not affect behavior.</summary>
     public bool UseConvShortcut { get; init; } = true;
 
     /// <summary>Whether the input waveform is loudness-normalized before encoding and the gain

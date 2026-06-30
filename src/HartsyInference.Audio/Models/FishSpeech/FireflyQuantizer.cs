@@ -1,231 +1,158 @@
-using HartsyInference.Audio.Models.Codecs;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.FishSpeech;
 
-/// <summary>Firefly-gan-vq <c>DownsampleFiniteScalarQuantize</c> (Fish-Speech 1.5). A grouped-<b>residual</b> FSQ
-/// (per-book levels <c>[8,5,5,5]</c>, 9 residual quantizers) wrapped in a ConvNeXt down/up-sample stack
-/// (<c>downsample_factor [2,2]</c>): the encoder strides the 1024-dim hidden down by 4 into the FSQ digit space,
-/// and the decode path runs the inverse — <c>indices → residual-FSQ dequant (sum stages) → fc_post → upsample
-/// convs → [1, 1024, T*4]</c>. That 1024-dim tensor is the input to the firefly HiFi-GAN generator.
+/// <summary>Firefly-gan-vq <c>DownsampleFiniteScalarQuantize</c> DECODE path (Fish-Speech 1.5, fish-speech
+/// <c>fsq.py</c>). The codec is a <b>grouped</b> FSQ: the 512-dim latent is split into <c>n_groups=8</c> chunks of
+/// 64, and each chunk has its own <c>ResidualFSQ</c> (here <c>n_codebooks=1</c>, so a single FSQ stage with
+/// levels <c>[8,5,5,5]</c> → 1000-entry vocab). Decode:
+/// <code>
+///   indices [b, g, l]  (g = 8 groups)
+///   per group: digit_k = (idx // basis_k) % levels_k;  code_k = (digit_k - levels_k//2) / (levels_k//2)
+///              latent_g = project_out_g(code)              # Linear 4 -> 64
+///   z = concat_g(latent_g)                                # [b, l, 512] channels-last -> [b, 512, l]
+///   z = upsample(z)                                       # 2x (FishTransConvNet k2 s2 + ConvNeXtBlock) -> [b,512,4l]
+/// </code>
 ///
-/// <para>Reuses <see cref="Fsq.Dequantize"/> for each residual stage. The residual FSQ has a learned per-stage
-/// <c>project_in</c>/<c>project_out</c> (codebook_dim ↔ 4) collapsed here into the standard FSQ inverse since
-/// firefly's FSQ uses <c>dim == sum(levels-arity)</c> with identity projections; any per-stage projection weight
-/// is applied if present in the checkpoint.</para></summary>
+/// <para>FSQ index→code uses the lucidrains <c>_scale_and_shift_inverse</c> convention (<c>half_width = L//2</c>),
+/// which differs from the bounded-tanh <see cref="Codecs.Fsq"/> dequant for even <c>L</c>; it is computed inline
+/// here to match the real <c>vector_quantize_pytorch.GroupedResidualFSQ.get_output_from_indices</c>.</para></summary>
 public sealed unsafe class FireflyQuantizer : IDisposable
 {
-    private const int OutputDim = 1_024;
     private readonly int[] _levels;
-    private readonly int _numQuantizers;
-    private readonly int _codebookDim;
-    private readonly int[] _upsampleFactors;
-    private readonly int _upTotal;
+    private readonly int _codebookDim;       // len(levels) = 4
+    private readonly int _nGroups;           // 8
+    private readonly int _groupDim;          // 64 = inputDim / nGroups
+    private readonly int _inputDim;          // 512
+    private readonly int[] _upsampleFactors; // [2, 2]
 
-    private readonly Tensor?[] _fsqProjInW, _fsqProjInB;       // optional per-stage residual-FSQ in projection
-    private readonly Tensor?[] _fsqProjOutW, _fsqProjOutB;     // optional per-stage residual-FSQ out projection
-    private Tensor? _fcPostW, _fcPostB;                        // residual-FSQ summed code → upsample-input channels
-    private readonly Tensor?[] _upW, _upB;                     // ConvTranspose1d upsample stack
-    private readonly Tensor?[] _upResW, _upResB;               // post-upsample ConvNeXt depthwise smoothing conv
+    private readonly Tensor?[] _projOutW;    // per-group residual-FSQ out projection [groupDim, codebookDim]
+    private readonly Tensor?[] _projOutB;
+    private readonly Tensor?[] _upConvW;     // per-stage FishTransConvNet weight [in, out, k]
+    private readonly Tensor?[] _upConvB;
+    private readonly FireflyConvNeXtBlock[] _upBlocks;
     private int _disposed;
 
-    public FireflyQuantizer(int[]? levels = null, int numQuantizers = 9, int[]? upsampleFactors = null,
-        int codebookDim = 0)
+    public FireflyQuantizer(int[]? levels = null, int nGroups = 8, int[]? upsampleFactors = null, int inputDim = 512)
     {
         _levels = levels ?? [8, 5, 5, 5];
-        _numQuantizers = numQuantizers;
-        _codebookDim = codebookDim > 0 ? codebookDim : _levels.Length;
+        _codebookDim = _levels.Length;
+        _nGroups = nGroups;
+        _inputDim = inputDim;
+        if (inputDim % nGroups != 0) throw new ArgumentException($"inputDim {inputDim} must be divisible by nGroups {nGroups}.");
+        _groupDim = inputDim / nGroups;
         _upsampleFactors = upsampleFactors ?? [2, 2];
-        _upTotal = 1;
-        for (int i = 0; i < _upsampleFactors.Length; i++) _upTotal *= _upsampleFactors[i];
-        _fsqProjInW = new Tensor?[_numQuantizers]; _fsqProjInB = new Tensor?[_numQuantizers];
-        _fsqProjOutW = new Tensor?[_numQuantizers]; _fsqProjOutB = new Tensor?[_numQuantizers];
-        _upW = new Tensor?[_upsampleFactors.Length]; _upB = new Tensor?[_upsampleFactors.Length];
-        _upResW = new Tensor?[_upsampleFactors.Length]; _upResB = new Tensor?[_upsampleFactors.Length];
+        _projOutW = new Tensor?[_nGroups];
+        _projOutB = new Tensor?[_nGroups];
+        _upConvW = new Tensor?[_upsampleFactors.Length];
+        _upConvB = new Tensor?[_upsampleFactors.Length];
+        _upBlocks = new FireflyConvNeXtBlock[_upsampleFactors.Length];
+        for (int i = 0; i < _upsampleFactors.Length; i++) _upBlocks[i] = new FireflyConvNeXtBlock(_inputDim);
     }
 
-    /// <summary>Total upsample factor of the ConvNeXt stack (frames in → frames out multiplier). 4 for firefly.</summary>
-    public int UpsampleFactor => _upTotal;
+    /// <summary>Total temporal upsample factor (product of the ConvNeXt upsample strides). 4 for firefly.</summary>
+    public int UpsampleFactor { get { int p = 1; foreach (int f in _upsampleFactors) p *= f; return p; } }
 
-    /// <summary>Per-book FSQ vocabulary size (<c>product(levels)</c>). 1000 for firefly.</summary>
-    public int CodebookSize => Fsq.VocabSize(_levels);
-
-    /// <summary>Number of residual quantizers (codebooks). 9 for firefly.</summary>
-    public int NumQuantizers => _numQuantizers;
+    /// <summary>Optional per-stage activation hook for parity debugging (key = stage name). Not used in production.</summary>
+    public Action<string, Tensor>? DebugHook { get; set; }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "quantizer")
     {
-        for (int i = 0; i < _numQuantizers; i++)
+        for (int g = 0; g < _nGroups; g++)
         {
-            string pin = $"{prefix}.residual_fsq.rvqs.0.layers.{i}.project_in";
-            if (w.ContainsKey($"{pin}.weight"))
-            {
-                _fsqProjInW[i] = WhisperOps.EnsureF32(w[$"{pin}.weight"]);
-                if (w.TryGetValue($"{pin}.bias", out Tensor? bin)) _fsqProjInB[i] = WhisperOps.EnsureF32(bin);
-            }
-            string pout = $"{prefix}.residual_fsq.rvqs.0.layers.{i}.project_out";
-            if (w.ContainsKey($"{pout}.weight"))
-            {
-                _fsqProjOutW[i] = WhisperOps.EnsureF32(w[$"{pout}.weight"]);
-                if (w.TryGetValue($"{pout}.bias", out Tensor? bout)) _fsqProjOutB[i] = WhisperOps.EnsureF32(bout);
-            }
+            string po = $"{prefix}.residual_fsq.rvqs.{g}.project_out";
+            _projOutW[g] = WhisperOps.EnsureF32(w[$"{po}.weight"]);
+            _projOutB[g] = w.TryGetValue($"{po}.bias", out Tensor? b) ? WhisperOps.EnsureF32(b) : null;
         }
-        if (w.ContainsKey($"{prefix}.fc_post.weight"))
-        {
-            _fcPostW = WhisperOps.EnsureF32(w[$"{prefix}.fc_post.weight"]);
-            if (w.TryGetValue($"{prefix}.fc_post.bias", out Tensor? fpb)) _fcPostB = WhisperOps.EnsureF32(fpb);
-        }
+        // upsample.{i} = Sequential(FishTransConvNet at .0, ConvNeXtBlock at .1).
         for (int i = 0; i < _upsampleFactors.Length; i++)
         {
             string up = $"{prefix}.upsample.{i}";
-            if (w.ContainsKey($"{up}.weight")) { _upW[i] = WhisperOps.EnsureF32(w[$"{up}.weight"]); }
-            else if (w.ContainsKey($"{up}.0.weight")) { _upW[i] = WhisperOps.EnsureF32(w[$"{up}.0.weight"]); }
-            if (w.TryGetValue($"{up}.bias", out Tensor? ub)) _upB[i] = WhisperOps.EnsureF32(ub);
-            else if (w.TryGetValue($"{up}.0.bias", out Tensor? ub0)) _upB[i] = WhisperOps.EnsureF32(ub0);
-            string ur = $"{prefix}.upsample_conv.{i}";
-            if (w.ContainsKey($"{ur}.weight"))
-            {
-                _upResW[i] = WhisperOps.EnsureF32(w[$"{ur}.weight"]);
-                if (w.TryGetValue($"{ur}.bias", out Tensor? urb)) _upResB[i] = WhisperOps.EnsureF32(urb);
-            }
+            _upConvW[i] = FireflyOps.LoadTransConvWeight(w, $"{up}.0.conv");
+            _upConvB[i] = WhisperOps.EnsureF32(w[$"{up}.0.conv.bias"]);
+            _upBlocks[i].LoadWeights(w, $"{up}.1");
         }
     }
 
-    /// <summary>Dequantizes residual-FSQ <c>codes</c> <c>[numQuantizers, T]</c> and runs the ConvNeXt upsample stack
-    /// to produce the firefly HiFi-GAN decoder input <c>[1, 1024, T * upsampleFactor]</c>.</summary>
+    /// <summary>Dequantizes <c>[nGroups, T]</c> indices and runs the ConvNeXt upsample stack, returning the firefly
+    /// HiFi-GAN decoder input <c>[1, inputDim, T * UpsampleFactor]</c>.</summary>
     public Tensor DequantToDecoderInput(IBackend backend, int[,] codes, int t)
     {
-        if (codes.GetLength(0) != _numQuantizers)
-            throw new ArgumentException($"codes must have {_numQuantizers} rows, got {codes.GetLength(0)}.");
+        if (codes.GetLength(0) != _nGroups)
+            throw new ArgumentException($"codes must have {_nGroups} rows, got {codes.GetLength(0)}.");
         if (t <= 0) throw new ArgumentException("t must be positive.", nameof(t));
 
-        // residual-FSQ get_output_from_indices: sum each stage's dequantized vector → [1, T, codebookDim].
-        int d = _levels.Length;
-        Tensor summed = new(new TensorShape(1, t, _codebookDim), DType.F32);
-        float* sp = (float*)summed.DataPointer;
-        for (long n = 0; n < summed.ElementCount; n++) sp[n] = 0f;
+        // Per-axis place values and symmetric inverse scales. firefly's FSQ uses preserve_symmetry=True, so
+        // index k maps to digit_k = (idx // basis_k) % levels_k then code_k = digit_k * 2/(levels_k - 1) - 1
+        // (evenly spaced in [-1, 1]) — NOT the half_width = L//2 convention.
+        Span<int> basis = stackalloc int[_codebookDim];
+        Span<float> invScale = stackalloc float[_codebookDim];
+        basis[0] = 1;
+        for (int k = 1; k < _codebookDim; k++) basis[k] = basis[k - 1] * _levels[k - 1];
+        for (int k = 0; k < _codebookDim; k++) invScale[k] = 2f / (_levels[k] - 1);
 
-        Tensor stageCodes = new(new TensorShape(1, t), DType.I32);
-        int* scp = (int*)stageCodes.DataPointer;
-        Tensor stageVec = new(new TensorShape(1, t, d), DType.F32);
-        for (int q = 0; q < _numQuantizers; q++)
+        // Build the channels-first latent [1, inputDim, T]; group g occupies channels [g*groupDim, (g+1)*groupDim).
+        Tensor latent = new(new TensorShape(1, _inputDim, t), DType.F32);
+        float* lp = (float*)latent.DataPointer;
+
+        Tensor code = new(new TensorShape(1, t, _codebookDim), DType.F32);
+        float* cdp = (float*)code.DataPointer;
+        for (int g = 0; g < _nGroups; g++)
         {
-            for (int j = 0; j < t; j++) scp[j] = codes[q, j];
-            Fsq.Dequantize(stageVec, stageCodes, _levels);
-            Tensor projected = ProjectStageOut(backend, stageVec, t);
-            float* pvp = (float*)projected.DataPointer;
-            for (long n = 0; n < (long)t * _codebookDim; n++) sp[n] += pvp[n];
-            if (!ReferenceEquals(projected, stageVec)) projected.Dispose();
+            for (int l = 0; l < t; l++)
+            {
+                int idx = codes[g, l];
+                for (int k = 0; k < _codebookDim; k++)
+                {
+                    int digit = (idx / basis[k]) % _levels[k];
+                    cdp[(long)l * _codebookDim + k] = digit * invScale[k] - 1f;
+                }
+            }
+            // project_out: Linear codebookDim -> groupDim.
+            Tensor proj = WhisperOps.ProjectLinear(backend, code, _projOutW[g]!, _projOutB[g], 1, t, _codebookDim, _groupDim);
+            float* pp = (float*)proj.DataPointer;
+            for (int j = 0; j < _groupDim; j++)
+                for (int l = 0; l < t; l++)
+                    lp[(long)(g * _groupDim + j) * t + l] = pp[(long)l * _groupDim + j];
+            proj.Dispose();
         }
-        stageVec.Dispose();
-        stageCodes.Dispose();
+        code.Dispose();
+        DebugHook?.Invoke("fsq_out", latent);
 
-        // [1, T, codebookDim] → [1, codebookDim, T] for the channels-first conv stack.
-        Tensor cf = new(new TensorShape(1, _codebookDim, t), DType.F32);
-        backend.Transpose2D(cf, summed, t, _codebookDim);
-        summed.Dispose();
-
-        // fc_post: 1×1 conv codebookDim → upsample-input channels (the channel count of the first upsample weight).
-        Tensor x = ApplyFcPost(backend, cf, t);
-        cf.Dispose();
-
+        // Upsample stack: FishTransConvNet(k=2,s=2) then ConvNeXtBlock, x2 -> [1, inputDim, T*4].
+        Tensor x = latent;
         int curT = t;
-        int inCh = (int)x.Shape[1];
         for (int i = 0; i < _upsampleFactors.Length; i++)
         {
             int stride = _upsampleFactors[i];
-            if (_upW[i] is null) throw new InvalidOperationException($"FireflyQuantizer upsample.{i} not loaded.");
-            int kernel = (int)_upW[i]!.Shape[2];
-            int outCh = (int)_upW[i]!.Shape[1];
-            int pad = (kernel - stride) / 2;
-            int outT = (curT - 1) * stride + (kernel - 1) + 1 - 2 * pad;
-            Tensor up = new(new TensorShape(1, outCh, outT), DType.F32);
-            backend.ConvTranspose1d(up, x, _upW[i]!, _upB[i], stride, pad, pad, 1, 1);
+            int kernel = (int)_upConvW[i]!.Shape[2];
+            Tensor up = FireflyOps.TransConv(backend, x, _upConvW[i]!, _upConvB[i], _inputDim, curT, _inputDim, kernel, stride);
             x.Dispose();
-            x = up;
-            curT = outT;
-            inCh = outCh;
-
-            if (_upResW[i] is not null)
-            {
-                Tensor act = new(x.Shape, DType.F32);
-                backend.Silu(act, x);
-                int rk = (int)_upResW[i]!.Shape[2];
-                int rpad = (rk - 1) / 2;
-                int rOut = (int)_upResW[i]!.Shape[0];
-                int rt = curT + 2 * rpad - (rk - 1);
-                Tensor res = new(new TensorShape(1, rOut, rt), DType.F32);
-                backend.Conv1d(res, act, _upResW[i]!, _upResB[i], 1, rpad, rpad, 1, 1);
-                act.Dispose();
-                if (rOut == inCh && rt == curT)
-                {
-                    float* xp = (float*)x.DataPointer; float* rp = (float*)res.DataPointer;
-                    for (long n = 0; n < x.ElementCount; n++) xp[n] += rp[n];
-                    res.Dispose();
-                }
-                else
-                {
-                    x.Dispose(); x = res; curT = rt; inCh = rOut;
-                }
-            }
+            curT = (int)up.Shape[2];
+            x = _upBlocks[i].Forward(backend, up, curT);
+            up.Dispose();
+            DebugHook?.Invoke($"q_up_{i}", x);
         }
-
-        // The HiFi-GAN expects 1024 input channels; if the upsample stack already lands there, return as-is.
-        if (inCh == OutputDim) return x;
-
-        // Otherwise channel-pad/truncate into a 1024-channel tensor (synthetic / partial checkpoints).
-        Tensor outp = new(new TensorShape(1, OutputDim, curT), DType.F32);
-        float* op = (float*)outp.DataPointer;
-        for (long n = 0; n < outp.ElementCount; n++) op[n] = 0f;
-        float* src = (float*)x.DataPointer;
-        int copyCh = Math.Min(inCh, OutputDim);
-        for (int c = 0; c < copyCh; c++)
-            for (int j = 0; j < curT; j++) op[(long)c * curT + j] = src[(long)c * curT + j];
-        x.Dispose();
-        return outp;
-    }
-
-    private Tensor ProjectStageOut(IBackend backend, Tensor stageVec, int t)
-    {
-        if (_fsqProjOutW[0] is null) return stageVec;
-        int outDim = (int)_fsqProjOutW[0]!.Shape[0];
-        if (outDim != _codebookDim) return stageVec;
-        // project_out is a Linear over the last dim; reuse the shared projection helper.
-        return WhisperOps.ProjectLinear(backend, stageVec, _fsqProjOutW[0]!, _fsqProjOutB[0], 1, t,
-            (int)_fsqProjOutW[0]!.Shape[1], outDim);
-    }
-
-    private Tensor ApplyFcPost(IBackend backend, Tensor cf, int t)
-    {
-        if (_fcPostW is null)
-        {
-            // No fc_post in the checkpoint: pass the codebook-dim tensor straight into the upsample stack.
-            Tensor clone = new(cf.Shape, DType.F32);
-            Buffer.MemoryCopy((void*)cf.DataPointer, (void*)clone.DataPointer, cf.ElementCount * 4, cf.ElementCount * 4);
-            return clone;
-        }
-        int outCh = (int)_fcPostW.Shape[0];
-        int kernel = _fcPostW.Shape.Rank == 3 ? (int)_fcPostW.Shape[2] : 1;
-        int pad = (kernel - 1) / 2;
-        int outT = t + 2 * pad - (kernel - 1);
-        Tensor x = new(new TensorShape(1, outCh, outT), DType.F32);
-        backend.Conv1d(x, cf, _fcPostW, _fcPostB, 1, pad, pad, 1, 1);
+        DebugHook?.Invoke("z_q", x);
         return x;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[][] groups = [_fsqProjInW, _fsqProjInB, _fsqProjOutW, _fsqProjOutB, _upW, _upB, _upResW, _upResB];
-        foreach (Tensor?[] g in groups) foreach (Tensor? t in g) if (t is not null) yield return t;
-        if (_fcPostW is not null) yield return _fcPostW;
-        if (_fcPostB is not null) yield return _fcPostB;
+        foreach (Tensor? t in _projOutW) if (t is not null) yield return t;
+        foreach (Tensor? t in _projOutB) if (t is not null) yield return t;
+        foreach (Tensor? t in _upConvW) if (t is not null) yield return t;
+        foreach (Tensor? t in _upConvB) if (t is not null) yield return t;
+        foreach (FireflyConvNeXtBlock blk in _upBlocks)
+            foreach (Tensor t in blk.EnumerateWeights()) yield return t;
     }
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        foreach (FireflyConvNeXtBlock blk in _upBlocks) blk.Dispose();
         GC.SuppressFinalize(this);
     }
 }

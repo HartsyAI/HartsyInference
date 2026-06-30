@@ -21,7 +21,7 @@ public sealed class GgufLanguageModel : IDisposable
 
     /// <summary>GGUF quant formats the CUDA path supports directly (dequant-to-F16 and the fused GEMV); other
     /// quant tensors are dequantized to F32 at load.</summary>
-    private static readonly HashSet<string> GpuSupportedQuant = ["Q8_0", "Q4_K", "Q5_K", "Q6_K"];
+    private static readonly HashSet<string> GpuSupportedQuant = ["Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K"];
 
     /// <summary>The architecture config inferred from the GGUF metadata + weights.</summary>
     public TransformerConfig Config { get; }
@@ -124,9 +124,10 @@ public sealed class GgufLanguageModel : IDisposable
             // separate projections the transformer expects (contiguous row-byte copy, dtype-preserving → works
             // on the quantized weights without dequant).
             if (handle.Architecture == "phi3") SplitFusedPhi(weights, handle.Metadata);
+            if (handle.Architecture == "glm4") SplitFusedPhi(weights, handle.Metadata, "glm4");   // fused gate+up → gate/up (q/k/v already separate)
             // GPT-2 / BLOOM fuse q/k/v (weight + bias) into one attn_qkv tensor laid out [q|k|v]; split before the
             // config factory reads tensor presence (so the QKV bias is detected). Runs before FromGguf.
-            if (handle.Architecture is "gpt2" or "bloom") SplitFusedGpt2(weights, handle.Metadata, handle.Architecture);
+            if (handle.Architecture is "gpt2" or "bloom" or "gptneox") SplitFusedGpt2(weights, handle.Metadata, handle.Architecture);
 
             TransformerConfig config = GgufConfigFactory.FromGguf(handle.Metadata, weights, lowVramQuant);
             // MoE: GGUF stacks all experts into one 3D tensor per projection; split them into the per-expert 2D
@@ -164,17 +165,17 @@ public sealed class GgufLanguageModel : IDisposable
     /// <summary>Splits Phi-3's fused <c>qkv_proj</c> (→ q/k/v) and <c>gate_up_proj</c> (→ gate/up) into the
     /// separate per-projection tensors. Rows are contiguous in the (possibly quantized) layout, so each split is
     /// a byte-range copy that preserves the dtype.</summary>
-    private static unsafe void SplitFusedPhi(Dictionary<string, Tensor> w, GgufMetadata meta)
+    private static unsafe void SplitFusedPhi(Dictionary<string, Tensor> w, GgufMetadata meta, string arch = "phi3")
     {
-        int hq = (int)meta.GetUInt32("phi3.attention.head_count");
-        int hkv = (int)meta.GetUInt32("phi3.attention.head_count_kv", (uint)hq);
-        int hidden = (int)meta.GetUInt32("phi3.embedding_length");
+        int hq = (int)meta.GetUInt32($"{arch}.attention.head_count");
+        int hkv = (int)meta.GetUInt32($"{arch}.attention.head_count_kv", (uint)hq);
+        int hidden = (int)meta.GetUInt32($"{arch}.embedding_length");
         // Real head_dim (key_length, else hidden/heads) — NOT rope.dimension_count, which is the (possibly
         // smaller) partial-rotary width and differs from head_dim on Phi-4-mini (96 vs 128).
-        int headDim = (int)meta.GetUInt32("phi3.attention.key_length", 0u);
+        int headDim = (int)meta.GetUInt32($"{arch}.attention.key_length", 0u);
         if (headDim == 0) headDim = hidden / Math.Max(1, hq);
-        int ffn = (int)meta.GetUInt32("phi3.feed_forward_length");
-        int layers = (int)meta.GetUInt32("phi3.block_count");
+        int ffn = (int)meta.GetUInt32($"{arch}.feed_forward_length");
+        int layers = (int)meta.GetUInt32($"{arch}.block_count");
         int qRows = hq * headDim, kvRows = hkv * headDim;
 
         for (int i = 0; i < layers; i++)

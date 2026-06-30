@@ -64,7 +64,10 @@ public static class GgufConfigFactory
         bool isGemma = arch.StartsWith("gemma", StringComparison.Ordinal);
         bool isGemma2 = arch == "gemma2";
         bool isGemma3 = arch == "gemma3";
-        bool sandwich = isGemma && weights.ContainsKey("model.layers.0.post_feedforward_layernorm.weight");
+        // GLM-4 (LLM_ARCH_GLM4, 0414 lineage): Gemma-style sandwich norm but RMSNorm + QKV biases + fused gate/up
+        // FFN + partial RoPE + NORM (interleaved) rope. The fused gate/up is split in GgufLanguageModel.
+        bool isGlm4 = arch == "glm4";
+        bool sandwich = (isGemma || isGlm4) && weights.ContainsKey("model.layers.0.post_feedforward_layernorm.weight");
         float embScale = isGemma ? (float)Math.Sqrt(hidden) : 1f;
         float queryPreAttn = metadata.GetFloat32($"{arch}.attention.query_pre_attn_scalar", 0f);
         float localTheta = isGemma3 ? metadata.GetFloat32($"{arch}.rope.local_freq_base", 10_000f) : 0f;
@@ -79,9 +82,11 @@ public static class GgufConfigFactory
         // Granite: scalar multipliers (embedding/attention/residual/logit). Granite shares the llama tensor
         // dialect; these knobs are all no-ops (1/standard) for other archs.
         bool isGranite = arch.StartsWith("granite", StringComparison.Ordinal);
-        float graniteEmbScale = isGranite ? metadata.GetFloat32($"{arch}.embedding_scale", 1f) : embScale;
+        bool isMinicpm = arch == "minicpm";
+        bool isGraniteLike = isGranite || isMinicpm;
+        float graniteEmbScale = isGraniteLike ? metadata.GetFloat32($"{arch}.embedding_scale", 1f) : embScale;
         float attnMultiplier = isGranite ? metadata.GetFloat32($"{arch}.attention.scale", 0f) : 0f;
-        float residualMul = isGranite ? metadata.GetFloat32($"{arch}.residual_scale", 1f) : 1f;
+        float residualMul = isGraniteLike ? metadata.GetFloat32($"{arch}.residual_scale", 1f) : 1f;
 
         // Cohere (Command-R / cohere2): LayerNorm + parallel residual + a logit MULTIPLIER (so divide by its
         // reciprocal). Granite's logit_scale is a divisor; Cohere's is a multiplier — hence the inverse here.
@@ -106,6 +111,14 @@ public static class GgufConfigFactory
         // StarCoder2: LayerNorm (with bias) + RoPE + GQA + biased attention (QKV + output) + non-gated GELU FFN
         // with biases. Like GPT-2 but RoPE instead of absolute positions and separate (not fused) q/k/v.
         bool isStarcoder2 = arch == "starcoder2";
+        // GPT-NeoX (Pythia / Dolly / RedPajama-INCITE / StableLM-base-alpha): LayerNorm (with bias) everywhere,
+        // fused QKV (+bias) split [Q|K|V]-contiguous, attn-output + FFN biases, non-gated GELU FFN, NEOX rope
+        // (split-half) with PARTIAL rotary (Pythia: 16/64), and optional parallel residual (attn+FFN both read the
+        // raw residual through SEPARATE norms — distinct from Cohere's single-norm parallel residual).
+        bool isGptneox = arch == "gptneox";
+        bool gptneoxParallel = isGptneox && metadata.GetBool($"{arch}.use_parallel_residual", true);
+        // MiniCPM: llama dialect (separate q/k/v, SwiGLU, RMSNorm, NORM rope) + Granite-style scalar multipliers
+        // (embedding_scale=12, residual_scale, logit_scale as a divisor). isMinicpm/isGraniteLike declared above.
 
         // GPT-OSS: MoE decoder with learned per-head attention sinks (a logit in the softmax denominator that
         // carries no value). Sigmoid routing + the o200k tokenizer come from the existing MoE/tokenizer paths.
@@ -123,7 +136,7 @@ public static class GgufConfigFactory
                 if (weights.ContainsKey($"model.layers.{i}.cross_attn.q_proj.weight")) b.Add(i);
             crossAttnLayers = b.ToImmutable();
         }
-        float logitScale = isGranite ? metadata.GetFloat32($"{arch}.logit_scale", 1f)
+        float logitScale = isGraniteLike ? metadata.GetFloat32($"{arch}.logit_scale", 1f)
             : isCohere ? 1f / metadata.GetFloat32($"{arch}.logit_scale", 1f)
             : 1f;
 
@@ -237,12 +250,12 @@ public static class GgufConfigFactory
             //     (interleaved adjacent pairs 2i,2i+1) reproduces HF rotate_half → we must apply Interleaved.
             //   - qwen2/qwen3: no permute, ggml uses NEOX rope (split-half pairs i,i+half) → SplitHalf.
             // Using the wrong pairing leaves attention rotating mismatched dimensions → coherent-looking garbage.
-            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" or "exaone" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
+            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" or "exaone" or "minicpm" or "glm4" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
             RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
             // Activation: Gemma/GPT-2/BLOOM = tanh-approx GELU; Nemotron = squared ReLU; everything else SwiGLU SiLU.
             Activation = isNemotron ? ActivationKind.ReluSquared
-                : isGemma || isGpt2 || isBloom || isStarcoder2 ? ActivationKind.GeluTanh : ActivationKind.Silu,
+                : isGemma || isGpt2 || isBloom || isStarcoder2 || isGptneox ? ActivationKind.GeluTanh : ActivationKind.Silu,
             SandwichNorm = sandwich,
             // llama.cpp's GGUF converter already bakes Gemma's (1+w) offset into the stored norm weights, so the
             // GGUF path uses them directly. RmsNormAddOne is only for loading raw (centered) HF safetensors.
@@ -252,15 +265,15 @@ public static class GgufConfigFactory
             AttentionMultiplier = attnMultiplier,
             ResidualMultiplier = residualMul,
             LogitScale = logitScale,
-            UseLayerNorm = isCohere || isStablelm || isGpt2 || isBloom || isNemotron || isStarcoder2,
+            UseLayerNorm = isCohere || isStablelm || isGpt2 || isBloom || isNemotron || isStarcoder2 || isGptneox,
             NormPlacement = isOlmo2 ? NormPlacement.PostNorm : NormPlacement.PreNorm,
-            GatedFfn = !(isGpt2 || isBloom || isNemotron || isStarcoder2),
-            FfnBias = isGpt2 || isBloom || isStarcoder2,
+            GatedFfn = !(isGpt2 || isBloom || isNemotron || isStarcoder2 || isGptneox),
+            FfnBias = isGpt2 || isBloom || isStarcoder2 || isGptneox,
             AbsolutePositionEmbeddings = isGpt2,
             EmbeddingLayerNorm = isBloom,
             AlibiMaxBias = alibiMaxBias,
             AlibiSlopes = alibiMaxBias > 0f ? TransformerConfig.ComputeAlibiSlopes(heads, alibiMaxBias) : System.Array.Empty<float>(),
-            ParallelResidual = isCohere,
+            ParallelResidual = isCohere || gptneoxParallel,
             // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
             NoRopeOnGlobalLayers = arch == "cohere2",
             RopeLocalTheta = localTheta,

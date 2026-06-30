@@ -12,7 +12,6 @@ namespace HartsyInference.Audio.Models.FishSpeech;
 /// SiLU generator lives alongside this decoder.</para></summary>
 public sealed unsafe class FireflyDecoder : IDisposable
 {
-    private const int DecoderInputChannels = 1_024;
     private readonly int _numCodebooks;
     private readonly int _sampleRate;
     private readonly FireflyQuantizer _quantizer;
@@ -22,11 +21,11 @@ public sealed unsafe class FireflyDecoder : IDisposable
     public FireflyDecoder(int numCodebooks, int codebookSize, int inputDim = 128, FireflyConfig? config = null)
     {
         FireflyConfig cfg = config ?? FireflyConfig.V1_5;
-        _numCodebooks = numCodebooks;
+        _numCodebooks = numCodebooks;       // == n_groups for the grouped FSQ ([nGroups, T] indices)
         _sampleRate = cfg.SampleRate;
-        _quantizer = new FireflyQuantizer(cfg.FsqLevels, numCodebooks, cfg.QuantizerUpsampleFactors);
+        _quantizer = new FireflyQuantizer(cfg.FsqLevels, numCodebooks, cfg.QuantizerUpsampleFactors, cfg.QuantizerInputDim);
         _gen = new FireflySiluGenerator(cfg.UpsampleInitialChannel, cfg.UpsampleRates, cfg.UpsampleKernelSizes,
-            cfg.ResBlockKernelSizes, cfg.ResBlockDilations);
+            cfg.ResBlockKernelSizes, cfg.ResBlockDilations, cfg.NumMels, cfg.PreConvKernelSize, cfg.PostConvKernelSize);
     }
 
     public int SampleRate => _sampleRate;

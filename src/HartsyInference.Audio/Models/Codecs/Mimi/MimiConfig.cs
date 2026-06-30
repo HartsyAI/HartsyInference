@@ -28,6 +28,13 @@ public sealed record MimiConfig
     public int TransformerFfnDim { get; init; } = 2_048;
     public float TransformerRopeTheta { get; init; } = 10_000f;
 
+    /// <summary>Sliding-window attention span for the transformer-of-codecs (HF <c>sliding_window</c> = 250).
+    /// Each query attends to the previous <c>TransformerContext</c> keys (causal). Null = full causal.</summary>
+    public int? TransformerContext { get; init; } = 250;
+
+    /// <summary>Number of semantic RVQ codebooks (the rest are acoustic). 1 in the published Mimi.</summary>
+    public int NumSemanticCodebooks { get; init; } = 1;
+
     /// <summary>Acoustic RVQ codebook count. 7 in Mimi (codebook 0 = semantic, codebooks
     /// 1..7 = acoustic residuals).</summary>
     public int AcousticCodebooks { get; init; } = 7;

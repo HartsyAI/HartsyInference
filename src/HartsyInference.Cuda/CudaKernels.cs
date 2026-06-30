@@ -165,6 +165,10 @@ public sealed class CudaKernels : IDisposable
     // ── GGUF Dequant Modules + Handles ───────────────────────────────────
     private readonly CudaModule _dequantQ8_0Module;
     private readonly nint _dequantQ8_0ToF16;
+    private readonly CudaModule _dequantQ4_0Module;
+    private readonly nint _dequantQ4_0ToF16;
+    private readonly CudaModule _dequantQ5_0Module;
+    private readonly nint _dequantQ5_0ToF16;
     private readonly CudaModule _dequantQ4_KModule;
     private readonly nint _dequantQ4_KToF16;
     private readonly CudaModule _dequantQ5_KModule;
@@ -339,6 +343,10 @@ public sealed class CudaKernels : IDisposable
         // ── GGUF Dequant ─────────────────────────────────────────────────
         _dequantQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
         _dequantQ8_0ToF16 = _dequantQ8_0Module.GetFunction("dequant_q8_0_to_f16");
+        _dequantQ4_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q4_0_to_f16.ptx"));
+        _dequantQ4_0ToF16 = _dequantQ4_0Module.GetFunction("dequant_q4_0_to_f16");
+        _dequantQ5_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q5_0_to_f16.ptx"));
+        _dequantQ5_0ToF16 = _dequantQ5_0Module.GetFunction("dequant_q5_0_to_f16");
         _dequantQ4_KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q4_k_to_f16.ptx"));
         _dequantQ4_KToF16 = _dequantQ4_KModule.GetFunction("dequant_q4_k_to_f16");
         _dequantQ5_KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q5_k_to_f16.ptx"));
@@ -1449,6 +1457,24 @@ public sealed class CudaKernels : IDisposable
             throw new ArgumentException($"Q8_0 element count must be a multiple of 32, got {elementCount}.");
         int superBlockCount = elementCount / 32;
         LaunchDequantImpl(_dequantQ8_0ToF16, output, input, superBlockCount, threadsPerBlock: 32, stream);
+    }
+
+    /// <summary>Launches Q4_0 → F16 dequant. Legacy 32-element block (18 bytes: fp16 scale + 16 nibble bytes).</summary>
+    public unsafe void LaunchDequantQ4_0ToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 32 != 0)
+            throw new ArgumentException($"Q4_0 element count must be a multiple of 32, got {elementCount}.");
+        int blockCount = elementCount / 32;
+        LaunchDequantImpl(_dequantQ4_0ToF16, output, input, blockCount, threadsPerBlock: 32, stream);
+    }
+
+    /// <summary>Launches Q5_0 → F16 dequant. Legacy 32-element block (22 bytes: fp16 scale + uint32 high-bits + 16 nibble bytes).</summary>
+    public unsafe void LaunchDequantQ5_0ToF16(ulong output, ulong input, int elementCount, nint stream)
+    {
+        if (elementCount % 32 != 0)
+            throw new ArgumentException($"Q5_0 element count must be a multiple of 32, got {elementCount}.");
+        int blockCount = elementCount / 32;
+        LaunchDequantImpl(_dequantQ5_0ToF16, output, input, blockCount, threadsPerBlock: 32, stream);
     }
 
     /// <summary>Launches Q4_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>

@@ -372,7 +372,22 @@ public sealed unsafe class GenericTransformer : IDisposable
         ThrowIfDisposed();
         Tensor headW = _lmHead ?? _embed ?? throw new InvalidOperationException("weights not loaded.");
         Tensor logits = new(new TensorShape(1, t, _cfg.VocabSize), DType.F32);
-        Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
+        if (_cfg.LowVramQuant && headW.DType.IsQuantized)
+        {
+            // Large-vocab heads (GLM-4 = 151k, Qwen = 152k) are the biggest single weight. With an F32 hidden the
+            // GEMM dtype resolves to BF16, whose dequant stages a full-size F32 temp (≈2.4 GB for a 151k×4096 head)
+            // on top of the F16 dequant — OOM on a 12 GB card. Casting the tiny hidden to F16 makes the GEMM resolve
+            // to F16 directly (one ≈1.2 GB dequant, no F32 staging). Logits never reach the SwiGLU-intermediate
+            // magnitudes that motivate BF16 elsewhere, so F16 is numerically safe here.
+            Tensor hidF16 = new(hidden.Shape, DType.F16);
+            backend.CastToF16(hidF16, hidden);
+            backend.QuantizedMatMul(logits, hidF16, headW, bias: null);
+            hidF16.Dispose();
+        }
+        else
+        {
+            Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
+        }
         // Granite divides the logits by logit_scale.
         if (_cfg.LogitScale != 1f) backend.Scale(logits, logits, 1f / _cfg.LogitScale);
         // Gemma-2 final-logit soft-cap: cap·tanh(logit/cap), elementwise in place.
@@ -456,6 +471,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _inNorm, _postNorm;       // pre-attn norm; pre-MLP norm (Gemma: pre_feedforward)
         private Tensor? _postAttnNorm, _postFfnNorm;   // Gemma sandwich norms (post-attn / post-FFN, pre-residual)
         private Tensor? _normBias, _postNormBias;   // LayerNorm biases (input / pre-MLP); zero for Cohere, real for StableLM
+        private Tensor? _parFfnNorm, _parFfnNormBias;   // GPT-NeoX parallel-residual: a SECOND norm feeding the FFN from the raw residual (Cohere has none → reuses the attn norm)
         private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB;
         private Tensor? _qNorm, _kNorm, _qNormBias, _kNormBias;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
@@ -496,7 +512,14 @@ public sealed unsafe class GenericTransformer : IDisposable
             if (_cfg.UseLayerNorm) _normBias = LoadBiasOrZero(w, $"{prefix}.input_layernorm.bias", _cfg.HiddenSize);
             if (_cfg.ParallelResidual)
             {
-                // Cohere / GPT-NeoX: one norm per layer; attention and FFN both read it, no pre-FFN norm.
+                // Cohere: one norm for both sublayers (attn + FFN read the same normed input). GPT-NeoX instead
+                // carries a SEPARATE FFN norm (post_attention_layernorm) applied to the raw residual — load it when
+                // present so the FFN reads its own norm rather than reusing the attention norm.
+                if (w.ContainsKey($"{prefix}.post_attention_layernorm.weight"))
+                {
+                    _parFfnNorm = LoadNorm(w[$"{prefix}.post_attention_layernorm.weight"], addOne);
+                    if (_cfg.UseLayerNorm) _parFfnNormBias = LoadBiasOrZero(w, $"{prefix}.post_attention_layernorm.bias", _cfg.HiddenSize);
+                }
             }
             else if (_cfg.SandwichNorm)
             {
@@ -651,7 +674,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _downW, _downB];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _downW, _downB];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
@@ -774,7 +797,14 @@ public sealed unsafe class GenericTransformer : IDisposable
                 // Cohere / GPT-NeoX: attention and the FFN both read the same normed `pre`; their outputs are
                 // summed into the residual once. No post-attn norm, no intermediate residual, no pre-FFN norm.
                 attnOut = PostSublayer(backend, attnOut, null, flat);   // applies the residual multiplier if any
-                Tensor mlpPar = Mlp(backend, pre, t);                   // consumes `pre`
+                Tensor? ffnNormed = null;
+                if (_parFfnNorm is not null)   // GPT-NeoX: FFN reads its own norm of the raw residual, not `pre`
+                {
+                    ffnNormed = new(flat, DType.F32);
+                    Normalize(backend, ffnNormed, hidden, _parFfnNorm, _parFfnNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+                }
+                Tensor mlpPar = Mlp(backend, ffnNormed ?? pre, t);      // consumes `pre` (Cohere) or its own norm (NeoX)
+                ffnNormed?.Dispose();
                 mlpPar = PostSublayer(backend, mlpPar, null, flat);
                 Tensor sum1 = new(flat, DType.F32);
                 backend.Add(sum1, hidden, attnOut);
@@ -1031,7 +1061,14 @@ public sealed unsafe class GenericTransformer : IDisposable
             if (_cfg.ParallelResidual)
             {
                 attnOut = PostSublayer(backend, attnOut, null, flat);
-                Tensor mlpPar = Mlp(backend, pre, b);
+                Tensor? ffnNormed = null;
+                if (_parFfnNorm is not null)   // GPT-NeoX: separate FFN norm of the raw residual
+                {
+                    ffnNormed = new(flat, DType.F32);
+                    Normalize(backend, ffnNormed, hidden, _parFfnNorm, _parFfnNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+                }
+                Tensor mlpPar = Mlp(backend, ffnNormed ?? pre, b);
+                ffnNormed?.Dispose();
                 mlpPar = PostSublayer(backend, mlpPar, null, flat);
                 Tensor sum1 = new(flat, DType.F32);
                 backend.Add(sum1, hidden, attnOut);
