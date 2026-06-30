@@ -11,6 +11,27 @@
 
 ---
 
+## Status (2026-06-30 session) — FP8 Linear 3 dispatches → 1, −32.9%
+
+| Stage | Outcome | 4090 microbench |
+|---|---|---|
+| **1b** weight-cast cache (C#) | ✅ shipped | 3.65 → 2.82 ms, 3→2 disp (−22.7%) |
+| **2** bias fused into coopmat (shader) | ✅ shipped | 2.82 → 2.45 ms, 2→1 disp (−13.1%) |
+| **4** submit batching (C#) | ✅ shipped | tiny-op host −15.2% (48→41 µs/disp) |
+| 4 descriptor recycling | 🔬 tried → reverted (no-win on NVIDIA) | ~0% |
+| 4 pipeline-bind dedup | 🔬 tried → reverted (no-win on NVIDIA) | ~0% |
+| (probe) coopmat vs tiled | negative result recorded | tiled 2.7× slower — keep coopmat |
+| **1** in-shader FP8 dequant | ⤵ demoted (VRAM-only; cache already cut the dispatch) | — |
+| **3** QKV fusion | ⛔ blocked (concurrent model-code rewrite + no e2e) | — |
+| **5** cross-vendor — preemptive crash fixes | ✅ shipped (3 latent AMD/Intel pipeline-failure bugs), perf tuning needs HW | no-op on NVIDIA (verified) |
+
+Cumulative **3 dispatches → 1**, **−32.9%** on the Flux FFN FP8 Linear, coopmat tensor-core path kept. All
+gates green (44 Vulkan correctness/leak/int8 tests). Vulkan still ~2–6× off CUDA — the remaining gap is the
+coopmat compute itself plus the per-dispatch host floor that needs a deeper, e2e-validated rework. Tooling:
+`glslangValidator` fetched as a Khronos prebuilt binary (no root) — see decision log.
+
+---
+
 ## Why this exists (the diagnosis is already known and data-backed)
 
 Phase C ([`PHASE_3_5_VULKAN_BACKEND.md` §8](PHASE_3_5_VULKAN_BACKEND.md)) established the bottleneck on an
@@ -153,24 +174,35 @@ A `HAS_BIAS` spec-const path in `matmul_coopmat.comp.glsl` removes the follow-up
 
 ---
 
-## Stage 3 — QKV projection fusion (3 Linears → 1)
+## Stage 3 — QKV projection fusion (3 Linears → 1) — DEFERRED (blocked)
 
 Hypothesis (Phase-C carryover): concat the Q/K/V weight matrices at load so the three sequential Linears
 become one matmul `[batch, seq, 3·hidden]`, then tensor-view-slice into Q/K/V. Cuts ~2/3 of the Q/K/V
 Linear dispatches (Q/K/V are ~21% of Linears → ~14% of total). Needs a tensor view/slice API (only
 `Reshape` exists today) + per-block weight-load changes in the Flux/Flux2/SDXL attention blocks.
 
-- [ ] Tensor view/slice API (no-copy sub-view) on `Tensor`.
-- [ ] Concat QKV weights at load in the affected blocks.
-- [ ] Gate: attention output unchanged (vs-unfused diff + SSIM).
-- [ ] A/B e2e: dispatch count + wall-clock. Commit, fill ledger.
+**Status (2026-06-30): not started — two hard blockers, deliberately not forced.**
+1. **Touches model code under active concurrent rewrite.** The Flux/Flux2/SDXL attention blocks live in
+   `HartsyInference.Diffusion`, which a parallel effort was rewriting this session (commits `288396e`,
+   `591e6ad`, `ded0ef0` swept denoiser/block files). Editing the same attention blocks now would conflict.
+2. **Can't validate.** The gate is "attention output unchanged + e2e SSIM", and e2e is unavailable here
+   (no model checkpoint + the Diffusion build was intermittently broken by the concurrent edits). Shipping a
+   weight-concat + view-slice change to attention without the SSIM gate violates guardrail #1.
+
+- [ ] Tensor view/slice API (no-copy sub-view) on `Tensor` — the reusable prerequisite, safe to land in
+      `Core` with unit tests once the tree is quiet; do this first.
+- [ ] Concat QKV weights at load in the affected blocks (after the tree settles + a checkpoint is available).
+- [ ] Gate: attention output unchanged (vs-unfused diff + SSIM); A/B e2e dispatch count + wall-clock.
 
 ---
 
-## Stage 4 — Per-dispatch binding overhead (IN PROGRESS)
+## Stage 4 — Per-dispatch binding overhead — submit-batching DONE; finer levers no-win on NVIDIA
 
 The remaining lever once dispatch count is minimized: make each surviving dispatch cheaper. Measured floor
 (2026-06-30, 4090, tiny Linears, no per-op Sync): **~48 µs/dispatch** of host overhead before this stage.
+**Net outcome:** submit-batching landed (−15%); descriptor recycling and pipeline-bind dedup were both
+implemented, measured, and **reverted as no-wins on NVIDIA** (cheap pool-alloc + cheap bind; the floor is
+update/bind/barrier-record/C# marshal, which need a deeper rework with e2e validation to move).
 
 - [x] **Submit batching (DONE):** the per-op path was issuing a `vkQueueSubmit2` at the end of *every* op
       (`OpScope.Dispose`). Now transients drain per op (correctness) but the submit is batched until
@@ -178,11 +210,13 @@ The remaining lever once dispatch count is minimized: make each surviving dispat
       (97.4 → 82.6 ms, 48 → 41 µs/dispatch).** Escape hatch `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1`. Gate: 39
       smoke/leak/int8 green. (Big-shape FFN bench Syncs per call, so it's unaffected — this targets the
       attention/norm-heavy parts and the 3060.)
-- [ ] **Descriptor-set recycling (NEXT):** the remaining ~41 µs/dispatch still pays a per-dispatch
-      `vkAllocateDescriptorSets` + `vkUpdateDescriptorSets` + bind. Replace the allocate-fresh-every-dispatch
-      pool with an in-flight-safe ring (hand out pre-allocated sets, recycle by timeline tick). Higher risk
-      (reusing a set still referenced by an in-flight submit corrupts output) — validate on e2e before
-      shipping, not just the microbench.
+- [x] **Descriptor-set recycling — TRIED, REVERTED (negative result):** implemented tick-gated set reuse
+      (free-list + in-flight-by-tick, reclaimed once `stream.CompletedTick` passes the set's submit tick — so a
+      reused set is never referenced by in-flight GPU work). Correctness-safe (leak + SDPA-multihead green), but
+      **0% measurable win** (81 ms → 79.6–90.5 ms, within run-to-run noise): on NVIDIA `vkAllocateDescriptorSets`
+      is a cheap pool bump-allocator, and the recycle bookkeeping + per-refill timeline read cancel the saving.
+      Reverted to keep the codebase clean. The remaining ~41 µs/dispatch is update/bind/barrier-record/C# marshal,
+      not the alloc. Revisit only on AMD/Intel (costlier descriptor alloc) with e2e validation.
 - [ ] Coalesce compute-to-compute barriers where dependencies allow (the global barrier after every dispatch
       is conservative). Lower host-side value (one barrier struct is cheap); mainly a GPU-serialization win, so
       only matters where GPU-bound.
@@ -191,11 +225,31 @@ The remaining lever once dispatch count is minimized: make each surviving dispat
 
 ---
 
-## Stage 5 — Cross-vendor (AMD / Intel) — not testable on this box
+## Stage 5 — Cross-vendor (AMD / Intel) — preemptive correctness fixes DONE; perf tuning needs HW
 
-This box is NVIDIA-only (3060 + 4090). The cross-vendor proof (AMD RDNA2/3, Intel Arc variable subgroup
-size) from the Phase-3.5 checklist needs other hardware. Note tuned tile tables / subgroup-size paths here;
-do not attempt blind.
+This box is NVIDIA-only (3060 + 4090), so the cross-vendor *proof* (AMD RDNA2/3, Intel Arc) still needs
+other hardware. But the audit surfaced three latent **crash/garbage** bugs where the fast paths assumed
+NVIDIA's generous limits — those are fixable blind and **verified behaviour-neutral on NVIDIA** (39 tests
+green + FFN microbench unchanged at 2.41 ms / 1 disp), so they're done now:
+
+- [x] **`matmul_tiled` shared memory exceeded the 32 KB spec minimum (the only GEMM fallback when coopmat is
+      absent → device unusable).** The shared `Asub`/`Bsub` were statically `MAX_BM/MAX_BK/MAX_BN`-sized FP32 =
+      **33,280 B** (the in-code comment even mis-counted, ignoring the `+1` pad). On AMD GCN / Intel Arc /
+      iGPU (exactly 32 KB) every tiled pipeline was invalid. **Fix:** size the shared arrays by the
+      *specialized* `BM/BK/BN` (valid Vulkan GLSL), so a 64×64×16 tile costs 8,448 B and 32×32×16 costs
+      4,224 B. Recompiled with glslangValidator 16.3.0.
+- [x] **`PickMatmulTile` ignored `maxComputeSharedMemoryBytes`.** Now picks the largest tile whose FP32
+      shared footprint fits the device (128→64→32), so low-shared-mem devices degrade gracefully instead of
+      failing pipeline creation. No-op on NVIDIA (48–64 KB → still 128).
+- [x] **Coopmat workgroup invocations could exceed device limits.** `(BM/16)*(BN/16)*subgroupSize` is 512 on
+      NVIDIA (subgroup 32) but **1024 on AMD wave64** for a 64×64 tile, over `maxComputeWorkGroupInvocations`/
+      `sizeX` on smaller parts. Now shrinks the coopmat tile (never below the 16×16 fragment = one subgroup,
+      always ≤ limit) until it fits. No-op on NVIDIA.
+- [ ] **Perf tuning (needs HW):** vendor tile tables (AMD wave32 128×64, wave64 64×64, Intel Arc 64×64), the
+      `requiredSubgroupSize` pin across RDNA wave32/64, and re-evaluating push descriptors on AMD/Intel.
+- [ ] **Watch-item:** the Stage-2 fused-bias uses a stride-0 `coopMatLoad` broadcast — spec-legal and fine on
+      NVIDIA; re-verify on the first AMD RDNA3 / Intel Arc run (some early coopmat impls were picky about
+      non-unit strides). If it misbehaves, gate `HAS_BIAS` off there and fall back to the BroadcastAdd path.
 
 ---
 
@@ -223,7 +277,8 @@ only if a long-context or LLM-on-Vulkan workload shifts the profile.
 | 2026-06-30 | 4090 | 2 bias-fuse | `HAS_BIAS` spec-const in matmul_coopmat | Flux FFN FP8 Linear, M=1024 K=3072 N=12288 | ms/call, dispatches | 2.82 ms, 2 disp | **2.45 ms, 1 disp** | **−13.1%** (vs 1b) | **pass** | Fuse per-column bias into the coopmat epilogue via a stride-0 broadcast accumulator load (keeps tensor cores). Bias cast to FP32 once + cached. Gate: `Backend_Linear_FP8Weight_CachedCast_Matches_Cpu` (F16 out) + `Backend_Linear_FluxShape_F32_Matches_Cpu` (F32 out) + full smoke/leak/int8 (39) green. **Cumulative 1b+2: 3.65 → 2.45 ms (−32.9%), 3 → 1 dispatch.** |
 | | | 3 qkv-fuse | — | Flux attn | dispatches/wall | | | | pass/fail | ~14% of Linears |
 | 2026-06-30 | 4090 | 4 submit-batch | `HARTSYINFERENCE_VK_SUBMIT_PER_OP` off (default batched) | 2000 tiny Linears (M=16 K=64 N=64), no per-op Sync | host-wall, µs/dispatch | 97.4 ms, 48 µs/disp (submit-per-op) | **82.6 ms, 41 µs/disp** | **−15.2%** | **pass** | Was submitting one `vkQueueSubmit2` per op (`OpScope.Dispose`). Now drains transients per op but batches the submit until `FLUSH_THRESHOLD`(8) dispatches; `Sync()`/lazy-sync still force-flush. Helps small-op-heavy workloads (attention/norms, the 3060). Big-shape FFN bench unaffected (it Syncs per call). Gate: smoke/leak/int8 (39) green. Escape hatch: `HARTSYINFERENCE_VK_SUBMIT_PER_OP=1`. |
-| | | 4 descriptor | — | per-dispatch | µs | 41 | | | | NEXT: descriptor-set recycling (avoid per-dispatch `vkAllocateDescriptorSets`) — needs in-flight-safe reuse; best validated on e2e. |
+| 2026-06-30 | 4090 | 5 cross-vendor crash fixes | spec-const shared arrays + shmem/invocation-aware tile pick | Flux FFN coopmat + tiled GEMM | ms/call, gate | 2.45 ms | 2.41 ms (noise) | **~0% (no-op on NVIDIA)** | pass (39) | Correctness, not perf: `matmul_tiled` shared mem was 33,280 B > 32 KB spec floor (unusable on AMD GCN/Intel Arc); tile pick ignored shmem; coopmat invocations could exceed limits on wave64. All fixed, verified behaviour-neutral on NVIDIA. |
+| 2026-06-30 | 4090 | 4 descriptor-recycle | tick-gated set reuse (reverted) | 2000 tiny Linears | host-wall | 81 ms | 79.6–90.5 ms (3 runs) | **~0% (noise)** | pass (42 tests) | **Negative result, reverted.** Tick-safe descriptor-set recycling (free-list + in-flight-by-tick, reclaim on completed timeline) removed per-dispatch `vkAllocateDescriptorSets` but gave NO measurable win — on NVIDIA that alloc is a cheap pool bump-allocator, and the recycle bookkeeping + timeline read cancel it. Correctness-safe (leak + SDPA-multihead green) but pure added complexity, so reverted per guardrail #5. The ~41 µs/dispatch floor is elsewhere (update/bind/barrier-record/C# overhead). |
 
 ---
 
@@ -240,6 +295,8 @@ only if a long-context or LLM-on-Vulkan workload shifts the profile.
 | 2026-06-30 | Stage 2 bias via stride-0 broadcast coopmat load | Per-column bias add to a cooperative-matrix accumulator can't index elements (lane→(i,j) mapping is opaque). A stride-0 row-major `coopMatLoad(biasFrag, bias, outCol, 0, RowMajor)` broadcasts bias[outCol+j] to every row; `acc + biasFrag` then matches BroadcastAdd. Works on NVIDIA (verified F16 + F32 output). |
 | 2026-06-30 | glslang obtained via Khronos prebuilt binary (no root) | `glslang-tools` apt package is sudo-gated and unavailable non-interactively. Downloaded the official `glslang-main-linux-Release.zip` (v16.3.0) from KhronosGroup/glslang releases to a local dir and ran build.sh with `GLSLANG=<path>`. spirv-val absent → build.sh skips validation (still emits valid SPIR-V; verified by NVIDIA driver accepting the module + green correctness gates). |
 | 2026-06-30 | Stage 1 (in-shader FP8) demoted below Stage 4 | With 1b caching the cast, Stage 1 no longer cuts dispatches — VRAM-only benefit, highest shader complexity. |
+| 2026-06-30 | Stage 4 finer levers (descriptor recycle, pipeline-bind dedup) reverted | Both correctness-safe but ~0% on NVIDIA (cheap pool-alloc + cheap bind); guardrail #5 says don't carry unmeasured complexity. Submit-batching is the kept win. |
+| 2026-06-30 | Stage 5 done as preemptive *correctness* fixes, not perf | Can't perf-tune blind, but the audit found 3 latent bugs where the fast paths assumed NVIDIA limits (tiled shared-mem > 32 KB spec floor; tile selection ignoring shmem; coopmat invocations > limit on wave64) that would crash/garbage on AMD/Intel. Fixed + verified no-op on NVIDIA (39 tests + microbench). Cross-vendor perf tuning + the stride-0-bias watch-item still need real HW. |
 
 ---
 

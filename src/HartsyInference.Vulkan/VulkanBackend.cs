@@ -267,12 +267,19 @@ public sealed class VulkanBackend : IBackend
     /// where big tiles would leave most threads idle (e.g. SDPA per-head 64×64 matmuls).
     /// MAX_BM/BN/BK/TM/TN in the shader (matmul_tiled.comp.glsl) cap what's selectable here —
     /// keep them in sync if you bump these values.</summary>
-    private static (uint BM, uint BN, uint BK, uint TM, uint TN) PickMatmulTile(long M, long N, long K)
+    private (uint BM, uint BN, uint BK, uint TM, uint TN) PickMatmulTile(long M, long N, long K)
     {
-        if (M >= 128 && N >= 128) return (128, 128, 32, 8, 8);   // 16×16 = 256 threads/wg, 32 KB shared
-        if (M >= 64  && N >= 64)  return ( 64,  64, 16, 8, 8);   //  8× 8 =  64 threads/wg
-        return (32, 32, 16, 4, 4);                               //  8× 8 =  64 threads/wg, small shapes
+        // matmul_tiled's shared arrays are FP32 and sized BM*(BK+1) + BK*BN (see the shader). The 128
+        // tile needs 33,280 B — over the 32 KB Vulkan-spec minimum — so on AMD GCN / Intel-class devices
+        // we must fall to a tile that fits, or pipeline creation is invalid. NVIDIA (48–64 KB) keeps 128.
+        uint shmem = Vk.MaxComputeSharedMemoryBytes;
+        if (M >= 128 && N >= 128 && TileSharedBytes(128, 128, 32) <= shmem) return (128, 128, 32, 8, 8);
+        if (M >= 64  && N >= 64  && TileSharedBytes(64, 64, 16) <= shmem)   return ( 64,  64, 16, 8, 8);
+        return (32, 32, 16, 4, 4);   // (32*17 + 16*32)*4 = 4,224 B — fits even a 16 KB shared-mem floor
     }
+
+    /// <summary>Shared-memory bytes matmul_tiled's FP32 Asub+Bsub consume for a tile (must stay ≤ device limit).</summary>
+    private static uint TileSharedBytes(uint BM, uint BN, uint BK) => (BM * (BK + 1) + BK * BN) * sizeof(float);
 
     /// <summary>Attempts the cooperative-matrix matmul fast path. Returns true when the kernel
     /// was dispatched (op is fully handled). Returns false when the path doesn't apply and the
@@ -304,6 +311,17 @@ public sealed class VulkanBackend : IBackend
         uint BN = (N >= 64) ? 64u : (N >= 32 ? 32u : 16u);
         // SUBGROUP_SIZE matches what we pin via VkPipelineShaderStageRequiredSubgroupSizeCreateInfo.
         uint subgroupSize = Vk.SubgroupSize;
+        // Workgroup invocations = (BM/16)*(BN/16) * subgroupSize. On NVIDIA (subgroup 32) a 64×64 tile is
+        // 16*32 = 512 — fine. On AMD wave64 it's 16*64 = 1024, and on small devices that can exceed
+        // maxComputeWorkGroupInvocations / sizeX. Shrink the tile (never below the 16×16 fragment, which is
+        // always one subgroup ≤ the limit) so the dispatch stays valid cross-vendor. No-op on NVIDIA.
+        uint maxInvocations = Math.Min(Vk.MaxComputeWorkGroupInvocations, Vk.MaxComputeWorkGroupSizeX);
+        while ((BM > FRAG || BN > FRAG) && (BM / FRAG) * (BN / FRAG) * subgroupSize > maxInvocations)
+        {
+            if (BN >= BM && BN > FRAG) BN /= 2;
+            else if (BM > FRAG) BM /= 2;
+            else BN /= 2;
+        }
         // subgroups per workgroup = (BM/16) * (BN/16). Workgroup size = subgroups * subgroupSize.
         uint subgroups = (BM / FRAG) * (BN / FRAG);
         uint localX = subgroups * subgroupSize;
