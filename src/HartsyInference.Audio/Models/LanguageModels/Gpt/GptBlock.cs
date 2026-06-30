@@ -22,11 +22,11 @@ public sealed unsafe class GptBlock : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _ln1G = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_1.weight"]);
-        _ln1B = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_1.bias"]);
+        _ln1B = LoadBiasOrZero(w, $"{prefix}.layernorm_1.bias", _ln1G);
         _attW = WhisperOps.EnsureF32(w[$"{prefix}.attn.att_proj.weight"]);
         _outW = WhisperOps.EnsureF32(w[$"{prefix}.attn.out_proj.weight"]);
         _ln2G = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_2.weight"]);
-        _ln2B = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_2.bias"]);
+        _ln2B = LoadBiasOrZero(w, $"{prefix}.layernorm_2.bias", _ln2G);
         _mlpInW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.in_proj.weight"]);
         _mlpOutW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.out_proj.weight"]);
     }
@@ -78,6 +78,17 @@ public sealed unsafe class GptBlock : IDisposable
         res1.Dispose();
         proj.Dispose();
         return res2;
+    }
+
+    /// <summary>Loads a LayerNorm bias, or returns a zero tensor (matching <paramref name="weightLike"/>'s length)
+    /// when the checkpoint has none — HF Bark's <c>BarkLayerNorm</c> uses <c>bias=False</c>.</summary>
+    internal static Tensor LoadBiasOrZero(IReadOnlyDictionary<string, Tensor> w, string key, Tensor weightLike)
+    {
+        if (w.TryGetValue(key, out Tensor? b)) return WhisperOps.EnsureF32(b);
+        Tensor zero = new(weightLike.Shape, DType.F32);
+        float* p = (float*)zero.DataPointer;
+        for (long i = 0; i < zero.ElementCount; i++) p[i] = 0f;
+        return zero;
     }
 
     private static (Tensor q, Tensor k, Tensor v) SplitQkv(Tensor qkv, int t, int h)

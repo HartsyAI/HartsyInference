@@ -32,6 +32,8 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
     public float[] ImageMean { get; }
     public float[] ImageStd { get; }
     public float Eps { get; }
+    public bool UseRmsNorm { get; }      // Qwen2.5-VL = RMSNorm; Qwen2-VL = LayerNorm (with bias)
+    public bool GatedMlp { get; }        // Qwen2.5-VL = SwiGLU (ffn_gate); Qwen2-VL = non-gated GELU
     private readonly HashSet<int> _fullAtt;
 
     public int TokensPerImage { get; private set; }
@@ -39,9 +41,10 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
 
     private Qwen25VlEncoder(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w, Tensor patchWSum,
         int hidden, int layers, int heads, int inter, int patch, int merge, int windowPatches, int image, int projDim,
-        float[] mean, float[] std, float eps, HashSet<int> fullAtt)
+        float[] mean, float[] std, float eps, HashSet<int> fullAtt, bool useRmsNorm, bool gatedMlp)
     {
         _handle = handle; _w = w; _patchWSum = patchWSum;
+        UseRmsNorm = useRmsNorm; GatedMlp = gatedMlp;
         Hidden = hidden; NumLayers = layers; NumHeads = heads; HeadDim = hidden / heads; Intermediate = inter;
         PatchSize = patch; Merge = merge; WindowPatches = windowPatches; ImageSize = image; ProjectionDim = projDim;
         ImageMean = mean; ImageStd = std; Eps = eps <= 0f ? 1e-6f : eps; _fullAtt = fullAtt;
@@ -69,15 +72,21 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
             int image = (int)m.GetUInt32("clip.vision.image_size");
             int projDim = (int)m.GetUInt32("clip.vision.projection_dim");
             int merge = 2;
-            int waPattern = (int)m.GetUInt32("clip.vision.n_wa_pattern", 8u);
             int windowPx = 112;   // Qwen2.5-VL window size
             int windowPatches = windowPx / patch / merge;
             float eps = m.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-6f);
             float[] mean = m.GetFloatArray("clip.vision.image_mean") ?? [0.48145467f, 0.45782750f, 0.40821072f];
             float[] std = m.GetFloatArray("clip.vision.image_std") ?? [0.26862955f, 0.26130259f, 0.27577710f];
-            // full-attention layers: every waPattern-th (indices waPattern-1, 2*waPattern-1, …).
+            // Qwen2-VL vs Qwen2.5-VL: 2-VL uses LayerNorm (ln1.bias present) + non-gated GELU MLP (no ffn_gate) +
+            // FULL attention everywhere (no n_wa_pattern); 2.5-VL uses RMSNorm + SwiGLU + windowed attention.
+            bool useRmsNorm = !w.ContainsKey("v.blk.0.ln1.bias");
+            bool gatedMlp = w.ContainsKey("v.blk.0.ffn_gate.weight");
+            bool windowed = m.ContainsKey("clip.vision.n_wa_pattern");
+            int waPattern = (int)m.GetUInt32("clip.vision.n_wa_pattern", 8u);
+            // full-attention layers: every waPattern-th (2.5-VL); ALL layers when not windowed (2-VL).
             HashSet<int> fullAtt = new();
-            for (int i = waPattern - 1; i < layers; i += waPattern) fullAtt.Add(i);
+            for (int i = 0; i < layers; i++)
+                if (!windowed || (i + 1) % waPattern == 0) fullAtt.Add(i);
 
             // Relabel nn.Linear weights (attn q/k/v/out, ffn gate/up/down, merger mm.0/mm.2) to [out, in].
             foreach (string key in w.Keys.ToList())
@@ -90,13 +99,15 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
             }
             // Patch embed: two temporal conv weights [hidden,3,patch,patch] → [hidden, 3*patch*patch]; summed because
             // the single image fills both temporal frames identically.
+            // Qwen2-VL stores feed_forward_length=0; derive the ViT intermediate from the ffn_up tensor (order-agnostic).
+            if (inter <= 0) inter = (int)(w["v.blk.0.ffn_up.weight"].ElementCount / hidden);
             int pin = 3 * patch * patch;
             Tensor w0 = w["v.patch_embd.weight"], w1 = w["v.patch_embd.weight.1"];
             Tensor wSum = new(new TensorShape(hidden, pin), DType.F32);
             float* d = (float*)wSum.DataPointer; float* a = (float*)w0.DataPointer; float* b = (float*)w1.DataPointer;
             for (long i = 0; i < (long)hidden * pin; i++) d[i] = a[i] + b[i];
 
-            return new Qwen25VlEncoder(handle, w, wSum, hidden, layers, heads, inter, patch, merge, windowPatches, image, projDim, mean, std, eps, fullAtt);
+            return new Qwen25VlEncoder(handle, w, wSum, hidden, layers, heads, inter, patch, merge, windowPatches, image, projDim, mean, std, eps, fullAtt, useRmsNorm, gatedMlp);
         }
         catch { handle.Dispose(); throw; }
     }
@@ -178,7 +189,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         }
         // post-LN (RMSNorm).
         Tensor post = new(new TensorShape(1, np, hidden), DType.F32);
-        backend.RmsNorm(post, h.Reshape(new TensorShape(1, np, hidden)), W("v.post_ln.weight"), Eps);
+        Norm(backend, post, h.Reshape(new TensorShape(1, np, hidden)), "v.post_ln");
         h.Dispose();
         Dbg(backend, "postln", post);
 
@@ -201,6 +212,14 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         return img;
     }
 
+    /// <summary>Vision-tower norm: RMSNorm (Qwen2.5-VL) or LayerNorm with bias (Qwen2-VL), keyed by
+    /// <paramref name="prefix"/> (<c>.weight</c>/<c>.bias</c>).</summary>
+    private void Norm(IBackend backend, Tensor outp, Tensor inp, string prefix)
+    {
+        if (UseRmsNorm) backend.RmsNorm(outp, inp, W($"{prefix}.weight"), Eps);
+        else backend.LayerNorm(outp, inp, W($"{prefix}.weight"), W($"{prefix}.bias"), Eps);
+    }
+
     private Tensor Block(IBackend backend, Tensor x, int i, float[] cosW, float[] sinW, int np, Tensor mask)
     {
         int hidden = Hidden, heads = NumHeads, hd = HeadDim;
@@ -208,7 +227,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         TensorShape flat3 = new(1, np, hidden);
 
         Tensor ln1 = new(flat3, DType.F32);
-        backend.RmsNorm(ln1, x.Reshape(flat3), W($"{p}.ln1.weight"), Eps);
+        Norm(backend, ln1, x.Reshape(flat3), $"{p}.ln1");
 
         Tensor q = new(new TensorShape(1, np, heads, hd), DType.F32);
         Tensor k = new(new TensorShape(1, np, heads, hd), DType.F32);
@@ -242,23 +261,30 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         backend.Add(afterAttn, x.Reshape(flat3), attnOut);
         attnOut.Dispose();
 
-        // SwiGLU MLP: down(silu(gate(x)) * up(x)).
+        // MLP: Qwen2.5-VL = SwiGLU (down(silu(gate)·up)); Qwen2-VL = non-gated GELU (down(gelu(up))).
         Tensor ln2 = new(flat3, DType.F32);
-        backend.RmsNorm(ln2, afterAttn, W($"{p}.ln2.weight"), Eps);
-        Tensor gate = new(new TensorShape(1, np, Intermediate), DType.F32);
-        backend.Linear(gate, ln2, W($"{p}.ffn_gate.weight"), W($"{p}.ffn_gate.bias"));
+        Norm(backend, ln2, afterAttn, $"{p}.ln2");
         Tensor up = new(new TensorShape(1, np, Intermediate), DType.F32);
         backend.Linear(up, ln2, W($"{p}.ffn_up.weight"), W($"{p}.ffn_up.bias"));
-        ln2.Dispose();
-        Tensor gact = new(new TensorShape(1, np, Intermediate), DType.F32);
-        backend.Silu(gact, gate); gate.Dispose();
         Tensor gu = new(new TensorShape(1, np, Intermediate), DType.F32);
-        backend.Mul(gu, gact, up); gact.Dispose(); up.Dispose();
+        if (GatedMlp)
+        {
+            Tensor gate = new(new TensorShape(1, np, Intermediate), DType.F32);
+            backend.Linear(gate, ln2, W($"{p}.ffn_gate.weight"), W($"{p}.ffn_gate.bias"));
+            backend.Silu(gate, gate);
+            backend.Mul(gu, gate, up); gate.Dispose();
+        }
+        else backend.Gelu(gu, up);
+        ln2.Dispose(); up.Dispose();
         Tensor down = new(flat3, DType.F32);
         backend.Linear(down, gu, W($"{p}.ffn_down.weight"), W($"{p}.ffn_down.bias")); gu.Dispose();
         Tensor result = new(flat3, DType.F32);
         backend.Add(result, afterAttn, down);
         afterAttn.Dispose(); down.Dispose();
+        // Barrier once per block: the ViT runs a single time per image (off the decode hot path), and at large patch
+        // counts (e.g. Qwen2-VL 560px → 1600 patches) the stream-ordered activation pool can otherwise recycle a
+        // buffer still in flight across the next block's Reshape. A per-block sync is negligible here and serializes.
+        backend.Sync();
         return result;
     }
 

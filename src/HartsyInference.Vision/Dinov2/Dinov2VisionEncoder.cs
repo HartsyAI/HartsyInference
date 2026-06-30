@@ -128,8 +128,10 @@ internal sealed unsafe class Dinov2Layer
 {
     private readonly int _hidden, _numHeads, _headDim, _inter;
     private readonly float _eps;
+    private bool _swiglu;
     private Tensor? _n1W, _n1B, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _ls1;
     private Tensor? _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2;
+    private Tensor? _swiInW, _swiInB, _swiOutW, _swiOutB;  // SwiGLU FFN (giant variant)
 
     public Dinov2Layer(int hidden, int numHeads, int inter, float eps)
     {
@@ -146,14 +148,24 @@ internal sealed unsafe class Dinov2Layer
         // LayerScale is DINOv2-specific; plain DINO/DINOv1 (e.g. the TripoSR tokenizer) omits it → identity.
         _ls1 = w.TryGetValue($"{prefix}.layer_scale1.lambda1", out Tensor? ls1) ? Dinov2VisionEncoder.F32(ls1) : null;
         _n2W = Dinov2VisionEncoder.F32(w[$"{prefix}.norm2.weight"]); _n2B = Dinov2VisionEncoder.F32(w[$"{prefix}.norm2.bias"]);
-        _fc1W = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc1.weight"]); _fc1B = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc1.bias"]);
-        _fc2W = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.weight"]); _fc2B = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.bias"]);
+        // Giant uses a SwiGLU FFN (mlp.weights_in/out); base/large use the gelu fc1/fc2 MLP.
+        if (w.TryGetValue($"{prefix}.mlp.weights_in.weight", out Tensor? swiIn))
+        {
+            _swiglu = true;
+            _swiInW = Dinov2VisionEncoder.F32(swiIn); _swiInB = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.weights_in.bias"]);
+            _swiOutW = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.weights_out.weight"]); _swiOutB = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.weights_out.bias"]);
+        }
+        else
+        {
+            _fc1W = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc1.weight"]); _fc1B = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc1.bias"]);
+            _fc2W = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.weight"]); _fc2B = Dinov2VisionEncoder.F32(w[$"{prefix}.mlp.fc2.bias"]);
+        }
         _ls2 = w.TryGetValue($"{prefix}.layer_scale2.lambda1", out Tensor? ls2) ? Dinov2VisionEncoder.F32(ls2) : null;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] all = [_n1W, _n1B, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _ls1, _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2];
+        Tensor?[] all = [_n1W, _n1B, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _ls1, _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2, _swiInW, _swiInB, _swiOutW, _swiOutB];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 
@@ -201,6 +213,23 @@ internal sealed unsafe class Dinov2Layer
 
     private Tensor Mlp(IBackend backend, Tensor input, int batch, int seq)
     {
+        if (_swiglu)
+        {
+            // weights_in -> [.,2H], split (x1,x2); silu(x1)*x2; weights_out.
+            int twoH = (int)_swiInW!.Shape[0], h2 = twoH / 2;
+            Tensor proj = new(new TensorShape(batch, seq, twoH), DType.F32); backend.Linear(proj, input, _swiInW!, _swiInB!);
+            Tensor gated = new(new TensorShape(batch, seq, h2), DType.F32);
+            float* pp = (float*)proj.DataPointer; float* gp = (float*)gated.DataPointer;
+            long rows = (long)batch * seq;
+            for (long r = 0; r < rows; r++)
+            {
+                float* x1 = pp + r * twoH; float* x2 = x1 + h2; float* o = gp + r * h2;
+                for (int i = 0; i < h2; i++) { float a = x1[i]; o[i] = (a / (1f + MathF.Exp(-a))) * x2[i]; }
+            }
+            proj.Dispose();
+            Tensor outp = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Linear(outp, gated, _swiOutW!, _swiOutB!); gated.Dispose();
+            return outp;
+        }
         Tensor f1 = new(new TensorShape(batch, seq, _inter), DType.F32); backend.Linear(f1, input, _fc1W!, _fc1B!);
         Tensor act = new(f1.Shape, DType.F32); backend.Gelu(act, f1); f1.Dispose();
         Tensor f2 = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Linear(f2, act, _fc2W!, _fc2B!); act.Dispose();

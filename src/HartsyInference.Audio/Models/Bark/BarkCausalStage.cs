@@ -75,6 +75,22 @@ public sealed unsafe class BarkCausalStage : IDisposable
         return generated;
     }
 
+    /// <summary>Parity-debug only: teacher-forced logits for the given token ids. Returns <c>[1, T, outVocab]</c>
+    /// (causal full-sequence forward + lm_head over every position). Not used in production.</summary>
+    public Tensor ForwardLogits(IBackend backend, IReadOnlyList<int> tokenIds)
+    {
+        if (_inputEmbed is null) throw new InvalidOperationException("BarkCausalStage weights not loaded.");
+        int h = _gpt.Hidden;
+        int t = tokenIds.Count;
+        List<int> seq = new(tokenIds);
+        Tensor embeds = EmbedTail(seq, t, h);
+        Tensor hidden = _backbone.Forward(backend, embeds, nonCausal: false);
+        embeds.Dispose();
+        Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _lmHead!, bias: null, 1, t, h, _outVocab);
+        hidden.Dispose();
+        return logits;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_inputEmbed is not null) yield return _inputEmbed;

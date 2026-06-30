@@ -29,7 +29,7 @@ public sealed unsafe class BarkFineModel : IDisposable
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
         for (int i = 0; i < _cfg.NumCodebooks; i++)
-            _inputEmbeds[i] = WhisperOps.EnsureF32(w[$"{p}input_embeds_layer.{i}.weight"]);
+            _inputEmbeds[i] = WhisperOps.EnsureF32(w[$"{p}input_embeds_layers.{i}.weight"]);
         _backbone.LoadWeights(w, $"{p}position_embeds_layer.weight", $"{p}layers",
             $"{p}layernorm_final.weight", $"{p}layernorm_final.bias");
         for (int i = 0; i < _cfg.NumCodebooks - 1; i++)
@@ -47,10 +47,11 @@ public sealed unsafe class BarkFineModel : IDisposable
         for (int cb = 0; cb < _cfg.NumCoarseCodebooks; cb++)
             for (int j = 0; j < t; j++) codes[cb, j] = coarse[cb, j];
 
-        // Predict codebooks numCoarse..7 in order.
+        // Predict codebooks numCoarse..7 in order. HF sums the embeddings of codebooks [0, pred] INCLUSIVE
+        // (the to-be-predicted slot holds a 0 placeholder), then reads lm_head[pred - n_codes_given].
         for (int pred = _cfg.NumCoarseCodebooks; pred < _cfg.NumCodebooks; pred++)
         {
-            Tensor input = SumEmbeds(codes, pred, t, h);
+            Tensor input = SumEmbeds(codes, pred + 1, t, h);
             Tensor hidden = _backbone.Forward(backend, input, nonCausal: true);
             input.Dispose();
             Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _outHeads[pred - 1]!, bias: null, 1, t, h, _cfg.FineVocab);
@@ -67,6 +68,23 @@ public sealed unsafe class BarkFineModel : IDisposable
             logits.Dispose();
         }
         return codes;
+    }
+
+    /// <summary>Parity-debug only: teacher-forced logits for codebook <paramref name="codebookIdx"/> given the full
+    /// <paramref name="codes"/> grid <c>[NumCodebooks, T]</c>. Matches HF <c>BarkFineModel.forward(codebook_idx,
+    /// input_ids)</c>: sum embeds of codebooks <c>[0, codebookIdx]</c> inclusive → non-causal body →
+    /// <c>lm_heads[codebookIdx - NCodesGiven]</c>. Returns <c>[1, T, fineVocab]</c>.</summary>
+    public Tensor DebugLogits(IBackend backend, int[,] codes, int codebookIdx, int t)
+    {
+        if (_inputEmbeds[0] is null) throw new InvalidOperationException("BarkFineModel weights not loaded.");
+        int h = _cfg.Stage.Hidden;
+        Tensor input = SumEmbeds(codes, codebookIdx + 1, t, h);
+        Tensor hidden = _backbone.Forward(backend, input, nonCausal: true);
+        input.Dispose();
+        Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _outHeads[codebookIdx - _cfg.NCodesGiven]!,
+            bias: null, 1, t, h, _cfg.FineVocab);
+        hidden.Dispose();
+        return logits;
     }
 
     private Tensor SumEmbeds(int[,] codes, int upTo, int t, int h)

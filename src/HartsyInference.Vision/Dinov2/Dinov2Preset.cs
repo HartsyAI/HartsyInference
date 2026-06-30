@@ -64,4 +64,15 @@ public sealed record Dinov2Preset
         HiddenSize = 768, NumLayers = 12, NumHeads = 12, IntermediateSize = 3072,
         ImageSize = 518, PatchSize = 14,
     };
+
+    /// <summary><c>facebook/dinov2-giant</c> — 1.1B params, SwiGLU FFN. The Hunyuan3D-2 shape conditioner
+    /// (bundled in the DiT checkpoint). Native 518px (37×37 patches + CLS = 1370 tokens), no register tokens,
+    /// so position embeddings are used directly (no interpolation). FFN is SwiGLU (<c>mlp.weights_in/out</c>),
+    /// auto-detected at load; <see cref="IntermediateSize"/> is unused for the SwiGLU path.</summary>
+    public static Dinov2Preset Giant => new()
+    {
+        Name = "facebook/dinov2-giant",
+        HiddenSize = 1536, NumLayers = 40, NumHeads = 24, IntermediateSize = 4096,
+        ImageSize = 518, PatchSize = 14,
+    };
 }

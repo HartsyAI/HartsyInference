@@ -39,7 +39,7 @@ public sealed unsafe class GptBackbone : IDisposable
         _posEmbed = WhisperOps.EnsureF32(w[posKey]);
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"{blockPrefix}.{i}");
         _lnFGamma = WhisperOps.EnsureF32(w[lnFGammaKey]);
-        _lnFBeta = WhisperOps.EnsureF32(w[lnFBetaKey]);
+        _lnFBeta = GptBlock.LoadBiasOrZero(w, lnFBetaKey, _lnFGamma);
     }
 
     /// <summary>Runs the stack over <paramref name="inputEmbeds"/> <c>[1, T, hidden]</c>, adding learned
