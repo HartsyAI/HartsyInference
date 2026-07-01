@@ -69,6 +69,7 @@ extern "C" __global__ void conv_transpose1d_f32(
     int stride,
     int padLeft,
     int dilation,
+    int groups,
     int hasBias)
 {
     int outFlat = blockIdx.x * blockDim.x + threadIdx.x;
@@ -78,6 +79,16 @@ extern "C" __global__ void conv_transpose1d_f32(
     int j = outFlat % tOut;
     int oc = (outFlat / tOut) % cOut;
     int b = outFlat / (tOut * cOut);
+
+    // Grouped connectivity: output channel oc lives in group `group`, fed only by that group's input
+    // channels. Weight is PyTorch [C_in, C_out/groups, K] — second axis is the LOCAL output index within
+    // the group. groups==channels is depthwise (BigVGAN anti-aliased upsampling). groups==1 reduces to the
+    // dense case bit-identically.
+    int outPerGroup = cOut / groups;
+    int inPerGroup  = cIn / groups;
+    int group   = oc / outPerGroup;
+    int ocLocal = oc - group * outPerGroup;
+    int icStart = group * inPerGroup;
 
     float acc = (hasBias != 0) ? bias[oc] : 0.0f;
 
@@ -89,9 +100,10 @@ extern "C" __global__ void conv_transpose1d_f32(
         if (num % stride != 0) continue;
         int i = num / stride;
         if (i >= tIn) continue;
-        for (int ic = 0; ic < cIn; ic++) {
-            int inIdx = (b * cIn + ic) * tIn + i;
-            int wIdx = (ic * cOut + oc) * kernel + k;
+        for (int ic = 0; ic < inPerGroup; ic++) {
+            int inCh = icStart + ic;
+            int inIdx = (b * cIn + inCh) * tIn + i;
+            int wIdx = (inCh * outPerGroup + ocLocal) * kernel + k;
             acc += input[inIdx] * weight[wIdx];
         }
     }

@@ -85,7 +85,7 @@ public sealed class FluxKontextGenerationTests
 
             using ClipTokenizer clipTok = new(TestPaths.Tokenizers.ClipVocab, TestPaths.Tokenizers.ClipMerges);
             using T5Tokenizer t5Tok = new(TestPaths.Tokenizers.T5Spiece, maxLength: 512);
-            string editPrompt = "Turn the horse into a zebra with black and white stripes";
+            string editPrompt = "Convert this photo to black and white grayscale";
             int[] cl = clipTok.Encode(editPrompt);
             int eos = ClipTokenizer.FindEosPosition(cl);
             int[] t5t = t5Tok.Encode(editPrompt);
@@ -98,7 +98,7 @@ public sealed class FluxKontextGenerationTests
             _output.WriteLine($"[4/6] Editing (Kontext) {W}x{H}, 28 steps, seed=42, prompt='{editPrompt}'...");
             Stopwatch gen = Stopwatch.StartNew();
             (byte[] rgb, int outW, int outH, int seed) = pipeline.GenerateFromTokens(
-                cl, eos, t5t, t5m, request, guidanceScale: 2.5f,
+                cl, eos, t5t, t5m, request, guidanceScale: 4.0f,
                 onProgress: p => _output.WriteLine($"  Step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"),
                 kontextRefImage: refImage);
             backend.Sync();

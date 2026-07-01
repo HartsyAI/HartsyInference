@@ -103,8 +103,29 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         (Tensor encVideoPos, Tensor encAudioPos) = EncodeText(promptTokens);
         (Tensor encVideoNeg, Tensor encAudioNeg) = EncodeText(negativeTokens);
 
-        // 2. Denoise both streams.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // Reclaim the ~12 GB Gemma encoder before the DiT — both can't be resident on 24 GB.
+        Backend.Sync();
+        Backend.FreeWeights(_gemma.EnumerateWeights());
+
+        // 2. Denoise both streams. The 22B fp8 DiT (~22 GB) doesn't fit resident alongside activations on 24 GB, so
+        // stream its 48 blocks on/off device (only the shared modulation tables stay resident). CPU/Vulkan (no
+        // streaming cache) preload everything eagerly.
+        HartsyInference.Core.MemoryManagement.BlockStreamingController? streamer = null;
+        if (Backend.StreamingCache is not null)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+            HartsyInference.Core.MemoryManagement.IStreamingBlock[] blocks =
+                new HartsyInference.Core.MemoryManagement.IStreamingBlock[_transformer.BlockCount];
+            for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
+            streamer = new HartsyInference.Core.MemoryManagement.BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: 2, retainBehind: 0);
+            _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+            streamer.Prime();
+            Logs.Info($"LTX-2 streaming: {blocks.Length} blocks, ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB total (resident window ~{streamer.EstimatedTotalWeightBytes / blocks.Length * 3 / (1024 * 1024)} MB)");
+        }
+        else
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+        }
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(sv, videoChannels), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioFrames, audioChannels), seed ^ 0x5D2B);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
@@ -138,7 +159,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         }
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (streamer is not null) { _transformer.BeforeBlockForward = null; streamer.EvictAll(); streamer.Dispose(); Backend.FreeWeights(_transformer.EnumerateSharedWeights()); }
+        else Backend.FreeWeights(_transformer.EnumerateWeights());
         encVideoPos.Dispose(); encAudioPos.Dispose(); encVideoNeg.Dispose(); encAudioNeg.Dispose();
 
         // 3. Decode video.
@@ -156,7 +178,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         int audioSampleRate = 0;
         if (_audioVae is not null && _vocoder is not null)
         {
-            audio = DecodeAudio(audioLat, audioFrames, out audioSampleRate);
+            // Audio decode must not sink the (already-decoded) video: the BigVGAN vocoder uses grouped
+            // ConvTranspose1d which the CUDA backend doesn't yet support — log and return video-only rather than throw.
+            try { audio = DecodeAudio(audioLat, audioFrames, out audioSampleRate); }
+            catch (Exception ex) { Logs.Error("LTX-2 audio decode failed; returning video only.", ex); audio = null; audioSampleRate = 0; }
         }
         audioLat.Dispose();
 

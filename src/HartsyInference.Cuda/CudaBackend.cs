@@ -1148,6 +1148,87 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Wan-Video interleaved in-place RoPE (shared cos/sin) — keeps q/k GPU-resident through RoPE so the
+    /// whole RmsNorm→RoPE→transpose→SDPA chain never leaves the device. In-place: x's device buffer is rotated and
+    /// re-cached to the same pointer (no reallocation, no host round-trip).</summary>
+    public unsafe void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
+    {
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA WanRopeInterleaved supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);       // x's device buffer (cached activation, in-place target)
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchWanRopeInterleaved(pX, pCos, pSin, seqLen, heads, headDim, _stream.Handle);
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));   // in-place: re-assert x → pX
+        }
+        finally
+        {
+            // pX is now x's cached buffer (freed on x.Dispose) — do NOT free it here. Free the cos/sin inputs
+            // (FreeDevice skips them if they are cached activations).
+            GpuTransferHelper.FreeDevice(pCos);
+            GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
+    /// <summary>GPU temporal frame extract: output[B,C,H,W] = src[B,C,Tsrc,H,W][:, :, ti, :, :]. Keeps CausalConv3d
+    /// frame slicing on-device (no D2H/host-slice).</summary>
+    public unsafe void ExtractVaeFrame(Tensor output, Tensor src, int ti)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int b = (int)output.Shape[0], c = (int)output.Shape[1];
+        int frameHW = (int)(output.ElementCount / ((long)b * c));
+        int tsrc = (int)src.Shape[2];
+        ulong pOut = 0, pSrc = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pSrc = GpuTransferHelper.CopyToDevice(src);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchWanVaeExtractFrame(pOut, pSrc, ti, b, c, tsrc, frameHW, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pSrc);
+        }
+    }
+
+    /// <summary>GPU temporal frame write (in-place): output[B,C,Tout,H,W][:, :, to, :, :] = acc[B,C,H,W] + bias[c].
+    /// Writes one slot of <paramref name="output"/>'s device buffer; used to accumulate CausalConv3d output frames
+    /// without ever leaving the device.</summary>
+    public unsafe void WriteVaeFrame(Tensor output, Tensor acc, Tensor? bias, int to)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int b = (int)acc.Shape[0], c = (int)acc.Shape[1];
+        int frameHW = (int)(acc.ElementCount / ((long)b * c));
+        int tout = (int)output.Shape[2];
+        ulong pOut = 0, pAcc = 0, pBias = 0;
+        try
+        {
+            pOut = GpuTransferHelper.CopyToDevice(output);   // in-place target: output's device buffer
+            pAcc = GpuTransferHelper.CopyToDevice(acc);
+            if (bias is not null) pBias = GpuTransferHelper.CopyToDevice(bias);
+            _kernels!.LaunchWanVaeWriteFrame(pOut, pAcc, pBias, to, b, c, tout, frameHW, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, GpuTransferHelper.ByteSize(output));   // in-place re-assert
+        }
+        finally
+        {
+            // pOut is output's cached buffer — do NOT free. Free acc/bias inputs (skipped if cached).
+            GpuTransferHelper.FreeDevice(pAcc);
+            if (pBias != 0) GpuTransferHelper.FreeDevice(pBias);
+        }
+    }
+
     /// <summary>In-place rotary embedding on a single GPU-resident tensor <c>[B, L, numHeads, headDim]</c>.
     /// Used by grouped-query attention where Q and K differ in head count (the paired <see cref="ApplyRope"/>
     /// would mis-stride K). cos/sin are <c>[B, L, headDim]</c>.</summary>
@@ -2208,12 +2289,10 @@ public sealed class CudaBackend : IBackend
     {
         if (output.DType != DType.F32)
             throw new NotSupportedException($"CUDA ConvTranspose1d writes F32 output — got output {output.DType}.");
-        if (groups != 1)
-            throw new NotSupportedException($"CUDA ConvTranspose1d currently supports groups=1 only — got groups={groups}; use CpuBackend for grouped transposed convs.");
         _context.EnsureCurrent();
         EnsureKernels();
 
-        // ConvTranspose1d weight is [C_in, C_out, K].
+        // ConvTranspose1d weight is [C_in, C_out/groups, K].
         int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
         int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2], kernel = (int)weight.Shape[2];
 
@@ -2232,7 +2311,7 @@ public sealed class CudaBackend : IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             _kernels!.LaunchConvTranspose1d(pOut, inF32, wF32, bF32, batch, cIn, cOut, tIn, tOut, kernel,
-                stride, padLeft, dilation, bias is null ? 0 : 1, _stream.Handle);
+                stride, padLeft, dilation, groups, bias is null ? 0 : 1, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

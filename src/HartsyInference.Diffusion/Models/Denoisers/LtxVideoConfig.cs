@@ -75,6 +75,15 @@ public sealed record LtxVideoConfig
     /// <summary>The base LTX-Video 0.9.0 preset (2B): 28 layers, head_dim 64, cross-attn 2048, non-timestep VAE.</summary>
     public static LtxVideoConfig V09 => new();
 
+    /// <summary>LTX-Video 0.9.5 preset (2B): same 28-layer transformer as 0.9, but the VAE is timestep-conditioned
+    /// (decode at 0.05 / 0.025) with the newer residual-upsampler decoder. The pipeline decode path differs; the VAE
+    /// itself is built with the 0.9.5 block config (decoder_block_out_channels (256,512,1024), 5 layers/block,
+    /// upsample_factor 2, residual upsamplers) — see the generation test.</summary>
+    public static LtxVideoConfig V095 => new()
+    {
+        VaeTimestepConditioned = true,
+    };
+
     /// <summary>LTX-Video 0.9.7 / 0.9.8 preset (13B). Verified against
     /// <c>Lightricks/LTX-Video-0.9.7-distilled/transformer/config.json</c>: <c>attention_head_dim=128</c>
     /// (inner 4096), <c>num_layers=48</c>, <c>cross_attention_dim=4096</c>. The 13B VAE is timestep-conditioned

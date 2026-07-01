@@ -161,6 +161,15 @@ public static class TestPaths
         public static string T5XxlSpiece => Tokenizers.T5XxlSpiece;
     }
 
+    /// <summary>LTX-2 (dual-stream audio+video) paths. The single file bundles the DiT + video VAE + audio VAE +
+    /// vocoder (original naming); the Gemma-3-12B text encoder + its SentencePiece tokenizer ship separately.</summary>
+    public static class LtxVideo2
+    {
+        public static string SingleFile     => Resolve("LTX2_PATH",            Path.Combine(ModelsDir, "Stable-Diffusion", "LtxVideo2", "ltx-2.3-22b-dev-fp8.safetensors"));
+        public static string GemmaEncoder   => Resolve("LTX2_GEMMA_PATH",      Path.Combine(ModelsDir, "text_encoders", "gemma_3_12B_it_fp8_scaled.safetensors"));
+        public static string GemmaTokenizer => Resolve("LTX2_GEMMA_TOKENIZER", Path.Combine(ModelsDir, "Tokenizers", "Gemma", "tokenizer.model"));
+    }
+
     /// <summary>Qwen-Image paths. Default expects a single-file checkpoint at <c>Models/Stable-Diffusion/QwenImage/qwen_image_v1.safetensors</c>; the Qwen2.5-VL-7B text encoder and the 16-channel VAE are loaded separately.</summary>
     public static class QwenImage
     {

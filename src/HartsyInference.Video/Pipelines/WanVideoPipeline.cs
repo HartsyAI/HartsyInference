@@ -108,6 +108,10 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, onProgress, firstFrameLatent, out _);
+        // Preload the VAE decoder weights onto the GPU. Without this every conv/norm in the decode is a weight
+        // cache-miss → SyncStream + re-upload, serializing the whole decode (GPU idle ~79%, ~8 min). The transformer
+        // weights were freed at the end of RunDenoise, so there is room.
+        Backend.PreloadWeights(_vae.EnumerateWeights());
         if (_vae is Wan22VaeDecoder w22)
         {
             try

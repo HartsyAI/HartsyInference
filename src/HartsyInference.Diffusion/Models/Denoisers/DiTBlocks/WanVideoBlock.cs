@@ -130,8 +130,18 @@ public sealed unsafe class WanVideoBlock
 
         if (applyRope)   // per-head; [S,dim] is contiguous as [S,heads,headDim]
         {
-            rope.ApplyRotary(qn, cos, sin, _heads);
-            rope.ApplyRotary(kn, cos, sin, _heads);
+            // GPU RoPE for the standard shared-cos path (cos rank-2 [S, headDim]) — keeps qn/kn on-device so the
+            // whole attention chain stays GPU-resident. The per-head sigma_theta variant (rank-3 cos) keeps the CPU ref.
+            if (cos.Shape.Rank == 2)
+            {
+                backend.WanRopeInterleaved(qn, cos, sin, sq, _heads, _headDim);
+                backend.WanRopeInterleaved(kn, cos, sin, sk, _heads, _headDim);
+            }
+            else
+            {
+                rope.ApplyRotary(qn, cos, sin, _heads);
+                rope.ApplyRotary(kn, cos, sin, _heads);
+            }
         }
 
         Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
@@ -332,20 +342,20 @@ public sealed unsafe class WanVideoBlock
         return o;
     }
 
-    // [s, dim] = [s, heads, headDim]  →  [1, heads, s, headDim]. GPU-resident via Permute0213 (explicit dims, so it
-    // reads the device buffer directly — no reshape / host sync).
+    // [s, dim]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 (explicit dims, reads the
+    // device buffer directly — correct now that RoPE is GPU so x never leaves the device).
     private Tensor ToBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new Tensor(new TensorShape(1, _heads, s, _headDim), DType.F32);
-        backend.Permute0213(o, x, s, _heads, _headDim);   // [1,s,heads,hd] → [1,heads,s,hd]
+        backend.Permute0213(o, x, s, _heads, _headDim);
         return o;
     }
 
-    // [1, heads, s, headDim]  →  [s, dim] = [s, heads, headDim]. GPU-resident via Permute0213 (inverse of ToBhsd).
+    // [1, heads, s, headDim] → [s, dim]=[s, heads, headDim], GPU-resident via Permute0213 (inverse of ToBhsd).
     private Tensor FromBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        backend.Permute0213(o, x, _heads, s, _headDim);   // [1,heads,s,hd] → [1,s,heads,hd]
+        backend.Permute0213(o, x, _heads, s, _headDim);
         return o;
     }
 

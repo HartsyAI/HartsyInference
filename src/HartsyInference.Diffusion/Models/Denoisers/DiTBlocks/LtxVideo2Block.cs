@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -16,8 +17,8 @@ public sealed class LtxVideo2BlockContext
 
     public required Tensor TembVideo;          // [9·videoDim]
     public required Tensor TembAudio;          // [9·audioDim]
-    public required Tensor TembPromptVideo;    // [2·videoDim]
-    public required Tensor TembPromptAudio;    // [2·audioDim]
+    public Tensor? TembPromptVideo;            // [2·videoDim] — null when the checkpoint has no prompt modulation
+    public Tensor? TembPromptAudio;            // [2·audioDim]
     public required Tensor TembCaVideoScaleShift;   // [4·videoDim]
     public required Tensor TembCaAudioScaleShift;   // [4·audioDim]
     public required Tensor TembCaVideoGate;    // [1·videoDim]
@@ -39,7 +40,7 @@ public sealed class LtxVideo2BlockContext
 /// (1) gated self-attention with RoPE, (2) gated cross-attention to the text features, (3) bidirectional
 /// audio↔video cross-attention (a2v updates video, v2a updates audio), (4) gelu-approximate FFN. All pre-norms are
 /// RMSNorm-no-affine (eps 1e-6); QK-norm is full-width RMSNorm. Reuses <see cref="LtxVideo2Attention"/>.</summary>
-public sealed unsafe class LtxVideo2Block
+public sealed unsafe class LtxVideo2Block : IStreamingBlock
 {
     private readonly int _vDim, _aDim;
     private readonly float _normEps;
@@ -89,8 +90,10 @@ public sealed unsafe class LtxVideo2Block
 
         _ssVideo = LoadF32(w, $"{p}.scale_shift_table");
         _ssAudio = LoadF32(w, $"{p}.audio_scale_shift_table");
-        _promptVideo = LoadF32(w, $"{p}.prompt_scale_shift_table");
-        _promptAudio = LoadF32(w, $"{p}.audio_prompt_scale_shift_table");
+        // Prompt (text cross-attn KV) modulation is a 2.3-only feature; earlier LTX-2 (e.g. 19B) omits it — the
+        // text features are then used unmodulated. Load only if present.
+        _promptVideo = w.ContainsKey($"{p}.prompt_scale_shift_table") ? LoadF32(w, $"{p}.prompt_scale_shift_table") : null;
+        _promptAudio = w.ContainsKey($"{p}.audio_prompt_scale_shift_table") ? LoadF32(w, $"{p}.audio_prompt_scale_shift_table") : null;
         _caVideo = LoadF32(w, $"{p}.scale_shift_table_a2v_ca_video");
         _caAudio = LoadF32(w, $"{p}.scale_shift_table_a2v_ca_audio");
 
@@ -98,6 +101,17 @@ public sealed unsafe class LtxVideo2Block
         _ffW2 = w[$"{p}.ff.net.2.weight"]; w.TryGetValue($"{p}.ff.net.2.bias", out _ffB2);
         _aFfW0 = w[$"{p}.audio_ff.net.0.proj.weight"]; w.TryGetValue($"{p}.audio_ff.net.0.proj.bias", out _aFfB0);
         _aFfW2 = w[$"{p}.audio_ff.net.2.weight"]; w.TryGetValue($"{p}.audio_ff.net.2.bias", out _aFfB2);
+    }
+
+    /// <summary>Sum of this block's weight bytes — the streaming controller's budget heuristic. Computed on demand.</summary>
+    public long EstimatedWeightBytes
+    {
+        get
+        {
+            long total = 0;
+            foreach (Tensor t in EnumerateWeights()) total += t.ElementCount * t.DType.SizeInBytes;
+            return total;
+        }
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -117,8 +131,9 @@ public sealed unsafe class LtxVideo2Block
         // Modulation params (per-block table + global temb), broadcast over the sequence.
         Tensor[] vMod = Modulation(_ssVideo!, ctx.TembVideo, 9, _vDim);     // shift_msa,scale_msa,gate_msa,shift_mlp,scale_mlp,gate_mlp,shift_tq,scale_tq,gate_tq
         Tensor[] aMod = Modulation(_ssAudio!, ctx.TembAudio, 9, _aDim);
-        Tensor[] vPrompt = Modulation(_promptVideo!, ctx.TembPromptVideo, 2, _vDim);   // shift_kv,scale_kv
-        Tensor[] aPrompt = Modulation(_promptAudio!, ctx.TembPromptAudio, 2, _aDim);
+        bool hasPrompt = _promptVideo is not null && ctx.TembPromptVideo is not null;
+        Tensor[]? vPrompt = hasPrompt ? Modulation(_promptVideo!, ctx.TembPromptVideo!, 2, _vDim) : null;   // shift_kv,scale_kv
+        Tensor[]? aPrompt = hasPrompt ? Modulation(_promptAudio!, ctx.TembPromptAudio!, 2, _aDim) : null;
         Tensor[] vCaSS = Modulation(Slice(_caVideo!, 0, 4, _vDim), ctx.TembCaVideoScaleShift, 4, _vDim); // a2v_scale,a2v_shift,v2a_scale,v2a_shift
         Tensor[] aCaSS = Modulation(Slice(_caAudio!, 0, 4, _aDim), ctx.TembCaAudioScaleShift, 4, _aDim);
         Tensor[] vCaGate = Modulation(Slice(_caVideo!, 4, 5, _vDim), ctx.TembCaVideoGate, 1, _vDim);     // a2v_gate
@@ -140,16 +155,16 @@ public sealed unsafe class LtxVideo2Block
         // ── 2. Text cross-attention (Q: stream; K,V: text) ──
         Tensor n2 = RmsNoAffine(backend, hidden, _onesV, _vDim);
         ApplyShiftScale(n2, vMod[7], vMod[6], _vDim);                       // scale_text_q, shift_text_q
-        Tensor encMod = ModulateRows(backend, ctx.Encoder, vPrompt[1], vPrompt[0], _vDim);   // enc·(1+scale_kv)+shift_kv
+        Tensor encMod = vPrompt is not null ? ModulateRows(backend, ctx.Encoder, vPrompt[1], vPrompt[0], _vDim) : ctx.Encoder;   // enc·(1+scale_kv)+shift_kv
         Tensor attn2 = _attn2.Forward(backend, n2, encMod, null, null, null, null, null, null, ctx.EncoderMask);
-        n2.Dispose(); encMod.Dispose();
+        n2.Dispose(); if (vPrompt is not null) encMod.Dispose();
         hidden = GatedAddInto(hidden, attn2, vMod[8], _vDim); attn2.Dispose();   // gate_text_q
 
         Tensor an2 = RmsNoAffine(backend, audioHidden, _onesA, _aDim);
         ApplyShiftScale(an2, aMod[7], aMod[6], _aDim);
-        Tensor aEncMod = ModulateRows(backend, ctx.AudioEncoder, aPrompt[1], aPrompt[0], _aDim);
+        Tensor aEncMod = aPrompt is not null ? ModulateRows(backend, ctx.AudioEncoder, aPrompt[1], aPrompt[0], _aDim) : ctx.AudioEncoder;
         Tensor aAttn2 = _aAttn2.Forward(backend, an2, aEncMod, null, null, null, null, null, null, ctx.AudioEncoderMask);
-        an2.Dispose(); aEncMod.Dispose();
+        an2.Dispose(); if (aPrompt is not null) aEncMod.Dispose();
         audioHidden = GatedAddInto(audioHidden, aAttn2, aMod[8], _aDim); aAttn2.Dispose();
 
         // ── 3. Audio↔Video cross-attention ──
@@ -184,8 +199,8 @@ public sealed unsafe class LtxVideo2Block
         an3.Dispose();
         audioHidden = GatedAddInto(audioHidden, aFf, aMod[5], _aDim); aFf.Dispose();
 
-        foreach (Tensor[] arr in new[] { vMod, aMod, vPrompt, aPrompt, vCaSS, aCaSS, vCaGate, aCaGate })
-            foreach (Tensor t in arr) t.Dispose();
+        foreach (Tensor[]? arr in new[] { vMod, aMod, vPrompt, aPrompt, vCaSS, aCaSS, vCaGate, aCaGate })
+            if (arr is not null) foreach (Tensor t in arr) t.Dispose();
         return (hidden, audioHidden);
     }
 

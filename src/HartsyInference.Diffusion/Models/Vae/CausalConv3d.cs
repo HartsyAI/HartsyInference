@@ -105,10 +105,8 @@ public sealed unsafe class CausalConv3d
         int wOut = (w + 2 * _padW - _kw) / _strideW + 1;
         int zeroPad = _padTLeft - cacheLen;                      // leading all-zero frames
 
+        // Device-resident output: every temporal slot is written by WriteVaeFrame below (GPU), so no host clear.
         Tensor output = new Tensor(new TensorShape([(long)batch, _cOut, tout, hOut, wOut]), DType.F32);
-        new Span<float>((float*)output.DataPointer, checked((int)output.Shape.ElementCount)).Clear();
-        float* outPtr = (float*)output.DataPointer;
-        long frameOut = (long)hOut * wOut;
 
         for (int to = 0; to < tout; to++)
         {
@@ -116,7 +114,7 @@ public sealed unsafe class CausalConv3d
             for (int dt = 0; dt < _kt; dt++)
             {
                 int srcT = to * _strideT + dt;
-                Tensor? frame = ResolveFrame(srcT, zeroPad, cacheLen, cacheFrames, input, batch, h, w);
+                Tensor? frame = ResolveFrame(backend, srcT, zeroPad, cacheLen, cacheFrames, input, batch, h, w);
                 if (frame is null) continue;                    // zero-pad frame contributes nothing
                 if (_spatialReplicatePad && (_padH > 0 || _padW > 0))
                 {
@@ -129,77 +127,48 @@ public sealed unsafe class CausalConv3d
                     _spatialReplicatePad ? 0 : _padH, _spatialReplicatePad ? 0 : _padW);
                 frame.Dispose();
                 if (acc is null) { acc = conv; }
-                else { AddInPlace(acc, conv); conv.Dispose(); }
+                else { backend.Add(acc, acc, conv); conv.Dispose(); }   // accumulate taps on-GPU (was CPU AddInPlace → D2H per tap)
             }
 
-            // Write the accumulated (+bias) frame into output[:, :, to].
+            // Write the accumulated (+bias) frame into output[:, :, to], on-GPU (was a host pointer loop).
             if (acc is null)
             {
                 acc = new Tensor(new TensorShape(batch, _cOut, hOut, wOut), DType.F32);
                 new Span<float>((float*)acc.DataPointer, checked((int)acc.Shape.ElementCount)).Clear();
             }
-            float* ap = (float*)acc.DataPointer;
-            float* bp = _bias is null ? null : (float*)_bias.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int co = 0; co < _cOut; co++)
-                {
-                    float biasVal = bp is null ? 0f : bp[co];
-                    long accBase = ((long)b * _cOut + co) * frameOut;
-                    long outBase = (((long)b * _cOut + co) * tout + to) * frameOut;
-                    for (long i = 0; i < frameOut; i++)
-                        outPtr[outBase + i] = ap[accBase + i] + biasVal;
-                }
+            backend.WriteVaeFrame(output, acc, _bias, to);
             acc.Dispose();
         }
         return output;
     }
 
     /// <summary>Extracts temporal frame <paramref name="srcT"/> of the (conceptually) left-padded input as a <c>[B, cIn, H, W]</c> tensor, or null for an all-zero pad frame.</summary>
-    private Tensor? ResolveFrame(int srcT, int zeroPad, int cacheLen, Tensor? cache, Tensor input, int batch, int h, int w)
+    private Tensor? ResolveFrame(IBackend backend, int srcT, int zeroPad, int cacheLen, Tensor? cache, Tensor input, int batch, int h, int w)
     {
         long frame = (long)h * w;
         Tensor outF = new Tensor(new TensorShape(batch, _cIn, h, w), DType.F32);
-        float* dp = (float*)outF.DataPointer;
         if (srcT < zeroPad)                                     // leading causal-pad frame
         {
             if (!_replicateFirstPad) { outF.Dispose(); return null; }   // zero (Wan): no contribution
-            // LTX: replicate the input's first frame.
+            // LTX: replicate the input's first frame (CPU — rare replicate path).
             int tinR = (int)input.Shape[2];
-            float* ipR = (float*)input.DataPointer;
+            float* dp = (float*)outF.DataPointer, ipR = (float*)input.DataPointer;
             for (int b = 0; b < batch; b++)
                 for (int ci = 0; ci < _cIn; ci++)
-                {
-                    long srcOff = ((long)b * _cIn + ci) * tinR * frame;   // frame 0
-                    long dstOff = ((long)b * _cIn + ci) * frame;
-                    Buffer.MemoryCopy(ipR + srcOff, dp + dstOff, frame * 4, frame * 4);
-                }
+                    Buffer.MemoryCopy(ipR + ((long)b * _cIn + ci) * tinR * frame, dp + ((long)b * _cIn + ci) * frame, frame * 4, frame * 4);
             return outF;
         }
         int afterZero = srcT - zeroPad;
-        if (afterZero < cacheLen)                               // cache frame
+        if (afterZero < cacheLen)                               // cache frame → GPU strided extract
         {
-            float* cp = (float*)cache!.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int ci = 0; ci < _cIn; ci++)
-                {
-                    long srcOff = (((long)b * _cIn + ci) * cacheLen + afterZero) * frame;
-                    long dstOff = ((long)b * _cIn + ci) * frame;
-                    Buffer.MemoryCopy(cp + srcOff, dp + dstOff, frame * 4, frame * 4);
-                }
+            backend.ExtractVaeFrame(outF, cache!, afterZero);
         }
         else                                                    // real input frame (or trailing edge-replicate)
         {
             int ti = afterZero - cacheLen;
             int tin = (int)input.Shape[2];
             if (ti >= tin) ti = tin - 1;                        // non-causal trailing pad: replicate the last frame
-            float* ip = (float*)input.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int ci = 0; ci < _cIn; ci++)
-                {
-                    long srcOff = (((long)b * _cIn + ci) * tin + ti) * frame;
-                    long dstOff = ((long)b * _cIn + ci) * frame;
-                    Buffer.MemoryCopy(ip + srcOff, dp + dstOff, frame * 4, frame * 4);
-                }
+            backend.ExtractVaeFrame(outF, input, ti);
         }
         return outF;
     }

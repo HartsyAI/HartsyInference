@@ -10,6 +10,8 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _spatialModule;
     private readonly CudaModule _softmaxModule;
     private readonly CudaModule _transposeModule;
+    private readonly CudaModule _wanRopeModule;
+    private readonly CudaModule _wanVaeFramesModule;
     private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
@@ -121,6 +123,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _permute0213F32;
     private readonly nint _transpose2dF16;
     private readonly nint _permute0213F16;
+    private readonly nint _wanRopeInterleaved;
+    private readonly nint _wanVaeExtractFrame;
+    private readonly nint _wanVaeWriteFrame;
 
     // ── GeGlu function handles ───────────────────────────────────────────
     private readonly nint _gegluF32;
@@ -213,6 +218,13 @@ public sealed class CudaKernels : IDisposable
         _transposeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "transpose_f32.ptx"));
         _transpose2dF32 = _transposeModule.GetFunction("transpose_2d_f32");
         _permute0213F32 = _transposeModule.GetFunction("permute_0213_f32");
+
+        _wanRopeModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_rope.ptx"));
+        _wanRopeInterleaved = _wanRopeModule.GetFunction("wan_rope_interleaved");
+
+        _wanVaeFramesModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_frames.ptx"));
+        _wanVaeExtractFrame = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame");
+        _wanVaeWriteFrame = _wanVaeFramesModule.GetFunction("wan_vae_write_frame");
 
         _gegluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "geglu_f32.ptx"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
@@ -455,20 +467,20 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches ConvTranspose1d (F32, channels-first [B,C,T], weight [C_in,C_out,K]).
-    /// Groups are not supported by this kernel; callers must pass groups=1.</summary>
+    /// <summary>Launches ConvTranspose1d (F32, channels-first [B,C,T], weight [C_in,C_out/groups,K]).
+    /// Grouped like <see cref="LaunchConv1d"/> — groups==channels is depthwise (BigVGAN anti-aliased upsampling).</summary>
     public unsafe void LaunchConvTranspose1d(ulong output, ulong input, ulong weight, ulong bias,
         int batch, int cIn, int cOut, int tIn, int tOut, int kernel, int stride, int padLeft,
-        int dilation, int hasBias, nint stream)
+        int dilation, int groups, int hasBias, nint stream)
     {
         ulong outArg = output, inArg = input, wArg = weight, bArg = bias;
         int batchArg = batch, cInArg = cIn, cOutArg = cOut, tInArg = tIn, tOutArg = tOut;
-        int kArg = kernel, strideArg = stride, padArg = padLeft, dilArg = dilation, biasArg = hasBias;
+        int kArg = kernel, strideArg = stride, padArg = padLeft, dilArg = dilation, groupsArg = groups, biasArg = hasBias;
 
-        void** args = stackalloc void*[14];
+        void** args = stackalloc void*[15];
         args[0] = &outArg; args[1] = &inArg; args[2] = &wArg; args[3] = &bArg;
         args[4] = &batchArg; args[5] = &cInArg; args[6] = &cOutArg; args[7] = &tInArg; args[8] = &tOutArg;
-        args[9] = &kArg; args[10] = &strideArg; args[11] = &padArg; args[12] = &dilArg; args[13] = &biasArg;
+        args[9] = &kArg; args[10] = &strideArg; args[11] = &padArg; args[12] = &dilArg; args[13] = &groupsArg; args[14] = &biasArg;
 
         uint total = (uint)(batch * cOut * tOut);
         uint gridDim = (total + BlockSize - 1) / BlockSize;
@@ -1453,6 +1465,43 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches 4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D] (F16).</summary>
     public void LaunchPermute0213F16(ulong output, ulong input, int s, int h, int d, int totalElements, nint stream)
         => LaunchPermute0213Impl(_permute0213F16, output, input, s, h, d, totalElements, stream);
+
+    /// <summary>Wan-Video interleaved RoPE, in-place on <paramref name="x"/> [S, heads·headDim]. One thread per
+    /// (s, head, pair); cos/sin are [S, headDim] shared across heads (duplicated-pair layout).</summary>
+    public unsafe void LaunchWanRopeInterleaved(ulong x, ulong cos, ulong sin, int S, int heads, int headDim, nint stream)
+    {
+        ulong xA = x, cA = cos, sA = sin;
+        uint sArg = (uint)S, hArg = (uint)heads, dArg = (uint)headDim;
+        void** args = stackalloc void*[6];
+        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
+        long total = (long)S * heads * (headDim / 2);
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanRopeInterleaved, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> tensor into a 4D
+    /// <c>[B,C,H,W]</c> frame, on-device.</summary>
+    public unsafe void LaunchWanVaeExtractFrame(ulong outp, ulong src, int ti, int B, int C, int Tsrc, int frameHW, nint stream)
+    {
+        ulong oA = outp, sA = src; uint tiA = (uint)ti, bA = (uint)B, cA = (uint)C, tsA = (uint)Tsrc, fA = (uint)frameHW;
+        void** args = stackalloc void*[7];
+        args[0] = &oA; args[1] = &sA; args[2] = &tiA; args[3] = &bA; args[4] = &cA; args[5] = &tsA; args[6] = &fA;
+        long total = (long)B * C * frameHW;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeExtractFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Writes a 4D <c>[B,C,H,W]</c> frame (plus optional per-channel bias) into temporal slot
+    /// <paramref name="to"/> of a 5D <c>[B,C,Tout,H,W]</c> tensor, on-device. <paramref name="bias"/>=0 for none.</summary>
+    public unsafe void LaunchWanVaeWriteFrame(ulong outp, ulong acc, ulong bias, int to, int B, int C, int Tout, int frameHW, nint stream)
+    {
+        ulong oA = outp, aA = acc, bsA = bias; uint toA = (uint)to, bA = (uint)B, cA = (uint)C, tA = (uint)Tout, fA = (uint)frameHW;
+        void** args = stackalloc void*[8];
+        args[0] = &oA; args[1] = &aA; args[2] = &bsA; args[3] = &toA; args[4] = &bA; args[5] = &cA; args[6] = &tA; args[7] = &fA;
+        long total = (long)B * C * frameHW;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeWriteFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     // ── GeGlu Launches ──────────────────────────────────────────────────
 

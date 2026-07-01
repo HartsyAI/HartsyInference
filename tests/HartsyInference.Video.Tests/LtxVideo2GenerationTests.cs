@@ -1,0 +1,141 @@
+using System.Diagnostics;
+using Xunit;
+using Xunit.Abstractions;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Models.Music;
+using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelHandler.CheckpointConverters;
+using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.Tests.Common;
+using HartsyInference.Tokenizers;
+using HartsyInference.Video.Encoding;
+using HartsyInference.Video.Pipelines;
+
+namespace HartsyInference.Video.Tests;
+
+/// <summary>End-to-end LTX-2 dual-stream (video+audio) T2V generation against the bundled 19B fp8 single file
+/// (DiT + video VAE + audio VAE + vocoder) plus the external Gemma-3-12B fp8 text encoder → <see cref="LtxVideo2Pipeline"/>
+/// → BMP frame sequence (+ optional waveform). Skips cleanly when artifacts are missing or VRAM is insufficient.
+/// First-run validation entry — numerics validation-pending.</summary>
+public class LtxVideo2GenerationTests
+{
+    private readonly ITestOutputHelper _output;
+    public LtxVideo2GenerationTests(ITestOutputHelper output) => _output = output;
+
+    [Fact]
+    public async Task LtxVideo2_Gpu_T2VA_ShortClip()
+    {
+        string ckpt = TestPaths.LtxVideo2.SingleFile;
+        string gemmaPath = TestPaths.LtxVideo2.GemmaEncoder, gemmaTok = TestPaths.LtxVideo2.GemmaTokenizer;
+        if (!File.Exists(ckpt)) { _output.WriteLine($"SKIPPED: LTX-2 checkpoint not found: {ckpt} (set LTX2_PATH)."); return; }
+        if (!File.Exists(gemmaPath)) { _output.WriteLine($"SKIPPED: Gemma-3-12B encoder not found: {gemmaPath} (set LTX2_GEMMA_PATH)."); return; }
+        if (!File.Exists(gemmaTok)) { _output.WriteLine($"SKIPPED: Gemma tokenizer not found: {gemmaTok} (set LTX2_GEMMA_TOKENIZER)."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(LtxVideo2GenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+
+        Stopwatch sw = Stopwatch.StartNew();
+        _output.WriteLine($"[1/5] Loading + converting LTX-2 single file: {Path.GetFileName(ckpt)}");
+        (LtxVideo2CheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ckptLoader) =
+            LtxVideo2CheckpointConverter.LoadAndConvert(ckpt);
+        using SafeTensorsLoader _ckpt = ckptLoader;
+        _output.WriteLine($"  DiT {conv.Transformer.Count} / connectors {conv.Connectors.Count} / vae {conv.Vae.Count} / " +
+            $"audioVae {conv.AudioVae.Count} / vocoder {conv.Vocoder.Count} keys in {sw.ElapsedMilliseconds}ms");
+
+        LtxVideo2Config cfg = LtxVideo2Config.V23;
+        using LtxVideo2Transformer transformer = new(cfg);
+        transformer.LoadWeights(conv.Transformer);
+        LtxVideo2TextConnectors connectors = new(cfg);
+        connectors.LoadWeights(conv.Connectors);
+        // Latent un-normalization stats (per-channel) — the diffusion model works in normalized latent space, so the
+        // decoder must apply z = latent·std + mean. Without these the VAE gets a wrongly-scaled latent → garbage.
+        float[]? latentsMean = ExtractStat(conv.Vae, "latents_mean");
+        float[]? latentsStd = ExtractStat(conv.Vae, "latents_std");
+        LtxVideo2VaeDecoder vae = new(latentsMean: latentsMean, latentsStd: latentsStd);
+        vae.LoadWeights(CastWeightsToF32(conv.Vae));
+        LtxAudioVaeDecoder? audioVae = null;
+        LtxAudioVocoder? vocoder = null;
+        float[]? audioLatentsMean = null, audioLatentsStd = null;
+        if (conv.AudioVae.Count > 0 && conv.Vocoder.Count > 0)
+        {
+            audioVae = new LtxAudioVaeDecoder();
+            audioVae.LoadWeights(CastWeightsToF32(conv.AudioVae));
+            vocoder = new LtxAudioVocoder();
+            vocoder.LoadWeights(CastWeightsToF32(conv.Vocoder));
+            // Audio latent stats ([128] over the packed 8×16 latent) — the pipeline denormalizes before unpacking.
+            audioLatentsMean = ExtractStat(conv.AudioVae, "latents_mean");
+            audioLatentsStd = ExtractStat(conv.AudioVae, "latents_std");
+        }
+
+        _output.WriteLine($"[2/5] Loading Gemma-3-12B from {Path.GetFileName(gemmaPath)}...");
+        sw.Restart();
+        using SafeTensorsLoader gemmaLoader = new();
+        gemmaLoader.Load(gemmaPath);
+        using LlamaStyleEncoder gemma = new(LlamaStyleEncoderConfig.Gemma3_12B);
+        gemma.LoadWeights(gemmaLoader.GetAllTensors());
+        _output.WriteLine($"  Gemma loaded in {sw.ElapsedMilliseconds}ms");
+
+        using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+        backend.CacheWeightCasts = false;   // fp8 stays fp8-resident; caching F16 casts would OOM.
+        (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
+        double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+        // Block-swap streams the ~22 GB DiT, so peak VRAM is the Gemma encode (~13 GB) + a small streaming window.
+        const double MinGb = 15.0;
+        if (freeGb < MinGb) { _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM; LTX-2 needs ≥{MinGb} GB (block-swapped DiT)."); return; }
+
+        using GemmaTokenizer tokenizer = new(gemmaTok, maxLength: 256);
+        int[] promptTokens = tokenizer.Encode("a cinematic shot of a cat walking through a sunlit garden, birds chirping");
+        int[] negTokens = tokenizer.Encode("blurry, low quality, distorted, watermark");
+
+        int steps = int.TryParse(Environment.GetEnvironmentVariable("LTX2_STEPS"), out int st) ? st : 20;
+        int numFrames = int.TryParse(Environment.GetEnvironmentVariable("LTX2_FRAMES"), out int nf) ? nf : 25;
+        int width = int.TryParse(Environment.GetEnvironmentVariable("LTX2_W"), out int w) ? w : 512;
+        int height = int.TryParse(Environment.GetEnvironmentVariable("LTX2_H"), out int h) ? h : 320;
+        _output.WriteLine($"[3/5] Generating {numFrames}f {width}x{height}, {steps} steps (NUMERIC OUTPUT VALIDATION-PENDING)...");
+        LtxVideo2Pipeline pipeline = new(backend, transformer, connectors, vae, gemma, cfg, audioVae, vocoder);
+        TextToImageRequest req = new() { Prompt = "cat", Width = width, Height = height, Steps = steps, CfgScale = cfg.GuidanceScale, Seed = 42 };
+        LtxVideo2Pipeline.Ltx2Result result = pipeline.GenerateFromTokens(promptTokens, negTokens, req, numFrames,
+            frameRate: 24.0, p => _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
+
+        _output.WriteLine($"[4/5] Writing {result.Frames.Length} frames" + (result.Audio is not null ? " + audio" : "") + "...");
+        string outDir = Path.Combine(TestPaths.OutputDir, $"ltx2_video_{DateTime.Now:yyyyMMdd_HHmmss}");
+        Directory.CreateDirectory(outDir);
+        VideoFrame[] frames = new VideoFrame[result.Frames.Length];
+        for (int i = 0; i < frames.Length; i++) frames[i] = new VideoFrame(i, result.Width, result.Height, result.Frames[i]);
+        await new BmpSequenceEncoder().EncodeAsync(ToAsync(frames), outDir, fps: 24);
+
+        _output.WriteLine($"[5/5] Wrote frames → {outDir}");
+        Assert.Equal(numFrames, Directory.GetFiles(outDir, "frame_*.bmp").Length);
+    }
+
+    private static async IAsyncEnumerable<VideoFrame> ToAsync(VideoFrame[] frames)
+    {
+        foreach (VideoFrame f in frames) { yield return f; await Task.Yield(); }
+    }
+
+    private static unsafe float[]? ExtractStat(Dictionary<string, Tensor> vae, string key)
+    {
+        if (!vae.TryGetValue(key, out Tensor? t)) return null;
+        Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        int n = (int)f32.ElementCount;
+        float[] outv = new float[n];
+        float* p = (float*)f32.DataPointer;
+        for (int i = 0; i < n; i++) outv[i] = p[i];
+        return outv;
+    }
+
+    private static Dictionary<string, Tensor> CastWeightsToF32(Dictionary<string, Tensor> weights)
+    {
+        Dictionary<string, Tensor> f32 = new(weights.Count);
+        foreach (KeyValuePair<string, Tensor> kvp in weights)
+        {
+            DType dt = kvp.Value.DType;
+            f32[kvp.Key] = (dt == DType.F16 || dt == DType.BF16) ? kvp.Value.CastTo(DType.F32) : kvp.Value;
+        }
+        return f32;
+    }
+}

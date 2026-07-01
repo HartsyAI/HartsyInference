@@ -57,15 +57,31 @@ public class LtxVideoGenerationTests
             { _output.WriteLine($"SKIPPED: no T5 weights in {Path.GetFileName(t5Standalone)}."); return; }
             _output.WriteLine($"  {t5Weights.Count} T5 tensors in {sw.ElapsedMilliseconds}ms");
 
-            LtxVideoConfig cfg = LtxVideoConfig.V09;
+            // Variant selection (filename or LTX_VARIANT override): 13B/0.9.7 = V097 transformer (48 layers, head_dim
+            // 128, cross 4096); 0.9.5 = V09 transformer. Both 0.9.5 and 13B share the timestep-conditioned VAE
+            // (residual channel-changing upsamplers, decoder_block_out_channels (256,512,1024), 5 layers/block). 0.9 is
+            // the base non-timestep VAE.
+            string variant = Environment.GetEnvironmentVariable("LTX_VARIANT")
+                ?? (ckpt.Contains("13b", StringComparison.OrdinalIgnoreCase) || ckpt.Contains("0.9.7", StringComparison.Ordinal) ? "0.9.7"
+                    : ckpt.Contains("0.9.5", StringComparison.Ordinal) ? "0.9.5" : "0.9");
+            bool timestepVae = variant is "0.9.5" or "0.9.7";
+            LtxVideoConfig cfg = variant switch { "0.9.7" => LtxVideoConfig.V097, "0.9.5" => LtxVideoConfig.V095, _ => LtxVideoConfig.V09 };
             using LtxVideoTransformer transformer = new(cfg);
             transformer.LoadWeights(conv.Transformer);
-            LtxVideoVaeDecoder vae = new();
+            LtxVideoVaeDecoder vae = timestepVae
+                ? new LtxVideoVaeDecoder(blockOutChannels: [256, 512, 1024], spatioTemporalScaling: [true, true, true],
+                    layersPerBlock: [5, 5, 5, 5], patchSize: 4, isCausal: false, timestepConditioned: true,
+                    upsampleFactor: [2, 2, 2], upsampleResidual: [true, true, true])
+                : new LtxVideoVaeDecoder();
             vae.LoadWeights(CastWeightsToF32(conv.Vae));
+            _output.WriteLine($"  variant: {variant} ({(timestepVae ? "timestep" : "base")} VAE)");
             using T5TextEncoder t5 = new(T5TextEncoderConfig.Xxl);
             t5.LoadWeights(t5Weights);
 
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            // 13B fp8 weights stay fp8-resident (~13 GB); caching their F16 casts would add ~26 GB → OOM on 24 GB.
+            // Dequant transiently per GEMM instead (matches the Wan fp8 recipe).
+            if (variant == "0.9.7") backend.CacheWeightCasts = false;
             (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
             double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
             const double MinGb = 10.0;

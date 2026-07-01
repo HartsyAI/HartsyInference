@@ -295,8 +295,13 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
 
+            // Kontext appends refSeqLen reference tokens to the noise tokens, so the transformer's real
+            // per-forward activation working set spans txt + noise + ref — not just the noise seq. Reserve for
+            // the full length so the prefetch estimate doesn't under-count and over-commit VRAM (base Flux
+            // passes kontextRefSeqLen = 0, so this is unchanged there).
+            int forwardImgSeqLen = imgSeqLen + kontextRefSeqLen;
             int prefetchAhead = ChooseFluxPrefetchAhead(
-                Backend.StreamingCache, blocks, txtSeqLen, imgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio));
+                Backend.StreamingCache, blocks, txtSeqLen, forwardImgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio));
             streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
             _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
             streamer.Prime();

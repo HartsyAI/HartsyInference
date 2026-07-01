@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -35,6 +36,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
 
     private readonly AdaLnSingle _timeEmbed, _audioTimeEmbed;
     private readonly AdaLnSingle _promptAdaln, _audioPromptAdaln;
+    private bool _hasPromptMod;
     private readonly AdaLnSingle _caVideoScaleShift, _caAudioScaleShift;
     private readonly AdaLnSingle _caVideoGate, _caAudioGate;
 
@@ -80,8 +82,13 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
 
         _timeEmbed.LoadWeights(w, "time_embed");
         _audioTimeEmbed.LoadWeights(w, "audio_time_embed");
-        _promptAdaln.LoadWeights(w, "prompt_adaln");
-        _audioPromptAdaln.LoadWeights(w, "audio_prompt_adaln");
+        // Prompt (text cross-attn KV) modulation is a 2.3-only feature; earlier LTX-2 (e.g. 19B) omits it.
+        _hasPromptMod = w.ContainsKey("prompt_adaln.emb.timestep_embedder.linear_1.weight");
+        if (_hasPromptMod)
+        {
+            _promptAdaln.LoadWeights(w, "prompt_adaln");
+            _audioPromptAdaln.LoadWeights(w, "audio_prompt_adaln");
+        }
         _caVideoScaleShift.LoadWeights(w, "av_cross_attn_video_scale_shift");
         _caAudioScaleShift.LoadWeights(w, "av_cross_attn_audio_scale_shift");
         _caVideoGate.LoadWeights(w, "av_cross_attn_video_a2v_gate");
@@ -90,16 +97,35 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"transformer_blocks.{i}");
     }
 
-    public IEnumerable<Tensor> EnumerateWeights()
+    /// <summary>Always-resident (non-block) weights — proj_in/out, the global AdaLN-Single modulation tables. Touched
+    /// every step regardless of the executing block, so the streaming controller doesn't manage them; preload eagerly.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         foreach (Tensor? t in new[] { _projInW, _projInB, _audioProjInW, _audioProjInB,
             _projOutW, _projOutB, _audioProjOutW, _audioProjOutB, _scaleShift, _audioScaleShift })
             if (t is not null) yield return t;
-        foreach (AdaLnSingle m in new[] { _timeEmbed, _audioTimeEmbed, _promptAdaln, _audioPromptAdaln,
-            _caVideoScaleShift, _caAudioScaleShift, _caVideoGate, _caAudioGate })
+        AdaLnSingle[] adalns = _hasPromptMod
+            ? new[] { _timeEmbed, _audioTimeEmbed, _promptAdaln, _audioPromptAdaln, _caVideoScaleShift, _caAudioScaleShift, _caVideoGate, _caAudioGate }
+            : new[] { _timeEmbed, _audioTimeEmbed, _caVideoScaleShift, _caAudioScaleShift, _caVideoGate, _caAudioGate };
+        foreach (AdaLnSingle m in adalns)
             foreach (Tensor t in m.EnumerateWeights()) yield return t;
+    }
+
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor t in EnumerateSharedWeights()) yield return t;
         for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
     }
+
+    /// <summary>Number of streamable transformer blocks.</summary>
+    public int BlockCount => _blocks.Length;
+
+    /// <summary>The streamable block at <paramref name="idx"/> (implements <see cref="IStreamingBlock"/>).</summary>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <summary>Optional hook invoked immediately before each block's forward pass — pipelines plug a
+    /// <c>BlockStreamingController</c> here to drive prefetch/eviction so the 22B fp8 fits in 24 GB. Null = all resident.</summary>
+    public Action<int>? BeforeBlockForward { get; set; }
 
     /// <summary>Velocity prediction over both streams. <paramref name="videoTokens"/> is <c>[Sv, inChannels]</c>
     /// (f,h,w order); <paramref name="audioTokens"/> is <c>[Sa, audioInChannels]</c>; <paramref name="encoderVideo"/>
@@ -123,8 +149,12 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         // Global modulation tables + the two embedded-timesteps used by the output layer.
         (Tensor tVideo, Tensor embV) = _timeEmbed.Forward(backend, timestep);
         (Tensor tAudio, Tensor embA) = _audioTimeEmbed.Forward(backend, timestep);
-        (Tensor tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
-        (Tensor tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
+        Tensor? tPromptV = null, tPromptA = null;
+        if (_hasPromptMod)
+        {
+            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
+            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
+        }
         (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
         (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
         (Tensor tCaVGate, Tensor _gv) = _caVideoGate.Forward(backend, timestep * _gateScaleFactor); _gv.Dispose();
@@ -156,11 +186,14 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         };
 
         for (int i = 0; i < _blocks.Length; i++)
+        {
+            BeforeBlockForward?.Invoke(i);
             (hidden, audioHidden) = _blocks[i].Forward(backend, hidden, audioHidden, ctx);
+        }
 
-        foreach (Tensor t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate,
+        foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate,
             vCos, vSin, aCos, aSin, cvCos, cvSin })
-            t.Dispose();
+            t?.Dispose();
 
         Tensor video = OutputLayer(backend, hidden, embV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
         Tensor audio = OutputLayer(backend, audioHidden, embA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB,

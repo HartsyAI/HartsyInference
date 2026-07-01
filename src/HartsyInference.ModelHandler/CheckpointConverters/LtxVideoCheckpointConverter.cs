@@ -35,6 +35,38 @@ public sealed class LtxVideoCheckpointConverter
         ("k_norm", "norm_k"),
     ];
 
+    // 0.9.5 / 0.9.7 timestep-conditioned VAE regrouping (diffusers VAE_095_RENAME_DICT). The decoder has a
+    // mid_block + N up_blocks each = [residual channel-changing upsampler + timestep-conditioned resnets], so the
+    // up_blocks.{odd}=upsampler / up_blocks.{even}=resnet-stage interleaving differs from the 0.9 table below.
+    // Applied when the VAE carries per-block timestep embedders (see IsTimestepVae).
+    private static readonly (string From, string To)[] _vaeRenames095 =
+    [
+        ("up_blocks.0", "mid_block"),
+        ("up_blocks.1", "up_blocks.0.upsamplers.0"),
+        ("up_blocks.2", "up_blocks.0"),
+        ("up_blocks.3", "up_blocks.1.upsamplers.0"),
+        ("up_blocks.4", "up_blocks.1"),
+        ("up_blocks.5", "up_blocks.2.upsamplers.0"),
+        ("up_blocks.6", "up_blocks.2"),
+        ("up_blocks.7", "up_blocks.3.upsamplers.0"),
+        ("up_blocks.8", "up_blocks.3"),
+        ("down_blocks.1", "down_blocks.0.downsamplers.0"),
+        ("down_blocks.2", "down_blocks.1"),
+        ("down_blocks.3", "down_blocks.1.downsamplers.0"),
+        ("down_blocks.4", "down_blocks.2"),
+        ("down_blocks.5", "down_blocks.2.downsamplers.0"),
+        ("down_blocks.6", "down_blocks.3"),
+        ("down_blocks.7", "down_blocks.3.downsamplers.0"),
+        ("down_blocks.8", "mid_block"),
+        ("conv_shortcut", "conv_shortcut.conv"),
+        ("res_blocks", "resnets"),
+        ("norm3.norm", "norm3"),
+        ("per_channel_statistics.mean-of-means", "latents_mean"),
+        ("per_channel_statistics.std-of-means", "latents_std"),
+        ("last_time_embedder", "time_embedder"),
+        ("last_scale_shift_table", "scale_shift_table"),
+    ];
+
     // Ordered — applied sequentially per key like the python script's replace chain; later sources never match
     // earlier outputs. Ported verbatim from diffusers convert_ltx_to_diffusers.py VAE_KEYS_RENAME_DICT.
     private static readonly (string From, string To)[] _vaeRenames =
@@ -89,6 +121,17 @@ public sealed class LtxVideoCheckpointConverter
         public required Dictionary<string, Tensor> Vae { get; init; }
     }
 
+    /// <summary>True when the VAE is the 0.9.5+/13B timestep-conditioned decoder (per-block/decoder-level time
+    /// embedders present) — selects <see cref="_vaeRenames095"/> instead of the 0.9 <see cref="_vaeRenames"/>, whose
+    /// up_block regrouping differs. Detected on original-naming keys (the diffusers-folder path is already renamed).</summary>
+    public static bool IsTimestepVae(IEnumerable<string> keys)
+    {
+        foreach (string key in keys)
+            if (key.Contains("time_embedder", StringComparison.Ordinal))
+                return true;
+        return false;
+    }
+
     /// <summary>True when the (prefix-stripped) VAE key set uses original LTX naming rather than diffusers naming.</summary>
     public static bool IsOriginalVaeNaming(IEnumerable<string> keys)
     {
@@ -107,13 +150,13 @@ public sealed class LtxVideoCheckpointConverter
     /// Single-file keys carry the <c>model.diffusion_model.</c>/<c>vae.</c> prefixes; bare keys (diffusers folder
     /// shards) are treated as transformer or VAE by content. <paramref name="vaeOriginalNaming"/> gates the VAE
     /// regrouping renames (never apply them to already-diffusers-named keys — they would corrupt the layout).</summary>
-    public static (LtxBucket Bucket, string? MappedKey) RouteKey(string key, bool vaeOriginalNaming)
+    public static (LtxBucket Bucket, string? MappedKey) RouteKey(string key, bool vaeOriginalNaming, bool timestepVae = false)
     {
         if (key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || key == "scaled_fp8")
             return (LtxBucket.Drop, null);
 
         if (key.StartsWith(VaePrefix, StringComparison.Ordinal))
-            return MapVae(key[VaePrefix.Length..], vaeOriginalNaming);
+            return MapVae(key[VaePrefix.Length..], vaeOriginalNaming, timestepVae);
         if (key.StartsWith(TransformerPrefix, StringComparison.Ordinal))
             return MapTransformer(key[TransformerPrefix.Length..]);
 
@@ -121,7 +164,7 @@ public sealed class LtxVideoCheckpointConverter
         if (key.StartsWith("decoder.", StringComparison.Ordinal) || key.StartsWith("encoder.", StringComparison.Ordinal)
             || key.StartsWith("latents_", StringComparison.Ordinal) || key.StartsWith("per_channel_statistics.", StringComparison.Ordinal)
             || key.StartsWith("timestep_scale_multiplier", StringComparison.Ordinal))
-            return MapVae(key, vaeOriginalNaming);
+            return MapVae(key, vaeOriginalNaming, timestepVae);
         return MapTransformer(key);
     }
 
@@ -134,10 +177,10 @@ public sealed class LtxVideoCheckpointConverter
         return (LtxBucket.Transformer, key);
     }
 
-    private static (LtxBucket, string?) MapVae(string key, bool originalNaming)
+    private static (LtxBucket, string?) MapVae(string key, bool originalNaming, bool timestepVae)
     {
         if (originalNaming)
-            foreach ((string from, string to) in _vaeRenames)
+            foreach ((string from, string to) in (timestepVae ? _vaeRenames095 : _vaeRenames))
                 key = key.Replace(from, to, StringComparison.Ordinal);
         // Stats not renamed above (channel index, mean-of-stds) are metadata the decoder never reads.
         if (key.Contains("per_channel_statistics"))
@@ -150,12 +193,13 @@ public sealed class LtxVideoCheckpointConverter
     {
         allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
         bool vaeOriginal = IsOriginalVaeNaming(allWeights.Keys);
+        bool timestepVae = IsTimestepVae(allWeights.Keys);
 
         Dictionary<string, Tensor> transformer = new(allWeights.Count);
         Dictionary<string, Tensor> vae = new(512);
         foreach (KeyValuePair<string, Tensor> kvp in allWeights)
         {
-            (LtxBucket bucket, string? mapped) = RouteKey(kvp.Key, vaeOriginal);
+            (LtxBucket bucket, string? mapped) = RouteKey(kvp.Key, vaeOriginal, timestepVae);
             switch (bucket)
             {
                 case LtxBucket.Transformer: transformer[mapped!] = kvp.Value; break;

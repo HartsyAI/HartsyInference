@@ -1,3 +1,4 @@
+using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -24,6 +25,8 @@ public sealed unsafe class LtxVideoVaeDecoder
     private readonly int[] _blockOutRev;        // reversed block_out_channels
     private readonly bool[] _scalingRev;        // reversed spatio_temporal_scaling
     private readonly int[] _layersRev;          // reversed layers_per_block
+    private readonly int[] _upFactorRev;        // reversed upsample_factor (0.9.5/13B: 2; 0.9: 1)
+    private readonly bool[] _upResidualRev;     // reversed upsample_residual (0.9.5/13B: true; 0.9: false)
 
     private CausalConv3d? _convIn, _convOut;
     private LtxVaeResnetBlock3d[] _midResnets = [];
@@ -43,7 +46,8 @@ public sealed unsafe class LtxVideoVaeDecoder
     public LtxVideoVaeDecoder(
         int latentChannels = 128, int outChannels = 3,
         int[]? blockOutChannels = null, bool[]? spatioTemporalScaling = null, int[]? layersPerBlock = null,
-        int patchSize = 4, bool isCausal = false, bool timestepConditioned = false)
+        int patchSize = 4, bool isCausal = false, bool timestepConditioned = false,
+        int[]? upsampleFactor = null, bool[]? upsampleResidual = null)
     {
         _latentChannels = latentChannels;
         _outChannels = outChannels;
@@ -53,9 +57,15 @@ public sealed unsafe class LtxVideoVaeDecoder
         blockOutChannels ??= [128, 256, 512, 512];
         spatioTemporalScaling ??= [true, true, true, false];
         layersPerBlock ??= [4, 3, 3, 3, 4];
+        // Per up-block channel divisor / residual for the pixel-shuffle upsampler. Default = 0.9 behaviour (no
+        // channel change in the upsampler — conv_in resnets do it); 0.9.5/13B pass factor 2 + residual true.
+        upsampleFactor ??= Enumerable.Repeat(1, blockOutChannels.Length).ToArray();
+        upsampleResidual ??= new bool[blockOutChannels.Length];
         _blockOutRev = Reverse(blockOutChannels);
         _scalingRev = Reverse(spatioTemporalScaling);
         _layersRev = Reverse(layersPerBlock);
+        _upFactorRev = Reverse(upsampleFactor);
+        _upResidualRev = Reverse(upsampleResidual);
     }
 
     /// <summary>Output frames for a given latent frame count: <c>(T_lat − 1)·8 + 1</c> (3 temporal upsamplers ×2 each).</summary>
@@ -86,18 +96,25 @@ public sealed unsafe class LtxVideoVaeDecoder
         _upStages = new UpStage[_blockOutRev.Length];
         for (int i = 0; i < _blockOutRev.Length; i++)
         {
-            int inC = output;
-            int outC = _blockOutRev[i];
+            int incoming = output;
+            int upF = _upFactorRev[i];
+            bool scale = _scalingRev[i];
+            // diffusers LTXVideoDecoder3d: output = block_out[i] / upsample_factor; the pixel-shuffle upsampler
+            // takes out·upF channels in and emits out (0.9.5/13B channel reduction). 0.9 (upF=1) keeps channels
+            // in the upsampler and reduces via the conv_in resnet instead.
+            int outC = _blockOutRev[i] / upF;
+            int upsamplerInC = scale ? outC * upF : outC;
+            int convInTarget = scale ? upsamplerInC : outC;
             UpStage stage = new();
             string p = $"decoder.up_blocks.{i}";
-            if (inC != outC)
+            if (incoming != convInTarget)
             {
-                stage.ConvIn = new LtxVaeResnetBlock3d(inC, outC, timestepCond: _timestepCond, isCausal: _isCausal);
+                stage.ConvIn = new LtxVaeResnetBlock3d(incoming, convInTarget, timestepCond: _timestepCond, isCausal: _isCausal);
                 stage.ConvIn.LoadWeights(w, $"{p}.conv_in");
             }
-            if (_scalingRev[i])
+            if (scale)
             {
-                stage.Upsampler = new LtxVaeUpsampler3d(outC, (2, 2, 2), upscaleFactor: 1, residual: false, isCausal: _isCausal);
+                stage.Upsampler = new LtxVaeUpsampler3d(upsamplerInC, (2, 2, 2), upscaleFactor: upF, residual: _upResidualRev[i], isCausal: _isCausal);
                 stage.Upsampler.LoadWeights(w, $"{p}.upsamplers.0");
             }
             stage.Resnets = new LtxVaeResnetBlock3d[_layersRev[i + 1]];
@@ -106,17 +123,11 @@ public sealed unsafe class LtxVideoVaeDecoder
                 stage.Resnets[j] = new LtxVaeResnetBlock3d(outC, outC, timestepCond: _timestepCond, isCausal: _isCausal);
                 stage.Resnets[j].LoadWeights(w, $"{p}.resnets.{j}");
             }
-            // VALIDATION-PENDING: verify vs diffusers LTXPipeline 0.9.7 — the up block time_embedder is sized
-            // PixArtAlphaCombinedTimestepSizeEmbeddings(in_channels·4) (the block's INCOMING channels). All the
-            // block's resnets are out_channels-sized and consume this 4·inC temb, so a timestep-conditioned VAE
-            // only stays dimensionally consistent where inC == outC (the real LTX TC VAE has no channel-changing
-            // up blocks; channel reduction is done by the pixel-shuffle upsampler, so conv_in is absent here).
+            // The up block's time_embedder is PixArtAlphaCombinedTimestepSizeEmbeddings(out_channels·4) — the
+            // post-upsample working channels the resnets run at (diffusers sizes it by in_channels, which equals
+            // out_channels for every real TC config since the upsample_factor makes them match).
             if (_timestepCond)
-            {
-                if (inC != outC)
-                    throw new NotSupportedException($"Timestep-conditioned LTX-Video VAE up block {i} changes channels ({inC}→{outC}); not supported (no real-weight config does this).");
-                stage.TimeEmbedder = LtxVaeTimeEmbedder.Load(w, $"{p}.time_embedder", inC * 4);
-            }
+                stage.TimeEmbedder = LtxVaeTimeEmbedder.Load(w, $"{p}.time_embedder", outC * 4);
             _upStages[i] = stage;
             output = outC;
         }

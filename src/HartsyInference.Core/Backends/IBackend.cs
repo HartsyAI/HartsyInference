@@ -239,6 +239,64 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Wan-Video interleaved in-place RoPE (shared cos/sin path): <paramref name="x"/> is
+    /// <c>[S, heads·headDim]</c>; for each <c>(s, head, pair i)</c> the adjacent pair <c>(2i, 2i+1)</c> is rotated by
+    /// the angle at cos/sin index <c>2i</c> (Wan's duplicated-pair layout), with <paramref name="cos"/>/<paramref
+    /// name="sin"/> <c>[S, headDim]</c> shared across heads. Matches <c>WanRope.ApplyRotary</c>. CUDA overrides with a
+    /// kernel so the attention chain stays GPU-resident; the default is the CPU reference.</summary>
+    unsafe void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
+    {
+        float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, sp = (float*)sin.DataPointer;
+        int pairs = headDim / 2;
+        for (int s = 0; s < seqLen; s++)
+            for (int h = 0; h < heads; h++)
+            {
+                long xoff = ((long)s * heads + h) * headDim;
+                long coff = (long)s * headDim;
+                for (int i = 0; i < pairs; i++)
+                {
+                    int i0 = 2 * i;
+                    float re = xp[xoff + i0], im = xp[xoff + i0 + 1];
+                    float c = cp[coff + i0], sn = sp[coff + i0];
+                    xp[xoff + i0] = re * c - im * sn;
+                    xp[xoff + i0 + 1] = re * sn + im * c;
+                }
+            }
+    }
+
+    /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> source into the 4D
+    /// <c>[B,C,H,W]</c> <paramref name="output"/> (a strided temporal slice). Keeps 3D-VAE conv frame ops on-device;
+    /// CUDA overrides, default is a host copy.</summary>
+    unsafe void ExtractVaeFrame(Tensor output, Tensor src, int ti)
+    {
+        int b = (int)output.Shape[0], c = (int)output.Shape[1];
+        long frameHW = output.ElementCount / ((long)b * c);
+        int tsrc = (int)src.Shape[2];
+        float* op = (float*)output.DataPointer, sp = (float*)src.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+            for (int ci = 0; ci < c; ci++)
+                Buffer.MemoryCopy(sp + ((((long)bi * c + ci) * tsrc + ti) * frameHW), op + (((long)bi * c + ci) * frameHW), frameHW * 4, frameHW * 4);
+    }
+
+    /// <summary>Writes the 4D <c>[B,C,H,W]</c> frame <paramref name="acc"/> (plus optional per-channel
+    /// <paramref name="bias"/>) into temporal slot <paramref name="to"/> of the 5D <c>[B,C,Tout,H,W]</c>
+    /// <paramref name="output"/>, in place. CUDA overrides; default is a host copy.</summary>
+    unsafe void WriteVaeFrame(Tensor output, Tensor acc, Tensor? bias, int to)
+    {
+        int b = (int)acc.Shape[0], c = (int)acc.Shape[1];
+        long frameHW = acc.ElementCount / ((long)b * c);
+        int tout = (int)output.Shape[2];
+        float* op = (float*)output.DataPointer, ap = (float*)acc.DataPointer;
+        float* bp = bias is null ? null : (float*)bias.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+            for (int ci = 0; ci < c; ci++)
+            {
+                float bv = bp is null ? 0f : bp[ci];
+                long srcOff = ((long)bi * c + ci) * frameHW, dstOff = (((long)bi * c + ci) * tout + to) * frameHW;
+                for (long i = 0; i < frameHW; i++) op[dstOff + i] = ap[srcOff + i] + bv;
+            }
+    }
+
     /// <summary>In-place rotary position embedding on a single tensor <paramref name="x"/> of shape
     /// <c>[B, L, numHeads, headDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>
     /// broadcast over heads. Same rotate-half math as <see cref="ApplyRope"/> but for one tensor — required for
