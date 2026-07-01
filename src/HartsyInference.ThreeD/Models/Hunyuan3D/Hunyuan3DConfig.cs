@@ -12,23 +12,29 @@ public sealed record Hunyuan3DConfig
     /// <summary>Latent channel dim C (the noised tensor's per-token width).</summary>
     public required int LatentChannels { get; init; }
 
-    /// <summary>DiT hidden width.</summary>
+    /// <summary>DiT hidden width (hidden_size).</summary>
     public required int Width { get; init; }
 
-    /// <summary>Number of DiT blocks.</summary>
-    public required int Depth { get; init; }
+    /// <summary>Number of Flux <b>double</b>-stream blocks (config <c>depth</c>).</summary>
+    public required int DepthDouble { get; init; }
+
+    /// <summary>Number of Flux <b>single</b>-stream blocks (config <c>depth_single_blocks</c>).</summary>
+    public required int DepthSingle { get; init; }
 
     /// <summary>DiT attention heads.</summary>
     public required int NumHeads { get; init; }
 
-    /// <summary>Conditioning token dim (DINOv2 hidden) projected to <see cref="Width"/>.</summary>
+    /// <summary>Conditioning token dim (DINOv2-giant hidden = 1536) projected to <see cref="Width"/> by <c>cond_in</c>.</summary>
     public required int CondDim { get; init; }
 
-    /// <summary>FFN intermediate size in the DiT (typically 4× <see cref="Width"/>).</summary>
+    /// <summary>FFN intermediate size in the DiT (<c>mlp_ratio</c>× <see cref="Width"/> = 4096).</summary>
     public required int MlpDim { get; init; }
 
-    /// <summary>Sinusoidal timestep embedding dim before its MLP.</summary>
+    /// <summary>Sinusoidal timestep embedding dim before its MLP (Flux uses 256).</summary>
     public int TimestepEmbedDim { get; init; } = 256;
+
+    /// <summary>Timestep scale applied before the sinusoid (<c>time_factor</c>, Flux uses 1000).</summary>
+    public float TimeFactor { get; init; } = 1000f;
 
     // --- ShapeVAE decoder ---
     /// <summary>ShapeVAE decoder hidden width.</summary>
@@ -67,8 +73,8 @@ public sealed record Hunyuan3DConfig
     /// Pairs with <c>Dinov2Preset.Large</c> (CondDim = 1024).</summary>
     public static Hunyuan3DConfig Hunyuan3D2 => new()
     {
-        LatentTokens = 3072, LatentChannels = 64, Width = 1024, Depth = 21, NumHeads = 16, CondDim = 1024,
-        MlpDim = 4096, TimestepEmbedDim = 256,
+        LatentTokens = 3072, LatentChannels = 64, Width = 1024, DepthDouble = 16, DepthSingle = 32, NumHeads = 16,
+        CondDim = 1536, MlpDim = 4096, TimestepEmbedDim = 256, TimeFactor = 1000f,
         VaeWidth = 1024, VaeDepth = 16, VaeNumHeads = 16, FourierBands = 8,
         NumInferenceSteps = 50, GuidanceScale = 5.0f, FlowShift = 1.0f,
         GridResolution = 256, IsoLevel = 0f, BoundingBox = 1.01f,
