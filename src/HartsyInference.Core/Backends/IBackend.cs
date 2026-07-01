@@ -297,6 +297,63 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Builds the frame-major padded input <c>[paddedT, cIn, H, W]</c> for BATCHED CausalConv3d: transpose
+    /// (cIn↔T) + causal zero-pad (first <paramref name="zeroPad"/> frames) + cache prepend, from
+    /// <paramref name="input"/> <c>[1,cIn,Tin,H,W]</c> and optional <paramref name="cache"/> <c>[1,cIn,cacheLen,H,W]</c>.
+    /// CUDA overrides.</summary>
+    unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad)
+    {
+        int paddedT = (int)padded.Shape[0], cIn = (int)padded.Shape[1];
+        long HW = padded.ElementCount / ((long)paddedT * cIn);
+        int Tin = (int)input.Shape[2];
+        int cacheLen = cache is null ? 0 : (int)cache.Shape[2];
+        float* pp = (float*)padded.DataPointer, ip = (float*)input.DataPointer;
+        float* cp = cache is null ? null : (float*)cache.DataPointer;
+        for (int t = 0; t < paddedT; t++)
+            for (int ci = 0; ci < cIn; ci++)
+            {
+                long dst = ((long)t * cIn + ci) * HW;
+                if (t < zeroPad) { for (long i = 0; i < HW; i++) pp[dst + i] = 0f; }
+                else
+                {
+                    int az = t - zeroPad;
+                    if (az < cacheLen) { long src = ((long)ci * cacheLen + az) * HW; for (long i = 0; i < HW; i++) pp[dst + i] = cp![src + i]; }
+                    else { int ti = az - cacheLen; if (ti >= Tin) ti = Tin - 1; long src = ((long)ci * Tin + ti) * HW; for (long i = 0; i < HW; i++) pp[dst + i] = ip[src + i]; }
+                }
+            }
+    }
+
+    /// <summary>Fills <paramref name="output"/> <c>[1,cOut,tout,H,W]</c> with per-channel <paramref name="bias"/>
+    /// (or 0 when null). CUDA overrides.</summary>
+    unsafe void FillBias(Tensor output, Tensor? bias)
+    {
+        int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
+        long HW = output.ElementCount / ((long)cOut * tout);
+        float* op = (float*)output.DataPointer; float* bp = bias is null ? null : (float*)bias.DataPointer;
+        for (int co = 0; co < cOut; co++)
+        {
+            float bv = bp is null ? 0f : bp[co];
+            for (int to = 0; to < tout; to++) { long o = ((long)co * tout + to) * HW; for (long i = 0; i < HW; i++) op[o + i] = bv; }
+        }
+    }
+
+    /// <summary>Temporal gather-sum for batched CausalConv3d (in place):
+    /// <c>output[co][to][hw] += convDt[to·strideT+dt][co][hw]</c>. <paramref name="output"/> is
+    /// <c>[1,cOut,tout,H,W]</c>, <paramref name="convDt"/> is <c>[paddedT,cOut,H,W]</c>. CUDA overrides.</summary>
+    unsafe void AccumulateTap(Tensor output, Tensor convDt, int dt, int strideT)
+    {
+        int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
+        long HW = output.ElementCount / ((long)cOut * tout);
+        float* op = (float*)output.DataPointer, cp = (float*)convDt.DataPointer;
+        for (int co = 0; co < cOut; co++)
+            for (int to = 0; to < tout; to++)
+            {
+                int srcT = to * strideT + dt;
+                long o = ((long)co * tout + to) * HW, s = ((long)srcT * cOut + co) * HW;
+                for (long i = 0; i < HW; i++) op[o + i] += cp[s + i];
+            }
+    }
+
     /// <summary>In-place rotary position embedding on a single tensor <paramref name="x"/> of shape
     /// <c>[B, L, numHeads, headDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>
     /// broadcast over heads. Same rotate-half math as <see cref="ApplyRope"/> but for one tensor — required for

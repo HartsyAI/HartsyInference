@@ -177,12 +177,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         float[][]? audio = null;
         int audioSampleRate = 0;
         if (_audioVae is not null && _vocoder is not null)
-        {
-            // Audio decode must not sink the (already-decoded) video: the BigVGAN vocoder uses grouped
-            // ConvTranspose1d which the CUDA backend doesn't yet support — log and return video-only rather than throw.
-            try { audio = DecodeAudio(audioLat, audioFrames, out audioSampleRate); }
-            catch (Exception ex) { Logs.Error("LTX-2 audio decode failed; returning video only.", ex); audio = null; audioSampleRate = 0; }
-        }
+            audio = DecodeAudio(audioLat, audioFrames, out audioSampleRate);
         audioLat.Dispose();
 
         Logs.Info($"LTX-2 complete ({frames.Length} frames" + (audio is not null ? " + audio" : "") + $", seed={seed})");

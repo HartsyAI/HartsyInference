@@ -127,6 +127,12 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     /// <c>BlockStreamingController</c> here to drive prefetch/eviction so the 22B fp8 fits in 24 GB. Null = all resident.</summary>
     public Action<int>? BeforeBlockForward { get; set; }
 
+    /// <summary>Debug/parity hook invoked with the current video + audio hidden states after <c>proj_in</c>
+    /// (index <c>-1</c>) and after each transformer block (index <c>0..BlockCount-1</c>). Used by the numerical parity
+    /// harness to localize where the C# port diverges from the diffusers reference; leave null in production. On a GPU
+    /// backend the tensors are device-resident, so read them from a CPU-backend run (or sync) when dumping.</summary>
+    public Action<int, Tensor, Tensor>? OnBlockOutput { get; set; }
+
     /// <summary>Velocity prediction over both streams. <paramref name="videoTokens"/> is <c>[Sv, inChannels]</c>
     /// (f,h,w order); <paramref name="audioTokens"/> is <c>[Sa, audioInChannels]</c>; <paramref name="encoderVideo"/>
     /// /<paramref name="encoderAudio"/> are the per-modality text-connector outputs (<c>[Lv, 4096]</c>/<c>[La,
@@ -185,10 +191,12 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
             CaAudioRope = _audioRope, CaAudioCos = aCos, CaAudioSin = aSin,
         };
 
+        OnBlockOutput?.Invoke(-1, hidden, audioHidden);   // post-proj_in state (parity harness)
         for (int i = 0; i < _blocks.Length; i++)
         {
             BeforeBlockForward?.Invoke(i);
             (hidden, audioHidden) = _blocks[i].Forward(backend, hidden, audioHidden, ctx);
+            OnBlockOutput?.Invoke(i, hidden, audioHidden);
         }
 
         foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate,

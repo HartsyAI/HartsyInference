@@ -105,6 +105,26 @@ public sealed unsafe class CausalConv3d
         int wOut = (w + 2 * _padW - _kw) / _strideW + 1;
         int zeroPad = _padTLeft - cacheLen;                      // leading all-zero frames
 
+        // FAST PATH — batched convolution (B=1, no first-frame/spatial replicate: i.e. the Wan decode path).
+        // The per-frame loop below fires tout·kt tiny Conv2D+glue ops per layer, leaving the GPU idle ~66% on host
+        // dispatch. Instead build the frame-major padded input ONCE, run kt batched Conv2D calls over ALL frames,
+        // then a temporal gather-sum — ~(2+2·kt) ops instead of tout·kt·4. Zero-pad frames convolve to 0 (no bias
+        // in the per-tap Conv2D), matching the per-frame skip.
+        if (batch == 1 && !_replicateFirstPad && !_spatialReplicatePad)
+        {
+            using Tensor padded = new Tensor(new TensorShape(paddedT, _cIn, h, w), DType.F32);
+            backend.BuildPaddedFrames(padded, input, cacheFrames, zeroPad);
+            Tensor fastOut = new Tensor(new TensorShape([1L, _cOut, tout, hOut, wOut]), DType.F32);
+            backend.FillBias(fastOut, _bias);
+            for (int dt = 0; dt < _kt; dt++)
+            {
+                using Tensor convDt = new Tensor(new TensorShape(paddedT, _cOut, hOut, wOut), DType.F32);
+                backend.Conv2D(convDt, padded, _weight2d[dt], null, _strideH, _strideW, _padH, _padW);
+                backend.AccumulateTap(fastOut, convDt, dt, _strideT);
+            }
+            return fastOut;
+        }
+
         // Device-resident output: every temporal slot is written by WriteVaeFrame below (GPU), so no host clear.
         Tensor output = new Tensor(new TensorShape([(long)batch, _cOut, tout, hOut, wOut]), DType.F32);
 

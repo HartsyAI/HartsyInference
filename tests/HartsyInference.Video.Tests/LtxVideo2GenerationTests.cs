@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -96,7 +97,8 @@ public class LtxVideo2GenerationTests
         int width = int.TryParse(Environment.GetEnvironmentVariable("LTX2_W"), out int w) ? w : 512;
         int height = int.TryParse(Environment.GetEnvironmentVariable("LTX2_H"), out int h) ? h : 320;
         _output.WriteLine($"[3/5] Generating {numFrames}f {width}x{height}, {steps} steps (NUMERIC OUTPUT VALIDATION-PENDING)...");
-        LtxVideo2Pipeline pipeline = new(backend, transformer, connectors, vae, gemma, cfg, audioVae, vocoder);
+        LtxVideo2Pipeline pipeline = new(backend, transformer, connectors, vae, gemma, cfg, audioVae, vocoder,
+            audioLatentsMean, audioLatentsStd);
         TextToImageRequest req = new() { Prompt = "cat", Width = width, Height = height, Steps = steps, CfgScale = cfg.GuidanceScale, Seed = 42 };
         LtxVideo2Pipeline.Ltx2Result result = pipeline.GenerateFromTokens(promptTokens, negTokens, req, numFrames,
             frameRate: 24.0, p => _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
@@ -116,6 +118,60 @@ public class LtxVideo2GenerationTests
     {
         foreach (VideoFrame f in frames) { yield return f; await Task.Yield(); }
     }
+
+    /// <summary>Isolates the video-VAE grid artifact: decode ONE fixed random latent through the LTX-2 video VAE on
+    /// BOTH the CUDA and CPU backends and dump the middle frame of each. If CUDA shows a 32-px grid but CPU does not,
+    /// the bug is the CUDA host-glue/activation-cache stale-read (GPU-residency fix); if both match, the VAE logic is
+    /// the issue (or the grid lives upstream in the DiT). Fast — no DiT, tiny latent.</summary>
+    [Fact]
+    public async Task LtxVideo2_VaeDecode_CudaVsCpu_Diagnostic()
+    {
+        string ckpt = TestPaths.LtxVideo2.SingleFile;
+        if (!File.Exists(ckpt)) { _output.WriteLine($"SKIPPED: {ckpt} not found."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(LtxVideo2GenerationTests).Assembly.Location)!, "Ptx");
+        (LtxVideo2CheckpointConverter.ConvertedWeights conv, SafeTensorsLoader loader) = LtxVideo2CheckpointConverter.LoadAndConvert(ckpt);
+        using SafeTensorsLoader _l = loader;
+        float[]? lm = ExtractStat(conv.Vae, "latents_mean"), ls = ExtractStat(conv.Vae, "latents_std");
+
+        // Tiny smooth-ish random latent [1,128,2,6,8] → output 9×192×256. Same data for both backends.
+        int C = 128, T = 2, H = 6, W = 8;
+        TensorShape shape = new([1L, C, T, H, W]);
+        long n = shape.ElementCount;
+        float[] data = new float[n];
+        Random rng = new(1234);
+        for (long i = 0; i < n; i++) data[i] = (float)(rng.NextDouble() * 2 - 1);
+        unsafe void Fill(Tensor t) { fixed (float* dp = data) Buffer.MemoryCopy(dp, (void*)t.DataPointer, n * 4, n * 4); }
+
+        string outDir = Path.Combine(TestPaths.OutputDir, "ltx2_vae_diag");
+        Directory.CreateDirectory(outDir);
+        foreach ((string tag, IBackend backend, bool dispose) in Backends(ptxDir))
+        {
+            using IBackend b = dispose ? backend : null!;
+            LtxVideo2VaeDecoder vae = new(latentsMean: lm, latentsStd: ls);
+            vae.LoadWeights(CastWeightsToF32(conv.Vae));
+            Tensor latent = new(shape, DType.F32);
+            Fill(latent);
+            Tensor rgb = vae.Decode(backend, latent);
+            latent.Dispose();
+            int mid = (int)rgb.Shape[2] / 2;
+            byte[] frame = VideoRgbFrames.ExtractFrame(rgb, mid);
+            int w = (int)rgb.Shape[4], h = (int)rgb.Shape[3];
+            double sum = 0, sum2 = 0; foreach (byte px in frame) { sum += px; sum2 += (double)px * px; }
+            double mean = sum / frame.Length, std = Math.Sqrt(sum2 / frame.Length - mean * mean);
+            await new BmpSequenceEncoder().EncodeAsync(One(new VideoFrame(0, w, h, frame)), Path.Combine(outDir, tag), fps: 1);
+            _output.WriteLine($"[VAE-DIAG {tag}] {w}x{h} mean={mean:F1} std={std:F1} → {Path.Combine(outDir, tag)}");
+            rgb.Dispose();
+        }
+    }
+
+    private static IEnumerable<(string, IBackend, bool)> Backends(string ptxDir)
+    {
+        yield return ("cpu", new HartsyInference.Cpu.CpuBackend(), true);
+        if (Directory.Exists(ptxDir))
+            yield return ("cuda", new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir), true);
+    }
+
+    private static async IAsyncEnumerable<VideoFrame> One(VideoFrame f) { yield return f; await Task.Yield(); }
 
     private static unsafe float[]? ExtractStat(Dictionary<string, Tensor> vae, string key)
     {

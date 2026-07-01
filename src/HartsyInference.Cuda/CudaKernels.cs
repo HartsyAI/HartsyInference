@@ -12,6 +12,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _transposeModule;
     private readonly CudaModule _wanRopeModule;
     private readonly CudaModule _wanVaeFramesModule;
+    private readonly CudaModule _wanVaeConv3dModule;
     private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
@@ -126,6 +127,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _wanRopeInterleaved;
     private readonly nint _wanVaeExtractFrame;
     private readonly nint _wanVaeWriteFrame;
+    private readonly nint _wanVaeBuildPadded;
+    private readonly nint _wanVaeFillBias;
+    private readonly nint _wanVaeAccumulateTap;
 
     // ── GeGlu function handles ───────────────────────────────────────────
     private readonly nint _gegluF32;
@@ -225,6 +229,11 @@ public sealed class CudaKernels : IDisposable
         _wanVaeFramesModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_frames.ptx"));
         _wanVaeExtractFrame = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame");
         _wanVaeWriteFrame = _wanVaeFramesModule.GetFunction("wan_vae_write_frame");
+
+        _wanVaeConv3dModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_conv3d.ptx"));
+        _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
+        _wanVaeFillBias = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias");
+        _wanVaeAccumulateTap = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap");
 
         _gegluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "geglu_f32.ptx"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
@@ -1501,6 +1510,41 @@ public sealed class CudaKernels : IDisposable
         long total = (long)B * C * frameHW;
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_wanVaeWriteFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Builds the frame-major padded input [paddedT, cIn, H, W] (transpose + causal zero-pad + cache) for
+    /// batched CausalConv3d. <paramref name="cache"/>=0 for none.</summary>
+    public unsafe void LaunchWanVaeBuildPadded(ulong padded, ulong input, ulong cache, int paddedT, int cIn, int Tin, int cacheLen, int zeroPad, int HW, nint stream)
+    {
+        ulong pA = padded, iA = input, cA = cache; uint ptA = (uint)paddedT, ciA = (uint)cIn, tiA = (uint)Tin, clA = (uint)cacheLen, zpA = (uint)zeroPad, hwA = (uint)HW;
+        void** args = stackalloc void*[9];
+        args[0] = &pA; args[1] = &iA; args[2] = &cA; args[3] = &ptA; args[4] = &ciA; args[5] = &tiA; args[6] = &clA; args[7] = &zpA; args[8] = &hwA;
+        long total = (long)paddedT * cIn * HW;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fills output [cOut, tout, HW] with per-channel bias (or 0 when <paramref name="bias"/>=0).</summary>
+    public unsafe void LaunchWanVaeFillBias(ulong outp, ulong bias, int cOut, int tout, int HW, nint stream)
+    {
+        ulong oA = outp, bA = bias; uint coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;
+        void** args = stackalloc void*[5];
+        args[0] = &oA; args[1] = &bA; args[2] = &coA; args[3] = &toA; args[4] = &hwA;
+        long total = (long)cOut * tout * HW;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeFillBias, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Temporal gather-sum: out[co][to][hw] += convDt[to·strideT+dt][co][hw]. out=[cOut,tout,HW],
+    /// convDt=[paddedT,cOut,HW].</summary>
+    public unsafe void LaunchWanVaeAccumulateTap(ulong outp, ulong convDt, int dt, int strideT, int cOut, int tout, int HW, nint stream)
+    {
+        ulong oA = outp, cA = convDt; uint dtA = (uint)dt, stA = (uint)strideT, coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;
+        void** args = stackalloc void*[7];
+        args[0] = &oA; args[1] = &cA; args[2] = &dtA; args[3] = &stA; args[4] = &coA; args[5] = &toA; args[6] = &hwA;
+        long total = (long)cOut * tout * HW;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeAccumulateTap, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     // ── GeGlu Launches ──────────────────────────────────────────────────

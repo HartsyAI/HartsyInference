@@ -1229,6 +1229,82 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>GPU build of the frame-major padded input for batched CausalConv3d (transpose + causal zero-pad +
+    /// cache prepend), so the whole conv layer runs as kt batched Conv2D calls instead of tout·kt tiny ones.</summary>
+    public unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int paddedT = (int)padded.Shape[0], cIn = (int)padded.Shape[1];
+        int HW = (int)(padded.ElementCount / ((long)paddedT * cIn));
+        int Tin = (int)input.Shape[2];
+        int cacheLen = cache is null ? 0 : (int)cache.Shape[2];
+        ulong pOut = 0, pIn = 0, pCache = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            if (cache is not null) pCache = GpuTransferHelper.CopyToDevice(cache);
+            nuint outBytes = GpuTransferHelper.ByteSize(padded);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchWanVaeBuildPadded(pOut, pIn, pCache, paddedT, cIn, Tin, cacheLen, zeroPad, HW, _stream.Handle);
+            GpuTransferHelper.CacheActivation(padded, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            if (pCache != 0) GpuTransferHelper.FreeDevice(pCache);
+        }
+    }
+
+    /// <summary>GPU fill of the conv output with per-channel bias (init for the temporal accumulate).</summary>
+    public unsafe void FillBias(Tensor output, Tensor? bias)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
+        int HW = (int)(output.ElementCount / ((long)cOut * tout));
+        ulong pOut = 0, pBias = 0;
+        bool cachedOutput = false;
+        try
+        {
+            if (bias is not null) pBias = GpuTransferHelper.CopyToDevice(bias);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchWanVaeFillBias(pOut, pBias, cOut, tout, HW, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (pBias != 0) GpuTransferHelper.FreeDevice(pBias);
+        }
+    }
+
+    /// <summary>GPU temporal gather-sum (in place): output += the dt-shifted frames of convDt.</summary>
+    public unsafe void AccumulateTap(Tensor output, Tensor convDt, int dt, int strideT)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
+        int HW = (int)(output.ElementCount / ((long)cOut * tout));
+        ulong pOut = 0, pConv = 0;
+        try
+        {
+            pOut = GpuTransferHelper.CopyToDevice(output);   // in-place accumulate target
+            pConv = GpuTransferHelper.CopyToDevice(convDt);
+            _kernels!.LaunchWanVaeAccumulateTap(pOut, pConv, dt, strideT, cOut, tout, HW, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, GpuTransferHelper.ByteSize(output));   // in-place re-assert
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pConv);   // pOut is output's cached buffer — do not free
+        }
+    }
+
     /// <summary>In-place rotary embedding on a single GPU-resident tensor <c>[B, L, numHeads, headDim]</c>.
     /// Used by grouped-query attention where Q and K differ in head count (the paired <see cref="ApplyRope"/>
     /// would mis-stride K). cos/sin are <c>[B, L, headDim]</c>.</summary>
