@@ -1,3 +1,5 @@
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for LTX-2.3 (Lightricks, 22B) — a dual-stream audio+video DiT. Verified against the
@@ -45,10 +47,13 @@ public sealed record LtxVideo2Config
 
     // ── Norms ──
     public float NormEps { get; init; } = 1e-6f;
-    /// <summary>QK-RMSNorm "rms_norm_across_heads" epsilon.</summary>
-    public float QkNormEps { get; init; } = 1e-5f;
+    /// <summary>QK-RMSNorm "rms_norm_across_heads" epsilon (diffusers <c>norm_eps</c> = 1e-6).</summary>
+    public float QkNormEps { get; init; } = 1e-6f;
 
     // ── RoPE ──
+    /// <summary>Rotary apply convention. LTX-2.3 (22B) ships <c>rope_type=split</c> in the checkpoint metadata; base
+    /// LTX / the diffusers default is interleaved. Applying the wrong flavor scrambles spatial positions (32px grid).</summary>
+    public LtxVideo2Rope.RopeType RopeType { get; init; } = LtxVideo2Rope.RopeType.Split;
     public float RopeTheta { get; init; } = 10000.0f;
     public int RopeBaseNumFrames { get; init; } = 20;
     public int RopeBaseHeight { get; init; } = 2048;

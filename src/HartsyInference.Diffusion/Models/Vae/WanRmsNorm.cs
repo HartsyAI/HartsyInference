@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -27,6 +28,17 @@ public sealed unsafe class WanRmsNorm
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_gamma is not null) yield return _gamma;
+    }
+
+    /// <summary>GPU-resident overload: keeps the norm on-device (host <see cref="Forward(Tensor)"/> would force a
+    /// D2H sync + H2D re-upload around every call — and this fires ~30× per decoded frame).</summary>
+    public Tensor Forward(IBackend backend, Tensor x)
+    {
+        int c = (int)x.Shape[1];
+        if (c != _channels) throw new ArgumentException($"input channels {c} != {_channels}.", nameof(x));
+        Tensor outT = new Tensor(x.Shape, DType.F32);
+        backend.WanRmsNormChannel(outT, x, _gamma, _eps);
+        return outT;
     }
 
     /// <summary>Returns a new <c>[B, C, T, H, W]</c> tensor: per position, <c>out[c] = x[c] / rms_over_C(x) · gamma[c]</c>.</summary>

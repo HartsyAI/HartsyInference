@@ -36,6 +36,21 @@ public static unsafe class Wan22VaePatch
     }
 
     /// <summary>Inverse of <see cref="Patchify"/>: <c>[B, C·p², T, H, W] → [B, C, T, H·p, W·p]</c>.</summary>
+    /// <summary>GPU-resident overload: keeps unpatchify on-device (host <see cref="Unpatchify(Tensor,int)"/> forces a
+    /// D2H sync + H2D re-upload, once per decoded frame).</summary>
+    public static Tensor Unpatchify(HartsyInference.Core.Backends.IBackend backend, Tensor x, int patchSize)
+    {
+        if (patchSize == 1) return CloneRef(x);
+        int b = (int)x.Shape[0], packedC = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
+        int p = patchSize;
+        if (packedC % (p * p) != 0)
+            throw new ArgumentException($"Channels {packedC} not divisible by p² ({p * p}).");
+        int c = packedC / (p * p);
+        Tensor outT = new Tensor(new TensorShape([(long)b, c, t, h * p, w * p]), DType.F32);
+        backend.UnpatchifyVae(outT, x, patchSize);
+        return outT;
+    }
+
     public static Tensor Unpatchify(Tensor x, int patchSize)
     {
         if (patchSize == 1) return CloneRef(x);

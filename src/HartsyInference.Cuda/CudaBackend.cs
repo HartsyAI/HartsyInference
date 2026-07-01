@@ -1305,6 +1305,113 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>GPU channel-wise RMS norm for the Wan2.2 VAE (one thread per <c>[B, spatial]</c> position reduces over C).</summary>
+    public unsafe void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int b = (int)input.Shape[0], c = (int)input.Shape[1];
+        long spatial = input.ElementCount / ((long)b * c);
+        long numPos = (long)b * spatial;
+        float sqrtC = MathF.Sqrt(c);
+        ulong pOut = 0, pIn = 0, pGamma = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            if (gamma is not null) pGamma = GpuTransferHelper.CopyToDevice(gamma);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchWanVaeRmsNormChannel(pOut, pIn, pGamma, c, spatial, eps, sqrtC, numPos, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            if (pGamma != 0) GpuTransferHelper.FreeDevice(pGamma);
+        }
+    }
+
+    /// <summary>GPU Wan2.2 VAE unpatchify (pixel-shuffle), one thread per output element.</summary>
+    public unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int b = (int)input.Shape[0], packedC = (int)input.Shape[1], t = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
+        int p = patchSize, c = packedC / (p * p);
+        long numOut = output.ElementCount;
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchWanVaeUnpatchify(pOut, pIn, b, c, t, h, w, p, numOut, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
+    /// <summary>GPU Wan2.2 VAE attention qkv split (channel↔token transpose into three [bt,1,hw,c] tensors).</summary>
+    public unsafe void SplitVaeQkv(Tensor q, Tensor k, Tensor v, Tensor qkv, int bt, int c, int hw)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        long numEl = (long)bt * c * hw;
+        ulong pQ = 0, pK = 0, pV = 0, pSrc = 0;
+        bool cached = false;
+        try
+        {
+            pSrc = GpuTransferHelper.CopyToDevice(qkv);
+            nuint bytes = GpuTransferHelper.ByteSize(q);
+            pQ = GpuTransferHelper.AllocateDevice(bytes);
+            pK = GpuTransferHelper.AllocateDevice(bytes);
+            pV = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchWanVaeSplitQkv(pQ, pK, pV, pSrc, bt, c, hw, numEl, _stream.Handle);
+            GpuTransferHelper.CacheActivation(q, pQ, bytes);
+            GpuTransferHelper.CacheActivation(k, pK, bytes);
+            GpuTransferHelper.CacheActivation(v, pV, bytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) { GpuTransferHelper.FreeDevice(pQ); GpuTransferHelper.FreeDevice(pK); GpuTransferHelper.FreeDevice(pV); }
+            GpuTransferHelper.FreeDevice(pSrc);
+        }
+    }
+
+    /// <summary>GPU Wan2.2 VAE attention output un-transpose ([bt,1,hw,c] → [bt,c,h,w]).</summary>
+    public unsafe void VaeTokensToFrame(Tensor output, Tensor attn, int bt, int c, int hw)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        long numEl = (long)bt * c * hw;
+        ulong pOut = 0, pAttn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pAttn = GpuTransferHelper.CopyToDevice(attn);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchWanVaeTokensToFrame(pOut, pAttn, bt, c, hw, numEl, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pAttn);
+        }
+    }
+
     /// <summary>In-place rotary embedding on a single GPU-resident tensor <c>[B, L, numHeads, headDim]</c>.
     /// Used by grouped-query attention where Q and K differ in head count (the paired <see cref="ApplyRope"/>
     /// would mis-stride K). cos/sin are <c>[B, L, headDim]</c>.</summary>

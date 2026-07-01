@@ -94,7 +94,7 @@ public sealed unsafe class Wan22Resample
 
         if (_mode == Wan22ResampleMode.Upsample3d && cache is not null && _timeConv is not null)
         {
-            (bool skip, Tensor? convCache) = cache.StepTimeConv(x);
+            (bool skip, Tensor? convCache) = cache.StepTimeConv(backend, x);
             if (!skip)
             {
                 Tensor tc = _timeConv.Forward(backend, x, convCache);   // [B, 2C, T, H, W]
@@ -106,7 +106,7 @@ public sealed unsafe class Wan22Resample
         }
 
         int b = (int)spatialIn.Shape[0], c = (int)spatialIn.Shape[1], t = (int)spatialIn.Shape[2], h = (int)spatialIn.Shape[3], w = (int)spatialIn.Shape[4];
-        Tensor frames = Vae3dLayout.ToFrames(spatialIn, b, c, t, h, w);   // [BT,C,H,W]
+        Tensor frames = Vae3dLayout.ToFrames(backend, spatialIn);        // [BT,C,H,W], on-device
         if (ownsSpatialIn) spatialIn.Dispose();
         Tensor up = new Tensor(new TensorShape(b * t, c, h * 2, w * 2), DType.F32);
         backend.UpsampleNearest2D(up, frames, 2, 2);
@@ -116,7 +116,7 @@ public sealed unsafe class Wan22Resample
         Tensor conv = new Tensor(new TensorShape(b * t, outC, h * 2, w * 2), DType.F32);
         backend.Conv2D(conv, up, _convW!, _convB, 1, 1, 1, 1);
         up.Dispose();
-        Tensor outT = Vae3dLayout.FromFrames(conv, b, outC, t, h * 2, w * 2);
+        Tensor outT = Vae3dLayout.FromFrames(backend, conv, b, outC, t, h * 2, w * 2);
         conv.Dispose();
         return outT;
     }

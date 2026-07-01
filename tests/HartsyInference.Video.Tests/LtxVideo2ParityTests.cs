@@ -27,6 +27,7 @@ public unsafe class LtxVideo2ParityTests
     private const int InCh = 8, Inner = 16, AudioInner = 8, OutCh = 8, NumLayers = 2;
     private const double Fps = 24.0;
     private const float Timestep = 500.0f;
+    private const float Sigma = 0.5f;      // unscaled flow sigma (prompt_adaln); matches the Python harness
 
     private static LtxVideo2Config TinyConfig() => new()
     {
@@ -38,6 +39,8 @@ public unsafe class LtxVideo2ParityTests
         AudioCrossAttentionDim = AudioInner,
         NumLayers = NumLayers, FfnMultiplier = 4,
         SelfAttnModParams = 9, CrossAttnMod = true,
+        RopeType = LtxVideo2Rope.RopeType.Split,   // LTX-2.3 22B
+
         NormEps = 1e-6f,
         QkNormEps = 1e-6f,                         // match diffusers norm_eps (prod uses 1e-5 — see findings)
         RopeTheta = 10000f, RopeBaseNumFrames = 20, RopeBaseHeight = 2048, RopeBaseWidth = 2048,
@@ -73,8 +76,9 @@ public unsafe class LtxVideo2ParityTests
         if (File.Exists(ropeCosPath))
         {
             int[] videoScale = { 8, 32, 32 };
-            LtxVideo2Rope rope = HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.LtxVideo2Rope.ForVideoSelf(
-                Inner, 10000.0, 20, 2048, 2048, videoScale, causalOffset: 1);
+            LtxVideo2Rope rope = LtxVideo2Rope.ForVideoSelf(
+                Inner, 10000.0, 20, 2048, 2048, videoScale, causalOffset: 1,
+                LtxVideo2Rope.RopeType.Split, numHeads: 2, headDim: 8);
             (Tensor cos, Tensor sin) = rope.BuildVideo(TLat, HLat, WLat, Fps);
             double cosRel = RelL2(HostFloats(cos), ReadBin(ropeCosPath));
             double sinRel = RelL2(HostFloats(sin), ReadBin(Path.Combine(dir, "rope_video_sin.bin")));
@@ -108,7 +112,7 @@ public unsafe class LtxVideo2ParityTests
         };
 
         (Tensor video, Tensor audio) = transformer.Forward(backend, videoTokens, audioTokens, encVideo, encAudio,
-            Timestep, (TLat, HLat, WLat), Sa, Fps, null, null);
+            Timestep, (TLat, HLat, WLat), Sa, Fps, null, null, Sigma);
 
         double outRel = RelL2(HostFloats(video), refDump["out_velocity"]);
 

@@ -13,6 +13,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _wanRopeModule;
     private readonly CudaModule _wanVaeFramesModule;
     private readonly CudaModule _wanVaeConv3dModule;
+    private readonly CudaModule _wanVaeNormModule;
     private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
@@ -130,6 +131,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _wanVaeBuildPadded;
     private readonly nint _wanVaeFillBias;
     private readonly nint _wanVaeAccumulateTap;
+    private readonly nint _wanVaeRmsNormChannel;
+    private readonly nint _wanVaeUnpatchify;
+    private readonly nint _wanVaeSplitQkv;
+    private readonly nint _wanVaeTokensToFrame;
 
     // ── GeGlu function handles ───────────────────────────────────────────
     private readonly nint _gegluF32;
@@ -234,6 +239,12 @@ public sealed class CudaKernels : IDisposable
         _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
         _wanVaeFillBias = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias");
         _wanVaeAccumulateTap = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap");
+
+        _wanVaeNormModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "wan_vae_norm.ptx"));
+        _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
+        _wanVaeUnpatchify = _wanVaeNormModule.GetFunction("wan_vae_unpatchify");
+        _wanVaeSplitQkv = _wanVaeNormModule.GetFunction("wan_vae_split_qkv");
+        _wanVaeTokensToFrame = _wanVaeNormModule.GetFunction("wan_vae_tokens_to_frame");
 
         _gegluModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "geglu_f32.ptx"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
@@ -1525,6 +1536,42 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Fills output [cOut, tout, HW] with per-channel bias (or 0 when <paramref name="bias"/>=0).</summary>
+    public unsafe void LaunchWanVaeRmsNormChannel(ulong outp, ulong x, ulong gamma, int c, long spatial, float eps, float sqrtC, long numPos, nint stream)
+    {
+        ulong oA = outp, xA = x, gA = gamma; int cA = c; long spA = spatial, npA = numPos; float eA = eps, scA = sqrtC;
+        void** args = stackalloc void*[8];
+        args[0] = &oA; args[1] = &xA; args[2] = &gA; args[3] = &cA; args[4] = &spA; args[5] = &eA; args[6] = &scA; args[7] = &npA;
+        uint gridDim = (uint)((numPos + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeRmsNormChannel, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    public unsafe void LaunchWanVaeUnpatchify(ulong outp, ulong x, int b, int c, int t, int h, int w, int p, long numOut, nint stream)
+    {
+        ulong oA = outp, xA = x; int bA = b, cA = c, tA = t, hA = h, wA = w, pA = p; long nA = numOut;
+        void** args = stackalloc void*[9];
+        args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &cA; args[4] = &tA; args[5] = &hA; args[6] = &wA; args[7] = &pA; args[8] = &nA;
+        uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    public unsafe void LaunchWanVaeSplitQkv(ulong q, ulong k, ulong v, ulong src, int bt, int c, int hw, long numEl, nint stream)
+    {
+        ulong qA = q, kA = k, vA = v, sA = src; int btA = bt, cA = c, hwA = hw; long nA = numEl;
+        void** args = stackalloc void*[8];
+        args[0] = &qA; args[1] = &kA; args[2] = &vA; args[3] = &sA; args[4] = &btA; args[5] = &cA; args[6] = &hwA; args[7] = &nA;
+        uint gridDim = (uint)((numEl + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeSplitQkv, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    public unsafe void LaunchWanVaeTokensToFrame(ulong outp, ulong a, int bt, int c, int hw, long numEl, nint stream)
+    {
+        ulong oA = outp, aA = a; int btA = bt, cA = c, hwA = hw; long nA = numEl;
+        void** args = stackalloc void*[6];
+        args[0] = &oA; args[1] = &aA; args[2] = &btA; args[3] = &cA; args[4] = &hwA; args[5] = &nA;
+        uint gridDim = (uint)((numEl + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_wanVaeTokensToFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     public unsafe void LaunchWanVaeFillBias(ulong outp, ulong bias, int cOut, int tout, int HW, nint stream)
     {
         ulong oA = outp, bA = bias; uint coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;

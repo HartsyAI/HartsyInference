@@ -38,10 +38,12 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
         _baseSeqLen = baseSeqLen;
         _numRegisters = numRegisters;
         _numBlocks = numBlocks;
+        // The connector 1D rope follows the checkpoint-global rope_type (split for LTX-2.3); its head layout is the
+        // connector attention's own (video/audio) heads.
         _video = new Connector(_videoDim, c.NumHeads, c.HeadDim, c.NormEps, c.QkNormEps, numBlocks, numRegisters,
-            LtxVideo2Rope.ForConnector1d(_videoDim, _theta, baseSeqLen));
+            LtxVideo2Rope.ForConnector1d(_videoDim, _theta, baseSeqLen, c.RopeType, c.NumHeads, c.HeadDim));
         _audio = new Connector(_audioDim, c.AudioNumHeads, c.AudioHeadDim, c.NormEps, c.QkNormEps, numBlocks, numRegisters,
-            LtxVideo2Rope.ForConnector1d(_audioDim, _theta, baseSeqLen));
+            LtxVideo2Rope.ForConnector1d(_audioDim, _theta, baseSeqLen, c.RopeType, c.AudioNumHeads, c.AudioHeadDim));
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)

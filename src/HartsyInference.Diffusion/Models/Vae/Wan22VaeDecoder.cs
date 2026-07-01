@@ -145,7 +145,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         List<Tensor> groups = new();
         foreach (Tensor g in DecodeRgbGroups(backend, x)) groups.Add(g);
         x.Dispose();
-        Tensor rgb = groups.Count == 1 ? groups[0] : Vae3dLayout.ConcatFrames(groups);
+        Tensor rgb = groups.Count == 1 ? groups[0] : Vae3dLayout.ConcatFrames(backend, groups);
         if (groups.Count != 1) foreach (Tensor g in groups) g.Dispose();
         return rgb;
     }
@@ -176,7 +176,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         if (t == 1)
         {
             Tensor twelve = DecodeFrame(backend, x, cache: null, firstChunk: true);
-            Tensor rgb = Wan22VaePatch.Unpatchify(twelve, 2);
+            Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, 2);
             twelve.Dispose();
             yield return rgb;
             yield break;
@@ -185,10 +185,10 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         for (int i = 0; i < t; i++)
         {
             cache.NewFrame();
-            Tensor frame = Vae3dLayout.SliceFrames(x, i, 1);
+            Tensor frame = Vae3dLayout.SliceFrames(backend, x, i, 1);
             Tensor twelve = DecodeFrame(backend, frame, cache, firstChunk: i == 0);
             frame.Dispose();
-            Tensor rgb = Wan22VaePatch.Unpatchify(twelve, 2);
+            Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, 2);
             twelve.Dispose();
             yield return rgb;
         }
@@ -197,7 +197,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
     /// <summary>Decodes a single latent frame <c>[B, 48, 1, H, W]</c> through the Decoder3d graph to the pre-unpatchify 12-channel frame(s). With <paramref name="cache"/> non-null, every CausalConv3d threads its temporal cache (in forward order) and the temporal Resample doubles T from the second chunk on.</summary>
     private Tensor DecodeFrame(IBackend backend, Tensor x, Wan22StreamCache? cache, bool firstChunk)
     {
-        Tensor? cc = cache?.StepConv(x);
+        Tensor? cc = cache?.StepConv(backend, x);
         Tensor h = _conv1!.Forward(backend, x, cc);
         cc?.Dispose();
 
@@ -237,10 +237,10 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
             }
         }
 
-        Tensor hn = _headNorm!.Forward(cur);
+        Tensor hn = _headNorm!.Forward(backend, cur);
         cur.Dispose();
         backend.Silu(hn, hn);
-        Tensor? hcc = cache?.StepConv(hn);
+        Tensor? hcc = cache?.StepConv(backend, hn);
         Tensor twelve = _headConv!.Forward(backend, hn, hcc);
         hcc?.Dispose();
         hn.Dispose();

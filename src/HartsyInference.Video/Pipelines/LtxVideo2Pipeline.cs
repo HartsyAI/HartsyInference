@@ -134,12 +134,13 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         {
             Stopwatch sw = Stopwatch.StartNew();
             float dt = tsteps[k] - tsteps[k + 1];
-            float tEmb = tsteps[k] * _config.TimestepScaleMultiplier;   // ≈0..1000
+            float sigma = tsteps[k];                                    // raw flow sigma (≈1..0), for prompt_adaln
+            float tEmb = sigma * _config.TimestepScaleMultiplier;       // ≈0..1000, for the other modulators
 
             (Tensor vCondV, Tensor vCondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoPos, encAudioPos,
-                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null);
+                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
             (Tensor vUncondV, Tensor vUncondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoNeg, encAudioNeg,
-                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null);
+                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
 
             LancePipelineCommon.EulerCfgStep(videoLat, vCondV, vUncondV, guidance, dt);
             LancePipelineCommon.EulerCfgStep(audioLat, vCondA, vUncondA, guidance, dt);

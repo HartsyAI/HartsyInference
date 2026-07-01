@@ -19,11 +19,11 @@ divergent block/op.
 Run:  python ltx2_transformer_parity_dump.py [OUT_DIR]      (default: /tmp/ltx2_parity)
 Uses the diffusers in /home/hartsy/hfvenv (activate it or run its python).
 
-NOTE ON sigma: LTX-2.3 feeds the UNSCALED flow sigma (0..1) to prompt_adaln / (optionally) the av-ca
-adalns, while our C# LtxVideo2Transformer.Forward feeds the SCALED timestep (0..1000) to prompt_adaln.
-To keep this harness a clean test of the *rest* of the network, we set sigma == timestep here so both
-sides feed the same number to prompt_adaln. That masks the sigma-vs-timestep discrepancy on purpose;
-it is reported separately in the findings and is NOT the grid bug.
+NOTE ON sigma: LTX-2.3 feeds the UNSCALED flow sigma (0..1) to prompt_adaln, while the other modulators
+use the SCALED timestep (0..1000). This harness uses distinct values (timestep=500, sigma=0.5) so the C#
+side (which now takes an explicit `sigma` arg on Forward) is verified to route sigma to prompt_adaln and
+timestep everywhere else — if C# mistakenly fed timestep to prompt_adaln, the text-cross-attn block would
+diverge here.
 """
 import os
 import sys
@@ -60,7 +60,7 @@ CFG = dict(
     attention_bias=True, attention_out_bias=True,
     rope_theta=10000.0, rope_double_precision=True, causal_offset=1,
     timestep_scale_multiplier=1000, cross_attn_timestep_scale_multiplier=1000,
-    rope_type="interleaved", use_prompt_embeddings=False, perturbed_attn=False,
+    rope_type="split", use_prompt_embeddings=False, perturbed_attn=False,   # LTX-2.3 22B is split
 )
 
 model = LTX2VideoTransformer3DModel(**CFG).eval()
@@ -76,7 +76,7 @@ SA = 5                                  # audio tokens
 LV, LA = 7, 6                           # text seq lengths (video / audio connectors)
 FPS = 24.0
 TIMESTEP = 500.0
-SIGMA = 500.0                           # == TIMESTEP on purpose (see module docstring)
+SIGMA = 0.5                             # UNSCALED flow sigma (0..1); distinct from timestep to verify the C# sigma fix
 
 vid = torch.randn(1, SV, 8)
 aud = torch.randn(1, SA, 8)
@@ -104,9 +104,18 @@ for i, blk in enumerate(model.transformer_blocks):
 with torch.no_grad():
     vcoords = model.rope.prepare_video_coords(1, T_LAT, H_LAT, W_LAT, torch.device("cpu"), fps=FPS)
     vcos, vsin = model.rope(vcoords, device=torch.device("cpu"))
-    np.ascontiguousarray(vcos.squeeze(0).float().cpu().numpy(), dtype=np.float32).tofile(
+
+    def rope_to_token_major(t):
+        # C# LtxVideo2Rope.BuildVideo produces [T, cosWidth] (token-major, lane = h*(headDim/2)+i).
+        # Interleaved rope returns [B, T, dim]; split returns [B, H, T, headDim/2] — fold the latter back to
+        # [T, H*(headDim/2)] = [T, dim/2] so the layouts match for the relL2 compare.
+        if t.ndim == 4:                          # [B, H, T, r] -> [T, H*r]
+            return t.squeeze(0).permute(1, 0, 2).reshape(SV, -1).float().cpu().numpy()
+        return t.squeeze(0).float().cpu().numpy()  # [B, T, dim] -> [T, dim]
+
+    np.ascontiguousarray(rope_to_token_major(vcos), dtype=np.float32).tofile(
         os.path.join(OUT, "rope_video_cos.bin"))
-    np.ascontiguousarray(vsin.squeeze(0).float().cpu().numpy(), dtype=np.float32).tofile(
+    np.ascontiguousarray(rope_to_token_major(vsin), dtype=np.float32).tofile(
         os.path.join(OUT, "rope_video_sin.bin"))
 
 with torch.no_grad():

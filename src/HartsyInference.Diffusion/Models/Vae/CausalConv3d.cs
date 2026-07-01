@@ -10,6 +10,10 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <para>Operates on 5-D tensors <c>[B, C, T, H, W]</c>. Bias is added once after the temporal sum.</para></summary>
 public sealed unsafe class CausalConv3d
 {
+    /// <summary>Test-only escape hatch: forces the original per-frame accumulate loop instead of the batched fast path,
+    /// so a parity test can prove the two produce identical output. Never set in production.</summary>
+    public static bool DisableBatchedPath;
+
     private readonly int _cOut;
     private readonly int _cIn;
     private readonly int _kt;
@@ -110,7 +114,7 @@ public sealed unsafe class CausalConv3d
         // dispatch. Instead build the frame-major padded input ONCE, run kt batched Conv2D calls over ALL frames,
         // then a temporal gather-sum — ~(2+2·kt) ops instead of tout·kt·4. Zero-pad frames convolve to 0 (no bias
         // in the per-tap Conv2D), matching the per-frame skip.
-        if (batch == 1 && !_replicateFirstPad && !_spatialReplicatePad)
+        if (batch == 1 && !_replicateFirstPad && !_spatialReplicatePad && !DisableBatchedPath)
         {
             using Tensor padded = new Tensor(new TensorShape(paddedT, _cIn, h, w), DType.F32);
             backend.BuildPaddedFrames(padded, input, cacheFrames, zeroPad);

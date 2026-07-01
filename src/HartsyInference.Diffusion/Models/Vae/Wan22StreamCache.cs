@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -26,14 +27,14 @@ public sealed unsafe class Wan22StreamCache : IDisposable
     }
 
     /// <summary>Standard residual/decoder/head <c>CausalConv3d</c>: returns the previous frame's cache (to feed <c>conv.Forward(x, cache)</c>, then dispose it) and stashes this frame's last frames. Returns null on the first frame (zero-pad).</summary>
-    public Tensor? StepConv(Tensor convInput)
+    public Tensor? StepConv(IBackend backend, Tensor convInput)
     {
         int idx = Next();
         Tensor? prev = _slots[idx] as Tensor;
-        Tensor cacheX = Vae3dLayout.SliceFrames(convInput, FramesOf(convInput) - Math.Min(CacheT, FramesOf(convInput)), Math.Min(CacheT, FramesOf(convInput)));
+        Tensor cacheX = Vae3dLayout.SliceFrames(backend, convInput, FramesOf(convInput) - Math.Min(CacheT, FramesOf(convInput)), Math.Min(CacheT, FramesOf(convInput)));
         if (FramesOf(cacheX) < 2 && prev is not null)
         {
-            Tensor merged = Vae3dLayout.PrependLastFrameOf(prev, cacheX);
+            Tensor merged = Vae3dLayout.PrependLastFrameOf(backend, prev, cacheX);
             cacheX.Dispose();
             cacheX = merged;
         }
@@ -42,7 +43,7 @@ public sealed unsafe class Wan22StreamCache : IDisposable
     }
 
     /// <summary>Resample temporal <c>time_conv</c>: on the first frame, marks the slot "Rep" and returns <c>(skip:true)</c> so the caller skips the temporal conv entirely (image / first chunk). Afterwards returns the cache (or null when transitioning from "Rep") to feed <c>time_conv.Forward(x, cache)</c>.</summary>
-    public (bool Skip, Tensor? Cache) StepTimeConv(Tensor convInput)
+    public (bool Skip, Tensor? Cache) StepTimeConv(IBackend backend, Tensor convInput)
     {
         int idx = Next();
         object? slot = _slots[idx];
@@ -54,16 +55,16 @@ public sealed unsafe class Wan22StreamCache : IDisposable
 
         bool isRep = ReferenceEquals(slot, _repMarker);
         int avail = Math.Min(CacheT, FramesOf(convInput));
-        Tensor cacheX = Vae3dLayout.SliceFrames(convInput, FramesOf(convInput) - avail, avail);
+        Tensor cacheX = Vae3dLayout.SliceFrames(backend, convInput, FramesOf(convInput) - avail, avail);
         if (FramesOf(cacheX) < 2 && !isRep)
         {
-            Tensor merged = Vae3dLayout.PrependLastFrameOf((Tensor)slot, cacheX);
+            Tensor merged = Vae3dLayout.PrependLastFrameOf(backend, (Tensor)slot, cacheX);
             cacheX.Dispose();
             cacheX = merged;
         }
         else if (FramesOf(cacheX) < 2 && isRep)
         {
-            Tensor merged = Vae3dLayout.PrependZeroFrame(cacheX);
+            Tensor merged = Vae3dLayout.PrependZeroFrame(backend, cacheX);
             cacheX.Dispose();
             cacheX = merged;
         }

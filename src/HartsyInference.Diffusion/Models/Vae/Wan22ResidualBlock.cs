@@ -51,26 +51,28 @@ public sealed unsafe class Wan22ResidualBlock
     /// <summary>Forward over <c>[B, inDim, T, H, W]</c> → <c>[B, outDim, T, H, W]</c>. Pass <paramref name="cache"/> for streaming video decode (the two CausalConv3d layers thread their temporal cache through it, in order); null = stateless image/first-chunk path. The 1×1×1 shortcut conv is never cached.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Wan22StreamCache? cache = null)
     {
-        Tensor shortcut = _shortcut is null ? CloneRef(x) : _shortcut.Forward(backend, x);
+        // Identity shortcut (in==out): add the untouched input x directly — no host clone. The norm/conv path below
+        // allocates fresh tensors and never mutates x, so it is still valid at the residual add.
+        Tensor? shortcut = _shortcut?.Forward(backend, x);
 
-        Tensor r1 = _norm1.Forward(x);
+        Tensor r1 = _norm1.Forward(backend, x);
         Silu(backend, r1);
-        Tensor? cc1 = cache?.StepConv(r1);
+        Tensor? cc1 = cache?.StepConv(backend, r1);
         Tensor c1 = _conv1!.Forward(backend, r1, cc1);
         cc1?.Dispose();
         r1.Dispose();
-        Tensor r2 = _norm2.Forward(c1);
+        Tensor r2 = _norm2.Forward(backend, c1);
         c1.Dispose();
         Silu(backend, r2);
-        Tensor? cc2 = cache?.StepConv(r2);
+        Tensor? cc2 = cache?.StepConv(backend, r2);
         Tensor c2 = _conv2!.Forward(backend, r2, cc2);
         cc2?.Dispose();
         r2.Dispose();
 
         Tensor outT = new Tensor(c2.Shape, DType.F32);
-        backend.Add(outT, c2, shortcut);
+        backend.Add(outT, c2, shortcut ?? x);
         c2.Dispose();
-        shortcut.Dispose();
+        shortcut?.Dispose();
         return outT;
     }
 
@@ -78,12 +80,4 @@ public sealed unsafe class Wan22ResidualBlock
 
     private static Tensor? Bias(IReadOnlyDictionary<string, Tensor> w, string key) =>
         w.TryGetValue(key, out Tensor? b) ? b : null;
-
-    private static Tensor CloneRef(Tensor x)
-    {
-        Tensor t = new Tensor(x.Shape, x.DType);
-        long n = x.Shape.ElementCount;
-        Buffer.MemoryCopy(x.DataPointer, t.DataPointer, n * 4, n * 4);
-        return t;
-    }
 }

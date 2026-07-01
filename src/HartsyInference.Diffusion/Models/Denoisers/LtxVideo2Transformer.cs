@@ -47,14 +47,21 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         for (int i = 0; i < config.NumLayers; i++) _blocks[i] = new LtxVideo2Block(config);
 
         int[] videoScale = [config.VaeTemporalCompression, config.VaeSpatialCompression, config.VaeSpatialCompression];
+        // rope_type (split for LTX-2.3) + the per-rope head layout drive the split apply (pairs the two halves within
+        // each head). Video self uses the video heads; the audio and both cross-modal ropes use the audio heads
+        // (the a2v query, v2a query and audio self all run at the 32×64 audio head config, inner 2048).
         _videoRope = LtxVideo2Rope.ForVideoSelf(config.InnerDim, config.RopeTheta, config.RopeBaseNumFrames,
-            config.RopeBaseHeight, config.RopeBaseWidth, videoScale, config.CausalOffset);
-        // Cross-modal video rope uses the audio-cross width (= audio inner dim) and the temporal axis only.
+            config.RopeBaseHeight, config.RopeBaseWidth, videoScale, config.CausalOffset,
+            config.RopeType, config.NumHeads, config.HeadDim);
+        // Cross-modal video rope uses the audio-cross width (= audio inner dim), the temporal axis only, and the
+        // a2v attention's (audio) head layout.
         _caVideoRope = LtxVideo2Rope.ForVideoCross(config.AudioCrossAttentionDim, config.RopeTheta,
-            config.RopeBaseNumFrames, config.RopeBaseHeight, config.RopeBaseWidth, videoScale, config.CausalOffset);
+            config.RopeBaseNumFrames, config.RopeBaseHeight, config.RopeBaseWidth, videoScale, config.CausalOffset,
+            config.RopeType, config.AudioNumHeads, config.AudioHeadDim);
         // Audio self and audio-cross share coordinates and width (2048) — one rope serves both.
         _audioRope = LtxVideo2Rope.ForAudio(config.AudioInnerDim, config.RopeTheta, config.AudioPosEmbedMaxPos,
-            config.AudioScaleFactor, config.CausalOffset, config.AudioSamplingRate, config.AudioHopLength);
+            config.AudioScaleFactor, config.CausalOffset, config.AudioSamplingRate, config.AudioHopLength,
+            config.RopeType, config.AudioNumHeads, config.AudioHeadDim);
 
         _gateScaleFactor = (float)config.CrossAttnTimestepScaleMultiplier / config.TimestepScaleMultiplier;
 
@@ -141,8 +148,12 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     public (Tensor Video, Tensor Audio) Forward(IBackend backend, Tensor videoTokens, Tensor audioTokens,
         Tensor encoderVideo, Tensor encoderAudio, float timestep,
         (int Frames, int Height, int Width) grid, int audioFrames, double fps,
-        Tensor? encoderVideoMask, Tensor? encoderAudioMask)
+        Tensor? encoderVideoMask, Tensor? encoderAudioMask, float sigma = float.NaN)
     {
+        // prompt_adaln (text cross-attn KV/Q modulation) is driven by the UNSCALED flow sigma (0..1) in the reference,
+        // NOT the ×1000-scaled timestep the other modulators use. Callers pass the raw sigma; default to
+        // timestep/scale if unset for back-compat.
+        if (float.IsNaN(sigma)) sigma = timestep / _config.TimestepScaleMultiplier;
         int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
         int v = _config.InnerDim, a = _config.AudioInnerDim;
 
@@ -158,8 +169,8 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         Tensor? tPromptV = null, tPromptA = null;
         if (_hasPromptMod)
         {
-            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, timestep); _pv.Dispose();
-            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, timestep); _pa.Dispose();
+            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, sigma); _pv.Dispose();
+            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, sigma); _pa.Dispose();
         }
         (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
         (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();

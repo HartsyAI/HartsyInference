@@ -354,6 +354,84 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>Wan2.2 VAE channel-wise RMS norm (<c>vae.py</c> <c>RMS_norm</c>): for each position over the flattened
+    /// <c>[B, C, spatial]</c>, <c>scale = sqrt(C)/max(L2_over_C, eps)</c> and <c>out[c] = x[c]·scale·gamma[c]</c>
+    /// (equivalently x/rms over the channel axis). <paramref name="gamma"/> may be null. Default = host reference loop.</summary>
+    unsafe void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
+    {
+        int b = (int)input.Shape[0], c = (int)input.Shape[1];
+        long spatial = input.ElementCount / ((long)b * c);
+        float sqrtC = MathF.Sqrt(c);
+        float* xp = (float*)input.DataPointer, op = (float*)output.DataPointer;
+        float* g = gamma is null ? null : (float*)gamma.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+        {
+            long baseB = (long)bi * c * spatial;
+            for (long s = 0; s < spatial; s++)
+            {
+                double sumSq = 0;
+                for (int ci = 0; ci < c; ci++) { float v = xp[baseB + (long)ci * spatial + s]; sumSq += (double)v * v; }
+                float denom = MathF.Max((float)Math.Sqrt(sumSq), eps);
+                float scale = sqrtC / denom;
+                for (int ci = 0; ci < c; ci++)
+                {
+                    long off = baseB + (long)ci * spatial + s;
+                    op[off] = xp[off] * scale * (g is null ? 1f : g[ci]);
+                }
+            }
+        }
+    }
+
+    /// <summary>Wan2.2 VAE unpatchify / pixel-shuffle: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c> with channel
+    /// unpack <c>oc = ci·p² + r·p + q</c> at out spatial <c>(hh·p+q, ww·p+r)</c>. Default = host reference loop.</summary>
+    unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
+    {
+        int b = (int)input.Shape[0], packedC = (int)input.Shape[1], t = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
+        int p = patchSize, c = packedC / (p * p), outH = h * p, outW = w * p;
+        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+            for (int ci = 0; ci < c; ci++)
+                for (int ti = 0; ti < t; ti++)
+                    for (int hh = 0; hh < h; hh++)
+                        for (int ww = 0; ww < w; ww++)
+                            for (int q = 0; q < p; q++)
+                                for (int r = 0; r < p; r++)
+                                {
+                                    int oc = ci * p * p + r * p + q;
+                                    long srcOff = ((((long)bi * packedC + oc) * t + ti) * h + hh) * w + ww;
+                                    long dstOff = ((((long)bi * c + ci) * t + ti) * outH + (hh * p + q)) * outW + (ww * p + r);
+                                    dst[dstOff] = src[srcOff];
+                                }
+    }
+
+    /// <summary>Wan2.2 VAE attention qkv split: <c>src [bt, 3c, h, w] → q,k,v each [bt, 1, hw, c]</c>. Default = host loop.</summary>
+    unsafe void SplitVaeQkv(Tensor q, Tensor k, Tensor v, Tensor qkv, int bt, int c, int hw)
+    {
+        float* src = (float*)qkv.DataPointer, qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer;
+        long frame = hw;
+        for (int i = 0; i < bt; i++)
+            for (int ci = 0; ci < c; ci++)
+                for (int token = 0; token < hw; token++)
+                {
+                    long srcBase = ((long)i * 3 * c) * frame + token;
+                    long dstOff = ((long)i * hw + token) * c + ci;
+                    qp[dstOff] = src[srcBase + (long)ci * frame];
+                    kp[dstOff] = src[srcBase + (long)(c + ci) * frame];
+                    vp[dstOff] = src[srcBase + (long)(2 * c + ci) * frame];
+                }
+    }
+
+    /// <summary>Wan2.2 VAE attention output un-transpose: <c>attn [bt, 1, hw, c] → out [bt, c, h, w]</c>. Default = host loop.</summary>
+    unsafe void VaeTokensToFrame(Tensor output, Tensor attn, int bt, int c, int hw)
+    {
+        float* a = (float*)attn.DataPointer, o = (float*)output.DataPointer;
+        long frame = hw;
+        for (int i = 0; i < bt; i++)
+            for (int ci = 0; ci < c; ci++)
+                for (int token = 0; token < hw; token++)
+                    o[((long)i * c + ci) * frame + token] = a[((long)i * hw + token) * c + ci];
+    }
+
     /// <summary>In-place rotary position embedding on a single tensor <paramref name="x"/> of shape
     /// <c>[B, L, numHeads, headDim]</c>; <paramref name="cos"/>/<paramref name="sin"/> are <c>[B, L, headDim]</c>
     /// broadcast over heads. Same rotate-half math as <see cref="ApplyRope"/> but for one tensor — required for

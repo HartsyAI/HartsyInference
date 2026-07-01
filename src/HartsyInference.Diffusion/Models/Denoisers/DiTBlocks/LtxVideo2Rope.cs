@@ -3,25 +3,41 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>LTX-2.3 audio/video rotary position embedding (<c>LTX2AudioVideoRotaryPosEmbed</c> +
-/// <c>apply_interleaved_rotary_emb</c> in diffusers <c>transformer_ltx2.py</c>). Same interleaved-pair complex form
-/// and full-dim apply as <see cref="LtxRope"/> (LTX-1); the per-token coordinates are computed in <b>pixel / time
-/// space</b> (latent patch <c>[start, end)</c> bounds × VAE scale factors, temporal axis shifted by
-/// <c>causal_offset</c> and divided by fps for video or converted to seconds for audio, then patch-midpoint and
-/// base-shape normalized). Four flavors are needed by the DiT: video self (dim 4096, 3 axes), audio self (dim 2048,
-/// 1 axis), and the two cross-modal attentions (dim 2048, 1 <b>temporal-only</b> axis — the cross-attn rope uses
-/// only <c>coords[:, 0]</c>). The audio cross rope is numerically identical to the audio self rope.</summary>
+/// <c>apply_interleaved_rotary_emb</c> / <c>apply_split_rotary_emb</c> in diffusers <c>transformer_ltx2.py</c>). The
+/// per-token coordinates are computed in <b>pixel / time space</b> (latent patch <c>[start, end)</c> bounds × VAE
+/// scale factors, temporal axis shifted by <c>causal_offset</c> and divided by fps for video or converted to seconds
+/// for audio, then patch-midpoint and base-shape normalized) — identical for both apply flavors.
 ///
-/// <remarks>Per axis there are <c>dim / (2·numAxes)</c> log-spaced frequencies (<c>θ^linspace(0,1,n)·π/2</c>);
-/// phase = <c>freq·(normCoord·2−1)</c>. cos/sin are <c>[S, dim]</c> with per-axis values interleaved (k-outer,
-/// axis-inner) and pair-duplicated, a leading <c>dim % (2·numAxes)</c> identity pad (cos=1, sin=0) filling the
-/// remainder. <see cref="ApplyRotary"/> matches <see cref="LtxRope.ApplyRotary"/> exactly.</remarks>
+/// <para><b>Two apply flavors</b> (selected by <see cref="RopeType"/>, checkpoint-configured):
+/// <list type="bullet">
+/// <item><b>Interleaved</b> (base LTX / diffusers default): cos/sin are <c>[S, dim]</c>, per-axis values interleaved
+/// (k-outer, axis-inner) and pair-duplicated with a leading <c>dim % (2·numAxes)</c> identity pad; rotation pairs
+/// adjacent lanes <c>(2j, 2j+1)</c> across the full dim.</item>
+/// <item><b>Split</b> (LTX-2.3 22B — <c>rope_type=split</c> in the checkpoint metadata): cos/sin are <c>[S, dim/2]</c>
+/// (NO duplication), front-padded with <c>dim/2 − freqsPerAxis·numAxes</c> identity lanes, then laid out per head so
+/// head <c>h</c> owns lanes <c>[h·headDim/2, (h+1)·headDim/2)</c>; rotation pairs <c>(h·headDim+i, h·headDim+i+headDim/2)</c>
+/// — the two halves WITHIN each head — using compact <c>headDim/2</c> frequencies. Applying the wrong flavor scrambles
+/// spatial positions (the LTX-2.3 32px-lattice bug).</item></list></para>
+///
+/// <para>Four flavors are needed by the DiT: video self (dim 4096, 3 axes, 32×128 heads), audio self (dim 2048, 1
+/// axis, 32×64 heads), and the two cross-modal attentions (dim 2048, 1 <b>temporal-only</b> axis, 32×64 heads — the
+/// cross-attn rope uses only <c>coords[:, 0]</c>). The audio cross rope is numerically identical to the audio self
+/// rope. <see cref="ApplyRotary"/> runs on the full-dim <c>[S, dim]</c> Q/K before the head split (equivalent to the
+/// reference's per-head apply).</para></summary>
 public sealed unsafe class LtxVideo2Rope
 {
     public enum Modality { Video, Audio }
 
+    /// <summary>Rotary apply convention. <see cref="Split"/> is LTX-2.3 (22B checkpoint <c>rope_type=split</c>);
+    /// <see cref="Interleaved"/> is base LTX / the diffusers default.</summary>
+    public enum RopeType { Interleaved, Split }
+
     private readonly Modality _modality;
+    private readonly RopeType _ropeType;
     private readonly bool _temporalOnly;    // video cross-attn: use only the temporal axis (1-axis rope)
-    private readonly int _dim;
+    private readonly int _dim;              // full inner dim (Q/K width the rope is applied to)
+    private readonly int _numHeads, _headDim;   // head layout (split mode pairs the two halves within each head)
+    private readonly int _cosWidth;         // width of the cos/sin table: interleaved = dim, split = dim/2
     private readonly int _baseFrames, _baseHeight, _baseWidth;
     private readonly int _patchSize, _patchSizeT;
     private readonly int _causalOffset;
@@ -29,34 +45,40 @@ public sealed unsafe class LtxVideo2Rope
     private readonly int _samplingRate, _hopLength;
     private readonly int _numAxes;          // 3 (video self), 1 (audio / video-cross)
     private readonly int _freqsPerAxis;     // dim / (2 · numAxes)
-    private readonly int _pad;              // dim % (2 · numAxes)
+    private readonly int _pad;              // interleaved leading identity pad = dim % (2 · numAxes)
+    private readonly int _padSplit;         // split leading identity pad = dim/2 − freqsPerAxis · numAxes
     private readonly double[] _freqBase;    // theta^linspace(0,1,n) · π/2
 
     /// <summary>Video self-attention RoPE: 3 axes (frame, height, width).</summary>
     public static LtxVideo2Rope ForVideoSelf(int dim, double theta, int baseFrames, int baseHeight, int baseWidth,
-        int[] scaleFactors, int causalOffset, int patchSize = 1, int patchSizeT = 1) =>
-        new(Modality.Video, temporalOnly: false, dim, theta, baseFrames, baseHeight, baseWidth, scaleFactors,
-            causalOffset, samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
+        int[] scaleFactors, int causalOffset, RopeType ropeType, int numHeads, int headDim,
+        int patchSize = 1, int patchSizeT = 1) =>
+        new(Modality.Video, ropeType, temporalOnly: false, dim, numHeads, headDim, theta, baseFrames, baseHeight,
+            baseWidth, scaleFactors, causalOffset, samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
 
-    /// <summary>Video cross-attention RoPE: 1 temporal-only axis (uses <c>coords[:, 0]</c>).</summary>
+    /// <summary>Video cross-attention RoPE: 1 temporal-only axis (uses <c>coords[:, 0]</c>). The head layout is the
+    /// cross-attn's (a2v) query head config, not the video self-attn's.</summary>
     public static LtxVideo2Rope ForVideoCross(int dim, double theta, int baseFrames, int baseHeight, int baseWidth,
-        int[] scaleFactors, int causalOffset, int patchSize = 1, int patchSizeT = 1) =>
-        new(Modality.Video, temporalOnly: true, dim, theta, baseFrames, baseHeight, baseWidth, scaleFactors,
-            causalOffset, samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
+        int[] scaleFactors, int causalOffset, RopeType ropeType, int numHeads, int headDim,
+        int patchSize = 1, int patchSizeT = 1) =>
+        new(Modality.Video, ropeType, temporalOnly: true, dim, numHeads, headDim, theta, baseFrames, baseHeight,
+            baseWidth, scaleFactors, causalOffset, samplingRate: 0, hopLength: 0, patchSize, patchSizeT);
 
     /// <summary>Audio RoPE (self and cross are identical): 1 axis, coordinates in seconds.</summary>
     public static LtxVideo2Rope ForAudio(int dim, double theta, int baseFrames, int audioScaleFactor,
-        int causalOffset, int samplingRate, int hopLength, int patchSizeT = 1) =>
-        new(Modality.Audio, temporalOnly: false, dim, theta, baseFrames, baseHeight: 0, baseWidth: 0,
-            [audioScaleFactor], causalOffset, samplingRate, hopLength, patchSize: 1, patchSizeT);
+        int causalOffset, int samplingRate, int hopLength, RopeType ropeType, int numHeads, int headDim,
+        int patchSizeT = 1) =>
+        new(Modality.Audio, ropeType, temporalOnly: false, dim, numHeads, headDim, theta, baseFrames, baseHeight: 0,
+            baseWidth: 0, [audioScaleFactor], causalOffset, samplingRate, hopLength, patchSize: 1, patchSizeT);
 
     /// <summary>Text-connector 1D RoPE (<c>LTX2RotaryPosEmbed1d</c>): 1 axis, coordinate = <c>pos / base_seq_len</c>
     /// (the base sequence length is stored in the frame-base slot).</summary>
-    public static LtxVideo2Rope ForConnector1d(int dim, double theta, int baseSeqLen) =>
-        new(Modality.Audio, temporalOnly: false, dim, theta, baseFrames: baseSeqLen, baseHeight: 0, baseWidth: 0,
-            [1], causalOffset: 0, samplingRate: 0, hopLength: 0, patchSize: 1, patchSizeT: 1);
+    public static LtxVideo2Rope ForConnector1d(int dim, double theta, int baseSeqLen, RopeType ropeType,
+        int numHeads, int headDim) =>
+        new(Modality.Audio, ropeType, temporalOnly: false, dim, numHeads, headDim, theta, baseFrames: baseSeqLen,
+            baseHeight: 0, baseWidth: 0, [1], causalOffset: 0, samplingRate: 0, hopLength: 0, patchSize: 1, patchSizeT: 1);
 
-    /// <summary>Builds connector cos/sin <c>[seqLen, dim]</c> with positions <c>i / base_seq_len</c>.</summary>
+    /// <summary>Builds connector cos/sin <c>[seqLen, cosWidth]</c> with positions <c>i / base_seq_len</c>.</summary>
     public (Tensor Cos, Tensor Sin) BuildConnector(int seqLen)
     {
         (Tensor cos, Tensor sin) = Alloc(seqLen);
@@ -67,12 +89,16 @@ public sealed unsafe class LtxVideo2Rope
         return (cos, sin);
     }
 
-    private LtxVideo2Rope(Modality modality, bool temporalOnly, int dim, double theta, int baseFrames, int baseHeight,
-        int baseWidth, int[] scaleFactors, int causalOffset, int samplingRate, int hopLength, int patchSize, int patchSizeT)
+    private LtxVideo2Rope(Modality modality, RopeType ropeType, bool temporalOnly, int dim, int numHeads, int headDim,
+        double theta, int baseFrames, int baseHeight, int baseWidth, int[] scaleFactors, int causalOffset,
+        int samplingRate, int hopLength, int patchSize, int patchSizeT)
     {
         _modality = modality;
+        _ropeType = ropeType;
         _temporalOnly = temporalOnly;
         _dim = dim;
+        _numHeads = numHeads;
+        _headDim = headDim;
         _baseFrames = baseFrames;
         _baseHeight = baseHeight;
         _baseWidth = baseWidth;
@@ -86,6 +112,18 @@ public sealed unsafe class LtxVideo2Rope
         int numRopeElems = _numAxes * 2;
         _freqsPerAxis = dim / numRopeElems;
         _pad = dim % numRopeElems;
+        _cosWidth = ropeType == RopeType.Split ? dim / 2 : dim;
+        _padSplit = _cosWidth - _freqsPerAxis * _numAxes;      // front identity pad for the split (dim/2) layout
+
+        if (ropeType == RopeType.Split)
+        {
+            if (headDim % 2 != 0)
+                throw new ArgumentException($"Split RoPE requires an even head dim; got {headDim}.", nameof(headDim));
+            if (numHeads * headDim != dim)
+                throw new ArgumentException($"Split RoPE: numHeads·headDim ({numHeads}·{headDim}) != dim ({dim}).");
+            if (_padSplit < 0)
+                throw new ArgumentException($"Split RoPE: negative pad ({_padSplit}) for dim {dim}, axes {_numAxes}.");
+        }
 
         _freqBase = new double[_freqsPerAxis];
         for (int k = 0; k < _freqsPerAxis; k++)
@@ -97,7 +135,7 @@ public sealed unsafe class LtxVideo2Rope
 
     public int Dim => _dim;
 
-    /// <summary>Builds video cos/sin <c>[F·H·W, dim]</c> (row-major <c>(f,h,w)</c>). For the temporal-only (cross)
+    /// <summary>Builds video cos/sin <c>[F·H·W, cosWidth]</c> (row-major <c>(f,h,w)</c>). For the temporal-only (cross)
     /// flavor each token's single coordinate is its frame midpoint; otherwise all three axes are written.</summary>
     public (Tensor Cos, Tensor Sin) BuildVideo(int numFrames, int height, int width, double fps)
     {
@@ -126,7 +164,7 @@ public sealed unsafe class LtxVideo2Rope
         return (cos, sin);
     }
 
-    /// <summary>Builds audio cos/sin <c>[numFrames, dim]</c>; coordinates are patch-midpoint timestamps in seconds.</summary>
+    /// <summary>Builds audio cos/sin <c>[numFrames, cosWidth]</c>; coordinates are patch-midpoint timestamps in seconds.</summary>
     public (Tensor Cos, Tensor Sin) BuildAudio(int numFrames, int shift = 0)
     {
         if (_modality != Modality.Audio) throw new InvalidOperationException("BuildAudio on a video RoPE.");
@@ -156,33 +194,53 @@ public sealed unsafe class LtxVideo2Rope
         return ((tStart + tEnd) / 2.0) / _baseFrames;
     }
 
-    /// <summary>Writes one token's cos/sin row: leading identity pad, then k-outer/axis-inner interleaved pairs.</summary>
+    /// <summary>Writes one token's cos/sin row. Interleaved: leading identity pad, then k-outer/axis-inner pairs,
+    /// each pair-duplicated across two lanes (width <c>dim</c>). Split: leading identity pad, then k-outer/axis-inner
+    /// singles, NO duplication (width <c>dim/2</c>) — the per-head halving happens in <see cref="ApplyRotary"/>.</summary>
     private void WriteToken(float* cp, float* sp, long token, double[] normCoord)
     {
-        long baseOff = token * _dim;
-        for (int d = 0; d < _pad; d++) { cp[baseOff + d] = 1f; sp[baseOff + d] = 0f; }
-        int outIdx = _pad;
-        for (int k = 0; k < _freqsPerAxis; k++)
-            for (int axis = 0; axis < _numAxes; axis++)
-            {
-                double phase = _freqBase[k] * (normCoord[axis] * 2.0 - 1.0);
-                float c = (float)Math.Cos(phase);
-                float s = (float)Math.Sin(phase);
-                cp[baseOff + outIdx] = c; sp[baseOff + outIdx] = s;
-                cp[baseOff + outIdx + 1] = c; sp[baseOff + outIdx + 1] = s;
-                outIdx += 2;
-            }
+        long baseOff = token * _cosWidth;
+        if (_ropeType == RopeType.Interleaved)
+        {
+            for (int d = 0; d < _pad; d++) { cp[baseOff + d] = 1f; sp[baseOff + d] = 0f; }
+            int outIdx = _pad;
+            for (int k = 0; k < _freqsPerAxis; k++)
+                for (int axis = 0; axis < _numAxes; axis++)
+                {
+                    double phase = _freqBase[k] * (normCoord[axis] * 2.0 - 1.0);
+                    float c = (float)Math.Cos(phase);
+                    float s = (float)Math.Sin(phase);
+                    cp[baseOff + outIdx] = c; sp[baseOff + outIdx] = s;
+                    cp[baseOff + outIdx + 1] = c; sp[baseOff + outIdx + 1] = s;
+                    outIdx += 2;
+                }
+        }
+        else   // Split: cos/sin width dim/2, front-padded, no duplication.
+        {
+            for (int d = 0; d < _padSplit; d++) { cp[baseOff + d] = 1f; sp[baseOff + d] = 0f; }
+            int outIdx = _padSplit;
+            for (int k = 0; k < _freqsPerAxis; k++)
+                for (int axis = 0; axis < _numAxes; axis++)
+                {
+                    double phase = _freqBase[k] * (normCoord[axis] * 2.0 - 1.0);
+                    cp[baseOff + outIdx] = (float)Math.Cos(phase);
+                    sp[baseOff + outIdx] = (float)Math.Sin(phase);
+                    outIdx++;
+                }
+        }
     }
 
     private (Tensor, Tensor) Alloc(int seq)
     {
-        Tensor cos = new(new TensorShape(seq, _dim), DType.F32);
-        Tensor sin = new(new TensorShape(seq, _dim), DType.F32);
+        Tensor cos = new(new TensorShape(seq, _cosWidth), DType.F32);
+        Tensor sin = new(new TensorShape(seq, _cosWidth), DType.F32);
         return (cos, sin);
     }
 
-    /// <summary>Applies the interleaved-pair rotation in-place to <paramref name="x"/> <c>[S, dim]</c> (full-dim Q or
-    /// K before head split). cos/sin are <c>[S, dim]</c>. Identical to <see cref="LtxRope.ApplyRotary"/>.</summary>
+    /// <summary>Applies the rotation in-place to <paramref name="x"/> <c>[S, dim]</c> (full-dim Q or K before the head
+    /// split). Interleaved: cos/sin are <c>[S, dim]</c>, pairs are adjacent lanes. Split: cos/sin are <c>[S, dim/2]</c>,
+    /// head <c>h</c> rotates its two halves <c>(h·headDim+i, h·headDim+i+headDim/2)</c> using cos/sin lane
+    /// <c>h·(headDim/2)+i</c> (matches diffusers <c>apply_split_rotary_emb</c> after the per-head reshape).</summary>
     public void ApplyRotary(Tensor x, Tensor cos, Tensor sin)
     {
         int seq = (int)x.Shape[0];
@@ -191,19 +249,44 @@ public sealed unsafe class LtxVideo2Rope
         float* xp = (float*)x.DataPointer;
         float* cp = (float*)cos.DataPointer;
         float* sp = (float*)sin.DataPointer;
-        int pairs = _dim / 2;
 
-        for (int s = 0; s < seq; s++)
+        if (_ropeType == RopeType.Interleaved)
         {
-            long off = (long)s * _dim;
-            for (int j = 0; j < pairs; j++)
+            int pairs = _dim / 2;
+            for (int s = 0; s < seq; s++)
             {
-                int i0 = (int)off + 2 * j;
-                int i1 = i0 + 1;
-                float re = xp[i0], im = xp[i1];
-                float c = cp[i0], sn = sp[i0];   // cos[2j] == cos[2j+1], sin likewise
-                xp[i0] = re * c - im * sn;
-                xp[i1] = im * c + re * sn;
+                long off = (long)s * _dim;
+                for (int j = 0; j < pairs; j++)
+                {
+                    long i0 = off + 2 * j;
+                    long i1 = i0 + 1;
+                    float re = xp[i0], im = xp[i1];
+                    float c = cp[i0], sn = sp[i0];   // cos[2j] == cos[2j+1], sin likewise
+                    xp[i0] = re * c - im * sn;
+                    xp[i1] = im * c + re * sn;
+                }
+            }
+        }
+        else   // Split: rotate the two halves within each head.
+        {
+            int r = _headDim / 2;                     // per-head cos/sin width = headDim/2
+            for (int s = 0; s < seq; s++)
+            {
+                long xoff = (long)s * _dim;
+                long coff = (long)s * _cosWidth;
+                for (int h = 0; h < _numHeads; h++)
+                {
+                    long headBase = xoff + (long)h * _headDim;
+                    long cosBase = coff + (long)h * r;
+                    for (int i = 0; i < r; i++)
+                    {
+                        float a = xp[headBase + i];
+                        float b = xp[headBase + i + r];
+                        float c = cp[cosBase + i], sn = sp[cosBase + i];
+                        xp[headBase + i] = a * c - b * sn;
+                        xp[headBase + i + r] = b * c + a * sn;
+                    }
+                }
             }
         }
     }

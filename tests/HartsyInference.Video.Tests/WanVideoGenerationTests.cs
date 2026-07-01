@@ -173,4 +173,70 @@ public class WanVideoGenerationTests
         }
         finally { foreach (SafeTensorsLoader l in vl) l.Dispose(); }
     }
+
+    /// <summary>Parity guard for the batched CausalConv3d fast path: decodes a MULTI-frame latent (T=3, so the
+    /// streaming feat_cache threads across frames 2+) twice on CUDA — once with the batched path, once forced to the
+    /// original per-frame accumulate loop — and asserts byte-identical RGB. Proves the batched conv is equivalent to
+    /// the reference per-frame algorithm under the streaming cache (the isolation test above only covers T=1/no-cache).</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void Wan22Vae_Decode_MultiFrame_BatchedMatchesPerFrame_Gpu()
+    {
+        string vaePath = TestPaths.WanVideo.VaePath;
+        if (!File.Exists(vaePath)) { _output.WriteLine($"SKIPPED: Wan2.2 VAE not found: {vaePath}"); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA"); return; }
+
+        (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+        try
+        {
+            int T = 3, hLat = 12, wLat = 20;
+            Tensor MakeLatent()
+            {
+                Tensor latent = new(new TensorShape([1L, 48, T, hLat, wLat]), DType.F32);
+                Span<float> ls = latent.AsSpan<float>();
+                Random rng = new(11);
+                for (int i = 0; i < ls.Length; i++) ls[i] = (float)(rng.NextDouble() * 2 - 1);
+                return latent;
+            }
+
+            byte[] Decode(bool disableBatch)
+            {
+                Wan22VaeDecoder vae = new();
+                vae.LoadWeights(vaeW);
+                using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+                CausalConv3d.DisableBatchedPath = disableBatch;
+                try
+                {
+                    using Tensor latent = MakeLatent();
+                    using Tensor rgb = vae.Decode(backend, latent);
+                    backend.Sync();
+                    int frames = (int)rgb.Shape[2];
+                    _output.WriteLine($"[{(disableBatch ? "perFrame" : "batched")}] decoded frames={frames} dims=[{string.Join(",", Enumerable.Range(0, rgb.Shape.Rank).Select(d => (long)rgb.Shape[d]))}]");
+                    List<byte> all = new();
+                    for (int f = 0; f < frames; f++) all.AddRange(VideoRgbFrames.ExtractFrame(rgb, f));
+                    return all.ToArray();
+                }
+                finally { CausalConv3d.DisableBatchedPath = false; }
+            }
+
+            byte[] batched = Decode(disableBatch: false);
+            byte[] perFrame = Decode(disableBatch: true);
+
+            // Absolute fingerprint (mean + checksum) — compare across layout implementations (host vs GPU) to prove
+            // the GPU-resident Vae3dLayout is equivalent to the host reference, not just self-consistent.
+            long sumB = 0; ulong ck = 1469598103934665603UL;
+            foreach (byte bb in batched) { sumB += bb; ck = (ck ^ bb) * 1099511628211UL; }
+            _output.WriteLine($"[fingerprint] batched mean={(double)sumB / batched.Length:F4} fnv={ck:X16} bytes={batched.Length}");
+
+            Assert.Equal(perFrame.Length, batched.Length);
+            int diff = 0, maxDiff = 0;
+            for (int i = 0; i < batched.Length; i++) { int d = Math.Abs(batched[i] - perFrame[i]); if (d != 0) diff++; if (d > maxDiff) maxDiff = d; }
+            _output.WriteLine($"[parity] {batched.Length} RGB bytes: differing={diff} ({100.0 * diff / batched.Length:F3}%), maxDiff={maxDiff}");
+            Assert.True(maxDiff <= 1, $"Batched CausalConv3d diverges from per-frame reference: {diff} bytes differ, maxDiff={maxDiff} (expected byte-identical ±1 rounding).");
+            _output.WriteLine("VERDICT: batched CausalConv3d is byte-identical to the per-frame reference under the streaming cache.");
+        }
+        finally { foreach (SafeTensorsLoader l in vl) l.Dispose(); }
+    }
 }

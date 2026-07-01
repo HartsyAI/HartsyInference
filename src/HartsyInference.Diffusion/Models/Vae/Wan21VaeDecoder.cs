@@ -162,7 +162,7 @@ public sealed unsafe class Wan21VaeDecoder : IWanVaeDecoder
 
     private Tensor DecodeFrame(IBackend backend, Tensor x, Wan22StreamCache? cache)
     {
-        Tensor? cc = cache?.StepConv(x);
+        Tensor? cc = cache?.StepConv(backend, x);
         Tensor h = _conv1!.Forward(backend, x, cc);
         cc?.Dispose();
 
@@ -186,10 +186,10 @@ public sealed unsafe class Wan21VaeDecoder : IWanVaeDecoder
             }
         }
 
-        Tensor hn = _headNorm!.Forward(cur);
+        Tensor hn = _headNorm!.Forward(backend, cur);
         cur.Dispose();
         backend.Silu(hn, hn);
-        Tensor? hcc = cache?.StepConv(hn);
+        Tensor? hcc = cache?.StepConv(backend, hn);
         Tensor rgb = _headConv!.Forward(backend, hn, hcc);
         hcc?.Dispose();
         hn.Dispose();
