@@ -99,10 +99,16 @@ public sealed unsafe class WanVideoTransformer : IDisposable
 
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]
         WanVideoDebugDump.Dump("patch_embed", hidden);
+        WanVideoDebugDump.Dump("in_encoder", encoder);
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, timesteps, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);   // [G, dim], [G, 6, dim]
+        WanVideoDebugDump.Dump("cond_temb", temb);
+        WanVideoDebugDump.Dump("cond_timestepProj", timestepProj);
+        WanVideoDebugDump.Dump("cond_cos", cos);
+        WanVideoDebugDump.Dump("cond_sin", sin);
         Tensor textProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        WanVideoDebugDump.Dump("cond_textProj", textProj);
 
         // I2V: project the CLIP image embeds and prepend them to the text context; the blocks split at imageContextLen.
         int imageContextLen = 0;
@@ -120,7 +126,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen);
+                imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null);
             cur.Dispose();
             cur = next;
             WanVideoDebugDump.Dump($"blocks.{i}", cur);

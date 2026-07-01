@@ -1695,6 +1695,23 @@ public sealed class CudaBackend : IBackend
 
         long totalHeads = B * H;
 
+        // Memory-efficient dispatch: the GEMM path below materializes a [totalHeads, Sq, Skv] score matrix. For very
+        // long sequences (Wan-Video full-res self-attention: 24 heads × ~14040² × 4B ≈ 19 GB) that OOMs alongside the
+        // model weights. Route the plain case — F32, no additive mask, full bidirectional MHA — to the existing
+        // online-softmax flash kernel (never materializes scores, numerically equivalent). Gated on the score matrix
+        // eating most of free VRAM so small/medium attention keeps the faster tensor-core GEMM path; masked
+        // (Matrix-Game block-causal) callers always keep the GEMM path.
+        if (mask is null && query.DType == DType.F32)
+        {
+            ulong scoreBytesEst = (ulong)totalHeads * (ulong)Sq * (ulong)Skv * sizeof(float);
+            (nuint freeBytes, _) = _context.GetMemoryInfo();
+            if (EnvFlag("HARTSY_SDPA_FORCE_FLASH") || scoreBytesEst > (ulong)freeBytes / 2)
+            {
+                FlashAttention(output, query, key, value, (int)Skv, kvGroup: 1, causal: false, qOffset: 0, scale);
+                return;
+            }
+        }
+
         ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, scoresBuf = 0;
         ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0;
         bool cachedOutput = false;

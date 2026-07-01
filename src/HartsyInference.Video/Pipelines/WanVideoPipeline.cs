@@ -43,6 +43,28 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         (_config.IsMixtureOfExperts && _transformer2 is not null && tEmb < _config.BoundaryRatio * 1000f)
             ? _transformer2 : _transformer;
 
+    // Env-gated (HARTSY_WAN_DEBUG=1) per-step numerical diagnostic for the all-zero-output hunt. Reads host data only
+    // (scheduler writes latents host-side; velocity is host-coherent per the working Flux/Lance pattern). Identical
+    // velocity stats across steps ⇒ the GPU is re-reading a stale (frozen) latent input; NaN/inf or exploding
+    // magnitudes ⇒ transformer/scheduler math. See memory wan22-video-first-run-state.
+    private static readonly bool WanDebug = Environment.GetEnvironmentVariable("HARTSY_WAN_DEBUG") == "1";
+    private static void DumpStats(string tag, Tensor t)
+    {
+        if (!WanDebug) return;
+        ReadOnlySpan<float> s = t.AsReadOnlySpan<float>();
+        double mn = double.MaxValue, mx = double.MinValue, sum = 0, sumAbs = 0;
+        long n = s.Length, bad = 0;
+        for (long i = 0; i < n; i++)
+        {
+            float v = s[(int)i];
+            if (float.IsNaN(v) || float.IsInfinity(v)) { bad++; continue; }
+            if (v < mn) mn = v; if (v > mx) mx = v; sum += v; sumAbs += Math.Abs(v);
+        }
+        long ok = n - bad;
+        Logs.Info($"[WANDBG] {tag}: n={n} min={(ok > 0 ? mn : 0):F5} max={(ok > 0 ? mx : 0):F5} " +
+            $"mean={(ok > 0 ? sum / ok : 0):F5} meanAbs={(ok > 0 ? sumAbs / ok : 0):F5} nan/inf={bad}");
+    }
+
     /// <summary>Encodes an interleaved-RGB24 conditioning frame to the normalized first-frame latent for the TI2V
     /// I2V path — pass the result as <c>firstFrameLatent</c> to <see cref="GenerateFromEmbeddings"/> /
     /// <see cref="GenerateFramesAsync"/>. The caller owns (disposes) the returned tensor. Requires the pipeline to be
@@ -189,7 +211,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             }
             // Fold CFG into vCond, then take a UniPC predictor/corrector step in place.
             LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            DumpStats($"step {k} tEmb={tEmb:F2} velocity(cfg)", vCond);
             scheduler.Step(latents, vCond);
+            DumpStats($"step {k} latent(post-step)", latents);
             vCond.Dispose();
             vUncond.Dispose();
             sw.Stop();

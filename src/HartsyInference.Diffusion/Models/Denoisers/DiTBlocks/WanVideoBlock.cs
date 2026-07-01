@@ -79,15 +79,18 @@ public sealed unsafe class WanVideoBlock
     /// mutates the hidden state in place). <paramref name="selfAttnMask"/> is an optional additive mask broadcastable
     /// to <c>[1, heads, S, S]</c> — Matrix-Game 2's block-causal + local-window attention.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoder, Tensor temb, WanRope rope, Tensor cos, Tensor sin, int tokensPerGroup,
-        Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0)
+        Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null)
     {
         int s = (int)hidden.Shape[0];
         (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(temb);
+        if (dbg != null) { WanVideoDebugDump.Dump($"{dbg}_scaleMsa", scaleMsa); WanVideoDebugDump.Dump($"{dbg}_gateMsa", gateMsa); }
 
         // 1. self-attn
         Tensor n1 = LayerNorm(hidden, null, null, s);
         ApplyShiftScale(n1, scaleMsa, shiftMsa, s, tokensPerGroup);
+        if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
         Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask);
+        if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
         n1.Dispose();
         Tensor h1 = GatedAdd(hidden, attn1, gateMsa, s, tokensPerGroup);
         attn1.Dispose();
@@ -95,6 +98,7 @@ public sealed unsafe class WanVideoBlock
         // 2. cross-attn (to umT5 text, plus optional CLIP image context for I2V)
         Tensor n2 = LayerNorm(h1, _norm2W, _norm2B, s);
         Tensor attn2 = CrossAttention(backend, n2, encoder, imageContextLen);
+        if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn2", attn2);
         n2.Dispose();
         Tensor h2 = AddRows(h1, attn2, s);
         h1.Dispose();
@@ -106,6 +110,7 @@ public sealed unsafe class WanVideoBlock
         Tensor n3 = LayerNorm(h2, null, null, s);
         ApplyShiftScale(n3, cScale, cShift, s, tokensPerGroup);
         Tensor ff = Ffn(backend, n3, s);
+        if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_ff", ff);
         n3.Dispose();
         Tensor outT = GatedAdd(h2, ff, cGate, s, tokensPerGroup);
         h2.Dispose();

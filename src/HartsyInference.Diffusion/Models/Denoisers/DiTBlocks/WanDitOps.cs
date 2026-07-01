@@ -104,7 +104,11 @@ public static unsafe class WanDitOps
     /// <summary>PixArtAlphaTextProjection: <c>linear_2(gelu_tanh(linear_1(x)))</c>, text features <c>[L, textDim] → [L, dim]</c>.</summary>
     public static Tensor TextEmbed(IBackend backend, Tensor encoder, int dim, Tensor w1, Tensor? b1, Tensor w2, Tensor? b2)
     {
-        int l = (int)encoder.Shape[0];
+        // Row count = product of all leading dims (handles both rank-2 [L, hidden] and rank-3 [1, L, hidden] —
+        // CfgHelper.SliceBatchElement yields the latter). Using Shape[0] alone read L=1 for the rank-3 case, which
+        // undersized the output buffer while the GEMM still produced L rows → buffer overflow → NaN text context.
+        int lastDim = (int)encoder.Shape[encoder.Shape.Rank - 1];
+        int l = (int)(encoder.Shape.ElementCount / lastDim);
         Tensor h1 = new Tensor(new TensorShape(l, dim), DType.F32); backend.Linear(h1, encoder, w1, b1);
         Tensor act = new Tensor(h1.Shape, DType.F32); backend.Gelu(act, h1); h1.Dispose();
         Tensor outT = new Tensor(new TensorShape(l, dim), DType.F32); backend.Linear(outT, act, w2, b2); act.Dispose();
