@@ -64,6 +64,11 @@ public sealed unsafe class OasisDit : IDisposable
     /// stabilization level, the target at its DDIM index); <paramref name="actions"/> is <c>[T, 25]</c>.
     /// Returns <c>[T, C, gridH, gridW]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latents, ReadOnlySpan<int> noiseIndices, Tensor actions)
+        => Forward(backend, latents, noiseIndices, actions, null);
+
+    /// <summary>Forward with optional per-stage debug taps (parity bisection): <c>c</c>, <c>xembed</c>
+    /// (post patch-embed), <c>block0</c> (after the first block) captured as fresh copies.</summary>
+    public Tensor Forward(IBackend backend, Tensor latents, ReadOnlySpan<int> noiseIndices, Tensor actions, Dictionary<string, Tensor>? taps)
     {
         int t = (int)latents.Shape[0];
         int gh = (int)latents.Shape[2] / _config.PatchSize;
@@ -77,6 +82,7 @@ public sealed unsafe class OasisDit : IDisposable
 
         Tensor cond = BuildCondition(backend, noiseIndices, actions, t, dim);
         Tensor x = Patchify(backend, latents, t, gh, gw);
+        if (taps is not null) { taps["c"] = CloneCpu(cond); taps["xembed"] = CloneCpu(x); }
 
         (Tensor sCos, Tensor sSin) = _spatialRope.Build(gh, gw);
         (Tensor tCos, Tensor tSin) = _temporalRope.BuildCosSin(t, 1, 1);
@@ -88,6 +94,8 @@ public sealed unsafe class OasisDit : IDisposable
             Tensor next = _blocks[i].Forward(backend, cur, cond, t, sp, sCos, sSin, tCos, tSin, mask);
             cur.Dispose();
             cur = next;
+            if (taps is not null && i == 0) taps["block0"] = CloneCpu(cur);
+            if (taps is not null && i == _blocks.Length - 1) taps["blockLast"] = CloneCpu(cur);
         }
         sCos.Dispose(); sSin.Dispose(); tCos.Dispose(); tSin.Dispose(); mask.Dispose();
 
@@ -95,6 +103,14 @@ public sealed unsafe class OasisDit : IDisposable
         cur.Dispose();
         cond.Dispose();
         return outV;
+    }
+
+    private static Tensor CloneCpu(Tensor src)
+    {
+        Tensor dst = new Tensor(src.Shape, DType.F32);
+        new ReadOnlySpan<float>((float*)src.DataPointer, (int)src.ElementCount)
+            .CopyTo(new Span<float>((float*)dst.DataPointer, (int)dst.ElementCount));
+        return dst;
     }
 
     /// <summary><c>c[t] = mlp(sinusoidal(noiseIdx[t])) + external_cond(action[t])</c> → <c>[T, dim]</c>.</summary>
@@ -192,11 +208,13 @@ public sealed unsafe class OasisDit : IDisposable
                 for (int tx = 0; tx < gw; tx++)
                 {
                     long baseIdx = (((long)f * gh + ty) * gw + tx) * outVec;
-                    int d = 0;
+                    // Reference unpatchify: reshape(...,p,p,c) then einsum nhwpqc->nchpwq — the out-vector is
+                    // laid out [py, px, ci] (channel innermost), NOT [ci, py, px]. Read with that stride.
                     for (int ci = 0; ci < c; ci++)
                         for (int py = 0; py < p; py++)
                             for (int px = 0; px < p; px++)
-                                op[(((long)f * c + ci) * h + ty * p + py) * w + tx * p + px] = sp2[baseIdx + d++];
+                                op[(((long)f * c + ci) * h + ty * p + py) * w + tx * p + px]
+                                    = sp2[baseIdx + (py * p + px) * c + ci];
                 }
         proj.Dispose();
         return outT;

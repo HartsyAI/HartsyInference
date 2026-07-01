@@ -66,10 +66,12 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
 
-        _imgNorm1W = LoadF32(w, "condition_embedder.image_embedder.norm1.weight"); w.TryGetValue("condition_embedder.image_embedder.norm1.bias", out _imgNorm1B);
+        // The LayerNorm affine params are read by a manual host-pointer loop (LayerNormRows) → MUST be F32
+        // (the base checkpoint ships BF16; reading BF16 bytes as F32 gives garbage). Weights AND biases.
+        _imgNorm1W = LoadF32(w, "condition_embedder.image_embedder.norm1.weight"); _imgNorm1B = LoadF32Opt(w, "condition_embedder.image_embedder.norm1.bias");
         _imgFf1W = w["condition_embedder.image_embedder.ff.net.0.proj.weight"]; w.TryGetValue("condition_embedder.image_embedder.ff.net.0.proj.bias", out _imgFf1B);
         _imgFf2W = w["condition_embedder.image_embedder.ff.net.2.weight"]; w.TryGetValue("condition_embedder.image_embedder.ff.net.2.bias", out _imgFf2B);
-        _imgNorm2W = LoadF32(w, "condition_embedder.image_embedder.norm2.weight"); w.TryGetValue("condition_embedder.image_embedder.norm2.bias", out _imgNorm2B);
+        _imgNorm2W = LoadF32(w, "condition_embedder.image_embedder.norm2.weight"); _imgNorm2B = LoadF32Opt(w, "condition_embedder.image_embedder.norm2.bias");
 
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -103,6 +105,12 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
     /// trailing block to read out. Returns <c>[1, 16, outputFrames, H, W]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor clipContext, float[] frameTimesteps,
         ReadOnlySpan<int> ropeFrameIndices, int outputFrames, Tensor? mouse, Tensor? keyboard)
+        => Forward(backend, latent, clipContext, frameTimesteps, ropeFrameIndices, outputFrames, mouse, keyboard, null);
+
+    /// <summary>Forward with optional per-stage debug taps (parity bisection): <c>patch</c>, <c>ctx</c>,
+    /// <c>block0</c>, <c>blockLast</c> captured as fresh CPU copies.</summary>
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor clipContext, float[] frameTimesteps,
+        ReadOnlySpan<int> ropeFrameIndices, int outputFrames, Tensor? mouse, Tensor? keyboard, Dictionary<string, Tensor>? taps)
     {
         int t = (int)latent.Shape[2], hh = (int)latent.Shape[3], ww = (int)latent.Shape[4];
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -123,6 +131,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
         Tensor encoderProj = ProjectClipContext(backend, clipContext);
         Tensor mask = BuildBlockCausalMask(ropeFrameIndices, gh * gw, _config.LocalAttnSize, _config.NumFramePerBlock);
+        if (taps is not null) { taps["patch"] = CloneCpu(hidden); taps["ctx"] = CloneCpu(encoderProj); }
 
         int tokensPerGroup = s / gt;
         int[] frameIdx = ropeFrameIndices.ToArray();
@@ -136,6 +145,8 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup, hook, mask);
             cur.Dispose();
             cur = next;
+            if (taps is not null && i == 0) taps["block0"] = CloneCpu(cur);
+            if (taps is not null && i == _blocks.Length - 1) taps["blockLast"] = CloneCpu(cur);
         }
         cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose(); mask.Dispose();
 
@@ -154,14 +165,23 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         return outVel;
     }
 
-    /// <summary>The Wan I2V <c>MLPProj</c>: LayerNorm(1280) → Linear(1280→dim) → GELU → Linear(dim→dim) → LayerNorm(dim),
-    /// projecting the CLIP visual context to the cross-attention K/V source.</summary>
+    private static Tensor CloneCpu(Tensor src)
+    {
+        Tensor dst = new Tensor(src.Shape, DType.F32);
+        new ReadOnlySpan<float>((float*)src.DataPointer, (int)src.ElementCount)
+            .CopyTo(new Span<float>((float*)dst.DataPointer, (int)dst.ElementCount));
+        return dst;
+    }
+
+    /// <summary>The Wan I2V <c>MLPProj</c>: LayerNorm(1280) → Linear(1280→1280) → GELU → Linear(1280→dim) →
+    /// LayerNorm(dim), projecting the CLIP visual context to the cross-attention K/V source. The intermediate
+    /// Linear stays at the CLIP dim (1280); only the second Linear widens to the model dim.</summary>
     private Tensor ProjectClipContext(IBackend backend, Tensor clipContext)
     {
-        int l = (int)clipContext.Shape[0], dim = _config.InnerDim;
+        int l = (int)clipContext.Shape[0], dim = _config.InnerDim, cdim = _config.ClipContextDim;
         Tensor normed = Clone(clipContext);
-        LayerNormRows(normed, _imgNorm1W!, _imgNorm1B, l, _config.ClipContextDim);
-        Tensor h1 = new Tensor(new TensorShape(l, dim), DType.F32);
+        LayerNormRows(normed, _imgNorm1W!, _imgNorm1B, l, cdim);
+        Tensor h1 = new Tensor(new TensorShape(l, cdim), DType.F32);
         backend.Linear(h1, normed, _imgFf1W!, _imgFf1B);
         normed.Dispose();
         Tensor act = new Tensor(h1.Shape, DType.F32);
@@ -245,6 +265,9 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
+
+    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string key)
+        => w.TryGetValue(key, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 
     public void Dispose()
     {
