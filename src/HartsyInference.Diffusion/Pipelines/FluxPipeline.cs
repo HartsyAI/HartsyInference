@@ -72,7 +72,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         int negPromptEosPositionL = 0,
         int[]? negPromptTokenIdsT5 = null,
         int[]? negPromptAttentionMaskT5 = null,
-        float trueCfgScale = 1.0f)
+        float trueCfgScale = 1.0f,
+        Tensor? kontextRefImage = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
@@ -256,6 +257,28 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             controlLatentUnpacked.Dispose();
         }
 
+        // ── 3c. Flux.1 Kontext reference image: VAE-encode + pack once to [1, refSeq, 64]. Unlike Tools
+        //    (channel concat), the reference tokens are APPENDED to the noise tokens along the SEQUENCE every
+        //    step (diffusers FluxKontext) and given RoPE temporal-axis = 1 so the model distinguishes them.
+        //    The reference is expected at the output resolution, so its packed grid = (hPacked, wPacked).
+        Tensor? packedKontextRef = null;
+        int kontextRefSeqLen = 0;
+        if (kontextRefImage is not null)
+        {
+            if (_vaeEncoder is null)
+                throw new InvalidOperationException("Kontext reference image requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
+            if (kontextRefImage.Shape.Rank != 4 || kontextRefImage.Shape[1] != 3
+                || kontextRefImage.Shape[2] != height || kontextRefImage.Shape[3] != width)
+                throw new ArgumentException(
+                    $"kontextRefImage shape must be [1, 3, {height}, {width}] (resized to the output resolution); got {kontextRefImage.Shape}.",
+                    nameof(kontextRefImage));
+            Tensor refLatentUnpacked = _vaeEncoder.Encode(Backend, kontextRefImage);
+            packedKontextRef = PackLatent(refLatentUnpacked, latentH, latentW);
+            refLatentUnpacked.Dispose();
+            kontextRefSeqLen = (int)packedKontextRef.Shape[1];
+            Logs.Info($"Flux Kontext reference encoded: {kontextRefSeqLen} tokens.");
+        }
+
         // ── 4. Denoising loop ─────────────────────────────────────────
         // Two paths depending on whether the backend can stream:
         //   - StreamingCache != null (CUDA): use BlockStreamingController so resident
@@ -317,9 +340,11 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // For FLUX.1 Tools: concat noise + control along the feature dim before the
             // transformer pass. The transformer's wider x_embedder consumes the 128-dim
             // input; velocity output is back at 64 dims (no control side in the prediction).
-            Tensor transformerInput = packedControl is null
-                ? packedLatent
-                : ConcatPackedFeatureDim(packedLatent, packedControl);
+            Tensor transformerInput = packedControl is not null
+                ? ConcatPackedFeatureDim(packedLatent, packedControl)      // Tools: channel concat → 128-dim
+                : packedKontextRef is not null
+                    ? ConcatPackedSeqDim(packedLatent, packedKontextRef)   // Kontext: sequence concat [noise;ref]
+                    : packedLatent;
 
             Tensor? regionBias = null;
             if (hasRegions)
@@ -332,7 +357,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // Forward pass: conditional velocity prediction (embedded distilled guidance rides along).
             Tensor velocityPred = _transformer.Forward(
                 Backend, transformerInput, condStream, sigma,
-                clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, regionBias);
+                clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, regionBias,
+                kontextRefSeqLen, kontextRefSeqLen > 0 ? hPacked : 0, kontextRefSeqLen > 0 ? wPacked : 0);
 
             // True-CFG: run a second forward with the negative conditioning (same noisy latent,
             // same timestep, same embedded guidanceScale) and combine with standard CFG. The
@@ -343,7 +369,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             {
                 Tensor velocityNeg = _transformer.Forward(
                     Backend, transformerInput, negT5Embeddings!, sigma,
-                    negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null);
+                    negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null,
+                    kontextRefSeqLen, kontextRefSeqLen > 0 ? hPacked : 0, kontextRefSeqLen > 0 ? wPacked : 0);
                 Tensor combined = CfgHelper.ApplyCfg(velocityNeg, velocityPred, trueCfgScale);
                 velocityNeg.Dispose();
                 velocityPred.Dispose();
@@ -419,6 +446,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
         packedControl?.Dispose();
+        packedKontextRef?.Dispose();
 
         // Tear down the streaming controller (frees still-resident blocks) and free the
         // shared weights. After this, the transformer holds no device memory, making
@@ -706,6 +734,31 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 Buffer.MemoryCopy(ap + aOff, op + oOff, aBytes, aBytes);
                 Buffer.MemoryCopy(bp + bOff, op + oOff + dimA, bBytes, bBytes);
             }
+        }
+        return output;
+    }
+
+    /// <summary>Concatenates two packed-form tensors <c>[1, Sa, D]</c> and <c>[1, Sb, D]</c> along the SEQUENCE dim
+    /// → <c>[1, Sa+Sb, D]</c>. Used by Flux Kontext to append the packed reference-image tokens after the packed
+    /// noise tokens before the transformer. Both inputs must share batch and feature dim; F32 only.</summary>
+    private static Tensor ConcatPackedSeqDim(Tensor a, Tensor b)
+    {
+        if (a.Shape.Rank != 3 || b.Shape.Rank != 3 || a.Shape[0] != b.Shape[0] || a.Shape[2] != b.Shape[2])
+            throw new ArgumentException($"ConcatPackedSeqDim requires [B, S, D] tensors with matching B and D; got {a.Shape} and {b.Shape}.");
+        long batch = a.Shape[0];
+        long seqA = a.Shape[1];
+        long seqB = b.Shape[1];
+        long dim = a.Shape[2];
+        Tensor output = new Tensor(new TensorShape(batch, seqA + seqB, dim), DType.F32);
+        float* ap = (float*)a.DataPointer;
+        float* bp = (float*)b.DataPointer;
+        float* op = (float*)output.DataPointer;
+        for (long bi = 0; bi < batch; bi++)
+        {
+            long aBytes = seqA * dim * sizeof(float);
+            long bBytes = seqB * dim * sizeof(float);
+            Buffer.MemoryCopy(ap + bi * seqA * dim, op + bi * (seqA + seqB) * dim, aBytes, aBytes);
+            Buffer.MemoryCopy(bp + bi * seqB * dim, op + bi * (seqA + seqB) * dim + seqA * dim, bBytes, bBytes);
         }
         return output;
     }

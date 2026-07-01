@@ -181,4 +181,40 @@ public sealed unsafe class FluxRope
 
         return posIds;
     }
+
+    /// <summary>Flux.1 Kontext position ids for the sequence <c>[text ; noise-image ; reference-image]</c>.
+    /// Matches diffusers <c>FluxKontextPipeline</c>: text tokens are all-zero; the noise image grid is
+    /// <c>[0, row, col]</c>; the reference image grid uses the SAME spatial (row, col) but sets the first
+    /// (temporal) axis to <c>1</c> so RoPE distinguishes reference tokens from co-located noise tokens
+    /// (<c>image_ids[..., 0] = 1</c>).</summary>
+    public static Tensor BuildPositionIdsKontext(int txtSeqLen, int hPacked, int wPacked, int refHPacked, int refWPacked)
+    {
+        int noiseSeqLen = hPacked * wPacked;
+        int refSeqLen = refHPacked * refWPacked;
+        int totalSeqLen = txtSeqLen + noiseSeqLen + refSeqLen;
+        Tensor posIds = new Tensor(new TensorShape(totalSeqLen, 3), DType.F32);
+        float* ptr = (float*)posIds.DataPointer;
+
+        for (int i = 0; i < txtSeqLen * 3; i++) ptr[i] = 0f;
+
+        for (int row = 0; row < hPacked; row++)
+            for (int col = 0; col < wPacked; col++)
+            {
+                int idx = txtSeqLen + row * wPacked + col;
+                ptr[idx * 3 + 0] = 0f;
+                ptr[idx * 3 + 1] = row;
+                ptr[idx * 3 + 2] = col;
+            }
+
+        for (int row = 0; row < refHPacked; row++)
+            for (int col = 0; col < refWPacked; col++)
+            {
+                int idx = txtSeqLen + noiseSeqLen + row * refWPacked + col;
+                ptr[idx * 3 + 0] = 1f;  // reference: temporal axis = 1
+                ptr[idx * 3 + 1] = row;
+                ptr[idx * 3 + 2] = col;
+            }
+
+        return posIds;
+    }
 }

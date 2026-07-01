@@ -16,7 +16,7 @@ Build doc / research: [HUNYUAN3D_2_ARCHITECTURE.md](../Research/HUNYUAN3D_2_ARCH
 - [x] DINOv2 conditioning encoder in **Vision** (`Vision/Dinov2/Dinov2VisionEncoder.cs` + preset + preprocessor); LayerScale **optional** so it also serves DINOv1 (TripoSR)
 - [x] CPU unit tests: marching-cubes watertightness/normals on a sphere SDF, GLB/OBJ/PLY round-trip, trilinear sampling
 
-## 2. Hunyuan3D-2 (image → mesh) — 🔧 REBUILD REQUIRED; arch reverse-engineered (2026-06-30)
+## 2. Hunyuan3D-2 (image → mesh) — ✅ verified e2e on real weights (2026-07-01)
 
 The existing scaffold (`Hunyuan3DDit` as a simple AdaLN DiT with `in_proj`/`blocks.{i}.ada_mod`/`self_attn`/
 `cross_attn` keys) is the **wrong architecture** — none of those keys exist in the real checkpoint. The real
@@ -57,7 +57,9 @@ marching cubes. qk_norm true; scale_factor 0.9990943042622529 (latent ×= 1/scal
 - [x] **[VG] DONE (2026-06-30)** Rebuilt DiT (Flux double/single, no RoPE) — `Hunyuan3DDit.cs` + `Hunyuan3DFluxBlocks.cs` (`Hunyuan3DDoubleBlock`/`Hunyuan3DSingleBlock`/`Hunyuan3DDitOps`) reusing `AdaLNModulation`/`QkNorm`/`SwiGluFfn`. **Velocity corr 0.99999738** (std 0.4164=0.4164) vs hy3dgen `Hunyuan3DDiT` on CUDA (test `Hunyuan3DDitParityTests`, oracle `dump_hunyuan3d_dit.py`). Bug fixed: timestep `max_period=time_factor=1000` not 10000 (see [[hunyuan3d-timestep-maxperiod]]). NOTE: block glue is CPU-resident (correctness-first) → GPU-residency perf rewrite is a follow-up before the 50-step e2e is fast.
 - [x] **[VG] DONE (2026-06-30)** Rebuilt ShapeVAE — `Hunyuan3DShapeVae.cs` + `Hunyuan3DVaeBlocks.cs` (`Hunyuan3DVaeResBlock` self-attn stack + `Hunyuan3DGeoDecoder` cross-attn + `Hunyuan3DVaeOps`): `post_kl` → 16 CLIP-style resblocks (fused head-interleaved `c_qkv`, LayerNorm-64 QK-norm, erf-GELU MLP) → `geo_decoder` (FourierEmbedder 51-dim, `query_proj`, cross-attn to latents, `ln_post`, `output_proj`→1). **Occupancy corr 0.99999518** vs hy3dgen `ShapeVAE` on CUDA (test `Hunyuan3DVaeParityTests`, oracle `dump_hunyuan3d_vae.py` — loads the hy3dgen decode classes standalone via fake parent packages to dodge the diffusers-broken `__init__`). Config `VaeScaleFactor 0.9990943` added.
 - [~] **[VG] IN PROGRESS** Pipeline wired (`Hunyuan3DShapePipeline`): DINOv2-giant cond (uncond=zeros [1,1370,1536]) → hy3dgen flow-match Euler (**ascending** sigmas `linspace(1,1000,steps)/1000`+trailing 1.0; DiT fed `t=σ·1000`; `x += (σ_next−σ)·noise_pred`; 2-way CFG `uncond+g·(cond−uncond)`) → `latents /= scale_factor` → ShapeVAE grid decode → marching cubes. Converter key tables fixed (`model.`→DiT, `vae.`→ShapeVAE, `conditioner.main_image_encoder.model.`→Dino); default preset → `Dinov2Preset.Giant`. **Runs e2e on CUDA** (loads 10.5s, ~62s/step from the CPU-resident block glue). Test `Hunyuan3DGenerationTests` (env `HY3D_MODEL_DIR`/`HY3D_IMAGE`/`HY3D_STEPS`/`HY3D_GRID`); single checkpoint `hunyuan3d-dit-v2-0/model.fp16.safetensors` bundles all three. **Verifying mesh coherence** (multi-step run); the DiT feeds `t=σ·1000` and the DiT then ×time_factor 1000 again (the hy3dgen convention — the model trained on it).
-- [ ] **[VG]** Confirm coherent mesh + inspect; then the **GPU-residency perf pass** (DiT/VAE block glue reads DataPointer on the host → 62s/step; mirror Boogu/Qwen double/single blocks to get device-resident) so the full 30–50 step run is practical.
+- [x] **[VG] DONE (2026-07-01)** Coherent mesh confirmed — 20-step/grid-128 run on the 4090 produces a **recognizable 187k-tri chair `.glb`** (backrest+seat+legs clear in ortho views) from the chair image. Section 2 → **✅ verified e2e**.
+- [x] **[VG] DONE (2026-07-01) GPU-residency rewrite** — rewrote `Hunyuan3DFluxBlocks.cs` (DiT double/single) and `Hunyuan3DVaeBlocks.cs` (VAE resblock + geo-decoder) fully **device-resident**: all glue via `IBackend` ops (`LayerNormNoAffine`/`AffineBroadcastLastDim`/`SliceLastDim`/`Permute0213`/`Concat`/`SliceRows`/`RmsNorm`/`GatedResidualLastDim`), mod params via `SliceLastDim`, fused head-interleaved VAE `c_qkv`/`c_kv` split into head-major weights at load. **No mid-forward host `DataPointer` reads → the async mem-pool race is gone (no more `CUDA_LAUNCH_BLOCKING`) and it's ~13× faster** (30 steps + grid 128 in **87 s**, was 19 min). Parity preserved: DiT velocity corr **0.99999970**, VAE occupancy corr **0.99999454**; coherent chair mesh. **→ § 2 = ✅ verified e2e, fast + robust.**
+- [ ] Remaining: port the shared C# foreground/background-removal tool (§6) so raw-RGBA images work without the Python composite.
 
 ## 3. TripoSR (image → mesh, feed-forward) — ✅ verified e2e on real weights (2026-06-30)
 
@@ -87,7 +89,7 @@ which the upstream repos produce with Python `rembg` (U²-Net ONNX) + `resize_fo
 never shell out to Python, so this needs a native tool. During TripoSR e2e validation the compositing was done in
 Python (`/tmp/prep_triposr.py`) — that is a **stopgap, not shippable**.
 
-- [ ] **Salient-object segmentation model in `HartsyInference.Vision`** → per-pixel alpha mask (U²-Net / ISNet /
+- [x] **DONE (2026-07-01) — RMBG-1.4 (BriaRMBG/ISNet) in `HartsyInference.Vision/Rmbg/`** → per-pixel alpha, verified corr 1.0 (maxAbs 2.9e-6) vs upstream. `RmbgBackgroundRemover.CompositeOnGray` does foreground→gray-0.5 composite. Wired into the ThreeD CLI (`--rembg <rmbg.safetensors>`): raw photo → background-removed + gray-0.5 composite → 3D mesh, **zero Python**.
   BiRefNet; U²-Net is the rembg default and smallest). This is a normal model-build (weights + converter + forward
   + parity), reusable beyond 3D.
 - [ ] **`ForegroundComposite` helper in `HartsyInference.ThreeD`** (pure array ops, no model): alpha-bbox crop →

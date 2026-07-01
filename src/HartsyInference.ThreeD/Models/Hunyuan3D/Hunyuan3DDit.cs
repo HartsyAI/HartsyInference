@@ -80,40 +80,33 @@ public sealed unsafe class Hunyuan3DDit
         Tensor t1a = new(t1.Shape, DType.F32); backend.Silu(t1a, t1); t1.Dispose();
         Tensor vec = new(new TensorShape(b, width), DType.F32); backend.Linear(vec, t1a, _timeIn2W!, _timeIn2B!); t1a.Dispose();
 
-        // Double stream: (img, txt) updated jointly.
+        // Double stream: (img, txt) updated jointly. GPU-resident blocks → no per-block sync/host reads.
         foreach (Hunyuan3DDoubleBlock block in _double)
         {
             (Tensor ni, Tensor nt) = block.Forward(backend, img, txt, vec);
             img.Dispose(); txt.Dispose(); img = ni; txt = nt;
-            // Drain the compute stream so the per-block transients' async frees complete before the next block —
-            // otherwise 48 blocks' worth of ~1.3 GB joint-attention score buffers accumulate and OOM the 24 GB card.
-            // (A GPU-residency block rewrite with reused buffers removes the need for this.)
-            backend.Sync();
         }
 
-        // Single stream over concat[txt, img] (txt FIRST); then drop the txt prefix.
-        Tensor joint = Hunyuan3DDitOps.ConcatSeq(txt, img, b, scond, n, width);
+        // Single stream over concat[txt, img] (txt FIRST); then drop the txt prefix (B=1 → contiguous rows).
+        Tensor joint = new(new TensorShape(b, scond + n, width), DType.F32); backend.Concat(joint, [txt, img], 1);
         txt.Dispose(); img.Dispose();
         foreach (Hunyuan3DSingleBlock block in _single)
         {
             Tensor nj = block.Forward(backend, joint, vec);
             joint.Dispose(); joint = nj;
-            backend.Sync();
         }
-        Tensor latentOut = Hunyuan3DDitOps.SliceSeq(joint, b, scond, n, width);   // drop first `scond` tokens
+        Tensor latentOut = new(new TensorShape(b, n, width), DType.F32); backend.SliceRows(latentOut, joint, scond);
         joint.Dispose();
 
         // final_layer (LastLayer): shift,scale = chunk(adaLN(vec)) — SHIFT FIRST; x=(1+scale)·norm(x)+shift; linear→C.
-        Tensor tAct = new(vec.Shape, DType.F32); backend.Silu(tAct, vec); vec.Dispose();
-        Tensor mod = new(new TensorShape(b, 2 * width), DType.F32); backend.Linear(mod, tAct, _finalNormW!, _finalNormB!); tAct.Dispose();
-        Tensor normed = new(latentOut.Shape, DType.F32);
-        Hunyuan3DDitOps.LayerNormNoAffine(normed, latentOut, b, n, width);
-        latentOut.Dispose();
-        Hunyuan3DDitOps.ModulateShiftFirst(normed, mod, b, n, width);   // shift=param0, scale=param1
-        mod.Dispose();
+        Tensor[] fm = Hunyuan3DGpuOps.ModParams(backend, vec, _finalNormW!, _finalNormB!, 2, width); vec.Dispose();
+        Tensor normed = new(latentOut.Shape, DType.F32); backend.LayerNormNoAffine(normed, latentOut, 1e-6f); latentOut.Dispose();
+        Tensor scalePlus1 = new(fm[1].Shape, DType.F32); backend.AddScalar(scalePlus1, fm[1], 1f);
+        Tensor modOut = new(normed.Shape, DType.F32); backend.AffineBroadcastLastDim(modOut, normed, scalePlus1, fm[0]);
+        normed.Dispose(); scalePlus1.Dispose(); fm[0].Dispose(); fm[1].Dispose();
         Tensor velocity = new(new TensorShape(b, n, _cfg.LatentChannels), DType.F32);
-        backend.Linear(velocity, normed, _finalLinW!, _finalLinB!);
-        normed.Dispose();
+        backend.Linear(velocity, modOut, _finalLinW!, _finalLinB!);
+        modOut.Dispose();
         return velocity;
     }
 

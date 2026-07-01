@@ -23,7 +23,7 @@ internal static class Program
             return args.Length == 0 ? 1 : 0;
         }
 
-        string? imagePath = null, modelPath = null, outPath = "output.glb", backendName = "cpu", type = "hunyuan3d";
+        string? imagePath = null, modelPath = null, outPath = "output.glb", backendName = "cpu", type = "hunyuan3d", rembgPath = null;
         int steps = 0, grid = 0; int? seed = null;
         for (int i = 0; i < args.Length; i++)
         {
@@ -37,6 +37,7 @@ internal static class Program
                 case "--steps": steps = int.Parse(args[++i]); break;
                 case "--grid": grid = int.Parse(args[++i]); break;
                 case "--seed": seed = int.Parse(args[++i]); break;
+                case "--rembg": rembgPath = args[++i]; break;
                 default: Console.Error.WriteLine($"unknown flag: {args[i]}"); return 1;
             }
         }
@@ -53,14 +54,22 @@ internal static class Program
         Console.Error.WriteLine($"model:   {modelPath}");
         Console.Error.WriteLine($"backend: {backendName}");
 
-        // TODO(3D/no-python): raw photos need foreground isolation first (background removal → resize_foreground →
-        // gray-0.5 composite), which TripoSR/Hunyuan3D do via Python rembg. The app must NOT depend on Python, so
-        // this belongs in a pure-C# tool: a salient-object-segmentation model in HartsyInference.Vision (U²-Net /
-        // ISNet / BiRefNet) + a ForegroundComposite helper. Until then, pass an already-composited image (an alpha
-        // PNG or foreground-on-gray). See docs/Checklists/PHASE_11_THREED.md §5.
         (byte[] rgb, int w, int h) = PngDecoder.DecodeFromFile(imagePath);
 
         using IBackend backend = CreateBackend(backendName);
+
+        // Pure-C# background removal (no Python): --rembg <RMBG-1.4 safetensors> isolates the subject and composites
+        // it onto gray 0.5, which is what TripoSR / Hunyuan3D expect for a raw photo. Runs the ISNet segmenter
+        // (HartsyInference.Vision.Rmbg) on the same backend — use --backend cuda (CPU is far too slow at 1024²).
+        if (rembgPath is not null)
+        {
+            Console.Error.WriteLine($"rembg:   {rembgPath} (background removal → gray-0.5 composite)");
+            using HartsyInference.ModelHandler.SafeTensors.SafeTensorsLoader rl = new(); rl.Load(rembgPath);
+            HartsyInference.Vision.Rmbg.BriaRmbg rmbg = new(); rmbg.LoadWeights(rl.GetAllTensors());
+            backend.PreloadWeights(rmbg.EnumerateWeights());
+            rgb = new HartsyInference.Vision.Rmbg.RmbgBackgroundRemover(rmbg).CompositeOnGray(backend, rgb, w, h);
+            backend.FreeWeights(rmbg.EnumerateWeights());
+        }
 
         ImageTo3DRequest req = new()
         {
@@ -129,6 +138,7 @@ internal static class Program
               -t, --type <name>     hunyuan3d | triposr  (default: hunyuan3d)
               -o, --out <glb>       output path (default: output.glb)
               -b, --backend <name>  cpu | cuda  (default: cpu)
+                  --rembg <file>    RMBG-1.4 safetensors — remove background + composite on gray (raw photos; needs cuda)
                   --steps <n>       denoise steps — Hunyuan3D only (default: model config)
                   --grid <n>        marching-cubes grid resolution (default: model config)
                   --seed <n>        RNG seed (default: random)

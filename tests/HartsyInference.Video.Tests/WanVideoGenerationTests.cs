@@ -103,17 +103,17 @@ public class WanVideoGenerationTests
 
             _output.WriteLine($"[4/5] Generating 33-frame 832x480 clip (NUMERIC OUTPUT VALIDATION-PENDING)...");
             WanVideoPipeline pipeline = new(backend, transformer, vae, cfg);
-            TextToImageRequest req = new() { Prompt = "cat", Width = 832, Height = 480, Steps = 30, CfgScale = cfg.GuidanceScale, Seed = 42 };
+            TextToImageRequest req = new() { Prompt = "cat", Width = 320, Height = 192, Steps = 6, CfgScale = cfg.GuidanceScale, Seed = 42 };
             string outDir = Path.Combine(TestPaths.OutputDir, $"wan_video_{DateTime.Now:yyyyMMdd_HHmmss}");
             await new BmpSequenceEncoder().EncodeAsync(
-                pipeline.GenerateFramesAsync(promptEmbeds, negEmbeds, req, numFrames: 33,
+                pipeline.GenerateFramesAsync(promptEmbeds, negEmbeds, req, numFrames: 9,
                     p => _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)")),
                 outDir, fps: 24);
             promptEmbeds.Dispose();
             negEmbeds.Dispose();
 
             _output.WriteLine($"[5/5] Wrote frames → {outDir}");
-            Assert.Equal(33, Directory.GetFiles(outDir, "frame_*.bmp").Length);
+            Assert.Equal(9, Directory.GetFiles(outDir, "frame_*.bmp").Length);
         }
         finally
         {

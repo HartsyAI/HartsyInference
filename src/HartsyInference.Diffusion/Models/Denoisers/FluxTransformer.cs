@@ -224,12 +224,17 @@ public sealed unsafe class FluxTransformer : IDisposable
     /// <param name="wPacked">Packed image width (latent_w / 2).</param>
     /// <returns>Predicted velocity [B, imgSeqLen, 64].</returns>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor t5Embeddings, float sigma,
-        Tensor clipPooled, float guidanceScale, int txtSeqLen, int hPacked, int wPacked, Tensor? attnBias = null)
+        Tensor clipPooled, float guidanceScale, int txtSeqLen, int hPacked, int wPacked, Tensor? attnBias = null,
+        int refSeqLen = 0, int refHPacked = 0, int refWPacked = 0)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int totalSeqLen = txtSeqLen + imgSeqLen;
         int hidden = _config.HiddenSize;
+        // Kontext: packedLatent is [noise ; reference] concatenated along the sequence. The reference tokens
+        // condition the model (channel-0=1 in RoPE) but are NOT denoised — the final output keeps only the
+        // leading noise tokens. noiseSeqLen = imgSeqLen - refSeqLen.
+        int noiseSeqLen = imgSeqLen - refSeqLen;
 
         // ── 1. Project image tokens: [B, imgSeqLen, 64] → [B, imgSeqLen, 3072] ──
         TensorShape imgTokShape = new TensorShape(batch, imgSeqLen, hidden);
@@ -244,8 +249,10 @@ public sealed unsafe class FluxTransformer : IDisposable
         // ── 3. Compute temb = timestep_embed + clip_pooled_embed + optional guidance_embed ──
         Tensor temb = ComputeTimestepEmbedding(backend, sigma, clipPooled, guidanceScale, batch);
 
-        // ── 4. Precompute RoPE for this resolution ──
-        Tensor posIds = FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
+        // ── 4. Precompute RoPE for this resolution (Kontext appends reference-image ids at temporal axis = 1) ──
+        Tensor posIds = refSeqLen > 0
+            ? FluxRope.BuildPositionIdsKontext(txtSeqLen, hPacked, wPacked, refHPacked, refWPacked)
+            : FluxRope.BuildPositionIds(txtSeqLen, hPacked, wPacked);
         _rope.Precompute(posIds);
         posIds.Dispose();
 
@@ -288,14 +295,15 @@ public sealed unsafe class FluxTransformer : IDisposable
             x = newX;
         }
 
-        // ── 8. Extract image tokens: discard text tokens ──
-        TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
+        // ── 8. Extract image tokens: discard text tokens (and, for Kontext, the trailing reference tokens —
+        //        ExtractImageTokens copies x[txtSeqLen : txtSeqLen + noiseSeqLen], i.e. only the noise block) ──
+        TensorShape imgOutShape = new TensorShape(batch, noiseSeqLen, hidden);
         Tensor imgOut = new Tensor(imgOutShape, DType.F32);
-        ExtractImageTokens(imgOut, x, batch, txtSeqLen, imgSeqLen, hidden);
+        ExtractImageTokens(imgOut, x, batch, txtSeqLen, noiseSeqLen, hidden);
         x.Dispose();
 
         // ── 9. Final layer: AdaLN + proj_out ──
-        Tensor output = ApplyFinalLayer(backend, imgOut, temb, batch, imgSeqLen);
+        Tensor output = ApplyFinalLayer(backend, imgOut, temb, batch, noiseSeqLen);
         imgOut.Dispose();
         temb.Dispose();
 

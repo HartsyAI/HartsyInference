@@ -407,17 +407,43 @@ public sealed class CudaBackend : IBackend
             else
             {
                 // cuBLAS col-major: C_cm = op(A) × op(B) where op(A)=weight^T [N,K], op(B)=input [K,M]
-                // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N]
-                CublasApi.cublasGemmEx(
-                    _cublasHandle,
-                    CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                    N, M, K,
-                    &alpha,
-                    weightPtr, gemmType, K,
-                    inputPtr, gemmType, K,
-                    &beta,
-                    pOutput, outputType, N,
-                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                // Row-major interpretation: output[M,N] = input[M,K] × weight^T[K,N].
+                //
+                // cublasGemmEx supports Ctype ∈ {Atype, F32} only. When the output tensor is a 16-bit type
+                // that differs from the operand gemmDtype — e.g. BF16 operands (fp8/quant weight × F32
+                // activation → BF16, chosen so the F32→16-bit cast can't overflow F16's 65504 in a SwiGLU
+                // MLP) but an F16 output tensor — there is NO BF16→F16 kernel and cuBLAS returns
+                // CUBLAS_STATUS_NOT_SUPPORTED. Run the GEMM into a temp of gemmDtype, then cast to the real
+                // output. (F32 output is always compatible with 16-bit operands, so it skips the temp.)
+                bool outNeedsCast = output.DType != gemmDtype && output.DType != DType.F32;
+                ulong gemmOut = pOutput;
+                int gemmOutType = outputType;
+                ulong pGemmTemp = 0;
+                try
+                {
+                    if (outNeedsCast)
+                    {
+                        pGemmTemp = GpuTransferHelper.AllocateDevice((nuint)((long)M * N * gemmDtype.SizeInBytes));
+                        gemmOut = pGemmTemp;
+                        gemmOutType = gemmType;
+                    }
+                    CublasApi.cublasGemmEx(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                        N, M, K,
+                        &alpha,
+                        weightPtr, gemmType, K,
+                        inputPtr, gemmType, K,
+                        &beta,
+                        gemmOut, gemmOutType, N,
+                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    if (outNeedsCast)
+                        CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, M * N);
+                }
+                finally
+                {
+                    if (pGemmTemp != 0) GpuTransferHelper.FreeDevice(pGemmTemp);
+                }
             }
 
             // Bias add for every GEMM path except the cuBLASLt epilogue, which already fused it.
