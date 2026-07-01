@@ -1087,10 +1087,26 @@ public sealed class VulkanBackend : IBackend
             maskTotalSize = mask.ElementCount;
         }
 
-        // Scratch: scores [B, H, Sq, Skv] for raw QK^T, probsBuf for softmax output (separate
-        // buffer to avoid same-binding aliasing in the softmax shader, which has readonly+writeonly
-        // bindings and would produce undefined results when src==dst).
-        ulong scoresElems = (ulong)(totalHeads * Sq * Skv);
+        // Query tiling for the plain (no-mask) case: the full [B, H, Sq, Skv] score matrix OOMs at Wan-Video
+        // full res (24 × 14040² ≈ 19 GB). Tile the query axis into Br-row chunks so only [totalHeads, Br, Skv]
+        // is materialized; each tile reuses the same matmul/softmax dispatches (numerically identical to the
+        // untiled path — mirrors CudaBackend.SdpaTiledF32NoMask, which is bit-exact for a single tile). Masked
+        // callers keep Br = Sq (untiled), so the mask-offset math below is unchanged for them.
+        long Br = Sq;
+        ulong fullScoreBytes = (ulong)(totalHeads * Sq * Skv) * (ulong)dtype.SizeInBytes;
+        bool forceTile = Environment.GetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED") == "1";
+        if (mask is null && (forceTile || fullScoreBytes > (1UL << 30)))   // > 1 GiB score matrix → tile
+        {
+            long perRow = totalHeads * Skv * dtype.SizeInBytes;            // bytes per query row across all heads
+            Br = Math.Max(1, (512L * 1024 * 1024) / Math.Max(1, perRow));  // ~512 MB score-tile budget
+            if (Br > Sq) Br = Sq;
+            if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_SDPA_TILE"), out int envBr) && envBr > 0)
+                Br = Math.Min(envBr, Sq);
+        }
+
+        // Scratch: scores/probs sized for a single [totalHeads, Br, Skv] query tile (Br == Sq ⇒ the original
+        // full-matrix behavior). Separate probsBuf avoids readonly+writeonly aliasing in the softmax shader.
+        ulong scoresElems = (ulong)(totalHeads * Br * Skv);
         VulkanBuffer scoresBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
         VulkanBuffer probsBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
 
@@ -1101,45 +1117,52 @@ public sealed class VulkanBackend : IBackend
 
         try
         {
-            // Per-head dispatch
-            for (long bh = 0; bh < totalHeads; bh++)
+            for (long q0 = 0; q0 < Sq; q0 += Br)
             {
-                uint qOff = (uint)(bh * Sq * D);
-                uint kOff = (uint)(bh * Skv * D);
-                uint sOff = (uint)(bh * Sq * Skv);
-                uint vOff = (uint)(bh * Skv * D);
-                uint outOff = (uint)(bh * Sq * D);
+                long curBr = Math.Min(Br, Sq - q0);
 
-                // 1) scores = Q @ K^T * scale  →  shape (Sq, Skv)
-                DispatchMatmulWithOffsets(
-                    qRes.Handle, kRes.Handle, scoresBuf.Handle,
-                    Sq, Skv, D,
-                    transposeA: false, transposeB: true,
-                    alpha: scale, beta: 0.0f,
-                    aOffset: qOff, bOffset: kOff, cOffset: sOff,
-                    dtype: dtype);
-
-                // 1b) optional mask add: scores += mask  (broadcast across heads)
-                if (maskBuf is not null)
+                // Per-head dispatch over this query tile.
+                for (long bh = 0; bh < totalHeads; bh++)
                 {
-                    // The mask may be either [Sq, Skv] or [B, H, Sq, Skv]. We use modulo so a
-                    // [1, 1, Sq, Skv] broadcast cycles back to offset 0 for every head.
-                    uint maskOff = (uint)((bh * maskBroadcastSize) % maskTotalSize);
-                    DispatchMaskAdd(scoresBuf.Handle, maskBuf.Handle, dtype,
-                        (uint)maskBroadcastSize, scoreOffset: sOff, maskOffset: maskOff);
+                    uint qOff = (uint)(bh * Sq * D + q0 * D);
+                    uint kOff = (uint)(bh * Skv * D);
+                    uint sOff = (uint)(bh * curBr * Skv);   // packed within the tile buffer
+                    uint vOff = (uint)(bh * Skv * D);
+                    uint outOff = (uint)(bh * Sq * D + q0 * D);
+
+                    // 1) scores = Q_tile @ K^T * scale  →  shape (curBr, Skv)
+                    DispatchMatmulWithOffsets(
+                        qRes.Handle, kRes.Handle, scoresBuf.Handle,
+                        curBr, Skv, D,
+                        transposeA: false, transposeB: true,
+                        alpha: scale, beta: 0.0f,
+                        aOffset: qOff, bOffset: kOff, cOffset: sOff,
+                        dtype: dtype);
+
+                    // 1b) optional mask add: scores += mask  (broadcast across heads). Only reached when
+                    // mask is non-null, which forces Br == Sq (untiled), so curBr == Sq and this matches the
+                    // original per-head offsets exactly.
+                    if (maskBuf is not null)
+                    {
+                        // The mask may be either [Sq, Skv] or [B, H, Sq, Skv]. We use modulo so a
+                        // [1, 1, Sq, Skv] broadcast cycles back to offset 0 for every head.
+                        uint maskOff = (uint)((bh * maskBroadcastSize) % maskTotalSize);
+                        DispatchMaskAdd(scoresBuf.Handle, maskBuf.Handle, dtype,
+                            (uint)maskBroadcastSize, scoreOffset: sOff, maskOffset: maskOff);
+                    }
+
+                    // 2) softmax along last dim per row of scores  →  probsBuf (separate output)
+                    DispatchSoftmaxRows(scoresBuf.Handle, probsBuf.Handle, dtype, (int)Skv, (int)curBr, sOff, sOff);
+
+                    // 3) out_tile = probs @ V  →  shape (curBr, D)
+                    DispatchMatmulWithOffsets(
+                        probsBuf.Handle, vRes.Handle, outBufLocal.Handle,
+                        curBr, D, Skv,
+                        transposeA: false, transposeB: false,
+                        alpha: 1.0f, beta: 0.0f,
+                        aOffset: sOff, bOffset: vOff, cOffset: outOff,
+                        dtype: dtype);
                 }
-
-                // 2) softmax along last dim per row of scores  →  probsBuf (separate output)
-                DispatchSoftmaxRows(scoresBuf.Handle, probsBuf.Handle, dtype, (int)Skv, (int)Sq, sOff, sOff);
-
-                // 3) out_head = probs @ V  →  shape (Sq, D)
-                DispatchMatmulWithOffsets(
-                    probsBuf.Handle, vRes.Handle, outBufLocal.Handle,
-                    Sq, D, Skv,
-                    transposeA: false, transposeB: false,
-                    alpha: 1.0f, beta: 0.0f,
-                    aOffset: sOff, bOffset: vOff, cOffset: outOff,
-                    dtype: dtype);
             }
 
             // Cast result back to output dtype if needed (should match if model uses consistent dtype).

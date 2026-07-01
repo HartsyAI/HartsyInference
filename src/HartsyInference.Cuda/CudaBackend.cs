@@ -1697,17 +1697,26 @@ public sealed class CudaBackend : IBackend
 
         // Memory-efficient dispatch: the GEMM path below materializes a [totalHeads, Sq, Skv] score matrix. For very
         // long sequences (Wan-Video full-res self-attention: 24 heads × ~14040² × 4B ≈ 19 GB) that OOMs alongside the
-        // model weights. Route the plain case — F32, no additive mask, full bidirectional MHA — to the existing
-        // online-softmax flash kernel (never materializes scores, numerically equivalent). Gated on the score matrix
-        // eating most of free VRAM so small/medium attention keeps the faster tensor-core GEMM path; masked
-        // (Matrix-Game block-causal) callers always keep the GEMM path.
+        // model weights. For the plain case — F32, no additive mask, full bidirectional MHA — avoid the full matrix:
+        //   • default large-seq path = QUERY-TILED GEMM (SdpaTiledF32NoMask): tiles the query axis so only
+        //     [totalHeads, Br, Skv] is materialized per tile, reusing the same TF32 tensor-core GEMMs + softmax kernel
+        //     (numerically identical to the small-seq GEMM path, and ~10× faster than the online-softmax flash kernel
+        //     which re-reads all K/V per query row).
+        //   • HARTSY_SDPA_FORCE_FLASH=1 forces the online-softmax flash kernel (O(1) score memory; validation/fallback).
+        // Gated on the score matrix eating most of free VRAM so small/medium attention keeps the plain GEMM path;
+        // masked (Matrix-Game block-causal) callers always keep the plain GEMM path.
         if (mask is null && query.DType == DType.F32)
         {
-            ulong scoreBytesEst = (ulong)totalHeads * (ulong)Sq * (ulong)Skv * sizeof(float);
-            (nuint freeBytes, _) = _context.GetMemoryInfo();
-            if (EnvFlag("HARTSY_SDPA_FORCE_FLASH") || scoreBytesEst > (ulong)freeBytes / 2)
+            if (EnvFlag("HARTSY_SDPA_FORCE_FLASH"))
             {
                 FlashAttention(output, query, key, value, (int)Skv, kvGroup: 1, causal: false, qOffset: 0, scale);
+                return;
+            }
+            ulong scoreBytesEst = (ulong)totalHeads * (ulong)Sq * (ulong)Skv * sizeof(float);
+            (nuint freeBytes, _) = _context.GetMemoryInfo();
+            if (EnvFlag("HARTSY_SDPA_FORCE_TILED") || scoreBytesEst > (ulong)freeBytes / 2)
+            {
+                SdpaTiledF32NoMask(output, query, key, value, scale);
                 return;
             }
         }
@@ -1911,6 +1920,104 @@ public sealed class CudaBackend : IBackend
             if (pKCast != 0) CudaMemory.FreeAsync(pKCast, _stream.Handle);
             if (pVCast != 0) CudaMemory.FreeAsync(pVCast, _stream.Handle);
             if (pOutCast != 0) CudaMemory.FreeAsync(pOutCast, _stream.Handle);
+        }
+    }
+
+    /// <summary>Query-tiled scaled-dot-product attention for the plain F32/no-mask/MHA case (Wan-Video full-res
+    /// self-attention). Tiles the query axis into <c>Br</c>-row chunks so only a <c>[totalHeads, Br, Skv]</c> score
+    /// buffer is materialized per tile — never the full <c>[totalHeads, Sq, Skv]</c> matrix (24×14040²×4B ≈ 19 GB).
+    /// Each tile reuses the same TF32 tensor-core QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>,
+    /// so results are numerically identical to the plain path (and much faster than the online-softmax flash kernel,
+    /// which re-reads all K/V per query row). <c>Br</c> is sized to a quarter of free VRAM (override: <c>HARTSY_SDPA_TILE</c>).</summary>
+    private unsafe void SdpaTiledF32NoMask(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        long B = query.Shape[0], H = query.Shape[1], Sq = query.Shape[2], D = query.Shape[3];
+        long Skv = key.Shape[2];
+        long totalHeads = B * H;
+
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, scoresBuf = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            // Query-tile height: fit [totalHeads, Br, Skv] into ~a quarter of free VRAM (leaves room for Q/K/V/out
+            // and the model weights). Env override HARTSY_SDPA_TILE forces a fixed Br (benchmarking).
+            (nuint freeBytes, _) = _context.GetMemoryInfo();
+            long perRow = totalHeads * Skv * sizeof(float);            // bytes for one query row across all heads
+            long Br = (long)((ulong)freeBytes / 4) / Math.Max(1, perRow);
+            if (Br < 1) Br = 1;
+            if (Br > Sq) Br = Sq;
+            if (int.TryParse(Environment.GetEnvironmentVariable("HARTSY_SDPA_TILE"), out int envBr) && envBr > 0)
+                Br = Math.Min(envBr, Sq);
+
+            scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * Skv * sizeof(float)));
+
+            long strideQ = Sq * D, strideK = Skv * D, strideV = Skv * D, strideOut = Sq * D;
+            float alpha = scale, beta = 0f, one = 1f, zero = 0f;
+
+            for (long q0 = 0; q0 < Sq; q0 += Br)
+            {
+                long curBr = Math.Min(Br, Sq - q0);
+                long tileStride = curBr * Skv;   // per-head stride within the (packed) tile score buffer
+
+                // QK^T per head: scores[curBr, Skv] = scale · Q[q0:q0+curBr] · Kᵀ  (TF32 tensor cores)
+                for (long bh = 0; bh < totalHeads; bh++)
+                {
+                    ulong qPtr = pQ + (ulong)((bh * strideQ + q0 * D) * sizeof(float));
+                    ulong kPtr = pK + (ulong)(bh * strideK * sizeof(float));
+                    ulong sPtr = scoresBuf + (ulong)(bh * tileStride * sizeof(float));
+                    CublasApi.cublasGemmEx(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                        (int)Skv, (int)curBr, (int)D,
+                        &alpha,
+                        kPtr, CublasApi.CUDA_R_32F, (int)D,
+                        qPtr, CublasApi.CUDA_R_32F, (int)D,
+                        &beta,
+                        sPtr, CublasApi.CUDA_R_32F, (int)Skv,
+                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                }
+
+                // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
+                _kernels!.LaunchSoftmax(scoresBuf, (int)Skv, (int)(totalHeads * curBr), _stream.Handle);
+
+                // scores·V per head → out[q0:q0+curBr]  (TF32 tensor cores)
+                for (long bh = 0; bh < totalHeads; bh++)
+                {
+                    ulong sPtr = scoresBuf + (ulong)(bh * tileStride * sizeof(float));
+                    ulong vPtr = pV + (ulong)(bh * strideV * sizeof(float));
+                    ulong oPtr = pOut + (ulong)((bh * strideOut + q0 * D) * sizeof(float));
+                    CublasApi.cublasGemmEx(
+                        _cublasHandle,
+                        CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                        (int)D, (int)curBr, (int)Skv,
+                        &one,
+                        vPtr, CublasApi.CUDA_R_32F, (int)D,
+                        sPtr, CublasApi.CUDA_R_32F, (int)Skv,
+                        &zero,
+                        oPtr, CublasApi.CUDA_R_32F, (int)D,
+                        CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                }
+            }
+
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
         }
     }
 

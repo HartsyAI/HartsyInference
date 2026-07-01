@@ -86,33 +86,33 @@ public sealed unsafe class WanVideoBlock
         if (dbg != null) { WanVideoDebugDump.Dump($"{dbg}_scaleMsa", scaleMsa); WanVideoDebugDump.Dump($"{dbg}_gateMsa", gateMsa); }
 
         // 1. self-attn
-        Tensor n1 = LayerNorm(hidden, null, null, s);
-        ApplyShiftScale(n1, scaleMsa, shiftMsa, s, tokensPerGroup);
+        Tensor n1 = LayerNorm(backend, hidden, null, null, s);
+        ApplyShiftScale(backend, n1, scaleMsa, shiftMsa, s, tokensPerGroup);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
         Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
         n1.Dispose();
-        Tensor h1 = GatedAdd(hidden, attn1, gateMsa, s, tokensPerGroup);
+        Tensor h1 = GatedAdd(backend, hidden, attn1, gateMsa, s, tokensPerGroup);
         attn1.Dispose();
 
         // 2. cross-attn (to umT5 text, plus optional CLIP image context for I2V)
-        Tensor n2 = LayerNorm(h1, _norm2W, _norm2B, s);
+        Tensor n2 = LayerNorm(backend, h1, _norm2W, _norm2B, s);
         Tensor attn2 = CrossAttention(backend, n2, encoder, imageContextLen);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn2", attn2);
         n2.Dispose();
-        Tensor h2 = AddRows(h1, attn2, s);
+        Tensor h2 = AddRows(backend, h1, attn2, s);
         h1.Dispose();
         attn2.Dispose();
 
         postCrossAttnHook?.Invoke(h2);
 
         // 3. ffn
-        Tensor n3 = LayerNorm(h2, null, null, s);
-        ApplyShiftScale(n3, cScale, cShift, s, tokensPerGroup);
+        Tensor n3 = LayerNorm(backend, h2, null, null, s);
+        ApplyShiftScale(backend, n3, cScale, cShift, s, tokensPerGroup);
         Tensor ff = Ffn(backend, n3, s);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_ff", ff);
         n3.Dispose();
-        Tensor outT = GatedAdd(h2, ff, cGate, s, tokensPerGroup);
+        Tensor outT = GatedAdd(backend, h2, ff, cGate, s, tokensPerGroup);
         h2.Dispose();
         ff.Dispose();
 
@@ -246,33 +246,34 @@ public sealed unsafe class WanVideoBlock
         return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
     }
 
-    /// <summary>FP32 LayerNorm over the last dim with optional affine.</summary>
-    private Tensor LayerNorm(Tensor x, Tensor? weight, Tensor? bias, int s)
+    /// <summary>FP32 LayerNorm over the last dim with optional affine. GPU-resident (backend ops) — the per-op
+    /// host-pointer loop it replaced dominated full-res runtime (14040×3072 per call, forcing D2H/H2D each block).
+    /// Affine-with-bias → <see cref="IBackend.LayerNorm"/>; no-affine → <see cref="IBackend.LayerNormNoAffine"/>;
+    /// the rare affine-without-bias case keeps the CPU reference.</summary>
+    private Tensor LayerNorm(IBackend backend, Tensor x, Tensor? weight, Tensor? bias, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        float* wp = weight is null ? null : (float*)weight.DataPointer;
-        float* bp = bias is null ? null : (float*)bias.DataPointer;
-        for (int i = 0; i < s; i++)
-        {
-            long off = (long)i * _dim;
-            double mean = 0;
-            for (int d = 0; d < _dim; d++) mean += xp[off + d];
-            mean /= _dim;
-            double var = 0;
-            for (int d = 0; d < _dim; d++) { double dd = xp[off + d] - mean; var += dd * dd; }
-            float inv = 1f / MathF.Sqrt((float)(var / _dim) + _eps);
-            for (int d = 0; d < _dim; d++)
-            {
-                float n = (float)((xp[off + d] - mean) * inv);
-                op[off + d] = wp is null ? n : n * wp[d] + (bp is null ? 0f : bp[d]);
-            }
-        }
+        // No-affine (n1/n3): direct GPU op. Affine (n2): normalize on GPU then apply weight/bias as a broadcast
+        // affine on GPU (backend.LayerNorm has no CUDA kernel, but LayerNormNoAffine + AffineBroadcastLastDim do,
+        // so we stay GPU-resident). weight/bias are [dim] = [1, dim] broadcast over the sequence.
+        backend.LayerNormNoAffine(o, x, _eps);
+        if (weight is not null)
+            backend.AffineBroadcastLastDim(o, o, weight, bias);
         return o;
     }
 
-    private void ApplyShiftScale(Tensor x, Tensor scale, Tensor shift, int s, int tokensPerGroup)
+    /// <summary>AdaLN modulate in place: <c>x = x·(1+scale) + shift</c>, scale/shift broadcast per group over the
+    /// last dim. G=1 (scalar timestep) is GPU-resident via <see cref="IBackend.AffineBroadcastLastDim"/> (pre-adding
+    /// 1 to scale on-GPU); the multi-group TI2V path keeps the CPU reference.</summary>
+    private void ApplyShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s, int tokensPerGroup)
     {
+        if (tokensPerGroup == s)   // G == 1: scale/shift are [1, dim] broadcast over all S tokens
+        {
+            using Tensor scaleP1 = new Tensor(scale.Shape, DType.F32);
+            backend.AddScalar(scaleP1, scale, 1.0f);           // (1 + scale)
+            backend.AffineBroadcastLastDim(x, x, scaleP1, shift);   // x = x·(1+scale) + shift, in place
+            return;
+        }
         float* xp = (float*)x.DataPointer; float* sc = (float*)scale.DataPointer; float* sh = (float*)shift.DataPointer;
         for (int i = 0; i < s; i++)
         {
@@ -281,9 +282,16 @@ public sealed unsafe class WanVideoBlock
         }
     }
 
-    private Tensor GatedAdd(Tensor residual, Tensor value, Tensor gate, int s, int tokensPerGroup)
+    /// <summary>Gated residual: <c>out = residual + gate·value</c>, gate broadcast per group over the last dim.
+    /// G=1 is GPU-resident via <see cref="IBackend.GatedResidualLastDim"/>; multi-group TI2V keeps the CPU reference.</summary>
+    private Tensor GatedAdd(IBackend backend, Tensor residual, Tensor value, Tensor gate, int s, int tokensPerGroup)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+        if (tokensPerGroup == s)   // G == 1: gate is [1, dim]
+        {
+            backend.GatedResidualLastDim(o, residual, value, gate);
+            return o;
+        }
         float* rp = (float*)residual.DataPointer; float* vp = (float*)value.DataPointer; float* gp = (float*)gate.DataPointer; float* op = (float*)o.DataPointer;
         for (int i = 0; i < s; i++)
         {
@@ -293,12 +301,24 @@ public sealed unsafe class WanVideoBlock
         return o;
     }
 
-    private Tensor AddRows(Tensor a, Tensor b, int s)
+    // Cached [1, dim] ones row so plain elementwise add (backend.Add has no CUDA kernel) can run as a GPU
+    // GatedResidualLastDim: out = a + 1·b. Built once on first use.
+    private Tensor? _ones;
+    private Tensor Ones()
+    {
+        if (_ones is null)
+        {
+            _ones = new Tensor(new TensorShape(1, _dim), DType.F32);
+            float* p = (float*)_ones.DataPointer;
+            for (int i = 0; i < _dim; i++) p[i] = 1f;
+        }
+        return _ones;
+    }
+
+    private Tensor AddRows(IBackend backend, Tensor a, Tensor b, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        long n = (long)s * _dim;
-        float* ap = (float*)a.DataPointer; float* bp = (float*)b.DataPointer; float* op = (float*)o.DataPointer;
-        for (long i = 0; i < n; i++) op[i] = ap[i] + bp[i];
+        backend.GatedResidualLastDim(o, a, b, Ones());   // a + 1·b  (GPU)
         return o;
     }
 
