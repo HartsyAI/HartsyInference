@@ -19,9 +19,11 @@ public static class Hunyuan3DCheckpointConverter
         public required Dictionary<string, Tensor> Dinov2 { get; init; }
     }
 
-    private static readonly string[] VaePrefixes = ["shapevae.", "vae.", "shape_model.", "geo_decoder."];
-    private static readonly string[] DinoPrefixes = ["conditioner.", "image_encoder.", "dino.", "dinov2.", "main_image_encoder."];
-    private static readonly string[] DitPrefixes = ["denoiser.", "model.", "dit.", "transformer."];
+    // Real tencent/Hunyuan3D-2 layout: DiT = `model.*`, ShapeVAE = `vae.*`, DINOv2-giant conditioner =
+    // `conditioner.main_image_encoder.model.*` (strip the whole prefix → HF ViT `embeddings.*`/`encoder.layer.*`).
+    private static readonly string[] VaePrefixes = ["vae.", "shapevae.", "shape_model."];
+    private static readonly string[] DinoPrefixes = ["conditioner.main_image_encoder.model.", "conditioner.", "image_encoder.", "dinov2.", "dino."];
+    private static readonly string[] DitPrefixes = ["model.", "denoiser.", "dit.", "transformer."];
 
     /// <summary>Routes every weight to its component, stripping the matched component prefix. Keys that don't
     /// match a VAE/DINO prefix default to the DiT bucket.</summary>

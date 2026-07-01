@@ -11,9 +11,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// (layer-id, row, col).</para>
 /// <para>Text conditioning is the concatenation of:
 /// <list type="bullet">
-/// <item>The last two Llama-3.1 hidden states projected through <c>caption_projection[0]</c> (forming the "initial encoder hidden states");</item>
-/// <item>The T5-XXL hidden state projected through <c>caption_projection[-1]</c>;</item>
-/// <item>One Llama hidden state per block, projected through <c>caption_projection[0]</c> and concatenated to the running encoder.</item>
+/// <item>Each Llama-3.1 hidden state (one per block) projected through its OWN <c>caption_projection[i]</c> (sequential, i = block index);</item>
+/// <item>The T5-XXL hidden state projected through <c>caption_projection[-1]</c> (the final, 49th entry);</item>
+/// <item>The "initial encoder hidden states" = concat(T5 projection, last Llama projection); each block appends its own Llama projection to the running encoder.</item>
 /// </list>
 /// The pooled CLIP-L+CLIP-G embedding is fed into the timestep MLP via the pooled embedder.</para></summary>
 public sealed unsafe class HiDreamTransformer : IDisposable
@@ -85,8 +85,13 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         _pEmbedLinear2Weight = weights["p_embedder.pooled_embedder.linear_2.weight"];
         _pEmbedLinear2Bias = weights["p_embedder.pooled_embedder.linear_2.bias"];
 
-        // caption_projection[i].linear.weight (no bias)
-        int numCaptionProjections = _config.CaptionChannels.Length;
+        // caption_projection[i].linear.weight (no bias). Diffusers builds ONE projection per block plus a final
+        // one for T5: caption_channels = [llama_dim]*(num_layers+num_single_layers) + [t5_dim], i.e.
+        // num_layers + num_single_layers + 1 entries (49 for V1). Llama layer i is projected through
+        // caption_projection[i] (per-block, sequential); T5 through caption_projection[-1]. Loading only
+        // CaptionChannels.Length (=2) collapsed every block onto caption_projection[0] and mis-mapped T5 to [1],
+        // corrupting all conditioning (the brown-cloud bug).
+        int numCaptionProjections = _config.NumLayers + _config.NumSingleLayers + 1;
         _captionProjectionWeights = new Tensor[numCaptionProjections];
         for (int i = 0; i < numCaptionProjections; i++)
             _captionProjectionWeights[i] = weights[$"caption_projection.{i}.linear.weight"];
@@ -173,10 +178,12 @@ public sealed unsafe class HiDreamTransformer : IDisposable
 
         // ── 3. Project caption inputs ──
         // For the per-block llama states we use caption_projection[0]; for T5 we use caption_projection[-1].
+        // Each Llama layer i is projected through its OWN caption_projection[i] (per-block, sequential —
+        // matching diffusers `caption_projection[i](encoder_hidden_states[i])`), NOT a shared [0].
         Tensor[] llamaProj = new Tensor[llamaHiddenLayers.Count];
         for (int i = 0; i < llamaHiddenLayers.Count; i++)
         {
-            llamaProj[i] = ProjectCaption(backend, llamaHiddenLayers[i], _captionProjectionWeights![0]);
+            llamaProj[i] = ProjectCaption(backend, llamaHiddenLayers[i], _captionProjectionWeights![i]);
         }
 
         Tensor t5Proj = ProjectCaption(backend, t5Hidden, _captionProjectionWeights![^1]);
@@ -369,29 +376,24 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         backend.Linear(modParams, activated, _finalAdaLnWeight!, _finalAdaLnBias);
         activated.Dispose();
 
+        // GPU-resident final modulation: LayerNorm(no-affine) → norm*(1+scale)+shift, modParams split [shift, scale]
+        // (diffusers HiDreamImageOutEmbed order).
         Tensor normed = new Tensor(hidShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
+        backend.LayerNormNoAffine(normed, hidden, 1e-6f);
+
+        Tensor shift = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.SliceLastDim(shift, modParams, 0);
+        Tensor scale = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.SliceLastDim(scale, modParams, dim);
+        Tensor scalePlus1 = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        scale.Dispose();
 
         Tensor modulated = new Tensor(hidShape, DType.F32);
-        float* modPtr = (float*)modParams.DataPointer;
-        float* normPtr = (float*)normed.DataPointer;
-        float* modulatedPtr = (float*)modulated.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int modBase = b * dim * 2;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vecOffset = (b * seqLen + s) * dim;
-                for (int d = 0; d < dim; d++)
-                {
-                    // Diffusers HiDreamImageOutEmbed order: [shift, scale]
-                    float shift = modPtr[modBase + d];
-                    float scale = modPtr[modBase + dim + d];
-                    modulatedPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
-                }
-            }
-        }
+        backend.AffineBroadcastLastDim(modulated, normed, scalePlus1, shift);
         normed.Dispose();
+        shift.Dispose();
+        scalePlus1.Dispose();
         modParams.Dispose();
 
         TensorShape outShape = new TensorShape(batch, seqLen, outDim);

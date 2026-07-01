@@ -212,13 +212,13 @@ public sealed unsafe class HiDreamBlock
 
         // ── 2. Pre-attention norms + AdaLN modulation ──
         Tensor imgNormed = new Tensor(imgShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(imgNormed, image, batch, imgSeqLen, _hiddenSize);
-        Tensor imgMod = AdaLNModulation.ApplyModulation(imgNormed, mods[0], mods[1], batch, imgSeqLen, _hiddenSize);
+        backend.LayerNormNoAffine(imgNormed, image, 1e-6f);
+        Tensor imgMod = GpuModulate(backend, imgNormed, mods[0], mods[1], batch, imgSeqLen, _hiddenSize);
         imgNormed.Dispose();
 
         Tensor txtNormed = new Tensor(txtShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(txtNormed, text, batch, txtSeqLen, _hiddenSize);
-        Tensor txtMod = AdaLNModulation.ApplyModulation(txtNormed, mods[6], mods[7], batch, txtSeqLen, _hiddenSize);
+        backend.LayerNormNoAffine(txtNormed, text, 1e-6f);
+        Tensor txtMod = GpuModulate(backend, txtNormed, mods[6], mods[7], batch, txtSeqLen, _hiddenSize);
         txtNormed.Dispose();
 
         // ── 3. Joint MM-attention ──
@@ -228,35 +228,35 @@ public sealed unsafe class HiDreamBlock
         txtMod.Dispose();
 
         // ── 4. Gated residuals: hidden = hidden + gate * attn_out ──
-        Tensor imgAfterAttn = AdaLNModulation.ApplyGatedResidual(image, imgAttnOut, mods[2], batch, imgSeqLen, _hiddenSize);
+        Tensor imgAfterAttn = GpuGatedResidual(backend, image, imgAttnOut, mods[2], batch, imgSeqLen, _hiddenSize);
         imgAttnOut.Dispose();
-        Tensor txtAfterAttn = AdaLNModulation.ApplyGatedResidual(text, txtAttnOut, mods[8], batch, txtSeqLen, _hiddenSize);
+        Tensor txtAfterAttn = GpuGatedResidual(backend, text, txtAttnOut, mods[8], batch, txtSeqLen, _hiddenSize);
         txtAttnOut.Dispose();
 
         // ── 5. Image FFN (MoE single-expert fallback) ──
         Tensor imgPreFfn = new Tensor(imgShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(imgPreFfn, imgAfterAttn, batch, imgSeqLen, _hiddenSize);
-        Tensor imgFfnIn = AdaLNModulation.ApplyModulation(imgPreFfn, mods[3], mods[4], batch, imgSeqLen, _hiddenSize);
+        backend.LayerNormNoAffine(imgPreFfn, imgAfterAttn, 1e-6f);
+        Tensor imgFfnIn = GpuModulate(backend, imgPreFfn, mods[3], mods[4], batch, imgSeqLen, _hiddenSize);
         imgPreFfn.Dispose();
 
         // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
         Tensor imgFfnOut = MoeForward(backend, imgFfnIn, batch, imgSeqLen);
         imgFfnIn.Dispose();
 
-        Tensor imgFinal = AdaLNModulation.ApplyGatedResidual(imgAfterAttn, imgFfnOut, mods[5], batch, imgSeqLen, _hiddenSize);
+        Tensor imgFinal = GpuGatedResidual(backend, imgAfterAttn, imgFfnOut, mods[5], batch, imgSeqLen, _hiddenSize);
         imgFfnOut.Dispose();
         imgAfterAttn.Dispose();
 
         // ── 6. Text FFN (vanilla SwiGLU) ──
         Tensor txtPreFfn = new Tensor(txtShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(txtPreFfn, txtAfterAttn, batch, txtSeqLen, _hiddenSize);
-        Tensor txtFfnIn = AdaLNModulation.ApplyModulation(txtPreFfn, mods[9], mods[10], batch, txtSeqLen, _hiddenSize);
+        backend.LayerNormNoAffine(txtPreFfn, txtAfterAttn, 1e-6f);
+        Tensor txtFfnIn = GpuModulate(backend, txtPreFfn, mods[9], mods[10], batch, txtSeqLen, _hiddenSize);
         txtPreFfn.Dispose();
 
         Tensor txtFfnOut = SwiGluForward(backend, txtFfnIn, _ffTW1!, _ffTW3!, _ffTW2!, batch, txtSeqLen);
         txtFfnIn.Dispose();
 
-        Tensor txtFinal = AdaLNModulation.ApplyGatedResidual(txtAfterAttn, txtFfnOut, mods[11], batch, txtSeqLen, _hiddenSize);
+        Tensor txtFinal = GpuGatedResidual(backend, txtAfterAttn, txtFfnOut, mods[11], batch, txtSeqLen, _hiddenSize);
         txtFfnOut.Dispose();
         txtAfterAttn.Dispose();
 
@@ -283,28 +283,28 @@ public sealed unsafe class HiDreamBlock
 
         // ── 2. Pre-attention norm + modulate ──
         Tensor preAttn = new Tensor(hiddenShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(preAttn, hidden, batch, seqLen, _hiddenSize);
-        Tensor preAttnMod = AdaLNModulation.ApplyModulation(preAttn, mods[0], mods[1], batch, seqLen, _hiddenSize);
+        backend.LayerNormNoAffine(preAttn, hidden, 1e-6f);
+        Tensor preAttnMod = GpuModulate(backend, preAttn, mods[0], mods[1], batch, seqLen, _hiddenSize);
         preAttn.Dispose();
 
         // ── 3. Self-attention over the joint sequence (only image side has RoPE; text positions are zero) ──
         Tensor attnOut = SingleStreamSelfAttention(backend, preAttnMod, rope, totalRopeSeqLen, batch, seqLen, imgSeqLen, txtSeqLen);
         preAttnMod.Dispose();
 
-        Tensor afterAttn = AdaLNModulation.ApplyGatedResidual(hidden, attnOut, mods[2], batch, seqLen, _hiddenSize);
+        Tensor afterAttn = GpuGatedResidual(backend, hidden, attnOut, mods[2], batch, seqLen, _hiddenSize);
         attnOut.Dispose();
 
         // ── 4. MoE FFN over the joint sequence ──
         Tensor preFfn = new Tensor(hiddenShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(preFfn, afterAttn, batch, seqLen, _hiddenSize);
-        Tensor ffnIn = AdaLNModulation.ApplyModulation(preFfn, mods[3], mods[4], batch, seqLen, _hiddenSize);
+        backend.LayerNormNoAffine(preFfn, afterAttn, 1e-6f);
+        Tensor ffnIn = GpuModulate(backend, preFfn, mods[3], mods[4], batch, seqLen, _hiddenSize);
         preFfn.Dispose();
 
         // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
         Tensor ffnOut = MoeForward(backend, ffnIn, batch, seqLen);
         ffnIn.Dispose();
 
-        Tensor result = AdaLNModulation.ApplyGatedResidual(afterAttn, ffnOut, mods[5], batch, seqLen, _hiddenSize);
+        Tensor result = GpuGatedResidual(backend, afterAttn, ffnOut, mods[5], batch, seqLen, _hiddenSize);
         ffnOut.Dispose();
         afterAttn.Dispose();
 
@@ -327,26 +327,37 @@ public sealed unsafe class HiDreamBlock
         backend.Linear(projected, activated, _adaLnLinearWeight!, _adaLnLinearBias);
         activated.Dispose();
 
+        // GPU-resident split: SliceLastDim extracts each [B, hiddenSize] chunk at offset p*hiddenSize.
         Tensor[] results = new Tensor[numParams];
-        float* projPtr = (float*)projected.DataPointer;
-
         for (int p = 0; p < numParams; p++)
         {
-            TensorShape paramShape = new TensorShape(batch, _hiddenSize);
-            Tensor param = new Tensor(paramShape, DType.F32);
-            float* pPtr = (float*)param.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                int srcOff = b * outDim + p * _hiddenSize;
-                int dstOff = b * _hiddenSize;
-                for (int d = 0; d < _hiddenSize; d++)
-                    pPtr[dstOff + d] = projPtr[srcOff + d];
-            }
+            Tensor param = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
+            backend.SliceLastDim(param, projected, p * _hiddenSize);
             results[p] = param;
         }
 
         projected.Dispose();
         return results;
+    }
+
+    /// <summary>GPU-resident AdaLN modulation: output = input * (1 + scale) + shift, scale/shift [B, hidden]
+    /// broadcast over the sequence.</summary>
+    private static Tensor GpuModulate(IBackend backend, Tensor input, Tensor shift, Tensor scale, int batch, int seqLen, int hiddenSize)
+    {
+        Tensor scalePlus1 = new Tensor(new TensorShape(batch, hiddenSize), DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, hiddenSize), DType.F32);
+        backend.AffineBroadcastLastDim(output, input, scalePlus1, shift);
+        scalePlus1.Dispose();
+        return output;
+    }
+
+    /// <summary>GPU-resident gated residual: output = input + gate * value, gate [B, hidden] broadcast over the sequence.</summary>
+    private static Tensor GpuGatedResidual(IBackend backend, Tensor input, Tensor value, Tensor gate, int batch, int seqLen, int hiddenSize)
+    {
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, hiddenSize), DType.F32);
+        backend.GatedResidualLastDim(output, input, value, gate);
+        return output;
     }
 
     /// <summary>Joint MM-attention shared between image and text in double-stream blocks. Image and text

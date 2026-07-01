@@ -49,6 +49,10 @@ public sealed record Hunyuan3DConfig
     /// <summary>Number of Fourier frequency bands for query-point positional encoding (per axis).</summary>
     public int FourierBands { get; init; } = 8;
 
+    /// <summary>ShapeVAE latent scale (config <c>scale_factor</c>); the sampled latent is divided by this before
+    /// decode (<c>latents /= scale_factor</c>).</summary>
+    public float VaeScaleFactor { get; init; } = 1.0f;
+
     // --- Sampling / extraction defaults ---
     /// <summary>Default flow-match denoise steps.</summary>
     public int NumInferenceSteps { get; init; } = 50;
@@ -75,7 +79,7 @@ public sealed record Hunyuan3DConfig
     {
         LatentTokens = 3072, LatentChannels = 64, Width = 1024, DepthDouble = 16, DepthSingle = 32, NumHeads = 16,
         CondDim = 1536, MlpDim = 4096, TimestepEmbedDim = 256, TimeFactor = 1000f,
-        VaeWidth = 1024, VaeDepth = 16, VaeNumHeads = 16, FourierBands = 8,
+        VaeWidth = 1024, VaeDepth = 16, VaeNumHeads = 16, FourierBands = 8, VaeScaleFactor = 0.9990943042622529f,
         NumInferenceSteps = 50, GuidanceScale = 5.0f, FlowShift = 1.0f,
         GridResolution = 256, IsoLevel = 0f, BoundingBox = 1.01f,
     };

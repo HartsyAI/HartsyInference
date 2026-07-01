@@ -85,6 +85,10 @@ public sealed unsafe class Hunyuan3DDit
         {
             (Tensor ni, Tensor nt) = block.Forward(backend, img, txt, vec);
             img.Dispose(); txt.Dispose(); img = ni; txt = nt;
+            // Drain the compute stream so the per-block transients' async frees complete before the next block —
+            // otherwise 48 blocks' worth of ~1.3 GB joint-attention score buffers accumulate and OOM the 24 GB card.
+            // (A GPU-residency block rewrite with reused buffers removes the need for this.)
+            backend.Sync();
         }
 
         // Single stream over concat[txt, img] (txt FIRST); then drop the txt prefix.
@@ -94,6 +98,7 @@ public sealed unsafe class Hunyuan3DDit
         {
             Tensor nj = block.Forward(backend, joint, vec);
             joint.Dispose(); joint = nj;
+            backend.Sync();
         }
         Tensor latentOut = Hunyuan3DDitOps.SliceSeq(joint, b, scond, n, width);   // drop first `scond` tokens
         joint.Dispose();
@@ -112,19 +117,22 @@ public sealed unsafe class Hunyuan3DDit
         return velocity;
     }
 
-    /// <summary>Flux sinusoidal timestep embedding: <c>t*=time_factor</c>, half=dim/2, <c>freqs=exp(-log(10000)·i/half)</c>,
-    /// <c>emb=[cos(t·freqs), sin(t·freqs)]</c> (cos first). Same scalar t across the batch.</summary>
+    /// <summary>Flux sinusoidal timestep embedding, matching hy3dgen <c>timestep_embedding(t, dim, self.time_factor)</c>:
+    /// the model passes <c>time_factor</c> as the <b>max_period</b> positional arg, so BOTH the t-scale and the
+    /// frequency base are <see cref="Hunyuan3DConfig.TimeFactor"/> (1000) — NOT the 10000 default. So
+    /// <c>t*=1000</c>, <c>freqs=exp(-log(1000)·i/half)</c>, <c>emb=[cos(t·freqs), sin(t·freqs)]</c> (cos first).</summary>
     private static void FluxTimestepEmbedding(Tensor outp, float timestep, int batch, int dim, float timeFactor)
     {
         float* p = (float*)outp.DataPointer;
         int half = dim / 2;
         float tt = timestep * timeFactor;
+        float logMax = MathF.Log(timeFactor);   // max_period == time_factor (== 1000) in the hy3dgen call
         for (int bb = 0; bb < batch; bb++)
         {
             float* row = p + (long)bb * dim;
             for (int i = 0; i < half; i++)
             {
-                float freq = MathF.Exp(-MathF.Log(10000f) * i / half);
+                float freq = MathF.Exp(-logMax * i / half);
                 float a = tt * freq;
                 row[i] = MathF.Cos(a);
                 row[half + i] = MathF.Sin(a);
