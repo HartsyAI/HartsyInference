@@ -6,14 +6,15 @@ Concise status for 3D-generation (image → mesh) models. Build detail lives in
 
 ## Verified end-to-end (✅)
 
-None yet. Both pipelines are built structurally; neither has a real-weight, output-confirmed run.
+| Model | Notes |
+|---|---|
+| **TripoSR** | Real-weight image → mesh on the RTX 3060 (`stabilityai/TripoSR`, 2026-06-30). Every stage matches the upstream `tsr` reference — DINO ViT-B/16 tokens corr ~1.0, Transformer1D backbone scene_codes **corr 1.00000000** (std 409.33 vs 409.33), NeRF decoder density/color to 1.6e-2/5e-6 — and the density field (1.2% > iso 25) meshes into a coherent 84k-tri chair `.glb`. Two bugs fixed (see [PARITY_VERIFICATION.md §Bugs](PARITY_VERIFICATION.md)): DINO pos-embed interp `+0.1` fudge, and a CUDA activation-cache reshape-identity bug in the backbone. **Caveat:** background removal (rembg + resize_foreground + gray-0.5 composite) is still done in Python — the C# pipeline expects an already-composited RGB input; port it for raw-RGBA CLI use. |
 
 ## Built, validation-pending (🔧)
 
 | Model | Notes |
 |---|---|
-| **Hunyuan3D-2** | image → mesh pipeline on the shared 3D foundation. |
-| **TripoSR** | image → mesh (triplane → marching cubes). |
+| **Hunyuan3D-2** | image → mesh pipeline on the shared 3D foundation. Reference dump `dump_hunyuan3d_full_forward.py` still has unfilled `TODO[VG]` (model construction + forward hooks) — build the oracle before running. |
 
 ## Foundation
 

@@ -44,9 +44,9 @@ per-model architecture notes and build plans.
 | **Flux.2 Dev (32B)** | Needs GGUF Q4 + per-block streaming to fit 12 GB. |
 | **ChromaRadiance / ZetaChroma** | Chroma variants (base Chroma now ✅). T5-only pipelines; await variant checkpoints. |
 | **Hunyuan Image 2.1** | 17B; **BLOCKED on 24GB** — 35GB bf16 + fp8/GGUF repacks use incompatible original-Tencent keys. Needs an fp8-diffusers-naming quant or a GGUF/K-quant reader. |
-| **HiDream i1 (Full / Dev)** | Quad-encoder; MoE FFN is single-expert fallback (full routing pending). |
+| **HiDream i1 Dev** | 🔬 IN PROGRESS — fp8 staged + loads; encoder crash FIXED (CLIP-L pooled). Now runs past encoding into the denoising loop. BLOCKERS: half-rewritten `HiDreamBlock` (reverted to original cpu=27 working baseline in working tree) crashes the forward if used — needs a proper redo; 17GB-fp8 load occasionally hangs. **See worklog "▶▶ NEXT AGENT".** Quad-encoder; MoE FFN single-expert fallback. |
 | **Kandinsky 5.0 Lite** | Dual Qwen2.5-VL + CLIP-L embeds. |
-| **OmniGen 2** | Joint-stream RoPE; t2i only. |
+| **OmniGen 2** | 🔬 IN PROGRESS — fp16 + 3B TE + embeds staged; RUNS at 512-nocfg on the 3060 (68s) but 4 bugs: wrong subject (conditioning/embeds), blocky bottom-third (latent), 1024-CFG illegal-address, host-bound at 1024. **See worklog "▶▶ NEXT AGENT".** Joint-stream RoPE; t2i only. |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
 | **Boogu-Image 0.1 Turbo** | Base is ✅ (above); Turbo shares the identical code path (same config/TE/VAE, 4-step, tg=1.0) — just needs a verification run. **Edit** variant needs the Qwen3-VL vision tower (ref-image conditioning) — not yet wired. |
 

@@ -26,7 +26,7 @@ Flow-match DiT over a VecSet latent + ShapeVAE occupancy decode → marching cub
 - [x] CPU structural tests (DiT finite velocity, ShapeVAE finite field, pipeline image→mesh end-to-end)
 - [ ] **[VG]** numeric pass: download `tencent/Hunyuan3D-2`, fill `tests/python-reference/dump_hunyuan3d_full_forward.py` TODO[VG], run `diff_hunyuan3d_layers.py`, drive to ✅ (DiT block wiring, timestep scaling, VAE Fourier/iso/bounds, converter keys, config dims)
 
-## 3. TripoSR (image → mesh, feed-forward) — 🔧 structural build, numerics validation-pending (2026-06-14)
+## 3. TripoSR (image → mesh, feed-forward) — ✅ verified e2e on real weights (2026-06-30)
 
 Deterministic LRM → triplane → NeRF MLP → marching cubes (no diffusion → easiest to validate).
 
@@ -34,7 +34,7 @@ Deterministic LRM → triplane → NeRF MLP → marching cubes (no diffusion →
 - [x] `Pipelines/TripoSrPipeline.cs` (+ `LoadFromPath`); density field → marching cubes → mesh + per-vertex colors
 - [x] `ModelHandler/CheckpointConverters/TripoSrCheckpointConverter.cs`
 - [x] CPU structural tests (transformer triplane shape, NeRF density field, pipeline end-to-end)
-- [ ] **[VG]** numeric pass vs `stabilityai/TripoSR` (single clean diff — no scheduler/seed alignment); DINO preset, plane→axis mapping, density activation/threshold, converter keys
+- [x] **[VG]** numeric pass vs `stabilityai/TripoSR` (single clean diff — no scheduler/seed alignment): DINO tokens corr ~1.0, backbone scene_codes corr 1.0, decoder density/color to 1.6e-2/5e-6; coherent 84k-tri chair `.glb` on the 3060. Fixed 2 bugs (DINO pos-embed `+0.1`, CUDA activation-cache reshape identity — see PARITY_VERIFICATION §Bugs). Tests: `TripoSrParityTests` (CPU numeric), `TripoSrGenerationTests` (GPU e2e), `CudaOpBisectTests` (CPU-vs-CUDA op regression). **Follow-up:** port the rembg + resize_foreground + gray-0.5 composite preprocessing to C# (currently done in Python) for raw-RGBA input.
 
 ## 4. Sample + wiring — DONE
 
@@ -46,3 +46,19 @@ Deterministic LRM → triplane → NeRF MLP → marching cubes (no diffusion →
 - [ ] **TRELLIS** (image → Gaussian splat + mesh) — needs sparse 3D conv/attention (no backend op yet) + flexicubes + splat rendering. The `GaussianSplatCloud` type + PLY splat export are already in place.
 - [ ] Texture/PBR (Hunyuan3D Paint — multiview diffusion + UV bake)
 - [ ] Splat **rendering** (rasterizer) for previews
+
+## 6. Foreground preprocessing — pure-C# background removal (**REQUIRED for raw-image input; no Python in the app**)
+
+Both TripoSR and Hunyuan3D condition on a **foreground-isolated** image (object on a neutral gray-0.5 background),
+which the upstream repos produce with Python `rembg` (U²-Net ONNX) + `resize_foreground` + composite. Our app must
+never shell out to Python, so this needs a native tool. During TripoSR e2e validation the compositing was done in
+Python (`/tmp/prep_triposr.py`) — that is a **stopgap, not shippable**.
+
+- [ ] **Salient-object segmentation model in `HartsyInference.Vision`** → per-pixel alpha mask (U²-Net / ISNet /
+  BiRefNet; U²-Net is the rembg default and smallest). This is a normal model-build (weights + converter + forward
+  + parity), reusable beyond 3D.
+- [ ] **`ForegroundComposite` helper in `HartsyInference.ThreeD`** (pure array ops, no model): alpha-bbox crop →
+  pad to square → resize to `foreground_ratio` (0.85) → composite `rgb·α + (1−α)·0.5`. Mirrors TripoSR
+  `resize_foreground` + `run.py`.
+- [ ] Wire into `TripoSrPipeline.Generate` / `Hunyuan3DShapePipeline` + the CLI (flag: raw vs pre-composited input).
+  Code TODOs are marked `TODO(3D/no-python)` in `TripoSrPipeline.cs` and `samples/HartsyInference.ThreeD.Cli/Program.cs`.

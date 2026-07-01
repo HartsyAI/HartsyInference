@@ -53,6 +53,11 @@ internal static class Program
         Console.Error.WriteLine($"model:   {modelPath}");
         Console.Error.WriteLine($"backend: {backendName}");
 
+        // TODO(3D/no-python): raw photos need foreground isolation first (background removal → resize_foreground →
+        // gray-0.5 composite), which TripoSR/Hunyuan3D do via Python rembg. The app must NOT depend on Python, so
+        // this belongs in a pure-C# tool: a salient-object-segmentation model in HartsyInference.Vision (U²-Net /
+        // ISNet / BiRefNet) + a ForegroundComposite helper. Until then, pass an already-composited image (an alpha
+        // PNG or foreground-on-gray). See docs/Checklists/PHASE_11_THREED.md §5.
         (byte[] rgb, int w, int h) = PngDecoder.DecodeFromFile(imagePath);
 
         using IBackend backend = CreateBackend(backendName);

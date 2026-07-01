@@ -4,10 +4,15 @@ First 3D model in HartsyInference. Single image → mesh. Two model components: 
 **flow-match DiT** that denoises a VecSet shape latent, and a **ShapeVAE decoder** that turns the latent
 into an occupancy/SDF field, which marching cubes turns into a mesh. Texture ("Paint") is **out of scope**.
 
-> ⚠️ **Status: structural build, numerics validation-pending.** The code path is green end-to-end on
-> synthetic weights (correct shapes, finite outputs). Items marked **[VG]** (validation-gated) below must be
-> reconciled against the reference (`tencent/Hunyuan3D-2`, the `hy3dgen` repo) via the layer-diff harness
-> before output is trustworthy. This mirrors how every other model reached ✅ in this project.
+> ⚠️ **Status: structural build was a WRONG-ARCHITECTURE guess — rewrite required (2026-06-30).** The real
+> `tencent/Hunyuan3D-2` DiT is **Flux double/single-stream (16 double + 32 single, NO RoPE), conditioned on
+> DINOv2-GIANT (1536-dim, 40 layers)**, and the ShapeVAE is a `transformer.resblocks` self-attn stack + a
+> `geo_decoder` cross-attn head — NOT the PixArt-style single-stream DiT + simple cross-attn VAE the sections
+> below describe. The current C# `Hunyuan3DDit`/`Hunyuan3DShapeVae`/`Hunyuan3DConfig` do not match and must be
+> rewritten. **The full confirmed spec + key tables + build order live in
+> [`../Checklists/E2E_3D_WORKLOG.md`](../Checklists/E2E_3D_WORKLOG.md) § Hunyuan3D-2** (extracted from the real
+> weights + `hy3dgen/shapegen/models/denoisers/hunyuan3ddit.py`). The sections below are the original guess,
+> kept only for history — follow the worklog, not this.
 
 ## Pipeline
 
