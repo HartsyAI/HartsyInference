@@ -109,8 +109,9 @@ public static unsafe class DemucsSpec
                 // Nyquist bin (index `freq`) restored as zero — Demucs nets predict no Nyquist energy.
             }
             float[] wave = IStft.Apply(re, im, frames, nfft, hop);
-            int n = Math.Min(length, wave.Length);
-            for (int i = 0; i < n; i++) op[(long)c * length + i] = wave[i];
+            // demucs _ispec crops [pad : pad+length] with pad = hop//2*3 (the reflect-pad added before the STFT).
+            int pad = hop / 2 * 3;
+            for (int i = 0; i < length; i++) op[(long)c * length + i] = (pad + i < wave.Length) ? wave[pad + i] : 0f;
         }
         return outT;
     }

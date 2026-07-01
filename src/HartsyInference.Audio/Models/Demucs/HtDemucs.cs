@@ -84,106 +84,125 @@ public sealed unsafe class HtDemucs
 
     /// <summary>Separates a stereo waveform into 4 stereo stems. Input waveform <c>[1, C, L]</c> (channels-first,
     /// C = <c>AudioChannels</c>); returns <c>[1, NumSources, C, L]</c>.</summary>
+    /// <summary>Optional per-stage activation hook for parity debugging (key = stage name). Not used in production.</summary>
+    public Action<string, Tensor>? DebugHook { get; set; }
+
     public Tensor Forward(IBackend backend, Tensor wav, int length)
     {
         int channels = _cfg.AudioChannels;
         int srcs = _cfg.NumSources;
+        int encCh = _encChannels[_depth - 1];     // 384
+        int bottom = _cfg.BottomChannels;          // 512
 
-        // ── Time normalize (per the mono mix). ──
-        Tensor timeIn = new(new TensorShape(1, channels, length), DType.F32);
-        float* wp = (float*)wav.DataPointer; float* tp = (float*)timeIn.DataPointer;
-        (float mean, float std) = MonoMeanStd(wp, channels, length);
-        float invStd = 1f / (1e-5f + std);
-        for (long i = 0; i < (long)channels * length; i++) tp[i] = (wp[i] - mean) * invStd;
-
-        // ── STFT → cac → freq normalize. ──
-        Tensor spec = DemucsSpec.Spec(backend, timeIn, channels, length, _cfg.NFft, _cfg.HopLength, out int freq, out int time);
+        // ── Spec from the RAW mix (cac), then normalize by the spec mean/std over all (1,2,3). ──
+        Tensor spec = DemucsSpec.Spec(backend, wav, channels, length, _cfg.NFft, _cfg.HopLength, out int freq, out int time);
+        DebugHook?.Invoke("spec_cac", spec);
         (float smean, float sstd) = TensorMeanStd(spec);
         float sInv = 1f / (1e-5f + sstd);
         float* spp = (float*)spec.DataPointer;
         for (long i = 0; i < spec.ElementCount; i++) spp[i] = (spp[i] - smean) * sInv;
+        DebugHook?.Invoke("spec_norm", spec);
+        if (DebugHook is not null) { DemucsConvBlock.ConvProbe = c => DebugHook("enc0_conv", c); DemucsConvBlock.DConvProbe = c => DebugHook("enc0_postdconv", c); }
 
-        // ── Encode. Freq branch (2D, strides freq) + time branch (1D, strides time), collecting skips. ──
+        // ── Time branch from the RAW mix, normalized by its own mean/std over (1,2). ──
+        (float tmean, float tstd) = TensorMeanStd(wav);
+        float tInv = 1f / (1e-5f + tstd);
+        Tensor timeIn = new(new TensorShape(1, channels, length), DType.F32);
+        float* wp = (float*)wav.DataPointer; float* tp = (float*)timeIn.DataPointer;
+        for (long i = 0; i < (long)channels * length; i++) tp[i] = (wp[i] - tmean) * tInv;
+
+        // ── Encoder: parallel freq (2D) + time (1D) branches (htdemucs has no inject), collecting skips. ──
         Tensor[] specSkip = new Tensor[_depth];
         Tensor[] timeSkip = new Tensor[_depth];
-        Tensor x = spec; int f = freq, tlen = time;
+        int[] timeLen = new int[_depth];
+        Tensor x = spec; int f = freq, t1 = time;
         Tensor xt = timeIn; int tt = length;
         for (int i = 0; i < _depth; i++)
         {
-            Tensor nx = _enc[i].EncodeForward(backend, x, f, tlen);
-            if (i != 0) x.Dispose();
-            x = nx;
-            f = (int)x.Shape[2];
-            if (i == 0 && _freqEmb is not null) AddFreqEmb(x, f, tlen, _encChannels[0]);
+            if (i == 1 && DebugHook is not null) { DemucsConvBlock.ConvProbe = c => DebugHook("enc1_conv", c); DemucsConvBlock.DConvProbe = c => DebugHook("enc1_postdconv", c); }
+            Tensor nx = _enc[i].EncodeForward(backend, x, f, t1);
+            x.Dispose(); x = nx; f = (int)x.Shape[2];
+            if (i == 0) DebugHook?.Invoke("enc0_prefreq", x);
+            if (i == 0 && _freqEmb is not null) AddFreqEmb(x, f, t1, _encChannels[0]);
             specSkip[i] = Clone(x);
 
+            timeLen[i] = tt;
             Tensor nxt = _tenc[i].EncodeForward(backend, xt, 1, tt);
-            if (i != 0) xt.Dispose();
-            xt = nxt;
-            tt = (int)xt.Shape[2];
+            xt.Dispose(); xt = nxt; tt = (int)xt.Shape[2];
             timeSkip[i] = Clone(xt);
+            DebugHook?.Invoke($"enc{i}", x); DebugHook?.Invoke($"tenc{i}", xt);
         }
-        spec.Dispose(); timeIn.Dispose();
 
-        // ── Merge: collapse the freq axis to 1 and inject the time branch. ──
-        // After the encoder freq is small but not necessarily 1; average-collapse the residual freq into 1 so the
-        // token layout matches the time branch, then add the (channel-aligned) time features as the inject.
-        Tensor xCollapsed = CollapseFreq(x, _encChannels[_depth - 1], f, tlen); x.Dispose();
-        int nSpec = tlen;                              // tokens = (1·time)
-        int nTime = tt;
-        AddInject(xCollapsed, xt, _encChannels[_depth - 1], nSpec, nTime);
-
-        // ── Up-project both streams to bottom_channels, cross-transform, down-project. ──
-        int bottom = _cfg.BottomChannels;
-        int encCh = _encChannels[_depth - 1];
-        Tensor sUp = Conv1x1(backend, xCollapsed, _upW!, _upB, encCh, bottom, nSpec); xCollapsed.Dispose();
-        Tensor tUp = Conv1x1(backend, xt, _upWt!, _upBt, encCh, bottom, nTime); xt.Dispose();
-        (Tensor sMix, Tensor tMix) = _xf.Forward(backend, sUp, nSpec, tUp, nTime);
+        // ── Channel up-project (1x1) both streams to bottom_channels, cross-transform, down-project. ──
+        Tensor sUp = ChannelProj(backend, x, _upW!, _upB, encCh, bottom, f * t1, f, t1, true); x.Dispose();
+        Tensor tUp = ChannelProj(backend, xt, _upWt!, _upBt, encCh, bottom, tt, 1, tt, false); xt.Dispose();
+        DebugHook?.Invoke("ct_in_x", sUp); DebugHook?.Invoke("ct_in_xt", tUp);
+        if (DebugHook is not null) { DemucsCrossTransformer.Probe = (k, v) => DebugHook(k, v); DemucsCrossTransformer.AttnProbe = v => DebugHook("ct_l0_attn", v); DemucsCrossTransformer.AfterAttnProbe = v => DebugHook("ct_l0_afterattn", v); DemucsCrossTransformer.PreNormOutProbe = v => DebugHook("ct_l0_out", v); }
+        (Tensor sMix, Tensor tMix) = _xf.Forward(backend, sUp, bottom, f, t1, tUp, tt);
+        DemucsCrossTransformer.Probe = null;
         sUp.Dispose(); tUp.Dispose();
-        Tensor sDown = Conv1x1(backend, sMix, _downW!, _downB, bottom, encCh, nSpec); sMix.Dispose();
-        Tensor tDown = Conv1x1(backend, tMix, _downWt!, _downBt, bottom, encCh, nTime); tMix.Dispose();
+        DebugHook?.Invoke("ct_out_x", sMix); DebugHook?.Invoke("ct_out_xt", tMix);
+        Tensor xs = ChannelProj(backend, sMix, _downW!, _downB, bottom, encCh, f * t1, f, t1, true); sMix.Dispose();
+        Tensor xtd = ChannelProj(backend, tMix, _downWt!, _downBt, bottom, encCh, tt, 1, tt, false); tMix.Dispose();
 
-        // Restore the freq axis (=1) on the spec stream → [1, encCh, 1, tlen].
-        Tensor xs = ExpandFreq(sDown, encCh, tlen); sDown.Dispose();
-        Tensor xtd = tDown;
-
-        // ── Decode. Freq decoder returns features that feed the next layer; both add skips first. ──
-        int curF = 1;
+        // ── Decoder: freq + time branches each add the same-level encoder skip, then up-convolve. ──
         for (int i = 0; i < _depth; i++)
         {
             int di = _depth - 1 - i;
             AddSkip(xs, specSkip[di]);
-            int decT = (int)xs.Shape[3];
-            Tensor nxs = _dec[i].DecodeForward(backend, xs, curF, decT);
-            xs.Dispose(); specSkip[di].Dispose(); xs = nxs;
-            curF = (int)xs.Shape[2];
+            Tensor nxs = _dec[i].DecodeForward(backend, xs, f, t1, t1);
+            xs.Dispose(); specSkip[di].Dispose(); xs = nxs; f = (int)xs.Shape[2];
 
             AddSkip(xtd, timeSkip[di]);
-            int decTt = (int)xtd.Shape[2];
-            Tensor nxtd = _tdec[i].DecodeForward(backend, xtd, 1, decTt);
+            Tensor nxtd = _tdec[i].DecodeForward(backend, xtd, 1, (int)xtd.Shape[2], timeLen[di]);
             xtd.Dispose(); timeSkip[di].Dispose(); xtd = nxtd;
+            DebugHook?.Invoke($"dec{i}", xs); DebugHook?.Invoke($"tdec{i}", xtd);
         }
 
-        // ── Spec branch → complex → iSTFT (channels = 2C → C audio channels via cac); time branch denorm. ──
-        // The freq decoder outputs [1, srcs*specIn, Fq, T]; reshape into [1, srcs, specIn, Fq, T] per source.
+        // ── Freq branch: denorm (spec stats, ·std + mean) → per-source cac → iSTFT. Time branch: denorm (time
+        // stats) → add. The cac → complex mask is the identity for cac (the decoder output IS the spectrogram). ──
+        float* xsp = (float*)xs.DataPointer;
+        for (long i = 0; i < xs.ElementCount; i++) xsp[i] = xsp[i] * sstd + smean;
         int specIn = _cfg.SpecInChannels;
         int outFreq = (int)xs.Shape[2];
         int outTime = (int)xs.Shape[3];
+        float* xtdp = (float*)xtd.DataPointer;
+        int xtdLen = (int)xtd.Shape[2];
+
         Tensor outStems = new(new TensorShape(1, srcs, channels, length), DType.F32);
         float* osp = (float*)outStems.DataPointer;
         for (int s = 0; s < srcs; s++)
         {
             Tensor cac = SliceSource(xs, s, srcs, specIn, outFreq, outTime);
             Tensor wave = DemucsSpec.InverseSpec(cac, channels, length, _cfg.NFft, _cfg.HopLength); cac.Dispose();
-            Tensor twave = SliceTimeSource(xtd, s, srcs, channels, length, std, mean);
-            float* wpv = (float*)wave.DataPointer; float* twv = (float*)twave.DataPointer;
+            float* wpv = (float*)wave.DataPointer;
             for (int c = 0; c < channels; c++)
+            {
+                int tCh = s * channels + c;
                 for (int j = 0; j < length; j++)
-                    osp[((((long)s * channels) + c) * length) + j] = wpv[(long)c * length + j] + twv[(long)c * length + j];
-            wave.Dispose(); twave.Dispose();
+                {
+                    float tv = j < xtdLen ? xtdp[(long)tCh * xtdLen + j] * tstd + tmean : 0f;
+                    osp[((((long)s * channels) + c) * length) + j] = wpv[(long)c * length + j] + tv;
+                }
+            }
+            wave.Dispose();
         }
         xs.Dispose(); xtd.Dispose();
         return outStems;
+    }
+
+    /// <summary>1x1 channel projection (<c>channel_(up/down)sampler</c>): reshapes the (optionally 2D) feature to
+    /// <c>[1, inCh, n]</c>, runs the 1x1 Conv1d, and restores the layout. Order-agnostic (1x1 is pointwise).</summary>
+    private static Tensor ChannelProj(IBackend backend, Tensor x, Tensor w, Tensor? bias, int inCh, int outCh, int n, int f, int t, bool is2d)
+    {
+        Tensor flat = new(new TensorShape(1, inCh, n), DType.F32);
+        Buffer.MemoryCopy((void*)x.DataPointer, (void*)flat.DataPointer, (long)inCh * n * 4, (long)inCh * n * 4);
+        Tensor o = Conv1x1(backend, flat, w, bias, inCh, outCh, n); flat.Dispose();
+        if (!is2d) return o;
+        Tensor o4 = new(new TensorShape(1, outCh, f, t), DType.F32);
+        Buffer.MemoryCopy((void*)o.DataPointer, (void*)o4.DataPointer, (long)outCh * n * 4, (long)outCh * n * 4);
+        o.Dispose();
+        return o4;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -200,27 +219,6 @@ public sealed unsafe class HtDemucs
         foreach (Tensor? w in own) if (w is not null) yield return w;
     }
 
-    private static (float Mean, float Std) MonoMeanStd(float* wp, int channels, int length)
-    {
-        double sum = 0;
-        for (int j = 0; j < length; j++)
-        {
-            double m = 0;
-            for (int c = 0; c < channels; c++) m += wp[(long)c * length + j];
-            sum += m / channels;
-        }
-        double mean = sum / length;
-        double var = 0;
-        for (int j = 0; j < length; j++)
-        {
-            double m = 0;
-            for (int c = 0; c < channels; c++) m += wp[(long)c * length + j];
-            m /= channels;
-            double d = m - mean; var += d * d;
-        }
-        var /= Math.Max(1, length - 1);
-        return ((float)mean, (float)Math.Sqrt(var));
-    }
 
     private static (float Mean, float Std) TensorMeanStd(Tensor t)
     {
@@ -236,7 +234,9 @@ public sealed unsafe class HtDemucs
     private void AddFreqEmb(Tensor x, int f, int t, int channels)
     {
         float* xp = (float*)x.DataPointer; float* ep = (float*)_freqEmb!.DataPointer;
-        float scale = _cfg.FreqEmbScale;
+        // demucs ScaledEmbedding.forward multiplies by its internal scale (EmbScale=10); the main forward then
+        // multiplies by freq_emb_scale (0.2). Effective = 2.0 on the stored embedding weight.
+        float scale = _cfg.FreqEmbScale * _cfg.EmbScale;
         int tableF = (int)_freqEmb.Shape[0];
         for (int c = 0; c < channels; c++)
             for (int fi = 0; fi < f; fi++)
@@ -245,39 +245,6 @@ public sealed unsafe class HtDemucs
                 float e = scale * ep[(long)row * channels + c];
                 for (int ti = 0; ti < t; ti++) xp[(((long)c * f + fi) * t) + ti] += e;
             }
-    }
-
-    /// <summary>Mean-collapses the residual freq axis into a single token row: <c>[1, C, F, T] → [1, C, T]</c>.</summary>
-    private static Tensor CollapseFreq(Tensor x, int channels, int f, int t)
-    {
-        Tensor o = new(new TensorShape(1, channels, t), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        for (int c = 0; c < channels; c++)
-            for (int ti = 0; ti < t; ti++)
-            {
-                float acc = 0f;
-                for (int fi = 0; fi < f; fi++) acc += xp[(((long)c * f + fi) * t) + ti];
-                op[(long)c * t + ti] = acc / f;
-            }
-        return o;
-    }
-
-    private static Tensor ExpandFreq(Tensor x, int channels, int t)
-    {
-        Tensor o = new(new TensorShape(1, channels, 1, t), DType.F32);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)o.DataPointer, (long)channels * t * 4, (long)channels * t * 4);
-        return o;
-    }
-
-    /// <summary>Adds the time-branch features into the collapsed freq tokens (the merge inject), aligning the
-    /// shorter sequence by truncation.</summary>
-    private static void AddInject(Tensor spec, Tensor time, int channels, int nSpec, int nTime)
-    {
-        float* sp = (float*)spec.DataPointer; float* tp = (float*)time.DataPointer;
-        int n = Math.Min(nSpec, nTime);
-        for (int c = 0; c < channels; c++)
-            for (int j = 0; j < n; j++)
-                sp[(long)c * nSpec + j] += tp[(long)c * nTime + j];
     }
 
     private static Tensor Conv1x1(IBackend b, Tensor x, Tensor w, Tensor? bias, int inCh, int outCh, int n)
@@ -312,23 +279,6 @@ public sealed unsafe class HtDemucs
         {
             int srcCh = s * specIn + c;
             Buffer.MemoryCopy(xp + srcCh * plane, op + (long)c * plane, plane * 4, plane * 4);
-        }
-        return o;
-    }
-
-    /// <summary>Extracts source <paramref name="s"/>'s waveform <c>[1, C, L]</c> from the time decoder output
-    /// <c>[1, srcs·C, L]</c> and denormalizes (undo the input time-normalize).</summary>
-    private static Tensor SliceTimeSource(Tensor xtd, int s, int srcs, int channels, int length, float std, float mean)
-    {
-        int outLen = (int)xtd.Shape[2];
-        Tensor o = new(new TensorShape(1, channels, length), DType.F32);
-        float* xp = (float*)xtd.DataPointer; float* op = (float*)o.DataPointer;
-        float scale = 1e-5f + std;
-        int n = Math.Min(length, outLen);
-        for (int c = 0; c < channels; c++)
-        {
-            int srcCh = s * channels + c;
-            for (int j = 0; j < n; j++) op[(long)c * length + j] = xp[(long)srcCh * outLen + j] * scale + mean;
         }
         return o;
     }

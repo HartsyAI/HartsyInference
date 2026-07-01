@@ -42,7 +42,8 @@ public sealed unsafe class DemucsDConv
 
     private sealed class Layer
     {
-        private readonly int _channels, _hidden, _dilation;
+        private readonly int _channels, _dilation;
+        private int _hidden;       // inferred from the conv1 weight at load (htdemucs DConv uses compress=8)
         private readonly bool _norm;
         private Tensor? _conv1W, _conv1B, _conv2W, _conv2B, _n1W, _n1B, _n2W, _n2B, _scale;
 
@@ -66,6 +67,7 @@ public sealed unsafe class DemucsDConv
             }
             else { c2 = 2; ls = 4; }
             _conv1W = WhisperOps.EnsureF32(w[$"{p}.{c1}.weight"]); _conv1B = Bias(w, $"{p}.{c1}.bias");
+            _hidden = (int)_conv1W.Shape[0];      // htdemucs uses compress=8 (hidden = channels/8)
             _conv2W = WhisperOps.EnsureF32(w[$"{p}.{c2}.weight"]); _conv2B = Bias(w, $"{p}.{c2}.bias");
             _scale = WhisperOps.EnsureF32(w[$"{p}.{ls}.scale"]);
         }
@@ -74,17 +76,12 @@ public sealed unsafe class DemucsDConv
         {
             Tensor h = new(new TensorShape(1, _hidden, t), DType.F32);
             backend.Conv1d(h, x, _conv1W!, _conv1B, 1, _dilation, _dilation, _dilation, 1);
-            if (_norm)
-            {
-                Tensor hn = new(h.Shape, DType.F32); backend.GroupNorm(hn, h, _n1W!, _n1B!, 1, 1e-5f); h.Dispose(); h = hn;
-            }
-            Tensor g = new(h.Shape, DType.F32); backend.Gelu(g, h); h.Dispose();
+            // GroupNorm(1, C) over (C, T) — done inline because the backend GroupNorm needs a rank-4 [N,C,H,W].
+            if (_norm) GroupNorm1(h, _hidden, t, _n1W!, _n1B!);
+            HartsyInference.Audio.Layers.Activations.ErfGelu(h); Tensor g = h;   // demucs F.gelu = exact erf
             Tensor c2 = new(new TensorShape(1, 2 * _channels, t), DType.F32);
             backend.Conv1d(c2, g, _conv2W!, _conv2B, 1, 0, 0, 1, 1); g.Dispose();
-            if (_norm)
-            {
-                Tensor cn = new(c2.Shape, DType.F32); backend.GroupNorm(cn, c2, _n2W!, _n2B!, 1, 1e-5f); c2.Dispose(); c2 = cn;
-            }
+            if (_norm) GroupNorm1(c2, 2 * _channels, t, _n2W!, _n2B!);
             // GLU(dim=1): split channels → a · σ(b), then LayerScale, then residual add in place.
             float* gp = (float*)c2.DataPointer;
             float* xp = (float*)x.DataPointer;
@@ -100,6 +97,25 @@ public sealed unsafe class DemucsDConv
                 }
             }
             c2.Dispose();
+        }
+
+        /// <summary>GroupNorm(num_groups=1) over a channels-first [1, C, T] tensor in place: normalize over all
+        /// C·T (biased variance, eps 1e-5), then per-channel affine. Matches torch nn.GroupNorm(1, C).</summary>
+        private static void GroupNorm1(Tensor x, int c, int t, Tensor weight, Tensor bias)
+        {
+            float* xp = (float*)x.DataPointer; float* wp = (float*)weight.DataPointer; float* bp = (float*)bias.DataPointer;
+            long n = (long)c * t;
+            double sum = 0, sumSq = 0;
+            for (long i = 0; i < n; i++) { float v = xp[i]; sum += v; sumSq += (double)v * v; }
+            double mean = sum / n;
+            double var = sumSq / n - mean * mean;
+            float invStd = (float)(1.0 / Math.Sqrt(var + 1e-5));
+            for (int ch = 0; ch < c; ch++)
+            {
+                float wc = wp[ch], bc = bp[ch];
+                float* row = xp + (long)ch * t;
+                for (int j = 0; j < t; j++) row[j] = (float)((row[j] - mean) * invStd) * wc + bc;
+            }
         }
 
         public IEnumerable<Tensor> EnumerateWeights()

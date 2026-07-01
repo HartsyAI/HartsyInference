@@ -30,12 +30,31 @@ public sealed unsafe class TripoSrParityTests
         return (w is null || r is null || !File.Exists(w) || !File.Exists(r)) ? null : (w, r);
     }
 
+    private static bool IsCuda => string.Equals(Environment.GetEnvironmentVariable("PARITY_BACKEND"), "cuda", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Absolute tolerance: tight on CPU F32; looser on the GPU path (cuBLAS + flash-attention use
+    /// different reduction orders → larger abs error on big-magnitude outputs, while corr stays the strict
+    /// functional check).</summary>
+    private static double AbsTol => IsCuda ? 0.5 : 5e-3;
+
+    /// <summary>Selects the backend under test: <c>PARITY_BACKEND=cuda</c> exercises the real GPU path
+    /// (kernels + the lazy DataPointer sync), otherwise CPU F32.</summary>
+    private static IBackend MakeBackend()
+    {
+        string? b = Environment.GetEnvironmentVariable("PARITY_BACKEND");
+        if (!IsCuda) return new CpuBackend();
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        return new HartsyInference.Cuda.CudaBackend(0, ptxDir);
+    }
+
     [Fact]
     public void DinoVit_ImageTokens_MatchReference()
     {
         (string w, string r)? e = Env();
         if (e is null) return; // gated
-        using IBackend cpu = new CpuBackend();
+        using IBackend cpu = MakeBackend();
         using SafeTensorsLoader wl = new(); wl.Load(e!.Value.w);
         using SafeTensorsLoader rl = new(); rl.Load(e!.Value.r);
         Dictionary<string, Tensor> all = wl.GetAllTensors();
@@ -51,7 +70,7 @@ public sealed unsafe class TripoSrParityTests
         (double maxAbs, double corr) = Compare(tokens, refTok);
         _out.WriteLine($"DINO image_tokens: maxAbs={maxAbs:E3} corr={corr:F8}");
         tokens.Dispose();
-        Assert.True(maxAbs < 5e-3, $"maxAbs {maxAbs}");
+        Assert.True(maxAbs < AbsTol, $"maxAbs {maxAbs}");
         Assert.True(corr > 0.9999, $"corr {corr}");
     }
 
@@ -60,7 +79,7 @@ public sealed unsafe class TripoSrParityTests
     {
         (string w, string r)? e = Env();
         if (e is null) return; // gated
-        using IBackend cpu = new CpuBackend();
+        using IBackend cpu = MakeBackend();
         using SafeTensorsLoader wl = new(); wl.Load(e!.Value.w);
         using SafeTensorsLoader rl = new(); rl.Load(e!.Value.r);
         TripoSrCheckpointConverter.ConvertedWeights cw = TripoSrCheckpointConverter.Convert(wl.GetAllTensors());
@@ -80,7 +99,7 @@ public sealed unsafe class TripoSrParityTests
         }
         double corr = dot / (Math.Sqrt(na * nb) + 1e-12);
         _out.WriteLine($"transformer scene_codes: maxAbs={maxAbs:E3} corr={corr:F8}");
-        Assert.True(maxAbs < 5e-3, $"maxAbs {maxAbs}");
+        Assert.True(maxAbs < AbsTol, $"maxAbs {maxAbs}");
         Assert.True(corr > 0.9999, $"corr {corr}");
     }
 
@@ -89,7 +108,7 @@ public sealed unsafe class TripoSrParityTests
     {
         (string w, string r)? e = Env();
         if (e is null) return; // gated
-        using IBackend cpu = new CpuBackend();
+        using IBackend cpu = MakeBackend();
         using SafeTensorsLoader wl = new(); wl.Load(e!.Value.w);
         using SafeTensorsLoader rl = new(); rl.Load(e!.Value.r);
         TripoSrCheckpointConverter.ConvertedWeights cw = TripoSrCheckpointConverter.Convert(wl.GetAllTensors());
@@ -130,7 +149,7 @@ public sealed unsafe class TripoSrParityTests
     {
         (string w, string r)? e = Env();
         if (e is null) return; // gated
-        using IBackend cpu = new CpuBackend();
+        using IBackend cpu = MakeBackend();
         using SafeTensorsLoader wl = new(); wl.Load(e!.Value.w);
         using SafeTensorsLoader rl = new(); rl.Load(e!.Value.r);
         TripoSrCheckpointConverter.ConvertedWeights cw = TripoSrCheckpointConverter.Convert(wl.GetAllTensors());
