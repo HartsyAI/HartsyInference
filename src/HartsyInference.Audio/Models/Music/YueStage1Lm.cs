@@ -30,15 +30,33 @@ public sealed unsafe class YueStage1Lm : IDisposable
         => _lm.LoadWeights(w, prefix);
 
     /// <summary>Generates the two codebook-0 track streams. Returns <c>(vocal, accompaniment)</c> codec
-    /// indices (equal length).</summary>
+    /// indices (equal length). All YuE generation params are exposed per-call (default to the config):
+    /// <paramref name="temperature"/> (1.0), <paramref name="topK"/> (50), <paramref name="topP"/> (0.93),
+    /// <paramref name="repetitionPenalty"/> (1.1). Classifier-free guidance (YuE default 1.5) is applied when
+    /// <paramref name="uncondTokenIds"/> is supplied (a negative/unconditional prompt) and
+    /// <paramref name="guidanceScale"/> ≠ 1: at each step <c>logits = uncond + g·(cond − uncond)</c> via a parallel
+    /// KV cache primed on the negative prompt and fed the same generated tokens.</summary>
     public (List<int> Vocal, List<int> Accomp) GenerateCb0(IBackend backend,
-        ReadOnlySpan<int> promptTokenIds, int maxFrames = 3000, int seed = 0)
+        ReadOnlySpan<int> promptTokenIds, int maxFrames = 3000, int seed = 0,
+        float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
+        float? guidanceScale = null, ReadOnlySpan<int> uncondTokenIds = default)
     {
         ThrowIfDisposed();
+        float temp = temperature ?? _cfg.Temperature;
+        int tk = topK ?? _cfg.TopK;
+        float tp = topP ?? _cfg.TopP;
+        float repPen = repetitionPenalty ?? _cfg.RepetitionPenalty;
+        float g = guidanceScale ?? _cfg.GuidanceScale;
+        bool useCfg = g != 1f && uncondTokenIds.Length > 0;
+
         int promptLen = promptTokenIds.Length;
         int maxTokens = maxFrames * 2;     // 2 interleaved tracks per frame
         int cacheCap = Math.Min(_cfg.Stage1.MaxPositionEmbeddings, promptLen + maxTokens + 8);
         using StreamingKvCache cache = new(_cfg.Stage1.NumHiddenLayers, 1, _cfg.Stage1.NumKeyValueHeads, cacheCap, _cfg.Stage1.HeadDim);
+        StreamingKvCache? uncondCache = useCfg
+            ? new(_cfg.Stage1.NumHiddenLayers, 1, _cfg.Stage1.NumKeyValueHeads,
+                Math.Min(_cfg.Stage1.MaxPositionEmbeddings, uncondTokenIds.Length + maxTokens + 8), _cfg.Stage1.HeadDim)
+            : null;
 
         uint rng = DeterministicRng.Seed(seed);
         List<int> vocal = new(maxFrames), accomp = new(maxFrames);
@@ -48,35 +66,55 @@ public sealed unsafe class YueStage1Lm : IDisposable
 
         int[] prompt = promptTokenIds.ToArray();
         Tensor hidden = _lm.Forward(backend, prompt, 1, 0, cache);
+        Tensor? uHidden = useCfg ? _lm.Forward(backend, uncondTokenIds.ToArray(), 1, 0, uncondCache!) : null;
 
-        for (int step = 0; step < maxTokens; step++)
+        try
         {
-            int t = (int)hidden.Shape[1];
-            Tensor last = SliceLast(hidden, _cfg.Stage1.HiddenSize);
-            hidden.Dispose();
-            Tensor logitsT = _lm.ProjectLogits(backend, last, 1, 1);
-            last.Dispose();
+            for (int step = 0; step < maxTokens; step++)
+            {
+                Tensor last = SliceLast(hidden, _cfg.Stage1.HiddenSize);
+                hidden.Dispose();
+                Tensor logitsT = _lm.ProjectLogits(backend, last, 1, 1);
+                last.Dispose();
+                Span<float> logits = new((void*)logitsT.DataPointer, vocab);
 
-            Span<float> logits = new((void*)logitsT.DataPointer, vocab);
-            ApplyRepetitionPenalty(logits, history, _cfg.RepetitionPenalty);
-            int next = NucleusSampler.Draw(logits, vocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
-            logitsT.Dispose();
+                if (useCfg)
+                {
+                    Tensor uLast = SliceLast(uHidden!, _cfg.Stage1.HiddenSize);
+                    uHidden!.Dispose();
+                    Tensor uLogitsT = _lm.ProjectLogits(backend, uLast, 1, 1);
+                    uLast.Dispose();
+                    float* up = (float*)uLogitsT.DataPointer;
+                    for (int v = 0; v < vocab; v++) logits[v] = up[v] + g * (logits[v] - up[v]);
+                    uLogitsT.Dispose();
+                }
 
-            if (next == _cfg.AudioEosToken) break;
-            history.Add(next);
-            if (history.Count > 256) history.RemoveAt(0);
+                ApplyRepetitionPenalty(logits, history, repPen);
+                int next = NucleusSampler.Draw(logits, vocab, temp, tk, tp, ref rng);
+                logitsT.Dispose();
 
-            if (wantVocal && next >= _cfg.VocalTokenBase && next < _cfg.VocalTokenBase + _cfg.CodebookSize)
-                vocal.Add(next - _cfg.VocalTokenBase);
-            else if (!wantVocal && next >= _cfg.AccompTokenBase && next < _cfg.AccompTokenBase + _cfg.CodebookSize)
-                accomp.Add(next - _cfg.AccompTokenBase);
-            wantVocal = !wantVocal;
+                if (next == _cfg.AudioEosToken) break;
+                history.Add(next);
+                if (history.Count > 256) history.RemoveAt(0);
 
-            int[] step1 = [next];
-            hidden = _lm.Forward(backend, step1, 1, cache.CurrentLength, cache);
-            if (cache.CurrentLength >= cacheCap - 2) break;
+                if (wantVocal && next >= _cfg.VocalTokenBase && next < _cfg.VocalTokenBase + _cfg.CodebookSize)
+                    vocal.Add(next - _cfg.VocalTokenBase);
+                else if (!wantVocal && next >= _cfg.AccompTokenBase && next < _cfg.AccompTokenBase + _cfg.CodebookSize)
+                    accomp.Add(next - _cfg.AccompTokenBase);
+                wantVocal = !wantVocal;
+
+                int[] step1 = [next];
+                hidden = _lm.Forward(backend, step1, 1, cache.CurrentLength, cache);
+                if (useCfg) uHidden = _lm.Forward(backend, step1, 1, uncondCache!.CurrentLength, uncondCache);
+                if (cache.CurrentLength >= cacheCap - 2) break;
+            }
         }
-        hidden.Dispose();
+        finally
+        {
+            hidden.Dispose();
+            uHidden?.Dispose();
+            uncondCache?.Dispose();
+        }
 
         // Trim to a common frame count.
         int frames = Math.Min(vocal.Count, accomp.Count);

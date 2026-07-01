@@ -6,7 +6,9 @@ detail lives in [PHASE_10_INTERACTIVE.md](PHASE_10_INTERACTIVE.md). Parity evide
 
 ## Verified end-to-end (✅)
 
-None yet. World models are built structurally; none has a real-weight, output-confirmed run.
+| Model | Notes |
+|---|---|
+| **Oasis-500m** (Decart + Etched) | Real-weight numeric parity vs `etched-ai/open-oasis` on **CUDA/3060**: ViT-VAE encode corr **0.99999999**, decode corr **1.0**, DiT-S/2 v-pred corr **1.0** (maxAbs 3e-5). Fixed a DiT unpatchify vec-order bug (`[py,px,c]` not `[c,py,px]` — see [PARITY_VERIFICATION.md §Bugs](PARITY_VERIFICATION.md)). E2E AR rollout (DDIM v-pred + Diffusion Forcing) follows by composition (all cores corr 1.0). Weights: `camenduru/oasis-500m` mirror (the `Etched` repo is gated). |
 
 ## Built, validation-pending (🔧)
 
@@ -16,7 +18,6 @@ All built end-to-end with structural tests passing; numeric parity pending.
 |---|---|
 | **Matrix-Game 3.0** (Skywork) | Flagship. 5B Wan2.2-TI2V finetune + `ActionModule` (mouse self-attn / keyboard cross-attn) + FOV memory + DMD 3-step. UMT5-XXL + Wan2.2 VAE. DiT reuses `WanVideoBlock`. |
 | **Matrix-Game 2.0** (Skywork) | Entry-level. 1.8B Wan2.1-lineage; sliding-window KV cache; three per-domain variants. Wan2.1 16ch VAE; CLIP-ViT-H/14 seed. |
-| **Oasis-500m** (Decart + Etched) | Tiny 500M AR Minecraft model; continuous Gaussian ViT-VAE (incl. encoder), DDIM v-pred + Diffusion Forcing, axial-attention DiT. The action-conditioning CI smoke model (fits the 3060). |
 | **Hunyuan-GameCraft 1.0** (Tencent) | 12.5B HunyuanVideo MM-DiT + CameraNet (Plücker rays) + 33-ch composite history. PCM+CFG 8-step. Reusable `.pt` pickle loader + N-axis rope. No license gate (engine MIT, user-supplied weights). |
 
 ## Not started (❌)

@@ -57,12 +57,20 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Generates stereo audio from pre-computed UMT5 style features <c>[T_text, 768]</c> and ACE lyric token
-    /// ids (empty array → instrumental via prompt tags). Returns one <c>float[]</c> per channel at 44.1 kHz.</summary>
+    /// ids (empty array → instrumental via prompt tags). Returns one <c>float[]</c> per channel at 44.1 kHz.
+    /// <para>The full upstream <c>pipeline_ace_step.py</c> guidance controls are exposed per-call (all default to the
+    /// config): <paramref name="guidanceInterval"/> (0.5, CFG only over the centered trajectory fraction),
+    /// <paramref name="guidanceIntervalDecay"/> (0.0) toward <paramref name="minGuidanceScale"/> (3.0),
+    /// <paramref name="omegaScale"/> (10.0, the scheduler granularity rescale), double-condition CFG
+    /// (<paramref name="guidanceScaleText"/> / <paramref name="guidanceScaleLyric"/>, both must exceed 1.0 to enable),
+    /// and <paramref name="ossSteps"/> (an optimal custom-step subset; 1-indexed into the full grid).</para></summary>
     public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
         Tensor textEmbeds, int[] lyricIds, double durationSeconds,
         int? steps = null, float? guidance = null, GuidanceMode guidanceMode = GuidanceMode.Apg,
         SamplerMode sampler = SamplerMode.Euler, int? seed = null, float[]? speakerVec = null,
-        Action<GenerationProgress>? onProgress = null)
+        float? guidanceInterval = null, float? guidanceIntervalDecay = null, float? minGuidanceScale = null,
+        float? omegaScale = null, float? guidanceScaleText = null, float? guidanceScaleLyric = null,
+        int[]? ossSteps = null, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
         if (durationSeconds < 1 || durationSeconds > 600)
@@ -71,9 +79,31 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         int actualSeed = seed ?? SeedGenerator.RandomSeed();
         int inferSteps = steps ?? _config.NumInferenceSteps;
         float g = guidance ?? _config.GuidanceScale;
+        float gInterval = guidanceInterval ?? _config.GuidanceInterval;
+        float gIntervalDecay = guidanceIntervalDecay ?? _config.GuidanceIntervalDecay;
+        float minG = minGuidanceScale ?? _config.MinGuidanceScale;
+        float omega = omegaScale ?? _config.OmegaScale;
+        float gText = guidanceScaleText ?? _config.GuidanceScaleText;
+        float gLyric = guidanceScaleLyric ?? _config.GuidanceScaleLyric;
         int fLat = Math.Max(8, _config.LatentFrames(durationSeconds));
 
-        Logs.Info($"ACE-Step: {durationSeconds:0}s ({fLat} latent frames), {inferSteps} steps, {guidanceMode} g={g}, " +
+        // Custom (OSS) step schedule: effective steps = |oss|, each sampling a sigma from the full grid (1-indexed).
+        float[] sigmas = ossSteps is { Length: > 0 }
+            ? BuildOssSigmas(ossSteps, _config.FlowShift)
+            : BuildSigmas(inferSteps, _config.FlowShift);
+        int loopSteps = sigmas.Length - 1;
+
+        // Guidance is applied only over the centered interval [start, end) (upstream guidance_interval).
+        bool doCfg = g != 0f && g != 1f;
+        bool doDualCondition = gText > 1f && gLyric > 1f;
+        int startIdx = (int)(loopSteps * ((1f - gInterval) / 2f));
+        int endIdx = (int)(loopSteps * (gInterval / 2f + 0.5f));
+        // omega mean-preserving rescale factor (constant across steps).
+        float omegaNorm = 0.9f + 0.2f / (1f + MathF.Exp(-0.1f * omega));
+
+        Logs.Info($"ACE-Step: {durationSeconds:0}s ({fLat} latent frames), {loopSteps} steps, {guidanceMode} g={g}, " +
+            $"interval [{startIdx},{endIdx}) decay={gIntervalDecay} minG={minG} omega={omega}, " +
+            (doDualCondition ? $"dualCFG(text={gText},lyric={gLyric}), " : "") +
             $"{sampler}, {lyricIds.Length} lyric tokens, seed={actualSeed}");
         Logs.Warning("ACE-Step pipeline is first-run-validation pending — numerics unverified vs the reference.");
 
@@ -81,39 +111,54 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
 
         Tensor ctx = _dit.BuildContext(Backend, textEmbeds, lyricIds, speakerVec);
         Tensor uncondCtx = new Tensor(ctx.Shape, DType.F32);   // zeroed conditioning (matches the reference)
+        // Double-condition needs a "text-only" branch: full context with the lyric rows zeroed.
+        Tensor? onlyTextCtx = doDualCondition ? BuildOnlyTextContext(ctx, (int)textEmbeds.Shape[0]) : null;
 
-        float[] sigmas = BuildSigmas(inferSteps, _config.FlowShift);
         Tensor z = SeedGenerator.CreateNoise(new TensorShape([1L, _config.InChannels, _config.LatentHeight, fLat]), actualSeed);
         using AceStepGuidance.MomentumBuffer momentum = new();
 
         Stopwatch sw = Stopwatch.StartNew();
         try
         {
-            for (int i = 0; i < inferSteps; i++)
+            for (int i = 0; i < loopSteps; i++)
             {
                 float t = sigmas[i] * 1000f;
-                Tensor v = GuidedVelocity(z, ctx, uncondCtx, t, g, guidanceMode, momentum, zeroInit: i == 0);
+                bool inInterval = doCfg && i >= startIdx && i < endIdx;
+                float curG = g;
+                if (inInterval && gIntervalDecay > 0f)
+                {
+                    float progress = (i - startIdx) / (float)Math.Max(1, endIdx - startIdx - 1);
+                    curG = g - (g - minG) * progress * gIntervalDecay;
+                }
+                Tensor v = inInterval
+                    ? GuidedVelocity(z, ctx, uncondCtx, onlyTextCtx, t, curG, gText, gLyric, doDualCondition,
+                        guidanceMode, momentum, zeroInit: i == startIdx)
+                    : _dit.Forward(Backend, z, ctx, t);
                 float dt = sigmas[i + 1] - sigmas[i];
                 switch (sampler)
                 {
                     case SamplerMode.Euler:
-                        AddScaled(z, v, dt);
+                        EulerStep(z, v, dt, omegaNorm);
                         break;
-                    case SamplerMode.Heun when i < inferSteps - 1:
+                    case SamplerMode.Heun when i < loopSteps - 1:
                     {
                         Tensor mid = Clone(z);
-                        AddScaled(mid, v, dt);
-                        Tensor v2 = GuidedVelocity(mid, ctx, uncondCtx, sigmas[i + 1] * 1000f, g, guidanceMode, momentum, zeroInit: false);
+                        EulerStep(mid, v, dt, omegaNorm);
+                        bool nextInInterval = doCfg && (i + 1) >= startIdx && (i + 1) < endIdx;
+                        Tensor v2 = nextInInterval
+                            ? GuidedVelocity(mid, ctx, uncondCtx, onlyTextCtx, sigmas[i + 1] * 1000f, curG, gText, gLyric,
+                                doDualCondition, guidanceMode, momentum, zeroInit: false)
+                            : _dit.Forward(Backend, mid, ctx, sigmas[i + 1] * 1000f);
                         mid.Dispose();
                         float* vp = (float*)v.DataPointer;
                         float* v2p = (float*)v2.DataPointer;
                         for (long e = 0; e < v.Shape.ElementCount; e++) vp[e] = 0.5f * (vp[e] + v2p[e]);
                         v2.Dispose();
-                        AddScaled(z, v, dt);
+                        EulerStep(z, v, dt, omegaNorm);
                         break;
                     }
                     case SamplerMode.Heun:
-                        AddScaled(z, v, dt);   // final step degrades to Euler
+                        EulerStep(z, v, dt, omegaNorm);   // final step degrades to Euler
                         break;
                     case SamplerMode.PingPong:
                     {
@@ -132,13 +177,14 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
                     }
                 }
                 v.Dispose();
-                onProgress?.Invoke(new GenerationProgress(i + 1, inferSteps, sw.Elapsed.TotalMilliseconds));
+                onProgress?.Invoke(new GenerationProgress(i + 1, loopSteps, sw.Elapsed.TotalMilliseconds));
             }
         }
         finally
         {
             ctx.Dispose();
             uncondCtx.Dispose();
+            onlyTextCtx?.Dispose();
         }
         Backend.Sync();
         Backend.FreeWeights(_dit.EnumerateWeights());
@@ -165,10 +211,27 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         return (left, right, _config.SampleRate, actualSeed);
     }
 
-    private Tensor GuidedVelocity(Tensor z, Tensor ctx, Tensor uncondCtx, float t, float g,
-        GuidanceMode mode, AceStepGuidance.MomentumBuffer momentum, bool zeroInit)
+    private Tensor GuidedVelocity(Tensor z, Tensor ctx, Tensor uncondCtx, Tensor? onlyTextCtx, float t, float g,
+        float gText, float gLyric, bool doDualCondition, GuidanceMode mode,
+        AceStepGuidance.MomentumBuffer momentum, bool zeroInit)
     {
         Tensor vCond = _dit.Forward(Backend, z, ctx, t);
+
+        // Double-condition CFG: uncond → text-only → full, blended (upstream cfg_double_condition_forward).
+        if (doDualCondition && onlyTextCtx is not null)
+        {
+            Tensor vText = _dit.Forward(Backend, z, onlyTextCtx, t);
+            Tensor vUncondD = _dit.Forward(Backend, z, uncondCtx, t);
+            float* c = (float*)vCond.DataPointer;
+            float* tx = (float*)vText.DataPointer;
+            float* un = (float*)vUncondD.DataPointer;
+            for (long e = 0; e < vCond.Shape.ElementCount; e++)
+                c[e] = (1f - gText) * un[e] + (gText - gLyric) * tx[e] + gLyric * c[e];
+            vText.Dispose();
+            vUncondD.Dispose();
+            return vCond;
+        }
+
         Tensor vUncond = _dit.Forward(Backend, z, uncondCtx, t);
         switch (mode)
         {
@@ -184,6 +247,22 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         }
         vUncond.Dispose();
         return vCond;
+    }
+
+    /// <summary>Clones the full context and zeroes the lyric rows (everything after speaker + text), leaving the
+    /// speaker + UMT5 text conditioning active — the "text-only" branch for double-condition CFG.</summary>
+    private Tensor BuildOnlyTextContext(Tensor ctx, int textRows)
+    {
+        Tensor o = Clone(ctx);
+        int dim = (int)ctx.Shape[1];
+        int lyricStart = 1 + textRows;   // row 0 = speaker, rows 1..textRows = text.
+        long rows = ctx.Shape[0];
+        if (lyricStart < rows)
+        {
+            float* p = (float*)o.DataPointer;
+            new Span<float>(p + (long)lyricStart * dim, (int)((rows - lyricStart) * dim)).Clear();
+        }
+        return o;
     }
 
     private float[] DecodeChannel(Tensor mel, int channel)
@@ -211,11 +290,40 @@ public sealed unsafe class AceStepPipeline : DiffusionPipelineBase
         return sigmas;
     }
 
-    private static void AddScaled(Tensor target, Tensor value, float scale)
+    /// <summary>Custom (OSS) sigma schedule: build the full grid of <c>max(ossSteps)</c> steps, then keep the sigmas
+    /// at the (1-indexed) <paramref name="ossSteps"/> positions plus a terminal 0 (upstream <c>oss_steps</c>).</summary>
+    private static float[] BuildOssSigmas(int[] ossSteps, float shift)
+    {
+        int maxStep = 0;
+        foreach (int s in ossSteps) maxStep = Math.Max(maxStep, s);
+        float[] full = BuildSigmas(maxStep, shift);
+        float[] sel = new float[ossSteps.Length + 1];
+        for (int j = 0; j < ossSteps.Length; j++)
+            sel[j] = full[Math.Clamp(ossSteps[j] - 1, 0, maxStep)];
+        sel[ossSteps.Length] = 0f;
+        return sel;
+    }
+
+    /// <summary>Flow-match Euler step with ACE-Step's omega granularity rescale: the mean of the Euler delta is
+    /// preserved while its residual is scaled by <paramref name="omegaNorm"/> (upstream <c>omega_scale</c> effect).</summary>
+    private static void EulerStep(Tensor target, Tensor value, float dt, float omegaNorm)
     {
         float* tp = (float*)target.DataPointer;
         float* vp = (float*)value.DataPointer;
-        for (long e = 0; e < target.Shape.ElementCount; e++) tp[e] += scale * vp[e];
+        long n = target.Shape.ElementCount;
+        if (omegaNorm == 1f)
+        {
+            for (long e = 0; e < n; e++) tp[e] += dt * vp[e];
+            return;
+        }
+        double sum = 0;
+        for (long e = 0; e < n; e++) sum += (double)dt * vp[e];
+        float mean = (float)(sum / n);
+        for (long e = 0; e < n; e++)
+        {
+            float dx = dt * vp[e];
+            tp[e] += (dx - mean) * omegaNorm + mean;
+        }
     }
 
     private static Tensor Clone(Tensor x)

@@ -43,6 +43,9 @@ public sealed record YueConfig
     public int TopK { get; init; } = 50;
     public float TopP { get; init; } = 0.93f;
     public float RepetitionPenalty { get; init; } = 1.1f;   // mandatory per the YuE README
+    /// <summary>Classifier-free guidance scale for stage-1 (YuE uses 1.5 for the first ≤1 segments, 1.2 after).
+    /// Applied when a negative/unconditional prompt is supplied; 1.0 disables CFG.</summary>
+    public float GuidanceScale { get; init; } = 1.5f;
 
     public static YueConfig V1 => new()
     {

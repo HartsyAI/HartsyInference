@@ -29,12 +29,20 @@ public sealed unsafe class MusicGenPipeline : IDisposable
     }
 
     /// <summary>Generates audio from precomputed T5 states <c>[1, T_text, textDim]</c>. <paramref name="seconds"/>
-    /// sets the real frame count (<c>frameRate × seconds</c>). Returns mono PCM at the codec sample rate.</summary>
-    public float[] Synthesize(IBackend backend, Tensor t5States, float seconds = 8f, int seed = 0)
+    /// sets the real frame count (<c>frameRate × seconds</c>). Returns mono PCM at the codec sample rate.
+    /// <para>The AudioCraft generation params (<c>set_generation_params</c>) are exposed per-call, defaulting to the
+    /// config: <paramref name="guidance"/> = <c>cfg_coef</c> (3.0), <paramref name="temperature"/> (1.0),
+    /// <paramref name="topK"/> (250), <paramref name="topP"/> (0.0 = off), <paramref name="useSampling"/> (true;
+    /// false = greedy argmax).</para></summary>
+    public float[] Synthesize(IBackend backend, Tensor t5States, float seconds = 8f, int seed = 0,
+        float? guidance = null, float? temperature = null, int? topK = null, float? topP = null, bool useSampling = true)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
         int k = _cfg.NumCodebooks;
+        float temp = temperature ?? _cfg.Temperature;
+        int tk = topK ?? _cfg.TopK;
+        float tp = topP ?? _cfg.TopP;
         int tReal = Math.Max(1, (int)MathF.Round(_cfg.CodecFrameRate * seconds));
         int maxDelay = MusicGenDelay.Max(_cfg.DelayPattern);
         int tTotal = tReal + maxDelay;
@@ -48,7 +56,7 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         int[,] delayed = new int[tTotal, k];
         for (int c = 0; c < k; c++) delayed[0, c] = _cfg.SpecialToken;   // step 0 lead-in is special anyway
 
-        float g = _cfg.GuidanceScale;
+        float g = guidance ?? _cfg.GuidanceScale;
         for (int step = 0; step < tTotal; step++)
         {
             // Feed frames [0..step] and predict frame `step` (BOS at index 0 shifts prediction by one).
@@ -76,8 +84,9 @@ public sealed unsafe class MusicGenPipeline : IDisposable
                     float[] u = uncondLogits[c];
                     for (int v = 0; v < logits.Length; v++) logits[v] = u[v] + g * (logits[v] - u[v]);
                 }
-                int tok = NucleusSampler.Draw(logits, _cfg.CodebookSize, _cfg.Temperature, _cfg.TopK, _cfg.TopP,
-                    ref rng, maskToken: _cfg.SpecialToken);
+                int tok = useSampling
+                    ? NucleusSampler.Draw(logits, _cfg.CodebookSize, temp, tk, tp, ref rng, maskToken: _cfg.SpecialToken)
+                    : Argmax(logits, _cfg.CodebookSize, _cfg.SpecialToken);
                 SetIfInRange(delayed, step, c, tok);
             }
         }
@@ -109,6 +118,18 @@ public sealed unsafe class MusicGenPipeline : IDisposable
     private static void SetIfInRange(int[,] grid, int step, int c, int value)
     {
         if (step < grid.GetLength(0)) grid[step, c] = value;
+    }
+
+    /// <summary>Greedy (use_sampling=false): argmax over the valid codebook range, skipping the special token.</summary>
+    private static int Argmax(float[] logits, int vocab, int maskToken)
+    {
+        int best = 0; float bv = float.NegativeInfinity;
+        for (int v = 0; v < vocab; v++)
+        {
+            if (v == maskToken) continue;
+            if (logits[v] > bv) { bv = logits[v]; best = v; }
+        }
+        return best;
     }
 
     public void Dispose()

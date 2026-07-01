@@ -71,9 +71,21 @@ public sealed unsafe class CsmModel : IDisposable
 
     /// <summary>Generates one full 8-codebook frame from the running <paramref name="contextEmbeds"/>
     /// <c>[1, T, backboneHidden]</c>. Returns the 8 codebook values; the last codebook-0 value equals
-    /// <see cref="CsmConfig.AudioEosToken"/> at end-of-utterance.</summary>
-    public int[] GenerateFrame(IBackend backend, Tensor contextEmbeds, ref uint rng)
+    /// <see cref="CsmConfig.AudioEosToken"/> at end-of-utterance.
+    /// <para>Sampling params default to the config but are exposed per-call (<paramref name="temperature"/>,
+    /// <paramref name="topK"/>, <paramref name="topP"/>). When <paramref name="uncondContext"/> is supplied and
+    /// <paramref name="cfgScale"/> ≠ 1, classifier-free guidance is applied to every codebook's logits
+    /// (<c>logit = uncond + g·(cond − uncond)</c>) via a parallel backbone+depth pass over the unconditional
+    /// context (HeartMuLa's <c>cfg_scale</c>). CSM callers omit both and get the plain single-pass behavior.</para></summary>
+    public int[] GenerateFrame(IBackend backend, Tensor contextEmbeds, ref uint rng,
+        float? temperature = null, int? topK = null, float? topP = null,
+        float cfgScale = 1f, Tensor? uncondContext = null)
     {
+        float temp = temperature ?? _cfg.Temperature;
+        int tk = topK ?? _cfg.TopK;
+        float tp = topP ?? _cfg.TopP;
+        bool useCfg = cfgScale != 1f && uncondContext is not null;
+
         int bt = (int)contextEmbeds.Shape[1];
         int bh = _cfg.Backbone.HiddenSize;
         using StreamingKvCache bCache = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, bt, _cfg.Backbone.HeadDim);
@@ -81,14 +93,26 @@ public sealed unsafe class CsmModel : IDisposable
         Tensor last = SliceLast(hidden, bh);
         hidden.Dispose();
 
+        // Parallel unconditional backbone pass (CFG). Its last hidden anchors the uncond depth decoder.
+        Tensor? uLast = null;
+        if (useCfg)
+        {
+            int ubt = (int)uncondContext!.Shape[1];
+            using StreamingKvCache ubCache = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, ubt, _cfg.Backbone.HeadDim);
+            Tensor uHidden = _backbone.ForwardEmbeds(backend, uncondContext, 1, ubt, 0, ubCache);
+            uLast = SliceLast(uHidden, bh);
+            uHidden.Dispose();
+        }
+
         // codebook 0 from the backbone head.
         Tensor c0Logits = WhisperOps.ProjectLinear(backend, last, _c0Head!, bias: null, 1, 1, bh, _cfg.AudioVocab);
-        int c0 = NucleusSampler.Draw(new Span<float>((void*)c0Logits.DataPointer, _cfg.AudioVocab), _cfg.AudioVocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+        if (useCfg) CombineCfg(backend, c0Logits, uLast!, _c0Head!, bh, cfgScale);
+        int c0 = NucleusSampler.Draw(new Span<float>((void*)c0Logits.DataPointer, _cfg.AudioVocab), _cfg.AudioVocab, temp, tk, tp, ref rng);
         c0Logits.Dispose();
 
         int[] frame = new int[_cfg.NumCodebooks];
         frame[0] = c0;
-        if (c0 == _cfg.AudioEosToken) { last.Dispose(); return frame; }
+        if (c0 == _cfg.AudioEosToken) { last.Dispose(); uLast?.Dispose(); return frame; }
 
         // Decoder fills codebooks 1..7. Upstream `generate_frame`: build curr_h = [last_h, embed(c0), …] in the
         // backbone hidden space, apply `projection` to the WHOLE sequence, run the depth decoder over it (fresh
@@ -99,24 +123,56 @@ public sealed unsafe class CsmModel : IDisposable
         List<int> decoderSeq = new() { c0 };
         for (int cb = 1; cb < _cfg.NumCodebooks; cb++)
         {
-            Tensor curr = BuildDecoderSequence(last, decoderSeq, bh);     // [1, 1+seq, bh]
-            Tensor decInput = WhisperOps.ProjectLinear(backend, curr, _projW!, bias: null, 1, (int)curr.Shape[1], bh, dh);
-            curr.Dispose();
-            int dt = (int)decInput.Shape[1];
-            using StreamingKvCache dCache = new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, dt, _cfg.Decoder.HeadDim);
-            Tensor dHidden = _decoder.ForwardEmbeds(backend, decInput, 1, dt, 0, dCache);
-            decInput.Dispose();
-            Tensor dLast = SliceLast(dHidden, dh);
-            dHidden.Dispose();
-            Tensor cbLogits = WhisperOps.ProjectLinear(backend, dLast, _audioHead[cb - 1]!, bias: null, 1, 1, dh, _cfg.AudioVocab);
-            dLast.Dispose();
-            int cbVal = NucleusSampler.Draw(new Span<float>((void*)cbLogits.DataPointer, _cfg.AudioVocab), _cfg.AudioVocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+            Tensor cbLogits = DepthCodebookLogits(backend, last, decoderSeq, bh, dh, cb);
+            if (useCfg)
+            {
+                Tensor uCbLogits = DepthCodebookLogits(backend, uLast!, decoderSeq, bh, dh, cb);
+                BlendCfg(cbLogits, uCbLogits, cfgScale);
+                uCbLogits.Dispose();
+            }
+            int cbVal = NucleusSampler.Draw(new Span<float>((void*)cbLogits.DataPointer, _cfg.AudioVocab), _cfg.AudioVocab, temp, tk, tp, ref rng);
             cbLogits.Dispose();
             frame[cb] = cbVal;
             decoderSeq.Add(cbVal);
         }
         last.Dispose();
+        uLast?.Dispose();
         return frame;
+    }
+
+    /// <summary>Runs one depth-decoder step for codebook <paramref name="cb"/> from the backbone last-hidden
+    /// <paramref name="anchor"/> and the sampled <paramref name="decoderSeq"/>, returning that codebook's logits.</summary>
+    private Tensor DepthCodebookLogits(IBackend backend, Tensor anchor, List<int> decoderSeq, int bh, int dh, int cb)
+    {
+        Tensor curr = BuildDecoderSequence(anchor, decoderSeq, bh);     // [1, 1+seq, bh]
+        Tensor decInput = WhisperOps.ProjectLinear(backend, curr, _projW!, bias: null, 1, (int)curr.Shape[1], bh, dh);
+        curr.Dispose();
+        int dt = (int)decInput.Shape[1];
+        using StreamingKvCache dCache = new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, dt, _cfg.Decoder.HeadDim);
+        Tensor dHidden = _decoder.ForwardEmbeds(backend, decInput, 1, dt, 0, dCache);
+        decInput.Dispose();
+        Tensor dLast = SliceLast(dHidden, dh);
+        dHidden.Dispose();
+        Tensor cbLogits = WhisperOps.ProjectLinear(backend, dLast, _audioHead[cb - 1]!, bias: null, 1, 1, dh, _cfg.AudioVocab);
+        dLast.Dispose();
+        return cbLogits;
+    }
+
+    /// <summary>CFG-combines <paramref name="condLogits"/> in place with the uncond head projection of
+    /// <paramref name="uLast"/> through <paramref name="head"/>: <c>logit = uncond + g·(cond − uncond)</c>.</summary>
+    private void CombineCfg(IBackend backend, Tensor condLogits, Tensor uLast, Tensor head, int inDim, float g)
+    {
+        Tensor uLogits = WhisperOps.ProjectLinear(backend, uLast, head, bias: null, 1, 1, inDim, _cfg.AudioVocab);
+        BlendCfg(condLogits, uLogits, g);
+        uLogits.Dispose();
+    }
+
+    /// <summary>In-place CFG blend of already-computed cond/uncond logits: <c>cond = uncond + g·(cond − uncond)</c>.</summary>
+    private void BlendCfg(Tensor condLogits, Tensor uncondLogits, float g)
+    {
+        float* c = (float*)condLogits.DataPointer;
+        float* u = (float*)uncondLogits.DataPointer;
+        for (int v = 0; v < _cfg.AudioVocab; v++) c[v] = u[v] + g * (c[v] - u[v]);
     }
 
     /// <summary>Teacher-forced parity probe (not used in inference). Runs the backbone over

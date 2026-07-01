@@ -57,6 +57,15 @@ public sealed record HeartMulaConfig
     /// <summary>Llama-3 end-of-text token appended to the encoded tags/lyrics token stream (mirrors music_generation.py).</summary>
     public int TextEosToken { get; init; } = 128_001;
 
+    // ── Sampling / guidance (music_generation.py generate defaults) ──
+    /// <summary>Sampling temperature (upstream default 1.0, distinct from CSM's 0.9).</summary>
+    public float Temperature { get; init; } = 1.0f;
+    public int TopK { get; init; } = 50;
+    public float TopP { get; init; } = 1.0f;
+    /// <summary>Classifier-free guidance scale (upstream <c>cfg_scale</c> = 1.5). Applied by re-running the
+    /// backbone+depth decoder on an unconditional context (no lyrics/style) and blending logits; 1.0 disables it.</summary>
+    public float CfgScale { get; init; } = 1.5f;
+
     // ── HeartCodec (HeartCodec-oss): 48 kHz, 12.5 Hz, 8-codebook RVQ ──
     public int CodecNumQuantizers { get; init; } = 8;
     public int CodecCodebookSize { get; init; } = 8_192;

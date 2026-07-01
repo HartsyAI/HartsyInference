@@ -58,11 +58,34 @@ public sealed record AceStepConfig
     /// <summary>Flow-match shift.</summary>
     public float FlowShift { get; init; } = 3.0f;
 
-    /// <summary>Default inference steps (fast preset; 60 = quality).</summary>
-    public int NumInferenceSteps { get; init; } = 27;
+    /// <summary>Default inference steps (upstream <c>pipeline_ace_step.py</c> default).</summary>
+    public int NumInferenceSteps { get; init; } = 60;
 
-    /// <summary>Default guidance scale.</summary>
-    public float GuidanceScale { get; init; } = 7.0f;
+    /// <summary>Default guidance scale (upstream default 15.0).</summary>
+    public float GuidanceScale { get; init; } = 15.0f;
+
+    /// <summary>Fraction of the trajectory (centered) over which CFG is applied; outside it the plain conditional
+    /// velocity is used (upstream <c>guidance_interval</c> = 0.5).</summary>
+    public float GuidanceInterval { get; init; } = 0.5f;
+
+    /// <summary>Linear decay of the guidance scale across the guidance interval toward <see cref="MinGuidanceScale"/>
+    /// (upstream <c>guidance_interval_decay</c> = 0.0 = no decay).</summary>
+    public float GuidanceIntervalDecay { get; init; } = 0.0f;
+
+    /// <summary>Floor the guidance scale decays toward (upstream <c>min_guidance_scale</c> = 3.0).</summary>
+    public float MinGuidanceScale { get; init; } = 3.0f;
+
+    /// <summary>Granularity / "ERG-diffusion" rescale applied in the scheduler step (upstream <c>omega_scale</c> = 10.0).
+    /// The per-step update rescales the non-mean component of the Euler delta by
+    /// <c>0.9 + 0.2/(1 + e^(−0.1·omega))</c>, mean-preserving.</summary>
+    public float OmegaScale { get; init; } = 10.0f;
+
+    /// <summary>Double-condition CFG text-guidance scale (upstream <c>guidance_scale_text</c> = 0.0 = disabled).
+    /// Enabled only when both this and <see cref="GuidanceScaleLyric"/> exceed 1.0.</summary>
+    public float GuidanceScaleText { get; init; } = 0.0f;
+
+    /// <summary>Double-condition CFG lyric-guidance scale (upstream <c>guidance_scale_lyric</c> = 0.0 = disabled).</summary>
+    public float GuidanceScaleLyric { get; init; } = 0.0f;
 
     /// <summary>DCAE pipeline latent scale (NOT the diffusers 0.41407 — see research § 7).</summary>
     public float LatentScaleFactor { get; init; } = 0.1786f;

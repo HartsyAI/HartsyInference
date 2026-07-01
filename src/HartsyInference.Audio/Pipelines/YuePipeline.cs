@@ -26,13 +26,19 @@ public sealed unsafe class YuePipeline : IDisposable
     }
 
     /// <summary>Synthesizes a 16 kHz song from the tokenized lyric+genre prompt. Returns the vocal track
-    /// audio (accompaniment mixing + the Stage-2 residual upsampler are deferred — see checklist).</summary>
-    public float[] Synthesize(IBackend backend, int[] promptTokenIds, int maxFrames = 3000, int seed = 0)
+    /// audio (accompaniment mixing + the Stage-2 residual upsampler are deferred — see checklist). YuE's
+    /// generation params are exposed per-call (default to config): <paramref name="temperature"/>,
+    /// <paramref name="topK"/>, <paramref name="topP"/>, <paramref name="repetitionPenalty"/>, and classifier-free
+    /// guidance (<paramref name="guidanceScale"/>) when a negative prompt <paramref name="uncondTokenIds"/> is given.</summary>
+    public float[] Synthesize(IBackend backend, int[] promptTokenIds, int maxFrames = 3000, int seed = 0,
+        float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
+        float? guidanceScale = null, int[]? uncondTokenIds = null)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
 
-        (List<int> vocal, List<int> accomp) = _stage1.GenerateCb0(backend, promptTokenIds, maxFrames, seed);
+        (List<int> vocal, List<int> accomp) = _stage1.GenerateCb0(backend, promptTokenIds, maxFrames, seed,
+            temperature, topK, topP, repetitionPenalty, guidanceScale, uncondTokenIds ?? ReadOnlySpan<int>.Empty);
         Logs.Info($"YuE S1: {vocal.Count} frames (vocal+accomp cb0) in {sw.ElapsedMilliseconds}ms.");
         if (vocal.Count == 0) return [];
 

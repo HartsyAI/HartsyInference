@@ -40,12 +40,22 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
 
     /// <summary>Generates the 8-codebook grid <c>[NumCodebooks, T]</c> from lyrics token ids (the audio EOS
     /// frame stops generation), optionally prefixed with a MuQ style-conditioning embedding already projected
-    /// into the LM hidden (<c>[1, hiddenSize]</c>, from <see cref="MuqEmbedder.ProjectToLmHidden"/>).</summary>
+    /// into the LM hidden (<c>[1, hiddenSize]</c>, from <see cref="MuqEmbedder.ProjectToLmHidden"/>).
+    /// <para>The generation params default to the config (<see cref="HeartMulaConfig.Temperature"/> 1.0,
+    /// <see cref="HeartMulaConfig.TopK"/> 50, <see cref="HeartMulaConfig.TopP"/> 1.0) but are exposed per-call.
+    /// Classifier-free guidance (<paramref name="cfgScale"/>, default <see cref="HeartMulaConfig.CfgScale"/> 1.5)
+    /// re-runs the LM on an unconditional context (no lyrics/style, same AR audio frames) and blends logits;
+    /// pass 1.0 to disable.</para></summary>
     public int[,] GenerateCodes(IBackend backend, ReadOnlySpan<int> lyricsTokens, int maxFrames, int seed = 0,
-        Tensor? muqLmEmbed = null)
+        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null)
     {
         ThrowIfDisposed();
         int nb = _cfg.Lm.NumCodebooks;
+        float temp = temperature ?? _cfg.Temperature;
+        int tk = topK ?? _cfg.TopK;
+        float tp = topP ?? _cfg.TopP;
+        float g = cfgScale ?? _cfg.CfgScale;
+        bool useCfg = g != 1f;
         uint rng = DeterministicRng.Seed(seed);
         List<int[]> frames = new(maxFrames);
 
@@ -53,8 +63,11 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         for (int f = 0; f < maxFrames; f++)
         {
             Tensor ctx = BuildContext(lyricsTokens, frames, muqLmEmbed);
-            int[] codes = _lm.GenerateFrame(backend, ctx, ref rng);
+            // Unconditional context: strip lyrics + MuQ style, keep the AR audio frames only.
+            Tensor? uCtx = useCfg ? BuildContext(ReadOnlySpan<int>.Empty, frames, null) : null;
+            int[] codes = _lm.GenerateFrame(backend, ctx, ref rng, temp, tk, tp, useCfg ? g : 1f, uCtx);
             ctx.Dispose();
+            uCtx?.Dispose();
             if (codes[0] >= _cfg.Lm.AudioEosToken) break;   // upstream stops on codebook-0 >= audio_eos_id
             frames.Add(codes);
         }
@@ -70,10 +83,10 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     /// 48 kHz mono waveform. <paramref name="muqLmEmbed"/> is the optional MuQ style conditioning projected
     /// into the LM hidden. Requires both the LM and codec weights to be loaded.</summary>
     public float[] Generate(IBackend backend, ReadOnlySpan<int> lyricsTokens, int maxFrames, int seed = 0,
-        Tensor? muqLmEmbed = null)
+        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null)
     {
         ThrowIfDisposed();
-        int[,] codes = GenerateCodes(backend, lyricsTokens, maxFrames, seed, muqLmEmbed);
+        int[,] codes = GenerateCodes(backend, lyricsTokens, maxFrames, seed, muqLmEmbed, temperature, topK, topP, cfgScale);
         if (codes.GetLength(1) == 0) return [];
         return _codec.Decode(backend, codes, seed);
     }
