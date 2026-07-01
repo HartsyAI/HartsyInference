@@ -11,9 +11,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// (layer-id, row, col).</para>
 /// <para>Text conditioning is the concatenation of:
 /// <list type="bullet">
-/// <item>The last two Llama-3.1 hidden states projected through <c>caption_projection[0]</c> (forming the "initial encoder hidden states");</item>
-/// <item>The T5-XXL hidden state projected through <c>caption_projection[-1]</c>;</item>
-/// <item>One Llama hidden state per block, projected through <c>caption_projection[0]</c> and concatenated to the running encoder.</item>
+/// <item>Each Llama-3.1 hidden state (one per block) projected through its OWN <c>caption_projection[i]</c> (sequential, i = block index);</item>
+/// <item>The T5-XXL hidden state projected through <c>caption_projection[-1]</c> (the final, 49th entry);</item>
+/// <item>The "initial encoder hidden states" = concat(T5 projection, last Llama projection); each block appends its own Llama projection to the running encoder.</item>
 /// </list>
 /// The pooled CLIP-L+CLIP-G embedding is fed into the timestep MLP via the pooled embedder.</para></summary>
 public sealed unsafe class HiDreamTransformer : IDisposable
@@ -85,8 +85,13 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         _pEmbedLinear2Weight = weights["p_embedder.pooled_embedder.linear_2.weight"];
         _pEmbedLinear2Bias = weights["p_embedder.pooled_embedder.linear_2.bias"];
 
-        // caption_projection[i].linear.weight (no bias)
-        int numCaptionProjections = _config.CaptionChannels.Length;
+        // caption_projection[i].linear.weight (no bias). Diffusers builds ONE projection per block plus a final
+        // one for T5: caption_channels = [llama_dim]*(num_layers+num_single_layers) + [t5_dim], i.e.
+        // num_layers + num_single_layers + 1 entries (49 for V1). Llama layer i is projected through
+        // caption_projection[i] (per-block, sequential); T5 through caption_projection[-1]. Loading only
+        // CaptionChannels.Length (=2) collapsed every block onto caption_projection[0] and mis-mapped T5 to [1],
+        // corrupting all conditioning (the brown-cloud bug).
+        int numCaptionProjections = _config.NumLayers + _config.NumSingleLayers + 1;
         _captionProjectionWeights = new Tensor[numCaptionProjections];
         for (int i = 0; i < numCaptionProjections; i++)
             _captionProjectionWeights[i] = weights[$"caption_projection.{i}.linear.weight"];
@@ -159,8 +164,16 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             throw new InvalidOperationException(
                 $"Expected {_doubleBlocks.Length + _singleBlocks.Length} Llama hidden layers (one per block), got {llamaHiddenLayers.Count}.");
 
+        // Debug: dump the transformer's raw inputs so a Python reference can be fed the IDENTICAL tensors.
+        HiDreamDebugDump.Dump("in_latent", latent);
+        HiDreamDebugDump.Dump("in_t5hidden", t5Hidden);
+        HiDreamDebugDump.Dump("in_llama0", llamaHiddenLayers[0]);
+        HiDreamDebugDump.Dump("in_pooled", pooledEmbeds);
+        if (HiDreamDebugDump.Enabled) HiDreamDebugDump.DumpScalar("in_timestep", timestep);
+
         // ── 1. Patchify and embed ──
         Tensor patched = PatchifyLatent(latent, batch, inChannels, patH, patW, _config.PatchSize);
+        HiDreamDebugDump.Dump("patched", patched);
         TensorShape embedShape = new TensorShape(batch, imgSeqLen, hidden);
         Tensor imgTokens = new Tensor(embedShape, DType.F32);
         backend.Linear(imgTokens, patched, _xEmbedWeight!, _xEmbedBias);
@@ -173,11 +186,14 @@ public sealed unsafe class HiDreamTransformer : IDisposable
 
         // ── 3. Project caption inputs ──
         // For the per-block llama states we use caption_projection[0]; for T5 we use caption_projection[-1].
+        // Each Llama layer i is projected through its OWN caption_projection[i] (per-block, sequential —
+        // matching diffusers `caption_projection[i](encoder_hidden_states[i])`), NOT a shared [0].
         Tensor[] llamaProj = new Tensor[llamaHiddenLayers.Count];
         for (int i = 0; i < llamaHiddenLayers.Count; i++)
         {
-            llamaProj[i] = ProjectCaption(backend, llamaHiddenLayers[i], _captionProjectionWeights![0]);
+            llamaProj[i] = ProjectCaption(backend, llamaHiddenLayers[i], _captionProjectionWeights![i]);
         }
+        HiDreamDebugDump.Dump("llama_proj_0", llamaProj[0]);
 
         Tensor t5Proj = ProjectCaption(backend, t5Hidden, _captionProjectionWeights![^1]);
         HiDreamDebugDump.Dump("t5_proj", t5Proj);

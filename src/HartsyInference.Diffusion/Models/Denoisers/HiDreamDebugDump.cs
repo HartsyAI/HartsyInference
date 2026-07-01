@@ -47,6 +47,13 @@ internal static unsafe class HiDreamDebugDump
         WriteRawF32(Path.Combine(_dumpDir, "output_velocity.bin"), t);
     }
 
+    public static void DumpScalar(string name, float value)
+    {
+        if (_dumpDir is null) return;
+        EnsureInit();
+        File.WriteAllText(Path.Combine(_dumpDir, "layers", name.Replace('.', '_') + ".txt"), value.ToString("R"));
+    }
+
     private static void WriteRawF32(string path, Tensor t)
     {
         long count = t.Shape.ElementCount;
