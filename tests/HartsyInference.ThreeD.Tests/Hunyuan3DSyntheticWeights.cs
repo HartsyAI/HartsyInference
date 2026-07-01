@@ -17,8 +17,8 @@ internal static unsafe class Hunyuan3DSyntheticWeights
 
     public static Hunyuan3DConfig TinyConfig => new()
     {
-        LatentTokens = 8, LatentChannels = 8, Width = 32, Depth = 2, NumHeads = 4, CondDim = 32,
-        MlpDim = 64, TimestepEmbedDim = 32,
+        LatentTokens = 8, LatentChannels = 8, Width = 32, DepthDouble = 1, DepthSingle = 1, NumHeads = 4, CondDim = 32,
+        MlpDim = 64, TimestepEmbedDim = 32, TimeFactor = 1000f,
         VaeWidth = 32, VaeDepth = 2, VaeNumHeads = 4, FourierBands = 2,
         NumInferenceSteps = 2, GuidanceScale = 2f, FlowShift = 1f, GridResolution = 16, IsoLevel = 0f, BoundingBox = 1f,
     };
@@ -55,26 +55,37 @@ internal static unsafe class Hunyuan3DSyntheticWeights
 
     public static Dictionary<string, Tensor> BuildDit(Hunyuan3DConfig c)
     {
-        int w_ = c.Width, cdim = c.CondDim, m = c.MlpDim;
+        int w_ = c.Width, cdim = c.CondDim, m = c.MlpDim, hd = c.Width / c.NumHeads;
         Random r = new(22);
         Dictionary<string, Tensor> w = new()
         {
-            ["in_proj.weight"] = T(r, w_, c.LatentChannels), ["in_proj.bias"] = T(r, w_),
-            ["cond_proj.weight"] = T(r, w_, cdim), ["cond_proj.bias"] = T(r, w_),
-            ["t_embed.mlp.0.weight"] = T(r, w_, c.TimestepEmbedDim), ["t_embed.mlp.0.bias"] = T(r, w_),
-            ["t_embed.mlp.2.weight"] = T(r, w_, w_), ["t_embed.mlp.2.bias"] = T(r, w_),
-            ["final_layer.mod.weight"] = T(r, 2 * w_, w_), ["final_layer.mod.bias"] = T(r, 2 * w_),
-            ["final_layer.out_proj.weight"] = T(r, c.LatentChannels, w_), ["final_layer.out_proj.bias"] = T(r, c.LatentChannels),
+            ["latent_in.weight"] = T(r, w_, c.LatentChannels), ["latent_in.bias"] = T(r, w_),
+            ["cond_in.weight"] = T(r, w_, cdim), ["cond_in.bias"] = T(r, w_),
+            ["time_in.in_layer.weight"] = T(r, w_, c.TimestepEmbedDim), ["time_in.in_layer.bias"] = T(r, w_),
+            ["time_in.out_layer.weight"] = T(r, w_, w_), ["time_in.out_layer.bias"] = T(r, w_),
+            ["final_layer.adaLN_modulation.1.weight"] = T(r, 2 * w_, w_), ["final_layer.adaLN_modulation.1.bias"] = T(r, 2 * w_),
+            ["final_layer.linear.weight"] = T(r, c.LatentChannels, w_), ["final_layer.linear.bias"] = T(r, c.LatentChannels),
         };
-        for (int i = 0; i < c.Depth; i++)
+        for (int i = 0; i < c.DepthDouble; i++)
         {
-            string p = $"blocks.{i}";
-            w[$"{p}.ada_mod.weight"] = T(r, 6 * w_, w_); w[$"{p}.ada_mod.bias"] = T(r, 6 * w_);
-            foreach (string a in new[] { "self_attn", "cross_attn" })
-                foreach (string proj in new[] { "q", "k", "v", "o" })
-                { w[$"{p}.{a}.{proj}.weight"] = T(r, w_, w_); w[$"{p}.{a}.{proj}.bias"] = T(r, w_); }
-            w[$"{p}.mlp.fc1.weight"] = T(r, m, w_); w[$"{p}.mlp.fc1.bias"] = T(r, m);
-            w[$"{p}.mlp.fc2.weight"] = T(r, w_, m); w[$"{p}.mlp.fc2.bias"] = T(r, w_);
+            string p = $"double_blocks.{i}";
+            foreach (string s in new[] { "img", "txt" })
+            {
+                w[$"{p}.{s}_mod.lin.weight"] = T(r, 6 * w_, w_); w[$"{p}.{s}_mod.lin.bias"] = T(r, 6 * w_);
+                w[$"{p}.{s}_attn.qkv.weight"] = T(r, 3 * w_, w_); w[$"{p}.{s}_attn.qkv.bias"] = T(r, 3 * w_);
+                w[$"{p}.{s}_attn.proj.weight"] = T(r, w_, w_); w[$"{p}.{s}_attn.proj.bias"] = T(r, w_);
+                w[$"{p}.{s}_attn.norm.query_norm.scale"] = Ones(hd); w[$"{p}.{s}_attn.norm.key_norm.scale"] = Ones(hd);
+                w[$"{p}.{s}_mlp.0.weight"] = T(r, m, w_); w[$"{p}.{s}_mlp.0.bias"] = T(r, m);
+                w[$"{p}.{s}_mlp.2.weight"] = T(r, w_, m); w[$"{p}.{s}_mlp.2.bias"] = T(r, w_);
+            }
+        }
+        for (int i = 0; i < c.DepthSingle; i++)
+        {
+            string p = $"single_blocks.{i}";
+            w[$"{p}.modulation.lin.weight"] = T(r, 3 * w_, w_); w[$"{p}.modulation.lin.bias"] = T(r, 3 * w_);
+            w[$"{p}.linear1.weight"] = T(r, 3 * w_ + m, w_); w[$"{p}.linear1.bias"] = T(r, 3 * w_ + m);
+            w[$"{p}.linear2.weight"] = T(r, w_, w_ + m); w[$"{p}.linear2.bias"] = T(r, w_);
+            w[$"{p}.norm.query_norm.scale"] = Ones(hd); w[$"{p}.norm.key_norm.scale"] = Ones(hd);
         }
         return w;
     }
