@@ -22,6 +22,11 @@ public enum VlmProjectorKind
     /// Linear (<c>mm.model.mlp.1</c>) → GELU → Linear (<c>mm.model.mlp.3</c>). The InternViT blocks carry LayerScale
     /// (<c>ls1</c>/<c>ls2</c>).</summary>
     InternVL,
+    /// <summary>MiniCPM-V: a SigLIP tower (with integer-bucketed position selection into the 70×70 learned table)
+    /// feeding a <b>perceiver resampler</b> — <c>query_num</c> learnable queries cross-attend the vision features
+    /// (K = features + 2D-sincos pos, separate q/k/v/out projections, LayerNorms) → <c>resampler.proj</c> into the
+    /// text hidden size.</summary>
+    MiniCpmV,
 }
 
 /// <summary>The vision tower + connector of llama.cpp <c>mmproj-*.gguf</c> VLMs. Covers both ViT flavours that
@@ -41,8 +46,11 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         VlmProjectorKind.Idefics3 => "idefics3",
         VlmProjectorKind.Llava => "llava",
         VlmProjectorKind.InternVL => "internvl",
+        VlmProjectorKind.MiniCpmV => "minicpmv",
         _ => "gemma3",
     };
+
+    public int QueryNum { get; }          // MiniCPM-V resampler: number of learnable queries (= tokens/image)
 
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
@@ -74,15 +82,17 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
     private SiglipVlmEncoder(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w,
         int hidden, int layers, int heads, int inter, int patch, int image, int projDim,
         float[] mean, float[] std, float eps, VlmProjectorKind projector, int scaleFactor,
-        bool hasCls, bool hasPreLn, bool hasPostLn, bool quickGelu, bool ffnUpIsFc1)
+        bool hasCls, bool hasPreLn, bool hasPostLn, bool quickGelu, bool ffnUpIsFc1, int queryNum)
     {
         _handle = handle; _w = w;
         Hidden = hidden; NumLayers = layers; NumHeads = heads; HeadDim = hidden / heads; Intermediate = inter;
         PatchSize = patch; ImageSize = image; PatchGrid = (image - patch) / patch + 1; NumPatches = PatchGrid * PatchGrid;
         ProjectionDim = projDim; ImageMean = mean; ImageStd = std; LayerNormEps = eps <= 0f ? 1e-6f : eps;
-        Projector = projector; ScaleFactor = scaleFactor; FfnUpIsFc1 = ffnUpIsFc1;
+        Projector = projector; ScaleFactor = scaleFactor; FfnUpIsFc1 = ffnUpIsFc1; QueryNum = queryNum;
         HasClsToken = hasCls; SeqLen = NumPatches + (hasCls ? 1 : 0); HasPreLn = hasPreLn; HasPostLn = hasPostLn; UseQuickGelu = quickGelu;
-        TokensPerImage = projector == VlmProjectorKind.Llava ? NumPatches : (PatchGrid / scaleFactor) * (PatchGrid / scaleFactor);
+        TokensPerImage = projector == VlmProjectorKind.MiniCpmV ? queryNum
+            : projector == VlmProjectorKind.Llava ? NumPatches
+            : (PatchGrid / scaleFactor) * (PatchGrid / scaleFactor);
     }
 
     /// <summary>Transposes a 2D F32 weight to row-major <c>[d0, d1]</c>. Used for Gemma-3's
@@ -117,7 +127,8 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         try
         {
             // Detect the connector by which projector tensors are present.
-            VlmProjectorKind projector = w.ContainsKey("mm.model.mlp.0.weight") ? VlmProjectorKind.InternVL
+            VlmProjectorKind projector = w.ContainsKey("resampler.query") ? VlmProjectorKind.MiniCpmV
+                : w.ContainsKey("mm.model.mlp.0.weight") ? VlmProjectorKind.InternVL
                 : w.ContainsKey("mm.model.fc.weight") ? VlmProjectorKind.Idefics3
                 : w.ContainsKey("mm.0.weight") ? VlmProjectorKind.Llava
                 : VlmProjectorKind.Gemma3;
@@ -138,7 +149,10 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
                 else if (key.Contains("attn_q") || key.Contains("attn_k") || key.Contains("attn_v") || key.Contains("attn_out")
                     || key.Contains("ffn_up") || key.Contains("ffn_down") || key.Contains("mm.model.fc")
                     || key == "mm.0.weight" || key == "mm.2.weight"
-                    || key == "mm.model.mlp.1.weight" || key == "mm.model.mlp.3.weight")   // InternVL projector Linears
+                    || key == "mm.model.mlp.1.weight" || key == "mm.model.mlp.3.weight"   // InternVL projector Linears
+                    || key == "resampler.kv.weight" || key == "resampler.proj.weight"      // MiniCPM-V resampler Linears
+                    || key == "resampler.attn.q.weight" || key == "resampler.attn.k.weight"
+                    || key == "resampler.attn.v.weight" || key == "resampler.attn.out.weight")
                     w[key] = Relabel(w[key]);
             }
             GgufMetadata m = handle.Metadata;
@@ -151,7 +165,11 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             // Text hidden: Gemma-3/SmolVLM expose projection_dim = text hidden; LLaVA's mm.2 output is the text hidden.
             int projDim = projector == VlmProjectorKind.Llava ? (int)w["mm.2.weight"].Shape[0]
                 : projector == VlmProjectorKind.InternVL ? (int)w["mm.model.mlp.3.weight"].Shape[0]
+                : projector == VlmProjectorKind.MiniCpmV ? (int)w["resampler.proj.weight"].Shape[0]
                 : (int)m.GetUInt32("clip.vision.projection_dim");
+            // MiniCPM-V resampler: query count = tokens/image (resampler.query ggml ne = [dim, query_num]).
+            int queryNum = projector == VlmProjectorKind.MiniCpmV
+                ? (int)m.GetUInt32("clip.minicpmv_query_num", (uint)w["resampler.query"].Shape[1]) : 0;
             float eps = m.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-6f);
             float[] mean = m.GetFloatArray("clip.vision.image_mean") ?? [0.5f, 0.5f, 0.5f];
             float[] std = m.GetFloatArray("clip.vision.image_std") ?? [0.5f, 0.5f, 0.5f];
@@ -160,7 +178,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             {
                 VlmProjectorKind.Idefics3 => (int)m.GetUInt32("clip.vision.projector.scale_factor", 3u),
                 VlmProjectorKind.InternVL => (int)m.GetUInt32("clip.vision.projector.scale_factor", 2u),
-                VlmProjectorKind.Llava => 1,
+                VlmProjectorKind.Llava or VlmProjectorKind.MiniCpmV => 1,
                 // Gemma-3: pool size = grid / sqrt(mm_tokens_per_image).
                 _ => grid / (int)MathF.Round(MathF.Sqrt(m.GetUInt32("clip.vision.mm_tokens_per_image", 256u))),
             };
@@ -172,7 +190,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             // names (ffn_up = up). Decide by the relabeled out-dim: the fc1 (up) projection produces `intermediate`.
             bool ffnUpIsFc1 = (int)w["v.blk.0.ffn_up.weight"].Shape[0] == inter;
             return new SiglipVlmEncoder(handle, w, hidden, layers, heads, inter, patch, image, projDim, mean, std, eps,
-                projector, scaleFactor, hasCls, hasPreLn, hasPostLn, quickGelu, ffnUpIsFc1);
+                projector, scaleFactor, hasCls, hasPreLn, hasPostLn, quickGelu, ffnUpIsFc1, queryNum);
         }
         catch { handle.Dispose(); throw; }
     }
@@ -261,6 +279,7 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
             VlmProjectorKind.Idefics3 => ProjectIdefics3(backend, h),
             VlmProjectorKind.Llava => ProjectLlava(backend, h, cls),
             VlmProjectorKind.InternVL => ProjectInternVL(backend, h, cls),
+            VlmProjectorKind.MiniCpmV => ProjectMiniCpmV(backend, h),
             _ => ProjectGemma3(backend, h),
         };
         Dbg(backend, "embeds", img, ProjectionDim);
@@ -457,6 +476,90 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
         return img;
     }
 
+    /// <summary>MiniCPM-V perceiver resampler: <c>query_num</c> learnable queries cross-attend the vision features.
+    /// v = ln_kv(kv_proj(features)); q = ln_q(query); K = v + 2D-sincos-pos, V = v; MHA(d_head=128) → out_proj →
+    /// ln_post → proj into the text hidden size. Returns <c>[1, query_num, projDim]</c>.</summary>
+    private Tensor ProjectMiniCpmV(IBackend backend, Tensor h)
+    {
+        int np = NumPatches, grid = PatchGrid, dim = ProjectionDim, nq = QueryNum;
+        int dHead = 128, nHead = dim / dHead;
+        TensorShape flatNp = new(1, np, dim), flatQ = new(1, nq, dim);
+
+        // v = ln_kv(kv_proj(features)) [1, np, dim]; kv/attn projections have no relabel bias for kv.
+        Tensor v = new(flatNp, DType.F32);
+        backend.Linear(v, h, W("resampler.kv.weight"), null);
+        Tensor vln = new(flatNp, DType.F32);
+        backend.LayerNorm(vln, v, W("resampler.ln_kv.weight"), W("resampler.ln_kv.bias"), LayerNormEps);
+        v.Dispose();
+
+        // q = ln_q(query) [1, nq, dim]; the query weight is [nq, dim] rows (ggml ne = [dim, nq]).
+        using Tensor query = W("resampler.query").Reshape(flatQ);
+        Tensor qln = new(flatQ, DType.F32);
+        backend.LayerNorm(qln, query, W("resampler.ln_q.weight"), W("resampler.ln_q.bias"), LayerNormEps);
+
+        // K = v + 2D-sincos position embed (host-built), V = v.
+        Tensor kIn = new(flatNp, DType.F32);
+        using (Tensor pos = BuildResamplerPos(np, grid, dim)) backend.Add(kIn, vln, pos);
+
+        // Project to heads and cross-attend (queries over the np keys).
+        Tensor Q = new(new TensorShape(1, nq, nHead, dHead), DType.F32);
+        Tensor K = new(new TensorShape(1, np, nHead, dHead), DType.F32);
+        Tensor V = new(new TensorShape(1, np, nHead, dHead), DType.F32);
+        backend.Linear(Q, qln, W("resampler.attn.q.weight"), W("resampler.attn.q.bias"));
+        backend.Linear(K, kIn, W("resampler.attn.k.weight"), W("resampler.attn.k.bias"));
+        backend.Linear(V, vln, W("resampler.attn.v.weight"), W("resampler.attn.v.bias"));
+        qln.Dispose(); kIn.Dispose(); vln.Dispose();
+
+        Tensor qM = new(new TensorShape(1, nHead, nq, dHead), DType.F32);
+        Tensor kM = new(new TensorShape(1, nHead, np, dHead), DType.F32);
+        Tensor vM = new(new TensorShape(1, nHead, np, dHead), DType.F32);
+        backend.Permute0213(qM, Q, nq, nHead, dHead);
+        backend.Permute0213(kM, K, np, nHead, dHead);
+        backend.Permute0213(vM, V, np, nHead, dHead);
+        Q.Dispose(); K.Dispose(); V.Dispose();
+        Tensor attn = new(new TensorShape(1, nHead, nq, dHead), DType.F32);
+        backend.FlashAttention(attn, qM, kM, vM, np, 1, causal: false, qOffset: 0, 1f / MathF.Sqrt(dHead));
+        qM.Dispose(); kM.Dispose(); vM.Dispose();
+        Tensor attnFlat = new(flatQ, DType.F32);
+        backend.Permute0213(attnFlat, attn, nHead, nq, dHead);
+        attn.Dispose();
+        Tensor outp = new(flatQ, DType.F32);
+        backend.Linear(outp, attnFlat, W("resampler.attn.out.weight"), W("resampler.attn.out.bias"));
+        attnFlat.Dispose();
+
+        Tensor lnp = new(flatQ, DType.F32);
+        backend.LayerNorm(lnp, outp, W("resampler.ln_post.weight"), W("resampler.ln_post.bias"), LayerNormEps);
+        outp.Dispose();
+        Tensor img = new(new TensorShape(1, nq, ProjectionDim), DType.F32);
+        backend.Linear(img, lnp, W("resampler.proj.weight"), null);
+        lnp.Dispose();
+        return img;
+    }
+
+    /// <summary>2D sinusoidal position embedding for the resampler keys: for patch p at grid (row = p/grid,
+    /// col = p%grid), <c>[sin(col·ω), cos(col·ω), sin(row·ω), cos(row·ω)]</c> with <c>ω_k = base^(−k/(dim/4))</c>.</summary>
+    private static Tensor BuildResamplerPos(int np, int grid, int dim)
+    {
+        int quarter = dim / 4;
+        float[] omega = new float[quarter];
+        for (int k = 0; k < quarter; k++) omega[k] = 1f / MathF.Pow(10000f, (float)k / quarter);
+        Tensor pos = new(new TensorShape(1, np, dim), DType.F32);
+        float* p = (float*)pos.DataPointer;
+        for (int patch = 0; patch < np; patch++)
+        {
+            float row = patch / grid, col = patch % grid;
+            long b = (long)patch * dim;
+            for (int k = 0; k < quarter; k++)
+            {
+                p[b + k] = MathF.Sin(col * omega[k]);
+                p[b + quarter + k] = MathF.Cos(col * omega[k]);
+                p[b + 2 * quarter + k] = MathF.Sin(row * omega[k]);
+                p[b + 3 * quarter + k] = MathF.Cos(row * omega[k]);
+            }
+        }
+        return pos;
+    }
+
     /// <summary>LLaVA projector: drop the leading CLS token, then a 2-layer MLP (<c>mm.0</c> → GELU → <c>mm.2</c>)
     /// over the patch tokens into the text hidden size.</summary>
     private Tensor ProjectLlava(IBackend backend, Tensor h, int cls)
@@ -481,9 +584,25 @@ public sealed unsafe class SiglipVlmEncoder : IVlmImageEncoder
 
     private void AddPositions(Tensor seq)
     {
-        // v.position_embd.weight is [hidden, seqLen] (GGUF) → position p's vector is the p-th row of [seqLen, hidden].
+        // v.position_embd.weight is [hidden, nPos] (GGUF) → position p's vector is the p-th row of [nPos, hidden].
         float* sp = (float*)seq.DataPointer;
         float* pp = (float*)W("v.position_embd.weight").DataPointer;
+        if (Projector == VlmProjectorKind.MiniCpmV)
+        {
+            // MiniCPM-V buckets the gridxgrid patches into the trained nPerSide×nPerSide (70×70) position table:
+            // patch (i,j) → table row floor(nPerSide·i/grid)·nPerSide + floor(nPerSide·j/grid). (No CLS.)
+            int grid = PatchGrid, nPos = (int)(W("v.position_embd.weight").ElementCount / Hidden);
+            int nPerSide = (int)MathF.Round(MathF.Sqrt(nPos));
+            for (int i = 0; i < grid; i++)
+                for (int j = 0; j < grid; j++)
+                {
+                    int bh = (int)MathF.Floor((float)nPerSide * i / grid);
+                    int bw = (int)MathF.Floor((float)nPerSide * j / grid);
+                    long dst = ((long)i * grid + j) * Hidden, srcRow = ((long)bh * nPerSide + bw) * Hidden;
+                    for (int c = 0; c < Hidden; c++) sp[dst + c] += pp[srcRow + c];
+                }
+            return;
+        }
         long total = (long)SeqLen * Hidden;
         for (long i = 0; i < total; i++) sp[i] += pp[i];
     }

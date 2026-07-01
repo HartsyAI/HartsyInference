@@ -23,7 +23,8 @@ x = torch.from_numpy(wav).float()
 print("clip", tuple(x.shape), "dur", L / sr)
 
 with torch.no_grad():
-    prod = apply_model(m, x[None], split=True, overlap=0.25, progress=False)[0]   # [4,2,L] production
+    # shifts=0 → deterministic (the default shifts=1 applies a RANDOM test-time offset, non-reproducible).
+    prod = apply_model(m, x[None], shifts=0, split=True, overlap=0.25, progress=False)[0]   # [4,2,L]
     sub.use_train_segment = False
     raw = sub(x[None])[0]                                                          # [4,2,L] raw model forward
 print("prod", tuple(prod.shape), "raw", tuple(raw.shape), "sources", m.sources)

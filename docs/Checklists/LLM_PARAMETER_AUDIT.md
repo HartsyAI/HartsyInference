@@ -155,8 +155,16 @@ not caused by these changes; each model is correct in isolation.)
   race surfaces in the **vision tower** at very large patch counts (560 px → 1600 patches): correct under
   `CUDA_LAUNCH_BLOCKING=1` but flaky without (the pool accumulates transients across 32 ViT blocks; `Sync()` syncs
   the stream but doesn't reclaim the pool). Not Qwen2-VL-specific — affects any 560 px+ ViT on the fast path.
-- Remaining: VLM dynamic-resolution smart-resize + further towers (pixtral/minicpm-v) + structural MoE presets
-  (>12 GB, code-only). jais (ALiBi) deferred (no small GGUF).
+- **MiniCPM-V VERIFIED e2e (2026-06-30).** MiniCPM-V-2.6 (SigLIP tower + Qwen2-7B) — red circle→"The shape is
+  red.", blue square→"The shape is blue." Added the **perceiver-resampler** projector to `SiglipVlmEncoder`:
+  `query_num`(=64) learnable queries cross-attend the vision features (K = ln_kv(kv_proj(feat)) + 2D-sincos pos,
+  V = ln_kv(kv_proj(feat)), Q = ln_q(query); MHA d_head=128 → out_proj → ln_post → proj into the 3584 text hidden)
+  + **integer-bucketed** ViT positions (patch (i,j) → 70×70 table row floor(70i/grid)·70+floor(70j/grid), no
+  interpolation) + ChatML `<image>…</image>` prompt. Worked first run.
+- **VLMs now (9 verified):** Gemma-3, SmolVLM2, LLaVA-1.5, Qwen2.5-VL 3B/7B, Qwen2-VL-2B, mllama-11B,
+  InternVL2.5-1B, MiniCPM-V-2.6.
+- Remaining: pixtral tower (2D-RoPE ViT + IMG_BREAK; no small GGUF surfaced) + VLM smart-resize/tiling +
+  structural MoE presets (>12 GB, code-only) + audio modality. jais (ALiBi) deferred (no small GGUF).
 
 ## 0. TOP PRIORITY — confirmed defects on architectures we already claim to support
 

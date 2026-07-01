@@ -16,6 +16,13 @@ public sealed record HtDemucsConfig
     public int KernelSize { get; init; } = 8;
     public int Stride { get; init; } = 4;
     public int BottomChannels { get; init; } = 512;   // transformer width
+    /// <summary>Training segment length in seconds (htdemucs = 7.8 s). <c>apply_model</c> chunks the input into
+    /// segments of this length, and the model pads shorter inputs up to it (<c>use_train_segment</c>).</summary>
+    public double Segment { get; init; } = 7.8;
+    /// <summary>Fractional overlap between successive segments in <c>apply_model</c> (default 0.25).</summary>
+    public double Overlap { get; init; } = 0.25;
+    /// <summary>Segment length in samples (<c>int(Segment · SampleRate)</c>).</summary>
+    public int SegmentSamples => (int)(Segment * SampleRate);
     public int TLayers { get; init; } = 5;
     public int THeads { get; init; } = 8;
     public float HiddenScale { get; init; } = 4.0f;   // FFN = dim*4 = 2048

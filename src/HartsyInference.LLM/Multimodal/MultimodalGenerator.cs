@@ -44,6 +44,13 @@ public sealed class MultimodalGenerator
             int[] post = _text.Tokenizer.Encode($"<|vision_end|>{question}<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
             return (pre, post);
         }
+        if (_vision.Family == "minicpmv")
+        {
+            // MiniCPM-V (Qwen2 LLM, ChatML): "<|im_start|>user\n<image> [image] </image>\n{q}<|im_end|>\n<|im_start|>assistant\n"
+            int[] pre = _text.Tokenizer.Encode("<|im_start|>user\n<image>", addSpecial: true);
+            int[] post = _text.Tokenizer.Encode($"</image>\n{question}<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
+            return (pre, post);
+        }
         if (_vision.Family == "internvl")
         {
             // InternVL (Qwen2 LLM, ChatML): "<|im_start|>system\n…<|im_end|>\n<|im_start|>user\n<img> [image] </img>\n{q}<|im_end|>\n<|im_start|>assistant\n"
