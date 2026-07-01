@@ -17,7 +17,7 @@ All built end-to-end with structural tests passing; numeric parity pending.
 | Model | Notes |
 |---|---|
 | **Matrix-Game 3.0** (Skywork) | Flagship. 5B Wan2.2-TI2V finetune + `ActionModule` (mouse self-attn / keyboard cross-attn) + FOV memory + DMD 3-step. UMT5-XXL + Wan2.2 VAE. DiT reuses `WanVideoBlock`. |
-| **Matrix-Game 2.0** (Skywork) | Entry-level. 1.8B Wan2.1-lineage; sliding-window KV cache; three per-domain variants. Wan2.1 16ch VAE; CLIP-ViT-H/14 seed. |
+| **Matrix-Game 2.0** (Skywork) | Entry-level. 1.8B Wan2.1-lineage. **Wan-backbone DiT forward verified corr 0.99999473 on CUDA/3060** vs the Skywork `WanModel` (real bf16 base ckpt; 2 bf16-bias bugs fixed — see PARITY §Bugs). Remaining: the per-block ActionModule (mouse/keyboard cross-attn) parity. Wan2.1 16ch VAE; CLIP-ViT-H/14 seed. |
 | **Hunyuan-GameCraft 1.0** (Tencent) | 12.5B HunyuanVideo MM-DiT + CameraNet (Plücker rays) + 33-ch composite history. PCM+CFG 8-step. Reusable `.pt` pickle loader + N-axis rope. No license gate (engine MIT, user-supplied weights). |
 
 ## Not started (❌)

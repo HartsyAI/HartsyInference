@@ -42,7 +42,9 @@ public sealed unsafe class WanVideoBlock
             _addV = w[$"{prefix}.attn2.add_v_proj.weight"]; w.TryGetValue($"{prefix}.attn2.add_v_proj.bias", out _addVB);
             _normAddedK = LoadF32(w, $"{prefix}.attn2.norm_added_k.weight");
         }
-        if (_crossAttnNorm) { _norm2W = LoadF32(w, $"{prefix}.norm2.weight"); w.TryGetValue($"{prefix}.norm2.bias", out _norm2B); }
+        // norm2 affine is read by the manual host-pointer LayerNorm loop → cast BOTH weight and bias to F32
+        // (bf16 checkpoints else feed garbage bias bytes reinterpreted as f32).
+        if (_crossAttnNorm) { _norm2W = LoadF32(w, $"{prefix}.norm2.weight"); _norm2B = w.TryGetValue($"{prefix}.norm2.bias", out Tensor? n2b) ? (n2b.DType == DType.F32 ? n2b : n2b.CastTo(DType.F32)) : null; }
         _ffProjW = w[$"{prefix}.ffn.net.0.proj.weight"]; w.TryGetValue($"{prefix}.ffn.net.0.proj.bias", out _ffProjB);
         _ffOutW = w[$"{prefix}.ffn.net.2.weight"]; w.TryGetValue($"{prefix}.ffn.net.2.bias", out _ffOutB);
     }

@@ -47,7 +47,8 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     /// re-runs the LM on an unconditional context (no lyrics/style, same AR audio frames) and blends logits;
     /// pass 1.0 to disable.</para></summary>
     public int[,] GenerateCodes(IBackend backend, ReadOnlySpan<int> lyricsTokens, int maxFrames, int seed = 0,
-        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null)
+        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null,
+        CancellationToken cancel = default, Action<int, int>? onFrame = null)
     {
         ThrowIfDisposed();
         int nb = _cfg.Lm.NumCodebooks;
@@ -62,6 +63,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         // Context = optional MuQ style row + lyrics text embeddings; then AR audio frames re-fed.
         for (int f = 0; f < maxFrames; f++)
         {
+            cancel.ThrowIfCancellationRequested();   // per-frame cancellation checkpoint (Stop Generation)
             Tensor ctx = BuildContext(lyricsTokens, frames, muqLmEmbed);
             // Unconditional context: strip lyrics + MuQ style, keep the AR audio frames only.
             Tensor? uCtx = useCfg ? BuildContext(ReadOnlySpan<int>.Empty, frames, null) : null;
@@ -70,6 +72,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
             uCtx?.Dispose();
             if (codes[0] >= _cfg.Lm.AudioEosToken) break;   // upstream stops on codebook-0 >= audio_eos_id
             frames.Add(codes);
+            onFrame?.Invoke(frames.Count, maxFrames);       // progress: frames produced so far / cap
         }
 
         int t = frames.Count;
@@ -83,11 +86,13 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     /// 48 kHz mono waveform. <paramref name="muqLmEmbed"/> is the optional MuQ style conditioning projected
     /// into the LM hidden. Requires both the LM and codec weights to be loaded.</summary>
     public float[] Generate(IBackend backend, ReadOnlySpan<int> lyricsTokens, int maxFrames, int seed = 0,
-        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null)
+        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null,
+        CancellationToken cancel = default, Action<int, int>? onFrame = null)
     {
         ThrowIfDisposed();
-        int[,] codes = GenerateCodes(backend, lyricsTokens, maxFrames, seed, muqLmEmbed, temperature, topK, topP, cfgScale);
+        int[,] codes = GenerateCodes(backend, lyricsTokens, maxFrames, seed, muqLmEmbed, temperature, topK, topP, cfgScale, cancel, onFrame);
         if (codes.GetLength(1) == 0) return [];
+        cancel.ThrowIfCancellationRequested();   // don't start the (cheaper) codec decode if already cancelled
         return _codec.Decode(backend, codes, seed);
     }
 
