@@ -58,7 +58,7 @@ marching cubes. qk_norm true; scale_factor 0.9990943042622529 (latent ×= 1/scal
 - [ ] **[VG]** Rebuild ShapeVAE (post_kl + resblocks + geo_decoder + Fourier) → parity vs hy3dgen `ShapeVAE` (CUDA).
 - [ ] **[VG]** Wire pipeline (FlowMatchEuler + CFG + converter) → e2e mesh on CUDA.
 
-## 3. TripoSR (image → mesh, feed-forward) — ✅ real-weight parity verified (2026-06-30)
+## 3. TripoSR (image → mesh, feed-forward) — ✅ verified e2e on real weights (2026-06-30)
 
 Deterministic LRM → triplane → NeRF MLP → marching cubes (no diffusion → easiest to validate).
 
@@ -66,7 +66,7 @@ Deterministic LRM → triplane → NeRF MLP → marching cubes (no diffusion →
 - [x] `Pipelines/TripoSrPipeline.cs` (+ `LoadFromPath`); density field → marching cubes → mesh + per-vertex colors
 - [x] `ModelHandler/CheckpointConverters/TripoSrCheckpointConverter.cs`
 - [x] CPU structural tests (transformer triplane shape, NeRF density field, pipeline end-to-end)
-- [x] **[VG] DONE (2026-06-30)** numeric pass vs `stabilityai/TripoSR`: rewrote the model to the real arch (the scaffold guessed wrong on every component). DINO image tokens maxAbs 8.5e-6, Transformer1D scene_codes 3.4e-3 (corr 1.0), NeRF probe + 64³ density grid corr 1.0. Built `DinoViTEncoder` (HF ViT + bicubic pos-interp + exact-erf GELU), rewrote `TripoSrTransformer` (diffusers `Transformer1D` + ConvTranspose2d upsampler) and `TriplaneNerfDecoder` (grid_sample align_corners=False, exp density, iso 25). Oracle + `TripoSrParityTests`. See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md) § Bugs.
+- [x] **[VG] DONE (2026-06-30)** numeric pass vs `stabilityai/TripoSR` — rewrote the model to the real arch (the scaffold guessed wrong on every component): built `DinoViTEncoder` (HF ViT + bicubic pos-interp + exact-erf GELU), rewrote `TripoSrTransformer` (diffusers `Transformer1D` + ConvTranspose2d upsampler) and `TriplaneNerfDecoder` (grid_sample align_corners=False, exp density, iso 25). DINO tokens corr ~1.0, backbone scene_codes corr 1.0 (std 409.33), decoder density/color to 1.6e-2/5e-6; coherent 84k-tri chair `.glb` on the 3060. Fixed 2 bugs (DINO pos-embed `+0.1`, CUDA activation-cache reshape identity — see PARITY_VERIFICATION §Bugs). Tests: `TripoSrParityTests` (CPU + `PARITY_BACKEND=cuda`), `TripoSrGenerationTests` (GPU e2e), `CudaOpBisectTests` (CPU-vs-CUDA op regression). **Follow-up:** port the rembg + resize_foreground + gray-0.5 composite preprocessing to C# (currently done in Python) for raw-RGBA input.
 
 ## 4. Sample + wiring — DONE
 
@@ -78,3 +78,19 @@ Deterministic LRM → triplane → NeRF MLP → marching cubes (no diffusion →
 - [ ] **TRELLIS** (image → Gaussian splat + mesh) — needs sparse 3D conv/attention (no backend op yet) + flexicubes + splat rendering. The `GaussianSplatCloud` type + PLY splat export are already in place.
 - [ ] Texture/PBR (Hunyuan3D Paint — multiview diffusion + UV bake)
 - [ ] Splat **rendering** (rasterizer) for previews
+
+## 6. Foreground preprocessing — pure-C# background removal (**REQUIRED for raw-image input; no Python in the app**)
+
+Both TripoSR and Hunyuan3D condition on a **foreground-isolated** image (object on a neutral gray-0.5 background),
+which the upstream repos produce with Python `rembg` (U²-Net ONNX) + `resize_foreground` + composite. Our app must
+never shell out to Python, so this needs a native tool. During TripoSR e2e validation the compositing was done in
+Python (`/tmp/prep_triposr.py`) — that is a **stopgap, not shippable**.
+
+- [ ] **Salient-object segmentation model in `HartsyInference.Vision`** → per-pixel alpha mask (U²-Net / ISNet /
+  BiRefNet; U²-Net is the rembg default and smallest). This is a normal model-build (weights + converter + forward
+  + parity), reusable beyond 3D.
+- [ ] **`ForegroundComposite` helper in `HartsyInference.ThreeD`** (pure array ops, no model): alpha-bbox crop →
+  pad to square → resize to `foreground_ratio` (0.85) → composite `rgb·α + (1−α)·0.5`. Mirrors TripoSR
+  `resize_foreground` + `run.py`.
+- [ ] Wire into `TripoSrPipeline.Generate` / `Hunyuan3DShapePipeline` + the CLI (flag: raw vs pre-composited input).
+  Code TODOs are marked `TODO(3D/no-python)` in `TripoSrPipeline.cs` and `samples/HartsyInference.ThreeD.Cli/Program.cs`.

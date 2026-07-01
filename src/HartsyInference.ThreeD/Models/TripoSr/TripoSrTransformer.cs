@@ -67,15 +67,17 @@ public sealed unsafe class TripoSrTransformer
                         tp[(long)ct * n + seqIdx] = ep[(((long)np * c + ct) * ps + hp) * ps + wp];
                     }
 
-        // residual (in [1,C,N]) + GroupNorm (reshape to [1,C,N,1]).
-        Tensor normed = new(new TensorShape(1, c, n), DType.F32);
+        // GroupNorm over [1,C,N,1]. NOTE: the output must be the SAME Tensor object fed to the next op — the
+        // CUDA activation cache is keyed by object identity, so writing GroupNorm into `x.Reshape(...)` (a new
+        // identity) and then reading the original `x` cache-misses → stale host zeros. Keep gnOut as the
+        // canonical [1,C,N,1] tensor and hand it straight to Transpose2D (same c·n memory layout as [1,C,N]).
         Tensor gnIn = tokensCN.Reshape(new TensorShape(1, c, n, 1));
-        Tensor gnOut = normed.Reshape(new TensorShape(1, c, n, 1));
+        Tensor gnOut = new(new TensorShape(1, c, n, 1), DType.F32);
         backend.GroupNorm(gnOut, gnIn, _normW!, _normB!, _cfg.NormNumGroups, 1e-6f);
 
         // permute [1,C,N] -> [1,N,C], proj_in -> [1,N,Width].
         Tensor seqNC = new(new TensorShape(1, n, c), DType.F32);
-        backend.Transpose2D(seqNC, normed, c, n); normed.Dispose();
+        backend.Transpose2D(seqNC, gnOut, c, n); gnOut.Dispose();
         Tensor h = new(new TensorShape(1, n, width), DType.F32);
         backend.Linear(h, seqNC, _projInW!, _projInB!); seqNC.Dispose();
 

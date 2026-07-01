@@ -201,6 +201,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
             imgTokens = next;
         }
 
+
         // ── 6. Context refiner: text tokens with text RoPE (no modulation) ──
         for (int i = 0; i < _contextRefiner.Length; i++)
         {
@@ -223,6 +224,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
             joint.Dispose();
             joint = next;
         }
+
 
         // ── 9. Strip text prefix, keep image tail ──
         (Tensor _, Tensor imgFinal) = DiTUtils.SplitAlongSeqDim(joint, textSeqLen);
@@ -411,7 +413,13 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
 
     private static int ComputeFfnInnerDim(OmniGen2Config config)
     {
-        int target = (int)(8.0 / 3.0 * config.HiddenSize);
+        // Upstream LuminaFeedForward (OmniGen2TransformerBlock) is constructed with inner_dim = 4 * dim, then an
+        // optional ffn_dim_multiplier, then rounded UP to multiple_of. It does NOT apply the Llama SwiGLU 2/3
+        // reduction (which would give 8/3 * dim) — for V1 this yields round_up(4*2520, 256) = 10240, matching the
+        // shipped feed_forward.linear_1 weight [10240, 2520]. Using 8/3*dim (=6912) under-sizes every SwiGLU
+        // buffer while backend.Linear still writes N=10240 from the weight, overflowing the buffers and corrupting
+        // the tail image tokens (the blocky bottom-third artifact).
+        int target = 4 * config.HiddenSize;
         if (config.FfnDimMultiplier is float m) target = (int)(target * m);
         int rem = target % config.MultipleOf;
         return rem == 0 ? target : target + (config.MultipleOf - rem);

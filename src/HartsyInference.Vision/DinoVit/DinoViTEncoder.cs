@@ -107,7 +107,10 @@ public sealed unsafe class DinoViTEncoder
             return outp;
         }
         // Patch positions start at offset `hidden` in src (after CLS). Interpolate per channel.
-        float scale = src / (float)dst;
+        // HF/DINO add a +0.1 fudge to the target grid and pass it to F.interpolate as a *scale_factor*
+        // ((dst+0.1)/src). With align_corners=False + an explicit scale_factor, PyTorch's coordinate scale is
+        // 1/scale_factor = src/(dst+0.1), NOT src/dst — the +0.1 shifts every sample and must be reproduced.
+        float scale = src / (dst + 0.1f);
         Span<float> wx = stackalloc float[4];
         Span<float> wy = stackalloc float[4];
         for (int oy = 0; oy < dst; oy++)

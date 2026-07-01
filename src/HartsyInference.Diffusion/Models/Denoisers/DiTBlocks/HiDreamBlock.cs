@@ -5,32 +5,22 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>HiDream-I1 transformer block. Two flavors share the same code path:
 /// <list type="bullet">
-/// <item>Double-stream (joint MM-attention): image and text get separate Q/K/V projections, RMSNorm Q/K, RoPE on the
-/// joint sequence (text positions are zero → identity), joint SDPA over the concatenated sequence, separate output
-/// projections, separate FFNs (MoE on the image side, vanilla SwiGLU on the text side). 12-way AdaLN modulation
-/// (6 per stream).</item>
-/// <item>Single-stream: text is already concatenated to the image sequence by the caller; one set of Q/K/V projections,
-/// one SDPA, one MoE FFN on the joint sequence. 6-way AdaLN modulation.</item>
+/// <item>Double-stream (joint MM-attention): image and text get separate Q/K/V projections, RMSNorm Q/K, RoPE on the image side, joint SDPA over the concatenated sequence, separate output projections, separate FFNs (MoE on the image side, vanilla SwiGLU on the text side). 12-way AdaLN modulation (6 per stream).</item>
+/// <item>Single-stream: text is already concatenated to the image sequence by the caller; one set of Q/K/V projections, one SDPA, one MoE FFN on the joint sequence. 6-way AdaLN modulation.</item>
 /// </list>
 /// <para><b>MoE FFN (full top-k routing):</b> the image-side FFN is HiDream's sparse MoE — a softmax gate over
-/// <c>num_routed_experts</c> (4) experts, top-k (<c>num_activated_experts</c> = 2) selection per token. Per ComfyUI
-/// (<c>MoEGate.norm_topk_prob = False</c>) the selected experts keep their <i>raw</i> softmax weight (no renormalization
-/// to sum 1), plus an always-on shared expert added on top. Because the <see cref="IBackend"/> exposes no
-/// grouped-GEMM / sort-scatter expert-dispatch primitive, this block runs the routed forward densely (every expert
-/// evaluated for every token) and zeroes non-selected experts via the per-token gate weight — numerically identical to
-/// a true sparse dispatch, just with extra compute. See <see cref="MoeForward"/>.</para>
-/// <para><b>GPU-residency:</b> every glue op — non-affine LayerNorm, AdaLN affine (scale/shift), gated residual, Q/K
-/// RMSNorm, reshape-to-heads, joint concat/split, and the MoE gate scatter — runs as an <see cref="IBackend"/> GPU op so
-/// the activation stays device-resident across the whole block (no per-op <c>DataPointer</c> reads / D2H sync barriers).
-/// The only CPU step is the tiny MoE gate softmax/top-k over the <c>[B,S,num_experts]</c> logits, and RoPE
-/// (<see cref="HiDreamRope"/>, whose D2H/H2D for Q/K is coherent with the activation cache). Numerics match the old
-/// CPU path bit-for-bit.</para></summary>
+/// <c>num_routed_experts</c> (4) experts, top-k (<c>num_activated_experts</c> = 2) selection per token with the
+/// selected gate weights renormalized to sum to 1, plus an always-on shared expert added on top. Because the
+/// <see cref="IBackend"/> exposes no grouped-GEMM / sort-scatter expert-dispatch primitive, this block runs the
+/// routed forward densely (every expert evaluated for every token) and zeroes non-selected experts via the
+/// per-token gate weight — numerically identical to a true sparse dispatch, just with extra compute. The
+/// single-expert path (shared + experts[0]) is kept only as a fallback when <c>num_activated_experts &lt;= 1</c>.
+/// See <see cref="MoeForward"/> for the routing/renorm formula.</para></summary>
 public sealed unsafe class HiDreamBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numHeads;
     private readonly int _headDim;
-    private readonly int _ffDim;
     private readonly bool _isSingle;
     private readonly float _qkNormEps;
     private readonly int _numActivatedExperts;
@@ -82,7 +72,6 @@ public sealed unsafe class HiDreamBlock
         _hiddenSize = hiddenSize;
         _numHeads = numHeads;
         _headDim = headDim;
-        _ffDim = ffDim;
         _isSingle = isSingle;
         _qkNormEps = qkNormEps;
         _numRoutedExperts = numRoutedExperts;
@@ -210,53 +199,64 @@ public sealed unsafe class HiDreamBlock
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
+        int totalSeqLen = imgSeqLen + txtSeqLen;
+        TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
+        TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
 
         // ── 1. AdaLN modulation: 12 params (image: 6, text: 6) ──
-        // Order matches diffusers/ComfyUI: shift_msa_i, scale_msa_i, gate_msa_i, shift_mlp_i, scale_mlp_i,
-        // gate_mlp_i, shift_msa_t, scale_msa_t, gate_msa_t, shift_mlp_t, scale_mlp_t, gate_mlp_t.
         Tensor[] mods = ComputeAdaLnParams(backend, temb, batch, 12);
+        // mods order matches diffusers: shift_msa_i, scale_msa_i, gate_msa_i,
+        //                                shift_mlp_i, scale_mlp_i, gate_mlp_i,
+        //                                shift_msa_t, scale_msa_t, gate_msa_t,
+        //                                shift_mlp_t, scale_mlp_t, gate_mlp_t
 
         // ── 2. Pre-attention norms + AdaLN modulation ──
-        Tensor imgNormed = LayerNorm(backend, image, batch, imgSeqLen);
-        Tensor imgMod = ApplyMod(backend, imgNormed, mods[0], mods[1], batch, imgSeqLen);
+        Tensor imgNormed = new Tensor(imgShape, DType.F32);
+        DiTUtils.LayerNormNoAffine(imgNormed, image, batch, imgSeqLen, _hiddenSize);
+        Tensor imgMod = AdaLNModulation.ApplyModulation(imgNormed, mods[0], mods[1], batch, imgSeqLen, _hiddenSize);
         imgNormed.Dispose();
 
-        Tensor txtNormed = LayerNorm(backend, text, batch, txtSeqLen);
-        Tensor txtMod = ApplyMod(backend, txtNormed, mods[6], mods[7], batch, txtSeqLen);
+        Tensor txtNormed = new Tensor(txtShape, DType.F32);
+        DiTUtils.LayerNormNoAffine(txtNormed, text, batch, txtSeqLen, _hiddenSize);
+        Tensor txtMod = AdaLNModulation.ApplyModulation(txtNormed, mods[6], mods[7], batch, txtSeqLen, _hiddenSize);
         txtNormed.Dispose();
 
         // ── 3. Joint MM-attention ──
-        (Tensor imgAttnOut, Tensor txtAttnOut) = JointAttention(backend, imgMod, txtMod, rope, batch, imgSeqLen, txtSeqLen);
+        Tensor imgAttnOut, txtAttnOut;
+        (imgAttnOut, txtAttnOut) = JointAttention(backend, imgMod, txtMod, rope, totalRopeSeqLen, batch, imgSeqLen, txtSeqLen);
         imgMod.Dispose();
         txtMod.Dispose();
 
         // ── 4. Gated residuals: hidden = hidden + gate * attn_out ──
-        Tensor imgAfterAttn = GatedRes(backend, image, imgAttnOut, mods[2], batch, imgSeqLen);
+        Tensor imgAfterAttn = AdaLNModulation.ApplyGatedResidual(image, imgAttnOut, mods[2], batch, imgSeqLen, _hiddenSize);
         imgAttnOut.Dispose();
-        Tensor txtAfterAttn = GatedRes(backend, text, txtAttnOut, mods[8], batch, txtSeqLen);
+        Tensor txtAfterAttn = AdaLNModulation.ApplyGatedResidual(text, txtAttnOut, mods[8], batch, txtSeqLen, _hiddenSize);
         txtAttnOut.Dispose();
 
-        // ── 5. Image FFN (MoE) ──
-        Tensor imgPreFfn = LayerNorm(backend, imgAfterAttn, batch, imgSeqLen);
-        Tensor imgFfnIn = ApplyMod(backend, imgPreFfn, mods[3], mods[4], batch, imgSeqLen);
+        // ── 5. Image FFN (MoE single-expert fallback) ──
+        Tensor imgPreFfn = new Tensor(imgShape, DType.F32);
+        DiTUtils.LayerNormNoAffine(imgPreFfn, imgAfterAttn, batch, imgSeqLen, _hiddenSize);
+        Tensor imgFfnIn = AdaLNModulation.ApplyModulation(imgPreFfn, mods[3], mods[4], batch, imgSeqLen, _hiddenSize);
         imgPreFfn.Dispose();
 
+        // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
         Tensor imgFfnOut = MoeForward(backend, imgFfnIn, batch, imgSeqLen);
         imgFfnIn.Dispose();
 
-        Tensor imgFinal = GatedRes(backend, imgAfterAttn, imgFfnOut, mods[5], batch, imgSeqLen);
+        Tensor imgFinal = AdaLNModulation.ApplyGatedResidual(imgAfterAttn, imgFfnOut, mods[5], batch, imgSeqLen, _hiddenSize);
         imgFfnOut.Dispose();
         imgAfterAttn.Dispose();
 
         // ── 6. Text FFN (vanilla SwiGLU) ──
-        Tensor txtPreFfn = LayerNorm(backend, txtAfterAttn, batch, txtSeqLen);
-        Tensor txtFfnIn = ApplyMod(backend, txtPreFfn, mods[9], mods[10], batch, txtSeqLen);
+        Tensor txtPreFfn = new Tensor(txtShape, DType.F32);
+        DiTUtils.LayerNormNoAffine(txtPreFfn, txtAfterAttn, batch, txtSeqLen, _hiddenSize);
+        Tensor txtFfnIn = AdaLNModulation.ApplyModulation(txtPreFfn, mods[9], mods[10], batch, txtSeqLen, _hiddenSize);
         txtPreFfn.Dispose();
 
-        Tensor txtFfnOut = SwiGluForward(backend, txtFfnIn, _ffTW1!, _ffTW3!, _ffTW2!, batch, txtSeqLen, _ffDim);
+        Tensor txtFfnOut = SwiGluForward(backend, txtFfnIn, _ffTW1!, _ffTW3!, _ffTW2!, batch, txtSeqLen);
         txtFfnIn.Dispose();
 
-        Tensor txtFinal = GatedRes(backend, txtAfterAttn, txtFfnOut, mods[11], batch, txtSeqLen);
+        Tensor txtFinal = AdaLNModulation.ApplyGatedResidual(txtAfterAttn, txtFfnOut, mods[11], batch, txtSeqLen, _hiddenSize);
         txtFfnOut.Dispose();
         txtAfterAttn.Dispose();
 
@@ -274,31 +274,37 @@ public sealed unsafe class HiDreamBlock
 
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
+        int txtSeqLen = seqLen - imgSeqLen;
+        TensorShape hiddenShape = new TensorShape(batch, seqLen, _hiddenSize);
 
-        // ── 1. AdaLN: 6 params (shift_msa_i, scale_msa_i, gate_msa_i, shift_mlp_i, scale_mlp_i, gate_mlp_i) ──
+        // ── 1. AdaLN: 6 params ──
         Tensor[] mods = ComputeAdaLnParams(backend, temb, batch, 6);
+        // shift_msa_i, scale_msa_i, gate_msa_i, shift_mlp_i, scale_mlp_i, gate_mlp_i
 
         // ── 2. Pre-attention norm + modulate ──
-        Tensor preAttn = LayerNorm(backend, hidden, batch, seqLen);
-        Tensor preAttnMod = ApplyMod(backend, preAttn, mods[0], mods[1], batch, seqLen);
+        Tensor preAttn = new Tensor(hiddenShape, DType.F32);
+        DiTUtils.LayerNormNoAffine(preAttn, hidden, batch, seqLen, _hiddenSize);
+        Tensor preAttnMod = AdaLNModulation.ApplyModulation(preAttn, mods[0], mods[1], batch, seqLen, _hiddenSize);
         preAttn.Dispose();
 
-        // ── 3. Self-attention over the joint sequence (text positions rotate by 0 = identity) ──
-        Tensor attnOut = SingleStreamSelfAttention(backend, preAttnMod, rope, batch, seqLen);
+        // ── 3. Self-attention over the joint sequence (only image side has RoPE; text positions are zero) ──
+        Tensor attnOut = SingleStreamSelfAttention(backend, preAttnMod, rope, totalRopeSeqLen, batch, seqLen, imgSeqLen, txtSeqLen);
         preAttnMod.Dispose();
 
-        Tensor afterAttn = GatedRes(backend, hidden, attnOut, mods[2], batch, seqLen);
+        Tensor afterAttn = AdaLNModulation.ApplyGatedResidual(hidden, attnOut, mods[2], batch, seqLen, _hiddenSize);
         attnOut.Dispose();
 
         // ── 4. MoE FFN over the joint sequence ──
-        Tensor preFfn = LayerNorm(backend, afterAttn, batch, seqLen);
-        Tensor ffnIn = ApplyMod(backend, preFfn, mods[3], mods[4], batch, seqLen);
+        Tensor preFfn = new Tensor(hiddenShape, DType.F32);
+        DiTUtils.LayerNormNoAffine(preFfn, afterAttn, batch, seqLen, _hiddenSize);
+        Tensor ffnIn = AdaLNModulation.ApplyModulation(preFfn, mods[3], mods[4], batch, seqLen, _hiddenSize);
         preFfn.Dispose();
 
+        // VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel
         Tensor ffnOut = MoeForward(backend, ffnIn, batch, seqLen);
         ffnIn.Dispose();
 
-        Tensor result = GatedRes(backend, afterAttn, ffnOut, mods[5], batch, seqLen);
+        Tensor result = AdaLNModulation.ApplyGatedResidual(afterAttn, ffnOut, mods[5], batch, seqLen, _hiddenSize);
         ffnOut.Dispose();
         afterAttn.Dispose();
 
@@ -306,124 +312,131 @@ public sealed unsafe class HiDreamBlock
         return result;
     }
 
-    /// <summary>Computes <paramref name="numParams"/> AdaLN modulation tensors (each [B, hiddenSize]) from a
-    /// [B, hiddenSize] timestep embedding using SiLU + Linear, then splits the [B, numParams*hiddenSize]
-    /// projection into per-param [B, hiddenSize] GPU slices (<see cref="IBackend.SliceLastDim"/>).</summary>
+    /// <summary>Computes <paramref name="numParams"/> AdaLN modulation tensors (each [B, hiddenSize])
+    /// from a [B, hiddenSize] timestep embedding using SiLU + Linear. <paramref name="numParams"/> is
+    /// 12 for double blocks, 6 for single blocks, 2 for the final layer.</summary>
     private Tensor[] ComputeAdaLnParams(IBackend backend, Tensor temb, int batch, int numParams)
     {
         int outDim = numParams * _hiddenSize;
-        Tensor activated = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
+        TensorShape inShape = new TensorShape(batch, _hiddenSize);
+        Tensor activated = new Tensor(inShape, DType.F32);
         backend.Silu(activated, temb);
 
-        Tensor projected = new Tensor(new TensorShape(batch, outDim), DType.F32);
+        TensorShape outShape = new TensorShape(batch, outDim);
+        Tensor projected = new Tensor(outShape, DType.F32);
         backend.Linear(projected, activated, _adaLnLinearWeight!, _adaLnLinearBias);
         activated.Dispose();
 
         Tensor[] results = new Tensor[numParams];
+        float* projPtr = (float*)projected.DataPointer;
+
         for (int p = 0; p < numParams; p++)
         {
-            Tensor param = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
-            backend.SliceLastDim(param, projected, p * _hiddenSize);
+            TensorShape paramShape = new TensorShape(batch, _hiddenSize);
+            Tensor param = new Tensor(paramShape, DType.F32);
+            float* pPtr = (float*)param.DataPointer;
+            for (int b = 0; b < batch; b++)
+            {
+                int srcOff = b * outDim + p * _hiddenSize;
+                int dstOff = b * _hiddenSize;
+                for (int d = 0; d < _hiddenSize; d++)
+                    pPtr[dstOff + d] = projPtr[srcOff + d];
+            }
             results[p] = param;
         }
+
         projected.Dispose();
         return results;
     }
 
-    /// <summary>Non-affine LayerNorm over the hidden dim (ComfyUI <c>norm1_i/norm3_i</c>, eps 1e-6).</summary>
-    private Tensor LayerNorm(IBackend backend, Tensor input, int batch, int seqLen)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.LayerNormNoAffine(output, input, 1e-6f);
-        return output;
-    }
-
-    /// <summary>AdaLN affine modulation <c>out = input * (1 + scale) + shift</c>, GPU-resident
-    /// (<c>AddScalar</c> + <c>AffineBroadcastLastDim</c>). <paramref name="shift"/>/<paramref name="scale"/> are
-    /// [B, hidden] broadcast over the sequence axis.</summary>
-    private Tensor ApplyMod(IBackend backend, Tensor input, Tensor shift, Tensor scale, int batch, int seqLen)
-    {
-        Tensor scalePlus1 = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
-        backend.AddScalar(scalePlus1, scale, 1.0f);
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.AffineBroadcastLastDim(output, input, scalePlus1, shift);
-        scalePlus1.Dispose();
-        return output;
-    }
-
-    /// <summary>Gated residual <c>out = residual + gate * value</c>, GPU-resident
-    /// (<see cref="IBackend.GatedResidualLastDim"/>). <paramref name="gate"/> is [B, hidden] broadcast over seq.</summary>
-    private Tensor GatedRes(IBackend backend, Tensor residual, Tensor value, Tensor gate, int batch, int seqLen)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.GatedResidualLastDim(output, residual, value, gate);
-        return output;
-    }
-
-    /// <summary>Joint MM-attention shared between image and text in double-stream blocks. Image and text each get
-    /// their own Q/K/V; both are RMS-normed over the full inner dim (ComfyUI <c>q_rms_norm</c> = RMSNorm(inner_dim)),
-    /// concatenated [image, text] on the sequence axis, reshaped to heads, RoPE applied over the joint sequence (text
-    /// positions are zero → identity), SDPA, then split back and projected per stream.</summary>
+    /// <summary>Joint MM-attention shared between image and text in double-stream blocks. Image and text
+    /// each get their own Q/K/V (image via <c>to_q/k/v</c>, text via <c>to_q_t/k_t/v_t</c>); both are RMS-normed
+    /// per stream, RoPE is applied to the image-side Q/K (text positions are zero so RoPE is identity), then
+    /// SDPA is run over the concatenated [img_tokens, text_tokens] sequence and the result is split back.</summary>
     private (Tensor img, Tensor txt) JointAttention(IBackend backend, Tensor img, Tensor txt,
-        HiDreamRope rope, int batch, int imgSeqLen, int txtSeqLen)
+        HiDreamRope rope, int totalRopeSeqLen, int batch, int imgSeqLen, int txtSeqLen)
     {
-        int total = imgSeqLen + txtSeqLen;
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
-        TensorShape jointShape = new TensorShape(batch, total, _hiddenSize);
+        int totalSeqLen = imgSeqLen + txtSeqLen;
+        TensorShape totalMhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
 
-        // Q/K/V projections + RMSNorm Q/K over the full inner dim (image side).
+        // Q/K/V projections (image side)
         Tensor imgQ = LinearAlloc(backend, img, _toQWeight!, _toQBias, imgShape);
-        Tensor imgQn = RmsNormAlloc(backend, imgQ, _qRmsNormWeight!, imgShape);
-        imgQ.Dispose();
         Tensor imgK = LinearAlloc(backend, img, _toKWeight!, _toKBias, imgShape);
-        Tensor imgKn = RmsNormAlloc(backend, imgK, _kRmsNormWeight!, imgShape);
-        imgK.Dispose();
         Tensor imgV = LinearAlloc(backend, img, _toVWeight!, _toVBias, imgShape);
 
-        // Q/K/V projections + RMSNorm Q/K (text side).
+        // RMSNorm Q and K over the flat last dim (= inner_dim).
+        Tensor imgQNormed = new Tensor(imgShape, DType.F32);
+        Tensor imgKNormed = new Tensor(imgShape, DType.F32);
+        backend.RmsNorm(imgQNormed, imgQ, _qRmsNormWeight!, _qkNormEps);
+        backend.RmsNorm(imgKNormed, imgK, _kRmsNormWeight!, _qkNormEps);
+        imgQ.Dispose(); imgK.Dispose();
+
+        // Q/K/V projections (text side)
         Tensor txtQ = LinearAlloc(backend, txt, _toQTWeight!, _toQTBias, txtShape);
-        Tensor txtQn = RmsNormAlloc(backend, txtQ, _qRmsNormTWeight!, txtShape);
-        txtQ.Dispose();
         Tensor txtK = LinearAlloc(backend, txt, _toKTWeight!, _toKTBias, txtShape);
-        Tensor txtKn = RmsNormAlloc(backend, txtK, _kRmsNormTWeight!, txtShape);
-        txtK.Dispose();
         Tensor txtV = LinearAlloc(backend, txt, _toVTWeight!, _toVTBias, txtShape);
 
-        // Concat [image, text] along the sequence dim (matches ComfyUI cat([q_i, q_t], dim=1)).
-        Tensor jointQ = new Tensor(jointShape, DType.F32);
-        backend.Concat(jointQ, new Tensor[] { imgQn, txtQn }, 1);
-        Tensor jointK = new Tensor(jointShape, DType.F32);
-        backend.Concat(jointK, new Tensor[] { imgKn, txtKn }, 1);
-        Tensor jointV = new Tensor(jointShape, DType.F32);
-        backend.Concat(jointV, new Tensor[] { imgV, txtV }, 1);
-        imgQn.Dispose(); txtQn.Dispose(); imgKn.Dispose(); txtKn.Dispose(); imgV.Dispose(); txtV.Dispose();
+        Tensor txtQNormed = new Tensor(txtShape, DType.F32);
+        Tensor txtKNormed = new Tensor(txtShape, DType.F32);
+        backend.RmsNorm(txtQNormed, txtQ, _qRmsNormTWeight!, _qkNormEps);
+        backend.RmsNorm(txtKNormed, txtK, _kRmsNormTWeight!, _qkNormEps);
+        txtQ.Dispose(); txtK.Dispose();
 
-        Tensor qMh = ToHeads(backend, jointQ, batch, total);
-        jointQ.Dispose();
-        Tensor kMh = ToHeads(backend, jointK, batch, total);
-        jointK.Dispose();
-        Tensor vMh = ToHeads(backend, jointV, batch, total);
-        jointV.Dispose();
+        // Reshape to multi-head [B, H, S, D]
+        TensorShape imgMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
+        TensorShape txtMhShape = new TensorShape(batch, _numHeads, txtSeqLen, _headDim);
 
-        // RoPE over the joint sequence; text positions are zero in the rope table → identity.
-        rope.Forward(qMh, kMh, batch, _numHeads, total);
+        Tensor imgQMh = new Tensor(imgMhShape, DType.F32);
+        Tensor imgKMh = new Tensor(imgMhShape, DType.F32);
+        Tensor imgVMh = new Tensor(imgMhShape, DType.F32);
+        DiTUtils.ReshapeToMultiHead(imgQMh, imgQNormed, batch, imgSeqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(imgKMh, imgKNormed, batch, imgSeqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(imgVMh, imgV, batch, imgSeqLen, _numHeads, _headDim);
+        imgQNormed.Dispose(); imgKNormed.Dispose(); imgV.Dispose();
 
+        Tensor txtQMh = new Tensor(txtMhShape, DType.F32);
+        Tensor txtKMh = new Tensor(txtMhShape, DType.F32);
+        Tensor txtVMh = new Tensor(txtMhShape, DType.F32);
+        DiTUtils.ReshapeToMultiHead(txtQMh, txtQNormed, batch, txtSeqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(txtKMh, txtKNormed, batch, txtSeqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(txtVMh, txtV, batch, txtSeqLen, _numHeads, _headDim);
+        txtQNormed.Dispose(); txtKNormed.Dispose(); txtV.Dispose();
+
+        // RoPE on image-side Q/K only — RoPE expects [B, H, totalRopeSeqLen, D] tables, but image
+        // tokens occupy the first imgSeqLen positions in the rope table by convention.
+        ApplyRopeImageOnly(imgQMh, imgKMh, rope, batch, imgSeqLen);
+
+        // Concatenate image then text along the seq axis (multi-head layout).
+        Tensor jointQ = new Tensor(totalMhShape, DType.F32);
+        Tensor jointK = new Tensor(totalMhShape, DType.F32);
+        Tensor jointV = new Tensor(totalMhShape, DType.F32);
+        DiTUtils.ConcatAlongSeqDimMultiHead(jointQ, imgQMh, txtQMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+        DiTUtils.ConcatAlongSeqDimMultiHead(jointK, imgKMh, txtKMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+        DiTUtils.ConcatAlongSeqDimMultiHead(jointV, imgVMh, txtVMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+        imgQMh.Dispose(); imgKMh.Dispose(); imgVMh.Dispose();
+        txtQMh.Dispose(); txtKMh.Dispose(); txtVMh.Dispose();
+
+        // SDPA
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(new TensorShape(batch, _numHeads, total, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor jointAttn = new Tensor(totalMhShape, DType.F32);
+        backend.ScaledDotProductAttention(jointAttn, jointQ, jointK, jointV, null, scale);
+        jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
 
-        Tensor attnFlat = FromHeads(backend, attnMh, batch, total);
-        attnMh.Dispose();
+        // Split back to image / text and reshape to [B, S, hidden]
+        Tensor imgAttnMh = new Tensor(imgMhShape, DType.F32);
+        Tensor txtAttnMh = new Tensor(txtMhShape, DType.F32);
+        DiTUtils.SplitAlongSeqDimMultiHead(imgAttnMh, txtAttnMh, jointAttn, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+        jointAttn.Dispose();
 
-        // Split [image, text] and project per stream.
         Tensor imgAttn = new Tensor(imgShape, DType.F32);
-        backend.SliceRows(imgAttn, attnFlat, 0);
         Tensor txtAttn = new Tensor(txtShape, DType.F32);
-        backend.SliceRows(txtAttn, attnFlat, imgSeqLen);
-        attnFlat.Dispose();
+        DiTUtils.ReshapeFromMultiHead(imgAttn, imgAttnMh, batch, imgSeqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeFromMultiHead(txtAttn, txtAttnMh, batch, txtSeqLen, _numHeads, _headDim);
+        imgAttnMh.Dispose(); txtAttnMh.Dispose();
 
+        // Output projections
         Tensor imgOut = LinearAlloc(backend, imgAttn, _toOutWeight!, _toOutBias, imgShape);
         Tensor txtOut = LinearAlloc(backend, txtAttn, _toOutTWeight!, _toOutTBias, txtShape);
         imgAttn.Dispose();
@@ -432,117 +445,112 @@ public sealed unsafe class HiDreamBlock
         return (imgOut, txtOut);
     }
 
-    /// <summary>Self-attention over the concatenated single-stream sequence. The image-side weights are reused for
-    /// the entire sequence; RoPE rotates every position (text positions are zero → identity).</summary>
-    private Tensor SingleStreamSelfAttention(IBackend backend, Tensor hidden, HiDreamRope rope, int batch, int seqLen)
+    /// <summary>Self-attention over the concatenated single-stream sequence. The image-side weights
+    /// (<c>to_q/k/v</c>) are reused for the entire sequence; only the image-token Q/K positions get RoPE
+    /// (text positions in the rope table are zeros and are passed through unchanged by the rotation).</summary>
+    private Tensor SingleStreamSelfAttention(IBackend backend, Tensor hidden, HiDreamRope rope, int totalRopeSeqLen,
+        int batch, int seqLen, int imgSeqLen, int txtSeqLen)
     {
-        TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
+        TensorShape hiddenShape = new TensorShape(batch, seqLen, _hiddenSize);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
-        Tensor q = LinearAlloc(backend, hidden, _toQWeight!, _toQBias, shape);
-        Tensor qn = RmsNormAlloc(backend, q, _qRmsNormWeight!, shape);
-        q.Dispose();
-        Tensor k = LinearAlloc(backend, hidden, _toKWeight!, _toKBias, shape);
-        Tensor kn = RmsNormAlloc(backend, k, _kRmsNormWeight!, shape);
-        k.Dispose();
-        Tensor v = LinearAlloc(backend, hidden, _toVWeight!, _toVBias, shape);
+        Tensor q = LinearAlloc(backend, hidden, _toQWeight!, _toQBias, hiddenShape);
+        Tensor k = LinearAlloc(backend, hidden, _toKWeight!, _toKBias, hiddenShape);
+        Tensor v = LinearAlloc(backend, hidden, _toVWeight!, _toVBias, hiddenShape);
 
-        Tensor qMh = ToHeads(backend, qn, batch, seqLen);
-        qn.Dispose();
-        Tensor kMh = ToHeads(backend, kn, batch, seqLen);
-        kn.Dispose();
-        Tensor vMh = ToHeads(backend, v, batch, seqLen);
-        v.Dispose();
+        Tensor qNormed = new Tensor(hiddenShape, DType.F32);
+        Tensor kNormed = new Tensor(hiddenShape, DType.F32);
+        backend.RmsNorm(qNormed, q, _qRmsNormWeight!, _qkNormEps);
+        backend.RmsNorm(kNormed, k, _kRmsNormWeight!, _qkNormEps);
+        q.Dispose(); k.Dispose();
 
-        rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        Tensor qMh = new Tensor(mhShape, DType.F32);
+        Tensor kMh = new Tensor(mhShape, DType.F32);
+        Tensor vMh = new Tensor(mhShape, DType.F32);
+        DiTUtils.ReshapeToMultiHead(qMh, qNormed, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(kMh, kNormed, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
+        qNormed.Dispose(); kNormed.Dispose(); v.Dispose();
+
+        // RoPE applies position-by-position; zero-position text tokens just rotate by 0 (identity).
+        // We rotate over min(seqLen, totalRopeSeqLen) positions — the text segment past imgSeqLen
+        // uses the all-zero rope entries from BuildPositionIds.
+        ApplyRopeFullSeq(qMh, kMh, rope, batch, seqLen);
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(new TensorShape(batch, _numHeads, seqLen, _headDim), DType.F32);
+        Tensor attnMh = new Tensor(mhShape, DType.F32);
         backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor attnFlat = FromHeads(backend, attnMh, batch, seqLen);
+        Tensor attn = new Tensor(hiddenShape, DType.F32);
+        DiTUtils.ReshapeFromMultiHead(attn, attnMh, batch, seqLen, _numHeads, _headDim);
         attnMh.Dispose();
 
-        Tensor outProj = LinearAlloc(backend, attnFlat, _toOutWeight!, _toOutBias, shape);
-        attnFlat.Dispose();
+        Tensor outProj = LinearAlloc(backend, attn, _toOutWeight!, _toOutBias, hiddenShape);
+        attn.Dispose();
         return outProj;
     }
 
-    /// <summary>Reshapes a flat [B, S, hidden] tensor to head-major [B, numHeads, S, headDim]
-    /// (<see cref="IBackend.Permute0213"/> on the byte-identical [B, S, numHeads, headDim] view).</summary>
-    private Tensor ToHeads(IBackend backend, Tensor flat, int batch, int seqLen)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, _numHeads, seqLen, _headDim), DType.F32);
-        backend.Permute0213(output, flat, seqLen, _numHeads, _headDim);
-        return output;
-    }
-
-    /// <summary>Inverse of <see cref="ToHeads"/>: [B, numHeads, S, headDim] → [B, S, hidden].</summary>
-    private Tensor FromHeads(IBackend backend, Tensor mh, int batch, int seqLen)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);
-        backend.Permute0213(output, mh, _numHeads, seqLen, _headDim);
-        return output;
-    }
-
-    /// <summary>Allocates an output of the given shape and runs <c>backend.RmsNorm</c> over the last dim.</summary>
-    private Tensor RmsNormAlloc(IBackend backend, Tensor input, Tensor weight, TensorShape shape)
-    {
-        Tensor output = new Tensor(shape, DType.F32);
-        backend.RmsNorm(output, input, weight, _qkNormEps);
-        return output;
-    }
-
     /// <summary>MoE SwiGLU FFN: <c>shared_experts(x) + sum_k(topk_weight_k * experts[idx_k](x))</c>.
-    /// <para>Mirrors ComfyUI HiDream <c>MoEGate</c> + <c>MOEFeedForwardSwiGLU</c>: the gate Linear produces
-    /// <c>[B, S, num_routed_experts]</c> logits; softmax over the expert axis; the top-k (= num_activated_experts)
-    /// experts per token are selected and kept at their <b>raw</b> softmax weight (ComfyUI sets
-    /// <c>norm_topk_prob = False</c>, so there is no renormalization to sum 1). Each routed expert is evaluated
-    /// densely and scaled by its (possibly zero) per-token gate weight via <see cref="IBackend.MaskRows"/>, then
-    /// accumulated; the always-on shared expert is added on top. GPU-resident except the tiny gate softmax/top-k.</para></summary>
+    /// <para>Mirrors diffusers HiDream <c>MoEGate</c> + <c>MOEFeedForwardSwiGLU</c>:
+    /// the gate Linear produces <c>[B, S, num_routed_experts]</c> logits; softmax is taken over the
+    /// expert axis (dim=-1); the top-k (= <c>num_activated_experts</c>) experts per token are selected and
+    /// their gate weights are renormalized to sum to 1 (<c>topk_weight / (topk_weight.sum(-1) + 1e-20)</c>,
+    /// the <c>norm_topk_prob=True</c> path HiDream uses since top_k &gt; 1). Each token is then run through its
+    /// selected experts and the outputs are weighted by the renormalized gate weights and summed. The shared
+    /// (always-on) expert output is added on top.</para>
+    /// <para>VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel. This eager per-token-mask
+    /// implementation runs <i>all</i> routed experts densely (no grouped-GEMM dispatch — the backend has no
+    /// scatter/gather expert primitive) and zeroes the non-selected experts' contributions via the per-token
+    /// gate weight, which is numerically identical to a true top-k dispatch but does extra compute. If
+    /// <c>num_activated_experts &lt;= 1</c> the routing collapses to top-1 (each token routes to its single
+    /// argmax expert with renormalized weight 1) plus the shared expert.</para></summary>
     private Tensor MoeForward(IBackend backend, Tensor input, int batch, int seqLen)
     {
         TensorShape inShape = new TensorShape(batch, seqLen, _hiddenSize);
 
-        // Shared (always-on) expert: SwiGLU at hidden_dim/2. Seeds the accumulator.
-        int sharedDim = (_ffDim + 1) / 2; // ff_dim // 2 (Python integer division of 4*hidden / 2)
-        Tensor combined = SwiGluForward(backend, input, _sharedW1!, _sharedW3!, _sharedW2!, batch, seqLen, sharedDim);
+        // Shared (always-on) expert: SwiGLU. Inner dim is taken from the shared weight (3584 for HiDream V1),
+        // which is NOT ff_dim/2 — so it must come from the weight, not a computed value.
+        Tensor shared = SwiGluForward(backend, input, _sharedW1!, _sharedW3!, _sharedW2!, batch, seqLen);
 
-        // Gate logits → per-token, per-expert renorm-free top-k weights (0 for non-selected). [B, S, E].
+        // Gate logits: input @ gate_weight^T → [B, S, num_routed_experts].
         Tensor gateLogits = new Tensor(new TensorShape(batch, seqLen, _numRoutedExperts), DType.F32);
         backend.Linear(gateLogits, input, _moeGateWeight!, null);
+
+        // Per-token, per-expert renormalized top-k gate weights (0 for non-selected experts). [B, S, E].
+        // With top-k=1 (or fewer) this collapses to the single-expert fallback (each token routes to its
+        // single argmax expert with weight 1 after renorm) plus the shared expert.
         Tensor gateWeights = new Tensor(new TensorShape(batch, seqLen, _numRoutedExperts), DType.F32);
         int activeK = _numActivatedExperts <= 1 ? 1 : _numActivatedExperts;
         ComputeTopKGateWeights(gateLogits, gateWeights, batch, seqLen, _numRoutedExperts, activeK);
         gateLogits.Dispose();
 
+        // Accumulate the shared expert, then add each routed expert weighted by its (possibly zero) gate.
+        Tensor combined = new Tensor(inShape, DType.F32);
+        CopyTensor(combined, shared, batch * seqLen * _hiddenSize);
+        shared.Dispose();
+
         for (int e = 0; e < _numRoutedExperts; e++)
         {
-            Tensor expertOut = SwiGluForward(backend, input, _expertW1![e], _expertW3![e], _expertW2![e], batch, seqLen, _ffDim);
-
-            // Per-token gate column [B, S, 1] → per-row scale of the expert output, then accumulate.
-            Tensor gateColE = new Tensor(new TensorShape(batch, seqLen, 1), DType.F32);
-            backend.SliceLastDim(gateColE, gateWeights, e);
-            Tensor scaled = new Tensor(inShape, DType.F32);
-            backend.MaskRows(scaled, expertOut, gateColE);
+            Tensor expertOut = SwiGluForward(backend, input, _expertW1![e], _expertW3![e], _expertW2![e], batch, seqLen);
+            AccumulateGatedExpert(combined, expertOut, gateWeights, e, batch, seqLen, _hiddenSize, _numRoutedExperts);
             expertOut.Dispose();
-            gateColE.Dispose();
-
-            Tensor newCombined = new Tensor(inShape, DType.F32);
-            backend.Add(newCombined, combined, scaled);
-            combined.Dispose();
-            scaled.Dispose();
-            combined = newCombined;
         }
         gateWeights.Dispose();
         return combined;
     }
 
-    /// <summary>SwiGLU forward: <c>w2(silu(w1(x)) * w3(x))</c>. Used by the text FFN, the shared MoE expert, and
-    /// each routed expert.</summary>
+    /// <summary>SwiGLU forward: <c>w2(silu(w1(x)) * w3(x))</c>. Used by the text FFN, the shared MoE
+    /// expert, and (under the fallback) the single routed expert.</summary>
     private Tensor SwiGluForward(IBackend backend, Tensor input, Tensor w1, Tensor w3, Tensor w2,
-        int batch, int seqLen, int hiddenInner)
+        int batch, int seqLen)
     {
+        // The SwiGLU inner dim MUST come from the weight (w1.Shape[0] = the GEMM's N), not a computed ffDim.
+        // HiDream's checkpoint uses the Llama SwiGLU width round_up(8/3·dim, 256) = 6912 (routed experts / text
+        // FFN) and 3584 (shared expert), NOT 4·dim = 10240 / ff_dim//2 = 5120. Allocating with a computed dim that
+        // disagrees with the weight makes backend.Linear (which takes N from the weight) write into a mis-sized
+        // buffer, corrupting the FFN and the whole image. Deriving from the weight keeps buffer and GEMM in lockstep.
+        int hiddenInner = (int)w1.Shape[0];
         TensorShape ffShape = new TensorShape(batch, seqLen, hiddenInner);
         Tensor gate = new Tensor(ffShape, DType.F32);
         backend.Linear(gate, input, w1, null);
@@ -575,12 +583,32 @@ public sealed unsafe class HiDreamBlock
         return output;
     }
 
-    /// <summary>Computes the per-token, per-expert top-k gate weights from routing logits.
-    /// <para>Matches ComfyUI HiDream <c>MoEGate</c>: <c>scores = softmax(logits, dim=-1)</c>; pick the top-k experts
-    /// by score and keep their raw softmax weight (<c>norm_topk_prob = False</c> → no renormalization). The output
-    /// <paramref name="weights"/> is dense <c>[B, S, E]</c> with the selected weight at each chosen expert slot and 0
-    /// elsewhere, so a dense per-expert masked accumulation reproduces the sparse top-k dispatch exactly.</para>
-    /// This is the only CPU step in the block — a tiny [B, S, E] tensor (E = 4).</summary>
+    /// <summary>Applies the image-side rope to the first imgSeqLen positions of Q and K; the text segment
+    /// (positions imgSeqLen..total) is left untouched. The rope was precomputed in the caller for the full
+    /// image+text sequence with text positions = 0, so a single Forward call over <paramref name="imgSeqLen"/>
+    /// rotates exactly the image tokens.</summary>
+    private static void ApplyRopeImageOnly(Tensor q, Tensor k, HiDreamRope rope, int batch, int imgSeqLen)
+    {
+        // The rope cache is sized by the latest Precompute call. Forward rotates the first
+        // imgSeqLen positions of each [B, H, S, D] tensor — anything beyond is ignored by Forward.
+        rope.Forward(q, k, batch, q.ShapeValue(1), imgSeqLen);
+    }
+
+    /// <summary>Applies rope across the full single-stream sequence. Text tokens have all-zero positions
+    /// in the rope table (set by HiDreamRope.BuildPositionIds), so their rotation is the identity.</summary>
+    private static void ApplyRopeFullSeq(Tensor q, Tensor k, HiDreamRope rope, int batch, int seqLen)
+    {
+        rope.Forward(q, k, batch, q.ShapeValue(1), seqLen);
+    }
+
+    /// <summary>Computes the per-token, per-expert renormalized top-k gate weights from routing logits.
+    /// <para>Matches diffusers HiDream <c>MoEGate</c>: <c>scores = softmax(logits, dim=-1)</c>; pick the top-k
+    /// experts by score; renormalize the selected weights to sum to 1 (<c>norm_topk_prob=True</c> path:
+    /// <c>w_k / (sum_k w_k + 1e-20)</c>). The output <paramref name="weights"/> is dense <c>[B, S, E]</c> with the
+    /// renormalized weight at each selected expert slot and 0 elsewhere, so a dense per-expert accumulation
+    /// reproduces the sparse top-k dispatch exactly.</para>
+    /// VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel (softmax axis = expert dim,
+    /// top-k renorm denominator includes the 1e-20 epsilon).</summary>
     private static void ComputeTopKGateWeights(Tensor logits, Tensor weights, int batch, int seqLen, int numExperts, int topK)
     {
         float* lp = (float*)logits.DataPointer;
@@ -611,8 +639,8 @@ public sealed unsafe class HiDreamBlock
                     wp[off + e] = 0f;
                 }
 
-                // top-k selection (k small — simple repeated argmax). Selected experts keep their raw softmax
-                // weight; ComfyUI's norm_topk_prob is False so there is no renormalization.
+                // top-k selection (k small — simple repeated argmax over a copy).
+                float denom = 0f;
                 for (int kk = 0; kk < k; kk++)
                 {
                     int best = -1;
@@ -626,10 +654,45 @@ public sealed unsafe class HiDreamBlock
                             best = e;
                         }
                     }
+                    // Mark selected with its (pre-renorm) prob; renormalize after the loop.
                     wp[off + best] = bestVal;
+                    denom += bestVal;
                 }
+
+                // Renormalize the selected weights to sum to 1 (norm_topk_prob path).
+                denom += 1e-20f;
+                for (int e = 0; e < numExperts; e++)
+                    if (wp[off + e] != 0f) wp[off + e] /= denom;
             }
         }
+    }
+
+    /// <summary>output += gate[..., expert] * expertOut, broadcasting the per-token scalar gate weight over
+    /// the hidden dim. Non-selected tokens have a 0 gate weight so they contribute nothing.</summary>
+    private static void AccumulateGatedExpert(Tensor output, Tensor expertOut, Tensor gateWeights, int expert,
+        int batch, int seqLen, int hiddenSize, int numExperts)
+    {
+        float* op = (float*)output.DataPointer;
+        float* ep = (float*)expertOut.DataPointer;
+        float* gp = (float*)gateWeights.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int s = 0; s < seqLen; s++)
+            {
+                float g = gp[(b * seqLen + s) * numExperts + expert];
+                if (g == 0f) continue;
+                int off = (b * seqLen + s) * hiddenSize;
+                for (int d = 0; d < hiddenSize; d++)
+                    op[off + d] += g * ep[off + d];
+            }
+        }
+    }
+
+    /// <summary>Copies <paramref name="count"/> floats from <paramref name="src"/> into <paramref name="dst"/>.</summary>
+    private static void CopyTensor(Tensor dst, Tensor src, int count)
+    {
+        long bytes = (long)count * sizeof(float);
+        Buffer.MemoryCopy((float*)src.DataPointer, (float*)dst.DataPointer, bytes, bytes);
     }
 }
 
