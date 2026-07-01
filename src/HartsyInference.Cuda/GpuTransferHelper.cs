@@ -135,6 +135,15 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Caches an op's output GPU pointer on the tensor, avoiding D2H transfer. Sets lazy callbacks: DataPointer access triggers D2H, Dispose frees GPU memory.</summary>
     public static void CacheActivation(Tensor tensor, ulong gpuPtr, nuint byteSize)
     {
+        // In-place op re-caching its own output (e.g. backend.Gelu(x, x) / AffineBroadcastLastDim(x, x, …)): the
+        // tensor already maps to its OLD device buffer. Drop that old pointer from the cached set WITHOUT freeing it
+        // here — the calling op's `finally FreeDevice(pInput)` then frees it exactly once (FreeDevice only skips
+        // pointers still in _cachedPointers). Leaving it would orphan the old buffer: no tensor maps to it, so
+        // neither Dispose nor FreeActivations nor GC ever reclaims it → a permanent per-op device-memory leak (this
+        // was the Wan full-res multi-step OOM; latent in every in-place backend op across LLM/Vision/Diffusion).
+        if (gpuPtr != 0 && _activationCache.TryGetValue(tensor, out (ulong gpuPtr, nuint bytes) prev) && prev.gpuPtr != gpuPtr)
+            _cachedPointers.Remove(prev.gpuPtr);
+
         // Do NOT touch tensor.DataPointer here: that would force the lazy host buffer to allocate (and zero) for
         // every GPU-resident activation, the exact host malloc+memset cost we are avoiding. The host buffer is
         // allocated only if/when CPU code actually reads the tensor, inside the sync callback below.
@@ -288,6 +297,37 @@ internal static unsafe class GpuTransferHelper
     public static void EvictAll()
     {
         FreeAllCached();
+    }
+
+    /// <summary>Frees only cached ACTIVATION device buffers; preloaded weights and weight-casts are kept. Call
+    /// between denoise steps to deterministically reclaim device memory held by activations that were neither read
+    /// back to host (which frees via the sync callback) nor explicitly disposed — those otherwise linger in the
+    /// cache until non-deterministic GC finalization and accumulate to OOM over multi-step diffusion. Safe because
+    /// the only cross-step state (the latent) lives on the host; anything still cached here is dead. The per-tensor
+    /// sync/dispose callbacks stay valid: they re-check <c>_activationCache</c> and no-op once the entry is gone.</summary>
+    public static void FreeActivations()
+    {
+        _context?.EnsureCurrent();
+        foreach (KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)> kv in _activationCache)
+        {
+            _cachedPointers.Remove(kv.Value.gpuPtr);
+            CudaMemory.FreeAsync(kv.Value.gpuPtr, _streamHandle);
+        }
+        _activationCache.Clear();
+
+        // Return pooled memory to the driver. cuMemFreeAsync (used by every activation/dispose free) hands memory
+        // back to the stream-ordered mempool, which RESERVES it (cuMemGetInfo counts it as used) until trimmed —
+        // otherwise the pool's high-water mark grows every op and multi-step diffusion OOMs even though the memory
+        // is logically free. SyncStreamsAndReleasePool only trims when the streaming weight cache is wired (it isn't
+        // for the video pipelines), so trim the default pool directly. Sync first so the queued async frees complete.
+        // Return pooled memory to the driver so it counts as free (cuMemFreeAsync only hands blocks back to the
+        // stream-ordered pool, which reserves them). Sync first so the queued async frees complete.
+        if (_context is not null && _streamHandle != 0)
+        {
+            CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
+            if (CudaDriverApi.cuDeviceGetDefaultMemPool(out nint pool, _context.DeviceOrdinal) == 0)
+                CudaDriverApi.cuMemPoolTrimTo(pool, 0);
+        }
     }
 
     /// <summary>Computes the byte size of a tensor's data. Uses <see cref="DType.ComputeByteCount"/> so quantized tensors (Q4_K, Q5_K, Q8_0, etc.) report their true on-disk byte count rather than <c>elementCount * 0</c>.</summary>

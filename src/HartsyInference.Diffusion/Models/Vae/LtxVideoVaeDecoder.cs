@@ -34,6 +34,9 @@ public sealed unsafe class LtxVideoVaeDecoder
     // norm_out timestep conditioning (decoder-level): embedder emits 2·lastChannel, plus scale_shift_table[2, C].
     private LtxVaeTimeEmbedder? _normOutTimeEmbedder;
     private Tensor? _normOutScaleShift;          // [2, lastChannel]
+    // Per-channel latent normalization stats (LTX trains the diffusion model on normalized latents:
+    // (raw − mean)/std). The decoder must un-normalize before decode: raw = latent·std + mean. [latentChannels] each.
+    private Tensor? _latentsMean, _latentsStd;
     // VALIDATION-PENDING: verify vs diffusers LTXPipeline 0.9.7 — timestep_scale_multiplier registered as 1000.0.
     private const float TimestepScaleMultiplier = 1000.0f;
 
@@ -128,6 +131,11 @@ public sealed unsafe class LtxVideoVaeDecoder
         }
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
+
+        // Latent normalization stats (optional — absent on synthetic tests). LTX names them
+        // per_channel_statistics.mean-of-means / std-of-means; the converter renames to latents_mean/std.
+        if (w.TryGetValue("latents_mean", out Tensor? lm)) _latentsMean = lm.DType == DType.F32 ? lm : lm.CastTo(DType.F32);
+        if (w.TryGetValue("latents_std", out Tensor? ls)) _latentsStd = ls.DType == DType.F32 ? ls : ls.CastTo(DType.F32);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -161,6 +169,10 @@ public sealed unsafe class LtxVideoVaeDecoder
         // PixArt embedders; the un-embedded scalar (not the embedding) is what flows between blocks upstream.
         float scaledTimestep = (decodeTimestep ?? 0f) * TimestepScaleMultiplier;
 
+        // Un-normalize: the diffusion model works in normalized latent space (raw−mean)/std, so
+        // raw = latent·std + mean per channel. In-place on the caller's latent (disposed right after decode).
+        Denormalize(latent);
+
         Tensor h = _convIn!.Forward(backend, latent);
 
         Tensor? midTemb = _midTimeEmbedder?.Embed(backend, scaledTimestep);
@@ -193,6 +205,26 @@ public sealed unsafe class LtxVideoVaeDecoder
         Tensor rgb = PixelUnshuffle(patched);
         patched.Dispose();
         return rgb;
+    }
+
+    /// <summary>Per-channel latent un-normalization (in-place): <c>latent[c] = latent[c]·std[c] + mean[c]</c>
+    /// over <c>[1, C, T, H, W]</c>. No-op when the checkpoint carries no stats (identity normalization).</summary>
+    private void Denormalize(Tensor latent)
+    {
+        if (_latentsMean is null || _latentsStd is null) return;
+        int b = (int)latent.Shape[0];
+        int c = (int)latent.Shape[1];
+        long spatial = latent.Shape.ElementCount / ((long)b * c);
+        float* lp = (float*)latent.DataPointer;
+        float* mean = (float*)_latentsMean.DataPointer;
+        float* std = (float*)_latentsStd.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+            for (int ci = 0; ci < c; ci++)
+            {
+                float m = mean[ci], s = std[ci];
+                long basePos = ((long)bi * c + ci) * spatial;
+                for (long i = 0; i < spatial; i++) lp[basePos + i] = lp[basePos + i] * s + m;
+            }
     }
 
     /// <summary>norm_out (shift, scale) conditioning: <c>temb [2·C]</c> + <c>scale_shift_table [2, C]</c> → per-channel <c>x·(1+scale) + shift</c>.</summary>

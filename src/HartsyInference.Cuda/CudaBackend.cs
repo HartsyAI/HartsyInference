@@ -3310,6 +3310,18 @@ public sealed class CudaBackend : IBackend
         GpuTransferHelper.FreeWeights(weights);
     }
 
+    public void FreeActivations()
+    {
+        _context.EnsureCurrent();
+        GpuTransferHelper.FreeActivations();
+    }
+
+    public long FreeMemoryBytes()
+    {
+        _context.EnsureCurrent();
+        return (long)_context.GetMemoryInfo().freeBytes;
+    }
+
     /// <summary>Frees all preloaded weight memory from GPU and clears the cache.</summary>
     public void FreePreloadedWeights()
     {

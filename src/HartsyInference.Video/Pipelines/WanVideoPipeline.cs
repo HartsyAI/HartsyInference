@@ -223,6 +223,10 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 Latent = latents,
                 LatentArch = LatentArchitecture.Wan,
             });
+            // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device, and any
+            // not read-back or disposed would linger until GC and accumulate to OOM over many steps. The latent is
+            // host-side, so nothing cross-step is lost.
+            Backend.FreeActivations();
         }
 
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);

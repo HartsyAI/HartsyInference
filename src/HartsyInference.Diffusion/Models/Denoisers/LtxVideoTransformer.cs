@@ -109,7 +109,10 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     /// <summary>PixArtAlphaTextProjection: <c>linear_2(gelu_tanh(linear_1(x)))</c>, T5 <c>[L, captionChannels] → [L, dim]</c>.</summary>
     private Tensor CaptionProject(IBackend backend, Tensor encoder)
     {
-        int l = (int)encoder.Shape[0];
+        // Encoder may arrive rank-3 [1, L, captionChannels] (CfgHelper.SliceBatchElement) — derive the row count
+        // from element-count / last-dim, NOT Shape[0] (which is the batch 1). Reading Shape[0] would collapse the
+        // caption to a single token and undersize the projection buffer (the Wan TextEmbed rank-3 bug class).
+        int l = (int)(encoder.ElementCount / encoder.Shape[encoder.Shape.Rank - 1]);
         int dim = _config.InnerDim;
         Tensor h1 = new Tensor(new TensorShape(l, dim), DType.F32);
         backend.Linear(h1, encoder, _capW1!, _capB1);

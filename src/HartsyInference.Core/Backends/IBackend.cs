@@ -943,6 +943,14 @@ public interface IBackend : IDisposable
     /// <summary>Frees specific weight tensors from accelerator memory. No-op on CPU backends. Call between pipeline phases to reclaim VRAM (e.g., free UNet weights before VAE decode).</summary>
     void FreeWeights(IEnumerable<Tensor> weights) { }
 
+    /// <summary>Frees cached activation device buffers while keeping preloaded weights. Backends that keep
+    /// activations GPU-resident (CUDA) override this so long multi-step pipelines can reclaim memory between steps;
+    /// the default is a no-op.</summary>
+    void FreeActivations() { }
+
+    /// <summary>Free device memory in bytes (0 if not a device backend). For diagnostics / adaptive tiling.</summary>
+    long FreeMemoryBytes() => 0;
+
     /// <summary>Pre-uploads weights into the backend's weight cache so subsequent ops hit cached device memory instead of re-uploading per call. No-op on backends without a weight cache; pair with <see cref="FreeWeights"/> at pipeline phase boundaries.</summary>
     void PreloadWeights(IEnumerable<Tensor> weights) { }
 

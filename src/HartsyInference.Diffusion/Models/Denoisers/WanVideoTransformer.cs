@@ -14,6 +14,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
     private int _disposed;
 
     private Tensor? _patchW2d, _patchB;        // [inner, patchVec], [inner]
+    private static int _fwdCounter;            // diagnostic: counts ForwardCore calls (VRAM logging)
     private Tensor? _projOutW, _projOutB;      // [out·pt·ph·pw, inner]
     private Tensor? _finalScaleShift;          // [2, inner]
     private Tensor? _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B;   // time_embedder
@@ -123,8 +124,12 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         }
 
         Tensor cur = hidden;
+        _fwdCounter++;
+        string? vramLog = Environment.GetEnvironmentVariable("HARTSY_WAN_VRAM");
         for (int i = 0; i < _blocks.Length; i++)
         {
+            if (vramLog is not null)
+                System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
                 imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null);
             cur.Dispose();

@@ -82,6 +82,9 @@ public class WanVideoGenerationTests
             umt5.LoadWeights(umt5W);
 
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            // WAN_NO_CACHE_CASTS=1 → dequant fp16 weights transiently per GEMM instead of caching the ~9.4 GB of
+            // BF16 casts (trades a re-cast per forward for headroom; needed if full-res peak sits near 24 GB).
+            if (Environment.GetEnvironmentVariable("WAN_NO_CACHE_CASTS") == "1") backend.CacheWeightCasts = false;
             (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
             double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
             // Env overrides let a tiny debug clip run on the 3060 (WAN_MIN_GB=10 WAN_W=320 WAN_H=192 WAN_FRAMES=9 WAN_STEPS=4).

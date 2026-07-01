@@ -155,6 +155,9 @@ public static class TestPaths
     {
         public static string SingleFile  => Resolve("LTX_VIDEO_PATH",        Path.Combine(ModelsDir, "Stable-Diffusion", "LtxVideo", "ltx-video-2b-v0.9.safetensors"));
         public static string T5XxlSource => Resolve("LTX_T5XXL_SOURCE",      Sd35.Medium);
+        /// <summary>Standalone T5-XXL encoder (fp8-scaled comfy layout, <c>encoder.block.*</c>/<c>shared.weight</c>);
+        /// preferred over the SD3.5-bundle extraction when present. Reuses the HiDream t5xxl file by default.</summary>
+        public static string T5XxlStandalone => Resolve("LTX_T5XXL_STANDALONE", Path.Combine(ModelsDir, "Stable-Diffusion", "HiDream", "t5xxl.safetensors"));
         public static string T5XxlSpiece => Tokenizers.T5XxlSpiece;
     }
 

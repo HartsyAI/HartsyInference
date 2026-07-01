@@ -86,8 +86,7 @@ public sealed unsafe class WanVideoBlock
         if (dbg != null) { WanVideoDebugDump.Dump($"{dbg}_scaleMsa", scaleMsa); WanVideoDebugDump.Dump($"{dbg}_gateMsa", gateMsa); }
 
         // 1. self-attn
-        Tensor n1 = LayerNorm(backend, hidden, null, null, s);
-        ApplyShiftScale(backend, n1, scaleMsa, shiftMsa, s, tokensPerGroup);
+        Tensor n1 = ApplyShiftScale(backend, LayerNorm(backend, hidden, null, null, s), scaleMsa, shiftMsa, s, tokensPerGroup);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_n1", n1);
         Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, s, s, selfAttnMask);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_attn1", attn1);
@@ -107,8 +106,7 @@ public sealed unsafe class WanVideoBlock
         postCrossAttnHook?.Invoke(h2);
 
         // 3. ffn
-        Tensor n3 = LayerNorm(backend, h2, null, null, s);
-        ApplyShiftScale(backend, n3, cScale, cShift, s, tokensPerGroup);
+        Tensor n3 = ApplyShiftScale(backend, LayerNorm(backend, h2, null, null, s), cScale, cShift, s, tokensPerGroup);
         Tensor ff = Ffn(backend, n3, s);
         if (dbg != null) WanVideoDebugDump.Dump($"{dbg}_ff", ff);
         n3.Dispose();
@@ -136,16 +134,16 @@ public sealed unsafe class WanVideoBlock
             rope.ApplyRotary(kn, cos, sin, _heads);
         }
 
-        Tensor qMh = ToBhsd(qn, sq); qn.Dispose();
-        Tensor kMh = ToBhsd(kn, sk); kn.Dispose();
-        Tensor vMh = ToBhsd(v, sk); v.Dispose();
+        Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
+        Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();
+        Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
         backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor flat = FromBhsd(attn, sq); attn.Dispose();
+        Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();
         Tensor outT = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(outT, flat, _o[idx]!, _oB[idx]);
         flat.Dispose();
         return outT;
@@ -163,7 +161,7 @@ public sealed unsafe class WanVideoBlock
 
         Tensor q = new Tensor(new TensorShape(sq, _dim), DType.F32); backend.Linear(q, qInput, _q[1]!, _qB[1]);
         Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq[1]!, _eps); q.Dispose();
-        Tensor qMh = ToBhsd(qn, sq); qn.Dispose();
+        Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
 
         Tensor textRows = imageContextLen > 0 ? SliceRows(encoder, imageContextLen, textLen) : encoder;
         Tensor flat = AttnBranch(backend, qMh, textRows, _k[1]!, _kB[1], _v[1]!, _vB[1], _nk[1]!, sq, textLen);
@@ -192,13 +190,13 @@ public sealed unsafe class WanVideoBlock
         Tensor k = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(k, kvRows, kW, kB);
         Tensor v = new Tensor(new TensorShape(sk, _dim), DType.F32); backend.Linear(v, kvRows, vW, vB);
         Tensor kn = new Tensor(k.Shape, DType.F32); backend.RmsNorm(kn, k, kNorm, _eps); k.Dispose();
-        Tensor kMh = ToBhsd(kn, sk); kn.Dispose();
-        Tensor vMh = ToBhsd(v, sk); v.Dispose();
+        Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();
+        Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
         backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, scale);
         kMh.Dispose(); vMh.Dispose();
-        Tensor flat = FromBhsd(attn, sq); attn.Dispose();
+        Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();
         return flat;
     }
 
@@ -255,24 +253,35 @@ public sealed unsafe class WanVideoBlock
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
         // No-affine (n1/n3): direct GPU op. Affine (n2): normalize on GPU then apply weight/bias as a broadcast
         // affine on GPU (backend.LayerNorm has no CUDA kernel, but LayerNormNoAffine + AffineBroadcastLastDim do,
-        // so we stay GPU-resident). weight/bias are [dim] = [1, dim] broadcast over the sequence.
-        backend.LayerNormNoAffine(o, x, _eps);
-        if (weight is not null)
-            backend.AffineBroadcastLastDim(o, o, weight, bias);
+        // so we stay GPU-resident). weight/bias are [dim] = [1, dim] broadcast over the sequence. The affine step
+        // must NOT be in-place: re-caching the same tensor orphans its old device buffer (FreeDevice skips cached
+        // pointers), leaking it — so normalize into a scratch tensor, then affine into the output.
+        if (weight is null)
+        {
+            backend.LayerNormNoAffine(o, x, _eps);
+            return o;
+        }
+        using Tensor normed = new Tensor(new TensorShape(s, _dim), DType.F32);
+        backend.LayerNormNoAffine(normed, x, _eps);
+        backend.AffineBroadcastLastDim(o, normed, weight, bias);
         return o;
     }
 
-    /// <summary>AdaLN modulate in place: <c>x = x·(1+scale) + shift</c>, scale/shift broadcast per group over the
-    /// last dim. G=1 (scalar timestep) is GPU-resident via <see cref="IBackend.AffineBroadcastLastDim"/> (pre-adding
-    /// 1 to scale on-GPU); the multi-group TI2V path keeps the CPU reference.</summary>
-    private void ApplyShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s, int tokensPerGroup)
+    /// <summary>AdaLN modulate: <c>out = x·(1+scale) + shift</c>, scale/shift broadcast per group over the last dim.
+    /// Consumes <paramref name="x"/> (disposes it) and returns the result. G=1 (scalar timestep) is GPU-resident via
+    /// <see cref="IBackend.AffineBroadcastLastDim"/> (pre-adding 1 to scale on-GPU) into a FRESH tensor — never
+    /// in-place, which would orphan/leak x's cached device buffer. The multi-group TI2V path keeps the CPU reference
+    /// (mutates x in place and returns it).</summary>
+    private Tensor ApplyShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s, int tokensPerGroup)
     {
         if (tokensPerGroup == s)   // G == 1: scale/shift are [1, dim] broadcast over all S tokens
         {
             using Tensor scaleP1 = new Tensor(scale.Shape, DType.F32);
             backend.AddScalar(scaleP1, scale, 1.0f);           // (1 + scale)
-            backend.AffineBroadcastLastDim(x, x, scaleP1, shift);   // x = x·(1+scale) + shift, in place
-            return;
+            Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+            backend.AffineBroadcastLastDim(o, x, scaleP1, shift);   // o = x·(1+scale) + shift  (non-in-place)
+            x.Dispose();
+            return o;
         }
         float* xp = (float*)x.DataPointer; float* sc = (float*)scale.DataPointer; float* sh = (float*)shift.DataPointer;
         for (int i = 0; i < s; i++)
@@ -280,6 +289,7 @@ public sealed unsafe class WanVideoBlock
             long g = (long)(i / tokensPerGroup) * _dim;
             for (int d = 0; d < _dim; d++) xp[i * _dim + d] = xp[i * _dim + d] * (1f + sc[g + d]) + sh[g + d];
         }
+        return x;
     }
 
     /// <summary>Gated residual: <c>out = residual + gate·value</c>, gate broadcast per group over the last dim.
@@ -322,23 +332,20 @@ public sealed unsafe class WanVideoBlock
         return o;
     }
 
-    private Tensor ToBhsd(Tensor x, int s)
+    // [s, dim] = [s, heads, headDim]  →  [1, heads, s, headDim]. GPU-resident via Permute0213 (explicit dims, so it
+    // reads the device buffer directly — no reshape / host sync).
+    private Tensor ToBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new Tensor(new TensorShape(1, _heads, s, _headDim), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int h = 0; h < _heads; h++)
-                Buffer.MemoryCopy(xp + (long)i * _dim + (long)h * _headDim, op + ((long)h * s + i) * _headDim, (long)_headDim * 4, (long)_headDim * 4);
+        backend.Permute0213(o, x, s, _heads, _headDim);   // [1,s,heads,hd] → [1,heads,s,hd]
         return o;
     }
 
-    private Tensor FromBhsd(Tensor x, int s)
+    // [1, heads, s, headDim]  →  [s, dim] = [s, heads, headDim]. GPU-resident via Permute0213 (inverse of ToBhsd).
+    private Tensor FromBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        for (int h = 0; h < _heads; h++)
-            for (int i = 0; i < s; i++)
-                Buffer.MemoryCopy(xp + ((long)h * s + i) * _headDim, op + (long)i * _dim + (long)h * _headDim, (long)_headDim * 4, (long)_headDim * 4);
+        backend.Permute0213(o, x, _heads, s, _headDim);   // [1,heads,s,hd] → [1,s,heads,hd]
         return o;
     }
 

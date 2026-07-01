@@ -129,6 +129,11 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(s, _latentChannels), seed);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
+        string? diagFile = Environment.GetEnvironmentVariable("LTX_DIAG_FILE");
+        bool dbg = diagFile is not null || Environment.GetEnvironmentVariable("LTX_DIAG") == "1";
+        void Diag(string m) { Logs.Info(m); if (diagFile is not null) File.AppendAllText(diagFile, m + "\n"); }
+        if (dbg) Diag($"[LTX-DIAG] promptEmbeds {Stat(promptEmbeds)} | negEmbeds {Stat(negativeEmbeds)} | initLatent {Stat(latents)}");
+
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
@@ -136,6 +141,8 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             float tEmb = t * 1000f;   // DiT timestep scaling (validation-gated)
             Tensor vCond = _transformer.Forward(Backend, latents, promptEmbeds, tEmb, (tLat, hLat, wLat), interp, null);
             Tensor vUncond = _transformer.Forward(Backend, latents, negativeEmbeds, tEmb, (tLat, hLat, wLat), interp, null);
+            if (dbg && (k == 0 || k == steps - 1))
+                Diag($"[LTX-DIAG] step {k}: t={t:F4} dt={dt:F4} tEmb={tEmb:F1} | vCond {Stat(vCond)} | vUncond {Stat(vUncond)} | diffL2={DiffL2(vCond, vUncond):F4} | latent {Stat(latents)}");
             LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
             vCond.Dispose();
             vUncond.Dispose();
@@ -201,4 +208,24 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
     }
 
     private static byte[] FrameToBytes(Tensor rgb, int frameIndex) => VideoRgbFrames.ExtractFrame(rgb, frameIndex);
+
+    /// <summary>Diagnostic: mean/std/min/max of a tensor (forces a host read — debug only).</summary>
+    private static string Stat(Tensor t)
+    {
+        long n = t.Shape.ElementCount;
+        float* p = (float*)t.DataPointer;
+        double sum = 0, sum2 = 0; float mn = float.MaxValue, mx = float.MinValue;
+        for (long i = 0; i < n; i++) { float v = p[i]; sum += v; sum2 += (double)v * v; if (v < mn) mn = v; if (v > mx) mx = v; }
+        double mean = sum / n, var = sum2 / n - mean * mean;
+        return $"[{t.Shape}] mean={mean:F4} std={Math.Sqrt(Math.Max(0, var)):F4} min={mn:F3} max={mx:F3}";
+    }
+
+    private static double DiffL2(Tensor a, Tensor b)
+    {
+        long n = a.Shape.ElementCount;
+        float* pa = (float*)a.DataPointer; float* pb = (float*)b.DataPointer;
+        double s = 0;
+        for (long i = 0; i < n; i++) { double d = pa[i] - pb[i]; s += d * d; }
+        return Math.Sqrt(s);
+    }
 }

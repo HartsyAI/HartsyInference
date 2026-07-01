@@ -22,6 +22,22 @@ public static unsafe class CfgHelper
         return slice;
     }
 
+    /// <summary>Extracts the first <paramref name="realLen"/> rows of batch element <paramref name="batchIdx"/> from a
+    /// right-padded <c>[B, fullSeqLen, hiddenSize]</c> tensor → <c>[1, realLen, hiddenSize]</c>. Drops the pad rows so
+    /// downstream cross-attention sees only real tokens (equivalent to masking the pad positions, which text-conditioned
+    /// DiTs require — attending unmasked padding dilutes the caption). F32 only.</summary>
+    public static Tensor SliceBatchElementPrefix(Tensor tensor, int batchIdx, int fullSeqLen, int realLen, int hiddenSize)
+    {
+        if (realLen <= 0 || realLen > fullSeqLen)
+            throw new ArgumentException($"realLen {realLen} must be in (0, {fullSeqLen}].", nameof(realLen));
+        Tensor slice = new Tensor(new TensorShape(1, realLen, hiddenSize), DType.F32);
+        float* src = (float*)tensor.DataPointer + (long)batchIdx * fullSeqLen * hiddenSize;
+        float* dst = (float*)slice.DataPointer;
+        long n = (long)realLen * hiddenSize;
+        for (long i = 0; i < n; i++) dst[i] = src[i];
+        return slice;
+    }
+
     /// <summary>Extracts a single element along the batch dimension of a 2-D tensor [B, dim] → [1, dim]. F32 only.</summary>
     public static Tensor SliceBatchElement1D(Tensor tensor, int batchIdx, int dim)
     {

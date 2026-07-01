@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using Xunit;
 using Xunit.Abstractions;
 using HartsyInference.Core.Tensors;
@@ -10,6 +11,7 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelHandler.CheckpointConverters;
 using HartsyInference.ModelHandler.SafeTensors;
+using HartsyInference.ModelHandler.TextEncoders;
 using HartsyInference.Tests.Common;
 using HartsyInference.Tokenizers;
 using HartsyInference.Video.Encoding;
@@ -30,9 +32,9 @@ public class LtxVideoGenerationTests
     public async Task LtxVideo09_Gpu_T2V_480p_ShortClip()
     {
         string ckpt = TestPaths.LtxVideo.SingleFile;
-        string t5Source = TestPaths.LtxVideo.T5XxlSource, spiece = TestPaths.LtxVideo.T5XxlSpiece;
+        string t5Standalone = TestPaths.LtxVideo.T5XxlStandalone, spiece = TestPaths.LtxVideo.T5XxlSpiece;
         if (!File.Exists(ckpt)) { _output.WriteLine($"SKIPPED: LTX-Video checkpoint not found: {ckpt} (set LTX_VIDEO_PATH)."); return; }
-        if (!File.Exists(t5Source)) { _output.WriteLine($"SKIPPED: T5-XXL source not found: {t5Source} (set LTX_T5XXL_SOURCE; default is the SD3.5 bundle)."); return; }
+        if (!File.Exists(t5Standalone)) { _output.WriteLine($"SKIPPED: standalone T5-XXL not found: {t5Standalone} (set LTX_T5XXL_STANDALONE)."); return; }
         if (!File.Exists(spiece)) { _output.WriteLine($"SKIPPED: T5-XXL SentencePiece not found: {spiece}."); return; }
         string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(LtxVideoGenerationTests).Assembly.Location)!, "Ptx");
         if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
@@ -44,15 +46,16 @@ public class LtxVideoGenerationTests
         using SafeTensorsLoader _ckpt = ckptLoader;
         _output.WriteLine($"  DiT {conv.Transformer.Count} keys, VAE {conv.Vae.Count} keys in {sw.ElapsedMilliseconds}ms");
 
-        _output.WriteLine($"[2/5] Extracting T5-XXL from {Path.GetFileName(t5Source)}...");
+        _output.WriteLine($"[2/5] Loading standalone T5-XXL from {Path.GetFileName(t5Standalone)}...");
         sw.Restart();
-        (Sd3CheckpointConverter.ConvertedWeights sd3Bundle, SafeTensorsLoader t5Loader) =
-            Sd3CheckpointConverter.LoadAndConvert(t5Source);
+        using SafeTensorsLoader t5Loader = new();
+        t5Loader.Load(t5Standalone);
         try
         {
-            if (sd3Bundle.T5.Count == 0)
-            { _output.WriteLine($"SKIPPED: no T5 weights bundled in {Path.GetFileName(t5Source)}."); return; }
-            _output.WriteLine($"  {sd3Bundle.T5.Count} T5 tensors in {sw.ElapsedMilliseconds}ms");
+            Dictionary<string, Tensor> t5Weights = TextEncoderQuantNormalizer.Normalize(t5Loader.GetAllTensors());
+            if (t5Weights.Count == 0)
+            { _output.WriteLine($"SKIPPED: no T5 weights in {Path.GetFileName(t5Standalone)}."); return; }
+            _output.WriteLine($"  {t5Weights.Count} T5 tensors in {sw.ElapsedMilliseconds}ms");
 
             LtxVideoConfig cfg = LtxVideoConfig.V09;
             using LtxVideoTransformer transformer = new(cfg);
@@ -60,7 +63,7 @@ public class LtxVideoGenerationTests
             LtxVideoVaeDecoder vae = new();
             vae.LoadWeights(CastWeightsToF32(conv.Vae));
             using T5TextEncoder t5 = new(T5TextEncoderConfig.Xxl);
-            t5.LoadWeights(sd3Bundle.T5);
+            t5.LoadWeights(t5Weights);
 
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
             (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
@@ -73,11 +76,15 @@ public class LtxVideoGenerationTests
             using T5Tokenizer tokenizer = new(spiece, maxLength: 128);
             int[] promptTokens = tokenizer.Encode("a cinematic shot of a cat walking through a sunlit garden, shallow depth of field");
             int[] negTokens = tokenizer.Encode("blurry, low quality, distorted, watermark");
-            Tensor batch = t5.Encode(backend,
-                [promptTokens, negTokens],
-                [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
-            Tensor promptEmbeds = CfgHelper.SliceBatchElement(batch, 0, promptTokens.Length, 4096);
-            Tensor negEmbeds = CfgHelper.SliceBatchElement(batch, 1, negTokens.Length, 4096);
+            int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
+            int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
+            Tensor batch = t5.Encode(backend, [promptTokens, negTokens], [promptMask, negMask]);
+            // Drop right-padding: feed cross-attention only the real (non-pad) T5 tokens. Attending the ~120 pad rows
+            // unmasked dilutes the caption (LTX/diffusers mask them); truncation is the equivalent for a prefix-padded seq.
+            int promptLen = promptMask.Sum(), negLen = negMask.Sum();
+            Tensor promptEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 0, promptTokens.Length, promptLen, 4096);
+            Tensor negEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 1, negTokens.Length, negLen, 4096);
+            _output.WriteLine($"  real tokens: prompt {promptLen}/{promptTokens.Length}, neg {negLen}/{negTokens.Length}");
             batch.Dispose();
             // Reclaim T5 VRAM before the DiT preload (the pipeline preloads the transformer itself).
             backend.Sync();
@@ -86,7 +93,8 @@ public class LtxVideoGenerationTests
 
             _output.WriteLine($"[4/5] Generating 25-frame 704x480 clip (NUMERIC OUTPUT VALIDATION-PENDING)...");
             LtxVideoPipeline pipeline = new(backend, transformer, vae, cfg);
-            TextToImageRequest req = new() { Prompt = "cat", Width = 704, Height = 480, Steps = 30, CfgScale = cfg.GuidanceScale, Seed = 42 };
+            int steps = int.TryParse(Environment.GetEnvironmentVariable("LTX_STEPS"), out int st) ? st : 30;
+            TextToImageRequest req = new() { Prompt = "cat", Width = 704, Height = 480, Steps = steps, CfgScale = cfg.GuidanceScale, Seed = 42 };
             string outDir = Path.Combine(TestPaths.OutputDir, $"ltx_video_{DateTime.Now:yyyyMMdd_HHmmss}");
             await new BmpSequenceEncoder().EncodeAsync(
                 pipeline.GenerateFramesAsync(promptEmbeds, negEmbeds, req, numFrames: 25, frameRate: 25,
@@ -100,7 +108,7 @@ public class LtxVideoGenerationTests
         }
         finally
         {
-            t5Loader.Dispose();
+            // t5Loader is a `using` declaration — disposed at scope exit.
         }
     }
 
