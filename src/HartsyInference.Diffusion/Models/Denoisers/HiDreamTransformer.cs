@@ -164,16 +164,8 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             throw new InvalidOperationException(
                 $"Expected {_doubleBlocks.Length + _singleBlocks.Length} Llama hidden layers (one per block), got {llamaHiddenLayers.Count}.");
 
-        // Debug: dump the transformer's raw inputs so a Python reference can be fed the IDENTICAL tensors.
-        HiDreamDebugDump.Dump("in_latent", latent);
-        HiDreamDebugDump.Dump("in_t5hidden", t5Hidden);
-        HiDreamDebugDump.Dump("in_llama0", llamaHiddenLayers[0]);
-        HiDreamDebugDump.Dump("in_pooled", pooledEmbeds);
-        if (HiDreamDebugDump.Enabled) HiDreamDebugDump.DumpScalar("in_timestep", timestep);
-
         // ── 1. Patchify and embed ──
         Tensor patched = PatchifyLatent(latent, batch, inChannels, patH, patW, _config.PatchSize);
-        HiDreamDebugDump.Dump("patched", patched);
         TensorShape embedShape = new TensorShape(batch, imgSeqLen, hidden);
         Tensor imgTokens = new Tensor(embedShape, DType.F32);
         backend.Linear(imgTokens, patched, _xEmbedWeight!, _xEmbedBias);
@@ -193,7 +185,6 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         {
             llamaProj[i] = ProjectCaption(backend, llamaHiddenLayers[i], _captionProjectionWeights![i]);
         }
-        HiDreamDebugDump.Dump("llama_proj_0", llamaProj[0]);
 
         Tensor t5Proj = ProjectCaption(backend, t5Hidden, _captionProjectionWeights![^1]);
         HiDreamDebugDump.Dump("t5_proj", t5Proj);
@@ -385,29 +376,24 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         backend.Linear(modParams, activated, _finalAdaLnWeight!, _finalAdaLnBias);
         activated.Dispose();
 
+        // GPU-resident final modulation: LayerNorm(no-affine) → norm*(1+scale)+shift, modParams split [shift, scale]
+        // (diffusers HiDreamImageOutEmbed order).
         Tensor normed = new Tensor(hidShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, dim);
+        backend.LayerNormNoAffine(normed, hidden, 1e-6f);
+
+        Tensor shift = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.SliceLastDim(shift, modParams, 0);
+        Tensor scale = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.SliceLastDim(scale, modParams, dim);
+        Tensor scalePlus1 = new Tensor(new TensorShape(batch, dim), DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        scale.Dispose();
 
         Tensor modulated = new Tensor(hidShape, DType.F32);
-        float* modPtr = (float*)modParams.DataPointer;
-        float* normPtr = (float*)normed.DataPointer;
-        float* modulatedPtr = (float*)modulated.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int modBase = b * dim * 2;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int vecOffset = (b * seqLen + s) * dim;
-                for (int d = 0; d < dim; d++)
-                {
-                    // Diffusers HiDreamImageOutEmbed order: [shift, scale]
-                    float shift = modPtr[modBase + d];
-                    float scale = modPtr[modBase + dim + d];
-                    modulatedPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
-                }
-            }
-        }
+        backend.AffineBroadcastLastDim(modulated, normed, scalePlus1, shift);
         normed.Dispose();
+        shift.Dispose();
+        scalePlus1.Dispose();
         modParams.Dispose();
 
         TensorShape outShape = new TensorShape(batch, seqLen, outDim);

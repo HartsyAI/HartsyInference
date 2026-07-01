@@ -34,7 +34,7 @@ public sealed class HiDreamGenerationTests
 
     [Fact]
     public void HiDream_I1_Dev_Gpu_1024_NoCfg() =>
-        RunGenerationTest("hidream_i1_dev_1024_nocfg", width: 1024, height: 1024, steps: 8, cfgScale: 1.0f);
+        RunGenerationTest("hidream_i1_dev_1024_nocfg", width: 1024, height: 1024, steps: 25, cfgScale: 1.0f);
 
     private void RunGenerationTest(string outputName, int width, int height, int steps, float cfgScale)
     {

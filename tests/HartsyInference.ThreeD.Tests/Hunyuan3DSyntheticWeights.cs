@@ -92,22 +92,37 @@ internal static unsafe class Hunyuan3DSyntheticWeights
 
     public static Dictionary<string, Tensor> BuildVae(Hunyuan3DConfig c)
     {
-        int vw = c.VaeWidth, fdim = 3 + 6 * c.FourierBands, mlp = 4 * vw;
+        int vw = c.VaeWidth, fdim = 3 * (2 * c.FourierBands + 1), mlp = 4 * vw, hd = vw / c.VaeNumHeads;
         Random r = new(33);
         Dictionary<string, Tensor> w = new()
         {
-            ["latent_proj.weight"] = T(r, vw, c.LatentChannels), ["latent_proj.bias"] = T(r, vw),
-            ["query_proj.weight"] = T(r, vw, fdim), ["query_proj.bias"] = T(r, vw),
-            ["out.weight"] = T(r, 1, vw), ["out.bias"] = T(r, 1),
+            ["post_kl.weight"] = T(r, vw, c.LatentChannels), ["post_kl.bias"] = T(r, vw),
         };
         for (int i = 0; i < c.VaeDepth; i++)
         {
-            string p = $"blocks.{i}";
-            foreach (string proj in new[] { "q", "k", "v", "o" })
-            { w[$"{p}.cross_attn.{proj}.weight"] = T(r, vw, vw); w[$"{p}.cross_attn.{proj}.bias"] = T(r, vw); }
-            w[$"{p}.mlp.fc1.weight"] = T(r, mlp, vw); w[$"{p}.mlp.fc1.bias"] = T(r, mlp);
-            w[$"{p}.mlp.fc2.weight"] = T(r, vw, mlp); w[$"{p}.mlp.fc2.bias"] = T(r, vw);
+            string p = $"transformer.resblocks.{i}";
+            w[$"{p}.ln_1.weight"] = Ones(vw); w[$"{p}.ln_1.bias"] = T(r, vw);
+            w[$"{p}.attn.c_qkv.weight"] = T(r, 3 * vw, vw);
+            w[$"{p}.attn.c_proj.weight"] = T(r, vw, vw); w[$"{p}.attn.c_proj.bias"] = T(r, vw);
+            w[$"{p}.attn.attention.q_norm.weight"] = Ones(hd); w[$"{p}.attn.attention.q_norm.bias"] = T(r, hd);
+            w[$"{p}.attn.attention.k_norm.weight"] = Ones(hd); w[$"{p}.attn.attention.k_norm.bias"] = T(r, hd);
+            w[$"{p}.ln_2.weight"] = Ones(vw); w[$"{p}.ln_2.bias"] = T(r, vw);
+            w[$"{p}.mlp.c_fc.weight"] = T(r, mlp, vw); w[$"{p}.mlp.c_fc.bias"] = T(r, mlp);
+            w[$"{p}.mlp.c_proj.weight"] = T(r, vw, mlp); w[$"{p}.mlp.c_proj.bias"] = T(r, vw);
         }
+        string g = "geo_decoder";
+        w[$"{g}.query_proj.weight"] = T(r, vw, fdim); w[$"{g}.query_proj.bias"] = T(r, vw);
+        string cd = $"{g}.cross_attn_decoder";
+        foreach (string ln in new[] { "ln_1", "ln_2", "ln_3" }) { w[$"{cd}.{ln}.weight"] = Ones(vw); w[$"{cd}.{ln}.bias"] = T(r, vw); }
+        w[$"{cd}.attn.c_q.weight"] = T(r, vw, vw);
+        w[$"{cd}.attn.c_kv.weight"] = T(r, 2 * vw, vw);
+        w[$"{cd}.attn.c_proj.weight"] = T(r, vw, vw); w[$"{cd}.attn.c_proj.bias"] = T(r, vw);
+        w[$"{cd}.attn.attention.q_norm.weight"] = Ones(hd); w[$"{cd}.attn.attention.q_norm.bias"] = T(r, hd);
+        w[$"{cd}.attn.attention.k_norm.weight"] = Ones(hd); w[$"{cd}.attn.attention.k_norm.bias"] = T(r, hd);
+        w[$"{cd}.mlp.c_fc.weight"] = T(r, mlp, vw); w[$"{cd}.mlp.c_fc.bias"] = T(r, mlp);
+        w[$"{cd}.mlp.c_proj.weight"] = T(r, vw, mlp); w[$"{cd}.mlp.c_proj.bias"] = T(r, vw);
+        w[$"{g}.ln_post.weight"] = Ones(vw); w[$"{g}.ln_post.bias"] = T(r, vw);
+        w[$"{g}.output_proj.weight"] = T(r, 1, vw); w[$"{g}.output_proj.bias"] = T(r, 1);
         return w;
     }
 
