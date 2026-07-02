@@ -174,6 +174,12 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _castF8Module;
     private readonly nint _castF8E4M3ToF16;
 
+    // ── FP8 Activation Quantization (native fp8 GEMM path) ───────────────
+    private readonly CudaModule _fp8QuantModule;
+    private readonly nint _fp8AbsMax;
+    private readonly nint _fp8AbsMaxFinalizeScale;
+    private readonly nint _fp8QuantF32ToE4M3;
+
     private readonly CudaModule _castBf16Module;
     private readonly nint _castBf16ToF32;
     private readonly nint _castF32ToBf16;
@@ -327,6 +333,12 @@ public sealed class CudaKernels : IDisposable
         _castF8Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "cast_f8e4m3_f16.ptx"));
         _castF8E4M3ToF16 = _castF8Module.GetFunction("cast_f8e4m3_to_f16");
         _castF16ToF8E4M3 = _castF8Module.GetFunction("cast_f16_to_f8e4m3");
+
+        // ── FP8 Activation Quantization ──────────────────────────────────
+        _fp8QuantModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "fp8_quant.ptx"));
+        _fp8AbsMax = _fp8QuantModule.GetFunction("absmax_f32");
+        _fp8AbsMaxFinalizeScale = _fp8QuantModule.GetFunction("absmax_finalize_scale");
+        _fp8QuantF32ToE4M3 = _fp8QuantModule.GetFunction("quant_f32_e4m3");
 
         // ── BF16 <-> F32 Cast ───────────────────────────────────────────
         _castBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "cast_bf16_f32.ptx"));
@@ -1641,6 +1653,37 @@ public sealed class CudaKernels : IDisposable
     public void LaunchCastF16ToF8E4M3(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_castF16ToF8E4M3, output, input, count, stream);
 
+    /// <summary>Block count the absmax pass-1 launches for <paramref name="count"/> elements; size the blockMax scratch buffer with this.</summary>
+    public static int Fp8AbsMaxBlockCount(int count) => Math.Min(1024, (count + 255) / 256);
+
+    /// <summary>Two-pass per-tensor absmax → writes the e4m3 DEQUANT scale (<c>amax/448</c>, or 1.0 for an all-zero
+    /// tensor) to <paramref name="scaleOut"/>[0] (device F32). <paramref name="blockMax"/> is scratch of
+    /// ≥ <see cref="Fp8AbsMaxBlockCount"/> floats. Fully async — the scale stays on-device for
+    /// CUBLASLT_MATMUL_DESC_B_SCALE_POINTER.</summary>
+    public unsafe void LaunchFp8AbsMaxScale(ulong x, ulong blockMax, ulong scaleOut, int count, nint stream)
+    {
+        uint blocks = (uint)Fp8AbsMaxBlockCount(count);
+        ulong xA = x, bmA = blockMax; uint nA = (uint)count;
+        void** args = stackalloc void*[3];
+        args[0] = &xA; args[1] = &bmA; args[2] = &nA;
+        CudaDriverApi.cuLaunchKernel(_fp8AbsMax, blocks, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        ulong scA = scaleOut; uint nbA = blocks;
+        void** args2 = stackalloc void*[3];
+        args2[0] = &bmA; args2[1] = &nbA; args2[2] = &scA;
+        CudaDriverApi.cuLaunchKernel(_fp8AbsMaxFinalizeScale, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args2, 0).ThrowOnError();
+    }
+
+    /// <summary>Quantizes F32 → e4m3fn: <c>out[i] = e4m3(x[i] · 448/amax)</c>, reading the dequant scale produced by
+    /// <see cref="LaunchFp8AbsMaxScale"/> from device memory (no host sync).</summary>
+    public unsafe void LaunchFp8QuantF32ToE4M3(ulong output, ulong input, ulong scale, int count, nint stream)
+    {
+        ulong iA = input, oA = output, sA = scale; uint nA = (uint)count;
+        void** args = stackalloc void*[4];
+        args[0] = &iA; args[1] = &oA; args[2] = &sA; args[3] = &nA;
+        uint gridDim = (uint)((count + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_fp8QuantF32ToE4M3, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Launches BF16 to F32 cast (lossless — BF16 is the upper 16 bits of F32). Input is 2 bytes/element, output is 4 bytes/element.</summary>
     public void LaunchCastBf16ToF32(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_castBf16ToF32, output, input, count, stream);
@@ -1759,6 +1802,7 @@ public sealed class CudaKernels : IDisposable
         _lmF32Module?.Dispose();
         _flashAttnF32Module?.Dispose();
         _castF8Module?.Dispose();
+        _fp8QuantModule?.Dispose();
         _castBf16Module?.Dispose();
         _dequantQ8_0Module?.Dispose();
         _dequantQ4_KModule?.Dispose();

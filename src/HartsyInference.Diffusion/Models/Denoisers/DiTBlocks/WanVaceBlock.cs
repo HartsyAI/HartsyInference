@@ -52,9 +52,13 @@ public sealed unsafe class WanVaceBlock
         {
             Tensor proj = new Tensor(new TensorShape(s, _dim), DType.F32);
             backend.Linear(proj, control, _projInW!, _projInB);
-            AddInPlace(proj, hidden);     // control = proj_in(control) + hidden
+            // control = proj_in(control) + hidden — GPU op into a fresh tensor (host-mutating the Linear output
+            // would stream-sync + evict it from the activation cache).
+            Tensor summed = new Tensor(proj.Shape, DType.F32);
+            backend.Add(summed, proj, hidden);
+            proj.Dispose();
             control.Dispose();
-            cur = proj;
+            cur = summed;
         }
 
         Tensor updated = _inner.Forward(backend, cur, encoder, temb, rope, cos, sin, tokensPerGroup);
@@ -63,12 +67,5 @@ public sealed unsafe class WanVaceBlock
         Tensor hint = new Tensor(new TensorShape(s, _dim), DType.F32);
         backend.Linear(hint, updated, _projOutW!, _projOutB);
         return (hint, updated);
-    }
-
-    private static void AddInPlace(Tensor acc, Tensor add)
-    {
-        long n = acc.Shape.ElementCount;
-        float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
-        for (long i = 0; i < n; i++) ap[i] += dp[i];
     }
 }

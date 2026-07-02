@@ -102,8 +102,8 @@ public sealed class HunyuanVideoVaeDecoder
         if (_convOut is not null) foreach (Tensor t in _convOut.EnumerateWeights()) yield return t;
     }
 
-    /// <summary>Decodes a raw VAE-space latent <c>[B, 16, T_lat, H_lat, W_lat]</c> (already divided by the scaling factor) → RGB <c>[B, 3, (T_lat−1)·4+1, H_lat·8, W_lat·8]</c> in [−1, 1].</summary>
-    public Tensor Decode(IBackend backend, Tensor latent)
+    /// <summary>Decodes a raw VAE-space latent <c>[B, 16, T_lat, H_lat, W_lat]</c> (already divided by the scaling factor) → RGB <c>[B, 3, (T_lat−1)·4+1, H_lat·8, W_lat·8]</c> in [−1, 1]. <paramref name="trimStages"/> keeps the per-stage memory-pool trim that bounds an UNTILED full-res decode's peak; <see cref="DecodeTiled"/> passes false — a tile's working set is small, and each trim costs a sync + multi-GB driver release/re-map.</summary>
+    public Tensor Decode(IBackend backend, Tensor latent, bool trimStages = true)
     {
         if (latent.Shape.Rank != 5 || (int)latent.Shape[1] != _config.LatentChannels)
             throw new ArgumentException(
@@ -123,7 +123,7 @@ public sealed class HunyuanVideoVaeDecoder
         // processed — which needs a stream sync. Without one, a full-res decode's pool grows to the SUM of every
         // intermediate (>24 GB at 512×320×25f) instead of the per-stage working set. Trim after each stage (sync +
         // cuMemPoolTrimTo, correctness-neutral, no-op off-CUDA) so peak stays bounded to one stage. See DecodeTiled.
-        backend.TrimMemoryPool();
+        if (trimStages) backend.TrimMemoryPool();
 
         int si = 0;
         foreach (UpStage stage in _stages)
@@ -143,7 +143,7 @@ public sealed class HunyuanVideoVaeDecoder
                 cur = up;
                 Stat(backend, $"up{si}.upsample", cur);
             }
-            backend.TrimMemoryPool();
+            if (trimStages) backend.TrimMemoryPool();
             si++;
         }
 
@@ -203,7 +203,7 @@ public sealed class HunyuanVideoVaeDecoder
                                 float* dst = tp + (((long)c * Tl + t) * th + y) * tw;
                                 for (int x = 0; x < tw; x++) dst[x] = src[x];
                             }
-                    rgb = Decode(backend, tileL);
+                    rgb = Decode(backend, tileL, trimStages: false);
                     backend.Sync();
                 }
 
@@ -217,43 +217,52 @@ public sealed class HunyuanVideoVaeDecoder
 
                 int tph = th * sf, tpw = tw * sf;
                 float* rp = (float*)rgb.DataPointer, op = (float*)outT.DataPointer;
+                // Separable feather weights precomputed per axis; blend iterates (c, t) outermost so both the tile
+                // read and the canvas write are row-sequential (the previous (y, x, c, t) order strided the whole
+                // canvas per pixel — cache-hostile on a 25-frame full-res canvas).
+                float[] wyA = new float[tph], wxA = new float[tpw];
+                for (int y = 0; y < tph; y++) wyA[y] = Feather(y, tph, blendPx, topEdge, botEdge);
+                for (int x = 0; x < tpw; x++) wxA[x] = Feather(x, tpw, blendPx, leftEdge, rightEdge);
                 for (int y = 0; y < tph; y++)
                 {
-                    float wy = Feather(y, tph, blendPx, topEdge, botEdge);
-                    int gy = i0 * sf + y;
-                    for (int x = 0; x < tpw; x++)
-                    {
-                        float wgt = wy * Feather(x, tpw, blendPx, leftEdge, rightEdge);
-                        int gx = j0 * sf + x;
-                        weight![(long)gy * Wpx + gx] += wgt;
-                        for (int c = 0; c < cout; c++)
-                            for (int t = 0; t < tout; t++)
-                                op[(((long)c * tout + t) * Hpx + gy) * Wpx + gx] +=
-                                    rp[(((long)c * tout + t) * tph + y) * tpw + x] * wgt;
-                    }
+                    long wRow = (long)(i0 * sf + y) * Wpx + j0 * sf;
+                    for (int x = 0; x < tpw; x++) weight![wRow + x] += wyA[y] * wxA[x];
                 }
+                for (int c = 0; c < cout; c++)
+                    for (int t = 0; t < tout; t++)
+                        for (int y = 0; y < tph; y++)
+                        {
+                            float wy = wyA[y];
+                            float* srcRow = rp + (((long)c * tout + t) * tph + y) * tpw;
+                            float* dstRow = op + (((long)c * tout + t) * Hpx + (i0 * sf + y)) * Wpx + j0 * sf;
+                            for (int x = 0; x < tpw; x++) dstRow[x] += srcRow[x] * (wy * wxA[x]);
+                        }
                 rgb.Dispose();
                 // The tile's rgb is now copied into the host canvas, so every activation from this tile's decode is
                 // dead. The decoder's ops (mid/resnet/upsample) leave some intermediates cached-but-undisposed (freed
                 // only at GC), and TrimMemoryPool can't reclaim those (the pool sees them as in-use) — so across many
-                // tiles they accumulate to OOM. FreeActivations clears the whole activation cache AND trims the pool,
-                // keeping peak flat at one tile's working set. Safe here because DecodeTiled is a terminal decode
-                // stage: the host latent/canvas aren't cached, and no caller-live activation crosses a tile boundary.
-                backend.FreeActivations();
+                // tiles they accumulate to OOM. FreeActivations clears the whole activation cache, keeping peak flat
+                // at one tile's working set. Safe here because DecodeTiled is a terminal decode stage: the host
+                // latent/canvas aren't cached, and no caller-live activation crosses a tile boundary. trimPool:false —
+                // tiles are identical, so the pool reservation is re-used; the single trim below returns it once.
+                backend.FreeActivations(trimPool: false);
             }
         }
+        backend.TrimMemoryPool();
 
         float* fop = (float*)outT!.DataPointer;
-        for (int gy = 0; gy < Hpx; gy++)
-            for (int gx = 0; gx < Wpx; gx++)
-            {
-                float wgt = weight![(long)gy * Wpx + gx];
-                if (wgt <= 0f) continue;
-                float inv = 1f / wgt;
-                for (int c = 0; c < cout; c++)
-                    for (int t = 0; t < tout; t++)
-                        fop[(((long)c * tout + t) * Hpx + gy) * Wpx + gx] *= inv;
-            }
+        for (int c = 0; c < cout; c++)
+            for (int t = 0; t < tout; t++)
+                for (int gy = 0; gy < Hpx; gy++)
+                {
+                    float* row = fop + (((long)c * tout + t) * Hpx + gy) * Wpx;
+                    long wRow = (long)gy * Wpx;
+                    for (int gx = 0; gx < Wpx; gx++)
+                    {
+                        float wgt = weight![wRow + gx];
+                        if (wgt > 0f) row[gx] *= 1f / wgt;
+                    }
+                }
         return outT;
     }
 

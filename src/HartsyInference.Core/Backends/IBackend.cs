@@ -1162,6 +1162,13 @@ public interface IBackend : IDisposable
     /// the default is a no-op.</summary>
     void FreeActivations() { }
 
+    /// <summary>As <see cref="FreeActivations()"/>, but with control over the memory-pool trim. Pass
+    /// <paramref name="trimPool"/>=false on hot per-step/per-tile cleanups: the freed blocks stay reserved in the
+    /// stream-ordered pool for immediate reuse, avoiding a multi-GB driver release + re-map every iteration
+    /// (persistent allocators reclaim the pool automatically via their OOM-retry if they ever need it). Use
+    /// <paramref name="trimPool"/>=true (or <see cref="TrimMemoryPool"/>) at pipeline stage transitions.</summary>
+    void FreeActivations(bool trimPool) => FreeActivations();
+
     /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache, so
     /// it is safe to call mid-computation (e.g. between VAE decode tiles) to cap peak memory. No-op on backends
     /// without a stream-ordered mempool.</summary>

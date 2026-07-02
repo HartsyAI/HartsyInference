@@ -113,7 +113,15 @@ public sealed unsafe class WanVaceTransformer : IDisposable
             int hintIdx = Array.IndexOf(_vaceLayers, i);
             if (hintIdx >= 0)
             {
-                AddScaled(cur, hints[hintIdx], scales[hintIdx]);
+                // GPU-resident hint add (Scale + Add into a fresh tensor) — a host loop here would stream-sync +
+                // evict the block output from the activation cache on every VACE layer.
+                Tensor scaled = new Tensor(hints[hintIdx].Shape, DType.F32);
+                backend.Scale(scaled, hints[hintIdx], scales[hintIdx]);
+                Tensor fused = new Tensor(cur.Shape, DType.F32);
+                backend.Add(fused, cur, scaled);
+                scaled.Dispose();
+                cur.Dispose();
+                cur = fused;
                 hints[hintIdx].Dispose();
                 hints[hintIdx] = null!;
             }
@@ -143,13 +151,6 @@ public sealed unsafe class WanVaceTransformer : IDisposable
         Buffer.MemoryCopy((float*)tokens.DataPointer, (float*)padded.DataPointer, (long)sc * dim * 4, (long)sc * dim * 4);
         tokens.Dispose();
         return padded;
-    }
-
-    private static void AddScaled(Tensor acc, Tensor add, float scale)
-    {
-        long n = acc.Shape.ElementCount;
-        float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
-        for (long i = 0; i < n; i++) ap[i] += dp[i] * scale;
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }

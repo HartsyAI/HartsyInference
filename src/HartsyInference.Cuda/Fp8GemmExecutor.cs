@@ -47,10 +47,12 @@ public sealed unsafe class Fp8GemmExecutor : IDisposable
     /// <list type="bullet">
     /// <item><description><paramref name="weight"/> — FP8 weight tensor, device pointer, shape [N, K], row-major.</description></item>
     /// <item><description><paramref name="input"/> — FP8 activation, device pointer, shape [M, K], row-major.</description></item>
-    /// <item><description><paramref name="outPtr"/> — F16 output, device pointer, shape [M, N], row-major.</description></item>
+    /// <item><description><paramref name="outPtr"/> — F16 (or F32 when <paramref name="outF32"/>) output, device pointer, shape [M, N], row-major.</description></item>
     /// <item><description><paramref name="weightScale"/> — Per-tensor weight scale (cuBLAS alpha). Pass 1.0f when the tensor has no scale.</description></item>
+    /// <item><description><paramref name="inputScaleDev"/> — Optional DEVICE pointer to one F32: the activation's per-tensor DEQUANT scale (<c>amax/448</c>, written by the absmax kernels). Wired to CUBLASLT_MATMUL_DESC_B_SCALE_POINTER so dynamic activation quantization needs no host sync. 0 = unscaled.</description></item>
     /// </list></summary>
-    public void Run(ulong weight, ulong input, ulong outPtr, int m, int n, int k, float weightScale, nint stream)
+    public void Run(ulong weight, ulong input, ulong outPtr, int m, int n, int k, float weightScale, nint stream,
+        ulong inputScaleDev = 0, bool outF32 = false)
     {
         if (!IsSupported)
         {
@@ -73,12 +75,20 @@ public sealed unsafe class Fp8GemmExecutor : IDisposable
                 matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(int)).ThrowOnError();
             CublasLtApi.cublasLtMatmulDescSetAttribute(
                 matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(int)).ThrowOnError();
+            if (inputScaleDev != 0)
+            {
+                // Per-tensor activation dequant scale, read by the GEMM from device memory.
+                ulong bScale = inputScaleDev;
+                CublasLtApi.cublasLtMatmulDescSetAttribute(
+                    matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bScale, (nuint)sizeof(ulong)).ThrowOnError();
+            }
 
             // weight: [N, K] fp8 transposed → operand A. input: [M, K] fp8 → operand B.
-            // Output C: [M, N] f16. Matches CudaBackend.Linear's CUBLAS_OP_T / CUBLAS_OP_N order.
+            // Output C: [M, N] f16/f32. Matches CudaBackend.Linear's CUBLAS_OP_T / CUBLAS_OP_N order.
+            int outType = outF32 ? CublasApi.CUDA_R_32F : CublasApi.CUDA_R_16F;
             CublasLtApi.cublasLtMatrixLayoutCreate(out layoutA, CublasApi.CUDA_R_8F_E4M3, (ulong)k, (ulong)n, k).ThrowOnError();
             CublasLtApi.cublasLtMatrixLayoutCreate(out layoutB, CublasApi.CUDA_R_8F_E4M3, (ulong)k, (ulong)m, k).ThrowOnError();
-            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutC, CublasApi.CUDA_R_16F, (ulong)n, (ulong)m, n).ThrowOnError();
+            CublasLtApi.cublasLtMatrixLayoutCreate(out layoutC, outType, (ulong)n, (ulong)m, n).ThrowOnError();
 
             float alpha = weightScale, beta = 0.0f;
             CublasLtApi.cublasLtMatmul(

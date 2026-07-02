@@ -489,13 +489,31 @@ public class WanVideoGenerationTests
 
             _output.WriteLine($"[gen] S2V {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}...");
             WanS2VPipeline pipeline = new(backend, transformer, audioEncoder, vae, cfg, encoder);
-            TextToImageRequest req = new() { Prompt = "s2v", Width = genW, Height = genH, Steps = genSteps, CfgScale = (float)EnvD("WAN_CFG", cfg.GuidanceScale), Seed = 42 };
-            (byte[][] frames, int w, int h, _) = pipeline.GenerateFromWaveform(promptEmbeds, negEmbeds, waveform, wav2vec2, req, genFrames, reference,
-                p =>
-                {
-                    (long cached, _, _) = backend.GetGpuCacheStats();
-                    _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms) free={backend.FreeMemoryBytes() >> 20}MB cached={cached >> 20}MB");
-                });
+            if (Env("WAN_S2V_NO_REF") == "1") reference = [];   // isolate the reference-token path when debugging
+
+            // WAN_CFG_SWEEP="3:0.7,5:1.0" runs one generation per cfg:rescale pair in THIS process (the GPU stays
+            // held throughout — chaining separate test processes loses the GPU to other tenants between runs).
+            string sweep = Env("WAN_CFG_SWEEP") ?? $"{EnvD("WAN_CFG", cfg.GuidanceScale)}:{cfg.CfgRescale}";
+            byte[][] frames = []; int w = genW, h = genH;
+            foreach (string pair in sweep.Split(','))
+            {
+                string[] parts = pair.Split(':');
+                float cfgScale = float.Parse(parts[0]);
+                float rescale = parts.Length > 1 ? float.Parse(parts[1]) : cfg.CfgRescale;
+                WanS2VPipeline sweepPipeline = rescale == cfg.CfgRescale ? pipeline
+                    : new WanS2VPipeline(backend, transformer, audioEncoder, vae, cfg with { CfgRescale = rescale }, encoder);
+                TextToImageRequest req = new() { Prompt = "s2v", Width = genW, Height = genH, Steps = genSteps, CfgScale = cfgScale, Seed = 42 };
+                _output.WriteLine($"[sweep] cfg={cfgScale} rescale={rescale}");
+                (frames, w, h, _) = sweepPipeline.GenerateFromWaveform(promptEmbeds, negEmbeds, waveform, wav2vec2, req, genFrames, reference,
+                    p =>
+                    {
+                        if (p.Step % 5 != 0 && p.Step != p.TotalSteps) return;
+                        (long cached, _, _) = backend.GetGpuCacheStats();
+                        _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms) free={backend.FreeMemoryBytes() >> 20}MB cached={cached >> 20}MB");
+                    });
+                double[] means = frames.Select(f => f.Average(b => (double)b)).ToArray();
+                _output.WriteLine($"[sweep] cfg={cfgScale} rescale={rescale} → means: {string.Join(" ", means.Select(m => m.ToString("F0")))}");
+            }
             promptEmbeds.Dispose(); negEmbeds.Dispose();
             AssertFramesCoherent(frames, w, h);
         }

@@ -104,8 +104,15 @@ public static class WanConfigDetector
         bool isAnimate = w.ContainsKey("pose_patch_embedding.weight")
                          && w.ContainsKey("face_adapter.fuser_blocks.0.linear1_kv.weight");
 
+        // S2V CFG defaults (empirical, 2026-07-02): the reference-faithful silence-audio uncond darkens the output
+        // ~linearly in (cfg−1) — cfg 5:0.7 collapses to black, cfg 2 with full renorm is the usable ceiling until the
+        // uncond path's numeric parity is settled. Text-only CFG (HARTSY_S2V_TEXT_CFG=1) is the interim for higher cfg.
+        float guidance = audioInjectLayers.Length > 0 ? 2.0f : 5.0f;
+        if (audioInjectLayers.Length > 0) cfgRescale = 1.0f;
+
         return new WanVideoConfig
         {
+            GuidanceScale = guidance,
             IsAnimate = isAnimate,
             VaceLayers = vaceLayers,
             VaceInChannels = vaceInChannels,

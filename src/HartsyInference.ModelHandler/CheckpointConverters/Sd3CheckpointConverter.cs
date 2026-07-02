@@ -378,6 +378,13 @@ public sealed class Sd3CheckpointConverter
         Buffer.MemoryCopy(src + chunkBytes, (void*)kWeight.DataPointer, chunkBytes, chunkBytes);
         Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vWeight.DataPointer, chunkBytes, chunkBytes);
 
+        // fp8_scaled bundles (SD3.5-Large fp8): the fused QKV carries a per-tensor scale that MUST follow the
+        // split halves — the raw fp8 bytes alone are real_value/scale, so dropping it runs every attention
+        // projection dozens of times too large → saturated softmax → pure-noise output.
+        qWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vWeight.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+
         output[$"{prefix}.{qName}.weight"] = qWeight;
         output[$"{prefix}.{kName}.weight"] = kWeight;
         output[$"{prefix}.{vName}.weight"] = vWeight;
@@ -399,6 +406,11 @@ public sealed class Sd3CheckpointConverter
         Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
         Buffer.MemoryCopy(src + chunkBytes, (void*)kBias.DataPointer, chunkBytes, chunkBytes);
         Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)vBias.DataPointer, chunkBytes, chunkBytes);
+
+        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
 
         output[$"{prefix}.{qName}.bias"] = qBias;
         output[$"{prefix}.{kName}.bias"] = kBias;
