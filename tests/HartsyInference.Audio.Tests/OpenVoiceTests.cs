@@ -75,8 +75,9 @@ public sealed unsafe class OpenVoiceTests
         {
             int inCh = c.UpsampleInitialChannel >> i, outCh = inCh >> 1;
             w[$"dec.ups.{i}.weight"] = F3(inCh, outCh, c.UpsampleKernelSizes[i]); w[$"dec.ups.{i}.bias"] = F1(outCh);
+            // ResBlock="2" → a single `convs` list (one conv per dilation), not the ResBlock1 `convs1`/`convs2` pair.
             for (int dn = 0; dn < c.ResBlockDilations[0].Count; dn++)
-            { w[$"dec.resblocks.{i}.convs1.{dn}.weight"] = F3(outCh, outCh, 3); w[$"dec.resblocks.{i}.convs1.{dn}.bias"] = F1(outCh); }
+            { w[$"dec.resblocks.{i}.convs.{dn}.weight"] = F3(outCh, outCh, 3); w[$"dec.resblocks.{i}.convs.{dn}.bias"] = F1(outCh); }
         }
         return w;
     }

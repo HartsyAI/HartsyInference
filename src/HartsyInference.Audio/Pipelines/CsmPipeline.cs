@@ -33,14 +33,18 @@ public sealed unsafe class CsmPipeline : IDisposable
         Stopwatch sw = Stopwatch.StartNew();
         uint rng = DeterministicRng.Seed(seed);
 
-        // Text context embeddings (the audio context is built up as frames are generated).
+        // Text context embeddings (the audio context is built up as frames are generated). The backbone KV cache
+        // persists across frames: the first step feeds the whole text prefix, later steps append just the previous
+        // frame's summed audio embedding (one row) — O(1) per frame instead of re-scanning the growing context.
         int bh = _cfg.Backbone.HiddenSize;
         List<int[]> frames = new(Math.Min(maxFrames, 256));
+        List<int[]> noFrames = new(0);
+        using CsmModel.DecodeSession session = _model.CreateSession(textTokenIds.Length + maxFrames + 4, 0, useCfg: false);
         for (int step = 0; step < maxFrames; step++)
         {
-            Tensor context = BuildContext(textTokenIds, frames, bh);
-            int[] frame = _model.GenerateFrame(backend, context, ref rng);
-            context.Dispose();
+            Tensor condNew = step == 0 ? BuildContext(textTokenIds, noFrames, bh) : _model.EmbedAudioFrame(frames[step - 1]);
+            int[] frame = _model.StepFrame(backend, session, condNew, ref rng);
+            condNew.Dispose();
             if (frame[0] == _cfg.AudioEosToken) break;
             frames.Add(frame);
         }

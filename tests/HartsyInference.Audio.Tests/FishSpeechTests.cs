@@ -92,23 +92,25 @@ public sealed unsafe class FishSpeechTests
     [Fact]
     public void FireflyDecoder_SyntheticForward_CodesToFiniteAudio()
     {
-        // Tiny firefly: FSQ levels [2,2] (vocab 4), 3 residual quantizers, quantizer upsample [2], SiLU gen
-        // upsample [2,2]. Channel bookkeeping is checkpoint-driven, so the weights below define the shapes.
-        int nq = 3;
+        // Tiny firefly: grouped-residual FSQ (levels [2,2] → vocab 4) with 2 groups over an 8-dim latent (groupDim 4),
+        // quantizer upsample [2], then the SiLU HiFi-GAN generator. The quantizer output channels (QuantizerInputDim)
+        // must equal the generator input channels (NumMels); nGroups (= numCodebooks) must divide QuantizerInputDim.
         int[] levels = [2, 2];
+        int nGroups = 2;   // FireflyDecoder passes numCodebooks as the quantizer's nGroups.
         using CpuBackend backend = new();
         FireflyConfig cfg = new()
         {
-            FsqLevels = levels, QuantizerUpsampleFactors = [2],
+            FsqLevels = levels, QuantizerUpsampleFactors = [2], QuantizerInputDim = 8, NumMels = 8,
             UpsampleInitialChannel = 16, UpsampleRates = [2, 2], UpsampleKernelSizes = [4, 4],
-            ResBlockKernelSizes = [3], ResBlockDilations = [[1]], SampleRate = 44_100,
+            ResBlockKernelSizes = [3], ResBlockDilations = [[1]],
+            PreConvKernelSize = 3, PostConvKernelSize = 3, SampleRate = 44_100,
         };
-        FireflyDecoder dec = new(nq, FishSpeechCodecTests.FsqVocab(levels), config: cfg);
-        dec.LoadWeights(FishSpeechCodecTests.FireflyWeights(levels, qUp: [2], genInit: 16, genRates: [2, 2], genKernels: [4, 4]));
+        FireflyDecoder dec = new(nGroups, FishSpeechCodecTests.FsqVocab(levels), config: cfg);
+        dec.LoadWeights(FishSpeechCodecTests.FireflyWeights(cfg, nGroups));
         int t = 3;
         int cbVocab = FishSpeechCodecTests.FsqVocab(levels);
-        int[,] codes = new int[nq, t];
-        for (int i = 0; i < nq; i++) for (int j = 0; j < t; j++) codes[i, j] = (i + j) % cbVocab;
+        int[,] codes = new int[nGroups, t];
+        for (int i = 0; i < nGroups; i++) for (int j = 0; j < t; j++) codes[i, j] = (i + j) % cbVocab;
         float[] audio = dec.Decode(backend, codes, t);
         Assert.True(audio.Length > 0);
         foreach (float s in audio) Assert.True(float.IsFinite(s));
@@ -121,39 +123,41 @@ public sealed unsafe class FishSpeechTests
         AttentionBias = false, TieWordEmbeddings = false,
     };
 
+    // Synthetic weights in the REAL fish-speech checkpoint layout that FishSpeechDualAr.LoadWeights consumes: fused
+    // `layers.{i}.attention.wqkv` (q|k|v) + `.wo`, `feed_forward.w1/w3/w2` (gate/up/down), `attention_norm`/`ffn_norm`,
+    // a bare `norm.weight` (slow final) and `fast_norm.weight` (fast final). LoadWeights remaps these to the split
+    // Qwen2 layout internally.
     private static Dictionary<string, Tensor> Weights(FishSpeechConfig c)
     {
-        int h = c.Backbone.HiddenSize;
+        int h = c.Backbone.HiddenSize, fh = c.Fast.HiddenSize;
         Dictionary<string, Tensor> w = new()
         {
             ["embeddings.weight"] = F2(c.TextVocab, h),
             ["codebook_embeddings.weight"] = F2(c.NumCodebooks * c.CodebookSize, h),
             ["output.weight"] = F2(c.TextVocab, h),
-            ["fast_embeddings.weight"] = F2(c.CodebookSize, c.Fast.HiddenSize),
-            ["fast_output.weight"] = F2(c.CodebookSize, c.Fast.HiddenSize),
-            ["fast_norm.weight"] = Ones(c.Fast.HiddenSize),
+            ["fast_embeddings.weight"] = F2(c.CodebookSize, fh),
+            ["fast_output.weight"] = F2(c.CodebookSize, fh),
+            ["fast_norm.weight"] = Ones(fh),   // fast final RMSNorm
+            ["norm.weight"] = Ones(h),         // slow final RMSNorm
         };
-        AddQwen(w, "model", c.Backbone);
-        AddQwen(w, "fast_model", c.Fast);
+        AddFishLlama(w, "layers", c.Backbone);
+        AddFishLlama(w, "fast_layers", c.Fast);
         return w;
     }
 
-    private static void AddQwen(Dictionary<string, Tensor> w, string prefix, Qwen2Config c)
+    private static void AddFishLlama(Dictionary<string, Tensor> w, string prefix, Qwen2Config c)
     {
-        int h = c.HiddenSize, kv = c.NumKeyValueHeads * c.HeadDim;
-        w[$"{prefix}.norm.weight"] = Ones(h);
+        int h = c.HiddenSize, q = c.NumAttentionHeads * c.HeadDim, kv = c.NumKeyValueHeads * c.HeadDim;
         for (int i = 0; i < c.NumHiddenLayers; i++)
         {
-            string p = $"{prefix}.layers.{i}";
-            w[$"{p}.input_layernorm.weight"] = Ones(h);
-            w[$"{p}.post_attention_layernorm.weight"] = Ones(h);
-            w[$"{p}.self_attn.q_proj.weight"] = F2(h, h);
-            w[$"{p}.self_attn.k_proj.weight"] = F2(kv, h);
-            w[$"{p}.self_attn.v_proj.weight"] = F2(kv, h);
-            w[$"{p}.self_attn.o_proj.weight"] = F2(h, h);
-            w[$"{p}.mlp.gate_proj.weight"] = F2(c.IntermediateSize, h);
-            w[$"{p}.mlp.up_proj.weight"] = F2(c.IntermediateSize, h);
-            w[$"{p}.mlp.down_proj.weight"] = F2(h, c.IntermediateSize);
+            string p = $"{prefix}.{i}";
+            w[$"{p}.attention.wqkv.weight"] = F2(q + 2 * kv, h);   // fused q|k|v
+            w[$"{p}.attention.wo.weight"] = F2(h, q);
+            w[$"{p}.feed_forward.w1.weight"] = F2(c.IntermediateSize, h);   // gate
+            w[$"{p}.feed_forward.w3.weight"] = F2(c.IntermediateSize, h);   // up
+            w[$"{p}.feed_forward.w2.weight"] = F2(h, c.IntermediateSize);   // down
+            w[$"{p}.attention_norm.weight"] = Ones(h);
+            w[$"{p}.ffn_norm.weight"] = Ones(h);
         }
     }
 

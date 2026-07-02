@@ -1,8 +1,8 @@
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.VibeVoice;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.SafeTensors;
 
@@ -147,8 +147,7 @@ public sealed class VibeVoicePipeline : IDisposable
         // Cap the cache at prompt + new-tokens budget, rounded up a little to absorb the
         // diffusion-head's per-frame embed appends (one per emitted speech_diffusion token).
         int cacheCap = Math.Min(_lmCfg.MaxPositionEmbeddings, promptLen + maxNewTokens + 16);
-        using StreamingKvCache kvCache = new(_lmCfg.NumHiddenLayers, batch: 1,
-            _lmCfg.NumKeyValueHeads, cacheCap, _lmCfg.HeadDim);
+        using IKvCache kvCache = _lm.CreateDecodeCache(cacheCap);
 
         // ── Prefill ─────────────────────────────────────────────────────────
         // 1. Encode each voice prompt through the acoustic VAE → [1, N_i, 64] mean latents.

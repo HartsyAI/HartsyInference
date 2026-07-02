@@ -41,9 +41,8 @@ internal sealed unsafe class SnacEncoder
         _strides = [.. cfg.EncoderRates];
         _depthwise = cfg.Depthwise;
 
-        if (cfg.AttnWindowSize is not null)
-            throw new NotSupportedException("SNAC LocalMHA (attn_window_size) encode is not wired yet (Phase 4 PARITY-TODO).");
-
+        // LocalMHA (attn_window_size, 32/44 kHz) is not wired yet — deferred to Forward so config/construction
+        // still work (the encode path throws only when actually invoked). Phase 4 PARITY-TODO.
         _stageUnits = new SnacResidualUnit[_nStages][];
         _downsampleSnakeAlpha = new Tensor?[_nStages];
         _downsampleW = new Tensor?[_nStages];
@@ -96,6 +95,8 @@ internal sealed unsafe class SnacEncoder
 
     public Tensor Forward(IBackend backend, Tensor pcm, int batch, int tPcm)
     {
+        if (_cfg.AttnWindowSize is not null)
+            throw new NotSupportedException("SNAC LocalMHA (attn_window_size) encode is not wired yet (Phase 4 PARITY-TODO).");
         if (_stemW is null) throw new InvalidOperationException("SnacEncoder weights not loaded.");
 
         int stemPad = _cfg.StemKernelSize / 2;

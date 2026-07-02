@@ -55,8 +55,8 @@ internal sealed unsafe class SnacDecoder
         _depthwise = cfg.Depthwise;
         _noise = cfg.Noise;
 
-        if (cfg.AttnWindowSize is not null)
-            throw new NotSupportedException("SNAC LocalMHA (attn_window_size) decode is not wired yet (Phase 4 PARITY-TODO).");
+        // LocalMHA (attn_window_size, 32/44 kHz) is not wired yet — deferred to Forward so config/construction still
+        // work (the decode path throws only when actually invoked). Phase 4 PARITY-TODO.
 
         // model.0 (depthwise) + model.1 (pointwise) push the blocks to model.2; plain decoder starts at model.1.
         _blockBase = _depthwise ? 2 : 1;
@@ -127,6 +127,8 @@ internal sealed unsafe class SnacDecoder
 
     public Tensor Forward(IBackend backend, Tensor latent, int batch, int tFrames)
     {
+        if (_cfg.AttnWindowSize is not null)
+            throw new NotSupportedException("SNAC LocalMHA (attn_window_size) decode is not wired yet (Phase 4 PARITY-TODO).");
         if (_initW is null) throw new InvalidOperationException("SnacDecoder weights not loaded.");
 
         int initPad = _cfg.StemKernelSize / 2;

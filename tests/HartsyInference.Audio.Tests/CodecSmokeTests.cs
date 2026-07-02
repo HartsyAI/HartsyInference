@@ -107,7 +107,7 @@ public sealed class CodecSmokeTests
     {
         BiCodecConfig c = BiCodecConfig.Default;
         int vocab = Fsq.VocabSize([.. c.GlobalFsqLevels]);
-        Assert.Equal(8 * 8 * 8 * 5 * 5, vocab);
+        Assert.Equal(4 * 4 * 4 * 4 * 4 * 4, vocab);   // reference fsq_levels [4,4,4,4,4,4] → 4096
     }
 
     [Fact]

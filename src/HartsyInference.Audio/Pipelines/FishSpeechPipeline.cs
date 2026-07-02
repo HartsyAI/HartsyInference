@@ -1,7 +1,7 @@
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.FishSpeech;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -40,7 +40,7 @@ public sealed unsafe class FishSpeechPipeline : IDisposable
         int n = _cfg.NumCodebooks;
         int max = maxFrames > 0 ? maxFrames : _cfg.MaxNewTokens;
         int cap = textTokens.Length + max + 2;
-        using StreamingKvCache slow = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, cap, _cfg.Backbone.HeadDim);
+        using IKvCache slow = _model.CreateSlowCache(cap);
         uint rng = DeterministicRng.Seed(seed);
 
         // Prefill text prompt (row-0 = text token, codebooks = 0).

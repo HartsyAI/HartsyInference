@@ -2,9 +2,9 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.FishSpeech;
 
@@ -106,9 +106,13 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         return outT;
     }
 
+    /// <summary>Allocates the slow-backbone decode cache (efficient <see cref="FixedKvCache"/>) for the AR loop;
+    /// pass it to <see cref="GenerateFrame"/> each step. Dispose when the utterance completes.</summary>
+    public IKvCache CreateSlowCache(int maxSeqLen) => _backbone.CreateDecodeCache(maxSeqLen);
+
     /// <summary>One frame: slow step → next semantic token + the 8 codebook tokens (fast depth AR).</summary>
     public (int Semantic, int[] Codes) GenerateFrame(IBackend backend, Tensor frameEmbed, int posStart,
-        StreamingKvCache slowCache, ref uint rng)
+        IKvCache slowCache, ref uint rng)
     {
         int h = HiddenSize, n = _cfg.NumCodebooks;
         // norm_fastlayer_input=False: the fast model consumes the PRE-final-norm slow hidden, while the slow head
@@ -128,7 +132,7 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         // Fast depth transformer over the codebook axis.
         int[] codes = new int[n];
         int fastDim = _cfg.Fast.HiddenSize;
-        using StreamingKvCache fastCache = new(_cfg.Fast.NumHiddenLayers, 1, _cfg.Fast.NumKeyValueHeads, n + 1, _cfg.Fast.HeadDim);
+        using IKvCache fastCache = _fast.CreateDecodeCache(n + 1);
         Tensor depthIn = ProjectSlow(backend, hidden, fastDim);   // step 0 input = slow hidden
         hidden.Dispose();
         for (int k = 0; k < n; k++)
@@ -162,7 +166,7 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
             using Tensor fe = EmbedFrame(semantics[i], codes[i]);
             Buffer.MemoryCopy((void*)fe.DataPointer, ep + (long)i * h, h * 4, h * 4);
         }
-        using StreamingKvCache cache = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, t + 1, _cfg.Backbone.HeadDim);
+        using IKvCache cache = _backbone.CreateDecodeCache(t + 1);
         Tensor hidden = _backbone.ForwardEmbeds(backend, embed, 1, t, 0, cache);
         embed.Dispose();
         Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _slowHead!, null, 1, t, h, _cfg.TextVocab);
@@ -183,7 +187,7 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         for (int i = 0; i < n - 1; i++)
             for (int c = 0; c < dim; c++) xp[(long)(i + 1) * dim + c] = fe[(long)prevCodes[i] * dim + c];
 
-        using StreamingKvCache cache = new(_cfg.Fast.NumHiddenLayers, 1, _cfg.Fast.NumKeyValueHeads, n + 1, _cfg.Fast.HeadDim);
+        using IKvCache cache = _fast.CreateDecodeCache(n + 1);
         Tensor hid = _fast.ForwardEmbeds(backend, x, 1, n, 0, cache, applyFinalNorm: false);
         x.Dispose();
         Tensor normed = new(hid.Shape, DType.F32);

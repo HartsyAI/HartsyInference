@@ -125,7 +125,7 @@ public static class CodecCatalog
             GetFrameRate: o => ((SnacModel)o).FrameRate,
             GetMaxCodebooks: o => ((SnacModel)o).NCodebooks,
             ExpectedSampleRate: 32_000,
-            ExpectedFrameRate: 62,           // 32000 / 512 = 62.5 → 62
+            ExpectedFrameRate: 83,           // 32000 / (2*3*8*8 = 384) = 83.3 → 83
             ExpectedMaxCodebooks: 4),
         new(
             Key: "snac_44khz",
@@ -135,8 +135,8 @@ public static class CodecCatalog
             GetFrameRate: o => ((SnacModel)o).FrameRate,
             GetMaxCodebooks: o => ((SnacModel)o).NCodebooks,
             ExpectedSampleRate: 44_100,
-            ExpectedFrameRate: 100,          // 44100 / (3*3*7*7) = 100
-            ExpectedMaxCodebooks: 3),
+            ExpectedFrameRate: 114,          // 44100 / (2*3*8*8 = 384) = 114.8 → 114
+            ExpectedMaxCodebooks: 4),
         new(
             Key: "wavtokenizer_24khz",
             Description: "WavTokenizer 24 kHz single-codebook",

@@ -2,9 +2,9 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Chatterbox;
 
@@ -108,7 +108,7 @@ public sealed unsafe class ChatterboxT3 : IDisposable
         AddEmbPlusPos(ep + (long)(condLen + tt) * h, _speechEmb!, _cfg.StartSpeechToken, _speechPos!, 0, h);
 
         int cacheCap = Math.Min(_cfg.T3.MaxPositionEmbeddings, prefill + maxNew + 4);
-        using StreamingKvCache cache = new(_cfg.T3.NumHiddenLayers, 1, _cfg.T3.NumKeyValueHeads, cacheCap, _cfg.T3.HeadDim);
+        using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
         uint rng = DeterministicRng.Seed(seed);
         List<int> tokens = new(maxNew);
         HashSet<int> seen = new();

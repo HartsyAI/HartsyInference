@@ -13,7 +13,7 @@ public sealed class PocketTtsTests
         Assert.Equal(24_000, c.SampleRate);
         Assert.Equal(26, c.Voices.Count);
         Assert.Contains("alba", c.Voices);
-        Assert.Equal(0, c.DModel);        // placeholder — reconcile from checkpoint
-        Assert.Equal(0, c.LatentDim);     // placeholder — reconcile from checkpoint
+        Assert.Equal(1_024, c.DModel);    // flow_lm.transformer.d_model (reconciled from checkpoint)
+        Assert.Equal(32, c.LatentDim);    // mimi.inner_dim continuous latent (reconciled from checkpoint)
     }
 }

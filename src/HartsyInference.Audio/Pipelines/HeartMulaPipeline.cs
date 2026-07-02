@@ -59,17 +59,38 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         bool useCfg = g != 1f;
         uint rng = DeterministicRng.Seed(seed);
         List<int[]> frames = new(maxFrames);
+        int bh = _cfg.Lm.Backbone.HiddenSize;
+        int prefixLen = (muqLmEmbed is not null ? 1 : 0) + lyricsTokens.Length;
+        List<int[]> noFrames = new(0);
 
-        // Context = optional MuQ style row + lyrics text embeddings; then AR audio frames re-fed.
+        // Persistent backbone KV cache(s): the first step feeds the whole conditioning prefix (MuQ style + lyrics),
+        // and every later step appends ONLY the previous frame's summed audio embedding (one row) — so the 3B
+        // backbone runs O(1) per frame instead of re-scanning the whole growing context (the old O(n²) hot path).
+        // Numerically identical to the stateless GenerateFrame path (same kernels, RoPE positions, causal key set).
+        // The uncond stream (CFG) is the audio frames only; its frame-0 context is a single zeroed row that must not
+        // persist, so it runs "standalone" (throwaway cache) — matching the stateless uncond positions exactly.
+        using CsmModel.DecodeSession session = _lm.CreateSession(prefixLen + maxFrames + 4, maxFrames + 4, useCfg);
         for (int f = 0; f < maxFrames; f++)
         {
             cancel.ThrowIfCancellationRequested();   // per-frame cancellation checkpoint (Stop Generation)
-            Tensor ctx = BuildContext(lyricsTokens, frames, muqLmEmbed);
-            // Unconditional context: strip lyrics + MuQ style, keep the AR audio frames only.
-            Tensor? uCtx = useCfg ? BuildContext(ReadOnlySpan<int>.Empty, frames, null) : null;
-            int[] codes = _lm.GenerateFrame(backend, ctx, ref rng, temp, tk, tp, useCfg ? g : 1f, uCtx);
-            ctx.Dispose();
-            uCtx?.Dispose();
+            Tensor condNew;
+            Tensor? uncondNew;
+            bool standalone;
+            if (f == 0)
+            {
+                condNew = BuildContext(lyricsTokens, noFrames, muqLmEmbed);
+                uncondNew = useCfg ? new Tensor(new TensorShape(1, 1, bh), DType.F32) : null;   // zeroed
+                standalone = true;
+            }
+            else
+            {
+                condNew = _lm.EmbedAudioFrame(frames[f - 1]);
+                uncondNew = useCfg ? _lm.EmbedAudioFrame(frames[f - 1]) : null;
+                standalone = false;
+            }
+            int[] codes = _lm.StepFrame(backend, session, condNew, ref rng, temp, tk, tp, useCfg ? g : 1f, uncondNew, standalone);
+            condNew.Dispose();
+            uncondNew?.Dispose();
             if (codes[0] >= _cfg.Lm.AudioEosToken) break;   // upstream stops on codebook-0 >= audio_eos_id
             frames.Add(codes);
             onFrame?.Invoke(frames.Count, maxFrames);       // progress: frames produced so far / cap
