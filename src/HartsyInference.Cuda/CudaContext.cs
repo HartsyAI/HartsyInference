@@ -105,6 +105,12 @@ public sealed class CudaContext : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnsureCurrent()
     {
+        // Tensor finalizers never call CUDA directly (see Tensor.PendingFinalizerGpuCleanup) — they queue their
+        // cleanup instead, since the finalizer thread racing the inference thread's stream enqueues is exactly
+        // the kind of cross-thread hazard EnsureCurrent is supposed to close. Drain unconditionally (not just on
+        // the cold re-bind path below) so pending frees get processed on every call from the thread that's
+        // actually driving this context right now, not just the first one after a thread switch.
+        HartsyInference.Core.Tensors.Tensor.DrainPendingFinalizerGpuCleanup();
         // Both checks matter: handle equality alone is unsafe because the CUDA
         // driver reuses primary-context handles after release+retain — a thread
         // could see a numerically-equal handle that's actually backed by a freshly

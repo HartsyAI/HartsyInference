@@ -49,7 +49,7 @@ public sealed unsafe class HeartCodecParityTests
         return (mx, corr);
     }
 
-    [Fact(Skip = "HeartCodec FlowMatching rewrite (RVQ+estimator+ScalarModel) parity pending — agent cut off by usage limit; see music-models-sweep memory")]
+    [Fact]
     [Trait("Category", "Integration")]
     public void HeartCodec_MatchesHeartlibReference()
     {
@@ -132,7 +132,7 @@ public sealed unsafe class HeartCodecParityTests
         int[,] fcodes = ReadCodes(fullCodes);
         Tensor initNoise = rd["full_init_noise"];   // [2tf, 256]
         Tensor wavRef = rd["full_wav"];             // [2, samples]
-        float[][] stereo = codec.DecodeStereo(backend, fcodes, 0);   // (Skipped) deterministic-noise variant pending
+        float[][] stereo = codec.DecodeSegmentStereo(backend, fcodes, initNoise);   // oracle's exact init noise
         int samples = (int)wavRef.Shape[1];
         float* wr = (float*)wavRef.DataPointer;
         for (int ch = 0; ch < 2; ch++)

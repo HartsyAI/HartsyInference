@@ -44,6 +44,11 @@ public static class EmbeddedTokenizerResources
     /// Consumed by <see cref="ChatterboxEnTokenizer"/>; embedded so Chatterbox TTS ships self-contained.</summary>
     public const string ChatterboxTokenizerJsonName = "HartsyInference.Tokenizers.Resources.chatterbox_tokenizer.json";
 
+    /// <summary>Canonical Qwen2.5/3 <c>tokenizer.json</c>. Consumed via <see cref="HfTokenizerJson"/> so the
+    /// family split regex reproduces HF ids exactly (the vocab+merges form misses merges like ":\n\n") — used
+    /// by the ACE-Step 1.5 text/lyric conditioning front-end.</summary>
+    public const string Qwen3TokenizerJsonName = "HartsyInference.Tokenizers.Resources.qwen3_tokenizer.json";
+
     private static readonly Assembly _asm = typeof(EmbeddedTokenizerResources).Assembly;
 
     /// <summary>Opens the named embedded resource. Caller owns the returned stream.</summary>
@@ -70,10 +75,15 @@ public static class EmbeddedTokenizerResources
     public static Stream OpenLlama3Merges() => Open(Llama3MergesName);
     public static Stream OpenLlama3TokenizerJson() => Open(Llama3TokenizerJsonName);
     public static Stream OpenChatterboxTokenizerJson() => Open(ChatterboxTokenizerJsonName);
+    public static Stream OpenQwen3TokenizerJson() => Open(Qwen3TokenizerJsonName);
 
     /// <summary>True when the canonical Llama-3 <c>tokenizer.json</c> is embedded in this build.</summary>
     public static bool HasLlama3TokenizerJson =>
         _asm.GetManifestResourceStream(Llama3TokenizerJsonName) is not null;
+
+    /// <summary>True when the canonical Qwen2.5/3 <c>tokenizer.json</c> is embedded in this build.</summary>
+    public static bool HasQwen3TokenizerJson =>
+        _asm.GetManifestResourceStream(Qwen3TokenizerJsonName) is not null;
 
     /// <summary>True when the Llama-3.1 tokenizer assets are embedded in this build. They ship separately
     /// from the source tree (the vocab.json is ~5 MB) and are included via a conditional csproj glob, so a

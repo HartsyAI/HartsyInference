@@ -14,6 +14,12 @@ public sealed unsafe class NativeBuffer : IDisposable
         Alignment = alignment;
         _pointer = (nint)NativeMemory.AlignedAlloc(byteLength, alignment);
         NativeMemory.Clear((void*)_pointer, byteLength);
+        // This managed wrapper is a few dozen bytes — the GC sees no reason to collect it under
+        // memory pressure even while it privately owns megabytes of unmanaged host RAM. Without this,
+        // any Tensor/NativeBuffer that isn't explicitly Dispose()d (left to the finalizer) can pile up
+        // unbounded host memory well past what a healthy managed heap would ever trigger a GC for —
+        // only the OS OOM-killer eventually notices. AddMemoryPressure makes the GC feel the real cost.
+        GC.AddMemoryPressure((long)byteLength);
     }
 
     /// <summary>Total size in bytes of the allocated buffer.</summary>
@@ -60,7 +66,10 @@ public sealed unsafe class NativeBuffer : IDisposable
     {
         nint ptr = Interlocked.Exchange(ref _pointer, 0);
         if (ptr != 0)
+        {
             NativeMemory.AlignedFree((void*)ptr);
+            GC.RemoveMemoryPressure((long)ByteLength);
+        }
         GC.SuppressFinalize(this);
     }
 
@@ -68,6 +77,9 @@ public sealed unsafe class NativeBuffer : IDisposable
     {
         nint ptr = Interlocked.Exchange(ref _pointer, 0);
         if (ptr != 0)
+        {
             NativeMemory.AlignedFree((void*)ptr);
+            GC.RemoveMemoryPressure((long)ByteLength);
+        }
     }
 }

@@ -13,7 +13,13 @@ import torch
 import torch.nn.functional as F
 
 torch.manual_seed(0)
-DIT = "/home/kalebbroo/.cache/hartsyinference/models/Comfy-Org--ace_step_1.5_ComfyUI_files/split_files/diffusion_models/acestep_v1.5_turbo.safetensors"
+import os
+DIT = os.environ.get("ACESTEP15_DIT", "/home/kalebbroo/Desktop/Projects/SwarmUI/Models/audio/music/AceStep/acestep_v1.5_turbo.safetensors")
+SILENCE = os.environ.get("ACESTEP15_SILENCE", "/home/kalebbroo/Desktop/Projects/SwarmUI/Models/audio/music/AceStep/acestep-v15-silence_latent.pt")
+def silence_rows(T):
+    """First T frames of the shipped silence latent as [1,T,64] (torch.load(...).transpose(1,2))."""
+    sl = torch.load(SILENCE, weights_only=True).float().transpose(1, 2)
+    return sl[:, :T, :].clone()
 
 # ---- config (configuration_acestep_v15.py defaults) ----
 HID = 2048; NLAY = 24; NHEAD = 16; NKV = 8; HD = 128; INTER = 6144
@@ -232,8 +238,8 @@ if __name__ == '__main__':
     print('cond shape', cond.shape, 'maxabs', cond.abs().max().item())
 
     noisy = torch.tensor(rng.randn(1, T, LATCH).astype(np.float32))
-    src = torch.tensor(rng.randn(1, T, LATCH).astype(np.float32))
-    chunk = torch.ones(1, T, LATCH)
+    src = silence_rows(T)
+    chunk = torch.full((1, T, LATCH), 2.0)
     context = torch.cat([src, chunk], dim=-1)
     t_val = 0.75; r_val = 0.75
     v = dit_velocity(noisy, context, cond, t_val, r_val)
@@ -254,8 +260,8 @@ def full_loop_dump():
     text_hidden = torch.tensor(rng.randn(1, T_text, TEXTDIM).astype(np.float32))
     lyric_hidden = torch.tensor(rng.randn(1, T_lyric, TEXTDIM).astype(np.float32))
     cond = condition_encode(text_hidden, lyric_hidden, None)
-    src = torch.tensor(rng.randn(1, T, LATCH).astype(np.float32))
-    chunk = torch.ones(1, T, LATCH)
+    src = silence_rows(T)
+    chunk = torch.full((1, T, LATCH), 2.0)
     context = torch.cat([src, chunk], dim=-1)
     noise = torch.tensor(rng.randn(1, T, LATCH).astype(np.float32))
     sched = [1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3]
@@ -285,3 +291,18 @@ def full_loop_dump():
     print('wrote loop_*.bin')
 
 full_loop_dump()
+
+def write_single_bins():
+    import struct
+    d = np.load('/tmp/ace15ref/ref.npz')
+    def w(name, arr):
+        arr = np.ascontiguousarray(arr.astype(np.float32))
+        with open(f'/tmp/ace15ref/{name}.bin', 'wb') as f:
+            f.write(struct.pack('<i', arr.ndim))
+            for s in arr.shape: f.write(struct.pack('<i', s))
+            f.write(arr.tobytes())
+    for k in ['text_hidden', 'lyric_hidden', 'cond', 'noisy', 'src', 'chunk', 'velocity']:
+        w(k, d[k])
+    print('wrote single-step bins')
+
+write_single_bins()

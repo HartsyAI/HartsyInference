@@ -66,40 +66,185 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
         return mono;
     }
 
-    /// <summary>Full flow-matching decode of a code grid <c>[8,T]</c> → 2-channel waveform <c>float[2][]</c>.</summary>
+    // Upstream detokenize constants (duration = 29.76 s fixed decode window).
+    private const double SegmentSeconds = 29.76;
+    private const int MinCodes = 372;      // int(29.76 * 12.5) — codes per window
+    private const int HopCodes = 320;      // 372 // 93 * 80
+    private const int OvlpCodes = 52;      // 372 - 320
+    private const int OvlpLatent = 104;    // 52 * 2 — latent frames carried as in-context
+    private const int SegLatent = 744;     // int(29.76 * 25) — latent frames per window
+
+    /// <summary>Full upstream <c>detokenize</c>: codes are tiled up to the fixed 372-frame window (the DiT is
+    /// trained at latent length 744), long grids decode as overlapping windows whose last 104 latent frames seed
+    /// the next window's in-context region, waveforms crossfade over the overlap, and the result is truncated to
+    /// the true code duration. → 2-channel waveform <c>float[2][]</c>.</summary>
     public float[][] DecodeStereo(IBackend backend, int[,] codes, int seed)
     {
         ThrowIfDisposed();
         if (_condW is null) throw new InvalidOperationException("HeartCodecDecoder weights not loaded.");
         int t = codes.GetLength(1);
         if (t <= 0) return [[], []];
+        long targetLen = (long)(t / 12.5 * SampleRate);
 
-        // 1. RVQ decode → [1,T,512]; cond_feature_emb Linear; nearest 2x → mu [1,2T,512].
-        Tensor rvq = _rvq.Decode(backend, codes, t);
-        Tensor cond = WhisperOps.ProjectLinear(backend, rvq, _condW!, _condB, 1, t, CondDim, CondDim);
-        rvq.Dispose();
-        int t2 = 2 * t;
-        Tensor mu = NearestUpsample2x(cond, t, CondDim);
-        cond.Dispose();
+        // Code tiling to the fixed window grid (cyclic repeat, as upstream's cat-doubling+truncate).
+        int[,] work = codes;
+        if (work.GetLength(1) < MinCodes) work = TileOrTruncate(work, MinCodes);
+        int len = work.GetLength(1);
+        if ((len - OvlpLatent) % HopCodes > 0)   // upstream quirk: modulo uses the latent overlap (104)
+        {
+            int lenCodes = (int)Math.Ceiling((len - OvlpCodes) / (double)HopCodes) * HopCodes + OvlpCodes;
+            if (lenCodes != len) work = TileOrTruncate(work, lenCodes);
+            len = lenCodes;
+        }
 
-        // 2. CFM Euler with CFG → latent [1, 2T, 256].
-        Tensor latent = SolveEulerCfg(backend, mu, t2, seed);
-        mu.Dispose();
+        int minWav = (int)(SegmentSeconds * SampleRate);      // 1428480 samples per window
+        int hopWav = minWav / 93 * 80;                        // 1228800
+        int ovlpWav = minWav - hopWav;                        // 199680
 
-        // 3. reshape [1,2T,256] → [2,2T,128] (channels), scalar-decode each.
-        Tensor chan = ReshapeToChannels(latent, t2);   // [2,128,2T] (already transposed to [B,C,L])
-        latent.Dispose();
-        Tensor wav = _scalar.Decode(backend, chan);     // [2,1,L]
-        chan.Dispose();
+        float[][]? output = null;
+        Tensor? prevLatent = null;
+        int windowIdx = 0;
+        try
+        {
+            for (int sinx = 0; sinx + HopCodes <= len; sinx += HopCodes, windowIdx++)
+            {
+                int wLen = Math.Min(MinCodes, len - sinx);    // python slice clamps; only differs on upstream's quirk lens
+                Tensor mu = BuildMu(backend, work, sinx, wLen);
+                int t2 = 2 * wLen;
 
-        int samples = (int)wav.Shape[2];
-        float[][] outp = [new float[samples], new float[samples]];
-        float* wp = (float*)wav.DataPointer;
-        for (int ch = 0; ch < 2; ch++)
-            for (int i = 0; i < samples; i++)
-                outp[ch][i] = wp[(long)ch * 1 * samples + i];
-        wav.Dispose();
+                Tensor? incontext = null;
+                int inLen = 0;
+                if (windowIdx > 0 && OvlpLatent > 0 && prevLatent is not null)
+                {
+                    // in-context = last 104 latent frames of the previous window, rest zeros.
+                    incontext = new Tensor(new TensorShape(1, t2, LatentDim), DType.F32);
+                    float* icp = (float*)incontext.DataPointer;
+                    float* plp = (float*)prevLatent.DataPointer;
+                    long tail = (long)(SegLatent - OvlpLatent) * LatentDim;
+                    Buffer.MemoryCopy(plp + tail, icp, (long)t2 * LatentDim * 4, (long)OvlpLatent * LatentDim * 4);
+                    inLen = OvlpLatent;
+                }
+
+                Tensor noise = GaussianNoise(1, t2, LatentDim, unchecked(seed + 7919 * windowIdx));
+                Tensor latent = SolveEulerCfg(backend, mu, t2, noise, incontext, inLen);
+                mu.Dispose(); noise.Dispose(); incontext?.Dispose();
+
+                float[][] segWav = ScalarDecodeStereo(backend, latent, t2);
+                prevLatent?.Dispose();
+                prevLatent = latent;
+
+                // truncate the segment to the fixed window length, then crossfade-append.
+                int segLen = Math.Min(segWav[0].Length, minWav);
+                if (output is null)
+                {
+                    output = [new float[segLen], new float[segLen]];
+                    for (int ch = 0; ch < 2; ch++) Array.Copy(segWav[ch], output[ch], segLen);
+                }
+                else
+                {
+                    output = CrossfadeAppend(output, segWav, segLen, ovlpWav);
+                }
+            }
+        }
+        finally
+        {
+            prevLatent?.Dispose();
+        }
+
+        if (output is null) return [[], []];
+        int finalLen = (int)Math.Min(targetLen, output[0].Length);
+        float[][] outp = [new float[finalLen], new float[finalLen]];
+        for (int ch = 0; ch < 2; ch++) Array.Copy(output[ch], outp[ch], finalLen);
         return outp;
+    }
+
+    /// <summary>Single-segment decode with caller-supplied init noise <c>[2T,256]</c> (no tiling/windowing) —
+    /// the deterministic path the parity test compares against the Python oracle.</summary>
+    public float[][] DecodeSegmentStereo(IBackend backend, int[,] codes, Tensor initNoise)
+    {
+        ThrowIfDisposed();
+        if (_condW is null) throw new InvalidOperationException("HeartCodecDecoder weights not loaded.");
+        int t = codes.GetLength(1);
+        int t2 = 2 * t;
+        Tensor mu = BuildMu(backend, codes, 0, t);
+        Tensor noise = new(new TensorShape(1, t2, LatentDim), DType.F32);
+        Buffer.MemoryCopy((void*)initNoise.DataPointer, (void*)noise.DataPointer, (long)t2 * LatentDim * 4, (long)t2 * LatentDim * 4);
+        Tensor latent = SolveEulerCfg(backend, mu, t2, noise, incontext: null, incontextLen: 0);
+        mu.Dispose(); noise.Dispose();
+        float[][] outp = ScalarDecodeStereo(backend, latent, t2);
+        latent.Dispose();
+        return outp;
+    }
+
+    // RVQ decode + cond_feature_emb + nearest 2x on a window [sinx, sinx+wLen) of the code grid → mu [1,2w,512].
+    private Tensor BuildMu(IBackend backend, int[,] codes, int sinx, int wLen)
+    {
+        int q = codes.GetLength(0);
+        int[,] win = codes;
+        if (sinx != 0 || wLen != codes.GetLength(1))
+        {
+            win = new int[q, wLen];
+            for (int i = 0; i < q; i++) for (int j = 0; j < wLen; j++) win[i, j] = codes[i, sinx + j];
+        }
+        Tensor rvq = _rvq.Decode(backend, win, wLen);
+        Tensor cond = WhisperOps.ProjectLinear(backend, rvq, _condW!, _condB, 1, wLen, CondDim, CondDim);
+        rvq.Dispose();
+        Tensor mu = NearestUpsample2x(cond, wLen, CondDim);
+        cond.Dispose();
+        return mu;
+    }
+
+    // [1,2T,256] latent → ScalarModel per channel → float[2][2T*1920]. Channels decode sequentially:
+    // the upsampling stack's activations peak at ~[1,64,2T·1920] floats, so batch-1 halves host memory.
+    private float[][] ScalarDecodeStereo(IBackend backend, Tensor latent, int t2)
+    {
+        Tensor chan = ReshapeToChannels(latent, t2);   // [2,128,2T]
+        int half = LatentDim / 2;
+        float[][] outp = new float[2][];
+        float* cp = (float*)chan.DataPointer;
+        for (int ch = 0; ch < 2; ch++)
+        {
+            Tensor one = new(new TensorShape(1, half, t2), DType.F32);
+            Buffer.MemoryCopy(cp + (long)ch * half * t2, (void*)one.DataPointer, (long)half * t2 * 4, (long)half * t2 * 4);
+            Tensor wav = _scalar.Decode(backend, one);   // [1,1,L]
+            one.Dispose();
+            int samples = (int)wav.Shape[2];
+            outp[ch] = new float[samples];
+            float* wp = (float*)wav.DataPointer;
+            for (int i = 0; i < samples; i++) outp[ch][i] = wp[i];
+            wav.Dispose();
+        }
+        chan.Dispose();
+        return outp;
+    }
+
+    // Cyclic repeat/truncate of the code grid to wantLen frames (upstream cat-doubling + slice).
+    private static int[,] TileOrTruncate(int[,] src, int wantLen)
+    {
+        int q = src.GetLength(0), t = src.GetLength(1);
+        int[,] outp = new int[q, wantLen];
+        for (int i = 0; i < q; i++) for (int j = 0; j < wantLen; j++) outp[i, j] = src[i, j % t];
+        return outp;
+    }
+
+    // Linear-ramp overlap-add (upstream ov_win), then append the non-overlapped remainder.
+    private static float[][] CrossfadeAppend(float[][] output, float[][] seg, int segLen, int ovlp)
+    {
+        int oldLen = output[0].Length;
+        int ov = Math.Min(ovlp, Math.Min(oldLen, segLen));
+        int newLen = oldLen + segLen - ov;
+        float[][] merged = [new float[newLen], new float[newLen]];
+        for (int ch = 0; ch < 2; ch++)
+        {
+            Array.Copy(output[ch], merged[ch], oldLen);
+            for (int i = 0; i < ov; i++)
+            {
+                float up = ov <= 1 ? 1f : i / (float)(ov - 1);   // np.linspace(0,1,ovlp)
+                merged[ch][oldLen - ov + i] = output[ch][oldLen - ov + i] * (1f - up) + seg[ch][i] * up;
+            }
+            Array.Copy(seg[ch], ov, merged[ch], oldLen, segLen - ov);
+        }
+        return merged;
     }
 
     // ── components exposed for parity testing ──
@@ -118,24 +263,45 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
 
     public Tensor ScalarDecode(IBackend backend, Tensor latentBCL) => _scalar.Decode(backend, latentBCL);
 
-    /// <summary>Fixed-Euler OT-CFM ODE (upstream <c>FlowMatching.solve_euler</c>) with classifier-free guidance.
-    /// Integrates from Gaussian noise (t=0) to the codec latent (t=1) in <see cref="NumSteps"/> steps. The
-    /// in-context region is empty (start segment), so the noise-blend term and incontext branch are zero.</summary>
+    /// <summary>Fixed-Euler OT-CFM ODE with self-seeded noise and no in-context region (start segment).</summary>
     public Tensor SolveEulerCfg(IBackend backend, Tensor mu, int t2, int seed)
     {
-        // initial latent noise x [1, 2T, 256].
-        Tensor x = GaussianNoise(1, t2, LatentDim, seed);
+        Tensor noise = GaussianNoise(1, t2, LatentDim, seed);
+        Tensor x = SolveEulerCfg(backend, mu, t2, noise, incontext: null, incontextLen: 0);
+        noise.Dispose();
+        return x;
+    }
 
-        // Estimator input = cat(x, incontext(0), mu) over the feature dim → [B, 2T, 256+256+512=1024].
-        // CFG batches it ×2 with mu replaced by zeros on the negative branch.
+    /// <summary>Fixed-Euler OT-CFM ODE (upstream <c>FlowMatching.solve_euler</c>) with classifier-free guidance.
+    /// Integrates from <paramref name="initNoise"/> (t=0) to the codec latent (t=1) in <see cref="NumSteps"/> steps.
+    /// When <paramref name="incontextLen"/> &gt; 0 the first rows are re-blended each step
+    /// (<c>x = (1-(1-1e-6)t)·noise + t·incontext</c>) and pinned to the in-context latents at the end.</summary>
+    public Tensor SolveEulerCfg(IBackend backend, Tensor mu, int t2, Tensor initNoise, Tensor? incontext, int incontextLen)
+    {
+        // x starts as a copy of the init noise; the original is kept for the per-step in-context blend.
+        Tensor x = new(new TensorShape(1, t2, LatentDim), DType.F32);
+        Buffer.MemoryCopy((void*)initNoise.DataPointer, (void*)x.DataPointer, (long)t2 * LatentDim * 4, (long)t2 * LatentDim * 4);
+
+        // Estimator input = cat(x, incontext, mu) over the feature dim → [B, 2T, 256+256+512=1024].
+        // CFG batches it ×2 with mu replaced by zeros on the negative branch (incontext kept on both).
         int inCh = 2 * LatentDim + CondDim;
         float dt = 1f / NumSteps;
         float tcur = 0f;
         float* xp = (float*)x.DataPointer;
+        float* np = (float*)initNoise.DataPointer;
         float* mup = (float*)mu.DataPointer;
+        float* icp = incontext is not null ? (float*)incontext.DataPointer : null;
 
         for (int step = 0; step < NumSteps; step++)
         {
+            // Progressive noise→in-context blend of the pinned region (before the velocity eval).
+            for (int ti = 0; ti < incontextLen; ti++)
+            {
+                long o = (long)ti * LatentDim;
+                float a = 1f - (1f - 1e-6f) * tcur;
+                for (int c = 0; c < LatentDim; c++) xp[o + c] = a * np[o + c] + tcur * icp![o + c];
+            }
+
             // Build CFG input [2, 2T, 1024]: row0 = uncond (mu=0), row1 = cond (mu).
             Tensor input = new(new TensorShape(2, t2, inCh), DType.F32);
             float* ip = (float*)input.DataPointer;
@@ -145,13 +311,13 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
                 long muo = (long)ti * CondDim;
                 // uncond row (batch 0).
                 long b0 = ((long)0 * t2 + ti) * inCh;
-                for (int c = 0; c < LatentDim; c++) ip[b0 + c] = xp[xo + c];           // x
-                for (int c = 0; c < LatentDim; c++) ip[b0 + LatentDim + c] = 0f;       // incontext
-                for (int c = 0; c < CondDim; c++) ip[b0 + 2 * LatentDim + c] = 0f;     // mu zeroed
+                for (int c = 0; c < LatentDim; c++) ip[b0 + c] = xp[xo + c];                                   // x
+                for (int c = 0; c < LatentDim; c++) ip[b0 + LatentDim + c] = icp is null ? 0f : icp[xo + c];   // incontext
+                for (int c = 0; c < CondDim; c++) ip[b0 + 2 * LatentDim + c] = 0f;                             // mu zeroed
                 // cond row (batch 1).
                 long b1 = ((long)1 * t2 + ti) * inCh;
                 for (int c = 0; c < LatentDim; c++) ip[b1 + c] = xp[xo + c];
-                for (int c = 0; c < LatentDim; c++) ip[b1 + LatentDim + c] = 0f;
+                for (int c = 0; c < LatentDim; c++) ip[b1 + LatentDim + c] = icp is null ? 0f : icp[xo + c];
                 for (int c = 0; c < CondDim; c++) ip[b1 + 2 * LatentDim + c] = mup[muo + c];
             }
 
@@ -173,6 +339,13 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
             }
             dphi.Dispose();
             tcur += dt;
+        }
+
+        // Pin the in-context region to the previous window's latents (upstream post-solve assignment).
+        for (int ti = 0; ti < incontextLen; ti++)
+        {
+            long o = (long)ti * LatentDim;
+            for (int c = 0; c < LatentDim; c++) xp[o + c] = icp![o + c];
         }
         return x;   // [1, 2T, 256]
     }

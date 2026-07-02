@@ -38,17 +38,19 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     public void LoadCodecWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "") =>
         _codec.LoadWeights(w, prefix);
 
-    /// <summary>Generates the 8-codebook grid <c>[NumCodebooks, T]</c> from lyrics token ids (the audio EOS
-    /// frame stops generation), optionally prefixed with a MuQ style-conditioning embedding already projected
-    /// into the LM hidden (<c>[1, hiddenSize]</c>, from <see cref="MuqEmbedder.ProjectToLmHidden"/>).
+    /// <summary>Generates the 8-codebook grid <c>[NumCodebooks, T]</c> from the upstream prompt layout
+    /// <c>[tags, MuQ row, lyrics]</c>. <paramref name="tagsTokens"/> is the tokenized (BOS-wrapped)
+    /// <c>&lt;tag&gt;…&lt;/tag&gt;</c> genre string; the MuQ style row is ALWAYS injected between tags and lyrics
+    /// (<c>muq_linear(muqEmbed ?? zeros)</c> — zeros = the trained no-reference default). Generation stops when
+    /// any codebook reaches the audio EOS.
     /// <para>The generation params default to the config (<see cref="HeartMulaConfig.Temperature"/> 1.0,
     /// <see cref="HeartMulaConfig.TopK"/> 50, <see cref="HeartMulaConfig.TopP"/> 1.0) but are exposed per-call.
     /// Classifier-free guidance (<paramref name="cfgScale"/>, default <see cref="HeartMulaConfig.CfgScale"/> 1.5)
-    /// re-runs the LM on an unconditional context (no lyrics/style, same AR audio frames) and blends logits;
-    /// pass 1.0 to disable.</para></summary>
+    /// runs a parallel stream whose prompt rows are all the learned <c>unconditional_text_embedding</c> (same
+    /// length/positions as the real prompt; audio frames shared) and blends logits; pass 1.0 to disable.</para></summary>
     public int[,] GenerateCodes(IBackend backend, ReadOnlySpan<int> lyricsTokens, int maxFrames, int seed = 0,
-        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null,
-        CancellationToken cancel = default, Action<int, int>? onFrame = null)
+        Tensor? muqEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null,
+        CancellationToken cancel = default, Action<int, int>? onFrame = null, ReadOnlySpan<int> tagsTokens = default)
     {
         ThrowIfDisposed();
         int nb = _cfg.Lm.NumCodebooks;
@@ -56,42 +58,39 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         int tk = topK ?? _cfg.TopK;
         float tp = topP ?? _cfg.TopP;
         float g = cfgScale ?? _cfg.CfgScale;
-        bool useCfg = g != 1f;
+        bool useCfg = g != 1f && _lm.HasMulaConditioning;
         uint rng = DeterministicRng.Seed(seed);
         List<int[]> frames = new(maxFrames);
-        int bh = _cfg.Lm.Backbone.HiddenSize;
-        int prefixLen = (muqLmEmbed is not null ? 1 : 0) + lyricsTokens.Length;
-        List<int[]> noFrames = new(0);
+        bool hasMuqRow = _lm.HasMulaConditioning;   // upstream always has the row; skip only for legacy checkpoints
+        int prefixLen = tagsTokens.Length + (hasMuqRow ? 1 : 0) + lyricsTokens.Length;
 
-        // Persistent backbone KV cache(s): the first step feeds the whole conditioning prefix (MuQ style + lyrics),
+        // Persistent backbone KV cache(s): the first step feeds the whole conditioning prefix (tags + MuQ + lyrics),
         // and every later step appends ONLY the previous frame's summed audio embedding (one row) — so the 3B
         // backbone runs O(1) per frame instead of re-scanning the whole growing context (the old O(n²) hot path).
-        // Numerically identical to the stateless GenerateFrame path (same kernels, RoPE positions, causal key set).
-        // The uncond stream (CFG) is the audio frames only; its frame-0 context is a single zeroed row that must not
-        // persist, so it runs "standalone" (throwaway cache) — matching the stateless uncond positions exactly.
-        using CsmModel.DecodeSession session = _lm.CreateSession(prefixLen + maxFrames + 4, maxFrames + 4, useCfg);
+        // The uncond stream mirrors upstream CFG exactly: same prompt length/positions, every prompt row replaced
+        // by the learned unconditional_text_embedding, audio frames appended identically to both streams.
+        using CsmModel.DecodeSession session = _lm.CreateSession(prefixLen + maxFrames + 4, prefixLen + maxFrames + 4, useCfg);
         for (int f = 0; f < maxFrames; f++)
         {
             cancel.ThrowIfCancellationRequested();   // per-frame cancellation checkpoint (Stop Generation)
             Tensor condNew;
             Tensor? uncondNew;
-            bool standalone;
             if (f == 0)
             {
-                condNew = BuildContext(lyricsTokens, noFrames, muqLmEmbed);
-                uncondNew = useCfg ? new Tensor(new TensorShape(1, 1, bh), DType.F32) : null;   // zeroed
-                standalone = true;
+                condNew = BuildPrompt(tagsTokens, lyricsTokens, muqEmbed, hasMuqRow);
+                uncondNew = useCfg ? _lm.UncondTextRows(prefixLen) : null;
             }
             else
             {
                 condNew = _lm.EmbedAudioFrame(frames[f - 1]);
                 uncondNew = useCfg ? _lm.EmbedAudioFrame(frames[f - 1]) : null;
-                standalone = false;
             }
-            int[] codes = _lm.StepFrame(backend, session, condNew, ref rng, temp, tk, tp, useCfg ? g : 1f, uncondNew, standalone);
+            int[] codes = _lm.StepFrame(backend, session, condNew, ref rng, temp, tk, tp, useCfg ? g : 1f, uncondNew, uncondStandalone: false);
             condNew.Dispose();
             uncondNew?.Dispose();
-            if (codes[0] >= _cfg.Lm.AudioEosToken) break;   // upstream stops on codebook-0 >= audio_eos_id
+            bool eos = false;   // upstream stops when ANY codebook value >= audio_eos_id
+            for (int cb = 0; cb < codes.Length; cb++) if (codes[cb] >= _cfg.Lm.AudioEosToken) { eos = true; break; }
+            if (eos) break;
             frames.Add(codes);
             onFrame?.Invoke(frames.Count, maxFrames);       // progress: frames produced so far / cap
         }
@@ -103,18 +102,45 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         return grid;
     }
 
-    /// <summary>End-to-end: lyrics tokens → CSM AR codes (8 codebooks) → HeartCodec flow-matching decode →
-    /// 48 kHz mono waveform. <paramref name="muqLmEmbed"/> is the optional MuQ style conditioning projected
-    /// into the LM hidden. Requires both the LM and codec weights to be loaded.</summary>
+    /// <summary>End-to-end: tags + lyrics tokens → CSM AR codes (8 codebooks) → HeartCodec flow-matching decode →
+    /// 48 kHz mono waveform. <paramref name="muqEmbed"/> is the optional raw MuQ style embedding (<c>[muqDim]</c>);
+    /// null uses the trained zero-reference default. Requires both the LM and codec weights to be loaded.</summary>
     public float[] Generate(IBackend backend, ReadOnlySpan<int> lyricsTokens, int maxFrames, int seed = 0,
-        Tensor? muqLmEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null,
-        CancellationToken cancel = default, Action<int, int>? onFrame = null)
+        Tensor? muqEmbed = null, float? temperature = null, int? topK = null, float? topP = null, float? cfgScale = null,
+        CancellationToken cancel = default, Action<int, int>? onFrame = null, ReadOnlySpan<int> tagsTokens = default)
     {
         ThrowIfDisposed();
-        int[,] codes = GenerateCodes(backend, lyricsTokens, maxFrames, seed, muqLmEmbed, temperature, topK, topP, cfgScale, cancel, onFrame);
+        int[,] codes = GenerateCodes(backend, lyricsTokens, maxFrames, seed, muqEmbed, temperature, topK, topP, cfgScale, cancel, onFrame, tagsTokens);
         if (codes.GetLength(1) == 0) return [];
         cancel.ThrowIfCancellationRequested();   // don't start the (cheaper) codec decode if already cancelled
         return _codec.Decode(backend, codes, seed);
+    }
+
+    /// <summary>Frame-0 prompt embeds in the upstream layout: tags text rows, then the MuQ style row
+    /// (<c>muq_linear(muqEmbed ?? zeros)</c>), then lyrics text rows → <c>[1, prefixLen, bh]</c>.</summary>
+    private Tensor BuildPrompt(ReadOnlySpan<int> tags, ReadOnlySpan<int> lyrics, Tensor? muqEmbed, bool hasMuqRow)
+    {
+        int h = _cfg.Lm.Backbone.HiddenSize;
+        int total = tags.Length + (hasMuqRow ? 1 : 0) + lyrics.Length;
+        Tensor ctx = new(new TensorShape(1, Math.Max(1, total), h), DType.F32);
+        float* cp = (float*)ctx.DataPointer;
+        int row = 0;
+        for (int i = 0; i < tags.Length; i++)
+        {
+            Tensor e = _lm.EmbedText(tags[i]);
+            Buffer.MemoryCopy((void*)e.DataPointer, cp + (long)row++ * h, h * 4, h * 4); e.Dispose();
+        }
+        if (hasMuqRow)
+        {
+            Tensor m = _lm.EmbedMuq(muqEmbed);
+            Buffer.MemoryCopy((void*)m.DataPointer, cp + (long)row++ * h, h * 4, h * 4); m.Dispose();
+        }
+        for (int i = 0; i < lyrics.Length; i++)
+        {
+            Tensor e = _lm.EmbedText(lyrics[i]);
+            Buffer.MemoryCopy((void*)e.DataPointer, cp + (long)row++ * h, h * 4, h * 4); e.Dispose();
+        }
+        return ctx;
     }
 
     private Tensor BuildContext(ReadOnlySpan<int> lyrics, List<int[]> frames, Tensor? muqLmEmbed)

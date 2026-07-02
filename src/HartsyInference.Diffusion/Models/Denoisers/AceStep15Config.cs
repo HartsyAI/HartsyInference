@@ -72,6 +72,23 @@ public sealed record AceStep15Config
     /// <summary>Default timestep-table shift.</summary>
     public float FlowShift { get; init; } = 3.0f;
 
+    /// <summary>True for distilled turbo checkpoints (8-step, guidance baked in — CFG must stay off);
+    /// false for base/sft (continuous schedule + CFG). From the checkpoint's <c>is_turbo</c>.</summary>
+    public bool IsTurbo { get; init; } = true;
+
+    /// <summary>Condition-encoder width. XL keeps the 2B-sized encoder (<c>encoder_hidden_size</c>) under a
+    /// wider decoder; for 2B checkpoints these equal the decoder dims.</summary>
+    public int EncoderHiddenSize { get; init; } = 2048;
+
+    /// <summary>Condition-encoder SwiGLU inner dim (<c>encoder_intermediate_size</c>).</summary>
+    public int EncoderIntermediateSize { get; init; } = 6144;
+
+    /// <summary>Condition-encoder query heads (<c>encoder_num_attention_heads</c>).</summary>
+    public int EncoderNumHeads { get; init; } = 16;
+
+    /// <summary>Condition-encoder key/value heads (<c>encoder_num_key_value_heads</c>).</summary>
+    public int EncoderNumKvHeads { get; init; } = 8;
+
     /// <summary>True for layers using the 128-token sliding window: even indices (the reference computes
     /// <c>"sliding_attention" if (i + 1) % 2 else "full_attention"</c>, so layer 0 slides, layer 1 is full, …).
     /// Shared by the DiT and both condition encoders.</summary>
@@ -81,18 +98,70 @@ public sealed record AceStep15Config
     public int LatentFrames(double durationSeconds) => (int)Math.Round(durationSeconds * LatentRate);
 
     /// <summary>The fixed turbo timestep table (8 descending values; the final step integrates to 0). The shift is
-    /// snapped to the nearest of the reference's <c>VALID_SHIFTS</c> [1, 2, 3].</summary>
-    public static float[] GetTimesteps(float shift)
+    /// snapped to the nearest of the reference's <c>VALID_SHIFTS</c> [1, 2, 3]. These tables are exactly
+    /// <see cref="GetTimesteps(int,float,bool)"/> at 8 steps.</summary>
+    public static float[] GetTimesteps(float shift) => GetTimesteps(8, shift, snapShift: true);
+
+    /// <summary>The shared flow schedule: <c>t = linspace(1,0,steps+1)</c> then, for shift ≠ 1,
+    /// <c>t = shift·t / (1 + (shift−1)·t)</c>. Returns the first <paramref name="steps"/> values (the final
+    /// step integrates to the implicit trailing 0). Turbo snaps shift to the trained {1,2,3}
+    /// (<paramref name="snapShift"/>); base/sft/continuous accept arbitrary shift.</summary>
+    public static float[] GetTimesteps(int steps, float shift, bool snapShift = false)
     {
-        float snapped = shift < 1.5f ? 1f : shift < 2.5f ? 2f : 3f;
-        return snapped switch
+        if (steps < 1) throw new ArgumentOutOfRangeException(nameof(steps));
+        if (snapShift) shift = shift < 1.5f ? 1f : shift < 2.5f ? 2f : 3f;
+        float[] ts = new float[steps];
+        for (int k = 0; k < steps; k++)
         {
-            1f => [1f, 0.875f, 0.75f, 0.625f, 0.5f, 0.375f, 0.25f, 0.125f],
-            2f => [1f, 0.9333333333f, 0.8571428571f, 0.7692307692f, 0.6666666666f, 0.5454545454f, 0.4f, 0.2222222222f],
-            _ => [1f, 0.9545454545f, 0.9f, 0.8333333333f, 0.75f, 0.6428571428f, 0.5f, 0.3f],
-        };
+            double t = 1.0 - k / (double)steps;
+            if (shift != 1f) t = shift * t / (1.0 + (shift - 1.0) * t);
+            ts[k] = (float)t;
+        }
+        return ts;
     }
 
     /// <summary>The published v1.5 turbo 2B model.</summary>
     public static AceStep15Config Turbo => new();
+
+    /// <summary>Builds a config from a checkpoint's <c>config.json</c> (upstream
+    /// <c>configuration_acestep_v15.py</c> keys). Missing keys keep the 2B turbo defaults; XL's
+    /// <c>encoder_*</c> keys override the encoder dims independently of the decoder.</summary>
+    public static AceStep15Config FromJson(string configJson)
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(configJson);
+        System.Text.Json.JsonElement r = doc.RootElement;
+        int I(string key, int dflt) => r.TryGetProperty(key, out System.Text.Json.JsonElement e) && e.ValueKind == System.Text.Json.JsonValueKind.Number ? e.GetInt32() : dflt;
+        float F(string key, float dflt) => r.TryGetProperty(key, out System.Text.Json.JsonElement e) && e.ValueKind == System.Text.Json.JsonValueKind.Number ? (float)e.GetDouble() : dflt;
+        bool B(string key, bool dflt) => r.TryGetProperty(key, out System.Text.Json.JsonElement e) && (e.ValueKind == System.Text.Json.JsonValueKind.True || e.ValueKind == System.Text.Json.JsonValueKind.False) ? e.GetBoolean() : dflt;
+
+        int hidden = I("hidden_size", 2048);
+        int inter = I("intermediate_size", 6144);
+        int heads = I("num_attention_heads", 16);
+        int kvHeads = I("num_key_value_heads", 8);
+        return new AceStep15Config
+        {
+            HiddenSize = hidden,
+            NumLayers = I("num_hidden_layers", 24),
+            NumHeads = heads,
+            NumKvHeads = kvHeads,
+            HeadDim = I("head_dim", 128),
+            IntermediateSize = inter,
+            RmsNormEps = F("rms_norm_eps", 1e-6f),
+            RopeTheta = r.TryGetProperty("rope_theta", out System.Text.Json.JsonElement rt) && rt.ValueKind == System.Text.Json.JsonValueKind.Number ? rt.GetDouble() : 1_000_000.0,
+            SlidingWindow = I("sliding_window", 128),
+            InChannels = I("in_channels", 192),
+            PatchSize = I("patch_size", 2),
+            LatentChannels = I("audio_acoustic_hidden_dim", 64),
+            TextHiddenDim = I("text_hidden_dim", 1024),
+            TimbreHiddenDim = I("timbre_hidden_dim", 64),
+            LyricEncoderLayers = I("num_lyric_encoder_hidden_layers", 8),
+            TimbreEncoderLayers = I("num_timbre_encoder_hidden_layers", 4),
+            IsTurbo = B("is_turbo", true),
+            // 2B checkpoints have no encoder_* keys (encoder == decoder dims); XL sets them explicitly.
+            EncoderHiddenSize = I("encoder_hidden_size", hidden),
+            EncoderIntermediateSize = I("encoder_intermediate_size", inter),
+            EncoderNumHeads = I("encoder_num_attention_heads", heads),
+            EncoderNumKvHeads = I("encoder_num_key_value_heads", kvHeads),
+        };
+    }
 }

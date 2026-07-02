@@ -31,6 +31,8 @@ public sealed unsafe class CsmModel : IDisposable
     private Tensor? _c0Head;               // [audioVocab, backboneHidden]
     private Tensor? _projW;                // backboneHidden → decoderHidden
     private Tensor?[] _audioHead;          // (numCodebooks-1) × [audioVocab, decoderHidden]
+    private Tensor? _muqW, _muqB;          // muq_linear [backboneHidden, muqDim] + bias (HeartMuLa only)
+    private Tensor? _uncondText;           // unconditional_text_embedding [1, backboneHidden] (HeartMuLa only)
 
     public CsmConfig Config => _cfg;
 
@@ -48,11 +50,59 @@ public sealed unsafe class CsmModel : IDisposable
         // Headless Llama bodies: load layers/norm only (no embed_tokens / lm_head inside the transformer).
         _backbone.LoadWeightsHeadless(w, "backbone");
         _decoder.LoadWeightsHeadless(w, "decoder");
-        _textEmbed = WhisperOps.EnsureF32(w["text_embeddings.weight"]);
-        for (int i = 0; i < _cfg.NumCodebooks; i++) _audioEmbed[i] = WhisperOps.EnsureF32(w[$"audio_embeddings.{i}.weight"]);
+        // Embedding tables stay in their source dtype (BF16 stays BF16 — ~2.4 GB saved on HeartMuLa);
+        // row reads convert per-element via CopyRowF32/AddRowF32.
+        _textEmbed = KeepF32OrBf16(w["text_embeddings.weight"]);
+        for (int i = 0; i < _cfg.NumCodebooks; i++) _audioEmbed[i] = KeepF32OrBf16(w[$"audio_embeddings.{i}.weight"]);
         _c0Head = WhisperOps.EnsureF32(w["codebook0_head.weight"]);
         _projW = WhisperOps.EnsureF32(w["projection.weight"]);
         for (int i = 0; i < _cfg.NumCodebooks - 1; i++) _audioHead[i] = WhisperOps.EnsureF32(w[$"audio_head.{i}.weight"]);
+        // HeartMuLa-only conditioning weights (absent from CSM TTS checkpoints).
+        if (w.TryGetValue("muq_linear.weight", out Tensor? mw)) _muqW = WhisperOps.EnsureF32(mw);
+        if (w.TryGetValue("muq_linear.bias", out Tensor? mb)) _muqB = WhisperOps.EnsureF32(mb);
+        if (w.TryGetValue("unconditional_text_embedding.weight", out Tensor? ue)) _uncondText = WhisperOps.EnsureF32(ue);
+    }
+
+    /// <summary>True when the HeartMuLa conditioning weights (muq_linear + unconditional_text_embedding) loaded.</summary>
+    public bool HasMulaConditioning => _muqW is not null && _uncondText is not null;
+
+    /// <summary>MuQ style row: <c>muq_linear(muqEmbed ?? zeros)</c> → <c>[1, 1, backboneHidden]</c>. Upstream always
+    /// injects this row between tags and lyrics; with no reference audio the input is zeros (= the bias).</summary>
+    public Tensor EmbedMuq(Tensor? muqEmbed512)
+    {
+        if (_muqW is null) throw new InvalidOperationException("muq_linear weights not loaded.");
+        int h = _cfg.Backbone.HiddenSize;
+        int muqDim = (int)_muqW.Shape[1];
+        Tensor outT = new(new TensorShape(1, 1, h), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        float* wp = (float*)_muqW.DataPointer;
+        float* bp = _muqB is not null ? (float*)_muqB.DataPointer : null;
+        float* ep = muqEmbed512 is not null ? (float*)muqEmbed512.DataPointer : null;
+        for (int r = 0; r < h; r++)
+        {
+            float acc = bp is not null ? bp[r] : 0f;
+            if (ep is not null)
+            {
+                float* row = wp + (long)r * muqDim;
+                for (int c = 0; c < muqDim; c++) acc += row[c] * ep[c];
+            }
+            op[r] = acc;
+        }
+        return outT;
+    }
+
+    /// <summary>The learned unconditional text embedding repeated <paramref name="rows"/> times →
+    /// <c>[1, rows, backboneHidden]</c>: upstream's CFG negative stream replaces every prompt position
+    /// (tags, MuQ row, lyrics) with this single vector; audio frames stay shared.</summary>
+    public Tensor UncondTextRows(int rows)
+    {
+        if (_uncondText is null) throw new InvalidOperationException("unconditional_text_embedding not loaded.");
+        int h = _cfg.Backbone.HiddenSize;
+        Tensor outT = new(new TensorShape(1, Math.Max(1, rows), h), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        float* sp = (float*)_uncondText.DataPointer;
+        for (int r = 0; r < rows; r++) Buffer.MemoryCopy(sp, op + (long)r * h, h * 4, h * 4);
+        return outT;
     }
 
     /// <summary>Embeds a text token via the text table → <c>[1, 1, backboneHidden]</c>.</summary>
@@ -65,13 +115,43 @@ public sealed unsafe class CsmModel : IDisposable
         Tensor outT = new(new TensorShape(1, 1, h), DType.F32);
         float* op = (float*)outT.DataPointer;
         for (int cb = 0; cb < frameCodes.Length && cb < _cfg.NumCodebooks; cb++)
-        {
-            float* tab = (float*)_audioEmbed[cb]!.DataPointer;
-            int id = Math.Clamp(frameCodes[cb], 0, _cfg.AudioVocab - 1);
-            float* row = tab + (long)id * h;
-            for (int c = 0; c < h; c++) op[c] += row[c];
-        }
+            AddRowF32(_audioEmbed[cb]!, frameCodes[cb], op, h);
         return outT;
+    }
+
+    // Keep F32/BF16 tables as loaded (no F32 duplication); anything else casts up once.
+    private static Tensor KeepF32OrBf16(Tensor t) =>
+        t.DType == DType.F32 || t.DType == DType.BF16 ? t : t.CastTo(DType.F32);
+
+    // dst = table[id] as F32 (row-clamped; table F32 or BF16).
+    private static void CopyRowF32(Tensor table, int id, float* dst, int h)
+    {
+        long off = (long)Math.Clamp(id, 0, (int)table.Shape[0] - 1) * h;
+        if (table.DType == DType.BF16)
+        {
+            ushort* row = (ushort*)table.DataPointer + off;
+            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; dst[c] = *(float*)&b; }
+        }
+        else
+        {
+            Buffer.MemoryCopy((float*)table.DataPointer + off, dst, h * 4L, h * 4L);
+        }
+    }
+
+    // dst += table[id] as F32 (row-clamped; table F32 or BF16).
+    private static void AddRowF32(Tensor table, int id, float* dst, int h)
+    {
+        long off = (long)Math.Clamp(id, 0, (int)table.Shape[0] - 1) * h;
+        if (table.DType == DType.BF16)
+        {
+            ushort* row = (ushort*)table.DataPointer + off;
+            for (int c = 0; c < h; c++) { uint b = (uint)row[c] << 16; dst[c] += *(float*)&b; }
+        }
+        else
+        {
+            float* row = (float*)table.DataPointer + off;
+            for (int c = 0; c < h; c++) dst[c] += row[c];
+        }
     }
 
     /// <summary>Generates one full 8-codebook frame from the running <paramref name="contextEmbeds"/>
@@ -324,6 +404,9 @@ public sealed unsafe class CsmModel : IDisposable
         if (_c0Head is not null) yield return _c0Head;
         if (_projW is not null) yield return _projW;
         foreach (Tensor? hd in _audioHead) if (hd is not null) yield return hd;
+        if (_muqW is not null) yield return _muqW;
+        if (_muqB is not null) yield return _muqB;
+        if (_uncondText is not null) yield return _uncondText;
     }
 
     /// <summary>Decoder sequence (in backbone-hidden space, pre-projection) = the backbone last hidden, then the
@@ -337,11 +420,7 @@ public sealed unsafe class CsmModel : IDisposable
         Buffer.MemoryCopy((void*)lastHidden.DataPointer, op, bh * 4, bh * 4);
         for (int i = 0; i < seq.Count; i++)
         {
-            float* tab = (float*)_audioEmbed[i]!.DataPointer;
-            int id = Math.Clamp(seq[i], 0, _cfg.AudioVocab - 1);
-            float* row = tab + (long)id * bh;
-            float* dst = op + (long)(i + 1) * bh;
-            for (int c = 0; c < bh; c++) dst[c] = row[c];
+            CopyRowF32(_audioEmbed[i]!, seq[i], op + (long)(i + 1) * bh, bh);
         }
         return outT;
     }
@@ -350,8 +429,7 @@ public sealed unsafe class CsmModel : IDisposable
     {
         int h = (int)table.Shape[1];
         Tensor outT = new(new TensorShape(1, 1, h), DType.F32);
-        int clamped = Math.Clamp(id, 0, (int)table.Shape[0] - 1);
-        Buffer.MemoryCopy((float*)table.DataPointer + (long)clamped * h, (void*)outT.DataPointer, h * 4, h * 4);
+        CopyRowF32(table, id, (float*)outT.DataPointer, h);
         return outT;
     }
 

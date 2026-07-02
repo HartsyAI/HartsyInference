@@ -34,6 +34,24 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
     internal Action? _gpuDisposeCallback;
 
+    /// <summary>GPU cleanup callbacks from tensors reclaimed by the finalizer (never explicitly Disposed) — queued
+    /// here instead of invoked inline. The finalizer thread has no business making CUDA driver calls (stream
+    /// enqueue order across threads is a race even though individual driver calls are thread-safe): a free enqueued
+    /// from the finalizer thread can land between two dependent ops the inference thread assumed were adjacent in
+    /// the stream, corrupting an in-flight buffer. Drained by the backend on the thread that actually owns the
+    /// stream (see <c>CudaContext.EnsureCurrent</c>) so every GPU driver call still comes from one thread.</summary>
+    internal static readonly System.Collections.Concurrent.ConcurrentQueue<Action> PendingFinalizerGpuCleanup = new();
+
+    /// <summary>Drains and invokes every GPU cleanup callback queued by tensor finalizers. Call only from the thread
+    /// that owns the backend's CUDA context/stream.</summary>
+    public static void DrainPendingFinalizerGpuCleanup()
+    {
+        while (PendingFinalizerGpuCleanup.TryDequeue(out Action? cleanup))
+        {
+            cleanup();
+        }
+    }
+
     /// <summary>Creates a new owned tensor. The host buffer is NOT allocated here; it is allocated (zeroed) lazily on the
     /// first CPU access via <see cref="DataPointer"/>/<see cref="AsSpan{T}"/>/etc. GPU-resident activations (whose data
     /// lives on the device and is freed without ever being read on the host) therefore never pay for a host malloc+memset.</summary>
@@ -477,7 +495,12 @@ public sealed unsafe class Tensor : IDisposable
         nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
         Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
         Interlocked.Exchange(ref _gpuSyncCallback, null);
-        gpuDispose?.Invoke();
+        // Never invoke a CUDA-touching callback from the finalizer thread directly — queue it for the
+        // backend's owning thread to drain (see PendingFinalizerGpuCleanup).
+        if (gpuDispose is not null)
+        {
+            PendingFinalizerGpuCleanup.Enqueue(gpuDispose);
+        }
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
         if (ptr != 0 && buffer is not null)
         {

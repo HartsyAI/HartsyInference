@@ -380,6 +380,20 @@ public sealed class VaeDecoder
                 Tensor tileInput = Utilities.DtypeCastHelper.EnsureDtype(backend, latentSlice, vaeDtype);
                 Tensor rgbTile = Decode(backend, tileInput);
                 tileInput.Dispose();
+                if (ty == 0 && tx == 0)
+                {
+                    float* dbgPtr = (float*)rgbTile.DataPointer;
+                    float dbgMin = float.MaxValue, dbgMax = float.MinValue;
+                    double dbgSum = 0;
+                    for (long di = 0; di < rgbTile.ElementCount; di++)
+                    {
+                        float v = dbgPtr[di];
+                        if (v < dbgMin) dbgMin = v;
+                        if (v > dbgMax) dbgMax = v;
+                        dbgSum += v;
+                    }
+                    Logs.Info($"[TILEDBG] tile(0,0) rgbTile min={dbgMin} max={dbgMax} mean={dbgSum / rgbTile.ElementCount} dtype={rgbTile.DType.Name} elems={rgbTile.ElementCount}");
+                }
 
                 int rgbTileH = actualTileH * SpatialScale;
                 int rgbTileW = actualTileW * SpatialScale;
@@ -426,6 +440,27 @@ public sealed class VaeDecoder
                 float w = weightAccum[i];
                 if (w > 1e-8f) accumPtr[outIdx] /= w;
             }
+        }
+
+        {
+            float dbgMin = float.MaxValue, dbgMax = float.MinValue;
+            double dbgSum = 0;
+            long dbgNanCount = 0;
+            for (long di = 0; di < accumOutput.ElementCount; di++)
+            {
+                float v = accumPtr[di];
+                if (float.IsNaN(v)) { dbgNanCount++; continue; }
+                if (v < dbgMin) dbgMin = v;
+                if (v > dbgMax) dbgMax = v;
+                dbgSum += v;
+            }
+            float wMin = float.MaxValue, wMax = float.MinValue;
+            for (long di = 0; di < weightCount; di++)
+            {
+                if (weightAccum[di] < wMin) wMin = weightAccum[di];
+                if (weightAccum[di] > wMax) wMax = weightAccum[di];
+            }
+            Logs.Info($"[TILEDBG] accumOutput min={dbgMin} max={dbgMax} mean={dbgSum / accumOutput.ElementCount} nanCount={dbgNanCount} weightMin={wMin} weightMax={wMax}");
         }
 
         return accumOutput;
