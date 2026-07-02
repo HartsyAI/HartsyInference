@@ -39,15 +39,29 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         _config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
+    /// <summary>Sets the shipped <c>silence_latent.pt</c> rows <c>[T, 64]</c> as the text-to-music src latent
+    /// (upstream loads it per checkpoint; byte-identical across all v1.5 repos). When unset, the pipeline
+    /// falls back to VAE-encoding digital silence.</summary>
+    public void SetSilenceLatent(Tensor silenceRows)
+    {
+        ThrowIfDisposed();
+        if (silenceRows.Shape.Rank != 2 || (int)silenceRows.Shape[1] != _config.LatentChannels)
+            throw new ArgumentException($"silence latent must be [T, {_config.LatentChannels}]; got {silenceRows.Shape}.", nameof(silenceRows));
+        _silenceFrames?.Dispose();
+        _silenceFrames = silenceRows;
+    }
+
     /// <summary>Generates stereo audio from pre-computed Qwen3-Embedding-0.6B prompt states <c>[T_text, 1024]</c>
     /// and optional lyric states <c>[L, 1024]</c> (null → no lyric tokens; instrumental via prompt tags).
     /// <paramref name="timbreLatent"/> is an optional reference-audio Oobleck latent <c>[T_ref, 64]</c>;
     /// <paramref name="lmHints"/> is the phase-2 cover-mode hook (25 Hz detokenizer latents <c>[1, T, 64]</c>
-    /// replacing the silence src). Returns one <c>float[]</c> per channel at 48 kHz.</summary>
+    /// replacing the silence src). <paramref name="inferSteps"/> overrides the turbo default 8 (upstream allows
+    /// 1..20 on turbo via the same linspace+shift schedule; shift stays snapped to the trained {1,2,3}).
+    /// Returns one <c>float[]</c> per channel at 48 kHz.</summary>
     public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
         Tensor textHidden, Tensor? lyricHidden, double durationSeconds,
         float? shift = null, int? seed = null, Tensor? timbreLatent = null, Tensor? lmHints = null,
-        Action<GenerationProgress>? onProgress = null)
+        int? inferSteps = null, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
         if (durationSeconds < 1 || durationSeconds > 600)
@@ -56,7 +70,8 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         int actualSeed = seed ?? SeedGenerator.RandomSeed();
         int patch = _config.PatchSize;
         int frames = Math.Max(4 * patch, (_config.LatentFrames(durationSeconds) + patch - 1) / patch * patch);
-        float[] timesteps = AceStep15Config.GetTimesteps(shift ?? _config.FlowShift);
+        int wantSteps = Math.Clamp(inferSteps ?? _config.NumInferenceSteps, 1, 20);
+        float[] timesteps = AceStep15Config.GetTimesteps(wantSteps, shift ?? _config.FlowShift, snapShift: true);
         int steps = timesteps.Length;
 
         Logs.Info($"ACE-Step 1.5 turbo: {durationSeconds:0}s ({frames} latent frames), {steps} steps, " +
@@ -118,8 +133,8 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
     }
 
     /// <summary>Builds <c>context_latents [1, T, 128]</c> = src ‖ chunk-mask per frame: src = phase-2
-    /// <paramref name="lmHints"/> when given, else the silence latent tiled; mask = all ones (generate everything —
-    /// repaint regions are a later feature).</summary>
+    /// <paramref name="lmHints"/> when given, else the silence latent tiled; mask = 2.0 (upstream
+    /// <c>chunk_mask_mode="auto"</c> — "model decides"; repaint's explicit 0/1 spans are a later feature).</summary>
     private Tensor BuildContextLatents(int frames, Tensor? lmHints)
     {
         int latCh = _config.LatentChannels;
@@ -135,7 +150,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         {
             long rowOff = (long)i * 2 * latCh;
             Buffer.MemoryCopy(hp + (long)(i % srcPeriod) * latCh, cp + rowOff, latCh * 4, latCh * 4);
-            for (int c = 0; c < latCh; c++) cp[rowOff + latCh + c] = 1f;
+            for (int c = 0; c < latCh; c++) cp[rowOff + latCh + c] = 2f;
         }
         return context;
     }

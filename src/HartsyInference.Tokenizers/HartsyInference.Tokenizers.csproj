@@ -50,4 +50,11 @@
     <EmbeddedResource Include="Resources\llama3_tokenizer.json" LogicalName="HartsyInference.Tokenizers.Resources.llama3_tokenizer.json" Condition="Exists('Resources\llama3_tokenizer.json')" />
   </ItemGroup>
 
+  <!-- Canonical Qwen2.5/3 tokenizer.json (~11 MB). Consumed via HfTokenizerJson so the family split regex
+       reproduces HF ids exactly (the vocab+merges two-file form misses merges like ":\n\n" and "/A").
+       Used by the ACE-Step 1.5 text/lyric conditioning. Conditional so a checkout without it still compiles. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\qwen3_tokenizer.json" LogicalName="HartsyInference.Tokenizers.Resources.qwen3_tokenizer.json" Condition="Exists('Resources\qwen3_tokenizer.json')" />
+  </ItemGroup>
+
 </Project>

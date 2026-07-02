@@ -62,6 +62,62 @@ public static class AudioTextFrontend
         return RequireLlama().EncodeOrdinary(text);
     }
 
+    /// <summary>Qwen2.5/3 byte-level BPE with the exact HF split regex (from the embedded canonical
+    /// <c>tokenizer.json</c>) — used by ACE-Step 1.5 conditioning. The two-file vocab+merges Qwen3Tokenizer
+    /// misses family merges (e.g. ":\n\n", "/A") and is NOT id-exact for template text.</summary>
+    private static readonly Lazy<GgufTokenizer> _qwen3 = new(() =>
+    {
+        using Stream json = EmbeddedTokenizerResources.OpenQwen3TokenizerJson();
+        return HfTokenizerJson.LoadByteLevelBpe(json);
+    });
+
+    /// <summary>Raw Qwen2.5/3 BPE ids of <paramref name="text"/> (no specials appended), HF-exact.</summary>
+    public static int[] Qwen3Ids(string text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        if (!EmbeddedTokenizerResources.HasQwen3TokenizerJson)
+        {
+            throw new InvalidOperationException(
+                "The Qwen tokenizer.json is not embedded in HartsyInference.Tokenizers. Drop a Qwen2.5/3 "
+                + "tokenizer.json in HartsyInference.Tokenizers/Resources/ as qwen3_tokenizer.json, then rebuild.");
+        }
+        return _qwen3.Value.EncodeOrdinary(text);
+    }
+
+    private const int Llama3Bos = 128000;
+    private const int Llama3Eos = 128001;
+
+    /// <summary>HeartMuLa tags section (upstream <c>preprocess</c>): lowercase, wrap in
+    /// <c>&lt;tag&gt;…&lt;/tag&gt;</c> (plain text, not a special token), Llama-3 BPE, then BOS/EOS-wrap.</summary>
+    public static int[] HeartMulaTags(string tags)
+    {
+        ArgumentNullException.ThrowIfNull(tags);
+        string s = tags.ToLowerInvariant();
+        if (!s.StartsWith("<tag>", StringComparison.Ordinal)) s = "<tag>" + s;
+        if (!s.EndsWith("</tag>", StringComparison.Ordinal)) s += "</tag>";
+        return BosEosWrap(RequireLlama().EncodeOrdinary(s));
+    }
+
+    /// <summary>HeartMuLa lyrics section (upstream <c>preprocess</c>): lowercase, Llama-3 BPE, BOS/EOS-wrap.
+    /// Structure markers like <c>[verse]</c>/<c>[chorus]</c> stay inline in <paramref name="lyrics"/>.</summary>
+    public static int[] HeartMulaLyrics(string lyrics)
+    {
+        ArgumentNullException.ThrowIfNull(lyrics);
+        return BosEosWrap(RequireLlama().EncodeOrdinary(lyrics.ToLowerInvariant()));
+    }
+
+    private static int[] BosEosWrap(int[] ids)
+    {
+        bool needBos = ids.Length == 0 || ids[0] != Llama3Bos;
+        bool needEos = ids.Length == 0 || ids[^1] != Llama3Eos;
+        int[] outp = new int[ids.Length + (needBos ? 1 : 0) + (needEos ? 1 : 0)];
+        int o = 0;
+        if (needBos) outp[o++] = Llama3Bos;
+        Array.Copy(ids, 0, outp, o, ids.Length);
+        if (needEos) outp[^1] = Llama3Eos;
+        return outp;
+    }
+
     /// <summary>Bark: BERT WordPiece ids shifted by <paramref name="textEncodingOffset"/>
     /// (<c>BarkConfig.TextEncodingOffset</c>). The pipeline appends its own semantic-infer token. The caller
     /// supplies the BERT tokenizer (loaded from the model's bert-base-multilingual-cased vocab.txt).</summary>
