@@ -1,9 +1,9 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen3;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.QwenTts;
 
@@ -15,8 +15,8 @@ namespace HartsyInference.Audio.Models.QwenTts;
 ///
 /// <para>Structure mirrors the Moshi depformer (<see cref="HartsyInference.Audio.Models.Kyutai.MoshiDepthTransformer"/>):
 /// per depth position the input is either the projected talker hidden (step 0) or the previous codebook's
-/// embedding (steps &gt; 0); the shared <see cref="Qwen3Model"/> body runs over the growing depth sequence via a
-/// <see cref="StreamingKvCache"/>; each step projects to its own per-codebook logits and samples.</para></summary>
+/// embedding (steps &gt; 0); the shared <see cref="Qwen3Model"/> body runs over the growing depth sequence via an
+/// <see cref="IKvCache"/> from <see cref="Qwen3Model.CreateDecodeCache"/>; each step projects to its own per-codebook logits and samples.</para></summary>
 public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
 {
     private readonly Qwen3TtsConfig _cfg;
@@ -89,7 +89,7 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
         int depth = _cfg.MtpCodebooks;
         int[] codes = new int[depth];
 
-        using StreamingKvCache cache = new(_mtp.NumHiddenLayers, 1, _mtp.NumKeyValueHeads, depth + 2, _mtp.HeadDim);
+        using IKvCache cache = _body.CreateDecodeCache(depth + 2);
 
         // Position 0: projected talker hidden (builds KV, no prediction).
         Tensor cond = WhisperOps.ProjectLinear(backend, talkerHidden, _smallToMtpW!, _smallToMtpB, 1, 1, talkerH, mtpHidden);

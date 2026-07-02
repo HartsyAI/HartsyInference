@@ -2,9 +2,9 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Music;
 
@@ -52,10 +52,10 @@ public sealed unsafe class YueStage1Lm : IDisposable
         int promptLen = promptTokenIds.Length;
         int maxTokens = maxFrames * 2;     // 2 interleaved tracks per frame
         int cacheCap = Math.Min(_cfg.Stage1.MaxPositionEmbeddings, promptLen + maxTokens + 8);
-        using StreamingKvCache cache = new(_cfg.Stage1.NumHiddenLayers, 1, _cfg.Stage1.NumKeyValueHeads, cacheCap, _cfg.Stage1.HeadDim);
-        StreamingKvCache? uncondCache = useCfg
-            ? new(_cfg.Stage1.NumHiddenLayers, 1, _cfg.Stage1.NumKeyValueHeads,
-                Math.Min(_cfg.Stage1.MaxPositionEmbeddings, uncondTokenIds.Length + maxTokens + 8), _cfg.Stage1.HeadDim)
+        // Efficient incremental decode cache (FixedKvCache): O(1) appends, no per-step prefix copy.
+        using IKvCache cache = _lm.CreateDecodeCache(cacheCap);
+        IKvCache? uncondCache = useCfg
+            ? _lm.CreateDecodeCache(Math.Min(_cfg.Stage1.MaxPositionEmbeddings, uncondTokenIds.Length + maxTokens + 8))
             : null;
 
         uint rng = DeterministicRng.Seed(seed);

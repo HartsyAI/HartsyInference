@@ -243,7 +243,7 @@ public sealed unsafe class PocketTtsModelTests
         // ── Decoder ── initial conv at index 0, no LSTM (index 1 unused), stages then final.
         int maxChannels = nFilters * (1 << stages);
         AddConv(w, "decoder.model.0.conv.conv", maxChannels, c.LatentDim, k);
-        seq = 2;
+        seq = 1;       // SeaNetDecoder (no LSTM) starts seqIdx at 1; first ELU→upsample lands at model.2.
         for (int i = 0; i < stages; i++)
         {
             int dimInD = nFilters * (1 << (stages - i));
@@ -273,14 +273,18 @@ public sealed unsafe class PocketTtsModelTests
         for (int i = 0; i < c.TransformerLayers; i++)
         {
             string p = $"{prefix}.layers.{i}";
-            w[$"{p}.norm_attn.weight"] = Ones(d);
-            w[$"{p}.norm_ffn.weight"] = Ones(d);
-            w[$"{p}.attn.q_proj.weight"] = R(d, d);
-            w[$"{p}.attn.k_proj.weight"] = R(d, d);
-            w[$"{p}.attn.v_proj.weight"] = R(d, d);
-            w[$"{p}.attn.o_proj.weight"] = R(d, d);
-            w[$"{p}.ffn.fc1.weight"] = R(c.TransformerFfnDim, d);
-            w[$"{p}.ffn.fc2.weight"] = R(d, c.TransformerFfnDim);
+            // HF Mimi layout: input_layernorm / post_attention_layernorm (with bias), self_attn.{q,k,v,o}_proj,
+            // mlp.fc1/fc2, and per-sublayer LayerScale (.scale).
+            w[$"{p}.input_layernorm.weight"] = Ones(d); w[$"{p}.input_layernorm.bias"] = R(d);
+            w[$"{p}.post_attention_layernorm.weight"] = Ones(d); w[$"{p}.post_attention_layernorm.bias"] = R(d);
+            w[$"{p}.self_attn.q_proj.weight"] = R(d, d);
+            w[$"{p}.self_attn.k_proj.weight"] = R(d, d);
+            w[$"{p}.self_attn.v_proj.weight"] = R(d, d);
+            w[$"{p}.self_attn.o_proj.weight"] = R(d, d);
+            w[$"{p}.mlp.fc1.weight"] = R(c.TransformerFfnDim, d);
+            w[$"{p}.mlp.fc2.weight"] = R(d, c.TransformerFfnDim);
+            w[$"{p}.self_attn_layer_scale.scale"] = R(d);
+            w[$"{p}.mlp_layer_scale.scale"] = R(d);
         }
     }
 
@@ -292,10 +296,10 @@ public sealed unsafe class PocketTtsModelTests
         w[$"{prefix}.bias"] = R(outCh);
     }
 
-    // ConvTranspose1d weight: [inCh, outCh, k] (PyTorch layout); weight-norm dim 0 = inCh.
+    // ConvTranspose1d weight: [inCh, outCh, k] (PyTorch layout); weight-norm is along dim 0 = inCh (C_in).
     private static void AddConvTranspose(Dictionary<string, Tensor> w, string prefix, int inCh, int outCh, int k)
     {
-        w[$"{prefix}.weight_g"] = Ones(outCh);
+        w[$"{prefix}.weight_g"] = Ones(inCh);   // WeightNormT dim0 = C_in
         w[$"{prefix}.weight_v"] = R(inCh, outCh, k);
         w[$"{prefix}.bias"] = R(outCh);
     }

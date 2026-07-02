@@ -4,7 +4,7 @@ using HartsyInference.Audio.Models.Codecs.Snac;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Orpheus;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
@@ -60,8 +60,7 @@ public sealed unsafe class OrpheusPipeline : IDisposable
         prompt[^1] = _cfg.EndOfHuman;
 
         int cacheCap = Math.Min(_cfg.Llm.MaxPositionEmbeddings, prompt.Length + maxTokens + 8);
-        using StreamingKvCache cache = new(_cfg.Llm.NumHiddenLayers, batch: 1,
-            _cfg.Llm.NumKeyValueHeads, cacheCap, _cfg.Llm.HeadDim);
+        using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
 
         uint rng = DeterministicRng.Seed(seed);
         int vocab = _cfg.Llm.VocabSize;

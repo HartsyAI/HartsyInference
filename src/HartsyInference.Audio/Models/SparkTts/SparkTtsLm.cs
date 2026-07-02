@@ -1,9 +1,9 @@
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.SparkTts;
 
@@ -42,8 +42,7 @@ public sealed unsafe class SparkTtsLm : IDisposable
         ThrowIfDisposed();
         int promptLen = promptTokenIds.Length;
         int cacheCap = Math.Min(_cfg.Llm.MaxPositionEmbeddings, promptLen + maxTokens + 8);
-        using StreamingKvCache cache = new(_cfg.Llm.NumHiddenLayers, batch: 1,
-            _cfg.Llm.NumKeyValueHeads, cacheCap, _cfg.Llm.HeadDim);
+        using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
 
         uint rng = DeterministicRng.Seed(seed);
         List<int> global = new(_cfg.NumGlobalTokens);

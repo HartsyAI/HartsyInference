@@ -9,6 +9,7 @@ detail lives in [PHASE_10_INTERACTIVE.md](PHASE_10_INTERACTIVE.md). Parity evide
 | Model | Notes |
 |---|---|
 | **Oasis-500m** (Decart + Etched) | Real-weight numeric parity vs `etched-ai/open-oasis` on **CUDA/3060**: ViT-VAE encode corr **0.99999999**, decode corr **1.0**, DiT-S/2 v-pred corr **1.0** (maxAbs 3e-5). Fixed a DiT unpatchify vec-order bug (`[py,px,c]` not `[c,py,px]` — see [PARITY_VERIFICATION.md §Bugs](PARITY_VERIFICATION.md)). E2E AR rollout (DDIM v-pred + Diffusion Forcing) follows by composition (all cores corr 1.0). Weights: `camenduru/oasis-500m` mirror (the `Etched` repo is gated). |
+| **DIAMOND** (Eloi Alonso et al.) | **Built from scratch + verified** vs `eloialonso/diamond` (Atari/Breakout) on **CUDA and CPU**: inner U-Net corr **1.0** (maxAbs 7e-6), full EDM denoise **bit-exact** (maxAbs 0.0), 3-step Karras+Euler sampler **bit-exact** (maxAbs 3e-8). New architecture family for the engine: **CNN U-Net + EDM (Karras) diffusion**, pixel-space (no VAE), 4-frame + action conditioning via AdaGroupNorm. 1 bug fixed (U-Net upsample-conv index). Weights ungated. Remaining: the Interactive AR game-loop wiring (integration, not numerics). See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). |
 
 ## Built, validation-pending (🔧)
 

@@ -12,8 +12,12 @@ namespace HartsyInference.LLM.Transformer;
 /// <para>Ownership contract: <see cref="GetK"/>/<see cref="GetV"/> return a tensor <b>owned by the cache</b>
 /// and valid until the next <see cref="Append"/> on that layer (or <see cref="Reset"/>/dispose). Callers must
 /// NOT dispose it. The returned tensor is the exact populated prefix <c>[1, num_kv_heads, length, head_dim]</c>
-/// (no padding), ready for the GQA repeat + SDPA.</para></summary>
-public interface IKvCache
+/// (no padding), ready for the GQA repeat + SDPA.</para>
+///
+/// <para>Extends <see cref="IDisposable"/> so a decode cache can be created via a factory
+/// (<see cref="KvCaches.ForDecode"/>) and scoped with <c>using</c> without the caller naming the concrete type.
+/// All implementations (device <c>KvCache</c>, host <c>StreamingKvCache</c>, <c>FixedKvCache</c>) are disposable.</para></summary>
+public interface IKvCache : IDisposable
 {
     /// <summary>Number of layers this cache stores.</summary>
     int NumLayers { get; }

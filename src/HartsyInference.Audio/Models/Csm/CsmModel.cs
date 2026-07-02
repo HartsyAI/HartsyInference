@@ -5,6 +5,7 @@ using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Csm;
 
@@ -12,8 +13,12 @@ namespace HartsyInference.Audio.Models.Csm;
 /// predicts codebook 0 of the next frame from the running text+audio context; the Llama-100M decoder
 /// fills codebooks 1..7 of that frame, conditioned on the backbone hidden + the sampled codebook-0 token.
 /// Embedding tables, codebook heads, and the backbone→decoder projection live here; both transformer
-/// bodies + the shared <see cref="NucleusSampler"/> are reused. Runs full-sequence (no persistent KV
-/// cache across frames — a fresh cache per backbone pass); correct, perf-tunable.</summary>
+/// bodies + the shared <see cref="NucleusSampler"/> are reused.
+/// <para><b>Incremental decode:</b> the fast path is <see cref="CreateSession"/> + <see cref="StepFrame"/>, which
+/// persists the backbone KV cache across frames (a <see cref="FixedKvCache"/>) so each frame feeds only the newly
+/// appended rows through the backbone — O(n) over a song instead of the O(n²) full re-scan. It is numerically
+/// identical to the full-context <see cref="GenerateFrame"/> (same kernels, same RoPE positions, same causal key
+/// set); <see cref="GenerateFrame"/> is retained as a stateless one-shot / parity path.</para></summary>
 public sealed unsafe class CsmModel : IDisposable
 {
     private readonly CsmConfig _cfg;
@@ -81,11 +86,7 @@ public sealed unsafe class CsmModel : IDisposable
         float? temperature = null, int? topK = null, float? topP = null,
         float cfgScale = 1f, Tensor? uncondContext = null)
     {
-        float temp = temperature ?? _cfg.Temperature;
-        int tk = topK ?? _cfg.TopK;
-        float tp = topP ?? _cfg.TopP;
         bool useCfg = cfgScale != 1f && uncondContext is not null;
-
         int bt = (int)contextEmbeds.Shape[1];
         int bh = _cfg.Backbone.HiddenSize;
         using StreamingKvCache bCache = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, bt, _cfg.Backbone.HeadDim);
@@ -104,6 +105,102 @@ public sealed unsafe class CsmModel : IDisposable
             uHidden.Dispose();
         }
 
+        return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale);
+    }
+
+    /// <summary>Persistent per-utterance decode state: the backbone KV cache (and, for CFG, a parallel
+    /// unconditional cache) that survive across frames so <see cref="StepFrame"/> only feeds new rows. Dispose it
+    /// when the utterance/song completes. Not thread-safe; one session per generation.</summary>
+    public sealed class DecodeSession : IDisposable
+    {
+        internal FixedKvCache Backbone { get; }
+        internal FixedKvCache? Uncond { get; }
+        private int _disposed;
+
+        internal DecodeSession(FixedKvCache backbone, FixedKvCache? uncond)
+        {
+            Backbone = backbone;
+            Uncond = uncond;
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            Backbone.Dispose();
+            Uncond?.Dispose();
+        }
+    }
+
+    /// <summary>Allocates an incremental decode session. <paramref name="maxCondLen"/> is the maximum conditional
+    /// context length (prefix rows + frames); <paramref name="maxUncondLen"/> is the unconditional stream length
+    /// (frames only) and is ignored unless <paramref name="useCfg"/>.</summary>
+    public DecodeSession CreateSession(int maxCondLen, int maxUncondLen, bool useCfg)
+    {
+        ThrowIfDisposed();
+        FixedKvCache bb = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, _cfg.Backbone.HeadDim, Math.Max(1, maxCondLen));
+        FixedKvCache? un = useCfg
+            ? new FixedKvCache(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, _cfg.Backbone.HeadDim, Math.Max(1, maxUncondLen))
+            : null;
+        return new DecodeSession(bb, un);
+    }
+
+    /// <summary>Incremental frame decode: appends <paramref name="condNewEmbeds"/> <c>[1, tNew, bh]</c> to the
+    /// session's persistent backbone cache at the current position and decodes one full 8-codebook frame. The first
+    /// call feeds the whole prefix (text/lyrics/style); later calls feed just the previous frame's summed audio
+    /// embedding (one row) — so the backbone cost is O(1) per frame, not O(n).
+    /// <para>For CFG, pass <paramref name="uncondNewEmbeds"/> and <paramref name="cfgScale"/> ≠ 1: the unconditional
+    /// stream is decoded in parallel through <see cref="DecodeSession.Uncond"/>. Set <paramref name="uncondStandalone"/>
+    /// to run the uncond rows through a throwaway cache (used for the frame-0 dummy row, which must not persist so the
+    /// uncond audio-frame positions match the stateless path exactly).</para>
+    /// This is numerically identical to <see cref="GenerateFrame"/> over the equivalent full context.</summary>
+    public int[] StepFrame(IBackend backend, DecodeSession session, Tensor condNewEmbeds, ref uint rng,
+        float? temperature = null, int? topK = null, float? topP = null,
+        float cfgScale = 1f, Tensor? uncondNewEmbeds = null, bool uncondStandalone = false)
+    {
+        ThrowIfDisposed();
+        bool useCfg = cfgScale != 1f && uncondNewEmbeds is not null;
+        int bh = _cfg.Backbone.HiddenSize;
+
+        int tNew = (int)condNewEmbeds.Shape[1];
+        Tensor hidden = _backbone.ForwardEmbeds(backend, condNewEmbeds, 1, tNew, session.Backbone.CurrentLength, session.Backbone);
+        Tensor last = SliceLast(hidden, bh);
+        hidden.Dispose();
+
+        Tensor? uLast = null;
+        if (useCfg)
+        {
+            int utNew = (int)uncondNewEmbeds!.Shape[1];
+            if (uncondStandalone)
+            {
+                using StreamingKvCache tmp = new(_cfg.Backbone.NumHiddenLayers, 1, _cfg.Backbone.NumKeyValueHeads, utNew, _cfg.Backbone.HeadDim);
+                Tensor uHidden = _backbone.ForwardEmbeds(backend, uncondNewEmbeds, 1, utNew, 0, tmp);
+                uLast = SliceLast(uHidden, bh);
+                uHidden.Dispose();
+            }
+            else
+            {
+                FixedKvCache uc = session.Uncond ?? throw new InvalidOperationException("CFG StepFrame needs a CFG session (useCfg:true).");
+                Tensor uHidden = _backbone.ForwardEmbeds(backend, uncondNewEmbeds, 1, utNew, uc.CurrentLength, uc);
+                uLast = SliceLast(uHidden, bh);
+                uHidden.Dispose();
+            }
+        }
+
+        return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale);
+    }
+
+    /// <summary>Shared frame tail: codebook-0 from the backbone <paramref name="last"/> hidden, then the depth
+    /// decoder for codebooks 1..7, with optional CFG against <paramref name="uLast"/>. Disposes both hiddens.</summary>
+    private int[] DecodeFrameTail(IBackend backend, Tensor last, Tensor? uLast, ref uint rng,
+        float? temperature, int? topK, float? topP, float cfgScale)
+    {
+        float temp = temperature ?? _cfg.Temperature;
+        int tk = topK ?? _cfg.TopK;
+        float tp = topP ?? _cfg.TopP;
+        bool useCfg = cfgScale != 1f && uLast is not null;
+        int bh = _cfg.Backbone.HiddenSize;
+        int dh = _cfg.Decoder.HiddenSize;
+
         // codebook 0 from the backbone head.
         Tensor c0Logits = WhisperOps.ProjectLinear(backend, last, _c0Head!, bias: null, 1, 1, bh, _cfg.AudioVocab);
         if (useCfg) CombineCfg(backend, c0Logits, uLast!, _c0Head!, bh, cfgScale);
@@ -118,8 +215,6 @@ public sealed unsafe class CsmModel : IDisposable
         // backbone hidden space, apply `projection` to the WHOLE sequence, run the depth decoder over it (fresh
         // KV cache, max len = num_codebooks), and matmul the last hidden by `audio_head[i-1]`. The decoder input
         // is the full backbone-hidden (3072) — no truncation.
-        int dh = _cfg.Decoder.HiddenSize;
-
         List<int> decoderSeq = new() { c0 };
         for (int cb = 1; cb < _cfg.NumCodebooks; cb++)
         {
@@ -274,5 +369,10 @@ public sealed unsafe class CsmModel : IDisposable
         _backbone.Dispose();
         _decoder.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed != 0) throw new ObjectDisposedException(nameof(CsmModel));
     }
 }

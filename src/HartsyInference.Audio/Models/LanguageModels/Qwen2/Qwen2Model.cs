@@ -72,7 +72,7 @@ public sealed class Qwen2Model : IDisposable
 
     /// <summary>Token-IDs-in path: embedding lookup then the decoder stack. Returns the final
     /// <c>[1, T, hidden]</c> hidden state (post final RMSNorm).</summary>
-    public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int batch, int posStart, StreamingKvCache cache)
+    public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int batch, int posStart, IKvCache cache)
     {
         ThrowIfDisposed();
         RequireBatchOne(batch);
@@ -80,14 +80,20 @@ public sealed class Qwen2Model : IDisposable
     }
 
     /// <summary>Embedding-in path with optional layer range and final-norm toggle (VibeVoice streaming splits
-    /// the stack). <paramref name="batch"/> must be 1.</summary>
+    /// the stack). <paramref name="batch"/> must be 1. The cache is any <see cref="IKvCache"/> — pass a
+    /// <see cref="FixedKvCache"/> for O(1)-append incremental decode, or a <see cref="StreamingKvCache"/> for the
+    /// host-copy prefix path.</summary>
     public Tensor ForwardEmbeds(IBackend backend, Tensor inputsEmbeds, int batch, int t, int posStart,
-        StreamingKvCache cache, int startLayer = 0, int? endLayer = null, bool applyFinalNorm = true)
+        IKvCache cache, int startLayer = 0, int? endLayer = null, bool applyFinalNorm = true)
     {
         ThrowIfDisposed();
         RequireBatchOne(batch);
         return _transformer.ForwardEmbeds(backend, inputsEmbeds, t, posStart, cache, applyFinalNorm, startLayer, endLayer);
     }
+
+    /// <summary>Allocates the efficient incremental decode cache for this model (<see cref="KvCaches.ForDecode"/>) —
+    /// a <see cref="FixedKvCache"/> (O(1) appends). Prefer this over hand-rolling a cache. Dispose when done.</summary>
+    public IKvCache CreateDecodeCache(int maxSeqLen) => KvCaches.ForDecode(NumLayers, NumKeyValueHeads, HeadDim, maxSeqLen);
 
     /// <summary>Projects the final hidden state <c>[1, T, hidden]</c> to vocab logits <c>[1, T, vocab]</c>.</summary>
     public Tensor ProjectLogits(IBackend backend, Tensor hidden, int batch, int t)

@@ -26,17 +26,18 @@ public sealed unsafe class FishSpeechCodecTests
     public void FireflyQuantizer_SyntheticForward_CodesToFiniteDecoderInput()
     {
         int[] levels = [2, 2];
-        int nq = 3;
+        int nGroups = 2, inputDim = 8;   // groupDim = inputDim / nGroups = 4 (nGroups must divide inputDim)
+        int[] qUp = [2];
         using CpuBackend backend = new();
-        FireflyQuantizer q = new(levels, nq, [2]);
-        q.LoadWeights(QuantizerWeights(levels, qUp: [2]), "quantizer");
+        FireflyQuantizer q = new(levels, nGroups, qUp, inputDim);
+        q.LoadWeights(QuantizerWeights(levels, qUp, inputDim, nGroups), "quantizer");
         int t = 4;
         int vocab = FsqVocab(levels);
-        int[,] codes = new int[nq, t];
-        for (int i = 0; i < nq; i++) for (int j = 0; j < t; j++) codes[i, j] = (i * 2 + j) % vocab;
+        int[,] codes = new int[nGroups, t];
+        for (int i = 0; i < nGroups; i++) for (int j = 0; j < t; j++) codes[i, j] = (i * 2 + j) % vocab;
         using Tensor decoderInput = q.DequantToDecoderInput(backend, codes, t);
         Assert.Equal(1, (int)decoderInput.Shape[0]);
-        Assert.Equal(1_024, (int)decoderInput.Shape[1]);
+        Assert.Equal(inputDim, (int)decoderInput.Shape[1]);
         Assert.Equal(t * q.UpsampleFactor, (int)decoderInput.Shape[2]);
         float* p = (float*)decoderInput.DataPointer;
         for (long n = 0; n < decoderInput.ElementCount; n++) Assert.True(float.IsFinite(p[n]));
@@ -169,48 +170,80 @@ public sealed unsafe class FishSpeechCodecTests
         return map;
     }
 
-    internal static Dictionary<string, Tensor> QuantizerWeights(int[] levels, int[] qUp)
+    // Synthetic weights for the current grouped-residual FSQ quantizer (fish-speech firefly `fsq.py`): per-group
+    // residual_fsq.rvqs.{g}.project_out (Linear codebookDim→groupDim) + upsample.{i} = [FishTransConvNet .0.conv,
+    // ConvNeXtBlock .1]. inputDim must be divisible by nGroups (groupDim = inputDim/nGroups).
+    internal static Dictionary<string, Tensor> QuantizerWeights(int[] levels, int[] qUp, int inputDim, int nGroups,
+        string prefix = "quantizer")
     {
-        // codebookDim = levels.Length; no project_out (identity FSQ). fc_post: codebookDim → 8 channels (1×1).
-        int codebookDim = levels.Length;
-        Dictionary<string, Tensor> w = new()
+        int codebookDim = levels.Length, groupDim = inputDim / nGroups;
+        Dictionary<string, Tensor> w = new();
+        for (int g = 0; g < nGroups; g++)
         {
-            ["quantizer.fc_post.weight"] = F3(8, codebookDim, 1),
-            ["quantizer.fc_post.bias"] = F1(8),
-        };
-        int inCh = 8;
+            w[$"{prefix}.residual_fsq.rvqs.{g}.project_out.weight"] = F2(groupDim, codebookDim);   // Linear [out,in]
+            w[$"{prefix}.residual_fsq.rvqs.{g}.project_out.bias"] = F1(groupDim);
+        }
         for (int i = 0; i < qUp.Length; i++)
         {
-            int outCh = inCh / 2;
-            // ConvTranspose1d weight [C_in, C_out, K]; K = 2*stride.
-            w[$"quantizer.upsample.{i}.weight"] = F3(inCh, outCh, 2 * qUp[i]);
-            w[$"quantizer.upsample.{i}.bias"] = F1(outCh);
-            inCh = outCh;
+            w[$"{prefix}.upsample.{i}.0.conv.weight"] = F3(inputDim, inputDim, 2 * qUp[i]);   // ConvTranspose1d [Cin,Cout,K]
+            w[$"{prefix}.upsample.{i}.0.conv.bias"] = F1(inputDim);
+            AddConvNeXt(w, $"{prefix}.upsample.{i}.1", inputDim);
         }
         return w;
     }
 
-    internal static Dictionary<string, Tensor> FireflyWeights(int[] levels, int[] qUp, int genInit, int[] genRates, int[] genKernels)
+    // ConvNeXt block: depthwise (groups=dim) k=7 conv → LayerNorm → Linear dim→4dim → GELU → Linear 4dim→dim → gamma.
+    private static void AddConvNeXt(Dictionary<string, Tensor> w, string p, int dim, int kernel = 7, int mlpRatio = 4)
     {
-        Dictionary<string, Tensor> w = new(QuantizerWeights(levels, qUp))
-        {
-            // Gen conv_pre consumes the 1024-channel decoder input.
-            ["head.conv_pre.weight"] = F3(genInit, 1_024, 7),
-            ["head.conv_pre.bias"] = F1(genInit),
-            ["head.conv_post.weight"] = F3(1, genInit >> genRates.Length, 7),
-            ["head.conv_post.bias"] = F1(1),
-        };
-        for (int i = 0; i < genRates.Length; i++)
-        {
-            int inCh = genInit >> i, outCh = inCh >> 1;
-            w[$"head.ups.{i}.weight"] = F3(inCh, outCh, genKernels[i]);
-            w[$"head.ups.{i}.bias"] = F1(outCh);
-            w[$"head.resblocks.{i}.convs1.0.weight"] = F3(outCh, outCh, 3);
-            w[$"head.resblocks.{i}.convs1.0.bias"] = F1(outCh);
-            w[$"head.resblocks.{i}.convs2.0.weight"] = F3(outCh, outCh, 3);
-            w[$"head.resblocks.{i}.convs2.0.bias"] = F1(outCh);
-        }
+        int hidden = mlpRatio * dim;
+        w[$"{p}.dwconv.conv.weight"] = F3(dim, 1, kernel);   // depthwise: [dim, 1, k]
+        w[$"{p}.dwconv.conv.bias"] = F1(dim);
+        w[$"{p}.norm.weight"] = F1(dim);
+        w[$"{p}.norm.bias"] = F1(dim);
+        w[$"{p}.pwconv1.weight"] = F2(hidden, dim);
+        w[$"{p}.pwconv1.bias"] = F1(hidden);
+        w[$"{p}.pwconv2.weight"] = F2(dim, hidden);
+        w[$"{p}.pwconv2.bias"] = F1(dim);
+        w[$"{p}.gamma"] = F1(dim);
+    }
+
+    // Full firefly decoder weights = grouped-FSQ quantizer + SiLU HiFi-GAN generator ("head.*"), driven off the config.
+    internal static Dictionary<string, Tensor> FireflyWeights(FireflyConfig cfg, int nGroups)
+    {
+        Dictionary<string, Tensor> w = QuantizerWeights(cfg.FsqLevels, cfg.QuantizerUpsampleFactors, cfg.QuantizerInputDim, nGroups);
+        AddSiluGenerator(w, cfg);
         return w;
+    }
+
+    // SiLU HiFi-GAN generator: conv_pre (numMels→initCh) → per-stage [FishTransConvNet + parallel ResBlock1 branches]
+    // → conv_post (→1). Every conv is a FishConvNet/FishTransConvNet loaded from a `...conv.weight` (plain, no weight-norm).
+    private static void AddSiluGenerator(Dictionary<string, Tensor> w, FireflyConfig cfg, string prefix = "head")
+    {
+        int initCh = cfg.UpsampleInitialChannel;
+        w[$"{prefix}.conv_pre.conv.weight"] = F3(initCh, cfg.NumMels, cfg.PreConvKernelSize);
+        w[$"{prefix}.conv_pre.conv.bias"] = F1(initCh);
+        for (int i = 0; i < cfg.UpsampleRates.Length; i++)
+        {
+            int inCh = initCh >> i, outCh = initCh >> (i + 1);
+            w[$"{prefix}.ups.{i}.conv.weight"] = F3(inCh, outCh, cfg.UpsampleKernelSizes[i]);   // ConvTranspose1d [Cin,Cout,K]
+            w[$"{prefix}.ups.{i}.conv.bias"] = F1(outCh);
+            for (int k = 0; k < cfg.ResBlockKernelSizes.Length; k++)
+            {
+                int kk = cfg.ResBlockKernelSizes[k];
+                int[] dils = cfg.ResBlockDilations[k];
+                string rp = $"{prefix}.resblocks.{i}.blocks.{k}";
+                for (int j = 0; j < dils.Length; j++)
+                {
+                    w[$"{rp}.convs1.{j}.conv.weight"] = F3(outCh, outCh, kk);
+                    w[$"{rp}.convs1.{j}.conv.bias"] = F1(outCh);
+                    w[$"{rp}.convs2.{j}.conv.weight"] = F3(outCh, outCh, kk);
+                    w[$"{rp}.convs2.{j}.conv.bias"] = F1(outCh);
+                }
+            }
+        }
+        int chFinal = initCh >> cfg.UpsampleRates.Length;
+        w[$"{prefix}.conv_post.conv.weight"] = F3(1, chFinal, cfg.PostConvKernelSize);
+        w[$"{prefix}.conv_post.conv.bias"] = F1(1);
     }
 
     private static Dictionary<string, Tensor> DacWeights(int numResidual, int codebookDim, int latentDim, int decoderDim,

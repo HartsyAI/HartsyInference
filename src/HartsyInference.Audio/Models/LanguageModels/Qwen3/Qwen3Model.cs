@@ -58,11 +58,15 @@ public sealed class Qwen3Model : IDisposable
 
     /// <summary>Runs the decoder stack over <paramref name="embeds"/> <c>[1, t, hidden]</c> and returns the
     /// final-normed <c>[1, t, hidden]</c> hidden state. <paramref name="posStart"/> = cache length before this step.</summary>
-    public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, StreamingKvCache cache)
+    public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache)
     {
         ThrowIfDisposed();
         return _transformer.ForwardEmbeds(backend, embeds, t, posStart, cache);
     }
+
+    /// <summary>Allocates the efficient incremental decode cache for this model (<see cref="KvCaches.ForDecode"/>).
+    /// Prefer this over hand-rolling a cache. Dispose when done.</summary>
+    public IKvCache CreateDecodeCache(int maxSeqLen) => KvCaches.ForDecode(NumLayers, KvHeads, HeadDim, maxSeqLen);
 
     /// <summary>All weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights() => _transformer.EnumerateWeights();

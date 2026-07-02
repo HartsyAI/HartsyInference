@@ -1,8 +1,8 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Whisper;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.CosyVoice;
 
@@ -98,8 +98,7 @@ public sealed unsafe class CosyVoiceQwenLm : IDisposable
 
         // ── KV cache sized for prompt + generation ──
         int cacheCap = Math.Min(_cfg.Llm.MaxPositionEmbeddings, promptLen + maxTokens + 8);
-        using StreamingKvCache cache = new(_cfg.Llm.NumHiddenLayers, batch: 1,
-            _cfg.Llm.NumKeyValueHeads, cacheCap, _cfg.Llm.HeadDim);
+        using IKvCache cache = _backbone.CreateDecodeCache(cacheCap);
 
         List<int> generated = new(Math.Min(maxTokens, 256));
         SpeechSampler sampler = new(_cfg.Sampling, _eosSpeechToken, seed);

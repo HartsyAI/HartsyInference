@@ -1,15 +1,15 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Whisper;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.PocketTts;
 
 /// <summary>The Pocket-TTS <c>FlowLMModel</c>: an autoregressive streaming transformer over <b>continuous</b>
 /// audio latents. Each time step embeds its input (a text token early in the sequence, or the previous frame's
 /// latent projected into model width), runs the headless transformer (<see cref="Qwen2Model.ForwardEmbeds"/> with
-/// a <see cref="StreamingKvCache"/>), and feeds the resulting hidden into the per-frame
+/// an <see cref="IKvCache"/> from <see cref="Qwen2Model.CreateDecodeCache"/>), and feeds the resulting hidden into the per-frame
 /// <see cref="PocketTtsFlowHead"/> — a <b>regression</b> head (not token logits) that samples the next continuous
 /// latent via a short flow ODE. Generation runs text prefix → optional voice-prompt priming → AR latent loop, then
 /// decodes the collected latents through <see cref="MimiContinuousLatent.DecodeFromLatent"/> to 24 kHz PCM.
@@ -86,7 +86,7 @@ public sealed unsafe class PocketTtsModel : IDisposable
         genFrames = Math.Min(genFrames, _cfg.MaxFrames);
 
         int maxSeq = textTokens.Length + primeFrames + genFrames + 1;
-        using StreamingKvCache cache = new(_lmCfg.NumHiddenLayers, 1, _lmCfg.NumKeyValueHeads, maxSeq, _lmCfg.HeadDim);
+        using IKvCache cache = _transformer.CreateDecodeCache(maxSeq);
 
         int pos = 0;
 

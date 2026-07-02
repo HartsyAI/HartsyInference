@@ -4,7 +4,7 @@ using HartsyInference.Audio.Models.Codecs.NeuCodec;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.NeuTts;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
@@ -58,8 +58,7 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
             prompt[promptPrefix.Length + 1 + i] = _cfg.SpeechTokenBase + refCodes[i];
 
         int cacheCap = Math.Min(_cfg.Llm.MaxPositionEmbeddings, prompt.Length + maxTokens + 8);
-        using StreamingKvCache cache = new(_cfg.Llm.NumHiddenLayers, batch: 1,
-            _cfg.Llm.NumKeyValueHeads, cacheCap, _cfg.Llm.HeadDim);
+        using IKvCache cache = _lm.CreateDecodeCache(cacheCap);
 
         uint rng = DeterministicRng.Seed(seed);
         int vocab = _cfg.Llm.VocabSize;

@@ -86,49 +86,48 @@ public sealed unsafe class OobleckVaeTests
         mults[0] = 1;
         cfg.ChannelMultiples.CopyTo(mults, 1);
 
-        // ── Decoder ──
+        // ── Decoder: flat nn.Sequential — layers.0 stem WNConv1d, layers.{1..n} DecoderBlock
+        //    ([snake, convT, resUnit×3] at .layers.{0,1,2,3,4}), layers.{n+1} final snake, layers.{n+2} out conv. ──
         int[] decDims = new int[n + 1];
         for (int i = 0; i <= n; i++) decDims[i] = cfg.DecoderChannels * mults[n - i];
-        AddConv(w, rng, "decoder.conv1", decDims[0], cfg.DecoderInputChannels, 7, bias: true);
+        AddConv(w, rng, "decoder.layers.0", decDims[0], cfg.DecoderInputChannels, 7, bias: true);
         for (int i = 0; i < n; i++)
         {
-            string blk = $"decoder.block.{i}";
+            string blk = $"decoder.layers.{i + 1}";
             int stride = cfg.DownsamplingRatios[n - 1 - i];
-            AddSnake(w, $"{blk}.snake1", decDims[i]);
-            AddConvT(w, rng, $"{blk}.conv_t1", decDims[i], decDims[i + 1], 2 * stride);
-            AddResUnits(w, rng, blk, decDims[i + 1]);
+            AddSnake(w, $"{blk}.layers.0", decDims[i]);
+            AddConvT(w, rng, $"{blk}.layers.1", decDims[i], decDims[i + 1], 2 * stride);
+            for (int j = 0; j < 3; j++) AddResUnit(w, rng, $"{blk}.layers.{j + 2}", decDims[i + 1]);
         }
-        AddSnake(w, "decoder.snake1", decDims[^1]);
-        AddConv(w, rng, "decoder.conv2", cfg.AudioChannels, decDims[^1], 7, bias: false);
+        AddSnake(w, $"decoder.layers.{n + 1}", decDims[^1]);
+        AddConv(w, rng, $"decoder.layers.{n + 2}", cfg.AudioChannels, decDims[^1], 7, bias: false);   // out conv, bias=False
 
         if (!includeEncoder) return w;
 
-        // ── Encoder ──
+        // ── Encoder: layers.0 stem, layers.{1..n} EncoderBlock ([resUnit×3, snake, downConv] at .layers.{0..4}),
+        //    layers.{n+1} final snake, layers.{n+2} out conv (→ 2·latent Gaussian params, k=3). ──
         int[] encDims = new int[n + 1];
         for (int i = 0; i <= n; i++) encDims[i] = cfg.EncoderHiddenSize * mults[i];
-        AddConv(w, rng, "encoder.conv1", encDims[0], cfg.AudioChannels, 7, bias: true);
+        AddConv(w, rng, "encoder.layers.0", encDims[0], cfg.AudioChannels, 7, bias: true);
         for (int i = 0; i < n; i++)
         {
-            string blk = $"encoder.block.{i}";
-            AddResUnits(w, rng, blk, encDims[i]);
-            AddSnake(w, $"{blk}.snake1", encDims[i]);
-            AddConv(w, rng, $"{blk}.conv1", encDims[i + 1], encDims[i], 2 * cfg.DownsamplingRatios[i], bias: true);
+            string blk = $"encoder.layers.{i + 1}";
+            for (int j = 0; j < 3; j++) AddResUnit(w, rng, $"{blk}.layers.{j}", encDims[i]);
+            AddSnake(w, $"{blk}.layers.3", encDims[i]);
+            AddConv(w, rng, $"{blk}.layers.4", encDims[i + 1], encDims[i], 2 * cfg.DownsamplingRatios[i], bias: true);
         }
-        AddSnake(w, "encoder.snake1", encDims[^1]);
-        AddConv(w, rng, "encoder.conv2", cfg.EncoderHiddenSize, encDims[^1], 3, bias: true);
+        AddSnake(w, $"encoder.layers.{n + 1}", encDims[^1]);
+        AddConv(w, rng, $"encoder.layers.{n + 2}", 2 * cfg.DecoderInputChannels, encDims[^1], 3, bias: true);
         return w;
     }
 
-    private static void AddResUnits(Dictionary<string, Tensor> w, Random rng, string blk, int dim)
+    // ResidualUnit = Sequential[snake, WNConv1d(k7,dilated), snake, WNConv1d(k1)] at .layers.{0,1,2,3}.
+    private static void AddResUnit(Dictionary<string, Tensor> w, Random rng, string unit, int dim)
     {
-        for (int j = 0; j < 3; j++)
-        {
-            string unit = $"{blk}.res_unit{j + 1}";
-            AddSnake(w, $"{unit}.snake1", dim);
-            AddConv(w, rng, $"{unit}.conv1", dim, dim, 7, bias: true);
-            AddSnake(w, $"{unit}.snake2", dim);
-            AddConv(w, rng, $"{unit}.conv2", dim, dim, 1, bias: true);
-        }
+        AddSnake(w, $"{unit}.layers.0", dim);
+        AddConv(w, rng, $"{unit}.layers.1", dim, dim, 7, bias: true);
+        AddSnake(w, $"{unit}.layers.2", dim);
+        AddConv(w, rng, $"{unit}.layers.3", dim, dim, 1, bias: true);
     }
 
     private static void AddConv(Dictionary<string, Tensor> w, Random rng, string prefix, int oc, int ic, int k, bool bias)

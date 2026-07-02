@@ -1,8 +1,8 @@
 using System.Diagnostics;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.QwenTts;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
@@ -156,7 +156,7 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
             int h = _cfg.Talker.HiddenSize;
             int prefillLen = prefill.Count;
             int cap = Math.Min(_cfg.Talker.MaxPositionEmbeddings, prefillLen + _cfg.MaxNewTokens + 8);
-            using StreamingKvCache cache = new(_cfg.Talker.NumHiddenLayers, 1, _cfg.Talker.NumKeyValueHeads, cap, _cfg.Talker.HeadDim);
+            using IKvCache cache = _talker.Backbone.CreateDecodeCache(cap);
             uint rng = DeterministicRng.Seed(seed);
 
             // Build and run the prefill in one batched forward; the last position's hidden predicts codebook-0.

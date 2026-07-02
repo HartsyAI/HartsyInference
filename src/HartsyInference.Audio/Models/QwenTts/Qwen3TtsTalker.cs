@@ -1,9 +1,9 @@
 using HartsyInference.Audio.Models.LanguageModels.Qwen3;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
-using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.QwenTts;
 
@@ -90,7 +90,7 @@ public sealed unsafe class Qwen3TtsTalker : IDisposable
 
     /// <summary>Runs the headless backbone over a prepared <c>[1,t,hidden]</c> embedding block and returns the
     /// final-norm hidden <c>[1,t,hidden]</c>. Callers feed prefill in one shot then single steps.</summary>
-    public Tensor Forward(IBackend backend, Tensor embeds, int t, int posStart, StreamingKvCache cache)
+    public Tensor Forward(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache)
     {
         return _backbone.ForwardEmbeds(backend, embeds, t, posStart, cache);
     }

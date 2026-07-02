@@ -21,7 +21,7 @@ public sealed class CsmTests
         Assert.Equal(1_024, c.Decoder.HiddenSize);
         Assert.Equal(4, c.Decoder.NumHiddenLayers);
         Assert.False(c.Decoder.AttentionBias);
-        Assert.Equal(8, c.NumCodebooks);
+        Assert.Equal(32, c.NumCodebooks);                // 32 Mimi codebooks (decoder MaxPositionEmbeddings = 33 = NumCodebooks + 1)
         Assert.Equal(24_000, c.SampleRate);
         Assert.Equal(1_920, c.FrameSamples);             // 80 ms @ 24 kHz
     }
