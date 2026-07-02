@@ -1,10 +1,11 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Hunyuan Image dual-stream MMDiT block (<c>HunyuanImageTransformerBlock</c>). Maintains separate image and text streams with independent AdaLN-Zero modulation (6 params each: <c>shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp</c>) — chunked from a single Linear that emits <c>6 * hidden</c>. Joint attention applies image-only RoPE before concatenating <c>[img, txt]</c> along the sequence dim, then SDPA, then splits back to per-stream output projections. FFN is GELU-approximate (tanh) with <c>ff.net.0.proj</c> + <c>ff.net.2</c> diffusers naming. Mirrors <c>diffusers/models/transformers/transformer_hunyuanimage.py:HunyuanImageTransformerBlock.forward</c> 1:1.</summary>
-public sealed unsafe class HunyuanImageBlock
+public sealed unsafe class HunyuanImageBlock : IStreamingBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numHeads;
@@ -104,6 +105,12 @@ public sealed unsafe class HunyuanImageBlock
             weights[$"{prefix}.ff_context.net.0.proj.bias"],
             weights[$"{prefix}.ff_context.net.2.weight"],
             weights[$"{prefix}.ff_context.net.2.bias"]);
+    }
+
+    /// <summary>Sum of weight bytes in this streamable block (for the block-streaming budget heuristic).</summary>
+    public long EstimatedWeightBytes
+    {
+        get { long t = 0; foreach (Tensor w in EnumerateWeights()) t += w.ElementCount * w.DType.SizeInBytes; return t; }
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>

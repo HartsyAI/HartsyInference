@@ -23,7 +23,6 @@ public static unsafe class HunyuanVideoSyntheticWeights
         Dictionary<string, Tensor> w = new()
         {
             ["img_in.weight"] = T(r, h, patchVec), ["img_in.bias"] = T(r, h),
-            ["txt_in.weight"] = T(r, h, c.TextEmbedDim), ["txt_in.bias"] = T(r, h),
             ["time_in.0.weight"] = T(r, h, 256), ["time_in.0.bias"] = T(r, h),
             ["time_in.2.weight"] = T(r, h, h), ["time_in.2.bias"] = T(r, h),
             ["vector_in.0.weight"] = T(r, h, c.PooledEmbedDim), ["vector_in.0.bias"] = T(r, h),
@@ -31,6 +30,30 @@ public static unsafe class HunyuanVideoSyntheticWeights
             ["final_layer.mod.weight"] = T(r, 2 * h, h), ["final_layer.mod.bias"] = T(r, 2 * h),
             ["final_layer.proj.weight"] = T(r, outVec, h), ["final_layer.proj.bias"] = T(r, outVec),
         };
+        // guidance_in (plain HunyuanVideo embedded-guidance path only).
+        if (c.GuidanceEmbed)
+        {
+            w["guidance_in.0.weight"] = T(r, h, 256); w["guidance_in.0.bias"] = T(r, h);
+            w["guidance_in.2.weight"] = T(r, h, h); w["guidance_in.2.bias"] = T(r, h);
+        }
+        // Token refiner (txt_in): input_embedder + t/c embedders + 2 self-attention refiner blocks (Comfy naming).
+        int rm = 4 * h;   // refiner MLP inner (mlp_ratio 4)
+        w["txt_in.input_embedder.weight"] = T(r, h, c.TextEmbedDim); w["txt_in.input_embedder.bias"] = T(r, h);
+        w["txt_in.t_embedder.in_layer.weight"] = T(r, h, 256); w["txt_in.t_embedder.in_layer.bias"] = T(r, h);
+        w["txt_in.t_embedder.out_layer.weight"] = T(r, h, h); w["txt_in.t_embedder.out_layer.bias"] = T(r, h);
+        w["txt_in.c_embedder.in_layer.weight"] = T(r, h, c.TextEmbedDim); w["txt_in.c_embedder.in_layer.bias"] = T(r, h);
+        w["txt_in.c_embedder.out_layer.weight"] = T(r, h, h); w["txt_in.c_embedder.out_layer.bias"] = T(r, h);
+        for (int i = 0; i < 2; i++)
+        {
+            string rp = $"txt_in.individual_token_refiner.blocks.{i}";
+            w[$"{rp}.norm1.weight"] = Ones(h); w[$"{rp}.norm1.bias"] = T(r, h);
+            w[$"{rp}.norm2.weight"] = Ones(h); w[$"{rp}.norm2.bias"] = T(r, h);
+            w[$"{rp}.self_attn.qkv.weight"] = T(r, 3 * h, h); w[$"{rp}.self_attn.qkv.bias"] = T(r, 3 * h);
+            w[$"{rp}.self_attn.proj.weight"] = T(r, h, h); w[$"{rp}.self_attn.proj.bias"] = T(r, h);
+            w[$"{rp}.mlp.0.weight"] = T(r, rm, h); w[$"{rp}.mlp.0.bias"] = T(r, rm);
+            w[$"{rp}.mlp.2.weight"] = T(r, h, rm); w[$"{rp}.mlp.2.bias"] = T(r, h);
+            w[$"{rp}.adaLN_modulation.1.weight"] = T(r, 2 * h, h); w[$"{rp}.adaLN_modulation.1.bias"] = T(r, 2 * h);
+        }
         for (int i = 0; i < c.NumDoubleBlocks; i++)
         {
             string p = $"double_blocks.{i}";

@@ -170,6 +170,19 @@ public static class TestPaths
         public static string GemmaTokenizer => Resolve("LTX2_GEMMA_TOKENIZER", Path.Combine(ModelsDir, "Tokenizers", "Gemma", "tokenizer.model"));
     }
 
+    /// <summary>HunyuanVideo (Tencent 13B T2V) paths. The DiT single-file is the Comfy-Org repacked bf16 (original
+    /// Tencent naming — <see cref="HartsyInference.ModelHandler.CheckpointConverters.HunyuanVideoCheckpointConverter"/>
+    /// remaps to the hybrid DiT layout); the VAE is the HunyuanVideo 3D VAE; the primary text encoder is
+    /// LLaVA-Llama-3-8B (fp8 scaled) run via <c>LlamaStyleEncoder</c>(Llama31_8B) and CLIP-L for the pooled vector.
+    /// The Llama-3 + CLIP tokenizers are the embedded/standalone assets.</summary>
+    public static class HunyuanVideo
+    {
+        public static string Dit    => Resolve("HUNYUAN_VIDEO_DIT_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "HunyuanVideo", "hunyuan_video_t2v_720p_bf16.safetensors"));
+        public static string Vae    => Resolve("HUNYUAN_VIDEO_VAE_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "HunyuanVideo", "hunyuan_video_vae_bf16.safetensors"));
+        public static string Llava  => Resolve("HUNYUAN_VIDEO_LLAVA_PATH", Path.Combine(ModelsDir, "text_encoders", "llava_llama3_fp8_scaled.safetensors"));
+        public static string ClipL  => Resolve("HUNYUAN_VIDEO_CLIPL_PATH", Path.Combine(ModelsDir, "text_encoders", "clip_l.safetensors"));
+    }
+
     /// <summary>Qwen-Image paths. Default expects a single-file checkpoint at <c>Models/Stable-Diffusion/QwenImage/qwen_image_v1.safetensors</c>; the Qwen2.5-VL-7B text encoder and the 16-channel VAE are loaded separately.</summary>
     public static class QwenImage
     {

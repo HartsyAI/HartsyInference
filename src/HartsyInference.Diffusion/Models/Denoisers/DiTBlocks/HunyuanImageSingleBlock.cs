@@ -1,10 +1,11 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Hunyuan Image single-stream block (<c>HunyuanImageSingleTransformerBlock</c>). Concatenates <c>[img, txt]</c> first, then runs AdaLayerNormZeroSingle (3 params: <c>shift_msa, scale_msa, gate_msa</c>) on the joint sequence. Q/K/V projection happens on the joint normed sequence; image-only RoPE is applied to the image portion of Q/K. Parallel <c>proj_mlp + GELU(tanh)</c> path is concatenated with the attention output along the feature dim, then <c>proj_out</c> reduces back to <c>hidden_size</c> and a single gated residual is added to the joint sequence. Splits back to <c>(image, text)</c> on output.</summary>
-public sealed unsafe class HunyuanImageSingleBlock
+public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numHeads;
@@ -59,6 +60,12 @@ public sealed unsafe class HunyuanImageSingleBlock
 
         _projOutWeight = weights[$"{prefix}.proj_out.weight"];
         weights.TryGetValue($"{prefix}.proj_out.bias", out _projOutBias);
+    }
+
+    /// <summary>Sum of weight bytes in this streamable block (for the block-streaming budget heuristic).</summary>
+    public long EstimatedWeightBytes
+    {
+        get { long t = 0; foreach (Tensor w in EnumerateWeights()) t += w.ElementCount * w.DType.SizeInBytes; return t; }
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>

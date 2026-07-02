@@ -65,8 +65,8 @@ public sealed unsafe class HunyuanGameCraftPipeline : DiffusionPipelineBase
         {
             float t = tsteps[k], dt = t - tsteps[k + 1];
             Tensor composite = GameCraftLatentBuilder.Build(noisy, historyLatent, maskArr);
-            Tensor vCond = _dit.Forward(Backend, composite, promptEmbeds, pooled, t, cameraTokens);
-            Tensor vUncond = _dit.Forward(Backend, composite, negEmbeds, negPooled, t, cameraTokens);
+            Tensor vCond = _dit.Forward(Backend, composite, promptEmbeds, pooled, t, guidance: 0f, cameraTokens: cameraTokens);
+            Tensor vUncond = _dit.Forward(Backend, composite, negEmbeds, negPooled, t, guidance: 0f, cameraTokens: cameraTokens);
             composite.Dispose();
             LancePipelineCommon.EulerCfgStep(noisy, vCond, vUncond, guidance, dt);
             vCond.Dispose();
