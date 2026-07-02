@@ -775,8 +775,24 @@ public sealed class CudaBackend : IBackend
             }
             else
             {
+                // F32 input path: the kernel reads weight/bias AS F32, so a F16/BF16 affine (common for repacked
+                // VAEs, e.g. HunyuanVideo) must be upcast to F32 first — otherwise its raw bytes are misread as F32
+                // (~1e38 garbage → washed-out / near-zero output). Mirrors the F16/BF16 paths' F32→low-precision cast.
+                ulong wPtr = pW, bPtr = pB;
+                if (weight.DType != DType.F32)
+                {
+                    pWCast = CudaMemory.Allocate((nuint)(weight.ElementCount * 4));
+                    CastOnGpu(pWCast, pW, weight.DType, DType.F32, (int)weight.ElementCount);
+                    wPtr = pWCast;
+                }
+                if (bias.DType != DType.F32)
+                {
+                    pBCast = CudaMemory.Allocate((nuint)(bias.ElementCount * 4));
+                    CastOnGpu(pBCast, pB, bias.DType, DType.F32, (int)bias.ElementCount);
+                    bPtr = pBCast;
+                }
                 _kernels!.LaunchGroupNorm(
-                    pOut, pIn, pW, pB,
+                    pOut, pIn, wPtr, bPtr,
                     batch, channels, spatial, groups, eps,
                     _stream.Handle);
             }

@@ -52,7 +52,7 @@ public sealed record T5TextEncoderConfig
     /// with semantically-wrong conditioning — image quality high, prompt ignored.</summary>
     public bool UsePerLayerPositionBias { get; init; } = false;
 
-    /// <summary>T5 v1.1 XXL encoder preset for SD3/Flux text encoding.</summary>
+    /// <summary>T5 v1.1 XXL encoder preset for SD3/Flux/LTX text encoding.</summary>
     public static T5TextEncoderConfig Xxl => new()
     {
         DModel = 4096,
@@ -61,6 +61,11 @@ public sealed record T5TextEncoderConfig
         NumHeads = 64,
         NumLayers = 24,
         VocabSize = 32128,
+        AttentionScale = 1.0f,   // faithful T5 (all versions): no 1/sqrt(head_dim) scaling. The legacy null
+                                 // fallback (1/sqrt(dkv)) detuned every layer's softmax — same class of bug
+                                 // that produced Wan's flat videos via the Umt5Xxl preset. NOTE: this changes
+                                 // Flux/SD3/LTX conditioning (now matches the HF/Comfy reference); Flux/SD3
+                                 // outputs will shift and should be spot-checked.
     };
 
     /// <summary>Original T5 v1.0 base encoder preset (`google/t5-base`) — the text encoder MusicGen / AudioGen
@@ -128,5 +133,8 @@ public sealed record T5TextEncoderConfig
         NumLayers = 24,
         VocabSize = 256384,
         UsePerLayerPositionBias = true,
+        AttentionScale = 1.0f,   // faithful T5/UMT5: no 1/sqrt(head_dim) scaling. Leaving this null (legacy
+                                 // 1/sqrt(dkv) fallback) detunes every encoder layer's softmax and produces
+                                 // semantically-garbage Wan conditioning — the flat/uniform-color video bug.
     };
 }

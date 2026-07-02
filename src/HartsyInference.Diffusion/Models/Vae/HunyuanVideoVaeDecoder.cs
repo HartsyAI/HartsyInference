@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -108,11 +109,15 @@ public sealed class HunyuanVideoVaeDecoder
             throw new ArgumentException(
                 $"Expected latent [B, {_config.LatentChannels}, T, H, W]; got {latent.Shape}.", nameof(latent));
 
+        Stat(backend, "latent_in", latent);
         Tensor x = _postQuantConv!.Forward(backend, latent);
+        Stat(backend, "post_quant", x);
         Tensor h = _convIn!.Forward(backend, x);
+        Stat(backend, "conv_in", h);
         x.Dispose();
 
         Tensor cur = _mid!.Forward(backend, h);
+        Stat(backend, "mid", cur);
         h.Dispose();
         // The stream-ordered mempool (cuMemAllocAsync) only recycles a freed block once its cuMemFreeAsync is
         // processed — which needs a stream sync. Without one, a full-res decode's pool grows to the SUM of every
@@ -120,27 +125,34 @@ public sealed class HunyuanVideoVaeDecoder
         // cuMemPoolTrimTo, correctness-neutral, no-op off-CUDA) so peak stays bounded to one stage. See DecodeTiled.
         backend.TrimMemoryPool();
 
+        int si = 0;
         foreach (UpStage stage in _stages)
         {
+            int ri = 0;
             foreach (HunyuanVideoResnetBlock3d resnet in stage.Resnets)
             {
                 Tensor next = resnet.Forward(backend, cur);
                 cur.Dispose();
                 cur = next;
+                Stat(backend, $"up{si}.resnet{ri++}", cur);
             }
             if (stage.UpsampleConv is not null)
             {
                 Tensor up = Upsample(backend, cur, stage.Temporal, stage.Spatial, stage.UpsampleConv);
                 cur.Dispose();
                 cur = up;
+                Stat(backend, $"up{si}.upsample", cur);
             }
             backend.TrimMemoryPool();
+            si++;
         }
 
         Tensor normed = HunyuanVideoVaeKeys.GroupNormSilu3d(backend, cur, _normOutWeight!, _normOutBias!,
             _config.NormGroups, _config.NormEps);
+        Stat(backend, "norm_out", normed);
         cur.Dispose();
         Tensor rgb = _convOut!.Forward(backend, normed);
+        Stat(backend, "conv_out(rgb)", rgb);
         normed.Dispose();
         return rgb;
     }
@@ -243,6 +255,18 @@ public sealed class HunyuanVideoVaeDecoder
                         fop[(((long)c * tout + t) * Hpx + gy) * Wpx + gx] *= inv;
             }
         return outT;
+    }
+
+    /// <summary>Diagnostic: logs mean/std/range of a decode intermediate (forces a D2H sync — debug only).</summary>
+    private static unsafe void Stat(IBackend backend, string tag, Tensor t)
+    {
+        if (Environment.GetEnvironmentVariable("HYV_VAE_STAGES") != "1") return;
+        backend.Sync();
+        float* p = (float*)t.DataPointer; long n = t.Shape.ElementCount;
+        double s = 0, s2 = 0; float mn = float.MaxValue, mx = float.MinValue; long nan = 0;
+        for (long i = 0; i < n; i++) { float x = p[i]; if (float.IsNaN(x) || float.IsInfinity(x)) { nan++; continue; } s += x; s2 += (double)x * x; if (x < mn) mn = x; if (x > mx) mx = x; }
+        double m = s / n, sd = Math.Sqrt(Math.Max(0, s2 / n - m * m));
+        Logs.Info($"[VAE {tag,-16}] {t.Shape} mean={m:F4} std={sd:F4} range=[{mn:F3},{mx:F3}] NaN={nan}");
     }
 
     /// <summary>Tile start offsets along one axis: stride steps, with the final tile snapped to cover the edge.</summary>

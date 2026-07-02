@@ -76,7 +76,7 @@ public class HunyuanVideoGenerationTests
 
             _output.WriteLine("[2/6] Loading VAE...");
             HunyuanVideoVaeDecoder vae = new();
-            vae.LoadWeights(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath)));
+            vae.LoadWeights(CastBf16ToF16(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath))));
 
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
             backend.CacheWeightCasts = false;   // bf16 stays bf16-resident; block-streamed. Caching casts would OOM.
@@ -150,7 +150,7 @@ public class HunyuanVideoGenerationTests
         try
         {
             HunyuanVideoVaeDecoder vae = new();
-            vae.LoadWeights(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath)));
+            vae.LoadWeights(CastBf16ToF16(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath))));
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
             backend.CacheWeightCasts = false;
 
@@ -185,9 +185,10 @@ public class HunyuanVideoGenerationTests
             sw.Stop();
             _output.WriteLine($"VAE tiled-decode OK: latent [1,16,{tLat},{hLat},{wLat}] → rgb {rgb.Shape} in {sw.ElapsedMilliseconds}ms");
             float* rp = (float*)rgb.DataPointer;
-            double s = 0; long rn = rgb.Shape.ElementCount;
-            for (long i = 0; i < rn; i++) s += rp[i];
-            _output.WriteLine($"  rgb mean={s / rn:F4}");
+            double s = 0, s2 = 0; long rn = rgb.Shape.ElementCount; float rmin = float.MaxValue, rmax = float.MinValue;
+            for (long i = 0; i < rn; i++) { float x = rp[i]; s += x; s2 += (double)x * x; if (x < rmin) rmin = x; if (x > rmax) rmax = x; }
+            double rmean = s / rn; double rstd = Math.Sqrt(Math.Max(0, s2 / rn - rmean * rmean));
+            _output.WriteLine($"  rgb mean={rmean:F4} std={rstd:F4} range=[{rmin:F3},{rmax:F3}]");
             latent.Dispose(); rgb.Dispose();
         }
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
@@ -250,6 +251,16 @@ public class HunyuanVideoGenerationTests
 
     private static async IAsyncEnumerable<VideoFrame> ToAsync(VideoFrame[] frames)
     { foreach (VideoFrame f in frames) { yield return f; await Task.Yield(); } }
+
+    /// <summary>Casts BF16 tensors → F16 in place (same 2-byte size). BF16 weights run through the
+    /// CacheWeightCasts=false transient path are left unapplied → blank output; F16 is native cuBLAS. Applies to
+    /// both the DiT and the VAE (both ship as bf16 checkpoints).</summary>
+    private static Dictionary<string, Tensor> CastBf16ToF16(Dictionary<string, Tensor> w)
+    {
+        foreach (string k in w.Keys.ToList())
+            if (w[k].DType == DType.BF16) w[k] = w[k].CastTo(DType.F16);
+        return w;
+    }
 
     private static unsafe double Corr(float* a, float* b, long n)
     {

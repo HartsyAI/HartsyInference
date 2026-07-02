@@ -89,19 +89,14 @@ internal static class HunyuanVideoVaeKeys
     /// <summary>GroupNorm with clip-wide statistics over a <c>[B, C, T, H, W]</c> tensor, followed by SiLU. Views the clip as <c>[B, C, T·H·W, 1]</c> so the existing 4-D GroupNorm op normalizes over (C/g, T, H, W).</summary>
     public static Tensor GroupNormSilu3d(IBackend backend, Tensor x, Tensor weight, Tensor bias, int groups, float eps)
     {
-        int batch = (int)x.Shape[0];
-        int channels = (int)x.Shape[1];
-        long spatial = x.Shape[2] * x.Shape[3] * x.Shape[4];
-
-        TensorShape flatShape = new TensorShape([(long)batch, channels, spatial, 1]);
-        Tensor x4d = x.Reshape(flatShape);
+        // Operate on the native [B,C,T,H,W] shape — CudaBackend.GroupNorm derives spatial from dims 2+, so no
+        // reshape is needed. The previous reshape to [B,C,T·H·W,1] made GroupNorm cache its output on the *view*
+        // object while Silu read the parent → CUDA activation-cache miss → stale host zeros (the whole norm path
+        // silently produced 0; resnets masked it via their residual, but norm_out has none → blank decode). Keeping
+        // one object identity (normed) across GroupNorm + Silu fixes it. See cuda-activation-cache-reshape-identity.
         Tensor normed = new Tensor(x.Shape, DType.F32);
-        Tensor normed4d = normed.Reshape(flatShape);
-        backend.GroupNorm(normed4d, x4d, weight, bias, groups, eps);
+        backend.GroupNorm(normed, x, weight, bias, groups, eps);
         backend.Silu(normed, normed);
-        // x4d is a borrowed-memory view: its cached device buffer (a fresh upload distinct from x's) is dead after
-        // GroupNorm and would otherwise leak until GC — disposing frees only that device entry, not x's host memory.
-        x4d.Dispose();
         return normed;
     }
 }

@@ -214,15 +214,37 @@ public class WanVideoGenerationTests
                     init[o + 2] = (byte)(128 + 127 * Math.Sin(6.28 * (x + y) / 96.0));
                 }
 
-            // CLIP image embeds only for the CLIP-conditioned variant (Wan2.1 I2V-14B); A14B conditions via concat only.
+            // First-last-frame (FLF2V): a distinct last-frame image; WAN_FLF=1 enables it.
+            byte[]? lastImg = null;
+            if (Env("WAN_FLF") == "1")
+            {
+                lastImg = new byte[genW * genH * 3];
+                for (int y = 0; y < genH; y++)
+                    for (int x = 0; x < genW; x++)
+                    {
+                        int o = (y * genW + x) * 3;
+                        lastImg[o] = (byte)(255 * y / genH);
+                        lastImg[o + 1] = (byte)(255 * (genW - x) / genW);
+                        lastImg[o + 2] = (byte)(64 + 63 * Math.Cos(6.28 * (x - y) / 80.0));
+                    }
+            }
+
+            // CLIP image embeds only for the CLIP-conditioned variant (Wan2.1 I2V-14B / FLF2V); A14B conditions via concat only.
             Tensor? imageEmbeds = null;
             if (cfg.HasImageConditioning)
             {
-                _output.WriteLine("[clip] encoding reference image → 257×1280 penultimate hidden states...");
+                _output.WriteLine("[clip] encoding reference image(s) → penultimate hidden states...");
                 using SafeTensorsLoader clipLoader = new(); clipLoader.Load(clipPath);
                 ClipVisionEncoder clip = new(ClipVisionEncoderConfig.ViTH14); clip.LoadWeights(clipLoader.GetAllTensors());
                 using Tensor pix = new ClipImagePreprocessor().Preprocess(init, genW, genH);
-                imageEmbeds = clip.EncodeHiddenStates(backend, pix);
+                imageEmbeds = clip.EncodeHiddenStates(backend, pix); backend.Sync();
+                if (lastImg is not null)   // FLF2V: concat first+last CLIP embeds → [1,514,1280]
+                {
+                    using Tensor pixL = new ClipImagePreprocessor().Preprocess(lastImg, genW, genH);
+                    using Tensor le = clip.EncodeHiddenStates(backend, pixL); backend.Sync();
+                    Tensor cat = ConcatImageEmbeds(imageEmbeds, le);
+                    imageEmbeds.Dispose(); imageEmbeds = cat;
+                }
                 _output.WriteLine($"  imageEmbeds {string.Join("x", Enumerable.Range(0, imageEmbeds.Shape.Rank).Select(d => (long)imageEmbeds.Shape[d]))}");
                 backend.Sync();
                 backend.FreeWeights(clip.EnumerateWeights());   // reclaim CLIP VRAM before the DiT
@@ -243,7 +265,7 @@ public class WanVideoGenerationTests
             WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder, transformer2);
             TextToImageRequest req = new() { Prompt = "i2v", Width = genW, Height = genH, Steps = genSteps, CfgScale = cfg.GuidanceScale, Seed = 42 };
             (byte[][] frames, int w, int h, _) = pipeline.GenerateImageToVideoConcat(promptEmbeds, negEmbeds, imageEmbeds, init, req, genFrames,
-                p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+                p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); }, lastRgb24: lastImg);
             imageEmbeds?.Dispose(); promptEmbeds.Dispose(); negEmbeds.Dispose(); transformer2?.Dispose();
             AssertFramesCoherent(frames, w, h);
         }
@@ -344,6 +366,19 @@ public class WanVideoGenerationTests
             Assert.True(sum / f0.Length is > 25 and < 235, $"Wan2.1 VAE decode of a normal latent is degenerate (mean={(double)sum / f0.Length:F1}) — the z=16 VAE path is the bug.");
         }
         finally { foreach (SafeTensorsLoader l in vl) l.Dispose(); }
+    }
+
+    /// <summary>Concatenates two image-embed tensors <c>[1,Sa,D]+[1,Sb,D] → [1,Sa+Sb,D]</c> along the token axis (host)
+    /// — FLF2V feeds the first+last frames' CLIP hidden states as one 514-token context.</summary>
+    private static unsafe Tensor ConcatImageEmbeds(Tensor a, Tensor b)
+    {
+        int d = (int)a.Shape[a.Shape.Rank - 1];
+        int sa = (int)(a.ElementCount / d), sb = (int)(b.ElementCount / d);
+        Tensor o = new(new TensorShape([1L, sa + sb, d]), DType.F32);
+        float* op = (float*)o.DataPointer, ap = (float*)a.DataPointer, bp = (float*)b.DataPointer;
+        Buffer.MemoryCopy(ap, op, (long)(sa + sb) * d * 4, (long)sa * d * 4);
+        Buffer.MemoryCopy(bp, op + (long)sa * d, (long)sb * d * 4, (long)sb * d * 4);
+        return o;
     }
 
     /// <summary>Asserts a generated clip is real output: each frame has a wide value spread (not flat), and there is
