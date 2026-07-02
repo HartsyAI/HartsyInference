@@ -31,6 +31,183 @@ public class WanVideoGenerationTests
     private static double EnvD(string name, double fallback) =>
         double.TryParse(Environment.GetEnvironmentVariable(name), out double v) ? v : fallback;
 
+    private static string? Env(string name)
+    {
+        string? v = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(v) ? null : v;
+    }
+
+    /// <summary>Generalized real-weight e2e harness for ANY Wan variant, driven by env vars so one test validates the
+    /// whole family. Auto-detects the config from the checkpoint (<see cref="WanConfigDetector"/>), picks the z=16/48
+    /// VAE decoder, wires the MoE low-noise expert when given, and runs a short T2V clip — asserting the frames are
+    /// non-degenerate (real output, not black/uniform).
+    ///
+    /// <para>Env: <c>WAN_CKPT</c> (DiT, required), <c>WAN_VAE</c> (VAE safetensors, required), <c>WAN_CKPT_LOW</c> +
+    /// <c>WAN_BOUNDARY</c> (MoE A14B low-noise expert + boundary ratio), <c>WAN_FLOW_SHIFT</c>, and the shared
+    /// <c>WAN_W/H/FRAMES/STEPS/MIN_GB</c>. Text encoder is umT5 at <c>UMT5_XXL_PATH</c>.</para></summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public async Task WanVariant_Gpu_E2E()
+    {
+        string? ckpt = Env("WAN_CKPT");
+        if (ckpt is null) { _output.WriteLine("SKIPPED: set WAN_CKPT to a Wan DiT checkpoint to run the generalized variant harness."); return; }
+        string vaePath = Env("WAN_VAE") ?? TestPaths.WanVideo.VaePath;
+        string umt5Path = TestPaths.WanVideo.Umt5Xxl;
+        if (!File.Exists(ckpt)) { _output.WriteLine($"SKIPPED: WAN_CKPT not found: {ckpt}"); return; }
+        if (!File.Exists(vaePath)) { _output.WriteLine($"SKIPPED: WAN_VAE not found: {vaePath}"); return; }
+        if (!File.Exists(umt5Path)) { _output.WriteLine($"SKIPPED: umT5 not found: {umt5Path}"); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA"); return; }
+
+        Stopwatch sw = Stopwatch.StartNew();
+        _output.WriteLine($"[1/5] Load + convert DiT: {Path.GetFileName(ckpt)}");
+        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(ckpt);
+        using SafeTensorsLoader _dit = ditLoader;
+
+        // Auto-detect config from the checkpoint; apply the non-weight overrides (flow shift, MoE boundary).
+        WanVideoConfig cfg = WanConfigDetector.Detect(conv.Transformer);
+        string? lowPath = Env("WAN_CKPT_LOW");
+        float boundary = (float)EnvD("WAN_BOUNDARY", 0.0);
+        if (lowPath is not null && boundary > 0) cfg = cfg with { BoundaryRatio = boundary };
+        if (Env("WAN_FLOW_SHIFT") is not null) cfg = cfg with { FlowShift = (float)EnvD("WAN_FLOW_SHIFT", cfg.FlowShift) };
+        _output.WriteLine($"  detected → {WanConfigDetector.Describe(cfg)} ({conv.Transformer.Count} keys, {sw.ElapsedMilliseconds}ms)");
+
+        List<SafeTensorsLoader> loaders = [];
+        try
+        {
+            (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+            loaders.AddRange(vl);
+            using SafeTensorsLoader umt5Loader = new();
+            umt5Loader.Load(umt5Path);
+            Dictionary<string, Tensor> umt5W = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
+
+            using WanVideoTransformer transformer = new(cfg);
+            transformer.LoadWeights(conv.Transformer);
+
+            // MoE (A14B): load the low-noise expert into transformer2.
+            WanVideoTransformer? transformer2 = null;
+            SafeTensorsLoader? lowLoader = null;
+            if (lowPath is not null && File.Exists(lowPath))
+            {
+                (WanVideoCheckpointConverter.ConvertedWeights convLow, SafeTensorsLoader ll) = WanVideoCheckpointConverter.LoadAndConvert(lowPath);
+                lowLoader = ll; loaders.Add(ll);
+                transformer2 = new WanVideoTransformer(cfg);
+                transformer2.LoadWeights(convLow.Transformer);
+                _output.WriteLine($"  MoE low-noise expert loaded ({Path.GetFileName(lowPath)}), boundary={cfg.BoundaryRatio}");
+            }
+
+            // z=48 → Wan2.2 VAE decoder; z=16 → Wan2.1 VAE decoder.
+            IWanVaeDecoder vae;
+            if (cfg.VaeLatentChannels >= 48) { Wan22VaeDecoder d = new(); d.LoadWeights(vaeW); vae = d; }
+            else { Wan21VaeDecoder d = new(); d.LoadWeights(vaeW); vae = d; }
+
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            if (Environment.GetEnvironmentVariable("WAN_NO_CACHE_CASTS") == "1") backend.CacheWeightCasts = false;
+            (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
+            double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+            double minGb = EnvD("WAN_MIN_GB", 14.0);
+            if (freeGb < minGb) { _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free VRAM; need ≥{minGb}."); transformer2?.Dispose(); return; }
+
+            _output.WriteLine($"[3/5] umT5 encode...");
+            using T5TextEncoder umt5 = new(T5TextEncoderConfig.Umt5Xxl);
+            umt5.LoadWeights(umt5W);
+            using T5Tokenizer tokenizer = T5Tokenizer.CreateUmt5(maxLength: 512);
+            int[] promptTokens = tokenizer.Encode("a cinematic shot of a red fox trotting across a snowy field at dawn, shallow depth of field");
+            int[] negTokens = tokenizer.Encode("blurry, low quality, distorted, watermark");
+            Tensor tbatch = umt5.Encode(backend, [promptTokens, negTokens],
+                [T5Tokenizer.CreateAttentionMask(promptTokens), T5Tokenizer.CreateAttentionMask(negTokens)]);
+            int seqLen = promptTokens.Length;
+            Tensor promptEmbeds = CfgHelper.SliceBatchElement(tbatch, 0, seqLen, 4096);
+            Tensor negEmbeds = CfgHelper.SliceBatchElement(tbatch, 1, seqLen, 4096);
+            tbatch.Dispose();
+            backend.Sync();
+            backend.FreeWeights(umt5.EnumerateWeights());
+
+            int genW = (int)EnvD("WAN_W", 832), genH = (int)EnvD("WAN_H", 480);
+            int genFrames = (int)EnvD("WAN_FRAMES", 33), genSteps = (int)EnvD("WAN_STEPS", 20);
+            _output.WriteLine($"[4/5] Generating {genFrames}f {genW}x{genH}, {genSteps} steps...");
+            sw.Restart();
+            WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder: null, transformer2: transformer2);
+            TextToImageRequest req = new() { Prompt = "fox", Width = genW, Height = genH, Steps = genSteps, CfgScale = cfg.GuidanceScale, Seed = 42 };
+            (byte[][] frames, int w, int h, _) = pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, req, genFrames,
+                p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+            promptEmbeds.Dispose(); negEmbeds.Dispose(); transformer2?.Dispose();
+            _output.WriteLine($"[5/5] {frames.Length} frames in {sw.Elapsed.TotalMinutes:F2} min");
+
+            // Coherence: frames must be non-degenerate (spread + temporal variation), not black/uniform.
+            AssertFramesCoherent(frames, w, h);
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    /// <summary>Isolation diagnostic for the T2V-14B dark-output bug: decode a NORMAL(0,1) random z=16 latent through
+    /// the real-weight <see cref="Wan21VaeDecoder"/> alone (Wan 2.1 VAE, never before run on real weights). A healthy
+    /// VAE maps this to a mid-gray-ish image (mean ~90–160); a near-black result localizes the bug to the z=16 VAE.</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void Wan21Vae_Decode_NormalLatent_Gpu()
+    {
+        string vaePath = Env("WAN21_VAE") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/VAE/Wan/wan_2.1_vae.safetensors";
+        if (!File.Exists(vaePath)) { _output.WriteLine($"SKIPPED: Wan2.1 VAE not found: {vaePath}"); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir) || !CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no PTX/CUDA"); return; }
+
+        (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+        try
+        {
+            Wan21VaeDecoder vae = new();
+            vae.LoadWeights(vaeW);
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            _output.WriteLine($"  loaded Wan2.1 VAE: {vaeW.Count} keys");
+
+            int T = 3, hLat = 24, wLat = 40;   // → 8×: 192×320, temporal (3-1)*4+1 = 9 frames
+            Tensor latent = new(new TensorShape([1L, 16, T, hLat, wLat]), DType.F32);
+            Span<float> ls = latent.AsSpan<float>();
+            Random rng = new(7);
+            // Box–Muller normal(0,1): the transformer emits ~unit-variance latents pre-denorm.
+            for (int i = 0; i < ls.Length; i++)
+            {
+                double u1 = rng.NextDouble() + 1e-9, u2 = rng.NextDouble();
+                ls[i] = (float)(Math.Sqrt(-2 * Math.Log(u1)) * Math.Cos(2 * Math.PI * u2));
+            }
+            Tensor rgb = vae.Decode(backend, latent);
+            backend.Sync();
+            int frames = (int)rgb.Shape[2];
+            byte[] f0 = VideoRgbFrames.ExtractFrame(rgb, 0);
+            long sum = 0; byte mn = 255, mx = 0; foreach (byte b in f0) { sum += b; if (b < mn) mn = b; if (b > mx) mx = b; }
+            _output.WriteLine($"[out] {frames} frames; frame0 mean={(double)sum / f0.Length:F1} min={mn} max={mx}");
+            latent.Dispose(); rgb.Dispose();
+            Assert.True(sum / f0.Length is > 25 and < 235, $"Wan2.1 VAE decode of a normal latent is degenerate (mean={(double)sum / f0.Length:F1}) — the z=16 VAE path is the bug.");
+        }
+        finally { foreach (SafeTensorsLoader l in vl) l.Dispose(); }
+    }
+
+    /// <summary>Asserts a generated clip is real output: each frame has a wide value spread (not flat), and there is
+    /// temporal variation across frames (not a frozen/duplicated frame).</summary>
+    private void AssertFramesCoherent(byte[][] frames, int w, int h)
+    {
+        Assert.True(frames.Length > 0, "no frames produced");
+        double[] means = new double[frames.Length];
+        for (int f = 0; f < frames.Length; f++)
+        {
+            byte[] px = frames[f];
+            long sum = 0; byte mn = 255, mx = 0;
+            foreach (byte b in px) { sum += b; if (b < mn) mn = b; if (b > mx) mx = b; }
+            means[f] = (double)sum / px.Length;
+            Assert.True(mx - mn > 20, $"frame {f} is near-flat (min={mn} max={mx}) — degenerate output");
+        }
+        double meanMin = means.Min(), meanMax = means.Max();
+        double clipMean = means.Average();
+        _output.WriteLine($"  coherence: per-frame mean {meanMin:F1}..{meanMax:F1}, clip mean {clipMean:F1}, spread {meanMax - meanMin:F1}");
+        // Real video frames sit around mid-gray (~80–180); a near-black clip (mean < 25) is degenerate output even if
+        // it has some structure — this is the check that catches the "dark output" class of bugs.
+        Assert.True(clipMean is > 25 and < 235, $"clip mean {clipMean:F1} outside healthy range [25,235] — degenerate (too dark / blown out)");
+        // A static image repeated across frames would have ~0 spread; require some temporal motion for >1 frame.
+        if (frames.Length > 1)
+            Assert.True(meanMax - meanMin > 0.5, $"no temporal variation across {frames.Length} frames (all mean≈{meanMin:F1})");
+    }
+
     [Fact]
     public async Task Wan22Ti2V5B_Gpu_T2V_480p_ShortClip()
     {

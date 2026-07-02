@@ -323,4 +323,70 @@ public static unsafe class HunyuanVideoCheckpointConverter
         Buffer.MemoryCopy(sp, dp + block, block * 4, block * 4);   // src first half  (scale) → dst second half
         return dst;
     }
+
+    /// <summary>Converts a HunyuanVideo VAE checkpoint's DECODER from ldm/Tencent naming to the diffusers naming
+    /// <see cref="HartsyInference.Diffusion.Models.Vae.HunyuanVideoVaeDecoder"/> expects: <c>decoder.up.N</c>
+    /// (reversed) → <c>decoder.up_blocks.(numUp−1−N)</c>, <c>mid.block_1/2</c> → <c>mid_block.resnets.0/1</c>,
+    /// <c>mid.attn_1.{norm,q,k,v,proj_out}</c> → <c>mid_block.attentions.0.{group_norm,to_q,to_k,to_v,to_out.0}</c>
+    /// (attn projections reshaped <c>[C,C,1,1,1]→[C,C]</c>), <c>nin_shortcut</c> → <c>conv_shortcut</c>,
+    /// <c>norm_out</c> → <c>conv_norm_out</c>. Keeps <c>post_quant_conv</c>; drops the encoder + <c>quant_conv</c>
+    /// (decode-only). fp8 dequant runs first.</summary>
+    public static Dictionary<string, Tensor> ConvertVaeDecoder(Dictionary<string, Tensor> allWeights)
+    {
+        allWeights = CheckpointConvertUtils.ApplyFp8ScaledDequant(allWeights);
+        int numUp = 0;
+        foreach (string k in allWeights.Keys)
+            if (k.StartsWith("decoder.up.", StringComparison.Ordinal))
+            {
+                int dot = k.IndexOf('.', "decoder.up.".Length);
+                if (dot > 0 && int.TryParse(k["decoder.up.".Length..dot], out int n)) numUp = Math.Max(numUp, n + 1);
+            }
+
+        Dictionary<string, Tensor> o = new(allWeights.Count);
+        foreach ((string key, Tensor t) in allWeights)
+        {
+            if (key is "post_quant_conv.weight" or "post_quant_conv.bias") { o[key] = t; continue; }
+            if (!key.StartsWith("decoder.", StringComparison.Ordinal)) continue;   // drop encoder / quant_conv
+            string r = key["decoder.".Length..];
+            if (r.StartsWith("conv_in.", StringComparison.Ordinal) || r.StartsWith("conv_out.", StringComparison.Ordinal)) { o[key] = t; continue; }
+            if (r.StartsWith("norm_out.", StringComparison.Ordinal)) { o["decoder.conv_norm_out." + r["norm_out.".Length..]] = t; continue; }
+            if (r.StartsWith("mid.block_1.", StringComparison.Ordinal)) { o["decoder.mid_block.resnets.0." + r["mid.block_1.".Length..]] = t; continue; }
+            if (r.StartsWith("mid.block_2.", StringComparison.Ordinal)) { o["decoder.mid_block.resnets.1." + r["mid.block_2.".Length..]] = t; continue; }
+            if (r.StartsWith("mid.attn_1.", StringComparison.Ordinal))
+            {
+                string s = r["mid.attn_1.".Length..];
+                const string ab = "decoder.mid_block.attentions.0.";
+                if (s.StartsWith("norm.", StringComparison.Ordinal)) o[ab + "group_norm." + s["norm.".Length..]] = t;
+                else if (s.StartsWith("q.", StringComparison.Ordinal)) o[ab + "to_q." + s["q.".Length..]] = AttnProj(t, s);
+                else if (s.StartsWith("k.", StringComparison.Ordinal)) o[ab + "to_k." + s["k.".Length..]] = AttnProj(t, s);
+                else if (s.StartsWith("v.", StringComparison.Ordinal)) o[ab + "to_v." + s["v.".Length..]] = AttnProj(t, s);
+                else if (s.StartsWith("proj_out.", StringComparison.Ordinal)) o[ab + "to_out.0." + s["proj_out.".Length..]] = AttnProj(t, s);
+                continue;
+            }
+            if (r.StartsWith("up.", StringComparison.Ordinal))
+            {
+                int dot = r.IndexOf('.', 3);
+                int n = int.Parse(r[3..dot]);
+                int di = numUp - 1 - n;
+                string rest = r[(dot + 1)..];
+                if (rest.StartsWith("block.", StringComparison.Ordinal))
+                {
+                    string bm = rest["block.".Length..];
+                    int d2 = bm.IndexOf('.');
+                    int m = int.Parse(bm[..d2]);
+                    string sub = bm[(d2 + 1)..];
+                    string tgt = sub.StartsWith("nin_shortcut.", StringComparison.Ordinal) ? "conv_shortcut." + sub["nin_shortcut.".Length..] : sub;
+                    o[$"decoder.up_blocks.{di}.resnets.{m}.{tgt}"] = t;
+                }
+                else if (rest.StartsWith("upsample.conv.", StringComparison.Ordinal))
+                    o[$"decoder.up_blocks.{di}.upsamplers.0.conv." + rest["upsample.conv.".Length..]] = t;
+                continue;
+            }
+        }
+        return o;
+
+        // ldm attention q/k/v/proj_out are 1×1×1 convs [C,C,1,1,1]; the diffusers VaeAttention uses Linear [C,C].
+        static Tensor AttnProj(Tensor t, string sub) =>
+            sub.EndsWith(".weight", StringComparison.Ordinal) && t.Shape.Rank > 2 ? Reshape2D(t, (int)t.Shape[0]) : t;
+    }
 }

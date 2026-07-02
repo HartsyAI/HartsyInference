@@ -70,7 +70,7 @@ public class HunyuanVideoGenerationTests
 
             _output.WriteLine("[2/6] Loading VAE...");
             HunyuanVideoVaeDecoder vae = new();
-            vae.LoadWeights(StripPrefix(LoadStandalone(loaders, vaePath), "vae."));
+            vae.LoadWeights(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath)));
 
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
             backend.CacheWeightCasts = false;   // bf16 stays bf16-resident; block-streamed. Caching casts would OOM.
@@ -134,12 +134,15 @@ public class HunyuanVideoGenerationTests
         // Reference tokenizes the templated string with add_special_tokens=True (BOS prepended) then crops 95.
         // Special header/eot tokens are resolved by the Llama-3 tokenizer's added-token table. VALIDATION-GATED:
         // if special tokens are BPE'd literally, the crop count / conditioning will drift — verify vs the reference.
-        using LlamaTokenizer tok = new(maxLength: 512);
+        // Build from the embedded Llama-3 tokenizer.json (HF byte-level BPE) so the special header/eot literals
+        // resolve to single ids and the crop-95 alignment matches diffusers (add_special_tokens=True → BOS prepended).
+        using Stream json = EmbeddedTokenizerResources.OpenLlama3TokenizerJson();
+        GgufTokenizer tok = HfTokenizerJson.LoadByteLevelBpe(json);
         string templated = string.Format(PromptTemplate, prompt);
-        IReadOnlyList<int> ids = tok.EncodeRaw(templated);
-        int[] withBos = new int[ids.Count + 1];
-        withBos[0] = LlamaTokenizer.BosTokenId;
-        for (int i = 0; i < ids.Count; i++) withBos[i + 1] = ids[i];
+        int[] ids = tok.Encode(templated, addSpecial: true);
+        int[] withBos = new int[ids.Length + 1];
+        withBos[0] = tok.BosId ?? 128000;
+        Array.Copy(ids, 0, withBos, 1, ids.Length);
         return withBos;
     }
 
