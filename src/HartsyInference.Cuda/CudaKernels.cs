@@ -1523,14 +1523,19 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_wanVaeWriteFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Builds the frame-major padded input [paddedT, cIn, H, W] (transpose + causal zero-pad + cache) for
-    /// batched CausalConv3d. <paramref name="cache"/>=0 for none.</summary>
-    public unsafe void LaunchWanVaeBuildPadded(ulong padded, ulong input, ulong cache, int paddedT, int cIn, int Tin, int cacheLen, int zeroPad, int HW, nint stream)
+    /// <summary>Builds the frame-major padded input [paddedT, cIn, H+2·padH, W+2·padW] (transpose + temporal
+    /// zero/replicate-first pad + cache + spatial edge-replicate pad) for batched CausalConv3d.
+    /// <paramref name="cache"/>=0 for none.</summary>
+    public unsafe void LaunchWanVaeBuildPadded(ulong padded, ulong input, ulong cache, int paddedT, int cIn, int Tin, int cacheLen, int zeroPad,
+        int H, int W, int padH, int padW, bool replicateFirst, nint stream)
     {
-        ulong pA = padded, iA = input, cA = cache; uint ptA = (uint)paddedT, ciA = (uint)cIn, tiA = (uint)Tin, clA = (uint)cacheLen, zpA = (uint)zeroPad, hwA = (uint)HW;
-        void** args = stackalloc void*[9];
-        args[0] = &pA; args[1] = &iA; args[2] = &cA; args[3] = &ptA; args[4] = &ciA; args[5] = &tiA; args[6] = &clA; args[7] = &zpA; args[8] = &hwA;
-        long total = (long)paddedT * cIn * HW;
+        ulong pA = padded, iA = input, cA = cache;
+        uint ptA = (uint)paddedT, ciA = (uint)cIn, tiA = (uint)Tin, clA = (uint)cacheLen, zpA = (uint)zeroPad;
+        uint hA = (uint)H, wA = (uint)W, phA = (uint)padH, pwA = (uint)padW, rfA = replicateFirst ? 1u : 0u;
+        void** args = stackalloc void*[13];
+        args[0] = &pA; args[1] = &iA; args[2] = &cA; args[3] = &ptA; args[4] = &ciA; args[5] = &tiA; args[6] = &clA; args[7] = &zpA;
+        args[8] = &hA; args[9] = &wA; args[10] = &phA; args[11] = &pwA; args[12] = &rfA;
+        long total = (long)paddedT * cIn * (H + 2L * padH) * (W + 2L * padW);
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }

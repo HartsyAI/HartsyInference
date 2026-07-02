@@ -166,6 +166,9 @@ public sealed unsafe class Tensor : IDisposable
             Tensor copy = new Tensor(Shape, DType, Device);
             long byteSize = DType.ComputeByteCount(Shape.ElementCount);
             Buffer.MemoryCopy(ptr, copy.DataPointer, byteSize, byteSize);
+            // A byte-identical copy of an fp8_scaled tensor is still scaled — dropping the factor here would
+            // silently rescale the weight by 1/scale at the next GEMM.
+            copy.Fp8ScaleFactor = Fp8ScaleFactor;
             return copy;
         }
 
@@ -189,6 +192,11 @@ public sealed unsafe class Tensor : IDisposable
         try
         {
             long count = Shape.ElementCount;
+            // Dequantizing an fp8_scaled tensor must fold the per-tensor scale into the values: the fp8 bytes
+            // alone are `real_value / scale`. The result carries factor 1.0 (already applied), so downstream
+            // GEMM alpha logic sees an ordinary unscaled tensor. Scale is 1.0 for everything non-fp8_scaled,
+            // making the multiply a no-op on plain checkpoints.
+            float fp8Scale = Fp8ScaleFactor;
 
             if (DType == DType.F32 && targetDtype == DType.F16)
             {
@@ -227,7 +235,7 @@ public sealed unsafe class Tensor : IDisposable
                 ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
                 Span<float> dst = new Span<float>(result.DataPointer, (int)count);
                 for (int i = 0; i < (int)count; i++)
-                    dst[i] = Fp8E4M3ToFloat(src[i]);
+                    dst[i] = Fp8E4M3ToFloat(src[i]) * fp8Scale;
             }
             else if (DType == DType.F32 && targetDtype == DType.F8E4M3)
             {
@@ -241,7 +249,7 @@ public sealed unsafe class Tensor : IDisposable
                 ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
                 Span<Half> dst = new Span<Half>(result.DataPointer, (int)count);
                 for (int i = 0; i < (int)count; i++)
-                    dst[i] = (Half)Fp8E4M3ToFloat(src[i]);
+                    dst[i] = (Half)(Fp8E4M3ToFloat(src[i]) * fp8Scale);
             }
             else if (DType == DType.F16 && targetDtype == DType.F8E4M3)
             {
@@ -255,7 +263,7 @@ public sealed unsafe class Tensor : IDisposable
                 ReadOnlySpan<byte> src = new ReadOnlySpan<byte>(ptr, (int)count);
                 Span<float> dst = new Span<float>(result.DataPointer, (int)count);
                 for (int i = 0; i < (int)count; i++)
-                    dst[i] = Fp8E5M2ToFloat(src[i]);
+                    dst[i] = Fp8E5M2ToFloat(src[i]) * fp8Scale;
             }
             else if (DType == DType.F32 && targetDtype == DType.F8E5M2)
             {
@@ -296,7 +304,7 @@ public sealed unsafe class Tensor : IDisposable
                 Span<ushort> dst = new Span<ushort>(result.DataPointer, (int)count);
                 for (int i = 0; i < (int)count; i++)
                 {
-                    float f = Fp8E4M3ToFloat(src[i]);
+                    float f = Fp8E4M3ToFloat(src[i]) * fp8Scale;
                     dst[i] = (ushort)(BitConverter.SingleToUInt32Bits(f) >> 16);
                 }
             }

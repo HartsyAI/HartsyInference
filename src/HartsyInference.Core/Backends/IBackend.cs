@@ -297,14 +297,19 @@ public interface IBackend : IDisposable
             }
     }
 
-    /// <summary>Builds the frame-major padded input <c>[paddedT, cIn, H, W]</c> for BATCHED CausalConv3d: transpose
-    /// (cIn↔T) + causal zero-pad (first <paramref name="zeroPad"/> frames) + cache prepend, from
-    /// <paramref name="input"/> <c>[1,cIn,Tin,H,W]</c> and optional <paramref name="cache"/> <c>[1,cIn,cacheLen,H,W]</c>.
-    /// CUDA overrides.</summary>
-    unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad)
+    /// <summary>Builds the frame-major padded input <c>[paddedT, cIn, H+2·padH, W+2·padW]</c> for BATCHED
+    /// CausalConv3d: transpose (cIn↔T) + temporal pad (first <paramref name="zeroPad"/> frames: zeros, or the first
+    /// content frame when <paramref name="replicateFirst"/>) + cache prepend + optional spatial edge-replicate pad
+    /// (<paramref name="padH"/>/<paramref name="padW"/> &gt; 0 → source pixel clamped, so the caller convolves with
+    /// zero padding disabled), from <paramref name="input"/> <c>[1,cIn,Tin,H,W]</c> and optional
+    /// <paramref name="cache"/> <c>[1,cIn,cacheLen,H,W]</c>. CUDA overrides.</summary>
+    unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad,
+        bool replicateFirst = false, int padH = 0, int padW = 0)
     {
         int paddedT = (int)padded.Shape[0], cIn = (int)padded.Shape[1];
-        long HW = padded.ElementCount / ((long)paddedT * cIn);
+        int H = (int)input.Shape[3], W = (int)input.Shape[4];
+        int Hp = H + 2 * padH, Wp = W + 2 * padW;
+        long HW = (long)H * W;
         int Tin = (int)input.Shape[2];
         int cacheLen = cache is null ? 0 : (int)cache.Shape[2];
         float* pp = (float*)padded.DataPointer, ip = (float*)input.DataPointer;
@@ -312,13 +317,29 @@ public interface IBackend : IDisposable
         for (int t = 0; t < paddedT; t++)
             for (int ci = 0; ci < cIn; ci++)
             {
-                long dst = ((long)t * cIn + ci) * HW;
-                if (t < zeroPad) { for (long i = 0; i < HW; i++) pp[dst + i] = 0f; }
+                long dst = ((long)t * cIn + ci) * Hp * Wp;
+                if (t < zeroPad && !replicateFirst)
+                {
+                    for (long i = 0; i < (long)Hp * Wp; i++) pp[dst + i] = 0f;
+                    continue;
+                }
+                int az = t < zeroPad ? 0 : t - zeroPad;   // replicate-first: pad frames clamp to the first content frame
+                float* src;
+                if (az < cacheLen) src = cp! + ((long)ci * cacheLen + az) * HW;
                 else
                 {
-                    int az = t - zeroPad;
-                    if (az < cacheLen) { long src = ((long)ci * cacheLen + az) * HW; for (long i = 0; i < HW; i++) pp[dst + i] = cp![src + i]; }
-                    else { int ti = az - cacheLen; if (ti >= Tin) ti = Tin - 1; long src = ((long)ci * Tin + ti) * HW; for (long i = 0; i < HW; i++) pp[dst + i] = ip[src + i]; }
+                    int ti = az - cacheLen;
+                    if (ti >= Tin) ti = Tin - 1;          // trailing clamp (non-causal replicate)
+                    src = ip + ((long)ci * Tin + ti) * HW;
+                }
+                for (int y = 0; y < Hp; y++)
+                {
+                    int sy = Math.Clamp(y - padH, 0, H - 1);
+                    for (int x = 0; x < Wp; x++)
+                    {
+                        int sx = Math.Clamp(x - padW, 0, W - 1);
+                        pp[dst + (long)y * Wp + x] = src[(long)sy * W + sx];
+                    }
                 }
             }
     }

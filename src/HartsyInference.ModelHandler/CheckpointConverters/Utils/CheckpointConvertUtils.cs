@@ -280,7 +280,10 @@ public static unsafe class CheckpointConvertUtils
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
     {
         // First pass: gather scale companions keyed by the base name (the part before the suffix).
+        // `.weight_scale_2` is nvfp4's global scalar (block scales live in `.weight_scale`); note that
+        // ".weight_scale_2".EndsWith(".weight_scale") is FALSE, so the two never collide in the buckets.
         Dictionary<string, Tensor> weightScales = new();
+        Dictionary<string, Tensor> weightScale2s = new();
         bool sawAnyScale = false;
         foreach (KeyValuePair<string, Tensor> kvp in source)
         {
@@ -293,6 +296,11 @@ public static unsafe class CheckpointConvertUtils
             if (baseKey is not null)
             {
                 weightScales[baseKey] = kvp.Value;
+                sawAnyScale = true;
+            }
+            else if (key.EndsWith(".weight_scale_2", StringComparison.Ordinal))
+            {
+                weightScale2s[key[..^".weight_scale_2".Length]] = kvp.Value;
                 sawAnyScale = true;
             }
             else if (key.EndsWith(".scale_input", StringComparison.Ordinal) ||
@@ -314,6 +322,7 @@ public static unsafe class CheckpointConvertUtils
             if (key.EndsWith(".scale_weight", StringComparison.Ordinal) ||
                 key.EndsWith(".scale_input", StringComparison.Ordinal) ||
                 key.EndsWith(".weight_scale", StringComparison.Ordinal) ||
+                key.EndsWith(".weight_scale_2", StringComparison.Ordinal) ||
                 key.EndsWith(".input_scale", StringComparison.Ordinal) ||
                 key.EndsWith(".comfy_quant", StringComparison.Ordinal) ||
                 key == "scaled_fp8")
@@ -335,9 +344,99 @@ public static unsafe class CheckpointConvertUtils
                 }
             }
 
+            // NVFP4 (ComfyUI comfy_quant "nvfp4"): U8 weight packing two e2m1 values per byte, with per-16-element
+            // F8-E4M3 block scales in `.weight_scale` and a global F32 scalar in `.weight_scale_2`. Identified
+            // structurally (that companion combination exists for no other format) and dequantized to F16 host-side
+            // at load — there is no per-block-scale GEMM path in the backends.
+            if (kvp.Value.DType == DType.U8 && key.EndsWith(".weight", StringComparison.Ordinal))
+            {
+                string baseKey = key[..^".weight".Length];
+                if (weightScales.TryGetValue(baseKey, out Tensor? blockScales) && blockScales.DType == DType.F8E4M3
+                    && blockScales.Shape.Rank == 2
+                    && weightScale2s.TryGetValue(baseKey, out Tensor? scale2T) && scale2T.DType == DType.F32)
+                {
+                    float globalScale = ((float*)scale2T.DataPointer)[0];
+                    result[key] = DequantNvfp4ToF16(kvp.Value, blockScales, globalScale);
+                    continue;
+                }
+            }
+
             result[key] = kvp.Value;
         }
         return result;
     }
 
+    /// <summary>The 8 magnitudes representable by FP4 E2M1, indexed by bits [e1 e0 m]: exp==0 → {0, 0.5}
+    /// (subnormal), exp>0 → 2^(exp-1) · (1 + m/2). Bit 3 of the nibble is the sign.</summary>
+    private static readonly float[] E2M1Magnitudes = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
+
+    /// <summary>256-entry FP8-E4M3FN decode table (built once). Index = raw byte. E4M3FN: bias 7, no infinities,
+    /// exp=15/man=7 is NaN, max ±448.</summary>
+    private static readonly float[] E4M3Table = BuildE4M3Table();
+
+    private static float[] BuildE4M3Table()
+    {
+        float[] table = new float[256];
+        for (int b = 0; b < 256; b++)
+        {
+            int sign = (b >> 7) & 1;
+            int exp = (b >> 3) & 0xF;
+            int man = b & 7;
+            float value;
+            if (exp == 15 && man == 7)
+                value = float.NaN;
+            else if (exp == 0)
+                value = man / 8f * MathF.Pow(2f, -6f);          // subnormal
+            else
+                value = MathF.Pow(2f, exp - 7) * (1f + man / 8f); // normal
+            table[b] = sign == 1 ? -value : value;
+        }
+        return table;
+    }
+
+    /// <summary>Dequantizes an NVFP4 weight to F16. <paramref name="packed"/> is U8 <c>[rows, cols/2]</c> with two
+    /// e2m1 values per byte — element <c>2j</c> in the LOW nibble, <c>2j+1</c> in the HIGH nibble (PyTorch
+    /// <c>float4_e2m1fn_x2</c> / TensorRT convention, which ComfyUI follows). <paramref name="blockScales"/> is
+    /// F8-E4M3 <c>[rows, cols/16]</c> — one scale per 16 consecutive input-dim elements. The full value is
+    /// <c>e2m1 · block_scale · globalScale</c>. Rows are dequantized in parallel (pure per-row writes).</summary>
+    public static Tensor DequantNvfp4ToF16(Tensor packed, Tensor blockScales, float globalScale)
+    {
+        if (packed.DType != DType.U8 || packed.Shape.Rank != 2)
+            throw new ArgumentException($"NVFP4 packed weight must be U8 rank-2; got {packed.DType} {packed.Shape}.");
+        long rows = packed.Shape[0];
+        long packedCols = packed.Shape[1];
+        long cols = packedCols * 2;
+        long scaleCols = blockScales.Shape[1];
+        if (blockScales.Shape[0] != rows || scaleCols * 16 != cols)
+            throw new ArgumentException(
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not match packed weight [{rows}, {packedCols}] (expect [rows, cols/16]).");
+
+        Tensor result = new Tensor(new TensorShape(rows, cols), DType.F16);
+        unsafe
+        {
+            byte* src = (byte*)packed.DataPointer;
+            byte* scales = (byte*)blockScales.DataPointer;
+            Half* dst = (Half*)result.DataPointer;
+            float[] e2m1 = E2M1Magnitudes;
+            float[] e4m3 = E4M3Table;
+            Parallel.For(0, (int)rows, r =>
+            {
+                byte* rowSrc = src + (long)r * packedCols;
+                byte* rowScales = scales + (long)r * scaleCols;
+                Half* rowDst = dst + (long)r * cols;
+                for (long j = 0; j < packedCols; j++)
+                {
+                    // 8 packed bytes per 16-element scale block → scale index = j/8.
+                    float scale = e4m3[rowScales[j >> 3]] * globalScale;
+                    byte b = rowSrc[j];
+                    int lo = b & 0xF, hi = b >> 4;
+                    float loVal = e2m1[lo & 7] * scale;
+                    float hiVal = e2m1[hi & 7] * scale;
+                    rowDst[j * 2] = (Half)((lo & 8) != 0 ? -loVal : loVal);
+                    rowDst[j * 2 + 1] = (Half)((hi & 8) != 0 ? -hiVal : hiVal);
+                }
+            });
+        }
+        return result;
+    }
 }

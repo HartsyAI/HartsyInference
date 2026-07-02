@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <para>Two things are NOT recoverable from a single DiT file and are left at their config defaults for the caller to
 /// override: the <b>MoE boundary ratio</b> (Wan2.2 A14B ships as two architecturally-identical expert files, so
 /// "is this MoE" is a packaging fact, not a weight fact) and the resolution-specific <b>flow shift</b> (3.0 for 480p /
-/// 5.0 for 720p). VACE control layers are also not in the base DiT (they ship in a separate control checkpoint).</para></summary>
+/// 5.0 for 720p). VACE checkpoints (merged base + control branch) are detected via <c>vace_patch_embedding</c>.</para></summary>
 public static class WanConfigDetector
 {
     /// <summary>Builds a <see cref="WanVideoConfig"/> from converted transformer weights
@@ -61,8 +61,26 @@ public static class WanConfigDetector
         // renormalization for them (fp16/bf16 stay at 0 = plain CFG, byte-identical). Detect fp8 by the matmul dtype.
         float cfgRescale = w.TryGetValue("blocks.0.ffn.net.0.proj.weight", out Tensor? ffn0) && ffn0.DType.IsFp8 ? 0.7f : 0f;
 
+        // VACE control branch: vace_patch_embedding [inner, vaceIn, pt, ph, pw] + evenly-spread vace_blocks
+        // (block i attaches to main layer i·(numLayers/count) — comfy's vace_layers_mapping).
+        int vaceInChannels = 0;
+        int[] vaceLayers = [];
+        if (w.TryGetValue("vace_patch_embedding.weight", out Tensor? vacePatch))
+        {
+            vaceInChannels = (int)vacePatch.Shape[1];
+            int vaceCount = 0;
+            while (w.ContainsKey($"vace_blocks.{vaceCount}.proj_out.weight")) vaceCount++;
+            if (vaceCount == 0 || numLayers % vaceCount != 0)
+                throw new ArgumentException($"VACE DiT: {vaceCount} vace_blocks don't evenly divide {numLayers} layers.", nameof(w));
+            int step = numLayers / vaceCount;
+            vaceLayers = new int[vaceCount];
+            for (int i = 0; i < vaceCount; i++) vaceLayers[i] = i * step;
+        }
+
         return new WanVideoConfig
         {
+            VaceLayers = vaceLayers,
+            VaceInChannels = vaceInChannels,
             CfgRescale = cfgRescale,
             PatchSize = patchSize,
             NumHeads = numHeads,
@@ -85,5 +103,6 @@ public static class WanConfigDetector
         $"in={c.InChannels} out={c.OutChannels} z={c.VaeLatentChannels}/{c.VaeSpatialCompression}× " +
         (c.HasImageConditioning ? $"I2V-CLIP(img={c.ImageDim},pos={c.PosEmbedSeqLen}) " : "") +
         (c.InChannels > c.OutChannels ? "concat-I2V " : "") +
+        (c.VaceLayers.Length > 0 ? $"VACE(in={c.VaceInChannels},blocks={c.VaceLayers.Length}) " : "") +
         (c.IsMixtureOfExperts ? $"MoE(boundary={c.BoundaryRatio}) " : "");
 }

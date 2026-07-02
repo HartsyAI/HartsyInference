@@ -210,6 +210,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // (~hundreds of ms) that's strictly cheaper than swapping mid-pipeline.
         Backend.FreeWeights(_t5.EnumerateWeights());
 
+        // Materialize the conditioning on the host (clipPooled already is — ExtractEosHiddenState reads it),
+        // then reclaim every encoder intermediate. CLIP+T5 leave hundreds of device-cached activations that
+        // otherwise linger until GC finalization — they held multi-GB into the DiT phase and were a chunk of
+        // the fp8 auto-transfer OOM. Same per-step pattern the video pipelines already use.
+        _ = t5Embeddings.DataPointer;
+        if (negT5Embeddings is not null) _ = negT5Embeddings.DataPointer;
+        Backend.FreeActivations();
+
         // ── 2. Set up dynamic flow-match scheduler ─────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
         int hPacked = latentH / 2;
@@ -334,6 +342,17 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             regionWeights = new float[regionalPlan!.Regions.Count];
         }
 
+        // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode /
+        // packing intermediates (control, Kontext, img2img source). The per-step FreeActivations below frees
+        // device buffers WITHOUT a D2H sync-back, so anything still device-only here would be silently lost.
+        _ = condStream.DataPointer;
+        _ = packedLatent.DataPointer;
+        if (packedControl is not null) _ = packedControl.DataPointer;
+        if (packedKontextRef is not null) _ = packedKontextRef.DataPointer;
+        if (packedSourceLatent is not null) _ = packedSourceLatent.DataPointer;
+        if (packedMask is not null) _ = packedMask.DataPointer;
+        Backend.FreeActivations();
+
         Logs.Info("Starting Flux denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -441,6 +460,12 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 }
                 finally { previewLatent.Dispose(); }
             }
+
+            // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and
+            // any not read-back/disposed linger until GC, accumulating to OOM over the schedule (same fix as the
+            // video pipelines). Safe: SchedulerStepPacked runs on the host, so packedLatent — the only tensor the
+            // next step needs — is host-resident, and everything else persistent was materialized above the loop.
+            Backend.FreeActivations();
         }
 
         clipPooled.Dispose();
@@ -524,6 +549,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // ── 8. Convert to RGB bytes ───────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+
+        // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
+        // memory until GC finalization and shrink the budget of whatever generation runs next.
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Flux ({baseMode}) {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

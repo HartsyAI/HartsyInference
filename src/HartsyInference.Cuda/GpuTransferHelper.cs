@@ -81,6 +81,11 @@ internal static unsafe class GpuTransferHelper
         // Cache also drains its own upload stream + calls cuMemPoolTrimTo on the
         // default mempool. No-op if no streaming cache is wired (CPU/Vulkan, tests).
         _streamingCache?.DrainAndReleasePool();
+        // Always trim the default pool too: with no streaming cache wired (auto-transfer paths, tests), every
+        // cuMemFreeAsync'd transient stays RESERVED in the stream-ordered pool. An OOM retry that never trims
+        // reports "GPU full" (cuMemGetInfo counts reservations as used) even though most of it is reusable —
+        // the fp8 auto-transfer Flux/T5 OOM at 0.9% free.
+        TrimPool();
     }
 
     /// <summary>Returns the GPU device pointer for a tensor, using caches to avoid transfers. Priority: weight cache → activation cache → fresh H2D transfer.</summary>

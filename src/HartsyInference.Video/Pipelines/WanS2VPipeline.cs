@@ -133,7 +133,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
                 Tensor vCond = _transformer.Forward(Backend, modelInput, audioTokens, promptEmbeds, tEmb);
                 Tensor vUncond = _transformer.Forward(Backend, modelInput, audioTokens, negativeEmbeds, tEmb);
                 modelInput.Dispose();
-                LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+                LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
                 scheduler.Step(latents, vCond);
                 vCond.Dispose(); vUncond.Dispose();
                 sw.Stop();
@@ -270,7 +270,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             float tEmb = scheduler.Timesteps[k];
             Tensor vCond = _transformer.Forward(Backend, latents, audioTokens, promptEmbeds, tEmb);
             Tensor vUncond = _transformer.Forward(Backend, latents, audioTokens, negativeEmbeds, tEmb);
-            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();

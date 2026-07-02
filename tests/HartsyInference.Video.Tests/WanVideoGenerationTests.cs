@@ -272,6 +272,154 @@ public class WanVideoGenerationTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    /// <summary>Real-weight e2e for Wan2.1 VACE (control-video conditioning): loads the merged VACE DiT (config +
+    /// control branch auto-detected via <c>vace_patch_embedding</c>), the z=16 VAE (decoder + encoder), builds a
+    /// synthetic moving-square control clip, and runs <see cref="WanVacePipeline.GenerateFromControl"/> in full-control
+    /// mode (null mask → inactive = gray, reactive = control). Env: <c>WAN_VACE_CKPT</c>, <c>WAN_VAE</c> (z=16 VAE),
+    /// plus the shared <c>WAN_W/H/FRAMES/STEPS/MIN_GB/CFG/FLOW_SHIFT</c>.</summary>
+    /// <summary>Real-weight e2e for the production <see cref="WanVideoLoader"/> entry point: one call from checkpoint
+    /// paths to a ready pipeline (auto-detect incl. VACE routing + auto CFG-renorm), umT5 via
+    /// <see cref="WanVideoLoader.EncodePrompts"/>, then a short T2V (or full-control VACE) clip. Env:
+    /// <c>WAN_LOADER_CKPT</c>, <c>WAN_VAE</c>, plus the shared <c>WAN_W/H/FRAMES/STEPS/MIN_GB</c>.</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void WanLoader_Gpu_E2E()
+    {
+        string? ckpt = Env("WAN_LOADER_CKPT");
+        if (ckpt is null || !File.Exists(ckpt)) { _output.WriteLine("SKIPPED: set WAN_LOADER_CKPT to a Wan DiT checkpoint."); return; }
+        string vaePath = Env("WAN_VAE") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/VAE/Wan/wan_2.1_vae.safetensors";
+        string umt5Path = TestPaths.WanVideo.Umt5Xxl;
+        if (!File.Exists(vaePath) || !File.Exists(umt5Path)) { _output.WriteLine($"SKIPPED: missing VAE/umT5 ({vaePath}|{umt5Path})."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir) || !CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no PTX/CUDA"); return; }
+
+        using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+        if (Environment.GetEnvironmentVariable("WAN_NO_CACHE_CASTS") == "1") backend.CacheWeightCasts = false;
+        (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
+        if (freeBytes / (1024.0 * 1024.0 * 1024.0) < EnvD("WAN_MIN_GB", 8.0)) { _output.WriteLine("SKIPPED: low VRAM."); return; }
+
+        using WanVideoLoader loader = WanVideoLoader.Load(backend, ckpt, vaePath, new WanVideoLoadOptions
+        {
+            Umt5Path = umt5Path,
+            LowNoiseDitPath = Env("WAN_LOADER_CKPT_LOW"),
+            FlowShift = Env("WAN_FLOW_SHIFT") is null ? null : (float)EnvD("WAN_FLOW_SHIFT", 5.0),
+        });
+        _output.WriteLine($"  loader → {WanConfigDetector.Describe(loader.Config)} (vace={loader.VacePipeline is not null})");
+
+        (Tensor promptEmbeds, Tensor negEmbeds) = loader.EncodePrompts(
+            "a bright red balloon drifting across a clear blue sky on a sunny day, vivid colors",
+            "blurry, low quality, distorted");
+        int genW = (int)EnvD("WAN_W", 480), genH = (int)EnvD("WAN_H", 320);
+        int genFrames = (int)EnvD("WAN_FRAMES", 17), genSteps = (int)EnvD("WAN_STEPS", 20);
+        TextToImageRequest req = new() { Prompt = "loader", Width = genW, Height = genH, Steps = genSteps, CfgScale = (float)EnvD("WAN_CFG", loader.Config.GuidanceScale), Seed = 42 };
+
+        byte[][] frames; int w, h;
+        if (loader.VacePipeline is WanVacePipeline vace)
+        {
+            Tensor control = BuildMovingSquareClip(genFrames, genH, genW);
+            (frames, w, h, _) = vace.GenerateFromControl(promptEmbeds, negEmbeds, control, req,
+                onProgress: p => { if (p.Step % 5 == 0) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+            control.Dispose();
+        }
+        else
+        {
+            (frames, w, h, _) = loader.Pipeline!.GenerateFromEmbeddings(promptEmbeds, negEmbeds, req, genFrames,
+                p => { if (p.Step % 5 == 0) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+        }
+        promptEmbeds.Dispose(); negEmbeds.Dispose();
+        AssertFramesCoherent(frames, w, h);
+    }
+
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void WanVace_Gpu_E2E()
+    {
+        string? ckpt = Env("WAN_VACE_CKPT");
+        if (ckpt is null || !File.Exists(ckpt)) { _output.WriteLine("SKIPPED: set WAN_VACE_CKPT to a merged Wan VACE checkpoint."); return; }
+        string vaePath = Env("WAN_VAE") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/VAE/Wan/wan_2.1_vae.safetensors";
+        string umt5Path = TestPaths.WanVideo.Umt5Xxl;
+        if (!File.Exists(vaePath) || !File.Exists(umt5Path)) { _output.WriteLine($"SKIPPED: missing VAE/umT5 ({vaePath}|{umt5Path})."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir) || !CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no PTX/CUDA"); return; }
+
+        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(ckpt);
+        using SafeTensorsLoader _dit = ditLoader;
+        WanVideoConfig cfg = WanConfigDetector.Detect(conv.Transformer);
+        if (Env("WAN_FLOW_SHIFT") is not null) cfg = cfg with { FlowShift = (float)EnvD("WAN_FLOW_SHIFT", cfg.FlowShift) };
+        if (Env("WAN_CFG_RESCALE") is not null) cfg = cfg with { CfgRescale = (float)EnvD("WAN_CFG_RESCALE", cfg.CfgRescale) };
+        _output.WriteLine($"  detected → {WanConfigDetector.Describe(cfg)}");
+        Assert.True(cfg.VaceLayers.Length > 0, "checkpoint has no vace_blocks — not a VACE DiT");
+
+        List<SafeTensorsLoader> loaders = [];
+        try
+        {
+            (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+            loaders.AddRange(vl);
+            using SafeTensorsLoader umt5Loader = new(); umt5Loader.Load(umt5Path);
+            Dictionary<string, Tensor> umt5W = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
+
+            using WanVaceTransformer transformer = new(cfg);
+            transformer.LoadWeights(conv.Transformer);
+            Wan21VaeDecoder vae = new(); vae.LoadWeights(vaeW);
+            Wan21VaeEncoder encoder = new(); encoder.LoadWeights(vaeW);
+
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            if (Environment.GetEnvironmentVariable("WAN_NO_CACHE_CASTS") == "1") backend.CacheWeightCasts = false;
+            (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
+            double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+            if (freeGb < EnvD("WAN_MIN_GB", 8.0)) { _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free."); return; }
+
+            using T5TextEncoder umt5 = new(T5TextEncoderConfig.Umt5Xxl); umt5.LoadWeights(umt5W);
+            using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 512);
+            int[] pTok = tok.Encode("a bright red balloon drifting across a clear blue sky on a sunny day, vivid colors, high key lighting");
+            int[] nTok = tok.Encode("blurry, low quality, distorted");
+            Tensor tb = umt5.Encode(backend, [pTok, nTok], [T5Tokenizer.CreateAttentionMask(pTok), T5Tokenizer.CreateAttentionMask(nTok)]);
+            Tensor promptEmbeds = CfgHelper.SliceBatchElement(tb, 0, pTok.Length, 4096);
+            Tensor negEmbeds = CfgHelper.SliceBatchElement(tb, 1, pTok.Length, 4096);
+            tb.Dispose();
+            backend.Sync();
+            backend.FreeWeights(umt5.EnumerateWeights());
+
+            int genW = (int)EnvD("WAN_W", 480), genH = (int)EnvD("WAN_H", 320);
+            int genFrames = (int)EnvD("WAN_FRAMES", 25), genSteps = (int)EnvD("WAN_STEPS", 20);
+
+            // Synthetic control clip [1,3,T,H,W] in [-1,1]: a bright square sweeping left→right on a dark field —
+            // enough structure for the control branch to steer motion and validate the plumbing e2e.
+            Tensor control = BuildMovingSquareClip(genFrames, genH, genW);
+
+            _output.WriteLine($"[gen] VACE {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}...");
+            WanVacePipeline pipeline = new(backend, transformer, vae, encoder, cfg);
+            float cfgScale = (float)EnvD("WAN_CFG", cfg.GuidanceScale);
+            TextToImageRequest req = new() { Prompt = "vace", Width = genW, Height = genH, Steps = genSteps, CfgScale = cfgScale, Seed = 42 };
+            (byte[][] frames, int w, int h, _) = pipeline.GenerateFromControl(promptEmbeds, negEmbeds, control, req,
+                controlScale: (float)EnvD("WAN_VACE_SCALE", 1.0),
+                p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+            control.Dispose(); promptEmbeds.Dispose(); negEmbeds.Dispose();
+            AssertFramesCoherent(frames, w, h);
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    /// <summary>Builds a <c>[1,3,T,H,W]</c> F32 clip in [-1,1]: dark background, bright square sweeping left→right.</summary>
+    private static unsafe Tensor BuildMovingSquareClip(int t, int h, int w)
+    {
+        Tensor clip = new Tensor(new TensorShape([1L, 3, t, h, w]), DType.F32);
+        float* p = (float*)clip.DataPointer;
+        long frame = (long)h * w;
+        for (long i = 0; i < 3 * t * frame; i++) p[i] = 0.1f;
+        int side = Math.Min(h, w) / 4;
+        for (int ti = 0; ti < t; ti++)
+        {
+            int cx = side + (w - 2 * side) * ti / Math.Max(1, t - 1);
+            int cy = h / 2;
+            for (int c = 0; c < 3; c++)
+                for (int y = cy - side / 2; y < cy + side / 2; y++)
+                    for (int x = cx - side / 2; x < cx + side / 2; x++)
+                        p[((long)c * t + ti) * frame + (long)y * w + x] = 0.9f;
+        }
+        return clip;
+    }
+
     /// <summary>Parity guard for the query-tiled SDPA path (<c>SdpaTiledF32NoMask</c>, used at full-res / long-sequence
     /// attention like T2V-14B's 14040 tokens): compares the forced-tiled output against the regular GEMM SDPA on the
     /// SAME Q/K/V. They must match — a divergence is the "full-res dark output" bug (the tiled path was never exercised

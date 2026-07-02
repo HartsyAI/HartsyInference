@@ -58,6 +58,10 @@ public sealed class WanVideoCheckpointConverter
         ("attn2.to_k_img", "attn2.add_k_proj"),
         ("attn2.to_v_img", "attn2.add_v_proj"),
         ("attn2.norm_k_img", "attn2.norm_added_k"),
+        // VACE control branch (diffusers convert script's VACE additions): the vace_blocks share the main block
+        // sub-names (handled by the rules above); only the per-block control projections differ.
+        ("before_proj", "proj_in"),
+        ("after_proj", "proj_out"),
     ];
 
     /// <summary>Result bucket from a Wan DiT checkpoint. The umT5 text encoder + VAE ship separately.</summary>

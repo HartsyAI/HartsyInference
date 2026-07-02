@@ -297,31 +297,32 @@ public sealed class HunyuanVideoVaeDecoder
         Tensor spatialUp;
         if (spatial)
         {
-            Tensor frames = Vae3dLayout.ToFrames(x, b, c, t, h, w);
+            // GPU-resident layout ops (the host Vae3dLayout overloads read DataPointer → D2H sync per call).
+            Tensor frames = Vae3dLayout.ToFrames(backend, x);
             Tensor upFrames = new Tensor(new TensorShape(b * t, c, h * 2, w * 2), DType.F32);
             backend.UpsampleNearest2D(upFrames, frames, 2, 2);
             frames.Dispose();
-            spatialUp = Vae3dLayout.FromFrames(upFrames, b, c, t, h * 2, w * 2);
+            spatialUp = Vae3dLayout.FromFrames(backend, upFrames, b, c, t, h * 2, w * 2);
             upFrames.Dispose();
         }
         else
         {
-            spatialUp = Vae3dLayout.SliceFrames(x, 0, t);   // contiguous copy so we can dispose uniformly
+            spatialUp = Vae3dLayout.SliceFrames(backend, x, 0, t);   // contiguous copy so we can dispose uniformly
         }
 
         Tensor interp = spatialUp;
         if (temporal && t > 1)
         {
             List<Tensor> parts = new(1 + 2 * (t - 1));
-            Tensor first = Vae3dLayout.SliceFrames(spatialUp, 0, 1);
+            Tensor first = Vae3dLayout.SliceFrames(backend, spatialUp, 0, 1);
             parts.Add(first);
             for (int ti = 1; ti < t; ti++)
             {
-                Tensor frame = Vae3dLayout.SliceFrames(spatialUp, ti, 1);
+                Tensor frame = Vae3dLayout.SliceFrames(backend, spatialUp, ti, 1);
                 parts.Add(frame);
                 parts.Add(frame);   // nearest temporal ×2 = each later frame repeated twice
             }
-            interp = Vae3dLayout.ConcatFrames(parts);
+            interp = Vae3dLayout.ConcatFrames(backend, parts);
             // Repeated frames appear twice in the list; dispose each distinct tensor once.
             first.Dispose();
             for (int pi = 1; pi < parts.Count; pi += 2) parts[pi].Dispose();

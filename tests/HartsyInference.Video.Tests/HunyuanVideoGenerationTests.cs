@@ -194,6 +194,65 @@ public class HunyuanVideoGenerationTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    /// <summary>Parity guard for the batched CausalConv3d fast path under HunyuanVideo REPLICATE padding
+    /// (replicateFirstPad + spatialReplicatePad — the modes the Wan guard doesn't cover): decodes a multi-frame
+    /// latent twice on CUDA — batched vs the original per-frame loop (host replicate-pad reference) — and asserts
+    /// near-identical RGB floats.</summary>
+    [Fact]
+    public unsafe void HunyuanVideo_Gpu_VaeDecode_BatchedMatchesPerFrame()
+    {
+        string vaePath = TestPaths.HunyuanVideo.Vae;
+        if (!File.Exists(vaePath)) { _output.WriteLine($"SKIPPED: HunyuanVideo VAE not found: {vaePath}."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(HunyuanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+
+        List<SafeTensorsLoader> loaders = [];
+        try
+        {
+            HunyuanVideoVaeDecoder vae = new();
+            vae.LoadWeights(CastBf16ToF16(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath))));
+
+            float[] Decode(bool disableBatch)
+            {
+                using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+                backend.CacheWeightCasts = false;
+                CausalConv3d.DisableBatchedPath = disableBatch;
+                try
+                {
+                    using Tensor latent = new(new TensorShape([1L, 16, 3, 12, 20]), DType.F32);
+                    float* lp = (float*)latent.DataPointer;
+                    Random rng = new(23);
+                    for (long i = 0; i < latent.Shape.ElementCount; i++) lp[i] = (float)(rng.NextDouble() * 2 - 1);
+                    backend.PreloadWeights(vae.EnumerateWeights());
+                    using Tensor rgb = vae.Decode(backend, latent);
+                    backend.Sync();
+                    float* rp = (float*)rgb.DataPointer;
+                    float[] outF = new float[rgb.Shape.ElementCount];
+                    for (long i = 0; i < outF.Length; i++) outF[i] = rp[i];
+                    _output.WriteLine($"[{(disableBatch ? "perFrame" : "batched")}] rgb {rgb.Shape}");
+                    return outF;
+                }
+                finally { CausalConv3d.DisableBatchedPath = false; }
+            }
+
+            float[] batched = Decode(disableBatch: false);
+            float[] perFrame = Decode(disableBatch: true);
+
+            Assert.Equal(perFrame.Length, batched.Length);
+            double maxAbs = 0, corr;
+            fixed (float* bp = batched, pp = perFrame)
+            {
+                for (long i = 0; i < batched.Length; i++) { double d = Math.Abs(bp[i] - pp[i]); if (d > maxAbs) maxAbs = d; }
+                corr = Corr(bp, pp, batched.Length);
+            }
+            _output.WriteLine($"[parity] {batched.Length} floats: corr={corr:F6} maxAbs={maxAbs:E3}");
+            Assert.True(corr > 0.99999 && maxAbs < 1e-2,
+                $"Batched CausalConv3d (replicate pad) diverges from per-frame reference: corr={corr:F6} maxAbs={maxAbs:E3}.");
+            _output.WriteLine("VERDICT: batched replicate-pad CausalConv3d matches the per-frame host reference.");
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
     private static int[] BuildTemplatedTokens(string prompt)
     {
         // Reference tokenizes the templated string with add_special_tokens=True (BOS prepended) then crops 95.

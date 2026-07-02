@@ -242,7 +242,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pC = GpuTransferHelper.AllocateDevice(outBytes);
 
-            float alpha = 1.0f;
+            // fp8_scaled operands carry a per-tensor scalar (real = fp8_byte * Fp8ScaleFactor); the CastIfNeeded
+            // dequant below is scale-blind, so fold the factor(s) into cuBLAS alpha exactly like LinearImpl does.
+            // Both default to 1.0, so plain checkpoints are unchanged.
+            float alpha = a.Fp8ScaleFactor * b.Fp8ScaleFactor;
             float beta = 0.0f;
 
             // Joint dtype resolution — see ResolveGemmDtype(a, b) docs. Fp8 forces F16.
@@ -365,9 +368,24 @@ public sealed class CudaBackend : IBackend
                 if (!GpuTransferHelper.TryGetWeightCast(weight, out weightPtr))
                 {
                     nuint castBytes = (nuint)(weight.ElementCount * gemmDtype.SizeInBytes);
-                    weightPtr = GpuTransferHelper.AllocateDevice(castBytes);
-                    CastOnGpu(weightPtr, pWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
-                    GpuTransferHelper.CacheWeightCast(weight, weightPtr, castBytes);
+                    // Budget gate: an unbounded cast cache keeps an F16 copy of EVERY preloaded quant weight —
+                    // for a 12B fp8 DiT that's ~24 GB on top of the 12 GB fp8 originals, guaranteed OOM mid-first-
+                    // forward on a 24 GB card (this was the Flux-fp8 eager-preload OOM). If caching this cast would
+                    // leave less headroom than activations/transients need, cast transiently instead: correct output,
+                    // per-call dequant cost, bounded memory. freeBytes counts pool reservations as used, so the gate
+                    // errs conservative under transient churn — the safe direction.
+                    (long freeBytes, long totalBytes) = CudaMemory.GetMemInfo();
+                    long headroom = Math.Max(2L << 30, totalBytes / 8);
+                    if (freeBytes > 0 && freeBytes - (long)castBytes < headroom)
+                    {
+                        weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
+                    }
+                    else
+                    {
+                        weightPtr = GpuTransferHelper.AllocateDevice(castBytes);
+                        CastOnGpu(weightPtr, pWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
+                        GpuTransferHelper.CacheWeightCast(weight, weightPtr, castBytes);
+                    }
                 }
             }
             else
@@ -509,7 +527,8 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pC = GpuTransferHelper.AllocateDevice(outBytes);
 
-            float alpha = 1.0f;
+            // fp8_scaled operands: fold per-tensor scale(s) into cuBLAS alpha (see MatMul above). Defaults 1.0.
+            float alpha = a.Fp8ScaleFactor * b.Fp8ScaleFactor;
             float beta = 0.0f;
 
             // Joint dtype resolution — see ResolveGemmDtype(a, b) docs.
@@ -599,7 +618,8 @@ public sealed class CudaBackend : IBackend
                 colBuf = CudaMemory.Allocate((nuint)((long)colRows * colCols * elemSize));
             }
 
-            float alpha = 1.0f;
+            // fp8_scaled conv weights: fold the per-tensor scale into the GEMM alpha (see MatMul). Defaults 1.0.
+            float alpha = input.Fp8ScaleFactor * weight.Fp8ScaleFactor;
             float beta = 0.0f;
 
             ulong weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
@@ -1254,14 +1274,16 @@ public sealed class CudaBackend : IBackend
         }
     }
 
-    /// <summary>GPU build of the frame-major padded input for batched CausalConv3d (transpose + causal zero-pad +
-    /// cache prepend), so the whole conv layer runs as kt batched Conv2D calls instead of tout·kt tiny ones.</summary>
-    public unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad)
+    /// <summary>GPU build of the frame-major padded input for batched CausalConv3d (transpose + temporal
+    /// zero/replicate pad + cache prepend + optional spatial edge-replicate pad), so the whole conv layer runs as
+    /// kt batched Conv2D calls instead of tout·kt tiny ones.</summary>
+    public unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad,
+        bool replicateFirst = false, int padH = 0, int padW = 0)
     {
         _context.EnsureCurrent();
         EnsureKernels();
         int paddedT = (int)padded.Shape[0], cIn = (int)padded.Shape[1];
-        int HW = (int)(padded.ElementCount / ((long)paddedT * cIn));
+        int H = (int)input.Shape[3], W = (int)input.Shape[4];
         int Tin = (int)input.Shape[2];
         int cacheLen = cache is null ? 0 : (int)cache.Shape[2];
         ulong pOut = 0, pIn = 0, pCache = 0;
@@ -1272,7 +1294,7 @@ public sealed class CudaBackend : IBackend
             if (cache is not null) pCache = GpuTransferHelper.CopyToDevice(cache);
             nuint outBytes = GpuTransferHelper.ByteSize(padded);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeBuildPadded(pOut, pIn, pCache, paddedT, cIn, Tin, cacheLen, zeroPad, HW, _stream.Handle);
+            _kernels!.LaunchWanVaeBuildPadded(pOut, pIn, pCache, paddedT, cIn, Tin, cacheLen, zeroPad, H, W, padH, padW, replicateFirst, _stream.Handle);
             GpuTransferHelper.CacheActivation(padded, pOut, outBytes);
             cachedOutput = true;
         }

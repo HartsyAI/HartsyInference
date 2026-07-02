@@ -82,7 +82,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             float tEmb = scheduler.Timesteps[k];
             Tensor vCond = _transformer.Forward(Backend, latents, pose, faceRgbClip, promptEmbeds, tEmb);
             Tensor vUncond = _transformer.Forward(Backend, latents, pose, faceRgbClip, negativeEmbeds, tEmb);
-            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();
