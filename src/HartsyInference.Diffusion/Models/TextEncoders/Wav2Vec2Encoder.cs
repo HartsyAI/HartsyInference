@@ -3,16 +3,18 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
-/// <summary>Wav2Vec2 audio feature extractor (HF <c>Wav2Vec2Model</c>, post-norm encoder), the frozen front-end for
-/// Wan2.2-S2V. Raw 16 kHz waveform → 7-layer strided Conv1d feature encoder → feature projection → grouped positional
-/// conv → N transformer layers (bidirectional MHA + GELU FFN). <see cref="EncodeAllLayers"/> returns every hidden
-/// state stacked <c>[T, numHiddenStates, hidden]</c> for the S2V audio encoder to weight + project. B=1.</summary>
+/// <summary>Wav2Vec2 audio feature extractor (HF <c>Wav2Vec2Model</c>), the frozen front-end for Wan2.2-S2V.
+/// Raw 16 kHz waveform (optionally z-normalized) → 7-layer strided Conv1d feature encoder (GroupNorm-first or
+/// per-conv LayerNorm) → feature projection → grouped positional conv → N transformer layers (post-norm, or pre-norm
+/// when <c>StableLayerNorm</c> — the wav2vec2-large variant S2V ships). <see cref="EncodeAllLayers"/> returns every
+/// hidden state stacked <c>[T, numHiddenStates, hidden]</c> for the S2V audio encoder to weight + project. B=1.</summary>
 public sealed unsafe class Wav2Vec2Encoder
 {
     private readonly Wav2Vec2EncoderConfig _config;
 
     private Tensor?[] _convW = [], _convB = [];
     private Tensor? _conv0NormW, _conv0NormB;           // group norm on conv layer 0 (group mode)
+    private Tensor?[] _convLnW = [], _convLnB = [];     // per-conv LayerNorm (layer mode, wav2vec2-large)
     private Tensor? _fpNormW, _fpNormB, _fpProjW, _fpProjB;   // feature projection
     private Tensor? _posConvW, _posConvB;               // positional conv embedding (grouped)
     private Tensor? _encNormW, _encNormB;               // encoder layer_norm (pre-layers, non-stable)
@@ -47,6 +49,15 @@ public sealed unsafe class Wav2Vec2Encoder
             _conv0NormW = LoadF32(w, "feature_extractor.conv_layers.0.layer_norm.weight");
             _conv0NormB = LoadF32(w, "feature_extractor.conv_layers.0.layer_norm.bias");
         }
+        else
+        {
+            _convLnW = new Tensor?[nConv]; _convLnB = new Tensor?[nConv];
+            for (int i = 0; i < nConv; i++)
+            {
+                _convLnW[i] = LoadF32(w, $"feature_extractor.conv_layers.{i}.layer_norm.weight");
+                _convLnB[i] = LoadF32(w, $"feature_extractor.conv_layers.{i}.layer_norm.bias");
+            }
+        }
         _fpNormW = LoadF32(w, "feature_projection.layer_norm.weight"); _fpNormB = LoadF32(w, "feature_projection.layer_norm.bias");
         _fpProjW = w["feature_projection.projection.weight"]; w.TryGetValue("feature_projection.projection.bias", out _fpProjB);
         _posConvW = LoadPosConv(w); w.TryGetValue("encoder.pos_conv_embed.conv.bias", out _posConvB);
@@ -66,13 +77,16 @@ public sealed unsafe class Wav2Vec2Encoder
         }
     }
 
-    /// <summary>Merged or weight-normed positional conv weight (<c>encoder.pos_conv_embed.conv.weight</c>, or the
-    /// weight_norm pair <c>parametrizations.weight.original0/1</c> = g·v/‖v‖).</summary>
+    /// <summary>Merged or weight-normed positional conv weight (<c>encoder.pos_conv_embed.conv.weight</c>, the
+    /// weight_norm pair <c>parametrizations.weight.original0/1</c>, or the legacy <c>weight_g/weight_v</c> pair —
+    /// both = g·v/‖v‖).</summary>
     private Tensor LoadPosConv(IReadOnlyDictionary<string, Tensor> w)
     {
         if (w.TryGetValue("encoder.pos_conv_embed.conv.weight", out Tensor? merged)) return LoadF32In(merged);
-        Tensor g = LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original0");
-        Tensor v = LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original1");
+        Tensor g = w.TryGetValue("encoder.pos_conv_embed.conv.weight_g", out Tensor? legacyG)
+            ? LoadF32In(legacyG) : LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original0");
+        Tensor v = w.TryGetValue("encoder.pos_conv_embed.conv.weight_v", out Tensor? legacyV)
+            ? LoadF32In(legacyV) : LoadF32(w, "encoder.pos_conv_embed.conv.parametrizations.weight.original1");
         // weight = g * v / ||v|| over the (in,k) dims per output channel (HF weight_norm dim=2 → norm over dims 0,1).
         int outC = (int)v.Shape[0], inC = (int)v.Shape[1], k = (int)v.Shape[2];
         Tensor o = new Tensor(v.Shape, DType.F32);
@@ -93,6 +107,8 @@ public sealed unsafe class Wav2Vec2Encoder
     {
         foreach (Tensor? t in _convW) if (t is not null) yield return t;
         foreach (Tensor? t in _convB) if (t is not null) yield return t;
+        foreach (Tensor? t in _convLnW) if (t is not null) yield return t;
+        foreach (Tensor? t in _convLnB) if (t is not null) yield return t;
         foreach (Tensor? t in new[] { _conv0NormW, _conv0NormB, _fpNormW, _fpNormB, _fpProjW, _fpProjB, _posConvW, _posConvB, _encNormW, _encNormB })
             if (t is not null) yield return t;
         foreach (Layer l in _layers)
@@ -106,8 +122,10 @@ public sealed unsafe class Wav2Vec2Encoder
         int samples = waveform.Length;
         Tensor feat = new Tensor(new TensorShape(1, 1, samples), DType.F32);
         fixed (float* wp = waveform) Buffer.MemoryCopy(wp, (float*)feat.DataPointer, (long)samples * 4, (long)samples * 4);
+        if (_config.NormalizeInput) NormalizeWaveform(feat, samples);
 
-        // 1. Conv feature encoder.
+        // 1. Conv feature encoder. Norm per HF feat_extract_norm: "group" = GroupNorm on conv 0 only;
+        //    "layer" (wav2vec2-large) = per-conv LayerNorm over channels, applied before the GELU.
         for (int i = 0; i < _convW.Length; i++)
         {
             int inC = (int)feat.Shape[1], tin = (int)feat.Shape[2];
@@ -123,6 +141,16 @@ public sealed unsafe class Wav2Vec2Encoder
                 conv.Dispose();
                 conv = gn;
             }
+            else if (!_config.GroupNormFirstConvOnly)
+            {
+                Tensor tokens = ChannelsToTokens(conv, outC, tout);
+                conv.Dispose();
+                Tensor lnTokens = new Tensor(tokens.Shape, DType.F32);
+                backend.LayerNorm(lnTokens, tokens, _convLnW[i]!, _convLnB[i]!, _config.Eps);
+                tokens.Dispose();
+                conv = TokensToChannels(lnTokens, outC, tout);
+                lnTokens.Dispose();
+            }
             backend.Gelu(conv, conv);
             feat = conv;
         }
@@ -136,22 +164,50 @@ public sealed unsafe class Wav2Vec2Encoder
         // 3. Positional conv (grouped, "same" pad with even-kernel right trim) + GELU, added to hidden.
         AddPositionalConv(backend, hidden, t);
 
-        // 4. encoder.layer_norm (non-stable: before the layers).
-        Tensor h = new Tensor(hidden.Shape, DType.F32); backend.LayerNorm(h, hidden, _encNormW!, _encNormB!, _config.Eps); hidden.Dispose();
-
-        // 5. Collect hidden states: hs[0] = h, then after each layer.
         int numStates = _config.NumHiddenStates;
         Tensor stacked = new Tensor(new TensorShape(t, numStates, _config.Hidden), DType.F32);
-        WriteState(stacked, h, 0, t, numStates);
-        for (int i = 0; i < _layers.Length; i++)
+        if (_config.StableLayerNorm)
         {
-            Tensor next = EncoderLayer(backend, h, _layers[i], t);
-            h.Dispose();
-            h = next;
-            WriteState(stacked, h, i + 1, t, numStates);
+            // Stable (pre-norm, wav2vec2-large): NO layer_norm before the layers; harvest each layer's INPUT,
+            // then encoder.layer_norm on the final output as the last state — matching ComfyUI's all_x collection.
+            Tensor h = hidden;
+            for (int i = 0; i < _layers.Length; i++)
+            {
+                WriteState(stacked, h, i, t, numStates);
+                Tensor next = EncoderLayerStable(backend, h, _layers[i], t);
+                h.Dispose();
+                h = next;
+            }
+            Tensor final = new Tensor(h.Shape, DType.F32); backend.LayerNorm(final, h, _encNormW!, _encNormB!, _config.Eps); h.Dispose();
+            WriteState(stacked, final, numStates - 1, t, numStates);
+            final.Dispose();
         }
-        h.Dispose();
+        else
+        {
+            // Post-norm: encoder.layer_norm BEFORE the layers; hs[0] = the normed input, then after each layer.
+            Tensor h = new Tensor(hidden.Shape, DType.F32); backend.LayerNorm(h, hidden, _encNormW!, _encNormB!, _config.Eps); hidden.Dispose();
+            WriteState(stacked, h, 0, t, numStates);
+            for (int i = 0; i < _layers.Length; i++)
+            {
+                Tensor next = EncoderLayer(backend, h, _layers[i], t);
+                h.Dispose();
+                h = next;
+                WriteState(stacked, h, i + 1, t, numStates);
+            }
+            h.Dispose();
+        }
         return stacked;
+    }
+
+    /// <summary>Unbiased z-normalization of the raw waveform (HF <c>do_normalize</c>; torch <c>var()</c> is unbiased).</summary>
+    private static void NormalizeWaveform(Tensor feat, int samples)
+    {
+        float* p = (float*)feat.DataPointer;
+        double mean = 0; for (int i = 0; i < samples; i++) mean += p[i]; mean /= samples;
+        double var = 0; for (int i = 0; i < samples; i++) { double d = p[i] - mean; var += d * d; }
+        var /= Math.Max(1, samples - 1);
+        float inv = 1f / MathF.Sqrt((float)var + 1e-7f);
+        for (int i = 0; i < samples; i++) p[i] = (float)((p[i] - mean) * inv);
     }
 
     private void AddPositionalConv(IBackend backend, Tensor hidden, int t)
@@ -170,6 +226,23 @@ public sealed unsafe class Wav2Vec2Encoder
         for (int ti = 0; ti < keep; ti++)
             for (int d = 0; d < dim; d++) hp[(long)ti * dim + d] += pp[(long)d * tout + ti];   // pos is [dim,tout] channels-first
         pos.Dispose();
+    }
+
+    /// <summary>Pre-norm (stable) layer: <c>x += attn(LN_attn(x)); x += ff(LN_final(x))</c>.</summary>
+    private Tensor EncoderLayerStable(IBackend backend, Tensor h, Layer l, int t)
+    {
+        int dim = _config.Hidden;
+        Tensor n1 = new Tensor(h.Shape, DType.F32); backend.LayerNorm(n1, h, l.AttnNormW!, l.AttnNormB!, _config.Eps);
+        Tensor attn = Attention(backend, n1, l, t); n1.Dispose();
+        Tensor h1 = AddRows(h, attn, t, dim); attn.Dispose();
+
+        Tensor n2 = new Tensor(h1.Shape, DType.F32); backend.LayerNorm(n2, h1, l.FinalNormW!, l.FinalNormB!, _config.Eps);
+        int inter = (int)l.FfInW!.Shape[0];
+        Tensor ff1 = new Tensor(new TensorShape(t, inter), DType.F32); backend.Linear(ff1, n2, l.FfInW!, l.FfInB); n2.Dispose();
+        backend.Gelu(ff1, ff1);
+        Tensor ff2 = new Tensor(new TensorShape(t, dim), DType.F32); backend.Linear(ff2, ff1, l.FfOutW!, l.FfOutB); ff1.Dispose();
+        Tensor outT = AddRows(h1, ff2, t, dim); h1.Dispose(); ff2.Dispose();
+        return outT;
     }
 
     private Tensor EncoderLayer(IBackend backend, Tensor h, Layer l, int t)

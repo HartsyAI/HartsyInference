@@ -78,6 +78,23 @@ public sealed record WanVideoConfig
     /// checkpoint is fp8; stays 0 for fp16/bf16 (those have no DC bias and are left byte-identical).</summary>
     public float CfgRescale { get; init; }
 
+    /// <summary>S2V audio-injector block indices (after each listed block, the latent tokens cross-attend to that
+    /// frame's audio tokens). Empty = no audio conditioning.</summary>
+    public int[] AudioInjectLayers { get; init; } = [];
+
+    /// <summary>S2V Wav2Vec2 feature width fed to the causal audio encoder (1024 for wav2vec2-large).</summary>
+    public int AudioDim { get; init; } = 1024;
+
+    /// <summary>S2V audio tokens per latent frame from the local branch (a learnable padding token is appended, so
+    /// the injector cross-attends to <c>AudioTokens + 1</c> tokens per frame).</summary>
+    public int AudioTokens { get; init; } = 4;
+
+    /// <summary>Stacked Wav2Vec2 hidden states the S2V audio encoder weights (25 = embeddings + 24 layers for large).</summary>
+    public int AudioLayers { get; init; } = 25;
+
+    /// <summary>True when this variant carries the S2V audio injector.</summary>
+    public bool HasAudioConditioning => AudioInjectLayers.Length > 0;
+
     /// <summary>VACE control-branch layer indices (the main-block indices where the VACE hints are added back).</summary>
     public int[] VaceLayers { get; init; } = [];
 
@@ -89,6 +106,10 @@ public sealed record WanVideoConfig
 
     /// <summary>Default CFG guidance scale.</summary>
     public float GuidanceScale { get; init; } = 5.0f;
+
+    /// <summary>True for Wan2.2-Animate (character animation): pose patch-embed conditioning + the motion-encoder →
+    /// face-encoder → face-adapter pathway. Drives <c>WanAnimateTransformer</c> instead of <c>WanVideoTransformer</c>.</summary>
+    public bool IsAnimate { get; init; }
 
     /// <summary>True when this variant carries CLIP image conditioning (Wan2.1 I2V).</summary>
     public bool HasImageConditioning => ImageDim > 0;
@@ -158,12 +179,13 @@ public sealed record WanVideoConfig
         VaceLayers = [0, 5, 10, 15, 20, 25], VaceInChannels = 96,
     };
 
-    /// <summary>Wan2.2-S2V-14B (speech-to-video): the Wan2.1-14B backbone with the audio injector. Config values are
-    /// provisional (reconstructed from the original Wan repo, not diffusers — see <c>WAN_VIDEO_ARCHITECTURE.md</c>).
-    /// <c>InChannels</c> stays at the VAE z here (audio+text); the pipeline may bump it to concat a reference latent.</summary>
+    /// <summary>Wan2.2-S2V-14B (speech-to-video), matching ComfyUI's <c>WanModel_S2V</c>: the Wan2.1-14B T2V backbone
+    /// plus the causal audio encoder + per-block audio injector, a 3-row trainable cond-mask embedding, and reference
+    /// latents appended as extra tokens (NOT channel-concat — <c>InChannels</c> stays at the VAE z).</summary>
     public static WanVideoConfig S2V_14B => new()
     {
         NumHeads = 40, HeadDim = 128, InChannels = 16, OutChannels = 16, VaeLatentChannels = 16,
         FfnDim = 13824, NumLayers = 40, VaeSpatialCompression = 8, FlowShift = 5.0f,
+        AudioInjectLayers = [0, 4, 8, 12, 16, 20, 24, 27, 30, 33, 36, 39], AudioDim = 1024, AudioTokens = 4, AudioLayers = 25,
     };
 }

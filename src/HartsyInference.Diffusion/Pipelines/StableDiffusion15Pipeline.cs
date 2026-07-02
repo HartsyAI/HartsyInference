@@ -42,6 +42,7 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
     /// <list type="bullet">
     /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image. Initial latent is fresh Gaussian noise scaled by the scheduler's <c>InitialNoiseSigma</c>; denoise from step 0.</item>
     /// <item><see cref="ImageToImageRequest"/> → image-to-image. The source image is encoded via the VAE encoder, fresh noise is injected at <c>sigma[startStep]</c> via <c>scheduler.AddNoise</c>, and denoising runs from <c>startStep = steps - round(steps * Strength)</c>. Requires a pipeline constructed with a <see cref="VaeEncoder"/>.</item>
+    /// <item><see cref="ImageToImageRequest"/> with a <c>Mask</c> → blend-on-vanilla inpaint: per-step latent blend keeps the unmasked region on the source's noise trajectory, plus a final pixel-space recomposite (same pattern as <see cref="SdxlPipeline"/>).</item>
     /// </list>
     /// The two paths only differ in the initial latent and the start step — text encoding, denoise loop, VAE decode, and RGB conversion are identical. Strength=0 short-circuits to a byte-identical pass-through.
     /// </summary>
@@ -70,8 +71,12 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             Logs.Info("Strength=0; passing source through unchanged");
             return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
         }
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
 
-        string mode = isImg2Img ? $"img2img (start={plan.StartStep}/{steps})" : "txt2img";
+        string mode = isMaskedInpaint ? $"inpaint (start={plan.StartStep}/{steps})"
+                    : isImg2Img ? $"img2img (start={plan.StartStep}/{steps})"
+                    : "txt2img";
         Logs.Info($"SD1.5 {mode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -86,12 +91,20 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         scheduler.SetTimesteps(steps);
 
         // 3. Build initial latent — t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at startStep.
-        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep);
+        //    For masked inpaint we keep the clean source latent alive for per-step blending.
+        (Tensor latent, Tensor? sourceLatent) = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? latentMask = null;
+        if (isMaskedInpaint)
+        {
+            latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+        }
 
         // 4. Denoise loop (both paths run the same loop from their respective startStep)
-        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, ipAdapters, onProgress, conditioningSchedule);
+        latent = RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, ipAdapters, onProgress, conditioningSchedule);
 
         textEmbeddings.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         // 5. VAE decode (tiled — caps im2col workspace at ~2.4 GB per tile)
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
@@ -101,7 +114,14 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
-        // 6. Convert to RGB bytes
+        // 6. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        //    Suppresses VAE encode/decode drift in unmasked regions (same as SDXL).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
+        // 7. Convert to RGB bytes
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
@@ -111,8 +131,9 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Builds the starting latent for the denoise loop. For text-to-image this is fresh Gaussian noise scaled by the scheduler's initial sigma. For image-to-image this is the VAE-encoded source plus fresh noise injected at sigma[startStep] via <c>scheduler.AddNoise</c>.</summary>
-    private Tensor BuildInitialLatent(TextToImageRequest request, IScheduler scheduler, TensorShape latentShape, int seed, int startStep)
+    /// <summary>Builds the starting latent for the denoise loop. For text-to-image this is fresh Gaussian noise scaled by the scheduler's initial sigma. For image-to-image this is the VAE-encoded source plus fresh noise injected at sigma[startStep] via <c>scheduler.AddNoise</c>.
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>
+    private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(TextToImageRequest request, IScheduler scheduler, TensorShape latentShape, int seed, int startStep, bool keepSourceLatent)
     {
         if (request is ImageToImageRequest img2img)
         {
@@ -124,9 +145,13 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             Tensor noise = TakeOrCreateNoise(request, latentShape, seed);
             Tensor latent = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(latent, sourceLatent, noise, startStep);
-            sourceLatent.Dispose();
             noise.Dispose();
-            return latent;
+            if (keepSourceLatent)
+            {
+                return (latent, sourceLatent);
+            }
+            sourceLatent.Dispose();
+            return (latent, null);
         }
 
         // Text-to-image: scale fresh noise by the scheduler's initial sigma.
@@ -137,9 +162,9 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             Tensor scaled = new Tensor(latentShape, DType.F32);
             Backend.Scale(scaled, t2iNoise, initSigma);
             t2iNoise.Dispose();
-            return scaled;
+            return (scaled, null);
         }
-        return t2iNoise;
+        return (t2iNoise, null);
     }
 
     private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)
@@ -157,7 +182,8 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         return SeedGenerator.CreateNoise(latentShape, seed);
     }
 
-    /// <summary>Runs the diffusion denoising loop. Iterates <c>i</c> from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1, applying scheduler input scaling, the UNet (with optional CFG), and one scheduler step per iteration. Returns the final denoised latent. Disposes intermediate latents along the way.</summary>
+    /// <summary>Runs the diffusion denoising loop. Iterates <c>i</c> from <paramref name="startStep"/> through <paramref name="totalSteps"/>-1, applying scheduler input scaling, the UNet (with optional CFG), and one scheduler step per iteration. Returns the final denoised latent. Disposes intermediate latents along the way.
+    /// <para>When <paramref name="latentMask"/> is supplied (masked inpaint), after each scheduler step the loop blends in <c>scheduler.AddNoise(sourceLatent, freshNoise, nextStep)</c> on the unmasked region, keeping it on the source's noise trajectory while the masked region is freely denoised (same formulation as <see cref="SdxlPipeline"/>).</para></summary>
     private Tensor RunDenoiseLoop(
         Tensor latent,
         TensorShape latentShape,
@@ -166,6 +192,9 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         int startStep,
         int totalSteps,
         float cfgScale,
+        Tensor? sourceLatent,
+        Tensor? latentMask,
+        int seed,
         IReadOnlyList<IpAdapterConditioning>? ipAdapters,
         Action<GenerationProgress>? onProgress,
         ConditioningSchedule? conditioningSchedule = null)
@@ -268,6 +297,28 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
             noisePred.Dispose();
             latent.Dispose();
             latent = newLatent;
+
+            // Masked-inpaint blend: keep unmasked region on the source's noise trajectory.
+            // newLatent = newLatent * mask + AddNoise(source, fresh_noise, nextStep) * (1 - mask).
+            // For the final step, blend with the clean source latent (no further denoising will run).
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < totalSteps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{totalSteps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");

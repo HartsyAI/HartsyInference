@@ -68,8 +68,31 @@ public sealed unsafe class TextEncoderQuantNormalizerTests
     }
 
     [Fact]
-    public void Normalize_U8PackedFp4_ThrowsNamedError()
+    public void Normalize_ValidNvfp4_DequantizesToF16()
     {
+        // 8 rows × 32 real cols → packed [8, 16] U8, block scales [8, 2] (16 elements per block).
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["model.layers.0.self_attn.q_proj.weight"] = new Tensor(new TensorShape(8, 16), DType.U8),
+            ["model.layers.0.self_attn.q_proj.weight_scale"] = new Tensor(new TensorShape(8, 2), DType.F8E4M3),
+            ["model.layers.0.self_attn.q_proj.weight_scale_2"] = F32Scalar(1.0f),
+            ["model.layers.0.self_attn.q_proj.comfy_quant"] = ComfyQuantBlob("nvfp4"),
+        };
+
+        Dictionary<string, Tensor> result = TextEncoderQuantNormalizer.Normalize(weights);
+        Tensor weight = result["model.layers.0.self_attn.q_proj.weight"];
+        Assert.Equal(DType.F16, weight.DType);
+        Assert.Equal(32, weight.Shape[1]);
+        Assert.False(result.ContainsKey("model.layers.0.self_attn.q_proj.weight_scale"));
+        Assert.False(result.ContainsKey("model.layers.0.self_attn.q_proj.weight_scale_2"));
+        Assert.False(result.ContainsKey("model.layers.0.self_attn.q_proj.comfy_quant"));
+    }
+
+    [Fact]
+    public void Normalize_MalformedNvfp4BlockScales_ThrowsShapeError()
+    {
+        // Block-scale shape doesn't cover the packed width (2 packed cols = 4 elements, but scale says 1 block
+        // of 16) — must fail loudly at load with the shape diagnosis, not silently pass garbage to the GPU.
         Dictionary<string, Tensor> weights = new()
         {
             ["model.layers.0.self_attn.q_proj.weight"] = new Tensor(new TensorShape(8, 2), DType.U8),
@@ -78,8 +101,23 @@ public sealed unsafe class TextEncoderQuantNormalizerTests
             ["model.layers.0.self_attn.q_proj.comfy_quant"] = ComfyQuantBlob("nvfp4"),
         };
 
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => TextEncoderQuantNormalizer.Normalize(weights));
+        Assert.Contains("NVFP4 block-scale shape", ex.Message);
+    }
+
+    [Fact]
+    public void Normalize_U8PackedUnknownFormat_ThrowsNamedError()
+    {
+        // A U8-packed format we still don't dequantize (no nvfp4 companion structure) keeps the clear
+        // load-time refusal naming the declared format.
+        Dictionary<string, Tensor> weights = new()
+        {
+            ["model.layers.0.self_attn.q_proj.weight"] = new Tensor(new TensorShape(8, 2), DType.U8),
+            ["model.layers.0.self_attn.q_proj.comfy_quant"] = ComfyQuantBlob("svdquant"),
+        };
+
         NotSupportedException ex = Assert.Throws<NotSupportedException>(() => TextEncoderQuantNormalizer.Normalize(weights));
-        Assert.Contains("nvfp4", ex.Message);
+        Assert.Contains("svdquant", ex.Message);
         Assert.Contains("q_proj.weight", ex.Message);
     }
 }

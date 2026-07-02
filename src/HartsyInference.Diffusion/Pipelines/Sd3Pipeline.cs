@@ -128,6 +128,17 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             uncondPooled = negPooled;
         }
 
+        // Materialize the conditioning on the host, then reclaim every encoder intermediate. CLIP-L/G + T5
+        // leave hundreds of device-cached activations that otherwise linger until GC finalization — they'd
+        // hold multi-GB into the MMDiT phase. The pooled tensors are already host (ConcatPooled writes on the
+        // CPU) but the ProjectContext outputs are live GPU activations; touching DataPointer forces the D2H
+        // sync + cache eviction, making them safe to keep across the FreeActivations calls below.
+        _ = condProjected.DataPointer;
+        _ = condPooled.DataPointer;
+        if (uncondProjected is not null) _ = uncondProjected.DataPointer;
+        if (uncondPooled is not null) _ = uncondPooled.DataPointer;
+        Backend.FreeActivations();
+
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
         // ── 2. Set up flow-match scheduler ──────────────────────────────
@@ -183,6 +194,15 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         // VRAM. No-op on backends without a weight cache.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
+        // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode
+        // intermediates. The per-step FreeActivations below frees device buffers WITHOUT a D2H sync-back, so
+        // anything still device-only here would be silently lost — the t2i initSigma path leaves `latent` as
+        // a live Backend.Scale output on the GPU.
+        _ = latent.DataPointer;
+        if (sourceLatent is not null) _ = sourceLatent.DataPointer;
+        if (latentMask is not null) _ = latentMask.DataPointer;
+        Backend.FreeActivations();
+
         Logs.Info("Starting SD3 denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
@@ -237,6 +257,13 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
                 Latent = latent,
                 LatentArch = LatentArchitecture.Sd3,
             });
+
+            // Reclaim GPU-resident activation buffers between steps: the MMDiT keeps intermediates on-device
+            // and any not read-back/disposed linger until GC, accumulating to OOM over the schedule (same fix
+            // as Flux / the video pipelines). Safe: scheduler.Step runs on the host, so `latent` — the only
+            // tensor the next step needs — is host-resident, and everything else persistent was materialized
+            // above the loop.
+            Backend.FreeActivations();
         }
 
         condProjected.Dispose();
@@ -276,6 +303,10 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         // ── 7. Convert to RGB bytes ─────────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+
+        // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
+        // memory until GC finalization and shrink the budget of whatever generation runs next.
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"SD3 {mode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

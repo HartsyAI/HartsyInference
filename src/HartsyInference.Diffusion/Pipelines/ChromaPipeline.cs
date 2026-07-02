@@ -27,16 +27,19 @@ namespace HartsyInference.Diffusion.Pipelines;
 ///         (Flux-style; same base/max constants).</item>
 ///   <item><b>Latent packing</b> identical to Flux (2x2 patchify into channel dim, 16ch → 64dim).</item>
 /// </list>
-/// VRAM eviction at the transformer→VAE boundary mirrors <see cref="Sd3Pipeline"/> / <see cref="FluxPipeline"/>.</summary>
+/// VRAM eviction at the transformer→VAE boundary mirrors <see cref="Sd3Pipeline"/> / <see cref="FluxPipeline"/>.
+/// Img2img / inpaint follows the Flux pattern (packed AddNoise at sigma[startStep], per-step packed mask blend,
+/// final pixel recomposite) — pass an <see cref="ImageToImageRequest"/> and construct with a <see cref="VaeEncoder"/>.</summary>
 public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
 {
     private readonly T5TextEncoder _t5;
     private readonly ChromaTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly ChromaConfig _config;
     private readonly float _schedulerShiftFallback;
 
-    /// <summary>Creates a new Chroma pipeline with all components pre-loaded.</summary>
+    /// <summary>Creates a new Chroma pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="t5">T5-XXL text encoder (joint_attention_dim = 4096, max length 512).</param>
     /// <param name="transformer">Chroma transformer (loaded with <see cref="ChromaConfig"/>).</param>
@@ -47,22 +50,30 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     /// somehow short-circuits the dynamic path.</param>
     public ChromaPipeline(IBackend backend, T5TextEncoder t5, ChromaTransformer transformer,
         VaeDecoder vaeDecoder, ChromaConfig config, float schedulerShift = 3.0f)
+        : this(backend, t5, transformer, vaeDecoder, vaeEncoder: null, config, schedulerShift)
+    {
+    }
+
+    /// <summary>Creates a new Chroma pipeline with both VAE halves loaded. Required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>).</summary>
+    public ChromaPipeline(IBackend backend, T5TextEncoder t5, ChromaTransformer transformer,
+        VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, ChromaConfig config, float schedulerShift = 3.0f)
         : base(backend)
     {
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
         _schedulerShiftFallback = schedulerShift;
     }
 
-    /// <summary>Generates an image from pre-tokenized T5 input plus attention masks.</summary>
+    /// <summary>Generates an image from pre-tokenized T5 input plus attention masks. Handles both text-to-image and image-to-image via the runtime type of <paramref name="request"/>: an <see cref="ImageToImageRequest"/> encodes the source through the 16-channel Flux VAE, packs it (2×2 patchify), and injects flow-matching noise at <c>sigma[startStep]</c> — requires a <see cref="VaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step packed blend + final pixel recomposite, same as <see cref="FluxPipeline"/>). Strength=0 short-circuits to byte-identical pass-through.</summary>
     /// <param name="promptTokenIdsT5">Prompt token IDs from the T5 tokenizer.</param>
     /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs (same length as <paramref name="promptTokenIdsT5"/>).</param>
     /// <param name="promptAttentionMaskT5">Tokenizer attention mask for the prompt (1=real token, 0=pad). Required
     /// — Chroma needs this to compute the "first padding token unmasked" extension.</param>
     /// <param name="negativeAttentionMaskT5">Tokenizer attention mask for the negative prompt.</param>
-    /// <param name="request">Generation parameters.</param>
+    /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint.</param>
     /// <param name="onProgress">Optional progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsT5,
@@ -82,6 +93,10 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             throw new ArgumentNullException(nameof(negativeAttentionMaskT5),
                 "Chroma requires the tokenizer attention mask for the negative prompt as well.");
 
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
+
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width ?? GenerationDefaults.Chroma.Width;
         int height = request.Height ?? GenerationDefaults.Chroma.Height;
@@ -91,7 +106,20 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
         bool useCfg = cfgScale > 1.0f;
 
-        Logs.Info($"Chroma: Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "txt2img";
+        Logs.Info($"Chroma {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode prompts with T5-XXL ─────────────────────────────────
@@ -137,20 +165,16 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         scheduler.SetTimesteps(steps);
 
         // ── 3. Build initial packed latent ────────────────────────────────
-        // Honor a caller-supplied initial noise tensor (img2img / fixed-seed reproduction) when present;
-        // otherwise sample fresh noise from the seed. The caller's tensor is in unpacked latent layout
-        // [1, 16, latentH, latentW]; PackLatent takes ownership and disposes it.
-        Tensor initialNoise = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
-        if (!initialNoise.Shape.Equals(latentShape))
-            throw new ArgumentException($"InitialNoise shape {initialNoise.Shape} != expected {latentShape}.");
-        Tensor packedLatent = PackLatent(initialNoise, latentH, latentW);
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        // T2I: noise scaled by initSigma. Img2img: vaeEncoder.Encode → Pack → AddNoise at sigma[startStep].
+        // Masked inpaint: also keep the packed source latent + packed mask alive for per-step blend.
+        (Tensor packedLatent, Tensor? packedSourceLatent) =
+            BuildInitialPackedLatent(request, scheduler, latentShape, packedShape, latentH, latentW, seed, startStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? packedMask = null;
+        if (isMaskedInpaint)
         {
-            Tensor scaled = new Tensor(packedShape, DType.F32);
-            Backend.Scale(scaled, packedLatent, initSigma);
-            packedLatent.Dispose();
-            packedLatent = scaled;
+            Tensor latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+            packedMask = MaskBlendUtilities.PackLatentMask2x2(latentMask, latentH, latentW);
+            latentMask.Dispose();
         }
 
         // ── 4. Denoising loop ────────────────────────────────────────────
@@ -168,7 +192,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int txtSeqLen = (int)condContext.Shape[1];
 
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
@@ -193,6 +217,28 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             packedLatent.Dispose();
             packedLatent = newLatent;
 
+            // Masked-inpaint blend in packed form: keep unmasked region on the source's
+            // flow-matching trajectory by re-noising the source latent at the next step's
+            // sigma. Final step blends with the clean source — no further denoising follows.
+            if (packedMask is not null && packedSourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshPackedNoise = PackLatent(SeedGenerator.CreateNoise(latentShape, seed + nextStep), latentH, latentW);
+                    noisedSource = new Tensor(packedShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
+                    freshPackedNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = packedSourceLatent;
+                }
+                MaskBlendUtilities.BlendPackedInPlace(packedLatent, noisedSource, packedMask);
+                if (noisedSource != packedSourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             // Same packed layout as Flux.1 (Chroma reuses the Flux VAE). Unpack inline so
@@ -216,6 +262,8 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         condMask.Dispose();
         uncondContext?.Dispose();
         uncondMask?.Dispose();
+        packedSourceLatent?.Dispose();
+        packedMask?.Dispose();
 
         ChromaTransformer.DumpFinalLatent(packedLatent);
 
@@ -239,13 +287,69 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
+        // ── 7. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        //    Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"Chroma image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"Chroma {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Builds the initial packed latent for Chroma denoising. T2I: fresh (or caller-injected) noise packed and scaled by the scheduler's initial sigma. Img2img: VAE-encoded source (16 channels) packed via <see cref="PackLatent"/>, combined with fresh packed noise via flow-matching <c>AddNoise</c>: <c>noisy = (1-sigma) * source + sigma * noise</c>.
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the packed source latent is returned as the second tuple element for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>
+    private (Tensor packedLatent, Tensor? packedSourceLatent) BuildInitialPackedLatent(
+        TextToImageRequest request,
+        FlowMatchEulerDiscreteScheduler scheduler,
+        TensorShape latentShape,
+        TensorShape packedShape,
+        int latentH, int latentW, int seed, int startStep,
+        bool keepSourceLatent)
+    {
+        // Honor a caller-supplied initial noise tensor (fixed-seed reproduction) when present; otherwise
+        // sample fresh noise from the seed. The tensor is in unpacked latent layout [1, 16, latentH, latentW];
+        // PackLatent takes ownership and disposes it.
+        Tensor initialNoise = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
+        if (!initialNoise.Shape.Equals(latentShape))
+            throw new ArgumentException($"InitialNoise shape {initialNoise.Shape} != expected {latentShape}.");
+        Tensor packedNoise = PackLatent(initialNoise, latentH, latentW);
+
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceUnpacked = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor sourcePacked = PackLatent(sourceUnpacked, latentH, latentW);
+            Tensor result = new Tensor(packedShape, DType.F32);
+            scheduler.AddNoise(result, sourcePacked, packedNoise, startStep);
+            packedNoise.Dispose();
+            if (keepSourceLatent)
+            {
+                return (result, sourcePacked);
+            }
+            sourcePacked.Dispose();
+            return (result, null);
+        }
+
+        // T2I path: scale packed noise by initSigma.
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(packedShape, DType.F32);
+            Backend.Scale(scaled, packedNoise, initSigma);
+            packedNoise.Dispose();
+            return (scaled, null);
+        }
+        return (packedNoise, null);
     }
 
     /// <summary>Runs classifier-free guidance with Chroma's cond-anchored convention: <c>noise_pred = cond + cfg_scale * (cond - uncond)</c>. Chroma does real dual-pass CFG against a negative prompt; only the combine baseline differs from the standard formula.</summary>

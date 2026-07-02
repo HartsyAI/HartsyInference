@@ -16,7 +16,16 @@ namespace HartsyInference.ModelHandler.CheckpointConverters;
 ///
 /// <para><b>VAE note:</b> the TI2V-5B VAE is the already-built <c>Wan22VaeDecoder</c> (original Wan naming) — load it
 /// with <see cref="LanceCheckpointConverter.LoadVae"/> (same <c>wan2.2_vae.safetensors</c> Lance uses). The diffusers
-/// <c>vae/</c> folder layout (<c>AutoencoderKLWan</c> naming) is NOT supported.</para></summary>
+/// <c>vae/</c> folder layout (<c>AutoencoderKLWan</c> naming) is NOT supported.</para>
+///
+/// <para><b>Wan2.2-Animate:</b> the animate-specific keys (<c>pose_patch_embedding.*</c>,
+/// <c>motion_encoder.enc.net_app.convs.{i}.*</c> / <c>enc.fc.{i}.*</c> / <c>dec.direction.weight</c>,
+/// <c>face_encoder.conv{1_local,2,3}.conv.*</c> / <c>out_proj.*</c> / <c>padding_tokens</c>,
+/// <c>face_adapter.fuser_blocks.{i}.*</c>, <c>ref_conv.*</c>) match NO rename rule and pass through unchanged —
+/// <c>WanAnimateTransformer.LoadWeights</c> expects them under their original names (pinned by
+/// <c>WanVideoCheckpointConverterTests.MapKey_AnimateKeys_PassThroughUnchanged</c>). The base i2v keys
+/// (<c>img_emb.proj.*</c>, <c>cross_attn.k_img</c>/<c>v_img</c>/<c>norm_k_img</c>) convert to the diffusers names as
+/// usual.</para></summary>
 public sealed class WanVideoCheckpointConverter
 {
     private static readonly string[] _stripPrefixes = ["model.diffusion_model.", "diffusion_model.", "transformer.", "model."];

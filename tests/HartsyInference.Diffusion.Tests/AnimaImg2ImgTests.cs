@@ -1,7 +1,9 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
@@ -9,26 +11,33 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Wiring tests for Z-Image img2img on the unified <see cref="ZImagePipeline.GenerateFromEmbeddings"/> API. End-to-end nonzero-strength img2img on Z-Image needs validation against a reference (the latent-normalization split between pipeline and VAE decoder makes the math non-obvious); for production refining, prefer the cross-model pixel-space pattern with a different pipeline as the refiner.</summary>
-public sealed class ZImageImg2ImgTests
+/// <summary>Wiring tests for Anima img2img / inpaint on <see cref="AnimaPipeline.GenerateFromEmbeddings"/> (no-encoder throws, wrong-shape throws, wrong-mask-shape throws, strength=0 byte-identical pass-through). Anima uses the Qwen-Image VAE, so <see cref="QwenImageVaeEncoder"/> enables img2img; the masked-inpaint blend runs on the unpacked <c>[1, 16, H, W]</c> latent.</summary>
+public sealed class AnimaImg2ImgTests
 {
-    private static Tensor MakeCaptionEmbeddings(int seqLen, int hidden)
+    private static AnimaPipeline MakePipeline(CpuBackend backend, bool withEncoder)
     {
-        Tensor t = new Tensor(new TensorShape(1, seqLen, hidden), DType.F32);
-        return t;
+        AnimaConfig config = AnimaConfig.AnimaPreview3;
+        AnimaTransformer transformer = new(config);
+        AnimaLlmAdapter llmAdapter = new(config.LlmAdapter);
+        QwenImageVaeDecoder vaeDecoder = new(VaeConfig.QwenImage);
+        return withEncoder
+            ? new AnimaPipeline(backend, transformer, llmAdapter, vaeDecoder, new QwenImageVaeEncoder(VaeConfig.QwenImage), config)
+            : new AnimaPipeline(backend, transformer, llmAdapter, vaeDecoder, config);
+    }
+
+    private static Tensor MakeTextEmbeddings(int seqLen, int hidden)
+    {
+        return new Tensor(new TensorShape(1, seqLen, hidden), DType.F32);
     }
 
     [Fact]
     public void GenerateFromEmbeddings_Img2ImgWithoutVaeEncoder_Throws()
     {
         using CpuBackend backend = new();
-        ZImageTransformer transformer = new(ZImageConfig.Turbo);
-        VaeDecoder vaeDecoder = new(VaeConfig.ZImage);
-
-        using ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, ZImageConfig.Turbo);
+        using AnimaPipeline pipeline = MakePipeline(backend, withEncoder: false);
 
         Tensor source = new Tensor(new TensorShape(1, 3, 64, 64), DType.F32);
-        Tensor cap = MakeCaptionEmbeddings(8, 2560);
+        Tensor emb = MakeTextEmbeddings(8, 1024);
         ImageToImageRequest request = new()
         {
             Prompt = "test",
@@ -38,24 +47,20 @@ public sealed class ZImageImg2ImgTests
         };
 
         Assert.Throws<InvalidOperationException>(() =>
-            pipeline.GenerateFromEmbeddings(cap, request));
+            pipeline.GenerateFromEmbeddings(emb, t5TokenIds: [0], request));
 
         source.Dispose();
-        cap.Dispose();
+        emb.Dispose();
     }
 
     [Fact]
     public void GenerateFromEmbeddings_Img2ImgWrongSourceShape_Throws()
     {
         using CpuBackend backend = new();
-        ZImageTransformer transformer = new(ZImageConfig.Turbo);
-        VaeDecoder vaeDecoder = new(VaeConfig.ZImage);
-        VaeEncoder vaeEncoder = new(VaeConfig.ZImage);
-
-        using ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, vaeEncoder, ZImageConfig.Turbo);
+        using AnimaPipeline pipeline = MakePipeline(backend, withEncoder: true);
 
         Tensor source = new Tensor(new TensorShape(1, 3, 32, 32), DType.F32);
-        Tensor cap = MakeCaptionEmbeddings(8, 2560);
+        Tensor emb = MakeTextEmbeddings(8, 1024);
         ImageToImageRequest request = new()
         {
             Prompt = "test",
@@ -65,25 +70,21 @@ public sealed class ZImageImg2ImgTests
         };
 
         Assert.Throws<ArgumentException>(() =>
-            pipeline.GenerateFromEmbeddings(cap, request));
+            pipeline.GenerateFromEmbeddings(emb, t5TokenIds: [0], request));
 
         source.Dispose();
-        cap.Dispose();
+        emb.Dispose();
     }
 
     [Fact]
     public void GenerateFromEmbeddings_InpaintWrongMaskShape_Throws()
     {
         using CpuBackend backend = new();
-        ZImageTransformer transformer = new(ZImageConfig.Turbo);
-        VaeDecoder vaeDecoder = new(VaeConfig.ZImage);
-        VaeEncoder vaeEncoder = new(VaeConfig.ZImage);
-
-        using ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, vaeEncoder, ZImageConfig.Turbo);
+        using AnimaPipeline pipeline = MakePipeline(backend, withEncoder: true);
 
         Tensor source = new Tensor(new TensorShape(1, 3, 64, 64), DType.F32);
         Tensor mask = new Tensor(new TensorShape(1, 1, 32, 32), DType.F32);
-        Tensor cap = MakeCaptionEmbeddings(8, 2560);
+        Tensor emb = MakeTextEmbeddings(8, 1024);
         ImageToImageRequest request = new()
         {
             Prompt = "test",
@@ -94,28 +95,25 @@ public sealed class ZImageImg2ImgTests
         };
 
         Assert.Throws<ArgumentException>(() =>
-            pipeline.GenerateFromEmbeddings(cap, request));
+            pipeline.GenerateFromEmbeddings(emb, t5TokenIds: [0], request));
 
         source.Dispose();
         mask.Dispose();
-        cap.Dispose();
+        emb.Dispose();
     }
 
     [Fact]
     public void GenerateFromEmbeddings_Img2ImgStrength0_PassesSourceThrough()
     {
+        // Strength=0 short-circuits before any model code, so uninitialized weights are fine.
         using CpuBackend backend = new();
-        ZImageTransformer transformer = new(ZImageConfig.Turbo);
-        VaeDecoder vaeDecoder = new(VaeConfig.ZImage);
-        VaeEncoder vaeEncoder = new(VaeConfig.ZImage);
-
-        using ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, vaeEncoder, ZImageConfig.Turbo);
+        using AnimaPipeline pipeline = MakePipeline(backend, withEncoder: true);
 
         const int w = 64, h = 64;
         byte[] sourceBytes = new byte[w * h * 3];
-        for (int i = 0; i < sourceBytes.Length; i++) sourceBytes[i] = (byte)((i * 11) & 0xFF);
+        for (int i = 0; i < sourceBytes.Length; i++) sourceBytes[i] = (byte)((i * 37) & 0xFF);
         Tensor source = ImagePostProcessor.RgbBytesToTensor(sourceBytes, w, h);
-        Tensor cap = MakeCaptionEmbeddings(8, 2560);
+        Tensor emb = MakeTextEmbeddings(8, 1024);
 
         ImageToImageRequest request = new()
         {
@@ -128,7 +126,8 @@ public sealed class ZImageImg2ImgTests
             Strength = 0.0f,
         };
 
-        (byte[] outBytes, int outW, int outH, int seed) = pipeline.GenerateFromEmbeddings(cap, request);
+        (byte[] outBytes, int outW, int outH, int seed) = pipeline.GenerateFromEmbeddings(
+            emb, t5TokenIds: [0], request);
 
         Assert.Equal(w, outW);
         Assert.Equal(h, outH);
@@ -136,6 +135,6 @@ public sealed class ZImageImg2ImgTests
         Assert.Equal(sourceBytes, outBytes);
 
         source.Dispose();
-        cap.Dispose();
+        emb.Dispose();
     }
 }

@@ -58,6 +58,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
     /// <list type="bullet">
     /// <item>Plain <see cref="TextToImageRequest"/> → text-to-image.</item>
     /// <item><see cref="ImageToImageRequest"/> → img2img. Source goes VAE-encode (32ch latent) → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep]. Requires a <see cref="VaeEncoder"/>.</item>
+    /// <item><see cref="ImageToImageRequest"/> with a <c>Mask</c> → blend-on-vanilla inpaint: per-step packed-latent blend keeps the unmasked region on the source's noise trajectory, plus a final pixel-space recomposite (same pattern as <see cref="FluxPipeline"/>).</item>
     /// </list>
     /// </summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
@@ -90,6 +91,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         // imgH/imgW (not request.Height/Width). Img2ImgSetup hard-checks against the request, which
         // would reject any input that wasn't already 16-aligned.
         int startStep = 0;
+        Tensor? maskPixel = null;
         if (request is ImageToImageRequest img2img)
         {
             Tensor src = img2img.SourceImage;
@@ -99,6 +101,23 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
                 throw new ArgumentException(
                     $"SourceImage shape must be [1, 3, {imgH}, {imgW}] (matching the 16-rounded request resolution); got {src.Shape}.",
                     nameof(request));
+            }
+
+            if (img2img.Mask is not null)
+            {
+                Tensor mk = img2img.Mask;
+                if (mk.Shape.Rank != 4 || mk.Shape[0] != 1 || mk.Shape[1] != 1 ||
+                    mk.Shape[2] != imgH || mk.Shape[3] != imgW)
+                {
+                    throw new ArgumentException(
+                        $"Mask shape must be [1, 1, {imgH}, {imgW}] (matching the 16-rounded source); got {mk.Shape}.",
+                        nameof(request));
+                }
+                if (mk.DType != DType.F32)
+                {
+                    throw new ArgumentException($"Mask must be F32 in [0, 1]; got {mk.DType}.", nameof(request));
+                }
+                maskPixel = mk;
             }
 
             float strength = Math.Clamp(img2img.Strength, 0f, 1f);
@@ -111,9 +130,12 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
                 return (ImagePostProcessor.TensorToRgbBytes(src), imgW, imgH, seed);
             }
         }
+        bool isMaskedInpaint = maskPixel is not null;
 
         string variant = _config.TextEncoderType == Flux2TextEncoderType.Mistral ? "Dev" : "Klein";
-        string opMode = isImg2Img ? $"img2img (start={startStep}/{steps})" : "txt2img";
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "txt2img";
         Logs.Info($"Flux.2 ({variant}) {opMode}: {imgW}x{imgH}, {steps} steps, guidance={guidanceScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -133,7 +155,19 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         scheduler.SetTimesteps(steps);
 
         // ── 3. Build initial packed latent (t2i: noise * initSigma; img2img: encode + patchify + BN-norm + pack + AddNoise) ──
-        Tensor packedLatent = BuildInitialPackedLatent(request, scheduler, noiseShape, packedShape, latH, latW, patH, patW, seed, startStep);
+        //    For masked inpaint the packed source latent + packed mask stay alive for per-step blending.
+        (Tensor packedLatent, Tensor? packedSourceLatent) =
+            BuildInitialPackedLatent(request, scheduler, noiseShape, packedShape, latH, latW, patH, patW, seed, startStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? packedMask = null;
+        if (isMaskedInpaint)
+        {
+            // One packed-mask value per 2×2 latent sub-patch. Flux.2's patchified feature layout is
+            // c·4 + (py·2 + px) — the same (tl, tr, bl, br) order PackLatentMask2x2 emits, so the Flux.1
+            // packed blend applies unchanged with featDim=128 (32 latent channels × 4 sub-patches).
+            Tensor latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latH, latW);
+            packedMask = MaskBlendUtilities.PackLatentMask2x2(latentMask, latH, latW);
+            latentMask.Dispose();
+        }
 
         // ── 4. Denoising loop (from startStep onward) ──
         Logs.Info("Starting Flux.2 denoising loop...");
@@ -153,6 +187,30 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             packedLatent.Dispose();
             packedLatent = newLatent;
 
+            // Masked-inpaint blend in packed form: keep unmasked region on the source's
+            // flow-matching trajectory by re-noising the source at the next step's sigma.
+            // Final step blends with the clean source — no further denoising follows.
+            if (packedMask is not null && packedSourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(noiseShape, seed + nextStep);
+                    Tensor freshPackedNoise = PackLatent(freshNoise);
+                    freshNoise.Dispose();
+                    noisedSource = new Tensor(packedStepShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
+                    freshPackedNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = packedSourceLatent;
+                }
+                MaskBlendUtilities.BlendPackedInPlace(packedLatent, noisedSource, packedMask);
+                if (noisedSource != packedSourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             // No live preview for Flux.2 yet. Three things would need to line up:
@@ -170,6 +228,8 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         }
 
         textEmbeddings.Dispose();
+        packedSourceLatent?.Dispose();
+        packedMask?.Dispose();
 
         // ── 5. Unpack [B, S, 128] → [B, 128, patH, patW] ──────────────
         Tensor unpackedPatched = UnpackLatent(packedLatent, patH, patW);
@@ -193,7 +253,14 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
-        // ── 9. RGB conversion ─────────────────────────────────────────
+        // ── 9. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        //    Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux.1).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
+        // ── 10. RGB conversion ────────────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
@@ -414,16 +481,20 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         return output;
     }
 
-    /// <summary>Builds the initial packed latent for Flux.2 denoising. T2I: fresh noise scaled by initSigma. Img2img: source goes VAE-encode → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep].</summary>
-    private Tensor BuildInitialPackedLatent(
+    /// <summary>Builds the initial packed latent for Flux.2 denoising. T2I: fresh noise scaled by initSigma. Img2img: source goes VAE-encode → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep].
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean BN-normalized packed source is returned alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>
+    private (Tensor packedLatent, Tensor? packedSourceLatent) BuildInitialPackedLatent(
         TextToImageRequest request,
         FlowMatchEulerDiscreteScheduler scheduler,
         TensorShape noiseShape,
         TensorShape packedShape,
         int latH, int latW, int patH, int patW,
-        int seed, int startStep)
+        int seed, int startStep,
+        bool keepSourceLatent)
     {
-        Tensor packedNoise = PackLatent(SeedGenerator.CreateNoise(noiseShape, seed));
+        Tensor unpackedNoise = SeedGenerator.CreateNoise(noiseShape, seed);
+        Tensor packedNoise = PackLatent(unpackedNoise);
+        unpackedNoise.Dispose();
 
         if (request is ImageToImageRequest img2img)
         {
@@ -448,9 +519,13 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             // AddNoise at sigma[startStep]: noisy = (1 - sigma) * source + sigma * noise
             Tensor result = new Tensor(packedShape, DType.F32);
             scheduler.AddNoise(result, sourcePacked, packedNoise, startStep);
-            sourcePacked.Dispose();
             packedNoise.Dispose();
-            return result;
+            if (keepSourceLatent)
+            {
+                return (result, sourcePacked);
+            }
+            sourcePacked.Dispose();
+            return (result, null);
         }
 
         // T2I path: scale packed noise by initSigma.
@@ -460,9 +535,9 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             Tensor scaled = new Tensor(packedShape, DType.F32);
             Backend.Scale(scaled, packedNoise, initSigma);
             packedNoise.Dispose();
-            return scaled;
+            return (scaled, null);
         }
-        return packedNoise;
+        return (packedNoise, null);
     }
 
     private static void LogTensorStats(string name, Tensor tensor)

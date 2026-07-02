@@ -112,6 +112,13 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // element-wise against the transformers Qwen3-VL reference (same tokens).
         HartsyInference.Diffusion.Models.Denoisers.Ideogram4DebugDump.Dump("textFeatures", textFeatures);
         Backend.FreeWeights(_textEncoder.EnumerateWeights());
+        // Materialize the encoder output on the host, then reclaim every encoder intermediate. The Qwen3-VL
+        // forward leaves hundreds of device-cached activations that otherwise linger until GC finalization and
+        // hold multi-GB into the DiT phase. textFeatures is already host-synced (LogEncoderStats read it), but
+        // touch it explicitly — FreeActivations frees device buffers WITHOUT a D2H sync-back, so anything
+        // still device-only would be silently lost.
+        _ = textFeatures.DataPointer;
+        Backend.FreeActivations();
         Logs.Info($"Prompt encoded in {sw.ElapsedMilliseconds}ms");
 
         // ── 2. Build the unified-sequence conditioning tensors ──
@@ -149,6 +156,17 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Backend.PreloadWeights(_conditional.EnumerateWeights());
         Backend.PreloadWeights(_unconditional.EnumerateWeights());
         LogVram("after DiT weight preload");
+
+        // Materialize everything that must survive across steps, then reclaim conditioning-build leftovers.
+        // All of these are host-created (BuildLlmFull / BuildPositionIds / CreateNoise write on the CPU), so the
+        // touches are free — they just guarantee nothing here is a live GPU activation when the per-step
+        // FreeActivations (which frees device buffers WITHOUT a D2H sync-back) runs below.
+        _ = llmFull.DataPointer;
+        _ = posIds.DataPointer;
+        _ = posIdsImageOnly.DataPointer;
+        _ = negLlm.DataPointer;
+        _ = z.DataPointer;
+        Backend.FreeActivations();
 
         for (int i = steps - 1; i >= 0; i--)
         {
@@ -212,6 +230,16 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             {
                 LatentArch = LatentArchitecture.Flux2,
             });
+
+            // Reclaim GPU-resident activation buffers between steps: the two 9.3B DiTs keep intermediates
+            // on-device and any not read-back/disposed linger until GC, accumulating to OOM over the schedule
+            // (same fix as Flux / the video pipelines). Unlike the host-scheduler pipelines, CfgEulerStep
+            // leaves `z` — the only cross-step tensor — as a live GPU activation, so materialize it first:
+            // FreeActivations frees device buffers WITHOUT a D2H sync-back and would silently revert z to its
+            // stale host copy. Costs one small [1, nImg, 128] D2H per step (after the D2H-sync log line, so
+            // per-step sync counts still reflect only the DiT forwards) + one re-upload next step.
+            _ = z.DataPointer;
+            Backend.FreeActivations();
         }
 
         llmFull.Dispose();
@@ -240,6 +268,10 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
 
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+
+        // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
+        // memory until GC finalization and shrink the budget of whatever generation runs next.
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Ideogram 4 generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

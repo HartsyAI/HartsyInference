@@ -11,13 +11,18 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Video.Pipelines;
 
-/// <summary>Wan-Animate (character animation) pipeline. Drives the <see cref="WanAnimateTransformer"/>: a pose video is
-/// VAE-encoded into the pose-conditioning latent (added to the non-first latent frames in-DiT), and a face video
-/// (pixel space, fixed motion-encoder resolution) drives the motion-encoder → face-encoder → face-adapter pathway.
-/// Flow-match Euler + 2-way text CFG; reuses the Wan VAE (z=16).
+/// <summary>Wan2.2-Animate (character animation) pipeline, following ComfyUI's <c>WanAnimateToVideo</c> node +
+/// <c>WAN22_Animate.extra_conds</c>. The reference image is VAE-encoded into an extra leading latent frame
+/// (<c>trim_latent</c>, removed before decode); the generated frames are represented by a VAE-encoded mid-gray clip in
+/// the concat conditioning. Each step's model input is <c>[noisy(z), mask(4), cond-latent(z)]</c> where the mask (in
+/// model space, after the WAN21 <c>1 − mask</c> inversion) is 1 on the reference frame and 0 on generated frames.
+/// The pose video is VAE-encoded and passed to the DiT (added
+/// in-DiT to latent frames 1..); the face video ([-1,1], 512×512 pixels) drives the motion-encoder → face-encoder →
+/// face-adapter pathway — the negative CFG branch gets black face frames (<c>face·0 − 1</c>), per the node.
 ///
-/// <para><b>Status:</b> structural — the reference-image latent concat and replace-mode background/mask conditioning
-/// are NOT modeled here (pose + face conditioning only); numerics validation-pending vs the real checkpoint.</para></summary>
+/// <para><b>Not modeled (structural gaps, flagged):</b> <c>continue_motion</c> chunked extension,
+/// <c>background_video</c>/<c>character_mask</c> replace-mode conditioning. Numerics validation-pending vs the real
+/// Wan22Animate checkpoint (fp8-scaled, Kijai/WanVideo_comfy_fp8_scaled).</para></summary>
 public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
 {
     private readonly WanAnimateTransformer _transformer;
@@ -35,44 +40,72 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         _config = config;
     }
 
-    /// <summary>Generates an animated clip. <paramref name="poseRgbClip"/> is <c>[1, 3, T, H, W]</c> (the driving
-    /// pose/skeleton video); <paramref name="faceRgbClip"/> is <c>[1, 3, Tface, size, size]</c> at the motion-encoder
-    /// resolution (the driving face video). Output length follows the pose clip's latent grid.</summary>
+    /// <summary>Generates an animated clip. <paramref name="referenceRgb"/> is the character reference image
+    /// <c>[1, 3, 1, H, W]</c> in [-1, 1]; <paramref name="poseRgbClip"/> is the driving pose/skeleton video
+    /// <c>[1, 3, T, H, W]</c>; <paramref name="faceRgbClip"/> is the driving face video <c>[1, 3, Tface, 512, 512]</c>
+    /// in [-1, 1] (already cropped/resized to the motion-encoder resolution); <paramref name="clipImageEmbeds"/> is
+    /// the optional CLIP-ViT-H penultimate hidden state of the reference image. Output length follows the pose clip.</summary>
     public (byte[][] frames, int width, int height, int seed) GenerateAnimation(
-        Tensor promptEmbeds, Tensor negativeEmbeds, Tensor poseRgbClip, Tensor faceRgbClip,
-        TextToImageRequest request, Action<GenerationProgress>? onProgress = null)
+        Tensor promptEmbeds, Tensor negativeEmbeds, Tensor referenceRgb, Tensor poseRgbClip, Tensor faceRgbClip,
+        TextToImageRequest request, Tensor? clipImageEmbeds = null, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        int latentCh = _config.VaeLatentChannels;
         int sp = _config.VaeSpatialCompression, tp = _config.VaeTemporalCompression;
+        if (_config.InChannels != 2 * latentCh + tp)
+            throw new InvalidOperationException(
+                $"Wan-Animate expects InChannels == 2·z + tp ({2 * latentCh + tp}); got {_config.InChannels}.");
+        if (referenceRgb.Shape.Rank != 5 || referenceRgb.Shape[1] != 3 || referenceRgb.Shape[2] != 1)
+            throw new ArgumentException($"referenceRgb must be [1,3,1,H,W]; got {referenceRgb.Shape}.", nameof(referenceRgb));
         int pixT = (int)poseRgbClip.Shape[2], pixH = (int)poseRgbClip.Shape[3], pixW = (int)poseRgbClip.Shape[4];
+        if (referenceRgb.Shape[3] != pixH || referenceRgb.Shape[4] != pixW)
+            throw new ArgumentException($"reference image must match the pose video size {pixW}x{pixH}.", nameof(referenceRgb));
         if (pixH % sp != 0 || pixW % sp != 0)
             throw new ArgumentException($"pose H/W must be divisible by {sp}.");
         if ((pixT - 1) % tp != 0)
             throw new ArgumentException($"pose frame count must satisfy (T-1) % {tp} == 0; got {pixT}.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
+        int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp;
+        const int trimLatent = 1;   // the reference latent frame, removed before decode
+        int tTotal = tLat + trimLatent;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = _config.FlowShift;
 
         Logs.Info($"Wan-Animate: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}, seed={seed} " +
-            $"(latent {latentCh}x{tLat}x{hLat}x{wLat})");
-        Logs.Warning("Wan-Animate pipeline is first-run-validation pending — reference/background conditioning not modeled.");
+            $"(latent {latentCh}x{tTotal}x{hLat}x{wLat}, ref-trim {trimLatent})");
+        Logs.Warning("Wan-Animate pipeline is first-run-validation pending — continue-motion and background/mask " +
+            "replace conditioning not modeled.");
 
-        // Pose conditioning: VAE-encode the pose clip, then keep the non-first latent frames (the DiT adds them to
-        // latent frames 1..gt-1).
+        // VAE-encode the conditioning: reference frame, pose video, and the mid-gray placeholder for generated frames.
         Backend.PreloadWeights(_encoder.EnumerateWeights());
-        Tensor poseLatentFull = _encoder.Encode(Backend, poseRgbClip);   // [1, z, tLat, hLat, wLat]
+        Tensor refLatent = _encoder.Encode(Backend, referenceRgb);       // [1, z, 1, hLat, wLat]
+        Tensor poseLatent = _encoder.Encode(Backend, poseRgbClip);       // [1, z, tLat, hLat, wLat]
+        Tensor gray = new Tensor(new TensorShape([1L, 3, pixT, pixH, pixW]), DType.F32);   // 0 in [-1,1] = mid gray
+        new Span<float>((float*)gray.DataPointer, (int)gray.Shape.ElementCount).Clear();
+        Tensor grayLatent = _encoder.Encode(Backend, gray);              // [1, z, tLat, hLat, wLat]
+        gray.Dispose();
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
-        Tensor pose = DropFirstLatentFrame(poseLatentFull, latentCh, tLat, hLat, wLat);   // [1, z, tLat-1, hLat, wLat]
-        poseLatentFull.Dispose();
+
+        // Concat conditioning [1, 4+z, tTotal, hLat, wLat]: the node emits concat_mask 0 on the ref frame / 1 on
+        // generated frames, and WAN21.concat_cond INVERTS it (mask = 1.0 - mask) before cat((mask, image)) — so the
+        // model sees 1 on the known ref frame, 0 elsewhere. Cond-latent = [ref frame, gray frames].
+        Tensor condition = BuildAnimateCondition(refLatent, grayLatent, latentCh, tp, trimLatent, tTotal, hLat, wLat);
+        refLatent.Dispose();
+        grayLatent.Dispose();
+
+        // Negative CFG branch drives the face pathway with black frames (face·0 − 1), per the node.
+        Tensor faceNeg = new Tensor(faceRgbClip.Shape, DType.F32);
+        float* fnp = (float*)faceNeg.DataPointer;
+        long fn = faceNeg.Shape.ElementCount;
+        for (long i = 0; i < fn; i++) fnp[i] = -1f;
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
-        Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
+        Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tTotal, hLat, wLat]), seed);
         // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
-        // shift) — verify the Animate pose/face path's UniPC trajectory vs the diffusers Wan Animate pipeline.
+        // shift) — verify the Animate trajectory vs ComfyUI at the configured step count.
         FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
         scheduler.SetTimesteps(steps, shift);
 
@@ -80,8 +113,10 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         {
             Stopwatch sw = Stopwatch.StartNew();
             float tEmb = scheduler.Timesteps[k];
-            Tensor vCond = _transformer.Forward(Backend, latents, pose, faceRgbClip, promptEmbeds, tEmb);
-            Tensor vUncond = _transformer.Forward(Backend, latents, pose, faceRgbClip, negativeEmbeds, tEmb);
+            Tensor modelInput = ConcatChannels(latents, condition);      // [1, 2z+4, tTotal, hLat, wLat]
+            Tensor vCond = _transformer.Forward(Backend, modelInput, poseLatent, faceRgbClip, promptEmbeds, tEmb, clipImageEmbeds);
+            Tensor vUncond = _transformer.Forward(Backend, modelInput, poseLatent, faceNeg, negativeEmbeds, tEmb, clipImageEmbeds);
+            modelInput.Dispose();
             LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
@@ -91,15 +126,21 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
                 Latent = latents,
                 LatentArch = LatentArchitecture.Wan,
             });
+            Backend.FreeActivations();
         }
 
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
-        pose.Dispose();
+        condition.Dispose();
+        poseLatent.Dispose();
+        faceNeg.Dispose();
 
+        // Trim the reference latent frame (trim_latent), then decode the generated frames.
+        Tensor video = DropLeadingFrames(latents, latentCh, tTotal, trimLatent, hLat, wLat);
+        latents.Dispose();
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, latents); }
-        finally { latents.Dispose(); }
+        try { rgb = _vae.Decode(Backend, video); }
+        finally { video.Dispose(); }
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = VideoRgbFrames.ExtractFrame(rgb, i);
@@ -108,14 +149,58 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         return (frames, pixW, pixH, seed);
     }
 
-    /// <summary>Drops latent frame 0 → <c>[1, C, T-1, H, W]</c> (the pose conditioning that the DiT adds to frames 1..).</summary>
-    private static Tensor DropFirstLatentFrame(Tensor x, int c, int t, int h, int w)
+    /// <summary>Builds the <c>[1, tp+z, tTotal, H, W]</c> concat conditioning in model space (post the WAN21
+    /// <c>1 − mask</c> inversion): mask channels 1 on the leading reference frame(s) / 0 on generated frames,
+    /// cond-latent = reference latent then gray-clip latent.</summary>
+    private static Tensor BuildAnimateCondition(Tensor refLatent, Tensor grayLatent, int latentCh, int maskCh,
+        int trimLatent, int tTotal, int hLat, int wLat)
     {
-        Tensor o = new Tensor(new TensorShape([1L, c, t - 1, h, w]), DType.F32);
+        Tensor o = new Tensor(new TensorShape([1L, maskCh + latentCh, tTotal, hLat, wLat]), DType.F32);
+        float* op = (float*)o.DataPointer;
+        long frame = (long)hLat * wLat;
+        long perChannel = (long)tTotal * frame;
+        for (int m = 0; m < maskCh; m++)
+            for (int t = 0; t < tTotal; t++)
+            {
+                float v = t < trimLatent ? 1f : 0f;
+                for (long p = 0; p < frame; p++) op[(long)m * perChannel + t * frame + p] = v;
+            }
+        float* rp = (float*)refLatent.DataPointer;    // [1, z, trimLatent, h, w]
+        float* gp = (float*)grayLatent.DataPointer;   // [1, z, tTotal-trimLatent, h, w]
+        int tGen = tTotal - trimLatent;
+        for (int c = 0; c < latentCh; c++)
+        {
+            long dstBase = (long)(maskCh + c) * perChannel;
+            Buffer.MemoryCopy(rp + (long)c * trimLatent * frame, op + dstBase,
+                (long)trimLatent * frame * 4, (long)trimLatent * frame * 4);
+            Buffer.MemoryCopy(gp + (long)c * tGen * frame, op + dstBase + (long)trimLatent * frame,
+                (long)tGen * frame * 4, (long)tGen * frame * 4);
+        }
+        return o;
+    }
+
+    /// <summary>Channel-concatenates two <c>[1, C, T, H, W]</c> tensors → <c>[1, Ca+Cb, T, H, W]</c>.</summary>
+    private static Tensor ConcatChannels(Tensor a, Tensor b)
+    {
+        int ca = (int)a.Shape[1], cb = (int)b.Shape[1];
+        int t = (int)a.Shape[2], h = (int)a.Shape[3], w = (int)a.Shape[4];
+        long perChannel = (long)t * h * w;
+        Tensor o = new Tensor(new TensorShape([1L, ca + cb, t, h, w]), DType.F32);
+        float* op = (float*)o.DataPointer;
+        Buffer.MemoryCopy((float*)a.DataPointer, op, (long)ca * perChannel * 4, (long)ca * perChannel * 4);
+        Buffer.MemoryCopy((float*)b.DataPointer, op + (long)ca * perChannel, (long)cb * perChannel * 4, (long)cb * perChannel * 4);
+        return o;
+    }
+
+    /// <summary>Drops the leading <paramref name="skip"/> latent frames → <c>[1, C, T−skip, H, W]</c>.</summary>
+    private static Tensor DropLeadingFrames(Tensor x, int c, int t, int skip, int h, int w)
+    {
+        Tensor o = new Tensor(new TensorShape([1L, c, t - skip, h, w]), DType.F32);
         float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer;
         long frame = (long)h * w;
         for (int ci = 0; ci < c; ci++)
-            Buffer.MemoryCopy(xp + ((long)ci * t + 1) * frame, op + (long)ci * (t - 1) * frame, (long)(t - 1) * frame * 4, (long)(t - 1) * frame * 4);
+            Buffer.MemoryCopy(xp + ((long)ci * t + skip) * frame, op + (long)ci * (t - skip) * frame,
+                (long)(t - skip) * frame * 4, (long)(t - skip) * frame * 4);
         return o;
     }
 }

@@ -88,8 +88,10 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
             Logs.Info("Anima img2img strength=0 → returning source image unchanged.");
             return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
         }
+        Tensor? maskPixel = img2imgPlan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
 
-        Logs.Info($"Anima {(isImg2Img ? "img2img" : "t2i")}: {width}x{height}, {steps} steps, start={img2imgPlan.StartStep}, cfg={cfgScale}, seed={seed}");
+        Logs.Info($"Anima {(isMaskedInpaint ? "inpaint" : isImg2Img ? "img2img" : "t2i")}: {width}x{height}, {steps} steps, start={img2imgPlan.StartStep}, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         LogStats("textEmbeddings (Qwen3 0.6B output)", textEmbeddings);
@@ -169,16 +171,27 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         Logs.Info($"Anima sigmas (Z-Image flow-match, shift={Shift}): [{sigmas[0]:F4}, {sigmas[1]:F4}, ..., {sigmas[^2]:F4}, {sigmas[^1]:F4}]");
 
         // Initial latent: fresh noise (t2i) or the VAE-encoded source noised to sigma[startStep] (img2img).
+        // For masked inpaint the clean source latent + latent-resolution mask stay alive for per-step blending.
         int startStep = img2imgPlan.StartStep;
         Tensor latent;
+        Tensor? sourceLatent = null;
+        Tensor? latentMask = null;
         if (isImg2Img)
         {
-            Tensor sourceLatent = _vaeEncoder!.Encode(Backend, ((ImageToImageRequest)request).SourceImage);  // [1, 16, latentH, latentW]
+            Tensor encodedSource = _vaeEncoder!.Encode(Backend, ((ImageToImageRequest)request).SourceImage);  // [1, 16, latentH, latentW]
             Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
             latent = new Tensor(latentShape, DType.F32);
-            AddNoiseFlowMatch(latent, sourceLatent, noise, sigmas[startStep]);   // x = (1-σ)·source + σ·noise
-            sourceLatent.Dispose();
+            AddNoiseFlowMatch(latent, encodedSource, noise, sigmas[startStep]);   // x = (1-σ)·source + σ·noise
             noise.Dispose();
+            if (isMaskedInpaint)
+            {
+                sourceLatent = encodedSource;
+                latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+            }
+            else
+            {
+                encodedSource.Dispose();
+            }
             Logs.Info($"Anima img2img: encoded source, AddNoise at sigma[{startStep}]={sigmas[startStep]:F4}.");
         }
         else
@@ -216,6 +229,28 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
             latent.Dispose();
             latent = newLatent;
 
+            // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory by
+            // re-noising the source at the next step's sigma. Final step blends with the clean source
+            // (sigmas[steps] = 0 makes AddNoiseFlowMatch the identity, but we skip the noise alloc).
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    AddNoiseFlowMatch(noisedSource, sourceLatent, freshNoise, sigmas[nextStep]);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
             {
@@ -229,6 +264,8 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 
         refinedText.Dispose();
         refinedNegText?.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
@@ -242,6 +279,13 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 
         LogStats("VAE decoded (raw)", decoded);
         LogPerChannelStats("VAE decoded per-channel", decoded);
+
+        // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        // Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(decoded, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
 
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
         decoded.Dispose();

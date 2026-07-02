@@ -150,6 +150,16 @@ public static unsafe class WanDitOps
         return proj;
     }
 
+    /// <summary>Row-concatenates <paramref name="top"/> <c>[a, dim]</c> over <paramref name="bottom"/> <c>[b, dim]</c> → <c>[a+b, dim]</c>.</summary>
+    public static Tensor ConcatRows(Tensor top, Tensor bottom, int dim)
+    {
+        int a = (int)top.Shape[0], b = (int)bottom.Shape[0];
+        Tensor o = new Tensor(new TensorShape(a + b, dim), DType.F32);
+        Buffer.MemoryCopy((float*)top.DataPointer, (float*)o.DataPointer, (long)a * dim * 4, (long)a * dim * 4);
+        Buffer.MemoryCopy((float*)bottom.DataPointer, (float*)o.DataPointer + (long)a * dim, (long)b * dim * 4, (long)b * dim * 4);
+        return o;
+    }
+
     /// <summary>Copies a tensor's contiguous data into a fresh F32 <c>[rows, cols]</c> view (Conv3d weight → linear).</summary>
     public static Tensor Reshape2d(Tensor t, int rows, int cols)
     {

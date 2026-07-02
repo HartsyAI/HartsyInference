@@ -4,6 +4,7 @@ using Xunit.Abstractions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
@@ -400,6 +401,194 @@ public class WanVideoGenerationTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    /// <summary>Real-weight e2e for Wan2.2-S2V-14B (speech-to-video): fp8 DiT (auto-detected S2V config incl. the
+    /// audio injector), Wav2Vec2-large front-end on a synthetic modulated waveform, z=16 VAE, optional reference image.
+    /// Env: <c>WAN_S2V_CKPT</c>, <c>WAN_WAV2VEC</c>, <c>WAN_VAE</c>; needs the 4090 (fp8 14B ⇒ <c>WAN_NO_CACHE_CASTS=1</c>).</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void WanS2V_Gpu_E2E()
+    {
+        string ckpt = Env("WAN_S2V_CKPT") ?? "/home/hartsy/Desktop/HartsyInference/Models/Stable-Diffusion/Wan/wan2.2_s2v_14B_fp8_scaled.safetensors";
+        string wavPath = Env("WAN_WAV2VEC") ?? "/home/hartsy/Desktop/HartsyInference/Models/Stable-Diffusion/Wan/wav2vec2_large_english_fp16.safetensors";
+        string vaePath = Env("WAN_VAE") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/VAE/Wan/wan_2.1_vae.safetensors";
+        string umt5Path = TestPaths.WanVideo.Umt5Xxl;
+        if (!File.Exists(ckpt) || !File.Exists(wavPath) || !File.Exists(vaePath) || !File.Exists(umt5Path))
+        { _output.WriteLine($"SKIPPED: missing S2V ckpt/wav2vec2/VAE/umT5."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir) || !CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no PTX/CUDA"); return; }
+
+        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(ckpt);
+        using SafeTensorsLoader _dit = ditLoader;
+        WanVideoConfig cfg = WanConfigDetector.Detect(conv.Transformer);
+        if (Env("WAN_FLOW_SHIFT") is not null) cfg = cfg with { FlowShift = (float)EnvD("WAN_FLOW_SHIFT", cfg.FlowShift) };
+        if (Env("WAN_CFG_RESCALE") is not null) cfg = cfg with { CfgRescale = (float)EnvD("WAN_CFG_RESCALE", cfg.CfgRescale) };
+        _output.WriteLine($"  detected → {WanConfigDetector.Describe(cfg)}");
+        Assert.True(cfg.HasAudioConditioning, "checkpoint has no audio conditioning — not an S2V DiT");
+
+        List<SafeTensorsLoader> loaders = [];
+        try
+        {
+            (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+            loaders.AddRange(vl);
+            using SafeTensorsLoader umt5Loader = new(); umt5Loader.Load(umt5Path);
+            Dictionary<string, Tensor> umt5W = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
+
+            using WanS2VTransformer transformer = new(cfg);
+            transformer.LoadWeights(conv.Transformer);
+            WanS2VAudioEncoder audioEncoder = new(cfg.AudioLayers, cfg.AudioDim, cfg.InnerDim, cfg.AudioTokens);
+            audioEncoder.LoadWeights(conv.Transformer);
+            Wan21VaeDecoder vae = new(); vae.LoadWeights(vaeW);
+            Wan21VaeEncoder encoder = new(); encoder.LoadWeights(vaeW);
+
+            // The ComfyOrg audio-encoder file prefixes every key with "wav2vec2." (plus an unused lm_head).
+            using SafeTensorsLoader wavLoader = new(); wavLoader.Load(wavPath);
+            Dictionary<string, Tensor> wavW = new();
+            foreach (KeyValuePair<string, Tensor> kvp in wavLoader.GetAllTensors())
+                if (kvp.Key.StartsWith("wav2vec2.", StringComparison.Ordinal)) wavW[kvp.Key["wav2vec2.".Length..]] = kvp.Value;
+            Wav2Vec2Encoder wav2vec2 = new(Wav2Vec2EncoderConfig.Large);
+            wav2vec2.LoadWeights(wavW);
+
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            if (Environment.GetEnvironmentVariable("WAN_NO_CACHE_CASTS") == "1") backend.CacheWeightCasts = false;
+            (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
+            if (freeBytes / (1024.0 * 1024.0 * 1024.0) < EnvD("WAN_MIN_GB", 17.0)) { _output.WriteLine("SKIPPED: low VRAM."); return; }
+
+            using T5TextEncoder umt5 = new(T5TextEncoderConfig.Umt5Xxl); umt5.LoadWeights(umt5W);
+            using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 512);
+            int[] pTok = tok.Encode("a person speaking enthusiastically to the camera, natural lighting, photorealistic");
+            int[] nTok = tok.Encode("blurry, low quality, distorted");
+            Tensor tb = umt5.Encode(backend, [pTok, nTok], [T5Tokenizer.CreateAttentionMask(pTok), T5Tokenizer.CreateAttentionMask(nTok)]);
+            Tensor promptEmbeds = CfgHelper.SliceBatchElement(tb, 0, pTok.Length, 4096);
+            Tensor negEmbeds = CfgHelper.SliceBatchElement(tb, 1, pTok.Length, 4096);
+            tb.Dispose();
+            backend.Sync();
+            backend.FreeWeights(umt5.EnumerateWeights());
+
+            int genW = (int)EnvD("WAN_W", 480), genH = (int)EnvD("WAN_H", 320);
+            int genFrames = (int)EnvD("WAN_FRAMES", 33), genSteps = (int)EnvD("WAN_STEPS", 20);
+
+            // Synthetic "speech": a 16 kHz amplitude-modulated tone sweep long enough for genFrames at 16 fps.
+            int samples = (int)((genFrames / 16.0 + 0.5) * 16000);
+            float[] waveform = new float[samples];
+            for (int i = 0; i < samples; i++)
+            {
+                double t = i / 16000.0;
+                waveform[i] = (float)(0.4 * Math.Sin(2 * Math.PI * (140 + 60 * Math.Sin(2 * Math.PI * 2.5 * t)) * t)
+                                      * (0.55 + 0.45 * Math.Sin(2 * Math.PI * 4.0 * t)));
+            }
+
+            byte[] reference = new byte[genW * genH * 3];
+            for (int y = 0; y < genH; y++)
+                for (int x = 0; x < genW; x++)
+                {
+                    int o = (y * genW + x) * 3;
+                    reference[o] = (byte)(200 - 100 * y / genH);
+                    reference[o + 1] = (byte)(160 + 60 * x / genW);
+                    reference[o + 2] = (byte)(150 + 80 * Math.Sin(6.28 * (x + y) / 120.0));
+                }
+
+            _output.WriteLine($"[gen] S2V {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}...");
+            WanS2VPipeline pipeline = new(backend, transformer, audioEncoder, vae, cfg, encoder);
+            TextToImageRequest req = new() { Prompt = "s2v", Width = genW, Height = genH, Steps = genSteps, CfgScale = (float)EnvD("WAN_CFG", cfg.GuidanceScale), Seed = 42 };
+            (byte[][] frames, int w, int h, _) = pipeline.GenerateFromWaveform(promptEmbeds, negEmbeds, waveform, wav2vec2, req, genFrames, reference,
+                p =>
+                {
+                    (long cached, _, _) = backend.GetGpuCacheStats();
+                    _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms) free={backend.FreeMemoryBytes() >> 20}MB cached={cached >> 20}MB");
+                });
+            promptEmbeds.Dispose(); negEmbeds.Dispose();
+            AssertFramesCoherent(frames, w, h);
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    /// <summary>Real-weight e2e for Wan2.2-Animate-14B (character animation): fp8 DiT (auto-detected Animate config —
+    /// pose patch-embed + motion/face adapter), synthetic reference/pose/face inputs, z=16 VAE. Env:
+    /// <c>WAN_ANIMATE_CKPT</c>, <c>WAN_VAE</c>; needs the 4090 (fp8 14B ⇒ <c>WAN_NO_CACHE_CASTS=1</c>).</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void WanAnimate_Gpu_E2E()
+    {
+        string ckpt = Env("WAN_ANIMATE_CKPT") ?? "/home/hartsy/Desktop/HartsyInference/Models/Stable-Diffusion/Wan/wan2.2_animate_14B_fp8_scaled_KJ_v2.safetensors";
+        string vaePath = Env("WAN_VAE") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/VAE/Wan/wan_2.1_vae.safetensors";
+        string umt5Path = TestPaths.WanVideo.Umt5Xxl;
+        if (!File.Exists(ckpt) || !File.Exists(vaePath) || !File.Exists(umt5Path)) { _output.WriteLine("SKIPPED: missing Animate ckpt/VAE/umT5."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir) || !CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no PTX/CUDA"); return; }
+
+        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(ckpt);
+        using SafeTensorsLoader _dit = ditLoader;
+        WanVideoConfig cfg = WanConfigDetector.Detect(conv.Transformer);
+        if (Env("WAN_FLOW_SHIFT") is not null) cfg = cfg with { FlowShift = (float)EnvD("WAN_FLOW_SHIFT", cfg.FlowShift) };
+        if (Env("WAN_CFG_RESCALE") is not null) cfg = cfg with { CfgRescale = (float)EnvD("WAN_CFG_RESCALE", cfg.CfgRescale) };
+        _output.WriteLine($"  detected → {WanConfigDetector.Describe(cfg)}");
+        Assert.True(cfg.IsAnimate, "checkpoint has no pose/face adapter — not an Animate DiT");
+
+        List<SafeTensorsLoader> loaders = [];
+        try
+        {
+            (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+            loaders.AddRange(vl);
+            using SafeTensorsLoader umt5Loader = new(); umt5Loader.Load(umt5Path);
+            Dictionary<string, Tensor> umt5W = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
+
+            using WanAnimateTransformer transformer = new(cfg);
+            transformer.LoadWeights(conv.Transformer);
+            Wan21VaeDecoder vae = new(); vae.LoadWeights(vaeW);
+            Wan21VaeEncoder encoder = new(); encoder.LoadWeights(vaeW);
+
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            if (Environment.GetEnvironmentVariable("WAN_NO_CACHE_CASTS") == "1") backend.CacheWeightCasts = false;
+            (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
+            if (freeBytes / (1024.0 * 1024.0 * 1024.0) < EnvD("WAN_MIN_GB", 18.0)) { _output.WriteLine("SKIPPED: low VRAM."); return; }
+
+            using T5TextEncoder umt5 = new(T5TextEncoderConfig.Umt5Xxl); umt5.LoadWeights(umt5W);
+            using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 512);
+            int[] pTok = tok.Encode("a person dancing in a bright studio, smooth motion, photorealistic");
+            int[] nTok = tok.Encode("blurry, low quality, distorted");
+            Tensor tb = umt5.Encode(backend, [pTok, nTok], [T5Tokenizer.CreateAttentionMask(pTok), T5Tokenizer.CreateAttentionMask(nTok)]);
+            Tensor promptEmbeds = CfgHelper.SliceBatchElement(tb, 0, pTok.Length, 4096);
+            Tensor negEmbeds = CfgHelper.SliceBatchElement(tb, 1, pTok.Length, 4096);
+            tb.Dispose();
+            backend.Sync();
+            backend.FreeWeights(umt5.EnumerateWeights());
+
+            int genW = (int)EnvD("WAN_W", 480), genH = (int)EnvD("WAN_H", 320);
+            int genFrames = (int)EnvD("WAN_FRAMES", 17), genSteps = (int)EnvD("WAN_STEPS", 20);
+
+            Tensor reference = BuildGradientFrame(genH, genW);                    // [1,3,1,H,W]
+            Tensor pose = BuildMovingSquareClip(genFrames, genH, genW);           // stick-figure stand-in
+            Tensor face = BuildMovingSquareClip(genFrames, 512, 512);             // motion-encoder resolution
+
+            _output.WriteLine($"[gen] Animate {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}...");
+            WanAnimatePipeline pipeline = new(backend, transformer, vae, encoder, cfg);
+            TextToImageRequest req = new() { Prompt = "animate", Width = genW, Height = genH, Steps = genSteps, CfgScale = (float)EnvD("WAN_CFG", cfg.GuidanceScale), Seed = 42 };
+            (byte[][] frames, int w, int h, _) = pipeline.GenerateAnimation(promptEmbeds, negEmbeds, reference, pose, face, req,
+                onProgress: p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+            reference.Dispose(); pose.Dispose(); face.Dispose();
+            promptEmbeds.Dispose(); negEmbeds.Dispose();
+            AssertFramesCoherent(frames, w, h);
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    /// <summary>Builds a <c>[1,3,1,H,W]</c> F32 frame in [-1,1]: a smooth colour gradient (reference-image stand-in).</summary>
+    private static unsafe Tensor BuildGradientFrame(int h, int w)
+    {
+        Tensor frame = new Tensor(new TensorShape([1L, 3, 1, h, w]), DType.F32);
+        float* p = (float*)frame.DataPointer;
+        long plane = (long)h * w;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                long o = (long)y * w + x;
+                p[o] = 2f * x / w - 1f;
+                p[plane + o] = 2f * y / h - 1f;
+                p[2 * plane + o] = (float)Math.Sin(6.28 * (x + y) / 130.0) * 0.6f;
+            }
+        return frame;
+    }
+
     /// <summary>Builds a <c>[1,3,T,H,W]</c> F32 clip in [-1,1]: dark background, bright square sweeping left→right.</summary>
     private static unsafe Tensor BuildMovingSquareClip(int t, int h, int w)
     {
@@ -535,17 +724,21 @@ public class WanVideoGenerationTests
     {
         Assert.True(frames.Length > 0, "no frames produced");
         double[] means = new double[frames.Length];
+        int flatFrame = -1; byte flatMn = 0, flatMx = 0;
         for (int f = 0; f < frames.Length; f++)
         {
             byte[] px = frames[f];
             long sum = 0; byte mn = 255, mx = 0;
             foreach (byte b in px) { sum += b; if (b < mn) mn = b; if (b > mx) mx = b; }
             means[f] = (double)sum / px.Length;
-            Assert.True(mx - mn > 20, $"frame {f} is near-flat (min={mn} max={mx}) — degenerate output");
+            if (mx - mn <= 20 && flatFrame < 0) { flatFrame = f; flatMn = mn; flatMx = mx; }
         }
         double meanMin = means.Min(), meanMax = means.Max();
         double clipMean = means.Average();
+        // Print the full profile BEFORE asserting so a failing run is diagnosable from the log alone.
         _output.WriteLine($"  coherence: per-frame mean {meanMin:F1}..{meanMax:F1}, clip mean {clipMean:F1}, spread {meanMax - meanMin:F1}");
+        _output.WriteLine($"  per-frame means: {string.Join(" ", means.Select(m => m.ToString("F0")))}");
+        Assert.True(flatFrame < 0, $"frame {flatFrame} is near-flat (min={flatMn} max={flatMx}) — degenerate output");
         // Real video frames sit around mid-gray (~80–180); a near-black clip (mean < 25) is degenerate output even if
         // it has some structure — this is the check that catches the "dark output" class of bugs.
         Assert.True(clipMean is > 25 and < 235, $"clip mean {clipMean:F1} outside healthy range [25,235] — degenerate (too dark / blown out)");

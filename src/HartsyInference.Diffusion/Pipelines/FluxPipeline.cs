@@ -488,6 +488,11 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             streamer.EvictAll();
             streamer.Dispose();
             Backend.FreeWeights(_transformer.EnumerateSharedWeights());
+            // Also purge the block weights: the streaming cache registers each uploaded block in the backend
+            // weight cache, and any block still cached at the end (or its lingering F16 cast) would stay
+            // resident and starve the VAE decode (same fix as HunyuanVideoPipeline — decode OOM'd with the
+            // DiT still holding ~20+ GB, <1.2 GB free).
+            Backend.FreeWeights(_transformer.EnumerateWeights());
         }
         else
         {

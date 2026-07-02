@@ -210,6 +210,17 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
         txtK.Dispose();
 
+        // ── 3b. Image RoPE BEFORE the head permute: pre-permute [B(=1), S_img, H, D] is exactly
+        // WanRopeInterleaved's [S, heads·headDim] contract, so the whole image Q/K rotates in one GPU-resident op
+        // (was a full D2H→host-trig→H2D excursion per block per step).
+        if (batch == 1)
+        {
+            Span<int> ropeDims = imgPackedT > 1
+                ? stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW }
+                : stackalloc int[2] { imgPackedH, imgPackedW };
+            rope.ApplyGpu(backend, imgQn, imgKn, _numHeads, ropeDims);
+        }
+
         // ── 4. Permute [B, S, H, D] → [B, H, S, D] ──
         Tensor imgQMh = new Tensor(imgMhShape, DType.F32);
         backend.Permute0213(imgQMh, imgQn, imgSeqLen, _numHeads, _headDim);
@@ -231,14 +242,17 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         backend.Permute0213(txtVMh, txtV, txtSeqLen, _numHeads, _headDim);
         txtV.Dispose();
 
-        // ── 5. Image-only RoPE (CPU; standalone [B, H, imgSeq, D] tensor — see class note) ──
-        if (imgPackedT > 1)
+        // ── 5. Host RoPE fallback (batched inference only; B=1 runs the GPU path at 3b) ──
+        if (batch != 1)
         {
-            Span<int> dims = stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW };
-            rope.ApplyJoint(imgQMh, imgKMh, batch, _numHeads, dims);
+            if (imgPackedT > 1)
+            {
+                Span<int> dims = stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW };
+                rope.ApplyJoint(imgQMh, imgKMh, batch, _numHeads, dims);
+            }
+            else
+                rope.ApplyImage(imgQMh, imgKMh, batch, _numHeads, imgPackedH, imgPackedW);
         }
-        else
-            rope.ApplyImage(imgQMh, imgKMh, batch, _numHeads, imgPackedH, imgPackedW);
 
         // ── 6. Concat [img, txt] along the seq dim of [B, H, S, D] ──
         Tensor jointQ = new Tensor(jointMhShape, DType.F32);

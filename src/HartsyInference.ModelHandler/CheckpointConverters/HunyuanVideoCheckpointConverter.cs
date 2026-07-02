@@ -51,6 +51,16 @@ public static unsafe class HunyuanVideoCheckpointConverter
             allWeights = stripped;
         }
 
+        // Raw Tencent hyvideo naming (Kijai fp8 repacks): underscore attention modules (img_attn_qkv),
+        // mlp.fc1/fc2, mod.linear — normalize to the Comfy Flux-style names MapOriginal expects.
+        bool tencentRaw = allWeights.ContainsKey("double_blocks.0.img_attn_qkv.weight");
+        if (tencentRaw)
+        {
+            Dictionary<string, Tensor> normalized = new(allWeights.Count);
+            foreach ((string k, Tensor v) in allWeights) normalized[NormalizeTencentRaw(k)] = v;
+            allWeights = normalized;
+        }
+
         bool diffusers = allWeights.ContainsKey("x_embedder.proj.weight")
             || allWeights.ContainsKey("transformer_blocks.0.attn.to_q.weight");
         Dictionary<string, Tensor> outW = new(allWeights.Count + 256);
@@ -62,6 +72,30 @@ public static unsafe class HunyuanVideoCheckpointConverter
         }
         return outW;
     }
+
+    /// <summary>Rewrites a raw Tencent hyvideo key (Kijai repacks: <c>img_attn_qkv</c>, <c>mlp.fc1</c>,
+    /// <c>mod.linear</c>, <c>t_embedder.mlp.0</c>, <c>c_embedder.linear_1</c>) to the Comfy Flux-style name
+    /// <see cref="MapOriginal"/> expects. Order matters: embedder <c>.mlp.0/.2</c> renames run BEFORE the refiner
+    /// <c>mlp.fc1/fc2 → mlp.0/mlp.2</c> renames so the two never collide.</summary>
+    private static string NormalizeTencentRaw(string key) => key
+        .Replace(".mlp.0.", ".in_layer.")                      // time_in/guidance_in/t_embedder MLPs
+        .Replace(".mlp.2.", ".out_layer.")
+        .Replace("c_embedder.linear_1.", "c_embedder.in_layer.")
+        .Replace("c_embedder.linear_2.", "c_embedder.out_layer.")
+        .Replace("_attn_qkv.", "_attn.qkv.")
+        .Replace("_attn_proj.", "_attn.proj.")
+        .Replace("_attn_q_norm.", "_attn.norm.query_norm.")
+        .Replace("_attn_k_norm.", "_attn.norm.key_norm.")
+        .Replace(".q_norm.", ".norm.query_norm.")              // single_blocks (attn norms are underscore-joined)
+        .Replace(".k_norm.", ".norm.key_norm.")
+        .Replace("_mlp.fc1.", "_mlp.0.")                       // double-block img/txt MLPs
+        .Replace("_mlp.fc2.", "_mlp.2.")
+        .Replace(".mlp.fc1.", ".mlp.0.")                       // refiner-block MLPs
+        .Replace(".mlp.fc2.", ".mlp.2.")
+        .Replace("_mod.linear.", "_mod.lin.")
+        .Replace(".modulation.linear.", ".modulation.lin.")
+        .Replace("self_attn_qkv.", "self_attn.qkv.")
+        .Replace("self_attn_proj.", "self_attn.proj.");
 
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadAndConvert(string checkpointPath)
     {

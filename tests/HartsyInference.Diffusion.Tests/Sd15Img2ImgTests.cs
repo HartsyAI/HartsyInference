@@ -103,6 +103,36 @@ public sealed class Sd15Img2ImgTests
         source.Dispose();
     }
 
+    [Fact]
+    public void GenerateInpaint_WrongMaskShape_Throws()
+    {
+        using CpuBackend backend = new();
+        ClipTextEncoder textEncoder = new(ClipTextEncoderConfig.Sd15);
+        UNet unet = new(UNetConfig.Sd15);
+        VaeDecoder vaeDecoder = new(VaeConfig.Sd15);
+        VaeEncoder vaeEncoder = new(VaeConfig.Sd15);
+
+        using StableDiffusion15Pipeline pipeline = new(backend, textEncoder, unet, vaeDecoder, vaeEncoder);
+
+        // Mask spatial dims don't match the source → ArgumentException from Img2ImgSetup.Prepare.
+        Tensor source = new Tensor(new TensorShape(1, 3, 64, 64), DType.F32);
+        Tensor mask = new Tensor(new TensorShape(1, 1, 32, 32), DType.F32);
+        ImageToImageRequest request = new()
+        {
+            Prompt = "test",
+            Width = 64,
+            Height = 64,
+            SourceImage = source,
+            Mask = mask,
+        };
+
+        Assert.Throws<ArgumentException>(() =>
+            pipeline.GenerateFromTokens(promptTokenIds: [], negativePromptTokenIds: [], request));
+
+        source.Dispose();
+        mask.Dispose();
+    }
+
     // ── Strength=0 short-circuit (no checkpoint required) ──────────────
 
     [Fact]

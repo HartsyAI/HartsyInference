@@ -395,10 +395,11 @@ public static unsafe class CheckpointConvertUtils
     }
 
     /// <summary>Dequantizes an NVFP4 weight to F16. <paramref name="packed"/> is U8 <c>[rows, cols/2]</c> with two
-    /// e2m1 values per byte — element <c>2j</c> in the LOW nibble, <c>2j+1</c> in the HIGH nibble (PyTorch
-    /// <c>float4_e2m1fn_x2</c> / TensorRT convention, which ComfyUI follows). <paramref name="blockScales"/> is
-    /// F8-E4M3 <c>[rows, cols/16]</c> — one scale per 16 consecutive input-dim elements. The full value is
-    /// <c>e2m1 · block_scale · globalScale</c>. Rows are dequantized in parallel (pure per-row writes).</summary>
+    /// e2m1 values per byte — element <c>2j</c> in the HIGH nibble, <c>2j+1</c> in the LOW nibble (comfy_kitchen
+    /// <c>hi_first=True</c>, its default for both quantize and dequantize; verified against
+    /// <c>float_utils.unpack_uint4</c>). <paramref name="blockScales"/> is F8-E4M3 <c>[rows, cols/16]</c> — one
+    /// scale per 16 consecutive input-dim elements. The full value is <c>e2m1 · block_scale · globalScale</c>.
+    /// Rows are dequantized in parallel (pure per-row writes).</summary>
     public static Tensor DequantNvfp4ToF16(Tensor packed, Tensor blockScales, float globalScale)
     {
         if (packed.DType != DType.U8 || packed.Shape.Rank != 2)
@@ -429,11 +430,11 @@ public static unsafe class CheckpointConvertUtils
                     // 8 packed bytes per 16-element scale block → scale index = j/8.
                     float scale = e4m3[rowScales[j >> 3]] * globalScale;
                     byte b = rowSrc[j];
-                    int lo = b & 0xF, hi = b >> 4;
-                    float loVal = e2m1[lo & 7] * scale;
+                    int hi = b >> 4, lo = b & 0xF;
                     float hiVal = e2m1[hi & 7] * scale;
-                    rowDst[j * 2] = (Half)((lo & 8) != 0 ? -loVal : loVal);
-                    rowDst[j * 2 + 1] = (Half)((hi & 8) != 0 ? -hiVal : hiVal);
+                    float loVal = e2m1[lo & 7] * scale;
+                    rowDst[j * 2] = (Half)((hi & 8) != 0 ? -hiVal : hiVal);
+                    rowDst[j * 2 + 1] = (Half)((lo & 8) != 0 ? -loVal : loVal);
                 }
             });
         }

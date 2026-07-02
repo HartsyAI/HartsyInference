@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -9,6 +10,8 @@ public sealed unsafe class HunyuanImageRope
     private readonly int[] _axesDim;
     private readonly float _theta;
     private readonly int _headDim;
+    private int[]? _tableDims;
+    private Tensor? _tableCos, _tableSin;
 
     /// <summary>Creates a HunyuanImageRope.</summary>
     /// <param name="axesDim">Per-axis dim split. 2 axes <c>(height, width)</c> for image (default <c>[64, 64]</c>);
@@ -67,6 +70,72 @@ public sealed unsafe class HunyuanImageRope
         }
 
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, seqLen);
+    }
+
+    /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> Q/K pair via <see cref="IBackend.WanRopeInterleaved"/>
+    /// (same interleaved-pair rotation): rotates the leading <c>Π packedDims</c> tokens in place, leaving any trailing
+    /// (text) rows untouched — so it works both on a standalone image tensor and on a joint <c>[img, txt]</c> tensor
+    /// with image-first layout. Replaces the per-block host path (a full Q/K D2H→trig→H2D round trip per block per
+    /// step); the duplicated-pair cos/sin tables <c>[S, headDim]</c> are built ONCE per packed-dims and preloaded to
+    /// the GPU weight cache. Requires batch 1 (the flat layout equivalence); callers keep the host path for B&gt;1.</summary>
+    public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads, ReadOnlySpan<int> packedDims)
+    {
+        (Tensor cos, Tensor sin, int seqLen) = GetTables(backend, packedDims);
+        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+    }
+
+    /// <summary>Builds (or returns the cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> for
+    /// <paramref name="packedDims"/> — the value for pair <c>i</c> stored at both <c>2i</c> and <c>2i+1</c>, the
+    /// layout <see cref="IBackend.WanRopeInterleaved"/> reads. Preloads them into the backend weight cache so the
+    /// per-block op skips the H2D upload; frees the previous tables when the grid changes.</summary>
+    private (Tensor cos, Tensor sin, int seqLen) GetTables(IBackend backend, ReadOnlySpan<int> packedDims)
+    {
+        if (packedDims.Length != _axesDim.Length)
+            throw new ArgumentException($"packedDims has {packedDims.Length} dims but rope has {_axesDim.Length} axes.", nameof(packedDims));
+        int seqLen = 1;
+        for (int i = 0; i < packedDims.Length; i++) seqLen *= packedDims[i];
+
+        if (_tableDims is not null && packedDims.SequenceEqual(_tableDims))
+            return (_tableCos!, _tableSin!, seqLen);
+
+        if (_tableCos is not null)
+        {
+            backend.FreeWeights([_tableCos, _tableSin!]);
+            _tableCos.Dispose();
+            _tableSin!.Dispose();
+        }
+
+        int halfDim = _headDim / 2;
+        float[] compactCos = new float[halfDim];
+        float[] compactSin = new float[halfDim];
+        Tensor cos = new Tensor(new TensorShape(seqLen, _headDim), DType.F32);
+        Tensor sin = new Tensor(new TensorShape(seqLen, _headDim), DType.F32);
+        float* cp = (float*)cos.DataPointer;
+        float* sp = (float*)sin.DataPointer;
+        Span<double> pos = stackalloc double[packedDims.Length];
+        for (int s = 0; s < seqLen; s++)
+        {
+            int rem = s;
+            for (int axis = packedDims.Length - 1; axis >= 0; axis--)
+            {
+                pos[axis] = rem % packedDims[axis];
+                rem /= packedDims[axis];
+            }
+            FillTokenFreqs(compactCos, compactSin, 0, pos);
+            long baseOff = (long)s * _headDim;
+            for (int i = 0; i < halfDim; i++)
+            {
+                cp[baseOff + 2 * i] = compactCos[i]; cp[baseOff + 2 * i + 1] = compactCos[i];
+                sp[baseOff + 2 * i] = compactSin[i]; sp[baseOff + 2 * i + 1] = compactSin[i];
+            }
+        }
+
+        backend.PreloadWeights([cos, sin]);
+        _tableDims = packedDims.ToArray();
+        _tableCos = cos;
+        _tableSin = sin;
+        return (cos, sin, seqLen);
     }
 
     private void FillTokenFreqs(Span<float> cosTable, Span<float> sinTable, int seqIdx, ReadOnlySpan<double> positions)

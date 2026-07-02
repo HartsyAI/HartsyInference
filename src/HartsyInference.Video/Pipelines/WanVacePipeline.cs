@@ -112,6 +112,9 @@ public sealed unsafe class WanVacePipeline : DiffusionPipelineBase
                 Latent = latents,
                 LatentArch = LatentArchitecture.Wan,
             });
+            // Reclaim GPU-resident activation buffers between steps — the 14B DiT's intermediates accumulate to OOM
+            // over a multi-step run otherwise (the latent is host-side, so nothing cross-step is lost).
+            Backend.FreeActivations();
         }
 
         Backend.Sync();

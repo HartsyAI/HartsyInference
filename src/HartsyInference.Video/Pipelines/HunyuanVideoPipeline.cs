@@ -97,14 +97,20 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
             $"seed={seed} (latent {tLat}x{hLat}x{wLat}, shift={shift:F2})");
         Logs.Warning("HunyuanVideo pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
-        // Stream the 60 double+single blocks when the backend supports it (24 GB bf16 DiT); else preload all.
+        // Keep the DiT fully resident when it fits (fp8 ~13 GB on a 24 GB card — no per-step streaming tax);
+        // stream the 60 double+single blocks only when it doesn't (24 GB bf16 DiT).
+        long ditWeightBytes = 0;
+        foreach (Tensor t in _dit.EnumerateWeights()) ditWeightBytes += t.Shape.ElementCount * t.DType.SizeInBytes;
+        const long residentMarginBytes = 6L << 30;   // activations + workspace headroom for one forward
+        bool resident = Backend.StreamingCache is null
+            || ditWeightBytes + residentMarginBytes <= Backend.FreeMemoryBytes();
         BlockStreamingController? streamer = null;
-        if (Backend.StreamingCache is not null)
+        if (!resident)
         {
             Backend.PreloadWeights(_dit.EnumerateSharedWeights());
             IStreamingBlock[] blocks = new IStreamingBlock[_dit.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _dit.GetBlock(b);
-            streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: 2, retainBehind: 0);
+            streamer = new BlockStreamingController(Backend.StreamingCache!, blocks, prefetchAhead: 2, retainBehind: 0);
             _dit.BeforeBlockForward = streamer.BeforeBlockForward;
             streamer.Prime();
             Logs.Info($"HunyuanVideo streaming: {blocks.Length} blocks, ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB total");
@@ -112,6 +118,7 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
         else
         {
             Backend.PreloadWeights(_dit.EnumerateWeights());
+            Logs.Info($"HunyuanVideo DiT resident: {ditWeightBytes / (1024 * 1024)} MB preloaded (no block streaming).");
         }
 
         Tensor latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);

@@ -79,8 +79,12 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             Logs.Info("Strength=0; passing source through unchanged");
             return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
         }
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
 
-        string opMode = isImg2Img ? $"img2img (start={plan.StartStep}/{steps})" : "txt2img";
+        string opMode = isMaskedInpaint ? $"inpaint (start={plan.StartStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={plan.StartStep}/{steps})"
+                      : "txt2img";
         Logs.Info($"Z-Image {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -90,7 +94,30 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         scheduler.SetTimesteps(steps);
 
         // ── 2. Build initial latent (t2i: noise * initSigma; img2img: vaeEncoder + AddNoise at sigma[startStep]) ──
-        Tensor latent = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep);
+        //    For masked inpaint the clean source latent is kept alive for per-step blending.
+        (Tensor latent, Tensor? sourceLatent) = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? latentMask = null;
+        if (isMaskedInpaint)
+        {
+            latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+        }
+
+        // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode
+        // intermediates. The caption embeddings arrive from an upstream Qwen3 encode and may still be live GPU
+        // activations; the t2i initSigma path leaves `latent` as a live Backend.Scale output. The per-step
+        // FreeActivations below frees device buffers WITHOUT a D2H sync-back, so anything still device-only
+        // here would be silently lost — touching DataPointer forces the D2H sync + cache eviction.
+        _ = captionEmbeddings.DataPointer;
+        if (negativeCaptionEmbeddings is not null) _ = negativeCaptionEmbeddings.DataPointer;
+        _ = latent.DataPointer;
+        if (sourceLatent is not null) _ = sourceLatent.DataPointer;
+        if (latentMask is not null) _ = latentMask.DataPointer;
+        if (regionalPlan is not null)
+        {
+            // Region conditioning is handed to the transformer every step; it too may be a live GPU activation.
+            foreach (RegionConditioning region in regionalPlan.Regions) _ = region.Cond.DataPointer;
+        }
+        Backend.FreeActivations();
 
         // ── 3. Denoising loop (from startStep onward) ──
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -125,6 +152,28 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             latent.Dispose();
             latent = newLatent;
 
+            // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
+            // by re-noising the source latent at the next step's sigma. Final step blends with the
+            // clean source — no further denoising follows.
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Z-Image step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -132,6 +181,13 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 Latent = latent,
                 LatentArch = LatentArchitecture.ZImage,
             });
+
+            // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and
+            // any not read-back/disposed linger until GC, accumulating to OOM over the schedule (same fix as
+            // Flux / the video pipelines). Safe: scheduler.Step runs on the host (and NegateInPlace already
+            // synced the velocity), so `latent` — the only tensor the next step needs — is host-resident, and
+            // everything else persistent was materialized above the loop.
+            Backend.FreeActivations();
         }
 
         // ── 4. VAE decode ──
@@ -154,14 +210,27 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
         latent.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         LogLatentStatsPerChannel("VAE output", image);
 
+        // ── 5. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        //    Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         // ── 6. RGB conversion ──
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+
+        // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
+        // memory until GC finalization and shrink the budget of whatever generation runs next.
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Z-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
@@ -169,8 +238,9 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) combined with fresh noise via flow-matching AddNoise at sigma[startStep].</summary>
-    private Tensor BuildInitialLatent(TextToImageRequest request, FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep)
+    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) combined with fresh noise via flow-matching AddNoise at sigma[startStep].
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>
+    private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(TextToImageRequest request, FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep, bool keepSourceLatent)
     {
         if (request is ImageToImageRequest img2img)
         {
@@ -182,9 +252,13 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
             Tensor latent = new Tensor(latentShape, DType.F32);
             scheduler.AddNoise(latent, sourceLatent, noise, startStep);
-            sourceLatent.Dispose();
             noise.Dispose();
-            return latent;
+            if (keepSourceLatent)
+            {
+                return (latent, sourceLatent);
+            }
+            sourceLatent.Dispose();
+            return (latent, null);
         }
 
         Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
@@ -194,9 +268,9 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             Tensor scaled = new Tensor(latentShape, DType.F32);
             Backend.Scale(scaled, t2iNoise, initSigma);
             t2iNoise.Dispose();
-            return scaled;
+            return (scaled, null);
         }
-        return t2iNoise;
+        return (t2iNoise, null);
     }
 
     /// <summary>In-place negate. Z-Image's diffusers pipeline negates the velocity output before stepping.</summary>

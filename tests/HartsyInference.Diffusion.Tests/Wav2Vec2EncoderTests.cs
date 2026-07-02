@@ -37,6 +37,32 @@ public unsafe class Wav2Vec2EncoderTests
         for (long i = 0; i < states.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
     }
 
+    [Fact]
+    public void EncodeAllLayers_StableLayerNorm_ProducesStackedHiddenStates()
+    {
+        CpuBackend backend = new();
+        // The wav2vec2-large (S2V) variant: per-conv LayerNorm, pre-norm layers, normalized input.
+        Wav2Vec2EncoderConfig cfg = new()
+        {
+            ConvDims = [8, 8, 8], ConvStrides = [5, 2, 2], ConvKernels = [10, 3, 3], ConvBias = true,
+            GroupNormFirstConvOnly = false, StableLayerNorm = true, NormalizeInput = true,
+            Hidden = 16, NumLayers = 2, NumHeads = 2, Intermediate = 32,
+            PosConvKernel = 8, PosConvGroups = 2,
+        };
+        Wav2Vec2Encoder enc = new(cfg);
+        enc.LoadWeights(BuildWeights(cfg));
+
+        float[] waveform = new float[400];
+        Random rng = new(37);
+        for (int i = 0; i < waveform.Length; i++) waveform[i] = (float)(rng.NextDouble() * 2 - 1);
+
+        Tensor states = enc.EncodeAllLayers(backend, waveform);
+        Assert.Equal(cfg.NumHiddenStates, (int)states.Shape[1]);
+        Assert.Equal(cfg.Hidden, (int)states.Shape[2]);
+        float* p = (float*)states.DataPointer;
+        for (long i = 0; i < states.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
+    }
+
     private static Dictionary<string, Tensor> BuildWeights(Wav2Vec2EncoderConfig c)
     {
         Dictionary<string, Tensor> w = new();
@@ -44,10 +70,22 @@ public unsafe class Wav2Vec2EncoderTests
         for (int i = 0; i < c.ConvDims.Length; i++)
         {
             w[$"feature_extractor.conv_layers.{i}.conv.weight"] = R([c.ConvDims[i], prevC, c.ConvKernels[i]]);
+            if (c.ConvBias) w[$"feature_extractor.conv_layers.{i}.conv.bias"] = R([c.ConvDims[i]]);
             prevC = c.ConvDims[i];
         }
-        w["feature_extractor.conv_layers.0.layer_norm.weight"] = R([c.ConvDims[0]]);
-        w["feature_extractor.conv_layers.0.layer_norm.bias"] = R([c.ConvDims[0]]);
+        if (c.GroupNormFirstConvOnly)
+        {
+            w["feature_extractor.conv_layers.0.layer_norm.weight"] = R([c.ConvDims[0]]);
+            w["feature_extractor.conv_layers.0.layer_norm.bias"] = R([c.ConvDims[0]]);
+        }
+        else
+        {
+            for (int i = 0; i < c.ConvDims.Length; i++)
+            {
+                w[$"feature_extractor.conv_layers.{i}.layer_norm.weight"] = R([c.ConvDims[i]]);
+                w[$"feature_extractor.conv_layers.{i}.layer_norm.bias"] = R([c.ConvDims[i]]);
+            }
+        }
         w["feature_projection.layer_norm.weight"] = R([c.ConvDims[^1]]); w["feature_projection.layer_norm.bias"] = R([c.ConvDims[^1]]);
         w["feature_projection.projection.weight"] = R([c.Hidden, c.ConvDims[^1]]); w["feature_projection.projection.bias"] = R([c.Hidden]);
         w["encoder.pos_conv_embed.conv.weight"] = R([c.Hidden, c.Hidden / c.PosConvGroups, c.PosConvKernel]);

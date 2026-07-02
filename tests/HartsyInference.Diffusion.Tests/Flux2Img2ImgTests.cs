@@ -86,6 +86,40 @@ public sealed class Flux2Img2ImgTests
     }
 
     [Fact]
+    public void GenerateFromTokens_InpaintWrongMaskShape_Throws()
+    {
+        using CpuBackend backend = new();
+        LlamaStyleEncoder textEncoder = new(LlamaStyleEncoderConfig.Qwen3_4B);
+        Flux2Transformer transformer = new(Flux2Config.Klein4B);
+        VaeDecoder vaeDecoder = new(VaeConfig.Flux2);
+        VaeEncoder vaeEncoder = new(VaeConfig.Flux2);
+        (Tensor bnMean, Tensor bnVar) = MakeBnTensors(128);
+
+        using Flux2Pipeline pipeline = new(backend, textEncoder, transformer, vaeDecoder, vaeEncoder,
+            bnMean, bnVar, Flux2Config.Klein4B);
+
+        // Mask spatial dims don't match the (16-rounded) source dims → ArgumentException.
+        Tensor source = new Tensor(new TensorShape(1, 3, 64, 64), DType.F32);
+        Tensor mask = new Tensor(new TensorShape(1, 1, 32, 32), DType.F32);
+        ImageToImageRequest request = new()
+        {
+            Prompt = "test",
+            Width = 64,
+            Height = 64,
+            SourceImage = source,
+            Mask = mask,
+        };
+
+        Assert.Throws<ArgumentException>(() =>
+            pipeline.GenerateFromTokens(promptTokenIds: [0], request));
+
+        source.Dispose();
+        mask.Dispose();
+        bnMean.Dispose();
+        bnVar.Dispose();
+    }
+
+    [Fact]
     public void GenerateFromTokens_Img2ImgStrength0_PassesSourceThrough()
     {
         using CpuBackend backend = new();

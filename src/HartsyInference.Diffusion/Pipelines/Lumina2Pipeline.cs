@@ -10,21 +10,30 @@ using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
-/// <summary>Lumina-Image-2.0 text-to-image pipeline (Alpha-VLLM, Apache 2.0). Accepts pre-computed Gemma-2 caption embeddings (text-encoder forward is owned by a separate component, since HartsyInference's <see cref="Models.TextEncoders.LlamaStyleEncoder"/> does not yet implement Gemma-2-specific features like GeGLU MLP and attention soft-capping) and orchestrates the NextDiT transformer with a dynamic-shift flow-match Euler scheduler (shift derived from the image token count, matching diffusers <c>calculate_shift</c>).
-/// <para>The diffusers pipeline (<c>pipeline_lumina2.py</c>) inverts the timestep before feeding it to the transformer (<c>1 - t / num_train_timesteps</c>) and negates the predicted velocity before the scheduler step — both behaviors are replicated here for parity. Default sampling: 30 steps, cfg_scale=4.0 with a negative prompt (matches the diffusers default). Only t2i is supported.</para>
+/// <summary>Lumina-Image-2.0 text-to-image and image-to-image pipeline (Alpha-VLLM, Apache 2.0). Accepts pre-computed Gemma-2 caption embeddings (text-encoder forward is owned by a separate component, since HartsyInference's <see cref="Models.TextEncoders.LlamaStyleEncoder"/> does not yet implement Gemma-2-specific features like GeGLU MLP and attention soft-capping) and orchestrates the NextDiT transformer with a dynamic-shift flow-match Euler scheduler (shift derived from the image token count, matching diffusers <c>calculate_shift</c>).
+/// <para>The diffusers pipeline (<c>pipeline_lumina2.py</c>) inverts the timestep before feeding it to the transformer (<c>1 - t / num_train_timesteps</c>) and negates the predicted velocity before the scheduler step — both behaviors are replicated here for parity. Default sampling: 30 steps, cfg_scale=4.0 with a negative prompt (matches the diffusers default).</para>
+/// <para>Img2img is selected by passing an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromEmbeddings"/>. Requires a <see cref="VaeEncoder"/> (16-channel Flux VAE, <c>VaeConfig.Flux</c>) on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step latent blend + final pixel recomposite, same pattern as <see cref="ZImagePipeline"/>).</para>
 /// </summary>
 public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
 {
     private readonly Lumina2Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly Lumina2Config _config;
 
-    /// <summary>Creates a Lumina-Image-2.0 pipeline (text-to-image only; no image-to-image).</summary>
+    /// <summary>Creates a Lumina-Image-2.0 pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public Lumina2Pipeline(IBackend backend, Lumina2Transformer transformer, VaeDecoder vaeDecoder, Lumina2Config config)
+        : this(backend, transformer, vaeDecoder, vaeEncoder: null, config)
+    {
+    }
+
+    /// <summary>Creates a Lumina-Image-2.0 pipeline with both VAE halves loaded. Required for img2img / inpaint.</summary>
+    public Lumina2Pipeline(IBackend backend, Lumina2Transformer transformer, VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, Lumina2Config config)
         : base(backend)
     {
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
     }
 
@@ -46,6 +55,9 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         float cfgTruncRatio = 1.0f)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         if (cfgScale > 1.0f && negativeCaptionEmbeddings is null)
             throw new ArgumentException(
@@ -59,7 +71,19 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         int latentW = width / _config.VaeDownscaleFactor;
         int steps = request.Steps ?? GenerationDefaults.Lumina2.Steps;
 
-        Logs.Info($"Lumina 2.0 t2i: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={plan.StartStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={plan.StartStep}/{steps})"
+                      : "t2i";
+        Logs.Info($"Lumina 2.0 {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
@@ -72,10 +96,15 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imageSeqLen);
         scheduler.SetTimesteps(steps);
 
-        Tensor latent = BuildInitialLatent(scheduler, latentShape, seed);
+        (Tensor latent, Tensor? sourceLatent) = BuildInitialLatent(request, scheduler, latentShape, seed, plan.StartStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? latentMask = null;
+        if (isMaskedInpaint)
+        {
+            latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+        }
 
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 0; i < steps; i++)
+        for (int i = plan.StartStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
@@ -110,10 +139,35 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
             latent.Dispose();
             latent = newLatent;
 
+            // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
+            // by re-noising the source latent at the next step's sigma. Final step blends with the
+            // clean source — no further denoising follows.
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Lumina 2.0 step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
+
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
@@ -122,28 +176,55 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
+        // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        // Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"Lumina 2.0 t2i complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"Lumina 2.0 {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
     }
 
-    /// <summary>Builds the initial latent: noise * initSigma. Lumina 2.0's flow-match scheduler at sigma_init typically yields ~1.0 so this is a near-identity scaling.</summary>
-    private Tensor BuildInitialLatent(FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed)
+    /// <summary>Builds the initial latent. T2I: noise * initSigma (Lumina 2.0's flow-match scheduler at sigma_init typically yields ~1.0 so this is a near-identity scaling). Img2img: VaeEncoder.Encode(source) combined with fresh noise via flow-matching AddNoise at sigma[startStep].
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain img2img.</para></summary>
+    private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(TextToImageRequest request, FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep, bool keepSourceLatent)
     {
-        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor latent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
+            noise.Dispose();
+            if (keepSourceLatent)
+            {
+                return (latent, sourceLatent);
+            }
+            sourceLatent.Dispose();
+            return (latent, null);
+        }
+
+        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
         float initSigma = scheduler.InitialNoiseSigma;
         if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
         {
             Tensor scaled = new Tensor(latentShape, DType.F32);
-            Backend.Scale(scaled, noise, initSigma);
-            noise.Dispose();
-            return scaled;
+            Backend.Scale(scaled, t2iNoise, initSigma);
+            t2iNoise.Dispose();
+            return (scaled, null);
         }
-        return noise;
+        return (t2iNoise, null);
     }
 
     private static void NegateInPlace(Tensor t)

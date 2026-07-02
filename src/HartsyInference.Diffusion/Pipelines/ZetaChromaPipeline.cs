@@ -40,7 +40,9 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Generates an image from pre-computed Qwen3 caption embeddings. API mirrors
-    /// <see cref="ZImagePipeline.GenerateFromEmbeddings"/> (txt2img only — no img2img until validated).</summary>
+    /// <see cref="ZImagePipeline.GenerateFromEmbeddings"/>. Img2img / inpaint is pixel-space (no VAE): pass an
+    /// <see cref="ImageToImageRequest"/> and the source pixels are noised directly at <c>sigma[startStep]</c>
+    /// (VALIDATION-PENDING alongside the rest of the sampling recipe — mid-pretraining checkpoint).</summary>
     /// <param name="captionEmbeddings">Qwen3-4B last-hidden-state for the prompt [B, capLen, 2560].</param>
     /// <param name="request">Generation parameters. Width/Height must be divisible by the 32-px patch.</param>
     /// <param name="cfgScale">CFG scale (5.0 recommended; 1.0 disables the second pass).</param>
@@ -71,7 +73,23 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
                 $"Zeta-Chroma is pixel-space with a {patch}-px patch; width/height ({width}x{height}) must be " +
                 $"divisible by {patch}.", nameof(request));
 
-        Logs.Info($"Zeta-Chroma: Generating {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed} " +
+        // Img2img / inpaint: pixel-space means no VAE — the source image IS the clean sample. Since
+        // Zeta-Chroma has no pad/crop path, the source already matches the (patch-aligned) pixel shape.
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        bool isImg2Img = request is ImageToImageRequest;
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "txt2img";
+        Logs.Info($"Zeta-Chroma {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed} " +
             "(mid-pretraining checkpoint — output quality is validation-gated)");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -80,24 +98,38 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = new(_config.SchedulerShift);
         scheduler.SetTimesteps(steps);
 
-        // ── 2. Initial pixel sample: pure noise scaled by initSigma ──
+        // ── 2. Initial pixel sample ──
+        // T2I: pure noise scaled by initSigma. Img2img: AddNoise(source, noise) at sigma[startStep]
+        // directly on the pixels (no VAE encode). Masked inpaint keeps the source for per-step blending.
         Tensor pixels = request.InitialNoise ?? SeedGenerator.CreateNoise(pixelShape, seed);
         if (!pixels.Shape.Equals(pixelShape))
             throw new ArgumentException($"InitialNoise shape {pixels.Shape} != expected {pixelShape}.");
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        Tensor? sourcePixels = null;
+        if (isImg2Img)
         {
-            Tensor scaled = new Tensor(pixelShape, DType.F32);
-            Backend.Scale(scaled, pixels, initSigma);
+            sourcePixels = ((ImageToImageRequest)request).SourceImage;
+            Tensor noised = new Tensor(pixelShape, DType.F32);
+            scheduler.AddNoise(noised, sourcePixels, pixels, startStep);
             pixels.Dispose();
-            pixels = scaled;
+            pixels = noised;
+        }
+        else
+        {
+            float initSigma = scheduler.InitialNoiseSigma;
+            if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+            {
+                Tensor scaled = new Tensor(pixelShape, DType.F32);
+                Backend.Scale(scaled, pixels, initSigma);
+                pixels.Dispose();
+                pixels = scaled;
+            }
         }
 
         // ── 3. Denoising loop ──
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
@@ -130,6 +162,28 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
             pixels.Dispose();
             pixels = newPixels;
 
+            // Masked-inpaint blend in pixel space: keep unmasked region on the source's
+            // flow-matching trajectory by re-noising the source at the next step's sigma.
+            // Final step blends with the clean source — no further denoising follows.
+            if (isMaskedInpaint && sourcePixels is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(pixelShape, seed + nextStep);
+                    noisedSource = new Tensor(pixelShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourcePixels, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourcePixels;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(pixels, noisedSource, maskPixel!);
+                if (noisedSource != sourcePixels) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Zeta-Chroma step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -142,12 +196,19 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
 
+        // Recomposite for masked inpaint: guarantees the unmasked region is byte-exact to the source
+        // (consistent with the latent-space pipelines; there is no VAE drift to suppress here).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(pixels, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         // ── 4. Direct RGB conversion — no VAE ──
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(pixels);
         pixels.Dispose();
 
         sw.Stop();
-        Logs.Info($"Zeta-Chroma generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"Zeta-Chroma {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
     }

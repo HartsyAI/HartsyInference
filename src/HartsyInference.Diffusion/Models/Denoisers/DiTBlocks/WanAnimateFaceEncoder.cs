@@ -3,36 +3,46 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>Wan-Animate face encoder (<c>WanAnimateFaceEncoder</c>): turns per-frame motion vectors
-/// <c>[T, in_dim]</c> (B=1) into temporally-aligned face features <c>[T', num_heads+1, out_dim]</c> via three
-/// causal (replicate-padded) Conv1ds over the frame axis — the first expands to <c>num_heads</c> parallel streams,
-/// the next two downsample temporally by 2× each — with no-affine LayerNorm + SiLU between them, then an output
-/// projection and a learnable padding token appended along the head axis.</summary>
+/// <summary>Wan-Animate face encoder (<c>FaceEncoder</c> in ComfyUI <c>comfy/ldm/wan/model_animate.py</c>): turns
+/// per-frame motion vectors <c>[T, in_dim]</c> (B=1) into temporally-aligned face features
+/// <c>[T', num_heads+1, out_dim]</c>. <c>conv1_local</c> (CausalConv1d, stride 1) expands to <c>num_heads</c>
+/// parallel 1024-wide streams (the head axis folds into the batch, so each stream runs the rest independently);
+/// <c>conv2</c>/<c>conv3</c> (CausalConv1d, stride 2 each) downsample 4× temporally; each conv is followed by
+/// no-affine LayerNorm + SiLU; <c>out_proj</c> maps 1024 → out_dim and the learnable <c>padding_tokens</c> row is
+/// appended along the head axis. CausalConv1d = replicate-pad <c>kernel−1</c> on the left, then a plain Conv1d.
+/// All dims derive from the loaded weights (real: in 512, hidden 1024, heads 4).</summary>
 public sealed unsafe class WanAnimateFaceEncoder
 {
-    private readonly int _inDim, _outDim, _hiddenDim, _numHeads, _kernel;
     private readonly float _eps;
+    private int _inDim, _outDim, _hiddenDim, _numHeads, _kernel;
 
     private Tensor? _conv1W, _conv1B, _conv2W, _conv2B, _conv3W, _conv3B;
     private Tensor? _outW, _outB, _paddingTokens;   // padding_tokens [1,1,1,out_dim]
 
-    public WanAnimateFaceEncoder(int inDim, int outDim, int hiddenDim = 1024, int numHeads = 4, int kernel = 3, float eps = 1e-6f)
+    public WanAnimateFaceEncoder(float eps = 1e-6f)
     {
-        _inDim = inDim;
-        _outDim = outDim;
-        _hiddenDim = hiddenDim;
-        _numHeads = numHeads;
-        _kernel = kernel;
         _eps = eps;
     }
 
+    /// <summary>Number of parallel head streams (+1 padding token in the output). Valid after <see cref="LoadWeights"/>.</summary>
+    public int NumHeads => _numHeads;
+
+    /// <summary>Loads the <c>face_encoder.*</c> subtree — CausalConv1d wraps its conv as <c>.conv</c>, so the weight
+    /// keys are <c>conv1_local.conv.weight</c> / <c>conv2.conv.weight</c> / <c>conv3.conv.weight</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
-        _conv1W = LoadF32(w, $"{p}.conv1_local.weight"); w.TryGetValue($"{p}.conv1_local.bias", out _conv1B);
-        _conv2W = LoadF32(w, $"{p}.conv2.weight"); w.TryGetValue($"{p}.conv2.bias", out _conv2B);
-        _conv3W = LoadF32(w, $"{p}.conv3.weight"); w.TryGetValue($"{p}.conv3.bias", out _conv3B);
+        _conv1W = LoadF32(w, $"{p}.conv1_local.conv.weight"); w.TryGetValue($"{p}.conv1_local.conv.bias", out _conv1B);
+        _conv2W = LoadF32(w, $"{p}.conv2.conv.weight"); w.TryGetValue($"{p}.conv2.conv.bias", out _conv2B);
+        _conv3W = LoadF32(w, $"{p}.conv3.conv.weight"); w.TryGetValue($"{p}.conv3.conv.bias", out _conv3B);
         _outW = w[$"{p}.out_proj.weight"]; w.TryGetValue($"{p}.out_proj.bias", out _outB);
         _paddingTokens = LoadF32(w, $"{p}.padding_tokens");
+        _inDim = (int)_conv1W.Shape[1];
+        _hiddenDim = (int)_conv2W.Shape[1];
+        _numHeads = (int)(_conv1W.Shape[0] / _hiddenDim);
+        _kernel = (int)_conv1W.Shape[2];
+        _outDim = (int)_outW.Shape[0];
+        if (_numHeads * _hiddenDim != (int)_conv1W.Shape[0])
+            throw new ArgumentException($"conv1_local out channels {_conv1W.Shape[0]} not a multiple of hidden {_hiddenDim}.", nameof(w));
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -46,11 +56,10 @@ public sealed unsafe class WanAnimateFaceEncoder
     {
         int tIn = (int)motion.Shape[0];
 
-        // conv1_local: [in_dim, T] → [hidden*num_heads, T] (stride 1, causal replicate pad). Split into num_heads streams.
+        // conv1_local: [in_dim, T] → [hidden·num_heads, T] (stride 1, causal replicate pad). Channel layout is
+        // head-major ("b (n c) t"), so head h owns rows [h·hidden, (h+1)·hidden) and runs independently below.
         Tensor c1 = Conv1dCausal(backend, Transpose(motion, tIn, _inDim), _inDim, _hiddenDim * _numHeads, _conv1W!, _conv1B, 1, tIn);
-        // c1: [hidden*num_heads, T] → per head [num_heads, hidden, T]; treat as num_heads independent sequences.
         int t1 = (int)c1.Shape[1];
-        // Process each head: [hidden, T] → norm+silu → conv2 → norm+silu → conv3 → norm+silu → out_proj.
         Tensor[] headOut = new Tensor[_numHeads];
         int tFinal = -1;
         for (int h = 0; h < _numHeads; h++)
@@ -91,7 +100,7 @@ public sealed unsafe class WanAnimateFaceEncoder
     }
 
     /// <summary>Causal Conv1d over the frame axis: replicate-pads the left by <c>kernel-1</c>, then a strided Conv1d.
-    /// <paramref name="input"/> is <c>[Cin, T]</c> (channels-first), returns <c>[Cout, Tout]</c>.</summary>
+    /// <paramref name="input"/> is <c>[1, Cin, T]</c> (consumed), returns <c>[Cout, Tout]</c>.</summary>
     private Tensor Conv1dCausal(IBackend backend, Tensor input, int cin, int cout, Tensor weight, Tensor? bias, int stride, int tIn)
     {
         int pad = _kernel - 1;

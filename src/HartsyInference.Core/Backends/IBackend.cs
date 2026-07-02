@@ -1167,6 +1167,15 @@ public interface IBackend : IDisposable
     /// without a stream-ordered mempool.</summary>
     void TrimMemoryPool() { }
 
+    /// <summary>Frees EVERY cached device allocation this backend holds — preloaded weights, cached dtype casts,
+    /// and activations — and returns pool reservations to the driver. For host-application model switching: cache
+    /// entries hold weight Tensors that were preloaded via <see cref="PreloadWeights"/>, and disposing the model
+    /// objects alone does NOT release those device copies (the weight cache keeps them, and their Tensors, alive).
+    /// Call this after evicting ALL models to guarantee a clean-slate VRAM budget for the next load. Do NOT call
+    /// while any loaded model may still be used — its preloaded weights would silently degrade to per-op re-upload.
+    /// No-op on backends without device caches.</summary>
+    void FreeAllDeviceMemory() { }
+
     /// <summary>Free device memory in bytes (0 if not a device backend). For diagnostics / adaptive tiling.</summary>
     long FreeMemoryBytes() => 0;
 

@@ -184,21 +184,15 @@ public sealed class CudaBackend : IBackend
             HartsyInference.Core.Logging.Logs.Warning($"[Cuda] couldn't query cuBLAS version: {ex.Message}");
         }
 
-        // Give GpuTransferHelper the stream handle for FreeAsync and lazy-sync callbacks
-        GpuTransferHelper.SetStream(_stream.Handle);
-        // Route transient allocations (op outputs, dtype casts, scratch) through the stream-ordered pool on the
-        // same compute stream, so they reuse the memory their cuMemFreeAsync frees return instead of stranding it
-        // in the pool — without this the GPU fills with pool-locked bytes and every op OOM-retries with a full
-        // drain+trim (the Ideogram-4 ~100s/step thrash). Persistent weights/workspaces stay on the sync allocator.
-        CudaMemory.SetComputeStream(_stream.Handle);
-        // ...and the context, so its lazy callbacks (which fire on whatever thread
-        // later reads/disposes a tensor — possibly the GC finalizer thread) can bind
-        // the primary context before issuing CUDA Driver API calls.
-        GpuTransferHelper.SetContext(_context);
-        // ...and the streaming cache, so the OOM retry path can drain its upload
-        // stream and trim the device mempool when sync allocs are starved by memory
-        // locked up in the stream-ordered allocator pool.
-        GpuTransferHelper.SetStreamingCache(_streamingCache);
+        // Register this backend's transfer state (context + stream + streaming cache) keyed by the CUDA
+        // context, so a second backend on another GPU gets its OWN caches/stream instead of silently
+        // retargeting this one's (the multi-GPU CUDA 700 poison). Transient allocations route through the
+        // stream-ordered pool on the same compute stream, so they reuse the memory their cuMemFreeAsync
+        // frees return instead of stranding it in the pool — without this the GPU fills with pool-locked
+        // bytes and every op OOM-retries with a full drain+trim (the Ideogram-4 ~100s/step thrash).
+        // Persistent weights/workspaces stay on the sync allocator.
+        GpuTransferHelper.Register(_context, _stream.Handle, _streamingCache);
+        CudaMemory.SetComputeStream(_context, _stream.Handle);
 
         // Load PTX kernels if directory provided
         if (ptxDir != null && Directory.Exists(ptxDir))
@@ -3637,6 +3631,15 @@ public sealed class CudaBackend : IBackend
         GpuTransferHelper.TrimPool();
     }
 
+    public void FreeAllDeviceMemory()
+    {
+        _context.EnsureCurrent();
+        // EvictAll clears weights + casts + activations (syncing the stream first); the trim then returns the
+        // stream-ordered pool's reservations so cuMemGetInfo/persistent allocs see the memory as actually free.
+        GpuTransferHelper.EvictAll();
+        GpuTransferHelper.TrimPool();
+    }
+
     public long FreeMemoryBytes()
     {
         _context.EnsureCurrent();
@@ -3722,6 +3725,11 @@ public sealed class CudaBackend : IBackend
                 CublasApi.cublasDestroy(_cublasHandle);
                 _cublasHandle = 0;
             }
+
+            // Drop this backend's per-context registrations before tearing the context down, so a later
+            // backend (or a same-device re-construction) never resolves to freed stream handles.
+            GpuTransferHelper.Unregister(_context);
+            CudaMemory.RemoveComputeStream(_context);
 
             // Order: upload stream first (no other code holds events on it after
             // EvictAll above), then compute stream, then context.

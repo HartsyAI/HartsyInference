@@ -60,6 +60,41 @@ public class WanVideoCheckpointConverterTests
         Assert.Equal(key, WanVideoCheckpointConverter.MapKey(key, fromOriginalNaming: false));
     }
 
+    [Theory]
+    // Wan2.2-Animate keys must survive the original→diffusers rename chain UNCHANGED — WanAnimateTransformer
+    // loads them under their original module-tree names. Pins them against future rule additions (e.g. a rule
+    // touching "norm2"/"ffn.0"/"modulation" substrings must not hit these).
+    [InlineData("pose_patch_embedding.weight")]
+    [InlineData("pose_patch_embedding.bias")]
+    [InlineData("motion_encoder.enc.net_app.convs.0.0.weight")]
+    [InlineData("motion_encoder.enc.net_app.convs.0.1.bias")]
+    [InlineData("motion_encoder.enc.net_app.convs.1.conv1.0.weight")]
+    [InlineData("motion_encoder.enc.net_app.convs.1.conv2.0.kernel")]
+    [InlineData("motion_encoder.enc.net_app.convs.1.conv2.1.weight")]
+    [InlineData("motion_encoder.enc.net_app.convs.1.conv2.2.bias")]
+    [InlineData("motion_encoder.enc.net_app.convs.1.skip.1.weight")]
+    [InlineData("motion_encoder.enc.net_app.convs.8.weight")]
+    [InlineData("motion_encoder.enc.fc.0.weight")]
+    [InlineData("motion_encoder.enc.fc.4.bias")]
+    [InlineData("motion_encoder.dec.direction.weight")]
+    [InlineData("face_encoder.conv1_local.conv.weight")]
+    [InlineData("face_encoder.conv2.conv.weight")]
+    [InlineData("face_encoder.conv3.conv.bias")]
+    [InlineData("face_encoder.out_proj.weight")]
+    [InlineData("face_encoder.padding_tokens")]
+    [InlineData("face_adapter.fuser_blocks.0.linear1_kv.weight")]
+    [InlineData("face_adapter.fuser_blocks.7.linear1_q.bias")]
+    [InlineData("face_adapter.fuser_blocks.3.linear2.weight")]
+    [InlineData("face_adapter.fuser_blocks.0.q_norm.weight")]
+    [InlineData("face_adapter.fuser_blocks.0.k_norm.weight")]
+    [InlineData("ref_conv.weight")]
+    [InlineData("ref_conv.bias")]
+    public void MapKey_AnimateKeys_PassThroughUnchanged(string key)
+    {
+        Assert.Equal(key, WanVideoCheckpointConverter.MapKey(key, fromOriginalNaming: true));
+        Assert.Equal(key, WanVideoCheckpointConverter.MapKey($"model.diffusion_model.{key}", fromOriginalNaming: true));
+    }
+
     [Fact]
     public void MapKey_DropsFp8Metadata()
     {

@@ -32,6 +32,14 @@ public sealed record Wav2Vec2EncoderConfig
     /// <summary>FFN intermediate size.</summary>
     public required int Intermediate { get; init; }
 
+    /// <summary>HF <c>do_stable_layer_norm</c> (true for wav2vec2-large): pre-norm transformer layers, the encoder
+    /// LayerNorm runs AFTER the layers, and the harvested hidden states are each layer's INPUT plus the final normed
+    /// output (post-norm collects the normed input plus each layer's output).</summary>
+    public bool StableLayerNorm { get; init; }
+
+    /// <summary>HF <c>do_normalize</c>: z-normalize the waveform (zero mean, unit unbiased variance) before the convs.</summary>
+    public bool NormalizeInput { get; init; }
+
     /// <summary>Positional conv embedding kernel size.</summary>
     public int PosConvKernel { get; init; } = 128;
 
@@ -63,9 +71,11 @@ public sealed record Wav2Vec2EncoderConfig
         PosConvKernel = 128, PosConvGroups = 16,
     };
 
-    /// <summary>wav2vec2-large preset: hidden 1024, 24 layers, 16 heads, intermediate 4096.</summary>
+    /// <summary>wav2vec2-large preset (the S2V front-end): hidden 1024, 24 layers, 16 heads, intermediate 4096,
+    /// per-conv LayerNorm feature encoder with biases, stable (pre-norm) layers, normalized input.</summary>
     public static Wav2Vec2EncoderConfig Large => Base with
     {
         Hidden = 1024, NumLayers = 24, NumHeads = 16, Intermediate = 4096,
+        ConvBias = true, GroupNormFirstConvOnly = false, StableLayerNorm = true, NormalizeInput = true,
     };
 }

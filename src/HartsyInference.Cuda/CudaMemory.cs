@@ -5,14 +5,42 @@ namespace HartsyInference.Cuda;
 /// <summary>GPU memory allocation and transfer helpers wrapping CUDA Driver API memory functions.</summary>
 public static class CudaMemory
 {
-    /// <summary>The compute stream transient allocations are bound to. Set once by the backend so
-    /// <see cref="Allocate"/> can route through the stream-ordered pool. Zero (the default) falls back to the
-    /// synchronous allocator — used by tests and by the brief window before the backend wires the stream.</summary>
-    private static nint _computeStream;
+    /// <summary>Per-context compute streams (keyed by raw context handle), so each backend's transient
+    /// allocations land in ITS OWN stream-ordered pool. A single static stream here was half of the
+    /// multi-backend poison: backend A's transients allocated/freed on backend B's stream → cross-device
+    /// stream ops → CUDA 700 on both GPUs.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<nint, nint> _computeStreams = new();
 
-    /// <summary>Binds the compute stream so transient allocations use the stream-ordered pool (matching their
-    /// <c>cuMemFreeAsync</c> frees). Called once from <see cref="CudaBackend"/>'s constructor.</summary>
-    public static void SetComputeStream(nint stream) => _computeStream = stream;
+    /// <summary>Fast path for the single-backend case (no cuCtxGetCurrent per alloc). 0 when zero or 2+ registered.</summary>
+    private static volatile nint _singleStream;
+
+    /// <summary>Binds the compute stream for a backend's context so transient allocations use the stream-ordered
+    /// pool (matching their <c>cuMemFreeAsync</c> frees). Called once from <see cref="CudaBackend"/>'s constructor.</summary>
+    public static void SetComputeStream(CudaContext context, nint stream)
+    {
+        _computeStreams[context.Handle] = stream;
+        _singleStream = _computeStreams.Count == 1 ? stream : 0;
+    }
+
+    /// <summary>Removes a context's stream binding at backend disposal.</summary>
+    public static void RemoveComputeStream(CudaContext context)
+    {
+        _computeStreams.TryRemove(context.Handle, out _);
+        _singleStream = _computeStreams.Count == 1 ? System.Linq.Enumerable.First(_computeStreams.Values) : 0;
+    }
+
+    /// <summary>Resolves the calling thread's current context to its registered compute stream (0 = none;
+    /// falls back to the synchronous allocator). Callers hold their backend's context current — the same
+    /// invariant <see cref="GpuTransferHelper"/> relies on.</summary>
+    private static nint ResolveStream()
+    {
+        nint single = _singleStream;
+        if (single != 0) return single;
+        if (_computeStreams.IsEmpty) return 0;
+        if (CudaDriverApi.cuCtxGetCurrent(out nint current) == 0 && _computeStreams.TryGetValue(current, out nint stream))
+            return stream;
+        return 0;
+    }
 
     /// <summary>Allocates <b>transient</b> device memory (op outputs, dtype casts, scratch) and returns a device
     /// pointer. Routes through the stream-ordered pool (<c>cuMemAllocAsync</c> on the compute stream) so the memory
@@ -24,8 +52,9 @@ public static class CudaMemory
     /// freed via synchronous <see cref="Free"/> must use <see cref="AllocatePersistent"/> instead.</summary>
     public static ulong Allocate(nuint byteSize)
     {
-        if (_computeStream != 0)
-            return AllocateAsync(byteSize, _computeStream);
+        nint stream = ResolveStream();
+        if (stream != 0)
+            return AllocateAsync(byteSize, stream);
         return AllocatePersistent(byteSize);
     }
 

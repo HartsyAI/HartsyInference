@@ -57,6 +57,29 @@ public static class WanConfigDetector
         int z = outChannels;                        // predicted VAE latent width
         int spatialCompression = z >= 48 ? 16 : 8;  // Wan2.2 z=48 VAE is 16×; Wan2.1 z=16 VAE is 8×
 
+        // S2V: the causal audio encoder + audio injector (post-converter names are the raw checkpoint names — the
+        // converter's rule table doesn't touch them). The inject-layer INDICES are a config fact, not a weight fact;
+        // only the count is recoverable, so map known (numLayers, count) combos to the reference lists.
+        int[] audioInjectLayers = [];
+        int audioDim = 1024, audioTokens = 4, audioLayers = 25;
+        if (w.TryGetValue("casual_audio_encoder.weights", out Tensor? audioW))
+        {
+            audioLayers = (int)audioW.Shape[audioW.Shape.Rank >= 2 ? 1 : 0];   // [1, numLayers, 1, 1]
+            Tensor conv1Local = w["casual_audio_encoder.encoder.conv1_local.conv.weight"];
+            Tensor conv2 = w["casual_audio_encoder.encoder.conv2.conv.weight"];
+            audioDim = (int)conv1Local.Shape[1];
+            audioTokens = (int)(conv1Local.Shape[0] / conv2.Shape[1]);         // conv1_local out = (dim/4)·tokens; conv2 in = dim/4
+            int injectorCount = 0;
+            while (w.ContainsKey($"audio_injector.injector.{injectorCount}.q.weight")) injectorCount++;
+            audioInjectLayers = (numLayers, injectorCount) switch
+            {
+                (40, 12) => [0, 4, 8, 12, 16, 20, 24, 27, 30, 33, 36, 39],     // Wan2.2-S2V-14B
+                (_, 2) => [0, 27],                                             // reference AudioInjector_WAN default
+                _ => throw new ArgumentException(
+                    $"Unknown S2V audio-inject layout: {numLayers} blocks with {injectorCount} injectors — set WanVideoConfig.AudioInjectLayers manually.", nameof(w)),
+            };
+        }
+
         // fp8 checkpoints carry a small velocity DC bias that CFG≥5 amplifies into a dark trajectory — enable CFG
         // renormalization for them (fp16/bf16 stay at 0 = plain CFG, byte-identical). Detect fp8 by the matmul dtype.
         float cfgRescale = w.TryGetValue("blocks.0.ffn.net.0.proj.weight", out Tensor? ffn0) && ffn0.DType.IsFp8 ? 0.7f : 0f;
@@ -77,8 +100,13 @@ public static class WanConfigDetector
             for (int i = 0; i < vaceCount; i++) vaceLayers[i] = i * step;
         }
 
+        // Wan2.2-Animate: pose patch embed + face adapter (post-converter these keep their original names).
+        bool isAnimate = w.ContainsKey("pose_patch_embedding.weight")
+                         && w.ContainsKey("face_adapter.fuser_blocks.0.linear1_kv.weight");
+
         return new WanVideoConfig
         {
+            IsAnimate = isAnimate,
             VaceLayers = vaceLayers,
             VaceInChannels = vaceInChannels,
             CfgRescale = cfgRescale,
@@ -94,6 +122,10 @@ public static class WanConfigDetector
             ImageDim = imageDim,
             AddedKvProjDim = addedKv,
             PosEmbedSeqLen = posLen,
+            AudioInjectLayers = audioInjectLayers,
+            AudioDim = audioDim,
+            AudioTokens = audioTokens,
+            AudioLayers = audioLayers,
         };
     }
 
@@ -104,5 +136,7 @@ public static class WanConfigDetector
         (c.HasImageConditioning ? $"I2V-CLIP(img={c.ImageDim},pos={c.PosEmbedSeqLen}) " : "") +
         (c.InChannels > c.OutChannels ? "concat-I2V " : "") +
         (c.VaceLayers.Length > 0 ? $"VACE(in={c.VaceInChannels},blocks={c.VaceLayers.Length}) " : "") +
+        (c.HasAudioConditioning ? $"S2V(audio={c.AudioDim}×{c.AudioLayers},inject={c.AudioInjectLayers.Length}) " : "") +
+        (c.IsAnimate ? "Animate(pose+face) " : "") +
         (c.IsMixtureOfExperts ? $"MoE(boundary={c.BoundaryRatio}) " : "");
 }

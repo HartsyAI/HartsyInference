@@ -23,6 +23,9 @@ namespace HartsyInference.Diffusion.Pipelines;
 ///   <item><b>Pixel space</b> — no latent packing, no VAE. Dimensions are padded up to a multiple of the 16-px patch
 ///         and the output is cropped back. Previews are the in-flight image itself
 ///         (<see cref="LatentArchitecture.ChromaRadiance"/>).</item>
+///   <item><b>Img2img / inpaint without a VAE</b> — the source image IS the clean sample: it's padded to the
+///         patch grid and noised directly via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>. Masked
+///         inpaint blends per step in pixel space (mask used at full resolution — no downsample).</item>
 /// </list></summary>
 public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 {
@@ -50,7 +53,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
     /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs.</param>
     /// <param name="promptAttentionMaskT5">Tokenizer attention mask for the prompt (1=real token, 0=pad).</param>
     /// <param name="negativeAttentionMaskT5">Tokenizer attention mask for the negative prompt.</param>
-    /// <param name="request">Generation parameters.</param>
+    /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint (pixel-space — no VAE encoder needed; strength=0 short-circuits to byte-identical pass-through).</param>
     /// <param name="onProgress">Optional progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsT5,
@@ -82,7 +85,24 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         int padWidth = PadUpTo(width, patch);
         int padHeight = PadUpTo(height, patch);
 
-        Logs.Info($"Chroma Radiance: Generating {width}x{height} (padded {padWidth}x{padHeight}), " +
+        // Img2img / inpaint: pixel-space means no VAE — the source image IS the clean sample. Validate
+        // against the request resolution (the pad to the patch grid is internal; source + mask are padded
+        // alongside the sample below) and handle the strength=0 short-circuit before any model work.
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        bool isImg2Img = request is ImageToImageRequest;
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "txt2img";
+        Logs.Info($"Chroma Radiance {opMode}: {width}x{height} (padded {padWidth}x{padHeight}), " +
             $"{steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -112,17 +132,43 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         FlowMatchEulerDiscreteScheduler scheduler = new(_config.SchedulerShift);
         scheduler.SetTimesteps(steps);
 
-        // ── 3. Initial pixel sample: pure noise scaled by initSigma (the "latent" IS the image) ──
+        // ── 3. Initial pixel sample (the "latent" IS the image) ──
+        // T2I: pure noise scaled by initSigma. Img2img: source padded to the patch grid + AddNoise at
+        // sigma[startStep] — no VAE encode, the pixels themselves are the clean sample. Masked inpaint
+        // keeps the padded source + padded mask alive for per-step blending (pad fill 1.0 lets the
+        // padded border denoise freely; it's cropped away at the end either way).
         Tensor pixels = request.InitialNoise ?? SeedGenerator.CreateNoise(pixelShape, seed);
         if (!pixels.Shape.Equals(pixelShape))
             throw new ArgumentException($"InitialNoise shape {pixels.Shape} != expected {pixelShape}.");
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        Tensor? sourcePadded = null;
+        Tensor? maskPadded = null;
+        if (isImg2Img)
         {
-            Tensor scaled = new Tensor(pixelShape, DType.F32);
-            Backend.Scale(scaled, pixels, initSigma);
+            sourcePadded = PadPixels(((ImageToImageRequest)request).SourceImage, padHeight, padWidth, fill: 0f);
+            Tensor noised = new Tensor(pixelShape, DType.F32);
+            scheduler.AddNoise(noised, sourcePadded, pixels, startStep);
             pixels.Dispose();
-            pixels = scaled;
+            pixels = noised;
+            if (isMaskedInpaint)
+            {
+                maskPadded = PadPixels(maskPixel!, padHeight, padWidth, fill: 1f);
+            }
+            else
+            {
+                sourcePadded.Dispose();
+                sourcePadded = null;
+            }
+        }
+        else
+        {
+            float initSigma = scheduler.InitialNoiseSigma;
+            if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+            {
+                Tensor scaled = new Tensor(pixelShape, DType.F32);
+                Backend.Scale(scaled, pixels, initSigma);
+                pixels.Dispose();
+                pixels = scaled;
+            }
         }
 
         // ── 4. Denoising loop ──
@@ -137,7 +183,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         int condTxtLen = (int)condContext.Shape[1];
         int uncondTxtLen = useCfg ? (int)uncondContext!.Shape[1] : 0;
 
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
@@ -166,6 +212,28 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
             pixels.Dispose();
             pixels = newPixels;
 
+            // Masked-inpaint blend in pixel space: keep unmasked region on the source's
+            // flow-matching trajectory by re-noising the source at the next step's sigma.
+            // Final step blends with the clean source — no further denoising follows.
+            if (maskPadded is not null && sourcePadded is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(pixelShape, seed + nextStep);
+                    noisedSource = new Tensor(pixelShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourcePadded, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourcePadded;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(pixels, noisedSource, maskPadded);
+                if (noisedSource != sourcePadded) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             // Pixel-space preview: the in-flight sample is already an RGB image — no unpack needed.
@@ -180,6 +248,8 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         condMask.Dispose();
         uncondContext?.Dispose();
         uncondMask?.Dispose();
+        sourcePadded?.Dispose();
+        maskPadded?.Dispose();
 
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
@@ -193,11 +263,19 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
             pixels = cropped;
         }
 
+        // Recomposite for masked inpaint: paste the denoised pixels over the source where mask=1.
+        // Pixel space has no VAE round-trip drift, but the final blend guarantees the unmasked
+        // region is byte-exact to the source (consistent with the latent-space pipelines).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(pixels, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(pixels);
         pixels.Dispose();
 
         sw.Stop();
-        Logs.Info($"Chroma Radiance image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"Chroma Radiance {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
     }
@@ -206,6 +284,44 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
     {
         int rem = n % multiple;
         return rem == 0 ? n : n + (multiple - rem);
+    }
+
+    /// <summary>Pads a <c>[1, C, H, W]</c> pixel tensor to <c>[1, C, padH, padW]</c> (top-left anchored, matching <see cref="CropPixels"/>) with <paramref name="fill"/> in the new bottom/right border. Source images pad with 0 (mid-gray in [-1, 1]); masks pad with 1 so the cropped-away border denoises freely.</summary>
+    private static Tensor PadPixels(Tensor src, int padH, int padW, float fill)
+    {
+        int channels = (int)src.Shape[1];
+        int h = (int)src.Shape[2];
+        int w = (int)src.Shape[3];
+        if (h == padH && w == padW)
+        {
+            Tensor clone = new Tensor(src.Shape, DType.F32);
+            long bytes = src.Shape.ElementCount * sizeof(float);
+            Buffer.MemoryCopy((float*)src.DataPointer, (float*)clone.DataPointer, bytes, bytes);
+            return clone;
+        }
+        Tensor output = new Tensor(new TensorShape(1, channels, padH, padW), DType.F32);
+        float* srcPtr = (float*)src.DataPointer;
+        float* dstPtr = (float*)output.DataPointer;
+        for (int c = 0; c < channels; c++)
+        {
+            long srcPlane = (long)c * h * w;
+            long dstPlane = (long)c * padH * padW;
+            for (int y = 0; y < padH; y++)
+            {
+                float* dstRow = dstPtr + dstPlane + (long)y * padW;
+                if (y < h)
+                {
+                    long rowBytes = (long)w * sizeof(float);
+                    Buffer.MemoryCopy(srcPtr + srcPlane + (long)y * w, dstRow, rowBytes, rowBytes);
+                    for (int x = w; x < padW; x++) dstRow[x] = fill;
+                }
+                else
+                {
+                    for (int x = 0; x < padW; x++) dstRow[x] = fill;
+                }
+            }
+        }
+        return output;
     }
 
     /// <summary>Crops a [1, 3, padH, padW] pixel tensor back to the requested [1, 3, H, W] (top-left anchored,

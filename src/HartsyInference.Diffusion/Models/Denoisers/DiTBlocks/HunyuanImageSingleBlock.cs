@@ -145,7 +145,19 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
-        // ── 5. Permute [B, S, H, D] → [B, H, S, D] ──
+        // ── 5. Image-only RoPE on the leading image rows of joint Q/K, BEFORE the head permute: the pre-permute
+        // [B(=1), S, H, D] layout is exactly WanRopeInterleaved's [S, heads·headDim] contract with image tokens
+        // first, so seqLen=imgSeqLen rotates the image portion in place and leaves text rows untouched — the last
+        // host excursion in the block (full Q/K D2H per block per step) becomes one GPU-resident op.
+        if (batch == 1)
+        {
+            Span<int> ropeDims = imgPackedT > 1
+                ? stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW }
+                : stackalloc int[2] { imgPackedH, imgPackedW };
+            rope.ApplyGpu(backend, qn, kn, _numHeads, ropeDims);
+        }
+
+        // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
         Tensor qMh = new Tensor(mhShape, DType.F32);
         backend.Permute0213(qMh, qn, totalSeqLen, _numHeads, _headDim);
         qn.Dispose();
@@ -156,8 +168,8 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         backend.Permute0213(vMh, v, totalSeqLen, _numHeads, _headDim);
         v.Dispose();
 
-        // ── 6. Image-only RoPE on the image portion of joint Q/K (CPU — see class note) ──
-        ApplyRopeToImagePortion(qMh, kMh, rope, batch, _numHeads, totalSeqLen, imgSeqLen, imgPackedH, imgPackedW, imgPackedT);
+        if (batch != 1)   // host fallback (per-head strided extract + CPU rotation) — batched inference only
+            ApplyRopeToImagePortion(qMh, kMh, rope, batch, _numHeads, totalSeqLen, imgSeqLen, imgPackedH, imgPackedW, imgPackedT);
 
         // ── 7. Joint scaled dot-product attention (no mask) ──
         Tensor attnOut = new Tensor(mhShape, DType.F32);

@@ -56,7 +56,8 @@ public static unsafe class TextEncoderQuantNormalizer
             string format = formats.TryGetValue(baseKey, out string? f) ? f : "unknown (no comfy_quant tag)";
             throw new NotSupportedException(
                 $"Text-encoder weight '{kvp.Key}' is {format}-quantized (U8-packed), which HartsyInference " +
-                "does not dequantize yet. Use a BF16/F16 or fp8_scaled (float8_e4m3fn) text-encoder checkpoint instead.");
+                "does not dequantize yet (nvfp4 IS supported and handled upstream — this weight lacks nvfp4's " +
+                "block-scale companions). Use a BF16/F16, fp8_scaled (float8_e4m3fn), or nvfp4 text-encoder checkpoint instead.");
         }
 
         return normalized;
