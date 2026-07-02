@@ -145,8 +145,13 @@ public sealed unsafe class QwenImageBlock
     // so the two per-stream rotations are fused into ONE joint pass (QwenImageRope.ApplyJoint, bit-identical since
     // RoPE is per-row independent) over the already-GPU-concatenated [txt, img] sequence. Batch is always 1 here
     // (QwenImagePipeline runs CFG as two batch-1 passes), which the seq-dim slice relies on.
+    /// <param name="refPackedH">Packed-grid height of the trailing Qwen-Image-Edit reference-latent token section
+    /// (0 = no ref tokens). Ref tokens ride at the END of the image stream and get their own RoPE positions
+    /// (frame axis 1, centered on the ref grid) — everything else in the block treats them as ordinary image tokens.</param>
+    /// <param name="refPackedW">Packed-grid width of the reference-latent section (0 = no ref tokens).</param>
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
-        QwenImageRope rope, int imgPackedH, int imgPackedW, int txtPositionStart)
+        QwenImageRope rope, int imgPackedH, int imgPackedW, int txtPositionStart,
+        int refPackedH = 0, int refPackedW = 0)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
@@ -224,8 +229,9 @@ public sealed unsafe class QwenImageBlock
         backend.Permute0213(jointV, jointVf, totalSeqLen, _numHeads, _headDim);
         jointVf.Dispose();
 
-        // ── 6. RoPE on the joint [txt, img] Q,K (CPU; interleaved, fused single pass — see class note) ──
-        rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart);
+        // ── 6. RoPE on the joint [txt, img(, ref)] Q,K (CPU; interleaved, fused single pass — see class note) ──
+        rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart,
+            refPackedH, refPackedW);
 
         // ── 7. Joint scaled dot-product attention (no mask) ──
         Tensor jointAttnOut = new Tensor(jointMh, DType.F32);

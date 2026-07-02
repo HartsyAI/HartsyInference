@@ -28,6 +28,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     private readonly IErnieTextEncoder _textEncoder;
     private readonly ErnieImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly ErnieImageConfig _config;
     private readonly Tensor? _vaeBnMean;
     private readonly Tensor? _vaeBnVar;
@@ -45,12 +46,15 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     /// <param name="vaeBnEps">Numerical epsilon used in <c>std = sqrt(var + eps)</c>. Default 1e-5 (matches diffusers' BN default).</param>
     /// <param name="schedulerShift">Flow-match scheduler shift. Default <b>4.0</b> per ERNIE-Image's
     /// <c>scheduler_config.json</c> (<c>shift=4.0</c>, static); ERNIE-Image-Turbo may differ.</param>
+    /// <param name="vaeEncoder">Optional Flux2-style VAE encoder (configure with <c>VaeConfig.Flux2</c>) — required
+    /// for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>).</param>
     public ErnieImagePipeline(IBackend backend, IErnieTextEncoder textEncoder, ErnieImageTransformer transformer,
         VaeDecoder vaeDecoder, ErnieImageConfig config,
         Tensor? vaeBnMean = null, Tensor? vaeBnVar = null, float vaeBnEps = 1e-5f,
-        float schedulerShift = 4.0f)
+        float schedulerShift = 4.0f, VaeEncoder? vaeEncoder = null)
         : base(backend)
     {
+        _vaeEncoder = vaeEncoder;
         _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
@@ -64,7 +68,13 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         _schedulerShift = schedulerShift;
     }
 
-    /// <summary>Generates an image from pre-tokenized prompt + negative prompt token ids (use <c>ErnieTokenizer</c> from HartsyInference.Tokenizers: BOS-prefixed raw prompt, no padding). The token ids must already be padded (per-prompt) up to a single common <c>Tmax</c>; pass the corresponding real lengths in <paramref name="promptRealLen"/> and <paramref name="negativeRealLen"/>.</summary>
+    /// <summary>Generates an image from pre-tokenized prompt + negative prompt token ids (use <c>ErnieTokenizer</c> from HartsyInference.Tokenizers: BOS-prefixed raw prompt, no padding). The token ids must already be padded (per-prompt) up to a single common <c>Tmax</c>; pass the corresponding real lengths in <paramref name="promptRealLen"/> and <paramref name="negativeRealLen"/>.
+    /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source goes VAE-encode (32-ch latent) →
+    /// 2×2 patchify (→128 ch) → BN-normalize (when BN stats were supplied, symmetric with the decode-side
+    /// un-normalization) → flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c> — requires a
+    /// <see cref="VaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint
+    /// (per-step latent blend at the 16×-downscaled grid + final pixel recomposite). Strength=0 short-circuits to
+    /// byte-identical pass-through.</para></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         int[] negativePromptTokenIds,
@@ -74,6 +84,9 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with one (vaeEncoder parameter).");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         (int steps, float cfgScale, int width, int height) = GenerationDefaults.ErnieImage.Resolve(request);
@@ -85,7 +98,20 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         int latentH = height / effectiveDownscale;
         int latentW = width / effectiveDownscale;
 
-        Logs.Info($"ERNIE-Image: Generating {width}x{height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "txt2img";
+        Logs.Info($"ERNIE-Image {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode prompts ─────────────────────────────────────────────
@@ -114,21 +140,19 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_textEncoder.EnumerateWeights());
 
-        // ── 2. Initial noise: [1, 128, latentH, latentW]. The transformer expects 128-channel latents already. ──
-        TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // ── 3. Flow-match Euler scheduler ─────────────────────────────────
+        // ── 2. Flow-match Euler scheduler ─────────────────────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
         scheduler.SetTimesteps(steps);
 
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        // ── 3. Initial latent: [1, 128, latentH, latentW] (t2i: noise * initSigma; img2img: encode + patchify
+        //       + BN-normalize + AddNoise at sigma[startStep]). The transformer expects 128-channel latents. ──
+        TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
+        (Tensor latent, Tensor? sourceLatent) =
+            BuildInitialLatent(request, scheduler, latentShape, seed, startStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? latentMask = null;
+        if (isMaskedInpaint)
         {
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            Backend.Scale(scaled, latent, initSigma);
-            latent.Dispose();
-            latent = scaled;
+            latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
         }
 
         // ── 4. Denoising loop ─────────────────────────────────────────────
@@ -138,7 +162,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
 
         Logs.Info("Starting ERNIE-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
@@ -157,12 +181,34 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
                 noisePred = _transformer.Forward(Backend, latent, t, condEmb, condLens);
             }
 
-            if (i == 0) ErnieDiag("noisePred[0]", noisePred);
+            if (i == startStep) ErnieDiag($"noisePred[{startStep}]", noisePred);
             Tensor newLatent = new Tensor(latentShape, DType.F32);
             scheduler.Step(newLatent, noisePred, latent, i);
             noisePred.Dispose();
             latent.Dispose();
             latent = newLatent;
+
+            // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
+            // by re-noising the source latent at the next step's sigma. Final step blends with the
+            // clean source — no further denoising follows.
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
@@ -172,6 +218,8 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         ErnieDiag("finalLatent", latent);
         condEmb.Dispose();
         uncondEmb?.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         // ── 5. Free transformer weights from VRAM before VAE decode (TE was already freed post-encode) ──
         Backend.Sync();
@@ -204,13 +252,73 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
-        // ── 9. RGB conversion ─────────────────────────────────────────────
+        // ── 9. Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        //       Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux). ──
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
+        // ── 10. RGB conversion ────────────────────────────────────────────
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"ERNIE-Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"ERNIE-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Builds the initial 128-channel latent. T2I: noise * initSigma. Img2img: the source goes
+    /// VAE-encode (<c>[1, 32, 2·latentH, 2·latentW]</c>, VaeConfig.Flux2 scaling is identity) → 2×2 patchify
+    /// (<c>[1, 128, latentH, latentW]</c>, inverse of <see cref="UnpatchifyLatent"/>) → BN-normalize
+    /// (<c>(z − mean)/std</c>, inverse of <see cref="ApplyBnUnnormalize"/>; skipped when no BN stats were supplied,
+    /// symmetric with decode) → flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c>.
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean normalized source latent
+    /// is returned alongside the noised latent for per-step blending. Caller disposes both. Source is null for
+    /// txt2img and plain img2img.</para></summary>
+    private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(TextToImageRequest request,
+        FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep,
+        bool keepSourceLatent)
+    {
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceVae = _vaeEncoder!.Encode(Backend, img2img.SourceImage);   // [1, 32, 2·latH, 2·latW]
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor sourcePatched = PatchifyLatent(sourceVae);                       // [1, 128, latH, latW]
+            sourceVae.Dispose();
+
+            Tensor sourceLatent = sourcePatched;
+            if (_vaeBnMean is not null && _vaeBnVar is not null)
+            {
+                sourceLatent = ApplyBnNormalize(sourcePatched, _vaeBnMean, _vaeBnVar, _vaeBnEps);
+                sourcePatched.Dispose();
+            }
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor latent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
+            noise.Dispose();
+            if (keepSourceLatent)
+            {
+                return (latent, sourceLatent);
+            }
+            sourceLatent.Dispose();
+            return (latent, null);
+        }
+
+        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(latentShape, DType.F32);
+            Backend.Scale(scaled, t2iNoise, initSigma);
+            t2iNoise.Dispose();
+            return (scaled, null);
+        }
+        return (t2iNoise, null);
     }
 
     /// <summary>Temporary diagnostic: logs mean/std/min/max/NaN of a tensor (forces D2H). Localizes the
@@ -288,6 +396,86 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
                         }
                     }
                 }
+            }
+        }
+        return output;
+    }
+
+    /// <summary>Inverse of <see cref="UnpatchifyLatent"/> — the pipeline-level 2×2 channel-fold used by img2img:
+    /// <c>[1, 32, 2H, 2W] → [1, 128, H, W]</c> with <c>packed[b, oc·4 + ph·2 + pw, h, w] = src[b, oc, 2h+ph, 2w+pw]</c>
+    /// (mirrors <c>pipeline_ernie_image.py:_patchify_latents</c>).</summary>
+    private static Tensor PatchifyLatent(Tensor unpacked)
+    {
+        int batch = (int)unpacked.Shape[0];
+        int inC = (int)unpacked.Shape[1];
+        int inH = (int)unpacked.Shape[2];
+        int inW = (int)unpacked.Shape[3];
+        if (inH % 2 != 0 || inW % 2 != 0)
+            throw new ArgumentException($"Latent spatial dims must be even for 2×2 patchify; got {inH}x{inW}.", nameof(unpacked));
+
+        int outC = inC * 4;
+        int outH = inH / 2;
+        int outW = inW / 2;
+
+        TensorShape shape = new TensorShape(batch, outC, outH, outW);
+        Tensor output = new Tensor(shape, DType.F32);
+        float* srcPtr = (float*)unpacked.DataPointer;
+        float* dstPtr = (float*)output.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int oc = 0; oc < inC; oc++)
+            {
+                for (int h = 0; h < outH; h++)
+                {
+                    for (int w = 0; w < outW; w++)
+                    {
+                        for (int ph = 0; ph < 2; ph++)
+                        {
+                            for (int pw = 0; pw < 2; pw++)
+                            {
+                                int dstChannel = oc * 4 + ph * 2 + pw;
+                                long dstOff = (((long)b * outC + dstChannel) * outH + h) * outW + w;
+                                long srcOff = (((long)b * inC + oc) * inH + h * 2 + ph) * inW + w * 2 + pw;
+                                dstPtr[dstOff] = srcPtr[srcOff];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return output;
+    }
+
+    /// <summary>Inverse of <see cref="ApplyBnUnnormalize"/>: <c>(z - mean) / sqrt(var + eps)</c>. Used by img2img to
+    /// renormalize the VAE-encoded source into the BN-normalized space the transformer denoises in.</summary>
+    private static Tensor ApplyBnNormalize(Tensor latent, Tensor bnMean, Tensor bnVar, float eps)
+    {
+        int batch = (int)latent.Shape[0];
+        int channels = (int)latent.Shape[1];
+        int height = (int)latent.Shape[2];
+        int width = (int)latent.Shape[3];
+        long meanCount = bnMean.Shape.ElementCount;
+        long varCount = bnVar.Shape.ElementCount;
+        if (meanCount != channels || varCount != channels)
+            throw new ArgumentException(
+                $"BN mean/var element counts ({meanCount}/{varCount}) must equal latent channels ({channels}).");
+
+        Tensor output = new Tensor(latent.Shape, DType.F32);
+        float* inPtr = (float*)latent.DataPointer;
+        float* outPtr = (float*)output.DataPointer;
+        float* meanPtr = (float*)bnMean.DataPointer;
+        float* varPtr = (float*)bnVar.DataPointer;
+
+        long spatial = (long)height * width;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int c = 0; c < channels; c++)
+            {
+                float invStd = 1.0f / MathF.Sqrt(varPtr[c] + eps);
+                float mean = meanPtr[c];
+                long base_ = ((long)b * channels + c) * spatial;
+                for (long i = 0; i < spatial; i++)
+                    outPtr[base_ + i] = (inPtr[base_ + i] - mean) * invStd;
             }
         }
         return output;

@@ -119,8 +119,14 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
     /// optional CLIP-ViT-H penultimate hidden state for the per-block image cross-attention;
     /// <paramref name="referenceLatent"/> is the optional <c>ref_conv</c> reference latent <c>[1, refC, H, W]</c>
     /// (token-prepend variant — mutually exclusive with the face pathway, as in the reference).</summary>
+    /// <summary>Precomputed face-motion features for <see cref="Forward"/>'s <c>motion</c> parameter. The face clip is
+    /// constant across the denoise, so encode it ONCE per CFG branch — the StyleGAN motion encoder is host-side and
+    /// running it inside every forward (2×/step) makes a 14B run impractically slow.</summary>
+    public Tensor EncodeMotion(IBackend backend, Tensor facePixels, int latentFrames) =>
+        BuildMotion(backend, facePixels, latentFrames / _config.PatchSize.T);
+
     public Tensor Forward(IBackend backend, Tensor latent, Tensor? pose, Tensor? facePixels, Tensor encoder,
-        float timestep, Tensor? clipImageEmbeds = null, Tensor? referenceLatent = null)
+        float timestep, Tensor? clipImageEmbeds = null, Tensor? referenceLatent = null, Tensor? motion = null)
     {
         int t = (int)latent.Shape[2], hh = (int)latent.Shape[3], ww = (int)latent.Shape[4];
         (int pt, int ph, int pw) = _config.PatchSize;
@@ -128,7 +134,7 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
         int frame = gh * gw, dim = _config.InnerDim;
 
         bool useRef = referenceLatent is not null && _refConvW2d is not null;
-        if (useRef && facePixels is not null)
+        if (useRef && (facePixels is not null || motion is not null))
             throw new ArgumentException("ref_conv token-prepend and the face pathway cannot combine: the fuser's " +
                 "temporal grouping (T | S) breaks once ref tokens are prepended (same constraint as the reference).");
 
@@ -144,7 +150,9 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
         }
 
         // Face pathway: pixels → motion vectors → face features; zero frame prepended, then padded/truncated to gt.
-        Tensor? motion = facePixels is not null ? BuildMotion(backend, facePixels, gt) : null;
+        // Prefer the caller's precomputed features (EncodeMotion) — the per-forward encode is a debug/compat path.
+        bool ownsMotion = motion is null && facePixels is not null;
+        motion ??= facePixels is not null ? BuildMotion(backend, facePixels, gt) : null;
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, [timestep], _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
@@ -189,7 +197,7 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
                 adapted.Dispose();
             }
         }
-        motion?.Dispose();
+        if (ownsMotion) motion?.Dispose();
         cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
 
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, s, dim, _config.Eps, s);

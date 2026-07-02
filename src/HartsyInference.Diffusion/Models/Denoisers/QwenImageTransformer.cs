@@ -93,18 +93,35 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
-    /// <param name="packedLatent">Packed latent tokens [B, imgSeqLen, patch_size² * in_channels].</param>
+    /// <param name="packedLatent">Packed latent tokens [B, imgSeqLen, patch_size² * in_channels]. For
+    /// Qwen-Image-Edit the caller appends the packed reference latent AFTER the noise tokens
+    /// (<c>[noise ; ref]</c> along the sequence dim) and passes the ref grid via
+    /// <paramref name="refHPacked"/>/<paramref name="refWPacked"/>.</param>
     /// <param name="encoderHidden">Qwen2.5-VL encoder hidden states [B, txtSeqLen, encoderDim].</param>
     /// <param name="timestep">Normalized timestep in [0, 1] (diffusers passes <c>t / 1000</c>).</param>
-    /// <param name="hPacked">Packed-grid height (<c>latent_h / patch_size</c>).</param>
-    /// <param name="wPacked">Packed-grid width (<c>latent_w / patch_size</c>).</param>
+    /// <param name="hPacked">Packed-grid height (<c>latent_h / patch_size</c>) of the MAIN (noise) latent.</param>
+    /// <param name="wPacked">Packed-grid width (<c>latent_w / patch_size</c>) of the MAIN (noise) latent.</param>
+    /// <param name="refHPacked">Packed-grid height of the trailing Qwen-Image-Edit reference-latent tokens
+    /// (0 = none). Ref tokens run through every block as image tokens with frame-axis-1 RoPE (ComfyUI
+    /// <c>qwen_image/model.py</c> ref "index" method) and are DROPPED from the output — the returned velocity
+    /// covers only the main <c>hPacked·wPacked</c> tokens (upstream <c>hidden_states[:, :num_embeds]</c>).</param>
+    /// <param name="refWPacked">Packed-grid width of the reference-latent tokens (0 = none).</param>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor encoderHidden, float timestep,
-        int hPacked, int wPacked)
+        int hPacked, int wPacked, int refHPacked = 0, int refWPacked = 0)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int txtSeqLen = (int)encoderHidden.Shape[1];
         int hidden = _config.HiddenSize;
+        int refSeqLen = refHPacked * refWPacked;
+        int mainSeqLen = imgSeqLen - refSeqLen;
+        if (refSeqLen > 0 && mainSeqLen != hPacked * wPacked)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                $"packedLatent seq {imgSeqLen} must equal main ({hPacked}x{wPacked}) + ref ({refHPacked}x{refWPacked}) tokens.");
+        // The output slice below (and the block's seq-dim [txt|img] split) assume contiguous batch-1 rows.
+        if (refSeqLen > 0 && batch != 1)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                "Reference-latent (edit) tokens require batch size 1; run CFG as two batch-1 passes.");
 
         TensorShape imgTokShape = new TensorShape(batch, imgSeqLen, hidden);
         Tensor imgTokens = new Tensor(imgTokShape, DType.F32);
@@ -133,7 +150,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         {
             (Tensor newImg, Tensor newTxt) = _blocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope,
-                hPacked, wPacked, txtPositionStart);
+                hPacked, wPacked, txtPositionStart, refHPacked, refWPacked);
 
             currentImg.Dispose();
             currentTxt.Dispose();
@@ -151,6 +168,18 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         QwenImageDebugDump.Dump("proj_out", output);
         currentImg.Dispose();
         temb.Dispose();
+
+        // Qwen-Image-Edit: drop the reference-latent rows — only the main noise tokens carry velocity
+        // (upstream `hidden_states[:, :num_embeds]`, applied AFTER norm_out/proj_out; per-token final
+        // layer means slicing after is numerically identical to slicing before).
+        if (refSeqLen > 0)
+        {
+            int outDim = _config.PatchSize * _config.PatchSize * _config.InChannels;
+            Tensor mainOnly = new Tensor(new TensorShape(batch, mainSeqLen, outDim), DType.F32);
+            backend.SliceRows(mainOnly, output, 0);
+            output.Dispose();
+            output = mainOnly;
+        }
 
         QwenImageDebugDump.DumpOutput(output);
         return output;

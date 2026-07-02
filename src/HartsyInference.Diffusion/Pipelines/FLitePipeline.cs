@@ -20,27 +20,46 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
     private readonly T5TextEncoder _t5;
     private readonly FLiteTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly FLiteConfig _config;
     private readonly float _vaeScalingFactor;
     private readonly float _vaeShiftFactor;
 
-    /// <summary>Creates an F-Lite text-to-image pipeline.</summary>
+    /// <summary>Creates an F-Lite text-to-image pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="vaeScalingFactor">Flux Schnell VAE scaling factor (default 0.3611). Latent is divided by this before VAE decode.</param>
     /// <param name="vaeShiftFactor">Flux Schnell VAE shift factor (default 0.1159). Added back to latent before VAE decode.</param>
     public FLitePipeline(IBackend backend, T5TextEncoder t5, FLiteTransformer transformer,
         VaeDecoder vaeDecoder, FLiteConfig config,
+        float vaeScalingFactor = 0.3611f, float vaeShiftFactor = 0.1159f)
+        : this(backend, t5, transformer, vaeDecoder, vaeEncoder: null, config, vaeScalingFactor, vaeShiftFactor)
+    {
+    }
+
+    /// <summary>Creates an F-Lite pipeline with both VAE halves loaded — required for img2img / inpaint (pass an
+    /// <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with
+    /// <see cref="VaeConfig.Flux"/> so its output is already normalized (<c>(mu − shift) · scale</c>) into the
+    /// transformer's latent space — the inverse of the <c>latent / scale + shift</c> this pipeline applies before
+    /// decode.</summary>
+    public FLitePipeline(IBackend backend, T5TextEncoder t5, FLiteTransformer transformer,
+        VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, FLiteConfig config,
         float vaeScalingFactor = 0.3611f, float vaeShiftFactor = 0.1159f)
         : base(backend)
     {
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
         _vaeScalingFactor = vaeScalingFactor;
         _vaeShiftFactor = vaeShiftFactor;
     }
 
-    /// <summary>Generates an image from pre-tokenized T5 input. <paramref name="t5TokenIds"/> length determines the conditioning sequence length (F-Lite reference uses 512 with padding).</summary>
+    /// <summary>Generates an image from pre-tokenized T5 input. <paramref name="t5TokenIds"/> length determines the conditioning sequence length (F-Lite reference uses 512 with padding).
+    /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source is VAE-encoded (Flux Schnell VAE) and
+    /// mixed with fresh noise at F-Lite's dynamic-shift time <c>t(startStep)</c> (<c>x = (1−t)·src + t·noise</c>, the
+    /// same convention the inline integrator denoises under) — requires a <see cref="VaeEncoder"/> on construction.
+    /// A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step latent blend + final pixel recomposite).
+    /// Strength=0 short-circuits to byte-identical pass-through.</para></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] t5TokenIds, int[] t5AttentionMask,
         int[] negativeT5TokenIds, int[] negativeT5AttentionMask,
@@ -48,6 +67,9 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         int width = request.Width ?? GenerationDefaults.FLite.Width;
@@ -59,7 +81,20 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         int steps = request.Steps ?? _config.DefaultSteps;
         float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
-        Logs.Info($"F-Lite: {width}x{height} (latent {latentH}x{latentW}), {steps} steps, cfg={cfgScale}, seed={seed}.");
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "txt2img";
+        Logs.Info($"F-Lite {opMode}: {width}x{height} (latent {latentH}x{latentW}), {steps} steps, cfg={cfgScale}, seed={seed}.");
         Stopwatch totalSw = Stopwatch.StartNew();
 
         Stopwatch sw = Stopwatch.StartNew();
@@ -80,14 +115,45 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_t5.EnumerateWeights());
 
-        TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
-        Tensor latent = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
-        if (!latent.Shape.Equals(latentShape) || latent.DType != DType.F32)
-            throw new ArgumentException($"InitialNoise must be F32 with shape {latentShape}; got {latent.Shape} {latent.DType}.", nameof(request));
-
         int imgTokenCount = hPacked * wPacked;
         float alpha = 2.0f * MathF.Sqrt(imgTokenCount / (64.0f * 64.0f));
         Logs.Info($"F-Lite: dynamic-shift alpha={alpha:F3} for {hPacked}x{wPacked} image-token grid.");
+
+        // Initial latent. T2I: pure noise (caller-injected or seeded) at t(0)=1. Img2img: VAE-encoded source
+        // mixed with fresh noise at the shifted start time — x = (1−t)·src + t·noise with t = t(startStep),
+        // matching the integrator's x_t = (1−t)·x0 + t·ε convention (t: 1 → 0 over the loop).
+        TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
+        Tensor latent;
+        Tensor? sourceLatent = null;
+        Tensor? latentMask = null;
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor encoded = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            float tStart = ShiftedTime(startStep, steps, alpha);
+            latent = new Tensor(latentShape, DType.F32);
+            Img2ImgSetup.MixAtSigma(latent, encoded, noise, tStart);
+            noise.Dispose();
+            if (isMaskedInpaint)
+            {
+                sourceLatent = encoded;
+                latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
+            }
+            else
+            {
+                encoded.Dispose();
+            }
+        }
+        else
+        {
+            latent = request.InitialNoise ?? SeedGenerator.CreateNoise(latentShape, seed);
+            if (!latent.Shape.Equals(latentShape) || latent.DType != DType.F32)
+                throw new ArgumentException($"InitialNoise must be F32 with shape {latentShape}; got {latent.Shape} {latent.DType}.", nameof(request));
+        }
 
         // Bulk-upload transformer weights before the denoise loop. F-Lite is a 40-block
         // single-stream DiT — without preload the first step would pay cache-miss overhead
@@ -100,14 +166,11 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
             (long)latent.ElementCount * sizeof(float));
 
         bool useCfg = cfgScale > 1.0f;
-        for (int step = 0; step < steps; step++)
+        for (int step = startStep; step < steps; step++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
-            int idx = steps - step;
-            float tNorm = idx / (float)steps;
-            float tNextNorm = (idx - 1) / (float)steps;
-            float t = tNorm * alpha / (1.0f + (alpha - 1.0f) * tNorm);
-            float tNext = tNextNorm * alpha / (1.0f + (alpha - 1.0f) * tNextNorm);
+            float t = ShiftedTime(step, steps, alpha);
+            float tNext = ShiftedTime(step + 1, steps, alpha);
             float dt = t - tNext;
 
             Tensor velocity;
@@ -127,6 +190,27 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
             ApplyEulerStepInPlace(accumulator, velocity, dt);
             velocity.Dispose();
 
+            // Masked-inpaint blend directly on the accumulator (the integrator's source of truth): keep the
+            // unmasked region on the source's trajectory by re-mixing the source with fresh noise at tNext.
+            // Final step blends with the clean source (tNext ≈ 0) — no further integration follows.
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                Tensor noisedSource;
+                if (step + 1 < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + step + 1);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    Img2ImgSetup.MixAtSigma(noisedSource, sourceLatent, freshNoise, tNext);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(accumulator, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
+
             latent.Dispose();
             latent = new Tensor(latentShape, DType.F32);
             Buffer.MemoryCopy((void*)accumulator.DataPointer, (void*)latent.DataPointer,
@@ -144,6 +228,8 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         accumulator.Dispose();
         positiveContext.Dispose();
         negativeContext.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
@@ -156,12 +242,27 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Info($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms.");
 
+        // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        // Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(decoded, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(decoded);
         decoded.Dispose();
 
         totalSw.Stop();
-        Logs.Info($"F-Lite total: {totalSw.ElapsedMilliseconds}ms (seed={seed}).");
+        Logs.Info($"F-Lite {opMode} total: {totalSw.ElapsedMilliseconds}ms (seed={seed}).");
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>F-Lite's dynamic-shift time at loop index <paramref name="stepIndex"/>: <c>t = shift((steps−i)/steps)</c>
+    /// with <c>shift(u) = u·alpha / (1 + (alpha−1)·u)</c>. t(0) = 1 (pure noise), t(steps) = 0 (clean).</summary>
+    private static float ShiftedTime(int stepIndex, int steps, float alpha)
+    {
+        float tNorm = (steps - stepIndex) / (float)steps;
+        return tNorm * alpha / (1.0f + (alpha - 1.0f) * tNorm);
     }
 
     private static void ApplyEulerStepInPlace(Tensor accumulator, Tensor velocity, float dt)

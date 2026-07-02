@@ -29,13 +29,14 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     private readonly Ideogram4Transformer _conditional;
     private readonly Ideogram4Transformer _unconditional;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly Ideogram4Config _config;
 
     private const int LlmTokenIndicator = 3;
     private const int OutputImageIndicator = 2;
     private const int ImagePositionOffset = 65536;
 
-    /// <summary>Creates an Ideogram 4 pipeline from pre-loaded components.</summary>
+    /// <summary>Creates an Ideogram 4 pipeline from pre-loaded components. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="textEncoder">Qwen3-VL-8B language tower (<see cref="LlamaStyleEncoderConfig.Qwen3_VL_8B"/>).</param>
     /// <param name="conditional">Conditional transformer (<c>transformer/</c> weights).</param>
@@ -45,18 +46,33 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     public Ideogram4Pipeline(IBackend backend, LlamaStyleEncoder textEncoder,
         Ideogram4Transformer conditional, Ideogram4Transformer unconditional,
         VaeDecoder vaeDecoder, Ideogram4Config config)
+        : this(backend, textEncoder, conditional, unconditional, vaeDecoder, vaeEncoder: null, config)
+    {
+    }
+
+    /// <summary>Creates an Ideogram 4 pipeline with both VAE halves loaded — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with <see cref="VaeConfig.Flux2"/> (its scalar scaling is identity; Ideogram's fixed-constant token norm is applied by the pipeline).</summary>
+    public Ideogram4Pipeline(IBackend backend, LlamaStyleEncoder textEncoder,
+        Ideogram4Transformer conditional, Ideogram4Transformer unconditional,
+        VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, Ideogram4Config config)
         : base(backend)
     {
         _textEncoder = textEncoder;
         _conditional = conditional;
         _unconditional = unconditional;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
     }
 
-    /// <summary>Generates an image from chat-templated prompt token ids (the Qwen3 chat template must already be applied). The negative branch needs no tokens — Ideogram's CFG zeroes the text features.</summary>
+    /// <summary>Generates an image from chat-templated prompt token ids (the Qwen3 chat template must already be applied). The negative branch needs no tokens — Ideogram's CFG zeroes the text features.
+    /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source goes VAE-encode (32-ch latent) → 2×2
+    /// token patchify (<c>[1, nImg, 128]</c>) → inverse fixed-constant latent norm → mix with fresh noise at the
+    /// logit-normal time of the start step (Ideogram integrates <c>x_t = t·x0 + (1−t)·ε</c> from t≈0 noise to t≈1
+    /// clean, so the mix uses <c>sigma = 1 − t(start)</c>) — requires a <see cref="VaeEncoder"/> on construction. A
+    /// <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step packed blend in Ideogram's channel-inner
+    /// token layout + final pixel recomposite). Strength=0 short-circuits to byte-identical pass-through.</para></summary>
     /// <param name="promptTokenIds">Tokenized, chat-templated prompt.</param>
-    /// <param name="request">Width/Height/Seed (Steps and CfgScale come from <paramref name="preset"/>).</param>
+    /// <param name="request">Width/Height/Seed (Steps and CfgScale come from <paramref name="preset"/>). Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint (strength maps onto the preset's step grid).</param>
     /// <param name="preset">Sampler preset (steps + guidance schedule + logit-normal mu/std). Defaults to <see cref="Ideogram4SamplerPreset.Default20"/>.</param>
     /// <param name="onProgress">Optional per-step callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
@@ -68,6 +84,9 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     {
         ThrowIfDisposed();
         preset ??= Ideogram4SamplerPreset.Default20;
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         if (promptTokenIds.Length == 0)
             throw new ArgumentException("Prompt token ids must be non-empty.", nameof(promptTokenIds));
@@ -89,7 +108,23 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         int latentDim = _config.InChannels;
         int steps = preset.NumSteps;
 
-        Logs.Info($"Ideogram 4: generating {width}x{height}, preset={preset.Name} ({steps} steps), seed={seed}");
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+        // Ideogram's loop runs i = steps−1 → 0 (t: ≈0 noise → ≈1 clean); skipping `startStep` iterations from the
+        // noisy end means starting at loop index steps−1−startStep, with the latent seeded at t(startIdx+1).
+        int startIdx = steps - 1 - startStep;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "t2i";
+        Logs.Info($"Ideogram 4 {opMode}: {width}x{height}, preset={preset.Name} ({steps} steps), seed={seed}");
         Logs.Warning("Ideogram 4 runs TWO 9.3B transformers concurrently (asymmetric CFG) — expect very high VRAM use.");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -145,12 +180,25 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Array.Fill(indicatorImageOnly, OutputImageIndicator);
         Tensor negLlm = new Tensor(new TensorShape(1, numImageTokens, _config.LlmFeaturesDim), DType.F32); // zeros
 
-        // ── 3. Initial noise (image-token format) [1, nImg, 128] ──
-        Tensor z = SeedGenerator.CreateNoise(new TensorShape(1, numImageTokens, latentDim), seed);
-
-        // ── 4. Schedule ──
+        // ── 3. Schedule ──
         LogitNormalSchedule schedule = LogitNormalSchedule.ForResolution(height, width, preset.Mu, preset.Std);
         float[] grid = LogitNormalSchedule.MakeStepIntervals(steps);
+
+        // ── 3b. Initial latent (image-token format) [1, nImg, 128] — t2i: pure noise; img2img: encoded source
+        //        mixed with noise at the start step's logit-normal time. Masked inpaint keeps the clean token
+        //        source + packed mask for the per-step blend.
+        (Tensor z, Tensor? sourceTokens) = BuildInitialTokenLatent(
+            request, schedule, grid, numImageTokens, latentDim, gridH, gridW, seed, startIdx,
+            keepSourceLatent: isMaskedInpaint);
+        Tensor? packedMask = null;
+        if (isMaskedInpaint)
+        {
+            Tensor latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(
+                maskPixel!, gridH * _config.PatchSize, gridW * _config.PatchSize);
+            packedMask = MaskBlendUtilities.PackLatentMask2x2(
+                latentMask, gridH * _config.PatchSize, gridW * _config.PatchSize);
+            latentMask.Dispose();
+        }
 
         // ── 5. Denoise loop (both transformers resident) ──
         Backend.PreloadWeights(_conditional.EnumerateWeights());
@@ -166,9 +214,11 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         _ = posIdsImageOnly.DataPointer;
         _ = negLlm.DataPointer;
         _ = z.DataPointer;
+        if (sourceTokens is not null) _ = sourceTokens.DataPointer;
+        if (packedMask is not null) _ = packedMask.DataPointer;
         Backend.FreeActivations();
 
-        for (int i = steps - 1; i >= 0; i--)
+        for (int i = startIdx; i >= 0; i--)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             Backend.ResetD2hSyncCount();
@@ -216,6 +266,29 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             posV.Dispose();
             negV.Dispose();
 
+            // Masked-inpaint blend: keep the unmasked region on the source's trajectory by re-mixing the source
+            // with fresh noise at the step's new time sVal (sigma = 1 − t in Ideogram's t≈0-noise → t≈1-clean
+            // convention). Final step (i=0) blends with the clean source. Host-side: reading z.DataPointer syncs
+            // the GPU latent back; the per-step FreeActivations below drops the stale device copy so the next
+            // forward re-uploads the blended host data.
+            if (packedMask is not null && sourceTokens is not null)
+            {
+                Tensor noisedSource;
+                if (i > 0)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(z.Shape, seed + i);
+                    noisedSource = new Tensor(z.Shape, DType.F32);
+                    Img2ImgSetup.MixAtSigma(noisedSource, sourceTokens, freshNoise, 1.0f - sVal);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceTokens;
+                }
+                MaskBlendUtilities.BlendPackedChannelInnerInPlace(z, noisedSource, packedMask);
+                if (noisedSource != sourceTokens) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             (long freeB, long totalB) = Backend.GetVramInfo();
             long syncs = Backend.GetD2hSyncCount();
@@ -246,6 +319,8 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         posIds.Dispose();
         posIdsImageOnly.Dispose();
         negLlm.Dispose();
+        sourceTokens?.Dispose();
+        packedMask?.Dispose();
 
         // ── 6. Free DiT weights before VAE decode ──
         Backend.Sync();
@@ -266,6 +341,13 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Logs.Info($"[Ideogram4] VAE decode in {vaeSw.ElapsedMilliseconds}ms");
         vaeIn.Dispose();
 
+        // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        // Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
@@ -274,8 +356,103 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         Backend.FreeActivations();
 
         sw.Stop();
-        Logs.Info($"Ideogram 4 generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"Ideogram 4 {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Builds the initial image-token latent <c>[1, nImg, 128]</c>. T2I: pure seeded noise (Ideogram's
+    /// integrator starts at t≈0). Img2img: the source goes VAE-encode (<c>[1, 32, H/8, W/8]</c>, Flux2 scaling is
+    /// identity) → 2×2 token patchify (inverse of <see cref="Unpatchify"/>) → inverse fixed-constant latent norm
+    /// (<c>(x − Shift)/Scale</c>, inverse of <see cref="ApplyLatentNorm"/>) → <c>Img2ImgSetup.MixAtSigma</c> with
+    /// fresh noise at <c>sigma = 1 − t(startIdx+1)</c> (Ideogram's <c>x_t = t·x0 + (1−t)·ε</c>).
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean normalized source tokens
+    /// are returned alongside for the per-step blend. Caller disposes both. Source is null for t2i and plain
+    /// img2img.</para></summary>
+    private (Tensor z, Tensor? sourceTokens) BuildInitialTokenLatent(
+        TextToImageRequest request, LogitNormalSchedule schedule, float[] grid,
+        int numImageTokens, int latentDim, int gridH, int gridW, int seed, int startIdx,
+        bool keepSourceLatent)
+    {
+        TensorShape tokenShape = new TensorShape(1, numImageTokens, latentDim);
+        Tensor noise = SeedGenerator.CreateNoise(tokenShape, seed);
+        if (request is not ImageToImageRequest img2img) return (noise, null);
+
+        Stopwatch vaeEncSw = Stopwatch.StartNew();
+        Tensor sourceVae = _vaeEncoder!.Encode(Backend, img2img.SourceImage);   // [1, 32, H/8, W/8]
+        vaeEncSw.Stop();
+        Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+        Tensor sourceTokens = PatchifyToTokens(sourceVae, gridH, gridW, _config.PatchSize);   // [1, nImg, 128]
+        sourceVae.Dispose();
+        ApplyInverseLatentNorm(sourceTokens);
+
+        Tensor z = new Tensor(tokenShape, DType.F32);
+        float tStart = schedule.Map(grid[startIdx + 1]);
+        Img2ImgSetup.MixAtSigma(z, sourceTokens, noise, 1.0f - tStart);
+        noise.Dispose();
+        if (keepSourceLatent)
+        {
+            return (z, sourceTokens);
+        }
+        sourceTokens.Dispose();
+        return (z, null);
+    }
+
+    /// <summary>Inverse of <see cref="ApplyLatentNorm"/>, in-place: <c>z[...,c] = (z[...,c] − Shift[c]) / Scale[c]</c> — maps a VAE-space packed latent into the token space the transformers denoise.</summary>
+    private static void ApplyInverseLatentNorm(Tensor z)
+    {
+        int channels = (int)z.Shape[2];
+        if (channels != Ideogram4LatentNorm.Channels)
+            throw new InvalidOperationException($"Latent channels {channels} != {Ideogram4LatentNorm.Channels}.");
+        long tokens = z.Shape[0] * z.Shape[1];
+        float* zp = (float*)z.DataPointer;
+        float[] scale = Ideogram4LatentNorm.Scale;
+        float[] shift = Ideogram4LatentNorm.Shift;
+        for (long tok = 0; tok < tokens; tok++)
+        {
+            long baseOff = tok * channels;
+            for (int c = 0; c < channels; c++)
+                zp[baseOff + c] = (zp[baseOff + c] - shift[c]) / scale[c];
+        }
+    }
+
+    /// <summary>Inverse of <see cref="Unpatchify"/>: VAE latent <c>[1, aeC, gridH·patch, gridW·patch]</c> → packed
+    /// token latent <c>[1, gridH·gridW, patch²·aeC]</c> with feature <c>f = p1·(aeC·patch) + p2·aeC + ae</c>.</summary>
+    private static Tensor PatchifyToTokens(Tensor vaeLatent, int gridH, int gridW, int patch)
+    {
+        int aeC = (int)vaeLatent.Shape[1];
+        int inH = (int)vaeLatent.Shape[2];
+        int inW = (int)vaeLatent.Shape[3];
+        if (inH != gridH * patch || inW != gridW * patch)
+            throw new ArgumentException(
+                $"VAE latent {inH}x{inW} does not match token grid {gridH}x{gridW} at patch {patch}.", nameof(vaeLatent));
+        int packedC = aeC * patch * patch;
+        Tensor tokens = new Tensor(new TensorShape(1, (long)gridH * gridW, packedC), DType.F32);
+        float* src = (float*)vaeLatent.DataPointer;
+        float* dst = (float*)tokens.DataPointer;
+        for (int gh = 0; gh < gridH; gh++)
+        {
+            for (int gw = 0; gw < gridW; gw++)
+            {
+                long token = (long)gh * gridW + gw;
+                long dstBase = token * packedC;
+                for (int p1 = 0; p1 < patch; p1++)
+                {
+                    for (int p2 = 0; p2 < patch; p2++)
+                    {
+                        int srcH = gh * patch + p1;
+                        int srcW = gw * patch + p2;
+                        for (int ae = 0; ae < aeC; ae++)
+                        {
+                            int f = p1 * (aeC * patch) + p2 * aeC + ae;
+                            long srcOff = ((long)ae * inH + srcH) * inW + srcW;
+                            dst[dstBase + f] = src[srcOff];
+                        }
+                    }
+                }
+            }
+        }
+        return tokens;
     }
 
     /// <summary>Places encoded base text features <c>[1, numText, D]</c> (and any regional features) into a full <c>[1, seqLen, D]</c> tensor: base text at the front, region features immediately after, zeros at image positions.</summary>
