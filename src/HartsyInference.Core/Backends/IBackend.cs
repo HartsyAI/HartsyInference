@@ -1141,6 +1141,11 @@ public interface IBackend : IDisposable
     /// the default is a no-op.</summary>
     void FreeActivations() { }
 
+    /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache, so
+    /// it is safe to call mid-computation (e.g. between VAE decode tiles) to cap peak memory. No-op on backends
+    /// without a stream-ordered mempool.</summary>
+    void TrimMemoryPool() { }
+
     /// <summary>Free device memory in bytes (0 if not a device backend). For diagnostics / adaptive tiling.</summary>
     long FreeMemoryBytes() => 0;
 

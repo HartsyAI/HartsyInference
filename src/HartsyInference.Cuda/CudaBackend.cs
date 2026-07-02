@@ -82,6 +82,13 @@ public sealed class CudaBackend : IBackend
     /// activations must keep full F32 mantissa across many layers/steps (e.g. ACE-Step's 3.5B DiT on a 12 GB 3060).</summary>
     public bool HighPrecisionGemm { get; set; }
 
+    /// <summary>Route the fp8 GEMM activation cast through F16 (10-bit) instead of BF16 (7-bit). Safe for GELU-FFN models
+    /// (Wan); needed for deep fp8 DiTs where BF16's coarser mantissa compounds a per-step bias into divergence.</summary>
+    public bool EnableFp8F16Gemm { get; set; }
+
+    /// <summary>Compute the fp8 GEMM in F32 (max precision; slow, high memory) — decisive test for whether F16/BF16 compute error is compounding.</summary>
+    public bool EnableFp8F32Gemm { get; set; }
+
     /// <summary>Lazily-initialized general-precision cuBLASLt GEMM executor used by the epilogue-fusion path.</summary>
     public LtGemmExecutor LtGemm
     {
@@ -135,6 +142,8 @@ public sealed class CudaBackend : IBackend
         EnableTensorCoreGemm = EnvFlag("HARTSY_TENSORCORE_GEMM");
         EnableNativeFp8Gemm = EnvFlag("HARTSY_FP8_NATIVE");
         HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
+        EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
+        EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
@@ -2704,6 +2713,12 @@ public sealed class CudaBackend : IBackend
         //    when their activations are already F16 (and therefore in-range).
         if (a.IsFp8 || b.IsFp8)
         {
+            // F16 (10-bit mantissa) is more accurate than BF16 (7-bit) for the activation cast; BF16 is the default only
+            // because SwiGLU MLPs can momentarily exceed F16's 65504. For GELU-FFN models (Wan) F16 is safe AND needed:
+            // over a deep DiT (40 layers) + CFG, BF16's coarser mantissa lets a small per-step velocity bias compound
+            // into a diverging trajectory. HARTSY_FP8_F16 opts the fp8 path into F16.
+            if (EnableFp8F32Gemm) return DType.F32;
+            if (EnableFp8F16Gemm) return DType.F16;
             return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
         }
         // GGUF quants always dequantize to F16 (or BF16 if the other operand is F32). The
@@ -3576,6 +3591,12 @@ public sealed class CudaBackend : IBackend
     {
         _context.EnsureCurrent();
         GpuTransferHelper.FreeActivations();
+    }
+
+    public void TrimMemoryPool()
+    {
+        _context.EnsureCurrent();
+        GpuTransferHelper.TrimPool();
     }
 
     public long FreeMemoryBytes()

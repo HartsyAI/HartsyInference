@@ -114,6 +114,11 @@ public sealed class HunyuanVideoVaeDecoder
 
         Tensor cur = _mid!.Forward(backend, h);
         h.Dispose();
+        // The stream-ordered mempool (cuMemAllocAsync) only recycles a freed block once its cuMemFreeAsync is
+        // processed — which needs a stream sync. Without one, a full-res decode's pool grows to the SUM of every
+        // intermediate (>24 GB at 512×320×25f) instead of the per-stage working set. Trim after each stage (sync +
+        // cuMemPoolTrimTo, correctness-neutral, no-op off-CUDA) so peak stays bounded to one stage. See DecodeTiled.
+        backend.TrimMemoryPool();
 
         foreach (UpStage stage in _stages)
         {
@@ -129,6 +134,7 @@ public sealed class HunyuanVideoVaeDecoder
                 cur.Dispose();
                 cur = up;
             }
+            backend.TrimMemoryPool();
         }
 
         Tensor normed = HunyuanVideoVaeKeys.GroupNormSilu3d(backend, cur, _normOutWeight!, _normOutBias!,
@@ -137,6 +143,126 @@ public sealed class HunyuanVideoVaeDecoder
         Tensor rgb = _convOut!.Forward(backend, normed);
         normed.Dispose();
         return rgb;
+    }
+
+    /// <summary>Memory-bounded spatial-tiled decode (diffusers <c>tiled_decode</c> analogue). Splits the latent
+    /// into overlapping <paramref name="tileLatent"/>×<paramref name="tileLatent"/> spatial tiles (stride =
+    /// <c>tileLatent·(1−overlapFactor)</c>), decodes each independently, and feather-blends the pixel tiles into a
+    /// single canvas so the full-res peak (>24 GB at 512×320×25f) drops to a per-tile working set. Because GroupNorm
+    /// statistics are computed per tile this is a close approximation of <see cref="Decode"/> (not bit-identical),
+    /// exactly as in diffusers; the feathered overlap hides tile seams. Falls back to <see cref="Decode"/> when the
+    /// latent already fits one tile.</summary>
+    public unsafe Tensor DecodeTiled(IBackend backend, Tensor latent, int tileLatent = 24, float overlapFactor = 0.25f)
+    {
+        if (latent.Shape.Rank != 5 || (int)latent.Shape[1] != _config.LatentChannels)
+            throw new ArgumentException($"Expected latent [B, {_config.LatentChannels}, T, H, W]; got {latent.Shape}.", nameof(latent));
+        int C = (int)latent.Shape[1], Tl = (int)latent.Shape[2], Hl = (int)latent.Shape[3], Wl = (int)latent.Shape[4];
+        if (Hl <= tileLatent && Wl <= tileLatent) return Decode(backend, latent);
+
+        int sf = _config.SpatialCompression;
+        int stride = Math.Max(1, (int)(tileLatent * (1f - overlapFactor)));
+        int blendPx = (tileLatent - stride) * sf;
+        List<int> iS = TileStarts(Hl, tileLatent, stride), jS = TileStarts(Wl, tileLatent, stride);
+        int Hpx = Hl * sf, Wpx = Wl * sf;
+
+        float* lp = (float*)latent.DataPointer;
+        Tensor? outT = null;
+        float[]? weight = null;
+        int tout = 0, cout = 3;
+
+        for (int ii = 0; ii < iS.Count; ii++)
+        {
+            int i0 = iS[ii], th = Math.Min(tileLatent, Hl - i0);
+            bool topEdge = ii == 0, botEdge = ii == iS.Count - 1;
+            for (int jj = 0; jj < jS.Count; jj++)
+            {
+                int j0 = jS[jj], tw = Math.Min(tileLatent, Wl - j0);
+                bool leftEdge = jj == 0, rightEdge = jj == jS.Count - 1;
+
+                Tensor rgb;
+                using (Tensor tileL = new(new TensorShape([1L, C, Tl, th, tw]), DType.F32))
+                {
+                    float* tp = (float*)tileL.DataPointer;
+                    for (int c = 0; c < C; c++)
+                        for (int t = 0; t < Tl; t++)
+                            for (int y = 0; y < th; y++)
+                            {
+                                float* src = lp + ((((long)c * Tl + t) * Hl + (i0 + y)) * Wl + j0);
+                                float* dst = tp + (((long)c * Tl + t) * th + y) * tw;
+                                for (int x = 0; x < tw; x++) dst[x] = src[x];
+                            }
+                    rgb = Decode(backend, tileL);
+                    backend.Sync();
+                }
+
+                if (outT is null)
+                {
+                    tout = (int)rgb.Shape[2];
+                    outT = new Tensor(new TensorShape([1L, cout, tout, Hpx, Wpx]), DType.F32);
+                    new Span<float>((float*)outT.DataPointer, checked((int)outT.Shape.ElementCount)).Clear();
+                    weight = new float[(long)Hpx * Wpx];
+                }
+
+                int tph = th * sf, tpw = tw * sf;
+                float* rp = (float*)rgb.DataPointer, op = (float*)outT.DataPointer;
+                for (int y = 0; y < tph; y++)
+                {
+                    float wy = Feather(y, tph, blendPx, topEdge, botEdge);
+                    int gy = i0 * sf + y;
+                    for (int x = 0; x < tpw; x++)
+                    {
+                        float wgt = wy * Feather(x, tpw, blendPx, leftEdge, rightEdge);
+                        int gx = j0 * sf + x;
+                        weight![(long)gy * Wpx + gx] += wgt;
+                        for (int c = 0; c < cout; c++)
+                            for (int t = 0; t < tout; t++)
+                                op[(((long)c * tout + t) * Hpx + gy) * Wpx + gx] +=
+                                    rp[(((long)c * tout + t) * tph + y) * tpw + x] * wgt;
+                    }
+                }
+                rgb.Dispose();
+                // The tile's rgb is now copied into the host canvas, so every activation from this tile's decode is
+                // dead. The decoder's ops (mid/resnet/upsample) leave some intermediates cached-but-undisposed (freed
+                // only at GC), and TrimMemoryPool can't reclaim those (the pool sees them as in-use) — so across many
+                // tiles they accumulate to OOM. FreeActivations clears the whole activation cache AND trims the pool,
+                // keeping peak flat at one tile's working set. Safe here because DecodeTiled is a terminal decode
+                // stage: the host latent/canvas aren't cached, and no caller-live activation crosses a tile boundary.
+                backend.FreeActivations();
+            }
+        }
+
+        float* fop = (float*)outT!.DataPointer;
+        for (int gy = 0; gy < Hpx; gy++)
+            for (int gx = 0; gx < Wpx; gx++)
+            {
+                float wgt = weight![(long)gy * Wpx + gx];
+                if (wgt <= 0f) continue;
+                float inv = 1f / wgt;
+                for (int c = 0; c < cout; c++)
+                    for (int t = 0; t < tout; t++)
+                        fop[(((long)c * tout + t) * Hpx + gy) * Wpx + gx] *= inv;
+            }
+        return outT;
+    }
+
+    /// <summary>Tile start offsets along one axis: stride steps, with the final tile snapped to cover the edge.</summary>
+    private static List<int> TileStarts(int dim, int tile, int stride)
+    {
+        List<int> l = [];
+        if (dim <= tile) { l.Add(0); return l; }
+        for (int s = 0; s < dim; s += stride) { l.Add(s); if (s + tile >= dim) break; }
+        return l;
+    }
+
+    /// <summary>Separable feather weight: ramps 0→1 over the first <paramref name="blend"/> px and 1→0 over the last
+    /// (skipping the ramp on a global-image edge so border pixels keep full weight). Overlapping ramps from adjacent
+    /// tiles sum to a partition of unity after the weight-normalization pass.</summary>
+    private static float Feather(int pos, int len, int blend, bool startEdge, bool endEdge)
+    {
+        float w = 1f;
+        if (!startEdge && blend > 0 && pos < blend) w *= (pos + 0.5f) / blend;
+        if (!endEdge && blend > 0 && pos >= len - blend) w *= (len - pos - 0.5f) / blend;
+        return w < 1e-6f ? 1e-6f : w;
     }
 
     /// <summary>HunyuanVideo causal upsampler: frame 0 is spatially nearest-×2 only; frames 1..T−1 get the full nearest interpolation (incl. temporal ×2 when <paramref name="temporal"/>), then a k3 causal conv.</summary>

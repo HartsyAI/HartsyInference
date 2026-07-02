@@ -79,6 +79,41 @@ public static unsafe class LancePipelineCommon
         for (long i = 0; i < n; i++) c[i] = u[i] + cfg * (c[i] - u[i]);
     }
 
+    /// <summary>CFG with guidance-renormalization (Lin et al. 2023, "Common Diffusion Noise Schedules…"). Folds
+    /// <c>v_cfg = uncond + cfg·(cond − uncond)</c>, then rescales <c>v_cfg</c> so its mean+std match the raw
+    /// <b>conditional</b> prediction (which is on-distribution), blended by <paramref name="rescale"/> in [0,1].
+    /// Corrects the mean/std inflation that high CFG induces — the DC drift that turns fp8-quantized DiTs' output dark
+    /// at cfg≥5. <paramref name="rescale"/>=0 is byte-identical to plain <see cref="CfgCombineInPlace"/> (so fp16
+    /// models with the flag off are unchanged); ~0.7 tames the drift while preserving the guidance direction.</summary>
+    public static void CfgCombineRenormInPlace(Tensor cond, Tensor uncond, float cfg, float rescale)
+    {
+        if (rescale <= 0f) { CfgCombineInPlace(cond, uncond, cfg); return; }
+        long n = cond.Shape.ElementCount;
+        float* c = (float*)cond.DataPointer;
+        float* u = (float*)uncond.DataPointer;
+
+        // Stats of the raw conditional prediction (the on-distribution target) BEFORE we overwrite cond.
+        double sumC = 0; for (long i = 0; i < n; i++) sumC += c[i];
+        double meanC = sumC / n;
+        double varC = 0; for (long i = 0; i < n; i++) { double d = c[i] - meanC; varC += d * d; }
+        double stdC = Math.Sqrt(varC / n);
+
+        // Fold CFG in place + accumulate its stats.
+        double sumCfg = 0; for (long i = 0; i < n; i++) { c[i] = u[i] + cfg * (c[i] - u[i]); sumCfg += c[i]; }
+        double meanCfg = sumCfg / n;
+        double varCfg = 0; for (long i = 0; i < n; i++) { double d = c[i] - meanCfg; varCfg += d * d; }
+        double stdCfg = Math.Sqrt(varCfg / n);
+
+        // Rescale v_cfg to the conditional's mean+std, then blend back by `rescale`.
+        float factor = (float)(stdC / Math.Max(stdCfg, 1e-8));
+        float mC = (float)meanC, mCfg = (float)meanCfg, phi = rescale;
+        for (long i = 0; i < n; i++)
+        {
+            float matched = (c[i] - mCfg) * factor + mC;
+            c[i] = phi * matched + (1f - phi) * c[i];
+        }
+    }
+
     /// <summary>Channel-last <c>[T,H,W,C]</c> → <c>[1,C,T,H,W]</c> for the VAE decode handoff.</summary>
     public static Tensor ChannelLastToBcthw(Tensor cl)
     {

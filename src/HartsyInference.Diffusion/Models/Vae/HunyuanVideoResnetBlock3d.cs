@@ -99,6 +99,9 @@ internal static class HunyuanVideoVaeKeys
         Tensor normed4d = normed.Reshape(flatShape);
         backend.GroupNorm(normed4d, x4d, weight, bias, groups, eps);
         backend.Silu(normed, normed);
+        // x4d is a borrowed-memory view: its cached device buffer (a fresh upload distinct from x's) is dead after
+        // GroupNorm and would otherwise leak until GC — disposing frees only that device entry, not x's host memory.
+        x4d.Dispose();
         return normed;
     }
 }

@@ -98,6 +98,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
 
         (Tensor cos, Tensor sin) = _rope.BuildCosSin(gt, gh, gw);
 
+        WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]
         WanVideoDebugDump.Dump("patch_embed", hidden);
         WanVideoDebugDump.Dump("in_encoder", encoder);
@@ -151,8 +152,10 @@ public sealed unsafe class WanVideoTransformer : IDisposable
     /// gelu FFN (net.0.proj → net.2) → FP32 LayerNorm. Maps CLIP <c>[seqImg, imageDim]</c> → <c>[seqImg, dim]</c>.</summary>
     private Tensor ImageEmbed(IBackend backend, Tensor imageEmbeds, int dim)
     {
-        int seq = (int)imageEmbeds.Shape[0];
-        int imageDim = (int)imageEmbeds.Shape[1];
+        // The real CLIP-ViT-H encoder emits rank-3 [1, seq, imageDim] (257×1280); the synthetic test used rank-2.
+        // Derive dims from the last axis + element count so both work (same fix class as WanDitOps.TextEmbed).
+        int imageDim = (int)imageEmbeds.Shape[imageEmbeds.Shape.Rank - 1];
+        int seq = (int)(imageEmbeds.ElementCount / imageDim);
 
         Tensor x = imageEmbeds;
         bool ownX = false;

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using Xunit;
 using Xunit.Abstractions;
 using HartsyInference.Core.Tensors;
@@ -59,6 +60,11 @@ public class HunyuanVideoGenerationTests
         _output.WriteLine($"[1/6] Loading + converting HunyuanVideo DiT: {Path.GetFileName(ditPath)}");
         (Dictionary<string, Tensor> ditW, SafeTensorsLoader ditLoader) = HunyuanVideoCheckpointConverter.LoadAndConvert(ditPath);
         using SafeTensorsLoader _dit = ditLoader;
+        // Cast BF16 → F16 (same 2-byte size, so block-swap still fits; native cuBLAS F16 GEMM). Running BF16 weights
+        // through the CacheWeightCasts=false transient path (the fp8 recipe) leaves them unapplied → a BLANK/flat
+        // gray render (bf16-transformer-needs-f16-cast). F16 keeps the weights actually applied.
+        foreach (string k in ditW.Keys.ToList())
+            if (ditW[k].DType == DType.BF16) ditW[k] = ditW[k].CastTo(DType.F16);
         _output.WriteLine($"  {ditW.Count} DiT keys in {sw.ElapsedMilliseconds}ms");
 
         List<SafeTensorsLoader> loaders = [];
@@ -129,6 +135,64 @@ public class HunyuanVideoGenerationTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    /// <summary>Isolated VAE decode: random latent [1,16,7,40,64] (== 25f/512x320) → full-res decode on CUDA.
+    /// Reproduces the full-pipeline VAE OOM in seconds (no DiT/text-encode). Reports peak/free VRAM.</summary>
+    [Fact]
+    public unsafe void HunyuanVideo_Gpu_VaeDecode_FullRes()
+    {
+        string vaePath = TestPaths.HunyuanVideo.Vae;
+        if (!File.Exists(vaePath)) { _output.WriteLine($"SKIPPED: HunyuanVideo VAE not found: {vaePath}."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(HunyuanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir)) { _output.WriteLine($"SKIPPED: PTX dir not found: {ptxDir}"); return; }
+
+        int tLat = EnvI("HYV_TLAT", 7), hLat = EnvI("HYV_HLAT", 40), wLat = EnvI("HYV_WLAT", 64);
+        List<SafeTensorsLoader> loaders = [];
+        try
+        {
+            HunyuanVideoVaeDecoder vae = new();
+            vae.LoadWeights(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath)));
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            backend.CacheWeightCasts = false;
+
+            Tensor latent = new(new TensorShape([1L, 16, tLat, hLat, wLat]), DType.F32);
+            Random rng = new(42);
+            float* lp = (float*)latent.DataPointer;
+            long n = latent.Shape.ElementCount;
+            for (long i = 0; i < n; i++) lp[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
+
+            backend.PreloadWeights(vae.EnumerateWeights());
+
+            // (a) Small tiled-vs-untiled correlation check (latent fits untiled) — validates the feather blend.
+            {
+                Tensor small = new(new TensorShape([1L, 16, 3, 20, 40]), DType.F32);
+                float* sp0 = (float*)small.DataPointer; long sn = small.Shape.ElementCount;
+                Random r2 = new(7); for (long i = 0; i < sn; i++) sp0[i] = (float)(r2.NextDouble() * 2 - 1);
+                Tensor full = vae.Decode(backend, small); backend.Sync();
+                // Force full → host now (DecodeTiled's per-tile FreeActivations would otherwise evict its cached
+                // device buffer and leave the host copy unpopulated → spurious zeros).
+                _ = ((float*)full.DataPointer)[0];
+                Tensor tiled = vae.DecodeTiled(backend, small); backend.Sync();
+                double corr = Corr((float*)full.DataPointer, (float*)tiled.DataPointer, full.Shape.ElementCount);
+                _output.WriteLine($"[blend] tiled-vs-untiled corr={corr:F4} (GroupNorm-per-tile ⇒ close, not exact)");
+                small.Dispose(); full.Dispose(); tiled.Dispose();
+                Assert.True(corr > 0.9, $"Tiled decode diverges from untiled (corr {corr:F4}).");
+            }
+
+            // (b) Full-res tiled decode — must fit in 24 GB and produce a non-degenerate frame.
+            Stopwatch sw = Stopwatch.StartNew();
+            Tensor rgb = vae.DecodeTiled(backend, latent);
+            backend.Sync();
+            sw.Stop();
+            _output.WriteLine($"VAE tiled-decode OK: latent [1,16,{tLat},{hLat},{wLat}] → rgb {rgb.Shape} in {sw.ElapsedMilliseconds}ms");
+            float* rp = (float*)rgb.DataPointer;
+            double s = 0; long rn = rgb.Shape.ElementCount;
+            for (long i = 0; i < rn; i++) s += rp[i];
+            _output.WriteLine($"  rgb mean={s / rn:F4}");
+            latent.Dispose(); rgb.Dispose();
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
     private static int[] BuildTemplatedTokens(string prompt)
     {
         // Reference tokenizes the templated string with add_special_tokens=True (BOS prepended) then crops 95.
@@ -186,6 +250,14 @@ public class HunyuanVideoGenerationTests
 
     private static async IAsyncEnumerable<VideoFrame> ToAsync(VideoFrame[] frames)
     { foreach (VideoFrame f in frames) { yield return f; await Task.Yield(); } }
+
+    private static unsafe double Corr(float* a, float* b, long n)
+    {
+        double sa = 0, sb = 0; for (long i = 0; i < n; i++) { sa += a[i]; sb += b[i]; }
+        double ma = sa / n, mb = sb / n, num = 0, da = 0, db = 0;
+        for (long i = 0; i < n; i++) { double x = a[i] - ma, y = b[i] - mb; num += x * y; da += x * x; db += y * y; }
+        return num / (Math.Sqrt(da * db) + 1e-12);
+    }
 
     private static int EnvI(string name, int fallback) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), out int v) ? v : fallback;

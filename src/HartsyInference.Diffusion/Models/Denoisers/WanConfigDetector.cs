@@ -57,8 +57,13 @@ public static class WanConfigDetector
         int z = outChannels;                        // predicted VAE latent width
         int spatialCompression = z >= 48 ? 16 : 8;  // Wan2.2 z=48 VAE is 16×; Wan2.1 z=16 VAE is 8×
 
+        // fp8 checkpoints carry a small velocity DC bias that CFG≥5 amplifies into a dark trajectory — enable CFG
+        // renormalization for them (fp16/bf16 stay at 0 = plain CFG, byte-identical). Detect fp8 by the matmul dtype.
+        float cfgRescale = w.TryGetValue("blocks.0.ffn.net.0.proj.weight", out Tensor? ffn0) && ffn0.DType.IsFp8 ? 0.7f : 0f;
+
         return new WanVideoConfig
         {
+            CfgRescale = cfgRescale,
             PatchSize = patchSize,
             NumHeads = numHeads,
             HeadDim = headDim,

@@ -72,6 +72,12 @@ public sealed record WanVideoConfig
     /// <summary>Default flow-match shift (5.0 for 720p, 3.0 for 480p).</summary>
     public float FlowShift { get; init; } = 5.0f;
 
+    /// <summary>CFG guidance-renormalization strength [0,1] (0 = plain CFG). fp8-quantized DiTs give the velocity a
+    /// small DC bias that CFG≥5 amplifies into a dark/diverging trajectory; rescaling the CFG output toward the
+    /// conditional prediction's mean+std corrects it. Auto-set to ~0.7 by <see cref="WanConfigDetector"/> when the
+    /// checkpoint is fp8; stays 0 for fp16/bf16 (those have no DC bias and are left byte-identical).</summary>
+    public float CfgRescale { get; init; }
+
     /// <summary>VACE control-branch layer indices (the main-block indices where the VACE hints are added back).</summary>
     public int[] VaceLayers { get; init; } = [];
 

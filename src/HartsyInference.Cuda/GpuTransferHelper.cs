@@ -322,8 +322,20 @@ internal static unsafe class GpuTransferHelper
         // for the video pipelines), so trim the default pool directly. Sync first so the queued async frees complete.
         // Return pooled memory to the driver so it counts as free (cuMemFreeAsync only hands blocks back to the
         // stream-ordered pool, which reserves them). Sync first so the queued async frees complete.
+        TrimPool();
+    }
+
+    /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache.
+    /// <c>cuMemFreeAsync</c> (every activation/dispose free) hands blocks back to the stream-ordered mempool, which
+    /// RESERVES them (counts as used in cuMemGetInfo) until trimmed. Unlike <see cref="FreeActivations"/> this leaves
+    /// live cached activations intact — only already-freed blocks are reclaimed — so it is safe to call mid-computation
+    /// (e.g. between VAE decode tiles) to cap peak at one unit's working set without corrupting tensors still in use.
+    /// Syncs the stream first so queued async frees complete before the trim.</summary>
+    public static void TrimPool()
+    {
         if (_context is not null && _streamHandle != 0)
         {
+            _context.EnsureCurrent();
             CudaDriverApi.cuStreamSynchronize(_streamHandle).ThrowOnError();
             if (CudaDriverApi.cuDeviceGetDefaultMemPool(out nint pool, _context.DeviceOrdinal) == 0)
                 CudaDriverApi.cuMemPoolTrimTo(pool, 0);

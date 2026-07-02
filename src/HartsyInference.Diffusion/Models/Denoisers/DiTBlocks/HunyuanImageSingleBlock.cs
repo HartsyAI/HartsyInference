@@ -87,6 +87,16 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
     }
 
     /// <summary>Forward pass on concatenated <c>[image, text]</c> sequence. Image-only RoPE is applied to the image portion of joint Q/K. Returns <c>(image, text)</c>.</summary>
+    // GPU-residency rewrite (mirrors the verified QwenImageBlock): every glue op (join concat / LayerNorm / AdaLN
+    // modulation / QK-norm / head reshape / feature-dim concat / gated residual / split) runs as an IBackend op so the
+    // activation stays device-resident — no per-op DataPointer D2H sync barriers (the old ConcatImageText /
+    // DiTUtils / QkNorm / AdaLNModulation / ConcatFeatureDim / SplitImageText host path D2H-synced every intermediate).
+    // Head reshape = declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so QK-norm runs over
+    // headDim with no reshape, then Permute0213 to/from [B, H, S, D]. The [img, txt] concat preserves image-first
+    // order (Concat dim 1); the output split is SliceRows (B=1: image rows first). The ONLY op left on the CPU is the
+    // image-only RoPE and its image-portion extract/write (ApplyRopeToImagePortion) — the image sub-region of the
+    // joint [B, H, S, D] is per-head strided (not a contiguous row-block), so a clean GPU slice-write is not available;
+    // this is one contained host excursion over a small tensor, and RoPE itself is host-only (as in QwenImageBlock).
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT = 1)
     {
@@ -94,26 +104,31 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
         int totalSeqLen = imgSeqLen + txtSeqLen;
+        float scale = 1.0f / MathF.Sqrt(_headDim);
 
         TensorShape jointShape = new TensorShape(batch, totalSeqLen, _hiddenSize);
+        // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
+        TensorShape jointHeads = new TensorShape(batch, totalSeqLen, _numHeads, _headDim);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
+        TensorShape mlpShape = new TensorShape(batch, totalSeqLen, _mlpDim);
+
+        // ── 1. Concat [img, txt] along the seq dim (image first) ──
         Tensor joint = new Tensor(jointShape, DType.F32);
-        ConcatImageText(joint, image, text, batch, imgSeqLen, txtSeqLen, _hiddenSize);
+        backend.Concat(joint, new Tensor[] { image, text }, 1);
 
         Tensor[] mod = _modulation.Forward(backend, temb);
 
-        Tensor normed = new Tensor(jointShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, joint, batch, totalSeqLen, _hiddenSize);
-        Tensor modulated = AdaLNModulation.ApplyModulation(normed, mod[0], mod[1], batch, totalSeqLen, _hiddenSize);
-        normed.Dispose();
+        // ── 2. LayerNorm (no affine) + AdaLN modulate ──
+        Tensor modulated = DiTUtils.NormModulate(backend, joint, mod[0], mod[1], jointShape);
 
-        Tensor q = new Tensor(jointShape, DType.F32);
+        // ── 3. Q/K/V (declared [B, S, H, D]) + parallel MLP proj/GELU ──
+        Tensor q = new Tensor(jointHeads, DType.F32);
         backend.Linear(q, modulated, _toQWeight!, _toQBias);
-        Tensor k = new Tensor(jointShape, DType.F32);
+        Tensor k = new Tensor(jointHeads, DType.F32);
         backend.Linear(k, modulated, _toKWeight!, _toKBias);
-        Tensor v = new Tensor(jointShape, DType.F32);
+        Tensor v = new Tensor(jointHeads, DType.F32);
         backend.Linear(v, modulated, _toVWeight!, _toVBias);
 
-        TensorShape mlpShape = new TensorShape(batch, totalSeqLen, _mlpDim);
         Tensor mlpProj = new Tensor(mlpShape, DType.F32);
         backend.Linear(mlpProj, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();
@@ -122,42 +137,45 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         backend.Gelu(mlpActivated, mlpProj);
         mlpProj.Dispose();
 
-        int totalVectors = batch * totalSeqLen * _numHeads;
-        Tensor qNormed = new Tensor(q.Shape, DType.F32);
-        Tensor kNormed = new Tensor(k.Shape, DType.F32);
-        _normQ.Forward(qNormed, q, totalVectors);
-        _normK.Forward(kNormed, k, totalVectors);
+        // ── 4. QK-norm (per-head RMSNorm over the last dim = headDim) ──
+        Tensor qn = new Tensor(jointHeads, DType.F32);
+        backend.RmsNorm(qn, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
+        Tensor kn = new Tensor(jointHeads, DType.F32);
+        backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
-        TensorShape mhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
+        // ── 5. Permute [B, S, H, D] → [B, H, S, D] ──
         Tensor qMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(qMh, qn, totalSeqLen, _numHeads, _headDim);
+        qn.Dispose();
         Tensor kMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(kMh, kn, totalSeqLen, _numHeads, _headDim);
+        kn.Dispose();
         Tensor vMh = new Tensor(mhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(qMh, qNormed, batch, totalSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(kMh, kNormed, batch, totalSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(vMh, v, batch, totalSeqLen, _numHeads, _headDim);
-        qNormed.Dispose();
-        kNormed.Dispose();
+        backend.Permute0213(vMh, v, totalSeqLen, _numHeads, _headDim);
         v.Dispose();
 
+        // ── 6. Image-only RoPE on the image portion of joint Q/K (CPU — see class note) ──
         ApplyRopeToImagePortion(qMh, kMh, rope, batch, _numHeads, totalSeqLen, imgSeqLen, imgPackedH, imgPackedW, imgPackedT);
 
-        float scale = 1.0f / MathF.Sqrt(_headDim);
+        // ── 7. Joint scaled dot-product attention (no mask) ──
         Tensor attnOut = new Tensor(mhShape, DType.F32);
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
 
+        // ── 8. Permute back [B, H, S, D] → [B, S, hidden] ──
         Tensor attnFlat = new Tensor(jointShape, DType.F32);
-        DiTUtils.ReshapeFromMultiHead(attnFlat, attnOut, batch, totalSeqLen, _numHeads, _headDim);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, totalSeqLen, _headDim);
         attnOut.Dispose();
 
+        // ── 9. Concat [attn, mlp] along the feature dim, then proj_out ──
         int concatDim = _hiddenSize + _mlpDim;
         TensorShape concatShape = new TensorShape(batch, totalSeqLen, concatDim);
         Tensor concatted = new Tensor(concatShape, DType.F32);
-        ConcatFeatureDim(concatted, attnFlat, mlpActivated, batch, totalSeqLen, _hiddenSize, _mlpDim);
+        backend.Concat(concatted, new Tensor[] { attnFlat, mlpActivated }, 2);
         attnFlat.Dispose();
         mlpActivated.Dispose();
 
@@ -165,7 +183,9 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         backend.Linear(projOut, concatted, _projOutWeight!, _projOutBias);
         concatted.Dispose();
 
-        Tensor result = AdaLNModulation.ApplyGatedResidual(joint, projOut, mod[2], batch, totalSeqLen, _hiddenSize);
+        // ── 10. Single gated residual + split [img, txt] (B=1: contiguous rows) ──
+        Tensor result = new Tensor(jointShape, DType.F32);
+        backend.GatedResidualLastDim(result, joint, projOut, mod[2]);
         joint.Dispose();
         projOut.Dispose();
 
@@ -174,51 +194,12 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
         TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtOutShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
         Tensor imgOut = new Tensor(imgOutShape, DType.F32);
+        backend.SliceRows(imgOut, result, 0);
         Tensor txtOut = new Tensor(txtOutShape, DType.F32);
-        SplitImageText(imgOut, txtOut, result, batch, imgSeqLen, txtSeqLen, _hiddenSize);
+        backend.SliceRows(txtOut, result, imgSeqLen);
         result.Dispose();
 
         return (imgOut, txtOut);
-    }
-
-    /// <summary>Concatenates two <c>[B, S, D]</c> tensors along the sequence dim. Image first, text second.</summary>
-    private static void ConcatImageText(Tensor output, Tensor image, Tensor text,
-        int batch, int imgSeqLen, int txtSeqLen, int dim)
-    {
-        float* imgPtr = (float*)image.DataPointer;
-        float* txtPtr = (float*)text.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int totalSeqLen = imgSeqLen + txtSeqLen;
-
-        for (int b = 0; b < batch; b++)
-        {
-            long imgBytes = (long)imgSeqLen * dim * sizeof(float);
-            long txtBytes = (long)txtSeqLen * dim * sizeof(float);
-            Buffer.MemoryCopy(imgPtr + (long)b * imgSeqLen * dim,
-                outPtr + (long)b * totalSeqLen * dim, imgBytes, imgBytes);
-            Buffer.MemoryCopy(txtPtr + (long)b * txtSeqLen * dim,
-                outPtr + (long)b * totalSeqLen * dim + imgSeqLen * dim, txtBytes, txtBytes);
-        }
-    }
-
-    /// <summary>Splits <c>[B, S_img+S_txt, D]</c> back to <c>(image, text)</c>.</summary>
-    private static void SplitImageText(Tensor image, Tensor text, Tensor input,
-        int batch, int imgSeqLen, int txtSeqLen, int dim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* imgPtr = (float*)image.DataPointer;
-        float* txtPtr = (float*)text.DataPointer;
-        int totalSeqLen = imgSeqLen + txtSeqLen;
-
-        for (int b = 0; b < batch; b++)
-        {
-            long imgBytes = (long)imgSeqLen * dim * sizeof(float);
-            long txtBytes = (long)txtSeqLen * dim * sizeof(float);
-            Buffer.MemoryCopy(inPtr + (long)b * totalSeqLen * dim,
-                imgPtr + (long)b * imgSeqLen * dim, imgBytes, imgBytes);
-            Buffer.MemoryCopy(inPtr + (long)b * totalSeqLen * dim + imgSeqLen * dim,
-                txtPtr + (long)b * txtSeqLen * dim, txtBytes, txtBytes);
-        }
     }
 
     /// <summary>Applies image-only RoPE to a joint <c>[B, H, S_img+S_txt, D]</c> Q/K. Image tokens occupy the first <paramref name="imgSeqLen"/> sequence positions.</summary>
@@ -278,28 +259,6 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
                 long outOffset = ((long)b * numHeads + h) * totalSeqLen * headDim;
                 long inOffset = ((long)b * numHeads + h) * imgSeqLen * headDim;
                 Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, copyBytes, copyBytes);
-            }
-        }
-    }
-
-    private static void ConcatFeatureDim(Tensor output, Tensor first, Tensor second,
-        int batch, int seqLen, int firstDim, int secondDim)
-    {
-        float* firstPtr = (float*)first.DataPointer;
-        float* secondPtr = (float*)second.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int totalDim = firstDim + secondDim;
-        long firstRowBytes = (long)firstDim * sizeof(float);
-        long secondRowBytes = (long)secondDim * sizeof(float);
-        long totalRowBytes = (long)totalDim * sizeof(float);
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long row = (long)b * seqLen + s;
-                Buffer.MemoryCopy(firstPtr + row * firstDim, outPtr + row * totalDim, firstRowBytes, firstRowBytes);
-                Buffer.MemoryCopy(secondPtr + row * secondDim, outPtr + row * totalDim + firstDim, secondRowBytes, secondRowBytes);
             }
         }
     }

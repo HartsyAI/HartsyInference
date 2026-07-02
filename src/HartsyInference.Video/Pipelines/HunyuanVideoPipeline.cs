@@ -68,7 +68,8 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
         float inv = 1f / VaeScalingFactor;
         for (long i = 0; i < n; i++) lp[i] *= inv;
         Backend.PreloadWeights(_vae.EnumerateWeights());
-        Tensor rgb = _vae.Decode(Backend, latent);
+        // Full-res 3D decode peaks >24 GB at 512×320×25f; spatial tiling bounds it to a per-tile working set.
+        Tensor rgb = _vae.DecodeTiled(Backend, latent);
         Backend.Sync();
         Backend.FreeWeights(_vae.EnumerateWeights());
         return rgb;
@@ -116,6 +117,12 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
         Tensor latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
+        // Materialize the conditioning on the host so the per-step FreeActivations() below can't evict it (it is
+        // re-uploaded fresh each step). promptEmbeds is already host (CropSequence), but pooled may be a live
+        // GPU activation from the CLIP encoder — touching DataPointer forces the D2H sync + cache eviction.
+        _ = promptEmbeds.DataPointer;
+        _ = pooled.DataPointer;
+
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
@@ -136,6 +143,10 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
                 });
                 preview.Dispose();
             }
+            // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and any
+            // not read-back/disposed linger until GC, accumulating to OOM (they held ~18 GB → the VAE decode OOM'd).
+            // Safe: EulerCfgStep updates the latent in-place on the host, so nothing cross-step is GPU-only.
+            Backend.FreeActivations();
         }
 
         Backend.Sync();
@@ -145,8 +156,14 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
             streamer.EvictAll();
             streamer.Dispose();
             Backend.FreeWeights(_dit.EnumerateSharedWeights());
+            // Also purge the block weights: the streaming cache registers each uploaded block in the backend weight
+            // cache, and any block still cached at the end (or not caught by EvictAll's state machine) would stay
+            // resident and starve the VAE decode (was the decode OOM — ~23 GB DiT still held, <1 GB free).
+            Backend.FreeWeights(_dit.EnumerateWeights());
         }
         else Backend.FreeWeights(_dit.EnumerateWeights());
+        Backend.FreeActivations();
+        Logs.Info($"HunyuanVideo: DiT freed, {Backend.FreeMemoryBytes() / (1024 * 1024)} MB free before VAE decode.");
 
         return latent;
     }

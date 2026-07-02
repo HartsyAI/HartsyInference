@@ -43,6 +43,20 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         (_config.IsMixtureOfExperts && _transformer2 is not null && tEmb < _config.BoundaryRatio * 1000f)
             ? _transformer2 : _transformer;
 
+    // Tracks which MoE expert's weights are currently GPU-resident. Two 14B experts (2×14 GB fp8) don't fit in 24 GB,
+    // so we keep only the active one loaded and swap once at the boundary crossing (high→low noise).
+    private WanVideoTransformer? _loadedExpert;
+
+    /// <summary>Ensures <paramref name="expert"/> is the only DiT resident: frees the previously-loaded expert (if
+    /// different) and preloads this one. No-op for the single-transformer (non-MoE) case handled by the callers.</summary>
+    private void SwapToExpert(WanVideoTransformer expert)
+    {
+        if (ReferenceEquals(_loadedExpert, expert)) return;
+        if (_loadedExpert is not null) Backend.FreeWeights(_loadedExpert.EnumerateWeights());
+        Backend.PreloadWeights(expert.EnumerateWeights());
+        _loadedExpert = expert;
+    }
+
     // Env-gated (HARTSY_WAN_DEBUG=1) per-step numerical diagnostic for the all-zero-output hunt. Reads host data only
     // (scheduler writes latents host-side; velocity is host-coherent per the working Flux/Lance pattern). Identical
     // velocity stats across steps ⇒ the GPU is re-reading a stale (frozen) latent input; NaN/inf or exploding
@@ -178,8 +192,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Logs.Info($"Wan-Video {mode}: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (latent {_config.InChannels}x{tLat}x{hLat}x{wLat}, shift={shift})");
         Logs.Warning("Wan-Video pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
-        if (_transformer2 is not null) Backend.PreloadWeights(_transformer2.EnumerateWeights());
+        if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
         // T2V/TI2V denoise in VAE-latent space; the latent channel count is the VAE z, not the (possibly larger,
         // I2V-concat) transformer in_channels.
         int latentCh = _config.VaeLatentChannels;
@@ -187,7 +201,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // VALIDATION-PENDING: Wan 2.2 ships UniPCMultistepScheduler (solver_order=2, bh2, predict_x0=true,
         // use_flow_sigmas=true, time_shift_type="exponential"); verify the UniPC sigma grid + bh2 update-coefficients
         // against diffusers WanPipeline at the configured step count (e.g. 50).
-        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: int.TryParse(Environment.GetEnvironmentVariable("WAN_SOLVER_ORDER"), out int _so) && _so > 0 ? _so : 2);
         scheduler.SetTimesteps(steps, shift);
         float[]? frameTs = firstFrameLatent is null ? null : new float[tLat];
 
@@ -196,6 +210,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Stopwatch sw = Stopwatch.StartNew();
             float tEmb = scheduler.Timesteps[k];   // sigma·1000 (DiT timestep scaling, validation-gated)
             WanVideoTransformer expert = Expert(tEmb);
+            if (_transformer2 is not null) SwapToExpert(expert);
             Tensor vCond, vUncond;
             if (firstFrameLatent is null)
             {
@@ -214,7 +229,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 modelInput.Dispose();
             }
             // Fold CFG into vCond, then take a UniPC predictor/corrector step in place.
-            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             DumpStats($"step {k} tEmb={tEmb:F2} velocity(cfg)", vCond);
             scheduler.Step(latents, vCond);
             DumpStats($"step {k} latent(post-step)", latents);
@@ -236,8 +251,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+        if (_transformer2 is null) Backend.FreeWeights(_transformer.EnumerateWeights());
+        else if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
         return latents;
     }
 
@@ -292,12 +307,12 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         frame0.Dispose();
         frameLast?.Dispose();
 
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
-        if (_transformer2 is not null) Backend.PreloadWeights(_transformer2.EnumerateWeights());
+        if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
         // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
         // shift) — verify the I2V concat path's UniPC trajectory vs diffusers WanImageToVideoPipeline.
-        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: int.TryParse(Environment.GetEnvironmentVariable("WAN_SOLVER_ORDER"), out int _so) && _so > 0 ? _so : 2);
         scheduler.SetTimesteps(steps, shift);
 
         for (int k = 0; k < steps; k++)
@@ -305,6 +320,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Stopwatch sw = Stopwatch.StartNew();
             float tEmb = scheduler.Timesteps[k];
             WanVideoTransformer expert = Expert(tEmb);
+            if (_transformer2 is not null) SwapToExpert(expert);
             Tensor modelInput = ConcatChannels(latents, condition);   // [1, 2z+tp, tLat, hLat, wLat]
             Tensor vCond, vUncond;
             if (imageEmbeds is not null)
@@ -318,7 +334,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, [tEmb]);
             }
             modelInput.Dispose();
-            LancePipelineCommon.CfgCombineInPlace(vCond, vUncond, guidance);
+            LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();
@@ -330,8 +346,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         }
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+        if (_transformer2 is null) Backend.FreeWeights(_transformer.EnumerateWeights());
+        else if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
         condition.Dispose();
 
         Tensor rgb;
@@ -388,7 +404,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // history starts at step 0; a mid-trajectory start (startStep > 0) needs the diffusers
         // begin_index / init-timestep handling to seed the history correctly. Match WanVideoPipeline.RunDenoise once
         // the partial-trajectory UniPC start is designed + verified vs diffusers WanVideoToVideoPipeline.
-        FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
+        FlowUniPCMultistepScheduler scheduler = new(solverOrder: int.TryParse(Environment.GetEnvironmentVariable("WAN_SOLVER_ORDER"), out int _so) && _so > 0 ? _so : 2);
         scheduler.SetTimesteps(steps, shift);
         float sigma0 = scheduler.Sigmas[startStep];
         Tensor noise = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
@@ -398,13 +414,14 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         for (long i = 0; i < n; i++) lp[i] = (1f - sigma0) * rp[i] + sigma0 * np[i];   // flow-match noising
         real.Dispose(); noise.Dispose();
 
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
-        if (_transformer2 is not null) Backend.PreloadWeights(_transformer2.EnumerateWeights());
+        if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
         for (int k = startStep; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
             float t = scheduler.Sigmas[k], dt = t - scheduler.Sigmas[k + 1], tEmb = scheduler.Timesteps[k];
             WanVideoTransformer expert = Expert(tEmb);
+            if (_transformer2 is not null) SwapToExpert(expert);
             Tensor vCond = expert.Forward(Backend, latents, promptEmbeds, tEmb);
             Tensor vUncond = expert.Forward(Backend, latents, negativeEmbeds, tEmb);
             LancePipelineCommon.EulerCfgStep(latents, vCond, vUncond, guidance, dt);
@@ -417,8 +434,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             });
         }
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+        if (_transformer2 is null) Backend.FreeWeights(_transformer.EnumerateWeights());
+        else if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
 
         Tensor rgb;
         try { rgb = _vae.Decode(Backend, latents); }

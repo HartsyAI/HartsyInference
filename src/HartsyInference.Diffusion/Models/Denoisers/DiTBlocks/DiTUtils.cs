@@ -527,4 +527,21 @@ public static unsafe class DiTUtils
 
         return output;
     }
+
+    /// <summary>LayerNorm (no affine, eps 1e-6) followed by AdaLN modulation <c>out = x*(1+scale)+shift</c>, entirely on
+    /// the backend so the activation stays device-resident. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>,
+    /// so <paramref name="scale"/> is pre-incremented by 1 (<c>AddScalar</c>) to reproduce the <c>(1+scale)</c> factor —
+    /// bit-identical to the old host <see cref="AdaLNModulation.ApplyModulation"/>. Mirrors QwenImageBlock.NormModulate.</summary>
+    public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape, float eps = 1e-6f)
+    {
+        Tensor normed = new Tensor(shape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, eps);
+        Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        Tensor output = new Tensor(shape, DType.F32);
+        backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
+        normed.Dispose();
+        scalePlus1.Dispose();
+        return output;
+    }
 }

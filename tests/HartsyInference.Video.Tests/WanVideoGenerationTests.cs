@@ -16,6 +16,7 @@ using HartsyInference.Tests.Common;
 using HartsyInference.Tokenizers;
 using HartsyInference.Video.Encoding;
 using HartsyInference.Video.Pipelines;
+using HartsyInference.Vision.Clip;
 
 namespace HartsyInference.Video.Tests;
 
@@ -71,6 +72,7 @@ public class WanVideoGenerationTests
         float boundary = (float)EnvD("WAN_BOUNDARY", 0.0);
         if (lowPath is not null && boundary > 0) cfg = cfg with { BoundaryRatio = boundary };
         if (Env("WAN_FLOW_SHIFT") is not null) cfg = cfg with { FlowShift = (float)EnvD("WAN_FLOW_SHIFT", cfg.FlowShift) };
+        if (Env("WAN_CFG_RESCALE") is not null) cfg = cfg with { CfgRescale = (float)EnvD("WAN_CFG_RESCALE", cfg.CfgRescale) };
         _output.WriteLine($"  detected → {WanConfigDetector.Describe(cfg)} ({conv.Transformer.Count} keys, {sw.ElapsedMilliseconds}ms)");
 
         List<SafeTensorsLoader> loaders = [];
@@ -129,7 +131,8 @@ public class WanVideoGenerationTests
             _output.WriteLine($"[4/5] Generating {genFrames}f {genW}x{genH}, {genSteps} steps...");
             sw.Restart();
             WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder: null, transformer2: transformer2);
-            TextToImageRequest req = new() { Prompt = "fox", Width = genW, Height = genH, Steps = genSteps, CfgScale = cfg.GuidanceScale, Seed = 42 };
+            float cfgScale = (float)EnvD("WAN_CFG", cfg.GuidanceScale);
+            TextToImageRequest req = new() { Prompt = "fox", Width = genW, Height = genH, Steps = genSteps, CfgScale = cfgScale, Seed = 42 };
             (byte[][] frames, int w, int h, _) = pipeline.GenerateFromEmbeddings(promptEmbeds, negEmbeds, req, genFrames,
                 p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
             promptEmbeds.Dispose(); negEmbeds.Dispose(); transformer2?.Dispose();
@@ -139,6 +142,163 @@ public class WanVideoGenerationTests
             AssertFramesCoherent(frames, w, h);
         }
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    /// <summary>Real-weight e2e for Wan2.1 I2V-14B (CLIP-conditioned image-to-video): loads the fp8 DiT (auto-detected
+    /// I2V config: in=36, image_dim=1280, CFG-renorm on), the z=16 VAE (decoder + encoder), and CLIP-ViT-H; encodes a
+    /// reference image to the 257×1280 penultimate hidden states → <c>imageEmbeds</c> and VAE-encodes it into the
+    /// concat conditioning, then runs <see cref="WanVideoPipeline.GenerateImageToVideoConcat"/>. Env: <c>WAN_I2V_CKPT</c>,
+    /// <c>WAN_VAE</c>, <c>WAN_CLIP_VISION</c>.</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void WanI2V14B_Gpu_E2E()
+    {
+        string? ckpt = Env("WAN_I2V_CKPT");
+        if (ckpt is null || !File.Exists(ckpt)) { _output.WriteLine("SKIPPED: set WAN_I2V_CKPT to a Wan I2V-14B checkpoint."); return; }
+        string vaePath = Env("WAN_VAE") ?? TestPaths.WanVideo.VaePath;
+        string clipPath = Env("WAN_CLIP_VISION") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/clip_vision/clip_vision_h.safetensors";
+        string umt5Path = TestPaths.WanVideo.Umt5Xxl;
+        if (!File.Exists(vaePath) || !File.Exists(clipPath) || !File.Exists(umt5Path)) { _output.WriteLine($"SKIPPED: missing VAE/CLIP/umT5 ({vaePath}|{clipPath}|{umt5Path})."); return; }
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir) || !CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no PTX/CUDA"); return; }
+
+        (WanVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ditLoader) = WanVideoCheckpointConverter.LoadAndConvert(ckpt);
+        using SafeTensorsLoader _dit = ditLoader;
+        WanVideoConfig cfg = WanConfigDetector.Detect(conv.Transformer);
+        _output.WriteLine($"  detected → {WanConfigDetector.Describe(cfg)}");
+        Assert.Equal(36, cfg.InChannels);   // I2V concat input (14B uses CLIP; A14B is concat-only, no CLIP)
+        string? lowPath = Env("WAN_I2V_CKPT_LOW");
+        float boundary = (float)EnvD("WAN_BOUNDARY", 0.0);
+        if (lowPath is not null && File.Exists(lowPath) && boundary > 0) cfg = cfg with { BoundaryRatio = boundary };
+
+        List<SafeTensorsLoader> loaders = [];
+        try
+        {
+            (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+            loaders.AddRange(vl);
+            using SafeTensorsLoader umt5Loader = new(); umt5Loader.Load(umt5Path);
+            Dictionary<string, Tensor> umt5W = CheckpointConvertUtils.ApplyFp8ScaledDequant(umt5Loader.GetAllTensors());
+
+            using WanVideoTransformer transformer = new(cfg);
+            transformer.LoadWeights(conv.Transformer);
+            Wan21VaeDecoder vae = new(); vae.LoadWeights(vaeW);
+            Wan21VaeEncoder encoder = new(); encoder.LoadWeights(vaeW);
+
+            // MoE low-noise expert (Wan2.2 A14B I2V ships as two experts).
+            WanVideoTransformer? transformer2 = null;
+            if (lowPath is not null && File.Exists(lowPath) && cfg.BoundaryRatio > 0)
+            {
+                (WanVideoCheckpointConverter.ConvertedWeights convLow, SafeTensorsLoader ll) = WanVideoCheckpointConverter.LoadAndConvert(lowPath);
+                loaders.Add(ll);
+                transformer2 = new WanVideoTransformer(cfg); transformer2.LoadWeights(convLow.Transformer);
+                _output.WriteLine($"  MoE low-noise expert loaded, boundary={cfg.BoundaryRatio}");
+            }
+
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            if (Environment.GetEnvironmentVariable("WAN_NO_CACHE_CASTS") == "1") backend.CacheWeightCasts = false;
+            (nuint freeBytes, _) = backend.Context.GetMemoryInfo();
+            double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
+            if (freeGb < EnvD("WAN_MIN_GB", 15.0)) { _output.WriteLine($"SKIPPED: only {freeGb:F1} GB free."); transformer2?.Dispose(); return; }
+
+            int genW = (int)EnvD("WAN_W", 480), genH = (int)EnvD("WAN_H", 320);
+            int genFrames = (int)EnvD("WAN_FRAMES", 25), genSteps = (int)EnvD("WAN_STEPS", 20);
+
+            // Synthetic reference image (HWC RGB24): smooth colour field — enough to validate the I2V plumbing e2e.
+            byte[] init = new byte[genW * genH * 3];
+            for (int y = 0; y < genH; y++)
+                for (int x = 0; x < genW; x++)
+                {
+                    int o = (y * genW + x) * 3;
+                    init[o] = (byte)(255 * x / genW);
+                    init[o + 1] = (byte)(255 * y / genH);
+                    init[o + 2] = (byte)(128 + 127 * Math.Sin(6.28 * (x + y) / 96.0));
+                }
+
+            // CLIP image embeds only for the CLIP-conditioned variant (Wan2.1 I2V-14B); A14B conditions via concat only.
+            Tensor? imageEmbeds = null;
+            if (cfg.HasImageConditioning)
+            {
+                _output.WriteLine("[clip] encoding reference image → 257×1280 penultimate hidden states...");
+                using SafeTensorsLoader clipLoader = new(); clipLoader.Load(clipPath);
+                ClipVisionEncoder clip = new(ClipVisionEncoderConfig.ViTH14); clip.LoadWeights(clipLoader.GetAllTensors());
+                using Tensor pix = new ClipImagePreprocessor().Preprocess(init, genW, genH);
+                imageEmbeds = clip.EncodeHiddenStates(backend, pix);
+                _output.WriteLine($"  imageEmbeds {string.Join("x", Enumerable.Range(0, imageEmbeds.Shape.Rank).Select(d => (long)imageEmbeds.Shape[d]))}");
+                backend.Sync();
+                backend.FreeWeights(clip.EnumerateWeights());   // reclaim CLIP VRAM before the DiT
+            }
+
+            using T5TextEncoder umt5 = new(T5TextEncoderConfig.Umt5Xxl); umt5.LoadWeights(umt5W);
+            using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 512);
+            int[] pTok = tok.Encode("the scene comes to life, gentle camera motion, cinematic");
+            int[] nTok = tok.Encode("blurry, low quality, distorted");
+            Tensor tb = umt5.Encode(backend, [pTok, nTok], [T5Tokenizer.CreateAttentionMask(pTok), T5Tokenizer.CreateAttentionMask(nTok)]);
+            Tensor promptEmbeds = CfgHelper.SliceBatchElement(tb, 0, pTok.Length, 4096);
+            Tensor negEmbeds = CfgHelper.SliceBatchElement(tb, 1, pTok.Length, 4096);
+            tb.Dispose();
+            backend.Sync();
+            backend.FreeWeights(umt5.EnumerateWeights());
+
+            _output.WriteLine($"[gen] I2V {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}, moe={transformer2 is not null}...");
+            WanVideoPipeline pipeline = new(backend, transformer, vae, cfg, encoder, transformer2);
+            TextToImageRequest req = new() { Prompt = "i2v", Width = genW, Height = genH, Steps = genSteps, CfgScale = cfg.GuidanceScale, Seed = 42 };
+            (byte[][] frames, int w, int h, _) = pipeline.GenerateImageToVideoConcat(promptEmbeds, negEmbeds, imageEmbeds, init, req, genFrames,
+                p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+            imageEmbeds?.Dispose(); promptEmbeds.Dispose(); negEmbeds.Dispose(); transformer2?.Dispose();
+            AssertFramesCoherent(frames, w, h);
+        }
+        finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
+    }
+
+    /// <summary>Parity guard for the query-tiled SDPA path (<c>SdpaTiledF32NoMask</c>, used at full-res / long-sequence
+    /// attention like T2V-14B's 14040 tokens): compares the forced-tiled output against the regular GEMM SDPA on the
+    /// SAME Q/K/V. They must match — a divergence is the "full-res dark output" bug (the tiled path was never exercised
+    /// by TI2V-5B, which only reaches 3510 tokens → regular path).</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void SdpaTiled_MatchesRegularGemm_Gpu()
+    {
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!Directory.Exists(ptxDir) || !CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no PTX/CUDA"); return; }
+
+        int B = 1, H = (int)EnvD("SDPA_H", 8), S = (int)EnvD("SDPA_S", 300), D = 128;   // S small → regular path is the reference; tile forces multi-tile
+        float scale = 1.0f / MathF.Sqrt(D);
+        Tensor MakeRand(int seed)
+        {
+            Tensor t = new(new TensorShape([(long)B, H, S, D]), DType.F32);
+            Span<float> s = t.AsSpan<float>(); Random r = new(seed);
+            for (int i = 0; i < s.Length; i++) s[i] = (float)(r.NextDouble() * 2 - 1);
+            return t;
+        }
+        using Tensor q = MakeRand(1), k = MakeRand(2), v = MakeRand(3);
+
+        using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+        // Reference: regular GEMM path (env clear, small S).
+        Environment.SetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED", null);
+        using Tensor outRef = new(new TensorShape([(long)B, H, S, D]), DType.F32);
+        backend.ScaledDotProductAttention(outRef, q, k, v, null, scale);
+        backend.Sync();
+        float[] refv = outRef.AsSpan<float>().ToArray();
+
+        // Tiled: force the tiled path with a small tile so the multi-tile loop runs.
+        Environment.SetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED", "1");
+        Environment.SetEnvironmentVariable("HARTSY_SDPA_TILE", "37");
+        using Tensor outTiled = new(new TensorShape([(long)B, H, S, D]), DType.F32);
+        backend.ScaledDotProductAttention(outTiled, q, k, v, null, scale);
+        backend.Sync();
+        float[] tv = outTiled.AsSpan<float>().ToArray();
+        Environment.SetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED", null);
+        Environment.SetEnvironmentVariable("HARTSY_SDPA_TILE", null);
+
+        double num = 0, den = 0, maxAbs = 0;
+        for (int i = 0; i < refv.Length; i++)
+        {
+            double d = tv[i] - refv[i]; num += d * d; den += (double)refv[i] * refv[i];
+            maxAbs = Math.Max(maxAbs, Math.Abs(d));
+        }
+        double relL2 = Math.Sqrt(num / Math.Max(den, 1e-12));
+        _output.WriteLine($"[sdpa-parity] relL2={relL2:E3} maxAbs={maxAbs:E3} (ref[0]={refv[0]:F4} tiled[0]={tv[0]:F4})");
+        Assert.True(relL2 < 1e-3, $"Tiled SDPA diverges from regular GEMM (relL2={relL2:E3}) — the full-res attention bug.");
     }
 
     /// <summary>Isolation diagnostic for the T2V-14B dark-output bug: decode a NORMAL(0,1) random z=16 latent through
@@ -161,7 +321,10 @@ public class WanVideoGenerationTests
             using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
             _output.WriteLine($"  loaded Wan2.1 VAE: {vaeW.Count} keys");
 
-            int T = 3, hLat = 24, wLat = 40;   // → 8×: 192×320, temporal (3-1)*4+1 = 9 frames
+            // Latent dims default to a small clip but honor WAN_W/H/FRAMES so this can isolate the FULL-RES z=16
+            // decode (WAN_W=832 WAN_H=480 → latent 104×60) — where the T2V-14B dark output actually appears.
+            int genW = (int)EnvD("WAN_W", 320), genH = (int)EnvD("WAN_H", 192), genF = (int)EnvD("WAN_FRAMES", 9);
+            int T = (genF - 1) / 4 + 1, hLat = genH / 8, wLat = genW / 8;
             Tensor latent = new(new TensorShape([1L, 16, T, hLat, wLat]), DType.F32);
             Span<float> ls = latent.AsSpan<float>();
             Random rng = new(7);

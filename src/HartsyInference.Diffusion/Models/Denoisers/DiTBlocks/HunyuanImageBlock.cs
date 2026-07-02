@@ -143,6 +143,16 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
     }
 
     /// <summary>Forward pass. Each stream's modulation produces 6 params; image-only RoPE is applied via <see cref="HunyuanImageRope"/> before <c>[img, txt]</c> joint-attention concat. Returns <c>(image, text)</c>.</summary>
+    // GPU-residency rewrite (mirrors the verified QwenImageBlock): every glue op (LayerNorm / AdaLN modulation /
+    // QK-norm / head reshape / joint concat / split / gated residual) runs as an IBackend op so the activation stays
+    // device-resident across the whole block — no per-op DataPointer D2H sync barriers (the old DiTUtils / QkNorm /
+    // AdaLNModulation host path D2H-synced every intermediate ~10 times per block × 60 blocks × steps). The only op
+    // left on the CPU is RoPE (HunyuanImageRope): it is image-only here, applied to the standalone per-stream image
+    // multi-head Q/K BEFORE the joint concat — one contained host excursion over a small tensor, exactly as before.
+    // The head reshape is expressed as declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so
+    // QK-norm runs over headDim with no reshape, then Permute0213 to [B, H, S, D]; the [img, txt] seq-dim concat is a
+    // Concat at dim 2 (byte-identical to ConcatAlongSeqDimMultiHead), and the post-attention split is a permute-back
+    // to [B, S, hidden] + SliceRows (B=1: image rows first, then text — see class note / QwenImageBlock).
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT = 1)
     {
@@ -150,79 +160,78 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
         int totalSeqLen = imgSeqLen + txtSeqLen;
+        float scale = 1.0f / MathF.Sqrt(_headDim);
 
         Tensor[] imgMod = _imgModulation.Forward(backend, temb);
         Tensor[] txtMod = _txtModulation.Forward(backend, temb);
 
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
-        Tensor imgNormed = new Tensor(imgShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(imgNormed, image, batch, imgSeqLen, _hiddenSize);
-        Tensor imgModulated = AdaLNModulation.ApplyModulation(imgNormed, imgMod[0], imgMod[1], batch, imgSeqLen, _hiddenSize);
-        imgNormed.Dispose();
-
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
-        Tensor txtNormed = new Tensor(txtShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(txtNormed, text, batch, txtSeqLen, _hiddenSize);
-        Tensor txtModulated = AdaLNModulation.ApplyModulation(txtNormed, txtMod[0], txtMod[1], batch, txtSeqLen, _hiddenSize);
-        txtNormed.Dispose();
-
-        Tensor imgQ = new Tensor(imgShape, DType.F32);
-        backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgShape, DType.F32);
-        backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgShape, DType.F32);
-        backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
-        imgModulated.Dispose();
-
-        Tensor txtQ = new Tensor(txtShape, DType.F32);
-        backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
-        Tensor txtK = new Tensor(txtShape, DType.F32);
-        backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
-        Tensor txtV = new Tensor(txtShape, DType.F32);
-        backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
-        txtModulated.Dispose();
-
-        int imgVectors = batch * imgSeqLen * _numHeads;
-        int txtVectors = batch * txtSeqLen * _numHeads;
-
-        Tensor imgQNormed = new Tensor(imgQ.Shape, DType.F32);
-        Tensor imgKNormed = new Tensor(imgK.Shape, DType.F32);
-        _normQ.Forward(imgQNormed, imgQ, imgVectors);
-        _normK.Forward(imgKNormed, imgK, imgVectors);
-        imgQ.Dispose();
-        imgK.Dispose();
-
-        Tensor txtQNormed = new Tensor(txtQ.Shape, DType.F32);
-        Tensor txtKNormed = new Tensor(txtK.Shape, DType.F32);
-        _normAddedQ.Forward(txtQNormed, txtQ, txtVectors);
-        _normAddedK.Forward(txtKNormed, txtK, txtVectors);
-        txtQ.Dispose();
-        txtK.Dispose();
-
+        // [B, S, H, D] views (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
+        TensorShape imgHeads = new TensorShape(batch, imgSeqLen, _numHeads, _headDim);
+        TensorShape txtHeads = new TensorShape(batch, txtSeqLen, _numHeads, _headDim);
         TensorShape imgMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
         TensorShape txtMhShape = new TensorShape(batch, _numHeads, txtSeqLen, _headDim);
         TensorShape jointMhShape = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
+        TensorShape jointFlat = new TensorShape(batch, totalSeqLen, _hiddenSize);
 
+        // ── 1. LayerNorm (no affine) + AdaLN modulate: x*(1+scale)+shift ──
+        Tensor imgModulated = DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
+        Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
+
+        // ── 2. Q/K/V projections (declared [B, S, H, D] so QK-norm + permute need no reshape view) ──
+        Tensor imgQ = new Tensor(imgHeads, DType.F32);
+        backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
+        Tensor imgK = new Tensor(imgHeads, DType.F32);
+        backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
+        Tensor imgV = new Tensor(imgHeads, DType.F32);
+        backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
+        imgModulated.Dispose();
+
+        Tensor txtQ = new Tensor(txtHeads, DType.F32);
+        backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
+        Tensor txtK = new Tensor(txtHeads, DType.F32);
+        backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
+        Tensor txtV = new Tensor(txtHeads, DType.F32);
+        backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
+        txtModulated.Dispose();
+
+        // ── 3. QK-norm (per-head RMSNorm over the last dim = headDim) ──
+        Tensor imgQn = new Tensor(imgHeads, DType.F32);
+        backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
+        imgQ.Dispose();
+        Tensor imgKn = new Tensor(imgHeads, DType.F32);
+        backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
+        imgK.Dispose();
+        Tensor txtQn = new Tensor(txtHeads, DType.F32);
+        backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
+        txtQ.Dispose();
+        Tensor txtKn = new Tensor(txtHeads, DType.F32);
+        backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
+        txtK.Dispose();
+
+        // ── 4. Permute [B, S, H, D] → [B, H, S, D] ──
         Tensor imgQMh = new Tensor(imgMhShape, DType.F32);
+        backend.Permute0213(imgQMh, imgQn, imgSeqLen, _numHeads, _headDim);
+        imgQn.Dispose();
         Tensor imgKMh = new Tensor(imgMhShape, DType.F32);
+        backend.Permute0213(imgKMh, imgKn, imgSeqLen, _numHeads, _headDim);
+        imgKn.Dispose();
         Tensor imgVMh = new Tensor(imgMhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(imgQMh, imgQNormed, batch, imgSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(imgKMh, imgKNormed, batch, imgSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(imgVMh, imgV, batch, imgSeqLen, _numHeads, _headDim);
-        imgQNormed.Dispose();
-        imgKNormed.Dispose();
+        backend.Permute0213(imgVMh, imgV, imgSeqLen, _numHeads, _headDim);
         imgV.Dispose();
 
         Tensor txtQMh = new Tensor(txtMhShape, DType.F32);
+        backend.Permute0213(txtQMh, txtQn, txtSeqLen, _numHeads, _headDim);
+        txtQn.Dispose();
         Tensor txtKMh = new Tensor(txtMhShape, DType.F32);
+        backend.Permute0213(txtKMh, txtKn, txtSeqLen, _numHeads, _headDim);
+        txtKn.Dispose();
         Tensor txtVMh = new Tensor(txtMhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(txtQMh, txtQNormed, batch, txtSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(txtKMh, txtKNormed, batch, txtSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(txtVMh, txtV, batch, txtSeqLen, _numHeads, _headDim);
-        txtQNormed.Dispose();
-        txtKNormed.Dispose();
+        backend.Permute0213(txtVMh, txtV, txtSeqLen, _numHeads, _headDim);
         txtV.Dispose();
 
+        // ── 5. Image-only RoPE (CPU; standalone [B, H, imgSeq, D] tensor — see class note) ──
         if (imgPackedT > 1)
         {
             Span<int> dims = stackalloc int[3] { imgPackedT, imgPackedH, imgPackedW };
@@ -231,65 +240,65 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         else
             rope.ApplyImage(imgQMh, imgKMh, batch, _numHeads, imgPackedH, imgPackedW);
 
+        // ── 6. Concat [img, txt] along the seq dim of [B, H, S, D] ──
         Tensor jointQ = new Tensor(jointMhShape, DType.F32);
+        backend.Concat(jointQ, new Tensor[] { imgQMh, txtQMh }, 2);
         Tensor jointK = new Tensor(jointMhShape, DType.F32);
+        backend.Concat(jointK, new Tensor[] { imgKMh, txtKMh }, 2);
         Tensor jointV = new Tensor(jointMhShape, DType.F32);
-        DiTUtils.ConcatAlongSeqDimMultiHead(jointQ, imgQMh, txtQMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-        DiTUtils.ConcatAlongSeqDimMultiHead(jointK, imgKMh, txtKMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-        DiTUtils.ConcatAlongSeqDimMultiHead(jointV, imgVMh, txtVMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+        backend.Concat(jointV, new Tensor[] { imgVMh, txtVMh }, 2);
         imgQMh.Dispose(); txtQMh.Dispose();
         imgKMh.Dispose(); txtKMh.Dispose();
         imgVMh.Dispose(); txtVMh.Dispose();
 
-        float scale = 1.0f / MathF.Sqrt(_headDim);
+        // ── 7. Joint scaled dot-product attention (no mask) ──
         Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
         backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();
 
-        Tensor imgAttnMh = new Tensor(imgMhShape, DType.F32);
-        Tensor txtAttnMh = new Tensor(txtMhShape, DType.F32);
-        DiTUtils.SplitAlongSeqDimMultiHead(imgAttnMh, txtAttnMh, jointAttnOut, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+        // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [img, txt] (B=1: contiguous rows) ──
+        Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
+        backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
         Tensor imgAttn = new Tensor(imgShape, DType.F32);
-        DiTUtils.ReshapeFromMultiHead(imgAttn, imgAttnMh, batch, imgSeqLen, _numHeads, _headDim);
-        imgAttnMh.Dispose();
-
+        backend.SliceRows(imgAttn, jointAttnFlat, 0);
         Tensor txtAttn = new Tensor(txtShape, DType.F32);
-        DiTUtils.ReshapeFromMultiHead(txtAttn, txtAttnMh, batch, txtSeqLen, _numHeads, _headDim);
-        txtAttnMh.Dispose();
+        backend.SliceRows(txtAttn, jointAttnFlat, imgSeqLen);
+        jointAttnFlat.Dispose();
 
+        // ── 9. Output projections + gated residual (input + gate*value) ──
         Tensor imgAttnProj = new Tensor(imgShape, DType.F32);
         backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
         imgAttn.Dispose();
-        Tensor imgAfterAttn = AdaLNModulation.ApplyGatedResidual(image, imgAttnProj, imgMod[2], batch, imgSeqLen, _hiddenSize);
+        Tensor imgAfterAttn = new Tensor(imgShape, DType.F32);
+        backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
         imgAttnProj.Dispose();
 
         Tensor txtAttnProj = new Tensor(txtShape, DType.F32);
         backend.Linear(txtAttnProj, txtAttn, _toAddOutWeight!, _toAddOutBias);
         txtAttn.Dispose();
-        Tensor txtAfterAttn = AdaLNModulation.ApplyGatedResidual(text, txtAttnProj, txtMod[2], batch, txtSeqLen, _hiddenSize);
+        Tensor txtAfterAttn = new Tensor(txtShape, DType.F32);
+        backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
         txtAttnProj.Dispose();
 
-        Tensor imgMlpNormed = new Tensor(imgShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(imgMlpNormed, imgAfterAttn, batch, imgSeqLen, _hiddenSize);
-        Tensor imgMlpModulated = AdaLNModulation.ApplyModulation(imgMlpNormed, imgMod[3], imgMod[4], batch, imgSeqLen, _hiddenSize);
-        imgMlpNormed.Dispose();
+        // ── 10. Image MLP path ──
+        Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
-        Tensor imgFinal = AdaLNModulation.ApplyGatedResidual(imgAfterAttn, imgMlpOut, imgMod[5], batch, imgSeqLen, _hiddenSize);
+        Tensor imgFinal = new Tensor(imgShape, DType.F32);
+        backend.GatedResidualLastDim(imgFinal, imgAfterAttn, imgMlpOut, imgMod[5]);
         imgMlpOut.Dispose();
         imgAfterAttn.Dispose();
 
-        Tensor txtMlpNormed = new Tensor(txtShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(txtMlpNormed, txtAfterAttn, batch, txtSeqLen, _hiddenSize);
-        Tensor txtMlpModulated = AdaLNModulation.ApplyModulation(txtMlpNormed, txtMod[3], txtMod[4], batch, txtSeqLen, _hiddenSize);
-        txtMlpNormed.Dispose();
+        // ── 11. Text MLP path ──
+        Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
         Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, batch, txtSeqLen);
         txtMlpModulated.Dispose();
-        Tensor txtFinal = AdaLNModulation.ApplyGatedResidual(txtAfterAttn, txtMlpOut, txtMod[5], batch, txtSeqLen, _hiddenSize);
+        Tensor txtFinal = new Tensor(txtShape, DType.F32);
+        backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
         txtMlpOut.Dispose();
         txtAfterAttn.Dispose();
 
