@@ -27,6 +27,13 @@ public readonly ref struct NvtxRange
     // NvtxRange-wrapped ops, regardless of whether NVTX itself is available. Zero overhead when off. ──
     internal static readonly bool ProfileEnabled =
         Environment.GetEnvironmentVariable("HARTSY_PROFILE") == "1";
+
+    /// <summary>HARTSY_PROFILE_SYNC=1: sync the compute stream on each range Dispose so per-op timing = GPU time.</summary>
+    internal static readonly bool ProfileSync =
+        Environment.GetEnvironmentVariable("HARTSY_PROFILE_SYNC") == "1";
+
+    /// <summary>Compute-stream handle set by CudaBackend at init, so the sync-profiler can drain it. 0 = unset.</summary>
+    internal static nint ProfileSyncStream;
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long[]> _profStats = new();
 
     /// <summary>Writes the accumulated per-op wall-time table (sorted by total) to <paramref name="path"/>.</summary>
@@ -103,6 +110,13 @@ public readonly ref struct NvtxRange
     {
         if (_profName is not null)
         {
+            // HARTSY_PROFILE_SYNC=1: drain the compute stream before timestamping so each op's recorded time is its
+            // TRUE GPU execution time (not just the async launch cost). Serializes execution — profiling only — but
+            // it's the only way, without Nsight, to attribute where GPU time actually goes across async ops.
+            if (ProfileSync && ProfileSyncStream != 0)
+            {
+                try { CudaDriverApi.cuStreamSynchronize(ProfileSyncStream); } catch { }
+            }
             long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - _startTicks;
             long[] slot = _profStats.GetOrAdd(_profName, static _ => new long[2]);
             Interlocked.Increment(ref slot[0]);

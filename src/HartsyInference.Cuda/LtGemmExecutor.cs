@@ -12,6 +12,9 @@ public sealed unsafe class LtGemmExecutor : IDisposable
     private readonly nuint _workspaceBytes;
     private int _disposed;
 
+    /// <summary>Opt-out of TF32 tensor-core GEMM for F32 operands (fall back to plain F32 CUDA cores).</summary>
+    private static readonly bool EnvOff = Environment.GetEnvironmentVariable("HARTSY_GEMM_NO_TF32") == "1";
+
     /// <summary>Whether the cuBLASLt handle was created successfully. False only if the cuBLASLt library is unavailable, in which case callers fall back to <c>cublasGemmEx</c> + separate bias add.</summary>
     public bool IsSupported { get; }
 
@@ -49,7 +52,15 @@ public sealed unsafe class LtGemmExecutor : IDisposable
         nint matmulDesc = 0, layoutA = 0, layoutB = 0, layoutD = 0, pref = 0;
         try
         {
-            Chk(CublasLtApi.cublasLtMatmulDescCreate(out matmulDesc, CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUDA_R_32F), "DescCreate");
+            // F32 operands: use TF32 tensor cores (CUBLAS_COMPUTE_32F_FAST_TF32) instead of plain F32 CUDA cores —
+            // ~2× on Ada with a 10-bit multiply mantissa (F32 range preserved, F32 accumulate). This is the
+            // PyTorch/ComfyUI default (allow_tf32) and diffusion tolerates it. F16/other operands keep COMPUTE_32F,
+            // which already runs on F16 tensor cores (F16 multiply, F32 accumulate) — only the F32-operand path was
+            // leaving the tensor cores idle (the dominant Wan-DiT GEMM cost). Opt-out via HARTSY_GEMM_NO_TF32=1.
+            int computeType = (abType == CublasApi.CUDA_R_32F && !EnvOff)
+                ? CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32
+                : CublasApi.CUBLAS_COMPUTE_32F;
+            Chk(CublasLtApi.cublasLtMatmulDescCreate(out matmulDesc, computeType, CublasApi.CUDA_R_32F), "DescCreate");
 
             int transA = CublasApi.CUBLAS_OP_T;
             int transB = CublasApi.CUBLAS_OP_N;

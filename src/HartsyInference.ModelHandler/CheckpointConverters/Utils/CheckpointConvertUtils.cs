@@ -284,8 +284,13 @@ public static unsafe class CheckpointConvertUtils
     /// </list>
     /// The input-side scale is dropped — we run F32 activations and use alpha=weight_scale at GEMM time. Marker tensors like <c>scaled_fp8</c> are also dropped.</summary>
     /// <param name="source">Raw checkpoint dictionary (mutated; companion keys removed).</param>
+    /// <param name="nvfp4ToFp8">When true, NVFP4 weights are dequantized to <b>fp8 (1 byte/param)</b> with the block
+    /// scale folded into the value and the global scale carried on <see cref="Tensor.Fp8ScaleFactor"/>, instead of
+    /// the default F16 (2 byte/param). Halves the resident footprint of an all-nvfp4 model (Ideogram 4: two 9.3B
+    /// DiTs, 35.9 GB at F16 → 18.6 GB at fp8, the difference between "won't fit a 24 GB card" and "fits"). Leave
+    /// false for small nvfp4 text encoders (Z-Image's Qwen3-4B) where F16 is free and avoids fp8's smaller range.</param>
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
-    public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source)
+    public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source, bool nvfp4ToFp8 = false)
     {
         // First pass: gather scale companions keyed by the base name (the part before the suffix).
         // `.weight_scale_2` is nvfp4's global scalar (block scales live in `.weight_scale`); note that
@@ -364,7 +369,9 @@ public static unsafe class CheckpointConvertUtils
                     && weightScale2s.TryGetValue(baseKey, out Tensor? scale2T) && scale2T.DType == DType.F32)
                 {
                     float globalScale = ((float*)scale2T.DataPointer)[0];
-                    result[key] = DequantNvfp4ToF16(kvp.Value, blockScales, globalScale);
+                    result[key] = nvfp4ToFp8
+                        ? DequantNvfp4ToFp8(kvp.Value, blockScales, globalScale)
+                        : DequantNvfp4ToF16(kvp.Value, blockScales, globalScale);
                     continue;
                 }
             }
@@ -446,6 +453,61 @@ public static unsafe class CheckpointConvertUtils
                 }
             });
         }
+        return result;
+    }
+
+    /// <summary>Dequantizes an NVFP4 weight to <b>fp8 e4m3 (1 byte/param)</b> instead of F16, folding the per-16-element
+    /// block scale into the stored value and returning the <b>global</b> scale on <see cref="Tensor.Fp8ScaleFactor"/>.
+    /// The GEMM then computes <c>fp8_value · globalScale ≈ e2m1 · block_scale · globalScale</c> (the same real weight),
+    /// reusing the existing fp8 alpha path — so an all-nvfp4 model keeps its footprint at fp8 size. fp8 e4m3 (3-bit
+    /// mantissa) is finer than the 4-bit nvfp4 source, so folding block_scale into the value adds negligible rounding
+    /// vs the F16 path; the only real difference is fp8's smaller range — a block whose <c>e2m1·block_scale</c> falls
+    /// below fp8's min subnormal (~2^-9) flushes to 0 (F16 wouldn't). Acceptable for weights; used for the Ideogram-4
+    /// DiTs to fit a 24 GB card. Nibble order and block layout match <see cref="DequantNvfp4ToF16"/>.</summary>
+    public static Tensor DequantNvfp4ToFp8(Tensor packed, Tensor blockScales, float globalScale)
+    {
+        if (packed.DType != DType.U8 || packed.Shape.Rank != 2)
+            throw new ArgumentException($"NVFP4 packed weight must be U8 rank-2; got {packed.DType} {packed.Shape}.");
+        long rows = packed.Shape[0];
+        long packedCols = packed.Shape[1];
+        long cols = packedCols * 2;
+        long scaleCols = blockScales.Shape[1];
+        if (blockScales.Shape[0] != rows || scaleCols * 16 != cols)
+            throw new ArgumentException(
+                $"NVFP4 block-scale shape [{blockScales.Shape[0]}, {scaleCols}] does not match packed weight [{rows}, {packedCols}] (expect [rows, cols/16]).");
+
+        // Build the dequantized values (e2m1 · block_scale) as F32, then cast to fp8 via the engine's TESTED
+        // F32→F8E4M3 path (Tensor.CastTo) rather than a hand-rolled quantizer. The F32 intermediate is per-tensor
+        // transient (freed below). Global scale rides on Fp8ScaleFactor, applied as the GEMM alpha.
+        Tensor f32 = new Tensor(new TensorShape(rows, cols), DType.F32);
+        unsafe
+        {
+            byte* src = (byte*)packed.DataPointer;
+            byte* scales = (byte*)blockScales.DataPointer;
+            float* dst = (float*)f32.DataPointer;
+            float[] e2m1 = E2M1Magnitudes;
+            float[] e4m3 = E4M3Table;
+            Parallel.For(0, (int)rows, r =>
+            {
+                byte* rowSrc = src + (long)r * packedCols;
+                byte* rowScales = scales + (long)r * scaleCols;
+                float* rowDst = dst + (long)r * cols;
+                for (long j = 0; j < packedCols; j++)
+                {
+                    // Fold ONLY the block scale into the value (not the global scale — that rides on Fp8ScaleFactor).
+                    float scale = e4m3[rowScales[j >> 3]];
+                    byte b = rowSrc[j];
+                    int hi = b >> 4, lo = b & 0xF;
+                    float hiVal = e2m1[hi & 7] * scale;
+                    float loVal = e2m1[lo & 7] * scale;
+                    rowDst[j * 2] = (hi & 8) != 0 ? -hiVal : hiVal;
+                    rowDst[j * 2 + 1] = (lo & 8) != 0 ? -loVal : loVal;
+                }
+            });
+        }
+        Tensor result = f32.CastTo(DType.F8E4M3);
+        f32.Dispose();
+        result.Fp8ScaleFactor = globalScale;
         return result;
     }
 }

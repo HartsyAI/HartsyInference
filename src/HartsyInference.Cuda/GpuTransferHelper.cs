@@ -194,11 +194,20 @@ internal static unsafe class GpuTransferHelper
         }
 
         // 4. Cache miss — fresh H2D transfer. The buffer is a transient (the caller frees it via the async
-        // FreeDevice), so allocate it from the stream-ordered pool. cuMemAllocAsync is stream-ordered, so sync the
-        // stream before the synchronous host→device copy to guarantee the allocation has completed.
+        // FreeDevice). Allocate from the stream-ordered pool (cuMemAllocAsync on the compute stream) and copy with a
+        // STREAM-ORDERED async H2D on the SAME stream — the copy is naturally ordered after the alloc, and the
+        // consuming kernel (queued next on that stream) sees the data. This replaces a per-miss full
+        // `cuStreamSynchronize` that drained the entire async pipeline on EVERY small host-tensor upload — the Wan
+        // DiT alone missed ~14 tiny modulation/scratch tensors per block-forward, so that drain was ~94 s of a
+        // ~63 s×... gen (dominant cost). Pageable src stages synchronously before returning (host buffer safe to
+        // reuse); pinned src stays alive until the stream-ordered FreeDevice. No CPU read happens here, so no
+        // correctness dependency on the copy completing before this returns — only stream order, which holds.
+        using Profiling.NvtxRange _miss = Profiling.NvtxRange.Push(byteSize > (1u << 20) ? "H2D_MISS_BIG" : "H2D_MISS_SMALL");   // HARTSY_PROFILE visibility into miss H2D volume
         ulong dptr = CudaMemory.Allocate(byteSize);
-        if (s.StreamHandle != 0) SyncStream();
-        CudaMemory.CopyHostToDevice(dptr, cpuTensor.DataPointer, byteSize);
+        if (s.StreamHandle != 0)
+            CudaMemory.CopyHostToDeviceAsync(dptr, cpuTensor.DataPointer, byteSize, s.StreamHandle);
+        else
+            CudaMemory.CopyHostToDevice(dptr, cpuTensor.DataPointer, byteSize);
         return dptr;
     }
 

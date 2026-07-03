@@ -123,6 +123,9 @@ public sealed class CudaBackend : IBackend
     /// keeps F32 range with a 10-bit mantissa. Opt out with <c>HARTSY_NO_TF32=1</c>.</summary>
     private readonly bool _allowTf32;
 
+    /// <summary>HARTSY_SDPA_F16=1: run the non-tiled no-mask SDPA in F16 (halves score-matrix traffic, F16 tensor cores).</summary>
+    private readonly bool _sdpaF16;
+
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>: FAST_TF32 for
     /// F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit full-precision request —
     /// is off), otherwise plain 32F accumulate (mixed F16-in/F32-acc stays 32F).</summary>
@@ -140,6 +143,7 @@ public sealed class CudaBackend : IBackend
         // synchronize with the NULL stream, causing race conditions where kernels read incomplete
         // data from in-progress H2D transfers. Fix: switch to cuMemcpyHtoDAsync on this stream.
         _stream = new CudaStream(nonBlocking: false);
+        Profiling.NvtxRange.ProfileSyncStream = _stream.Handle;   // enables HARTSY_PROFILE_SYNC per-op GPU-time attribution
         // Upload stream is non-blocking so its in-flight work doesn't gate the compute
         // stream's NULL-stream "wait for everything" semantics — without that, prefetched
         // uploads would force compute to wait, defeating overlap. The streaming cache uses
@@ -159,6 +163,7 @@ public sealed class CudaBackend : IBackend
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
         EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
         _allowTf32 = _context.ComputeCapabilityMajor >= 8 && !EnvFlag("HARTSY_NO_TF32");
+        _sdpaF16 = !EnvFlag("HARTSY_SDPA_NO_F16");   // default ON (standard F16 attention); opt out for precision debugging
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
@@ -2173,6 +2178,26 @@ public sealed class CudaBackend : IBackend
                 opOut = pOutCast;
                 opDtype = DType.F32;
             }
+            else if (query.DType == DType.F32 && mask is null && _sdpaF16)
+            {
+                // F16 speed path (default on; opt out via HARTSY_SDPA_NO_F16): the non-tiled SDPA cost is dominated by the
+                // [totalHeads, Sq, Skv] score matrix (Wan-1.3B self-attn: 12·4480²·4B ≈ 963 MB, written by QK then
+                // re-read by softmax + AV — the profiled #1 GPU cost). Running in F16 halves that traffic and uses
+                // F16 tensor cores. Scores are bounded (scale·RMS-normed Q·K), and softmax subtracts the row max, so
+                // no F16 overflow. Output is cast back to F32 after AV.
+                pQCast = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
+                _kernels!.LaunchCastF32ToF16(pQCast, pQ, (int)query.ElementCount, _stream.Handle);
+                pKCast = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
+                _kernels!.LaunchCastF32ToF16(pKCast, pK, (int)key.ElementCount, _stream.Handle);
+                pVCast = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
+                _kernels!.LaunchCastF32ToF16(pVCast, pV, (int)value.ElementCount, _stream.Handle);
+                pOutCast = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
+                opQ = pQCast;
+                opK = pKCast;
+                opV = pVCast;
+                opOut = pOutCast;
+                opDtype = DType.F16;
+            }
 
             bool isF16 = opDtype == DType.F16;
             int elemSize = opDtype.SizeInBytes;
@@ -2317,6 +2342,11 @@ public sealed class CudaBackend : IBackend
             if (output.DType == DType.BF16 && pOutCast != 0)
             {
                 _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
+            }
+            else if (opDtype == DType.F16 && output.DType == DType.F32 && pOutCast != 0)
+            {
+                // F16 speed path produced an F16 result in pOutCast — cast it back to the F32 output tensor.
+                _kernels!.LaunchCastF16ToF32(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
             }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);

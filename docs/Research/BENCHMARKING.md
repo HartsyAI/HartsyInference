@@ -1,7 +1,17 @@
 # Benchmarking HartsyInference vs ComfyUI
 
 > **Goal:** HartsyInference within 2× of ComfyUI on the same hardware running the same model + same noise + same scheduler config.
-> **Status:** procedure documented, not yet collected — needs a paired dual-run on the user's RTX 3060 (or any single-GPU box) once checkpoints are downloaded.
+> **Status:** first paired video dual-run collected 2026-07-03 on RTX 4090 via SwarmUI — see
+> [`../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`](../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md).
+> **Initial result: FAILED the 2× bar — 5.9× (14B fp8) to 10.8× (1.3B fp16) slower than ComfyUI.**
+> Root cause was NOT F16/compute: the shared `GpuTransferHelper.CopyToDevice` miss path did a full
+> `cuStreamSynchronize` before every host-tensor H2D, draining the async pipeline ~30k times/gen (Wan DiT misses
+> ~14 tiny scratch tensors per block-forward). **Fixed in alpha.43.17-local** (stream-ordered `cuMemcpyHtoDAsync`,
+> no drain) + on-device Wan modulation: **Wan-1.3B 67.6 s → 28.1 s (2.4×), gap 10.8× → 4.5×**; now compute-bound so
+> F16 is the next lever. Fix is arch-agnostic (in the shared helper) — image archs benefit too (needs its own
+> dual-run to quantify). 14B fp8 also GPU-bound on redundant per-step re-casts (`CacheWeightCasts=off`). LTX-2.3 22B
+> is block-swap-bound (streams the 19 GB DiT every forward on 24 GB) — fine for short clips, impractical for
+> long/large (177f/704×448/30-step didn't finish in 30 min).
 
 ## What to measure
 

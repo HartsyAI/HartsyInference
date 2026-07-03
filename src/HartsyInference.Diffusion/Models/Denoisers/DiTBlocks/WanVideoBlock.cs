@@ -82,7 +82,7 @@ public sealed unsafe class WanVideoBlock
         Action<Tensor>? postCrossAttnHook = null, Tensor? selfAttnMask = null, int imageContextLen = 0, string? dbg = null)
     {
         int s = (int)hidden.Shape[0];
-        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(temb);
+        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor cShift, Tensor cScale, Tensor cGate) = Modulation(backend, temb);
         if (dbg != null) { WanVideoDebugDump.Dump($"{dbg}_scaleMsa", scaleMsa); WanVideoDebugDump.Dump($"{dbg}_gateMsa", gateMsa); }
 
         // 1. self-attn
@@ -235,13 +235,38 @@ public sealed unsafe class WanVideoBlock
         return outT;
     }
 
-    /// <summary>Adds <c>scale_shift_table</c> to the timestep_proj <c>[G, 6, dim]</c>; returns 6 modulation tensors of <c>[G, dim]</c>.</summary>
-    private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation(Tensor temb)
+    /// <summary>Adds <c>scale_shift_table</c> to the timestep_proj <c>[G, 6, dim]</c>; returns 6 modulation tensors of <c>[G, dim]</c>.
+    /// <para>G=1 (scalar-timestep T2V/I2V, the hot path) builds the 6 tensors <b>on-device</b> via <see cref="IBackend.SliceRows"/>
+    /// + <see cref="IBackend.GatedResidualLastDim"/>, so the results are GPU-resident activations. This is a load-bearing perf
+    /// fix: the old host-pointer loop produced fresh CPU tensors whose first <c>CopyToDevice</c> (in every downstream AddScalar /
+    /// AffineBroadcast / GatedResidual) is a cache MISS, and the miss path does a full stream <c>SyncStream</c> before its H2D —
+    /// so each block drained the whole async attention/FFN pipeline 3× (measured: ~85 s of a ~90 s Wan-1.3B gen sat in that
+    /// GatedResidual sync). Keeping modulation on-device makes every downstream upload a cache HIT → no per-block barriers.
+    /// The multi-group TI2V path (per-frame timesteps) keeps the CPU reference.</para></summary>
+    private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation(IBackend backend, Tensor temb)
     {
         int g = (int)temb.Shape[0];
+        if (g == 1)
+        {
+            // out[m] = scale_shift_table[m,:] + temb[0,m,:], each [1, dim], GPU-resident.
+            Tensor ones = Ones();   // [1, dim], device-promoted after first use — the "+1·x" add gate
+            Tensor[] outs = new Tensor[6];
+            for (int m = 0; m < 6; m++)
+            {
+                Tensor ssM = new Tensor(new TensorShape(1, _dim), DType.F32);
+                backend.SliceRows(ssM, _scaleShift!, m);            // scale_shift_table row m
+                Tensor tbM = new Tensor(new TensorShape(1, _dim), DType.F32);
+                backend.SliceRows(tbM, temb, m);                    // temb[0, m, :]
+                Tensor o = new Tensor(new TensorShape(1, _dim), DType.F32);
+                backend.GatedResidualLastDim(o, tbM, ssM, ones);    // o = tbM + 1·ssM
+                ssM.Dispose(); tbM.Dispose();
+                outs[m] = o;
+            }
+            return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
+        }
         float* ss = (float*)_scaleShift!.DataPointer;
         float* tb = (float*)temb.DataPointer;
-        Tensor[] outs = new Tensor[6];
+        Tensor[] outsHost = new Tensor[6];
         for (int m = 0; m < 6; m++)
         {
             Tensor o = new Tensor(new TensorShape(g, _dim), DType.F32);
@@ -249,9 +274,9 @@ public sealed unsafe class WanVideoBlock
             for (int gi = 0; gi < g; gi++)
                 for (int d = 0; d < _dim; d++)
                     op[gi * _dim + d] = ss[m * _dim + d] + tb[((long)gi * 6 + m) * _dim + d];
-            outs[m] = o;
+            outsHost[m] = o;
         }
-        return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
+        return (outsHost[0], outsHost[1], outsHost[2], outsHost[3], outsHost[4], outsHost[5]);
     }
 
     /// <summary>FP32 LayerNorm over the last dim with optional affine. GPU-resident (backend ops) — the per-op

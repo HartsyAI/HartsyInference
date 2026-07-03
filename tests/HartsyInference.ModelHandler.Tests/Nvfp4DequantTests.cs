@@ -49,6 +49,32 @@ public sealed unsafe class Nvfp4DequantTests
     }
 
     [Fact]
+    public void DequantNvfp4ToFp8_MatchesF16Path_WithinFp8Precision()
+    {
+        // Same 16-element block as the exact-values test, but dequantized to fp8 (block scale folded into value,
+        // global scale on Fp8ScaleFactor). fp8_value * Fp8ScaleFactor must reproduce the F16 dequant.
+        Tensor packed = new(new TensorShape(1, 8), DType.U8);
+        byte* p = (byte*)packed.DataPointer;
+        p[0] = Pack(0, 1); p[1] = Pack(2, 3); p[2] = Pack(4, 5); p[3] = Pack(6, 7);
+        p[4] = Pack(9, 10); p[5] = Pack(11, 12); p[6] = Pack(13, 14); p[7] = Pack(15, 8);
+        Tensor blockScales = new(new TensorShape(1, 1), DType.F8E4M3);
+        ((byte*)blockScales.DataPointer)[0] = 0x40; // 2.0
+        const float g = 0.5f;
+
+        Tensor f16 = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, g);
+        Tensor fp8 = CheckpointConvertUtils.DequantNvfp4ToFp8(packed, blockScales, g);
+
+        Assert.Equal(DType.F8E4M3, fp8.DType);
+        Assert.Equal(g, fp8.Fp8ScaleFactor);
+        // fp8 stores e2m1*block_scale (= the F16 value / g); real value = decoded_fp8 * Fp8ScaleFactor.
+        Tensor fp8AsF32 = fp8.CastTo(DType.F32);          // CastTo folds Fp8ScaleFactor into the value
+        Half* a = (Half*)f16.DataPointer;
+        float* b = (float*)fp8AsF32.DataPointer;
+        for (int i = 0; i < 16; i++)
+            Assert.True(MathF.Abs((float)a[i] - b[i]) < 1e-3f, $"idx {i}: F16={(float)a[i]} fp8*scale={b[i]}");
+    }
+
+    [Fact]
     public void DequantNvfp4_BlockScaleSelection_UsesPerBlockScale()
     {
         // Two 16-element blocks in one row: same nibble pattern, different block scales → second block doubled.
