@@ -56,10 +56,13 @@ public sealed class Qwen3TtsEndToEndTests
         codecLoader.Load(codecPath);
         IReadOnlyDictionary<string, Tensor> codec = codecLoader.GetAllTensors();
 
-        Qwen3TtsConfig cfg = Qwen3TtsConfig.Default_1_7B with { MaxNewTokens = maxFrames };
+        // Pick the preset from the checkpoint itself: the talker final norm is hidden-size wide (1.7B 2048, 0.6B 1024).
+        bool is06B = (int)talker["talker.model.norm.weight"].Shape[0] == 1024;
+        Qwen3TtsConfig cfg = (is06B ? Qwen3TtsConfig.Default_0_6B : Qwen3TtsConfig.Default_1_7B) with { MaxNewTokens = maxFrames };
+        _out.WriteLine($"Preset: {(is06B ? "0.6B" : "1.7B")}.");
         if (Environment.GetEnvironmentVariable("QWEN3TTS_GREEDY") == "1")
         {
-            cfg = cfg with { TopK = 1, RepetitionPenalty = 1f };   // deterministic, for parity vs the reference
+            cfg = cfg with { TopK = 1, RepetitionPenalty = 1f, SubTalkerTopK = 1 };   // deterministic, for parity vs the reference
         }
         using Qwen3TtsPipeline pipe = new(cfg);
 

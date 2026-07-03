@@ -73,6 +73,15 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         return _tokenizer.EncodeToIds(text);
     }
 
+    /// <summary>Byte-level-exact raw BPE encode (routes through <see cref="ByteLevelCodec.Encode"/>, matching the
+    /// HF fast tokenizer — the same fix Qwen3Tokenizer.EncodeRaw got). Use where exact ids are load-bearing
+    /// (NeuTTS prompt building); <see cref="EncodeRaw"/> keeps the legacy behavior until its consumers are revalidated.</summary>
+    public IReadOnlyList<int> EncodeRawByteLevel(string text)
+    {
+        ThrowIfDisposed();
+        return _tokenizer.EncodeToIds(ByteLevelCodec.Encode(text));
+    }
+
     /// <summary>Decodes token ids back to text. Control tokens (id ≥ <see cref="EndOfTextId"/>) are dropped, and
     /// the GPT-2 byte-level mapping is reversed via <see cref="ByteLevelCodec"/> (so spaces render correctly
     /// instead of leaking <c>Ġ</c>).</summary>

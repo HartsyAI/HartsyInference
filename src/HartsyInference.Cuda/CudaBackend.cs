@@ -117,6 +117,20 @@ public sealed class CudaBackend : IBackend
     /// <summary>Reads a <c>HARTSY_*</c> boolean env var (set "1" to enable), mirroring <see cref="Profiling.NvtxRange.ProfileEnabled"/>. Unset or any non-"1" value is treated as off.</summary>
     private static bool EnvFlag(string name) => Environment.GetEnvironmentVariable(name) == "1";
 
+    /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — the same default PyTorch
+    /// uses for inference. Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a
+    /// fraction of tensor-core throughput), leaving F32 pipelines compute-bound far below the hardware. TF32
+    /// keeps F32 range with a 10-bit mantissa. Opt out with <c>HARTSY_NO_TF32=1</c>.</summary>
+    private readonly bool _allowTf32;
+
+    /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>: FAST_TF32 for
+    /// F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit full-precision request —
+    /// is off), otherwise plain 32F accumulate (mixed F16-in/F32-acc stays 32F).</summary>
+    private int Compute32F(int gemmType)
+        => _allowTf32 && !HighPrecisionGemm && gemmType == CublasApi.CUDA_R_32F
+            ? CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32
+            : CublasApi.CUBLAS_COMPUTE_32F;
+
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
     {
@@ -144,11 +158,12 @@ public sealed class CudaBackend : IBackend
         HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
         EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
+        _allowTf32 = _context.ComputeCapabilityMajor >= 8 && !EnvFlag("HARTSY_NO_TF32");
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"NativeFp8Gemm={EnableNativeFp8Gemm} HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
-            $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights}.");
+            $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
 
         // Initialize cuBLAS
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();
@@ -255,7 +270,7 @@ public sealed class CudaBackend : IBackend
                 aPtr, gemmType, K,
                 &beta,
                 pC, cType, N,
-                CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
             GpuTransferHelper.CacheActivation(output, pC, outBytes);
             cachedOutput = true;
@@ -488,7 +503,7 @@ public sealed class CudaBackend : IBackend
                         inputPtr, gemmType, K,
                         &beta,
                         gemmOut, gemmOutType, N,
-                        CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                     if (outNeedsCast)
                         CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, M * N);
                 }
@@ -576,7 +591,7 @@ public sealed class CudaBackend : IBackend
                 &beta,
                 pC, cType, N, strideC,
                 (int)batchSize,
-                CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
             GpuTransferHelper.CacheActivation(output, pC, outBytes);
             cachedOutput = true;
@@ -700,7 +715,7 @@ public sealed class CudaBackend : IBackend
                     weightPtr, gemmType, colRows,
                     &beta,
                     outBatchPtr, gemmOutType, colCols,
-                    CublasApi.CUBLAS_COMPUTE_32F, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             }
 
             // Add bias (cast if dtype mismatch)

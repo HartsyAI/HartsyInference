@@ -51,73 +51,72 @@ internal sealed unsafe class F5DitBlock
     }
 
     /// <summary>Forward: <paramref name="x"/> <c>[1, T, dim]</c> channels-last,
-    /// <paramref name="timeEmb"/> <c>[1, dim]</c> per-batch timestep embedding,
-    /// <paramref name="ropeCos"/> / <paramref name="ropeSin"/> precomputed tables.</summary>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor timeEmb, int t, float[] ropeCos, float[] ropeSin)
+    /// <paramref name="siluTimeEmb"/> <c>[1, dim]</c> SiLU'd timestep embedding (computed once per step by
+    /// the caller), <paramref name="ropeCos"/>/<paramref name="ropeSin"/> <c>[maxPos, headDim]</c> GPU-ready
+    /// tables. Fully backend-resident: no activation is touched on the host, so the whole block runs without
+    /// a single GPU stall — the previous version did adaLN/RoPE/GELU/reshapes as CPU pointer loops, forcing
+    /// D2H+H2D round-trips per op (the reason F5 ran ~60x slower than the reference).</summary>
+    public Tensor Forward(IBackend backend, Tensor x, Tensor siluTimeEmb, int t, Tensor ropeCos, Tensor ropeSin)
     {
         int dim = _cfg.Dim;
         int heads = _cfg.Heads;
         int headDim = _cfg.HeadDim;
         int ffInner = _cfg.FfInner;
 
-        // 1. AdaLN-Zero modulation: project timeEmb through SiLU + Linear → 6*dim.
-        Tensor tCopy = new(timeEmb.Shape, DType.F32);
-        unsafe
-        {
-            // SiLU on a copy of timeEmb (don't clobber the caller's tensor).
-            float* src = (float*)timeEmb.DataPointer;
-            float* dst = (float*)tCopy.DataPointer;
-            long n = timeEmb.ElementCount;
-            for (long i = 0; i < n; i++) { float vv = src[i]; dst[i] = vv / (1f + MathF.Exp(-vv)); }
-        }
-        Tensor mods = WhisperOps.ProjectLinear(backend, tCopy, _attnNormLinW!, _attnNormLinB, 1, 1, dim, 6 * dim);
-        tCopy.Dispose();
+        // 1. AdaLN-Zero modulation params, kept on-device: Linear(silu(t_emb)) → [1,1,6*dim] → six [1,1,dim]
+        //    slices; scales get the "+1" on-device.
+        Tensor mods = WhisperOps.ProjectLinear(backend, siluTimeEmb, _attnNormLinW!, _attnNormLinB, 1, 1, dim, 6 * dim);
+        Tensor shiftMsa = SliceMod(backend, mods, 0, dim);
+        Tensor scaleMsa = SliceMod(backend, mods, 1, dim);
+        Tensor gateMsa = SliceMod(backend, mods, 2, dim);
+        Tensor shiftMlp = SliceMod(backend, mods, 3, dim);
+        Tensor scaleMlp = SliceMod(backend, mods, 4, dim);
+        Tensor gateMlp = SliceMod(backend, mods, 5, dim);
+        mods.Dispose();
+        backend.AddScalar(scaleMsa, scaleMsa, 1f);
+        backend.AddScalar(scaleMlp, scaleMlp, 1f);
 
-        float* modsP = (float*)mods.DataPointer;
-        float* shiftMsa = modsP;
-        float* scaleMsa = modsP + dim;
-        float* gateMsa = modsP + 2 * dim;
-        float* shiftMlp = modsP + 3 * dim;
-        float* scaleMlp = modsP + 4 * dim;
-        float* gateMlp = modsP + 5 * dim;
-
-        // 2. Pre-norm + modulate for attention: x_n = (LayerNorm(x) with no affine) * (1 + scale_msa) + shift_msa
-        //    Our IBackend.LayerNorm requires weight + bias; pre-allocate ones/zeros to act
-        //    as the elementwise_affine=False case.
-        Tensor onesD = OnesLike(dim);
-        Tensor zerosD = ZerosLike(dim);
+        // 2. Pre-norm + modulate for attention.
         Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, onesD, zerosD, 1e-6f);
-        onesD.Dispose(); zerosD.Dispose();
-
-        F5Ops.AdaLnZeroModulate(normed, shiftMsa, scaleMsa, 1, t, dim);
-
-        // 3. Self-attention with RoPE on Q, K.
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _qW!, _qB, 1, t, dim, dim);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _kW!, _kB, 1, t, dim, dim);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _vW!, _vB, 1, t, dim, dim);
+        backend.LayerNormNoAffine(normed, x, 1e-6f);
+        Tensor modded = new(x.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(modded, normed, scaleMsa, shiftMsa);
         normed.Dispose();
+
+        // 3. Self-attention with RoPE on Q, K. The projections write straight into [1, T, heads, headDim]
+        //    tensors (shape is metadata to Linear), so RoPE applies in place with no reshape, and the
+        //    head transpose for SDPA runs on-device via Permute0213.
+        TensorShape packed = new(1, t, heads, headDim);
+        Tensor q = new(packed, DType.F32);
+        Tensor k = new(packed, DType.F32);
+        Tensor v = new(packed, DType.F32);
+        backend.Linear(q, modded, _qW!, _qB);
+        backend.Linear(k, modded, _kW!, _kB);
+        backend.Linear(v, modded, _vW!, _vB);
+        modded.Dispose();
+
+        backend.ApplyRopeInterleaved(q, ropeCos, ropeSin);
+        backend.ApplyRopeInterleaved(k, ropeCos, ropeSin);
 
         TensorShape mh = new(1, heads, t, headDim);
         Tensor qMh = new(mh, DType.F32);
         Tensor kMh = new(mh, DType.F32);
         Tensor vMh = new(mh, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(qMh, q, 1, t, heads, headDim);
-        WhisperOps.ReshapeToMultiHead4D(kMh, k, 1, t, heads, headDim);
-        WhisperOps.ReshapeToMultiHead4D(vMh, v, 1, t, heads, headDim);
+        backend.Permute0213(qMh, q, t, heads, headDim);
+        backend.Permute0213(kMh, k, t, heads, headDim);
+        backend.Permute0213(vMh, v, t, heads, headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        // Full RoPE (rotary_dim == head_dim == 64) on Q and K.
-        RotaryEmbedding.ApplyInPlace(qMh, heads, t, headDim, headDim, 0, ropeCos, ropeSin);
-        RotaryEmbedding.ApplyInPlace(kMh, heads, t, headDim, headDim, 0, ropeCos, ropeSin);
-
+        // Fused flash attention: at DiT sequence lengths (T ~2000) the naive SDPA materializes a
+        // [heads, T, T] score tensor (~256MB/block) — pure DRAM-bandwidth burn; flash never does.
         float scale = 1f / MathF.Sqrt(headDim);
         Tensor attnOut = new(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, mask: null, scale);
+        backend.FlashAttention(attnOut, qMh, kMh, vMh, kvLen: t, kvGroup: 1, causal: false, qOffset: 0, scale);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
+        // [1, heads, T, headDim] → [1, T, heads*headDim] (inverse transpose, still on-device).
         Tensor merged = new(x.Shape, DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(merged, attnOut, 1, t, heads, headDim);
+        backend.Permute0213(merged, attnOut, heads, t, headDim);
         attnOut.Dispose();
 
         Tensor attnProj = WhisperOps.ProjectLinear(backend, merged, _oW!, _oB, 1, t, dim, dim);
@@ -125,48 +124,40 @@ internal sealed unsafe class F5DitBlock
 
         // 4. Gated residual: x = x + gate_msa * attn_proj
         Tensor afterAttn = new(x.Shape, DType.F32);
-        F5Ops.AdaLnZeroGatedAdd(afterAttn, x, attnProj, gateMsa, 1, t, dim);
+        backend.GatedResidualLastDim(afterAttn, x, attnProj, gateMsa);
         attnProj.Dispose();
 
         // 5. Pre-norm + modulate for FFN.
-        Tensor ones2 = OnesLike(dim);
-        Tensor zeros2 = ZerosLike(dim);
         Tensor normed2 = new(afterAttn.Shape, DType.F32);
-        backend.LayerNorm(normed2, afterAttn, ones2, zeros2, 1e-6f);
-        ones2.Dispose(); zeros2.Dispose();
-
-        F5Ops.AdaLnZeroModulate(normed2, shiftMlp, scaleMlp, 1, t, dim);
-
-        // 6. FF: Linear → GELU → Linear (ff_mult=2).
-        Tensor ff1 = WhisperOps.ProjectLinear(backend, normed2, _ffW1!, _ffB1, 1, t, dim, ffInner);
+        backend.LayerNormNoAffine(normed2, afterAttn, 1e-6f);
+        Tensor modded2 = new(afterAttn.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(modded2, normed2, scaleMlp, shiftMlp);
         normed2.Dispose();
-        F5Ops.TanhGeluInPlace(ff1);   // F5 FeedForward uses nn.GELU(approximate="tanh")
+
+        // 6. FF: Linear → tanh-GELU (the backend's Gelu IS the tanh approximation) → Linear (ff_mult=2).
+        Tensor ff1 = WhisperOps.ProjectLinear(backend, modded2, _ffW1!, _ffB1, 1, t, dim, ffInner);
+        modded2.Dispose();
+        backend.Gelu(ff1, ff1);
         Tensor ff2 = WhisperOps.ProjectLinear(backend, ff1, _ffW2!, _ffB2, 1, t, ffInner, dim);
         ff1.Dispose();
 
         // 7. Gated residual: x = x + gate_mlp * ff_out
         Tensor outX = new(x.Shape, DType.F32);
-        F5Ops.AdaLnZeroGatedAdd(outX, afterAttn, ff2, gateMlp, 1, t, dim);
+        backend.GatedResidualLastDim(outX, afterAttn, ff2, gateMlp);
         afterAttn.Dispose();
         ff2.Dispose();
-        mods.Dispose();
+        shiftMsa.Dispose(); scaleMsa.Dispose(); gateMsa.Dispose();
+        shiftMlp.Dispose(); scaleMlp.Dispose(); gateMlp.Dispose();
         return outX;
     }
 
-    private static Tensor OnesLike(int dim)
+    /// <summary>On-device slice of modulation chunk <paramref name="idx"/> (a <c>[1, 1, dim]</c> tensor) out of
+    /// the packed <c>[1, 1, 6*dim]</c> projection.</summary>
+    private static Tensor SliceMod(IBackend backend, Tensor mods, int idx, int dim)
     {
-        Tensor t = new(new TensorShape(dim), DType.F32);
-        float* p = (float*)t.DataPointer;
-        for (int i = 0; i < dim; i++) p[i] = 1f;
-        return t;
-    }
-
-    private static Tensor ZerosLike(int dim)
-    {
-        Tensor t = new(new TensorShape(dim), DType.F32);
-        float* p = (float*)t.DataPointer;
-        for (int i = 0; i < dim; i++) p[i] = 0f;
-        return t;
+        Tensor slice = new(new TensorShape(1, 1, dim), DType.F32);
+        backend.SliceLastDim(slice, mods, idx * dim);
+        return slice;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

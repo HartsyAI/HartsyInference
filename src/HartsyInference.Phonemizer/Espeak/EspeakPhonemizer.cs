@@ -61,6 +61,10 @@ public sealed class EspeakPhonemizer : IPhonemizer
             cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "hartsyinference", "models");
         yield return Path.Combine(cacheRoot, "Hartsy--espeak-ng-data", "espeak-ng-data");
         yield return Path.Combine(cacheRoot, "Hartsy--espeak-ng-data");
+
+        // Standard Linux install locations for the espeak-ng package.
+        yield return "/usr/lib/x86_64-linux-gnu/espeak-ng-data";
+        yield return "/usr/share/espeak-ng-data";
     }
 
     /// <summary>Builds a phonemizer for English from an <c>espeak-ng-data</c> directory containing <c>en_dict</c> and

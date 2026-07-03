@@ -56,6 +56,23 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
             _codecEmbedding[k] = WhisperOps.EnsureF32(w[$"{prefix}.model.codec_embedding.{k}.weight"]);
             _lmHeadW[k] = WhisperOps.EnsureF32(w[$"{prefix}.lm_head.{k}.weight"]);
             _lmHeadB[k] = TryGet(w, $"{prefix}.lm_head.{k}.bias");
+            RequireDim(_codecEmbedding[k], 0, _cfg.MtpVocabSize, $"codec_embedding.{k} rows");
+            RequireDim(_codecEmbedding[k], 1, _cfg.Talker.HiddenSize, $"codec_embedding.{k} dim (talker width)");
+            RequireDim(_lmHeadW[k], 0, _cfg.MtpVocabSize, $"lm_head.{k} out-dim");
+            RequireDim(_lmHeadW[k], 1, _mtp.HiddenSize, $"lm_head.{k} in-dim");
+        }
+        if (_smallToMtpW is null)
+        {
+            if (_cfg.Talker.HiddenSize != _mtp.HiddenSize)
+            {
+                throw new InvalidOperationException(
+                    $"Qwen3-TTS MTP config mismatch: no small_to_mtp_projection in the checkpoint but talker hidden {_cfg.Talker.HiddenSize} != MTP hidden {_mtp.HiddenSize}.");
+            }
+        }
+        else
+        {
+            RequireDim(_smallToMtpW, 0, _mtp.HiddenSize, "small_to_mtp_projection out-dim");
+            RequireDim(_smallToMtpW, 1, _cfg.Talker.HiddenSize, "small_to_mtp_projection in-dim");
         }
         _body.LoadWeightsHeadless(w, $"{prefix}.model");
     }
@@ -84,8 +101,9 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
     /// each input projected from talker width into MTP width by <c>small_to_mtp_projection</c>. Position 0 (the
     /// talker hidden) makes no prediction; position 1 (codebook-0 embedded through the talker's codec table)
     /// predicts codebook 1; each later position embeds the previous codebook through the code-predictor's own
-    /// <c>codec_embedding</c> table. Greedy (argmax), as in the reference.</summary>
-    public int[] PredictFrame(IBackend backend, Tensor talkerHidden, Tensor code0Embed)
+    /// <c>codec_embedding</c> table. Sampled per the reference (subtalker_dosample=true, temp 0.9/top_k 50/top_p 1,
+    /// no repetition penalty).</summary>
+    public int[] PredictFrame(IBackend backend, Tensor talkerHidden, Tensor code0Embed, ref uint rng)
     {
         int talkerH = _cfg.Talker.HiddenSize;
         int mtpHidden = _mtp.HiddenSize;
@@ -103,7 +121,7 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
         Tensor proj1 = ProjectToMtp(backend, code0Embed, talkerH, mtpHidden);
         Tensor h1 = _body.ForwardEmbeds(backend, proj1, 1, 1, cache);
         proj1.Dispose();
-        codes[0] = ArgmaxHead(backend, h1, 0, mtpHidden);
+        codes[0] = SampleHead(backend, h1, 0, mtpHidden, ref rng);
         h1.Dispose();
 
         // Positions 2..15: previous codebook embedded via code_predictor.codec_embedding[g-1], projected.
@@ -114,7 +132,7 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
             emb.Dispose();
             Tensor hidden = _body.ForwardEmbeds(backend, proj, 1, g + 1, cache);
             proj.Dispose();
-            codes[g] = ArgmaxHead(backend, hidden, g, mtpHidden);
+            codes[g] = SampleHead(backend, hidden, g, mtpHidden, ref rng);
             hidden.Dispose();
         }
         return codes;
@@ -127,15 +145,15 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
             ? x.To(x.Device)
             : WhisperOps.ProjectLinear(backend, x, _smallToMtpW, _smallToMtpB, 1, 1, talkerH, mtpHidden);
 
-    /// <summary>Projects the MTP hidden through <c>lm_head[g]</c> and returns the argmax (greedy) codebook token.</summary>
-    private int ArgmaxHead(IBackend backend, Tensor hidden, int g, int mtpHidden)
+    /// <summary>Projects the MTP hidden through <c>lm_head[g]</c> and samples a codebook token with the
+    /// sub-talker params (greedy falls out of <c>SubTalkerTopK=1</c>).</summary>
+    private int SampleHead(IBackend backend, Tensor hidden, int g, int mtpHidden, ref uint rng)
     {
         Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _lmHeadW[g]!, _lmHeadB[g], 1, 1, mtpHidden, _cfg.MtpVocabSize);
-        float* p = (float*)logits.DataPointer;
-        int best = 0; float bestV = float.NegativeInfinity;
-        for (int i = 0; i < _cfg.MtpVocabSize; i++) { if (p[i] > bestV) { bestV = p[i]; best = i; } }
+        int tok = NucleusSampler.Draw(new Span<float>((void*)logits.DataPointer, _cfg.MtpVocabSize),
+            _cfg.MtpVocabSize, _cfg.SubTalkerTemperature, _cfg.SubTalkerTopK, _cfg.SubTalkerTopP, ref rng);
         logits.Dispose();
-        return best;
+        return tok;
     }
 
     /// <summary>Returns the code-predictor's <c>codec_embedding[g]</c> row for <paramref name="token"/> as
@@ -149,6 +167,15 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
         float* src = (float*)table.DataPointer + (long)clamped * width;
         Buffer.MemoryCopy(src, (void*)emb.DataPointer, width * 4, width * 4);
         return emb;
+    }
+
+    private static void RequireDim(Tensor? t, int axis, int expected, string what)
+    {
+        if (t is not null && (int)t.Shape[axis] != expected)
+        {
+            throw new InvalidOperationException(
+                $"Qwen3-TTS MTP config mismatch: {what} is {t.Shape[axis]} in the checkpoint but the config says {expected}.");
+        }
     }
 
     private static Tensor? TryGet(IReadOnlyDictionary<string, Tensor> w, string key) =>

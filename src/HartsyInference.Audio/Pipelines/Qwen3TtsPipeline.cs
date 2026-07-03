@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.QwenTts;
 using HartsyInference.Core.Backends;
@@ -180,22 +181,27 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
             int pos = prefillLen;
 
             List<int[]> frames = [];
-            Span<int> recent = stackalloc int[16];
-            int recentLen = 0;
+            // Repetition penalty runs over EVERY previously generated codebook-0 token (the reference penalizes the
+            // whole generated sequence, once per unique id) — not a sliding window.
+            List<int> generated = new(256);
+            bool[] seen = new bool[_cfg.CodecHeadOut];
 
             for (int f = 0; f < _cfg.MaxNewTokens; f++)
             {
                 Tensor hid = curHidden!;
-                int cb0 = _talker.SampleCodebook0(backend, hid, ref rng, recent[..recentLen]);
-                if (cb0 == _cfg.CodecEos && f >= _cfg.MinNewTokens)
+                // EOS is masked until MinNewTokens frames exist (reference min_new_tokens=2); control ids other
+                // than EOS are always suppressed inside SampleCodebook0 (reference suppress_tokens).
+                int cb0 = _talker.SampleCodebook0(backend, hid, ref rng, CollectionsMarshal.AsSpan(generated),
+                    allowEos: f >= _cfg.MinNewTokens);
+                if (cb0 == _cfg.CodecEos)
                 {
                     hid.Dispose();
                     break;
                 }
-                // Code predictor fills codebooks 1..15 (greedy), conditioned on the talker hidden + the codebook-0
-                // embedding (looked up through the talker's codec table, as in the reference).
+                // Code predictor fills codebooks 1..15 (sampled, as in the reference), conditioned on the talker
+                // hidden + the codebook-0 embedding (looked up through the talker's codec table).
                 Tensor code0Embed = _talker.CodecEmbedRow(backend, cb0);
-                int[] acoustic = _mtp.PredictFrame(backend, hid, code0Embed);
+                int[] acoustic = _mtp.PredictFrame(backend, hid, code0Embed, ref rng);
                 code0Embed.Dispose();
                 hid.Dispose();
 
@@ -204,8 +210,7 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
                 for (int k = 0; k < acoustic.Length && k + 1 < _cfg.NumCodeGroups; k++) frameCodes[k + 1] = acoustic[k];
                 frames.Add(frameCodes);
 
-                recent[recentLen % recent.Length] = cb0;
-                if (recentLen < recent.Length) recentLen++;
+                if ((uint)cb0 < (uint)seen.Length && !seen[cb0]) { seen[cb0] = true; generated.Add(cb0); }
                 if (DebugCodes) Console.Error.WriteLine($"[qwen3gen] frame {f,3} cb0={cb0,5} acoustic[0..3]={acoustic[0]},{acoustic[1]},{acoustic[2]}");
                 progress?.Invoke(new GenerationProgress(f + 1, _cfg.MaxNewTokens, sw.Elapsed.TotalMilliseconds));
 

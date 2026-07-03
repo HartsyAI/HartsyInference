@@ -76,6 +76,16 @@ public sealed unsafe class Qwen3TtsVocoder : IDisposable
             _acousticCodebook[k] = LoadEmaCodebook(w, $"{prefix}.quantizer.rvq_rest.vq.layers.{k}._codebook");
         _acousticOutProj = SqueezeK1(w[$"{prefix}.quantizer.rvq_rest.output_proj.weight"]);
 
+        // Dim guards: AccumulateGroup walks these tables with unsafe pointer strides from the config, so a
+        // config/checkpoint mismatch is native memory corruption, not a managed error. Fail loudly instead
+        // (the 512-vs-256 AcousticCodebookDim default did exactly that — AV at first decode).
+        RequireDim(_semanticCodebook, 1, _cfg.SemanticCodebookDim, "rvq_first codebook dim");
+        RequireDim(_semanticOutProj, 1, _cfg.SemanticCodebookDim, "rvq_first output_proj in-dim");
+        RequireDim(_semanticOutProj, 0, _cfg.LatentDim, "rvq_first output_proj out-dim");
+        RequireDim(_acousticCodebook[0], 1, _cfg.AcousticCodebookDim, "rvq_rest codebook dim");
+        RequireDim(_acousticOutProj, 1, _cfg.AcousticCodebookDim, "rvq_rest output_proj in-dim");
+        RequireDim(_acousticOutProj, 0, _cfg.LatentDim, "rvq_rest output_proj out-dim");
+
         // pre_conv (512 -> 1024, causal k3).
         _preConvW = WhisperOps.EnsureF32(w[$"{prefix}.pre_conv.conv.weight"]);
         _preConvB = TryGet(w, $"{prefix}.pre_conv.conv.bias");
@@ -267,6 +277,17 @@ public sealed unsafe class Qwen3TtsVocoder : IDisposable
             for (int d = 0; d < dim; d++) op[(long)i * dim + d] = sp[(long)i * dim + d] * inv;
         }
         return outT;
+    }
+
+    /// <summary>Throws when a loaded tensor's <paramref name="axis"/> length doesn't match the config value the
+    /// unsafe decode strides assume.</summary>
+    private static void RequireDim(Tensor? t, int axis, int expected, string what)
+    {
+        if (t is not null && (int)t.Shape[axis] != expected)
+        {
+            throw new InvalidOperationException(
+                $"Qwen3-TTS vocoder config mismatch: {what} is {t.Shape[axis]} in the checkpoint but the config says {expected}.");
+        }
     }
 
     /// <summary>Squeezes a k1 conv weight <c>[out, in, 1]</c> to a Linear matrix <c>[out, in]</c>.</summary>

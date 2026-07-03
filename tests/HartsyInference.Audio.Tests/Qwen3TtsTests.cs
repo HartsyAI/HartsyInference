@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Codecs.Mimi;
 using HartsyInference.Audio.Models.LanguageModels.Qwen3;
 using HartsyInference.Audio.Models.QwenTts;
+using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
@@ -59,6 +60,13 @@ public sealed unsafe class Qwen3TtsTests
         MaxNewTokens = 6,
     };
 
+    /// <summary>TinyCfg with text special ids remapped inside the tiny 32-entry text vocab (BuildPrefill embeds them).</summary>
+    private static Qwen3TtsConfig TinyPipelineCfg => TinyCfg with
+    {
+        TextImStart = 1, TextImEnd = 2, TextAssistant = 3, TextNewline = 4,
+        TextTtsPad = 5, TextTtsBos = 6, TextTtsEod = 7,
+    };
+
     private static Qwen3TtsVocoderConfig TinyVocoder => new()
     {
         SemanticCodebookSize = 32, SemanticCodebookDim = 8,
@@ -111,9 +119,79 @@ public sealed unsafe class Qwen3TtsTests
         mtp.LoadWeights(MtpWeights(cfg));
         using Tensor talkerHidden = F3(1, 1, cfg.Talker.HiddenSize);
         using Tensor code0Embed = F3(1, 1, cfg.Talker.HiddenSize);
-        int[] codes = mtp.PredictFrame(backend, talkerHidden, code0Embed);
+        uint rng = 0xBEEFu;
+        int[] codes = mtp.PredictFrame(backend, talkerHidden, code0Embed, ref rng);
         Assert.Equal(cfg.MtpCodebooks, codes.Length);
         foreach (int c in codes) Assert.InRange(c, 0, cfg.MtpVocabSize - 1);
+    }
+
+    [Fact]
+    public void Talker_TextHiddenDecoupledFromHidden_EmbedsFinitely()
+    {
+        // 0.6B shape: text_embedding/fc1 are text_hidden wide (here 32) while the talker hidden is 16.
+        Qwen3TtsConfig cfg = TinyCfg;
+        using CpuBackend backend = new();
+        using Qwen3TtsTalker talker = new(cfg);
+        talker.LoadWeights(TalkerWeights(cfg, textHidden: 32));
+        using Tensor e = talker.EmbedStep(backend, 3, cfg.CodecBos);
+        Assert.Equal(new TensorShape(1, 1, cfg.Talker.HiddenSize), e.Shape);
+        AssertFinite((float*)e.DataPointer, e.ElementCount);
+    }
+
+    [Fact]
+    public void Talker_LoadRejectsWrongCodecHeadDim()
+    {
+        Qwen3TtsConfig cfg = TinyCfg;
+        Dictionary<string, Tensor> w = TalkerWeights(cfg);
+        w["talker.codec_head.weight"] = F2(cfg.CodecHeadOut, cfg.Talker.HiddenSize + 4);   // wrong in-dim
+        using Qwen3TtsTalker talker = new(cfg);
+        Assert.Throws<InvalidOperationException>(() => talker.LoadWeights(w));
+    }
+
+    [Fact]
+    public void Talker_SuppressesControlTokensAndGatesEos()
+    {
+        // Zero codec_head weights + rigged bias => logits == bias. A control token holds the max logit but must
+        // never be sampled (reference suppress_tokens); EOS holds the next logit and must only pass when allowed.
+        Qwen3TtsConfig cfg = TinyCfg with { TopK = 1, RepetitionPenalty = 1f };
+        using CpuBackend backend = new();
+        using Qwen3TtsTalker talker = new(cfg);
+        Dictionary<string, Tensor> w = TalkerWeights(cfg);
+        w["talker.codec_head.weight"] = new Tensor(new TensorShape(cfg.CodecHeadOut, cfg.Talker.HiddenSize), DType.F32); // zeros
+        Tensor bias = Zeros(cfg.CodecHeadOut);
+        float* bp = (float*)bias.DataPointer;
+        bp[cfg.CodecRealVocab + 1] = 10f;   // control token (not eos) — always suppressed
+        bp[cfg.CodecEos] = 5f;
+        bp[7] = 1f;                          // best real token
+        w["talker.codec_head.bias"] = bias;
+        talker.LoadWeights(w);
+
+        using Tensor hidden = F3(1, 1, cfg.Talker.HiddenSize);
+        uint rng = 1u;
+        Assert.Equal(cfg.CodecEos, talker.SampleCodebook0(backend, hidden, ref rng, ReadOnlySpan<int>.Empty, allowEos: true));
+        Assert.Equal(7, talker.SampleCodebook0(backend, hidden, ref rng, ReadOnlySpan<int>.Empty, allowEos: false));
+    }
+
+    [Fact]
+    public void Pipeline_StopsAtEosAfterMinNewTokens()
+    {
+        // EOS dominates the head: banned for the first MinNewTokens frames, then sampled and the loop stops —
+        // total frames == MinNewTokens (not MaxNewTokens), pcm length proportional.
+        Qwen3TtsConfig cfg = TinyPipelineCfg with { TopK = 1, RepetitionPenalty = 1f, MinNewTokens = 2, MaxNewTokens = 6 };
+        using CpuBackend backend = new();
+        using Qwen3TtsPipeline pipe = new(cfg);
+        Dictionary<string, Tensor> talker = TalkerWeights(cfg);
+        talker["talker.codec_head.weight"] = new Tensor(new TensorShape(cfg.CodecHeadOut, cfg.Talker.HiddenSize), DType.F32); // zeros
+        Tensor bias = Zeros(cfg.CodecHeadOut);
+        float* bp = (float*)bias.DataPointer;
+        bp[cfg.CodecEos] = 10f;
+        bp[5] = 8f;   // fallback real token while EOS is banned
+        talker["talker.codec_head.bias"] = bias;
+        pipe.LoadWeights(talker, MtpWeights(cfg), VocoderWeights(TinyVocoder));
+
+        float[] pcm = pipe.SynthesizeCustomVoice(backend, [10, 11, 12], cfg.CustomVoiceSpeakerIds[0], seed: 3);
+        Assert.Equal(cfg.MinNewTokens * TinyVocoder.TotalUpsample, pcm.Length);
+        foreach (float v in pcm) Assert.True(float.IsFinite(v));
     }
 
     [Fact]
@@ -182,17 +260,18 @@ public sealed unsafe class Qwen3TtsTests
         }
     }
 
-    private static Dictionary<string, Tensor> TalkerWeights(Qwen3TtsConfig cfg)
+    private static Dictionary<string, Tensor> TalkerWeights(Qwen3TtsConfig cfg, int textHidden = 0)
     {
         int h = cfg.Talker.HiddenSize;
+        int th = textHidden > 0 ? textHidden : h;   // text_hidden_size is decoupled (0.6B: 2048 text vs 1024 hidden)
         // Keys mirror the real Qwen/Qwen3-TTS-12Hz checkpoint: embeddings + norm + layers under talker.model.*,
         // codec_head + text_projection (linear_fc1/fc2) under talker.*.
         Dictionary<string, Tensor> w = new()
         {
-            ["talker.model.text_embedding.weight"] = F2(cfg.TextVocabSize, h),
+            ["talker.model.text_embedding.weight"] = F2(cfg.TextVocabSize, th),
             ["talker.model.codec_embedding.weight"] = F2(cfg.CodecVocabSize, h),
-            ["talker.text_projection.linear_fc1.weight"] = F2(h, h),
-            ["talker.text_projection.linear_fc2.weight"] = F2(h, h),
+            ["talker.text_projection.linear_fc1.weight"] = F2(th, th),
+            ["talker.text_projection.linear_fc2.weight"] = F2(h, th),
             ["talker.codec_head.weight"] = F2(cfg.CodecHeadOut, h),
         };
         AddBackbone(w, cfg.Talker, "talker.model");

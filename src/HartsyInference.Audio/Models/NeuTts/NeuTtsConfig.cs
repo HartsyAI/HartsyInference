@@ -29,7 +29,12 @@ public sealed record NeuTtsConfig
     public int TextReplace { get; init; } = 151_665;
     /// <summary>LM token id used as the speech-replace placeholder in the prompt framing.</summary>
     public int SpeechReplace { get; init; } = 151_668;
-    /// <summary>Maximum prompt + AR generation length (hard cap).</summary>
+    /// <summary>LM token id of the checkpoint's first appended IPA phoneme token (<see cref="PhonemeTokens"/>[0]);
+    /// these sit ABOVE the speech-code block and must be matched before byte-level BPE.</summary>
+    public int PhonemeTokenBase { get; init; } = 217_207;
+    /// <summary>The checkpoint's appended IPA phoneme tokens, in id order from <see cref="PhonemeTokenBase"/>.</summary>
+    public IReadOnlyList<string> PhonemeTokens { get; init; } = NeuTtsPhonemeTokens.Air;
+    /// <summary>Maximum prompt + AR generation length (upstream <c>max_context</c>, generate <c>max_length</c>).</summary>
     public int MaxContext { get; init; } = 2_048;
 
     // ── Sampling (matches neutts.py _infer_torch, NOT generation_config.json) ──
@@ -78,5 +83,7 @@ public sealed record NeuTtsConfig
         TextPromptEnd = 128_258,
         TextReplace = 128_256,
         SpeechReplace = 128_259,
+        PhonemeTokenBase = 193_798,
+        PhonemeTokens = NeuTtsPhonemeTokens.Nano,
     };
 }

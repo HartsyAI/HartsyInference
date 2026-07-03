@@ -31,7 +31,7 @@ public sealed unsafe class F5Dit : IDisposable
     private Tensor? _normOutLinW, _normOutLinB;  // [2*dim, dim] / [2*dim]
     private Tensor? _projOutW, _projOutB;        // [mel_dim, dim] / [mel_dim]
 
-    private float[]? _ropeCos, _ropeSin;
+    private Tensor? _ropeCos, _ropeSin;   // [maxPos, headDim] backend-ready (first half of each row used)
     private bool _loaded;
     private int _disposed;
 
@@ -63,11 +63,25 @@ public sealed unsafe class F5Dit : IDisposable
         _projOutW = WhisperOps.EnsureF32(w[$"{prefix}.proj_out.weight"]);
         _projOutB = WhisperOps.EnsureF32(w[$"{prefix}.proj_out.bias"]);
 
-        // Precompute RoPE tables. F5-TTS uses full RoPE (rotary_dim = head_dim = 64) with
-        // theta=10000. Size the table generously to support long target durations.
-        (float[] cos, float[] sin) = RotaryEmbedding.GetTables(_cfg.HeadDim, _cfg.RopeTheta, maxPos: 8_192);
-        _ropeCos = cos;
-        _ropeSin = sin;
+        // Precompute RoPE tables. F5-TTS uses full RoPE (rotary_dim = head_dim = 64) with theta=10000.
+        // Repacked from the [maxPos, half] table layout into the backend's [maxPos, headDim] stride
+        // (first half of each row) so ApplyRopeInterleaved runs on-device — the tensors are long-lived,
+        // so weight auto-promotion keeps them GPU-resident.
+        const int maxPos = 8_192;
+        (float[] cos, float[] sin) = RotaryEmbedding.GetTables(_cfg.HeadDim, _cfg.RopeTheta, maxPos);
+        int half = _cfg.HeadDim / 2;
+        _ropeCos = new Tensor(new TensorShape(maxPos, _cfg.HeadDim), DType.F32);
+        _ropeSin = new Tensor(new TensorShape(maxPos, _cfg.HeadDim), DType.F32);
+        float* cp = (float*)_ropeCos.DataPointer;
+        float* sp = (float*)_ropeSin.DataPointer;
+        for (int p = 0; p < maxPos; p++)
+        {
+            for (int i = 0; i < half; i++)
+            {
+                cp[p * _cfg.HeadDim + i] = cos[p * half + i];
+                sp[p * _cfg.HeadDim + i] = sin[p * half + i];
+            }
+        }
         _loaded = true;
     }
 
@@ -84,9 +98,13 @@ public sealed unsafe class F5Dit : IDisposable
         Tensor x = _inputEmb.Forward(backend, noisyMel, condMel, textHidden, t, dropAudioCond);
         textHidden.Dispose();
 
+        // SiLU(t_emb) once per step, on-device; every block's adaLN Linear consumes it.
+        Tensor siluTime = new(timeEmb.Shape, DType.F32);
+        backend.Silu(siluTime, timeEmb);
+
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, x, timeEmb, t, _ropeCos!, _ropeSin!);
+            Tensor next = _blocks[i].Forward(backend, x, siluTime, t, _ropeCos!, _ropeSin!);
             x.Dispose();
             x = next;
         }
@@ -94,7 +112,8 @@ public sealed unsafe class F5Dit : IDisposable
 
         // 5. Final AdaLayerNorm: x = LayerNorm(x, no affine) * (1 + scale) + shift, where
         //    scale and shift come from the timestep through norm_out.linear.
-        Tensor outNorm = ApplyFinalAdaLn(backend, x, _normOutLinW!, _normOutLinB!, ComputeSilu(_timeEmb.LastTimeEmb!), t);
+        Tensor outNorm = ApplyFinalAdaLn(backend, x, _normOutLinW!, _normOutLinB!, siluTime, t);
+        siluTime.Dispose();
         x.Dispose();
 
         // 6. proj_out: Linear(dim → mel_dim) → [1, T, mel_dim]
@@ -116,16 +135,19 @@ public sealed unsafe class F5Dit : IDisposable
         textHidden.Dispose();
         Tensor xInputCopy = Clone(x);
 
-        Tensor block0 = _blocks[0].Forward(backend, x, timeEmb, t, _ropeCos!, _ropeSin!);
+        Tensor siluTime = new(timeEmb.Shape, DType.F32);
+        backend.Silu(siluTime, timeEmb);
+        Tensor block0 = _blocks[0].Forward(backend, x, siluTime, t, _ropeCos!, _ropeSin!);
         x.Dispose();
         Tensor block0Copy = Clone(block0);
         x = block0;
         for (int i = 1; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, x, timeEmb, t, _ropeCos!, _ropeSin!);
+            Tensor next = _blocks[i].Forward(backend, x, siluTime, t, _ropeCos!, _ropeSin!);
             x.Dispose();
             x = next;
         }
+        siluTime.Dispose();
         timeEmb.Dispose();
         Tensor preNorm = Clone(x);
         x.Dispose();
@@ -140,45 +162,24 @@ public sealed unsafe class F5Dit : IDisposable
     }
 
     /// <summary>AdaLayerNorm_Final: <c>x = LN_no_affine(x) * (1 + scale) + shift</c>
-    /// where scale, shift come from a single Linear(dim → 2*dim) of <c>silu(time_emb)</c>.</summary>
+    /// where scale, shift come from a single Linear(dim → 2*dim) of <c>silu(time_emb)</c>.
+    /// Chunk order in the projection is [scale, shift]. Fully on-device.</summary>
     private Tensor ApplyFinalAdaLn(IBackend backend, Tensor x, Tensor linW, Tensor linB, Tensor siluTime, int t)
     {
         int dim = _cfg.Dim;
         Tensor mods = WhisperOps.ProjectLinear(backend, siluTime, linW, linB, 1, 1, dim, 2 * dim);
-
-        // No-affine LayerNorm via ones/zeros.
-        Tensor ones = new(new TensorShape(dim), DType.F32);
-        Tensor zeros = new(new TensorShape(dim), DType.F32);
-        unsafe
-        {
-            float* op = (float*)ones.DataPointer; float* zp = (float*)zeros.DataPointer;
-            for (int i = 0; i < dim; i++) { op[i] = 1f; zp[i] = 0f; }
-        }
-        Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, ones, zeros, 1e-6f);
-        ones.Dispose(); zeros.Dispose();
-
-        unsafe
-        {
-            float* mp = (float*)mods.DataPointer;
-            float* scale = mp;        // first 1024
-            float* shift = mp + dim;  // second 1024
-            F5Ops.AdaLnZeroModulate(normed, shift, scale, 1, t, dim);
-        }
+        Tensor scale = new(new TensorShape(1, 1, dim), DType.F32);
+        Tensor shift = new(new TensorShape(1, 1, dim), DType.F32);
+        backend.SliceLastDim(scale, mods, 0);
+        backend.SliceLastDim(shift, mods, dim);
         mods.Dispose();
-        return normed;
-    }
+        backend.AddScalar(scale, scale, 1f);
 
-    private static Tensor ComputeSilu(Tensor t)
-    {
-        Tensor outT = new(t.Shape, DType.F32);
-        unsafe
-        {
-            float* src = (float*)t.DataPointer;
-            float* dst = (float*)outT.DataPointer;
-            long n = t.ElementCount;
-            for (long i = 0; i < n; i++) { float v = src[i]; dst[i] = v / (1f + MathF.Exp(-v)); }
-        }
+        Tensor normed = new(x.Shape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, 1e-6f);
+        Tensor outT = new(x.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(outT, normed, scale, shift);
+        normed.Dispose(); scale.Dispose(); shift.Dispose();
         return outT;
     }
 

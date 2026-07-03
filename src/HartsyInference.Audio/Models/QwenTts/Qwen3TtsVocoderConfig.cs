@@ -16,8 +16,11 @@ public sealed record Qwen3TtsVocoderConfig
     /// <summary>Acoustic codebook size (codebooks 1..15).</summary>
     public int AcousticCodebookSize { get; init; } = 2_048;
 
-    /// <summary>Acoustic codebook embedding dim (512 in the real Tokenizer-V2 codec; semantic stays 256).</summary>
-    public int AcousticCodebookDim { get; init; } = 512;
+    /// <summary>Acoustic codebook embedding dim. 256 in the shipped 12Hz speech_tokenizer checkpoints
+    /// (embedding_sum is [2048, 256] and rvq_rest.output_proj is [512, 256] for BOTH model sizes) — the
+    /// previous 512 default indexed the loaded [2048, 256] tables at stride 512, reading past the buffer
+    /// (an AccessViolation crash at first vocoder decode) and overrunning the projection input.</summary>
+    public int AcousticCodebookDim { get; init; } = 256;
 
     /// <summary>Number of acoustic codebooks.</summary>
     public int AcousticCodebooks { get; init; } = 15;

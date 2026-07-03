@@ -95,11 +95,13 @@ public sealed record Qwen3TtsConfig
     public int MinNewTokens { get; init; } = 2;
     public int MaxNewTokens { get; init; } = 8_192;
 
+    /// <summary>Sub-talker (MTP) sampling — the reference samples (subtalker_dosample=true), it is NOT greedy.</summary>
+    public float SubTalkerTemperature { get; init; } = 0.9f;
+    public int SubTalkerTopK { get; init; } = 50;
+    public float SubTalkerTopP { get; init; } = 1.0f;
+
     /// <summary>mRoPE temporal position-id increment per second of generated audio.</summary>
     public int PositionIdPerSeconds { get; init; } = 13;
-
-    /// <summary>Auto codec prefill written before the talker starts emitting: [nothink, think_bos, think_eos, pad, bos].</summary>
-    public int[] CodecPrefill() => [CodecNoThink, CodecThinkBos, CodecThinkEos, CodecPad, CodecBos];
 
     /// <summary>Qwen3-TTS-12Hz-1.7B preset.</summary>
     public static Qwen3TtsConfig Default_1_7B => new()

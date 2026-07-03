@@ -14,9 +14,9 @@ namespace HartsyInference.Audio.Pipelines;
 
 /// <summary>NeuTTS Air pipeline: a Qwen2.5-0.5B LM emits a single NeuCodec FSQ stream which the
 /// <see cref="NeuCodecDecoder"/> turns into 24 kHz audio. Voice cloning conditions on reference NeuCodec codes
-/// spliced into the prompt. Takes the pre-tokenized prompt prefix + reference codes (caller phonemizes /
-/// tokenizes; the Audio package carries no text-BPE dependency). Reuses <see cref="Qwen2Model"/> +
-/// <see cref="NucleusSampler"/> (top-k draw).</summary>
+/// spliced into the prompt. Takes the pre-tokenized prompt prefix + reference codes (caller phonemizes with
+/// espeak and tokenizes via <see cref="NeuTtsPromptBuilder"/>; the Audio package carries no text-BPE
+/// dependency). Reuses <see cref="Qwen2Model"/> + <see cref="NucleusSampler"/> (top-k draw).</summary>
 public sealed unsafe class NeuTtsPipeline : IDisposable
 {
     private readonly NeuTtsConfig _cfg;
@@ -41,10 +41,13 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         _codec.LoadWeights(codec);
     }
 
-    /// <summary>Synthesizes 24 kHz mono PCM. <paramref name="promptPrefix"/> is the tokenized
-    /// <c>"user: Convert the text to speech: …"</c> chat prefix up to (but excluding) the speech-gen marker;
-    /// <paramref name="refCodes"/> are the reference NeuCodec FSQ indices for voice cloning (empty for the
-    /// model's default voice).</summary>
+    /// <summary>Synthesizes 24 kHz mono PCM. <paramref name="promptPrefix"/> is the tokenized chat prefix from
+    /// <see cref="NeuTtsPromptBuilder.BuildPromptPrefix"/> (verified against upstream <c>neutts.py</c>
+    /// <c>_apply_chat_template</c>); this appends <c>SPEECH_GENERATION_START</c> + <paramref name="refCodes"/>
+    /// (reference NeuCodec FSQ indices) exactly as upstream. Upstream always clones from a reference — an empty
+    /// span (default voice) is a best-effort extension, not an upstream mode. Stops on
+    /// <c>SPEECH_GENERATION_END</c>; total length capped at <see cref="NeuTtsConfig.MaxContext"/> (upstream
+    /// <c>max_length</c>); sampling temp 1.0 / top-k 50 / min-new-tokens 50 (upstream <c>_infer_torch</c>).</summary>
     public float[] Synthesize(IBackend backend, ReadOnlySpan<int> promptPrefix, ReadOnlySpan<int> refCodes,
         int maxTokens = 2000, int seed = 0, Action<GenerationProgress>? progress = null)
     {
@@ -57,7 +60,8 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         for (int i = 0; i < refCodes.Length; i++)
             prompt[promptPrefix.Length + 1 + i] = _cfg.SpeechTokenBase + refCodes[i];
 
-        int cacheCap = Math.Min(_cfg.Llm.MaxPositionEmbeddings, prompt.Length + maxTokens + 8);
+        int cacheCap = Math.Min(Math.Min(_cfg.Llm.MaxPositionEmbeddings, _cfg.MaxContext),
+            prompt.Length + maxTokens + 8);
         using IKvCache cache = _lm.CreateDecodeCache(cacheCap);
 
         uint rng = DeterministicRng.Seed(seed);

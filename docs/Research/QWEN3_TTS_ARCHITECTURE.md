@@ -177,14 +177,27 @@ Run all of the above as one prefill building the KV cache.
 ### Autoregressive generation
 Each frame: input = tts_pad (text) + **sum of all 16 codebook embeddings of the previous frame** (cb0 via
 `talker.model.codec_embedding`, cb1..15 via `code_predictor.model.codec_embedding.{0..14}`). Talker step ->
-codebook-0 via `codec_head` (sample: temp 0.9, top_k 50, top_p 1.0, rep_penalty 1.05). Then the code-predictor
-runs 15 GREEDY passes (temp 0, top_k 1) for cb1..15. Accumulate 16 codes. Stop when cb0 == codec_eos (2150);
-cap at max_new_tokens (8192). Map control cb0 (>= 2048) to silence 0 before the codec decoder.
+codebook-0 via `codec_head` (sample: temp 0.9, top_k 50, top_p 1.0, rep_penalty 1.05 over the WHOLE generated
+cb0 sequence, once per unique id). **suppress_tokens (official `modeling_qwen3_tts.py` generate): every id in
+`[vocab_size-1024, vocab_size)` = [2048, 3072) is masked to -inf EXCEPT codec_eos 2150** — without this the
+talker samples codec_pad/control ids and EOS never fires (600+ frame runaway). min_new_tokens=2 masks EOS for
+the first 2 frames. The code-predictor **SAMPLES** cb1..15 (subtalker_dosample=true, temp 0.9, top_k 50,
+top_p 1.0, no rep penalty) — the pure-C reference's greedy passes were a simplification, NOT upstream. Stop
+when cb0 == codec_eos (2150); cap at max_new_tokens (8192). Map control cb0 (>= 2048) to silence 0 before the
+codec decoder.
 
 ### Engine deltas to implement (the remaining work to make custom_voice/voice_design produce speech)
 1. `Qwen3TtsPipeline.Generate`: replace the per-frame-text loop with the dual-stream prefill above + free AR.
 2. Per-frame codec input must sum all 16 codebook embeds of the previous frame (needs the talker to read the
    code-predictor's `codec_embedding` tables, or the MTP to expose them).
-3. Config: fix the codec-prefix order/contents, speaker ids, language ids, MTP greedy sampling.
+3. Config: fix the codec-prefix order/contents, speaker ids, language ids, MTP sampled (not greedy) decoding.
 4. Loader: the talker ships SHARDED (`model.safetensors.index.json` + shards, BF16) + the codec; text via the
    embedded Qwen3 BPE tokenizer with the ChatML template. Validate end to end against the C reference output.
+
+### 0.6B checkpoint dims (verified from Qwen3-TTS-12Hz-0.6B-CustomVoice headers, 2026-07-02)
+`text_hidden_size` stays **2048** while hidden drops to 1024: `text_embedding [151936, 2048]`,
+`text_projection.linear_fc1 [2048, 2048]`, `linear_fc2 [1024, 2048]` — the text row stride and fc1 in-dim must
+use text_hidden, NOT hidden (this exact 1.7B-ism was the 0.6B `CUDA_ERROR_INVALID_VALUE`). Talker-width tables:
+`codec_embedding [3072, 1024]`, `codec_head [3072, 1024]`, MTP `codec_embedding.{k} [2048, 1024]`.
+`small_to_mtp_projection` is ABSENT on 0.6B (talker hidden == MTP hidden 1024 → identity); q_proj stays
+[2048, 1024] (decoupled head_dim 16×128). lm_head.{k} [2048, 1024] on both sizes.
