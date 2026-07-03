@@ -223,6 +223,11 @@ public sealed unsafe class Qwen3TtsPipeline : IDisposable
                 for (int k = 0; k < _cfg.NumCodeGroups; k++)
                     grid[k, s] = frames[s][k];
 
+            // The talker loop leaves thousands of step activations + pool reservations on the device; the codes
+            // are on the host now, so reclaim before the vocoder's large full-sequence decode (12GB cards OOM'd
+            // here otherwise — 10.7GB peak observed at the decode of a ~600-step generation).
+            backend.FreeActivations();
+            backend.TrimMemoryPool();
             return _vocoder.Decode(backend, grid);
         }
         catch (Exception ex)

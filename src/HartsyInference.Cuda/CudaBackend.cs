@@ -147,7 +147,8 @@ public sealed class CudaBackend : IBackend
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
-            $"NativeFp8Gemm={EnableNativeFp8Gemm} HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts}.");
+            $"NativeFp8Gemm={EnableNativeFp8Gemm} HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
+            $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights}.");
 
         // Initialize cuBLAS
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();

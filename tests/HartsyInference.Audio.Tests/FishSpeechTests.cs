@@ -89,6 +89,94 @@ public sealed unsafe class FishSpeechTests
         foreach (int code in codes) Assert.InRange(code, 0, c.CodebookSize - 1);
     }
 
+    /// <summary>Upstream <c>BaseTransformer.embed</c> zeroes the codebook sum for frames whose row-0 is NOT a
+    /// <c>&lt;|semantic:i|&gt;</c> token: text positions must embed identically regardless of codebook values,
+    /// while semantic positions must include the codebook contribution.</summary>
+    [Fact]
+    public void EmbedFrame_ZeroesCodebooksForNonSemanticRow0()
+    {
+        FishSpeechConfig c = new()
+        {
+            Backbone = TinyQwen(h: 16, layers: 2, vocab: 12),
+            Fast = TinyQwen(h: 16, layers: 2, vocab: 6),
+            NumCodebooks = 4, CodebookSize = 6, TextVocab = 12, SemanticBeginId = 4,   // semantic range [4, 10)
+        };
+        using FishSpeechDualAr m = new(c);
+        m.LoadWeights(Weights(c));
+        int[] codesA = [1, 2, 3, 4], codesB = [5, 0, 2, 1];
+
+        using Tensor textA = m.EmbedFrame(2, codesA);   // 2 < 4 → text token
+        using Tensor textB = m.EmbedFrame(2, codesB);
+        float* ta = (float*)textA.DataPointer, tb = (float*)textB.DataPointer;
+        for (int i = 0; i < 16; i++) Assert.Equal(ta[i], tb[i]);
+
+        using Tensor semA = m.EmbedFrame(5, codesA);    // 5 ∈ [4, 10) → semantic token
+        using Tensor semB = m.EmbedFrame(5, codesB);
+        float* sa = (float*)semA.DataPointer, sb = (float*)semB.DataPointer;
+        bool differs = false;
+        for (int i = 0; i < 16; i++) differs |= sa[i] != sb[i];
+        Assert.True(differs);
+    }
+
+    /// <summary>Upstream <c>decode_one_token_ar</c> derives codebook 0 from the slow semantic token
+    /// (<c>a = semantic − semantic_begin_id</c>, clamped) instead of sampling it from the fast model.</summary>
+    [Fact]
+    public void SampleFrame_DerivesCodebook0FromSemanticToken()
+    {
+        FishSpeechConfig c = new()
+        {
+            Backbone = TinyQwen(h: 16, layers: 2, vocab: 12),
+            Fast = TinyQwen(h: 16, layers: 2, vocab: 6),
+            NumCodebooks = 4, CodebookSize = 6, TextVocab = 12, SemanticBeginId = 4,
+        };
+        using CpuBackend backend = new();
+        using FishSpeechDualAr m = new(c);
+        m.LoadWeights(Weights(c));
+        using StreamingKvCache slow = new(c.Backbone.NumHiddenLayers, 1, c.Backbone.NumKeyValueHeads, 8, c.Backbone.HeadDim);
+        uint rng = 21;
+        Span<int> zero = stackalloc int[c.NumCodebooks];
+        using Tensor e = m.EmbedFrame(3, zero);
+        (int sem, int[] codes) = m.GenerateFrame(backend, e, 0, slow, ref rng);
+        Assert.InRange(sem, 0, c.TextVocab - 1);
+        Assert.Equal(Math.Clamp(sem - c.SemanticBeginId, 0, c.CodebookSize - 1), codes[0]);
+        for (int i = 1; i < codes.Length; i++) Assert.InRange(codes[i], 0, c.CodebookSize - 1);
+    }
+
+    /// <summary>Batched prompt prefill (one <c>ForwardHidden</c> over <c>[1,T,h]</c>) must match the per-token
+    /// sequential path: same last-position hidden, so the same sampled first frame for a fixed RNG.</summary>
+    [Fact]
+    public void PrefillBatched_MatchesSequential()
+    {
+        FishSpeechConfig c = new()
+        {
+            Backbone = TinyQwen(h: 16, layers: 2, vocab: 12),
+            Fast = TinyQwen(h: 16, layers: 2, vocab: 6),
+            NumCodebooks = 4, CodebookSize = 6, TextVocab = 12, SemanticBeginId = 4,
+        };
+        using CpuBackend backend = new();
+        using FishSpeechDualAr m = new(c);
+        m.LoadWeights(Weights(c));
+        int[] prompt = [1, 3, 0, 2, 11];
+
+        using StreamingKvCache cacheA = new(c.Backbone.NumHiddenLayers, 1, c.Backbone.NumKeyValueHeads, 16, c.Backbone.HeadDim);
+        using Tensor batched = m.EmbedPrompt(prompt);
+        using Tensor hidA = m.ForwardHidden(backend, batched, prompt.Length, 0, cacheA);
+
+        using StreamingKvCache cacheB = new(c.Backbone.NumHiddenLayers, 1, c.Backbone.NumKeyValueHeads, 16, c.Backbone.HeadDim);
+        Span<int> zero = stackalloc int[c.NumCodebooks];
+        Tensor hidB = null!;
+        for (int i = 0; i < prompt.Length; i++)
+        {
+            using Tensor e = m.EmbedFrame(prompt[i], zero);
+            Tensor h = m.ForwardHidden(backend, e, 1, i, cacheB);
+            if (i == prompt.Length - 1) hidB = h; else h.Dispose();
+        }
+
+        float* pa = (float*)hidA.DataPointer, pb = (float*)hidB.DataPointer;
+        for (int i = 0; i < 16; i++) Assert.Equal(pa[i], pb[i], 4);
+        hidB.Dispose();
+    }
+
     [Fact]
     public void FireflyDecoder_SyntheticForward_CodesToFiniteAudio()
     {

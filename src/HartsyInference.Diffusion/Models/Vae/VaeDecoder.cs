@@ -373,11 +373,45 @@ public sealed class VaeDecoder
                     }
                 }
 
+                if (ty == 0 && tx == 0)
+                {
+                    float dbgMin = float.MaxValue, dbgMax = float.MinValue;
+                    double dbgSum = 0;
+                    long dbgNan = 0;
+                    for (long di = 0; di < latentSlice.ElementCount; di++)
+                    {
+                        float v = slicePtr[di];
+                        if (float.IsNaN(v)) { dbgNan++; continue; }
+                        if (v < dbgMin) dbgMin = v;
+                        if (v > dbgMax) dbgMax = v;
+                        dbgSum += v;
+                    }
+                    Logs.Info($"[TILEDBG] latentSlice(0,0) min={dbgMin} max={dbgMax} mean={dbgSum / latentSlice.ElementCount} nan={dbgNan} elems={latentSlice.ElementCount}");
+                }
+
                 // 2. Decode the tile. We need to feed Decode at the same dtype its
                 // weights are loaded in — otherwise the per-op dispatch picks the wrong
                 // kernel and reads the weights at the wrong width. Cast the F32 slice to
                 // vaeDtype if they differ (no-op when already F32).
                 Tensor tileInput = Utilities.DtypeCastHelper.EnsureDtype(backend, latentSlice, vaeDtype);
+                if (ty == 0 && tx == 0)
+                {
+                    Tensor tileInputF32 = tileInput.DType == DType.F32 ? tileInput : Utilities.DtypeCastHelper.EnsureDtype(backend, tileInput, DType.F32, disposeSourceOnCast: false);
+                    float* dbgPtr2 = (float*)tileInputF32.DataPointer;
+                    float dbgMin = float.MaxValue, dbgMax = float.MinValue;
+                    double dbgSum = 0;
+                    long dbgNan = 0;
+                    for (long di = 0; di < tileInputF32.ElementCount; di++)
+                    {
+                        float v = dbgPtr2[di];
+                        if (float.IsNaN(v)) { dbgNan++; continue; }
+                        if (v < dbgMin) dbgMin = v;
+                        if (v > dbgMax) dbgMax = v;
+                        dbgSum += v;
+                    }
+                    Logs.Info($"[TILEDBG] tileInput(0,0) [{vaeDtype.Name}] min={dbgMin} max={dbgMax} mean={dbgSum / tileInputF32.ElementCount} nan={dbgNan} elems={tileInputF32.ElementCount}");
+                    if (!ReferenceEquals(tileInputF32, tileInput)) tileInputF32.Dispose();
+                }
                 Tensor rgbTile = Decode(backend, tileInput);
                 tileInput.Dispose();
                 if (ty == 0 && tx == 0)

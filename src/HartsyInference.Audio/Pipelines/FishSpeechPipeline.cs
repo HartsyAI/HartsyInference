@@ -32,38 +32,45 @@ public sealed unsafe class FishSpeechPipeline : IDisposable
         _codec.LoadWeights(codec);
     }
 
-    /// <summary>Synthesizes audio from pre-tokenized text ids.</summary>
+    /// <summary>Synthesizes audio from pre-tokenized text ids. Mirrors upstream <c>generate</c>: one batched
+    /// prefill over the prompt (sampling only at its last position), then the AR loop feeds each sampled frame
+    /// (row-0 = semantic vocab id + N codebooks) back in until <paramref name="endToken"/> or the frame cap.</summary>
     public float[] Synthesize(IBackend backend, ReadOnlySpan<int> textTokens, int endToken, int maxFrames = 0,
         int seed = 0)
     {
         ThrowIfDisposed();
+        if (textTokens.Length == 0) { Logs.Warning("FishSpeech: empty prompt."); return []; }
         int n = _cfg.NumCodebooks;
         int max = maxFrames > 0 ? maxFrames : _cfg.MaxNewTokens;
         int cap = textTokens.Length + max + 2;
         using IKvCache slow = _model.CreateSlowCache(cap);
         uint rng = DeterministicRng.Seed(seed);
 
-        // Prefill text prompt (row-0 = text token, codebooks = 0).
-        Span<int> zero = stackalloc int[n];
-        int pos = 0;
-        for (int i = 0; i < textTokens.Length; i++)
-        {
-            Tensor e = _model.EmbedFrame(textTokens[i], zero);
-            _model.GenerateFrame(backend, e, pos++, slow, ref rng).Codes.AsSpan().Clear();
-            e.Dispose();
-        }
+        // Batched prefill (prompt frames: row-0 = text id, codebook rows padded; EmbedPrompt zeroes the codebook
+        // contribution for non-semantic rows), sampling the first frame from the last prompt position.
+        Tensor promptEmbeds = _model.EmbedPrompt(textTokens);
+        Tensor hidden = _model.ForwardHidden(backend, promptEmbeds, textTokens.Length, 0, slow);
+        promptEmbeds.Dispose();
+        (int sem, int[] codes) = _model.SampleFrame(backend, hidden, ref rng);
+        hidden.Dispose();
 
+        // AR loop: previous frame in, next frame out. The end-token frame carries no audio and is dropped.
         List<int[]> frames = new(max);
-        int prevSemantic = textTokens.Length > 0 ? textTokens[^1] : 0;
-        int[] prevCodes = new int[n];
-        for (int f = 0; f < max && pos < cap - 1; f++)
+        List<int[]> window = new(_cfg.RepetitionWindow);   // trailing [semantic, codes...] rows for rep penalty
+        int pos = textTokens.Length;
+        while (sem != endToken && frames.Count < max && pos < cap - 1)
         {
-            Tensor e = _model.EmbedFrame(prevSemantic, prevCodes);
-            (int sem, int[] codes) = _model.GenerateFrame(backend, e, pos++, slow, ref rng);
-            e.Dispose();
-            if (sem == endToken) break;
             frames.Add(codes);
-            prevSemantic = sem; prevCodes = codes;
+            int[] row = new int[n + 1];
+            row[0] = sem; codes.CopyTo(row, 1);
+            if (window.Count == _cfg.RepetitionWindow) window.RemoveAt(0);
+            window.Add(row);
+
+            Tensor e = _model.EmbedFrame(sem, codes);
+            hidden = _model.ForwardHidden(backend, e, 1, pos++, slow);
+            e.Dispose();
+            (sem, codes) = _model.SampleFrame(backend, hidden, ref rng, window);
+            hidden.Dispose();
         }
 
         if (frames.Count == 0) { Logs.Warning("FishSpeech: no audio frames generated."); return []; }

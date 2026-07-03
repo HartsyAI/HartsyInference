@@ -57,19 +57,22 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         for (int c = 0; c < k; c++) delayed[0, c] = _cfg.SpecialToken;   // step 0 lead-in is special anyway
 
         float g = guidance ?? _cfg.GuidanceScale;
+        // KV caches with once-projected cross K/V; the CFG null branch decodes against its own cache.
+        MusicGenKvCache condCache = _decoder.CreateCache(backend, condCross, tTotal);
+        MusicGenKvCache? uncondCache = g != 1f ? _decoder.CreateCache(backend, nullCross, tTotal) : null;
+        condCross.Dispose();
+        nullCross.Dispose();
+
+        int[] frame = new int[k];
         for (int step = 0; step < tTotal; step++)
         {
-            // Feed frames [0..step] and predict frame `step` (BOS at index 0 shifts prediction by one).
-            int len = step + 1;
-            int[,] prefix = new int[len, k];
-            for (int s = 0; s < len; s++)
-                for (int c = 0; c < k; c++) prefix[s, c] = delayed[s, c];
-
-            Tensor embeds = _decoder.EmbedFrames(prefix);
-            float[][] condLogits = _decoder.Forward(backend, embeds, condCross);
-            Tensor embeds2 = _decoder.EmbedFrames(prefix);
-            float[][] uncondLogits = g != 1f ? _decoder.Forward(backend, embeds2, nullCross) : condLogits;
-            embeds.Dispose(); embeds2.Dispose();
+            // Probe: step row `step`'s provisional tokens (BOS at 0, unfilled after) without committing —
+            // same feed as a full forward over frames [0..step], predicting frame `step`.
+            for (int c = 0; c < k; c++) frame[c] = delayed[step, c];
+            float[][] condLogits = _decoder.ForwardStep(backend, frame, condCache, advance: false);
+            float[][] uncondLogits = uncondCache is not null
+                ? _decoder.ForwardStep(backend, frame, uncondCache, advance: false)
+                : condLogits;
 
             for (int c = 0; c < k; c++)
             {
@@ -89,10 +92,13 @@ public sealed unsafe class MusicGenPipeline : IDisposable
                     : Argmax(logits, _cfg.CodebookSize, _cfg.SpecialToken);
                 SetIfInRange(delayed, step, c, tok);
             }
-        }
 
-        condCross.Dispose();
-        nullCross.Dispose();
+            // Commit: rewrite row `step`'s K/V from the sampled frame so later steps attend the real tokens.
+            if (step + 1 == tTotal) break;
+            for (int c = 0; c < k; c++) frame[c] = delayed[step, c];
+            _decoder.ForwardStep(backend, frame, condCache);
+            if (uncondCache is not null) _decoder.ForwardStep(backend, frame, uncondCache);
+        }
 
         int[,] real = MusicGenDelay.Revert(delayed, _cfg.DelayPattern, tReal);
 

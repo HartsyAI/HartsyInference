@@ -82,20 +82,17 @@ public sealed class VibeVoiceCosineDpmSolver : IDisposable
     }
 
     /// <summary>Selects <paramref name="num"/> inference timesteps from the 1000-step
-    /// training schedule. Uses <c>linspace</c> spacing (matches HF
-    /// <c>timestep_spacing="linspace"</c>, the default for DPMSolverMultistepScheduler).</summary>
+    /// training schedule. Matches HF <c>timestep_spacing="linspace"</c>:
+    /// <c>linspace(0, T-1, num+1).round()[::-1][:-1]</c> — the t=0 endpoint is NOT a model
+    /// eval; the final integration to t=0 happens via the zero final sigma in <see cref="Step"/>.</summary>
     public void SetTimesteps(int num)
     {
         if (num <= 0) throw new ArgumentOutOfRangeException(nameof(num));
         _numInferenceSteps = num;
         _timesteps = new float[num];
-        // Linspace from NumTrainTimesteps-1 down to 0 (inclusive endpoints).
         float lastStep = NumTrainTimesteps - 1;
         for (int i = 0; i < num; i++)
-        {
-            float r = (float)i / (num - 1);
-            _timesteps[i] = lastStep - r * lastStep;
-        }
+            _timesteps[i] = MathF.Round(lastStep * (num - i) / num);
         _prevX0?.Dispose();
         _prevX0 = null;
         _prevStepIndex = -1;
@@ -127,8 +124,14 @@ public sealed class VibeVoiceCosineDpmSolver : IDisposable
         (float alphaNext, float sigmaNext) = InterpolateAlphaSigma(nextT);
         float lambdaNext = nextT > 0f ? (float)(Math.Log(alphaNext) - Math.Log(sigmaNext)) : 1e6f;
 
+        // lower_order_final: the final step must be first-order — the zero final sigma makes
+        // lambda_next → ∞, so the second-order d1 coefficient (h / h_prev) would explode.
+        // (HF also drops to first order on the 2nd-to-last step for short (<15) schedules.)
+        bool lowerOrder = stepIndex == _timesteps.Length - 1
+            || (stepIndex == _timesteps.Length - 2 && _timesteps.Length < 15);
+
         Tensor output;
-        if (_prevX0 is null || _prevStepIndex != stepIndex - 1)
+        if (_prevX0 is null || _prevStepIndex != stepIndex - 1 || lowerOrder)
         {
             // First-order (multistep init): x_{t-1} = (sigma_{t-1}/sigma_t) * x_t - alpha_{t-1} * (exp(-h)-1) * x0
             // For dpmsolver++ this is:

@@ -6,9 +6,11 @@ namespace HartsyInference.Audio.Models.Music;
 
 /// <summary>MusicGen causal decoder: K codebook embeddings (summed) + sinusoidal positions → a stack of
 /// pre-norm blocks (causal self-attention + cross-attention to the T5 text states + GELU MLP) → K parallel
-/// output heads. Reuses the WhisperOps attention helpers (`ProjectLinear`, multi-head reshape, SDPA);
-/// runs full-sequence (no KV cache) — AR callers re-feed the prefix. Cross-attn states are the
-/// caller-projected T5 features <c>[1, T_text, hidden]</c>.</summary>
+/// output heads. Reuses the WhisperOps attention helpers (`ProjectLinear`, multi-head reshape, SDPA).
+/// AR decoding is incremental: <see cref="CreateCache"/> pre-projects the cross-attn K/V once, then one
+/// cache-capturing prefill <see cref="Forward"/> plus O(T) per-frame <see cref="ForwardStep"/> calls against
+/// the <see cref="MusicGenKvCache"/>. Cross-attn states are the caller-projected T5 features
+/// <c>[1, T_text, hidden]</c>.</summary>
 public sealed unsafe class MusicGenDecoder : IDisposable
 {
     private readonly MusicGenConfig _cfg;
@@ -75,21 +77,31 @@ public sealed unsafe class MusicGenDecoder : IDisposable
     }
 
     /// <summary>Runs the decoder stack and returns the K next-step logits <c>[K][codebookSize]</c> from
-    /// the last position. <paramref name="cross"/> is the projected T5 states.</summary>
-    public float[][] Forward(IBackend backend, Tensor inputEmbeds, Tensor cross)
+    /// the last position. <paramref name="cross"/> is the projected T5 states. Pass <paramref name="cache"/>
+    /// to capture every layer's self-attn K/V for the prompt (prefill), enabling incremental continuation
+    /// via <see cref="ForwardStep"/>.</summary>
+    public float[][] Forward(IBackend backend, Tensor inputEmbeds, Tensor cross, MusicGenKvCache? cache = null)
     {
         int t = (int)inputEmbeds.Shape[1];
         int h = _cfg.Hidden;
+        if (cache is not null && t > cache.Capacity)
+        {
+            throw new ArgumentException($"Prompt length {t} exceeds KV cache capacity {cache.Capacity}.");
+        }
         Tensor? mask = t > 1 ? BuildCausalMask(t) : null;
         Tensor hidden = inputEmbeds;
         bool owns = false;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, hidden, cross, mask);
+            Tensor next = _blocks[i].Forward(backend, hidden, cross, mask, cache?.Layers[i]);
             if (owns) hidden.Dispose();
             hidden = next; owns = true;
         }
         mask?.Dispose();
+        if (cache is not null)
+        {
+            cache.Length = t;
+        }
 
         Tensor normed = new(hidden.Shape, DType.F32);
         backend.LayerNorm(normed, hidden, _lnOutG!, _lnOutB!, 1e-5f);
@@ -97,16 +109,81 @@ public sealed unsafe class MusicGenDecoder : IDisposable
 
         Tensor last = SliceLast(normed, h);
         normed.Dispose();
+        float[][] logits = HeadLogits(backend, last);
+        last.Dispose();
+        return logits;
+    }
+
+    /// <summary>Creates a K/V cache sized to <paramref name="capacity"/> positions, pre-projecting each
+    /// layer's cross-attn K/V from <paramref name="cross"/> once (they depend only on the text states,
+    /// never per step). For use with <see cref="Forward"/> (prefill) + <see cref="ForwardStep"/>.</summary>
+    public MusicGenKvCache CreateCache(IBackend backend, Tensor cross, int capacity)
+    {
+        MusicGenKvCache cache = new(_cfg.NumLayers, capacity, _cfg.Hidden);
+        for (int i = 0; i < _blocks.Length; i++) _blocks[i].PrimeCross(backend, cross, cache.Layers[i]);
+        cache.CrossLength = (int)cross.Shape[1];
+        return cache;
+    }
+
+    /// <summary>Incremental decode: embeds one K-codebook <paramref name="frame"/> at position
+    /// <see cref="MusicGenKvCache.Length"/>, steps the stack against the cache (appending its K/V there),
+    /// and returns the K next-step logits. Equivalent to the last position of a full causal
+    /// <see cref="Forward"/> over the cached prefix plus this frame, at O(T) instead of O(T²).
+    /// <paramref name="advance"/>=false leaves <c>Length</c> unchanged so the same row can be rewritten —
+    /// probe a provisional frame for logits, then commit the sampled one over it.</summary>
+    public float[][] ForwardStep(IBackend backend, int[] frame, MusicGenKvCache cache, bool advance = true)
+    {
+        int pos = cache.Length;
+        if (pos >= cache.Capacity)
+        {
+            throw new InvalidOperationException($"KV cache is full ({cache.Capacity}); size it to the generation length.");
+        }
+
+        Tensor hidden = EmbedFrame(frame, pos);
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            Tensor next = _blocks[i].ForwardStep(backend, hidden, cache.Layers[i], pos, cache.CrossLength);
+            hidden.Dispose();
+            hidden = next;
+        }
+        if (advance) cache.Length = pos + 1;
+
+        Tensor normed = new(hidden.Shape, DType.F32);
+        backend.LayerNorm(normed, hidden, _lnOutG!, _lnOutB!, 1e-5f);
+        hidden.Dispose();
+        float[][] logits = HeadLogits(backend, normed);
+        normed.Dispose();
+        return logits;
+    }
+
+    /// <summary>Projects a <c>[1, 1, hidden]</c> state through the K output heads → <c>[K][codebookSize]</c>.</summary>
+    private float[][] HeadLogits(IBackend backend, Tensor last)
+    {
         float[][] logits = new float[_cfg.NumCodebooks][];
         for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
         {
-            Tensor l = WhisperOps.ProjectLinear(backend, last, _heads[cb]!, bias: null, 1, 1, h, _cfg.CodebookSize);
+            Tensor l = WhisperOps.ProjectLinear(backend, last, _heads[cb]!, bias: null, 1, 1, _cfg.Hidden, _cfg.CodebookSize);
             logits[cb] = new float[_cfg.CodebookSize];
             new Span<float>((void*)l.DataPointer, _cfg.CodebookSize).CopyTo(logits[cb]);
             l.Dispose();
         }
-        last.Dispose();
         return logits;
+    }
+
+    /// <summary>Embeds one K-codebook frame (summed embeddings + sinusoid at absolute <paramref name="pos"/>) → <c>[1, 1, hidden]</c>.</summary>
+    private Tensor EmbedFrame(int[] frame, int pos)
+    {
+        int h = _cfg.Hidden;
+        Tensor outT = new(new TensorShape(1, 1, h), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
+        {
+            int id = Math.Clamp(frame[cb], 0, _cfg.CodebookSize);
+            float* tab = (float*)_codebookEmbed[cb]!.DataPointer + (long)id * h;
+            for (int c = 0; c < h; c++) op[c] += tab[c];
+        }
+        AddSinusoid(op, pos, h);
+        return outT;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

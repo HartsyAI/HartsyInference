@@ -21,6 +21,10 @@ public sealed class FishSpeechTokenizer
     public const string ImEnd = "<|im_end|>";
     public const string AudioStart = "<|audio_start|>";
     public const string AudioEnd = "<|audio_end|>";
+
+    /// <summary>v1.5 assistant-turn opener that cues speech generation — the upstream template's final special.
+    /// (<see cref="AudioStart"/> is NOT in the 1.5 vocab; it would BPE-encode as literal text.)</summary>
+    public const string Voice = "<|voice|>";
     public const string SemanticZero = "<|semantic:0|>";
     public const string PlainSemantic = "<|semantic|>";
 

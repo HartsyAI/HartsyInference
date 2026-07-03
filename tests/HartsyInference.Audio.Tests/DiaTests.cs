@@ -156,6 +156,81 @@ public sealed unsafe class DiaTests
         AssertFinite(logits);
     }
 
+    [Fact]
+    public void FoldSpeakerTags_ReplacesLiteralTagBytes_AndTruncates()
+    {
+        int[] raw = [.. System.Text.Encoding.UTF8.GetBytes("[S1] Hi [S2] Yo").Select(b => (int)b)];
+        int[] folded = DiaPipeline.FoldSpeakerTags(raw, 1024);
+        Assert.Equal([1, (int)' ', (int)'H', (int)'i', (int)' ', 2, (int)' ', (int)'Y', (int)'o'], folded);
+
+        // Idempotent: already-folded ids pass through; over-long input truncates to maxLen.
+        Assert.Equal(folded, DiaPipeline.FoldSpeakerTags(folded, 1024));
+        Assert.Equal(4, DiaPipeline.FoldSpeakerTags(raw, 4).Length);
+    }
+
+    /// <summary>The CFG filter (upstream model.py:440-445): candidates come from the top-K of the
+    /// CFG-combined logits, but the sampled distribution is the CONDITIONAL logits — a token outside the
+    /// combined top-K is never sampled even with the highest conditional logit.</summary>
+    [Fact]
+    public void SampleDiaChannel_RestrictsToTopKOfGuided_SamplesCond()
+    {
+        DiaConfig cfg = DiaConfig.Dia1_6B;
+        float[] cond = new float[cfg.AudioVocab];
+        float[] guided = new float[cfg.AudioVocab];
+        Array.Fill(cond, -10f); Array.Fill(guided, -10f);
+        for (int i = 0; i < cfg.TopK; i++) guided[i] = 100f - i;   // guided top-K = ids 0..44, well above the -10 floor
+        cond[500] = 100f;                                          // huge cond logit outside the candidate set
+        cond[7] = 50f;                                             // dominant cond logit inside it
+        uint rng = 12345;
+        for (int n = 0; n < 200; n++)
+        {
+            int tok = DiaPipeline.SampleDiaChannel(cond, guided, channel: 1, cfg, ref rng);
+            Assert.NotEqual(500, tok);
+            Assert.InRange(tok, 0, cfg.TopK - 1);
+        }
+        // cond dominates within the candidate set: id 7 is drawn despite guided ranking it 8th.
+        rng = 12345;
+        Assert.Equal(7, DiaPipeline.SampleDiaChannel(cond, guided, channel: 1, cfg, ref rng));
+    }
+
+    /// <summary>EOS handling (upstream _sample_next_token model.py:40-49): EOS is masked unless it is the
+    /// argmax, in which case it is forced; channels &gt; 0 never emit EOS; PAD/BOS/1027 never sampled.</summary>
+    [Fact]
+    public void SampleDiaChannel_EosOnlyWhenArgmax_AndSpecialsMasked()
+    {
+        DiaConfig cfg = DiaConfig.Dia1_6B;
+        float[] cond = new float[cfg.AudioVocab];
+        float[] guided = new float[cfg.AudioVocab];
+
+        // EOS in the candidate set but not argmax → never sampled.
+        Array.Fill(cond, -10f); Array.Fill(guided, -10f);
+        guided[cfg.AudioEos] = 9f; cond[cfg.AudioEos] = 9f;
+        guided[3] = 10f; cond[3] = 10f;
+        guided[4] = 9.5f; cond[4] = 9.5f;
+        uint rng = 99;
+        for (int n = 0; n < 200; n++)
+            Assert.NotEqual(cfg.AudioEos, DiaPipeline.SampleDiaChannel(cond, guided, 0, cfg, ref rng));
+
+        // EOS is argmax → forced deterministically on channel 0, still masked on channels > 0.
+        cond[cfg.AudioEos] = 20f; guided[cfg.AudioEos] = 20f;
+        for (int n = 0; n < 20; n++)
+            Assert.Equal(cfg.AudioEos, DiaPipeline.SampleDiaChannel(cond, guided, 0, cfg, ref rng));
+        for (int n = 0; n < 200; n++)
+            Assert.NotEqual(cfg.AudioEos, DiaPipeline.SampleDiaChannel(cond, guided, 1, cfg, ref rng));
+
+        // PAD / BOS / 1027 are never sampled even with dominant logits.
+        Array.Fill(cond, -10f); Array.Fill(guided, -10f);
+        cond[cfg.AudioPad] = 30f; guided[cfg.AudioPad] = 30f;
+        cond[cfg.AudioBos] = 29f; guided[cfg.AudioBos] = 29f;
+        cond[1027] = 28f; guided[1027] = 28f;
+        cond[10] = 5f; guided[10] = 5f;
+        for (int n = 0; n < 200; n++)
+        {
+            int tok = DiaPipeline.SampleDiaChannel(cond, guided, 0, cfg, ref rng);
+            Assert.True(tok < cfg.AudioEos, $"sampled special/invalid token {tok}");
+        }
+    }
+
     private static void AssertFinite(Tensor t)
     {
         float* p = (float*)t.DataPointer;

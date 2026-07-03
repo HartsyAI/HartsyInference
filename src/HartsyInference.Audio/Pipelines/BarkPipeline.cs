@@ -36,41 +36,30 @@ public sealed unsafe class BarkPipeline : IDisposable
     /// shifted by <see cref="BarkConfig.TextEncodingOffset"/> (caller's tokenizer); the semantic-infer
     /// prefix is appended here.</summary>
     public float[] Synthesize(IBackend backend, int[] textTokenIds, int seed = 0,
-        int maxSemantic = 768, int maxCoarse = 1536)
+        int maxSemantic = 768)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Semantic stage ──
-        List<int> semPrompt = new(textTokenIds) { _cfg.SemanticInferToken };
-        List<int> semantic = _semantic.Generate(backend, semPrompt, maxSemantic,
-            _cfg.SemanticTemperature, _cfg.TopK, _cfg.TopP, _cfg.SemanticPadToken, seed);
+        // ── 1. Semantic stage: merged 256-text/256-history context + infer, min_eos_p early stop ──
+        List<int> semantic = _semantic.GenerateSemantic(backend, textTokenIds, _cfg, seed, maxSemantic);
+        if (semantic.Count == 0)
+        {
+            throw new InvalidOperationException("Bark semantic stage produced no tokens (immediate EOS).");
+        }
         Logs.Info($"Bark: {semantic.Count} semantic tokens.");
 
-        // ── 2. Coarse stage: semantic tokens (offset) + infer prefix → interleaved 2-codebook stream ──
-        List<int> coarsePrompt = new(semantic.Count + 1);
-        foreach (int s in semantic) coarsePrompt.Add(s);
-        coarsePrompt.Add(_cfg.CoarseInferToken);
-        List<int> coarseFlat = _coarse.Generate(backend, coarsePrompt, maxCoarse,
-            _cfg.CoarseTemperature, _cfg.TopK, _cfg.TopP, eosToken: -1, seed + 1);
-
-        // De-interleave [book0, book1, book0, book1, ...] → [2, T]; map back to [0, CodebookSize).
-        int t = coarseFlat.Count / _cfg.NumCoarseCodebooks;
-        int[,] coarse = new int[_cfg.NumCoarseCodebooks, t];
-        for (int j = 0; j < t; j++)
-            for (int cb = 0; cb < _cfg.NumCoarseCodebooks; cb++)
-            {
-                int v = coarseFlat[j * _cfg.NumCoarseCodebooks + cb] - cb * _cfg.CodebookSize;
-                coarse[cb, j] = Math.Clamp(v, 0, _cfg.CodebookSize - 1);
-            }
+        // ── 2. Coarse stage: ratio-derived step count, 60-step sliding windows, per-book constrained sampling ──
+        int[,] coarse = _coarse.GenerateCoarse(backend, semantic, _cfg, seed + 1);
+        int t = coarse.GetLength(1);
         Logs.Info($"Bark: {t} coarse frames.");
 
         // ── 3. Fine stage: fill codebooks 2..7 → [8, T] ──
-        int[,] codes = _fine.Refine(backend, coarse);
+        int[,] codes = _fine.Refine(backend, coarse, seed + 2);
 
         // ── 4. EnCodec decode ──
-        Tensor codesT = new(new TensorShape(1, _cfg.NumCodebooks, t), DType.F32);
-        float* cp = (float*)codesT.DataPointer;
+        Tensor codesT = new(new TensorShape(1, _cfg.NumCodebooks, t), DType.I32);
+        int* cp = (int*)codesT.DataPointer;
         for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
             for (int j = 0; j < t; j++) cp[(long)cb * t + j] = codes[cb, j];
         Tensor audioT = _encodec.Decode(backend, codesT, batch: 1, tFrames: t);

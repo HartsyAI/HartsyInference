@@ -72,6 +72,50 @@ public sealed unsafe class GptBackboneTests
     }
 
     [Fact]
+    public void Backbone_ForwardStep_MatchesFullSequenceForward()
+    {
+        GptConfig cfg = new() { Hidden = 16, NumLayers = 2, NumHeads = 4, BlockSize = 32 };
+        using CpuBackend backend = new();
+        using GptBackbone bb = new(cfg);
+        bb.LoadWeights(SyntheticGptWeights(cfg), "pos", "blk", "lnf.weight", "lnf.bias");
+
+        const int prefillLen = 4, totalLen = 9;
+        using Tensor allEmbeds = Filled(1, totalLen, cfg.Hidden);
+        float* ap = (float*)allEmbeds.DataPointer;
+
+        // Incremental: prefill the first 4 positions, then step tokens 4..8 one at a time.
+        GptKvCache cache = bb.CreateCache();
+        Tensor prefill = new(new TensorShape(1, prefillLen, cfg.Hidden), DType.F32);
+        new ReadOnlySpan<float>(ap, prefillLen * cfg.Hidden).CopyTo(prefill.AsSpan<float>());
+        using Tensor prefillOut = bb.Forward(backend, prefill, nonCausal: false, cache);
+        prefill.Dispose();
+        Assert.Equal(prefillLen, cache.Length);
+
+        float[][] stepOuts = new float[totalLen][];
+        for (int pos = prefillLen; pos < totalLen; pos++)
+        {
+            Tensor one = new(new TensorShape(1, 1, cfg.Hidden), DType.F32);
+            new ReadOnlySpan<float>(ap + (long)pos * cfg.Hidden, cfg.Hidden).CopyTo(one.AsSpan<float>());
+            using Tensor stepOut = bb.ForwardStep(backend, one, cache);
+            one.Dispose();
+            stepOuts[pos] = new Span<float>((void*)stepOut.DataPointer, cfg.Hidden).ToArray();
+        }
+        Assert.Equal(totalLen, cache.Length);
+
+        // Reference: one full causal forward over all 9 positions.
+        using Tensor fullOut = bb.Forward(backend, allEmbeds, nonCausal: false);
+        float* fp = (float*)fullOut.DataPointer;
+        for (int pos = prefillLen; pos < totalLen; pos++)
+        {
+            for (int c = 0; c < cfg.Hidden; c++)
+            {
+                Assert.True(MathF.Abs(fp[(long)pos * cfg.Hidden + c] - stepOuts[pos][c]) < 1e-4f,
+                    $"pos {pos} ch {c}: full={fp[(long)pos * cfg.Hidden + c]} step={stepOuts[pos][c]}");
+            }
+        }
+    }
+
+    [Fact]
     public void BarkConfig_Presets_HaveExpectedShape()
     {
         Assert.Equal(1024, BarkConfig.Full.Stage.Hidden);

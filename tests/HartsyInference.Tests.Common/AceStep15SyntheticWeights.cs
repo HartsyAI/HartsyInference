@@ -24,11 +24,12 @@ public static unsafe class AceStep15SyntheticWeights
     public static Dictionary<string, Tensor> BuildModel(AceStep15Config c)
     {
         int dim = c.HiddenSize, inter = c.IntermediateSize;
+        int encDim = c.EncoderVariant().HiddenSize;
         Dictionary<string, Tensor> w = new()
         {
             ["decoder.proj_in.1.weight"] = R([dim, c.InChannels, c.PatchSize]),
             ["decoder.proj_in.1.bias"] = R([dim]),
-            ["decoder.condition_embedder.weight"] = R([dim, dim]),
+            ["decoder.condition_embedder.weight"] = R([dim, encDim]),
             ["decoder.condition_embedder.bias"] = R([dim]),
             ["decoder.norm_out.weight"] = R([dim]),
             ["decoder.scale_shift_table"] = R([1, 2, dim]),
@@ -55,9 +56,10 @@ public static unsafe class AceStep15SyntheticWeights
             w[$"{p}.mlp.down_proj.weight"] = R([dim, inter]);
         }
 
-        w["encoder.text_projector.weight"] = R([dim, c.TextHiddenDim]);
-        AddConditionEncoder(w, "encoder.lyric_encoder", c.TextHiddenDim, c.LyricEncoderLayers, c, special: false);
-        AddConditionEncoder(w, "encoder.timbre_encoder", c.TimbreHiddenDim, c.TimbreEncoderLayers, c, special: true);
+        AceStep15Config enc = c.EncoderVariant();
+        w["encoder.text_projector.weight"] = R([enc.HiddenSize, c.TextHiddenDim]);
+        AddConditionEncoder(w, "encoder.lyric_encoder", c.TextHiddenDim, c.LyricEncoderLayers, enc, special: false);
+        AddConditionEncoder(w, "encoder.timbre_encoder", c.TimbreHiddenDim, c.TimbreEncoderLayers, enc, special: true);
         return w;
     }
 

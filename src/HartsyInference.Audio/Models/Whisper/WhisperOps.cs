@@ -24,24 +24,15 @@ internal static unsafe class WhisperOps
     public static Tensor EnsureF32(Tensor t) =>
         t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
-    /// <summary>Linear projection: output = input @ weight^T + bias. The HF safetensors
-    /// store linear-layer weights as <c>[outDim, inDim]</c> (PyTorch convention) so we
-    /// transpose into a scratch tensor before dispatching to <see cref="IBackend.BatchedMatMul"/>.
-    /// Same approach as <c>ClipTransformerLayer.ProjectLinear</c>; consolidated here to
-    /// keep encoder + decoder code aligned.</summary>
+    /// <summary>Linear projection: output = input @ weight^T + bias, dispatched to
+    /// <see cref="IBackend.Linear"/> which takes the HF/PyTorch <c>[outDim, inDim]</c> weight as-is.
+    /// The unmodified weight tensor is what reaches the backend, so its device cache (weight
+    /// auto-promotion) keeps it GPU-resident across calls — the previous per-call CPU transpose
+    /// into a fresh scratch tensor could never be cached and re-crossed PCIe on every linear.</summary>
     public static Tensor ProjectLinear(IBackend backend, Tensor input, Tensor weight, Tensor? bias, int batch, int seqLen, int inDim, int outDim)
     {
-        TensorShape outShape = new(batch, seqLen, outDim);
-        Tensor output = new(outShape, DType.F32);
-
-        TensorShape weightTShape = new(inDim, outDim);
-        Tensor weightT = new(weightTShape, DType.F32);
-        TransposeMatrix(weight, weightT, outDim, inDim);
-
-        backend.BatchedMatMul(output, input, weightT);
-        weightT.Dispose();
-
-        if (bias is not null) AddBiasBroadcast(output, bias, batch, seqLen, outDim);
+        Tensor output = new(new TensorShape(batch, seqLen, outDim), DType.F32);
+        backend.Linear(output, input, weight, bias);
         return output;
     }
 

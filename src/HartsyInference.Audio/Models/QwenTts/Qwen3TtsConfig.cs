@@ -109,4 +109,13 @@ public sealed record Qwen3TtsConfig
         Codec = MimiConfig.Mimi24kHz with { AcousticCodebooks = 15 },
         Vocoder = Qwen3TtsVocoderConfig.Default,
     };
+
+    /// <summary>Qwen3-TTS-12Hz-0.6B preset — same code-predictor/codec/vocoder as 1.7B, smaller talker.</summary>
+    public static Qwen3TtsConfig Default_0_6B => new()
+    {
+        Talker = Qwen3Config.Talker0_6B,
+        CodePredictor = Qwen3Config.CodePredictor,
+        Codec = MimiConfig.Mimi24kHz with { AcousticCodebooks = 15 },
+        Vocoder = Qwen3TtsVocoderConfig.Default,
+    };
 }

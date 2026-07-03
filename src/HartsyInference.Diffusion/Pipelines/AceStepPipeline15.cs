@@ -21,6 +21,31 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// real turbo checkpoint</b> (condition encoder maxAbs 1.9e-6; DiT velocity / full-loop latent corr 1.0 — see
 /// <c>AceStep15DitParityTests</c>); Oobleck VAE decode verified corr 0.9999999999. Hints-less quality vs Comfy
 /// defaults remains an open question (research §7).</summary>
+/// <summary>Per-generation knobs for <see cref="AceStepPipeline15.Generate"/>. Defaults mirror the upstream
+/// per-family UI config: turbo ignores guidance (distilled, CFG baked in) and enables DCW; base/sft run CFG
+/// (APG default, ADG opt-in, interval-gated) with DCW off.</summary>
+public sealed record AceStep15GenerateOptions
+{
+    public float? Shift { get; init; }
+    public int? Seed { get; init; }
+    /// <summary>Steps; null = config default (turbo 8; callers pass 50 sft / 32 base).</summary>
+    public int? InferSteps { get; init; }
+    /// <summary>CFG strength; ≤1 (or a turbo config) disables the uncond pass.</summary>
+    public float GuidanceScale { get; init; } = 1f;
+    /// <summary>ADG instead of the default APG blend.</summary>
+    public bool UseAdg { get; init; }
+    /// <summary>Guidance applies only when <c>cfgIntervalStart ≤ t ≤ cfgIntervalEnd</c> (momentum skips too).</summary>
+    public float CfgIntervalStart { get; init; } = 0f;
+    public float CfgIntervalEnd { get; init; } = 1f;
+    /// <summary>"ode" (Euler) or "sde" (predict clean + renoise at linear next-t).</summary>
+    public string InferMethod { get; init; } = "ode";
+    /// <summary>DCW wavelet correction; null = upstream default (on for turbo, off for base/sft).</summary>
+    public bool? DcwEnabled { get; init; }
+    public string DcwMode { get; init; } = "double";
+    public float DcwScaler { get; init; } = 0.05f;
+    public float DcwHighScaler { get; init; } = 0.02f;
+}
+
 public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
 {
     private readonly AceStep15Dit _dit;
@@ -28,6 +53,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
     private readonly IAudioLatentDecoder _vae;
     private readonly AceStep15Config _config;
     private Tensor? _silenceFrames;
+    private Tensor? _nullConditionEmb;   // learned [1,1,encH] uncond row (base/sft CFG)
 
     public AceStepPipeline15(IBackend backend, AceStep15Dit dit, AceStep15ConditionEncoder encoder,
         IAudioLatentDecoder vae, AceStep15Config config)
@@ -37,6 +63,15 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         _encoder = encoder ?? throw new ArgumentNullException(nameof(encoder));
         _vae = vae ?? throw new ArgumentNullException(nameof(vae));
         _config = config ?? throw new ArgumentNullException(nameof(config));
+    }
+
+    /// <summary>Sets the checkpoint's learned <c>null_condition_emb</c> <c>[1, 1, encHidden]</c> — the CFG
+    /// unconditional row substituted for every position of the packed condition sequence (base/sft).</summary>
+    public void SetNullConditionEmb(Tensor nullEmb)
+    {
+        ThrowIfDisposed();
+        _nullConditionEmb?.Dispose();
+        _nullConditionEmb = nullEmb;
     }
 
     /// <summary>Sets the shipped <c>silence_latent.pt</c> rows <c>[T, 64]</c> as the text-to-music src latent
@@ -62,20 +97,48 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         Tensor textHidden, Tensor? lyricHidden, double durationSeconds,
         float? shift = null, int? seed = null, Tensor? timbreLatent = null, Tensor? lmHints = null,
         int? inferSteps = null, Action<GenerationProgress>? onProgress = null)
+        => Generate(textHidden, lyricHidden, durationSeconds,
+            new AceStep15GenerateOptions { Shift = shift, Seed = seed, InferSteps = inferSteps },
+            timbreLatent, lmHints, onProgress);
+
+    /// <summary>Options-driven generation (CFG for base/sft, SDE, DCW). See <see cref="AceStep15GenerateOptions"/>.</summary>
+    public (float[] Left, float[] Right, int SampleRate, int Seed) Generate(
+        Tensor textHidden, Tensor? lyricHidden, double durationSeconds, AceStep15GenerateOptions opts,
+        Tensor? timbreLatent = null, Tensor? lmHints = null, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
         if (durationSeconds < 1 || durationSeconds > 600)
             throw new ArgumentOutOfRangeException(nameof(durationSeconds), "duration must be 1..600 s.");
 
-        int actualSeed = seed ?? SeedGenerator.RandomSeed();
-        int patch = _config.PatchSize;
-        int frames = Math.Max(4 * patch, (_config.LatentFrames(durationSeconds) + patch - 1) / patch * patch);
-        int wantSteps = Math.Clamp(inferSteps ?? _config.NumInferenceSteps, 1, 20);
-        float[] timesteps = AceStep15Config.GetTimesteps(wantSteps, shift ?? _config.FlowShift, snapShift: true);
+        int actualSeed = opts.Seed ?? SeedGenerator.RandomSeed();
+        int frames = _config.FrameCount(durationSeconds);
+        // Turbo: 1..20 steps, shift snapped to trained {1,2,3}. Base/sft: arbitrary steps/shift.
+        int wantSteps = _config.IsTurbo
+            ? Math.Clamp(opts.InferSteps ?? _config.NumInferenceSteps, 1, 20)
+            : Math.Clamp(opts.InferSteps ?? 50, 1, 200);
+        float[] timesteps = AceStep15Config.GetTimesteps(wantSteps, opts.Shift ?? _config.FlowShift, snapShift: _config.IsTurbo);
         int steps = timesteps.Length;
 
-        Logs.Info($"ACE-Step 1.5 turbo: {durationSeconds:0}s ({frames} latent frames), {steps} steps, " +
-            $"shift={shift ?? _config.FlowShift}, lyrics={(lyricHidden is null ? 0 : lyricHidden.Shape[0])} tokens, " +
+        // Turbo bakes guidance into distillation — upstream force-clamps to 1.0 (their issue #927: CFG on
+        // turbo = noise/NaN). Base/sft need the learned null_condition_emb for the uncond branch.
+        float guidance = opts.GuidanceScale;
+        if (_config.IsTurbo && guidance != 1f)
+        {
+            Logs.Info($"ACE-Step 1.5: turbo model — overriding guidance {guidance:0.0} -> 1.0 (turbo does not use CFG).");
+            guidance = 1f;
+        }
+        bool useCfg = guidance > 1f && _nullConditionEmb is not null;
+        if (guidance > 1f && _nullConditionEmb is null)
+        {
+            Logs.Warning("ACE-Step 1.5: guidance requested but null_condition_emb not loaded — running uncond-free.");
+        }
+        bool sde = string.Equals(opts.InferMethod, "sde", StringComparison.OrdinalIgnoreCase);
+        AceStep15Guidance.DcwCorrector dcw = new(opts.DcwEnabled ?? _config.IsTurbo, opts.DcwMode, opts.DcwScaler, opts.DcwHighScaler);
+        AceStep15Guidance.MomentumBuffer momentum = new();
+
+        Logs.Info($"ACE-Step 1.5 {(_config.IsTurbo ? "turbo" : "base/sft")}: {durationSeconds:0}s ({frames} latent frames), {steps} steps, " +
+            $"shift={opts.Shift ?? _config.FlowShift}, cfg={(useCfg ? guidance : 1f)}{(useCfg && opts.UseAdg ? " (ADG)" : useCfg ? " (APG)" : "")}, " +
+            $"method={(sde ? "sde" : "ode")}, dcw={dcw.IsActive}, lyrics={(lyricHidden is null ? 0 : lyricHidden.Shape[0])} tokens, " +
             $"timbre={(timbreLatent is not null)}, hints={(lmHints is not null)}, seed={actualSeed}");
 
         Backend.PreloadWeights(_encoder.EnumerateWeights());
@@ -83,8 +146,22 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
 
+        // Uncond conditions = null_condition_emb broadcast over the packed sequence (encoder NOT re-run).
+        Tensor? nullConditions = null;
+        if (useCfg)
+        {
+            int condLen = (int)conditions.Shape[1];
+            int condDim = (int)conditions.Shape[2];
+            nullConditions = new Tensor(new TensorShape(1, condLen, condDim), DType.F32);
+            float* np = (float*)nullConditions.DataPointer;
+            float* ne = (float*)_nullConditionEmb!.DataPointer;
+            for (int i = 0; i < condLen; i++)
+                Buffer.MemoryCopy(ne, np + (long)i * condDim, condDim * 4, condDim * 4);
+        }
+
         Tensor context = BuildContextLatents(frames, lmHints);
         Tensor z = SeedGenerator.CreateNoise(new TensorShape(1, frames, _config.LatentChannels), actualSeed);
+        long elems = z.Shape.ElementCount;
 
         Backend.PreloadWeights(_dit.EnumerateWeights());
         Stopwatch sw = Stopwatch.StartNew();
@@ -94,18 +171,65 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
             {
                 float sigma = timesteps[i];
                 float sigmaNext = i < steps - 1 ? timesteps[i + 1] : 0f;   // final step integrates to 0
-                Tensor v = _dit.Forward(Backend, z, context, conditions, sigma, sigma);   // turbo: r = t
+                Tensor vt = _dit.Forward(Backend, z, context, conditions, sigma, sigma);   // r = t (all variants)
+
+                if (useCfg)
+                {
+                    // Sequential dual batch-1 forward (the DiT is batch-1 throughout); interval-gated blend.
+                    bool applyCfg = sigma >= opts.CfgIntervalStart && sigma <= opts.CfgIntervalEnd;
+                    if (applyCfg)
+                    {
+                        Tensor vu = _dit.Forward(Backend, z, context, nullConditions!, sigma, sigma);
+                        Tensor guided = opts.UseAdg
+                            ? AceStep15Guidance.AdgForward(z, vt, vu, sigma, guidance)
+                            : AceStep15Guidance.ApgForward(vt, vu, guidance, momentum);
+                        vu.Dispose();
+                        vt.Dispose();
+                        vt = guided;
+                    }
+                }
+
                 float* zp = (float*)z.DataPointer;
-                float* vp = (float*)v.DataPointer;
-                float dt = sigmaNext - sigma;
-                for (long e = 0; e < z.Shape.ElementCount; e++) zp[e] += dt * vp[e];
-                v.Dispose();
+                float* vp = (float*)vt.DataPointer;
+                // DCW needs the clean estimate from the PRE-update latent: denoised = x_before − t_curr·v.
+                Tensor? denoised = null;
+                if (dcw.IsActive)
+                {
+                    denoised = new Tensor(z.Shape, DType.F32);
+                    float* dp = (float*)denoised.DataPointer;
+                    for (long e = 0; e < elems; e++) dp[e] = zp[e] - sigma * vp[e];
+                }
+                if (sde)
+                {
+                    // Predict clean (x − t·v), renoise at the LINEAR next timestep with a fresh draw.
+                    float nextT = 1f - (i + 1) / (float)steps;
+                    Tensor fresh = SeedGenerator.CreateNoise(z.Shape, unchecked(actualSeed + 7919 * (i + 1)));
+                    float* fp = (float*)fresh.DataPointer;
+                    for (long e = 0; e < elems; e++)
+                    {
+                        float clean = zp[e] - sigma * vp[e];
+                        zp[e] = nextT * fp[e] + (1f - nextT) * clean;
+                    }
+                    fresh.Dispose();
+                }
+                else
+                {
+                    float dt = sigmaNext - sigma;
+                    for (long e = 0; e < elems; e++) zp[e] += dt * vp[e];
+                }
+                if (denoised is not null)
+                {
+                    dcw.Apply(z, denoised, sigma);
+                    denoised.Dispose();
+                }
+                vt.Dispose();
                 onProgress?.Invoke(new GenerationProgress(i + 1, steps, sw.Elapsed.TotalMilliseconds));
             }
         }
         finally
         {
             conditions.Dispose();
+            nullConditions?.Dispose();
             context.Dispose();
         }
         Backend.Sync();
@@ -192,5 +316,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
     {
         _silenceFrames?.Dispose();
         _silenceFrames = null;
+        _nullConditionEmb?.Dispose();
+        _nullConditionEmb = null;
     }
 }

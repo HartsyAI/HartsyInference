@@ -117,17 +117,10 @@ public sealed class VibeVoicePipeline : IDisposable
         float scaling = ReadScalar(weights, "model.speech_scaling_factor");
         float bias = ReadScalar(weights, "model.speech_bias_factor");
 
-        // Free the safetensors mmap immediately — every submodule's LoadWeights has
-        // already CastTo'd the bf16 source tensors into fresh F32 copies it owns. Keeping
-        // the loader alive would pin ~3 GB of mmapped bf16 storage we never touch again.
-        // On a 16 GB host this is the difference between fitting prefill + activations
-        // in RAM and getting OOM-killed mid-forward.
-        loader.Dispose();
-        weights = null!;
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
+        // Do NOT dispose the loader: the LM keeps its projection weights as borrowed bf16
+        // mmap views (uploaded/dequanted on first use), so unmapping here segfaults the
+        // first H2D copy. The views' keep-alive roots the mapping; file-backed pages are
+        // evictable, so this pins no RAM. Audio submodules hold their own F32 copies.
         return new VibeVoicePipeline(cfg, lmCfg, tokenizer, processor, lm, acoustic,
             semantic, acousticConnector, semanticConnector, diffusionHead, scaling, bias);
     }
@@ -489,8 +482,9 @@ public sealed class VibeVoicePipeline : IDisposable
     private static unsafe float ReadScalar(IReadOnlyDictionary<string, Tensor> w, string key)
     {
         if (!w.TryGetValue(key, out Tensor? t)) return 1.0f;
-        float* p = (float*)t.DataPointer;
-        return p[0];
+        if (t.DType == DType.F32) return *(float*)t.DataPointer;
+        using Tensor f = t.CastTo(DType.F32);     // checkpoint stores these as bf16 scalars
+        return *(float*)f.DataPointer;
     }
 
     private void ThrowIfDisposed()
@@ -503,8 +497,7 @@ public sealed class VibeVoicePipeline : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _lm.Dispose();
         _tokenizer.Dispose();
-        // The bf16 safetensors loader was disposed inside LoadAsync as soon as all
-        // submodules had cast to F32 — nothing more to release here.
+        // The safetensors mmap unroots once the LM's borrowed weight tensors are collected.
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();

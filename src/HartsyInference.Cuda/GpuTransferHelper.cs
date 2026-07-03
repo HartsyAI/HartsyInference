@@ -31,7 +31,14 @@ internal static unsafe class GpuTransferHelper
         /// The cast result is identical every forward, so it is computed once and reused — avoiding a per-Linear
         /// re-cast of the whole 9.3B weight set on every denoise step. Keyed by the source weight tensor; freed
         /// alongside its weight in <see cref="FreeWeights"/> / <see cref="FreeAllCached"/>.</summary>
-        public readonly Dictionary<Tensor, ulong> WeightCastCache = new(ReferenceEqualityComparer.Instance);
+        public readonly Dictionary<Tensor, (ulong castPtr, nuint bytes)> WeightCastCache = new(ReferenceEqualityComparer.Instance);
+
+        /// <summary>Upload counts for host tensors that miss both caches. A tensor re-uploaded with unchanged host data
+        /// is behaving like a weight, whoever created it — on its second upload it is promoted into the weight cache
+        /// (see <see cref="TryAutoPromote"/>), making pipelines that never call <c>PreloadWeights</c> (the audio stack)
+        /// GPU-resident instead of PCIe-bound. Weak-keyed so tracked tensors stay collectible; the state dies with its
+        /// tensor. Per-State so promotion bookkeeping stays with the backend that owns the device copy.</summary>
+        public readonly ConditionalWeakTable<Tensor, UploadState> UploadTracker = new();
 
         /// <summary>Set of GPU pointers that belong to either cache (skip in FreeDevice).</summary>
         public readonly HashSet<ulong> CachedPointers = new();
@@ -59,6 +66,24 @@ internal static unsafe class GpuTransferHelper
         /// A residency-health metric: during a fully GPU-resident denoise loop this must stay at ~0.</summary>
         public long D2hSyncs;
     }
+
+    /// <summary>Per-tensor H2D upload bookkeeping for weight auto-promotion.</summary>
+    internal sealed class UploadState { public int Count; public bool Promoted; public bool Blocked; }
+
+    /// <summary>Auto-promotion kill switch: set <c>HARTSY_NO_AUTOPROMOTE=1</c> to reproduce the old always-re-upload
+    /// behavior (A/B benchmarking, or if a pipeline mutates host weight data through a stashed raw pointer that
+    /// bypasses <c>DataPointer</c>/<c>AsSpan</c> and so can't be seen by the demote-on-host-access hook).</summary>
+    public static readonly bool AutoPromoteWeights = Environment.GetEnvironmentVariable("HARTSY_NO_AUTOPROMOTE") != "1";
+
+    /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room).
+    /// A promotion that would dip below this floor is skipped and the tensor streams as before. Override via
+    /// <c>HARTSY_AUTOPROMOTE_HEADROOM_MB</c>.</summary>
+    private static readonly long _autoPromoteHeadroomBytes =
+        long.TryParse(Environment.GetEnvironmentVariable("HARTSY_AUTOPROMOTE_HEADROOM_MB"), out long mb) ? mb << 20 : 1536L << 20;
+
+    /// <summary>Tensors below this size are never auto-promoted: small hot tensors are cheap to re-upload and are
+    /// the most likely to be mutated scratch buffers.</summary>
+    private const nuint AutoPromoteMinBytes = 1 << 20;
 
     /// <summary>Registered states keyed by CUDA context handle. Concurrent: registration happens on backend
     /// construction threads while Resolve() reads from compute threads.</summary>
@@ -160,11 +185,17 @@ internal static unsafe class GpuTransferHelper
             return activation.gpuPtr;
         }
 
-        // 3. Cache miss — fresh H2D transfer. The buffer is a transient (the caller frees it via the async
-        // FreeDevice), so allocate it from the stream-ordered pool. cuMemAllocAsync is stream-ordered, so sync the
-        // stream before the synchronous host→device copy to guarantee the allocation has completed.
+        // 3. Second-plus upload of the same unchanged host tensor → promote it to a resident cached weight.
         s.Misses++;
         nuint byteSize = ByteSize(cpuTensor);
+        if (TryAutoPromote(s, cpuTensor, byteSize, out ulong promotedPtr))
+        {
+            return promotedPtr;
+        }
+
+        // 4. Cache miss — fresh H2D transfer. The buffer is a transient (the caller frees it via the async
+        // FreeDevice), so allocate it from the stream-ordered pool. cuMemAllocAsync is stream-ordered, so sync the
+        // stream before the synchronous host→device copy to guarantee the allocation has completed.
         ulong dptr = CudaMemory.Allocate(byteSize);
         if (s.StreamHandle != 0) SyncStream();
         CudaMemory.CopyHostToDevice(dptr, cpuTensor.DataPointer, byteSize);
@@ -207,6 +238,26 @@ internal static unsafe class GpuTransferHelper
         if (gpuPtr != 0 && s.ActivationCache.TryGetValue(tensor, out (ulong gpuPtr, nuint bytes) prev) && prev.gpuPtr != gpuPtr)
             s.CachedPointers.Remove(prev.gpuPtr);
 
+        // In-place op mutated an auto-promoted weight's device buffer (CopyToDevice returned the cached ptr, the
+        // kernel wrote through it). The buffer's contents no longer match host data, so it can't stay a cached
+        // weight: hand ownership to the activation cache (registered below) and block re-promotion. Any cached
+        // dtype-cast of the old contents is stale — free it.
+        if (gpuPtr != 0 && s.WeightCache.TryGetValue(tensor, out ulong promotedPtr) && promotedPtr == gpuPtr
+            && s.UploadTracker.TryGetValue(tensor, out UploadState? promoState) && promoState.Promoted)
+        {
+            promoState.Promoted = false;
+            promoState.Blocked = true;
+            s.WeightCache.Remove(tensor);
+            s.CachedBytes -= (long)byteSize;
+            if (s.WeightCastCache.Remove(tensor, out (ulong castPtr, nuint bytes) staleCast))
+            {
+                s.CachedPointers.Remove(staleCast.castPtr);
+                // Stream-ordered free: in-flight GEMMs may still read the stale cast.
+                CudaMemory.FreeAsync(staleCast.castPtr, s.StreamHandle);
+                s.CachedBytes -= (long)staleCast.bytes;
+            }
+        }
+
         // Do NOT touch tensor.DataPointer here: that would force the lazy host buffer to allocate (and zero) for
         // every GPU-resident activation, the exact host malloc+memset cost we are avoiding. The host buffer is
         // allocated only if/when CPU code actually reads the tensor, inside the sync callback below.
@@ -245,14 +296,19 @@ internal static unsafe class GpuTransferHelper
     }
 
     /// <summary>Returns a cached dtype-upcast of a weight (e.g. fp8→BF16), if one was already computed.</summary>
-    public static bool TryGetWeightCast(Tensor weight, out ulong castPtr) => Resolve().WeightCastCache.TryGetValue(weight, out castPtr);
+    public static bool TryGetWeightCast(Tensor weight, out ulong castPtr)
+    {
+        bool found = Resolve().WeightCastCache.TryGetValue(weight, out (ulong castPtr, nuint bytes) cast);
+        castPtr = cast.castPtr;
+        return found;
+    }
 
     /// <summary>Records a dtype-upcast of a weight so subsequent forwards reuse it instead of re-casting.
     /// The pointer is tracked as cached so <see cref="FreeDevice"/> won't reclaim it as a transient.</summary>
     public static void CacheWeightCast(Tensor weight, ulong castPtr, nuint byteSize)
     {
         State s = Resolve();
-        s.WeightCastCache[weight] = castPtr;
+        s.WeightCastCache[weight] = (castPtr, byteSize);
         s.CachedPointers.Add(castPtr);
         s.CachedBytes += (long)byteSize;
     }
@@ -271,6 +327,75 @@ internal static unsafe class GpuTransferHelper
         CudaMemory.CopyHostToDevice(dptr, weight.DataPointer, byteSize);
 
         RegisterCachedWeight(weight, dptr, byteSize);
+    }
+
+    /// <summary>Promotes a repeatedly-uploaded host tensor into the resident weight cache. Fires on the second
+    /// cache-missing upload of the same tensor object: weights are the only tensors that live long enough to be
+    /// uploaded twice (activations are fresh objects per op), so this catches every weight of pipelines that never
+    /// call <see cref="PreloadWeight"/> at the cost of one duplicate upload. Correctness hinges on the demote hook:
+    /// promotion plants <c>_gpuSyncCallback</c>/<c>_gpuDisposeCallback</c>, so ANY later CPU access (which always
+    /// funnels through <c>EnsureCpuData</c>) or Dispose evicts the device copy before host data can diverge — and
+    /// blocks re-promotion, so host-mutated scratch tensors settle back to plain streaming instead of thrashing.
+    /// Skipped when the promotion would drop free VRAM below <see cref="_autoPromoteHeadroomBytes"/>.</summary>
+    private static bool TryAutoPromote(State s, Tensor cpuTensor, nuint byteSize, out ulong dptr)
+    {
+        dptr = 0;
+        if (!AutoPromoteWeights || byteSize < AutoPromoteMinBytes)
+        {
+            return false;
+        }
+        UploadState state = s.UploadTracker.GetOrCreateValue(cpuTensor);
+        state.Count++;
+        if (state.Blocked || state.Count < 2)
+        {
+            return false;
+        }
+        if (CudaDriverApi.cuMemGetInfo(out nuint free, out _) != 0 || (long)free - (long)byteSize < _autoPromoteHeadroomBytes)
+        {
+            return false;
+        }
+        // Read DataPointer BEFORE planting the demote callbacks — it triggers EnsureCpuData.
+        dptr = CudaMemory.AllocatePersistent(byteSize);
+        CudaMemory.CopyHostToDevice(dptr, cpuTensor.DataPointer, byteSize);
+        RegisterCachedWeight(cpuTensor, dptr, byteSize);
+        state.Promoted = true;
+        // Capture the owning State: demotion must free against this backend's context/stream even if
+        // another backend registers later (same rule as the activation callbacks).
+        cpuTensor._gpuSyncCallback = () => OnPromotedHostAccess(s, cpuTensor);
+        cpuTensor._gpuDisposeCallback = () => OnPromotedHostAccess(s, cpuTensor);
+        return true;
+    }
+
+    /// <summary>Demote hook for auto-promoted weights: fires from <c>EnsureCpuData</c> (host about to read/write) or
+    /// Dispose/finalizer (via the pending-cleanup queue). Frees the device copy (and any cached dtype-cast) after a
+    /// stream sync so in-flight kernels finish first. Host data is authoritative for promoted tensors, so no D2H copy
+    /// is needed. Blocks re-promotion only when an entry was actually evicted — after <see cref="FreeAllCached"/>
+    /// (backend teardown) the stale callback finds nothing and the tensor stays promotable for the next session.</summary>
+    private static void OnPromotedHostAccess(State s, Tensor tensor)
+    {
+        if (!s.UploadTracker.TryGetValue(tensor, out UploadState? state) || !state.Promoted)
+        {
+            return;
+        }
+        state.Promoted = false;
+        s.Context?.EnsureCurrent();
+        if (s.WeightCache.Remove(tensor, out ulong dptr))
+        {
+            state.Blocked = true;
+            s.CachedPointers.Remove(dptr);
+            s.CachedBytes -= (long)ByteSize(tensor);
+            if (s.StreamHandle != 0)
+            {
+                CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
+            }
+            CudaMemory.Free(dptr);
+            if (s.WeightCastCache.Remove(tensor, out (ulong castPtr, nuint bytes) cast))
+            {
+                s.CachedPointers.Remove(cast.castPtr);
+                CudaMemory.Free(cast.castPtr);
+                s.CachedBytes -= (long)cast.bytes;
+            }
+        }
     }
 
     // ── Cache-state hooks for the streaming weight cache ────────────────
@@ -308,12 +433,13 @@ internal static unsafe class GpuTransferHelper
     internal static bool TryUnregisterCachedWeight(Tensor weight, out ulong dptr)
     {
         State s = Resolve();
-        if (s.WeightCastCache.Remove(weight, out ulong castPtr))
+        if (s.WeightCastCache.Remove(weight, out (ulong castPtr, nuint bytes) cast))
         {
-            s.CachedPointers.Remove(castPtr);
+            s.CachedPointers.Remove(cast.castPtr);
             // Stream-ordered free: the cast was allocated via the async pool and may be referenced by
             // GEMMs still in flight on the compute stream; FreeAsync orders the release after them.
-            CudaMemory.FreeAsync(castPtr, s.StreamHandle);
+            CudaMemory.FreeAsync(cast.castPtr, s.StreamHandle);
+            s.CachedBytes -= (long)cast.bytes;
         }
         if (s.WeightCache.Remove(weight, out dptr))
         {
@@ -341,10 +467,11 @@ internal static unsafe class GpuTransferHelper
                 CudaMemory.Free(dptr);
                 s.CachedBytes -= (long)ByteSize(weight);
             }
-            if (s.WeightCastCache.Remove(weight, out ulong castPtr))
+            if (s.WeightCastCache.Remove(weight, out (ulong castPtr, nuint bytes) cast))
             {
-                s.CachedPointers.Remove(castPtr);
-                CudaMemory.Free(castPtr);
+                s.CachedPointers.Remove(cast.castPtr);
+                CudaMemory.Free(cast.castPtr);
+                s.CachedBytes -= (long)cast.bytes;
             }
         }
     }

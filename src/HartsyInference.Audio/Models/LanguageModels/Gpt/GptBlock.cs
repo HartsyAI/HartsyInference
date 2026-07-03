@@ -31,7 +31,7 @@ public sealed unsafe class GptBlock : IDisposable
         _mlpOutW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.out_proj.weight"]);
     }
 
-    public Tensor Forward(IBackend backend, Tensor x, Tensor? causalMask)
+    public Tensor Forward(IBackend backend, Tensor x, Tensor? causalMask, GptKvCache.GptKvLayer? cacheOut = null, int cacheOffset = 0)
     {
         int t = (int)x.Shape[1];
         int h = _cfg.Hidden;
@@ -46,6 +46,13 @@ public sealed unsafe class GptBlock : IDisposable
 
         (Tensor q, Tensor k, Tensor v) = SplitQkv(qkv, t, h);
         qkv.Dispose();
+
+        // Prefill capture: stash the prompt's K/V rows so generation can continue incrementally (ForwardStep).
+        if (cacheOut is not null)
+        {
+            new ReadOnlySpan<float>((void*)k.DataPointer, t * h).CopyTo(cacheOut.K.AsSpan(cacheOffset * h));
+            new ReadOnlySpan<float>((void*)v.DataPointer, t * h).CopyTo(cacheOut.V.AsSpan(cacheOffset * h));
+        }
         Tensor qMh = ToHeads(q, t, nh, d); q.Dispose();
         Tensor kMh = ToHeads(k, t, nh, d); k.Dispose();
         Tensor vMh = ToHeads(v, t, nh, d); v.Dispose();
@@ -71,6 +78,87 @@ public sealed unsafe class GptBlock : IDisposable
         ln2.Dispose();
         backend.Gelu(fc, fc);
         Tensor proj = WhisperOps.ProjectLinear(backend, fc, _mlpOutW!, bias: null, 1, t, _cfg.MlpDim, h);
+        fc.Dispose();
+
+        Tensor res2 = new(res1.Shape, DType.F32);
+        AddInto(res2, res1, proj);
+        res1.Dispose();
+        proj.Dispose();
+        return res2;
+    }
+
+    /// <summary>Single-token decode step against a K/V cache: projections run on the backend (weights stay
+    /// device-resident), the 1×L attention runs on CPU over the cached prefix (K/V never cross PCIe). The new
+    /// token's K/V rows are appended at <paramref name="pos"/>; attention covers rows <c>[0, pos]</c> (causal by
+    /// construction, no mask). Input and output are <c>[1, 1, hidden]</c>.</summary>
+    public Tensor ForwardStep(IBackend backend, Tensor x, GptKvCache.GptKvLayer cache, int pos)
+    {
+        int h = _cfg.Hidden;
+        int nh = _cfg.NumHeads;
+        int d = _cfg.HeadDim;
+
+        // ── Attention (incremental) ──
+        Tensor ln1 = new(x.Shape, DType.F32);
+        backend.LayerNorm(ln1, x, _ln1G!, _ln1B!, 1e-5f);
+        Tensor qkv = WhisperOps.ProjectLinear(backend, ln1, _attW!, bias: null, 1, 1, h, 3 * h);
+        ln1.Dispose();
+
+        float* qkvP = (float*)qkv.DataPointer;
+        new ReadOnlySpan<float>(qkvP + h, h).CopyTo(cache.K.AsSpan(pos * h));
+        new ReadOnlySpan<float>(qkvP + 2 * h, h).CopyTo(cache.V.AsSpan(pos * h));
+
+        int len = pos + 1;
+        float scale = 1f / MathF.Sqrt(d);
+        Tensor attnFlat = new(new TensorShape(1, 1, h), DType.F32);
+        float* outP = (float*)attnFlat.DataPointer;
+        Span<float> scores = len <= 4096 ? stackalloc float[len] : new float[len];
+        for (int head = 0; head < nh; head++)
+        {
+            int hOff = head * d;
+            float* qh = qkvP + hOff;
+            // scores = q · K_head over the cached prefix, softmax in place
+            float max = float.NegativeInfinity;
+            for (int l = 0; l < len; l++)
+            {
+                float dot = 0f;
+                int rowOff = l * h + hOff;
+                for (int j = 0; j < d; j++) dot += qh[j] * cache.K[rowOff + j];
+                dot *= scale;
+                scores[l] = dot;
+                if (dot > max) max = dot;
+            }
+            float sum = 0f;
+            for (int l = 0; l < len; l++)
+            {
+                float e = MathF.Exp(scores[l] - max);
+                scores[l] = e;
+                sum += e;
+            }
+            float inv = 1f / sum;
+            float* oh = outP + hOff;
+            for (int j = 0; j < d; j++) oh[j] = 0f;
+            for (int l = 0; l < len; l++)
+            {
+                float w = scores[l] * inv;
+                int rowOff = l * h + hOff;
+                for (int j = 0; j < d; j++) oh[j] += w * cache.V[rowOff + j];
+            }
+        }
+        qkv.Dispose();
+
+        Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, _outW!, bias: null, 1, 1, h, h);
+        attnFlat.Dispose();
+        Tensor res1 = new(x.Shape, DType.F32);
+        AddInto(res1, x, attnOut);
+        attnOut.Dispose();
+
+        // ── MLP ──
+        Tensor ln2 = new(res1.Shape, DType.F32);
+        backend.LayerNorm(ln2, res1, _ln2G!, _ln2B!, 1e-5f);
+        Tensor fc = WhisperOps.ProjectLinear(backend, ln2, _mlpInW!, bias: null, 1, 1, h, _cfg.MlpDim);
+        ln2.Dispose();
+        backend.Gelu(fc, fc);
+        Tensor proj = WhisperOps.ProjectLinear(backend, fc, _mlpOutW!, bias: null, 1, 1, _cfg.MlpDim, h);
         fc.Dispose();
 
         Tensor res2 = new(res1.Shape, DType.F32);

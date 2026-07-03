@@ -1,0 +1,140 @@
+using System;
+using System.IO;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace HartsyInference.Diffusion.Tests;
+
+/// <summary>Numerical parity for <see cref="AceStep15Guidance"/> (APG with momentum, ADG, plain CFG, DCW Haar
+/// correction) against the UPSTREAM <c>apg_guidance.py</c>/<c>dcw_correction.py</c> modules run verbatim
+/// (<c>tests/python-reference/dump_acestep15_cfg_reference.py</c>). Pure math on vendored fixed tensors
+/// (<c>acestep15_ref/cfg_*.bin</c>) — ungated, no checkpoint, runs everywhere.</summary>
+public sealed unsafe class AceStep15GuidanceParityTests
+{
+    private static readonly string RefDir = Path.Combine(FindRepoRoot(), "tests", "python-reference", "acestep15_ref");
+
+    private readonly ITestOutputHelper _out;
+    public AceStep15GuidanceParityTests(ITestOutputHelper o) => _out = o;
+
+    private static string FindRepoRoot()
+    {
+        string? dir = AppContext.BaseDirectory;
+        while (dir is not null && !File.Exists(Path.Combine(dir, "HartsyInference.sln")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+        return dir ?? ".";
+    }
+
+    private static float[] LoadBin(string name, out int[] shape)
+    {
+        using BinaryReader r = new(File.OpenRead(Path.Combine(RefDir, $"cfg_{name}.bin")));
+        int ndim = r.ReadInt32();
+        shape = new int[ndim];
+        long count = 1;
+        for (int i = 0; i < ndim; i++) { shape[i] = r.ReadInt32(); count *= shape[i]; }
+        float[] data = new float[count];
+        for (long i = 0; i < count; i++) data[i] = r.ReadSingle();
+        return data;
+    }
+
+    private static Tensor ToTensor(float[] data, int t, int c)
+    {
+        Tensor outT = new(new TensorShape(1, t, c), DType.F32);
+        fixed (float* sp = data)
+        {
+            Buffer.MemoryCopy(sp, (void*)outT.DataPointer, data.Length * 4L, data.Length * 4L);
+        }
+        return outT;
+    }
+
+    private static (double maxAbs, double corr) Diff(Tensor a, float[] reference)
+    {
+        float* ap = (float*)a.DataPointer;
+        double mx = 0, sa = 0, sb = 0, sab = 0, saa = 0, sbb = 0;
+        long n = reference.Length;
+        for (long i = 0; i < n; i++)
+        {
+            double x = ap[i], y = reference[i];
+            mx = Math.Max(mx, Math.Abs(x - y));
+            sa += x; sb += y; sab += x * y; saa += x * x; sbb += y * y;
+        }
+        double cov = sab / n - sa / n * (sb / n);
+        double corr = cov / (Math.Sqrt((saa / n - sa / n * (sa / n)) * (sbb / n - sb / n * (sb / n))) + 1e-12);
+        return (mx, corr);
+    }
+
+    [Fact]
+    public void Apg_WithMomentum_MatchesUpstream()
+    {
+        float[] conds = LoadBin("apg_cond", out int[] shp);       // [4, T, C]
+        float[] unconds = LoadBin("apg_uncond", out _);
+        float[] outs = LoadBin("apg_out", out _);
+        int steps = shp[0], t = shp[1], c = shp[2];
+        int stride = t * c;
+        AceStep15Guidance.MomentumBuffer mb = new();
+        for (int k = 0; k < steps; k++)
+        {
+            using Tensor cond = ToTensor(conds[(k * stride)..((k + 1) * stride)], t, c);
+            using Tensor uncond = ToTensor(unconds[(k * stride)..((k + 1) * stride)], t, c);
+            using Tensor guided = AceStep15Guidance.ApgForward(cond, uncond, 7f, mb);
+            (double mx, double corr) = Diff(guided, outs[(k * stride)..((k + 1) * stride)]);
+            _out.WriteLine($"APG step {k}: maxAbs={mx:E3} corr={corr:F8}");
+            Assert.True(mx < 1e-4, $"APG step {k} maxAbs {mx:E3} too large.");
+        }
+    }
+
+    [Fact]
+    public void Adg_MatchesUpstream()
+    {
+        float[] xt = LoadBin("adg_xt", out int[] shp);
+        float[] cond = LoadBin("adg_cond", out _);
+        float[] uncond = LoadBin("adg_uncond", out _);
+        float[] reference = LoadBin("adg_out", out _);
+        int t = shp[0], c = shp[1];
+        using Tensor xtT = ToTensor(xt, t, c);
+        using Tensor cT = ToTensor(cond, t, c);
+        using Tensor uT = ToTensor(uncond, t, c);
+        using Tensor outT = AceStep15Guidance.AdgForward(xtT, cT, uT, 0.6f, 7f);
+        (double mx, double corr) = Diff(outT, reference);
+        _out.WriteLine($"ADG: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(mx < 1e-3, $"ADG maxAbs {mx:E3} too large.");
+    }
+
+    [Fact]
+    public void CfgForward_MatchesUpstream()
+    {
+        float[] cond = LoadBin("adg_cond", out int[] shp);
+        float[] uncond = LoadBin("adg_uncond", out _);
+        float[] reference = LoadBin("cfgf_out", out _);
+        using Tensor cT = ToTensor(cond, shp[0], shp[1]);
+        using Tensor uT = ToTensor(uncond, shp[0], shp[1]);
+        using Tensor outT = AceStep15Guidance.CfgForward(cT, uT, 7f);
+        (double mx, _) = Diff(outT, reference);
+        Assert.True(mx < 1e-5, $"cfg_forward maxAbs {mx:E3} too large.");
+    }
+
+    [Theory]
+    [InlineData("even", "double")]
+    [InlineData("even", "low")]
+    [InlineData("even", "high")]
+    [InlineData("odd", "double")]
+    [InlineData("odd", "low")]
+    [InlineData("odd", "high")]
+    public void Dcw_MatchesUpstream(string tag, string mode)
+    {
+        float[] x = LoadBin($"dcw_{tag}_x", out int[] shp);
+        float[] y = LoadBin($"dcw_{tag}_y", out _);
+        float[] reference = LoadBin($"dcw_{tag}_{mode}", out _);
+        int t = shp[0], c = shp[1];
+        using Tensor xT = ToTensor(x, t, c);
+        using Tensor yT = ToTensor(y, t, c);
+        AceStep15Guidance.DcwCorrector dcw = new(enabled: true, mode, scaler: 0.05f, highScaler: 0.02f);
+        dcw.Apply(xT, yT, 0.75f);
+        (double mx, double corr) = Diff(xT, reference);
+        _out.WriteLine($"DCW {tag}/{mode}: maxAbs={mx:E3} corr={corr:F8}");
+        Assert.True(mx < 1e-4, $"DCW {tag}/{mode} maxAbs {mx:E3} too large.");
+    }
+}

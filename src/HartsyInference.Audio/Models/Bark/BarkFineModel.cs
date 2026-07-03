@@ -8,7 +8,8 @@ namespace HartsyInference.Audio.Models.Bark;
 /// <summary>Bark fine acoustics — a non-causal (bidirectional) GPT that fills EnCodec codebooks 2..7
 /// given the 2 coarse codebooks, in six refinement passes. Eight input codebook embeddings are summed
 /// per timestep; seven output heads predict codebooks 1..7. Reuses the shared <see cref="GptBackbone"/>
-/// in non-causal mode. Deterministic argmax fill (Bark uses low-temp / argmax for fine).</summary>
+/// in non-causal mode. Faithful to upstream <c>generate_fine</c>: 1024-frame windows (512 stride),
+/// CODEBOOK_SIZE placeholder for unfilled slots, temperature-0.5 sampling.</summary>
 public sealed unsafe class BarkFineModel : IDisposable
 {
     private readonly BarkConfig _cfg;
@@ -38,34 +39,56 @@ public sealed unsafe class BarkFineModel : IDisposable
 
     /// <summary>Fills codebooks 2..7 from the 2 coarse codebooks. <paramref name="coarse"/> is
     /// <c>[numCoarse, T]</c>; returns all 8 codebooks <c>[8, T]</c>.</summary>
-    public int[,] Refine(IBackend backend, int[,] coarse)
+    public int[,] Refine(IBackend backend, int[,] coarse, int seed = 0)
     {
         if (_inputEmbeds[0] is null) throw new InvalidOperationException("BarkFineModel weights not loaded.");
         int t = coarse.GetLength(1);
         int h = _cfg.Stage.Hidden;
-        int[,] codes = new int[_cfg.NumCodebooks, t];
-        for (int cb = 0; cb < _cfg.NumCoarseCodebooks; cb++)
-            for (int j = 0; j < t; j++) codes[cb, j] = coarse[cb, j];
+        int padT = Math.Max(1024, t);
+        uint rng = Dsp.DeterministicRng.Seed(seed);
 
-        // Predict codebooks numCoarse..7 in order. HF sums the embeddings of codebooks [0, pred] INCLUSIVE
-        // (the to-be-predicted slot holds a 0 placeholder), then reads lm_head[pred - n_codes_given].
-        for (int pred = _cfg.NumCoarseCodebooks; pred < _cfg.NumCodebooks; pred++)
+        // Upstream generate_fine: unfilled slots (codebooks ≥ numCoarse, and frames beyond T) hold the
+        // CODEBOOK_SIZE placeholder id (1024) — NOT 0 — and the grid is padded to ≥1024 frames because the
+        // non-causal model was trained on absolute positions within 1024-frame windows.
+        int[,] grid = new int[_cfg.NumCodebooks, padT];
+        for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
         {
-            Tensor input = SumEmbeds(codes, pred + 1, t, h);
-            Tensor hidden = _backbone.Forward(backend, input, nonCausal: true);
-            input.Dispose();
-            Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _outHeads[pred - 1]!, bias: null, 1, t, h, _cfg.FineVocab);
-            hidden.Dispose();
-            float* lp = (float*)logits.DataPointer;
-            for (int j = 0; j < t; j++)
+            for (int j = 0; j < padT; j++)
             {
-                int best = 0; float bestV = float.NegativeInfinity;
-                long off = (long)j * _cfg.FineVocab;
-                for (int v = 0; v < _cfg.CodebookSize; v++)   // only the real codebook range is valid
-                    if (lp[off + v] > bestV) { bestV = lp[off + v]; best = v; }
-                codes[pred, j] = best;
+                grid[cb, j] = cb < _cfg.NumCoarseCodebooks && j < t ? coarse[cb, j] : _cfg.CodebookSize;
             }
-            logits.Dispose();
+        }
+
+        // 1024-frame windows sliding by 512; each predicts codebooks numCoarse..7 in order, sampling at
+        // FineTemperature over the real codebook range, writing back so later windows condition on results.
+        int nLoops = Math.Max(0, (int)Math.Ceiling((t - 1024) / 512.0)) + 1;
+        for (int n = 0; n < nLoops; n++)
+        {
+            int startIdx = Math.Min(n * 512, padT - 1024);
+            int startFill = Math.Min(n * 512, padT - 512);
+            int relStart = startFill - startIdx;
+            for (int pred = _cfg.NumCoarseCodebooks; pred < _cfg.NumCodebooks; pred++)
+            {
+                Tensor input = SumEmbedsWindow(grid, pred + 1, startIdx, 1024, h);
+                Tensor hidden = _backbone.Forward(backend, input, nonCausal: true);
+                input.Dispose();
+                Tensor logits = WhisperOps.ProjectLinear(backend, hidden, _outHeads[pred - 1]!, bias: null, 1, 1024, h, _cfg.FineVocab);
+                hidden.Dispose();
+                float* lp = (float*)logits.DataPointer;
+                for (int j = relStart; j < 1024; j++)
+                {
+                    Span<float> slice = new(lp + (long)j * _cfg.FineVocab, _cfg.CodebookSize);
+                    grid[pred, startIdx + j] = Sampling.NucleusSampler.Draw(
+                        slice, _cfg.CodebookSize, _cfg.FineTemperature, 0, 1f, ref rng);
+                }
+                logits.Dispose();
+            }
+        }
+
+        int[,] codes = new int[_cfg.NumCodebooks, t];
+        for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
+        {
+            for (int j = 0; j < t; j++) codes[cb, j] = grid[cb, j];
         }
         return codes;
     }
@@ -85,6 +108,27 @@ public sealed unsafe class BarkFineModel : IDisposable
             bias: null, 1, t, h, _cfg.FineVocab);
         hidden.Dispose();
         return logits;
+    }
+
+    /// <summary>Sums the embeddings of codebooks <c>[0, upTo)</c> over a <paramref name="len"/>-frame window of
+    /// the padded grid starting at <paramref name="start"/> (upstream's <c>in_buffer</c> slice).</summary>
+    private Tensor SumEmbedsWindow(int[,] grid, int upTo, int start, int len, int h)
+    {
+        Tensor outT = new(new TensorShape(1, len, h), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        for (int cb = 0; cb < upTo; cb++)
+        {
+            float* tab = (float*)_inputEmbeds[cb]!.DataPointer;
+            for (int j = 0; j < len; j++)
+            {
+                int id = grid[cb, start + j];
+                if ((uint)id >= (uint)_cfg.FineVocab) id = 0;
+                float* row = tab + (long)id * h;
+                long dst = (long)j * h;
+                for (int c = 0; c < h; c++) op[dst + c] += row[c];
+            }
+        }
+        return outT;
     }
 
     private Tensor SumEmbeds(int[,] codes, int upTo, int t, int h)

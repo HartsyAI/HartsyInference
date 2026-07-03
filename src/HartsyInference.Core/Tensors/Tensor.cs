@@ -162,7 +162,10 @@ public sealed unsafe class Tensor : IDisposable
         return new TensorRef(ptr, Shape, DType, Device);
     }
 
-    /// <summary>Creates a view with a different shape but same underlying data. No copy.</summary>
+    /// <summary>Creates a view with a different shape but same underlying data. No copy. The view roots this
+    /// tensor (see <see cref="_keepAlive"/>): without that, reshaping a temporary (e.g. an <c>EnsureF32</c> cast
+    /// held by nothing else) left the view dangling once GC finalized the parent and freed its buffer — a
+    /// GC-timing-dependent AccessViolation observed in the Qwen3-TTS vocoder after ~9 min of generation.</summary>
     public Tensor Reshape(TensorShape newShape)
     {
         void* ptr = DataPointer;
@@ -171,7 +174,9 @@ public sealed unsafe class Tensor : IDisposable
             throw new HartsyInferenceException(
                 $"Cannot reshape {Shape} ({Shape.ElementCount} elements) to {newShape} ({newShape.ElementCount} elements).");
 
-        return new Tensor(ptr, newShape, DType, Device);
+        Tensor view = new(ptr, newShape, DType, Device);
+        view.SetKeepAlive(this);
+        return view;
     }
 
     /// <summary>Creates a contiguous copy on the specified device. Cross-device requires IBackend.CopyTo.</summary>

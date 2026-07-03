@@ -83,68 +83,119 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         return o;
     }
 
-    /// <summary>Builds the summed input embedding for one frame: <c>text_emb(sem) + Σ codebook_emb(code_i +
-    /// i·codebook_size)</c>, scaled by <c>1/√(N+1)</c>. Returns <c>[1,1,hidden]</c>.</summary>
+    /// <summary>True when <paramref name="id"/> is a <c>&lt;|semantic:i|&gt;</c> token (or the range is unset).</summary>
+    private bool IsSemantic(int id) => _cfg.SemanticBeginId < 0
+        || (id >= _cfg.SemanticBeginId && id < _cfg.SemanticBeginId + _cfg.CodebookSize);
+
+    /// <summary>Builds the summed input embedding for one frame: <c>text_emb(row0) + Σ codebook_emb(code_i +
+    /// i·codebook_size)</c>. Matches upstream <c>BaseTransformer.embed</c>: the codebook sum is ZEROED when row-0
+    /// is not a <c>&lt;|semantic:i|&gt;</c> token (text prompt positions carry only the text embedding). Returns
+    /// <c>[1,1,hidden]</c>.</summary>
     public Tensor EmbedFrame(int semantic, ReadOnlySpan<int> codes)
     {
-        int h = HiddenSize, n = _cfg.NumCodebooks;
-        Tensor outT = new(new TensorShape(1, 1, h), DType.F32);
+        Tensor outT = new(new TensorShape(1, 1, HiddenSize), DType.F32);
+        EmbedFrameInto((float*)outT.DataPointer, semantic, codes);
+        return outT;
+    }
+
+    /// <summary>Builds the summed embeddings for a whole prompt (codebook rows all pad) as <c>[1,T,hidden]</c>,
+    /// for one batched prefill forward.</summary>
+    public Tensor EmbedPrompt(ReadOnlySpan<int> row0)
+    {
+        int h = HiddenSize;
+        Tensor outT = new(new TensorShape(1, row0.Length, h), DType.F32);
         float* op = (float*)outT.DataPointer;
+        Span<int> pad = stackalloc int[_cfg.NumCodebooks];
+        for (int i = 0; i < row0.Length; i++) EmbedFrameInto(op + (long)i * h, row0[i], pad);
+        return outT;
+    }
+
+    private void EmbedFrameInto(float* op, int semantic, ReadOnlySpan<int> codes)
+    {
+        int h = HiddenSize, n = _cfg.NumCodebooks;
         float* tp = (float*)_textEmb!.DataPointer + (long)semantic * h;
         float* cb = (float*)_codebookEmb!.DataPointer;
         for (int c = 0; c < h; c++) op[c] = tp[c];
-        for (int i = 0; i < n && i < codes.Length; i++)
+        if (IsSemantic(semantic))
         {
-            float* row = cb + (long)(codes[i] + i * _cfg.CodebookSize) * h;
-            for (int c = 0; c < h; c++) op[c] += row[c];
+            for (int i = 0; i < n && i < codes.Length; i++)
+            {
+                float* row = cb + (long)(codes[i] + i * _cfg.CodebookSize) * h;
+                for (int c = 0; c < h; c++) op[c] += row[c];
+            }
         }
         if (_cfg.ScaleCodebookEmbeddings)
         {
             float scale = 1f / MathF.Sqrt(n + 1);
             for (int c = 0; c < h; c++) op[c] *= scale;
         }
-        return outT;
     }
 
     /// <summary>Allocates the slow-backbone decode cache (efficient <see cref="FixedKvCache"/>) for the AR loop;
     /// pass it to <see cref="GenerateFrame"/> each step. Dispose when the utterance completes.</summary>
     public IKvCache CreateSlowCache(int maxSeqLen) => _backbone.CreateDecodeCache(maxSeqLen);
 
-    /// <summary>One frame: slow step → next semantic token + the 8 codebook tokens (fast depth AR).</summary>
-    public (int Semantic, int[] Codes) GenerateFrame(IBackend backend, Tensor frameEmbed, int posStart,
-        IKvCache slowCache, ref uint rng)
+    /// <summary>Runs the slow backbone over <paramref name="frameEmbeds"/> (<c>[1,T,hidden]</c>) and returns the
+    /// PRE-final-norm hidden state of the LAST position as <c>[1,1,hidden]</c> (upstream <c>forward_generate</c>:
+    /// the slow head normalizes, the fast model consumes the pre-norm hidden).</summary>
+    public Tensor ForwardHidden(IBackend backend, Tensor frameEmbeds, int t, int posStart, IKvCache slowCache)
+    {
+        int h = HiddenSize;
+        Tensor hidden = _backbone.ForwardEmbeds(backend, frameEmbeds, 1, t, posStart, slowCache, applyFinalNorm: false);
+        if (t == 1) return hidden;
+        Tensor last = new(new TensorShape(1, 1, h), DType.F32);
+        Buffer.MemoryCopy((float*)hidden.DataPointer + (long)(t - 1) * h, (void*)last.DataPointer, h * 4, h * 4);
+        hidden.Dispose();
+        return last;
+    }
+
+    /// <summary>Samples one frame from the pre-norm slow hidden (<c>[1,1,hidden]</c>), the port of upstream
+    /// <c>decode_one_token_ar</c>: slow head → semantic token (full text vocab); codebook 0 is DERIVED as
+    /// <c>semantic − SemanticBeginId</c> (clamped ≥ 0, pos-0 fast logits discarded); the fast depth AR then
+    /// samples codebooks 1..N−1. <paramref name="recent"/> = trailing generated frames (each
+    /// <c>[semantic, code0..codeN−1]</c>) for the windowed repetition penalty; null = no penalty.</summary>
+    public (int Semantic, int[] Codes) SampleFrame(IBackend backend, Tensor hidden, ref uint rng,
+        IReadOnlyList<int[]>? recent = null)
     {
         int h = HiddenSize, n = _cfg.NumCodebooks;
-        // norm_fastlayer_input=False: the fast model consumes the PRE-final-norm slow hidden, while the slow head
-        // is applied to the POST-norm hidden (output(norm(x))). So skip the final norm here and apply it only
-        // for the slow head.
-        Tensor hidden = _backbone.ForwardEmbeds(backend, frameEmbed, 1, 1, posStart, slowCache, applyFinalNorm: false);
         Tensor slowPost = new(hidden.Shape, DType.F32);
         backend.RmsNorm(slowPost, hidden, _slowNorm!, _cfg.Backbone.RmsNormEps);
 
         // Slow head → semantic token.
         Tensor slowLogits = WhisperOps.ProjectLinear(backend, slowPost, _slowHead!, null, 1, 1, h, _cfg.TextVocab);
         slowPost.Dispose();
-        int semantic = NucleusSampler.Draw(new Span<float>((void*)slowLogits.DataPointer, _cfg.TextVocab),
-            _cfg.TextVocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+        Span<float> sl = new((void*)slowLogits.DataPointer, _cfg.TextVocab);
+        ApplyRepetitionPenalty(sl, recent, 0);
+        int semantic = NucleusSampler.Draw(sl, _cfg.TextVocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
         slowLogits.Dispose();
 
-        // Fast depth transformer over the codebook axis.
+        // Fast depth transformer over the codebook axis (fresh cache per frame, as upstream).
         int[] codes = new int[n];
         int fastDim = _cfg.Fast.HiddenSize;
         using IKvCache fastCache = _fast.CreateDecodeCache(n + 1);
         Tensor depthIn = ProjectSlow(backend, hidden, fastDim);   // step 0 input = slow hidden
-        hidden.Dispose();
-        for (int k = 0; k < n; k++)
+        int start = 0;
+        if (_cfg.SemanticBeginId >= 0)
         {
-            Tensor fh = _fast.ForwardEmbeds(backend, depthIn, 1, 1, k, fastCache);
+            // Upstream: pos-0 fast forward only fills the cache; codebook 0 comes from the semantic token.
+            _fast.ForwardEmbeds(backend, depthIn, 1, 1, 0, fastCache, applyFinalNorm: false).Dispose();
+            depthIn.Dispose();
+            int a = semantic - _cfg.SemanticBeginId;
+            codes[0] = Math.Clamp(a, 0, _cfg.CodebookSize - 1);
+            depthIn = EmbedFast(codes[0], fastDim);
+            start = 1;
+        }
+        for (int k = start; k < n; k++)
+        {
+            Tensor fh = _fast.ForwardEmbeds(backend, depthIn, 1, 1, k, fastCache, applyFinalNorm: false);
             depthIn.Dispose();
             Tensor normed = new(fh.Shape, DType.F32);
             backend.RmsNorm(normed, fh, _fastNorm!, _cfg.Fast.RmsNormEps); fh.Dispose();
             Tensor cl = WhisperOps.ProjectLinear(backend, normed, _fastOut!, null, 1, 1, fastDim, _cfg.CodebookSize);
             normed.Dispose();
-            int tok = NucleusSampler.Draw(new Span<float>((void*)cl.DataPointer, _cfg.CodebookSize),
-                _cfg.CodebookSize, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+            Span<float> fl = new((void*)cl.DataPointer, _cfg.CodebookSize);
+            ApplyRepetitionPenalty(fl, recent, k + 1);
+            int tok = NucleusSampler.Draw(fl, _cfg.CodebookSize, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
             cl.Dispose();
             codes[k] = tok;
             if (k < n - 1) depthIn = EmbedFast(tok, fastDim);
@@ -152,6 +203,31 @@ public sealed unsafe class FishSpeechDualAr : IDisposable
         }
         depthIn.Dispose();
         return (semantic, codes);
+    }
+
+    /// <summary>One frame: slow step → next semantic token + the N codebook tokens (fast depth AR).</summary>
+    public (int Semantic, int[] Codes) GenerateFrame(IBackend backend, Tensor frameEmbed, int posStart,
+        IKvCache slowCache, ref uint rng)
+    {
+        Tensor hidden = ForwardHidden(backend, frameEmbed, 1, posStart, slowCache);
+        (int Semantic, int[] Codes) r = SampleFrame(backend, hidden, ref rng);
+        hidden.Dispose();
+        return r;
+    }
+
+    // Upstream logits_to_probs: penalize each distinct token in the trailing window once (score<0 ? ×p : ÷p).
+    private void ApplyRepetitionPenalty(Span<float> logits, IReadOnlyList<int[]>? recent, int row)
+    {
+        float p = _cfg.RepetitionPenalty;
+        if (recent is null || recent.Count == 0 || p == 1f) return;
+        HashSet<int> seen = [];
+        foreach (int[] frame in recent)
+        {
+            int tok = frame[row];
+            if ((uint)tok >= (uint)logits.Length || !seen.Add(tok)) continue;
+            float s = logits[tok];
+            logits[tok] = s < 0 ? s * p : s / p;
+        }
     }
 
     /// <summary>Diagnostics — runs the full-sequence slow path (summed embed → backbone → slow head) and returns

@@ -76,18 +76,18 @@ public sealed record AceStep15Config
     /// false for base/sft (continuous schedule + CFG). From the checkpoint's <c>is_turbo</c>.</summary>
     public bool IsTurbo { get; init; } = true;
 
-    /// <summary>Condition-encoder width. XL keeps the 2B-sized encoder (<c>encoder_hidden_size</c>) under a
-    /// wider decoder; for 2B checkpoints these equal the decoder dims.</summary>
-    public int EncoderHiddenSize { get; init; } = 2048;
+    /// <summary>Condition-encoder width (<c>encoder_hidden_size</c>). 0 = same as the decoder (all 2B
+    /// checkpoints); XL keeps a 2048-wide encoder under a 2560-wide decoder.</summary>
+    public int EncoderHiddenSize { get; init; }
 
-    /// <summary>Condition-encoder SwiGLU inner dim (<c>encoder_intermediate_size</c>).</summary>
-    public int EncoderIntermediateSize { get; init; } = 6144;
+    /// <summary>Condition-encoder SwiGLU inner dim (<c>encoder_intermediate_size</c>); 0 = decoder's.</summary>
+    public int EncoderIntermediateSize { get; init; }
 
-    /// <summary>Condition-encoder query heads (<c>encoder_num_attention_heads</c>).</summary>
-    public int EncoderNumHeads { get; init; } = 16;
+    /// <summary>Condition-encoder query heads (<c>encoder_num_attention_heads</c>); 0 = decoder's.</summary>
+    public int EncoderNumHeads { get; init; }
 
-    /// <summary>Condition-encoder key/value heads (<c>encoder_num_key_value_heads</c>).</summary>
-    public int EncoderNumKvHeads { get; init; } = 8;
+    /// <summary>Condition-encoder key/value heads (<c>encoder_num_key_value_heads</c>); 0 = decoder's.</summary>
+    public int EncoderNumKvHeads { get; init; }
 
     /// <summary>True for layers using the 128-token sliding window: even indices (the reference computes
     /// <c>"sliding_attention" if (i + 1) % 2 else "full_attention"</c>, so layer 0 slides, layer 1 is full, …).
@@ -96,6 +96,11 @@ public sealed record AceStep15Config
 
     /// <summary>Latent frames for a duration at 25 Hz.</summary>
     public int LatentFrames(double durationSeconds) => (int)Math.Round(durationSeconds * LatentRate);
+
+    /// <summary>The exact frame count the pipeline generates for a duration (patch-aligned, floor 4·patch) —
+    /// lmHints must match this length.</summary>
+    public int FrameCount(double durationSeconds)
+        => Math.Max(4 * PatchSize, (LatentFrames(durationSeconds) + PatchSize - 1) / PatchSize * PatchSize);
 
     /// <summary>The fixed turbo timestep table (8 descending values; the final step integrates to 0). The shift is
     /// snapped to the nearest of the reference's <c>VALID_SHIFTS</c> [1, 2, 3]. These tables are exactly
@@ -122,6 +127,18 @@ public sealed record AceStep15Config
 
     /// <summary>The published v1.5 turbo 2B model.</summary>
     public static AceStep15Config Turbo => new();
+
+    /// <summary>The condition-side config (upstream's <c>encoder_config = deepcopy(config)</c> with the
+    /// <c>encoder_*</c> dims): the condition encoder, tokenizer/detokenizer, and null_condition_emb all run at
+    /// encoder width. Identity for 2B checkpoints; XL keeps a 2048-wide encoder under a 2560-wide decoder.</summary>
+    public AceStep15Config EncoderVariant() => this with
+    {
+        HiddenSize = EncoderHiddenSize > 0 ? EncoderHiddenSize : HiddenSize,
+        IntermediateSize = EncoderIntermediateSize > 0 ? EncoderIntermediateSize : IntermediateSize,
+        NumHeads = EncoderNumHeads > 0 ? EncoderNumHeads : NumHeads,
+        NumKvHeads = EncoderNumKvHeads > 0 ? EncoderNumKvHeads : NumKvHeads,
+        EncoderHiddenSize = 0, EncoderIntermediateSize = 0, EncoderNumHeads = 0, EncoderNumKvHeads = 0,
+    };
 
     /// <summary>Builds a config from a checkpoint's <c>config.json</c> (upstream
     /// <c>configuration_acestep_v15.py</c> keys). Missing keys keep the 2B turbo defaults; XL's

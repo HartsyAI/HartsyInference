@@ -46,7 +46,10 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
     {
         // Real layout: small_to_mtp_projection + the 15 lm_heads sit under `talker.code_predictor.*`; the body
         // and the 15 per-codebook codec_embedding tables sit under `talker.code_predictor.model.*`.
-        _smallToMtpW = WhisperOps.EnsureF32(w[$"{prefix}.small_to_mtp_projection.weight"]);
+        // 0.6B checkpoints omit the projection entirely (talker hidden == MTP hidden == 1024 → identity);
+        // only the 2048-wide 1.7B talker ships it.
+        _smallToMtpW = w.TryGetValue($"{prefix}.small_to_mtp_projection.weight", out Tensor? smallToMtp)
+            ? WhisperOps.EnsureF32(smallToMtp) : null;
         _smallToMtpB = TryGet(w, $"{prefix}.small_to_mtp_projection.bias");
         for (int k = 0; k < _cfg.MtpCodebooks; k++)
         {
@@ -92,12 +95,12 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
         using IKvCache cache = _body.CreateDecodeCache(depth + 2);
 
         // Position 0: projected talker hidden (builds KV, no prediction).
-        Tensor cond = WhisperOps.ProjectLinear(backend, talkerHidden, _smallToMtpW!, _smallToMtpB, 1, 1, talkerH, mtpHidden);
+        Tensor cond = ProjectToMtp(backend, talkerHidden, talkerH, mtpHidden);
         Tensor h0 = _body.ForwardEmbeds(backend, cond, 1, 0, cache);
         cond.Dispose(); h0.Dispose();
 
         // Position 1: codebook-0 embedded via the talker table, projected -> predict codebook 1.
-        Tensor proj1 = WhisperOps.ProjectLinear(backend, code0Embed, _smallToMtpW!, _smallToMtpB, 1, 1, talkerH, mtpHidden);
+        Tensor proj1 = ProjectToMtp(backend, code0Embed, talkerH, mtpHidden);
         Tensor h1 = _body.ForwardEmbeds(backend, proj1, 1, 1, cache);
         proj1.Dispose();
         codes[0] = ArgmaxHead(backend, h1, 0, mtpHidden);
@@ -107,7 +110,7 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
         for (int g = 1; g < depth; g++)
         {
             Tensor emb = CodecEmbedRow(g - 1, codes[g - 1], talkerH);
-            Tensor proj = WhisperOps.ProjectLinear(backend, emb, _smallToMtpW!, _smallToMtpB, 1, 1, talkerH, mtpHidden);
+            Tensor proj = ProjectToMtp(backend, emb, talkerH, mtpHidden);
             emb.Dispose();
             Tensor hidden = _body.ForwardEmbeds(backend, proj, 1, g + 1, cache);
             proj.Dispose();
@@ -116,6 +119,13 @@ public sealed unsafe class Qwen3MtpCodePredictor : IDisposable
         }
         return codes;
     }
+
+    /// <summary>Talker-width → MTP-width projection; identity copy when the checkpoint has no projection
+    /// (0.6B: both widths are 1024).</summary>
+    private Tensor ProjectToMtp(IBackend backend, Tensor x, int talkerH, int mtpHidden)
+        => _smallToMtpW is null
+            ? x.To(x.Device)
+            : WhisperOps.ProjectLinear(backend, x, _smallToMtpW, _smallToMtpB, 1, 1, talkerH, mtpHidden);
 
     /// <summary>Projects the MTP hidden through <c>lm_head[g]</c> and returns the argmax (greedy) codebook token.</summary>
     private int ArgmaxHead(IBackend backend, Tensor hidden, int g, int mtpHidden)

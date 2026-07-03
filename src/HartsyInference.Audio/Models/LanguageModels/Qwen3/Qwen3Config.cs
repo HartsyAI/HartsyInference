@@ -28,6 +28,15 @@ public sealed record Qwen3Config
         HeadDim = 128, IntermediateSize = 6_144,
     };
 
+    /// <summary>Qwen3-TTS talker backbone (0.6B): hidden 1024 / 28L / 16 heads / 8 KV / head_dim 128 /
+    /// SwiGLU 3072 / RoPE θ=1e6 (verified against Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice config.json;
+    /// its code-predictor is identical to the 1.7B's).</summary>
+    public static Qwen3Config Talker0_6B => new()
+    {
+        HiddenSize = 1_024, NumHiddenLayers = 28, NumAttentionHeads = 16, NumKeyValueHeads = 8,
+        HeadDim = 128, IntermediateSize = 3_072,
+    };
+
     /// <summary>Qwen3-TTS code-predictor (MTP) — 5-layer depth transformer (plain 1D RoPE).</summary>
     public static Qwen3Config CodePredictor => new()
     {

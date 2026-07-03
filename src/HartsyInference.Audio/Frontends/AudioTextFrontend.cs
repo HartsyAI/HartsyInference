@@ -30,12 +30,12 @@ public static class AudioTextFrontend
         return _llama.Value;
     }
 
-    /// <summary>Dia takes raw UTF-8 bytes (0–255), one int per byte. Speaker tags like <c>[S1]</c>/<c>[S2]</c>
-    /// are written inline in <paramref name="text"/> by the caller; there is no trained tokenizer.</summary>
+    /// <summary>Dia takes raw UTF-8 bytes (0–255), one int per byte. Inline speaker tags <c>[S1]</c>/<c>[S2]</c>
+    /// become bytes 0x01/0x02 (upstream <c>_encode_text</c>); there is no trained tokenizer.</summary>
     public static int[] DiaBytes(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        byte[] utf8 = Encoding.UTF8.GetBytes(text);
+        byte[] utf8 = Encoding.UTF8.GetBytes(text.Replace("[S1]", "\u0001").Replace("[S2]", "\u0002"));
         int[] ids = new int[utf8.Length];
         for (int i = 0; i < utf8.Length; i++)
         {
@@ -83,6 +83,9 @@ public static class AudioTextFrontend
         }
         return _qwen3.Value.EncodeOrdinary(text);
     }
+
+    /// <summary>Decodes base-vocab Qwen BPE ids back to text (specials are the caller's problem).</summary>
+    public static string Qwen3Decode(IReadOnlyList<int> ids) => _qwen3.Value.Decode(ids);
 
     private const int Llama3Bos = 128000;
     private const int Llama3Eos = 128001;

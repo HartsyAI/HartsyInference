@@ -13,9 +13,10 @@ using DacModel = HartsyInference.Audio.Models.Codecs.Dac.Dac;
 namespace HartsyInference.Audio.Pipelines;
 
 /// <summary>Dia text-to-dialogue pipeline: encode byte text (conditional + unconditional for CFG), then
-/// run the cross-attending decoder one frame at a time over the 9-channel delayed code grid, CFG-combine the
-/// per-channel logits, sample, and once channel 0 emits EOS flush the remaining delay before reverting the
-/// delay and DAC-decoding to 44.1 kHz audio. Reuses <see cref="MusicGenDelay"/>, <see cref="NucleusSampler"/>,
+/// run the cross-attending decoder one frame at a time over the 9-channel delayed code grid, pick candidates
+/// from the top-K of the CFG-combined logits but sample the CONDITIONAL distribution over them (upstream
+/// cfg_filter_top_k), and once channel 0 emits EOS flush each channel's delayed EOS/PAD tail before reverting
+/// the delay and DAC-decoding to 44.1 kHz audio. Reuses <see cref="MusicGenDelay"/>, <see cref="NucleusSampler"/>,
 /// and the built DAC. CFG uses two decoder instances sharing weights (separate cross-KV + self-cache).</summary>
 public sealed unsafe class DiaPipeline : IDisposable
 {
@@ -81,7 +82,8 @@ public sealed unsafe class DiaPipeline : IDisposable
         return pk.GetAllTensors();
     }
 
-    /// <summary>Generates 44.1 kHz mono PCM from byte-level text token ids (UTF-8 bytes, speaker tags inline).</summary>
+    /// <summary>Generates 44.1 kHz mono PCM from byte-level text token ids (UTF-8 bytes, speaker tags inline —
+    /// literal <c>[S1]</c>/<c>[S2]</c> byte runs are folded to 0x01/0x02 like upstream <c>_encode_text</c>).</summary>
     public float[] Generate(IBackend backend, ReadOnlySpan<int> textBytes, int maxTokens = 1720, int seed = 0,
         Action<GenerationProgress>? progress = null)
     {
@@ -92,7 +94,7 @@ public sealed unsafe class DiaPipeline : IDisposable
         int maxDelay = _cfg.MaxDelay;
 
         // Encode conditional + unconditional (all-pad) text and cache cross-KV per branch.
-        int[] cond = textBytes.ToArray();
+        int[] cond = FoldSpeakerTags(textBytes, _cfg.MaxText);
         int[] uncond = new int[Math.Max(1, cond.Length)];
         Array.Fill(uncond, _cfg.TextPad);
         Tensor encCond = _encoder.Forward(backend, cond);
@@ -115,23 +117,40 @@ public sealed unsafe class DiaPipeline : IDisposable
         for (int s = 0; s < cap - 1; s++)
         {
             for (int c = 0; c < ch; c++) frame[c] = grid[s, c];
-            float[][] logits = StepCfg(backend, frame, s, cacheC, cacheU);
+            (float[][] lc, float[][] lg) = StepCfg(backend, frame, s, cacheC, cacheU);
 
             int target = s + 1;
             for (int c = 0; c < ch; c++)
             {
-                if (target < delay[c]) { grid[target, c] = _cfg.AudioBos; continue; }
-                if (eosStep >= 0) { grid[target, c] = target >= delay[c] + eosStep ? _cfg.AudioPad : SampleChannel(logits[c], c, ref rng); continue; }
-                int tok = SampleChannel(logits[c], c, ref rng);
-                grid[target, c] = tok;
-                if (c == 0 && tok == _cfg.AudioEos && eosStep < 0) eosStep = target;
+                // BOS lead-in runs through t == delay[c] (upstream apply_audio_delay: BOS where t - delay <= 0).
+                if (target <= delay[c]) { grid[target, c] = _cfg.AudioBos; continue; }
+                if (eosStep >= 0)
+                {
+                    // EOS flush: EOS lands at exactly eosStep + delay[c], PAD after, sampled before (model.py:729-741).
+                    int off = target - eosStep;
+                    grid[target, c] = off == delay[c] ? _cfg.AudioEos
+                        : off > delay[c] ? _cfg.AudioPad
+                        : SampleChannel(lc[c], lg[c], c, ref rng);
+                    continue;
+                }
+                grid[target, c] = SampleChannel(lc[c], lg[c], c, ref rng);
             }
-            if (eosStep >= 0 && s >= eosStep + maxDelay) { lastStep = target; break; }
+            if (eosStep < 0 && grid[target, 0] == _cfg.AudioEos) eosStep = target;
+            // Near the cap, force the flush so every channel closes cleanly (model.py:721 is_max_len).
+            if (eosStep < 0 && target >= cap - 1 - maxDelay) { eosStep = target; grid[target, 0] = _cfg.AudioEos; }
+            if (eosStep >= 0 && target >= eosStep + maxDelay) { lastStep = target; break; }
             if (progress != null && (s & 63) == 0) progress(new(s, cap, sw.Elapsed.TotalMilliseconds));
+            // Two CFG streams double per-step device pressure; trim the pool periodically on long runs.
+            if ((s & 255) == 255) backend.TrimMemoryPool();
         }
 
-        // Revert delay to real codes, strip the BOS prefill row, keep only valid DAC codes.
-        int tReal = Math.Max(0, lastStep - maxDelay);
+        // Codes are host-side ints now; reclaim the AR loop's device activations + pool before the DAC decode
+        // (the CFG double-stream loop otherwise leaves enough resident to OOM 12GB cards at the vocoder).
+        backend.FreeActivations();
+        backend.TrimMemoryPool();
+
+        // Revert delay to real codes, strip the BOS prefill row and the EOS frame (upstream length = eosStep - 1).
+        int tReal = Math.Max(0, (eosStep >= 0 ? eosStep - 1 : lastStep - maxDelay));
         if (tReal <= 0) { Logs.Warning("Dia: no audio frames generated."); return []; }
         int[,] delayedReal = new int[lastStep, ch];
         for (int s = 0; s < lastStep; s++)
@@ -142,7 +161,7 @@ public sealed unsafe class DiaPipeline : IDisposable
         int* cp = (int*)codes.DataPointer;
         for (int c = 0; c < ch; c++)
             for (int j = 0; j < tReal; j++)
-                cp[(long)c * tReal + j] = Math.Clamp(real[j, c], 0, 1023);
+                cp[(long)c * tReal + j] = (uint)real[j, c] > 1023u ? 0 : real[j, c];   // invalid codes → 0 (model.py:509-512)
 
         Tensor audioT = _dac.Decode(backend, codes, batch: 1, tFrames: tReal);
         codes.Dispose();
@@ -156,8 +175,9 @@ public sealed unsafe class DiaPipeline : IDisposable
         return audio;
     }
 
-    /// <summary>Steps both CFG branches and returns per-channel CFG-combined logits.</summary>
-    private float[][] StepCfg(IBackend backend, ReadOnlySpan<int> frame, int posStart, StreamingKvCache cacheC, StreamingKvCache cacheU)
+    /// <summary>Steps both CFG branches and returns per-channel (conditional, CFG-combined) logits.</summary>
+    private (float[][] Cond, float[][] Guided) StepCfg(IBackend backend, ReadOnlySpan<int> frame, int posStart,
+        StreamingKvCache cacheC, StreamingKvCache cacheU)
     {
         Tensor lc = _decCond.StepLogits(backend, frame, posStart, cacheC);
         Tensor lu = _decUncond.StepLogits(backend, frame, posStart, cacheU);
@@ -165,29 +185,76 @@ public sealed unsafe class DiaPipeline : IDisposable
         float* pu = (float*)lu.DataPointer;
         int v = _cfg.AudioVocab;
         float g = _cfg.CfgScale;
-        float[][] outL = new float[_cfg.Channels][];
+        float[][] condL = new float[_cfg.Channels][];
+        float[][] guidedL = new float[_cfg.Channels][];
         for (int c = 0; c < _cfg.Channels; c++)
         {
-            float[] arr = new float[v];
+            float[] cArr = new float[v];
+            float[] gArr = new float[v];
             long baseOff = (long)c * v;
             for (int i = 0; i < v; i++)
             {
                 float cond = pc[baseOff + i], uncond = pu[baseOff + i];
-                arr[i] = cond + g * (cond - uncond);
+                cArr[i] = cond;
+                gArr[i] = cond + g * (cond - uncond);
             }
-            outL[c] = arr;
+            condL[c] = cArr;
+            guidedL[c] = gArr;
         }
         lc.Dispose(); lu.Dispose();
-        return outL;
+        return (condL, guidedL);
     }
 
-    /// <summary>Samples one channel's token; masks PAD/BOS always and EOS for channels &gt; 0.</summary>
-    private int SampleChannel(float[] logits, int channel, ref uint rng)
+    private int SampleChannel(float[] cond, float[] guided, int channel, ref uint rng)
+        => SampleDiaChannel(cond, guided, channel, _cfg, ref rng);
+
+    /// <summary>Faithful Dia sampling (model.py:440-464 + _sample_next_token): the candidate set is the
+    /// top-<c>TopK</c> of the CFG-combined logits, but the distribution sampled is the CONDITIONAL logits
+    /// restricted to it; PAD/BOS/1027 are masked for all channels and EOS for channels &gt; 0; EOS is masked
+    /// unless it is the argmax, in which case it is forced.</summary>
+    internal static int SampleDiaChannel(float[] cond, float[] guided, int channel, DiaConfig cfg, ref uint rng)
     {
-        logits[_cfg.AudioPad] = float.NegativeInfinity;
-        logits[_cfg.AudioBos] = float.NegativeInfinity;
-        if (channel != 0) logits[_cfg.AudioEos] = float.NegativeInfinity;
-        return NucleusSampler.Draw(logits, _cfg.AudioVocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
+        int v = cfg.AudioVocab;
+        int k = Math.Min(cfg.TopK, v);
+        int[] order = new int[v];
+        for (int i = 0; i < v; i++) order[i] = i;
+        Array.Sort(order, (a, b) => guided[b].CompareTo(guided[a]));
+        float[] arr = new float[v];
+        Array.Fill(arr, float.NegativeInfinity);
+        for (int r = 0; r < k; r++) arr[order[r]] = cond[order[r]];
+        for (int i = cfg.AudioEos + 1; i < v; i++) arr[i] = float.NegativeInfinity;
+        if (channel != 0) arr[cfg.AudioEos] = float.NegativeInfinity;
+        int top = 0;
+        for (int i = 1; i < v; i++) if (arr[i] > arr[top]) top = i;
+        if (top == cfg.AudioEos)
+        {
+            for (int i = 0; i < cfg.AudioEos; i++) arr[i] = float.NegativeInfinity;   // force EOS
+        }
+        else
+        {
+            arr[cfg.AudioEos] = float.NegativeInfinity;   // EOS only when it is the argmax
+        }
+        return NucleusSampler.Draw(arr, v, cfg.Temperature, 0, cfg.TopP, ref rng);
+    }
+
+    /// <summary>Replaces literal <c>[S1]</c>/<c>[S2]</c> byte runs with 0x01/0x02 (upstream _encode_text)
+    /// and truncates to <paramref name="maxLen"/>. Idempotent for callers that already folded the tags.</summary>
+    internal static int[] FoldSpeakerTags(ReadOnlySpan<int> textBytes, int maxLen)
+    {
+        List<int> ids = new(textBytes.Length);
+        for (int i = 0; i < textBytes.Length; i++)
+        {
+            if (i + 3 < textBytes.Length && textBytes[i] == '[' && textBytes[i + 1] == 'S'
+                && (textBytes[i + 2] == '1' || textBytes[i + 2] == '2') && textBytes[i + 3] == ']')
+            {
+                ids.Add(textBytes[i + 2] - '0');
+                i += 3;
+                continue;
+            }
+            ids.Add(textBytes[i]);
+        }
+        if (ids.Count > maxLen) ids.RemoveRange(maxLen, ids.Count - maxLen);
+        return [.. ids];
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

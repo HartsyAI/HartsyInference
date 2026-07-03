@@ -10,13 +10,15 @@ namespace HartsyInference.Audio.Tests;
 public sealed class AudioTextFrontendTests
 {
     [Fact]
-    public void DiaBytes_AreRawUtf8_OneIntPerByte()
+    public void DiaBytes_AreRawUtf8_WithSpeakerTagsFoldedTo1And2()
     {
         const string text = "[S1] Hello there. [S2] Hi!";
         int[] ids = AudioTextFrontend.DiaBytes(text);
-        byte[] expected = Encoding.UTF8.GetBytes(text);
+        byte[] expected = Encoding.UTF8.GetBytes("\u0001 Hello there. \u0002 Hi!");
 
         Assert.Equal(expected.Length, ids.Length);
+        Assert.Equal(1, ids[0]);                // [S1] → 0x01 (upstream _encode_text)
+        Assert.Contains(2, ids);                // [S2] → 0x02
         for (int i = 0; i < expected.Length; i++)
         {
             Assert.Equal(expected[i], ids[i]);
