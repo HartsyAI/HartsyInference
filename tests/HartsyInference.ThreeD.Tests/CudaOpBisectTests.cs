@@ -10,6 +10,10 @@ namespace HartsyInference.ThreeD.Tests;
 /// <summary>Bisect: CPU vs CUDA parity for the individual ops the TripoSR Transformer1D backbone uses with its
 /// unusual shapes (GroupNorm over [1,C,N,1], ConvTranspose2d k2/s2 upsample, Linear/SDPA over N=1024 tokens).
 /// Isolates a CUDA-specific op bug. Gated on PTX presence.</summary>
+// GpuIntegration: needs a real CUDA device. The PTX-dir existence check is not enough — the hosted
+// CI runner ships the PTX but has no GPU, so CudaBackend construction/ops fail there. Runs on the
+// self-hosted CUDA lane only.
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaOpBisectTests
 {
     private readonly ITestOutputHelper _out;

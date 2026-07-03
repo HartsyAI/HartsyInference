@@ -31,6 +31,9 @@ public class OasisPipelineTests
         return (dit, vae);
     }
 
+    // SyntheticSmoke: full autoregressive rollout on synthetic weights; can hard-crash the CPU test
+    // host (native heap corruption) until Oasis is CPU-validated. Runs on the GPU lane. See CODE_STYLE.
+    [Trait("Category", "SyntheticSmoke")]
     [Fact]
     public void Generate_AutoregressiveRollout_IsDeterministicPerSeed()
     {

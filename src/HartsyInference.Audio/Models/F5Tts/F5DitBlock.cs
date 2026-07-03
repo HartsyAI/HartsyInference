@@ -95,8 +95,10 @@ internal sealed unsafe class F5DitBlock
         backend.Linear(v, modded, _vW!, _vB);
         modded.Dispose();
 
-        backend.ApplyRopeInterleaved(q, ropeCos, ropeSin);
-        backend.ApplyRopeInterleaved(k, ropeCos, ropeSin);
+        // On-device interleaved RoPE (WanRopeInterleaved has a CUDA kernel; ApplyRopeInterleaved does not).
+        // q/k are [1, t, heads, headDim] — flat layout == [t, heads, headDim], which the kernel indexes directly.
+        backend.WanRopeInterleaved(q, ropeCos, ropeSin, t, heads, headDim);
+        backend.WanRopeInterleaved(k, ropeCos, ropeSin, t, heads, headDim);
 
         TensorShape mh = new(1, heads, t, headDim);
         Tensor qMh = new(mh, DType.F32);

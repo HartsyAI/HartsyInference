@@ -53,7 +53,11 @@ public sealed class VibeVoiceTokenizer : IDisposable
     public int[] Encode(string text)
     {
         ThrowIfDisposed();
-        IReadOnlyList<int> ids = _bpe.EncodeToIds(text);
+        // ML.Tokenizers' BpeTokenizer.Create(vocab, merges) does NOT apply the GPT-2 byte-level
+        // pre-tokenizer, so it drops leading spaces (" Speaker" -> "Speaker") instead of matching the
+        // Ġ-prefixed vocab keys ("ĠSpeaker"). Pre-encode into GPT-2 byte space so the prompt tokens
+        // match Qwen2.5 exactly — otherwise the LM never sees the real script text and free-runs.
+        IReadOnlyList<int> ids = _bpe.EncodeToIds(ByteLevelCodec.Encode(text));
         int[] result = new int[ids.Count];
         for (int i = 0; i < ids.Count; i++) result[i] = ids[i];
         return result;
@@ -66,7 +70,8 @@ public sealed class VibeVoiceTokenizer : IDisposable
         ThrowIfDisposed();
         int[] buf = new int[ids.Length];
         ids.CopyTo(buf);
-        return _bpe.Decode(buf) ?? string.Empty;
+        // Reverse the byte-level mapping applied in Encode so logged text reads normally (no Ġ/Ċ).
+        return ByteLevelCodec.Decode(_bpe.Decode(buf) ?? string.Empty);
     }
 
     private void ThrowIfDisposed()

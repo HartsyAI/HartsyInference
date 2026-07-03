@@ -64,9 +64,11 @@ public sealed unsafe class F5Dit : IDisposable
         _projOutB = WhisperOps.EnsureF32(w[$"{prefix}.proj_out.bias"]);
 
         // Precompute RoPE tables. F5-TTS uses full RoPE (rotary_dim = head_dim = 64) with theta=10000.
-        // Repacked from the [maxPos, half] table layout into the backend's [maxPos, headDim] stride
-        // (first half of each row) so ApplyRopeInterleaved runs on-device — the tensors are long-lived,
-        // so weight auto-promotion keeps them GPU-resident.
+        // Repacked into the backend's WanRopeInterleaved "duplicated-pair" layout: freq_i sits at position 2i
+        // (and 2i+1) of each [maxPos, headDim] row, so the interleaved pair (2i, 2i+1) reads its angle at index
+        // 2i. This lets RoPE run via the on-device WanRopeInterleaved kernel — the previous ApplyRopeInterleaved
+        // has no CUDA override, so it yanked q/k to the host and back ~2800× per generation (the F5 slowdown).
+        // The tables are long-lived, so weight auto-promotion keeps them GPU-resident.
         const int maxPos = 8_192;
         (float[] cos, float[] sin) = RotaryEmbedding.GetTables(_cfg.HeadDim, _cfg.RopeTheta, maxPos);
         int half = _cfg.HeadDim / 2;
@@ -78,8 +80,9 @@ public sealed unsafe class F5Dit : IDisposable
         {
             for (int i = 0; i < half; i++)
             {
-                cp[p * _cfg.HeadDim + i] = cos[p * half + i];
-                sp[p * _cfg.HeadDim + i] = sin[p * half + i];
+                int i0 = 2 * i;
+                cp[p * _cfg.HeadDim + i0] = cp[p * _cfg.HeadDim + i0 + 1] = cos[p * half + i];
+                sp[p * _cfg.HeadDim + i0] = sp[p * _cfg.HeadDim + i0 + 1] = sin[p * half + i];
             }
         }
         _loaded = true;

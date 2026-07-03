@@ -17,6 +17,9 @@ namespace HartsyInference.Interactive.Tests;
 /// reused, separately-tested HunyuanVideo VAE and is exercised in the env-gated real-checkpoint test.</summary>
 public sealed unsafe class HunyuanGameCraftPipelineTests
 {
+    // SyntheticSmoke: denoise forward on synthetic weights; can hard-crash the CPU test host
+    // (native heap corruption) until GameCraft is CPU-validated. Runs on the GPU lane. See CODE_STYLE.
+    [Trait("Category", "SyntheticSmoke")]
     [Fact]
     public void DenoiseChunk_ProducesFiniteLatent()
     {

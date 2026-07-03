@@ -34,7 +34,10 @@ public sealed class GgufRoundTripTests : IDisposable
             }
 
             using GgufModelLoader.LoadedGgufModel loaded = GgufModelLoader.Load(path);
-            Assert.Equal("passthrough", loaded.Architecture);
+            // Architecture now reports the real GGUF arch ("test"); the mapper that handled the
+            // unknown arch is exposed separately as MapperName ("passthrough").
+            Assert.Equal("test", loaded.Architecture);
+            Assert.Equal("passthrough", loaded.MapperName);
             Assert.Equal("test", loaded.Metadata.GetString("general.architecture"));
             Assert.Single(loaded.Weights);
             Assert.True(loaded.Weights.ContainsKey("test.tensor"));

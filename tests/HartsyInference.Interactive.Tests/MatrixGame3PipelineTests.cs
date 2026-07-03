@@ -18,6 +18,9 @@ public unsafe class MatrixGame3PipelineTests
     private readonly ITestOutputHelper _output;
     public MatrixGame3PipelineTests(ITestOutputHelper output) => _output = output;
 
+    // SyntheticSmoke: full segment rollout on synthetic weights; can hard-crash the CPU test host
+    // (native heap corruption) until Matrix-Game 3 is CPU-validated. Runs on the GPU lane. See CODE_STYLE.
+    [Trait("Category", "SyntheticSmoke")]
     [Fact]
     public void Generate_TwoSegments_ProducesContinuousRollout()
     {

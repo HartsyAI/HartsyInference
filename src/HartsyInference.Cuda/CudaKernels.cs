@@ -67,6 +67,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmGatherRowsF32;
     private readonly nint _lmScatterAddWeightedRowsF32;
     private readonly nint _lmArgMaxLastDimF32;
+    private readonly nint _lmRopeInterleavedF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
     private readonly CudaModule _flashAttnF32SplitModule;
@@ -384,6 +385,7 @@ public sealed class CudaKernels : IDisposable
         _lmGatherRowsF32 = _lmF32Module.GetFunction("lm_gather_rows_f32");
         _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
         _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
+        _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
         _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
         _flashAttnF32SplitModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
@@ -1374,6 +1376,27 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches in-place rotary embedding on x [B,L,numHeads,headDim]; cos/sin [B,L,headDim].</summary>
     public void LaunchRope(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream, int rotaryDim = 0)
         => LaunchRopeImpl(_ditRopeF32, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
+
+    /// <summary>Launches in-place interleaved (GPT-J) rotary embedding on x [B,L,numHeads,headDim];
+    /// cos/sin [B,L,headDim]. Rotates adjacent pairs (2i,2i+1) by frequency i (not the split-half convention).</summary>
+    public unsafe void LaunchRopeInterleaved(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream)
+    {
+        ulong xArg = x, cosArg = cos, sinArg = sin;
+        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim;
+        ulong vecsArg = (ulong)totalVecs;
+        void** args = stackalloc void*[6];
+        args[0] = &xArg;
+        args[1] = &cosArg;
+        args[2] = &sinArg;
+        args[3] = &headsArg;
+        args[4] = &headDimArg;
+        args[5] = &vecsArg;
+        long threads = totalVecs * (headDim / 2);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            _lmRopeInterleavedF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Launches last-dim slice: out[row,d] = in[row, offset+d], in row stride = inDim.</summary>
     public void LaunchSliceLastDim(ulong output, ulong input, int outDim, int inDim, int offset, long total, nint stream)

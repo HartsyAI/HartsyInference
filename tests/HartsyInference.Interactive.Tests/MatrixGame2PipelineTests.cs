@@ -38,6 +38,9 @@ public unsafe class MatrixGame2PipelineTests
         return (dit, dec, enc, cfg);
     }
 
+    // SyntheticSmoke: full block rollout on synthetic weights; can hard-crash the CPU test host
+    // (native heap corruption) until Matrix-Game 2 is CPU-validated. Runs on the GPU lane. See CODE_STYLE.
+    [Trait("Category", "SyntheticSmoke")]
     [Fact]
     public void Generate_TwoBlocks_ProducesControllableRollout()
     {

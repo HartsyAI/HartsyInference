@@ -1,15 +1,11 @@
 name: CI (GPU)
 
+# NOTE: This lane requires a self-hosted `[self-hosted, cuda]` runner to be online. It is
+# NOT triggered automatically on push — an auto-trigger just piles up runs stuck in "queued"
+# whenever the runner is offline, which reads as a perpetually-pending check on every commit.
+# Start it explicitly with "Run workflow" (workflow_dispatch) once the CUDA box is connected.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'src/HartsyInference.Cuda/**'
-      - 'src/HartsyInference.Diffusion/**'
-      - 'tests/HartsyInference.Cuda.Tests/**'
-      - 'tests/HartsyInference.Diffusion.Tests/**'
-      - '.github/workflows/ci-gpu.yml'
 
 permissions:
   contents: read

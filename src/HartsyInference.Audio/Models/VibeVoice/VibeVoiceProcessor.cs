@@ -102,10 +102,12 @@ public sealed class VibeVoiceProcessor
             AppendText(tokens, mask, "\n");
         }
 
-        // Text input section.
+        // Text input section. Upstream formats this as f" Speaker {id}:{text}\n" with NO
+        // space after the colon (the parsed text already has its leading space stripped),
+        // so " Speaker 0:Hello" — matching that exactly keeps the BPE tokens identical.
         AppendText(tokens, mask, TextHeader + "\n");
         foreach (Turn turn in turns)
-            AppendText(tokens, mask, $" Speaker {turn.SpeakerIndex}: {turn.Text}\n");
+            AppendText(tokens, mask, $" Speaker {turn.SpeakerIndex}:{turn.Text}\n");
 
         // Speech output cursor.
         AppendText(tokens, mask, OutputHeader + "\n");

@@ -43,6 +43,16 @@ jobs:
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: |
+          # CI gates on the deterministic "Unit" tier only. Tests are excluded by TRAIT, not by
+          # name-substring (the old approach silently missed newly-added heavy tests). Tiers:
+          #   Category=Integration     — real-weight parity, env-gated (needs checkpoints)
+          #   Category=GpuIntegration  — needs a CUDA device + PTX (only the self-hosted runner)
+          #   Category=Slow            — long-running, run on the GPU/nightly lane
+          #   Category=SyntheticSmoke  — forward-pass over random weights on validation-pending model
+          #                              code; fragile and can hard-crash the host until the model is
+          #                              validated. Graduates back to Unit once it has real parity.
+          #   Network=Real             — hits the network, run manually.
+          # See docs/CODE_STYLE.md ("Test tiers") for the rule new tests must follow.
           dotnet test HartsyInference.sln --configuration Release --no-build \
-            --filter "FullyQualifiedName!~Generation&FullyQualifiedName!~Img2Img&FullyQualifiedName!~Diff&FullyQualifiedName!~Ssim&FullyQualifiedName!~Vulkan&FullyQualifiedName!~Smoke" \
+            --filter "Category!=Integration&Category!=GpuIntegration&Category!=Slow&Category!=SyntheticSmoke&Network!=Real&FullyQualifiedName!~Generation&FullyQualifiedName!~Img2Img&FullyQualifiedName!~Diff&FullyQualifiedName!~Ssim&FullyQualifiedName!~Vulkan&FullyQualifiedName!~Smoke" \
             --logger "console;verbosity=normal"

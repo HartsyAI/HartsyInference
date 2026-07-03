@@ -100,6 +100,37 @@ __global__ void lm_scatter_add_weighted_rows_f32(
     output[(unsigned long long)rowIndices[m] * K + j] += scales[m] * input[i];
 }
 
+// ── Interleaved (GPT-J) rotary embedding, in-place ─────────────────────────
+// x [B, L, numHeads, headDim]; rotates adjacent pairs (2i, 2i+1) sharing frequency i (cos/sin
+// index i, NOT the split-half convention of lm/dit_rope). cos/sin are [B, L, headDim] (only the
+// first headDim/2 entries per position are read); a vector's cos/sin row is vec/numHeads. Matches
+// IBackend.ApplyRopeInterleaved — the Sesame CSM / HeartMuLa backbone+decoder RoPE. One thread per
+// (vector, pair); keeps q/k GPU-resident through RoPE (no host round-trip per layer).
+__global__ void lm_rope_interleaved_f32(
+    float* __restrict__ x,
+    const float* __restrict__ cos,
+    const float* __restrict__ sin,
+    unsigned int numHeads,
+    unsigned int headDim,
+    unsigned long long totalVecs)
+{
+    unsigned int half = headDim >> 1;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total = totalVecs * (unsigned long long)half;
+    if (gid >= total) return;
+    unsigned int i = (unsigned int)(gid % half);
+    unsigned long long vec = gid / half;
+    unsigned long long row = vec / numHeads;
+    size_t baseX = (size_t)vec * headDim + 2u * i;
+    size_t baseCs = (size_t)row * headDim + i;
+    float xe = x[baseX];
+    float xo = x[baseX + 1];
+    float c = cos[baseCs];
+    float s = sin[baseCs];
+    x[baseX]     = xe * c - xo * s;
+    x[baseX + 1] = xo * c + xe * s;
+}
+
 // ── Per-row argmax over the last dim ────────────────────────────────────────
 // indices[r] = argmax_c input[r, c]   (first max on ties, matching the CPU reference).
 // One block per row; each thread scans a strided slice, then a tree reduction keeps the

@@ -1537,6 +1537,62 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>In-place interleaved (GPT-J) rotary embedding on a single GPU-resident tensor
+    /// <c>[B, L, numHeads, headDim]</c> (adjacent pairs rotated by frequency i). cos/sin are <c>[B, L, headDim]</c>.
+    /// Without this override the shared <see cref="IBackend"/> CPU fallback would drag q/k off the device every layer
+    /// (Sesame CSM / HeartMuLa use interleaved RoPE) — the whole RmsNorm→RoPE→SDPA chain stays resident.</summary>
+    public unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
+        if (Environment.GetEnvironmentVariable("HM_ROPE_CPU") == "1")   // TEMP perf-repro gate: old CPU-fallback path
+        {
+            int b = (int)x.Shape[0], sl = (int)x.Shape[1], nh = (int)x.Shape[2], hd = (int)x.Shape[3], hf = hd / 2;
+            float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, sp = (float*)sin.DataPointer;
+            for (int bi = 0; bi < b; bi++)
+                for (int s = 0; s < sl; s++)
+                {
+                    long fb = ((long)bi * sl + s) * hd;
+                    for (int h = 0; h < nh; h++)
+                    {
+                        float* v = xp + (((long)bi * sl + s) * nh + h) * hd;
+                        for (int i = 0; i < hf; i++)
+                        {
+                            float xe = v[2 * i], xo = v[2 * i + 1];
+                            v[2 * i] = xe * cp[fb + i] - xo * sp[fb + i];
+                            v[2 * i + 1] = xo * cp[fb + i] + xe * sp[fb + i];
+                        }
+                    }
+                }
+            return;
+        }
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA ApplyRopeInterleaved supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int numHeads = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        long totalVecs = x.ElementCount / headDim;
+
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchRopeInterleaved(pX, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+
+            // In-place: clear stale callbacks before re-caching (pitfall #17).
+            x._gpuSyncCallback = null;
+            x._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCos);
+            GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
     public void SliceLastDim(Tensor output, Tensor input, int offset)
     {
         using NvtxRange _nvtx = NvtxRange.Push("SliceLastDim");

@@ -274,6 +274,76 @@ public sealed class VibeVoiceStage1SmokeTests : IDisposable
         Assert.True(totalWeights <= 880, $"Bound {totalWeights} weights — more than the Stage-1 budget.");
     }
 
+    /// <summary>Streaming-equivalence: feeding audio to the VAE encoder one 3200-sample
+    /// frame at a time through a persistent <see cref="VibeVoiceTokenizerStreamingCache"/>
+    /// must reproduce the full-sequence (non-streaming) encode. This is the exact per-frame
+    /// path the AR loop's semantic re-encode depends on — if it drifts, the LM's next-step
+    /// conditioning drifts and it never emits speech_end (the over-generation bug). With
+    /// input length an exact multiple of the 3200 hop, every conv stage adds zero
+    /// right-padding, so the two paths are purely causal and must match to FP tolerance.</summary>
+    [Fact]
+    public unsafe void StreamingEncode_MatchesFullNonStreamingEncode()
+    {
+        if (Skip()) return;
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> w = _loader!.GetAllTensors();
+
+        VibeVoiceConfig cfg = VibeVoiceConfig.V15B;
+        VibeVoiceSemanticTokenizerModel semantic = new(cfg.SemanticTokenizer!, "model.semantic_tokenizer");
+        semantic.LoadWeights(w);
+
+        const int frames = 4;
+        const int hop = 3_200;
+        int tPcm = frames * hop;
+        int dim = cfg.SemanticVaeDim;     // 128
+
+        // Deterministic, non-silent PCM.
+        Tensor full = new(new TensorShape(1, 1, tPcm), DType.F32);
+        float* fp = (float*)full.DataPointer;
+        Random rng = new(1234);
+        for (int i = 0; i < tPcm; i++)
+            fp[i] = 0.08f * MathF.Sin(2 * MathF.PI * 180f * i / 24_000f) + 0.01f * (float)(rng.NextDouble() * 2 - 1);
+
+        // Non-streaming: whole sequence at once → [1, frames, 128].
+        Tensor nonStream = semantic.Encode(backend, full, batch: 1, tPcm: tPcm);
+        Assert.Equal(new TensorShape(1, frames, dim), nonStream.Shape);
+
+        // Streaming: one 3200-sample chunk at a time through a persistent cache.
+        using VibeVoiceTokenizerStreamingCache cache = new();
+        int[] sampleIndices = [0];
+        float[] streamed = new float[frames * dim];
+        int frameCursor = 0;
+        for (int c = 0; c < frames; c++)
+        {
+            Tensor chunk = new(new TensorShape(1, 1, hop), DType.F32);
+            Buffer.MemoryCopy(fp + (long)c * hop, (void*)chunk.DataPointer, hop * 4, hop * 4);
+            Tensor outc = semantic.Encode(backend, chunk, batch: 1, tPcm: hop, cache, sampleIndices);
+            int m = (int)outc.Shape[1];
+            float* op = (float*)outc.DataPointer;
+            for (int f = 0; f < m && frameCursor < frames; f++, frameCursor++)
+                for (int k = 0; k < dim; k++)
+                    streamed[frameCursor * dim + k] = op[f * dim + k];
+            chunk.Dispose();
+            outc.Dispose();
+        }
+        Assert.Equal(frames, frameCursor);     // one latent frame per 3200-sample chunk
+
+        float* np = (float*)nonStream.DataPointer;
+        double maxAbs = 0, sumSq = 0;
+        for (int i = 0; i < frames * dim; i++)
+        {
+            double d = Math.Abs(streamed[i] - np[i]);
+            if (d > maxAbs) maxAbs = d;
+            sumSq += d * d;
+        }
+        double rmsDiff = Math.Sqrt(sumSq / (frames * dim));
+        _out.WriteLine($"Streaming-equivalence: max|Δ|={maxAbs:E3}, rmsΔ={rmsDiff:E3} over {frames}×{dim} latents.");
+        Assert.True(maxAbs < 1e-2, $"streaming encode diverged from full encode (max|Δ|={maxAbs:E3}).");
+
+        full.Dispose();
+        nonStream.Dispose();
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────
 
     private static unsafe Tensor MakeRandomCL(int batch, int seq, int dim, int seed)

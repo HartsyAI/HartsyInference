@@ -71,13 +71,13 @@ public sealed class VibeVoicePipeline : IDisposable
     /// use). Returns a fully-wired pipeline ready to synthesize.</summary>
     public static async Task<VibeVoicePipeline> LoadAsync(CancellationToken ct = default)
     {
-        string repoDir = AudioModelCache.GetRepoDirectory("vibevoice/VibeVoice-1.5B");
+        string repoDir = AudioModelCache.GetRepoDirectory("microsoft/VibeVoice-1.5B");
         await Task.WhenAll(
-            AudioModelCache.GetAsync("vibevoice/VibeVoice-1.5B", "model-00001-of-00003.safetensors", ct: ct),
-            AudioModelCache.GetAsync("vibevoice/VibeVoice-1.5B", "model-00002-of-00003.safetensors", ct: ct),
-            AudioModelCache.GetAsync("vibevoice/VibeVoice-1.5B", "model-00003-of-00003.safetensors", ct: ct),
-            AudioModelCache.GetAsync("vibevoice/VibeVoice-1.5B", "model.safetensors.index.json", ct: ct),
-            AudioModelCache.GetAsync("vibevoice/VibeVoice-1.5B", "config.json", ct: ct))
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00001-of-00003.safetensors", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00002-of-00003.safetensors", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model-00003-of-00003.safetensors", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "model.safetensors.index.json", ct: ct),
+            AudioModelCache.GetAsync("microsoft/VibeVoice-1.5B", "config.json", ct: ct))
             .ConfigureAwait(false);
 
         VibeVoiceConfig cfg = VibeVoiceConfig.V15B;
@@ -165,6 +165,18 @@ public sealed class VibeVoicePipeline : IDisposable
 
         // ── AR loop ─────────────────────────────────────────────────────────
         List<float[]> audioChunks = new();
+
+        // Persistent streaming caches for the acoustic decoder and semantic encoder. These
+        // thread the causal conv/transpose receptive-field state through every AR step,
+        // mirroring upstream's `acoustic_tokenizer.decode(..., cache=acoustic_cache,
+        // use_cache=True)` and `semantic_tokenizer.encode(..., cache=semantic_cache,
+        // use_cache=True)`. Created ONCE here (not per frame) so per-frame conditioning stays
+        // coherent — rebuilding them stateless each step is what caused the LM to drift and
+        // never emit speech_end/eos. Single stream → sample index 0.
+        using VibeVoiceTokenizerStreamingCache acousticCache = new();
+        using VibeVoiceTokenizerStreamingCache? semanticCache = _semantic is not null ? new VibeVoiceTokenizerStreamingCache() : null;
+        int[] sampleIndices = [0];
+
         // Initial conditioning hidden state for the (very rare) case where the very first
         // emitted token is a speech_diffusion. Slice last frame of prefillHidden.
         using Tensor _lastHiddenWarm = SliceLastFrame(prefillHidden, _lmCfg.HiddenSize);
@@ -183,6 +195,15 @@ public sealed class VibeVoicePipeline : IDisposable
                 if (nextToken == VibeVoiceTokenizer.EndOfTextTokenId)
                     break;
 
+                // speech_end: reset the per-speaker streaming state (upstream calls
+                // acoustic_cache.set_to_zero / semantic_cache.set_to_zero here) so the next
+                // segment starts from a clean receptive field.
+                if (nextToken == VibeVoiceTokenizer.SpeechEndTokenId)
+                {
+                    acousticCache.SetToZero(sampleIndices);
+                    semanticCache?.SetToZero(sampleIndices);
+                }
+
                 if (nextToken == VibeVoiceTokenizer.SpeechDiffusionTokenId)
                 {
                     // ── Diffusion sub-loop ──────────────────────────────────
@@ -199,7 +220,9 @@ public sealed class VibeVoicePipeline : IDisposable
                     UnnormalizeLatentInPlace(denoised, _speechScalingFactor, _speechBiasFactor);
 
                     // Decode one frame (1 latent) through the acoustic VAE → 3200 samples.
-                    using Tensor frameAudio = _acoustic.Decode(backend, denoised, batch: 1);
+                    // Stream through the persistent acoustic cache so this frame's decode
+                    // sees the prior frames' receptive-field tail.
+                    using Tensor frameAudio = _acoustic.Decode(backend, denoised, batch: 1, acousticCache, sampleIndices);
                     float[] chunk = TensorToPcm(frameAudio);
                     audioChunks.Add(chunk);
 
@@ -212,7 +235,10 @@ public sealed class VibeVoicePipeline : IDisposable
                     if (_semantic is not null && _semanticConnector is not null)
                     {
                         using Tensor pcmTensor = PcmToTensor(chunk);
-                        using Tensor semFeat = _semantic.Encode(backend, pcmTensor, batch: 1, tPcm: chunk.Length);
+                        // Stream through the persistent semantic cache — the per-frame
+                        // semantic features must be continuous with prior frames, else the
+                        // LM's next-step conditioning drifts.
+                        using Tensor semFeat = _semantic.Encode(backend, pcmTensor, batch: 1, tPcm: chunk.Length, semanticCache!, sampleIndices);
                         semanticEmbed = _semanticConnector.Forward(backend, semFeat, batch: 1, seqLen: 1);
                     }
                     latentNormalized.Dispose();

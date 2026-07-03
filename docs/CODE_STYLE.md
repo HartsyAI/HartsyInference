@@ -472,6 +472,31 @@ public long ElementCount => Shape.ElementCount;
 
 ---
 
+## Testing
+
+### Test tiers — every test declares which lane it belongs to
+
+CI on the hosted GitHub runner (`ci-cpu.yml`) gates `main` on the **Unit** tier only: fast,
+deterministic, no GPU, no checkpoints. Everything heavier is opted OUT of that gate with a
+`[Trait("Category", ...)]` (or `[Trait("Network", "Real")]`) so it runs on the self-hosted GPU
+lane / nightly / manually instead. The CI filter excludes by trait, so an untagged test is a
+Unit test and **must pass on any machine with no GPU and no weights.**
+
+| Tier | Attribute | Runs where | What belongs here |
+|---|---|---|---|
+| **Unit** (default) | *(none)* | Hosted CI, gates `main` | Config/shape assertions, math, tokenizers, key-mapping, converters, CPU-kernel correctness. Deterministic and self-contained. |
+| **SyntheticSmoke** | `[Trait("Category", "SyntheticSmoke")]` | GPU lane / manual | A forward pass over **random synthetic weights** on model code that is not yet real-weight-validated. These are fragile and can hard-crash the test host (native heap corruption) until the model is correct on CPU. |
+| **Integration** | `[Trait("Category", "Integration")]` | GPU lane (env-gated) | Real-weight parity. Must `return` early (skip cleanly) when its checkpoint env-var is unset. |
+| **GpuIntegration** | `[Trait("Category", "GpuIntegration")]` | GPU lane only | Needs a CUDA device + PTX. A PTX-dir existence check is NOT enough — the hosted runner may have PTX but no GPU. |
+| **Slow** | `[Trait("Category", "Slow")]` | GPU lane / nightly | Long-running end-to-end generation. |
+| **Network** | `[Trait("Network", "Real")]` | Manual | Hits the network. |
+
+**The rule for a new model:** its forward-pass test starts life as `SyntheticSmoke`. Once the
+model has documented real-weight parity (see `docs/Checklists/PARITY_VERIFICATION.md`), delete the
+trait so it graduates to the Unit gate. This keeps `main` green while a model is being brought up,
+without hiding it: the parity checklist is the ledger of what still needs to graduate. Never make
+CI green by deleting a test or by widening the name-substring blocklist — tag the tier instead.
+
 ## What NOT to Do
 
 - **Don't use `dynamic`** — ever
