@@ -138,7 +138,7 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
 
         Logs.Info($"ACE-Step 1.5 {(_config.IsTurbo ? "turbo" : "base/sft")}: {durationSeconds:0}s ({frames} latent frames), {steps} steps, " +
             $"shift={opts.Shift ?? _config.FlowShift}, cfg={(useCfg ? guidance : 1f)}{(useCfg && opts.UseAdg ? " (ADG)" : useCfg ? " (APG)" : "")}, " +
-            $"method={(sde ? "sde" : "ode")}, dcw={dcw.IsActive}, lyrics={(lyricHidden is null ? 0 : lyricHidden.Shape[0])} tokens, " +
+            $"method={(sde ? "sde" : "ode")}, dcw={dcw.IsActive}, lyrics={(lyricHidden is null ? 0 : lyricHidden.Shape[lyricHidden.Shape.Rank - 2])} tokens, " +
             $"timbre={(timbreLatent is not null)}, hints={(lmHints is not null)}, seed={actualSeed}");
 
         Backend.PreloadWeights(_encoder.EnumerateWeights());
@@ -252,13 +252,23 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         new ReadOnlySpan<float>(wp + (wav.Shape[1] > 1 ? channelSamples : 0), channelSamples).CopyTo(right);
         wav.Dispose();
 
+        // Peak-normalize to -1 dBFS — upstream's enable_normalization default (audio_utils.normalize_audio).
+        float peak = 0f;
+        for (int i = 0; i < channelSamples; i++) peak = MathF.Max(peak, MathF.Max(MathF.Abs(left[i]), MathF.Abs(right[i])));
+        if (peak > 1e-6f)
+        {
+            float gain = 0.8912509f / peak;   // 10^(-1/20)
+            for (int i = 0; i < channelSamples; i++) { left[i] *= gain; right[i] *= gain; }
+        }
+
         Logs.Info($"ACE-Step 1.5 complete: {channelSamples / (double)_config.SampleRate:0.0}s stereo, seed={actualSeed}");
         return (left, right, _config.SampleRate, actualSeed);
     }
 
     /// <summary>Builds <c>context_latents [1, T, 128]</c> = src ‖ chunk-mask per frame: src = phase-2
-    /// <paramref name="lmHints"/> when given, else the silence latent tiled; mask = 2.0 (upstream
-    /// <c>chunk_mask_mode="auto"</c> — "model decides"; repaint's explicit 0/1 spans are a later feature).</summary>
+    /// <paramref name="lmHints"/> when given, else the silence latent tiled; mask = 1.0 (upstream's
+    /// full-generation bool ones() mask — its "auto" 2.0 assign clamps to True=1.0; repaint's explicit
+    /// 0/1 spans are a later feature).</summary>
     private Tensor BuildContextLatents(int frames, Tensor? lmHints)
     {
         int latCh = _config.LatentChannels;
@@ -274,7 +284,9 @@ public sealed unsafe class AceStepPipeline15 : DiffusionPipelineBase
         {
             long rowOff = (long)i * 2 * latCh;
             Buffer.MemoryCopy(hp + (long)(i % srcPeriod) * latCh, cp + rowOff, latCh * 4, latCh * 4);
-            for (int c = 0; c < latCh; c++) cp[rowOff + latCh + c] = 2f;
+            // Full-generation chunk mask = 1.0. Upstream builds a bool ones() mask; its "auto" 2.0 assign
+            // clamps to True on the bool tensor, so the model only ever sees 1.0 (2.0 → muffled/quiet).
+            for (int c = 0; c < latCh; c++) cp[rowOff + latCh + c] = 1f;
         }
         return context;
     }
