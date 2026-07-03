@@ -153,7 +153,7 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         ErnieImageDebugDump.Dump("modulation_gate_mlp", mod[5]);
 
         // ── 5. Concat [image, text] along sequence dim → [B, totalSeq, hidden] ──
-        Tensor combined = ConcatAlongSeqDim(imgTokens, textProjected, batch, nImg, textMax, hidden);
+        Tensor combined = ConcatAlongSeqDim(backend, imgTokens, textProjected, batch, nImg, textMax, hidden);
         imgTokens.Dispose();
         textProjected.Dispose();
 
@@ -182,7 +182,7 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         attentionMask.Dispose();
 
         // ── 9. Slice off image tokens (front of [image, text] sequence) ──
-        Tensor imageOnly = SliceImageFront(x, batch, nImg, textMax, hidden);
+        Tensor imageOnly = SliceImageFront(backend, x, batch, nImg, textMax, hidden);
         x.Dispose();
 
         // ── 10. Final layer: AdaLN-continuous(LayerNorm-no-affine + Linear → scale, shift) → modulate → Linear ──
@@ -273,16 +273,30 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         backend.Silu(act, c);
 
         TensorShape projShape = new TensorShape(batch, outDim);
-        Tensor projected = new Tensor(projShape, c.DType);
+        Tensor projected = new Tensor(projShape, DType.F32);
         backend.Linear(projected, act, _adaLnModulationWeight!, _adaLnModulationBias);
         act.Dispose();
 
+        // Chunk [B, 6·hidden] → 6 × [B, hidden]. B=1 (the only case pipelines exercise) runs device-resident so the
+        // modulation vectors stay on-device for every block's DiTUtils.Modulate; B>1 (CFG) keeps the host chunk.
         Tensor[] result = new Tensor[6];
+        if (batch == 1)
+        {
+            for (int p = 0; p < 6; p++)
+            {
+                Tensor param = new Tensor(new TensorShape(batch, hidden), DType.F32);
+                backend.SliceRows(param, projected, p);   // B=1: chunk p = [p·hidden, (p+1)·hidden)
+                result[p] = param;
+            }
+            projected.Dispose();
+            return result;
+        }
+
         float* projPtr = (float*)projected.DataPointer;
         for (int p = 0; p < 6; p++)
         {
             TensorShape paramShape = new TensorShape(batch, hidden);
-            Tensor param = new Tensor(paramShape, projected.DType);
+            Tensor param = new Tensor(paramShape, DType.F32);
             float* paramPtr = (float*)param.DataPointer;
             for (int b = 0; b < batch; b++)
             {
@@ -305,100 +319,87 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
     /// </list></summary>
     private Tensor ApplyFinalLayer(IBackend backend, Tensor imageTokens, Tensor c, int batch, int seqLen, int hidden)
     {
-        // 1. Linear(c) → [B, 2*hidden], chunk into (scale, shift) — scale FIRST per Python ref.
+        // 1. Linear(c) → [B, 2*hidden], chunk into (scale, shift) — scale FIRST per Python ref. B=1 (the only case
+        //    pipelines exercise) slices device-resident; B>1 (CFG) keeps the host chunk (strided per batch).
         TensorShape projShape = new TensorShape(batch, 2 * hidden);
-        Tensor projected = new Tensor(projShape, c.DType);
+        Tensor projected = new Tensor(projShape, DType.F32);
         backend.Linear(projected, c, _finalNormLinearWeight!, _finalNormLinearBias);
 
         TensorShape modShape = new TensorShape(batch, hidden);
-        Tensor scale = new Tensor(modShape, c.DType);
-        Tensor shift = new Tensor(modShape, c.DType);
-        float* projPtr = (float*)projected.DataPointer;
-        float* scalePtr = (float*)scale.DataPointer;
-        float* shiftPtr = (float*)shift.DataPointer;
-        for (int b = 0; b < batch; b++)
+        Tensor scale = new Tensor(modShape, DType.F32);
+        Tensor shift = new Tensor(modShape, DType.F32);
+        if (batch == 1)
         {
-            int srcBase = b * 2 * hidden;
-            int dstBase = b * hidden;
-            Buffer.MemoryCopy(projPtr + srcBase, scalePtr + dstBase, hidden * sizeof(float), hidden * sizeof(float));
-            Buffer.MemoryCopy(projPtr + srcBase + hidden, shiftPtr + dstBase, hidden * sizeof(float), hidden * sizeof(float));
+            backend.SliceRows(scale, projected, 0);   // scale = chunk 0
+            backend.SliceRows(shift, projected, 1);   // shift = chunk 1
+        }
+        else
+        {
+            float* projPtr = (float*)projected.DataPointer;
+            float* scalePtr = (float*)scale.DataPointer;
+            float* shiftPtr = (float*)shift.DataPointer;
+            for (int b = 0; b < batch; b++)
+            {
+                int srcBase = b * 2 * hidden;
+                int dstBase = b * hidden;
+                Buffer.MemoryCopy(projPtr + srcBase, scalePtr + dstBase, hidden * sizeof(float), hidden * sizeof(float));
+                Buffer.MemoryCopy(projPtr + srcBase + hidden, shiftPtr + dstBase, hidden * sizeof(float), hidden * sizeof(float));
+            }
         }
         projected.Dispose();
 
-        // 2. LayerNorm-no-affine on imageTokens.
+        // 2+3. LayerNorm-no-affine (eps = RmsNormEps) then AdaLN modulate x·(1+scale) + shift, broadcast over seqLen —
+        //      entirely on the backend so the full image-token activation stays device-resident. Bit-identical to the
+        //      old host LayerNormNoAffine + shift/scale triple-loop.
         TensorShape seqShape = new TensorShape(batch, seqLen, hidden);
-        Tensor normed = new Tensor(seqShape, imageTokens.DType);
-        DiTUtils.LayerNormNoAffine(normed, imageTokens, batch, seqLen, hidden, _config.RmsNormEps);
-
-        // 3. x * (1 + scale) + shift — broadcast over seqLen.
-        Tensor modulated = new Tensor(seqShape, imageTokens.DType);
-        float* normPtr = (float*)normed.DataPointer;
-        float* outPtr = (float*)modulated.DataPointer;
-        scalePtr = (float*)scale.DataPointer;
-        shiftPtr = (float*)shift.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int rowOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                {
-                    outPtr[rowOff + d] = normPtr[rowOff + d] * (1.0f + scalePtr[condBase + d]) + shiftPtr[condBase + d];
-                }
-            }
-        }
-        normed.Dispose();
+        Tensor modulated = DiTUtils.NormModulate(backend, imageTokens, shift, scale, seqShape, _config.RmsNormEps);
         scale.Dispose();
         shift.Dispose();
 
         // 4. final_linear: [B, S, hidden] → [B, S, p² · out_channels]
         int outDim = _config.PatchSize * _config.PatchSize * _config.OutChannels;
         TensorShape outShape = new TensorShape(batch, seqLen, outDim);
-        Tensor projected2 = new Tensor(outShape, imageTokens.DType);
+        Tensor projected2 = new Tensor(outShape, DType.F32);
         backend.Linear(projected2, modulated, _finalLinearWeight!, _finalLinearBias);
         modulated.Dispose();
 
         return projected2;
     }
 
-    /// <summary>Concatenates <c>[B, nImg, hidden]</c> + <c>[B, Tmax, hidden]</c> along the seq dim, image FIRST.</summary>
-    private static Tensor ConcatAlongSeqDim(Tensor img, Tensor text, int batch, int nImg, int textMax, int hidden)
+    /// <summary>Concatenates <c>[B, nImg, hidden]</c> + <c>[B, Tmax, hidden]</c> along the seq dim, image FIRST.
+    /// Device-resident (<see cref="IBackend.Concat"/>, dim=1) so the joined activation never leaves the GPU between
+    /// the patch-embed/text-proj GEMMs and the block loop.</summary>
+    private static Tensor ConcatAlongSeqDim(IBackend backend, Tensor img, Tensor text, int batch, int nImg, int textMax, int hidden)
     {
         int totalSeq = nImg + textMax;
         TensorShape outShape = new TensorShape(batch, totalSeq, hidden);
         Tensor output = new Tensor(outShape, img.DType);
 
-        // If text dtype != img dtype, this would mis-copy; ensure both are the same dtype upstream (ProjectText
+        // If text dtype != img dtype, Concat would mis-copy; ensure both are the same dtype upstream (ProjectText
         // already preserves text's dtype which may not match img's dtype — but in practice both are F32 since the
         // patch embed conv currently operates on F32 latents and ProjectText doesn't change dtype).
         if (text.DType != img.DType)
             throw new InvalidOperationException($"Concat dtype mismatch: img={img.DType} text={text.DType}.");
 
-        float* iPtr = (float*)img.DataPointer;
-        float* tPtr = (float*)text.DataPointer;
-        float* oPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            long imgBytes = (long)nImg * hidden * sizeof(float);
-            long textBytes = (long)textMax * hidden * sizeof(float);
-            Buffer.MemoryCopy(iPtr + (long)b * nImg * hidden, oPtr + (long)b * totalSeq * hidden, imgBytes, imgBytes);
-            if (textMax > 0)
-            {
-                Buffer.MemoryCopy(tPtr + (long)b * textMax * hidden,
-                    oPtr + (long)b * totalSeq * hidden + (long)nImg * hidden, textBytes, textBytes);
-            }
-        }
+        backend.Concat(output, new Tensor[] { img, text }, 1);
         return output;
     }
 
-    /// <summary>Slices the image-front section <c>[B, totalSeq, hidden]</c> → <c>[B, nImg, hidden]</c>.</summary>
-    private static Tensor SliceImageFront(Tensor combined, int batch, int nImg, int textMax, int hidden)
+    /// <summary>Slices the image-front section <c>[B, totalSeq, hidden]</c> → <c>[B, nImg, hidden]</c>. B=1 (the only
+    /// case pipelines exercise) runs device-resident via <see cref="IBackend.SliceRows"/> — the image tokens are the
+    /// contiguous <c>nImg·hidden</c> prefix — so the final-layer input never leaves the GPU. B>1 (CFG) keeps the host
+    /// copy because each batch's image prefix is strided by <c>totalSeq</c>.</summary>
+    private static Tensor SliceImageFront(IBackend backend, Tensor combined, int batch, int nImg, int textMax, int hidden)
     {
         int totalSeq = nImg + textMax;
         TensorShape outShape = new TensorShape(batch, nImg, hidden);
         Tensor output = new Tensor(outShape, combined.DType);
+
+        if (batch == 1)
+        {
+            backend.SliceRows(output, combined, 0);   // first nImg·hidden elements = image prefix
+            return output;
+        }
 
         float* srcPtr = (float*)combined.DataPointer;
         float* dstPtr = (float*)output.DataPointer;

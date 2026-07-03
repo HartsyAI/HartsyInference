@@ -111,52 +111,52 @@ public sealed unsafe class ErnieImageBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         TensorShape shape = new TensorShape(batch, seqLen, _hidden);
+        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // ── Attention sub-block ────────────────────────────────────────────
-        Tensor norm1 = new Tensor(shape, x.DType);
+        // GPU-residency rewrite (mirrors the verified Krea2Block / FluxSingleStreamBlock ports): the two AdaLN
+        // (1+scale)·norm+shift affines, the two gated residuals, the head-split/merge reshapes and the QK-norm all
+        // run as IBackend ops so the activation chain stays device-resident — no per-op DataPointer D2H sync barriers
+        // around the attention/FFN GEMMs. ApplyShiftScale → DiTUtils.Modulate; ApplyGatedResidual →
+        // GatedResidualLastDim; the ReshapeFlatToHeads/PermuteBshdToBhsd/PermuteBhsdToBsh host loops →
+        // Permute0213 (+ declaring Q/K/V directly as [B, S, H, D], byte-identical to [B, S, hidden]). The ONLY op
+        // left on the CPU is ErnieImageRope.ApplyRotaryEmb: it is the non-interleaved Megatron "rotate_half" (pairs
+        // (i, i+halfDim), unlike Flux's interleaved (2k, 2k+1)) with no GPU-resident equivalent, so rope stays a
+        // contained host excursion — exactly as Krea2 left FluxRope on host — operating on the [B, S, H, D] layout.
+        Tensor norm1 = new Tensor(shape, DType.F32);
         backend.RmsNorm(norm1, x, _adaLnSaWeight!, _eps);
-        Tensor modulated = ApplyShiftScale(norm1, shiftMsa, scaleMsa, batch, seqLen, _hidden);
+        Tensor modulated = DiTUtils.Modulate(backend, norm1, shiftMsa, scaleMsa, shape); // x·(1+scale_msa) + shift_msa
         norm1.Dispose();
 
-        // Separate Q, K, V projections. Each [B, S, hidden] → [B, S, hidden]; bias=False.
-        Tensor q = new Tensor(shape, x.DType);
-        Tensor k = new Tensor(shape, x.DType);
-        Tensor v = new Tensor(shape, x.DType);
-        backend.Linear(q, modulated, _toQWeight!, null);
-        backend.Linear(k, modulated, _toKWeight!, null);
+        // Separate Q, K, V projections; bias=False. Q/K/V declared directly as [B, S, H, D] (byte-identical to
+        // [B, S, hidden]) so RmsNorm normalizes over headDim and Permute0213 runs with no explicit reshape.
+        Tensor qHeads = new Tensor(headsShape, DType.F32);
+        Tensor kHeads = new Tensor(headsShape, DType.F32);
+        Tensor v = new Tensor(headsShape, DType.F32);
+        backend.Linear(qHeads, modulated, _toQWeight!, null);
+        backend.Linear(kHeads, modulated, _toKWeight!, null);
         backend.Linear(v, modulated, _toVWeight!, null);
         modulated.Dispose();
 
-        // Reshape to [B, S, numHeads, headDim] for QK-norm + RoPE.
-        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
-        Tensor qHeads = new Tensor(headsShape, DType.F32);
-        Tensor kHeads = new Tensor(headsShape, DType.F32);
-        ReshapeFlatToHeads(qHeads, q, batch, seqLen, _numHeads, _headDim);
-        ReshapeFlatToHeads(kHeads, k, batch, seqLen, _numHeads, _headDim);
-        q.Dispose();
-        k.Dispose();
-
-        // QK-RMSNorm: each [B, S, numHeads, headDim] flattened to (batch*seq*heads) vectors of headDim.
-        int totalVecs = batch * seqLen * _numHeads;
+        // QK-RMSNorm over the last dim (headDim); weight already F32. Identical to the old QkNorm host loop.
         Tensor qNormed = new Tensor(headsShape, DType.F32);
         Tensor kNormed = new Tensor(headsShape, DType.F32);
-        _normQ.Forward(qNormed, qHeads, totalVecs);
-        _normK.Forward(kNormed, kHeads, totalVecs);
+        backend.RmsNorm(qNormed, qHeads, _normQ.Weight, _normQ.Eps);
+        backend.RmsNorm(kNormed, kHeads, _normK.Weight, _normK.Eps);
         qHeads.Dispose();
         kHeads.Dispose();
 
-        // 3D RoPE (in-place on qNormed/kNormed, both still [B, S, numHeads, headDim]).
+        // 3D RoPE (in-place on qNormed/kNormed, both still [B, S, numHeads, headDim]) — host excursion, see note above.
         rope.ApplyRotaryEmb(qNormed, kNormed, freqs);
 
         // SDPA expects [B, numHeads, S, headDim]. Permute (B, S, H, D) → (B, H, S, D).
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         Tensor qMh = new Tensor(mhShape, DType.F32);
         Tensor kMh = new Tensor(mhShape, DType.F32);
         Tensor vMh = new Tensor(mhShape, DType.F32);
-        PermuteBshdToBhsd(qMh, qNormed, batch, seqLen, _numHeads, _headDim);
-        PermuteBshdToBhsd(kMh, kNormed, batch, seqLen, _numHeads, _headDim);
-        // V never went through the head-split, so reshape from flat [B, S, hidden] directly.
-        ReshapeFlatToBhsd(vMh, v, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         qNormed.Dispose();
         kNormed.Dispose();
         v.Dispose();
@@ -170,26 +170,28 @@ public sealed unsafe class ErnieImageBlock
 
         // [B, H, S, D] → [B, S, hidden]
         Tensor attnFlat = new Tensor(shape, DType.F32);
-        PermuteBhsdToBsh(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
-        Tensor projected = new Tensor(shape, x.DType);
+        Tensor projected = new Tensor(shape, DType.F32);
         backend.Linear(projected, attnFlat, _toOutWeight!, null);
         attnFlat.Dispose();
 
-        Tensor afterAttn = ApplyGatedResidual(x, projected, gateMsa, batch, seqLen, _hidden);
+        Tensor afterAttn = new Tensor(shape, DType.F32);
+        backend.GatedResidualLastDim(afterAttn, x, projected, gateMsa);   // x + gate_msa·attn_out
         projected.Dispose();
 
         // ── MLP sub-block ──────────────────────────────────────────────────
-        Tensor norm2 = new Tensor(shape, x.DType);
+        Tensor norm2 = new Tensor(shape, DType.F32);
         backend.RmsNorm(norm2, afterAttn, _adaLnMlpWeight!, _eps);
-        Tensor modulated2 = ApplyShiftScale(norm2, shiftMlp, scaleMlp, batch, seqLen, _hidden);
+        Tensor modulated2 = DiTUtils.Modulate(backend, norm2, shiftMlp, scaleMlp, shape); // x·(1+scale_mlp) + shift_mlp
         norm2.Dispose();
 
         Tensor mlpOut = ForwardGeluGatedFfn(backend, modulated2, batch, seqLen);
         modulated2.Dispose();
 
-        Tensor result = ApplyGatedResidual(afterAttn, mlpOut, gateMlp, batch, seqLen, _hidden);
+        Tensor result = new Tensor(shape, DType.F32);
+        backend.GatedResidualLastDim(result, afterAttn, mlpOut, gateMlp);  // afterAttn + gate_mlp·mlp_out
         afterAttn.Dispose();
         mlpOut.Dispose();
 
@@ -221,123 +223,6 @@ public sealed unsafe class ErnieImageBlock
         combined.Dispose();
 
         return output;
-    }
-
-    /// <summary><c>output = input * (1 + scale[b]) + shift[b]</c>. Modulation broadcast over the sequence dim.</summary>
-    private static Tensor ApplyShiftScale(Tensor input, Tensor shift, Tensor scale, int batch, int seqLen, int hidden)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hidden);
-        Tensor output = new Tensor(shape, input.DType);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* shiftPtr = (float*)shift.DataPointer;
-        float* scalePtr = (float*)scale.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int rowOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                {
-                    outPtr[rowOff + d] = inPtr[rowOff + d] * (1.0f + scalePtr[condBase + d]) + shiftPtr[condBase + d];
-                }
-            }
-        }
-        return output;
-    }
-
-    /// <summary><c>output = residual + gate[b] * value</c>. Broadcast gate over the sequence dim.</summary>
-    private static Tensor ApplyGatedResidual(Tensor residual, Tensor value, Tensor gate, int batch, int seqLen, int hidden)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hidden);
-        Tensor output = new Tensor(shape, residual.DType);
-
-        float* resPtr = (float*)residual.DataPointer;
-        float* valPtr = (float*)value.DataPointer;
-        float* gatePtr = (float*)gate.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int rowOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                {
-                    outPtr[rowOff + d] = resPtr[rowOff + d] + gatePtr[condBase + d] * valPtr[rowOff + d];
-                }
-            }
-        }
-        return output;
-    }
-
-    /// <summary>Reshape <c>[B, S, hidden]</c> → <c>[B, S, H, D]</c> in-place into a pre-allocated tensor.</summary>
-    private static void ReshapeFlatToHeads(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        // Memory layout is identical (just a logical reshape) — copy verbatim.
-        long bytes = (long)batch * seqLen * numHeads * headDim * sizeof(float);
-        Buffer.MemoryCopy(input.DataPointer, output.DataPointer, bytes, bytes);
-    }
-
-    /// <summary>Reshape + permute <c>[B, S, hidden]</c> → <c>[B, H, S, D]</c>.</summary>
-    private static void ReshapeFlatToBhsd(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    long inOff = ((long)b * seqLen + s) * numHeads * headDim + (long)h * headDim;
-                    long outOff = (((long)b * numHeads + h) * seqLen + s) * headDim;
-                    Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    /// <summary>Permute <c>[B, S, H, D]</c> → <c>[B, H, S, D]</c>.</summary>
-    private static void PermuteBshdToBhsd(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    long inOff = (((long)b * seqLen + s) * numHeads + h) * headDim;
-                    long outOff = (((long)b * numHeads + h) * seqLen + s) * headDim;
-                    Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    /// <summary>Permute <c>[B, H, S, D]</c> → <c>[B, S, hidden]</c> (flatten heads back into hidden).</summary>
-    private static void PermuteBhsdToBsh(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    long inOff = (((long)b * numHeads + h) * seqLen + s) * headDim;
-                    long outOff = ((long)b * seqLen + s) * numHeads * headDim + (long)h * headDim;
-                    Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
     }
 
     /// <summary>Loads a norm weight, casting to F32 if necessary (RmsNorm reads float* directly).</summary>

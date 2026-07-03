@@ -68,24 +68,12 @@ public sealed unsafe class ErnieImagePatchEmbed
         Tensor convOut = new Tensor(convShape, latent.DType);
         backend.Conv2D(convOut, latent, _projWeight!, _projBias, _patchSize, _patchSize, 0, 0);
 
-        // Reshape [B, hidden, outH, outW] → [B, hidden, outH*outW] → [B, outH*outW, hidden]
+        // Reshape [B, hidden, outH, outW] → [B, hidden, seqLen] → [B, seqLen, hidden] on the backend (the conv output
+        // is contiguously [B, hidden, seqLen], so this is exactly a batched 2D transpose) — keeps the token sequence
+        // device-resident for the downstream concat + block loop; identical to the old host token-major copy.
         TensorShape outShape = new TensorShape(batch, seqLen, _hidden);
         Tensor output = new Tensor(outShape, latent.DType);
-
-        float* inPtr = (float*)convOut.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long dstBase = ((long)b * seqLen + s) * _hidden;
-                for (int d = 0; d < _hidden; d++)
-                {
-                    long srcOffset = (((long)b * _hidden + d) * seqLen) + s;
-                    outPtr[dstBase + d] = inPtr[srcOffset];
-                }
-            }
-        }
+        backend.Transpose2D(output, convOut, _hidden, seqLen);
 
         convOut.Dispose();
         return output;

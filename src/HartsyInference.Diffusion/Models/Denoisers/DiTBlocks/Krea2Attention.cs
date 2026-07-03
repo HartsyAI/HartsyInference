@@ -58,90 +58,101 @@ public sealed unsafe class Krea2Attention
 
     /// <summary>Runs attention over <paramref name="x"/> <c>[B, S, hidden]</c>. Pass <paramref name="rope"/> (already
     /// <c>Precompute</c>d for this sequence) for the main blocks; pass null for the text-fusion blocks.</summary>
+    // GPU-residency rewrite (mirrors the verified FluxSingleStreamBlock / HunyuanImageSingleBlock): every glue op
+    // (head split/merge, per-head QK-norm, GQA K/V repeat, the sigmoid output gate) runs as an IBackend op so the
+    // activation chain stays device-resident — no per-op DataPointer D2H sync barriers (the old ReshapeTo/FromMultiHead
+    // + host RepeatKvHeads loops D2H-synced every intermediate around every GEMM). Head split = declaring Q/K/V
+    // directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim with no reshape,
+    // then Permute0213 to/from [B, H, S, D]. The ONLY op left on the CPU is FluxRope.ForwardSingle: this is GQA
+    // (numHeads != numKvHeads), and FluxRope.ApplyGpu rotates Q and K with a single shared head count — so the
+    // GPU-resident rope path is unavailable here and rope stays a host excursion, exactly as before (bit-identical
+    // interleaved-pair rotation and placement on the post-permute [B, H, S, D] layout).
     public Tensor Forward(IBackend backend, Tensor x, FluxRope? rope, int batch, int seqLen)
     {
-        int qDim = _numHeads * _headDim;
-        int kvDim = _numKvHeads * _headDim;
+        TensorShape qHeads = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape kvHeads = new TensorShape(batch, seqLen, _numKvHeads, _headDim);
+        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        TensorShape kvMhShape = new TensorShape(batch, _numKvHeads, seqLen, _headDim);
+        TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
 
-        Tensor q = Linear(backend, x, _toQ!, batch, seqLen, qDim);
-        Tensor k = Linear(backend, x, _toK!, batch, seqLen, kvDim);
-        Tensor v = Linear(backend, x, _toV!, batch, seqLen, kvDim);
-        Tensor gate = Linear(backend, x, _toGate!, batch, seqLen, _hidden);
+        // Q/K/V declared [B, S, H, D] (byte-identical to [B, S, H·D]) + gate [B, S, hidden].
+        Tensor q = new Tensor(qHeads, DType.F32);
+        backend.Linear(q, x, _toQ!, null);
+        Tensor k = new Tensor(kvHeads, DType.F32);
+        backend.Linear(k, x, _toK!, null);
+        Tensor v = new Tensor(kvHeads, DType.F32);
+        backend.Linear(v, x, _toV!, null);
+        Tensor gate = new Tensor(flatShape, DType.F32);
+        backend.Linear(gate, x, _toGate!, null);
 
-        Tensor qMh = DiTUtils.ReshapeToMultiHead(q, batch, seqLen, _numHeads, _headDim);
-        Tensor kMh = DiTUtils.ReshapeToMultiHead(k, batch, seqLen, _numKvHeads, _headDim);
-        Tensor vMh = DiTUtils.ReshapeToMultiHead(v, batch, seqLen, _numKvHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        // Per-head zero-centered RMSNorm on Q and K (weight already folded +1 at load), over the last dim = headDim.
+        Tensor qNorm = new Tensor(qHeads, DType.F32);
+        backend.RmsNorm(qNorm, q, _normQ!, _eps);
+        q.Dispose();
+        Tensor kNorm = new Tensor(kvHeads, DType.F32);
+        backend.RmsNorm(kNorm, k, _normK!, _eps);
+        k.Dispose();
 
-        Tensor qNorm = new Tensor(qMh.Shape, DType.F32);
-        Tensor kNorm = new Tensor(kMh.Shape, DType.F32);
-        backend.RmsNorm(qNorm, qMh, _normQ!, _eps);
-        backend.RmsNorm(kNorm, kMh, _normK!, _eps);
-        qMh.Dispose(); kMh.Dispose();
+        // Permute [B, S, H, D] → [B, H, S, D] for RoPE + SDPA.
+        Tensor qMh = new Tensor(qMhShape, DType.F32);
+        backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
+        qNorm.Dispose();
+        Tensor kMh = new Tensor(kvMhShape, DType.F32);
+        backend.Permute0213(kMh, kNorm, seqLen, _numKvHeads, _headDim);
+        kNorm.Dispose();
+        Tensor vMh = new Tensor(kvMhShape, DType.F32);
+        backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
+        v.Dispose();
 
+        // RoPE (main blocks only; text-fusion passes null) — host excursion, see method note above.
         if (rope is not null)
         {
-            rope.ForwardSingle(qNorm, batch, _numHeads, seqLen);
-            rope.ForwardSingle(kNorm, batch, _numKvHeads, seqLen);
+            rope.ForwardSingle(qMh, batch, _numHeads, seqLen);
+            rope.ForwardSingle(kMh, batch, _numKvHeads, seqLen);
         }
 
-        Tensor kRep = RepeatKvHeads(kNorm, batch, _numKvHeads, _kvGroup, seqLen, _headDim);
-        Tensor vRep = RepeatKvHeads(vMh, batch, _numKvHeads, _kvGroup, seqLen, _headDim);
-        kNorm.Dispose(); vMh.Dispose();
+        // GQA K/V head repeat (device). group == 1 (text-fusion, full MHA) skips the copy.
+        Tensor kRep, vRep;
+        if (_kvGroup == 1)
+        {
+            kRep = kMh;
+            vRep = vMh;
+        }
+        else
+        {
+            kRep = new Tensor(qMhShape, DType.F32);
+            backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroup);
+            vRep = new Tensor(qMhShape, DType.F32);
+            backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroup);
+            kMh.Dispose();
+            vMh.Dispose();
+        }
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(new TensorShape(batch, _numHeads, seqLen, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qNorm, kRep, vRep, null, scale);
-        qNorm.Dispose(); kRep.Dispose(); vRep.Dispose();
+        Tensor attnMh = new Tensor(qMhShape, DType.F32);
+        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
+        qMh.Dispose();
+        kRep.Dispose();   // when _kvGroup == 1, kRep/vRep alias kMh/vMh — disposed exactly once here.
+        vRep.Dispose();
 
-        Tensor attnFlat = DiTUtils.ReshapeFromMultiHead(attnMh, batch, seqLen, _numHeads, _headDim);
+        // Permute [B, H, S, D] → [B, S, hidden].
+        Tensor attnFlat = new Tensor(flatShape, DType.F32);
+        backend.Permute0213(attnFlat, attnMh, _numHeads, seqLen, _headDim);
         attnMh.Dispose();
 
         // out = attn · sigmoid(gate)
-        Tensor sig = new Tensor(gate.Shape, DType.F32);
+        Tensor sig = new Tensor(flatShape, DType.F32);
         backend.Sigmoid(sig, gate);
         gate.Dispose();
-        Tensor gated = new Tensor(attnFlat.Shape, DType.F32);
+        Tensor gated = new Tensor(flatShape, DType.F32);
         backend.Mul(gated, attnFlat, sig);
-        attnFlat.Dispose(); sig.Dispose();
+        attnFlat.Dispose();
+        sig.Dispose();
 
-        Tensor outp = Linear(backend, gated, _toOut!, batch, seqLen, _hidden);
+        Tensor outp = new Tensor(flatShape, DType.F32);
+        backend.Linear(outp, gated, _toOut!, null);
         gated.Dispose();
         return outp;
-    }
-
-    private static Tensor Linear(IBackend backend, Tensor input, Tensor weight, int batch, int seqLen, int outDim)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, outDim), DType.F32);
-        backend.Linear(output, input, weight, null);
-        return output;
-    }
-
-    private static Tensor RepeatKvHeads(Tensor input, int batch, int kvHeads, int groupSize, int seqLen, int headDim)
-    {
-        if (groupSize == 1)
-        {
-            Tensor copy = new Tensor(new TensorShape(batch, kvHeads, seqLen, headDim), DType.F32);
-            long bytes = (long)batch * kvHeads * seqLen * headDim * sizeof(float);
-            Buffer.MemoryCopy((void*)input.DataPointer, (void*)copy.DataPointer, bytes, bytes);
-            return copy;
-        }
-        int qHeads = kvHeads * groupSize;
-        Tensor output = new Tensor(new TensorShape(batch, qHeads, seqLen, headDim), DType.F32);
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long perHead = (long)seqLen * headDim * sizeof(float);
-        for (int b = 0; b < batch; b++)
-            for (int kv = 0; kv < kvHeads; kv++)
-            {
-                long src = ((long)b * kvHeads + kv) * seqLen * headDim;
-                for (int g = 0; g < groupSize; g++)
-                {
-                    long dst = ((long)b * qHeads + kv * groupSize + g) * seqLen * headDim;
-                    Buffer.MemoryCopy(inPtr + src, outPtr + dst, perHead, perHead);
-                }
-            }
-        return output;
     }
 }
 

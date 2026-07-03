@@ -66,87 +66,93 @@ public sealed unsafe class AuraFlowSingleBlock
     }
 
     /// <summary>Forward pass on the joint <c>[txt, img]</c> token stream. Per <c>AuraFlowSingleTransformerBlock.forward</c> lines 171-191.</summary>
+    // GPU-residency rewrite (mirrors ChromaSingleStreamBlock / Krea2Attention): every glue op — LayerNorm+AdaLN
+    // modulation, per-head FP32 QK-norm, head split/merge, gated residual — runs as an IBackend op so the activation
+    // stays device-resident across the block (no per-op DataPointer D2H sync barriers around every GEMM). Head split =
+    // declaring Q/K/V directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim
+    // with no reshape, then Permute0213 to/from [B, H, S, D]. AuraFlow has no RoPE, so nothing is left on the host.
+    // Numerics are bit-identical to the old host helpers: DiTUtils.NormModulate reproduces LayerNormNoAffine +
+    // x*(1+scale)+shift; backend.RmsNorm reproduces QkNorm.Forward; backend.GatedResidualLastDim reproduces
+    // AdaLNModulation.ApplyGatedResidual.
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor temb)
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
 
         TensorShape hidShape = new TensorShape(batch, seqLen, _hiddenSize);
+        // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
+        TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
         TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
         // ── 1. AdaLN-Zero (norm + modulate via shift_msa, scale_msa) returning gate_msa, shift_mlp, scale_mlp, gate_mlp ──
         // The reference's `norm1(hidden, emb=temb)` computes `norm(x) * (1 + scale_msa) + shift_msa` internally
         // and returns (modulated_x, gate_msa, shift_mlp, scale_mlp, gate_mlp). We replicate this with our 6-param
-        // AdaLNModulation: ApplyModulation uses mod[0]=shift_msa, mod[1]=scale_msa; mod[2]=gate_msa,
-        // mod[3]=shift_mlp, mod[4]=scale_mlp, mod[5]=gate_mlp.
+        // AdaLNModulation: mod[0]=shift_msa, mod[1]=scale_msa; mod[2]=gate_msa, mod[3]=shift_mlp, mod[4]=scale_mlp,
+        // mod[5]=gate_mlp.
         Tensor[] mod = _modulation.Forward(backend, temb);
 
-        Tensor normed = new Tensor(hidShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, hidden, batch, seqLen, _hiddenSize);
-        Tensor normHidden = AdaLNModulation.ApplyModulation(normed, mod[0], mod[1], batch, seqLen, _hiddenSize);
-        normed.Dispose();
+        // ── 2. LayerNorm (no affine, eps 1e-6) + modulate: x*(1+scale_msa)+shift_msa ──
+        Tensor normHidden = DiTUtils.NormModulate(backend, hidden, mod[0], mod[1], hidShape);
 
-        // ── 2. Self-attention Q/K/V (bias-free) ──
-        Tensor q = new Tensor(hidShape, DType.F32);
+        // ── 3. Self-attention Q/K/V (bias-free), declared [B, S, H, D] for per-head RMSNorm ──
+        Tensor q = new Tensor(heads, DType.F32);
         backend.Linear(q, normHidden, _toQWeight!, null);
-        Tensor k = new Tensor(hidShape, DType.F32);
+        Tensor k = new Tensor(heads, DType.F32);
         backend.Linear(k, normHidden, _toKWeight!, null);
-        Tensor v = new Tensor(hidShape, DType.F32);
+        Tensor v = new Tensor(heads, DType.F32);
         backend.Linear(v, normHidden, _toVWeight!, null);
         normHidden.Dispose();
 
-        // ── 3. FP32 QK-norm ──
-        int numVectors = batch * seqLen * _numHeads;
-        Tensor qNormed = new Tensor(q.Shape, DType.F32);
-        Tensor kNormed = new Tensor(k.Shape, DType.F32);
-        _normQ.Forward(qNormed, q, numVectors);
-        _normK.Forward(kNormed, k, numVectors);
+        // ── 4. FP32 QK-norm (per-head RMSNorm over the last dim = headDim) ──
+        Tensor qNormed = new Tensor(heads, DType.F32);
+        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
+        Tensor kNormed = new Tensor(heads, DType.F32);
+        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
         k.Dispose();
-        q = qNormed;
-        k = kNormed;
 
-        // ── 4. Reshape to multi-head and run SDPA ──
+        // ── 5. Permute [B, S, H, D] → [B, H, S, D] then run SDPA ──
         Tensor qMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
+        qNormed.Dispose();
         Tensor kMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
+        kNormed.Dispose();
         Tensor vMh = new Tensor(mhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(qMh, q, batch, seqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(kMh, k, batch, seqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
-        q.Dispose(); k.Dispose(); v.Dispose();
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
+        v.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnMh = new Tensor(mhShape, DType.F32);
         backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
+        // ── 6. Permute back [B, H, S, D] → [B, S, hidden] ──
         Tensor attn = new Tensor(hidShape, DType.F32);
-        DiTUtils.ReshapeFromMultiHead(attn, attnMh, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(attn, attnMh, _numHeads, seqLen, _headDim);
         attnMh.Dispose();
 
-        // ── 5. Output projection ──
+        // ── 7. Output projection ──
         Tensor attnProj = new Tensor(hidShape, DType.F32);
         backend.Linear(attnProj, attn, _toOutWeight!, null);
         attn.Dispose();
 
-        // ── 6. Post-attention path (lines 187-191):
+        // ── 8. Post-attention path (lines 187-191):
         //   h_post  = norm2(residual + gate_msa * attn)
         //   h_mod   = h_post * (1 + scale_mlp) + shift_mlp
         //   out     = residual + gate_mlp * ff(h_mod)
-        Tensor preNorm = AdaLNModulation.ApplyGatedResidual(hidden, attnProj, mod[2], batch, seqLen, _hiddenSize);
+        Tensor preNorm = new Tensor(hidShape, DType.F32);
+        backend.GatedResidualLastDim(preNorm, hidden, attnProj, mod[2]);
         attnProj.Dispose();
 
-        Tensor postNorm = new Tensor(hidShape, DType.F32);
-        DiTUtils.LayerNormNoAffine(postNorm, preNorm, batch, seqLen, _hiddenSize);
+        Tensor mlpModulated = DiTUtils.NormModulate(backend, preNorm, mod[3], mod[4], hidShape);
         preNorm.Dispose();
-
-        Tensor mlpModulated = AdaLNModulation.ApplyModulation(postNorm, mod[3], mod[4], batch, seqLen, _hiddenSize);
-        postNorm.Dispose();
 
         Tensor ffOut = _ffn.Forward(backend, mlpModulated, batch, seqLen);
         mlpModulated.Dispose();
 
-        Tensor result = AdaLNModulation.ApplyGatedResidual(hidden, ffOut, mod[5], batch, seqLen, _hiddenSize);
+        Tensor result = new Tensor(hidShape, DType.F32);
+        backend.GatedResidualLastDim(result, hidden, ffOut, mod[5]);
         ffOut.Dispose();
 
         for (int i = 0; i < mod.Length; i++) mod[i].Dispose();

@@ -46,13 +46,17 @@ public sealed unsafe class Krea2TextFusion
     }
 
     /// <summary>Fuses <paramref name="encoderHidden"/> <c>[B, S, numTextLayers, dim]</c> → <c>[B, S, dim]</c>.</summary>
+    // GPU-residency rewrite: the [B,S,L,dim]→[B·S,L,dim] reshape is a device-resident contiguous copy (SliceRows,
+    // not a host Buffer.MemoryCopy over DataPointer), and the layer-axis projector collapse becomes Transpose2D
+    // (move the L axis to the last dim) + Linear(L→1) — the exact Σ_l proj[0,l]·layerStack[t,l,d] contraction, run
+    // on-device so the fusion stack never leaves the GPU between blocks.
     public Tensor Forward(IBackend backend, Tensor encoderHidden, int batch, int seqLen)
     {
         int bs = batch * seqLen;
-        // [B, S, L, dim] is contiguous as [B·S, L, dim]; run layerwise blocks with that as the (batch, seq).
+        // [B, S, L, dim] is contiguous as [B·S, L, dim]; device-copy reshape, then run layerwise blocks with that
+        // as the (batch, seq).
         Tensor layerStack = new Tensor(new TensorShape(bs, _numTextLayers, _dim), DType.F32);
-        long bytes = (long)bs * _numTextLayers * _dim * sizeof(float);
-        Buffer.MemoryCopy((void*)encoderHidden.DataPointer, (void*)layerStack.DataPointer, bytes, bytes);
+        backend.SliceRows(layerStack, encoderHidden, 0);
 
         for (int i = 0; i < _layerwise.Length; i++)
         {
@@ -61,20 +65,14 @@ public sealed unsafe class Krea2TextFusion
             layerStack = next;
         }
 
-        // projector: out[b,s,d] = Σ_l proj[0,l] · layerStack[(b·s), l, d]
-        Tensor fused = new Tensor(new TensorShape(batch, seqLen, _dim), DType.F32);
-        float* src = (float*)layerStack.DataPointer;
-        float* pj = (float*)_projector!.DataPointer;
-        float* dst = (float*)fused.DataPointer;
-        for (int t = 0; t < bs; t++)
-            for (int d = 0; d < _dim; d++)
-            {
-                float acc = 0f;
-                for (int l = 0; l < _numTextLayers; l++)
-                    acc += pj[l] * src[((long)t * _numTextLayers + l) * _dim + d];
-                dst[(long)t * _dim + d] = acc;
-            }
+        // projector: fused[t, d] = Σ_l proj[0, l] · layerStack[t, l, d]. Transpose the layer axis to the last dim
+        // ([bs, L, dim] → [bs, dim, L]), then Linear(L → 1) contracts it → [bs, dim, 1] ≡ [B, S, dim].
+        Tensor transposed = new Tensor(new TensorShape(bs, _dim, _numTextLayers), DType.F32);
+        backend.Transpose2D(transposed, layerStack, _numTextLayers, _dim);
         layerStack.Dispose();
+        Tensor fused = new Tensor(new TensorShape(batch, seqLen, _dim), DType.F32);
+        backend.Linear(fused, transposed, _projector!, null);
+        transposed.Dispose();
 
         for (int i = 0; i < _refiner.Length; i++)
         {

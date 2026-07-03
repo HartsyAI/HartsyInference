@@ -59,38 +59,69 @@ public sealed unsafe class Krea2Block
 
     /// <summary>Runs one block. <paramref name="tembMod"/> is the shared <c>[B, 6·hidden]</c> modulation;
     /// <paramref name="rope"/> is precomputed for the joint sequence.</summary>
+    // GPU-residency rewrite (mirrors the verified Flux/SD3/Hunyuan ports): the modulation split, the two
+    // (1+scale)·norm+shift affines, and the two gated residuals all run as IBackend ops so the activation stays
+    // device-resident — no per-op DataPointer D2H sync barriers around the attention/FFN GEMMs. AffineScaleShift →
+    // DiTUtils.Modulate (AddScalar(scale,+1) + AffineBroadcastLastDim, same (1+scale) convention); GatedResidual →
+    // GatedResidualLastDim; the [6,hidden]-table split → SliceRows + Add (B=1; B>1 keeps the host loop).
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor tembMod, FluxRope rope, int batch, int seqLen)
     {
         // 6 modulation vectors [B, hidden] = tembMod.unflatten(6, hidden) + scale_shift_table.
-        Tensor[] mod = SplitModulation(tembMod, _scaleShiftTable!, batch);
+        Tensor[] mod = SplitModulation(backend, tembMod, _scaleShiftTable!, batch);
 
         TensorShape hShape = new TensorShape(batch, seqLen, _hidden);
         Tensor n1 = new Tensor(hShape, DType.F32);
         backend.RmsNorm(n1, hidden, _norm1!, _eps);
-        Tensor preIn = AffineScaleShift(n1, mod[0], mod[1], batch, seqLen); // (1+prescale)·n1 + preshift
+        Tensor preIn = DiTUtils.Modulate(backend, n1, mod[1], mod[0], hShape); // (1+prescale)·n1 + preshift
         n1.Dispose();
 
         Tensor attnOut = _attn.Forward(backend, preIn, rope, batch, seqLen);
         preIn.Dispose();
-        Tensor h1 = GatedResidual(hidden, attnOut, mod[2], batch, seqLen);  // h + pregate·attn
+        Tensor h1 = new Tensor(hShape, DType.F32);
+        backend.GatedResidualLastDim(h1, hidden, attnOut, mod[2]);            // h + pregate·attn
         attnOut.Dispose();
 
         Tensor n2 = new Tensor(hShape, DType.F32);
         backend.RmsNorm(n2, h1, _norm2!, _eps);
-        Tensor postIn = AffineScaleShift(n2, mod[3], mod[4], batch, seqLen); // (1+postscale)·n2 + postshift
+        Tensor postIn = DiTUtils.Modulate(backend, n2, mod[4], mod[3], hShape); // (1+postscale)·n2 + postshift
         n2.Dispose();
 
         Tensor ffOut = SwiGlu(backend, postIn, batch, seqLen);
         postIn.Dispose();
-        Tensor outp = GatedResidual(h1, ffOut, mod[5], batch, seqLen);      // h + postgate·ff
+        Tensor outp = new Tensor(hShape, DType.F32);
+        backend.GatedResidualLastDim(outp, h1, ffOut, mod[5]);               // h + postgate·ff
         ffOut.Dispose(); h1.Dispose();
 
         foreach (Tensor m in mod) m.Dispose();
         return outp;
     }
 
-    /// <summary>Splits <c>tembMod [B, 6·hidden] + table [6, hidden]</c> into 6 <c>[B, hidden]</c> modulation vectors.</summary>
-    private Tensor[] SplitModulation(Tensor tembMod, Tensor table, int batch)
+    /// <summary>Splits <c>tembMod [B, 6·hidden] + table [6, hidden]</c> into 6 <c>[B, hidden]</c> modulation vectors.
+    /// B=1 (the only case pipelines exercise) runs device-resident: each mod[i] is the i-th <c>hidden</c>-wide chunk
+    /// of <paramref name="tembMod"/> (SliceRows) plus table row i (SliceRows) added on-device.</summary>
+    private Tensor[] SplitModulation(IBackend backend, Tensor tembMod, Tensor table, int batch)
+    {
+        if (batch != 1)
+            return SplitModulationHost(tembMod, table, batch);
+
+        Tensor[] mod = new Tensor[6];
+        TensorShape vecShape = new TensorShape(batch, _hidden);
+        for (int i = 0; i < 6; i++)
+        {
+            Tensor tmSlice = new Tensor(vecShape, DType.F32);
+            backend.SliceRows(tmSlice, tembMod, i);   // B=1: row i = chunk [i·hidden, (i+1)·hidden)
+            Tensor tabSlice = new Tensor(vecShape, DType.F32);
+            backend.SliceRows(tabSlice, table, i);     // table [6, hidden] row i
+            mod[i] = new Tensor(vecShape, DType.F32);
+            backend.Add(mod[i], tmSlice, tabSlice);
+            tmSlice.Dispose();
+            tabSlice.Dispose();
+        }
+        return mod;
+    }
+
+    /// <summary>Host fallback for the modulation split (B&gt;1 only; pipelines run B=1).</summary>
+    private Tensor[] SplitModulationHost(Tensor tembMod, Tensor table, int batch)
     {
         Tensor[] mod = new Tensor[6];
         for (int i = 0; i < 6; i++) mod[i] = new Tensor(new TensorShape(batch, _hidden), DType.F32);
@@ -106,40 +137,6 @@ public sealed unsafe class Krea2Block
                     dst[d] = tm[tmBase + d] + tb[tbBase + d];
             }
         return mod;
-    }
-
-    private Tensor AffineScaleShift(Tensor input, Tensor scale, Tensor shift, int batch, int seqLen)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
-        float* ip = (float*)input.DataPointer, sc = (float*)scale.DataPointer, sh = (float*)shift.DataPointer, op = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            long cb = (long)b * _hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                long vb = ((long)b * seqLen + s) * _hidden;
-                for (int d = 0; d < _hidden; d++)
-                    op[vb + d] = (1.0f + sc[cb + d]) * ip[vb + d] + sh[cb + d];
-            }
-        }
-        return output;
-    }
-
-    private Tensor GatedResidual(Tensor residual, Tensor value, Tensor gate, int batch, int seqLen)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
-        float* rp = (float*)residual.DataPointer, vp = (float*)value.DataPointer, gp = (float*)gate.DataPointer, op = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            long gb = (long)b * _hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                long vb = ((long)b * seqLen + s) * _hidden;
-                for (int d = 0; d < _hidden; d++)
-                    op[vb + d] = rp[vb + d] + gp[gb + d] * vp[vb + d];
-            }
-        }
-        return output;
     }
 
     private Tensor SwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
