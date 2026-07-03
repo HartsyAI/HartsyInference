@@ -460,6 +460,23 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
                     noisedSource = sourceLatent;
                 }
                 MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (Environment.GetEnvironmentVariable("HARTSY_SDXL_DEBUG") == "1")
+                {
+                    unsafe
+                    {
+                        float* lp = (float*)latent.DataPointer, np = (float*)noisedSource.DataPointer, mp = (float*)latentMask.DataPointer;
+                        int lh = (int)latent.Shape[2], lw = (int)latent.Shape[3];
+                        long spatial = (long)lh * lw;
+                        double agree = 0, maskMean = 0; long unmasked = 0;
+                        for (long p = 0; p < spatial; p++)
+                        {
+                            maskMean += mp[p];
+                            if (mp[p] < 0.01f) { agree += Math.Abs(lp[p] - np[p]); unmasked++; }
+                        }
+                        Logs.Info($"[SDXLDBG] step {i}: latentMask mean={maskMean / spatial:F4} unmaskedPx={unmasked}/{spatial} " +
+                            $"post-blend |latent-noisedSource| on unmasked ch0={(unmasked > 0 ? agree / unmasked : -1):F6}");
+                    }
+                }
                 if (noisedSource != sourceLatent) noisedSource.Dispose();
             }
 

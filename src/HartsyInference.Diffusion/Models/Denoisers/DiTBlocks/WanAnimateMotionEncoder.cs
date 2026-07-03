@@ -14,8 +14,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <para>Numerics ported exactly: EqualConv2d/EqualLinear runtime weight scale <c>1/√fan_in</c> (folded once at load;
 /// <c>lr_mul</c> is 1 in this model), FusedLeakyReLU <c>leaky_relu(x+bias, 0.2)·√2</c>, Blur = depthwise FIR with the
 /// normalized <c>[1,3,3,1]</c> outer-product kernel and asymmetric pad <c>((p+1)//2, p//2)</c>, ResBlock output
-/// <c>/√2</c>. The QR is Gram-Schmidt over the 20 columns — torch.linalg.qr (Householder) may flip column signs when
-/// an R diagonal entry is negative; validation-gated against the real checkpoint.</para></summary>
+/// <c>/√2</c>. The QR is Householder with the LAPACK <c>geqrf</c> sign convention, matching torch.linalg.qr column
+/// signs exactly (verified per-column against the real checkpoint: 12 of 20 columns flip vs positive-R Gram-Schmidt).</para></summary>
 public sealed unsafe class WanAnimateMotionEncoder
 {
     private EqualConv2d? _conv0;          // enc.net_app.convs.0 (ConvLayer k1 + FusedLeakyReLU)
@@ -109,34 +109,61 @@ public sealed unsafe class WanAnimateMotionEncoder
     /// <summary>Pixel input size the loaded conv stack expects (final-kernel × 2^numResBlocks).</summary>
     public int ExpectedInputSize() => _convFinal!.Kernel << _resBlocks.Length;
 
-    /// <summary>Gram-Schmidt on the columns of <paramref name="weight"/> <c>[m, n]</c> (+1e-8 on the diagonal,
+    /// <summary>Householder QR on the columns of <paramref name="weight"/> <c>[m, n]</c> (+1e-8 on the diagonal,
     /// matching <c>torch.eye(512, motion_dim)</c>), returning <c>Qᵀ</c> <c>[n, m]</c> for the <c>x @ Qᵀ</c> product.
-    /// Column signs follow the positive-R Gram-Schmidt convention (LAPACK Householder QR may differ — flagged).</summary>
+    /// Column signs follow the LAPACK <c>geqrf</c> convention (reflector <c>α = -sign(x₀)·‖x‖</c>), which is what
+    /// <c>torch.linalg.qr</c> produces — classical Gram-Schmidt (positive-R) flips 12 of 20 columns on the real
+    /// checkpoint, negating those motion components.</summary>
     private static Tensor OrthonormalBasisTransposed(Tensor weight, int m, int n)
     {
         Tensor wf = weight.DType == DType.F32 ? weight : weight.CastTo(DType.F32);
         float* wp = (float*)wf.DataPointer;
-        double[][] q = new double[n][];
+        double[][] a = new double[n][];   // column j of the stabilized weight
         for (int j = 0; j < n; j++)
         {
-            q[j] = new double[m];
-            for (int r = 0; r < m; r++) q[j][r] = wp[(long)r * n + j] + (r == j ? 1e-8 : 0.0);
+            a[j] = new double[m];
+            for (int r = 0; r < m; r++) a[j][r] = wp[(long)r * n + j] + (r == j ? 1e-8 : 0.0);
         }
-        for (int j = 0; j < n; j++)
+        // Factor: reflector k zeroes column k below the diagonal; H_k = I - 2·v·vᵀ/‖v‖², v = x - α·e₀ over rows k…m-1.
+        double[][] v = new double[n][];
+        double[] vNorm2 = new double[n];
+        for (int k = 0; k < n; k++)
         {
-            for (int i = 0; i < j; i++)
+            int len = m - k;
+            double[] vk = new double[len];
+            for (int r = 0; r < len; r++) vk[r] = a[k][k + r];
+            double norm = 0; for (int r = 0; r < len; r++) norm += vk[r] * vk[r];
+            double alpha = vk[0] >= 0 ? -Math.Sqrt(norm) : Math.Sqrt(norm);   // LAPACK dlarfg sign choice
+            vk[0] -= alpha;
+            double vn = 0; for (int r = 0; r < len; r++) vn += vk[r] * vk[r];
+            v[k] = vk; vNorm2[k] = vn;
+            if (vn == 0) continue;   // column already zero below the diagonal
+            for (int j = k; j < n; j++)
             {
-                double dot = 0; for (int r = 0; r < m; r++) dot += q[i][r] * q[j][r];
-                for (int r = 0; r < m; r++) q[j][r] -= dot * q[i][r];
+                double dot = 0; for (int r = 0; r < len; r++) dot += vk[r] * a[j][k + r];
+                double coef = 2.0 * dot / vn;
+                for (int r = 0; r < len; r++) a[j][k + r] -= coef * vk[r];
             }
-            double norm = 0; for (int r = 0; r < m; r++) norm += q[j][r] * q[j][r];
-            double inv = 1.0 / Math.Sqrt(norm);
-            for (int r = 0; r < m; r++) q[j][r] *= inv;
         }
+        // Q's column j = H₀·H₁·…·H_{n-1}·e_j — apply reflectors to the identity column in reverse order.
         Tensor qt = new Tensor(new TensorShape(n, m), DType.F32);
         float* qp = (float*)qt.DataPointer;
+        double[] col = new double[m];
         for (int j = 0; j < n; j++)
-            for (int r = 0; r < m; r++) qp[(long)j * m + r] = (float)q[j][r];
+        {
+            Array.Clear(col);
+            col[j] = 1.0;
+            for (int k = n - 1; k >= 0; k--)
+            {
+                if (vNorm2[k] == 0) continue;
+                int len = m - k;
+                double[] vk = v[k];
+                double dot = 0; for (int r = 0; r < len; r++) dot += vk[r] * col[k + r];
+                double coef = 2.0 * dot / vNorm2[k];
+                for (int r = 0; r < len; r++) col[k + r] -= coef * vk[r];
+            }
+            for (int r = 0; r < m; r++) qp[(long)j * m + r] = (float)col[r];
+        }
         if (!ReferenceEquals(wf, weight)) wf.Dispose();
         return qt;
     }

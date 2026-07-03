@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -26,6 +27,10 @@ public sealed unsafe class Kandinsky5Rope
     private float[]? _cosCache;
     private float[]? _sinCache;
     private int _cachedSeqLen;
+    private int _version;
+    private string? _precomputeKey;
+    private int _tableVersion = -1;
+    private Tensor? _tableCos, _tableSin;
 
     /// <summary>Creates a Kandinsky 5 rope with the given head dim and base period.</summary>
     public Kandinsky5Rope(int headDim, float theta = 10000.0f)
@@ -47,6 +52,13 @@ public sealed unsafe class Kandinsky5Rope
     /// <param name="positions">Per-token positions, shape <c>[seqLen]</c> as int32 (we read as int32 ptr).</param>
     public void Precompute1D(ReadOnlySpan<int> positions)
     {
+        // The transformer precomputes every forward with identical inputs (same seq every step) —
+        // memoize so the host trig AND the GPU table upload happen once per generation, not per step.
+        string key = $"1d:{positions.Length}:{(positions.Length > 0 ? positions[0] : 0)}:{(positions.Length > 0 ? positions[^1] : 0)}";
+        if (key == _precomputeKey && _cosCache is not null) return;
+        _precomputeKey = key;
+        _version++;
+
         int seqLen = positions.Length;
         int halfDim = _headDim / 2;
         _cosCache = new float[seqLen * halfDim];
@@ -91,6 +103,12 @@ public sealed unsafe class Kandinsky5Rope
         if (axisSum != _headDim)
             throw new ArgumentException(
                 $"axesDims sum ({axisSum}) must equal head_dim ({_headDim})", nameof(axesDims));
+
+        // Memoized like Precompute1D — the per-step inputs are identical across the denoise loop.
+        string key = $"3d:{string.Join(',', axesDims)}:{duration}:{height}:{width}:{tStart}:{scaleT}:{scaleH}:{scaleW}";
+        if (key == _precomputeKey && _cosCache is not null) return;
+        _precomputeKey = key;
+        _version++;
 
         int seqLen = duration * height * width;
         int halfDim = _headDim / 2;
@@ -177,6 +195,53 @@ public sealed unsafe class Kandinsky5Rope
                 }
             }
         }
+    }
+
+    /// <summary>GPU-resident RoPE on a PRE-head-permute <c>[1, S, H, D]</c> Q/K pair (byte-identical to the
+    /// <c>[S, heads·headDim]</c> layout <see cref="IBackend.WanRopeInterleaved"/> expects) — the rotation math is
+    /// the same interleaved GPT-J pairing, so the Wan kernel applies verbatim. Replaces the per-block host
+    /// excursion (a full Q/K D2H → trig → H2D round trip per attention, the dominant per-step cost). The
+    /// duplicated-pair cos/sin tables are built ONCE per Precompute (version-keyed) and preloaded to the GPU
+    /// weight cache. Requires batch 1; callers keep <see cref="Apply"/> as the batched fallback.</summary>
+    public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads, int seqLen)
+    {
+        if (_cosCache is null || _sinCache is null)
+            throw new InvalidOperationException("Kandinsky5Rope: Precompute must be called before ApplyGpu.");
+        if (seqLen != _cachedSeqLen)
+            throw new InvalidOperationException(
+                $"Kandinsky5Rope: cached seq_len {_cachedSeqLen} doesn't match requested {seqLen}");
+
+        if (_tableVersion != _version || _tableCos is null)
+        {
+            if (_tableCos is not null)
+            {
+                backend.FreeWeights([_tableCos, _tableSin!]);
+                _tableCos.Dispose();
+                _tableSin!.Dispose();
+            }
+            int halfDim = _headDim / 2;
+            Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+            Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+            float* cp = (float*)cos.DataPointer;
+            float* sp = (float*)sin.DataPointer;
+            for (int s = 0; s < _cachedSeqLen; s++)
+            {
+                int src = s * halfDim;
+                long dst = (long)s * _headDim;
+                for (int i = 0; i < halfDim; i++)
+                {
+                    cp[dst + 2 * i] = _cosCache[src + i]; cp[dst + 2 * i + 1] = _cosCache[src + i];
+                    sp[dst + 2 * i] = _sinCache[src + i]; sp[dst + 2 * i + 1] = _sinCache[src + i];
+                }
+            }
+            backend.PreloadWeights([cos, sin]);
+            _tableCos = cos;
+            _tableSin = sin;
+            _tableVersion = _version;
+        }
+
+        backend.WanRopeInterleaved(q, _tableCos, _tableSin!, seqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, _tableCos, _tableSin!, seqLen, numHeads, _headDim);
     }
 
     /// <summary>Rotates each consecutive pair via <c>x[2i]'   = cos·x[2i]   - sin·x[2i+1]</c>

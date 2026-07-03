@@ -1055,6 +1055,7 @@ public sealed class CudaBackend : IBackend
 
     public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcast");
         if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
             throw new NotSupportedException("CUDA AffineBroadcastLastDim supports F32 only.");
         _context.EnsureCurrent();
@@ -1087,6 +1088,7 @@ public sealed class CudaBackend : IBackend
 
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("GatedResidual");
         if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
             throw new NotSupportedException("CUDA GatedResidualLastDim supports F32 only.");
         _context.EnsureCurrent();
@@ -1224,6 +1226,7 @@ public sealed class CudaBackend : IBackend
     /// re-cached to the same pointer (no reallocation, no host round-trip).</summary>
     public unsafe void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("CUDA WanRopeInterleaved supports F32 only.");
         _context.EnsureCurrent();
@@ -1520,6 +1523,7 @@ public sealed class CudaBackend : IBackend
 
     public void SliceLastDim(Tensor output, Tensor input, int offset)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("SliceLastDim");
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("CUDA SliceLastDim supports F32 only.");
         _context.EnsureCurrent();
@@ -1601,6 +1605,7 @@ public sealed class CudaBackend : IBackend
 
     public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("LayerNormNoAffine");
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("CUDA LayerNormNoAffine supports F32 only.");
         _context.EnsureCurrent();
@@ -2364,6 +2369,7 @@ public sealed class CudaBackend : IBackend
 
     public void Gelu(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Gelu");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -2586,6 +2592,7 @@ public sealed class CudaBackend : IBackend
 
     public void Silu(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Silu");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -3084,6 +3091,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D] via PTX kernel.</summary>
     public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Permute0213");
         _context.EnsureCurrent();
         EnsureKernels();
 

@@ -99,8 +99,23 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         // causal audio encoder — its biases/padding token make that a non-zero "silence" embedding).
         Tensor features = FitToFrames(audioFeatures, tVideo);
         (Tensor audioGlobalC, Tensor audioLocalC) = _audioEncoder.Forward(Backend, features);
+        if (WanVideoDebugDump.Enabled)
+        {
+            WanVideoDebugDump.SetTag("cond");
+            WanVideoDebugDump.Dump("audio_features", features);
+            WanVideoDebugDump.Dump("audio_global", audioGlobalC);
+            WanVideoDebugDump.Dump("audio_local", audioLocalC);
+        }
         ZeroTensor(features);
         (Tensor audioGlobalU, Tensor audioLocalU) = _audioEncoder.Forward(Backend, features);
+        if (WanVideoDebugDump.Enabled)
+        {
+            WanVideoDebugDump.SetTag("uncond");
+            WanVideoDebugDump.Dump("audio_features", features);
+            WanVideoDebugDump.Dump("audio_global", audioGlobalU);
+            WanVideoDebugDump.Dump("audio_local", audioLocalU);
+            WanVideoDebugDump.SetTag(null);
+        }
         features.Dispose();
 
         Tensor? refLatent = null;
@@ -110,6 +125,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             refLatent = _encoder.EncodeRgbFrame(Backend, referenceRgb24, width, height);   // [1, z, 1, hLat, wLat]
             Backend.Sync();
             Backend.FreeWeights(_encoder.EnumerateWeights());
+            WanVideoDebugDump.Dump("ref_latent", refLatent);
         }
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
@@ -131,11 +147,15 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             Stopwatch sw = Stopwatch.StartNew();
             float tEmb = scheduler.Timesteps[k];
             if (wanDebug) Logs.Info($"[S2VDBG] step {k} pre-cond    free={Backend.FreeMemoryBytes() >> 20}MB");
+            WanVideoDebugDump.SetTag("cond");
             Tensor vCond = _transformer.Forward(Backend, latents, promptEmbeds, tEmb, audioLocalC, audioGlobalC, refLatent);
             if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-cond   free={Backend.FreeMemoryBytes() >> 20}MB");
+            WanVideoDebugDump.SetTag("uncond");
             Tensor vUncond = _transformer.Forward(Backend, latents, negativeEmbeds, tEmb, uncondLocal, uncondGlobal, refLatent);
             if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-uncond free={Backend.FreeMemoryBytes() >> 20}MB");
+            WanVideoDebugDump.SetTag(null);
             LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
+            WanVideoDebugDump.Dump("cfg_combined", vCond);
             scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();

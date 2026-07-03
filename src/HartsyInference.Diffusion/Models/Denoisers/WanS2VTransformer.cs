@@ -103,6 +103,8 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         if (audioLocal is not null && (int)audioLocal.Shape[0] != gt)
             throw new ArgumentException($"audio tokens must have {gt} latent frames; got {audioLocal.Shape[0]}.", nameof(audioLocal));
 
+        WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
+        WanVideoDebugDump.Dump("text_embeds", encoder);
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
 
         // Pose control: ComfyUI always feeds cond_encoder (zeros when absent) — conv over zeros = its bias everywhere.
@@ -123,8 +125,10 @@ public sealed unsafe class WanS2VTransformer : IDisposable
                 hidden = AddRowGpu(backend, hidden, _condEncB);
             }
         }
+        WanVideoDebugDump.Dump("post_patchify", hidden);
 
         hidden = AddRowGpu(backend, hidden, _condMask0!);
+        WanVideoDebugDump.Dump("post_condmask", hidden);
 
         (Tensor cos, Tensor sin) = _rope.BuildCosSin(gt, gh, gw);
         int totalS = s, groups = 1;
@@ -139,6 +143,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
             Tensor refTokens = WanDitOps.Patchify(backend, referenceLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
             int refS = refT * frameTokens;
             refTokens = AddRowGpu(backend, refTokens, _condMask1!);
+            WanVideoDebugDump.Dump("ref_tokens", refTokens);
 
             // Reference RoPE sits far past the video frames on the temporal axis: t_start = max(30, T + 9).
             int tStart = Math.Max(30, gt + 9);
@@ -153,6 +158,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
             cur.Dispose(); refTokens.Dispose();
             cur = joined;
             totalS = s + refS;
+            WanVideoDebugDump.Dump("joined_tokens", cur);
 
             // Per-frame timesteps: the sampler timestep for noisy frames, 0 for the reference frame(s).
             groups = gt + refT;
@@ -163,13 +169,23 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         int tokensPerGroup = totalS / groups;
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, timesteps, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
+        if (WanVideoDebugDump.Enabled)
+        {
+            WanVideoDebugDump.DumpValues("timesteps", timesteps);
+            WanVideoDebugDump.Dump("temb", temb);
+            WanVideoDebugDump.Dump("timestep_proj", timestepProj);
+        }
         Tensor encoderProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        WanVideoDebugDump.Dump("text_proj", encoderProj);
 
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup);
             cur.Dispose();
             cur = next;
+            // Block output BEFORE the audio injection — the injector residual is dumped separately inside it.
+            if (i == 0 || i == _blocks.Length / 2 || i == _blocks.Length - 1)
+                WanVideoDebugDump.Dump($"block_{i}", cur);
             int injIdx = Array.IndexOf(_injectLayers, i);
             if (injIdx >= 0 && audioLocal is not null && audioGlobal is not null)
             {
@@ -184,9 +200,11 @@ public sealed unsafe class WanS2VTransformer : IDisposable
             totalS, dim, _config.Eps, tokensPerGroup);
         cur.Dispose();
         temb.Dispose();
+        WanVideoDebugDump.Dump("pre_unpatchify", projected);
         // Unpatchify reads only the first gt·gh·gw rows — the appended reference tokens are dropped, as in the reference.
         Tensor outVel = WanDitOps.Unpatchify(projected, _config.OutChannels, gt, gh, gw, _config.PatchSize);
         projected.Dispose();
+        WanVideoDebugDump.Dump("velocity_out", outVel);
         return outVel;
     }
 

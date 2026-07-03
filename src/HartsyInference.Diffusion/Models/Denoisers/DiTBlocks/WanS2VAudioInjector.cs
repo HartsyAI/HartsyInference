@@ -142,6 +142,8 @@ public sealed unsafe class WanS2VAudioInjector
         Tensor residual = new Tensor(new TensorShape(seqLen, _dim), DType.F32);
         backend.Linear(residual, attnFlat, inj.OW!, inj.OB);
         attnFlat.Dispose();
+        if (injectorIdx == 0 || injectorIdx == _inj.Length - 1)
+            WanVideoDebugDump.Dump($"audio_delta_inj{injectorIdx}", residual);
 
         // out = hidden with the residual added to the first seqLen rows; trailing (reference) rows pass through.
         Tensor topAdded = new Tensor(new TensorShape(seqLen, _dim), DType.F32);
