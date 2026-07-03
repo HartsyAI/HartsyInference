@@ -88,6 +88,146 @@ public sealed class Fp8NativeGemmTests
         }
     }
 
+    /// <summary>Validates the activation-quantization kernels feeding the native path: per-tensor absmax →
+    /// dequant scale (amax/448) + e4m3 quantized bytes. Pure compute kernels, so this runs on ANY CUDA GPU
+    /// (Ampere included) — no fp8 GEMM involved.</summary>
+    [Fact]
+    public unsafe void Fp8QuantKernels_DynamicQuant_MatchesHostReference()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        using CudaBackend backend = new CudaBackend(0, ptxDir);
+
+        const int count = 300_007;   // odd size exercises the grid tail
+        Tensor input = new Tensor(new TensorShape(count), DType.F32);
+        Tensor fp8Out = new Tensor(new TensorShape(count), DType.F8E4M3);
+        Tensor scaleOut = new Tensor(new TensorShape(1), DType.F32);
+        try
+        {
+            Random rng = new Random(11);
+            float* ip = (float*)input.DataPointer;
+            for (int i = 0; i < count; i++) ip[i] = (float)(rng.NextDouble() * 20.0 - 10.0);
+            ip[12345] = -173.25f;   // known amax, negative on purpose
+            float amax = 173.25f;
+
+            backend.Fp8QuantizeActivationForTest(fp8Out, scaleOut, input);
+            backend.Sync();
+
+            float scale = *(float*)scaleOut.DataPointer;
+            float expectedScale = amax / 448.0f;
+            Assert.True(MathF.Abs(scale - expectedScale) < 1e-6f, $"scale {scale} != amax/448 {expectedScale}");
+
+            // Each byte must decode back to ≈ x/scale within half an e4m3 ulp (2^-4 relative for
+            // normals, 2^-9·448-absolute near zero).
+            byte* qp = (byte*)fp8Out.DataPointer;
+            double sumRel = 0; int relCount = 0; float maxRel = 0;
+            for (int i = 0; i < count; i++)
+            {
+                float target = ip[i] / scale;
+                float dec = DecodeE4M3(qp[i]);
+                Assert.False(float.IsNaN(dec), $"NaN code at {i} (byte 0x{qp[i]:X2}, target {target})");
+                float err = MathF.Abs(dec - target);
+                if (MathF.Abs(target) > 1.0f)
+                {
+                    float rel = err / MathF.Abs(target);
+                    sumRel += rel; relCount++;
+                    if (rel > maxRel) maxRel = rel;
+                    Assert.True(rel <= 0.0625f + 1e-4f, $"elem {i}: decoded {dec} vs target {target} (rel {rel})");
+                }
+                else
+                    Assert.True(err <= 0.125f, $"elem {i}: decoded {dec} vs target {target} (abs {err})");
+            }
+            _output.WriteLine($"quant {count} elems: scale={scale:E6}, avg_rel={(float)(sumRel / Math.Max(1, relCount)):E3}, max_rel={maxRel:E3}");
+        }
+        finally
+        {
+            input.Dispose(); fp8Out.Dispose(); scaleOut.Dispose();
+        }
+    }
+
+    /// <summary>The full new wiring on Ada: F32 activation → dynamic e4m3 quantization (device-side scale via
+    /// B_SCALE_POINTER) → native fp8 GEMM → F32/F16 output, diffed against the default cast-to-F16 fallback on
+    /// the same F32 input. Tolerance is dominated by activation quantization (e4m3 ≈ 2 decimal digits).</summary>
+    [Theory]
+    [InlineData(64, 256, 128, false)]
+    [InlineData(256, 512, 512, false)]
+    [InlineData(200, 320, 256, true)]    // F32 out + M not multiple of 16 (only leading dims need alignment)
+    public unsafe void NativeFp8Gemm_F32ActivationDynamicQuant_MatchesF16Fallback(int m, int outDim, int inDim, bool outF32)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        using CudaBackend backend = new CudaBackend(0, ptxDir);
+        if (!backend.Fp8Executor.IsSupported)
+        {
+            _output.WriteLine("SKIPPED: native FP8 GEMM needs SM 8.9+.");
+            return;
+        }
+
+        DType outDtype = outF32 ? DType.F32 : DType.F16;
+        Tensor input = new Tensor(new TensorShape(m, inDim), DType.F32);
+        Tensor weight = new Tensor(new TensorShape(outDim, inDim), DType.F8E4M3);
+        Tensor bias = new Tensor(new TensorShape(outDim), DType.F32);
+        Tensor outNative = new Tensor(new TensorShape(m, outDim), outDtype);
+        Tensor outRef = new Tensor(new TensorShape(m, outDim), outDtype);
+        try
+        {
+            Random rng = new Random(23);
+            float* ip = (float*)input.DataPointer;
+            for (long i = 0; i < (long)m * inDim; i++) ip[i] = (float)(rng.NextDouble() * 8.0 - 4.0);
+            byte* wp = (byte*)weight.DataPointer;
+            for (long i = 0; i < (long)outDim * inDim; i++) wp[i] = EncodeE4M3((float)(rng.NextDouble() * 0.5 - 0.25));
+            weight.Fp8ScaleFactor = 0.5f;   // must be applied exactly once by BOTH paths
+            float* bp = (float*)bias.DataPointer;
+            for (int i = 0; i < outDim; i++) bp[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
+
+            backend.EnableNativeFp8Gemm = true;
+            backend.Linear(outNative, input, weight, bias);
+            backend.Sync();
+
+            backend.EnableNativeFp8Gemm = false;
+            backend.Linear(outRef, input, weight, bias);
+            backend.Sync();
+
+            double sumAbs = 0.0, sumRefAbs = 0.0;
+            float maxAbs = 0f;
+            long total = (long)m * outDim;
+            for (long i = 0; i < total; i++)
+            {
+                float n = outF32 ? ((float*)outNative.DataPointer)[i] : (float)((Half*)outNative.DataPointer)[i];
+                float r = outF32 ? ((float*)outRef.DataPointer)[i] : (float)((Half*)outRef.DataPointer)[i];
+                Assert.False(float.IsNaN(n) || float.IsInfinity(n), $"native output non-finite at {i}: {n}");
+                float err = MathF.Abs(n - r);
+                sumAbs += err;
+                sumRefAbs += MathF.Abs(r);
+                if (err > maxAbs) maxAbs = err;
+            }
+            float relErr = sumRefAbs > 0 ? (float)(sumAbs / sumRefAbs) : (float)(sumAbs / total);
+            _output.WriteLine($"F32-act native FP8 {m}x{outDim}x{inDim} out={outDtype}: rel_err={relErr:E3}, max_err={maxAbs:E3}");
+            Assert.True(relErr < 5e-2f, $"F32-activation native FP8 rel_err {relErr:E3} exceeds tolerance (max={maxAbs:E3}).");
+        }
+        finally
+        {
+            input.Dispose(); weight.Dispose(); bias.Dispose(); outNative.Dispose(); outRef.Dispose();
+        }
+    }
+
+    /// <summary>e4m3fn decode (inverse of <see cref="EncodeE4M3"/>): 0x7F/0xFF → NaN.</summary>
+    private static float DecodeE4M3(byte b)
+    {
+        int sign = (b & 0x80) != 0 ? -1 : 1;
+        int expField = (b >> 3) & 0xF;
+        int mant = b & 0x7;
+        if (expField == 0xF && mant == 0x7) return float.NaN;
+        float value = expField == 0
+            ? mant * MathF.Pow(2f, -9)                                  // subnormal
+            : (1f + mant / 8f) * MathF.Pow(2f, expField - 7);           // normal
+        return sign * value;
+    }
+
     /// <summary>Minimal F32 → FP8 E4M3 (OCP: 1 sign, 4 exp bias 7, 3 mantissa, no inf, max normal 448,
     /// 0x7F/0xFF reserved for NaN). Round-to-nearest on the mantissa; flushes tiny values to zero. Exact
     /// rounding is immaterial to the gate — both GEMM paths consume the identical encoded bytes — it only

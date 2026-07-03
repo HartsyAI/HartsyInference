@@ -230,6 +230,10 @@ public static unsafe class CheckpointConvertUtils
         Tensor qWeight = new Tensor(splitShape, inProj.DType);
         Tensor kWeight = new Tensor(splitShape, inProj.DType);
         Tensor vWeight = new Tensor(splitShape, inProj.DType);
+        // Propagate fp8_scaled per-tensor scale — the raw fp8 bytes are real_value/scale; splits keep the fused tensor's factor.
+        qWeight.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
+        kWeight.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
+        vWeight.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
 
         byte* src = (byte*)inProj.DataPointer;
         long chunkBytes = hiddenSize * rowBytes;
@@ -253,6 +257,10 @@ public static unsafe class CheckpointConvertUtils
         Tensor qBias = new Tensor(splitShape, inProj.DType);
         Tensor kBias = new Tensor(splitShape, inProj.DType);
         Tensor vBias = new Tensor(splitShape, inProj.DType);
+        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+        qBias.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
+        kBias.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
+        vBias.Fp8ScaleFactor = inProj.Fp8ScaleFactor;
 
         byte* src = (byte*)inProj.DataPointer;
 

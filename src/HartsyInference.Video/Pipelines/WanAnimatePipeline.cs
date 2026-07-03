@@ -103,6 +103,10 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         for (long i = 0; i < fn; i++) fnp[i] = -1f;
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // The face clip is constant across the denoise: encode motion ONCE per CFG branch (the StyleGAN motion
+        // encoder is host-side; running it inside every forward made a 20-step 14B run take >30 min).
+        Tensor motionCond = _transformer.EncodeMotion(Backend, faceRgbClip, tTotal);
+        Tensor motionUncond = _transformer.EncodeMotion(Backend, faceNeg, tTotal);
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tTotal, hLat, wLat]), seed);
         // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
         // shift) — verify the Animate trajectory vs ComfyUI at the configured step count.
@@ -114,8 +118,8 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
             Stopwatch sw = Stopwatch.StartNew();
             float tEmb = scheduler.Timesteps[k];
             Tensor modelInput = ConcatChannels(latents, condition);      // [1, 2z+4, tTotal, hLat, wLat]
-            Tensor vCond = _transformer.Forward(Backend, modelInput, poseLatent, faceRgbClip, promptEmbeds, tEmb, clipImageEmbeds);
-            Tensor vUncond = _transformer.Forward(Backend, modelInput, poseLatent, faceNeg, negativeEmbeds, tEmb, clipImageEmbeds);
+            Tensor vCond = _transformer.Forward(Backend, modelInput, poseLatent, null, promptEmbeds, tEmb, clipImageEmbeds, motion: motionCond);
+            Tensor vUncond = _transformer.Forward(Backend, modelInput, poseLatent, null, negativeEmbeds, tEmb, clipImageEmbeds, motion: motionUncond);
             modelInput.Dispose();
             LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             scheduler.Step(latents, vCond);
@@ -134,6 +138,8 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         condition.Dispose();
         poseLatent.Dispose();
         faceNeg.Dispose();
+        motionCond.Dispose();
+        motionUncond.Dispose();
 
         // Trim the reference latent frame (trim_latent), then decode the generated frames.
         Tensor video = DropLeadingFrames(latents, latentCh, tTotal, trimLatent, hLat, wLat);

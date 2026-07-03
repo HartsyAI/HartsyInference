@@ -65,7 +65,12 @@ public sealed unsafe class CausalConv3d
     /// <summary>Pre-slices a contiguous <c>[cOut,cIn,kt,kh,kw]</c> weight into kt tensors of <c>[cOut,cIn,kh,kw]</c>.</summary>
     private Tensor[] SliceTemporal(Tensor weight5d)
     {
-        Tensor src = weight5d.DType == DType.F32 ? weight5d : weight5d.CastTo(DType.F32);
+        // The cast temporary must stay reachable for the whole copy loop: `sp` is a raw pointer, so once the local
+        // is dead the GC can finalize the Tensor mid-loop and free the buffer under us (AccessViolation under
+        // memory pressure). The explicit Dispose at the end doubles as the keep-alive AND fixes the leak (the
+        // full VAE's cast slices are ~240 MB otherwise held until GC).
+        Tensor? cast = weight5d.DType == DType.F32 ? null : weight5d.CastTo(DType.F32);
+        Tensor src = cast ?? weight5d;
         float* sp = (float*)src.DataPointer;
         int khw = _kh * _kw;
         Tensor[] slices = new Tensor[_kt];
@@ -82,6 +87,8 @@ public sealed unsafe class CausalConv3d
                 }
             slices[dt] = w;
         }
+        cast?.Dispose();
+        GC.KeepAlive(weight5d);
         return slices;
     }
 

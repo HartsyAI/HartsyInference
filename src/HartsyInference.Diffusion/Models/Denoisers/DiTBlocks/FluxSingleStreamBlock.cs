@@ -4,7 +4,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Flux SingleStreamBlock: parallel attention + MLP on a concatenated image+text sequence. Uses a fused linear1 for Q/K/V + MLP input, then combines attention output with GELU(MLP) via linear2. No SD3 equivalent exists.</summary>
-public sealed unsafe class FluxSingleStreamBlock
+public sealed class FluxSingleStreamBlock
 {
     private readonly int _hiddenSize;
     private readonly int _numHeads;
@@ -97,61 +97,76 @@ public sealed unsafe class FluxSingleStreamBlock
     /// <param name="temb">Timestep embedding [B, hidden].</param>
     /// <param name="rope">Precomputed FluxRope.</param>
     /// <returns>Updated x tensor [B, totalSeqLen, hidden].</returns>
+    // GPU-residency rewrite (mirrors the verified HunyuanImageSingleBlock): every glue op (LayerNorm / AdaLN
+    // modulation / QK-norm / head reshape / feature-dim concat / gated residual) runs as an IBackend op so the
+    // activation stays device-resident — no per-op DataPointer D2H sync barriers (the old LayerNormNoAffine /
+    // AdaLNModulation / QkNorm.Forward / ReshapeTo(From)MultiHead / ConcatAlongFeatureDim host loops D2H-synced
+    // every intermediate around every GEMM). Head reshape = declaring Q/K/V directly as [B, S, H, D]
+    // (byte-identical to [B, S, hidden]) so QK-norm's RmsNorm runs over headDim with no reshape, then Permute0213
+    // to/from [B, H, S, D]. RoPE runs pre-permute via FluxRope.ApplyGpu (same interleaved-pair rotation, identity
+    // on the zero-position text rows, bit-identical to the host path); B>1 keeps the host rope on the permuted
+    // layout, exactly as before.
     public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? attnBias = null)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
 
+        TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
+        // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
+        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpDim);
+
         // ── 1. Modulation: 3 params (shift, scale, gate) ──
         Tensor[] mod = _modulation.Forward(backend, temb);
 
-        // ── 2. LayerNorm (no affine) + modulate ──
-        TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
-        Tensor normed = new Tensor(shape, DType.F32);
-        LayerNormNoAffine(normed, x, batch, seqLen, _hiddenSize);
-        Tensor modulated = AdaLNModulation.ApplyModulation(normed, mod[0], mod[1], batch, seqLen, _hiddenSize);
-        normed.Dispose();
+        // ── 2. LayerNorm (no affine, eps 1e-6) + modulate x*(1+scale)+shift ──
+        Tensor modulated = DiTUtils.NormModulate(backend, x, mod[0], mod[1], shape);
 
         // ── 3. Q/K/V projections + MLP projection (parallel) ──
-        Tensor q = new Tensor(shape, DType.F32);
+        Tensor q = new Tensor(headsShape, DType.F32);
         backend.Linear(q, modulated, _toQWeight!, _toQBias);
-        Tensor k = new Tensor(shape, DType.F32);
+        Tensor k = new Tensor(headsShape, DType.F32);
         backend.Linear(k, modulated, _toKWeight!, _toKBias);
-        Tensor v = new Tensor(shape, DType.F32);
+        Tensor v = new Tensor(headsShape, DType.F32);
         backend.Linear(v, modulated, _toVWeight!, _toVBias);
         // mlpInput / mlpActivated / concatted run at F16. At 1024x1024 these are the three
         // largest activations in the block (213/213/267 MB at F32) and dominate VRAM peak.
         // F16 halves them and lets the next Linear skip its input cast since the joint
         // dtype is already F16. The proj_mlp Linear writes F16 directly into mlpInput;
         // cuBLAS still accumulates in F32 internally so accuracy is preserved.
-        TensorShape mlpProjShape = new TensorShape(batch, seqLen, _mlpDim);
-        Tensor mlpInput = new Tensor(mlpProjShape, DType.F16);
+        Tensor mlpInput = new Tensor(mlpShape, DType.F16);
         backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();
 
-        // ── 4. QK-Norm ──
-        int totalVectors = batch * seqLen * _numHeads;
-        Tensor qNormed = new Tensor(q.Shape, DType.F32);
-        Tensor kNormed = new Tensor(k.Shape, DType.F32);
-        _normQ.Forward(qNormed, q, totalVectors);
-        _normK.Forward(kNormed, k, totalVectors);
+        // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
+        Tensor qNormed = new Tensor(headsShape, DType.F32);
+        backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
+        Tensor kNormed = new Tensor(headsShape, DType.F32);
+        backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
-        // ── 5. Reshape to multi-head [B, H, S, D] ──
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        // ── 5. RoPE BEFORE the head permute: the pre-permute [B(=1), S, H, D] layout is exactly
+        // WanRopeInterleaved's [S, heads·headDim] contract, so the whole joint Q/K rotates in one GPU-resident
+        // op (was a full D2H→host-trig→H2D excursion per block per step).
+        if (batch == 1)
+            rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
+
+        // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
         Tensor qMh = new Tensor(mhShape, DType.F32);
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        Tensor vMh = new Tensor(mhShape, DType.F32);
-        ReshapeToMultiHead(qMh, qNormed, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(kMh, kNormed, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
         qNormed.Dispose();
+        Tensor kMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
         kNormed.Dispose();
+        Tensor vMh = new Tensor(mhShape, DType.F32);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         v.Dispose();
 
-        // ── 6. Apply RoPE ──
-        rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        // Host RoPE fallback (batched inference only; B=1 runs the GPU path at 5) ──
+        if (batch != 1)
+            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
 
         // ── 7. SDPA ──
         float scale = 1.0f / MathF.Sqrt(_headDim);
@@ -161,13 +176,12 @@ public sealed unsafe class FluxSingleStreamBlock
         kMh.Dispose();
         vMh.Dispose();
 
-        // ── 8. Reshape attention output back to [B, S, hidden] ──
+        // ── 8. Permute attention output back [B, H, S, D] → [B, S, hidden] ──
         Tensor attnFlat = new Tensor(shape, DType.F32);
-        ReshapeFromMultiHead(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
         // ── 9. GELU(tanh) on MLP input ── (F16, matches mlpInput; CudaBackend.Gelu has an F16 path)
-        TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpDim);
         Tensor mlpActivated = new Tensor(mlpShape, DType.F16);
         backend.Gelu(mlpActivated, mlpInput);
         mlpInput.Dispose();
@@ -177,12 +191,14 @@ public sealed unsafe class FluxSingleStreamBlock
         // attention activations are 4x smaller than the MLP ones). Cast it down to F16
         // so concat operands match. The cast is small (53 MB at 1024x1024), a worthwhile
         // tradeoff for a 134 MB concatted buffer at F16 instead of 267 MB at F32.
+        // backend.Concat at dim 2 is a raw byte-copy, dtype-agnostic — byte-identical to
+        // the old host ConcatAlongFeatureDim.
         Tensor attnFlatF16 = Utilities.DtypeCastHelper.EnsureDtype(backend, attnFlat, DType.F16);
 
         int concatDim = _hiddenSize + _mlpDim;
         TensorShape concatShape = new TensorShape(batch, seqLen, concatDim);
         Tensor concatted = new Tensor(concatShape, DType.F16);
-        ConcatAlongFeatureDim(concatted, attnFlatF16, mlpActivated, batch, seqLen, _hiddenSize, _mlpDim);
+        backend.Concat(concatted, new Tensor[] { attnFlatF16, mlpActivated }, 2);
         attnFlatF16.Dispose();
         mlpActivated.Dispose();
 
@@ -194,117 +210,12 @@ public sealed unsafe class FluxSingleStreamBlock
         concatted.Dispose();
 
         // ── 11. Gated residual: x = x + gate * output ──
-        Tensor result = AdaLNModulation.ApplyGatedResidual(x, output, mod[2], batch, seqLen, _hiddenSize);
+        Tensor result = new Tensor(shape, DType.F32);
+        backend.GatedResidualLastDim(result, x, output, mod[2]);
         output.Dispose();
 
         for (int i = 0; i < mod.Length; i++) mod[i].Dispose();
 
         return result;
-    }
-
-    // ── Helper methods ──
-
-    private static void LayerNormNoAffine(Tensor output, Tensor input, int batch, int seqLen, int dim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * dim;
-
-                float mean = 0f;
-                for (int d = 0; d < dim; d++)
-                    mean += inPtr[offset + d];
-                mean /= dim;
-
-                float variance = 0f;
-                for (int d = 0; d < dim; d++)
-                {
-                    float diff = inPtr[offset + d] - mean;
-                    variance += diff * diff;
-                }
-                variance /= dim;
-
-                float invStd = 1.0f / MathF.Sqrt(variance + 1e-6f);
-                for (int d = 0; d < dim; d++)
-                    outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
-            }
-        }
-    }
-
-    private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    /// <summary>Concatenates two tensors along the feature dimension: [B, S, D1] + [B, S, D2] → [B, S, D1+D2].
-    /// Operates on raw bytes via Tensor.DataPointer — all three tensors must share the same element
-    /// size (validated at the top). Works for F32 and F16 alike.</summary>
-    private static void ConcatAlongFeatureDim(Tensor output, Tensor first, Tensor second,
-        int batch, int seqLen, int firstDim, int secondDim)
-    {
-        int elemSize = first.DType.SizeInBytes;
-        if (second.DType.SizeInBytes != elemSize || output.DType.SizeInBytes != elemSize)
-        {
-            throw new InvalidOperationException(
-                $"ConcatAlongFeatureDim requires identical element size; got first={first.DType}, second={second.DType}, output={output.DType}");
-        }
-        byte* firstPtr = (byte*)first.DataPointer;
-        byte* secondPtr = (byte*)second.DataPointer;
-        byte* outPtr = (byte*)output.DataPointer;
-        int totalDim = firstDim + secondDim;
-        long firstRowBytes = (long)firstDim * elemSize;
-        long secondRowBytes = (long)secondDim * elemSize;
-        long totalRowBytes = (long)totalDim * elemSize;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long row = (long)b * seqLen + s;
-                long outOffset = row * totalRowBytes;
-                long firstOffset = row * firstRowBytes;
-                long secondOffset = row * secondRowBytes;
-
-                Buffer.MemoryCopy(firstPtr + firstOffset, outPtr + outOffset, firstRowBytes, firstRowBytes);
-                Buffer.MemoryCopy(secondPtr + secondOffset, outPtr + outOffset + firstRowBytes, secondRowBytes, secondRowBytes);
-            }
-        }
     }
 }

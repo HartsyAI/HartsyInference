@@ -259,6 +259,10 @@ public sealed class ChromaCheckpointConverter
             Tensor qB = new Tensor(splitShape, bFused.DType);
             Tensor kB = new Tensor(splitShape, bFused.DType);
             Tensor vB = new Tensor(splitShape, bFused.DType);
+            // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+            qB.Fp8ScaleFactor = bFused.Fp8ScaleFactor;
+            kB.Fp8ScaleFactor = bFused.Fp8ScaleFactor;
+            vB.Fp8ScaleFactor = bFused.Fp8ScaleFactor;
 
             byte* src = (byte*)bFused.DataPointer;
             Buffer.MemoryCopy(src, (void*)qB.DataPointer, chunkBytes, chunkBytes);
@@ -320,6 +324,11 @@ public sealed class ChromaCheckpointConverter
         Tensor kB = new Tensor(qkvShape, fused.DType);
         Tensor vB = new Tensor(qkvShape, fused.DType);
         Tensor mlpB = new Tensor(mlpShape, fused.DType);
+        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+        qB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        mlpB.Fp8ScaleFactor = fused.Fp8ScaleFactor;
 
         byte* src = (byte*)fused.DataPointer;
         long qkvChunkBytes = (long)InnerDim * elemBytes;

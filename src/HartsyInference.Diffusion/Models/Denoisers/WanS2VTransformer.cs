@@ -33,7 +33,8 @@ public sealed unsafe class WanS2VTransformer : IDisposable
     private Tensor? _patchW2d, _patchB, _projOutW, _projOutB, _finalScaleShift;
     private Tensor? _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB;
     private Tensor? _textW1, _textB1, _textW2, _textB2;
-    private Tensor? _condMask;                     // trainable_cond_mask.weight [3, dim]
+    private Tensor? _condMask0, _condMask1;        // trainable_cond_mask.weight rows (main / reference tokens)
+    private Tensor? _onesDim;                      // [1, dim] of 1s — the scale operand for GPU broadcast-adds
     private Tensor? _condEncW2d, _condEncB;        // cond_encoder Conv3d as linear (pose control)
 
     public WanS2VTransformer(WanVideoConfig config)
@@ -60,7 +61,11 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
         _textW1 = w["condition_embedder.text_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.text_embedder.linear_1.bias", out _textB1);
         _textW2 = w["condition_embedder.text_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.text_embedder.linear_2.bias", out _textB2);
-        _condMask = LoadF32(w, "trainable_cond_mask.weight");
+        Tensor condMask = LoadF32(w, "trainable_cond_mask.weight");   // [3, dim]
+        _condMask0 = CopyRow(condMask, 0, _config.InnerDim);
+        _condMask1 = CopyRow(condMask, 1, _config.InnerDim);
+        _onesDim = new Tensor(new TensorShape(1, _config.InnerDim), DType.F32);
+        new Span<float>((float*)_onesDim.DataPointer, _config.InnerDim).Fill(1f);
         if (w.TryGetValue("cond_encoder.weight", out Tensor? condW))
         {
             _condEncW2d = WanDitOps.Reshape2d(condW, _config.InnerDim,
@@ -75,7 +80,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
     {
         foreach (Tensor? t in new[] { _patchW2d, _patchB, _projOutW, _projOutB, _finalScaleShift,
             _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB, _textW1, _textB1, _textW2, _textB2,
-            _condMask, _condEncW2d, _condEncB })
+            _condMask0, _condMask1, _onesDim, _condEncW2d, _condEncB })
             if (t is not null) yield return t;
         for (int i = 0; i < _blocks.Length; i++) foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
         foreach (Tensor t in _audioInjector.EnumerateWeights()) yield return t;
@@ -98,24 +103,32 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         if (audioLocal is not null && (int)audioLocal.Shape[0] != gt)
             throw new ArgumentException($"audio tokens must have {gt} latent frames; got {audioLocal.Shape[0]}.", nameof(audioLocal));
 
+        WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
+        WanVideoDebugDump.Dump("text_embeds", encoder);
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
 
         // Pose control: ComfyUI always feeds cond_encoder (zeros when absent) — conv over zeros = its bias everywhere.
+        // All adds are backend ops into fresh tensors: host-mutating a cached op output would force a stream-sync +
+        // D2H eviction per touch (the S2V host-glue slowdown), and the mutation itself never reaches the GPU copy.
         if (_condEncW2d is not null)
         {
             if (controlLatent is not null)
             {
                 Tensor ctrl = WanDitOps.Patchify(backend, controlLatent, _config.VaeLatentChannels, dim, _config.PatchSize, _condEncW2d, _condEncB);
-                AddInPlace(hidden, ctrl, s, dim);
-                ctrl.Dispose();
+                Tensor summed = new Tensor(hidden.Shape, DType.F32);
+                backend.Add(summed, hidden, ctrl);
+                ctrl.Dispose(); hidden.Dispose();
+                hidden = summed;
             }
             else if (_condEncB is not null)
             {
-                AddRowBroadcast(hidden, _condEncB, 0, s, dim);
+                hidden = AddRowGpu(backend, hidden, _condEncB);
             }
         }
+        WanVideoDebugDump.Dump("post_patchify", hidden);
 
-        AddCondMaskRow(hidden, 0, 0, s, dim);
+        hidden = AddRowGpu(backend, hidden, _condMask0!);
+        WanVideoDebugDump.Dump("post_condmask", hidden);
 
         (Tensor cos, Tensor sin) = _rope.BuildCosSin(gt, gh, gw);
         int totalS = s, groups = 1;
@@ -129,20 +142,23 @@ public sealed unsafe class WanS2VTransformer : IDisposable
                 throw new ArgumentException($"reference latent spatial size must match the video latent ({hh}x{ww}); got {referenceLatent.Shape}.", nameof(referenceLatent));
             Tensor refTokens = WanDitOps.Patchify(backend, referenceLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
             int refS = refT * frameTokens;
-            AddCondMaskRow(refTokens, 1, 0, refS, dim);
+            refTokens = AddRowGpu(backend, refTokens, _condMask1!);
+            WanVideoDebugDump.Dump("ref_tokens", refTokens);
 
             // Reference RoPE sits far past the video frames on the temporal axis: t_start = max(30, T + 9).
             int tStart = Math.Max(30, gt + 9);
             int[] refFrames = new int[refT];
             for (int i = 0; i < refT; i++) refFrames[i] = tStart + i;
             (Tensor refCos, Tensor refSin) = _rope.BuildCosSin(refFrames, gh, gw);
-            Tensor cos2 = ConcatRows(cos, refCos, _config.HeadDim); cos.Dispose(); refCos.Dispose(); cos = cos2;
-            Tensor sin2 = ConcatRows(sin, refSin, _config.HeadDim); sin.Dispose(); refSin.Dispose(); sin = sin2;
+            Tensor cos2 = WanDitOps.ConcatRows(cos, refCos, _config.HeadDim); cos.Dispose(); refCos.Dispose(); cos = cos2;
+            Tensor sin2 = WanDitOps.ConcatRows(sin, refSin, _config.HeadDim); sin.Dispose(); refSin.Dispose(); sin = sin2;
 
-            Tensor joined = ConcatRows(cur, refTokens, dim);
+            Tensor joined = new Tensor(new TensorShape(s + refS, dim), DType.F32);
+            backend.Concat(joined, [cur, refTokens], 0);
             cur.Dispose(); refTokens.Dispose();
             cur = joined;
             totalS = s + refS;
+            WanVideoDebugDump.Dump("joined_tokens", cur);
 
             // Per-frame timesteps: the sampler timestep for noisy frames, 0 for the reference frame(s).
             groups = gt + refT;
@@ -153,16 +169,30 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         int tokensPerGroup = totalS / groups;
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, timesteps, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
+        if (WanVideoDebugDump.Enabled)
+        {
+            WanVideoDebugDump.DumpValues("timesteps", timesteps);
+            WanVideoDebugDump.Dump("temb", temb);
+            WanVideoDebugDump.Dump("timestep_proj", timestepProj);
+        }
         Tensor encoderProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        WanVideoDebugDump.Dump("text_proj", encoderProj);
 
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup);
             cur.Dispose();
             cur = next;
+            // Block output BEFORE the audio injection — the injector residual is dumped separately inside it.
+            if (i == 0 || i == _blocks.Length / 2 || i == _blocks.Length - 1)
+                WanVideoDebugDump.Dump($"block_{i}", cur);
             int injIdx = Array.IndexOf(_injectLayers, i);
             if (injIdx >= 0 && audioLocal is not null && audioGlobal is not null)
-                _audioInjector.Forward(backend, cur, injIdx, audioLocal, audioGlobal, s);
+            {
+                Tensor injected = _audioInjector.Forward(backend, cur, injIdx, audioLocal, audioGlobal, s);
+                cur.Dispose();
+                cur = injected;
+            }
         }
         cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
 
@@ -170,42 +200,30 @@ public sealed unsafe class WanS2VTransformer : IDisposable
             totalS, dim, _config.Eps, tokensPerGroup);
         cur.Dispose();
         temb.Dispose();
+        WanVideoDebugDump.Dump("pre_unpatchify", projected);
         // Unpatchify reads only the first gt·gh·gw rows — the appended reference tokens are dropped, as in the reference.
         Tensor outVel = WanDitOps.Unpatchify(projected, _config.OutChannels, gt, gh, gw, _config.PatchSize);
         projected.Dispose();
+        WanVideoDebugDump.Dump("velocity_out", outVel);
         return outVel;
     }
 
-    /// <summary>Adds <c>trainable_cond_mask</c> row <paramref name="row"/> to rows [start, start+count) of the tokens.</summary>
-    private void AddCondMaskRow(Tensor tokens, int row, int start, int count, int dim)
+    /// <summary>GPU broadcast row-add: consumes <paramref name="tokens"/> and returns a fresh tensor
+    /// <c>tokens + row</c> (row <c>[1, dim]</c> broadcast over every token) via <c>AffineBroadcastLastDim</c>
+    /// with a ones scale — keeps the stream GPU-resident instead of a host loop + cache eviction.</summary>
+    private Tensor AddRowGpu(IBackend backend, Tensor tokens, Tensor row)
     {
-        float* tp = (float*)tokens.DataPointer + (long)start * dim;
-        float* mp = (float*)_condMask!.DataPointer + (long)row * dim;
-        for (int i = 0; i < count; i++)
-            for (int d = 0; d < dim; d++) tp[(long)i * dim + d] += mp[d];
+        Tensor o = new Tensor(tokens.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(o, tokens, _onesDim!, row);
+        tokens.Dispose();
+        return o;
     }
 
-    private static void AddRowBroadcast(Tensor tokens, Tensor row, int rowIdx, int count, int dim)
+    /// <summary>Copies row <paramref name="row"/> of a <c>[rows, dim]</c> F32 tensor into a standalone <c>[1, dim]</c>.</summary>
+    private static Tensor CopyRow(Tensor x, int row, int dim)
     {
-        float* tp = (float*)tokens.DataPointer;
-        float* rp = (float*)row.DataPointer + (long)rowIdx * dim;
-        for (int i = 0; i < count; i++)
-            for (int d = 0; d < dim; d++) tp[(long)i * dim + d] += rp[d];
-    }
-
-    private static void AddInPlace(Tensor acc, Tensor add, int rows, int dim)
-    {
-        long n = (long)rows * dim;
-        float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
-        for (long i = 0; i < n; i++) ap[i] += dp[i];
-    }
-
-    private static Tensor ConcatRows(Tensor top, Tensor bottom, int dim)
-    {
-        int a = (int)top.Shape[0], b = (int)bottom.Shape[0];
-        Tensor o = new Tensor(new TensorShape(a + b, dim), DType.F32);
-        Buffer.MemoryCopy((float*)top.DataPointer, (float*)o.DataPointer, (long)a * dim * 4, (long)a * dim * 4);
-        Buffer.MemoryCopy((float*)bottom.DataPointer, (float*)o.DataPointer + (long)a * dim, (long)b * dim * 4, (long)b * dim * 4);
+        Tensor o = new Tensor(new TensorShape(1, dim), DType.F32);
+        Buffer.MemoryCopy((float*)x.DataPointer + (long)row * dim, (float*)o.DataPointer, (long)dim * 4, (long)dim * 4);
         return o;
     }
 
@@ -219,7 +237,8 @@ public sealed unsafe class WanS2VTransformer : IDisposable
             _patchW2d = _patchB = _projOutW = _projOutB = _finalScaleShift = null;
             _timeEmb1W = _timeEmb1B = _timeEmb2W = _timeEmb2B = _timeProjW = _timeProjB = null;
             _textW1 = _textB1 = _textW2 = _textB2 = null;
-            _condMask = _condEncW2d = _condEncB = null;
+            _condMask0?.Dispose(); _condMask1?.Dispose(); _onesDim?.Dispose();
+            _condMask0 = _condMask1 = _onesDim = _condEncW2d = _condEncB = null;
         }
         GC.SuppressFinalize(this);
     }

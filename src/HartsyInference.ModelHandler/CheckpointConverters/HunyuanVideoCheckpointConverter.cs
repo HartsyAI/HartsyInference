@@ -312,6 +312,8 @@ public static unsafe class HunyuanVideoCheckpointConverter
         long rowBytes = cols * esz;
         TensorShape shape = src.Shape.Rank == 1 ? new TensorShape(numRows) : new TensorShape(numRows, cols);
         Tensor dst = new(shape, src.DType);
+        // Propagate fp8_scaled per-tensor scale — the raw fp8 bytes are real_value/scale, so a slice must keep the source's factor.
+        dst.Fp8ScaleFactor = src.Fp8ScaleFactor;
         byte* sp = (byte*)src.DataPointer + startRow * rowBytes;
         Buffer.MemoryCopy(sp, (void*)dst.DataPointer, numRows * rowBytes, numRows * rowBytes);
         return dst;
@@ -325,6 +327,8 @@ public static unsafe class HunyuanVideoCheckpointConverter
         int rows = (int)(q.Shape[0] + k.Shape[0] + v.Shape[0]);
         TensorShape shape = q.Shape.Rank == 1 ? new TensorShape(rows) : new TensorShape(rows, cols);
         Tensor dst = new(shape, q.DType);
+        // Propagate fp8_scaled per-tensor scale (q's — a fused tensor carries one factor; diffusers refiner q/k/v ship unscaled or with identical scales in practice).
+        dst.Fp8ScaleFactor = q.Fp8ScaleFactor;
         byte* dp = (byte*)dst.DataPointer;
         long qb = q.ElementCount * esz, kb = k.ElementCount * esz, vb = v.ElementCount * esz;
         Buffer.MemoryCopy((void*)q.DataPointer, dp, qb, qb);
@@ -339,6 +343,8 @@ public static unsafe class HunyuanVideoCheckpointConverter
     {
         long cols = src.ElementCount / rows;
         Tensor dst = new(new TensorShape(rows, cols), src.DType);
+        // Propagate fp8_scaled per-tensor scale — the reshape is byte-identical, so the source's factor still applies.
+        dst.Fp8ScaleFactor = src.Fp8ScaleFactor;
         long bytes = src.ElementCount * src.DType.SizeInBytes;
         Buffer.MemoryCopy((void*)src.DataPointer, (void*)dst.DataPointer, bytes, bytes);
         return dst;

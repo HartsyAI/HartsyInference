@@ -306,6 +306,10 @@ public sealed class Flux2CheckpointConverter
         Tensor qBias = new Tensor(splitShape, fused.DType);
         Tensor kBias = new Tensor(splitShape, fused.DType);
         Tensor vBias = new Tensor(splitShape, fused.DType);
+        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+        qBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        kBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        vBias.Fp8ScaleFactor = fused.Fp8ScaleFactor;
 
         byte* src = (byte*)fused.DataPointer;
         Buffer.MemoryCopy(src, (void*)qBias.DataPointer, chunkBytes, chunkBytes);
@@ -397,6 +401,12 @@ public sealed class Flux2CheckpointConverter
         Tensor v = new Tensor(qkvShape, fused.DType);
         Tensor gate = new Tensor(mlpShape, fused.DType);
         Tensor up = new Tensor(mlpShape, fused.DType);
+        // Propagate fp8_scaled per-tensor scale — biases aren't fp8-scaled in practice, but a non-1 factor must follow the bytes.
+        q.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        k.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        v.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        gate.Fp8ScaleFactor = fused.Fp8ScaleFactor;
+        up.Fp8ScaleFactor = fused.Fp8ScaleFactor;
 
         byte* src = (byte*)fused.DataPointer;
         long qkvChunkBytes = (long)_hiddenSize * elemBytes;

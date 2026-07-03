@@ -512,7 +512,7 @@ internal static unsafe class GpuTransferHelper
     /// cache until non-deterministic GC finalization and accumulate to OOM over multi-step diffusion. Safe because
     /// the only cross-step state (the latent) lives on the host; anything still cached here is dead. The per-tensor
     /// sync/dispose callbacks stay valid: they re-check the activation cache and no-op once the entry is gone.</summary>
-    public static void FreeActivations()
+    public static void FreeActivations(bool trimPool = true)
     {
         State s = Resolve();
         s.Context?.EnsureCurrent();
@@ -526,8 +526,11 @@ internal static unsafe class GpuTransferHelper
         // Return pooled memory to the driver. cuMemFreeAsync (used by every activation/dispose free) hands memory
         // back to the stream-ordered mempool, which RESERVES it (cuMemGetInfo counts it as used) until trimmed —
         // otherwise the pool's high-water mark grows every op and multi-step diffusion OOMs even though the memory
-        // is logically free. Sync first so the queued async frees complete.
-        TrimPool();
+        // is logically free. Sync first so the queued async frees complete. Hot per-step/per-tile callers pass
+        // trimPool=false: the next iteration re-uses the reservation directly, and a trim there costs a multi-GB
+        // driver release + re-map every iteration (persistent cuMemAlloc callers reclaim the pool via their
+        // OOM-retry if they ever need it).
+        if (trimPool) TrimPool();
     }
 
     /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache.

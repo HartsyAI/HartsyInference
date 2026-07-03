@@ -72,12 +72,19 @@ public sealed unsafe class QwenImageRope
     /// <see cref="ApplyText"/> then <see cref="ApplyImage"/> on the separate streams before concatenation, since RoPE
     /// is per-row independent. Used by the GPU-resident block path, which concatenates <c>[txt, img]</c> on the GPU
     /// first (contiguous row-concat) and then ropes the joint tensor once — avoiding a per-stream CPU round-trip.
-    /// Both Q and K must be <c>[B, numHeads, txtSeqLen + H·W, headDim]</c>.</summary>
+    /// Both Q and K must be <c>[B, numHeads, txtSeqLen + H·W (+ refH·refW), headDim]</c>.
+    /// <para>Qwen-Image-Edit reference-latent tokens: when <paramref name="refPackedH"/>/<paramref name="refPackedW"/>
+    /// are non-zero, an extra <c>refH·refW</c> token section follows the main image rows. Ref tokens use frame axis
+    /// <paramref name="refFrameIndex"/> (ComfyUI <c>qwen_image/model.py</c> ref_latents "index" method: first ref = 1)
+    /// and spatial positions centered on the REF grid — the reference image may have a different resolution than the
+    /// output.</para></summary>
     public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads,
-        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart)
+        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart,
+        int refPackedH = 0, int refPackedW = 0, int refFrameIndex = 1)
     {
         int imgSeqLen = imgPackedH * imgPackedW;
-        int totalSeqLen = txtSeqLen + imgSeqLen;
+        int refSeqLen = refPackedH * refPackedW;
+        int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
         int halfDim = _headDim / 2;
         float[] cosTable = new float[totalSeqLen * halfDim];
         float[] sinTable = new float[totalSeqLen * halfDim];
@@ -96,6 +103,20 @@ public sealed unsafe class QwenImageRope
             int row = si / imgPackedW;
             int col = si - row * imgPackedW;
             FillTokenFreqs(cosTable, sinTable, txtSeqLen + si, frame: 0, height: row - hCenter, width: col - wCenter);
+        }
+        // Finally the reference-latent rows: frame axis = refFrameIndex, spatial centered on the ref grid
+        // (same centering convention as the main grid — identical to ComfyUI for even packed dims).
+        if (refSeqLen > 0)
+        {
+            int refHCenter = refPackedH - refPackedH / 2;
+            int refWCenter = refPackedW - refPackedW / 2;
+            for (int si = 0; si < refSeqLen; si++)
+            {
+                int row = si / refPackedW;
+                int col = si - row * refPackedW;
+                FillTokenFreqs(cosTable, sinTable, txtSeqLen + imgSeqLen + si,
+                    frame: refFrameIndex, height: row - refHCenter, width: col - refWCenter);
+            }
         }
 
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);

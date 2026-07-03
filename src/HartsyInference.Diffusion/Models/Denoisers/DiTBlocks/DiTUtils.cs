@@ -536,11 +536,21 @@ public static unsafe class DiTUtils
     {
         Tensor normed = new Tensor(shape, DType.F32);
         backend.LayerNormNoAffine(normed, x, eps);
+        Tensor output = Modulate(backend, normed, shift, scale, shape);
+        normed.Dispose();
+        return output;
+    }
+
+    /// <summary>AdaLN modulation <c>out = x*(1+scale)+shift</c> on an ALREADY-normalized input, entirely on the
+    /// backend. Split out of <see cref="NormModulate"/> for blocks that share one LayerNorm across two modulation
+    /// paths (SD3.5 dual-attention) or use an affine <c>backend.LayerNorm</c> before modulating. Bit-identical to
+    /// the old host <see cref="AdaLNModulation.ApplyModulation"/>.</summary>
+    public static Tensor Modulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
+    {
         Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
         backend.AddScalar(scalePlus1, scale, 1.0f);
         Tensor output = new Tensor(shape, DType.F32);
-        backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
-        normed.Dispose();
+        backend.AffineBroadcastLastDim(output, x, scalePlus1, shift);
         scalePlus1.Dispose();
         return output;
     }

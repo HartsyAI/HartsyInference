@@ -17,10 +17,11 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     private readonly T5TextEncoder _t5;
     private readonly AuraFlowTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly VaeEncoder? _vaeEncoder;
     private readonly AuraFlowConfig _config;
     private readonly float _schedulerShift;
 
-    /// <summary>Creates a new AuraFlow pipeline with all components pre-loaded.</summary>
+    /// <summary>Creates a new AuraFlow pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="t5">Pile-T5-XL text encoder (output dim 2048, max length 256).</param>
     /// <param name="transformer">AuraFlow MMDiT transformer.</param>
@@ -29,21 +30,29 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     /// <param name="schedulerShift">Flow-match scheduler shift. AuraFlow uses a static shift; default 1.73 matches the diffusers config.</param>
     public AuraFlowPipeline(IBackend backend, T5TextEncoder t5, AuraFlowTransformer transformer,
         VaeDecoder vaeDecoder, AuraFlowConfig config, float schedulerShift = 1.73f)
+        : this(backend, t5, transformer, vaeDecoder, vaeEncoder: null, config, schedulerShift)
+    {
+    }
+
+    /// <summary>Creates a new AuraFlow pipeline with both VAE halves loaded — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>). Configure the encoder with <see cref="VaeConfig.AuraFlow"/> so its output is already in the transformer's latent space.</summary>
+    public AuraFlowPipeline(IBackend backend, T5TextEncoder t5, AuraFlowTransformer transformer,
+        VaeDecoder vaeDecoder, VaeEncoder? vaeEncoder, AuraFlowConfig config, float schedulerShift = 1.73f)
         : base(backend)
     {
         _t5 = t5;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _vaeEncoder = vaeEncoder;
         _config = config;
         _schedulerShift = schedulerShift;
     }
 
-    /// <summary>Generates an image from pre-tokenized Pile-T5-XL input with optional CFG.</summary>
+    /// <summary>Generates an image from pre-tokenized Pile-T5-XL input with optional CFG. An <see cref="ImageToImageRequest"/> selects img2img: the source is VAE-encoded and noised via flow-matching <c>AddNoise</c> at <c>sigma[startStep]</c> — requires a <see cref="VaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint (per-step latent blend + final pixel recomposite). Strength=0 short-circuits to byte-identical pass-through.</summary>
     /// <param name="promptTokenIdsT5">Prompt token IDs from Pile-T5-XL tokenizer (max length 256).</param>
     /// <param name="negativePromptTokenIdsT5">Negative prompt token IDs (same length as <paramref name="promptTokenIdsT5"/>).</param>
     /// <param name="promptAttentionMaskT5">Optional T5 attention mask for the prompt (1=attend, 0=pad).</param>
     /// <param name="negativeAttentionMaskT5">Optional T5 attention mask for the negative prompt.</param>
-    /// <param name="request">Generation parameters.</param>
+    /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint.</param>
     /// <param name="onProgress">Optional progress callback.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsT5,
@@ -54,13 +63,29 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();
+        bool isImg2Img = request is ImageToImageRequest;
+        if (isImg2Img && _vaeEncoder is null)
+            throw new InvalidOperationException("ImageToImageRequest requires a VaeEncoder. Construct the pipeline with the overload that accepts one.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
         (int steps, float cfgScale, int width, int height) = GenerationDefaults.AuraFlow.Resolve(request);
         int latentH = height / 8;
         int latentW = width / 8;
 
-        Logs.Info($"AuraFlow: Generating {width}x{height} image, {steps} steps, cfg={cfgScale}, seed={seed}");
+        Img2ImgSetup.Plan plan = Img2ImgSetup.Prepare(request, height, width, steps);
+        if (plan.PassThrough)
+        {
+            Logs.Info("Strength=0; passing source through unchanged");
+            return (ImagePostProcessor.TensorToRgbBytes(((ImageToImageRequest)request).SourceImage), width, height, seed);
+        }
+        int startStep = plan.StartStep;
+        Tensor? maskPixel = plan.MaskPixel;
+        bool isMaskedInpaint = maskPixel is not null;
+
+        string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
+                      : isImg2Img ? $"img2img (start={startStep}/{steps})"
+                      : "txt2img";
+        Logs.Info($"AuraFlow {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode text with Pile-T5-XL ───────────────────────────────
@@ -87,21 +112,18 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
-        // ── 2. Create initial noise latent [1, 4, latentH, latentW] ────
-        TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
-
-        // ── 3. Set up flow-match scheduler (static shift) ────────────────
+        // ── 2. Set up flow-match scheduler (static shift) ────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
         scheduler.SetTimesteps(steps);
 
-        float initSigma = scheduler.InitialNoiseSigma;
-        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        // ── 3. Build initial latent [1, 4, latentH, latentW] (t2i: noise * initSigma; img2img: encode + AddNoise at sigma[startStep]) ──
+        TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
+        (Tensor latent, Tensor? sourceLatent) =
+            BuildInitialLatent(request, scheduler, latentShape, seed, startStep, keepSourceLatent: isMaskedInpaint);
+        Tensor? latentMask = null;
+        if (isMaskedInpaint)
         {
-            Tensor scaled = new Tensor(latentShape, DType.F32);
-            Backend.Scale(scaled, latent, initSigma);
-            latent.Dispose();
-            latent = scaled;
+            latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
         }
 
         // ── 4. Denoising loop ────────────────────────────────────────────
@@ -113,7 +135,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         Logs.Info("Starting AuraFlow denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
-        for (int i = 0; i < steps; i++)
+        for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
@@ -138,6 +160,28 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
             latent.Dispose();
             latent = newLatent;
 
+            // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
+            // by re-noising the source latent at the next step's sigma. Final step blends with the
+            // clean source — no further denoising follows.
+            if (latentMask is not null && sourceLatent is not null)
+            {
+                int nextStep = i + 1;
+                Tensor noisedSource;
+                if (nextStep < steps)
+                {
+                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                    noisedSource = new Tensor(latentShape, DType.F32);
+                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                    freshNoise.Dispose();
+                }
+                else
+                {
+                    noisedSource = sourceLatent;
+                }
+                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                if (noisedSource != sourceLatent) noisedSource.Dispose();
+            }
+
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -149,6 +193,8 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         condContext.Dispose();
         uncondContext?.Dispose();
+        sourceLatent?.Dispose();
+        latentMask?.Dispose();
 
         AuraFlowTransformer.DumpFinalLatent(latent);
 
@@ -168,12 +214,60 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
+        // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
+        // Suppresses VAE encode/decode drift in unmasked regions (same as SDXL / Flux).
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
+        }
+
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
 
         sw.Stop();
-        Logs.Info($"AuraFlow image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
+        Logs.Info($"AuraFlow {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) (SDXL-family
+    /// 4-channel VAE, scaling applied inside the encoder) combined with fresh noise via flow-matching AddNoise at
+    /// sigma[startStep].
+    /// <para>When <paramref name="keepSourceLatent"/> is true (masked inpaint), the clean source latent is returned
+    /// alongside the noised latent for per-step blending. Caller disposes both. Source is null for txt2img and plain
+    /// img2img.</para></summary>
+    private (Tensor latent, Tensor? sourceLatent) BuildInitialLatent(TextToImageRequest request,
+        FlowMatchEulerDiscreteScheduler scheduler, TensorShape latentShape, int seed, int startStep,
+        bool keepSourceLatent)
+    {
+        if (request is ImageToImageRequest img2img)
+        {
+            Stopwatch vaeEncSw = Stopwatch.StartNew();
+            Tensor sourceLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
+            vaeEncSw.Stop();
+            Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
+
+            Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+            Tensor latent = new Tensor(latentShape, DType.F32);
+            scheduler.AddNoise(latent, sourceLatent, noise, startStep);
+            noise.Dispose();
+            if (keepSourceLatent)
+            {
+                return (latent, sourceLatent);
+            }
+            sourceLatent.Dispose();
+            return (latent, null);
+        }
+
+        Tensor t2iNoise = SeedGenerator.CreateNoise(latentShape, seed);
+        float initSigma = scheduler.InitialNoiseSigma;
+        if (MathF.Abs(initSigma - 1.0f) > 1e-6f)
+        {
+            Tensor scaled = new Tensor(latentShape, DType.F32);
+            Backend.Scale(scaled, t2iNoise, initSigma);
+            t2iNoise.Dispose();
+            return (scaled, null);
+        }
+        return (t2iNoise, null);
     }
 }

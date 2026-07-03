@@ -54,4 +54,26 @@ public static class Img2ImgSetup
         int startStep = Math.Max(steps - initTimesteps, 0);
         return new Plan(startStep, mask, PassThrough: initTimesteps == 0);
     }
+
+    /// <summary>Flow-matching mix <c>output = (1−sigma)·source + sigma·noise</c> for pipelines that drive their own
+    /// integrator instead of a scheduler with an <c>AddNoise</c> (F-Lite dynamic shift, Lance shifted grid,
+    /// Ideogram 4 logit-normal). All three tensors must be same-shape F32; <paramref name="sigma"/> is the noise
+    /// level at the img2img start step (1 = pure noise, 0 = clean source).</summary>
+    public static unsafe void MixAtSigma(Tensor output, Tensor source, Tensor noise, float sigma)
+    {
+        if (output.ElementCount != source.ElementCount || output.ElementCount != noise.ElementCount)
+        {
+            throw new ArgumentException(
+                $"MixAtSigma requires same-size tensors; got {output.Shape}, {source.Shape}, {noise.Shape}.");
+        }
+        float* op = (float*)output.DataPointer;
+        float* sp = (float*)source.DataPointer;
+        float* np = (float*)noise.DataPointer;
+        long count = output.ElementCount;
+        float oneMinusSigma = 1.0f - sigma;
+        for (long i = 0; i < count; i++)
+        {
+            op[i] = oneMinusSigma * sp[i] + sigma * np[i];
+        }
+    }
 }

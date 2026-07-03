@@ -14,35 +14,29 @@ namespace HartsyInference.Diffusion.Models.Vae.QwenImage;
 /// <see cref="VaeEncoder"/>. The scaled latent is <c>(mean − latents_mean) / latents_std</c> per channel
 /// (the exact inverse of the decoder's <c>UndoScaling</c>).</para>
 ///
-/// <para><b>Checkpoint-reconciliation pending.</b> Unlike the decoder (whose schedule + keys were probed
-/// from <c>qwen_image_vae.safetensors</c>), the <c>encoder.downsamples.*</c> stage schedule here is the
-/// best-effort <i>mirror</i> of the decoder's <c>upsamples</c> schedule (resample→downsample, channel
-/// transitions reversed). The schedule is a single data array (<see cref="_stages"/>) so it's a one-place
-/// edit once probed against the real file; the block topology + ops are shared with the validated
-/// decoder. The strength=0 img2img path does not invoke the encoder, so it works regardless.</para></summary>
+/// <para>The <c>encoder.downsamples.*</c> stage schedule is probed from the real
+/// <c>qwen_image_vae.safetensors</c> (see <see cref="_stages"/>); block topology + ops are shared with the
+/// validated decoder.</para></summary>
 public sealed class QwenImageVaeEncoder : IDisposable
 {
     public const int LatentChannels = 16;
     public const int MidChannels = 384;
     public const int FirstChannels = 96;
 
-    /// <summary>Mirror of <see cref="QwenImageVaeDecoder"/>'s upsample schedule, reversed and inverted
-    /// (Resample→Downsample; each residual's in/out swapped). <b>Reconcile against the checkpoint.</b></summary>
+    /// <summary>Probed from the real <c>qwen_image_vae.safetensors</c> header (2026-07-02): channel widening
+    /// happens in shortcut RESIDUAL blocks (3: 96→192, 6: 192→384); the strided downsamples keep channels.
+    /// Stages 5/8 also carry a <c>time_conv</c> (temporal video path) that image mode skips, same as the decoder.</summary>
     private static readonly EncodeStage[] _stages =
     [
         new(StageKind.Residual, 96, 96),
         new(StageKind.Residual, 96, 96),
-        new(StageKind.Residual, 96, 96),
-        new(StageKind.Downsample, 96, 192),     // spatial /2, channels 96→192
+        new(StageKind.Downsample, 96, 96),       // spatial /2
+        new(StageKind.Residual, 96, 192),        // shortcut residual widens
         new(StageKind.Residual, 192, 192),
-        new(StageKind.Residual, 192, 192),
-        new(StageKind.Residual, 192, 192),
-        new(StageKind.Downsample, 192, 384),     // spatial /2, channels 192→384
+        new(StageKind.Downsample, 192, 192),     // spatial /2 (+ skipped time_conv)
+        new(StageKind.Residual, 192, 384),       // shortcut residual widens
         new(StageKind.Residual, 384, 384),
-        new(StageKind.Residual, 384, 384),
-        new(StageKind.Residual, 384, 192),       // mirror of decoder's 192→384 shortcut residual
-        new(StageKind.Downsample, 192, 384),     // spatial /2, channels 192→384
-        new(StageKind.Residual, 384, 384),
+        new(StageKind.Downsample, 384, 384),     // spatial /2 (+ skipped time_conv)
         new(StageKind.Residual, 384, 384),
         new(StageKind.Residual, 384, 384),
     ];
@@ -259,7 +253,11 @@ public sealed class QwenImageDownsample
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _convWeight = QwenImageVaeOps.SliceConv3dToConv2d(weights[$"{prefix}.resample.1.weight"], temporalSlot: -1);
+        // Spatial resamples are stored as native 2-D convs [out, in, kH, kW] (same as the decoder's
+        // QwenImageResample); only the residual/head convs carry a temporal axis.
+        Tensor w = weights[$"{prefix}.resample.1.weight"];
+        _convWeight = w.Shape.Rank == 5 ? QwenImageVaeOps.SliceConv3dToConv2d(w, temporalSlot: -1)
+            : (w.DType == DType.F32 ? w : w.CastTo(DType.F32));
         Tensor b = weights[$"{prefix}.resample.1.bias"];
         _convBias = b.DType == DType.F32 ? b : b.CastTo(DType.F32);
     }

@@ -294,6 +294,7 @@ public sealed class CudaBackend : IBackend
         int M = (int)(input.ElementCount / K); // batch*seqLen
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
+        ulong pInputFp8 = 0, pFp8Scratch = 0;
         bool cachedOutput = false;
         try
         {
@@ -312,15 +313,41 @@ public sealed class CudaBackend : IBackend
             float alpha = weight.Fp8ScaleFactor;
             float beta = 0.0f;
 
-            // Native FP8 GEMM path (Ada/Hopper, opt-in). Both operands must be FP8 and the output
-            // F16 to dispatch via cublasLtMatmul. The Ampere fallback below stays the default
-            // because the native path has not been end-to-end validated on Ada in CI.
-            if (EnableNativeFp8Gemm
-                && input.DType.IsFp8 && weight.DType.IsFp8
-                && output.DType == DType.F16
-                && Fp8Executor.IsSupported)
+            // Native FP8 GEMM path (Ada/Hopper, opt-in). The fp8 weight is consumed directly by fp8 tensor cores
+            // (no per-call fp8→F16 weight cast — the dominant fp8-fallback cost) and an F32 activation is
+            // quantized transiently to e4m3 with a per-tensor dynamic scale (absmax → x·448/amax), consumed by
+            // the GEMM as a device-side B_SCALE_POINTER so the whole chain stays async. Alignment: cuBLASLt fp8
+            // needs 16-byte leading dims (lda/ldb = K fp8 bytes; ldc = N · output element bytes); non-conforming
+            // shapes fall through to the cast-to-F16 path below.
+            if (EnableNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
+                && (input.DType.IsFp8 || input.DType == DType.F32)
+                && (output.DType == DType.F16 || output.DType == DType.F32)
+                && K % 16 == 0
+                && (N * output.DType.SizeInBytes) % 16 == 0)
             {
-                Fp8Executor.Run(weight: pWeight, input: pInput, outPtr: pOutput, m: M, n: N, k: K, weightScale: alpha, stream: _stream.Handle);
+                ulong inputFp8Ptr;
+                ulong inputScaleDev = 0;
+                if (input.DType.IsFp8)
+                {
+                    inputFp8Ptr = pInput;
+                    alpha *= input.Fp8ScaleFactor;   // pre-quantized caller input: fold its per-tensor scale too
+                }
+                else
+                {
+                    int count = (int)input.ElementCount;
+                    pInputFp8 = CudaMemory.Allocate((nuint)count);
+                    // Scratch layout: [0] = dequant scale (amax/448), [1..] = per-block maxes.
+                    pFp8Scratch = CudaMemory.Allocate((nuint)((CudaKernels.Fp8AbsMaxBlockCount(count) + 1) * sizeof(float)));
+                    _kernels!.LaunchFp8AbsMaxScale(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
+                    _kernels!.LaunchFp8QuantF32ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                    inputFp8Ptr = pInputFp8;
+                    inputScaleDev = pFp8Scratch;
+                }
+
+                Fp8Executor.Run(weight: pWeight, input: inputFp8Ptr, outPtr: pOutput, m: M, n: N, k: K,
+                    weightScale: alpha, stream: _stream.Handle,
+                    inputScaleDev: inputScaleDev, outF32: output.DType == DType.F32);
+
                 if (bias is not null)
                 {
                     int totalElementsFp8 = M * N;
@@ -331,7 +358,10 @@ public sealed class CudaBackend : IBackend
                         CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
                         biasPtr = pBiasCast;
                     }
-                    _kernels!.LaunchBiasAddF16(pOutput, biasPtr, N, 1, totalElementsFp8, _stream.Handle);
+                    if (output.DType == DType.F32)
+                        _kernels!.LaunchBiasAdd(pOutput, biasPtr, N, 1, totalElementsFp8, _stream.Handle);
+                    else
+                        _kernels!.LaunchBiasAddF16(pOutput, biasPtr, N, 1, totalElementsFp8, _stream.Handle);
                 }
                 GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                 cachedOutput = true;
@@ -491,6 +521,8 @@ public sealed class CudaBackend : IBackend
             if (pInputCast != 0) CudaMemory.FreeAsync(pInputCast, _stream.Handle);
             if (pWeightCast != 0) CudaMemory.FreeAsync(pWeightCast, _stream.Handle);
             if (pBiasCast != 0) CudaMemory.FreeAsync(pBiasCast, _stream.Handle);
+            if (pInputFp8 != 0) CudaMemory.FreeAsync(pInputFp8, _stream.Handle);
+            if (pFp8Scratch != 0) CudaMemory.FreeAsync(pFp8Scratch, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
         }
     }
@@ -1024,6 +1056,7 @@ public sealed class CudaBackend : IBackend
 
     public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcast");
         if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
             throw new NotSupportedException("CUDA AffineBroadcastLastDim supports F32 only.");
         _context.EnsureCurrent();
@@ -1056,6 +1089,7 @@ public sealed class CudaBackend : IBackend
 
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("GatedResidual");
         if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
             throw new NotSupportedException("CUDA GatedResidualLastDim supports F32 only.");
         _context.EnsureCurrent();
@@ -1193,6 +1227,7 @@ public sealed class CudaBackend : IBackend
     /// re-cached to the same pointer (no reallocation, no host round-trip).</summary>
     public unsafe void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("CUDA WanRopeInterleaved supports F32 only.");
         _context.EnsureCurrent();
@@ -1489,6 +1524,7 @@ public sealed class CudaBackend : IBackend
 
     public void SliceLastDim(Tensor output, Tensor input, int offset)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("SliceLastDim");
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("CUDA SliceLastDim supports F32 only.");
         _context.EnsureCurrent();
@@ -1570,6 +1606,7 @@ public sealed class CudaBackend : IBackend
 
     public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("LayerNormNoAffine");
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("CUDA LayerNormNoAffine supports F32 only.");
         _context.EnsureCurrent();
@@ -2333,6 +2370,7 @@ public sealed class CudaBackend : IBackend
 
     public void Gelu(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Gelu");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -2555,6 +2593,7 @@ public sealed class CudaBackend : IBackend
 
     public void Silu(Tensor output, Tensor input)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Silu");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -2921,6 +2960,39 @@ public sealed class CudaBackend : IBackend
             throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_0, Q5_0, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
     }
 
+    /// <summary>Test hook for the native-fp8 activation quantization kernels: computes the per-tensor e4m3 dequant
+    /// scale (<c>amax/448</c>) into <paramref name="scaleOut"/> (1-element F32) and the quantized bytes into
+    /// <paramref name="fp8Out"/> (same element count as <paramref name="input"/>, F8E4M3). Runs on any CUDA GPU —
+    /// the kernels are plain compute (only the GEMM needs Ada) — so the Ampere CI box can validate them.</summary>
+    internal void Fp8QuantizeActivationForTest(Tensor fp8Out, Tensor scaleOut, Tensor input)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int count = (int)input.ElementCount;
+        ulong pIn = 0, pOut = 0, pScale = 0, pScratch = 0;
+        bool cachedOut = false, cachedScale = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pOut = GpuTransferHelper.AllocateDevice((nuint)count);
+            pScale = GpuTransferHelper.AllocateDevice(sizeof(float));
+            pScratch = CudaMemory.Allocate((nuint)(CudaKernels.Fp8AbsMaxBlockCount(count) * sizeof(float)));
+            _kernels!.LaunchFp8AbsMaxScale(pIn, pScratch, pScale, count, _stream.Handle);
+            _kernels!.LaunchFp8QuantF32ToE4M3(pOut, pIn, pScale, count, _stream.Handle);
+            GpuTransferHelper.CacheActivation(fp8Out, pOut, (nuint)count);
+            cachedOut = true;
+            GpuTransferHelper.CacheActivation(scaleOut, pScale, sizeof(float));
+            cachedScale = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pIn);
+            if (pScratch != 0) CudaMemory.FreeAsync(pScratch, _stream.Handle);
+            if (!cachedOut) GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedScale) GpuTransferHelper.FreeDevice(pScale);
+        }
+    }
+
     /// <summary>Implements CastF8E4M3ToF16 using the PTX cast kernel on GPU.</summary>
     public void CastF8E4M3ToF16(Tensor output, Tensor input)
     {
@@ -3020,6 +3092,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>4D permute(0,2,1,3): [B, S, H, D] -> [B, H, S, D] via PTX kernel.</summary>
     public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
     {
+        using NvtxRange _nvtx = NvtxRange.Push("Permute0213");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -3624,6 +3697,12 @@ public sealed class CudaBackend : IBackend
     {
         _context.EnsureCurrent();
         GpuTransferHelper.FreeActivations();
+    }
+
+    public void FreeActivations(bool trimPool)
+    {
+        _context.EnsureCurrent();
+        GpuTransferHelper.FreeActivations(trimPool);
     }
 
     public void TrimMemoryPool()

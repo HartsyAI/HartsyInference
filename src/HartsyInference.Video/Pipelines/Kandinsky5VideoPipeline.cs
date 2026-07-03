@@ -90,15 +90,20 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
         Tensor latent = RunDenoise(qwenEmbeds, clipPooled, negQwenEmbeds, negClipPooled,
             request, numFrames, onProgress, firstFrameLatent, out int seed);
 
-        // ── VAE decode: model space → raw VAE space, then HunyuanVideo causal decode. ──
+        // ── VAE decode: model space → raw VAE space, then HunyuanVideo causal decode. Tiled — the
+        // full-res 3D decode peaks >24 GB (same VAE as HunyuanVideo); tiling bounds it to a per-tile
+        // working set. Weights preloaded/freed around the stage per the shared pipeline convention. ──
         Stopwatch vaeSw = Stopwatch.StartNew();
         Tensor decodeIn = new Tensor(latent.Shape, DType.F32);
         Backend.Scale(decodeIn, latent, 1.0f / _vae.Config.ScalingFactor);
         latent.Dispose();
 
         Tensor rgb;
-        try { rgb = _vae.Decode(Backend, decodeIn); }
+        Backend.PreloadWeights(_vae.EnumerateWeights());
+        try { rgb = _vae.DecodeTiled(Backend, decodeIn); }
         finally { decodeIn.Dispose(); }
+        Backend.Sync();
+        Backend.FreeWeights(_vae.EnumerateWeights());
         vaeSw.Stop();
         Logs.Verbose($"Kandinsky5-Video: VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
@@ -222,6 +227,12 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
             sw.Stop();
             Logs.Debug($"Kandinsky5-Video step {i + 1}/{steps} (t={t:F1}) in {sw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, sw.Elapsed.TotalMilliseconds));
+
+            // Reclaim GPU-resident activations between steps (undisposed cached intermediates otherwise
+            // accumulate to OOM over the loop). Safe: the scheduler steps the latent on the host, and the
+            // conditioning tensors are host-backed (re-uploaded per step). trimPool:false — steps are
+            // identical, so the pool reservation is reused instead of a per-step driver release/re-map.
+            Backend.FreeActivations(trimPool: false);
         }
 
         condLatent.Dispose();

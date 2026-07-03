@@ -99,8 +99,23 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         // causal audio encoder — its biases/padding token make that a non-zero "silence" embedding).
         Tensor features = FitToFrames(audioFeatures, tVideo);
         (Tensor audioGlobalC, Tensor audioLocalC) = _audioEncoder.Forward(Backend, features);
+        if (WanVideoDebugDump.Enabled)
+        {
+            WanVideoDebugDump.SetTag("cond");
+            WanVideoDebugDump.Dump("audio_features", features);
+            WanVideoDebugDump.Dump("audio_global", audioGlobalC);
+            WanVideoDebugDump.Dump("audio_local", audioLocalC);
+        }
         ZeroTensor(features);
         (Tensor audioGlobalU, Tensor audioLocalU) = _audioEncoder.Forward(Backend, features);
+        if (WanVideoDebugDump.Enabled)
+        {
+            WanVideoDebugDump.SetTag("uncond");
+            WanVideoDebugDump.Dump("audio_features", features);
+            WanVideoDebugDump.Dump("audio_global", audioGlobalU);
+            WanVideoDebugDump.Dump("audio_local", audioLocalU);
+            WanVideoDebugDump.SetTag(null);
+        }
         features.Dispose();
 
         Tensor? refLatent = null;
@@ -110,6 +125,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             refLatent = _encoder.EncodeRgbFrame(Backend, referenceRgb24, width, height);   // [1, z, 1, hLat, wLat]
             Backend.Sync();
             Backend.FreeWeights(_encoder.EnumerateWeights());
+            WanVideoDebugDump.Dump("ref_latent", refLatent);
         }
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
@@ -118,13 +134,28 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         FlowUniPCMultistepScheduler scheduler = new(solverOrder: 2);
         scheduler.SetTimesteps(steps, shift);
 
+        bool wanDebug = Environment.GetEnvironmentVariable("HARTSY_WAN_DEBUG") == "1";
+        // Text-only CFG: run the SAME audio on both branches so guidance steers text adherence without pushing the
+        // sample away from the audio contribution. The reference zeroes the negative branch's audio, but our
+        // silence-audio uncond darkens the output roughly linearly in (cfg−1) until the numeric parity of that path
+        // is settled — this mode is the usable interim for cfg>2 (HARTSY_S2V_TEXT_CFG=1).
+        bool textOnlyCfg = Environment.GetEnvironmentVariable("HARTSY_S2V_TEXT_CFG") == "1";
+        Tensor uncondLocal = textOnlyCfg ? audioLocalC : audioLocalU;
+        Tensor uncondGlobal = textOnlyCfg ? audioGlobalC : audioGlobalU;
         for (int k = 0; k < steps; k++)
         {
             Stopwatch sw = Stopwatch.StartNew();
             float tEmb = scheduler.Timesteps[k];
+            if (wanDebug) Logs.Info($"[S2VDBG] step {k} pre-cond    free={Backend.FreeMemoryBytes() >> 20}MB");
+            WanVideoDebugDump.SetTag("cond");
             Tensor vCond = _transformer.Forward(Backend, latents, promptEmbeds, tEmb, audioLocalC, audioGlobalC, refLatent);
-            Tensor vUncond = _transformer.Forward(Backend, latents, negativeEmbeds, tEmb, audioLocalU, audioGlobalU, refLatent);
+            if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-cond   free={Backend.FreeMemoryBytes() >> 20}MB");
+            WanVideoDebugDump.SetTag("uncond");
+            Tensor vUncond = _transformer.Forward(Backend, latents, negativeEmbeds, tEmb, uncondLocal, uncondGlobal, refLatent);
+            if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-uncond free={Backend.FreeMemoryBytes() >> 20}MB");
+            WanVideoDebugDump.SetTag(null);
             LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
+            WanVideoDebugDump.Dump("cfg_combined", vCond);
             scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();
@@ -138,6 +169,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             // until a mid-run OOM otherwise (the latent is host-side, so nothing cross-step is lost).
             Backend.FreeActivations();
             Backend.TrimMemoryPool();
+            if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-free   free={Backend.FreeMemoryBytes() >> 20}MB");
         }
 
         Backend.Sync();

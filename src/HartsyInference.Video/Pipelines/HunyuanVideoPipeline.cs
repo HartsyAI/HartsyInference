@@ -153,7 +153,9 @@ public sealed unsafe class HunyuanVideoPipeline : DiffusionPipelineBase
             // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and any
             // not read-back/disposed linger until GC, accumulating to OOM (they held ~18 GB → the VAE decode OOM'd).
             // Safe: EulerCfgStep updates the latent in-place on the host, so nothing cross-step is GPU-only.
-            Backend.FreeActivations();
+            // trimPool:false — steps are identical, so the pool reservation is re-used verbatim; trimming here
+            // released + re-mapped multiple GB of driver memory EVERY step.
+            Backend.FreeActivations(trimPool: false);
         }
 
         Backend.Sync();

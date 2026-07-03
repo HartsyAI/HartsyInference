@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -14,6 +15,11 @@ public sealed unsafe class FluxRope
     private float[]? _cosCache;
     private float[]? _sinCache;
     private int _cachedSeqLen;
+
+    // GPU duplicated-pair tables [S, headDim] (pair i stored at both 2i and 2i+1 — the layout
+    // IBackend.WanRopeInterleaved reads). Rebuilt whenever Precompute refreshes the host tables.
+    private Tensor? _gpuCos, _gpuSin;
+    private bool _gpuTablesDirty = true;
 
     /// <summary>Creates a FluxRope with the given per-axis dimensions.</summary>
     /// <param name="axesDim">Dimensions per axis. Default: [16, 56, 56]. Must sum to headDim.</param>
@@ -78,6 +84,72 @@ public sealed unsafe class FluxRope
 
             freqOffset += numPairs;
         }
+
+        _gpuTablesDirty = true;   // host tables changed → GPU duplicated-pair tables must be rebuilt
+    }
+
+    /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> (pre-permute) Q/K pair via
+    /// <see cref="IBackend.WanRopeInterleaved"/> — the same interleaved-pair rotation as <see cref="Forward"/>
+    /// (<c>x0' = c·x0 − s·x1, x1' = s·x0 + c·x1</c>), so results are bit-identical; text tokens (position ids all
+    /// zero → cos 1 / sin 0) rotate by identity exactly as on the host path. Applied BEFORE the head permute:
+    /// the pre-permute <c>[1, S, H, D]</c> layout is exactly WanRopeInterleaved's <c>[S, heads·headDim]</c>
+    /// contract. Replaces the per-block host loop (full Q/K D2H→trig→H2D round trip per block per step).
+    /// Requires batch 1 (flat-layout equivalence); callers keep the host <see cref="Forward"/> for B&gt;1.
+    /// Mirrors <see cref="HunyuanImageRope.ApplyGpu"/>.</summary>
+    public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads)
+    {
+        if (_cosCache == null || _sinCache == null)
+            throw new InvalidOperationException("FluxRope.Precompute must be called before ApplyGpu.");
+        int seqLen = (int)q.Shape[1];
+        if (seqLen != _cachedSeqLen)
+            throw new InvalidOperationException($"FluxRope.ApplyGpu: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
+
+        // DIAGNOSTIC (HARTSY_SKIP_ROPE=1): skip rope entirely (parity with Forward).
+        if (Environment.GetEnvironmentVariable("HARTSY_SKIP_ROPE") == "1") return;
+
+        (Tensor cos, Tensor sin) = GetGpuTables(backend);
+        backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numHeads, _headDim);
+    }
+
+    /// <summary>Builds (or returns the cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> from the host
+    /// <see cref="Precompute"/> tables — a pure copy-expansion, no trig — and preloads them into the backend
+    /// weight cache so the per-block op skips the H2D upload. Rebuilt only when Precompute has refreshed the
+    /// host tables (FluxTransformer calls Precompute per step, so this re-uploads ~2·S·headDim floats per step —
+    /// negligible next to a single activation).</summary>
+    private unsafe (Tensor cos, Tensor sin) GetGpuTables(IBackend backend)
+    {
+        if (!_gpuTablesDirty)
+            return (_gpuCos!, _gpuSin!);
+
+        if (_gpuCos is not null)
+        {
+            backend.FreeWeights([_gpuCos, _gpuSin!]);
+            _gpuCos.Dispose();
+            _gpuSin!.Dispose();
+        }
+
+        int halfDim = _headDim / 2;
+        Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+        Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+        float* cp = (float*)cos.DataPointer;
+        float* sp = (float*)sin.DataPointer;
+        for (int s = 0; s < _cachedSeqLen; s++)
+        {
+            long srcOff = (long)s * halfDim;
+            long dstOff = (long)s * _headDim;
+            for (int i = 0; i < halfDim; i++)
+            {
+                cp[dstOff + 2 * i] = _cosCache![srcOff + i]; cp[dstOff + 2 * i + 1] = _cosCache[srcOff + i];
+                sp[dstOff + 2 * i] = _sinCache![srcOff + i]; sp[dstOff + 2 * i + 1] = _sinCache[srcOff + i];
+            }
+        }
+
+        backend.PreloadWeights([cos, sin]);
+        _gpuCos = cos;
+        _gpuSin = sin;
+        _gpuTablesDirty = false;
+        return (cos, sin);
     }
 
     /// <summary>Applies RoPE rotation to Q and K tensors in-place. Q/K must be [B, numHeads, seqLen, headDim] laid out as contiguous floats. Precompute must be called first with matching seqLen.</summary>

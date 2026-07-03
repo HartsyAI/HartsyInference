@@ -117,6 +117,58 @@ public static unsafe class MaskBlendUtilities
         return packed;
     }
 
+    /// <summary>In-place mask blend for the CHANNEL-INNER packed latent layout <c>[1, seqLen, 4·channels]</c> where a
+    /// token's feature <c>f</c> decomposes as sub-patch-outer / channel-inner (<c>p = f / channels</c>,
+    /// <c>c = f % channels</c> — Ideogram 4's <c>(p1, p2, ae)</c> token packing), against a same-shape source:
+    /// <c>target = target * mask + source * (1 - mask)</c>. The packed mask is the same <c>[1, seqLen, 4]</c>
+    /// <see cref="PackLatentMask2x2"/> produces — its (TL, TR, BL, BR) order equals <c>p1·2 + p2</c>, so entry
+    /// <c>f / channels</c> is the sub-patch's mask value. Contrast <see cref="BlendPackedInPlace"/>, which handles the
+    /// Flux channel-outer layout (<c>c·4 + p</c>).</summary>
+    public static void BlendPackedChannelInnerInPlace(Tensor target, Tensor source, Tensor packedMask)
+    {
+        if (target.Shape.Rank != 3 || source.Shape.Rank != 3 || packedMask.Shape.Rank != 3)
+        {
+            throw new ArgumentException("BlendPackedChannelInnerInPlace requires [1, seqLen, F] tensors.");
+        }
+        if (target.Shape[0] != 1 || source.Shape[0] != 1 || packedMask.Shape[0] != 1)
+        {
+            throw new ArgumentException("BlendPackedChannelInnerInPlace requires batch size 1.");
+        }
+        long seqLen = target.Shape[1];
+        long featDim = target.Shape[2];
+        if (source.Shape[1] != seqLen || source.Shape[2] != featDim)
+        {
+            throw new ArgumentException($"Source shape {source.Shape} must match target shape {target.Shape}.");
+        }
+        if (packedMask.Shape[1] != seqLen || packedMask.Shape[2] != 4)
+        {
+            throw new ArgumentException($"Packed mask shape {packedMask.Shape} must be [1, {seqLen}, 4].");
+        }
+        if ((featDim & 3) != 0)
+        {
+            throw new ArgumentException($"Feature dim {featDim} must be a multiple of 4 for 2×2 patchified packing.");
+        }
+        long channels = featDim / 4;
+        float* tp = (float*)target.DataPointer;
+        float* sp = (float*)source.DataPointer;
+        float* mp = (float*)packedMask.DataPointer;
+        for (long s = 0; s < seqLen; s++)
+        {
+            long maskBase = s * 4;
+            long featBase = s * featDim;
+            for (int p = 0; p < 4; p++)
+            {
+                float m = mp[maskBase + p];
+                float inv = 1f - m;
+                long blockOff = featBase + p * channels;
+                for (long c = 0; c < channels; c++)
+                {
+                    tp[blockOff + c] = tp[blockOff + c] * m + sp[blockOff + c] * inv;
+                }
+            }
+        }
+    }
+
     /// <summary>In-place mask blend for Flux's packed latent format <c>[1, seqLen, channels·4]</c> against a same-shape source: <c>target = target * mask + source * (1 - mask)</c>. The packed mask is <c>[1, seqLen, 4]</c> — one mask value per 2×2 sub-patch, broadcast across all latent channels via index <c>c*4 + p</c>.</summary>
     public static void BlendPackedInPlace(Tensor target, Tensor source, Tensor packedMask)
     {

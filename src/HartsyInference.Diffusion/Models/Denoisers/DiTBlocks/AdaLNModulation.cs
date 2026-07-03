@@ -52,27 +52,42 @@ public sealed unsafe class AdaLNModulation
         backend.Linear(projected, activated, _linearWeight!, _linearBias);
         activated.Dispose();
 
-        // Split into numParams chunks along last dim
+        // Split into numParams chunks along last dim. B=1 F32 (the inference hot path): chunk p is the
+        // contiguous element range [p*hidden, (p+1)*hidden) of the flat projection, exactly SliceRows'
+        // contract (rowOffset · lastDim of output) — the split stays device-resident instead of D2H-syncing
+        // the projection and re-uploading every param, once per block per step. B>1 keeps the strided host copy.
         Tensor[] results = new Tensor[_numParams];
-        float* projPtr = (float*)projected.DataPointer;
-
-        for (int p = 0; p < _numParams; p++)
+        if (batch == 1 && projected.DType == DType.F32)
         {
-            TensorShape paramShape = new TensorShape(batch, _hiddenSize);
-            Tensor param = new Tensor(paramShape, projected.DType);
-            float* paramPtr = (float*)param.DataPointer;
-
-            for (int b = 0; b < batch; b++)
+            for (int p = 0; p < _numParams; p++)
             {
-                int srcOffset = b * outDim + p * _hiddenSize;
-                int dstOffset = b * _hiddenSize;
-                for (int d = 0; d < _hiddenSize; d++)
-                {
-                    paramPtr[dstOffset + d] = projPtr[srcOffset + d];
-                }
+                Tensor param = new Tensor(new TensorShape(batch, _hiddenSize), DType.F32);
+                backend.SliceRows(param, projected, p);
+                results[p] = param;
             }
+        }
+        else
+        {
+            float* projPtr = (float*)projected.DataPointer;
 
-            results[p] = param;
+            for (int p = 0; p < _numParams; p++)
+            {
+                TensorShape paramShape = new TensorShape(batch, _hiddenSize);
+                Tensor param = new Tensor(paramShape, projected.DType);
+                float* paramPtr = (float*)param.DataPointer;
+
+                for (int b = 0; b < batch; b++)
+                {
+                    int srcOffset = b * outDim + p * _hiddenSize;
+                    int dstOffset = b * _hiddenSize;
+                    for (int d = 0; d < _hiddenSize; d++)
+                    {
+                        paramPtr[dstOffset + d] = projPtr[srcOffset + d];
+                    }
+                }
+
+                results[p] = param;
+            }
         }
 
         projected.Dispose();

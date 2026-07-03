@@ -14,10 +14,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// GPU-residency rewrite (mirrors the verified QwenImageBlock / ChromaDoubleStreamBlock): every glue op
 /// (LayerNorm / AdaLN modulation / QK-norm / reshape-to-heads / gated residual / modulation split) runs as an
 /// IBackend GPU op so the activation stays device-resident across the whole block — no per-op DataPointer
-/// reads / D2H sync barriers (the old DiTUtils/AdaLNModulation CPU path D2H-synced every multi-MB intermediate
-/// ~10× per block × 52 blocks × every step, which was the host-bound cost). The only op left on the host is
-/// RoPE: <see cref="Kandinsky5Rope"/> is interleaved (GPT-J pairing) and the CUDA ApplyRope kernel is rotate-half
-/// (NEOX) — no match — so the single fused Q/K rotation stays on the CPU (one sync per attention).</summary>
+/// reads / D2H sync barriers. RoPE is GPU-resident too for batch 1: <see cref="Kandinsky5Rope"/>'s interleaved
+/// GPT-J pairing is exactly <see cref="Kandinsky5Rope.ApplyGpu"/>'s <c>WanRopeInterleaved</c> contract, applied
+/// pre-head-permute where <c>[1, S, H, D]</c> ≡ <c>[S, heads·headDim]</c>; the host <c>Apply</c> remains the
+/// batched fallback.</summary>
 public sealed unsafe class Kandinsky5EncoderBlock
 {
     private readonly int _modelDim;
@@ -128,7 +128,13 @@ public sealed unsafe class Kandinsky5EncoderBlock
         backend.RmsNorm(kn, k, _kNormWeight!, _qkNormEps);
         k.Dispose();
 
-        // Permute [B, S, H, D] → [B, H, S, D] for RoPE + SDPA.
+        // RoPE BEFORE the head permute: [B(=1), S, H, D] is exactly WanRopeInterleaved's [S, heads·headDim]
+        // contract and the rotation is the same interleaved pairing — one GPU-resident op instead of the
+        // per-block Q/K D2H → host-trig → H2D excursion (the dominant per-step cost).
+        if (batch == 1)
+            rope.ApplyGpu(backend, qn, kn, _numHeads, seqLen);
+
+        // Permute [B, S, H, D] → [B, H, S, D] for SDPA.
         Tensor qMh = new Tensor(mh, DType.F32);
         backend.Permute0213(qMh, qn, seqLen, _numHeads, _headDim);
         qn.Dispose();
@@ -139,7 +145,8 @@ public sealed unsafe class Kandinsky5EncoderBlock
         backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         v.Dispose();
 
-        rope.Apply(qMh, kMh, batch, _numHeads, seqLen);
+        if (batch != 1)   // host fallback (batched inference only)
+            rope.Apply(qMh, kMh, batch, _numHeads, seqLen);
 
         Tensor attnMh = new Tensor(mh, DType.F32);
         backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, attnScale);
@@ -316,6 +323,10 @@ public sealed unsafe class Kandinsky5DecoderBlock
         backend.RmsNorm(kn, k, _saKNorm!, _qkNormEps);
         k.Dispose();
 
+        // GPU RoPE pre-permute — see the encoder block note.
+        if (batch == 1)
+            rope.ApplyGpu(backend, qn, kn, _numHeads, sV);
+
         Tensor qMh = new Tensor(vMh, DType.F32);
         backend.Permute0213(qMh, qn, sV, _numHeads, _headDim);
         qn.Dispose();
@@ -326,7 +337,8 @@ public sealed unsafe class Kandinsky5DecoderBlock
         backend.Permute0213(vMhT, v, sV, _numHeads, _headDim);
         v.Dispose();
 
-        rope.Apply(qMh, kMh, batch, _numHeads, sV);
+        if (batch != 1)   // host fallback (batched inference only)
+            rope.Apply(qMh, kMh, batch, _numHeads, sV);
 
         Tensor attnMh = new Tensor(vMh, DType.F32);
         backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMhT, null, attnScale);

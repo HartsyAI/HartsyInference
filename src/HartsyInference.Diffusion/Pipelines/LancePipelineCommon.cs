@@ -132,4 +132,23 @@ public static unsafe class LancePipelineCommon
                     }
         return outT;
     }
+
+    /// <summary>Inverse of <see cref="ChannelLastToBcthw"/>: <c>[1,C,T,H,W]</c> → channel-last <c>[T,H,W,C]</c>. Used by img2img to feed the VAE-encoded source into <c>LanceLatentPatch.Patchify</c>.</summary>
+    public static Tensor BcthwToChannelLast(Tensor bcthw)
+    {
+        int c = (int)bcthw.Shape[1], t = (int)bcthw.Shape[2], h = (int)bcthw.Shape[3], w = (int)bcthw.Shape[4];
+        Tensor outT = new Tensor(new TensorShape([(long)t, h, w, c]), DType.F32);
+        float* s = (float*)bcthw.DataPointer;
+        float* d = (float*)outT.DataPointer;
+        for (int ti = 0; ti < t; ti++)
+            for (int hi = 0; hi < h; hi++)
+                for (int wi = 0; wi < w; wi++)
+                    for (int ci = 0; ci < c; ci++)
+                    {
+                        long src = (((long)ci * t + ti) * h + hi) * w + wi;
+                        long dst = (((long)ti * h + hi) * w + wi) * c + ci;
+                        d[dst] = s[src];
+                    }
+        return outT;
+    }
 }
