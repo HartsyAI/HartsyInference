@@ -1,0 +1,42 @@
+[
+  {
+    "model": "Qwen3-0.6B-Q4_K_M.gguf",
+    "tg_tps_median": 40.363347095946295,
+    "tg_tps_mean": 40.426984673446434,
+    "tg_tps_std": 2.6406648255289555,
+    "ttft_ms_median": 4334.399765008129,
+    "n_chunks": 127,
+    "counted_tokens": 132,
+    "reps": 5
+  },
+  {
+    "model": "llama-3.2-1b-instruct-q8_0.gguf",
+    "tg_tps_median": 28.37275835597314,
+    "tg_tps_mean": 28.277380531609722,
+    "tg_tps_std": 1.4442461979957666,
+    "ttft_ms_median": 5808.547229040414,
+    "n_chunks": 128,
+    "counted_tokens": 128,
+    "reps": 5
+  },
+  {
+    "model": "gemma-3-1b-it-Q4_K_M.gguf",
+    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+  },
+  {
+    "model": "Phi-4-mini-instruct-Q4_K_M.gguf",
+    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+  },
+  {
+    "model": "granite-3.1-2b-instruct-Q4_K_M.gguf",
+    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+  },
+  {
+    "model": "OLMoE-1B-7B-0924-Instruct-Q4_K_M.gguf",
+    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+  },
+  {
+    "model": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+  }
+]
