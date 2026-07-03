@@ -203,8 +203,14 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         Tensor pooledHidden = ProjectPooled(backend, pooledEmbeds);
         Kandinsky5DebugDump.Dump("pooled_proj", pooledHidden);
 
-        Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch);
-        AddInPlace(temb, pooledHidden);
+        // GPU add — the previous host AddInPlace read temb.DataPointer, which EVICTED temb from the GPU
+        // activation cache; every block's modulation Silu then re-uploaded it via a synchronous pageable
+        // H2D that drained the whole queued stream (a full pipeline stall per block — measured at ~90% of
+        // the Kandinsky-5 step time).
+        Tensor tembSum = ComputeTimestepEmbedding(backend, timestep, batch);
+        Tensor temb = new Tensor(tembSum.Shape, DType.F32);
+        backend.Add(temb, tembSum, pooledHidden);
+        tembSum.Dispose();
         pooledHidden.Dispose();
         Kandinsky5DebugDump.Dump("time_embed", temb);
 
@@ -323,19 +329,6 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         backend.Linear(temb, activated, _timeIn2Weight!, _timeIn2Bias);
         activated.Dispose();
         return temb;
-    }
-
-    /// <summary>Adds <paramref name="add"/> into <paramref name="dst"/> element-wise (both
-    /// <c>[B, time_dim]</c>). Equivalent to <c>dst += add</c>.</summary>
-    private static void AddInPlace(Tensor dst, Tensor add)
-    {
-        long n = dst.ElementCount;
-        if (add.ElementCount != n)
-            throw new InvalidOperationException("AddInPlace: tensor sizes differ");
-        float* d = (float*)dst.DataPointer;
-        float* a = (float*)add.DataPointer;
-        for (long i = 0; i < n; i++)
-            d[i] += a[i];
     }
 
     /// <summary>Patch embed over a BCTHW latent. Mirrors diffusers' <c>Kandinsky5VisualEmbeddings</c>:
