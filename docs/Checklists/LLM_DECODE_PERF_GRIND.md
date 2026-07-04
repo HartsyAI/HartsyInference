@@ -55,6 +55,24 @@ Baselines are **warm, 256-token, decode-dominated** (amortizes JIT+prefill; earl
 ### FINAL STATE: gap **20-54× → 1.94-2.88×**. Qwen3 2.26× · Llama **1.94×** · Mistral 2.12× · Gemma 2.88× (Gemma slowest — sliding-window attn can't use split-K yet). All coherent.
 ### Remaining levers (bigger, uncertain): **CUDA graphs** (~640 launches/token, ~30% gaps for small models — the highest-confidence next win); **split-K for sliding-window/softcap attention** (helps Gemma/GPT-OSS); **GEMV memory-pattern redesign** (needs ncu access).
 
+---
+
+## Phase 6 — CUDA Graphs (in progress)
+
+**Why:** nsys shows ~30% GPU-idle gaps on small models = CPU can't issue the ~640 kernel launches/token fast enough (GPU starves between tiny kernels). A captured graph replays the whole decode step in ONE `cuGraphLaunch`, removing launch issuance from the critical path. Biggest remaining lever for small models.
+
+**✅ Foundation VERIFIED (2026-07-04):** `CudaGraph` wrapper (already in repo, was untested) works on this GPU — `CudaBackend.GraphSmokeTest()` captures a Scale on a stable buffer, replays twice with changed input → returns (6, 15) = PASS. Proves: capture/replay works, the stream-ordered async-pool memory model is capture-compatible, and replay reads live buffer content. CLI: `hartsyinference-textgen graphtest`. Backend was already graph-ready (single compute stream, all launches on it, `cuMemAllocAsync` pool, graph P/Invokes bound).
+
+**Design (mapped by 2 agents):** capture-once/replay-many requires the per-token varying state to be **device-resident** (host scalars/tables get baked into the graph at capture). The exact conversions needed (each has a clean device path; gate the whole thing behind `HARTSY_GRAPH_DECODE`, default OFF → zero risk to the verified default path):
+1. **RoPE**: `BuildRope` is host `Math.Cos/Sin` into per-step cos/sin tensors → precompute the FULL `[maxSeq, ropeDim]` table once (device), rope-apply indexes it by a **device position**. (Handles all scaling variants since the table is built once with the existing `RopeFrequencyBuilder`.)
+2. **Attention**: `kvLen`/`qOffset` are host int params in `LaunchFlashAttention` → read from a **device position counter** (kernel loops device length; grid fixed for max).
+3. **KV append**: offset is a host int → device position.
+4. **Embed**: `EmbedLookup` is a host gather from host-resident `_embed` → device gather (`lm_gather_rows_f32` already reads a device idx ptr) from an **on-device embed**, indexed by a **device token buffer**.
+5. **Argmax**: `ArgMaxLastDim` (device, EXISTS) writes the next token to the **device token buffer** → embed of the NEXT replay reads it. Fully GPU-resident greedy: no per-token D2H (accumulate tokens in a device buffer, one D2H at the end).
+6. **Fallback (no hacks):** graph path handles the dense RoPE+GQA case (Qwen/Llama/Mistral); MoE/MLA/sliding-window/softcap/abs-pos fall through to the (verified) default decode. Clean feature gate, not a monkey-patch.
+
+**Status:** foundation ✅ verified; the 5 device-resident conversions + capture/replay pipeline loop are the remaining build. Each is verifiable independently (token-identical to default). This is a substantial multi-file feature; being built flag-gated so the default path stays the verified 1.94-2.88× state throughout.
+
 **Phase 3 — attention split-K (nsys-guided):** re-nsys after P2c showed attention `lm_flash_attn_f32` had grown to **29.6%** of decode (72.8µs/call — one block/head, ~16 blocks under-occupy 28 SMs, sequential keys). The validated split-K flash-decode kernel existed but only engaged at `kvLen≥1024` (never for decode). Changed the dispatch (`CudaBackend.cs` ~3417): engage for the **occupancy-limited** case (`baseBlocks < 2·SM` = decode) at `kvLen≥128`, `minChunk=32`. Gated to `plain` attention so sliding-window/softcap models (Gemma, GPT-OSS) keep the monolithic path unchanged; split kernel is numerically exact. Result: **Qwen3 103→133 (+28%), Llama 100→111.5 (1.94× off llama.cpp, under 2×)**. Big models (Mistral) unaffected — they're matmul-bound, not attention-bound.
 
 ### Gap now: **Qwen3 2.66× · Llama 1.94× · Mistral 3.5×**. Small models attention-fixed; big models need GEMV throughput (dp4a int8 / R4-repack / memory-parallelism — ours reads ~22% of bandwidth vs llama.cpp ~80% on Mistral). That + CUDA graphs is the path to parity/beating.

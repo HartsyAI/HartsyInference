@@ -44,6 +44,11 @@ public sealed unsafe class YuePipeline : IDisposable
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
 
+        // Pin the (Q8_0) Stage-1 weights resident up front. The audio stack otherwise relies on lazy auto-promote,
+        // whose headroom gate loses to the transient-upload pool for a 7B — the weights never promote and stream
+        // from host EVERY token (~0.6 s/token). A one-shot preload (7 GB Q8_0 fits a 12 GB card) makes decode read
+        // resident weights via the fused quant GEMV. Freed at the Stage-1→Stage-2 boundary below.
+        backend.PreloadWeights(_stage1.EnumerateWeights());
         (List<int> vocal, List<int> accomp) = _stage1.GenerateCb0(backend, promptTokenIds, maxFrames, seed,
             temperature, topK, topP, repetitionPenalty, guidanceScale, uncondTokenIds ?? ReadOnlySpan<int>.Empty);
         Logs.Info($"YuE S1: {vocal.Count} frames (vocal+accomp cb0) in {sw.ElapsedMilliseconds}ms.");
@@ -56,12 +61,15 @@ public sealed unsafe class YuePipeline : IDisposable
         float[] audio;
         if (_stage2 is not null)
         {
+            // Same rationale: pin Stage-2's weights resident so its 8×/frame ×2-track decode stays on-device.
+            backend.PreloadWeights(_stage2.EnumerateWeights());
             // Full path: Stage-2 upsamples each track's cb0 to 8 codebooks, x-codec decodes each, mix (sum).
             System.Span<int> vSpan = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(vocal);
             System.Span<int> aSpan = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(accomp);
             int[][] vocalCodes = _stage2.Upsample(backend, vSpan);
             int[][] accompCodes = _stage2.Upsample(backend, aSpan);
             Logs.Info($"YuE S2: upsampled {vocal.Count} frames x2 tracks to 8 codebooks in {sw.ElapsedMilliseconds}ms.");
+            backend.FreeWeights(_stage2.EnumerateWeights());   // Stage-2 done — free before x-codec decode
             float[] vocalWav = DecodeFull(backend, vocalCodes);
             float[] accompWav = DecodeFull(backend, accompCodes);
             audio = MixSum(vocalWav, accompWav);

@@ -4017,6 +4017,43 @@ public sealed class CudaBackend : IBackend
     /// <summary>Resets the device-to-host sync counter (call before a region you want to measure for residency).</summary>
     public void ResetD2hSyncCount() => GpuTransferHelper.ResetSyncCount();
 
+    /// <summary>Foundation check for graph-based decode: captures a Scale kernel over a stable persistent
+    /// buffer into a CUDA graph, replays it, then changes the input buffer's content and replays the SAME
+    /// graph again. A working capture/replay returns (input0·3, input1·3) = (6, 15) — proving replay reads
+    /// live buffer content (stable pointers) and the async-pool memory model is capture-compatible.</summary>
+    public unsafe (float first, float second) GraphSmokeTest()
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        const int n = 256;
+        ulong dIn = CudaMemory.AllocatePersistent((nuint)(n * sizeof(float)));
+        ulong dOut = CudaMemory.AllocatePersistent((nuint)(n * sizeof(float)));
+        try
+        {
+            CudaMemory.Fill32(dIn, BitConverter.SingleToUInt32Bits(2.0f), n);
+            _stream.Synchronize();
+            using CudaGraph graph = new(_stream.Handle);
+            graph.Capture(() => _kernels!.LaunchScale(dOut, dIn, 3.0f, n, _stream.Handle));
+            graph.Launch();
+            _stream.Synchronize();
+            float first;
+            CudaMemory.CopyDeviceToHost(&first, dOut, sizeof(float));
+
+            CudaMemory.Fill32(dIn, BitConverter.SingleToUInt32Bits(5.0f), n);
+            _stream.Synchronize();
+            graph.Launch();
+            _stream.Synchronize();
+            float second;
+            CudaMemory.CopyDeviceToHost(&second, dOut, sizeof(float));
+            return (first, second);
+        }
+        finally
+        {
+            CudaMemory.Free(dIn);
+            CudaMemory.Free(dOut);
+        }
+    }
+
     /// <summary>Device memory (free, total) in bytes via cuMemGetInfo.</summary>
     public (long FreeBytes, long TotalBytes) GetVramInfo()
     {

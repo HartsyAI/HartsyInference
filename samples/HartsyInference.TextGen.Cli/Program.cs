@@ -33,6 +33,16 @@ string prompt = args.Length > 3 ? args[3] : "In one sentence, what is a transfor
 // HARTSY_MODEL_DIR = Gemma-3 text .gguf, HARTSY_MMPROJ = mmproj-*.gguf. A synthetic solid-colour image
 // (HARTSY_VLM_COLOR = r,g,b in 0..255, default a strong red) is fed so the answer is checkable without an
 // image decoder. HARTSY_LOWVRAM keeps the text weights compressed.
+// ── CUDA graph foundation smoke test: hartsyinference-textgen graphtest ──
+if (arch == "graphtest")
+{
+    using CudaBackend gb = new(deviceOrdinal: 0, ptxDir: Path.Combine(AppContext.BaseDirectory, "Ptx"));
+    (float first, float second) = gb.GraphSmokeTest();
+    bool ok = MathF.Abs(first - 6f) < 1e-4f && MathF.Abs(second - 15f) < 1e-4f;
+    Console.WriteLine($"CUDA graph smoke test: replay1={first} (want 6), replay2={second} (want 15) => {(ok ? "PASS" : "FAIL")}");
+    return ok ? 0 : 1;
+}
+
 if (arch == "vlm")
 {
     return HartsyInference.TextGen.Cli.VlmRunner.Run(backendName, genTokens, args.Length > 3 ? args[3] : "What is the main color of this image? Answer in one word.");
