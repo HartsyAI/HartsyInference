@@ -1,3 +1,4 @@
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 
 namespace HartsyInference.Diffusion.Pipelines;
@@ -33,4 +34,11 @@ public sealed record RefinerSwapConfig
 
     /// <summary>Aesthetic score for the uncond branch (negative prompt). Trained around <c>2.5</c>; CFG steers away from this so lower values amplify the "more aesthetic" pull on the conditional side.</summary>
     public float NegativeAestheticScore { get; init; } = 2.5f;
+
+    /// <summary>Optional CLIP-G penultimate hidden states <c>[2, S, 1280]</c> (uncond, cond) encoded from a
+    /// separate <c>&lt;refiner&gt;</c> prompt. When set, the refiner phase cross-attends to this instead of the
+    /// base prompt's CLIP-G conditioning (SwarmUI's <c>&lt;refiner&gt;</c> prompt syntax — a distinct prompt for the
+    /// refine stage). Null → the refiner reuses the base prompt's CLIP-G (previous behavior). The caller owns
+    /// the tensor's lifetime; the pipeline only borrows it for the one <c>GenerateFromTokens</c> call.</summary>
+    public Tensor? RefinerConditioning { get; init; }
 }

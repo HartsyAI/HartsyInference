@@ -264,6 +264,37 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>LTX-2 "split" rotary (rotate-half, per-head cos), in-place on <paramref name="x"/>
+    /// <c>[seqLen, numHeads*headDim]</c>. <paramref name="cos"/>/<paramref name="sin"/> are <c>[seqLen, dim/2]</c>
+    /// laid out per-head (width <c>headDim/2</c>), one angle shared by both elements of a pair
+    /// <c>(i, i+headDim/2)</c>. Matches <c>LtxVideo2Rope</c>'s split branch. CUDA overrides with a kernel so the
+    /// attention chain stays GPU-resident; the default is the CPU reference.</summary>
+    unsafe void Ltx2SplitRope(Tensor x, Tensor cos, Tensor sin, int seqLen, int numHeads, int headDim)
+    {
+        float* xp = (float*)x.DataPointer, cp = (float*)cos.DataPointer, sp = (float*)sin.DataPointer;
+        int r = headDim / 2;
+        int dim = numHeads * headDim;
+        int cosWidth = dim / 2;
+        for (int s = 0; s < seqLen; s++)
+        {
+            long xoff = (long)s * dim;
+            long coff = (long)s * cosWidth;
+            for (int h = 0; h < numHeads; h++)
+            {
+                long headBase = xoff + (long)h * headDim;
+                long cosBase = coff + (long)h * r;
+                for (int i = 0; i < r; i++)
+                {
+                    float a = xp[headBase + i];
+                    float b = xp[headBase + i + r];
+                    float c = cp[cosBase + i], sn = sp[cosBase + i];
+                    xp[headBase + i] = a * c - b * sn;
+                    xp[headBase + i + r] = b * c + a * sn;
+                }
+            }
+        }
+    }
+
     /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> source into the 4D
     /// <c>[B,C,H,W]</c> <paramref name="output"/> (a strided temporal slice). Keeps 3D-VAE conv frame ops on-device;
     /// CUDA overrides, default is a host copy.</summary>

@@ -167,6 +167,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditCfgEulerF32;
     private readonly nint _ditTanhF32;
     private readonly nint _ditRopeF32;
+    private readonly nint _ltx2SplitRopeF32;
     private readonly nint _ditSliceLastDimF32;
     private readonly nint _ditRowScaleF32;
     private readonly nint _ditAddScalarF32;
@@ -367,6 +368,7 @@ public sealed class CudaKernels : IDisposable
         _ditCfgEulerF32 = _ditF32Module.GetFunction("dit_cfg_euler_f32");
         _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
         _ditRopeF32 = _ditF32Module.GetFunction("dit_rope_f32");
+        _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
         _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
         _ditAddScalarF32 = _ditF32Module.GetFunction("dit_add_scalar_f32");
@@ -1606,6 +1608,18 @@ public sealed class CudaKernels : IDisposable
         long total = (long)S * heads * (headDim / 2);
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_wanRopeInterleaved, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>LTX-2 split (rotate-half, per-head cos) rotary. x [S, numHeads*headDim] in-place; cos/sin [S, dim/2].</summary>
+    public unsafe void LaunchLtx2SplitRope(ulong x, ulong cos, ulong sin, int S, int numHeads, int headDim, nint stream)
+    {
+        ulong xA = x, cA = cos, sA = sin;
+        uint sArg = (uint)S, hArg = (uint)numHeads, dArg = (uint)headDim;
+        void** args = stackalloc void*[6];
+        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
+        long total = (long)S * numHeads * (headDim / 2);
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_ltx2SplitRopeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> tensor into a 4D

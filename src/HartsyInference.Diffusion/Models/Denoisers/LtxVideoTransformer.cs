@@ -124,25 +124,26 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
 
     private Tensor FinalLayer(IBackend backend, Tensor hidden, Tensor embedded, int s, int dim)
     {
-        // shift = ss[0]+embedded; scale = ss[1]+embedded ([dim], broadcast over S).
+        // shift = ss[0]+embedded; (1+scale) = 1+ss[1]+embedded ([dim], broadcast over S). The [dim] build stays host
+        // (tiny), folding the +1 into the scale so the device affine is a single input·scale+shift.
         float* ss = (float*)_finalScaleShift!.DataPointer;
         float* em = (float*)embedded.DataPointer;
         Tensor shift = new Tensor(new TensorShape(dim), DType.F32);
-        Tensor scale = new Tensor(new TensorShape(dim), DType.F32);
-        float* shp = (float*)shift.DataPointer; float* scp = (float*)scale.DataPointer;
-        for (int d = 0; d < dim; d++) { shp[d] = ss[d] + em[d]; scp[d] = ss[dim + d] + em[d]; }
+        Tensor scaleP1 = new Tensor(new TensorShape(dim), DType.F32);
+        float* shp = (float*)shift.DataPointer; float* scp = (float*)scaleP1.DataPointer;
+        for (int d = 0; d < dim; d++) { shp[d] = ss[d] + em[d]; scp[d] = 1f + ss[dim + d] + em[d]; }
 
+        // Device LayerNorm + affine → the [s,dim] output stays GPU-resident through the final Linear. Was a host
+        // LayerNorm + a host DataPointer affine loop over [s,dim] per step, which forced a re-upload of `normed`.
         Tensor normed = new Tensor(new TensorShape(s, dim), DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, hidden, 1, s, dim, 1e-6f);
-        float* np = (float*)normed.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < dim; d++)
-                np[i * dim + d] = np[i * dim + d] * (1f + scp[d]) + shp[d];
-        shift.Dispose(); scale.Dispose();
+        backend.LayerNormNoAffine(normed, hidden, 1e-6f);
+        Tensor affined = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.AffineBroadcastLastDim(affined, normed, scaleP1, shift);
+        normed.Dispose(); shift.Dispose(); scaleP1.Dispose();
 
         Tensor outVel = new Tensor(new TensorShape(s, _config.OutChannels), DType.F32);
-        backend.Linear(outVel, normed, _projOutW!, _projOutB);
-        normed.Dispose();
+        backend.Linear(outVel, affined, _projOutW!, _projOutB);
+        affined.Dispose();
         return outVel;
     }
 

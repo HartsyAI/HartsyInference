@@ -336,4 +336,38 @@ __global__ void dit_slice_lastdim_f32(
     output[i] = input[(size_t)row * inDim + offset + d];
 }
 
+// ── LTX-2 "split" rotary (rotate-half, per-head cos) ───────────────────────
+// LTX-2.3 (rope_type=split): x is [S, dim] = [S, numHeads, headDim]; cos/sin are [S, dim/2] = [S, numHeads, r]
+// with r=headDim/2 (per-head, ONE angle shared by both elements of a pair). For pair i in head h at token s:
+//   out[i]   = a*c - b*sn ; out[i+r] = b*c + a*sn ,  a=x[i], b=x[i+r], c=cos[i], sn=sin[i]
+// Distinct from dit_rope_f32 (per-position cos, dual-angle) and wan_rope_interleaved (adjacent-pair). Keeps LTX-2.3
+// Q/K GPU-resident through RoPE — the host loop D2H'd + re-uploaded [S,dim] Q/K per attention, and on this
+// block-swap-bound 22B model those re-uploads fight the 19 GB/forward weight stream on PCIe.
+__global__ void ltx2_split_rope_f32(
+    float* __restrict__ x,
+    const float* __restrict__ cos,
+    const float* __restrict__ sin,
+    unsigned int seqLen,
+    unsigned int numHeads,
+    unsigned int headDim)
+{
+    unsigned int r = headDim >> 1;
+    unsigned int dim = numHeads * headDim;
+    unsigned int cosWidth = dim >> 1;            // = numHeads * r
+    unsigned long long total = (unsigned long long)seqLen * numHeads * r;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= total) return;
+    unsigned int i = (unsigned int)(gid % r);
+    unsigned long long t = gid / r;
+    unsigned int h = (unsigned int)(t % numHeads);
+    unsigned int s = (unsigned int)(t / numHeads);
+    size_t headBase = (size_t)s * dim + (size_t)h * headDim;
+    size_t cosBase = (size_t)s * cosWidth + (size_t)h * r;
+    float a = x[headBase + i];
+    float b = x[headBase + i + r];
+    float c = cos[cosBase + i], sn = sin[cosBase + i];
+    x[headBase + i]     = a * c - b * sn;
+    x[headBase + i + r] = b * c + a * sn;
+}
+
 } // extern "C"
