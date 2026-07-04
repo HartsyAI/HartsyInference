@@ -52,9 +52,8 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         Tensor nullCross = new(new TensorShape(1, 1, _cfg.Hidden), DType.F32);   // zeroed → CFG null branch
 
         uint rng = DeterministicRng.Seed(seed);
-        // Delayed grid we fill autoregressively, prefixed with one all-special BOS frame.
+        // Delayed grid filled autoregressively; each codebook's lead-in and tail hold the special token.
         int[,] delayed = new int[tTotal, k];
-        for (int c = 0; c < k; c++) delayed[0, c] = _cfg.SpecialToken;   // step 0 lead-in is special anyway
 
         float g = guidance ?? _cfg.GuidanceScale;
         // KV caches with once-projected cross K/V; the CFG null branch decodes against its own cache.
@@ -63,22 +62,24 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         condCross.Dispose();
         nullCross.Dispose();
 
-        int[] frame = new int[k];
+        // Standard causal-LM AR loop (HF `_sample`): feed the previous delay-masked frame — starting with the
+        // all-special BOS/decoder_start frame — and read the next-frame logits it produces to sample row `step`.
+        // The prediction of row `step` conditions on rows [0..step-1] only; the current row is never pre-fed.
+        int[] prev = new int[k];
+        for (int c = 0; c < k; c++) prev[c] = _cfg.SpecialToken;   // BOS frame (decoder_start_token)
         for (int step = 0; step < tTotal; step++)
         {
-            // Probe: step row `step`'s provisional tokens (BOS at 0, unfilled after) without committing —
-            // same feed as a full forward over frames [0..step], predicting frame `step`.
-            for (int c = 0; c < k; c++) frame[c] = delayed[step, c];
-            float[][] condLogits = _decoder.ForwardStep(backend, frame, condCache, advance: false);
+            float[][] condLogits = _decoder.ForwardStep(backend, prev, condCache);
             float[][] uncondLogits = uncondCache is not null
-                ? _decoder.ForwardStep(backend, frame, uncondCache, advance: false)
+                ? _decoder.ForwardStep(backend, prev, uncondCache)
                 : condLogits;
 
             for (int c = 0; c < k; c++)
             {
-                if (!MusicGenDelay.IsActive(step, c, _cfg.DelayPattern))
+                int j = step - _cfg.DelayPattern[c];   // this codebook's real-frame index at this step
+                if (j < 0 || j >= tReal)
                 {
-                    if (step < tTotal) SetIfInRange(delayed, step, c, _cfg.SpecialToken);
+                    delayed[step, c] = _cfg.SpecialToken;   // lead-in (j<0) or tail (j>=tReal) → pad, per delay mask
                     continue;
                 }
                 float[] logits = condLogits[c];
@@ -87,17 +88,13 @@ public sealed unsafe class MusicGenPipeline : IDisposable
                     float[] u = uncondLogits[c];
                     for (int v = 0; v < logits.Length; v++) logits[v] = u[v] + g * (logits[v] - u[v]);
                 }
-                int tok = useSampling
+                delayed[step, c] = useSampling
                     ? NucleusSampler.Draw(logits, _cfg.CodebookSize, temp, tk, tp, ref rng, maskToken: _cfg.SpecialToken)
                     : Argmax(logits, _cfg.CodebookSize, _cfg.SpecialToken);
-                SetIfInRange(delayed, step, c, tok);
             }
 
-            // Commit: rewrite row `step`'s K/V from the sampled frame so later steps attend the real tokens.
-            if (step + 1 == tTotal) break;
-            for (int c = 0; c < k; c++) frame[c] = delayed[step, c];
-            _decoder.ForwardStep(backend, frame, condCache);
-            if (uncondCache is not null) _decoder.ForwardStep(backend, frame, uncondCache);
+            // The delay-masked frame just produced becomes the next step's input.
+            for (int c = 0; c < k; c++) prev[c] = delayed[step, c];
         }
 
         int[,] real = MusicGenDelay.Revert(delayed, _cfg.DelayPattern, tReal);
@@ -119,11 +116,6 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         sw.Stop();
         Logs.Info($"MusicGen: {tReal} frames → {audio.Length} samples ({audio.Length / (double)_cfg.CodecSampleRate:F1}s) in {sw.ElapsedMilliseconds}ms.");
         return audio;
-    }
-
-    private static void SetIfInRange(int[,] grid, int step, int c, int value)
-    {
-        if (step < grid.GetLength(0)) grid[step, c] = value;
     }
 
     /// <summary>Greedy (use_sampling=false): argmax over the valid codebook range, skipping the special token.</summary>

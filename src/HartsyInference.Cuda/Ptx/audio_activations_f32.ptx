@@ -456,6 +456,112 @@ $L__BB4_14:
 	ret;
 
 }
+	// .globl	audio_prelu_f32
+.visible .entry audio_prelu_f32(
+	.param .u64 audio_prelu_f32_param_0,
+	.param .u64 audio_prelu_f32_param_1,
+	.param .u64 audio_prelu_f32_param_2,
+	.param .u32 audio_prelu_f32_param_3,
+	.param .u32 audio_prelu_f32_param_4,
+	.param .u32 audio_prelu_f32_param_5,
+	.param .u32 audio_prelu_f32_param_6
+)
+{
+	.reg .pred 	%p<4>;
+	.reg .f32 	%f<5>;
+	.reg .b32 	%r<13>;
+	.reg .b64 	%rd<13>;
+
+
+	ld.param.u64 	%rd1, [audio_prelu_f32_param_0];
+	ld.param.u64 	%rd2, [audio_prelu_f32_param_1];
+	ld.param.u64 	%rd3, [audio_prelu_f32_param_2];
+	ld.param.u32 	%r5, [audio_prelu_f32_param_3];
+	ld.param.u32 	%r2, [audio_prelu_f32_param_4];
+	ld.param.u32 	%r3, [audio_prelu_f32_param_5];
+	ld.param.u32 	%r4, [audio_prelu_f32_param_6];
+	mov.u32 	%r6, %ntid.x;
+	mov.u32 	%r7, %ctaid.x;
+	mov.u32 	%r8, %tid.x;
+	mad.lo.s32 	%r1, %r7, %r6, %r8;
+	mul.lo.s32 	%r9, %r2, %r5;
+	mul.lo.s32 	%r10, %r9, %r3;
+	setp.ge.s32 	%p1, %r1, %r10;
+	@%p1 bra 	$L__BB5_2;
+
+	cvta.to.global.u64 	%rd4, %rd3;
+	cvta.to.global.u64 	%rd5, %rd1;
+	div.s32 	%r11, %r1, %r3;
+	rem.s32 	%r12, %r11, %r2;
+	cvta.to.global.u64 	%rd6, %rd2;
+	mul.wide.s32 	%rd7, %r1, 4;
+	add.s64 	%rd8, %rd6, %rd7;
+	mul.wide.s32 	%rd9, %r12, 4;
+	add.s64 	%rd10, %rd4, %rd9;
+	setp.eq.s32 	%p2, %r4, 0;
+	selp.b64 	%rd11, %rd4, %rd10, %p2;
+	ld.global.nc.f32 	%f1, [%rd8];
+	setp.ge.f32 	%p3, %f1, 0f00000000;
+	ld.global.nc.f32 	%f2, [%rd11];
+	mul.f32 	%f3, %f1, %f2;
+	selp.f32 	%f4, %f1, %f3, %p3;
+	add.s64 	%rd12, %rd5, %rd7;
+	st.global.f32 	[%rd12], %f4;
+
+$L__BB5_2:
+	ret;
+
+}
+	// .globl	audio_repeat_time_f32
+.visible .entry audio_repeat_time_f32(
+	.param .u64 audio_repeat_time_f32_param_0,
+	.param .u64 audio_repeat_time_f32_param_1,
+	.param .u32 audio_repeat_time_f32_param_2,
+	.param .u32 audio_repeat_time_f32_param_3,
+	.param .u32 audio_repeat_time_f32_param_4,
+	.param .u32 audio_repeat_time_f32_param_5
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .f32 	%f<2>;
+	.reg .b32 	%r<17>;
+	.reg .b64 	%rd<9>;
+
+
+	ld.param.u64 	%rd1, [audio_repeat_time_f32_param_0];
+	ld.param.u64 	%rd2, [audio_repeat_time_f32_param_1];
+	ld.param.u32 	%r5, [audio_repeat_time_f32_param_2];
+	ld.param.u32 	%r6, [audio_repeat_time_f32_param_3];
+	ld.param.u32 	%r3, [audio_repeat_time_f32_param_4];
+	ld.param.u32 	%r4, [audio_repeat_time_f32_param_5];
+	mov.u32 	%r7, %ctaid.x;
+	mov.u32 	%r8, %ntid.x;
+	mov.u32 	%r9, %tid.x;
+	mad.lo.s32 	%r1, %r7, %r8, %r9;
+	mul.lo.s32 	%r10, %r6, %r5;
+	mul.lo.s32 	%r2, %r4, %r3;
+	mul.lo.s32 	%r11, %r10, %r2;
+	setp.ge.s32 	%p1, %r1, %r11;
+	@%p1 bra 	$L__BB6_2;
+
+	cvta.to.global.u64 	%rd3, %rd2;
+	div.s32 	%r12, %r1, %r2;
+	mul.lo.s32 	%r13, %r12, %r2;
+	sub.s32 	%r14, %r1, %r13;
+	div.s32 	%r15, %r14, %r4;
+	mad.lo.s32 	%r16, %r12, %r3, %r15;
+	mul.wide.s32 	%rd4, %r16, 4;
+	add.s64 	%rd5, %rd3, %rd4;
+	ld.global.nc.f32 	%f1, [%rd5];
+	cvta.to.global.u64 	%rd6, %rd1;
+	mul.wide.s32 	%rd7, %r1, 4;
+	add.s64 	%rd8, %rd6, %rd7;
+	st.global.f32 	[%rd8], %f1;
+
+$L__BB6_2:
+	ret;
+
+}
 	// .globl	audio_snake_beta_f32
 .visible .entry audio_snake_beta_f32(
 	.param .u64 audio_snake_beta_f32_param_0,
@@ -467,7 +573,7 @@ $L__BB4_14:
 	.param .u32 audio_snake_beta_f32_param_6
 )
 {
-	.local .align 4 .b8 	__local_depot5[28];
+	.local .align 4 .b8 	__local_depot7[28];
 	.reg .b64 	%SP;
 	.reg .b64 	%SPL;
 	.reg .pred 	%p<12>;
@@ -477,7 +583,7 @@ $L__BB4_14:
 	.reg .b64 	%rd<38>;
 
 
-	mov.u64 	%SPL, __local_depot5;
+	mov.u64 	%SPL, __local_depot7;
 	ld.param.u64 	%rd9, [audio_snake_beta_f32_param_0];
 	ld.param.u64 	%rd10, [audio_snake_beta_f32_param_1];
 	ld.param.u64 	%rd11, [audio_snake_beta_f32_param_2];
@@ -493,7 +599,7 @@ $L__BB4_14:
 	mul.lo.s32 	%r26, %r20, %r22;
 	mul.lo.s32 	%r27, %r26, %r21;
 	setp.ge.s32 	%p1, %r1, %r27;
-	@%p1 bra 	$L__BB5_14;
+	@%p1 bra 	$L__BB7_14;
 
 	cvta.to.global.u64 	%rd14, %rd10;
 	div.s32 	%r28, %r1, %r21;
@@ -521,18 +627,18 @@ $L__BB4_14:
 	fma.rn.f32 	%f42, %f18, %f23, %f22;
 	abs.f32 	%f5, %f3;
 	setp.leu.f32 	%p2, %f5, 0f47CE4780;
-	@%p2 bra 	$L__BB5_9;
+	@%p2 bra 	$L__BB7_9;
 
 	setp.eq.f32 	%p3, %f5, 0f7F800000;
-	@%p3 bra 	$L__BB5_8;
-	bra.uni 	$L__BB5_3;
+	@%p3 bra 	$L__BB7_8;
+	bra.uni 	$L__BB7_3;
 
-$L__BB5_8:
+$L__BB7_8:
 	mov.f32 	%f26, 0f00000000;
 	mul.rn.f32 	%f42, %f3, %f26;
-	bra.uni 	$L__BB5_9;
+	bra.uni 	$L__BB7_9;
 
-$L__BB5_3:
+$L__BB7_3:
 	mov.b32 	%r3, %f3;
 	bfe.u32 	%r31, %r3, 23, 8;
 	add.s32 	%r4, %r31, -128;
@@ -544,7 +650,7 @@ $L__BB5_3:
 	mov.u64 	%rd35, __cudart_i2opi_f;
 	mov.u64 	%rd36, %rd1;
 
-$L__BB5_4:
+$L__BB7_4:
 	.pragma "nounroll";
 	ld.global.nc.u32 	%r33, [%rd35];
 	mad.wide.u32 	%rd24, %r33, %r5, %rd37;
@@ -554,7 +660,7 @@ $L__BB5_4:
 	add.s64 	%rd35, %rd35, 4;
 	add.s32 	%r59, %r59, 1;
 	setp.ne.s32 	%p4, %r59, 6;
-	@%p4 bra 	$L__BB5_4;
+	@%p4 bra 	$L__BB7_4;
 
 	st.local.u32 	[%rd1+24], %rd37;
 	mov.u32 	%r34, 4;
@@ -567,7 +673,7 @@ $L__BB5_4:
 	ld.local.u32 	%r61, [%rd26+-4];
 	and.b32  	%r12, %r4, 31;
 	setp.eq.s32 	%p5, %r12, 0;
-	@%p5 bra 	$L__BB5_7;
+	@%p5 bra 	$L__BB7_7;
 
 	mov.u32 	%r37, 32;
 	sub.s32 	%r38, %r37, %r12;
@@ -581,7 +687,7 @@ $L__BB5_4:
 	shl.b32 	%r43, %r61, %r12;
 	add.s32 	%r61, %r42, %r43;
 
-$L__BB5_7:
+$L__BB7_7:
 	and.b32  	%r44, %r3, -2147483648;
 	shr.u32 	%r45, %r61, 30;
 	shl.b32 	%r46, %r60, 2;
@@ -609,19 +715,19 @@ $L__BB5_7:
 	neg.f32 	%f25, %f24;
 	selp.f32 	%f42, %f24, %f25, %p8;
 
-$L__BB5_9:
+$L__BB7_9:
 	and.b32  	%r19, %r62, 1;
 	setp.eq.s32 	%p9, %r19, 0;
 	selp.f32 	%f9, %f42, 0f3F800000, %p9;
 	mul.rn.f32 	%f10, %f42, %f42;
 	mov.f32 	%f43, 0fB94D4153;
-	@%p9 bra 	$L__BB5_11;
+	@%p9 bra 	$L__BB7_11;
 
 	mov.f32 	%f28, 0fBAB607ED;
 	mov.f32 	%f29, 0f37CBAC00;
 	fma.rn.f32 	%f43, %f29, %f10, %f28;
 
-$L__BB5_11:
+$L__BB7_11:
 	selp.f32 	%f30, 0f3C0885E4, 0f3D2AAABB, %p9;
 	fma.rn.f32 	%f31, %f43, %f10, %f30;
 	selp.f32 	%f32, 0fBE2AAAA8, 0fBEFFFFFF, %p9;
@@ -631,12 +737,12 @@ $L__BB5_11:
 	fma.rn.f32 	%f44, %f33, %f35, %f9;
 	and.b32  	%r58, %r62, 2;
 	setp.eq.s32 	%p11, %r58, 0;
-	@%p11 bra 	$L__BB5_13;
+	@%p11 bra 	$L__BB7_13;
 
 	mov.f32 	%f37, 0fBF800000;
 	fma.rn.f32 	%f44, %f44, %f37, %f34;
 
-$L__BB5_13:
+$L__BB7_13:
 	mul.f32 	%f38, %f44, %f44;
 	add.f32 	%f39, %f1, 0f322BCC77;
 	div.rn.f32 	%f40, %f38, %f39;
@@ -646,7 +752,7 @@ $L__BB5_13:
 	add.s64 	%rd34, %rd32, %rd33;
 	st.global.f32 	[%rd34], %f41;
 
-$L__BB5_14:
+$L__BB7_14:
 	ret;
 
 }

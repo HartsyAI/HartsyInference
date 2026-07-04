@@ -113,6 +113,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         int[,] codes = GenerateCodes(backend, lyricsTokens, maxFrames, seed, muqEmbed, temperature, topK, topP, cfgScale, cancel, onFrame, tagsTokens);
         if (codes.GetLength(1) == 0) return [];
         cancel.ThrowIfCancellationRequested();   // don't start the (cheaper) codec decode if already cancelled
+        backend.FreeWeights(_lm.EnumerateWeights());   // LM done — free its VRAM/host copies for the codec decode
         return _codec.Decode(backend, codes, seed);
     }
 

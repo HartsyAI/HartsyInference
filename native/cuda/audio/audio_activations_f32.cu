@@ -87,6 +87,45 @@ extern "C" __global__ void audio_snake_f32(
     output[flat] = x + (s * s) / a;
 }
 
+// Parametric ReLU: x if x>=0 else alpha*x, alpha per-channel (HeartCodec decoder / DAC).
+// alphaPerChannel=1 indexes alpha[c]; 0 uses the single shared alpha[0].
+extern "C" __global__ void audio_prelu_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    const float* __restrict__ alpha,
+    int batch,
+    int channels,
+    int timeDim,
+    int alphaPerChannel)
+{
+    int flat = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * channels * timeDim;
+    if (flat >= total) return;
+    int c = (flat / timeDim) % channels;
+    float x = input[flat];
+    float a = alphaPerChannel ? alpha[c] : alpha[0];
+    output[flat] = (x >= 0.0f) ? x : (a * x);
+}
+
+// Frame-repeat over time: out[b,c, ti*numSamples + s] = in[b,c,ti]. HeartCodec PostProcessor 2x repeat.
+extern "C" __global__ void audio_repeat_time_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    int batch,
+    int channels,
+    int inT,
+    int numSamples)
+{
+    int flat = blockIdx.x * blockDim.x + threadIdx.x;
+    int outT = inT * numSamples;
+    int total = batch * channels * outT;
+    if (flat >= total) return;
+    int to = flat % outT;
+    int bc = flat / outT;          // b*channels + c
+    int ti = to / numSamples;      // source time index
+    output[flat] = input[bc * inT + ti];
+}
+
 extern "C" __global__ void audio_snake_beta_f32(
     float* __restrict__ output,
     const float* __restrict__ input,

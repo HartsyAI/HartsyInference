@@ -23,17 +23,21 @@ public sealed class YueTokenizer : IDisposable
     /// <summary>End-of-audio: stops cb0 generation.</summary>
     public const string EoaPiece = "<EOA>";
     public const string Stage1Piece = "<stage_1>";
+    /// <summary>Stage-2 handoff marker (Stage-2 prompt: [SOA][stage_1] + cb0 + [stage_2]).</summary>
+    public const string Stage2Piece = "<stage_2>";
 
     // Fixed mm_tokenizer_v0.2 ids for the YuE control symbols (verified by Decode round-trip below).
     private const int SoaId = 32_001;
     private const int EoaId = 32_002;
     private const int Stage1Id = 32_013;
+    private const int Stage2Id = 32_017;
 
     private readonly SentencePieceTokenizer _sp;
 
     public int Soa { get; }
     public int Eoa { get; }
     public int Stage1 { get; }
+    public int Stage2 { get; }
 
     public YueTokenizer(string tokenizerModelPath)
     {
@@ -47,6 +51,7 @@ public sealed class YueTokenizer : IDisposable
         Soa = ResolveControl(SoaId, SoaPiece);
         Eoa = ResolveControl(EoaId, EoaPiece);
         Stage1 = ResolveControl(Stage1Id, Stage1Piece);
+        Stage2 = ResolveControl(Stage2Id, Stage2Piece);
     }
 
     /// <summary>Confirms a pinned control-symbol id maps back to its expected angle-bracket piece via

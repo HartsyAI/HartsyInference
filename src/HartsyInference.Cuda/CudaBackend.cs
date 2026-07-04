@@ -2548,6 +2548,63 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public void Prelu(Tensor output, Tensor input, Tensor alpha)
+    {
+        if (input.DType != DType.F32)
+            throw new NotSupportedException($"CUDA Prelu currently supports F32 only — got {input.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        int batch = (int)input.Shape[0], channels = (int)input.Shape[1], timeDim = (int)input.Shape[2];
+        int perCh = alpha.ElementCount > 1 ? 1 : 0;
+
+        ulong pOut = 0, pIn = 0, pAlpha = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pAlpha = GpuTransferHelper.CopyToDevice(alpha);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAudioPrelu(pOut, pIn, pAlpha, batch, channels, timeDim, perCh, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pAlpha);
+        }
+    }
+
+    public void RepeatTime(Tensor output, Tensor input, int numSamples)
+    {
+        if (input.DType != DType.F32)
+            throw new NotSupportedException($"CUDA RepeatTime currently supports F32 only — got {input.DType}.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        int batch = (int)input.Shape[0], channels = (int)input.Shape[1], inT = (int)input.Shape[2];
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchAudioRepeatTime(pOut, pIn, batch, channels, inT, numSamples, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     public void Elu(Tensor output, Tensor input, float alpha)
     {
         if (input.DType != DType.F32)

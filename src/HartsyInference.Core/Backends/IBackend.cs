@@ -771,6 +771,44 @@ public interface IBackend : IDisposable
     /// (broadcast across batch and time for <c>[B, C, T]</c> input).</summary>
     void Snake(Tensor output, Tensor input, Tensor alpha, Tensor? beta);
 
+    /// <summary>Parametric ReLU over <c>[B, C, T]</c>: <c>x if x&gt;=0 else alpha*x</c>, with
+    /// <paramref name="alpha"/> per-channel (<c>ElementCount == C</c>) or a single shared value.
+    /// Default host implementation; CUDA overrides with a kernel to keep the codec chain GPU-resident.</summary>
+    unsafe void Prelu(Tensor output, Tensor input, Tensor alpha)
+    {
+        int batch = (int)input.Shape[0], channels = (int)input.Shape[1], timeDim = (int)input.Shape[2];
+        float* op = (float*)output.DataPointer, ip = (float*)input.DataPointer, ap = (float*)alpha.DataPointer;
+        bool perCh = alpha.ElementCount > 1;
+        for (int bi = 0; bi < batch; bi++)
+            for (int ci = 0; ci < channels; ci++)
+            {
+                float a = perCh ? ap[ci] : ap[0];
+                long off = ((long)bi * channels + ci) * timeDim;
+                for (int ti = 0; ti < timeDim; ti++) { float v = ip[off + ti]; op[off + ti] = v >= 0f ? v : a * v; }
+            }
+    }
+
+    /// <summary>Frame-repeat over time on <c>[B, C, inT]</c>: each time-step is duplicated
+    /// <paramref name="numSamples"/> times consecutively → <c>[B, C, inT*numSamples]</c> (nearest 1D upsample).
+    /// Default host implementation; CUDA overrides with a kernel to keep the codec chain GPU-resident.</summary>
+    unsafe void RepeatTime(Tensor output, Tensor input, int numSamples)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("RepeatTime default fallback only supports F32.");
+        int batch = (int)input.Shape[0], channels = (int)input.Shape[1], inT = (int)input.Shape[2];
+        int outT = inT * numSamples;
+        float* ip = (float*)input.DataPointer, op = (float*)output.DataPointer;
+        for (int bc = 0; bc < batch * channels; bc++)
+        {
+            long inBase = (long)bc * inT, outBase = (long)bc * outT;
+            for (int ti = 0; ti < inT; ti++)
+            {
+                float v = ip[inBase + ti];
+                for (int s = 0; s < numSamples; s++) op[outBase + (long)ti * numSamples + s] = v;
+            }
+        }
+    }
+
     // ── Element-wise ────────────────────────────────────────────────────
 
     /// <summary>Element-wise addition: output = a + b</summary>

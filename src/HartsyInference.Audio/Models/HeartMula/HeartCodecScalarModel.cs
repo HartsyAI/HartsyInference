@@ -80,20 +80,11 @@ public sealed unsafe class HeartCodecScalarModel
         }
 
         // PostProcessor: repeat 2x (frame-major) then causal conv k7 + PReLU.
+        // Net effect: each time-step is duplicated NumSamples times consecutively (GPU-resident nearest repeat).
         int ppCh = (int)_ppW!.Shape[1];          // in channels (=64)
         int repLen = curLen * NumSamples;
         Tensor rep = new(new TensorShape(b, ppCh, repLen), DType.F32);
-        float* cp = (float*)cur.DataPointer; float* rp = (float*)rep.DataPointer;
-        // upstream: transpose to [B,T,C], repeat(1,1,num_samples).view(B,-1,C), transpose back.
-        // Net effect: each time-step is duplicated NumSamples times consecutively.
-        for (int bi = 0; bi < b; bi++)
-            for (int c = 0; c < ppCh; c++)
-                for (int ti = 0; ti < curLen; ti++)
-                {
-                    float val = cp[((long)bi * ppCh + c) * curLen + ti];
-                    for (int s = 0; s < NumSamples; s++)
-                        rp[((long)bi * ppCh + c) * repLen + ti * NumSamples + s] = val;
-                }
+        backend.RepeatTime(rep, cur, NumSamples);
         cur.Dispose();
         curLen = repLen;
         int ppOut = (int)_ppW!.Shape[0];
@@ -101,7 +92,7 @@ public sealed unsafe class HeartCodecScalarModel
         int ppK = (int)_ppW!.Shape[2];
         backend.Conv1d(pp, rep, _ppW!, _ppB, 1, ppK - 1, 0, 1, 1);   // causal
         rep.Dispose();
-        Prelu(pp, _ppAct!, b, ppOut, curLen);
+        backend.Prelu(pp, pp, _ppAct!);
 
         // final conv: 64→1, k7, causal.
         int outK = (int)_outW!.Shape[2];
@@ -109,24 +100,6 @@ public sealed unsafe class HeartCodecScalarModel
         backend.Conv1d(wav, pp, _outW!, _outB, 1, outK - 1, 0, 1, 1);
         pp.Dispose();
         return wav;   // [B, 1, curLen]
-    }
-
-    private static unsafe void Prelu(Tensor x, Tensor alpha, int b, int c, int t)
-    {
-        float* xp = (float*)x.DataPointer;
-        float* ap = (float*)alpha.DataPointer;
-        bool single = alpha.ElementCount == 1;
-        for (int bi = 0; bi < b; bi++)
-            for (int ci = 0; ci < c; ci++)
-            {
-                float a = single ? ap[0] : ap[ci];
-                long off = ((long)bi * c + ci) * t;
-                for (int ti = 0; ti < t; ti++)
-                {
-                    float v = xp[off + ti];
-                    if (v < 0) xp[off + ti] = a * v;
-                }
-            }
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -193,15 +166,12 @@ public sealed unsafe class HeartCodecScalarModel
             int k1 = (int)_c1W!.Shape[2];        // 7
             Tensor h = new(new TensorShape(b, c, t), DType.F32);
             backend.Conv1d(h, x, _c1W!, _c1B, 1, dilation * (k1 - 1), 0, dilation, 1);   // causal dilated
-            Prelu(h, _a1!, b, c, t);
+            backend.Prelu(h, h, _a1!);
             Tensor h2 = new(new TensorShape(b, c, t), DType.F32);
             backend.Conv1d(h2, h, _c2W!, _c2B, 1, 0, 0, 1, 1);   // k1, causal pad 0 (left_padding = 1*(1-1)=0)
             h.Dispose();
-            Prelu(h2, _a2!, b, c, t);
-            // residual add.
-            float* hp = (float*)h2.DataPointer; float* xp = (float*)x.DataPointer;
-            long n = (long)b * c * t;
-            for (long i = 0; i < n; i++) hp[i] += xp[i];
+            backend.Prelu(h2, h2, _a2!);
+            backend.Add(h2, h2, x);   // residual (GPU-resident)
             return h2;
         }
 

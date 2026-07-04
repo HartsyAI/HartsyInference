@@ -55,6 +55,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _audioLeakyReluF32;
     private readonly nint _audioSnakeF32;
     private readonly nint _audioSnakeBetaF32;
+    private readonly nint _audioPreluF32;
+    private readonly nint _audioRepeatTimeF32;
 
     // ── Adaptive InstanceNorm 1D Module + handle (Kokoro / StyleTTS 2, F32) ──
     private readonly CudaModule _audioAdain1dF32Module;
@@ -374,6 +376,8 @@ public sealed class CudaKernels : IDisposable
         _audioLeakyReluF32 = _audioActF32Module.GetFunction("audio_leaky_relu_f32");
         _audioSnakeF32 = _audioActF32Module.GetFunction("audio_snake_f32");
         _audioSnakeBetaF32 = _audioActF32Module.GetFunction("audio_snake_beta_f32");
+        _audioPreluF32 = _audioActF32Module.GetFunction("audio_prelu_f32");
+        _audioRepeatTimeF32 = _audioActF32Module.GetFunction("audio_repeat_time_f32");
 
         _audioAdain1dF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "adain1d_f32.ptx"));
         _audioAdain1dF32 = _audioAdain1dF32Module.GetFunction("audio_adain1d_f32");
@@ -582,6 +586,36 @@ public sealed class CudaKernels : IDisposable
             args[3] = &batchArg; args[4] = &chArg; args[5] = &tArg;
             CudaDriverApi.cuLaunchKernel(_audioSnakeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
         }
+    }
+
+    /// <summary>Launches parametric ReLU over [B,C,T] F32: x if x&gt;=0 else α·x, α per-channel
+    /// (<paramref name="alphaPerChannel"/>=1) or a single shared α (0).</summary>
+    public unsafe void LaunchAudioPrelu(ulong output, ulong input, ulong alpha,
+        int batch, int channels, int timeDim, int alphaPerChannel, nint stream)
+    {
+        ulong outArg = output, inArg = input, alphaArg = alpha;
+        int batchArg = batch, chArg = channels, tArg = timeDim, perChArg = alphaPerChannel;
+        uint total = (uint)(batch * channels * timeDim);
+        uint gridDim = (total + BlockSize - 1) / BlockSize;
+        void** args = stackalloc void*[7];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &alphaArg;
+        args[3] = &batchArg; args[4] = &chArg; args[5] = &tArg; args[6] = &perChArg;
+        CudaDriverApi.cuLaunchKernel(_audioPreluF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Launches the frame-repeat over [B,C,inT] F32: each time-step duplicated
+    /// <paramref name="numSamples"/> times → [B,C,inT*numSamples].</summary>
+    public unsafe void LaunchAudioRepeatTime(ulong output, ulong input,
+        int batch, int channels, int inT, int numSamples, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        int batchArg = batch, chArg = channels, inTArg = inT, nsArg = numSamples;
+        uint total = (uint)(batch * channels * inT * numSamples);
+        uint gridDim = (total + BlockSize - 1) / BlockSize;
+        void** args = stackalloc void*[6];
+        args[0] = &outArg; args[1] = &inArg;
+        args[2] = &batchArg; args[3] = &chArg; args[4] = &inTArg; args[5] = &nsArg;
+        CudaDriverApi.cuLaunchKernel(_audioRepeatTimeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches Adaptive InstanceNorm 1D over [B,C,T] F32: per-(batch,channel) row,

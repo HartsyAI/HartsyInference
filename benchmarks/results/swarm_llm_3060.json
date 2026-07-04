@@ -1,42 +1,48 @@
 [
   {
     "model": "Qwen3-0.6B-Q4_K_M.gguf",
-    "tg_tps_median": 40.363347095946295,
-    "tg_tps_mean": 40.426984673446434,
-    "tg_tps_std": 2.6406648255289555,
-    "ttft_ms_median": 4334.399765008129,
+    "tg_tps_median": 38.31086457964115,
+    "tg_tps_mean": 38.64821617168843,
+    "tg_tps_std": 2.383087880437421,
+    "ttft_ms_median": 4609.329462982714,
     "n_chunks": 127,
     "counted_tokens": 132,
     "reps": 5
   },
   {
     "model": "llama-3.2-1b-instruct-q8_0.gguf",
-    "tg_tps_median": 28.37275835597314,
-    "tg_tps_mean": 28.277380531609722,
-    "tg_tps_std": 1.4442461979957666,
-    "ttft_ms_median": 5808.547229040414,
+    "tg_tps_median": 27.625174957750193,
+    "tg_tps_mean": 27.286546510285937,
+    "tg_tps_std": 1.73781242652286,
+    "ttft_ms_median": 5626.305431011133,
     "n_chunks": 128,
     "counted_tokens": 128,
     "reps": 5
   },
   {
     "model": "gemma-3-1b-it-Q4_K_M.gguf",
-    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+    "tg_tps_median": 35.83844412331542,
+    "tg_tps_mean": 34.86130437361053,
+    "tg_tps_std": 4.03725002403816,
+    "ttft_ms_median": 6840.465035988018,
+    "n_chunks": 128,
+    "counted_tokens": 128,
+    "reps": 5
   },
   {
     "model": "Phi-4-mini-instruct-Q4_K_M.gguf",
-    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+    "error": "too few chunks (0)"
   },
   {
     "model": "granite-3.1-2b-instruct-Q4_K_M.gguf",
-    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+    "error": "ConnectionRefusedError(111, \"Connect call failed ('127.0.0.1', 7801)\")"
   },
   {
     "model": "OLMoE-1B-7B-0924-Instruct-Q4_K_M.gguf",
-    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+    "error": "ConnectionRefusedError(111, \"Connect call failed ('127.0.0.1', 7801)\")"
   },
   {
     "model": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
-    "error": "CUDA error 2: CUDA_ERROR_OUT_OF_MEMORY \u2014 out of memory"
+    "error": "ConnectionRefusedError(111, \"Connect call failed ('127.0.0.1', 7801)\")"
   }
 ]
