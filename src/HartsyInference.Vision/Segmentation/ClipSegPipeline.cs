@@ -114,6 +114,7 @@ public sealed unsafe class ClipSegPipeline : IVisionPipeline, ITextSegmenter
         }
         _filmMulW = dec["decoder.film_mul.weight"]; _filmMulB = dec["decoder.film_mul.bias"];
         _filmAddW = dec["decoder.film_add.weight"]; _filmAddB = dec["decoder.film_add.bias"];
+        // Head is Sequential[Conv2d(64,64,k3s1p1), ReLU, ConvTranspose2d(64,32,k4s4), ReLU, ConvTranspose2d(32,1,k4s4)].
         _tconv0W = dec["decoder.transposed_convolution.0.weight"]; _tconv0B = dec["decoder.transposed_convolution.0.bias"];
         _tconv2W = dec["decoder.transposed_convolution.2.weight"]; _tconv2B = dec["decoder.transposed_convolution.2.bias"];
         _tconv4W = dec["decoder.transposed_convolution.4.weight"]; _tconv4B = dec["decoder.transposed_convolution.4.bias"];
@@ -216,10 +217,16 @@ public sealed unsafe class ClipSegPipeline : IVisionPipeline, ITextSegmenter
         Tensor chanFirst = new Tensor(new TensorShape(1, ReduceDim, patches), DType.F32);
         backend.Transpose2D(chanFirst, noCls, patches, ReduceDim);
         noCls.Dispose();
-        Tensor spatial = chanFirst.Reshape(new TensorShape(1, ReduceDim, grid, grid));
+        // Materialize a real [1,64,grid,grid] tensor (a reshape *view* of chanFirst confuses ConvTranspose2d).
+        Tensor spatial = new Tensor(new TensorShape(1, ReduceDim, grid, grid), DType.F32);
+        long spBytes = spatial.Shape.ElementCount * sizeof(float);
+        Buffer.MemoryCopy((void*)chanFirst.DataPointer, (void*)spatial.DataPointer, spBytes, spBytes);
 
+        // Head layer 0 is a REGULAR Conv2d(64,64,k3,s1,p1) — NOT a transposed conv (only sc[2]/sc[4] are).
+        // Weight is [Cout=64, Cin=64, 3, 3]; ambiguous with the transposed [Cin,Cout] convention because
+        // Cin==Cout, which is why the wrong op silently ran on correctly-loaded weights.
         Tensor t0 = new Tensor(new TensorShape(1, ReduceDim, grid, grid), DType.F32);
-        backend.ConvTranspose2d(t0, spatial, _tconv0W, _tconv0B, 1, 1, 1, 1);
+        backend.Conv2D(t0, spatial, _tconv0W, _tconv0B, 1, 1, 1, 1);
         chanFirst.Dispose();
         backend.LeakyRelu(t0, t0, 0f);
 
@@ -274,7 +281,7 @@ public sealed unsafe class ClipSegPipeline : IVisionPipeline, ITextSegmenter
 
         Tensor fc1 = new Tensor(new TensorShape(1, seq, DecoderFfn), DType.F32);
         backend.Linear(fc1, normed1, w.Fc1W, w.Fc1B);
-        QuickGelu(backend, fc1);
+        backend.LeakyRelu(fc1, fc1, 0f); // CLIPSeg's decoder MLP uses ReLU (HF overrides config's quick_gelu)
         Tensor fc2 = new Tensor(shape, DType.F32);
         backend.Linear(fc2, fc1, w.Fc2W, w.Fc2B);
         fc1.Dispose();

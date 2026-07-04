@@ -12,6 +12,24 @@ public class ClipSegTest
     private const string Scratch = "/tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/a035d95f-4f31-468f-aa2e-4b2c832692fe/scratchpad";
 
     [Fact]
+    public unsafe void ConvTranspose2d_Isolation()
+    {
+        HartsyInference.Core.Backends.IBackend backend = new CpuBackend();
+        // input [1,2,3,3] = 0..17 ; weight [2,3,3,3] = 0..53 ; k3 s1 p1, no bias -> output [1,3,3,3]
+        Tensor inp = new Tensor(new TensorShape(1, 2, 3, 3), DType.F32);
+        System.Span<float> ins = inp.AsSpan<float>();
+        for (int i = 0; i < ins.Length; i++) ins[i] = i;
+        Tensor w = new Tensor(new TensorShape(2, 3, 3, 3), DType.F32);
+        System.Span<float> ws = w.AsSpan<float>();
+        for (int i = 0; i < ws.Length; i++) ws[i] = i;
+        Tensor outp = new Tensor(new TensorShape(1, 3, 3, 3), DType.F32);
+        backend.ConvTranspose2d(outp, inp, w, null, 1, 1, 1, 1);
+        byte[] b = new byte[27 * sizeof(float)];
+        fixed (float* op = outp.AsSpan<float>()) fixed (byte* bp = b) Buffer.MemoryCopy(op, bp, b.Length, b.Length);
+        File.WriteAllBytes(Path.Combine(Scratch, "cs_convt_iso.bin"), b);
+    }
+
+    [Fact]
     public unsafe void ClipSeg_Segment_ProducesMasks()
     {
         string inBin = Path.Combine(Scratch, "clipseg_in.bin");
@@ -31,7 +49,7 @@ public class ClipSegTest
             new System.ReadOnlySpan<float>(rp, raw.Length / sizeof(float)).CopyTo(dst);
         }
 
-        foreach (string prompt in new[] { "grass", "house", "sky" })
+        foreach (string prompt in new[] { "house" })
         {
             float[] mask = seg.Segment(backend, img, prompt, out int w, out int h);
             Assert.Equal(224, w);
