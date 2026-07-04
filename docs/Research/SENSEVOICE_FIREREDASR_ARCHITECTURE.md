@@ -345,7 +345,7 @@ Beam search uses standard length penalty and a repetition penalty (FireRedASR's 
 10. transcript = qwen_tokenizer.decode(generated_ids, skip_special_tokens=True)
 ```
 
-The Qwen2 forward path is exactly the standard Qwen2-7B forward — `HartsyInference.Audio` should hand this off to `dotLLM`'s Qwen2 implementation rather than reimplement it.
+The Qwen2 forward path is exactly the standard Qwen2-7B forward — `HartsyInference.Audio` should hand this off to `HartsyInference.LLM`'s Qwen2 implementation rather than reimplement it.
 
 ### 7. Streaming
 
@@ -407,7 +407,7 @@ Notes:
 
 - **Kaldi-native-fbank in pure C#**: `Audio.Frontend.KaldiFbank` — Hamming window, dither, log-mel filterbank, snip-edges. Used by both SenseVoice and FireRedASR (and we already need it for Paraformer/SenseVoice/whisper.cpp parity). Validate within 1e-3 of `kaldi-native-fbank` output on a fixed test waveform.
 - **CMVN loader**: parse FunASR `am.mvn` and FireRedASR `cmvn.ark` formats; apply per-feature `(x - mean) * scale`. Two formats, one C# struct.
-- **SentencePiece runtime (BPE only)**: load the `.model` protobuf, run encode/decode. Existing dotLLM SentencePiece works for Qwen2 tokenizer (LLM variant). The SenseVoice multilingual model and the FireRedASR `train_bpe1000.model` are vanilla SentencePiece — same loader.
+- **SentencePiece runtime (BPE only)**: load the `.model` protobuf, run encode/decode. Existing HartsyInference.LLM SentencePiece works for Qwen2 tokenizer (LLM variant). The SenseVoice multilingual model and the FireRedASR `train_bpe1000.model` are vanilla SentencePiece — same loader.
 - **Special-token table**: small static struct mapping `id → "<|...|>"` strings for the SenseVoice 4-prefix slots.
 
 #### 9.2 SenseVoice-Small specifics
@@ -420,7 +420,7 @@ Notes:
 - **LFR preprocessing**: must be in pure C# in the frontend, before encoder. Trivially vectorizable.
 - **CTC decode**: argmax + run-length-encode + blank-drop. One kernel, no beam search needed.
 - **Special-prefix split**: just slice the first 4 logit rows separately.
-- **Checkpoint source format**: PyTorch `.pt` from HF. We'll need a one-time converter to our tensor layout (see existing dotLLM converter pattern). Tensor naming follows FunASR convention: `encoder.encoders.{i}.self_attn.linear_q_k_v.weight`, `encoder.encoders.{i}.self_attn.fsmn_block.weight`, etc.
+- **Checkpoint source format**: PyTorch `.pt` from HF. We'll need a one-time converter to our tensor layout (see existing HartsyInference.LLM converter pattern). Tensor naming follows FunASR convention: `encoder.encoders.{i}.self_attn.linear_q_k_v.weight`, `encoder.encoders.{i}.self_attn.fsmn_block.weight`, etc.
 
 #### 9.3 FireRedASR-AED-L specifics
 
@@ -434,19 +434,19 @@ Notes:
 
 - **Encoder = identical to AED-L's encoder** — load AED-L encoder weights into the LLM-L encoder slot. Same C# code path.
 - **Adapter is trivial**: `frame_splice` (reshape `[T,2D] → [T/2, 4D]`... actually concatenate pairs: `[T,D] → [T/2, 2D]`) then 2× Linear with ReLU between. ~30 M params.
-- **Decoder = Qwen2-7B-Instruct** — **delegate to dotLLM**. We do NOT reimplement Qwen2 inside HartsyInference. Define a `HartsyInference.Audio.ILlmDecoder` interface, have the FireRedASR-LLM pipeline call into a `dotLLM.Qwen2Model` instance through that interface. The interface needs:
+- **Decoder = Qwen2-7B-Instruct** — **delegate to HartsyInference.LLM**. We do NOT reimplement Qwen2 inside HartsyInference. Define a `HartsyInference.Audio.ILlmDecoder` interface, have the FireRedASR-LLM pipeline call into a `HartsyInference.LLM.Qwen2Model` instance through that interface. The interface needs:
   - `Embed(int[] tokenIds) → Tensor[seq, hidden]`  (so we can build the embedding sequence ourselves and then splice in speech_emb at the placeholder positions).
   - `Forward(Tensor inputsEmbeds, KVCache cache) → Tensor logits`.
   - `Generate(...)` with the standard Qwen2 generation config.
-- **Hidden dim coupling**: the adapter's final Linear output dim **must equal** the dotLLM-loaded Qwen2 model's `hidden_size` (3 584). Assert at model-load time.
+- **Hidden dim coupling**: the adapter's final Linear output dim **must equal** the HartsyInference.LLM-loaded Qwen2 model's `hidden_size` (3 584). Assert at model-load time.
 - **Audio limit 30 s** (375 speech tokens at 80 ms) — enforce in API; chunk longer audio.
 - **Prompt template**: Qwen2 chat format with a fixed user instruction `"请转写音频内容"` and `<|im_start|>/<|im_end|>` framing. Templated string in C#, no template engine needed.
 
 #### 9.5 Package boundaries
 
 - `HartsyInference.Audio` — frontend (fbank + LFR + CMVN), SenseVoice model, FireRedASR-AED model, FireRedASR-LLM **pipeline orchestration**.
-- `HartsyInference.Audio` depends on `HartsyInference.Core` (tensors, CUDA) and — for FireRedASR-LLM only — on `dotLLM` (Qwen2 decoder). That dotLLM dependency must be a **soft / optional** package reference so users who only want SenseVoice or FireRedASR-AED don't pay for it. Suggested split: `HartsyInference.Audio.FireRedLlm` as a separate small package that pulls in `dotLLM`, while base `HartsyInference.Audio` covers SenseVoice + FireRedASR-AED.
-- Tokenizers: SentencePiece runtime already needed by dotLLM; promote it to a shared `HartsyInference.Tokenizers` package (or reuse dotLLM's) to avoid duplication.
+- `HartsyInference.Audio` depends on `HartsyInference.Core` (tensors, CUDA) and — for FireRedASR-LLM only — on `HartsyInference.LLM` (Qwen2 decoder). That HartsyInference.LLM dependency must be a **soft / optional** package reference so users who only want SenseVoice or FireRedASR-AED don't pay for it. Suggested split: `HartsyInference.Audio.FireRedLlm` as a separate small package that pulls in `HartsyInference.LLM`, while base `HartsyInference.Audio` covers SenseVoice + FireRedASR-AED.
+- Tokenizers: SentencePiece runtime already needed by HartsyInference.LLM; promote it to a shared `HartsyInference.Tokenizers` package (or reuse HartsyInference.LLM's) to avoid duplication.
 
 #### 9.6 Validation targets
 

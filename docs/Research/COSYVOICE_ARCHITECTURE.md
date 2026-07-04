@@ -70,7 +70,7 @@ HiFiGAN (CV1) / HiFTNet-style (CV2)
 - Special tokens include `<|sos|>`, `<|eos|>`, `<|task_id|>` markers for SFT, plus per-language language IDs (`<|zh|>`, `<|en|>`, `<|jp|>`, `<|ko|>`, `<|yue|>`).
 
 #### CosyVoice 2
-- **Reuses the Qwen2.5 BPE tokenizer verbatim** — vocabulary 151,643 base + Qwen-style added special tokens (`<|im_start|>`, `<|im_end|>`, etc.). The text encoder is **deleted**; raw token IDs from the Qwen tokenizer enter the LM directly. This is the single most important reuse opportunity for our pure-C# port — the Qwen tokenizer we already need for dotLLM (Qwen2.5 LLM family) covers CosyVoice 2 verbatim.
+- **Reuses the Qwen2.5 BPE tokenizer verbatim** — vocabulary 151,643 base + Qwen-style added special tokens (`<|im_start|>`, `<|im_end|>`, etc.). The text encoder is **deleted**; raw token IDs from the Qwen tokenizer enter the LM directly. This is the single most important reuse opportunity for our pure-C# port — the Qwen tokenizer we already need for the native HartsyInference.LLM Qwen2.5 family covers CosyVoice 2 verbatim.
 - Adds a small number of CosyVoice-specific tokens appended to the vocabulary:
   - `<|endofprompt|>` — boundary between the natural-language instruction (Instruct mode) and the synthesis text.
   - Speech-token IDs `<|s_0|> .. <|s_6560|>` — appended to the Qwen vocabulary so that the same Qwen2 transformer can emit both text and speech tokens through a single softmax (an "unembedding-extended" LM head). The total LM vocab is therefore **151,643 + N_special + 6,561**.
@@ -389,7 +389,7 @@ Deterministic — no sampling knobs.
 | `instruct.yaml` (Instruct)    | small     | Instruct-specific hyperparams                            |
 | Misc                          | ~ MB      | tokenizer, config, README, samples                       |
 
-For both versions the tokenizer's vocab/merges are stored as standard HuggingFace tokenizer files — directly readable by `Tokenizers.NET` and our existing dotLLM Qwen tokenizer loader.
+For both versions the tokenizer's vocab/merges are stored as standard HuggingFace tokenizer files — directly readable by `Tokenizers.NET` and our existing HartsyInference Qwen tokenizer loader.
 
 ### 14. Memory and Performance
 
@@ -421,12 +421,12 @@ CV2 first-packet latency on RTX 4090: ~150 ms with chunk-2M, ~95 ms with chunk-M
 
 Notes for the implementer of `HartsyInference.Audio` CosyVoice pipeline.
 
-1. **LM (Qwen2.5-0.5B) — reuse dotLLM verbatim.** The CV2 LM *is* a plain Qwen2.5-0.5B with an extended vocabulary (6561 extra IDs appended). Our existing `DotLLM.Models.Qwen2` runtime can load it directly given two trivial extensions:
+1. **LM (Qwen2.5-0.5B) — reuse the native HartsyInference.LLM Qwen2 runtime verbatim.** The CV2 LM *is* a plain Qwen2.5-0.5B with an extended vocabulary (6561 extra IDs appended). Our existing HartsyInference.LLM Qwen2 runtime can load it directly given two trivial extensions:
    - Embed table resize: load `model.embed_tokens.weight` as `[151643 + N_special + 6561, 896]`.
    - LM head resize: `lm_head.weight` matches the same extended shape.
    We just need an extra `int speechTokenVocabSize` config field and a small helper that splits LM output logits into "text logits" (first 151,643 + N_special) and "speech logits" (last 6,561). Sampling is then masked to the appropriate slice depending on whether we're currently emitting text or speech (state machine driven by the position of `<|TURN_OF_SPEECH|>`).
 
-2. **Tokenizer reuse**. The Qwen2.5 BPE tokenizer is identical to dotLLM's. Load `vocab.json` + `merges.txt` exactly as our existing `QwenTokenizer`. Inject the CV-specific special tokens through the `added_tokens.json` mechanism Qwen already supports.
+2. **Tokenizer reuse**. The Qwen2.5 BPE tokenizer is the same one the native HartsyInference.LLM Qwen2.5 family uses. Load `vocab.json` + `merges.txt` exactly as our existing `QwenTokenizer`. Inject the CV-specific special tokens through the `added_tokens.json` mechanism Qwen already supports.
 
 3. **Speech tokenizer FSQ — small and pure C#.** This is the simplest of all the components.
    - Port the encoder (6 Transformer blocks with RoPE) using our existing Conformer/Transformer kernels (Parakeet shares this).
@@ -480,7 +480,7 @@ Notes for the implementer of `HartsyInference.Audio` CosyVoice pipeline.
     - `HartsyInference.Audio.Preprocessing` — mel spectrogram.
     - `HartsyInference.Audio.Tokenizers.S3` — speech tokenizer (depends on Conformer kernels in `HartsyInference.Audio` core).
     - `HartsyInference.Audio.SpeakerEmbeddings.CamPlusPlus` — CAM++ encoder.
-    - `HartsyInference.Audio.CosyVoice` — top-level pipeline; depends on `DotLLM.Qwen2`, `HartsyInference.Audio.Tokenizers.S3`, `HartsyInference.Audio.SpeakerEmbeddings.CamPlusPlus`, `HartsyInference.Audio.FlowMatching`, `HartsyInference.Audio.Vocoders.HiFTNet`, `HartsyInference.Diffusion.Schedulers` (Euler flow scheduler).
-    - **No transitive dotLLM leakage** — the pipeline accepts an `IQwen2LM` interface so dotLLM remains an optional peer dep.
+    - `HartsyInference.Audio.CosyVoice` — top-level pipeline; depends on `HartsyInference.LLM` (Qwen2 runtime), `HartsyInference.Audio.Tokenizers.S3`, `HartsyInference.Audio.SpeakerEmbeddings.CamPlusPlus`, `HartsyInference.Audio.FlowMatching`, `HartsyInference.Audio.Vocoders.HiFTNet`, `HartsyInference.Diffusion.Schedulers` (Euler flow scheduler).
+    - **Decoupled LM dependency** — the pipeline accepts an `IQwen2LM` interface so the Audio package stays decoupled from the HartsyInference.LLM package that supplies the concrete Qwen2 runtime.
 
 ---

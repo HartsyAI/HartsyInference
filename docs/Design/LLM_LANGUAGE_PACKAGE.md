@@ -1,8 +1,12 @@
-# Implementation Plan: HartsyInference.Language (Native LLM Inference)
+# Implementation Plan: HartsyInference.LLM (Native LLM Inference)
 
-> Back to [Core Design](CORE_DESIGN.md). Decision record + file-by-file architecture for adding
-> first-class LLM text generation to HartsyInference, replacing the planned dotLLM dependency.
-> Status: **design / not yet implemented**. Authored 2026-06-21.
+> Back to [Core Design](CORE_DESIGN.md). Decision record + file-by-file architecture for the first-class
+> LLM text generation in HartsyInference, replacing the once-planned dotLLM dependency.
+> Status: **implemented and shipping** as the `HartsyInference.LLM` package (config-driven generic
+> transformer, GGUF quantized decode, device-resident KV cache, sampler chain, chat templates). The
+> package name is `HartsyInference.LLM` (this doc's original working name was "Language"). Decode is
+> currently ~2-3× behind llama.cpp on a 3060 and closing; see the benchmark note in the checklists.
+> Authored 2026-06-21; updated 2026-07-04.
 
 ## 0. Decision Record
 
@@ -36,23 +40,23 @@
 
 ## 1. Package & Dependency Graph
 
-New package **`HartsyInference.Language`**.
+Package **`HartsyInference.LLM`**.
 
 ```
 Core
  ├─ ModelHandler ─┐
  ├─ Tokenizers ───┤
- ├─ Cpu / Cuda / Vulkan
- └─────────────── HartsyInference.Language   (NEW)
+ └─────────────── HartsyInference.LLM   (NEW)
                        │  (consumed by)
-        Audio ── Diffusion ── Server (/v1/chat/completions)
+              Audio ── Diffusion ── CLIs / SwarmUI extension
 ```
 
-- **Depends on:** Core, ModelHandler, Tokenizers, Cpu, Cuda, Vulkan. **Not** Diffusion/Audio/Vision/Video.
-- **Consumed by:** Server (chat endpoint); Audio + Diffusion re-target their transformer/encoder code onto
-  it over Milestones 1 & 4.
-- `tests/HartsyInference.Language.Tests/` and `samples/TextGeneration/` added alongside.
-- Minimum install (NVIDIA chat): `HartsyInference.Language` + `Cuda` + `ModelHandler` + `Tokenizers`.
+- **Project references:** Core, ModelHandler, Tokenizers. **Not** Diffusion/Audio/Vision/Video. The backend
+  (Cpu/Cuda/Vulkan) is supplied at runtime via `IBackend`, not referenced at the project level.
+- **Consumed by:** the sample CLIs (`samples/HartsyInference.TextGen.Cli`) and, indirectly, the SwarmUI
+  extension; Audio + Diffusion re-target their transformer/encoder code onto it over Milestones 1 & 4.
+- `tests/HartsyInference.LLM.Tests/` and `samples/HartsyInference.TextGen.Cli/` sit alongside.
+- Minimum install (NVIDIA chat): `HartsyInference.LLM` + `Cuda` + `ModelHandler` + `Tokenizers`.
 
 ---
 
@@ -178,7 +182,7 @@ optionally a small logits slice) crosses the PCIe boundary per step. See §5 Ris
 
 ---
 
-## 4. File Breakdown (`src/HartsyInference.Language/`)
+## 4. File Breakdown (`src/HartsyInference.LLM/`)
 
 ### Transformer/
 - **`TransformerConfig.cs`** — config record + presets (§2.1). *dotLLM pattern:* architecture-as-data.
@@ -269,7 +273,7 @@ and (deferred) `MOE_INFERENCE.md`.
 - **M3 — Coverage:** Llama-3.x, Mistral (sliding window), Qwen2.5 presets + converters; flash-attn; RoPE scaling.
 - **M4 — Encoder unification.** Re-target `T5TextEncoder`/`ClipTextEncoder`/`LlamaStyleEncoder` + audio
   Qwen3-TTS/YuE/Higgs onto the generic core; delete duplicated transformer code.
-- **M5 — MoE + paged KV + Server `/v1/chat/completions` streaming.**
+- **M5 — MoE + paged KV + continuous batching** (the streaming decode API the CLIs and SwarmUI extension consume).
 - **M6 *(optional)* — VLM** (reuse Vision towers + generic transformer; Qwen-VL lineage).
 
 ## 8. Testing Strategy

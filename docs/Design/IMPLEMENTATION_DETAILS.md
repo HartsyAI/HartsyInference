@@ -18,7 +18,7 @@
 | Schedulers | Pure C# math | FP reproducibility |
 | LoRA/ControlNet | Delta weights / separate UNet residuals | Flux format differs |
 | Whisper STT / Kokoro TTS | Encoder-decoder / HiFiGAN vocoder | Autoregressive + timestamps |
-| OpenAI API | ASP.NET Minimal API | — |
+| LLM text generation | Config-driven generic decoder transformer + GGUF quant + KV cache | GPU-resident decode loop |
 
 ---
 
@@ -107,7 +107,7 @@ Same P/Invoke-to-driver philosophy as CUDA. `[LibraryImport("vulkan-1")]` over t
 
 ## Diffusion — Pipelines
 
-**Pipeline factory** — inspects model metadata → auto-instantiates correct pipeline. All implement `IAsyncEnumerable<GenerationProgress>`.
+**Pipeline factory** — `PipelineFactory.LoadAuto` is scaffolding (throws with a list of unresolved design questions); callers construct pipelines directly today. Pipelines report progress via `Action<GenerationProgress>?` callbacks (not `IAsyncEnumerable`).
 
 **UNet (SD1.5):** 4 down, 1 mid, 4 up. ResNetBlock: `GroupNorm→SiLU→Conv→GroupNorm→SiLU→Conv+residual`. CrossAttentionBlock: `LayerNorm→self-attn→cross-attn→FFN`. Timestep: sinusoidal→MLP→FiLM addition.
 
@@ -127,10 +127,10 @@ Same P/Invoke-to-driver philosophy as CUDA. `[LibraryImport("vulkan-1")]` over t
 
 ---
 
-## Server — OpenAI API
+## LLM — Native Text Generation
 
-DotLLM Minimal API: `ServerState` singleton, source-gen JSON, one file per endpoint.
+One config-driven `GenericTransformer` (Qwen2/Qwen3/Llama/Mistral) drives decode (causal + KV cache) and also backs bidirectional text encoders. GGUF quantized inference uses fused mul_mat_vec decode kernels (Q4_K/Q6_K/Q8_0) plus a quantized LM head. The per-token loop keeps activations and the KV cache device-resident so only the next token id crosses the PCIe boundary. Full design: [LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md).
 
-**Endpoints:** `POST /v1/images/generations` (JSON), `POST /v1/images/edits` (multipart), `POST /v1/audio/transcriptions` (multipart), `POST /v1/audio/speech` (JSON → audio stream), `GET /v1/models`, model load/unload/pull.
+## Server — dropped
 
-**Streaming:** SSE for image progress, chunked transfer for TTS audio.
+The `HartsyInference.Server` ASP.NET scaffolding remains in `src/` but is **abandoned**. There is no OpenAI-compatible server product and none is planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and sample CLIs.

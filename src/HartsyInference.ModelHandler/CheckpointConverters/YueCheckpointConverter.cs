@@ -80,15 +80,18 @@ public sealed class YueCheckpointConverter
         "gate_proj.weight", "up_proj.weight", "down_proj.weight", "lm_head.weight",
     ];
 
-    /// <summary>Quantizes the LM's big 2D GEMM weights (attention/MLP projections + lm_head) to <see cref="DType.Q8_0"/>
-    /// in place. Halves the 7B footprint (bf16 14 GB → Q8_0 7 GB) so it fits a 12 GB card resident instead of streaming
-    /// per forward, and single-token decode hits the fused Q8_0 GEMV. Q8_0 is a per-32-block symmetric int8 (~0.4% RMS
-    /// error) — negligible for codec-token sampling. Only rank-2 tensors whose in-dim is a multiple of 32 are touched;
-    /// everything else (embeddings, norms) is left as-is. Replaced tensors are owned by the dict (the borrowed source
-    /// stays valid until its loader disposes).</summary>
-    public static unsafe void QuantizeLmWeightsQ8_0(Dictionary<string, Tensor> weights)
+    /// <summary>Quantizes the LM's big 2D GEMM weights (attention/MLP projections + lm_head) to <paramref name="target"/>
+    /// (a GGUF quant dtype) in place, so a 7B fits a 12 GB card resident instead of streaming per forward. Prefer
+    /// <see cref="DType.Q4_K"/>: it fits the 7B in ~3.5 GB AND decode hits the llama.cpp-style dp4a GEMV
+    /// (<c>mul_mat_vec_q4k_q8_1</c>), which is ~an order of magnitude faster than the naive Q8_0 F32 GEMV. Only rank-2
+    /// tensors whose in-dim is a multiple of the target's block size (256 for Q4_K, so quant blocks never cross a row)
+    /// are touched; embeddings/norms are left as-is. Replaced tensors are owned by the dict (the borrowed source stays
+    /// valid until its loader disposes).</summary>
+    public static unsafe void QuantizeLmWeights(Dictionary<string, Tensor> weights, DType target)
     {
-        Codec_Q8_0 codec = new();
+        IGgufCodec codec = GgufCodecRegistry.Get(target);
+        if (!codec.SupportsQuantize) throw new ArgumentException($"Codec {target} cannot quantize.", nameof(target));
+        int blk = target.BlockElementCount;
         foreach (string key in new List<string>(weights.Keys))
         {
             bool eligible = false;
@@ -99,10 +102,10 @@ public sealed class YueCheckpointConverter
             if (!eligible) continue;
 
             Tensor w = weights[key];
-            if (w.Shape.Rank != 2 || w.Shape[1] % 32 != 0) continue;   // Q8_0 blocks (32) must not cross rows
+            if (w.Shape.Rank != 2 || w.Shape[1] % blk != 0) continue;   // quant blocks must not cross rows
 
             Tensor f32 = w.DType == DType.F32 ? w : w.CastTo(DType.F32);
-            Tensor q = new(w.Shape, DType.Q8_0);
+            Tensor q = new(w.Shape, target);
             codec.QuantizeFromF32((float*)f32.DataPointer, (byte*)q.DataPointer, w.Shape.ElementCount);
             if (!ReferenceEquals(f32, w)) f32.Dispose();
             weights[key] = q;

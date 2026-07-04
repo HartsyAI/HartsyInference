@@ -656,7 +656,7 @@ fixed (VkPhysicalDeviceVulkan11Features* p11 = &features11)
 VulkanApi.vkGetDeviceQueue(_device, computeFamilyIndex, 0, out _queue);
 ```
 
-`ConstStringArray.Pin` — utility that copies strings into a single pinned UTF-8 block and returns `const char**`. See `dotLLM`'s pattern for `ppEnabledExtensionNames` reuse.
+`ConstStringArray.Pin` — utility that copies strings into a single pinned UTF-8 block and returns `const char**`. See `HartsyInference.Cuda`'s P/Invoke pattern for `ppEnabledExtensionNames` reuse.
 
 ---
 
@@ -1475,7 +1475,7 @@ Tested on Linux unless noted.
 
 ## Implementation Notes
 
-1. **`[LibraryImport]` over `[DllImport]`** — source-gen marshalling, faster startup. Mirror dotLLM's pattern.
+1. **`[LibraryImport]` over `[DllImport]`** — source-gen marshalling, faster startup. Mirror `HartsyInference.Cuda`'s P/Invoke pattern.
 2. **Cross-platform DLL resolution** — `NativeLibrary.SetDllImportResolver` for `vulkan-1` → `libvulkan.so.1`/`libvulkan-1.dll`/`libvulkan.1.dylib` (or `libMoltenVK.dylib` on macOS).
 3. **Strong-typed handles** — wrap dispatchable in `nint` and non-dispatchable in `ulong` consistently. Define a `VkBuffer { ulong Handle; }` struct only if the readability win is worth the boxing risk.
 4. **Pin extension-name strings once** — build a `static readonly byte[] s_extNamesBlob` of UTF-8 + nulls and a `static readonly nint s_extNamePtrs[]`; reuse across multiple `vkCreateDevice` attempts.

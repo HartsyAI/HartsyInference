@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-HartsyInference is a pure C#/.NET 10 AI inference engine for non-LLM modalities — image generation (diffusion), speech-to-text, text-to-speech, voice conversion, vision, object detection, and video generation. It pairs with dotLLM for LLM inference.
+HartsyInference is a pure C#/.NET AI inference engine (targets net8.0 and net10.0) covering LLM text generation, image generation (diffusion), speech-to-text, text-to-speech, voice conversion, music, vision, object detection, video generation, 3D mesh, and interactive world models. LLM inference is native in the `HartsyInference.LLM` package (dotLLM is no longer a dependency). The recommended way to run the engine is the SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend); it is also consumed as NuGet libraries and via the sample CLIs.
 
 **Before doing anything, read these files to understand the project:**
 

@@ -66,7 +66,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 ## 2. Planning
 
 - [ ] Decide STT model rollout order — recommend **Whisper first** (existing research, broad coverage), then **Parakeet-TDT** (real-time English), then **Moonshine** (edge / streaming), then **Canary** (multilingual + translation), then **SenseVoice + FireRedASR** (Chinese strong).
-- [ ] Decide TTS model rollout order — recommend **Kokoro first** (simplest, no codec, deterministic voices), then **F5-TTS** (no G2P needed, flow matching reuses image scheduler infra), then **XTTS-v2** (multilingual character-level), then **CosyVoice 2** (streaming + Qwen reuse), then the rest. Slot **VibeVoice** after F5-TTS — it reuses Qwen2.5 from dotLLM, the same DPM++ v-prediction cosine scheduler F5 already lives next to, and AdaLN-Zero block patterns from Flux/SD3; novelty is the causal 1D-ConvNeXt VAEs and the per-token DDPM sub-loop. Build all three checkpoints (1.5B / 7B / Streaming-0.5B) behind one `VibeVoicePipeline` switched on `config.model_type` — they share the acoustic VAE, diffusion head, and DPM-Solver path.
+- [ ] Decide TTS model rollout order — recommend **Kokoro first** (simplest, no codec, deterministic voices), then **F5-TTS** (no G2P needed, flow matching reuses image scheduler infra), then **XTTS-v2** (multilingual character-level), then **CosyVoice 2** (streaming + Qwen reuse), then the rest. Slot **VibeVoice** after F5-TTS — it reuses the native Qwen2.5 decoder, the same DPM++ v-prediction cosine scheduler F5 already lives next to, and AdaLN-Zero block patterns from Flux/SD3; novelty is the causal 1D-ConvNeXt VAEs and the per-token DDPM sub-loop. Build all three checkpoints (1.5B / 7B / Streaming-0.5B) behind one `VibeVoicePipeline` switched on `config.model_type` — they share the acoustic VAE, diffusion head, and DPM-Solver path.
 - [ ] Decide music model rollout order — recommend **ACE-Step first** (flagship per user request, flow-matching reuses image pipeline patterns), then **Stable Audio Open** (similar tech stack, smaller scope), then **MusicGen** (clean AR + EnCodec reference), then **DiffRhythm / YuE** (full-song generation), then **AudioLDM 2** (text-to-audio for SFX).
 - [ ] G2P language-coverage cut: **English only in v1** via CMUDict + ARPABET→IPA + heteronym table + small neural OOV fallback. Chinese (pinyin via jieba.NET port) and Japanese (NMeCab + UniDic repackaging) phased.
 - [ ] Audio codec build order: **EnCodec 24kHz first** (Bark, MusicGen, AudioGen, AudioCraft), then **Mimi** (Sesame CSM streaming demo), then **DAC** (IndexTTS, Higgs Audio), then **xcodec** (YuE), then **Vocos** (covers F5/Kokoro variants/ChatTTS as vocoder too).
@@ -158,7 +158,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] `SenseVoiceEncoder.cs` — 50-layer SANM encoder + LFR frontend + CTC head
 - [ ] `SenseVoicePipeline.cs` — special-token parser (`<emotion><lang><event><text>`)
 - [ ] `FireRedAsrPipeline.cs` (AED variant) — Conformer + Whisper-style decoder
-- [ ] `FireRedAsrLlmPipeline.cs` (LLM variant) — Conformer + adapter + Qwen2 decoder (dotLLM dependency)
+- [ ] `FireRedAsrLlmPipeline.cs` (LLM variant) — Conformer + adapter + Qwen2 decoder (native Qwen2 LM)
 
 ### .nemo file format support
 - [ ] `NemoFileLoader.cs` — extract tar to {ckpt, config.yaml}; route to model loader
@@ -340,7 +340,7 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] **Reconcile/deferred:** espeak-ng phonemization + the full conditioning-prefix assembly (speaker/integer/passthrough conditioners), ResNet293 speaker encoder, the NovelAI "unified" sampler, and the interleaved-RoPE convention check.
 
 ### Higgs Audio v2
-- [ ] Llama-3.2-3B with DualFFN (per-token-type routing) — extended dotLLM
+- [ ] Llama-3.2-3B with DualFFN (per-token-type routing) — extends the native Llama decoder
 - [ ] Dual-branch tokenizer (HuBERT-base + DAC acoustic, 8 codebooks consumed of 12 declared)
 - [ ] RAS (Repetition-Aware Sampling)
 - [ ] Multi-speaker prompt format with `[SPEAKER0]` / `[SPEAKER1]` tags
@@ -532,12 +532,13 @@ All 31 audio research docs are complete (see `docs/Research/`). No further resea
 - [ ] SpeechT5HifiGan (5-stage upsample, 16 kHz, 64 mel bins)
 - [ ] DDIM scheduler (existing) or DPM++ 2M
 
-## 8. Server / Streaming Endpoints (deferred to Phase 7)
+## 8. Server / Streaming Endpoints — DROPPED
 
-- [ ] STT endpoints: `/v1/audio/transcriptions`, `/v1/audio/translations`
-- [ ] TTS endpoints: `/v1/audio/speech` (synchronous) + SSE streaming variant
-- [ ] Music endpoints: `/v1/audio/music` (long-running job queue — songs take minutes)
-- [ ] OpenAI-compatible request shapes (model, voice, response_format)
+The first-party REST server is not planned. Audio pipelines are consumed in-process via the
+`HartsyInference.Audio` library, exercised through the sample CLIs, and surfaced to end users through
+the SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend). The former
+OpenAI-compatible endpoint list (`/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/audio/music`, etc.)
+is no longer a deliverable.
 
 ## 9. Testing
 

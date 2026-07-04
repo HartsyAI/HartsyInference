@@ -79,6 +79,7 @@ parity. This list is the ledger — nothing is hidden, it is deferred.
 | `MatrixGame3PipelineTests.Generate_TwoSegments_...` | Matrix-Game 3 | Native heap corruption during CPU rollout | MG3 CPU-validated |
 | `MatrixGame2PipelineTests.Generate_TwoBlocks_...` | Matrix-Game 2 | Native heap corruption during CPU rollout | MG2 CPU-validated |
 | `HunyuanGameCraftPipelineTests.DenoiseChunk_...` | Hunyuan GameCraft | Native heap corruption during CPU denoise | GameCraft CPU-validated |
+| `LtxVideoPipelineTests.GenerateFromEmbeddings_TinyConfig_...` | LTX-Video | LTX2 opt loads DiT weights as F16 for GPU tensor cores; CPU backend is F32-only so the CPU forward throws | LtxVideoBlock gains a CPU F32 path (or test moves to GPU) |
 
 `ThreeD.Tests.CudaOpBisectTests.*` is tagged `GpuIntegration` (not SyntheticSmoke): it is correct
 code that simply needs a real CUDA device, which the hosted runner lacks.

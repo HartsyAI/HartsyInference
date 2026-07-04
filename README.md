@@ -2,10 +2,13 @@
 
 **A pure C#/.NET 10 AI inference engine for image, audio, vision, video, 3D, and interactive world models, with zero Python dependencies.**
 
-HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU**. No Python. No C++ wrappers. No external processes. Just NuGet packages. It's a complete pure-C# inference engine: LLMs + diffusion image models + speech/music + vision + video + 3D + interactive worlds. (An OpenAI-compatible REST server is [in progress](#openai-compatible-server-in-progress).)
+HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpoints directly and runs inference on **CUDA**, **Vulkan**, or **CPU**. No Python. No C++ wrappers. No external processes. Just NuGet packages. It's a complete pure-C# inference engine: LLMs + diffusion image models + speech/music + vision + video + 3D + interactive worlds.
+
+> [!IMPORTANT]
+> **The recommended way to run HartsyInference is inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) via the [HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend).** It registers HartsyInference as a SwarmUI backend (a pure-C# alternative to the ComfyUI backend), so you get a full generation UI, model management, LoRA, and video/audio output with no Python install. HartsyInference is not building its own front-end. You can also consume the engine directly as [NuGet libraries](#quick-start-library) or through the bundled [sample CLIs](#quick-start-cli-developer-tool).
 
 > [!NOTE]
-> HartsyInference ships with **native LLM text generation** (Qwen, Llama, Mistral, quantized GGUF inference), plus diffusion image models, speech-to-text, text-to-speech, music generation, vision embeddings & detection, video generation, 3D mesh, and real-time interactive world models — all in C#.
+> HartsyInference ships with **native LLM text generation** (Qwen, Llama, Mistral, quantized GGUF inference), plus diffusion image models, speech-to-text, text-to-speech, music generation, vision embeddings & detection, video generation, 3D mesh, and real-time interactive world models, all in C#.
 
 ---
 
@@ -13,9 +16,10 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 
 - [Why HartsyInference](#why-hartsyinference)
 - [Design Pillars](#design-pillars)
-- [Quick Start (CLI)](#quick-start-cli)
+- [How to Use It (SwarmUI recommended)](#how-to-use-it)
 - [Quick Start (Library)](#quick-start-library)
-- [OpenAI-Compatible Server](#openai-compatible-server)
+- [Quick Start (CLI, developer tool)](#quick-start-cli-developer-tool)
+- [Benchmarks](#benchmarks)
 - [Supported Models](#supported-models)
 - [Future Features](#future-features)
 - [Packages](#packages)
@@ -34,7 +38,7 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 | **Modular NuGet** | Pull in only the modality you need. `HartsyInference.Diffusion` for images, `HartsyInference.Audio` for speech, etc. |
 | **World models** | Real-time, action-conditioned interactive generation (keyboard / mouse / camera-pose → streamed frames). |
 | **Zero-alloc hot paths** | Tensor data in `NativeMemory.AlignedAlloc`, weights memory-mapped, `Span<T>` everywhere. |
-| **Drop-in API** | OpenAI-compatible endpoints (in progress) and an in-process SwarmUI backend. |
+| **SwarmUI-native** | Ships as a first-class [SwarmUI backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), a pure-C# alternative to the ComfyUI backend, for a full UI with no Python. |
 
 ---
 
@@ -51,9 +55,33 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 
 ---
 
-## Quick Start (CLI)
+## How to Use It
 
-The bundled CLI generates images with Stable Diffusion 1.5 and is the fastest way to verify your setup end-to-end.
+There are three ways to run HartsyInference, in order of how most people should reach for them.
+
+### 1. SwarmUI + the HartsyInference backend extension (recommended)
+
+HartsyInference does not ship its own front-end. The recommended way to actually generate with it is through **[SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI)** using the **[SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)** extension. The extension registers HartsyInference as a SwarmUI backend, a pure-C# alternative to the ComfyUI backend, so you get:
+
+- SwarmUI's full generation UI, model browser, and parameter controls with **no Python environment**.
+- Per-architecture model loaders (SD/SDXL/Flux/SD3/Qwen-Image/Ideogram/Kandinsky and more), plus **video** (Wan 2.x, LTX) with ffmpeg muxing, **audio/music** (ACE-Step), LoRA passthrough, live previews, and automatic checkpoint conversion.
+- The same engine and kernels this repo builds, consumed as pinned `HartsyInference` NuGet packages.
+
+Install it like any SwarmUI extension: clone `SwarmUI-HartsyInference-Backend` into your SwarmUI `src/Extensions/` folder (as `SwarmUI-HartsyInference`), rebuild SwarmUI, then add a **HartsyInference** backend under Server → Backends. See that repo's README for the current model-support matrix and setup.
+
+### 2. Library (NuGet)
+
+Embed the engine directly in a .NET app. Each modality is its own package. See [Quick Start (Library)](#quick-start-library) below.
+
+### 3. Sample CLIs (developer tool)
+
+The bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) are compile-tested references for verifying a checkpoint or a pipeline end-to-end from the command line. They are development and validation tools, not the intended end-user surface. See [Quick Start (CLI, developer tool)](#quick-start-cli-developer-tool) below.
+
+---
+
+## Quick Start (CLI, developer tool)
+
+The bundled CLI generates images with Stable Diffusion 1.5 and is the fastest way to verify your setup end-to-end from a terminal. It is a developer/validation tool; for day-to-day generation use the [SwarmUI extension](#how-to-use-it).
 
 ```bash
 # Build the solution
@@ -124,7 +152,7 @@ Text task:
 > Image models are resolved from a ComfyUI-style layout under `<repo>/Models` (e.g. `Models/StabilityAI/sd-v1-5`). Override the root with `--models /path/to/models`. Generated images land in `<repo>/Output`. Every per-task `--*-model` flag still works as an alias for `--model`.
 
 > [!IMPORTANT]
-> The `image` and `text` tasks run end-to-end today (image is wired to the SD1.5 pipeline; text drives the config-driven LLM transformer). `music`, `vision`, `video`, `3d`, and `interactive` are placeholders in the CLI — that **full breadth of models** is exposed through the library API, the per-modality samples under [`samples/`](samples/), and the OpenAI-compatible server described below.
+> The `image` and `text` tasks run end-to-end today (image is wired to the SD1.5 pipeline; text drives the config-driven LLM transformer). `music`, `vision`, `video`, `3d`, and `interactive` are placeholders in this dispatcher CLI. That **full breadth of models** is exposed through the [SwarmUI extension](#how-to-use-it), the library API, and the per-modality samples under [`samples/`](samples/).
 
 ---
 
@@ -133,7 +161,7 @@ Text task:
 Each modality is its own NuGet package. Expand a section below for the install reference and a minimal end-to-end example.
 
 > [!NOTE]
-> There is no one-line auto-loader yet. `PipelineFactory` is still scaffolding, so pipelines are constructed explicitly from pre-loaded components, exactly as the bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) do. Those programs are the authoritative, compile-tested usage references.
+> `PipelineFactory.DetectArchitecture(path)` and `PipelineFactory.LoadAuto(path, backend)` give a one-line auto-loader today for **SDXL**; other detected families throw a clear `NotSupportedException` naming the architecture, so those pipelines are still constructed explicitly from pre-loaded components. The bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) are the authoritative, compile-tested usage references for the explicit path.
 
 <details>
 <summary><b>Image Generation</b>: diffusion text-to-image (SD1.5)</summary>
@@ -342,27 +370,39 @@ await foreach (VideoFrame frame in session.ReadFramesAsync())
 
 ---
 
-## OpenAI-Compatible Server (in progress)
+## Benchmarks
 
-> [!WARNING]
-> The server host is scaffolding today. It boots and serves `/health` and `/ready`, but the OpenAI-compatible endpoints (`AddHartsyInference` / `MapHartsyInferenceEndpoints`) are not wired yet. The snippet below is the current state, not the finished API.
+We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and it is **not yet as fast as the best native runners**. We are closing that gap in the open. Every number below is reproducible from `benchmarks/` and the committed result files under [`benchmarks/results/`](benchmarks/results/).
 
-```csharp
-using HartsyInference.Server;
+### LLM decode vs llama.cpp
 
-WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
+RTX 3060 12GB, CUDA, batch=1, 128-token greedy decode, warm, tokens/sec. Same GGUF file and quant on both sides. After a focused kernel optimization pass (fused quantized GEMV, quantized `lm_head`, split-K flash-decode attention, vectorized loads), engine decode went from **20-54× slower to 1.94-2.88× off llama.cpp**:
 
-// builder.Services.AddHartsyInference(options => { ... });   // planned
+| Model | Quant | llama.cpp t/s | HartsyInference t/s | Gap |
+|---|---|---:|---:|---:|
+| Llama-3.2-1B | Q8_0 | 215.9 | ~111.5 | **1.94×** |
+| Mistral-7B-v0.3 | Q4_K_M | 66.5 | ~30.7 | **2.12×** |
+| Qwen3-0.6B | Q4_K_M | 354.5 | ~157 | **2.26×** |
+| Gemma-3-1B | Q4_K_M | 229.8 | ~79.7 | **2.88×** |
 
-WebApplication app = builder.Build();
-app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
-app.MapGet("/ready", () => Results.Ok(new { status = "ready" }));
+Prefill (prompt processing) is much faster and not the bottleneck. The remaining decode gap is launch-overhead on small models; the next lever is CUDA graphs. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
 
-// app.MapHartsyInferenceEndpoints();                          // planned: /v1/images/generations, etc.
-app.Run();
-```
+### Diffusion / video end-to-end vs ComfyUI
 
-The planned surface is a drop-in replacement for `/v1/images/generations`, `/v1/audio/transcriptions`, and `/v1/audio/speech` with SSE streaming for progress. Until it lands, drive inference through the library APIs above or the bundled CLIs.
+RTX 4090 24GB, full end-to-end wall-clock through the **SwarmUI API**, the identical request routed to the ComfyUI backend then the HartsyInference backend on the same GPU. Warm (model resident), 512×320, 20-25 steps. All outputs are coherent; this is a **speed** gap, not a correctness gap:
+
+| Model | HartsyInference warm | ComfyUI warm | Gap |
+|---|---:|---:|---:|
+| Wan 2.1 T2V 1.3B (fp16) | ~23.7 s | 6.28 s | ~3.8× |
+| LTX-0.9 2B (fp16) | ~15 s | 2.84 s | ~5.3× |
+| Wan 2.2 TI2V-5B (fp16) | ~37.9 s | 4.52 s | ~8.4× |
+| Wan 2.1 T2V 14B (fp8) | ~180 s | 30.6 s | ~5.9× |
+
+Image architectures (Flux, SD3, Ideogram) were device-ported and run much closer to ComfyUI; the video DiT blocks are the current optimization frontier. The remaining gap is well understood and documented: no full flash-attention kernel yet, some F32-only elementwise ops, and kernel-launch overhead at small token counts (needs CUDA graphs / op fusion). Full write-up: [`benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`](benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md).
+
+### GPU op microbenchmarks
+
+Per-op MatMul / Conv2D / norm / SDPA / elementwise timings against PyTorch, with full statistical method (5 trials, 95% CI, Welch's t-test), are committed under [`benchmarks/results/run_baseline_*`](benchmarks/results/) for both RTX 3060 and RTX 4090. See [`benchmarks/README.md`](benchmarks/README.md) to reproduce.
 
 ---
 
@@ -423,7 +463,7 @@ The planned surface is a drop-in replacement for `/v1/images/generations`, `/v1/
 | ACE-Step | Music generation (flow-matching) | ✅ |
 | YuE | Music generation (dual-stage Llama) | ✅ |
 | Stable Audio Open | Music generation | 🏗️ |
-| F5-TTS | Voice cloning | 🏗️ |
+| F5-TTS | Voice cloning (flow-matching DiT) | 🧪 |
 | Codecs (Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck) | Neural audio codecs | ✅ |
 
 ### Vision
@@ -495,15 +535,15 @@ See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the fu
 | `HartsyInference.Cuda` | CUDA backend with PTX kernels and cuBLAS |
 | `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (SPIR-V compute) |
 | `HartsyInference.LLM` | Native LLM text generation (Qwen, Llama, Mistral, GGUF inference, chat templates) |
+| `HartsyInference.Phonemizer` | Pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
 | `HartsyInference.Diffusion` | Image pipelines (SD/SDXL/Flux/SD3/MMDiT/NextDiT), VAE, LoRA |
 | `HartsyInference.Audio` | STT, TTS, music generation, and neural audio codecs |
 | `HartsyInference.Vision` | CLIP/SigLIP/DINO embeddings, YOLO detection, SAM segmentation, face |
 | `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky video generation |
 | `HartsyInference.ThreeD` | Image/text → 3D mesh; glTF/OBJ/PLY export, marching cubes |
 | `HartsyInference.Interactive` | Action-conditioned world models, sessions, action encoders |
-| `HartsyInference.Server` | OpenAI-compatible REST API with SSE streaming |
-| `HartsyInference.Meta` | Metadata and model-registry utilities |
-| `HartsyInference.Cli` | Command-line interface |
+| `HartsyInference` | Meta-package that references the core, backends, and modality packages (add `HartsyInference.LLM` separately for text generation) |
+| `HartsyInference.Cli` | Command-line sample/validation tool (not published as a package) |
 
 See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependency graph and minimum install examples.
 

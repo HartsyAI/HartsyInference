@@ -492,11 +492,11 @@ Sesame's blog claims their internal (larger, unreleased) model achieves ~150 ms 
 
 | CSM Component                          | HartsyInference reuse                                                                  |
 |----------------------------------------|---------------------------------------------------------------------------------------|
-| Backbone (Llama-3.2 1B with GQA, RoPE, RMSNorm, SwiGLU) | **Direct dotLLM reuse.** This is bit-identical Llama-3.2-1B except `tok_embeddings`/`output` are stubbed. Use the dotLLM `LlamaBlock`, KV cache, attention, RoPE with `scale_factor=32`. |
-| Decoder (4-layer Llama-100M)           | **Same dotLLM blocks, smaller config.** Note `intermediate_dim=8192` (8× hidden, not 2.6×) — make sure the FFN dim is read from config, not derived. KV cache size = 8 entries per layer per head. |
+| Backbone (Llama-3.2 1B with GQA, RoPE, RMSNorm, SwiGLU) | **Direct HartsyInference.LLM reuse.** This is bit-identical Llama-3.2-1B except `tok_embeddings`/`output` are stubbed. Use the HartsyInference.LLM `LlamaBlock`, KV cache, attention, RoPE with `scale_factor=32`. |
+| Decoder (4-layer Llama-100M)           | **Same HartsyInference.LLM blocks, smaller config.** Note `intermediate_dim=8192` (8× hidden, not 2.6×) — make sure the FFN dim is read from config, not derived. KV cache size = 8 entries per layer per head. |
 | Mimi codec                             | **New code path.** See [AUDIO_CODECS.md](AUDIO_CODECS.md) Mimi section. Critical: 12.5 Hz frame rate (1920-sample hop), causal convs with ring-buffer streaming, bottleneck transformer with RoPE+GELU, split-RVQ with 1 semantic + 7 acoustic codebooks. |
-| Llama-3.2 BPE tokenizer                | **Reuse dotLLM tokenizer** (`meta-llama/Llama-3.2-1B`). Add a TemplateProcessing post-processor equivalent that wraps `<|begin_of_text|>` … `<|end_of_text|>`. |
-| Top-k sampling                         | Already in dotLLM. No nucleus, no repetition penalty needed. |
+| Llama-3.2 BPE tokenizer                | **Reuse HartsyInference.LLM tokenizer** (`meta-llama/Llama-3.2-1B`). Add a TemplateProcessing post-processor equivalent that wraps `<|begin_of_text|>` … `<|end_of_text|>`. |
+| Top-k sampling                         | Already in HartsyInference.LLM. No nucleus, no repetition penalty needed. |
 | Watermarker (SilentCipher)             | **Skip for v1.** `watermarking.py` references `CSM_1B_GH_WATERMARK` and SilentCipher. It is optional (not load-bearing for audio quality) and the Apache 2.0 license does not require it. Document the omission. |
 
 #### Critical correctness items
@@ -555,8 +555,8 @@ Implementation notes for the streaming path:
 #### Suggested implementation order
 
 1. **Mimi decoder + encoder** in `HartsyInference.Audio.Codecs.Mimi` — both directions are needed (encoder for context audio, decoder for generation output). Validate against the HF `MimiModel` port (Python) within 1e-3 RMS on a fixed test waveform. See [AUDIO_CODECS.md](AUDIO_CODECS.md) Mimi section for the full op list.
-2. **CSM `Model` class** in `HartsyInference.Audio.Tts.Sesame` — wraps two dotLLM-Llama instances + the embedding tables + the three projection/head parameters. Implement the wide-frame embedding sum and the `generate_frame` loop. Validate `generate_frame` output (the 8 sampled codebooks) is plausible (cb0 distribution matches Mimi-semantic distribution for known audio).
-3. **Generator + tokenization** in `HartsyInference.Audio.Tts.Sesame.Generator` — port `_tokenize_text_segment`, `_tokenize_audio`, `_tokenize_segment`, the conversation-context loop. Reuse the dotLLM Llama-3.2 tokenizer.
+2. **CSM `Model` class** in `HartsyInference.Audio.Tts.Sesame` — wraps two HartsyInference.LLM-Llama instances + the embedding tables + the three projection/head parameters. Implement the wide-frame embedding sum and the `generate_frame` loop. Validate `generate_frame` output (the 8 sampled codebooks) is plausible (cb0 distribution matches Mimi-semantic distribution for known audio).
+3. **Generator + tokenization** in `HartsyInference.Audio.Tts.Sesame.Generator` — port `_tokenize_text_segment`, `_tokenize_audio`, `_tokenize_segment`, the conversation-context loop. Reuse the HartsyInference.LLM Llama-3.2 tokenizer.
 4. **Non-streaming `GenerateAsync`** — batched frame loop, single Mimi decode at the end. End-to-end validate output PCM against the Python reference: same prompt, same seed → audibly identical waveform (perfect bit-match is unlikely due to sampling).
 5. **Streaming `GenerateStreamingAsync`** — refactor the frame loop to emit per-frame. Per-frame Mimi decode with causal ring buffers. Build the `IAsyncEnumerable<AudioChunk>` plumbing and the producer/consumer split. **This is the showcase real-time path for HartsyInference.**
 6. **Performance pass** — fuse the wide-frame embedding sum kernel, ensure backbone KV cache writes are coalesced, profile single-frame latency target ≤ 25 ms on RTX 4090 bf16.
@@ -644,7 +644,7 @@ Shape `(B, n_codebooks, T_frames)`:
 
 ### Llama tokenizer
 
-Standard Llama-3.2 BPE (`tokenizer.json` 17.2 MB) plus a post-processor that wraps each input with BOS/EOS. Reuse dotLLM's Llama-3.2 tokenizer; just set the post-processor template.
+Standard Llama-3.2 BPE (`tokenizer.json` 17.2 MB) plus a post-processor that wraps each input with BOS/EOS. Reuse HartsyInference.LLM's Llama-3.2 tokenizer; just set the post-processor template.
 
 ## Algorithm Steps
 
@@ -730,11 +730,11 @@ Applied independently per codebook of every sampled frame. **No shared random st
 | Original Sesame reference                         | [SesameAILabs/csm](https://github.com/SesameAILabs/csm)                     | `models.py`, `generator.py`, `run_csm.py`, `watermarking.py`. Uses torchtune Llama. |
 | HuggingFace Transformers port                     | `transformers.models.csm.CsmForConditionalGeneration` (v4.52.1+, 2025-05-20) | Native HF API. Bundles Mimi. Supports static cache + CUDA graphs. Best reference for HF-format checkpoint shape. |
 | Mimi codec (Kyutai)                               | [kyutai-labs/moshi](https://github.com/kyutai-labs/moshi) `moshi/models/loaders.py`, `moshi/modules/seanet.py`, `moshi/quantization/{vq,core_vq}.py` | The codec implementation. Use as reference for the Mimi C# port. |
-| Llama-3.2 builder used by Sesame                  | [pytorch/torchtune](https://github.com/pytorch/torchtune) `torchtune/models/llama3_2/` | The exact `llama3_2.llama3_2(...)` factory called by `models.py`. Verifies hyperparameters match dotLLM. |
+| Llama-3.2 builder used by Sesame                  | [pytorch/torchtune](https://github.com/pytorch/torchtune) `torchtune/models/llama3_2/` | The exact `llama3_2.llama3_2(...)` factory called by `models.py`. Verifies hyperparameters match HartsyInference.LLM. |
 
 ## Differences Between Implementations
 
-- **torchtune Llama vs HF Llama vs dotLLM Llama.** All three implement identical math (RoPE + GQA + RMSNorm + SwiGLU) but with different code paths and tensor naming. The CSM checkpoint is **torchtune-named** (`backbone.layers.0.attn.q_proj.weight`, etc.). The HF-Transformers `transformers-*.safetensors` rename to the HF convention (`model.layers.0.self_attn.q_proj.weight`). When loading from safetensors in C#, support both naming schemes or document which one we target.
+- **torchtune Llama vs HF Llama vs HartsyInference.LLM Llama.** All three implement identical math (RoPE + GQA + RMSNorm + SwiGLU) but with different code paths and tensor naming. The CSM checkpoint is **torchtune-named** (`backbone.layers.0.attn.q_proj.weight`, etc.). The HF-Transformers `transformers-*.safetensors` rename to the HF convention (`model.layers.0.self_attn.q_proj.weight`). When loading from safetensors in C#, support both naming schemes or document which one we target.
 
 - **Mimi `num_codebooks` at load.** The reference uses 32 (encodes context fully); HF Transformers CSM defaults to 8 (only what's needed for generation). The 8-codebook path is faster and saves memory, but **context audio loses ~75% of its acoustic information**, weakening voice cloning. We should default to 32 to match the reference behavior.
 
@@ -758,7 +758,7 @@ Applied independently per codebook of every sampled frame. **No shared random st
 
 ## Implementation Notes for HartsyInference
 
-### What HartsyInference already has (or will, from dotLLM)
+### What HartsyInference already has (or will, from HartsyInference.LLM)
 
 - Llama-3.2 transformer block (RoPE + GQA + RMSNorm + SwiGLU) — both backbone (16 layers) and decoder (4 layers) use this directly.
 - Llama-3 BPE tokenizer.

@@ -16,7 +16,7 @@ been *proven correct against real weights*.
 | **World / interactive** | [MODEL_STATUS_WORLD.md](MODEL_STATUS_WORLD.md) | [PHASE_10_INTERACTIVE.md](PHASE_10_INTERACTIVE.md) |
 | **3D** (image → mesh) | [MODEL_STATUS_3D.md](MODEL_STATUS_3D.md) | [PHASE_11_THREED.md](PHASE_11_THREED.md) |
 | **Vision** (CLIP / detection / segmentation) | [MODEL_STATUS_VISION.md](MODEL_STATUS_VISION.md) | [PHASE_6_VISION.md](PHASE_6_VISION.md) |
-| **LLM + text encoders + VLMs + embeddings** | [MODEL_STATUS_LLM.md](MODEL_STATUS_LLM.md) | [LLM_MODEL_COVERAGE.md](LLM_MODEL_COVERAGE.md), [PHASE_12_LANGUAGE.md](PHASE_12_LANGUAGE.md) |
+| **LLM + text encoders + VLMs + embeddings** | [MODEL_STATUS_LLM.md](MODEL_STATUS_LLM.md) | [LLM_MODEL_COVERAGE.md](LLM_MODEL_COVERAGE.md), [PHASE_12_LANGUAGE.md](PHASE_12_LANGUAGE.md); **decode perf:** [LLM_THROUGHPUT_BENCHMARK.md](LLM_THROUGHPUT_BENCHMARK.md) + [LLM_DECODE_PERF_GRIND.md](LLM_DECODE_PERF_GRIND.md) (2026-07-04: 20-54× → 1.94-2.88× off llama.cpp) |
 
 ## Shared legend
 

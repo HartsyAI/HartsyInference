@@ -111,15 +111,17 @@ See [`docs/Research/INTERACTIVE_INFERENCE.md`](../Research/INTERACTIVE_INFERENCE
 - Editing variants (image edit, video edit) are deferred until after both base pipelines are clean — they reuse the same transformer with `clean_vae_cond` slots populated from the source media.
 - `cfg_vision_scale` default for video-edit is an open question in the research doc (§ Open Questions #4); confirm against `config/examples/video_edit.json` before shipping edit support.
 
-## 7. Server Integration
+## 7. Host Integration (was: server integration — DROPPED)
 
-- [ ] Video generation endpoint, SSE streaming, video file serving
-- [ ] Lance-specific endpoint surface (or generic unified endpoint covering LTX / Wan / Lance with a model-name discriminator)
+The first-party REST server is not planned. Video pipelines are consumed in-process via the
+`HartsyInference.Video` library, exercised through the sample CLIs, and surfaced to end users through the
+SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), which covers
+LTX / Wan / Lance via a model-name discriminator. There is no HartsyInference video endpoint to build.
 
 ## 8. Testing
 
 - [ ] Temporal attention consistency, video VAE vs reference
-- [ ] Pipeline quality (manual check), VRAM usage, server endpoint
+- [ ] Pipeline quality (manual check), VRAM usage
 - [ ] All tests pass on GPU CI
 - [ ] Lance video diff harness — layer-by-layer F32 noise floor vs reference Python forward
 

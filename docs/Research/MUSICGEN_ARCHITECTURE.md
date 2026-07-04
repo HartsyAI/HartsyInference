@@ -81,7 +81,7 @@ For codec internals (encoder conv stack, RVQ algorithm, decoder ConvTranspose st
 
 ### Codebook Interleaving Patterns
 
-This is the central novelty of MusicGen and the main piece of logic that does not exist in dotLLM or any existing HartsyInference component. Reference implementation: `audiocraft/modules/codebooks_patterns.py`.
+This is the central novelty of MusicGen and the main piece of logic that does not exist in HartsyInference.LLM or any existing HartsyInference component. Reference implementation: `audiocraft/modules/codebooks_patterns.py`.
 
 Given a tensor of audio codes with shape `[B, K, T]` (B = batch, K = codebooks, T = codec frames), a "pattern" specifies how those K×T tokens are arranged into a flat sequence of LM steps. The paper compares four patterns; MusicGen ships with **delay**.
 
@@ -453,7 +453,7 @@ For validation, the AudioCraft official and HF Transformers implementations shou
 
 ## Implementation Notes for HartsyInference
 
-This is the first **autoregressive** model in HartsyInference (everything to date is diffusion or feed-forward — diffusion samplers loop, but each step is feed-forward). Many of the patterns needed already exist in dotLLM; HartsyInference will need a thin port of those patterns.
+This is the first **autoregressive** model in HartsyInference (everything to date is diffusion or feed-forward — diffusion samplers loop, but each step is feed-forward). Many of the patterns needed already exist in HartsyInference.LLM; MusicGen reuses those patterns.
 
 ### What HartsyInference already has
 
@@ -479,7 +479,7 @@ This is the first **autoregressive** model in HartsyInference (everything to dat
    - Cross-attention (we have this for SD3-style joint attention; the encoder-decoder variant is simpler — no shared projection).
    - GELU FFN with 4× ratio (we have GELU; standard).
    - No RoPE — sinusoidal positions added to embeddings, plain absolute. Trivial.
-   - Architecture is close enough to dotLLM that we can copy the attention/FFN kernels and add cross-attention.
+   - Architecture is close enough to HartsyInference.LLM that we can reuse the attention/FFN kernels and add cross-attention.
 
 3. **EnCodec decoder** — pure C# reimplementation per [AUDIO_CODECS.md](AUDIO_CODECS.md). The encoder is only needed for audio-prompted continuation; ship the decoder first.
 
@@ -489,7 +489,7 @@ This is the first **autoregressive** model in HartsyInference (everything to dat
    - `Undelay() -> [B, K, T_codec]`: at end of decode, slice out the actual audio codes.
    - This is a ~50-line class. Worth a dedicated `DelayPattern` type to keep the LM loop clean.
 
-5. **Sampling kernel** (top-k + temperature). Already in dotLLM; port it. Per-codebook (vectorize across K).
+5. **Sampling kernel** (top-k + temperature). Already in HartsyInference.LLM; reuse it. Per-codebook (vectorize across K).
 
 6. **Chromagram extractor** (melody-only). STFT-based, 12 bins. We have STFT code from Whisper preprocessor. Reuse it; add a chroma binning step. Or skip melody for v1 and ship text-only first.
 

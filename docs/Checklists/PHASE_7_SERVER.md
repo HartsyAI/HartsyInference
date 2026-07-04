@@ -1,6 +1,21 @@
 # Phase 7 — Server (OpenAI-Compatible API)
 
-> **Goal:** OpenAI-compatible REST API serving image generation and audio endpoints.
+> # ⛔ DROPPED / ABANDONED
+>
+> **This phase is no longer planned. No first-party server ships.** The OpenAI-compatible REST
+> server was abandoned; the engine is consumed three ways instead:
+> 1. **SwarmUI + the HartsyInference backend extension** (the recommended path, see
+>    [PHASE_8_SWARMUI.md](PHASE_8_SWARMUI.md)),
+> 2. the **NuGet libraries** (per-modality packages),
+> 3. the **bundled sample CLIs** (`samples/` + `src/HartsyInference.Cli`).
+>
+> The `HartsyInference.Server` package still physically exists in `src/` as abandoned scaffolding,
+> but it is not built, advertised, or supported. The checklist below is kept for history only; do
+> not action it.
+
+---
+
+> **Goal (historical):** OpenAI-compatible REST API serving image generation and audio endpoints.
 > **Packages:** HartsyInference.Server
 
 ---

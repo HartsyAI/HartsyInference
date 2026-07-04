@@ -1,9 +1,14 @@
 # OpenAI Image API — Research Notes
 
+> **Note:** HartsyInference does not ship a first-party OpenAI-compatible server. The engine is
+> consumed via the SwarmUI backend extension, the per-modality NuGet libraries, and the bundled
+> sample CLIs. This document is retained purely as a reference for OpenAI's Image and Audio API
+> request/response schemas. Any "server" flow below describes a generic OpenAI-compatible surface
+> for reference only, not a planned HartsyInference deliverable.
 
 ## Summary
 
-The OpenAI Image and Audio APIs provide REST endpoints for image generation/editing and audio speech/transcription. This document covers the exact request/response JSON schemas for all endpoints: `/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, and `/v1/audio/translations`. All schemas are sourced from the official OpenAI OpenAPI specification (openapi.yaml) and corroborated with OpenAI guide documentation. HartsyInference.Server must implement these schemas to be a drop-in OpenAI-compatible backend.
+The OpenAI Image and Audio APIs provide REST endpoints for image generation/editing and audio speech/transcription. This document covers the exact request/response JSON schemas for all endpoints: `/v1/images/generations`, `/v1/images/edits`, `/v1/images/variations`, `/v1/audio/speech`, `/v1/audio/transcriptions`, and `/v1/audio/translations`. All schemas are sourced from the official OpenAI OpenAPI specification (openapi.yaml) and corroborated with OpenAI guide documentation. These are the schemas an OpenAI-compatible backend would implement to be a drop-in replacement.
 
 Sources:
 - [OpenAI OpenAPI Spec (GitHub)](https://github.com/openai/openai-openapi) — canonical machine-readable spec (openapi.yaml, version 2.3.0+)
@@ -393,7 +398,7 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 
 ## Algorithm Steps
 
-### HartsyInference.Server Image Generation Flow
+### OpenAI-Compatible Image Generation Flow
 
 1. Accept POST /v1/images/generations with JSON body
 2. Parse and validate `CreateImageRequest` — check model, size, quality, n constraints
@@ -405,7 +410,7 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 5. Base64-encode each image and place in `data[].b64_json`
 6. Return `ImagesResponse` with `created` timestamp and metadata
 
-### HartsyInference.Server Audio TTS Flow
+### OpenAI-Compatible Audio TTS Flow
 
 1. Accept POST /v1/audio/speech with JSON body
 2. Parse and validate `CreateSpeechRequest`
@@ -413,7 +418,7 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 4. Encode audio to requested format (mp3/opus/flac/wav/aac/pcm)
 5. Return raw audio bytes with appropriate Content-Type header
 
-### HartsyInference.Server Transcription Flow
+### OpenAI-Compatible Transcription Flow
 
 1. Accept POST /v1/audio/transcriptions with multipart form data
 2. Extract audio file and parameters
@@ -453,7 +458,7 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 
 ## Differences Between Implementations
 
-| Feature | OpenAI Official | LocalAI | vLLM-Omni | HartsyInference (planned) |
+| Feature | OpenAI Official | LocalAI | vLLM-Omni | OpenAI-compatible surface (reference) |
 |---------|----------------|---------|-----------|-------------------------|
 | /v1/images/generations | Full spec | Supported (subset params) | Supported (passthrough) | Full spec |
 | /v1/images/edits | Full spec | Not supported | Not supported | Full spec |
@@ -467,7 +472,7 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 
 ## Open Questions
 
-- [ ] How to map OpenAI model names to local HartsyInference models (e.g., `"dall-e-3"` -> which local diffusion pipeline?)
+- [ ] How to map OpenAI model names to local models (e.g., `"dall-e-3"` -> which local diffusion pipeline?)
 - [ ] Whether to support the `stream` parameter for image generation (requires SSE with partial image events)
 - [ ] Whether to implement the `instructions` field for TTS (requires model support beyond basic Kokoro)
 - [ ] Whether to support custom voices via `{"id": "voice_1234"}` object syntax
@@ -477,7 +482,7 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 
 ## Implementation Notes
 
-### Priority Order for HartsyInference.Server
+### Priority Order (for any OpenAI-compatible surface)
 
 1. **Phase 1**: `/v1/images/generations` with `prompt`, `model`, `n`, `size`, `response_format` (b64_json), `output_format`. This covers the core use case.
 2. **Phase 2**: `/v1/audio/speech` with `model`, `input`, `voice`, `response_format`, `speed`.
@@ -487,7 +492,7 @@ For `/v1/images/edits`, the `image` field can be a single file or multiple files
 
 ### Model Name Mapping Strategy
 
-HartsyInference should accept OpenAI model names and map them to local pipelines:
+An OpenAI-compatible surface should accept OpenAI model names and map them to local pipelines:
 - `"dall-e-2"` / `"dall-e-3"` -> Stable Diffusion 1.5 or SDXL (closest local equivalent)
 - `"gpt-image-1"` / `"gpt-image-1.5"` -> FLUX or SD3 (highest quality local model)
 - `"gpt-image-1-mini"` -> SDXL or SD 1.5 (faster model)
@@ -506,10 +511,10 @@ All size strings follow the pattern `"{width}x{height}"`. Parse with simple stri
 
 ### URL Expiry for response_format=url
 
-OpenAI URLs expire after 60 minutes. If HartsyInference.Server implements URL-based responses, it should either:
+OpenAI URLs expire after 60 minutes. If such a server implements URL-based responses, it should either:
 - Serve images from a temporary file store with cleanup, or
 - Simply always return b64_json (which is what GPT image models do anyway)
 
 ### Backward Compatibility
 
-The `quality` and `style` parameters have different valid values depending on the model. HartsyInference should accept all values and silently map unsupported ones to the closest equivalent. For example, if a client sends `quality=hd` (dall-e-3 style) but the local model is SDXL, map to `quality=high`.
+The `quality` and `style` parameters have different valid values depending on the model. Such a surface should accept all values and silently map unsupported ones to the closest equivalent. For example, if a client sends `quality=hd` (dall-e-3 style) but the local model is SDXL, map to `quality=high`.

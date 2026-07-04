@@ -633,7 +633,7 @@ This is the same eviction-discipline pattern Flux/SD3.5/Qwen-Image use today. **
 
 ### What NOT to do
 
-- **Don't try to call into `dotLLM` for the GPT-OSS encoder.** Lens needs the multi-layer hidden states with mid-network capture, which is not a public API of either project. Re-implement the relevant forward as a single self-contained `LensGptOssEncoder` class.
+- **Don't try to call into `HartsyInference.LLM` for the GPT-OSS encoder.** Lens needs the multi-layer hidden states with mid-network capture, which is not a public API of the LLM package. Re-implement the relevant forward as a single self-contained `LensGptOssEncoder` class.
 - **Don't fold the norm-rescale into the scheduler step.** Keep it explicit in the pipeline so the layer-diff harness can validate it against the upstream code exactly.
 - **Don't expose `selected_layer_index` as a runtime knob.** It's part of how the DiT was trained; changing it means re-training. Hardcode in `LensConfig`.
 - **Don't reuse `T5TextEncoder.EncodeAtLayer` semantics.** That helper re-applies the final layer norm; Lens does NOT — each captured hidden state is the raw output of the selected decoder layer (no extra normalization), and the per-layer `txt_norm` in the DiT does the only normalization that matters.

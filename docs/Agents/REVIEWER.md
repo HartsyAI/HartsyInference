@@ -21,7 +21,7 @@
 
 **Correctness:** Math matches reference? Shapes validated? Edge cases handled? CUDA/Vulkan return codes checked?
 
-**Security:** No path traversal in model loading? No command injection? Input validated at API endpoints? No hardcoded secrets?
+**Security:** No path traversal in model loading? No command injection? Input validated at public API boundaries (sizes, shapes, model paths)? No hardcoded secrets?
 
 **Code Quality:** File-scoped namespaces? XML docs on public APIs? No `#region`? `readonly`/`sealed`? No dead code?
 

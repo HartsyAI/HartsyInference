@@ -743,7 +743,7 @@ This is the canonical way to produce "what HuBERT semantic IDs does this audio c
 
 4. **VQ quantiser**: implement as a single-codebook residual VQ. The codebook is `(1024, 192)`. Given an input `(B, T, 192)`, return `(B, T)` integer indices via nearest-codebook L2 search. **Deterministic** — must match reference exactly. Use FP32 for the distance computation even if surrounding ops are FP16 (avoid tie-break drift).
 
-5. **GPT KV cache**: the dominant cost is the 24-layer transformer × ~125-1500 tokens. Implement proper KV cache (preallocated tensor of shape `(batch, n_layers, 2, n_heads, max_len, head_dim)`) so each step is O(seq_len) attention not O(seq_len²). This is the same KV-cache pattern as our dotLLM cross-reference — consider extracting a shared `KvCache` type into `HartsyInference.Core`.
+5. **GPT KV cache**: the dominant cost is the 24-layer transformer × ~125-1500 tokens. Implement proper KV cache (preallocated tensor of shape `(batch, n_layers, 2, n_heads, max_len, head_dim)`) so each step is O(seq_len) attention not O(seq_len²). This is the same KV-cache pattern the native `HartsyInference.LLM` package uses; consider extracting a shared `KvCache` type into `HartsyInference.Core`.
 
 6. **Sampling**: top-k + repetition penalty + temperature. Match Python semantics:
    - Repetition penalty is applied multiplicatively to logits of previously generated tokens **before** softmax (PyTorch: `logits[batch, prev_token] /= rep_pen if logits[batch, prev_token] > 0 else logits[batch, prev_token] *= rep_pen`).

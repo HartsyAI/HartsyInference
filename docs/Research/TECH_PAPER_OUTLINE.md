@@ -295,7 +295,7 @@ Single paragraph summary of what was achieved, with the headline number. Future 
 
 ## 10. Reproducibility Statement
 
-- All code: `https://github.com/kalebbroo/HartsyInference` at tag `phase-b-complete`
+- All code: `https://github.com/HartsyAI/HartsyInference` at tag `phase-b-complete`
 - All raw data: `benchmarks/results/run_*/` directories, signed and SHA-256-hashed
 - All scripts: `benchmarks/run_benchmarks.sh`, `benchmarks/python-baseline/run_all.sh`, `benchmarks/analyze.py`
 - Pinned dependencies in `benchmarks/python-baseline/requirements.txt`

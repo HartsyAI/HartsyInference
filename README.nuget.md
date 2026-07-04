@@ -1,10 +1,12 @@
 # HartsyInference
 
-**A pure C#/.NET AI inference engine for image generation, speech, vision, video, and interactive world models. No Python, no native runtime DLLs.**
+**A pure C#/.NET AI inference engine for LLM text generation, image generation, speech, music, vision, video, 3D, and interactive world models. No Python, no native runtime DLLs.**
 
 HartsyInference loads `.safetensors` and `.gguf` checkpoints directly and runs them on NVIDIA CUDA, cross-vendor Vulkan, or CPU SIMD, entirely in managed .NET. GPU kernels are PTX/SPIR-V shipped with the package and JIT-compiled at runtime; there are no C++ wrappers, no bundled native inference library, and no external Python process to manage. Just NuGet packages.
 
-It is the non-LLM companion to [dotLLM](https://github.com/kalebbroo/dotLLM): together they form a complete AI stack in pure .NET.
+It is a complete pure-.NET AI stack, including **native LLM text generation** (Qwen, Llama, Mistral, quantized GGUF) in the `HartsyInference.LLM` package.
+
+> **The easiest way to use HartsyInference is inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) via the [HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)**, a pure-C# alternative to the ComfyUI backend. These NuGet packages are for embedding the engine directly in your own .NET code.
 
 ---
 
@@ -15,9 +17,9 @@ It is the non-LLM companion to [dotLLM](https://github.com/kalebbroo/dotLLM): to
 - **APIs will change without notice** between alpha releases. Pin an exact version.
 - **Model coverage is broad but maturity varies.** Many architectures are implemented and load/run end-to-end but are still being validated numerically against their reference implementations. Treat output quality per-model as "verify before you rely on it."
 - **No support guarantees, no semver stability** until `1.0.0`.
-- The OpenAI-compatible **server and CLI are not published as packages** in this alpha; they live in the source repository. Publishing them is on the [roadmap](#coming-soon).
+- The **sample CLIs are not published as packages** in this alpha; they live in the source repository as developer/validation tools.
 
-Found a bug or a mismatch against a reference? Please [open an issue](https://github.com/kalebbroo/HartsyInference/issues).
+Found a bug or a mismatch against a reference? Please [open an issue](https://github.com/HartsyAI/HartsyInference/issues).
 
 ---
 
@@ -58,7 +60,7 @@ string text = pipeline.TranscribeWav(backend, "audio.wav", options);
 Console.WriteLine(text);
 ```
 
-Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()`; the pipeline is backend-agnostic. Audio pipelines that auto-download (`WhisperPipeline`, `KokoroPipeline`) share this `LoadAsync` convention, while image and video pipelines (`StableDiffusion15Pipeline`, `WanVideoPipeline`) are constructed from pre-loaded components. See the [samples in the repo](https://github.com/kalebbroo/HartsyInference/tree/main/samples) for image, video, and TTS walkthroughs.
+Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()`; the pipeline is backend-agnostic. Audio pipelines that auto-download (`WhisperPipeline`, `KokoroPipeline`) share this `LoadAsync` convention, while image and video pipelines (`StableDiffusion15Pipeline`, `WanVideoPipeline`) are constructed from pre-loaded components. See the [samples in the repo](https://github.com/HartsyAI/HartsyInference/tree/main/samples) for image, video, and TTS walkthroughs.
 
 ---
 
@@ -66,6 +68,7 @@ Swap `new CpuBackend()` for `new CudaBackend()` or `new VulkanBackend()`; the pi
 
 | Modality | Highlights |
 |---|---|
+| **LLM text generation** | Qwen2/Qwen3, Llama-3.x, Mistral, and quantized GGUF (Q4/Q8) inference, with a config-driven generic transformer, device-resident KV cache, samplers, and chat templates |
 | **Image generation** | SD 1.5, SDXL, SD3, Flux.1 / Flux.2, AuraFlow, Chroma, HiDream, Qwen-Image, Lumina 2, OmniGen2, HunyuanImage, Ideogram, Kandinsky 5, and more, with LoRA, img2img, and tiling |
 | **Video generation** | LTX-Video, Wan 2.x, Lance, Kandinsky 5 video |
 | **Interactive / world models** | Matrix-Game 2 & 3, Oasis: action-conditioned, frame-by-frame generation |
@@ -92,10 +95,10 @@ HartsyInference is moving fast, and the roadmap is broad. On deck:
 | **Video** | HunyuanVideo, CogVideoX, longer-context temporal generation |
 | **3D** | Gaussian-splat output, texture synthesis, multi-view to mesh |
 | **World models** | Broader action spaces, longer memory horizons, multiplayer state |
-| **Serving** | OpenAI-compatible REST server and CLI, published as NuGet packages |
-| **Tooling** | Wider quantized inference (MXFP4 / MXFP8 / NVFP4), model hot-swap, per-modality CLI subcommands |
+| **Performance** | Full flash-attention kernel, CUDA graphs, and F16 activation paths to close the remaining speed gap vs native runners |
+| **Tooling** | Wider quantized inference (MXFP4 / MXFP8 / NVFP4), model hot-swap, broader SwarmUI-extension model coverage |
 
-Track progress and releases on the [GitHub repo](https://github.com/kalebbroo/HartsyInference).
+Track progress and releases on the [GitHub repo](https://github.com/HartsyAI/HartsyInference).
 
 ---
 
@@ -114,13 +117,15 @@ Track progress and releases on the [GitHub repo](https://github.com/kalebbroo/Ha
 
 | Package | Description |
 |---|---|
-| `HartsyInference` | Meta-package that references everything below |
+| `HartsyInference` | Meta-package referencing the core, all three backends, and the modality packages (add `HartsyInference.LLM` separately for text generation) |
 | `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline base types |
 | `HartsyInference.ModelHandler` | Safetensors/GGUF loaders, quant dequant, HuggingFace download, model registry |
 | `HartsyInference.Tokenizers` | CLIP, T5, Whisper, and LLM-style tokenizers |
+| `HartsyInference.Phonemizer` | Pure-C# grapheme-to-phoneme (espeak-ng port) for TTS front-ends |
 | `HartsyInference.Cpu` | CPU backend with AVX2 / AVX-512 / NEON SIMD kernels |
 | `HartsyInference.Cuda` | CUDA backend with PTX kernels + cuBLAS |
 | `HartsyInference.Vulkan` | Cross-vendor Vulkan backend (NVIDIA / AMD / Intel) via SPIR-V |
+| `HartsyInference.LLM` | Native LLM text generation: config-driven transformer (Qwen2/Qwen3/Llama/Mistral), GGUF inference, KV cache, samplers, chat templates |
 | `HartsyInference.Diffusion` | Image + music diffusion pipelines, VAEs, text encoders, LoRA |
 | `HartsyInference.Audio` | Whisper/Moonshine STT, TTS, voice conversion, music |
 | `HartsyInference.Vision` | CLIP/SigLIP embeddings, YOLO, SAM, face detection |
@@ -149,9 +154,9 @@ Track progress and releases on the [GitHub repo](https://github.com/kalebbroo/Ha
 
 ## Links
 
-- **Source & docs:** https://github.com/kalebbroo/HartsyInference
-- **Issues:** https://github.com/kalebbroo/HartsyInference/issues
-- **LLM companion:** [dotLLM](https://github.com/kalebbroo/dotLLM)
+- **Source & docs:** https://github.com/HartsyAI/HartsyInference
+- **Issues:** https://github.com/HartsyAI/HartsyInference/issues
+- **SwarmUI extension (recommended way to run it):** [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)
 
 ---
 

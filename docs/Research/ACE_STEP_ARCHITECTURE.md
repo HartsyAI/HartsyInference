@@ -25,7 +25,7 @@
 
 Both generations share: UMT5 text encoder, 32k-context RoPE (θ=1e6), in/out 8-channel latents (v1) or 192-channel pre-quant features (v1.5), structured-lyric tags (`[verse]`, `[chorus]`, `[bridge]`, `[instrumental]`, …), 50+ language support, and a flow-matching scheduler with shift=3.0 (v1) or learned `(μ=-0.4, σ=1.0)` timestep distribution (v1.5).
 
-For HartsyInference, the **v1 3.5B model is the implementation target first**: its component boundaries are clean (UMT5 text encoder + Conformer lyric encoder + DiT + DCAE + HiFiGAN vocoder), it reuses UMT5 (already in HartsyInference for AuraFlow) and a flow-match Euler scheduler (already in HartsyInference for Flux/SD3). v1.5 should follow once Qwen3-style decoder LM + FSQ vocoder are scoped — those are dotLLM territory plus a new audio codec component.
+For HartsyInference, the **v1 3.5B model is the implementation target first**: its component boundaries are clean (UMT5 text encoder + Conformer lyric encoder + DiT + DCAE + HiFiGAN vocoder), it reuses UMT5 (already in HartsyInference for AuraFlow) and a flow-match Euler scheduler (already in HartsyInference for Flux/SD3). v1.5 should follow once Qwen3-style decoder LM + FSQ vocoder are scoped — those are HartsyInference.LLM territory plus a new audio codec component.
 
 This file covers ACE-Step architecture, weights, conditioning, and inference. The shared flow-matching mathematics live in [FLOW_MATCHING_AUDIO.md](FLOW_MATCHING_AUDIO.md). The HiFiGAN vocoder family used by both generations is documented in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). UMT5 details live with the AuraFlow text-encoder notes ([TEXT_ENCODERS.md](TEXT_ENCODERS.md)).
 
@@ -78,7 +78,7 @@ ACE-Step-v1-3.5B/
 | `acestep-5Hz-lm-1.7B` | 1.7B | Balanced |
 | `acestep-5Hz-lm-4B` | 4B | Strong composition + audio understanding |
 
-These LMs take a free-form user request, emit a structured song blueprint (genre tags, lyrics with structure markers, BPM, key), and hand it to the DiT/decoder. They are pure dotLLM work — HartsyInference only needs to consume the resulting structured prompt.
+These LMs take a free-form user request, emit a structured song blueprint (genre tags, lyrics with structure markers, BPM, key), and hand it to the DiT/decoder. They are pure HartsyInference.LLM work — the audio pipeline only needs to consume the resulting structured prompt.
 
 #### GGUF quantizations (community)
 
@@ -353,7 +353,7 @@ Same fields, but: `hidden_size=2560`, `intermediate_size=9728`, `num_hidden_laye
 - **Sliding pool of 5 frames** (`pool_window_size=5`) — explicit temporal pooling to keep the audio sequence manageable; rate of decoder tokens ≈ 5 Hz (matches the "5Hz" branding of the planner LMs).
 - **Turbo variants** flip `is_turbo: true`. CFG is disabled in turbo (matches v1 turbo behaviour); only 8 sampling steps.
 
-For HartsyInference v1.5 work, treat the decoder as **a dotLLM-class causal transformer with a custom audio-token output head** rather than as a diffusion model. The FSQ decode step (token → continuous → vocoder → waveform) is the only piece that needs HartsyInference.Audio code; the rest is dotLLM.
+For HartsyInference v1.5 work, treat the decoder as **a HartsyInference.LLM-class causal transformer with a custom audio-token output head** rather than as a diffusion model. The FSQ decode step (token → continuous → vocoder → waveform) is the only piece that needs HartsyInference.Audio code; the rest is HartsyInference.LLM.
 
 ### 2.6 UMT5-base text encoder (v1 and v1.5)
 
@@ -1007,7 +1007,7 @@ The DCAE config says `in_channels=2`, suggesting joint stereo at the latent leve
 7. **End-to-end pipeline** — chain it all together. Validate against a published seed/prompt → known waveform (tolerance: PESQ > 3.5 vs reference).
 8. **Quantization** — wire up GGUF Q4/Q8 loading paths through the existing GGUF backend. Verify perceptual quality.
 9. **Edit / repaint / cover modes** — flow-edit mask-aware loop on top of the basic generation path.
-10. **v1.5 2B turbo** — second pipeline. Largely orthogonal; touches dotLLM for the decoder and HartsyInference.Audio for the FSQ → mel → wav path.
+10. **v1.5 2B turbo** — second pipeline. Largely orthogonal; touches HartsyInference.LLM for the decoder and HartsyInference.Audio for the FSQ → mel → wav path.
 
 ### Validation strategy
 
@@ -1031,4 +1031,4 @@ The DiT's hidden activation at peak is roughly `(1, F_lat, 2560)` for the audio 
 - `HartsyInference.Audio.Codecs.DCAE` — new module; shared with future Sana image work.
 - `HartsyInference.Text.VoiceBpe` — new tokenizer module; shared with XTTS / SongGen if/when added.
 
-v1.5 should land in a separate `HartsyInference.Audio.AceStepV15` sub-namespace once dotLLM-side Qwen3 decoder work catches up, because the inference loop is causal-LM-shaped rather than diffusion-shaped.
+v1.5 should land in a separate `HartsyInference.Audio.AceStepV15` sub-namespace once HartsyInference.LLM Qwen3 decoder work catches up, because the inference loop is causal-LM-shaped rather than diffusion-shaped.

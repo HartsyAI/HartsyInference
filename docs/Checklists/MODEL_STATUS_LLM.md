@@ -9,6 +9,12 @@ phased plan + per-model bring-up notes live in [LLM_MODEL_COVERAGE.md](LLM_MODEL
 Two bars apply: **Runnable@3060** (fits 12 GB at Q4/Q8, verified coherent e2e on this box) and
 **build-defer** (arch + key-map + slice tests land, e2e marked pending-hardware for >12 GB models).
 
+> **Decode throughput (2026-07-04):** benchmarked vs a CUDA `llama-bench` baseline and optimized from
+> **20-54× slower → 1.94-2.88× off llama.cpp** (Llama-3.2-1B under 2×). Fused quantized GEMV decode
+> kernels (Q4_K/Q6_K/Q8_0) + quantized lm_head + split-K flash-decode attention + vectorized loads.
+> Full record: [LLM_THROUGHPUT_BENCHMARK.md](LLM_THROUGHPUT_BENCHMARK.md) + [LLM_DECODE_PERF_GRIND.md](LLM_DECODE_PERF_GRIND.md).
+> CUDA-graph decode (last lever for small models) foundation verified, full build deferred.
+
 ## LLM — verified end-to-end (✅, Runnable@3060)
 
 | Family | Verified | Notes |

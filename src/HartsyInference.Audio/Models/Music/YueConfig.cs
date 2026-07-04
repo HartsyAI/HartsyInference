@@ -60,6 +60,7 @@ public sealed record YueConfig
             HiddenSize = 4_096, NumHiddenLayers = 32, NumAttentionHeads = 32, NumKeyValueHeads = 4,
             IntermediateSize = 11_008, VocabSize = 83_968, MaxPositionEmbeddings = 16_384,
             RopeTheta = 10_000f, RmsNormEps = 1e-5f, TieWordEmbeddings = false, AttentionBias = false,
+            LowVramQuant = true,   // 7B Q4_K on 12 GB: prefill must dequant transiently, not cache F16 (would OOM)
         },
         // Real m-a-p/YuE-s2-1B-general config.json: 32 layers, intermediate 5504, vocab 83840
         // (distinct from the s1 vocab of 83968). NOT numerically verified yet (Stage-2 codec is out of scope).
@@ -68,6 +69,7 @@ public sealed record YueConfig
             HiddenSize = 2_048, NumHiddenLayers = 32, NumAttentionHeads = 16, NumKeyValueHeads = 16,
             IntermediateSize = 5_504, VocabSize = 83_840, MaxPositionEmbeddings = 8_192,
             RopeTheta = 10_000f, RmsNormEps = 1e-5f, TieWordEmbeddings = false, AttentionBias = false,
+            LowVramQuant = true,   // same as Stage-1 (Q4_K prefill transient dequant)
         },
     };
 }

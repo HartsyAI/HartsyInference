@@ -4,7 +4,7 @@
 
 ## Extra Reading
 - `docs/Design/IMPLEMENTATION_DETAILS.md`
-- `docs/Research/DOTLLM_ARCHITECTURE.md` — SIMD dispatch, PTX from disk, `nint` handles, `stackalloc` args
+- `docs/Research/DOTLLM_ARCHITECTURE.md` — SIMD dispatch, PTX from disk, `nint` handles, `stackalloc` args (historical study that informed the engine's native patterns; not a live dependency)
 - `docs/Research/SIMD_INTRINSICS_DOTNET.md`
 - `docs/Research/CUDA_AND_PTX.md` — CUDA Driver API + PTX kernel patterns (current implementation)
 - `docs/Research/CONV2D_CUDA.md`, `docs/Research/CUDA_PERFORMANCE.md`

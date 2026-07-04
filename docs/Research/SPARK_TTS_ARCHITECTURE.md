@@ -13,7 +13,7 @@ Both token streams are predicted *autoregressively in a single sequence* by the 
 
 Training data is **VoxBox** (102.5k hours, 4.7M utterances across 29 corpora; 47.6k h zh + 54.9k h en) annotated with gender/age/emotion/pitch/speed. The full model ships at ~3.95 GB (LLM 2.03 GB BF16 + BiCodec 626 MB + wav2vec2 1.27 GB FP32). Performance on an L20 GPU via Triton/TensorRT-LLM: RTF 0.14 @ concurrency-1, dropping to RTF 0.07 @ concurrency-4. UTMOS=4.35 (beats CosyVoice2 and even ground truth at 4.08).
 
-This document covers the model + pipeline. The BiCodec codec module is also cross-referenced from [AUDIO_CODECS.md](AUDIO_CODECS.md) (needs a new section). Mel preprocessing in [MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md). HiFi-GAN-style wave generator background in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). The LM reuses the same Qwen2.5-0.5B kernels as dotLLM — see [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md).
+This document covers the model + pipeline. The BiCodec codec module is also cross-referenced from [AUDIO_CODECS.md](AUDIO_CODECS.md) (needs a new section). Mel preprocessing in [MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md). HiFi-GAN-style wave generator background in [HIFIGAN_VOCODER.md](HIFIGAN_VOCODER.md). The LM reuses the same Qwen2.5-0.5B kernels as the native HartsyInference.LLM package (whose design was informed by the historical [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md) study).
 
 Sources: [arXiv:2503.01710 (paper)](https://arxiv.org/abs/2503.01710), [HTML version](https://arxiv.org/html/2503.01710v1), [SparkAudio/Spark-TTS-0.5B HF](https://huggingface.co/SparkAudio/Spark-TTS-0.5B), [SparkAudio/Spark-TTS GitHub](https://github.com/SparkAudio/Spark-TTS), [VoxBox](https://github.com/SparkAudio/VoxBox), [demo page](https://sparkaudio.github.io/spark-tts/).
 
@@ -320,7 +320,7 @@ Some inference recipes also prefix the reference *semantic* tokens after `<|star
 **Step C — Autoregressive LM decode:**
 
 - `model.generate(prompt_ids, max_new_tokens=3000, temperature=0.8, top_k=50, top_p=0.95)`.
-- KV-cache enabled (Qwen2.5 has full kv-cache support; reuse dotLLM's kv-cache infrastructure).
+- KV-cache enabled (Qwen2.5 has full kv-cache support; reuse HartsyInference.LLM's kv-cache infrastructure).
 - Stop on `<|end_semantic_token|>` or `<|im_end|>`.
 - Output is parsed with regex `<\|bicodec_semantic_(\d+)\|>` to extract integer codes.
 
@@ -463,10 +463,10 @@ Repo: [`SparkAudio/Spark-TTS-0.5B`](https://huggingface.co/SparkAudio/Spark-TTS-
 
 ### 8. C# Implementation Notes
 
-#### 8.1 Reuse from dotLLM / existing HartsyInference
+#### 8.1 Reuse from HartsyInference.LLM / existing HartsyInference
 
-- **Qwen2.5-0.5B LM = standard Llama-style decoder transformer.** GQA (14:2), SwiGLU FFN, RMSNorm, RoPE θ=1M, tied embeddings. **Reuse dotLLM's `Qwen2ForCausalLM` implementation as-is** — only the embedding/lm_head dimensions change (vocab 151,936 → 166,000). Make sure the safetensors loader accepts the wider embedding matrix.
-  - dotLLM patterns for KV-cache, sampling (temp/top-k/top-p), RoPE precomputation, and the GGUF-quantized variants all apply.
+- **Qwen2.5-0.5B LM = standard Llama-style decoder transformer.** GQA (14:2), SwiGLU FFN, RMSNorm, RoPE θ=1M, tied embeddings. **Reuse HartsyInference.LLM's `Qwen2ForCausalLM` implementation as-is** — only the embedding/lm_head dimensions change (vocab 151,936 → 166,000). Make sure the safetensors loader accepts the wider embedding matrix.
+  - HartsyInference.LLM patterns for KV-cache, sampling (temp/top-k/top-p), RoPE precomputation, and the GGUF-quantized variants all apply.
   - Sampling stop conditions: stop on `<|end_semantic_token|>` or `<|im_end|>`.
 - **Qwen tokenizer**: HartsyInference already has BPE / Qwen tokenizer infra (see [TOKENIZERS.md](TOKENIZERS.md)). The `added_tokens.json` adds ~14k textual tokens — these need to be registered as atomic units that bypass BPE merging.
 - **Mel-spectrogram**: HartsyInference already has a mel-spec kernel ([MEL_SPECTROGRAM.md](MEL_SPECTROGRAM.md)). Use n_fft=1024, win=640, hop=320, n_mels=128, fmin=10, fmax=sr/2. **Note the unusual win_length=640 (40 ms) with hop=320 (20 ms) — 50% overlap, not the more common 25%.** Use Hann window.
@@ -509,7 +509,7 @@ Per [CODE_STYLE.md](../CODE_STYLE.md) §validate-against-references, each compon
 
 Suggested implementation phases (depends on what's already done):
 
-1. **Phase A (prerequisites)**: dotLLM Qwen2.5-0.5B BF16 inference + Qwen BPE tokenizer with added-token registration. Mel-spec kernel. (Likely already shipped.)
+1. **Phase A (prerequisites)**: HartsyInference.LLM Qwen2.5-0.5B BF16 inference + Qwen BPE tokenizer with added-token registration. Mel-spec kernel. (Likely already shipped.)
 2. **Phase B (reusable codec primitives)**: WNConv1d, WNConvTranspose1d, Snake1d, ResidualUnit, ConvNeXtBlock, AdaLayerNorm, VocosBackbone. These are shared with DAC and other codecs.
 3. **Phase C (BiCodec specifics)**: FactorizedVectorQuantize, ResidualFsq, EcapaTdnnGlobC512, PerceiverResampler, WaveGeneratorDac. Wire into BiCodec class.
 4. **Phase D (wav2vec2 helper)**: standalone Wav2Vec2Xlsr53Encoder — only the inference path, no training-time CTC head. Loadable from PyTorch `pytorch_model.bin` (use HartsyInference's existing PyTorch-pickle loader or convert to safetensors at packaging).

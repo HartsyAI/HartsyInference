@@ -21,7 +21,7 @@
 
 - [ ] Package boundary review — confirm `HartsyInference.Interactive` depends on Video transitively (which brings Diffusion + ModelHandler). Verify no Server / Web dependencies leak into the streaming session contract.
 - [ ] `IInteractiveSession` API freeze — review the surface in [INTERACTIVE_INFERENCE.md § 3](../Research/INTERACTIVE_INFERENCE.md) with one application integration target in mind before locking the contract.
-- [ ] License-acceptance UX — settle the Server-side endpoint shape (`POST /v1/licenses/accept`) and the local-cache filename convention (e.g. `~/.hartsyinference/licenses/<license-id>.accepted`).
+- [ ] License-acceptance UX — settle the acceptance flow at the consuming host (SwarmUI extension / library caller) and the local-cache filename convention (e.g. `~/.hartsyinference/licenses/<license-id>.accepted`). The engine exposes acceptance state; there is no first-party server endpoint.
 
 ## 3. Implementation — `HartsyInference.Interactive` core (cross-model) — **DONE (2026-06-10)**
 
@@ -121,11 +121,13 @@ Remaining (numeric pass, **[VG]**, needs cloud GPU + real checkpoint):
 - [ ] Reconcile timestep scaling, the txt token-refiner (currently a plain projection), the CameraNet temporal schedule, and GameCraft dims via the diff harness (§9).
 - [ ] Distilled (8-step / CFG 1.0) variant parity once base is ✅.
 
-## 8. Server integration
+## 8. Host integration (was: server integration — DROPPED)
 
-- [ ] `src/HartsyInference.Server/Endpoints/InteractiveSessionEndpoint.cs` — WebSocket endpoint that wraps `IInteractiveSession` (action input via inbound messages, frames via outbound messages). Per-connection session lifecycle.
-- [ ] `src/HartsyInference.Server/Streaming/InteractiveFrameStream.cs` — frame-serialization adapter (PNG, JPEG, or raw RGB depending on Accept-Encoding).
-- [ ] Server test: `tests/HartsyInference.Server.Tests/InteractiveSessionWsTests.cs` — end-to-end smoke test with the Oasis-500m fixture model.
+The first-party REST/WebSocket server is not planned. `IInteractiveSession` is consumed in-process by
+the host application. The interactive streaming surface (action input, frame output) is driven by the
+SwarmUI backend extension (https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend); frame
+serialization (PNG / JPEG / raw RGB) and per-connection session lifecycle live in that host, not in a
+HartsyInference server package.
 
 ## 9. Testing & Validation
 
