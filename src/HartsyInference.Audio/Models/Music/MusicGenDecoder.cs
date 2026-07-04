@@ -19,6 +19,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
 
     private Tensor?[] _codebookEmbed;   // K × [codebookSize+1, hidden]
     private Tensor? _encToDecW;         // textDim → hidden (project T5 states once)
+    private Tensor? _encToDecB;         // enc_to_dec_proj bias [hidden] (HF nn.Linear default bias=True)
     private Tensor? _lnOutG, _lnOutB;
     private Tensor?[] _heads;           // K × [codebookSize, hidden]
 
@@ -39,6 +40,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
         for (int i = 0; i < _cfg.NumCodebooks; i++)
             _codebookEmbed[i] = WhisperOps.EnsureF32(w[$"{p}embed_tokens.{i}.weight"]);
         _encToDecW = WhisperOps.EnsureF32(w["enc_to_dec_proj.weight"]);
+        _encToDecB = w.TryGetValue("enc_to_dec_proj.bias", out Tensor? edb) ? WhisperOps.EnsureF32(edb) : null;
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"{p}layers.{i}");
         _lnOutG = WhisperOps.EnsureF32(w[$"{p}layer_norm.weight"]);
         _lnOutB = WhisperOps.EnsureF32(w[$"{p}layer_norm.bias"]);
@@ -51,7 +53,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
     public Tensor ProjectText(IBackend backend, Tensor t5States)
     {
         int tt = (int)t5States.Shape[1];
-        return WhisperOps.ProjectLinear(backend, t5States, _encToDecW!, bias: null, 1, tt, _cfg.TextDim, _cfg.Hidden);
+        return WhisperOps.ProjectLinear(backend, t5States, _encToDecW!, _encToDecB, 1, tt, _cfg.TextDim, _cfg.Hidden);
     }
 
     /// <summary>Embeds a sequence of K-codebook frames (sum of the per-codebook embeddings) + sinusoidal
@@ -190,6 +192,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
     {
         foreach (Tensor? e in _codebookEmbed) if (e is not null) yield return e;
         if (_encToDecW is not null) yield return _encToDecW;
+        if (_encToDecB is not null) yield return _encToDecB;
         foreach (MusicGenBlock b in _blocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
         if (_lnOutG is not null) yield return _lnOutG;
         if (_lnOutB is not null) yield return _lnOutB;

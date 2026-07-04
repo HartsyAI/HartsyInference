@@ -38,6 +38,7 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         float? guidance = null, float? temperature = null, int? topK = null, float? topP = null, bool useSampling = true)
     {
         ThrowIfDisposed();
+        if (Environment.GetEnvironmentVariable("MUSICGEN_GREEDY") == "1") useSampling = false;   // debug: deterministic
         Stopwatch sw = Stopwatch.StartNew();
         int k = _cfg.NumCodebooks;
         float temp = temperature ?? _cfg.Temperature;
@@ -100,13 +101,32 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         int[,] real = MusicGenDelay.Revert(delayed, _cfg.DelayPattern, tReal);
 
         // Pack into EnCodec's [nQ, batch=1, T] Int32 grid and decode.
-        Tensor codes = new(new TensorShape(k, 1, tReal), DType.I32);
-        int* cp = (int*)codes.DataPointer;
-        for (int c = 0; c < k; c++)
-            for (int j = 0; j < tReal; j++)
-                cp[(long)c * tReal + j] = Math.Clamp(real[j, c], 0, _cfg.CodebookSize - 1);
+        int decT = tReal;
+        Tensor codes;
+        string? loadCodes = Environment.GetEnvironmentVariable("MUSICGEN_LOAD_CODES");
+        if (!string.IsNullOrEmpty(loadCodes) && File.Exists(loadCodes))
+        {
+            byte[] eb = File.ReadAllBytes(loadCodes);   // EnCodec-isolation: decode external [k,T] int32 grid
+            decT = (eb.Length / 4) / k;
+            codes = new(new TensorShape(k, 1, decT), DType.I32);
+            System.Runtime.InteropServices.Marshal.Copy(eb, 0, (nint)codes.DataPointer, k * decT * 4);
+        }
+        else
+        {
+            codes = new(new TensorShape(k, 1, tReal), DType.I32);
+            int* cp = (int*)codes.DataPointer;
+            for (int c = 0; c < k; c++)
+                for (int j = 0; j < tReal; j++)
+                    cp[(long)c * tReal + j] = Math.Clamp(real[j, c], 0, _cfg.CodebookSize - 1);
+            string? dumpCodes = Environment.GetEnvironmentVariable("MUSICGEN_DUMP_CODES");
+            if (!string.IsNullOrEmpty(dumpCodes))
+            {
+                byte[] ob = new ReadOnlySpan<byte>((byte*)codes.DataPointer, k * tReal * 4).ToArray();
+                File.WriteAllBytes(dumpCodes, ob);
+            }
+        }
 
-        Tensor audioT = _codec.Decode(backend, codes, batch: 1, tFrames: tReal);
+        Tensor audioT = _codec.Decode(backend, codes, batch: 1, tFrames: decT);
         codes.Dispose();
 
         int n = (int)audioT.Shape[audioT.Shape.Rank - 1];

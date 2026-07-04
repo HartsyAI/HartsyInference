@@ -202,6 +202,14 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _dequantQ6_KModule;
     private readonly nint _dequantQ6_KToF16;
 
+    // ── Fused quantized GEMV (decode M=1) ────────────────────────────────
+    private readonly CudaModule _mulMatVecQ4KModule;
+    private readonly nint _mulMatVecQ4KF32;
+    private readonly CudaModule _mulMatVecQ6KModule;
+    private readonly nint _mulMatVecQ6KF32;
+    private readonly CudaModule _mulMatVecQ8_0Module;
+    private readonly nint _mulMatVecQ8_0F32;
+
     private const uint BlockSize = 256;
 
     /// <summary>Loads all PTX kernels from the specified directory.</summary>
@@ -409,6 +417,13 @@ public sealed class CudaKernels : IDisposable
         _dequantQ5_KToF16 = _dequantQ5_KModule.GetFunction("dequant_q5_k_to_f16");
         _dequantQ6_KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q6_k_to_f16.ptx"));
         _dequantQ6_KToF16 = _dequantQ6_KModule.GetFunction("dequant_q6_k_to_f16");
+
+        _mulMatVecQ4KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4k_f32.ptx"));
+        _mulMatVecQ4KF32 = _mulMatVecQ4KModule.GetFunction("mul_mat_vec_q4k_f32");
+        _mulMatVecQ6KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q6k_f32.ptx"));
+        _mulMatVecQ6KF32 = _mulMatVecQ6KModule.GetFunction("mul_mat_vec_q6k_f32");
+        _mulMatVecQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q8_0_f32.ptx"));
+        _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
     }
 
     // ── Private Launch Helpers ───────────────────────────────────────────
@@ -1805,6 +1820,39 @@ public sealed class CudaKernels : IDisposable
         LaunchDequantImpl(_dequantQ6_KToF16, output, input, superBlockCount, threadsPerBlock: 64, stream);
     }
 
+    /// <summary>Fused Q4_K × F32 matrix-vector product for decode (M small). Computes
+    /// output[M,N] = input[M,K] × dequant(weight[N,K])^T (+ bias), reading the Q4_K bytes once and
+    /// dequantizing inline — no F16 weight materialization. K must be a multiple of 256 (guaranteed
+    /// for Q4_K). One CUDA block (256 threads) per output element; grid = (N, M).</summary>
+    public void LaunchMulMatVecQ4KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ4KF32, output, input, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q6_K × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV;
+    /// used for the lm_head / output projection (commonly Q6_K).</summary>
+    public void LaunchMulMatVecQ6KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ6KF32, output, input, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q8_0 × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.</summary>
+    public void LaunchMulMatVecQ8_0F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ8_0F32, output, input, weight, bias, N, K, M, stream);
+
+    private unsafe void LaunchMulMatVecImpl(nint func, ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    {
+        ulong outA = output, inA = input, wA = weight, bA = bias;
+        int nA = N, kA = K, mA = M;
+        void** args = stackalloc void*[7];
+        args[0] = &outA; args[1] = &inA; args[2] = &wA; args[3] = &bA;
+        args[4] = &nA; args[5] = &kA; args[6] = &mA;
+        // One warp per output row, WARPS_PER_BLOCK rows per block.
+        const uint WARPS_PER_BLOCK = 8;
+        uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        CudaDriverApi.cuLaunchKernel(
+            func,
+            gridX, (uint)M, 1,
+            32, WARPS_PER_BLOCK, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     private unsafe void LaunchDequantImpl(nint func, ulong output, ulong input, int superBlockCount, int threadsPerBlock, nint stream)
     {
         ulong outArg = output, inArg = input;
@@ -1865,6 +1913,9 @@ public sealed class CudaKernels : IDisposable
         _dequantQ4_KModule?.Dispose();
         _dequantQ5_KModule?.Dispose();
         _dequantQ6_KModule?.Dispose();
+        _mulMatVecQ4KModule?.Dispose();
+        _mulMatVecQ6KModule?.Dispose();
+        _mulMatVecQ8_0Module?.Dispose();
     }
 
     public void Dispose()

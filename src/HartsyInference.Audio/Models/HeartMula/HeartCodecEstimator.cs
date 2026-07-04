@@ -75,36 +75,29 @@ public sealed unsafe class HeartCodecEstimator
         // Stage 1.
         Tensor s = _projIn.Forward(backend, input, b, t);                            // [B,T,inner]
         (Tensor mod1, Tensor emb1) = _adaln.Forward(backend, timestep, b);           // mod1 [B,6*inner], emb1 [B,inner]
-        // Block.Forward mutates its input in place and RETURNS THE SAME tensor — do NOT dispose between
-        // iterations (that frees the live buffer and the next block reads freed memory → heap corruption).
+        (Tensor cos1, Tensor sin1) = BuildRope(b, t, _headDim);
+        // Block.Forward consumes s and returns a fresh tensor each iteration.
         for (int i = 0; i < _nLayers; i++)
-            s = _blocks[i].Forward(backend, s, mod1, b, t);
-        mod1.Dispose();
+            s = _blocks[i].Forward(backend, s, mod1, b, t, cos1, sin1);
+        mod1.Dispose(); cos1.Dispose(); sin1.Dispose();
 
         // norm_out + scale_shift_table + emb1.
-        ApplyFinalNorm(s, _ssTable!, emb1, b, t, _inner);
+        s = ApplyFinalNorm(backend, s, _ssTable!, emb1, b, t, _inner);
         emb1.Dispose();
-        // connection_proj over cat(input, s).
+        // connection_proj over cat(input, s) along the feature dim.
         Tensor cat = new(new TensorShape(b, t, _inCh + _inner), DType.F32);
-        float* ip = (float*)input.DataPointer; float* sp = (float*)s.DataPointer; float* cp = (float*)cat.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ti = 0; ti < t; ti++)
-            {
-                long dst = ((long)bi * t + ti) * (_inCh + _inner);
-                long srcI = ((long)bi * t + ti) * _inCh;
-                long srcS = ((long)bi * t + ti) * _inner;
-                for (int c = 0; c < _inCh; c++) cp[dst + c] = ip[srcI + c];
-                for (int c = 0; c < _inner; c++) cp[dst + _inCh + c] = sp[srcS + c];
-            }
+        backend.Concat(cat, [input, s], 2);
         s.Dispose();
         Tensor x = _connProj.Forward(backend, cat, b, t);                            // [B,T,inner2]
         cat.Dispose();
 
         // Stage 2.
         (Tensor mod2, Tensor emb2) = _adaln2.Forward(backend, timestep, b);
+        (Tensor cos2, Tensor sin2) = BuildRope(b, t, _headDim2);
         for (int i = 0; i < _nLayers2; i++)
-            x = _blocks2[i].Forward(backend, x, mod2, b, t);
-        mod2.Dispose();        ApplyFinalNorm(x, _ssTable2!, emb2, b, t, _inner2);
+            x = _blocks2[i].Forward(backend, x, mod2, b, t, cos2, sin2);
+        mod2.Dispose(); cos2.Dispose(); sin2.Dispose();
+        x = ApplyFinalNorm(backend, x, _ssTable2!, emb2, b, t, _inner2);
         emb2.Dispose();
 
         Tensor outp = _projOut.Forward(backend, x, b, t);                            // [B,T,out_channels]
@@ -113,34 +106,58 @@ public sealed unsafe class HeartCodecEstimator
     }
 
     // norm_out (affine-free LN, eps 1e-6) then x * (1 + scale) + shift, where
-    // [shift, scale] = scale_shift_table[None] + embedded_timestep[:,None] (chunk 2 over dim 1).
-    private static void ApplyFinalNorm(Tensor x, Tensor ssTable, Tensor emb, int b, int t, int dim)
+    // [shift, scale] = scale_shift_table[None] + embedded_timestep[:,None] (chunk 2 over dim 1). GPU-resident.
+    // Consumes x and returns the normed+modulated result (caller reassigns).
+    private static Tensor ApplyFinalNorm(IBackend backend, Tensor x, Tensor ssTable, Tensor emb, int b, int t, int dim)
     {
-        float* xp = (float*)x.DataPointer;
-        float* tab = (float*)ssTable.DataPointer;   // [2, dim]: row0=shift, row1=scale
-        float* ep = (float*)emb.DataPointer;        // [b, dim]
-        const float eps = 1e-6f;
-        for (int bi = 0; bi < b; bi++)
+        // shift[b,dim] = ssTable[0] + emb ; (1+scale)[b,dim] = 1 + ssTable[1] + emb (both rows share emb).
+        Tensor ss0 = RowRep(ssTable, 0, b, dim), ss1 = RowRep(ssTable, 1, b, dim);
+        Tensor shift = new(new TensorShape(b, dim), DType.F32);
+        Tensor scale = new(new TensorShape(b, dim), DType.F32);
+        backend.Add(shift, emb, ss0);
+        backend.Add(scale, emb, ss1);
+        ss0.Dispose(); ss1.Dispose();
+        backend.AddScalar(scale, scale, 1f);
+        Tensor normed = new(new TensorShape(b, t, dim), DType.F32);
+        backend.LayerNormNoAffine(normed, x, 1e-6f);
+        x.Dispose();
+        backend.AffineBroadcastLastDim(normed, normed, scale, shift);   // in place: normed = normed*(1+scale)+shift
+        shift.Dispose(); scale.Dispose();
+        return normed;
+    }
+
+    // [b,dim] broadcast of ssTable row (host copy; ssTable is a host weight so no D2H sync).
+    private static Tensor RowRep(Tensor ssTable, int row, int b, int dim)
+    {
+        Tensor rep = new(new TensorShape(b, dim), DType.F32);
+        float* src = (float*)ssTable.DataPointer + (long)row * dim; float* rp = (float*)rep.DataPointer;
+        for (int bi = 0; bi < b; bi++) Buffer.MemoryCopy(src, rp + (long)bi * dim, (long)dim * 4, (long)dim * 4);
+        return rep;
+    }
+
+    // Interleaved (GPT-J) RoPE tables [b*t, headDim]: freq_i (angle ti·10000^(-2i/hd), ti = pos % t) at
+    // index 2i (and 2i+1) so the on-device WanRopeInterleaved kernel reads its angle at 2i. Matches the host
+    // RopeInterleaved math exactly (float cos/sin), tiled over the batch so seqLen = b*t is a flat pass.
+    private static (Tensor Cos, Tensor Sin) BuildRope(int b, int t, int hd)
+    {
+        int half = hd / 2;
+        Tensor cos = new(new TensorShape(b * t, hd), DType.F32);
+        Tensor sin = new(new TensorShape(b * t, hd), DType.F32);
+        float* cp = (float*)cos.DataPointer; float* sp = (float*)sin.DataPointer;
+        for (int s = 0; s < b * t; s++)
         {
-            for (int ti = 0; ti < t; ti++)
+            int ti = s % t;
+            for (int i = 0; i < half; i++)
             {
-                long off = ((long)bi * t + ti) * dim;
-                double mean = 0;
-                for (int c = 0; c < dim; c++) mean += xp[off + c];
-                mean /= dim;
-                double var = 0;
-                for (int c = 0; c < dim; c++) { double d = xp[off + c] - mean; var += d * d; }
-                var /= dim;
-                float inv = 1f / MathF.Sqrt((float)var + eps);
-                for (int c = 0; c < dim; c++)
-                {
-                    float n = ((float)(xp[off + c] - mean)) * inv;
-                    float shift = tab[c] + ep[(long)bi * dim + c];
-                    float scale = tab[dim + c] + ep[(long)bi * dim + c];
-                    xp[off + c] = n * (1f + scale) + shift;
-                }
+                float invFreq = 1f / MathF.Pow(10000f, (2f * i) / hd);
+                float ang = ti * invFreq;
+                float cs = MathF.Cos(ang), sn = MathF.Sin(ang);
+                int i0 = 2 * i;
+                cp[(long)s * hd + i0] = cp[(long)s * hd + i0 + 1] = cs;
+                sp[(long)s * hd + i0] = sp[(long)s * hd + i0 + 1] = sn;
             }
         }
+        return (cos, sin);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -177,12 +194,12 @@ public sealed unsafe class HeartCodecEstimator
         {
             // x [B,T,in] → transpose to [B,in,T] → conv1d k3 pad1 → [B,filter,T] → transpose → scale → Linear.
             Tensor xc = new(new TensorShape(b, _in, t), DType.F32);
-            TransposeBTCtoBCT(x, xc, b, t, _in);
+            backend.Transpose2D(xc, x, t, _in);
             Tensor conv = new(new TensorShape(b, _filter, t), DType.F32);
             backend.Conv1d(conv, xc, _convW!, _convB, 1, 1, 1, 1, 1);
             xc.Dispose();
             Tensor convBT = new(new TensorShape(b, t, _filter), DType.F32);
-            Transpose_BCT_to_BTC(conv, convBT, b, t, _filter);
+            backend.Transpose2D(convBT, conv, _filter, t);
             conv.Dispose();
             backend.Scale(convBT, convBT, KScale);
             Tensor outp = WhisperOps.ProjectLinear(backend, convBT, _linW!, _linB, b, t, _filter, _filter);
@@ -196,24 +213,6 @@ public sealed unsafe class HeartCodecEstimator
             if (_convB is not null) yield return _convB;
             if (_linW is not null) yield return _linW;
             if (_linB is not null) yield return _linB;
-        }
-
-        private static unsafe void TransposeBTCtoBCT(Tensor src, Tensor dst, int b, int t, int c)
-        {
-            float* s = (float*)src.DataPointer; float* d = (float*)dst.DataPointer;
-            for (int bi = 0; bi < b; bi++)
-                for (int ti = 0; ti < t; ti++)
-                    for (int ci = 0; ci < c; ci++)
-                        d[((long)bi * c + ci) * t + ti] = s[((long)bi * t + ti) * c + ci];
-        }
-
-        private static unsafe void Transpose_BCT_to_BTC(Tensor src, Tensor dst, int b, int t, int c)
-        {
-            float* s = (float*)src.DataPointer; float* d = (float*)dst.DataPointer;
-            for (int bi = 0; bi < b; bi++)
-                for (int ci = 0; ci < c; ci++)
-                    for (int ti = 0; ti < t; ti++)
-                        d[((long)bi * t + ti) * c + ci] = s[((long)bi * c + ci) * t + ti];
         }
     }
 
@@ -308,144 +307,95 @@ public sealed unsafe class HeartCodecEstimator
             _downW = WhisperOps.EnsureF32(w[$"{p}.mlp.down.weight"]);
         }
 
-        public Tensor Forward(IBackend backend, Tensor x, Tensor mod, int b, int t)
+        // Fully GPU-resident. Consumes (disposes) x and returns a new tensor; caller reassigns.
+        // ropeCos/ropeSin are [b*t, headDim] tables (freq_i at index 2i), shared across a stage's blocks.
+        public Tensor Forward(IBackend backend, Tensor x, Tensor mod, int b, int t, Tensor ropeCos, Tensor ropeSin)
         {
             int d = _dim;
-            // chunk: scale_shift_table[None] + mod.reshape(B,6,D) → 6 × [B,D].
-            float* tab = (float*)_ssTable!.DataPointer;     // [6, D]
-            float* mp = (float*)mod.DataPointer;            // [B, 6*D]
-            float[] shiftMsa = new float[(long)b * d], scaleMsa = new float[(long)b * d], gateMsa = new float[(long)b * d];
-            float[] shiftMlp = new float[(long)b * d], scaleMlp = new float[(long)b * d], gateMlp = new float[(long)b * d];
-            for (int bi = 0; bi < b; bi++)
-                for (int c = 0; c < d; c++)
-                {
-                    long mo = (long)bi * 6 * d;
-                    long o = (long)bi * d + c;
-                    shiftMsa[o] = tab[0 * d + c] + mp[mo + 0 * d + c];
-                    scaleMsa[o] = tab[1 * d + c] + mp[mo + 1 * d + c];
-                    gateMsa[o] = tab[2 * d + c] + mp[mo + 2 * d + c];
-                    shiftMlp[o] = tab[3 * d + c] + mp[mo + 3 * d + c];
-                    scaleMlp[o] = tab[4 * d + c] + mp[mo + 4 * d + c];
-                    gateMlp[o] = tab[5 * d + c] + mp[mo + 5 * d + c];
-                }
+            // combined = mod.reshape(B,6,D) + scale_shift_table[None] → [B,6D], then chunk into six [B,D].
+            Tensor ssRep = BuildSsRep(b, d);   // host-built [B,6D] broadcast of _ssTable (sync-free)
+            Tensor comb = new(new TensorShape(b, 6 * d), DType.F32);
+            backend.Add(comb, mod, ssRep);
+            ssRep.Dispose();
+            Tensor shiftMsa = Slice(backend, comb, 0, d, b), scaleMsa = Slice(backend, comb, 1, d, b), gateMsa = Slice(backend, comb, 2, d, b);
+            Tensor shiftMlp = Slice(backend, comb, 3, d, b), scaleMlp = Slice(backend, comb, 4, d, b), gateMlp = Slice(backend, comb, 5, d, b);
+            comb.Dispose();
+            backend.AddScalar(scaleMsa, scaleMsa, 1f);   // modulate uses (1 + scale)
+            backend.AddScalar(scaleMlp, scaleMlp, 1f);
 
-            // Self-attention path.
+            // Self-attention path: modulate(RmsNorm(x)) → attn → x + gate_msa * attn.
             Tensor an = new(new TensorShape(b, t, d), DType.F32);
             backend.RmsNorm(an, x, _attnNorm!, 1e-6f);
-            Modulate(an, scaleMsa, shiftMsa, b, t, d);
-            Tensor attnOut = Attention(backend, an, b, t);
+            Tensor anMod = new(new TensorShape(b, t, d), DType.F32);
+            backend.AffineBroadcastLastDim(anMod, an, scaleMsa, shiftMsa);
             an.Dispose();
-            // x = x + gate_msa * attn.
-            GatedResidual(x, attnOut, gateMsa, b, t, d);
-            attnOut.Dispose();
+            Tensor attnOut = Attention(backend, anMod, b, t, ropeCos, ropeSin);
+            anMod.Dispose();
+            Tensor afterAttn = new(new TensorShape(b, t, d), DType.F32);
+            backend.GatedResidualLastDim(afterAttn, x, attnOut, gateMsa);
+            x.Dispose(); attnOut.Dispose();
 
             // MLP path.
             Tensor mn = new(new TensorShape(b, t, d), DType.F32);
-            backend.RmsNorm(mn, x, _mlpNorm!, 1e-6f);
-            Modulate(mn, scaleMlp, shiftMlp, b, t, d);
-            Tensor mlpOut = Mlp(backend, mn, b, t);
+            backend.RmsNorm(mn, afterAttn, _mlpNorm!, 1e-6f);
+            Tensor mnMod = new(new TensorShape(b, t, d), DType.F32);
+            backend.AffineBroadcastLastDim(mnMod, mn, scaleMlp, shiftMlp);
             mn.Dispose();
-            GatedResidual(x, mlpOut, gateMlp, b, t, d);
-            mlpOut.Dispose();
-            return x;   // mutated in place and returned (caller owns)
+            Tensor mlpOut = Mlp(backend, mnMod, b, t);
+            mnMod.Dispose();
+            Tensor outX = new(new TensorShape(b, t, d), DType.F32);
+            backend.GatedResidualLastDim(outX, afterAttn, mlpOut, gateMlp);
+            afterAttn.Dispose(); mlpOut.Dispose();
+            shiftMsa.Dispose(); scaleMsa.Dispose(); gateMsa.Dispose();
+            shiftMlp.Dispose(); scaleMlp.Dispose(); gateMlp.Dispose();
+            return outX;
         }
 
-        private static unsafe void Modulate(Tensor x, float[] scale, float[] shift, int b, int t, int d)
+        // [B,6D] broadcast of _ssTable[6,D] over the batch (host copy; both operands host so no D2H sync).
+        private Tensor BuildSsRep(int b, int d)
         {
-            float* xp = (float*)x.DataPointer;
+            Tensor rep = new(new TensorShape(b, 6 * d), DType.F32);
+            float* tab = (float*)_ssTable!.DataPointer; float* rp = (float*)rep.DataPointer;
             for (int bi = 0; bi < b; bi++)
-                for (int ti = 0; ti < t; ti++)
-                {
-                    long off = ((long)bi * t + ti) * d;
-                    long so = (long)bi * d;
-                    for (int c = 0; c < d; c++) xp[off + c] = xp[off + c] * (1f + scale[so + c]) + shift[so + c];
-                }
+                Buffer.MemoryCopy(tab, rp + (long)bi * 6 * d, (long)6 * d * 4, (long)6 * d * 4);
+            return rep;
         }
 
-        private static unsafe void GatedResidual(Tensor x, Tensor h, float[] gate, int b, int t, int d)
+        private static Tensor Slice(IBackend backend, Tensor comb, int idx, int d, int b)
         {
-            float* xp = (float*)x.DataPointer; float* hp = (float*)h.DataPointer;
-            for (int bi = 0; bi < b; bi++)
-                for (int ti = 0; ti < t; ti++)
-                {
-                    long off = ((long)bi * t + ti) * d;
-                    long go = (long)bi * d;
-                    for (int c = 0; c < d; c++) xp[off + c] += gate[go + c] * hp[off + c];
-                }
+            Tensor s = new(new TensorShape(b, d), DType.F32);
+            backend.SliceLastDim(s, comb, idx * d);
+            return s;
         }
 
-        private Tensor Attention(IBackend backend, Tensor x, int b, int t)
+        private Tensor Attention(IBackend backend, Tensor x, int b, int t, Tensor ropeCos, Tensor ropeSin)
         {
             int d = _dim, h = _heads, hd = _headDim;
-            Tensor q = WhisperOps.ProjectLinear(backend, x, _qW!, null, b, t, d, d);
-            Tensor k = WhisperOps.ProjectLinear(backend, x, _kW!, null, b, t, d, d);
-            Tensor v = WhisperOps.ProjectLinear(backend, x, _vW!, null, b, t, d, d);
-            // Apply interleaved RoPE on q,k.
-            RopeInterleaved(q, b, t, h, hd);
-            RopeInterleaved(k, b, t, h, hd);
-            // Bidirectional attention (no mask), scale 1/sqrt(head_dim).
-            Tensor outp = new(new TensorShape(b, t, d), DType.F32);
-            float* qp = (float*)q.DataPointer; float* kp = (float*)k.DataPointer;
-            float* vp = (float*)v.DataPointer; float* op = (float*)outp.DataPointer;
-            float scale = 1f / MathF.Sqrt(hd);
-            float[] scores = new float[t];
-            for (int bi = 0; bi < b; bi++)
-                for (int hi = 0; hi < h; hi++)
-                {
-                    for (int qi = 0; qi < t; qi++)
-                    {
-                        long qbase = ((long)bi * t + qi) * d + (long)hi * hd;
-                        float mx = float.NegativeInfinity;
-                        for (int ki = 0; ki < t; ki++)
-                        {
-                            long kbase = ((long)bi * t + ki) * d + (long)hi * hd;
-                            float dot = 0;
-                            for (int e = 0; e < hd; e++) dot += qp[qbase + e] * kp[kbase + e];
-                            dot *= scale;
-                            scores[ki] = dot;
-                            if (dot > mx) mx = dot;
-                        }
-                        float sum = 0;
-                        for (int ki = 0; ki < t; ki++) { scores[ki] = MathF.Exp(scores[ki] - mx); sum += scores[ki]; }
-                        float inv = 1f / sum;
-                        long obase = ((long)bi * t + qi) * d + (long)hi * hd;
-                        for (int e = 0; e < hd; e++)
-                        {
-                            float acc = 0;
-                            for (int ki = 0; ki < t; ki++)
-                                acc += scores[ki] * vp[((long)bi * t + ki) * d + (long)hi * hd + e];
-                            op[obase + e] = acc * inv;
-                        }
-                    }
-                }
+            // Projections write straight into [b,t,heads,headDim] (shape is metadata to Linear).
+            TensorShape packed = new(b, t, h, hd);
+            Tensor q = new(packed, DType.F32), k = new(packed, DType.F32), v = new(packed, DType.F32);
+            backend.Linear(q, x, _qW!, null);
+            backend.Linear(k, x, _kW!, null);
+            backend.Linear(v, x, _vW!, null);
+            // Interleaved (GPT-J) RoPE; flat q is [b*t, heads, headDim] so seqLen = b*t.
+            backend.WanRopeInterleaved(q, ropeCos, ropeSin, b * t, h, hd);
+            backend.WanRopeInterleaved(k, ropeCos, ropeSin, b * t, h, hd);
+            TensorShape mh = new(b, h, t, hd);
+            Tensor qMh = new(mh, DType.F32), kMh = new(mh, DType.F32), vMh = new(mh, DType.F32);
+            backend.Permute0213(qMh, q, t, h, hd);
+            backend.Permute0213(kMh, k, t, h, hd);
+            backend.Permute0213(vMh, v, t, h, hd);
             q.Dispose(); k.Dispose(); v.Dispose();
-            Tensor proj = WhisperOps.ProjectLinear(backend, outp, _oW!, null, b, t, d, d);
-            outp.Dispose();
+            // Bidirectional (no mask), scale 1/sqrt(head_dim).
+            Tensor attn = new(mh, DType.F32);
+            backend.FlashAttention(attn, qMh, kMh, vMh, kvLen: t, kvGroup: 1, causal: false, qOffset: 0, 1f / MathF.Sqrt(hd));
+            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+            Tensor merged = new(new TensorShape(b, t, d), DType.F32);
+            backend.Permute0213(merged, attn, h, t, hd);
+            attn.Dispose();
+            Tensor proj = WhisperOps.ProjectLinear(backend, merged, _oW!, null, b, t, d, d);
+            merged.Dispose();
             return proj;
-        }
-
-        // GPT-J interleaved RoPE: head viewed as [hd/2, 2] pairs (x1=even, x2=odd);
-        // rot pair = [x1*cos - x2*sin, x1*sin + x2*cos]. inv_freq base 10000 over hd.
-        private static unsafe void RopeInterleaved(Tensor t_, int b, int t, int h, int hd)
-        {
-            float* p = (float*)t_.DataPointer;
-            int half = hd / 2;
-            int d = h * hd;
-            for (int ti = 0; ti < t; ti++)
-                for (int i = 0; i < half; i++)
-                {
-                    float invFreq = 1f / MathF.Pow(10000f, (2f * i) / hd);
-                    float ang = ti * invFreq;
-                    float cs = MathF.Cos(ang), sn = MathF.Sin(ang);
-                    for (int bi = 0; bi < b; bi++)
-                        for (int hi = 0; hi < h; hi++)
-                        {
-                            long baseOff = ((long)bi * t + ti) * d + (long)hi * hd + 2 * i;
-                            float x1 = p[baseOff], x2 = p[baseOff + 1];
-                            p[baseOff] = x1 * cs - x2 * sn;
-                            p[baseOff + 1] = x1 * sn + x2 * cs;
-                        }
-                }
         }
 
         private Tensor Mlp(IBackend backend, Tensor x, int b, int t)

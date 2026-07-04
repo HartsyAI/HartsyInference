@@ -70,9 +70,16 @@ public sealed class EnCodec
     /// <summary>Decodes RVQ codes back to PCM. <paramref name="codes"/> is
     /// <c>[nQ, batch, T_frames]</c> Int32. Returns channels-first
     /// <c>[batch, channels=1, T_frames * 320]</c>.</summary>
-    public Tensor Decode(IBackend backend, Tensor codes, int batch, int tFrames)
+    public unsafe Tensor Decode(IBackend backend, Tensor codes, int batch, int tFrames)
     {
         Tensor latentCf = _quantizer.Decode(codes, batch, tFrames);
+        string? dl = Environment.GetEnvironmentVariable("MUSICGEN_DUMP_LATENT");   // debug: quantizer-vs-decoder isolation
+        if (!string.IsNullOrEmpty(dl))
+        {
+            long nEl = latentCf.Shape.ElementCount;
+            byte[] ob = new ReadOnlySpan<byte>((byte*)latentCf.DataPointer, (int)(nEl * 4)).ToArray();
+            System.IO.File.WriteAllBytes(dl, ob);
+        }
         Tensor pcm = _decoder.Forward(backend, latentCf, batch, tFrames);
         latentCf.Dispose();
         return pcm;

@@ -60,6 +60,14 @@ def new_session():
     return http_post("/API/GetNewSession", {})["session_id"]
 
 
+def unload_models(sid):
+    """Free any resident LLM model so only one is in host+GPU memory at a time."""
+    try:
+        return http_post("/API/LLMAssistantUnloadModels", {"session_id": sid})
+    except Exception:
+        return None
+
+
 def count_tokens(sid, model, text):
     """Authoritative token count via the same tokenizer the engine uses."""
     try:
@@ -143,6 +151,8 @@ async def one_generation(sid, tid, model):
 
 
 async def bench_model(sid, tid, model):
+    # Free the previous model first so peak host+GPU memory stays at one model, not N.
+    unload_models(sid)
     # warmup (also forces lazy model load into the CUDA slot)
     for _ in range(WARMUP):
         w = await one_generation(sid, tid, model)

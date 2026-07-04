@@ -296,9 +296,12 @@ public sealed unsafe class CsmModel : IDisposable
         // codebook. The previous path created a fresh KV cache AND rebuilt/re-projected the whole growing sequence
         // on the host for every codebook — O(codebooks²) and the dominant cost of the HeartMuLa ~1hr/30s run.
         // Codebook value c_k is embedded via audio_embed[k]; the last position's hidden predicts the next codebook.
+        // GPU-resident cache (matches the backbone): device in-place appends (KvCacheAppend) and device K/V prefixes
+        // to FlashAttention — no per-layer/per-codebook D2H stream-drain + host prefix realloc + H2D re-upload that a
+        // host StreamingKvCache incurred (~8 codebooks × decoder layers of cuStreamSynchronize stalls per frame).
         int maxDec = _cfg.NumCodebooks + 1;
-        StreamingKvCache dCache = new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, maxDec, _cfg.Decoder.HeadDim);
-        StreamingKvCache? uCache = useCfg ? new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, maxDec, _cfg.Decoder.HeadDim) : null;
+        FixedKvCache dCache = new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+        FixedKvCache? uCache = useCfg ? new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec) : null;
         try
         {
             Tensor dLast = DepthPrefill(backend, last, c0, bh, dh, dCache);
@@ -339,7 +342,7 @@ public sealed unsafe class CsmModel : IDisposable
 
     /// <summary>Prefills a depth-decoder cache with [proj(anchor), proj(embed_0(c0))] (positions 0,1) and returns
     /// the last-position hidden <c>[1,1,dh]</c> (which predicts codebook 1).</summary>
-    private Tensor DepthPrefill(IBackend backend, Tensor anchor, int c0, int bh, int dh, StreamingKvCache cache)
+    private Tensor DepthPrefill(IBackend backend, Tensor anchor, int c0, int bh, int dh, FixedKvCache cache)
     {
         Tensor curr = BuildDecoderSequence(anchor, new List<int> { c0 }, bh);   // [1, 2, bh]
         Tensor decInput = WhisperOps.ProjectLinear(backend, curr, _projW!, bias: null, 1, 2, bh, dh);
@@ -353,7 +356,7 @@ public sealed unsafe class CsmModel : IDisposable
 
     /// <summary>Feeds one projected codebook embedding (audio_embed[k] row <paramref name="id"/>) as the next
     /// decoder token at the cache's current position, returning the new last hidden <c>[1,1,dh]</c>.</summary>
-    private Tensor DepthStep(IBackend backend, Tensor table, int id, int bh, int dh, StreamingKvCache cache)
+    private Tensor DepthStep(IBackend backend, Tensor table, int id, int bh, int dh, FixedKvCache cache)
     {
         Tensor embed = EmbedRow(table, id);                                     // [1, 1, bh]
         Tensor decInput = WhisperOps.ProjectLinear(backend, embed, _projW!, bias: null, 1, 1, bh, dh);

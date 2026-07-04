@@ -189,7 +189,7 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
         Tensor rvq = _rvq.Decode(backend, win, wLen);
         Tensor cond = WhisperOps.ProjectLinear(backend, rvq, _condW!, _condB, 1, wLen, CondDim, CondDim);
         rvq.Dispose();
-        Tensor mu = NearestUpsample2x(cond, wLen, CondDim);
+        Tensor mu = NearestUpsample2x(backend, cond, wLen, CondDim);
         cond.Dispose();
         return mu;
     }
@@ -198,14 +198,13 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
     // the upsampling stack's activations peak at ~[1,64,2T·1920] floats, so batch-1 halves host memory.
     private float[][] ScalarDecodeStereo(IBackend backend, Tensor latent, int t2)
     {
-        Tensor chan = ReshapeToChannels(latent, t2);   // [2,128,2T]
+        Tensor chan = ReshapeToChannels(backend, latent, t2);   // [2,128,2T]
         int half = LatentDim / 2;
         float[][] outp = new float[2][];
-        float* cp = (float*)chan.DataPointer;
         for (int ch = 0; ch < 2; ch++)
         {
             Tensor one = new(new TensorShape(1, half, t2), DType.F32);
-            Buffer.MemoryCopy(cp + (long)ch * half * t2, (void*)one.DataPointer, (long)half * t2 * 4, (long)half * t2 * 4);
+            backend.SliceRows(one, chan, ch * half);   // channel ch = rows [ch*128 .. ) of [2,128,2T]
             Tensor wav = _scalar.Decode(backend, one);   // [1,1,L]
             one.Dispose();
             int samples = (int)wav.Shape[2];
@@ -253,7 +252,7 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
     public Tensor CondEmb(IBackend backend, Tensor rvqOut, int t)
     {
         Tensor cond = WhisperOps.ProjectLinear(backend, rvqOut, _condW!, _condB, 1, t, CondDim, CondDim);
-        Tensor mu = NearestUpsample2x(cond, t, CondDim);
+        Tensor mu = NearestUpsample2x(backend, cond, t, CondDim);
         cond.Dispose();
         return mu;
     }
@@ -284,103 +283,115 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
 
         // Estimator input = cat(x, incontext, mu) over the feature dim → [B, 2T, 256+256+512=1024].
         // CFG batches it ×2 with mu replaced by zeros on the negative branch (incontext kept on both).
-        int inCh = 2 * LatentDim + CondDim;
         float dt = 1f / NumSteps;
         float tcur = 0f;
-        float* xp = (float*)x.DataPointer;
-        float* np = (float*)initNoise.DataPointer;
-        float* mup = (float*)mu.DataPointer;
-        float* icp = incontext is not null ? (float*)incontext.DataPointer : null;
+
+        // incontext (or zeros when absent) and a zeroed conditioning block, shared across steps (GPU-resident).
+        Tensor ic = incontext ?? Zeros(backend, 1, t2, LatentDim);
+        Tensor zeroCond = Zeros(backend, 1, t2, CondDim);
 
         for (int step = 0; step < NumSteps; step++)
         {
-            // Progressive noise→in-context blend of the pinned region (before the velocity eval).
-            for (int ti = 0; ti < incontextLen; ti++)
-            {
-                long o = (long)ti * LatentDim;
-                float a = 1f - (1f - 1e-6f) * tcur;
-                for (int c = 0; c < LatentDim; c++) xp[o + c] = a * np[o + c] + tcur * icp![o + c];
-            }
+            // Progressive noise→in-context blend of the pinned region: x[:icLen] = a·noise + tcur·incontext.
+            if (incontextLen > 0)
+                x = BlendHead(backend, x, initNoise, incontext!, incontextLen, t2, 1f - (1f - 1e-6f) * tcur, tcur);
 
             // Build CFG input [2, 2T, 1024]: row0 = uncond (mu=0), row1 = cond (mu).
-            Tensor input = new(new TensorShape(2, t2, inCh), DType.F32);
-            float* ip = (float*)input.DataPointer;
-            for (int ti = 0; ti < t2; ti++)
-            {
-                long xo = (long)ti * LatentDim;
-                long muo = (long)ti * CondDim;
-                // uncond row (batch 0).
-                long b0 = ((long)0 * t2 + ti) * inCh;
-                for (int c = 0; c < LatentDim; c++) ip[b0 + c] = xp[xo + c];                                   // x
-                for (int c = 0; c < LatentDim; c++) ip[b0 + LatentDim + c] = icp is null ? 0f : icp[xo + c];   // incontext
-                for (int c = 0; c < CondDim; c++) ip[b0 + 2 * LatentDim + c] = 0f;                             // mu zeroed
-                // cond row (batch 1).
-                long b1 = ((long)1 * t2 + ti) * inCh;
-                for (int c = 0; c < LatentDim; c++) ip[b1 + c] = xp[xo + c];
-                for (int c = 0; c < LatentDim; c++) ip[b1 + LatentDim + c] = icp is null ? 0f : icp[xo + c];
-                for (int c = 0; c < CondDim; c++) ip[b1 + 2 * LatentDim + c] = mup[muo + c];
-            }
+            Tensor uncondRow = new(new TensorShape(1, t2, 2 * LatentDim + CondDim), DType.F32);
+            Tensor condRow = new(new TensorShape(1, t2, 2 * LatentDim + CondDim), DType.F32);
+            backend.Concat(uncondRow, [x, ic, zeroCond], 2);
+            backend.Concat(condRow, [x, ic, mu], 2);
+            Tensor input = new(new TensorShape(2, t2, 2 * LatentDim + CondDim), DType.F32);
+            backend.Concat(input, [uncondRow, condRow], 0);
+            uncondRow.Dispose(); condRow.Dispose();
 
             Tensor dphi = _estimator.Forward(backend, input, [tcur, tcur]);   // [2, 2T, 256]
             input.Dispose();
-            float* dp = (float*)dphi.DataPointer;
-            // CFG: v = uncond + guidance * (cond - uncond); x += dt * v.
-            for (int ti = 0; ti < t2; ti++)
-            {
-                long un = ((long)0 * t2 + ti) * LatentDim;
-                long co = ((long)1 * t2 + ti) * LatentDim;
-                long xo = (long)ti * LatentDim;
-                for (int c = 0; c < LatentDim; c++)
-                {
-                    float u = dp[un + c], cc = dp[co + c];
-                    float v = u + Guidance * (cc - u);
-                    xp[xo + c] += dt * v;
-                }
-            }
+            // CFG: v = uncond + guidance·(cond − uncond); x += dt·v.
+            Tensor uncond = new(new TensorShape(1, t2, LatentDim), DType.F32);
+            Tensor cond = new(new TensorShape(1, t2, LatentDim), DType.F32);
+            backend.SliceRows(uncond, dphi, 0);      // dphi batch 0
+            backend.SliceRows(cond, dphi, t2);       // dphi batch 1
             dphi.Dispose();
+            backend.CfgEulerStep(x, cond, uncond, Guidance, dt);   // pos=cond, neg=uncond
+            uncond.Dispose(); cond.Dispose();
             tcur += dt;
         }
 
         // Pin the in-context region to the previous window's latents (upstream post-solve assignment).
-        for (int ti = 0; ti < incontextLen; ti++)
-        {
-            long o = (long)ti * LatentDim;
-            for (int c = 0; c < LatentDim; c++) xp[o + c] = icp![o + c];
-        }
+        if (incontextLen > 0)
+            x = PinHead(backend, x, incontext!, incontextLen, t2);
+
+        if (incontext is null) ic.Dispose();   // only the zeros stand-in is ours to free
+        zeroCond.Dispose();
         return x;   // [1, 2T, 256]
     }
 
-    // nearest-neighbor 2x upsample over the time axis of [1, t, dim] → [1, 2t, dim].
-    private static Tensor NearestUpsample2x(Tensor x, int t, int dim)
+    private static Tensor Zeros(IBackend backend, int b, int t, int dim)
     {
+        Tensor z = new(new TensorShape(b, t, dim), DType.F32);
+        backend.Fill(z, 0f);
+        return z;
+    }
+
+    // x[:icLen] = a·noise[:icLen] + tcur·incontext[:icLen], rest unchanged. Consumes x, returns a new tensor.
+    private static Tensor BlendHead(IBackend backend, Tensor x, Tensor noise, Tensor incontext, int icLen, int t2, float a, float tcur)
+    {
+        Tensor head = new(new TensorShape(1, icLen, LatentDim), DType.F32);
+        Tensor icHead = new(new TensorShape(1, icLen, LatentDim), DType.F32);
+        backend.SliceRows(head, noise, 0);
+        backend.SliceRows(icHead, incontext, 0);
+        backend.Scale(head, head, a);
+        backend.Scale(icHead, icHead, tcur);
+        backend.Add(head, head, icHead);
+        icHead.Dispose();
+        Tensor tail = new(new TensorShape(1, t2 - icLen, LatentDim), DType.F32);
+        backend.SliceRows(tail, x, icLen);
+        x.Dispose();
+        Tensor merged = new(new TensorShape(1, t2, LatentDim), DType.F32);
+        backend.Concat(merged, [head, tail], 1);
+        head.Dispose(); tail.Dispose();
+        return merged;
+    }
+
+    // x[:icLen] = incontext[:icLen], rest unchanged. Consumes x, returns a new tensor.
+    private static Tensor PinHead(IBackend backend, Tensor x, Tensor incontext, int icLen, int t2)
+    {
+        Tensor head = new(new TensorShape(1, icLen, LatentDim), DType.F32);
+        backend.SliceRows(head, incontext, 0);
+        Tensor tail = new(new TensorShape(1, t2 - icLen, LatentDim), DType.F32);
+        backend.SliceRows(tail, x, icLen);
+        x.Dispose();
+        Tensor merged = new(new TensorShape(1, t2, LatentDim), DType.F32);
+        backend.Concat(merged, [head, tail], 1);
+        head.Dispose(); tail.Dispose();
+        return merged;
+    }
+
+    // nearest-neighbor 2x upsample over the time axis of [1, t, dim] → [1, 2t, dim] (GPU-resident:
+    // transpose to channels-first, frame-repeat, transpose back — each output frame duplicated consecutively).
+    private static Tensor NearestUpsample2x(IBackend backend, Tensor x, int t, int dim)
+    {
+        Tensor xc = new(new TensorShape(1, dim, t), DType.F32);
+        backend.Transpose2D(xc, x, t, dim);
+        Tensor rep = new(new TensorShape(1, dim, 2 * t), DType.F32);
+        backend.RepeatTime(rep, xc, 2);
+        xc.Dispose();
         Tensor outp = new(new TensorShape(1, 2 * t, dim), DType.F32);
-        float* sp = (float*)x.DataPointer; float* dp = (float*)outp.DataPointer;
-        for (int ti = 0; ti < t; ti++)
-        {
-            long src = (long)ti * dim;
-            for (int r = 0; r < 2; r++)
-            {
-                long dst = (long)(ti * 2 + r) * dim;
-                for (int c = 0; c < dim; c++) dp[dst + c] = sp[src + c];
-            }
-        }
+        backend.Transpose2D(outp, rep, dim, 2 * t);
+        rep.Dispose();
         return outp;
     }
 
-    // [1, 2T, 256] → reshape [1,2T,2,128] → permute [1,2,2T,128] → [2,2T,128] → transpose to [2,128,2T].
-    private static Tensor ReshapeToChannels(Tensor latent, int t2)
+    // [1, 2T, 256] → view [1,2T,2,128] → Permute0213 [1,2,2T,128] (= [2,2T,128]) → Transpose2D → [2,128,2T].
+    private static Tensor ReshapeToChannels(IBackend backend, Tensor latent, int t2)
     {
         int half = LatentDim / 2;   // 128
+        Tensor perm = new(new TensorShape(1, 2, t2, half), DType.F32);
+        backend.Permute0213(perm, latent, t2, 2, half);   // latent viewed as [1,2T,2,128]
         Tensor outp = new(new TensorShape(2, half, t2), DType.F32);
-        float* lp = (float*)latent.DataPointer;   // [1, 2T, 256]
-        float* op = (float*)outp.DataPointer;     // [2, 128, 2T]
-        for (int ti = 0; ti < t2; ti++)
-            for (int ch = 0; ch < 2; ch++)
-                for (int c = 0; c < half; c++)
-                {
-                    float val = lp[(long)ti * LatentDim + ch * half + c];
-                    op[((long)ch * half + c) * t2 + ti] = val;
-                }
+        backend.Transpose2D(outp, perm, t2, half);         // [2,2T,128] → [2,128,2T]
+        perm.Dispose();
         return outp;
     }
 

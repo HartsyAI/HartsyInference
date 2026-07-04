@@ -24,6 +24,10 @@ public sealed unsafe class GenericTransformer : IDisposable
     private Tensor? _finalNorm;
     private Tensor? _finalNormBias;   // zero bias for the LayerNorm path (Cohere)
     private Tensor? _lmHead;   // null when tied — reuse _embed.
+    // Tied models: the original QUANTIZED embed, kept for the lm_head GEMV. The F32 _embed is host-only (gather);
+    // this quantized copy is what goes to the GPU + the fused decode GEMV — 4-5× less HBM/token than the F32 head,
+    // and ~0.5 GB less VRAM (we preload this instead of the F32 table).
+    private Tensor? _lmHeadQuant;
     private int _disposed;
 
     /// <summary>The architecture this transformer was built for.</summary>
@@ -120,7 +124,11 @@ public sealed unsafe class GenericTransformer : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string? lmHeadKey = null)
     {
         ThrowIfDisposed();
-        _embed = EnsureF32(w[$"{prefix}.embed_tokens.weight"]);
+        Tensor embedRaw = w[$"{prefix}.embed_tokens.weight"];
+        _embed = EnsureF32(embedRaw);
+        // Keep the quantized embed for the tied lm_head so the decode projection runs the fused quant GEMV
+        // instead of a 622 MB-per-token F32 GEMM (Qwen 151k×1024 head was ~28% of decode time).
+        if (_cfg.TieWordEmbeddings && embedRaw.DType.IsQuantized) _lmHeadQuant = embedRaw;
         if (_cfg.AbsolutePositionEmbeddings) _posEmbed = EnsureF32(w[$"{prefix}.embed_positions.weight"]);
         if (_cfg.EmbeddingLayerNorm)
         {
@@ -154,7 +162,13 @@ public sealed unsafe class GenericTransformer : IDisposable
         // The embedding table is gathered host-side. Upload it to the GPU only when it doubles as the (tied)
         // lm_head; when the model has a separate lm_head, _embed is host-only — skip it (saves real VRAM, e.g.
         // ~0.8 GB for DeepSeek-V2-Lite's 102k×2048 F32 table).
-        if (_embed is not null && _cfg.TieWordEmbeddings) yield return _embed;
+        // Tied lm_head: upload the QUANTIZED head (fused GEMV, ~0.5 GB less VRAM) when available; else the F32
+        // table. Untied: _embed is host-only (gather), skip it — the separate _lmHead covers the projection.
+        if (_cfg.TieWordEmbeddings)
+        {
+            if (_lmHeadQuant is not null) yield return _lmHeadQuant;
+            else if (_embed is not null) yield return _embed;
+        }
         if (_embedNorm is not null) { yield return _embedNorm; yield return _embedNormBias!; }
         if (_finalNorm is not null) yield return _finalNorm;
         if (_finalNormBias is not null) yield return _finalNormBias;
@@ -370,9 +384,17 @@ public sealed unsafe class GenericTransformer : IDisposable
     public Tensor ProjectLogits(IBackend backend, Tensor hidden, int t)
     {
         ThrowIfDisposed();
-        Tensor headW = _lmHead ?? _embed ?? throw new InvalidOperationException("weights not loaded.");
+        Tensor headW = _lmHead ?? _lmHeadQuant ?? _embed ?? throw new InvalidOperationException("weights not loaded.");
         Tensor logits = new(new TensorShape(1, t, _cfg.VocabSize), DType.F32);
-        if (_cfg.LowVramQuant && headW.DType.IsQuantized)
+        // Fused decode GEMV supports Q4_K/Q6_K/Q8_0 directly from the F32 hidden — no F16 cast, no whole-weight
+        // dequant, no F32 staging (so no large-vocab OOM). This is the fast path for the (tied or not) lm_head.
+        bool fusedHead = t <= 8 && (headW.DType == DType.Q4_K || headW.DType == DType.Q6_K || headW.DType == DType.Q8_0)
+            && _cfg.HiddenSize % 256 == 0;
+        if (fusedHead)
+        {
+            Project(backend, logits, hidden, headW, bias: null, _cfg.LowVramQuant);
+        }
+        else if (_cfg.LowVramQuant && headW.DType.IsQuantized)
         {
             // Large-vocab heads (GLM-4 = 151k, Qwen = 152k) are the biggest single weight. With an F32 hidden the
             // GEMM dtype resolves to BF16, whose dequant stages a full-size F32 temp (≈2.4 GB for a 151k×4096 head)
@@ -460,7 +482,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null;
+        _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null;
     }
 
     /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual

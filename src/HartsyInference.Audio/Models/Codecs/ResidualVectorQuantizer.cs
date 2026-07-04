@@ -50,6 +50,13 @@ internal sealed unsafe class ResidualVectorQuantizer
             _codebooks[q] = WhisperOps.EnsureF32(w[$"{prefix}.vq.layers.{q}._codebook.embed"]);
             if ((int)_codebooks[q]!.Shape[0] != CodebookSize || (int)_codebooks[q]!.Shape[1] != Dim)
                 throw new InvalidDataException($"Codebook {q} shape mismatch: expected [{CodebookSize}, {Dim}], got {_codebooks[q]!.Shape}.");
+            string? dcb = q == 0 ? Environment.GetEnvironmentVariable("MUSICGEN_DUMP_CB") : null;   // debug: compare cb0 to official
+            if (!string.IsNullOrEmpty(dcb))
+            {
+                long ne = _codebooks[0]!.Shape.ElementCount;
+                byte[] ob = new ReadOnlySpan<byte>((byte*)_codebooks[0]!.DataPointer, (int)(ne * 4)).ToArray();
+                System.IO.File.WriteAllBytes(dcb, ob);
+            }
         }
     }
 

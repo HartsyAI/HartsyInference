@@ -128,13 +128,22 @@ Engine column = Tier-1 direct, CUDA, `lowVram=1` (compressed, matches llama.cpp 
 
 | Model | Quant | llama.cpp tg t/s | engine tg t/s | engine/llama | slowdown | Swarm tg t/s | D2H/tok | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| Qwen3-0.6B | Q4_K_M | 354.46 | 17.6 | 0.050 | 20× | 40.4 | ~1.0 | FAIL |
-| Llama-3.2-1B | Q8_0 | 215.91 | 6.05 | 0.028 | 36× | 28.4 | ~1.0 | FAIL |
-| Gemma-3-1B | Q4_K_M | 229.75 | 8.16 | 0.036 | 28× | (leak-OOM) | ~1.0 | FAIL |
-| Phi-4-mini | Q4_K_M | 107.56 | 2.74 | 0.025 | 39× | (leak-OOM) | ~1.0 | FAIL |
-| Granite-3.1-2B | Q4_K_M | 148.46 | 3.18 | 0.021 | 47× | (leak-OOM) | ~1.0 | FAIL |
-| OLMoE-1B-7B | Q4_K_M | 283.27 | OOM† | — | — | (leak-OOM) | — | — |
-| Mistral-7B-v0.3 | Q4_K_M | 66.46 | 1.24 | 0.019 | 54× | (leak-OOM) | ~1.0 | FAIL |
+| Qwen3-0.6B | Q4_K_M | 354.46 | 17.6 | 0.050 | 20× | 20.1 | ~1.0 | FAIL |
+| Llama-3.2-1B | Q8_0 | 215.91 | 6.05 | 0.028 | 36× | 6.2 | ~1.0 | FAIL |
+| Gemma-3-1B | Q4_K_M | 229.75 | 8.16 | 0.036 | 28× | 11.7 | ~1.0 | FAIL |
+| Phi-4-mini | Q4_K_M | 107.56 | 2.74 | 0.025 | 39× | VRAM‡ | ~1.0 | FAIL |
+| Granite-3.1-2B | Q4_K_M | 148.46 | 3.18 | 0.021 | 47× | VRAM‡ | ~1.0 | FAIL |
+| OLMoE-1B-7B | Q4_K_M | 283.27 | OOM† | — | — | VRAM‡ | — | — |
+| Mistral-7B-v0.3 | Q4_K_M | 66.46 | 1.24 | 0.019 | 54× | VRAM‡ | ~1.0 | FAIL |
+
+‡ Won't run through SwarmUI on this 12 GB card: **SwarmUI reserves ~8 GB VRAM at idle** (its T2I/ComfyUI/image backends), leaving ~4 GB — too little for Phi-4/granite/OLMoE/Mistral, which fit standalone in Tier-1 (whole GPU). Each attempt OOMs and auto-restarts SwarmUI. Their engine throughput is the Tier-1 column. The Swarm-tier Qwen3/Llama/Gemma numbers (compressed, `LowVramQuant=true`) **corroborate Tier-1** (20 vs 18, 6.2 vs 6.0, 12 vs 8), confirming the engine kernels are the bottleneck, not the Swarm/WebSocket layer.
+
+### Config change made (revert if undesired)
+- Set `Data/Backends.fds` → `llmassistant-hartsy-local` → `LowVramQuant: true` (was `false`). Compressed path: smaller host+VRAM footprint, fits more, matches llama.cpp's memory model. Slightly slower decode. Revert to `false` for the (memory-hungrier) dequantized-F16 path.
+- Fixed the swap VRAM leak in `HartsyLocalLLMProvider.UnloadSlot` (uses `FreeAllDeviceMemory`); verified: gemma-3 (model #3) now loads where it OOM'd before.
+
+### FINDING #3 — SwarmUI's ~8 GB idle VRAM crowds out LLM on a 12 GB card
+SwarmUI holds ~8 GB VRAM before any LLM loads (T2I/ComfyUI/image backends). On a 12 GB 3060 that leaves too little for 2B+ LLMs through the integrated path, though they run fine standalone. Options: unload the T2I backends while benchmarking LLM, run LLM on a second GPU, or reduce the engine's LLM decode memory (F32 lm_head → tiled/streamed).
 
 † OLMoE-1B-7B Tier-1 OOM'd with only 6.7 GB free (SwarmUI holds 3.5 GB base). Re-run with SwarmUI stopped to fit its 4.2 GB compressed weights.
 

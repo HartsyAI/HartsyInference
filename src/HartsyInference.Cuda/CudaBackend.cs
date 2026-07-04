@@ -327,6 +327,33 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOutput = GpuTransferHelper.AllocateDevice(outBytes);
 
+            // Fused quantized GEMV — the LLM decode hot path. When M is small (single-token or small-batch
+            // decode) and the weight is Q4_K with F32 activations, read the quantized bytes ONCE and dequant
+            // inline with F32 accumulate. This replaces "dequant whole weight to F16 (a full extra HBM pass +
+            // F16-sized intermediate) then cuBLAS GEMM at M=1", cutting weight traffic ~4× and skipping the
+            // temp — the dominant decode cost. K is always a multiple of 256 for Q4_K. Larger M (prefill)
+            // falls through to the cuBLAS GEMM, which is efficient at M≥ a few hundred.
+            if (M <= 8 && input.DType == DType.F32 && output.DType == DType.F32)
+            {
+                if ((weight.DType == DType.Q4_K || weight.DType == DType.Q6_K) && K % 256 == 0)
+                {
+                    if (weight.DType == DType.Q4_K)
+                        _kernels!.LaunchMulMatVecQ4KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    else
+                        _kernels!.LaunchMulMatVecQ6KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                if (weight.DType == DType.Q8_0 && K % 32 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ8_0F32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+            }
+
             // For ComfyUI fp8_scaled checkpoints, every FP8 weight has a per-tensor scalar scale.
             // We store it on the Tensor itself; folding it into cuBLAS' alpha applies the scaling
             // for free during the GEMM (no extra kernel launch). Default Fp8ScaleFactor is 1.0.
