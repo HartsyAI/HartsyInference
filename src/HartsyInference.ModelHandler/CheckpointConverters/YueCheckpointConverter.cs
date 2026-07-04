@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelHandler.CheckpointConverters.Utils;
+using HartsyInference.ModelHandler.Gguf.Codecs;
 using HartsyInference.ModelHandler.SafeTensors;
 
 namespace HartsyInference.ModelHandler.CheckpointConverters;
@@ -70,6 +71,43 @@ public sealed class YueCheckpointConverter
     /// <summary>Pure LM key mapping (testable without files): pass-through, with recomputed RoPE buffers dropped.</summary>
     public static string? MapLmKey(string key) =>
         key.EndsWith(".rotary_emb.inv_freq", StringComparison.Ordinal) ? null : key;
+
+    // The 2D GEMM matrices worth quantizing: attention + MLP projections + the LM head. Embeddings (a gather,
+    // not a matmul) and the 1D norms stay full-precision.
+    private static readonly string[] _quantizableSuffixes =
+    [
+        "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
+        "gate_proj.weight", "up_proj.weight", "down_proj.weight", "lm_head.weight",
+    ];
+
+    /// <summary>Quantizes the LM's big 2D GEMM weights (attention/MLP projections + lm_head) to <see cref="DType.Q8_0"/>
+    /// in place. Halves the 7B footprint (bf16 14 GB → Q8_0 7 GB) so it fits a 12 GB card resident instead of streaming
+    /// per forward, and single-token decode hits the fused Q8_0 GEMV. Q8_0 is a per-32-block symmetric int8 (~0.4% RMS
+    /// error) — negligible for codec-token sampling. Only rank-2 tensors whose in-dim is a multiple of 32 are touched;
+    /// everything else (embeddings, norms) is left as-is. Replaced tensors are owned by the dict (the borrowed source
+    /// stays valid until its loader disposes).</summary>
+    public static unsafe void QuantizeLmWeightsQ8_0(Dictionary<string, Tensor> weights)
+    {
+        Codec_Q8_0 codec = new();
+        foreach (string key in new List<string>(weights.Keys))
+        {
+            bool eligible = false;
+            foreach (string s in _quantizableSuffixes)
+            {
+                if (key.EndsWith(s, StringComparison.Ordinal)) { eligible = true; break; }
+            }
+            if (!eligible) continue;
+
+            Tensor w = weights[key];
+            if (w.Shape.Rank != 2 || w.Shape[1] % 32 != 0) continue;   // Q8_0 blocks (32) must not cross rows
+
+            Tensor f32 = w.DType == DType.F32 ? w : w.CastTo(DType.F32);
+            Tensor q = new(w.Shape, DType.Q8_0);
+            codec.QuantizeFromF32((float*)f32.DataPointer, (byte*)q.DataPointer, w.Shape.ElementCount);
+            if (!ReferenceEquals(f32, w)) f32.Dispose();
+            weights[key] = q;
+        }
+    }
 
     /// <summary>Loads an X-Codec safetensors export for the engine <c>XCodec</c> class. Caller owns the loader.</summary>
     public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadXCodec(string path, bool castToF32 = false)

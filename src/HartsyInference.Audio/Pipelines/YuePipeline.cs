@@ -49,6 +49,10 @@ public sealed unsafe class YuePipeline : IDisposable
         Logs.Info($"YuE S1: {vocal.Count} frames (vocal+accomp cb0) in {sw.ElapsedMilliseconds}ms.");
         if (vocal.Count == 0) return [];
 
+        // Stage-1 (7B) is done — free its resident weights so Stage-2 (1B) + x-codec get full VRAM instead of
+        // streaming against the 7B's cache (same phase-boundary free as HeartMuLa's LM→codec handoff).
+        backend.FreeWeights(_stage1.EnumerateWeights());
+
         float[] audio;
         if (_stage2 is not null)
         {

@@ -25,11 +25,15 @@ public sealed class YueTokenizer : IDisposable
     public const string Stage1Piece = "<stage_1>";
     /// <summary>Stage-2 handoff marker (Stage-2 prompt: [SOA][stage_1] + cb0 + [stage_2]).</summary>
     public const string Stage2Piece = "<stage_2>";
+    /// <summary>xcodec codec-type separator — CodecManipulator("xcodec").sep_ids. Ends the Stage-1 prompt
+    /// (… &lt;SOA&gt; &lt;xcodec&gt;) to prime cb0 generation.</summary>
+    public const string XcodecPiece = "<xcodec>";
 
     // Fixed mm_tokenizer_v0.2 ids for the YuE control symbols (verified by Decode round-trip below).
     private const int SoaId = 32_001;
     private const int EoaId = 32_002;
     private const int Stage1Id = 32_013;
+    private const int XcodecId = 32_016;
     private const int Stage2Id = 32_017;
 
     private readonly SentencePieceTokenizer _sp;
@@ -38,6 +42,7 @@ public sealed class YueTokenizer : IDisposable
     public int Eoa { get; }
     public int Stage1 { get; }
     public int Stage2 { get; }
+    public int Xcodec { get; }
 
     public YueTokenizer(string tokenizerModelPath)
     {
@@ -52,6 +57,7 @@ public sealed class YueTokenizer : IDisposable
         Eoa = ResolveControl(EoaId, EoaPiece);
         Stage1 = ResolveControl(Stage1Id, Stage1Piece);
         Stage2 = ResolveControl(Stage2Id, Stage2Piece);
+        Xcodec = ResolveControl(XcodecId, XcodecPiece);
     }
 
     /// <summary>Confirms a pinned control-symbol id maps back to its expected angle-bracket piece via
@@ -74,13 +80,14 @@ public sealed class YueTokenizer : IDisposable
     public static string BuildStage1PromptText(string genre, string lyrics)
         => $"Generate music from the given lyrics segment by segment.\n[Genre] {(genre ?? "").Trim()}\n{(lyrics ?? "").Trim()}";
 
-    /// <summary>Encodes the full Stage-1 prompt: instruction+genre+lyrics text, then the stage-1 +
-    /// start-of-audio markers that hand off to cb0 generation (YuE infer.py CoT order: … &lt;stage_1&gt; &lt;SOA&gt;).</summary>
+    /// <summary>Encodes the full Stage-1 prompt: instruction+genre+lyrics text, then the start-of-audio +
+    /// xcodec-sep markers that prime cb0 generation (YuE infer.py order: … &lt;SOA&gt; &lt;xcodec&gt;). NOTE:
+    /// &lt;stage_1&gt; is NOT used in Stage-1 — it belongs to the Stage-2 prompt only.</summary>
     public int[] EncodeStage1Prompt(string genre, string lyrics)
     {
         List<int> ids = [.. _sp.EncodeToIds(BuildStage1PromptText(genre, lyrics))];
-        ids.Add(Stage1);
         ids.Add(Soa);
+        ids.Add(Xcodec);
         return [.. ids];
     }
 

@@ -34,10 +34,14 @@ public sealed record YueConfig
     public int SampleRate { get; init; } = 16_000;
     public int FrameRateHz { get; init; } = 50;
 
-    // ── Extended-vocab audio-token bases (reconcile against the YuE tokenizer) ──
-    public int VocalTokenBase { get; init; } = 45_334;     // <|vocal_cb0_0|> .. (per-track cb0)
-    public int AccompTokenBase { get; init; } = 45_334 + 1_024;
+    // ── xcodec cb0 token base (CodecManipulator("xcodec"): global_offset 45334, codebook_size 1024). ──
+    // LM id = 45334 + k*1024 + code. Stage-1 emits only cb0, so both the vocal and accompaniment tracks
+    // live in the SAME range [45334, 46358); they are separated by interleave parity (even=vocal, odd=accomp),
+    // NOT by a per-track offset. AudioEosToken = <EOA>; XcodecSepToken = <xcodec> primes cb0 generation.
+    public int VocalTokenBase { get; init; } = 45_334;
+    public int AccompTokenBase { get; init; } = 45_334;
     public int AudioEosToken { get; init; } = 32_002;
+    public int XcodecSepToken { get; init; } = 32_016;
 
     public float Temperature { get; init; } = 1.0f;
     public int TopK { get; init; } = 50;

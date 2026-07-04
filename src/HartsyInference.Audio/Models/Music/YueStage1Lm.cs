@@ -89,6 +89,9 @@ public sealed unsafe class YueStage1Lm : IDisposable
                     uLogitsT.Dispose();
                 }
 
+                // Faithful Stage-1 masking (YuE infer.py BlockTokenRangeProcessor(0, 32002)): block ids
+                // [0, AudioEosToken) so the model can only emit <EOA> or a codec token, never text.
+                for (int v = 0; v < _cfg.AudioEosToken; v++) logits[v] = float.NegativeInfinity;
                 ApplyRepetitionPenalty(logits, history, repPen);
                 int next = NucleusSampler.Draw(logits, vocab, temp, tk, tp, ref rng);
                 logitsT.Dispose();
@@ -97,10 +100,13 @@ public sealed unsafe class YueStage1Lm : IDisposable
                 history.Add(next);
                 if (history.Count > 256) history.RemoveAt(0);
 
-                if (wantVocal && next >= _cfg.VocalTokenBase && next < _cfg.VocalTokenBase + _cfg.CodebookSize)
-                    vocal.Add(next - _cfg.VocalTokenBase);
-                else if (!wantVocal && next >= _cfg.AccompTokenBase && next < _cfg.AccompTokenBase + _cfg.CodebookSize)
-                    accomp.Add(next - _cfg.AccompTokenBase);
+                // Both tracks share the cb0 range [VocalTokenBase, +CodebookSize); vocal/accomp is decided by
+                // interleave parity (even step = vocal, odd = accomp), not by a per-track offset.
+                if (next >= _cfg.VocalTokenBase && next < _cfg.VocalTokenBase + _cfg.CodebookSize)
+                {
+                    int code = next - _cfg.VocalTokenBase;
+                    if (wantVocal) vocal.Add(code); else accomp.Add(code);
+                }
                 wantVocal = !wantVocal;
 
                 int[] step1 = [next];
