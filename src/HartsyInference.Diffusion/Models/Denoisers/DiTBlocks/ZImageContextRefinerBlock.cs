@@ -15,7 +15,8 @@ public sealed unsafe class ZImageContextRefinerBlock
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
 
-    private Tensor? _qkvWeight;
+    // Fused QKV split into separate Q/K/V weights at load (GPU-residency rewrite); see LoadSplitQkv.
+    private Tensor? _toQWeight, _toKWeight, _toVWeight;
     private Tensor? _attnOutWeight;
 
     private Tensor? _attnNorm1Weight;
@@ -40,7 +41,7 @@ public sealed unsafe class ZImageContextRefinerBlock
     /// <summary>Loads weights using Z-Image's Lumina-style naming under the given prefix (e.g., "context_refiner.0").</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _qkvWeight = weights[$"{prefix}.attention.qkv.weight"];
+        LoadSplitQkv(weights[$"{prefix}.attention.qkv.weight"]);
         _attnOutWeight = weights[$"{prefix}.attention.out.weight"];
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
@@ -60,7 +61,9 @@ public sealed unsafe class ZImageContextRefinerBlock
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        if (_qkvWeight is not null) yield return _qkvWeight;
+        if (_toQWeight is not null) yield return _toQWeight;
+        if (_toKWeight is not null) yield return _toKWeight;
+        if (_toVWeight is not null) yield return _toVWeight;
         if (_attnOutWeight is not null) yield return _attnOutWeight;
         foreach (Tensor w in _normQ.EnumerateWeights()) yield return w;
         foreach (Tensor w in _normK.EnumerateWeights()) yield return w;
@@ -79,39 +82,39 @@ public sealed unsafe class ZImageContextRefinerBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
+        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+
+        // GPU-residency rewrite — see ZImageBlock.Forward for the full rationale. This block has no AdaLN
+        // (caption refinement is timestep-independent), so the residuals stay plain backend.Add.
 
         // ── Attention sub-block: x = x + AttnNorm2(Attn(AttnNorm1(x))) ──
-        Tensor pre = new Tensor(shape, x.DType);
+        Tensor pre = new Tensor(shape, DType.F32);
         backend.RmsNorm(pre, x, _attnNorm1Weight!, _eps);
 
-        TensorShape qkvShape = new TensorShape(batch, seqLen, 3 * _hiddenSize);
-        Tensor qkv = new Tensor(qkvShape, x.DType);
-        backend.Linear(qkv, pre, _qkvWeight!, null);
+        Tensor qHeads = new Tensor(headsShape, DType.F32);
+        Tensor kHeads = new Tensor(headsShape, DType.F32);
+        Tensor v = new Tensor(headsShape, DType.F32);
+        backend.Linear(qHeads, pre, _toQWeight!, null);
+        backend.Linear(kHeads, pre, _toKWeight!, null);
+        backend.Linear(v, pre, _toVWeight!, null);
         pre.Dispose();
 
-        Tensor q = new Tensor(shape, x.DType);
-        Tensor k = new Tensor(shape, x.DType);
-        Tensor v = new Tensor(shape, x.DType);
-        SplitQkv(qkv, q, k, v, batch, seqLen, _hiddenSize);
-        qkv.Dispose();
+        Tensor qNormed = new Tensor(headsShape, DType.F32);
+        Tensor kNormed = new Tensor(headsShape, DType.F32);
+        backend.RmsNorm(qNormed, qHeads, _normQ.Weight, _normQ.Eps);
+        backend.RmsNorm(kNormed, kHeads, _normK.Weight, _normK.Eps);
+        qHeads.Dispose();
+        kHeads.Dispose();
 
-        int totalVecs = batch * seqLen * _numHeads;
-        Tensor qN = new Tensor(q.Shape, DType.F32);
-        Tensor kN = new Tensor(k.Shape, DType.F32);
-        _normQ.Forward(qN, q, totalVecs);
-        _normK.Forward(kN, k, totalVecs);
-        q.Dispose();
-        k.Dispose();
-
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
         Tensor qMh = new Tensor(mhShape, DType.F32);
         Tensor kMh = new Tensor(mhShape, DType.F32);
         Tensor vMh = new Tensor(mhShape, DType.F32);
-        ReshapeToMultiHead(qMh, qN, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(kMh, kN, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
-        qN.Dispose();
-        kN.Dispose();
+        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
+        qNormed.Dispose();
+        kNormed.Dispose();
         v.Dispose();
 
         rope?.Forward(qMh, kMh, batch, _numHeads, seqLen);
@@ -124,33 +127,33 @@ public sealed unsafe class ZImageContextRefinerBlock
         vMh.Dispose();
 
         Tensor attnFlat = new Tensor(shape, DType.F32);
-        ReshapeFromMultiHead(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
-        Tensor projected = new Tensor(shape, x.DType);
+        Tensor projected = new Tensor(shape, DType.F32);
         backend.Linear(projected, attnFlat, _attnOutWeight!, null);
         attnFlat.Dispose();
 
-        Tensor postAttnNorm = new Tensor(shape, x.DType);
+        Tensor postAttnNorm = new Tensor(shape, DType.F32);
         backend.RmsNorm(postAttnNorm, projected, _attnNorm2Weight!, _eps);
         projected.Dispose();
 
-        Tensor afterAttn = new Tensor(shape, x.DType);
+        Tensor afterAttn = new Tensor(shape, DType.F32);
         backend.Add(afterAttn, x, postAttnNorm);
         postAttnNorm.Dispose();
 
         // ── FFN sub-block ──
-        Tensor preFfn = new Tensor(shape, x.DType);
+        Tensor preFfn = new Tensor(shape, DType.F32);
         backend.RmsNorm(preFfn, afterAttn, _ffnNorm1Weight!, _eps);
 
         Tensor ffnOut = ForwardSwiGlu(backend, preFfn, batch, seqLen);
         preFfn.Dispose();
 
-        Tensor postFfnNorm = new Tensor(shape, x.DType);
+        Tensor postFfnNorm = new Tensor(shape, DType.F32);
         backend.RmsNorm(postFfnNorm, ffnOut, _ffnNorm2Weight!, _eps);
         ffnOut.Dispose();
 
-        Tensor result = new Tensor(shape, x.DType);
+        Tensor result = new Tensor(shape, DType.F32);
         backend.Add(result, afterAttn, postFfnNorm);
         afterAttn.Dispose();
         postFfnNorm.Dispose();
@@ -158,31 +161,31 @@ public sealed unsafe class ZImageContextRefinerBlock
         return result;
     }
 
+    /// <summary>Splits the fused <c>attention.qkv.weight</c> [3H, H] into contiguous Q/K/V weights [H, H], sharing
+    /// the per-tensor scalar fp8 scale. See <c>ZImageBlock.LoadSplitQkv</c>.</summary>
+    private void LoadSplitQkv(Tensor qkv)
+    {
+        int h = _hiddenSize;
+        if (qkv.Shape[0] != 3L * h || qkv.Shape[1] != h)
+            throw new ArgumentException($"Expected fused QKV weight [{3 * h}, {h}], got [{qkv.Shape[0]}, {qkv.Shape[1]}].");
+
+        long chunkBytes = (long)h * h * qkv.DType.SizeInBytes;
+        TensorShape splitShape = new TensorShape(h, h);
+
+        _toQWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        _toKWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        _toVWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+
+        byte* src = (byte*)qkv.DataPointer;
+        Buffer.MemoryCopy(src, (void*)_toQWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + chunkBytes, (void*)_toKWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)_toVWeight.DataPointer, chunkBytes, chunkBytes);
+    }
+
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
     {
         Tensor t = weights[key];
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
-
-    private static void SplitQkv(Tensor qkv, Tensor q, Tensor k, Tensor v, int batch, int seqLen, int hidden)
-    {
-        float* srcPtr = (float*)qkv.DataPointer;
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
-        float* vPtr = (float*)v.DataPointer;
-
-        long bytesPerSlice = (long)hidden * sizeof(float);
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long srcBase = ((long)b * seqLen + s) * 3 * hidden;
-                long dstBase = ((long)b * seqLen + s) * hidden;
-                Buffer.MemoryCopy(srcPtr + srcBase, qPtr + dstBase, bytesPerSlice, bytesPerSlice);
-                Buffer.MemoryCopy(srcPtr + srcBase + hidden, kPtr + dstBase, bytesPerSlice, bytesPerSlice);
-                Buffer.MemoryCopy(srcPtr + srcBase + 2 * hidden, vPtr + dstBase, bytesPerSlice, bytesPerSlice);
-            }
-        }
     }
 
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
@@ -211,39 +214,4 @@ public sealed unsafe class ZImageContextRefinerBlock
         return output;
     }
 
-    private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
 }

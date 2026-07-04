@@ -84,7 +84,13 @@ public sealed class ZImageGenerationTests
         Stopwatch totalSw = Stopwatch.StartNew();
         Stopwatch sw = Stopwatch.StartNew();
 
-        CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir);
+        int gpuOrdinal = int.TryParse(Environment.GetEnvironmentVariable("HARTSY_TEST_GPU_ORDINAL"), out int ord) ? ord : 0;
+        CudaBackend backend = new CudaBackend(deviceOrdinal: gpuOrdinal, ptxDir: ptxDir);
+        // On a 12 GB card, caching fp8→fp16 weight casts (~13 GB) leaves no room for the VAE decode. Opt out
+        // (HARTSY_TEST_CACHE_CASTS=off) to keep the transformer fp8-resident and fit the whole pipeline.
+        if (string.Equals(Environment.GetEnvironmentVariable("HARTSY_TEST_CACHE_CASTS"), "off", StringComparison.OrdinalIgnoreCase))
+            backend.CacheWeightCasts = false;
+        _output.WriteLine($"[GPU] CudaBackend on device ordinal {gpuOrdinal}, CacheWeightCasts={backend.CacheWeightCasts}");
 
         // ── PHASE A: encode prompt with Qwen3-4B, then dispose it before loading Z-Image (memory pressure: 16 GB Qwen3 F32 + 7 GB Z-Image FP8 + activations exceeds 32 GB easily) ──
         string prompt = "A photograph of an astronaut riding a horse on the moon";
@@ -94,12 +100,12 @@ public sealed class ZImageGenerationTests
             _output.WriteLine($"[A1] Loading Qwen3-4B from: {Path.GetFileName(Qwen3WeightsPath)}");
             using SafeTensorsLoader qwenLoader = new();
             qwenLoader.Load(Qwen3WeightsPath);
+            // Mirror the production ZImageLoader: pass the raw tensors straight to the encoder (it handles
+            // fp8/bf16/comfy-quant natively). A blanket CastTo(F32) both breaks on the U8 comfy_quant markers
+            // and inflates the encoder to ~16 GB — too big for a 12 GB card.
             Dictionary<string, Tensor> qwenWeights = qwenLoader.GetAllTensors();
-            Dictionary<string, Tensor> qwenF32 = new(qwenWeights.Count);
-            foreach (KeyValuePair<string, Tensor> kvp in qwenWeights)
-                qwenF32[kvp.Key] = kvp.Value.DType == DType.F32 ? kvp.Value : kvp.Value.CastTo(DType.F32);
             LlamaStyleEncoder qwenEncoder = new(LlamaStyleEncoderConfig.Qwen3_4B);
-            qwenEncoder.LoadWeights(qwenF32);
+            qwenEncoder.LoadWeights(qwenWeights);
             _output.WriteLine($"  Qwen3-4B loaded in {sw.ElapsedMilliseconds}ms");
 
             // Z-Image's diffusers pipeline applies a chat template and uses penultimate hidden state.
@@ -125,12 +131,8 @@ public sealed class ZImageGenerationTests
             _output.WriteLine($"  Caption embeddings: shape={captionEmbeddings.Shape}, dtype={captionEmbeddings.DType}, in {sw.ElapsedMilliseconds}ms");
             LogTensorStats("captionEmbeddings", captionEmbeddings);
 
-            // Force Qwen3 weights to drop. Cast tensors hold heap-allocated F32 buffers — disposing the
-            // F32 dict and the encoder lets ~16 GB go before we load the transformer.
+            // Force Qwen3 weights to drop before loading the transformer.
             qwenEncoder.Dispose();
-            foreach (Tensor t in qwenF32.Values)
-                t.Dispose();
-            qwenF32.Clear();
             // qwenWeights holds the original mmap-borrowed tensors; the loader's Dispose will release them.
         }
         GC.Collect();
@@ -178,13 +180,14 @@ public sealed class ZImageGenerationTests
                 vaeDecoder.LoadWeights(vaeF32);
                 _output.WriteLine($"  VAE loaded in {sw.ElapsedMilliseconds}ms");
 
-                _output.WriteLine("[B4] Generating image (512×512, 8 NFE, CFG=1.0)...");
+                int res = int.TryParse(Environment.GetEnvironmentVariable("HARTSY_TEST_ZIMAGE_RES"), out int r) ? r : 512;
+                _output.WriteLine($"[B4] Generating image ({res}×{res}, 8 NFE, CFG=1.0)...");
                 ZImagePipeline pipeline = new(backend, transformer, vaeDecoder, zConfig);
                 TextToImageRequest request = new()
                 {
                     Prompt = prompt,
-                    Width = 512,
-                    Height = 512,
+                    Width = res,
+                    Height = res,
                     Steps = 8,
                     Seed = 42,
                 };
@@ -204,9 +207,9 @@ public sealed class ZImageGenerationTests
                 ImagePostProcessor.SaveBmp(outputPath, rgbData, width, height);
                 _output.WriteLine($"Saved: {outputPath}");
 
-                Assert.Equal(512, width);
-                Assert.Equal(512, height);
-                Assert.Equal(512 * 512 * 3, rgbData.Length);
+                Assert.Equal(res, width);
+                Assert.Equal(res, height);
+                Assert.Equal(res * res * 3, rgbData.Length);
                 ValidateImageNotDegenerate(rgbData);
 
                 totalSw.Stop();

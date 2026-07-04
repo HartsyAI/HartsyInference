@@ -81,7 +81,7 @@ public sealed class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
-    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
+    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
         ThrowIfDisposed();
         AttentionKernels.ScaledDotProductAttention(output, query, key, value, mask, scale);

@@ -67,29 +67,27 @@ public sealed unsafe class LtxVideoBlock
     {
         int s = (int)hidden.Shape[0];
         // AdaLN: scale_shift_table[6,dim] + temb[6,dim] → 6 vectors [dim].
-        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor shiftMlp, Tensor scaleMlp, Tensor gateMlp) = Modulation(temb);
+        (Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa, Tensor shiftMlp, Tensor scaleMlp, Tensor gateMlp) = Modulation(backend, temb);
 
         // ── self-attn ──
-        Tensor n1 = RmsNoAffine(backend, hidden, s);
-        ApplyShiftScale(n1, scaleMsa, shiftMsa, s);
+        Tensor n1 = ApplyShiftScale(backend, RmsNoAffine(backend, hidden, s), scaleMsa, shiftMsa, s);
         Tensor attn1 = Attention(backend, n1, n1, 0, applyRope: true, rope, cos, sin, null, s, s);
         n1.Dispose();
-        Tensor afterAttn1 = GatedAdd(hidden, attn1, gateMsa, s);
+        Tensor afterAttn1 = GatedAdd(backend, hidden, attn1, gateMsa, s);
         attn1.Dispose();
 
         // ── cross-attn (to T5) ──
         int l = (int)encoder.Shape[0];
         Tensor attn2 = Attention(backend, afterAttn1, encoder, 1, applyRope: false, rope, cos, sin, encoderMask, s, l);
-        Tensor afterAttn2 = AddRows(afterAttn1, attn2, s);
+        Tensor afterAttn2 = AddRows(backend, afterAttn1, attn2, s);
         afterAttn1.Dispose();
         attn2.Dispose();
 
         // ── FFN ──
-        Tensor n2 = RmsNoAffine(backend, afterAttn2, s);
-        ApplyShiftScale(n2, scaleMlp, shiftMlp, s);
+        Tensor n2 = ApplyShiftScale(backend, RmsNoAffine(backend, afterAttn2, s), scaleMlp, shiftMlp, s);
         Tensor ff = Ffn(backend, n2, s);
         n2.Dispose();
-        Tensor outT = GatedAdd(afterAttn2, ff, gateMlp, s);
+        Tensor outT = GatedAdd(backend, afterAttn2, ff, gateMlp, s);
         afterAttn2.Dispose();
         ff.Dispose();
 
@@ -113,16 +111,17 @@ public sealed unsafe class LtxVideoBlock
 
         if (applyRope) { rope.ApplyRotary(qn, cos, sin); rope.ApplyRotary(kn, cos, sin); }
 
-        Tensor qMh = ToBhsd(qn, sq); qn.Dispose();
-        Tensor kMh = ToBhsd(kn, sk); kn.Dispose();
-        Tensor vMh = ToBhsd(v, sk); v.Dispose();
+        Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
+        Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();
+        Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale);
+        // allowF16: Q/K are RMS-normed → bounded scores → F16 attention is safe (halves score-matrix traffic).
+        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale, allowF16: true);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor flat = FromBhsd(attn, sq); attn.Dispose();
+        Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();
         Tensor outT = new Tensor(new TensorShape(sq, _dim), DType.F32);
         backend.Linear(outT, flat, _o[idx]!, _oB[idx]);
         flat.Dispose();
@@ -143,17 +142,22 @@ public sealed unsafe class LtxVideoBlock
         return outT;
     }
 
-    private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation(Tensor temb)
+    // ada[m] = scale_shift_table[m] + temb[m], each [1, dim], GPU-resident (SliceRows + GatedResidual) so downstream
+    // AddScalar/AffineBroadcast/GatedResidual uploads all HIT the activation cache — no per-block cache-miss SyncStream
+    // (the fix that took Wan-1.3B 67→28s). Was a host DataPointer loop.
+    private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation(IBackend backend, Tensor temb)
     {
-        // ada[m] = scale_shift_table[m] + temb[m], both [6, dim].
-        float* ss = (float*)_scaleShift!.DataPointer;
-        float* tb = (float*)temb.DataPointer;
+        Tensor ones = OnesRow();
         Tensor[] outs = new Tensor[6];
         for (int m = 0; m < 6; m++)
         {
-            Tensor o = new Tensor(new TensorShape(_dim), DType.F32);
-            float* op = (float*)o.DataPointer;
-            for (int d = 0; d < _dim; d++) op[d] = ss[m * _dim + d] + tb[m * _dim + d];
+            Tensor ssM = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.SliceRows(ssM, _scaleShift!, m);
+            Tensor tbM = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.SliceRows(tbM, temb, m);
+            Tensor o = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.GatedResidualLastDim(o, tbM, ssM, ones);   // tbM + 1·ssM
+            ssM.Dispose(); tbM.Dispose();
             outs[m] = o;
         }
         return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
@@ -166,64 +170,61 @@ public sealed unsafe class LtxVideoBlock
         return o;
     }
 
-    private void ApplyShiftScale(Tensor x, Tensor scale, Tensor shift, int s)
+    // out = x·(1+scale) + shift, scale/shift [1,dim] broadcast — GPU-resident (AddScalar + AffineBroadcast), non-in-place
+    // (disposes x, returns the result). Was a host DataPointer loop.
+    private Tensor ApplyShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s)
     {
-        float* xp = (float*)x.DataPointer;
-        float* sc = (float*)scale.DataPointer;
-        float* sh = (float*)shift.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < _dim; d++)
-                xp[i * _dim + d] = xp[i * _dim + d] * (1f + sc[d]) + sh[d];
-    }
-
-    private Tensor GatedAdd(Tensor residual, Tensor value, Tensor gate, int s)
-    {
+        using Tensor scaleP1 = new Tensor(scale.Shape, DType.F32);
+        backend.AddScalar(scaleP1, scale, 1.0f);
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        float* rp = (float*)residual.DataPointer;
-        float* vp = (float*)value.DataPointer;
-        float* gp = (float*)gate.DataPointer;
-        float* op = (float*)o.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < _dim; d++)
-                op[i * _dim + d] = rp[i * _dim + d] + gp[d] * vp[i * _dim + d];
+        backend.AffineBroadcastLastDim(o, x, scaleP1, shift);
+        x.Dispose();
         return o;
     }
 
-    private Tensor AddRows(Tensor a, Tensor b, int s)
+    // out = residual + gate·value, gate [1,dim] broadcast — GPU-resident. Was a host DataPointer loop.
+    private Tensor GatedAdd(IBackend backend, Tensor residual, Tensor value, Tensor gate, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        long n = (long)s * _dim;
-        float* ap = (float*)a.DataPointer; float* bp = (float*)b.DataPointer; float* op = (float*)o.DataPointer;
-        for (long i = 0; i < n; i++) op[i] = ap[i] + bp[i];
+        backend.GatedResidualLastDim(o, residual, value, gate);
         return o;
     }
 
-    private Tensor ToBhsd(Tensor x, int s)
+    // out = a + b — GPU-resident via GatedResidualLastDim(a, b, ones). Was a host loop.
+    private Tensor AddRows(IBackend backend, Tensor a, Tensor b, int s)
+    {
+        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
+        backend.GatedResidualLastDim(o, a, b, OnesRow());
+        return o;
+    }
+
+    // [s, dim]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 (was a host DataPointer loop).
+    private Tensor ToBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new Tensor(new TensorShape(1, _heads, s, _headDim), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int h = 0; h < _heads; h++)
-            {
-                long src = (long)i * _dim + (long)h * _headDim;
-                long dst = ((long)h * s + i) * _headDim;
-                Buffer.MemoryCopy(xp + src, op + dst, (long)_headDim * 4, (long)_headDim * 4);
-            }
+        backend.Permute0213(o, x, s, _heads, _headDim);
         return o;
     }
 
-    private Tensor FromBhsd(Tensor x, int s)
+    // [1, heads, s, headDim] → [s, dim] (inverse of ToBhsd), GPU-resident via Permute0213.
+    private Tensor FromBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        for (int h = 0; h < _heads; h++)
-            for (int i = 0; i < s; i++)
-            {
-                long src = ((long)h * s + i) * _headDim;
-                long dst = (long)i * _dim + (long)h * _headDim;
-                Buffer.MemoryCopy(xp + src, op + dst, (long)_headDim * 4, (long)_headDim * 4);
-            }
+        backend.Permute0213(o, x, _heads, s, _headDim);
         return o;
+    }
+
+    // Cached [1, dim] ones for the "a + 1·b" GatedResidual add-idiom; device-promoted after first use.
+    private Tensor? _onesRow;
+    private Tensor OnesRow()
+    {
+        if (_onesRow is null)
+        {
+            _onesRow = new Tensor(new TensorShape(1, _dim), DType.F32);
+            float* p = (float*)_onesRow.DataPointer;
+            for (int i = 0; i < _dim; i++) p[i] = 1f;
+        }
+        return _onesRow;
     }
 
     private static Tensor Ones(int n)

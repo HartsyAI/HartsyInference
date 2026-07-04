@@ -6,6 +6,7 @@
 // Usage:  LD_LIBRARY_PATH=~/.local/lib/cuda13 ./nvrtc_compile in.cu out.ptx compute_80
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <dlfcn.h>
 
 typedef int nvrtcResult;
@@ -63,8 +64,19 @@ int main(int argc, char** argv)
 
     char archOpt[64];
     snprintf(archOpt, sizeof(archOpt), "--gpu-architecture=%s", arch);
-    const char* opts[] = { archOpt };
-    r = nvrtcCompileProgram(prog, 1, opts);
+    // Extra argv (argv[4..]) are include directories → passed as --include-path=<dir> (for <mma.h>, <cuda_fp16.h>,
+    // etc. when the WMMA/tensor-core kernels need the CUDA headers under bare nvrtc). Backward compatible: none → arch-only.
+    int nInc = argc - 4;
+    int nOpts = 1 + (nInc > 0 ? nInc : 0);
+    const char** opts = (const char**)malloc(sizeof(char*) * nOpts);
+    opts[0] = archOpt;
+    for (int i = 0; i < nInc; i++)
+    {
+        char* incOpt = (char*)malloc(strlen(argv[4 + i]) + 32);
+        sprintf(incOpt, "--include-path=%s", argv[4 + i]);
+        opts[1 + i] = incOpt;
+    }
+    r = nvrtcCompileProgram(prog, nOpts, opts);
 
     size_t logSize = 0;
     nvrtcGetProgramLogSize(prog, &logSize);

@@ -74,6 +74,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _flashAttnF32;
     private readonly CudaModule _flashAttnF32SplitModule;
     private readonly nint _flashAttnF32Split;
+    private readonly CudaModule _flashV2Module;
+    private readonly nint _flashV2Tf32;
     private readonly nint _flashAttnF32Combine;
 
     // ── Elementwise F32 function handles ─────────────────────────────────
@@ -403,6 +405,11 @@ public sealed class CudaKernels : IDisposable
         _flashAttnF32SplitModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
         _flashAttnF32Split = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_split");
         _flashAttnF32Combine = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_combine");
+        _flashV2Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_v2_tf32.ptx"));
+        _flashV2Tf32 = _flashV2Module.GetFunction("lm_flash_attn_v2_tf32");
+        // Opt the fused flash kernel into >48 KB dynamic shared memory (K/V/S/O tiles ≈ 72 KB for D=128).
+        // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. Ignore failure (kernel launch will surface it).
+        CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
 
         // ── GGUF Dequant ─────────────────────────────────────────────────
         _dequantQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
@@ -1301,6 +1308,24 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             _flashAttnF32, gridDim, 1, 1, blockThreads, 1, 1,
             sharedBytes, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused FlashAttention-2, TF32 tensor cores, F32 accumulate — no-mask MHA, D∈{64,128}, Hkv==Hq.
+    /// Q/out [B,Hq,Sq,D], K/V [B,Hq,Skv,D]. Grid (ceil(Sq/64), Hq, B); block 128 (4 warps); BR=64/BC=32 tiles.</summary>
+    public unsafe void LaunchFlashAttentionV2Tf32(ulong outPtr, ulong q, ulong k, ulong v,
+        int b, int hq, int sq, int skv, int d, float scale, nint stream)
+    {
+        ulong oArg = outPtr, qArg = q, kArg = k, vArg = v;
+        uint bA = (uint)b, hA = (uint)hq, sqA = (uint)sq, skvA = (uint)skv, dA = (uint)d;
+        float scA = scale;
+        void** args = stackalloc void*[10];
+        args[0] = &oArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
+        args[4] = &bA; args[5] = &hA; args[6] = &sqA; args[7] = &skvA; args[8] = &dA; args[9] = &scA;
+        const int BR = 32, BC = 16;   // must match flash_attn_v2_tf32.cu #defines (M2: 34KB smem → 2 blocks/SM)
+        uint grid = (uint)((sq + BR - 1) / BR);
+        uint smem = (uint)((BC * d + BC * d + BR * BC + BR * d) * sizeof(float));
+        CudaDriverApi.cuLaunchKernel(_flashV2Tf32, grid, (uint)hq, (uint)b, 64, 1, 1,
+            smem, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Flash-decoding split phase (plain path: no sink/alibi/softcap/window). Launches

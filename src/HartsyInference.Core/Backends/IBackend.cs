@@ -656,7 +656,10 @@ public interface IBackend : IDisposable
     // ── Attention ───────────────────────────────────────────────────────
 
     /// <summary>Scaled dot-product attention: output = softmax(Q @ K^T / sqrt(d)) @ V</summary>
-    void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale);
+    /// <param name="allowF16">When true, a backend MAY run the attention in F16 for speed (halves score-matrix
+    /// traffic + F16 tensor cores). Callers pass true ONLY when pre-softmax scores are bounded — e.g. Q/K are
+    /// RMS/L2-normalized (Wan) — since unbounded scores (some fp8 archs) overflow F16 and produce black output.</param>
+    void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false);
 
     /// <summary>FlashAttention: fused online-softmax attention that never materializes the score matrix and is
     /// grouped-query aware (no need to replicate K/V). <paramref name="query"/> is <c>[B, Hq, Tq, D]</c>;

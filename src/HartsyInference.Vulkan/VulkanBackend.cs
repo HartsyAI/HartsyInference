@@ -1045,7 +1045,7 @@ public sealed class VulkanBackend : IBackend
     // ── Attention ───────────────────────────────────────────────────────
 
     /// <summary>Naive 3-pass SDPA. Q*K^T -> mask add -> softmax -> *V dispatched once per (B*H) head with base offsets. FlashAttention-style is a Phase-4 optimization.</summary>
-    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
+    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
         using OpScope _ = EnterOp();
         if (query.Shape.Rank != 4)

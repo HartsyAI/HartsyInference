@@ -15,6 +15,7 @@ KERNELS=(
     "lm_f32"
     "flash_attn_f32"
     "flash_attn_f32_split"
+    "flash_attn_v2_tf32"
     "mul_mat_vec_q4k_f32"
     "mul_mat_vec_q6k_f32"
     "mul_mat_vec_q8_0_f32"
