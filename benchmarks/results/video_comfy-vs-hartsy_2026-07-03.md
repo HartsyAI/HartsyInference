@@ -230,13 +230,60 @@ cleanups during new CUDA-context construction must be null-safe / context-scoped
 
 | model | Comfy warm | Hartsy | notes |
 |---|---|---|---|
-| LTX-0.9 2B | **2.84 s** | ~89 s (ported) | 31× gap; block device-ported but RoPE/SDPA/T5/VAE remain |
-| LTX-2.3 22B (audio) | n/a (no Comfy workflow) | ~434 s (ported) vs 451 s | block-swap-bound (streams 19 GB DiT/forward), so attn fix is marginal; coherent video + real 48 kHz audio ✓ |
+| LTX-0.9 2B | **2.84 s** | ~89 s → **16 s** (RoPE) → **15 s** (F16 DiT) | 31× → **5.3× gap**; cold 23 s (was 159 s). Now launch-overhead bound |
+| LTX-2.3 22B (audio) | n/a (no Comfy workflow) | ~434–551 s, block-swap-bound | split-rope now device-ported; coherent video + real 48 kHz audio ✓. Timing noise (contention) > any rope-level gain |
 
 **Found + fixed (same host-loop patterns as Wan):** both `LtxVideo2Attention` (LTX-2.3) and `LtxVideoBlock` (LTX-0.9)
 did the multi-head reshape (`ToBhsd`/`FromBhsd`), AdaLN modulation, shift-scale, and gated-add as **host `DataPointer`
 loops**, and called `ScaledDotProductAttention` without `allowF16`. Ported to device ops (`Permute0213`, `SliceRows`+
 `GatedResidualLastDim`, `AffineBroadcastLastDim`) + `allowF16: true` (LTX RMS-norms Q/K → bounded scores → safe).
-Both verified frame-coherent (LTX-2.3 + real audio). LTX-0.9 still 89 s — remaining: the host `LtxRope.ApplyRotary`
-loop (2 D2H syncs/self-attn), the materialized SDPA (the flash-attn kernel would help universally), T5 encode, LTX VAE.
-Needs a sync-profile pass to target, like Wan. LTX-2.3 is block-swap-bound so its ceiling is the 19 GB/forward stream.
+Both verified frame-coherent (LTX-2.3 + real audio).
+
+**LTX-0.9 RoPE device port (2026-07-04, alpha.43.29-local): 89 s → 16 s warm (5.6×).** Sync-profile (`HARTSY_PROFILE_SYNC`)
+ranked LTX-0.9's true GPU cost: **H2D_MISS_BIG 26 s (37 589 big-tensor cache misses) > Linear 22 s > SDPA 20 s**. The
+misses were the one host loop left in: `LtxRope.ApplyRotary` reads `qn`/`kn` via `DataPointer` (D2H), rotates on the CPU,
+then the next device op (`Permute0213`) re-uploads the whole `[S,dim]` Q/K — a big-tensor miss *per attention*, which also
+caused the wild wall-clock variance (94–313 s). Fix: LTX's cos/sin already use the duplicated-pair layout
+(`cos[2j]==cos[2j+1]`) that the proven `wan_rope_interleaved` device kernel reads (`coff = s·dim + 2i`, identical
+rotation), so `ApplyRotary` was swapped from the host loop to `backend.WanRopeInterleaved(x, cos, sin, seq, 1, dim)` —
+zero `BuildCosSin` change, Q/K stay GPU-resident. Verified frame-coherent (fox in sunlit snowy forest). Remaining gap to
+Comfy's 2.84 s is real compute: materialized SDPA + Linear GEMMs.
+
+**Re-profile after RoPE fix (alpha.43.29):** H2D_MISS_BIG collapsed **37 589→989 (26 s→2 s)** — fix confirmed. New top
+GPU costs: **Linear 8.1 s > SDPA 7.2 s** (sync-inflated; ~10 s/gen real GPU vs 15 s/gen warm wall → ~1/3 of wall is
+launch/host overhead, not GPU). LTX-0.9 ships **all-F32 weights** (908 tensors), so its GEMMs ran TF32 tensor cores
+(~½ F16 throughput). **F16 DiT-weight cast (alpha.43.30):** `LtxVideoBlock` loads the 2D q/k/v/o + ff weights as F16
+(→ `ResolveGemmDtype(F32 act, F16 w)=F16`, F32 accumulate = lossless reduction, same as Comfy's bf16; norms/bias stay
+F32). Coherent. But only **16→15 s warm** because at 512×320×25f LTX-0.9 is just ~640 tokens → **launch-overhead bound**
+(50 k+ tiny kernel launches/gen: 34 k Linear, 27 k Permute0213, 20 k RmsNorm), so halving GEMM throughput barely moves
+wall-clock. F16 still worth keeping: **halves DiT VRAM (9.4→4.7 GB)** and the payoff grows with resolution/frames (where
+compute dominates). Cold 23→32 s from one-time host F32→F16 weight cast (amortizes — load once, gen many). **Remaining
+gap to Comfy is now structural: kernel-launch latency at small token counts → needs CUDA graphs or op fusion (a big
+engine change), not more dtype/device-port tweaks.**
+
+**FinalLayer device port (alpha.43.31):** the output `FinalLayer` still did a host `LayerNorm` + a host affine loop over
+`[s,dim]` per step (then re-uploaded `normed` for the final Linear). Ported to `backend.LayerNormNoAffine` +
+`AffineBroadcastLastDim` (folding the +1 into the scale) — the last per-step host loop in LTX-0.9's forward. Warm stays
+14–15 s (no regression; confirms the launch-bound plateau), output coherent. LTX-0.9 forward is now fully device-resident.
+
+**⚠️ GPU_ID footgun (recurred 2026-07-04):** backend #2's `GPU_ID` in `Data/Backends.fds` flipped `0→1` again between
+deploys (concurrent edits / Swarm persistence), silently moving Hartsy onto the **RTX 3060** (SM 8.6) — a warm gen read
+25 s instead of 15 s purely from the slower card. **Hartsy GPU_ID 0 = 4090, 1 = 3060** (opposite nvidia-smi's index).
+Always confirm the init line says `RTX 4090, SM 8.9` before trusting a timing. Fix: `sed -i '92s/GPU_ID: 1/GPU_ID: 0/'
+Data/Backends.fds` (kill Swarm first so it can't rewrite the file on exit), then restart.
+
+**LTX-2.3 split-rope device port (alpha.43.32):** wrote a dedicated `ltx2_split_rope_f32` CUDA kernel (per-head cos
+`[S,dim/2]`, one angle per `(i,i+headDim/2)` pair — matches `LtxVideo2Rope.Split`; `wan_rope_interleaved`/`dit_rope_f32`
+don't) + `IBackend.Ltx2SplitRope` (host reference default, CUDA override); `LtxVideo2Rope.ApplyRotary` now dispatches
+Split→`Ltx2SplitRope`, Interleaved→`WanRopeInterleaved`. **Verified: 2/2 gens coherent video + real 48 kHz stereo audio**
+(fox in sunlit snowy forest). **Timing inconclusive:** 373 s and 551 s across the two runs — a >170 s swing that straddles
+the ~434–451 s baseline, because LTX-2.3 is fundamentally block-swap-bound (fp8 22B streams 19 GB/forward on a 24 GB
+card) and the shared-PCIe bus is contended by the 3060 (seen at 100% util). The rope re-uploads the fix removes are a few
+hundred MB — negligible against 19 GB/forward — so the port is correct + architecturally cleaner (device-resident RoPE,
+less PCIe + host traffic) but cannot produce a measurable wall-clock win here. **The only real lever for LTX-2.3 speed is
+the block-swap itself** (streaming/compute overlap + prefetch, or more VRAM), not attention-level ops.
+
+**Env gotcha (2026-07-04):** the NVIDIA driver's max PTX ISA dropped to 9.0 (was ≥9.2 on 07-03). The committed GGUF
+matvec PTX (`mul_mat_vec_q4k/q6k/q8_0_f32.ptx`) were `.version 9.2` and are loaded *eagerly* at backend init → CUDA 222
+PTX-JIT failure killed the whole backend. Rebuilt to 9.0 with `nvrtc_compile ... compute_80` (same as the flash kernel).
+These are **still committed at 9.2 in git** — any fresh checkout will hit this until the 9.0 rebuilds are committed.

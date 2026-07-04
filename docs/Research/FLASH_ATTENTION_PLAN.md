@@ -93,3 +93,14 @@ But **SLOWER than baseline: 54.7s vs 23.65s** — the M1 layout keeps the O accu
 optimizations: keep O in REGISTERS (WMMA accumulator fragments held across the whole K-loop, not smem round-tripped —
 the tricky part is the per-row `corr` rescale of fragment elements), shrink smem for ≥2 blocks/SM, `cp.async`
 double-buffer K/V, parallelize the softmax. Correctness oracle: the current M1 kernel + the materialized path.
+
+## M2 attempt 2026-07-04: occupancy insufficient — kernel needs deep rework to beat cublas
+Shrank tiles BR=64/BC=32→32/16 (72KB→34KB smem, 1→2 blocks/SM). Result: 54.7s→52.2s (~5% only). Still CORRECT.
+**Honest conclusion:** my hand-written WMMA flash kernel is ~21.7ms/attn vs ~13ms for the materialized+cublas+F16
+path — i.e. SLOWER, and ~35× off the theoretical TF32 optimum. Occupancy is not the bottleneck; the kernel is just
+far less efficient than cublas (tiny 16×16 tiles, SERIAL per-row softmax, smem-O round-trip per K-step, per-K-step
+`__syncthreads`). Beating cublas+F16-materialized needs a genuinely competitive kernel (parallel warp-reduce softmax,
+register-resident O accumulator, larger tiles, cp.async, warp specialization) — a multi-day expert effort, not a
+tweak spot. **Pragmatic recommendation: keep the materialized+F16 path (the shipped Wan 2.85×) as the default; leave
+this correct M1/M2 kernel as a documented WIP behind `HARTSY_SDPA_V2` (off by default).** The materialized path with
+F16 scores (allowF16) is already a good attention path; the bigger wins are elsewhere (per-arch host-loop ports, etc.).

@@ -79,8 +79,8 @@ public sealed unsafe class LtxVideo2Attention
         // Full-width QK-RMSNorm (across heads), then optional interleaved RoPE before the head split.
         Tensor qn = new(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq!, _qkEps); q.Dispose();
         Tensor kn = new(k.Shape, DType.F32); backend.RmsNorm(kn, k, _nk!, _qkEps); k.Dispose();
-        if (qRope is not null) qRope.ApplyRotary(qn, qCos!, qSin!);
-        if (kRope is not null) kRope.ApplyRotary(kn, kCos!, kSin!);
+        if (qRope is not null) qRope.ApplyRotary(backend, qn, qCos!, qSin!);
+        if (kRope is not null) kRope.ApplyRotary(backend, kn, kCos!, kSin!);
 
         Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
         Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();

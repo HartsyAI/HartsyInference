@@ -128,10 +128,11 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
         Tensor textEmbeddings = CfgHelper.ConcatLastDim(clipLHidden, clipGHidden);
         clipLHidden.Dispose();
-        // Keep clipGHidden alive when StepSwap is active — refiner UNet uses CLIP-G alone
-        // (CrossAttentionDim=1280) instead of the concat (2048). Disposed at end of pipeline.
-        Tensor? clipGForRefiner = useStepSwap ? clipGHidden : null;
-        if (!useStepSwap) clipGHidden.Dispose();
+        // Refiner phase cross-attends to CLIP-G alone (CrossAttentionDim=1280, not the 2048 concat). Prefer a
+        // separate <refiner>-prompt conditioning when supplied, else reuse the base prompt's CLIP-G. clipGHidden
+        // is disposed here unless it IS the chosen refiner conditioning (kept alive to the end of the pipeline).
+        Tensor? clipGForRefiner = useStepSwap ? (refiner!.RefinerConditioning ?? clipGHidden) : null;
+        if (!ReferenceEquals(clipGForRefiner, clipGHidden)) clipGHidden.Dispose();
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
         // 2. ADM size conditioning (orig_size = target_size = request resolution; no crop)
@@ -169,7 +170,12 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         pooledOutput?.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
-        clipGForRefiner?.Dispose();
+        // Only dispose clipGForRefiner when it's the base clipGHidden we kept alive — a caller-supplied
+        // RefinerConditioning is owned by the caller.
+        if (clipGForRefiner is not null && !ReferenceEquals(clipGForRefiner, refiner?.RefinerConditioning))
+        {
+            clipGForRefiner.Dispose();
+        }
 
         // 6. VAE decode — free UNet weights to reclaim VRAM for high-res VAE conv2d buffers.
         // CLIP-L/CLIP-G stay resident (they don't expose EnumerateWeights yet); BF16 VAE

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -241,53 +242,20 @@ public sealed unsafe class LtxVideo2Rope
     /// split). Interleaved: cos/sin are <c>[S, dim]</c>, pairs are adjacent lanes. Split: cos/sin are <c>[S, dim/2]</c>,
     /// head <c>h</c> rotates its two halves <c>(h·headDim+i, h·headDim+i+headDim/2)</c> using cos/sin lane
     /// <c>h·(headDim/2)+i</c> (matches diffusers <c>apply_split_rotary_emb</c> after the per-head reshape).</summary>
-    public void ApplyRotary(Tensor x, Tensor cos, Tensor sin)
+    public void ApplyRotary(IBackend backend, Tensor x, Tensor cos, Tensor sin)
     {
         int seq = (int)x.Shape[0];
         if ((int)x.Shape[1] != _dim)
             throw new ArgumentException($"x dim {x.Shape[1]} != rope dim {_dim}.", nameof(x));
-        float* xp = (float*)x.DataPointer;
-        float* cp = (float*)cos.DataPointer;
-        float* sp = (float*)sin.DataPointer;
-
+        // Device-resident RoPE. The host DataPointer loop D2H'd + then re-uploaded the [S,dim] Q/K on every attention;
+        // on the block-swap-bound LTX-2.3 22B those re-uploads fought the 19 GB/forward weight stream on PCIe.
+        //  - Interleaved: adjacent-pair (2j,2j+1) over the full dim, duplicated-pair cos[2j]==cos[2j+1] → the shared
+        //    wan_rope_interleaved kernel (headDim=dim, heads=1), identical to LtxRope / LTX-0.9.
+        //  - Split: rotate-half within each head, per-head cos[S,dim/2] with one angle per pair → the dedicated
+        //    ltx2_split_rope kernel.
         if (_ropeType == RopeType.Interleaved)
-        {
-            int pairs = _dim / 2;
-            for (int s = 0; s < seq; s++)
-            {
-                long off = (long)s * _dim;
-                for (int j = 0; j < pairs; j++)
-                {
-                    long i0 = off + 2 * j;
-                    long i1 = i0 + 1;
-                    float re = xp[i0], im = xp[i1];
-                    float c = cp[i0], sn = sp[i0];   // cos[2j] == cos[2j+1], sin likewise
-                    xp[i0] = re * c - im * sn;
-                    xp[i1] = im * c + re * sn;
-                }
-            }
-        }
-        else   // Split: rotate the two halves within each head.
-        {
-            int r = _headDim / 2;                     // per-head cos/sin width = headDim/2
-            for (int s = 0; s < seq; s++)
-            {
-                long xoff = (long)s * _dim;
-                long coff = (long)s * _cosWidth;
-                for (int h = 0; h < _numHeads; h++)
-                {
-                    long headBase = xoff + (long)h * _headDim;
-                    long cosBase = coff + (long)h * r;
-                    for (int i = 0; i < r; i++)
-                    {
-                        float a = xp[headBase + i];
-                        float b = xp[headBase + i + r];
-                        float c = cp[cosBase + i], sn = sp[cosBase + i];
-                        xp[headBase + i] = a * c - b * sn;
-                        xp[headBase + i + r] = b * c + a * sn;
-                    }
-                }
-            }
-        }
+            backend.WanRopeInterleaved(x, cos, sin, seq, 1, _dim);
+        else
+            backend.Ltx2SplitRope(x, cos, sin, seq, _numHeads, _headDim);
     }
 }

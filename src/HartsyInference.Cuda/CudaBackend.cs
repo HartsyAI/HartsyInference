@@ -1306,6 +1306,29 @@ public sealed class CudaBackend : IBackend
     /// <summary>Wan-Video interleaved in-place RoPE (shared cos/sin) — keeps q/k GPU-resident through RoPE so the
     /// whole RmsNorm→RoPE→transpose→SDPA chain never leaves the device. In-place: x's device buffer is rotated and
     /// re-cached to the same pointer (no reallocation, no host round-trip).</summary>
+    public unsafe void Ltx2SplitRope(Tensor x, Tensor cos, Tensor sin, int seqLen, int numHeads, int headDim)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("Ltx2SplitRope");
+        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA Ltx2SplitRope supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pX = 0, pCos = 0, pSin = 0;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);       // in-place target (cached activation)
+            pCos = GpuTransferHelper.CopyToDevice(cos);
+            pSin = GpuTransferHelper.CopyToDevice(sin);
+            _kernels!.LaunchLtx2SplitRope(pX, pCos, pSin, seqLen, numHeads, headDim, _stream.Handle);
+            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));   // in-place: re-assert x → pX
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pCos);
+            GpuTransferHelper.FreeDevice(pSin);
+        }
+    }
+
     public unsafe void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
