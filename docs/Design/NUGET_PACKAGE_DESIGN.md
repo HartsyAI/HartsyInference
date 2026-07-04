@@ -5,10 +5,12 @@
 ## Why Multiple Packages?
 
 Monolithic NuGet is wrong because:
-- SwarmUI extensions shouldn't pull audio/video code
+- SwarmUI extensions and desktop apps shouldn't pull audio/video code they don't use
 - CUDA dependencies should be opt-in
-- Server adds ASP.NET deps desktop apps don't want
+- LLM text generation should be an explicit add, not forced on image-only consumers
 - CPU-only users shouldn't need CUDA
+
+A single meta-package (`HartsyInference`) is published for consumers who want the whole modality stack in one reference. The `HartsyInference.LLM` package is added separately (see the meta-package note below).
 
 ## Package List
 
@@ -16,9 +18,10 @@ Monolithic NuGet is wrong because:
 
 | Package | Description | Dependencies |
 |---|---|---|
-| **Core** | Tensor types, `IBackend`, `IScheduler`, `IModel`, interfaces, enums, logs | .NET 10 only |
-| **ModelHandler** | Safetensors/GGUF loaders, registry, HF Hub download, caching | Core |
+| **Core** | Tensor types, `IBackend`, `IScheduler`, `IModel`, interfaces, enums, logs | net8.0 / net10.0 |
+| **ModelHandler** | Safetensors/GGUF/PyTorch-pickle loaders, registry, HF Hub download, caching | Core |
 | **Tokenizers** | BPE (CLIP), SentencePiece (T5), Whisper tokenizer | Core, Microsoft.ML.Tokenizers |
+| **Phonemizer** | Pure-C# espeak-ng-style G2P / IPA phonemization for phoneme-input TTS | Core |
 | **Cpu** | SIMD kernels: Conv2D, GroupNorm, SDPA, matmul via `System.Runtime.Intrinsics` | Core |
 | **Cuda** | PTX management, cuBLAS HGEMM, cuDNN optional, memory pool | Core, Cpu (fallback) |
 | **Vulkan** | SPIR-V shaders, compute pipelines, memory allocator, cross-vendor GPU | Core, Cpu (fallback) |
@@ -27,6 +30,7 @@ Monolithic NuGet is wrong because:
 
 | Package | Description | Dependencies |
 |---|---|---|
+| **LLM** | Native LLM text generation: config-driven generic decoder transformer (Qwen2/Qwen3/Llama/Mistral), GGUF quantized inference, device-resident KV cache, sampler chain, chat templates. Also backs text encoders. | Core, ModelHandler, Tokenizers |
 | **Diffusion** | SD1.5/SDXL/SD3/Flux pipelines, UNet, DiT, VAE, CLIP, schedulers, LoRA, ControlNet | Core, ModelHandler, Tokenizers |
 | **Audio** | Whisper STT, Kokoro/Parler TTS, voice conversion, STFT/mel, vocoder | Core, ModelHandler |
 | **Vision** | CLIP image encoder, embeddings, YOLO, SAM, face detection | Core, ModelHandler |
@@ -34,12 +38,23 @@ Monolithic NuGet is wrong because:
 | **Interactive** | Action-conditioned, real-time, frame-by-frame world models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft). `IInteractiveSession` streaming loop, `IActionEncoder` abstractions, memory-augmented cross-attn primitive, CameraNet. Strictly user-driven runtime — does not appear in offline pipelines. | Video |
 | **ThreeD** | 3D asset generation (image→mesh/splat). Representation-agnostic foundation: marching cubes, glTF/OBJ/PLY export, triplane/grid sampling, geometry types. Models: Hunyuan3D-2 (flow-match DiT + ShapeVAE) and TripoSR (triplane/NeRF LRM). | Diffusion, Vision |
 
-### Application
+### Meta package
 
-| Package | Description | Dependencies |
+| Package | Description | References |
 |---|---|---|
-| **Server** | ASP.NET OpenAI API, SSE, model mgmt, auth, rate limiting | All above + ASP.NET Core |
-| **SwarmUI** | In-process SwarmUI backend extension | Server, SwarmUI SDK |
+| **HartsyInference** | Dependencies-only meta-package: one reference pulls the whole modality stack | Core, Cpu, Cuda, Vulkan, ModelHandler, Tokenizers, Diffusion, Audio, Vision, Video, Interactive, ThreeD |
+
+> **Meta-package note.** `HartsyInference` references the 12 packages above. It does **not** include **LLM**, **Phonemizer**, **Server**, or **Cli**. Consumers who want native LLM text generation add it explicitly: `dotnet add package HartsyInference.LLM`. Phoneme-input TTS pulls `HartsyInference.Phonemizer` the same way.
+
+### Consuming the engine
+
+The engine is consumed three ways, in priority order:
+
+1. **SwarmUI backend extension (recommended):** the [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend) repo. It is a SwarmUI extension (not a package in this repo) that registers HartsyInference as an alternative to the ComfyUI backend and drives the pipelines.
+2. **NuGet libraries:** reference the meta-package or individual modality packages.
+3. **Sample CLIs:** the per-modality apps under `samples/` and `src/HartsyInference.Cli` (developer and verification tools).
+
+> **Dropped: first-party server.** `HartsyInference.Server` physically exists in `src/` as abandoned ASP.NET scaffolding. It is **not** a supported or advertised path: there is no OpenAI-compatible server product, and none is planned. Do not depend on it.
 
 ### Utility (not shipped)
 
@@ -58,16 +73,18 @@ Monolithic NuGet is wrong because:
        |          \  |  /
    Tokenizers    (all three)
        |
-  Diffusion  Audio  Vision
-       |       |       |
-       \_______|_______/
-               |
-          Video (Phase 9)         ThreeD (Phase 11 — Diffusion + Vision)
-               |
-        Interactive (Phase 10 — world models)
-               |
-          Server → SwarmUI
+  LLM   Diffusion  Audio  Vision
+        |       |       |
+        \_______|_______/
+                |
+           Video (Phase 9)         ThreeD (Phase 11 — Diffusion + Vision)
+                |
+         Interactive (Phase 10 — world models)
+
+  Consumers: SwarmUI backend extension (external repo) · CLIs · apps
 ```
+
+LLM depends only on Core + ModelHandler + Tokenizers (not on the visual stack). Phonemizer depends on Core.
 
 **Runtime backend selection:**
 - NVIDIA → Cuda (best perf)
@@ -91,9 +108,14 @@ Monolithic NuGet is wrong because:
 <PackageReference Include="HartsyInference.ModelHandler" />
 ```
 
-**SwarmUI backend:**
+**SwarmUI backend:** installed as a SwarmUI extension from [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend), not a NuGet reference in your own project. The extension pins the engine packages it needs.
+
+**Native LLM text generation (NVIDIA):**
 ```xml
-<PackageReference Include="HartsyInference.SwarmUI" />
+<PackageReference Include="HartsyInference.LLM" />
+<PackageReference Include="HartsyInference.Cuda" />
+<PackageReference Include="HartsyInference.ModelHandler" />
+<PackageReference Include="HartsyInference.Tokenizers" />
 ```
 
 **Audio-only (CPU):**

@@ -11,7 +11,7 @@
 
 ## Summary
 
-The builder is a small, dependency-free library: a **`StructuredPrompt` data model** (scene description, style block, ordered list of elements each with optional bounding box + color palette), a set of **`IPromptDialect` serializers** (one per target model/format), and an optional **`IMagicPromptExpander`** hook (plug an LLM — dotLLM, Claude API, or a local Gemma/Qwen — to turn a plain string into a `StructuredPrompt`). The first dialect is **`Ideogram4Dialect`**, which emits the exact JSON Ideogram 4 was trained on (correct key ordering, compact separators, uppercase `#RRGGBB`, `0–1000` normalized `[y_min,x_min,y_max,x_max]` boxes). Later dialects cover **regional-attention prompting** (for models that take per-region prompt + mask instead of JSON) and **plain natural language** (flatten the structure to prose).
+The builder is a small, dependency-free library: a **`StructuredPrompt` data model** (scene description, style block, ordered list of elements each with optional bounding box + color palette), a set of **`IPromptDialect` serializers** (one per target model/format), and an optional **`IMagicPromptExpander`** hook (plug an LLM via the native `HartsyInference.LLM` package, the Claude API, or a local Gemma/Qwen, to turn a plain string into a `StructuredPrompt`). The first dialect is **`Ideogram4Dialect`**, which emits the exact JSON Ideogram 4 was trained on (correct key ordering, compact separators, uppercase `#RRGGBB`, `0–1000` normalized `[y_min,x_min,y_max,x_max]` boxes). Later dialects cover **regional-attention prompting** (for models that take per-region prompt + mask instead of JSON) and **plain natural language** (flatten the structure to prose).
 
 This lives in **`src/HartsyInference.Diffusion/Prompting/`** (image-generation specific; not Core). It is **pure data + serialization** — no backend, no tensors, no hot path — so it has no performance constraints and no package-boundary concerns beyond Diffusion. The LLM expander is an interface only; concrete expanders live behind it so the core builder never depends on any LLM SDK.
 
@@ -137,7 +137,7 @@ public interface IMagicPromptExpander
 - The **system prompts** that instruct the LLM to emit Ideogram's JSON live in `ideogram4/magic_prompt_system_prompts/` — port the relevant one as the default expander template.
 - Concrete expanders (each behind the interface, no hard dependency in the core builder):
   - **`ClaudeMagicPromptExpander`** — calls the Claude API (the upstream repo offers `ClaudeOpusMagicPromptV1` / `ClaudeSonnetMagicPromptV1` via OpenRouter; we'd target the Anthropic API directly). See the `claude-api` skill for current model IDs/params before wiring.
-  - **`DotLlmMagicPromptExpander`** — use a local LLM via the paired dotLLM engine (matches the project's "pairs with dotLLM" positioning) — fully offline, no API key.
+  - **`LocalLlmMagicPromptExpander`** — use a local LLM via the native `HartsyInference.LLM` package (config-driven Qwen2/Qwen3/Llama/Mistral decoder), fully offline, no API key.
   - **`LocalGemmaMagicPromptExpander`** — mirrors what ComfyUI does (local Gemma-4). Lower priority.
 - **Important caveat from upstream:** "The magic prompt shipped here is **not** the same magic prompt used in production at Ideogram.ai — results will differ." Set user expectations; the expander is a convenience, not a fidelity guarantee.
 - **Safety note:** Ideogram's safety filter has a **higher false-positive rate for non-JSON-like prompts** — another reason the structured path is preferred.

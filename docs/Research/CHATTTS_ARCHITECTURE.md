@@ -579,7 +579,7 @@ First-yield happens after batch 3 (~3 * 12000 = 36000 samples worth of generated
 
 ## Implementation Notes for HartsyInference
 
-1. **LlamaModel is standard.** We will have already built a causal LLaMA implementation for dotLLM (RoPE + RMSNorm + SwiGLU FFN, KV cache). The GPT here is a stock LLaMA with hidden=768, layers=20, heads=12 — reuse the dotLLM Llama block directly. The only ChatTTS-specific wrapper is:
+1. **LlamaModel is standard.** We will have already built a causal LLaMA implementation in the native HartsyInference.LLM package (RoPE + RMSNorm + SwiGLU FFN, KV cache). The GPT here is a stock LLaMA with hidden=768, layers=20, heads=12 — reuse the HartsyInference.LLM Llama block directly. The only ChatTTS-specific wrapper is:
    - Replace `emb_tokens` with a switchable `emb_text` (21178x768) + 4x `emb_code[i]` (626x768 each). At each step pick the right embedding table based on which mode we're in.
    - Multi-head output: 4 `head_code[i]` (768 -> 626) for InferCode, 1 `head_text` (768 -> 21178) for RefineText. Sample each VQ head independently and concatenate.
    - Speaker injection: a single in-place embedding overwrite at `[spk_emb]` token positions. Use a span-find on token_ids before the first forward.

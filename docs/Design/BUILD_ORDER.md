@@ -11,11 +11,12 @@ Phase 3.5: Vulkan backend
 Phase 4: SDXL pipeline → Flux pipeline
 Phase 5: Audio (Whisper → TTS)
 Phase 6: Vision (CLIP → detection)
-Phase 7: Server (OpenAI-compatible API)
-Phase 8: SwarmUI extension
+Phase 7: Server (OpenAI-compatible API) — DROPPED (no first-party server)
+Phase 8: SwarmUI backend extension (external repo)
 Phase 9: Video (LTX-Video → Wan → Lance → Cosmos-Predict V2W) + shared interactive infra
 Phase 10: Interactive / World Models (Matrix-Game 2/3, Oasis, Hunyuan-GameCraft)
 Phase 11: 3D Asset Generation (Hunyuan3D-2, TripoSR) — new HartsyInference.ThreeD package
+Phase 12: Native LLM text generation — new HartsyInference.LLM package
 ```
 
 ## Phase 1 — Foundation (Core + ModelHandler + Cpu)
@@ -138,16 +139,13 @@ Phase 11: 3D Asset Generation (Hunyuan3D-2, TripoSR) — new HartsyInference.Thr
 | Image/text embeddings | Vision | Standalone pipelines |
 | YOLO pipeline + NMS | Vision | Object detection end-to-end |
 
-## Phase 7 — Server
+## Phase 7 — Server (DROPPED)
 
-| Deliverable | Package | Description |
-|---|---|---|
-| Image/audio endpoints | Server | `/v1/images/*`, `/v1/audio/*` |
-| SSE streaming | Server | Step-by-step progress |
-| Model management + queue + auth | Server | `/v1/models`, FIFO queue, optional API key |
+The OpenAI-compatible REST server is no longer a goal. The `HartsyInference.Server` package remains in `src/` as abandoned ASP.NET scaffolding, but no server product is built or planned. The engine is consumed via the SwarmUI backend extension, NuGet libraries, and the sample CLIs.
 
 ## Phase 8 — SwarmUI Extension
-**Goal:** Register as in-process SwarmUI backend.
+**Goal:** Register HartsyInference as a SwarmUI backend, an alternative to the ComfyUI backend.
+**Location:** external repo [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend). This is the recommended way to run the engine.
 
 ## Phase 9 — Video + Interactive Infra (Future)
 
@@ -191,3 +189,17 @@ stack + a new representation-agnostic 3D foundation. See [PHASE_11_THREED.md](..
 | TripoSR (image→mesh) | ThreeD | Feed-forward LRM → triplane → NeRF MLP → marching cubes (deterministic). 🔧 structural. |
 | Reusable `.pt` pickle loader | ModelHandler | Landed with GameCraft; enables `.pt`-only models (also used by future 3D checkpoints). |
 | Deferred | ThreeD | TRELLIS (Gaussian splats + sparse 3D ops), texture/PBR paint, splat rendering. |
+
+## Phase 12 — Native LLM Text Generation
+
+New `HartsyInference.LLM` package (deps: Core + ModelHandler + Tokenizers). One config-driven generic decoder
+transformer serves LLMs and text encoders; GGUF quantized inference is CUDA-first. Full design and milestones:
+[LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md).
+
+| Deliverable | Package | Description |
+|---|---|---|
+| GPU-resident fused decode path | Cuda | Gating prerequisite: keep activations + KV cache device-resident across single-token steps |
+| `GenericTransformer` + config presets | LLM | One core for Qwen2/Qwen3/Llama/Mistral (causal) and bidirectional text encoders |
+| KV cache + sampler chain + chat templates | LLM | Device-resident cache, composable samplers, per-family chat templating |
+| GGUF quantized matmul (Q4_K/Q6_K/Q8_0) | Cuda | Fused mul_mat_vec decode kernels + quantized LM head |
+| Text encoder unification | LLM | Re-target diffusion/audio transformer + encoder code onto the generic core |

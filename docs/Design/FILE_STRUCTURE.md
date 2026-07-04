@@ -9,10 +9,15 @@ HartsyInference/
 ├── HartsyInference.slnx / Directory.Build.props / Directory.Packages.props
 ├── CLAUDE.md / GEMINI.md / README.md / LICENSE / CONTRIBUTING.md
 ├── src/
-│   ├── HartsyInference.Core / ModelHandler / Tokenizers / Cpu / Cuda / Vulkan
-│   ├── HartsyInference.Diffusion / Audio / Vision / Video / Interactive / Server
+│   ├── HartsyInference.Core / ModelHandler / Tokenizers / Phonemizer / Cpu / Cuda / Vulkan
+│   ├── HartsyInference.LLM / Diffusion / Audio / Vision / Video / Interactive / ThreeD
+│   ├── HartsyInference.Meta        (dependencies-only meta-package)
+│   ├── HartsyInference.Cli         (developer / verification CLI)
+│   └── HartsyInference.Server      (abandoned ASP.NET scaffolding — not a product)
 ├── tests/ / samples/ / benchmarks/ / docs/ / native/
 ```
+
+> The recommended way to run the engine is the external [SwarmUI-HartsyInference-Backend](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend) extension; it lives in its own repo, not here.
 
 ---
 
@@ -67,6 +72,40 @@ HartsyInference/
 | `T5Tokenizer.cs` | SentencePiece, 4096-token context |
 | `WhisperTokenizer.cs` | Multilingual BPE + special tokens |
 | `TokenizerCache.cs` | Reuse tokenizers across pipeline instances |
+
+---
+
+## src/HartsyInference.Phonemizer/
+
+Pure-C# G2P / IPA phonemization (an espeak-ng-style port) for phoneme-input TTS models. Depends on Core only.
+
+| File | Description |
+|---|---|
+| `IPhonemizer.cs` / `PhonemeIdMap.cs` | Phonemizer interface + phoneme-to-id mapping |
+| `Espeak/EspeakTranslator.cs` / `EspeakPhonemizer.cs` | Text → phoneme translation, top-level phonemizer |
+| `Espeak/EspeakPhonemeInterpreter.cs` / `EspeakProgram.cs` / `EspeakPhonemeRenderer.cs` | Phoneme-program bytecode VM (allophones + IPA), rule interpreter, renderer |
+| `Espeak/EspeakDictFile.cs` / `EspeakWordLookup.cs` / `EspeakRuleCodes.cs` / `EspeakStress.cs` | Compiled-dictionary parser, per-word lookup, letter/rule codes, stress rules |
+| `Resources/ipa_phoneme_map*.tsv` | IPA phoneme maps (base + en / en-us) embedded as resources |
+
+---
+
+## src/HartsyInference.LLM/
+
+Native LLM text generation. One config-driven generic transformer serves decoder LLMs, text encoders, and
+seq2seq. Depends on Core + ModelHandler + Tokenizers. See [LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md).
+
+| File | Description |
+|---|---|
+| `Transformer/GenericTransformer.cs` / `TransformerConfig.cs` | Config-driven block stack (Qwen2/Qwen3/Llama/Mistral) + config record with presets |
+| `Transformer/KvCache.cs` / `FixedKvCache.cs` / `IKvCache.cs` / `KvCaches.cs` | Device-resident KV cache variants |
+| `Transformer/MoeFeedForward.cs` / `GgufConfigFactory.cs` | MoE FFN routing; GGUF metadata → config |
+| `Generation/TextGenerationPipeline.cs` / `GgufLanguageModel.cs` / `GenerationRequest.cs` / `GenerationResult.cs` / `ContinuousBatchScheduler.cs` | Prefill→decode→sample loop, GGUF model wrapper, request/result types, batching |
+| `Sampling/SamplerChain.cs` / `ISamplerStep.cs` / `TemperatureStep.cs` / `TopKStep.cs` / `TopPStep.cs` / `MinPStep.cs` / `RepetitionPenaltyStep.cs` | Composable sampler chain |
+| `ChatTemplates/ChatTemplateRegistry.cs` / `ChatMlTemplate.cs` / `JinjaChatTemplate.cs` / `JinjaEngine.cs` | Chat templating incl. a Jinja engine for GGUF-embedded templates |
+| `Embeddings/BertEmbeddingModel.cs` / `DecoderEmbeddingModel.cs` | Text-embedding heads on the generic core |
+| `Seq2Seq/T5Model.cs` | Encoder-decoder (T5) on the shared core |
+| `Ssm/MambaModel.cs` / `Mamba2Model.cs` / `RwkvModel.cs` / `Rwkv7Model.cs` | State-space / RWKV sequence models |
+| `Multimodal/MllamaGenerator.cs` / `Qwen25VlEncoder.cs` / `SiglipVlmEncoder.cs` / `MultimodalGenerator.cs` | VLM generators + vision encoders (Llama-3.2-Vision, Qwen2.5-VL) |
 
 ---
 
@@ -206,13 +245,23 @@ HartsyInference/
 | `Models/Hunyuan3D/*` | Hunyuan3D-2 image→mesh: VecSet flow-match DiT + ShapeVAE occupancy decoder + converter |
 | `Models/TripoSr/*` / `Pipelines/TripoSrPipeline.cs` | TripoSR image→mesh: triplane transformer + NeRF MLP decoder (feed-forward) |
 
-## src/HartsyInference.Server/
+## src/HartsyInference.Cli/
+
+Developer / verification CLI (`Program.cs`) that references most modality packages (Diffusion, LLM, Audio,
+Vision, Video, Interactive) plus the backends. Used for local runs and parity checks, not a shipped product.
+
+---
+
+## src/HartsyInference.Server/  (abandoned — not a product)
+
+ASP.NET scaffolding left in the tree from the dropped Phase 7 server. **Not supported or advertised**; there is
+no OpenAI-compatible server product and none is planned. Kept only so the code is not lost; do not depend on it.
 
 | File | Description |
 |---|---|
 | `Setup/HartsyInferenceServiceExtensions.cs` / `HartsyInferenceServerOptions.cs` | DI registration, server options |
-| `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement, **InteractiveSessionEndpoint** (WebSocket) |
-| `Streaming/SseProgressStream.cs` / `AudioChunkStream.cs` / `InteractiveFrameStream.cs` | SSE progress, audio chunk streaming, interactive frame serialization (PNG / JPEG / raw RGB) |
+| `Endpoints/` | ImageGeneration, AudioTranscription, Vision, ModelManagement, InteractiveSessionEndpoint (WebSocket) |
+| `Streaming/SseProgressStream.cs` / `AudioChunkStream.cs` / `InteractiveFrameStream.cs` | SSE progress, audio chunk streaming, interactive frame serialization |
 | `Queue/InferenceQueue.cs` / `InferenceQueueEntry.cs` | FIFO inference queue |
 | `Auth/ApiKeyMiddleware.cs` | Optional API key validation |
 
@@ -220,25 +269,35 @@ HartsyInference/
 
 ## tests/
 
-| Project | Tests |
+One test project per package plus shared fixtures and Python references.
+
+| Project | Scope |
 |---|---|
-| `HartsyInference.Core.Tests` | TensorTests, TensorShapeTests, NativeBufferTests |
-| `HartsyInference.ModelHandler.Tests` | SafeTensorsLoaderTests, GgufLoaderTests |
-| `HartsyInference.Cpu.Tests` | MatMulKernelTests, Conv2DKernelTests, NormKernelTests, AttentionKernelTests |
-| `HartsyInference.Diffusion.Tests` | SchedulerTests, ClipTokenizerTests, PipelineIntegrationTests |
-| `HartsyInference.Audio.Tests` | StftTests, MelSpectrogramTests, WhisperIntegrationTests |
-| `HartsyInference.Server.Tests` | ImageApiTests |
+| `HartsyInference.Core.Tests` | Tensor, TensorShape, NativeBuffer, finalizer cleanup |
+| `HartsyInference.ModelHandler.Tests` | Safetensors, GGUF, PyTorch-pickle loaders |
+| `HartsyInference.Cpu.Tests` | MatMul, Conv2D, Norm, Attention kernels |
+| `HartsyInference.Cuda.Tests` | CUDA kernels, multi-backend isolation |
+| `HartsyInference.Vulkan.Tests` | SPIR-V kernels vs CPU/CUDA reference |
+| `HartsyInference.Tokenizers.Tests` / `HartsyInference.Phonemizer.Tests` | Tokenizer + G2P parity |
+| `HartsyInference.LLM.Tests` | Generic transformer, sampler chain, chat templates, decode parity |
+| `HartsyInference.Diffusion.Tests` | Schedulers, tokenizer, pipeline integration |
+| `HartsyInference.Audio.Tests` / `HartsyInference.Vision.Tests` | STT/TTS + CLIP/YOLO/SAM |
+| `HartsyInference.Video.Tests` / `HartsyInference.Interactive.Tests` / `HartsyInference.ThreeD.Tests` | Video, world-model, and 3D pipelines |
+| `HartsyInference.Server.Tests` | Legacy scaffolding tests (server is dropped) |
+| `HartsyInference.Tests.Common` / `python-reference/` | Shared test helpers + Python golden-reference scripts |
 
 ---
 
 ## samples/
 
+Per-modality sample CLI apps plus offline conversion tools (developer / verification tools).
+
 | Sample | Description |
 |---|---|
-| `BasicImageGeneration` | Console app: text → image |
-| `StreamingServer` | ASP.NET with SSE image progress |
-| `VoiceAssistant` | Whisper STT + dotLLM LLM + Kokoro TTS loop |
-| `SwarmUIExtension` | Full SwarmUI backend extension example |
+| `HartsyInference.TextGen.Cli` | Console app: prompt → LLM text generation |
+| `HartsyInference.Speech.Cli` / `HartsyInference.Whisper.Cli` / `HartsyInference.Music.Cli` / `HartsyInference.Audio.Codec.Cli` | TTS, Whisper STT, music generation, audio codec |
+| `HartsyInference.Vision.Cli` / `HartsyInference.Video.Cli` / `HartsyInference.ThreeD.Cli` | Vision, video, and image→3D runs |
+| `ConvertSafetensorsToGguf` / `FuseWeightNorm` | Offline checkpoint conversion utilities |
 
 ---
 

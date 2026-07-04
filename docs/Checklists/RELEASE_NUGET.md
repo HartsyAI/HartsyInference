@@ -1,6 +1,9 @@
 # Release — NuGet Publication
 
-> **Goal:** Publish all HartsyInference packages to NuGet.org.
+> **Goal:** Publish the HartsyInference modality packages to NuGet.org under the **HartsyAI** org
+> (https://github.com/HartsyAI/HartsyInference). `HartsyInference.Server` is abandoned scaffolding and
+> is not published as a product; the engine is consumed via the SwarmUI backend extension, the NuGet
+> libraries, and the sample CLIs.
 
 ---
 
@@ -8,7 +11,7 @@
 
 **Branding:** Package icon, descriptions, README, project URL, license expression, tags. Verify/reserve IDs on NuGet.org.
 
-**Versioning:** SemVer, initial version (1.0.0-preview.1 or 0.1.0), `Directory.Build.props` version props, CI auto-increment.
+**Versioning:** SemVer pre-release convention `1.0.0-alpha.NN` (current: **1.0.0-alpha.43**), single source of truth is `Directory.Build.props` `<VersionSuffix>`, CI auto-increment. Keep the SwarmUI extension csproj pinned to the same version.
 
 **Documentation:** Main README with quickstart, CONTRIBUTING.md, API docs (XML comments), samples project, getting-started guide, docs site.
 
@@ -18,7 +21,7 @@
 
 **Testing:** All unit + integration + golden reference tests pass, 24hr memory soak, cross-platform build (Windows + Linux), benchmarks documented.
 
-**Compatibility:** .NET 10 target builds, transitive deps resolve, minimum install scenarios work, OpenAI Python SDK compat, SwarmUI compat.
+**Compatibility:** .NET 8 and .NET 10 target builds, transitive deps resolve, minimum install scenarios work, SwarmUI backend extension compat.
 
 ## 3. Package Build
 
@@ -31,7 +34,7 @@
 
 ## 4. Pre-Release
 
-- [ ] Push 1.0.0-preview.1 to NuGet.org
+- [ ] Push 1.0.0-alpha.43 to NuGet.org
 - [ ] Fresh project install test from NuGet.org
 - [ ] Gallery pages look correct
 - [ ] Community feedback, fix issues

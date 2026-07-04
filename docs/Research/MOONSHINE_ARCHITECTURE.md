@@ -4,7 +4,7 @@
 
 Moonshine (Useful Sensors, 2024) is a tiny encoder-decoder ASR family explicitly designed for edge devices and live transcription. Unlike Whisper, it operates **directly on the raw 16 kHz waveform** (no mel spectrogram), uses **RoPE** instead of learned absolute positional embeddings, and processes **variable-length** audio without zero-padding to 30 s.
 
-Pure C# implementation is straightforward: a 3-layer Conv1D front-end, then a standard pre-existing pre-LN Transformer encoder/decoder pattern (we already have this for Whisper / dotLLM), reusing the RoPE we built for Flux / Hunyuan / Z-Image and the BPE tokenizer infrastructure from dotLLM.
+Pure C# implementation is straightforward: a 3-layer Conv1D front-end, then a standard pre-existing pre-LN Transformer encoder/decoder pattern (we already have this for Whisper and the HartsyInference.LLM decoder), reusing the RoPE we built for Flux / Hunyuan / Z-Image and the BPE tokenizer infrastructure from HartsyInference.Tokenizers.
 
 ---
 
@@ -261,7 +261,7 @@ return concat([x_rot_rotated, x_pass], dim=-1)
 
 - Base: **Llama 1 / 2 byte-level BPE** (same merges + base vocab).
 - Base vocab: **32 000** tokens. Plus **768** reserved special tokens → **`vocab_size = 32768`**.
-- Encoded as a HuggingFace `tokenizer.json` (~1.99 MB) — same JSON schema dotLLM already supports.
+- Encoded as a HuggingFace `tokenizer.json` (~1.99 MB) — same JSON schema HartsyInference.Tokenizers already supports.
 - Special tokens:
   - `bos_token_id = 1`
   - `eos_token_id = 2`
@@ -272,9 +272,9 @@ return concat([x_rot_rotated, x_pass], dim=-1)
 **Decode loop input/output:**
 - Start the decoder with `[BOS]` (id 1).
 - Stop on `EOS` (id 2) or when `max_length` reached.
-- Detokenise with the standard byte-level BPE decoder (same code path as Llama in dotLLM).
+- Detokenise with the standard byte-level BPE decoder (same code path as Llama in HartsyInference.LLM).
 
-If we want to share code with dotLLM's Llama tokenizer: yes, this works directly — Moonshine ships the same `tokenizer.json` format and the same base merges. Only difference is the upper 768 IDs.
+If we want to share code with the HartsyInference Llama tokenizer: yes, this works directly — Moonshine ships the same `tokenizer.json` format and the same base merges. Only difference is the upper 768 IDs.
 
 ---
 
@@ -373,7 +373,7 @@ Headlines:
 | Encoder transformer (pre-LN)      | Reuse the Whisper encoder pattern; swap absolute-pos for RoPE.            |
 | Decoder transformer (pre-LN)      | Reuse the Whisper decoder pattern; swap absolute-pos for RoPE; FFN is gated SiLU (different from encoder). |
 | RoPE                              | Reuse Flux / Hunyuan / Z-Image RoPE. **Watch the interleaved vs concat layout** (see §7). |
-| Llama BPE tokenizer               | Reuse dotLLM's Llama tokenizer (32k merges + 768 reserved); same `tokenizer.json` format. |
+| Llama BPE tokenizer               | Reuse the HartsyInference Llama tokenizer (32k merges + 768 reserved); same `tokenizer.json` format. |
 | MHA self-attn / cross-attn        | Reuse Whisper attention kernels. KV cache layout same as Whisper.         |
 | GroupNorm(num_groups=1)           | Equivalent to LayerNorm over the channel dim of a `[B, C, T]` tensor. We may already have this from Conv2D path. |
 | Greedy decode loop                | Reuse Whisper greedy + EOS logic; swap in the `max_length = 6.5 × seconds` guard. |

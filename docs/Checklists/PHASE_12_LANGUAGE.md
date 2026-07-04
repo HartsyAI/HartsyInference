@@ -2,7 +2,8 @@
 
 > **Goal:** First-class LLM text generation via one generic config-driven transformer that also backs the
 > existing text encoders. Replaces the planned dotLLM dependency (GPLv3, clean-room our own).
-> **Package:** HartsyInference.Language (Core, ModelHandler, Tokenizers, Cpu/Cuda/Vulkan).
+> **Package:** HartsyInference.LLM (Core, ModelHandler, Tokenizers, Cpu/Cuda/Vulkan). Not pulled in by
+> the `HartsyInference` meta package; consumers add it explicitly (`dotnet add package HartsyInference.LLM`).
 > **Full design:** [`docs/Design/LLM_LANGUAGE_PACKAGE.md`](../Design/LLM_LANGUAGE_PACKAGE.md).
 > **Initial coverage:** Llama-3.x, Qwen2.5/Qwen3, Mistral (dense). Quant: CUDA first.
 
@@ -100,7 +101,9 @@ kernels Q8_0/Q4_K/Q5_K/Q6_K, quantized `Linear`). M2 added the wiring + a low-VR
 
 - [ ] `MoeLayer` (router + expert dispatch); Mixtral / Qwen-MoE presets
 - [ ] `PagedKvCache` + continuous batching
-- [ ] Server `/v1/chat/completions` (+ streaming SSE), OpenAI-compatible
+- ~~Server `/v1/chat/completions` (+ streaming SSE), OpenAI-compatible~~ — **dropped.** No first-party
+      server is planned; text generation is consumed in-process via the `HartsyInference.LLM` library and,
+      for end users, through the SwarmUI backend extension.
 
 ## M6 — VLM (optional)
 

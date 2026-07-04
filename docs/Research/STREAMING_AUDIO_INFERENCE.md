@@ -6,7 +6,7 @@
 
 "Streaming" in audio inference is overloaded. Some models are **natively streaming** (causal or bounded-lookahead encoders that emit partial output as audio arrives — Parakeet-TDT, Moonshine, CosyVoice 2, Sesame CSM, RNN-T family, CTC family). Others are **non-streaming** but admit **pseudo-streaming wrappers** (overlap-and-dedupe sliding windows — Whisper, distil-Whisper, F5-TTS, Kokoro). The latency that matters for a voice agent is not throughput (RTF) but **first-token latency** and the **algorithmic lookahead** baked into the encoder.
 
-This document fixes vocabulary (RTF/RTFx, latency vs throughput, causal vs lookahead, partial vs final hypotheses), enumerates the streaming architectures we will encounter (chunked-and-overlap, cache-aware encoder + per-layer state, RNN-T/TDT joint, chunk-aware causal flow-matching, autoregressive codec-token streaming), and lists the concrete C# infrastructure HartsyInference.Audio needs to build before any streaming model can ship: `AudioRingBuffer`, `StreamingMelExtractor`, `StreamingKvCache`, `IStreamingPipeline<TIn,TOut>`, and an `IAsyncEnumerable<AudioChunk>` output surface that mirrors dotLLM's existing token-streaming API.
+This document fixes vocabulary (RTF/RTFx, latency vs throughput, causal vs lookahead, partial vs final hypotheses), enumerates the streaming architectures we will encounter (chunked-and-overlap, cache-aware encoder + per-layer state, RNN-T/TDT joint, chunk-aware causal flow-matching, autoregressive codec-token streaming), and lists the concrete C# infrastructure HartsyInference.Audio needs to build before any streaming model can ship: `AudioRingBuffer`, `StreamingMelExtractor`, `StreamingKvCache`, `IStreamingPipeline<TIn,TOut>`, and an `IAsyncEnumerable<AudioChunk>` output surface that mirrors HartsyInference.LLM's existing token-streaming API.
 
 Sources: [Moonshine v2 paper](https://arxiv.org/abs/2602.12241), [CosyVoice 2 paper](https://arxiv.org/abs/2412.10117), [NVIDIA Parakeet-TDT blog](https://developer.nvidia.com/blog/turbocharge-asr-accuracy-and-speed-with-nvidia-nemo-parakeet-tdt/), [Parakeet-TDT 0.6b-v2 card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2), [whisper.cpp stream.cpp](https://github.com/ggml-org/whisper.cpp/blob/master/examples/stream/stream.cpp), [whisper_streaming](https://github.com/ufal/whisper_streaming), [CosyVoice repo](https://github.com/FunAudioLLM/CosyVoice), [Sesame CSM](https://github.com/SesameAILabs/csm), [Mimi codec](https://huggingface.co/kyutai/mimi), [Moonshine repo](https://github.com/moonshine-ai/moonshine), [Coqui XTTS docs](https://docs.coqui.ai/en/latest/models/xtts.html), [HiFi-GAN](https://github.com/jik876/hifi-gan), [RNN-T / Transducer overview](https://www.assemblyai.com/blog/an-overview-of-transducer-models-for-asr), [TDT explained (Speechmatics)](https://www.speechmatics.com/company/articles-and-news/token-duration-transducer-tdt-explained), [F5-TTS](https://github.com/SWivid/F5-TTS), [Canary streaming docs](https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/asr/streaming_decoding/canary_chunked_and_streaming_decoding.html).
 
@@ -145,7 +145,7 @@ Multilingual ASR + translation. **Not natively streaming** — Transformer decod
 
 **Streaming protocol**: emit one Mimi frame (8 RVQ codes) per 80 ms step. The Mimi decoder streams these into 24 kHz PCM with no extra lookahead.
 
-**Why this is a different shape from Whisper streaming**: there is no chunking. The model state advances frame-by-frame the entire conversation. The infrastructure needed is closer to dotLLM's KV-cache management than to whisper_streaming's hypothesis buffer.
+**Why this is a different shape from Whisper streaming**: there is no chunking. The model state advances frame-by-frame the entire conversation. The infrastructure needed is closer to HartsyInference.LLM's KV-cache management than to whisper_streaming's hypothesis buffer.
 
 #### 2.8 Pseudo-streaming wrappers that are NOT real streaming
 
@@ -253,7 +253,7 @@ on finalize():
 
 ### 5. KV-cache management for streaming TTS / bi-directional models
 
-dotLLM already has a KV-cache pattern for LLM inference; HartsyInference inherits the same idea but applies it to autoregressive *audio* models. The cache holds `(K_layer, V_layer)` tensors per layer; each new generated token appends one row.
+HartsyInference.LLM already has a KV-cache pattern for LLM inference; HartsyInference inherits the same idea but applies it to autoregressive *audio* models. The cache holds `(K_layer, V_layer)` tensors per layer; each new generated token appends one row.
 
 **Append-and-grow** (the common case for short utterances):
 - Pre-allocate `[max_seq_len, n_heads, head_dim]` per layer.
@@ -369,7 +369,7 @@ public readonly record struct TranscriptionChunk(string Text, bool IsFinal, doub
 /// <summary>TTS-shaped output: a raw PCM chunk.</summary>
 public readonly record struct AudioChunk(ReadOnlyMemory<float> Pcm, int SampleRate, bool IsFinal);
 
-/// <summary>TTS pipelines expose IAsyncEnumerable to match dotLLM's IAsyncEnumerable&lt;Token&gt; streaming.</summary>
+/// <summary>TTS pipelines expose IAsyncEnumerable to match HartsyInference.LLM's IAsyncEnumerable&lt;Token&gt; streaming.</summary>
 public interface IStreamingTtsPipeline : IDisposable
 {
     IAsyncEnumerable<AudioChunk> SynthesizeAsync(string text, CancellationToken ct = default);
@@ -388,7 +388,7 @@ public sealed class HypothesisBuffer
 - `AudioRingBuffer` backing storage: `NativeMemory.AlignedAlloc` so producer/consumer can be P/Invoked safely.
 - `StreamingMelExtractor`: `Span<float>` in/out, FFT work buffer pre-allocated in ctor, zero alloc per Push.
 - `StreamingKvCache`: storage in CUDA device memory or pinned host (depending on backend); `Append` is a layout copy + position bump, no managed alloc.
-- All `Push/Finalize` calls return `ValueTask` (not `Task`) — see §dotLLM async patterns.
+- All `Push/Finalize` calls return `ValueTask` (not `Task`) — see §HartsyInference.LLM async patterns.
 
 ### 9. Per-model streaming status table
 

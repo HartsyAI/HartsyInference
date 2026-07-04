@@ -1,12 +1,14 @@
 # HartsyInference — Core Design Overview
 
-HartsyInference is a **native C#/.NET 10 AI inference engine** for non-LLM modalities — image generation, speech-to-text, text-to-speech, vision, object detection, video, and **interactive world models** (action-conditioned, real-time, frame-by-frame video generation for games / sims / agents). It works alongside **dotLLM** ([kkokosa/dotLLM](https://github.com/kkokosa/dotLLM)) as a complete AI platform with zero Python dependencies, zero C++ wrappers, and no external processes.
+HartsyInference is a **native C#/.NET AI inference engine** (targets **.NET 8 and .NET 10**) spanning image generation, speech-to-text, text-to-speech, vision, object detection, video, **interactive world models** (action-conditioned, real-time, frame-by-frame video generation for games / sims / agents), and **native LLM text generation** (the `HartsyInference.LLM` package). It runs with zero Python dependencies, zero C++ wrappers, and no external processes.
+
+The **recommended way to use the engine** is the **[SwarmUI HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend)**, which registers HartsyInference as an alternative to SwarmUI's ComfyUI backend and drives the engine's pipelines. Secondary supported paths are the per-modality **NuGet libraries** and the bundled **sample CLIs** under `samples/` plus `src/HartsyInference.Cli` (developer and verification tools).
 
 ## Why HartsyInference?
 
-Every existing .NET AI inference solution is either a Python wrapper, C++ wrapper, ONNX Runtime, or NVIDIA-only. No pure C# engine loads `.safetensors` diffusion models, runs on any GPU (NVIDIA via CUDA, AMD/Intel via Vulkan), and streams results through ASP.NET — without external processes.
+Every existing .NET AI inference solution is either a Python wrapper, C++ wrapper, ONNX Runtime, or NVIDIA-only. No other pure C# engine loads `.safetensors` diffusion models, runs on any GPU (NVIDIA via CUDA, AMD/Intel via Vulkan), and covers image, audio, video, vision, 3D, world models, and LLM text generation in one process.
 
-dotLLM proved pure C# with PTX achieves ~98-100% native CUDA performance for LLMs. HartsyInference extends this to non-LLM modalities and adds cross-vendor GPU via Vulkan.
+Pure C# with PTX can reach near-native CUDA performance; HartsyInference applies that approach across every modality and adds cross-vendor GPU via Vulkan. LLM text generation is now first-party (see [LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md)); the engine no longer depends on any external LLM runtime.
 
 ## Design Pillars
 
@@ -16,21 +18,21 @@ dotLLM proved pure C# with PTX achieves ~98-100% native CUDA performance for LLM
 | **Zero-allocation hot paths** | `NativeMemory.AlignedAlloc`; mmap weights; `TensorRef` on kernels; `Span<T>` on hot paths |
 | **Modular NuGet** | Pull only what you need (see `NUGET_PACKAGE_DESIGN.md`) |
 | **Multi-GPU backend** | CUDA (NVIDIA) — implemented, FP16 SD1.5/SDXL/Flux<br>Vulkan (AMD/Intel/NVIDIA) — implemented; Flux Schnell FP8 verified end-to-end on Linux + NVIDIA. SD1.5/SDXL integration tests, AMD cross-vendor verification, and perf tuning are the remaining acceptance gates — see [Phase 3.5 checklist](../Checklists/PHASE_3_5_VULKAN_BACKEND.md)<br>CPU fallback — implemented (AVX-512/AVX2/NEON via SIMD dispatch) |
-| **OpenAI-compatible API** | Drop-in replacement for OpenAI image/audio endpoints |
-| **dotLLM alignment** | Same tensor memory, P/Invoke, PTX, SIMD dispatch, thread pool patterns |
+| **SwarmUI-first** | Consumed primarily through the SwarmUI backend extension; also usable as NuGet libraries and sample CLIs |
+| **Native LLM** | `HartsyInference.LLM`: config-driven generic decoder transformer, GGUF quantized inference, device-resident KV cache |
 
 ## Architecture
 
 ```
 +--------------------------------------------------------------+
-|                     HartsyInference.Server                     |
-|            (OpenAI-compatible REST API + SSE)                 |
+|   Consumers: SwarmUI backend extension (recommended) ·        |
+|              NuGet libraries · sample CLIs                    |
 +------+----------+----------+--------+----------+-------------+
-| Diff | Audio    | Vision   | Video  | Inter-   |             |
-| SD/  | Whisper  | CLIP     | LTX /  | active   |             |
-| Flux | Kokoro   | YOLO     | Wan /  | Matrix-  | World       |
-| SD3  | F5/Bark  | SAM      | Lance  | Game /   | models      |
-|      |          |          | Cosmos | Oasis    | (Phase 10)  |
+| Diff | Audio    | Vision   | Video  | Inter-   | LLM         |
+| SD/  | Whisper  | CLIP     | LTX /  | active   | Qwen/Llama  |
+| Flux | Kokoro   | YOLO     | Wan /  | Matrix-  | Mistral     |
+| SD3  | F5/Bark  | SAM      | Lance  | Game /   | (GGUF)      |
+|      |          |          | Cosmos | Oasis    |             |
 +------+----------+----------+--------+----------+-------------+
 |                  HartsyInference.Core                          |
 |    Tensor + TensorRef . IBackend . Schedulers . Pipelines    |
@@ -55,15 +57,17 @@ Model code programs against `IBackend` only. CPU dispatches to SIMD kernels; CUD
 - **Pipeline factory** — model metadata drives automatic pipeline selection.
 - **Three-tier options** — flat properties (simple), explicit composition (advanced), custom injection (full control).
 
-## dotLLM Relationship
+## Native LLM Text Generation
 
-dotLLM handles LLM text generation; HartsyInference covers everything else. Shared patterns are documented in `docs/CODE_STYLE.md` and `docs/Agents/AGENTS.md`. Integration points: shared CUDA context, unified model registry, prompt enhancement, multimodal pipelines, composable server (`/v1/chat/completions` + `/v1/images/*` + `/v1/audio/*`).
+LLM text generation ships in the first-party **`HartsyInference.LLM`** package: one config-driven generic decoder transformer (Qwen2/Qwen3/Llama/Mistral), GGUF quantized inference, a device-resident KV cache, a composable sampler chain, and chat templates. See [LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md) for the design.
 
-**Licensing:** dotLLM is GPLv3. HartsyInference uses clean-room implementations. Architectural patterns are not copyrightable.
+The engine used to plan on the external **dotLLM** project for LLMs. That is no longer the case: dotLLM is GPLv3 (linking it would relicense the engine and the SwarmUI extension), so the LLM package is a clean-room native implementation. `docs/Research/DOTLLM_ARCHITECTURE.md` remains only as a historical study of the patterns that informed the native design; it is not a live dependency. Architectural patterns are not copyrightable.
 
-## Image vs LLM Inference — Why Separate Engines
+## Image/Audio vs LLM Inference — Different Compute Shapes
 
-| LLM (dotLLM) | Image/Audio (HartsyInference) |
+The image and audio stack differs from decoder LLM inference in almost every op; both live in one engine but reuse little at the kernel level:
+
+| LLM decoder | Image/Audio |
 |---|---|
 | RMSNorm | GroupNorm (32-group) |
 | 1D RoPE | 2D RoPE (spatial) |
@@ -74,9 +78,11 @@ dotLLM handles LLM text generation; HartsyInference covers everything else. Shar
 | Single-token GEMV | Batch GEMM (spatial maps) |
 | — | Upsample 2D, FFT/STFT/Mel, timestep conditioning |
 
-## SwarmUI Backend Angle
+## SwarmUI Backend (Recommended Path)
 
-| Before (Python backend) | After (HartsyInference) |
+The primary way to run the engine is the [SwarmUI HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend). It installs as a SwarmUI backend and registers HartsyInference as an alternative to the ComfyUI backend:
+
+| ComfyUI backend (Python) | HartsyInference backend |
 |---|---|
 | Python + pip + torch + diffusers | NuGet reference only |
 | Separate process, HTTP round-trips | In-process inference |
@@ -87,10 +93,13 @@ dotLLM handles LLM text generation; HartsyInference covers everything else. Shar
 
 | Document | Description |
 |---|---|
+| [Vision & Goals](VISION_AND_GOALS.md) | Why the engine exists and what it is for |
+| [Features](FEATURES.md) | Capability summary |
 | [Build Order](BUILD_ORDER.md) | Phase dependencies and sequencing |
 | [File Structure](FILE_STRUCTURE.md) | Project layout |
 | [NuGet Package Design](NUGET_PACKAGE_DESIGN.md) | Package breakdown, dependency graph |
 | [Implementation Details](IMPLEMENTATION_DETAILS.md) | Per-component technical approach |
+| [LLM Language Package](LLM_LANGUAGE_PACKAGE.md) | Native LLM text generation design |
 | [Validation Strategy](VALIDATION_STRATEGY.md) | References and validation methods |
 | [Research Requirements](RESEARCH_REQUIREMENTS.md) | Research docs needed before implementation |
 | [Model Support Roadmap](MODEL_SUPPORT_ROADMAP.md) | Phase 1-3 model support plan |

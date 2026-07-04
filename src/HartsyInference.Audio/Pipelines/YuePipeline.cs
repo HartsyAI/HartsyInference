@@ -66,8 +66,8 @@ public sealed unsafe class YuePipeline : IDisposable
             // Full path: Stage-2 upsamples each track's cb0 to 8 codebooks, x-codec decodes each, mix (sum).
             System.Span<int> vSpan = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(vocal);
             System.Span<int> aSpan = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(accomp);
-            int[][] vocalCodes = _stage2.Upsample(backend, vSpan);
-            int[][] accompCodes = _stage2.Upsample(backend, aSpan);
+            // Batch both tracks (B=2) through Stage-2 in one pass — same codes as two sequential Upsample calls, ~half the wall-clock.
+            (int[][] vocalCodes, int[][] accompCodes) = _stage2.UpsampleBoth(backend, vSpan, aSpan);
             Logs.Info($"YuE S2: upsampled {vocal.Count} frames x2 tracks to 8 codebooks in {sw.ElapsedMilliseconds}ms.");
             backend.FreeWeights(_stage2.EnumerateWeights());   // Stage-2 done — free before x-codec decode
             float[] vocalWav = DecodeFull(backend, vocalCodes);

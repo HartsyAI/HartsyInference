@@ -149,7 +149,9 @@ Each subphase is its own deliverable with a benchmarks/results/run_post_{tag}_{g
 
 ### B4.5 — CUDA Graphs for the Denoise Step
 
-- [ ] `CudaStream.BeginCapture()` / `.EndCapture()` / `Replay()` API
+> **UPDATE 2026-07-04:** the `CudaGraph` wrapper (`src/HartsyInference.Cuda/CudaGraph.cs`, Capture/TryUpdate/Launch) is now **verified working on-GPU** — was untested; `CudaBackend.GraphSmokeTest()` (CLI `hartsyinference-textgen graphtest`) captures a Scale on a stable buffer, replays with changed input → PASS. So the API below (item 1) effectively exists (`CudaGraph`) and the foundation is proven; the async-pool memory model is capture-compatible. The **same device-side-scalar requirement** (item 2) was hit and fully mapped for the LLM decode step — see [LLM_DECODE_PERF_GRIND.md](LLM_DECODE_PERF_GRIND.md) Phase 6 (precompute-table RoPE, device position counter for attention/KV, device token/embed). The denoise step needs the analogous device-side timestep/sigma. Foundation ✅; the device-resident conversion (LLM or denoise) is the remaining build.
+
+- [x] `CudaGraph.Capture()` / `.Launch()` / `.TryUpdate()` API — exists + **verified** (`CudaGraph.cs`, `GraphSmokeTest`)
 - [ ] Refactor scheduler step to use device-side scalars (timestep, sigma) so the captured graph is parameter-stable
 - [ ] First step runs in capture mode; steps 2..N run via `cuGraphLaunch`
 - [ ] Re-capture trigger when shape changes (new resolution, different model)

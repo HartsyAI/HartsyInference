@@ -4,6 +4,8 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 
 **Goal.** Get HartsyInference LLM single-token decode from **20-54× slower than llama.cpp** to within a small factor (target: ≥50% of llama.cpp t/s, i.e. ≤2× slower) on the RTX 3060, same GGUF files and params as `LLM_THROUGHPUT_BENCHMARK.md`. Top priority.
 
+> **STATUS (2026-07-04): gap closed 20-54× → 1.94-2.88×.** Llama-3.2-1B **1.94× (under 2×)**, Mistral-7B 2.12×, Qwen3 2.26×, Gemma-3 2.88×. All verified coherent, default path is the shipped state. Phases 1-4 done (fused Q4_K/Q6_K/Q8_0 GEMV, quantized lm_head, split-K flash-decode attention, vectorized loads). Phase 5 (dp4a) built but no gain (memory-bound). Phase 6 (CUDA graphs) foundation verified, full device-resident build deferred (multi-session). Progress table + per-phase detail below.
+
 **Method.** Strict measure → optimize → verify loop. Every change must (1) show a speedup on an isolated micro-benchmark, (2) show a speedup on end-to-end t/s, and (3) preserve correctness (greedy token-id match vs the pre-change output). A faster wrong answer is a regression.
 
 ---

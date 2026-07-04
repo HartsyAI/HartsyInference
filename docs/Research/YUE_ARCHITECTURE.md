@@ -471,9 +471,9 @@ In HartsyInference, both pipelines should coexist in `HartsyInference.Audio.Musi
 
 This section is the implementer's bridge.
 
-**Reuse dotLLM patterns aggressively.** Both S1 and S2 are stock LLaMA-2 decoder architectures with vocab/RoPE-scaling tweaks. dotLLM already implements LLaMA (see [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md)). The right plan is:
+**Reuse the native `HartsyInference.LLM` patterns aggressively.** Both S1 and S2 are stock LLaMA-2 decoder architectures with vocab/RoPE-scaling tweaks. The native `HartsyInference.LLM` package already implements LLaMA (its design drew on the historical [DOTLLM_ARCHITECTURE.md](DOTLLM_ARCHITECTURE.md) study). The right plan is:
 
-1. **`HartsyInference.Models.Llama`** — already needed for the dotLLM-shaped LLM modality. Build it once, parameterize for: hidden size, layers, heads, KV heads (GQA), FFN dim, RoPE base + scaling factor, vocab size.
+1. **`HartsyInference.Models.Llama`** — already needed for the native LLM modality. Build it once, parameterize for: hidden size, layers, heads, KV heads (GQA), FFN dim, RoPE base + scaling factor, vocab size.
 2. **`HartsyInference.Audio.YuE.YuETokenizer`** — wraps the LLaMA BPE tokenizer plus the 1024 audio-cb0 IDs and ~64 control tokens. The audio IDs are pure integer offsets — no embedding fancy footwork; LLaMA's input-embedding table just has to be sized to the expanded vocab.
 3. **`HartsyInference.Audio.YuE.YuES1Stage`** — owns the S1 model instance, the section parser, the per-section loop, the cb0-extraction post-processor.
 4. **`HartsyInference.Audio.YuE.YuES2Stage`** — owns the S2 model instance, the cb0-prefix packing, batched chunk inference.
@@ -488,7 +488,7 @@ This section is the implementer's bridge.
 * **CFG (only for ICL variants).** Standard CFG: run a "conditional" forward and an "unconditional" forward (genre/lyric tokens replaced with the null prompt), combine: `logits = logits_uncond + w × (logits_cond - logits_uncond)` where `w ≈ 1.5`. This doubles per-step compute; only enable when targeting maximum quality. Cross-ref [CFG_AND_GUIDANCE.md](CFG_AND_GUIDANCE.md).
 * **Repetition penalty is mandatory.** Without `repetition_penalty=1.1`, S1 will fall into looping instrumental phrases — every implementer who has skipped it reports this. Implement it via the standard HF formula: divide logits of tokens that appear in the prior context by `1.1`.
 * **Codec decode is per-track.** Decode the vocal stream and the accompaniment stream *separately* through X-Codec, then mix. Do not try to decode "interleaved as one waveform" — that's not what X-Codec expects.
-* **GGUF / quantization path.** The community has already shipped GGUF S1 builds; once `HartsyInference.GGUF` supports LLaMA-2 7B (which it must for dotLLM), YuE quantized inference is free. See [GGUF_BACKEND.md](GGUF_BACKEND.md) and [QUANTIZATION_DIFFUSION.md](QUANTIZATION_DIFFUSION.md) (note: diffusion is a different quantization story, but the GGUF format/loader is shared).
+* **GGUF / quantization path.** The community has already shipped GGUF S1 builds; once `HartsyInference.GGUF` supports LLaMA-2 7B (which it must for `HartsyInference.LLM`), YuE quantized inference is free. See [GGUF_BACKEND.md](GGUF_BACKEND.md) and [QUANTIZATION_DIFFUSION.md](QUANTIZATION_DIFFUSION.md) (note: diffusion is a different quantization story, but the GGUF format/loader is shared).
 * **No Python deps.** The reference pipeline pulls in `omegaconf`, `descript-audio-codec`, `transformers`. None survive — we re-implement the codec decoder from the X-Codec architecture spec and load weights from the bf16 safetensors directly (`HartsyInference.Safetensors`).
 
 **Validation plan** (in line with the project rule "validate against references"):
@@ -507,4 +507,4 @@ This section is the implementer's bridge.
 * **Two flavors per language:** CoT (no extras) and ICL (with audio demo prompt; CFG-capable; best quality).
 * **VRAM:** ~18 GB bf16 full pipeline; ~12 GB at 8-bit; ~8 GB at 4-bit.
 * **Speed:** ~12 min on A100, ~25 min on 4090 for a 5-min song. Realtime is not on offer.
-* **For C#:** build LLaMA-2 once (shared with dotLLM), build X-Codec decoder once (shares the GAN-vocoder kernels with Kokoro), then YuE is glue code on top.
+* **For C#:** build LLaMA-2 once (shared with `HartsyInference.LLM`), build X-Codec decoder once (shares the GAN-vocoder kernels with Kokoro), then YuE is glue code on top.

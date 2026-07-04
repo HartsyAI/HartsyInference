@@ -4,7 +4,7 @@
 
 ## Extra Reading
 - `docs/Design/NUGET_PACKAGE_DESIGN.md`, `docs/Design/BUILD_ORDER.md`, `docs/Design/IMPLEMENTATION_DETAILS.md`
-- `docs/Research/DOTLLM_ARCHITECTURE.md` — tensor type system, device management
+- `docs/Research/DOTLLM_ARCHITECTURE.md` — tensor type system, device management (historical study that informed the engine's native patterns; not a live dependency)
 - Source code in packages being integrated
 
 ## Workflow
@@ -26,7 +26,7 @@
 | Text Encoder → UNet/DiT | Hidden states `[batch, seq_len, hidden_dim]`; SDXL dual CLIP concat; Flux CLIP+T5 format |
 | Scheduler → UNet/DiT | Timestep + noise level; `Step()` produces next latent; flow-matching vs noise-prediction |
 | UNet/DiT → VAE | Latent `[batch, C, H, W]` → scaled → pixel image `[batch, 3, H*8, W*8]` |
-| Pipeline → Server | `IAsyncEnumerable<GenerationProgress>` → SSE via `Results.Stream()`; cancellation; `ServerState` singleton |
+| Pipeline → Consumer (SwarmUI extension / CLI) | Synchronous `GenerateFromTokens`/`GenerateFromEmbeddings` returning `(byte[] rgb, int w, int h, int seed)`; progress via `Action<GenerationProgress>?` callback (LLM: `Action<int>? onToken`); cancellation via `CancellationToken` |
 | CPU ↔ CUDA/Vulkan | Explicit `IBackend.CopyTo()` only; efficient page-in + VRAM copy; pre-allocate scratch at load time |
 
 ## Integration Checklist

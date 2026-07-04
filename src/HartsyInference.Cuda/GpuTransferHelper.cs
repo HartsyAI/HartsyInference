@@ -302,6 +302,9 @@ internal static unsafe class GpuTransferHelper
                 CudaMemory.FreeAsync(cached.gpuPtr, s.StreamHandle);
             }
         };
+        // Route this tensor's finalizer cleanup into THIS backend's context bucket so a concurrent backend's
+        // drain thread never runs it against the wrong (and unsynchronized) State.
+        tensor._gpuCleanupContext = s.Context?.Handle ?? 0;
     }
 
     /// <summary>Returns a cached dtype-upcast of a weight (e.g. fp8→BF16), if one was already computed.</summary>
@@ -372,6 +375,7 @@ internal static unsafe class GpuTransferHelper
         // another backend registers later (same rule as the activation callbacks).
         cpuTensor._gpuSyncCallback = () => OnPromotedHostAccess(s, cpuTensor);
         cpuTensor._gpuDisposeCallback = () => OnPromotedHostAccess(s, cpuTensor);
+        cpuTensor._gpuCleanupContext = s.Context?.Handle ?? 0;
         return true;
     }
 

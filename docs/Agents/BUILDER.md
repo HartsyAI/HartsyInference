@@ -1,10 +1,10 @@
 # Builder Agent
 
-> Write clean, correct, production-quality C# following dotLLM standards.
+> Write clean, correct, production-quality C# following the engine's core patterns.
 
 ## Extra Reading
 - `docs/Design/IMPLEMENTATION_DETAILS.md`
-- `docs/Research/DOTLLM_ARCHITECTURE.md` — Key Patterns Summary and Architectural Lessons
+- `docs/Research/DOTLLM_ARCHITECTURE.md` — Key Patterns Summary and Architectural Lessons (historical study that informed the engine's native patterns; not a live dependency)
 - Relevant `docs/Research/` doc and architect's plan
 - Existing code in the target package
 
@@ -25,7 +25,7 @@
 
 **C# Style:** File-scoped namespaces, primary constructors, `readonly`/`sealed`, `readonly record struct` for value types, `record` for config. No `#region`. Nullable enabled.
 
-## dotLLM Quick Reference
+## Core Pattern Quick Reference
 
 | Pattern | Implementation |
 |---|---|
@@ -45,5 +45,5 @@
 | Activation casts | `DtypeCastHelper.EnsureF32` / `EnsureDtype` |
 | Img2img validation | `Img2ImgSetup.Prepare(request, h, w, steps)` |
 | Thread pool | `delegate*` dispatch |
-| Server JSON | `[JsonSerializable]` |
+| Source-gen JSON | `[JsonSerializable]` |
 | Worker crash | `Environment.FailFast` |

@@ -73,6 +73,155 @@ public sealed unsafe class YueStage2Lm : IDisposable
         return codes;
     }
 
+    // ── PERF TODO (2026-07-04): Stage-2 is the YuE bottleneck. Stage-1 was fixed to ~40 ms/tok (Q4_K dp4a GEMV,
+    // resident) and BEATS the Python reference. Stage-2 here is still ~2.3x off Python's batched rate and dominates a
+    // full song (a 30 s clip ≈ 24k forwards ≈ ~40 min — same ballpark as official YuE on a 3060, so this is the last
+    // real gap to close, not a bug).
+    //
+    // Root cause of the gap: the per-frame residual loop below (UpsampleWindowBoth) does, per frame, 8 transformer
+    // forwards + 7 lm_head projections, and each residual reads `logitsT.DataPointer` on the HOST to run
+    // ArgmaxResidual → that triggers a D2H sync (EnsureCpuData drains the compute stream), then the chosen token is
+    // fed back via EmbedLookup(host int[]) → next forward. So there are ~7 GPU→host→GPU round-trips PER FRAME whose
+    // latency the batched GEMM can't hide. Measured actual ≈137 ms/op vs ~4 s total pure compute — the rest is this
+    // serialization. Batching the 2 tracks (this method) only removed the halving-able projection work (~18%); the
+    // sync latency is untouched.
+    //
+    // To close it (pick up later — needs GPU test cycles + nsys to confirm):
+    //   1. On-GPU argmax over [ResidualLo,ResidualHi) → a device-resident token id (add an IBackend ArgmaxRange op /
+    //      reuse any existing GPU argmax). Avoids the full-logits D2H.
+    //   2. Device-index embedding feed: a GenericTransformer/Qwen2Model EmbedLookup variant that gathers rows using a
+    //      DEVICE index tensor (not host int[]), so the chosen token never leaves the GPU. Then the whole 7-residual
+    //      chain stays on-device and only ONE D2H per frame (or per window) is needed to read the emitted codes.
+    //   3. With (1)+(2), the per-frame decode becomes a fixed launch sequence → CUDA-graph capture/replay (the user's
+    //      suggestion) can then collapse launch overhead too.
+    // Expected: Stage-2 ~565 s → ~350 s for a 5 s clip (match Python). Won't make full songs "fast" (3060 is the
+    // ceiling), but removes the last software gap. Keep the numerics identical (greedy argmax + range mask + -1
+    // out-of-range + FixInvalidCodes must be byte-for-byte).
+    // ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Upsamples BOTH tracks (vocal + accompaniment) together as a decode batch of 2, halving Stage-2
+    /// wall-clock versus two sequential <see cref="Upsample"/> passes. Numerically identical: each track keeps its
+    /// own KV cache and per-sequence attention; only the projections/MLP run as one batched GEMM. Requires equal
+    /// track lengths (their windows advance in lockstep); falls back to two sequential passes otherwise.</summary>
+    public (int[][] vocalCodes, int[][] accompCodes) UpsampleBoth(IBackend backend, ReadOnlySpan<int> vocalCb0, ReadOnlySpan<int> accompCb0)
+    {
+        ThrowIfDisposed();
+        int t = vocalCb0.Length;
+        // Unequal lengths would desync the two caches' windows — fall back to the exact per-track path.
+        if (accompCb0.Length != t)
+            return (Upsample(backend, vocalCb0), Upsample(backend, accompCb0));
+        // Batched B=2 runs TWO KV caches + batched activations at once — fits a single window (~5 s clip) on a 12 GB
+        // card but OOMs for longer songs (VRAM crept to ~11.7 GB at 705 frames). Past one window, fall back to the
+        // lighter sequential per-track path (one cache at a time) so full songs complete instead of OOMing.
+        if (t > WindowFrames)
+            return (Upsample(backend, vocalCb0), Upsample(backend, accompCb0));
+
+        int[][] vCodes = new int[_cfg.NumCodebooks][];
+        int[][] aCodes = new int[_cfg.NumCodebooks][];
+        for (int k = 0; k < _cfg.NumCodebooks; k++) { vCodes[k] = new int[t]; aCodes[k] = new int[t]; }
+        for (int i = 0; i < t; i++) { vCodes[0][i] = vocalCb0[i]; aCodes[0][i] = accompCb0[i]; }
+        if (t == 0) return (vCodes, aCodes);
+
+        for (int w0 = 0; w0 < t; w0 += WindowFrames)
+        {
+            int wlen = Math.Min(WindowFrames, t - w0);
+            UpsampleWindowBoth(backend, vocalCb0.Slice(w0, wlen), accompCb0.Slice(w0, wlen), vCodes, aCodes, w0);
+        }
+        FixInvalidCodes(vCodes);
+        FixInvalidCodes(aCodes);
+        return (vCodes, aCodes);
+    }
+
+    /// <summary>One window for both tracks as a B=2 batch. Prefills each track's own prompt into its own
+    /// <see cref="FixedKvCache"/> (prompts differ since cb0 differs, but lengths match), then runs the per-frame +
+    /// 7-residual loop batched via <see cref="Qwen2Model.ForwardBatchDecode"/>. Mirrors <see cref="UpsampleWindow"/>
+    /// exactly per track (same feed order, argmax, out-of-range marking).</summary>
+    private void UpsampleWindowBoth(IBackend backend, ReadOnlySpan<int> vCb0, ReadOnlySpan<int> aCb0,
+        int[][] vCodes, int[][] aCodes, int frameOffset)
+    {
+        int wlen = vCb0.Length;                                         // == aCb0.Length (guarded by caller)
+        int promptLen = 2 + wlen + 1;
+        int seqMax = promptLen + wlen * (_cfg.NumCodebooks - 1) + wlen + 8;
+        int cacheCap = Math.Min(_cfg.Stage2.MaxPositionEmbeddings, seqMax);
+        FixedKvCache cacheV = _lm.CreateFixedCache(cacheCap);
+        FixedKvCache cacheA = _lm.CreateFixedCache(cacheCap);
+        try
+        {
+            int h = _cfg.Stage2.HiddenSize;
+            int vocab = _cfg.Stage2.VocabSize;
+            int nResidual = _cfg.NumCodebooks - 1;                      // 7
+            FixedKvCache[] caches = [cacheV, cacheA];
+
+            // Prefill each track's prompt into its own cache (per-sequence — prompts differ by cb0).
+            _lm.Forward(backend, BuildWindowPrompt(vCb0), 1, 0, cacheV).Dispose();
+            _lm.Forward(backend, BuildWindowPrompt(aCb0), 1, 0, cacheA).Dispose();
+
+            for (int fr = 0; fr < wlen; fr++)
+            {
+                // Feed both tracks' cb0 token for this frame (batched); resulting hidden predicts residual cb1.
+                Tensor embeds = new(new TensorShape(1, 2, h), DType.F32);
+                _lm.EmbedLookup(embeds, [vCb0[fr] + GlobalOffset, aCb0[fr] + GlobalOffset], 1, 2);
+                Tensor hidden = _lm.ForwardBatchDecode(backend, embeds, [cacheV.CurrentLength, cacheA.CurrentLength], caches);
+                embeds.Dispose();
+                if (cacheV.CurrentLength >= cacheCap - (nResidual + 2)) { hidden.Dispose(); break; }
+
+                for (int j = 1; j <= nResidual; j++)                    // codebooks 1..7
+                {
+                    Tensor logitsT = _lm.ProjectLogits(backend, hidden, 1, 2);  // [1,2,vocab] (row per track)
+                    hidden.Dispose();
+                    float* lp = (float*)logitsT.DataPointer;
+
+                    // Greedy argmax over the residual range [46358,53526) per track (== upstream block_list mask).
+                    int bestV = ArgmaxResidual(lp, 0, vocab);
+                    int bestA = ArgmaxResidual(lp, 1, vocab);
+                    logitsT.Dispose();
+
+                    // Decode assuming this slot is codebook j; out-of-range -> -1 (patched later).
+                    int decV = bestV - (GlobalOffset + j * CodebookSize);
+                    vCodes[j][frameOffset + fr] = (uint)decV < (uint)CodebookSize ? decV : -1;
+                    int decA = bestA - (GlobalOffset + j * CodebookSize);
+                    aCodes[j][frameOffset + fr] = (uint)decA < (uint)CodebookSize ? decA : -1;
+
+                    // Autoregress: both tracks' emitted tokens enter their caches for subsequent positions.
+                    Tensor rEmbeds = new(new TensorShape(1, 2, h), DType.F32);
+                    _lm.EmbedLookup(rEmbeds, [bestV, bestA], 1, 2);
+                    hidden = _lm.ForwardBatchDecode(backend, rEmbeds, [cacheV.CurrentLength, cacheA.CurrentLength], caches);
+                    rEmbeds.Dispose();
+                }
+                hidden.Dispose();
+            }
+        }
+        finally
+        {
+            cacheV.Dispose();
+            cacheA.Dispose();
+        }
+    }
+
+    /// <summary>Greedy argmax over the residual range [<see cref="ResidualLo"/>,<see cref="ResidualHi"/>) for row
+    /// <paramref name="row"/> of a <c>[1, B, vocab]</c> logits buffer (same tie-break as the sequential path).</summary>
+    private static int ArgmaxResidual(float* logits, int row, int vocab)
+    {
+        float* r = logits + (long)row * vocab;
+        int best = ResidualLo;
+        float bestv = float.NegativeInfinity;
+        for (int v = ResidualLo; v < ResidualHi; v++)
+            if (r[v] > bestv) { bestv = r[v]; best = v; }
+        return best;
+    }
+
+    /// <summary>Builds a window's prompt <c>[SOA][stage_1] + cb0(window)+GlobalOffset + [stage_2]</c>.</summary>
+    private int[] BuildWindowPrompt(ReadOnlySpan<int> cb0)
+    {
+        int wlen = cb0.Length;
+        int[] prompt = new int[2 + wlen + 1];
+        prompt[0] = _soa;
+        prompt[1] = _stage1Tok;
+        for (int i = 0; i < wlen; i++) prompt[2 + i] = cb0[i] + GlobalOffset;  // cb0 outline (k=0 offset)
+        prompt[^1] = _stage2Tok;
+        return prompt;
+    }
+
     /// <summary>One independent window: prime <c>[SOA][stage_1] + cb0(window) + [stage_2]</c>, then for each
     /// frame feed its cb0 token and greedily emit the 7 residual tokens (cb1..cb7). Uses an incremental KV
     /// cache — numerically identical to upstream's re-prefill-per-frame loop, O(T) instead of O(T²).</summary>
@@ -84,11 +233,7 @@ public sealed unsafe class YueStage2Lm : IDisposable
         int cacheCap = Math.Min(_cfg.Stage2.MaxPositionEmbeddings, seqMax);
         using IKvCache cache = _lm.CreateDecodeCache(cacheCap);
 
-        int[] prompt = new int[promptLen];
-        prompt[0] = _soa;
-        prompt[1] = _stage1Tok;
-        for (int i = 0; i < wlen; i++) prompt[2 + i] = cb0[i] + GlobalOffset;  // cb0 outline (k=0 offset)
-        prompt[promptLen - 1] = _stage2Tok;
+        int[] prompt = BuildWindowPrompt(cb0);
 
         int h = _cfg.Stage2.HiddenSize;
         int nResidual = _cfg.NumCodebooks - 1;                          // 7

@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Threading;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using Xunit;
@@ -110,5 +112,98 @@ public sealed unsafe class MultiBackendIsolationTests
         float c = RunLinear(backendC, inputA, weightA, outC);
         Assert.Equal(expectedA, c, 3);
         backendC.FreeWeights(new[] { weightA });
+    }
+
+    private static float ExpectedFirst(Tensor input, Tensor weight, int dim)
+    {
+        float* ip = (float*)input.DataPointer;
+        float* wp = (float*)weight.DataPointer;
+        double acc = 0;
+        for (int k = 0; k < dim; k++) acc += ip[k] * wp[k]; // out[0,0] = input[0,:] · weight[0,:]
+        return (float)acc;
+    }
+
+    /// <summary>Runs a Linear whose output is never read and never disposed, so its GPU cleanup callback stays
+    /// planted and — once the tensor is GC-finalized — is queued into THIS backend's context bucket. The reference
+    /// dies at method return (NoInlining keeps it from being kept alive by the caller frame).</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void QueueAbandonedGpuTensor(CudaBackend backend, Tensor input, Tensor weight, TensorShape ioShape)
+    {
+        Tensor abandoned = new(ioShape, DType.F32);
+        backend.Linear(abandoned, input, weight, bias: null);
+        // Deliberately no read (no lazy D2H sync) and no Dispose — the dispose callback survives to the finalizer.
+    }
+
+    /// <summary>The concurrency guard the interleaved test can't provide: two backends on two DISTINCT GPUs generating
+    /// on two threads AT THE SAME TIME, while each thread abandons GPU tensors and forces GC so finalizer-cleanup
+    /// callbacks pile up. Before the queue was partitioned by context, thread B's EnsureCurrent drained thread A's
+    /// callbacks — mutating A's non-thread-safe GpuTransferHelper State while A's own thread mutated it → intermittent
+    /// leak / throw / illegal-address. Requires 2 physical GPUs: two backends on ONE device intentionally share a
+    /// primary context (and thus per-context State), so concurrent use there is out of contract and would race by design.</summary>
+    [Fact]
+    public void TwoBackends_ConcurrentThreads_NoFinalizerDrainRace()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        int deviceCount = CudaContext.GetDeviceCount();
+        if (deviceCount < 2)
+        {
+            _output.WriteLine($"SKIPPED: needs 2 physical GPUs for cross-context concurrency (found {deviceCount}).");
+            return;
+        }
+
+        const int dim = 64;
+        TensorShape ioShape = new(2, dim);
+        TensorShape wShape = new(dim, dim);
+        using Tensor weightA = RandomF32(wShape, 11);
+        using Tensor weightB = RandomF32(wShape, 22);
+        using Tensor inputA = RandomF32(ioShape, 33);
+        using Tensor inputB = RandomF32(ioShape, 44);
+        float expectedA = ExpectedFirst(inputA, weightA, dim);
+        float expectedB = ExpectedFirst(inputB, weightB, dim);
+
+        CudaBackend backendA = new(0, PtxDir());
+        CudaBackend backendB = new(1, PtxDir());
+        Exception? failure = null;
+        try
+        {
+            backendA.PreloadWeights(new[] { weightA });
+            backendB.PreloadWeights(new[] { weightB });
+            using Barrier gate = new(2);
+            const int iters = 200;
+
+            void Worker(CudaBackend backend, Tensor input, Tensor weight, float expected, int gcMod)
+            {
+                try
+                {
+                    gate.SignalAndWait();
+                    for (int i = 0; i < iters; i++)
+                    {
+                        using Tensor output = new(ioShape, DType.F32);
+                        backend.Linear(output, input, weight, bias: null);
+                        float got = ((float*)output.DataPointer)[0]; // lazy sync fires on THIS backend's stream/context
+                        Assert.Equal(expected, got, 3);
+                        QueueAbandonedGpuTensor(backend, input, weight, ioShape);
+                        if (i % gcMod == 0) { GC.Collect(); GC.WaitForPendingFinalizers(); }
+                    }
+                }
+                catch (Exception ex) { Interlocked.CompareExchange(ref failure, ex, null); }
+            }
+
+            Thread tA = new(() => Worker(backendA, inputA, weightA, expectedA, 7)) { IsBackground = true };
+            Thread tB = new(() => Worker(backendB, inputB, weightB, expectedB, 5)) { IsBackground = true };
+            tA.Start();
+            tB.Start();
+            tA.Join();
+            tB.Join();
+
+            Assert.Null(failure);
+            backendA.FreeWeights(new[] { weightA });
+            backendB.FreeWeights(new[] { weightB });
+        }
+        finally
+        {
+            backendA.Dispose();
+            backendB.Dispose();
+        }
     }
 }

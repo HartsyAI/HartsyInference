@@ -114,7 +114,9 @@ public sealed class CudaContext : IDisposable
         // the kind of cross-thread hazard EnsureCurrent is supposed to close. Drain unconditionally (not just on
         // the cold re-bind path below) so pending frees get processed on every call from the thread that's
         // actually driving this context right now, not just the first one after a thread switch.
-        HartsyInference.Core.Tensors.Tensor.DrainPendingFinalizerGpuCleanup();
+        // Drain ONLY this context's bucket: with multiple GPU backends live, running another context's callbacks
+        // here would mutate that backend's unsynchronized per-context state concurrently with its own thread.
+        HartsyInference.Core.Tensors.Tensor.DrainPendingFinalizerGpuCleanup(_context);
         // Both checks matter: handle equality alone is unsafe because the CUDA
         // driver reuses primary-context handles after release+retain — a thread
         // could see a numerically-equal handle that's actually backed by a freshly

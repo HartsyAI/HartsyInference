@@ -111,13 +111,29 @@ Every area below needs a `docs/Research/` document **before** implementation beg
 | [DIFFRHYTHM_ARCHITECTURE.md](../Research/DIFFRHYTHM_ARCHITECTURE.md) ✅ | DiffRhythm — fast latent-diffusion full-song generation |
 | [AUDIOLDM2_ARCHITECTURE.md](../Research/AUDIOLDM2_ARCHITECTURE.md) ✅ | AudioLDM 2 — text-to-audio (music / SFX / speech) |
 
-## Vision / Server / Reference
+## Vision / Reference
 
 | Document | Needed Before |
 |---|---|
 | [YOLO_ARCHITECTURE.md](../Research/YOLO_ARCHITECTURE.md) | Vision |
-| [OPENAI_IMAGE_API.md](../Research/OPENAI_IMAGE_API.md) | Server |
-| [DOTLLM_ARCHITECTURE.md](../Research/DOTLLM_ARCHITECTURE.md) | All packages |
+| [OPENAI_IMAGE_API.md](../Research/OPENAI_IMAGE_API.md) | Historical — the OpenAI-compatible server was dropped (no first-party server) |
+| [DOTLLM_ARCHITECTURE.md](../Research/DOTLLM_ARCHITECTURE.md) | Historical study of the patterns that informed the native `HartsyInference.LLM` design; dotLLM is not a dependency |
+
+## Native LLM (HartsyInference.LLM)
+
+> See [LLM_LANGUAGE_PACKAGE.md](LLM_LANGUAGE_PACKAGE.md) §6. Design docs for the config-driven generic transformer.
+
+| Document | Needed Before |
+|---|---|
+| [GENERIC_TRANSFORMER.md](../Research/GENERIC_TRANSFORMER.md) | LLM (the config-matrix spine; decoder / encoder / enc-dec on one core) |
+| [LLM_DECODE_LOOP.md](../Research/LLM_DECODE_LOOP.md) | LLM (prefill → decode → sample loop, GPU-resident) |
+| [GGUF_QUANTIZED_MATMUL.md](../Research/GGUF_QUANTIZED_MATMUL.md) | LLM / Cuda (Q4_K/Q6_K/Q8_0 dequant-matmul) |
+| [LLM_ATTENTION.md](../Research/LLM_ATTENTION.md) | LLM (GQA/MQA, sliding-window + sink, flash decode) |
+| [ROPE_SCALING.md](../Research/ROPE_SCALING.md) | LLM (linear / NTK / YaRN / llama3 scaling) |
+| [LLM_SAMPLING.md](../Research/LLM_SAMPLING.md) | LLM (sampler chain) |
+| [CHAT_TEMPLATES.md](../Research/CHAT_TEMPLATES.md) | LLM (per-family chat templating) |
+
+(Multi-GPU sharding for large LLMs is covered by [MULTI_GPU_PARALLELISM.md](../Research/MULTI_GPU_PARALLELISM.md), listed under GPU / Compute above.)
 
 ## Interactive / World Models (Phase 10)
 

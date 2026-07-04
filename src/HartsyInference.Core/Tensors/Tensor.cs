@@ -34,21 +34,57 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
     internal Action? _gpuDisposeCallback;
 
+    /// <summary>Key identifying which backend context owns <see cref="_gpuDisposeCallback"/> — the CUDA primary-context
+    /// handle (one per device) the callback frees against. Set by the backend when it plants the callback; 0 for
+    /// non-CUDA/context-less callbacks. Used to route this tensor's finalizer cleanup into the owning context's queue
+    /// so the draining thread only ever touches its own backend's state (see <see cref="PendingFinalizerGpuCleanup"/>).</summary>
+    internal nint _gpuCleanupContext;
+
     /// <summary>GPU cleanup callbacks from tensors reclaimed by the finalizer (never explicitly Disposed) — queued
     /// here instead of invoked inline. The finalizer thread has no business making CUDA driver calls (stream
     /// enqueue order across threads is a race even though individual driver calls are thread-safe): a free enqueued
     /// from the finalizer thread can land between two dependent ops the inference thread assumed were adjacent in
     /// the stream, corrupting an in-flight buffer. Drained by the backend on the thread that actually owns the
-    /// stream (see <c>CudaContext.EnsureCurrent</c>) so every GPU driver call still comes from one thread.</summary>
-    internal static readonly System.Collections.Concurrent.ConcurrentQueue<Action> PendingFinalizerGpuCleanup = new();
+    /// stream (see <c>CudaContext.EnsureCurrent</c>) so every GPU driver call still comes from one thread.
+    ///
+    /// <para>Partitioned by owning-context key (not one global queue): a callback frees against, and mutates the
+    /// unsynchronized per-context state of, exactly one backend. With multiple GPU backends live in one process,
+    /// draining every backend's callbacks from any thread let backend B's inference thread mutate backend A's
+    /// non-thread-safe state while A's own thread did the same — a data race that leaked VRAM / threw / corrupted
+    /// under concurrent multi-GPU load. Keying by context (bucket per device) means each thread drains only its own
+    /// backend's bucket. Bucket 0 holds context-less callbacks (e.g. Vulkan) and is drained only by the drain-all overload.</para></summary>
+    internal static readonly System.Collections.Concurrent.ConcurrentDictionary<nint, System.Collections.Concurrent.ConcurrentQueue<Action>> PendingFinalizerGpuCleanup = new();
 
-    /// <summary>Drains and invokes every GPU cleanup callback queued by tensor finalizers. Call only from the thread
-    /// that owns the backend's CUDA context/stream.</summary>
+    /// <summary>Queues a finalizer GPU-cleanup callback under its owning context's bucket.</summary>
+    internal static void EnqueueFinalizerGpuCleanup(nint contextKey, Action cleanup)
+    {
+        PendingFinalizerGpuCleanup.GetOrAdd(contextKey, static _ => new System.Collections.Concurrent.ConcurrentQueue<Action>()).Enqueue(cleanup);
+    }
+
+    /// <summary>Drains and invokes the finalizer GPU-cleanup callbacks owned by <paramref name="contextKey"/> only.
+    /// Call from the thread that owns that backend's CUDA context/stream — it touches no other backend's state.</summary>
+    public static void DrainPendingFinalizerGpuCleanup(nint contextKey)
+    {
+        if (PendingFinalizerGpuCleanup.TryGetValue(contextKey, out System.Collections.Concurrent.ConcurrentQueue<Action>? queue))
+        {
+            while (queue.TryDequeue(out Action? cleanup))
+            {
+                cleanup();
+            }
+        }
+    }
+
+    /// <summary>Drains every context's finalizer GPU-cleanup callbacks, regardless of owner. Only safe when the caller
+    /// can service all live contexts (single-backend / shutdown paths). Concurrent multi-GPU inference must use the
+    /// keyed overload so a thread never runs another backend's cleanup.</summary>
     public static void DrainPendingFinalizerGpuCleanup()
     {
-        while (PendingFinalizerGpuCleanup.TryDequeue(out Action? cleanup))
+        foreach (System.Collections.Concurrent.ConcurrentQueue<Action> queue in PendingFinalizerGpuCleanup.Values)
         {
-            cleanup();
+            while (queue.TryDequeue(out Action? cleanup))
+            {
+                cleanup();
+            }
         }
     }
 
@@ -500,11 +536,11 @@ public sealed unsafe class Tensor : IDisposable
         nint ptr = Interlocked.Exchange(ref _dataPointer, 0);
         Action? gpuDispose = Interlocked.Exchange(ref _gpuDisposeCallback, null);
         Interlocked.Exchange(ref _gpuSyncCallback, null);
-        // Never invoke a CUDA-touching callback from the finalizer thread directly — queue it for the
-        // backend's owning thread to drain (see PendingFinalizerGpuCleanup).
+        // Never invoke a CUDA-touching callback from the finalizer thread directly — queue it under the owning
+        // context so only that backend's own thread drains it (see PendingFinalizerGpuCleanup).
         if (gpuDispose is not null)
         {
-            PendingFinalizerGpuCleanup.Enqueue(gpuDispose);
+            EnqueueFinalizerGpuCleanup(_gpuCleanupContext, gpuDispose);
         }
         NativeBuffer? buffer = Interlocked.Exchange(ref _ownedBuffer, null);
         if (ptr != 0 && buffer is not null)

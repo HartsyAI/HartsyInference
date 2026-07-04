@@ -4,7 +4,7 @@
 
 ## Extra Reading
 - `docs/Design/FILE_STRUCTURE.md`, `docs/Design/NUGET_PACKAGE_DESIGN.md`, `docs/Design/IMPLEMENTATION_DETAILS.md`
-- `docs/Research/DOTLLM_ARCHITECTURE.md` — Key Patterns Summary, Architectural Lessons, Addendum
+- `docs/Research/DOTLLM_ARCHITECTURE.md` — Key Patterns Summary, Architectural Lessons, Addendum (historical study that informed the engine's native patterns; not a live dependency)
 - Relevant `docs/Research/` docs and existing `src/` code
 
 ## Workflow
@@ -33,7 +33,7 @@
 - **Purpose:** ...
 - **Key methods:** ...
 - **Depends on:** ...
-- **dotLLM pattern:** ...
+- **Core pattern:** ...
 ## Edge Cases & Risks
 ## Testing Strategy
 ```

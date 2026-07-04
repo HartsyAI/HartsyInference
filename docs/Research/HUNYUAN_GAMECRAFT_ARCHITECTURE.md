@@ -62,7 +62,7 @@ Two novel architectural pieces sit *on top of* that backbone:
 
 Text conditioning uses HunyuanVideo's dual encoder — **Llava-Llama-3-8B-v1.1** as the primary high-dim sequence encoder (≈4096-dim hidden, passed through a TokenRefiner) and **CLIP-ViT-Large-Patch14** as the pooled global encoder (768-dim). VAE is HunyuanVideo's **3D causal VAE** (`884-16c-hy0801`): 16 latent channels, 8× spatial compression, 4× temporal compression, causal-conv3d. Scheduler is **FlowMatchDiscreteScheduler** (`num_train_timesteps=1000`, `shift=5.0` at inference, `reverse=true`, Euler solver). CFG at scale 2.0 over 50 steps for the base model; a **Phased Consistency Model (PCM)** distilled variant runs in **8 steps with CFG=1.0** for ≈10-20× speedup, hitting 6.6 fps on the reference 8×H20 setup.
 
-For HartsyInference: the **transformer code can be ≈98 % shared with a future HunyuanVideo pipeline** (only the input-channel count and the CameraNet attachment differ). The hard new work is (a) Plücker-ray generation from `(w/a/s/d, speed)` sequences, (b) the 3D causal VAE decoder, (c) Llava-Llama-3-8B text-encoder inference (likely shared with dotLLM via the existing Llama backbone), and (d) a **`.pt` (PyTorch pickle) loader** — the weights ship only as `mp_rank_00_model_states.pt` (30.2 GB) and `mp_rank_00_model_states_distill.pt` (30.2 GB), not safetensors. See § File tree warning.
+For HartsyInference: the **transformer code can be ≈98 % shared with a future HunyuanVideo pipeline** (only the input-channel count and the CameraNet attachment differ). The hard new work is (a) Plücker-ray generation from `(w/a/s/d, speed)` sequences, (b) the 3D causal VAE decoder, (c) Llava-Llama-3-8B text-encoder inference (likely shared with the native `HartsyInference.LLM` Llama backbone), and (d) a **`.pt` (PyTorch pickle) loader** — the weights ship only as `mp_rank_00_model_states.pt` (30.2 GB) and `mp_rank_00_model_states_distill.pt` (30.2 GB), not safetensors. See § File tree warning.
 
 ## Detailed Findings
 
@@ -264,7 +264,7 @@ GameCraft uses **HunyuanVideo's dual-encoder text stack unchanged**:
     - Standard OpenAI CLIP-L (12-layer Transformer, hidden 768, 12 heads, vocab 49408, context 77).
     - Output: pooled `(B, 768)` text embedding (the EOS-token's hidden state after final projection). Combined with timestep into the global modulation vector via a `CombinedTimestepTextProjEmbeddings` MLP.
 
-Both encoders are **frozen**; GameCraft does not fine-tune them. The Llava-Llama path is the same one `dotLLM` already implements for Llama-3-8B, so the bulk of text-encoder code is shareable.
+Both encoders are **frozen**; GameCraft does not fine-tune them. The Llava-Llama path is the same one the native `HartsyInference.LLM` package already implements for Llama-3-8B, so the bulk of text-encoder code is shareable.
 
 ### 7. VAE — `884-16c-hy0801`
 
@@ -585,10 +585,10 @@ The reference image plays no further role after chunk 0. Action symbol `a_N` and
 7. **Plücker generation.** Pure CPU code; runs once per chunk, ~1 ms at 704×1216×33. No backend kernel needed. Cache the unit ray directions in pixel coordinates at startup; per-chunk only the camera pose changes.
 8. **Action → pose integration.** `ActionToPose` is a tiny state machine: `(action, speed)` → constant `(d_trans, d_rot, α, β)` for the chunk → integrate over 33 frames → 33 poses. Use double precision for the integration to avoid drift over long rollouts. Quaternion for rotation.
 9. **VAE.** Reuse the future `HunyuanVideo3DCausalVae` decoder. Tiling required at 704×1216 on consumer GPUs (24 GB).
-10. **Text encoders.** Llava-Llama-3-8B is just Llama-3-8B at the language tower — depend on `HartsyInference.Text.Llama` (or `dotLLM`) for the inference. Apply the diffusers prompt template + `crop_start=95` exactly. CLIP-L pooled is a tiny standalone encoder; we likely already have it for SD3/FLUX.
+10. **Text encoders.** Llava-Llama-3-8B is just Llama-3-8B at the language tower — depend on the native `HartsyInference.LLM` package for the inference. Apply the diffusers prompt template + `crop_start=95` exactly. CLIP-L pooled is a tiny standalone encoder; we likely already have it for SD3/FLUX.
 11. **CFG.** Two-pass CFG at scale 2.0 doubles the per-step transformer cost. At 30k tokens × 50 steps × 2 passes this is the dominant cost. Consider always-batched CFG (cat cond + uncond along batch axis) to halve the launch overhead — same trick FLUX uses.
 12. **Distilled checkpoint.** Same code path; just swap the safetensors file, set `num_inference_steps=8`, skip the uncond pass entirely (`cfg-scale=1.0`).
-13. **Streaming output.** The natural API is `async IAsyncEnumerable<VideoChunk>` yielding one 33-frame chunk at a time, with the caller supplying the next action via a callback or queue. Match `dotLLM`'s streaming token API where possible for consistency.
+13. **Streaming output.** The natural API is `async IAsyncEnumerable<VideoChunk>` yielding one 33-frame chunk at a time, with the caller supplying the next action via a callback or queue. Match the native `HartsyInference.LLM` streaming token API where possible for consistency.
 14. **Validation.** Reproduce the first frame of `asset/village.png + "w 0.2"` exactly (within bf16 tolerance) against the Python reference. Numeric tolerance budget: max-abs ≤ 1e-2 on the final decoded RGB frame after one chunk; mean-abs ≤ 1e-3. (Tight because flow-matching + CFG amplifies small precision errors over 50 steps.)
 15. **Sample app.** `samples/HunyuanGameCraft.Interactive/` — a console app that takes `--reference-image`, `--prompt`, and reads action keys from stdin (`w/a/s/d`) to produce chunks on demand. Must display the license warning before doing anything.
 16. **Documentation in `docs/Checklists/PHASE_10_INTERACTIVE.md`** must call out the license gate as a separate checklist item from "implement transformer" / "implement CameraNet" / "implement VAE decode."

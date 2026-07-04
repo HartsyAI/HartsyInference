@@ -32,7 +32,7 @@ Notes:
 - **FC-L** (used by all "Flash" + v2 1B variants) = same d_model/heads but a *deeper* encoder (32 layers) and a *thinner* decoder. The "Flash" idea: keep the heavy encoder for accuracy, shrink the decoder (which is run autoregressively) for throughput. Same principle as Whisper-large-v3-turbo.
 - **Canary-180M-Flash** is the most aggressive shrink: 17 encoder layers + 4 decoder layers. NVIDIA has not published the exact d_model for 180M but config patterns in NeMo suggest 512 with 8 heads and FFN 2048 (verify from extracted `.nemo` `model_config.yaml`).
 - **Canary-1B-v2** is a re-architecture, not a fine-tune: it switches to a **single unified BPE** tokenizer (16,384 tokens — larger and more efficient than the v1 concatenated 4×1024 setup) and doubles the decoder depth from 4 (Flash) back to 8 to handle 25 languages.
-- **Canary-Qwen-2.5B** is a Speech-Augmented LLM (SALM): the canary-1b-flash encoder is frozen, audio embeddings are projected with a linear layer into Qwen3-1.7B's embedding space, then LoRA-adapted Qwen3 generates output. Out of scope for the standard Canary pipeline — needs LLM integration via dotLLM.
+- **Canary-Qwen-2.5B** is a Speech-Augmented LLM (SALM): the canary-1b-flash encoder is frozen, audio embeddings are projected with a linear layer into Qwen3-1.7B's embedding space, then LoRA-adapted Qwen3 generates output. Out of scope for the standard Canary pipeline — needs LLM integration via the native HartsyInference.LLM package.
 
 #### Performance (Open ASR Leaderboard, WER lower is better)
 

@@ -4,6 +4,8 @@ Status legend: ⬜ not started · 🔧 in progress · ✅ done · ⚠ blocked
 
 **Goal.** For every latest-SOTA LLM we support, establish a llama.cpp baseline (tokens/sec, GPU) and prove the HartsyInference engine **matches or beats** it. The bar is set by `llama-bench`; the engine is measured both directly (Tier 1) and through the real Swarm API path (Tier 2).
 
+> **STATUS (2026-07-04):** baseline captured (all 7 models); benchmark revealed a 20-54× gap; the optimization grind (**`LLM_DECODE_PERF_GRIND.md`**) closed it to **1.94-2.88×** (Llama-3.2-1B **under 2×**). Remaining lever = CUDA graphs (foundation verified, full build deferred). See the "AFTER the grind" results table below.
+
 **Hardware.** RTX 3060 12 GB (sm_86), driver CUDA 13.2. Keep desktop/SwarmUI VRAM in mind (~5 GB baseline occupancy); free it before a run for headroom. Single GPU, batch=1.
 
 ---
@@ -122,19 +124,33 @@ During the Tier-2 sweep, SwarmUI's LLM backend grew to **10 GB VRAM** after only
 
 ---
 
-## Results (to be filled)
+## Results — ORIGINAL BASELINE (2026-07-03), then AFTER the optimization grind (2026-07-04)
 
-Engine column = Tier-1 direct, CUDA, `lowVram=1` (compressed, matches llama.cpp memory model), 128-token greedy, **overall tok/s (decode-dominated, single-shot incl. first-token kernel JIT → slightly pessimistic for small models)**. D2H syncs = 129/128 tokens on every model (≈1/token; no residency bug anywhere). Verdict vs the "match or beat" goal: all **FAIL** by 20-54×.
+> **The gap has been closed from 20-54× to 1.94-2.88×** by the work in **`LLM_DECODE_PERF_GRIND.md`** (fused quantized GEMV kernels, quantized lm_head, split-K flash-decode attention, vectorized loads). See that doc for the per-phase progression and kernel details. The tables below are the *starting* point and the *current* state.
 
-| Model | Quant | llama.cpp tg t/s | engine tg t/s | engine/llama | slowdown | Swarm tg t/s | D2H/tok | Verdict |
-|---|---|---|---|---|---|---|---|---|
-| Qwen3-0.6B | Q4_K_M | 354.46 | 17.6 | 0.050 | 20× | 20.1 | ~1.0 | FAIL |
-| Llama-3.2-1B | Q8_0 | 215.91 | 6.05 | 0.028 | 36× | 6.2 | ~1.0 | FAIL |
-| Gemma-3-1B | Q4_K_M | 229.75 | 8.16 | 0.036 | 28× | 11.7 | ~1.0 | FAIL |
-| Phi-4-mini | Q4_K_M | 107.56 | 2.74 | 0.025 | 39× | VRAM‡ | ~1.0 | FAIL |
-| Granite-3.1-2B | Q4_K_M | 148.46 | 3.18 | 0.021 | 47× | VRAM‡ | ~1.0 | FAIL |
-| OLMoE-1B-7B | Q4_K_M | 283.27 | OOM† | — | — | VRAM‡ | — | — |
-| Mistral-7B-v0.3 | Q4_K_M | 66.46 | 1.24 | 0.019 | 54× | VRAM‡ | ~1.0 | FAIL |
+### Original baseline (before the grind)
+Engine column = Tier-1 direct, CUDA, `lowVram=1`, 128-token greedy overall tok/s (single-shot, incl. first-token JIT → pessimistic; the accurate warm/256-tok baselines are in the grind doc). D2H syncs ≈1/token (no residency bug). This is the pre-optimization starting point:
+
+| Model | Quant | llama.cpp tg t/s | engine tg t/s | engine/llama | slowdown | Swarm tg t/s |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B | Q4_K_M | 354.46 | 17.6 | 0.050 | 20× | 20.1 |
+| Llama-3.2-1B | Q8_0 | 215.91 | 6.05 | 0.028 | 36× | 6.2 |
+| Gemma-3-1B | Q4_K_M | 229.75 | 8.16 | 0.036 | 28× | 11.7 |
+| Phi-4-mini | Q4_K_M | 107.56 | 2.74 | 0.025 | 39× | VRAM‡ |
+| Granite-3.1-2B | Q4_K_M | 148.46 | 3.18 | 0.021 | 47× | VRAM‡ |
+| OLMoE-1B-7B | Q4_K_M | 283.27 | OOM† | — | — | VRAM‡ |
+| Mistral-7B-v0.3 | Q4_K_M | 66.46 | 1.24 | 0.019 | 54× | VRAM‡ |
+
+### ✅ AFTER the grind (current, 2026-07-04) — warm decode tok/s, GPU idle
+Same GGUF files. Engine now uses fused mul_mat_vec Q4_K/Q6_K/Q8_0 decode kernels + quantized lm_head + split-K flash-decode attention + vectorized loads. All coherent (token-checked vs the pre-change path).
+
+| Model | Quant | llama.cpp tg t/s | engine tg t/s | engine/llama | vs llama.cpp | Δ from baseline |
+|---|---|---|---|---|---|---|
+| Llama-3.2-1B | Q8_0 | 215.91 | ~111.5 | 0.52 | **1.94×** (under 2×!) | 6.05 → 111.5 (**18×**) |
+| Mistral-7B-v0.3 | Q4_K_M | 66.46 | ~30.7 | 0.46 | **2.12×** | 1.24 → 30.7 (**25×**) |
+| Qwen3-0.6B | Q4_K_M | 354.46 | ~157 | 0.44 | **2.26×** | 17.6 → 157 (**5.9× warm; ~9× vs cold**) |
+| Gemma-3-1B | Q4_K_M | 229.75 | ~79.7 | 0.35 | 2.88× | (sliding-window attn can't use split-K yet — slowest) |
+| Phi-4-mini / Granite-3.1-2B / OLMoE | Q4_K_M | — | — | — | pending re-measure | (small models expected ~2-2.5×) |
 
 ‡ Won't run through SwarmUI on this 12 GB card: **SwarmUI reserves ~8 GB VRAM at idle** (its T2I/ComfyUI/image backends), leaving ~4 GB — too little for Phi-4/granite/OLMoE/Mistral, which fit standalone in Tier-1 (whole GPU). Each attempt OOMs and auto-restarts SwarmUI. Their engine throughput is the Tier-1 column. The Swarm-tier Qwen3/Llama/Gemma numbers (compressed, `LowVramQuant=true`) **corroborate Tier-1** (20 vs 18, 6.2 vs 6.0, 12 vs 8), confirming the engine kernels are the bottleneck, not the Swarm/WebSocket layer.
 
@@ -147,7 +163,7 @@ SwarmUI holds ~8 GB VRAM before any LLM loads (T2I/ComfyUI/image backends). On a
 
 † OLMoE-1B-7B Tier-1 OOM'd with only 6.7 GB free (SwarmUI holds 3.5 GB base). Re-run with SwarmUI stopped to fit its 4.2 GB compressed weights.
 
-**Reading it:** the engine is 20-54× slower than llama.cpp at decode, and the gap *widens with model size* (54× on Mistral-7B). GPU is 100% utilized throughout, so it is compute-bound on inefficient quant-GEMV/dequant + attention kernels, not stalled. Swarm-path (Tier-2) numbers read higher than Tier-1 for the two models that ran, but the Swarm decode-window metric over-counts throughput (initial-token buffering) — treat Tier-1 as authoritative.
+**Reading it (historical):** at baseline the engine was 20-54× slower than llama.cpp, gap widening with model size (54× on Mistral) — GPU 100% utilized but compute-bound on the dequant-then-cuBLAS quant path and low-occupancy attention. Root cause + fixes are in `LLM_DECODE_PERF_GRIND.md`: there was **no fused quantized GEMV** (weights were dequantized whole to F16 then run through cuBLAS at M=1), the tied lm_head ran as a 622 MB/token F32 GEMV, and decode attention was one-block-per-head. Fixing those closed the gap to 1.94-2.88×. Remaining lever to reach/beat parity = **CUDA graphs** (launch overhead on small models; foundation verified, full build deferred — see grind doc Phase 6).
 
 ## Phase 1/2 status
 - Phase 1 (Tier-1 direct engine): ✅ 6/7 measured (OLMoE OOM, needs SwarmUI stopped). Harness = existing `samples/HartsyInference.TextGen.Cli` (`gguf cuda 128`), no new project needed. Raw log: `benchmarks/results/tier1_engine_3060.txt`.

@@ -422,12 +422,12 @@ This must match exactly — a small drift in `s` or the clip bound changes the i
 
 ### 12. Mapping to HartsyInference
 
-Tasks split between "reuse" (existing HartsyInference / dotLLM code) and "new":
+Tasks split between "reuse" (existing HartsyInference / HartsyInference.LLM code) and "new":
 
 | Component | Reuse | New |
 |---|---|---|
-| Qwen2.5-0.5B / 1.5B / 7B LM | **dotLLM** (full Qwen2 forward + KV cache + RoPE + tied embeddings) | None — dotLLM dependency check only |
-| Qwen2 tokenizer (BPE) | **dotLLM** tokenizer | Subclass to expose `speech_start_id`, `speech_end_id`, `speech_diffusion_id` from `<|vision_start/end/pad|>` |
+| Qwen2.5-0.5B / 1.5B / 7B LM | **HartsyInference.LLM** (full Qwen2 forward + KV cache + RoPE + tied embeddings) | None — HartsyInference.LLM dependency check only |
+| Qwen2 tokenizer (BPE) | **HartsyInference.LLM** tokenizer | Subclass to expose `speech_start_id`, `speech_end_id`, `speech_diffusion_id` from `<|vision_start/end/pad|>` |
 | `<|vision_pad|>` constraint logits processor | — | New: small constrained-vocab logit mask (~30 lines) |
 | Cosine beta schedule, v-prediction, DPM++ multistep | `HartsyInference.Diffusion/Schedulers/DpmppMultiStepScheduler` (verify cosine match) | Likely no new code; one validation test |
 | Acoustic VAE encoder + decoder | — | **New** `VibeVoiceAcousticTokenizer.cs` (1D causal ConvNeXt + streaming cache). Patterns from F5-TTS Vocos but causal and depthwise-conv. |
@@ -436,18 +436,18 @@ Tasks split between "reuse" (existing HartsyInference / dotLLM code) and "new":
 | Diffusion head (4-layer AdaLN+FFN) | AdaLN-Zero patterns from `Flux/SD3` DiT blocks | **New** `VibeVoiceDiffusionHead.cs` — strip out attention, keep only FFN + AdaLN modulation |
 | Multi-speaker prompt format | — | **New** `VibeVoiceProcessor.cs` — script parser + voice-prompt builder + audio dB-FS normalizer |
 | Streaming cache for SConv1d / SConvTranspose1d | — | **New** `VibeVoiceTokenizerStreamingCache` — per-sample, per-layer ring of last `(k-1)*d - (s-1)` samples |
-| Streaming-0.5B split-LM forward | dotLLM Qwen2 (per-layer hooks needed — see deviation below) | **New** wrapper that runs lower-N layers, then upper-(N-K) layers as a separate forward with `tts_input_types` embedding injected |
+| Streaming-0.5B split-LM forward | HartsyInference.LLM Qwen2 (per-layer hooks needed — see deviation below) | **New** wrapper that runs lower-N layers, then upper-(N-K) layers as a separate forward with `tts_input_types` embedding injected |
 | Binary EOS classifier | — | **New** trivial 2-layer MLP |
 | Audio I/O (24 kHz PCM) | `HartsyInference.Audio/Io` | None |
 
-#### 12.1 Deviation risk: dotLLM Qwen2 must expose per-layer outputs
+#### 12.1 Deviation risk: HartsyInference.LLM Qwen2 must expose per-layer outputs
 
-The streaming-0.5B variant needs to run the **lower 4 Qwen2 layers**, then independently run the **upper 20 layers** with modified inputs. dotLLM's Qwen2Model normally returns only the final hidden state. Two options:
+The streaming-0.5B variant needs to run the **lower 4 Qwen2 layers**, then independently run the **upper 20 layers** with modified inputs. HartsyInference.LLM's Qwen2Model normally returns only the final hidden state. Two options:
 
-1. **Add a "stop at layer N" parameter** to dotLLM's Qwen2 forward (preferred — minimal API surface).
+1. **Add a "stop at layer N" parameter** to HartsyInference.LLM's Qwen2 forward (preferred — minimal API surface).
 2. **Construct two independent Qwen2Model instances** with overlapping but disjoint layer slices, sharing the same embedding table.
 
-The first is cleaner and matches what `VibeVoiceStreamingModel` does in Python (it instantiates two `Qwen2Model`s but unused embed_tokens on the second). We should coordinate with dotLLM maintainers (or self, since same author) before settling.
+The first is cleaner and matches what `VibeVoiceStreamingModel` does in Python (it instantiates two `Qwen2Model`s but unused embed_tokens on the second). Since `HartsyInference.LLM` is first-party, add the "stop at layer N" hook there directly when building the Qwen2 forward.
 
 #### 12.2 GPU kernels required
 
@@ -465,7 +465,7 @@ No new PTX kernels needed.
 
 - `HartsyInference.Audio.Models.VibeVoice/` — all new model code
 - `HartsyInference.Audio.Pipelines.VibeVoicePipeline.cs` — orchestration
-- **dotLLM** dependency: Qwen2.5 LM only (existing). VibeVoice should not depend on `dotLLM.Cli` or any other dotLLM package beyond what F5-TTS already uses (if any) — see [`docs/Design/NUGET_PACKAGE_DESIGN.md`](../Design/NUGET_PACKAGE_DESIGN.md).
+- **HartsyInference.LLM** dependency: Qwen2.5 LM only (existing). VibeVoice should reference only the `HartsyInference.LLM` package (Qwen2.5 LM), not the CLI or sample projects, beyond what F5-TTS already uses (if any). See [`docs/Design/NUGET_PACKAGE_DESIGN.md`](../Design/NUGET_PACKAGE_DESIGN.md).
 
 ### 13. Open Questions / Pre-Implementation Verification
 
@@ -475,10 +475,10 @@ These need to be resolved during the planning phase, not during research:
 2. **`speech_scaling_factor` / `speech_bias_factor` provenance**: confirm these are present in the safetensors file (registered as buffers — should serialize). If not, we need a fallback.
 3. **`std_dist_type = 'gaussian'`**: in inference, do we actually need the random std multiplier, or is the deterministic `mean` good enough? Demo scripts always use `gaussian` — match the upstream behavior to avoid quality regression.
 4. **Streaming cache key**: Python uses `id(self)` as part of the cache key, which doesn't transfer to a C# port. We need a deterministic per-layer ID assigned at construction time. Use `layer_index` + `block_index` + role (`"enc"|"dec"`).
-5. **dotLLM Qwen2 per-layer interrupt**: confirm we can stop forward at layer N or do we need to refactor. (See §12.1.)
+5. **HartsyInference.LLM Qwen2 per-layer interrupt**: confirm we can stop forward at layer N or do we need to refactor. (See §12.1.)
 6. **bf16 on GPU**: all official ckpts are bf16. Our existing diffusion DiT pipelines already run bf16 — confirm `Tensor.CastTo` covers this path and bf16 matmul kernels are in place. (Should be — Flux/SD3/Z-Image all use bf16.)
 7. **CFG-Zero* / APG**: the upstream code uses **vanilla CFG only** (`x = uncond + scale*(cond - uncond)`). Do not enable APG / CFG-Zero* until separately validated — they're not used by VibeVoice.
-8. **Long-form stability**: 90-min outputs need a 65k-token context (1.5B variant has `max_position_embeddings = 65536`). Confirm dotLLM's KV cache scales to this without precision loss. RoPE theta is 1e6 (long-context preset).
+8. **Long-form stability**: 90-min outputs need a 65k-token context (1.5B variant has `max_position_embeddings = 65536`). Confirm HartsyInference.LLM's KV cache scales to this without precision loss. RoPE theta is 1e6 (long-context preset).
 
 ### 14. Validation Checklist (for the implementation phase)
 

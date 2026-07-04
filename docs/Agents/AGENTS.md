@@ -25,7 +25,7 @@ Pick the specialized agent file that matches your task. Read it before starting 
 | Review code | `REVIEWER.md` |
 | Debug a failure | `DEBUG.md` |
 | Refactor or optimize | `REFACTOR.md` |
-| Build server/API endpoints | `API.md` |
+| Extend the public library API / SwarmUI-extension surface | `API.md` |
 | Wire cross-package integration | `INTEGRATION.md` |
 | Convert model formats | `CONVERT.md` |
 | Run benchmarks | `BENCHMARK.md` |
@@ -51,9 +51,9 @@ These apply to ALL agents. Specialized files only add task-specific rules.
 
 **Reuse shared primitives — no redundant bloat.** The backend is modular *so that models share it*. Before writing ANY helper (inline or a new shared one), grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`, `Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics (`WhisperOps` for `ProjectLinear`/`EnsureF32`, `WeightNorm`, `IStft`, and `HartsyInference.Audio/Dsp/` → `NsfVocoderDsp` for NSF source / forward-STFT / iSTFT head / pad / scale, `DeterministicRng` for seeded noise). Concrete: a `[1,C,T]↔[1,T,C]` layout transpose is `backend.Transpose2D(out, in, d1, d2)` — never a hand-rolled loop. When 2+ models need the same operation, hoist ONE helper **parameterized by the differences** (a few extra params or a `switch` beats a dozen near-identical small methods). When adding a model, audit it for duplication against the models already built and fold the shared parts. Re-run affected models' tests after hoisting — shared code is load-bearing.
 
-## dotLLM Patterns (Single Source of Truth)
+## Core Engine Patterns (Single Source of Truth)
 
-All code follows patterns verified from the dotLLM codebase. See `docs/CODE_STYLE.md` for full P/Invoke and disposal patterns.
+These are the engine's own established patterns for tensors, CUDA launches, config, and disposal. They originated from a study of the dotLLM codebase (`docs/Research/DOTLLM_ARCHITECTURE.md`, kept as historical background), but they are now native to HartsyInference and are not a dependency on any external framework. LLM text generation itself is native too, in the `HartsyInference.LLM` package (config-driven generic decoder transformer: Qwen2/Qwen3/Llama/Mistral, GGUF quantized inference, device-resident KV cache, sampler chain, chat templates); route LLM work there, not at dotLLM. See `docs/CODE_STYLE.md` for full P/Invoke and disposal patterns.
 
 ### Tensor Type System
 

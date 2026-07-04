@@ -112,7 +112,7 @@ Each kernel ships **FP32 + FP16 variants** (same .glsl, different `-DUSE_FP16` d
 - [ ] `sdpa_flash.comp.glsl` — FlashAttention-2 style (online softmax, Br=64 / Bc=64 tiles). Phase 4 optimization; v1 uses naive 3-pass. **Phase C2 profile data shows SDPA is only 4.4% of host time on Flux Schnell** — FlashAttention is now low-priority versus the per-dispatch-overhead lever (push descriptors / kernel fusion).
 - [x] `matmul_coopmat.comp.glsl` — `VK_KHR_cooperative_matrix` variant. **Implemented in Phase C2 step 2.** FP16 input, FP32-or-FP16 output (gated by `OUTPUT_F32` spec const — see [PHASE_3_5_DEVIATIONS.md #11](PHASE_3_5_DEVIATIONS.md) for why both are required), transpose-aware via `gl_CooperativeMatrixLayout{Row,Column}Major`. Bias add via follow-up `BroadcastAdd(N, 1)` dispatch. Linear time on Flux 43.8 s → 37.0 s (15%); wall-clock 138 s → 129.5 s (6%). Less than projected — see § 8 perf measurements.
 - [ ] `dequant_q4_k.comp.glsl`, `dequant_q8_0.comp.glsl` — GGUF Q4/Q8 dequant on GPU. Phase 4.
-- [ ] Multi-queue / async-compute — Phase 7 if needed.
+- [ ] Multi-queue / async-compute — deferred, build if needed.
 
 ## 4. Implementation — Diffusion (no changes expected)
 

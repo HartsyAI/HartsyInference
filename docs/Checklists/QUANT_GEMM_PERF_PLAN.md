@@ -10,6 +10,19 @@
 
 ---
 
+## ⚡ UPDATE 2026-07-04 — LLM decode GEMV was rewritten (see `LLM_DECODE_PERF_GRIND.md`)
+
+The **LLM decode path** GEMM story changed substantially and supersedes the Stage-6 "Q4_K dequant is a constant +85%/op at M=1, keep it opt-in" conclusion below **for decode**:
+
+- **Fused quantized GEMV kernels now ARE the decode matmul.** New `native/cuda/lm/mul_mat_vec_{q4k,q6k,q8_0}_f32.cu` (one warp/row, F32 accumulate, vectorized 128-bit loads) read the quantized weight **once** and dequant inline — replacing "dequant whole weight → F16 → cuBLAS GEMM at M=1". Dispatched in `CudaBackend.LinearImpl` for M≤8. This removed both the extra HBM pass AND the per-token whole-weight dequant of the old `QuantizedMatMul` low-VRAM path. Net: **compressed decode now matches F16-cached decode speed**, and the 20-54× gap to llama.cpp fell to 1.94-2.88×.
+- **`dp4a` int8 GEMV** (`mul_mat_vec_q4k_q8_1.cu` + `quantize_activation_q8_1_f32.cu`, opt-in `HARTSY_DP4A_ON`): built + numerically exact, but **NO speedup** — the vectorized-float GEMV is **memory-bound, not ALU-bound**, and not occupancy-starved (big-N = thousands of warps). So dp4a (llama.cpp's trick) doesn't help *our* kernel; the remaining GEMV gap is memory-access-pattern (needs `ncu`, blocked by GeForce perf-counter perms).
+- **lm_head**: tied models force-dequantized the embed to F32 (622 MB/token F32 GEMV); now keep the quantized embed for the head GEMV (`GenericTransformer._lmHeadQuant`), −0.5 GB VRAM too.
+- The Stage-5b split-K flash-decode below was **made default** for occupancy-limited decode (was gated `kvLen≥1024`, never fired for decode) — big attention win on small models.
+
+The ledger/findings below remain accurate for the **diffusion/prefill (M large)** GEMM path (cuBLAS, epilogue fusion, FP8, tensor-core), which is unchanged.
+
+---
+
 ## Why this exists (findings from the kernel/quant audit)
 
 Traced on 2026-06-30. The engine already has the right machinery, but the fast paths are

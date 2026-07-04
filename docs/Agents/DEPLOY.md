@@ -21,11 +21,11 @@ Each `.csproj` must have:
 ```xml
 <PropertyGroup>
     <PackageId>HartsyInference.Core</PackageId>
-    <Version>1.0.0-preview.1</Version>
-    <Authors>YourName</Authors>
+    <!-- Version is centralized; do NOT hardcode per-project. See Versioning below. -->
+    <Authors>Hartsy</Authors>
     <Description>...</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/...</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/HartsyAI/HartsyInference</PackageProjectUrl>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>ai;inference;diffusion;cuda;dotnet</PackageTags>
@@ -34,9 +34,13 @@ Each `.csproj` must have:
     <Deterministic>true</Deterministic>
 </PropertyGroup>
 ```
+Target frameworks: **net8.0 and net10.0** (multi-target both).
 
 ## Versioning
-All packages share one version: `1.0.0-preview.N` → `1.0.0` → `1.0.1` (patch) / `1.1.0` (minor) / `2.0.0` (major).
+Single source of truth is `Directory.Build.props` (`<VersionSuffix>`); all packages share that one version (currently `1.0.0-alpha.43`). Bump it there every release, never per-project. Progression: `1.0.0-alpha.N` → `1.0.0` → `1.0.1` (patch) / `1.1.0` (minor) / `2.0.0` (major). The SwarmUI backend extension pins a published engine version, so any new public type is invisible to it until this is bumped, published, AND re-pinned in the extension's csproj.
+
+## What Ships
+Publish the real modality packages (Core, Cpu, Cuda, Vulkan, ModelHandler, Tokenizers, Diffusion, Audio, Vision, Video, ThreeD, Interactive), plus **HartsyInference.LLM** and **HartsyInference.Phonemizer**, and the meta package **HartsyInference** (references everything except LLM, Phonemizer, Server, and Cli, so LLM/Phonemizer are added explicitly by consumers). Do NOT publish or advertise **HartsyInference.Server**; the OpenAI-compatible server is dropped and that project is abandoned scaffolding. The engine is consumed via the SwarmUI backend extension (`https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend`), the libraries above, and the sample CLIs.
 
 ## Validation
 Before publishing: create fresh project, add local packages, verify compile/run/output and transitive dependency resolution.

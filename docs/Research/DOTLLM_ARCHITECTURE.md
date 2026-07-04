@@ -1,5 +1,10 @@
 # dotLLM Architecture — Research Notes
 
+> Historical study. dotLLM is not a dependency or companion of HartsyInference. This document
+> captured dotLLM's patterns during research and informed the design of the engine's own native
+> LLM stack, which now ships in the `HartsyInference.LLM` package (a config-driven generic decoder
+> transformer covering Qwen2/Qwen3/Llama/Mistral with GGUF quantized inference). It is retained for
+> reference and provenance.
 
 ## Summary
 
@@ -505,7 +510,7 @@ app.MapPost("/v1/chat/completions", async (ChatCompletionRequest request, Server
 
 Source: [dotLLM server](https://github.com/kkokosa/dotLLM)
 
-**HartsyInference adoption:** Same Minimal API architecture. HartsyInference serves `/v1/images/generations`, `/v1/audio/transcriptions`, `/v1/audio/speech`, and `/v1/audio/translations`. Shared `ServerState` pattern, source-generated JSON, per-endpoint files.
+**HartsyInference adoption:** The engine does not ship a first-party server; it is consumed via the SwarmUI backend extension, the per-modality NuGet libraries, and the bundled sample CLIs. dotLLM's `IAsyncEnumerable<T>` streaming shape still informs the engine's streaming APIs, but there is no `/v1/...` REST surface to maintain.
 
 ### Testing Strategy
 

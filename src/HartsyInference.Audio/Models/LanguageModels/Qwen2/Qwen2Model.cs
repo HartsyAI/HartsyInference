@@ -50,6 +50,8 @@ public sealed class Qwen2Model : IDisposable
         AttentionBias = cfg.AttentionBias,
         QkNorm = false,
         TieWordEmbeddings = cfg.TieWordEmbeddings,
+        // Per-config opt-in OR the global env (TransformerConfig.LowVramQuant defaults to the env; OR-ing preserves it).
+        LowVramQuant = cfg.LowVramQuant || Environment.GetEnvironmentVariable("HARTSY_LOWVRAM_QUANT") == "1",
         Rope = cfg.Rope,
     };
 
@@ -94,6 +96,20 @@ public sealed class Qwen2Model : IDisposable
     /// <summary>Allocates the efficient incremental decode cache for this model (<see cref="KvCaches.ForDecode"/>) —
     /// a <see cref="FixedKvCache"/> (O(1) appends). Prefer this over hand-rolling a cache. Dispose when done.</summary>
     public IKvCache CreateDecodeCache(int maxSeqLen) => KvCaches.ForDecode(NumLayers, NumKeyValueHeads, HeadDim, maxSeqLen);
+
+    /// <summary>Creates a single-sequence <see cref="FixedKvCache"/> directly (the concrete type
+    /// <see cref="ForwardBatchDecode"/> needs, one per batched sequence). Dispose when done.</summary>
+    public FixedKvCache CreateFixedCache(int maxSeqLen) => new(NumLayers, batch: 1, NumKeyValueHeads, HeadDim, Math.Max(1, maxSeqLen));
+
+    /// <summary>Batched decode step: <paramref name="embeds"/> is <c>[1, B, hidden]</c> (one token per sequence),
+    /// <paramref name="positions"/>[b] is sequence b's absolute position, <paramref name="caches"/>[b] its own cache.
+    /// Returns post-norm hidden <c>[1, B, hidden]</c> (rows = B, ready for <see cref="ProjectLogits"/>). See
+    /// <see cref="GenericTransformer.ForwardBatchDecode"/>.</summary>
+    public Tensor ForwardBatchDecode(IBackend backend, Tensor embeds, ReadOnlySpan<int> positions, FixedKvCache[] caches)
+    {
+        ThrowIfDisposed();
+        return _transformer.ForwardBatchDecode(backend, embeds, positions, caches);
+    }
 
     /// <summary>Projects the final hidden state <c>[1, T, hidden]</c> to vocab logits <c>[1, T, vocab]</c>.</summary>
     public Tensor ProjectLogits(IBackend backend, Tensor hidden, int batch, int t)

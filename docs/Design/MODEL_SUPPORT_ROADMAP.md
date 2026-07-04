@@ -156,7 +156,7 @@ Reusable `.pt` (PyTorch pickle) checkpoint loader landed alongside GameCraft (`M
 | **Image super-resolution** | Real-ESRGAN, ESRGAN, SwinIR — also serve as diffusion upscalers |
 
 ### Multimodal / LLM+Vision
-- LLaVA-style (via dotLLM), Qwen2.5-VL, **Qwen3-VL** (2026), Pixtral
+- LLaVA-style (via the native `HartsyInference.LLM` package + Vision towers), Qwen2.5-VL, **Qwen3-VL** (2026), Pixtral
 - **InternVL 2.5 / 3** — open weights, competitive with GPT-4V on benchmarks
 - **PaliGemma 2** — Google, 2B/9B/28B sizes, vision-language transfer
 - **Molmo** (Allen AI) — competitive open VLM

@@ -10,7 +10,7 @@ The pipeline uniquely supports four modes from one checkpoint via the chat templ
 
 Higgs v2.5 (Sep 2025) is a 1B-parameter condensation with the same tokenizer and chat template but stronger primary-language coverage (en/zh/ko/ja via GRPO) and explicit expressiveness control tags.
 
-For HartsyInference this maps cleanly to: **dotLLM patterns for the Llama-3.2-3B backbone + a new DualFFN MLP variant; a new audio codec implementation in HartsyInference.Audio that combines DAC-style decoder ops (already documented in [AUDIO_CODECS.md](AUDIO_CODECS.md)) with a HuBERT-style semantic encoder; pure string templating for prompt construction; KV-cache + `IAsyncEnumerable<float[]>` for streaming.**
+For HartsyInference this maps cleanly to: **the native `HartsyInference.LLM` transformer for the Llama-3.2-3B backbone + a new DualFFN MLP variant; a new audio codec implementation in HartsyInference.Audio that combines DAC-style decoder ops (already documented in [AUDIO_CODECS.md](AUDIO_CODECS.md)) with a HuBERT-style semantic encoder; pure string templating for prompt construction; KV-cache + `IAsyncEnumerable<float[]>` for streaming.**
 
 Sources: [boson-ai/higgs-audio (GitHub)](https://github.com/boson-ai/higgs-audio), [bosonai/higgs-audio-v2-generation-3B-base (HF)](https://huggingface.co/bosonai/higgs-audio-v2-generation-3B-base), [bosonai/higgs-audio-v2-tokenizer (HF)](https://huggingface.co/bosonai/higgs-audio-v2-tokenizer), [HiggsAudioV2 transformers docs](https://huggingface.co/docs/transformers/model_doc/higgs_audio_v2), [Boson AI v2 blog](https://www.boson.ai/blog/higgs-audio-v2), [Boson AI v2.5 blog](https://www.boson.ai/blog/higgs-audio-v2.5), [erogol model-check writeup](https://erogol.substack.com/p/model-check-higgs-audio-v2-unified).
 
@@ -314,7 +314,7 @@ The delay pattern naturally aligns with streaming: codebook k is delayed by k LM
 | `generation_config.json` | 351 B | Default sampling params | **Yes** (for defaults) |
 | `processor_config.json` | 682 B | Audio token + delay token mappings | **Yes** |
 | `chat_template.jinja` | 3.05 kB | Prompt rendering template | Use as **reference only** — reimplement in C# string builder |
-| `tokenizer.json` | 17.2 MB | Llama-3.2 BPE merges + vocab + special tokens | **Yes** (reuse dotLLM's Llama-3 tokenizer) |
+| `tokenizer.json` | 17.2 MB | Llama-3.2 BPE merges + vocab + special tokens | **Yes** (reuse the native LLM Llama-3 tokenizer) |
 | `tokenizer_config.json`, `special_tokens_map.json` | <1 kB each | Token id maps | Yes (read at load) |
 | `LICENSE` | 9.17 kB | Apache-2.0 | Bundle for redistribution |
 | `*.png`, `*.mp4` | 1.4 MB total | Docs/demo | No |
@@ -349,10 +349,10 @@ The brief's "~7 GB at FP16" figure undercounts because it ignores the 2.2 B Dual
 
 ### 9. C# Implementation Notes
 
-**Backbone reuse from dotLLM.** The text-only forward pass is **stock Llama-3.2-3B**:
+**Backbone reuse from `HartsyInference.LLM`.** The text-only forward pass is **stock Llama-3.2-3B**:
 - RMSNorm, SwiGLU MLP, GQA (24 Q / 8 KV), RoPE with llama3-type scaling (`factor=32, low=0.125, high=0.5, original_max=1024, theta=500000`).
-- Tokenizer is the standard Llama-3.2 BPE — dotLLM's tokenizer loader works unchanged.
-- All RoPE/attention/RMSNorm/MLP kernels from dotLLM port directly.
+- Tokenizer is the standard Llama-3.2 BPE — the engine's native LLM tokenizer loader handles it unchanged.
+- All RoPE/attention/RMSNorm/MLP kernels come from the native LLM transformer directly.
 
 **New code required (HartsyInference.Audio.HiggsAudio):**
 
@@ -374,7 +374,7 @@ The brief's "~7 GB at FP16" figure undercounts because it ignores the 2.2 B Dual
    - Resample 16 kHz → 24 kHz (or skip if decoder output is already 24 k — verify against reference).
 
 6. **Audio tokenizer encoder** (only needed for voice cloning):
-   - HuBERT-base CNN feature extractor + 12-layer transformer (port from dotLLM-style stack, no causal mask, GELU activation, weight-norm convs).
+   - HuBERT-base CNN feature extractor + 12-layer transformer (a standard encoder stack, no causal mask, GELU activation, weight-norm convs).
    - DAC encoder mirror of the decoder above.
    - Joint quantization to per-frame 8-tuple of codebook IDs.
 
@@ -384,7 +384,7 @@ The brief's "~7 GB at FP16" figure undercounts because it ignores the 2.2 B Dual
 
 9. **RAS logits processor**. Per-codebook circular buffer of the last 7 sampled IDs; before sampling step t, count occurrences in the buffer and set `logits[id] = -inf` for any id with count > 2. ~30 lines of C#.
 
-10. **Sampling**. Reuse dotLLM's top-k + top-p + temperature kernels; just run them 8 times in parallel (once per codebook).
+10. **Sampling**. Reuse the native `HartsyInference.LLM` top-k + top-p + temperature sampler kernels; just run them 8 times in parallel (once per codebook).
 
 **Validation plan.** Match outputs against the reference Python pipeline:
 - Tokenize the same prompt — compare BPE IDs (must be exact).
@@ -392,4 +392,4 @@ The brief's "~7 GB at FP16" figure undercounts because it ignores the 2.2 B Dual
 - Decode a fixed audio-token tensor through the tokenizer — compare waveforms (within ~−40 dB error, since both DAC decoders are deterministic).
 - End-to-end with greedy sampling and a fixed prompt — waveforms should match sample-for-sample up to tokenizer fp tolerance.
 
-**Out of scope for v1.** v2.5 (different/smaller architecture, untested for open-source LM weights at time of writing), v3 STT (uses Whisper+Qwen3, completely different stack — see [WHISPER_ARCHITECTURE.md](WHISPER_ARCHITECTURE.md) and would belong in a Qwen3 dotLLM package), training/finetuning (we are inference-only), and the v1 understanding variant (not open-sourced for generation).
+**Out of scope for v1.** v2.5 (different/smaller architecture, untested for open-source LM weights at time of writing), v3 STT (uses Whisper+Qwen3, completely different stack — see [WHISPER_ARCHITECTURE.md](WHISPER_ARCHITECTURE.md) and would belong with the Qwen3 path in `HartsyInference.LLM`), training/finetuning (we are inference-only), and the v1 understanding variant (not open-sourced for generation).

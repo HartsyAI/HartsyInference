@@ -9,6 +9,9 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>Tests for the LTX-Video DiT pieces — the interleaved 3D <see cref="LtxRope"/> (rotation invariants) and a tiny-config <see cref="LtxVideoTransformer"/> end-to-end on CPU. No GPU/checkpoint; numerics vs the real checkpoint are validation-pending.</summary>
 public unsafe class LtxVideoTransformerTests
 {
+    // ApplyRotary now dispatches through a backend (backend.WanRopeInterleaved), so it takes IBackend first.
+    private readonly CpuBackend _backend = new();
+
     [Fact]
     public void Rope_PreservesL2Norm()
     {
@@ -19,7 +22,7 @@ public unsafe class LtxVideoTransformerTests
 
         Tensor x = RandRows(8, 48, seed: 3);
         double before = L2(x);
-        rope.ApplyRotary(x, cos, sin);
+        rope.ApplyRotary(_backend, x, cos, sin);
         double after = L2(x);
         Assert.True(Math.Abs(before - after) < 1e-3, $"rotation must preserve norm: {before} vs {after}");
     }
@@ -32,7 +35,7 @@ public unsafe class LtxVideoTransformerTests
         (Tensor cos, Tensor sin) = rope.BuildCosSin(1, 1, 2, (1, 1, 1));   // S = 2
         Tensor x = RandRows(2, 128, seed: 5);
         float a0 = ((float*)x.DataPointer)[0], a1 = ((float*)x.DataPointer)[1];
-        rope.ApplyRotary(x, cos, sin);
+        rope.ApplyRotary(_backend, x, cos, sin);
         Assert.Equal(a0, ((float*)x.DataPointer)[0], 5);
         Assert.Equal(a1, ((float*)x.DataPointer)[1], 5);
     }
@@ -45,7 +48,7 @@ public unsafe class LtxVideoTransformerTests
         Tensor x = RandRows(2, 48, seed: 7);
         // Make rows identical so any post-rotation difference is purely positional.
         Buffer.MemoryCopy((float*)x.DataPointer, (float*)x.DataPointer + 48, 48 * 4, 48 * 4);
-        rope.ApplyRotary(x, cos, sin);
+        rope.ApplyRotary(_backend, x, cos, sin);
         float* p = (float*)x.DataPointer;
         float maxDiff = 0;
         for (int d = 0; d < 48; d++) maxDiff = MathF.Max(maxDiff, MathF.Abs(p[d] - p[48 + d]));

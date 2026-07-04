@@ -28,6 +28,9 @@ Every model implementation must be validated against a reference before being co
 | Kokoro TTS | Python Kokoro | Same text → mel | Within tolerance |
 | CLIP image encoder | OpenAI `clip` | Same image → embedding | Cosine similarity > 0.999 |
 | YOLO detection | Ultralytics YOLOv8 | Same image → boxes | IoU > 0.95 |
+| LLM logits (per family) | HF `transformers` / llama.cpp | Same tokens → logits (greedy, fixed seed) | High correlation; greedy token match |
+| GGUF dequant-matmul | llama.cpp | Same quantized weights → output | 1e-3 (dequant), token-checked decode |
+| Chat template | HF `apply_chat_template` | Same messages → prompt string | Exact |
 
 ## Reference Output Generation
 

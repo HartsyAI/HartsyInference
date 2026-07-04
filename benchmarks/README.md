@@ -2,6 +2,40 @@
 
 This directory holds the benchmarking infrastructure for [Phase B GPU performance optimization](../docs/Checklists/PHASE_B_GPU_PERFORMANCE.md). Read [`docs/Research/CUDA_PERFORMANCE_PLAN.md`](../docs/Research/CUDA_PERFORMANCE_PLAN.md) and [`docs/Research/PROFILING_METHODOLOGY.md`](../docs/Research/PROFILING_METHODOLOGY.md) before adding new benchmarks — the methodology is non-trivial.
 
+## LLM decode throughput vs llama.cpp (2026-07-04)
+
+Separate from the diffusion/Phase-B harness below. Docs: [`LLM_THROUGHPUT_BENCHMARK.md`](../docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) (baseline + method) and [`LLM_DECODE_PERF_GRIND.md`](../docs/Checklists/LLM_DECODE_PERF_GRIND.md) (optimization log). Assets:
+
+- **Baseline**: CUDA-compiled `llama-bench` (`~/models/llamacpp/build/bin/`), swept over the 7 SOTA GGUFs in `Models/llm/` with `-ngl 99 -p 512 -n 128 -r 5`. Result: `results/llamacpp_baseline_3060.json`.
+- **Tier-1 (engine, direct)**: the existing `samples/HartsyInference.TextGen.Cli` (`gguf cuda <ntok> "<prompt>"`) — loads a GGUF on CUDA, times decode, reports tok/s + D2H sync count. Raw: `results/tier1_engine_3060.txt`.
+- **Tier-2 (engine, through Swarm)**: `swarm_llm_bench/swarm_llm_bench.py` drives the live SwarmUI `LLMAssistantSendMessageWS` WebSocket (hartsy-local provider), measuring client-side. Raw: `results/swarm_llm_3060.json`.
+- **Outcome**: decode gap **20-54× → 1.94-2.88×** off llama.cpp (Llama-3.2-1B under 2×) via fused quantized GEMV + quantized lm_head + split-K flash-decode attention + vectorized loads.
+- **CUDA graph foundation** (last lever): `hartsyinference-textgen graphtest` verifies `CudaGraph` capture/replay works on-GPU.
+
+### Current LLM decode results (RTX 3060, warm, 128-token greedy, tok/s)
+
+| Model | Quant | llama.cpp tg | engine tg | gap |
+|---|---|---:|---:|---:|
+| Llama-3.2-1B | Q8_0 | 215.9 | ~111.5 | 1.94× |
+| Mistral-7B-v0.3 | Q4_K_M | 66.5 | ~30.7 | 2.12× |
+| Qwen3-0.6B | Q4_K_M | 354.5 | ~157 | 2.26× |
+| Gemma-3-1B | Q4_K_M | 229.8 | ~79.7 | 2.88× |
+
+Prefill (pp512) is not the bottleneck; the remaining decode gap is launch-overhead on small models (next lever: CUDA graphs). Full per-phase log in `LLM_DECODE_PERF_GRIND.md`.
+
+## Diffusion / video e2e vs ComfyUI (2026-07-03)
+
+End-to-end wall-clock through the **SwarmUI API** (the identical request routed to the ComfyUI backend, then the HartsyInference backend, on the same RTX 4090). This is the user-perceived-latency comparison; it complements the in-engine microbench harness. Full write-up + host-vs-compute diagnosis: [`results/video_comfy-vs-hartsy_2026-07-03.md`](results/video_comfy-vs-hartsy_2026-07-03.md).
+
+| Model | Quant | Hartsy warm | Comfy warm | gap |
+|---|---|---:|---:|---:|
+| Wan 2.1 T2V 1.3B | fp16 | ~23.7 s | 6.28 s | ~3.8× |
+| LTX-0.9 2B | fp16 | ~15 s | 2.84 s | ~5.3× |
+| Wan 2.2 TI2V-5B | fp16 | ~37.9 s | 4.52 s | ~8.4× |
+| Wan 2.1 T2V 14B | fp8 | ~180 s | 30.6 s | ~5.9× |
+
+All outputs are coherent: this is a speed gap, not a correctness gap. Image architectures (Flux/SD3/Ideogram) were device-ported and run much closer; the video DiT blocks are the current frontier (no full flash-attention kernel yet, some F32-only elementwise ops, launch-overhead at small token counts).
+
 ## Quick start
 
 ```bash
