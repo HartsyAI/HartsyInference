@@ -150,7 +150,9 @@ public sealed unsafe class WanVideoBlock
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale);
+        // allowF16: Wan RMS-norms Q and K (qn/kn above), so pre-softmax scores are bounded → F16 attention is safe
+        // and ~halves the (dominant) score-matrix memory traffic. The engine still keeps F32 when a mask is present.
+        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale, allowF16: true);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();
@@ -204,7 +206,8 @@ public sealed unsafe class WanVideoBlock
         Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attn = new Tensor(new TensorShape(1, _heads, sq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, scale);
+        // allowF16: cross-attn Q and K are RMS-normed too (qn / kNorm) → bounded scores → F16-safe.
+        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, null, scale, allowF16: true);
         kMh.Dispose(); vMh.Dispose();
         Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();
         return flat;

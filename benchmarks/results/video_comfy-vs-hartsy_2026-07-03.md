@@ -185,19 +185,27 @@ Findings that redirected the plan:
   then re-read by softmax + AV ≈ 4 GB traffic/call) plus a per-head GEMM loop. The engine's flash kernel is a naive
   reference (re-reads K/V per row) — **slower** (forced-flash cold = 159 s), so it's not usable.
 
-**Fix (43.20/.21):** run the non-tiled no-mask SDPA in **F16** — halves the score-matrix traffic + F16 tensor cores.
-Scores are bounded (scaled, RMS-normed Q/K; softmax subtracts row-max), so no overflow. Default on (opt out
-`HARTSY_SDPA_NO_F16`). Output verified frame-coherent.
+**Fix (43.20+):** run the non-tiled no-mask SDPA in **F16** — halves the score-matrix traffic + F16 tensor cores.
+**OPT-IN (`HARTSY_SDPA_F16=1`), NOT default.** Verified fast + frame-coherent on Wan (fp16, RMS-normed Q/K → bounded
+scores), but a default-on trial produced a **BLACK image on Z-Image fp8** — its unbounded pre-softmax scores overflow
+F16. So it needs per-arch / per-call gating (enable only when Q/K are pre-normalized) before it can be default; the
+universal safe default stays F32/TF32 attention.
 
-**Result: Wan-1.3B warm 28.1 s → 23.7 s (min 22.6 s).** Cumulative **67.6 → 23.7 s = 2.85×**; gap to ComfyUI
-10.8× → **3.8×**.
+**Result: Wan-1.3B warm 28.1 s → 23.7 s (min 22.6 s).** Cumulative **67.6 → 23.7 s = 2.85×**; gap to ComfyUI 10.8× → 3.8×.
+
+**Shipped safely by default (43.23) via a per-arch gate:** added `bool allowF16=false` to `IBackend.ScaledDotProductAttention`;
+the F16 SDPA path fires only when a caller passes `allowF16: true`. `WanVideoBlock` passes true (Q/K are RMS-normed →
+bounded scores); Z-Image and other unbounded-score archs don't → they stay F32 → **no black output**. So Wan gets 23.7 s
+**by default** while Z-Image stays correct (verified frame-coherent, seed 98765/55511, mean≈138). Env overrides:
+`HARTSY_SDPA_F16=1` forces it on for all callers (testing), `HARTSY_SDPA_NO_F16=1` kills it globally.
 
 ## Where the remaining ~3.8× lives (next levers)
 
 - **SDPA (still #1 even after F16):** the win-condition is a real **flash-attention** kernel (tiled, tensor-core,
-  online-softmax, no materialized score matrix) — the engine's current one is a naive reference. This is the single
-  biggest remaining lever and the biggest effort (competitive flash kernels are hard). Cheaper interim: batched GEMM
-  (`cublasGemmStridedBatchedEx`) to kill the per-head launch loop.
+  online-softmax, no materialized score matrix) — the engine's current one is a naive reference. **Detailed plan:
+  [`../../docs/Research/FLASH_ATTENTION_PLAN.md`](../../docs/Research/FLASH_ATTENTION_PLAN.md)** — fused WMMA, **TF32-in
+  / F32-accumulate** (safe for ALL archs incl. fp8 — architecturally fixes the F16 blackout), ~4 GB→~55 MB HBM traffic
+  (~3-5× on SDPA → ~1.6-2× e2e at M1). NOTE: no `nvcc` on this box — PTX builds via `native/cuda/nvrtc_compile`.
 - **VAE Conv2D** (12.6 s sync-profiled): separate from the DiT; its own optimization axis.
 - **F16 activations end-to-end** to kill the ~25 k per-Linear F32→F16 input casts and halve elementwise traffic
   (needs F16 variants of the ~6 F32-only elementwise/norm ops).

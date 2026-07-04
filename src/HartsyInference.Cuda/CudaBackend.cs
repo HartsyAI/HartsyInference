@@ -123,8 +123,10 @@ public sealed class CudaBackend : IBackend
     /// keeps F32 range with a 10-bit mantissa. Opt out with <c>HARTSY_NO_TF32=1</c>.</summary>
     private readonly bool _allowTf32;
 
-    /// <summary>HARTSY_SDPA_F16=1: run the non-tiled no-mask SDPA in F16 (halves score-matrix traffic, F16 tensor cores).</summary>
-    private readonly bool _sdpaF16;
+    /// <summary>HARTSY_SDPA_F16=1: force the F16 SDPA path on for ALL callers (not just allowF16 ones) — testing/override.</summary>
+    private readonly bool _sdpaF16ForceOn;
+    /// <summary>HARTSY_SDPA_NO_F16=1: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
+    private readonly bool _sdpaF16Disabled;
 
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>: FAST_TF32 for
     /// F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit full-precision request —
@@ -163,7 +165,10 @@ public sealed class CudaBackend : IBackend
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
         EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
         _allowTf32 = _context.ComputeCapabilityMajor >= 8 && !EnvFlag("HARTSY_NO_TF32");
-        _sdpaF16 = !EnvFlag("HARTSY_SDPA_NO_F16");   // default ON (standard F16 attention); opt out for precision debugging
+        // F16 SDPA is gated PER-CALL via the allowF16 arg (callers with bounded/RMS-normed scores like Wan pass true);
+        // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
+        _sdpaF16ForceOn = EnvFlag("HARTSY_SDPA_F16");
+        _sdpaF16Disabled = EnvFlag("HARTSY_SDPA_NO_F16");
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
@@ -2100,7 +2105,7 @@ public sealed class CudaBackend : IBackend
     #region Attention
 
     /// <summary>Scaled dot-product attention via cuBLAS batched GEMM: softmax(Q @ K^T * scale) @ V.</summary>
-    public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
+    public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
     {
         using NvtxRange _nvtx = NvtxRange.Push("SDPA");
         _context.EnsureCurrent();
@@ -2178,9 +2183,12 @@ public sealed class CudaBackend : IBackend
                 opOut = pOutCast;
                 opDtype = DType.F32;
             }
-            else if (query.DType == DType.F32 && mask is null && _sdpaF16)
+            else if (query.DType == DType.F32 && mask is null && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled)
             {
-                // F16 speed path (default on; opt out via HARTSY_SDPA_NO_F16): the non-tiled SDPA cost is dominated by the
+                // F16 speed path — enabled per-call via allowF16 (callers with bounded/normalized scores, e.g. Wan's
+                // RMS-normed Q/K) or globally via HARTSY_SDPA_F16; disabled globally via HARTSY_SDPA_NO_F16. NOT safe
+                // for unbounded-score archs (Z-Image fp8 → F16 overflow → black), which simply don't pass allowF16.
+                // The non-tiled SDPA cost is dominated by the
                 // [totalHeads, Sq, Skv] score matrix (Wan-1.3B self-attn: 12·4480²·4B ≈ 963 MB, written by QK then
                 // re-read by softmax + AV — the profiled #1 GPU cost). Running in F16 halves that traffic and uses
                 // F16 tensor cores. Scores are bounded (scale·RMS-normed Q·K), and softmax subtracts the row max, so

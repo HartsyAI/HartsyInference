@@ -86,7 +86,7 @@ public sealed class WhisperPipelineSurfaceTests
         public void RmsNorm(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, HartsyInference.Core.Tensors.Tensor w, float e) => throw new NotImplementedException();
         public void AdaInstanceNorm1d(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, HartsyInference.Core.Tensors.Tensor g, HartsyInference.Core.Tensors.Tensor b, float e) => throw new NotImplementedException();
         public void LeakyRelu(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i, float s) => throw new NotImplementedException();
-        public void ScaledDotProductAttention(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor q, HartsyInference.Core.Tensors.Tensor k, HartsyInference.Core.Tensors.Tensor v, HartsyInference.Core.Tensors.Tensor? m, float s) => throw new NotImplementedException();
+        public void ScaledDotProductAttention(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor q, HartsyInference.Core.Tensors.Tensor k, HartsyInference.Core.Tensors.Tensor v, HartsyInference.Core.Tensors.Tensor? m, float s, bool allowF16 = false) => throw new NotImplementedException();
         public void Gelu(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
         public void Silu(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
         public void Sigmoid(HartsyInference.Core.Tensors.Tensor o, HartsyInference.Core.Tensors.Tensor i) => throw new NotImplementedException();
