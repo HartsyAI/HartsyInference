@@ -340,12 +340,41 @@ public sealed class CudaBackend : IBackend
             // falls through to the cuBLAS GEMM, which is efficient at M≥ a few hundred.
             if (M <= 8 && input.DType == DType.F32 && output.DType == DType.F32)
             {
-                if ((weight.DType == DType.Q4_K || weight.DType == DType.Q6_K) && K % 256 == 0)
+                if (weight.DType == DType.Q4_K && K % 256 == 0 && EnvFlag("HARTSY_DP4A_ON"))
                 {
-                    if (weight.DType == DType.Q4_K)
-                        _kernels!.LaunchMulMatVecQ4KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
-                    else
-                        _kernels!.LaunchMulMatVecQ6KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    // dp4a path (opt-in): quantize the activation to int8 (Q8_1) once, then int8 GEMV via __dp4a.
+                    // Numerically exact vs the float kernel, but NOT faster here — the vectorized float GEMV is
+                    // memory-latency-bound, not ALU-bound, so cutting ALU doesn't help and the extra quantize
+                    // kernel offsets it. Kept behind a flag for GPUs/shapes where ALU is the limiter.
+                    int kblocks = M * (K / 32);
+                    ulong pXq = GpuTransferHelper.AllocateDevice((nuint)((long)M * K));
+                    ulong pXd = GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float)));
+                    ulong pXs = GpuTransferHelper.AllocateDevice((nuint)((long)kblocks * sizeof(float)));
+                    try
+                    {
+                        _kernels!.LaunchQuantizeActivationQ8_1(pXq, pXd, pXs, pInput, M, K, _stream.Handle);
+                        _kernels!.LaunchMulMatVecQ4KQ8_1(pOutput, pXq, pXd, pXs, pWeight, pBias, N, K, M, _stream.Handle);
+                    }
+                    finally
+                    {
+                        GpuTransferHelper.FreeDevice(pXq);
+                        GpuTransferHelper.FreeDevice(pXd);
+                        GpuTransferHelper.FreeDevice(pXs);
+                    }
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                if (weight.DType == DType.Q4_K && K % 256 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ4KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                if (weight.DType == DType.Q6_K && K % 256 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ6KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                     cachedOutput = true;
                     return;
@@ -3417,13 +3446,18 @@ public sealed class CudaBackend : IBackend
             int baseBlocks = b * hq * tq;
             bool plain = pSink == 0 && pAlibi == 0 && softcap <= 0f && slidingWindow <= 0;
             bool forceSplit = EnvFlag("HARTSY_FLASH_SPLIT_FORCE");
+            // Occupancy-limited = the LLM decode case (tq=1, few heads → e.g. 16 blocks on 28 SMs). Splitting the
+            // key axis there fills the GPU and is a large decode win (attention was ~30% of decode; split-K ≈ +38%
+            // end-to-end on Qwen3). The split kernel is numerically exact vs monolithic (online-softmax merge). The
+            // old kvLen≥1024 floor never engaged for decode (kvLen<300); gate on occupancy instead, floor 128.
+            bool occLimited = baseBlocks < 2 * _context.MultiprocessorCount;
             int splits = 1;
             if (!EnvFlag("HARTSY_FLASH_SPLIT_OFF")
-                && plain && kvLen >= (forceSplit ? 8 : 1024) && (forceSplit || baseBlocks < 2 * _context.MultiprocessorCount))
+                && plain && (forceSplit || occLimited) && kvLen >= (forceSplit ? 8 : 128))
             {
                 int target = forceSplit ? 4 * baseBlocks : 2 * _context.MultiprocessorCount;
                 int g = (target + baseBlocks - 1) / baseBlocks;
-                int minChunk = forceSplit ? 1 : 256;
+                int minChunk = forceSplit ? 1 : (occLimited ? 32 : 256);
                 int maxG = Math.Max(1, kvLen / minChunk);
                 g = Math.Clamp(g, 1, Math.Min(32, maxG));
                 if (g >= 2) splits = g;

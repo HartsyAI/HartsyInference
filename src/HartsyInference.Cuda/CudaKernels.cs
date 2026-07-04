@@ -211,6 +211,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ6KF32;
     private readonly CudaModule _mulMatVecQ8_0Module;
     private readonly nint _mulMatVecQ8_0F32;
+    private readonly CudaModule _quantActQ8_1Module;
+    private readonly nint _quantActQ8_1F32;
+    private readonly CudaModule _mulMatVecQ4KQ8_1Module;
+    private readonly nint _mulMatVecQ4KQ8_1;
 
     private const uint BlockSize = 256;
 
@@ -431,6 +435,10 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ6KF32 = _mulMatVecQ6KModule.GetFunction("mul_mat_vec_q6k_f32");
         _mulMatVecQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q8_0_f32.ptx"));
         _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
+        _quantActQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "quantize_activation_q8_1_f32.ptx"));
+        _quantActQ8_1F32 = _quantActQ8_1Module.GetFunction("quantize_activation_q8_1_f32");
+        _mulMatVecQ4KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4k_q8_1.ptx"));
+        _mulMatVecQ4KQ8_1 = _mulMatVecQ4KQ8_1Module.GetFunction("mul_mat_vec_q4k_q8_1");
     }
 
     // ── Private Launch Helpers ───────────────────────────────────────────
@@ -1861,6 +1869,31 @@ public sealed class CudaKernels : IDisposable
     public void LaunchMulMatVecQ8_0F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecImpl(_mulMatVecQ8_0F32, output, input, weight, bias, N, K, M, stream);
 
+    /// <summary>Quantizes an F32 activation [M,K] to int8 (Q8_1): xq int8 + per-32-block scale xd + int-sum xs.
+    /// One warp per 32-block.</summary>
+    public unsafe void LaunchQuantizeActivationQ8_1(ulong xq, ulong xd, ulong xs, ulong x, int M, int K, nint stream)
+    {
+        int nblocks = M * (K / 32);
+        ulong xqA = xq, xdA = xd, xsA = xs, xA = x; int nbA = nblocks;
+        void** args = stackalloc void*[5];
+        args[0] = &xqA; args[1] = &xdA; args[2] = &xsA; args[3] = &xA; args[4] = &nbA;
+        CudaDriverApi.cuLaunchKernel(_quantActQ8_1F32, (uint)nblocks, 1, 1, 32, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Fused Q4_K × Q8_1 dp4a matrix-vector product for decode (M small). Consumes the pre-quantized
+    /// int8 activation (xq/xd/xs from <see cref="LaunchQuantizeActivationQ8_1"/>).</summary>
+    public unsafe void LaunchMulMatVecQ4KQ8_1(ulong output, ulong xq, ulong xd, ulong xs, ulong weight, ulong bias, int N, int K, int M, nint stream)
+    {
+        ulong outA = output, xqA = xq, xdA = xd, xsA = xs, wA = weight, bA = bias;
+        int nA = N, kA = K, mA = M;
+        void** args = stackalloc void*[9];
+        args[0] = &outA; args[1] = &xqA; args[2] = &xdA; args[3] = &xsA; args[4] = &wA; args[5] = &bA;
+        args[6] = &nA; args[7] = &kA; args[8] = &mA;
+        const uint WARPS_PER_BLOCK = 8;
+        uint gridX = ((uint)N + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        CudaDriverApi.cuLaunchKernel(_mulMatVecQ4KQ8_1, gridX, (uint)M, 1, 32, WARPS_PER_BLOCK, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     private unsafe void LaunchMulMatVecImpl(nint func, ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
     {
         ulong outA = output, inA = input, wA = weight, bA = bias;
@@ -1941,6 +1974,8 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ4KModule?.Dispose();
         _mulMatVecQ6KModule?.Dispose();
         _mulMatVecQ8_0Module?.Dispose();
+        _quantActQ8_1Module?.Dispose();
+        _mulMatVecQ4KQ8_1Module?.Dispose();
     }
 
     public void Dispose()

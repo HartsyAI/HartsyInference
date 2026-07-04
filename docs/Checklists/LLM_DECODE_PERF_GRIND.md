@@ -43,11 +43,31 @@ Baselines are **warm, 256-token, decode-dominated** (amortizes JIT+prefill; earl
 | 2026-07-03 | **P2: + fused Q6_K GEMV** (lm_head) | 90.6 | 91.6 | **16.38** (lv1) | Qwen3 **3.9×** · **Mistral 4.1×** | coherent ✓ |
 | 2026-07-04 | **P2b: + fused Q8_0 GEMV** | 90.6 | 91.6 | 16.38 | **Llama-1B q8_0 6.05→83.7 (13.8×), 2.6×** | coherent ✓ |
 | 2026-07-04 | **P2c: quantized lm_head** (tied embed) | 106.3 | 106.0 | 18.77 | Qwen3 **3.3×** · Llama **2.15×** · Mistral 3.5× | coherent ✓ |
+| 2026-07-04 | **P3: split-K flash-decode default** | 133 | 133 | 18.6 | Qwen3 **2.66×** · Llama **1.94×** (<2×!) · Mistral 3.5× | coherent ✓ |
+| 2026-07-04 | **P4: vectorized Q4_K GEMV loads** | 156.6 | 156.6 | **30.7** | Qwen3 **2.26×** · Llama 1.94× · **Mistral 2.16×** | coherent ✓ |
+
+**Phase 4 — vectorized loads (step toward dp4a):** the Q4_K GEMV did 16 scalar loads/super-block (8 quant bytes + 8 activations). Replaced with **1× uint2 + 2× float4** (128-bit loads) + nibble extraction via shifts (`mul_mat_vec_q4k_f32.cu`). Alignment verified (quant bytes 8-aligned, activations 16-aligned). Result: **Qwen3 133→156.6 (+18%), Mistral 18.6→30.7 (+65%!)** — matmul-bound big models win most. **All models now ~2.2× off llama.cpp (from 20-54×).** Q8_0 already coalesced (1 byte/lane) — left as-is; Q6_K vectorization deferred (complex ql/qh packing).
+
+| 2026-07-04 | **P5: dp4a int8 GEMV** (tried) | 157 | — | 31.4 | Qwen3 2.26× · Mistral 2.12× · Gemma 2.88× | dp4a=NO GAIN |
+
+**Phase 5 — dp4a int8 GEMV: implemented, numerically exact, but NOT faster.** Built the full llama.cpp-style path (`quantize_activation_q8_1_f32.cu` → int8 + per-block scale/sum; `mul_mat_vec_q4k_q8_1.cu` → `__dp4a` int8 dot). Output byte-identical to the float kernel. **But same speed** (Qwen3 153 vs 159; Mistral 31.4 vs 31.4). **Key finding: our vectorized-float GEMV is memory-bound, not ALU-bound** — cutting ALU (dp4a) doesn't help and the extra quantize kernel offsets it. Kept behind `HARTSY_DP4A_ON` for GPUs/shapes where ALU limits. Also ruled out split-K on the GEMV: for big models N=4096-14336 → thousands of warps already, so it's **not occupancy-starved** either (unlike attention). The remaining GEMV inefficiency is **memory-access-pattern** (needs ncu, blocked by GeForce perms) — a deeper redesign.
+
+### FINAL STATE: gap **20-54× → 1.94-2.88×**. Qwen3 2.26× · Llama **1.94×** · Mistral 2.12× · Gemma 2.88× (Gemma slowest — sliding-window attn can't use split-K yet). All coherent.
+### Remaining levers (bigger, uncertain): **CUDA graphs** (~640 launches/token, ~30% gaps for small models — the highest-confidence next win); **split-K for sliding-window/softcap attention** (helps Gemma/GPT-OSS); **GEMV memory-pattern redesign** (needs ncu access).
+
+**Phase 3 — attention split-K (nsys-guided):** re-nsys after P2c showed attention `lm_flash_attn_f32` had grown to **29.6%** of decode (72.8µs/call — one block/head, ~16 blocks under-occupy 28 SMs, sequential keys). The validated split-K flash-decode kernel existed but only engaged at `kvLen≥1024` (never for decode). Changed the dispatch (`CudaBackend.cs` ~3417): engage for the **occupancy-limited** case (`baseBlocks < 2·SM` = decode) at `kvLen≥128`, `minChunk=32`. Gated to `plain` attention so sliding-window/softcap models (Gemma, GPT-OSS) keep the monolithic path unchanged; split kernel is numerically exact. Result: **Qwen3 103→133 (+28%), Llama 100→111.5 (1.94× off llama.cpp, under 2×)**. Big models (Mistral) unaffected — they're matmul-bound, not attention-bound.
+
+### Gap now: **Qwen3 2.66× · Llama 1.94× · Mistral 3.5×**. Small models attention-fixed; big models need GEMV throughput (dp4a int8 / R4-repack / memory-parallelism — ours reads ~22% of bandwidth vs llama.cpp ~80% on Mistral). That + CUDA graphs is the path to parity/beating.
 
 **Phase 2c — the lm_head fix (nsys-guided):** nsys showed the tied lm_head was a **2.17 ms/token F32 cuBLAS GEMV** (28% of decode) because line 123 force-dequantized the tied embed to F32 (622 MB read/tok). Now keep the original **quantized** embed (`_lmHeadQuant`), preload *that* (not the F32 table → **~0.5 GB less VRAM**), and route the head through the fused GEMV (F32 hidden, no F16 cast). Also fixed untied lv1 heads (Mistral's Q6_K head skipped the F16-cast path). Results: **Qwen3 90.6→106 (+17%), Llama 83.7→100 (+20%, 2.15× off llama.cpp), Mistral 16.4→18.8**. `GenericTransformer.cs` load/EnumerateWeights/ProjectLogits.
 
 ### Gap so far: 20-54× → **2.15-3.5×**. Remaining (nsys): our Q4_K GEMV 36% (17µs/call, overhead-bound not bandwidth-bound → R4 repack/vectorize/dp4a), attention 16% (low occupancy), ~640 launches/token (CUDA graphs).
 ### ⚠ TODO before "done": formal token-parity gate vs llama.cpp (validated coherent only so far).
+
+### Mid-grind merge (2026-07-04) — RESOLVED, NO regression. Merge `a3c6f59` landed: my LLM work (`3b034fa`), flash-attn-v2 (`26ebea3`), Wan/video (`b314a87`), music (`5b7bf24`). Verdict:
+- **LLM not regressed.** `flash_attn_v2_tf32` is **opt-in** (`HARTSY_SDPA_V2`) and only in the video/diffusion `ScaledDotProductAttention` path — LLM decode uses `FlashAttention`/`lm_flash_attn_f32`, untouched. My GEMV+lm_head committed & intact. Clean idle re-measure: **Qwen3 lv0 100 / lv1 99** (the "82-88" I saw was GPU contention from SwarmUI + the user's other agents at 91% util, NOT the merge).
+- **Builds clean.** Full sample (LLM+Audio+Cuda) + Diffusion(video) both compile. The Audio CS8600 errors were a transient mid-merge artifact, gone.
+- Audio/video runtime owned by other agents; v2 opt-in so their default paths unchanged.
 
 **Phase 2b:** Q8_0 GEMV (`native/cuda/lm/mul_mat_vec_q8_0_f32.cu`). Llama-3.2-1B q8_0 **6.05→83.7 t/s (13.8×)**, now only **2.6× off llama.cpp** (was 36×) — the best result, q8_0 is the simplest format. All three quant formats (Q4_K/Q6_K/Q8_0) fused. Re-profile after P2 (synced) still shows the launch-bound shape: ~640 launches/token (Linear 12805, Permute 7280, RmsNorm 7345, **H2D_MISS 7466 = per-token host RoPE/embed rebuild**). Next = attack launch/host overhead (H2D elim, fusion, CUDA graphs).
 

@@ -77,13 +77,23 @@ extern "C" __global__ void mul_mat_vec_q4k_f32(
         const float subScale = d * (float)sc;
         const float subMin = dmin * (float)mm;
 
+        // Vectorized loads: the 8 quant bytes are 8-byte aligned (uint2), the 8 activations 16-byte
+        // aligned (2× float4) — 3 memory instructions instead of 16 scalar loads.
         const float* xb = xrow + sb * SUPER_ELEMS + xBase;
-        #pragma unroll
-        for (int t = 0; t < 8; ++t) {
-            const int q = (qs[subByteBase + t] >> nibbleShift) & 0x0F;
-            const float w = subScale * (float)q - subMin;
-            acc += w * xb[t];
-        }
+        const uint2 qpack = *reinterpret_cast<const uint2*>(qs + subByteBase);
+        const float4 xa = *reinterpret_cast<const float4*>(xb);
+        const float4 xb2 = *reinterpret_cast<const float4*>(xb + 4);
+        const unsigned int lo = qpack.x, hi = qpack.y;
+        const float w0 = subScale * (float)(((lo      ) >> nibbleShift) & 0xF) - subMin;
+        const float w1 = subScale * (float)(((lo >>  8) >> nibbleShift) & 0xF) - subMin;
+        const float w2 = subScale * (float)(((lo >> 16) >> nibbleShift) & 0xF) - subMin;
+        const float w3 = subScale * (float)(((lo >> 24) >> nibbleShift) & 0xF) - subMin;
+        const float w4 = subScale * (float)(((hi      ) >> nibbleShift) & 0xF) - subMin;
+        const float w5 = subScale * (float)(((hi >>  8) >> nibbleShift) & 0xF) - subMin;
+        const float w6 = subScale * (float)(((hi >> 16) >> nibbleShift) & 0xF) - subMin;
+        const float w7 = subScale * (float)(((hi >> 24) >> nibbleShift) & 0xF) - subMin;
+        acc += w0 * xa.x + w1 * xa.y + w2 * xa.z + w3 * xa.w
+             + w4 * xb2.x + w5 * xb2.y + w6 * xb2.z + w7 * xb2.w;
     }
 
     // Warp-shuffle reduction across the 32 lanes.
