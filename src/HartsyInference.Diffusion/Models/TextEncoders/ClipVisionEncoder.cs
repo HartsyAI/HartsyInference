@@ -118,6 +118,55 @@ public sealed unsafe class ClipVisionEncoder
         return ForwardTransformer(backend, pixelValues, layersToRun: _layers.Length - 1, applyPostLayernorm: false);
     }
 
+    /// <summary>Runs the vision transformer and returns a deep copy of the hidden states <c>[B, seqLen, hidden]</c>
+    /// captured immediately after each 1-indexed layer listed in <paramref name="afterLayers"/> (no post_layernorm).
+    /// Used by CLIPSeg, whose decoder fuses activations from layers <c>[3, 6, 9]</c>. The returned tensors are owned
+    /// by the caller. Order matches <paramref name="afterLayers"/>.</summary>
+    public Tensor[] EncodeExtractLayers(IBackend backend, Tensor pixelValues, int[] afterLayers)
+    {
+        int batch = (int)pixelValues.Shape[0];
+        int hidden = _config.HiddenSize;
+        int patchGrid = _config.ImageSize / _config.PatchSize;
+
+        TensorShape patchOutShape = new TensorShape(batch, hidden, patchGrid, patchGrid);
+        Tensor patchOut = new Tensor(patchOutShape, DType.F32);
+        backend.Conv2D(patchOut, pixelValues, _patchEmbeddingWeight!, null, _config.PatchSize, _config.PatchSize, 0, 0);
+        Tensor flat = patchOut.Reshape(new TensorShape(batch, hidden, _numPatches));
+        Tensor patchSeq = new Tensor(new TensorShape(batch, _numPatches, hidden), DType.F32);
+        backend.Transpose2D(patchSeq, flat, hidden, _numPatches);
+        patchOut.Dispose();
+
+        TensorShape seqShape = new TensorShape(batch, _seqLen, hidden);
+        Tensor embedded = new Tensor(seqShape, DType.F32);
+        BuildEmbedded(embedded, patchSeq, batch, hidden);
+        patchSeq.Dispose();
+
+        Tensor h = new Tensor(seqShape, DType.F32);
+        backend.LayerNorm(h, embedded, _preLayerNormWeight!, _preLayerNormBias!, _config.LayerNormEps);
+        embedded.Dispose();
+
+        Tensor[] captured = new Tensor[afterLayers.Length];
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            Tensor next = _layers[i].Forward(backend, h);
+            h.Dispose();
+            h = next;
+            int layerNum = i + 1; // output of the (i+1)-th layer, matching HF hidden_states indexing
+            for (int e = 0; e < afterLayers.Length; e++)
+            {
+                if (afterLayers[e] == layerNum)
+                {
+                    Tensor copy = new Tensor(seqShape, DType.F32);
+                    long bytes = seqShape.ElementCount * sizeof(float);
+                    Buffer.MemoryCopy((void*)h.DataPointer, (void*)copy.DataPointer, bytes, bytes);
+                    captured[e] = copy;
+                }
+            }
+        }
+        h.Dispose();
+        return captured;
+    }
+
     /// <summary>Shared transformer driver. Runs patch embed → CLS prepend → pos embed → pre_layernorm → first <paramref name="layersToRun"/> transformer layers → optional post_layernorm. Returns <c>[B, seqLen, hidden]</c> in F32.</summary>
     private Tensor ForwardTransformer(IBackend backend, Tensor pixelValues, int layersToRun, bool applyPostLayernorm)
     {

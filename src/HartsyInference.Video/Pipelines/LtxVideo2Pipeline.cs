@@ -117,11 +117,13 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             HartsyInference.Core.MemoryManagement.IStreamingBlock[] blocks =
                 new HartsyInference.Core.MemoryManagement.IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
-            int prefetchAhead = ChooseLtx2PrefetchAhead(Backend.StreamingCache, blocks);
-            streamer = new HartsyInference.Core.MemoryManagement.BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+            // prefetchAhead=2 double-buffers the block stream. A VRAM-gated deeper window (tested at 8) gave no
+            // measurable win — the 22B fp8 forward streams 19 GB at ~PCIe-saturation, so it's bandwidth-bound, not
+            // upload-stall-bound; deeper queueing can't exceed the bus. Kept at 2 (known-good, minimal VRAM).
+            streamer = new HartsyInference.Core.MemoryManagement.BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: 2, retainBehind: 0);
             _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
             streamer.Prime();
-            Logs.Info($"LTX-2 streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB total (resident window ~{streamer.EstimatedTotalWeightBytes / blocks.Length * (prefetchAhead + 2) / (1024 * 1024)} MB)");
+            Logs.Info($"LTX-2 streaming: {blocks.Length} blocks, ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB total (resident window ~{streamer.EstimatedTotalWeightBytes / blocks.Length * 3 / (1024 * 1024)} MB)");
         }
         else
         {
@@ -189,31 +191,6 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// <summary>Runs Gemma over the (register-padded) tokens, relayouts the 49 hidden states into the connector's
     /// <c>channel·49+layer</c> feature layout, and returns the per-modality text embeddings (video <c>[seq,4096]</c>,
     /// audio <c>[seq,2048]</c>). Caller owns both tensors.</summary>
-    /// <summary>Picks the block-streaming prefetch depth from free VRAM. LTX-2's 22B blocks are large and compute for
-    /// much longer than Flux's (which caps depth at 2 — tiny blocks, no gain past 2), so a deeper in-flight window can
-    /// hide PCIe upload jitter behind compute when VRAM allows. Gated by the streaming cache's available bytes so the
-    /// peak resident set (prefetchAhead + 2 blocks) never OOMs; floored at 2 (the prior fixed value, known to fit) and
-    /// capped at 8 (beyond that the extra weights just churn VRAM). Set HARTSY_LTX2_PREFETCH to override for A/B tests.</summary>
-    private static int ChooseLtx2PrefetchAhead(IStreamingWeightCache cache,
-        HartsyInference.Core.MemoryManagement.IStreamingBlock[] blocks)
-    {
-        const int MinDepth = 2, MaxDepth = 8;
-        string? ovr = Environment.GetEnvironmentVariable("HARTSY_LTX2_PREFETCH");
-        if (!string.IsNullOrEmpty(ovr) && int.TryParse(ovr, out int forced) && forced >= 0)
-            return forced;
-        if (blocks.Length == 0) return MinDepth;
-        long perBlockBytes = blocks[0].EstimatedWeightBytes;
-        if (perBlockBytes <= 0) return MinDepth;
-        // Reserve for the two-stream (video+audio) activations, cuBLAS workspace, fp8→F16 cast buffers, and the RoPE /
-        // modulation tables that aren't part of the streamed set. Generous 3 GB keeps us clear of OOM across resolutions.
-        long activationReserve = 3L * 1024 * 1024 * 1024;
-        long avail = cache.QueryAvailableWeightCacheBytes(activationReserve);
-        if (avail <= 0) return MinDepth;
-        // The working set briefly hits (prefetchAhead + 2) blocks (block N+1 made resident before N-1 is evicted).
-        int maxByBudget = (int)(avail / perBlockBytes) - 2;
-        return Math.Clamp(maxByBudget, MinDepth, MaxDepth);
-    }
-
     private (Tensor Video, Tensor Audio) EncodeText(int[] tokens)
     {
         int real = tokens.Length;

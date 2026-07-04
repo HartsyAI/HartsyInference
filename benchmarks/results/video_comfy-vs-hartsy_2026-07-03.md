@@ -230,7 +230,7 @@ cleanups during new CUDA-context construction must be null-safe / context-scoped
 
 | model | Comfy warm | Hartsy | notes |
 |---|---|---|---|
-| LTX-0.9 2B | **2.84 s** | ~89 s → **16 s** (RoPE) → **15 s** (F16 DiT) | 31× → **5.3× gap**; cold 23 s (was 159 s). Now launch-overhead bound |
+| LTX-0.9 2B | **2.84 s** | ~89 s → 16 (RoPE) → 15 (F16 DiT) → **12–13 s** (cos/sin cache) | 31× → **~4.4× gap**; ~7× vs baseline. Launch-overhead bound |
 | LTX-2.3 22B (audio) | n/a (no Comfy workflow) | ~434–551 s, block-swap-bound | split-rope now device-ported; coherent video + real 48 kHz audio ✓. Timing noise (contention) > any rope-level gain |
 
 **Found + fixed (same host-loop patterns as Wan):** both `LtxVideo2Attention` (LTX-2.3) and `LtxVideoBlock` (LTX-0.9)
@@ -260,6 +260,12 @@ wall-clock. F16 still worth keeping: **halves DiT VRAM (9.4→4.7 GB)** and the 
 compute dominates). Cold 23→32 s from one-time host F32→F16 weight cast (amortizes — load once, gen many). **Remaining
 gap to Comfy is now structural: kernel-launch latency at small token counts → needs CUDA graphs or op fusion (a big
 engine change), not more dtype/device-port tweaks.**
+
+**cos/sin cache (2026-07-04):** `LtxVideoTransformer.Forward` rebuilt the RoPE cos/sin via `BuildCosSin` (a host loop
+that then uploads `[S,dim]` cos/sin) on **every call** — but they depend only on the latent grid, which is fixed for a
+whole gen, while Forward runs 2×/step (CFG cond+uncond). Cached them (`GetCosSin`, grid-keyed) so BuildCosSin runs ONCE
+per gen instead of ~2·steps times and the upload stays cache-hot. **Warm 14–15 s → 12–13 s (~15–20%)**, output
+coherent (RoPE unchanged). Also removes a per-step host excursion — a CUDA-graph capture prerequisite.
 
 **FinalLayer device port (alpha.43.31):** the output `FinalLayer` still did a host `LayerNorm` + a host affine loop over
 `[s,dim]` per step (then re-uploaded `normed` for the final Linear). Ported to `backend.LayerNormNoAffine` +

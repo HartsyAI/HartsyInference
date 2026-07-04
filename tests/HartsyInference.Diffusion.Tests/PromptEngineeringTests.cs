@@ -328,4 +328,37 @@ public class PromptEngineeringTests
         Assert.Equal(MathF.Log(2f), b[2 * seqLen + 0], 4);
         Assert.Equal(MathF.Log(2f), b[3 * seqLen + 0], 4);
     }
+
+    [Fact]
+    public void TextualInversion_DualTensor_SdxlEmbed_LoadsBothDims()
+    {
+        // SDXL dual embed (clip_l 768 + clip_g 1280). Exercises the SUCCESS path of TextualInversion.Load — which
+        // copies out of a loader-mmap'd tensor. Regression for the use-after-free where SelectEmbedding ran after
+        // the loader's `using` had already unmapped the file (AccessViolation on the copy).
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"sdxlti_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            using (Tensor l = new Tensor(new TensorShape(4, 768), DType.F32))
+            using (Tensor g = new Tensor(new TensorShape(4, 1280), DType.F32))
+            {
+                l.AsSpan<float>().Fill(0.11f);
+                g.AsSpan<float>().Fill(0.22f);
+                SafeTensorsWriter.Save(path, new Dictionary<string, Tensor> { ["clip_l"] = l, ["clip_g"] = g });
+            }
+
+            using Tensor eL = TextualInversion.Load(path, 768);
+            using Tensor eG = TextualInversion.Load(path, 1280);
+            Assert.Equal(4, (int)eL.Shape[0]);
+            Assert.Equal(768, (int)eL.Shape[1]);
+            Assert.Equal(4, (int)eG.Shape[0]);
+            Assert.Equal(1280, (int)eG.Shape[1]);
+            // Read every element — a dangling mmap pointer would AccessViolation here.
+            Assert.Equal(0.11f, eL.AsReadOnlySpan<float>()[eL.AsReadOnlySpan<float>().Length - 1], 4);
+            Assert.Equal(0.22f, eG.AsReadOnlySpan<float>()[eG.AsReadOnlySpan<float>().Length - 1], 4);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+        }
+    }
 }

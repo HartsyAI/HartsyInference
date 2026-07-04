@@ -18,6 +18,12 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     private Tensor? _timeLinW, _timeLinB;  // → 6*inner
     private Tensor? _capW1, _capB1, _capW2, _capB2;   // caption projection
 
+    // RoPE cos/sin depend only on the latent grid + interp scale, which are fixed for a whole generation — but Forward
+    // is called 2×/step (CFG cond+uncond). Cache them so BuildCosSin (a host loop that then uploads [S,dim] cos/sin)
+    // runs ONCE per gen instead of ~2·steps times, and the device upload stays cache-hot across steps.
+    private Tensor? _cachedCos, _cachedSin;
+    private (int F, int H, int W, double T, double IH, double IW) _cosKey = (-1, -1, -1, 0, 0, 0);
+
     public LtxVideoTransformer(LtxVideoConfig config)
     {
         _config = config;
@@ -56,7 +62,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         int s = (int)latentTokens.Shape[0];
         int dim = _config.InnerDim;
 
-        (Tensor cos, Tensor sin) = _rope.BuildCosSin(grid.Frames, grid.Height, grid.Width, interpScale);
+        (Tensor cos, Tensor sin) = GetCosSin(grid, interpScale);
 
         Tensor hidden = new Tensor(new TensorShape(s, dim), DType.F32);
         backend.Linear(hidden, latentTokens, _projInW!, _projInB);
@@ -73,13 +79,28 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
             cur = next;
             LtxVideoDebugDump.Dump($"blocks.{i}", cur);
         }
-        cos.Dispose(); sin.Dispose(); temb6.Dispose(); encoderProj.Dispose();
+        temb6.Dispose(); encoderProj.Dispose();   // cos/sin are cached (GetCosSin) — not disposed here
 
         Tensor outVel = FinalLayer(backend, cur, embedded, s, dim);
         cur.Dispose();
         embedded.Dispose();
         LtxVideoDebugDump.DumpOutput(outVel);
         return outVel;
+    }
+
+    /// <summary>Returns the RoPE cos/sin tables for this grid, building them once and caching across the many
+    /// per-step (and CFG cond/uncond) Forward calls that share a fixed grid. The transformer owns the cached tensors
+    /// (disposed in <see cref="Dispose"/> or when the grid changes).</summary>
+    private (Tensor Cos, Tensor Sin) GetCosSin((int Frames, int Height, int Width) grid, (double T, double H, double W) interpScale)
+    {
+        (int F, int H, int W, double T, double IH, double IW) key = (grid.Frames, grid.Height, grid.Width, interpScale.T, interpScale.H, interpScale.W);
+        if (_cachedCos is null || _cachedSin is null || !_cosKey.Equals(key))
+        {
+            _cachedCos?.Dispose(); _cachedSin?.Dispose();
+            (_cachedCos, _cachedSin) = _rope.BuildCosSin(grid.Frames, grid.Height, grid.Width, interpScale);
+            _cosKey = key;
+        }
+        return (_cachedCos, _cachedSin);
     }
 
     /// <summary>AdaLayerNormSingle: <c>embedded = mlp(sinusoidal(t))</c>; <c>temb = linear(silu(embedded))</c> reshaped to <c>[6, dim]</c>.</summary>
@@ -160,6 +181,8 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
             _projInW = _projInB = _projOutW = _projOutB = _finalScaleShift = null;
             _timeEmb1W = _timeEmb1B = _timeEmb2W = _timeEmb2B = _timeLinW = _timeLinB = null;
             _capW1 = _capB1 = _capW2 = _capB2 = null;
+            _cachedCos?.Dispose(); _cachedSin?.Dispose();
+            _cachedCos = _cachedSin = null;
         }
         GC.SuppressFinalize(this);
     }

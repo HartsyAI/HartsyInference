@@ -16,20 +16,17 @@ public static class TextualInversion
         {
             throw new FileNotFoundException($"Textual-inversion file not found: {path}");
         }
-        Dictionary<string, Tensor> tensors;
+        // SelectEmbedding MUST run while the loader is still alive: the tensors it returns borrow the loader's
+        // mmap, so copying out of them after the loader's `using` disposes would read freed memory (AccessViolation).
         if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
         {
             using SafeTensorsLoader loader = new SafeTensorsLoader();
             loader.Load(path);
-            tensors = loader.GetAllTensors();
+            return SelectEmbedding(loader.GetAllTensors(), hiddenSize, path);
         }
-        else
-        {
-            using PytorchPickleLoader loader = new PytorchPickleLoader();
-            loader.Load(path);
-            tensors = loader.GetAllTensors();
-        }
-        return SelectEmbedding(tensors, hiddenSize, path);
+        using PytorchPickleLoader pickleLoader = new PytorchPickleLoader();
+        pickleLoader.Load(path);
+        return SelectEmbedding(pickleLoader.GetAllTensors(), hiddenSize, path);
     }
 
     /// <summary>Slices a loaded <c>[numVectors, hiddenSize]</c> embedding into per-row inline-embedding entries keyed by sequential placeholder token ids starting at <paramref name="startPlaceholderId"/> (choose a value past the tokenizer vocab). The returned row tensors borrow <paramref name="embedding"/>'s memory, so keep it alive while encoding. Pass the map as <c>ClipTextEncoder.Encode(..., inlineEmbeddings)</c> and inject the ids where <c>&lt;embed:name&gt;</c> appears.</summary>
@@ -67,10 +64,10 @@ public static class TextualInversion
             {
                 chosen = t;
             }
-            else
-            {
-                t.Dispose();
-            }
+            // Do NOT dispose the non-chosen tensors here: a multi-tensor embed (e.g. SDXL dual clip_l/clip_g)
+            // has every tensor borrowing the SAME loader mmap, and disposing any one invalidates the shared
+            // handle → the chosen tensor's pointer dangles → AccessViolation on the copy below. The loader's own
+            // Dispose (its `using` in Load) tears the mmap down exactly once after this returns.
         }
         if (chosen is null)
         {

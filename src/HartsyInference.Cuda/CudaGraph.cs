@@ -11,18 +11,29 @@ namespace HartsyInference.Cuda;
 /// <para><b>Untested locally.</b> Written from the CUDA Driver API graph docs; not exercised on GPU in this environment. Validate on hardware before relying on it in a pipeline.</para></summary>
 public sealed class CudaGraph : IDisposable
 {
+    /// <summary><c>CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH</c>: the executable graph automatically frees any
+    /// memory its allocation nodes produced in the previous launch before relaunching. Required to replay a graph that
+    /// captured stream-ordered activation allocations (the backend's per-op <c>cuMemAllocAsync</c>) more than once —
+    /// without it the second <c>cuGraphLaunch</c> re-allocs still-live graph memory and fails with INVALID_VALUE.
+    /// Addresses stay stable across launches, so pointers cached at capture time remain valid.</summary>
+    private const ulong FlagAutoFreeOnLaunch = 1;
+
     private readonly nint _stream;
+    private readonly ulong _instantiateFlags;
     private nint _graphExec;
     private int _disposed;
 
     /// <summary>Whether an executable graph has been captured and is ready to <see cref="Launch"/>.</summary>
     public bool IsReady => _graphExec != 0;
 
-    /// <summary>Creates a graph bound to the stream its work will be captured on and replayed to.</summary>
-    public CudaGraph(nint stream)
+    /// <summary>Creates a graph bound to the stream its work will be captured on and replayed to. Set
+    /// <paramref name="autoFreeAllocationsOnRelaunch"/> when the captured work allocates memory (e.g. the backend's
+    /// per-op activation allocations) and the graph will be launched more than once — the loop case.</summary>
+    public CudaGraph(nint stream, bool autoFreeAllocationsOnRelaunch = false)
     {
         if (stream == 0) throw new ArgumentException("Stream handle must be non-zero.", nameof(stream));
         _stream = stream;
+        _instantiateFlags = autoFreeAllocationsOnRelaunch ? FlagAutoFreeOnLaunch : 0;
     }
 
     /// <summary>Captures the device work issued by <paramref name="recordWork"/> on this graph's stream and instantiates it. The delegate must issue only capturable (asynchronous) work — see the type remarks. Replaces any previously captured graph.</summary>
@@ -51,7 +62,7 @@ public sealed class CudaGraph : IDisposable
         try
         {
             DestroyExec();
-            CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, 0).ThrowOnError();
+            CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
         }
         finally
         {
@@ -80,7 +91,7 @@ public sealed class CudaGraph : IDisposable
             {
                 // Topology changed — re-instantiate from the fresh graph.
                 DestroyExec();
-                CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, 0).ThrowOnError();
+                CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
             }
         }
         finally
