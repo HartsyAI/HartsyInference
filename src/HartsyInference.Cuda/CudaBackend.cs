@@ -2131,6 +2131,13 @@ public sealed class CudaBackend : IBackend
         // masked (Matrix-Game block-causal) callers always keep the plain GEMM path.
         if (mask is null && query.DType == DType.F32)
         {
+            // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
+            // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
+            if (EnvFlag("HARTSY_SDPA_V2") && (D == 64 || D == 128))
+            {
+                FlashAttentionV2(output, query, key, value, scale);
+                return;
+            }
             if (EnvFlag("HARTSY_SDPA_FORCE_FLASH"))
             {
                 FlashAttention(output, query, key, value, (int)Skv, kvGroup: 1, causal: false, qOffset: 0, scale);
@@ -2372,6 +2379,36 @@ public sealed class CudaBackend : IBackend
             if (pKCast != 0) CudaMemory.FreeAsync(pKCast, _stream.Handle);
             if (pVCast != 0) CudaMemory.FreeAsync(pVCast, _stream.Handle);
             if (pOutCast != 0) CudaMemory.FreeAsync(pOutCast, _stream.Handle);
+        }
+    }
+
+    /// <summary>Fused FlashAttention-2 (TF32 tensor cores, F32 accumulate) — no-mask MHA, D∈{64,128}. Never
+    /// materializes the [heads,Sq,Skv] score matrix. Q/out [B,H,Sq,D], K/V [B,H,Skv,D].</summary>
+    private unsafe void FlashAttentionV2(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        long B = query.Shape[0], H = query.Shape[1], Sq = query.Shape[2], D = query.Shape[3];
+        long Skv = key.Shape[2];
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchFlashAttentionV2Tf32(pOut, pQ, pK, pV, (int)B, (int)H, (int)Sq, (int)Skv, (int)D, scale, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
         }
     }
 

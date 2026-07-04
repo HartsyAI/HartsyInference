@@ -544,8 +544,9 @@ public static unsafe class DiTUtils
     /// <summary>AdaLN modulation <c>out = x*(1+scale)+shift</c> on an ALREADY-normalized input, entirely on the
     /// backend. Split out of <see cref="NormModulate"/> for blocks that share one LayerNorm across two modulation
     /// paths (SD3.5 dual-attention) or use an affine <c>backend.LayerNorm</c> before modulating. Bit-identical to
-    /// the old host <see cref="AdaLNModulation.ApplyModulation"/>.</summary>
-    public static Tensor Modulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
+    /// the old host <see cref="AdaLNModulation.ApplyModulation"/>. Pass <paramref name="shift"/> null for scale-only
+    /// modulation <c>out = x*(1+scale)</c> (Z-Image / Ideogram-4 adaLN blocks that omit the shift term).</summary>
+    public static Tensor Modulate(IBackend backend, Tensor x, Tensor? shift, Tensor scale, TensorShape shape)
     {
         Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
         backend.AddScalar(scalePlus1, scale, 1.0f);

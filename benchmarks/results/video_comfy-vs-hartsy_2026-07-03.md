@@ -225,3 +225,18 @@ Hartsy backend wedged "in use"; the subsequent backend re-init threw
 ← `CudaStreamingWeightCache..ctor` — stale pending finalizer GPU-cleanups from the disposed context. Only a full
 SwarmUI process restart cleared it (`RestartBackends`/toggle could not). File as: draining pending finalizer
 cleanups during new CUDA-context construction must be null-safe / context-scoped.
+
+## LTX benchmark + optimization (2026-07-03, 4090)
+
+| model | Comfy warm | Hartsy | notes |
+|---|---|---|---|
+| LTX-0.9 2B | **2.84 s** | ~89 s (ported) | 31× gap; block device-ported but RoPE/SDPA/T5/VAE remain |
+| LTX-2.3 22B (audio) | n/a (no Comfy workflow) | ~434 s (ported) vs 451 s | block-swap-bound (streams 19 GB DiT/forward), so attn fix is marginal; coherent video + real 48 kHz audio ✓ |
+
+**Found + fixed (same host-loop patterns as Wan):** both `LtxVideo2Attention` (LTX-2.3) and `LtxVideoBlock` (LTX-0.9)
+did the multi-head reshape (`ToBhsd`/`FromBhsd`), AdaLN modulation, shift-scale, and gated-add as **host `DataPointer`
+loops**, and called `ScaledDotProductAttention` without `allowF16`. Ported to device ops (`Permute0213`, `SliceRows`+
+`GatedResidualLastDim`, `AffineBroadcastLastDim`) + `allowF16: true` (LTX RMS-norms Q/K → bounded scores → safe).
+Both verified frame-coherent (LTX-2.3 + real audio). LTX-0.9 still 89 s — remaining: the host `LtxRope.ApplyRotary`
+loop (2 D2H syncs/self-attn), the materialized SDPA (the flash-attn kernel would help universally), T5 encode, LTX VAE.
+Needs a sync-profile pass to target, like Wan. LTX-2.3 is block-swap-bound so its ceiling is the 19 GB/forward stream.

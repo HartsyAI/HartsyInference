@@ -5,6 +5,17 @@ Attention (`ScaledDotProductAttention`) is **~half of GPU time** for Wan-Video D
 self-attn ≈ 963 MB → ~4 GB HBM traffic/call). The existing `FlashAttention` kernel is a **naive reference**
 (re-reads all K/V per query row) and is *slower* (159s vs 40s). Goal: a real fused flash-attention kernel.
 
+## Build toolchain — VERIFIED WORKING 2026-07-03
+`nvrtc_compile.c` was patched to accept include dirs (argv[4..] → `--include-path=`). A WMMA TF32 test kernel now
+compiles to PTX with real tensor-core ops (`wmma.mma.sync.aligned.row.col.m16n16k8.f32.tf32.tf32.f32`). Recipe:
+```bash
+cc -O2 -o native/cuda/nvrtc_compile native/cuda/nvrtc_compile.c -ldl   # rebuild helper (once, after the patch)
+TINC="/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI/venv/lib/python3.12/site-packages/triton/backends/nvidia/include"
+LD_LIBRARY_PATH=~/.local/lib/cuda13 native/cuda/nvrtc_compile in.cu out.ptx compute_80 "$TINC"
+```
+`$TINC` is a complete CUDA header set (`mma.h`, `cuda_fp16.h`, `cooperative_groups`, `crt/`). TF32 WMMA fragment sizes
+are 16×16×8 (`wmma::precision::tf32`); cast fragment elements with `wmma::__float_to_tf32(...)` before `mma_sync`.
+
 ## Build reality (CRITICAL)
 - **No `nvcc` on this box.** The `native/cuda/*/build.sh` scripts (which call `nvcc -ptx`) are misleading.
 - Real recipe: the committed helper `native/cuda/nvrtc_compile` (dlopens `libnvrtc.so`):
@@ -72,3 +83,13 @@ SDPA share dropping.
 Net: M1 ≈ halves total GPU time; M1+M2+M3 lands the video DiT in the low-teens of seconds with a safe TF32 default and
 Wan-gated F16 opt-in. Related: [`BENCHMARKING.md`](BENCHMARKING.md),
 [`../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md`](../../benchmarks/results/video_comfy-vs-hartsy_2026-07-03.md).
+
+## Status 2026-07-03: M1 kernel CORRECT, needs M2 tuning
+`native/cuda/lm/flash_attn_v2_tf32.cu` written, compiles (WMMA tf32 for both GEMMs), fully wired
+(`LaunchFlashAttentionV2Tf32`, `CudaBackend.FlashAttentionV2`, dispatch behind `HARTSY_SDPA_V2=1`,
+`cuFuncSetAttribute` 96KB). **Verified NUMERICALLY CORRECT** on real Wan-1.3B T2V (coherent frames, mean 151).
+But **SLOWER than baseline: 54.7s vs 23.65s** — the M1 layout keeps the O accumulator + K/V/S in shared memory
+(~72 KB/block → only 1 block/SM, kills latency hiding) and does a serial per-row softmax. M2 = the standard FA2
+optimizations: keep O in REGISTERS (WMMA accumulator fragments held across the whole K-loop, not smem round-tripped —
+the tricky part is the per-row `corr` rescale of fragment elements), shrink smem for ≥2 blocks/SM, `cp.async`
+double-buffer K/V, parallelize the softmax. Correctness oracle: the current M1 kernel + the materialized path.

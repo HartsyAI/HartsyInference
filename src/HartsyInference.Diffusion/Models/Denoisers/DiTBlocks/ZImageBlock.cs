@@ -21,8 +21,10 @@ public sealed unsafe class ZImageBlock
     private Tensor? _adaLNWeight;
     private Tensor? _adaLNBias;
 
-    // Fused QKV: Linear(hidden → 3 * hidden), no bias.
-    private Tensor? _qkvWeight;
+    // Fused QKV is split into separate Q/K/V weights at load (GPU-residency rewrite): 3 Linears write
+    // directly into [B, S, H, D] so the head-split needs no host memcopy. The scalar fp8 weight_scale is
+    // per-tensor, so the three splits share it (see LoadSplitQkv).
+    private Tensor? _toQWeight, _toKWeight, _toVWeight;
 
     // Output projection: Linear(hidden → hidden), no bias.
     private Tensor? _attnOutWeight;
@@ -54,7 +56,7 @@ public sealed unsafe class ZImageBlock
         _adaLNWeight = weights[$"{prefix}.adaLN_modulation.0.weight"];
         weights.TryGetValue($"{prefix}.adaLN_modulation.0.bias", out _adaLNBias);
 
-        _qkvWeight = weights[$"{prefix}.attention.qkv.weight"];
+        LoadSplitQkv(weights[$"{prefix}.attention.qkv.weight"]);
         _attnOutWeight = weights[$"{prefix}.attention.out.weight"];
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
@@ -78,7 +80,9 @@ public sealed unsafe class ZImageBlock
     {
         if (_adaLNWeight is not null) yield return _adaLNWeight;
         if (_adaLNBias is not null) yield return _adaLNBias;
-        if (_qkvWeight is not null) yield return _qkvWeight;
+        if (_toQWeight is not null) yield return _toQWeight;
+        if (_toKWeight is not null) yield return _toKWeight;
+        if (_toVWeight is not null) yield return _toVWeight;
         if (_attnOutWeight is not null) yield return _attnOutWeight;
         foreach (Tensor w in _normQ.EnumerateWeights()) yield return w;
         foreach (Tensor w in _normK.EnumerateWeights()) yield return w;
@@ -101,46 +105,53 @@ public sealed unsafe class ZImageBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
+        TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
 
-        // ── AdaLN: Linear(t_emb) → split into 4 along last dim ──
+        // GPU-residency rewrite (mirrors the verified ErnieImageBlock / FluxSingleStreamBlock ports): the scale-only
+        // AdaLN affines, the two gated residuals, the QK-norm and the head-split/merge reshapes all run as IBackend
+        // ops so the activation chain stays device-resident — no per-op DataPointer D2H sync barriers around the
+        // attention/FFN GEMMs. ApplyScale → DiTUtils.Modulate (shift null = pure broadcast multiply x·(1+scale));
+        // ApplyGatedResidual → GatedResidualLastDim; the ReshapeToMultiHead/FromMultiHead host loops → Permute0213
+        // (Q/K/V declared directly as [B, S, H, D], byte-identical to [B, S, hidden]); the fused-QKV host split →
+        // three Linears against the load-time-split Q/K/V weights. The ONLY ops left on the CPU are the tiny AdaLN
+        // chunk ([1, 15360]) and ZImageRope.Forward — both contained host excursions the current block already runs.
+
+        // ── AdaLN: Linear(t_emb) → split into 4 along last dim (tiny; host) ──
         Tensor[] mod = ComputeAdaLN(backend, tEmb, batch);
 
-
         // ── Attention sub-block ──
-        Tensor norm1 = new Tensor(shape, x.DType);
+        Tensor norm1 = new Tensor(shape, DType.F32);
         backend.RmsNorm(norm1, x, _attnNorm1Weight!, _eps);
-        Tensor modulated = ApplyScale(norm1, mod[0], batch, seqLen, _hiddenSize);
+        Tensor modulated = DiTUtils.Modulate(backend, norm1, null, mod[0], shape); // x·(1+scale_msa), no shift
         norm1.Dispose();
 
-        // Fused QKV: [B, S, 3*hidden]
-        TensorShape qkvShape = new TensorShape(batch, seqLen, 3 * _hiddenSize);
-        Tensor qkv = new Tensor(qkvShape, x.DType);
-        backend.Linear(qkv, modulated, _qkvWeight!, null);
+        // Separate Q/K/V projections declared directly as [B, S, H, D] so RmsNorm normalizes over headDim and
+        // Permute0213 runs with no explicit reshape.
+        Tensor qHeads = new Tensor(headsShape, DType.F32);
+        Tensor kHeads = new Tensor(headsShape, DType.F32);
+        Tensor v = new Tensor(headsShape, DType.F32);
+        backend.Linear(qHeads, modulated, _toQWeight!, null);
+        backend.Linear(kHeads, modulated, _toKWeight!, null);
+        backend.Linear(v, modulated, _toVWeight!, null);
         modulated.Dispose();
 
-        Tensor q = new Tensor(shape, x.DType);
-        Tensor k = new Tensor(shape, x.DType);
-        Tensor v = new Tensor(shape, x.DType);
-        SplitQkv(qkv, q, k, v, batch, seqLen, _hiddenSize);
-        qkv.Dispose();
+        Tensor qNormed = new Tensor(headsShape, DType.F32);
+        Tensor kNormed = new Tensor(headsShape, DType.F32);
+        backend.RmsNorm(qNormed, qHeads, _normQ.Weight, _normQ.Eps);
+        backend.RmsNorm(kNormed, kHeads, _normK.Weight, _normK.Eps);
+        qHeads.Dispose();
+        kHeads.Dispose();
 
-        int totalVecs = batch * seqLen * _numHeads;
-        Tensor qN = new Tensor(q.Shape, DType.F32);
-        Tensor kN = new Tensor(k.Shape, DType.F32);
-        _normQ.Forward(qN, q, totalVecs);
-        _normK.Forward(kN, k, totalVecs);
-        q.Dispose();
-        k.Dispose();
-
-        TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        // [B, S, H, D] → [B, H, S, D] for SDPA. RoPE runs on the [B, H, S, D] layout (host, unchanged).
         Tensor qMh = new Tensor(mhShape, DType.F32);
         Tensor kMh = new Tensor(mhShape, DType.F32);
         Tensor vMh = new Tensor(mhShape, DType.F32);
-        ReshapeToMultiHead(qMh, qN, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(kMh, kN, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
-        qN.Dispose();
-        kN.Dispose();
+        backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
+        backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
+        qNormed.Dispose();
+        kNormed.Dispose();
         v.Dispose();
 
         rope?.Forward(qMh, kMh, batch, _numHeads, seqLen);
@@ -152,35 +163,38 @@ public sealed unsafe class ZImageBlock
         kMh.Dispose();
         vMh.Dispose();
 
+        // [B, H, S, D] → [B, S, hidden]
         Tensor attnFlat = new Tensor(shape, DType.F32);
-        ReshapeFromMultiHead(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
-        Tensor projected = new Tensor(shape, x.DType);
+        Tensor projected = new Tensor(shape, DType.F32);
         backend.Linear(projected, attnFlat, _attnOutWeight!, null);
         attnFlat.Dispose();
 
-        Tensor postAttnNorm = new Tensor(shape, x.DType);
+        Tensor postAttnNorm = new Tensor(shape, DType.F32);
         backend.RmsNorm(postAttnNorm, projected, _attnNorm2Weight!, _eps);
         projected.Dispose();
 
-        Tensor afterAttn = ApplyGatedResidual(x, postAttnNorm, mod[1], batch, seqLen, _hiddenSize);
+        Tensor afterAttn = new Tensor(shape, DType.F32);
+        backend.GatedResidualLastDim(afterAttn, x, postAttnNorm, mod[1]);   // x + gate_msa·attn_out
         postAttnNorm.Dispose();
 
         // ── FFN sub-block ──
-        Tensor normF1 = new Tensor(shape, x.DType);
+        Tensor normF1 = new Tensor(shape, DType.F32);
         backend.RmsNorm(normF1, afterAttn, _ffnNorm1Weight!, _eps);
-        Tensor modulatedF = ApplyScale(normF1, mod[2], batch, seqLen, _hiddenSize);
+        Tensor modulatedF = DiTUtils.Modulate(backend, normF1, null, mod[2], shape); // x·(1+scale_mlp), no shift
         normF1.Dispose();
 
         Tensor ffnOut = ForwardSwiGlu(backend, modulatedF, batch, seqLen);
         modulatedF.Dispose();
 
-        Tensor postFfnNorm = new Tensor(shape, x.DType);
+        Tensor postFfnNorm = new Tensor(shape, DType.F32);
         backend.RmsNorm(postFfnNorm, ffnOut, _ffnNorm2Weight!, _eps);
         ffnOut.Dispose();
 
-        Tensor result = ApplyGatedResidual(afterAttn, postFfnNorm, mod[3], batch, seqLen, _hiddenSize);
+        Tensor result = new Tensor(shape, DType.F32);
+        backend.GatedResidualLastDim(result, afterAttn, postFfnNorm, mod[3]);  // afterAttn + gate_mlp·ffn_out
         afterAttn.Dispose();
         postFfnNorm.Dispose();
 
@@ -189,33 +203,34 @@ public sealed unsafe class ZImageBlock
         return result;
     }
 
+    /// <summary>Splits the fused <c>attention.qkv.weight</c> <c>[3*hidden, hidden]</c> into separate contiguous Q/K/V
+    /// weights <c>[hidden, hidden]</c> at load. Rows [0,H)=Q, [H,2H)=K, [2H,3H)=V (matches the old feature-dim split).
+    /// The per-tensor scalar <see cref="Tensor.Fp8ScaleFactor"/> is shared by all three splits (mirrors
+    /// <c>CheckpointConvertUtils.SplitInProjWeight</c>). Dtype-agnostic byte copy — works for fp8/F16/F32.</summary>
+    private void LoadSplitQkv(Tensor qkv)
+    {
+        int h = _hiddenSize;
+        if (qkv.Shape[0] != 3L * h || qkv.Shape[1] != h)
+            throw new ArgumentException($"Expected fused QKV weight [{3 * h}, {h}], got [{qkv.Shape[0]}, {qkv.Shape[1]}].");
+
+        long chunkBytes = (long)h * h * qkv.DType.SizeInBytes;
+        TensorShape splitShape = new TensorShape(h, h);
+
+        _toQWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        _toKWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        _toVWeight = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+
+        byte* src = (byte*)qkv.DataPointer;
+        Buffer.MemoryCopy(src, (void*)_toQWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + chunkBytes, (void*)_toKWeight.DataPointer, chunkBytes, chunkBytes);
+        Buffer.MemoryCopy(src + 2 * chunkBytes, (void*)_toVWeight.DataPointer, chunkBytes, chunkBytes);
+    }
+
     /// <summary>Loads a norm weight from the dict, casting to F32 if not already (RmsNorm requires F32 weight pointer).</summary>
     private static Tensor LoadAsF32(IReadOnlyDictionary<string, Tensor> weights, string key)
     {
         Tensor t = weights[key];
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-    }
-
-    /// <summary>Splits a fused QKV tensor [B, S, 3H] into three [B, S, H] tensors. Layout: feature dim is [Q | K | V].</summary>
-    private static void SplitQkv(Tensor qkv, Tensor q, Tensor k, Tensor v, int batch, int seqLen, int hidden)
-    {
-        float* srcPtr = (float*)qkv.DataPointer;
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
-        float* vPtr = (float*)v.DataPointer;
-
-        long bytesPerSlice = (long)hidden * sizeof(float);
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long srcBase = ((long)b * seqLen + s) * 3 * hidden;
-                long dstBase = ((long)b * seqLen + s) * hidden;
-                Buffer.MemoryCopy(srcPtr + srcBase, qPtr + dstBase, bytesPerSlice, bytesPerSlice);
-                Buffer.MemoryCopy(srcPtr + srcBase + hidden, kPtr + dstBase, bytesPerSlice, bytesPerSlice);
-                Buffer.MemoryCopy(srcPtr + srcBase + 2 * hidden, vPtr + dstBase, bytesPerSlice, bytesPerSlice);
-            }
-        }
     }
 
     private Tensor[] ComputeAdaLN(IBackend backend, Tensor tEmb, int batch)
@@ -260,55 +275,6 @@ public sealed unsafe class ZImageBlock
         return results;
     }
 
-    private static Tensor ApplyScale(Tensor input, Tensor scale, int batch, int seqLen, int hiddenSize)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hiddenSize);
-        Tensor output = new Tensor(shape, input.DType);
-
-        float* inPtr = (float*)input.DataPointer;
-        float* scalePtr = (float*)scale.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int seqOffset = (b * seqLen + s) * hiddenSize;
-                int condOffset = b * hiddenSize;
-                for (int d = 0; d < hiddenSize; d++)
-                {
-                    outPtr[seqOffset + d] = inPtr[seqOffset + d] * (1.0f + scalePtr[condOffset + d]);
-                }
-            }
-        }
-        return output;
-    }
-
-    private static Tensor ApplyGatedResidual(Tensor residual, Tensor value, Tensor gate, int batch, int seqLen, int hiddenSize)
-    {
-        TensorShape shape = new TensorShape(batch, seqLen, hiddenSize);
-        Tensor output = new Tensor(shape, residual.DType);
-
-        float* resPtr = (float*)residual.DataPointer;
-        float* valPtr = (float*)value.DataPointer;
-        float* gatePtr = (float*)gate.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int seqOffset = (b * seqLen + s) * hiddenSize;
-                int condOffset = b * hiddenSize;
-                for (int d = 0; d < hiddenSize; d++)
-                {
-                    outPtr[seqOffset + d] = resPtr[seqOffset + d] + gatePtr[condOffset + d] * valPtr[seqOffset + d];
-                }
-            }
-        }
-        return output;
-    }
-
     /// <summary>SwiGLU FFN with no biases: output = w2(silu(w1(x)) * w3(x)).</summary>
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
     {
@@ -336,39 +302,4 @@ public sealed unsafe class ZImageBlock
         return output;
     }
 
-    private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
 }

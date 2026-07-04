@@ -82,16 +82,18 @@ public sealed unsafe class LtxVideo2Attention
         if (qRope is not null) qRope.ApplyRotary(qn, qCos!, qSin!);
         if (kRope is not null) kRope.ApplyRotary(kn, kCos!, kSin!);
 
-        Tensor qMh = ToBhsd(qn, sq); qn.Dispose();
-        Tensor kMh = ToBhsd(kn, sk); kn.Dispose();
-        Tensor vMh = ToBhsd(v, sk); v.Dispose();
+        Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
+        Tensor kMh = ToBhsd(backend, kn, sk); kn.Dispose();
+        Tensor vMh = ToBhsd(backend, v, sk); v.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attn = new(new TensorShape(1, _heads, sq, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale);
+        // allowF16: Q and K are RMS-normed above → bounded pre-softmax scores → F16 attention is safe and halves the
+        // (dominant) score-matrix traffic. Engine keeps F32 when a mask is present.
+        backend.ScaledDotProductAttention(attn, qMh, kMh, vMh, mask, scale, allowF16: true);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
-        Tensor flat = FromBhsd(attn, sq); attn.Dispose();   // [Sq, inner]
+        Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();   // [Sq, inner]
         if (gateLogits is not null) { ApplyGate(flat, gateLogits, sq); gateLogits.Dispose(); }
 
         Tensor outT = new(new TensorShape(sq, _outDim), DType.F32);
@@ -114,31 +116,20 @@ public sealed unsafe class LtxVideo2Attention
             }
     }
 
-    private Tensor ToBhsd(Tensor x, int s)
+    // [s, inner]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 (was a host DataPointer
+    // loop = a D2H sync + host copy + H2D per call, ×3/attention — the same host-excursion that dominated Wan/Flux).
+    private Tensor ToBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new(new TensorShape(1, _heads, s, _headDim), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int h = 0; h < _heads; h++)
-            {
-                long src = (long)i * _inner + (long)h * _headDim;
-                long dst = ((long)h * s + i) * _headDim;
-                Buffer.MemoryCopy(xp + src, op + dst, (long)_headDim * 4, (long)_headDim * 4);
-            }
+        backend.Permute0213(o, x, s, _heads, _headDim);
         return o;
     }
 
-    private Tensor FromBhsd(Tensor x, int s)
+    // [1, heads, s, headDim] → [s, inner] (inverse of ToBhsd), GPU-resident via Permute0213.
+    private Tensor FromBhsd(IBackend backend, Tensor x, int s)
     {
         Tensor o = new(new TensorShape(s, _inner), DType.F32);
-        float* xp = (float*)x.DataPointer; float* op = (float*)o.DataPointer;
-        for (int h = 0; h < _heads; h++)
-            for (int i = 0; i < s; i++)
-            {
-                long src = ((long)h * s + i) * _headDim;
-                long dst = (long)i * _inner + (long)h * _headDim;
-                Buffer.MemoryCopy(xp + src, op + dst, (long)_headDim * 4, (long)_headDim * 4);
-            }
+        backend.Permute0213(o, x, _heads, s, _headDim);
         return o;
     }
 

@@ -80,6 +80,11 @@ internal static partial class CudaDriverApi
         uint sharedMemBytes, nint stream,
         nint kernelParams, nint extra);
 
+    // Set a function attribute. CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8 — required to opt a kernel into
+    // >48 KB dynamic shared memory (up to ~99 KB/block on sm_89), e.g. the fused flash-attention kernel's K/V/S/O tiles.
+    [LibraryImport(LibName)]
+    internal static partial int cuFuncSetAttribute(nint function, int attrib, int value);
+
     // ── Memory Management ───────────────────────────────────────────────
 
     [LibraryImport(LibName, EntryPoint = "cuMemAlloc_v2")]
