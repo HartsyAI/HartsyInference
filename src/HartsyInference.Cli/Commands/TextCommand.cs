@@ -89,19 +89,6 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         string label = spec.Catalog?.Id ?? (settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : settings.Model);
 
         return CommandRunner.Run(Modality.Text, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
-            settings.Output, label, showResponseRule: true, present: (artifact, quiet) =>
-            {
-                if (quiet)
-                {
-                    AnsiConsole.WriteLine(artifact.Text ?? "");
-                    return;
-                }
-                AnsiConsole.WriteLine();
-                AnsiConsole.Write(new Rule().RuleStyle("grey"));
-                AnsiConsole.MarkupLine(
-                    $"[grey]{artifact.Meta.GetValueOrDefault("generated_tokens", "?")} tokens · " +
-                    $"{artifact.Meta.GetValueOrDefault("tokens_per_sec", "?")} tok/s · " +
-                    $"stop: {artifact.Meta.GetValueOrDefault("stopped_on", "?")}[/]");
-            });
+            settings.Output, label, showResponseRule: true);
     }
 }

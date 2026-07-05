@@ -103,10 +103,6 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         string outputDir = settings.Output ?? RepoPaths.OutputRoot();
 
         return CommandRunner.Run(Modality.Image, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
-            outputDir, label, showResponseRule: false, present: (artifact, quiet) =>
-            {
-                if (!quiet)
-                    AnsiConsole.MarkupLine($"[grey]{Markup.Escape(artifact.Text ?? "image")}[/]");
-            });
+            outputDir, label, showResponseRule: false);
     }
 }

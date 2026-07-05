@@ -73,7 +73,7 @@ public sealed class TextHandler : IModalityHandler
         double seconds = Math.Max(sw.Elapsed.TotalSeconds, 1e-6);
         int generated = Math.Max(1, result.TokenIds.Count);
 
-        GeneratedArtifact artifact = new GeneratedArtifact { Kind = ArtifactKind.Text, Text = result.Text, Extension = "txt" };
+        GeneratedArtifact artifact = new GeneratedArtifact { Kind = ArtifactKind.Text, Text = result.Text, Extension = "txt", Streamed = true };
         artifact.Meta["model"] = text.ModelId;
         artifact.Meta["prompt_tokens"] = result.PromptTokens.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["generated_tokens"] = result.TokenIds.Count.ToString(CultureInfo.InvariantCulture);

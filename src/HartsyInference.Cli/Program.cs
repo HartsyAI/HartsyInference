@@ -1,5 +1,5 @@
 using HartsyInference.Cli.Commands;
-using HartsyInference.Cli.Infra;
+using HartsyInference.Cli.Repl;
 using HartsyInference.Core.Logging;
 using Spectre.Console.Cli;
 
@@ -16,7 +16,10 @@ public static class Program
         Logs.MinLevel = LogLevel.Warning;
 
         if (args.Length == 0)
-            CliTheme.RenderBanner("auto");
+        {
+            using ReplSession repl = new ReplSession();
+            return repl.Run();
+        }
 
         CommandApp app = new CommandApp();
         app.Configure(config =>
@@ -32,6 +35,22 @@ public static class Program
             config.AddCommand<TranscribeCommand>("transcribe")
                 .WithDescription("Transcribe a WAV file to text with Whisper.")
                 .WithExample("transcribe", "speech.wav", "-m", "whisper-base");
+            config.AddCommand<SpeechCommand>("speak")
+                .WithDescription("Synthesize speech from text with Piper (saves a WAV).")
+                .WithExample("speak", "\"Hello world\"", "-m", "en_US-lessac-medium");
+            config.AddCommand<ThreeDCommand>("3d")
+                .WithDescription("Generate a 3D mesh (GLB) from an image with TripoSR or Hunyuan3D.")
+                .WithExample("3d", "photo.png", "-m", "triposr", "--model-path", "/models/triposr");
+            config.AddCommand<VisionCommand>("vision")
+                .WithDescription("Run CLIP embedding or YOLO detection on an image.")
+                .WithExample("vision", "photo.png", "-m", "yolo11", "--model-path", "yolo11n.safetensors");
+            config.AddCommand<MusicCommand>("music")
+                .WithDescription("Generate music from a prompt with MusicGen (saves a WAV).")
+                .WithExample("music", "\"lofi hip hop, mellow piano\"", "--model-path", "musicgen-small.safetensors");
+            config.AddCommand<VideoCommand>("video")
+                .WithDescription("Generate a video (BMP frame sequence) from a prompt with LTX-Video (CUDA).");
+            config.AddCommand<InteractiveCommand>("world")
+                .WithDescription("Roll out an Oasis world model from a first-frame image (canned action plan).");
             config.AddCommand<ListCommand>("list")
                 .WithDescription("List models in the catalog, optionally filtered by modality.")
                 .WithExample("list", "image")

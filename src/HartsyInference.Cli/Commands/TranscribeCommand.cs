@@ -71,11 +71,6 @@ public sealed class TranscribeCommand : Command<TranscribeCommand.Settings>
         ModelSpec spec = new ModelSpec { Requested = settings.Model, Modality = Modality.Transcribe, Catalog = ModelCatalog.Find(settings.Model) };
 
         return CommandRunner.Run(Modality.Transcribe, spec, settings.Audio, parameters, settings.Backend, settings.Quiet,
-            settings.Output, settings.Model, showResponseRule: false, present: (artifact, quiet) =>
-            {
-                if (!quiet)
-                    AnsiConsole.Write(new Rule().RuleStyle("grey"));
-                AnsiConsole.WriteLine(artifact.Text ?? "");
-            });
+            settings.Output, settings.Model, showResponseRule: false);
     }
 }

@@ -100,7 +100,12 @@ public sealed class ParamState
                 _values["confidence"] = "0.5";
                 break;
             case Modality.Video:
-                _values["duration"] = "8";
+                _values["width"] = "704";
+                _values["height"] = "480";
+                _values["steps"] = "30";
+                _values["frames"] = "25";
+                _values["fps"] = "25";
+                _values["negative"] = "";
                 _values["seed"] = "-1";
                 break;
             case Modality.ThreeD:
@@ -109,8 +114,9 @@ public sealed class ParamState
                 _values["seed"] = "-1";
                 break;
             case Modality.Interactive:
-                _values["width"] = "640";
-                _values["height"] = "360";
+                _values["frames"] = "16";
+                _values["steps"] = "10";
+                _values["seed"] = "-1";
                 break;
         }
     }
