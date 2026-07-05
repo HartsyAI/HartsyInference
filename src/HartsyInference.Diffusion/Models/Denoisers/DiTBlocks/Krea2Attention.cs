@@ -138,7 +138,10 @@ public sealed unsafe class Krea2Attention
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnMh = new Tensor(qMhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
+        // allowF16: Krea2 applies zero-centered RMSNorm to Q and K (per-head, over headDim) before attention, so
+        // pre-softmax scores are bounded and the F16 SDPA path (half the score-matrix HBM traffic + F16 tensor
+        // cores) is numerically safe — same condition Wan/LTX use. SDPA is ~55% of Krea2 GPU time (sync-profiled).
+        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale, allowF16: true);
         qMh.Dispose();
         kRep.Dispose();   // when _kvGroup == 1, kRep/vRep alias kMh/vMh — disposed exactly once here.
         vRep.Dispose();

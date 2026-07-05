@@ -105,6 +105,7 @@ pre-permute `[B,S,H,D]` layout — bit-identical, mirrors the Flux/Ideogram GPU-
 |---|---|---|---|---|---|---|---|
 | **Krea2-Turbo** | GQA GPU-RoPE (`FluxRope.ApplyGpuGqa`, per-tensor head counts) | 6.5s | 70.6s (10.9×) | **36.7s** | **1.9×** | **5.6×** | ✅ verified coherent |
 | **Chroma1-HD** | MHA GPU-RoPE both blocks (`ApplyGpu` pre-permute) + SDPA mask built once/forward in `ChromaTransformer` (was 85 MB `[B,1,S,S]` host build × 57 blocks) | 16.6s | 550.0s (33.2×) | **119s** | **4.6×** | **7.2×** | ✅ verified coherent |
+| **ERNIE-Image** | GPU rotate_half RoPE (`ErnieImageRope.ApplyRotaryEmbGpu`: slice packed freqs → cos/sin on-device, `backend.ApplyRope`) — was host `ApplyRotaryEmb` per block | 24.0s | 296.4s (12.4×) | **53.3s** | **5.6×** | **2.2×** | ✅ verified coherent |
 
 Chroma breakdown: 550s → 270s (GPU-RoPE, 2.0×) → **119s** (+ mask-once, another 2.3×). It went from the **worst
 model in the set (33×) to mid-pack (7.2×)**.

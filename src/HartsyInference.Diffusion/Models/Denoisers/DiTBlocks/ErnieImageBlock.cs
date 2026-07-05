@@ -120,10 +120,10 @@ public sealed unsafe class ErnieImageBlock
         // run as IBackend ops so the activation chain stays device-resident — no per-op DataPointer D2H sync barriers
         // around the attention/FFN GEMMs. ApplyShiftScale → DiTUtils.Modulate; ApplyGatedResidual →
         // GatedResidualLastDim; the ReshapeFlatToHeads/PermuteBshdToBhsd/PermuteBhsdToBsh host loops →
-        // Permute0213 (+ declaring Q/K/V directly as [B, S, H, D], byte-identical to [B, S, hidden]). The ONLY op
-        // left on the CPU is ErnieImageRope.ApplyRotaryEmb: it is the non-interleaved Megatron "rotate_half" (pairs
-        // (i, i+halfDim), unlike Flux's interleaved (2k, 2k+1)) with no GPU-resident equivalent, so rope stays a
-        // contained host excursion — exactly as Krea2 left FluxRope on host — operating on the [B, S, H, D] layout.
+        // Permute0213 (+ declaring Q/K/V directly as [B, S, H, D], byte-identical to [B, S, hidden]). RoPE is now
+        // GPU-resident too: the non-interleaved Megatron "rotate_half" (pairs (i, i+halfDim)) is applied via
+        // backend.ApplyRope (which computes exactly x·cos + rotate_half(x)·sin) after slicing the packed freqs into
+        // cos/sin on-device — see ErnieImageRope.ApplyRotaryEmbGpu. The block forward is fully device-resident.
         Tensor norm1 = new Tensor(shape, DType.F32);
         backend.RmsNorm(norm1, x, _adaLnSaWeight!, _eps);
         Tensor modulated = DiTUtils.Modulate(backend, norm1, shiftMsa, scaleMsa, shape); // x·(1+scale_msa) + shift_msa
@@ -147,8 +147,9 @@ public sealed unsafe class ErnieImageBlock
         qHeads.Dispose();
         kHeads.Dispose();
 
-        // 3D RoPE (in-place on qNormed/kNormed, both still [B, S, numHeads, headDim]) — host excursion, see note above.
-        rope.ApplyRotaryEmb(qNormed, kNormed, freqs);
+        // 3D RoPE (in-place on qNormed/kNormed, both still [B, S, numHeads, headDim]) — GPU-resident via
+        // backend.ApplyRope (rotate_half); freqs sliced into cos/sin on-device. Bit-identical to the host path.
+        rope.ApplyRotaryEmbGpu(backend, qNormed, kNormed, freqs);
 
         // SDPA expects [B, numHeads, S, headDim]. Permute (B, S, H, D) → (B, H, S, D).
         Tensor qMh = new Tensor(mhShape, DType.F32);

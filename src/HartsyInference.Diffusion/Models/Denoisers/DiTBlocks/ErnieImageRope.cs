@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -203,6 +204,26 @@ public sealed unsafe class ErnieImageRope
 
     /// <summary>Non-interleaved rotation: pairs are <c>(i, i + halfDim)</c>. Computes <c>out[i] = x[i]*cos[i] - x[i+halfDim]*sin[i]</c> for <c>i &lt; halfDim</c> and <c>out[i] = x[i]*cos[i] + x[i-halfDim]*sin[i]</c> for <c>i &gt;= halfDim</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// <summary>GPU-resident equivalent of <see cref="ApplyRotaryEmb"/>: slices the packed
+    /// <c>[B, S, 2·headDim]</c> freqs into <c>cos = freqs[..., :headDim]</c> / <c>sin = freqs[..., headDim:]</c>
+    /// and applies the same rotate_half rotation via <see cref="IBackend.ApplyRope"/> — that op computes
+    /// <c>x·cos + rotate_half(x)·sin</c> with <c>rotate_half(x)=cat(-x[half:], x[:half])</c>, which is
+    /// algebraically identical to <see cref="ApplyNonInterleavedRotation"/>. Keeps Q/K device-resident (no
+    /// per-block D2H/H2D). q/k are <c>[B, S, numHeads, headDim]</c> (pre-permute), modified in place.</summary>
+    public void ApplyRotaryEmbGpu(IBackend backend, Tensor q, Tensor k, Tensor freqs)
+    {
+        int batch = (int)q.Shape[0];
+        int seqLen = (int)q.Shape[1];
+        TensorShape csShape = new TensorShape(batch, seqLen, _headDim);
+        Tensor cos = new Tensor(csShape, DType.F32);
+        Tensor sin = new Tensor(csShape, DType.F32);
+        backend.SliceLastDim(cos, freqs, 0);          // freqs[..., 0 : headDim]
+        backend.SliceLastDim(sin, freqs, _headDim);   // freqs[..., headDim : 2·headDim]
+        backend.ApplyRope(q, k, cos, sin);
+        cos.Dispose();
+        sin.Dispose();
+    }
+
     private static void ApplyNonInterleavedRotation(float* vec, float* cos, float* sin, int halfDim, Span<float> lowerSnapshot)
     {
         // Snapshot the lower half before overwriting — the upper-half write reads original lower-half values.
