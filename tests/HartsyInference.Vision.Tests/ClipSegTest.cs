@@ -12,7 +12,7 @@ public class ClipSegTest
     private const string Scratch = "/tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/a035d95f-4f31-468f-aa2e-4b2c832692fe/scratchpad";
 
     [Fact]
-    public unsafe void ConvTranspose2d_Isolation()
+    public void ConvTranspose2d_Isolation()
     {
         HartsyInference.Core.Backends.IBackend backend = new CpuBackend();
         // input [1,2,3,3] = 0..17 ; weight [2,3,3,3] = 0..53 ; k3 s1 p1, no bias -> output [1,3,3,3]
@@ -24,11 +24,16 @@ public class ClipSegTest
         for (int i = 0; i < ws.Length; i++) ws[i] = i;
         Tensor outp = new Tensor(new TensorShape(1, 3, 3, 3), DType.F32);
         backend.ConvTranspose2d(outp, inp, w, null, 1, 1, 1, 1);
-        byte[] b = new byte[27 * sizeof(float)];
-        fixed (float* op = outp.AsSpan<float>()) fixed (byte* bp = b) Buffer.MemoryCopy(op, bp, b.Length, b.Length);
-        File.WriteAllBytes(Path.Combine(Scratch, "cs_convt_iso.bin"), b);
+        System.Span<float> os = outp.AsSpan<float>();
+        Assert.Equal(27, os.Length);
+        bool anyNonZero = false;
+        foreach (float v in os) { Assert.True(float.IsFinite(v), "ConvTranspose2d produced non-finite output"); anyNonZero |= v != 0f; }
+        Assert.True(anyNonZero, "ConvTranspose2d output is all-zero for non-zero input/weight");
     }
 
+    // Integration: needs a real ClipSeg checkpoint + a preprocessed input bin (skips cleanly when absent).
+    // The ModelDir/Scratch consts below are the original author's local diagnostic paths.
+    [Trait("Category", "Integration")]
     [Fact]
     public unsafe void ClipSeg_Segment_ProducesMasks()
     {
