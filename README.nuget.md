@@ -117,7 +117,7 @@ Track progress and releases on the [GitHub repo](https://github.com/HartsyAI/Har
 
 | Package | Description |
 |---|---|
-| `HartsyInference` | Meta-package referencing the core, all three backends, and the modality packages (add `HartsyInference.LLM` separately for text generation) |
+| `HartsyInference` | Meta-package: one reference for the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (only the abandoned `Server` and the sample `Cli` are excluded) |
 | `HartsyInference.Core` | Tensor types, `IBackend`, schedulers, pipeline base types |
 | `HartsyInference.ModelHandler` | Safetensors/GGUF loaders, quant dequant, HuggingFace download, model registry |
 | `HartsyInference.Tokenizers` | CLIP, T5, Whisper, and LLM-style tokenizers |

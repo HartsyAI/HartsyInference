@@ -7,10 +7,10 @@
 Monolithic NuGet is wrong because:
 - SwarmUI extensions and desktop apps shouldn't pull audio/video code they don't use
 - CUDA dependencies should be opt-in
-- LLM text generation should be an explicit add, not forced on image-only consumers
+- LLM text generation is its own package, so an image-only consumer can depend on `HartsyInference.Diffusion` directly without pulling it in
 - CPU-only users shouldn't need CUDA
 
-A single meta-package (`HartsyInference`) is published for consumers who want the whole modality stack in one reference. The `HartsyInference.LLM` package is added separately (see the meta-package note below).
+A single meta-package (`HartsyInference`) is published for consumers who want the whole modality stack in one reference; it bundles every modality package, LLM included (see the meta-package note below). Consumers who want only one modality reference that package directly instead.
 
 ## Package List
 
@@ -42,9 +42,9 @@ A single meta-package (`HartsyInference`) is published for consumers who want th
 
 | Package | Description | References |
 |---|---|---|
-| **HartsyInference** | Dependencies-only meta-package: one reference pulls the whole modality stack | Core, Cpu, Cuda, Vulkan, ModelHandler, Tokenizers, Diffusion, Audio, Vision, Video, Interactive, ThreeD |
+| **HartsyInference** | Dependencies-only meta-package: one reference pulls the whole modality stack | Core, Cpu, Cuda, Vulkan, ModelHandler, Tokenizers, Phonemizer, LLM, Diffusion, Audio, Vision, Video, Interactive, ThreeD |
 
-> **Meta-package note.** `HartsyInference` references the 12 packages above. It does **not** include **LLM**, **Phonemizer**, **Server**, or **Cli**. Consumers who want native LLM text generation add it explicitly: `dotnet add package HartsyInference.LLM`. Phoneme-input TTS pulls `HartsyInference.Phonemizer` the same way.
+> **Meta-package note.** `HartsyInference` explicitly references all 14 libraries above, including **LLM** and **Phonemizer**, so a single `dotnet add package HartsyInference` gives you native LLM text generation and phoneme-input TTS. Only **Server** (abandoned scaffolding) and **Cli** (a sample/validation tool, not a library) are excluded. Consumers who want just one modality reference that package directly instead of the meta.
 
 ### Consuming the engine
 

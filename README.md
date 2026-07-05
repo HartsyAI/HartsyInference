@@ -542,7 +542,7 @@ See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the fu
 | `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky video generation |
 | `HartsyInference.ThreeD` | Image/text → 3D mesh; glTF/OBJ/PLY export, marching cubes |
 | `HartsyInference.Interactive` | Action-conditioned world models, sessions, action encoders |
-| `HartsyInference` | Meta-package that references the core, backends, and modality packages (add `HartsyInference.LLM` separately for text generation) |
+| `HartsyInference` | Meta-package: one reference that pulls in the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (only the abandoned `Server` and the sample `Cli` are excluded) |
 | `HartsyInference.Cli` | Command-line sample/validation tool (not published as a package) |
 
 See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependency graph and minimum install examples.

@@ -7,15 +7,17 @@
   -->
   <PropertyGroup>
     <PackageId>HartsyInference</PackageId>
-    <Description>Meta-package for HartsyInference — a pure C#/.NET AI inference engine for non-LLM modalities (diffusion image generation, speech-to-text, text-to-speech, vision, video, interactive world models). Adds all backends (CPU, CUDA, Vulkan) and modality packages in one reference.</Description>
+    <Description>Meta-package for HartsyInference, a pure C#/.NET AI inference engine covering LLM text generation, diffusion image generation, speech-to-text, text-to-speech, music, vision, video, 3D, and interactive world models. Adds all backends (CPU, CUDA, Vulkan) and every modality package in one reference.</Description>
     <!-- No build output: this package is dependencies-only. -->
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <!-- NU5128: "dependencies declared but no lib/ files" — expected and correct for a meta-package. -->
     <NoWarn>$(NoWarn);NU5128</NoWarn>
   </PropertyGroup>
 
-  <!-- Referenced projects become package dependencies of HartsyInference. Listing all 12 libs
-       (rather than relying on transitivity) keeps the dependency set explicit and complete. -->
+  <!-- Referenced projects become package dependencies of HartsyInference. Listing all 14 libs
+       (rather than relying on transitivity) keeps the dependency set explicit and complete.
+       Server and Cli are intentionally excluded: Server is abandoned scaffolding, and Cli is a
+       sample/validation tool, not a library. -->
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
     <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
@@ -23,6 +25,8 @@
     <ProjectReference Include="..\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
     <ProjectReference Include="..\HartsyInference.ModelHandler\HartsyInference.ModelHandler.csproj" />
     <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
+    <ProjectReference Include="..\HartsyInference.Phonemizer\HartsyInference.Phonemizer.csproj" />
+    <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
     <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
     <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />

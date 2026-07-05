@@ -99,8 +99,9 @@ document lists capabilities, not per-model checkmarks.
 - **SwarmUI backend extension** (recommended): registers HartsyInference as a SwarmUI backend, a
   pure-C# alternative to the ComfyUI backend.
 - **NuGet libraries:** per-modality packages (see [NuGet Package Design](NUGET_PACKAGE_DESIGN.md)); a
-  `HartsyInference` meta-package pulls in the core, backends, and modality packages (add
-  `HartsyInference.LLM` explicitly for text generation).
+  `HartsyInference` meta-package pulls in the core, all three backends, and every modality package
+  including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (only the abandoned `Server` and the
+  sample `Cli` are excluded).
 - **Sample CLIs:** developer/validation tools under [`../../samples/`](../../samples/) and
   [`../../src/HartsyInference.Cli`](../../src/HartsyInference.Cli).
 
