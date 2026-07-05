@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HartsyInference.Audio.Models.Codecs.Vocos;
 using HartsyInference.Audio.Models.Codecs.XCodec;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Core.Backends;
@@ -22,15 +23,26 @@ public sealed unsafe class YuePipeline : IDisposable
     private readonly YueStage1Lm _stage1;
     private readonly YueStage2Lm? _stage2;
     private readonly XCodec _xcodec;
+    private readonly VocosDecoder? _vocalVocoder;   // YuE's real 44.1 kHz output path (per-stem Vocos)
+    private readonly VocosDecoder? _instVocoder;
     private int _disposed;
 
-    public YuePipeline(YueConfig cfg, YueStage1Lm stage1, XCodec xcodec, YueStage2Lm? stage2 = null)
+    public YuePipeline(YueConfig cfg, YueStage1Lm stage1, XCodec xcodec, YueStage2Lm? stage2 = null,
+        VocosDecoder? vocalVocoder = null, VocosDecoder? instVocoder = null)
     {
         _cfg = cfg;
         _stage1 = stage1;
         _stage2 = stage2;
         _xcodec = xcodec;
+        _vocalVocoder = vocalVocoder;
+        _instVocoder = instVocoder;
     }
+
+    /// <summary>True when both per-stem Vocos vocoders are loaded — output is 44.1 kHz, else the 16 kHz x-codec draft.</summary>
+    private bool HasVocoders => _vocalVocoder is not null && _instVocoder is not null;
+
+    /// <summary>Output sample rate: 44.1 kHz when the Vocos vocoders are present, else the x-codec's 16 kHz.</summary>
+    public int OutputSampleRate => HasVocoders ? VocosDecoder.SampleRate : _cfg.SampleRate;
 
     /// <summary>Synthesizes a 16 kHz song from the tokenized lyric+genre prompt. Returns the vocal track
     /// audio (accompaniment mixing + the Stage-2 residual upsampler are deferred — see checklist). YuE's
@@ -69,9 +81,13 @@ public sealed unsafe class YuePipeline : IDisposable
             // Batch both tracks (B=2) through Stage-2 in one pass — same codes as two sequential Upsample calls, ~half the wall-clock.
             (int[][] vocalCodes, int[][] accompCodes) = _stage2.UpsampleBoth(backend, vSpan, aSpan);
             Logs.Info($"YuE S2: upsampled {vocal.Count} frames x2 tracks to 8 codebooks in {sw.ElapsedMilliseconds}ms.");
-            backend.FreeWeights(_stage2.EnumerateWeights());   // Stage-2 done — free before x-codec decode
-            float[] vocalWav = DecodeFull(backend, vocalCodes);
-            float[] accompWav = DecodeFull(backend, accompCodes);
+            backend.FreeWeights(_stage2.EnumerateWeights());   // Stage-2 done — free before decode
+            // YuE's REAL output path: each stem's 8-codebook grid → x-codec 1024-d quantizer latent → its own Vocos
+            // vocoder → 44.1 kHz, then equal-gain sum (upstream infer.py `vocoder` path). Falls back to the 16 kHz
+            // x-codec draft (`DecodeFull`) when the vocoders aren't loaded. The plain draft under-reconstructs the
+            // vocal stem (quiet/rough); the Vocos vocal decoder fixes both the level and the fidelity.
+            float[] vocalWav = DecodeStem(backend, vocalCodes, _vocalVocoder);
+            float[] accompWav = DecodeStem(backend, accompCodes, _instVocoder);
             audio = MixSum(vocalWav, accompWav);
         }
         else
@@ -86,7 +102,7 @@ public sealed unsafe class YuePipeline : IDisposable
         }
 
         sw.Stop();
-        Logs.Info($"YuE synthesis complete: {audio.Length} samples ({audio.Length / (double)_cfg.SampleRate:F1}s) in {sw.ElapsedMilliseconds}ms.");
+        Logs.Info($"YuE synthesis complete: {audio.Length} samples ({audio.Length / (double)OutputSampleRate:F1}s @ {OutputSampleRate} Hz) in {sw.ElapsedMilliseconds}ms.");
         return audio;
     }
 
@@ -105,6 +121,32 @@ public sealed unsafe class YuePipeline : IDisposable
         }
         Tensor pcm = _xcodec.Decode(backend, grid, batch: 1, tFrames: t);
         grid.Dispose();
+        int n = (int)pcm.Shape[pcm.Shape.Rank - 1];
+        float[] wav = new float[n];
+        Buffer.MemoryCopy((void*)pcm.DataPointer, System.Runtime.CompilerServices.Unsafe.AsPointer(ref wav[0]), n * 4, n * 4);
+        pcm.Dispose();
+        return wav;
+    }
+
+    /// <summary>Decodes one stem's <c>[8][T]</c> codebook grid to a waveform: through the stem's Vocos vocoder
+    /// (x-codec 1024-d quantizer latent → 44.1 kHz) when supplied, else the 16 kHz x-codec draft.</summary>
+    private float[] DecodeStem(IBackend backend, int[][] codes, VocosDecoder? vocoder)
+    {
+        if (vocoder is null) return DecodeFull(backend, codes);
+
+        int nq = codes.Length;
+        int t = codes[0].Length;
+        Tensor grid = new(new TensorShape(nq, 1, t), DType.I32);
+        int* gp = (int*)grid.DataPointer;
+        for (int q = 0; q < nq; q++)
+        {
+            int[] row = codes[q];
+            for (int i = 0; i < t; i++) gp[q * t + i] = row[i];
+        }
+        Tensor latent = _xcodec.DecodeToLatent(backend, grid, batch: 1, tFrames: t);   // [1, 1024, T]
+        grid.Dispose();
+        Tensor pcm = vocoder.Forward(backend, latent, batch: 1, tFrames: t);            // [1, 1, T·882] @ 44.1 kHz
+        latent.Dispose();
         int n = (int)pcm.Shape[pcm.Shape.Rank - 1];
         float[] wav = new float[n];
         Buffer.MemoryCopy((void*)pcm.DataPointer, System.Runtime.CompilerServices.Unsafe.AsPointer(ref wav[0]), n * 4, n * 4);

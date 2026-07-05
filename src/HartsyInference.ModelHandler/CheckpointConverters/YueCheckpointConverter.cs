@@ -126,6 +126,19 @@ public sealed class YueCheckpointConverter
         return (weights, loader);
     }
 
+    /// <summary>Loads a converted YuE Vocos vocoder (<c>decoder_131000/151000.pth</c> → safetensors) as-is: the keys
+    /// (<c>backbone.embed/norm/convnext.*/final_layer_norm</c>, <c>head.out</c>) are already what <c>VocosDecoder</c>
+    /// consumes, so no mapping — just F32 (small: ~18M params).</summary>
+    public static (Dictionary<string, Tensor> Weights, SafeTensorsLoader Loader) LoadVocoder(string path, bool castToF32 = true)
+    {
+        SafeTensorsLoader loader = new();
+        loader.Load(path);
+        Dictionary<string, Tensor> weights = new();
+        foreach (string key in loader.Descriptors.Keys)
+            weights[key] = CodecKeyUtils.MaybeCast(loader.GetTensor(key), castToF32);
+        return (weights, loader);
+    }
+
     /// <summary>Pure X-Codec key mapping (testable without files): strips wrapper prefixes, drops the semantic branch,
     /// renames the acoustic <c>decoder_2.*</c> root to <c>decoder.*</c>, and normalizes weight-norm key spellings.
     /// Weight-norm pairs stay raw — the engine DAC blocks fuse them at load time.</summary>

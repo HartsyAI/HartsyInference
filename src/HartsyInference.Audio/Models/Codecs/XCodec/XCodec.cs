@@ -69,6 +69,12 @@ public sealed unsafe class XCodec
     /// <summary>Decodes code indices to a 16 kHz waveform. <paramref name="codes"/> may be channels-first
     /// integer indices either as <c>[B, n_q, T]</c> (pipeline-style, F32 or I32) — see
     /// <see cref="DecodeFromCodes"/>. This overload takes the EMA codes laid out <c>[n_q, B, T]</c> I32.</summary>
+    /// <summary>Decodes codes to the raw 1024-dim quantizer latent <c>[B, 1024, T]</c> (EMA-VQ lookup + sum) — the
+    /// fused (256 acoustic + 768 semantic) representation the YuE per-stem Vocos vocoders consume in place of the
+    /// SeaNet/DAC decode. Caller owns the returned tensor.</summary>
+    public Tensor DecodeToLatent(IBackend backend, Tensor codes, int batch, int tFrames)
+        => _quantizer.Decode(backend, codes, batch, tFrames);
+
     public Tensor Decode(IBackend backend, Tensor codes, int batch, int tFrames)
     {
         if (_fcPost2W is null) throw new InvalidOperationException("XCodec weights not loaded.");
