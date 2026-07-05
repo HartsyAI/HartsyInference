@@ -72,15 +72,12 @@ jobs:
           echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
           echo "Publishing version: 1.0.0-$SUFFIX"
 
-      - name: Pack libraries + meta-package
+      - name: Pack libraries
         env:
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: |
           dotnet pack HartsyInference.sln \
-            -c Release -o artifacts \
-            -p:VersionSuffix=${{ steps.ver.outputs.suffix }}
-          dotnet pack src/HartsyInference.Meta/HartsyInference.Meta.csproj \
             -c Release -o artifacts \
             -p:VersionSuffix=${{ steps.ver.outputs.suffix }}
 
