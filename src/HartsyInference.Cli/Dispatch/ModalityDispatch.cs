@@ -15,6 +15,12 @@ public sealed class ModalityDispatch
         Register(new TextHandler());
         Register(new ImageHandler());
         Register(new TranscribeHandler());
+        Register(new SpeechHandler());
+        Register(new ThreeDHandler());
+        Register(new VisionHandler());
+        Register(new MusicHandler());
+        Register(new VideoHandler());
+        Register(new InteractiveHandler());
     }
 
     /// <summary>Registers (or replaces) the handler for its modality.</summary>

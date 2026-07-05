@@ -1,7 +1,6 @@
 using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Logging;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Commands;
@@ -24,8 +23,7 @@ public static class CommandRunner
         bool quiet,
         string? outputDir,
         string headerLabel,
-        bool showResponseRule,
-        Action<GeneratedArtifact, bool> present)
+        bool showResponseRule)
     {
         IProgressSink sink = quiet ? new NullProgressSink() : new ConsoleProgressSink();
 
@@ -55,7 +53,7 @@ public static class CommandRunner
                 AnsiConsole.Write(new Rule($"[{CliTheme.Accent}]response[/]").LeftJustified().RuleStyle("grey"));
 
             GeneratedArtifact artifact = handler.Run(runner, prompt, parameters, sink, cts.Token);
-            present(artifact, quiet);
+            ResultPresenter.Present(artifact, quiet);
 
             string? saved = ArtifactWriter.Write(artifact, outputDir, prompt, force: outputDir is not null);
             if (saved is not null)
@@ -68,19 +66,9 @@ public static class CommandRunner
             AnsiConsole.MarkupLine("\n[yellow]Cancelled.[/]");
             return 130;
         }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException
-            or NotSupportedException or ArgumentException or InvalidOperationException)
-        {
-            // Expected user-facing errors (bad path, unsupported model): clean message, no stack dump.
-            Logs.Warning($"{Modalities.ToCliName(modality)} generation: {ex.Message}");
-            AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(ex.Message)}");
-            return 1;
-        }
         catch (Exception ex)
         {
-            Logs.Error($"{Modalities.ToCliName(modality)} generation failed", ex);
-            AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(ex.Message)}");
-            return 1;
+            return CliErrors.Report(ex, modality);
         }
         finally
         {

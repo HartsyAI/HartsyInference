@@ -28,7 +28,8 @@ public static class Modalities
         {
             case "image": modality = Modality.Image; return true;
             case "text": modality = Modality.Text; return true;
-            case "speech": modality = Modality.Speech; return true;
+            case "speech":
+            case "speak": modality = Modality.Speech; return true;
             case "music": modality = Modality.Music; return true;
             case "transcribe": modality = Modality.Transcribe; return true;
             case "vision": modality = Modality.Vision; return true;

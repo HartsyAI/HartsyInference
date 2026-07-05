@@ -16,6 +16,10 @@ public sealed class GeneratedArtifact
     /// <summary>Suggested file extension without the dot (e.g. "png", "wav", "glb", "txt").</summary>
     public string Extension { get; init; } = "txt";
 
+    /// <summary>True when <see cref="Text"/> was already emitted live via the progress sink (e.g. streamed LLM
+    /// tokens), so the presenter should not reprint it.</summary>
+    public bool Streamed { get; init; }
+
     /// <summary>Free-form metadata surfaced to the user (seed, tok/s, dimensions, stop reason).</summary>
     public Dictionary<string, string> Meta { get; } = new(StringComparer.OrdinalIgnoreCase);
 }

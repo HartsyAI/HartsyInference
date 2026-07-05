@@ -17,7 +17,7 @@ public static class ArtifactWriter
 
         string dir = string.IsNullOrWhiteSpace(outputDir) ? RepoPaths.OutputRoot() : Path.GetFullPath(outputDir);
         Directory.CreateDirectory(dir);
-        string name = NextName(dir, Slugify(promptSlug), artifact.Extension);
+        string name = NextName(dir, Slug.Make(promptSlug), artifact.Extension);
         string path = Path.Combine(dir, name);
 
         if (hasBytes)
@@ -38,23 +38,5 @@ public static class ArtifactWriter
                 return candidate;
         }
         return $"{slug}-{Guid.NewGuid():N}.{ext}";
-    }
-
-    private static string Slugify(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return "output";
-        StringBuilder sb = new StringBuilder(32);
-        foreach (char c in text.Trim())
-        {
-            if (sb.Length >= 30)
-                break;
-            if (char.IsLetterOrDigit(c))
-                sb.Append(char.ToLowerInvariant(c));
-            else if (c is ' ' or '-' or '_' && sb.Length > 0 && sb[^1] != '-')
-                sb.Append('-');
-        }
-        string slug = sb.ToString().Trim('-');
-        return slug.Length == 0 ? "output" : slug;
     }
 }

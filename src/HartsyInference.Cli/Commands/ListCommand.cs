@@ -36,41 +36,9 @@ public sealed class ListCommand : Command<ListCommand.Settings>
             filter = parsed;
         }
 
-        IEnumerable<CatalogEntry> rows = ModelCatalog.All;
-        if (filter is not null)
-            rows = rows.Where(e => e.Modality == filter.Value);
-        if (settings.VerifiedOnly)
-            rows = rows.Where(e => e.Status == ModelStatus.Verified);
-
-        List<CatalogEntry> entries = rows.ToList();
-        if (entries.Count == 0)
-        {
-            AnsiConsole.MarkupLine("[yellow]No models match that filter.[/]");
-            return 0;
-        }
-
-        Table table = new Table().Border(TableBorder.Rounded).BorderColor(Color.Grey);
-        if (filter is null)
-            table.AddColumn("[grey]modality[/]");
-        table.AddColumn($"[{CliTheme.Accent}]model[/]");
-        table.AddColumn("[grey]name[/]");
-        table.AddColumn("[grey]architecture[/]");
-        table.AddColumn("[grey]status[/]");
-
-        foreach (CatalogEntry e in entries)
-        {
-            string id = $"[{CliTheme.Accent}]{Markup.Escape(e.Id)}[/]";
-            string name = Markup.Escape(e.DisplayName);
-            string arch = $"[grey]{Markup.Escape(e.Architecture)}[/]";
-            string status = CliTheme.StatusMarkup(e.Status);
-            if (filter is null)
-                table.AddRow($"[grey]{Modalities.ToCliName(e.Modality)}[/]", id, name, arch, status);
-            else
-                table.AddRow(id, name, arch, status);
-        }
-
-        AnsiConsole.Write(table);
-        AnsiConsole.MarkupLine($"[grey]{entries.Count} model(s). Use[/] [{CliTheme.Accent}]hartsy list <modality>[/] [grey]to filter, or[/] [{CliTheme.Accent}]--verified[/][grey].[/]");
+        int count = CatalogView.Render(filter, settings.VerifiedOnly);
+        if (count > 0)
+            AnsiConsole.MarkupLine($"[grey]{count} model(s). Use[/] [{CliTheme.Accent}]hartsy list <modality>[/] [grey]to filter, or[/] [{CliTheme.Accent}]--verified[/][grey].[/]");
         return 0;
     }
 }
