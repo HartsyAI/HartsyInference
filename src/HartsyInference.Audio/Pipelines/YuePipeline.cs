@@ -61,15 +61,84 @@ public sealed unsafe class YuePipeline : IDisposable
         // from host EVERY token (~0.6 s/token). A one-shot preload (7 GB Q8_0 fits a 12 GB card) makes decode read
         // resident weights via the fused quant GEMV. Freed at the Stage-1→Stage-2 boundary below.
         backend.PreloadWeights(_stage1.EnumerateWeights());
+        // YuE generates with classifier-free guidance by default (infer.py: guidance_scale=1.5). The HF-faithful
+        // unconditional context is the prompt's LAST token (the <xcodec> sep) — the negative branch runs with no
+        // genre/lyrics conditioning. Auto-build it when the caller supplies none so CFG actually engages (without
+        // it the vocals drift/gibber). Disable by passing guidanceScale ≤ 1.
+        float cfg = guidanceScale ?? _cfg.GuidanceScale;
+        int[] uncond = uncondTokenIds
+            ?? (cfg > 1f && promptTokenIds.Length > 0 ? [promptTokenIds[^1]] : []);
         (List<int> vocal, List<int> accomp) = _stage1.GenerateCb0(backend, promptTokenIds, maxFrames, seed,
-            temperature, topK, topP, repetitionPenalty, guidanceScale, uncondTokenIds ?? ReadOnlySpan<int>.Empty);
+            temperature, topK, topP, repetitionPenalty, cfg, uncond);
         Logs.Info($"YuE S1: {vocal.Count} frames (vocal+accomp cb0) in {sw.ElapsedMilliseconds}ms.");
         if (vocal.Count == 0) return [];
 
         // Stage-1 (7B) is done — free its resident weights so Stage-2 (1B) + x-codec get full VRAM instead of
         // streaming against the 7B's cache (same phase-boundary free as HeartMuLa's LM→codec handoff).
         backend.FreeWeights(_stage1.EnumerateWeights());
+        return DecodeAndMix(backend, vocal, accomp, sw);
+    }
 
+    /// <summary>Segment-by-segment Stage-1 synthesis (infer.py's authoritative loop). Each segment is generated
+    /// conditioned on the accumulated context (head + prior segments' prompts + their generated cb0 + &lt;EOA&gt;),
+    /// injecting THAT segment's lyrics — the fix for gibberish vocals (single-shot conditioned only on segment 1).
+    /// <paramref name="headIds"/> = the head prompt ids (prepended once); <paramref name="segmentPrompts"/> = the
+    /// per-segment prompt id arrays (segment[0] starts with [start_of_segment]; later ones with
+    /// [end_of_segment][start_of_segment]). Each segment is capped at <paramref name="maxFramesPerSegment"/> and
+    /// stops at its own &lt;EOA&gt;; the song is their concatenation. Then Stage-2 + vocoders as usual.</summary>
+    public float[] Synthesize(IBackend backend, int[] headIds, IReadOnlyList<int[]> segmentPrompts,
+        int maxFramesPerSegment = 1500, int seed = 0,
+        float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
+        float? guidanceScale = null)
+    {
+        ThrowIfDisposed();
+        Stopwatch sw = Stopwatch.StartNew();
+        if (segmentPrompts.Count == 0) return [];
+        backend.PreloadWeights(_stage1.EnumerateWeights());
+
+        float cfg = guidanceScale ?? _cfg.GuidanceScale;
+        int maxContext = _cfg.Stage1.MaxPositionEmbeddings;
+        List<int> context = [];
+        List<int> allVocal = [], allAccomp = [];
+
+        for (int s = 0; s < segmentPrompts.Count; s++)
+        {
+            int[] seg = segmentPrompts[s];
+            // input = (s==0 ? head : accumulated context) ++ this segment's prompt.
+            List<int> input = new((s == 0 ? headIds.Length : context.Count) + seg.Length);
+            input.AddRange(s == 0 ? headIds : context);
+            input.AddRange(seg);
+            // Cap to the model window (official: input_ids[:, -max_context:]) leaving room for this segment's generation.
+            int budget = maxContext - maxFramesPerSegment * 2 - 8;
+            if (budget > 0 && input.Count > budget) input.RemoveRange(0, input.Count - budget);
+
+            int[] inputArr = [.. input];
+            // Per-segment CFG (infer.py: 1.5 for the first segment, 1.2 after); uncond = the prompt's last token
+            // (<xcodec> sep), same mechanism as the single-shot path. Disabled when the base scale is ≤ 1.
+            float segCfg = s == 0 ? cfg : (cfg > 1f ? 1.2f : cfg);
+            int[] uncond = segCfg > 1f && inputArr.Length > 0 ? [inputArr[^1]] : [];
+            (List<int> v, List<int> a, List<int> rawTokens) = _stage1.GenerateSegment(backend, inputArr,
+                maxFramesPerSegment, seed + s, temperature, topK, topP, repetitionPenalty, segCfg, uncond);
+            allVocal.AddRange(v);
+            allAccomp.AddRange(a);
+            // Next segment's context = this segment's input + its generated tokens + trailing <EOA> (infer.py raw_output).
+            context = new List<int>(inputArr.Length + rawTokens.Count + 1);
+            context.AddRange(inputArr);
+            context.AddRange(rawTokens);
+            context.Add(_cfg.AudioEosToken);
+            Logs.Info($"YuE S1 seg {s + 1}/{segmentPrompts.Count}: {v.Count} frames ({sw.ElapsedMilliseconds}ms).");
+        }
+
+        Logs.Info($"YuE S1: {allVocal.Count} frames total (vocal+accomp cb0) over {segmentPrompts.Count} segments in {sw.ElapsedMilliseconds}ms.");
+        if (allVocal.Count == 0) return [];
+        backend.FreeWeights(_stage1.EnumerateWeights());
+        return DecodeAndMix(backend, allVocal, allAccomp, sw);
+    }
+
+    /// <summary>Stage-1 cb0 → Stage-2 residual upsample → x-codec/Vocos decode → stem mix. Shared by both
+    /// <c>Synthesize</c> overloads (post-Stage-1 path is identical).</summary>
+    private float[] DecodeAndMix(IBackend backend, List<int> vocal, List<int> accomp, Stopwatch sw)
+    {
         float[] audio;
         if (_stage2 is not null)
         {

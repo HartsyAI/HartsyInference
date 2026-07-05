@@ -41,6 +41,21 @@ public sealed unsafe class YueStage1Lm : IDisposable
         float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
         float? guidanceScale = null, ReadOnlySpan<int> uncondTokenIds = default)
     {
+        (List<int> v, List<int> a, _) = GenerateSegment(backend, promptTokenIds, maxFrames, seed,
+            temperature, topK, topP, repetitionPenalty, guidanceScale, uncondTokenIds);
+        return (v, a);
+    }
+
+    /// <summary>Generates ONE segment's cb0 from an accumulated context (infer.py's per-segment
+    /// <c>model.generate</c>). Returns <c>(vocal, accomp)</c> codec indices PLUS <paramref name="RawTokens"/> —
+    /// the exact sampled LM ids for this segment (interleaved codec tokens, no prompt, no trailing &lt;EOA&gt;) so
+    /// the pipeline can build the next segment's context. Stops at &lt;EOA&gt; or after <paramref name="maxNewFrames"/>*2
+    /// tokens. Per-token sampling / masking / vocal-accomp bucketing is byte-identical to the single-shot path.</summary>
+    public (List<int> Vocal, List<int> Accomp, List<int> RawTokens) GenerateSegment(IBackend backend,
+        ReadOnlySpan<int> contextTokens, int maxNewFrames = 3000, int seed = 0,
+        float? temperature = null, int? topK = null, float? topP = null, float? repetitionPenalty = null,
+        float? guidanceScale = null, ReadOnlySpan<int> uncondTokenIds = default)
+    {
         ThrowIfDisposed();
         float temp = temperature ?? _cfg.Temperature;
         int tk = topK ?? _cfg.TopK;
@@ -49,8 +64,8 @@ public sealed unsafe class YueStage1Lm : IDisposable
         float g = guidanceScale ?? _cfg.GuidanceScale;
         bool useCfg = g != 1f && uncondTokenIds.Length > 0;
 
-        int promptLen = promptTokenIds.Length;
-        int maxTokens = maxFrames * 2;     // 2 interleaved tracks per frame
+        int promptLen = contextTokens.Length;
+        int maxTokens = maxNewFrames * 2;     // 2 interleaved tracks per frame
         int cacheCap = Math.Min(_cfg.Stage1.MaxPositionEmbeddings, promptLen + maxTokens + 8);
         // Efficient incremental decode cache (FixedKvCache): O(1) appends, no per-step prefix copy.
         using IKvCache cache = _lm.CreateDecodeCache(cacheCap);
@@ -59,12 +74,12 @@ public sealed unsafe class YueStage1Lm : IDisposable
             : null;
 
         uint rng = DeterministicRng.Seed(seed);
-        List<int> vocal = new(maxFrames), accomp = new(maxFrames);
+        List<int> vocal = new(maxNewFrames), accomp = new(maxNewFrames), raw = new(maxTokens);
         List<int> history = new(256);
         int vocab = _cfg.Stage1.VocabSize;
         bool wantVocal = true;
 
-        int[] prompt = promptTokenIds.ToArray();
+        int[] prompt = contextTokens.ToArray();
         Tensor hidden = _lm.Forward(backend, prompt, 1, 0, cache);
         Tensor? uHidden = useCfg ? _lm.Forward(backend, uncondTokenIds.ToArray(), 1, 0, uncondCache!) : null;
 
@@ -97,6 +112,7 @@ public sealed unsafe class YueStage1Lm : IDisposable
                 logitsT.Dispose();
 
                 if (next == _cfg.AudioEosToken) break;
+                raw.Add(next);     // accumulate the raw sampled ids (this segment's LM context tail; excludes <EOA>)
                 history.Add(next);
                 if (history.Count > 256) history.RemoveAt(0);
 
@@ -124,7 +140,7 @@ public sealed unsafe class YueStage1Lm : IDisposable
 
         // Trim to a common frame count.
         int frames = Math.Min(vocal.Count, accomp.Count);
-        return (vocal.GetRange(0, frames), accomp.GetRange(0, frames));
+        return (vocal.GetRange(0, frames), accomp.GetRange(0, frames), raw);
     }
 
     /// <summary>HF-convention repetition penalty over the trailing history (>0 divide, &lt;0 multiply).

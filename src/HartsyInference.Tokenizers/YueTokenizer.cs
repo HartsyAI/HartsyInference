@@ -37,6 +37,8 @@ public sealed class YueTokenizer : IDisposable
     private const int Stage2Id = 32_017;
 
     private readonly SentencePieceTokenizer _sp;
+    private int[]? _startOfSegmentIds;
+    private int[]? _endOfSegmentIds;
 
     public int Soa { get; }
     public int Eoa { get; }
@@ -75,17 +77,77 @@ public sealed class YueTokenizer : IDisposable
         return id;
     }
 
-    /// <summary>The Stage-1 instruction + genre + lyrics text (no special tokens). Pure/testable; matches
-    /// YuE infer.py's prompt head <c>"Generate music from the given lyrics segment by segment.\n[Genre] {genre}\n{lyrics}"</c>.</summary>
-    public static string BuildStage1PromptText(string genre, string lyrics)
-        => $"Generate music from the given lyrics segment by segment.\n[Genre] {(genre ?? "").Trim()}\n{(lyrics ?? "").Trim()}";
-
-    /// <summary>Encodes the full Stage-1 prompt: instruction+genre+lyrics text, then the start-of-audio +
-    /// xcodec-sep markers that prime cb0 generation (YuE infer.py order: … &lt;SOA&gt; &lt;xcodec&gt;). NOTE:
-    /// &lt;stage_1&gt; is NOT used in Stage-1 — it belongs to the Stage-2 prompt only.</summary>
-    public int[] EncodeStage1Prompt(string genre, string lyrics)
+    /// <summary>Splits lyrics into YuE's structured segments (one per <c>[verse]/[chorus]/…</c> tag),
+    /// mirroring infer.py's <c>split_lyrics</c>: each becomes <c>"[label]\n{text}\n\n"</c>.</summary>
+    public static List<string> SplitLyrics(string? lyrics)
     {
+        List<string> segs = [];
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                     lyrics ?? "", @"\[(\w+)\](.*?)(?=\[|\Z)", System.Text.RegularExpressions.RegexOptions.Singleline))
+            segs.Add($"[{m.Groups[1].Value}]\n{m.Groups[2].Value.Trim()}\n\n");
+        return segs;
+    }
+
+    /// <summary>The Stage-1 "head" prompt (instruction + genre + full structured lyrics) — infer.py <c>prompt_texts[0]</c>.
+    /// Testable; the structured lyrics join each <c>[label]</c> segment with a blank line, matching <c>split_lyrics</c>.</summary>
+    public static string BuildStage1PromptText(string? genre, string? lyrics)
+    {
+        List<string> segs = SplitLyrics(lyrics);
+        string full = segs.Count > 0 ? string.Join("\n", segs) : (lyrics ?? "").Trim();
+        return $"Generate music from the given lyrics segment by segment.\n[Genre] {(genre ?? "").Trim()}\n{full}";
+    }
+
+    /// <summary>Encodes YuE's Stage-1 **segment-0** prompt EXACTLY as infer.py builds it:
+    /// <c>tokenize(head) + tokenize("[start_of_segment]") + tokenize(section[0]) + [SOA] + [&lt;xcodec&gt; sep]</c>.
+    /// The head restates the genre + all structured lyrics as context; the section restates segment-0's lyrics
+    /// (this <c>[start_of_segment]</c> + section restatement is what primes coherent cb0 generation — omitting it
+    /// yields gibberish). Later segments are appended by the pipeline's segment loop (<c>[end_of_segment]</c> +
+    /// <c>[start_of_segment]</c> + section + [SOA] + sep). <c>&lt;stage_1&gt;</c> is Stage-2 only.</summary>
+    public int[] EncodeStage1Prompt(string? genre, string? lyrics)
+    {
+        List<string> segs = SplitLyrics(lyrics);
+        string section = segs.Count > 0 ? segs[0] : (lyrics ?? "").Trim();
         List<int> ids = [.. _sp.EncodeToIds(BuildStage1PromptText(genre, lyrics))];
+        ids.AddRange(_sp.EncodeToIds("[start_of_segment]"));
+        ids.AddRange(_sp.EncodeToIds(section));
+        ids.Add(Soa);
+        ids.Add(Xcodec);
+        return [.. ids];
+    }
+
+    /// <summary>Builds a subsequent-segment continuation prompt (infer.py, i&gt;0):
+    /// <c>tokenize("[end_of_segment][start_of_segment]") + tokenize(section) + [SOA] + [&lt;xcodec&gt; sep]</c>.
+    /// The pipeline prepends the running generated context and appends this per segment.</summary>
+    public int[] EncodeStage1SegmentContinuation(string? sectionLyrics)
+    {
+        List<int> ids = [.. _sp.EncodeToIds("[end_of_segment][start_of_segment]")];
+        ids.AddRange(_sp.EncodeToIds(sectionLyrics ?? ""));
+        ids.Add(Soa);
+        ids.Add(Xcodec);
+        return [.. ids];
+    }
+
+    /// <summary>Cached ids for the "[start_of_segment]" structural marker (infer.py's <c>start_of_segment</c>).</summary>
+    public IReadOnlyList<int> StartOfSegmentIds => _startOfSegmentIds ??= [.. _sp.EncodeToIds("[start_of_segment]")];
+
+    /// <summary>Cached ids for the "[end_of_segment]" structural marker (infer.py's <c>end_of_segment</c>).</summary>
+    public IReadOnlyList<int> EndOfSegmentIds => _endOfSegmentIds ??= [.. _sp.EncodeToIds("[end_of_segment]")];
+
+    /// <summary>Stage-1 "head" prompt ids (instruction + genre + full structured lyrics) — infer.py <c>prompt_texts[0]</c>.</summary>
+    public int[] EncodeStage1Head(string? genre, string? lyrics) => [.. _sp.EncodeToIds(BuildStage1PromptText(genre, lyrics))];
+
+    /// <summary>The structured lyric segments (infer.py <c>split_lyrics</c>) — one per <c>[label]</c> section.</summary>
+    public IReadOnlyList<string> Stage1Segments(string? lyrics) => SplitLyrics(lyrics);
+
+    /// <summary>Per-segment prompt ids driving iterative Stage-1 generation (infer.py loop):
+    /// <c>(isFirst ? [] : end_of_segment) + start_of_segment + tokenize(section) + [SOA] + [&lt;xcodec&gt; sep]</c>.
+    /// The head ids are prepended once by the pipeline for the first segment.</summary>
+    public int[] EncodeSegmentPrompt(string? sectionText, bool isFirst)
+    {
+        List<int> ids = new(32);
+        if (!isFirst) ids.AddRange(EndOfSegmentIds);
+        ids.AddRange(StartOfSegmentIds);
+        ids.AddRange(_sp.EncodeToIds(sectionText ?? ""));
         ids.Add(Soa);
         ids.Add(Xcodec);
         return [.. ids];
