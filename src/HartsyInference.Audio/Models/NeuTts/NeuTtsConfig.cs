@@ -41,8 +41,16 @@ public sealed record NeuTtsConfig
     public float Temperature { get; init; } = 1.0f;
     public int TopK { get; init; } = 50;
     public float TopP { get; init; } = 0f;
-    /// <summary>Minimum generated tokens before EOS is allowed (suppresses early stop).</summary>
+    /// <summary>Minimum generated tokens before EOS is allowed (suppresses early stop). Upstream applies this
+    /// to a reference-conditioned sequence; on the unconditioned default-voice path a flat floor forces short
+    /// clips past their natural stop (trailing babble), so callers may lower it via the Synthesize overload.</summary>
     public int MinNewTokens { get; init; } = 50;
+
+    /// <summary>Repetition penalty over recently-emitted codes (HF semantics; 1.0 = off). Defends the
+    /// unconditioned default-voice path against degenerate loops / trailing garble.</summary>
+    public float RepetitionPenalty { get; init; } = 1.1f;
+    /// <summary>Number of most-recent emitted tokens the repetition penalty considers.</summary>
+    public int RepetitionWindow { get; init; } = 64;
 
     /// <summary>NeuTTS Air preset — Qwen2.5-0.5B with the 217,652 extended vocab and tied head.</summary>
     public static NeuTtsConfig Air => new()

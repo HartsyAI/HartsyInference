@@ -49,10 +49,11 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
     /// <c>SPEECH_GENERATION_END</c>; total length capped at <see cref="NeuTtsConfig.MaxContext"/> (upstream
     /// <c>max_length</c>); sampling temp 1.0 / top-k 50 / min-new-tokens 50 (upstream <c>_infer_torch</c>).</summary>
     public float[] Synthesize(IBackend backend, ReadOnlySpan<int> promptPrefix, ReadOnlySpan<int> refCodes,
-        int maxTokens = 2000, int seed = 0, Action<GenerationProgress>? progress = null)
+        int maxTokens = 2000, int seed = 0, Action<GenerationProgress>? progress = null, int minNewTokens = -1)
     {
         ThrowIfDisposed();
         Stopwatch sw = Stopwatch.StartNew();
+        int minNew = minNewTokens >= 0 ? minNewTokens : _cfg.MinNewTokens;
 
         int[] prompt = new int[promptPrefix.Length + 1 + refCodes.Length];
         promptPrefix.CopyTo(prompt);
@@ -68,6 +69,7 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         int vocab = _cfg.Llm.VocabSize;
         List<int> codes = new(maxTokens);
 
+        Span<int> recentBuf = _cfg.RepetitionPenalty > 1f ? stackalloc int[_cfg.RepetitionWindow] : default;
         Tensor hidden = _lm.Forward(backend, prompt, batch: 1, posStart: 0, cache);
         for (int step = 0; step < maxTokens; step++)
         {
@@ -77,7 +79,14 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
             last.Dispose();
 
             Span<float> logits = new((void*)logitsT.DataPointer, vocab);
-            if (codes.Count < _cfg.MinNewTokens) logits[_cfg.SpeechGenEnd] = float.NegativeInfinity;
+            if (codes.Count < minNew) logits[_cfg.SpeechGenEnd] = float.NegativeInfinity;
+            if (_cfg.RepetitionPenalty > 1f && codes.Count > 0)
+            {
+                int win = Math.Min(_cfg.RepetitionWindow, codes.Count);
+                Span<int> recent = recentBuf[..win];
+                for (int r = 0; r < win; r++) recent[r] = _cfg.SpeechTokenBase + codes[codes.Count - win + r];
+                RepetitionPenalty.Apply(logits, recent, _cfg.RepetitionPenalty);
+            }
             int next = NucleusSampler.Draw(logits, vocab, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
             logitsT.Dispose();
 

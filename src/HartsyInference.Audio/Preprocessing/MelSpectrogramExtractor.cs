@@ -17,7 +17,10 @@ namespace HartsyInference.Audio.Preprocessing;
 /// per element (the standard whisper.cpp tolerance) on a fixed sine-wave clip.</para></summary>
 public sealed class MelSpectrogramExtractor
 {
-    /// <summary>Parameter set defining a specific mel preprocessing pipeline.</summary>
+    /// <summary>Parameter set defining a specific mel preprocessing pipeline. The trailing
+    /// <paramref name="Scale"/> / <paramref name="SlaneyNorm"/> / <paramref name="Center"/> parameters default
+    /// to the librosa Slaney convention used by most presets; F5-TTS/Vocos overrides them to HTK + no-norm +
+    /// center padding (see <see cref="F5VocosConfig"/>).</summary>
     public readonly record struct Config(
         int SampleRate,
         int NFft,
@@ -33,7 +36,10 @@ public sealed class MelSpectrogramExtractor
         float DynamicRangeDb,
         float NormOffset,
         float NormScale,
-        bool PowerSpectrum);
+        bool PowerSpectrum,
+        MelScale Scale = MelScale.Slaney,
+        bool SlaneyNorm = true,
+        bool Center = false);
 
     /// <summary>Whisper preset: 16kHz, n_fft=400, hop=160, 80 mel bins, log10,
     /// power spectrum, drop-last-frame, +4/4 normalization. Used by all Whisper
@@ -95,6 +101,30 @@ public sealed class MelSpectrogramExtractor
         NormScale: 1f,
         PowerSpectrum: false);
 
+    /// <summary>F5-TTS / Vocos mel front-end: torchaudio <c>MelSpectrogram(sr=24k, n_fft=1024, hop=256,
+    /// win=1024, n_mels=100, power=1, center=True, norm=None, mel_scale="htk")</c> then <c>clamp(1e-5).log()</c>.
+    /// HTK scale + no area norm + center reflect-padding + magnitude (not power) spectrum + natural log — every
+    /// axis differs from the Slaney presets, which is why F5 output was distorted before this existed.</summary>
+    public static Config F5VocosConfig() => new(
+        SampleRate: 24_000,
+        NFft: 1024,
+        WinLength: 1024,
+        HopLength: 256,
+        NMels: 100,
+        Fmin: 0.0,
+        Fmax: 12_000.0,
+        Norm: Normalization.None,
+        DropLastStftFrame: false,
+        LogBase: LogBase.Natural,
+        LogFloor: 1e-5f,
+        DynamicRangeDb: 0f,
+        NormOffset: 0f,
+        NormScale: 1f,
+        PowerSpectrum: false,
+        Scale: MelScale.Htk,
+        SlaneyNorm: false,
+        Center: true);
+
     /// <summary>Standard HiFiGAN preset: 22.05kHz, n_fft=1024, hop=256, 80 mel bins.
     /// Magnitude spectrum, no normalization.</summary>
     public static Config HifiGan22kConfig() => new(
@@ -144,7 +174,7 @@ public sealed class MelSpectrogramExtractor
         // FFT size must be a power of two; round up if win_length is not.
         _fftSize = NextPow2(cfg.NFft);
         _numBins = _fftSize / 2 + 1;
-        _filterbank = MelFilterbank.Get(cfg.SampleRate, _fftSize, cfg.NMels, cfg.Fmin, cfg.Fmax);
+        _filterbank = MelFilterbank.Get(cfg.SampleRate, _fftSize, cfg.NMels, cfg.Fmin, cfg.Fmax, cfg.Scale, cfg.SlaneyNorm);
 
         _frame = new float[_fftSize];
         _stftRe = new float[_numBins];
@@ -156,11 +186,11 @@ public sealed class MelSpectrogramExtractor
     /// <summary>The number of mel frames a given input audio length will produce.</summary>
     public int OutputFrames(int audioLength)
     {
-        // PyTorch's torch.stft(center=True) reflects-pads the signal by win_length/2
-        // on each side and produces (audioLength // hop) + 1 frames before any drop.
-        // We don't implement reflect padding here; instead the caller pre-pads
-        // (Whisper zero-pads to 30s, others can pad as needed).
-        int frames = 1 + (audioLength - _cfg.WinLength) / _cfg.HopLength;
+        // torch.stft(center=True) reflect-pads by n_fft/2 each side and yields (len // hop) + 1 frames.
+        // Without centering the caller is responsible for any pre-padding (e.g. Whisper zero-pads to 30s).
+        int frames = _cfg.Center
+            ? 1 + audioLength / _cfg.HopLength
+            : 1 + (audioLength - _cfg.WinLength) / _cfg.HopLength;
         if (frames < 1) frames = 1;
         if (_cfg.DropLastStftFrame) frames--;
         return frames;
@@ -174,6 +204,10 @@ public sealed class MelSpectrogramExtractor
         if (output.GetLength(0) != _cfg.NMels || output.GetLength(1) < frames)
             throw new ArgumentException($"output must be [{_cfg.NMels}, >={frames}]");
 
+        // torch.stft(center=True): reflect-pad by n_fft/2 so frame t is centered at t*hop.
+        float[]? padded = _cfg.Center ? ReflectPad(audio, _cfg.NFft / 2) : null;
+        ReadOnlySpan<float> src = padded ?? audio;
+
         float globalMax = float.MinValue;
 
         for (int t = 0; t < frames; t++)
@@ -182,7 +216,7 @@ public sealed class MelSpectrogramExtractor
             // Windowed frame, zero-padded to FFT size.
             for (int i = 0; i < _cfg.WinLength; i++)
             {
-                float sample = (start + i) < audio.Length ? audio[start + i] : 0f;
+                float sample = (start + i) < src.Length ? src[start + i] : 0f;
                 _frame[i] = sample * _window[i];
             }
             for (int i = _cfg.WinLength; i < _fftSize; i++) _frame[i] = 0f;
@@ -300,5 +334,24 @@ public sealed class MelSpectrogramExtractor
         int p = 1;
         while (p < n) p <<= 1;
         return p;
+    }
+
+    /// <summary>Reflect-pads <paramref name="audio"/> by <paramref name="pad"/> samples each side using the
+    /// edge-excluding ("reflect-101") convention that <c>torch.stft(center=True, pad_mode="reflect")</c> uses.</summary>
+    private static float[] ReflectPad(ReadOnlySpan<float> audio, int pad)
+    {
+        int len = audio.Length;
+        float[] outp = new float[len + 2 * pad];
+        for (int i = 0; i < outp.Length; i++)
+            outp[i] = audio[ReflectIndex(i - pad, len)];
+        return outp;
+    }
+
+    private static int ReflectIndex(int j, int len)
+    {
+        if (len <= 1) return 0;
+        int period = 2 * (len - 1);
+        int m = ((j % period) + period) % period;
+        return m < len ? m : period - m;
     }
 }

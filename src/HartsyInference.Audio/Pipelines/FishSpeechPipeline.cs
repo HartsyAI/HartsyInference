@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.FishSpeech;
+using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Logging;
@@ -36,7 +37,7 @@ public sealed unsafe class FishSpeechPipeline : IDisposable
     /// prefill over the prompt (sampling only at its last position), then the AR loop feeds each sampled frame
     /// (row-0 = semantic vocab id + N codebooks) back in until <paramref name="endToken"/> or the frame cap.</summary>
     public float[] Synthesize(IBackend backend, ReadOnlySpan<int> textTokens, int endToken, int maxFrames = 0,
-        int seed = 0)
+        int seed = 0, bool normalizeLoudness = true)
     {
         ThrowIfDisposed();
         if (textTokens.Length == 0) { Logs.Warning("FishSpeech: empty prompt."); return []; }
@@ -78,7 +79,10 @@ public sealed unsafe class FishSpeechPipeline : IDisposable
         int[,] grid = new int[n, t];
         for (int j = 0; j < t; j++)
             for (int i = 0; i < n; i++) grid[i, j] = frames[j][i];
-        return _codec.Decode(backend, grid, t);
+        float[] audio = _codec.Decode(backend, grid, t);
+        // Free-running DualAR codes render ~10x quiet vs the reference; peak-normalize as a product step
+        // (disabled for parity, which must match the reference's no-gain output). See LoudnessNormalizer.
+        return normalizeLoudness ? LoudnessNormalizer.PeakNormalize(audio) : audio;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

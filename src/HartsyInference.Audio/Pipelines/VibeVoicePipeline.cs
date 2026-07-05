@@ -131,9 +131,11 @@ public sealed class VibeVoicePipeline : IDisposable
     /// <paramref name="voiceWavPaths"/> is one 24 kHz reference WAV per speaker.
     /// <paramref name="maxNewTokens"/> caps the AR loop length.</summary>
     public unsafe float[] Synthesize(IBackend backend, IReadOnlyList<string> lines,
-        IReadOnlyList<string> voiceWavPaths, int maxNewTokens = 256, IProgress<int>? progress = null)
+        IReadOnlyList<string> voiceWavPaths, int maxNewTokens = 256, IProgress<int>? progress = null,
+        float temperature = 0.95f, float topP = 0.95f, int seed = 0)
     {
         ThrowIfDisposed();
+        uint rng = HartsyInference.Audio.Dsp.DeterministicRng.Seed(seed);
         VibeVoiceProcessor.PreparedPrompt prep = _processor.Prepare(lines, voiceWavPaths);
         int promptLen = prep.TokenIds.Length;
 
@@ -189,7 +191,7 @@ public sealed class VibeVoicePipeline : IDisposable
                 // Project the last hidden state to logits, mask to the constrained vocab,
                 // sample (greedy for determinism in v1).
                 using Tensor logits = _lm.ProjectLogits(backend, lastHidden!, batch: 1, t: 1);
-                int nextToken = SampleConstrained(logits, _lmCfg.VocabSize);
+                int nextToken = SampleConstrained(logits, temperature, topP, ref rng);
                 progress?.Report(step);
 
                 if (nextToken == VibeVoiceTokenizer.EndOfTextTokenId)
@@ -380,26 +382,60 @@ public sealed class VibeVoicePipeline : IDisposable
         return speech;
     }
 
-    /// <summary>Greedy argmax over the 5 allowed VibeVoice tokens. The official inference
-    /// uses temperature/top_p — for a deterministic smoke test, greedy is fine.</summary>
-    private static unsafe int SampleConstrained(Tensor logits, int vocabSize)
+    /// <summary>Samples one of the allowed VibeVoice control tokens with temperature + top-p (matching the
+    /// official inference). Greedy argmax deadlocks on short prompts: if <c>speech_diffusion</c> edges out
+    /// <c>speech_end</c>/<c>eos</c> by any margin it never stops until the token cap, which is exactly the
+    /// "rambles ~12s" symptom. Stochastic sampling lets the close stop token win. Deterministic for a fixed
+    /// <paramref name="rng"/>. <paramref name="temperature"/> ≤ 0 falls back to greedy.</summary>
+    private static unsafe int SampleConstrained(Tensor logits, float temperature, float topP, ref uint rng)
     {
         float* p = (float*)logits.DataPointer;     // [1, 1, vocab]
-        int[] allowed =
+        ReadOnlySpan<int> allowed =
         [
             VibeVoiceTokenizer.SpeechStartTokenId,
             VibeVoiceTokenizer.SpeechEndTokenId,
             VibeVoiceTokenizer.SpeechDiffusionTokenId,
             VibeVoiceTokenizer.EndOfTextTokenId,
         ];
-        int best = allowed[0];
-        float bestV = p[best];
-        for (int i = 1; i < allowed.Length; i++)
+        int n = allowed.Length;
+        if (temperature <= 0f)
         {
-            int id = allowed[i];
-            if (p[id] > bestV) { bestV = p[id]; best = id; }
+            int best = allowed[0];
+            float bestV = p[best];
+            for (int i = 1; i < n; i++)
+                if (p[allowed[i]] > bestV) { bestV = p[allowed[i]]; best = allowed[i]; }
+            return best;
         }
-        return best;
+
+        Span<float> probs = stackalloc float[n];
+        Span<int> order = stackalloc int[n];
+        float max = float.NegativeInfinity;
+        for (int i = 0; i < n; i++) { probs[i] = p[allowed[i]] / temperature; order[i] = i; if (probs[i] > max) max = probs[i]; }
+        float sum = 0f;
+        for (int i = 0; i < n; i++) { probs[i] = MathF.Exp(probs[i] - max); sum += probs[i]; }
+        for (int i = 0; i < n; i++) probs[i] /= sum;
+
+        // Sort indices by probability (descending) for the top-p nucleus over this tiny set.
+        for (int i = 1; i < n; i++)
+            for (int j = i; j > 0 && probs[order[j]] > probs[order[j - 1]]; j--)
+                (order[j], order[j - 1]) = (order[j - 1], order[j]);
+        float cum = 0f;
+        int keep = n;
+        for (int r = 0; r < n; r++)
+        {
+            cum += probs[order[r]];
+            if (topP > 0f && topP < 1f && cum >= topP) { keep = r + 1; break; }
+        }
+        float keptSum = 0f;
+        for (int r = 0; r < keep; r++) keptSum += probs[order[r]];
+        float draw = HartsyInference.Audio.Dsp.DeterministicRng.NextUniform(ref rng) * keptSum;
+        float acc = 0f;
+        for (int r = 0; r < keep; r++)
+        {
+            acc += probs[order[r]];
+            if (draw <= acc) return allowed[order[r]];
+        }
+        return allowed[order[keep - 1]];
     }
 
     private static unsafe Tensor SliceLastFrame(Tensor hidden, int dim)

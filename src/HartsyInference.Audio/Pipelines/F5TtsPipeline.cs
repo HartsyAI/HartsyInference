@@ -1,6 +1,8 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.F5Tts;
 using HartsyInference.Audio.Models.Vocoders;
+using HartsyInference.Audio.Preprocessing;
 using F5SwaySamplingScheduler = HartsyInference.Audio.Models.F5Tts.F5SwaySamplingScheduler;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Pipelines;
@@ -134,10 +136,61 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     /// reference clip's loudness (out of scope here).</para></summary>
     public float[] Generate(IBackend backend, Tensor refMel, string refText, string targetText, F5TtsOptions? options = null)
     {
-        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refText), _tokenizer.Encode(targetText), options);
+        // Upstream forces ref_text to end with ". " so the joint char stream (ref_text + gen_text) aligns at the
+        // boundary and len(ref_text) in the duration ratio is correct; without it the tempo drifts.
+        string refNorm = NormalizeRefText(refText);
+        Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText), options);
         float[] audio = _vocos.Forward(backend, mel);
         mel.Dispose();
         return audio;
+    }
+
+    /// <summary>Generates audio directly from a raw reference waveform, owning the F5/Vocos mel front-end so
+    /// callers cannot mis-configure it (HTK mel scale, no area norm, center padding, magnitude spectrum,
+    /// natural-log clamp 1e-5 — see <see cref="MelSpectrogramExtractor.F5VocosConfig"/>). The reference is
+    /// resampled to 24 kHz and RMS-normalized to 0.1 exactly as upstream <c>preprocess_ref_audio_text</c>.</summary>
+    public float[] GenerateFromAudio(IBackend backend, ReadOnlySpan<float> refAudio, int sampleRate,
+        string refText, string targetText, F5TtsOptions? options = null)
+    {
+        ThrowIfDisposed();
+        MelSpectrogramExtractor.Config melCfg = MelSpectrogramExtractor.F5VocosConfig();
+        int sr = melCfg.SampleRate;
+        float[] mono24k = sampleRate == sr
+            ? refAudio.ToArray()
+            : Resampler.Create(sampleRate, sr).Resample(refAudio);
+
+        // Upstream: if rms < target_rms (0.1), scale the reference up so quiet clips don't under-drive the DiT.
+        const float targetRms = 0.1f;
+        double sumSq = 0.0;
+        for (int i = 0; i < mono24k.Length; i++) sumSq += (double)mono24k[i] * mono24k[i];
+        float rms = mono24k.Length > 0 ? (float)Math.Sqrt(sumSq / mono24k.Length) : 0f;
+        if (rms > 1e-6f && rms < targetRms)
+        {
+            float g = targetRms / rms;
+            for (int i = 0; i < mono24k.Length; i++) mono24k[i] *= g;
+        }
+
+        MelSpectrogramExtractor extractor = new(melCfg);
+        float[,] melData = extractor.Compute(mono24k);
+        int tRef = melData.GetLength(1);
+        Tensor refMel = new(new TensorShape(1, _cfg.MelDim, tRef), DType.F32);
+        unsafe
+        {
+            float* mp = (float*)refMel.DataPointer;
+            for (int d = 0; d < _cfg.MelDim; d++)
+                for (int t = 0; t < tRef; t++) mp[d * tRef + t] = melData[d, t];
+        }
+        float[] audio = Generate(backend, refMel, refText, targetText, options);
+        refMel.Dispose();
+        return audio;
+    }
+
+    private static string NormalizeRefText(string refText)
+    {
+        string s = (refText ?? string.Empty).Trim();
+        if (s.Length == 0) return s;
+        if (s.EndsWith(". ", StringComparison.Ordinal) || s.EndsWith("。", StringComparison.Ordinal)) return s;
+        return s.EndsWith('.') ? s + " " : s + ". ";
     }
 
     /// <summary>Runs the flow-matching sample loop and returns the generated target mel <c>[1, mel_dim, T_tgt]</c>

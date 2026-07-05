@@ -68,56 +68,12 @@ public sealed class TtsToSttLoopTests
         public float[] Synthesize(string refWavPath, string refText, string targetText, int steps)
         {
             if (_pipeline is null) throw new InvalidOperationException("F5 weights not loaded.");
-            // Reference mel: load WAV, resample to 24 kHz if needed, run F5's mel extractor.
+            // GenerateFromAudio owns the correct F5/Vocos mel front-end (HTK scale, no area norm, center
+            // reflect-pad, magnitude spectrum, natural-log clamp 1e-5) + the target_rms=0.1 normalization.
+            // Building the mel here with a Slaney/no-center config was the "distorted robot" bug.
             WavFile.DecodedAudio refAudio = WavFile.Read(refWavPath);
-            float[] refSamples = refAudio.Channels[0];
-            if (refAudio.SampleRate != SampleRate)
-            {
-                Resampler r = Resampler.Create(refAudio.SampleRate, SampleRate);
-                refSamples = r.Resample(refSamples);
-            }
-
-            // RMS-normalize to target=0.1 per F5-TTS reference spec. The model was trained
-            // on clips at this level; skipping it leads to mel scale mismatch and garbled
-            // output.
-            float rms = ComputeRms(refSamples);
-            if (rms > 1e-6f)
-            {
-                float scale = 0.1f / rms;
-                for (int i = 0; i < refSamples.Length; i++) refSamples[i] *= scale;
-            }
-
-            // F5 mel preset: 24 kHz, n_fft=1024, hop=256, 100 mel bins, natural log.
-            MelSpectrogramExtractor.Config melCfg = new(
-                SampleRate: SampleRate, NFft: 1_024, WinLength: 1_024, HopLength: 256,
-                NMels: 100, Fmin: 0.0, Fmax: 12_000.0,
-                Norm: MelSpectrogramExtractor.Normalization.None,
-                DropLastStftFrame: false,
-                LogBase: MelSpectrogramExtractor.LogBase.Natural,
-                LogFloor: 1e-5f,
-                DynamicRangeDb: 0f, NormOffset: 0f, NormScale: 1f, PowerSpectrum: false);
-            MelSpectrogramExtractor extractor = new(melCfg);
-            float[,] melArr = extractor.Compute(refSamples);
-
-            int t = melArr.GetLength(1);
-            Tensor refMel = new(new TensorShape(1, 100, t), DType.F32);
-            unsafe
-            {
-                float* p = (float*)refMel.DataPointer;
-                for (int m = 0; m < 100; m++)
-                    for (int j = 0; j < t; j++)
-                        p[m * t + j] = melArr[m, j];
-            }
-
-            try
-            {
-                return _pipeline.Generate(_backend, refMel, refText, targetText,
-                    new F5TtsOptions { Steps = steps, Seed = 7 });
-            }
-            finally
-            {
-                refMel.Dispose();
-            }
+            return _pipeline.GenerateFromAudio(_backend, refAudio.Channels[0], refAudio.SampleRate,
+                refText, targetText, new F5TtsOptions { Steps = steps, Seed = 7 });
         }
 
         public void Dispose()

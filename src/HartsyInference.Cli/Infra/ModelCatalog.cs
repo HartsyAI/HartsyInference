@@ -1,0 +1,118 @@
+namespace HartsyInference.Cli.Infra;
+
+/// <summary>Static, data-driven catalog of the models the engine can drive, mirroring the README support table.
+/// Backs <c>hartsy list</c>, REPL model menus, and shell completion.</summary>
+public static class ModelCatalog
+{
+    private static readonly List<CatalogEntry> Entries = Build();
+
+    /// <summary>Every catalogued model in display order.</summary>
+    public static IReadOnlyList<CatalogEntry> All => Entries;
+
+    /// <summary>All models for one modality, in catalog order.</summary>
+    public static IReadOnlyList<CatalogEntry> ForModality(Modality modality) =>
+        Entries.Where(e => e.Modality == modality).ToList();
+
+    /// <summary>Looks up a model by its CLI id (case-insensitive), or null when unknown.</summary>
+    public static CatalogEntry? Find(string id) =>
+        Entries.FirstOrDefault(e => string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase));
+
+    private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status) =>
+        new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status };
+
+    private static List<CatalogEntry> Build()
+    {
+        const Modality img = Modality.Image;
+        const Modality txt = Modality.Text;
+        const Modality tts = Modality.Speech;
+        const Modality mus = Modality.Music;
+        const Modality stt = Modality.Transcribe;
+        const Modality vis = Modality.Vision;
+        const Modality vid = Modality.Video;
+        const Modality d3 = Modality.ThreeD;
+        const Modality act = Modality.Interactive;
+        const ModelStatus ok = ModelStatus.Verified;
+        const ModelStatus vp = ModelStatus.ValidationPending;
+        const ModelStatus st = ModelStatus.Structural;
+
+        return new List<CatalogEntry>
+        {
+            // Text / LLM
+            E("qwen2", txt, "Qwen2.5 (0.5B → 7B)", "Qwen2 dense transformer", ok),
+            E("qwen3", txt, "Qwen3 (0.6B → 7B)", "Qwen3 dense transformer", ok),
+            E("llama3", txt, "Llama-3.x", "Llama dense transformer", st),
+            E("mistral", txt, "Mistral (dense)", "Mistral dense transformer", st),
+            E("gguf", txt, "Quantized GGUF (Q4/Q8)", "config-driven, any GGUF LLM", ok),
+
+            // Image / diffusion
+            E("sd15", img, "Stable Diffusion 1.5", "UNet", ok),
+            E("sdxl", img, "SDXL", "UNet (dual CLIP)", ok),
+            E("sdxl-refiner", img, "SDXL Refiner", "UNet (dual CLIP)", ok),
+            E("sdxl-inpaint", img, "SDXL Inpaint", "UNet", st),
+            E("flux1", img, "Flux.1-dev", "single-stream DiT, flow-matching", ok),
+            E("flux2", img, "Flux.2", "single-stream DiT, flow-matching", ok),
+            E("chroma", img, "Chroma", "Flux-derivative DiT", ok),
+            E("chroma-radiance", img, "Chroma Radiance", "Flux-derivative DiT", ok),
+            E("sd3", img, "Stable Diffusion 3", "MMDiT (3 text encoders)", ok),
+            E("qwen-image", img, "Qwen-Image", "MMDiT (Qwen2.5-VL)", ok),
+            E("hunyuan-image", img, "Hunyuan Image 2.1", "17B MMDiT", ok),
+            E("hidream", img, "HiDream i1", "MMDiT (quad encoder + MoE)", ok),
+            E("auraflow", img, "AuraFlow", "MMDiT + single-DiT hybrid (Pile-T5-XL)", ok),
+            E("lumina2", img, "Lumina 2.0", "NextDiT (Gemma-2)", ok),
+            E("ernie-image", img, "ERNIE-Image", "single-stream DiT (Ministral-3B)", ok),
+            E("kandinsky5", img, "Kandinsky 5", "DiT (Qwen2.5-VL + CLIP)", ok),
+            E("omnigen2", img, "OmniGen 2", "MLLM-based DiT", ok),
+            E("ideogram4", img, "Ideogram 4", "9.3B single-stream DiT", ok),
+            E("f-lite", img, "F-Lite", "DiT (Qwen)", vp),
+            E("lance-image", img, "Lance (Image)", "unified multimodal DiT", vp),
+            E("zimage", img, "Z-Image Turbo", "NextDiT (Qwen3-4B)", st),
+            E("anima", img, "Anima", "Cosmos-Predict2-2B (T=1)", st),
+
+            // Transcription
+            E("whisper", stt, "Whisper (tiny → large-v3)", "encoder-decoder", ok),
+            E("moonshine", stt, "Moonshine", "encoder-decoder", ok),
+
+            // Text-to-speech
+            E("kokoro", tts, "Kokoro-82M", "StyleTTS-family vocoder", ok),
+            E("bark", tts, "Bark", "GPT-style TTS", ok),
+            E("styletts2", tts, "StyleTTS2", "style-diffusion TTS", ok),
+            E("spark-tts", tts, "Spark-TTS", "BiCodec LM", ok),
+            E("cosyvoice", tts, "CosyVoice", "Qwen LM + flow", ok),
+            E("vibevoice", tts, "VibeVoice", "diffusion TTS", ok),
+            E("fish-speech", tts, "Fish-Speech / OpenAudio", "DualAR + tiktoken", vp),
+            E("f5-tts", tts, "F5-TTS", "voice cloning, flow-matching DiT", vp),
+
+            // Music / audio generation
+            E("musicgen", mus, "MusicGen", "transformer + EnCodec", ok),
+            E("audiogen", mus, "AudioGen", "MusicGen-arch + T5", vp),
+            E("ace-step", mus, "ACE-Step", "flow-matching DiT", ok),
+            E("yue", mus, "YuE", "dual-stage Llama", ok),
+            E("stable-audio", mus, "Stable Audio Open", "latent diffusion", st),
+
+            // Vision
+            E("clip", vis, "CLIP (ViT-L/14, H/14, bigG/14)", "ViT embeddings", ok),
+            E("siglip", vis, "SigLIP · SigLIP2", "ViT embeddings", ok),
+            E("dinov2", vis, "DINOv2 · DINOv3", "dense features", ok),
+            E("yolo8", vis, "YOLO8 (n → xl)", "object detection", ok),
+            E("yolo11", vis, "YOLO11 (n → xl)", "object detection", ok),
+            E("sam", vis, "SAM · SAM 2 · SAM 2.1", "segmentation", ok),
+            E("retinaface", vis, "RetinaFace", "face detection + landmarks", ok),
+
+            // Video
+            E("ltx-video", vid, "LTX-Video", "DiT + video VAE", vp),
+            E("wan", vid, "Wan 2.2 (T2V + I2V)", "DiT + Wan VAE", vp),
+            E("lance-video", vid, "Lance (Video, T2V)", "unified multimodal DiT", vp),
+            E("kandinsky5-video", vid, "Kandinsky 5 Video", "DiT", vp),
+
+            // 3D
+            E("triposr", d3, "TripoSR", "triplane / NeRF", st),
+            E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st),
+
+            // Interactive / world models
+            E("hunyuan-gamecraft", act, "Hunyuan-GameCraft 1.0", "HunyuanVideo MM-DiT", vp),
+            E("matrix-game-3", act, "Matrix-Game 3.0", "5B (+28B MoE) memory-augmented", vp),
+            E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
+            E("oasis", act, "Oasis-500m", "axial-attention DiT", vp),
+        };
+    }
+}
