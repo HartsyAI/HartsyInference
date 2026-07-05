@@ -143,7 +143,7 @@ public sealed unsafe class ChromaDoubleStreamBlock
     /// <param name="text">Text tokens [B, N_txt, hidden].</param>
     /// <param name="temb">Precomputed modulation rows [B, 12, hidden].</param>
     /// <param name="rope">Precomputed FluxRope.</param>
-    /// <param name="attentionMask">Optional [B, totalSeqLen] mask (1=keep, 0=mask). Expanded to [B, 1, S, S] inside.</param>
+    /// <param name="sdpaMask">Optional additive [B, 1, S, S] SDPA mask, pre-built once per forward by ChromaTransformer (shared; not disposed here).</param>
     // GPU-residency rewrite (Chroma-only): all glue (LayerNorm / modulation / QK-norm / reshape-to-heads /
     // joint concat / split / gated-residual) runs as IBackend GPU ops so the activation stays device-resident
     // across the block — no per-op DataPointer reads / D2H sync barriers (which dominated the old ~56s/forward).
@@ -154,7 +154,7 @@ public sealed unsafe class ChromaDoubleStreamBlock
     // Mirrors Ideogram4Block. Full plan: docs/Checklists/TODO_CHROMA_GPU_RESIDENCY.md. NOTE: batch is always 1
     // for Chroma (ChromaPipeline runs CFG as two separate batch-1 passes); the seq-dim split uses that.
     public (Tensor image, Tensor text) Forward(
-        IBackend backend, Tensor image, Tensor text, Tensor temb, FluxRope rope, Tensor? attentionMask)
+        IBackend backend, Tensor image, Tensor text, Tensor temb, FluxRope rope, Tensor? sdpaMask)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
@@ -222,7 +222,15 @@ public sealed unsafe class ChromaDoubleStreamBlock
         txtKn.Dispose(); imgKn.Dispose();
         txtV.Dispose(); imgV.Dispose();
 
-        // ── 6. Permute [B, S, H, D] → [B, H, S, D] for RoPE + SDPA ──
+        // ── 6. RoPE on concatenated Q and K. B=1 (pipeline case): GPU-resident on the pre-permute
+        //       [B, S, H, D] layout (device WanRopeInterleaved, no D2H). B>1: host Forward post-permute. ──
+        bool gpuRope = batch == 1;
+        if (gpuRope)
+        {
+            rope.ApplyGpu(backend, jointQf, jointKf, _numHeads);
+        }
+
+        // ── 7. Permute [B, S, H, D] → [B, H, S, D] for SDPA ──
         Tensor jointQ = new Tensor(jointMh, DType.F32);
         backend.Permute0213(jointQ, jointQf, totalSeqLen, _numHeads, _headDim);
         jointQf.Dispose();
@@ -233,21 +241,18 @@ public sealed unsafe class ChromaDoubleStreamBlock
         backend.Permute0213(jointV, jointVf, totalSeqLen, _numHeads, _headDim);
         jointVf.Dispose();
 
-        // ── 7. RoPE on concatenated Q and K (CPU FluxRope — interleaved convention; see class note) ──
-        rope.Forward(jointQ, jointK, batch, _numHeads, totalSeqLen);
+        if (!gpuRope)
+        {
+            rope.Forward(jointQ, jointK, batch, _numHeads, totalSeqLen);
+        }
 
-        // ── 8. Build SDPA mask if requested: [B, S] -> [B, 1, S, S] via outer product ──
-        Tensor? sdpaMask = attentionMask is not null
-            ? BuildSdpaMask(attentionMask, batch, totalSeqLen, _numHeads)
-            : null;
-
-        // ── 9. Scaled dot-product attention ──
+        // ── 8. Scaled dot-product attention. The additive [B,1,S,S] mask is built ONCE per forward by
+        //       ChromaTransformer and shared across all blocks — use it directly, do NOT dispose here. ──
         Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
         backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, sdpaMask, scale);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();
-        sdpaMask?.Dispose();
 
         // ── 10. Permute back [B, H, S, D] → [B, S, hidden] ──
         Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
@@ -349,31 +354,4 @@ public sealed unsafe class ChromaDoubleStreamBlock
     /// Diffusers does <c>mask[:, None, None, :] * mask[:, None, :, None]</c> producing a 0/1 outer-product mask;
     /// we reproduce the same semantics by writing 0 where attention is allowed and a large negative value where
     /// it must be killed (additive-mask convention used by <see cref="IBackend.ScaledDotProductAttention"/>).</summary>
-    private static Tensor BuildSdpaMask(Tensor mask, int batch, int seqLen, int numHeads)
-    {
-        // Mask is [B, S]; build [B, 1, S, S] (broadcast to all heads). The backend's SDPA expects an additive mask.
-        TensorShape outShape = new TensorShape(batch, 1, seqLen, seqLen);
-        Tensor outMask = new Tensor(outShape, DType.F32);
-
-        float* mPtr = (float*)mask.DataPointer;
-        float* outPtr = (float*)outMask.DataPointer;
-        const float NegInf = -1.0e30f;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int maskOffset = b * seqLen;
-            int outOffset = b * seqLen * seqLen;
-            for (int q = 0; q < seqLen; q++)
-            {
-                float qKeep = mPtr[maskOffset + q];
-                for (int k = 0; k < seqLen; k++)
-                {
-                    float kKeep = mPtr[maskOffset + k];
-                    float allowed = qKeep * kKeep;
-                    outPtr[outOffset + q * seqLen + k] = allowed > 0.5f ? 0.0f : NegInf;
-                }
-            }
-        }
-        return outMask;
-    }
 }

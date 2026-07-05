@@ -63,10 +63,10 @@ public sealed unsafe class Krea2Attention
     // activation chain stays device-resident — no per-op DataPointer D2H sync barriers (the old ReshapeTo/FromMultiHead
     // + host RepeatKvHeads loops D2H-synced every intermediate around every GEMM). Head split = declaring Q/K/V
     // directly as [B, S, H, D] (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim with no reshape,
-    // then Permute0213 to/from [B, H, S, D]. The ONLY op left on the CPU is FluxRope.ForwardSingle: this is GQA
-    // (numHeads != numKvHeads), and FluxRope.ApplyGpu rotates Q and K with a single shared head count — so the
-    // GPU-resident rope path is unavailable here and rope stays a host excursion, exactly as before (bit-identical
-    // interleaved-pair rotation and placement on the post-permute [B, H, S, D] layout).
+    // then Permute0213 to/from [B, H, S, D]. RoPE is GPU-resident for B=1 (the pipeline case) via
+    // FluxRope.ApplyGpuGqa — WanRopeInterleaved is single-tensor with an explicit head count, so GQA
+    // (numHeads != numKvHeads) rotates Q and K with their own counts on the pre-permute [B, S, H, D] layout,
+    // bit-identical to the host ForwardSingle. B>1 keeps the host ForwardSingle fallback (post-permute).
     public Tensor Forward(IBackend backend, Tensor x, FluxRope? rope, int batch, int seqLen)
     {
         TensorShape qHeads = new TensorShape(batch, seqLen, _numHeads, _headDim);
@@ -93,7 +93,16 @@ public sealed unsafe class Krea2Attention
         backend.RmsNorm(kNorm, k, _normK!, _eps);
         k.Dispose();
 
-        // Permute [B, S, H, D] → [B, H, S, D] for RoPE + SDPA.
+        // RoPE (main blocks only; text-fusion passes null). B=1 (the only case pipelines exercise): GPU-resident
+        // on the pre-permute [B, S, H, D] layout (device WanRopeInterleaved with per-tensor GQA head counts —
+        // bit-identical interleaved-pair rotation, no D2H). B>1: host ForwardSingle on the post-permute layout.
+        bool gpuRope = rope is not null && batch == 1;
+        if (gpuRope)
+        {
+            rope!.ApplyGpuGqa(backend, qNorm, kNorm, _numHeads, _numKvHeads);
+        }
+
+        // Permute [B, S, H, D] → [B, H, S, D] for SDPA.
         Tensor qMh = new Tensor(qMhShape, DType.F32);
         backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
         qNorm.Dispose();
@@ -104,8 +113,7 @@ public sealed unsafe class Krea2Attention
         backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
         v.Dispose();
 
-        // RoPE (main blocks only; text-fusion passes null) — host excursion, see method note above.
-        if (rope is not null)
+        if (rope is not null && !gpuRope)
         {
             rope.ForwardSingle(qMh, batch, _numHeads, seqLen);
             rope.ForwardSingle(kMh, batch, _numKvHeads, seqLen);

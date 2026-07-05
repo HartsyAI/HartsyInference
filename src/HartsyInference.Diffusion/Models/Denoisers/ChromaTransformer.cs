@@ -220,10 +220,14 @@ public sealed unsafe class ChromaTransformer : IDisposable
         _rope.Precompute(posIds);
         posIds.Dispose();
 
-        // ── 6. Extend attention mask to cover image tokens (all-ones) ──
+        // ── 6. Extend attention mask to cover image tokens (all-ones), then expand to the [B,1,S,S] additive
+        //       SDPA mask ONCE (it is identical for every block — this avoids each of the 57 blocks rebuilding
+        //       an ~85MB [B,1,S,S] host mask + re-uploading it every forward). Blocks consume it directly. ──
         Tensor? joinedMask = attentionMask is not null
             ? ExtendMaskWithImageOnes(attentionMask, batch, txtSeqLen, imgSeqLen)
             : null;
+        Tensor? sdpaMask = joinedMask is not null ? BuildSdpaMask(joinedMask, batch, totalSeqLen) : null;
+        joinedMask?.Dispose();
 
         // ── 7. Double-stream blocks ──
         // Modulation table layout (matches transformer_chroma.py:546-557):
@@ -241,7 +245,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
             Tensor doubleTemb = BuildDoubleBlockTemb(modTable, batch, imgRow, txtRow, hidden);
             ChromaDebugDump.Dump($"double_{i}_temb", doubleTemb);
 
-            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, doubleTemb, _rope, joinedMask);
+            (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, doubleTemb, _rope, sdpaMask);
             doubleTemb.Dispose();
 
             img.Dispose();
@@ -267,7 +271,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
             Tensor singleTemb = SliceModSlab(modTable, batch, singleRow, rowCount: 3, hidden);
             ChromaDebugDump.Dump($"single_{i}_temb", singleTemb);
 
-            Tensor newCombined = _singleBlocks[i].Forward(backend, combined, singleTemb, _rope, joinedMask);
+            Tensor newCombined = _singleBlocks[i].Forward(backend, combined, singleTemb, _rope, sdpaMask);
             singleTemb.Dispose();
             combined.Dispose();
             combined = newCombined;
@@ -275,7 +279,7 @@ public sealed unsafe class ChromaTransformer : IDisposable
             ChromaDebugDump.Dump($"single_{i}_out", combined);
         }
 
-        joinedMask?.Dispose();
+        sdpaMask?.Dispose();
 
         // ── 10. Strip text prefix → image tail ──
         TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
@@ -291,6 +295,32 @@ public sealed unsafe class ChromaTransformer : IDisposable
     public static void DumpFinalLatent(Tensor latent) => ChromaDebugDump.Dump("final_latent", latent);
 
     /// <summary>Extends a [B, txtSeqLen] mask with all-ones for image tokens, returning [B, txtSeqLen+imgSeqLen].</summary>
+    /// <summary>Expands a [B, S] keep-mask into the additive [B, 1, S, S] SDPA mask (0 where the q·k pair is
+    /// kept, -1e30 where masked; broadcast over heads). Built ONCE per forward and shared by every block —
+    /// identical to the former per-block <c>BuildSdpaMask</c> (which the blocks now no longer call).</summary>
+    private static unsafe Tensor BuildSdpaMask(Tensor mask, int batch, int seqLen)
+    {
+        Tensor outMask = new Tensor(new TensorShape(batch, 1, seqLen, seqLen), DType.F32);
+        float* mPtr = (float*)mask.DataPointer;
+        float* outPtr = (float*)outMask.DataPointer;
+        const float NegInf = -1.0e30f;
+        for (int b = 0; b < batch; b++)
+        {
+            int maskOffset = b * seqLen;
+            int outOffset = b * seqLen * seqLen;
+            for (int q = 0; q < seqLen; q++)
+            {
+                float qKeep = mPtr[maskOffset + q];
+                for (int k = 0; k < seqLen; k++)
+                {
+                    float kKeep = mPtr[maskOffset + k];
+                    outPtr[outOffset + q * seqLen + k] = (qKeep * kKeep) > 0.5f ? 0.0f : NegInf;
+                }
+            }
+        }
+        return outMask;
+    }
+
     private static Tensor ExtendMaskWithImageOnes(Tensor txtMask, int batch, int txtSeqLen, int imgSeqLen)
     {
         int total = txtSeqLen + imgSeqLen;

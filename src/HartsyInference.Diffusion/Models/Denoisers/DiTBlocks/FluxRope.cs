@@ -112,6 +112,29 @@ public sealed unsafe class FluxRope
         backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numHeads, _headDim);
     }
 
+    /// <summary>GQA variant of <see cref="ApplyGpu"/>: rotates Q with <paramref name="numHeads"/> and K with
+    /// <paramref name="numKvHeads"/> (grouped-query attention, where K has fewer heads than Q). Same pre-permute
+    /// <c>[1, S, H, D]</c> contract and bit-identical interleaved-pair rotation as <see cref="ApplyGpu"/> —
+    /// <see cref="IBackend.WanRopeInterleaved"/> is single-tensor and takes an explicit head count, so the only
+    /// reason the shared-count <see cref="ApplyGpu"/> couldn't serve GQA was the hardcoded single count. RoPE is
+    /// head-independent (cos/sin index position×dim, not head), so rotating Q and K with their own counts is exact.
+    /// Requires batch 1; callers keep the host <see cref="ForwardSingle"/> for B&gt;1.</summary>
+    public void ApplyGpuGqa(IBackend backend, Tensor q, Tensor k, int numHeads, int numKvHeads)
+    {
+        if (_cosCache == null || _sinCache == null)
+            throw new InvalidOperationException("FluxRope.Precompute must be called before ApplyGpuGqa.");
+        int seqLen = (int)q.Shape[1];
+        if (seqLen != _cachedSeqLen)
+            throw new InvalidOperationException($"FluxRope.ApplyGpuGqa: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
+
+        // DIAGNOSTIC (HARTSY_SKIP_ROPE=1): skip rope entirely (parity with Forward).
+        if (Environment.GetEnvironmentVariable("HARTSY_SKIP_ROPE") == "1") return;
+
+        (Tensor cos, Tensor sin) = GetGpuTables(backend);
+        backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numKvHeads, _headDim);
+    }
+
     /// <summary>Builds (or returns the cached) duplicated-pair cos/sin tables <c>[S, headDim]</c> from the host
     /// <see cref="Precompute"/> tables — a pure copy-expansion, no trig — and preloads them into the backend
     /// weight cache so the per-block op skips the H2D upload. Rebuilt only when Precompute has refreshed the

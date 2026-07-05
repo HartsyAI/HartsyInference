@@ -87,11 +87,11 @@ public sealed unsafe class ChromaSingleStreamBlock
     /// <param name="x">Input [B, totalSeqLen, hidden].</param>
     /// <param name="temb">Modulation slice [B, 3, hidden] (shift, scale, gate).</param>
     /// <param name="rope">Precomputed FluxRope for the joint sequence.</param>
-    /// <param name="attentionMask">Optional [B, totalSeqLen] mask (1=keep, 0=mask).</param>
+    /// <param name="sdpaMask">Optional additive [B, 1, S, S] SDPA mask, pre-built once per forward by ChromaTransformer (shared; not disposed here).</param>
     // GPU-residency rewrite (Chroma-only): all glue runs as IBackend GPU ops; only RoPE stays on the CPU
     // (interleaved/GPT-J convention, no CUDA kernel — ~5s/run). Mirrors ChromaDoubleStreamBlock; batch is always 1
     // for Chroma. Full plan: docs/Checklists/TODO_CHROMA_GPU_RESIDENCY.md
-    public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? attentionMask)
+    public Tensor Forward(IBackend backend, Tensor x, Tensor temb, FluxRope rope, Tensor? sdpaMask)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
@@ -127,7 +127,15 @@ public sealed unsafe class ChromaSingleStreamBlock
         backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
-        // ── 5. Permute [B, S, H, D] → [B, H, S, D] ──
+        // ── 5. RoPE. B=1 (pipeline case): GPU-resident on the pre-permute [B, S, H, D] layout
+        //       (device WanRopeInterleaved, no D2H). B>1: host Forward post-permute. ──
+        bool gpuRope = batch == 1;
+        if (gpuRope)
+        {
+            rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
+        }
+
+        // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
         Tensor qMh = new Tensor(mhShape, DType.F32);
         backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
         qNormed.Dispose();
@@ -138,20 +146,18 @@ public sealed unsafe class ChromaSingleStreamBlock
         backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         v.Dispose();
 
-        // ── 6. RoPE (CPU FluxRope — interleaved convention; see class note) ──
-        rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        if (!gpuRope)
+        {
+            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        }
 
-        // ── 7. SDPA (with optional mask) ──
-        Tensor? sdpaMask = attentionMask is not null
-            ? BuildSdpaMask(attentionMask, batch, seqLen)
-            : null;
-
+        // ── 7. SDPA. The additive [B,1,S,S] mask is built ONCE per forward by ChromaTransformer and shared
+        //       across all blocks — use it directly, do NOT dispose here. ──
         Tensor attnOut = new Tensor(mhShape, DType.F32);
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, sdpaMask, scale);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
-        sdpaMask?.Dispose();
 
         // ── 8. Permute attention back [B, H, S, D] → [B, S, hidden] ──
         Tensor attnFlat = new Tensor(shape, DType.F32);
@@ -222,32 +228,5 @@ public sealed unsafe class ChromaSingleStreamBlock
             rows[r] = row;
         }
         return rows;
-    }
-
-    private static Tensor BuildSdpaMask(Tensor mask, int batch, int seqLen)
-    {
-        TensorShape outShape = new TensorShape(batch, 1, seqLen, seqLen);
-        Tensor outMask = new Tensor(outShape, DType.F32);
-
-        float* mPtr = (float*)mask.DataPointer;
-        float* outPtr = (float*)outMask.DataPointer;
-        const float NegInf = -1.0e30f;
-
-        for (int b = 0; b < batch; b++)
-        {
-            int maskOffset = b * seqLen;
-            int outOffset = b * seqLen * seqLen;
-            for (int q = 0; q < seqLen; q++)
-            {
-                float qKeep = mPtr[maskOffset + q];
-                for (int kk = 0; kk < seqLen; kk++)
-                {
-                    float kKeep = mPtr[maskOffset + kk];
-                    float allowed = qKeep * kKeep;
-                    outPtr[outOffset + q * seqLen + kk] = allowed > 0.5f ? 0.0f : NegInf;
-                }
-            }
-        }
-        return outMask;
     }
 }
