@@ -183,21 +183,17 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_unet.EnumerateWeights());
 
-        // Match the latent dtype to the loaded VAE weight dtype. SDXL VAE F16 is broken
-        // (resnet activations overflow → NaN → black output); the loader now casts SDXL
-        // VAE weights to BF16 (Ampere+) or F32 (older HW) per the ComfyUI policy. Cast the
-        // latent to match — otherwise the kernel dispatch reads weights of one dtype as
-        // another and produces garbage. See PHASE_3_DEVIATIONS.md ("F16 has been observed
-        // to produce all-black output").
-        DType vaeDtype = _vaeDecoder.EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
-        Logs.Verbose($"Decoding latents to image (VAE dtype={vaeDtype})...");
+        // Pass the F32 denoise latent straight to DecodeTiled — it matches dtype to the VAE weights
+        // internally (per-tile for the tiled path, once for the single-tile path). We deliberately do
+        // NOT pre-cast the whole latent to BF16 here: at 1024² (128×128 latent → 3×3 tiles) that
+        // full-tensor F32→BF16→F32 round-trip through the churned post-gen CUDA mem pool came back
+        // partially written — only the first tile's region was valid, the rest decoded to NaN → a
+        // mostly-black image. The F32 latent's host buffer is already valid, so tiled slicing is clean.
+        Logs.Verbose("Decoding latents to image (F32 latent, dtype matched per-tile)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
 
-        Tensor vaeInput = DtypeCastHelper.EnsureDtype(Backend, latent, vaeDtype);
-
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeInput);
-        vaeInput.Dispose();
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 

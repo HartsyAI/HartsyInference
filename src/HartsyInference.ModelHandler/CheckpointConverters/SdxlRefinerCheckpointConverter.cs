@@ -185,7 +185,11 @@ public sealed class SdxlRefinerCheckpointConverter
         {
             if (_outputBlockHasAttention[blockIdx])
                 return $"up_blocks.{upLevel}.attentions.{resnetIdx}." + rest;
-            // No-attention level with subIdx=1 → upsample variant
+            // No-attention level with subIdx=1 → upsample variant. The LDM Upsample stores its conv
+            // as "...conv.weight/bias"; strip the leading "conv." so the diffusers key isn't doubled
+            // to "upsamplers.0.conv.conv.weight" (mirrors the subIdx==2 attention-level path below).
+            if (rest.StartsWith("conv."))
+                return $"up_blocks.{upLevel}.upsamplers.0.conv." + rest["conv.".Length..];
             return $"up_blocks.{upLevel}.upsamplers.0.conv." + rest;
         }
         if (subIdx == 2)

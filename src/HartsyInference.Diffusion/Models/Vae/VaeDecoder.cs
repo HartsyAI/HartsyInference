@@ -291,11 +291,16 @@ public sealed class VaeDecoder
         int latentH = (int)latent.Shape[2];
         int latentW = (int)latent.Shape[3];
 
-        // Fast path: latent already fits in one tile, just decode it directly at its
-        // native dtype (no cast).
+        // Fast path: latent already fits in one tile. Match the latent dtype to the VAE weight
+        // dtype (callers now pass an F32 latent; Decode's per-op dispatch needs the input to match
+        // the weights — F32 latent on BF16 weights would read garbage). No-op when already equal.
         if (latentH <= tileLatentSize && latentW <= tileLatentSize)
         {
-            return Decode(backend, latent);
+            DType wDtype = EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
+            Tensor single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, wDtype, disposeSourceOnCast: false);
+            Tensor decoded = Decode(backend, single);
+            if (!ReferenceEquals(single, latent)) single.Dispose();
+            return decoded;
         }
 
         int rgbH = latentH * SpatialScale;
