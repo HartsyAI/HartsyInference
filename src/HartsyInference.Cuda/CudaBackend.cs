@@ -21,6 +21,12 @@ public sealed class CudaBackend : IBackend
     private Fp8GemmExecutor? _fp8Executor;
     private LtGemmExecutor? _ltGemmExecutor;
     private TensorCoreGemm? _tensorCoreGemm;
+    private CudnnSdpa? _cudnnSdpa;
+    private bool _cudnnSdpaDead;   // set if cuDNN init/exec throws once — never retry, fall back for the session
+
+    /// <summary>True once the cuDNN fused-attention fast path has successfully executed at least once this
+    /// session. Diagnostic surface (tests / deploy logs) to confirm the path actually engaged vs fell back.</summary>
+    public bool CudnnSdpaEngaged { get; private set; }
     private readonly string? _ptxDir;
     private bool _disposed;
 
@@ -127,6 +133,9 @@ public sealed class CudaBackend : IBackend
     private readonly bool _sdpaF16ForceOn;
     /// <summary>HARTSY_SDPA_NO_F16=1: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
     private readonly bool _sdpaF16Disabled;
+    /// <summary>HARTSY_SDPA_CUDNN=1: route no-mask MHA (D∈{64,128}) attention through cuDNN's fused flash-attention
+    /// engine instead of the materialized cuBLAS QKᵀ→softmax→PV path. ~34× on the Krea2 self-attention shape.</summary>
+    private readonly bool _sdpaCudnn;
 
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>: FAST_TF32 for
     /// F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit full-precision request —
@@ -155,6 +164,33 @@ public sealed class CudaBackend : IBackend
         _ptxDir = ptxDir;
         Device = DeviceKind.Cuda(deviceOrdinal);
 
+        // Keep freed activation buffers warm in the stream-ordered pool. The default device mempool's
+        // CU_MEMPOOL_ATTR_RELEASE_THRESHOLD is 0 (the streaming weight cache sets it so, to avoid an OOM during weight
+        // streaming) — but the compute stream churns activations through this SAME pool, so a 0 threshold returns every
+        // freed activation to the driver and re-acquires it on the next alloc, stalling the compute stream (the
+        // dominant non-kernel GPU-stream cost on big-activation diffusion: Krea2 1024² was ~13 s of pure alloc/free
+        // round-trips). Raise it to "hold everything" so per-op activation reuse is instant; the OOM path
+        // (AllocateAsync → SyncStreamsAndReleasePool) and the streaming cache's explicit cuMemPoolTrimTo still return
+        // memory on demand. Opt-in (HARTSY_MEMPOOL_KEEP=1): default-off so weight-STREAMING models (block-swap
+        // video) keep the streaming cache's eager-release behavior, which a held activation pool could OOM/thrash.
+        // Enable for preload-all models (Krea2 etc.) where activation-reuse is a clear win.
+        if (EnvFlag("HARTSY_MEMPOOL_KEEP"))
+        {
+            try
+            {
+                CudaDriverApi.cuDeviceGetDefaultMemPool(out nint computePool, _context.DeviceOrdinal).ThrowOnError();
+                unsafe
+                {
+                    ulong keepAll = ulong.MaxValue;
+                    CudaDriverApi.cuMemPoolSetAttribute(computePool, CudaDriverApi.CU_MEMPOOL_ATTR_RELEASE_THRESHOLD, &keepAll).ThrowOnError();
+                }
+            }
+            catch (Exception ex)
+            {
+                HartsyInference.Core.Logging.Logs.Warning($"[Cuda] could not raise mempool release threshold: {ex.Message}");
+            }
+        }
+
         // Stage-1 perf-flag wiring (see docs/Checklists/QUANT_GEMM_PERF_PLAN.md). The opt-in GEMM/quant
         // fast paths default OFF; the HARTSY_* env vars flip them on for A/B benchmarking in real pipelines
         // without recompiling (mirrors HARTSY_PROFILE). Unset/!="1" => off, reproducing the baseline exactly.
@@ -169,6 +205,7 @@ public sealed class CudaBackend : IBackend
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
         _sdpaF16ForceOn = EnvFlag("HARTSY_SDPA_F16");
         _sdpaF16Disabled = EnvFlag("HARTSY_SDPA_NO_F16");
+        _sdpaCudnn = EnvFlag("HARTSY_SDPA_CUDNN");
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
@@ -2210,6 +2247,18 @@ public sealed class CudaBackend : IBackend
         // masked (Matrix-Game block-causal) callers always keep the plain GEMM path.
         if (mask is null && query.DType == DType.F32)
         {
+            // cuDNN fused flash-attention (HARTSY_SDPA_CUDNN): a single fused kernel — no materialized
+            // [heads,Sq,Skv] score matrix — via cuDNN's runtime-compiled attention engine. ~34× over the
+            // materialized cuBLAS path at Krea2 shape. MHA only, D∈{64,128}. Safe for RMS-normed-Q/K archs
+            // (bounded scores) since we run fp16 I/O; callers gate the same way as the F16 path (allowF16).
+            // Self-disables for the session if cuDNN init/exec ever throws, falling back to the paths below.
+            if (_sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(D)
+                && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled
+                && TryCudnnSdpa(output, query, key, value, scale))
+            {
+                return;
+            }
+
             // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
             // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
             if (EnvFlag("HARTSY_SDPA_V2") && (D == 64 || D == 128))
@@ -2458,6 +2507,67 @@ public sealed class CudaBackend : IBackend
             if (pKCast != 0) CudaMemory.FreeAsync(pKCast, _stream.Handle);
             if (pVCast != 0) CudaMemory.FreeAsync(pVCast, _stream.Handle);
             if (pOutCast != 0) CudaMemory.FreeAsync(pOutCast, _stream.Handle);
+        }
+    }
+
+    /// <summary>cuDNN fused flash-attention fast path for the plain F32/no-mask/MHA case. Casts Q/K/V to F16,
+    /// runs cuDNN's fused attention (fp16 I/O, fp32 accum — no materialized score matrix), casts the F16 result
+    /// back to the F32 output. Returns false (and permanently disables cuDNN for the session) on any failure so
+    /// the caller falls through to the existing materialized/tiled paths. Q/out [B,H,Sq,D], K/V [B,H,Skv,D].</summary>
+    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    {
+        long B = query.Shape[0], H = query.Shape[1], Sq = query.Shape[2], D = query.Shape[3];
+        long Skv = key.Shape[2];
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
+        bool cachedOutput = false;
+        try
+        {
+            _cudnnSdpa ??= new CudnnSdpa(_stream.Handle);
+
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+
+            qF16 = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
+            kF16 = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
+            vF16 = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
+            oF16 = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
+            _kernels!.LaunchCastF32ToF16(qF16, pQ, (int)query.ElementCount, _stream.Handle);
+            _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
+            _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
+
+            _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, B, H, Sq, Skv, D, scale);
+
+            _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+            if (!CudnnSdpaEngaged)
+            {
+                CudnnSdpaEngaged = true;
+                HartsyInference.Core.Logging.Logs.Info($"[cuDNN SDPA] fused flash-attention engaged (D={D}, cuDNN {CudnnApi.cudnnGetVersion()})");
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // cuDNN unavailable (lib missing) or the graph/engine rejected this shape — disable for the session
+            // and fall back. Logged once so the deploy log shows whether the fast path actually engaged.
+            _cudnnSdpaDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] disabled (falling back to materialized path): {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (qF16 != 0) CudaMemory.FreeAsync(qF16, _stream.Handle);
+            if (kF16 != 0) CudaMemory.FreeAsync(kF16, _stream.Handle);
+            if (vF16 != 0) CudaMemory.FreeAsync(vF16, _stream.Handle);
+            if (oF16 != 0) CudaMemory.FreeAsync(oF16, _stream.Handle);
         }
     }
 
@@ -3334,6 +3444,10 @@ public sealed class CudaBackend : IBackend
     {
         _context.EnsureCurrent();
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
+        // HARTSY_PROFILE_EACH=1: dump the accumulated per-op profile at each Sync (end of a generation) — the Swarm
+        // ShutdownServer path does not reliably dispose the backend, so this is the reliable per-gen dump hook.
+        if (Environment.GetEnvironmentVariable("HARTSY_PROFILE_EACH") == "1")
+            Profiling.NvtxRange.DumpProfile(Environment.GetEnvironmentVariable("HARTSY_PROFILE_OUT") ?? "/tmp/hartsy_profile.txt");
     }
 
     #endregion
@@ -4122,6 +4236,12 @@ public sealed class CudaBackend : IBackend
             {
                 _tensorCoreGemm.Dispose();
                 _tensorCoreGemm = null;
+            }
+
+            if (_cudnnSdpa is not null)
+            {
+                _cudnnSdpa.Dispose();
+                _cudnnSdpa = null;
             }
 
             if (_cublasHandle != 0)

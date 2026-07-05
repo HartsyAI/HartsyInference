@@ -56,6 +56,25 @@ public static class CudaLibraryResolver
             }
         }
 
+        // cuDNN (fused flash-attention SDPA fast path, HARTSY_SDPA_CUDNN). Ships only as a versioned soname
+        // (libcudnn.so.9 / cudnn64_9.dll) — no unversioned alias — so the bare [LibraryImport("cudnn")] name
+        // fails without this case. Default-off, loaded lazily on first cuDNN SDPA call.
+        if (libraryName == "cudnn")
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                if (NativeLibrary.TryLoad("cudnn64_9.dll", out nint handle))
+                    return handle;
+                return NativeLibrary.Load("cudnn64_9.dll");
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                if (NativeLibrary.TryLoad("libcudnn.so.9", out nint handle))
+                    return handle;
+                return NativeLibrary.Load("libcudnn.so.9");
+            }
+        }
+
         // cuBLASLt ships as a SEPARATE library from cuBLAS (libcublasLt.so.N) and, like cuBLAS, only as a
         // versioned soname — there is no unversioned libcublasLt.so — so the bare [LibraryImport("cublasLt")]
         // name fails to load without this case. Exercised by the epilogue-fusion, native-FP8, and general

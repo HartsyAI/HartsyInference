@@ -27,6 +27,14 @@ public sealed unsafe class Krea2Transformer : IDisposable
     private Tensor? _txtNormW, _txt1W, _txt1B, _txt2W, _txt2B; // txt_in (Krea2TextProjection)
     private Tensor? _finalTable, _finalNormW, _finalLinW, _finalLinB;
 
+    // Per-generation caches (the text projection and the RoPE tables are identical across all denoise steps for a
+    // given prompt+resolution — recomputing them every step was ~95 op launches + 4 text-fusion SDPAs + a RoPE
+    // rebuild per step of pure waste). Keyed on the encoderHidden reference / a (txtSeq,hPacked,wPacked) signature
+    // so CFG's alternating cond/uncond streams each recompute correctly; a new prompt (new encoderHidden) evicts.
+    private Tensor? _cachedTxt;
+    private object? _cachedTxtKey;
+    private long _ropeSig = long.MinValue;
+
     private int _disposed;
 
     public Krea2Transformer(Krea2Config config)
@@ -90,14 +98,49 @@ public sealed unsafe class Krea2Transformer : IDisposable
         if (latent.Shape.Rank != 4 || latent.Shape[0] != 1)
             throw new ArgumentException($"latent must be [1, 16, H, W], got {latent.Shape}.", nameof(latent));
 
-        int batch = 1;
         int channels = (int)latent.Shape[1];
-        int latentH = (int)latent.Shape[2];
-        int latentW = (int)latent.Shape[3];
         int patch = _config.PatchSize;
+        int hPacked = (int)latent.Shape[2] / patch;
+        int wPacked = (int)latent.Shape[3] / patch;
+
+        Tensor patchLatent = PatchifyLatent(latent);
+        Tensor projected = ForwardPatched(backend, patchLatent, timestep, encoderHidden, hPacked, wPacked);
+        patchLatent.Dispose();
+        Tensor velocity = UnpatchifyChannelOuter(projected, 1, channels, hPacked, wPacked, patch);
+        projected.Dispose();
+        return velocity;
+    }
+
+    /// <summary>Patchifies a pixel latent <c>[1, C, H, W]</c> → the channel-outer token grid <c>[1, imgSeq, C·p²]</c>
+    /// that the loop operates on. Host op; call once per generation.</summary>
+    public Tensor PatchifyLatent(Tensor latent)
+    {
+        ThrowIfDisposed();
+        int channels = (int)latent.Shape[1];
+        int patch = _config.PatchSize;
+        return PatchifyChannelOuter(latent, 1, channels, (int)latent.Shape[2], (int)latent.Shape[3], patch);
+    }
+
+    /// <summary>Unpatchifies the loop's token grid <c>[1, imgSeq, C·p²]</c> back to a pixel latent <c>[1, C, H, W]</c>.
+    /// Host op; call once per generation.</summary>
+    public Tensor UnpatchifyLatent(Tensor patchTokens, int hPacked, int wPacked)
+    {
+        ThrowIfDisposed();
+        return UnpatchifyChannelOuter(patchTokens, 1, _config.VaeChannels, hPacked, wPacked, _config.PatchSize);
+    }
+
+    /// <summary>Denoise-step core operating entirely in patchified token space: consumes the patchified latent
+    /// <c>[1, imgSeq, C·p²]</c> and returns the patchified flow-match velocity of the same shape — no per-step
+    /// patchify/unpatchify. Keeping the latent in this form across the whole sampling loop (patchify once before,
+    /// unpatchify once after) lets the scheduler step run on-device (Scale+Add), so a denoise step never reads any
+    /// tensor's <c>DataPointer</c> and the host can queue all steps without the per-step D2H pipeline drain that
+    /// otherwise serialized host dispatch against GPU execution.</summary>
+    public Tensor ForwardPatched(IBackend backend, Tensor patchLatent, float timestep, Tensor encoderHidden,
+        int hPacked, int wPacked)
+    {
+        ThrowIfDisposed();
+        const int batch = 1;
         int hidden = _config.HiddenSize;
-        int hPacked = latentH / patch;
-        int wPacked = latentW / patch;
         int imgSeq = hPacked * wPacked;
         int txtSeq = (int)encoderHidden.Shape[1];
 
@@ -109,24 +152,45 @@ public sealed unsafe class Krea2Transformer : IDisposable
         backend.Linear(tembMod, tembGelu, _timeModW!, _timeModB);                       // [B, 6·hidden]
         tembGelu.Dispose();
 
-        // ── text: fusion → projection ──
-        Tensor fused = _textFusion.Forward(backend, encoderHidden, batch, txtSeq);      // [B, S, textDim]
-        Tensor txt = ApplyTxtIn(backend, fused, batch, txtSeq, hidden);                 // [B, S, hidden]
-        fused.Dispose();
+        // ── text: fusion → projection (cached across steps — depends only on the prompt, not the timestep) ──
+        bool txtCached = ReferenceEquals(_cachedTxtKey, encoderHidden) && _cachedTxt is not null;
+        Tensor txt;
+        if (txtCached)
+        {
+            txt = _cachedTxt!;
+        }
+        else
+        {
+            Tensor fused = _textFusion.Forward(backend, encoderHidden, batch, txtSeq);  // [B, S, textDim]
+            Tensor computedTxt = ApplyTxtIn(backend, fused, batch, txtSeq, hidden);      // [B, S, hidden]
+            fused.Dispose();
+            _ = computedTxt.DataPointer;   // materialize to host once so it survives (and is re-uploaded) across steps
+            _cachedTxt?.Dispose();
+            _cachedTxt = computedTxt;
+            _cachedTxtKey = encoderHidden;
+            txt = computedTxt;
+        }
 
-        // ── image: patchify + img_in ──
-        Tensor imgFlat = PatchifyChannelOuter(latent, batch, channels, latentH, latentW, patch);
+        // ── image: img_in (patchLatent is already the [1, imgSeq, C·p²] token grid) ──
         Tensor img = new Tensor(new TensorShape(batch, imgSeq, hidden), DType.F32);
-        backend.Linear(img, imgFlat, _imgInW!, _imgInB);
-        imgFlat.Dispose();
+        backend.Linear(img, patchLatent, _imgInW!, _imgInB);
 
-        // ── concat [text, image]; RoPE for the joint sequence ──
-        Tensor joint = DiTUtils.ConcatAlongSeqDim(txt, img);
-        txt.Dispose(); img.Dispose();
+        // ── concat [text, image]; RoPE for the joint sequence (RoPE tables cached across steps) ──
+        // Device concat (backend.Concat = DtoD copies, output cached as a device activation). The host
+        // DiTUtils.ConcatAlongSeqDim read img.DataPointer every step — a full pipeline drain + a 113 MB D2H +
+        // host memcpy + H2D re-upload of the joint, all on the critical path feeding the 28 blocks.
         int jointSeq = txtSeq + imgSeq;
-        Tensor posIds = FluxRope.BuildPositionIds(txtSeq, hPacked, wPacked);
-        _rope.Precompute(posIds);
-        posIds.Dispose();
+        Tensor joint = new Tensor(new TensorShape(batch, jointSeq, hidden), DType.F32);
+        backend.Concat(joint, new[] { txt, img }, dim: 1);
+        img.Dispose();
+        long ropeSig = ((long)txtSeq * 73856093L) ^ ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L);
+        if (_ropeSig != ropeSig)
+        {
+            Tensor posIds = FluxRope.BuildPositionIds(txtSeq, hPacked, wPacked);
+            _rope.Precompute(posIds);
+            posIds.Dispose();
+            _ropeSig = ropeSig;
+        }
 
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -136,16 +200,13 @@ public sealed unsafe class Krea2Transformer : IDisposable
         }
         tembMod.Dispose();
 
-        // ── strip text prefix, final layer, unpatchify ──
-        Tensor imgTail = SliceTail(joint, txtSeq, imgSeq, hidden);
+        // ── strip text prefix, final layer (device-resident; returns the patchified velocity) ──
+        Tensor imgTail = SliceTail(backend, joint, txtSeq, imgSeq, hidden);
         joint.Dispose();
         Tensor projected = ApplyFinalLayer(backend, imgTail, temb, batch, imgSeq, hidden);
         imgTail.Dispose();
         temb.Dispose();
-
-        Tensor velocity = UnpatchifyChannelOuter(projected, batch, channels, hPacked, wPacked, patch);
-        projected.Dispose();
-        return velocity;
+        return projected;
     }
 
     /// <summary>Sinusoidal(t·1000, cos-first, dim 256) → Linear → gelu_tanh → Linear. Returns <c>[B, hidden]</c>.</summary>
@@ -190,6 +251,30 @@ public sealed unsafe class Krea2Transformer : IDisposable
     {
         Tensor normed = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
         backend.RmsNorm(normed, h, _finalNormW!, _config.NormEps);
+
+        // scale = temb + table[0], shift = temb + table[1] (both [B, hidden]); (1+scale)·normed + shift — all on
+        // device (was a per-step D2H drain + a seqLen·hidden host loop reading normed/temb.DataPointer). B=1 path;
+        // B>1 (unused by pipelines) keeps the host loop.
+        if (batch == 1)
+        {
+            Tensor tabScale = new Tensor(new TensorShape(1, hidden), DType.F32);
+            backend.SliceRows(tabScale, _finalTable!, 0);
+            Tensor tabShift = new Tensor(new TensorShape(1, hidden), DType.F32);
+            backend.SliceRows(tabShift, _finalTable!, 1);
+            Tensor scale = new Tensor(new TensorShape(1, hidden), DType.F32);
+            backend.Add(scale, temb, tabScale);
+            Tensor shift = new Tensor(new TensorShape(1, hidden), DType.F32);
+            backend.Add(shift, temb, tabShift);
+            tabScale.Dispose(); tabShift.Dispose();
+
+            Tensor modulatedDev = DiTUtils.Modulate(backend, normed, shift, scale, new TensorShape(batch, seqLen, hidden));
+            normed.Dispose(); scale.Dispose(); shift.Dispose();
+
+            Tensor projectedDev = new Tensor(new TensorShape(batch, seqLen, _config.InChannels), DType.F32);
+            backend.Linear(projectedDev, modulatedDev, _finalLinW!, _finalLinB);
+            modulatedDev.Dispose();
+            return projectedDev;
+        }
 
         Tensor modulated = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
         float* np = (float*)normed.DataPointer, mp = (float*)modulated.DataPointer;
@@ -262,11 +347,13 @@ public sealed unsafe class Krea2Transformer : IDisposable
         return result;
     }
 
-    private static Tensor SliceTail(Tensor joint, int start, int tailLen, int hidden)
+    // Device-resident tail slice: copy the image rows [start, start+tailLen) of the joint sequence via the backend's
+    // SliceRows (a contiguous row-block copy) so the last block's output never leaves the GPU (was a joint.DataPointer
+    // D2H drain + host memcpy at the end of every step).
+    private static Tensor SliceTail(IBackend backend, Tensor joint, int start, int tailLen, int hidden)
     {
         Tensor output = new Tensor(new TensorShape(1, tailLen, hidden), DType.F32);
-        long bytes = (long)tailLen * hidden * sizeof(float);
-        Buffer.MemoryCopy((float*)joint.DataPointer + (long)start * hidden, (void*)output.DataPointer, bytes, bytes);
+        backend.SliceRows(output, joint, start);
         return output;
     }
 
@@ -279,6 +366,9 @@ public sealed unsafe class Krea2Transformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _cachedTxt?.Dispose();
+            _cachedTxt = null;
+            _cachedTxtKey = null;
             _imgInW = _imgInB = _time1W = _time1B = _time2W = _time2B = _timeModW = _timeModB = null;
             _txtNormW = _txt1W = _txt1B = _txt2W = _txt2B = null;
             _finalTable = _finalNormW = _finalLinW = _finalLinB = null;

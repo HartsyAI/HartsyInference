@@ -79,6 +79,11 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         }
     }
 
+    /// <summary>The flow-match Euler step size for a step: <c>dt = sigma_next - sigma</c> (negative). Lets callers run
+    /// the step <c>x_next = x + v·dt</c> on-device (Scale+Add) instead of the host <see cref="Step"/> loop, keeping the
+    /// latent GPU-resident across the sampling loop.</summary>
+    public float Dt(int stepIndex) => _sigmas[stepIndex + 1] - _sigmas[stepIndex];
+
     /// <summary>Performs one flow-match Euler step: x_next = x + model_output * (sigma_next - sigma).</summary>
     public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {

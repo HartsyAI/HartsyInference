@@ -1,0 +1,144 @@
+[
+  {
+    "name": "SDXL",
+    "model": "SDXL/sd_xl_base_1.0",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 7.0
+    }
+  },
+  {
+    "name": "Flux-Dev",
+    "model": "BFL/Flux1/flux1-dev-fp8-1_0-flux-1-dev-basesafetensors",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 1.0,
+      "fluxguidancescale": 3.5
+    }
+  },
+  {
+    "name": "Z-Image-Turbo",
+    "model": "ZImage/SwarmUI_Z-Image-Turbo-FP8Mix",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 8,
+      "cfgscale": 1.0
+    }
+  },
+  {
+    "name": "AuraFlow-0.3",
+    "model": "AuraFlow/aura_flow_0.3_fp8_scaled",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 3.5
+    }
+  },
+  {
+    "name": "Qwen-Image",
+    "model": "Qwen_Image-Q4_K_M.gguf",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 2.5
+    }
+  },
+  {
+    "name": "Lumina2",
+    "model": "Lumina2/lumina2_transformer_diffusers",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 25,
+      "cfgscale": 4.0
+    }
+  },
+  {
+    "name": "Chroma1-HD",
+    "model": "Chroma/Chroma1-HD-fp8mixed-final",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 4.0
+    }
+  },
+  {
+    "name": "Krea2-Turbo",
+    "model": "Krea2/krea2_turbo_fp8_scaled",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 8,
+      "cfgscale": 1.0
+    }
+  },
+  {
+    "name": "Boogu-Base",
+    "model": "Boogu/boogu_image_base_fp8_scaled",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 4.0
+    }
+  },
+  {
+    "name": "Boogu-Turbo",
+    "model": "Boogu/boogu_image_turbo_fp8_scaled",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "cfgscale": 1.0
+    }
+  },
+  {
+    "name": "ERNIE-Image",
+    "model": "ErnieImage/diffusion_pytorch_model-00001-of-00002",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 4.0
+    }
+  },
+  {
+    "name": "HiDream-i1",
+    "model": "HiDream/hidream_i1",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 25,
+      "cfgscale": 5.0
+    }
+  },
+  {
+    "name": "OmniGen2",
+    "model": "OmniGen2/omnigen2",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 4.0
+    }
+  },
+  {
+    "name": "Ideogram4",
+    "model": "Ideogram4/ideogram4_fp8_scaled",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 20,
+      "cfgscale": 4.0
+    },
+    "prompt": "{\"high_level_description\": \"A cinematic wide-angle photorealistic photograph of an astronaut in a white NASA spacesuit riding a chestnut horse across the rust-red Martian desert at golden hour, dramatic warm sunlight, ultra-detailed, sharp focus.\", \"compositional_deconstruction\": {\"background\": \"A vast Martian desert of rolling rust-orange sand dunes under a pale dusty-pink sky, distant eroded mesas and craters on the horizon, low golden-hour sun casting long shadows and warm rim light across the terrain, faint atmospheric haze.\", \"elements\": [{\"type\": \"subject\", \"desc\": \"An astronaut in a detailed white pressurized spacesuit with a reflective gold-tinted visor helmet, seated upright riding the horse, one gloved hand holding the reins.\"}, {\"type\": \"animal\", \"desc\": \"A powerful chestnut-brown horse mid-stride galloping across the sand, mane and tail flowing, hooves kicking up red dust.\"}, {\"type\": \"lighting\", \"desc\": \"Warm golden-hour side lighting, long dramatic shadows, high dynamic range, crisp photographic detail.\"}]}}"
+  }
+]

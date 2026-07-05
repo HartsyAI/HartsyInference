@@ -36,7 +36,10 @@ public sealed unsafe class Krea2Block
     /// <c>{prefix}.attn.*</c>, and <c>{prefix}.ff.gate/up/down.weight</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
-        _scaleShiftTable = F32(w[$"{p}.scale_shift_table"]);
+        // Store the [6, hidden] table flattened to [1, 6·hidden] so the whole modulation split is one device Add
+        // (tembMod + table) followed by 6 row slices — see SplitModulation. The host-path indexing (i·hidden) is
+        // unchanged. Reshape is a host view (the weight is host-resident until preloaded).
+        _scaleShiftTable = F32(w[$"{p}.scale_shift_table"]).Reshape(new TensorShape(1, 6 * _hidden));
         _norm1 = Krea2Norm.LoadZeroCentered(w[$"{p}.norm1.weight"]);
         _norm2 = Krea2Norm.LoadZeroCentered(w[$"{p}.norm2.weight"]);
         _attn.LoadWeights(w, $"{p}.attn");
@@ -104,19 +107,20 @@ public sealed unsafe class Krea2Block
         if (batch != 1)
             return SplitModulationHost(tembMod, table, batch);
 
+        // One device Add over the whole [1, 6·hidden] modulation (tembMod + flattened table), then 6 row slices —
+        // 7 ops instead of 18 (6× SliceRows(tembMod) + 6× SliceRows(table) + 6× Add). The 6·hidden-wide Add is a
+        // single kernel; per-op host overhead (new Tensor / alloc / launch / dispose) dominates at this op count,
+        // so collapsing 18→7 across 28 blocks × 8 steps removes ~2.5k tiny ops per generation.
+        Tensor packed = new Tensor(new TensorShape(1, 6 * _hidden), DType.F32);
+        backend.Add(packed, tembMod, table);           // table is stored flattened to [1, 6·hidden]
         Tensor[] mod = new Tensor[6];
         TensorShape vecShape = new TensorShape(batch, _hidden);
         for (int i = 0; i < 6; i++)
         {
-            Tensor tmSlice = new Tensor(vecShape, DType.F32);
-            backend.SliceRows(tmSlice, tembMod, i);   // B=1: row i = chunk [i·hidden, (i+1)·hidden)
-            Tensor tabSlice = new Tensor(vecShape, DType.F32);
-            backend.SliceRows(tabSlice, table, i);     // table [6, hidden] row i
             mod[i] = new Tensor(vecShape, DType.F32);
-            backend.Add(mod[i], tmSlice, tabSlice);
-            tmSlice.Dispose();
-            tabSlice.Dispose();
+            backend.SliceRows(mod[i], packed, i);       // row i = chunk [i·hidden, (i+1)·hidden) of packed
         }
+        packed.Dispose();
         return mod;
     }
 

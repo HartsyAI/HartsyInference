@@ -119,3 +119,67 @@ to fit 24 GB + stop the per-step fp8→F16 weight recast — it OOM-failed the b
 Worst gap (33×), the fix is already scoped in `TODO_CHROMA_GPU_RESIDENCY.md` with an op-by-op conversion table and a
 working reference block (`Ideogram4Block`), it's bit-identical (zero numerical risk), Chroma-only (no blast radius),
 and it validates the block-port playbook that then replicates to ERNIE/Krea2/HiDream.
+
+## Optimization results (cuDNN fused flash-attention SDPA) — engine `alpha.43.124-local`
+
+Wired cuDNN 9.24's fused flash-attention engine as a new SDPA fast path (`HARTSY_SDPA_CUDNN=1`, env-gated,
+self-disables on any cuDNN failure). Pure-C# backend-graph P/Invoke (`CudnnApi.cs` + `CudnnSdpa.cs`), no C++
+shim. The graph mirrors cudnn-frontend's plain-inference SDPA: `bmm1 → pointwise-scale → unified SOFTMAX op →
+bmm2`, 4D `[B,H,S,D]`, fp16 I/O + fp32 accum, all intermediates virtual (never materializes the score matrix).
+The **unified backend SOFTMAX op** (cuDNN ≥ 9.21) is the key — the decomposed max/sub/exp/sum/div graph does
+**not** match the fused engine (all engines return NOT_SUPPORTED).
+
+**Per-call SDPA GPU cost (profiled, `HARTSY_PROFILE_SYNC`, Krea2 B=1 H=24 S=4608 D=128):**
+
+| | cuBLAS materialized (F16) | cuDNN fused | speedup |
+|---|---|---|---|
+| per SDPA call | **62.7 ms** | **5.5 ms** (1.8 ms execute + ~3.6 ms F32↔F16 casts) | **11.4×** |
+| SDPA share of GPU time | 52% | ~12% | — |
+| score-matrix workspace | ~2 GB | **0** | — |
+
+Prototype pure-execute at this shape = **1.82 ms** (34.5× over 62.7 ms). Validated vs numpy + CPU reference
+(relL2 2.7e-4; C# unit test `CudnnSdpaTests` D∈{64,128}, `CudnnSdpaEngaged` asserted). Output **coherent**
+(clean astronaut-on-horse @ 1024², seeds 111/222/83865+).
+
+**Wall time (warm, RTX 4090, no profiler):** Krea2-Turbo **36.7s → 33.0s** (≈1.1×). Gap vs Comfy 6.5s: 5.6× → **5.1×**.
+
+**Why the wall barely moved despite an 11× SDPA win — Krea2 is HOST-BOUND, not GPU-bound.** Summing all GPU
+ops (serialized profile) ≈ **15 s/gen**, but wall is 33 s → ~18 s is host launch overhead / non-overlapped H2D
+that reducing GPU work can't touch. Post-cuDNN profile top ops (2 gens): `Linear` 12.4 s (4714 calls),
+`SDPA` 3.2 s (584), `GatedResidual` 3.1 s (896), `RmsNorm` 2.7 s (2360), `Conv2D` 2.6 s, `Permute0213` 2.2 s,
+`H2D_MISS_BIG` 1.7 s (126). The cuDNN win is **real and banked** but only surfaces in wall time once the
+host-launch tail is attacked. **Next = "B":** CUDA-graph capture of the denoise step + fuse the DiT block glue
+(`GatedResidual`/`RmsNorm`/`AffineBroadcast`/`Permute` = the still-pending Krea2 block-GPU-residency) + kill the
+`H2D_MISS_BIG` re-uploads. SDPA is no longer the bottleneck; the per-op host launch overhead is.
+
+Kept env-gated (not default-on) because it is not yet a clear wall win on this host-bound pipeline (it adds the
+3+1 F32↔F16 cast launches); flip to default-for-RMS-normed-archs once B lands and the GPU savings surface.
+
+## Krea2-Turbo host-overhead reduction ("B") — engine `alpha.43.131-local`
+
+After cuDNN SDPA banked the attention GPU win but wall stayed ~35s, profiling showed Krea2 is **not** GEMM-bound
+(enabling `HARTSY_FP8_NATIVE` fp8 tensor cores changed wall 0%) and **not** host-op-dispatch-bound (non-blocking
+profile: total host issue time for ALL ops ≈ **2.2 s**; SplitModulation fusion removing ~2.5k ops/gen gave ~0.5 s).
+Resolution sweep (256²=3.9s, 512²=9.2s, 1024²=30s) proves it scales ~linearly with token count = **memory/bandwidth
++ large-buffer allocation bound**. SYNC profile: profiled GPU kernels ≈ **6 s/gen** (transformer) + ~2 s VAE. The
+remaining ~18 s is the CUDA driver cost of allocating/freeing **thousands of 113–300 MB F32 activation buffers per
+generation** (eager per-op `cuMemAllocAsync`/`FreeAsync`) plus non-overlapped memory ops — not addressable by any
+single op-level change.
+
+Shipped, all coherent (verified each step), cumulative **36.7s → 27.7s** on top of prior work:
+
+| Change | Effect | Δ |
+|---|---|---|
+| Text path cached across steps (was recomputed every step: ~95 ops + 4 text SDPAs) | fewer ops/gen | ~2s |
+| RoPE precompute + head/tail (final-layer modulate, SliceTail) made device-resident (removed host loops + D2H drains) | fewer drains | ~1s |
+| Patched-latent residency: latent kept in `[1,imgSeq,64]` token space across the whole loop, on-device Euler step (Scale+Add) — patchify/unpatchify once, no per-step D2H | removed 8 drains/gen | ~0s (drains weren't the bottleneck) |
+| `cuMemAllocAsync` pool release-threshold raised (`HARTSY_MEMPOOL_KEEP`, opt-in) | warm activation reuse | ~1.4s |
+| Device `Concat` (was host `ConcatAlongSeqDim`: per-step 113MB D2H+memcpy+H2D) | removed per-step drain | ~1s |
+| SplitModulation fused 18→7 ops/block (flattened table + 1 Add + 6 slices) | −2.5k ops/gen | ~0.5s |
+
+**Wall now 27.7s vs Comfy 6.5s (gap 5.6× → 4.3×).** The two remaining levers, both **major rewrites**, are what
+close the rest: (1) **F16/BF16 activations** — halves every activation buffer (alloc cost) AND all bandwidth-bound
+elementwise/attention traffic (the dominant GPU cost; fp8 doesn't touch it); (2) **CUDA-graph capture / persistent
+activation arena** — eliminates the per-op alloc/free churn by reusing buffers and replaying the denoise step.
+Estimated: F16 → ~16–18s, + graph/arena → GPU-floor ~8s, then within reach of 6.5s. `Krea2Transformer.ForwardPatched`
++ device Euler step already give a clean, drain-free per-step region to capture.

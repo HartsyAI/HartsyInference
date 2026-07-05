@@ -115,10 +115,50 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
 
+        // Fast path (plain t2i, no img2img / masked-inpaint): keep the latent in the transformer's patchified token
+        // space across the WHOLE sampling loop — patchify once here, run each step's flow-match Euler update
+        // (x += v·dt) on-device (Scale+Add), unpatchify once after. A denoise step then never reads a tensor's
+        // DataPointer, so the host queues all steps without the per-step D2H pipeline drain that serialized host
+        // dispatch against GPU execution (the dominant host-bound cost). Img2img / inpaint keep the pixel-space path.
+        bool fastPath = !isImg2Img && !isMaskedInpaint;
+        Tensor? patchLatent = fastPath ? _transformer.PatchifyLatent(latent) : null;
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i] / 1000.0f; // scheduler stores sigma·1000; transformer takes t∈[0,1]
+
+            if (fastPath)
+            {
+                Tensor v;
+                if (useCfg)
+                {
+                    Tensor condV = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked);
+                    Tensor uncondV = _transformer.ForwardPatched(Backend, patchLatent!, t, uncondHidden!, hPacked, wPacked);
+                    v = CfgHelper.ApplyCfgCondAnchored(condV, uncondV, cfgScale);
+                    uncondV.Dispose();
+                    condV.Dispose();
+                }
+                else
+                {
+                    v = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked);
+                }
+
+                // On-device Euler step: patchLatent += v · dt  (Scale then Add; both stay GPU-resident).
+                float dt = scheduler.Dt(i);
+                Tensor vScaled = new Tensor(v.Shape, DType.F32);
+                Backend.Scale(vScaled, v, dt);
+                Tensor newPatch = new Tensor(patchLatent!.Shape, DType.F32);
+                Backend.Add(newPatch, patchLatent!, vScaled);
+                v.Dispose();
+                vScaled.Dispose();
+                patchLatent!.Dispose();
+                patchLatent = newPatch;
+
+                stepSw.Stop();
+                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                continue;
+            }
 
             Tensor noisePred;
             if (useCfg)
@@ -165,6 +205,14 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+        }
+
+        // Fast path: bring the final patchified latent back to pixel space once for the VAE.
+        if (fastPath)
+        {
+            latent.Dispose();
+            latent = _transformer.UnpatchifyLatent(patchLatent!, hPacked, wPacked);
+            patchLatent!.Dispose();
         }
 
         condHidden.Dispose();
