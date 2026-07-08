@@ -17,6 +17,7 @@ public sealed unsafe class WanVaceTransformer : IDisposable
     private readonly WanVaceBlock[] _vaceBlocks;
     private readonly int[] _vaceLayers;
     private readonly WanRope _rope;
+    private readonly DiTBlocks.WanForwardCaches _caches = new();
     private readonly int _patchVec, _vacePatchVec;
     private int _disposed;
 
@@ -82,14 +83,14 @@ public sealed unsafe class WanVaceTransformer : IDisposable
         if (scales.Length != _vaceLayers.Length)
             throw new ArgumentException($"controlScales must have {_vaceLayers.Length} entries; got {scales.Length}.", nameof(controlScales));
 
-        (Tensor cos, Tensor sin) = _rope.BuildCosSin(gt, gh, gw);
+        (Tensor cos, Tensor sin) = _caches.RopeCosSin((gt, gh, gw, 0), () => _rope.BuildCosSin(gt, gh, gw));
 
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
         Tensor controlTokens = PatchifyControl(backend, control, s, dim);
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, [timestep], _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
-        Tensor encoderProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        Tensor encoderProj = _caches.TextProj(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
 
         // VACE control branch: run all control blocks, collecting per-layer hints (reverse to pop in main-loop order).
         Tensor[] hints = new Tensor[_vaceBlocks.Length];
@@ -128,7 +129,7 @@ public sealed unsafe class WanVaceTransformer : IDisposable
         }
         // Every VACE layer index is < NumLayers, so all hints were added + disposed above; guard just in case.
         foreach (Tensor? h in hints) h?.Dispose();
-        cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
+        timestepProj.Dispose();   // cos/sin/encoderProj are owned by the per-generation caches
 
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, s, dim, _config.Eps, s);
         cur.Dispose();

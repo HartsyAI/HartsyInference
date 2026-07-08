@@ -10,6 +10,15 @@ public sealed unsafe class QwenImageRope
     private readonly int _theta;
     private readonly int _headDim;
 
+    // Cached joint cos/sin tables in the [S, headDim] layout IBackend.WanRopeInterleaved reads (the angle for
+    // pair i lives at index 2i; both slots filled). Position-only, so one host build serves every block of
+    // every step — the per-block host ApplyJoint this replaces was a D2H+H2D round trip of joint Q AND K
+    // (~50 MB each) per block. Keyed on the full sequence layout; a resolution/prompt-length change rebuilds.
+    private (int ImgH, int ImgW, int Txt, int TxtStart, int RefH, int RefW, int RefFrame) _jointTableKey =
+        (-1, -1, -1, -1, -1, -1, -1);
+    private Tensor? _jointCos;
+    private Tensor? _jointSin;
+
     public QwenImageRope(int[]? axesDim = null, int theta = 10000)
     {
         _axesDim = axesDim ?? [16, 56, 56];
@@ -120,6 +129,75 @@ public sealed unsafe class QwenImageRope
         }
 
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);
+    }
+
+    /// <summary>Builds (or returns the cached) joint cos/sin tables for the device rope path, <c>[S, headDim]</c>
+    /// F32 in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/> convention (pair i's angle at index
+    /// <c>2i</c>). Same position math as <see cref="ApplyJoint"/> — the rotation itself matches the interleaved
+    /// kernel exactly (<c>x0·cos−x1·sin, x0·sin+x1·cos</c> on pairs (2i, 2i+1)).</summary>
+    public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int imgPackedH, int imgPackedW, int txtSeqLen,
+        int txtPositionStart, int refPackedH = 0, int refPackedW = 0, int refFrameIndex = 1)
+    {
+        (int, int, int, int, int, int, int) key =
+            (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refPackedH, refPackedW, refFrameIndex);
+        if (_jointCos is not null && _jointSin is not null && _jointTableKey == key)
+            return (_jointCos, _jointSin);
+        _jointCos?.Dispose();
+        _jointSin?.Dispose();
+
+        int imgSeqLen = imgPackedH * imgPackedW;
+        int refSeqLen = refPackedH * refPackedW;
+        int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
+        int halfDim = _headDim / 2;
+        float[] cosTable = new float[totalSeqLen * halfDim];
+        float[] sinTable = new float[totalSeqLen * halfDim];
+        for (int s = 0; s < txtSeqLen; s++)
+        {
+            int pos = txtPositionStart + s;
+            FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
+        }
+        int hCenter = imgPackedH - imgPackedH / 2;
+        int wCenter = imgPackedW - imgPackedW / 2;
+        for (int si = 0; si < imgSeqLen; si++)
+        {
+            int row = si / imgPackedW;
+            int col = si - row * imgPackedW;
+            FillTokenFreqs(cosTable, sinTable, txtSeqLen + si, frame: 0, height: row - hCenter, width: col - wCenter);
+        }
+        if (refSeqLen > 0)
+        {
+            int refHCenter = refPackedH - refPackedH / 2;
+            int refWCenter = refPackedW - refPackedW / 2;
+            for (int si = 0; si < refSeqLen; si++)
+            {
+                int row = si / refPackedW;
+                int col = si - row * refPackedW;
+                FillTokenFreqs(cosTable, sinTable, txtSeqLen + imgSeqLen + si,
+                    frame: refFrameIndex, height: row - refHCenter, width: col - refWCenter);
+            }
+        }
+
+        Tensor cos = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
+        Tensor sin = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
+        float* cp = (float*)cos.DataPointer;
+        float* sp = (float*)sin.DataPointer;
+        for (int s = 0; s < totalSeqLen; s++)
+        {
+            for (int i = 0; i < halfDim; i++)
+            {
+                float c = cosTable[s * halfDim + i];
+                float sn = sinTable[s * halfDim + i];
+                long off = (long)s * _headDim + 2 * i;
+                cp[off] = c;
+                cp[off + 1] = c;
+                sp[off] = sn;
+                sp[off + 1] = sn;
+            }
+        }
+        _jointCos = cos;
+        _jointSin = sin;
+        _jointTableKey = key;
+        return (cos, sin);
     }
 
     /// <summary>Computes the position offset to use when calling <see cref="ApplyText"/>. Matches diffusers'

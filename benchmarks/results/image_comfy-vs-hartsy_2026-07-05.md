@@ -407,3 +407,30 @@ selection for the M≈8478 fp8 shapes, fused norm+modulate kernels, VAE decode o
 | Krea2-Turbo | <6.5s | **4.44s** ✓ (was 4.68) | (below) | coherent ✓ visually |
 | Z-Image-Turbo | ≤3.2s | **2.94s** ✓ (was 3.12) | (below) | coherent ✓ visually |
 | SDXL (banded-VAE sanity) | — | 36.3s (was 37.3) | — | coherent ✓ visually |
+
+## 2026-07-08 — Qwen-Image round 1: 355s → **40.9s = BEATS ComfyUI (54.8s, 1.34× faster)** — engine `alpha.44.8-local`
+
+Warm median 40.9s @ 1024²/20 steps/cfg 2.5 (dual-pass CFG, Q4_K_M GGUF), coherent + prompt-faithful, visually
+verified (fresh same-morning baseline was ~355s at 14–24 s/step, GPU util 36%; the 07-07 table's 192s predates
+this env). Steps now ~2.05s (both CFG passes). Qwen-Image-Edit inherits (same pipeline/blocks).
+
+One deploy, five fixes — all the Ideogram/Krea2/Z-Image playbook:
+| Fix | What |
+|---|---|
+| **Device joint RoPE** | `QwenImageRope.ApplyJoint` was a HOST loop reading jointQ/K `DataPointer` — a 2×~50 MB D2H+H2D round trip per block × 60 blocks × 2 passes × 20 steps. Now: cached `[S, headDim]` cos/sin tables (`GetOrBuildJointTables`, one host build per layout) + `WanRopeInterleaved` on the pre-permute layout. Proven equal to the host path by `DeviceRopeTables_Equal_HostApplyJoint` (CPU, 1e-6). Host path kept for batch>1 + as the tests' reference. |
+| **cuDNN flash SDPA** | `allowF16: true` on the joint attention (head_dim 128, QK-normed, mask-null — the proven config). Was F32 materialized scores. |
+| **Drain-free loop** | CFG combine + Euler fused into ONE in-place device op (`CfgEulerStep(z, cond, uncond, cfgScale, dt)` ≡ `uncond + cfg·(cond−uncond)` Euler); latent device-resident all loop; per-step `FreeActivations` gone (kept on the masked-inpaint/edit-ref host paths). |
+| **TE prompt cache** | cond + uncond Qwen2.5-VL hidden states keyed on (tokens, dropIndex); repeat prompts skip the whole TE phase. |
+| **KEEP_MODELS** | DiT stays resident across gens; prompt-cache MISS evicts it for the TE (Ideogram pattern). |
+
+**Remaining lever (documented, not yet built): Q4_K → fp8-e4m3 requant at load.** The Q4_K GEMM path still
+dequantizes each weight to a TRANSIENT F16 buffer per Linear call (the F16 expansion of a 20B model can't be
+cached on 24 GB — the Axis-B pathology, GGUF flavor). Requanting to fp8 at load (dequant via `GgufDequantizer`
+→ global amax/448 scale on `Fp8ScaleFactor` → `CastTo(F8E4M3)`, mirroring `DequantNvfp4ToFp8` which shipped
+coherent for Ideogram from the same 4-bit information budget) puts Qwen on the packed-fp8 native GEMM path:
+est. ~2.05 → ~1.2–1.4 s/step (→ ~30s/gen), at ~20 GB resident + a requant-quality visual gate.
+
+**Regression on `alpha.44.8` (includes the other session's Hunyuan/Kandinsky video SDPA flips):** Z-Image-Turbo
+**2.86s** ✓ (bar 3.2), Krea2-Turbo **4.47s** ✓ (bar 6.5), images pristine. (One bench pass showed 74–136s
+outliers that snapped back to 2.98/4.47 on final reps — transient GPU contention from the concurrent video
+session's verification runs, confirmed clean on re-run with an intruder watchdog.)
