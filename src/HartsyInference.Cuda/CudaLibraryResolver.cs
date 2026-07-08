@@ -17,43 +17,92 @@ public static class CudaLibraryResolver
         }
     }
 
+    /// <summary>Directories probed for CUDA userspace libs (cuBLAS/cuBLASLt/cuDNN/cudart) BEFORE the plain
+    /// soname search. The toolkit userspace on dev boxes often lives outside the loader's paths (this
+    /// project's documented install is <c>~/.local/lib/cuda13</c>), and <c>LD_LIBRARY_PATH</c> only works
+    /// when whoever launched the process remembered to export it — a bare SwarmUI relaunch without it kills
+    /// the whole backend (DllNotFoundException: libcublas.so.13). Probing here makes the engine
+    /// self-sufficient regardless of launcher environment. <c>HARTSY_CUDA_LIB_DIR</c> overrides/prepends.
+    /// libcuda.so.1 is NOT probed here — it's the driver, always in the system loader path.</summary>
+    private static readonly string[] ProbeDirs = BuildProbeDirs();
+
+    private static string[] BuildProbeDirs()
+    {
+        List<string> dirs = new();
+        string? overrideDir = Environment.GetEnvironmentVariable("HARTSY_CUDA_LIB_DIR");
+        if (!string.IsNullOrEmpty(overrideDir))
+        {
+            dirs.Add(overrideDir);
+        }
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            dirs.Add(Path.Combine(home, ".local", "lib", "cuda13"));
+        }
+        return dirs.ToArray();
+    }
+
+    /// <summary>Tries each candidate soname in order, first as an absolute path under every probe dir,
+    /// then via the default loader search (LD_LIBRARY_PATH / ldconfig / PATH).</summary>
+    private static bool TryLoadFirst(out nint handle, params string[] sonames)
+    {
+        foreach (string soname in sonames)
+        {
+            foreach (string dir in ProbeDirs)
+            {
+                string path = Path.Combine(dir, soname);
+                if (File.Exists(path) && NativeLibrary.TryLoad(path, out handle))
+                    return true;
+            }
+            if (NativeLibrary.TryLoad(soname, out handle))
+                return true;
+        }
+        handle = 0;
+        return false;
+    }
+
+    private static nint LoadFirst(params string[] sonames)
+    {
+        if (TryLoadFirst(out nint handle, sonames))
+            return handle;
+        // Nothing resolved: force a real Load of the newest name so the caller gets the standard
+        // DllNotFoundException (message names the library) instead of a silent 0 handle.
+        return NativeLibrary.Load(sonames[0]);
+    }
+
+    /// <summary>Availability probe for <see cref="CudaContext.IsAvailable"/>: can cuBLAS be loaded (probe
+    /// dirs included)? Keeps the availability check and the actual resolution on the SAME search logic —
+    /// a duplicated bare-soname probe here previously reported CUDA unavailable whenever LD_LIBRARY_PATH
+    /// was missing, even though the resolver could load everything from the probe dirs.</summary>
+    public static bool CublasLoadable()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return TryLoadFirst(out _, "cublas64_13.dll", "cublas64_12.dll", "cublas64_11.dll");
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            return TryLoadFirst(out _, "libcublas.so.13", "libcublas.so.12", "libcublas.so.11");
+        return false;
+    }
+
     private static nint ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
+        bool windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        bool linux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
+
         if (libraryName == "cuda")
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
+            if (windows)
                 return NativeLibrary.Load("nvcuda.dll");
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
+            else if (linux)
                 return NativeLibrary.Load("libcuda.so.1");
-            }
         }
 
         if (libraryName == "cublas")
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                // Try newest first, then older toolkits
-                if (NativeLibrary.TryLoad("cublas64_13.dll", out nint handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("cublas64_12.dll", out handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("cublas64_11.dll", out handle))
-                    return handle;
-                return NativeLibrary.Load("cublas64_13.dll");
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                if (NativeLibrary.TryLoad("libcublas.so.13", out nint handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("libcublas.so.12", out handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("libcublas.so.11", out handle))
-                    return handle;
-                return NativeLibrary.Load("libcublas.so.13");
-            }
+            // Try newest first, then older toolkits
+            if (windows)
+                return LoadFirst("cublas64_13.dll", "cublas64_12.dll", "cublas64_11.dll");
+            else if (linux)
+                return LoadFirst("libcublas.so.13", "libcublas.so.12", "libcublas.so.11");
         }
 
         // cuDNN (fused flash-attention SDPA fast path, HARTSY_SDPA_CUDNN). Ships only as a versioned soname
@@ -61,18 +110,10 @@ public static class CudaLibraryResolver
         // fails without this case. Default-off, loaded lazily on first cuDNN SDPA call.
         if (libraryName == "cudnn")
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                if (NativeLibrary.TryLoad("cudnn64_9.dll", out nint handle))
-                    return handle;
-                return NativeLibrary.Load("cudnn64_9.dll");
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                if (NativeLibrary.TryLoad("libcudnn.so.9", out nint handle))
-                    return handle;
-                return NativeLibrary.Load("libcudnn.so.9");
-            }
+            if (windows)
+                return LoadFirst("cudnn64_9.dll");
+            else if (linux)
+                return LoadFirst("libcudnn.so.9");
         }
 
         // cuBLASLt ships as a SEPARATE library from cuBLAS (libcublasLt.so.N) and, like cuBLAS, only as a
@@ -81,26 +122,10 @@ public static class CudaLibraryResolver
         // Lt-GEMM paths (all default-off, which is why this was dormant until perf flags got turned on).
         if (libraryName == "cublasLt")
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                if (NativeLibrary.TryLoad("cublasLt64_13.dll", out nint handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("cublasLt64_12.dll", out handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("cublasLt64_11.dll", out handle))
-                    return handle;
-                return NativeLibrary.Load("cublasLt64_13.dll");
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                if (NativeLibrary.TryLoad("libcublasLt.so.13", out nint handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("libcublasLt.so.12", out handle))
-                    return handle;
-                if (NativeLibrary.TryLoad("libcublasLt.so.11", out handle))
-                    return handle;
-                return NativeLibrary.Load("libcublasLt.so.13");
-            }
+            if (windows)
+                return LoadFirst("cublasLt64_13.dll", "cublasLt64_12.dll", "cublasLt64_11.dll");
+            else if (linux)
+                return LoadFirst("libcublasLt.so.13", "libcublasLt.so.12", "libcublasLt.so.11");
         }
 
         return 0;

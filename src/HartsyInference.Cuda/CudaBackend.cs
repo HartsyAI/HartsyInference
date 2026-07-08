@@ -2500,27 +2500,36 @@ public sealed class CudaBackend : IBackend
         // the tensors are already in the engine's fp16 I/O dtype, so this is the pure fused execute (the F32 route
         // below pays 3+1 F32↔F16 cast kernels). The caller choosing F16 activations already asserts bounded scores
         // (RMS-normed Q/K), so no allowF16 gate. Same session kill-switch on any cuDNN failure.
-        if (mask is null && query.DType == DType.F16 && key.DType == DType.F16 && value.DType == DType.F16
-            && output.DType == DType.F16
+        // An additive F32 [B,1,Sq,Skv]-broadcast mask (Chroma / padded-conditioning models) rides the fused
+        // engine as a bias score-modifier; incompatible mask layouts fall through to the materialized path.
+        if (CudnnMaskCompatible(mask, B, Sq, Skv) && query.DType == DType.F16 && key.DType == DType.F16
+            && value.DType == DType.F16 && output.DType == DType.F16
             && _sdpaCudnn && !_cudnnSdpaDead && !_cudnnSdpaDeadDims.Contains(D) && CudnnSdpa.ShapeSupported(D)
-            && TryCudnnSdpa(output, query, key, value, scale))
+            && TryCudnnSdpa(output, query, key, value, mask, scale))
         {
             return;
         }
 
-        if (mask is null && query.DType == DType.F32)
+        if (query.DType == DType.F32)
         {
             // cuDNN fused flash-attention (HARTSY_SDPA_CUDNN): a single fused kernel — no materialized
             // [heads,Sq,Skv] score matrix — via cuDNN's runtime-compiled attention engine. ~34× over the
             // materialized cuBLAS path at Krea2 shape. MHA only, D∈{64,128}. Safe for RMS-normed-Q/K archs
             // (bounded scores) since we run fp16 I/O; callers gate the same way as the F16 path (allowF16).
+            // Masked callers: the additive F32 mask is added to the fp32 scores INSIDE the engine (bias
+            // score-modifier), so the mask never rounds through F16 — only Q/K/V do, same as unmasked.
             // Self-disables for the session if cuDNN init/exec ever throws, falling back to the paths below.
-            if (_sdpaCudnn && !_cudnnSdpaDead && !_cudnnSdpaDeadDims.Contains(D) && CudnnSdpa.ShapeSupported(D)
+            if (CudnnMaskCompatible(mask, B, Sq, Skv)
+                && _sdpaCudnn && !_cudnnSdpaDead && !_cudnnSdpaDeadDims.Contains(D) && CudnnSdpa.ShapeSupported(D)
                 && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled
-                && TryCudnnSdpa(output, query, key, value, scale))
+                && TryCudnnSdpa(output, query, key, value, mask, scale))
             {
                 return;
             }
+        }
+
+        if (mask is null && query.DType == DType.F32)
+        {
 
             // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
             // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
@@ -2777,11 +2786,22 @@ public sealed class CudaBackend : IBackend
     /// runs cuDNN's fused attention (fp16 I/O, fp32 accum — no materialized score matrix), casts the F16 result
     /// back to the F32 output. Returns false (and permanently disables cuDNN for the session) on any failure so
     /// the caller falls through to the existing materialized/tiled paths. Q/out [B,H,Sq,D], K/V [B,H,Skv,D].</summary>
-    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, float scale)
+    /// <summary>Whether a caller's attention mask can ride the cuDNN fused engine as an additive fp32 bias:
+    /// no mask at all, or an F32 additive mask broadcastable as [B,1,Sq,Skv] / [1,1,Sq,Skv] over heads.
+    /// Per-head ([B,H,Sq,Skv]) or non-F32 masks fall back to the materialized path.</summary>
+    private static bool CudnnMaskCompatible(Tensor? mask, long B, long Sq, long Skv)
+    {
+        if (mask is null) return true;
+        if (mask.DType != DType.F32) return false;
+        long n = mask.ElementCount;
+        return n == Sq * Skv || n == B * Sq * Skv;
+    }
+
+    private unsafe bool TryCudnnSdpa(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
         long B = query.Shape[0], H = query.Shape[1], Sq = query.Shape[2], D = query.Shape[3];
         long Skv = key.Shape[2];
-        ulong pQ = 0, pK = 0, pV = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, qF16 = 0, kF16 = 0, vF16 = 0, oF16 = 0;
         bool cachedOutput = false;
         try
         {
@@ -2790,13 +2810,19 @@ public sealed class CudaBackend : IBackend
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
+            long biasB = 1;
+            if (mask is not null)
+            {
+                pMask = GpuTransferHelper.CopyToDevice(mask);
+                biasB = mask.ElementCount / (Sq * Skv);
+            }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             if (query.DType == DType.F16)
             {
                 // Native F16 Q/K/V/output — the engine's fp16 I/O dtype already; execute directly, zero casts.
-                _cudnnSdpa.Execute(pQ, pK, pV, pOut, B, H, Sq, Skv, D, scale);
+                _cudnnSdpa.Execute(pQ, pK, pV, pOut, B, H, Sq, Skv, D, scale, pMask, biasB);
             }
             else
             {
@@ -2808,7 +2834,7 @@ public sealed class CudaBackend : IBackend
                 _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
                 _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
-                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, B, H, Sq, Skv, D, scale);
+                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, B, H, Sq, Skv, D, scale, pMask, biasB);
 
                 _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
             }
@@ -2843,6 +2869,7 @@ public sealed class CudaBackend : IBackend
             GpuTransferHelper.FreeDevice(pQ);
             GpuTransferHelper.FreeDevice(pK);
             GpuTransferHelper.FreeDevice(pV);
+            if (pMask != 0) GpuTransferHelper.FreeDevice(pMask);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             if (qF16 != 0) CudaMemory.FreeAsync(qF16, _stream.Handle);
             if (kF16 != 0) CudaMemory.FreeAsync(kF16, _stream.Handle);

@@ -196,13 +196,19 @@ graph cannot span streamed (re-pointered) weights (the 43.145 eviction-crash rul
 > 7168-token SDPA was even more dominant than profiled. Remaining per the audit: Hunyuan patchify/unpatchify host
 > loops + per-step prompt re-upload + VAE tiled per-tile Sync; Kandinsky patch glue; graph capture for both.
 
-> ### I2V/S2V round (2026-07-08, engine 44.9-local deployed)
-> **Wan I2V-14B through Swarm was BROKEN on 44.8** (blotchy un-denoised output, composition preserved —
-> reproduced 2×): the per-forward conditioning recompute read CLIP/text tensors whose device buffers the
-> per-step `FreeActivations` had dropped. **FIXED by the I2V context cache in 44.9** (compute once,
-> host-materialize): output now pristine (astronaut-on-horse gallop, faithful to init). Lesson: any tensor
-> consumed across steps in a pipeline that calls `FreeActivations` per step MUST be host-materialized or
-> recomputed from host-backed sources — silent garbage otherwise.
+> ### I2V/S2V round (2026-07-08, engine 44.9-local deployed) — ⚠️ I2V IS CORRECTNESS-BROKEN (open)
+> **Wan I2V-14B produces garbage beyond frame 0 — at the ENGINE level, independent of Swarm.** The engine
+> e2e (synthetic gradient init, cfg 5, renorm 0.7) yields blotch noise on EVERY frame, and
+> `AssertFramesCoherent` PASSES on it (only catches flat/degenerate) — so the 07-02 "validated" status never
+> verified I2V visually; it has plausibly never worked. The I2V test now DUMPS FRAMES (`Output/wan_i2v_*`).
+> Through Swarm, frame 0 looks perfect (real-photo conditioning anchors it) which masked the bug in previews.
+> Debug matrix remaining: `WAN_SOLVER_ORDER=1` / `HARTSY_FP8_NATIVE=0` / `HARTSY_SDPA_CUDNN=0` (5-min runs,
+> need a quiet GPU), then layer-diff `GenerateImageToVideoConcat` + `BuildI2VCondition` vs diffusers
+> `WanImageToVideoPipeline` (clone `tests/python-reference/s2v_reference`). Suspects: UniPC trajectory
+> (code-flagged VALIDATION-PENDING), conditioning mask/layout, cond-latent normalization.
+> Side facts: the 44.8→44.9 ctx cache DID fix a real cross-step conditioning-corruption bug (FreeActivations
+> drops device buffers of never-host-read tensors — general rule stands), and `FreeBackendMemory` via the
+> Swarm API works for freeing held models between engine tests.
 > **I2V perf**: 200 s warm vs T2V-14B's 37 s at the same size/steps — ~160 s of I2V-specific overhead
 > (init VAE-encode, concat-conditioning build, per-step mask?) → needs phase probes in
 > `GenerateImageToVideoConcat` (next target).

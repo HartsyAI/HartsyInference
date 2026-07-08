@@ -48,25 +48,32 @@ internal sealed class CudnnSdpa : IDisposable
     /// <summary>
     /// Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D]
     /// (Q/O with Sq rows, K/V with Skv rows). <paramref name="scale"/> is the softmax pre-scale (1/√D typically).
+    /// <paramref name="biasF32"/> (optional, 0 = none) is a device fp32 additive attention bias/mask laid out as
+    /// [biasB,1,Sq,Skv], broadcast over heads (and over batch when biasB==1 &lt; b), added to the scaled scores
+    /// before softmax — the cudnn-frontend Bias score-modifier pattern, which still hits the fused engine.
     /// </summary>
     public unsafe void Execute(ulong qF16, ulong kF16, ulong vF16, ulong oF16,
-                               long b, long h, long sq, long sk, long d, float scale)
+                               long b, long h, long sq, long sk, long d, float scale,
+                               ulong biasF32 = 0, long biasB = 1)
     {
-        Plan plan = _plans.GetOrAdd(ShapeKey(b, h, sq, sk, d), _ => BuildPlan(b, h, sq, sk, d, scale));
+        bool hasBias = biasF32 != 0;
+        Plan plan = _plans.GetOrAdd(ShapeKey(b, h, sq, sk, d, hasBias, biasB),
+                                    _ => BuildPlan(b, h, sq, sk, d, scale, hasBias, biasB));
 
         // Variant pack: bind the actual device pointers to the graph's tensor UIDs, then execute.
         nint vp = 0;
         try
         {
             Check(cudnnBackendCreateDescriptor(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR, out vp), "variant pack create");
-            long* uids = stackalloc long[5] { UidQ, UidK, UidV, UidO, UidScale };
-            void** ptrs = stackalloc void*[5]
+            long n = hasBias ? 6 : 5;
+            long* uids = stackalloc long[6] { UidQ, UidK, UidV, UidO, UidScale, UidBias };
+            void** ptrs = stackalloc void*[6]
             {
-                (void*)qF16, (void*)kF16, (void*)vF16, (void*)oF16, (void*)plan.ScaleBuf
+                (void*)qF16, (void*)kF16, (void*)vF16, (void*)oF16, (void*)plan.ScaleBuf, (void*)biasF32
             };
             void* ws = (void*)plan.Workspace;
-            SetAttr(vp, CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS, CUDNN_TYPE_INT64, 5, uids);
-            SetAttr(vp, CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS, CUDNN_TYPE_VOID_PTR, 5, ptrs);
+            SetAttr(vp, CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS, CUDNN_TYPE_INT64, n, uids);
+            SetAttr(vp, CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS, CUDNN_TYPE_VOID_PTR, n, ptrs);
             SetAttr(vp, CUDNN_ATTR_VARIANT_PACK_WORKSPACE, CUDNN_TYPE_VOID_PTR, 1, &ws);
             Check(cudnnBackendFinalize(vp), "variant pack finalize");
             Check(cudnnBackendExecute(_handle, plan.Execution, vp), "cudnnBackendExecute");
@@ -78,13 +85,13 @@ internal sealed class CudnnSdpa : IDisposable
     }
 
     // ── graph tensor UIDs ───────────────────────────────────────────────
-    private const long UidQ = 1, UidK = 2, UidV = 3, UidO = 4, UidScale = 5;
-    private const long UidS = 100, UidSS = 101, UidP = 102;
+    private const long UidQ = 1, UidK = 2, UidV = 3, UidO = 4, UidScale = 5, UidBias = 6;
+    private const long UidS = 100, UidSS = 101, UidP = 102, UidSB = 103;
 
-    private static long ShapeKey(long b, long h, long sq, long sk, long d)
-        => (((b * 97 + h) * 100003 + sq) * 100003 + sk) * 137 + d;
+    private static long ShapeKey(long b, long h, long sq, long sk, long d, bool bias, long biasB)
+        => ((((b * 97 + h) * 100003 + sq) * 100003 + sk) * 137 + d) * 4 + (bias ? 1 : 0) + (biasB > 1 ? 2 : 0);
 
-    private unsafe Plan BuildPlan(long b, long h, long sq, long sk, long d, float scale)
+    private unsafe Plan BuildPlan(long b, long h, long sq, long sk, long d, float scale, bool hasBias, long biasB)
     {
         List<nint> owned = new();   // build-time descriptors to destroy once the plan is finalized
         try
@@ -111,19 +118,34 @@ internal sealed class CudnnSdpa : IDisposable
             nint tSS = Tensor(owned, UidSS, sDim, sStr, CUDNN_DATA_FLOAT, true);
             nint tP = Tensor(owned, UidP, sDim, sStr, CUDNN_DATA_HALF, true);
 
-            // ── ops: bmm1 → scale → softmax → bmm2 ──
-            nint op1 = MatmulOp(owned, tQ, tKt, tS);
-            nint op2 = PointwiseMulOp(owned, tS, tScale, tSS);
-            nint op3 = SoftmaxOp(owned, tSS, tP);
-            nint op4 = MatmulOp(owned, tP, tV, tO);
+            // ── ops: bmm1 → scale → [+ bias] → softmax → bmm2 ──
+            nint* ops = stackalloc nint[5];
+            long opCount = 0;
+            ops[opCount++] = MatmulOp(owned, tQ, tKt, tS);
+            ops[opCount++] = PointwiseOp(owned, CUDNN_POINTWISE_MUL, tS, tScale, tSS);
+            nint softmaxIn = tSS;
+            if (hasBias)
+            {
+                // Additive fp32 attention bias [biasB,1,sq,sk], broadcast over heads (dim-1 axes broadcast in
+                // pointwise ops) — the cudnn-frontend Bias score-modifier. -1e30 masked entries are safe: the
+                // add runs in fp32 and the fused softmax subtracts the row max (fully-masked rows go uniform,
+                // matching the materialized path's convention).
+                long* bDim = stackalloc long[4] { biasB, 1, sq, sk };
+                long* bStr = stackalloc long[4] { sq * sk, sq * sk, sk, 1 };
+                nint tBias = Tensor(owned, UidBias, bDim, bStr, CUDNN_DATA_FLOAT, false);
+                nint tSB = Tensor(owned, UidSB, sDim, sStr, CUDNN_DATA_FLOAT, true);
+                ops[opCount++] = PointwiseOp(owned, CUDNN_POINTWISE_ADD, tSS, tBias, tSB);
+                softmaxIn = tSB;
+            }
+            ops[opCount++] = SoftmaxOp(owned, softmaxIn, tP);
+            ops[opCount++] = MatmulOp(owned, tP, tV, tO);
 
             nint graph;
             Check(cudnnBackendCreateDescriptor(CUDNN_BACKEND_OPERATIONGRAPH_DESCRIPTOR, out graph), "graph create");
             owned.Add(graph);
             void* hp = (void*)_handle;
             SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_HANDLE, CUDNN_TYPE_HANDLE, 1, &hp);
-            nint* ops = stackalloc nint[4] { op1, op2, op3, op4 };
-            SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, 4, ops);
+            SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, opCount, ops);
             Check(cudnnBackendFinalize(graph), "graph finalize");
 
             (nint exec, long wsBytes) = BuildExecutionPlan(graph, owned);
@@ -248,11 +270,11 @@ internal sealed class CudnnSdpa : IDisposable
         return op;
     }
 
-    private unsafe nint PointwiseMulOp(List<nint> owned, nint x, nint bTensor, nint y)
+    private unsafe nint PointwiseOp(List<nint> owned, int mode, nint x, nint bTensor, nint y)
     {
         Check(cudnnBackendCreateDescriptor(CUDNN_BACKEND_POINTWISE_DESCRIPTOR, out nint pw), "pw desc create");
         owned.Add(pw);
-        int mode = CUDNN_POINTWISE_MUL, prec = CUDNN_DATA_FLOAT;
+        int prec = CUDNN_DATA_FLOAT;
         SetAttr(pw, CUDNN_ATTR_POINTWISE_MODE, CUDNN_TYPE_POINTWISE_MODE, 1, &mode);
         SetAttr(pw, CUDNN_ATTR_POINTWISE_MATH_PREC, CUDNN_TYPE_DATA_TYPE, 1, &prec);
         Check(cudnnBackendFinalize(pw), "pw desc finalize");

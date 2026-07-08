@@ -156,9 +156,11 @@ public sealed unsafe class ChromaSingleStreamBlock
         }
 
         // ── 7. SDPA. The additive [B,1,S,S] mask is built ONCE per forward by ChromaTransformer and shared
-        //       across all blocks — use it directly, do NOT dispose here. ──
+        //       across all blocks — use it directly, do NOT dispose here.
+        //       allowF16 is safe: Q/K are RMS-normed (QkNorm) so scores are bounded; the mask rides the cuDNN
+        //       fused engine as an fp32 bias score-modifier, never rounded through F16. ──
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, sdpaMask, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, sdpaMask, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

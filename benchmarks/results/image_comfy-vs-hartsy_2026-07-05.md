@@ -462,3 +462,45 @@ symlinked storage for ~10 checkpoints (AuraFlow/Chroma-fp8/Kontext/OmniGen2/HiDr
 Krea2/Ideogram TEs). Recovered same-session: TEs re-downloaded (Krea2 verified healed with a coherent gen),
 Chroma fp8 re-downloaded (`silveroxides/Chroma1-HD-fp8-scaled`). Still to re-fetch: AuraFlow fp8, Kontext,
 OmniGen2, Kandinsky-T2I, HiDream, Boogu flux1 VAE. Memory: `models-in-tmp-symlink-trap`.
+
+## 2026-07-08 — Chroma round 2: 97.2s → **63.2s** (Comfy 16.6s) — engine `alpha.44.10-local` — cuDNN SDPA bias/mask support
+
+The round-1 wall is gone: **the cuDNN fused flash-attention engine now takes an additive mask**, so Chroma's
+masked attention (the text-padding `[B,1,S,S]` mask that used to disqualify the fused path → F32 materialized
+2 GB score matrix) runs fused. Graph = the cudnn-frontend Bias score-modifier pattern:
+`bmm1 → scale(MUL) → bias(ADD, fp32 [B,1,Sq,Skv] broadcast over heads) → unified-SOFTMAX → bmm2` — still hits
+the fused engine (workspace 0), proven first in the surviving Python ctypes proto (relL2 2.7e-4 vs numpy with
+the exact `-1e30` convention; **2.20 ms/call at Chroma shape** B=1,H=24,S=4608,D=128 vs 62.7 ms materialized).
+C#: `CudnnSdpa.Execute(..., biasF32, biasB)` (plan-cache keyed on bias presence), `CudaBackend` gate now admits
+F32 `[B,1,Sq,Skv]`/`[1,1,Sq,Skv]` masks on both the F16-native and F32-cast cuDNN routes; Chroma's two block
+SDPA call sites pass `allowF16:true` (safe: QK RMS-norm bounds scores; the mask is added to fp32 scores INSIDE
+the engine, never rounded through F16). `CudnnSdpaTests` gained masked D∈{64,128} cases (all pass, engaged).
+
+**Chroma1-HD @1024²/20 steps: warm 62.99/63.22/63.45s (median 63.2s, was 97.2), peak VRAM 15.3 GB (score
+matrix gone), coherent ✓ visually (sharp astronaut, clean masks, no veil).** Gap vs Comfy 5.9× → 3.8×.
+Flagship regression: Krea2-Turbo **4.50s** (<6.5 gate ✓), Z-Image-Turbo **2.95s** (≤3.2 gate ✓), both verified
+coherent visually.
+
+**Blast radius (intended):** WanVideoBlock / LtxVideoBlock / LtxVideo2Attention / ZImageBlock already pass
+mask+`allowF16:true` — with `HARTSY_SDPA_CUDNN=1` their F32 broadcast masks now ride the fused engine too
+(per-head `[B,H,Sq,Skv]` masks and no-allowF16 callers — T5/CLIP/Llama encoders — unchanged). Z-Image is
+regression-verified above; **the masked video models should be re-benched/verified next video session** (free
+speedup expected, e.g. Wan cross-attn).
+
+**Deploy gotcha (cost one OOM'd bench):** the standard perf flags (`HARTSY_SDPA_CUDNN/FP8_NATIVE/DIT_F16/
+KEEP_MODELS/MEMPOOL_KEEP`) live ONLY in the Swarm launcher's env — a relaunch without exporting them silently
+reverts the engine to defaults (Chroma then OOM'd allocating the materialized 2 GB score buffer it no longer
+needs under cuDNN). Verify `/proc/<swarm-pid>/environ` after every relaunch; deploy memory updated.
+
+**Chroma next levers (round 3):** profile first (wall is no longer SDPA) — expected split: fp8 Linear/transient
+dequant (Axis B — the Qwen Q4_K→fp8-requant analog), remaining host glue, VAE. Then F16 activations
+(`HARTSY_DIT_F16` opt-in for the Chroma blocks) and the per-gen step graph (Z-Image recipe).
+
+**Addendum — `alpha.44.11-local`, deployment self-sufficiency (user directive: persistence belongs in the
+extension logic, not launcher env).** Two changes make a BARE Swarm launch fully functional: (1) the extension's
+`OnPreInit` sets the 5 standard perf flags as unset-only in-process defaults (env value, incl. "0", still wins —
+kill-switches intact; logged at init); (2) engine `CudaLibraryResolver` probes `$HARTSY_CUDA_LIB_DIR` then
+`~/.local/lib/cuda13` for cublas/cublasLt/cudnn before soname search, and `CudaContext.IsAvailable` shares that
+probe (its old duplicated bare-soname check silently SKIPPED GPU tests as "passed" without LD_LIBRARY_PATH).
+Verified end-to-end with a zero-env launch: flags logged, backend live, cuDNN engaged, coherent Chroma gen.
+44.11 = 44.10 + resolver only (no math changes) — the 44.10 bench numbers stand.

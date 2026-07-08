@@ -108,6 +108,7 @@ internal static partial class CudnnApi
     internal const int CUDNN_DATA_HALF = 2;
 
     // cudnnPointwiseMode_t
+    internal const int CUDNN_POINTWISE_ADD = 0;
     internal const int CUDNN_POINTWISE_MUL = 1;
 
     // cudnnBackendHeurMode_t

@@ -252,9 +252,11 @@ public sealed unsafe class ChromaDoubleStreamBlock
         }
 
         // ── 8. Scaled dot-product attention. The additive [B,1,S,S] mask is built ONCE per forward by
-        //       ChromaTransformer and shared across all blocks — use it directly, do NOT dispose here. ──
+        //       ChromaTransformer and shared across all blocks — use it directly, do NOT dispose here.
+        //       allowF16 is safe: Q/K are RMS-normed (QkNorm) so scores are bounded; the mask rides the cuDNN
+        //       fused engine as an fp32 bias score-modifier, never rounded through F16. ──
         Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, sdpaMask, scale);
+        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, sdpaMask, scale, allowF16: true);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();

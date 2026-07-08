@@ -268,6 +268,14 @@ public class WanVideoGenerationTests
             (byte[][] frames, int w, int h, _) = pipeline.GenerateImageToVideoConcat(promptEmbeds, negEmbeds, imageEmbeds, init, req, genFrames,
                 p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); }, lastRgb24: lastImg);
             imageEmbeds?.Dispose(); promptEmbeds.Dispose(); negEmbeds.Dispose(); transformer2?.Dispose();
+            // AssertFramesCoherent only catches degenerate output (flat/black); it passes on structured garbage —
+            // dump the frames so quality regressions can be verified visually (the 2026-07-08 I2V debugging need).
+            string i2vOutDir = Path.Combine(TestPaths.OutputDir, $"wan_i2v_{DateTime.Now:yyyyMMdd_HHmmss}");
+            Directory.CreateDirectory(i2vOutDir);
+            for (int fi = 0; fi < frames.Length; fi++)
+                HartsyInference.Diffusion.Utilities.ImagePostProcessor.SaveBmp(
+                    Path.Combine(i2vOutDir, $"frame_{fi:D5}.bmp"), frames[fi], w, h);
+            _output.WriteLine($"[frames] → {i2vOutDir}");
             AssertFramesCoherent(frames, w, h);
         }
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
