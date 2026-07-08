@@ -238,8 +238,9 @@ public sealed class QwenImageVaeDecoder : IDisposable
         }
 
         // ── 6. Head: RMSNorm(96) → SiLU → 3×3 Conv2D to RGB ──
+        // Device norm (WanRmsNormChannel) — the host loop here drained the full-res [1,96,H,W] tensor.
         Tensor headNorm = new Tensor(hidden.Shape, DType.F32);
-        QwenImageVaeOps.RmsNormPerPixelAcrossChannels(headNorm, hidden, _headGamma!);
+        backend.WanRmsNormChannel(headNorm, hidden, _headGamma!, 1e-12f);
         hidden.Dispose();
 
         Tensor headSilu = new Tensor(headNorm.Shape, DType.F32);
@@ -257,18 +258,14 @@ public sealed class QwenImageVaeDecoder : IDisposable
         // ── 7. Clamp to [-1, 1] — matches diffusers' AutoencoderKLQwenImage._decode:
         //   `out = torch.clamp(out, min=-1.0, max=1.0)` applied AFTER decoder.forward.
         //   Without this, the C# output exceeds [-1, 1] (saw range [-1.33, 1.21]) and
-        //   image rescaling overflows the [0, 255] byte range.
-        float* rgbPtr = (float*)rgb.DataPointer;
-        long rgbCount = rgb.ElementCount;
-        for (long i = 0; i < rgbCount; i++)
-        {
-            float v = rgbPtr[i];
-            if (v < -1.0f) rgbPtr[i] = -1.0f;
-            else if (v > 1.0f) rgbPtr[i] = 1.0f;
-        }
-        QwenImageVaeDebugDump.DumpOutput(rgb);
+        //   image rescaling overflows the [0, 255] byte range. Device clamp; the caller's
+        //   TensorToRgbBytes performs the single terminal D2H.
+        Tensor clamped = new Tensor(rgb.Shape, DType.F32);
+        backend.Clamp(clamped, rgb, -1.0f, 1.0f);
+        rgb.Dispose();
+        QwenImageVaeDebugDump.DumpOutput(clamped);
 
-        return rgb;
+        return clamped;
     }
 
     /// <summary>Rescales the latent BEFORE the VAE decoder runs. Two paths:

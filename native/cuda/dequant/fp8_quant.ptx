@@ -13,6 +13,7 @@
 	// .globl	absmax_f32
 // _ZZ10absmax_f32E2sm has been demoted
 // _ZZ21absmax_finalize_scaleE2sm has been demoted
+// _ZZ10absmax_f16E2sm has been demoted
 
 .visible .entry absmax_f32(
 	.param .u64 absmax_f32_param_0,
@@ -338,6 +339,347 @@ $L__BB2_10:
 	cvt.u16.u32 	%rs10, %r5;
 	or.b16  	%rs14, %rs14, %rs10;
 	bra.uni 	$L__BB2_16;
+
+}
+	// .globl	absmax_f16
+.visible .entry absmax_f16(
+	.param .u64 absmax_f16_param_0,
+	.param .u64 absmax_f16_param_1,
+	.param .u32 absmax_f16_param_2
+)
+{
+	.reg .pred 	%p<13>;
+	.reg .b16 	%rs<5>;
+	.reg .f32 	%f<13>;
+	.reg .b32 	%r<44>;
+	.reg .b64 	%rd<25>;
+	// demoted variable
+	.shared .align 4 .b8 _ZZ10absmax_f16E2sm[1024];
+
+	ld.param.u64 	%rd10, [absmax_f16_param_0];
+	ld.param.u64 	%rd11, [absmax_f16_param_1];
+	ld.param.u32 	%rd4, [absmax_f16_param_2];
+	mov.u32 	%r14, %ctaid.x;
+	mov.u32 	%r15, %ntid.x;
+	cvt.u64.u32 	%rd1, %r15;
+	mul.wide.u32 	%rd12, %r14, %r15;
+	mov.u32 	%r16, %tid.x;
+	cvt.u64.u32 	%rd2, %r16;
+	add.s64 	%rd24, %rd12, %rd2;
+	setp.ge.u64 	%p1, %rd24, %rd4;
+	mov.f32 	%f12, 0f00000000;
+	@%p1 bra 	$L__BB3_11;
+
+	mov.u32 	%r17, %nctaid.x;
+	cvt.u64.u32 	%rd13, %r17;
+	mul.lo.s64 	%rd5, %rd13, %rd1;
+	cvta.to.global.u64 	%rd6, %rd10;
+	mov.f32 	%f12, 0f00000000;
+
+$L__BB3_2:
+	shl.b64 	%rd14, %rd24, 1;
+	add.s64 	%rd15, %rd6, %rd14;
+	ld.global.nc.u16 	%rs3, [%rd15];
+	cvt.u32.u16 	%r18, %rs3;
+	shl.b32 	%r19, %r18, 16;
+	and.b32  	%r42, %r19, -2147483648;
+	shr.u16 	%rs4, %rs3, 10;
+	and.b16  	%rs1, %rs4, 31;
+	and.b16  	%rs2, %rs3, 1023;
+	cvt.u32.u16 	%r40, %rs2;
+	setp.eq.s16 	%p2, %rs1, 0;
+	@%p2 bra 	$L__BB3_6;
+
+	setp.eq.s16 	%p3, %rs1, 31;
+	@%p3 bra 	$L__BB3_5;
+	bra.uni 	$L__BB3_4;
+
+$L__BB3_5:
+	shl.b32 	%r25, %r40, 13;
+	or.b32  	%r26, %r42, %r25;
+	or.b32  	%r42, %r26, 2139095040;
+	bra.uni 	$L__BB3_10;
+
+$L__BB3_6:
+	setp.eq.s16 	%p4, %rs2, 0;
+	@%p4 bra 	$L__BB3_10;
+
+	mov.u32 	%r41, -8388608;
+
+$L__BB3_8:
+	mov.u32 	%r6, %r41;
+	shl.b32 	%r7, %r40, 1;
+	add.s32 	%r41, %r6, 8388608;
+	and.b32  	%r28, %r40, 512;
+	setp.eq.s32 	%p5, %r28, 0;
+	mov.u32 	%r40, %r7;
+	@%p5 bra 	$L__BB3_8;
+
+	mov.u32 	%r29, 931135488;
+	sub.s32 	%r30, %r29, %r6;
+	or.b32  	%r31, %r30, %r42;
+	shl.b32 	%r32, %r7, 13;
+	and.b32  	%r33, %r32, 8372224;
+	or.b32  	%r42, %r31, %r33;
+	bra.uni 	$L__BB3_10;
+
+$L__BB3_4:
+	cvt.u32.u16 	%r20, %rs1;
+	shl.b32 	%r21, %r20, 23;
+	add.s32 	%r22, %r21, 939524096;
+	shl.b32 	%r23, %r40, 13;
+	or.b32  	%r24, %r23, %r42;
+	or.b32  	%r42, %r24, %r22;
+
+$L__BB3_10:
+	mov.b32 	%f7, %r42;
+	abs.f32 	%f8, %f7;
+	setp.gt.f32 	%p6, %f8, %f12;
+	selp.f32 	%f12, %f8, %f12, %p6;
+	add.s64 	%rd24, %rd24, %rd5;
+	setp.lt.u64 	%p7, %rd24, %rd4;
+	@%p7 bra 	$L__BB3_2;
+
+$L__BB3_11:
+	shl.b64 	%rd16, %rd2, 2;
+	mov.u64 	%rd17, _ZZ10absmax_f16E2sm;
+	add.s64 	%rd9, %rd17, %rd16;
+	st.shared.f32 	[%rd9], %f12;
+	bar.sync 	0;
+	cvt.u32.u64 	%r34, %rd1;
+	shr.u32 	%r43, %r34, 1;
+	setp.eq.s32 	%p8, %r43, 0;
+	@%p8 bra 	$L__BB3_17;
+
+	cvt.u32.u64 	%r35, %rd2;
+
+$L__BB3_13:
+	setp.ge.u32 	%p9, %r35, %r43;
+	@%p9 bra 	$L__BB3_16;
+
+	add.s32 	%r37, %r43, %r35;
+	mul.wide.u32 	%rd18, %r37, 4;
+	add.s64 	%rd20, %rd17, %rd18;
+	ld.shared.f32 	%f9, [%rd9];
+	ld.shared.f32 	%f4, [%rd20];
+	setp.leu.f32 	%p10, %f4, %f9;
+	@%p10 bra 	$L__BB3_16;
+
+	st.shared.f32 	[%rd9], %f4;
+
+$L__BB3_16:
+	bar.sync 	0;
+	shr.u32 	%r43, %r43, 1;
+	setp.ne.s32 	%p11, %r43, 0;
+	@%p11 bra 	$L__BB3_13;
+
+$L__BB3_17:
+	cvt.u32.u64 	%r38, %rd2;
+	setp.ne.s32 	%p12, %r38, 0;
+	@%p12 bra 	$L__BB3_19;
+
+	ld.shared.f32 	%f10, [_ZZ10absmax_f16E2sm];
+	cvta.to.global.u64 	%rd21, %rd11;
+	mul.wide.u32 	%rd22, %r14, 4;
+	add.s64 	%rd23, %rd21, %rd22;
+	st.global.f32 	[%rd23], %f10;
+
+$L__BB3_19:
+	ret;
+
+}
+	// .globl	quant_f16_e4m3
+.visible .entry quant_f16_e4m3(
+	.param .u64 quant_f16_e4m3_param_0,
+	.param .u64 quant_f16_e4m3_param_1,
+	.param .u64 quant_f16_e4m3_param_2,
+	.param .u32 quant_f16_e4m3_param_3
+)
+{
+	.reg .pred 	%p<19>;
+	.reg .b16 	%rs<19>;
+	.reg .f32 	%f<17>;
+	.reg .b32 	%r<53>;
+	.reg .b64 	%rd<14>;
+
+
+	ld.param.u64 	%rd2, [quant_f16_e4m3_param_0];
+	ld.param.u64 	%rd3, [quant_f16_e4m3_param_1];
+	ld.param.u64 	%rd4, [quant_f16_e4m3_param_2];
+	ld.param.u32 	%rd5, [quant_f16_e4m3_param_3];
+	mov.u32 	%r18, %ctaid.x;
+	mov.u32 	%r19, %ntid.x;
+	mul.wide.u32 	%rd6, %r18, %r19;
+	mov.u32 	%r20, %tid.x;
+	cvt.u64.u32 	%rd7, %r20;
+	add.s64 	%rd1, %rd6, %rd7;
+	setp.ge.u64 	%p1, %rd1, %rd5;
+	@%p1 bra 	$L__BB4_25;
+
+	cvta.to.global.u64 	%rd8, %rd4;
+	ld.global.nc.f32 	%f1, [%rd8];
+	cvta.to.global.u64 	%rd9, %rd2;
+	shl.b64 	%rd10, %rd1, 1;
+	add.s64 	%rd11, %rd9, %rd10;
+	ld.global.nc.u16 	%rs12, [%rd11];
+	cvt.u32.u16 	%r21, %rs12;
+	shl.b32 	%r22, %r21, 16;
+	and.b32  	%r51, %r22, -2147483648;
+	shr.u16 	%rs13, %rs12, 10;
+	and.b16  	%rs1, %rs13, 31;
+	and.b16  	%rs2, %rs12, 1023;
+	cvt.u32.u16 	%r49, %rs2;
+	setp.eq.s16 	%p2, %rs1, 0;
+	@%p2 bra 	$L__BB4_5;
+
+	setp.eq.s16 	%p3, %rs1, 31;
+	@%p3 bra 	$L__BB4_4;
+	bra.uni 	$L__BB4_3;
+
+$L__BB4_4:
+	shl.b32 	%r28, %r49, 13;
+	or.b32  	%r29, %r51, %r28;
+	or.b32  	%r51, %r29, 2139095040;
+	bra.uni 	$L__BB4_9;
+
+$L__BB4_5:
+	setp.eq.s16 	%p4, %rs2, 0;
+	@%p4 bra 	$L__BB4_9;
+
+	mov.u32 	%r50, -8388608;
+
+$L__BB4_7:
+	mov.u32 	%r6, %r50;
+	shl.b32 	%r7, %r49, 1;
+	add.s32 	%r50, %r6, 8388608;
+	and.b32  	%r31, %r49, 512;
+	setp.eq.s32 	%p5, %r31, 0;
+	mov.u32 	%r49, %r7;
+	@%p5 bra 	$L__BB4_7;
+
+	mov.u32 	%r32, 931135488;
+	sub.s32 	%r33, %r32, %r6;
+	or.b32  	%r34, %r33, %r51;
+	shl.b32 	%r35, %r7, 13;
+	and.b32  	%r36, %r35, 8372224;
+	or.b32  	%r51, %r34, %r36;
+	bra.uni 	$L__BB4_9;
+
+$L__BB4_3:
+	cvt.u32.u16 	%r23, %rs1;
+	shl.b32 	%r24, %r23, 23;
+	add.s32 	%r25, %r24, 939524096;
+	shl.b32 	%r26, %r49, 13;
+	or.b32  	%r27, %r26, %r51;
+	or.b32  	%r51, %r27, %r25;
+
+$L__BB4_9:
+	mov.b32 	%f8, %r51;
+	rcp.rn.f32 	%f9, %f1;
+	mul.f32 	%f10, %f9, %f8;
+	mov.b32 	%r37, %f10;
+	shr.u32 	%r38, %r37, 24;
+	cvt.u16.u32 	%rs3, %r38;
+	and.b16  	%rs18, %rs3, 128;
+	abs.f32 	%f2, %f10;
+	setp.nan.f32 	%p6, %f2, %f2;
+	@%p6 bra 	$L__BB4_23;
+
+	setp.ltu.f32 	%p7, %f2, 0f43E80000;
+	@%p7 bra 	$L__BB4_12;
+	bra.uni 	$L__BB4_11;
+
+$L__BB4_12:
+	setp.lt.f32 	%p8, %f2, 0f3A800000;
+	@%p8 bra 	$L__BB4_24;
+
+	abs.f32 	%f3, %f2;
+	setp.lt.f32 	%p9, %f3, 0f00800000;
+	mul.f32 	%f11, %f2, 0f4B800000;
+	selp.f32 	%f4, %f11, %f2, %p9;
+	mov.b32 	%r11, %f4;
+	shr.u32 	%r39, %r11, 23;
+	and.b32  	%r12, %r39, 255;
+	setp.eq.f32 	%p10, %f3, 0f00000000;
+	setp.eq.s32 	%p11, %r12, 255;
+	or.pred  	%p12, %p10, %p11;
+	@%p12 bra 	$L__BB4_15;
+	bra.uni 	$L__BB4_14;
+
+$L__BB4_15:
+	add.f32 	%f16, %f4, %f4;
+	mov.u32 	%r52, 0;
+	bra.uni 	$L__BB4_16;
+
+$L__BB4_23:
+	or.b16  	%rs18, %rs3, 127;
+	bra.uni 	$L__BB4_24;
+
+$L__BB4_11:
+	or.b16  	%rs18, %rs18, 126;
+
+$L__BB4_24:
+	cvta.to.global.u64 	%rd12, %rd3;
+	add.s64 	%rd13, %rd12, %rd1;
+	st.global.u8 	[%rd13], %rs18;
+
+$L__BB4_25:
+	ret;
+
+$L__BB4_14:
+	selp.b32 	%r40, -150, -126, %p9;
+	add.s32 	%r52, %r40, %r12;
+	and.b32  	%r41, %r11, -2139095041;
+	or.b32  	%r42, %r41, 1056964608;
+	mov.b32 	%f16, %r42;
+
+$L__BB4_16:
+	setp.gt.s32 	%p14, %r52, -6;
+	@%p14 bra 	$L__BB4_20;
+	bra.uni 	$L__BB4_17;
+
+$L__BB4_20:
+	mul.f32 	%f14, %f16, 0f41800000;
+	cvt.rni.f32.f32 	%f15, %f14;
+	cvt.rzi.s32.f32 	%r16, %f15;
+	setp.eq.s32 	%p16, %r16, 16;
+	selp.u32 	%r44, 1, 0, %p16;
+	add.s32 	%r17, %r52, %r44;
+	setp.gt.s32 	%p17, %r17, 9;
+	@%p17 bra 	$L__BB4_22;
+	bra.uni 	$L__BB4_21;
+
+$L__BB4_22:
+	or.b16  	%rs18, %rs18, 126;
+	bra.uni 	$L__BB4_24;
+
+$L__BB4_17:
+	mul.f32 	%f12, %f2, 0f44000000;
+	cvt.rni.f32.f32 	%f13, %f12;
+	cvt.rzi.s32.f32 	%r15, %f13;
+	setp.gt.s32 	%p15, %r15, 7;
+	@%p15 bra 	$L__BB4_19;
+	bra.uni 	$L__BB4_18;
+
+$L__BB4_19:
+	or.b16  	%rs18, %rs18, 8;
+	bra.uni 	$L__BB4_24;
+
+$L__BB4_21:
+	shl.b32 	%r45, %r17, 3;
+	add.s32 	%r46, %r45, 48;
+	add.s32 	%r47, %r16, 248;
+	selp.b32 	%r48, 0, %r47, %p16;
+	cvt.u16.u32 	%rs15, %r48;
+	or.b16  	%rs16, %rs15, %rs18;
+	cvt.u16.u32 	%rs17, %r46;
+	or.b16  	%rs18, %rs16, %rs17;
+	bra.uni 	$L__BB4_24;
+
+$L__BB4_18:
+	cvt.u16.u32 	%rs14, %r15;
+	or.b16  	%rs18, %rs18, %rs14;
+	bra.uni 	$L__BB4_24;
 
 }
 

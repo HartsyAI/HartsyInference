@@ -75,21 +75,27 @@ public sealed unsafe class Krea2Attention
         TensorShape kvMhShape = new TensorShape(batch, _numKvHeads, seqLen, _headDim);
         TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
 
+        // Activation dtype follows the INPUT: the main blocks feed preIn in Krea2Dtype.Act (F16 on the
+        // HARTSY_KREA2_F16 path), while the text-fusion blocks (whose surrounding ops are F32 and cached
+        // once per prompt) feed F32 and keep the baseline path. Weights stay packed fp8; the norm weights
+        // (_normQ/_normK) are F32 — the F16 RmsNorm/RoPE/Sigmoid/RepeatKv kernels take F16 activation + F32 params.
+        DType act = x.DType;
+
         // Q/K/V declared [B, S, H, D] (byte-identical to [B, S, H·D]) + gate [B, S, hidden].
-        Tensor q = new Tensor(qHeads, DType.F32);
+        Tensor q = new Tensor(qHeads, act);
         backend.Linear(q, x, _toQ!, null);
-        Tensor k = new Tensor(kvHeads, DType.F32);
+        Tensor k = new Tensor(kvHeads, act);
         backend.Linear(k, x, _toK!, null);
-        Tensor v = new Tensor(kvHeads, DType.F32);
+        Tensor v = new Tensor(kvHeads, act);
         backend.Linear(v, x, _toV!, null);
-        Tensor gate = new Tensor(flatShape, DType.F32);
+        Tensor gate = new Tensor(flatShape, act);
         backend.Linear(gate, x, _toGate!, null);
 
         // Per-head zero-centered RMSNorm on Q and K (weight already folded +1 at load), over the last dim = headDim.
-        Tensor qNorm = new Tensor(qHeads, DType.F32);
+        Tensor qNorm = new Tensor(qHeads, act);
         backend.RmsNorm(qNorm, q, _normQ!, _eps);
         q.Dispose();
-        Tensor kNorm = new Tensor(kvHeads, DType.F32);
+        Tensor kNorm = new Tensor(kvHeads, act);
         backend.RmsNorm(kNorm, k, _normK!, _eps);
         k.Dispose();
 
@@ -103,13 +109,13 @@ public sealed unsafe class Krea2Attention
         }
 
         // Permute [B, S, H, D] → [B, H, S, D] for SDPA.
-        Tensor qMh = new Tensor(qMhShape, DType.F32);
+        Tensor qMh = new Tensor(qMhShape, act);
         backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
         qNorm.Dispose();
-        Tensor kMh = new Tensor(kvMhShape, DType.F32);
+        Tensor kMh = new Tensor(kvMhShape, act);
         backend.Permute0213(kMh, kNorm, seqLen, _numKvHeads, _headDim);
         kNorm.Dispose();
-        Tensor vMh = new Tensor(kvMhShape, DType.F32);
+        Tensor vMh = new Tensor(kvMhShape, act);
         backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
         v.Dispose();
 
@@ -128,16 +134,16 @@ public sealed unsafe class Krea2Attention
         }
         else
         {
-            kRep = new Tensor(qMhShape, DType.F32);
+            kRep = new Tensor(qMhShape, act);
             backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroup);
-            vRep = new Tensor(qMhShape, DType.F32);
+            vRep = new Tensor(qMhShape, act);
             backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroup);
             kMh.Dispose();
             vMh.Dispose();
         }
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(qMhShape, DType.F32);
+        Tensor attnMh = new Tensor(qMhShape, act);
         // allowF16: Krea2 applies zero-centered RMSNorm to Q and K (per-head, over headDim) before attention, so
         // pre-softmax scores are bounded and the F16 SDPA path (half the score-matrix HBM traffic + F16 tensor
         // cores) is numerically safe — same condition Wan/LTX use. SDPA is ~55% of Krea2 GPU time (sync-profiled).
@@ -147,24 +153,35 @@ public sealed unsafe class Krea2Attention
         vRep.Dispose();
 
         // Permute [B, H, S, D] → [B, S, hidden].
-        Tensor attnFlat = new Tensor(flatShape, DType.F32);
+        Tensor attnFlat = new Tensor(flatShape, act);
         backend.Permute0213(attnFlat, attnMh, _numHeads, seqLen, _headDim);
         attnMh.Dispose();
 
         // out = attn · sigmoid(gate)
-        Tensor sig = new Tensor(flatShape, DType.F32);
+        Tensor sig = new Tensor(flatShape, act);
         backend.Sigmoid(sig, gate);
         gate.Dispose();
-        Tensor gated = new Tensor(flatShape, DType.F32);
+        Tensor gated = new Tensor(flatShape, act);
         backend.Mul(gated, attnFlat, sig);
         attnFlat.Dispose();
         sig.Dispose();
 
-        Tensor outp = new Tensor(flatShape, DType.F32);
+        Tensor outp = new Tensor(flatShape, act);
         backend.Linear(outp, gated, _toOut!, null);
         gated.Dispose();
         return outp;
     }
+}
+
+/// <summary>Per-process activation dtype for the Krea2 DiT block/attention hot path. <c>HARTSY_KREA2_F16=1</c> runs the
+/// 28-block loop in F16 (half the HBM traffic of the bandwidth-bound norm/modulate/gate/attention kernels — the measured
+/// Krea2 bottleneck) while the once-per-forward text/image/timestep paths and the tiny per-channel modulation vectors
+/// stay F32. Default F32 reproduces the baseline exactly. Weights stay packed fp8 (activation-quant GEMM), so VRAM is
+/// unchanged. QK-norm makes F16 attention numerically safe; the one risk is SwiGLU exceeding F16's 65504 ceiling.</summary>
+public static class Krea2Dtype
+{
+    public static readonly DType Act =
+        Environment.GetEnvironmentVariable("HARTSY_KREA2_F16") == "1" ? DType.F16 : DType.F32;
 }
 
 /// <summary>Helper for Krea 2's zero-centered RMSNorm scales (<c>F.rms_norm(x, weight = weight + 1)</c>): loads a norm

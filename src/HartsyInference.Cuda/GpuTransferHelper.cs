@@ -156,6 +156,9 @@ internal static unsafe class GpuTransferHelper
         State s = Resolve();
         s.Context?.EnsureCurrent();
         SyncStream();
+        // Release the activation arena's idle blocks first (HARTSY_ACT_ARENA): they are held OUT of the driver pool,
+        // so an OOM retry that only trims the pool would still miss the VRAM the arena reserved. No-op when disabled.
+        CudaMemory.DrainArena();
         // Cache also drains its own upload stream + calls cuMemPoolTrimTo on the
         // default mempool. No-op if no streaming cache is wired (CPU/Vulkan, tests).
         s.StreamingCache?.DrainAndReleasePool();

@@ -183,6 +183,18 @@ public sealed unsafe class Krea2Transformer : IDisposable
         Tensor joint = new Tensor(new TensorShape(batch, jointSeq, hidden), DType.F32);
         backend.Concat(joint, new[] { txt, img }, dim: 1);
         img.Dispose();
+
+        // F16 hot path (HARTSY_KREA2_F16): one cast into F16 before the 28-block loop — the blocks and attention
+        // then run entirely in F16 (half the HBM traffic of the bandwidth-bound glue kernels, the measured Krea2
+        // bottleneck). The once-per-forward text/image/timestep paths above stay F32; the tail is cast back after
+        // the loop. Two [1,seq,3072] casts per step total.
+        if (DiTBlocks.Krea2Dtype.Act == DType.F16)
+        {
+            Tensor jointF16 = new Tensor(joint.Shape, DType.F16);
+            backend.CastToF16(jointF16, joint);
+            joint.Dispose();
+            joint = jointF16;
+        }
         long ropeSig = ((long)txtSeq * 73856093L) ^ ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L);
         if (_ropeSig != ropeSig)
         {
@@ -203,6 +215,14 @@ public sealed unsafe class Krea2Transformer : IDisposable
         // ── strip text prefix, final layer (device-resident; returns the patchified velocity) ──
         Tensor imgTail = SliceTail(backend, joint, txtSeq, imgSeq, hidden);
         joint.Dispose();
+        if (imgTail.DType == DType.F16)
+        {
+            // Back to F32 for the final layer + the on-device Euler step (velocity precision matters across steps).
+            Tensor tailF32 = new Tensor(imgTail.Shape, DType.F32);
+            backend.CastToF32(tailF32, imgTail);
+            imgTail.Dispose();
+            imgTail = tailF32;
+        }
         Tensor projected = ApplyFinalLayer(backend, imgTail, temb, batch, imgSeq, hidden);
         imgTail.Dispose();
         temb.Dispose();
@@ -349,10 +369,10 @@ public sealed unsafe class Krea2Transformer : IDisposable
 
     // Device-resident tail slice: copy the image rows [start, start+tailLen) of the joint sequence via the backend's
     // SliceRows (a contiguous row-block copy) so the last block's output never leaves the GPU (was a joint.DataPointer
-    // D2H drain + host memcpy at the end of every step).
+    // D2H drain + host memcpy at the end of every step). Follows the joint's dtype (F16 on the HARTSY_KREA2_F16 path).
     private static Tensor SliceTail(IBackend backend, Tensor joint, int start, int tailLen, int hidden)
     {
-        Tensor output = new Tensor(new TensorShape(1, tailLen, hidden), DType.F32);
+        Tensor output = new Tensor(new TensorShape(1, tailLen, hidden), joint.DType);
         backend.SliceRows(output, joint, start);
         return output;
     }

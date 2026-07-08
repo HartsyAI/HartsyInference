@@ -550,7 +550,9 @@ public static unsafe class DiTUtils
     {
         Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
         backend.AddScalar(scalePlus1, scale, 1.0f);
-        Tensor output = new Tensor(shape, DType.F32);
+        // Output follows the activation dtype so an F16 activation stays F16 through modulation (scale/shift are the
+        // small per-channel F32 vectors — kept F32 for precision; AffineBroadcastLastDim handles the mixed dtype).
+        Tensor output = new Tensor(shape, x.DType);
         backend.AffineBroadcastLastDim(output, x, scalePlus1, shift);
         scalePlus1.Dispose();
         return output;

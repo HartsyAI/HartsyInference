@@ -96,8 +96,12 @@ public sealed class QwenImageResidualBlock
         int width = (int)x.Shape[3];
 
         // Residual path: RMSNorm → SiLU → Conv2d → RMSNorm → SiLU → Conv2d.
+        // GPU-residency port: the norms and the residual add run as backend ops (WanRmsNormChannel — the
+        // same WAN RMS_norm the video VAE uses — and device Add). The previous host loops each forced a
+        // full D2H drain of an up-to-[1,96,1024,1024] conv output + CPU triple-loop + H2D re-upload; over
+        // ~17 residual blocks that was ~20 s of the 27 s Krea2 gen (the VAE, not the DiT, was the gap).
         Tensor h = new Tensor(x.Shape, DType.F32);
-        QwenImageVaeOps.RmsNormPerPixelAcrossChannels(h, x, _gamma0!);
+        backend.WanRmsNormChannel(h, x, _gamma0!, 1e-12f);
 
         Tensor hSilu = new Tensor(h.Shape, DType.F32);
         backend.Silu(hSilu, h);
@@ -109,7 +113,7 @@ public sealed class QwenImageResidualBlock
         hSilu.Dispose();
 
         Tensor hNorm = new Tensor(midShape, DType.F32);
-        QwenImageVaeOps.RmsNormPerPixelAcrossChannels(hNorm, hMid, _gamma3!);
+        backend.WanRmsNormChannel(hNorm, hMid, _gamma3!, 1e-12f);
         hMid.Dispose();
 
         Tensor hSilu2 = new Tensor(midShape, DType.F32);
@@ -132,9 +136,12 @@ public sealed class QwenImageResidualBlock
             shortcut = x;  // alias — caller owns x; we don't free it
         }
 
-        QwenImageVaeOps.AddInPlace(hOut, shortcut);
+        // Device residual add into a fresh tensor (x may be the caller's tensor when shortcut aliases it).
+        Tensor sum = new Tensor(midShape, DType.F32);
+        backend.Add(sum, hOut, shortcut);
+        hOut.Dispose();
         if (_hasShortcut) shortcut.Dispose();
-        return hOut;
+        return sum;
     }
 }
 
@@ -206,9 +213,9 @@ public sealed class QwenImageAttentionBlock
         int width = (int)x.Shape[3];
         long seqLen = (long)height * width;
 
-        // 1. RMSNorm across channel dim.
+        // 1. RMSNorm across channel dim (device — see QwenImageResidualBlock for the port rationale).
         Tensor normed = new Tensor(x.Shape, DType.F32);
-        QwenImageVaeOps.RmsNormPerPixelAcrossChannels(normed, x, _normGamma!);
+        backend.WanRmsNormChannel(normed, x, _normGamma!, 1e-12f);
 
         // 2. to_qkv: Conv2D 1×1, producing [B, 3*dim, H, W].
         TensorShape qkvShape = new TensorShape(batch, 3 * _dim, height, width);
@@ -216,13 +223,74 @@ public sealed class QwenImageAttentionBlock
         backend.Conv2D(qkv, normed, _qkvWeight!, _qkvBias, strideH: 1, strideW: 1, padH: 0, padW: 0);
         normed.Dispose();
 
-        // 3. Reshape qkv → split into q/k/v each [B, 1 head, seqLen, dim] for SDPA.
-        //    Source layout: qkv[b, c, h, w], where c spans [q_0..q_{dim-1}, k_0..k_{dim-1}, v_0..v_{dim-1}].
-        //    Target layout: each of q/k/v as [B, 1, seqLen, dim] contiguous (sequence-major over channel).
+        // 3. Split qkv into q/k/v [B, 1, seqLen, dim] for SDPA — device for B=1 (the pipeline case):
+        //    each channel block [dim, seqLen] is a contiguous slab of the flat qkv (SliceRows), and the
+        //    channel-major → sequence-major flip is a 2-D transpose. The old host loops D2H-drained the
+        //    ~75 MB qkv + re-uploaded q/k/v every call.
         TensorShape qkvHeadShape = new TensorShape(batch, 1, seqLen, _dim);
-        Tensor q = new Tensor(qkvHeadShape, DType.F32);
-        Tensor k = new Tensor(qkvHeadShape, DType.F32);
-        Tensor v = new Tensor(qkvHeadShape, DType.F32);
+        Tensor q, k, v;
+        if (batch == 1)
+        {
+            q = SliceBlockTransposed(backend, qkv, 0, seqLen, qkvHeadShape);
+            k = SliceBlockTransposed(backend, qkv, 1, seqLen, qkvHeadShape);
+            v = SliceBlockTransposed(backend, qkv, 2, seqLen, qkvHeadShape);
+        }
+        else
+        {
+            (q, k, v) = SplitQkvHost(qkv, batch, seqLen, qkvHeadShape);
+        }
+        qkv.Dispose();
+
+        // 4. SDPA: scale = 1 / sqrt(dim). Output [B, 1, seqLen, dim].
+        float scale = 1.0f / MathF.Sqrt(_dim);
+        Tensor attnOut = new Tensor(qkvHeadShape, DType.F32);
+        backend.ScaledDotProductAttention(attnOut, q, k, v, mask: null, scale);
+        q.Dispose();
+        k.Dispose();
+        v.Dispose();
+
+        // 5. Reshape [B, 1, seqLen, dim] back to [B, dim, H, W] — the inverse transpose, on-device for B=1.
+        Tensor reshaped = new Tensor(x.Shape, DType.F32);
+        if (batch == 1)
+        {
+            backend.Transpose2D(reshaped, attnOut, (int)seqLen, _dim);
+        }
+        else
+        {
+            ReshapeAttnHost(attnOut, reshaped, batch, seqLen);
+        }
+        attnOut.Dispose();
+
+        // 6. proj: Conv2D 1×1.
+        Tensor projOut = new Tensor(x.Shape, DType.F32);
+        backend.Conv2D(projOut, reshaped, _projWeight!, _projBias, strideH: 1, strideW: 1, padH: 0, padW: 0);
+        reshaped.Dispose();
+
+        // 7. Residual add (device).
+        Tensor outp = new Tensor(x.Shape, DType.F32);
+        backend.Add(outp, projOut, x);
+        projOut.Dispose();
+        return outp;
+    }
+
+    /// <summary>Device path (B=1): extracts channel block <paramref name="block"/> of the flat
+    /// <c>[1, 3·dim, S]</c> qkv (a contiguous slab → SliceRows) and transposes <c>[dim, S] → [S, dim]</c>.</summary>
+    private Tensor SliceBlockTransposed(IBackend backend, Tensor qkv, int block, long seqLen, TensorShape headShape)
+    {
+        Tensor chanMajor = new Tensor(new TensorShape(1, _dim, seqLen), DType.F32);
+        backend.SliceRows(chanMajor, qkv, block * _dim);   // elemOffset = block·dim·seqLen
+        Tensor seqMajor = new Tensor(headShape, DType.F32);
+        backend.Transpose2D(seqMajor, chanMajor, _dim, (int)seqLen);
+        chanMajor.Dispose();
+        return seqMajor;
+    }
+
+    /// <summary>Host fallback for B&gt;1 (unused by the image pipelines).</summary>
+    private unsafe (Tensor q, Tensor k, Tensor v) SplitQkvHost(Tensor qkv, int batch, long seqLen, TensorShape headShape)
+    {
+        Tensor q = new Tensor(headShape, DType.F32);
+        Tensor k = new Tensor(headShape, DType.F32);
+        Tensor v = new Tensor(headShape, DType.F32);
         float* qkvPtr = (float*)qkv.DataPointer;
         float* qPtr = (float*)q.DataPointer;
         float* kPtr = (float*)k.DataPointer;
@@ -235,25 +303,18 @@ public sealed class QwenImageAttentionBlock
             {
                 for (int c = 0; c < _dim; c++)
                 {
-                    // qkv has channel-major: index = c * seqLen + s
                     qPtr[(long)b * seqLen * _dim + s * _dim + c] = qkvPtr[bOff + ((long)0 * _dim + c) * seqLen + s];
                     kPtr[(long)b * seqLen * _dim + s * _dim + c] = qkvPtr[bOff + ((long)1 * _dim + c) * seqLen + s];
                     vPtr[(long)b * seqLen * _dim + s * _dim + c] = qkvPtr[bOff + ((long)2 * _dim + c) * seqLen + s];
                 }
             }
         }
-        qkv.Dispose();
+        return (q, k, v);
+    }
 
-        // 4. SDPA: scale = 1 / sqrt(dim). Output [B, 1, seqLen, dim].
-        float scale = 1.0f / MathF.Sqrt(_dim);
-        Tensor attnOut = new Tensor(qkvHeadShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, q, k, v, mask: null, scale);
-        q.Dispose();
-        k.Dispose();
-        v.Dispose();
-
-        // 5. Reshape [B, 1, seqLen, dim] back to [B, dim, H, W].
-        Tensor reshaped = new Tensor(x.Shape, DType.F32);
+    /// <summary>Host fallback for B&gt;1: [B, 1, S, dim] → [B, dim, H·W].</summary>
+    private unsafe void ReshapeAttnHost(Tensor attnOut, Tensor reshaped, int batch, long seqLen)
+    {
         float* attnPtr = (float*)attnOut.DataPointer;
         float* reshPtr = (float*)reshaped.DataPointer;
         for (int b = 0; b < batch; b++)
@@ -268,16 +329,6 @@ public sealed class QwenImageAttentionBlock
                 }
             }
         }
-        attnOut.Dispose();
-
-        // 6. proj: Conv2D 1×1.
-        Tensor projOut = new Tensor(x.Shape, DType.F32);
-        backend.Conv2D(projOut, reshaped, _projWeight!, _projBias, strideH: 1, strideW: 1, padH: 0, padW: 0);
-        reshaped.Dispose();
-
-        // 7. Residual add.
-        QwenImageVaeOps.AddInPlace(projOut, x);
-        return projOut;
     }
 }
 

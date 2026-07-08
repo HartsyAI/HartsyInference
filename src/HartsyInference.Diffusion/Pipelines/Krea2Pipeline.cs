@@ -20,6 +20,13 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 {
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Krea2Transformer _transformer;
+    /// <summary>HARTSY_KEEP_MODELS=1 keeps the DiT weights GPU-resident across generations (skips the post-loop
+    /// FreeWeights + next-gen ~1.8 s re-upload). The TE is still freed each gen — its VRAM is needed by the VAE
+    /// decode (see the call site). Requires DiT + VAE-decode peak to fit VRAM (fp8 Krea2 on 24 GB: yes).
+    /// Default off — eviction is what lets smaller cards run these models.</summary>
+    private static readonly bool KeepModelsResident =
+        Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") == "1";
+
     private readonly QwenImageVaeDecoder _vaeDecoder;
     private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly Krea2Config _config;
@@ -91,10 +98,20 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── encode prompt: 12-layer tap → [1, S, 12·2560], drop the system prefix ──
+        // [krea2-phase] probes: temporary wall-clock attribution of the 27s gen (profiled ops only sum to ~5.5s —
+        // the rest lives between ops / in un-instrumented phases; these logs locate it).
+        long phT0 = sw.ElapsedMilliseconds;
         Backend.PreloadWeights(_textEncoder.EnumerateWeights());
+        long phT1 = sw.ElapsedMilliseconds;
         Tensor condHidden = EncodeTapped(promptTokenIds, promptDropIndex);
         Tensor? uncondHidden = useCfg ? EncodeTapped(negativeTokenIds!, negativeDropIndex) : null;
+        long phT2 = sw.ElapsedMilliseconds;
+        // The TE is ALWAYS freed after encode, even under HARTSY_KEEP_MODELS: its ~4-8 GB is exactly the
+        // headroom the VAE decode's im2col needs at 1024² (keeping TE+DiT+VAE resident OOM'd: the decode
+        // requested 6.9 GB with 69 MB free). Re-encoding costs ~1 s/gen; keeping the 13 GB DiT saves ~2 s.
         Backend.FreeWeights(_textEncoder.EnumerateWeights());
+        long phT3 = sw.ElapsedMilliseconds;
+        Logs.Info($"[krea2-phase] TE preload={phT1 - phT0}ms encode={phT2 - phT1}ms free={phT3 - phT2}ms");
 
         // ── scheduler: resolution-aware exp shift (Turbo pins mu=1.15) ──
         FlowMatchEulerDiscreteScheduler scheduler = _config.IsDistilled
@@ -113,7 +130,9 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             latentMask = MaskBlendUtilities.DownsampleMaskAreaAverage(maskPixel!, latentH, latentW);
         }
 
+        long phT4 = sw.ElapsedMilliseconds;
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        Logs.Info($"[krea2-phase] DiT preload={sw.ElapsedMilliseconds - phT4}ms");
 
         // Fast path (plain t2i, no img2img / masked-inpaint): keep the latent in the transformer's patchified token
         // space across the WHOLE sampling loop — patchify once here, run each step's flow-match Euler update
@@ -156,6 +175,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 patchLatent = newPatch;
 
                 stepSw.Stop();
+                Logs.Info($"[krea2-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
                 onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
                 continue;
             }
@@ -220,11 +240,18 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
+        long phT5 = sw.ElapsedMilliseconds;
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        long phT6 = sw.ElapsedMilliseconds;
+        if (!KeepModelsResident)
+            Backend.FreeWeights(_transformer.EnumerateWeights());
 
+        long phT7 = sw.ElapsedMilliseconds;
         Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        long phT8 = sw.ElapsedMilliseconds;
         Tensor image = _vaeDecoder.Decode(Backend, latent);
+        long phT9 = sw.ElapsedMilliseconds;
+        Logs.Info($"[krea2-phase] post-loop sync={phT6 - phT5}ms DiT-free={phT7 - phT6}ms VAE preload={phT8 - phT7}ms decode={phT9 - phT8}ms");
         latent.Dispose();
 
         // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
@@ -234,7 +261,9 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
         }
 
+        long phT10 = sw.ElapsedMilliseconds;
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
+        Logs.Info($"[krea2-phase] rgb={sw.ElapsedMilliseconds - phT10}ms");
         image.Dispose();
 
         sw.Stop();

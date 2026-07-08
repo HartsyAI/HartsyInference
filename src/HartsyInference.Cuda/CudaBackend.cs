@@ -438,7 +438,7 @@ public sealed class CudaBackend : IBackend
             // needs 16-byte leading dims (lda/ldb = K fp8 bytes; ldc = N · output element bytes); non-conforming
             // shapes fall through to the cast-to-F16 path below.
             if (EnableNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
-                && (input.DType.IsFp8 || input.DType == DType.F32)
+                && (input.DType.IsFp8 || input.DType == DType.F32 || input.DType == DType.F16)
                 && (output.DType == DType.F16 || output.DType == DType.F32)
                 && K % 16 == 0
                 && (N * output.DType.SizeInBytes) % 16 == 0)
@@ -452,12 +452,24 @@ public sealed class CudaBackend : IBackend
                 }
                 else
                 {
+                    // F32 or F16 activation → per-tensor dynamic e4m3 quantization (absmax → x·448/amax), weights
+                    // stay PACKED fp8. The F16 branch is what keeps the Krea2 F16-activation path on the native fp8
+                    // GEMM — without it, F16 input falls through to the cuBLAS path, which (with CacheWeightCasts
+                    // off, the fp8 VRAM recipe) re-casts the whole fp8 weight set to F16 every step (Axis-B).
                     int count = (int)input.ElementCount;
                     pInputFp8 = CudaMemory.Allocate((nuint)count);
                     // Scratch layout: [0] = dequant scale (amax/448), [1..] = per-block maxes.
                     pFp8Scratch = CudaMemory.Allocate((nuint)((CudaKernels.Fp8AbsMaxBlockCount(count) + 1) * sizeof(float)));
-                    _kernels!.LaunchFp8AbsMaxScale(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
-                    _kernels!.LaunchFp8QuantF32ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                    if (input.DType == DType.F16)
+                    {
+                        _kernels!.LaunchFp8AbsMaxScaleF16(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
+                        _kernels!.LaunchFp8QuantF16ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                    }
+                    else
+                    {
+                        _kernels!.LaunchFp8AbsMaxScale(pInput, pFp8Scratch + sizeof(float), pFp8Scratch, count, _stream.Handle);
+                        _kernels!.LaunchFp8QuantF32ToE4M3(pInputFp8, pInput, pFp8Scratch, count, _stream.Handle);
+                    }
                     inputFp8Ptr = pInputFp8;
                     inputScaleDev = pFp8Scratch;
                 }
@@ -1113,6 +1125,33 @@ public sealed class CudaBackend : IBackend
             return;
         }
 
+        // Native F16 path (F16 activation I/O, F32 weight — the Krea2 F16 activation recipe): read F16, accumulate
+        // F32, write F16, weight kept F32. Halves the norm's HBM traffic vs the upcast fallback below (which reads
+        // F16 → F32 scratch → kernel → F16, three passes). Same reduction geometry + F32 shared-mem as the F32 kernel.
+        if (input.DType == DType.F16 && weight.DType == DType.F32 && output.DType == DType.F16)
+        {
+            EnsureKernels();
+            ulong pOut = 0, pIn = 0, pWeight = 0;
+            bool cachedOutput = false;
+            try
+            {
+                pIn = GpuTransferHelper.CopyToDevice(input);
+                pWeight = GpuTransferHelper.CopyToDevice(weight);
+                nuint outBytes = GpuTransferHelper.ByteSize(output);
+                pOut = GpuTransferHelper.AllocateDevice(outBytes);
+                _kernels!.LaunchRmsNormF16(pOut, pIn, pWeight, (int)lastDim, (int)outerSize, eps, _stream.Handle);
+                GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+                cachedOutput = true;
+            }
+            finally
+            {
+                if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+                GpuTransferHelper.FreeDevice(pIn);
+                GpuTransferHelper.FreeDevice(pWeight);
+            }
+            return;
+        }
+
         // GPU path for non-F32 input/weight: cast operands to F32 on-device, run the F32 RMSNorm kernel, cast
         // the result back to the output dtype. This replaces a CPU loop over millions of activation elements
         // per norm (with a blocking D2H sync) that was the dominant cost of the fp8/quant DiT path — dozens of
@@ -1175,8 +1214,12 @@ public sealed class CudaBackend : IBackend
     public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
     {
         using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcast");
-        if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
-            throw new NotSupportedException("CUDA AffineBroadcastLastDim supports F32 only.");
+        // F32 activation, or F16 activation with F32 scale/shift (the Krea2 F16 recipe: activation halved, tiny
+        // per-channel params kept F32 for precision). scale/shift must stay F32 in both cases.
+        bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
+        if ((!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
+            || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
+            throw new NotSupportedException("CUDA AffineBroadcastLastDim supports F32, or F16 activation with F32 scale/shift.");
         _context.EnsureCurrent();
         EnsureKernels();
         int rank = input.Shape.Rank;
@@ -1192,7 +1235,10 @@ public sealed class CudaBackend : IBackend
             if (shift is not null) pShift = GpuTransferHelper.CopyToDevice(shift);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchAffineBroadcastLastDim(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
+            if (f16)
+                _kernels!.LaunchAffineBroadcastLastDimF16(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchAffineBroadcastLastDim(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -1208,8 +1254,10 @@ public sealed class CudaBackend : IBackend
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GatedResidual");
-        if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
-            throw new NotSupportedException("CUDA GatedResidualLastDim supports F32 only.");
+        // F32, or F16 activations (residual/value/output) with an F32 gate — the Krea2 F16 recipe.
+        bool f16 = residual.DType == DType.F16 && value.DType == DType.F16 && output.DType == DType.F16;
+        if ((!f16 && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32)) || gate.DType != DType.F32)
+            throw new NotSupportedException("CUDA GatedResidualLastDim supports F32, or F16 activations with an F32 gate.");
         _context.EnsureCurrent();
         EnsureKernels();
         int rank = value.Shape.Rank;
@@ -1225,7 +1273,10 @@ public sealed class CudaBackend : IBackend
             pGate = GpuTransferHelper.CopyToDevice(gate);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchGatedResidualLastDim(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
+            if (f16)
+                _kernels!.LaunchGatedResidualLastDimF16(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchGatedResidualLastDim(pOut, pRes, pVal, pGate, seqLen, dim, value.ElementCount, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -1369,8 +1420,10 @@ public sealed class CudaBackend : IBackend
     public unsafe void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
-        if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
-            throw new NotSupportedException("CUDA WanRopeInterleaved supports F32 only.");
+        // F32, or F16 activation x with F32 cos/sin (Krea2 F16 recipe). cos/sin stay F32 in both cases.
+        bool f16 = x.DType == DType.F16;
+        if ((!f16 && x.DType != DType.F32) || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA WanRopeInterleaved supports F32, or F16 x with F32 cos/sin.");
         _context.EnsureCurrent();
         EnsureKernels();
         ulong pX = 0, pCos = 0, pSin = 0;
@@ -1379,7 +1432,10 @@ public sealed class CudaBackend : IBackend
             pX = GpuTransferHelper.CopyToDevice(x);       // x's device buffer (cached activation, in-place target)
             pCos = GpuTransferHelper.CopyToDevice(cos);
             pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchWanRopeInterleaved(pX, pCos, pSin, seqLen, heads, headDim, _stream.Handle);
+            if (f16)
+                _kernels!.LaunchWanRopeInterleavedF16(pX, pCos, pSin, seqLen, heads, headDim, _stream.Handle);
+            else
+                _kernels!.LaunchWanRopeInterleaved(pX, pCos, pSin, seqLen, heads, headDim, _stream.Handle);
             GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));   // in-place: re-assert x → pX
         }
         finally
@@ -1887,8 +1943,8 @@ public sealed class CudaBackend : IBackend
 
     public void SliceRows(Tensor output, Tensor input, int rowOffset)
     {
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("CUDA SliceRows supports F32 only.");
+        if (input.DType != output.DType || (output.DType != DType.F32 && output.DType != DType.F16))
+            throw new NotSupportedException("CUDA SliceRows supports F32 or F16 (matching input/output dtype).");
         _context.EnsureCurrent();
         EnsureKernels();
         int dim = (int)output.Shape[output.Shape.Rank - 1];
@@ -1901,7 +1957,10 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(input);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchSliceRows(pOut, pIn, elemOffset, output.ElementCount, _stream.Handle);
+            if (output.DType == DType.F16)
+                _kernels!.LaunchSliceRowsF16(pOut, pIn, elemOffset, output.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchSliceRows(pOut, pIn, elemOffset, output.ElementCount, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -2245,6 +2304,18 @@ public sealed class CudaBackend : IBackend
         //   • HARTSY_SDPA_FORCE_FLASH=1 forces the online-softmax flash kernel (O(1) score memory; validation/fallback).
         // Gated on the score matrix eating most of free VRAM so small/medium attention keeps the plain GEMM path;
         // masked (Matrix-Game block-causal) callers always keep the plain GEMM path.
+        // cuDNN fused flash-attention for NATIVE F16 Q/K/V/output (the Krea2 F16-activation path): zero casts —
+        // the tensors are already in the engine's fp16 I/O dtype, so this is the pure fused execute (the F32 route
+        // below pays 3+1 F32↔F16 cast kernels). The caller choosing F16 activations already asserts bounded scores
+        // (RMS-normed Q/K), so no allowF16 gate. Same session kill-switch on any cuDNN failure.
+        if (mask is null && query.DType == DType.F16 && key.DType == DType.F16 && value.DType == DType.F16
+            && output.DType == DType.F16
+            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(D)
+            && TryCudnnSdpa(output, query, key, value, scale))
+        {
+            return;
+        }
+
         if (mask is null && query.DType == DType.F32)
         {
             // cuDNN fused flash-attention (HARTSY_SDPA_CUDNN): a single fused kernel — no materialized
@@ -2530,17 +2601,25 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            qF16 = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
-            kF16 = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
-            vF16 = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
-            oF16 = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
-            _kernels!.LaunchCastF32ToF16(qF16, pQ, (int)query.ElementCount, _stream.Handle);
-            _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
-            _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
+            if (query.DType == DType.F16)
+            {
+                // Native F16 Q/K/V/output — the engine's fp16 I/O dtype already; execute directly, zero casts.
+                _cudnnSdpa.Execute(pQ, pK, pV, pOut, B, H, Sq, Skv, D, scale);
+            }
+            else
+            {
+                qF16 = CudaMemory.Allocate((nuint)(query.ElementCount * 2));
+                kF16 = CudaMemory.Allocate((nuint)(key.ElementCount * 2));
+                vF16 = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
+                oF16 = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
+                _kernels!.LaunchCastF32ToF16(qF16, pQ, (int)query.ElementCount, _stream.Handle);
+                _kernels!.LaunchCastF32ToF16(kF16, pK, (int)key.ElementCount, _stream.Handle);
+                _kernels!.LaunchCastF32ToF16(vF16, pV, (int)value.ElementCount, _stream.Handle);
 
-            _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, B, H, Sq, Skv, D, scale);
+                _cudnnSdpa.Execute(qF16, kF16, vF16, oF16, B, H, Sq, Skv, D, scale);
 
-            _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
+                _kernels!.LaunchCastF16ToF32(pOut, oF16, (int)output.ElementCount, _stream.Handle);
+            }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
             if (!CudnnSdpaEngaged)
@@ -2734,8 +2813,8 @@ public sealed class CudaBackend : IBackend
 
     public void Sigmoid(Tensor output, Tensor input)
     {
-        if (input.DType != DType.F32)
-            throw new NotSupportedException($"CUDA Sigmoid currently supports F32 only — got {input.DType}.");
+        if (input.DType != DType.F32 && !(input.DType == DType.F16 && output.DType == DType.F16))
+            throw new NotSupportedException($"CUDA Sigmoid supports F32 or F16 — got {input.DType}.");
         _context.EnsureCurrent();
         EnsureKernels();
 
@@ -2746,7 +2825,10 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(input);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchAudioSigmoid(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchDitSigmoidF16(pOut, pIn, (int)input.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchAudioSigmoid(pOut, pIn, (int)input.ElementCount, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -3534,7 +3616,10 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
-            _kernels!.LaunchRepeatKv(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
+            if (input.DType == DType.F16)
+                _kernels!.LaunchRepeatKvF16(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchRepeatKv(pOut, pIn, kvHeads, groupSize, seqLen, headDim, output.ElementCount, _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

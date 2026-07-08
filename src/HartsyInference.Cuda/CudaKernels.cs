@@ -176,6 +176,17 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditScatterRowsAfterF32;
     private readonly nint _ditSliceRowsF32;
 
+    // ── DiT glue function handles (F16 — Krea2 F16 activation path) ──────
+    private readonly CudaModule _ditF16Module;
+    private readonly nint _ditRmsNormF16;
+    private readonly nint _ditAffineBroadcastF16;
+    private readonly nint _ditGatedResidualF16;
+    private readonly nint _ditAddScalarF16;
+    private readonly nint _ditSigmoidF16;
+    private readonly nint _ditRopeInterleavedF16;
+    private readonly nint _ditRepeatKvF16;
+    private readonly nint _ditSliceRowsF16;
+
     // ── FP8 Cast Modules + Handles ────────────────────────────────────────
     private readonly CudaModule _castF8Module;
     private readonly nint _castF8E4M3ToF16;
@@ -185,6 +196,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _fp8AbsMax;
     private readonly nint _fp8AbsMaxFinalizeScale;
     private readonly nint _fp8QuantF32ToE4M3;
+    private readonly nint _fp8AbsMaxF16;
+    private readonly nint _fp8QuantF16ToE4M3;
 
     private readonly CudaModule _castBf16Module;
     private readonly nint _castBf16ToF32;
@@ -357,6 +370,8 @@ public sealed class CudaKernels : IDisposable
         _fp8AbsMax = _fp8QuantModule.GetFunction("absmax_f32");
         _fp8AbsMaxFinalizeScale = _fp8QuantModule.GetFunction("absmax_finalize_scale");
         _fp8QuantF32ToE4M3 = _fp8QuantModule.GetFunction("quant_f32_e4m3");
+        _fp8AbsMaxF16 = _fp8QuantModule.GetFunction("absmax_f16");
+        _fp8QuantF16ToE4M3 = _fp8QuantModule.GetFunction("quant_f16_e4m3");
 
         // ── BF16 <-> F32 Cast ───────────────────────────────────────────
         _castBf16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "cast_bf16_f32.ptx"));
@@ -380,6 +395,17 @@ public sealed class CudaKernels : IDisposable
         _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
         _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
+
+        // ── DiT glue (F16 I/O, F32 accumulate) — Krea2 F16 activation path ─
+        _ditF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_f16.ptx"));
+        _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
+        _ditAffineBroadcastF16 = _ditF16Module.GetFunction("dit_affine_broadcast_lastdim_f16");
+        _ditGatedResidualF16 = _ditF16Module.GetFunction("dit_gated_residual_lastdim_f16");
+        _ditAddScalarF16 = _ditF16Module.GetFunction("dit_add_scalar_f16");
+        _ditSigmoidF16 = _ditF16Module.GetFunction("dit_sigmoid_f16");
+        _ditRopeInterleavedF16 = _ditF16Module.GetFunction("dit_rope_interleaved_f16");
+        _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
+        _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
 
         // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
         _audioConvF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "conv1d_f32.ptx"));
@@ -1282,13 +1308,25 @@ public sealed class CudaKernels : IDisposable
     public void LaunchRmsNorm(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
         => LaunchRmsNormImpl(_ditRmsNormF32, output, input, weight, normDim, totalRows, eps, stream);
 
+    /// <summary>RMSNorm with F16 I/O (F32 accumulate, F32 weight). Same launch geometry as the F32 kernel.</summary>
+    public void LaunchRmsNormF16(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
+        => LaunchRmsNormImpl(_ditRmsNormF16, output, input, weight, normDim, totalRows, eps, stream);
+
     /// <summary>Launches broadcast affine over the last dim: out[b,s,d] = in[b,s,d]*scale[b,d] + shift[b,d] (shift optional, pass 0 to skip).</summary>
     public void LaunchAffineBroadcastLastDim(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
         => LaunchAffineBroadcastImpl(_ditAffineBroadcastF32, output, input, scale, shift, seqLen, dim, total, stream);
 
+    /// <summary>Broadcast affine over the last dim, F16 activation I/O (scale/shift stay F32).</summary>
+    public void LaunchAffineBroadcastLastDimF16(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
+        => LaunchAffineBroadcastImpl(_ditAffineBroadcastF16, output, input, scale, shift, seqLen, dim, total, stream);
+
     /// <summary>Launches GQA K/V head repeat (block pattern): [B,Hkv,L,D] → [B,Hkv*group,L,D].</summary>
     public void LaunchRepeatKv(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
         => LaunchRepeatKvImpl(_lmRepeatKvF32, output, input, kvHeads, group, seqLen, headDim, total, stream);
+
+    /// <summary>GQA K/V head repeat with F16 I/O (pure copy — no accumulation).</summary>
+    public void LaunchRepeatKvF16(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
+        => LaunchRepeatKvImpl(_ditRepeatKvF16, output, input, kvHeads, group, seqLen, headDim, total, stream);
 
     /// <summary>Launches FlashAttention (one block per (b, q-head, q-row); blockDim = headDim; shared mem =
     /// headDim floats). <paramref name="lk"/> is the K/V buffer seq stride; <paramref name="kvLen"/> the valid
@@ -1445,6 +1483,21 @@ public sealed class CudaKernels : IDisposable
     public void LaunchGatedResidualLastDim(ulong output, ulong residual, ulong value, ulong gate, int seqLen, int dim, long total, nint stream)
         => LaunchGatedResidualImpl(_ditGatedResidualF32, output, residual, value, gate, seqLen, dim, total, stream);
 
+    /// <summary>Gated residual over the last dim, F16 activation I/O (gate stays F32).</summary>
+    public void LaunchGatedResidualLastDimF16(ulong output, ulong residual, ulong value, ulong gate, int seqLen, int dim, long total, nint stream)
+        => LaunchGatedResidualImpl(_ditGatedResidualF16, output, residual, value, gate, seqLen, dim, total, stream);
+
+    /// <summary>Sigmoid with F16 I/O (F32 exp), for the Krea2 attention output gate.</summary>
+    public unsafe void LaunchDitSigmoidF16(ulong output, ulong input, int count, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint countArg = (uint)count;
+        void** args = stackalloc void*[3];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &countArg;
+        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
+        CudaDriverApi.cuLaunchKernel(_ditSigmoidF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Launches AdaLN modulation split: proj[B,4D] → (1+scale_msa, tanh(gate_msa), 1+scale_mlp, tanh(gate_mlp)), each [B,D].</summary>
     public void LaunchModulation4(ulong scaleMsa, ulong gateMsa, ulong scaleMlp, ulong gateMlp, ulong proj, int dim, int batch, nint stream)
         => LaunchModulation4Impl(_ditModulation4F32, scaleMsa, gateMsa, scaleMlp, gateMlp, proj, dim, batch, stream);
@@ -1494,6 +1547,10 @@ public sealed class CudaKernels : IDisposable
     public void LaunchAddScalar(ulong output, ulong input, float c, int count, nint stream)
         => LaunchScaleImpl(_ditAddScalarF32, output, input, c, count, stream);
 
+    /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>
+    public void LaunchAddScalarF16(ulong output, ulong input, float c, int count, nint stream)
+        => LaunchScaleImpl(_ditAddScalarF16, output, input, c, count, stream);
+
     /// <summary>Launches non-affine LayerNorm: per-row zero-mean unit-variance, no scale/bias.</summary>
     public void LaunchLayerNormNoAffine(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
         => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF32, output, input, dim, totalRows, eps, stream);
@@ -1509,6 +1566,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches contiguous row-block slice: output[i] = input[elemOffset + i].</summary>
     public void LaunchSliceRows(ulong output, ulong input, long elemOffset, long total, nint stream)
         => LaunchSliceRowsImpl(_ditSliceRowsF32, output, input, elemOffset, total, stream);
+
+    /// <summary>Contiguous row-block slice with F16 I/O (pure copy). Same geometry as the F32 kernel.</summary>
+    public void LaunchSliceRowsF16(ulong output, ulong input, long elemOffset, long total, nint stream)
+        => LaunchSliceRowsImpl(_ditSliceRowsF16, output, input, elemOffset, total, stream);
 
     // ── Fused GroupNorm+SiLU Launches ───────────────────────────────────
 
@@ -1616,6 +1677,18 @@ public sealed class CudaKernels : IDisposable
         long total = (long)S * heads * (headDim / 2);
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_wanRopeInterleaved, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Interleaved RoPE with F16 activation I/O (cos/sin stay F32). Same geometry as the F32 kernel.</summary>
+    public unsafe void LaunchWanRopeInterleavedF16(ulong x, ulong cos, ulong sin, int S, int heads, int headDim, nint stream)
+    {
+        ulong xA = x, cA = cos, sA = sin;
+        uint sArg = (uint)S, hArg = (uint)heads, dArg = (uint)headDim;
+        void** args = stackalloc void*[6];
+        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
+        long total = (long)S * heads * (headDim / 2);
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_ditRopeInterleavedF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>LTX-2 split (rotate-half, per-head cos) rotary. x [S, numHeads*headDim] in-place; cos/sin [S, dim/2].</summary>
@@ -1801,6 +1874,31 @@ public sealed class CudaKernels : IDisposable
         args[0] = &iA; args[1] = &oA; args[2] = &sA; args[3] = &nA;
         uint gridDim = (uint)((count + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_fp8QuantF32ToE4M3, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>F16-activation twin of <see cref="LaunchFp8AbsMaxScale"/>: two-pass |max| over __half input →
+    /// scale[0] = amax/448 on device. Keeps the native fp8 GEMM available to F16 activations.</summary>
+    public unsafe void LaunchFp8AbsMaxScaleF16(ulong x, ulong blockMax, ulong scaleOut, int count, nint stream)
+    {
+        uint blocks = (uint)Fp8AbsMaxBlockCount(count);
+        ulong xA = x, bmA = blockMax; uint nA = (uint)count;
+        void** args = stackalloc void*[3];
+        args[0] = &xA; args[1] = &bmA; args[2] = &nA;
+        CudaDriverApi.cuLaunchKernel(_fp8AbsMaxF16, blocks, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+        ulong scA = scaleOut; uint nbA = blocks;
+        void** args2 = stackalloc void*[3];
+        args2[0] = &bmA; args2[1] = &nbA; args2[2] = &scA;
+        CudaDriverApi.cuLaunchKernel(_fp8AbsMaxFinalizeScale, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args2, 0).ThrowOnError();
+    }
+
+    /// <summary>F16-activation twin of <see cref="LaunchFp8QuantF32ToE4M3"/>: out[i] = e4m3(h2f(x[i]) · 448/amax).</summary>
+    public unsafe void LaunchFp8QuantF16ToE4M3(ulong output, ulong input, ulong scale, int count, nint stream)
+    {
+        ulong iA = input, oA = output, sA = scale; uint nA = (uint)count;
+        void** args = stackalloc void*[4];
+        args[0] = &iA; args[1] = &oA; args[2] = &sA; args[3] = &nA;
+        uint gridDim = (uint)((count + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_fp8QuantF16ToE4M3, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches BF16 to F32 cast (lossless — BF16 is the upper 16 bits of F32). Input is 2 bytes/element, output is 4 bytes/element.</summary>

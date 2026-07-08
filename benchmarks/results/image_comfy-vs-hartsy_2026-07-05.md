@@ -183,3 +183,67 @@ elementwise/attention traffic (the dominant GPU cost; fp8 doesn't touch it); (2)
 activation arena** — eliminates the per-op alloc/free churn by reusing buffers and replaying the denoise step.
 Estimated: F16 → ~16–18s, + graph/arena → GPU-floor ~8s, then within reach of 6.5s. `Krea2Transformer.ForwardPatched`
 + device Euler step already give a clean, drain-free per-step region to capture.
+
+## 2026-07-07 — Krea2-Turbo BEATS ComfyUI: 27.7s → **5.83s** (Comfy 6.5s) — engine `alpha.43.137-local`
+
+**Final: Hartsy 5.83s warm median vs Comfy 6.5s = 1.11× FASTER. From 70.6s (10.9× slower) at the start of the effort.**
+Coherent astronaut-on-horse verified at every stage. Flags: `HARTSY_SDPA_CUDNN=1 HARTSY_FP8_NATIVE=1
+HARTSY_KREA2_F16=1 HARTSY_KEEP_MODELS=1 HARTSY_MEMPOOL_KEEP=1`. Peak VRAM 23.9 GB (fits 24 GB, weights stay packed fp8).
+
+### The decisive discovery: the gap was the VAE, not the DiT
+Wall-clock **phase probes** in `Krea2Pipeline` (op profiles only summed ~5.5s of the 27s — the rest was invisible
+to op-level profiling) attributed the 27s: TE 0.9s / DiT re-upload 1.5s / **denoise 8 steps = 3.9s** / **VAE decode
+= 20.1s** / rgb 0.01s. The transformer was ALREADY Comfy-class after the cumulative optimizations; the entire
+remaining gap was `QwenImageVaeDecoder` running its RMS norms + residual adds as **host CPU loops** (a comment
+claimed per-gen amortization made GPU kernels unnecessary — false at 1024²): ~35 × (D2H drain of up-to-400 MB
+conv output + CPU triple-loop + H2D re-upload). This also explains why the arena (0%) and F16 (≈0% wall) "failed":
+they correctly optimized a transformer that was already fast. Op-level elimination experiments cannot see
+un-instrumented host phases — **instrument wall-clock phases first.**
+
+### What shipped (alpha.43.133 → .137)
+| Change | Effect |
+|---|---|
+| **F16 activations for the Krea2 DiT** (`HARTSY_KREA2_F16`): 8 new `__half` PTX kernels (dit_f16.cu via nvrtc — RmsNorm/AffineBroadcast/GatedResidual/AddScalar/Sigmoid/RopeInterleaved/RepeatKv/SliceRows) + F16 branches in CudaBackend + block/attention conversion + zero-cast native-F16 cuDNN SDPA + **F16→e4m3 activation-quant** (`absmax_f16`/`quant_f16_e4m3`) so the native fp8 GEMM keeps weights PACKED (no per-step recast, no VRAM regression) | norm/residual/permute GPU time ↓8–19×; wall ≈0 (DiT wasn't the wall) — but it's what makes the 3.9s denoise loop this fast, and F16-kernel parity is unit-tested (`DitF16KernelTests`) |
+| **Qwen VAE GPU-residency port**: `WanRmsNormChannel` (existing kernel) replaces host `RmsNormPerPixelAcrossChannels` in residual blocks + attention + head; device `Add` residuals; device SliceRows+Transpose2D QKV split; device Clamp | **VAE decode 20,139ms → 16ms (~1250×)**; wall 27.0 → **7.4s** |
+| **`HARTSY_KEEP_MODELS=1`**: DiT weights stay GPU-resident across gens (skip post-loop free + next-gen ~1.8s re-upload). TE still freed each gen — its VRAM is required by the VAE decode's 6.9 GB im2col (keeping all three OOM'd) | wall 7.4 → **5.83s** |
+
+### Warm-gen phase profile at 5.83s (probe logs)
+TE preload+encode+free 1.13s · DiT preload 0ms (resident) · denoise 8 steps 3.95s (~525ms/step, step2 ~220ms) ·
+VAE decode 271ms · rgb 148ms.
+
+### Remaining headroom (next targets, in order)
+1. **TE churn ~1.1s/gen** — cache prompt embeddings across gens (same prompt = free), or pin the TE on the second GPU.
+2. **~525ms/step → ~450ms** — CUDA-graph capture of `ForwardPatched` (scaffolding proven; arena in-tree default-off
+   provides deterministic addresses), fuse remaining per-step ops.
+3. **VAE decode 271ms → ~100ms** — F16 conv + fold the 6.9 GB im2col peak (would also let TE stay resident → kills #1).
+4. Replicate the VAE-host-glue fix fleet-wide: any model using `QwenImageVaeDecoder`/host-loop VAE norms
+   (Qwen-Image, Anima, …) inherits the same win; re-bench SDXL/Flux/Chroma VAEs for the same pathology.
+
+## Persistent activation arena (`HARTSY_ACT_ARENA`) — engine `alpha.43.132-local` — **NEGATIVE RESULT**
+
+Implemented a size-keyed in-process free-list at the `CudaMemory.AllocateAsync`/`FreeAsync` choke point: recycle freed
+device blocks instead of `cuMemAllocAsync`/`cuMemFreeAsync` per op (bit-identical, zero op/block/Tensor changes,
+`HARTSY_ARENA_MAX_MB` cap, OOM-drains idle blocks). Hypothesis: the ~18s residual was stream-ordered alloc/free driver
+churn. **Disproven.**
+
+| | Comfy | Baseline (43.131) | Arena on (43.132) | Δ |
+|---|---|---|---|---|
+| Krea2-Turbo warm | 6.5s | 27.7s | **28.9s** | ~0 (noise) | 
+| peak VRAM | — | 17.9 GB | **21.4 GB** | +3.5 GB |
+
+Image coherent (astronaut-on-horse, clean) → the free-list reuse is **safe** (stream-ordering guarantee holds; recycling
+never corrupted a live buffer). But **wall did not move**, and VRAM rose. Interpretation: `HARTSY_MEMPOOL_KEEP` (shipped
+in the 27.7s baseline) already made `cuMemAllocAsync` a cheap warm-pool pop — the arena replaced a cheap pool-pop with a
+cheap dict-pop, and its exact-size buckets are *less* memory-efficient than the driver pool's coalescing (hence +3.5 GB).
+**Allocation is NOT the bottleneck.**
+
+### Reconciled diagnosis — it is memory-bandwidth / elementwise-kernel bound, not allocation
+Three independent eliminations now converge: `HARTSY_FP8_NATIVE` → 0% (not GEMM-compute-bound); host op-issue ≈2.2s
+(not host-dispatch-bound); **arena → 0% (not allocation-bound)**; SplitModulation −2.5k ops → 0.5s (not op-count-bound).
+By elimination the ~18s residual is **GPU execution of the many bandwidth-heavy F32 elementwise/norm/attention activation
+kernels** (RmsNorm, GatedResidual, Modulate, Concat, Permute, Silu, Mul, Add over `[1,~4600,3072]` F32 = ~56 MB each),
+which the NvtxRange profile under-counts (many of these ops have no range). This is exactly what **F16 activations**
+halve (bytes read/written per kernel) and what **fused elementwise kernels** reduce (fewer passes over the data).
+**Next = F16 activation path** (keep fp8 weights packed via activation-quant GEMM — see plan) ± fused norm/AdaLN kernels.
+The arena stays in-tree, default-off: harmless, and it is the right substrate for later CUDA-graph capture (deterministic
+addresses, zero mid-step `cuMemAllocAsync`).

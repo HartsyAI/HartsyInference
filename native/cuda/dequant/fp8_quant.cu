@@ -90,3 +90,63 @@ extern "C" __global__ void quant_f32_e4m3(
     float rs = 1.0f / scale[0];
     out[i] = f32_to_e4m3(x[i] * rs);
 }
+
+// ── F16-activation twins (the Krea2 F16-activation path) ───────────────────────────────────────
+// Same two-pass absmax + fused scale-and-quantize, reading __half activations (converted to F32 in
+// registers — the reduction/quant math is unchanged). Keeps the native fp8 GEMM path (weights packed,
+// activation quantized per-tensor) available to F16 activations; without these, F16 activations fall
+// off the native path onto the per-call fp8->F16 weight recast (the Axis-B pathology). __half is read
+// via raw bit reinterpretation (no cuda_fp16.h dependency, matching this file's no-header style).
+__device__ __forceinline__ float h16_to_f32(unsigned short h)
+{
+    unsigned int sign = ((unsigned int)h & 0x8000u) << 16;
+    unsigned int expo = (h >> 10) & 0x1Fu;
+    unsigned int mant = h & 0x3FFu;
+    unsigned int bits;
+    if (expo == 0u)
+    {
+        if (mant == 0u) { bits = sign; }                        // +-0
+        else
+        {
+            // subnormal: normalize
+            int e = -1;
+            do { mant <<= 1; e++; } while ((mant & 0x400u) == 0u);
+            bits = sign | ((unsigned int)(127 - 15 - e) << 23) | ((mant & 0x3FFu) << 13);
+        }
+    }
+    else if (expo == 0x1Fu) { bits = sign | 0x7F800000u | (mant << 13); }   // inf/NaN
+    else { bits = sign | ((expo - 15u + 127u) << 23) | (mant << 13); }
+    return __uint_as_float(bits);
+}
+
+extern "C" __global__ void absmax_f16(
+    const unsigned short* __restrict__ x, float* __restrict__ blockMax, unsigned int n)
+{
+    __shared__ float sm[REDUCE_THREADS];
+    unsigned int tid = threadIdx.x;
+    float m = 0.0f;
+    for (unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + tid; i < n;
+         i += (unsigned long long)gridDim.x * blockDim.x)
+    {
+        float v = fabsf(h16_to_f32(x[i]));
+        if (v > m) m = v;
+    }
+    sm[tid] = m;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (tid < s && sm[tid + s] > sm[tid]) sm[tid] = sm[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) blockMax[blockIdx.x] = sm[0];
+}
+
+extern "C" __global__ void quant_f16_e4m3(
+    const unsigned short* __restrict__ x, unsigned char* __restrict__ out,
+    const float* __restrict__ scale, unsigned int n)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float rs = 1.0f / scale[0];
+    out[i] = f32_to_e4m3(h16_to_f32(x[i]) * rs);
+}

@@ -69,29 +69,31 @@ public sealed unsafe class Krea2Block
     // GatedResidualLastDim; the [6,hidden]-table split → SliceRows + Add (B=1; B>1 keeps the host loop).
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor tembMod, FluxRope rope, int batch, int seqLen)
     {
-        // 6 modulation vectors [B, hidden] = tembMod.unflatten(6, hidden) + scale_shift_table.
+        // 6 modulation vectors [B, hidden] = tembMod.unflatten(6, hidden) + scale_shift_table. These stay F32 (tiny
+        // per-channel vectors); the F16 norm/modulate/gate kernels take an F16 activation + F32 params.
         Tensor[] mod = SplitModulation(backend, tembMod, _scaleShiftTable!, batch);
+        DType act = Krea2Dtype.Act;   // F16 hot path (HARTSY_KREA2_F16) else F32; `hidden` arrives in this dtype
 
         TensorShape hShape = new TensorShape(batch, seqLen, _hidden);
-        Tensor n1 = new Tensor(hShape, DType.F32);
+        Tensor n1 = new Tensor(hShape, act);
         backend.RmsNorm(n1, hidden, _norm1!, _eps);
-        Tensor preIn = DiTUtils.Modulate(backend, n1, mod[1], mod[0], hShape); // (1+prescale)·n1 + preshift
+        Tensor preIn = DiTUtils.Modulate(backend, n1, mod[1], mod[0], hShape); // (1+prescale)·n1 + preshift (follows n1 dtype)
         n1.Dispose();
 
         Tensor attnOut = _attn.Forward(backend, preIn, rope, batch, seqLen);
         preIn.Dispose();
-        Tensor h1 = new Tensor(hShape, DType.F32);
+        Tensor h1 = new Tensor(hShape, act);
         backend.GatedResidualLastDim(h1, hidden, attnOut, mod[2]);            // h + pregate·attn
         attnOut.Dispose();
 
-        Tensor n2 = new Tensor(hShape, DType.F32);
+        Tensor n2 = new Tensor(hShape, act);
         backend.RmsNorm(n2, h1, _norm2!, _eps);
         Tensor postIn = DiTUtils.Modulate(backend, n2, mod[4], mod[3], hShape); // (1+postscale)·n2 + postshift
         n2.Dispose();
 
         Tensor ffOut = SwiGlu(backend, postIn, batch, seqLen);
         postIn.Dispose();
-        Tensor outp = new Tensor(hShape, DType.F32);
+        Tensor outp = new Tensor(hShape, act);
         backend.GatedResidualLastDim(outp, h1, ffOut, mod[5]);               // h + postgate·ff
         ffOut.Dispose(); h1.Dispose();
 
@@ -145,18 +147,23 @@ public sealed unsafe class Krea2Block
 
     private Tensor SwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
     {
+        // Follows the block activation dtype. F16 note: the silu(g)·u product is THE F16 overflow risk site
+        // (65504 ceiling — why BF16 is the fp8-GEMM default for F32 activations). Krea2's fp8 checkpoint was
+        // trained/quantized with e4m3 activations in mind (≤448 per-tensor-scaled), so overflow is not expected;
+        // validated empirically per the F16 bring-up (incoherent output here ⇒ overflow ⇒ keep FFN inner F32/BF16).
+        DType act = Krea2Dtype.Act;
         TensorShape ffShape = new TensorShape(batch, seqLen, _ffnInner);
-        Tensor g = new Tensor(ffShape, DType.F32);
-        Tensor u = new Tensor(ffShape, DType.F32);
+        Tensor g = new Tensor(ffShape, act);
+        Tensor u = new Tensor(ffShape, act);
         backend.Linear(g, input, _ffGate!, null);
         backend.Linear(u, input, _ffUp!, null);
-        Tensor act = new Tensor(ffShape, DType.F32);
-        backend.Silu(act, g);
+        Tensor silu = new Tensor(ffShape, act);
+        backend.Silu(silu, g);
         g.Dispose();
-        Tensor gated = new Tensor(ffShape, DType.F32);
-        backend.Mul(gated, act, u);
-        act.Dispose(); u.Dispose();
-        Tensor outp = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
+        Tensor gated = new Tensor(ffShape, act);
+        backend.Mul(gated, silu, u);
+        silu.Dispose(); u.Dispose();
+        Tensor outp = new Tensor(new TensorShape(batch, seqLen, _hidden), act);
         backend.Linear(outp, gated, _ffDown!, null);
         gated.Dispose();
         return outp;
