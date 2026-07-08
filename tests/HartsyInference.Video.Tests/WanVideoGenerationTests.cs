@@ -145,6 +145,65 @@ public class WanVideoGenerationTests
         finally { foreach (SafeTensorsLoader l in loaders) l.Dispose(); }
     }
 
+    /// <summary>VAE quality discriminator: encodes a real RGB image through the Wan VAE encoder and decodes it
+    /// straight back (no denoising), writing input/output BMPs for visual comparison. Isolates VAE-roundtrip
+    /// softness/halos from denoise/parameter problems. Env: <c>WAN_ROUNDTRIP_IMG</c> (raw RGB24 .bin) or uses a
+    /// synthetic checker+gradient; <c>WAN_VAE</c>, <c>WAN_RT_W/H</c> (default 832×480).</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void WanVae_Roundtrip_Quality()
+    {
+        string vaePath = Env("WAN_VAE") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/VAE/Wan/wan_2.1_vae.safetensors";
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!File.Exists(vaePath) || !Directory.Exists(ptxDir) || !CudaContext.IsAvailable())
+        { _output.WriteLine("SKIPPED: missing VAE/PTX/CUDA."); return; }
+        int w = (int)EnvD("WAN_RT_W", 832), h = (int)EnvD("WAN_RT_H", 480);
+
+        byte[] rgb;
+        string? imgPath = Env("WAN_ROUNDTRIP_IMG");
+        if (imgPath is not null && File.Exists(imgPath))
+        {
+            rgb = File.ReadAllBytes(imgPath);
+            Assert.True(rgb.Length >= w * h * 3, $"raw RGB24 file must be ≥ {w * h * 3} bytes for {w}x{h}");
+        }
+        else
+        {
+            rgb = new byte[w * h * 3];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    int o = (y * w + x) * 3;
+                    bool check = ((x / 16) + (y / 16)) % 2 == 0;   // fine checker exposes VAE softness
+                    rgb[o] = (byte)(check ? 230 : 25);
+                    rgb[o + 1] = (byte)(255 * x / w);
+                    rgb[o + 2] = (byte)(255 * y / h);
+                }
+        }
+
+        (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+        try
+        {
+            Wan21VaeEncoder enc = new(); enc.LoadWeights(vaeW);
+            Wan21VaeDecoder dec = new(); dec.LoadWeights(vaeW);
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+            backend.PreloadWeights(enc.EnumerateWeights());
+            Tensor lat = enc.EncodeRgbFrame(backend, rgb, w, h);
+            backend.Sync();
+            backend.FreeWeights(enc.EnumerateWeights());
+            backend.PreloadWeights(dec.EnumerateWeights());
+            Tensor rgbOut = dec.Decode(backend, lat);   // [1,3,T(=1..4),H,W]
+            lat.Dispose();
+            string outDir = Path.Combine(TestPaths.OutputDir, $"wan_vae_roundtrip_{DateTime.Now:yyyyMMdd_HHmmss}");
+            Directory.CreateDirectory(outDir);
+            HartsyInference.Diffusion.Utilities.ImagePostProcessor.SaveBmp(Path.Combine(outDir, "input.bmp"), rgb, w, h);
+            byte[] outFrame = VideoRgbFrames.ExtractFrame(rgbOut, 0);
+            HartsyInference.Diffusion.Utilities.ImagePostProcessor.SaveBmp(Path.Combine(outDir, "roundtrip.bmp"), outFrame, w, h);
+            rgbOut.Dispose();
+            _output.WriteLine($"[roundtrip] → {outDir}");
+        }
+        finally { foreach (SafeTensorsLoader l in vl) l.Dispose(); }
+    }
+
     /// <summary>Real-weight e2e for Wan2.1 I2V-14B (CLIP-conditioned image-to-video): loads the fp8 DiT (auto-detected
     /// I2V config: in=36, image_dim=1280, CFG-renorm on), the z=16 VAE (decoder + encoder), and CLIP-ViT-H; encodes a
     /// reference image to the 257×1280 penultimate hidden states → <c>imageEmbeds</c> and VAE-encodes it into the
