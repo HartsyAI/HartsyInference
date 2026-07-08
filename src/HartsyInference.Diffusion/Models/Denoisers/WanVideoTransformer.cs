@@ -23,6 +23,12 @@ public sealed unsafe class WanVideoTransformer : IDisposable
     // I2V image embedder (condition_embedder.image_embedder), shared with the Animate DiT.
     private readonly WanImageEmbedder _imgEmbedder;
 
+    // Per-generation caches for the step-invariant conditioning work (recomputed 2×/step before):
+    // RoPE cos/sin keyed by the latent grid, and the projected text(+image) context keyed by encoder identity.
+    private (int T, int H, int W) _ropeKey = (-1, -1, -1);
+    private Tensor? _cosC, _sinC;
+    private readonly Dictionary<Tensor, (Tensor Ctx, int ImageContextLen)> _ctxCache = new(ReferenceEqualityComparer.Instance);
+
     public WanVideoTransformer(WanVideoConfig config)
     {
         _config = config;
@@ -90,7 +96,13 @@ public sealed unsafe class WanVideoTransformer : IDisposable
             throw new ArgumentException($"timesteps must have 1 or {gt} (latent frame groups) entries; got {g}.", nameof(timesteps));
         int tokensPerGroup = s / g;
 
-        (Tensor cos, Tensor sin) = _rope.BuildCosSin(gt, gh, gw);
+        if (_ropeKey != (gt, gh, gw))
+        {
+            _cosC?.Dispose(); _sinC?.Dispose();
+            (_cosC, _sinC) = _rope.BuildCosSin(gt, gh, gw);
+            _ropeKey = (gt, gh, gw);
+        }
+        (Tensor cos, Tensor sin) = (_cosC!, _sinC!);
 
         WanVideoDebugDump.Dump("latent_in", latent);   // raw transformer input, so the Python reference recomputes every stage
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]
@@ -103,19 +115,43 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         WanVideoDebugDump.Dump("cond_timestepProj", timestepProj);
         WanVideoDebugDump.Dump("cond_cos", cos);
         WanVideoDebugDump.Dump("cond_sin", sin);
-        Tensor textProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
-        WanVideoDebugDump.Dump("cond_textProj", textProj);
-
-        // I2V: project the CLIP image embeds and prepend them to the text context; the blocks split at imageContextLen.
+        // The projected text(+image) context is timestep-independent — cache it per encoder tensor identity so the
+        // 2 projections + gelu (+ image embed + concat) run once per generation instead of 2×/step. The cached
+        // tensor is host-materialized below, so it survives the pipeline's per-step FreeActivations (device copy
+        // re-uploads on demand; the host data stays authoritative).
         int imageContextLen = 0;
-        Tensor encoderProj = textProj;
-        if (imageEmbeds is not null && _imgEmbedder.IsLoaded)
+        Tensor encoderProj;
+        bool ctxCached = imageEmbeds is null;   // I2V contexts also depend on the image embeds → uncached per-forward
+        if (ctxCached && _ctxCache.TryGetValue(encoder, out (Tensor Ctx, int ImageContextLen) cached))
         {
-            Tensor imgProj = _imgEmbedder.Forward(backend, imageEmbeds, dim);
-            imageContextLen = (int)imgProj.Shape[0];
-            encoderProj = WanDitOps.ConcatRows(imgProj, textProj, dim);
-            imgProj.Dispose();
-            textProj.Dispose();
+            encoderProj = cached.Ctx;
+            imageContextLen = cached.ImageContextLen;
+        }
+        else
+        {
+            Tensor textProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+            WanVideoDebugDump.Dump("cond_textProj", textProj);
+
+            // I2V: project the CLIP image embeds and prepend them to the text context; the blocks split at imageContextLen.
+            encoderProj = textProj;
+            if (imageEmbeds is not null && _imgEmbedder.IsLoaded)
+            {
+                Tensor imgProj = _imgEmbedder.Forward(backend, imageEmbeds, dim);
+                imageContextLen = (int)imgProj.Shape[0];
+                encoderProj = WanDitOps.ConcatRows(imgProj, textProj, dim);
+                imgProj.Dispose();
+                textProj.Dispose();
+            }
+            if (ctxCached)
+            {
+                _ = (nint)encoderProj.DataPointer;   // host-materialize (see cache note above)
+                if (_ctxCache.Count >= 4)   // cap: prompts changed across gens; drop the stale contexts
+                {
+                    foreach ((Tensor ctx, _) in _ctxCache.Values) ctx.Dispose();
+                    _ctxCache.Clear();
+                }
+                _ctxCache[encoder] = (encoderProj, imageContextLen);
+            }
         }
 
         Tensor cur = hidden;
@@ -131,7 +167,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
             cur = next;
             WanVideoDebugDump.Dump($"blocks.{i}", cur);
         }
-        cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
+        timestepProj.Dispose();   // cos/sin/encoderProj live in the per-generation caches — not per-forward temporaries
 
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, s, dim, _config.Eps, tokensPerGroup);
         cur.Dispose();

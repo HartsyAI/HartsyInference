@@ -164,11 +164,12 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
                 Latent = latents,
                 LatentArch = LatentArchitecture.Wan,
             });
-            // Reclaim GPU-resident activation buffers between steps AND trim the stream-ordered pool — the audio
-            // injector's per-frame host-glue churn interleaved with the fp8 transient weight casts fragments the pool
-            // until a mid-run OOM otherwise (the latent is host-side, so nothing cross-step is lost).
-            Backend.FreeActivations();
-            Backend.TrimMemoryPool();
+            // Reclaim GPU-resident activation buffers between steps (the latent is host-side, so nothing cross-step
+            // is lost) WITHOUT trimming the stream-ordered pool: TrimMemoryPool syncs + re-maps multi-GB driver
+            // reservations every step (the cost HunyuanVideo/Kandinsky avoid via trimPool:false). The historical
+            // mid-run OOM this trim papered over predates the pool-friendly fp8 transient path; if it recurs, trim
+            // on OOM-retry rather than unconditionally.
+            Backend.FreeActivations(trimPool: false);
             if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-free   free={Backend.FreeMemoryBytes() >> 20}MB");
         }
 

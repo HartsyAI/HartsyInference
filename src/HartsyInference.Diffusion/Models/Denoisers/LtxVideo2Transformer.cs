@@ -40,6 +40,10 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     private readonly AdaLnSingle _caVideoScaleShift, _caAudioScaleShift;
     private readonly AdaLnSingle _caVideoGate, _caAudioGate;
 
+    // Per-generation RoPE cos/sin cache (grid-keyed; tables are step-invariant).
+    private (int Frames, int Height, int Width, double Fps, int AudioFrames) _ropeKey = (-1, -1, -1, 0, -1);
+    private Tensor? _vCosC, _vSinC, _aCosC, _aSinC, _cvCosC, _cvSinC;
+
     public LtxVideo2Transformer(LtxVideo2Config config)
     {
         _config = config;
@@ -177,9 +181,20 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         (Tensor tCaVGate, Tensor _gv) = _caVideoGate.Forward(backend, timestep * _gateScaleFactor); _gv.Dispose();
         (Tensor tCaAGate, Tensor _ga) = _caAudioGate.Forward(backend, timestep * _gateScaleFactor); _ga.Dispose();
 
-        (Tensor vCos, Tensor vSin) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
-        (Tensor aCos, Tensor aSin) = _audioRope.BuildAudio(audioFrames);
-        (Tensor cvCos, Tensor cvSin) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+        // RoPE tables depend only on (grid, fps, audioFrames) — fixed for a whole generation — so build them once
+        // and reuse across every step/CFG forward (was 3 host builds + uploads ×2 forwards ×steps per gen).
+        (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
+        if (_ropeKey != ropeKey)
+        {
+            DisposeRopeCache();
+            (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
+            (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            _ropeKey = ropeKey;
+        }
+        (Tensor vCos, Tensor vSin) = (_vCosC!, _vSinC!);
+        (Tensor aCos, Tensor aSin) = (_aCosC!, _aSinC!);
+        (Tensor cvCos, Tensor cvSin) = (_cvCosC!, _cvSinC!);
 
         LtxVideo2BlockContext ctx = new()
         {
@@ -210,8 +225,7 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
             OnBlockOutput?.Invoke(i, hidden, audioHidden);
         }
 
-        foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate,
-            vCos, vSin, aCos, aSin, cvCos, cvSin })
+        foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate })
             t?.Dispose();
 
         Tensor video = OutputLayer(backend, hidden, embV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
@@ -221,27 +235,42 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         return (video, audio);
     }
 
-    /// <summary>AdaLN-Single output: <c>shift/scale = scale_shift_table + embedded</c> ([dim], broadcast over the
-    /// sequence), LayerNorm-no-affine, <c>·(1+scale)+shift</c>, then <c>proj_out</c>.</summary>
+    /// <summary>AdaLN-Single output, fully device-resident: <c>shift/scale = scale_shift_table + embedded</c> ([dim],
+    /// broadcast over the sequence; table rows are [shift; scale] — keep that order), LayerNorm-no-affine,
+    /// <c>·(1+scale)+shift</c>, then <c>proj_out</c>. Was a host loop draining the full hidden state, 2×/forward.</summary>
     private static Tensor OutputLayer(IBackend backend, Tensor hidden, Tensor embedded, Tensor scaleShift,
         Tensor projW, Tensor? projB, int s, int dim, int outChannels)
     {
-        float* ss = (float*)scaleShift.DataPointer;
-        float* em = (float*)embedded.DataPointer;
+        Tensor ssShift = new Tensor(new TensorShape(dim), DType.F32);
+        backend.SliceRows(ssShift, scaleShift, 0);
+        Tensor ssScale = new Tensor(new TensorShape(dim), DType.F32);
+        backend.SliceRows(ssScale, scaleShift, 1);
+        Tensor shift = new Tensor(new TensorShape(dim), DType.F32);
+        backend.Add(shift, ssShift, embedded);
+        ssShift.Dispose();
+        Tensor scale1 = new Tensor(new TensorShape(dim), DType.F32);
+        backend.Add(scale1, ssScale, embedded);
+        ssScale.Dispose();
+        Tensor scale1p = new Tensor(new TensorShape(dim), DType.F32);
+        backend.AddScalar(scale1p, scale1, 1f);
+        scale1.Dispose();
         Tensor normed = new Tensor(new TensorShape(s, dim), DType.F32);
-        DiTUtils.LayerNormNoAffine(normed, hidden, 1, s, dim, 1e-6f);
-        float* np = (float*)normed.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < dim; d++)
-            {
-                float shift = ss[d] + em[d];
-                float scale = ss[dim + d] + em[d];
-                np[(long)i * dim + d] = np[(long)i * dim + d] * (1f + scale) + shift;
-            }
+        backend.LayerNormNoAffine(normed, hidden, 1e-6f);
+        Tensor modded = new Tensor(new TensorShape(s, dim), DType.F32);
+        backend.AffineBroadcastLastDim(modded, normed, scale1p, shift);
+        normed.Dispose(); scale1p.Dispose(); shift.Dispose();
         Tensor outVel = new Tensor(new TensorShape(s, outChannels), DType.F32);
-        backend.Linear(outVel, normed, projW, projB);
-        normed.Dispose();
+        backend.Linear(outVel, modded, projW, projB);
+        modded.Dispose();
         return outVel;
+    }
+
+    private void DisposeRopeCache()
+    {
+        foreach (Tensor? t in new[] { _vCosC, _vSinC, _aCosC, _aSinC, _cvCosC, _cvSinC })
+            t?.Dispose();
+        _vCosC = _vSinC = _aCosC = _aSinC = _cvCosC = _cvSinC = null;
+        _ropeKey = (-1, -1, -1, 0, -1);
     }
 
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key)
@@ -254,6 +283,10 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            // Null-only (no Tensor.Dispose): transformer disposal may run AFTER the backend's CudaContext is torn
+            // down, where disposing a GPU-promoted tensor throws ObjectDisposedException. The finalizer drain path
+            // reclaims them; actual disposal happens on mid-session grid changes in DisposeRopeCache.
+            _vCosC = _vSinC = _aCosC = _aSinC = _cvCosC = _cvSinC = null;
             _projInW = _projInB = _audioProjInW = _audioProjInB = null;
             _projOutW = _projOutB = _audioProjOutW = _audioProjOutB = _scaleShift = _audioScaleShift = null;
         }
@@ -301,15 +334,10 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
             Tensor modFlat = new Tensor(new TensorShape(1, _numParams * _dim), DType.F32);
             backend.Linear(modFlat, sil, _linW!, _linB); sil.Dispose();
 
-            Tensor mod = new Tensor(new TensorShape(_numParams * _dim), DType.F32);
-            Buffer.MemoryCopy((float*)modFlat.DataPointer, (float*)mod.DataPointer,
-                (long)_numParams * _dim * 4, (long)_numParams * _dim * 4);
-            modFlat.Dispose();
-
-            Tensor embedded = new Tensor(new TensorShape(_dim), DType.F32);
-            Buffer.MemoryCopy((float*)embedded2d.DataPointer, (float*)embedded.DataPointer, (long)_dim * 4, (long)_dim * 4);
-            embedded2d.Dispose();
-            return (mod, embedded);
+            // Returned as the [1, n·dim]/[1, dim] Linear outputs directly — every consumer is an element-count
+            // device op. The old host Buffer.MemoryCopy repack was a D2H drain of both tensors per modulator
+            // (8 modulators × 2 CFG forwards per step — the Kandinsky temb stream-drain pathology).
+            return (modFlat, embedded2d);
         }
     }
 }

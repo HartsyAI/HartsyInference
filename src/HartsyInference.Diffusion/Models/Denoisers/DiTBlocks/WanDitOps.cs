@@ -91,11 +91,22 @@ public static unsafe class WanDitOps
             Tensor e1 = new Tensor(new TensorShape(1, dim), DType.F32); backend.Linear(e1, sinEmb, emb1W, emb1B); sinEmb.Dispose();
             Tensor e1a = new Tensor(e1.Shape, DType.F32); backend.Silu(e1a, e1); e1.Dispose();
             Tensor temb2d = new Tensor(new TensorShape(1, dim), DType.F32); backend.Linear(temb2d, e1a, emb2W, emb2B); e1a.Dispose();
-            Buffer.MemoryCopy((float*)temb2d.DataPointer, (float*)temb.DataPointer + (long)gi * dim, (long)dim * 4, (long)dim * 4);
-
-            Tensor sil = new Tensor(new TensorShape(1, dim), DType.F32); backend.Silu(sil, temb2d); temb2d.Dispose();
+            Tensor sil = new Tensor(new TensorShape(1, dim), DType.F32); backend.Silu(sil, temb2d);
             Tensor projFlat = new Tensor(new TensorShape(1, 6 * dim), DType.F32); backend.Linear(projFlat, sil, projW, projB); sil.Dispose();
-            Buffer.MemoryCopy((float*)projFlat.DataPointer, (float*)proj.DataPointer + (long)gi * 6 * dim, (long)6 * dim * 4, (long)6 * dim * 4);
+            if (g == 1)
+            {
+                // Device copies keep temb/proj GPU-resident. The old host Buffer.MemoryCopy drained both Linear
+                // outputs D2H per forward AND left the results host-side, so every per-block consumer re-uploaded
+                // them — one such 2 KB pageable H2D can stall the whole queued stream (the Kandinsky temb bug).
+                backend.CopyInto(temb, temb2d);
+                backend.CopyInto(proj, projFlat);
+            }
+            else
+            {
+                Buffer.MemoryCopy((float*)temb2d.DataPointer, (float*)temb.DataPointer + (long)gi * dim, (long)dim * 4, (long)dim * 4);
+                Buffer.MemoryCopy((float*)projFlat.DataPointer, (float*)proj.DataPointer + (long)gi * 6 * dim, (long)6 * dim * 4, (long)6 * dim * 4);
+            }
+            temb2d.Dispose();
             projFlat.Dispose();
         }
         return (temb, proj);
@@ -121,6 +132,36 @@ public static unsafe class WanDitOps
         Tensor projOutW, Tensor? projOutB, int s, int dim, float eps, int tokensPerGroup)
     {
         int g = (int)temb.Shape[0];
+        int outVec = (int)projOutW.Shape[0];
+        if (g == 1)
+        {
+            // Device-resident single-group path (all non-per-frame-timestep Wan variants): the host version below
+            // drains the FULL final hidden state D2H, modulates on the CPU, and re-uploads it for proj_out —
+            // one full-hidden round-trip per forward.
+            Tensor ssShift = new Tensor(new TensorShape(dim), DType.F32);
+            backend.SliceRows(ssShift, finalScaleShift, 0);
+            Tensor ssScale = new Tensor(new TensorShape(dim), DType.F32);
+            backend.SliceRows(ssScale, finalScaleShift, 1);
+            Tensor shift1 = new Tensor(new TensorShape(dim), DType.F32);
+            backend.Add(shift1, ssShift, temb);
+            ssShift.Dispose();
+            Tensor scaleSum = new Tensor(new TensorShape(dim), DType.F32);
+            backend.Add(scaleSum, ssScale, temb);
+            ssScale.Dispose();
+            Tensor scale1p = new Tensor(new TensorShape(dim), DType.F32);
+            backend.AddScalar(scale1p, scaleSum, 1f);
+            scaleSum.Dispose();
+            Tensor normedDev = new Tensor(new TensorShape(s, dim), DType.F32);
+            backend.LayerNormNoAffine(normedDev, hidden, eps);
+            Tensor modded = new Tensor(new TensorShape(s, dim), DType.F32);
+            backend.AffineBroadcastLastDim(modded, normedDev, scale1p, shift1);
+            normedDev.Dispose(); scale1p.Dispose(); shift1.Dispose();
+            Tensor projDev = new Tensor(new TensorShape(s, outVec), DType.F32);
+            backend.Linear(projDev, modded, projOutW, projOutB);
+            modded.Dispose();
+            return projDev;
+        }
+
         float* ss = (float*)finalScaleShift.DataPointer;
         float* em = (float*)temb.DataPointer;
         Tensor shift = new Tensor(new TensorShape(g, dim), DType.F32);
@@ -143,7 +184,6 @@ public static unsafe class WanDitOps
         }
         shift.Dispose(); scale.Dispose();
 
-        int outVec = (int)projOutW.Shape[0];
         Tensor proj = new Tensor(new TensorShape(s, outVec), DType.F32);
         backend.Linear(proj, normed, projOutW, projOutB);
         normed.Dispose();

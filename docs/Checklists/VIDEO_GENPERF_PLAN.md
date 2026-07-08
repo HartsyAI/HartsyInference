@@ -1,5 +1,29 @@
 # Video gen-perf — full audit + optimization plan (2026-07-08)
 
+> ## Phase 0+1 SHIPPED for LTX-2.3 (2026-07-08) — steps ~30 s → **~5.5 s (5.4×)**, coherent video+audio, test PASSES
+> Clean-GPU rerun: steps 2..20 = **5.5 s** flat (cond 2.76 s / uncond+euler 2.77 s — pure streaming floor now; the
+> first run's 8 s had Swarm contention). Phase probes (20 steps 25f 512×320): TE(Gemma)+connectors 11.4 s ·
+> preload 0.5 s · denoise 111 s · latent unpack 37 ms · **video VAE decode 18.1 s (the predicted host-loop killer
+> → Phase 4)** · rgb 62 ms · audio decode 1.7 s (vocoder 1.5 s). E2E ≈ 145 s vs 451 s baseline = **3.1×**.
+> Block GPU-residency port (`LtxVideo2Block` Modulation/ShiftScale/GatedAdd via Add+SliceRows/
+> AffineBroadcastLastDim/GatedResidualLastDim; `LtxVideo2Attention.ApplyGate` via sigmoid+0/1-GEMM-expand+Mul),
+> per-gen RoPE table cache, device OutputLayer, AdaLnSingle host-memcpy removal, device `CfgEulerStep(−dt)` Euler,
+> `[ltx2-phase]` probes. **Proven bit-identical** to the pre-port code (tiny-config CPU dump old-vs-new, byte-equal;
+> `LtxVideo2PortNumericsDumpTests`, env `LTX2_PORT_DUMP`). GPU e2e (20 steps 25f 512×320, real 22B fp8): steps
+> 2..20 ≈ **7.9–8.5 s** vs ~30 s baseline; coherent cat-in-garden + audio decoded. 165 s denoise vs ~600 s.
+> Gotcha found: transformer `Dispose()` must NOT dispose GPU-promoted cache tensors (context may already be torn
+> down) — null-only, dispose on mid-session key change instead.
+> Next lever (Phase 2): the remaining ~8 s/step is the unpinned, unoverlapped 19 GB×2 weight stream.
+>
+> **Fleet quick wins shipped same day — Wan 1.3B GPU-verified:** Wan `ConditionTimeGroups` temb/proj device
+> `CopyInto` (G=1), Wan+Hunyuan device final layer (G=1/B=1), Wan RoPE cos/sin memo + cross-step text-context cache
+> (host-materialized, survives per-step `FreeActivations`), S2V per-step `TrimMemoryPool` → `trimPool:false`.
+> A/B on `WanVariant_Gpu_E2E` (1.3B fp16, 33f 832×480, 20 steps, same seed, coherence-asserted PASS both):
+> **4.45–4.61 → 4.09–4.11 s/step (~9%)** and step jitter ±80 ms → ±6 ms (the drains were the jitter). Hunyuan
+> final-layer + S2V trim still need their own GPU e2e (weights/session-time bound, harnesses identified).
+> Pre-existing (NOT ours): `HunyuanVideoDitTests.Forward_ProducesFiniteVelocityOfLatentShape` fails at HEAD with
+> missing `txt_in.input_embedder.weight` synthetic key.
+
 Applying the Krea2/Z-Image playbook (`KREA2_ARENA_GRAPH_F16_PLAN.md`, memories `vae-host-loops-hidden-20s`,
 `cuda-graph-step-capture-recipe`, `image-genperf-host-glue-wins`) to the video fleet, with **LTX-2.3 22B
 (dual-stream video+audio)** as the priority target. Audit only — no code changed yet.

@@ -94,7 +94,7 @@ public sealed unsafe class LtxVideo2Attention
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         Tensor flat = FromBhsd(backend, attn, sq); attn.Dispose();   // [Sq, inner]
-        if (gateLogits is not null) { ApplyGate(flat, gateLogits, sq); gateLogits.Dispose(); }
+        if (gateLogits is not null) { flat = ApplyGate(backend, flat, gateLogits, sq); gateLogits.Dispose(); }
 
         Tensor outT = new(new TensorShape(sq, _outDim), DType.F32);
         backend.Linear(outT, flat, _oW!, _oB);
@@ -102,18 +102,43 @@ public sealed unsafe class LtxVideo2Attention
         return outT;
     }
 
-    /// <summary>Per-head output gating: each head's slice scaled by <c>2·sigmoid(logit_head)</c>.</summary>
-    private void ApplyGate(Tensor flat, Tensor gateLogits, int sq)
+    /// <summary>Per-head output gating on-device: each head's slice scaled by <c>2·sigmoid(logit_head)</c>. The
+    /// per-(row,head) gate is expanded to <c>[Sq, inner]</c> via a constant 0/1 block matrix GEMM (exact copy — one
+    /// term per output element), then applied with an elementwise multiply. Was a host <c>DataPointer</c> loop that
+    /// drained the SDPA output mid-chain, 6×/block.</summary>
+    private Tensor ApplyGate(IBackend backend, Tensor flat, Tensor gateLogits, int sq)
     {
-        float* fp = (float*)flat.DataPointer;
-        float* gl = (float*)gateLogits.DataPointer;
-        for (int i = 0; i < sq; i++)
-            for (int h = 0; h < _heads; h++)
-            {
-                float gate = 2.0f / (1.0f + MathF.Exp(-gl[i * _heads + h]));
-                float* row = fp + (long)i * _inner + (long)h * _headDim;
-                for (int d = 0; d < _headDim; d++) row[d] *= gate;
-            }
+        Tensor sig = new(new TensorShape(sq, _heads), DType.F32);
+        backend.Sigmoid(sig, gateLogits);
+        Tensor sig2 = new(new TensorShape(sq, _heads), DType.F32);
+        backend.Scale(sig2, sig, 2f);
+        sig.Dispose();
+        Tensor expand = HeadExpandWeights.GetOrAdd((_heads, _headDim), BuildHeadExpand);
+        Tensor gateFull = new(new TensorShape(sq, _inner), DType.F32);
+        backend.Linear(gateFull, sig2, expand, null);
+        sig2.Dispose();
+        Tensor o = new(new TensorShape(sq, _inner), DType.F32);
+        backend.Mul(o, flat, gateFull);
+        gateFull.Dispose();
+        flat.Dispose();
+        return o;
+    }
+
+    // One constant [inner, heads] expansion matrix per (heads, headDim) head layout, shared across every attention
+    // instance (per-instance copies would cost ~150 MB across 48 dual-stream blocks). Never disposed: process-lifetime
+    // constants totaling <1 MB, re-uploaded on demand if a backend context is torn down.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int Heads, int HeadDim), Tensor> HeadExpandWeights = new();
+
+    private static Tensor BuildHeadExpand((int Heads, int HeadDim) key)
+    {
+        Tensor w = new(new TensorShape(key.Heads * key.HeadDim, key.Heads), DType.F32);
+        float* p = (float*)w.DataPointer;
+        long total = (long)key.Heads * key.HeadDim * key.Heads;
+        for (long i = 0; i < total; i++) p[i] = 0f;
+        for (int h = 0; h < key.Heads; h++)
+            for (int d = 0; d < key.HeadDim; d++)
+                p[((long)h * key.HeadDim + d) * key.Heads + h] = 1f;
+        return w;
     }
 
     // [s, inner]=[s, heads, headDim] → [1, heads, s, headDim], GPU-resident via Permute0213 (was a host DataPointer

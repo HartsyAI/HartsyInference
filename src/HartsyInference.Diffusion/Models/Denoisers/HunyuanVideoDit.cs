@@ -153,8 +153,30 @@ public sealed unsafe class HunyuanVideoDit : IDisposable
         Tensor mod = new(new TensorShape(b, 2 * hidden), DType.F32);
         Tensor tAct = new(temb.Shape, DType.F32); backend.Silu(tAct, temb); temb.Dispose();
         backend.Linear(mod, tAct, _finalModW!, _finalModB!); tAct.Dispose();
-        Tensor normed = new(img.Shape, DType.F32); DiTUtils.LayerNormNoAffine(normed, img, b, sImg, hidden); img.Dispose();
-        Modulate(normed, mod, b, sImg, hidden); mod.Dispose();
+        Tensor normed = new(img.Shape, DType.F32);
+        if (b == 1)
+        {
+            // Device-resident final layer (B=1): the host path below drains the FULL last hidden state D2H,
+            // modulates on the CPU, and re-uploads it for proj — one full-hidden round-trip per forward.
+            // mod is packed [shift, scale] (Tencent adaLN_modulation order) — sliced in that order.
+            backend.LayerNormNoAffine(normed, img, 1e-6f); img.Dispose();
+            Tensor fShift = new(new TensorShape(hidden), DType.F32);
+            backend.SliceRows(fShift, mod, 0);
+            Tensor fScale = new(new TensorShape(hidden), DType.F32);
+            backend.SliceRows(fScale, mod, 1);
+            mod.Dispose();
+            Tensor fScale1 = new(new TensorShape(hidden), DType.F32);
+            backend.AddScalar(fScale1, fScale, 1f); fScale.Dispose();
+            Tensor modded = new(normed.Shape, DType.F32);
+            backend.AffineBroadcastLastDim(modded, normed, fScale1, fShift);
+            normed.Dispose(); fScale1.Dispose(); fShift.Dispose();
+            normed = modded;
+        }
+        else
+        {
+            DiTUtils.LayerNormNoAffine(normed, img, b, sImg, hidden); img.Dispose();
+            Modulate(normed, mod, b, sImg, hidden); mod.Dispose();
+        }
 
         int outVec = _cfg.OutChannels * pT * pH * pW;
         Tensor projected = new(new TensorShape(b, sImg, outVec), DType.F32);

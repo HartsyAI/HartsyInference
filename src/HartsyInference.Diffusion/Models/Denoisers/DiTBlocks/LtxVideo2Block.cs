@@ -129,43 +129,43 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         int sv = (int)hidden.Shape[0], sa = (int)audioHidden.Shape[0];
 
         // Modulation params (per-block table + global temb), broadcast over the sequence.
-        Tensor[] vMod = Modulation(_ssVideo!, ctx.TembVideo, 9, _vDim);     // shift_msa,scale_msa,gate_msa,shift_mlp,scale_mlp,gate_mlp,shift_tq,scale_tq,gate_tq
-        Tensor[] aMod = Modulation(_ssAudio!, ctx.TembAudio, 9, _aDim);
+        Tensor[] vMod = Modulation(backend, _ssVideo!, 0, ctx.TembVideo, 9, _vDim);     // shift_msa,scale_msa,gate_msa,shift_mlp,scale_mlp,gate_mlp,shift_tq,scale_tq,gate_tq
+        Tensor[] aMod = Modulation(backend, _ssAudio!, 0, ctx.TembAudio, 9, _aDim);
         bool hasPrompt = _promptVideo is not null && ctx.TembPromptVideo is not null;
-        Tensor[]? vPrompt = hasPrompt ? Modulation(_promptVideo!, ctx.TembPromptVideo!, 2, _vDim) : null;   // shift_kv,scale_kv
-        Tensor[]? aPrompt = hasPrompt ? Modulation(_promptAudio!, ctx.TembPromptAudio!, 2, _aDim) : null;
-        Tensor[] vCaSS = Modulation(Slice(_caVideo!, 0, 4, _vDim), ctx.TembCaVideoScaleShift, 4, _vDim); // a2v_scale,a2v_shift,v2a_scale,v2a_shift
-        Tensor[] aCaSS = Modulation(Slice(_caAudio!, 0, 4, _aDim), ctx.TembCaAudioScaleShift, 4, _aDim);
-        Tensor[] vCaGate = Modulation(Slice(_caVideo!, 4, 5, _vDim), ctx.TembCaVideoGate, 1, _vDim);     // a2v_gate
-        Tensor[] aCaGate = Modulation(Slice(_caAudio!, 4, 5, _aDim), ctx.TembCaAudioGate, 1, _aDim);     // v2a_gate
+        Tensor[]? vPrompt = hasPrompt ? Modulation(backend, _promptVideo!, 0, ctx.TembPromptVideo!, 2, _vDim) : null;   // shift_kv,scale_kv
+        Tensor[]? aPrompt = hasPrompt ? Modulation(backend, _promptAudio!, 0, ctx.TembPromptAudio!, 2, _aDim) : null;
+        Tensor[] vCaSS = Modulation(backend, _caVideo!, 0, ctx.TembCaVideoScaleShift, 4, _vDim); // a2v_scale,a2v_shift,v2a_scale,v2a_shift
+        Tensor[] aCaSS = Modulation(backend, _caAudio!, 0, ctx.TembCaAudioScaleShift, 4, _aDim);
+        Tensor[] vCaGate = Modulation(backend, _caVideo!, 4, ctx.TembCaVideoGate, 1, _vDim);     // a2v_gate
+        Tensor[] aCaGate = Modulation(backend, _caAudio!, 4, ctx.TembCaAudioGate, 1, _aDim);     // v2a_gate
 
         // ── 1. Self-attention ──
         Tensor n1 = RmsNoAffine(backend, hidden, _onesV, _vDim);
-        ApplyShiftScale(n1, vMod[1], vMod[0], _vDim);
+        n1 = ShiftScale(backend, n1, vMod[1], vMod[0]);
         Tensor attn1 = _attn1.Forward(backend, n1, n1, ctx.VideoRope, ctx.VideoCos, ctx.VideoSin, ctx.VideoRope, ctx.VideoCos, ctx.VideoSin, null);
         n1.Dispose();
-        hidden = GatedAddInto(hidden, attn1, vMod[2], _vDim); attn1.Dispose();
+        hidden = GatedAddInto(backend, hidden, attn1, vMod[2]); attn1.Dispose();
 
         Tensor an1 = RmsNoAffine(backend, audioHidden, _onesA, _aDim);
-        ApplyShiftScale(an1, aMod[1], aMod[0], _aDim);
+        an1 = ShiftScale(backend, an1, aMod[1], aMod[0]);
         Tensor aAttn1 = _aAttn1.Forward(backend, an1, an1, ctx.AudioRope, ctx.AudioCos, ctx.AudioSin, ctx.AudioRope, ctx.AudioCos, ctx.AudioSin, null);
         an1.Dispose();
-        audioHidden = GatedAddInto(audioHidden, aAttn1, aMod[2], _aDim); aAttn1.Dispose();
+        audioHidden = GatedAddInto(backend, audioHidden, aAttn1, aMod[2]); aAttn1.Dispose();
 
         // ── 2. Text cross-attention (Q: stream; K,V: text) ──
         Tensor n2 = RmsNoAffine(backend, hidden, _onesV, _vDim);
-        ApplyShiftScale(n2, vMod[7], vMod[6], _vDim);                       // scale_text_q, shift_text_q
+        n2 = ShiftScale(backend, n2, vMod[7], vMod[6]);                     // scale_text_q, shift_text_q
         Tensor encMod = vPrompt is not null ? ModulateRows(backend, ctx.Encoder, vPrompt[1], vPrompt[0], _vDim) : ctx.Encoder;   // enc·(1+scale_kv)+shift_kv
         Tensor attn2 = _attn2.Forward(backend, n2, encMod, null, null, null, null, null, null, ctx.EncoderMask);
         n2.Dispose(); if (vPrompt is not null) encMod.Dispose();
-        hidden = GatedAddInto(hidden, attn2, vMod[8], _vDim); attn2.Dispose();   // gate_text_q
+        hidden = GatedAddInto(backend, hidden, attn2, vMod[8]); attn2.Dispose();   // gate_text_q
 
         Tensor an2 = RmsNoAffine(backend, audioHidden, _onesA, _aDim);
-        ApplyShiftScale(an2, aMod[7], aMod[6], _aDim);
+        an2 = ShiftScale(backend, an2, aMod[7], aMod[6]);
         Tensor aEncMod = aPrompt is not null ? ModulateRows(backend, ctx.AudioEncoder, aPrompt[1], aPrompt[0], _aDim) : ctx.AudioEncoder;
         Tensor aAttn2 = _aAttn2.Forward(backend, an2, aEncMod, null, null, null, null, null, null, ctx.AudioEncoderMask);
         an2.Dispose(); if (aPrompt is not null) aEncMod.Dispose();
-        audioHidden = GatedAddInto(audioHidden, aAttn2, aMod[8], _aDim); aAttn2.Dispose();
+        audioHidden = GatedAddInto(backend, audioHidden, aAttn2, aMod[8]); aAttn2.Dispose();
 
         // ── 3. Audio↔Video cross-attention ──
         Tensor ncaV = RmsNoAffine(backend, hidden, _onesV, _vDim);          // audio_to_video_norm(video)
@@ -176,60 +176,55 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         Tensor modA = ModulateRows(backend, ncaA, aCaSS[0], aCaSS[1], _aDim);
         Tensor a2v = _a2v.Forward(backend, modV, modA, ctx.CaVideoRope, ctx.CaVideoCos, ctx.CaVideoSin, ctx.CaAudioRope, ctx.CaAudioCos, ctx.CaAudioSin, null);
         modV.Dispose(); modA.Dispose();
-        hidden = GatedAddInto(hidden, a2v, vCaGate[0], _vDim); a2v.Dispose();
+        hidden = GatedAddInto(backend, hidden, a2v, vCaGate[0]); a2v.Dispose();
 
         // v2a: Q=audio, K,V=video → update audio.
         Tensor modV2 = ModulateRows(backend, ncaV, vCaSS[2], vCaSS[3], _vDim);  // v2a_scale, v2a_shift
         Tensor modA2 = ModulateRows(backend, ncaA, aCaSS[2], aCaSS[3], _aDim);
         Tensor v2a = _v2a.Forward(backend, modA2, modV2, ctx.CaAudioRope, ctx.CaAudioCos, ctx.CaAudioSin, ctx.CaVideoRope, ctx.CaVideoCos, ctx.CaVideoSin, null);
         modV2.Dispose(); modA2.Dispose();
-        audioHidden = GatedAddInto(audioHidden, v2a, aCaGate[0], _aDim); v2a.Dispose();
+        audioHidden = GatedAddInto(backend, audioHidden, v2a, aCaGate[0]); v2a.Dispose();
         ncaV.Dispose(); ncaA.Dispose();
 
         // ── 4. Feed-forward ──
         Tensor n3 = RmsNoAffine(backend, hidden, _onesV, _vDim);
-        ApplyShiftScale(n3, vMod[4], vMod[3], _vDim);                       // scale_mlp, shift_mlp
+        n3 = ShiftScale(backend, n3, vMod[4], vMod[3]);                     // scale_mlp, shift_mlp
         Tensor ff = Ffn(backend, n3, _ffW0!, _ffB0, _ffW2!, _ffB2, _vDim);
         n3.Dispose();
-        hidden = GatedAddInto(hidden, ff, vMod[5], _vDim); ff.Dispose();
+        hidden = GatedAddInto(backend, hidden, ff, vMod[5]); ff.Dispose();
 
         Tensor an3 = RmsNoAffine(backend, audioHidden, _onesA, _aDim);
-        ApplyShiftScale(an3, aMod[4], aMod[3], _aDim);
+        an3 = ShiftScale(backend, an3, aMod[4], aMod[3]);
         Tensor aFf = Ffn(backend, an3, _aFfW0!, _aFfB0, _aFfW2!, _aFfB2, _aDim);
         an3.Dispose();
-        audioHidden = GatedAddInto(audioHidden, aFf, aMod[5], _aDim); aFf.Dispose();
+        audioHidden = GatedAddInto(backend, audioHidden, aFf, aMod[5]); aFf.Dispose();
 
         foreach (Tensor[]? arr in new[] { vMod, aMod, vPrompt, aPrompt, vCaSS, aCaSS, vCaGate, aCaGate })
             if (arr is not null) foreach (Tensor t in arr) t.Dispose();
         return (hidden, audioHidden);
     }
 
-    /// <summary>AdaLN params: <c>table[m] + temb[m]</c> for <paramref name="n"/> params of width <paramref name="dim"/>.
-    /// <paramref name="temb"/> is laid out as <c>[n·dim]</c>; returns n vectors <c>[dim]</c>.</summary>
-    private static Tensor[] Modulation(Tensor table, Tensor temb, int n, int dim)
+    /// <summary>AdaLN params on-device: rows <c>[row, row+n)</c> of <paramref name="table"/> plus <paramref name="temb"/>
+    /// (<c>[n·dim]</c>), sliced into n <c>[dim]</c> vectors. Was a host <c>DataPointer</c> loop — a D2H drain of temb +
+    /// per-vector H2D re-uploads, ×48 blocks ×2 CFG per step (the Krea2/Chroma host-glue pathology).</summary>
+    private static Tensor[] Modulation(IBackend backend, Tensor table, int row, Tensor temb, int n, int dim)
     {
-        float* ss = (float*)table.DataPointer;
-        float* tb = (float*)temb.DataPointer;
+        // Always slice the table rows first: elementwise Add sizes its launch from the FIRST operand, so the operand
+        // must be exactly [n, dim] even when row==0 (the av-ca table is [5, dim] but only 4 or 1 rows participate).
+        Tensor rows = new(new TensorShape(n, dim), DType.F32);
+        backend.SliceRows(rows, table, row);
+        Tensor sum = new(new TensorShape(n, dim), DType.F32);
+        backend.Add(sum, rows, temb);
+        rows.Dispose();
         Tensor[] outs = new Tensor[n];
         for (int m = 0; m < n; m++)
         {
             Tensor o = new(new TensorShape(dim), DType.F32);
-            float* op = (float*)o.DataPointer;
-            for (int d = 0; d < dim; d++) op[d] = ss[(long)m * dim + d] + tb[(long)m * dim + d];
+            backend.SliceRows(o, sum, m);
             outs[m] = o;
         }
+        sum.Dispose();
         return outs;
-    }
-
-    /// <summary>View-copy of rows <c>[start, end)</c> from a <c>[N, dim]</c> table into a fresh <c>[end-start, dim]</c>
-    /// tensor (the per-layer av-ca table is split into a scale/shift part and a gate part).</summary>
-    private static Tensor Slice(Tensor table, int start, int end, int dim)
-    {
-        int rows = end - start;
-        Tensor o = new(new TensorShape(rows, dim), DType.F32);
-        Buffer.MemoryCopy((float*)table.DataPointer + (long)start * dim, (float*)o.DataPointer,
-            (long)rows * dim * 4, (long)rows * dim * 4);
-        return o;
     }
 
     private Tensor RmsNoAffine(IBackend backend, Tensor x, Tensor ones, int dim)
@@ -239,37 +234,36 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         return o;
     }
 
-    private static void ApplyShiftScale(Tensor x, Tensor scale, Tensor shift, int dim)
+    /// <summary>Device <c>x·(1+scale)+shift</c>; consumes <paramref name="x"/> and returns a fresh tensor.</summary>
+    private static Tensor ShiftScale(IBackend backend, Tensor x, Tensor scale, Tensor shift)
     {
-        int s = (int)x.Shape[0];
-        float* xp = (float*)x.DataPointer, sc = (float*)scale.DataPointer, sh = (float*)shift.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < dim; d++)
-                xp[(long)i * dim + d] = xp[(long)i * dim + d] * (1f + sc[d]) + sh[d];
+        int dim = (int)scale.Shape[scale.Shape.Rank - 1];
+        Tensor scale1 = new(new TensorShape(dim), DType.F32);
+        backend.AddScalar(scale1, scale, 1f);
+        Tensor o = new(x.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(o, x, scale1, shift);
+        scale1.Dispose();
+        x.Dispose();
+        return o;
     }
 
     /// <summary>Out-of-place <c>x·(1+scale)+shift</c> (used for inputs we must not mutate, e.g. the shared
     /// connector encoder and the shared a2v/v2a norms).</summary>
     private static Tensor ModulateRows(IBackend backend, Tensor x, Tensor scale, Tensor shift, int dim)
     {
-        int s = (int)x.Shape[0];
-        Tensor o = new(new TensorShape(s, dim), DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer, sc = (float*)scale.DataPointer, sh = (float*)shift.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < dim; d++)
-                op[(long)i * dim + d] = xp[(long)i * dim + d] * (1f + sc[d]) + sh[d];
+        Tensor scale1 = new(new TensorShape(dim), DType.F32);
+        backend.AddScalar(scale1, scale, 1f);
+        Tensor o = new(new TensorShape((int)x.Shape[0], dim), DType.F32);
+        backend.AffineBroadcastLastDim(o, x, scale1, shift);
+        scale1.Dispose();
         return o;
     }
 
     /// <summary><c>residual + gate · value</c> into a fresh tensor; disposes the residual.</summary>
-    private static Tensor GatedAddInto(Tensor residual, Tensor value, Tensor gate, int dim)
+    private static Tensor GatedAddInto(IBackend backend, Tensor residual, Tensor value, Tensor gate)
     {
-        int s = (int)residual.Shape[0];
-        Tensor o = new(new TensorShape(s, dim), DType.F32);
-        float* rp = (float*)residual.DataPointer, vp = (float*)value.DataPointer, gp = (float*)gate.DataPointer, op = (float*)o.DataPointer;
-        for (int i = 0; i < s; i++)
-            for (int d = 0; d < dim; d++)
-                op[(long)i * dim + d] = rp[(long)i * dim + d] + gp[d] * vp[(long)i * dim + d];
+        Tensor o = new(residual.Shape, DType.F32);
+        backend.GatedResidualLastDim(o, residual, value, gate);
         residual.Dispose();
         return o;
     }

@@ -100,12 +100,15 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Logs.Warning("LTX-2 pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
         // 1. Text conditioning (run once): Gemma 49-layer features → per-modality connector embeddings.
+        Stopwatch phase = Stopwatch.StartNew();
         (Tensor encVideoPos, Tensor encAudioPos) = EncodeText(promptTokens);
         (Tensor encVideoNeg, Tensor encAudioNeg) = EncodeText(negativeTokens);
 
         // Reclaim the ~12 GB Gemma encoder before the DiT — both can't be resident on 24 GB.
         Backend.Sync();
         Backend.FreeWeights(_gemma.EnumerateWeights());
+        Logs.Info($"[ltx2-phase] TE(Gemma)+connectors+free: {phase.ElapsedMilliseconds} ms");
+        phase.Restart();
 
         // 2. Denoise both streams. The 22B fp8 DiT (~22 GB) doesn't fit resident alongside activations on 24 GB, so
         // stream its 48 blocks on/off device (only the shared modulation tables stay resident). CPU/Vulkan (no
@@ -132,6 +135,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(sv, videoChannels), seed);
         Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioFrames, audioChannels), seed ^ 0x5D2B);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+        Logs.Info($"[ltx2-phase] DiT preload+prime: {phase.ElapsedMilliseconds} ms");
 
         for (int k = 0; k < steps; k++)
         {
@@ -142,16 +146,23 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
             (Tensor vCondV, Tensor vCondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoPos, encAudioPos,
                 tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
+            Backend.Sync();   // phase-probe attribution: separate the cond forward from the uncond forward
+            long condMs = sw.ElapsedMilliseconds;
             (Tensor vUncondV, Tensor vUncondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoNeg, encAudioNeg,
                 tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
 
-            LancePipelineCommon.EulerCfgStep(videoLat, vCondV, vUncondV, guidance, dt);
-            LancePipelineCommon.EulerCfgStep(audioLat, vCondA, vUncondA, guidance, dt);
+            // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
+            // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
+            Backend.CfgEulerStep(videoLat, vCondV, vUncondV, guidance, -dt);
+            Backend.CfgEulerStep(audioLat, vCondA, vUncondA, guidance, -dt);
             vCondV.Dispose(); vCondA.Dispose(); vUncondV.Dispose(); vUncondA.Dispose();
 
+            Backend.Sync();
             sw.Stop();
+            Logs.Info($"[ltx2-phase] step {k + 1}/{steps}: {sw.ElapsedMilliseconds} ms (cond {condMs} ms, uncond+euler {sw.ElapsedMilliseconds - condMs} ms)");
             if (onProgress is not null)
             {
+                // NOTE: the preview drain reads the latent on host, which evicts it from the GPU (re-upload next step).
                 Tensor preview = ExtractMiddleFrame(videoLat, tLat, hLat, wLat, videoChannels);
                 onProgress.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
                 {
@@ -163,6 +174,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         }
 
         Backend.Sync();
+        phase.Restart();
         if (streamer is not null) { _transformer.BeforeBlockForward = null; streamer.EvictAll(); streamer.Dispose(); Backend.FreeWeights(_transformer.EnumerateSharedWeights()); }
         else Backend.FreeWeights(_transformer.EnumerateWeights());
         encVideoPos.Dispose(); encAudioPos.Dispose(); encVideoNeg.Dispose(); encAudioNeg.Dispose();
@@ -170,12 +182,19 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // 3. Decode video.
         Tensor videoVaeLatent = UnpackVideoLatents(videoLat, tLat, hLat, wLat, videoChannels);
         videoLat.Dispose();
+        Logs.Info($"[ltx2-phase] latent unpack (host): {phase.ElapsedMilliseconds} ms");
+        phase.Restart();
         Tensor rgb = _vae.Decode(Backend, videoVaeLatent);
         videoVaeLatent.Dispose();
+        Backend.Sync();
+        Logs.Info($"[ltx2-phase] video VAE decode: {phase.ElapsedMilliseconds} ms");
+        phase.Restart();
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = VideoRgbFrames.ExtractFrame(rgb, i);
         rgb.Dispose();
+        Logs.Info($"[ltx2-phase] rgb frame extract: {phase.ElapsedMilliseconds} ms");
+        phase.Restart();
 
         // 4. Decode audio (optional — requires the audio VAE + vocoder).
         float[][]? audio = null;
@@ -183,6 +202,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         if (_audioVae is not null && _vocoder is not null)
             audio = DecodeAudio(audioLat, audioFrames, out audioSampleRate);
         audioLat.Dispose();
+        Logs.Info($"[ltx2-phase] audio decode total: {phase.ElapsedMilliseconds} ms");
 
         Logs.Info($"LTX-2 complete ({frames.Length} frames" + (audio is not null ? " + audio" : "") + $", seed={seed})");
         return new Ltx2Result(frames, width, height, seed, audio, audioSampleRate);
@@ -206,7 +226,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
         int[] layerIndices = new int[GemmaLayers];
         for (int i = 0; i < GemmaLayers; i++) layerIndices[i] = i;       // 0=embeddings, 1..48=post-layer
+        Stopwatch sub = Stopwatch.StartNew();
         Tensor multi = _gemma.EncodeMultiLayer(Backend, [padded], layerIndices);  // [1, seq, 49·3840] layer-outer
+        Logs.Info($"[ltx2-phase]   gemma encode ({seq} tok): {sub.ElapsedMilliseconds} ms");
+        sub.Restart();
 
         // Relayout to channel-outer (feature = channel·49 + layer), which the connector consumes.
         Tensor feats = new Tensor(new TensorShape(seq, GemmaLayers * GemmaCaptionChannels), DType.F32);
@@ -222,15 +245,19 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                     dstRow[(long)c * GemmaLayers + l] = srcRow[(long)l * GemmaCaptionChannels + c];
         }
         multi.Dispose();
+        Logs.Info($"[ltx2-phase]   gemma relayout (host): {sub.ElapsedMilliseconds} ms");
+        sub.Restart();
 
         (Tensor video, Tensor audio) = _connectors.Forward(Backend, feats, validMask);
         feats.Dispose();
+        Logs.Info($"[ltx2-phase]   connectors: {sub.ElapsedMilliseconds} ms");
         return (video, audio);
     }
 
     /// <summary>Audio VAE + vocoder: denormalize → unpack <c>[L,128]→[1,8,L,16]</c> → mel → 48 kHz waveform.</summary>
     private float[][] DecodeAudio(Tensor audioLat, int audioFrames, out int sampleRate)
     {
+        Stopwatch phase = Stopwatch.StartNew();
         Backend.PreloadWeights(_audioVae!.EnumerateWeights());
 
         int latentChannels = 8;
@@ -238,10 +265,14 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Tensor unpacked = UnpackAudioLatents(audioLat, audioFrames, latentChannels, melLat);
         Tensor mel = _audioVae.Decode(Backend, unpacked);        // [1, 2, T, 64]
         unpacked.Dispose();
+        Backend.Sync();
+        Logs.Info($"[ltx2-phase]   audio VAE (preload+unpack+decode): {phase.ElapsedMilliseconds} ms");
+        phase.Restart();
         // The vocoder manages its own weights (no bulk EnumerateWeights); ops fault them in on demand.
         Tensor wave = _vocoder!.Forward(Backend, mel);           // [1, channels, samples]
         mel.Dispose();
         Backend.Sync();
+        Logs.Info($"[ltx2-phase]   vocoder: {phase.ElapsedMilliseconds} ms");
         Backend.FreeWeights(_audioVae.EnumerateWeights());
 
         int channels = (int)wave.Shape[1], samples = (int)wave.Shape[2];
