@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -24,12 +25,12 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly QwenImageConfig _config;
 
-    /// <summary>HARTSY_KEEP_MODELS=1 keeps the DiT weights GPU-resident across generations (skips the post-loop
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
     /// FreeWeights + next-gen re-upload). The Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a
     /// prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both.
-    /// Default off — eviction is what lets smaller cards run this model.</summary>
+    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
-        Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") == "1";
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
     // Prompt-embedding cache (one cond + one uncond, last-used), keyed on (token ids, drop index) — the

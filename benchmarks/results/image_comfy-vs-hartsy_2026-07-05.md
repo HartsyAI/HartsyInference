@@ -504,3 +504,16 @@ kill-switches intact; logged at init); (2) engine `CudaLibraryResolver` probes `
 probe (its old duplicated bare-soname check silently SKIPPED GPU tests as "passed" without LD_LIBRARY_PATH).
 Verified end-to-end with a zero-env launch: flags logged, backend live, cuDNN engaged, coherent Chroma gen.
 44.11 = 44.10 + resolver only (no math changes) — the 44.10 bench numbers stand.
+
+**Addendum — `alpha.44.12-local`: the standard performance profile is now the ENGINE DEFAULT (user
+directive: every downloaded install must reproduce published times with zero configuration, documented
+professionally).** `HartsyInference.Core.Runtime.EnvSwitch` gives the 5 profile features tri-state
+semantics (unset → default ON, `0`/`false` = kill-switch): `HARTSY_SDPA_CUDNN` (self-disabling fallback),
+`HARTSY_FP8_NATIVE` (hardware-gated: default ON only on SM ≥ 8.9), `HARTSY_DIT_F16` (per-arch code opt-in
+unchanged), `HARTSY_KEEP_MODELS` (4 pipelines), `HARTSY_MEMPOOL_KEEP`. Experimental switches keep strict
+opt-in. Extension OnPreInit no longer sets anything — single source of truth is the engine, so NuGet/CLI
+consumers get identical behavior. Documented in the new **`docs/PERFORMANCE.md`** (profile table, native
+library requirements + resolver order, verification log lines, benchmark methodology + scoreboard) with
+README + extension README/doc-07 sections pointing at it. Verified on a zero-env launch: engine log
+`[Cuda] perf flags: SdpaCudnn=True NativeFp8Gemm=True MempoolKeep=True ...`, warm medians unchanged —
+Z-Image-Turbo 3.05s, Chroma1-HD 63.5s, both visually coherent.

@@ -372,7 +372,24 @@ await foreach (VideoFrame frame in session.ReadFramesAsync())
 
 ## Benchmarks
 
-We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and it is **not yet as fast as the best native runners**. We are closing that gap in the open. Every number below is reproducible from `benchmarks/` and the committed result files under [`benchmarks/results/`](benchmarks/results/).
+We publish real numbers and we are honest about where we stand. HartsyInference is a young pure-C# engine: it is correct across a very wide model set, and on several flagship image models it is now **faster than ComfyUI on the same GPU** — while other models are still mid-optimization. We are closing the remaining gaps in the open. Every number below is reproducible from `benchmarks/` and the committed result files under [`benchmarks/results/`](benchmarks/results/); the exact methodology, required libraries, and the engine's default performance profile are specified in the **[Performance Guide](docs/PERFORMANCE.md)**.
+
+### Image generation end-to-end vs ComfyUI
+
+RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.45`, 2026-07-08 (living snapshot — updated as optimization rounds land):
+
+| Model | HartsyInference | ComfyUI | Status |
+|---|---:|---:|---|
+| Z-Image-Turbo (8 steps) | **2.95 s** | 3.1 s | **Faster than ComfyUI** |
+| Krea2-Turbo (8 steps) | **4.50 s** | 6.5 s | **Faster than ComfyUI** |
+| Qwen-Image (20 steps) | **40.9 s** | 54.8 s | **Faster than ComfyUI** |
+| Ideogram4 (20 steps) | 19.5 s | 17.0 s | 1.15× — optimization queued |
+| Chroma1-HD (20 steps) | 63.2 s | 16.6 s | Optimization in progress |
+| ERNIE-Image (20 steps) | 50.6 s | 24.0 s | Optimization queued |
+| Flux-Dev (20 steps) | 72.4 s | 12.5 s | Optimization queued |
+| SDXL (20 steps) | 33.0 s | 3.7 s | Optimization queued |
+
+These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).
 
 ### LLM decode vs llama.cpp
 
@@ -554,8 +571,9 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 - **.NET 10** (SDK 10.0+)
 
 ### CUDA backend (NVIDIA, fastest)
-- **CUDA 12.x**
-- **NVIDIA GPU** with compute capability 8.0+ (RTX 30xx/40xx, A100, H100)
+- **CUDA 13.x / 12.x** userspace libraries (cuBLAS, cuBLASLt)
+- **NVIDIA GPU** with compute capability 8.0+ (RTX 30xx/40xx, A100, H100); fp8 tensor-core paths need 8.9+ (Ada)
+- **cuDNN 9.21+** (optional) for fused flash attention — without it the engine falls back to materialized attention (slower, identical output). Library locations and resolution order: [Performance Guide §3](docs/PERFORMANCE.md#3-native-library-requirements-and-resolution)
 
 ### Vulkan backend (NVIDIA / AMD / Intel, cross-vendor)
 - **Vulkan 1.3+ runtime**, almost always pre-installed by the GPU vendor driver
@@ -584,6 +602,7 @@ See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependen
 
 | Document | Description |
 |---|---|
+| [Performance Guide](docs/PERFORMANCE.md) | The default performance profile, native library requirements, benchmark methodology |
 | [Core Design](docs/Design/CORE_DESIGN.md) | Architecture overview, design pillars, key decisions |
 | [Vision & Goals](docs/Design/VISION_AND_GOALS.md) | Why this project exists, the SwarmUI angle |
 | [Features](docs/Design/FEATURES.md) | Complete feature list across all modalities |

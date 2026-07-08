@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
 
@@ -136,8 +137,10 @@ public sealed class CudaBackend : IBackend
     private readonly bool _sdpaF16ForceOn;
     /// <summary>HARTSY_SDPA_NO_F16=1: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
     private readonly bool _sdpaF16Disabled;
-    /// <summary>HARTSY_SDPA_CUDNN=1: route no-mask MHA (D∈{64,128}) attention through cuDNN's fused flash-attention
-    /// engine instead of the materialized cuBLAS QKᵀ→softmax→PV path. ~34× on the Krea2 self-attention shape.</summary>
+    /// <summary>Routes MHA (D∈{64,128,256}, no mask or a [B,1,Sq,Skv]-broadcast additive F32 mask) through cuDNN's
+    /// fused flash-attention engine instead of the materialized cuBLAS QKᵀ→softmax→PV path (~34× on the Krea2
+    /// self-attention shape). Standard-profile default ON; HARTSY_SDPA_CUDNN=0 disables. Missing cuDNN or engine
+    /// rejections fall back to the materialized paths automatically.</summary>
     private readonly bool _sdpaCudnn;
 
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>: FAST_TF32 for
@@ -174,10 +177,11 @@ public sealed class CudaBackend : IBackend
         // dominant non-kernel GPU-stream cost on big-activation diffusion: Krea2 1024² was ~13 s of pure alloc/free
         // round-trips). Raise it to "hold everything" so per-op activation reuse is instant; the OOM path
         // (AllocateAsync → SyncStreamsAndReleasePool) and the streaming cache's explicit cuMemPoolTrimTo still return
-        // memory on demand. Opt-in (HARTSY_MEMPOOL_KEEP=1): default-off so weight-STREAMING models (block-swap
-        // video) keep the streaming cache's eager-release behavior, which a held activation pool could OOM/thrash.
-        // Enable for preload-all models (Krea2 etc.) where activation-reuse is a clear win.
-        if (EnvFlag("HARTSY_MEMPOOL_KEEP"))
+        // memory on demand. Standard-profile default ON (HARTSY_MEMPOOL_KEEP=0 to disable): the whole fleet —
+        // including the block-swap streaming video models — is benchmark-verified under it, and the OOM-retry +
+        // explicit-trim paths cover the held-pool pressure case the old default-off guarded against.
+        bool mempoolKeep = EnvSwitch.IsEnabled("HARTSY_MEMPOOL_KEEP", defaultOn: true);
+        if (mempoolKeep)
         {
             try
             {
@@ -194,12 +198,17 @@ public sealed class CudaBackend : IBackend
             }
         }
 
-        // Stage-1 perf-flag wiring (see docs/Checklists/QUANT_GEMM_PERF_PLAN.md). The opt-in GEMM/quant
-        // fast paths default OFF; the HARTSY_* env vars flip them on for A/B benchmarking in real pipelines
-        // without recompiling (mirrors HARTSY_PROFILE). Unset/!="1" => off, reproducing the baseline exactly.
+        // Perf-flag wiring, two tiers (docs/PERFORMANCE.md). STANDARD PROFILE features default ON via
+        // tri-state EnvSwitch (unset → documented default, "0"/"false" is the kill-switch) so every install
+        // reproduces the published benchmark times with zero configuration. EXPERIMENTAL switches keep the
+        // strict opt-in EnvFlag form ("1" only) for A/B benchmarking without recompiling.
         EnableEpilogueFusion = EnvFlag("HARTSY_EPILOGUE_FUSION");
         EnableTensorCoreGemm = EnvFlag("HARTSY_TENSORCORE_GEMM");
-        EnableNativeFp8Gemm = EnvFlag("HARTSY_FP8_NATIVE");
+        // fp8 tensor-core GEMM (activation-quant e4m3) requires SM 8.9+ (Ada); older parts default to the
+        // F16-cast path. Verified quality-clean fleet-wide in the standard Swarm config.
+        bool fp8TensorCores = _context.ComputeCapabilityMajor > 8
+            || (_context.ComputeCapabilityMajor == 8 && _context.ComputeCapabilityMinor >= 9);
+        EnableNativeFp8Gemm = EnvSwitch.IsEnabled("HARTSY_FP8_NATIVE", defaultOn: fp8TensorCores);
         HighPrecisionGemm = EnvFlag("HARTSY_HIGH_PRECISION_GEMM");
         EnableFp8F16Gemm = EnvFlag("HARTSY_FP8_F16");
         EnableFp8F32Gemm = EnvFlag("HARTSY_FP8_F32");
@@ -208,11 +217,15 @@ public sealed class CudaBackend : IBackend
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
         _sdpaF16ForceOn = EnvFlag("HARTSY_SDPA_F16");
         _sdpaF16Disabled = EnvFlag("HARTSY_SDPA_NO_F16");
-        _sdpaCudnn = EnvFlag("HARTSY_SDPA_CUDNN");
+        // cuDNN fused flash attention: default ON — resolution failures self-disable per session (and engine
+        // rejections per head-dim), falling back to the materialized paths, so machines without cuDNN lose
+        // speed, never correctness.
+        _sdpaCudnn = EnvSwitch.IsEnabled("HARTSY_SDPA_CUDNN", defaultOn: true);
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] perf flags: EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
-            $"NativeFp8Gemm={EnableNativeFp8Gemm} HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
+            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +
+            $"EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
+            $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
             $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
 
         // Initialize cuBLAS

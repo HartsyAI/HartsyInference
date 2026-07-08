@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -39,12 +40,12 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     private readonly ChromaConfig _config;
     private readonly float _schedulerShiftFallback;
 
-    /// <summary>HARTSY_KEEP_MODELS=1 keeps the DiT weights GPU-resident across generations (skips the post-loop
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
     /// FreeWeights + next-gen re-upload). The T5-XXL cannot coexist with the resident DiT on smaller cards, so a
     /// prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both.
-    /// Default off — eviction is what lets smaller cards run this model.</summary>
+    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
-        Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") == "1";
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
     // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the T5 token ids — the Krea2 pattern.
