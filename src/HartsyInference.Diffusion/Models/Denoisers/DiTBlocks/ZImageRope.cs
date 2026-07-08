@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -13,6 +14,11 @@ public sealed unsafe class ZImageRope
     private float[]? _cosCache;
     private float[]? _sinCache;
     private int _cachedSeqLen;
+
+    // GPU cos/sin tables for the device RoPE path: [seqLen, headDim] with the pair angle at even index 2i
+    // (the layout backend.WanRopeInterleaved reads). Uploaded once per Precompute as preloaded weights.
+    private Tensor? _gpuCos, _gpuSin;
+    private bool _gpuTablesDirty = true;
 
     /// <summary>Creates a Z-Image RoPE with the given axis dims and base.</summary>
     /// <param name="axesDim">Per-axis dimensions. Must sum to head_dim. Default [32, 48, 48] (sums to 128).</param>
@@ -40,6 +46,8 @@ public sealed unsafe class ZImageRope
         _cosCache = new float[totalSeqLen * halfDim];
         _sinCache = new float[totalSeqLen * halfDim];
         _cachedSeqLen = totalSeqLen;
+
+        _gpuTablesDirty = true;   // new tables → re-upload on next ApplyGpu
 
         float* posPtr = (float*)posIds.DataPointer;
         int freqOffset = 0;
@@ -108,6 +116,68 @@ public sealed unsafe class ZImageRope
                 }
             }
         }
+    }
+
+    /// <summary>Device RoPE (B=1, the pipeline case): rotates Q and K in-place on the PRE-permute
+    /// <c>[1, seqLen, numHeads, headDim]</c> layout via <see cref="IBackend.WanRopeInterleaved"/> — the same
+    /// interleaved-pair rotation as <see cref="ApplyRotation"/> (adjacent pair (2i, 2i+1), angle shared across
+    /// heads), bit-identical to the host path because RoPE indexes only (position, dim). This replaces the host
+    /// <see cref="Forward"/> that D2H-round-tripped the full ~63 MB Q and K activations every block every step
+    /// (the dominant residual Z-Image cost after the block GPU-residency rewrite). Mirrors
+    /// <c>FluxRope.ApplyGpuGqa</c> (the Krea2 port). B&gt;1 callers keep the host <see cref="Forward"/>.</summary>
+    public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads)
+    {
+        if (_cosCache == null || _sinCache == null)
+            throw new InvalidOperationException("ZImageRope.Precompute must be called before ApplyGpu.");
+        int seqLen = (int)q.Shape[1];
+        if (seqLen != _cachedSeqLen)
+            throw new InvalidOperationException($"ZImageRope.ApplyGpu: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
+
+        (Tensor cos, Tensor sin) = GetGpuTables(backend);
+        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+    }
+
+    /// <summary>Expands the host <c>[S, headDim/2]</c> caches to the kernel's <c>[S, headDim]</c> layout (pair
+    /// angle stored at even index 2i; odd slots unused) and uploads them once as preloaded weights. Re-uploads
+    /// only after a new <see cref="Precompute"/>.</summary>
+    private (Tensor cos, Tensor sin) GetGpuTables(IBackend backend)
+    {
+        if (!_gpuTablesDirty)
+            return (_gpuCos!, _gpuSin!);
+
+        if (_gpuCos is not null)
+        {
+            backend.FreeWeights([_gpuCos, _gpuSin!]);
+            _gpuCos.Dispose();
+            _gpuSin!.Dispose();
+        }
+
+        int halfDim = _headDim / 2;
+        Tensor cos = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+        Tensor sin = new Tensor(new TensorShape(_cachedSeqLen, _headDim), DType.F32);
+        float* cp = (float*)cos.DataPointer;
+        float* sp = (float*)sin.DataPointer;
+        fixed (float* ch = _cosCache, sh = _sinCache)
+        {
+            for (int s = 0; s < _cachedSeqLen; s++)
+            {
+                long src = (long)s * halfDim;
+                long dst = (long)s * _headDim;
+                for (int i = 0; i < halfDim; i++)
+                {
+                    cp[dst + 2 * i] = ch[src + i];
+                    sp[dst + 2 * i] = sh[src + i];
+                    cp[dst + 2 * i + 1] = 0f;   // unused by the kernel
+                    sp[dst + 2 * i + 1] = 0f;
+                }
+            }
+        }
+        backend.PreloadWeights([cos, sin]);
+        _gpuCos = cos;
+        _gpuSin = sin;
+        _gpuTablesDirty = false;
+        return (cos, sin);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

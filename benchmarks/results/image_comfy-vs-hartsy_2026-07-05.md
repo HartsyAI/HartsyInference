@@ -268,3 +268,42 @@ halve (bytes read/written per kernel) and what **fused elementwise kernels** red
 **Next = F16 activation path** (keep fp8 weights packed via activation-quant GEMM — see plan) ± fused norm/AdaLN kernels.
 The arena stays in-tree, default-off: harmless, and it is the right substrate for later CUDA-graph capture (deterministic
 addresses, zero mid-step `cuMemAllocAsync`).
+
+## 2026-07-07 — fleet rerun on `alpha.43.144` + Z-Image round 1 (`alpha.43.145`)
+
+**Fleet inheritance from the Krea2 work** (shared VAE port, async Concat, cuDNN SDPA; env
+`HARTSY_SDPA_CUDNN/MEMPOOL_KEEP/FP8_NATIVE/DIT_F16/DIT_GRAPH`, no KEEP_MODELS):
+
+| Model | Comfy | 07-05 | now | note |
+|---|---|---|---|---|
+| SDXL | 3.7 | 46.3 | **36.9** | free |
+| Flux-Dev | 12.5 | 74.8 | **72.9** | ~flat |
+| Z-Image-Turbo | 3.1 | 52.1 | 40.5 → **6.6** | round 1 below |
+| AuraFlow | 14.0 | 34.5 | **31.4** | free |
+| Qwen-Image Q4_K | 54.8 | 380.7 | **192** | shared Qwen-VAE port (~2×) |
+| Chroma1-HD | 16.6 | 119 | **110** | modest |
+| Krea2-Turbo | 6.5 | 4.68 (KEEP) | **6.56 no-KEEP** | see crash fix below |
+| ERNIE / HiDream / Ideogram4 | — | 53.3 / fail / 42.3 | invalid | collateral of the crash below — rerun |
+
+**Step-graph weight-eviction crash (FOUND + FIXED, 43.145):** in the fleet env (no KEEP_MODELS) Krea2's
+post-loop `FreeWeights` freed the DiT weights whose device pointers the captured step graph had BAKED; the
+next gen's replay hit CUDA 700 ILLEGAL_ADDRESS and **poisoned the context** (the ERNIE/HiDream/Ideogram4
+"load failures" were collateral). Fix: `Krea2Transformer.InvalidateStepGraph` called whenever transformer
+weights are freed — proven by 3 clean no-KEEP warm gens. Rule: **a captured graph dies with any weight
+eviction.**
+
+### Z-Image-Turbo round 1: 40.5s → **6.6s** (vs Comfy 3.1s; was 16.8× → now 2.1×) — coherent ✓
+Recon killed two stale beliefs (Z-Image HAS QK-norm; blocks already GPU-resident) and found the real costs:
+| Fix | What |
+|---|---|
+| **GPU RoPE** (`ZImageRope.ApplyGpu` → `WanRopeInterleaved`, pre-permute, bit-identical) | was a ~63 MB × 2 host D2H/H2D round-trip per block × 34 blocks × 8 steps — the dominant cost |
+| **Device AdaLN** (`ModulationSplit4` — its (1+scale, tanh(gate)) convention matches Z-Image exactly; block applies scales via direct AffineBroadcast) | 34 D2H sync barriers/step gone |
+| `allowF16: true` on both SDPAs (QK-normed → bounded) | engages cuDNN flash attention |
+| Caption-path cache (cap_embedder + 2 context refiners, timestep-independent, keyed on encoder-output ref) + rope-table caching (3 host rebuilds/step → sig-cached) | −14 block-forwards +3 table builds per gen |
+| Device concat + single-SliceRows output slice (B=1) | 2 more per-step drains gone |
+| `FreeActivations(trimPool: false)` per step | stops a stream-sync + multi-GB pool release/re-map every step |
+
+**Round 2 menu (→ sub-3.1s):** the pipeline still host-syncs every step by design (host scheduler.Step +
+NegateInPlace + latent D2H) — build a `ForwardPatched`-style drain-free fast path (persistent latent tokens,
+on-device negate+Euler via CfgEulerStep with delta=−dt), then `DitDtype` F16 (audit ffn=10240 SwiGLU) +
+`DitStepGraph` capture + KEEP_MODELS/prompt-cache/device-rgb pipeline parity with Krea2. Then Ideogram4.

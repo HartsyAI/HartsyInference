@@ -308,7 +308,13 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         Backend.Sync();
         long phT6 = sw.ElapsedMilliseconds;
         if (!KeepModelsResident)
+        {
             Backend.FreeWeights(_transformer.EnumerateWeights());
+            // The captured step graph bakes weight device pointers — freeing the weights leaves it pointing at
+            // freed memory (replay = CUDA 700 that poisons the context). Invalidate; next gen re-captures.
+            if (graphMode)
+                _transformer.InvalidateStepGraph(Backend);
+        }
 
         long phT7 = sw.ElapsedMilliseconds;
         Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());

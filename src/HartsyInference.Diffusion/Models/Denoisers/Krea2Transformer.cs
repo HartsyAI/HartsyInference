@@ -296,6 +296,18 @@ public sealed unsafe class Krea2Transformer : IDisposable
         return _graphVelocity;
     }
 
+    /// <summary>Invalidates the captured step graph. MUST be called whenever the transformer's weights are freed
+    /// (the pipeline's post-loop <c>FreeWeights</c> when models aren't kept resident): the captured graph bakes
+    /// the WEIGHT device pointers, so a free + next-gen re-upload leaves it pointing at freed memory — replaying
+    /// it then is a CUDA 700 illegal-address that poisons the whole context (found by the fleet benchmark, where
+    /// models rotate and weights evict between gens). The next generation re-warms and re-captures.</summary>
+    public void InvalidateStepGraph(IBackend backend)
+    {
+        backend.StepGraphReset();
+        _graphSig = long.MinValue;   // MinValue = "no sig": the next call resets WITHOUT counting a CFG flip
+        _graphSigCalls = 0;
+    }
+
     /// <summary>Routes a fresh patchified latent into the step-graph's FIXED latent buffer (the address the
     /// captured graph reads and the pipeline's in-place Euler updates). Returns the fixed tensor — owned by the
     /// transformer; the pipeline must not dispose it or read its DataPointer (snapshot via

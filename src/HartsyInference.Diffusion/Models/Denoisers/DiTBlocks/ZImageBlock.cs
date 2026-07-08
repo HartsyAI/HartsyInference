@@ -117,13 +117,17 @@ public sealed unsafe class ZImageBlock
         // three Linears against the load-time-split Q/K/V weights. The ONLY ops left on the CPU are the tiny AdaLN
         // chunk ([1, 15360]) and ZImageRope.Forward — both contained host excursions the current block already runs.
 
-        // ── AdaLN: Linear(t_emb) → split into 4 along last dim (tiny; host) ──
+        // ── AdaLN: Linear(t_emb) → device 4-way split (ModulationSplit4: (1+scale), tanh(gate)) ──
+        // mod[0]/mod[2] come out ALREADY (1+scale)-folded, so the affines below apply them directly
+        // (no Modulate/AddScalar). The old host split read projected.DataPointer — a full D2H sync
+        // barrier per block (34×/step).
         Tensor[] mod = ComputeAdaLN(backend, tEmb, batch);
 
         // ── Attention sub-block ──
         Tensor norm1 = new Tensor(shape, DType.F32);
         backend.RmsNorm(norm1, x, _attnNorm1Weight!, _eps);
-        Tensor modulated = DiTUtils.Modulate(backend, norm1, null, mod[0], shape); // x·(1+scale_msa), no shift
+        Tensor modulated = new Tensor(shape, DType.F32);
+        backend.AffineBroadcastLastDim(modulated, norm1, mod[0], null); // x·(1+scale_msa), no shift
         norm1.Dispose();
 
         // Separate Q/K/V projections declared directly as [B, S, H, D] so RmsNorm normalizes over headDim and
@@ -143,7 +147,16 @@ public sealed unsafe class ZImageBlock
         qHeads.Dispose();
         kHeads.Dispose();
 
-        // [B, S, H, D] → [B, H, S, D] for SDPA. RoPE runs on the [B, H, S, D] layout (host, unchanged).
+        // RoPE on the PRE-permute [B, S, H, D] layout, device-resident for B=1 (bit-identical: RoPE indexes only
+        // (position, dim)). The old post-permute host rope.Forward D2H-round-tripped the full ~63 MB Q and K
+        // every block every step — the dominant residual Z-Image cost. B>1 keeps the host path post-permute.
+        bool gpuRope = rope is not null && batch == 1;
+        if (gpuRope)
+        {
+            rope!.ApplyGpu(backend, qNormed, kNormed, _numHeads);
+        }
+
+        // [B, S, H, D] → [B, H, S, D] for SDPA.
         Tensor qMh = new Tensor(mhShape, DType.F32);
         Tensor kMh = new Tensor(mhShape, DType.F32);
         Tensor vMh = new Tensor(mhShape, DType.F32);
@@ -154,11 +167,16 @@ public sealed unsafe class ZImageBlock
         kNormed.Dispose();
         v.Dispose();
 
-        rope?.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        if (rope is not null && !gpuRope)
+        {
+            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        }
 
+        // allowF16: Q/K are RMS-normed above → pre-softmax scores bounded → the F16/cuDNN fused SDPA path is
+        // numerically safe (same condition as Krea2/Wan/LTX).
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
@@ -183,7 +201,8 @@ public sealed unsafe class ZImageBlock
         // ── FFN sub-block ──
         Tensor normF1 = new Tensor(shape, DType.F32);
         backend.RmsNorm(normF1, afterAttn, _ffnNorm1Weight!, _eps);
-        Tensor modulatedF = DiTUtils.Modulate(backend, normF1, null, mod[2], shape); // x·(1+scale_mlp), no shift
+        Tensor modulatedF = new Tensor(shape, DType.F32);
+        backend.AffineBroadcastLastDim(modulatedF, normF1, mod[2], null); // x·(1+scale_mlp), no shift
         normF1.Dispose();
 
         Tensor ffnOut = ForwardSwiGlu(backend, modulatedF, batch, seqLen);
@@ -233,44 +252,21 @@ public sealed unsafe class ZImageBlock
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
+    /// <summary>AdaLN: Linear(t_emb) → device 4-way split via <see cref="IBackend.ModulationSplit4"/>, which emits
+    /// <c>(1+scale_msa, tanh(gate_msa), 1+scale_mlp, tanh(gate_mlp))</c> — the diffusers Z-Image convention
+    /// (tanh'd gates, transformer_z_image.py:233) with the <c>(1+scale)</c> pre-folded so the block applies the
+    /// scales directly via AffineBroadcast. Fully device-resident: the old host split read
+    /// <c>projected.DataPointer</c>, a D2H sync barrier per block (34×/step).</summary>
     private Tensor[] ComputeAdaLN(IBackend backend, Tensor tEmb, int batch)
     {
         int outDim = 4 * _hiddenSize;
-        TensorShape projShape = new TensorShape(batch, outDim);
-        Tensor projected = new Tensor(projShape, tEmb.DType);
+        Tensor projected = new Tensor(new TensorShape(batch, outDim), DType.F32);
         backend.Linear(projected, tEmb, _adaLNWeight!, _adaLNBias);
 
-        // Diffusers Z-Image applies tanh() to gate_msa (idx 1) and gate_mlp (idx 3) before use.
-        // Without this, gates blow up at init and the network produces noise. See transformer_z_image.py:233.
         Tensor[] results = new Tensor[4];
-        float* projPtr = (float*)projected.DataPointer;
-
-        for (int p = 0; p < 4; p++)
-        {
-            TensorShape paramShape = new TensorShape(batch, _hiddenSize);
-            Tensor param = new Tensor(paramShape, projected.DType);
-            float* paramPtr = (float*)param.DataPointer;
-            bool isGate = (p == 1 || p == 3);
-
-            for (int b = 0; b < batch; b++)
-            {
-                int srcOffset = b * outDim + p * _hiddenSize;
-                int dstOffset = b * _hiddenSize;
-                if (isGate)
-                {
-                    for (int d = 0; d < _hiddenSize; d++)
-                        paramPtr[dstOffset + d] = MathF.Tanh(projPtr[srcOffset + d]);
-                }
-                else
-                {
-                    Buffer.MemoryCopy(projPtr + srcOffset, paramPtr + dstOffset,
-                        _hiddenSize * sizeof(float), _hiddenSize * sizeof(float));
-                }
-            }
-
-            results[p] = param;
-        }
-
+        TensorShape paramShape = new TensorShape(batch, _hiddenSize);
+        for (int p = 0; p < 4; p++) results[p] = new Tensor(paramShape, DType.F32);
+        backend.ModulationSplit4(results[0], results[1], results[2], results[3], projected);
         projected.Dispose();
         return results;
     }

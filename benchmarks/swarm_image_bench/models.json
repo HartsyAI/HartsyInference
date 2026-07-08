@@ -81,6 +81,16 @@
     }
   },
   {
+    "name": "Krea2-Base",
+    "model": "Krea2/krea2_raw_fp8_scaled",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 28,
+      "cfgscale": 4.5
+    }
+  },
+  {
     "name": "Boogu-Base",
     "model": "Boogu/boogu_image_base_fp8_scaled",
     "params": {

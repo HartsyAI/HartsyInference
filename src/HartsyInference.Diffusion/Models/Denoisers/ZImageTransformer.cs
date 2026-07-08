@@ -15,6 +15,20 @@ public sealed unsafe class ZImageTransformer : IDisposable
     private readonly ZImageRope _rope;
     private int _disposed;
 
+    // ── Per-generation caches (the Krea2 pattern) ──────────────────────────────────────────────────────────
+    // The caption path (cap_embedder → pad → context_refiners) and all three RoPE precomputes are
+    // timestep-INDEPENDENT, yet were recomputed every denoise step (~14 wasted block-forwards + 3 host
+    // cos/sin table builds per step). Cache the refined caption keyed on the encoder-output reference (a new
+    // prompt is a new tensor → evicts) and the rope tables keyed on shape signatures. Regional conditioning
+    // bypasses the caption cache (its caption stream is plan/step-dependent).
+    private Tensor? _cachedRefinedCaption;
+    private object? _cachedCaptionKey;
+    private int _cachedCapPaddedLen = -1;
+    private ZImageRope? _captionRope;
+    private ZImageRope? _refinerRope;
+    private long _refinerRopeSig = long.MinValue;
+    private long _fullRopeSig = long.MinValue;
+
     // t_embedder: sinusoidal(timestep × 1000) → Linear(adaLNDim → adaLNDim) → SiLU → Linear(adaLNDim → adaLNDim)
     private Tensor? _tEmbLinear1Weight, _tEmbLinear1Bias;
     private Tensor? _tEmbLinear2Weight, _tEmbLinear2Bias;
@@ -220,33 +234,57 @@ public sealed unsafe class ZImageTransformer : IDisposable
         Tensor tEmb = ComputeTimestepEmbedding(backend, sigma, batch);
         ZImageDebugDump.Dump("t_embedder", tEmb);
 
-        // ── 2. Caption embedding: cap_embedder + pad to multiple of 32 + context_refiner stack ──
-        Tensor capProjected = EmbedCaption(backend, effCaption, batch, capRealLen);
-        if (ownsCaption)
+        // ── 2. Caption embedding: cap_embedder + pad + context_refiner stack — CACHED across steps ──
+        // Timestep-independent: same captionEmbeddings in → same refinedCaption out, so recomputing it every
+        // step wasted 2 refiner block-forwards + the cap_embedder + a host rope build per step. Keyed on the
+        // encoder-output reference + padded length; regional runs bypass (their caption stream is step-dependent).
+        bool captionCacheable = regionalPlan is null || regionalPlan.Regions.Count == 0;
+        bool captionCached = captionCacheable && ReferenceEquals(_cachedCaptionKey, captionEmbeddings)
+            && _cachedCapPaddedLen == capPaddedLen && _cachedRefinedCaption is not null;
+        Tensor refinedCaption;
+        if (captionCached)
         {
-            effCaption.Dispose();
+            refinedCaption = _cachedRefinedCaption!;
         }
-        ZImageDebugDump.Dump("cap_embedder", capProjected);
-        Tensor capPadded = PadCaption(capProjected, capRealLen, capPaddedLen, batch);
-        // PadCaption may return the input unchanged when paddedLen==realLen — only dispose if it allocated a new tensor.
-        if (!ReferenceEquals(capPadded, capProjected))
-            capProjected.Dispose();
-
-        // Caption-only RoPE: positions (1..capPaddedLen, 0, 0) on the frame axis. Diffusers ZImageTransformerBlock
-        // applies freqs_cis even when modulation=False (the context_refiner case), so caption tokens DO get RoPE.
-        ZImageRope captionRope = new ZImageRope(_config.AxesDims, _config.RopeTheta);
-        Tensor capPosIds = ZImageRope.BuildCaptionPositionIds(capPaddedLen);
-        captionRope.Precompute(capPosIds);
-        capPosIds.Dispose();
-
-        Tensor refinedCaption = capPadded;
-        for (int i = 0; i < _contextRefiners.Length; i++)
+        else
         {
-            Tensor next = _contextRefiners[i].Forward(backend, refinedCaption, captionRope);
-            refinedCaption.Dispose();
-            refinedCaption = next;
-            ZImageDebugDump.Dump($"context_refiner.{i}", refinedCaption);
+            Tensor capProjected = EmbedCaption(backend, effCaption, batch, capRealLen);
+            if (ownsCaption)
+            {
+                effCaption.Dispose();
+            }
+            ZImageDebugDump.Dump("cap_embedder", capProjected);
+            Tensor capPadded = PadCaption(capProjected, capRealLen, capPaddedLen, batch);
+            // PadCaption may return the input unchanged when paddedLen==realLen — only dispose if it allocated a new tensor.
+            if (!ReferenceEquals(capPadded, capProjected))
+                capProjected.Dispose();
+
+            // Caption-only RoPE: positions (1..capPaddedLen, 0, 0) on the frame axis. Diffusers ZImageTransformerBlock
+            // applies freqs_cis even when modulation=False (the context_refiner case), so caption tokens DO get RoPE.
+            _captionRope ??= new ZImageRope(_config.AxesDims, _config.RopeTheta);
+            Tensor capPosIds = ZImageRope.BuildCaptionPositionIds(capPaddedLen);
+            _captionRope.Precompute(capPosIds);
+            capPosIds.Dispose();
+
+            refinedCaption = capPadded;
+            for (int i = 0; i < _contextRefiners.Length; i++)
+            {
+                Tensor next = _contextRefiners[i].Forward(backend, refinedCaption, _captionRope);
+                refinedCaption.Dispose();
+                refinedCaption = next;
+                ZImageDebugDump.Dump($"context_refiner.{i}", refinedCaption);
+            }
+
+            if (captionCacheable)
+            {
+                _ = refinedCaption.DataPointer;   // materialize to host so it survives across steps
+                _cachedRefinedCaption?.Dispose();
+                _cachedRefinedCaption = refinedCaption;
+                _cachedCaptionKey = captionEmbeddings;
+                _cachedCapPaddedLen = capPaddedLen;
+            }
         }
+        bool ownsRefinedCaption = !captionCacheable;   // cached (or newly cached) captions are field-owned
 
         // ── 3. Image patchify + embed + pad + noise_refiner stack ──
         Tensor packedLatent = Patchify(latent, batch, inChannels, latentH, latentW, patch);
@@ -260,17 +298,21 @@ public sealed unsafe class ZImageTransformer : IDisposable
         if (!ReferenceEquals(imgPadded, imgEmbedded))
             imgEmbedded.Dispose();
 
-        // Image-only RoPE for noise_refiner. Diffusers uses pos_start=(1,0,0) for the image-only
-        // refinement stack — see ZImageRope.BuildImagePositionIds.
-        ZImageRope refinerRope = new ZImageRope(_config.AxesDims, _config.RopeTheta);
-        Tensor refinerPosIds = ZImageRope.BuildImagePositionIds(hPacked, wPacked, imgPaddedLen);
-        refinerRope.Precompute(refinerPosIds);
-        refinerPosIds.Dispose();
+        // Image-only RoPE for noise_refiner (cached by shape signature — timestep-independent).
+        long refinerSig = ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L) ^ ((long)imgPaddedLen * 2654435761L);
+        _refinerRope ??= new ZImageRope(_config.AxesDims, _config.RopeTheta);
+        if (_refinerRopeSig != refinerSig)
+        {
+            Tensor refinerPosIds = ZImageRope.BuildImagePositionIds(hPacked, wPacked, imgPaddedLen);
+            _refinerRope.Precompute(refinerPosIds);
+            refinerPosIds.Dispose();
+            _refinerRopeSig = refinerSig;
+        }
 
         Tensor refinedImage = imgPadded;
         for (int i = 0; i < _noiseRefiners.Length; i++)
         {
-            Tensor next = _noiseRefiners[i].Forward(backend, refinedImage, tEmb, refinerRope);
+            Tensor next = _noiseRefiners[i].Forward(backend, refinedImage, tEmb, _refinerRope);
             refinedImage.Dispose();
             refinedImage = next;
             ZImageDebugDump.Dump($"noise_refiner.{i}", refinedImage);
@@ -278,14 +320,31 @@ public sealed unsafe class ZImageTransformer : IDisposable
 
         // ── 4. Concatenate [refined_image, refined_caption] along sequence dim ──
         // Order is [image, caption] per diffusers transformer_z_image.py:859 — NOT [caption, image].
-        Tensor concat = ConcatAlongSeqDim(refinedImage, refinedCaption, batch, imgPaddedLen, capPaddedLen, hidden);
-        refinedCaption.Dispose();
+        // Device concat (backend.Concat = stream-ordered DtoD): the host ConcatAlongSeqDim read both inputs'
+        // DataPointer every step — a full pipeline drain + D2H/H2D round-trip of the joint sequence.
+        Tensor concat;
+        if (batch == 1)
+        {
+            concat = new Tensor(new TensorShape(batch, imgPaddedLen + capPaddedLen, hidden), DType.F32);
+            backend.Concat(concat, new[] { refinedImage, refinedCaption }, dim: 1);
+        }
+        else
+        {
+            concat = ConcatAlongSeqDim(refinedImage, refinedCaption, batch, imgPaddedLen, capPaddedLen, hidden);
+        }
+        if (ownsRefinedCaption)
+            refinedCaption.Dispose();
         refinedImage.Dispose();
 
-        // ── 5. Build full RoPE for the concatenated [image, caption] sequence ──
-        Tensor fullPosIds = ZImageRope.BuildPositionIds(capPaddedLen, hPacked, wPacked, imgPaddedLen);
-        _rope.Precompute(fullPosIds);
-        fullPosIds.Dispose();
+        // ── 5. Build full RoPE for the concatenated [image, caption] sequence (cached by signature) ──
+        long fullSig = refinerSig ^ ((long)capPaddedLen * 73856093L);
+        if (_fullRopeSig != fullSig)
+        {
+            Tensor fullPosIds = ZImageRope.BuildPositionIds(capPaddedLen, hPacked, wPacked, imgPaddedLen);
+            _rope.Precompute(fullPosIds);
+            fullPosIds.Dispose();
+            _fullRopeSig = fullSig;
+        }
 
         // Build the regional attention bias for the [image|caption] main-layer sequence. Image
         // tokens occupy [0, imgRealLen) (padded image tokens get no bias); region caption columns
@@ -315,12 +374,23 @@ public sealed unsafe class ZImageTransformer : IDisposable
         attnBias?.Dispose();
 
         // ── 7. Slice off image portion (front of the [image, caption] sequence), trim pad tokens ──
-        Tensor imageSlice = SliceImageFront(x, batch, imgPaddedLen, capPaddedLen, hidden);
-        x.Dispose();
-
-        Tensor realImage = TrimImagePad(imageSlice, batch, imgRealLen, imgPaddedLen);
-        if (!ReferenceEquals(realImage, imageSlice))
-            imageSlice.Dispose();
+        // B=1: the real image tokens are the CONTIGUOUS front rows [0, imgRealLen) of x, so slice + pad-trim
+        // collapse to ONE device SliceRows (the host helpers read x.DataPointer — a per-step pipeline drain).
+        Tensor realImage;
+        if (batch == 1)
+        {
+            realImage = new Tensor(new TensorShape(1, imgRealLen, hidden), DType.F32);
+            backend.SliceRows(realImage, x, 0);
+            x.Dispose();
+        }
+        else
+        {
+            Tensor imageSlice = SliceImageFront(x, batch, imgPaddedLen, capPaddedLen, hidden);
+            x.Dispose();
+            realImage = TrimImagePad(imageSlice, batch, imgRealLen, imgPaddedLen);
+            if (!ReferenceEquals(realImage, imageSlice))
+                imageSlice.Dispose();
+        }
 
         return (realImage, tEmb, hPacked, wPacked);
     }
@@ -657,6 +727,9 @@ public sealed unsafe class ZImageTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            _cachedRefinedCaption?.Dispose();
+            _cachedRefinedCaption = null;
+            _cachedCaptionKey = null;
             _tEmbLinear1Weight = null;
             _tEmbLinear1Bias = null;
             _tEmbLinear2Weight = null;

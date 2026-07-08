@@ -187,7 +187,9 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             // Flux / the video pipelines). Safe: scheduler.Step runs on the host (and NegateInPlace already
             // synced the velocity), so `latent` — the only tensor the next step needs — is host-resident, and
             // everything else persistent was materialized above the loop.
-            Backend.FreeActivations();
+            // trimPool:false — the next step re-uses the pool reservation directly; trimming here cost a full
+            // stream-sync + multi-GB driver release/re-map EVERY step (the final FreeActivations below trims).
+            Backend.FreeActivations(trimPool: false);
         }
 
         // ── 4. VAE decode ──

@@ -107,6 +107,14 @@ public sealed unsafe class ZImageContextRefinerBlock
         qHeads.Dispose();
         kHeads.Dispose();
 
+        // Device RoPE on the pre-permute layout for B=1 (see ZImageBlock — bit-identical, kills the host
+        // D2H round-trip of Q/K); B>1 keeps the host path after the permute.
+        bool gpuRope = rope is not null && batch == 1;
+        if (gpuRope)
+        {
+            rope!.ApplyGpu(backend, qNormed, kNormed, _numHeads);
+        }
+
         Tensor qMh = new Tensor(mhShape, DType.F32);
         Tensor kMh = new Tensor(mhShape, DType.F32);
         Tensor vMh = new Tensor(mhShape, DType.F32);
@@ -117,11 +125,15 @@ public sealed unsafe class ZImageContextRefinerBlock
         kNormed.Dispose();
         v.Dispose();
 
-        rope?.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        if (rope is not null && !gpuRope)
+        {
+            rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
+        }
 
+        // allowF16: Q/K RMS-normed above → bounded scores → the F16/cuDNN fused SDPA path is safe.
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
