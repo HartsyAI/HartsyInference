@@ -165,6 +165,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditGatedResidualF32;
     private readonly nint _ditModulation4F32;
     private readonly nint _ditCfgEulerF32;
+    private readonly nint _ditUnpatchifyF32;
     private readonly nint _ditTanhF32;
     private readonly nint _ditRopeF32;
     private readonly nint _ltx2SplitRopeF32;
@@ -386,6 +387,7 @@ public sealed class CudaKernels : IDisposable
         _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
         _ditModulation4F32 = _ditF32Module.GetFunction("dit_modulation4_f32");
         _ditCfgEulerF32 = _ditF32Module.GetFunction("dit_cfg_euler_f32");
+        _ditUnpatchifyF32 = _ditF32Module.GetFunction("dit_unpatchify_f32");
         _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
         _ditRopeF32 = _ditF32Module.GetFunction("dit_rope_f32");
         _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
@@ -1507,6 +1509,30 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches CFG combine + Euler step in-place on z: z[i] += delta*(guidance*pos[i] + (1-guidance)*neg[i]).</summary>
     public void LaunchCfgEuler(ulong z, ulong pos, ulong neg, float guidance, float delta, int count, nint stream)
         => LaunchCfgEulerImpl(_ditCfgEulerF32, z, pos, neg, guidance, delta, count, stream);
+
+    /// <summary>Launches unpatchify: token grid [hP·wP, C·p²] → pixel latent [C, H, W] (B=1, F32).
+    /// <paramref name="innerChannelFastest"/>: token inner order (ph, pw, c) when true (Z-Image), (c, ph, pw) when false (Krea2).</summary>
+    public unsafe void LaunchDitUnpatchify(ulong output, ulong input, int channels, int hPacked, int wPacked,
+        int patch, bool innerChannelFastest, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint chArg = (uint)channels, hpArg = (uint)hPacked, wpArg = (uint)wPacked, pArg = (uint)patch;
+        uint innerArg = innerChannelFastest ? 1u : 0u;
+        ulong totalArg = (ulong)channels * (ulong)hPacked * (ulong)wPacked * (ulong)(patch * patch);
+        void** args = stackalloc void*[8];
+        args[0] = &outArg;
+        args[1] = &inArg;
+        args[2] = &chArg;
+        args[3] = &hpArg;
+        args[4] = &wpArg;
+        args[5] = &pArg;
+        args[6] = &innerArg;
+        args[7] = &totalArg;
+        uint gridDim = (uint)((totalArg + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            _ditUnpatchifyF32, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Launches tanh: output[i] = tanh(input[i]) (F32).</summary>
     public void LaunchTanh(ulong output, ulong input, int count, nint stream)

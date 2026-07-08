@@ -323,3 +323,57 @@ device rgb (`ChwF32ToHwcU8`), per-gen latent-stats scans gated behind `HARTSY_ZI
    (fixed latent/tEmb/velocity buffers, sig = caption ref ⊕ shape, weight-eviction invalidation).
 3. **`DitDtype` F16 activations** — REAL SwiGLU overflow history here (ffn=10240, L0 ffnOut INF): audit with FFN
    inner kept F32 first.
+
+## 2026-07-08 — Z-Image-Turbo round 3 (`alpha.44.2-local`): 5.15s → **3.12s = TIED with Comfy (3.1s)** — coherent ✓
+
+Warm median 3.12s (best 3.10s), every stage verified visually against the astronaut reference. From 52.1s
+(16.8× slower) three days ago to 1.00× — the same arc that took Krea2 past Comfy.
+
+**Attribution first** (phase probes at Verbose): the 5.15s was TE 0.43s / denoise 2.75s (F32 ~344ms/step) /
+unpatchify+drain 0.20s / **VAE decode 1.49s** / tails ~0.3s. The round-2 note "VAE is already GPU — no work
+there" was wrong in a different way: the shared Flux `VaeDecoder` at 1024² ran **9 overlapping tiles** (2.25×
+redundant decode + host blend/normalize loops + per-tile D2H) — and unconditional `[TILEDBG]` full-tensor host
+scans on every gen.
+
+| Fix | Δ / result |
+|---|---|
+| **VAE full-res direct decode** (`VaeDecoder.DecodeTiled`: when the estimated worst im2col fits a 10 GB cap, decode the whole latent in one pass; OOM → fall back to tiles for the session; TILEDBG scans gated behind `HARTSY_VAE_STATS`) | 1490ms → 632ms; SDXL/Flux/Chroma/AuraFlow inherit free (SDXL 46.3 → 37.3s, coherent ✓) |
+| **BF16 VAE weights for Z-Image** (extension `ZImageLoader` via the existing `VaePrecisionHelper` — the SDXL policy) + **planned pool-trim** before the big im2col (its 9.2 GB alloc OOM-retried against MEMPOOL_KEEP reservations EVERY gen, ~+470ms) | decode → **416–474ms stable**, im2col 9.2 → 4.6 GB, zero OOM retries |
+| **TE prompt-embedding cache** (extension-side, keyed on prompt string; TE weights preloaded+freed only on cache miss — the freed ~8 GB is the VAE headroom) | repeat-prompt TE ~430ms → **0** |
+| **`DitStepGraph` for Z-Image** (`ZImageTransformer.ForwardPacked` → capturable `PackedCore`; per-GEN lifecycle — the pipeline's final `FreeActivations` frees the fixed boundary buffers, so cross-gen replay = CUDA 700 (hit live); invalidate at gen end, re-warm+re-capture next gen) | correct + banked; wall ~neutral (GPU-bound) |
+| **`HARTSY_DIT_F16` for Z-Image blocks** — see the sandwich-damp story below | steps 344 → **~256ms** (denoise 2.75 → 2.05s) |
+| **Device unpatchify** (`dit_unpatchify_f32` kernel + `IBackend.UnpatchifyTokens`, parameterized for Z-Image (ph,pw,c) AND Krea2 (c,ph,pw) inner orders) — end-of-loop tokens → VAE never leave the GPU | unpatchify+drain 280ms → ~0 host (wall −100ms; the rest was GPU tail that now overlaps the VAE phase) |
+
+### The F16 story: sandwich-norm scale damping (new general technique)
+Z-Image's attention out-projection and SwiGLU raw outputs genuinely exceed F16's 65504 (traced live: attnProjected
+INF in the FIRST refiner block; raw ffnOut ~1.05M at step 6 — late steps grow ~4× past step 1). But both feed
+straight into an RmsNorm, and **RMSNorm(c·x) ≡ RMSNorm(x)** — so scaling `attention.out` and `feed_forward.w3`
+by **1/64** (folded into the GEMM alpha via `Fp8ScaleFactor`, zero extra kernels, bit-exact post-norm, zero
+relative-precision cost) makes the whole block-loop F16-safe with NO F32 detours. 1/16 left exactly ONE element
+at INF; the magnitudes were measured with the env-gated `HARTSY_ZIMAGE_F16TRACE` per-tensor probes (kept in-tree).
+
+### Cross-model step-graph owner guard (latent bug found by inspection, fixed + verified live)
+The backend step-graph slot is single — with two graph-capturing models alternating (Krea2 ↔ Z-Image under
+KEEP_MODELS), model A would happily `StepGraphLaunch` model B's captured graph (A's own signature never changed).
+Added `IBackend.StepGraphOwner`; owner mismatch → reset + re-capture (never counted as a CFG flip). Verified live
+by the no-KEEP rotation bench below.
+
+### Deploy gotcha (cost one debugging round): a `1.0.0-alpha.44` pin resolves to NUGET.ORG
+The extension pin was bumped to `1.0.0-alpha.44` (no `-local`, no matching local pack) — NuGet silently restored
+the months-old PUBLIC `HartsyInference 1.0.0-alpha.44` from nuget.org: 59s gens, no phase probes, no error.
+Local packs must sort ABOVE any published version (hence `alpha.44.2-local`) and the deployed DLL should be
+md5-checked against the local nupkg after every extension rebuild.
+
+### Final numbers (RTX 4090, warm median of 3+, random seeds, all coherent ✓ visually)
+| Model | Comfy | round 2 | **round 3** | config |
+|---|---|---|---|---|
+| **Z-Image-Turbo** | 3.1s | 5.15s | **3.12s (1.01×)** | KEEP_MODELS; 3.13–3.18s no-KEEP |
+| Krea2-Turbo (regression) | 6.5s | 4.68s | **4.67s** ✓ | KEEP_MODELS; 6.47s no-KEEP (bar: 6.56) |
+| SDXL (free inheritance) | 3.7s | 46.3s | **37.3s** | full-res VAE only; rest unported |
+
+Warm 3.12s profile: TE 0 (cache) · denoise 8×~256ms = 2.05s · unpatchify ~0 · VAE 430ms · rgb 5ms · Swarm tail ~0.4s.
+
+**Remaining to BEAT 3.1s cleanly (~0.2s, all GPU-compute):** fused QKV GEMM (easy for Z-Image — the fused
+checkpoint tensor shares ONE fp8 scale, unlike Krea2), w1/w3 FFN fusion (mind the w3 damp), cuBLASLt algo tuning
+for M=4160, VAE mid-block attention F16/cuDNN, cross-gen graph persistence (needs the fixed buffers out of the
+activation cache). Fleet: port the prompt-embed cache + device rgb + full-res-VAE audit to Flux/Chroma/ERNIE.

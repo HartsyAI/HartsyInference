@@ -370,4 +370,36 @@ __global__ void ltx2_split_rope_f32(
     x[headBase + i + r] = b * c + a * sn;
 }
 
+
+// ── Unpatchify: token grid [hP·wP, C·p²] → pixel latent [C, H, W] (B=1) ─────
+// innerChannelFastest=1 → token inner order (ph, pw, c) (Z-Image / Lumina2 patchify);
+// 0 → channel-outer (c, ph, pw) (Krea2 / diffusers view+permute+reshape).
+__global__ void dit_unpatchify_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    unsigned int channels,
+    unsigned int hPacked,
+    unsigned int wPacked,
+    unsigned int patch,
+    unsigned int innerChannelFastest,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    unsigned int W = wPacked * patch;
+    unsigned int H = hPacked * patch;
+    unsigned int x = (unsigned int)(i % W);
+    unsigned long long t = i / W;
+    unsigned int y = (unsigned int)(t % H);
+    unsigned int c = (unsigned int)(t / H);
+    unsigned int hp = y / patch, ph = y % patch;
+    unsigned int wp = x / patch, pw = x % patch;
+    unsigned long long seq = (unsigned long long)hp * wPacked + wp;
+    unsigned int patchVol = channels * patch * patch;
+    unsigned long long inner = innerChannelFastest
+        ? ((unsigned long long)(ph * patch + pw) * channels + c)
+        : (((unsigned long long)c * patch + ph) * patch + pw);
+    output[i] = input[seq * patchVol + inner];
+}
+
 } // extern "C"

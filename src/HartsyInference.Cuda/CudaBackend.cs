@@ -1328,6 +1328,33 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public unsafe void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked,
+        int patch, bool innerChannelFastest)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("UnpatchifyTokens");
+        if (output.DType != DType.F32 || tokens.DType != DType.F32)
+            throw new NotSupportedException("CUDA UnpatchifyTokens supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(tokens);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchDitUnpatchify(pOut, pIn, channels, hPacked, wPacked, patch, innerChannelFastest, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     public void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
     {
         if (z.DType != DType.F32 || pos.DType != DType.F32 || neg.DType != DType.F32)

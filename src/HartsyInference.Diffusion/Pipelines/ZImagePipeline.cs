@@ -239,16 +239,20 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             Backend.FreeActivations(trimPool: false);
         }
 
-        // Fast path: bring the final packed tokens back to pixel space once for the VAE (the single D2H).
-        // Graph mode reads a SNAPSHOT — unpatchify's DataPointer read would otherwise D2H-and-FREE the fixed
-        // buffer the captured graph points at.
+        // Fast path: bring the final packed tokens back to pixel space once for the VAE — on-device
+        // (backend.UnpatchifyTokens), so the loop → VAE chain never leaves the GPU: the host unpatchify loop
+        // D2H-drained the tokens (~280 ms: pipeline drain + 4M-element triple loop) and the VAE re-uploaded the
+        // result. Graph mode reads a SNAPSHOT — touching the fixed buffer directly would free what the captured
+        // graph points at.
         if (fastPath)
         {
             long phU = sw.ElapsedMilliseconds;
             Tensor tokens = graphMode ? _transformer.SnapshotGraphLatent(Backend) : packed!;
-            latent = _transformer.UnpatchifyPacked(tokens, _config.InChannels, fpH, fpW);
+            latent = new Tensor(latentShape, DType.F32);
+            Backend.UnpatchifyTokens(latent, tokens, _config.InChannels, fpH, fpW, _config.PatchSize,
+                innerChannelFastest: true);
             tokens.Dispose();   // graph mode: the snapshot; eager: packed itself (as before)
-            Logs.Verbose($"[zimage-phase] unpatchify+drain={sw.ElapsedMilliseconds - phU}ms");
+            Logs.Verbose($"[zimage-phase] unpatchify={sw.ElapsedMilliseconds - phU}ms");
         }
 
         // ── 4. VAE decode ──

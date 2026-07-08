@@ -337,6 +337,11 @@ public sealed class VaeDecoder
             Tensor? single = null;
             try
             {
+                // Pre-trim when the pool's reservations would OOM the big im2col: the caller just drained the
+                // stream (the latent arrives host-resident), so a planned trim here is near-free, vs. the
+                // allocator's OOM-retry mid-decode which syncs a deep conv queue (measured ~+470 ms/gen).
+                if (backend.FreeMemoryBytes() < fullResWorkspace + (1L << 30))
+                    backend.TrimMemoryPool();
                 single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, weightDtype, disposeSourceOnCast: false);
                 Tensor decoded = Decode(backend, single);
                 if (!ReferenceEquals(single, latent)) single.Dispose();

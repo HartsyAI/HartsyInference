@@ -493,6 +493,32 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>DiT token-grid unpatchify: <c>[1, hP·wP, C·p²]</c> → <c>[1, C, hP·p, wP·p]</c> (F32, B=1).
+    /// <paramref name="innerChannelFastest"/> selects the token inner order: true = (ph, pw, c) (Z-Image/Lumina2),
+    /// false = channel-outer (c, ph, pw) (Krea2/diffusers). Keeps the end-of-loop latent → VAE chain device-resident
+    /// (the host unpatchify loop D2H-drained the tokens and re-uploaded for the decode). Default = host loop.</summary>
+    unsafe void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked, int patch,
+        bool innerChannelFastest)
+    {
+        int H = hPacked * patch, W = wPacked * patch;
+        int patchVol = channels * patch * patch;
+        float* src = (float*)tokens.DataPointer;
+        float* dst = (float*)output.DataPointer;
+        long hw = (long)H * W;
+        for (int c = 0; c < channels; c++)
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++)
+                {
+                    int hp = y / patch, ph = y % patch;
+                    int wp = x / patch, pw = x % patch;
+                    long seq = (long)hp * wPacked + wp;
+                    long inner = innerChannelFastest
+                        ? ((long)(ph * patch + pw) * channels + c)
+                        : (((long)c * patch + ph) * patch + pw);
+                    dst[c * hw + (long)y * W + x] = src[seq * patchVol + inner];
+                }
+    }
+
     /// <summary>Wan2.2 VAE unpatchify / pixel-shuffle: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c> with channel
     /// unpack <c>oc = ci·p² + r·p + q</c> at out spatial <c>(hh·p+q, ww·p+r)</c>. Default = host reference loop.</summary>
     unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
