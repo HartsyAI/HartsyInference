@@ -171,7 +171,7 @@ public sealed class FluxSingleStreamBlock
         // ── 7. SDPA ──
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

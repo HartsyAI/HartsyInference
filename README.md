@@ -386,7 +386,8 @@ RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identi
 | Ideogram4 (20 steps) | 19.5 s | 17.0 s | 1.15× — optimization queued |
 | Chroma1-HD (20 steps) | 63.2 s | 16.6 s | Optimization in progress |
 | ERNIE-Image (20 steps) | 50.6 s | 24.0 s | Optimization queued |
-| Flux-Dev (20 steps) | 72.4 s | 12.5 s | Optimization queued |
+| Flux-Dev (20 steps) | 31.0 s | 12.5 s | Optimization in progress |
+| Flux-Schnell (4 steps) | 10.5 s | — | First benchmark; optimization in progress |
 | SDXL (20 steps) | 33.0 s | 3.7 s | Optimization queued |
 
 These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).

@@ -267,7 +267,7 @@ public sealed class FluxDoubleStreamBlock
 
         // ── 8. Scaled dot-product attention ──
         Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, attnBias, scale);
+        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();

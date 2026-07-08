@@ -21,6 +21,16 @@
     }
   },
   {
+    "name": "Flux-Schnell",
+    "model": "BFL/Flux1/flux1-schnell-fp8",
+    "params": {
+      "width": 1024,
+      "height": 1024,
+      "steps": 4,
+      "cfgscale": 1.0
+    }
+  },
+  {
     "name": "Z-Image-Turbo",
     "model": "ZImage/SwarmUI_Z-Image-Turbo-FP8Mix",
     "params": {

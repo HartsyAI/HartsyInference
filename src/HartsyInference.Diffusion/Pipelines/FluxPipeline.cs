@@ -2,6 +2,7 @@ using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -25,6 +26,30 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder? _vaeEncoder;
     private readonly FluxConfig _config;
+
+    /// <summary>Keeps the DiT weights GPU-resident across generations on the eager (non-streaming) path — skips
+    /// the post-loop FreeWeights + next-gen re-upload. A prompt-cache MISS frees the DiT before the T5 encode
+    /// (the TE cannot always coexist with the resident DiT), then the loop re-preloads.
+    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables); the streaming (low-VRAM) path always evicts.</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the CLIP-L and T5 token ids —
+    // the Krea2/Chroma pattern. A hit skips the whole CLIP+T5 phase (preload + encode + free). Cached
+    // tensors are host-materialized so they survive the per-gen FreeActivations sweeps.
+    private int[]? _cachedCondKey;
+    private Tensor? _cachedClipPooled;
+    private Tensor? _cachedT5;
+    private int[]? _cachedNegKey;
+    private Tensor? _cachedNegClipPooled;
+    private Tensor? _cachedNegT5;
+
+    /// <summary>HARTSY_FLUX_STATS=1 re-enables the per-tensor debug statistics (min/max/mean/NaN scans and
+    /// per-channel means). Each scan is a full host read of a device-resident tensor — a forced D2H sync that
+    /// serializes the denoise loop — so they are strictly opt-in diagnostics, never on by default.</summary>
+    private static readonly bool StatsEnabled =
+        Environment.GetEnvironmentVariable("HARTSY_FLUX_STATS") == "1";
 
     /// <summary>Creates a new Flux pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public FluxPipeline(IBackend backend, ClipTextEncoder clipL, T5TextEncoder t5,
@@ -140,83 +165,127 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         Logs.Info($"Flux ({baseMode}) {opMode}: {width}x{height}, {steps} steps, guidance={guidanceScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Encode text ─────────────────────────────────────────────
-        Logs.Info("Encoding text with CLIP-L (pooled) + T5-XXL (per-token)...");
-
-        // Preload T5 weights to GPU as a single batch upload. Without this, every
-        // matmul/layernorm inside the encoder would do its own cache-miss H2D
-        // transfer + immediate free (see CudaBackend.MatMul finally block) — turning
-        // text encoding into thousands of ~MB-sized PCIe ping-pongs instead of one
-        // bulk transfer + many on-GPU reuses. Backends that don't support a weight
-        // cache (Cpu, Vulkan) treat PreloadWeights as a no-op.
-        Backend.PreloadWeights(_t5.EnumerateWeights());
-
-        int[][] batchTokenIdsL = [promptTokenIdsL];
-        Tensor clipLHidden = _clipL.Encode(Backend, batchTokenIdsL);
-        LogTensorStats("CLIP hidden (full)", clipLHidden);
-        Tensor clipPooled = ExtractEosHiddenState(clipLHidden, promptEosPositionL);
-        clipLHidden.Dispose();
-
-        int[][] batchTokenIdsT5 = [promptTokenIdsT5];
-        int[][]? batchMaskT5 = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
-        Tensor t5Embeddings = _t5.Encode(Backend, batchTokenIdsT5, batchMaskT5);
-
-        int txtSeqLen = (int)t5Embeddings.Shape[1];
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (T5 seqLen={txtSeqLen})");
-        LogTensorStats("CLIP pooled", clipPooled);
-        LogTensorStats("T5 embeddings", t5Embeddings);
-
-        // ── 1b. True-CFG negative conditioning (diffusers true_cfg_scale) ──
-        // VALIDATION-PENDING: verify vs diffusers FluxPipeline true_cfg. diffusers Flux
-        // runs a real unconditional pass only when true_cfg_scale > 1 AND a negative prompt
-        // is supplied, combining the two velocity predictions via standard CFG
-        // (neg + scale*(pos - neg)) in ADDITION to the model's embedded distilled guidance,
-        // which still rides along on BOTH passes (same guidanceScale fed to each forward).
-        // When doTrueCfg is false the loop below is byte-identical to the single-pass path.
+        // ── 1. Encode text (with cross-generation prompt-embedding cache) ──
+        // VALIDATION-PENDING (pre-existing): verify true-CFG vs diffusers FluxPipeline true_cfg. diffusers Flux
+        // runs a real unconditional pass only when true_cfg_scale > 1 AND a negative prompt is supplied,
+        // combining the two velocity predictions via standard CFG (neg + scale*(pos - neg)) in ADDITION to the
+        // model's embedded distilled guidance, which still rides along on BOTH passes.
         bool doTrueCfg = trueCfgScale > 1f && negPromptTokenIdsT5 is not null;
+
+        // Cache keys fold the EOS position in with the token ids (the pooled CLIP vector depends on it).
+        int[] condKey = BuildPromptCacheKey(promptTokenIdsL, promptEosPositionL, promptTokenIdsT5);
+        int[]? negKey = doTrueCfg
+            ? BuildPromptCacheKey(negPromptTokenIdsL ?? promptTokenIdsL, negPromptEosPositionL, negPromptTokenIdsT5!)
+            : null;
+        bool condHit = _cachedCondKey is not null && condKey.AsSpan().SequenceEqual(_cachedCondKey);
+        bool negHit = !doTrueCfg || (_cachedNegKey is not null && negKey!.AsSpan().SequenceEqual(_cachedNegKey));
+
+        Tensor clipPooled;
+        Tensor t5Embeddings;
         Tensor? negClipPooled = null;
         Tensor? negT5Embeddings = null;
-        if (doTrueCfg)
+        if (condHit && negHit)
         {
-            Logs.Info($"Flux true-CFG enabled (true_cfg_scale={trueCfgScale}); encoding negative prompt...");
-            int[][] negBatchTokenIdsL = [negPromptTokenIdsL ?? promptTokenIdsL];
-            Tensor negClipLHidden = _clipL.Encode(Backend, negBatchTokenIdsL);
-            negClipPooled = ExtractEosHiddenState(negClipLHidden, negPromptEosPositionL);
-            negClipLHidden.Dispose();
-
-            int[][] negBatchTokenIdsT5 = [negPromptTokenIdsT5!];
-            int[][]? negBatchMaskT5 = negPromptAttentionMaskT5 is not null ? [negPromptAttentionMaskT5] : null;
-            negT5Embeddings = _t5.Encode(Backend, negBatchTokenIdsT5, negBatchMaskT5);
-            LogTensorStats("Neg CLIP pooled", negClipPooled);
-            LogTensorStats("Neg T5 embeddings", negT5Embeddings);
-
-            // The negative T5 stream must match the positive's sequence length so the
-            // transformer's joint [txt|img] attention and the velocity shapes line up for
-            // the CFG combine. The Flux T5 encoder pads/truncates to a fixed max length, so
-            // positive and negative streams share txtSeqLen; guard rather than silently
-            // mis-combine if a caller ever supplies a divergent length.
-            if ((int)negT5Embeddings.Shape[1] != txtSeqLen)
+            Logs.Info("Flux prompt-embedding cache HIT — skipping CLIP+T5 encode.");
+            clipPooled = _cachedClipPooled!;
+            t5Embeddings = _cachedT5!;
+            if (doTrueCfg)
             {
-                throw new InvalidOperationException(
-                    $"True-CFG negative T5 seqLen ({negT5Embeddings.Shape[1]}) must equal positive T5 seqLen ({txtSeqLen}). " +
-                    "Tokenize the negative prompt with the same max length as the positive prompt.");
+                negClipPooled = _cachedNegClipPooled;
+                negT5Embeddings = _cachedNegT5;
+            }
+        }
+        else
+        {
+            Logs.Info("Encoding text with CLIP-L (pooled) + T5-XXL (per-token)...");
+
+            // The T5 cannot always coexist with a resident DiT (HARTSY_KEEP_MODELS); evict for this
+            // encode, the denoise section re-preloads. Cache hits never pay this.
+            if (_ditResident)
+            {
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
+
+            // Preload T5 weights to GPU as a single batch upload. Without this, every
+            // matmul/layernorm inside the encoder would do its own cache-miss H2D
+            // transfer + immediate free (see CudaBackend.MatMul finally block) — turning
+            // text encoding into thousands of ~MB-sized PCIe ping-pongs instead of one
+            // bulk transfer + many on-GPU reuses. Backends that don't support a weight
+            // cache (Cpu, Vulkan) treat PreloadWeights as a no-op.
+            Backend.PreloadWeights(_t5.EnumerateWeights());
+
+            int[][] batchTokenIdsL = [promptTokenIdsL];
+            Tensor clipLHidden = _clipL.Encode(Backend, batchTokenIdsL);
+            LogTensorStats("CLIP hidden (full)", clipLHidden);
+            clipPooled = ExtractEosHiddenState(clipLHidden, promptEosPositionL);
+            clipLHidden.Dispose();
+
+            int[][] batchTokenIdsT5 = [promptTokenIdsT5];
+            int[][]? batchMaskT5 = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
+            t5Embeddings = _t5.Encode(Backend, batchTokenIdsT5, batchMaskT5);
+
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (T5 seqLen={t5Embeddings.Shape[1]})");
+            LogTensorStats("CLIP pooled", clipPooled);
+            LogTensorStats("T5 embeddings", t5Embeddings);
+
+            if (doTrueCfg)
+            {
+                Logs.Info($"Flux true-CFG enabled (true_cfg_scale={trueCfgScale}); encoding negative prompt...");
+                int[][] negBatchTokenIdsL = [negPromptTokenIdsL ?? promptTokenIdsL];
+                Tensor negClipLHidden = _clipL.Encode(Backend, negBatchTokenIdsL);
+                negClipPooled = ExtractEosHiddenState(negClipLHidden, negPromptEosPositionL);
+                negClipLHidden.Dispose();
+
+                int[][] negBatchTokenIdsT5 = [negPromptTokenIdsT5!];
+                int[][]? negBatchMaskT5 = negPromptAttentionMaskT5 is not null ? [negPromptAttentionMaskT5] : null;
+                negT5Embeddings = _t5.Encode(Backend, negBatchTokenIdsT5, negBatchMaskT5);
+                LogTensorStats("Neg CLIP pooled", negClipPooled);
+                LogTensorStats("Neg T5 embeddings", negT5Embeddings);
+            }
+
+            // Free T5 weights from GPU now that text encoding is done. T5-XXL is ~5 GB —
+            // keeping it cached through sampling + VAE decode would OOM 12 GB cards on Flux.
+            // The activation tensors live independently of the encoder weights.
+            Backend.FreeWeights(_t5.EnumerateWeights());
+
+            // Materialize the conditioning on the host (clipPooled already is — ExtractEosHiddenState reads it),
+            // then reclaim every encoder intermediate. CLIP+T5 leave hundreds of device-cached activations that
+            // otherwise linger until GC finalization — they held multi-GB into the DiT phase and were a chunk of
+            // the fp8 auto-transfer OOM. Host-materializing is also what lets the cached embeddings survive
+            // every later FreeActivations sweep across generations.
+            _ = t5Embeddings.DataPointer;
+            if (negT5Embeddings is not null) _ = negT5Embeddings.DataPointer;
+            Backend.FreeActivations();
+
+            // Install into the cross-generation cache (dispose whatever it replaces).
+            if (!condHit)
+            {
+                if (_cachedClipPooled != clipPooled) _cachedClipPooled?.Dispose();
+                if (_cachedT5 != t5Embeddings) _cachedT5?.Dispose();
+                _cachedCondKey = condKey;
+                _cachedClipPooled = clipPooled;
+                _cachedT5 = t5Embeddings;
+            }
+            if (doTrueCfg && !negHit)
+            {
+                if (_cachedNegClipPooled != negClipPooled) _cachedNegClipPooled?.Dispose();
+                if (_cachedNegT5 != negT5Embeddings) _cachedNegT5?.Dispose();
+                _cachedNegKey = negKey;
+                _cachedNegClipPooled = negClipPooled;
+                _cachedNegT5 = negT5Embeddings;
             }
         }
 
-        // Free T5 weights from GPU now that text encoding is done. T5-XXL is ~5 GB —
-        // keeping it cached through sampling + VAE decode would OOM 12 GB cards on Flux.
-        // The activation tensor `t5Embeddings` is on GPU/CPU and lives independently of
-        // the encoder weights. Re-uploading T5 on the next generation is a one-time cost
-        // (~hundreds of ms) that's strictly cheaper than swapping mid-pipeline.
-        Backend.FreeWeights(_t5.EnumerateWeights());
-
-        // Materialize the conditioning on the host (clipPooled already is — ExtractEosHiddenState reads it),
-        // then reclaim every encoder intermediate. CLIP+T5 leave hundreds of device-cached activations that
-        // otherwise linger until GC finalization — they held multi-GB into the DiT phase and were a chunk of
-        // the fp8 auto-transfer OOM. Same per-step pattern the video pipelines already use.
-        _ = t5Embeddings.DataPointer;
-        if (negT5Embeddings is not null) _ = negT5Embeddings.DataPointer;
-        Backend.FreeActivations();
+        int txtSeqLen = (int)t5Embeddings.Shape[1];
+        if (doTrueCfg && (int)negT5Embeddings!.Shape[1] != txtSeqLen)
+        {
+            // The negative T5 stream must match the positive's sequence length so the transformer's joint
+            // [txt|img] attention and the velocity shapes line up for the CFG combine.
+            throw new InvalidOperationException(
+                $"True-CFG negative T5 seqLen ({negT5Embeddings.Shape[1]}) must equal positive T5 seqLen ({txtSeqLen}). " +
+                "Tokenize the negative prompt with the same max length as the positive prompt.");
+        }
 
         // ── 2. Set up dynamic flow-match scheduler ─────────────────────
         TensorShape latentShape = new TensorShape(1, 16, latentH, latentW);
@@ -299,24 +368,50 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         BlockStreamingController? streamer = null;
         if (Backend.StreamingCache is not null)
         {
-            Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
 
             // Kontext appends refSeqLen reference tokens to the noise tokens, so the transformer's real
             // per-forward activation working set spans txt + noise + ref — not just the noise seq. Reserve for
-            // the full length so the prefetch estimate doesn't under-count and over-commit VRAM (base Flux
+            // the full length so the estimates don't under-count and over-commit VRAM (base Flux
             // passes kontextRefSeqLen = 0, so this is unchanged there).
             int forwardImgSeqLen = imgSeqLen + kontextRefSeqLen;
-            int prefetchAhead = ChooseFluxPrefetchAhead(
-                Backend.StreamingCache, blocks, txtSeqLen, forwardImgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio));
-            streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
-            _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
-            streamer.Prime();
-            long perBlockMb = streamer.EstimatedTotalWeightBytes / blocks.Length / (1024 * 1024);
-            long totalMb = streamer.EstimatedTotalWeightBytes / (1024 * 1024);
-            Logs.Info($"Flux streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, " +
-                $"per-block ~{perBlockMb} MB, total ~{totalMb} MB");
+            long activationReserve = EstimateFluxActivationReserveBytes(
+                txtSeqLen, forwardImgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio));
+
+            // RESIDENT fast path: when the whole block set fits beside the activation reserve, skip streaming
+            // entirely. The sliding window (retainBehind: 0) evicts and re-uploads EVERY block on EVERY
+            // forward — ~12 GB of PCIe traffic per step for Flux-Dev fp8 — which dominated the wall on cards
+            // that never needed streaming in the first place (Krea2, same weight class, always ran resident).
+            long totalBlockBytes = 0;
+            foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
+            // A DiT that is ALREADY resident (KEEP_MODELS) trivially fits — the availability query must be
+            // skipped for it, because free VRAM no longer counts the weights' own footprint. Without this
+            // short-circuit warm gens alternate resident→streaming→resident: the query sees "not enough
+            // free" purely because the weights it is asking about are occupying the space.
+            long availForWeights = _ditResident
+                ? long.MaxValue
+                : Backend.StreamingCache.QueryAvailableWeightCacheBytes(activationReserve);
+            if (availForWeights >= totalBlockBytes)
+            {
+                Logs.Info(_ditResident
+                    ? "Flux: DiT already resident (KEEP_MODELS) — eager path."
+                    : $"Flux: full DiT fits resident ({totalBlockBytes / (1024 * 1024)} MB weights, " +
+                      $"{availForWeights / (1024 * 1024)} MB available) — eager preload, streaming skipped.");
+                Backend.PreloadWeights(_transformer.EnumerateWeights());
+            }
+            else
+            {
+                Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
+                int prefetchAhead = ChooseFluxPrefetchAhead(Backend.StreamingCache, blocks, activationReserve);
+                streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+                _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
+                streamer.Prime();
+                long perBlockMb = streamer.EstimatedTotalWeightBytes / blocks.Length / (1024 * 1024);
+                long totalMb = streamer.EstimatedTotalWeightBytes / (1024 * 1024);
+                Logs.Info($"Flux streaming: {blocks.Length} blocks, prefetchAhead={prefetchAhead}, " +
+                    $"per-block ~{perBlockMb} MB, total ~{totalMb} MB");
+            }
         }
         else
         {
@@ -356,11 +451,42 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         Logs.Info("Starting Flux denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
+        // Drain-free fast path (plain t2i / img2img, the Chroma/Krea2 pattern): the latent stays
+        // device-resident across the whole loop and the (true-)CFG combine + Euler step run as ONE in-place
+        // device op (CfgEulerStep: v = g·pos + (1−g)·neg, then z += v·dt; g=1 degenerates to plain Euler) —
+        // no per-step D2H of the velocity + H2D re-upload of the latent. Tools/Kontext (host-side per-step
+        // concats), regional bias, masked inpaint (host blend), and the opt-in stats scans keep the host
+        // branch, which is unchanged.
+        bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
+            && !hasRegions && !StatsEnabled;
+        Logs.Info(drainFree ? "Flux loop: drain-free device-resident path." : "Flux loop: host-step path.");
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f; // Convert timestep back to sigma [0,1]
 
+            if (drainFree)
+            {
+                Tensor velocityPred = _transformer.Forward(
+                    Backend, packedLatent, condStream, sigma,
+                    clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked, null, 0, 0, 0);
+                if (doTrueCfg)
+                {
+                    Tensor velocityNeg = _transformer.Forward(
+                        Backend, packedLatent, negT5Embeddings!, sigma,
+                        negClipPooled!, guidanceScale, txtSeqLen, hPacked, wPacked, null, 0, 0, 0);
+                    Backend.CfgEulerStep(packedLatent, velocityPred, velocityNeg, trueCfgScale, scheduler.Dt(i));
+                    velocityNeg.Dispose();
+                }
+                else
+                {
+                    Backend.CfgEulerStep(packedLatent, velocityPred, velocityPred, 1.0f, scheduler.Dt(i));
+                }
+                velocityPred.Dispose();
+            }
+            else
+            {
             // For FLUX.1 Tools: concat noise + control along the feature dim before the
             // transformer pass. The transformer's wider x_embedder consumes the 128-dim
             // input; velocity output is back at 64 dims (no control side in the prediction).
@@ -414,6 +540,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             velocityPred.Dispose();
             packedLatent.Dispose();
             packedLatent = newLatent;
+            }
 
             // Masked-inpaint blend in packed form: keep unmasked region on the source's
             // flow-matching trajectory by re-noising the source latent at the next step's
@@ -427,7 +554,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                     Tensor freshUnpackedNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
                     Tensor freshPackedNoise = PackLatent(freshUnpackedNoise, latentH, latentW);
                     freshUnpackedNoise.Dispose();
-                    noisedSource = new Tensor(packedStepShape, DType.F32);
+                    noisedSource = new Tensor(packedShape, DType.F32);
                     scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
                     freshPackedNoise.Dispose();
                 }
@@ -444,15 +571,16 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             // packedLatent is [B, S, 64] (16 channels × 2×2 patches per token). LatentPreview
-            // needs unpacked NCHW — allocate a temp, emit, dispose. ~1 ms for 1024² Flux; the
-            // PreviewEncoder throttles to ≤4/sec so the unpack only fires when a frame will
-            // actually be rendered.
-            if (onProgress is not null)
+            // needs unpacked NCHW — allocate a temp, emit, dispose. On the drain-free path the unpack reads
+            // the device-resident latent (a D2H sync per frame), so previews emit every 4th step + final
+            // instead of every step; the host path keeps every step.
+            bool emitPreview = onProgress is not null && (!drainFree || (i - startStep) % 4 == 3 || i == steps - 1);
+            if (emitPreview)
             {
                 Tensor previewLatent = LatentPreview.UnpackFluxStylePacked(packedLatent, latentH, latentW, channels: 16);
                 try
                 {
-                    onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                    onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
                         Latent = previewLatent,
                         LatentArch = LatentArchitecture.Flux,
@@ -460,18 +588,24 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                 }
                 finally { previewLatent.Dispose(); }
             }
+            else if (onProgress is not null)
+            {
+                onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            }
 
-            // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and
-            // any not read-back/disposed linger until GC, accumulating to OOM over the schedule (same fix as the
-            // video pipelines). Safe: SchedulerStepPacked runs on the host, so packedLatent — the only tensor the
-            // next step needs — is host-resident, and everything else persistent was materialized above the loop.
-            Backend.FreeActivations();
+            // Reclaim GPU-resident activation buffers between steps on the HOST path only: there the next
+            // step's packedLatent is host-resident (SchedulerStepPacked runs on the host), so freeing device
+            // buffers is safe. On the drain-free path the latent LIVES in the activation cache — freeing it
+            // would silently revert the next step to the stale pre-loop host copy (the Wan I2V garbage bug);
+            // per-op disposal + the warm mem-pool keep drain-free VRAM flat without a sweep (Chroma-verified).
+            if (!drainFree)
+            {
+                Backend.FreeActivations();
+            }
         }
 
-        clipPooled.Dispose();
-        t5Embeddings.Dispose();
-        negClipPooled?.Dispose();
-        negT5Embeddings?.Dispose();
+        // clipPooled / t5Embeddings / negClipPooled / negT5Embeddings are cross-generation cache entries —
+        // not disposed here; replacement on a future cache miss owns their lifetime.
         extendedT5?.Dispose();
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
@@ -479,9 +613,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         packedKontextRef?.Dispose();
 
         // Tear down the streaming controller (frees still-resident blocks) and free the
-        // shared weights. After this, the transformer holds no device memory, making
-        // room for VAE decode on tight VRAM budgets. The streaming + eager paths both
-        // converge on the same final state: zero transformer weights resident.
+        // shared weights, making room for VAE decode on tight VRAM budgets. On the eager path under
+        // HARTSY_KEEP_MODELS the DiT stays resident across generations instead (the full-res VAE decode's
+        // banded im2col fits beside it, falling back to tiles if not — the Chroma pattern); a future
+        // prompt-cache miss evicts it before the T5 encode.
         _transformer.BeforeBlockForward = null;
         if (streamer is not null)
         {
@@ -493,10 +628,16 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // resident and starve the VAE decode (same fix as HunyuanVideoPipeline — decode OOM'd with the
             // DiT still holding ~20+ GB, <1.2 GB free).
             Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
+        else if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
         }
         else
         {
-            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = true;
         }
 
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──
@@ -571,15 +712,12 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// the current+next block already in flight. We pick the largest value that still leaves
     /// headroom for activations + cuBLAS workspace, capped at 2 (deeper just churns VRAM
     /// without extra hiding when blocks compute in tens of milliseconds).</summary>
-    private static int ChooseFluxPrefetchAhead(
-        IStreamingWeightCache cache,
-        IStreamingBlock[] blocks,
-        int txtSeqLen, int imgSeqLen, int hiddenSize, int mlpDim)
+    /// <summary>Estimates the peak per-forward activation footprint (bytes) that must stay free beside the
+    /// DiT weights — the deepest valley is a SingleStreamBlock holding the F16 mlpInput + mlpActivated and
+    /// the F16 concatted simultaneously alongside the F32 attention tensors. Shared by the resident-vs-stream
+    /// decision and the prefetch-depth choice so the two can never disagree. Byte sizes are for B=1.</summary>
+    private static long EstimateFluxActivationReserveBytes(int txtSeqLen, int imgSeqLen, int hiddenSize, int mlpDim)
     {
-        // Estimate the peak activation footprint of a single SingleStreamBlock — the deepest
-        // valley in the forward pass, since SingleStreamBlocks hold both the F16 mlpInput +
-        // mlpActivated and the F16 concatted simultaneously alongside the F32 attention
-        // tensors. Numbers below are byte sizes for B=1.
         long totalSeqLen = txtSeqLen + imgSeqLen;
         long mlpInputBytes = totalSeqLen * mlpDim * 2;             // F16
         long mlpActivatedBytes = totalSeqLen * mlpDim * 2;         // F16
@@ -595,8 +733,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // and the persistent shared weights that aren't part of the streamed set. These are
         // hard to predict tightly; 1 GB is roomy enough to keep us out of OOM territory and
         // cheap if we have it.
-        long activationReserve = scratchBytes + 1024L * 1024 * 1024;
+        return scratchBytes + 1024L * 1024 * 1024;
+    }
 
+    private static int ChooseFluxPrefetchAhead(
+        IStreamingWeightCache cache,
+        IStreamingBlock[] blocks,
+        long activationReserve)
+    {
         long avail = cache.QueryAvailableWeightCacheBytes(activationReserve);
         if (avail <= 0) return 0;
 
@@ -659,6 +803,18 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         return (packedNoise, null);
     }
 
+    /// <summary>Builds a prompt-cache key from the CLIP-L token ids, the CLIP EOS position (the pooled vector
+    /// depends on it), and the T5 token ids, in one flat array (lengths make the encoding unambiguous).</summary>
+    private static int[] BuildPromptCacheKey(int[] tokenIdsL, int eosPositionL, int[] tokenIdsT5)
+    {
+        int[] key = new int[tokenIdsL.Length + 2 + tokenIdsT5.Length];
+        tokenIdsL.CopyTo(key, 0);
+        key[tokenIdsL.Length] = eosPositionL;
+        key[tokenIdsL.Length + 1] = tokenIdsL.Length;
+        tokenIdsT5.CopyTo(key, tokenIdsL.Length + 2);
+        return key;
+    }
+
     private static Tensor TakeOrCreateNoise(TextToImageRequest request, TensorShape latentShape, int seed)
     {
         if (request.InitialNoise is not null)
@@ -676,6 +832,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 
     private static void LogTensorStats(string name, Tensor tensor)
     {
+        if (!StatsEnabled) return;
         ReadOnlySpan<float> data = tensor.AsReadOnlySpan<float>();
         float min = float.MaxValue, max = float.MinValue, sum = 0;
         int nanCount = 0, infCount = 0, zeroCount = 0;
@@ -696,6 +853,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// <summary>Logs per-latent-channel mean for a packed [B, S, 64] tensor (velocity or latent). Each latent channel occupies 4 contiguous slots in the feature dim (c*4 .. c*4+3 for 2x2 patch).</summary>
     private static void LogPerLatentChannelMeanPacked(string name, Tensor packed)
     {
+        if (!StatsEnabled) return;
         long batch = packed.Shape[0];
         long seqLen = packed.Shape[1];
         long featDim = packed.Shape[2];
@@ -728,6 +886,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     /// <summary>Logs per-channel statistics for a 4D NCHW tensor. Useful for diagnosing color channel imbalances.</summary>
     private static void LogPerChannelStats(string name, Tensor tensor)
     {
+        if (!StatsEnabled) return;
         int channels = (int)tensor.Shape[1];
         int spatial = (int)(tensor.Shape[2] * tensor.Shape[3]);
         float* ptr = (float*)tensor.DataPointer;

@@ -517,3 +517,43 @@ library requirements + resolver order, verification log lines, benchmark methodo
 README + extension README/doc-07 sections pointing at it. Verified on a zero-env launch: engine log
 `[Cuda] perf flags: SdpaCudnn=True NativeFp8Gemm=True MempoolKeep=True ...`, warm medians unchanged —
 Z-Image-Turbo 3.05s, Chroma1-HD 63.5s, both visually coherent.
+
+## 2026-07-08 — Flux family round 1: Flux-Dev 72.4s → **31.0s** (Comfy 12.5s), Flux-Schnell first bench **10.5s** — engine `alpha.44.14-local`
+
+One shared FluxPipeline serves Dev / Schnell / Kontext / Tools, so one recipe round covered the family:
+
+1. **THE dominant fix — streaming bypass.** FluxPipeline unconditionally used the block-streaming sliding
+   window (`retainBehind: 0`) whenever the backend had a streaming cache — evicting and re-uploading ALL
+   ~12 GB of fp8 blocks EVERY forward (~240 GB of PCIe per 20-step gen) on a card that fits the whole
+   model (Krea2, same weight class, always ran resident). Now: if the full block set fits beside the
+   activation reserve (same estimate the prefetch chooser uses), eager-preload and skip streaming;
+   low-VRAM cards stream exactly as before. Follow-up fix: a resident DiT (KEEP_MODELS) must SKIP the
+   availability query — free VRAM no longer counts the weights' own footprint, so warm gens alternated
+   resident→streaming→resident (55/37/55s pattern) until short-circuited.
+2. **Drain-free device loop** (Chroma/Krea2 pattern): host `SchedulerStepPacked` (per-step velocity D2H +
+   latent re-upload) → in-place `CfgEulerStep` on the device-resident latent, incl. true-CFG. Per-step
+   `FreeActivations` skipped on this path (it would free the live device latent — the Wan I2V bug class).
+   Tools/Kontext (host per-step concats), regional bias, masked inpaint keep the host branch, unchanged.
+3. **Per-step host stat scans gated** (`HARTSY_FLUX_STATS=1` opt-in): three unconditional full-tensor host
+   reads per step (LogTensorStats ×2 + per-channel means) were forced D2H syncs serializing the loop.
+4. **TE prompt cache** (CLIP-pooled + T5, cond + neg, keyed on token ids + EOS position); miss evicts a
+   resident DiT first. **KEEP_MODELS residency** on the eager path; previews throttled to every 4th step.
+5. **allowF16 on both Flux blocks** (QK RMS-norm) → cuDNN fused flash attention engages fleet-wide for the
+   family; regional attention bias rides the fused engine's fp32 mask path.
+
+**Flux-Dev @1024²/20 steps: warm 28.3/31.0/31.0s (median 31.0, was 72.4; contention-checked re-run), peak
+17.8 GB stable, coherent ✓ (sharp sunset astronaut). Gap vs Comfy 5.8× → 2.5×.**
+**Flux-Schnell @1024²/4 steps: warm 10.5s (first recorded number; fp8 checkpoint downloaded; added to
+models.json), coherent ✓.** Kontext checkpoint verified present; its t2i path (no ref) IS the Dev path so
+it inherits everything — ref-image mode keeps the pre-round host path (round 2: device Concat).
+Flagship regression: Krea2 4.52s ✓, Z-Image 2.99s ✓, both coherent visually.
+
+**Deploy note:** 44.13 collided with a concurrent agent deploy that packed sub-packages but no meta →
+NU1603 silently resolved the 44.7 meta (stale engine, old flag format in the log — the documented
+detection signature). Re-synthesized meta + repacked as 44.14 (never overwrite a restored version).
+
+**Flux round 2 levers:** DIT_F16 opt-in for the Flux blocks (Krea2Block conversion pattern), profile the
+remaining 1.4s/step (fp8 transient dequant / Lt tuning / fused QKV), device Concat for Kontext ref +
+Tools control (unlocks drain-free there), then the step CUDA graph. **Flux.2 is a separate round:** its
+transformer still runs host-side block glue (DataPointer modulation loops) — needs the Chroma-style
+GPU-residency port BEFORE any recipe work.

@@ -134,6 +134,7 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | Ideogram4 | 20 | 4.0 |
 | Chroma1-HD | 20 | 4.0 |
 | Flux-Dev | 20 | 1.0 (guidance 3.5) |
+| Flux-Schnell | 4 | 1.0 |
 | SDXL | 20 | 7.0 |
 | ERNIE-Image | 20 | 4.0 |
 | AuraFlow-0.3 | 20 | 3.5 |
@@ -152,7 +153,8 @@ rounds land:
 | Chroma1-HD | 63.2 s | 16.6 s | 3.8× — optimization in progress |
 | ERNIE-Image | 50.6 s | 24.0 s | Optimization queued |
 | AuraFlow-0.3 | 31.4 s | 14.0 s | Optimization queued |
-| Flux-Dev | 72.4 s | 12.5 s | Optimization queued |
+| Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
+| Flux-Schnell | 10.5 s | — | First benchmark; optimization in progress |
 | SDXL | 33.0 s | 3.7 s | Optimization queued (UNet scheduler work) |
 
 ---
