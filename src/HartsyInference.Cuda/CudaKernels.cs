@@ -176,7 +176,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditScatterRowsAfterF32;
     private readonly nint _ditSliceRowsF32;
 
-    // ── DiT glue function handles (F16 — Krea2 F16 activation path) ──────
+    // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
     private readonly nint _ditRmsNormF16;
     private readonly nint _ditAffineBroadcastF16;
@@ -186,6 +186,7 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditRopeInterleavedF16;
     private readonly nint _ditRepeatKvF16;
     private readonly nint _ditSliceRowsF16;
+    private readonly nint _ditChwToHwcU8;
 
     // ── FP8 Cast Modules + Handles ────────────────────────────────────────
     private readonly CudaModule _castF8Module;
@@ -396,7 +397,7 @@ public sealed class CudaKernels : IDisposable
         _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
 
-        // ── DiT glue (F16 I/O, F32 accumulate) — Krea2 F16 activation path ─
+        // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
         _ditF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_f16.ptx"));
         _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
         _ditAffineBroadcastF16 = _ditF16Module.GetFunction("dit_affine_broadcast_lastdim_f16");
@@ -406,6 +407,7 @@ public sealed class CudaKernels : IDisposable
         _ditRopeInterleavedF16 = _ditF16Module.GetFunction("dit_rope_interleaved_f16");
         _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
+        _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
 
         // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
         _audioConvF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "conv1d_f32.ptx"));
@@ -1570,6 +1572,17 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Contiguous row-block slice with F16 I/O (pure copy). Same geometry as the F32 kernel.</summary>
     public void LaunchSliceRowsF16(ulong output, ulong input, long elemOffset, long total, nint stream)
         => LaunchSliceRowsImpl(_ditSliceRowsF16, output, input, elemOffset, total, stream);
+
+    /// <summary>CHW F32 [-1,1] → HWC u8 [0,255] image conversion. One thread per pixel.</summary>
+    public unsafe void LaunchChwToHwcU8(ulong output, ulong input, int height, int width, nint stream)
+    {
+        ulong oA = output, iA = input;
+        uint hA = (uint)height, wA = (uint)width;
+        void** args = stackalloc void*[4];
+        args[0] = &oA; args[1] = &iA; args[2] = &hA; args[3] = &wA;
+        uint gridDim = (uint)(((long)height * width + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_ditChwToHwcU8, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     // ── Fused GroupNorm+SiLU Launches ───────────────────────────────────
 

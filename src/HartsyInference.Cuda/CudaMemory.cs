@@ -14,47 +14,6 @@ public static class CudaMemory
     /// <summary>Fast path for the single-backend case (no cuCtxGetCurrent per alloc). 0 when zero or 2+ registered.</summary>
     private static volatile nint _singleStream;
 
-    // ── Activation arena (HARTSY_ACT_ARENA=1) ──────────────────────────────────────────────────────────────────
-    // The measured Krea2 bottleneck (~18 s of a 27.7 s gen) is stream-ordered cuMemAllocAsync/cuMemFreeAsync driver
-    // churn: a denoise step allocates+frees thousands of 100–300 MB activation buffers, each a driver call ordered
-    // on the compute stream. The arena recycles freed blocks IN-PROCESS instead of returning them to the driver's
-    // pool: a size-keyed LIFO free-list per stream. On alloc, pop a same-size idle block (no driver call); on free,
-    // push it back (no driver call). cuMemAllocAsync fires only the FIRST time a given size is needed.
-    //
-    // Correctness: within ONE in-order compute stream this preserves the exact ordering guarantee the async pool
-    // gives. A block is pushed only after its last consumer kernel was enqueued; a later op that pops it enqueues
-    // its kernel AFTER on the same stream, so the reuse can never race the previous read. Blocks are bucketed by the
-    // stream they were allocated on and only handed back to allocs requesting that same stream, so a cross-context
-    // free never leaks a block into another device's stream. Result is bit-identical to the driver-pool path (same
-    // bytes, same stream order) and — because the denoise step issues an identical alloc/free sequence every step —
-    // hands out identical device addresses every step, the precondition for CUDA-graph capture (Phase 2).
-    private static readonly bool _arenaEnabled = Environment.GetEnvironmentVariable("HARTSY_ACT_ARENA") == "1";
-
-    /// <summary>Optional cap (bytes) on total VRAM the arena retains; 0 = unbounded. Above it, frees genuinely
-    /// release to the driver instead of recycling, so VRAM-poor cards can bound the held working set
-    /// (<c>HARTSY_ARENA_MAX_MB</c>). Never touches weight VRAM (weights use the synchronous persistent allocator).</summary>
-    private static readonly long _arenaMaxBytes =
-        long.TryParse(Environment.GetEnvironmentVariable("HARTSY_ARENA_MAX_MB"), out long mb) ? mb << 20 : 0L;
-
-    private static readonly object _arenaLock = new();
-    /// <summary>Idle recyclable blocks, keyed by (owning stream, exact byte size), LIFO for address determinism.</summary>
-    private static readonly Dictionary<(nint stream, nuint size), Stack<ulong>> _arenaFree = new();
-    /// <summary>Every block the arena owns (alloc'd through <see cref="AllocateAsync"/> while enabled) → its stream+size.
-    /// Membership is what marks a pointer as "recycle me" in <see cref="FreeAsync"/>; anything else is a genuine
-    /// transient and is freed to the driver as before.</summary>
-    private static readonly Dictionary<ulong, (nint stream, nuint size)> _arenaOwned = new();
-    /// <summary>Total bytes of all arena-owned blocks (live + idle) — the arena's VRAM footprint, checked against the cap.</summary>
-    private static long _arenaOwnedBytes;
-    /// <summary>Recycle hits (served from the free-list, no driver call) vs misses (a real cuMemAllocAsync). After the
-    /// first denoise step warms every distinct size, a fixed-shape loop should be ~all hits — misses ≈ distinct sizes.</summary>
-    private static long _arenaHits, _arenaMisses;
-
-    /// <summary>Arena effectiveness snapshot for logging/tests: (recycle hits, driver-alloc misses, retained MB).</summary>
-    public static (long hits, long misses, long retainedMb) GetArenaStats()
-    {
-        lock (_arenaLock) return (_arenaHits, _arenaMisses, _arenaOwnedBytes >> 20);
-    }
-
     /// <summary>Binds the compute stream for a backend's context so transient allocations use the stream-ordered
     /// pool (matching their <c>cuMemFreeAsync</c> frees). Called once from <see cref="CudaBackend"/>'s constructor.</summary>
     public static void SetComputeStream(CudaContext context, nint stream)
@@ -63,11 +22,10 @@ public static class CudaMemory
         _singleStream = _computeStreams.Count == 1 ? stream : 0;
     }
 
-    /// <summary>Removes a context's stream binding at backend disposal, releasing any arena blocks held on its stream.</summary>
+    /// <summary>Removes a context's stream binding at backend disposal.</summary>
     public static void RemoveComputeStream(CudaContext context)
     {
-        if (_computeStreams.TryRemove(context.Handle, out nint stream))
-            ReleaseArenaForStream(stream);
+        _computeStreams.TryRemove(context.Handle, out _);
         _singleStream = _computeStreams.Count == 1 ? System.Linq.Enumerable.First(_computeStreams.Values) : 0;
     }
 
@@ -183,10 +141,17 @@ public static class CudaMemory
         CudaDriverApi.cuMemcpyDtoH((nint)dst, src, byteSize).ThrowOnError();
     }
 
-    /// <summary>Copies bytes between device pointers.</summary>
+    /// <summary>Copies bytes between device pointers (synchronous — serializes against the null stream; NOT
+    /// legal during stream capture. Hot paths should use <see cref="CopyDeviceToDeviceAsync"/>).</summary>
     public static void CopyDeviceToDevice(ulong dst, ulong src, nuint byteSize)
     {
         CudaDriverApi.cuMemcpyDtoD(dst, src, byteSize).ThrowOnError();
+    }
+
+    /// <summary>Stream-ordered device-to-device copy (capture-legal; no host serialization).</summary>
+    public static void CopyDeviceToDeviceAsync(ulong dst, ulong src, nuint byteSize, nint stream)
+    {
+        CudaDriverApi.cuMemcpyDtoDAsync(dst, src, byteSize, stream).ThrowOnError();
     }
 
     /// <summary>Zeros device memory.</summary>
@@ -206,25 +171,10 @@ public static class CudaMemory
     /// the request, drain everything and trim the pool, then retry once.</summary>
     public static ulong AllocateAsync(nuint byteSize, nint stream)
     {
-        // Arena fast path: hand back a recycled same-size idle block on this stream — no driver call at all.
-        if (_arenaEnabled)
-        {
-            lock (_arenaLock)
-            {
-                if (_arenaFree.TryGetValue((stream, byteSize), out Stack<ulong>? bucket) && bucket.Count > 0)
-                {
-                    _arenaHits++;
-                    return bucket.Pop();
-                }
-            }
-        }
-
         int result = CudaDriverApi.cuMemAllocAsync(out ulong dptr, byteSize, stream);
         if (result == 2) // CUDA_ERROR_OUT_OF_MEMORY
         {
             LogOomDiagnostic("OOM on async first attempt", byteSize);
-            // SyncStreamsAndReleasePool drains the arena's idle blocks back to the driver before trimming the pool,
-            // so a genuine new-size request can reclaim VRAM the arena was holding.
             GpuTransferHelper.SyncStreamsAndReleasePool();
             int retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);
             if (retryResult != 0)
@@ -237,114 +187,16 @@ public static class CudaMemory
         {
             result.ThrowOnError();
         }
-
-        if (_arenaEnabled)
-        {
-            lock (_arenaLock)
-            {
-                _arenaMisses++;
-                _arenaOwned[dptr] = (stream, byteSize);
-                _arenaOwnedBytes += (long)byteSize;
-            }
-        }
         return dptr;
     }
 
-    /// <summary>Frees device memory asynchronously on the given stream. With the arena enabled, an arena-owned block
-    /// is recycled to its size bucket (no driver call) instead of freed, unless the retained footprint is over the
-    /// optional cap — then it is genuinely released to shrink back toward the cap.</summary>
+    /// <summary>Frees device memory asynchronously on the given stream.</summary>
     public static void FreeAsync(ulong dptr, nint stream)
     {
-        if (dptr == 0)
-            return;
-
-        if (_arenaEnabled)
+        if (dptr != 0)
         {
-            lock (_arenaLock)
-            {
-                if (_arenaOwned.TryGetValue(dptr, out (nint stream, nuint size) info))
-                {
-                    // Over the cap: actually release this block (drops the owned footprint toward the cap).
-                    if (_arenaMaxBytes > 0 && _arenaOwnedBytes > _arenaMaxBytes)
-                    {
-                        _arenaOwned.Remove(dptr);
-                        _arenaOwnedBytes -= (long)info.size;
-                        CudaDriverApi.cuMemFreeAsync(dptr, info.stream).ThrowOnError();
-                        return;
-                    }
-                    // Recycle into the block's OWN stream/size bucket (stream-safe reuse; see the arena note above).
-                    if (!_arenaFree.TryGetValue((info.stream, info.size), out Stack<ulong>? bucket))
-                        _arenaFree[(info.stream, info.size)] = bucket = new Stack<ulong>();
-                    bucket.Push(dptr);
-                    return;
-                }
-            }
+            CudaDriverApi.cuMemFreeAsync(dptr, stream).ThrowOnError();
         }
-
-        CudaDriverApi.cuMemFreeAsync(dptr, stream).ThrowOnError();
-    }
-
-    /// <summary>Releases the arena's IDLE (free-list) blocks back to the driver's stream-ordered pool. Called on the
-    /// OOM-retry path (via <see cref="GpuTransferHelper.SyncStreamsAndReleasePool"/>) so a new-size request can reclaim
-    /// the VRAM the arena was holding; live blocks (owned but still in use) are left untouched. No-op when disabled.</summary>
-    public static void DrainArena()
-    {
-        if (!_arenaEnabled)
-            return;
-        lock (_arenaLock)
-        {
-            foreach (KeyValuePair<(nint stream, nuint size), Stack<ulong>> kv in _arenaFree)
-            {
-                while (kv.Value.Count > 0)
-                {
-                    ulong p = kv.Value.Pop();
-                    if (_arenaOwned.Remove(p, out (nint stream, nuint size) info))
-                        _arenaOwnedBytes -= (long)info.size;
-                    CudaDriverApi.cuMemFreeAsync(p, kv.Key.stream).ThrowOnError();
-                }
-            }
-            _arenaFree.Clear();
-        }
-    }
-
-    /// <summary>Releases the arena's IDLE (free-list) blocks for a stream at backend teardown and drops all of the
-    /// stream's owned-block bookkeeping. Frees ONLY free-list blocks: those were removed from the caches'
-    /// <c>CachedPointers</c> set before being recycled, so <see cref="GpuTransferHelper.FreeAllCached"/> (which runs
-    /// first at teardown and frees every cached pointer synchronously) can never have touched them — no double-free.
-    /// Any still-"owned" block that is NOT in the free-list is a LIVE cached pointer that FreeAllCached already
-    /// released; here we only forget it (dropping the stale <see cref="_arenaOwned"/> entry), we do not free it again.</summary>
-    private static void ReleaseArenaForStream(nint stream)
-    {
-        if (!_arenaEnabled)
-            return;
-        lock (_arenaLock)
-        {
-            List<(nint stream, nuint size)> keys = new();
-            foreach ((nint stream, nuint size) key in _arenaFree.Keys)
-                if (key.stream == stream) keys.Add(key);
-            foreach ((nint stream, nuint size) key in keys)
-            {
-                Stack<ulong> bucket = _arenaFree[key];
-                while (bucket.Count > 0)
-                {
-                    ulong p = bucket.Pop();
-                    _arenaOwned.Remove(p);            // free-list blocks are freed here — drop their ownership too
-                    CudaDriverApi.cuMemFreeAsync(p, stream).ThrowOnError();
-                }
-                _arenaFree.Remove(key);
-            }
-            // Forget the remaining (live) owned entries for this stream — FreeAllCached freed the memory already.
-            List<ulong> stale = new();
-            foreach (KeyValuePair<ulong, (nint stream, nuint size)> kv in _arenaOwned)
-                if (kv.Value.stream == stream) stale.Add(kv.Key);
-            foreach (ulong p in stale)
-                if (_arenaOwned.Remove(p, out (nint stream, nuint size) info))
-                    _arenaOwnedBytes -= (long)info.size;
-        }
-        long total = _arenaHits + _arenaMisses;
-        if (total > 0)
-            Logs.Info($"[CudaMemory] activation arena: {_arenaHits} recycle hits / {_arenaMisses} driver allocs "
-                + $"({(total == 0 ? 0 : 100.0 * _arenaHits / total):F1}% hit) across the session.");
     }
 
     /// <summary>Copies host to device asynchronously on the given stream. Host memory must be pinned.</summary>

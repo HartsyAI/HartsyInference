@@ -75,8 +75,8 @@ public sealed unsafe class Krea2Attention
         TensorShape kvMhShape = new TensorShape(batch, _numKvHeads, seqLen, _headDim);
         TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
 
-        // Activation dtype follows the INPUT: the main blocks feed preIn in Krea2Dtype.Act (F16 on the
-        // HARTSY_KREA2_F16 path), while the text-fusion blocks (whose surrounding ops are F32 and cached
+        // Activation dtype follows the INPUT: the main blocks feed preIn in DitDtype.Act (F16 on the
+        // HARTSY_DIT_F16 path), while the text-fusion blocks (whose surrounding ops are F32 and cached
         // once per prompt) feed F32 and keep the baseline path. Weights stay packed fp8; the norm weights
         // (_normQ/_normK) are F32 — the F16 RmsNorm/RoPE/Sigmoid/RepeatKv kernels take F16 activation + F32 params.
         DType act = x.DType;
@@ -171,17 +171,6 @@ public sealed unsafe class Krea2Attention
         gated.Dispose();
         return outp;
     }
-}
-
-/// <summary>Per-process activation dtype for the Krea2 DiT block/attention hot path. <c>HARTSY_KREA2_F16=1</c> runs the
-/// 28-block loop in F16 (half the HBM traffic of the bandwidth-bound norm/modulate/gate/attention kernels — the measured
-/// Krea2 bottleneck) while the once-per-forward text/image/timestep paths and the tiny per-channel modulation vectors
-/// stay F32. Default F32 reproduces the baseline exactly. Weights stay packed fp8 (activation-quant GEMM), so VRAM is
-/// unchanged. QK-norm makes F16 attention numerically safe; the one risk is SwiGLU exceeding F16's 65504 ceiling.</summary>
-public static class Krea2Dtype
-{
-    public static readonly DType Act =
-        Environment.GetEnvironmentVariable("HARTSY_KREA2_F16") == "1" ? DType.F16 : DType.F32;
 }
 
 /// <summary>Helper for Krea 2's zero-centered RMSNorm scales (<c>F.rms_norm(x, weight = weight + 1)</c>): loads a norm

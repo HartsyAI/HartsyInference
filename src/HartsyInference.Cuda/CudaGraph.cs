@@ -100,6 +100,45 @@ public sealed class CudaGraph : IDisposable
         }
     }
 
+    /// <summary>Starts stream capture directly (the open-region twin of <see cref="Capture"/>, for callers whose
+    /// captured work spans multiple methods). Pair with <see cref="EndCaptureAndInstantiate"/>; on any exception
+    /// between the two, call <see cref="AbortCapture"/> so the stream doesn't stay in capture mode.</summary>
+    public void BeginCapture()
+    {
+        ThrowIfDisposed();
+        // RELAXED (the mode ggml uses for its denoise-step capture): other threads' non-capturable CUDA calls
+        // (a second backend, the streaming cache) aren't failed by this thread's capture.
+        CudaDriverApi.cuStreamBeginCapture(_stream, CudaDriverApi.CU_STREAM_CAPTURE_MODE_RELAXED).ThrowOnError();
+    }
+
+    /// <summary>Ends an open capture region and instantiates the executable graph. NOTE: the work recorded during
+    /// capture did NOT execute — call <see cref="Launch"/> to run it.</summary>
+    public void EndCaptureAndInstantiate()
+    {
+        ThrowIfDisposed();
+        CudaDriverApi.cuStreamEndCapture(_stream, out nint graph).ThrowOnError();
+        try
+        {
+            DestroyExec();
+            CudaDriverApi.cuGraphInstantiate(out _graphExec, graph, _instantiateFlags).ThrowOnError();
+        }
+        finally
+        {
+            CudaDriverApi.cuGraphDestroy(graph);
+        }
+    }
+
+    /// <summary>Aborts an open capture region, leaving the stream clean (call from exception handlers between
+    /// <see cref="BeginCapture"/> and <see cref="EndCaptureAndInstantiate"/>).</summary>
+    public void AbortCapture()
+    {
+        CudaDriverApi.cuStreamEndCapture(_stream, out nint graph);
+        if (graph != 0) CudaDriverApi.cuGraphDestroy(graph);
+    }
+
+    /// <summary>Drops the captured executable graph (shape/prompt change → recapture needed).</summary>
+    public void Reset() => DestroyExec();
+
     /// <summary>Replays the captured graph on its stream with a single launch call.</summary>
     public void Launch()
     {

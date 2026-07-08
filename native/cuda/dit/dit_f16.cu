@@ -194,4 +194,25 @@ __global__ void dit_repeat_kv_f16(
     output[i] = input[inIdx];
 }
 
+// ── CHW F32 [-1,1] → HWC u8 [0,255] (image output conversion) ───────────────
+// One thread per pixel; reads the 3 channel planes, writes the interleaved byte triple. Replaces the
+// host loop in ImagePostProcessor.TensorToRgbBytes (12 MB D2H + 12M-element CPU loop → 3 MB D2H).
+__global__ void dit_chw_f32_to_hwc_u8(
+    unsigned char* __restrict__ output,
+    const float* __restrict__ input,
+    unsigned int height,
+    unsigned int width)
+{
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;   // pixel index
+    unsigned int hw = height * width;
+    if (i >= hw) return;
+    unsigned int outBase = i * 3u;
+    for (int c = 0; c < 3; c++)
+    {
+        float v = (input[(unsigned long long)c * hw + i] + 1.0f) * 0.5f;
+        v = fminf(fmaxf(v, 0.0f), 1.0f);
+        output[outBase + c] = (unsigned char)(v * 255.0f + 0.5f);
+    }
+}
+
 } // extern "C"

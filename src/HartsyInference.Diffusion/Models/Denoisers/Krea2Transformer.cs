@@ -35,6 +35,21 @@ public sealed unsafe class Krea2Transformer : IDisposable
     private object? _cachedTxtKey;
     private long _ropeSig = long.MinValue;
 
+    // ── Step-graph state (HARTSY_DIT_GRAPH; see ForwardPatched) ──────────────────────────────────────────
+    // The captured graph bakes device addresses, so every per-step-varying boundary lives in a FIXED buffer
+    // owned here: the patchified latent (_latentFixed, updated in-place by the pipeline's CfgEulerStep and
+    // refreshed per gen via PrepareGraphLatent), the timestep modulation (_tembFixed/_tembModFixed, refreshed
+    // per step via CopyInto), and the velocity output (_graphVelocity, written by a captured CopyInto as the
+    // graph's last op — a pre-capture NORMAL buffer, so it is safely disposable, unlike graph-owned memory).
+    private Tensor? _latentFixed;
+    private Tensor? _tembFixed, _tembModFixed;
+    private Tensor? _graphVelocity;
+    private long _graphSig = long.MinValue;   // rope signature ⊕ txt identity the captured graph is valid for
+    private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
+    private int _graphSigFlips;               // sig alternation counter (CFG cond/uncond → graph unusable)
+    private bool _graphDead;                  // permanent per-session fallback to eager
+    private const int GraphCaptureCall = 3;
+
     private int _disposed;
 
     public Krea2Transformer(Krea2Config config)
@@ -165,36 +180,17 @@ public sealed unsafe class Krea2Transformer : IDisposable
             Tensor computedTxt = ApplyTxtIn(backend, fused, batch, txtSeq, hidden);      // [B, S, hidden]
             fused.Dispose();
             _ = computedTxt.DataPointer;   // materialize to host once so it survives (and is re-uploaded) across steps
-            _cachedTxt?.Dispose();
+            if (_cachedTxt is not null)
+            {
+                backend.FreeWeights(new[] { _cachedTxt });   // no-op unless graph mode pinned it (see below)
+                _cachedTxt.Dispose();
+            }
             _cachedTxt = computedTxt;
             _cachedTxtKey = encoderHidden;
             txt = computedTxt;
         }
 
-        // ── image: img_in (patchLatent is already the [1, imgSeq, C·p²] token grid) ──
-        Tensor img = new Tensor(new TensorShape(batch, imgSeq, hidden), DType.F32);
-        backend.Linear(img, patchLatent, _imgInW!, _imgInB);
-
-        // ── concat [text, image]; RoPE for the joint sequence (RoPE tables cached across steps) ──
-        // Device concat (backend.Concat = DtoD copies, output cached as a device activation). The host
-        // DiTUtils.ConcatAlongSeqDim read img.DataPointer every step — a full pipeline drain + a 113 MB D2H +
-        // host memcpy + H2D re-upload of the joint, all on the critical path feeding the 28 blocks.
-        int jointSeq = txtSeq + imgSeq;
-        Tensor joint = new Tensor(new TensorShape(batch, jointSeq, hidden), DType.F32);
-        backend.Concat(joint, new[] { txt, img }, dim: 1);
-        img.Dispose();
-
-        // F16 hot path (HARTSY_KREA2_F16): one cast into F16 before the 28-block loop — the blocks and attention
-        // then run entirely in F16 (half the HBM traffic of the bandwidth-bound glue kernels, the measured Krea2
-        // bottleneck). The once-per-forward text/image/timestep paths above stay F32; the tail is cast back after
-        // the loop. Two [1,seq,3072] casts per step total.
-        if (DiTBlocks.Krea2Dtype.Act == DType.F16)
-        {
-            Tensor jointF16 = new Tensor(joint.Shape, DType.F16);
-            backend.CastToF16(jointF16, joint);
-            joint.Dispose();
-            joint = jointF16;
-        }
+        // ── RoPE tables (host build, cached across steps) — hoisted ABOVE the capturable region ──
         long ropeSig = ((long)txtSeq * 73856093L) ^ ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L);
         if (_ropeSig != ropeSig)
         {
@@ -204,13 +200,166 @@ public sealed unsafe class Krea2Transformer : IDisposable
             _ropeSig = ropeSig;
         }
 
+        // ── Step-graph mode (HARTSY_DIT_GRAPH): capture the fixed per-step region (img_in → blocks → final
+        // layer) once and replay it with a single graph launch. Only the fast t2i path qualifies (the pipeline
+        // routes the latent through PrepareGraphLatent → patchLatent IS _latentFixed); everything per-step-varying
+        // is refreshed into fixed device buffers before the launch. Self-disables on capture failure or a
+        // CFG-style signature flip storm.
+        bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
+            && ReferenceEquals(patchLatent, _latentFixed);
+        if (!graphMode)
+        {
+            Tensor eager = ForwardCore(backend, patchLatent, txt, temb, tembMod, batch, imgSeq, txtSeq, hidden);
+            tembMod.Dispose();
+            temb.Dispose();
+            return eager;
+        }
+
+        // Refresh the fixed timestep buffers (the ONLY per-step-varying content the captured graph reads).
+        _tembFixed ??= new Tensor(temb.Shape, DType.F32);
+        backend.CopyInto(_tembFixed, temb);
+        temb.Dispose();
+        _tembModFixed ??= new Tensor(tembMod.Shape, DType.F32);
+        backend.CopyInto(_tembModFixed, tembMod);
+        tembMod.Dispose();
+
+        long sig = ropeSig ^ ((long)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(txt) << 17);
+        if (sig != _graphSig)
+        {
+            backend.StepGraphReset();
+            if (_graphSig != long.MinValue && ++_graphSigFlips > 8)
+            {
+                _graphDead = true;   // alternating signatures (CFG cond/uncond) — capture can't converge
+                HartsyInference.Core.Logging.Logs.Warning("[Krea2 graph] signature flip storm — step-graph disabled for this session.");
+            }
+            _graphSig = sig;
+            _graphSigCalls = 0;
+        }
+        _graphSigCalls++;
+        if (_graphSigCalls == 1)
+        {
+            // Pin txt as a device-resident weight: the host-materialized txt cache otherwise re-uploads from
+            // PAGEABLE memory every step — an internally-synchronizing copy that is capture-ILLEGAL (this was
+            // the CUDA_ERROR_STREAM_CAPTURE_INVALIDATED at 99% VRAM, where auto-promotion's headroom gate
+            // blocks the pin). PreloadWeights is a sync alloc, so it must happen here, OUTSIDE the capture.
+            backend.PreloadWeights(new[] { txt });
+        }
+        _graphVelocity ??= new Tensor(new TensorShape(batch, imgSeq, _config.InChannels), DType.F32);
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return _graphVelocity;
+        }
+
+        // Calls 1..2 at this sig run eagerly THROUGH THE FIXED BUFFERS (warms txt auto-promotion + rope-table
+        // uploads so nothing inside the capture does a synchronous alloc); call 3 records the same sequence.
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) backend.StepGraphBegin();
+        try
+        {
+            Tensor projected = ForwardCore(backend, patchLatent, txt, _tembFixed, _tembModFixed, batch, imgSeq, txtSeq, hidden);
+            backend.CopyInto(_graphVelocity, projected);   // last captured op: land the velocity at a fixed, normal buffer
+            projected.Dispose();
+        }
+        catch (Exception ex) when (capture)
+        {
+            // A capture-illegal op invalidated the recording (nothing executed). Abort the capture, disable
+            // graph mode for the session, and re-run this step eagerly so the generation stays correct.
+            backend.StepGraphReset();
+            _graphDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[Krea2 graph] capture invalidated — falling back to eager: {ex}");
+            Tensor projected = ForwardCore(backend, patchLatent, txt, _tembFixed, _tembModFixed, batch, imgSeq, txtSeq, hidden);
+            backend.CopyInto(_graphVelocity, projected);
+            projected.Dispose();
+            return _graphVelocity;
+        }
+        if (capture)
+        {
+            try
+            {
+                backend.StepGraphEndAndLaunch();   // capture records without executing — this runs the step
+                HartsyInference.Core.Logging.Logs.Info("[Krea2 graph] denoise step captured; replaying via cuGraphLaunch.");
+            }
+            catch (Exception ex)
+            {
+                // Instantiation failed (some op wasn't capturable): the recorded work never executed. Fall back
+                // permanently and re-run this step eagerly so the generation stays correct.
+                backend.StepGraphReset();
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[Krea2 graph] capture failed — falling back to eager: {ex.Message}");
+                Tensor projected = ForwardCore(backend, patchLatent, txt, _tembFixed, _tembModFixed, batch, imgSeq, txtSeq, hidden);
+                backend.CopyInto(_graphVelocity, projected);
+                projected.Dispose();
+            }
+        }
+        return _graphVelocity;
+    }
+
+    /// <summary>Routes a fresh patchified latent into the step-graph's FIXED latent buffer (the address the
+    /// captured graph reads and the pipeline's in-place Euler updates). Returns the fixed tensor — owned by the
+    /// transformer; the pipeline must not dispose it or read its DataPointer (snapshot via
+    /// <see cref="SnapshotGraphLatent"/> instead). A resolution change resets the graph.</summary>
+    public Tensor PrepareGraphLatent(IBackend backend, Tensor freshPatchLatent)
+    {
+        ThrowIfDisposed();
+        if (_latentFixed is not null && _latentFixed.Shape != freshPatchLatent.Shape)
+        {
+            backend.StepGraphReset();
+            _graphSig = long.MinValue;
+            _latentFixed.Dispose();
+            _latentFixed = null;
+            _graphVelocity?.Dispose();
+            _graphVelocity = null;
+        }
+        _latentFixed ??= new Tensor(freshPatchLatent.Shape, DType.F32);
+        backend.CopyInto(_latentFixed, freshPatchLatent);
+        return _latentFixed;
+    }
+
+    /// <summary>Device-copies the fixed latent into a fresh tensor the caller may freely read/dispose (reading
+    /// the fixed tensor's DataPointer directly would D2H-and-FREE the buffer the captured graph points at).</summary>
+    public Tensor SnapshotGraphLatent(IBackend backend)
+    {
+        ThrowIfDisposed();
+        Tensor snap = new Tensor(_latentFixed!.Shape, DType.F32);
+        backend.CopyInto(snap, _latentFixed);
+        return snap;
+    }
+
+    /// <summary>The fixed per-step region: img_in → concat[text,image] → (F16 cast) → 28 blocks → tail slice →
+    /// (F32 cast) → final layer. Identical op sequence every step for a given (txt, resolution) — the property
+    /// that makes it CUDA-graph-capturable. Caller owns temb/tembMod.</summary>
+    private Tensor ForwardCore(IBackend backend, Tensor patchLatent, Tensor txt, Tensor temb, Tensor tembMod,
+        int batch, int imgSeq, int txtSeq, int hidden)
+    {
+        // ── image: img_in (patchLatent is already the [1, imgSeq, C·p²] token grid) ──
+        Tensor img = new Tensor(new TensorShape(batch, imgSeq, hidden), DType.F32);
+        backend.Linear(img, patchLatent, _imgInW!, _imgInB);
+
+        // ── concat [text, image] (device concat — see the GPU-residency notes in git history) ──
+        int jointSeq = txtSeq + imgSeq;
+        Tensor joint = new Tensor(new TensorShape(batch, jointSeq, hidden), DType.F32);
+        backend.Concat(joint, new[] { txt, img }, dim: 1);
+        img.Dispose();
+
+        // F16 hot path (HARTSY_DIT_F16): one cast into F16 before the 28-block loop — the blocks and attention
+        // then run entirely in F16 (half the HBM traffic of the bandwidth-bound glue kernels). The once-per-forward
+        // text/image/timestep paths stay F32; the tail is cast back after the loop.
+        if (DiTBlocks.DitDtype.Act == DType.F16)
+        {
+            Tensor jointF16 = new Tensor(joint.Shape, DType.F16);
+            backend.CastToF16(jointF16, joint);
+            joint.Dispose();
+            joint = jointF16;
+        }
+
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
             joint.Dispose();
             joint = next;
         }
-        tembMod.Dispose();
 
         // ── strip text prefix, final layer (device-resident; returns the patchified velocity) ──
         Tensor imgTail = SliceTail(backend, joint, txtSeq, imgSeq, hidden);
@@ -225,7 +374,6 @@ public sealed unsafe class Krea2Transformer : IDisposable
         }
         Tensor projected = ApplyFinalLayer(backend, imgTail, temb, batch, imgSeq, hidden);
         imgTail.Dispose();
-        temb.Dispose();
         return projected;
     }
 
@@ -369,7 +517,7 @@ public sealed unsafe class Krea2Transformer : IDisposable
 
     // Device-resident tail slice: copy the image rows [start, start+tailLen) of the joint sequence via the backend's
     // SliceRows (a contiguous row-block copy) so the last block's output never leaves the GPU (was a joint.DataPointer
-    // D2H drain + host memcpy at the end of every step). Follows the joint's dtype (F16 on the HARTSY_KREA2_F16 path).
+    // D2H drain + host memcpy at the end of every step). Follows the joint's dtype (F16 on the HARTSY_DIT_F16 path).
     private static Tensor SliceTail(IBackend backend, Tensor joint, int start, int tailLen, int hidden)
     {
         Tensor output = new Tensor(new TensorShape(1, tailLen, hidden), joint.DType);
@@ -389,6 +537,14 @@ public sealed unsafe class Krea2Transformer : IDisposable
             _cachedTxt?.Dispose();
             _cachedTxt = null;
             _cachedTxtKey = null;
+            _latentFixed?.Dispose();
+            _latentFixed = null;
+            _tembFixed?.Dispose();
+            _tembFixed = null;
+            _tembModFixed?.Dispose();
+            _tembModFixed = null;
+            _graphVelocity?.Dispose();
+            _graphVelocity = null;
             _imgInW = _imgInB = _time1W = _time1B = _time2W = _time2B = _timeModW = _timeModB = null;
             _txtNormW = _txt1W = _txt1B = _txt2W = _txt2B = null;
             _finalTable = _finalNormW = _finalLinW = _finalLinB = null;
