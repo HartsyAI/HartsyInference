@@ -100,7 +100,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
 
         if (string.IsNullOrWhiteSpace(settings.ModelPath) || string.IsNullOrWhiteSpace(settings.TextEncoderPath) || string.IsNullOrWhiteSpace(settings.TokenizerPath))
         {
-            AnsiConsole.MarkupLine("[red]Video needs[/] [mediumpurple2]--model-path[/][red],[/] [mediumpurple2]--text-encoder-path[/] [red]and[/] [mediumpurple2]--tokenizer-path[/][red].[/]");
+            AnsiConsole.MarkupLine("[red]Video needs[/] [#2ea5e0]--model-path[/][red],[/] [#2ea5e0]--text-encoder-path[/] [red]and[/] [#2ea5e0]--tokenizer-path[/][red].[/]");
             return 1;
         }
 

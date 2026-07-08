@@ -10,6 +10,30 @@ namespace HartsyInference.Cli.Repl;
 /// per-session cache of loaded models so successive generations reuse the same backend and weights.</summary>
 public sealed class ReplSession : IDisposable
 {
+    private static readonly IReadOnlyList<SlashCommand> SlashCommands = new SlashCommand[]
+    {
+        new("help", "show commands"),
+        new("text", "switch to text generation"),
+        new("image", "switch to image generation"),
+        new("speak", "switch to speech synthesis"),
+        new("music", "switch to music generation"),
+        new("transcribe", "switch to speech-to-text"),
+        new("vision", "switch to vision (embed / detect)"),
+        new("video", "switch to video generation"),
+        new("3d", "switch to 3D mesh generation"),
+        new("world", "switch to world-model rollout"),
+        new("model", "set the model (id or path)"),
+        new("backend", "set the compute backend"),
+        new("set", "set a generation parameter"),
+        new("output", "set the artifact output directory"),
+        new("show", "show the current state"),
+        new("reset", "reset parameters to defaults"),
+        new("list", "browse the model catalog"),
+        new("models", "show the local model cache"),
+        new("clear", "clear the screen"),
+        new("quit", "exit"),
+    };
+
     private readonly ModalityDispatch _dispatch = CommandRunner.Dispatch;
     private readonly Dictionary<string, IModalityRunner> _runners = new(StringComparer.OrdinalIgnoreCase);
 
@@ -29,8 +53,7 @@ public sealed class ReplSession : IDisposable
 
         while (true)
         {
-            AnsiConsole.Markup($"[{CliTheme.Accent}]hartsy[/] [grey]({Modalities.ToCliName(_modality)})[/] › ");
-            string? line = Console.ReadLine();
+            string? line = LineEditor.ReadLine(Modalities.ToCliName(_modality), SlashCommands);
             if (line is null)
                 break;
             line = line.Trim();

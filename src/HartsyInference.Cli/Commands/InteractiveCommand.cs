@@ -75,7 +75,7 @@ public sealed class InteractiveCommand : Command<InteractiveCommand.Settings>
 
         if (string.IsNullOrWhiteSpace(settings.ModelPath) || string.IsNullOrWhiteSpace(settings.VaePath))
         {
-            AnsiConsole.MarkupLine("[red]Oasis needs[/] [mediumpurple2]--model-path[/] [red](DiT) and[/] [mediumpurple2]--vae-path[/] [red](ViT-VAE).[/]");
+            AnsiConsole.MarkupLine("[red]Oasis needs[/] [#2ea5e0]--model-path[/] [red](DiT) and[/] [#2ea5e0]--vae-path[/] [red](ViT-VAE).[/]");
             return 1;
         }
 

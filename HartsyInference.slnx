@@ -29,12 +29,6 @@
     <Project Path="tests/HartsyInference.LLM.Tests/HartsyInference.LLM.Tests.csproj" />
   </Folder>
 
-  <Folder Name="/samples/">
-    <Project Path="samples/HartsyInference.Whisper.Cli/HartsyInference.Whisper.Cli.csproj" />
-    <Project Path="samples/HartsyInference.ThreeD.Cli/HartsyInference.ThreeD.Cli.csproj" />
-    <Project Path="samples/HartsyInference.TextGen.Cli/HartsyInference.TextGen.Cli.csproj" />
-  </Folder>
-
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/HartsyInference.Benchmarks/HartsyInference.Benchmarks.csproj" />
     <Project Path="benchmarks/HartsyInference.GpuBenchmarks/HartsyInference.GpuBenchmarks.csproj" />

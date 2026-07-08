@@ -65,7 +65,7 @@ public sealed class MusicCommand : Command<MusicCommand.Settings>
 
         if (string.IsNullOrWhiteSpace(settings.ModelPath))
         {
-            AnsiConsole.MarkupLine("[red]A model is required via[/] [mediumpurple2]--model-path[/][red].[/]");
+            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]--model-path[/][red].[/]");
             return 1;
         }
 

@@ -75,7 +75,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
 
         if (string.IsNullOrWhiteSpace(settings.Model) && string.IsNullOrWhiteSpace(settings.ModelPath))
         {
-            AnsiConsole.MarkupLine("[red]Specify a model with[/] [mediumpurple2]--model[/] [red]or[/] [mediumpurple2]--model-path[/][red].[/]");
+            AnsiConsole.MarkupLine("[red]Specify a model with[/] [#2ea5e0]--model[/] [red]or[/] [#2ea5e0]--model-path[/][red].[/]");
             return 1;
         }
 

@@ -51,8 +51,6 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Cli", "src\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Cuda.Tests", "tests\HartsyInference.Cuda.Tests\HartsyInference.Cuda.Tests.csproj", "{5F5A7967-4941-4ED8-8094-A06AB97F7F81}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "samples", "samples", "{5D20AA90-6969-D8BD-9DCD-8634F4692FDA}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.GpuBenchmarks", "benchmarks\HartsyInference.GpuBenchmarks\HartsyInference.GpuBenchmarks.csproj", "{5F8A4B28-C0F5-45B0-8319-DBF3450238BD}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Audio.Tests", "tests\HartsyInference.Audio.Tests\HartsyInference.Audio.Tests.csproj", "{7DF95CF0-9748-4239-B842-C36B77A684E0}"
