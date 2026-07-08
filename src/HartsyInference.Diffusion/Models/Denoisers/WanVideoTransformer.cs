@@ -108,6 +108,11 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);   // [S, dim]
         WanVideoDebugDump.Dump("patch_embed", hidden);
         WanVideoDebugDump.Dump("in_encoder", encoder);
+        if (WanVideoDebugDump.Enabled)
+        {
+            WanVideoDebugDump.DumpValues("timesteps", timesteps);
+            if (imageEmbeds is not null) WanVideoDebugDump.Dump("clip_embeds", imageEmbeds);
+        }
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, timesteps, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);   // [G, dim], [G, 6, dim]
@@ -138,11 +143,13 @@ public sealed unsafe class WanVideoTransformer : IDisposable
             if (imageEmbeds is not null && _imgEmbedder.IsLoaded)
             {
                 Tensor imgProj = _imgEmbedder.Forward(backend, imageEmbeds, dim);
+                WanVideoDebugDump.Dump("cond_imgProj", imgProj);
                 imageContextLen = (int)imgProj.Shape[0];
                 encoderProj = WanDitOps.ConcatRows(imgProj, textProj, dim);
                 imgProj.Dispose();
                 textProj.Dispose();
             }
+            WanVideoDebugDump.Dump("cond_encoderProj", encoderProj);
             _ = (nint)encoderProj.DataPointer;   // host-materialize (see cache note above)
             if (_ctxCache.Count >= 4)   // cap: prompts/images changed across gens; drop the stale contexts
             {

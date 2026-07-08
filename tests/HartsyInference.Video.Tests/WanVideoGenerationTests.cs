@@ -314,10 +314,26 @@ public class WanVideoGenerationTests
             using T5Tokenizer tok = T5Tokenizer.CreateUmt5(maxLength: 512);
             int[] pTok = tok.Encode("the scene comes to life, gentle camera motion, cinematic");
             int[] nTok = tok.Encode("blurry, low quality, distorted");
-            Tensor tb = umt5.Encode(backend, [pTok, nTok], [T5Tokenizer.CreateAttentionMask(pTok), T5Tokenizer.CreateAttentionMask(nTok)]);
+            int[] pMask = T5Tokenizer.CreateAttentionMask(pTok);
+            int[] nMask = T5Tokenizer.CreateAttentionMask(nTok);
+            Tensor tb = umt5.Encode(backend, [pTok, nTok], [pMask, nMask]);
             Tensor promptEmbeds = CfgHelper.SliceBatchElement(tb, 0, pTok.Length, 4096);
             Tensor negEmbeds = CfgHelper.SliceBatchElement(tb, 1, pTok.Length, 4096);
             tb.Dispose();
+            // Zero the pad rows like the reference (diffusers zero-pads to 512; umT5 emits GARBAGE at pad
+            // positions and leaving it in drowns the prompt — the flat/noise-clip failure the extension's
+            // ZeroPaddedRows comment documents). This test previously fed ~460 garbage rows of 512.
+            unsafe
+            {
+                static void ZeroPads(Tensor t, int[] mask)
+                {
+                    float* p = (float*)t.DataPointer;
+                    for (int r = 0; r < mask.Length; r++)
+                        if (mask[r] == 0) new Span<float>(p + (long)r * 4096, 4096).Clear();
+                }
+                ZeroPads(promptEmbeds, pMask);
+                ZeroPads(negEmbeds, nMask);
+            }
             backend.Sync();
             backend.FreeWeights(umt5.EnumerateWeights());
 

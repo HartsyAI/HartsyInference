@@ -199,10 +199,37 @@ graph cannot span streamed (re-pointered) weights (the 43.145 eviction-crash rul
 > ### ✅ I2V STRUCTURAL BUG FIXED (44.12-local, Swarm-verified): the cond-latent must be the causal-VAE encode
 > of the WHOLE padded pixel clip (init + mid-gray frames), not first-frame + zero latents (`BuildCondClip` +
 > full-latent `BuildI2VCondition`). Swarm-API gen 1349001: real galloping motion faithful to the init.
-> A/B (same seed, gallery 1349001 cfg3.5 vs 1406001 cfg2.0): saturation drift/late-clip degradation ≈ GONE at
-> cfg 2.0 (fp8-CFG amplification confirmed) → recommend extension-side cfg clamp/renorm for fp8 Wan I2V.
-> Posterize/comb-edge texture persists at cfg 2.0 → separate residual (VAE decode / striping class / fp8
-> quant) — parity-polish item. Residual (open): engine
+> ### ✅ I2V FULL AUDIT COMPLETE (2026-07-08 night) — DiT PARITY-PROVEN, root causes enumerated
+> **Layer-by-layer parity vs a faithful ComfyUI-math torch oracle (real fp8 ckpt, identical inputs,
+> `tests/python-reference/i2v_reference/`): ALL stages ≤6.5e-3 relL2** (patch_embed 1.8e-4, temb 3.7e-3,
+> textProj 2.3e-3, imgProj 8.1e-4, blocks 0/20/39 = 1.5e-3/6.5e-3/4.0e-3). The C# Wan I2V transformer —
+> incl. the k_img/v_img dual cross-attention — is numerically CORRECT. UniPC scheduler formula-audited
+> against the reference: faithful. Reference specs (diffusers/Comfy/sd.cpp, code-quote level) captured in
+> the research-agent outputs; key confirmations: our cond construction now matches all three (padded-clip
+> causal-VAE encode, mask-first concat, image-tokens-first context, shared-query summed img attention).
+> **Why the engine harness showed "all noise" while Swarm showed real video:** harness input defects, not
+> engine bugs — (1) it fed ~460 GARBAGE umT5 pad rows of 512 (unzeroed; the documented drowns-the-prompt
+> failure; FIXED — test now zeroes pads like the extension), (2) synthetic gradient init is off-distribution
+> for CLIP conditioning, (3) sub-native res. Rule: judge I2V quality ONLY via Swarm gens with real inputs.
+> **Measured fp8-native cost on small conditioning GEMMs:** temb 5.7%→0.4%, textProj/imgProj similar when
+> HARTSY_FP8_NATIVE=0 → exclude tiny GEMMs (M·N below threshold) from the fp8-native path (quality item).
+> Remaining open (quality/perf, not correctness): fp8-CFG collapse ≥cfg5 (renorm insufficiency vs Comfy),
+> comb-texture polish, I2V ~200 s vs T2V 37 s overhead, harness natural-init + WAN_CFG knob.
+>
+> **Quality attribution COMPLETE (official-spec runs, 2026-07-08 late):**
+> • VAE exonerated: real-image encode→decode roundtrip is pixel-faithful (new `WanVae_Roundtrip_Quality`
+>   harness, `Output/wan_vae_roundtrip_*`).
+> • Blur/halos = RESOLUTION under-spec: at native 0.4 MP (Image Aspect, Model Res) frame 0 is tack-sharp
+>   (gallery 1553001); at 512×320 (40% area) everything is soft with comb-edge halos. Official diffusers
+>   recipe: 81f / cfg 5 / ~50 steps / native area; our FlowShift 3.0 for 480p already matches.
+> • Flat-collapse = fp8-CFG DC-bias integration: cfg 5 at native res → frames 1+ collapse to a flat colour
+>   field (renorm 0.7 insufficient); cfg 3.5/2.0 keep real motion (1349001/1406001). Comfy handles cfg 6 on
+>   the SAME fp8 checkpoint → our fp8 CFG path has a correctable residual bias (velocity DC/renorm work).
+> • OOM fix shipped 44.13: the (correct) whole-clip conditioning encode needs headroom — pipeline now evicts
+>   the resident DiT pre-encode when free VRAM is short (loader preloads DiT before the pipeline runs).
+> • Sweet-spot probe in flight: native res + cfg 3.0. Practical recipe pending; extension should default
+>   fp8 Wan I2V cfg ≤3.5 (or land stronger renorm) + prefer native-area video resolution.
+> Residual (open): engine
 > I2V harness needs WAN_CFG knob + natural init (its cfg-5+gradient regime shows noise even when Swarm is
 > healthy); I2V wall ~250 s vs T2V 37 s (conditioning/overhead probes). History below.
 >

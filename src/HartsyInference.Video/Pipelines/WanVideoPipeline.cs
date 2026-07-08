@@ -318,8 +318,10 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         condClip.Dispose();
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
+        WanVideoDebugDump.Dump("i2v_cond_latent", condLatent);
         Tensor condition = BuildI2VCondition(condLatent, lastRgb24 is not null, latentCh, tp, tLat, hLat, wLat);   // [1,tp+z,tLat,hLat,wLat]
         condLatent.Dispose();
+        WanVideoDebugDump.Dump("i2v_condition", condition);
 
         if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
         // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
@@ -337,16 +339,20 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             if (_transformer2 is not null) SwapToExpert(expert);
             Tensor modelInput = ConcatChannels(latents, condition);   // [1, 2z+tp, tLat, hLat, wLat]
             Tensor vCond, vUncond;
+            WanVideoDebugDump.SetTag("cond");
             if (imageEmbeds is not null)
             {
                 vCond = expert.Forward(Backend, modelInput, promptEmbeds, [tEmb], imageEmbeds);
+                WanVideoDebugDump.SetTag("uncond");
                 vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, [tEmb], imageEmbeds);
             }
             else
             {
                 vCond = expert.Forward(Backend, modelInput, promptEmbeds, [tEmb]);
+                WanVideoDebugDump.SetTag("uncond");
                 vUncond = expert.Forward(Backend, modelInput, negativeEmbeds, [tEmb]);
             }
+            WanVideoDebugDump.SetTag(null);
             modelInput.Dispose();
             LancePipelineCommon.CfgCombineRenormInPlace(vCond, vUncond, guidance, _config.CfgRescale);
             scheduler.Step(latents, vCond);
