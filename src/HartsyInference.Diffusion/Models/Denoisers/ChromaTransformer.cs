@@ -159,10 +159,14 @@ public sealed unsafe class ChromaTransformer : IDisposable
         // ── 11. Final norm (ChromaAdaLayerNormContinuousPruned) ──
         // temb_final = modTable[:, -2:, :] → row 0 (=-2) = SHIFT, row 1 (=-1) = SCALE (ComfyUI Chroma
         // get_modulations("final") = (mod[-2], mod[-1]) → LastLayer `shift, scale = vec`). ApplyContinuousNorm consumes it in that order.
-        Tensor finalScaleShift = SliceModSlab(modTable, batch, _config.ModIndexLength - 2, rowCount: 2, hidden);
+        Tensor finalScaleShift = batch == 1
+            ? SliceModSlabDevice(backend, modTable, _config.ModIndexLength - 2, rowCount: 2, hidden)
+            : SliceModSlab(modTable, batch, _config.ModIndexLength - 2, rowCount: 2, hidden);
         modTable.Dispose();
 
-        Tensor normedOut = ApplyContinuousNorm(imgOut, finalScaleShift, batch, imgSeqLen, hidden);
+        Tensor normedOut = batch == 1
+            ? ApplyContinuousNormDevice(backend, imgOut, finalScaleShift, imgSeqLen, hidden)
+            : ApplyContinuousNorm(imgOut, finalScaleShift, batch, imgSeqLen, hidden);
         finalScaleShift.Dispose();
         imgOut.Dispose();
         ChromaDebugDump.Dump("img_post_norm_out", normedOut);
@@ -242,7 +246,9 @@ public sealed unsafe class ChromaTransformer : IDisposable
         {
             int imgRow = imgOffset + 6 * i;
             int txtRow = txtOffset + 6 * i;
-            Tensor doubleTemb = BuildDoubleBlockTemb(modTable, batch, imgRow, txtRow, hidden);
+            Tensor doubleTemb = batch == 1
+                ? BuildDoubleBlockTembDevice(backend, modTable, imgRow, txtRow, hidden)
+                : BuildDoubleBlockTemb(modTable, batch, imgRow, txtRow, hidden);
             ChromaDebugDump.Dump($"double_{i}_temb", doubleTemb);
 
             (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, doubleTemb, _rope, sdpaMask);
@@ -268,7 +274,9 @@ public sealed unsafe class ChromaTransformer : IDisposable
         for (int i = 0; i < numSingles; i++)
         {
             int singleRow = 3 * i;
-            Tensor singleTemb = SliceModSlab(modTable, batch, singleRow, rowCount: 3, hidden);
+            Tensor singleTemb = batch == 1
+                ? SliceModSlabDevice(backend, modTable, singleRow, rowCount: 3, hidden)
+                : SliceModSlab(modTable, batch, singleRow, rowCount: 3, hidden);
             ChromaDebugDump.Dump($"single_{i}_temb", singleTemb);
 
             Tensor newCombined = _singleBlocks[i].Forward(backend, combined, singleTemb, _rope, sdpaMask);
@@ -340,6 +348,31 @@ public sealed unsafe class ChromaTransformer : IDisposable
         return output;
     }
 
+    /// <summary>Device twin of <see cref="BuildDoubleBlockTemb"/> (B=1): two contiguous row-block slices out of
+    /// the DEVICE-resident modulation table, concatenated on the GPU. The host version read
+    /// <c>modTable.DataPointer</c> per block — a full pipeline drain of the freshly-computed table, twice per
+    /// double block per forward (the Kandinsky temb stream-stall pattern).</summary>
+    private static Tensor BuildDoubleBlockTembDevice(IBackend backend, Tensor modTable, int imgRow, int txtRow, int hidden)
+    {
+        Tensor imgRows = new Tensor(new TensorShape(1, 6, hidden), DType.F32);
+        backend.SliceRows(imgRows, modTable, imgRow);
+        Tensor txtRows = new Tensor(new TensorShape(1, 6, hidden), DType.F32);
+        backend.SliceRows(txtRows, modTable, txtRow);
+        Tensor output = new Tensor(new TensorShape(1, 12, hidden), DType.F32);
+        backend.Concat(output, new Tensor[] { imgRows, txtRows }, dim: 1);
+        imgRows.Dispose();
+        txtRows.Dispose();
+        return output;
+    }
+
+    /// <summary>Device twin of <see cref="SliceModSlab"/> (B=1): one contiguous row-block slice on the GPU.</summary>
+    private static Tensor SliceModSlabDevice(IBackend backend, Tensor modTable, int rowStart, int rowCount, int hidden)
+    {
+        Tensor output = new Tensor(new TensorShape(1, rowCount, hidden), DType.F32);
+        backend.SliceRows(output, modTable, rowStart);
+        return output;
+    }
+
     /// <summary>Builds the [B, 12, hidden] modulation slab consumed by a double block by stacking the 6 IMG rows
     /// followed by the 6 TXT rows. Mirrors <c>torch.cat((pooled[:, img:img+6], pooled[:, txt:txt+6]), dim=1)</c>.</summary>
     private static Tensor BuildDoubleBlockTemb(Tensor modTable, int batch, int imgRow, int txtRow, int hidden)
@@ -388,6 +421,30 @@ public sealed unsafe class ChromaTransformer : IDisposable
             long copyBytes = (long)rowCount * rowBytes;
             Buffer.MemoryCopy(srcPtr + src, dstPtr + dst, copyBytes, copyBytes);
         }
+        return output;
+    }
+
+    /// <summary>Device twin of <see cref="ApplyContinuousNorm"/> (B=1): LayerNorm + scale/shift modulation as
+    /// backend ops, keeping the block-loop output GPU-resident into proj_out. temb rows: 0 = SHIFT, 1 = SCALE.</summary>
+    private static Tensor ApplyContinuousNormDevice(IBackend backend, Tensor x, Tensor temb, int seqLen, int hidden)
+    {
+        TensorShape outShape = new TensorShape(1, seqLen, hidden);
+        Tensor normed = new Tensor(outShape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, 1e-6f);
+
+        Tensor shift = new Tensor(new TensorShape(1, hidden), DType.F32);
+        backend.SliceRows(shift, temb, 0);
+        Tensor scale = new Tensor(new TensorShape(1, hidden), DType.F32);
+        backend.SliceRows(scale, temb, 1);
+        Tensor scalePlus1 = new Tensor(new TensorShape(1, hidden), DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        scale.Dispose();
+
+        Tensor output = new Tensor(outShape, DType.F32);
+        backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
+        normed.Dispose();
+        scalePlus1.Dispose();
+        shift.Dispose();
         return output;
     }
 

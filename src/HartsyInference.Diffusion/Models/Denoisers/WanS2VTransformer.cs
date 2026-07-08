@@ -27,6 +27,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
     private readonly WanS2VAudioInjector _audioInjector;
     private readonly int[] _injectLayers;
     private readonly WanRope _rope;
+    private readonly DiTBlocks.WanForwardCaches _caches = new();
     private readonly int _patchVec;
     private int _disposed;
 
@@ -130,28 +131,39 @@ public sealed unsafe class WanS2VTransformer : IDisposable
         hidden = AddRowGpu(backend, hidden, _condMask0!);
         WanVideoDebugDump.Dump("post_condmask", hidden);
 
-        (Tensor cos, Tensor sin) = _rope.BuildCosSin(gt, gh, gw);
+        int refTFrames = 0;
+        if (referenceLatent is not null)
+        {
+            refTFrames = (int)referenceLatent.Shape[2] / pt;
+            if ((int)referenceLatent.Shape[3] != hh || (int)referenceLatent.Shape[4] != ww)
+                throw new ArgumentException($"reference latent spatial size must match the video latent ({hh}x{ww}); got {referenceLatent.Shape}.", nameof(referenceLatent));
+        }
+        // Video⊕reference cos/sin cached as ONE table; the reference rows sit far past the video frames on the
+        // temporal axis (t_start = max(30, T + 9)).
+        int refCount = refTFrames;
+        (Tensor cos, Tensor sin) = _caches.RopeCosSin((gt, gh, gw, refCount), () =>
+        {
+            (Tensor c, Tensor si) = _rope.BuildCosSin(gt, gh, gw);
+            if (refCount == 0) return (c, si);
+            int tStart = Math.Max(30, gt + 9);
+            int[] refFrames = new int[refCount];
+            for (int i = 0; i < refCount; i++) refFrames[i] = tStart + i;
+            (Tensor refCos, Tensor refSin) = _rope.BuildCosSin(refFrames, gh, gw);
+            Tensor c2 = WanDitOps.ConcatRows(c, refCos, _config.HeadDim); c.Dispose(); refCos.Dispose();
+            Tensor s2 = WanDitOps.ConcatRows(si, refSin, _config.HeadDim); si.Dispose(); refSin.Dispose();
+            return (c2, s2);
+        });
         int totalS = s, groups = 1;
         float[] timesteps = [timestep];
         Tensor cur = hidden;
 
         if (referenceLatent is not null)
         {
-            int refT = (int)referenceLatent.Shape[2] / pt;
-            if ((int)referenceLatent.Shape[3] != hh || (int)referenceLatent.Shape[4] != ww)
-                throw new ArgumentException($"reference latent spatial size must match the video latent ({hh}x{ww}); got {referenceLatent.Shape}.", nameof(referenceLatent));
+            int refT = refTFrames;
             Tensor refTokens = WanDitOps.Patchify(backend, referenceLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
             int refS = refT * frameTokens;
             refTokens = AddRowGpu(backend, refTokens, _condMask1!);
             WanVideoDebugDump.Dump("ref_tokens", refTokens);
-
-            // Reference RoPE sits far past the video frames on the temporal axis: t_start = max(30, T + 9).
-            int tStart = Math.Max(30, gt + 9);
-            int[] refFrames = new int[refT];
-            for (int i = 0; i < refT; i++) refFrames[i] = tStart + i;
-            (Tensor refCos, Tensor refSin) = _rope.BuildCosSin(refFrames, gh, gw);
-            Tensor cos2 = WanDitOps.ConcatRows(cos, refCos, _config.HeadDim); cos.Dispose(); refCos.Dispose(); cos = cos2;
-            Tensor sin2 = WanDitOps.ConcatRows(sin, refSin, _config.HeadDim); sin.Dispose(); refSin.Dispose(); sin = sin2;
 
             Tensor joined = new Tensor(new TensorShape(s + refS, dim), DType.F32);
             backend.Concat(joined, [cur, refTokens], 0);
@@ -175,7 +187,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
             WanVideoDebugDump.Dump("temb", temb);
             WanVideoDebugDump.Dump("timestep_proj", timestepProj);
         }
-        Tensor encoderProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        Tensor encoderProj = _caches.TextProj(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
         WanVideoDebugDump.Dump("text_proj", encoderProj);
 
         for (int i = 0; i < _blocks.Length; i++)
@@ -194,7 +206,7 @@ public sealed unsafe class WanS2VTransformer : IDisposable
                 cur = injected;
             }
         }
-        cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
+        timestepProj.Dispose();   // cos/sin/encoderProj are owned by the per-generation caches
 
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB,
             totalS, dim, _config.Eps, tokensPerGroup);

@@ -27,7 +27,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable
     // RoPE cos/sin keyed by the latent grid, and the projected text(+image) context keyed by encoder identity.
     private (int T, int H, int W) _ropeKey = (-1, -1, -1);
     private Tensor? _cosC, _sinC;
-    private readonly Dictionary<Tensor, (Tensor Ctx, int ImageContextLen)> _ctxCache = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<Tensor, (Tensor Ctx, int ImageContextLen, Tensor? ImgKey)> _ctxCache = new(ReferenceEqualityComparer.Instance);
 
     public WanVideoTransformer(WanVideoConfig config)
     {
@@ -115,14 +115,15 @@ public sealed unsafe class WanVideoTransformer : IDisposable
         WanVideoDebugDump.Dump("cond_timestepProj", timestepProj);
         WanVideoDebugDump.Dump("cond_cos", cos);
         WanVideoDebugDump.Dump("cond_sin", sin);
-        // The projected text(+image) context is timestep-independent — cache it per encoder tensor identity so the
-        // 2 projections + gelu (+ image embed + concat) run once per generation instead of 2×/step. The cached
-        // tensor is host-materialized below, so it survives the pipeline's per-step FreeActivations (device copy
-        // re-uploads on demand; the host data stays authoritative).
+        // The projected text(+image) context is timestep-independent — cache it per encoder tensor identity (with
+        // the image-embeds identity validated on hit for I2V, where the context also folds in the CLIP image and a
+        // HOST ConcatRows) so the projections + gelu + concat run once per generation instead of 2×/step. The
+        // cached tensor is host-materialized below, so it survives the pipeline's per-step FreeActivations (device
+        // copy re-uploads on demand; the host data stays authoritative).
         int imageContextLen = 0;
         Tensor encoderProj;
-        bool ctxCached = imageEmbeds is null;   // I2V contexts also depend on the image embeds → uncached per-forward
-        if (ctxCached && _ctxCache.TryGetValue(encoder, out (Tensor Ctx, int ImageContextLen) cached))
+        if (_ctxCache.TryGetValue(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) cached)
+            && ReferenceEquals(cached.ImgKey, imageEmbeds))
         {
             encoderProj = cached.Ctx;
             imageContextLen = cached.ImageContextLen;
@@ -142,16 +143,15 @@ public sealed unsafe class WanVideoTransformer : IDisposable
                 imgProj.Dispose();
                 textProj.Dispose();
             }
-            if (ctxCached)
+            _ = (nint)encoderProj.DataPointer;   // host-materialize (see cache note above)
+            if (_ctxCache.Count >= 4)   // cap: prompts/images changed across gens; drop the stale contexts
             {
-                _ = (nint)encoderProj.DataPointer;   // host-materialize (see cache note above)
-                if (_ctxCache.Count >= 4)   // cap: prompts changed across gens; drop the stale contexts
-                {
-                    foreach ((Tensor ctx, _) in _ctxCache.Values) ctx.Dispose();
-                    _ctxCache.Clear();
-                }
-                _ctxCache[encoder] = (encoderProj, imageContextLen);
+                foreach ((Tensor ctx, _, _) in _ctxCache.Values) ctx.Dispose();
+                _ctxCache.Clear();
             }
+            // Same-encoder re-entry with a different image replaces the stale entry (dispose the old context).
+            if (_ctxCache.Remove(encoder, out (Tensor Ctx, int ImageContextLen, Tensor? ImgKey) stale)) stale.Ctx.Dispose();
+            _ctxCache[encoder] = (encoderProj, imageContextLen, imageEmbeds);
         }
 
         Tensor cur = hidden;

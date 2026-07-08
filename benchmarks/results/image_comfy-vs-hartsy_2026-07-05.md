@@ -407,3 +407,113 @@ selection for the M≈8478 fp8 shapes, fused norm+modulate kernels, VAE decode o
 | Krea2-Turbo | <6.5s | **4.44s** ✓ (was 4.68) | (below) | coherent ✓ visually |
 | Z-Image-Turbo | ≤3.2s | **2.94s** ✓ (was 3.12) | (below) | coherent ✓ visually |
 | SDXL (banded-VAE sanity) | — | 36.3s (was 37.3) | — | coherent ✓ visually |
+
+## 2026-07-08 — Qwen-Image round 1: 355s → **40.9s = BEATS ComfyUI (54.8s, 1.34× faster)** — engine `alpha.44.8-local`
+
+Warm median 40.9s @ 1024²/20 steps/cfg 2.5 (dual-pass CFG, Q4_K_M GGUF), coherent + prompt-faithful, visually
+verified (fresh same-morning baseline was ~355s at 14–24 s/step, GPU util 36%; the 07-07 table's 192s predates
+this env). Steps now ~2.05s (both CFG passes). Qwen-Image-Edit inherits (same pipeline/blocks).
+
+One deploy, five fixes — all the Ideogram/Krea2/Z-Image playbook:
+| Fix | What |
+|---|---|
+| **Device joint RoPE** | `QwenImageRope.ApplyJoint` was a HOST loop reading jointQ/K `DataPointer` — a 2×~50 MB D2H+H2D round trip per block × 60 blocks × 2 passes × 20 steps. Now: cached `[S, headDim]` cos/sin tables (`GetOrBuildJointTables`, one host build per layout) + `WanRopeInterleaved` on the pre-permute layout. Proven equal to the host path by `DeviceRopeTables_Equal_HostApplyJoint` (CPU, 1e-6). Host path kept for batch>1 + as the tests' reference. |
+| **cuDNN flash SDPA** | `allowF16: true` on the joint attention (head_dim 128, QK-normed, mask-null — the proven config). Was F32 materialized scores. |
+| **Drain-free loop** | CFG combine + Euler fused into ONE in-place device op (`CfgEulerStep(z, cond, uncond, cfgScale, dt)` ≡ `uncond + cfg·(cond−uncond)` Euler); latent device-resident all loop; per-step `FreeActivations` gone (kept on the masked-inpaint/edit-ref host paths). |
+| **TE prompt cache** | cond + uncond Qwen2.5-VL hidden states keyed on (tokens, dropIndex); repeat prompts skip the whole TE phase. |
+| **KEEP_MODELS** | DiT stays resident across gens; prompt-cache MISS evicts it for the TE (Ideogram pattern). |
+
+**Remaining lever (documented, not yet built): Q4_K → fp8-e4m3 requant at load.** The Q4_K GEMM path still
+dequantizes each weight to a TRANSIENT F16 buffer per Linear call (the F16 expansion of a 20B model can't be
+cached on 24 GB — the Axis-B pathology, GGUF flavor). Requanting to fp8 at load (dequant via `GgufDequantizer`
+→ global amax/448 scale on `Fp8ScaleFactor` → `CastTo(F8E4M3)`, mirroring `DequantNvfp4ToFp8` which shipped
+coherent for Ideogram from the same 4-bit information budget) puts Qwen on the packed-fp8 native GEMM path:
+est. ~2.05 → ~1.2–1.4 s/step (→ ~30s/gen), at ~20 GB resident + a requant-quality visual gate.
+
+**Regression on `alpha.44.8` (includes the other session's Hunyuan/Kandinsky video SDPA flips):** Z-Image-Turbo
+**2.86s** ✓ (bar 3.2), Krea2-Turbo **4.47s** ✓ (bar 6.5), images pristine. (One bench pass showed 74–136s
+outliers that snapped back to 2.98/4.47 on final reps — transient GPU contention from the concurrent video
+session's verification runs, confirmed clean on re-run with an intruder watchdog.)
+
+## 2026-07-08 — Chroma round 1: 110s → **97.2s** (Comfy 16.6s) — engine `alpha.44.9-local` — + fleet recipe status
+
+Chroma got the full pipeline recipe (T5 prompt cache, KEEP_MODELS w/ evict-on-miss, drain-free CfgEulerStep
+loop, previews throttled to every 4th step) PLUS the device modulation-table port: `BuildDoubleBlockTemb` /
+`SliceModSlab` / per-block `SliceModRows` / `ApplyContinuousNorm` all read the device-produced mod table via
+host `DataPointer` (the Kandinsky temb stream-stall, ×57 blocks/forward) — now `SliceRows`/`Concat`/
+`LayerNormNoAffine`/`AffineBroadcastLastDim` device ops (B=1; host fallback kept). Coherent ✓ visually (clean
+modulation, no scrambling). Only −12% because **Chroma is GPU-bound on its masked SDPA**: the Chroma text mask
+disqualifies the cuDNN fused path (mask-null-only), so attention runs F32-materialized/tiled. **Chroma's real
+levers (next round): cuDNN SDPA bias/mask support (also unblocks the video fleet's masked models), F16
+activations, fp8-native GEMM audit.**
+
+ERNIE haze verdict: same-seed A/B with banded-conv + full-res VAE disabled = IDENTICAL image → today's shared
+changes innocent; the flat/grainy look is ERNIE's standing output (quality audit queued for its grind round —
+std-ratio vs ComfyUI per the GroupNormSilu washout history). Ideogram's "haze" is the JSON prompt's explicit
+"faint atmospheric haze" — not a defect.
+
+Fresh 44.8 baselines banked for the remaining fleet: SDXL 32.97s (Comfy 3.7), Flux-Dev 72.4s (12.5) — Flux also
+has two UNCONDITIONAL full-tensor host stat scans per step (`LogTensorStats` + `LogPerLatentChannelMeanPacked`)
+to gate, plus the standard recipe. AuraFlow re-download pending (see incident below). Qwen round-1 recipe is the
+template for all.
+
+**Incident (2026-07-08 ~10:24):** a disk-full cleanup deleted `/tmp/*_dl` dirs that turned out to be LIVE
+symlinked storage for ~10 checkpoints (AuraFlow/Chroma-fp8/Kontext/OmniGen2/HiDream/Kandinsky-T2I/Boogu-TE +
+Krea2/Ideogram TEs). Recovered same-session: TEs re-downloaded (Krea2 verified healed with a coherent gen),
+Chroma fp8 re-downloaded (`silveroxides/Chroma1-HD-fp8-scaled`). Still to re-fetch: AuraFlow fp8, Kontext,
+OmniGen2, Kandinsky-T2I, HiDream, Boogu flux1 VAE. Memory: `models-in-tmp-symlink-trap`.
+
+## 2026-07-08 — Chroma round 2: 97.2s → **63.2s** (Comfy 16.6s) — engine `alpha.44.10-local` — cuDNN SDPA bias/mask support
+
+The round-1 wall is gone: **the cuDNN fused flash-attention engine now takes an additive mask**, so Chroma's
+masked attention (the text-padding `[B,1,S,S]` mask that used to disqualify the fused path → F32 materialized
+2 GB score matrix) runs fused. Graph = the cudnn-frontend Bias score-modifier pattern:
+`bmm1 → scale(MUL) → bias(ADD, fp32 [B,1,Sq,Skv] broadcast over heads) → unified-SOFTMAX → bmm2` — still hits
+the fused engine (workspace 0), proven first in the surviving Python ctypes proto (relL2 2.7e-4 vs numpy with
+the exact `-1e30` convention; **2.20 ms/call at Chroma shape** B=1,H=24,S=4608,D=128 vs 62.7 ms materialized).
+C#: `CudnnSdpa.Execute(..., biasF32, biasB)` (plan-cache keyed on bias presence), `CudaBackend` gate now admits
+F32 `[B,1,Sq,Skv]`/`[1,1,Sq,Skv]` masks on both the F16-native and F32-cast cuDNN routes; Chroma's two block
+SDPA call sites pass `allowF16:true` (safe: QK RMS-norm bounds scores; the mask is added to fp32 scores INSIDE
+the engine, never rounded through F16). `CudnnSdpaTests` gained masked D∈{64,128} cases (all pass, engaged).
+
+**Chroma1-HD @1024²/20 steps: warm 62.99/63.22/63.45s (median 63.2s, was 97.2), peak VRAM 15.3 GB (score
+matrix gone), coherent ✓ visually (sharp astronaut, clean masks, no veil).** Gap vs Comfy 5.9× → 3.8×.
+Flagship regression: Krea2-Turbo **4.50s** (<6.5 gate ✓), Z-Image-Turbo **2.95s** (≤3.2 gate ✓), both verified
+coherent visually.
+
+**Blast radius (intended):** WanVideoBlock / LtxVideoBlock / LtxVideo2Attention / ZImageBlock already pass
+mask+`allowF16:true` — with `HARTSY_SDPA_CUDNN=1` their F32 broadcast masks now ride the fused engine too
+(per-head `[B,H,Sq,Skv]` masks and no-allowF16 callers — T5/CLIP/Llama encoders — unchanged). Z-Image is
+regression-verified above; **the masked video models should be re-benched/verified next video session** (free
+speedup expected, e.g. Wan cross-attn).
+
+**Deploy gotcha (cost one OOM'd bench):** the standard perf flags (`HARTSY_SDPA_CUDNN/FP8_NATIVE/DIT_F16/
+KEEP_MODELS/MEMPOOL_KEEP`) live ONLY in the Swarm launcher's env — a relaunch without exporting them silently
+reverts the engine to defaults (Chroma then OOM'd allocating the materialized 2 GB score buffer it no longer
+needs under cuDNN). Verify `/proc/<swarm-pid>/environ` after every relaunch; deploy memory updated.
+
+**Chroma next levers (round 3):** profile first (wall is no longer SDPA) — expected split: fp8 Linear/transient
+dequant (Axis B — the Qwen Q4_K→fp8-requant analog), remaining host glue, VAE. Then F16 activations
+(`HARTSY_DIT_F16` opt-in for the Chroma blocks) and the per-gen step graph (Z-Image recipe).
+
+**Addendum — `alpha.44.11-local`, deployment self-sufficiency (user directive: persistence belongs in the
+extension logic, not launcher env).** Two changes make a BARE Swarm launch fully functional: (1) the extension's
+`OnPreInit` sets the 5 standard perf flags as unset-only in-process defaults (env value, incl. "0", still wins —
+kill-switches intact; logged at init); (2) engine `CudaLibraryResolver` probes `$HARTSY_CUDA_LIB_DIR` then
+`~/.local/lib/cuda13` for cublas/cublasLt/cudnn before soname search, and `CudaContext.IsAvailable` shares that
+probe (its old duplicated bare-soname check silently SKIPPED GPU tests as "passed" without LD_LIBRARY_PATH).
+Verified end-to-end with a zero-env launch: flags logged, backend live, cuDNN engaged, coherent Chroma gen.
+44.11 = 44.10 + resolver only (no math changes) — the 44.10 bench numbers stand.
+
+**Addendum — `alpha.44.12-local`: the standard performance profile is now the ENGINE DEFAULT (user
+directive: every downloaded install must reproduce published times with zero configuration, documented
+professionally).** `HartsyInference.Core.Runtime.EnvSwitch` gives the 5 profile features tri-state
+semantics (unset → default ON, `0`/`false` = kill-switch): `HARTSY_SDPA_CUDNN` (self-disabling fallback),
+`HARTSY_FP8_NATIVE` (hardware-gated: default ON only on SM ≥ 8.9), `HARTSY_DIT_F16` (per-arch code opt-in
+unchanged), `HARTSY_KEEP_MODELS` (4 pipelines), `HARTSY_MEMPOOL_KEEP`. Experimental switches keep strict
+opt-in. Extension OnPreInit no longer sets anything — single source of truth is the engine, so NuGet/CLI
+consumers get identical behavior. Documented in the new **`docs/PERFORMANCE.md`** (profile table, native
+library requirements + resolver order, verification log lines, benchmark methodology + scoreboard) with
+README + extension README/doc-07 sections pointing at it. Verified on a zero-env launch: engine log
+`[Cuda] perf flags: SdpaCudnn=True NativeFp8Gemm=True MempoolKeep=True ...`, warm medians unchanged —
+Z-Image-Turbo 3.05s, Chroma1-HD 63.5s, both visually coherent.

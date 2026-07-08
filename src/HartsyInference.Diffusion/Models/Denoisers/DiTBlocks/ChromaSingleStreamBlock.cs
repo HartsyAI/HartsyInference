@@ -97,8 +97,12 @@ public sealed unsafe class ChromaSingleStreamBlock
         int seqLen = (int)x.Shape[1];
         float scale = 1.0f / MathF.Sqrt(_headDim);
 
-        // ── 1. Slice modulation rows (CPU; tiny [B, hidden] tensors): shift, scale, gate ──
-        Tensor[] mod = SliceModRows(temb, batch, rowCount: 3);
+        // ── 1. Slice modulation rows into tiny [B, hidden] tensors: shift, scale, gate. Device slices
+        // (B=1): the old host path read the device-produced temb's DataPointer — a full pipeline drain
+        // per block (the temb stream-stall). ──
+        Tensor[] mod = batch == 1
+            ? SliceModRowsDevice(backend, temb, rowCount: 3)
+            : SliceModRows(temb, batch, rowCount: 3);
 
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
         TensorShape heads = new TensorShape(batch, seqLen, _numHeads, _headDim);
@@ -152,9 +156,11 @@ public sealed unsafe class ChromaSingleStreamBlock
         }
 
         // ── 7. SDPA. The additive [B,1,S,S] mask is built ONCE per forward by ChromaTransformer and shared
-        //       across all blocks — use it directly, do NOT dispose here. ──
+        //       across all blocks — use it directly, do NOT dispose here.
+        //       allowF16 is safe: Q/K are RMS-normed (QkNorm) so scores are bounded; the mask rides the cuDNN
+        //       fused engine as an fp32 bias score-modifier, never rounded through F16. ──
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, sdpaMask, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, sdpaMask, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
@@ -204,6 +210,21 @@ public sealed unsafe class ChromaSingleStreamBlock
         normed.Dispose();
         scalePlus1.Dispose();
         return output;
+    }
+
+    /// <summary>Device twin of <see cref="SliceModRows"/> (B=1): per-row <c>backend.SliceRows</c> so the
+    /// device-resident temb is never drained to the host mid-forward.</summary>
+    private static Tensor[] SliceModRowsDevice(IBackend backend, Tensor temb, int rowCount)
+    {
+        int hidden = (int)temb.Shape[2];
+        Tensor[] rows = new Tensor[rowCount];
+        for (int r = 0; r < rowCount; r++)
+        {
+            Tensor row = new Tensor(new TensorShape(1, hidden), DType.F32);
+            backend.SliceRows(row, temb, r);
+            rows[r] = row;
+        }
+        return rows;
     }
 
     private static Tensor[] SliceModRows(Tensor temb, int batch, int rowCount)

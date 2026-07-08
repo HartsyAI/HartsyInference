@@ -196,6 +196,46 @@ graph cannot span streamed (re-pointered) weights (the 43.145 eviction-crash rul
 > 7168-token SDPA was even more dominant than profiled. Remaining per the audit: Hunyuan patchify/unpatchify host
 > loops + per-step prompt re-upload + VAE tiled per-tile Sync; Kandinsky patch glue; graph capture for both.
 
+> ### ✅ I2V STRUCTURAL BUG FIXED (44.12-local, Swarm-verified): the cond-latent must be the causal-VAE encode
+> of the WHOLE padded pixel clip (init + mid-gray frames), not first-frame + zero latents (`BuildCondClip` +
+> full-latent `BuildI2VCondition`). Swarm-API gen 1349001: real galloping motion faithful to the init.
+> A/B (same seed, gallery 1349001 cfg3.5 vs 1406001 cfg2.0): saturation drift/late-clip degradation ≈ GONE at
+> cfg 2.0 (fp8-CFG amplification confirmed) → recommend extension-side cfg clamp/renorm for fp8 Wan I2V.
+> Posterize/comb-edge texture persists at cfg 2.0 → separate residual (VAE decode / striping class / fp8
+> quant) — parity-polish item. Residual (open): engine
+> I2V harness needs WAN_CFG knob + natural init (its cfg-5+gradient regime shows noise even when Swarm is
+> healthy); I2V wall ~250 s vs T2V 37 s (conditioning/overhead probes). History below.
+>
+> ### I2V/S2V round (2026-07-08, engine 44.9-local deployed) — earlier state (superseded above)
+> **Wan I2V-14B produces garbage beyond frame 0 — at the ENGINE level, independent of Swarm.** The engine
+> e2e (synthetic gradient init, cfg 5, renorm 0.7) yields blotch noise on EVERY frame, and
+> `AssertFramesCoherent` PASSES on it (only catches flat/degenerate) — so the 07-02 "validated" status never
+> verified I2V visually; it has plausibly never worked. The I2V test now DUMPS FRAMES (`Output/wan_i2v_*`).
+> Through Swarm, frame 0 looks perfect (real-photo conditioning anchors it) which masked the bug in previews.
+> Debug log (2026-07-08 afternoon): knob matrix ALL-ELIMINATED — identical deterministic noise with
+> solver-order 1, fp8-native off, cuDNN off. **Conditioning fix SHIPPED** (reference-faithful: VAE-encode the
+> whole padded pixel clip [init + mid-gray frames] via causal `IWanVaeEncoder.Encode` → full-latent
+> `BuildI2VCondition`; the old single-frame encode left latent frames 1+ literal ZEROS on 16/36 input
+> channels — a genuine deviation from diffusers/Comfy, kept regardless) — but noise persists.
+> **Attribution correction:** engine T2V-14B ALSO fails the coherence assert (near-flat/black) at BOTH
+> f596cef AND 8027968 (bisect run) — NOT a new regression from the wan-grind commits; the engine-test
+> regime (detector cfg 5 + rescale 0.7 @ 512×320) sits in the DOCUMENTED fp8-CFG low-res darkening zone,
+> while the same model at cfg 6 through Swarm is fine. Next: engine T2V-14B probe at WAN_CFG=6 (queued on
+> GPU-quiet); if clean, re-judge I2V at matched cfg, then layer-diff `GenerateImageToVideoConcat` vs
+> diffusers `WanImageToVideoPipeline` (clone `tests/python-reference/s2v_reference`) as the definitive tool.
+> The I2V test now honors frame dumps; consider adding a `WAN_CFG` override to it (T2V/loader tests have one).
+> Side facts: the 44.8→44.9 ctx cache DID fix a real cross-step conditioning-corruption bug (FreeActivations
+> drops device buffers of never-host-read tensors — general rule stands), and `FreeBackendMemory` via the
+> Swarm API works for freeing held models between engine tests.
+> **I2V perf**: 200 s warm vs T2V-14B's 37 s at the same size/steps — ~160 s of I2V-specific overhead
+> (init VAE-encode, concat-conditioning build, per-step mask?) → needs phase probes in
+> `GenerateImageToVideoConcat` (next target).
+> **S2V trim REVERTED**: `FreeActivations(trimPool:false)` OOM'd mid-run (40 blocks × 13824 FFN) even with
+> FP8_NATIVE — the audio injector's churn needs the per-step pool trim until its host glue is ported.
+> **Wan 14B T2V at cfg 6 (fp8)** shows rainbow glitch patches through Swarm — the known fp8-CFG amplification;
+> extension should clamp/renorm CFG for fp8 Wan (detector CfgRescale exists engine-side; verify it engages
+> through the extension path).
+
 ## Plan — rest of fleet (interleave as capacity allows; ordered by value)
 
 1. **Quick wins, one deploy each:** S2V per-step `TrimMemoryPool` → `trimPool:false` (W9); Wan RoPE memoization

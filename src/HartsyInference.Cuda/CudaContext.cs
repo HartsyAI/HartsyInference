@@ -183,22 +183,10 @@ public sealed class CudaContext : IDisposable
             CudaLibraryResolver.Register();
 
             // Probe cuBLAS up front — the driver may be present (e.g., NVIDIA GL extension) without
-            // the toolkit, in which case CudaBackend construction would fail at cublasCreate. Match
-            // the version set probed by CudaLibraryResolver.ResolveLibrary("cublas").
-            bool cublasOk = false;
-            if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
-            {
-                cublasOk = System.Runtime.InteropServices.NativeLibrary.TryLoad("cublas64_13.dll", out _)
-                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("cublas64_12.dll", out _)
-                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("cublas64_11.dll", out _);
-            }
-            else if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Linux))
-            {
-                cublasOk = System.Runtime.InteropServices.NativeLibrary.TryLoad("libcublas.so.13", out _)
-                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("libcublas.so.12", out _)
-                        || System.Runtime.InteropServices.NativeLibrary.TryLoad("libcublas.so.11", out _);
-            }
-            if (!cublasOk) return false;
+            // the toolkit, in which case CudaBackend construction would fail at cublasCreate. Uses the
+            // resolver's own search (probe dirs like ~/.local/lib/cuda13 + soname fallback) so this
+            // check can't disagree with what actual P/Invoke resolution would find.
+            if (!CudaLibraryResolver.CublasLoadable()) return false;
 
             EnsureCudaInitialized();
             CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();

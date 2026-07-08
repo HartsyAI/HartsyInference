@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -20,12 +21,12 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 {
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Krea2Transformer _transformer;
-    /// <summary>HARTSY_KEEP_MODELS=1 keeps the DiT weights GPU-resident across generations (skips the post-loop
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
     /// FreeWeights + next-gen ~1.8 s re-upload). The TE is still freed each gen — its VRAM is needed by the VAE
     /// decode (see the call site). Requires DiT + VAE-decode peak to fit VRAM (fp8 Krea2 on 24 GB: yes).
-    /// Default off — eviction is what lets smaller cards run these models.</summary>
+    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
-        Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") == "1";
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
 
     // Prompt-embedding cache (one cond + one uncond, last-used): tapped TE hidden states keyed on
     // (token ids, drop index). See the encode block in GenerateFromTokens.

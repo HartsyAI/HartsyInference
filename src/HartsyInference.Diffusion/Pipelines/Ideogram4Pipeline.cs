@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -36,12 +37,12 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     private const int OutputImageIndicator = 2;
     private const int ImagePositionOffset = 65536;
 
-    /// <summary>HARTSY_KEEP_MODELS=1 keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop
+    /// <summary>Keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop
     /// FreeWeights + next-gen ~4.6 s re-upload). The TE cannot coexist with the resident DiTs (8 + 18.6 GB), so a
     /// prompt-cache MISS under this flag frees the DiTs first, encodes, then re-preloads — repeat prompts skip both.
-    /// Default off — eviction is what lets smaller cards run this model.</summary>
+    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private static readonly bool KeepModelsResident =
-        Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") == "1";
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
     private bool _ditResident;
 
     // Prompt-embedding cache (last prompt): the Qwen3-VL 13-layer tap keyed on the token ids. A hit skips the

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -23,6 +24,23 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private readonly QwenImageVaeDecoder _vaeDecoder;
     private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly QwenImageConfig _config;
+
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
+    /// FreeWeights + next-gen re-upload). The Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a
+    /// prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both.
+    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-embedding cache (one cond + one uncond, last-used), keyed on (token ids, drop index) — the
+    // Krea2Pipeline pattern. A hit skips the whole TE phase (preload + encode + free).
+    private int[]? _cachedCondKey;
+    private int _cachedCondDrop = -1;
+    private Tensor? _cachedCond;
+    private int[]? _cachedUncondKey;
+    private int _cachedUncondDrop = -1;
+    private Tensor? _cachedUncond;
 
     /// <summary>Creates a Qwen-Image pipeline. Caller is responsible for the lifetime of the components — they may be reused across pipelines. Img2img is unavailable; use the overload accepting a <see cref="QwenImageVaeEncoder"/> to enable it.</summary>
     public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
@@ -123,42 +141,80 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         Logs.Info($"Qwen-Image {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        Backend.PreloadWeights(_textEncoder.EnumerateWeights());
-
-        int[][] batchPrompt = [promptTokenIds];
-        Tensor condHidden = _textEncoder.Encode(Backend, batchPrompt);
-        if (promptDropIndex > 0)
-        {
-            Tensor trimmed = DropPrefixHiddenStates(condHidden, promptDropIndex);
-            condHidden.Dispose();
-            condHidden = trimmed;
-        }
-
+        // Prompt-embedding cache: identical (tokens, dropIndex) reuse the previous gen's hidden states — the
+        // whole TE phase (preload + encode + free) vanishes for repeat prompts (seed-only changes). Reusing the
+        // SAME tensor references also keeps any downstream ref-keyed caches warm. Cache holds one cond + one
+        // uncond (the last used); a new prompt evicts + disposes.
+        bool condHit = _cachedCond is not null && _cachedCondDrop == promptDropIndex
+            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIds);
+        bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondDrop == negativeDropIndex
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativeTokenIds));
+        Tensor condHidden;
         Tensor? uncondHidden = null;
-        if (useCfg)
+        if (condHit && uncondHit)
         {
-            int[][] batchNeg = [negativeTokenIds];
-            uncondHidden = _textEncoder.Encode(Backend, batchNeg);
-            if (negativeDropIndex > 0)
+            condHidden = _cachedCond!;
+            if (useCfg) uncondHidden = _cachedUncond;
+            Logs.Info("[QwenImage] prompt-embedding cache hit — TE phase skipped");
+        }
+        else
+        {
+            if (_ditResident)
             {
-                Tensor trimmed = DropPrefixHiddenStates(uncondHidden, negativeDropIndex);
-                uncondHidden.Dispose();
-                uncondHidden = trimmed;
+                // The TE cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
+                // new-prompt generation and re-preload below.
+                Backend.Sync();
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
+            Backend.PreloadWeights(_textEncoder.EnumerateWeights());
+
+            int[][] batchPrompt = [promptTokenIds];
+            condHidden = _textEncoder.Encode(Backend, batchPrompt);
+            if (promptDropIndex > 0)
+            {
+                Tensor trimmed = DropPrefixHiddenStates(condHidden, promptDropIndex);
+                condHidden.Dispose();
+                condHidden = trimmed;
+            }
+
+            if (useCfg)
+            {
+                int[][] batchNeg = [negativeTokenIds];
+                uncondHidden = _textEncoder.Encode(Backend, batchNeg);
+                if (negativeDropIndex > 0)
+                {
+                    Tensor trimmed = DropPrefixHiddenStates(uncondHidden, negativeDropIndex);
+                    uncondHidden.Dispose();
+                    uncondHidden = trimmed;
+                }
+            }
+
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (txt seqLen={condHidden.Shape[1]})");
+
+            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+
+            // Materialize the conditioning on the host, then reclaim every encoder intermediate. The Qwen2.5-VL
+            // encoder leaves hundreds of device-cached activations that otherwise linger until GC finalization —
+            // they'd hold multi-GB into the DiT phase. condHidden/uncondHidden may still be live GPU activations
+            // (the drop-index path already copied them on the host, the raw path did not); touching DataPointer
+            // forces the D2H sync + cache eviction, making them safe across the FreeActivations calls below.
+            _ = condHidden.DataPointer;
+            if (uncondHidden is not null) _ = uncondHidden.DataPointer;
+            Backend.FreeActivations();
+
+            _cachedCond?.Dispose();
+            _cachedCond = condHidden;
+            _cachedCondKey = (int[])promptTokenIds.Clone();
+            _cachedCondDrop = promptDropIndex;
+            if (useCfg)
+            {
+                _cachedUncond?.Dispose();
+                _cachedUncond = uncondHidden;
+                _cachedUncondKey = (int[])negativeTokenIds.Clone();
+                _cachedUncondDrop = negativeDropIndex;
             }
         }
-
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (txt seqLen={condHidden.Shape[1]})");
-
-        Backend.FreeWeights(_textEncoder.EnumerateWeights());
-
-        // Materialize the conditioning on the host, then reclaim every encoder intermediate. The Qwen2.5-VL
-        // encoder leaves hundreds of device-cached activations that otherwise linger until GC finalization —
-        // they'd hold multi-GB into the DiT phase. condHidden/uncondHidden may still be live GPU activations
-        // (the drop-index path already copied them on the host, the raw path did not); touching DataPointer
-        // forces the D2H sync + cache eviction, making them safe across the FreeActivations calls below.
-        _ = condHidden.DataPointer;
-        if (uncondHidden is not null) _ = uncondHidden.DataPointer;
-        Backend.FreeActivations();
 
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
         TensorShape packedShape = new TensorShape(1, imgSeqLen, patchDim);
@@ -209,6 +265,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         }
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        _ditResident = true;
 
         // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode /
         // packing intermediates. The per-step FreeActivations below frees device buffers WITHOUT a D2H
@@ -223,6 +280,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         Logs.Info("Starting Qwen-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
+        // Drain-free fast path (plain t2i / img2img): the latent stays device-resident across the whole loop,
+        // CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt — for
+        // gw=cfgScale this IS uncond + cfg·(cond−uncond), and gw=1 degenerates to the plain Euler step), and
+        // FreeActivations never runs mid-loop. The masked-inpaint and edit-ref paths keep the host branch:
+        // both must read/rebuild the latent on the host every step.
+        bool drainFree = !isMaskedInpaint && packedEditRef is null;
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
@@ -235,26 +299,44 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                 ? ConcatPackedSeqDim(packedLatent, packedEditRef)
                 : packedLatent;
 
-            Tensor noisePred;
-            if (useCfg)
+            if (drainFree)
             {
                 Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
-                Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
-                noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
-                uncondPred.Dispose();
+                if (useCfg)
+                {
+                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                    Backend.CfgEulerStep(packedLatent, condPred, uncondPred, cfgScale, scheduler.Dt(i));
+                    uncondPred.Dispose();
+                }
+                else
+                {
+                    Backend.CfgEulerStep(packedLatent, condPred, condPred, 1.0f, scheduler.Dt(i));
+                }
                 condPred.Dispose();
             }
             else
             {
-                noisePred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
-            }
-            if (transformerInput != packedLatent) transformerInput.Dispose();
+                Tensor noisePred;
+                if (useCfg)
+                {
+                    Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                    noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
+                    uncondPred.Dispose();
+                    condPred.Dispose();
+                }
+                else
+                {
+                    noisePred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                }
+                if (transformerInput != packedLatent) transformerInput.Dispose();
 
-            Tensor newLatent = new Tensor(packedShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, packedLatent, i);
-            noisePred.Dispose();
-            packedLatent.Dispose();
-            packedLatent = newLatent;
+                Tensor newLatent = new Tensor(packedShape, DType.F32);
+                scheduler.Step(newLatent, noisePred, packedLatent, i);
+                noisePred.Dispose();
+                packedLatent.Dispose();
+                packedLatent = newLatent;
+            }
 
             // Masked-inpaint blend in packed form: keep unmasked region on the source's
             // flow-matching trajectory by re-noising the source latent at the next step's
@@ -284,16 +366,17 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
 
-            // Reclaim GPU-resident activation buffers between steps: the DiT keeps intermediates on-device and
-            // any not read-back/disposed linger until GC, accumulating to OOM over the schedule (same fix as
-            // Flux / the video pipelines). Safe: scheduler.Step runs on the host, so packedLatent — the only
-            // tensor the next step needs — is host-resident, and everything else persistent was materialized
-            // above the loop.
-            Backend.FreeActivations();
+            // Reclaim GPU-resident activation buffers between steps ONLY on the host paths (their
+            // scheduler.Step/blends leave the latent host-resident, so nothing device-only is lost). The
+            // drain-free path skips this: every intermediate is explicitly disposed, and the latent — kept
+            // device-resident by the in-place CfgEulerStep — would be silently reverted to a stale host copy.
+            if (!drainFree)
+            {
+                Backend.FreeActivations();
+            }
         }
 
-        condHidden.Dispose();
-        uncondHidden?.Dispose();
+        // condHidden/uncondHidden are cross-generation caches — not disposed here.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
         packedEditRef?.Dispose();
@@ -301,7 +384,11 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
 
         Tensor unpacked = UnpackLatent(packedLatent, latentH, latentW, _config.InChannels, _config.PatchSize);
         packedLatent.Dispose();

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -38,6 +39,24 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly ChromaConfig _config;
     private readonly float _schedulerShiftFallback;
+
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
+    /// FreeWeights + next-gen re-upload). The T5-XXL cannot coexist with the resident DiT on smaller cards, so a
+    /// prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both.
+    /// Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the T5 token ids — the Krea2 pattern.
+    // A hit skips the whole T5 phase (preload + encode + free). The derived transformer-side masks are cached
+    // alongside (they are pure functions of the tokenizer masks).
+    private int[]? _cachedCondKey;
+    private Tensor? _cachedCond;
+    private Tensor? _cachedCondMask;
+    private int[]? _cachedUncondKey;
+    private Tensor? _cachedUncond;
+    private Tensor? _cachedUncondMask;
 
     /// <summary>Creates a new Chroma pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -123,33 +142,80 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Encode prompts with T5-XXL ─────────────────────────────────
-        Logs.Info("Encoding text with T5-XXL...");
-
-        // Bulk-upload T5 weights once (~5 GB on T5-XXL) so the encoder's many kernels don't
-        // each pay a per-op cache-miss H2D transfer. Paired with FreeWeights below the VAE
-        // handoff. No-op on backends without a weight cache.
-        Backend.PreloadWeights(_t5.EnumerateWeights());
-
-        int[][] batchT5 = [promptTokenIdsT5];
-        int[][] batchMask = [promptAttentionMaskT5];
-        Tensor condContext = _t5.Encode(Backend, batchT5, batchMask);
-
+        // Prompt-embedding cache: identical token ids reuse the previous gen's hidden states + derived masks —
+        // the whole T5 phase (preload + encode + free) vanishes for repeat prompts (seed-only changes).
+        bool condHit = _cachedCond is not null
+            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5);
+        bool uncondHit = !useCfg || (_cachedUncond is not null
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5));
+        Tensor condContext;
+        Tensor condMask;
         Tensor? uncondContext = null;
-        if (useCfg)
+        Tensor? uncondMask = null;
+        if (condHit && uncondHit)
         {
-            int[][] negBatchT5 = [negativePromptTokenIdsT5];
-            int[][] negBatchMask = [negativeAttentionMaskT5];
-            uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
+            condContext = _cachedCond!;
+            condMask = _cachedCondMask!;
+            if (useCfg)
+            {
+                uncondContext = _cachedUncond;
+                uncondMask = _cachedUncondMask;
+            }
+            Logs.Info("[Chroma] prompt-embedding cache hit — T5 phase skipped");
         }
+        else
+        {
+            Logs.Info("Encoding text with T5-XXL...");
+            if (_ditResident)
+            {
+                // The T5 cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
+                // new-prompt generation and re-preload below.
+                Backend.Sync();
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
+            // Bulk-upload T5 weights once (~5 GB on T5-XXL) so the encoder's many kernels don't
+            // each pay a per-op cache-miss H2D transfer. Paired with FreeWeights below the VAE
+            // handoff. No-op on backends without a weight cache.
+            Backend.PreloadWeights(_t5.EnumerateWeights());
 
-        // Build the [B, txtSeqLen] transformer-side mask:
-        //   m[i] = 1.0  if  i <= text_len   (i.e., all real tokens PLUS one extra unmasked padding slot)
-        //   m[i] = 0.0  otherwise
-        // Mirrors pipeline_chroma.py:249-252. text_len = sum(tokenizer_mask).
-        Tensor condMask = BuildChromaTextMask(promptAttentionMaskT5, batchSize: 1);
-        Tensor? uncondMask = useCfg ? BuildChromaTextMask(negativeAttentionMaskT5, batchSize: 1) : null;
+            int[][] batchT5 = [promptTokenIdsT5];
+            int[][] batchMask = [promptAttentionMaskT5];
+            condContext = _t5.Encode(Backend, batchT5, batchMask);
 
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+            if (useCfg)
+            {
+                int[][] negBatchT5 = [negativePromptTokenIdsT5];
+                int[][] negBatchMask = [negativeAttentionMaskT5];
+                uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
+            }
+
+            // Build the [B, txtSeqLen] transformer-side mask:
+            //   m[i] = 1.0  if  i <= text_len   (i.e., all real tokens PLUS one extra unmasked padding slot)
+            //   m[i] = 0.0  otherwise
+            // Mirrors pipeline_chroma.py:249-252. text_len = sum(tokenizer_mask).
+            condMask = BuildChromaTextMask(promptAttentionMaskT5, batchSize: 1);
+            uncondMask = useCfg ? BuildChromaTextMask(negativeAttentionMaskT5, batchSize: 1) : null;
+
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+
+            // Materialize the conditioning on the host so it survives activation reclaims, then cache.
+            _ = condContext.DataPointer;
+            if (uncondContext is not null) _ = uncondContext.DataPointer;
+            _cachedCond?.Dispose();
+            _cachedCondMask?.Dispose();
+            _cachedCond = condContext;
+            _cachedCondMask = condMask;
+            _cachedCondKey = (int[])promptTokenIdsT5.Clone();
+            if (useCfg)
+            {
+                _cachedUncond?.Dispose();
+                _cachedUncondMask?.Dispose();
+                _cachedUncond = uncondContext;
+                _cachedUncondMask = uncondMask;
+                _cachedUncondKey = (int[])negativePromptTokenIdsT5.Clone();
+            }
+        }
 
         // ── 2. Set up dynamic flow-match scheduler ────────────────────────
         int hPacked = latentH / 2;
@@ -187,16 +253,43 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // (~12 GB at FP16, ~9 GB at FP8) — without preload the first step would pay cache-miss
         // overhead for every block. Paired with FreeWeights below the VAE handoff.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        _ditResident = true;
 
         Logs.Info("Starting Chroma denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int txtSeqLen = (int)condContext.Shape[1];
+        int uncondTxtSeqLen = uncondContext is not null ? (int)uncondContext.Shape[1] : 0;
+
+        // Drain-free fast path (plain t2i / img2img): the latent stays device-resident across the whole loop
+        // and CFG combine + Euler run as ONE in-place device op (CfgEulerStep: uncond-anchored CFG then
+        // z += v·dt; gw=1 degenerates to the plain Euler step). Masked inpaint keeps the host branch — it
+        // must read/rebuild the latent on the host every step.
+        bool drainFree = !isMaskedInpaint;
 
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
 
+            if (drainFree)
+            {
+                Tensor condNoise = _transformer.Forward(Backend, packedLatent, condContext, sigma,
+                    txtSeqLen, hPacked, wPacked, condMask);
+                if (useCfg)
+                {
+                    Tensor uncondNoise = _transformer.Forward(Backend, packedLatent, uncondContext!, sigma,
+                        uncondTxtSeqLen, hPacked, wPacked, uncondMask);
+                    Backend.CfgEulerStep(packedLatent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
+                    uncondNoise.Dispose();
+                }
+                else
+                {
+                    Backend.CfgEulerStep(packedLatent, condNoise, condNoise, 1.0f, scheduler.Dt(i));
+                }
+                condNoise.Dispose();
+            }
+            else
+            {
             Tensor noisePred;
             if (useCfg)
             {
@@ -216,6 +309,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             noisePred.Dispose();
             packedLatent.Dispose();
             packedLatent = newLatent;
+            }
 
             // Masked-inpaint blend in packed form: keep unmasked region on the source's
             // flow-matching trajectory by re-noising the source latent at the next step's
@@ -241,14 +335,16 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            // Same packed layout as Flux.1 (Chroma reuses the Flux VAE). Unpack inline so
-            // preview renders. Skipped when no callback wants progress.
-            if (onProgress is not null)
+            // Same packed layout as Flux.1 (Chroma reuses the Flux VAE). Unpack inline so preview renders.
+            // On the drain-free path the unpack reads the device-resident latent (a D2H sync per frame), so
+            // previews emit every 4th step + final instead of every step; the host path keeps every step.
+            bool emitPreview = onProgress is not null && (!drainFree || (i - startStep) % 4 == 3 || i == steps - 1);
+            if (emitPreview)
             {
                 Tensor previewLatent = LatentPreview.UnpackFluxStylePacked(packedLatent, latentH, latentW, channels: 16);
                 try
                 {
-                    onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                    onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
                         Latent = previewLatent,
                         LatentArch = LatentArchitecture.Chroma,
@@ -256,20 +352,27 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 }
                 finally { previewLatent.Dispose(); }
             }
+            else if (onProgress is not null)
+            {
+                onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            }
         }
 
-        condContext.Dispose();
-        condMask.Dispose();
-        uncondContext?.Dispose();
-        uncondMask?.Dispose();
+        // condContext/condMask/uncond* are cross-generation caches — not disposed here.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
 
         ChromaTransformer.DumpFinalLatent(packedLatent);
 
         // Free transformer + T5 weights from GPU before VAE decode (mirrors SD3/Flux/AuraFlow pattern).
+        // Under HARTSY_KEEP_MODELS the DiT stays resident (~9 GB fp8; the full-res VAE decode's banded im2col
+        // fits beside it, falling back to tiles if not).
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
         Backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. Unpack latent: [1, seqLen, 64] → [1, 16, latentH, latentW] ──

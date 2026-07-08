@@ -218,7 +218,19 @@ public sealed unsafe class QwenImageBlock
         txtKn.Dispose(); imgKn.Dispose();
         txtV.Dispose(); imgV.Dispose();
 
-        // ── 5. Permute [B, S, H, D] → [B, H, S, D] for RoPE + SDPA ──
+        // ── 5. RoPE on the joint [txt, img(, ref)] Q,K — device kernel on the PRE-permute [B, S, H, D] layout
+        // (rope rotates each (s, h) vector independently, so applying before the head permute is identical to
+        // the old post-permute host pass). The cos/sin tables are position-only and cached across blocks/steps;
+        // the host ApplyJoint remains as the batch>1 fallback and the tests' numerical reference. ──
+        if (batch == 1)
+        {
+            (Tensor ropeCos, Tensor ropeSin) = rope.GetOrBuildJointTables(
+                imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refPackedH, refPackedW);
+            backend.WanRopeInterleaved(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
+            backend.WanRopeInterleaved(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
+        }
+
+        // ── 6. Permute [B, S, H, D] → [B, H, S, D] for SDPA ──
         Tensor jointQ = new Tensor(jointMh, DType.F32);
         backend.Permute0213(jointQ, jointQf, totalSeqLen, _numHeads, _headDim);
         jointQf.Dispose();
@@ -229,13 +241,17 @@ public sealed unsafe class QwenImageBlock
         backend.Permute0213(jointV, jointVf, totalSeqLen, _numHeads, _headDim);
         jointVf.Dispose();
 
-        // ── 6. RoPE on the joint [txt, img(, ref)] Q,K (CPU; interleaved, fused single pass — see class note) ──
-        rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart,
-            refPackedH, refPackedW);
+        if (batch != 1)
+        {
+            rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart,
+                refPackedH, refPackedW);
+        }
 
         // ── 7. Joint scaled dot-product attention (no mask) ──
+        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe and
+        // engages the cuDNN fused flash path (head_dim 128, no mask: the proven Krea2/Z-Image config).
         Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
+        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: true);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();

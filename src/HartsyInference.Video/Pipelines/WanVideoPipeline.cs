@@ -295,17 +295,31 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             $"{steps} steps, cfg={guidance}, seed={seed} (latent {latentCh}x{tLat}x{hLat}x{wLat}, shift={shift})");
         Logs.Warning("Wan-Video I2V pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
-        // Build the fixed [1, 20, T, H, W] conditioning: [mask(4), cond-latent(16)]. The first frame is VAE-encoded
-        // into latent frame 0; the remaining frames are zero, and the mask marks frame 0 as known.
+        // Build the fixed [1, 20, T, H, W] conditioning: [mask(4), cond-latent(16)]. Reference construction
+        // (diffusers WanImageToVideoPipeline / Comfy WAN21_I2V): VAE-encode the WHOLE padded pixel clip — the init
+        // frame followed by mid-gray (0 in [-1,1]) frames (+ the last frame for FLF2V) — through the causal VAE, so
+        // EVERY latent frame of the conditioning is the VAE's encoding of that padding. Encoding only the first
+        // frame and zero-filling latent frames 1+ (the pre-2026-07-08 behavior) feeds a large off-distribution
+        // constant on 16 of the model's 36 input channels and deterministically destroys every non-anchored frame.
+        // The whole-clip encode's conv activations scale with numFrames·H·W — with a KEEP_MODELS-resident DiT from a
+        // prior gen still on-device this OOMs (seen at 33f × native res: 5.25 GB requested, 82 MB free). Evict the
+        // transformer first when headroom is short; the denoise loop re-uploads it right after.
+        long encodeNeedBytes = (long)numFrames * height * width * 3L * 4 * 24;   // ~24 F32 conv-activation copies/frame, empirical ceiling
+        if (Backend.FreeMemoryBytes() < encodeNeedBytes + (2L << 30))
+        {
+            Logs.Info($"Wan I2V: freeing transformer weights before the conditioning encode " +
+                $"(need ~{encodeNeedBytes >> 20} MB, free {Backend.FreeMemoryBytes() >> 20} MB)");
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+        }
         Backend.PreloadWeights(_encoder.EnumerateWeights());
-        Tensor frame0 = _encoder.EncodeRgbFrame(Backend, condRgb24, width, height);   // [1,z,1,hLat,wLat]
-        Tensor? frameLast = lastRgb24 is not null
-            ? _encoder.EncodeRgbFrame(Backend, lastRgb24, width, height) : null;
+        Tensor condClip = BuildCondClip(condRgb24, lastRgb24, width, height, numFrames);
+        Tensor condLatent = _encoder.Encode(Backend, condClip);   // [1, z, tLat, hLat, wLat], normalized
+        condClip.Dispose();
         Backend.Sync();
         Backend.FreeWeights(_encoder.EnumerateWeights());
-        Tensor condition = BuildI2VCondition(frame0, frameLast, latentCh, tp, tLat, hLat, wLat);      // [1,tp+z,tLat,hLat,wLat]
-        frame0.Dispose();
-        frameLast?.Dispose();
+        Tensor condition = BuildI2VCondition(condLatent, lastRgb24 is not null, latentCh, tp, tLat, hLat, wLat);   // [1,tp+z,tLat,hLat,wLat]
+        condLatent.Dispose();
 
         if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
         // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
@@ -452,7 +466,29 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     /// first frame occupies latent frame 0 (and <paramref name="frameLast"/>, when given, the last latent frame for
     /// first-last-frame I2V), the rest are zero; the mask channels are 1 on the known frame(s) and 0 elsewhere — a
     /// structural stand-in for diffusers' temporal mask interleave (validation-gated).</summary>
-    private static Tensor BuildI2VCondition(Tensor frame0, Tensor? frameLast, int latentCh, int temporalFactor,
+    /// <summary>Padded conditioning pixel clip <c>[1, 3, numFrames, H, W]</c> in [-1, 1]: frame 0 = the init image,
+    /// middle frames = mid-gray (0), last frame = <paramref name="lastRgb24"/> when present (FLF2V).</summary>
+    private static Tensor BuildCondClip(ReadOnlySpan<byte> condRgb24, byte[]? lastRgb24, int width, int height, int numFrames)
+    {
+        Tensor clip = new Tensor(new TensorShape([1L, 3, numFrames, height, width]), DType.F32);
+        float* cp = (float*)clip.DataPointer;
+        long frame = (long)height * width;
+        long perChannel = (long)numFrames * frame;
+        new Span<float>(cp, (int)(3 * perChannel)).Clear();
+        for (long pix = 0; pix < frame; pix++)
+            for (int c = 0; c < 3; c++)
+                cp[c * perChannel + pix] = condRgb24[(int)(pix * 3 + c)] / 127.5f - 1f;
+        if (lastRgb24 is not null)
+        {
+            long lastOff = (long)(numFrames - 1) * frame;
+            for (long pix = 0; pix < frame; pix++)
+                for (int c = 0; c < 3; c++)
+                    cp[c * perChannel + lastOff + pix] = lastRgb24[(int)(pix * 3 + c)] / 127.5f - 1f;
+        }
+        return clip;
+    }
+
+    private static Tensor BuildI2VCondition(Tensor condLatent, bool hasLastFrame, int latentCh, int temporalFactor,
         int tLat, int hLat, int wLat)
     {
         int maskCh = temporalFactor;
@@ -463,24 +499,17 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         long perChannel = (long)tLat * frame;
         new Span<float>(op, (int)((long)condCh * perChannel)).Clear();
         int lastFrame = tLat - 1;
-        // Mask channels: 1 at latent frame 0 (and the last latent frame for FLF2V).
+        // Mask channels: 1 at latent frame 0 (and the last latent frame for FLF2V) — matches the diffusers
+        // repeat/view/transpose construction for the plain first-frame case.
         for (int m = 0; m < maskCh; m++)
         {
             for (long p = 0; p < frame; p++) op[(long)m * perChannel + p] = 1f;
-            if (frameLast is not null)
+            if (hasLastFrame)
                 for (long p = 0; p < frame; p++) op[(long)m * perChannel + (long)lastFrame * frame + p] = 1f;
         }
-        // Cond-latent channels: first-frame latent at frame 0, optional last-frame latent at the last frame.
-        float* fp = (float*)frame0.DataPointer;   // [1, latentCh, 1, hLat, wLat]
-        for (int c = 0; c < latentCh; c++)
-            Buffer.MemoryCopy(fp + (long)c * frame, op + ((long)(maskCh + c) * perChannel), frame * 4, frame * 4);
-        if (frameLast is not null)
-        {
-            float* lp = (float*)frameLast.DataPointer;
-            for (int c = 0; c < latentCh; c++)
-                Buffer.MemoryCopy(lp + (long)c * frame,
-                    op + ((long)(maskCh + c) * perChannel + (long)lastFrame * frame), frame * 4, frame * 4);
-        }
+        // Cond-latent channels: the FULL causal-VAE latent of the padded clip, all tLat frames.
+        float* fp = (float*)condLatent.DataPointer;   // [1, latentCh, tLat, hLat, wLat]
+        Buffer.MemoryCopy(fp, op + (long)maskCh * perChannel, (long)latentCh * perChannel * 4, (long)latentCh * perChannel * 4);
         return o;
     }
 

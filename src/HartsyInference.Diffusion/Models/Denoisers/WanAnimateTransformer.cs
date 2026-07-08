@@ -25,6 +25,7 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
     private readonly WanAnimateFaceEncoder _faceEncoder;
     private readonly WanImageEmbedder _imgEmbedder;
     private readonly WanRope _rope;
+    private readonly DiTBlocks.WanForwardCaches _caches = new();
     private readonly int _patchVec;
     private WanAnimateFaceBlock[] _faceAdapter = [];
     private int _poseChannels;
@@ -156,17 +157,20 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, [timestep], _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
-        Tensor textProj = WanDitOps.TextEmbed(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
+        // Text projection cached across steps (encoder-identity-keyed, owned by _caches); the CLIP-image concat
+        // stays per-forward and owns its result (ownsCtx) — the cached textProj must never be disposed here.
+        Tensor textProj = _caches.TextProj(backend, encoder, dim, _textW1!, _textB1, _textW2!, _textB2);
 
         int imageContextLen = 0;
         Tensor encoderProj = textProj;
+        bool ownsCtx = false;
         if (clipImageEmbeds is not null && _imgEmbedder.IsLoaded)
         {
             Tensor imgProj = _imgEmbedder.Forward(backend, clipImageEmbeds, dim);
             imageContextLen = (int)imgProj.Shape[0];
             encoderProj = WanDitOps.ConcatRows(imgProj, textProj, dim);
             imgProj.Dispose();
-            textProj.Dispose();
+            ownsCtx = true;
         }
 
         // ref_conv: reference tokens prepended; RoPE spans gt+1 temporal frames (ref = frame 0, video = 1..gt).
@@ -181,7 +185,8 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
             hidden = combined;
         }
         int s = gt * frame + refRows;
-        (Tensor cos, Tensor sin) = _rope.BuildCosSin(useRef ? gt + 1 : gt, gh, gw);
+        int ropeT = useRef ? gt + 1 : gt;
+        (Tensor cos, Tensor sin) = _caches.RopeCosSin((ropeT, gh, gw, 0), () => _rope.BuildCosSin(ropeT, gh, gw));
 
         Tensor cur = hidden;
         for (int i = 0; i < _blocks.Length; i++)
@@ -198,7 +203,8 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
             }
         }
         if (ownsMotion) motion?.Dispose();
-        cos.Dispose(); sin.Dispose(); timestepProj.Dispose(); encoderProj.Dispose();
+        timestepProj.Dispose();
+        if (ownsCtx) encoderProj.Dispose();   // cos/sin/textProj are owned by the per-generation caches
 
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, s, dim, _config.Eps, s);
         cur.Dispose();
