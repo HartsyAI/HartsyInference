@@ -49,6 +49,15 @@ public sealed class BlockStreamingController : IDisposable
         _retainBehind = retainBehind;
         _state = new BlockState[blocks.Count];
         _tokens = new StreamingUploadToken[blocks.Count];
+
+        // Block-swap re-uploads every block each forward, so pin the host sources: pageable H2D silently degrades
+        // to a synchronous staged copy — zero overlap with compute, which made deeper prefetch windows useless
+        // (LTX-2.3 measured ~7 GB/s serialized vs the pinned ~13 GB/s overlapped on this PCIe gen3 host).
+        // One-time registration per source, graceful per-weight fallback on failure. HARTSY_STREAM_PIN=0 disables.
+        if (Environment.GetEnvironmentVariable("HARTSY_STREAM_PIN") != "0")
+        {
+            cache.PinUploadSource = true;
+        }
     }
 
     /// <summary>The number of blocks under management.</summary>

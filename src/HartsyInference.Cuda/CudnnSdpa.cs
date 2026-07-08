@@ -41,8 +41,9 @@ internal sealed class CudnnSdpa : IDisposable
         cudnnSetStream(_handle, stream);
     }
 
-    /// <summary>D values the fused engine supports (head dim). Others fall back to the materialized path.</summary>
-    public static bool ShapeSupported(long d) => d == 64 || d == 128;
+    /// <summary>D values the fused engine may support (head dim). 256 (Ideogram 4) is build/arch-dependent —
+    /// the caller falls back per-D on rejection. Others fall back to the materialized path.</summary>
+    public static bool ShapeSupported(long d) => d == 64 || d == 128 || d == 256;
 
     /// <summary>
     /// Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D]

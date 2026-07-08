@@ -108,7 +108,8 @@ internal static partial class CublasLtApi
     internal const int CUBLASLT_EPILOGUE_GELU = 32;
     internal const int CUBLASLT_EPILOGUE_GELU_BIAS = 36;
 
-    // ── Default workspace size (cuBLASLt recommends 32 MiB on Hopper, 4 MiB on Ada) ───────
+    // ── Default workspace size (cuBLASLt minimum guidance: 32 MiB Hopper, 4 MiB Ada; a larger pool lets the
+    // internal heuristic pick split-K / larger-tile algos for the big M×K fp8 DiT shapes) ───────
 
-    internal const ulong DefaultWorkspaceBytes = 4UL * 1024 * 1024;
+    internal const ulong DefaultWorkspaceBytes = 64UL * 1024 * 1024;
 }

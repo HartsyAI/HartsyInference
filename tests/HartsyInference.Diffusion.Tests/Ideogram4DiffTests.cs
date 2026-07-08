@@ -103,9 +103,15 @@ public unsafe class Ideogram4DiffTests
         sin.Dispose();
 
         // ── Forward (dumps input_proj, hidden_in, adaln_input, layers.i, output_velocity) ──
+        // The Forward API takes text rows + image tokens separately (the reference files are full-sequence);
+        // output_velocity is image rows only — diff_ideogram4_layers.py compares against the reference tail.
+        int numText = 0;
+        while (numText < L && indicator[numText] == 3) numText++;
+        Tensor llmText = SliceRowsHost(llm, 0, numText, llmDim);
+        Tensor imgTokens = SliceRowsHost(x, numText, L - numText, inCh);
         using CpuBackend backend = new();
-        _output.WriteLine("Running Ideogram4Transformer.Forward (CPU)...");
-        Tensor velocity = transformer.Forward(backend, llm, x, timestep, posIds, indicator, null);
+        _output.WriteLine($"Running Ideogram4Transformer.Forward (CPU, numText={numText})...");
+        Tensor velocity = transformer.Forward(backend, numText > 0 ? llmText : null, imgTokens, timestep, posIds, indicator, null);
 
         float* vptr = (float*)velocity.DataPointer;
         int n = (int)velocity.ElementCount;
@@ -115,6 +121,8 @@ public unsafe class Ideogram4DiffTests
         _output.WriteLine($"output_velocity: shape={velocity.Shape}, mean={mean:F6}, abs_mean={sumAbs / n:F6}, std={Math.Sqrt(sumSq / n - mean * mean):F6}");
 
         velocity.Dispose();
+        llmText.Dispose();
+        imgTokens.Dispose();
         x.Dispose();
         llm.Dispose();
         posIds.Dispose();
@@ -126,6 +134,14 @@ public unsafe class Ideogram4DiffTests
 
         _output.WriteLine($"\nC# dump written to: {csDumpDir}");
         _output.WriteLine("Now run: python3 tests/python-reference/diff_ideogram4_layers.py");
+    }
+
+    private static Tensor SliceRowsHost(Tensor src, int startRow, int rows, int dim)
+    {
+        Tensor outT = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        long bytes = (long)rows * dim * sizeof(float);
+        Buffer.MemoryCopy((float*)src.DataPointer + (long)startRow * dim, (void*)outT.DataPointer, bytes, bytes);
+        return outT;
     }
 
     private static Tensor LoadF32(string path, params long[] dims)

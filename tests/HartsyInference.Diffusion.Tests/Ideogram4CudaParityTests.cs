@@ -89,7 +89,10 @@ public sealed unsafe class Ideogram4CudaParityTests
             using Tensor llm = LoadF32(Path.Combine(inputsDir, "llm_features.bin"), 1, L, llmDim);
             using Tensor posIds = LoadF32(Path.Combine(inputsDir, "position_ids.bin"), 1, L, 3);
             int[] indicator = LoadI32(Path.Combine(inputsDir, "indicator.bin"), L);
-            using Tensor vel = transformer.Forward(cpu, llm, x, timestep, posIds, indicator, null);
+            int numText = CountLeadingTextRows(indicator, L);
+            using Tensor llmText = SliceRowsHost(llm, 0, numText, llmDim);
+            using Tensor imgTokens = SliceRowsHost(x, numText, L - numText, inCh);
+            using Tensor vel = transformer.Forward(cpu, numText > 0 ? llmText : null, imgTokens, timestep, posIds, indicator, null);
             n = (int)vel.ElementCount;
             cpuVel = new float[n];
             fixed (float* dst = cpuVel) Buffer.MemoryCopy((void*)vel.DataPointer, dst, n * 4L, n * 4L);
@@ -107,8 +110,11 @@ public sealed unsafe class Ideogram4CudaParityTests
             using Tensor llm = LoadF32(Path.Combine(inputsDir, "llm_features.bin"), 1, L, llmDim);
             using Tensor posIds = LoadF32(Path.Combine(inputsDir, "position_ids.bin"), 1, L, 3);
             int[] indicator = LoadI32(Path.Combine(inputsDir, "indicator.bin"), L);
+            int numText = CountLeadingTextRows(indicator, L);
+            using Tensor llmText = SliceRowsHost(llm, 0, numText, llmDim);
+            using Tensor imgTokens = SliceRowsHost(x, numText, L - numText, inCh);
             cuda.ResetD2hSyncCount();
-            using Tensor vel = transformer.Forward(cuda, llm, x, timestep, posIds, indicator, null);
+            using Tensor vel = transformer.Forward(cuda, numText > 0 ? llmText : null, imgTokens, timestep, posIds, indicator, null);
             cuda.Sync();
             fixed (float* dst = cudaVel) Buffer.MemoryCopy((void*)vel.DataPointer, dst, n * 4L, n * 4L);
             syncs = cuda.GetD2hSyncCount();
@@ -125,6 +131,21 @@ public sealed unsafe class Ideogram4CudaParityTests
         _output.WriteLine($"D2H syncs during GPU forward: {syncs} (Phase 4/5 should drive this toward ~0)");
 
         Assert.True(maxErr < 5e-3, $"CUDA transformer forward diverges from CPU: max_err {maxErr:E3}");
+    }
+
+    private static int CountLeadingTextRows(int[] indicator, int seqLen)
+    {
+        int numText = 0;
+        while (numText < seqLen && indicator[numText] == 3) numText++;
+        return numText;
+    }
+
+    private static Tensor SliceRowsHost(Tensor src, int startRow, int rows, int dim)
+    {
+        Tensor outT = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        long bytes = (long)rows * dim * sizeof(float);
+        Buffer.MemoryCopy((float*)src.DataPointer + (long)startRow * dim, (void*)outT.DataPointer, bytes, bytes);
+        return outT;
     }
 
     private static Tensor LoadF32(string path, params long[] dims)

@@ -12,6 +12,20 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     private readonly nint _uploadStream;
     private readonly HashSet<nint> _pinnedHostPtrs = new();
 
+    // Pinned staging ring for PinUploadSource: weights are memcpy'd into a page-locked staging buffer and uploaded
+    // async from there. Registering the mmap'd weight pages directly (cuMemHostRegister) is a trap: it needs
+    // page-aligned ranges, contiguous weights share boundary pages (ALREADY_REGISTERED aborts the whole call), and a
+    // copy whose source straddles pinned/unpinned pages fails with INVALID_VALUE. Staging sidesteps all of it and
+    // pins only ring-size host memory instead of the whole checkpoint. 3 slots cover prefetchAhead=2 + the in-flight
+    // upload; each slot's event gates reuse.
+    private const int StagingSlots = 3;
+    private readonly nint[] _stagingPtrs = new nint[StagingSlots];
+    private readonly nint[] _stagingEvents = new nint[StagingSlots];
+    private readonly bool[] _stagingUsed = new bool[StagingSlots];
+    private nuint _stagingBytes;
+    private int _stagingIdx;
+    private bool _stagingDead;   // allocation failed once — fall back to pageable direct uploads for the session
+
     /// <summary>Opt-in: page-lock each weight's host source before uploading so <c>cuMemcpyHtoDAsync</c> is genuinely asynchronous and overlaps with compute (pageable sources silently force a synchronous staging copy that overlaps with nothing). Defaults to <c>false</c>. Only beneficial when weights are re-uploaded across steps (block-swap); for a one-shot preload the registration cost is not amortized. Requires the CPU weight tensors to stay resident (do not dispose them) for the lifetime of the stream.</summary>
     public bool PinUploadSource { get; set; }
 
@@ -55,14 +69,27 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         if (weights is null) throw new ArgumentNullException(nameof(weights));
         _context.EnsureCurrent();
 
-        bool anyUploaded = false;
+        // Materialize the to-upload set first: the staging path needs the total byte count up front.
+        List<Tensor> pending = new();
+        nuint totalBytes = 0;
         foreach (Tensor weight in weights)
         {
             if (GpuTransferHelper.IsWeightCached(weight))
             {
                 continue; // Free hit — the dptr is already valid in _weightCache.
             }
+            pending.Add(weight);
+            totalBytes += GpuTransferHelper.ByteSize(weight);
+        }
+        if (pending.Count == 0)
+        {
+            return StreamingUploadToken.Empty;
+        }
 
+        nint staging = PinUploadSource && !_stagingDead ? AcquireStagingSlot(totalBytes) : 0;
+        nuint stagingOffset = 0;
+        foreach (Tensor weight in pending)
+        {
             nuint byteSize = GpuTransferHelper.ByteSize(weight);
             // Use cuMemAllocAsync on the upload stream so the alloc and the eventual
             // cuMemFreeAsync (on the compute stream during eviction) round-trip through
@@ -76,11 +103,18 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
             unsafe
             {
                 nint hostSrc = (nint)weight.DataPointer;
-                if (PinUploadSource)
+                if (staging != 0)
                 {
-                    TryPinHostSource(hostSrc, byteSize);
+                    // memcpy into the pinned slot, upload from there: the H2D is then genuinely async and
+                    // overlaps compute; the memcpy itself overlaps the GPU's work on earlier blocks (prefetch).
+                    Buffer.MemoryCopy((void*)hostSrc, (void*)(staging + (nint)stagingOffset), byteSize, byteSize);
+                    CudaDriverApi.cuMemcpyHtoDAsync(dptr, staging + (nint)stagingOffset, byteSize, _uploadStream).ThrowOnError();
+                    stagingOffset += byteSize;
                 }
-                CudaDriverApi.cuMemcpyHtoDAsync(dptr, hostSrc, byteSize, _uploadStream).ThrowOnError();
+                else
+                {
+                    CudaDriverApi.cuMemcpyHtoDAsync(dptr, hostSrc, byteSize, _uploadStream).ThrowOnError();
+                }
             }
             // Register immediately even though the upload is in flight: ops won't
             // read these tensors until AwaitWeights gates the compute stream on
@@ -88,12 +122,14 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
             // visible. Registering up front means a parallel BeginUploadAsync
             // call for the same tensor sees it as cached and skips re-upload.
             GpuTransferHelper.RegisterCachedWeight(weight, dptr, byteSize);
-            anyUploaded = true;
         }
 
-        if (!anyUploaded)
+        if (staging != 0)
         {
-            return StreamingUploadToken.Empty;
+            // Slot guard: reuse of this staging buffer must wait for these uploads to drain.
+            CudaDriverApi.cuEventRecord(_stagingEvents[_stagingIdx], _uploadStream).ThrowOnError();
+            _stagingUsed[_stagingIdx] = true;
+            _stagingIdx = (_stagingIdx + 1) % StagingSlots;
         }
 
         // Record a completion event after all the queued copies. Disabling timing
@@ -101,6 +137,59 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         CudaDriverApi.cuEventCreate(out nint evt, CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
         CudaDriverApi.cuEventRecord(evt, _uploadStream).ThrowOnError();
         return new StreamingUploadToken(evt, this);
+    }
+
+    /// <summary>Returns the current ring slot's pinned pointer (host-waiting on its prior uploads if still in
+    /// flight), growing the ring buffers if <paramref name="totalBytes"/> exceeds the slot size. Returns 0 (and
+    /// disables staging for the session) if pinned allocation fails — callers fall back to pageable uploads.</summary>
+    private nint AcquireStagingSlot(nuint totalBytes)
+    {
+        if (totalBytes > _stagingBytes)
+        {
+            ReleaseStaging();
+            for (int i = 0; i < StagingSlots; i++)
+            {
+                int rc = CudaDriverApi.cuMemHostAlloc(out _stagingPtrs[i], totalBytes, CudaDriverApi.CU_MEMHOSTALLOC_PORTABLE);
+                if (rc != 0)
+                {
+                    Logs.Warning($"cuMemHostAlloc({totalBytes >> 20} MB) failed (rc={rc}); streaming uploads stay pageable (no compute overlap).");
+                    ReleaseStaging();
+                    _stagingDead = true;
+                    return 0;
+                }
+                CudaDriverApi.cuEventCreate(out _stagingEvents[i], CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
+            }
+            _stagingBytes = totalBytes;
+            for (int i = 0; i < StagingSlots; i++) _stagingUsed[i] = false;
+            _stagingIdx = 0;
+        }
+        if (_stagingUsed[_stagingIdx])
+        {
+            CudaDriverApi.cuEventSynchronize(_stagingEvents[_stagingIdx]).ThrowOnError();
+        }
+        return _stagingPtrs[_stagingIdx];
+    }
+
+    /// <summary>Frees the staging ring (waiting out in-flight uploads first). Safe to call repeatedly.</summary>
+    private void ReleaseStaging()
+    {
+        for (int i = 0; i < StagingSlots; i++)
+        {
+            if (_stagingEvents[i] != 0)
+            {
+                if (_stagingUsed[i]) CudaDriverApi.cuEventSynchronize(_stagingEvents[i]);
+                CudaDriverApi.cuEventDestroy(_stagingEvents[i]);
+                _stagingEvents[i] = 0;
+            }
+            if (_stagingPtrs[i] != 0)
+            {
+                CudaDriverApi.cuMemFreeHost(_stagingPtrs[i]);
+                _stagingPtrs[i] = 0;
+            }
+            _stagingUsed[i] = false;
+        }
+        _stagingBytes = 0;
+        _stagingIdx = 0;
     }
 
     /// <inheritdoc/>
@@ -145,35 +234,16 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         }
     }
 
-    /// <summary>Best-effort page-locks a host source range so the subsequent async H2D truly overlaps. Treats "already registered" (overlapping page with a prior registration) as success. Only ranges this cache registered are tracked for later unregistration.</summary>
-    private void TryPinHostSource(nint hostSrc, nuint byteSize)
-    {
-        if (hostSrc == 0 || _pinnedHostPtrs.Contains(hostSrc))
-        {
-            return;
-        }
-        int rc = CudaDriverApi.cuMemHostRegister(hostSrc, byteSize, CudaDriverApi.CU_MEMHOSTREGISTER_PORTABLE);
-        if (rc == 0)
-        {
-            _pinnedHostPtrs.Add(hostSrc);
-        }
-        else if (rc != CudaDriverApi.CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED)
-        {
-            // A genuine failure (e.g. invalid range): leave the source pageable. The
-            // upload still works, just without overlap. Don't throw — pinning is an
-            // optimization, not a correctness requirement.
-            Logs.Warning($"cuMemHostRegister failed for weight source (rc={rc}); uploading without pinning.");
-        }
-    }
-
-    /// <summary>Unregisters every host source this cache page-locked. Call before tearing down the backend so pinned pages are released back to the OS.</summary>
+    /// <summary>Releases pinned host resources (the staging ring, plus any legacy registrations). Call before
+    /// tearing down the backend so page-locked memory is returned to the OS.</summary>
     public void UnregisterPinnedSources()
     {
+        _context.EnsureCurrent();
+        ReleaseStaging();
         if (_pinnedHostPtrs.Count == 0)
         {
             return;
         }
-        _context.EnsureCurrent();
         foreach (nint ptr in _pinnedHostPtrs)
         {
             CudaDriverApi.cuMemHostUnregister(ptr);

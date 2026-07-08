@@ -129,6 +129,55 @@ __global__ void dit_sigmoid_f16(
     output[i] = __float2half(y);
 }
 
+// ── Rotate-half RoPE (in-place, F16 x, F32 cos/sin) ─────────────────────────
+// Mirrors dit_rope_f32: x is [totalVecs, headDim] (totalVecs = B*L*numHeads); cos/sin are
+// [B*L, headDim] broadcast over heads. Pairs (i, i+half); each thread owns one i and writes
+// both halves from the originals — race-free. rotaryDim semantics identical to the F32 twin.
+__global__ void dit_rope_f16(
+    __half* __restrict__ x,
+    const float* __restrict__ cosT,
+    const float* __restrict__ sinT,
+    unsigned int numHeads,
+    unsigned int headDim,
+    unsigned long long totalVecs,
+    unsigned int rotaryDim)
+{
+    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
+    unsigned int half = rdim >> 1;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total = totalVecs * (unsigned long long)half;
+    if (gid >= total) return;
+
+    unsigned int i = (unsigned int)(gid % half);
+    unsigned long long vec = gid / half;
+    unsigned long long row = vec / numHeads;
+    size_t baseX = (size_t)vec * headDim;
+    size_t baseCs = (size_t)row * headDim;
+
+    float lower = __half2float(x[baseX + i]);
+    float upper = __half2float(x[baseX + i + half]);
+    x[baseX + i] = __float2half(lower * cosT[baseCs + i] - upper * sinT[baseCs + i]);
+    x[baseX + i + half] = __float2half(upper * cosT[baseCs + i + half] + lower * sinT[baseCs + i + half]);
+}
+
+// ── Fused-lastdim slice (F16, pure copy) ────────────────────────────────────
+// Mirrors dit_slice_lastdim_f32: out[row, d] = in[row, offset + d] with in row stride = inDim.
+// Splits a fused [.., inDim] tensor (e.g. QKV [B,L,3H]) into a contiguous [.., outDim] chunk.
+__global__ void dit_slice_lastdim_f16(
+    __half* __restrict__ output,
+    const __half* __restrict__ input,
+    unsigned int outDim,
+    unsigned int inDim,
+    unsigned int offset,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    unsigned int d = (unsigned int)(i % outDim);
+    unsigned long long row = i / outDim;
+    output[i] = input[(size_t)row * inDim + offset + d];
+}
+
 // ── Interleaved RoPE (in-place, F16 x, F32 cos/sin) ─────────────────────────
 // Mirrors wan_rope_interleaved: x is [S, heads*headDim]; rotate adjacent pair (2i,2i+1) by the
 // shared angle at cos/sin index 2i (cos/sin are [S, headDim] shared across heads).

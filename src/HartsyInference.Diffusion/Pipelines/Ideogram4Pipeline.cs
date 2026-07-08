@@ -36,6 +36,26 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     private const int OutputImageIndicator = 2;
     private const int ImagePositionOffset = 65536;
 
+    /// <summary>HARTSY_KEEP_MODELS=1 keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop
+    /// FreeWeights + next-gen ~4.6 s re-upload). The TE cannot coexist with the resident DiTs (8 + 18.6 GB), so a
+    /// prompt-cache MISS under this flag frees the DiTs first, encodes, then re-preloads — repeat prompts skip both.
+    /// Default off — eviction is what lets smaller cards run this model.</summary>
+    private static readonly bool KeepModelsResident =
+        Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") == "1";
+    private bool _ditResident;
+
+    // Prompt-embedding cache (last prompt): the Qwen3-VL 13-layer tap keyed on the token ids. A hit skips the
+    // whole TE phase (preload + encode + free ≈ 1.7 s). Reusing the SAME tensor reference also keeps the
+    // conditional transformer's step-invariant llmProj cache warm across generations (keyed on this reference).
+    private int[]? _cachedPromptKey;
+    private Tensor? _cachedTextFeatures;
+
+    // Position-id cache keyed on (numText, gridH, gridW): reusing the SAME tensor references keeps both
+    // transformers' MRoPE cos/sin caches warm across generations.
+    private (int NumText, int GridH, int GridW) _cachedPosKey = (-1, -1, -1);
+    private Tensor? _cachedPosIds;
+    private Tensor? _cachedPosIdsImageOnly;
+
     /// <summary>Creates an Ideogram 4 pipeline from pre-loaded components. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="textEncoder">Qwen3-VL-8B language tower (<see cref="LlamaStyleEncoderConfig.Qwen3_VL_8B"/>).</param>
@@ -134,26 +154,49 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // A token-id mismatch ⇒ tokenizer/chat-template bug; a match with differing encoder
         // features ⇒ encoder forward/weight-load bug.
         LogTokenIds(promptTokenIds);
-        Backend.PreloadWeights(_textEncoder.EnumerateWeights());
-        // interleavedLayout: true — Ideogram 4 concatenates the 13 taps HIDDEN-MAJOR (c = h*13 + tap), matching
-        // upstream pipeline_ideogram4.py (permute(stack,(1,2,3,0)).reshape) and ComfyUI (permute(0,2,3,1)). The
-        // llm_cond_norm/llm_cond_proj weights are trained on this order; tap-major scrambles every input channel.
-        Tensor textFeatures = _textEncoder.EncodeMultiLayer(Backend, [promptTokenIds], Ideogram4Config.QwenActivationLayersHf, interleavedLayout: true);
-        if ((int)textFeatures.Shape[2] != _config.LlmFeaturesDim)
-            throw new InvalidOperationException($"Encoder produced {textFeatures.Shape[2]}-dim features, expected {_config.LlmFeaturesDim} (13 × 4096). Check the tap-layer indices / encoder preset.");
-        Backend.Sync();
-        LogEncoderStats(textFeatures);
-        // When IDEOGRAM4_DEBUG_DIR is set, dump the raw encoder output so it can be diffed
-        // element-wise against the transformers Qwen3-VL reference (same tokens).
-        HartsyInference.Diffusion.Models.Denoisers.Ideogram4DebugDump.Dump("textFeatures", textFeatures);
-        Backend.FreeWeights(_textEncoder.EnumerateWeights());
-        // Materialize the encoder output on the host, then reclaim every encoder intermediate. The Qwen3-VL
-        // forward leaves hundreds of device-cached activations that otherwise linger until GC finalization and
-        // hold multi-GB into the DiT phase. textFeatures is already host-synced (LogEncoderStats read it), but
-        // touch it explicitly — FreeActivations frees device buffers WITHOUT a D2H sync-back, so anything
-        // still device-only would be silently lost.
-        _ = textFeatures.DataPointer;
-        Backend.FreeActivations();
+        bool promptHit = _cachedTextFeatures is not null && _cachedPromptKey is not null
+            && _cachedPromptKey.AsSpan().SequenceEqual(promptTokenIds);
+        Tensor textFeatures;
+        if (promptHit)
+        {
+            textFeatures = _cachedTextFeatures!;
+            Logs.Info("[Ideogram4] prompt-embedding cache hit — TE phase skipped");
+        }
+        else
+        {
+            if (_ditResident)
+            {
+                // The 8 GB TE cannot coexist with the 18.6 GB of resident DiTs (HARTSY_KEEP_MODELS); evict
+                // them for this new-prompt generation and re-preload below.
+                Backend.Sync();
+                Backend.FreeWeights(_conditional.EnumerateWeights());
+                Backend.FreeWeights(_unconditional.EnumerateWeights());
+                _ditResident = false;
+            }
+            Backend.PreloadWeights(_textEncoder.EnumerateWeights());
+            // interleavedLayout: true — Ideogram 4 concatenates the 13 taps HIDDEN-MAJOR (c = h*13 + tap), matching
+            // upstream pipeline_ideogram4.py (permute(stack,(1,2,3,0)).reshape) and ComfyUI (permute(0,2,3,1)). The
+            // llm_cond_norm/llm_cond_proj weights are trained on this order; tap-major scrambles every input channel.
+            textFeatures = _textEncoder.EncodeMultiLayer(Backend, [promptTokenIds], Ideogram4Config.QwenActivationLayersHf, interleavedLayout: true);
+            if ((int)textFeatures.Shape[2] != _config.LlmFeaturesDim)
+                throw new InvalidOperationException($"Encoder produced {textFeatures.Shape[2]}-dim features, expected {_config.LlmFeaturesDim} (13 × 4096). Check the tap-layer indices / encoder preset.");
+            Backend.Sync();
+            LogEncoderStats(textFeatures);
+            // When IDEOGRAM4_DEBUG_DIR is set, dump the raw encoder output so it can be diffed
+            // element-wise against the transformers Qwen3-VL reference (same tokens).
+            HartsyInference.Diffusion.Models.Denoisers.Ideogram4DebugDump.Dump("textFeatures", textFeatures);
+            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            // Materialize the encoder output on the host, then reclaim every encoder intermediate. The Qwen3-VL
+            // forward leaves hundreds of device-cached activations that otherwise linger until GC finalization and
+            // hold multi-GB into the DiT phase. textFeatures is already host-synced (LogEncoderStats read it), but
+            // touch it explicitly — FreeActivations frees device buffers WITHOUT a D2H sync-back, so anything
+            // still device-only would be silently lost.
+            _ = textFeatures.DataPointer;
+            Backend.FreeActivations();
+            _cachedTextFeatures?.Dispose();
+            _cachedTextFeatures = textFeatures;
+            _cachedPromptKey = (int[])promptTokenIds.Clone();
+        }
         Logs.Info($"Prompt encoded in {sw.ElapsedMilliseconds}ms");
 
         // ── 2. Build the unified-sequence conditioning tensors ──
@@ -171,14 +214,15 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             regionWeights = new float[regionalPlan!.Regions.Count];
         }
         int effSeqLen = effNumText + numImageTokens;
-        Tensor llmFull = BuildLlmFull(textFeatures, numText, effSeqLen, _config.LlmFeaturesDim, hasRegions ? regionalPlan : null);
-        textFeatures.Dispose();
-        Tensor posIds = BuildPositionIds(effNumText, gridH, gridW);           // [1, L, 3]
+        // Text rows only ([1, effNumText, llmDim]) — the transformer synthesizes the zero image rows and caches
+        // the projection keyed on this reference, so pass the cached tensor itself when there are no regions.
+        Tensor llmTextRows = hasRegions
+            ? BuildLlmFull(textFeatures, numText, effNumText, _config.LlmFeaturesDim, regionalPlan)
+            : textFeatures;
+        (Tensor posIds, Tensor posIdsImageOnly) = GetOrBuildPositionIds(effNumText, gridH, gridW);
         int[] indicator = BuildIndicator(effNumText, numImageTokens);         // [L]
-        Tensor posIdsImageOnly = SliceImagePositions(posIds, effNumText, numImageTokens);
         int[] indicatorImageOnly = new int[numImageTokens];
         Array.Fill(indicatorImageOnly, OutputImageIndicator);
-        Tensor negLlm = new Tensor(new TensorShape(1, numImageTokens, _config.LlmFeaturesDim), DType.F32); // zeros
 
         // ── 3. Schedule ──
         LogitNormalSchedule schedule = LogitNormalSchedule.ForResolution(height, width, preset.Mu, preset.Std);
@@ -203,16 +247,16 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // ── 5. Denoise loop (both transformers resident) ──
         Backend.PreloadWeights(_conditional.EnumerateWeights());
         Backend.PreloadWeights(_unconditional.EnumerateWeights());
+        _ditResident = true;
         LogVram("after DiT weight preload");
 
         // Materialize everything that must survive across steps, then reclaim conditioning-build leftovers.
         // All of these are host-created (BuildLlmFull / BuildPositionIds / CreateNoise write on the CPU), so the
         // touches are free — they just guarantee nothing here is a live GPU activation when the per-step
         // FreeActivations (which frees device buffers WITHOUT a D2H sync-back) runs below.
-        _ = llmFull.DataPointer;
+        _ = llmTextRows.DataPointer;
         _ = posIds.DataPointer;
         _ = posIdsImageOnly.DataPointer;
-        _ = negLlm.DataPointer;
         _ = z.DataPointer;
         if (sourceTokens is not null) _ = sourceTokens.DataPointer;
         if (packedMask is not null) _ = packedMask.DataPointer;
@@ -228,23 +272,20 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             float delta = sVal - tVal;
             float gw = preset.GuidanceSchedule[i];
 
-            // Positive pass: full sequence, keep image-token velocity. Regional bias (when present)
-            // steers each image token toward its region's appended conditioning columns.
-            Tensor posX = BuildConditionalLatent(z, effNumText, numImageTokens, latentDim);
+            // Positive pass: full sequence, image-token velocity returned directly. Regional bias (when
+            // present) steers each image token toward its region's appended conditioning columns.
             Tensor? regionBias = null;
             if (hasRegions)
             {
                 regionalPlan!.ResolveStep(steps - 1 - i, regionWeights!);
                 regionBias = RegionalAttentionBias.Build(effSeqLen, effNumText, numImageTokens, regionRanges!, regionGridMasks!, regionWeights!);
             }
-            Tensor posOut = _conditional.Forward(Backend, llmFull, posX, tVal, posIds, indicator, regionBias);
+            Tensor posV = _conditional.Forward(Backend, llmTextRows, z, tVal, posIds, indicator, regionBias);
             regionBias?.Dispose();
-            posX.Dispose();
-            Tensor posV = SliceImageVelocity(posOut, effNumText, numImageTokens, latentDim);
-            posOut.Dispose();
 
-            // Negative pass: image-only sequence, zeroed text, unconditional transformer.
-            Tensor negV = _unconditional.Forward(Backend, negLlm, z, tVal, posIdsImageOnly, indicatorImageOnly, null);
+            // Negative pass: image-only sequence, unconditional transformer. Null text features — the zeroed
+            // text projection is exactly zero, so the transformer skips the text path outright.
+            Tensor negV = _unconditional.Forward(Backend, null, z, tVal, posIdsImageOnly, indicatorImageOnly, null);
 
             // Conditioning-effect probe (profile-gated): relative RMS difference between the conditional
             // and unconditional velocities. ~0 means the prompt has no effect (encoder/feature bug);
@@ -304,33 +345,39 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
                 LatentArch = LatentArchitecture.Flux2,
             });
 
-            // Reclaim GPU-resident activation buffers between steps: the two 9.3B DiTs keep intermediates
-            // on-device and any not read-back/disposed linger until GC, accumulating to OOM over the schedule
-            // (same fix as Flux / the video pipelines). Unlike the host-scheduler pipelines, CfgEulerStep
-            // leaves `z` — the only cross-step tensor — as a live GPU activation, so materialize it first:
-            // FreeActivations frees device buffers WITHOUT a D2H sync-back and would silently revert z to its
-            // stale host copy. Costs one small [1, nImg, 128] D2H per step (after the D2H-sync log line, so
-            // per-step sync counts still reflect only the DiT forwards) + one re-upload next step.
-            _ = z.DataPointer;
-            Backend.FreeActivations();
+            // Masked inpaint is the one path that must read z on the host every step (the blend above already
+            // did); protect the blended host copy from the next forward's stale device pointer with a per-step
+            // FreeActivations. The plain loop stays DRAIN-FREE: every intermediate is explicitly disposed, z
+            // stays device-resident across steps (CfgEulerStep is in-place), and the post-log z.DataPointer
+            // materialize + FreeActivations that used to run here cost a measured ~325 ms/step of pipeline
+            // drain (step wall 1156 ms vs 830 ms issued).
+            if (packedMask is not null)
+            {
+                Backend.FreeActivations();
+            }
         }
 
-        llmFull.Dispose();
-        posIds.Dispose();
-        posIdsImageOnly.Dispose();
-        negLlm.Dispose();
+        // llmTextRows/posIds/posIdsImageOnly are cross-generation caches; only a per-gen regional concat is ours.
+        if (hasRegions) llmTextRows.Dispose();
         sourceTokens?.Dispose();
         packedMask?.Dispose();
 
-        // ── 6. Free DiT weights before VAE decode ──
+        // ── 6. Free DiT weights before VAE decode (skipped under HARTSY_KEEP_MODELS — the Flux.2 VAE decode
+        // falls back to tiled if the resident DiTs leave too little room for the full-res im2col) ──
         Backend.Sync();
-        Backend.FreeWeights(_conditional.EnumerateWeights());
-        Backend.FreeWeights(_unconditional.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_conditional.EnumerateWeights());
+            Backend.FreeWeights(_unconditional.EnumerateWeights());
+            _ditResident = false;
+        }
 
         // ── 7. Latent un-normalize (fixed constants) + unpatchify → [1, 32, H/8, W/8] ──
+        Stopwatch tailSw = Stopwatch.StartNew();
         ApplyLatentNorm(z);
         Tensor vaeIn = Unpatchify(z, gridH, gridW, _config.PatchSize);
         z.Dispose();
+        Logs.Verbose($"[Ideogram4] latent-norm + unpatchify in {tailSw.ElapsedMilliseconds}ms");
 
         // ── 8. VAE decode ──
         Logs.Verbose("Decoding latents (Flux.2 VAE, tiled)...");
@@ -348,8 +395,10 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
         }
 
+        tailSw.Restart();
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+        Logs.Verbose($"[Ideogram4] rgb conversion in {tailSw.ElapsedMilliseconds}ms");
 
         // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
         // memory until GC finalization and shrink the budget of whatever generation runs next.
@@ -455,7 +504,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return tokens;
     }
 
-    /// <summary>Places encoded base text features <c>[1, numText, D]</c> (and any regional features) into a full <c>[1, seqLen, D]</c> tensor: base text at the front, region features immediately after, zeros at image positions.</summary>
+    /// <summary>Places encoded base text features <c>[1, numText, D]</c> (and any regional features) into a <c>[1, seqLen, D]</c> tensor: base text at the front, region features immediately after, zeros in any remainder.</summary>
     private static Tensor BuildLlmFull(Tensor textFeatures, int numText, int seqLen, int dim, RegionalPlan? plan)
     {
         Tensor full = new Tensor(new TensorShape(1, seqLen, dim), DType.F32);
@@ -552,23 +601,21 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         return ind;
     }
 
-    /// <summary>Builds the conditional-pass latent <c>[1, L, 128]</c> = <c>[zeros(numText) ; z]</c>.</summary>
-    /// <summary>Builds the conditional latent <c>[1, numText+numImg, dim]</c>: text rows zeroed (masked out
-    /// downstream), image rows = the current latent <paramref name="z"/>. GPU-resident scatter.</summary>
-    private Tensor BuildConditionalLatent(Tensor z, int numText, int numImg, int dim)
+    /// <summary>Builds (or returns the cached) MRoPE position tensors for the given layout. Reusing the same
+    /// tensor references across generations keeps both transformers' cos/sin caches warm.</summary>
+    private (Tensor PosIds, Tensor PosIdsImageOnly) GetOrBuildPositionIds(int numText, int gridH, int gridW)
     {
-        int seqLen = numText + numImg;
-        Tensor x = new Tensor(new TensorShape(1, seqLen, dim), DType.F32);
-        Backend.ScatterRowsAfter(x, z, numText);
-        return x;
-    }
-
-    /// <summary>Slices image-token velocity rows <c>[numText..L)</c> out of <c>[1, L, 128]</c> into <c>[1, numImg, 128]</c>. GPU-resident.</summary>
-    private Tensor SliceImageVelocity(Tensor full, int numText, int numImg, int dim)
-    {
-        Tensor outV = new Tensor(new TensorShape(1, numImg, dim), DType.F32);
-        Backend.SliceRows(outV, full, numText);
-        return outV;
+        if (_cachedPosIds is not null && _cachedPosIdsImageOnly is not null
+            && _cachedPosKey == (numText, gridH, gridW))
+        {
+            return (_cachedPosIds, _cachedPosIdsImageOnly);
+        }
+        _cachedPosIds?.Dispose();
+        _cachedPosIdsImageOnly?.Dispose();
+        _cachedPosIds = BuildPositionIds(numText, gridH, gridW);
+        _cachedPosIdsImageOnly = SliceImagePositions(_cachedPosIds, numText, gridH * gridW);
+        _cachedPosKey = (numText, gridH, gridW);
+        return (_cachedPosIds, _cachedPosIdsImageOnly);
     }
 
     /// <summary>Diagnostic: logs the prompt token ids (count + a head/tail window) so they can be compared

@@ -266,8 +266,10 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         imgVMh.Dispose(); txtVMh.Dispose();
 
         // ── 7. Joint scaled dot-product attention (no mask) ──
+        // allowF16: both streams' Q/K are RMS-normed above → bounded pre-softmax scores → F16/cuDNN-fused attention
+        // is safe (the 43.23 per-arch gate). At 720p-class token counts SDPA is ~half the step's GPU time.
         Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
+        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: true);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();

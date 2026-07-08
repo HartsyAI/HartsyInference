@@ -19,4 +19,7 @@ public interface IStreamingWeightCache
 
     /// <summary>Drains in-flight uploads and releases backend-internal pool reservations to the driver. Required between streaming and eager-allocation phases on CUDA — the stream-ordered allocator pool is invisible to subsequent sync allocations until trimmed. No-op on backends without a stream-ordered allocator.</summary>
     void DrainAndReleasePool();
+
+    /// <summary>Opt-in: page-lock weight host sources before upload so the async H2D truly overlaps with compute — a pageable source silently degrades to a synchronous staged copy that overlaps with nothing. Worth it only when weights are re-uploaded across steps (block-swap); registration cost is one-time per source. Default no-op for backends without pinning.</summary>
+    bool PinUploadSource { get => false; set { } }
 }

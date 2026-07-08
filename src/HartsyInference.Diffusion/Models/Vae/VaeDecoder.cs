@@ -331,33 +331,52 @@ public sealed class VaeDecoder
         // giving up, so a genuine failure means the VRAM truly isn't there.
         int gemmElemSize = Math.Max(2, weightDtype.SizeInBytes);   // fp8 weights GEMM at 16-bit
         long fullResWorkspace = EstimateDecodeWorkspaceBytes(latentH, latentW, gemmElemSize);
+        // A banding backend caps every conv's im2col at its workspace cap — the naive per-conv estimate above
+        // then overstates the real peak (e.g. Flux.2's 512-ch conv at 1024²: 9.2 GB naive vs a 2 GB band).
+        if (backend.Capabilities.BandsIm2Col && backend.Capabilities.Im2ColWorkspaceCapBytes > 0)
+            fullResWorkspace = Math.Min(fullResWorkspace, backend.Capabilities.Im2ColWorkspaceCapBytes);
+        // Post-trim headroom the attempt needs beyond the single worst im2col: neighboring layer activations
+        // plus a second in-flight im2col whose async free hasn't recycled yet. Below this, skip to tiled for
+        // THIS generation only — a resident-DiT host (HARTSY_KEEP_MODELS) may free VRAM later, and a skipped
+        // attempt costs nothing, unlike an OOM-failed one (~0.5 s + session-tiled).
+        const long FullResHeadroomBytes = 3L << 29;   // 1.5 GB
         if (FullResEnabled && !_fullResDisabled && fullResWorkspace <= FullResWorkspaceCapBytes)
         {
-            System.Diagnostics.Stopwatch fullSw = System.Diagnostics.Stopwatch.StartNew();
-            Tensor? single = null;
-            try
+            // Pre-trim when the pool's reservations would OOM the big im2col: the caller just drained the
+            // stream (the latent arrives host-resident), so a planned trim here is near-free, vs. the
+            // allocator's OOM-retry mid-decode which syncs a deep conv queue (measured ~+470 ms/gen).
+            if (backend.FreeMemoryBytes() < fullResWorkspace + FullResHeadroomBytes)
+                backend.TrimMemoryPool();
+            long postTrimFree = backend.FreeMemoryBytes();
+            if (postTrimFree < fullResWorkspace + FullResHeadroomBytes)
             {
-                // Pre-trim when the pool's reservations would OOM the big im2col: the caller just drained the
-                // stream (the latent arrives host-resident), so a planned trim here is near-free, vs. the
-                // allocator's OOM-retry mid-decode which syncs a deep conv queue (measured ~+470 ms/gen).
-                if (backend.FreeMemoryBytes() < fullResWorkspace + (1L << 30))
-                    backend.TrimMemoryPool();
-                single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, weightDtype, disposeSourceOnCast: false);
-                Tensor decoded = Decode(backend, single);
-                if (!ReferenceEquals(single, latent)) single.Dispose();
-                Logs.Verbose($"[vae-phase] full-res decode {latentH}x{latentW} latent in {fullSw.ElapsedMilliseconds}ms " +
-                    $"(im2col est {fullResWorkspace >> 20} MB)");
-                return decoded;
+                Logs.Verbose($"[vae-phase] full-res decode skipped this gen: post-trim free {postTrimFree >> 20} MB " +
+                    $"< im2col est {fullResWorkspace >> 20} MB + headroom; using tiles");
             }
-            catch (Exception ex)
+            else
             {
-                // Almost certainly VRAM exhaustion on the im2col workspace. Clean up whatever the partial
-                // decode left on-device and fall back to the tiled path (and stay tiled this session).
-                _fullResDisabled = true;
-                if (single is not null && !ReferenceEquals(single, latent)) single.Dispose();
-                backend.FreeActivations();
-                Logs.Warning($"[vae-phase] full-res decode failed after {fullSw.ElapsedMilliseconds}ms — " +
-                    $"falling back to tiled for this session: {ex.Message}");
+                System.Diagnostics.Stopwatch fullSw = System.Diagnostics.Stopwatch.StartNew();
+                Tensor? single = null;
+                try
+                {
+                    single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, weightDtype, disposeSourceOnCast: false);
+                    Tensor decoded = Decode(backend, single);
+                    if (!ReferenceEquals(single, latent)) single.Dispose();
+                    Logs.Verbose($"[vae-phase] full-res decode {latentH}x{latentW} latent in {fullSw.ElapsedMilliseconds}ms " +
+                        $"(im2col est {fullResWorkspace >> 20} MB)");
+                    return decoded;
+                }
+                catch (Exception ex)
+                {
+                    // Almost certainly VRAM exhaustion on the im2col workspace (despite the headroom check —
+                    // e.g. fragmentation). Clean up whatever the partial decode left on-device and fall back
+                    // to the tiled path (and stay tiled this session).
+                    _fullResDisabled = true;
+                    if (single is not null && !ReferenceEquals(single, latent)) single.Dispose();
+                    backend.FreeActivations();
+                    Logs.Warning($"[vae-phase] full-res decode failed after {fullSw.ElapsedMilliseconds}ms — " +
+                        $"falling back to tiled for this session: {ex.Message}");
+                }
             }
         }
 

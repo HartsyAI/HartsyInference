@@ -157,6 +157,8 @@ internal static partial class CudaDriverApi
 
     internal const uint CU_MEMHOSTREGISTER_PORTABLE = 1;
 
+    internal const uint CU_MEMHOSTALLOC_PORTABLE = 1;
+
     /// <summary>cuMemHostRegister returns this when the range (rounded to host pages) overlaps an already-registered region. Safe to treat as "already pinned" and continue.</summary>
     internal const int CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED = 712;
 

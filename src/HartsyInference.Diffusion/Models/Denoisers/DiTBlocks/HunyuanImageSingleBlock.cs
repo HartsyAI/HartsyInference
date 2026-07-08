@@ -172,8 +172,9 @@ public sealed unsafe class HunyuanImageSingleBlock : IStreamingBlock
             ApplyRopeToImagePortion(qMh, kMh, rope, batch, _numHeads, totalSeqLen, imgSeqLen, imgPackedH, imgPackedW, imgPackedT);
 
         // ── 7. Joint scaled dot-product attention (no mask) ──
+        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

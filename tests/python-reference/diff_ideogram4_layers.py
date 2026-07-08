@@ -65,8 +65,13 @@ for entry in entries:
     ref = np.fromfile(ref_path, dtype=np.float32)
     cs = np.fromfile(cs_path, dtype=np.float32)
     if ref.size != cs.size:
-        print(f"{name:<20} {str(shape):<22} {'-':>11} {'-':>11} <size mismatch ref={ref.size} cs={cs.size}>")
-        continue
+        if name == "output_velocity" and cs.size < ref.size:
+            # C# emits image-token velocity only (text rows are dropped before the final layer);
+            # the image tokens are the sequence tail, so compare against the reference's tail.
+            ref = ref[-cs.size:]
+        else:
+            print(f"{name:<20} {str(shape):<22} {'-':>11} {'-':>11} <size mismatch ref={ref.size} cs={cs.size}>")
+            continue
 
     diff = np.abs(ref.astype(np.float64) - cs.astype(np.float64))
     avg, mx = diff.mean(), diff.max()

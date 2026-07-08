@@ -16,6 +16,12 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// Attention is fused-QKV (<c>Linear(hidden → 3*hidden, bias=False)</c>), per-head QK-RMSNorm, 3D MRoPE, then <c>o</c> (bias=False). FFN is SwiGLU <c>w2(silu(w1)·w3)</c>, all bias=False.</summary>
 public sealed unsafe class Ideogram4Block
 {
+    /// <summary>F16-mode damping for the two RmsNorm-sandwiched projections (the Z-Image recipe): the raw
+    /// <c>attention.o</c> and SwiGLU outputs can exceed F16's 65504, but both feed straight into a sandwich
+    /// RMSNorm and <c>RMSNorm(c·x) ≡ RMSNorm(x)</c> — so scaling the weights via <see cref="Tensor.Fp8ScaleFactor"/>
+    /// (folded into the GEMM alpha, zero extra kernels) is bit-exact post-norm.</summary>
+    private const float F16SandwichDamp = 1.0f / 64.0f;
+
     private readonly int _hidden;
     private readonly int _numHeads;
     private readonly int _headDim;
@@ -73,6 +79,14 @@ public sealed unsafe class Ideogram4Block
         _w1 = weights[$"{prefix}.feed_forward.w1.weight"];
         _w2 = weights[$"{prefix}.feed_forward.w2.weight"];
         _w3 = weights[$"{prefix}.feed_forward.w3.weight"];
+        // F16 mode: damp the two sandwich-normed projections so their raw outputs fit F16 range (see
+        // F16SandwichDamp). attention_norm2 cancels the o damp; ffn_norm2 cancels the w3 damp (it scales
+        // silu(w1)·w3 and thus the w2 output linearly). F32 path untouched — baseline stays bit-identical.
+        if (DitDtype.Act == DType.F16)
+        {
+            _oWeight.Fp8ScaleFactor *= F16SandwichDamp;
+            _w3.Fp8ScaleFactor *= F16SandwichDamp;
+        }
 
         _adalnWeight = weights[$"{prefix}.adaln_modulation.weight"];
         weights.TryGetValue($"{prefix}.adaln_modulation.bias", out _adalnBias);
@@ -185,16 +199,16 @@ public sealed unsafe class Ideogram4Block
 
         // Split fused [B, L, 3*hidden] (layout [q|k|v]) directly into [B, L, numHeads, headDim] chunks —
         // the slice is a contiguous gather and the reshape is just the declared output shape.
-        Tensor q = new Tensor(heads, DType.F32);
-        Tensor k = new Tensor(heads, DType.F32);
-        Tensor v = new Tensor(heads, DType.F32);
+        Tensor q = new Tensor(heads, input.DType);
+        Tensor k = new Tensor(heads, input.DType);
+        Tensor v = new Tensor(heads, input.DType);
         backend.SliceLastDim(q, qkv, 0);
         backend.SliceLastDim(k, qkv, _hidden);
         backend.SliceLastDim(v, qkv, 2 * _hidden);
         qkv.Dispose();
 
-        Tensor qN = new Tensor(heads, DType.F32);
-        Tensor kN = new Tensor(heads, DType.F32);
+        Tensor qN = new Tensor(heads, input.DType);
+        Tensor kN = new Tensor(heads, input.DType);
         backend.RmsNorm(qN, q, _normQ.Weight, _normQ.Eps);
         backend.RmsNorm(kN, k, _normK.Weight, _normK.Eps);
         q.Dispose();
@@ -203,9 +217,9 @@ public sealed unsafe class Ideogram4Block
         backend.ApplyRope(qN, kN, cos, sin);
 
         // Permute [B, L, numHeads, headDim] → [B, numHeads, L, headDim] for SDPA.
-        Tensor qMh = new Tensor(mh, DType.F32);
-        Tensor kMh = new Tensor(mh, DType.F32);
-        Tensor vMh = new Tensor(mh, DType.F32);
+        Tensor qMh = new Tensor(mh, input.DType);
+        Tensor kMh = new Tensor(mh, input.DType);
+        Tensor vMh = new Tensor(mh, input.DType);
         backend.Permute0213(qMh, qN, seqLen, _numHeads, _headDim);
         backend.Permute0213(kMh, kN, seqLen, _numHeads, _headDim);
         backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
@@ -214,14 +228,16 @@ public sealed unsafe class Ideogram4Block
         v.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale);
+        Tensor attnOut = new Tensor(mh, input.DType);
+        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe and
+        // engages the cuDNN fused flash path (native zero-cast when the block runs F16 activations).
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
 
         // Permute back [B, numHeads, L, headDim] → [B, L, numHeads, headDim]; declared flat [B, L, hidden].
-        Tensor attnFlat = new Tensor(flat, DType.F32);
+        Tensor attnFlat = new Tensor(flat, input.DType);
         backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 

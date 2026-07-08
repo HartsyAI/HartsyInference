@@ -377,3 +377,33 @@ Warm 3.12s profile: TE 0 (cache) · denoise 8×~256ms = 2.05s · unpatchify ~0 �
 checkpoint tensor shares ONE fp8 scale, unlike Krea2), w1/w3 FFN fusion (mind the w3 damp), cuBLASLt algo tuning
 for M=4160, VAE mid-block attention F16/cuDNN, cross-gen graph persistence (needs the fixed buffers out of the
 activation cache). Fleet: port the prompt-embed cache + device rgb + full-res-VAE audit to Flux/Chroma/ERNIE.
+
+## 2026-07-08 — Ideogram4 grind: 39.3s → **19.5s** (Comfy 17.0s; gap 2.31× → 1.15×) — engine `alpha.44.7-local`
+
+Warm median 19.51s @ 1024²/20 steps (V4_DEFAULT_20, structured-JSON prompt), coherent + prompt-faithful,
+verified visually every round. Peak 23.7 GB (KEEP_MODELS: BOTH 9.3B DiTs resident). Fresh baseline this morning
+was 39.33s (the 07-05 table's 42.3s predates the fleet fixes).
+
+**Attribution first** (probes): TE 1.7s / denoise 32.2s (20×1.61s) / VAE 0.7s / DiT re-preload 4.6s.
+
+| Round | Fix | Result |
+|---|---|---|
+| 1 | **Step-invariant conditioning restructure**: the [1,L,53248] llmFull (933 MB) + zero negLlm (872 MB) were re-uploaded + re-projected (RmsNorm-53248 + 53248→4608 GEMM) EVERY STEP. Text projection now computed once per prompt over the ~286 text rows only, `[proj | Fill+Concat zeros]`, pinned; uncond text path skipped outright (provably zero); MRoPE cos/sin cached+pinned per gen; image path `Linear(z)+ScatterRowsAfter`; final layer on image rows only. All bit-identical. + TE prompt-embedding cache + posIds cache + `HARTSY_KEEP_MODELS` (evicts DiTs on prompt MISS — TE 8 GB can't coexist) | 39.33 → **25.35s** (steps 1.61 → 0.97s) |
+| 2 | **cuDNN fused flash attention at head_dim=256** — cuDNN 9.24 supports D=256 fwd on Ada; was gated to D∈{64,128} and the F32 fallback materialized 1.4–2.3 GB score matrices at the VRAM ceiling (OOM-retry thrash). Added per-D failure isolation (a D-reject no longer kills the engine for other models' D=128) | 25.35 → **24.84s** |
+| 3 | **HARTSY_DIT_F16 for Ideogram4Block** (new `dit_rope_f16` rotate-half + `dit_slice_lastdim_f16` kernels; o/w3 damped 1/64 via Fp8ScaleFactor — sandwich RMSNorms cancel exactly, the Z-Image recipe) + **drain-free loop** (removed per-step `z.DataPointer` + FreeActivations = measured 325 ms/step of hidden pipeline drain; kept only for masked inpaint) | 24.84 → **20.45s** (step wall 1156 → ~935ms) |
+| 4-5 | **Banded im2col Conv2D** (new `im2col_banded` kernel + band loop: caps any conv's im2col at 1 GB — bit-identical, ldc trick, parity-tested vs CPU): the Flux.2 VAE's 9.2 GB full-res estimate → 1 GB, so **full-res decode engages beside 18.6 GB resident DiTs** (was 3×3 tiles = 2.25× redundant + a VISIBLE SKY SEAM). + adaptive full-res gate (post-trim headroom check; skip-not-disable). + cuBLASLt fp8 workspace 4→64 MB | 20.45 → **19.51s**, VAE 1.48 → 0.64s, seam GONE |
+
+**GPU-bound confirmed** (util median 100% during the loop; step-graph capture would be wall-neutral, skipped).
+Step ≈ 935ms = fp8 GEMMs (~158 TFLOP/step at ~250-300 TFLOPS eff) + fused SDPA + F16 glue.
+Profile split: attn ~506ms / mlp ~389ms (blocking-profile inflated).
+
+**Remaining menu to beat 17.0s (~2.5s, all GPU-compute):** BSHD strided cuDNN SDPA (skip 4 Permute0213/block
+= 272 kernels/step), w1/w3 fusion (needs common-scale fp8 requant at load), cuBLASLt heuristic-cached algo
+selection for the M≈8478 fp8 shapes, fused norm+modulate kernels, VAE decode on the second GPU.
+
+**Fleet regression (same session, shared-code changes: banded conv, cuDNN per-D isolation, Lt workspace 64 MB):**
+| Model | bar | KEEP config | no-KEEP | note |
+|---|---|---|---|---|
+| Krea2-Turbo | <6.5s | **4.44s** ✓ (was 4.68) | (below) | coherent ✓ visually |
+| Z-Image-Turbo | ≤3.2s | **2.94s** ✓ (was 3.12) | (below) | coherent ✓ visually |
+| SDXL (banded-VAE sanity) | — | 36.3s (was 37.3) | — | coherent ✓ visually |

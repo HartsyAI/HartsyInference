@@ -34,7 +34,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 
 | Model | Status | Notes |
 |---|---|---|
-| **Ideogram 4** (9.3B DiT) | 🔬 | ~1e-7 parity on the 3060 after the GPU-residency rewrite (`dit_f32.ptx`). A100 timing + visual e2e pending. |
+| **Ideogram 4** (9.3B DiT) | ✅ | e2e coherent + prompt-faithful (structured-JSON prompt), visually verified. Perf grind 2026-07-08 (`alpha.44.7-local`): warm 1024²/20 steps **19.5s vs ComfyUI 17.0s (1.15×; was 2.5×)** — step-invariant conditioning caches, cuDNN flash attn @ head_dim 256, `HARTSY_DIT_F16` (o/w3 1/64 sandwich damp), drain-free loop, banded-im2col full-res Flux.2 VAE decode, KEEP_MODELS + prompt cache. Remaining menu in `benchmarks/results/image_comfy-vs-hartsy_2026-07-05.md`. |
 
 ## Built, validation-pending (🔧)
 

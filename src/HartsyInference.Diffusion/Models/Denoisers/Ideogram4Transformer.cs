@@ -28,6 +28,17 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
     private Tensor? _finalLinearW, _finalLinearB;
     private Tensor? _finalAdalnW, _finalAdalnB;
 
+    // Step-invariant caches, keyed on the caller's tensor references (the pipeline keeps them stable across
+    // steps and across repeat-prompt generations). The projected text conditioning and the MRoPE cos/sin
+    // tables are timestep-independent, so recomputing them per Forward re-uploaded and re-projected ~1 GB of
+    // constant data every step. Both are pinned via PreloadWeights so per-step FreeActivations cannot evict
+    // their device copies; FreeWeights+Dispose on replacement (the Krea2Transformer _cachedTxt pattern).
+    private IBackend? _cacheBackend;
+    private Tensor? _cachedLlmProj;
+    private object? _cachedLlmProjKey;
+    private Tensor? _cachedCos, _cachedSin;
+    private object? _cachedRopeKey;
+
     public Ideogram4Transformer(Ideogram4Config config)
     {
         _config = config;
@@ -92,61 +103,63 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
             foreach (Tensor w in _blocks[i].EnumerateWeights()) yield return w;
     }
 
-    /// <summary>Velocity prediction over a unified text+image sequence.</summary>
+    /// <summary>Velocity prediction over a unified text+image sequence. The text conditioning projection and
+    /// the MRoPE tables are step-invariant, so they are computed once and cached keyed on the caller's tensor
+    /// references — pass the SAME <paramref name="llmTextFeatures"/> / <paramref name="positionIds"/> instances
+    /// every step (and across repeat-prompt generations) to hit the caches.</summary>
     /// <param name="backend">Compute backend.</param>
-    /// <param name="llmFeatures">Qwen3-VL conditioning <c>[B, L, llmFeaturesDim]</c> (placed at text positions; image positions ignored).</param>
-    /// <param name="x">Noise tokens <c>[B, L, inChannels]</c> (image positions hold noise; text positions ignored).</param>
+    /// <param name="llmTextFeatures">Qwen3-VL conditioning for the TEXT rows only, <c>[B, numText, llmFeaturesDim]</c>. Null for a text-free (unconditional) pass — its projection is exactly zero, so the whole text path is skipped.</param>
+    /// <param name="imageTokens">Image latent tokens <c>[B, numImg, inChannels]</c> (the sequence tail; text rows are synthesized as zeros).</param>
     /// <param name="timestep">Flow-matching time in [0,1], shared across the batch.</param>
-    /// <param name="positionIds">MRoPE positions <c>[B, L, 3]</c> F32 (temporal, height, width).</param>
-    /// <param name="indicator">Per-token role, length <c>B*L</c> row-major: <c>LLM_TOKEN_INDICATOR(3)</c> / <c>OUTPUT_IMAGE_INDICATOR(2)</c> / padding(−1).</param>
+    /// <param name="positionIds">MRoPE positions <c>[B, numText+numImg, 3]</c> F32 (temporal, height, width).</param>
+    /// <param name="indicator">Per-token role, length <c>B*L</c> row-major: <c>LLM_TOKEN_INDICATOR(3)</c> first <c>numText</c> rows, then <c>OUTPUT_IMAGE_INDICATOR(2)</c>.</param>
     /// <param name="attentionMask">Optional additive mask <c>[B, 1, L, L]</c> or <c>[B, 1, 1, L]</c>; null = full attention (correct for unpadded single-prompt B=1).</param>
-    /// <returns><c>[B, L, inChannels]</c> velocity (F32). Only image-token positions are meaningful.</returns>
-    public Tensor Forward(IBackend backend, Tensor llmFeatures, Tensor x, float timestep,
+    /// <returns><c>[B, numImg, inChannels]</c> image-token velocity (F32); text rows are dropped before the final layer.</returns>
+    public Tensor Forward(IBackend backend, Tensor? llmTextFeatures, Tensor imageTokens, float timestep,
         Tensor positionIds, int[] indicator, Tensor? attentionMask)
     {
-        int batch = (int)x.Shape[0];
-        int seqLen = (int)x.Shape[1];
+        int batch = (int)imageTokens.Shape[0];
+        int numImg = (int)imageTokens.Shape[1];
+        int seqLen = (int)positionIds.Shape[1];
+        int numText = seqLen - numImg;
         int emb = _config.EmbDim;
         TensorShape hidShape = new TensorShape(batch, seqLen, emb);
 
         if (indicator.Length != batch * seqLen)
             throw new ArgumentException($"indicator length {indicator.Length} != B*L {batch * seqLen}.", nameof(indicator));
+        if (numText > 0 && (llmTextFeatures is null || (int)llmTextFeatures.Shape[1] != numText))
+            throw new ArgumentException($"llmTextFeatures rows {llmTextFeatures?.Shape[1].ToString() ?? "null"} != numText {numText}.", nameof(llmTextFeatures));
+        if (numText > 0 && batch != 1)
+            throw new ArgumentException("Text+image sequences are single-batch only (row-block scatter/slice).", nameof(imageTokens));
+        _cacheBackend = backend;
 
-        // Per-token role masks (built on CPU from the indicator; no GPU read, so no device sync).
-        Tensor imageMask = BuildRowMask(indicator, OutputImageIndicator, batch, seqLen);
-        Tensor textMask = BuildRowMask(indicator, LlmTokenIndicator, batch, seqLen);
+        // ── Image embedding: input_proj over the image rows only, scattered after a zeroed text head. ──
+        // Bit-identical to the old full-sequence masked path: text rows there were Linear-bias rows zeroed by
+        // the post-projection MaskRows; here they are never computed.
+        Tensor xProjImg = new Tensor(new TensorShape(batch, numImg, emb), DType.F32);
+        backend.Linear(xProjImg, imageTokens, _inputProjW!, _inputProjB);
+        Tensor h;
+        if (numText > 0)
+        {
+            h = new Tensor(hidShape, DType.F32);
+            backend.ScatterRowsAfter(h, xProjImg, numText);
+            xProjImg.Dispose();
+        }
+        else
+        {
+            h = xProjImg;
+        }
+        Ideogram4DebugDump.Dump("input_proj", h);
 
-        // ── Masked image embedding: x *= image_mask; input_proj(x); *= image_mask ──
-        Tensor xMasked = new Tensor(x.Shape, DType.F32);
-        backend.MaskRows(xMasked, x, imageMask);
-        Tensor xProjRaw = new Tensor(hidShape, DType.F32);
-        backend.Linear(xProjRaw, xMasked, _inputProjW!, _inputProjB);
-        xMasked.Dispose();
-        Tensor xProj = new Tensor(hidShape, DType.F32);
-        backend.MaskRows(xProj, xProjRaw, imageMask);
-        xProjRaw.Dispose();
-        Ideogram4DebugDump.Dump("input_proj", xProj);
-
-        // ── Masked text embedding: llm_cond_proj(llm_cond_norm(llm_features)); *= text_mask ──
-        Tensor llmMasked = new Tensor(llmFeatures.Shape, DType.F32);
-        backend.MaskRows(llmMasked, llmFeatures, textMask);
-        Tensor llmNorm = new Tensor(new TensorShape(batch, seqLen, _config.LlmFeaturesDim), DType.F32);
-        backend.RmsNorm(llmNorm, llmMasked, _llmCondNormW!, 1e-6f);
-        llmMasked.Dispose();
-        Tensor llmProjRaw = new Tensor(hidShape, DType.F32);
-        backend.Linear(llmProjRaw, llmNorm, _llmCondProjW!, _llmCondProjB);
-        llmNorm.Dispose();
-        Tensor llmProj = new Tensor(hidShape, DType.F32);
-        backend.MaskRows(llmProj, llmProjRaw, textMask);
-        llmProjRaw.Dispose();
-        imageMask.Dispose();
-        textMask.Dispose();
-
-        // ── h = image_emb + text_emb + image_indicator_embedding ──
-        Tensor h = new Tensor(hidShape, DType.F32);
-        backend.Add(h, xProj, llmProj);
-        xProj.Dispose();
-        llmProj.Dispose();
+        // ── Text embedding: step-invariant llm_cond_proj(llm_cond_norm(text rows)), cached across steps. ──
+        if (numText > 0)
+        {
+            Tensor llmProj = GetOrBuildLlmProj(backend, llmTextFeatures!, batch, numText, numImg, seqLen, emb);
+            Tensor hSum = new Tensor(hidShape, DType.F32);
+            backend.Add(hSum, h, llmProj);
+            h.Dispose();
+            h = hSum;
+        }
         Tensor indicatorIdx = BuildIndicatorIndices(indicator, batch, seqLen);
         backend.IndexAddRows(h, _imageIndicatorW!, indicatorIdx);
         indicatorIdx.Dispose();
@@ -156,11 +169,14 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         Tensor adalnInput = ComputeAdalnInput(backend, timestep, batch);
         Ideogram4DebugDump.Dump("adaln_input", adalnInput);
 
-        // ── RoPE ──
-        (Tensor cos, Tensor sin) = _rope.BuildCosSin(positionIds);
+        // ── RoPE (step-invariant, cached keyed on the positionIds reference) ──
+        (Tensor cos, Tensor sin) = GetOrBuildRope(backend, positionIds);
 
         // ── Blocks ──
-        Tensor cur = h;
+        // F16 hot path (HARTSY_DIT_F16): cast once at the loop boundary; the blocks follow the input dtype.
+        // Masked (regional) passes stay F32 — the additive-mask SDPA path is F32-only.
+        bool f16Blocks = DiTBlocks.DitDtype.Act == DType.F16 && attentionMask is null;
+        Tensor cur = f16Blocks ? Utilities.DtypeCastHelper.EnsureDtype(backend, h, DType.F16) : h;
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, cur, adalnInput, cos, sin, attentionMask);
@@ -173,15 +189,85 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
             // every block (re-reserved next block) — a uniform ~20-200x slowdown across all ops.
             Ideogram4DebugDump.Dump($"layers.{i}", cur);
         }
-        cos.Dispose();
-        sin.Dispose();
 
-        // ── Final layer ──
-        Tensor outVel = ApplyFinalLayer(backend, cur, adalnInput, batch, seqLen, emb);
-        cur.Dispose();
+        // ── Final layer over the image rows only (rowwise ops, so slicing first is bit-identical) ──
+        cur = Utilities.DtypeCastHelper.EnsureF32(backend, cur);
+        Tensor imgHidden;
+        if (numText > 0)
+        {
+            imgHidden = new Tensor(new TensorShape(batch, numImg, emb), DType.F32);
+            backend.SliceRows(imgHidden, cur, numText);
+            cur.Dispose();
+        }
+        else
+        {
+            imgHidden = cur;
+        }
+        Tensor outVel = ApplyFinalLayer(backend, imgHidden, adalnInput, batch, numImg, emb);
+        imgHidden.Dispose();
         adalnInput.Dispose();
         Ideogram4DebugDump.DumpOutput(outVel);
         return outVel;
+    }
+
+    /// <summary>Builds (or returns the cached) full-sequence text-conditioning projection <c>[B, L, emb]</c>:
+    /// <c>[llm_cond_proj(llm_cond_norm(textRows)) | zeros(numImg)]</c>. Computed over the ~2% of rows that are
+    /// text instead of the whole sequence, once per prompt instead of once per forward, and pinned on-device so
+    /// per-step FreeActivations cannot evict it.</summary>
+    private Tensor GetOrBuildLlmProj(IBackend backend, Tensor llmTextFeatures, int batch, int numText,
+        int numImg, int seqLen, int emb)
+    {
+        if (_cachedLlmProj is not null && ReferenceEquals(_cachedLlmProjKey, llmTextFeatures)
+            && (int)_cachedLlmProj.Shape[1] == seqLen)
+        {
+            return _cachedLlmProj;
+        }
+        if (_cachedLlmProj is not null)
+        {
+            backend.FreeWeights(new[] { _cachedLlmProj });
+            _cachedLlmProj.Dispose();
+            _cachedLlmProj = null;
+        }
+
+        Tensor llmNorm = new Tensor(new TensorShape(batch, numText, _config.LlmFeaturesDim), DType.F32);
+        backend.RmsNorm(llmNorm, llmTextFeatures, _llmCondNormW!, 1e-6f);
+        Tensor projText = new Tensor(new TensorShape(batch, numText, emb), DType.F32);
+        backend.Linear(projText, llmNorm, _llmCondProjW!, _llmCondProjB);
+        llmNorm.Dispose();
+
+        Tensor zerosTail = new Tensor(new TensorShape(batch, numImg, emb), DType.F32);
+        backend.Fill(zerosTail, 0f);
+        Tensor full = new Tensor(new TensorShape(batch, seqLen, emb), DType.F32);
+        backend.Concat(full, new[] { projText, zerosTail }, dim: 1);
+        projText.Dispose();
+        zerosTail.Dispose();
+
+        backend.PreloadWeights(new[] { full });
+        _cachedLlmProj = full;
+        _cachedLlmProjKey = llmTextFeatures;
+        return full;
+    }
+
+    /// <summary>Builds (or returns the cached) MRoPE cos/sin tables for <paramref name="positionIds"/> — a host
+    /// trig loop over B·L·headDim that is position-only, so one build serves every step. Pinned on-device.</summary>
+    private (Tensor Cos, Tensor Sin) GetOrBuildRope(IBackend backend, Tensor positionIds)
+    {
+        if (_cachedCos is not null && _cachedSin is not null && ReferenceEquals(_cachedRopeKey, positionIds))
+            return (_cachedCos, _cachedSin);
+        if (_cachedCos is not null || _cachedSin is not null)
+        {
+            backend.FreeWeights(new[] { _cachedCos!, _cachedSin! });
+            _cachedCos?.Dispose();
+            _cachedSin?.Dispose();
+            _cachedCos = _cachedSin = null;
+        }
+
+        (Tensor cos, Tensor sin) = _rope.BuildCosSin(positionIds);
+        backend.PreloadWeights(new[] { cos, sin });
+        _cachedCos = cos;
+        _cachedSin = sin;
+        _cachedRopeKey = positionIds;
+        return (cos, sin);
     }
 
     /// <summary>Final layer: <c>linear(norm_final(x) * (1 + adaln(silu(c))))</c>. <c>norm_final</c> is non-affine LayerNorm (eps 1e-6); modulation is scale-only.</summary>
@@ -258,17 +344,6 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         }
     }
 
-    /// <summary>Builds a per-row F32 mask (1 where <paramref name="keepRole"/> matches, else 0), shape <c>[B*L]</c>,
-    /// for <see cref="IBackend.MaskRows"/>. CPU-only (reads the indicator, writes a fresh tensor) so no device sync.</summary>
-    private static Tensor BuildRowMask(int[] indicator, int keepRole, int batch, int seqLen)
-    {
-        Tensor mask = new Tensor(new TensorShape(batch * seqLen), DType.F32);
-        float* p = (float*)mask.DataPointer;
-        for (int pos = 0; pos < batch * seqLen; pos++)
-            p[pos] = indicator[pos] == keepRole ? 1.0f : 0.0f;
-        return mask;
-    }
-
     /// <summary>Builds per-token I32 indices into <c>embed_image_indicator</c> (row 1 for image tokens, row 0 otherwise),
     /// shape <c>[B*L]</c>, for <see cref="IBackend.IndexAddRows"/>.</summary>
     private static Tensor BuildIndicatorIndices(int[] indicator, int batch, int seqLen)
@@ -286,11 +361,30 @@ public sealed unsafe class Ideogram4Transformer : IDisposable
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
-    /// <summary>Drops tensor references. Underlying unmanaged storage is owned by the mmap loader.</summary>
+    /// <summary>Drops tensor references (underlying weight storage is owned by the mmap loader) and releases the
+    /// pinned step-invariant caches.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            try
+            {
+                if (_cacheBackend is not null)
+                {
+                    if (_cachedLlmProj is not null) _cacheBackend.FreeWeights(new[] { _cachedLlmProj });
+                    if (_cachedCos is not null && _cachedSin is not null) _cacheBackend.FreeWeights(new[] { _cachedCos, _cachedSin });
+                }
+            }
+            catch (Exception ex)
+            {
+                HartsyInference.Core.Logging.Logs.Error($"Ideogram4Transformer cache release failed: {ex.Message}");
+            }
+            _cachedLlmProj?.Dispose();
+            _cachedCos?.Dispose();
+            _cachedSin?.Dispose();
+            _cachedLlmProj = _cachedCos = _cachedSin = null;
+            _cachedLlmProjKey = _cachedRopeKey = null;
+            _cacheBackend = null;
             _inputProjW = _inputProjB = null;
             _llmCondNormW = null;
             _llmCondProjW = _llmCondProjB = null;

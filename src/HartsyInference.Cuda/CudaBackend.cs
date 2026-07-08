@@ -22,7 +22,10 @@ public sealed class CudaBackend : IBackend
     private LtGemmExecutor? _ltGemmExecutor;
     private TensorCoreGemm? _tensorCoreGemm;
     private CudnnSdpa? _cudnnSdpa;
-    private bool _cudnnSdpaDead;   // set if cuDNN init/exec throws once — never retry, fall back for the session
+    private bool _cudnnSdpaDead;   // set if cuDNN INIT throws once — never retry, fall back for the session
+    // Head dims whose plan build/exec was rejected (e.g. D=256 on builds whose fused engine tops out at 128).
+    // Per-D so one unsupported arch doesn't kill the fused path for every other resident model.
+    private readonly HashSet<long> _cudnnSdpaDeadDims = new HashSet<long>();
 
     /// <summary>True once the cuDNN fused-attention fast path has successfully executed at least once this
     /// session. Diagnostic surface (tests / deploy logs) to confirm the path actually engaged vs fell back.</summary>
@@ -271,11 +274,24 @@ public sealed class CudaBackend : IBackend
             SupportsBF16 = _context.ComputeCapabilityMajor >= 8,
             SupportsQuantized = true,
             SupportsConv2D = true,
+            BandsIm2Col = true,
+            Im2ColWorkspaceCapBytes = Im2ColBandCapBytes,
             SupportsSdpa = true,
             SupportsFft = false,
             MaxRank = 6,
         };
     }
+
+    /// <summary>Largest single im2col workspace Conv2D will allocate; larger convs run as output-row bands
+    /// (bit-identical GEMMs, output pointer offset per band). Bounds the 512-ch 3×3 @1024² VAE conv (9.2 GB
+    /// naive) so full-res decode fits next to resident model weights — 1 GB verified live for the Flux.2 VAE
+    /// beside Ideogram 4's 18.6 GB resident DiTs (2 GB still OOM'd there); band size costs no GEMM efficiency
+    /// (M stays ≥ tens of thousands of rows). Override via HARTSY_IM2COL_BAND_MB (also lets tests force
+    /// banding on small shapes).</summary>
+    private static readonly long Im2ColBandCapBytes =
+        long.TryParse(Environment.GetEnvironmentVariable("HARTSY_IM2COL_BAND_MB"), out long capMb) && capMb > 0
+            ? capMb << 20
+            : 1L << 30;
 
     #region Linear Algebra
 
@@ -770,9 +786,20 @@ public sealed class CudaBackend : IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOutput = GpuTransferHelper.AllocateDevice(outBytes);
 
-            if (!is1x1)
+            // Banded im2col: cap the col workspace so one huge conv (512-ch 3x3 at 1024² = 9.2 GB) never
+            // needs a single allocation that can't fit next to resident model weights. Each band feeds the
+            // same GEMM with the output pointer offset to the band's rows and ldc = full outH·outW, so the
+            // result is bit-identical to the unbanded call. bandRows is sized to the cap; 0 bands = unbanded.
+            long colBytesFull = (long)colRows * colCols * elemSize;
+            int bandRows = 0;
+            if (!is1x1 && colBytesFull > Im2ColBandCapBytes)
             {
-                colBuf = CudaMemory.Allocate((nuint)((long)colRows * colCols * elemSize));
+                bandRows = Math.Max(1, (int)(Im2ColBandCapBytes / ((long)colRows * outW * elemSize)));
+                colBuf = CudaMemory.Allocate((nuint)((long)colRows * bandRows * outW * elemSize));
+            }
+            else if (!is1x1)
+            {
+                colBuf = CudaMemory.Allocate((nuint)colBytesFull);
             }
 
             // fp8_scaled conv weights: fold the per-tensor scale into the GEMM alpha (see MatMul). Defaults 1.0.
@@ -787,6 +814,35 @@ public sealed class CudaBackend : IBackend
             for (int b = 0; b < batch; b++)
             {
                 int inputBatchOffset = b * inCh;
+                ulong outBatchPtr = pOutput + (ulong)((long)b * outCh * outH * outW * outElemSize);
+
+                if (bandRows > 0)
+                {
+                    for (int ohBase = 0; ohBase < outH; ohBase += bandRows)
+                    {
+                        int rowsThis = Math.Min(bandRows, outH - ohBase);
+                        int bandCols = rowsThis * outW;
+                        _kernels!.LaunchIm2ColBanded(gemmDtype, colBuf, inputPtr,
+                            inCh, inH, inW, kH, kW,
+                            padH, padW, strideH, strideW,
+                            outW, ohBase, rowsThis, inputBatchOffset,
+                            _stream.Handle);
+                        // C for this band = the band's rows within every output-channel plane: pointer offset
+                        // ohBase·outW, ldc = full colCols so channel strides match the unbanded layout.
+                        ulong outBandPtr = outBatchPtr + (ulong)((long)ohBase * outW * outElemSize);
+                        CublasApi.cublasGemmEx(
+                            _cublasHandle,
+                            CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                            bandCols, outCh, colRows,
+                            &alpha,
+                            colBuf, gemmType, bandCols,
+                            weightPtr, gemmType, colRows,
+                            &beta,
+                            outBandPtr, gemmOutType, colCols,
+                            Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    }
+                    continue;
+                }
 
                 ulong colPtr;
                 if (is1x1)
@@ -818,8 +874,6 @@ public sealed class CudaBackend : IBackend
                             _stream.Handle);
                     colPtr = colBuf;
                 }
-
-                ulong outBatchPtr = pOutput + (ulong)((long)b * outCh * outH * outW * outElemSize);
 
                 CublasApi.cublasGemmEx(
                     _cublasHandle,
@@ -1457,8 +1511,10 @@ public sealed class CudaBackend : IBackend
 
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
     {
-        if (q.DType != DType.F32 || k.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
-            throw new NotSupportedException("CUDA ApplyRope supports F32 only.");
+        // F32, or F16 q/k with F32 cos/sin (DiT F16 recipe — cos/sin are tiny and precision-sensitive).
+        bool f16 = q.DType == DType.F16;
+        if ((!f16 && q.DType != DType.F32) || k.DType != q.DType || cos.DType != DType.F32 || sin.DType != DType.F32)
+            throw new NotSupportedException("CUDA ApplyRope supports F32, or F16 q/k with F32 cos/sin.");
         _context.EnsureCurrent();
         EnsureKernels();
         int numHeads = (int)q.Shape[2];
@@ -1472,8 +1528,16 @@ public sealed class CudaBackend : IBackend
             pK = GpuTransferHelper.CopyToDevice(k);
             pCos = GpuTransferHelper.CopyToDevice(cos);
             pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchRope(pQ, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
-            _kernels!.LaunchRope(pK, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+            if (f16)
+            {
+                _kernels!.LaunchRopeF16(pQ, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+                _kernels!.LaunchRopeF16(pK, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+            }
+            else
+            {
+                _kernels!.LaunchRope(pQ, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+                _kernels!.LaunchRope(pK, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
+            }
 
             // In-place on q and k: clear stale callbacks before re-caching (pitfall #17).
             q._gpuSyncCallback = null;
@@ -1902,8 +1966,9 @@ public sealed class CudaBackend : IBackend
     public void SliceLastDim(Tensor output, Tensor input, int offset)
     {
         using NvtxRange _nvtx = NvtxRange.Push("SliceLastDim");
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("CUDA SliceLastDim supports F32 only.");
+        bool f16 = output.DType == DType.F16 && input.DType == DType.F16;
+        if (!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
+            throw new NotSupportedException("CUDA SliceLastDim supports F32 or F16 (both sides same dtype).");
         _context.EnsureCurrent();
         EnsureKernels();
         int inDim = (int)input.Shape[input.Shape.Rank - 1];
@@ -1917,7 +1982,10 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(input);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchSliceLastDim(pOut, pIn, outDim, inDim, offset, output.ElementCount, _stream.Handle);
+            if (f16)
+                _kernels!.LaunchSliceLastDimF16(pOut, pIn, outDim, inDim, offset, output.ElementCount, _stream.Handle);
+            else
+                _kernels!.LaunchSliceLastDim(pOut, pIn, outDim, inDim, offset, output.ElementCount, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -2434,7 +2502,7 @@ public sealed class CudaBackend : IBackend
         // (RMS-normed Q/K), so no allowF16 gate. Same session kill-switch on any cuDNN failure.
         if (mask is null && query.DType == DType.F16 && key.DType == DType.F16 && value.DType == DType.F16
             && output.DType == DType.F16
-            && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(D)
+            && _sdpaCudnn && !_cudnnSdpaDead && !_cudnnSdpaDeadDims.Contains(D) && CudnnSdpa.ShapeSupported(D)
             && TryCudnnSdpa(output, query, key, value, scale))
         {
             return;
@@ -2447,7 +2515,7 @@ public sealed class CudaBackend : IBackend
             // materialized cuBLAS path at Krea2 shape. MHA only, D∈{64,128}. Safe for RMS-normed-Q/K archs
             // (bounded scores) since we run fp16 I/O; callers gate the same way as the F16 path (allowF16).
             // Self-disables for the session if cuDNN init/exec ever throws, falling back to the paths below.
-            if (_sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(D)
+            if (_sdpaCudnn && !_cudnnSdpaDead && !_cudnnSdpaDeadDims.Contains(D) && CudnnSdpa.ShapeSupported(D)
                 && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled
                 && TryCudnnSdpa(output, query, key, value, scale))
             {
@@ -2755,10 +2823,19 @@ public sealed class CudaBackend : IBackend
         }
         catch (Exception ex)
         {
-            // cuDNN unavailable (lib missing) or the graph/engine rejected this shape — disable for the session
-            // and fall back. Logged once so the deploy log shows whether the fast path actually engaged.
-            _cudnnSdpaDead = true;
-            HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] disabled (falling back to materialized path): {ex.Message}");
+            // Init failure (lib missing) ⇒ session-dead. A shape/engine rejection AFTER a working init (e.g.
+            // D=256 on a build whose fused engine tops out at 128) ⇒ dead for that head dim only, so other
+            // resident models (D=64/128) keep the fused path. Logged so the deploy log shows what engaged.
+            if (_cudnnSdpa is null)
+            {
+                _cudnnSdpaDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] disabled for the session (init failed): {ex.Message}");
+            }
+            else
+            {
+                _cudnnSdpaDeadDims.Add(D);
+                HartsyInference.Core.Logging.Logs.Warning($"[cuDNN SDPA] D={D} rejected (falling back to materialized path for this head dim): {ex.Message}");
+            }
             return false;
         }
         finally

@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Cuda;
 
 /// <summary>Loads PTX modules from disk and provides typed kernel launch methods. Function handles stored as nint fields for zero-alloc dispatch.</summary>
@@ -8,6 +10,7 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _groupnormModule;
     private readonly CudaModule _layernormModule;
     private readonly CudaModule _spatialModule;
+    private readonly CudaModule _im2colBandedModule;
     private readonly CudaModule _softmaxModule;
     private readonly CudaModule _transposeModule;
     private readonly CudaModule _wanRopeModule;
@@ -120,6 +123,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _upsampleNearest2dBf16;
     private readonly nint _im2colBf16;
     private readonly nint _col2biasAddBf16;
+    private readonly nint _im2colBandedF32;
+    private readonly nint _im2colBandedF16;
+    private readonly nint _im2colBandedBf16;
 
     // ── Softmax function handles ─────────────────────────────────────────
     private readonly nint _softmaxF32;
@@ -185,6 +191,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditAddScalarF16;
     private readonly nint _ditSigmoidF16;
     private readonly nint _ditRopeInterleavedF16;
+    private readonly nint _ditRopeF16;
+    private readonly nint _ditSliceLastDimF16;
     private readonly nint _ditRepeatKvF16;
     private readonly nint _ditSliceRowsF16;
     private readonly nint _ditChwToHwcU8;
@@ -259,6 +267,11 @@ public sealed class CudaKernels : IDisposable
         _upsampleNearest2dF32 = _spatialModule.GetFunction("upsample_nearest2d_f32");
         _im2colF32 = _spatialModule.GetFunction("im2col_f32");
         _col2biasAddF32 = _spatialModule.GetFunction("col2bias_add_f32");
+
+        _im2colBandedModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "im2col_banded.ptx"));
+        _im2colBandedF32 = _im2colBandedModule.GetFunction("im2col_banded_f32");
+        _im2colBandedF16 = _im2colBandedModule.GetFunction("im2col_banded_f16");
+        _im2colBandedBf16 = _im2colBandedModule.GetFunction("im2col_banded_bf16");
 
         _softmaxModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "softmax_f32.ptx"));
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
@@ -407,6 +420,8 @@ public sealed class CudaKernels : IDisposable
         _ditAddScalarF16 = _ditF16Module.GetFunction("dit_add_scalar_f16");
         _ditSigmoidF16 = _ditF16Module.GetFunction("dit_sigmoid_f16");
         _ditRopeInterleavedF16 = _ditF16Module.GetFunction("dit_rope_interleaved_f16");
+        _ditRopeF16 = _ditF16Module.GetFunction("dit_rope_f16");
+        _ditSliceLastDimF16 = _ditF16Module.GetFunction("dit_slice_lastdim_f16");
         _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
         _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
@@ -1072,6 +1087,48 @@ public sealed class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Launches banded Im2Col for one batch element: fills the col buffer for output rows
+    /// [ohBase, ohBase + bandRows) only. Dtype dispatch mirrors the full-image kernel.</summary>
+    public unsafe void LaunchIm2ColBanded(DType dtype, ulong col, ulong input,
+        int channels, int inH, int inW, int kH, int kW,
+        int padH, int padW, int strideH, int strideW,
+        int outW, int ohBase, int bandRows, int batchChanOffset, nint stream)
+    {
+        nint func = dtype == DType.F16 ? _im2colBandedF16
+            : dtype == DType.BF16 ? _im2colBandedBf16
+            : _im2colBandedF32;
+        ulong colArg = col, inArg = input;
+        uint chArg = (uint)channels, inHArg = (uint)inH, inWArg = (uint)inW;
+        uint kHArg = (uint)kH, kWArg = (uint)kW;
+        uint padHArg = (uint)padH, padWArg = (uint)padW;
+        uint strHArg = (uint)strideH, strWArg = (uint)strideW;
+        uint outWArg = (uint)outW, ohBaseArg = (uint)ohBase, bandRowsArg = (uint)bandRows;
+        uint chanOffArg = (uint)batchChanOffset;
+
+        void** args = stackalloc void*[15];
+        args[0] = &colArg;
+        args[1] = &inArg;
+        args[2] = &chArg;
+        args[3] = &inHArg;
+        args[4] = &inWArg;
+        args[5] = &kHArg;
+        args[6] = &kWArg;
+        args[7] = &padHArg;
+        args[8] = &padWArg;
+        args[9] = &strHArg;
+        args[10] = &strWArg;
+        args[11] = &outWArg;
+        args[12] = &ohBaseArg;
+        args[13] = &bandRowsArg;
+        args[14] = &chanOffArg;
+
+        long totalElements = (long)channels * kH * kW * bandRows * outW;
+        uint gridDim = (uint)((totalElements + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(
+            func, gridDim, 1, 1, BlockSize, 1, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     private unsafe void LaunchIm2ColImpl(nint func, ulong col, ulong input,
         int channels, int inH, int inW, int kH, int kW,
         int padH, int padW, int strideH, int strideW,
@@ -1542,6 +1599,10 @@ public sealed class CudaKernels : IDisposable
     public void LaunchRope(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream, int rotaryDim = 0)
         => LaunchRopeImpl(_ditRopeF32, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
 
+    /// <summary>Rotate-half rotary embedding with F16 x (cos/sin stay F32). Same geometry as the F32 kernel.</summary>
+    public void LaunchRopeF16(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream, int rotaryDim = 0)
+        => LaunchRopeImpl(_ditRopeF16, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
+
     /// <summary>Launches in-place interleaved (GPT-J) rotary embedding on x [B,L,numHeads,headDim];
     /// cos/sin [B,L,headDim]. Rotates adjacent pairs (2i,2i+1) by frequency i (not the split-half convention).</summary>
     public unsafe void LaunchRopeInterleaved(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream)
@@ -1566,6 +1627,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches last-dim slice: out[row,d] = in[row, offset+d], in row stride = inDim.</summary>
     public void LaunchSliceLastDim(ulong output, ulong input, int outDim, int inDim, int offset, long total, nint stream)
         => LaunchSliceLastDimImpl(_ditSliceLastDimF32, output, input, outDim, inDim, offset, total, stream);
+
+    /// <summary>Last-dim slice with F16 I/O (pure copy). Same geometry as the F32 kernel.</summary>
+    public void LaunchSliceLastDimF16(ulong output, ulong input, int outDim, int inDim, int offset, long total, nint stream)
+        => LaunchSliceLastDimImpl(_ditSliceLastDimF16, output, input, outDim, inDim, offset, total, stream);
 
     /// <summary>Launches per-row scalar multiply: out[row,c] = in[row,c] * rowScale[row] (token masking).</summary>
     public void LaunchRowScale(ulong output, ulong input, ulong rowScale, int channels, long total, nint stream)

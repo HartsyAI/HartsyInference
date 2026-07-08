@@ -77,7 +77,7 @@ def bench_model(sid, name, model, params, prompt=PROMPT):
     walls = []
     for i in range(REPS):
         smp = VramSampler(); smp.start()
-        r = one_gen(sid, model, params, base_seed + 1 + i)
+        r = one_gen(sid, model, params, base_seed + 1 + i, prompt)
         smp.stop(); smp.join()
         if "error" in r:
             print(f"    warm[{i}] ERROR: {r['error']}", file=sys.stderr)
