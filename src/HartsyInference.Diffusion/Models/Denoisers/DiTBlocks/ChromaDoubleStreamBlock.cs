@@ -162,11 +162,16 @@ public sealed unsafe class ChromaDoubleStreamBlock
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
 
-        // ── 1. Slice the precomputed modulation rows (CPU; tiny [B, hidden] tensors) ──
+        // ── 1. Slice the precomputed modulation rows into tiny [B, hidden] tensors ──
         // imgMod[0..6]: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp (image stream)
-        // txtMod[0..6]: same for text stream
-        Tensor[] imgMod = SliceModRows(temb, batch, rowStart: 0, rowCount: 6);
-        Tensor[] txtMod = SliceModRows(temb, batch, rowStart: 6, rowCount: 6);
+        // txtMod[0..6]: same for text stream. Device slices (B=1): the old host path read the
+        // device-produced temb's DataPointer — a full pipeline drain per block (the temb stream-stall).
+        Tensor[] imgMod = batch == 1
+            ? SliceModRowsDevice(backend, temb, rowStart: 0, rowCount: 6)
+            : SliceModRows(temb, batch, rowStart: 0, rowCount: 6);
+        Tensor[] txtMod = batch == 1
+            ? SliceModRowsDevice(backend, temb, rowStart: 6, rowCount: 6)
+            : SliceModRows(temb, batch, rowStart: 6, rowCount: 6);
 
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
@@ -326,6 +331,21 @@ public sealed unsafe class ChromaDoubleStreamBlock
     /// table starting at <paramref name="rowStart"/>, returning each row as its own <c>[B, hidden]</c> tensor.
     /// Lets <see cref="AdaLNModulation.ApplyModulation"/> / <see cref="AdaLNModulation.ApplyGatedResidual"/>
     /// consume them with the same per-batch broadcast semantics as Flux's modulation outputs.</summary>
+    /// <summary>Device twin of <see cref="SliceModRows"/> (B=1): per-row <c>backend.SliceRows</c> so the
+    /// device-resident temb is never drained to the host mid-forward.</summary>
+    private static Tensor[] SliceModRowsDevice(IBackend backend, Tensor temb, int rowStart, int rowCount)
+    {
+        int hidden = (int)temb.Shape[2];
+        Tensor[] rows = new Tensor[rowCount];
+        for (int r = 0; r < rowCount; r++)
+        {
+            Tensor row = new Tensor(new TensorShape(1, hidden), DType.F32);
+            backend.SliceRows(row, temb, rowStart + r);
+            rows[r] = row;
+        }
+        return rows;
+    }
+
     private Tensor[] SliceModRows(Tensor temb, int batch, int rowStart, int rowCount)
     {
         int totalRows = (int)temb.Shape[1];

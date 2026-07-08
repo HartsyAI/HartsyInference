@@ -196,6 +196,22 @@ graph cannot span streamed (re-pointered) weights (the 43.145 eviction-crash rul
 > 7168-token SDPA was even more dominant than profiled. Remaining per the audit: Hunyuan patchify/unpatchify host
 > loops + per-step prompt re-upload + VAE tiled per-tile Sync; Kandinsky patch glue; graph capture for both.
 
+> ### I2V/S2V round (2026-07-08, engine 44.9-local deployed)
+> **Wan I2V-14B through Swarm was BROKEN on 44.8** (blotchy un-denoised output, composition preserved —
+> reproduced 2×): the per-forward conditioning recompute read CLIP/text tensors whose device buffers the
+> per-step `FreeActivations` had dropped. **FIXED by the I2V context cache in 44.9** (compute once,
+> host-materialize): output now pristine (astronaut-on-horse gallop, faithful to init). Lesson: any tensor
+> consumed across steps in a pipeline that calls `FreeActivations` per step MUST be host-materialized or
+> recomputed from host-backed sources — silent garbage otherwise.
+> **I2V perf**: 200 s warm vs T2V-14B's 37 s at the same size/steps — ~160 s of I2V-specific overhead
+> (init VAE-encode, concat-conditioning build, per-step mask?) → needs phase probes in
+> `GenerateImageToVideoConcat` (next target).
+> **S2V trim REVERTED**: `FreeActivations(trimPool:false)` OOM'd mid-run (40 blocks × 13824 FFN) even with
+> FP8_NATIVE — the audio injector's churn needs the per-step pool trim until its host glue is ported.
+> **Wan 14B T2V at cfg 6 (fp8)** shows rainbow glitch patches through Swarm — the known fp8-CFG amplification;
+> extension should clamp/renorm CFG for fp8 Wan (detector CfgRescale exists engine-side; verify it engages
+> through the extension path).
+
 ## Plan — rest of fleet (interleave as capacity allows; ordered by value)
 
 1. **Quick wins, one deploy each:** S2V per-step `TrimMemoryPool` → `trimPool:false` (W9); Wan RoPE memoization

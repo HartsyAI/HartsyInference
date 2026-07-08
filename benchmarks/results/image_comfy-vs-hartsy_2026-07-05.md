@@ -434,3 +434,31 @@ est. ~2.05 → ~1.2–1.4 s/step (→ ~30s/gen), at ~20 GB resident + a requant-
 **2.86s** ✓ (bar 3.2), Krea2-Turbo **4.47s** ✓ (bar 6.5), images pristine. (One bench pass showed 74–136s
 outliers that snapped back to 2.98/4.47 on final reps — transient GPU contention from the concurrent video
 session's verification runs, confirmed clean on re-run with an intruder watchdog.)
+
+## 2026-07-08 — Chroma round 1: 110s → **97.2s** (Comfy 16.6s) — engine `alpha.44.9-local` — + fleet recipe status
+
+Chroma got the full pipeline recipe (T5 prompt cache, KEEP_MODELS w/ evict-on-miss, drain-free CfgEulerStep
+loop, previews throttled to every 4th step) PLUS the device modulation-table port: `BuildDoubleBlockTemb` /
+`SliceModSlab` / per-block `SliceModRows` / `ApplyContinuousNorm` all read the device-produced mod table via
+host `DataPointer` (the Kandinsky temb stream-stall, ×57 blocks/forward) — now `SliceRows`/`Concat`/
+`LayerNormNoAffine`/`AffineBroadcastLastDim` device ops (B=1; host fallback kept). Coherent ✓ visually (clean
+modulation, no scrambling). Only −12% because **Chroma is GPU-bound on its masked SDPA**: the Chroma text mask
+disqualifies the cuDNN fused path (mask-null-only), so attention runs F32-materialized/tiled. **Chroma's real
+levers (next round): cuDNN SDPA bias/mask support (also unblocks the video fleet's masked models), F16
+activations, fp8-native GEMM audit.**
+
+ERNIE haze verdict: same-seed A/B with banded-conv + full-res VAE disabled = IDENTICAL image → today's shared
+changes innocent; the flat/grainy look is ERNIE's standing output (quality audit queued for its grind round —
+std-ratio vs ComfyUI per the GroupNormSilu washout history). Ideogram's "haze" is the JSON prompt's explicit
+"faint atmospheric haze" — not a defect.
+
+Fresh 44.8 baselines banked for the remaining fleet: SDXL 32.97s (Comfy 3.7), Flux-Dev 72.4s (12.5) — Flux also
+has two UNCONDITIONAL full-tensor host stat scans per step (`LogTensorStats` + `LogPerLatentChannelMeanPacked`)
+to gate, plus the standard recipe. AuraFlow re-download pending (see incident below). Qwen round-1 recipe is the
+template for all.
+
+**Incident (2026-07-08 ~10:24):** a disk-full cleanup deleted `/tmp/*_dl` dirs that turned out to be LIVE
+symlinked storage for ~10 checkpoints (AuraFlow/Chroma-fp8/Kontext/OmniGen2/HiDream/Kandinsky-T2I/Boogu-TE +
+Krea2/Ideogram TEs). Recovered same-session: TEs re-downloaded (Krea2 verified healed with a coherent gen),
+Chroma fp8 re-downloaded (`silveroxides/Chroma1-HD-fp8-scaled`). Still to re-fetch: AuraFlow fp8, Kontext,
+OmniGen2, Kandinsky-T2I, HiDream, Boogu flux1 VAE. Memory: `models-in-tmp-symlink-trap`.
