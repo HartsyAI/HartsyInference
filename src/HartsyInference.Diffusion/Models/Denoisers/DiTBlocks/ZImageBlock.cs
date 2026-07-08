@@ -6,6 +6,22 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Z-Image transformer block (Lumina2/NextDiT). Used for both <c>noise_refiner</c> blocks and the 30 main <c>layers</c> — they're structurally identical and only differ in which tokens they're called on. Uses AdaLN with 4 outputs (scale_msa, gate_msa, scale_mlp, gate_mlp — scale + gate, no shifts) and a fused QKV projection. The SwarmUI single-file checkpoint stores QKV as one big <c>[3*hidden, hidden]</c> tensor and the output projection as <c>attention.out</c>; QK-norm is <c>q_norm</c>/<c>k_norm</c> (not <c>norm_q</c>/<c>norm_k</c>). All attention linears have NO bias.</summary>
 public sealed unsafe class ZImageBlock
 {
+    /// <summary>F16-mode damping for the two sandwich-normed projections. Z-Image's attention out-projection
+    /// and SwiGLU produce raw magnitudes past F16's 65504 (traced live: attnProjected INF in the FIRST refiner
+    /// block; the historical layer-0 ffnOut INF is the silu(w1·x)·(w3·x) product, ~±160k) — but BOTH feed
+    /// straight into an RmsNorm, and RMSNorm(c·x) ≡ RMSNorm(x). Scaling <c>attention.out</c> and
+    /// <c>feed_forward.w3</c> (folded into the GEMM alpha via Fp8ScaleFactor — zero extra kernels, any weight
+    /// dtype) divides every intermediate on those paths with a bit-exact post-norm result: F16 floating point
+    /// loses NO relative precision to a power-of-two exponent shift. 1/64 because late-step magnitudes grow
+    /// ~4× past step 1's (raw ffnOut traced to ~1.05M at step 6 — 1/16 left exactly ONE element at INF).</summary>
+    private const float F16SandwichDamp = 1.0f / 64.0f;
+
+    /// <summary>HARTSY_ZIMAGE_F16TRACE=1: logs min/max/nan of every block intermediate for the first few block
+    /// forwards — locates the first F16 overflow site. Each probe D2H-drains the tensor (very slow); debug only.</summary>
+    private static readonly bool F16TraceEnabled =
+        Environment.GetEnvironmentVariable("HARTSY_ZIMAGE_F16TRACE") == "1";
+    private static int _traceCallsLeft = F16TraceEnabled ? 300 : 0;   // covers all blocks of an 8-step gen
+
     private readonly int _hiddenSize;
     private readonly int _numHeads;
     private readonly int _headDim;
@@ -59,6 +75,14 @@ public sealed unsafe class ZImageBlock
         LoadSplitQkv(weights[$"{prefix}.attention.qkv.weight"]);
         _attnOutWeight = weights[$"{prefix}.attention.out.weight"];
 
+        // F16 mode: damp the two RmsNorm-sandwiched projections so their raw outputs fit F16 range (see
+        // F16SandwichDamp). Applied once per weight (LoadWeights runs once per transformer instance); the F32
+        // path is untouched when the flag is off so the baseline stays bit-identical.
+        if (DitDtype.Act == DType.F16)
+        {
+            _attnOutWeight.Fp8ScaleFactor *= F16SandwichDamp;
+        }
+
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.k_norm.weight"]);
 
@@ -73,6 +97,11 @@ public sealed unsafe class ZImageBlock
         _w1Weight = weights[$"{prefix}.feed_forward.w1.weight"];
         _w2Weight = weights[$"{prefix}.feed_forward.w2.weight"];
         _w3Weight = weights[$"{prefix}.feed_forward.w3.weight"];
+        if (DitDtype.Act == DType.F16)
+        {
+            // Damps silu(w1·x)·(w3·x) AND the w2 output linearly; ffn_norm2 cancels the factor exactly.
+            _w3Weight.Fp8ScaleFactor *= F16SandwichDamp;
+        }
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -104,6 +133,11 @@ public sealed unsafe class ZImageBlock
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
+        // Activation dtype follows the INPUT (the Krea2Block pattern): the transformer casts the token stream
+        // to F16 once before the block loop on the HARTSY_DIT_F16 path, and every block activation follows.
+        // The AdaLN modulation vectors stay F32 (tiny per-channel params — the F16 norm/affine/gate kernels
+        // take an F16 activation + F32 params); the classic F32 path is byte-identical to the baseline.
+        DType act = x.DType;
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
         TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
         TensorShape mhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
@@ -123,29 +157,41 @@ public sealed unsafe class ZImageBlock
         // barrier per block (34×/step).
         Tensor[] mod = ComputeAdaLN(backend, tEmb, batch);
 
+        bool trace = _traceCallsLeft > 0;
+        if (trace)
+        {
+            _traceCallsLeft--;
+            Trace("x-in", x);
+            Trace("mod0-scaleMsa", mod[0]);
+            Trace("mod1-gateMsa", mod[1]);
+        }
+
         // ── Attention sub-block ──
-        Tensor norm1 = new Tensor(shape, DType.F32);
+        Tensor norm1 = new Tensor(shape, act);
         backend.RmsNorm(norm1, x, _attnNorm1Weight!, _eps);
-        Tensor modulated = new Tensor(shape, DType.F32);
+        Tensor modulated = new Tensor(shape, act);
         backend.AffineBroadcastLastDim(modulated, norm1, mod[0], null); // x·(1+scale_msa), no shift
         norm1.Dispose();
+        if (trace) Trace("modulated-msa", modulated);
 
         // Separate Q/K/V projections declared directly as [B, S, H, D] so RmsNorm normalizes over headDim and
         // Permute0213 runs with no explicit reshape.
-        Tensor qHeads = new Tensor(headsShape, DType.F32);
-        Tensor kHeads = new Tensor(headsShape, DType.F32);
-        Tensor v = new Tensor(headsShape, DType.F32);
+        Tensor qHeads = new Tensor(headsShape, act);
+        Tensor kHeads = new Tensor(headsShape, act);
+        Tensor v = new Tensor(headsShape, act);
         backend.Linear(qHeads, modulated, _toQWeight!, null);
         backend.Linear(kHeads, modulated, _toKWeight!, null);
         backend.Linear(v, modulated, _toVWeight!, null);
         modulated.Dispose();
+        if (trace) { Trace("qHeads", qHeads); Trace("kHeads", kHeads); Trace("vHeads", v); }
 
-        Tensor qNormed = new Tensor(headsShape, DType.F32);
-        Tensor kNormed = new Tensor(headsShape, DType.F32);
+        Tensor qNormed = new Tensor(headsShape, act);
+        Tensor kNormed = new Tensor(headsShape, act);
         backend.RmsNorm(qNormed, qHeads, _normQ.Weight, _normQ.Eps);
         backend.RmsNorm(kNormed, kHeads, _normK.Weight, _normK.Eps);
         qHeads.Dispose();
         kHeads.Dispose();
+        if (trace) { Trace("qNormed", qNormed); Trace("kNormed", kNormed); }
 
         // RoPE on the PRE-permute [B, S, H, D] layout, device-resident for B=1 (bit-identical: RoPE indexes only
         // (position, dim)). The old post-permute host rope.Forward D2H-round-tripped the full ~63 MB Q and K
@@ -157,9 +203,9 @@ public sealed unsafe class ZImageBlock
         }
 
         // [B, S, H, D] → [B, H, S, D] for SDPA.
-        Tensor qMh = new Tensor(mhShape, DType.F32);
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        Tensor vMh = new Tensor(mhShape, DType.F32);
+        Tensor qMh = new Tensor(mhShape, act);
+        Tensor kMh = new Tensor(mhShape, act);
+        Tensor vMh = new Tensor(mhShape, act);
         backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
         backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
         backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
@@ -175,49 +221,56 @@ public sealed unsafe class ZImageBlock
         // allowF16: Q/K are RMS-normed above → pre-softmax scores bounded → the F16/cuDNN fused SDPA path is
         // numerically safe (same condition as Krea2/Wan/LTX).
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
+        Tensor attnOut = new Tensor(mhShape, act);
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
+        if (trace) Trace("attnOut", attnOut);
 
         // [B, H, S, D] → [B, S, hidden]
-        Tensor attnFlat = new Tensor(shape, DType.F32);
+        Tensor attnFlat = new Tensor(shape, act);
         backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
-        Tensor projected = new Tensor(shape, DType.F32);
+        Tensor projected = new Tensor(shape, act);
         backend.Linear(projected, attnFlat, _attnOutWeight!, null);
         attnFlat.Dispose();
+        if (trace) Trace("attnProjected", projected);
 
-        Tensor postAttnNorm = new Tensor(shape, DType.F32);
+        Tensor postAttnNorm = new Tensor(shape, act);
         backend.RmsNorm(postAttnNorm, projected, _attnNorm2Weight!, _eps);
         projected.Dispose();
 
-        Tensor afterAttn = new Tensor(shape, DType.F32);
+        Tensor afterAttn = new Tensor(shape, act);
         backend.GatedResidualLastDim(afterAttn, x, postAttnNorm, mod[1]);   // x + gate_msa·attn_out
         postAttnNorm.Dispose();
+        if (trace) Trace("afterAttn", afterAttn);
 
         // ── FFN sub-block ──
-        Tensor normF1 = new Tensor(shape, DType.F32);
+        Tensor normF1 = new Tensor(shape, act);
         backend.RmsNorm(normF1, afterAttn, _ffnNorm1Weight!, _eps);
-        Tensor modulatedF = new Tensor(shape, DType.F32);
+        Tensor modulatedF = new Tensor(shape, act);
         backend.AffineBroadcastLastDim(modulatedF, normF1, mod[2], null); // x·(1+scale_mlp), no shift
         normF1.Dispose();
 
-        Tensor ffnOut = ForwardSwiGlu(backend, modulatedF, batch, seqLen);
+        // The SwiGLU runs at the block dtype: F16 is range-safe because w3 is damped at load (F16SandwichDamp)
+        // — the silu(w1·x)·(w3·x) product and the w2 output are both /16, and ffn_norm2 cancels it exactly.
+        Tensor ffnOut = ForwardSwiGlu(backend, modulatedF, batch, seqLen, trace);
         modulatedF.Dispose();
+        if (trace) Trace("ffnOut", ffnOut);
 
-        Tensor postFfnNorm = new Tensor(shape, DType.F32);
+        Tensor postFfnNorm = new Tensor(shape, act);
         backend.RmsNorm(postFfnNorm, ffnOut, _ffnNorm2Weight!, _eps);
         ffnOut.Dispose();
 
-        Tensor result = new Tensor(shape, DType.F32);
+        Tensor result = new Tensor(shape, act);
         backend.GatedResidualLastDim(result, afterAttn, postFfnNorm, mod[3]);  // afterAttn + gate_mlp·ffn_out
         afterAttn.Dispose();
         postFfnNorm.Dispose();
 
         for (int i = 0; i < mod.Length; i++) mod[i].Dispose();
+        if (trace) Trace("blockOut", result);
 
         return result;
     }
@@ -271,8 +324,43 @@ public sealed unsafe class ZImageBlock
         return results;
     }
 
+
+    /// <summary>Debug probe (HARTSY_ZIMAGE_F16TRACE): min/max/nan of a tensor, F16 or F32. D2H-drains.</summary>
+    private static void Trace(string name, Tensor t)
+    {
+        float min = float.MaxValue, max = float.MinValue;
+        long nan = 0, inf = 0;
+        long n = t.Shape.ElementCount;
+        if (t.DType == DType.F16)
+        {
+            Half* p = (Half*)t.DataPointer;
+            for (long i = 0; i < n; i++)
+            {
+                float v = (float)p[i];
+                if (float.IsNaN(v)) { nan++; continue; }
+                if (float.IsInfinity(v)) { inf++; continue; }
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+        else
+        {
+            float* p = (float*)t.DataPointer;
+            for (long i = 0; i < n; i++)
+            {
+                float v = p[i];
+                if (float.IsNaN(v)) { nan++; continue; }
+                if (float.IsInfinity(v)) { inf++; continue; }
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[zimage-f16trace] {name} [{t.DType.Name}] min={min:F3} max={max:F3} nan={nan} inf={inf} n={n}");
+    }
+
     /// <summary>SwiGLU FFN with no biases: output = w2(silu(w1(x)) * w3(x)).</summary>
-    private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
+    private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen, bool trace = false)
     {
         TensorShape ffShape = new TensorShape(batch, seqLen, _ffnDim);
 
@@ -287,6 +375,7 @@ public sealed unsafe class ZImageBlock
 
         Tensor gated = new Tensor(ffShape, input.DType);
         backend.Mul(gated, gateActivated, linear);
+        if (trace) { Trace("ffn-siluG", gateActivated); Trace("ffn-u", linear); Trace("ffn-gated", gated); }
         gateActivated.Dispose();
         linear.Dispose();
 

@@ -1364,6 +1364,9 @@ public sealed class CudaBackend : IBackend
 
     public bool StepGraphReady => _stepGraph?.IsReady == true && !_stepGraphCapturing;
 
+    /// <summary>Owner token for the single step-graph slot (see IBackend.StepGraphOwner).</summary>
+    public object? StepGraphOwner { get; set; }
+
     public void StepGraphBegin()
     {
         _context.EnsureCurrent();

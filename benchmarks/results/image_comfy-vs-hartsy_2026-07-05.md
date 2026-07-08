@@ -307,3 +307,19 @@ Recon killed two stale beliefs (Z-Image HAS QK-norm; blocks already GPU-resident
 NegateInPlace + latent D2H) — build a `ForwardPatched`-style drain-free fast path (persistent latent tokens,
 on-device negate+Euler via CfgEulerStep with delta=−dt), then `DitDtype` F16 (audit ffn=10240 SwiGLU) +
 `DitStepGraph` capture + KEEP_MODELS/prompt-cache/device-rgb pipeline parity with Krea2. Then Ideogram4.
+
+### Z-Image-Turbo round 2 (`alpha.43.146-local`): 6.6s → **5.15s** — coherent ✓, Krea2 regression clean (4.68s)
+Drain-free packed fast path (the Krea2 `ForwardPatched` pattern): `ZImageTransformer.ForwardPacked` keeps the
+latent in `[1, imgRealLen, C·p²]` token space across the whole loop (patchify/unpatchify once); the Euler update
+is one in-place device op — `CfgEulerStep(packed, v, v, 1, −dt)` folds diffusers' `noise_pred = -noise_pred`
+negation into the sign (NegateInPlace + host scheduler.Step + per-step latent D2H + per-step FreeActivations all
+gone). Also: final layer fully device (host LayerNormNoAffine → backend op; host (1+scale) loop → Modulate),
+device rgb (`ChwF32ToHwcU8`), per-gen latent-stats scans gated behind `HARTSY_ZIMAGE_STATS`.
+
+**Standing: Z-Image-Turbo 5.15s vs Comfy 3.1s (1.66×; was 16.8×).** Remaining menu to beat 3.1s:
+1. **TE encode cost** (Qwen3-4B runs per gen in the extension loader — needs a prompt-embedding cache there,
+   extension-side; attribution first via the `[zimage-phase]` Verbose probes, run Swarm at verbose log level).
+2. **`DitStepGraph` capture** — the loop is now drain-free + fixed-shape; copy the Krea2Transformer pattern
+   (fixed latent/tEmb/velocity buffers, sig = caption ref ⊕ shape, weight-eviction invalidation).
+3. **`DitDtype` F16 activations** — REAL SwiGLU overflow history here (ffn=10240, L0 ffnOut INF): audit with FFN
+   inner kept F32 first.

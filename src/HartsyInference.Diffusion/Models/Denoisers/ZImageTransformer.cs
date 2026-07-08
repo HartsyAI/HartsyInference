@@ -29,6 +29,20 @@ public sealed unsafe class ZImageTransformer : IDisposable
     private long _refinerRopeSig = long.MinValue;
     private long _fullRopeSig = long.MinValue;
 
+    // ── Step-graph state (HARTSY_DIT_GRAPH; the Krea2Transformer recipe — see ForwardPacked) ──────────────
+    // Every per-step-varying boundary lives in a FIXED device buffer the captured graph reads: the packed
+    // latent (_latentFixed, updated in-place by the pipeline's CfgEulerStep), the timestep embedding
+    // (_tEmbFixed, refreshed per step via CopyInto), and the velocity output (_graphVelocity, a pre-capture
+    // NORMAL buffer written by a captured CopyInto as the graph's last op).
+    private Tensor? _latentFixed;
+    private Tensor? _tEmbFixed;
+    private Tensor? _graphVelocity;
+    private long _graphSig = long.MinValue;   // rope sig ⊕ caption identity the captured graph is valid for
+    private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
+    private int _graphSigFlips;               // sig alternation counter (CFG cond/uncond → graph unusable)
+    private bool _graphDead;                  // permanent per-session fallback to eager
+    private const int GraphCaptureCall = 3;
+
     // t_embedder: sinusoidal(timestep × 1000) → Linear(adaLNDim → adaLNDim) → SiLU → Linear(adaLNDim → adaLNDim)
     private Tensor? _tEmbLinear1Weight, _tEmbLinear1Bias;
     private Tensor? _tEmbLinear2Weight, _tEmbLinear2Bias;
@@ -190,26 +204,286 @@ public sealed unsafe class ZImageTransformer : IDisposable
         return velocity;
     }
 
+    /// <summary>Patchifies a pixel latent <c>[B, C, H, W]</c> → the <c>[B, (H/p)(W/p), C·p²]</c> token grid the
+    /// packed fast path operates on. Host op; call once per generation.</summary>
+    public Tensor PatchifyLatent(Tensor latent)
+    {
+        int patch = _config.PatchSize;
+        return Patchify(latent, (int)latent.Shape[0], (int)latent.Shape[1], (int)latent.Shape[2], (int)latent.Shape[3], patch);
+    }
+
+    /// <summary>Unpatchifies the packed token grid back to a pixel latent <c>[B, C, H, W]</c>. Host op; call once
+    /// per generation (reads the tokens' DataPointer — never call mid-loop).</summary>
+    public Tensor UnpatchifyPacked(Tensor tokens, int inChannels, int hPacked, int wPacked)
+    {
+        return Unpatchify(tokens, (int)tokens.Shape[0], inChannels, hPacked, wPacked, _config.PatchSize);
+    }
+
+    /// <summary>Denoise-step core in packed token space (the Krea2 <c>ForwardPatched</c> pattern): consumes the
+    /// <c>[1, imgRealLen, C·p²]</c> token grid (patchify once before the loop) and returns the flow-match velocity
+    /// in the SAME packed space — no per-step patchify/unpatchify, no host excursions, so the pipeline's Euler
+    /// update can run on-device (<c>CfgEulerStep</c> with <c>delta = −dt</c>, folding Z-Image's velocity negation
+    /// into the sign) and the loop never drains the pipeline. t2i only (no regional plan).
+    /// <para>With <c>HARTSY_DIT_GRAPH=1</c> and the latent routed through <see cref="PrepareGraphLatent"/>, the
+    /// fixed per-step region (<see cref="PackedCore"/>) is CUDA-graph-captured once and replayed per step —
+    /// tEmb is refreshed into a fixed buffer, the cached caption is pinned device-resident (a pageable re-upload
+    /// inside capture is illegal), and the velocity lands in a fixed pre-capture buffer the caller must NOT
+    /// dispose. Self-disables on capture failure; see the Krea2Transformer reference recipe.</para></summary>
+    public Tensor ForwardPacked(IBackend backend, Tensor packedLatent, Tensor captionEmbeddings, float sigma,
+        int hPacked, int wPacked)
+    {
+        if (packedLatent.Shape.Rank != 3 || packedLatent.Shape[0] != 1)
+            throw new ArgumentException($"packedLatent must be [1, imgSeq, C·p²], got {packedLatent.Shape}.", nameof(packedLatent));
+
+        int imgRealLen = hPacked * wPacked;
+        int imgPaddedLen = PadUpTo(imgRealLen, _config.SeqMultiOf);
+        int capRealLen = (int)captionEmbeddings.Shape[1];
+        int capPaddedLen = PadUpTo(capRealLen, _config.SeqMultiOf);
+        // F16 hot path (HARTSY_DIT_F16): the packed loop is the audited opt-in surface — the classic path
+        // (CFG / regional / img2img) stays F32.
+        DType act = DiTBlocks.DitDtype.Act;
+
+        Tensor tEmb = ComputeTimestepEmbedding(backend, sigma, 1);
+        Tensor refinedCaption = EnsureRefinedCaption(backend, captionEmbeddings, 1, capRealLen, capPaddedLen, act);
+        EnsureRefinerRope(hPacked, wPacked, imgPaddedLen);
+        EnsureFullRope(hPacked, wPacked, imgPaddedLen, capPaddedLen);
+
+        // Graph mode requires the pipeline-routed fixed latent AND a pad-free image sequence (PadImage is a
+        // host op — capture-illegal). Everything else falls back to the eager drain-free path.
+        bool graphMode = DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported && !_graphDead
+            && ReferenceEquals(packedLatent, _latentFixed) && imgPaddedLen == imgRealLen;
+        if (!graphMode)
+        {
+            Tensor eager = PackedCore(backend, packedLatent, refinedCaption, tEmb, hPacked, wPacked,
+                imgRealLen, imgPaddedLen, capPaddedLen, act);
+            tEmb.Dispose();
+            return eager;
+        }
+
+        // Refresh the fixed timestep buffer — the ONLY per-step-varying content the captured graph reads.
+        _tEmbFixed ??= new Tensor(tEmb.Shape, DType.F32);
+        backend.CopyInto(_tEmbFixed, tEmb);
+        tEmb.Dispose();
+
+        long ropeSig = ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L) ^ ((long)imgPaddedLen * 2654435761L)
+            ^ ((long)capPaddedLen * 73856093L);
+        long sig = ropeSig ^ ((long)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(refinedCaption) << 17);
+        // The backend graph slot is SHARED across models — if another transformer captured since our last launch
+        // (models alternating under KEEP_MODELS), replaying "our" graph would launch THEIR step. Owner mismatch
+        // forces a re-warm + re-capture and never counts toward the CFG flip-storm heuristic.
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        if (sig != _graphSig || ownerLost)
+        {
+            backend.StepGraphReset();
+            if (!ownerLost && _graphSig != long.MinValue && ++_graphSigFlips > 8)
+            {
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning("[Z-Image graph] signature flip storm — step-graph disabled for this session.");
+            }
+            _graphSig = sig;
+            _graphSigCalls = 0;
+            backend.StepGraphOwner = this;
+        }
+        _graphSigCalls++;
+        if (_graphSigCalls == 1)
+        {
+            // Pin the cached caption as a device-resident weight: the host-materialized cache otherwise
+            // re-uploads from PAGEABLE memory every step — an internally-syncing copy that invalidates capture
+            // (and a hidden per-step serializer in eager mode). Sync alloc — must happen OUTSIDE the capture.
+            backend.PreloadWeights(new[] { refinedCaption });
+        }
+        _graphVelocity ??= new Tensor(new TensorShape(1, imgRealLen,
+            _config.InChannels * _config.PatchSize * _config.PatchSize * _config.FramePatchSize), DType.F32);
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return _graphVelocity;
+        }
+
+        // Calls 1..2 at this sig run eagerly THROUGH THE FIXED BUFFERS (warms caption pin + rope-table uploads
+        // so nothing inside the capture does a synchronous alloc); call 3 records the same sequence.
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) backend.StepGraphBegin();
+        try
+        {
+            Tensor projected = PackedCore(backend, packedLatent, refinedCaption, _tEmbFixed, hPacked, wPacked,
+                imgRealLen, imgPaddedLen, capPaddedLen, act);
+            backend.CopyInto(_graphVelocity, projected);   // last captured op: land the velocity at a fixed, normal buffer
+            projected.Dispose();
+        }
+        catch (Exception ex) when (capture)
+        {
+            // A capture-illegal op invalidated the recording (nothing executed). Abort, disable graph mode for
+            // the session, and re-run this step eagerly so the generation stays correct.
+            backend.StepGraphReset();
+            _graphDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[Z-Image graph] capture invalidated — falling back to eager: {ex}");
+            Tensor projected = PackedCore(backend, packedLatent, refinedCaption, _tEmbFixed, hPacked, wPacked,
+                imgRealLen, imgPaddedLen, capPaddedLen, act);
+            backend.CopyInto(_graphVelocity, projected);
+            projected.Dispose();
+            return _graphVelocity;
+        }
+        if (capture)
+        {
+            try
+            {
+                backend.StepGraphEndAndLaunch();   // capture records without executing — this runs the step
+                HartsyInference.Core.Logging.Logs.Info("[Z-Image graph] denoise step captured; replaying via cuGraphLaunch.");
+            }
+            catch (Exception ex)
+            {
+                backend.StepGraphReset();
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[Z-Image graph] capture failed — falling back to eager: {ex.Message}");
+                Tensor projected = PackedCore(backend, packedLatent, refinedCaption, _tEmbFixed, hPacked, wPacked,
+                    imgRealLen, imgPaddedLen, capPaddedLen, act);
+                backend.CopyInto(_graphVelocity, projected);
+                projected.Dispose();
+            }
+        }
+        return _graphVelocity;
+    }
+
+    /// <summary>The fixed per-step region for the packed path: x_embedder → (F16 cast) → noise_refiners →
+    /// concat[image, caption] → 30 main layers → front slice → (F32 cast) → final layer. Identical op sequence
+    /// every step for a given (caption, resolution) — the property that makes it CUDA-graph-capturable.
+    /// Caller owns <paramref name="tEmb"/>; the caption is cache-owned.</summary>
+    private Tensor PackedCore(IBackend backend, Tensor packedLatent, Tensor refinedCaption, Tensor tEmb,
+        int hPacked, int wPacked, int imgRealLen, int imgPaddedLen, int capPaddedLen, DType act)
+    {
+        int hidden = _config.HiddenSize;
+
+        Tensor imgEmbedded = new Tensor(new TensorShape(1, imgRealLen, hidden), DType.F32);
+        backend.Linear(imgEmbedded, packedLatent, _xEmbedderWeight!, _xEmbedderBias);
+
+        Tensor imgPadded = PadImage(imgEmbedded, imgRealLen, imgPaddedLen, 1);
+        if (!ReferenceEquals(imgPadded, imgEmbedded))
+            imgEmbedded.Dispose();
+
+        // F16 hot path: one cast into F16 before the refiner + main-layer loop — the blocks and attention then
+        // run entirely in F16 (half the HBM traffic of the bandwidth-bound glue kernels). The once-per-step
+        // x_embedder/timestep paths stay F32; the image tail is cast back after the loop.
+        if (act == DType.F16)
+        {
+            Tensor imgF16 = new Tensor(imgPadded.Shape, DType.F16);
+            backend.CastToF16(imgF16, imgPadded);
+            imgPadded.Dispose();
+            imgPadded = imgF16;
+        }
+
+        Tensor refinedImage = imgPadded;
+        for (int i = 0; i < _noiseRefiners.Length; i++)
+        {
+            Tensor next = _noiseRefiners[i].Forward(backend, refinedImage, tEmb, _refinerRope);
+            refinedImage.Dispose();
+            refinedImage = next;
+        }
+
+        Tensor concat = new Tensor(new TensorShape(1, imgPaddedLen + capPaddedLen, hidden), act);
+        backend.Concat(concat, new[] { refinedImage, refinedCaption }, dim: 1);
+        refinedImage.Dispose();
+
+        Tensor x = concat;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            Tensor next = _layers[i].Forward(backend, x, tEmb, _rope);
+            x.Dispose();
+            x = next;
+        }
+
+        Tensor realImage = new Tensor(new TensorShape(1, imgRealLen, hidden), act);
+        backend.SliceRows(realImage, x, 0);
+        x.Dispose();
+        if (realImage.DType == DType.F16)
+        {
+            // Back to F32 for the final layer + the on-device Euler step (velocity precision matters across steps).
+            Tensor realF32 = new Tensor(realImage.Shape, DType.F32);
+            backend.CastToF32(realF32, realImage);
+            realImage.Dispose();
+            realImage = realF32;
+        }
+
+        Tensor finalProj = ApplyFinalLayer(backend, realImage, tEmb, 1, imgRealLen);
+        realImage.Dispose();
+        return finalProj;
+    }
+
+    /// <summary>Invalidates the captured step graph. MUST be called whenever the transformer's weights are freed:
+    /// the captured graph bakes the WEIGHT device pointers, so a free + re-upload leaves it pointing at freed
+    /// memory — replaying it then is a CUDA 700 illegal-address that poisons the whole context (the Krea2 fleet
+    /// lesson). The next generation re-warms and re-captures.</summary>
+    public void InvalidateStepGraph(IBackend backend)
+    {
+        backend.StepGraphReset();
+        if (ReferenceEquals(backend.StepGraphOwner, this))
+            backend.StepGraphOwner = null;
+        _graphSig = long.MinValue;   // MinValue = "no sig": the next call resets WITHOUT counting a CFG flip
+        _graphSigCalls = 0;
+    }
+
+    /// <summary>Routes a fresh packed latent into the step-graph's FIXED latent buffer (the address the captured
+    /// graph reads and the pipeline's in-place Euler updates). Returns the fixed tensor — transformer-owned; the
+    /// pipeline must not dispose it or read its DataPointer (snapshot via <see cref="SnapshotGraphLatent"/>).
+    /// A resolution change resets the graph.</summary>
+    public Tensor PrepareGraphLatent(IBackend backend, Tensor freshPackedLatent)
+    {
+        if (_latentFixed is not null && _latentFixed.Shape != freshPackedLatent.Shape)
+        {
+            InvalidateStepGraph(backend);
+            _latentFixed.Dispose();
+            _latentFixed = null;
+            _graphVelocity?.Dispose();
+            _graphVelocity = null;
+        }
+        _latentFixed ??= new Tensor(freshPackedLatent.Shape, DType.F32);
+        backend.CopyInto(_latentFixed, freshPackedLatent);
+        return _latentFixed;
+    }
+
+    /// <summary>Device-copies the fixed latent into a fresh tensor the caller may freely read/dispose (reading
+    /// the fixed tensor's DataPointer directly would D2H-and-FREE the buffer the captured graph points at).</summary>
+    public Tensor SnapshotGraphLatent(IBackend backend)
+    {
+        Tensor snap = new Tensor(_latentFixed!.Shape, DType.F32);
+        backend.CopyInto(snap, _latentFixed);
+        return snap;
+    }
+
     /// <summary>Backbone forward shared with <see cref="ZetaChromaTransformer"/>: caption/noise refiners + the 30
     /// main layers, from raw latent to post-backbone image tokens (pad tokens already trimmed, final layer NOT
     /// applied). The caller owns both returned tensors; <c>tEmb</c> is returned so classic Z-Image can run its
     /// AdaLN final layer — Zeta-Chroma disposes it unused (its decoder head conditions on the tokens only).</summary>
     internal (Tensor imgTokens, Tensor tEmb, int hPacked, int wPacked) ForwardCore(
         IBackend backend, Tensor latent, Tensor captionEmbeddings, float sigma,
-        RegionalPlan? regionalPlan = null, int regionalStep = 0)
+        RegionalPlan? regionalPlan = null, int regionalStep = 0, int packedH = 0, int packedW = 0)
     {
+        // Packed fast path (the drain-free pipeline loop): `latent` is ALREADY the [B, imgRealLen, C·p²] token
+        // grid (rank 3) with the grid dims passed explicitly — patchify is skipped and the caller keeps
+        // ownership of the token tensor. Rank-4 input is the classic [B, C, H, W] pixel latent.
+        bool packedInput = latent.Shape.Rank == 3;
         int batch = (int)latent.Shape[0];
-        int inChannels = (int)latent.Shape[1];
-        int latentH = (int)latent.Shape[2];
-        int latentW = (int)latent.Shape[3];
         int hidden = _config.HiddenSize;
         int patch = _config.PatchSize;
 
-        if (latentH % patch != 0 || latentW % patch != 0)
-            throw new ArgumentException($"Latent H/W ({latentH}x{latentW}) must be divisible by patch size {patch}.");
-
-        int hPacked = latentH / patch;
-        int wPacked = latentW / patch;
+        int hPacked, wPacked;
+        if (packedInput)
+        {
+            if (packedH <= 0 || packedW <= 0)
+                throw new ArgumentException("Packed (rank-3) input requires explicit packedH/packedW.");
+            hPacked = packedH;
+            wPacked = packedW;
+        }
+        else
+        {
+            int latentH = (int)latent.Shape[2];
+            int latentW = (int)latent.Shape[3];
+            if (latentH % patch != 0 || latentW % patch != 0)
+                throw new ArgumentException($"Latent H/W ({latentH}x{latentW}) must be divisible by patch size {patch}.");
+            hPacked = latentH / patch;
+            wPacked = latentW / patch;
+        }
         int imgRealLen = hPacked * wPacked;
         int imgPaddedLen = PadUpTo(imgRealLen, _config.SeqMultiOf);
 
@@ -235,79 +509,36 @@ public sealed unsafe class ZImageTransformer : IDisposable
         ZImageDebugDump.Dump("t_embedder", tEmb);
 
         // ── 2. Caption embedding: cap_embedder + pad + context_refiner stack — CACHED across steps ──
-        // Timestep-independent: same captionEmbeddings in → same refinedCaption out, so recomputing it every
-        // step wasted 2 refiner block-forwards + the cap_embedder + a host rope build per step. Keyed on the
-        // encoder-output reference + padded length; regional runs bypass (their caption stream is step-dependent).
+        // Timestep-independent; regional runs bypass the cache (their caption stream is step-dependent).
         bool captionCacheable = regionalPlan is null || regionalPlan.Regions.Count == 0;
-        bool captionCached = captionCacheable && ReferenceEquals(_cachedCaptionKey, captionEmbeddings)
-            && _cachedCapPaddedLen == capPaddedLen && _cachedRefinedCaption is not null;
-        Tensor refinedCaption;
-        if (captionCached)
+        Tensor refinedCaption = captionCacheable
+            ? EnsureRefinedCaption(backend, effCaption, batch, capRealLen, capPaddedLen, DType.F32)
+            : ComputeRefinedCaption(backend, effCaption, batch, capRealLen, capPaddedLen);
+        if (ownsCaption)
         {
-            refinedCaption = _cachedRefinedCaption!;
+            effCaption.Dispose();
         }
-        else
-        {
-            Tensor capProjected = EmbedCaption(backend, effCaption, batch, capRealLen);
-            if (ownsCaption)
-            {
-                effCaption.Dispose();
-            }
-            ZImageDebugDump.Dump("cap_embedder", capProjected);
-            Tensor capPadded = PadCaption(capProjected, capRealLen, capPaddedLen, batch);
-            // PadCaption may return the input unchanged when paddedLen==realLen — only dispose if it allocated a new tensor.
-            if (!ReferenceEquals(capPadded, capProjected))
-                capProjected.Dispose();
-
-            // Caption-only RoPE: positions (1..capPaddedLen, 0, 0) on the frame axis. Diffusers ZImageTransformerBlock
-            // applies freqs_cis even when modulation=False (the context_refiner case), so caption tokens DO get RoPE.
-            _captionRope ??= new ZImageRope(_config.AxesDims, _config.RopeTheta);
-            Tensor capPosIds = ZImageRope.BuildCaptionPositionIds(capPaddedLen);
-            _captionRope.Precompute(capPosIds);
-            capPosIds.Dispose();
-
-            refinedCaption = capPadded;
-            for (int i = 0; i < _contextRefiners.Length; i++)
-            {
-                Tensor next = _contextRefiners[i].Forward(backend, refinedCaption, _captionRope);
-                refinedCaption.Dispose();
-                refinedCaption = next;
-                ZImageDebugDump.Dump($"context_refiner.{i}", refinedCaption);
-            }
-
-            if (captionCacheable)
-            {
-                _ = refinedCaption.DataPointer;   // materialize to host so it survives across steps
-                _cachedRefinedCaption?.Dispose();
-                _cachedRefinedCaption = refinedCaption;
-                _cachedCaptionKey = captionEmbeddings;
-                _cachedCapPaddedLen = capPaddedLen;
-            }
-        }
-        bool ownsRefinedCaption = !captionCacheable;   // cached (or newly cached) captions are field-owned
+        bool ownsRefinedCaption = !captionCacheable;   // cached captions are field-owned
 
         // ── 3. Image patchify + embed + pad + noise_refiner stack ──
-        Tensor packedLatent = Patchify(latent, batch, inChannels, latentH, latentW, patch);
+        // Packed input skips patchify (the pipeline keeps the latent in token space across the whole loop and
+        // owns the tensor); pixel input patchifies here as before.
+        Tensor packedLatent = packedInput
+            ? latent
+            : Patchify(latent, batch, (int)latent.Shape[1], (int)latent.Shape[2], (int)latent.Shape[3], patch);
         TensorShape imgEmbShape = new TensorShape(batch, imgRealLen, hidden);
-        Tensor imgEmbedded = new Tensor(imgEmbShape, latent.DType);
+        Tensor imgEmbedded = new Tensor(imgEmbShape, DType.F32);
         backend.Linear(imgEmbedded, packedLatent, _xEmbedderWeight!, _xEmbedderBias);
         ZImageDebugDump.Dump("x_embedder", imgEmbedded);
-        packedLatent.Dispose();
+        if (!packedInput)
+            packedLatent.Dispose();
 
         Tensor imgPadded = PadImage(imgEmbedded, imgRealLen, imgPaddedLen, batch);
         if (!ReferenceEquals(imgPadded, imgEmbedded))
             imgEmbedded.Dispose();
 
         // Image-only RoPE for noise_refiner (cached by shape signature — timestep-independent).
-        long refinerSig = ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L) ^ ((long)imgPaddedLen * 2654435761L);
-        _refinerRope ??= new ZImageRope(_config.AxesDims, _config.RopeTheta);
-        if (_refinerRopeSig != refinerSig)
-        {
-            Tensor refinerPosIds = ZImageRope.BuildImagePositionIds(hPacked, wPacked, imgPaddedLen);
-            _refinerRope.Precompute(refinerPosIds);
-            refinerPosIds.Dispose();
-            _refinerRopeSig = refinerSig;
-        }
+        EnsureRefinerRope(hPacked, wPacked, imgPaddedLen);
 
         Tensor refinedImage = imgPadded;
         for (int i = 0; i < _noiseRefiners.Length; i++)
@@ -337,14 +568,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
         refinedImage.Dispose();
 
         // ── 5. Build full RoPE for the concatenated [image, caption] sequence (cached by signature) ──
-        long fullSig = refinerSig ^ ((long)capPaddedLen * 73856093L);
-        if (_fullRopeSig != fullSig)
-        {
-            Tensor fullPosIds = ZImageRope.BuildPositionIds(capPaddedLen, hPacked, wPacked, imgPaddedLen);
-            _rope.Precompute(fullPosIds);
-            fullPosIds.Dispose();
-            _fullRopeSig = fullSig;
-        }
+        EnsureFullRope(hPacked, wPacked, imgPaddedLen, capPaddedLen);
 
         // Build the regional attention bias for the [image|caption] main-layer sequence. Image
         // tokens occupy [0, imgRealLen) (padded image tokens get no bias); region caption columns
@@ -423,6 +647,96 @@ public sealed unsafe class ZImageTransformer : IDisposable
         m1Act.Dispose();
 
         return tEmb;
+    }
+
+    /// <summary>Returns the refined caption stream from the per-generation cache, recomputing on a key /
+    /// padded-length / dtype miss. Keyed on the encoder-output reference (a new prompt is a new tensor →
+    /// evicts). The cached tensor is host-materialized so it survives cross-step activation frees; graph mode
+    /// additionally pins it device-resident (see ForwardPacked), so eviction must FreeWeights before Dispose.</summary>
+    private Tensor EnsureRefinedCaption(IBackend backend, Tensor captionEmbeddings, int batch, int capRealLen,
+        int capPaddedLen, DType act)
+    {
+        bool hit = ReferenceEquals(_cachedCaptionKey, captionEmbeddings) && _cachedCapPaddedLen == capPaddedLen
+            && _cachedRefinedCaption is not null && _cachedRefinedCaption.DType == act;
+        if (hit)
+            return _cachedRefinedCaption!;
+
+        Tensor refined = ComputeRefinedCaption(backend, captionEmbeddings, batch, capRealLen, capPaddedLen);
+        if (act == DType.F16 && refined.DType != DType.F16)
+        {
+            // Cache in the block-loop dtype so the per-step concat needs no cast (the F16 packed path).
+            Tensor refinedF16 = new Tensor(refined.Shape, DType.F16);
+            backend.CastToF16(refinedF16, refined);
+            refined.Dispose();
+            refined = refinedF16;
+        }
+        _ = refined.DataPointer;   // materialize to host so it survives across steps
+        if (_cachedRefinedCaption is not null)
+        {
+            backend.FreeWeights(new[] { _cachedRefinedCaption });   // no-op unless graph mode pinned it
+            _cachedRefinedCaption.Dispose();
+        }
+        _cachedRefinedCaption = refined;
+        _cachedCaptionKey = captionEmbeddings;
+        _cachedCapPaddedLen = capPaddedLen;
+        return refined;
+    }
+
+    /// <summary>cap_embedder → pad → caption-RoPE → context_refiner stack. Timestep-independent; the caller
+    /// owns the returned tensor (the cacheable path routes through <see cref="EnsureRefinedCaption"/>).</summary>
+    private Tensor ComputeRefinedCaption(IBackend backend, Tensor caption, int batch, int capRealLen, int capPaddedLen)
+    {
+        Tensor capProjected = EmbedCaption(backend, caption, batch, capRealLen);
+        ZImageDebugDump.Dump("cap_embedder", capProjected);
+        Tensor capPadded = PadCaption(capProjected, capRealLen, capPaddedLen, batch);
+        // PadCaption may return the input unchanged when paddedLen==realLen — only dispose if it allocated a new tensor.
+        if (!ReferenceEquals(capPadded, capProjected))
+            capProjected.Dispose();
+
+        // Caption-only RoPE: positions (1..capPaddedLen, 0, 0) on the frame axis. Diffusers ZImageTransformerBlock
+        // applies freqs_cis even when modulation=False (the context_refiner case), so caption tokens DO get RoPE.
+        _captionRope ??= new ZImageRope(_config.AxesDims, _config.RopeTheta);
+        Tensor capPosIds = ZImageRope.BuildCaptionPositionIds(capPaddedLen);
+        _captionRope.Precompute(capPosIds);
+        capPosIds.Dispose();
+
+        Tensor refined = capPadded;
+        for (int i = 0; i < _contextRefiners.Length; i++)
+        {
+            Tensor next = _contextRefiners[i].Forward(backend, refined, _captionRope);
+            refined.Dispose();
+            refined = next;
+            ZImageDebugDump.Dump($"context_refiner.{i}", refined);
+        }
+        return refined;
+    }
+
+    /// <summary>Builds the noise_refiner image-only RoPE tables when the shape signature changes.</summary>
+    private void EnsureRefinerRope(int hPacked, int wPacked, int imgPaddedLen)
+    {
+        long refinerSig = ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L) ^ ((long)imgPaddedLen * 2654435761L);
+        _refinerRope ??= new ZImageRope(_config.AxesDims, _config.RopeTheta);
+        if (_refinerRopeSig != refinerSig)
+        {
+            Tensor refinerPosIds = ZImageRope.BuildImagePositionIds(hPacked, wPacked, imgPaddedLen);
+            _refinerRope.Precompute(refinerPosIds);
+            refinerPosIds.Dispose();
+            _refinerRopeSig = refinerSig;
+        }
+    }
+
+    /// <summary>Builds the main-layer [image, caption] RoPE tables when the shape signature changes.</summary>
+    private void EnsureFullRope(int hPacked, int wPacked, int imgPaddedLen, int capPaddedLen)
+    {
+        long refinerSig = ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L) ^ ((long)imgPaddedLen * 2654435761L);
+        long fullSig = refinerSig ^ ((long)capPaddedLen * 73856093L);
+        if (_fullRopeSig != fullSig)
+        {
+            Tensor fullPosIds = ZImageRope.BuildPositionIds(capPaddedLen, hPacked, wPacked, imgPaddedLen);
+            _rope.Precompute(fullPosIds);
+            fullPosIds.Dispose();
+            _fullRopeSig = fullSig;
+        }
     }
 
     /// <summary>Caption embedding: RMSNorm(cap_embedder.0) → Linear(cap_embedder.1) → [B, capLen, hidden].</summary>
@@ -683,28 +997,15 @@ public sealed unsafe class ZImageTransformer : IDisposable
         backend.Linear(scaleParam, activated, _finalAdaLNWeight!, _finalAdaLNBias);
         activated.Dispose();
 
-        // LayerNorm-no-affine on image tokens. Diffusers Z-Image FinalLayer uses LayerNorm(eps=1e-6, elementwise_affine=False) — note: 1e-6, not the 1e-5 used elsewhere in the model.
+        // LayerNorm-no-affine on image tokens (device — the DiTUtils host loop D2H-drained the full token tensor
+        // every step). Diffusers Z-Image FinalLayer uses LayerNorm(eps=1e-6, elementwise_affine=False) — note:
+        // 1e-6, not the 1e-5 used elsewhere in the model.
         TensorShape seqShape = new TensorShape(batch, seqLen, hidden);
-        Tensor normed = new Tensor(seqShape, imageTokens.DType);
-        DiTUtils.LayerNormNoAffine(normed, imageTokens, batch, seqLen, hidden, 1e-6f);
+        Tensor normed = new Tensor(seqShape, DType.F32);
+        backend.LayerNormNoAffine(normed, imageTokens, 1e-6f);
 
-        // Apply scale only: out = normed * (1 + scale).
-        Tensor modulated = new Tensor(seqShape, imageTokens.DType);
-        float* normPtr = (float*)normed.DataPointer;
-        float* scalePtr = (float*)scaleParam.DataPointer;
-        float* outPtr = (float*)modulated.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
-            {
-                int seqOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
-                {
-                    outPtr[seqOff + d] = normPtr[seqOff + d] * (1.0f + scalePtr[condBase + d]);
-                }
-            }
-        }
+        // Apply scale only: out = normed · (1 + scale) — device (was a host triple-loop + D2H drain per step).
+        Tensor modulated = DiTUtils.Modulate(backend, normed, null, scaleParam, seqShape);
         normed.Dispose();
         scaleParam.Dispose();
 
@@ -730,6 +1031,12 @@ public sealed unsafe class ZImageTransformer : IDisposable
             _cachedRefinedCaption?.Dispose();
             _cachedRefinedCaption = null;
             _cachedCaptionKey = null;
+            _latentFixed?.Dispose();
+            _latentFixed = null;
+            _tEmbFixed?.Dispose();
+            _tEmbFixed = null;
+            _graphVelocity?.Dispose();
+            _graphVelocity = null;
             _tEmbLinear1Weight = null;
             _tEmbLinear1Bias = null;
             _tEmbLinear2Weight = null;

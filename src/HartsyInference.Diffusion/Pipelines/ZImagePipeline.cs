@@ -120,6 +120,37 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         Backend.FreeActivations();
 
         // ── 3. Denoising loop (from startStep onward) ──
+        // Fast path (plain t2i, no CFG/img2img/inpaint/regional): keep the latent in the transformer's packed
+        // token space across the WHOLE loop — patchify once here, run each step via ForwardPacked, and do the
+        // Euler update on-device with CfgEulerStep(delta = −dt), which folds Z-Image's `noise_pred = -noise_pred`
+        // negation into the sign. A step then never reads a DataPointer: no NegateInPlace drain, no host
+        // scheduler.Step, no per-step latent D2H, no per-step FreeActivations (the Krea2 ForwardPatched pattern).
+        bool fastPath = !isImg2Img && !isMaskedInpaint && cfgScale <= 1.0f
+            && (regionalPlan is null || regionalPlan.Regions.Count == 0);
+        // Step-graph mode (HARTSY_DIT_GRAPH, fast path only): route the latent through the transformer's FIXED
+        // buffer so the captured graph's baked address stays valid across steps and gens. The fixed tensor is
+        // transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
+        bool graphMode = fastPath && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
+        int fpH = latentH / _config.PatchSize;
+        int fpW = latentW / _config.PatchSize;
+        Tensor? packed = null;
+        if (fastPath)
+        {
+            long phP = sw.ElapsedMilliseconds;
+            Tensor fresh = _transformer.PatchifyLatent(latent);
+            latent.Dispose();
+            if (graphMode)
+            {
+                packed = _transformer.PrepareGraphLatent(Backend, fresh);
+                fresh.Dispose();
+            }
+            else
+            {
+                packed = fresh;
+            }
+            Logs.Verbose($"[zimage-phase] patchify={sw.ElapsedMilliseconds - phP}ms");
+        }
+
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = plan.StartStep; i < steps; i++)
         {
@@ -131,6 +162,22 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             // this inversion every step conditions on the OPPOSITE point in the schedule and the
             // model produces near-random output. See pipeline_z_image.py:506.
             float invertedSigma = 1.0f - sigma;
+
+            if (fastPath)
+            {
+                Tensor v = _transformer.ForwardPacked(Backend, packed!, captionEmbeddings, invertedSigma, fpH, fpW);
+                // packed += (−v)·dt — one in-place device op = diffusers' negate + Euler step combined.
+                Backend.CfgEulerStep(packed!, v, v, 1.0f, -scheduler.Dt(i));
+                if (!graphMode)
+                    v.Dispose();   // graph mode: v is the transformer's fixed velocity buffer (reused every step)
+                stepSw.Stop();
+                Logs.Verbose($"[zimage-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
+                // No Latent in the progress event: the packed tokens must never be DataPointer-read mid-loop
+                // (the lazy D2H would free the device buffer). Previews skip gracefully when Latent is null.
+                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                continue;
+            }
+
             Tensor velocity = _transformer.Forward(Backend, latent, captionEmbeddings, invertedSigma, regionalPlan, i - plan.StartStep);
 
             if (cfgScale > 1.0f)
@@ -192,6 +239,18 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             Backend.FreeActivations(trimPool: false);
         }
 
+        // Fast path: bring the final packed tokens back to pixel space once for the VAE (the single D2H).
+        // Graph mode reads a SNAPSHOT — unpatchify's DataPointer read would otherwise D2H-and-FREE the fixed
+        // buffer the captured graph points at.
+        if (fastPath)
+        {
+            long phU = sw.ElapsedMilliseconds;
+            Tensor tokens = graphMode ? _transformer.SnapshotGraphLatent(Backend) : packed!;
+            latent = _transformer.UnpatchifyPacked(tokens, _config.InChannels, fpH, fpW);
+            tokens.Dispose();   // graph mode: the snapshot; eager: packed itself (as before)
+            Logs.Verbose($"[zimage-phase] unpatchify+drain={sw.ElapsedMilliseconds - phU}ms");
+        }
+
         // ── 4. VAE decode ──
         // No pre-scale: VaeDecoder.UndoScaling already applies `latent / ScalingFactor + ShiftFactor`
         // using VaeConfig.ZImage (== VaeConfig.Flux: scale=0.3611, shift=0.1159). The previous
@@ -226,13 +285,34 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
             MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
         }
 
-        // ── 6. RGB conversion ──
-        byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
+        // ── 6. RGB conversion — device CHW F32 → HWC u8, one 3 MB D2H (see Krea2Pipeline) ──
+        long phRgb = sw.ElapsedMilliseconds;
+        byte[] rgbData;
+        {
+            int outH = (int)image.Shape[2], outW = (int)image.Shape[3];
+            Tensor hwcU8 = new Tensor(new TensorShape(outH, outW, 3), DType.U8);
+            Backend.ChwF32ToHwcU8(hwcU8, image);
+            rgbData = new byte[(long)outH * outW * 3];
+            unsafe
+            {
+                fixed (byte* dst = rgbData)
+                    Buffer.MemoryCopy((void*)hwcU8.DataPointer, dst, rgbData.Length, rgbData.Length);
+            }
+            hwcU8.Dispose();
+        }
+        Logs.Verbose($"[zimage-phase] rgb={sw.ElapsedMilliseconds - phRgb}ms");
         image.Dispose();
 
         // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
         // memory until GC finalization and shrink the budget of whatever generation runs next.
         Backend.FreeActivations();
+
+        // FreeActivations just freed the step graph's fixed boundary buffers (they live in the ACTIVATION
+        // cache — CopyInto/CfgEulerStep re-cache them there), so a cross-gen replay would launch against freed
+        // addresses: CUDA 700 that poisons the context (hit live on the first warm gen). The graph is therefore
+        // per-generation here: invalidate now, re-warm + re-capture next gen at the fresh buffer addresses.
+        if (graphMode)
+            _transformer.InvalidateStepGraph(Backend);
 
         sw.Stop();
         Logs.Info($"Z-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
@@ -309,8 +389,14 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
     /// healthy Z-Image / Flux latents have per-channel min ~-5 to -1, max ~+1 to +5,
     /// mean within ±2. RGB outputs should land in roughly [-1, 1] with mean near 0.
     /// Outside those bands means the model or VAE saturated.</summary>
+    /// <summary>Diagnostic gate for the per-channel latent/VAE stats (HARTSY_ZIMAGE_STATS=1). Unconditional stats
+    /// forced a D2H drain + a host scan of the full tensors every generation — pure overhead outside bring-up.</summary>
+    private static readonly bool LatentStatsEnabled =
+        Environment.GetEnvironmentVariable("HARTSY_ZIMAGE_STATS") == "1";
+
     private static void LogLatentStatsPerChannel(string name, Tensor t)
     {
+        if (!LatentStatsEnabled) return;
         if (t.Shape.Rank != 4) return;
         int channels = (int)t.Shape[1];
         int spatial = (int)(t.Shape[2] * t.Shape[3]);

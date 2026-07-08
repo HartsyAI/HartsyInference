@@ -256,6 +256,25 @@ public sealed class VaeDecoder
     /// AutoencoderKL is always 8×, but exposed here so callers don't hardcode it.</summary>
     public const int SpatialScale = 8;
 
+    /// <summary>Diagnostic gate (HARTSY_VAE_STATS=1) for the per-tile/per-image min/max/mean scans below.
+    /// These were bring-up instrumentation for the black-tile bug; unconditional they force full host scans
+    /// of multi-megapixel tensors every generation.</summary>
+    private static readonly bool VaeStatsEnabled =
+        Environment.GetEnvironmentVariable("HARTSY_VAE_STATS") == "1";
+
+    /// <summary>Kill switch (HARTSY_VAE_FULLRES=0) for the full-resolution direct-decode attempt in
+    /// <see cref="DecodeTiled"/>, forcing the always-tiled behavior.</summary>
+    private static readonly bool FullResEnabled =
+        Environment.GetEnvironmentVariable("HARTSY_VAE_FULLRES") != "0";
+
+    /// <summary>Set when a full-resolution decode attempt failed (OOM) — tiles for the rest of the session.</summary>
+    private bool _fullResDisabled;
+
+    /// <summary>Largest single im2col workspace the full-res attempt may require before it falls back to tiling
+    /// without trying. 10 GB covers 1024² output for an F32 [128,256,512,512] AutoencoderKL (peak 9.66 GB) while
+    /// rejecting 2048²+ (≥4× that).</summary>
+    private const long FullResWorkspaceCapBytes = 10L << 30;
+
     /// <summary>Decodes the latent in spatial tiles and blends overlapping RGB regions,
     /// rather than running the full convolution stack on the entire latent at once.
     /// Solves the catastrophic im2col workspace blow-up (e.g. ~9.7 GB for a 256ch 3×3
@@ -294,13 +313,47 @@ public sealed class VaeDecoder
         // Fast path: latent already fits in one tile. Match the latent dtype to the VAE weight
         // dtype (callers now pass an F32 latent; Decode's per-op dispatch needs the input to match
         // the weights — F32 latent on BF16 weights would read garbage). No-op when already equal.
+        DType weightDtype = EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
         if (latentH <= tileLatentSize && latentW <= tileLatentSize)
         {
-            DType wDtype = EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
-            Tensor single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, wDtype, disposeSourceOnCast: false);
+            Tensor single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, weightDtype, disposeSourceOnCast: false);
             Tensor decoded = Decode(backend, single);
             if (!ReferenceEquals(single, latent)) single.Dispose();
             return decoded;
+        }
+
+        // Full-resolution direct decode: tiling exists only to bound Conv2D's im2col workspace, but it costs
+        // real time — at 1024² (128 latent, 64 tile, 8 overlap) it is 9 overlapping tiles = ~2.25× redundant
+        // GPU decode plus per-tile D2H drains and a multi-megapixel host blend/normalize loop (measured ~1.5 s
+        // vs ~0.3 s for a comparable full-res VAE). When the estimated worst-case im2col buffer is within
+        // budget, decode the whole latent in one pass (the same code path the single-tile case runs). OOM falls
+        // back to tiles for the rest of the session — the allocator already syncs + trims the pool before
+        // giving up, so a genuine failure means the VRAM truly isn't there.
+        int gemmElemSize = Math.Max(2, weightDtype.SizeInBytes);   // fp8 weights GEMM at 16-bit
+        long fullResWorkspace = EstimateDecodeWorkspaceBytes(latentH, latentW, gemmElemSize);
+        if (FullResEnabled && !_fullResDisabled && fullResWorkspace <= FullResWorkspaceCapBytes)
+        {
+            System.Diagnostics.Stopwatch fullSw = System.Diagnostics.Stopwatch.StartNew();
+            Tensor? single = null;
+            try
+            {
+                single = Utilities.DtypeCastHelper.EnsureDtype(backend, latent, weightDtype, disposeSourceOnCast: false);
+                Tensor decoded = Decode(backend, single);
+                if (!ReferenceEquals(single, latent)) single.Dispose();
+                Logs.Verbose($"[vae-phase] full-res decode {latentH}x{latentW} latent in {fullSw.ElapsedMilliseconds}ms " +
+                    $"(im2col est {fullResWorkspace >> 20} MB)");
+                return decoded;
+            }
+            catch (Exception ex)
+            {
+                // Almost certainly VRAM exhaustion on the im2col workspace. Clean up whatever the partial
+                // decode left on-device and fall back to the tiled path (and stay tiled this session).
+                _fullResDisabled = true;
+                if (single is not null && !ReferenceEquals(single, latent)) single.Dispose();
+                backend.FreeActivations();
+                Logs.Warning($"[vae-phase] full-res decode failed after {fullSw.ElapsedMilliseconds}ms — " +
+                    $"falling back to tiled for this session: {ex.Message}");
+            }
         }
 
         int rgbH = latentH * SpatialScale;
@@ -343,8 +396,8 @@ public sealed class VaeDecoder
         // the slice to match the weight dtype before calling Decode â otherwise
         // Decode's per-op dispatch picks the F32 kernel which reads BF16 weights as
         // F32 garbage. This is the analog of the SdxlPipeline match-to-VAE cast, but
-        // at per-tile granularity. Sample dtype from any weight tensor.
-        DType vaeDtype = EnumerateWeights().FirstOrDefault()?.DType ?? DType.F32;
+        // at per-tile granularity.
+        DType vaeDtype = weightDtype;
 
         for (int ty = 0; ty < nTilesH; ty++)
         {
@@ -378,7 +431,7 @@ public sealed class VaeDecoder
                     }
                 }
 
-                if (ty == 0 && tx == 0)
+                if (VaeStatsEnabled && ty == 0 && tx == 0)
                 {
                     float dbgMin = float.MaxValue, dbgMax = float.MinValue;
                     double dbgSum = 0;
@@ -399,7 +452,7 @@ public sealed class VaeDecoder
                 // kernel and reads the weights at the wrong width. Cast the F32 slice to
                 // vaeDtype if they differ (no-op when already F32).
                 Tensor tileInput = Utilities.DtypeCastHelper.EnsureDtype(backend, latentSlice, vaeDtype);
-                if (ty == 0 && tx == 0)
+                if (VaeStatsEnabled && ty == 0 && tx == 0)
                 {
                     Tensor tileInputF32 = tileInput.DType == DType.F32 ? tileInput : Utilities.DtypeCastHelper.EnsureDtype(backend, tileInput, DType.F32, disposeSourceOnCast: false);
                     float* dbgPtr2 = (float*)tileInputF32.DataPointer;
@@ -419,7 +472,7 @@ public sealed class VaeDecoder
                 }
                 Tensor rgbTile = Decode(backend, tileInput);
                 tileInput.Dispose();
-                if (ty == 0 && tx == 0)
+                if (VaeStatsEnabled && ty == 0 && tx == 0)
                 {
                     float* dbgPtr = (float*)rgbTile.DataPointer;
                     float dbgMin = float.MaxValue, dbgMax = float.MinValue;
@@ -481,6 +534,7 @@ public sealed class VaeDecoder
             }
         }
 
+        if (VaeStatsEnabled)
         {
             float dbgMin = float.MaxValue, dbgMax = float.MinValue;
             double dbgSum = 0;
@@ -516,6 +570,33 @@ public sealed class VaeDecoder
         float left = isFirstTile ? 1f : Math.Min(1f, (idx + 1) / (float)overlap);
         float right = isLastTile ? 1f : Math.Min(1f, (tileSize - idx) / (float)overlap);
         return Math.Min(left, right);
+    }
+
+    /// <summary>Walks the decoder's conv plan (mid → up-blocks with 2× upsamples → conv_out) and returns the
+    /// largest single im2col workspace (bytes) <see cref="Decode"/> will ask Conv2D for at this latent size.
+    /// Every conv here is 3×3, so workspace = inCh · 9 · outH · outW · elemSize; the peak is the first conv at
+    /// full output resolution that still carries the previous block's channel count.</summary>
+    private long EstimateDecodeWorkspaceBytes(int latentH, int latentW, int elemSize)
+    {
+        int[] ch = _config.BlockOutChannels;
+        int numBlocks = ch.Length;
+        long h = latentH, w = latentW;
+        long prevCh = ch[^1];
+        long worstElems = prevCh * 9 * h * w;   // conv_in + mid-block at latent resolution
+        for (int blockIdx = 0; blockIdx < numBlocks; blockIdx++)
+        {
+            long outCh = ch[numBlocks - 1 - blockIdx];
+            worstElems = Math.Max(worstElems, Math.Max(prevCh, outCh) * 9 * h * w);
+            if (blockIdx < numBlocks - 1)
+            {
+                h *= 2;
+                w *= 2;
+                worstElems = Math.Max(worstElems, outCh * 9 * h * w);   // upsampler conv at the doubled resolution
+            }
+            prevCh = outCh;
+        }
+        worstElems = Math.Max(worstElems, prevCh * 9 * h * w);   // conv_out at full resolution
+        return worstElems * elemSize;
     }
 
     /// <summary>Undoes the latent scaling: z = latent / scaling_factor + shift_factor.</summary>

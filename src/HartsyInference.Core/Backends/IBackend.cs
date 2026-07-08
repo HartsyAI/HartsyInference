@@ -458,6 +458,12 @@ public interface IBackend : IDisposable
     /// <summary>Drops the captured graph (shape/prompt change → recapture) and disables an in-flight capture.</summary>
     void StepGraphReset() { }
 
+    /// <summary>Identity of the model instance whose capture currently occupies the (single) step-graph slot.
+    /// The slot is SHARED across models: a transformer must verify it still owns the slot before
+    /// <see cref="StepGraphLaunch"/> — when models alternate, replaying a stale "ready" graph would silently run
+    /// ANOTHER model's step. Set it when starting a capture cycle; owner mismatch → reset + recapture.</summary>
+    object? StepGraphOwner { get => null; set { } }
+
     /// <summary>Copies <paramref name="src"/>'s data into <paramref name="dst"/>'s EXISTING storage, preserving
     /// dst's buffer address (unlike normal ops, which allocate fresh output buffers). Used to refresh a captured
     /// graph's fixed input buffers between launches. Shapes/dtypes must match. Default = host memcpy.</summary>

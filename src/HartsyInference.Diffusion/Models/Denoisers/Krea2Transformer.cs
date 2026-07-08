@@ -224,16 +224,21 @@ public sealed unsafe class Krea2Transformer : IDisposable
         tembMod.Dispose();
 
         long sig = ropeSig ^ ((long)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(txt) << 17);
-        if (sig != _graphSig)
+        // The backend graph slot is SHARED across models — if another transformer captured since our last
+        // launch (models alternating under KEEP_MODELS), a "ready" graph is THEIRS: replaying it would run the
+        // wrong model's step. Owner mismatch forces re-warm + re-capture and never counts as a CFG flip.
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        if (sig != _graphSig || ownerLost)
         {
             backend.StepGraphReset();
-            if (_graphSig != long.MinValue && ++_graphSigFlips > 8)
+            if (!ownerLost && _graphSig != long.MinValue && ++_graphSigFlips > 8)
             {
                 _graphDead = true;   // alternating signatures (CFG cond/uncond) — capture can't converge
                 HartsyInference.Core.Logging.Logs.Warning("[Krea2 graph] signature flip storm — step-graph disabled for this session.");
             }
             _graphSig = sig;
             _graphSigCalls = 0;
+            backend.StepGraphOwner = this;
         }
         _graphSigCalls++;
         if (_graphSigCalls == 1)
@@ -304,6 +309,8 @@ public sealed unsafe class Krea2Transformer : IDisposable
     public void InvalidateStepGraph(IBackend backend)
     {
         backend.StepGraphReset();
+        if (ReferenceEquals(backend.StepGraphOwner, this))
+            backend.StepGraphOwner = null;
         _graphSig = long.MinValue;   // MinValue = "no sig": the next call resets WITHOUT counting a CFG flip
         _graphSigCalls = 0;
     }
