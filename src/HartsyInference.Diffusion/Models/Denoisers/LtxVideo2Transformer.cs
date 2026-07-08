@@ -235,6 +235,95 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         return (video, audio);
     }
 
+    /// <summary>CFG-paired velocity prediction: runs the conditional and unconditional branches through each block
+    /// back-to-back, so under block streaming every block's weights upload ONCE per step instead of once per branch —
+    /// halving the dominant 19 GB/forward weight traffic. The branches share the latent inputs (proj_in computed once,
+    /// device-copied), all timestep modulation, and the RoPE tables; they differ only in the text-connector features.
+    /// Numerically identical to two <see cref="Forward"/> calls. <see cref="OnBlockOutput"/> fires for the conditional
+    /// branch only.</summary>
+    public ((Tensor Video, Tensor Audio) Cond, (Tensor Video, Tensor Audio) Uncond) ForwardCfgPair(
+        IBackend backend, Tensor videoTokens, Tensor audioTokens,
+        Tensor encoderVideoCond, Tensor encoderAudioCond, Tensor encoderVideoUncond, Tensor encoderAudioUncond,
+        float timestep, (int Frames, int Height, int Width) grid, int audioFrames, double fps, float sigma = float.NaN)
+    {
+        if (float.IsNaN(sigma)) sigma = timestep / _config.TimestepScaleMultiplier;
+        int sv = (int)videoTokens.Shape[0], sa = (int)audioTokens.Shape[0];
+        int v = _config.InnerDim, a = _config.AudioInnerDim;
+
+        Tensor hidC = new Tensor(new TensorShape(sv, v), DType.F32);
+        backend.Linear(hidC, videoTokens, _projInW!, _projInB);
+        Tensor audC = new Tensor(new TensorShape(sa, a), DType.F32);
+        backend.Linear(audC, audioTokens, _audioProjInW!, _audioProjInB);
+        Tensor hidU = new Tensor(new TensorShape(sv, v), DType.F32);
+        backend.CopyInto(hidU, hidC);
+        Tensor audU = new Tensor(new TensorShape(sa, a), DType.F32);
+        backend.CopyInto(audU, audC);
+
+        (Tensor tVideo, Tensor embV) = _timeEmbed.Forward(backend, timestep);
+        (Tensor tAudio, Tensor embA) = _audioTimeEmbed.Forward(backend, timestep);
+        Tensor? tPromptV = null, tPromptA = null;
+        if (_hasPromptMod)
+        {
+            (tPromptV, Tensor _pv) = _promptAdaln.Forward(backend, sigma); _pv.Dispose();
+            (tPromptA, Tensor _pa) = _audioPromptAdaln.Forward(backend, sigma); _pa.Dispose();
+        }
+        (Tensor tCaVss, Tensor _cv) = _caVideoScaleShift.Forward(backend, timestep); _cv.Dispose();
+        (Tensor tCaAss, Tensor _ca) = _caAudioScaleShift.Forward(backend, timestep); _ca.Dispose();
+        (Tensor tCaVGate, Tensor _gv) = _caVideoGate.Forward(backend, timestep * _gateScaleFactor); _gv.Dispose();
+        (Tensor tCaAGate, Tensor _ga) = _caAudioGate.Forward(backend, timestep * _gateScaleFactor); _ga.Dispose();
+
+        (int, int, int, double, int) ropeKey = (grid.Frames, grid.Height, grid.Width, fps, audioFrames);
+        if (_ropeKey != ropeKey)
+        {
+            DisposeRopeCache();
+            (_vCosC, _vSinC) = _videoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            (_aCosC, _aSinC) = _audioRope.BuildAudio(audioFrames);
+            (_cvCosC, _cvSinC) = _caVideoRope.BuildVideo(grid.Frames, grid.Height, grid.Width, fps);
+            _ropeKey = ropeKey;
+        }
+
+        LtxVideo2BlockContext MakeCtx(Tensor encV, Tensor encA) => new()
+        {
+            Encoder = encV,
+            AudioEncoder = encA,
+            EncoderMask = null,
+            AudioEncoderMask = null,
+            TembVideo = tVideo,
+            TembAudio = tAudio,
+            TembPromptVideo = tPromptV,
+            TembPromptAudio = tPromptA,
+            TembCaVideoScaleShift = tCaVss,
+            TembCaAudioScaleShift = tCaAss,
+            TembCaVideoGate = tCaVGate,
+            TembCaAudioGate = tCaAGate,
+            VideoRope = _videoRope, VideoCos = _vCosC!, VideoSin = _vSinC!,
+            AudioRope = _audioRope, AudioCos = _aCosC!, AudioSin = _aSinC!,
+            CaVideoRope = _caVideoRope, CaVideoCos = _cvCosC!, CaVideoSin = _cvSinC!,
+            CaAudioRope = _audioRope, CaAudioCos = _aCosC!, CaAudioSin = _aSinC!,
+        };
+        LtxVideo2BlockContext ctxC = MakeCtx(encoderVideoCond, encoderAudioCond);
+        LtxVideo2BlockContext ctxU = MakeCtx(encoderVideoUncond, encoderAudioUncond);
+
+        OnBlockOutput?.Invoke(-1, hidC, audC);
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            BeforeBlockForward?.Invoke(i);
+            (hidC, audC) = _blocks[i].Forward(backend, hidC, audC, ctxC);
+            (hidU, audU) = _blocks[i].Forward(backend, hidU, audU, ctxU);
+            OnBlockOutput?.Invoke(i, hidC, audC);
+        }
+
+        foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate })
+            t?.Dispose();
+
+        Tensor videoC = OutputLayer(backend, hidC, embV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
+        Tensor audioC = OutputLayer(backend, audC, embA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
+        Tensor videoU = OutputLayer(backend, hidU, embV, _scaleShift!, _projOutW!, _projOutB, sv, v, _config.OutChannels);
+        Tensor audioU = OutputLayer(backend, audU, embA, _audioScaleShift!, _audioProjOutW!, _audioProjOutB, sa, a, _config.AudioOutChannels);
+        hidC.Dispose(); audC.Dispose(); hidU.Dispose(); audU.Dispose(); embV.Dispose(); embA.Dispose();
+        return ((videoC, audioC), (videoU, audioU));
+    }
+
     /// <summary>AdaLN-Single output, fully device-resident: <c>shift/scale = scale_shift_table + embedded</c> ([dim],
     /// broadcast over the sequence; table rows are [shift; scale] — keep that order), LayerNorm-no-affine,
     /// <c>·(1+scale)+shift</c>, then <c>proj_out</c>. Was a host loop draining the full hidden state, 2×/forward.</summary>

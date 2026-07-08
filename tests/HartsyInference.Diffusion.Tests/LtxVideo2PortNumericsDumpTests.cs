@@ -61,6 +61,51 @@ public unsafe class LtxVideo2PortNumericsDumpTests
             Assert.True(MathF.Abs(p1[i] - p2[i]) < 1e-6f, $"Euler mismatch at {i}: {p1[i]} vs {p2[i]}");
     }
 
+    /// <summary>The CFG-paired forward must be numerically identical to two sequential single-branch forwards —
+    /// it shares proj_in/temb/rope but runs the same per-branch op sequence through every block.</summary>
+    [Fact]
+    public void CfgPair_MatchesTwoForwards()
+    {
+        CpuBackend backend = new();
+        LtxVideo2Config cfg = new()
+        {
+            InChannels = 4, OutChannels = 4, NumHeads = 2, HeadDim = 4, CrossAttentionDim = 8,
+            AudioInChannels = 4, AudioOutChannels = 4, AudioNumHeads = 2, AudioHeadDim = 2, AudioCrossAttentionDim = 4,
+            NumLayers = 2, FfnMultiplier = 4,
+        };
+        LtxVideo2Transformer transformer = new(cfg);
+        transformer.LoadWeights(BuildWeights(cfg));
+
+        int f = 2, h = 2, w = 2, sv = f * h * w, audioFrames = 3;
+        Tensor encC = RandRows(3, cfg.CrossAttentionDim, 31);
+        Tensor encAC = RandRows(3, cfg.AudioCrossAttentionDim, 32);
+        Tensor encU = RandRows(3, cfg.CrossAttentionDim, 33);
+        Tensor encAU = RandRows(3, cfg.AudioCrossAttentionDim, 34);
+
+        (Tensor refCV, Tensor refCA) = transformer.Forward(backend,
+            RandRows(sv, cfg.InChannels, 41), RandRows(audioFrames, cfg.AudioInChannels, 42),
+            encC, encAC, 500f, (f, h, w), audioFrames, 24.0, null, null);
+        (Tensor refUV, Tensor refUA) = transformer.Forward(backend,
+            RandRows(sv, cfg.InChannels, 41), RandRows(audioFrames, cfg.AudioInChannels, 42),
+            encU, encAU, 500f, (f, h, w), audioFrames, 24.0, null, null);
+
+        ((Tensor cv, Tensor ca), (Tensor uv, Tensor ua)) = transformer.ForwardCfgPair(backend,
+            RandRows(sv, cfg.InChannels, 41), RandRows(audioFrames, cfg.AudioInChannels, 42),
+            encC, encAC, encU, encAU, 500f, (f, h, w), audioFrames, 24.0);
+
+        AssertBitEqual(refCV, cv); AssertBitEqual(refCA, ca);
+        AssertBitEqual(refUV, uv); AssertBitEqual(refUA, ua);
+    }
+
+    private static void AssertBitEqual(Tensor expected, Tensor actual)
+    {
+        Assert.Equal(expected.Shape.ElementCount, actual.Shape.ElementCount);
+        float* e = (float*)expected.DataPointer;
+        float* a = (float*)actual.DataPointer;
+        for (long i = 0; i < expected.Shape.ElementCount; i++)
+            Assert.True(e[i] == a[i], $"mismatch at {i}: {e[i]} vs {a[i]}");
+    }
+
     private static void WriteTensor(BinaryWriter bw, Tensor t)
     {
         float* p = (float*)t.DataPointer;

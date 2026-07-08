@@ -144,6 +144,20 @@ VAE-video / VAE-audio / vocoder / mux. Plus one instrumented run logging per-for
 - **DoD:** bit-identical-class output (relL2 vs baseline at 2 steps), coherent clip + audio, per-step probe delta.
   Expected: removes ~117 k syncs/gen AND unblocks prefetch overlap (prereq for Phase 2 to show its full win).
 
+> ### ✅ Phase 2 SHIPPED (2026-07-08) — steps 5.5 s → **2.6 s** (30 s at audit start = **11.5×**), PASSES, coherent
+> (a) **Pinned staging ring** (`CudaStreamingWeightCache`): 3 × block-size `cuMemHostAlloc` slots; weights memcpy →
+> pinned slot → async HtoD, slot reuse event-gated. Direct `cuMemHostRegister` of mmap'd weights is a TRAP —
+> unaligned ranges fail INVALID_VALUE, contiguous weights share boundary pages (ALREADY_REGISTERED aborts all-or-
+> nothing), and a copy straddling pinned/unpinned pages fails INVALID_VALUE at `cuMemcpyHtoDAsync`. Auto-enabled by
+> `BlockStreamingController` (kill: `HARTSY_STREAM_PIN=0`), so Hunyuan/Flux streaming inherits it.
+> (b) **VRAM-gated resident block prefix** (`LtxVideo2Pipeline`): 15 of 48 blocks resident on this 24 GB card
+> (`HARTSY_LTX2_HEADROOM_MB`, default 4096). Prefix alone: 5.5 → 4.2 s/step.
+> (c) **CFG pairing** (`LtxVideo2Transformer.ForwardCfgPair`): cond+uncond through each block back-to-back → streamed
+> weights upload once/step (24.3 GB/step instead of 48.7). Proven bitwise-identical to two Forwards
+> (`CfgPair_MatchesTwoForwards`); real-weight seed-42 frame matches Phase 1.
+> Step floor is now ~24.3 GB ÷ ~13 GB/s ≈ 1.9 s transfer + tail — still stream-bound. Next tiers: bigger prefix via
+> F16 activations (Phase 3), VAE decode 18.5 s (Phase 4 — NOW the biggest single phase), TE 11.4 s (Phase 5 cache).
+
 **Phase 2 — streaming overhaul (Regime B; the LTX-2-specific lever).**
 1. **Pin the upload path**: set `PinUploadSource=true` for block-swap (weights are mmap'd — if `cuMemHostRegister`
    on file-backed pages misbehaves, fall back to a 2-block pinned staging ring: worker-thread memcpy mmap→pinned,
@@ -173,6 +187,14 @@ inside this phase.
 is expensive, TE freed every gen); `HARTSY_KEEP_MODELS` semantics for the resident block prefix. Step-graph
 capture ONLY for the resident prefix region if Phase 2.3 leaves streaming for a minority of blocks — a captured
 graph cannot span streamed (re-pointered) weights (the 43.145 eviction-crash rule).
+
+> ### ✅ Hunyuan+Kandinsky fused-SDPA round (2026-07-08) — both PASS, coherent (cat / snow leopard verified)
+> `allowF16: true` at all 5 QK-normed, mask-null SDPA sites (HunyuanImageBlock/SingleBlock joint attn;
+> Kandinsky5Block encoder-self/self/cross) + `HARTSY_SDPA_CUDNN=1`:
+> **HunyuanVideo 2.15 → 1.29 s/step (1.67×), clip 86 → 56 s** (fp8-resident + FP8_NATIVE recipe; also GPU-verifies
+> the device final-layer quick win). **Kandinsky-5 2.9 → 0.83 s/step (3.5×), 30-step clip 102 → 42 s** — the
+> 7168-token SDPA was even more dominant than profiled. Remaining per the audit: Hunyuan patchify/unpatchify host
+> loops + per-step prompt re-upload + VAE tiled per-tile Sync; Kandinsky patch glue; graph capture for both.
 
 ## Plan — rest of fleet (interleave as capacity allows; ordered by value)
 

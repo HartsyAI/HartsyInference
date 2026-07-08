@@ -148,8 +148,9 @@ public sealed unsafe class Kandinsky5EncoderBlock
         if (batch != 1)   // host fallback (batched inference only)
             rope.Apply(qMh, kMh, batch, _numHeads, seqLen);
 
+        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
         Tensor attnMh = new Tensor(mh, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, attnScale);
+        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, attnScale, allowF16: true);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         // Permute back [B, H, S, D] → [B, S, hidden].
@@ -340,8 +341,9 @@ public sealed unsafe class Kandinsky5DecoderBlock
         if (batch != 1)   // host fallback (batched inference only)
             rope.Apply(qMh, kMh, batch, _numHeads, sV);
 
+        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
         Tensor attnMh = new Tensor(vMh, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMhT, null, attnScale);
+        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMhT, null, attnScale, allowF16: true);
         qMh.Dispose(); kMh.Dispose(); vMhT.Dispose();
 
         Tensor attnFlat = new Tensor(vFlat, DType.F32);
@@ -385,8 +387,9 @@ public sealed unsafe class Kandinsky5DecoderBlock
         backend.Permute0213(vXMh, vX, sT, _numHeads, _headDim);
         vX.Dispose();
 
+        // allowF16: Q/K are RMS-normed above → bounded scores → F16/cuDNN-fused attention is safe (43.23 gate).
         Tensor xaMh = new Tensor(vMh, DType.F32);
-        backend.ScaledDotProductAttention(xaMh, qXMh, kXMh, vXMh, null, attnScale);
+        backend.ScaledDotProductAttention(xaMh, qXMh, kXMh, vXMh, null, attnScale, allowF16: true);
         qXMh.Dispose(); kXMh.Dispose(); vXMh.Dispose();
 
         Tensor xaFlat = new Tensor(vFlat, DType.F32);

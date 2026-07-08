@@ -114,19 +114,45 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // stream its 48 blocks on/off device (only the shared modulation tables stay resident). CPU/Vulkan (no
         // streaming cache) preload everything eagerly.
         HartsyInference.Core.MemoryManagement.BlockStreamingController? streamer = null;
+        int residentBlocks = 0;
         if (Backend.StreamingCache is not null)
         {
             Backend.PreloadWeights(_transformer.EnumerateSharedWeights());
             HartsyInference.Core.MemoryManagement.IStreamingBlock[] blocks =
                 new HartsyInference.Core.MemoryManagement.IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
-            // prefetchAhead=2 double-buffers the block stream. A VRAM-gated deeper window (tested at 8) gave no
-            // measurable win — the 22B fp8 forward streams 19 GB at ~PCIe-saturation, so it's bandwidth-bound, not
-            // upload-stall-bound; deeper queueing can't exceed the bus. Kept at 2 (known-good, minimal VRAM).
-            streamer = new HartsyInference.Core.MemoryManagement.BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: 2, retainBehind: 0);
-            _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
-            streamer.Prime();
-            Logs.Info($"LTX-2 streaming: {blocks.Length} blocks, ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB total (resident window ~{streamer.EstimatedTotalWeightBytes / blocks.Length * 3 / (1024 * 1024)} MB)");
+
+            // Resident prefix: park as many whole blocks as free VRAM allows (uploaded once per generation) and
+            // stream only the remainder. Streaming a block costs its full weight bytes on EVERY forward (2 CFG
+            // forwards × steps), so each resident block saves ~2·steps re-uploads. Headroom covers activations,
+            // the prefetch window, and pool slack; tune via HARTSY_LTX2_HEADROOM_MB (0 disables residency).
+            long blockBytes = blocks[0].EstimatedWeightBytes;
+            long headroomMb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_LTX2_HEADROOM_MB"), out long hm) ? hm : 4096;
+            long spendable = Backend.FreeMemoryBytes() - headroomMb * 1024 * 1024;
+            residentBlocks = (int)Math.Clamp(spendable / Math.Max(blockBytes, 1), 0, blocks.Length);
+            if (residentBlocks > 0)
+            {
+                IEnumerable<Tensor> PrefixWeights()
+                {
+                    for (int b = 0; b < residentBlocks; b++)
+                        foreach (Tensor t in blocks[b].EnumerateWeights()) yield return t;
+                }
+                Backend.PreloadWeights(PrefixWeights());
+            }
+            if (residentBlocks < blocks.Length)
+            {
+                HartsyInference.Core.MemoryManagement.IStreamingBlock[] streamed =
+                    new HartsyInference.Core.MemoryManagement.IStreamingBlock[blocks.Length - residentBlocks];
+                Array.Copy(blocks, residentBlocks, streamed, 0, streamed.Length);
+                // prefetchAhead=2 double-buffers the streamed remainder (sources are pinned by the controller, so
+                // the async H2D genuinely overlaps compute now).
+                streamer = new HartsyInference.Core.MemoryManagement.BlockStreamingController(Backend.StreamingCache, streamed, prefetchAhead: 2, retainBehind: 0);
+                int prefix = residentBlocks;
+                HartsyInference.Core.MemoryManagement.BlockStreamingController s = streamer;
+                _transformer.BeforeBlockForward = i => { if (i >= prefix) s.BeforeBlockForward(i - prefix); };
+                streamer.Prime();
+            }
+            Logs.Info($"LTX-2 streaming: {blocks.Length} blocks × {blockBytes / (1024 * 1024)} MB, resident prefix {residentBlocks}, streamed {blocks.Length - residentBlocks} ({(blocks.Length - residentBlocks) * blockBytes / (1024 * 1024)} MB/forward)");
         }
         else
         {
@@ -144,12 +170,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             float sigma = tsteps[k];                                    // raw flow sigma (≈1..0), for prompt_adaln
             float tEmb = sigma * _config.TimestepScaleMultiplier;       // ≈0..1000, for the other modulators
 
-            (Tensor vCondV, Tensor vCondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoPos, encAudioPos,
-                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
-            Backend.Sync();   // phase-probe attribution: separate the cond forward from the uncond forward
-            long condMs = sw.ElapsedMilliseconds;
-            (Tensor vUncondV, Tensor vUncondA) = _transformer.Forward(Backend, videoLat, audioLat, encVideoNeg, encAudioNeg,
-                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, null, null, sigma);
+            // CFG-paired forward: both branches share each block's (streamed) weights within the step — half the
+            // weight traffic of two sequential forwards.
+            ((Tensor vCondV, Tensor vCondA), (Tensor vUncondV, Tensor vUncondA)) = _transformer.ForwardCfgPair(
+                Backend, videoLat, audioLat, encVideoPos, encAudioPos, encVideoNeg, encAudioNeg,
+                tEmb, (tLat, hLat, wLat), audioFrames, frameRate, sigma);
 
             // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
             // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
@@ -159,7 +184,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
             Backend.Sync();
             sw.Stop();
-            Logs.Info($"[ltx2-phase] step {k + 1}/{steps}: {sw.ElapsedMilliseconds} ms (cond {condMs} ms, uncond+euler {sw.ElapsedMilliseconds - condMs} ms)");
+            Logs.Info($"[ltx2-phase] step {k + 1}/{steps}: {sw.ElapsedMilliseconds} ms (paired CFG)");
             if (onProgress is not null)
             {
                 // NOTE: the preview drain reads the latent on host, which evicts it from the GPU (re-upload next step).
@@ -175,8 +200,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
 
         Backend.Sync();
         phase.Restart();
-        if (streamer is not null) { _transformer.BeforeBlockForward = null; streamer.EvictAll(); streamer.Dispose(); Backend.FreeWeights(_transformer.EnumerateSharedWeights()); }
-        else Backend.FreeWeights(_transformer.EnumerateWeights());
+        _transformer.BeforeBlockForward = null;
+        if (streamer is not null) { streamer.EvictAll(); streamer.Dispose(); }
+        // Frees shared weights + the resident prefix (streamed blocks are already evicted — FreeWeights skips
+        // non-cached tensors). The VAE decode needs this VRAM back.
+        Backend.FreeWeights(_transformer.EnumerateWeights());
         encVideoPos.Dispose(); encAudioPos.Dispose(); encVideoNeg.Dispose(); encAudioNeg.Dispose();
 
         // 3. Decode video.
