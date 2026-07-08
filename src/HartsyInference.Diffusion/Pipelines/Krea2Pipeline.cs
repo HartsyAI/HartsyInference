@@ -27,6 +27,15 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     private static readonly bool KeepModelsResident =
         Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") == "1";
 
+    // Prompt-embedding cache (one cond + one uncond, last-used): tapped TE hidden states keyed on
+    // (token ids, drop index). See the encode block in GenerateFromTokens.
+    private int[]? _cachedCondKey;
+    private int _cachedCondDrop = -1;
+    private Tensor? _cachedCond;
+    private int[]? _cachedUncondKey;
+    private int _cachedUncondDrop = -1;
+    private Tensor? _cachedUncond;
+
     private readonly QwenImageVaeDecoder _vaeDecoder;
     private readonly QwenImageVaeEncoder? _vaeEncoder;
     private readonly Krea2Config _config;
@@ -98,20 +107,59 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── encode prompt: 12-layer tap → [1, S, 12·2560], drop the system prefix ──
-        // [krea2-phase] probes: temporary wall-clock attribution of the 27s gen (profiled ops only sum to ~5.5s —
-        // the rest lives between ops / in un-instrumented phases; these logs locate it).
+        // Prompt-embedding cache: identical (tokens, dropIndex) reuse the previous gen's hidden states — the
+        // whole TE phase (preload + encode + free ≈ 1.1 s) vanishes for repeat prompts (seed-only changes),
+        // matching ComfyUI's conditioning cache. Reusing the SAME tensor reference also keeps the
+        // transformer's txt-fusion cache warm (it's keyed on the encoderHidden reference). The cached tensor
+        // is host-materialized (DataPointer read frees its GPU buffer) so it survives activation frees; each
+        // step's use re-uploads ~5 MB, which the weight auto-promotion then pins. Cache holds one cond + one
+        // uncond (the last used); a new prompt evicts + disposes.
         long phT0 = sw.ElapsedMilliseconds;
-        Backend.PreloadWeights(_textEncoder.EnumerateWeights());
-        long phT1 = sw.ElapsedMilliseconds;
-        Tensor condHidden = EncodeTapped(promptTokenIds, promptDropIndex);
-        Tensor? uncondHidden = useCfg ? EncodeTapped(negativeTokenIds!, negativeDropIndex) : null;
-        long phT2 = sw.ElapsedMilliseconds;
+        bool condHit = _cachedCond is not null && _cachedCondDrop == promptDropIndex
+            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIds);
+        bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondDrop == negativeDropIndex
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativeTokenIds!));
+        Tensor condHidden;
+        Tensor? uncondHidden;
+        long phT1, phT2;
+        if (condHit && uncondHit)
+        {
+            condHidden = _cachedCond!;
+            uncondHidden = useCfg ? _cachedUncond : null;
+            phT1 = phT2 = sw.ElapsedMilliseconds;
+        }
+        else
+        {
+            Backend.PreloadWeights(_textEncoder.EnumerateWeights());
+            phT1 = sw.ElapsedMilliseconds;
+            condHidden = condHit ? _cachedCond! : EncodeTapped(promptTokenIds, promptDropIndex);
+            uncondHidden = useCfg ? (uncondHit ? _cachedUncond : EncodeTapped(negativeTokenIds!, negativeDropIndex)) : null;
+            phT2 = sw.ElapsedMilliseconds;
+            if (!condHit)
+            {
+                unsafe { _ = condHidden.DataPointer; }   // materialize to host so it survives across gens
+                if (!ReferenceEquals(_cachedCond, condHidden)) _cachedCond?.Dispose();
+                _cachedCond = condHidden;
+                _cachedCondKey = (int[])promptTokenIds.Clone();
+                _cachedCondDrop = promptDropIndex;
+            }
+            if (useCfg && !uncondHit)
+            {
+                unsafe { _ = uncondHidden!.DataPointer; }
+                if (!ReferenceEquals(_cachedUncond, uncondHidden)) _cachedUncond?.Dispose();
+                _cachedUncond = uncondHidden;
+                _cachedUncondKey = (int[])negativeTokenIds!.Clone();
+                _cachedUncondDrop = negativeDropIndex;
+            }
+        }
         // The TE is ALWAYS freed after encode, even under HARTSY_KEEP_MODELS: its ~4-8 GB is exactly the
         // headroom the VAE decode's im2col needs at 1024² (keeping TE+DiT+VAE resident OOM'd: the decode
         // requested 6.9 GB with 69 MB free). Re-encoding costs ~1 s/gen; keeping the 13 GB DiT saves ~2 s.
-        Backend.FreeWeights(_textEncoder.EnumerateWeights());
+        if (!(condHit && uncondHit))
+            Backend.FreeWeights(_textEncoder.EnumerateWeights());
         long phT3 = sw.ElapsedMilliseconds;
-        Logs.Info($"[krea2-phase] TE preload={phT1 - phT0}ms encode={phT2 - phT1}ms free={phT3 - phT2}ms");
+        Logs.Verbose($"[krea2-phase] TE preload={phT1 - phT0}ms encode={phT2 - phT1}ms free={phT3 - phT2}ms"
+            + (condHit && uncondHit ? " (cache hit)" : ""));
 
         // ── scheduler: resolution-aware exp shift (Turbo pins mu=1.15) ──
         FlowMatchEulerDiscreteScheduler scheduler = _config.IsDistilled
@@ -132,7 +180,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
         long phT4 = sw.ElapsedMilliseconds;
         Backend.PreloadWeights(_transformer.EnumerateWeights());
-        Logs.Info($"[krea2-phase] DiT preload={sw.ElapsedMilliseconds - phT4}ms");
+        Logs.Verbose($"[krea2-phase] DiT preload={sw.ElapsedMilliseconds - phT4}ms");
 
         // Fast path (plain t2i, no img2img / masked-inpaint): keep the latent in the transformer's patchified token
         // space across the WHOLE sampling loop — patchify once here, run each step's flow-match Euler update
@@ -140,7 +188,24 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // DataPointer, so the host queues all steps without the per-step D2H pipeline drain that serialized host
         // dispatch against GPU execution (the dominant host-bound cost). Img2img / inpaint keep the pixel-space path.
         bool fastPath = !isImg2Img && !isMaskedInpaint;
-        Tensor? patchLatent = fastPath ? _transformer.PatchifyLatent(latent) : null;
+        // Step-graph mode (HARTSY_DIT_GRAPH, fast path only, no CFG): route the latent through the
+        // transformer's FIXED buffer so the captured graph's baked address stays valid across steps and gens.
+        // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
+        bool graphMode = fastPath && !useCfg && Models.Denoisers.DiTBlocks.DitStepGraph.Enabled && Backend.StepGraphSupported;
+        Tensor? patchLatent = null;
+        if (fastPath)
+        {
+            Tensor fresh = _transformer.PatchifyLatent(latent);
+            if (graphMode)
+            {
+                patchLatent = _transformer.PrepareGraphLatent(Backend, fresh);
+                fresh.Dispose();
+            }
+            else
+            {
+                patchLatent = fresh;
+            }
+        }
 
         for (int i = startStep; i < steps; i++)
         {
@@ -163,19 +228,16 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                     v = _transformer.ForwardPatched(Backend, patchLatent!, t, condHidden, hPacked, wPacked);
                 }
 
-                // On-device Euler step: patchLatent += v · dt  (Scale then Add; both stay GPU-resident).
+                // On-device IN-PLACE Euler step: patchLatent += v·dt via CfgEulerStep with pos=neg=v (the CFG
+                // combine degenerates to identity: g·v + (1−g)·v = v). In-place keeps the latent's device address
+                // fixed — required by the captured step graph, and one kernel instead of Scale+Add for eager too.
                 float dt = scheduler.Dt(i);
-                Tensor vScaled = new Tensor(v.Shape, DType.F32);
-                Backend.Scale(vScaled, v, dt);
-                Tensor newPatch = new Tensor(patchLatent!.Shape, DType.F32);
-                Backend.Add(newPatch, patchLatent!, vScaled);
-                v.Dispose();
-                vScaled.Dispose();
-                patchLatent!.Dispose();
-                patchLatent = newPatch;
+                Backend.CfgEulerStep(patchLatent!, v, v, 1.0f, dt);
+                if (!graphMode)
+                    v.Dispose();   // graph mode: v is the transformer's fixed velocity buffer (reused every step)
 
                 stepSw.Stop();
-                Logs.Info($"[krea2-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
+                Logs.Verbose($"[krea2-phase] step {i + 1}/{steps}: {stepSw.ElapsedMilliseconds}ms");
                 onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
                 continue;
             }
@@ -227,16 +289,18 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        // Fast path: bring the final patchified latent back to pixel space once for the VAE.
+        // Fast path: bring the final patchified latent back to pixel space once for the VAE. Graph mode reads a
+        // SNAPSHOT — unpatchify's DataPointer read would otherwise D2H-and-FREE the fixed buffer the graph bakes.
         if (fastPath)
         {
             latent.Dispose();
-            latent = _transformer.UnpatchifyLatent(patchLatent!, hPacked, wPacked);
-            patchLatent!.Dispose();
+            Tensor tokens = graphMode ? _transformer.SnapshotGraphLatent(Backend) : patchLatent!;
+            latent = _transformer.UnpatchifyLatent(tokens, hPacked, wPacked);
+            tokens.Dispose();   // graph mode: the snapshot; eager: patchLatent itself (as before)
         }
 
-        condHidden.Dispose();
-        uncondHidden?.Dispose();
+        // condHidden/uncondHidden are owned by the prompt-embedding cache (host-materialized; survive across
+        // gens for repeat prompts) — do NOT dispose here. They're released on cache eviction / pipeline Dispose.
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
@@ -251,7 +315,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         long phT8 = sw.ElapsedMilliseconds;
         Tensor image = _vaeDecoder.Decode(Backend, latent);
         long phT9 = sw.ElapsedMilliseconds;
-        Logs.Info($"[krea2-phase] post-loop sync={phT6 - phT5}ms DiT-free={phT7 - phT6}ms VAE preload={phT8 - phT7}ms decode={phT9 - phT8}ms");
+        Logs.Verbose($"[krea2-phase] post-loop sync={phT6 - phT5}ms DiT-free={phT7 - phT6}ms VAE preload={phT8 - phT7}ms decode={phT9 - phT8}ms");
         latent.Dispose();
 
         // Pixel-space recomposite for masked inpaint: paste decoded over source where mask=1.
@@ -262,8 +326,22 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         }
 
         long phT10 = sw.ElapsedMilliseconds;
-        byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
-        Logs.Info($"[krea2-phase] rgb={sw.ElapsedMilliseconds - phT10}ms");
+        // Device rgb conversion: CHW F32 → HWC u8 on-GPU, then one 3 MB D2H of the byte image (the host
+        // TensorToRgbBytes path pulled 12 MB of float planes + ran a 12M-element CPU loop, ~140 ms).
+        byte[] rgbData;
+        {
+            int outH = (int)image.Shape[2], outW = (int)image.Shape[3];
+            Tensor hwcU8 = new Tensor(new TensorShape(outH, outW, 3), DType.U8);
+            Backend.ChwF32ToHwcU8(hwcU8, image);
+            rgbData = new byte[(long)outH * outW * 3];
+            unsafe
+            {
+                fixed (byte* dst = rgbData)
+                    Buffer.MemoryCopy((void*)hwcU8.DataPointer, dst, rgbData.Length, rgbData.Length);
+            }
+            hwcU8.Dispose();
+        }
+        Logs.Verbose($"[krea2-phase] rgb={sw.ElapsedMilliseconds - phT10}ms");
         image.Dispose();
 
         sw.Stop();
@@ -310,6 +388,17 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             return (scaled, null);
         }
         return (t2iNoise, null);
+    }
+
+    /// <summary>Releases the prompt-embedding cache (pipeline-internal state; see DiffusionPipelineBase).</summary>
+    protected override void DisposeCore()
+    {
+        _cachedCond?.Dispose();
+        _cachedCond = null;
+        _cachedCondKey = null;
+        _cachedUncond?.Dispose();
+        _cachedUncond = null;
+        _cachedUncondKey = null;
     }
 
     /// <summary>Encodes a token sequence, stacks the 12 selected layers (tap-major <c>[1, S, 12·2560]</c>) and drops

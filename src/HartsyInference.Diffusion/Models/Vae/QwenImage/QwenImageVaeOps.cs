@@ -103,9 +103,10 @@ public static unsafe class QwenImageVaeOps
     /// F32 tensor (use <see cref="FlattenGamma"/> at load time to produce it from the file's
     /// <c>[C, 1, 1, 1]</c> or <c>[C, 1, 1]</c> shapes). Output is F32 even if input isn't.</para>
     ///
-    /// <para>Implemented as a CPU loop. The VAE is called once per generation (not per step), so the
-    /// per-op overhead is amortized — no need for a fused GPU kernel here. ~50 MB scratch for 1024²
-    /// at C=384, which is fine.</para></summary>
+    /// <para><b>Host loop — DECODER MUST NOT USE THIS.</b> At 1024² each call D2H-drains an up-to-400 MB conv
+    /// output, loops on the CPU, and re-uploads — this was ~20 s of a 27 s Krea2 gen until the decoder switched to
+    /// <see cref="IBackend.WanRmsNormChannel"/> (identical math, GPU-resident). Only the ENCODER (img2img, one
+    /// call per source image) still uses it; port it the same way when img2img perf matters.</para></summary>
     public static void RmsNormPerPixelAcrossChannels(Tensor output, Tensor input, Tensor gamma, float eps = 1e-12f)
     {
         if (input.Shape.Rank != 4)
@@ -158,14 +159,4 @@ public static unsafe class QwenImageVaeOps
         if (!ReferenceEquals(gammaF32, gamma)) gammaF32.Dispose();
     }
 
-    /// <summary>In-place: <c>dst += src</c>. Used for residual additions. Both must be same shape + F32.</summary>
-    public static void AddInPlace(Tensor dst, Tensor src)
-    {
-        if (dst.Shape != src.Shape)
-            throw new ArgumentException($"AddInPlace: shape mismatch {dst.Shape} vs {src.Shape}.", nameof(src));
-        long count = dst.Shape.ElementCount;
-        float* dPtr = (float*)dst.DataPointer;
-        float* sPtr = (float*)src.DataPointer;
-        for (long i = 0; i < count; i++) dPtr[i] += sPtr[i];
-    }
 }

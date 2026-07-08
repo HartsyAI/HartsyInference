@@ -188,7 +188,7 @@ Estimated: F16 → ~16–18s, + graph/arena → GPU-floor ~8s, then within reach
 
 **Final: Hartsy 5.83s warm median vs Comfy 6.5s = 1.11× FASTER. From 70.6s (10.9× slower) at the start of the effort.**
 Coherent astronaut-on-horse verified at every stage. Flags: `HARTSY_SDPA_CUDNN=1 HARTSY_FP8_NATIVE=1
-HARTSY_KREA2_F16=1 HARTSY_KEEP_MODELS=1 HARTSY_MEMPOOL_KEEP=1`. Peak VRAM 23.9 GB (fits 24 GB, weights stay packed fp8).
+HARTSY_DIT_F16=1 HARTSY_KEEP_MODELS=1 HARTSY_MEMPOOL_KEEP=1`. Peak VRAM 23.9 GB (fits 24 GB, weights stay packed fp8).
 
 ### The decisive discovery: the gap was the VAE, not the DiT
 Wall-clock **phase probes** in `Krea2Pipeline` (op profiles only summed ~5.5s of the 27s — the rest was invisible
@@ -203,7 +203,7 @@ un-instrumented host phases — **instrument wall-clock phases first.**
 ### What shipped (alpha.43.133 → .137)
 | Change | Effect |
 |---|---|
-| **F16 activations for the Krea2 DiT** (`HARTSY_KREA2_F16`): 8 new `__half` PTX kernels (dit_f16.cu via nvrtc — RmsNorm/AffineBroadcast/GatedResidual/AddScalar/Sigmoid/RopeInterleaved/RepeatKv/SliceRows) + F16 branches in CudaBackend + block/attention conversion + zero-cast native-F16 cuDNN SDPA + **F16→e4m3 activation-quant** (`absmax_f16`/`quant_f16_e4m3`) so the native fp8 GEMM keeps weights PACKED (no per-step recast, no VRAM regression) | norm/residual/permute GPU time ↓8–19×; wall ≈0 (DiT wasn't the wall) — but it's what makes the 3.9s denoise loop this fast, and F16-kernel parity is unit-tested (`DitF16KernelTests`) |
+| **F16 activations for the Krea2 DiT** (`HARTSY_DIT_F16`): 8 new `__half` PTX kernels (dit_f16.cu via nvrtc — RmsNorm/AffineBroadcast/GatedResidual/AddScalar/Sigmoid/RopeInterleaved/RepeatKv/SliceRows) + F16 branches in CudaBackend + block/attention conversion + zero-cast native-F16 cuDNN SDPA + **F16→e4m3 activation-quant** (`absmax_f16`/`quant_f16_e4m3`) so the native fp8 GEMM keeps weights PACKED (no per-step recast, no VRAM regression) | norm/residual/permute GPU time ↓8–19×; wall ≈0 (DiT wasn't the wall) — but it's what makes the 3.9s denoise loop this fast, and F16-kernel parity is unit-tested (`DitF16KernelTests`) |
 | **Qwen VAE GPU-residency port**: `WanRmsNormChannel` (existing kernel) replaces host `RmsNormPerPixelAcrossChannels` in residual blocks + attention + head; device `Add` residuals; device SliceRows+Transpose2D QKV split; device Clamp | **VAE decode 20,139ms → 16ms (~1250×)**; wall 27.0 → **7.4s** |
 | **`HARTSY_KEEP_MODELS=1`**: DiT weights stay GPU-resident across gens (skip post-loop free + next-gen ~1.8s re-upload). TE still freed each gen — its VRAM is required by the VAE decode's 6.9 GB im2col (keeping all three OOM'd) | wall 7.4 → **5.83s** |
 
@@ -218,6 +218,27 @@ VAE decode 271ms · rgb 148ms.
 3. **VAE decode 271ms → ~100ms** — F16 conv + fold the 6.9 GB im2col peak (would also let TE stay resident → kills #1).
 4. Replicate the VAE-host-glue fix fleet-wide: any model using `QwenImageVaeDecoder`/host-loop VAE norms
    (Qwen-Image, Anima, …) inherits the same win; re-bench SDXL/Flux/Chroma VAEs for the same pathology.
+
+## 2026-07-07 (later) — sub-4s push: 5.83s → **4.68s** — engine `alpha.43.143-local`
+
+Three more shipped, all coherent (astronaut verified after each):
+
+| Change | Δ | Notes |
+|---|---|---|
+| **Prompt-embedding cache** (`Krea2Pipeline`: tapped TE hiddens keyed on token ids + drop index; reusing the same tensor reference keeps the transformer's txt-fusion cache warm too) | **−1.1s** → 4.72s | Repeat-prompt gens skip the whole TE phase (preload+encode+free = 0ms), matching Comfy's conditioning cache |
+| Device rgb conversion (`ChwF32ToHwcU8` kernel + IBackend op: CHW F32 → HWC u8 on-GPU, 3 MB D2H instead of 12 MB + host loop) | ~0 | The 142ms "rgb" phase was mostly absorbing the VAE's async tail — cleaner, not faster |
+| **CUDA-graph step capture** (`HARTSY_DIT_GRAPH=1`): `ForwardCore` (img_in→28 blocks→final layer) captured once, replayed per step via one `cuGraphLaunch`; per-step-varying inputs (temb/tembMod/latent) refreshed into FIXED buffers (`CopyInto`, in-place `CfgEulerStep` Euler); velocity lands in a pre-capture normal buffer via a captured CopyInto; self-disables on failure | ~0 wall (**4.68s**) | Step ISSUE went ~4.2s → **6ms** (host fully free during the loop) — but the GPU is genuinely busy ~550ms/step, so wall is unchanged. Capture is correct + banked. |
+
+**Two capture-blockers found + fixed (general lessons):** (1) the host-materialized txt cache re-uploaded from
+PAGEABLE memory every step (auto-promotion blocked by the VRAM headroom gate at 99% full) — an internally-syncing
+copy that invalidates capture; fix = explicit `PreloadWeights([txt])` pin in graph mode. (2) **`Concat` used
+synchronous `cuMemcpyDtoD`** — capture-illegal AND a hidden per-step host serialization; fix = `cuMemcpyDtoDAsync`
+on the compute stream (better for everyone, not just capture).
+
+**Standing: Hartsy 4.68s vs Comfy 6.5s = 1.39× faster.** Sub-4s needs ~0.7s more and the profile is now purely
+GPU-compute: 8×~550ms steps + VAE 275ms + rgb/Swarm tail. The honest menu (each a real kernel-engineering session):
+fused QKV+gate GEMM (blocked on per-tensor fp8 scale handling — requantize to a common scale at load), VAE F16 convs
+(halves its im2col + tensor-core rate), cuBLASLt algo tuning for the M=4608 shapes, VAE→second-GPU overlap.
 
 ## Persistent activation arena (`HARTSY_ACT_ARENA`) — engine `alpha.43.132-local` — **NEGATIVE RESULT**
 

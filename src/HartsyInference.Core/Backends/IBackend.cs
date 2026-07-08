@@ -434,6 +434,59 @@ public interface IBackend : IDisposable
         }
     }
 
+    // ── Step-graph capture (CUDA-graph replay of a fixed per-step op sequence) ─────────────────────────────
+    // A pipeline whose denoise step issues an IDENTICAL op sequence every step can capture it once and replay
+    // with a single graph launch, collapsing thousands of per-op host calls. Contract: between Begin and
+    // EndAndLaunch only async device work is issued (no DataPointer reads, no sync allocs); per-step-varying
+    // inputs are refreshed into FIXED device buffers via CopyInto before each Launch. Defaults: unsupported.
+
+    /// <summary>True when the backend can capture/replay a step graph (CUDA only).</summary>
+    bool StepGraphSupported => false;
+
+    /// <summary>True when a captured step graph is ready to <see cref="StepGraphLaunch"/>.</summary>
+    bool StepGraphReady => false;
+
+    /// <summary>Begins capturing subsequent backend ops into the step graph.</summary>
+    void StepGraphBegin() { }
+
+    /// <summary>Ends capture, instantiates the graph, and launches it once (capture records without executing).</summary>
+    void StepGraphEndAndLaunch() { }
+
+    /// <summary>Replays the captured step graph (one launch call).</summary>
+    void StepGraphLaunch() { }
+
+    /// <summary>Drops the captured graph (shape/prompt change → recapture) and disables an in-flight capture.</summary>
+    void StepGraphReset() { }
+
+    /// <summary>Copies <paramref name="src"/>'s data into <paramref name="dst"/>'s EXISTING storage, preserving
+    /// dst's buffer address (unlike normal ops, which allocate fresh output buffers). Used to refresh a captured
+    /// graph's fixed input buffers between launches. Shapes/dtypes must match. Default = host memcpy.</summary>
+    unsafe void CopyInto(Tensor dst, Tensor src)
+    {
+        long bytes = dst.DType.ComputeByteCount(dst.ElementCount);
+        Buffer.MemoryCopy((void*)src.DataPointer, (void*)dst.DataPointer, bytes, bytes);
+    }
+
+    /// <summary>Image-output conversion: CHW F32 in [-1,1] → interleaved HWC u8 in [0,255] (round-half-up, clamped).
+    /// <paramref name="input"/> is <c>[B(=1), 3, H, W]</c> F32; <paramref name="output"/> is <c>[H, W, 3]</c> U8.
+    /// Device backends convert on-GPU so only the 3-byte/pixel result crosses PCIe. Default = host reference loop.</summary>
+    unsafe void ChwF32ToHwcU8(Tensor output, Tensor input)
+    {
+        int height = (int)input.Shape[2], width = (int)input.Shape[3];
+        long hw = (long)height * width;
+        float* ip = (float*)input.DataPointer;
+        byte* op = (byte*)output.DataPointer;
+        for (long i = 0; i < hw; i++)
+        {
+            for (int c = 0; c < 3; c++)
+            {
+                float v = (ip[c * hw + i] + 1.0f) * 0.5f;
+                v = Math.Clamp(v, 0.0f, 1.0f);
+                op[i * 3 + c] = (byte)(v * 255.0f + 0.5f);
+            }
+        }
+    }
+
     /// <summary>Wan2.2 VAE unpatchify / pixel-shuffle: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c> with channel
     /// unpack <c>oc = ci·p² + r·p + q</c> at out spatial <c>(hh·p+q, ww·p+r)</c>. Default = host reference loop.</summary>
     unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)

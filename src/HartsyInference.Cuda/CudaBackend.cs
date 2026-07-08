@@ -453,7 +453,7 @@ public sealed class CudaBackend : IBackend
                 else
                 {
                     // F32 or F16 activation → per-tensor dynamic e4m3 quantization (absmax → x·448/amax), weights
-                    // stay PACKED fp8. The F16 branch is what keeps the Krea2 F16-activation path on the native fp8
+                    // stay PACKED fp8. The F16 branch is what keeps the DiT F16-activation path on the native fp8
                     // GEMM — without it, F16 input falls through to the cuBLAS path, which (with CacheWeightCasts
                     // off, the fp8 VRAM recipe) re-casts the whole fp8 weight set to F16 every step (Axis-B).
                     int count = (int)input.ElementCount;
@@ -1125,7 +1125,7 @@ public sealed class CudaBackend : IBackend
             return;
         }
 
-        // Native F16 path (F16 activation I/O, F32 weight — the Krea2 F16 activation recipe): read F16, accumulate
+        // Native F16 path (F16 activation I/O, F32 weight — the DiT F16 activation recipe): read F16, accumulate
         // F32, write F16, weight kept F32. Halves the norm's HBM traffic vs the upcast fallback below (which reads
         // F16 → F32 scratch → kernel → F16, three passes). Same reduction geometry + F32 shared-mem as the F32 kernel.
         if (input.DType == DType.F16 && weight.DType == DType.F32 && output.DType == DType.F16)
@@ -1214,7 +1214,7 @@ public sealed class CudaBackend : IBackend
     public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
     {
         using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcast");
-        // F32 activation, or F16 activation with F32 scale/shift (the Krea2 F16 recipe: activation halved, tiny
+        // F32 activation, or F16 activation with F32 scale/shift (the DiT F16 recipe: activation halved, tiny
         // per-channel params kept F32 for precision). scale/shift must stay F32 in both cases.
         bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
         if ((!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
@@ -1254,7 +1254,7 @@ public sealed class CudaBackend : IBackend
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GatedResidual");
-        // F32, or F16 activations (residual/value/output) with an F32 gate — the Krea2 F16 recipe.
+        // F32, or F16 activations (residual/value/output) with an F32 gate — the DiT F16 recipe.
         bool f16 = residual.DType == DType.F16 && value.DType == DType.F16 && output.DType == DType.F16;
         if ((!f16 && (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32)) || gate.DType != DType.F32)
             throw new NotSupportedException("CUDA GatedResidualLastDim supports F32, or F16 activations with an F32 gate.");
@@ -1356,6 +1356,75 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    // ── Step-graph capture (CUDA-graph replay of a fixed per-step op sequence; see IBackend docs) ─────────
+    private CudaGraph? _stepGraph;
+    private bool _stepGraphCapturing;
+
+    public bool StepGraphSupported => true;
+
+    public bool StepGraphReady => _stepGraph?.IsReady == true && !_stepGraphCapturing;
+
+    public void StepGraphBegin()
+    {
+        _context.EnsureCurrent();
+        _stepGraph ??= new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
+        _stepGraph.Reset();
+        _stepGraph.BeginCapture();
+        _stepGraphCapturing = true;
+    }
+
+    public void StepGraphEndAndLaunch()
+    {
+        if (!_stepGraphCapturing || _stepGraph is null)
+            return;
+        _stepGraphCapturing = false;
+        _stepGraph.EndCaptureAndInstantiate();
+        _stepGraph.Launch();
+    }
+
+    public void StepGraphLaunch()
+    {
+        _context.EnsureCurrent();
+        if (_stepGraph is null || !_stepGraph.IsReady)
+            throw new InvalidOperationException("StepGraphLaunch called with no captured graph.");
+        _stepGraph.Launch();
+    }
+
+    public void StepGraphReset()
+    {
+        if (_stepGraphCapturing)
+        {
+            _stepGraph?.AbortCapture();
+            _stepGraphCapturing = false;
+        }
+        _stepGraph?.Reset();
+    }
+
+    /// <summary>Device copy into <paramref name="dst"/>'s EXISTING buffer (address-preserving — the captured-graph
+    /// boundary refresh). First call materializes a device buffer for dst; subsequent calls reuse it. Host src is
+    /// uploaded; device src is DtoD'd, both stream-ordered on the compute stream.</summary>
+    public unsafe void CopyInto(Tensor dst, Tensor src)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        ulong pSrc = 0;
+        ulong pDst = GpuTransferHelper.CopyToDevice(dst);
+        try
+        {
+            pSrc = GpuTransferHelper.CopyToDevice(src);
+            nuint bytes = GpuTransferHelper.ByteSize(dst);
+            CudaDriverApi.cuMemcpyDtoDAsync(pDst, pSrc, bytes, _stream.Handle).ThrowOnError();
+            // In-place re-assert (the CfgEulerStep pattern): dst keeps this buffer across the copy.
+            dst._gpuSyncCallback = null;
+            dst._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(dst, pDst, bytes);
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pSrc);
+        }
+    }
+
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
     {
         if (q.DType != DType.F32 || k.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
@@ -1420,7 +1489,7 @@ public sealed class CudaBackend : IBackend
     public unsafe void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
     {
         using NvtxRange _nvtx = NvtxRange.Push("RopeInterleaved");
-        // F32, or F16 activation x with F32 cos/sin (Krea2 F16 recipe). cos/sin stay F32 in both cases.
+        // F32, or F16 activation x with F32 cos/sin (DiT F16 recipe). cos/sin stay F32 in both cases.
         bool f16 = x.DType == DType.F16;
         if ((!f16 && x.DType != DType.F32) || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("CUDA WanRopeInterleaved supports F32, or F16 x with F32 cos/sin.");
@@ -1605,6 +1674,31 @@ public sealed class CudaBackend : IBackend
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
             if (pGamma != 0) GpuTransferHelper.FreeDevice(pGamma);
+        }
+    }
+
+    /// <summary>GPU image-output conversion (CHW F32 [-1,1] → HWC u8): converts on-device so only the 3 MB byte
+    /// image crosses PCIe instead of the 12 MB float planes + a 12M-element host loop (~140 ms → ~30 ms).</summary>
+    public unsafe void ChwF32ToHwcU8(Tensor output, Tensor input)
+    {
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int height = (int)input.Shape[2], width = (int)input.Shape[3];
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchChwToHwcU8(pOut, pIn, height, width, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
         }
     }
 
@@ -2304,7 +2398,7 @@ public sealed class CudaBackend : IBackend
         //   • HARTSY_SDPA_FORCE_FLASH=1 forces the online-softmax flash kernel (O(1) score memory; validation/fallback).
         // Gated on the score matrix eating most of free VRAM so small/medium attention keeps the plain GEMM path;
         // masked (Matrix-Game block-causal) callers always keep the plain GEMM path.
-        // cuDNN fused flash-attention for NATIVE F16 Q/K/V/output (the Krea2 F16-activation path): zero casts —
+        // cuDNN fused flash-attention for NATIVE F16 Q/K/V/output (the DiT F16-activation path): zero casts —
         // the tensors are already in the engine's fp16 I/O dtype, so this is the pure fused execute (the F32 route
         // below pays 3+1 F32↔F16 cast kernels). The caller choosing F16 activations already asserts bounded scores
         // (RMS-normed Q/K), so no allowF16 gate. Same session kill-switch on any cuDNN failure.
@@ -3952,7 +4046,9 @@ public sealed class CudaBackend : IBackend
                 for (int t = 0; t < inputs.Length; t++)
                 {
                     nuint byteSize = (nuint)(inputs[t].ElementCount * elemSize);
-                    CudaMemory.CopyDeviceToDevice(pOut + offset, gpuInputs[t], byteSize);
+                    // Stream-ordered (async) DtoD: the sync cuMemcpyDtoD serialized the host against the null
+                    // stream per slice AND invalidated CUDA-graph capture (the Krea2 step-graph 901).
+                    CudaMemory.CopyDeviceToDeviceAsync(pOut + offset, gpuInputs[t], byteSize, _stream.Handle);
                     offset += (ulong)byteSize;
                 }
             }
@@ -3985,7 +4081,7 @@ public sealed class CudaBackend : IBackend
                         ulong srcOffset = (ulong)((outer * inDimStride) * elemSize);
                         ulong dstOffset = (ulong)((outer * outDimStride + dimOffset) * elemSize);
 
-                        CudaMemory.CopyDeviceToDevice(pOut + dstOffset, gpuInputs[t] + srcOffset, sliceBytes);
+                        CudaMemory.CopyDeviceToDeviceAsync(pOut + dstOffset, gpuInputs[t] + srcOffset, sliceBytes, _stream.Handle);
                         dimOffset += sliceSize;
                     }
                 }
@@ -4327,6 +4423,12 @@ public sealed class CudaBackend : IBackend
             {
                 _cudnnSdpa.Dispose();
                 _cudnnSdpa = null;
+            }
+
+            if (_stepGraph is not null)
+            {
+                _stepGraph.Dispose();
+                _stepGraph = null;
             }
 
             if (_cublasHandle != 0)

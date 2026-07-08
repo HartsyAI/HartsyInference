@@ -1,5 +1,21 @@
 # Krea2-Turbo → sub-6.5s — Arena / CUDA-graph / F16 rewrite plan
 
+> ## ✅ GOAL ACHIEVED 2026-07-07 — Krea2-Turbo **5.83s vs Comfy 6.5s** (`alpha.43.137-local`, coherent)
+> The plan's F16 phase shipped (denoise loop → 3.9s) but the decisive fix was OUTSIDE this plan's scope:
+> wall-clock phase probes revealed the residual ~20s was the **Qwen VAE's host-CPU norm loops**, not the DiT
+> (op profiles can't see un-instrumented host phases — instrument phases first). VAE GPU port: decode
+> 20,139ms→16ms. + `HARTSY_KEEP_MODELS` (DiT resident) → 5.83s. Full arc + next targets (TE churn, graph
+> capture, VAE F16): `benchmarks/results/image_comfy-vs-hartsy_2026-07-05.md`; memory `vae-host-loops-hidden-20s`.
+> Phase 2 (graph capture) remains the lever for the next tier (~525ms/step → ~450ms).
+>
+> **Sub-4s push + cleanup (2026-07-07, `alpha.43.144-local`, regression-tested):** prompt-embedding cache (−1.1s)
+> + graph capture SHIPPED (works, coherent, host issue 4.2s→6ms — wall-neutral: GPU-bound at ~550ms/step) →
+> **4.68s vs Comfy 6.5s (1.39× faster)**. The arena was REMOVED (disproven twice; capture doesn't need it —
+> AUTO_FREE_ON_LAUNCH graph memory suffices). Flags generalized for fleet reuse: `HARTSY_DIT_F16` /
+> `HARTSY_DIT_GRAPH` (`DitRuntimeFlags.cs`; models opt in in code, Krea2 = reference implementation).
+> Sub-4 menu (pure GPU compute now): fused QKV+gate GEMM (fp8 scale requant), VAE F16 convs, Lt algo tuning —
+> see the benchmark doc.
+
 **Goal:** Krea2-Turbo warm gen < 6.5s (Comfy baseline), coherent, on RTX 4090.
 **Start state (2026-07-05, `alpha.43.131-local`):** 27.7s warm. cuDNN SDPA banked (`HARTSY_SDPA_CUDNN=1`),
 host-glue block port done, patched-latent residency + device Euler step done. See
