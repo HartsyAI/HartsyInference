@@ -77,7 +77,10 @@ public sealed unsafe class DiaPipeline : IDisposable
             return l.GetAllTensors();
         }
         HartsyInference.ModelHandler.PyTorch.PytorchPickleLoader pk = new();
-        pk.Load(path, recursiveFlatten: true);
+        // Non-recursive: the descript DAC .pth is a flat state_dict under a {state_dict, metadata} envelope.
+        // FlattenStateDict drops the `state_dict.` wrapper (recursive flatten KEEPS it, so keys came out as
+        // `state_dict.encoder.block.0.weight_g` and the weight-norm fuse missed them → KeyNotFound on `.weight`).
+        pk.Load(path, recursiveFlatten: false);
         retain.Add(pk);
         return pk.GetAllTensors();
     }
@@ -93,6 +96,13 @@ public sealed unsafe class DiaPipeline : IDisposable
         int[] delay = [.. _cfg.DelayPattern];
         int maxDelay = _cfg.MaxDelay;
 
+        // Pin the F32 weights VRAM-resident up front (no-op on CPU). Without this the CUDA path leaves weights
+        // host-side and re-copies each one to the GPU per op — so a 6.4 GB model has to stay in system RAM and
+        // never actually lives on the card. One-shot preload (6.4 GB fits a 12 GB 3060) makes both CFG streams
+        // read resident weights; freed in the finally so a repeated call / other model reclaims the VRAM.
+        backend.PreloadWeights(EnumerateWeights());
+        try
+        {
         // Encode conditional + unconditional (all-pad) text and cache cross-KV per branch.
         int[] cond = FoldSpeakerTags(textBytes, _cfg.MaxText);
         int[] uncond = new int[Math.Max(1, cond.Length)];
@@ -113,6 +123,9 @@ public sealed unsafe class DiaPipeline : IDisposable
         for (int c = 0; c < ch; c++) grid[0, c] = _cfg.AudioBos;
 
         int eosStep = -1, lastStep = cap - 1;
+        // DEBUG: dump per-step channel-0 tokens to localize the repetition loop (DIA_DEBUG_TOKENS=path).
+        string? dbgPath = Environment.GetEnvironmentVariable("DIA_DEBUG_TOKENS");
+        System.Text.StringBuilder? dbg = dbgPath is null ? null : new();
         Span<int> frame = stackalloc int[ch];
         for (int s = 0; s < cap - 1; s++)
         {
@@ -135,6 +148,7 @@ public sealed unsafe class DiaPipeline : IDisposable
                 }
                 grid[target, c] = SampleChannel(lc[c], lg[c], c, ref rng);
             }
+            dbg?.Append(grid[target, 0]).Append(' ');
             if (eosStep < 0 && grid[target, 0] == _cfg.AudioEos) eosStep = target;
             // Near the cap, force the flush so every channel closes cleanly (model.py:721 is_max_len).
             if (eosStep < 0 && target >= cap - 1 - maxDelay) { eosStep = target; grid[target, 0] = _cfg.AudioEos; }
@@ -144,6 +158,7 @@ public sealed unsafe class DiaPipeline : IDisposable
             if ((s & 255) == 255) backend.TrimMemoryPool();
         }
 
+        if (dbg is not null) { try { File.WriteAllText(dbgPath!, dbg.ToString()); Logs.Info($"Dia: dumped ch0 tokens → {dbgPath}"); } catch { } }
         // Codes are host-side ints now; reclaim the AR loop's device activations + pool before the DAC decode
         // (the CFG double-stream loop otherwise leaves enough resident to OOM 12GB cards at the vocoder).
         backend.FreeActivations();
@@ -173,6 +188,8 @@ public sealed unsafe class DiaPipeline : IDisposable
         sw.Stop();
         Logs.Info($"Dia: {tReal} frames → {audio.Length} samples ({audio.Length / (double)SampleRate:F1}s) in {sw.ElapsedMilliseconds}ms.");
         return audio;
+        }
+        finally { backend.FreeWeights(EnumerateWeights()); }
     }
 
     /// <summary>Steps both CFG branches and returns per-channel (conditional, CFG-combined) logits.</summary>

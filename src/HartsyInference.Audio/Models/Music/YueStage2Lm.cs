@@ -110,9 +110,10 @@ public sealed unsafe class YueStage2Lm : IDisposable
         // Unequal lengths would desync the two caches' windows — fall back to the exact per-track path.
         if (accompCb0.Length != t)
             return (Upsample(backend, vocalCb0), Upsample(backend, accompCb0));
-        // Batched B=2 runs TWO KV caches + batched activations at once — fits a single window (~5 s clip) on a 12 GB
-        // card but OOMs for longer songs (VRAM crept to ~11.7 GB at 705 frames). Past one window, fall back to the
-        // lighter sequential per-track path (one cache at a time) so full songs complete instead of OOMing.
+        // Batched B=2 (two KV caches + batched activations) OOMs past one window: VRAM creeps to ~11.4 GB even with
+        // per-window/per-64-frame TrimMemoryPool (the growth isn't in the stream-ordered pool the trim reclaims —
+        // likely activation-cache accumulation in the B=2 path). Until that's root-caused, long songs use the
+        // lighter sequential per-track path (one cache at a time) so they complete instead of OOMing.
         if (t > WindowFrames)
             return (Upsample(backend, vocalCb0), Upsample(backend, accompCb0));
 
@@ -156,6 +157,8 @@ public sealed unsafe class YueStage2Lm : IDisposable
             _lm.Forward(backend, BuildWindowPrompt(vCb0), 1, 0, cacheV).Dispose();
             _lm.Forward(backend, BuildWindowPrompt(aCb0), 1, 0, cacheA).Dispose();
 
+            bool prof = Environment.GetEnvironmentVariable("HARTSY_YUE_PROFILE") == "1";
+            long tProj = 0, tArg = 0, tFeed = 0;   // proj+D2H-drain / host-argmax / feed-queue (ticks)
             for (int fr = 0; fr < wlen; fr++)
             {
                 // Feed both tracks' cb0 token for this frame (batched); resulting hidden predicts residual cb1.
@@ -167,14 +170,17 @@ public sealed unsafe class YueStage2Lm : IDisposable
 
                 for (int j = 1; j <= nResidual; j++)                    // codebooks 1..7
                 {
+                    long ts = prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                     Tensor logitsT = _lm.ProjectLogits(backend, hidden, 1, 2);  // [1,2,vocab] (row per track)
                     hidden.Dispose();
-                    float* lp = (float*)logitsT.DataPointer;
+                    float* lp = (float*)logitsT.DataPointer;                    // D2H sync drains the queued GPU work
+                    if (prof) { long n = System.Diagnostics.Stopwatch.GetTimestamp(); tProj += n - ts; ts = n; }
 
                     // Greedy argmax over the residual range [46358,53526) per track (== upstream block_list mask).
                     int bestV = ArgmaxResidual(lp, 0, vocab);
                     int bestA = ArgmaxResidual(lp, 1, vocab);
                     logitsT.Dispose();
+                    if (prof) { long n = System.Diagnostics.Stopwatch.GetTimestamp(); tArg += n - ts; ts = n; }
 
                     // Decode assuming this slot is codebook j; out-of-range -> -1 (patched later).
                     int decV = bestV - (GlobalOffset + j * CodebookSize);
@@ -187,8 +193,14 @@ public sealed unsafe class YueStage2Lm : IDisposable
                     _lm.EmbedLookup(rEmbeds, [bestV, bestA], 1, 2);
                     hidden = _lm.ForwardBatchDecode(backend, rEmbeds, [cacheV.CurrentLength, cacheA.CurrentLength], caches);
                     rEmbeds.Dispose();
+                    if (prof) tFeed += System.Diagnostics.Stopwatch.GetTimestamp() - ts;
                 }
                 hidden.Dispose();
+            }
+            if (prof)
+            {
+                double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                Core.Logging.Logs.Info($"[YuE-S2-prof] {wlen} fr: proj+sync={tProj * f:0}ms argmax={tArg * f:0}ms feed={tFeed * f:0}ms");
             }
         }
         finally

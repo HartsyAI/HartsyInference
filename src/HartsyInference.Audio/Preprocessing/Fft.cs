@@ -18,6 +18,7 @@ public static class Fft
 {
     private static readonly Dictionary<int, (float[] Cos, float[] Sin)> _twiddleCache = new();
     private static readonly object _twiddleLock = new();
+    private static readonly Dictionary<int, BluesteinPlan> _bluesteinCache = new();
 
     /// <summary>Out-of-place complex FFT. <paramref name="re"/> and <paramref name="im"/>
     /// are the real and imaginary inputs/outputs; both must be length <paramref name="n"/>
@@ -28,9 +29,11 @@ public static class Fft
         if (re.Length < n || im.Length < n) throw new ArgumentException("buffers too small for transform size.");
         if ((n & (n - 1)) != 0)
         {
-            // Non-power-of-two (e.g. iSTFTNet's n_fft=20): fall back to a direct O(n²) DFT.
-            // Tiny sizes only — the radix-2 path below still serves Whisper/Vocos/Kokoro-analysis pow2 sizes.
-            DirectDft(re, im, n);
+            // Non-power-of-two. Tiny sizes → direct O(n²) DFT; larger (e.g. YuE Vocos iSTFT n_fft=3528) → Bluestein
+            // (chirp-z: any-size DFT via power-of-two FFTs, O(n log n), no per-op trig). The O(n²) DirectDft here was
+            // a ~37-billion-inline-trig-call/song vocoder-decode bottleneck (~18 min → seconds).
+            if (n < 64) DirectDft(re, im, n);
+            else Bluestein(re, im, n);
             return;
         }
 
@@ -149,6 +152,79 @@ public static class Fft
             outIm[k] = (float)sumIm;
         }
         for (int i = 0; i < n; i++) { re[i] = outRe[i]; im[i] = outIm[i]; }
+    }
+
+    /// <summary>Cached Bluestein plan for one non-power-of-two size: the chirp <c>w[n]=e^{-iπn²/N}</c> and the
+    /// precomputed FFT of the convolution kernel (both constant per N).</summary>
+    private sealed class BluesteinPlan
+    {
+        public int M;                       // convolution FFT size (power of two ≥ 2N-1)
+        public float[] Wre = [], Wim = [];  // chirp, length N
+        public float[] Bre = [], Bim = [];  // FFT of the kernel, length M
+    }
+
+    private static BluesteinPlan GetBluesteinPlan(int n)
+    {
+        lock (_twiddleLock)
+        {
+            if (_bluesteinCache.TryGetValue(n, out BluesteinPlan? cached)) return cached;
+            int m = 1;
+            while (m < 2 * n - 1) m <<= 1;
+            float[] wre = new float[n], wim = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                long sq = (long)i * i % (2L * n);        // n² mod 2N keeps the angle bounded for large N
+                double ang = -Math.PI * sq / n;          // w[n] = e^{-iπn²/N}
+                wre[i] = (float)Math.Cos(ang);
+                wim[i] = (float)Math.Sin(ang);
+            }
+            // Kernel b: h[i]=conj(w[i])=e^{+iπi²/N}, symmetric-extended to length M (b[i] and b[M-i]).
+            float[] bre = new float[m], bim = new float[m];
+            bre[0] = wre[0]; bim[0] = -wim[0];
+            for (int i = 1; i < n; i++)
+            {
+                float hr = wre[i], hi = -wim[i];
+                bre[i] = hr; bim[i] = hi;
+                bre[m - i] = hr; bim[m - i] = hi;
+            }
+            Transform(bre, bim, m);                      // B = FFT(kernel) — m is power-of-two → radix-2 path
+            BluesteinPlan plan = new() { M = m, Wre = wre, Wim = wim, Bre = bre, Bim = bim };
+            _bluesteinCache[n] = plan;
+            return plan;
+        }
+    }
+
+    /// <summary>Bluestein (chirp-z) DFT for any non-power-of-two <paramref name="n"/> via three length-M power-of-two
+    /// FFTs — O(n log n), no per-element trig. Same forward <c>e^{-2πi kn/N}</c> convention as the radix-2 path
+    /// (verified bit-close to numpy). Result written in place on <paramref name="re"/>/<paramref name="im"/>.</summary>
+    private static void Bluestein(Span<float> re, Span<float> im, int n)
+    {
+        BluesteinPlan p = GetBluesteinPlan(n);
+        int m = p.M;
+        float[] are = new float[m], aim = new float[m];
+        for (int i = 0; i < n; i++)                       // a[i] = x[i] · w[i]
+        {
+            float xr = re[i], xi = im[i], wr = p.Wre[i], wi = p.Wim[i];
+            are[i] = xr * wr - xi * wi;
+            aim[i] = xr * wi + xi * wr;
+        }
+        Transform(are, aim, m);                           // A = FFT(a)
+        for (int i = 0; i < m; i++)                        // C = A · B
+        {
+            float ar = are[i], ai = aim[i], br = p.Bre[i], bi = p.Bim[i];
+            are[i] = ar * br - ai * bi;
+            aim[i] = ar * bi + ai * br;
+        }
+        for (int i = 0; i < m; i++) aim[i] = -aim[i];      // c = IFFT(C) = conj(FFT(conj(C)))/M
+        Transform(are, aim, m);
+        float invM = 1f / m;
+        for (int k = 0; k < n; k++)                        // X[k] = c[k] · w[k]
+        {
+            float cr = are[k] * invM, ci = -aim[k] * invM;
+            float wr = p.Wre[k], wi = p.Wim[k];
+            re[k] = cr * wr - ci * wi;
+            im[k] = cr * wi + ci * wr;
+        }
     }
 
     /// <summary>Real-input FFT producing only the first n/2+1 complex bins (the rest

@@ -54,7 +54,9 @@ public sealed class TtsToSttLoopTests
         {
             string repoDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS");
             string ditPath = Path.Combine(repoDir, "F5TTS_v1_Base", "model_1250000.safetensors");
-            string vocosRepoDir = AudioModelCache.GetRepoDirectory("charactr/vocos-mel-24khz");
+            // Match the repo the pipeline actually loads from (F5TtsPipeline.LoadAsync uses
+            // lucasnewman/vocos-mel-24khz); probing charactr/ here wrongly skipped the loop.
+            string vocosRepoDir = AudioModelCache.GetRepoDirectory("lucasnewman/vocos-mel-24khz");
             string vocosPath = Path.Combine(vocosRepoDir, "model.safetensors");
             IsCached = File.Exists(ditPath) && File.Exists(vocosPath);
             if (IsCached)
@@ -237,16 +239,19 @@ public sealed class TtsToSttLoopTests
         string outDir = Path.Combine(Path.GetTempPath(), "hartsyinference_tts_to_stt");
         Directory.CreateDirectory(outDir);
 
-        // Trim JFK to a 0.5 s segment. At ~150 wpm that's ~1-2 words: "And so" or "And so my".
-        string trimmedRef = TrimJfk(jfkPath, seconds: 0.5f, outDir);
-        _out.WriteLine($"Reference clip (trimmed): {trimmedRef}");
+        // F5 voice-clones from the reference, so it needs a REAL reference of adequate length (paper: 3-15 s) with
+        // an accurate transcript — a 0.5 s clip was the "distorted / (laughs)" bug. Use ~4.5 s of JFK + 32 steps.
+        float refSec = float.TryParse(Environment.GetEnvironmentVariable("F5_REF_SEC"), out float rs) ? rs : 4.5f;
+        int steps = int.TryParse(Environment.GetEnvironmentVariable("F5_STEPS"), out int st) ? st : 32;
+        string trimmedRef = TrimJfk(jfkPath, seconds: refSec, outDir);
+        _out.WriteLine($"Reference clip (trimmed {refSec}s): {trimmedRef}");
 
-        const string refText = "And so";
-        const string targetText = "Hello world.";
+        // Transcript of the first ~4.5 s of the canonical JFK clip.
+        const string refText = "And so, my fellow Americans, ask not what your country can do for you";
+        const string targetText = "The speech synthesizer is now working correctly.";
 
-        // Run F5 with 16 flow-matching steps. ~5 min on CPU.
         DateTime t0 = DateTime.UtcNow;
-        float[] generated = tts.Synthesize(trimmedRef, refText, targetText, steps: 16);
+        float[] generated = tts.Synthesize(trimmedRef, refText, targetText, steps: steps);
         TimeSpan ttsTime = DateTime.UtcNow - t0;
         _out.WriteLine($"F5 generated {generated.Length} samples ({generated.Length / 24_000f:F2} s of audio) in {ttsTime.TotalSeconds:F1} s of compute.");
 
@@ -282,7 +287,10 @@ public sealed class TtsToSttLoopTests
         // tends to over-transcribe (insert filler words) on noisy or short audio, so we
         // accept a loose "contains" match rather than exact equality. If even this fails,
         // the F5 pipeline isn't producing intelligible speech and we need to investigate.
-        bool contained = lower.Contains("hello") || lower.Contains("world")
+        string[] want = ["speech", "synthesizer", "working", "correctly", "now"];
+        int recall = want.Count(w => lower.Contains(w));
+        _out.WriteLine($"Content-word recall: {recall}/{want.Length} ({string.Join(",", want.Where(w => lower.Contains(w)))})");
+        bool contained = recall > 0
             || EditDistance(lower, targetText.ToLowerInvariant()) <= targetText.Length / 2;
         if (!contained)
         {
