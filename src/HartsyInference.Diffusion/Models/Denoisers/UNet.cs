@@ -187,6 +187,12 @@ public sealed class UNet
         return Forward(backend, latent, timestep, textEmbeddings, pooledTextEmb, sizeCondition, controlNetDownResiduals, controlNetMidResidual, null, null, null, null);
     }
 
+    /// <summary>Computes the step-invariant ADM micro-conditioning embedding once so the denoise loop can pass it back through every <c>Forward</c> via <c>cachedAdmEmb</c>. Returns <c>[batch, timeDim]</c> F32; caller owns and disposes it. Null when this UNet has no ADM conditioning (SD1.5).</summary>
+    public Tensor? ComputeAdmEmbedding(IBackend backend, Tensor pooledTextEmb, ReadOnlySpan<float> sizeCondition, int batch)
+    {
+        return _addEmbedding?.Forward(backend, pooledTextEmb, sizeCondition, batch);
+    }
+
     /// <summary>Total cross-attention sub-layer count this UNet exposes — sum of the count across all down blocks, the mid block, and all up blocks (in that order). IP-Adapter checkpoints store one <c>to_k_ip</c> / <c>to_v_ip</c> pair per cross-attention sub-layer; the count must match exactly.</summary>
     public int CrossAttentionLayerCount
     {
@@ -208,7 +214,8 @@ public sealed class UNet
     /// <param name="ipaScalePerLayer">Per-cross-attn-layer IP-Adapter scale array. Same length as <paramref name="ipaToKIpAll"/>. The pipeline computes this from the user's base scale + weight type + step-fraction gating once per step. Layers with scale 0 short-circuit the image attention entirely.</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeddings, Tensor? pooledTextEmb, ReadOnlySpan<float> sizeCondition,
         IReadOnlyList<Tensor>? controlNetDownResiduals, Tensor? controlNetMidResidual,
-        Tensor? ipaImageTokens, IReadOnlyList<Tensor>? ipaToKIpAll, IReadOnlyList<Tensor>? ipaToVIpAll, IReadOnlyList<float>? ipaScalePerLayer)
+        Tensor? ipaImageTokens, IReadOnlyList<Tensor>? ipaToKIpAll, IReadOnlyList<Tensor>? ipaToVIpAll, IReadOnlyList<float>? ipaScalePerLayer,
+        Tensor? cachedAdmEmb = null)
     {
         bool hasIpa = ipaImageTokens is not null && ipaToKIpAll is not null && ipaToVIpAll is not null && ipaScalePerLayer is not null;
         if (hasIpa && ipaToKIpAll!.Count != CrossAttentionLayerCount)
@@ -234,14 +241,17 @@ public sealed class UNet
         timesteps.Fill(timestep);
         Tensor temb = _timeEmbedding.Forward(backend, timesteps, batch);
 
-        // 2. ADM conditioning (SDXL only): add micro-conditioning to timestep embedding
-        if (_addEmbedding is not null && pooledTextEmb is not null)
+        // 2. ADM conditioning (SDXL only): add micro-conditioning to timestep embedding.
+        //    The ADM embedding is step-invariant (pooled text + size scalars only) — pipelines that run a
+        //    fixed conditioning across the loop pass it precomputed via cachedAdmEmb, which skips the
+        //    per-forward host sinusoid build + pooled DataPointer read (a GPU→host sync per forward).
+        if (_addEmbedding is not null && (cachedAdmEmb is not null || pooledTextEmb is not null))
         {
-            Tensor addEmb = _addEmbedding.Forward(backend, pooledTextEmb, sizeCondition, batch);
+            Tensor addEmb = cachedAdmEmb ?? _addEmbedding.Forward(backend, pooledTextEmb!, sizeCondition, batch);
             Tensor combinedTemb = new Tensor(temb.Shape, DType.F32);
             backend.Add(combinedTemb, temb, addEmb);
             temb.Dispose();
-            addEmb.Dispose();
+            if (cachedAdmEmb is null) addEmb.Dispose();
             temb = combinedTemb;
         }
 
@@ -264,7 +274,7 @@ public sealed class UNet
         // 4. Down blocks — collect all skip connections.
         //    IPA: maintain a flat offset into the per-cross-attn-layer K/V lists, advancing
         //    by each block's cross-attn count. Order matches diffusers: down → mid → up.
-        List<Tensor> allSkips = new List<Tensor> { hidden.To(hidden.Device) };
+        List<Tensor> allSkips = new List<Tensor> { UNetBlockHelpers.CloneOnDevice(backend, hidden) };
         int ipaOffset = 0;
         for (int i = 0; i < _downBlocks.Length; i++)
         {

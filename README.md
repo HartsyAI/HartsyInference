@@ -376,20 +376,23 @@ We publish real numbers and we are honest about where we stand. HartsyInference 
 
 ### Image generation end-to-end vs ComfyUI
 
-RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-08 (living snapshot — updated as optimization rounds land):
+RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-09 (living snapshot — updated as optimization rounds land):
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
-| Z-Image-Turbo (8 steps) | **2.95 s** | 3.1 s | **Faster than ComfyUI** |
-| Krea2-Turbo (8 steps) | **4.50 s** | 6.5 s | **Faster than ComfyUI** |
+| Z-Image-Turbo (8 steps) | **2.98 s** | 3.1 s | **Faster than ComfyUI** |
+| Krea2-Turbo (8 steps) | **4.52 s** | 6.5 s | **Faster than ComfyUI** |
 | Qwen-Image (20 steps) | **40.9 s** | 54.8 s | **Faster than ComfyUI** |
+| ERNIE-Image (20 steps) | **20.0 s** | 23.9 s | **Faster than ComfyUI** |
+| SDXL (20 steps) | **3.69 s** | 3.7 s | **Tied with ComfyUI** (was 33.9 s) |
 | Ideogram4 (20 steps) | 19.5 s | 17.0 s | 1.15× — optimization queued |
+| Boogu-Turbo (4 steps) | 3.26 s | 2.54 s | 1.28× — optimization in progress |
+| Boogu-Base (20 steps) | 26.5 s | 17.8 s | 1.49× — optimization in progress |
 | Chroma1-HD (20 steps) | 63.2 s | 16.6 s | Optimization in progress |
-| ERNIE-Image (20 steps) | 50.6 s | 24.0 s | Optimization queued |
 | Flux-Dev (20 steps) | 31.0 s | 12.5 s | Optimization in progress |
+| AuraFlow-0.3 (20 steps) | 31.4 s | 14.0 s | Optimization queued |
 | Flux-Schnell (4 steps) | 10.5 s | — | First benchmark; optimization in progress |
 | Flux.2 Klein 4B (10 steps) | 15.1 s | — | First benchmark; GPU-residency port landed |
-| SDXL (20 steps) | 33.0 s | 3.7 s | Optimization queued |
 
 These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).
 

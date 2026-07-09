@@ -141,7 +141,7 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | ERNIE-Image | 20 | 4.0 |
 | AuraFlow-0.3 | 20 | 3.5 |
 
-**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-08. ComfyUI
+**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-09. ComfyUI
 column is the same request on the same GPU through the ComfyUI backend. The optimization grind is ongoing
 and tracked in [`benchmarks/results/`](../benchmarks/results/); this table is a snapshot, updated as
 rounds land:
@@ -153,14 +153,14 @@ rounds land:
 | Qwen-Image | **40.9 s** | 54.8 s | Faster than ComfyUI |
 | ERNIE-Image | **20.0 s** | 23.9 s | Faster than ComfyUI (was 49.6 s / 2.1× slower) |
 | Ideogram4 | 19.5 s | 17.0 s | 1.15× — optimization queued |
-| Boogu-Turbo | 5.05 s | 2.54 s | 2.0× — round 1 landed (was 48.9 s); round 2 in progress |
-| Boogu-Base | 43.2 s | 17.8 s | 2.4× — round 1 landed (was ~6 min); round 2 in progress |
+| Boogu-Turbo | 3.26 s | 2.54 s | 1.28× — was 48.9 s (15× in two rounds); optimization in progress |
+| Boogu-Base | 26.5 s | 17.8 s | 1.49× — was ~6 min (~13×); optimization in progress |
 | Chroma1-HD | 63.2 s | 16.6 s | 3.8× — optimization in progress |
 | AuraFlow-0.3 | 31.4 s | 14.0 s | Optimization queued |
 | Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
 | Flux-Schnell | 10.5 s | — | First benchmark; optimization in progress |
 | Flux.2 Klein 4B | 15.1 s | — | First benchmark; GPU-residency port landed |
-| SDXL | 33.0 s | 3.7 s | Optimization queued (UNet scheduler work) |
+| SDXL | **3.69 s** | 3.7 s | Tied with ComfyUI (was 33.9 s / 9.2× slower) |
 
 ---
 

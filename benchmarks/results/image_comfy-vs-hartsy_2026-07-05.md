@@ -653,3 +653,70 @@ and was left F32-materialized in round 1; (2) packed-latent loop (kill the per-f
 D2H drain — no device patchify op exists yet; the Z-Image/Krea2 token-space pattern); (3) `HARTSY_DIT_F16`
 audit; (4) edit-path embed cache. ERNIE round-2: profile the ~0.9s/step split, DIT_F16 (GELU FFN 12288
 overflow audit), fused QKV.
+
+## 2026-07-09 — Boogu round 2: Turbo 5.05→**3.26s**, Base 43.2→**26.5s** — engine `alpha.44.22-local` — cuDNN gate widened to D=120
+
+Three fixes, warm medians pinned (`exactbackendid=2`), coherent ✓ viewed (Turbo base-camp scene, Base sunset
+silhouette), flagship regression clean (Krea2 **4.54s** ✓, Z-Image **2.99s** ✓ — the shared gate change is
+identical for D=128):
+
+| Fix | What |
+|---|---|
+| **cuDNN head-dim gate widened** (shared, `CudnnSdpa.ShapeSupported`): `{64,128,256}` → multiples of 8 in [64,128] + 256 (the documented SM80+ flash-fprop envelope). Boogu's D=120 (3360/28, axes [40,40,40]) was silently excluded; per-D rejection isolation (the Ideogram mechanism) makes a wrong guess cost one warning + materialized fallback, never a session kill | `[cuDNN SDPA] fused flash-attention engaged (D=120)` confirmed |
+| **allowF16 on both Boogu block SDPAs** (QK-RMS-normed, mask=null — the proven config; left F32-materialized in round 1) | with the gate fix, all Boogu attention now rides the fused engine |
+| **Packed-latent loop**: `BooguImageTransformer.ForwardPacked` (shared `ForwardCore`; NCHW `Forward` kept for edit) + pipeline keeps the latent in `[1, imgLen, p²·C]` token space across the loop — patchify once (seed-compatible: noise still seeded NCHW), device unpatchify once before the VAE. Kills the per-forward host `PatchifyNCHW` D2H drain. **Bit-equality vs the NCHW path unit-tested** (`Transformer_ForwardPacked_Matches_ForwardNchw`) | |
+
+| Model | Comfy | round 1 | **round 2** | gap |
+|---|---:|---:|---:|---|
+| Boogu Turbo (4 st) | 2.54s | 5.05s | **3.26s** (3.30/3.25/3.25) | 2.0× → **1.28×** (from 19× at 48.9s) |
+| Boogu Base (20 st, cfg 4) | 17.78s | 43.2s | **26.5s** (26.54/26.53) | 2.4× → **1.49×** |
+
+**Round-3 menu (to beat 2.54/17.8):** HARTSY_DIT_F16 for the Boogu blocks (SwiGLU FFN — overflow audit,
+sandwich-damp if needed), fused QKV / w1w3 (needs common-scale fp8 requant), Lt algo tuning at the joint-seq
+M, per-gen step graph, edit-path embed cache. Note: D=96/112 models fleet-wide may now also fuse for free —
+check any allowF16 caller with an odd head dim.
+
+## 2026-07-09 — SDXL round 1: 33.9s → **3.69s = TIED with ComfyUI (3.7s)** — engine `alpha.44.24-local`
+
+Warm median **3.69s** (3.74/3.69/3.68, random seeds, `exactbackendid=2`, GPU-quiet), cold 45.2 → 17.6s, peak
+VRAM 10.0 GB. Fresh same-morning baseline on 44.22: 33.94s (33.94/35.02/32.58) — matches the standing 33.0s.
+**9.2× in one round; the worst gap in the image fleet (8.9×) is now parity.** Coherent ✓ viewed (sharp
+astronaut, correct prompt); seed-50601 A/B vs the 44.22 baseline image: corr 0.9990, mean|Δ| 0.72/255,
+std-ratio 1.0001 (no washout) — batch-2 GEMM micro-drift only. Flagship regression clean + coherent viewed:
+Krea2-Turbo **4.50s** ✓ (<6.5), Z-Image-Turbo **2.98s** ✓ (≤3.2). CPU e2e test passes the fused path.
+
+Baseline warm phase split (44.22): TE 4.4s / UNet re-preload 2.1s / denoise 20×~1.39s = 27.5s / VAE 0.37s.
+Now: TE 0 (cache) / preload 0 (resident) / denoise 20×~153ms = 3.10s / VAE 0.38s.
+
+**THE find — `Tensor.Reshape` (and `.To()`) on GPU activations are hidden host round-trips.** `Reshape`
+touches `DataPointer` on construction, which forces a full D2H sync of the source activation, and the view is
+a NEW Tensor object so the consuming op cache-misses and re-UPLOADS the bytes (`H2D_MISS_BIG`). The SDXL
+attention stack did this 4-6× per sub-block × ~70 sub-blocks (multi-head split/merge views + seq↔spatial
+reshapes) plus 9 `.To(Device)` skip-connection clones per forward — profiled **9,149 multi-MB H2D misses per
+gen (~457/step, 6.4s host issue)** with the GPU idling at ~44%. This is the Axis-A host-glue pathology in a
+new costume: not host LOOPS, host ROUND-TRIPS from tensor plumbing. **Audit rule: grep DiT/UNet block code
+for `.Reshape(`/`.To(` on activations, not just `DataPointer` reads.**
+
+One deploy, both fix classes + the standard recipe:
+| Fix | What |
+|---|---|
+| **Reshape-free attention blocks** | `Transpose2D`/`Permute0213` take explicit dims and read buffers flat, so the views were pure overhead: pass the un-reshaped tensor in, and allocate outputs directly in their final shape (shape is metadata). Zero Reshape left in the UNet path. |
+| **Device skip clones** | `UNetBlockHelpers.CloneOnDevice` (unit-`Scale` kernel pass) replaces `hidden.To(hidden.Device)` in UNet + DownBlock (9 D2H+memcpy+H2D round-trips/forward gone). |
+| **Batched CFG** | cond+uncond as ONE batch-2 UNet forward (`RunDenoiseLoopFused`); at cfg≤1 (Turbo/Lightning) batch-1 cond-only. Halves per-step op dispatch. |
+| **Drain-free device loop** | in-place `CfgEulerStep(latent, cond, uncond, cfg, σ[i+1]−σ[i])` — exactly Euler/epsilon (`EulerDiscreteScheduler.FusedEulerCompatible` gates; v-pred + ddim/dpm++/lcm/tcd keep the host loop). Device `SliceRows` splits the batched prediction. Step-invariant conditioning built once/gen: batched text emb pre-cast to the UNet dtype + **cached ADM embedding** (`UNet.ComputeAdmEmbedding` — the old path re-built the ADM sinusoid on host AND read `pooled.DataPointer` EVERY forward). Latent host-materialized once post-loop (the tiled-VAE fallback slices on host). |
+| **TE prompt cache + KEEP_MODELS** | dual-CLIP embeddings keyed on all 4 token streams + EOS + clip-skip (repeat prompts skip the 4.4s TE phase — SDXL's dual-CLIP encode is itself suspiciously slow, likely the same Reshape pathology, round-2 item); UNet stays resident (2.5 GB F16 fits beside VAE + CLIPs). Refiner StepSwap bypasses the cache (needs raw CLIP-G). |
+| **allowF16 on UNet SDPA** | F16 checkpoints already ride the F16-native cuDNN gate (`engaged (D=64)` confirmed, Skv=77 cross-attn accepted); the flag covers F32-loaded checkpoints. |
+| **Preview throttle** | fused loop emits latent previews every 4th step + final (each is a deliberate D2H). Masked inpaint / ControlNet / IPA / refiner / conditioning schedules keep the reference host loop, unchanged. |
+
+SD1.5 / SDXL-Refiner / SDXL-Inpaint share the UNet blocks → they inherit the Reshape/skip-clone wins free
+(their pipelines still run the host loop — porting the fused loop to SD15 is a cheap follow-up).
+
+**Round-2 menu (to BEAT 3.7 decisively):** cold-path TE encode 4.4s (Reshape audit in `ClipTextEncoder`),
+step 153ms → profile the GPU split (conv im2col vs GEMM vs attention; cuDNN-conv/winograd is the classic SDXL
+lever), VAE 377ms (F16 conv), per-gen step graph if host issue resurfaces, cold load 17.6s.
+
+**Incident logged:** running two SwarmUI instances against the same `Data/` (a second launch while an
+incumbent held 7801) corrupted `Users.ldb` (LiteDB "Detected loop in Find" on every `GetNewSession`).
+Recovered from `Data/UsersBackups/UsersBackup_2026_27.ldb`; corrupted file preserved as
+`Users.ldb.corrupt-2026-07-09-dualinstance`. **Always check for an existing SwarmUI (ss -tlnp | grep 7801)
+before launching.**
