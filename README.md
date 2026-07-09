@@ -380,11 +380,11 @@ RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identi
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
-| Z-Image-Turbo (8 steps) | **2.98 s** | 3.1 s | **Faster than ComfyUI** |
-| Krea2-Turbo (8 steps) | **4.52 s** | 6.5 s | **Faster than ComfyUI** |
+| Z-Image-Turbo (8 steps) | **2.77 s** | 3.1 s | **Faster than ComfyUI** |
+| SDXL (20 steps) | **2.93 s** | 3.7 s | **Faster than ComfyUI** (was 33.9 s) |
+| Krea2-Turbo (8 steps) | **4.48 s** | 6.5 s | **Faster than ComfyUI** |
 | Qwen-Image (20 steps) | **40.9 s** | 54.8 s | **Faster than ComfyUI** |
 | ERNIE-Image (20 steps) | **20.0 s** | 23.9 s | **Faster than ComfyUI** |
-| SDXL (20 steps) | **3.69 s** | 3.7 s | **Tied with ComfyUI** (was 33.9 s) |
 | Ideogram4 (20 steps) | 19.5 s | 17.0 s | 1.15× — optimization queued |
 | Boogu-Turbo (4 steps) | 3.26 s | 2.54 s | 1.28× — optimization in progress |
 | Boogu-Base (20 steps) | 26.5 s | 17.8 s | 1.49× — optimization in progress |

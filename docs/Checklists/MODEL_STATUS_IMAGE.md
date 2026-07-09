@@ -12,15 +12,15 @@ Authoritative living copies: [`docs/PERFORMANCE.md`](../PERFORMANCE.md) §5 and
 
 | Model | Hartsy | ComfyUI | Status |
 |---|---:|---:|---|
-| Z-Image-Turbo (8 st) | **2.98 s** | 3.1 s | Faster than Comfy |
-| Krea2-Turbo (8 st) | **4.52 s** | 6.5 s | Faster than Comfy |
+| Z-Image-Turbo (8 st) | **2.77 s** | 3.1 s | Faster than Comfy (free −0.2s from the SDXL round-2 fleet changes) |
+| **SDXL (20 st)** | **2.93 s** | 3.7 s | **Faster than Comfy** (rounds 1+2 `44.24/44.26-local`: 33.9→3.69→2.93; Reshape round-trips + fused loop, then cuDNN conv + Lt epilogue + VAE-attn fix) |
+| Krea2-Turbo (8 st) | **4.48 s** | 6.5 s | Faster than Comfy |
 | Boogu-Turbo (4 st) | 3.26 s | 2.54 s | 1.28× (round 2 `44.22-local`: 48.9→5.05→3.26; D=120 cuDNN fused + packed loop) |
 | Flux-Schnell (4 st) | 10.5 s | — | first bench |
 | Flux.2 Klein 4B (10 st) | 15.1 s | — | first bench (residency port round) |
 | Ideogram4 (20 st) | 19.5 s | 17.0 s | 1.15× |
 | **ERNIE (20 st)** | **20.0 s** | 23.9 s | **Faster than Comfy** (round 1: 49.6→20.0, seed-777 A/B clean) |
 | Flux-Dev (20 st) | 31.0 s | 12.5 s | grind in progress (was 72.4) |
-| **SDXL (20 st)** | **3.69 s** | 3.7 s | **Tied with Comfy** (round 1 `44.24-local`: 33.9→3.69; Reshape/To() host round-trips + batched-CFG fused loop) |
 | Qwen-Image (20 st) | **40.9 s** | 54.8 s | Faster than Comfy |
 | Boogu-Base (20 st, cfg 4) | 26.5 s | 17.8 s | 1.49× (round 2: ~6 min→43.2→26.5) |
 | Chroma1-HD (20 st) | 63.2 s | 16.6 s | grind in progress (was 550) |
@@ -33,7 +33,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | Model | Status | Notes |
 |---|---|---|
 | **SD 1.5** | ✅ | Clean astronaut-on-horse output. |
-| **SDXL** | ✅ | Clean 1024×1024. Perf round 1 2026-07-09 (`alpha.44.24-local`): warm 1024²/20 steps **3.69s vs ComfyUI 3.7s (TIED; was 33.9s = 9.2×)** — THE find was `Tensor.Reshape`/`.To()` on GPU activations forcing D2H sync + H2D re-upload (~457 multi-MB misses/step across the attention stack + skip clones); fixed by passing un-reshaped tensors to dim-explicit ops, allocating outputs in final shape, and device skip clones. Plus batched-CFG single forward, drain-free `CfgEulerStep` loop (Euler/epsilon only), cached ADM embedding, dual-CLIP prompt cache, KEEP_MODELS. Seed A/B corr 0.9990. SD1.5/Refiner/Inpaint inherit the block fixes. Round 2: cold TE 4.4s (ClipTextEncoder Reshape audit), step 153ms (conv path), VAE 377ms. |
+| **SDXL** | ✅ | Clean 1024×1024. Perf round 1 2026-07-09 (`alpha.44.24-local`): warm 1024²/20 steps **3.69s vs ComfyUI 3.7s (TIED; was 33.9s = 9.2×)** — THE find was `Tensor.Reshape`/`.To()` on GPU activations forcing D2H sync + H2D re-upload (~457 multi-MB misses/step across the attention stack + skip clones); fixed by passing un-reshaped tensors to dim-explicit ops, allocating outputs in final shape, and device skip clones. Plus batched-CFG single forward, drain-free `CfgEulerStep` loop (Euler/epsilon only), cached ADM embedding, dual-CLIP prompt cache, KEEP_MODELS. Seed A/B corr 0.9990. SD1.5/Refiner/Inpaint inherit the block fixes. Round 2 (`44.26-local`): **2.93s (1.26× faster than Comfy)** — cuDNN conv forward (new `CudnnConv`, default-on, fleet-wide), cuBLASLt bias-epilogue promoted to standard profile, VaeAttention Reshape purge (VAE 377→235ms), cross-attn K/V cache. GPU-bound at 100% util ≈63% of F16 peak; **sub-2s needs fp8 UNet GEMMs (output-changing — a quality decision) — see the benchmark log round-3 menu**. Remaining F16 levers: GroupNormSilu grid (~−0.15s), fused QKV (~−0.1s), cold TE 4.4s (ClipTextEncoder Reshape audit). |
 | **SD3.5 Medium** | ✅ | Clean photorealistic output; 5 pipeline bugs fixed (PHASE_3_DEVIATIONS #31-35). |
 | **Flux Dev / Schnell / Krea** | ✅ | Photoreal across all three. |
 | **Z-Image Turbo / Base** | ✅ | Clean photoreal; 8 plumbing bugs fixed (PHASE_3_DEVIATIONS #25-30). |

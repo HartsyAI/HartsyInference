@@ -720,3 +720,29 @@ incumbent held 7801) corrupted `Users.ldb` (LiteDB "Detected loop in Find" on ev
 Recovered from `Data/UsersBackups/UsersBackup_2026_27.ldb`; corrupted file preserved as
 `Users.ldb.corrupt-2026-07-09-dualinstance`. **Always check for an existing SwarmUI (ss -tlnp | grep 7801)
 before launching.**
+
+## 2026-07-09 — SDXL round 2: 3.69s → **2.93s = BEATS ComfyUI (3.7s, 1.26× faster)** — engine `alpha.44.26-local` — cuDNN conv + fleet-wide GEMM/VAE wins
+
+Warm median **2.93s** (2.93/2.94/2.91, pinned, GPU-quiet), steps 153→~125ms, VAE 377→235ms, peak 13.6 GB.
+Coherent ✓ viewed; seed-50601 A/B vs the ORIGINAL 44.22 baseline image: corr 0.9991, std-ratio 1.0005 (all
+three rounds of changes preserve composition). CPU e2e + new GPU parity tests pass. **Flagships IMPROVED by
+the shared changes: Krea2-Turbo 4.48s ✓, Z-Image-Turbo 2.77s ✓ (was 2.98 — free −0.2s), both coherent ✓ viewed.**
+
+Attribution first (PROFILE_SYNC per step): Linear ~81ms / Conv2D ~39 / SDPA ~25 / GroupNormSilu ~14 /
+Permute ~10 — GEMM+conv-bound, host-glue class gone. Four changes, three of them FLEET-WIDE:
+
+| Change | What | Δ |
+|---|---|---|
+| **cuBLASLt bias-epilogue GEMM promoted to standard profile** (`EnableEpilogueFusion` default ON, was strict opt-in) | every biased Linear ran GemmEx + a separate BiasAdd kernel + an output-sized HBM round-trip (~700/step); the Lt path folds it into the GEMM epilogue | −0.16s/gen SDXL; helps every model |
+| **cuDNN convolution forward** (`CudnnConv.cs` + `HARTSY_CONV_CUDNN`, default ON, self-disable + im2col fallback — the SDPA pattern; enum values verified vs NVIDIA docs, conv-fwd attrs are 700-705) | F16/BF16 NCHW convs skip the im2col materialization (a kH·kW× input-sized HBM write+read per conv) for tensor-core implicit-GEMM/Winograd engines; ~50 convs/step + the whole VAE | Conv2D −32% serialized; parity-tested vs im2col (`CudnnConvTests`, max|Δ| ≤2e-3, 1×1 bit-exact) |
+| **VaeAttention Reshape purge** (shared by SD/SDXL/Flux/video VAE mid-blocks) | 5 view round-trips (~16 MB each) per decode + rank-normalizing views; CPU GroupNorm made rank-agnostic (was hardcoded Shape[2]·Shape[3] — silently wrong for rank-5 video without the old view) | VAE 297→235ms; Z-Image/Krea2 inherit |
+| **Cross-attention K/V cache** (TransformerSubBlock, keyed on context tensor ref) | the text conditioning's K/V projections are step-invariant — now computed once per gen instead of ×20 steps (140 GEMMs + 140 permutes/step removed); per-step-slicing callers (legacy loop) behave exactly as before | small (~1ms/step — the GEMMs were tiny; kept for the launch-count win) |
+
+**Round-3 reality check (the sub-2s question): SDXL @1024²/20 steps/CFG-batch-2 is ~12 TFLOP/step ≈ 240
+TFLOP/gen. At the 4090's ~165 TFLOPS F16 peak the denoise loop's hard floor is ~1.5s ideal — we measure
+2.5s at 100% GPU util (~63% of peak, already efficient). Sub-2s TOTAL is not reachable in F16.** The honest
+menu: (1) **fp8 UNet GEMMs** (~330 TFLOPS Ada; requant F16→e4m3 at load with per-tensor amax/448 scales on
+`Fp8ScaleFactor` — plumbing exists via `QualityProfileApplier`+`Fp8Executor`; est. → ~2.0-2.2s) — but this
+CHANGES OUTPUT (Comfy's 3.7s runs F16 weights), so it's a quality-vs-speed default decision, not a perf fix;
+(2) GroupNormSilu grid fix (batch·groups=64 blocks on 128 SMs; ~−0.15s); (3) fused self-attn QKV at load
+(~−0.1s); (4) fp8 would also want the CFG-collapse check (the Wan lesson) at cfg 7.

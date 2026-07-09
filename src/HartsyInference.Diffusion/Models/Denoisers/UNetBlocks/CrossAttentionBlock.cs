@@ -208,6 +208,15 @@ internal sealed unsafe class TransformerSubBlock
     private Tensor? _toOutWeight;
     private Tensor? _toOutBias;
 
+    // Cross-attention K/V cache: the projections of the text conditioning are step-invariant (the
+    // context tensor is fixed across the denoise loop), so the k/v Linears + head-split permutes run
+    // once per generation instead of once per step (~140 GEMMs + 140 permutes/step on SDXL). Keyed on
+    // the context tensor reference — the fused loop passes the same pre-cast conditioning object every
+    // step; per-step slicing callers (legacy CFG loop) miss every call and behave exactly as before.
+    private Tensor? _crossKvContextRef;
+    private Tensor? _cachedCrossKeyMh;
+    private Tensor? _cachedCrossValueMh;
+
     public TransformerSubBlock(int channels, int numHeads, int contextDim)
     {
         _channels = channels;
@@ -269,37 +278,59 @@ internal sealed unsafe class TransformerSubBlock
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
 
         // Q from normed hidden; K/V from normed hidden (self-attn) or raw context (cross-attn)
-        Tensor kvSource = ReferenceEquals(hidden, context) ? normed : context;
-        int kvSeqLen = ReferenceEquals(hidden, context) ? seqLen : ctxLen;
+        bool isSelfAttn = ReferenceEquals(hidden, context);
+        Tensor kvSource = isSelfAttn ? normed : context;
+        int kvSeqLen = isSelfAttn ? seqLen : ctxLen;
 
         Tensor query = new Tensor(hidShape, dtype);
         backend.Linear(query, normed, _toQWeight!, _toQBias);
 
-        TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
-        Tensor key = new Tensor(kvOutShape, dtype);
-        backend.Linear(key, kvSource, _toKWeight!, _toKBias);
-
-        Tensor value = new Tensor(kvOutShape, dtype);
-        backend.Linear(value, kvSource, _toVWeight!, _toVBias);
-        normed.Dispose();
-
-        // Split to multi-head 4D. Permute0213 takes the (seq, heads, headDim) split explicitly and
+        // Multi-head split shapes. Permute0213 takes the (seq, heads, headDim) split explicitly and
         // reads the buffer flat, so the projections are passed directly — Reshape views would each
         // force a GPU→host sync + re-upload of a multi-MB activation (see CrossAttentionBlock.Forward).
         TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-        TensorShape kvMhShape = new TensorShape(batch, _numHeads, ctxLen, _headDim);
+        TensorShape kvMhShape = new TensorShape(batch, _numHeads, kvSeqLen, _headDim);
+
+        // Cross-attention K/V: step-invariant per generation (see cache fields) — reuse when the same
+        // context tensor comes back; the cache owns the reused tensors' lifetime.
+        bool kvFromCache = !isSelfAttn && ReferenceEquals(_crossKvContextRef, context)
+            && _cachedCrossKeyMh is not null && _cachedCrossValueMh is not null;
+        Tensor keyMh, valueMh;
+        if (kvFromCache)
+        {
+            keyMh = _cachedCrossKeyMh!;
+            valueMh = _cachedCrossValueMh!;
+        }
+        else
+        {
+            TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
+            Tensor key = new Tensor(kvOutShape, dtype);
+            backend.Linear(key, kvSource, _toKWeight!, _toKBias);
+            Tensor value = new Tensor(kvOutShape, dtype);
+            backend.Linear(value, kvSource, _toVWeight!, _toVBias);
+
+            keyMh = new Tensor(kvMhShape, dtype);
+            backend.Permute0213(keyMh, key, kvSeqLen, _numHeads, _headDim);
+            key.Dispose();
+            valueMh = new Tensor(kvMhShape, dtype);
+            backend.Permute0213(valueMh, value, kvSeqLen, _numHeads, _headDim);
+            value.Dispose();
+
+            if (!isSelfAttn)
+            {
+                _cachedCrossKeyMh?.Dispose();
+                _cachedCrossValueMh?.Dispose();
+                _cachedCrossKeyMh = keyMh;
+                _cachedCrossValueMh = valueMh;
+                _crossKvContextRef = context;
+                kvFromCache = true;
+            }
+        }
+        normed.Dispose();
 
         Tensor queryMh = new Tensor(qMhShape, dtype);
         backend.Permute0213(queryMh, query, seqLen, _numHeads, _headDim);
         query.Dispose();
-
-        Tensor keyMh = new Tensor(kvMhShape, dtype);
-        backend.Permute0213(keyMh, key, ctxLen, _numHeads, _headDim);
-        key.Dispose();
-
-        Tensor valueMh = new Tensor(kvMhShape, dtype);
-        backend.Permute0213(valueMh, value, ctxLen, _numHeads, _headDim);
-        value.Dispose();
 
         // SDPA — text branch. allowF16: SDXL/SD1.5 attention is universally run in fp16 by the reference
         // engines (the checkpoints themselves ship F16); when this UNet loads F32 the flag lets the
@@ -307,8 +338,11 @@ internal sealed unsafe class TransformerSubBlock
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(qMhShape, dtype);
         backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale, allowF16: true);
-        keyMh.Dispose();
-        valueMh.Dispose();
+        if (!kvFromCache)
+        {
+            keyMh.Dispose();
+            valueMh.Dispose();
+        }
 
         // SDPA — image branch (IP-Adapter). Reuses queryMh; produces attention against
         // image-prompt tokens projected through to_k_ip / to_v_ip. Result is added on top of
