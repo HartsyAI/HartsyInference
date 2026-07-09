@@ -36,6 +36,19 @@ public sealed unsafe class AuraFlowTransformer : IDisposable
     // proj_out: Linear(hidden → patch_size² * out_channels, bias=False).
     private Tensor? _projOutWeight;
 
+    // ── Packed-loop caches (step-invariant per generation) ──
+    // Text tokens (context projection + register prepend) are fixed across the denoise loop; keyed on
+    // the encoderHidden reference so the drain-free pipeline (same conditioning tensors every step)
+    // computes them once per generation instead of once per forward. TWO slots — the dual-pass CFG
+    // loop alternates cond/uncond contexts every step, and a single slot would thrash.
+    private readonly Tensor?[] _cachedTextTokens = new Tensor?[2];
+    private readonly Tensor?[] _textTokensContextRef = new Tensor?[2];
+    private int _textTokensNextSlot;
+    // Cropped positional-embedding slab [B, numPatches, hidden]: host-built once per (batch, grid),
+    // then a plain device Add per forward — the old host add loop drained the GPU pipeline per forward.
+    private Tensor? _cachedPosEmbedSlab;
+    private int _posSlabBatch = -1, _posSlabGridH = -1, _posSlabGridW = -1;
+
     /// <summary>Creates an AuraFlow transformer from configuration.</summary>
     public AuraFlowTransformer(AuraFlowConfig config)
     {
@@ -220,14 +233,188 @@ public sealed unsafe class AuraFlowTransformer : IDisposable
     /// <summary>Pipeline-level debug hook: dumps the post-denoise, pre-VAE latent under <c>$AURAFLOW_DEBUG_DIR/final_latent.bin</c>.</summary>
     public static void DumpFinalLatent(Tensor latent) => AuraFlowDebugDump.Dump("final_latent", latent);
 
-    /// <summary>Patch embed: reshape [B, C, H, W] → [B, gridH*gridW, P*P*C] then project via the patch Linear and add cropped pos_embed via <c>pe_selection_index_based_on_dim</c>.</summary>
-    private Tensor PatchEmbedForward(IBackend backend, Tensor latent, int batch, int channels, int height, int width, int gridH, int gridW, int hidden)
+    /// <summary>Patchifies a spatial latent <c>[B, C, H, W]</c> into patch tokens <c>[B, gridH·gridW, P²·C]</c> (diffusers layout, channel-outer per token). Host loop — the packed pipeline calls this ONCE per generation on the freshly seeded (host) noise, then keeps the latent in token space for the whole loop.</summary>
+    public Tensor PatchifyToTokens(Tensor latent)
+    {
+        int batch = (int)latent.Shape[0];
+        int channels = (int)latent.Shape[1];
+        int height = (int)latent.Shape[2];
+        int width = (int)latent.Shape[3];
+        int patchSize = _config.PatchSize;
+        int gridH = height / patchSize;
+        int gridW = width / patchSize;
+        return PatchifyCore(latent, batch, channels, height, width, gridH, gridW);
+    }
+
+    /// <summary>Packed forward for the drain-free denoise loop (B=1): latent PATCH TOKENS in, velocity PATCH TOKENS out (same <c>[1, N, P²·C]</c> space — the caller's Euler update and final unpatchify both stay on-device). Differences vs <see cref="Forward"/>: patchify already done by the caller (once per generation); the positional embedding is a cached device Add instead of a host loop; text tokens are cached per conditioning tensor (step-invariant); the [text|image] concat / split and pre-final modulation run as backend ops; and the trailing unpatchify is skipped. B=1 only — the flat seq-axis Concat/SliceRows are byte-exact only without a batch dim.</summary>
+    public Tensor ForwardTokens(IBackend backend, Tensor latentTokens, float timestep, Tensor encoderHidden, int gridH, int gridW)
+    {
+        int batch = (int)latentTokens.Shape[0];
+        if (batch != 1)
+            throw new ArgumentException($"ForwardTokens is single-sample (got batch={batch}); use Forward for batched calls.", nameof(latentTokens));
+        int numPatches = gridH * gridW;
+        int hidden = _config.HiddenSize;
+
+        // ── 1. Patch projection + cached pos-embed slab ──
+        TensorShape tokShape = new TensorShape(batch, numPatches, hidden);
+        Tensor projectedTokens = new Tensor(tokShape, DType.F32);
+        backend.Linear(projectedTokens, latentTokens, _patchProjWeight!, _patchProjBias);
+        Tensor posSlab = GetOrBuildPosEmbedSlab(batch, gridH, gridW, hidden);
+        Tensor imageTokens = new Tensor(tokShape, DType.F32);
+        backend.Add(imageTokens, projectedTokens, posSlab);
+        projectedTokens.Dispose();
+
+        // ── 2. Timestep MLP ──
+        Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch);
+
+        // ── 3. Text tokens (cached per conditioning reference) ──
+        Tensor textTokens = GetOrBuildTextTokens(backend, encoderHidden, batch);
+
+        // ── 4. Joint dual-stream blocks (first-iteration text is the CACHE — never disposed here) ──
+        Tensor currentImage = imageTokens;
+        Tensor currentText = textTokens;
+        for (int i = 0; i < _config.NumDoubleBlocks; i++)
+        {
+            (Tensor newImage, Tensor newText) = _doubleBlocks[i].Forward(backend, currentImage, currentText, temb);
+            currentImage.Dispose();
+            if (!ReferenceEquals(currentText, textTokens)) currentText.Dispose();
+            currentImage = newImage;
+            currentText = newText;
+        }
+
+        // ── 5-6. [text, image] concat + single-stream blocks. At B=1 the seq-axis concat is a flat
+        // byte concat, so the device Concat replaces the host ConcatAlongSeqDim round-trip. ──
+        int textSeqLen = (int)currentText.Shape[1];
+        Tensor combined = new Tensor(new TensorShape(batch, textSeqLen + numPatches, hidden), DType.F32);
+        backend.Concat(combined, [currentText, currentImage], 0);
+        if (!ReferenceEquals(currentText, textTokens)) currentText.Dispose();
+        currentImage.Dispose();
+        for (int i = 0; i < _config.NumSingleBlocks; i++)
+        {
+            Tensor next = _singleBlocks[i].Forward(backend, combined, temb);
+            combined.Dispose();
+            combined = next;
+        }
+
+        // ── 7. Keep only the image tokens (device row slice; offset in lastDim-width rows) ──
+        TensorShape imgShape = new TensorShape(batch, numPatches, hidden);
+        Tensor imgOut = new Tensor(imgShape, DType.F32);
+        backend.SliceRows(imgOut, combined, textSeqLen);
+        combined.Dispose();
+
+        // ── 8. Pre-final modulation (device) + proj_out ──
+        Tensor normedOut = ApplyPreFinalBlockDevice(backend, imgOut, temb, batch, numPatches, hidden);
+        imgOut.Dispose();
+        temb.Dispose();
+
+        int patchOutDim = _config.PatchSize * _config.PatchSize * _config.OutChannels;
+        Tensor projected = new Tensor(new TensorShape(batch, numPatches, patchOutDim), DType.F32);
+        backend.Linear(projected, normedOut, _projOutWeight!, null);
+        normedOut.Dispose();
+
+        // AuraFlow's token layouts are ASYMMETRIC: patchify/patch-projection consume channel-outer
+        // (c, py, px) tokens, but proj_out was trained to emit spatial-first (py, px, c) tokens (see
+        // Unpatchify). The packed loop's Euler update adds velocity onto the latent tokens directly,
+        // so the velocity must be permuted back into the latent's (c, py, px) layout — without this
+        // every step adds mismatched layouts and the output is pure noise. Per token: [P², C] → [C, P²]
+        // is exactly Permute0213 with B=numPatches, S=P², H=C, D=1.
+        int pp = _config.PatchSize * _config.PatchSize;
+        Tensor velocity = new Tensor(new TensorShape(batch, numPatches, patchOutDim), DType.F32);
+        backend.Permute0213(velocity, projected, pp, _config.OutChannels, 1);
+        projected.Dispose();
+        return velocity;
+    }
+
+    /// <summary>Cached cropped pos-embed slab for the packed path (see cache fields).</summary>
+    private Tensor GetOrBuildPosEmbedSlab(int batch, int gridH, int gridW, int hidden)
+    {
+        if (_cachedPosEmbedSlab is not null && _posSlabBatch == batch && _posSlabGridH == gridH && _posSlabGridW == gridW)
+            return _cachedPosEmbedSlab;
+
+        int numPatches = gridH * gridW;
+        Tensor slab = new Tensor(new TensorShape(batch, numPatches, hidden), DType.F32);
+        float* posPtr = (float*)_posEmbed!.DataPointer;
+        float* slabPtr = (float*)slab.DataPointer;
+        int startH = _posEmbedAxis / 2 - gridH / 2;
+        int startW = _posEmbedAxis / 2 - gridW / 2;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int r = 0; r < gridH; r++)
+            {
+                for (int c = 0; c < gridW; c++)
+                {
+                    int posIdx = (startH + r) * _posEmbedAxis + (startW + c);
+                    long dst = ((long)(b * numPatches + r * gridW + c)) * hidden;
+                    Buffer.MemoryCopy(posPtr + (long)posIdx * hidden, slabPtr + dst, (long)hidden * sizeof(float), (long)hidden * sizeof(float));
+                }
+            }
+        }
+        _cachedPosEmbedSlab?.Dispose();
+        _cachedPosEmbedSlab = slab;
+        _posSlabBatch = batch;
+        _posSlabGridH = gridH;
+        _posSlabGridW = gridW;
+        return slab;
+    }
+
+    /// <summary>Cached text tokens (context projection + register prepend) for the packed path — two-slot, see cache fields.</summary>
+    private Tensor GetOrBuildTextTokens(IBackend backend, Tensor encoderHidden, int batch)
+    {
+        for (int s = 0; s < 2; s++)
+        {
+            if (_cachedTextTokens[s] is not null && ReferenceEquals(_textTokensContextRef[s], encoderHidden)
+                && (int)_cachedTextTokens[s]!.Shape[0] == batch)
+                return _cachedTextTokens[s]!;
+        }
+
+        Tensor projected = ProjectContext(backend, encoderHidden);
+        // PrependRegisterTokens builds on the host (one D2H of the projection per GENERATION —
+        // acceptable; it also leaves the cache host-materialized so pool churn can't corrupt it).
+        Tensor tokens = PrependRegisterTokens(projected, batch);
+        projected.Dispose();
+        int slot = _textTokensNextSlot;
+        _textTokensNextSlot = 1 - _textTokensNextSlot;
+        _cachedTextTokens[slot]?.Dispose();
+        _cachedTextTokens[slot] = tokens;
+        _textTokensContextRef[slot] = encoderHidden;
+        return tokens;
+    }
+
+    /// <summary>Device version of <see cref="ApplyPreFinalBlock"/>: <c>x·(1+scale)+shift</c> via SliceLastDim + AddScalar + AffineBroadcastLastDim — the host loop read two GPU-produced tensors per forward.</summary>
+    private Tensor ApplyPreFinalBlockDevice(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen, int dim)
+    {
+        TensorShape tembShape = new TensorShape(batch, dim);
+        Tensor activated = new Tensor(tembShape, DType.F32);
+        backend.Silu(activated, temb);
+
+        Tensor mod = new Tensor(new TensorShape(batch, dim * 2), DType.F32);
+        backend.Linear(mod, activated, _normOutLinearWeight!, null);
+        activated.Dispose();
+
+        // AuraFlow chunk order: [scale, shift].
+        Tensor scaleRaw = new Tensor(tembShape, DType.F32);
+        backend.SliceLastDim(scaleRaw, mod, 0);
+        Tensor shift = new Tensor(tembShape, DType.F32);
+        backend.SliceLastDim(shift, mod, dim);
+        mod.Dispose();
+        Tensor scalePlusOne = new Tensor(tembShape, DType.F32);
+        backend.AddScalar(scalePlusOne, scaleRaw, 1.0f);
+        scaleRaw.Dispose();
+
+        Tensor output = new Tensor(new TensorShape(batch, seqLen, dim), DType.F32);
+        backend.AffineBroadcastLastDim(output, hidden, scalePlusOne, shift);
+        scalePlusOne.Dispose();
+        shift.Dispose();
+        return output;
+    }
+
+    /// <summary>Shared host patchify: [B, C, H, W] → [B, gridH·gridW, C·P·P] (diffusers permute (0,2,4,1,3,5) + flatten).</summary>
+    private Tensor PatchifyCore(Tensor latent, int batch, int channels, int height, int width, int gridH, int gridW)
     {
         int patchSize = _config.PatchSize;
         int numPatches = gridH * gridW;
         int patchInDim = patchSize * patchSize * channels;
 
-        // Diffusers reshape: [B, C, H/P, P, W/P, P] → permute to [B, H/P, W/P, C, P, P] → flatten last 3 → [B, num_patches, C*P*P].
         TensorShape flatShape = new TensorShape(batch, numPatches, patchInDim);
         Tensor flat = new Tensor(flatShape, DType.F32);
 
@@ -260,6 +447,14 @@ public sealed unsafe class AuraFlowTransformer : IDisposable
                 }
             }
         }
+        return flat;
+    }
+
+    /// <summary>Patch embed: reshape [B, C, H, W] → [B, gridH*gridW, P*P*C] then project via the patch Linear and add cropped pos_embed via <c>pe_selection_index_based_on_dim</c>.</summary>
+    private Tensor PatchEmbedForward(IBackend backend, Tensor latent, int batch, int channels, int height, int width, int gridH, int gridW, int hidden)
+    {
+        int numPatches = gridH * gridW;
+        Tensor flat = PatchifyCore(latent, batch, channels, height, width, gridH, gridW);
 
         // Project to inner_dim via Linear.
         TensorShape outShape = new TensorShape(batch, numPatches, hidden);
@@ -412,6 +607,16 @@ public sealed unsafe class AuraFlowTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            // Null WITHOUT disposing (matches the weight fields below): these tensors may be
+            // auto-promoted into the backend's weight cache, and their dispose callbacks touch the
+            // CudaContext — which callers routinely tear down BEFORE the transformer (the LTX-2
+            // dispose-after-context gotcha). The backend teardown already reclaimed the GPU memory.
+            for (int s = 0; s < 2; s++)
+            {
+                _cachedTextTokens[s] = null;
+                _textTokensContextRef[s] = null;
+            }
+            _cachedPosEmbedSlab = null;
             _patchProjWeight = null;
             _patchProjBias = null;
             _posEmbed = null;

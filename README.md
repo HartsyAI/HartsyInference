@@ -390,7 +390,7 @@ RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identi
 | Boogu-Base (20 steps) | 26.5 s | 17.8 s | 1.49× — optimization in progress |
 | Chroma1-HD (20 steps) | 63.2 s | 16.6 s | Optimization in progress |
 | Flux-Dev (20 steps) | 31.0 s | 12.5 s | Optimization in progress |
-| AuraFlow-0.3 (20 steps) | 31.4 s | 14.0 s | Optimization queued |
+| AuraFlow-0.3 (20 steps) | **13.93 s** | 14.0 s | **Tied with ComfyUI** (was 31.4 s) |
 | Flux-Schnell (4 steps) | 10.5 s | — | First benchmark; optimization in progress |
 | Flux.2 Klein 4B (10 steps) | 15.1 s | — | First benchmark; GPU-residency port landed |
 

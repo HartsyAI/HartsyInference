@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -20,6 +21,18 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly AuraFlowConfig _config;
     private readonly float _schedulerShift;
+
+    /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS): transformer weights stay GPU-resident across generations. On a prompt-cache miss the Pile-T5-XL encoder is preloaded/freed around the encode as before.</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-embedding cache: repeat prompts skip the whole Pile-T5-XL phase. Keyed on token ids +
+    // attention masks; tensors are host-materialized at store time (PrependRegisterTokens and the
+    // batched-context build read them on the host anyway).
+    private int[]? _teKeyCond, _teKeyUncond, _teKeyCondMask, _teKeyUncondMask;
+    private Tensor? _cachedCond;
+    private Tensor? _cachedUncond;
 
     /// <summary>Creates a new AuraFlow pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -88,29 +101,58 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         Logs.Info($"AuraFlow {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Encode text with Pile-T5-XL ───────────────────────────────
-        Logs.Info("Encoding text with Pile-T5-XL...");
-
-        // Bulk-upload T5 weights once so the encoder's many kernel launches don't each pay a
-        // per-op cache-miss H2D transfer. Backends without a weight cache no-op. Paired with
-        // the FreeWeights below the VAE handoff so VRAM cycles cleanly.
-        Backend.PreloadWeights(_t5.EnumerateWeights());
-
+        // ── 1. Encode text with Pile-T5-XL (with a cross-generation prompt-embedding cache) ──
         bool useCfg = cfgScale > 1.0f;
+        bool teCacheHit = _cachedCond is not null
+            && TokensEqual(_teKeyCond, promptTokenIdsT5) && TokensEqual(_teKeyCondMask, promptAttentionMaskT5)
+            && (!useCfg || (_cachedUncond is not null
+                && TokensEqual(_teKeyUncond, negativePromptTokenIdsT5) && TokensEqual(_teKeyUncondMask, negativeAttentionMaskT5)));
 
-        int[][] batchT5 = [promptTokenIdsT5];
-        int[][]? batchMask = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
-        Tensor condContext = _t5.Encode(Backend, batchT5, batchMask);
-
-        Tensor? uncondContext = null;
-        if (useCfg)
+        Tensor condContext;
+        Tensor? uncondContext;
+        if (teCacheHit)
         {
-            int[][] negBatchT5 = [negativePromptTokenIdsT5];
-            int[][]? negBatchMask = negativeAttentionMaskT5 is not null ? [negativeAttentionMaskT5] : null;
-            uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
+            condContext = _cachedCond!;
+            uncondContext = useCfg ? _cachedUncond : null;
+            Logs.Info("AuraFlow prompt-embedding cache hit — text encoding skipped");
         }
+        else
+        {
+            Logs.Info("Encoding text with Pile-T5-XL...");
+            // Bulk-upload T5 weights once so the encoder's many kernel launches don't each pay a
+            // per-op cache-miss H2D transfer; freed right after the encode (the cache makes repeat
+            // prompts skip this phase entirely).
+            Backend.PreloadWeights(_t5.EnumerateWeights());
 
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+            int[][] batchT5 = [promptTokenIdsT5];
+            int[][]? batchMask = promptAttentionMaskT5 is not null ? [promptAttentionMaskT5] : null;
+            condContext = _t5.Encode(Backend, batchT5, batchMask);
+
+            uncondContext = null;
+            if (useCfg)
+            {
+                int[][] negBatchT5 = [negativePromptTokenIdsT5];
+                int[][]? negBatchMask = negativeAttentionMaskT5 is not null ? [negativeAttentionMaskT5] : null;
+                uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
+            }
+            Backend.FreeWeights(_t5.EnumerateWeights());
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+
+            // Host-materialize (the T5 outputs are live GPU activations until touched) and cache.
+            unsafe
+            {
+                _ = (nint)condContext.DataPointer;
+                if (uncondContext is not null) _ = (nint)uncondContext.DataPointer;
+            }
+            _cachedCond?.Dispose();
+            _cachedUncond?.Dispose();
+            _cachedCond = condContext;
+            _cachedUncond = uncondContext;
+            _teKeyCond = (int[])promptTokenIdsT5.Clone();
+            _teKeyCondMask = (int[]?)promptAttentionMaskT5?.Clone();
+            _teKeyUncond = useCfg ? (int[])negativePromptTokenIdsT5.Clone() : null;
+            _teKeyUncondMask = (int[]?)negativeAttentionMaskT5?.Clone();
+        }
 
         // ── 2. Set up flow-match scheduler (static shift) ────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
@@ -128,82 +170,159 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         // ── 4. Denoising loop ────────────────────────────────────────────
         // Bulk-upload transformer weights before the denoise loop (touched every step, every
-        // block — without this the first step would pay cache-miss overhead per parameter).
-        // Paired with FreeWeights at the VAE handoff so VRAM cycles between generations.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // block). Under HARTSY_KEEP_MODELS they stay resident across generations.
+        Stopwatch preloadSw = Stopwatch.StartNew();
+        if (!_ditResident)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+        }
+        Logs.Verbose($"[auraflow-phase] DiT preload {(_ditResident ? "0 (resident)" : preloadSw.ElapsedMilliseconds.ToString())}ms");
 
         Logs.Info("Starting AuraFlow denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        Stopwatch denoiseSw = Stopwatch.StartNew();
 
-        for (int i = startStep; i < steps; i++)
+        // Drain-free packed path (plain t2i/img2img): the latent lives in patch-token space on the
+        // device for the whole loop — patchify once, dual-pass ForwardTokens per step, in-place
+        // device CfgEulerStep (flow-match Euler: x += v·(σ[i+1]−σ[i])), unpatchify once at the end.
+        // Masked inpaint keeps the reference host loop (per-step blend needs the spatial latent).
+        // HARTSY_AURAFLOW_PACKED=0 is the kill-switch (A/B against the reference loop).
+        bool fusedLoop = !isMaskedInpaint && EnvSwitch.IsEnabled("HARTSY_AURAFLOW_PACKED", defaultOn: true);
+        if (fusedLoop)
         {
-            Stopwatch stepSw = Stopwatch.StartNew();
-            float t = timesteps[i];
-
-            Tensor noisePred;
-            if (useCfg)
-            {
-                Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondContext!);
-                Tensor condNoise = _transformer.Forward(Backend, latent, t, condContext);
-                noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
-                uncondNoise.Dispose();
-                condNoise.Dispose();
-            }
-            else
-            {
-                noisePred = _transformer.Forward(Backend, latent, t, condContext);
-            }
-
-            Tensor newLatent = new Tensor(latentShape, DType.F32);
-            scheduler.Step(newLatent, noisePred, latent, i);
-            noisePred.Dispose();
+            int gridH = latentH / _config.PatchSize;
+            int gridW = latentW / _config.PatchSize;
+            Tensor latentTokens = _transformer.PatchifyToTokens(latent);
             latent.Dispose();
-            latent = newLatent;
 
-            // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
-            // by re-noising the source latent at the next step's sigma. Final step blends with the
-            // clean source — no further denoising follows.
-            if (latentMask is not null && sourceLatent is not null)
+            for (int i = startStep; i < steps; i++)
             {
-                int nextStep = i + 1;
-                Tensor noisedSource;
-                if (nextStep < steps)
+                Stopwatch stepSw = Stopwatch.StartNew();
+                float t = timesteps[i];
+
+                Tensor condVel = _transformer.ForwardTokens(Backend, latentTokens, t, condContext, gridH, gridW);
+                if (useCfg)
                 {
-                    Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
-                    noisedSource = new Tensor(latentShape, DType.F32);
-                    scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
-                    freshNoise.Dispose();
+                    // The transformer's two-slot text-token cache holds both branches' conditioning,
+                    // so each is projected once per generation, not once per step.
+                    Tensor uncondVel = _transformer.ForwardTokens(Backend, latentTokens, t, uncondContext!, gridH, gridW);
+                    Backend.CfgEulerStep(latentTokens, condVel, uncondVel, cfgScale, scheduler.Dt(i));
+                    uncondVel.Dispose();
                 }
                 else
                 {
-                    noisedSource = sourceLatent;
+                    Backend.CfgEulerStep(latentTokens, condVel, condVel, 1.0f, scheduler.Dt(i));
                 }
-                MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
-                if (noisedSource != sourceLatent) noisedSource.Dispose();
+                condVel.Dispose();
+
+                stepSw.Stop();
+                Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
+                bool emitPreview = onProgress is not null && ((i - startStep) % 4 == 3 || i == steps - 1);
+                if (emitPreview)
+                {
+                    Tensor previewLatent = new Tensor(latentShape, DType.F32);
+                    Backend.UnpatchifyTokens(previewLatent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
+                    try
+                    {
+                        onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                        {
+                            Latent = previewLatent,
+                            LatentArch = LatentArchitecture.AuraFlow,
+                        });
+                    }
+                    finally { previewLatent.Dispose(); }
+                }
+                else
+                {
+                    onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                }
             }
 
-            stepSw.Stop();
-            Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
-            {
-                Latent = latent,
-                LatentArch = LatentArchitecture.AuraFlow,
-            });
+            latent = new Tensor(latentShape, DType.F32);
+            Backend.UnpatchifyTokens(latent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
+            latentTokens.Dispose();
+            // Host-materialize for the tiled-VAE fallback's host slicing (and any host consumer).
+            Backend.Sync();
+            unsafe { _ = (nint)latent.DataPointer; }
         }
+        else
+        {
+            for (int i = startStep; i < steps; i++)
+            {
+                Stopwatch stepSw = Stopwatch.StartNew();
+                float t = timesteps[i];
 
-        condContext.Dispose();
-        uncondContext?.Dispose();
+                Tensor noisePred;
+                if (useCfg)
+                {
+                    Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondContext!);
+                    Tensor condNoise = _transformer.Forward(Backend, latent, t, condContext);
+                    noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
+                    uncondNoise.Dispose();
+                    condNoise.Dispose();
+                }
+                else
+                {
+                    noisePred = _transformer.Forward(Backend, latent, t, condContext);
+                }
+
+                Tensor newLatent = new Tensor(latentShape, DType.F32);
+                scheduler.Step(newLatent, noisePred, latent, i);
+                noisePred.Dispose();
+                latent.Dispose();
+                latent = newLatent;
+
+                // Masked-inpaint blend: keep unmasked region on the source's flow-matching trajectory
+                // by re-noising the source latent at the next step's sigma. Final step blends with the
+                // clean source — no further denoising follows.
+                if (latentMask is not null && sourceLatent is not null)
+                {
+                    int nextStep = i + 1;
+                    Tensor noisedSource;
+                    if (nextStep < steps)
+                    {
+                        Tensor freshNoise = SeedGenerator.CreateNoise(latentShape, seed + nextStep);
+                        noisedSource = new Tensor(latentShape, DType.F32);
+                        scheduler.AddNoise(noisedSource, sourceLatent, freshNoise, nextStep);
+                        freshNoise.Dispose();
+                    }
+                    else
+                    {
+                        noisedSource = sourceLatent;
+                    }
+                    MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
+                    if (noisedSource != sourceLatent) noisedSource.Dispose();
+                }
+
+                stepSw.Stop();
+                Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
+                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = latent,
+                    LatentArch = LatentArchitecture.AuraFlow,
+                });
+            }
+        }
+        Logs.Verbose($"[auraflow-phase] denoise {denoiseSw.ElapsedMilliseconds}ms ({(fusedLoop ? "packed" : "host")} loop)");
+
+        if (!ReferenceEquals(condContext, _cachedCond)) condContext.Dispose();
+        if (uncondContext is not null && !ReferenceEquals(uncondContext, _cachedUncond)) uncondContext.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
         AuraFlowTransformer.DumpFinalLatent(latent);
 
-        // Free transformer + T5 weights from GPU before VAE decode (mirrors SD3 pattern;
-        // the SDXL VAE im2col buffers are large and the transformer is huge — we OOM on
-        // a 12 GB card without this eviction).
+        // Free transformer weights before VAE decode unless resident (the banded-conv VAE fits
+        // beside the DiT on 24 GB; smaller cards keep the legacy evict via HARTSY_KEEP_MODELS=0).
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        Backend.FreeWeights(_t5.EnumerateWeights());
+        if (KeepModelsResident)
+        {
+            _ditResident = true;
+        }
+        else
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+        }
 
         // ── 5. VAE decode ────────────────────────────────────────────────
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
@@ -229,6 +348,10 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         return (rgbData, width, height, seed);
     }
+
+    /// <summary>Compares token/mask arrays for the prompt-embedding cache key (null-tolerant: two nulls match).</summary>
+    private static bool TokensEqual(int[]? cached, int[]? incoming)
+        => cached is null ? incoming is null : incoming is not null && cached.AsSpan().SequenceEqual(incoming);
 
     /// <summary>Builds the initial latent. T2I: noise * initSigma. Img2img: VaeEncoder.Encode(source) (SDXL-family
     /// 4-channel VAE, scaling applied inside the encoder) combined with fresh noise via flow-matching AddNoise at

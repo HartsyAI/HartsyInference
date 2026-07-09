@@ -24,7 +24,7 @@ Authoritative living copies: [`docs/PERFORMANCE.md`](../PERFORMANCE.md) §5 and
 | Qwen-Image (20 st) | **40.9 s** | 54.8 s | Faster than Comfy |
 | Boogu-Base (20 st, cfg 4) | 26.5 s | 17.8 s | 1.49× (round 2: ~6 min→43.2→26.5) |
 | Chroma1-HD (20 st) | 63.2 s | 16.6 s | grind in progress (was 550) |
-| AuraFlow (20 st) | 31.4 s | 14.0 s | queued |
+| AuraFlow (20 st) | **13.93 s** | 14.0 s | Tied with Comfy (round 1 `44.28-local`: 31.4→13.93; packed token-space loop + recipe; NOTE proj_out emits (py,px,c) tokens ≠ patchify's (c,py,px) — velocity must be permuted for token-space Euler) |
 
 ## Verified end-to-end (✅)
 

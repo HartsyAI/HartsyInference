@@ -124,7 +124,7 @@ public sealed unsafe class AuraFlowSingleBlock
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnMh = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
+        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale, allowF16: true);   // QK-RMS-normed, mask-null, D=256 — the proven cuDNN fused config
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         // ── 6. Permute back [B, H, S, D] → [B, S, hidden] ──

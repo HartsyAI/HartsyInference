@@ -158,7 +158,7 @@ rounds land:
 | Boogu-Turbo | 3.26 s | 2.54 s | 1.28× — was 48.9 s (15× in two rounds); optimization in progress |
 | Boogu-Base | 26.5 s | 17.8 s | 1.49× — was ~6 min (~13×); optimization in progress |
 | Chroma1-HD | 63.2 s | 16.6 s | 3.8× — optimization in progress |
-| AuraFlow-0.3 | 31.4 s | 14.0 s | Optimization queued |
+| AuraFlow-0.3 | **13.93 s** | 14.0 s | Tied with ComfyUI (was 31.4 s) |
 | Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
 | Flux-Schnell | 10.5 s | — | First benchmark; optimization in progress |
 | Flux.2 Klein 4B | 15.1 s | — | First benchmark; GPU-residency port landed |

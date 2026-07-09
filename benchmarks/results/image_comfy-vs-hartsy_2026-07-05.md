@@ -746,3 +746,36 @@ menu: (1) **fp8 UNet GEMMs** (~330 TFLOPS Ada; requant F16→e4m3 at load with p
 CHANGES OUTPUT (Comfy's 3.7s runs F16 weights), so it's a quality-vs-speed default decision, not a perf fix;
 (2) GroupNormSilu grid fix (batch·groups=64 blocks on 128 SMs; ~−0.15s); (3) fused self-attn QKV at load
 (~−0.1s); (4) fp8 would also want the CFG-collapse check (the Wan lesson) at cfg 7.
+
+## 2026-07-09 — AuraFlow round 1: 31.4s → **13.93s = TIED with ComfyUI (14.0s)** — engine `alpha.44.28-local`
+
+Warm median **13.93s** (13.96/13.93/13.92, pinned, GPU-quiet), cold 19.0s, peak 13.5 GB. Was 31.4s (2.2×).
+Coherent ✓ viewed (sharp astronaut-on-horse). Checkpoint re-downloaded (`calcuis/aura` fp8, 9.66 GB — an
+/tmp-incident casualty) into the shared Swarm Models dir. Flagship + SDXL regression clean: Krea2 4.48s ✓,
+Z-Image 2.75s ✓, SDXL 2.91s ✓. GPU e2e tests pass per-process (both CFG modes).
+
+The standard recipe, one deploy: Pile-T5 prompt cache + KEEP_MODELS residency; drain-free PACKED loop
+(patchify once → token-space latent all loop → in-place `CfgEulerStep` per branch → device
+`UnpatchifyTokens` once + throttled previews); transformer glue de-hosted (cached device pos-embed slab,
+TWO-SLOT step-invariant text-token cache — dual-pass CFG alternates two contexts and a single slot would
+thrash; device [text|image] seq concat + SliceRows split at B=1; device pre-final modulate via
+SliceLastDim+AddScalar+AffineBroadcastLastDim); `allowF16` on both block SDPAs (QK-RMS-normed, mask-null,
+**D=256 fused confirmed engaged**). `HARTSY_AURAFLOW_PACKED=0` kill-switch.
+
+**Bug found on the way (cost one noise-output deploy): AuraFlow's token layouts are ASYMMETRIC** — patchify
+feeds the patch projection channel-outer `(c, py, px)`, but `proj_out` emits spatial-first `(py, px, c)`
+(see `Unpatchify`). The legacy loop unpatchifies every forward so it never notices; a token-space Euler
+update adds velocity directly onto the latent tokens, so the velocity must be permuted back to the latent
+layout (one `Permute0213` with S=P², H=C, D=1) — without it every step adds mismatched layouts → pure noise.
+**Lesson for every future packed-loop port: verify the model's patchify-in vs proj-out token layouts MATCH
+before doing token-space Euler; and the GPU e2e tests' not-black/not-white assertions PASS ON NOISE — only
+a viewed image (or a legacy-vs-packed A/B) is a real gate.**
+
+**Round-2 menu (to beat 14.0s):** batched CFG (needs batch-aware seq concat/split — the single-stream stack
+mixes text+image rows per batch element), `HARTSY_DIT_F16` opt-in for the blocks (QK-normed; MLP overflow
+audit), profile the 680ms/step split (fp8 GEMM vs glue), fused QKV.
+
+**Known issue flagged (pre-existing, NOT from this session's cleanup): Flux.2 Klein fails to load** on
+44.26+ with `Unsupported dtype conversion: U8 → F16` in `Flux2Loader.Load` (the Qwen3-4B TE cast loop hits a
+U8 tensor in `qwen_3_4b.safetensors`, dated May 10). The loader needs to skip/handle U8 metadata tensors
+(e.g. ComfyUI `scaled_fp8` markers). The 15.1s Klein scoreboard entry is not currently reproducible.
