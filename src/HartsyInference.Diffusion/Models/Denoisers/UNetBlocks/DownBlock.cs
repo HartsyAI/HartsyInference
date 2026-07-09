@@ -122,8 +122,8 @@ public sealed class DownBlock
                 hidden = attnOut;
             }
 
-            // Save skip connection (clone so we own it)
-            skips.Add(hidden.To(hidden.Device));
+            // Save skip connection (clone so we own it; on-device — To() drains the pipeline)
+            skips.Add(UNetBlockHelpers.CloneOnDevice(backend, hidden));
         }
 
         // Downsample
@@ -141,7 +141,7 @@ public sealed class DownBlock
             hidden = downsampled;
 
             // Save downsample output as skip (diffusers does this)
-            skips.Add(hidden.To(hidden.Device));
+            skips.Add(UNetBlockHelpers.CloneOnDevice(backend, hidden));
         }
 
         return (hidden, skips);

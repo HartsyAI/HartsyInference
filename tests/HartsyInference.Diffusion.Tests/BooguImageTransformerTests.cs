@@ -1,8 +1,10 @@
 using Xunit;
 using Xunit.Abstractions;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Schedulers;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -272,5 +274,38 @@ public sealed class BooguImageTransformerTests
     private static void DisposeAll(Dictionary<string, Tensor> w)
     {
         foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    /// <summary>The packed-IO T2I path (<c>PatchifyNCHW → ForwardPacked → UnpatchifyTokens</c>, the pipeline's
+    /// drain-free token-space loop) must be bit-identical to the NCHW <c>Forward</c> — both run the same
+    /// <c>ForwardCore</c>; this pins the patchify/unpatchify round-trip and the packed shape plumbing.</summary>
+    [Fact]
+    public unsafe void Transformer_ForwardPacked_Matches_ForwardNchw()
+    {
+        BooguImageConfig cfg = TinyConfig;
+        using CpuBackend backend = new();
+        using BooguImageTransformer transformer = new(cfg);
+        Dictionary<string, Tensor> weights = BuildSyntheticWeights(cfg);
+        transformer.LoadWeights(weights);
+
+        int h = 8, w = 8;
+        int hPacked = h / cfg.PatchSize, wPacked = w / cfg.PatchSize;
+        using Tensor latent = RandomTensor(new TensorShape(1, cfg.InChannels, h, w), 4321);
+        using Tensor instruction = RandomTensor(new TensorShape(1, 5, cfg.InstructionFeatDim), 8765);
+
+        using Tensor refVel = transformer.Forward(backend, latent, 0.3f, instruction);
+
+        using Tensor packed = DiTUtils.PatchifyNCHW(latent, cfg.PatchSize);
+        using Tensor packedVel = transformer.ForwardPacked(backend, packed, 0.3f, instruction, hPacked, wPacked);
+        using Tensor newVel = new(refVel.Shape, DType.F32);
+        ((IBackend)backend).UnpatchifyTokens(newVel, packedVel, cfg.InChannels, hPacked, wPacked, cfg.PatchSize,
+            innerChannelFastest: true);
+
+        float* rp = (float*)refVel.DataPointer;
+        float* np = (float*)newVel.DataPointer;
+        long n = refVel.ElementCount;
+        for (long i = 0; i < n; i++)
+            Assert.True(rp[i] == np[i], $"mismatch at {i}: {rp[i]} vs {np[i]}");
+        DisposeAll(weights);
     }
 }

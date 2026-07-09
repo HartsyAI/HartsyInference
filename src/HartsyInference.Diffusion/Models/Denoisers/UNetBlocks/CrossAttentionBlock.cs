@@ -121,11 +121,13 @@ public sealed class CrossAttentionBlock
         Tensor normed = new Tensor(spatialShape, dtype);
         backend.GroupNorm(normed, input, _normWeight!, _normBias!, 32, 1e-6f);
 
-        // 2. Reshape [B, C, H, W] → [B, C, spatial] → transpose → [B, spatial, C] and project in
+        // 2. [B, C, H, W] → [B, spatial, C] via batched transpose and project in. Transpose2D takes
+        // explicit dims and reads the buffer flat, so normed is passed directly — a Reshape view here
+        // would touch DataPointer, forcing a GPU→host sync + re-upload of the activation (the profiled
+        // dominant SDXL step cost: ~457 multi-MB H2D misses per step across the block stack).
         TensorShape seqShape = new TensorShape(batch, spatial, channels);
-        Tensor normedFlat = normed.Reshape(new TensorShape(batch, channels, spatial));
         Tensor hidden = new Tensor(seqShape, dtype);
-        backend.Transpose2D(hidden, normedFlat, channels, spatial);
+        backend.Transpose2D(hidden, normed, channels, spatial);
         normed.Dispose();
 
         // proj_in: [B, spatial, C] → [B, spatial, C]
@@ -167,11 +169,12 @@ public sealed class CrossAttentionBlock
         backend.Linear(projOut, hidden, _projOutWeight!, _projOutBias!);
         hidden.Dispose();
 
-        // 5. Transpose [B, spatial, C] → [B, C, spatial] → reshape to [B, C, H, W] and add residual
-        Tensor projOutTransposed = new Tensor(new TensorShape(batch, channels, spatial), dtype);
-        backend.Transpose2D(projOutTransposed, projOut, spatial, channels);
+        // 5. Transpose [B, spatial, C] → [B, C, H, W] and add residual. The output tensor is allocated
+        // with the final 4-D shape directly (shape is metadata; Transpose2D writes the buffer flat) —
+        // no Reshape, no device→host round-trip.
+        Tensor output = new Tensor(spatialShape, dtype);
+        backend.Transpose2D(output, projOut, spatial, channels);
         projOut.Dispose();
-        Tensor output = projOutTransposed.Reshape(spatialShape);
 
         // Add residual from input
         Tensor result = new Tensor(spatialShape, dtype);
@@ -204,6 +207,15 @@ internal sealed unsafe class TransformerSubBlock
     private Tensor? _toVBias;
     private Tensor? _toOutWeight;
     private Tensor? _toOutBias;
+
+    // Cross-attention K/V cache: the projections of the text conditioning are step-invariant (the
+    // context tensor is fixed across the denoise loop), so the k/v Linears + head-split permutes run
+    // once per generation instead of once per step (~140 GEMMs + 140 permutes/step on SDXL). Keyed on
+    // the context tensor reference — the fused loop passes the same pre-cast conditioning object every
+    // step; per-step slicing callers (legacy CFG loop) miss every call and behave exactly as before.
+    private Tensor? _crossKvContextRef;
+    private Tensor? _cachedCrossKeyMh;
+    private Tensor? _cachedCrossValueMh;
 
     public TransformerSubBlock(int channels, int numHeads, int contextDim)
     {
@@ -266,45 +278,71 @@ internal sealed unsafe class TransformerSubBlock
         backend.LayerNorm(normed, hidden, _normWeight!, _normBias!, 1e-5f);
 
         // Q from normed hidden; K/V from normed hidden (self-attn) or raw context (cross-attn)
-        Tensor kvSource = ReferenceEquals(hidden, context) ? normed : context;
-        int kvSeqLen = ReferenceEquals(hidden, context) ? seqLen : ctxLen;
+        bool isSelfAttn = ReferenceEquals(hidden, context);
+        Tensor kvSource = isSelfAttn ? normed : context;
+        int kvSeqLen = isSelfAttn ? seqLen : ctxLen;
 
         Tensor query = new Tensor(hidShape, dtype);
         backend.Linear(query, normed, _toQWeight!, _toQBias);
 
-        TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
-        Tensor key = new Tensor(kvOutShape, dtype);
-        backend.Linear(key, kvSource, _toKWeight!, _toKBias);
+        // Multi-head split shapes. Permute0213 takes the (seq, heads, headDim) split explicitly and
+        // reads the buffer flat, so the projections are passed directly — Reshape views would each
+        // force a GPU→host sync + re-upload of a multi-MB activation (see CrossAttentionBlock.Forward).
+        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        TensorShape kvMhShape = new TensorShape(batch, _numHeads, kvSeqLen, _headDim);
 
-        Tensor value = new Tensor(kvOutShape, dtype);
-        backend.Linear(value, kvSource, _toVWeight!, _toVBias);
+        // Cross-attention K/V: step-invariant per generation (see cache fields) — reuse when the same
+        // context tensor comes back; the cache owns the reused tensors' lifetime.
+        bool kvFromCache = !isSelfAttn && ReferenceEquals(_crossKvContextRef, context)
+            && _cachedCrossKeyMh is not null && _cachedCrossValueMh is not null;
+        Tensor keyMh, valueMh;
+        if (kvFromCache)
+        {
+            keyMh = _cachedCrossKeyMh!;
+            valueMh = _cachedCrossValueMh!;
+        }
+        else
+        {
+            TensorShape kvOutShape = new TensorShape(batch, kvSeqLen, _channels);
+            Tensor key = new Tensor(kvOutShape, dtype);
+            backend.Linear(key, kvSource, _toKWeight!, _toKBias);
+            Tensor value = new Tensor(kvOutShape, dtype);
+            backend.Linear(value, kvSource, _toVWeight!, _toVBias);
+
+            keyMh = new Tensor(kvMhShape, dtype);
+            backend.Permute0213(keyMh, key, kvSeqLen, _numHeads, _headDim);
+            key.Dispose();
+            valueMh = new Tensor(kvMhShape, dtype);
+            backend.Permute0213(valueMh, value, kvSeqLen, _numHeads, _headDim);
+            value.Dispose();
+
+            if (!isSelfAttn)
+            {
+                _cachedCrossKeyMh?.Dispose();
+                _cachedCrossValueMh?.Dispose();
+                _cachedCrossKeyMh = keyMh;
+                _cachedCrossValueMh = valueMh;
+                _crossKvContextRef = context;
+                kvFromCache = true;
+            }
+        }
         normed.Dispose();
 
-        // Reshape to multi-head 4D
-        TensorShape qMhShape = new TensorShape(batch, _numHeads, seqLen, _headDim);
-        TensorShape kvMhShape = new TensorShape(batch, _numHeads, ctxLen, _headDim);
-
-        Tensor queryView = query.Reshape(new TensorShape(batch, seqLen, _numHeads, _headDim));
         Tensor queryMh = new Tensor(qMhShape, dtype);
-        backend.Permute0213(queryMh, queryView, seqLen, _numHeads, _headDim);
+        backend.Permute0213(queryMh, query, seqLen, _numHeads, _headDim);
         query.Dispose();
 
-        Tensor keyView = key.Reshape(new TensorShape(batch, ctxLen, _numHeads, _headDim));
-        Tensor keyMh = new Tensor(kvMhShape, dtype);
-        backend.Permute0213(keyMh, keyView, ctxLen, _numHeads, _headDim);
-        key.Dispose();
-
-        Tensor valueView = value.Reshape(new TensorShape(batch, ctxLen, _numHeads, _headDim));
-        Tensor valueMh = new Tensor(kvMhShape, dtype);
-        backend.Permute0213(valueMh, valueView, ctxLen, _numHeads, _headDim);
-        value.Dispose();
-
-        // SDPA — text branch
+        // SDPA — text branch. allowF16: SDXL/SD1.5 attention is universally run in fp16 by the reference
+        // engines (the checkpoints themselves ship F16); when this UNet loads F32 the flag lets the
+        // cuDNN fused path engage via the F32↔F16 cast route instead of materializing [H,Sq,Skv] scores.
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(qMhShape, dtype);
-        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale);
-        keyMh.Dispose();
-        valueMh.Dispose();
+        backend.ScaledDotProductAttention(attnOut, queryMh, keyMh, valueMh, null, scale, allowF16: true);
+        if (!kvFromCache)
+        {
+            keyMh.Dispose();
+            valueMh.Dispose();
+        }
 
         // SDPA — image branch (IP-Adapter). Reuses queryMh; produces attention against
         // image-prompt tokens projected through to_k_ip / to_v_ip. Result is added on top of
@@ -318,21 +356,19 @@ internal sealed unsafe class TransformerSubBlock
             Tensor ipValueFlat = new Tensor(new TensorShape(batch, imgSeqLen, _channels), dtype);
             backend.Linear(ipValueFlat, ipaImageTokens, toVIp!, null);
 
-            // Reshape to multi-head: [B, imgSeqLen, H*D] → [B, H, imgSeqLen, D]
+            // Multi-head split: [B, imgSeqLen, H*D] → [B, H, imgSeqLen, D] (direct, no Reshape views)
             TensorShape ipMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
-            Tensor ipKeyView = ipKeyFlat.Reshape(new TensorShape(batch, imgSeqLen, _numHeads, _headDim));
             Tensor ipKeyMh = new Tensor(ipMhShape, dtype);
-            backend.Permute0213(ipKeyMh, ipKeyView, imgSeqLen, _numHeads, _headDim);
+            backend.Permute0213(ipKeyMh, ipKeyFlat, imgSeqLen, _numHeads, _headDim);
             ipKeyFlat.Dispose();
 
-            Tensor ipValueView = ipValueFlat.Reshape(new TensorShape(batch, imgSeqLen, _numHeads, _headDim));
             Tensor ipValueMh = new Tensor(ipMhShape, dtype);
-            backend.Permute0213(ipValueMh, ipValueView, imgSeqLen, _numHeads, _headDim);
+            backend.Permute0213(ipValueMh, ipValueFlat, imgSeqLen, _numHeads, _headDim);
             ipValueFlat.Dispose();
 
             // Image attention against the same Q
             Tensor imgAttnOut = new Tensor(qMhShape, dtype);
-            backend.ScaledDotProductAttention(imgAttnOut, queryMh, ipKeyMh, ipValueMh, null, scale);
+            backend.ScaledDotProductAttention(imgAttnOut, queryMh, ipKeyMh, ipValueMh, null, scale, allowF16: true);
             ipKeyMh.Dispose();
             ipValueMh.Dispose();
 
@@ -342,11 +378,10 @@ internal sealed unsafe class TransformerSubBlock
         }
         queryMh.Dispose();
 
-        // Permute back
-        Tensor attnPermuted = new Tensor(new TensorShape(batch, seqLen, _numHeads, _headDim), dtype);
-        backend.Permute0213(attnPermuted, attnOut, _numHeads, seqLen, _headDim);
+        // Permute back — allocated as the final [B, seqLen, C] merged shape directly (no Reshape).
+        Tensor merged = new Tensor(hidShape, dtype);
+        backend.Permute0213(merged, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
-        Tensor merged = attnPermuted.Reshape(hidShape);
 
         // Output projection
         Tensor projected = new Tensor(hidShape, dtype);

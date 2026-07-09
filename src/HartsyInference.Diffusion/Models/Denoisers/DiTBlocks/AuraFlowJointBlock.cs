@@ -194,7 +194,7 @@ public sealed unsafe class AuraFlowJointBlock
         // ── 7. Joint scaled dot-product attention ──
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
-        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale);
+        backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: true);   // QK-RMS-normed, mask-null, D=256 — the proven cuDNN fused config
         jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
 
         // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] along the seq dim ──

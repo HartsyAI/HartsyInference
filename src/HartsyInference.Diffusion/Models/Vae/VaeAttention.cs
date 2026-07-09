@@ -107,77 +107,52 @@ public sealed class VaeAttention
         return mask;
     }
 
-    /// <summary>Shared core: treats the input as <c>[B, C, seqLen]</c> (any trailing spatial dims) and returns a tensor with the input's shape.</summary>
+    /// <summary>Shared core: treats the input as <c>[B, C, seqLen]</c> (any trailing spatial dims) and returns a tensor with the input's shape. No Reshape views anywhere — on CUDA a view of a GPU-produced activation forces a device→host sync + re-upload (~16 MB per view at SDXL VAE scale); every op here either reads the buffer flat (Transpose2D, Linear) or derives its layout from explicit dims, so outputs are allocated directly in the shape the next op needs.</summary>
     private Tensor ForwardCore(IBackend backend, Tensor input, int batch, int channels, int seqLen, Tensor? mask)
     {
         DType dtype = input.DType;
 
-        // GroupNorm — viewed as [B, C, seqLen, 1] so group statistics span the whole sequence.
-        TensorShape spatialShape = new TensorShape(batch, channels, seqLen, 1);
-        Tensor input4d = input.Reshape(spatialShape);
-        Tensor normed = new Tensor(spatialShape, dtype);
-        backend.GroupNorm(normed, input4d, _groupNormWeight!, _groupNormBias!, _normGroups, _normEps);
+        // GroupNorm statistics span all trailing dims (spatial = seqLen), so the native layout is fine.
+        Tensor normed = new Tensor(input.Shape, dtype);
+        backend.GroupNorm(normed, input, _groupNormWeight!, _groupNormBias!, _normGroups, _normEps);
 
-        // Reshape to [B, C, seqLen] then transpose to [B, seqLen, C] for attention
-        // Q, K, V projections: weight is [C, C], we do matmul [B, seqLen, C] @ [C, C]^T
+        // [B, C, seqLen] → [B, seqLen, C]
         TensorShape seqShape = new TensorShape(batch, seqLen, channels);
-        Tensor normedSeq = normed.Reshape(new TensorShape(batch, channels, seqLen));
-
-        // Transpose [B, C, seqLen] → [B, seqLen, C] via backend
         Tensor normedTransposed = new Tensor(seqShape, dtype);
-        backend.Transpose2D(normedTransposed, normedSeq, channels, seqLen);
+        backend.Transpose2D(normedTransposed, normed, channels, seqLen);
         normed.Dispose();
 
-        // Project Q, K, V via batched matmul: [B, seqLen, C] @ [C, C]^T = [B, seqLen, C]
-        Tensor query = ProjectLinear(backend, normedTransposed, _toQWeight!, _toQBias!, batch, seqLen, channels);
-        Tensor key = ProjectLinear(backend, normedTransposed, _toKWeight!, _toKBias!, batch, seqLen, channels);
-        Tensor value = ProjectLinear(backend, normedTransposed, _toVWeight!, _toVBias!, batch, seqLen, channels);
+        // Q/K/V projections, allocated directly in the single-head 4D attention layout (Linear derives
+        // its row count from element count / weight inDim, so the unit head dim is free).
+        TensorShape attn4DShape = new TensorShape(batch, 1, seqLen, channels);
+        Tensor query = new Tensor(attn4DShape, dtype);
+        backend.Linear(query, normedTransposed, _toQWeight!, _toQBias!);
+        Tensor key = new Tensor(attn4DShape, dtype);
+        backend.Linear(key, normedTransposed, _toKWeight!, _toKBias!);
+        Tensor value = new Tensor(attn4DShape, dtype);
+        backend.Linear(value, normedTransposed, _toVWeight!, _toVBias!);
         normedTransposed.Dispose();
 
-        // Reshape to 4D for single-head attention: [B, seqLen, C] → [B, 1, seqLen, C]
-        TensorShape attn4DShape = new TensorShape(batch, 1, seqLen, channels);
-        Tensor query4D = query.Reshape(attn4DShape);
-        Tensor key4D = key.Reshape(attn4DShape);
-        Tensor value4D = value.Reshape(attn4DShape);
-
         float scale = 1.0f / MathF.Sqrt(channels);
-        Tensor attnOut4D = new Tensor(attn4DShape, dtype);
-        backend.ScaledDotProductAttention(attnOut4D, query4D, key4D, value4D, mask, scale);
+        Tensor attnOut = new Tensor(attn4DShape, dtype);
+        backend.ScaledDotProductAttention(attnOut, query, key, value, mask, scale);
         query.Dispose();
         key.Dispose();
         value.Dispose();
 
-        // Reshape back to 3D: [B, 1, seqLen, C] → [B, seqLen, C]
-        Tensor attnOut = attnOut4D.Reshape(seqShape);
-
-        // Output projection: [B, seqLen, C] @ [C, C]^T = [B, seqLen, C]
-        Tensor projected = ProjectLinear(backend, attnOut, _toOutWeight!, _toOutBias!, batch, seqLen, channels);
+        // Output projection back to [B, seqLen, C], then channel-first in the input's native shape.
+        Tensor projected = new Tensor(seqShape, dtype);
+        backend.Linear(projected, attnOut, _toOutWeight!, _toOutBias!);
         attnOut.Dispose();
 
-        // Transpose back [B, seqLen, C] → [B, C, seqLen] → reshape to the input's layout
-        Tensor projectedChannelFirst = new Tensor(new TensorShape(batch, channels, seqLen), dtype);
+        Tensor projectedChannelFirst = new Tensor(input.Shape, dtype);
         backend.Transpose2D(projectedChannelFirst, projected, seqLen, channels);
         projected.Dispose();
 
-        Tensor projectedSpatial = projectedChannelFirst.Reshape(input.Shape);
-
         // Residual connection
         Tensor output = new Tensor(input.Shape, dtype);
-        backend.Add(output, input, projectedSpatial);
+        backend.Add(output, input, projectedChannelFirst);
         projectedChannelFirst.Dispose();
-
-        return output;
-    }
-
-    /// <summary>Linear projection: output[b] = input[b] @ weight^T + bias for each batch.</summary>
-    private static Tensor ProjectLinear(IBackend backend, Tensor input, Tensor weight, Tensor bias, int batch, int seqLen, int channels)
-    {
-        TensorShape outShape = new TensorShape(batch, seqLen, channels);
-        Tensor output = new Tensor(outShape, input.DType);
-
-        // backend.Linear computes output = input @ weight^T + bias on GPU
-        // Weight transpose and bias addition are handled by cuBLAS SGEMM (OP_T) + GPU kernel
-        backend.Linear(output, input, weight, bias);
 
         return output;
     }

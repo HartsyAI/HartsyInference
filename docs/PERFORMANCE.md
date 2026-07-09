@@ -26,6 +26,8 @@ correctness** — the engine falls back to the reference implementation and logs
 | Feature | Switch | Default | Requires | Effect | Fallback when unavailable |
 |---|---|---|---|---|---|
 | cuDNN fused flash attention | `HARTSY_SDPA_CUDNN` | **On** | cuDNN ≥ 9.21 (see §3) | Attention (D ∈ {64, 128, 256}, unmasked or `[B,1,Sq,Skv]`-broadcast additive F32 mask) runs as one fused kernel — no materialized score matrix. ~34× per call at 4608-token self-attention; the single largest fleet win | Materialized cuBLAS QKᵀ→softmax→PV path; self-disables per session (missing library) or per head-dim (engine rejection) |
+| cuDNN convolution forward | `HARTSY_CONV_CUDNN` | **On** | cuDNN ≥ 9.21 (see §3) | F16/BF16 NCHW convolutions run cuDNN tensor-core implicit-GEMM/Winograd engines instead of materializing an im2col matrix (a kernel-area-times-input-sized HBM round-trip per conv). The dominant conv win on UNet models (SDXL) and every VAE | im2col→cuBLAS GEMM; self-disables per session on any cuDNN failure |
+| cuBLASLt bias-epilogue GEMM | `HARTSY_EPILOGUE_FUSION` | **On** | cuBLASLt | Biased Linear layers fold the bias add into the GEMM epilogue, removing a separate kernel + an output-sized HBM round-trip per Linear (~700/step on SDXL) | GemmEx + separate BiasAdd kernel |
 | fp8 tensor-core GEMM | `HARTSY_FP8_NATIVE` | **On** when SM ≥ 8.9 (Ada/RTX 40xx+), **Off** otherwise | Ada-generation GPU | fp8-weight models run activation-quant (F16→e4m3) GEMMs on fp8 tensor cores; weights stay packed (no VRAM increase) | F16-cast GEMM |
 | F16 DiT activations | `HARTSY_DIT_F16` | **On** | Per-architecture code opt-in | Audited DiT block loops run F16 activations (half the HBM traffic of the bandwidth-bound norm/modulate/gate/attention kernels). The switch alone never flips an un-audited model — F16 safety is verified per architecture (QK-normed attention, bounded FFN intermediates) before a model opts in | F32 activations |
 | Resident DiT weights | `HARTSY_KEEP_MODELS` | **On** | — | DiT weights stay GPU-resident across generations (skips the per-generation free + ~2 s re-upload). VRAM-aware by construction: on a prompt-cache miss the pipeline evicts the DiT before loading the text encoder, so smaller cards remain viable | Free after each generation, re-upload on the next |
@@ -141,26 +143,26 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | ERNIE-Image | 20 | 4.0 |
 | AuraFlow-0.3 | 20 | 3.5 |
 
-**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-08. ComfyUI
+**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-09. ComfyUI
 column is the same request on the same GPU through the ComfyUI backend. The optimization grind is ongoing
 and tracked in [`benchmarks/results/`](../benchmarks/results/); this table is a snapshot, updated as
 rounds land:
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
-| Z-Image-Turbo | **2.98 s** | 3.1 s | Faster than ComfyUI |
-| Krea2-Turbo | **4.52 s** | 6.5 s | Faster than ComfyUI |
+| Z-Image-Turbo | **2.77 s** | 3.1 s | Faster than ComfyUI |
+| Krea2-Turbo | **4.48 s** | 6.5 s | Faster than ComfyUI |
 | Qwen-Image | **40.9 s** | 54.8 s | Faster than ComfyUI |
 | ERNIE-Image | **20.0 s** | 23.9 s | Faster than ComfyUI (was 49.6 s / 2.1× slower) |
 | Ideogram4 | 19.5 s | 17.0 s | 1.15× — optimization queued |
-| Boogu-Turbo | 5.05 s | 2.54 s | 2.0× — round 1 landed (was 48.9 s); round 2 in progress |
-| Boogu-Base | 43.2 s | 17.8 s | 2.4× — round 1 landed (was ~6 min); round 2 in progress |
+| Boogu-Turbo | 3.26 s | 2.54 s | 1.28× — was 48.9 s (15× in two rounds); optimization in progress |
+| Boogu-Base | 26.5 s | 17.8 s | 1.49× — was ~6 min (~13×); optimization in progress |
 | Chroma1-HD | 63.2 s | 16.6 s | 3.8× — optimization in progress |
-| AuraFlow-0.3 | 31.4 s | 14.0 s | Optimization queued |
+| AuraFlow-0.3 | **13.93 s** | 14.0 s | Tied with ComfyUI (was 31.4 s) |
 | Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
 | Flux-Schnell | 10.5 s | — | First benchmark; optimization in progress |
 | Flux.2 Klein 4B | 15.1 s | — | First benchmark; GPU-residency port landed |
-| SDXL | 33.0 s | 3.7 s | Optimization queued (UNet scheduler work) |
+| SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
 
 ---
 
@@ -174,7 +176,7 @@ Semantics may change between versions.
 | `HARTSY_DIT_GRAPH` | CUDA-graph capture of the denoise step (models opt in in code) |
 | `HARTSY_SDPA_V2`, `HARTSY_SDPA_FORCE_FLASH`, `HARTSY_SDPA_FORCE_TILED` | Alternate attention kernels, validation only |
 | `HARTSY_SDPA_F16` / `HARTSY_SDPA_NO_F16` | Force/kill the F16 SDPA path for **all** callers (per-call `allowF16` is the supported mechanism) |
-| `HARTSY_EPILOGUE_FUSION`, `HARTSY_TENSORCORE_GEMM`, `HARTSY_FP8_F16`, `HARTSY_FP8_F32`, `HARTSY_HIGH_PRECISION_GEMM`, `HARTSY_NO_TF32` | GEMM A/B-benchmarking toggles |
+| `HARTSY_TENSORCORE_GEMM`, `HARTSY_FP8_F16`, `HARTSY_FP8_F32`, `HARTSY_HIGH_PRECISION_GEMM`, `HARTSY_NO_TF32` | GEMM A/B-benchmarking toggles |
 | `HARTSY_PROFILE`, `HARTSY_PROFILE_SYNC`, `HARTSY_PROFILE_OUT` | Op-level profiler (serializes ops — never profile and benchmark in the same run) |
 | `HARTSY_VAE_STATS`, `HARTSY_LOWVRAM*`, model-specific `*_DEBUG`/`*_DUMP` switches | Targeted diagnostics |
 

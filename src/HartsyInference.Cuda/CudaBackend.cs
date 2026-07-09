@@ -27,10 +27,16 @@ public sealed class CudaBackend : IBackend
     // Head dims whose plan build/exec was rejected (e.g. D=256 on builds whose fused engine tops out at 128).
     // Per-D so one unsupported arch doesn't kill the fused path for every other resident model.
     private readonly HashSet<long> _cudnnSdpaDeadDims = new HashSet<long>();
+    private CudnnConv? _cudnnConv;
+    private bool _cudnnConvDead;   // any cuDNN conv failure → session fallback to the im2col path
 
     /// <summary>True once the cuDNN fused-attention fast path has successfully executed at least once this
     /// session. Diagnostic surface (tests / deploy logs) to confirm the path actually engaged vs fell back.</summary>
     public bool CudnnSdpaEngaged { get; private set; }
+
+    /// <summary>True once the cuDNN convolution fast path has successfully executed at least once this
+    /// session — same diagnostic role as <see cref="CudnnSdpaEngaged"/>.</summary>
+    public bool CudnnConvEngaged { get; private set; }
     private readonly string? _ptxDir;
     private bool _disposed;
 
@@ -143,6 +149,11 @@ public sealed class CudaBackend : IBackend
     /// rejections fall back to the materialized paths automatically.</summary>
     private readonly bool _sdpaCudnn;
 
+    /// <summary>Routes F16/BF16 NCHW convolutions through cuDNN conv-forward engines instead of the
+    /// im2col→cuBLAS GEMM path. Standard-profile default ON; HARTSY_CONV_CUDNN=0 disables. Failures
+    /// self-disable for the session and fall back to im2col.</summary>
+    private readonly bool _convCudnn;
+
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>: FAST_TF32 for
     /// F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit full-precision request —
     /// is off), otherwise plain 32F accumulate (mixed F16-in/F32-acc stays 32F).</summary>
@@ -202,7 +213,11 @@ public sealed class CudaBackend : IBackend
         // tri-state EnvSwitch (unset → documented default, "0"/"false" is the kill-switch) so every install
         // reproduces the published benchmark times with zero configuration. EXPERIMENTAL switches keep the
         // strict opt-in EnvFlag form ("1" only) for A/B benchmarking without recompiling.
-        EnableEpilogueFusion = EnvFlag("HARTSY_EPILOGUE_FUSION");
+        // cuBLASLt bias-epilogue GEMM: promoted to the standard profile 2026-07-09 — every biased Linear
+        // otherwise pays a separate BiasAdd kernel + an output-sized HBM round-trip (~700/step on the SDXL
+        // UNet, measured −0.16 s/gen). Falls back to GemmEx+BiasAdd when Lt is unavailable or shapes
+        // don't qualify; HARTSY_EPILOGUE_FUSION=0 is the kill-switch.
+        EnableEpilogueFusion = EnvSwitch.IsEnabled("HARTSY_EPILOGUE_FUSION", defaultOn: true);
         EnableTensorCoreGemm = EnvFlag("HARTSY_TENSORCORE_GEMM");
         // fp8 tensor-core GEMM (activation-quant e4m3) requires SM 8.9+ (Ada); older parts default to the
         // F16-cast path. Verified quality-clean fleet-wide in the standard Swarm config.
@@ -221,9 +236,12 @@ public sealed class CudaBackend : IBackend
         // rejections per head-dim), falling back to the materialized paths, so machines without cuDNN lose
         // speed, never correctness.
         _sdpaCudnn = EnvSwitch.IsEnabled("HARTSY_SDPA_CUDNN", defaultOn: true);
+        // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
+        // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
+        _convCudnn = EnvSwitch.IsEnabled("HARTSY_CONV_CUDNN", defaultOn: true);
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +
+            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +
             $"EpilogueFusion={EnableEpilogueFusion} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
             $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
@@ -773,6 +791,20 @@ public sealed class CudaBackend : IBackend
         int outH = (inH + 2 * padH - kH) / strideH + 1;
         int outW = (inW + 2 * padW - kW) / strideW + 1;
 
+        // cuDNN conv-forward fast path: F16/BF16 same-dtype conv with no fp8 alpha folding. Skips the
+        // im2col materialization entirely (tensor-core implicit-GEMM/Winograd engines) — the im2col
+        // matrix is a kH·kW× input-sized HBM write+read per conv, the dominant conv cost on the SDXL
+        // UNet (~50 convs/step) and VAE. Anything else (F32, fp8/quant weights, scale factors) keeps
+        // the im2col path; any cuDNN failure self-disables the route for the session.
+        if (_convCudnn && !_cudnnConvDead
+            && input.DType == weight.DType && output.DType == input.DType
+            && (input.DType == DType.F16 || input.DType == DType.BF16)
+            && input.Fp8ScaleFactor == 1.0f && weight.Fp8ScaleFactor == 1.0f
+            && TryCudnnConv(output, input, weight, bias, batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW))
+        {
+            return;
+        }
+
         int colRows = inCh * kH * kW;
         int colCols = outH * outW;
 
@@ -943,6 +975,72 @@ public sealed class CudaBackend : IBackend
             if (pBiasCast != 0) CudaMemory.FreeAsync(pBiasCast, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
             if (colBuf != 0) CudaMemory.FreeAsync(colBuf, _stream.Handle);
+        }
+    }
+
+    /// <summary>Attempts the cuDNN conv-forward route for <see cref="Conv2D"/>. Returns false (after
+    /// disabling the route for the session) on any cuDNN failure so the caller falls through to the
+    /// im2col path — a rejection costs one warning, never a session kill. Bias is added by the same
+    /// per-channel kernel as the im2col path, so the two routes differ only by GEMM-class accumulation
+    /// order.</summary>
+    private unsafe bool TryCudnnConv(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int batch, int inCh, int inH, int inW, int outCh, int kH, int kW, int outH, int outW,
+        int strideH, int strideW, int padH, int padW)
+    {
+        ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pBiasCast = 0;
+        bool cachedOutput = false;
+        try
+        {
+            _cudnnConv ??= new CudnnConv(_stream.Handle);
+
+            pInput = GpuTransferHelper.CopyToDevice(input);
+            pWeight = GpuTransferHelper.CopyToDevice(weight);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOutput = GpuTransferHelper.AllocateDevice(outBytes);
+
+            int dataType = input.DType == DType.F16 ? CudnnApi.CUDNN_DATA_HALF : CudnnApi.CUDNN_DATA_BFLOAT16;
+            _cudnnConv.Execute(pInput, pWeight, pOutput,
+                batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW, dataType);
+
+            if (bias is not null)
+            {
+                pBias = GpuTransferHelper.CopyToDevice(bias);
+                ulong biasPtr = pBias;
+                if (output.DType != bias.DType)
+                {
+                    pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
+                    CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
+                    biasPtr = pBiasCast;
+                }
+                int totalElements = batch * outCh * outH * outW;
+                if (output.DType == DType.F16)
+                    _kernels!.LaunchBiasAddF16(pOutput, biasPtr, outCh, outH * outW, totalElements, _stream.Handle);
+                else
+                    _kernels!.LaunchBiasAddBf16(pOutput, biasPtr, outCh, outH * outW, totalElements, _stream.Handle);
+            }
+
+            GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+            cachedOutput = true;
+            if (!CudnnConvEngaged)
+            {
+                CudnnConvEngaged = true;
+                HartsyInference.Core.Logging.Logs.Info($"[cuDNN conv] convolution-forward engine engaged (cuDNN {CudnnApi.cudnnGetVersion()})");
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _cudnnConvDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[cuDNN conv] disabled for the session (falling back to im2col): {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pInput);
+            GpuTransferHelper.FreeDevice(pWeight);
+            GpuTransferHelper.FreeDevice(pBias);
+            if (pBiasCast != 0) CudaMemory.FreeAsync(pBiasCast, _stream.Handle);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
         }
     }
 
@@ -4570,6 +4668,12 @@ public sealed class CudaBackend : IBackend
             {
                 _cudnnSdpa.Dispose();
                 _cudnnSdpa = null;
+            }
+
+            if (_cudnnConv is not null)
+            {
+                _cudnnConv.Dispose();
+                _cudnnConv = null;
             }
 
             if (_stepGraph is not null)

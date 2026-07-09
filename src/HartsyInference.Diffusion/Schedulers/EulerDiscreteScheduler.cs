@@ -99,6 +99,12 @@ public sealed class EulerDiscreteScheduler : IScheduler
         }
     }
 
+    /// <summary>Whether <see cref="Step"/> reduces to <c>sample + modelOutput·dt</c> (epsilon prediction), i.e. the denoise loop may replace the host Step loop with the in-place device <c>IBackend.CfgEulerStep</c>.</summary>
+    public bool FusedEulerCompatible => _config.PredictionType == PredictionType.Epsilon;
+
+    /// <summary>Euler dt for the fused device step: <c>sigma[i+1] − sigma[i]</c>.</summary>
+    public float StepDelta(int stepIndex) => _sigmas[stepIndex + 1] - _sigmas[stepIndex];
+
     /// <summary>Performs one Euler denoising step.</summary>
     public unsafe void Step(Tensor output, Tensor modelOutput, Tensor sample, int stepIndex)
     {

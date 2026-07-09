@@ -44,10 +44,12 @@ internal static partial class CudnnApi
 
     // cudnnBackendDescriptorType_t
     internal const int CUDNN_BACKEND_POINTWISE_DESCRIPTOR = 0;
+    internal const int CUDNN_BACKEND_CONVOLUTION_DESCRIPTOR = 1;
     internal const int CUDNN_BACKEND_ENGINE_DESCRIPTOR = 2;
     internal const int CUDNN_BACKEND_ENGINECFG_DESCRIPTOR = 3;
     internal const int CUDNN_BACKEND_ENGINEHEUR_DESCRIPTOR = 4;
     internal const int CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR = 5;
+    internal const int CUDNN_BACKEND_OPERATION_CONVOLUTION_FORWARD_DESCRIPTOR = 10;
     internal const int CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR = 13;
     internal const int CUDNN_BACKEND_OPERATIONGRAPH_DESCRIPTOR = 15;
     internal const int CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR = 16;
@@ -63,6 +65,7 @@ internal static partial class CudnnApi
     internal const int CUDNN_TYPE_INT64 = 3;
     internal const int CUDNN_TYPE_FLOAT = 4;
     internal const int CUDNN_TYPE_VOID_PTR = 6;
+    internal const int CUDNN_TYPE_CONVOLUTION_MODE = 7;
     internal const int CUDNN_TYPE_HEUR_MODE = 8;
     internal const int CUDNN_TYPE_POINTWISE_MODE = 14;
     internal const int CUDNN_TYPE_BACKEND_DESCRIPTOR = 15;
@@ -70,6 +73,19 @@ internal static partial class CudnnApi
     // cudnnBackendAttributeName_t
     internal const int CUDNN_ATTR_POINTWISE_MODE = 0;
     internal const int CUDNN_ATTR_POINTWISE_MATH_PREC = 1;
+    internal const int CUDNN_ATTR_CONVOLUTION_COMP_TYPE = 100;
+    internal const int CUDNN_ATTR_CONVOLUTION_CONV_MODE = 101;
+    internal const int CUDNN_ATTR_CONVOLUTION_DILATIONS = 102;
+    internal const int CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES = 103;
+    internal const int CUDNN_ATTR_CONVOLUTION_POST_PADDINGS = 104;
+    internal const int CUDNN_ATTR_CONVOLUTION_PRE_PADDINGS = 105;
+    internal const int CUDNN_ATTR_CONVOLUTION_SPATIAL_DIMS = 106;
+    internal const int CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_ALPHA = 700;
+    internal const int CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_BETA = 701;
+    internal const int CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_CONV_DESC = 702;
+    internal const int CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_W = 703;
+    internal const int CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_X = 704;
+    internal const int CUDNN_ATTR_OPERATION_CONVOLUTION_FORWARD_Y = 705;
     internal const int CUDNN_ATTR_ENGINEHEUR_MODE = 200;
     internal const int CUDNN_ATTR_ENGINEHEUR_OPERATION_GRAPH = 201;
     internal const int CUDNN_ATTR_ENGINEHEUR_RESULTS = 202;
@@ -106,6 +122,10 @@ internal static partial class CudnnApi
     // cudnnDataType_t
     internal const int CUDNN_DATA_FLOAT = 0;
     internal const int CUDNN_DATA_HALF = 2;
+    internal const int CUDNN_DATA_BFLOAT16 = 9;
+
+    // cudnnConvolutionMode_t
+    internal const int CUDNN_CROSS_CORRELATION = 1;
 
     // cudnnPointwiseMode_t
     internal const int CUDNN_POINTWISE_ADD = 0;

@@ -11,10 +11,12 @@ public static class NormKernels
     {
         long N = input.Shape[0];
         long C = input.Shape[1];
-        long H = input.Shape[2];
-        long W = input.Shape[3];
         long channelsPerGroup = C / groups;
-        long spatialSize = H * W;
+        // Spatial spans ALL trailing dims (rank-3 [B,C,S], rank-4 [B,C,H,W], rank-5 video [B,C,T,H,W]) —
+        // matches the CUDA backend, so callers don't need rank-normalizing Reshape views.
+        long spatialSize = 1;
+        for (int d = 2; d < input.Shape.Rank; d++)
+            spatialSize *= input.Shape[d];
         long groupSize = channelsPerGroup * spatialSize;
 
         float* pIn = (float*)input.DataPointer;
