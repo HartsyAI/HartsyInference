@@ -5,6 +5,32 @@ family. Build detail lives in [PHASE_5_AUDIO.md](PHASE_5_AUDIO.md); the music-sp
 [MUSIC_MODELS_COMPLETION_PLAN.md](MUSIC_MODELS_COMPLETION_PLAN.md). Parity evidence (maxAbs, bugs found)
 lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
+> ## ⚠️ STT reality-check (2026-07-08) — parity ✅ does NOT mean intelligible speech
+> The ✅/🔬 marks below are **numeric-parity** verdicts (corr 1.0 vs a Python reference on random/tap inputs).
+> A real-weight end-to-end pass — generate audio → resample → Whisper-base STT → content-word recall, then
+> a human listen — tells a very different story. Results so far (each writes a WAV to
+> `{TmpPath}/hartsyinference_tts_to_stt/`; tests: `*EndToEndSttTests` + `DiaEndToEndTests` + `TranscribeWavFileTests`):
+>
+> | Model | Doc mark | Whisper heard | Real verdict |
+> |---|---|---|---|
+> | **Kokoro** | ✅ | "Hello world. This is a test." (4/4) | ✅ **genuinely works** |
+> | **MeloTTS** | ✅ | "Hello World, this is a test of the speech synthesizer." (5/5) | ✅ **genuinely works** |
+> | **F5-TTS** | ✅ "bit-exact" | "(laughs)" | ✗ **not intelligible** |
+> | **Dia-1.6B** | 🔬 | "(crickets chirping)" (0/7) | ✗ **not intelligible** — gen-loop/DAC bug (transformer parity is real, output isn't) |
+> | **Qwen3-TTS 0.6B** | ✅ "bit-exact" | — (RMS 0, silent) | ⚠️ **inconclusive** — probably driven wrong (voice-design mode on a CustomVoice ckpt) |
+>
+> Lesson: the whole audio suite's "verified" status rests on parity tests that are blind to whether the
+> assembled pipeline (sampling, delay, codec decode, vocoder) makes speech. **A model is not "working" until
+> Whisper recovers its words and a human confirms the WAV.** Debugging the ✗ models + STT-verifying the rest
+> (Chatterbox/VibeVoice/Bark/NeuTTS/FishSpeech + the download-blocked set) is the open work.
+>
+> Engine changes made during this pass: `DiaPipeline.Generate` now preloads weights to **VRAM**
+> (`PreloadWeights`/`FreeWeights`, like YuE) instead of streaming F32 from host RAM per op — a 6.4 GB model now
+> lives on the GPU (VRAM 1.7→8.2 GB) with host RAM free, which is also what stops it OOM-crashing a
+> RAM-constrained box; the Dia DAC `.pth` state-dict-unwrap load fix; bert-base-uncased converted to
+> safetensors (loader can't read legacy pre-1.6 pickle). Heavy runs go through a RAM-watchdog script that
+> hard-kills below 1.5 GB free.
+
 ## TTS
 
 | Model | Status | Notes |

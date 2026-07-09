@@ -218,22 +218,30 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         Array.Copy(refIds, jointIds, refIds.Length);
         Array.Copy(targetIds, 0, jointIds, refIds.Length, targetIds.Length);
 
-        F5SwaySamplingScheduler sched = new(opts.Steps, opts.SwayCoef);
-        for (int step = 0; step < sched.Steps; step++)
+        // Pin the DiT weights VRAM-resident for the whole sample loop (32 forwards for 16 steps × CFG). Without
+        // this the CUDA path streams every weight from host each forward — the audio stack's lazy auto-promote
+        // loses its headroom gate to the transient pool, so weights never promote (no-op on CPU).
+        backend.PreloadWeights(_dit.EnumerateWeights());
+        try
         {
-            float t = sched.Timesteps[step];
-            float dt = sched.Deltas[step];
-            Tensor vCond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: false, dropText: false);
-            Tensor vUncond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: true, dropText: true);
-            ApplyCfgAndStep(x, vCond, vUncond, opts.CfgStrength, dt);
-            vCond.Dispose();
-            vUncond.Dispose();
-        }
+            F5SwaySamplingScheduler sched = new(opts.Steps, opts.SwayCoef);
+            for (int step = 0; step < sched.Steps; step++)
+            {
+                float t = sched.Timesteps[step];
+                float dt = sched.Deltas[step];
+                Tensor vCond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: false, dropText: false);
+                Tensor vUncond = _dit.Forward(backend, x, condMel, jointIds, t, dropAudioCond: true, dropText: true);
+                ApplyCfgAndStep(x, vCond, vUncond, opts.CfgStrength, dt);
+                vCond.Dispose();
+                vUncond.Dispose();
+            }
 
-        Tensor targetMel = SliceTargetPortion(x, tRef, tTotal);
-        if (!ReferenceEquals(x, initialNoise)) x.Dispose();
-        condMel.Dispose();
-        return targetMel;
+            Tensor targetMel = SliceTargetPortion(x, tRef, tTotal);
+            if (!ReferenceEquals(x, initialNoise)) x.Dispose();
+            condMel.Dispose();
+            return targetMel;
+        }
+        finally { backend.FreeWeights(_dit.EnumerateWeights()); }
     }
 
     private static unsafe Tensor ConcatRefAndZeros(Tensor refMel, int tTarget, int melDim)
