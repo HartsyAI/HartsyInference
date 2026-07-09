@@ -71,7 +71,7 @@ public sealed unsafe class WanAnimatePipeline : DiffusionPipelineBase
         int tTotal = tLat + trimLatent;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
-        float shift = _config.FlowShift;
+        float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         Logs.Info($"Wan-Animate: {pixT}f {pixW}x{pixH}, {steps} steps, cfg={guidance}, seed={seed} " +
             $"(latent {latentCh}x{tTotal}x{hLat}x{wLat}, ref-trim {trimLatent})");

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -26,6 +27,23 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder? _vaeEncoder;
     private readonly BooguImageConfig _config;
+
+    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): the ~10 GB fp8 transformer
+    /// stays GPU-resident across generations. The caller (loader) owns the Qwen3-VL TE staging — it must evict
+    /// the resident DiT via <see cref="EvictResidentWeights"/> before an encode that needs the VRAM.</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    /// <summary>Frees the resident transformer weights (no-op when not resident). For the loader's TE ⇄ DiT
+    /// staging on a prompt-cache miss.</summary>
+    public void EvictResidentWeights()
+    {
+        if (!_ditResident) return;
+        Backend.Sync();
+        Backend.FreeWeights(_transformer.EnumerateWeights());
+        _ditResident = false;
+    }
 
     /// <summary>Creates a Boogu-Image pipeline. Pass <paramref name="vaeEncoder"/> to enable the edit path (it encodes
     /// reference images into the DiT latent stream); null restricts the pipeline to T2I. Caller owns each component.</summary>
@@ -65,50 +83,89 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         TensorShape latentShape = new(1, _config.InChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
+        int hPacked = latentH / _config.PatchSize;
+        int wPacked = latentW / _config.PatchSize;
+
+        // Packed-latent loop (the Z-Image/Krea2 token-space pattern): patchify the seeded noise ONCE, keep
+        // the latent in [1, imgLen, p²·C] token space across the whole loop (ForwardPacked skips the
+        // per-forward host PatchifyNCHW — a full D2H drain of the latent every forward), unpatchify ONCE
+        // on-device before the VAE. Seed-compatible: noise is seeded in NCHW exactly as before.
+        Tensor noiseNchw = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor latent = DiTUtils.PatchifyNCHW(noiseNchw, _config.PatchSize);
+        noiseNchw.Dispose();
 
         BooguFlowMatchScheduler scheduler = new(seqLen);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        _ditResident = true;
 
+        // Drain-free loop: CFG combine + Euler run as ONE in-place device op (CfgEulerStep:
+        // z += (neg + gw·(pos−neg))·dt ≡ uncond + tg·(cond−uncond) Euler; gw=1 degenerates to the plain
+        // step). The old host scheduler.Step + ApplyCfg forced a velocity D2H + latent re-upload per step.
         for (int i = 0; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            Tensor velocity = _transformer.Forward(Backend, latent, t, instructionEmbeddings);
+            Tensor velocity = _transformer.ForwardPacked(Backend, latent, t, instructionEmbeddings, hPacked, wPacked);
             if (textGuidanceScale > 1.0f)
             {
-                Tensor uncond = _transformer.Forward(Backend, latent, t, negativeInstructionEmbeddings!);
-                Tensor combined = CfgHelper.ApplyCfg(uncond, velocity, textGuidanceScale);
+                Tensor uncond = _transformer.ForwardPacked(Backend, latent, t, negativeInstructionEmbeddings!, hPacked, wPacked);
+                Backend.CfgEulerStep(latent, velocity, uncond, textGuidanceScale, scheduler.Dt(i));
                 uncond.Dispose();
-                velocity.Dispose();
-                velocity = combined;
             }
-
-            Tensor newLatent = new(latentShape, DType.F32);
-            scheduler.Step(newLatent, velocity, latent, i);
+            else
+            {
+                Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, scheduler.Dt(i));
+            }
             velocity.Dispose();
-            latent.Dispose();
-            latent = newLatent;
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
 
-        Tensor decoded = _vaeDecoder.Decode(Backend, latent);
+        // One device unpatchify back to NCHW for the VAE (the packed latent never left the GPU).
+        Tensor unpacked = new Tensor(latentShape, DType.F32);
+        Backend.UnpatchifyTokens(unpacked, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
+            innerChannelFastest: true);
         latent.Dispose();
-        byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
+
+        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
+        Tensor decoded = _vaeDecoder.Decode(Backend, unpacked);
+        unpacked.Dispose();
+        byte[] rgb = DeviceRgb(decoded);
         decoded.Dispose();
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Boogu-Image t2i complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Device CHW F32 → HWC u8 conversion (one 3-byte/pixel D2H instead of the 4-byte/channel host
+    /// loop; see Krea2/Z-Image).</summary>
+    private byte[] DeviceRgb(Tensor image)
+    {
+        int outH = (int)image.Shape[2], outW = (int)image.Shape[3];
+        Tensor hwcU8 = new Tensor(new TensorShape(outH, outW, 3), DType.U8);
+        Backend.ChwF32ToHwcU8(hwcU8, image);
+        byte[] rgb = new byte[(long)outH * outW * 3];
+        unsafe
+        {
+            fixed (byte* dst = rgb)
+                Buffer.MemoryCopy((void*)hwcU8.DataPointer, dst, rgb.Length, rgb.Length);
+        }
+        hwcU8.Dispose();
+        return rgb;
     }
 
     /// <summary>Edit (text+image-to-image) with Boogu double guidance. The three instruction embeddings are produced by
@@ -158,6 +215,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        _ditResident = true;
 
         for (int i = 0; i < steps; i++)
         {
@@ -167,39 +225,45 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             Tensor cond = _transformer.Forward(Backend, latent, t, condEmbeddings, refLatents);
             Tensor dropText = _transformer.Forward(Backend, latent, t, dropTextEmbeddings, refLatents);
 
-            Tensor velocity;
             if (doubleGuide)
             {
+                // 3-tensor double guidance — no 2-tensor device fusion; keep the host combine + step.
                 Tensor dropAll = _transformer.Forward(Backend, latent, t, dropAllEmbeddings!, null);
-                velocity = CombineDoubleGuidance(cond, dropText, dropAll, textGuidanceScale, imageGuidanceScale);
+                Tensor velocity = CombineDoubleGuidance(cond, dropText, dropAll, textGuidanceScale, imageGuidanceScale);
                 dropAll.Dispose();
+                Tensor newLatent = new(latentShape, DType.F32);
+                scheduler.Step(newLatent, velocity, latent, i);
+                velocity.Dispose();
+                latent.Dispose();
+                latent = newLatent;
             }
             else
             {
-                // Text-only guidance with the reference kept: cond + (tg-1)*(cond - dropText).
-                velocity = CfgHelper.ApplyCfg(dropText, cond, textGuidanceScale);
+                // Text-only guidance with the reference kept: cond + (tg-1)*(cond - dropText), fused with the
+                // Euler update as one in-place device op (≡ dropText + tg·(cond−dropText)).
+                Backend.CfgEulerStep(latent, cond, dropText, textGuidanceScale, scheduler.Dt(i));
             }
             cond.Dispose();
             dropText.Dispose();
-
-            Tensor newLatent = new(latentShape, DType.F32);
-            scheduler.Step(newLatent, velocity, latent, i);
-            velocity.Dispose();
-            latent.Dispose();
-            latent = newLatent;
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
         foreach (Tensor r in refLatents) r.Dispose();
 
+        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         Tensor decoded = _vaeDecoder.Decode(Backend, latent);
         latent.Dispose();
-        byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
+        byte[] rgb = DeviceRgb(decoded);
         decoded.Dispose();
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Boogu-Image edit complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

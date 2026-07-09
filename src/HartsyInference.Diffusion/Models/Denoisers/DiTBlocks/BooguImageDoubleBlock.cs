@@ -161,15 +161,15 @@ public sealed unsafe class BooguImageDoubleBlock
     /// <summary>Runs one dual-stream block. Updates and returns <c>(image, instruct)</c>.</summary>
     /// <param name="image">Image stream <c>[B, L_img, hidden]</c> (ref + noise image tokens). Caller owns lifetime.</param>
     /// <param name="instruct">Instruction stream <c>[B, L_ins, hidden]</c>. Caller owns lifetime.</param>
-    /// <param name="rope">Shared 3-axis RoPE (used only to apply the precomputed tables).</param>
-    /// <param name="jointCos">Joint-sequence <c>[instruct || image]</c> cos table, sized <c>(L_ins+L_img)·headDim/2</c>.</param>
-    /// <param name="jointSin">Joint-sequence sin table.</param>
-    /// <param name="imageCos">Image-only cos table for the self-attention, sized <c>L_img·headDim/2</c>.</param>
-    /// <param name="imageSin">Image-only sin table.</param>
+    /// <param name="jointCos">Joint-sequence <c>[instruct || image]</c> device cos table, <c>[L_ins+L_img, headDim]</c>
+    /// duplicated-pair layout (<see cref="OmniGen2Rope.ExpandToDeviceTables"/>).</param>
+    /// <param name="jointSin">Joint-sequence device sin table.</param>
+    /// <param name="imageCos">Image-only device cos table for the self-attention, <c>[L_img, headDim]</c>.</param>
+    /// <param name="imageSin">Image-only device sin table.</param>
     /// <param name="capLen">Instruction token count = <c>instruct.Shape[1]</c>; first segment of the joint sequence.</param>
     /// <param name="temb">Conditioning <c>[B, conditioningDim]</c>.</param>
-    public (Tensor image, Tensor instruct) Forward(IBackend backend, Tensor image, Tensor instruct, OmniGen2Rope rope,
-        ReadOnlySpan<float> jointCos, ReadOnlySpan<float> jointSin, ReadOnlySpan<float> imageCos, ReadOnlySpan<float> imageSin,
+    public (Tensor image, Tensor instruct) Forward(IBackend backend, Tensor image, Tensor instruct,
+        Tensor jointCos, Tensor jointSin, Tensor imageCos, Tensor imageSin,
         int capLen, Tensor temb)
     {
         int batch = (int)image.Shape[0];
@@ -187,11 +187,11 @@ public sealed unsafe class BooguImageDoubleBlock
         insN2c2.Dispose(); insN2c3.Dispose();
 
         // ── joint cross-attention over [instruct, image] ──
-        (Tensor insAttn, Tensor imgAttn) = JointAttention(backend, imgN1, insN1, rope, jointCos, jointSin, capLen, batch, imgLen, insLen);
+        (Tensor insAttn, Tensor imgAttn) = JointAttention(backend, imgN1, insN1, jointCos, jointSin, capLen, batch, imgLen, insLen);
         imgN1.Dispose(); insN1.Dispose();
 
         // ── image self-attention ──
-        Tensor imgSelf = SelfAttention(backend, imgN3, rope, imageCos, imageSin, batch, imgLen);
+        Tensor imgSelf = SelfAttention(backend, imgN3, imageCos, imageSin, batch, imgLen);
         imgN3.Dispose();
 
         // ── image residual updates ──
@@ -242,10 +242,10 @@ public sealed unsafe class BooguImageDoubleBlock
     /// <summary>Joint cross-attention. Returns the attention output split into <c>(instruct[B,capLen,H], image[B,imgLen,H])</c>
     /// after all projections (per-stream out + parent to_out). GPU-resident: per-stream Q/K/V Linear into
     /// <c>[B, S, H, D]</c> heads-layout tensors, RMSNorm QK-norm over the head dim, joint <c>Concat</c> on the sequence
-    /// axis, <c>Permute0213</c> to <c>[B, H, S, D]</c>, CPU RoPE, GQA <c>RepeatKvHeads</c>, SDPA, permute back, and
-    /// <c>SliceRows</c> splits.</summary>
-    private (Tensor instruct, Tensor image) JointAttention(IBackend backend, Tensor imgN1, Tensor insN1, OmniGen2Rope rope,
-        ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int capLen, int batch, int imgLen, int insLen)
+    /// axis, device RoPE pre-permute, <c>Permute0213</c> to <c>[B, H, S, D]</c>, GQA <c>RepeatKvHeads</c>, SDPA,
+    /// permute back, and <c>SliceRows</c> splits.</summary>
+    private (Tensor instruct, Tensor image) JointAttention(IBackend backend, Tensor imgN1, Tensor insN1,
+        Tensor ropeCos, Tensor ropeSin, int capLen, int batch, int imgLen, int insLen)
     {
         int qDim = _numQHeads * _headDim;
         int kvDim = _numKvHeads * _headDim;
@@ -279,7 +279,7 @@ public sealed unsafe class BooguImageDoubleBlock
         backend.Concat(vJoint, new Tensor[] { insV, imgV }, 1);
         insQn.Dispose(); imgQn.Dispose(); insKn.Dispose(); imgKn.Dispose(); insV.Dispose(); imgV.Dispose();
 
-        Tensor attnFlat = GqaAttention(backend, qJoint, kJoint, vJoint, rope, ropeCos, ropeSin, batch, jointLen);
+        Tensor attnFlat = GqaAttention(backend, qJoint, kJoint, vJoint, ropeCos, ropeSin, batch, jointLen);
         qJoint.Dispose(); kJoint.Dispose(); vJoint.Dispose();
 
         // Split [instruct, image], per-stream output projections, parent to_out, then return split halves.
@@ -309,8 +309,8 @@ public sealed unsafe class BooguImageDoubleBlock
 
     /// <summary>Image self-attention (ordinary GQA block attention with image RoPE). GPU-resident, same primitives as
     /// <see cref="JointAttention"/> but over a single stream.</summary>
-    private Tensor SelfAttention(IBackend backend, Tensor x, OmniGen2Rope rope,
-        ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int batch, int seqLen)
+    private Tensor SelfAttention(IBackend backend, Tensor x,
+        Tensor ropeCos, Tensor ropeSin, int batch, int seqLen)
     {
         Tensor q = LinearHeads(backend, x, _saToQ!, batch, seqLen, _numQHeads);
         Tensor k = LinearHeads(backend, x, _saToK!, batch, seqLen, _numKvHeads);
@@ -321,7 +321,7 @@ public sealed unsafe class BooguImageDoubleBlock
         Tensor kN = RmsNormHeads(backend, k, _saNormK, batch, seqLen, _numKvHeads);
         k.Dispose();
 
-        Tensor attnFlat = GqaAttention(backend, qN, kN, v, rope, ropeCos, ropeSin, batch, seqLen);
+        Tensor attnFlat = GqaAttention(backend, qN, kN, v, ropeCos, ropeSin, batch, seqLen);
         qN.Dispose(); kN.Dispose(); v.Dispose();
 
         Tensor outProj = Linear(backend, attnFlat, _saToOut!, batch, seqLen, _hidden);
@@ -329,12 +329,21 @@ public sealed unsafe class BooguImageDoubleBlock
         return outProj;
     }
 
-    /// <summary>Permute to <c>[B, H, S, D]</c>, apply the precomputed RoPE table (CPU), GQA repeat-interleave K/V, SDPA,
+    /// <summary>Device RoPE pre-permute, permute to <c>[B, H, S, D]</c>, GQA repeat-interleave K/V, SDPA,
     /// permute back to <c>[B, S, hidden]</c>. <paramref name="qFlat"/> is <c>[B, S, qDim]</c> and
-    /// <paramref name="kFlat"/>/<paramref name="vFlat"/> are <c>[B, S, kvDim]</c>, already QK-normed.</summary>
-    private Tensor GqaAttention(IBackend backend, Tensor qFlat, Tensor kFlat, Tensor vFlat, OmniGen2Rope rope,
-        ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int batch, int seqLen)
+    /// <paramref name="kFlat"/>/<paramref name="vFlat"/> are <c>[B, S, kvDim]</c>, already QK-normed; Q/K are
+    /// rotated IN PLACE (callers dispose them right after). B=1 only (the transformer's contract).</summary>
+    private Tensor GqaAttention(IBackend backend, Tensor qFlat, Tensor kFlat, Tensor vFlat,
+        Tensor ropeCos, Tensor ropeSin, int batch, int seqLen)
     {
+        if (batch != 1)
+            throw new NotSupportedException("BooguImageDoubleBlock device-rope path requires batch == 1.");
+
+        // Device RoPE on the pre-permute [1, S, H, D] layout (rotation is per (s, h) vector — permute-order
+        // independent, bit-equivalent to the old post-permute host loop).
+        backend.WanRopeInterleaved(qFlat, ropeCos, ropeSin, seqLen, _numQHeads, _headDim);
+        backend.WanRopeInterleaved(kFlat, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim);
+
         Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
         backend.Permute0213(qMh, qFlat, seqLen, _numQHeads, _headDim);
         Tensor kMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
@@ -342,17 +351,15 @@ public sealed unsafe class BooguImageDoubleBlock
         Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
         backend.Permute0213(vMh, vFlat, seqLen, _numKvHeads, _headDim);
 
-        // RoPE (CPU; interleaved pairing — see class note). In-place on the head-major Q/K.
-        rope.Apply(qMh, ropeCos, ropeSin, batch, _numQHeads, seqLen);
-        rope.Apply(kMh, ropeCos, ropeSin, batch, _numKvHeads, seqLen);
-
         Tensor kRep = RepeatKv(backend, kMh, batch, seqLen);
         Tensor vRep = RepeatKv(backend, vMh, batch, seqLen);
         kMh.Dispose(); vMh.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
+        // allowF16: QK-RMS-norm bounds the scores and the mask is null — the proven cuDNN fused
+        // flash-attention config (falls back to the materialized F32 path when cuDNN is unavailable).
+        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale, allowF16: true);
         qMh.Dispose(); kRep.Dispose(); vRep.Dispose();
 
         Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);

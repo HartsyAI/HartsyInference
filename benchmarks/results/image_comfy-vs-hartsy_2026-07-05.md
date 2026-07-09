@@ -575,3 +575,81 @@ Q4_K block format breaks — needs the QwenImageLoader GGUF-bridge pattern + qua
 Checkpoints staged as REAL files: flux2-dev-Q4_K_S.gguf (19.3 GB), Mistral TE (12.3 GB), Klein 4B (7.75 GB).
 NOTE: hf_hub_download local_dir SYMLINKS into ~/.cache/huggingface — always cp --dereference + purge the
 cache repo, or the /tmp-symlink incident repeats and disk double-counts.
+
+## 2026-07-08 — ERNIE-Image round 1: 49.6s → **~20.3s pipeline (BEATS Comfy 24.0s; clean wall median pending)** — engine `alpha.44.19-local`
+
+Fresh same-evening baseline on 44.17: cold 64.75s, warm **49.62/49.69/49.34s (median 49.62s)**, peak 13.8 GB.
+After round 1: pipeline-logged warm gens **20.3/23.8/20.3s** (TE-cache-hit gens = 20.3s; the 23.8s rep paid a
+TE re-encode). Contended wall 27.1s — the concurrent video session's Wan S2V work + two surprise Swarm restarts
+poisoned the wall clock; the official warm-median wall bench is queued behind a sustained-GPU-quiet gate and
+this section will be finalized from it. **Correctness gate passed: seed-777 A/B pre/post deploy — identical
+composition/contrast, no haze/washout, only F16-attention-class micro-deltas. Coherent ✓ viewed.**
+
+One deploy, five fixes — all in ERNIE-only files (zero shared-code blast radius), the Qwen/Ideogram playbook:
+| Fix | What |
+|---|---|
+| **Step-invariant mask cache — THE find** | `ErnieImageTransformer.BuildAttentionMask` host-built + H2D-uploaded a **77 MB `[1,1,S,S]` F32 padding mask EVERY forward** (2 CFG passes × 20 steps = 40/gen — the Chroma mask pathology, bigger). Now cached per (nImg, textMax, textLen); RoPE cos/sin tables cached the same way (and pre-sliced ONCE per gen instead of 2 slices × 36 blocks per forward); text projection cached on the textEmbeds reference (the pipeline prompt cache reuses refs, keeping it warm across gens). Cache tensors are host-materialized at store time so FreeActivations can't revert them. |
+| **Masked cuDNN flash SDPA** | The block SDPA never passed `allowF16` → F32 materialized scores. ERNIE is QK-RMS-normed with exactly the `[B,1,Sq,Skv]` F32 additive mask the 44.10 fused path supports; one-line `allowF16:true` → `[cuDNN SDPA] fused flash-attention engaged (D=128)` confirmed in log. |
+| **Drain-free loop** | Host `scheduler.Step` + `CfgHelper.ApplyCfg` (velocity D2H ×2 + latent re-upload per step) → in-place device `CfgEulerStep(latent, cond, uncond, cfg, Dt(i))`; latent device-resident all loop; masked-inpaint keeps the host branch. |
+| **TE prompt cache + KEEP_MODELS** | Cond+uncond Ministral-3B hiddens keyed on (tokens, realLen); repeat prompts skip the whole TE phase (preload+encode+free of ~7.7 GB). DiT stays resident across gens; prompt-cache MISS evicts it for the TE (Qwen pattern). |
+| **Device tail** | `UnpatchifyTokens` for the per-forward host unpatchify loop (p=1 → pure transpose; was a full D2H drain per forward), device `ChwF32ToHwcU8` rgb, VAE `PreloadWeights`. |
+
+**Round 2 menu:** profile the ~0.9-1.0s/step split (fp8 GEMM vs glue), `HARTSY_DIT_F16` opt-in for
+ErnieImageBlock (GELU-gated FFN 12288 — overflow audit first, sandwich-damp if needed), fused QKV,
+wall-vs-pipeline gap attribution (~3s of Swarm/extension overhead seen under contention).
+
+**Boogu unblocked (routing metadata, NOT a core update):** the Swarm core (HEAD 2026-07-04) already ships the
+`boogu` detector; the real blocker was stale cached metadata — arch `null` in Swarm's model DB and a sidecar
+`"boogu-image"` id from an old extension registration (unknown id → normalized null; Swarm never re-detects
+existing entries). Fix = `/API/EditModelMetadata` with `type:"boogu"` per model (base/turbo/edit fp8) — sets
+ModelClass from the live registry + resaves sidecar + DB. First Swarm-routed Boogu bench queued.
+
+**Concurrent-session note:** engine versions are a shared namespace — the video session took `44.18-local`
+mid-evening; this round shipped as `44.19-local` with a hand-synthesized meta nupkg (the 44.13 lesson: `dotnet
+pack` on the sln emits sub-packages only). After any unexplained connection-refused, re-verify pin + DLL md5.
+
+## 2026-07-09 — dual-backend routing trap + fresh ComfyUI baselines (incl. FIRST Boogu Comfy numbers)
+
+**Methodology trap (cost one suite):** the concurrent video session enabled the ComfyUI backend (#1) at
+~00:35 — with BOTH backends enabled, Swarm load-balances `/API/GenerateText2Image`, and `bench_t2i.py` does
+NOT toggle backends per its doc claim. An entire "Hartsy" suite (ERNIE + Z-Image + Boogu) silently ran on
+**ComfyUI**; the tell was Hartsy's Boogu VRAM pre-check failing (`≥16 GB free` — Comfy held the card) while
+"results" kept arriving. **Rule: always pin routing per-request with `exactbackendid` (Hartsy = "2");
+never rely on which backends happen to be enabled.**
+
+The mis-routed suite is still a clean, GPU-quiet **ComfyUI** dataset (warm medians, RTX 4090, 1024²):
+| Model | ComfyUI warm | Note |
+|---|---:|---|
+| ERNIE-Image (20 st) | **23.93s** | re-validates the documented 24.0s |
+| Z-Image-Turbo (8 st) | **3.09s** | re-validates the documented 3.1s |
+| **Boogu Turbo (4 st)** | **2.54s** (cold 19.4s) | FIRST Comfy Boogu baseline |
+| **Boogu Base (20 st, cfg 4)** | **17.78s** (cold 28.5s) | FIRST Comfy Boogu baseline |
+
+Comfy's Boogu output verified coherent (sharp astronauts, viewed). The Hartsy-pinned suite (engine
+`alpha.44.20-local` = ERNIE round 1 + Boogu round 1) is queued behind a GPU-quiet gate; its results replace
+the pending entries below when they land.
+
+## 2026-07-09 — FINAL pinned suite (engine `alpha.44.20-local`, `exactbackendid=2`, GPU-quiet): ERNIE **BEATS Comfy 20.0 vs 23.9s**; Boogu first Swarm bench 48.9→**5.05s** Turbo / ~6min→**43.2s** Base
+
+All warm medians of 3 (Base: 2), random seeds, RTX 4090, 1024², routing pinned to the Hartsy backend, Comfy
+VRAM flushed via `/API/FreeBackendMemory` before each phase, every output visually verified coherent.
+
+| Model | Hartsy 44.20 | ComfyUI (same night) | Verdict |
+|---|---:|---:|---|
+| **ERNIE-Image (20 st)** | **20.03s** (19.99/20.03/20.09, peak 13.7 GB) | 23.93s | **1.19× FASTER** (round 1: was 49.62s = 2.07× slower this same evening) |
+| **Boogu Turbo (4 st)** | **5.05s** (5.06/5.03/5.05; cold 24.2s) | 2.54s | 2.0× — was **48.9s engine-level** (9.7× round-1 speedup); first Swarm-routed bench ever |
+| **Boogu Base (20 st, cfg 4)** | **43.2s** (44.2/42.2; cold 58.0s) | 17.78s | 2.4× — was ~6 min engine-level (~8×) |
+| Krea2-Turbo (flagship gate) | **4.52s** ✓ | 6.5s | coherent ✓ viewed |
+| Z-Image-Turbo (flagship gate) | **2.98s** ✓ | 3.1s | coherent ✓ viewed |
+
+ERNIE wall 20.0s vs 20.3s pipeline-logged → the Swarm tail is ~0s warm (the earlier 27s walls were pure
+contention). Boogu images (Turbo 5s + Base 44s) are sharp/detailed astronauts — the device-rope port, caption
+cache and drain-free loop verified on the real CUDA path (bit-equivalence was pre-proven on CPU by
+`OmniGen2RopeDeviceTableTests`).
+
+**Boogu round-2 menu (uniform ~2× vs Comfy on both variants → per-forward cost):** (1) `allowF16:true` on
+the Single/Double block SDPAs — Boogu is QK-RMS-normed with mask=null, EXACTLY the proven cuDNN fused config,
+and was left F32-materialized in round 1; (2) packed-latent loop (kill the per-forward host `PatchifyNCHW`
+D2H drain — no device patchify op exists yet; the Z-Image/Krea2 token-space pattern); (3) `HARTSY_DIT_F16`
+audit; (4) edit-path embed cache. ERNIE round-2: profile the ~0.9s/step split, DIT_F16 (GELU FFN 12288
+overflow audit), fused QKV.

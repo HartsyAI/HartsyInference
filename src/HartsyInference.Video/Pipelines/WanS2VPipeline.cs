@@ -89,7 +89,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         int tVideo = tLat * 4;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
-        float shift = _config.FlowShift;
+        float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         Logs.Info($"Wan-S2V: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} " +
             $"(latent {latentCh}x{tLat}x{hLat}x{wLat}, ref={(referenceRgb24.IsEmpty ? "no" : "yes")})");
@@ -170,7 +170,11 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             // variant was tried 2026-07-08 and OOM'd at 40 blocks × 13824 FFN even with HARTSY_FP8_NATIVE — the trim
             // stays until the injector's host glue is ported (which removes the churn at the source).
             Backend.FreeActivations();
-            Backend.TrimMemoryPool();
+            // WAN_S2V_TRIM=0 skips the per-step pool trim (perf experiment 2026-07-09: the trim was an OOM
+            // band-aid from the pre-MEMPOOL_KEEP era; profiling shows large per-step re-uploads and the
+            // trim + realloc churn is the prime suspect for the 15× gap vs T2V).
+            if (Environment.GetEnvironmentVariable("WAN_S2V_TRIM") != "0")
+                Backend.TrimMemoryPool();
             if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-free   free={Backend.FreeMemoryBytes() >> 20}MB");
         }
 

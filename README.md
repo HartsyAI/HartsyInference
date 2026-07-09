@@ -376,7 +376,7 @@ We publish real numbers and we are honest about where we stand. HartsyInference 
 
 ### Image generation end-to-end vs ComfyUI
 
-RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.45`, 2026-07-08 (living snapshot — updated as optimization rounds land):
+RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-08 (living snapshot — updated as optimization rounds land):
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
@@ -388,6 +388,7 @@ RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identi
 | ERNIE-Image (20 steps) | 50.6 s | 24.0 s | Optimization queued |
 | Flux-Dev (20 steps) | 31.0 s | 12.5 s | Optimization in progress |
 | Flux-Schnell (4 steps) | 10.5 s | — | First benchmark; optimization in progress |
+| Flux.2 Klein 4B (10 steps) | 15.1 s | — | First benchmark; GPU-residency port landed |
 | SDXL (20 steps) | 33.0 s | 3.7 s | Optimization queued |
 
 These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).

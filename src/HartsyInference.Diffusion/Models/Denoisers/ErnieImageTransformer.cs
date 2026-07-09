@@ -25,6 +25,15 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
     private readonly ErnieImageRope _rope;
     private int _disposed;
 
+    // ── Step-invariant per-generation caches (B=1 only — the only case pipelines exercise). ──
+    // The attention mask ([1,1,S,S], ~77 MB at 1024²), the RoPE freqs and their cos/sin slices, and the text
+    // projection are all functions of (grid, textMax, textLens, textEmbeds) only — rebuilding them on EVERY
+    // forward (2 CFG passes × steps) was the dominant transformer-level host cost (host build + H2D re-upload
+    // per forward). Keys stay tiny (cond + uncond per prompt); a >8-entry sweep guards prompt-churn growth.
+    private readonly Dictionary<(int nImg, int textMax, int len0), Tensor> _maskCache = [];
+    private readonly Dictionary<(int gridH, int gridW, int textMax, int len0), (Tensor cos, Tensor sin)> _ropeCache = [];
+    private readonly Dictionary<Tensor, Tensor> _textProjCache = new(ReferenceEqualityComparer.Instance);
+
     // text_proj: Linear(text_in_dim, hidden, bias=False). Optional — present only when text_in_dim != hidden.
     private Tensor? _textProjWeight;
 
@@ -132,9 +141,33 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         ErnieImageDebugDump.Dump("patch_embed", imgTokens);
 
         // ── 2. Project text embeds to hidden dim → [B, Tmax, hidden] ──
-        Tensor textProjected = _textProjWeight is not null
-            ? ProjectText(backend, textEmbeds, batch, textMax, hidden)
-            : EnsureF32(textEmbeds);
+        // Step-invariant per prompt: cached on the textEmbeds reference (cond + uncond alternate every step;
+        // the pipeline's prompt-embedding cache reuses the same tensor refs across gens, keeping this warm too).
+        bool cacheable = batch == 1;
+        bool ownsTextProj = !cacheable;
+        Tensor textProjected;
+        if (cacheable && _textProjCache.TryGetValue(textEmbeds, out Tensor? cachedProj))
+        {
+            textProjected = cachedProj;
+        }
+        else
+        {
+            textProjected = _textProjWeight is not null
+                ? ProjectText(backend, textEmbeds, batch, textMax, hidden)
+                : EnsureF32(textEmbeds);
+            if (cacheable && !ReferenceEquals(textProjected, textEmbeds))
+            {
+                if (_textProjCache.Count > 8) SweepTextProjCache();
+                // Host-materialize so a later FreeActivations can't revert the cache to stale host memory.
+                _ = textProjected.DataPointer;
+                _textProjCache[textEmbeds] = textProjected;
+            }
+            else if (cacheable)
+            {
+                // No projection layer: textProjected IS the caller's tensor — never dispose it.
+                ownsTextProj = false;
+            }
+        }
         ErnieImageDebugDump.Dump("text_proj", textProjected);
 
         // ── 3. Timestep embedding: get_timestep_embedding(t, hidden, flip_sin_to_cos=False, downscale_freq_shift=0) ──
@@ -155,16 +188,38 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         // ── 5. Concat [image, text] along sequence dim → [B, totalSeq, hidden] ──
         Tensor combined = ConcatAlongSeqDim(backend, imgTokens, textProjected, batch, nImg, textMax, hidden);
         imgTokens.Dispose();
-        textProjected.Dispose();
+        if (ownsTextProj && !ReferenceEquals(textProjected, textEmbeds)) textProjected.Dispose();
 
-        // ── 6. Build attention mask [B, 1, 1, totalSeq]: 1 for valid tokens, 0 for padded text ──
-        Tensor attentionMask = BuildAttentionMask(batch, nImg, textMax, textLens);
+        // ── 6. Attention mask [B, 1, S, S] — step-invariant, cached per (nImg, textMax, len) so the ~77 MB
+        //      host build + H2D upload happens once per prompt instead of on every forward ──
+        bool ownsMaskRope = !cacheable;
+        Tensor attentionMask;
+        Tensor ropeCos, ropeSin;
+        if (cacheable)
+        {
+            (int, int, int) maskKey = (nImg, textMax, textLens[0]);
+            if (!_maskCache.TryGetValue(maskKey, out attentionMask!))
+            {
+                if (_maskCache.Count > 8) SweepCache(_maskCache);
+                attentionMask = BuildAttentionMask(batch, nImg, textMax, textLens);
+                _maskCache[maskKey] = attentionMask;
+            }
 
-        // ── 7. Build 3D RoPE freqs ──
-        Tensor posIds = ErnieImageRope.BuildPositionIds(batch, textLens, gridH, gridW, textMax);
-        Tensor freqs = _rope.BuildFreqs(posIds);
-        posIds.Dispose();
-        ErnieImageDebugDump.Dump("rope_freqs", freqs);
+            // ── 7. 3D RoPE cos/sin — same invariance; sliced once here instead of twice per block ──
+            (int, int, int, int) ropeKey = (gridH, gridW, textMax, textLens[0]);
+            if (!_ropeCache.TryGetValue(ropeKey, out (Tensor cos, Tensor sin) cs))
+            {
+                if (_ropeCache.Count > 8) SweepRopeCache();
+                cs = BuildRopeCosSin(backend, batch, textLens, gridH, gridW, textMax);
+                _ropeCache[ropeKey] = cs;
+            }
+            (ropeCos, ropeSin) = cs;
+        }
+        else
+        {
+            attentionMask = BuildAttentionMask(batch, nImg, textMax, textLens);
+            (ropeCos, ropeSin) = BuildRopeCosSin(backend, batch, textLens, gridH, gridW, textMax);
+        }
 
         // ── 8. Layer loop with broadcasted modulation ──
         Tensor x = combined;
@@ -172,14 +227,18 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         {
             Tensor next = _blocks[i].Forward(backend, x,
                 mod[0], mod[1], mod[2], mod[3], mod[4], mod[5],
-                freqs, _rope, attentionMask);
+                ropeCos, ropeSin, attentionMask);
             x.Dispose();
             x = next;
             ErnieImageDebugDump.Dump($"layers.{i}", x);
         }
 
-        freqs.Dispose();
-        attentionMask.Dispose();
+        if (ownsMaskRope)
+        {
+            attentionMask.Dispose();
+            ropeCos.Dispose();
+            ropeSin.Dispose();
+        }
 
         // ── 9. Slice off image tokens (front of [image, text] sequence) ──
         Tensor imageOnly = SliceImageFront(backend, x, batch, nImg, textMax, hidden);
@@ -193,11 +252,52 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         ErnieImageDebugDump.Dump("final_linear", projected);
 
         // ── 11. Reshape [B, nImg, p²·out_channels] → [B, out_channels, H, W] ──
-        Tensor velocity = Unpatchify(projected, batch, gridH, gridW, _config.PatchSize, _config.OutChannels);
+        Tensor velocity = Unpatchify(backend, projected, batch, gridH, gridW, _config.PatchSize, _config.OutChannels);
         projected.Dispose();
         ErnieImageDebugDump.DumpOutput(velocity);
 
         return velocity;
+    }
+
+    /// <summary>Builds the RoPE cos/sin pair for the concatenated sequence: <c>BuildPositionIds → BuildFreqs</c>
+    /// (host, same math as before) then a one-time device slice of the packed <c>[B,S,2·D]</c> freqs into
+    /// <c>cos</c>/<c>sin</c> — previously re-sliced twice per block per forward (<see cref="ErnieImageRope.ApplyRotaryEmbGpu"/>).</summary>
+    private (Tensor cos, Tensor sin) BuildRopeCosSin(IBackend backend, int batch, int[] textLens, int gridH, int gridW, int textMax)
+    {
+        Tensor posIds = ErnieImageRope.BuildPositionIds(batch, textLens, gridH, gridW, textMax);
+        Tensor freqs = _rope.BuildFreqs(posIds);
+        posIds.Dispose();
+        ErnieImageDebugDump.Dump("rope_freqs", freqs);
+        int totalSeq = (int)freqs.Shape[1];
+        int headDim = _rope.HeadDim;
+        TensorShape csShape = new TensorShape(batch, totalSeq, headDim);
+        Tensor cos = new Tensor(csShape, DType.F32);
+        Tensor sin = new Tensor(csShape, DType.F32);
+        backend.SliceLastDim(cos, freqs, 0);
+        backend.SliceLastDim(sin, freqs, headDim);
+        // Host-materialize so a later FreeActivations can't revert cached copies to stale host memory.
+        _ = cos.DataPointer;
+        _ = sin.DataPointer;
+        freqs.Dispose();
+        return (cos, sin);
+    }
+
+    private void SweepCache(Dictionary<(int, int, int), Tensor> cache)
+    {
+        foreach (Tensor t in cache.Values) t.Dispose();
+        cache.Clear();
+    }
+
+    private void SweepRopeCache()
+    {
+        foreach ((Tensor cos, Tensor sin) in _ropeCache.Values) { cos.Dispose(); sin.Dispose(); }
+        _ropeCache.Clear();
+    }
+
+    private void SweepTextProjCache()
+    {
+        foreach (Tensor t in _textProjCache.Values) t.Dispose();
+        _textProjCache.Clear();
     }
 
     /// <summary>Projects <c>[B, Tmax, text_in_dim]</c> text embeds to <c>[B, Tmax, hidden]</c> via <c>text_proj</c> (Linear, bias=False).</summary>
@@ -439,9 +539,16 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         return mask;
     }
 
-    /// <summary>Reshapes <c>[B, nImg, p²·out_channels]</c> back to <c>[B, out_channels, H, W]</c>. For p=1 this is just a logical permute from token-major to channel-major.</summary>
-    private static Tensor Unpatchify(Tensor packed, int batch, int gridH, int gridW, int patch, int outChannels)
+    /// <summary>Reshapes <c>[B, nImg, p²·out_channels]</c> back to <c>[B, out_channels, H, W]</c>. For p=1 this is just a logical permute from token-major to channel-major. B=1 runs device-resident via <see cref="IBackend.UnpatchifyTokens"/> (ERNIE's <c>(ph·p+pw)·C + c</c> inner order is exactly <c>innerChannelFastest</c>) — the host loop forced a full D2H drain of the projected tokens on every forward. B&gt;1 keeps the host reference loop.</summary>
+    private static Tensor Unpatchify(IBackend backend, Tensor packed, int batch, int gridH, int gridW, int patch, int outChannels)
     {
+        if (batch == 1)
+        {
+            TensorShape deviceOutShape = new TensorShape(1, outChannels, gridH * patch, gridW * patch);
+            Tensor deviceOut = new Tensor(deviceOutShape, packed.DType);
+            backend.UnpatchifyTokens(deviceOut, packed, outChannels, gridH, gridW, patch, innerChannelFastest: true);
+            return deviceOut;
+        }
         int height = gridH * patch;
         int width = gridW * patch;
         int seqLen = gridH * gridW;
@@ -485,6 +592,9 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            SweepCache(_maskCache);
+            SweepRopeCache();
+            SweepTextProjCache();
             _textProjWeight = null;
             _timeLinear1Weight = null; _timeLinear1Bias = null;
             _timeLinear2Weight = null; _timeLinear2Bias = null;

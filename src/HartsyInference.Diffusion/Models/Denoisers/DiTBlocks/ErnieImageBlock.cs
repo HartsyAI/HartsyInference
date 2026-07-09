@@ -100,13 +100,13 @@ public sealed unsafe class ErnieImageBlock
     /// <param name="shiftMlp">MLP shift.</param>
     /// <param name="scaleMlp">MLP scale.</param>
     /// <param name="gateMlp">MLP output gate.</param>
-    /// <param name="freqs">RoPE freqs from <see cref="ErnieImageRope.BuildFreqs"/>, shape <c>[B, S, 2*head_dim]</c>.</param>
-    /// <param name="rope">RoPE applier (holds the axes_dim/theta config).</param>
+    /// <param name="ropeCos">RoPE cos table <c>[B, S, head_dim]</c> (pre-sliced once at the transformer level from <see cref="ErnieImageRope.BuildFreqs"/>'s packed output — was re-sliced per block).</param>
+    /// <param name="ropeSin">RoPE sin table <c>[B, S, head_dim]</c>.</param>
     /// <param name="attentionMask">Optional attention mask <c>[B, 1, 1, S]</c> — bool-style, where 0=mask out.</param>
     public Tensor Forward(IBackend backend, Tensor x,
         Tensor shiftMsa, Tensor scaleMsa, Tensor gateMsa,
         Tensor shiftMlp, Tensor scaleMlp, Tensor gateMlp,
-        Tensor freqs, ErnieImageRope rope, Tensor? attentionMask)
+        Tensor ropeCos, Tensor ropeSin, Tensor? attentionMask)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
@@ -148,8 +148,8 @@ public sealed unsafe class ErnieImageBlock
         kHeads.Dispose();
 
         // 3D RoPE (in-place on qNormed/kNormed, both still [B, S, numHeads, headDim]) — GPU-resident via
-        // backend.ApplyRope (rotate_half); freqs sliced into cos/sin on-device. Bit-identical to the host path.
-        rope.ApplyRotaryEmbGpu(backend, qNormed, kNormed, freqs);
+        // backend.ApplyRope (rotate_half) on the pre-sliced cos/sin tables. Bit-identical to the host path.
+        backend.ApplyRope(qNormed, kNormed, ropeCos, ropeSin);
 
         // SDPA expects [B, numHeads, S, headDim]. Permute (B, S, H, D) → (B, H, S, D).
         Tensor qMh = new Tensor(mhShape, DType.F32);
@@ -164,7 +164,10 @@ public sealed unsafe class ErnieImageBlock
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale);
+        // allowF16: QK-RMS-norm bounds the scores, and the [B,1,Sq,Skv] F32 padding mask rides the cuDNN fused
+        // engine's fp32 bias path (added to fp32 scores inside the engine, never rounded through F16) — the
+        // proven Chroma/Z-Image config. Falls back to the materialized F32 path when cuDNN is unavailable.
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();

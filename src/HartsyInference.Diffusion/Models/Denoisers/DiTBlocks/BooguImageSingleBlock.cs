@@ -129,11 +129,13 @@ public sealed unsafe class BooguImageSingleBlock
         if (_ffnNorm2Weight is not null) yield return _ffnNorm2Weight;
     }
 
-    /// <summary>Table-driven forward (matches <see cref="OmniGen2Block.Forward(IBackend, Tensor, OmniGen2Rope,
-    /// ReadOnlySpan{float}, ReadOnlySpan{float}, Tensor?)"/>): rotates Q/K with the caller-supplied precomputed
-    /// <c>(cos, sin)</c> RoPE table. Caller owns <paramref name="hidden"/>; a new output tensor is returned.</summary>
-    public Tensor Forward(IBackend backend, Tensor hidden, OmniGen2Rope rope,
-        ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, Tensor? temb)
+    /// <summary>Table-driven forward: rotates Q/K with the caller-supplied precomputed device <c>(cos, sin)</c>
+    /// RoPE tables (<c>[S, headDim]</c> duplicated-pair layout from <see cref="OmniGen2Rope.ExpandToDeviceTables"/>).
+    /// The rotation runs pre-permute via <c>IBackend.WanRopeInterleaved</c> — bit-equivalent to the old host
+    /// <see cref="OmniGen2Rope.Apply"/> minus its per-block D2H drain + re-upload of Q and K. B=1 only (the
+    /// transformer's contract). Caller owns <paramref name="hidden"/>; a new output tensor is returned.</summary>
+    public Tensor Forward(IBackend backend, Tensor hidden,
+        Tensor ropeCos, Tensor ropeSin, Tensor? temb)
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
@@ -153,7 +155,7 @@ public sealed unsafe class BooguImageSingleBlock
             backend.RmsNorm(norm1Out, hidden, _norm1Weight!, _normEps);
         }
 
-        Tensor attnOut = ComputeSelfAttentionWithTable(backend, norm1Out, rope, ropeCos, ropeSin, batch, seqLen);
+        Tensor attnOut = ComputeSelfAttentionWithTable(backend, norm1Out, ropeCos, ropeSin, batch, seqLen);
         norm1Out.Dispose();
 
         Tensor norm2Out = new Tensor(hShape, DType.F32);
@@ -215,9 +217,11 @@ public sealed unsafe class BooguImageSingleBlock
         return output;
     }
 
-    private Tensor ComputeSelfAttentionWithTable(IBackend backend, Tensor input, OmniGen2Rope rope,
-        ReadOnlySpan<float> ropeCos, ReadOnlySpan<float> ropeSin, int batch, int seqLen)
+    private Tensor ComputeSelfAttentionWithTable(IBackend backend, Tensor input,
+        Tensor ropeCos, Tensor ropeSin, int batch, int seqLen)
     {
+        if (batch != 1)
+            throw new NotSupportedException("BooguImageSingleBlock device-rope path requires batch == 1.");
         // Q/K/V projected into [B, S, H, D] (byte-identical to [B, S, H·D]) so RmsNorm QK-norm normalizes over the
         // head dim and Permute0213 needs no reshape view.
         Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), DType.F32);
@@ -234,6 +238,11 @@ public sealed unsafe class BooguImageSingleBlock
         backend.RmsNorm(kn, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
+        // Device RoPE on the pre-permute [1, S, H, D] layout (rotation is per (s, h) vector — permute-order
+        // independent, bit-equivalent to the old post-permute host loop).
+        backend.WanRopeInterleaved(qn, ropeCos, ropeSin, seqLen, _numQHeads, _headDim);
+        backend.WanRopeInterleaved(kn, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim);
+
         Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
         backend.Permute0213(qMh, qn, seqLen, _numQHeads, _headDim);
         qn.Dispose();
@@ -244,10 +253,6 @@ public sealed unsafe class BooguImageSingleBlock
         backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
         v.Dispose();
 
-        // RoPE (CPU; interleaved pairing — see class note).
-        rope.Apply(qMh, ropeCos, ropeSin, batch, _numQHeads, seqLen);
-        rope.Apply(kMh, ropeCos, ropeSin, batch, _numKvHeads, seqLen);
-
         Tensor kRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
         backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroupSize);
         Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
@@ -256,7 +261,9 @@ public sealed unsafe class BooguImageSingleBlock
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale);
+        // allowF16: QK-RMS-norm bounds the scores and the mask is null — the proven cuDNN fused
+        // flash-attention config (falls back to the materialized F32 path when cuDNN is unavailable).
+        backend.ScaledDotProductAttention(attnMh, qMh, kRep, vRep, null, scale, allowF16: true);
         qMh.Dispose(); kRep.Dispose(); vRep.Dispose();
 
         Tensor attnFlat = new Tensor(new TensorShape(batch, seqLen, _hiddenSize), DType.F32);

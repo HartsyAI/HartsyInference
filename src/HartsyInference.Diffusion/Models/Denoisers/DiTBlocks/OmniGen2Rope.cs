@@ -200,6 +200,37 @@ public sealed unsafe class OmniGen2Rope
         }
     }
 
+    /// <summary>Expands a host <c>[S, halfDim]</c> pair-angle table (from <see cref="BuildTableFromPositions"/> /
+    /// the fixed builders) into the <c>[S, headDim]</c> F32 layout <c>IBackend.WanRopeInterleaved</c> reads — pair
+    /// <c>i</c>'s angle duplicated at indices <c>2i</c> and <c>2i+1</c>. That kernel's rotation
+    /// (<c>re·c − im·s, im·c + re·s</c> on adjacent pairs) matches <see cref="ApplyRotation"/> exactly, so applying it
+    /// pre-permute on <c>[1, S, H, D]</c> Q/K is bit-equivalent to the host <see cref="Apply"/> — minus the per-block
+    /// D2H drain + re-upload of Q and K the host loop forced.</summary>
+    public (Tensor cos, Tensor sin) ExpandToDeviceTables(float[] cosTable, float[] sinTable)
+    {
+        int halfDim = _headDim / 2;
+        int seqLen = cosTable.Length / halfDim;
+        Tensor cos = new Tensor(new TensorShape(seqLen, _headDim), DType.F32);
+        Tensor sin = new Tensor(new TensorShape(seqLen, _headDim), DType.F32);
+        float* cp = (float*)cos.DataPointer;
+        float* sp = (float*)sin.DataPointer;
+        for (int s = 0; s < seqLen; s++)
+        {
+            long rowOff = (long)s * _headDim;
+            int srcOff = s * halfDim;
+            for (int i = 0; i < halfDim; i++)
+            {
+                float cv = cosTable[srcOff + i];
+                float sv = sinTable[srcOff + i];
+                cp[rowOff + 2 * i] = cv;
+                cp[rowOff + 2 * i + 1] = cv;
+                sp[rowOff + 2 * i] = sv;
+                sp[rowOff + 2 * i + 1] = sv;
+            }
+        }
+        return (cos, sin);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void ApplyRotation(float* vec, float* cos, float* sin, int halfDim)
     {

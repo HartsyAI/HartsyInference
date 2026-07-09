@@ -59,7 +59,7 @@ public sealed unsafe class WanVacePipeline : DiffusionPipelineBase
         int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
-        float shift = _config.FlowShift;
+        float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         float[] scales = new float[_config.VaceLayers.Length];
         for (int i = 0; i < scales.Length; i++) scales[i] = controlScale;
 

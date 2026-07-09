@@ -267,19 +267,42 @@ public sealed unsafe class WanVideoBlock
             }
             return (outs[0], outs[1], outs[2], outs[3], outs[4], outs[5]);
         }
-        float* ss = (float*)_scaleShift!.DataPointer;
-        float* tb = (float*)temb.DataPointer;
-        Tensor[] outsHost = new Tensor[6];
+        // Multi-group (per-frame timesteps: S2V/TI2V/Animate) — GPU-resident since 2026-07-09. The old
+        // host loop here was the S2V 15x-vs-T2V wall: fresh CPU tensors -> downstream CopyToDevice cache
+        // MISS -> full stream drain, ~4 big bounces per block per forward (profiled 324 H2D_MISS_BIG/step).
+        // Permute [G,6,dim] -> [6,G,dim] so each modulation's G rows are contiguous, then slice + broadcast-add.
+        Tensor ones6 = Ones();
+        Tensor perm = new Tensor(new TensorShape(6 * g, _dim), DType.F32);
+        backend.Permute0213(perm, temb, g, 6, _dim);        // [1,G,6,dim] -> [1,6,G,dim]
+        Tensor[] outsG = new Tensor[6];
         for (int m = 0; m < 6; m++)
         {
+            Tensor tbM = new Tensor(new TensorShape(g, _dim), DType.F32);
+            backend.SliceRows(tbM, perm, m * g);            // temb[:, m, :]
+            Tensor ssM = new Tensor(new TensorShape(1, _dim), DType.F32);
+            backend.SliceRows(ssM, _scaleShift!, m);        // scale_shift_table row m
             Tensor o = new Tensor(new TensorShape(g, _dim), DType.F32);
-            float* op = (float*)o.DataPointer;
-            for (int gi = 0; gi < g; gi++)
-                for (int d = 0; d < _dim; d++)
-                    op[gi * _dim + d] = ss[m * _dim + d] + tb[((long)gi * 6 + m) * _dim + d];
-            outsHost[m] = o;
+            backend.AffineBroadcastLastDim(o, tbM, ones6, ssM);   // o = tbM*1 + ssM (row-broadcast)
+            tbM.Dispose(); ssM.Dispose();
+            outsG[m] = o;
         }
-        return (outsHost[0], outsHost[1], outsHost[2], outsHost[3], outsHost[4], outsHost[5]);
+        perm.Dispose();
+        return (outsG[0], outsG[1], outsG[2], outsG[3], outsG[4], outsG[5]);
+    }
+
+    /// <summary>Expands per-group rows <c>[G, dim]</c> to per-token rows <c>[G*tokensPerGroup, dim]</c> by row
+    /// repetition — GPU-resident via <see cref="IBackend.UpsampleNearest2D"/> over an NCHW view.</summary>
+    private Tensor ExpandGroups(IBackend backend, Tensor grouped, int groups, int tokensPerGroup)
+    {
+        Tensor src = new Tensor(new TensorShape(1, 1, groups, _dim), DType.F32);
+        backend.SliceRows(src, grouped, 0);
+        Tensor up = new Tensor(new TensorShape(1, 1, (long)groups * tokensPerGroup, _dim), DType.F32);
+        backend.UpsampleNearest2D(up, src, tokensPerGroup, 1);
+        src.Dispose();
+        Tensor outT = new Tensor(new TensorShape((long)groups * tokensPerGroup, _dim), DType.F32);
+        backend.SliceRows(outT, up, 0);
+        up.Dispose();
+        return outT;
     }
 
     /// <summary>FP32 LayerNorm over the last dim with optional affine. GPU-resident (backend ops) — the per-op
@@ -321,6 +344,21 @@ public sealed unsafe class WanVideoBlock
             x.Dispose();
             return o;
         }
+        int groupsSS = (int)scale.Shape[0];
+        if ((long)groupsSS * tokensPerGroup == s)
+        {
+            // GPU multi-group path (2026-07-09): expand scale/shift to token rows, then elementwise FMA.
+            using Tensor scaleExp = ExpandGroups(backend, scale, groupsSS, tokensPerGroup);
+            using Tensor shiftExp = ExpandGroups(backend, shift, groupsSS, tokensPerGroup);
+            using Tensor scaleP1 = new Tensor(new TensorShape(s, _dim), DType.F32);
+            backend.AddScalar(scaleP1, scaleExp, 1.0f);
+            using Tensor prod = new Tensor(new TensorShape(s, _dim), DType.F32);
+            backend.Mul(prod, x, scaleP1);
+            Tensor oG = new Tensor(new TensorShape(s, _dim), DType.F32);
+            backend.Add(oG, prod, shiftExp);
+            x.Dispose();
+            return oG;
+        }
         float* xp = (float*)x.DataPointer; float* sc = (float*)scale.DataPointer; float* sh = (float*)shift.DataPointer;
         for (int i = 0; i < s; i++)
         {
@@ -338,6 +376,16 @@ public sealed unsafe class WanVideoBlock
         if (tokensPerGroup == s)   // G == 1: gate is [1, dim]
         {
             backend.GatedResidualLastDim(o, residual, value, gate);
+            return o;
+        }
+        int groupsGA = (int)gate.Shape[0];
+        if ((long)groupsGA * tokensPerGroup == s)
+        {
+            // GPU multi-group path (2026-07-09): expand the gate to token rows, then elementwise ops.
+            using Tensor gateExp = ExpandGroups(backend, gate, groupsGA, tokensPerGroup);
+            using Tensor prod = new Tensor(new TensorShape(s, _dim), DType.F32);
+            backend.Mul(prod, value, gateExp);
+            backend.Add(o, residual, prod);
             return o;
         }
         float* rp = (float*)residual.DataPointer; float* vp = (float*)value.DataPointer; float* gp = (float*)gate.DataPointer; float* op = (float*)o.DataPointer;

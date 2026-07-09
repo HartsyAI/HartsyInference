@@ -41,9 +41,11 @@ internal sealed class CudnnSdpa : IDisposable
         cudnnSetStream(_handle, stream);
     }
 
-    /// <summary>D values the fused engine may support (head dim). 256 (Ideogram 4) is build/arch-dependent —
-    /// the caller falls back per-D on rejection. Others fall back to the materialized path.</summary>
-    public static bool ShapeSupported(long d) => d == 64 || d == 128 || d == 256;
+    /// <summary>D values the fused engine may support (head dim): multiples of 8 in [64, 128] (the documented
+    /// flash-fprop envelope on SM80+ — covers 64/96/112/120/128, e.g. Boogu's 120) plus 256 (Ideogram 4,
+    /// build/arch-dependent). The caller falls back per-D on rejection (<c>_cudnnSdpaDeadDims</c>), so an
+    /// unsupported D costs one warning and the materialized path — never a session kill.</summary>
+    public static bool ShapeSupported(long d) => d == 256 || (d >= 64 && d <= 128 && d % 8 == 0);
 
     /// <summary>
     /// Run fused attention. All pointers are device fp16 buffers laid out contiguously as [B,H,S,D]

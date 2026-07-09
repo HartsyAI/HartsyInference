@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -34,6 +35,24 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     private readonly Tensor? _vaeBnVar;
     private readonly float _vaeBnEps;
     private readonly float _schedulerShift;
+
+    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): transformer weights stay
+    /// GPU-resident across generations; a prompt-cache MISS evicts them first so the ~7.7 GB TE still fits.</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-embedding cache: identical (tokens, realLen) reuse the previous gen's hidden states — the whole
+    // TE phase (preload + encode + free of the ~7.7 GB Ministral-3B) vanishes for repeat prompts. Reusing the
+    // SAME tensor references also keeps the transformer's ref-keyed text-projection cache warm.
+    private int[]? _cachedCondKey;
+    private int _cachedCondRealLen = -1;
+    private Tensor? _cachedCond;
+    private int[]? _cachedCondLens;
+    private int[]? _cachedUncondKey;
+    private int _cachedUncondRealLen = -1;
+    private Tensor? _cachedUncond;
+    private int[]? _cachedUncondLens;
 
     /// <summary>Creates a new ERNIE-Image pipeline.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -117,28 +136,76 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         // ── 1. Encode prompts ─────────────────────────────────────────────
         bool useCfg = cfgScale > 1.0f;
 
-        Logs.Info("Encoding prompt(s)...");
-        // Bulk-upload text encoder weights once so its kernels don't pay per-op cache-miss
-        // H2D transfers. Paired with FreeWeights below the VAE handoff. No-op on backends
-        // without a weight cache.
-        Backend.PreloadWeights(_textEncoder.EnumerateWeights());
-        (Tensor condEmb, int[] condLens) = EncodeBatch(promptTokenIds, promptRealLen);
+        bool condHit = _cachedCond is not null && _cachedCondRealLen == promptRealLen
+            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIds);
+        bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondRealLen == negativeRealLen
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIds));
+        Tensor condEmb;
+        int[] condLens;
         Tensor? uncondEmb = null;
         int[]? uncondLens = null;
-        if (useCfg)
+        if (condHit && uncondHit)
         {
-            (uncondEmb, uncondLens) = EncodeBatch(negativePromptTokenIds, negativeRealLen);
+            condEmb = _cachedCond!;
+            condLens = _cachedCondLens!;
+            if (useCfg)
+            {
+                uncondEmb = _cachedUncond;
+                uncondLens = _cachedUncondLens;
+            }
+            Logs.Info("[ErnieImage] prompt-embedding cache hit — TE phase skipped");
         }
-        Logs.Info($"Text encoded in {sw.ElapsedMilliseconds}ms");
-        ErnieDiag("condEmb", condEmb);
-        if (uncondEmb is not null) ErnieDiag("uncondEmb", uncondEmb);
+        else
+        {
+            if (_ditResident)
+            {
+                // The TE cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
+                // new-prompt generation and re-preload below.
+                Backend.Sync();
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
+            Logs.Info("Encoding prompt(s)...");
+            // Bulk-upload text encoder weights once so its kernels don't pay per-op cache-miss
+            // H2D transfers. Paired with FreeWeights below. No-op on backends without a weight cache.
+            Backend.PreloadWeights(_textEncoder.EnumerateWeights());
+            (condEmb, condLens) = EncodeBatch(promptTokenIds, promptRealLen);
+            if (useCfg)
+            {
+                (uncondEmb, uncondLens) = EncodeBatch(negativePromptTokenIds, negativeRealLen);
+            }
+            Logs.Info($"Text encoded in {sw.ElapsedMilliseconds}ms");
+            ErnieDiag("condEmb", condEmb);
+            if (uncondEmb is not null) ErnieDiag("uncondEmb", uncondEmb);
 
-        // Free the text-encoder weights from VRAM now: they are only needed for the encode above, and
-        // the ERNIE-Image TE (Ministral-3B, ~7.7 GB BF16) cannot coexist with the FP8 transformer
-        // (~7.5 GB) on a 12 GB card. The encoded embeddings (condEmb/uncondEmb) are separate tensors and
-        // remain valid. No-op on backends without a weight cache.
-        Backend.Sync();
-        Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            // Free the text-encoder weights from VRAM now: they are only needed for the encode above, and
+            // the ERNIE-Image TE (Ministral-3B, ~7.7 GB BF16) cannot coexist with the FP8 transformer
+            // (~7.5 GB) on a 12 GB card. The encoded embeddings (condEmb/uncondEmb) are separate tensors and
+            // remain valid. No-op on backends without a weight cache.
+            Backend.Sync();
+            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+
+            // Host-materialize the conditioning, then reclaim the encoder's device activations — they'd
+            // otherwise hold multi-GB into the DiT phase. The cached tensors survive later FreeActivations
+            // calls because their host copies are now authoritative.
+            _ = condEmb.DataPointer;
+            if (uncondEmb is not null) _ = uncondEmb.DataPointer;
+            Backend.FreeActivations();
+
+            _cachedCond?.Dispose();
+            _cachedCond = condEmb;
+            _cachedCondKey = (int[])promptTokenIds.Clone();
+            _cachedCondRealLen = promptRealLen;
+            _cachedCondLens = condLens;
+            if (useCfg)
+            {
+                _cachedUncond?.Dispose();
+                _cachedUncond = uncondEmb;
+                _cachedUncondKey = (int[])negativePromptTokenIds.Clone();
+                _cachedUncondRealLen = negativeRealLen;
+                _cachedUncondLens = uncondLens;
+            }
+        }
 
         // ── 2. Flow-match Euler scheduler ─────────────────────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
@@ -156,9 +223,17 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         }
 
         // ── 4. Denoising loop ─────────────────────────────────────────────
-        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights at
-        // the VAE handoff (line ~160). No-op on backends without a weight cache.
+        // Bulk-upload transformer weights before the denoise loop (no-op when already resident under
+        // HARTSY_KEEP_MODELS). Paired with the conditional FreeWeights at the VAE handoff.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        _ditResident = true;
+
+        // Drain-free fast path (t2i / plain img2img): the latent stays device-resident across the whole
+        // loop; CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt
+        // ≡ uncond + cfg·(cond−uncond) Euler, gw=1 degenerates to the plain step). The old host
+        // scheduler.Step forced a velocity D2H + latent re-upload every step. Masked inpaint keeps the host
+        // branch (its per-step blend reads/rebuilds the latent on the host).
+        bool drainFree = !isMaskedInpaint;
 
         Logs.Info("Starting ERNIE-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -166,6 +241,28 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
+
+            if (drainFree)
+            {
+                if (useCfg)
+                {
+                    Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondEmb!, uncondLens!);
+                    Tensor condNoise = _transformer.Forward(Backend, latent, t, condEmb, condLens);
+                    Backend.CfgEulerStep(latent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
+                    uncondNoise.Dispose();
+                    condNoise.Dispose();
+                }
+                else
+                {
+                    Tensor noise = _transformer.Forward(Backend, latent, t, condEmb, condLens);
+                    Backend.CfgEulerStep(latent, noise, noise, 1.0f, scheduler.Dt(i));
+                    noise.Dispose();
+                }
+                stepSw.Stop();
+                Logs.Debug($"Step {i + 1}/{steps} (t={t:F1}) done in {stepSw.ElapsedMilliseconds}ms");
+                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+                continue;
+            }
 
             Tensor noisePred;
             if (useCfg)
@@ -215,15 +312,22 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
+        // Host-materialize the (device-resident on the drain-free path) final latent before the host-side
+        // BN-unnorm / unpatchify below — touching DataPointer forces the D2H sync.
+        _ = latent.DataPointer;
         ErnieDiag("finalLatent", latent);
-        condEmb.Dispose();
-        uncondEmb?.Dispose();
+        // condEmb/uncondEmb are cross-generation caches — not disposed here.
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
-        // ── 5. Free transformer weights from VRAM before VAE decode (TE was already freed post-encode) ──
+        // ── 5. Transformer weights: keep GPU-resident across gens under HARTSY_KEEP_MODELS (the Flux2-VAE
+        //       decode below fits beside the ~7.5 GB fp8 DiT); a future prompt-cache miss evicts for the TE ──
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
 
         // ── 6. BN-style un-normalization (Flux2 VAE ships running mean/var) ──
         if (_vaeBnMean is not null && _vaeBnVar is not null)
@@ -247,6 +351,8 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         // DecodeTiled only if a future high-res case OOMs.
         Logs.Verbose("Decoding latents to image (full F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
+        // Bulk-upload VAE weights so the decode doesn't pay per-op cache-miss H2D transfers.
+        Backend.PreloadWeights(_vaeDecoder.EnumerateWeights());
         Tensor image = _vaeDecoder.Decode(Backend, vaeIn);
         vaeIn.Dispose();
         vaeSw.Stop();
@@ -259,9 +365,30 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
             MaskBlendUtilities.BlendChannelsInPlace(image, ((ImageToImageRequest)request).SourceImage, maskPixel!);
         }
 
-        // ── 10. RGB conversion ────────────────────────────────────────────
-        byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
+        // ── 10. RGB conversion — device CHW F32 → HWC u8 (one 3 MB D2H) on the plain path; the inpaint
+        //        recomposite wrote the image on the HOST above, so it must keep the host conversion (a device
+        //        convert would read the stale pre-blend device copy) ──
+        byte[] rgb;
+        if (isMaskedInpaint && ((ImageToImageRequest)request).RecompositeAtEnd)
+        {
+            rgb = ImagePostProcessor.TensorToRgbBytes(image);
+        }
+        else
+        {
+            int outH = (int)image.Shape[2], outW = (int)image.Shape[3];
+            Tensor hwcU8 = new Tensor(new TensorShape(outH, outW, 3), DType.U8);
+            Backend.ChwF32ToHwcU8(hwcU8, image);
+            rgb = new byte[(long)outH * outW * 3];
+            fixed (byte* dst = rgb)
+                Buffer.MemoryCopy((void*)hwcU8.DataPointer, dst, rgb.Length, rgb.Length);
+            hwcU8.Dispose();
+        }
         image.Dispose();
+
+        // Final reclaim: in a long-lived host (SwarmUI), decode intermediates otherwise sit in device memory
+        // until GC finalization. Every cross-gen cache (prompt embeds, transformer mask/rope/text-proj) is
+        // host-materialized at store time, so this cannot revert them to stale memory.
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"ERNIE-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

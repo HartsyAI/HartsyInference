@@ -37,6 +37,17 @@ public sealed unsafe class BooguImageTransformer : IDisposable
 
     private int _disposed;
 
+    // ── Step-invariant per-generation caches. ──
+    // The RoPE tables are pure functions of the sequence layout (capLen, grid, refs) — previously the four
+    // host float[] builds ran EVERY forward and each block re-applied them via a host loop that D2H-drained
+    // Q AND K. Cached here as device tensors in the WanRopeInterleaved layout. The context-refined caption is
+    // timestep-independent (context refiner takes no temb) — cached on the instructionHidden reference (the
+    // loader's prompt cache reuses refs, keeping this warm across gens); a >8-entry sweep guards prompt churn.
+    private (int capLen, int hPacked, int wPacked, string refSig) _tableKey = (-1, -1, -1, "");
+    private Tensor? _jointCosT, _jointSinT, _ctxCosT, _ctxSinT, _combCosT, _combSinT, _noiseCosT, _noiseSinT;
+    private Tensor? _refCosT, _refSinT;
+    private readonly Dictionary<Tensor, Tensor> _captionCache = new(ReferenceEqualityComparer.Instance);
+
     /// <summary>Creates a Boogu-Image transformer with the geometry in <paramref name="config"/>
     /// (see <see cref="BooguImageConfig.V01"/>).</summary>
     public BooguImageTransformer(BooguImageConfig config)
@@ -138,34 +149,60 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         ThrowIfDisposed();
         if (latent.Shape.Rank != 4 || latent.Shape[0] != 1)
             throw new ArgumentException($"Latent must be [1, C, H, W], got {latent.Shape}.", nameof(latent));
-        if (instructionHidden.Shape.Rank != 3 || instructionHidden.Shape[0] != 1)
-            throw new ArgumentException($"instructionHidden must be [1, T, dim], got {instructionHidden.Shape}.", nameof(instructionHidden));
 
-        int batch = 1;
         int inChannels = (int)latent.Shape[1];
         int latentH = (int)latent.Shape[2];
         int latentW = (int)latent.Shape[3];
         int patch = _config.PatchSize;
+        if (latentH % patch != 0 || latentW % patch != 0)
+            throw new ArgumentException($"Latent {latentH}x{latentW} not divisible by patch {patch}.", nameof(latent));
+        int hPacked = latentH / patch;
+        int wPacked = latentW / patch;
+        int outChannels = _config.OutChannels ?? inChannels;
+
+        Tensor imgFlat = DiTUtils.PatchifyNCHW(latent, patch);
+        Tensor packedVel = ForwardCore(backend, imgFlat, timestep, instructionHidden, refLatents, hPacked, wPacked);
+        imgFlat.Dispose();
+
+        // Device unpatchify — Boogu's (py·p+px)·C + c token inner order IS innerChannelFastest; the old
+        // DiTUtils.UnpatchifyToNCHW host loop forced a full D2H drain of the projection every forward.
+        Tensor velocity = new Tensor(new TensorShape(1, outChannels, latentH, latentW), DType.F32);
+        backend.UnpatchifyTokens(velocity, packedVel, outChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+        packedVel.Dispose();
+        return velocity;
+    }
+
+    /// <summary>Packed-IO T2I forward: <paramref name="packedLatent"/> is <c>[1, hP·wP, p²·in_channels]</c>
+    /// (the <see cref="DiTUtils.PatchifyNCHW"/> token layout) and the return is the packed velocity
+    /// <c>[1, hP·wP, p²·out_channels]</c>. Lets the pipeline keep the latent in token space across the whole
+    /// denoise loop (patchify once, unpatchify once) — the NCHW <see cref="Forward"/> re-ran the host
+    /// PatchifyNCHW (a full D2H drain of the latent) on every forward. Same math, no refs (T2I only).</summary>
+    public Tensor ForwardPacked(IBackend backend, Tensor packedLatent, float timestep, Tensor instructionHidden,
+        int hPacked, int wPacked)
+    {
+        ThrowIfDisposed();
+        return ForwardCore(backend, packedLatent, timestep, instructionHidden, null, hPacked, wPacked);
+    }
+
+    /// <summary>Shared forward body over the packed token latent <c>[1, imgLen, p²·in_channels]</c>
+    /// (not consumed — caller owns it). Returns the packed velocity <c>[1, imgLen, p²·out_channels]</c>.</summary>
+    private Tensor ForwardCore(IBackend backend, Tensor imgFlatIn, float timestep, Tensor instructionHidden,
+        IReadOnlyList<Tensor>? refLatents, int hPacked, int wPacked)
+    {
+        if (instructionHidden.Shape.Rank != 3 || instructionHidden.Shape[0] != 1)
+            throw new ArgumentException($"instructionHidden must be [1, T, dim], got {instructionHidden.Shape}.", nameof(instructionHidden));
+
+        int batch = 1;
+        int patch = _config.PatchSize;
         int hidden = _config.HiddenSize;
         int cond = _config.ConditioningDim;
         int capLen = (int)instructionHidden.Shape[1];
-        int hPacked = latentH / patch;
-        int wPacked = latentW / patch;
         int imgLen = hPacked * wPacked;
-        int outChannels = _config.OutChannels ?? inChannels;
+        if (imgFlatIn.Shape.Rank != 3 || imgFlatIn.Shape[1] != imgLen)
+            throw new ArgumentException($"Packed latent must be [1, {imgLen}, p²·C], got {imgFlatIn.Shape}.", nameof(imgFlatIn));
 
-        if (latentH % patch != 0 || latentW % patch != 0)
-            throw new ArgumentException($"Latent {latentH}x{latentW} not divisible by patch {patch}.", nameof(latent));
-
-        // ── timestep + caption embedding ──
+        // ── timestep embedding ──
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch, cond);
-        Tensor caption = new Tensor(new TensorShape(batch, capLen, hidden), DType.F32);
-        {
-            Tensor capNorm = new Tensor(new TensorShape(batch, capLen, _config.InstructionFeatDim), DType.F32);
-            backend.RmsNorm(capNorm, instructionHidden, _captionNormW!, _config.NormEps);
-            backend.Linear(caption, capNorm, _captionLinearW!, _captionLinearB);
-            capNorm.Dispose();
-        }
 
         // ── reference image grids (edit) ──
         int refCount = refLatents?.Count ?? 0;
@@ -182,32 +219,67 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         int combinedImgLen = totalRefLen + imgLen;
         int jointLen = capLen + combinedImgLen;
 
-        // ── RoPE position ids (caption | refs | noise) with pe_shift offsets ──
-        (int[] jt, int[] jh, int[] jw) = BuildJointPositionIds(capLen, refHTok, refWTok, hPacked, wPacked);
-        (float[] jointCos, float[] jointSin) = _rope.BuildTableFromPositions(jt, jh, jw);
-        (float[] ctxCos, float[] ctxSin) = _rope.BuildTableFromPositions(jt[..capLen], jh[..capLen], jw[..capLen]);
-        (float[] combCos, float[] combSin) = _rope.BuildTableFromPositions(jt[capLen..], jh[capLen..], jw[capLen..]);
-        int[] noiseTimeIds = jt[(capLen + totalRefLen)..];
-        int[] noiseHIds = jh[(capLen + totalRefLen)..];
-        int[] noiseWIds = jw[(capLen + totalRefLen)..];
-        (float[] noiseCos, float[] noiseSin) = _rope.BuildTableFromPositions(noiseTimeIds, noiseHIds, noiseWIds);
-
-        // ── context refiner (text) ──
-        for (int i = 0; i < _contextRefiner.Length; i++)
+        // ── RoPE tables (caption | refs | noise, with pe_shift offsets) — step-invariant per layout, so the
+        //    host trig builds + device expansion run once per (capLen, grid, refs) instead of every forward ──
+        string refSig = refCount == 0 ? "" : string.Join(',', refHTok) + "x" + string.Join(',', refWTok);
+        (int, int, int, string) tableKey = (capLen, hPacked, wPacked, refSig);
+        if (_tableKey != tableKey)
         {
-            Tensor next = _contextRefiner[i].Forward(backend, caption, _rope, ctxCos, ctxSin, null);
-            caption.Dispose();
-            caption = next;
+            DisposeRopeTables();
+            (int[] jt, int[] jh, int[] jw) = BuildJointPositionIds(capLen, refHTok, refWTok, hPacked, wPacked);
+            (float[] jointCos, float[] jointSin) = _rope.BuildTableFromPositions(jt, jh, jw);
+            (float[] ctxCos, float[] ctxSin) = _rope.BuildTableFromPositions(jt[..capLen], jh[..capLen], jw[..capLen]);
+            (float[] combCos, float[] combSin) = _rope.BuildTableFromPositions(jt[capLen..], jh[capLen..], jw[capLen..]);
+            (float[] noiseCos, float[] noiseSin) = _rope.BuildTableFromPositions(
+                jt[(capLen + totalRefLen)..], jh[(capLen + totalRefLen)..], jw[(capLen + totalRefLen)..]);
+            (_jointCosT, _jointSinT) = _rope.ExpandToDeviceTables(jointCos, jointSin);
+            (_ctxCosT, _ctxSinT) = _rope.ExpandToDeviceTables(ctxCos, ctxSin);
+            (_combCosT, _combSinT) = _rope.ExpandToDeviceTables(combCos, combSin);
+            (_noiseCosT, _noiseSinT) = _rope.ExpandToDeviceTables(noiseCos, noiseSin);
+            if (refCount > 0)
+            {
+                (float[] refCos, float[] refSin) = _rope.BuildTableFromPositions(
+                    jt[capLen..(capLen + totalRefLen)], jh[capLen..(capLen + totalRefLen)], jw[capLen..(capLen + totalRefLen)]);
+                (_refCosT, _refSinT) = _rope.ExpandToDeviceTables(refCos, refSin);
+            }
+            _tableKey = tableKey;
         }
 
-        // ── noise image patch embed + refine ──
-        Tensor imgFlat = DiTUtils.PatchifyNCHW(latent, patch);
+        // ── caption embed + context refiner (text) — timestep-independent, cached per instructionHidden ref ──
+        Tensor caption;
+        if (!_captionCache.TryGetValue(instructionHidden, out Tensor? cachedCaption))
+        {
+            caption = new Tensor(new TensorShape(batch, capLen, hidden), DType.F32);
+            {
+                Tensor capNorm = new Tensor(new TensorShape(batch, capLen, _config.InstructionFeatDim), DType.F32);
+                backend.RmsNorm(capNorm, instructionHidden, _captionNormW!, _config.NormEps);
+                backend.Linear(caption, capNorm, _captionLinearW!, _captionLinearB);
+                capNorm.Dispose();
+            }
+            for (int i = 0; i < _contextRefiner.Length; i++)
+            {
+                Tensor next = _contextRefiner[i].Forward(backend, caption, _ctxCosT!, _ctxSinT!, null);
+                caption.Dispose();
+                caption = next;
+            }
+            if (_captionCache.Count > 8) SweepCaptionCache();
+            // Host-materialize so a later FreeActivations can't revert the cache to stale host memory.
+            _ = caption.DataPointer;
+            _captionCache[instructionHidden] = caption;
+            cachedCaption = caption;
+        }
+        // The double-block loop consumes (disposes) its instruct input — hand it a per-forward working copy.
+        {
+            caption = new Tensor(new TensorShape(batch, capLen, hidden), DType.F32);
+            backend.CopyInto(caption, cachedCaption);
+        }
+
+        // ── noise image patch embed + refine (input already in packed token layout; caller owns it) ──
         Tensor noiseImg = new Tensor(new TensorShape(batch, imgLen, hidden), DType.F32);
-        backend.Linear(noiseImg, imgFlat, _xEmbedderW!, _xEmbedderB);
-        imgFlat.Dispose();
+        backend.Linear(noiseImg, imgFlatIn, _xEmbedderW!, _xEmbedderB);
         for (int i = 0; i < _noiseRefiner.Length; i++)
         {
-            Tensor next = _noiseRefiner[i].Forward(backend, noiseImg, _rope, noiseCos, noiseSin, temb);
+            Tensor next = _noiseRefiner[i].Forward(backend, noiseImg, _noiseCosT!, _noiseSinT!, temb);
             noiseImg.Dispose();
             noiseImg = next;
         }
@@ -217,13 +289,9 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         if (refCount > 0)
         {
             Tensor refTokens = BuildRefImageTokens(backend, refLatents!, refHTok, refWTok, totalRefLen, hidden, patch);
-            int[] refTimeIds = jt[capLen..(capLen + totalRefLen)];
-            int[] refHIds = jh[capLen..(capLen + totalRefLen)];
-            int[] refWIds = jw[capLen..(capLen + totalRefLen)];
-            (float[] refCos, float[] refSin) = _rope.BuildTableFromPositions(refTimeIds, refHIds, refWIds);
             for (int i = 0; i < _refImageRefiner.Length; i++)
             {
-                Tensor next = _refImageRefiner[i].Forward(backend, refTokens, _rope, refCos, refSin, temb);
+                Tensor next = _refImageRefiner[i].Forward(backend, refTokens, _refCosT!, _refSinT!, temb);
                 refTokens.Dispose();
                 refTokens = next;
             }
@@ -241,8 +309,8 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         Tensor image = combinedImg;
         for (int i = 0; i < _doubleBlocks.Length; i++)
         {
-            (Tensor newImage, Tensor newInstruct) = _doubleBlocks[i].Forward(backend, image, instruct, _rope,
-                jointCos, jointSin, combCos, combSin, capLen, temb);
+            (Tensor newImage, Tensor newInstruct) = _doubleBlocks[i].Forward(backend, image, instruct,
+                _jointCosT!, _jointSinT!, _combCosT!, _combSinT!, capLen, temb);
             image.Dispose();
             instruct.Dispose();
             image = newImage;
@@ -255,7 +323,7 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         image.Dispose();
         for (int i = 0; i < _singleBlocks.Length; i++)
         {
-            Tensor next = _singleBlocks[i].Forward(backend, joint, _rope, jointCos, jointSin, temb);
+            Tensor next = _singleBlocks[i].Forward(backend, joint, _jointCosT!, _jointSinT!, temb);
             joint.Dispose();
             joint = next;
         }
@@ -270,13 +338,12 @@ public sealed unsafe class BooguImageTransformer : IDisposable
         noiseTail.Dispose();
         temb.Dispose();
 
+        int outChannels = _config.OutChannels ?? _config.InChannels;
         Tensor projOut = new Tensor(new TensorShape(batch, imgLen, patch * patch * outChannels), DType.F32);
         backend.Linear(projOut, normed, _normOutLin2W!, _normOutLin2B);
         normed.Dispose();
 
-        Tensor velocity = DiTUtils.UnpatchifyToNCHW(projOut, outChannels, hPacked, wPacked, patch);
-        projOut.Dispose();
-        return velocity;
+        return projOut;
     }
 
     /// <summary>Patch-embeds the reference latents, concatenates them into one <c>[1, totalRefLen, hidden]</c> tensor,
@@ -392,10 +459,31 @@ public sealed unsafe class BooguImageTransformer : IDisposable
     private void ThrowIfDisposed() =>
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
+    /// <summary>Disposes the cached device RoPE tables (layout change / teardown).</summary>
+    private void DisposeRopeTables()
+    {
+        _jointCosT?.Dispose(); _jointSinT?.Dispose();
+        _ctxCosT?.Dispose(); _ctxSinT?.Dispose();
+        _combCosT?.Dispose(); _combSinT?.Dispose();
+        _noiseCosT?.Dispose(); _noiseSinT?.Dispose();
+        _refCosT?.Dispose(); _refSinT?.Dispose();
+        _jointCosT = _jointSinT = _ctxCosT = _ctxSinT = _combCosT = _combSinT = _noiseCosT = _noiseSinT = null;
+        _refCosT = _refSinT = null;
+        _tableKey = (-1, -1, -1, "");
+    }
+
+    private void SweepCaptionCache()
+    {
+        foreach (Tensor t in _captionCache.Values) t.Dispose();
+        _captionCache.Clear();
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            DisposeRopeTables();
+            SweepCaptionCache();
             _xEmbedderW = _xEmbedderB = _refPatchEmbedderW = _refPatchEmbedderB = null;
             _timeEmbed1W = _timeEmbed1B = _timeEmbed2W = _timeEmbed2B = null;
             _captionNormW = _captionLinearW = _captionLinearB = null;

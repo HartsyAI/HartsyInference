@@ -731,11 +731,50 @@ public class WanVideoGenerationTests
             Tensor pose = BuildMovingSquareClip(genFrames, genH, genW);           // stick-figure stand-in
             Tensor face = BuildMovingSquareClip(genFrames, 512, 512);             // motion-encoder resolution
 
-            _output.WriteLine($"[gen] Animate {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}...");
+            // Bisect knob (WAN_ANIMATE_CLIP=1): exercise the i2v CLIP image-embedder path (clipImageEmbeds)
+            // that the original e2e never covered — the Swarm loader passes real CLIP-ViT-H embeds and its
+            // first run produced checkerboard garbage; this isolates whether _imgEmbedder is the culprit.
+            Tensor? clipEmbeds = null;
+            if (Environment.GetEnvironmentVariable("WAN_ANIMATE_CLIP") == "1")
+            {
+                string clipPath = Env("WAN_CLIP_VISION") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/clip_vision/clip_vision_h.safetensors";
+                Assert.True(File.Exists(clipPath), $"WAN_ANIMATE_CLIP=1 but no CLIP-ViT-H at {clipPath}");
+                using SafeTensorsLoader clipLoader = new(); clipLoader.Load(clipPath);
+                ClipVisionEncoder clipVision = new(ClipVisionEncoderConfig.ViTH14);
+                clipVision.LoadWeights(clipLoader.GetAllTensors());
+                byte[] refRgb24 = new byte[genW * genH * 3];
+                unsafe
+                {
+                    float* rp = (float*)reference.DataPointer;
+                    long frameN = (long)genH * genW;
+                    for (long pix = 0; pix < frameN; pix++)
+                        for (int c = 0; c < 3; c++)
+                            refRgb24[pix * 3 + c] = (byte)Math.Clamp((rp[c * frameN + pix] + 1f) * 127.5f, 0, 255);
+                }
+                ClipImagePreprocessor prep = new();
+                Tensor pixels = prep.Preprocess(refRgb24, genW, genH);
+                Tensor embBatched = clipVision.EncodeHiddenStates(backend, pixels);   // [1, 257, 1280]
+                pixels.Dispose();
+                backend.Sync();
+                backend.FreeWeights(clipVision.EnumerateWeights());
+                int l = (int)embBatched.Shape[1], d = (int)embBatched.Shape[2];
+                clipEmbeds = CfgHelper.SliceBatchElement(embBatched, 0, l, d);
+                embBatched.Dispose();
+                _output.WriteLine($"[gen] CLIP embeds: [{l},{d}]");
+            }
+
+            _output.WriteLine($"[gen] Animate {genFrames}f {genW}x{genH}, {genSteps} steps, cfg={cfg.GuidanceScale}, renorm={cfg.CfgRescale}, clip={(clipEmbeds is not null)}...");
             WanAnimatePipeline pipeline = new(backend, transformer, vae, encoder, cfg);
             TextToImageRequest req = new() { Prompt = "animate", Width = genW, Height = genH, Steps = genSteps, CfgScale = (float)EnvD("WAN_CFG", cfg.GuidanceScale), Seed = 42 };
             (byte[][] frames, int w, int h, _) = pipeline.GenerateAnimation(promptEmbeds, negEmbeds, reference, pose, face, req,
+                clipImageEmbeds: clipEmbeds,
                 onProgress: p => { if (p.Step % 5 == 0 || p.Step == p.TotalSteps) _output.WriteLine($"  step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"); });
+            clipEmbeds?.Dispose();
+            string animDir = Path.Combine(TestPaths.OutputDir, $"wan_animate_{DateTime.Now:yyyyMMdd_HHmmss}");
+            Directory.CreateDirectory(animDir);
+            foreach (int fi in new[] { 0, frames.Length / 2, frames.Length - 1 })
+                HartsyInference.Diffusion.Utilities.ImagePostProcessor.SaveBmp(Path.Combine(animDir, $"f{fi}.bmp"), frames[fi], w, h);
+            _output.WriteLine($"[gen] frames -> {animDir}");
             reference.Dispose(); pose.Dispose(); face.Dispose();
             promptEmbeds.Dispose(); negEmbeds.Dispose();
             AssertFramesCoherent(frames, w, h);
