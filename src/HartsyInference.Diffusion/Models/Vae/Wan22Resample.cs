@@ -83,6 +83,13 @@ public sealed unsafe class Wan22Resample
             if (_mode == Wan22ResampleMode.Downsample3d && applyTemporal && _downTimeConv is not null && (int)spatial.Shape[2] > 1)
             {
                 Tensor td = _downTimeConv.Forward(backend, spatial);
+                // Reference semantics (Wan vae.py Resample downsample3d, chunked encode): frame 0 BYPASSES the
+                // time_conv — chunk 0 is cached and returned unchanged, and the strided conv only ever produces
+                // frames 1+ (windows in[2i-2..2i], which our zero-padded whole-clip pass reproduces exactly).
+                // The whole-clip pass however computes out[0] = conv(0, 0, in[0]) — a last-tap-only filtering of
+                // frame 0 that corrupts the first latent frame (the I2V conditioning anchor). Overwrite out[0]
+                // with the untouched spatially-downsampled frame 0.
+                CopyFrame0(td, spatial);
                 spatial.Dispose();
                 return td;
             }
@@ -119,6 +126,23 @@ public sealed unsafe class Wan22Resample
         Tensor outT = Vae3dLayout.FromFrames(backend, conv, b, outC, t, h * 2, w * 2);
         conv.Dispose();
         return outT;
+    }
+
+    /// <summary>Copies temporal frame 0 of <paramref name="src"/> into frame 0 of <paramref name="dst"/>
+    /// (both <c>[B, C, T, H, W]</c> F32, same B/C/H/W). Host-side: reading <c>DataPointer</c> materializes the
+    /// device result (evict-on-read), and downstream ops re-upload the mutated tensor.</summary>
+    private static void CopyFrame0(Tensor dst, Tensor src)
+    {
+        int b = (int)dst.Shape[0], c = (int)dst.Shape[1], h = (int)dst.Shape[3], w = (int)dst.Shape[4];
+        long tDst = dst.Shape[2], tSrc = src.Shape[2];
+        long frame = (long)h * w;
+        float* dp = (float*)dst.DataPointer;
+        float* sp = (float*)src.DataPointer;
+        for (long bc = 0; bc < (long)b * c; bc++)
+            Buffer.MemoryCopy(
+                sp + bc * tSrc * frame,
+                dp + bc * tDst * frame,
+                frame * 4, frame * 4);
     }
 
     /// <summary>Per-frame <c>ZeroPad2d((0,1,0,1))</c> + 3×3 Conv2d stride 2 — the encoder's spatial halving. The

@@ -557,3 +557,21 @@ remaining 1.4s/step (fp8 transient dequant / Lt tuning / fused QKV), device Conc
 Tools control (unlocks drain-free there), then the step CUDA graph. **Flux.2 is a separate round:** its
 transformer still runs host-side block glue (DataPointer modulation loops) — needs the Chroma-style
 GPU-residency port BEFORE any recipe work.
+
+## 2026-07-08 — Flux.2 round 1: GPU-residency port + recipe — Klein 4B first numbers: cold 46s, **warm 15.1s** @1024²/10 steps — engine `alpha.44.15-local`
+
+Flux.2 never had the residency port (audit: Flux2DoubleBlock cpu=33, Flux2SingleBlock cpu=29 host glue
+sites). Ported both blocks + transformer glue to backend ops (the verified Flux.1/Chroma idioms: NormModulate,
+RmsNorm QK-norm, pre-permute Concat + device RoPE, Permute0213, SliceRows split, GatedResidualLastDim,
+Silu+Mul SwiGLU, device AdaLN-Continuous final layer) — blocks now have ZERO host reads. Pipeline gained
+weight staging (TE ⇄ DiT swap — it previously had NONE, which is why 32B Dev was marked "blocked": ~12 GB
+Mistral TE + ~18 GB Q4 DiT can't coexist on 24 GB), TE prompt cache, KEEP_MODELS residency, and the
+drain-free CfgEulerStep loop (g=1; guidance is embedded). allowF16 on both blocks (QK RMS-norm) → cuDNN
+fused attention. Klein 4B verified via Swarm: coherent, sharp (viewed), warm 15.1/15.1s.
+
+**Dev-GGUF blocker (next round):** `Flux2Loader` has no GGUF branch (feeds .gguf to SafeTensorsLoader →
+JsonReaderException), and `Flux2CheckpointConverter`'s fused-weight splits do per-element row math that a
+Q4_K block format breaks — needs the QwenImageLoader GGUF-bridge pattern + quant-block-aligned slicing.
+Checkpoints staged as REAL files: flux2-dev-Q4_K_S.gguf (19.3 GB), Mistral TE (12.3 GB), Klein 4B (7.75 GB).
+NOTE: hf_hub_download local_dir SYMLINKS into ~/.cache/huggingface — always cp --dereference + purge the
+cache repo, or the /tmp-symlink incident repeats and disk double-counts.

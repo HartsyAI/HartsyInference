@@ -186,7 +186,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
 
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
-        float shift = _config.FlowShift;
+        float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         string mode = firstFrameLatent is null ? "T2V" : "I2V";
         Logs.Info($"Wan-Video {mode}: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} (latent {_config.InChannels}x{tLat}x{hLat}x{wLat}, shift={shift})");
@@ -289,7 +289,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int hLat = height / sp, wLat = width / sp;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
-        float shift = _config.FlowShift;
+        float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
 
         Logs.Info($"Wan-Video I2V ({(imageEmbeds is null ? "concat" : "CLIP")}): {numFrames}f {width}x{height}, " +
             $"{steps} steps, cfg={guidance}, seed={seed} (latent {latentCh}x{tLat}x{hLat}x{wLat}, shift={shift})");
@@ -406,7 +406,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         int tLat = (pixT - 1) / tp + 1, hLat = pixH / sp, wLat = pixW / sp, latentCh = _config.VaeLatentChannels;
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
-        float shift = _config.FlowShift;
+        float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
         int startStep = Math.Clamp((int)Math.Round((1f - strength) * steps), 0, steps - 1);
 
         Logs.Info($"Wan-Video V2V: {pixT}f {pixW}x{pixH}, strength={strength}, start step {startStep}/{steps}, " +

@@ -164,10 +164,11 @@ public sealed unsafe class Flux2Transformer : IDisposable
             currentTxt = newTxt;
         }
 
-        // ── 6. Concatenate [text, image] for single-stream processing ──
+        // ── 6. Concatenate [text, image] for single-stream processing (device op — the old host copy was a
+        // full D2H sync of both block-loop outputs every forward) ──
         TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
         Tensor x = new Tensor(concatShape, DType.F32);
-        ConcatAlongSeqDim3D(x, currentTxt, currentImg, batch, txtSeqLen, imgSeqLen, hidden);
+        backend.Concat(x, new Tensor[] { currentTxt, currentImg }, 1);
         if (!ReferenceEquals(currentImg, imgTokens)) currentImg.Dispose();
         if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
         imgTokens.Dispose();
@@ -181,10 +182,14 @@ public sealed unsafe class Flux2Transformer : IDisposable
             x = newX;
         }
 
-        // ── 8. Strip text prefix → image-only tokens ──
+        // ── 8. Strip text prefix → image-only tokens (B=1: contiguous row-block → device SliceRows;
+        // batched keeps the host copy) ──
         TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
         Tensor imgOut = new Tensor(imgOutShape, DType.F32);
-        ExtractImageTokens(imgOut, x, batch, txtSeqLen, imgSeqLen, hidden);
+        if (batch == 1)
+            backend.SliceRows(imgOut, x, txtSeqLen);
+        else
+            ExtractImageTokens(imgOut, x, batch, txtSeqLen, imgSeqLen, hidden);
         x.Dispose();
 
         // ── 9. Final layer: AdaLN-Continuous (shift/scale only) + proj_out ──
@@ -288,23 +293,44 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
         TensorShape seqShape = new TensorShape(batch, seqLen, dim);
         Tensor normed = new Tensor(seqShape, DType.F32);
-        LayerNormNoAffine(normed, hidden, batch, seqLen, dim, _config.LayerNormEps);
-
-        Tensor modulated = new Tensor(seqShape, DType.F32);
-        float* normPtr = (float*)normed.DataPointer;
-        float* modPtr = (float*)modParams.DataPointer;
-        float* outModPtr = (float*)modulated.DataPointer;
-        for (int b = 0; b < batch; b++)
+        Tensor modulated;
+        if (batch == 1)
         {
-            int modBase = b * dim * 2;
-            for (int s = 0; s < seqLen; s++)
+            // Device AdaLN-Continuous (the Chroma ApplyContinuousNormDevice idiom): the old host loop read the
+            // device-produced modParams via DataPointer — a full-pipeline drain every forward. Flux.2 layout is
+            // [scale, shift] (converter half-swap), each a contiguous dim-length row of the flat projection.
+            backend.LayerNormNoAffine(normed, hidden, _config.LayerNormEps);
+            Tensor scaleRow = new Tensor(new TensorShape(1, dim), DType.F32);
+            backend.SliceRows(scaleRow, modParams, 0);
+            Tensor shiftRow = new Tensor(new TensorShape(1, dim), DType.F32);
+            backend.SliceRows(shiftRow, modParams, 1);
+            Tensor scalePlus1 = new Tensor(new TensorShape(1, dim), DType.F32);
+            backend.AddScalar(scalePlus1, scaleRow, 1.0f);
+            scaleRow.Dispose();
+            modulated = new Tensor(seqShape, DType.F32);
+            backend.AffineBroadcastLastDim(modulated, normed, scalePlus1, shiftRow);
+            scalePlus1.Dispose();
+            shiftRow.Dispose();
+        }
+        else
+        {
+            LayerNormNoAffine(normed, hidden, batch, seqLen, dim, _config.LayerNormEps);
+            modulated = new Tensor(seqShape, DType.F32);
+            float* normPtr = (float*)normed.DataPointer;
+            float* modPtr = (float*)modParams.DataPointer;
+            float* outModPtr = (float*)modulated.DataPointer;
+            for (int b = 0; b < batch; b++)
             {
-                int vecOffset = (b * seqLen + s) * dim;
-                for (int d = 0; d < dim; d++)
+                int modBase = b * dim * 2;
+                for (int s = 0; s < seqLen; s++)
                 {
-                    float scale = modPtr[modBase + d];
-                    float shift = modPtr[modBase + dim + d];
-                    outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
+                    int vecOffset = (b * seqLen + s) * dim;
+                    for (int d = 0; d < dim; d++)
+                    {
+                        float scale = modPtr[modBase + d];
+                        float shift = modPtr[modBase + dim + d];
+                        outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
+                    }
                 }
             }
         }
@@ -336,22 +362,6 @@ public sealed unsafe class Flux2Transformer : IDisposable
                 float invStd = 1.0f / MathF.Sqrt(variance + eps);
                 for (int d = 0; d < dim; d++) outPtr[offset + d] = (inPtr[offset + d] - mean) * invStd;
             }
-        }
-    }
-
-    private static void ConcatAlongSeqDim3D(Tensor output, Tensor first, Tensor second,
-        int batch, int firstSeqLen, int secondSeqLen, int dim)
-    {
-        float* firstPtr = (float*)first.DataPointer;
-        float* secondPtr = (float*)second.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int totalSeqLen = firstSeqLen + secondSeqLen;
-        for (int b = 0; b < batch; b++)
-        {
-            long firstBytes = (long)firstSeqLen * dim * sizeof(float);
-            long secondBytes = (long)secondSeqLen * dim * sizeof(float);
-            Buffer.MemoryCopy(firstPtr + b * firstSeqLen * dim, outPtr + b * totalSeqLen * dim, firstBytes, firstBytes);
-            Buffer.MemoryCopy(secondPtr + b * secondSeqLen * dim, outPtr + b * totalSeqLen * dim + firstSeqLen * dim, secondBytes, secondBytes);
         }
     }
 

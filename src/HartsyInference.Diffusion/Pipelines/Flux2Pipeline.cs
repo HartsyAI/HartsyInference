@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -23,6 +24,20 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
     private readonly Tensor _bnVar;      // [128] — running_var
     private readonly float _bnEps;
     private readonly int[] _hiddenLayers;
+
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop free + next-gen
+    /// re-upload). A prompt-cache MISS frees the DiT before the text-encoder forward — Dev's Mistral-Small
+    /// (~12 GB fp4) and the 32B Q4 DiT (~18 GB) cannot coexist on a 24 GB card, which is also why this
+    /// pipeline stages weights at all. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-embedding cache (last-used), keyed on the tokenizer ids — the Krea2/Chroma pattern. A hit
+    // skips the whole text-encoder phase (weights never upload), which on Dev also avoids the 12 GB
+    // TE↔DiT swap entirely.
+    private int[]? _cachedPromptKey;
+    private Tensor? _cachedTextEmbeddings;
 
     /// <summary>Creates a Flux.2 pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     public Flux2Pipeline(IBackend backend, LlamaStyleEncoder textEncoder,
@@ -139,13 +154,42 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         Logs.Info($"Flux.2 ({variant}) {opMode}: {imgW}x{imgH}, {steps} steps, guidance={guidanceScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Text encoder forward ───────────────────────────────────
-        Logs.Info($"Encoding text with {(_config.TextEncoderType == Flux2TextEncoderType.Mistral ? "Mistral-Small" : "Qwen3")} (multi-layer hidden states, layers [{string.Join(",", _hiddenLayers)}])...");
-        int[][] batchedTokenIds = [promptTokenIds];
-        Tensor textEmbeddings = _textEncoder.EncodeMultiLayer(Backend, batchedTokenIds, _hiddenLayers);
+        // ── 1. Text encoder forward (with cross-generation prompt-embedding cache) ──
+        Tensor textEmbeddings;
+        if (_cachedPromptKey is not null && promptTokenIds.AsSpan().SequenceEqual(_cachedPromptKey))
+        {
+            Logs.Info("Flux.2 prompt-embedding cache HIT — skipping the text-encoder phase.");
+            textEmbeddings = _cachedTextEmbeddings!;
+        }
+        else
+        {
+            Logs.Info($"Encoding text with {(_config.TextEncoderType == Flux2TextEncoderType.Mistral ? "Mistral-Small" : "Qwen3")} (multi-layer hidden states, layers [{string.Join(",", _hiddenLayers)}])...");
+
+            // The TE cannot coexist with a resident DiT (Dev: ~12 GB fp4 TE + ~18 GB Q4 DiT on 24 GB);
+            // evict for this encode, the denoise section re-preloads. Cache hits never pay this.
+            if (_ditResident)
+            {
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
+
+            int[][] batchedTokenIds = [promptTokenIds];
+            textEmbeddings = _textEncoder.EncodeMultiLayer(Backend, batchedTokenIds, _hiddenLayers);
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (seqLen={textEmbeddings.Shape[1]}, hidden={textEmbeddings.Shape[2]})");
+            LogTensorStats("text embeddings", textEmbeddings);
+
+            // Free the TE weights (auto-promoted into the weight cache during the forward), host-materialize
+            // the embeddings so they survive activation sweeps across generations, and reclaim the encoder's
+            // device intermediates before the DiT phase.
+            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            _ = textEmbeddings.DataPointer;
+            Backend.FreeActivations();
+
+            if (_cachedTextEmbeddings != textEmbeddings) _cachedTextEmbeddings?.Dispose();
+            _cachedPromptKey = (int[])promptTokenIds.Clone();
+            _cachedTextEmbeddings = textEmbeddings;
+        }
         int txtSeqLen = (int)textEmbeddings.Shape[1];
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (seqLen={txtSeqLen}, hidden={textEmbeddings.Shape[2]})");
-        LogTensorStats("text embeddings", textEmbeddings);
 
         // ── 2. Set up dynamic-shift flow-match scheduler ──────────────
         TensorShape noiseShape = new TensorShape(1, _config.InChannels, patH, patW);
@@ -170,7 +214,17 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         }
 
         // ── 4. Denoising loop (from startStep onward) ──
-        Logs.Info("Starting Flux.2 denoising loop...");
+        // Preload the DiT as one bulk upload (a KEEP_MODELS-resident DiT makes this a cache no-op). Without
+        // it every Linear pays its own cache-miss H2D; with the Q4 GGUF source the quant blocks then stay
+        // resident and dequantize transiently per use (a full F16 cast cache would not fit 24 GB for Dev).
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
+
+        // Drain-free fast path (plain t2i / img2img, the Chroma/Krea2 pattern): the latent stays
+        // device-resident across the loop and the Euler step runs as ONE in-place device op (Flux.2 has no
+        // true-CFG — guidance is embedded — so CfgEulerStep with g=1 is the plain z += v·dt). Masked inpaint
+        // keeps the host branch (per-step host blend must read the latent anyway).
+        bool drainFree = !isMaskedInpaint;
+        Logs.Info(drainFree ? "Flux.2 loop: drain-free device-resident path." : "Flux.2 loop: host-step path.");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = startStep; i < steps; i++)
         {
@@ -180,12 +234,20 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             Tensor velocityPred = _transformer.Forward(
                 Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW);
 
+            if (drainFree)
+            {
+                Backend.CfgEulerStep(packedLatent, velocityPred, velocityPred, 1.0f, scheduler.Dt(i));
+                velocityPred.Dispose();
+            }
+            else
+            {
             TensorShape packedStepShape = new TensorShape(1, imgSeqLen, _config.InChannels);
             Tensor newLatent = new Tensor(packedStepShape, DType.F32);
             scheduler.Step(newLatent, velocityPred, packedLatent, i);
             velocityPred.Dispose();
             packedLatent.Dispose();
             packedLatent = newLatent;
+            }
 
             // Masked-inpaint blend in packed form: keep unmasked region on the source's
             // flow-matching trajectory by re-noising the source at the next step's sigma.
@@ -199,7 +261,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
                     Tensor freshNoise = SeedGenerator.CreateNoise(noiseShape, seed + nextStep);
                     Tensor freshPackedNoise = PackLatent(freshNoise);
                     freshNoise.Dispose();
-                    noisedSource = new Tensor(packedStepShape, DType.F32);
+                    noisedSource = new Tensor(packedShape, DType.F32);
                     scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
                     freshPackedNoise.Dispose();
                 }
@@ -227,9 +289,21 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             });
         }
 
-        textEmbeddings.Dispose();
+        // textEmbeddings is a cross-generation cache entry — not disposed here.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
+
+        // Free the DiT before VAE decode unless KEEP_MODELS keeps it resident (the 32-channel decode's
+        // tiled fallback covers the tight case; a future prompt-cache miss evicts before the TE).
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
+        else
+        {
+            _ditResident = true;
+        }
 
         // ── 5. Unpack [B, S, 128] → [B, 128, patH, patW] ──────────────
         Tensor unpackedPatched = UnpackLatent(packedLatent, patH, patW);

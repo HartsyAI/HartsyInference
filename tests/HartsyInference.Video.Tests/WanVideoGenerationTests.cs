@@ -204,6 +204,76 @@ public class WanVideoGenerationTests
         finally { foreach (SafeTensorsLoader l in vl) l.Dispose(); }
     }
 
+    /// <summary>Clip-level (T&gt;1) Wan VAE roundtrip — the I2V conditioning shape the single-frame roundtrip never
+    /// covered: a padded pixel clip (frame 0 = real image, frames 1+ = mid-gray, mirroring the pipeline's
+    /// <c>BuildCondClip</c>) is encoded through the causal video VAE and decoded straight back. If frame 0 of the
+    /// decode shows weave/tint artifacts absent from the single-frame roundtrip, the temporal encode path is the
+    /// I2V quality bug. Env: <c>WAN_ROUNDTRIP_IMG</c> (raw RGB24), <c>WAN_VAE</c>, <c>WAN_RT_W/H</c>,
+    /// <c>WAN_RT_FRAMES</c> (default 25).</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public unsafe void WanVae_Roundtrip_Clip()
+    {
+        string vaePath = Env("WAN_VAE") ?? "/home/hartsy/Desktop/Swarm/SwarmUI.old/Models/VAE/Wan/wan_2.1_vae.safetensors";
+        string ptxDir = Path.Combine(Path.GetDirectoryName(typeof(WanVideoGenerationTests).Assembly.Location)!, "Ptx");
+        if (!File.Exists(vaePath) || !Directory.Exists(ptxDir) || !CudaContext.IsAvailable())
+        { _output.WriteLine("SKIPPED: missing VAE/PTX/CUDA."); return; }
+        int w = (int)EnvD("WAN_RT_W", 832), h = (int)EnvD("WAN_RT_H", 480);
+        int numFrames = (int)EnvD("WAN_RT_FRAMES", 25);
+        string? imgPath = Env("WAN_ROUNDTRIP_IMG");
+        Assert.True(imgPath is not null && File.Exists(imgPath), "set WAN_ROUNDTRIP_IMG to a raw RGB24 file");
+        byte[] rgb = File.ReadAllBytes(imgPath!);
+        Assert.True(rgb.Length >= w * h * 3, $"raw RGB24 file must be ≥ {w * h * 3} bytes for {w}x{h}");
+
+        (Dictionary<string, Tensor> vaeW, IReadOnlyList<SafeTensorsLoader> vl) = LanceCheckpointConverter.LoadVae(vaePath);
+        try
+        {
+            Wan21VaeEncoder enc = new(); enc.LoadWeights(vaeW);
+            Wan21VaeDecoder dec = new(); dec.LoadWeights(vaeW);
+            using CudaBackend backend = new(deviceOrdinal: 0, ptxDir: ptxDir);
+
+            // Padded clip [1,3,T,H,W] in [-1,1]: frame 0 = image, frames 1+ = mid-gray (0) — BuildCondClip's layout.
+            Tensor clip = new Tensor(new TensorShape([1L, 3, numFrames, h, w]), DType.F32);
+            float* cp = (float*)clip.DataPointer;
+            long frame = (long)h * w;
+            long perChannel = (long)numFrames * frame;
+            new Span<float>(cp, (int)(3 * perChannel)).Clear();
+            for (long pix = 0; pix < frame; pix++)
+                for (int c = 0; c < 3; c++)
+                    cp[c * perChannel + pix] = rgb[(int)(pix * 3 + c)] / 127.5f - 1f;
+
+            backend.PreloadWeights(enc.EnumerateWeights());
+            Tensor lat = enc.Encode(backend, clip);
+            clip.Dispose();
+            backend.Sync();
+            backend.FreeWeights(enc.EnumerateWeights());
+            _output.WriteLine($"[clip-roundtrip] latent {lat.Shape}");
+            if (Env("WAN_RT_DUMP") is string dumpPath)
+            {
+                ReadOnlySpan<float> ls = lat.AsReadOnlySpan<float>();
+                byte[] raw = new byte[ls.Length * 4];
+                System.Runtime.InteropServices.MemoryMarshal.AsBytes(ls).CopyTo(raw);
+                File.WriteAllBytes(dumpPath, raw);
+                _output.WriteLine($"[clip-roundtrip] latent dumped → {dumpPath}");
+            }
+            backend.PreloadWeights(dec.EnumerateWeights());
+            Tensor rgbOut = dec.Decode(backend, lat);
+            lat.Dispose();
+            string outDir = Path.Combine(TestPaths.OutputDir, $"wan_vae_cliprt_{DateTime.Now:yyyyMMdd_HHmmss}");
+            Directory.CreateDirectory(outDir);
+            HartsyInference.Diffusion.Utilities.ImagePostProcessor.SaveBmp(Path.Combine(outDir, "input.bmp"), rgb, w, h);
+            int tOut = (int)rgbOut.Shape[2];
+            foreach (int f in new[] { 0, Math.Min(6, tOut - 1), Math.Min(12, tOut - 1), tOut - 1 })
+            {
+                byte[] fb = VideoRgbFrames.ExtractFrame(rgbOut, f);
+                HartsyInference.Diffusion.Utilities.ImagePostProcessor.SaveBmp(Path.Combine(outDir, $"rt_f{f}.bmp"), fb, w, h);
+            }
+            rgbOut.Dispose();
+            _output.WriteLine($"[clip-roundtrip] → {outDir} ({tOut} frames)");
+        }
+        finally { foreach (SafeTensorsLoader l in vl) l.Dispose(); }
+    }
+
     /// <summary>Real-weight e2e for Wan2.1 I2V-14B (CLIP-conditioned image-to-video): loads the fp8 DiT (auto-detected
     /// I2V config: in=36, image_dim=1280, CFG-renorm on), the z=16 VAE (decoder + encoder), and CLIP-ViT-H; encodes a
     /// reference image to the 257×1280 penultimate hidden states → <c>imageEmbeds</c> and VAE-encodes it into the
