@@ -238,6 +238,12 @@ public sealed unsafe class DiaPipeline : IDisposable
         Array.Sort(order, (a, b) => guided[b].CompareTo(guided[a]));
         float[] arr = new float[v];
         Array.Fill(arr, float.NegativeInfinity);
+        // model.py:442-445: the candidate window is the top-K of the CFG-COMBINED logits, but the sampled
+        // distribution (EOS-argmax + top_p + multinomial in _sample_next_token) is the CONDITIONAL logits
+        // restricted to it (`cond_logits.masked_fill(mask, -inf)`). Filling `guided` here is WRONG: at an
+        // utterance's end the all-pad UNCOND branch also wants EOS, so cfg*(cond-uncond) shrinks (or flips)
+        // the EOS margin — EOS then never becomes the argmax and generation runs to the cap (never-EOS +
+        // off-distribution garble → near-silent decode). Sample the conditional, exactly like upstream.
         for (int r = 0; r < k; r++) arr[order[r]] = cond[order[r]];
         for (int i = cfg.AudioEos + 1; i < v; i++) arr[i] = float.NegativeInfinity;
         if (channel != 0) arr[cfg.AudioEos] = float.NegativeInfinity;

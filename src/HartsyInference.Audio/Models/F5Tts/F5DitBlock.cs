@@ -123,12 +123,13 @@ internal sealed unsafe class F5DitBlock
         backend.Permute0213(vMh, v, t, heads, headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
 
-        // Fused flash attention: at DiT sequence lengths (T ~2000) the naive SDPA materializes a
-        // [heads, T, T] score tensor (~256MB/block) — pure DRAM-bandwidth burn; flash never does.
+        // SDPA (no mask, non-causal MHA): routes to the TF32 tensor-core GEMM path — ~12× faster than the
+        // monolithic online-softmax flash kernel at DiT lengths (7.1→0.58 ms/call at [1,16,454,64], maxDiff
+        // 6e-5), and auto-tiles the query axis if T ever grows large enough to threaten the score matrix.
         float scale = 1f / MathF.Sqrt(headDim);
         Tensor attnOut = new(mh, DType.F32);
         if (Prof) { backend.Sync(); _swAttn.Restart(); }
-        backend.FlashAttention(attnOut, qMh, kMh, vMh, kvLen: t, kvGroup: 1, causal: false, qOffset: 0, scale);
+        backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, null, scale);
         if (Prof) { backend.Sync(); _tAttn += _swAttn.Elapsed.TotalMilliseconds; }
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 

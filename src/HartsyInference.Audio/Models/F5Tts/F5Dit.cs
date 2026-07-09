@@ -33,6 +33,10 @@ public sealed unsafe class F5Dit : IDisposable
 
     private Tensor? _ropeCos, _ropeSin;   // [maxPos, headDim] backend-ready (first half of each row used)
     private bool _loaded;
+
+    // Per-loop text-embedding cache: two step-invariant tensors (cond/uncond) keyed by sequence length.
+    private Tensor? _txtCond, _txtUncond;
+    private int _txtCacheLen = -1;
     private int _disposed;
 
     // ── CUDA-graph step capture (opt-in via HARTSY_F5_GRAPH; ZImage pattern) ───────────────────────────
@@ -114,9 +118,12 @@ public sealed unsafe class F5Dit : IDisposable
         int t = (int)noisyMel.Shape[2];
 
         Tensor timeEmb = _timeEmb.Forward(backend, timestep);
-        Tensor textHidden = _textEmb.Forward(backend, textIds, t, dropText);
+        // Text embedding depends only on (textIds, t, dropText) — invariant across the 32 sampling steps, so
+        // there are just two distinct values (cond/uncond). Computing it eagerly every forward reran 4 ConvNeXt
+        // blocks whose depthwise conv is a host loop (GPU→host→GPU sync per block); cache the two tensors and
+        // reuse them for the whole loop. After the first use each is a pure host-side read (no GPU work).
+        Tensor textHidden = GetTextHidden(backend, textIds, t, dropText);
         Tensor x = _inputEmb.Forward(backend, noisyMel, condMel, textHidden, t, dropAudioCond);
-        textHidden.Dispose();
 
         // SiLU(t_emb) once per step, on-device; every block's adaLN Linear consumes it.
         Tensor siluTime = new(timeEmb.Shape, DType.F32);
@@ -131,6 +138,31 @@ public sealed unsafe class F5Dit : IDisposable
         siluTime.Dispose();
         F5DitBlock.DumpProfile();
         return vec;
+    }
+
+    /// <summary>Clears the per-loop text-embedding cache. Call once before each sampling loop — the cache keys
+    /// on sequence length only, so a new generation reusing a length with different text must reset first.</summary>
+    public void ResetTextCache()
+    {
+        _txtCond?.Dispose(); _txtUncond?.Dispose();
+        _txtCond = _txtUncond = null;
+        _txtCacheLen = -1;
+    }
+
+    /// <summary>Returns the cond/uncond text embedding, computing it once per sequence length and reusing the
+    /// cached tensor across all sampling steps. The returned tensor is owned by this cache — callers must NOT
+    /// dispose it. Invalidated automatically when the sequence length changes.</summary>
+    private Tensor GetTextHidden(IBackend backend, ReadOnlySpan<int> textIds, int t, bool dropText)
+    {
+        if (t != _txtCacheLen)
+        {
+            _txtCond?.Dispose(); _txtUncond?.Dispose();
+            _txtCond = _txtUncond = null;
+            _txtCacheLen = t;
+        }
+        if (dropText)
+            return _txtUncond ??= _textEmb.Forward(backend, textIds, t, dropText: true);
+        return _txtCond ??= _textEmb.Forward(backend, textIds, t, dropText: false);
     }
 
     /// <summary>The 22 DiT blocks + final AdaLN head + proj_out, eager. Does NOT dispose <paramref name="xIn"/>
@@ -305,6 +337,8 @@ public sealed unsafe class F5Dit : IDisposable
         Interlocked.Exchange(ref _disposed, 1);
         _xFixed?.Dispose(); _siluFixed?.Dispose(); _graphVelocity?.Dispose();
         _xFixed = _siluFixed = _graphVelocity = null;
+        _txtCond?.Dispose(); _txtUncond?.Dispose();
+        _txtCond = _txtUncond = null;
     }
 }
 

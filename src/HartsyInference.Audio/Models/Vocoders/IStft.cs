@@ -20,8 +20,13 @@ public static class IStft
     ///
     /// <para>Output is a float[] of length <c>(frames - 1) * hopLength</c> with center
     /// padding (the leading and trailing <c>n_fft/2</c> samples of the raw overlap-add
-    /// result are trimmed — same as <c>torch.istft(center=True)</c>).</para></summary>
-    public static float[] Apply(float[] spectReal, float[] spectImag, int frames, int nFft, int hopLength)
+    /// result are trimmed — same as <c>torch.istft(center=True)</c>).</para>
+    ///
+    /// <para><paramref name="edgePad"/> overrides how many samples are trimmed from each
+    /// end. When negative (default) it is <c>n_fft/2</c> (center padding). Vocos "same"
+    /// padding — used by NeuCodec — passes <c>(n_fft - hopLength)/2</c>, yielding
+    /// <c>frames * hopLength</c> output samples.</para></summary>
+    public static float[] Apply(float[] spectReal, float[] spectImag, int frames, int nFft, int hopLength, int edgePad = -1)
     {
         int half = nFft / 2;
         int numBins = half + 1;
@@ -84,11 +89,12 @@ public static class IStft
             if (winSq[i] > 1e-11f) outRaw[i] /= winSq[i];
         }
 
-        // Trim the center-padded edges: drop the leading and trailing n_fft/2 samples.
-        long trimmedLen = rawLen - nFft;
+        // Trim the padded edges: drop `pad` samples from each end (center: n_fft/2; Vocos "same": (n_fft-hop)/2).
+        int pad = edgePad >= 0 ? edgePad : half;
+        long trimmedLen = rawLen - 2L * pad;
         if (trimmedLen < 0) trimmedLen = 0;
         float[] result = new float[trimmedLen];
-        Array.Copy(outRaw, half, result, 0, trimmedLen);
+        Array.Copy(outRaw, pad, result, 0, trimmedLen);
         return result;
     }
 }

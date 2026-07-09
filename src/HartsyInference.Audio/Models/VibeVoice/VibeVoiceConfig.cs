@@ -50,6 +50,17 @@ public sealed record VibeVoiceConfig
     /// on the multi-speaker variant. Default 20 per <c>VibeVoice-Streaming-0.5B</c>.</summary>
     public int TtsBackboneNumHiddenLayers { get; init; } = 20;
 
+    /// <summary>Classifier-free guidance scale for the diffusion head. The denoise step
+    /// forms <c>eps = uncond + CfgScale*(cond - uncond)</c> from a positive (text+voice
+    /// conditioned) and a negative (voice/acoustic-only, text-masked) LM stream. 1.3 is the
+    /// upstream demo default; 1.0 disables guidance (single-stream).</summary>
+    public float CfgScale { get; init; } = 1.3f;
+
+    /// <summary>AR token selection. Upstream uses greedy (<c>do_sample=False</c>) once CFG
+    /// is enabled — the diffusion head stops cleanly. Set true to restore temperature/top-p
+    /// stochastic sampling.</summary>
+    public bool DoSample { get; init; } = false;
+
     /// <summary>Convenience accessor — true for the streaming variant.</summary>
     public bool IsStreaming => ModelType == "vibevoice_streaming";
 

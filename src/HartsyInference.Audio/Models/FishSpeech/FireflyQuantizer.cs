@@ -84,14 +84,15 @@ public sealed unsafe class FireflyQuantizer : IDisposable
             throw new ArgumentException($"codes must have {_nGroups} rows, got {codes.GetLength(0)}.");
         if (t <= 0) throw new ArgumentException("t must be positive.", nameof(t));
 
-        // Per-axis place values and symmetric inverse scales. firefly's FSQ uses preserve_symmetry=True, so
-        // index k maps to digit_k = (idx // basis_k) % levels_k then code_k = digit_k * 2/(levels_k - 1) - 1
-        // (evenly spaced in [-1, 1]) — NOT the half_width = L//2 convention.
+        // Per-axis place values and half-widths. fish-speech's GroupedResidualFSQ(levels=[8,5,5,5]) leaves
+        // preserve_symmetry at its default False, so index k maps to digit_k = (idx // basis_k) % levels_k then
+        // code_k = (digit_k - levels_k//2) / (levels_k//2) — the half_width convention (NOT the evenly-spaced
+        // 2/(L-1) mapping, which only agrees on odd levels and mis-scales the L=8 axis).
         Span<int> basis = stackalloc int[_codebookDim];
-        Span<float> invScale = stackalloc float[_codebookDim];
+        Span<int> halfWidth = stackalloc int[_codebookDim];
         basis[0] = 1;
         for (int k = 1; k < _codebookDim; k++) basis[k] = basis[k - 1] * _levels[k - 1];
-        for (int k = 0; k < _codebookDim; k++) invScale[k] = 2f / (_levels[k] - 1);
+        for (int k = 0; k < _codebookDim; k++) halfWidth[k] = _levels[k] / 2;
 
         // Build the channels-first latent [1, inputDim, T]; group g occupies channels [g*groupDim, (g+1)*groupDim).
         Tensor latent = new(new TensorShape(1, _inputDim, t), DType.F32);
@@ -107,7 +108,7 @@ public sealed unsafe class FireflyQuantizer : IDisposable
                 for (int k = 0; k < _codebookDim; k++)
                 {
                     int digit = (idx / basis[k]) % _levels[k];
-                    cdp[(long)l * _codebookDim + k] = digit * invScale[k] - 1f;
+                    cdp[(long)l * _codebookDim + k] = (digit - halfWidth[k]) / (float)halfWidth[k];
                 }
             }
             // project_out: Linear codebookDim -> groupDim.

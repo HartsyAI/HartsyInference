@@ -12,10 +12,18 @@ OUT = "/tmp/hartsyinference_tts_to_stt/f5_REF_python.wav"
 
 f5 = F5TTS(model="F5TTS_v1_Base", device="cuda" if torch.cuda.is_available() else "cpu")
 print("model loaded; generating (nfe=32, cfg=2, sway=-1) ...", flush=True)
+import time
 torch.manual_seed(7)
+# warm
+f5.infer(ref_file=REF, ref_text=REF_TEXT, gen_text="warm up", nfe_step=32, cfg_strength=2.0, sway_sampling_coef=-1, seed=7)
+torch.cuda.synchronize() if torch.cuda.is_available() else None
+t0 = time.perf_counter()
 wav, sr, spec = f5.infer(ref_file=REF, ref_text=REF_TEXT, gen_text=GEN_TEXT,
                          nfe_step=32, cfg_strength=2.0, sway_sampling_coef=-1, seed=7)
+torch.cuda.synchronize() if torch.cuda.is_available() else None
+dt = time.perf_counter() - t0
 wav = np.asarray(wav, dtype=np.float32).flatten()
 sf.write(OUT, wav, sr)
 np.save("/tmp/hartsyinference_tts_to_stt/f5_ref_mel.npy", np.asarray(spec))
-print(f"WROTE {OUT} ({len(wav)/sr:.2f}s @ {sr}Hz) | mel shape {np.asarray(spec).shape}", flush=True)
+dur = len(wav)/sr
+print(f"F5 REF: gen {dt:.2f}s | audio {dur:.2f}s | RTF {dt/dur:.3f} | RMS {float(np.sqrt((wav**2).mean())):.4f} -> {OUT} | mel {np.asarray(spec).shape}", flush=True)

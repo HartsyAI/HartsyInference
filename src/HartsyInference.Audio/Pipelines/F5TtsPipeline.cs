@@ -247,6 +247,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // this the CUDA path streams every weight from host each forward — the audio stack's lazy auto-promote
         // loses its headroom gate to the transient pool, so weights never promote (no-op on CPU).
         backend.PreloadWeights(_dit.EnumerateWeights());
+        _dit.ResetTextCache();   // text embedding is cached across steps; clear any prior generation's entry
         try
         {
             F5SwaySamplingScheduler sched = new(opts.Steps, opts.SwayCoef);

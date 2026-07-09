@@ -22,6 +22,7 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
     private readonly NeuTtsConfig _cfg;
     private readonly Qwen2Model _lm;
     private readonly NeuCodecDecoder _codec;
+    private readonly NeuCodecEncoder _encoder;
     private int _disposed;
 
     public NeuTtsPipeline(NeuTtsConfig cfg)
@@ -29,7 +30,11 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         _cfg = cfg;
         _lm = new Qwen2Model(cfg.Llm);
         _codec = new NeuCodecDecoder(cfg.Codec);
+        _encoder = new NeuCodecEncoder();
     }
+
+    /// <summary>Input sample rate the reference wav for <see cref="EncodeReference"/> must be resampled to (16 kHz).</summary>
+    public int ReferenceSampleRate => _encoder.Config.InputSampleRate;
 
     public int SampleRate => _cfg.Codec.SampleRate;
 
@@ -39,6 +44,16 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
     {
         _lm.LoadWeights(backbone, backbonePrefix);
         _codec.LoadWeights(codec);
+        _encoder.LoadWeights(codec);
+    }
+
+    /// <summary>Encodes a mono 16 kHz reference waveform into NeuCodec FSQ code indices (the X-Codec2 encode path),
+    /// suitable for the <c>refCodes</c> argument of <see cref="Synthesize"/>. NeuTTS is voice-cloning-only upstream,
+    /// so this is the required conditioning path — every generation clones from a reference voice.</summary>
+    public int[] EncodeReference(IBackend backend, float[] referencePcm16k)
+    {
+        ThrowIfDisposed();
+        return _encoder.Encode(backend, referencePcm16k);
     }
 
     /// <summary>Synthesizes 24 kHz mono PCM. <paramref name="promptPrefix"/> is the tokenized chat prefix from
@@ -112,6 +127,7 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
     {
         foreach (Tensor t in _lm.EnumerateWeights()) yield return t;
         foreach (Tensor t in _codec.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _encoder.EnumerateWeights()) yield return t;
     }
 
     private static Tensor SliceLastFrame(Tensor hidden, int h)
@@ -128,6 +144,7 @@ public sealed unsafe class NeuTtsPipeline : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _lm.Dispose();
         _codec.Dispose();
+        _encoder.Dispose();
         GC.SuppressFinalize(this);
     }
 
