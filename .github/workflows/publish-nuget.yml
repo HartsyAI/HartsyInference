@@ -90,7 +90,7 @@ jobs:
       - name: Verify complete package set
         run: |
           VER="1.0.0-${{ steps.ver.outputs.suffix }}"
-          EXPECTED="HartsyInference.Core HartsyInference.Cpu HartsyInference.Cuda HartsyInference.Vulkan HartsyInference.ModelHandler HartsyInference.Tokenizers HartsyInference.Diffusion HartsyInference.Audio HartsyInference.Vision HartsyInference.Video HartsyInference.Interactive HartsyInference.ThreeD HartsyInference.Phonemizer HartsyInference.LLM"
+          EXPECTED="HartsyInference HartsyInference.Core HartsyInference.Cpu HartsyInference.Cuda HartsyInference.Vulkan HartsyInference.ModelHandler HartsyInference.Tokenizers HartsyInference.Diffusion HartsyInference.Audio HartsyInference.Vision HartsyInference.Video HartsyInference.Interactive HartsyInference.ThreeD HartsyInference.Phonemizer HartsyInference.LLM"
           missing=0
           for pkg in $EXPECTED; do
             if [ ! -f "artifacts/${pkg}.${VER}.nupkg" ]; then
@@ -102,7 +102,7 @@ jobs:
             echo "::error::Incomplete package set for ${VER} — refusing to publish a partial release."
             exit 1
           fi
-          echo "All 14 packages present for ${VER}."
+          echo "All 15 packages present for ${VER}."
 
       # Exchange the GitHub OIDC token for a short-lived (1-hour) NuGet API key.
       # Run this right before the push so the key doesn't expire mid-job.

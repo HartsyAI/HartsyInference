@@ -88,28 +88,23 @@ public sealed class Resampler
         float[] result = output ?? new float[outLen];
         if (result.Length < outLen) throw new ArgumentException("output buffer too small", nameof(output));
 
-        // Per-output-sample compute:
-        //   inIdx, phase = divmod(m * down, up)
-        //   y[m] = sum_k input[inIdx - half + k] * phaseTable[phase][k]
-        // The "half" centers the filter so output sample 0 lines up with input sample 0.
+        // scipy resample_poly convolution: zero-stuff by `up`, filter with h, decimate by
+        // `down`. For output m the live taps land on phase = (m*down) % up and the signal is
+        // convolved *backwards* (x[inIdx0 - k]) about the filter centre; `half` removes the
+        // (filterLen-1)/2 group delay so output 0 lines up with input 0.
         int half = _taps / 2;
 
         for (int m = 0; m < outLen; m++)
         {
             long t = (long)m * _down;
-            int inIdx = (int)(t / _up) - half;
+            int inIdx0 = (int)(t / _up);
             int phase = (int)(((t % _up) + _up) % _up);
-            // scipy.resample_poly uses h[p][k] convolved against the original-rate input;
-            // when t % up != 0 the effective phase rotates through the polyphase rows.
-            // We need the *reverse* phase index because the up-sampled filter sees the
-            // zero-stuffed input shifted by `up - phase` zeros within each output stride.
-            int pIdx = phase == 0 ? 0 : _up - phase;
-            float[] taps = _phaseTable[pIdx];
+            float[] taps = _phaseTable[phase];
 
             float acc = 0f;
             for (int k = 0; k < _taps; k++)
             {
-                int s = inIdx + k;
+                int s = inIdx0 - k + half;
                 if ((uint)s < (uint)input.Length) acc += input[s] * taps[k];
             }
             result[m] = acc;

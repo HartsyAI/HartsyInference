@@ -35,6 +35,23 @@ public sealed unsafe class F5Dit : IDisposable
     private bool _loaded;
     private int _disposed;
 
+    // ── CUDA-graph step capture (opt-in via HARTSY_F5_GRAPH; ZImage pattern) ───────────────────────────
+    // The 22-block core has an identical op sequence every forward (cond/uncond differ only in the embedding
+    // stage, which stays outside the graph). Capturing it once and replaying via a single cuGraphLaunch
+    // collapses the ~7k per-op host calls that dominate the eager path. Fixed input buffers (_xFixed embedded
+    // hidden, _siluFixed timestep-SiLU) are refreshed per forward via CopyInto; the velocity lands in
+    // _graphVelocity. Any capture-illegal op trips _graphDead → permanent eager fallback for the session.
+    // EXPERIMENTAL / WIP — capture works but replay throws CUDA_ERROR_ILLEGAL_ADDRESS: the block core
+    // allocates+frees intermediate tensors per-forward, so pool addresses shift on replay and the recorded
+    // kernels read stale pointers. Landing this needs graph-stable scratch: pre-allocate every F5DitBlock
+    // intermediate ONCE so the captured region does zero alloc/free (the remaining work). Keep OFF.
+    private static readonly bool GraphEnabled = Environment.GetEnvironmentVariable("HARTSY_F5_GRAPH") == "1";
+    private bool _graphDead;
+    private Tensor? _xFixed, _siluFixed, _graphVelocity;
+    private long _graphSig = long.MinValue;
+    private int _graphSigCalls;
+    private const int GraphCaptureCall = 3;   // calls 1-2 warm the fixed buffers/uploads, call 3 records
+
     public F5TtsConfig Config => _cfg;
 
     public F5Dit(F5TtsConfig cfg)
@@ -104,25 +121,104 @@ public sealed unsafe class F5Dit : IDisposable
         // SiLU(t_emb) once per step, on-device; every block's adaLN Linear consumes it.
         Tensor siluTime = new(timeEmb.Shape, DType.F32);
         backend.Silu(siluTime, timeEmb);
+        timeEmb.Dispose();
 
+        // The 22-block core (+ final head) is the expensive, structurally-identical part — graph-captured when
+        // enabled; the embedding stage above stays eager (differs per cond/uncond drop flags).
+        bool graphMode = GraphEnabled && backend.StepGraphSupported && !_graphDead;
+        Tensor vec = graphMode ? RunBlocksGraph(backend, x, siluTime, t) : RunBlocks(backend, x, siluTime, t);
+        x.Dispose();
+        siluTime.Dispose();
+        F5DitBlock.DumpProfile();
+        return vec;
+    }
+
+    /// <summary>The 22 DiT blocks + final AdaLN head + proj_out, eager. Does NOT dispose <paramref name="xIn"/>
+    /// (the caller — or the captured graph's fixed buffer — owns it). Returns <c>[1, T, mel_dim]</c>.</summary>
+    private Tensor RunBlocks(IBackend backend, Tensor xIn, Tensor siluTime, int t)
+    {
+        Tensor x = xIn;
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, x, siluTime, t, _ropeCos!, _ropeSin!);
-            x.Dispose();
+            if (i > 0) x.Dispose();   // never dispose the caller's input
             x = next;
         }
-        timeEmb.Dispose();
-
-        // 5. Final AdaLayerNorm: x = LayerNorm(x, no affine) * (1 + scale) + shift, where
-        //    scale and shift come from the timestep through norm_out.linear.
         Tensor outNorm = ApplyFinalAdaLn(backend, x, _normOutLinW!, _normOutLinB!, siluTime, t);
-        siluTime.Dispose();
         x.Dispose();
-
-        // 6. proj_out: Linear(dim → mel_dim) → [1, T, mel_dim]
         Tensor vec = WhisperOps.ProjectLinear(backend, outNorm, _projOutW!, _projOutB, 1, t, _cfg.Dim, _cfg.MelDim);
         outNorm.Dispose();
         return vec;
+    }
+
+    /// <summary>Graph-captured block core. Refreshes the fixed input buffers, then replays the captured
+    /// cuGraph (or captures on call 3). Returns a fresh copy of the velocity so both CFG branches keep
+    /// independent buffers. Falls back to <see cref="RunBlocks"/> on any capture issue (sets _graphDead).</summary>
+    private Tensor RunBlocksGraph(IBackend backend, Tensor x, Tensor siluTime, int t)
+    {
+        // (Re)allocate fixed buffers on shape change; the sequence length t is the only varying dim.
+        if (_xFixed is null || (int)_xFixed.Shape[1] != t)
+        {
+            _xFixed?.Dispose(); _siluFixed?.Dispose(); _graphVelocity?.Dispose();
+            _xFixed = new Tensor(x.Shape, DType.F32);
+            _siluFixed = new Tensor(siluTime.Shape, DType.F32);
+            _graphVelocity = new Tensor(new TensorShape(1, t, _cfg.MelDim), DType.F32);
+            _graphSig = long.MinValue;   // force re-capture for the new shape
+        }
+        backend.CopyInto(_xFixed!, x);
+        backend.CopyInto(_siluFixed!, siluTime);
+
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        long sig = t;
+        if (sig != _graphSig || ownerLost)
+        {
+            backend.StepGraphReset();
+            _graphSig = sig;
+            _graphSigCalls = 0;
+            backend.StepGraphOwner = this;
+        }
+        _graphSigCalls++;
+
+        // Everything the captured kernels read must be device-resident AND stay pinned across capture→replay
+        // (an evicted weight/rope buffer moves → the recorded kernel reads a stale address → ILLEGAL_ADDRESS on
+        // replay). Re-pin the full weight set + RoPE tables on each warmup call so the transient activation pool
+        // can never reclaim them before the graph is instantiated. (Idempotent — already-cached weights no-op.)
+        if (_graphSigCalls <= GraphCaptureCall)
+            backend.PreloadWeights(System.Linq.Enumerable.Append(System.Linq.Enumerable.Append(EnumerateWeights(), _ropeCos!), _ropeSin!));
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return Clone(_graphVelocity!);
+        }
+
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) backend.StepGraphBegin();
+        try
+        {
+            Tensor vec = RunBlocks(backend, _xFixed!, _siluFixed!, t);
+            backend.CopyInto(_graphVelocity!, vec);   // last (captured) op lands velocity at the fixed buffer
+            vec.Dispose();
+        }
+        catch (Exception ex) when (capture)
+        {
+            backend.StepGraphReset();
+            _graphDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[F5 graph] capture invalidated — eager fallback: {ex.Message}");
+            return RunBlocks(backend, x, siluTime, t);
+        }
+        if (capture)
+        {
+            try { backend.StepGraphEndAndLaunch(); HartsyInference.Core.Logging.Logs.Info("[F5 graph] DiT block-core captured; replaying via cuGraphLaunch."); }
+            catch (Exception ex)
+            {
+                backend.StepGraphReset();
+                _graphDead = true;
+                HartsyInference.Core.Logging.Logs.Warning($"[F5 graph] capture failed — eager fallback: {ex.Message}");
+                return RunBlocks(backend, x, siluTime, t);
+            }
+        }
+        return Clone(_graphVelocity!);
     }
 
     /// <summary>Diagnostics — returns copies of the text-stem output, the DiT input embedding, the block-0
@@ -204,7 +300,12 @@ public sealed unsafe class F5Dit : IDisposable
         if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(F5Dit));
     }
 
-    public void Dispose() { Interlocked.Exchange(ref _disposed, 1); }
+    public void Dispose()
+    {
+        Interlocked.Exchange(ref _disposed, 1);
+        _xFixed?.Dispose(); _siluFixed?.Dispose(); _graphVelocity?.Dispose();
+        _xFixed = _siluFixed = _graphVelocity = null;
+    }
 }
 
 /// <summary>F5-TTS sinusoidal-into-MLP timestep embedder. <c>freq_embed → Linear(1024) →

@@ -140,6 +140,20 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // boundary and len(ref_text) in the duration ratio is correct; without it the tempo drifts.
         string refNorm = NormalizeRefText(refText);
         Tensor mel = GenerateMel(backend, refMel, _tokenizer.Encode(refNorm), _tokenizer.Encode(targetText), options);
+        // DEBUG: dump the pre-vocoder mel [1,melDim,T] to localize DiT-vs-vocoder (F5_DUMP_MEL=path).
+        string? melPath = Environment.GetEnvironmentVariable("F5_DUMP_MEL");
+        if (melPath is not null)
+        {
+            int md = (int)mel.Shape[1], mt = (int)mel.Shape[2];
+            long n = (long)md * mt;
+            double s = 0, s2 = 0, mn = double.MaxValue, mx = double.MinValue;
+            unsafe
+            {
+                float* mp = (float*)mel.DataPointer;
+                for (long i = 0; i < n; i++) { float v = mp[i]; s += v; s2 += (double)v * v; mn = Math.Min(mn, v); mx = Math.Max(mx, v); }
+            }
+            HartsyInference.Core.Logging.Logs.Info($"[F5 mel] shape [{md},{mt}] mean {s / n:F4} std {Math.Sqrt(s2 / n - (s / n) * (s / n)):F4} min {mn:F3} max {mx:F3}");
+        }
         float[] audio = _vocos.Forward(backend, mel);
         mel.Dispose();
         return audio;
@@ -202,6 +216,17 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
     {
         ThrowIfDisposed();
         F5TtsOptions opts = options ?? new F5TtsOptions();
+        if (Environment.GetEnvironmentVariable("F5_DUMP_MEL") is not null)
+        {
+            long rn = refMel.ElementCount; double rs = 0, rs2 = 0, rmn = double.MaxValue, rmx = double.MinValue;
+            unsafe { float* rp = (float*)refMel.DataPointer; for (long i = 0; i < rn; i++) { float v = rp[i]; rs += v; rs2 += (double)v * v; rmn = Math.Min(rmn, v); rmx = Math.Max(rmx, v); } }
+            HartsyInference.Core.Logging.Logs.Info($"[F5 refmel] shape [{refMel.Shape[1]},{refMel.Shape[2]}] mean {rs / rn:F4} std {Math.Sqrt(rs2 / rn - (rs / rn) * (rs / rn)):F4} min {rmn:F3} max {rmx:F3}");
+            // per-mel-bin mean (100 values) → localize which bins differ from F5 (filterbank shape).
+            int rmd = (int)refMel.Shape[1], rmt = (int)refMel.Shape[2];
+            double[] binMean = new double[rmd];
+            unsafe { float* rp = (float*)refMel.DataPointer; for (int d = 0; d < rmd; d++) { double a = 0; for (int t = 0; t < rmt; t++) a += rp[(long)d * rmt + t]; binMean[d] = a / rmt; } }
+            File.WriteAllText("/tmp/f5_ours_binmean.txt", string.Join(" ", binMean.Select(x => x.ToString("F4"))));
+        }
 
         int tRef = (int)refMel.Shape[2];
 

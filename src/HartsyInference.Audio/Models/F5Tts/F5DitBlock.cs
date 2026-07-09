@@ -20,6 +20,17 @@ namespace HartsyInference.Audio.Models.F5Tts;
 /// (smaller than the typical 4x — note this when comparing magnitudes to other DiTs).</para></summary>
 internal sealed unsafe class F5DitBlock
 {
+    // ── Section profiling (HARTSY_F5_PROFILE=1): sync-bracketed ms accumulators, dumped per generation ──
+    internal static readonly bool Prof = Environment.GetEnvironmentVariable("HARTSY_F5_PROFILE") == "1";
+    internal static double _tAttn, _tQkv, _tFfn, _tBlock; internal static int _nBlocks;
+    private static readonly System.Diagnostics.Stopwatch _swAttn = new(), _swQkv = new(), _swFfn = new(), _swBlk = new();
+    internal static void DumpProfile()
+    {
+        if (!Prof || _nBlocks == 0) return;
+        HartsyInference.Core.Logging.Logs.Info($"[F5 prof] {_nBlocks} block-fwds | block {_tBlock:0}ms (attn {_tAttn:0} qkv {_tQkv:0} ffn {_tFfn:0} other {_tBlock-_tAttn-_tQkv-_tFfn:0}) | per-block {_tBlock/_nBlocks:0.0}ms");
+        _tAttn = _tQkv = _tFfn = _tBlock = 0; _nBlocks = 0;
+    }
+
     private readonly F5TtsConfig _cfg;
 
     private Tensor? _attnNormLinW, _attnNormLinB;   // [6*dim, dim] / [6*dim]
@@ -62,6 +73,7 @@ internal sealed unsafe class F5DitBlock
         int heads = _cfg.Heads;
         int headDim = _cfg.HeadDim;
         int ffInner = _cfg.FfInner;
+        if (Prof) { backend.Sync(); _swBlk.Restart(); }
 
         // 1. AdaLN-Zero modulation params, kept on-device: Linear(silu(t_emb)) → [1,1,6*dim] → six [1,1,dim]
         //    slices; scales get the "+1" on-device.
@@ -90,9 +102,11 @@ internal sealed unsafe class F5DitBlock
         Tensor q = new(packed, DType.F32);
         Tensor k = new(packed, DType.F32);
         Tensor v = new(packed, DType.F32);
+        if (Prof) { backend.Sync(); _swQkv.Restart(); }
         backend.Linear(q, modded, _qW!, _qB);
         backend.Linear(k, modded, _kW!, _kB);
         backend.Linear(v, modded, _vW!, _vB);
+        if (Prof) { backend.Sync(); _tQkv += _swQkv.Elapsed.TotalMilliseconds; }
         modded.Dispose();
 
         // On-device interleaved RoPE (WanRopeInterleaved has a CUDA kernel; ApplyRopeInterleaved does not).
@@ -113,7 +127,9 @@ internal sealed unsafe class F5DitBlock
         // [heads, T, T] score tensor (~256MB/block) — pure DRAM-bandwidth burn; flash never does.
         float scale = 1f / MathF.Sqrt(headDim);
         Tensor attnOut = new(mh, DType.F32);
+        if (Prof) { backend.Sync(); _swAttn.Restart(); }
         backend.FlashAttention(attnOut, qMh, kMh, vMh, kvLen: t, kvGroup: 1, causal: false, qOffset: 0, scale);
+        if (Prof) { backend.Sync(); _tAttn += _swAttn.Elapsed.TotalMilliseconds; }
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         // [1, heads, T, headDim] → [1, T, heads*headDim] (inverse transpose, still on-device).
@@ -137,10 +153,12 @@ internal sealed unsafe class F5DitBlock
         normed2.Dispose();
 
         // 6. FF: Linear → tanh-GELU (the backend's Gelu IS the tanh approximation) → Linear (ff_mult=2).
+        if (Prof) { backend.Sync(); _swFfn.Restart(); }
         Tensor ff1 = WhisperOps.ProjectLinear(backend, modded2, _ffW1!, _ffB1, 1, t, dim, ffInner);
         modded2.Dispose();
         backend.Gelu(ff1, ff1);
         Tensor ff2 = WhisperOps.ProjectLinear(backend, ff1, _ffW2!, _ffB2, 1, t, ffInner, dim);
+        if (Prof) { backend.Sync(); _tFfn += _swFfn.Elapsed.TotalMilliseconds; }
         ff1.Dispose();
 
         // 7. Gated residual: x = x + gate_mlp * ff_out
@@ -150,6 +168,7 @@ internal sealed unsafe class F5DitBlock
         ff2.Dispose();
         shiftMsa.Dispose(); scaleMsa.Dispose(); gateMsa.Dispose();
         shiftMlp.Dispose(); scaleMlp.Dispose(); gateMlp.Dispose();
+        if (Prof) { backend.Sync(); _tBlock += _swBlk.Elapsed.TotalMilliseconds; _nBlocks++; }
         return outX;
     }
 

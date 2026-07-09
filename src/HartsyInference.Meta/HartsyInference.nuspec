@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>HartsyInference</id>
+    <version>$version$</version>
+    <authors>kalebbroo</authors>
+    <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
+    <readme>README.nuget.md</readme>
+    <projectUrl>https://github.com/HartsyAI/HartsyInference</projectUrl>
+    <description>Meta-package for HartsyInference — a pure C#/.NET AI inference engine for non-LLM modalities (diffusion image generation, speech-to-text, text-to-speech, vision, video, interactive world models). Adds all backends (CPU, CUDA, Vulkan) and modality packages in one reference.</description>
+    <copyright>Copyright (c) 2026 kalebbroo</copyright>
+    <tags>ai inference diffusion stable-diffusion flux whisper cuda dotnet csharp</tags>
+    <repository type="git" url="https://github.com/HartsyAI/HartsyInference" />
+    <dependencies>
+      <group targetFramework="net8.0">
+        <dependency id="HartsyInference.Audio" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Core" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Cpu" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Interactive" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.LLM" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.ModelHandler" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Phonemizer" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.ThreeD" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Tokenizers" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Video" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Vision" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Vulkan" version="$version$" exclude="Build,Analyzers" />
+      </group>
+      <group targetFramework="net10.0">
+        <dependency id="HartsyInference.Audio" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Core" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Cpu" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Interactive" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.LLM" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.ModelHandler" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Phonemizer" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.ThreeD" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Tokenizers" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Video" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Vision" version="$version$" exclude="Build,Analyzers" />
+        <dependency id="HartsyInference.Vulkan" version="$version$" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+  </metadata>
+  <!-- NuspecFile mode doesn't auto-pull the README from the MSBuild <None Pack="true"> item that
+       Directory.Build.targets adds for other (non-nuspec-mode) projects — it must be declared here
+       explicitly or `dotnet pack` fails with NU5039 ("readme file does not exist in the package"). -->
+  <files>
+    <file src="../../README.nuget.md" target="" />
+  </files>
+</package>

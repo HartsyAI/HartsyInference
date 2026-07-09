@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Meta-package: no source, no compiled output of its own — it exists purely to declare
+         dependencies on all 14 modality/backend packages so consumers can add one reference
+         instead of enumerating every sub-package. -->
+    <PackageId>HartsyInference</PackageId>
+    <AssemblyName>HartsyInference.Meta</AssemblyName>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <!-- NU5128: normally means "package has no lib/ref assemblies", which is correct here by
+         design (dependency-only package). NU5127 fires for the same reason on frameworks with
+         zero lib files; also expected. -->
+    <NoWarn>$(NoWarn);NU5128;NU5127</NoWarn>
+    <!-- Metadata + the dependency graph live in the nuspec (below), not standard PackageReference,
+         because PackageReference would force NuGet to RESTORE each sibling package at its
+         about-to-be-published version DURING this same CI run — before that version exists on
+         nuget.org. NuspecFile mode sidesteps restore entirely: it just substitutes $version$
+         (from this project's own resolved Version, i.e. VersionPrefix+VersionSuffix from
+         Directory.Build.props) into the nuspec's dependency list as literal text. -->
+    <NuspecFile>HartsyInference.nuspec</NuspecFile>
+    <NuspecBasePath>$(MSBuildThisFileDirectory)</NuspecBasePath>
+    <Description>Meta-package for HartsyInference — a pure C#/.NET AI inference engine for non-LLM modalities (diffusion image generation, speech-to-text, text-to-speech, vision, video, interactive world models). Adds all backends (CPU, CUDA, Vulkan) and modality packages in one reference.</Description>
+  </PropertyGroup>
+
+  <!-- NuspecFile mode does NOT auto-fill $token$ placeholders from MSBuild properties (that's
+       only legacy nuget.exe csproj-pack behavior) — NuspecProperties must be supplied explicitly.
+       Set it in a BeforePack target, not a plain PropertyGroup, because $(PackageVersion) isn't
+       resolved yet at ordinary property-evaluation time (it's computed from
+       VersionPrefix+VersionSuffix by NuGet's own targets during the pack pipeline). -->
+  <Target Name="SetNuspecVersionToken" BeforeTargets="GenerateNuspec">
+    <PropertyGroup>
+      <NuspecProperties>version=$(PackageVersion)</NuspecProperties>
+    </PropertyGroup>
+  </Target>
+
+</Project>
