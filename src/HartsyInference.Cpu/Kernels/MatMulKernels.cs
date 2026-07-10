@@ -105,13 +105,21 @@ public static class MatMulKernels
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void LinearTransB(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
-        RequireF32(output, input, weight, bias, nameof(LinearTransB));
-        int N = (int)weight.Shape[0]; // outDim
-        int K = (int)weight.Shape[1]; // inDim
+        // Tolerate a non-F32 weight by casting it up for the call (fp16→f32 is exact). The MusicGen/AudioGen
+        // decoder + T5 now keep their big projection weights in native fp16 to halve host RAM; the GPU GEMM casts
+        // them itself, and on CPU we cast here so those models still run on the F32-only CPU kernels. output/input/
+        // bias must already be F32.
+        Tensor? weightF32 = weight.DType != DType.F32 ? weight.CastTo(DType.F32) : null;
+        Tensor w = weightF32 ?? weight;
+        try
+        {
+        RequireF32(output, input, w, bias, nameof(LinearTransB));
+        int N = (int)w.Shape[0]; // outDim
+        int K = (int)w.Shape[1]; // inDim
         int M = (int)(input.ElementCount / K); // batch*seqLen
 
         float* pIn = (float*)input.DataPointer;
-        float* pW = (float*)weight.DataPointer;
+        float* pW = (float*)w.DataPointer;
         float* pOut = (float*)output.DataPointer;
 
         // Zero the output buffer
@@ -187,6 +195,11 @@ public static class MatMulKernels
                     pOut[rowOffset + n] += bPtr[n];
                 }
             }
+        }
+        }
+        finally
+        {
+            weightF32?.Dispose();
         }
     }
 

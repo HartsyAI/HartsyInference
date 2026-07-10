@@ -53,7 +53,8 @@ public sealed record MusicGenConfig
     public static MusicGenConfig Small => new() { Hidden = 1_024, NumLayers = 24, NumHeads = 16 };
     public static MusicGenConfig Medium => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24 };
     public static MusicGenConfig Large => new() { Hidden = 2_048, NumLayers = 48, NumHeads = 32 };
-    public static MusicGenConfig AudioGen => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24, CodecSampleRate = 16_000 };
+    /// <summary>AudioGen-medium: t5-large text conditioner (dim 1024, not t5-base 768) + 16 kHz EnCodec.</summary>
+    public static MusicGenConfig AudioGen => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24, TextDim = 1_024, CodecSampleRate = 16_000 };
 
     /// <summary>Melody-conditioned medium variant (text + chroma conditioning).</summary>
     public static MusicGenConfig Melody => new() { Hidden = 1_536, NumLayers = 48, NumHeads = 24 };

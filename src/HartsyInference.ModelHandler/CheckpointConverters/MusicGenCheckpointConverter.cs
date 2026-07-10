@@ -22,7 +22,7 @@ namespace HartsyInference.ModelHandler.CheckpointConverters;
 /// <c>Conv1d</c>). Weight-norm pairs stay RAW (no fusion) — <c>SeaNetEncoder</c>/<c>SeaNetDecoder</c> fuse them via
 /// <c>WeightNormFusion</c> at <c>LoadWeights</c> time, unlike the ACE-Step vocoder path which fuses in the converter.
 /// Meta-named dumps and the EnCodec embedded in a combined MusicGen file (<c>audio_encoder.*</c>) also load.</para></summary>
-public sealed class MusicGenCheckpointConverter
+public sealed unsafe class MusicGenCheckpointConverter
 {
     /// <summary>Pure decoder key mapping (testable without files). Returns <c>null</c> for keys the decoder never
     /// consumes (T5 text encoder, embedded EnCodec, sinusoidal position buffer).</summary>
@@ -95,9 +95,55 @@ public sealed class MusicGenCheckpointConverter
         return (MapTextEncoderWeights(raw, castToF32), loader);
     }
 
+    // ── One-entry load-once cache (combined-file dedup) ──────────────────────────────────────────────────────
+    // The combined MusicGen small/medium checkpoint holds decoder + EnCodec + T5 in ONE file, and both AudioLab's
+    // MusicModels loader and the CLI MusicHandler call LoadDecoderAny/LoadEnCodecAny/LoadTextEncoderAny back-to-back
+    // on that same path. Without dedup each call re-opened and re-parsed the whole file — 3× the parsed-tensor host
+    // RAM (which OOM-killed the server on medium) and 3× the load time. This cache parses a path once and shares the
+    // parsed dict + one underlying loader across those calls; the loader is reference-counted and disposed exactly
+    // once, when the last handle returned to a caller is disposed. Only the LAST path is remembered — a different
+    // path (the AudioCraft 3-different-files branch) replaces it, and a full release clears it, so nothing leaks.
+    private static readonly object _cacheLock = new();
+    private static string? _cachedPath;
+    private static Dictionary<string, Tensor>? _cachedRaw;
+    private static RefCountedLoader? _cachedLoader;
+
     /// <summary>Reads every tensor from a checkpoint file, choosing the reader by extension: <c>.safetensors</c> →
-    /// <see cref="SafeTensorsLoader"/>, otherwise (<c>.bin</c>/<c>.pt</c>/<c>.pth</c>) → <see cref="PytorchPickleLoader"/>.</summary>
+    /// <see cref="SafeTensorsLoader"/>, otherwise (<c>.bin</c>/<c>.pt</c>/<c>.pth</c>) → <see cref="PytorchPickleLoader"/>.
+    /// Parses the file once per path across the back-to-back decoder/EnCodec/T5 calls (see the cache above); each
+    /// returned loader is an independent handle over one shared, reference-counted underlying loader.</summary>
     private static (Dictionary<string, Tensor> Raw, IDisposable Loader) LoadAny(string path)
+    {
+        lock (_cacheLock)
+        {
+            if (_cachedLoader is not null && _cachedRaw is not null && _cachedPath == path)
+            {
+                _cachedLoader.AddRef();
+                return (_cachedRaw, new Handle(_cachedLoader));
+            }
+        }
+        // Cache miss: parse the file once, outside the lock (parsing is I/O + allocation heavy).
+        (Dictionary<string, Tensor> raw, IDisposable inner) = ReadRaw(path);
+        lock (_cacheLock)
+        {
+            // A concurrent load may have published the same path while we parsed — prefer the cached copy, drop ours.
+            if (_cachedLoader is not null && _cachedRaw is not null && _cachedPath == path)
+            {
+                inner.Dispose();
+                _cachedLoader.AddRef();
+                return (_cachedRaw, new Handle(_cachedLoader));
+            }
+            RefCountedLoader shared = new(inner);
+            shared.AddRef();
+            _cachedPath = path;
+            _cachedRaw = raw;
+            _cachedLoader = shared;
+            return (raw, new Handle(shared));
+        }
+    }
+
+    /// <summary>Extension-dispatched raw read (no caching) backing <see cref="LoadAny"/>.</summary>
+    private static (Dictionary<string, Tensor> Raw, IDisposable Loader) ReadRaw(string path)
     {
         if (path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
         {
@@ -110,16 +156,187 @@ public sealed class MusicGenCheckpointConverter
         return (pt.GetAllTensors(), pt);
     }
 
+    /// <summary>Wraps the one underlying loader shared by the combined-file consumers; the underlying loader is
+    /// disposed exactly once, when the reference count (one per live <see cref="Handle"/>) reaches zero. All
+    /// refcount mutations run under <see cref="_cacheLock"/>.</summary>
+    private sealed class RefCountedLoader(IDisposable inner)
+    {
+        private readonly IDisposable _inner = inner;
+        private int _refs;
+        public void AddRef() => _refs++;
+        /// <summary>Drops one reference; returns true when this call freed the underlying loader.</summary>
+        public bool Release()
+        {
+            if (--_refs > 0) return false;
+            _inner.Dispose();
+            return true;
+        }
+    }
+
+    /// <summary>Per-consumer disposable over a shared <see cref="RefCountedLoader"/>. Idempotent: disposing more than
+    /// once is a no-op, so a caller that hands the same handle to several owners can't over-release.</summary>
+    private sealed class Handle(RefCountedLoader shared) : IDisposable
+    {
+        private RefCountedLoader? _shared = shared;
+        public void Dispose()
+        {
+            RefCountedLoader? s = _shared;
+            if (s is null) return;
+            _shared = null;
+            lock (_cacheLock)
+            {
+                // If this was the last reference and the cache still points at it, clear the (now-stale) entry.
+                if (s.Release() && ReferenceEquals(_cachedLoader, s))
+                {
+                    _cachedPath = null;
+                    _cachedRaw = null;
+                    _cachedLoader = null;
+                }
+            }
+        }
+    }
+
+    /// <summary>True for the big 2-D projection weights that the MusicGen decoder / T5 encoder consume ONLY via
+    /// <c>backend.Linear</c> (q/k/v/out projections, FFN fc1/fc2 &amp; T5 wi/wo, the K <c>lm_heads</c>, and
+    /// <c>enc_to_dec_proj</c>). These never touch host pointer-math, and the GPU GEMM casts a non-F32 weight itself,
+    /// so we keep them in their native (fp16) checkpoint dtype even when <paramref name="castToF32"/> is requested —
+    /// F32-upconverting them at load doubles host RAM and is what OOM'd AudioGen. Embeddings, norms, biases, the T5
+    /// relative-position table, and the EnCodec convs/codebooks are NOT matched here: they are read by host math and
+    /// still honor <c>castToF32</c> (and their own <c>LoadWeights</c> re-<c>EnsureF32</c>s the host-touched ones).</summary>
+    public static bool IsGpuMatmulWeight(string mappedKey)
+    {
+        if (mappedKey.EndsWith(".q_proj.weight", StringComparison.Ordinal) ||
+            mappedKey.EndsWith(".k_proj.weight", StringComparison.Ordinal) ||
+            mappedKey.EndsWith(".v_proj.weight", StringComparison.Ordinal) ||
+            mappedKey.EndsWith(".out_proj.weight", StringComparison.Ordinal) ||
+            mappedKey.EndsWith(".fc1.weight", StringComparison.Ordinal) ||
+            mappedKey.EndsWith(".fc2.weight", StringComparison.Ordinal) ||
+            mappedKey == "enc_to_dec_proj.weight" ||
+            (mappedKey.StartsWith("lm_heads.", StringComparison.Ordinal) && mappedKey.EndsWith(".weight", StringComparison.Ordinal)))
+            return true;
+        // T5 encoder (MusicGen text tower): self-attention q/k/v/o + gated/non-gated FFN wi*/wo.
+        if (mappedKey.Contains(".SelfAttention.", StringComparison.Ordinal) &&
+            (mappedKey.EndsWith(".q.weight", StringComparison.Ordinal) || mappedKey.EndsWith(".k.weight", StringComparison.Ordinal) ||
+             mappedKey.EndsWith(".v.weight", StringComparison.Ordinal) || mappedKey.EndsWith(".o.weight", StringComparison.Ordinal)))
+            return true;
+        if (mappedKey.Contains(".DenseReluDense.", StringComparison.Ordinal) &&
+            (mappedKey.EndsWith(".wi.weight", StringComparison.Ordinal) || mappedKey.EndsWith(".wi_0.weight", StringComparison.Ordinal) ||
+             mappedKey.EndsWith(".wi_1.weight", StringComparison.Ordinal) || mappedKey.EndsWith(".wo.weight", StringComparison.Ordinal)))
+            return true;
+        return false;
+    }
+
+    /// <summary>Honors <paramref name="castToF32"/> EXCEPT for the big <see cref="IsGpuMatmulWeight"/> projections,
+    /// which stay in their native (fp16) checkpoint dtype to halve host RAM — the fix that lets AudioGen's F32 load
+    /// fit. These weights are consumed only by <c>backend.Linear</c>, whose cuBLAS GEMM upconverts an fp16 weight and
+    /// writes an F32 output tensor, so no F16 activation ever reaches a host/elementwise op. (An earlier
+    /// "F16 reached T5's ReLU" crash was actually a stale-PTX CUDA→Vulkan fallback, not this path.)</summary>
+    private static Tensor MaybeCastKeepMatmulNative(string mappedKey, Tensor value, bool castToF32) =>
+        CodecKeyUtils.MaybeCast(value, castToF32 && !IsGpuMatmulWeight(mappedKey));
+
     /// <summary>Applies <see cref="MapDecoderKey"/> across a raw name→tensor dictionary (any source format).</summary>
     public static Dictionary<string, Tensor> MapDecoderWeights(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
     {
+        if (IsAudioCraftDecoder(raw)) return ConvertAudioCraftDecoder(raw, castToF32);
         Dictionary<string, Tensor> weights = new();
         foreach ((string key, Tensor value) in raw)
         {
             string? mapped = MapDecoderKey(key);
-            if (mapped is not null) weights[mapped] = CodecKeyUtils.MaybeCast(value, castToF32);
+            if (mapped is not null) weights[mapped] = MaybeCastKeepMatmulNative(mapped, value, castToF32);
         }
         return weights;
+    }
+
+    /// <summary>True when <paramref name="raw"/> is a Meta AudioCraft single-file LM dump (AudioGen / MusicGen-large),
+    /// keyed by <c>emb.k.weight</c> + <c>transformer.layers.i.*</c> rather than HF <c>model.decoder.*</c> names.</summary>
+    public static bool IsAudioCraftDecoder(IReadOnlyDictionary<string, Tensor> raw) =>
+        raw.ContainsKey("emb.0.weight") || raw.ContainsKey("transformer.layers.0.self_attn.in_proj_weight");
+
+    /// <summary>Remaps a Meta AudioCraft LM dump to the HF <c>MusicgenForCausalLM</c> names the engine
+    /// <c>MusicGenDecoder.LoadWeights(prefix:"model.decoder")</c> consumes. The fused
+    /// <c>self_attn/cross_attention.in_proj_weight</c> <c>[3d,d]</c> is split into q/k/v <c>[d,d]</c> row-blocks
+    /// (Q, K, V order — matching torch <c>nn.MultiheadAttention</c> and HF's <c>convert_musicgen_transformers.py</c>).</summary>
+    public static Dictionary<string, Tensor> ConvertAudioCraftDecoder(IReadOnlyDictionary<string, Tensor> raw, bool castToF32 = false)
+    {
+        Dictionary<string, Tensor> o = new(raw.Count + 128);
+        foreach ((string key, Tensor value) in raw)
+        {
+            if (key.StartsWith("transformer.layers.", StringComparison.Ordinal))
+            {
+                if (key.EndsWith(".self_attn.in_proj_weight", StringComparison.Ordinal))
+                { SplitInProj(value, LayerModulePrefix(key, "self_attn"), o); continue; }
+                if (key.EndsWith(".cross_attention.in_proj_weight", StringComparison.Ordinal))
+                { SplitInProj(value, LayerModulePrefix(key, "encoder_attn"), o); continue; }
+            }
+            string? mapped = MapAudioCraftDecoderKey(key);
+            if (mapped is not null) o[mapped] = MaybeCastKeepMatmulNative(mapped, value, castToF32);
+        }
+        return o;
+    }
+
+    /// <summary>Pure AudioCraft → HF decoder key mapping (testable without files). Returns <c>null</c> for the fused
+    /// <c>in_proj_weight</c> keys (split separately by <see cref="ConvertAudioCraftDecoder"/>) and any key the decoder
+    /// never consumes (optional <c>in_proj_bias</c>, stray metadata).</summary>
+    public static string? MapAudioCraftDecoderKey(string key)
+    {
+        if (key.StartsWith("emb.", StringComparison.Ordinal) && key.EndsWith(".weight", StringComparison.Ordinal))
+            return "model.decoder.embed_tokens." + key["emb.".Length..];
+        if (key.StartsWith("linears.", StringComparison.Ordinal) && key.EndsWith(".weight", StringComparison.Ordinal))
+            return "lm_heads." + key["linears.".Length..];
+        if (key == "out_norm.weight") return "model.decoder.layer_norm.weight";
+        if (key == "out_norm.bias") return "model.decoder.layer_norm.bias";
+        const string op = "condition_provider.conditioners.description.output_proj.";
+        if (key.StartsWith(op, StringComparison.Ordinal)) return "enc_to_dec_proj." + key[op.Length..];
+        if (key.StartsWith("transformer.layers.", StringComparison.Ordinal))
+        {
+            // Fused qkv is split by the caller; the out_proj / norms / FFN map 1:1.
+            if (key.EndsWith(".self_attn.in_proj_weight", StringComparison.Ordinal) ||
+                key.EndsWith(".cross_attention.in_proj_weight", StringComparison.Ordinal))
+                return null;
+            string s = "model.decoder." + key["transformer.".Length..];
+            s = s.Replace(".cross_attention.", ".encoder_attn.", StringComparison.Ordinal);
+            s = s.Replace(".norm_cross.", ".encoder_attn_layer_norm.", StringComparison.Ordinal);
+            s = s.Replace(".norm1.", ".self_attn_layer_norm.", StringComparison.Ordinal);
+            s = s.Replace(".norm2.", ".final_layer_norm.", StringComparison.Ordinal);
+            s = s.Replace(".linear1.", ".fc1.", StringComparison.Ordinal);
+            s = s.Replace(".linear2.", ".fc2.", StringComparison.Ordinal);
+            return s;
+        }
+        return null;
+    }
+
+    /// <summary>Builds <c>model.decoder.layers.{i}.{hfModule}</c> from a <c>transformer.layers.{i}.*</c> key.</summary>
+    private static string LayerModulePrefix(string key, string hfModule)
+    {
+        int start = "transformer.layers.".Length;
+        int dot = key.IndexOf('.', start);
+        string idx = key[start..dot];
+        return $"model.decoder.layers.{idx}.{hfModule}";
+    }
+
+    /// <summary>Splits a fused <c>in_proj_weight</c> <c>[3d,d]</c> into <c>{modulePrefix}.{q,k,v}_proj.weight</c>
+    /// <c>[d,d]</c> row-blocks (Q, K, V order).</summary>
+    private static void SplitInProj(Tensor fused, string modulePrefix, Dictionary<string, Tensor> o)
+    {
+        // The q/k/v projections are big backend.Linear-only weights (IsGpuMatmulWeight) — keep them native fp16
+        // to save host RAM, matching the non-fused decoder/T5 path.
+        int h = (int)fused.Shape[0] / 3;
+        o[$"{modulePrefix}.q_proj.weight"] = RowSlice(fused, 0, h);
+        o[$"{modulePrefix}.k_proj.weight"] = RowSlice(fused, h, h);
+        o[$"{modulePrefix}.v_proj.weight"] = RowSlice(fused, 2 * h, h);
+    }
+
+    /// <summary>Copies rows <c>[startRow, startRow+numRows)</c> of <paramref name="src"/> into a new owned tensor
+    /// (same dtype). A "row" is the product of all dims after dim-0.</summary>
+    private static Tensor RowSlice(Tensor src, int startRow, int numRows)
+    {
+        long cols = src.Shape.Rank == 1 ? 1 : src.ElementCount / src.Shape[0];
+        int esz = src.DType.SizeInBytes;
+        long rowBytes = cols * esz;
+        Tensor dst = new(new TensorShape(numRows, cols), src.DType);
+        byte* sp = (byte*)src.DataPointer + startRow * rowBytes;
+        Buffer.MemoryCopy(sp, (void*)dst.DataPointer, numRows * rowBytes, numRows * rowBytes);
+        return dst;
     }
 
     /// <summary>Strips the combined <c>audio_encoder.</c> envelope (if present) then remaps EnCodec HF naming to
@@ -147,7 +364,7 @@ public sealed class MusicGenCheckpointConverter
         {
             if (combined && !key.StartsWith("text_encoder.", StringComparison.Ordinal)) continue;
             string name = combined ? key["text_encoder.".Length..] : key;
-            weights[name] = CodecKeyUtils.MaybeCast(value, castToF32);
+            weights[name] = MaybeCastKeepMatmulNative(name, value, castToF32);
         }
         return weights;
     }

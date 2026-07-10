@@ -37,15 +37,19 @@ public sealed unsafe class MusicGenDecoder : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "model.decoder")
     {
         string p = prefix.Length == 0 ? "" : prefix + ".";
+        // Codebook embeddings are read by host pointer-math (EmbedFrame/EmbedFrames index into DataPointer), so they
+        // MUST be F32. enc_to_dec_proj + the K lm_heads are consumed only via backend.Linear (ProjectText/HeadLogits),
+        // which casts a non-F32 weight on the GPU — keep them in native (fp16) dtype to save host RAM. Output norm +
+        // enc_to_dec bias stay F32 (tiny / precision-sensitive).
         for (int i = 0; i < _cfg.NumCodebooks; i++)
             _codebookEmbed[i] = WhisperOps.EnsureF32(w[$"{p}embed_tokens.{i}.weight"]);
-        _encToDecW = WhisperOps.EnsureF32(w["enc_to_dec_proj.weight"]);
+        _encToDecW = w["enc_to_dec_proj.weight"];
         _encToDecB = w.TryGetValue("enc_to_dec_proj.bias", out Tensor? edb) ? WhisperOps.EnsureF32(edb) : null;
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"{p}layers.{i}");
         _lnOutG = WhisperOps.EnsureF32(w[$"{p}layer_norm.weight"]);
         _lnOutB = WhisperOps.EnsureF32(w[$"{p}layer_norm.bias"]);
         for (int i = 0; i < _cfg.NumCodebooks; i++)
-            _heads[i] = WhisperOps.EnsureF32(w[$"lm_heads.{i}.weight"]);
+            _heads[i] = w[$"lm_heads.{i}.weight"];
     }
 
     /// <summary>Projects raw T5 states <c>[1, T_text, textDim]</c> to the decoder's cross-attn space
@@ -121,7 +125,7 @@ public sealed unsafe class MusicGenDecoder : IDisposable
     /// never per step). For use with <see cref="Forward"/> (prefill) + <see cref="ForwardStep"/>.</summary>
     public MusicGenKvCache CreateCache(IBackend backend, Tensor cross, int capacity)
     {
-        MusicGenKvCache cache = new(_cfg.NumLayers, capacity, _cfg.Hidden);
+        MusicGenKvCache cache = new(_cfg.NumLayers, _cfg.NumHeads, capacity, _cfg.HeadDim);
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].PrimeCross(backend, cross, cache.Layers[i]);
         cache.CrossLength = (int)cross.Shape[1];
         return cache;

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.IO.MemoryMappedFiles;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelHandler.PyTorch;
@@ -88,16 +89,42 @@ public sealed class PytorchPickleLoader : IDisposable
     /// single read at ~2 GB, which this format never exceeds in practice).</summary>
     private unsafe void LoadLegacy(string filePath, bool recursiveFlatten)
     {
-        byte[] all = File.ReadAllBytes(filePath);
+        // Memory-map instead of File.ReadAllBytes: a legacy T5 encoder (e.g. t5-large's 2.9 GB pytorch_model.bin)
+        // exceeds the 2 GB managed-array cap ReadAllBytes enforces. The mapped pointer has no such limit and the
+        // storage-table walk below needs 64-bit offsets into the multi-GB tail anyway.
+        long length = new FileInfo(filePath).Length;
+        using MemoryMappedFile mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, mapName: null, capacity: 0, MemoryMappedFileAccess.Read);
+        using MemoryMappedViewAccessor acc = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+        byte* pAll = null;
+        acc.SafeMemoryMappedViewHandle.AcquirePointer(ref pAll);
+        try
+        {
+            LoadLegacyCore(pAll, length, recursiveFlatten);
+        }
+        finally
+        {
+            acc.SafeMemoryMappedViewHandle.ReleasePointer();
+        }
+    }
+
+    private unsafe void LoadLegacyCore(byte* pAll, long length, bool recursiveFlatten)
+    {
+        // The five pickle streams (metadata + storage-key list) live at the very start and are small; copy just that
+        // prefix into a managed buffer so the byte[]-based pickle VM can parse them. 256 MB is far beyond any real
+        // checkpoint's metadata yet safely under the 2 GB managed-array cap.
+        int headLen = (int)Math.Min(length, 256L * 1024 * 1024);
+        byte[] head = new byte[headLen];
+        fixed (byte* pHead = head) Buffer.MemoryCopy(pAll, pHead, headLen, headLen);
 
         // Five sequential pickle streams over the SAME buffer; each Run() stops at its '.' opcode and reports the
         // offset just past it, which seeds the next stream.
         int off = 0;
-        off = RunPickle(all, off, out _);                                                   // 1: MAGIC_NUMBER
-        off = RunPickle(all, off, out _);                                                   // 2: PROTOCOL_VERSION
-        off = RunPickle(all, off, out _);                                                   // 3: sys_info
-        off = RunPickle(all, off, out object? root);                                        // 4: state_dict
-        off = RunPickle(all, off, out object? keysObj);                                     // 5: storage-key list
+        off = RunPickle(head, off, out _);                                                  // 1: MAGIC_NUMBER
+        off = RunPickle(head, off, out _);                                                  // 2: PROTOCOL_VERSION
+        off = RunPickle(head, off, out _);                                                  // 3: sys_info
+        off = RunPickle(head, off, out object? root);                                       // 4: state_dict
+        off = RunPickle(head, off, out object? keysObj);                                    // 5: storage-key list
+        if (off > headLen) throw new InvalidOperationException("Legacy checkpoint metadata exceeds the 256 MB header window.");
 
         Dictionary<string, PickleTensor> metas = [];
         if (recursiveFlatten)
@@ -124,14 +151,14 @@ public sealed class PytorchPickleLoader : IDisposable
         foreach (object? ko in keyList)
         {
             string key = ko as string ?? throw new InvalidOperationException("Legacy storage key is not a string.");
-            if (p + 8 > all.LongLength) throw new EndOfStreamException("Truncated legacy storage table.");
-            long numel = BitConverter.ToInt64(all, checked((int)p));
+            if (p + 8 > length) throw new EndOfStreamException("Truncated legacy storage table.");
+            long numel = *(long*)(pAll + p);
             p += 8;
             keyDataOffset[key] = p;
             if (!keyDType.TryGetValue(key, out DType dt))
                 throw new InvalidOperationException($"Legacy storage '{key}' is unreferenced (unknown element size); cannot advance.");
             p += numel * dt.SizeInBytes;
-            if (p > all.LongLength) throw new EndOfStreamException($"Legacy storage '{key}' runs past end of file.");
+            if (p > length) throw new EndOfStreamException($"Legacy storage '{key}' runs past end of file.");
         }
 
         Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
@@ -141,9 +168,8 @@ public sealed class PytorchPickleLoader : IDisposable
             Tensor t = new(shape, meta.Storage.DType);
             long byteCount = shape.ElementCount * meta.Storage.DType.SizeInBytes;
             long src = keyDataOffset[meta.Storage.Key] + meta.Offset * meta.Storage.DType.SizeInBytes; // storage_offset
-            if (src + byteCount > all.LongLength) throw new EndOfStreamException($"Tensor '{name}' storage out of range.");
-            fixed (byte* pAll = all)
-                Buffer.MemoryCopy(pAll + src, (byte*)t.DataPointer, byteCount, byteCount);
+            if (src + byteCount > length) throw new EndOfStreamException($"Tensor '{name}' storage out of range.");
+            Buffer.MemoryCopy(pAll + src, (byte*)t.DataPointer, byteCount, byteCount);
             _tensors[name] = t;
             descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = shape };
         }

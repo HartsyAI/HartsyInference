@@ -67,12 +67,16 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         // The prediction of row `step` conditions on rows [0..step-1] only; the current row is never pre-fed.
         int[] prev = new int[k];
         for (int c = 0; c < k; c++) prev[c] = _cfg.SpecialToken;   // BOS frame (decoder_start_token)
+        // TEMP instrumentation: attribute loop time to forward passes vs host sampling.
+        long fwdTicks = 0, sampTicks = 0; Stopwatch _swPhase = new();
         for (int step = 0; step < tTotal; step++)
         {
+            _swPhase.Restart();
             float[][] condLogits = _decoder.ForwardStep(backend, prev, condCache);
             float[][] uncondLogits = uncondCache is not null
                 ? _decoder.ForwardStep(backend, prev, uncondCache)
                 : condLogits;
+            fwdTicks += _swPhase.ElapsedTicks; _swPhase.Restart();
 
             for (int c = 0; c < k; c++)
             {
@@ -95,7 +99,12 @@ public sealed unsafe class MusicGenPipeline : IDisposable
 
             // The delay-masked frame just produced becomes the next step's input.
             for (int c = 0; c < k; c++) prev[c] = delayed[step, c];
+            sampTicks += _swPhase.ElapsedTicks;
         }
+        Logs.Info($"MusicGen decode phases: fwd={fwdTicks * 1000.0 / Stopwatch.Frequency:F0}ms sample={sampTicks * 1000.0 / Stopwatch.Frequency:F0}ms over {tTotal} steps ({fwdTicks * 1000.0 / Stopwatch.Frequency / tTotal:F2}ms/step fwd)");
+
+        condCache.Dispose();
+        uncondCache?.Dispose();
 
         int[,] real = MusicGenDelay.Revert(delayed, _cfg.DelayPattern, tReal);
 

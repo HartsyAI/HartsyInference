@@ -86,6 +86,22 @@ public sealed record T5TextEncoderConfig
         // UsePerLayerPositionBias stays false: T5 v1.0 learns the bias in block 0 and shares it.
     };
 
+    /// <summary>t5-large encoder preset (`google-t5/t5-large`) — AudioGen's conditioning encoder (NOT t5-base;
+    /// AudioGen's <c>enc_to_dec_proj</c> input is 1024). 24 layers, hidden 1024, 16 heads. Same T5 v1.0 family
+    /// as <see cref="T5Base"/> (shared block-0 position bias, ReLU FFN, no attention scaling).</summary>
+    public static T5TextEncoderConfig T5Large => new()
+    {
+        DModel = 1024,
+        DFf = 4096,
+        DKv = 64,
+        NumHeads = 16,
+        NumLayers = 24,
+        VocabSize = 32128,
+        GatedFeedForward = false,
+        UseReluActivation = true,
+        AttentionScale = 1.0f,
+    };
+
     /// <summary>Pile-T5-XL (UMT5) encoder preset for AuraFlow text encoding (`EleutherAI/pile-t5-xl`).
     /// <c>d_model = 2048</c> matches AuraFlow's <c>joint_attention_dim = 2048</c>. UMT5 differs from
     /// T5 v1.1 in TWO ways for the encoder path: (1) the SentencePiece vocabulary (different token IDs

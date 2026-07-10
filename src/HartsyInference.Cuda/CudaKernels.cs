@@ -236,6 +236,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ6KF32;
     private readonly CudaModule _mulMatVecQ8_0Module;
     private readonly nint _mulMatVecQ8_0F32;
+    private readonly CudaModule _mulMatVecQ5_0Module;
+    private readonly nint _mulMatVecQ5_0F32;
     private readonly CudaModule _quantActQ8_1Module;
     private readonly nint _quantActQ8_1F32;
     private readonly CudaModule _mulMatVecQ4KQ8_1Module;
@@ -484,6 +486,8 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ6KF32 = _mulMatVecQ6KModule.GetFunction("mul_mat_vec_q6k_f32");
         _mulMatVecQ8_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q8_0_f32.ptx"));
         _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
+        _mulMatVecQ5_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5_0_f32.ptx"));
+        _mulMatVecQ5_0F32 = _mulMatVecQ5_0Module.GetFunction("mul_mat_vec_q5_0_f32");
         _quantActQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "quantize_activation_q8_1_f32.ptx"));
         _quantActQ8_1F32 = _quantActQ8_1Module.GetFunction("quantize_activation_q8_1_f32");
         _mulMatVecQ4KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4k_q8_1.ptx"));
@@ -1395,20 +1399,20 @@ public sealed class CudaKernels : IDisposable
     /// headDim floats). <paramref name="lk"/> is the K/V buffer seq stride; <paramref name="kvLen"/> the valid
     /// key count.</summary>
     public unsafe void LaunchFlashAttention(ulong outPtr, ulong q, ulong k, ulong v,
-        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap, ulong sink, int slidingWindow, ulong alibiSlopes, nint stream)
+        int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap, ulong sink, int slidingWindow, ulong alibiSlopes, nint stream, ulong dPos = 0)
     {
-        ulong outArg = outPtr, qArg = q, kArg = k, vArg = v, sinkArg = sink, alibiArg = alibiSlopes;
+        ulong outArg = outPtr, qArg = q, kArg = k, vArg = v, sinkArg = sink, alibiArg = alibiSlopes, dPosArg = dPos;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
         int causalArg = causal ? 1 : 0, offArg = qOffset, swArg = slidingWindow;
         float scaleArg = scale, softcapArg = softcap;
 
-        void** args = stackalloc void*[19];
+        void** args = stackalloc void*[20];
         args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
         args[4] = &bArg; args[5] = &hqArg; args[6] = &tqArg; args[7] = &dArg;
         args[8] = &hkvArg; args[9] = &lkArg; args[10] = &kvLenArg; args[11] = &grpArg;
         args[12] = &causalArg; args[13] = &offArg; args[14] = &scaleArg; args[15] = &softcapArg;
-        args[16] = &sinkArg; args[17] = &swArg; args[18] = &alibiArg;
+        args[16] = &sinkArg; args[17] = &swArg; args[18] = &alibiArg; args[19] = &dPosArg;
 
         // Block threads = next power of two >= headDim, so the kernel's tree reduction is always power-of-two
         // and non-pow2 head dims (e.g. Phi-3's 96) work; padding threads contribute 0.
@@ -1490,16 +1494,16 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Launches in-place KV-cache append: copies newKv [1,H,tNew,D] into buffer [1,H,maxSeq,D] at offset.</summary>
-    public unsafe void LaunchKvAppend(ulong buffer, ulong newKv, int heads, int maxSeq, int tNew, int headDim, int offset, nint stream)
+    public unsafe void LaunchKvAppend(ulong buffer, ulong newKv, int heads, int maxSeq, int tNew, int headDim, int offset, nint stream, ulong dPos = 0)
     {
-        ulong bufArg = buffer, newArg = newKv;
+        ulong bufArg = buffer, newArg = newKv, dPosArg = dPos;
         uint hArg = (uint)heads, maxArg = (uint)maxSeq, tArg = (uint)tNew, dArg = (uint)headDim, offArg = (uint)offset;
         ulong total = (ulong)heads * (ulong)tNew * (ulong)headDim;
         ulong totalArg = total;
 
-        void** args = stackalloc void*[8];
+        void** args = stackalloc void*[9];
         args[0] = &bufArg; args[1] = &newArg; args[2] = &hArg; args[3] = &maxArg;
-        args[4] = &tArg; args[5] = &dArg; args[6] = &offArg; args[7] = &totalArg;
+        args[4] = &tArg; args[5] = &dArg; args[6] = &offArg; args[7] = &totalArg; args[8] = &dPosArg;
 
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmKvAppendF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
@@ -2091,6 +2095,12 @@ public sealed class CudaKernels : IDisposable
     public void LaunchMulMatVecQ8_0F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecImpl(_mulMatVecQ8_0F32, output, input, weight, bias, N, K, M, stream);
 
+    /// <summary>Fused Q5_0 × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.
+    /// Q5_0 is llama.cpp's fallback quant (in Q4_K_M-style mixed schemes) for any tensor whose K isn't a
+    /// multiple of 256, so without this kernel those tensors silently miss every fused GEMV path.</summary>
+    public void LaunchMulMatVecQ5_0F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ5_0F32, output, input, weight, bias, N, K, M, stream);
+
     /// <summary>Quantizes an F32 activation [M,K] to int8 (Q8_1): xq int8 + per-32-block scale xd + int-sum xs.
     /// One warp per 32-block.</summary>
     public unsafe void LaunchQuantizeActivationQ8_1(ulong xq, ulong xd, ulong xs, ulong x, int M, int K, nint stream)
@@ -2196,6 +2206,7 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ4KModule?.Dispose();
         _mulMatVecQ6KModule?.Dispose();
         _mulMatVecQ8_0Module?.Dispose();
+        _mulMatVecQ5_0Module?.Dispose();
         _quantActQ8_1Module?.Dispose();
         _mulMatVecQ4KQ8_1Module?.Dispose();
     }

@@ -49,6 +49,57 @@ public sealed class AudioGenLoaderTests
     }
 
     [Fact]
+    public void MapDecoderWeights_RemapsAudioCraftDumpToHfNamesAndSplitsFusedQkv()
+    {
+        const int d = 6;
+        Dictionary<string, Tensor> raw = new()
+        {
+            ["emb.0.weight"] = T(9, d),
+            ["linears.0.weight"] = T(8, d),
+            ["out_norm.weight"] = T(d),
+            ["out_norm.bias"] = T(d),
+            ["condition_provider.conditioners.description.output_proj.weight"] = T(d, 4),
+            ["condition_provider.conditioners.description.output_proj.bias"] = T(d),
+            ["transformer.layers.0.self_attn.in_proj_weight"] = T(3 * d, d),
+            ["transformer.layers.0.self_attn.out_proj.weight"] = T(d, d),
+            ["transformer.layers.0.cross_attention.in_proj_weight"] = T(3 * d, d),
+            ["transformer.layers.0.cross_attention.out_proj.weight"] = T(d, d),
+            ["transformer.layers.0.norm1.weight"] = T(d),
+            ["transformer.layers.0.norm_cross.weight"] = T(d),
+            ["transformer.layers.0.norm2.weight"] = T(d),
+            ["transformer.layers.0.linear1.weight"] = T(4 * d, d),
+            ["transformer.layers.0.linear2.weight"] = T(d, 4 * d),
+        };
+        try
+        {
+            Assert.True(MusicGenCheckpointConverter.IsAudioCraftDecoder(raw));
+            Dictionary<string, Tensor> w = MusicGenCheckpointConverter.MapDecoderWeights(raw);
+            Assert.True(w.ContainsKey("model.decoder.embed_tokens.0.weight"));
+            Assert.True(w.ContainsKey("lm_heads.0.weight"));
+            Assert.True(w.ContainsKey("model.decoder.layer_norm.weight"));
+            Assert.True(w.ContainsKey("enc_to_dec_proj.weight"));
+            Assert.True(w.ContainsKey("enc_to_dec_proj.bias"));
+            // Fused [3d,d] in_proj split into three [d,d] row-blocks for both self- and cross-attn.
+            foreach (string m in new[] { "self_attn", "encoder_attn" })
+                foreach (string x in new[] { "q", "k", "v" })
+                {
+                    Tensor t = w[$"model.decoder.layers.0.{m}.{x}_proj.weight"];
+                    Assert.Equal(d, (int)t.Shape[0]);
+                    Assert.Equal(d, (int)t.Shape[1]);
+                }
+            Assert.True(w.ContainsKey("model.decoder.layers.0.self_attn.out_proj.weight"));
+            Assert.True(w.ContainsKey("model.decoder.layers.0.encoder_attn.out_proj.weight"));
+            Assert.True(w.ContainsKey("model.decoder.layers.0.self_attn_layer_norm.weight"));
+            Assert.True(w.ContainsKey("model.decoder.layers.0.encoder_attn_layer_norm.weight"));
+            Assert.True(w.ContainsKey("model.decoder.layers.0.final_layer_norm.weight"));
+            Assert.True(w.ContainsKey("model.decoder.layers.0.fc1.weight"));
+            Assert.True(w.ContainsKey("model.decoder.layers.0.fc2.weight"));
+            Assert.DoesNotContain(w.Keys, k => k.Contains("in_proj_weight") || k.Contains("transformer."));
+        }
+        finally { foreach (Tensor t in raw.Values) t.Dispose(); }
+    }
+
+    [Fact]
     public void LoadDecoderAny_ReadsPytorchBin()
     {
         // Set HARTSYINFERENCE_AUDIOGEN_BIN to a torch.save'd checkpoint (see tests/python-reference) to run.

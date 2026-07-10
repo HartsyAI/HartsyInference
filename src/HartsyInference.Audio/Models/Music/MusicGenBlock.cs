@@ -26,24 +26,29 @@ public sealed unsafe class MusicGenBlock : IDisposable
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
+        // The q/k/v/o projections and the FFN fc1/fc2 are the bulk of the decoder's weight mass. They are consumed
+        // ONLY via backend.Linear (WhisperOps.ProjectLinear), which casts a non-F32 weight to the GEMM dtype on the
+        // GPU — so we keep them in their native checkpoint dtype (fp16) instead of upconverting to F32 here. That
+        // halves their host-RAM footprint (the AudioGen load OOM). Norm gains/biases + the small FFN biases stay
+        // F32: they're tiny, precision-sensitive, and backend.LayerNorm reads the F32 gains directly.
         _selfLnW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn_layer_norm.weight"]);
         _selfLnB = WhisperOps.EnsureF32(w[$"{prefix}.self_attn_layer_norm.bias"]);
-        _selfQW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.q_proj.weight"]);
-        _selfKW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.k_proj.weight"]);
-        _selfVW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.v_proj.weight"]);
-        _selfOW = WhisperOps.EnsureF32(w[$"{prefix}.self_attn.out_proj.weight"]);
+        _selfQW = w[$"{prefix}.self_attn.q_proj.weight"];
+        _selfKW = w[$"{prefix}.self_attn.k_proj.weight"];
+        _selfVW = w[$"{prefix}.self_attn.v_proj.weight"];
+        _selfOW = w[$"{prefix}.self_attn.out_proj.weight"];
         _crossLnW = WhisperOps.EnsureF32(w[$"{prefix}.encoder_attn_layer_norm.weight"]);
         _crossLnB = WhisperOps.EnsureF32(w[$"{prefix}.encoder_attn_layer_norm.bias"]);
-        _crossQW = WhisperOps.EnsureF32(w[$"{prefix}.encoder_attn.q_proj.weight"]);
-        _crossKW = WhisperOps.EnsureF32(w[$"{prefix}.encoder_attn.k_proj.weight"]);
-        _crossVW = WhisperOps.EnsureF32(w[$"{prefix}.encoder_attn.v_proj.weight"]);
-        _crossOW = WhisperOps.EnsureF32(w[$"{prefix}.encoder_attn.out_proj.weight"]);
+        _crossQW = w[$"{prefix}.encoder_attn.q_proj.weight"];
+        _crossKW = w[$"{prefix}.encoder_attn.k_proj.weight"];
+        _crossVW = w[$"{prefix}.encoder_attn.v_proj.weight"];
+        _crossOW = w[$"{prefix}.encoder_attn.out_proj.weight"];
         _finalLnW = WhisperOps.EnsureF32(w[$"{prefix}.final_layer_norm.weight"]);
         _finalLnB = WhisperOps.EnsureF32(w[$"{prefix}.final_layer_norm.bias"]);
         // MusicGen FFN linears are bias-free (the HF checkpoint has no fc1.bias/fc2.bias); load if present.
-        _fc1W = WhisperOps.EnsureF32(w[$"{prefix}.fc1.weight"]);
+        _fc1W = w[$"{prefix}.fc1.weight"];
         _fc1B = w.TryGetValue($"{prefix}.fc1.bias", out Tensor? fc1b) ? WhisperOps.EnsureF32(fc1b) : null;
-        _fc2W = WhisperOps.EnsureF32(w[$"{prefix}.fc2.weight"]);
+        _fc2W = w[$"{prefix}.fc2.weight"];
         _fc2B = w.TryGetValue($"{prefix}.fc2.bias", out Tensor? fc2b) ? WhisperOps.EnsureF32(fc2b) : null;
     }
 
@@ -70,17 +75,18 @@ public sealed unsafe class MusicGenBlock : IDisposable
         Tensor k = WhisperOps.ProjectLinear(backend, normed, _selfKW!, null, 1, t, d, d);
         Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, null, 1, t, d, d);
         normed.Dispose();
-        // Prefill capture: stash the prompt's self-attn K/V rows so decoding can continue via ForwardStep.
-        if (cacheOut is not null)
-        {
-            new ReadOnlySpan<float>((void*)k.DataPointer, t * d).CopyTo(cacheOut.K.AsSpan(cacheOffset * d));
-            new ReadOnlySpan<float>((void*)v.DataPointer, t * d).CopyTo(cacheOut.V.AsSpan(cacheOffset * d));
-        }
         Tensor qh = new(mhT, DType.F32), kh = new(mhT, DType.F32), vh = new(mhT, DType.F32);
         WhisperOps.ReshapeToMultiHead4D(qh, q, 1, t, nh, hd);
         WhisperOps.ReshapeToMultiHead4D(kh, k, 1, t, nh, hd);
         WhisperOps.ReshapeToMultiHead4D(vh, v, 1, t, nh, hd);
         q.Dispose(); k.Dispose(); v.Dispose();
+        // Prefill capture: append the prompt's head-major self-attn K/V into the device cache (in place, no
+        // host round-trip) so decoding can continue via ForwardStep.
+        if (cacheOut is not null)
+        {
+            backend.KvCacheAppend(cacheOut.K, kh, cacheOffset);
+            backend.KvCacheAppend(cacheOut.V, vh, cacheOffset);
+        }
         Tensor attn = new(mhT, DType.F32);
         backend.ScaledDotProductAttention(attn, qh, kh, vh, causalMask, scale);
         qh.Dispose(); kh.Dispose(); vh.Dispose();
@@ -140,20 +146,27 @@ public sealed unsafe class MusicGenBlock : IDisposable
     {
         int tt = (int)cross.Shape[1];
         int d = _cfg.Hidden;
+        int nh = _cfg.NumHeads;
+        int hd = _cfg.HeadDim;
         Tensor ck = WhisperOps.ProjectLinear(backend, cross, _crossKW!, null, 1, tt, d, d);
         Tensor cv = WhisperOps.ProjectLinear(backend, cross, _crossVW!, null, 1, tt, d, d);
-        cache.CrossK = new float[tt * d];
-        cache.CrossV = new float[tt * d];
-        new ReadOnlySpan<float>((void*)ck.DataPointer, tt * d).CopyTo(cache.CrossK);
-        new ReadOnlySpan<float>((void*)cv.DataPointer, tt * d).CopyTo(cache.CrossV);
+        Tensor ckh = new(new TensorShape(1, nh, tt, hd), DType.F32);
+        Tensor cvh = new(new TensorShape(1, nh, tt, hd), DType.F32);
+        backend.Permute0213(ckh, ck, tt, nh, hd);   // [1,tt,d] → head-major [1,nh,tt,hd]
+        backend.Permute0213(cvh, cv, tt, nh, hd);
         ck.Dispose(); cv.Dispose();
+        cache.CrossK?.Dispose(); cache.CrossV?.Dispose();
+        cache.CrossK = ckh;
+        cache.CrossV = cvh;
     }
 
-    /// <summary>Single-token decode step against the cache: projections run on the backend (weights stay
-    /// device-resident); the 1×L self-attention runs on CPU over the cached prefix (new K/V appended at
-    /// <paramref name="pos"/>, attention covers rows <c>[0, pos]</c> — causal by construction, no mask); the
-    /// 1×T_text cross-attention runs on CPU over the pre-projected text K/V (rows <c>[0, crossLen)</c>).
-    /// Input and output are <c>[1, 1, hidden]</c>.</summary>
+    /// <summary>Single-token decode step against the cache, fully on-device: projections run on the backend;
+    /// the 1×L self-attention appends the new K/V into the device cache at <paramref name="pos"/>
+    /// (<see cref="IBackend.KvCacheAppend"/>, no host copy) then runs <see cref="IBackend.FlashAttention"/> over
+    /// rows <c>[0, pos]</c> (causal, qOffset=pos — no explicit mask); the 1×T_text cross-attention runs
+    /// FlashAttention over the pre-projected device text K/V (rows <c>[0, crossLen)</c>, non-causal). Numerics
+    /// match the previous CPU path (same 1/√headDim scale, same causal prefix). Input/output are
+    /// <c>[1, 1, hidden]</c>.</summary>
     public Tensor ForwardStep(IBackend backend, Tensor x, MusicGenKvCache.MusicGenKvLayer cache, int pos, int crossLen)
     {
         int d = _cfg.Hidden;
@@ -161,34 +174,49 @@ public sealed unsafe class MusicGenBlock : IDisposable
         int hd = _cfg.HeadDim;
         float scale = 1f / MathF.Sqrt(hd);
         TensorShape one = new(1, 1, d);
+        TensorShape mh1 = new(1, nh, 1, hd);
 
-        // --- Self-attention (incremental) ---
+        // --- Self-attention (incremental, device-resident KV) ---
         Tensor normed = new(one, DType.F32);
         backend.LayerNorm(normed, x, _selfLnW!, _selfLnB!, 1e-5f);
         Tensor q = WhisperOps.ProjectLinear(backend, normed, _selfQW!, null, 1, 1, d, d);
         Tensor k = WhisperOps.ProjectLinear(backend, normed, _selfKW!, null, 1, 1, d, d);
         Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, null, 1, 1, d, d);
         normed.Dispose();
-        new ReadOnlySpan<float>((void*)k.DataPointer, d).CopyTo(cache.K.AsSpan(pos * d));
-        new ReadOnlySpan<float>((void*)v.DataPointer, d).CopyTo(cache.V.AsSpan(pos * d));
-        k.Dispose(); v.Dispose();
+        Tensor qh = new(mh1, DType.F32), kh = new(mh1, DType.F32), vh = new(mh1, DType.F32);
+        backend.Permute0213(qh, q, 1, nh, hd);   // [1,1,d] → head-major [1,nh,1,hd]
+        backend.Permute0213(kh, k, 1, nh, hd);
+        backend.Permute0213(vh, v, 1, nh, hd);
+        q.Dispose(); k.Dispose(); v.Dispose();
+        backend.KvCacheAppend(cache.K, kh, pos);   // in-place device append at row `pos`
+        backend.KvCacheAppend(cache.V, vh, pos);
+        kh.Dispose(); vh.Dispose();
+        Tensor attn = new(mh1, DType.F32);
+        backend.FlashAttention(attn, qh, cache.K, cache.V, kvLen: pos + 1, kvGroup: 1, causal: true, qOffset: pos, scale);
+        qh.Dispose();
         Tensor attnFlat = new(one, DType.F32);
-        AttendCpu((float*)q.DataPointer, cache.K, cache.V, pos + 1, (float*)attnFlat.DataPointer, nh, hd, scale);
-        q.Dispose();
+        backend.Permute0213(attnFlat, attn, nh, 1, hd);   // [1,nh,1,hd] → [1,1,d]
+        attn.Dispose();
         Tensor selfProj = WhisperOps.ProjectLinear(backend, attnFlat, _selfOW!, null, 1, 1, d, d);
         attnFlat.Dispose();
         Tensor res1 = new(one, DType.F32);
         backend.Add(res1, x, selfProj);
         selfProj.Dispose();
 
-        // --- Cross-attention (pre-projected text K/V) ---
+        // --- Cross-attention (device-resident pre-projected text K/V) ---
         Tensor normed2 = new(one, DType.F32);
         backend.LayerNorm(normed2, res1, _crossLnW!, _crossLnB!, 1e-5f);
         Tensor cq = WhisperOps.ProjectLinear(backend, normed2, _crossQW!, null, 1, 1, d, d);
         normed2.Dispose();
-        Tensor cattnFlat = new(one, DType.F32);
-        AttendCpu((float*)cq.DataPointer, cache.CrossK, cache.CrossV, crossLen, (float*)cattnFlat.DataPointer, nh, hd, scale);
+        Tensor cqh = new(mh1, DType.F32);
+        backend.Permute0213(cqh, cq, 1, nh, hd);
         cq.Dispose();
+        Tensor cattn = new(mh1, DType.F32);
+        backend.FlashAttention(cattn, cqh, cache.CrossK!, cache.CrossV!, kvLen: crossLen, kvGroup: 1, causal: false, qOffset: 0, scale);
+        cqh.Dispose();
+        Tensor cattnFlat = new(one, DType.F32);
+        backend.Permute0213(cattnFlat, cattn, nh, 1, hd);
+        cattn.Dispose();
         Tensor cproj = WhisperOps.ProjectLinear(backend, cattnFlat, _crossOW!, null, 1, 1, d, d);
         cattnFlat.Dispose();
         Tensor res2 = new(one, DType.F32);
@@ -209,46 +237,6 @@ public sealed unsafe class MusicGenBlock : IDisposable
         backend.Add(outT, res2, fc2);
         res2.Dispose(); fc2.Dispose();
         return outT;
-    }
-
-    /// <summary>Single-query multi-head attention on CPU: <paramref name="q"/> <c>[hidden]</c> against
-    /// token-major K/V rows <c>[len, hidden]</c>, softmax per head, result into <paramref name="outP"/>.</summary>
-    private static void AttendCpu(float* q, float[] kRows, float[] vRows, int len, float* outP, int nh, int hd, float scale)
-    {
-        int h = nh * hd;
-        Span<float> scores = len <= 4096 ? stackalloc float[len] : new float[len];
-        for (int head = 0; head < nh; head++)
-        {
-            int hOff = head * hd;
-            float* qh = q + hOff;
-            // scores = q · K_head over the rows, softmax in place
-            float max = float.NegativeInfinity;
-            for (int l = 0; l < len; l++)
-            {
-                float dot = 0f;
-                int rowOff = l * h + hOff;
-                for (int j = 0; j < hd; j++) dot += qh[j] * kRows[rowOff + j];
-                dot *= scale;
-                scores[l] = dot;
-                if (dot > max) max = dot;
-            }
-            float sum = 0f;
-            for (int l = 0; l < len; l++)
-            {
-                float e = MathF.Exp(scores[l] - max);
-                scores[l] = e;
-                sum += e;
-            }
-            float inv = 1f / sum;
-            float* oh = outP + hOff;
-            for (int j = 0; j < hd; j++) oh[j] = 0f;
-            for (int l = 0; l < len; l++)
-            {
-                float w = scores[l] * inv;
-                int rowOff = l * h + hOff;
-                for (int j = 0; j < hd; j++) oh[j] += w * vRows[rowOff + j];
-            }
-        }
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

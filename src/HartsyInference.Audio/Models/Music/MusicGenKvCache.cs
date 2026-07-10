@@ -1,31 +1,51 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Audio.Models.Music;
 
-/// <summary>Per-layer key/value cache for incremental <see cref="MusicGenDecoder"/> decoding. Self-attn
-/// keys/values are kept on the host in token-major <c>[t, hidden]</c> layout (the pre-multi-head shape the
-/// blocks produce), so the single-token attention runs on CPU over the cached prefix while the projections
-/// stay on the backend — the growing K/V never crosses PCIe. Cross-attn K/V depend only on the text states,
-/// so they are projected once at cache creation (<see cref="MusicGenDecoder.CreateCache"/>) and reused every
-/// step. One <see cref="MusicGenKvLayer"/> per block; <see cref="Length"/> is the shared number of cached
-/// positions (kept in lock-step across layers by the decoder).</summary>
-public sealed class MusicGenKvCache
+/// <summary>Per-layer key/value cache for incremental <see cref="MusicGenDecoder"/> decoding, fully
+/// device-resident so the single-token step never crosses PCIe. Self-attn K/V are appended in place on the
+/// backend (<see cref="HartsyInference.Core.Backends.IBackend.KvCacheAppend"/>) into a fixed head-major
+/// <c>[1, heads, capacity, headDim]</c> buffer, then attended with <see cref="HartsyInference.Core.Backends.IBackend.FlashAttention"/>
+/// over the valid prefix (kvLen told separately) — no host round-trip, no O(n²) concat. Cross-attn K/V depend
+/// only on the text states, so they are projected once at cache creation (<see cref="MusicGenDecoder.CreateCache"/>)
+/// into device tensors and reused every step. One <see cref="MusicGenKvLayer"/> per block; <see cref="Length"/>
+/// is the shared number of cached positions (kept in lock-step across layers by the decoder).</summary>
+public sealed class MusicGenKvCache : IDisposable
 {
-    /// <summary>K/V rows for one block. <c>K</c>/<c>V</c> are <c>[capacity * hidden]</c> flat, row <c>t</c> at
-    /// offset <c>t * hidden</c>; head <c>i</c> of a row is the contiguous slice <c>[i*headDim, (i+1)*headDim)</c>.
-    /// <c>CrossK</c>/<c>CrossV</c> are the once-projected text K/V, <c>[tText * hidden]</c> in the same layout.</summary>
-    public sealed class MusicGenKvLayer(int capacity, int hidden)
+    /// <summary>Device K/V buffers for one block, head-major <c>[1, heads, capacity, headDim]</c>; valid keys
+    /// are the first <see cref="Length"/> positions (FlashAttention is told the count). <c>CrossK</c>/<c>CrossV</c>
+    /// are the once-projected text K/V, head-major <c>[1, heads, crossLen, headDim]</c>.</summary>
+    public sealed class MusicGenKvLayer : IDisposable
     {
-        public readonly float[] K = new float[checked(capacity * hidden)];
-        public readonly float[] V = new float[checked(capacity * hidden)];
-        public float[] CrossK = [];
-        public float[] CrossV = [];
+        public readonly Tensor K;
+        public readonly Tensor V;
+        public Tensor? CrossK;
+        public Tensor? CrossV;
+
+        public MusicGenKvLayer(int numHeads, int capacity, int headDim)
+        {
+            K = new Tensor(new TensorShape(1, numHeads, capacity, headDim), DType.F32);
+            V = new Tensor(new TensorShape(1, numHeads, capacity, headDim), DType.F32);
+        }
+
+        public void Dispose()
+        {
+            K.Dispose();
+            V.Dispose();
+            CrossK?.Dispose();
+            CrossV?.Dispose();
+        }
     }
 
-    public MusicGenKvCache(int numLayers, int capacity, int hidden)
+    private int _disposed;
+
+    public MusicGenKvCache(int numLayers, int numHeads, int capacity, int headDim)
     {
         Capacity = capacity;
-        Hidden = hidden;
+        NumHeads = numHeads;
+        HeadDim = headDim;
         Layers = new MusicGenKvLayer[numLayers];
-        for (int i = 0; i < numLayers; i++) Layers[i] = new MusicGenKvLayer(capacity, hidden);
+        for (int i = 0; i < numLayers; i++) Layers[i] = new MusicGenKvLayer(numHeads, capacity, headDim);
     }
 
     public MusicGenKvLayer[] Layers { get; }
@@ -36,11 +56,19 @@ public sealed class MusicGenKvCache
     /// <summary>Maximum positions the cache can hold (the caller sizes it to the generation length).</summary>
     public int Capacity { get; }
 
-    public int Hidden { get; }
+    public int NumHeads { get; }
 
-    /// <summary>Text-state length (rows in <c>CrossK</c>/<c>CrossV</c>), set at cache creation.</summary>
+    public int HeadDim { get; }
+
+    /// <summary>Text-state length (valid rows in <c>CrossK</c>/<c>CrossV</c>), set at cache creation.</summary>
     public int CrossLength { get; internal set; }
 
     /// <summary>Empties the self-attn cache for a fresh sequence without reallocating (cross K/V stay).</summary>
     public void Reset() => Length = 0;
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        foreach (MusicGenKvLayer l in Layers) l.Dispose();
+    }
 }

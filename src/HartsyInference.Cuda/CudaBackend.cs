@@ -470,6 +470,18 @@ public sealed class CudaBackend : IBackend
                     cachedOutput = true;
                     return;
                 }
+                // Q5_0: llama.cpp's fallback quant (in Q4_K_M-style mixed schemes) for any tensor whose K isn't
+                // a multiple of 256 — very common on odd hidden sizes (e.g. qwen2.5-0.5b's 896). Without this
+                // branch those tensors missed every fused GEMV path and fell back to the ~10-20× slower
+                // dequant-to-F16-then-cuBLAS route (measured: qwen2.5-0.5b decode was ~2.7× slower than its own
+                // Q8_0 quant of the identical model, because nearly every projection is K=896 → Q5_0).
+                if (weight.DType == DType.Q5_0 && K % 32 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ5_0F32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
             }
 
             // For ComfyUI fp8_scaled checkpoints, every FP8 weight has a per-tensor scalar scale.
@@ -3505,7 +3517,9 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pA);
-            GpuTransferHelper.FreeDevice(pB);
+            // a and b can be the same tensor (e.g. an elementwise self-op) — CopyToDevice then returns the same
+            // cached pointer for both, so freeing pB unconditionally double-frees it (CUDA_ERROR_INVALID_VALUE).
+            if (pB != pA) GpuTransferHelper.FreeDevice(pB);
         }
     }
 
@@ -3537,7 +3551,10 @@ public sealed class CudaBackend : IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pA);
-            GpuTransferHelper.FreeDevice(pB);
+            // a and b can be the same tensor (e.g. Nemotron's relu(x)² does Mul(outp, outp, outp)) — CopyToDevice
+            // then returns the same cached pointer for both, so freeing pB unconditionally double-frees it
+            // (CUDA_ERROR_INVALID_VALUE).
+            if (pB != pA) GpuTransferHelper.FreeDevice(pB);
         }
     }
 
