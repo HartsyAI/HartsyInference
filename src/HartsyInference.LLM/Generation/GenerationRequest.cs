@@ -28,4 +28,9 @@ public sealed record GenerationRequest
 
     /// <summary>Extra stop token ids beyond the model's end-of-turn / end-of-text tokens.</summary>
     public IReadOnlyList<int>? StopTokenIds { get; init; }
+
+    /// <summary>Overrides whether CUDA-graph decode is attempted. Null defers to the <c>HARTSY_GRAPH_DECODE</c>
+    /// environment variable. Graph decode still requires <see cref="Sampling"/> to be greedy and the model/backend
+    /// to report eligibility via <c>SupportsGraphDecode</c> — this only controls the opt-in gate itself.</summary>
+    public bool? GraphDecode { get; init; }
 }

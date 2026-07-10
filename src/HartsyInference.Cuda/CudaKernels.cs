@@ -73,6 +73,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmScatterAddWeightedRowsF32;
     private readonly nint _lmArgMaxLastDimF32;
     private readonly nint _lmRopeInterleavedF32;
+    private readonly nint _lmRopeDecodeSplitHalf;
+    private readonly nint _lmRopeDecodeInterleaved;
+    private readonly nint _lmEmbedGatherDecodeF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
     private readonly CudaModule _flashAttnF32SplitModule;
@@ -455,6 +458,9 @@ public sealed class CudaKernels : IDisposable
         _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
         _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
         _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
+        _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
+        _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
+        _lmEmbedGatherDecodeF32 = _lmF32Module.GetFunction("lm_embed_gather_decode_f32");
         _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
         _flashAttnF32SplitModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
@@ -1448,21 +1454,21 @@ public sealed class CudaKernels : IDisposable
     /// its key chunk into the scratch buffers. <paramref name="chunk"/> = ceil(kvLen / splits).</summary>
     public unsafe void LaunchFlashAttentionSplit(ulong partialM, ulong partialL, ulong partialAcc,
         ulong q, ulong k, ulong v, int batch, int hq, int tq, int headDim, int hkv, int lk, int kvLen,
-        int kvGroup, bool causal, int qOffset, float scale, int splits, int chunk, nint stream)
+        int kvGroup, bool causal, int qOffset, float scale, int splits, int chunk, nint stream, ulong dPos = 0)
     {
-        ulong pmArg = partialM, plArg = partialL, paArg = partialAcc, qArg = q, kArg = k, vArg = v;
+        ulong pmArg = partialM, plArg = partialL, paArg = partialAcc, qArg = q, kArg = k, vArg = v, dPosArg = dPos;
         uint bArg = (uint)batch, hqArg = (uint)hq, tqArg = (uint)tq, dArg = (uint)headDim;
         uint hkvArg = (uint)hkv, lkArg = (uint)lk, kvLenArg = (uint)kvLen, grpArg = (uint)kvGroup;
         int causalArg = causal ? 1 : 0, offArg = qOffset;
         float scaleArg = scale;
         uint gArg = (uint)splits, chunkArg = (uint)chunk;
 
-        void** args = stackalloc void*[19];
+        void** args = stackalloc void*[20];
         args[0] = &pmArg; args[1] = &plArg; args[2] = &paArg; args[3] = &qArg; args[4] = &kArg; args[5] = &vArg;
         args[6] = &bArg; args[7] = &hqArg; args[8] = &tqArg; args[9] = &dArg;
         args[10] = &hkvArg; args[11] = &lkArg; args[12] = &kvLenArg; args[13] = &grpArg;
         args[14] = &causalArg; args[15] = &offArg; args[16] = &scaleArg;
-        args[17] = &gArg; args[18] = &chunkArg;
+        args[17] = &gArg; args[18] = &chunkArg; args[19] = &dPosArg;
 
         uint blockThreads = 1;
         while (blockThreads < (uint)headDim) blockThreads <<= 1;
@@ -1628,6 +1634,49 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             _lmRopeInterleavedF32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Graph-capture decode: split-half RoPE on a single decode-step Q/K tensor [1,numHeads,1,headDim],
+    /// reading the rotation row from a precomputed full table via devicePos[1] (qOffset). Grid is fixed
+    /// (position-independent) — same devicePos convention as LaunchKvAppend/LaunchFlashAttention.</summary>
+    public unsafe void LaunchRopeDecodeSplitHalf(ulong x, ulong cosTable, ulong sinTable, int numHeads, int headDim, int rotaryDim, ulong devicePos, nint stream)
+    {
+        ulong xArg = x, cosArg = cosTable, sinArg = sinTable, posArg = devicePos;
+        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim, rotArg = (uint)rotaryDim;
+        void** args = stackalloc void*[7];
+        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg;
+        args[3] = &headsArg; args[4] = &headDimArg; args[5] = &rotArg; args[6] = &posArg;
+        int rdim = rotaryDim == 0 ? headDim : Math.Min(rotaryDim, headDim);
+        long threads = (long)numHeads * (rdim / 2);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmRopeDecodeSplitHalf, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Graph-capture decode: interleaved (GPT-J) RoPE on a single decode-step Q/K tensor, position
+    /// from devicePos[1]. Same table/convention as <see cref="LaunchRopeDecodeSplitHalf"/>.</summary>
+    public unsafe void LaunchRopeDecodeInterleaved(ulong x, ulong cosTable, ulong sinTable, int numHeads, int headDim, ulong devicePos, nint stream)
+    {
+        ulong xArg = x, cosArg = cosTable, sinArg = sinTable, posArg = devicePos;
+        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim;
+        void** args = stackalloc void*[6];
+        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg;
+        args[3] = &headsArg; args[4] = &headDimArg; args[5] = &posArg;
+        long threads = (long)numHeads * (headDim / 2);
+        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmRopeDecodeInterleaved, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Graph-capture decode: gathers one row (the token in <paramref name="tokenId"/>, a persistent
+    /// 1-int device buffer) from a GPU-resident embedding table into <paramref name="output"/> [1,1,hidden].
+    /// Fixed grid — capturable.</summary>
+    public unsafe void LaunchEmbedGatherDecode(ulong output, ulong embedTable, ulong tokenId, int hidden, nint stream)
+    {
+        ulong outArg = output, embArg = embedTable, tokArg = tokenId;
+        uint hiddenArg = (uint)hidden;
+        void** args = stackalloc void*[4];
+        args[0] = &outArg; args[1] = &embArg; args[2] = &tokArg; args[3] = &hiddenArg;
+        uint gridDim = (uint)(((uint)hidden + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmEmbedGatherDecodeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches last-dim slice: out[row,d] = in[row, offset+d], in row stride = inDim.</summary>

@@ -13,7 +13,25 @@ Two bars apply: **Runnable@3060** (fits 12 GB at Q4/Q8, verified coherent e2e on
 > **20-54× slower → 1.94-2.88× off llama.cpp** (Llama-3.2-1B under 2×). Fused quantized GEMV decode
 > kernels (Q4_K/Q6_K/Q8_0) + quantized lm_head + split-K flash-decode attention + vectorized loads.
 > Full record: [LLM_THROUGHPUT_BENCHMARK.md](LLM_THROUGHPUT_BENCHMARK.md) + [LLM_DECODE_PERF_GRIND.md](LLM_DECODE_PERF_GRIND.md).
-> CUDA-graph decode (last lever for small models) foundation verified, full build deferred.
+> **UPDATE (2026-07-10): CUDA-graph decode DONE** for the plain dense GQA/RoPE shape (Llama/Qwen2/Qwen3/Mistral) —
+> Qwen3-0.6B 2.57× faster (1.77× off llama.cpp, was 4.5×), byte-identical output verified. Greedy-only, opt-in
+> `HARTSY_GRAPH_DECODE=1`. Also fixed a missing fused Q5_0 GEMV kernel (odd-hidden-dim models, e.g. qwen2.5-0.5b,
+> were silently using the ~10-20× slower path for most of their weights — 2.5× fix).
+>
+> **Bug sweep (2026-07-10):** a live-API benchmark across all 22 supported GGUF architectures found and fixed:
+> **mamba2/rwkv7/mamba1/rwkv6 were never actually wired** — the classes below were unit-test-verified in
+> isolation but `GgufLanguageModel.Load` routed every architecture through the transformer config path
+> regardless, which divides by `mamba2.attention.head_count` (0 for SSM archs) → instant crash. Now dispatch
+> through a proper `SsmLanguageModel`/`SsmGenerationPipeline`, plus a new incremental per-layer state (was
+> O(n²) full-sequence recompute per decode step, now O(1)/token) and a new RWKV-World byte-trie tokenizer
+> (rwkv6/7 GGUFs have no BPE merges at all). **exaone and granite/granite-MoE both had the wrong RoPE pairing**
+> (Interleaved vs SplitHalf swapped) — wrong pairing is a no-op at position 0, so short/greedy smoke tests
+> (like the granite-MoE entry below) don't catch it; only shows up as sequence length grows. **nemotron** hit a
+> CUDA double-free (`CudaBackend.Mul`'s finally block frees the same device pointer twice when a==b — nemotron's
+> ReLU² activation is the only call site that does `Mul(x,x,x)`). **mllama** crashed on ANY text-only chat
+> request — not an mllama bug at all, a Jinja engine bug (`for x in "someString"` should iterate characters,
+> matching real Jinja2/Python, but threw `Value is not iterable`); mllama's own official chat template scans
+> every message for image parts before checking `content is string`, so it hit this unconditionally.
 
 ## LLM — verified end-to-end (✅, Runnable@3060)
 

@@ -63,6 +63,10 @@ public sealed class ParamState
     public float GetFloat(string key, float fallback) =>
         _values.TryGetValue(key, out string? v) && float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out float f) ? f : fallback;
 
+    /// <summary>Gets a tunable as a bool, falling back when unset or unparseable.</summary>
+    public bool GetBool(string key, bool fallback) =>
+        _values.TryGetValue(key, out string? v) && bool.TryParse(v, out bool b) ? b : fallback;
+
     private void ApplyDefaults(Modality modality)
     {
         _values.Clear();
@@ -81,6 +85,7 @@ public sealed class ParamState
                 _values["temperature"] = "0.7";
                 _values["top-p"] = "0.95";
                 _values["seed"] = "-1";
+                _values["graph-decode"] = "false";
                 break;
             case Modality.Speech:
                 _values["voice"] = "default";

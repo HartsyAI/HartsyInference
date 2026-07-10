@@ -144,15 +144,16 @@ public sealed unsafe class MusicGenBlock : IDisposable
     /// only on the encoder output, so no per-step recompute.</summary>
     public void PrimeCross(IBackend backend, Tensor cross, MusicGenKvCache.MusicGenKvLayer cache)
     {
+        int b = (int)cross.Shape[0];   // 1 (no CFG) or 2 (CFG: [0]=cond text, [1]=null/zeros)
         int tt = (int)cross.Shape[1];
         int d = _cfg.Hidden;
         int nh = _cfg.NumHeads;
         int hd = _cfg.HeadDim;
-        Tensor ck = WhisperOps.ProjectLinear(backend, cross, _crossKW!, null, 1, tt, d, d);
-        Tensor cv = WhisperOps.ProjectLinear(backend, cross, _crossVW!, null, 1, tt, d, d);
-        Tensor ckh = new(new TensorShape(1, nh, tt, hd), DType.F32);
-        Tensor cvh = new(new TensorShape(1, nh, tt, hd), DType.F32);
-        backend.Permute0213(ckh, ck, tt, nh, hd);   // [1,tt,d] → head-major [1,nh,tt,hd]
+        Tensor ck = WhisperOps.ProjectLinear(backend, cross, _crossKW!, null, b, tt, d, d);
+        Tensor cv = WhisperOps.ProjectLinear(backend, cross, _crossVW!, null, b, tt, d, d);
+        Tensor ckh = new(new TensorShape(b, nh, tt, hd), DType.F32);
+        Tensor cvh = new(new TensorShape(b, nh, tt, hd), DType.F32);
+        backend.Permute0213(ckh, ck, tt, nh, hd);   // [b,tt,d] → head-major [b,nh,tt,hd]
         backend.Permute0213(cvh, cv, tt, nh, hd);
         ck.Dispose(); cv.Dispose();
         cache.CrossK?.Dispose(); cache.CrossV?.Dispose();
@@ -167,46 +168,47 @@ public sealed unsafe class MusicGenBlock : IDisposable
     /// FlashAttention over the pre-projected device text K/V (rows <c>[0, crossLen)</c>, non-causal). Numerics
     /// match the previous CPU path (same 1/√headDim scale, same causal prefix). Input/output are
     /// <c>[1, 1, hidden]</c>.</summary>
-    public Tensor ForwardStep(IBackend backend, Tensor x, MusicGenKvCache.MusicGenKvLayer cache, int pos, int crossLen)
+    public Tensor ForwardStep(IBackend backend, Tensor x, MusicGenKvCache.MusicGenKvLayer cache, int pos, int crossLen, ulong devicePos = 0)
     {
+        int b = (int)x.Shape[0];   // 1 (no CFG) or 2 (CFG cond+uncond decoded together)
         int d = _cfg.Hidden;
         int nh = _cfg.NumHeads;
         int hd = _cfg.HeadDim;
         float scale = 1f / MathF.Sqrt(hd);
-        TensorShape one = new(1, 1, d);
-        TensorShape mh1 = new(1, nh, 1, hd);
+        TensorShape one = new(b, 1, d);
+        TensorShape mh1 = new(b, nh, 1, hd);
 
         // --- Self-attention (incremental, device-resident KV) ---
         Tensor normed = new(one, DType.F32);
         backend.LayerNorm(normed, x, _selfLnW!, _selfLnB!, 1e-5f);
-        Tensor q = WhisperOps.ProjectLinear(backend, normed, _selfQW!, null, 1, 1, d, d);
-        Tensor k = WhisperOps.ProjectLinear(backend, normed, _selfKW!, null, 1, 1, d, d);
-        Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, null, 1, 1, d, d);
+        Tensor q = WhisperOps.ProjectLinear(backend, normed, _selfQW!, null, b, 1, d, d);
+        Tensor k = WhisperOps.ProjectLinear(backend, normed, _selfKW!, null, b, 1, d, d);
+        Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, null, b, 1, d, d);
         normed.Dispose();
         Tensor qh = new(mh1, DType.F32), kh = new(mh1, DType.F32), vh = new(mh1, DType.F32);
-        backend.Permute0213(qh, q, 1, nh, hd);   // [1,1,d] → head-major [1,nh,1,hd]
+        backend.Permute0213(qh, q, 1, nh, hd);   // [b,1,d] → head-major [b,nh,1,hd]
         backend.Permute0213(kh, k, 1, nh, hd);
         backend.Permute0213(vh, v, 1, nh, hd);
         q.Dispose(); k.Dispose(); v.Dispose();
-        backend.KvCacheAppend(cache.K, kh, pos);   // in-place device append at row `pos`
-        backend.KvCacheAppend(cache.V, vh, pos);
+        backend.KvCacheAppendDev(cache.K, kh, pos, devicePos);   // in-place device append at row `pos` (device or host)
+        backend.KvCacheAppendDev(cache.V, vh, pos, devicePos);
         kh.Dispose(); vh.Dispose();
         Tensor attn = new(mh1, DType.F32);
-        backend.FlashAttention(attn, qh, cache.K, cache.V, kvLen: pos + 1, kvGroup: 1, causal: true, qOffset: pos, scale);
+        backend.FlashAttentionDev(attn, qh, cache.K, cache.V, kvLen: pos + 1, kvGroup: 1, causal: true, qOffset: pos, scale, devicePos);
         qh.Dispose();
         Tensor attnFlat = new(one, DType.F32);
-        backend.Permute0213(attnFlat, attn, nh, 1, hd);   // [1,nh,1,hd] → [1,1,d]
+        backend.Permute0213(attnFlat, attn, nh, 1, hd);   // [b,nh,1,hd] → [b,1,d]
         attn.Dispose();
-        Tensor selfProj = WhisperOps.ProjectLinear(backend, attnFlat, _selfOW!, null, 1, 1, d, d);
+        Tensor selfProj = WhisperOps.ProjectLinear(backend, attnFlat, _selfOW!, null, b, 1, d, d);
         attnFlat.Dispose();
         Tensor res1 = new(one, DType.F32);
         backend.Add(res1, x, selfProj);
         selfProj.Dispose();
 
-        // --- Cross-attention (device-resident pre-projected text K/V) ---
+        // --- Cross-attention (device-resident pre-projected text K/V; each batch elem attends its own K/V) ---
         Tensor normed2 = new(one, DType.F32);
         backend.LayerNorm(normed2, res1, _crossLnW!, _crossLnB!, 1e-5f);
-        Tensor cq = WhisperOps.ProjectLinear(backend, normed2, _crossQW!, null, 1, 1, d, d);
+        Tensor cq = WhisperOps.ProjectLinear(backend, normed2, _crossQW!, null, b, 1, d, d);
         normed2.Dispose();
         Tensor cqh = new(mh1, DType.F32);
         backend.Permute0213(cqh, cq, 1, nh, hd);
@@ -217,7 +219,7 @@ public sealed unsafe class MusicGenBlock : IDisposable
         Tensor cattnFlat = new(one, DType.F32);
         backend.Permute0213(cattnFlat, cattn, nh, 1, hd);
         cattn.Dispose();
-        Tensor cproj = WhisperOps.ProjectLinear(backend, cattnFlat, _crossOW!, null, 1, 1, d, d);
+        Tensor cproj = WhisperOps.ProjectLinear(backend, cattnFlat, _crossOW!, null, b, 1, d, d);
         cattnFlat.Dispose();
         Tensor res2 = new(one, DType.F32);
         backend.Add(res2, res1, cproj);
@@ -226,12 +228,12 @@ public sealed unsafe class MusicGenBlock : IDisposable
         // --- GELU MLP ---
         Tensor normed3 = new(one, DType.F32);
         backend.LayerNorm(normed3, res2, _finalLnW!, _finalLnB!, 1e-5f);
-        Tensor fc1 = WhisperOps.ProjectLinear(backend, normed3, _fc1W!, _fc1B, 1, 1, d, _cfg.FfnDim);
+        Tensor fc1 = WhisperOps.ProjectLinear(backend, normed3, _fc1W!, _fc1B, b, 1, d, _cfg.FfnDim);
         normed3.Dispose();
         Tensor act = new(fc1.Shape, DType.F32);
         backend.Gelu(act, fc1);
         fc1.Dispose();
-        Tensor fc2 = WhisperOps.ProjectLinear(backend, act, _fc2W!, _fc2B, 1, 1, _cfg.FfnDim, d);
+        Tensor fc2 = WhisperOps.ProjectLinear(backend, act, _fc2W!, _fc2B, b, 1, _cfg.FfnDim, d);
         act.Dispose();
         Tensor outT = new(one, DType.F32);
         backend.Add(outT, res2, fc2);

@@ -186,4 +186,82 @@ __global__ void lm_argmax_lastdim_f32(
     if (threadIdx.x == 0) indices[row] = sIdx[0];
 }
 
+// ── Graph-capture decode: device-indexed RoPE ───────────────────────────────
+// Applies rotary embedding to a single decode-step Q or K tensor [1, numHeads, 1, headDim] by
+// reading the rotation ROW from a precomputed FULL table [maxPos, headDim] (duplicated-half
+// layout, built once host-side via RopeFrequencyBuilder — identical math to GenericTransformer's
+// BuildRope, just for every position up front instead of one small per-step tensor) at the
+// position in devicePos[1] (qOffset — the position of the token this decode step is embedding;
+// same buffer/convention as lm_kv_append_f32/lm_flash_attn_f32's dPos). This removes RoPE's
+// per-token host Math.Cos/Sin + H2D upload (one of the two host rebuilds — with embed gather —
+// that blocked graph capture; see LLM_DECODE_PERF_GRIND.md Phase 6). Two entry points (not a
+// runtime branch) mirroring the existing split-half (dit_rope_f32) vs interleaved
+// (lm_rope_interleaved_f32) kernels this replaces for the graphed decode path only.
+__global__ void lm_rope_decode_splithalf(
+    float* __restrict__ x,
+    const float* __restrict__ cosTable,
+    const float* __restrict__ sinTable,
+    unsigned int numHeads,
+    unsigned int headDim,
+    unsigned int rotaryDim,
+    const int* __restrict__ devicePos)
+{
+    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
+    unsigned int half = rdim >> 1;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total = (unsigned long long)numHeads * half;   // totalVecs = numHeads (B=1, Tq=1)
+    if (gid >= total) return;
+    unsigned int i = (unsigned int)(gid % half);
+    unsigned long long h = gid / half;
+    int pos = devicePos[1];
+    size_t baseX = h * headDim;
+    size_t baseCs = (size_t)pos * headDim;
+    float lower = x[baseX + i];
+    float upper = x[baseX + i + half];
+    x[baseX + i] = lower * cosTable[baseCs + i] - upper * sinTable[baseCs + i];
+    x[baseX + i + half] = upper * cosTable[baseCs + i + half] + lower * sinTable[baseCs + i + half];
+}
+
+__global__ void lm_rope_decode_interleaved(
+    float* __restrict__ x,
+    const float* __restrict__ cosTable,
+    const float* __restrict__ sinTable,
+    unsigned int numHeads,
+    unsigned int headDim,
+    const int* __restrict__ devicePos)
+{
+    unsigned int half = headDim >> 1;
+    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long total = (unsigned long long)numHeads * half;
+    if (gid >= total) return;
+    unsigned int i = (unsigned int)(gid % half);
+    unsigned long long h = gid / half;
+    int pos = devicePos[1];
+    size_t baseX = h * headDim + 2u * i;
+    size_t baseCs = (size_t)pos * headDim + i;
+    float xe = x[baseX];
+    float xo = x[baseX + 1];
+    float c = cosTable[baseCs];
+    float s = sinTable[baseCs];
+    x[baseX]     = xe * c - xo * s;
+    x[baseX + 1] = xo * c + xe * s;
+}
+
+// ── Graph-capture decode: device-indexed embedding gather ───────────────────
+// output[hidden] = embedTable[tokenId, hidden]. tokenId comes from a persistent 1-int device
+// buffer (the SAME buffer lm_argmax_lastdim_f32 writes into for the previous step — greedy
+// decode chains entirely on-device: step N's argmax output is step N+1's embed input, with no
+// host round-trip). embedTable must already be GPU-resident (preloaded weight). One thread per
+// hidden channel.
+__global__ void lm_embed_gather_decode_f32(
+    float* __restrict__ output,
+    const float* __restrict__ embedTable,
+    const int* __restrict__ tokenId,
+    unsigned int hidden)
+{
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= hidden) return;
+    output[i] = embedTable[(size_t)tokenId[0] * hidden + i];
+}
+
 } // extern "C"

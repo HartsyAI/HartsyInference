@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
@@ -22,10 +23,10 @@ public sealed class MusicGenKvCache : IDisposable
         public Tensor? CrossK;
         public Tensor? CrossV;
 
-        public MusicGenKvLayer(int numHeads, int capacity, int headDim)
+        public MusicGenKvLayer(int batch, int numHeads, int capacity, int headDim)
         {
-            K = new Tensor(new TensorShape(1, numHeads, capacity, headDim), DType.F32);
-            V = new Tensor(new TensorShape(1, numHeads, capacity, headDim), DType.F32);
+            K = new Tensor(new TensorShape(batch, numHeads, capacity, headDim), DType.F32);
+            V = new Tensor(new TensorShape(batch, numHeads, capacity, headDim), DType.F32);
         }
 
         public void Dispose()
@@ -39,13 +40,18 @@ public sealed class MusicGenKvCache : IDisposable
 
     private int _disposed;
 
-    public MusicGenKvCache(int numLayers, int numHeads, int capacity, int headDim)
+    /// <summary>Batch size: 1 (no CFG) or 2 (CFG cond+uncond decoded together). Element 0 is the conditional
+    /// stream, element 1 the unconditional (null-cross) stream.</summary>
+    public int Batch { get; }
+
+    public MusicGenKvCache(int batch, int numLayers, int numHeads, int capacity, int headDim)
     {
+        Batch = batch;
         Capacity = capacity;
         NumHeads = numHeads;
         HeadDim = headDim;
         Layers = new MusicGenKvLayer[numLayers];
-        for (int i = 0; i < numLayers; i++) Layers[i] = new MusicGenKvLayer(numHeads, capacity, headDim);
+        for (int i = 0; i < numLayers; i++) Layers[i] = new MusicGenKvLayer(batch, numHeads, capacity, headDim);
     }
 
     public MusicGenKvLayer[] Layers { get; }
@@ -63,6 +69,13 @@ public sealed class MusicGenKvCache : IDisposable
     /// <summary>Text-state length (valid rows in <c>CrossK</c>/<c>CrossV</c>), set at cache creation.</summary>
     public int CrossLength { get; internal set; }
 
+    /// <summary>Device buffer handle {kvLen, qOffset} for graph-replayable decode (0 = eager / host position). The
+    /// self-attn KV-append + flash kernels read this instead of a host int so one captured graph replays each step.</summary>
+    public ulong DevicePos { get; internal set; }
+
+    /// <summary>Backend that owns <see cref="DevicePos"/> (used to free it on dispose).</summary>
+    internal IBackend? PosBackend { get; set; }
+
     /// <summary>Empties the self-attn cache for a fresh sequence without reallocating (cross K/V stay).</summary>
     public void Reset() => Length = 0;
 
@@ -70,5 +83,6 @@ public sealed class MusicGenKvCache : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (MusicGenKvLayer l in Layers) l.Dispose();
+        if (DevicePos != 0) { PosBackend?.FreeDevicePos(DevicePos); DevicePos = 0; }
     }
 }

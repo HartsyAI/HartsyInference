@@ -31,7 +31,8 @@ extern "C" __global__ void lm_flash_attn_f32_split(
     unsigned int B, unsigned int Hq, unsigned int Tq, unsigned int D,
     unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
     int causal, int qOffset, float scale,
-    unsigned int G, unsigned int chunk)
+    unsigned int G, unsigned int chunk,
+    const int* __restrict__ dPos)
 {
     unsigned int blk = blockIdx.x;
     unsigned int g = blk % G;
@@ -43,6 +44,10 @@ extern "C" __global__ void lm_flash_attn_f32_split(
     unsigned int hkv = h / kvGroup;
     if (hkv >= Hkv) hkv = Hkv - 1;
     unsigned int tid = threadIdx.x;
+
+    // Graph-capture decode: read this step's position {kvLen, qOffset} from device so one captured graph replays
+    // at every step with a FIXED split count (chunk is sized to capacity; splits past kvLen early-exit below).
+    if (dPos != nullptr) { kvLen = (unsigned int)dPos[0]; qOffset = dPos[1]; }
 
     extern __shared__ float sdata[];
     size_t qBase = (((size_t)b * Hq + h) * Tq + r) * D;

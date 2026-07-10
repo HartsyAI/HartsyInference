@@ -398,16 +398,16 @@ These times require **zero configuration**: the engine's standard performance pr
 
 ### LLM decode vs llama.cpp
 
-RTX 3060 12GB, CUDA, batch=1, 128-token greedy decode, warm, tokens/sec. Same GGUF file and quant on both sides. After a focused kernel optimization pass (fused quantized GEMV, quantized `lm_head`, split-K flash-decode attention, vectorized loads), engine decode went from **20-54× slower to 1.94-2.88× off llama.cpp**:
+RTX 3060 12GB, CUDA, batch=1, 128-token greedy decode, warm, tokens/sec. Same GGUF file and quant on both sides. After a focused kernel optimization pass (fused quantized GEMV, quantized `lm_head`, split-K flash-decode attention, vectorized loads), engine decode went from **20-54× slower to 1.94-2.88× off llama.cpp**; **CUDA-graph decode** (2026-07-10, opt-in via `HARTSY_GRAPH_DECODE=1`) then collapsed the ~600-700 per-token kernel launches into one `cuGraphLaunch`/token for the plain dense GQA/RoPE decoder shape (Llama/Qwen2/Qwen3/Mistral), closing most of the remaining gap on launch-bound small models — **verified byte-identical greedy token output** with the graph on vs off:
 
-| Model | Quant | llama.cpp t/s | HartsyInference t/s | Gap |
-|---|---|---:|---:|---:|
-| Llama-3.2-1B | Q8_0 | 215.9 | ~111.5 | **1.94×** |
-| Mistral-7B-v0.3 | Q4_K_M | 66.5 | ~30.7 | **2.12×** |
-| Qwen3-0.6B | Q4_K_M | 354.5 | ~157 | **2.26×** |
-| Gemma-3-1B | Q4_K_M | 229.8 | ~79.7 | **2.88×** |
+| Model | Quant | llama.cpp t/s | Kernel-optimized t/s | + CUDA graph t/s | Gap (graph) |
+|---|---|---:|---:|---:|---:|
+| Qwen3-0.6B | Q4_K_M | 337.6 | ~157 | **190.8** (2.57× faster than no-graph) | **1.77×** |
+| Llama-3.2-1B | Q8_0 | 206.8 | ~111.5 | **120.2** (1.07×) | **1.72×** |
+| Mistral-7B-v0.3 | Q4_K_M | 66.5 | ~30.7 | **32.0** (1.02×) | **2.08×** |
+| Gemma-3-1B | Q4_K_M | 229.8 | ~79.7 | not eligible (sliding-window + softcap) | 2.88× |
 
-Prefill (prompt processing) is much faster and not the bottleneck. The remaining decode gap is launch-overhead on small models; the next lever is CUDA graphs. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
+CUDA graphs remove kernel-*launch* overhead, so the win scales inversely with model size: dramatic on small models (Qwen3), marginal on large ones already bound by GEMV memory bandwidth (Mistral — the engine reads ~22% of the bandwidth llama.cpp does there, a separate un-fixed bottleneck). Graph decode is greedy-only for now (no on-device sampler chain yet) and requires the plain decoder shape — MoE, MLA, cross-attention, sliding-window, and SSM models fall through to the eager path unchanged. Prefill (prompt processing) is much faster and not the bottleneck. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
 
 ### Diffusion / video end-to-end vs ComfyUI
 
@@ -439,9 +439,10 @@ Per-op MatMul / Conv2D / norm / SDPA / elementwise timings against PyTorch, with
 |---|---|---|
 | Qwen2.5 (0.5B → 7B) | LLM (native inference) | ✅ |
 | Qwen3 (0.6B → 7B) | LLM (native inference) | ✅ |
-| Llama-3.x | LLM (native inference) | 🏗️ |
-| Mistral (dense) | LLM (native inference) | 🏗️ |
-| Quantized GGUF (Q4/Q8) | LLM (quantized inference, all models) | ✅ |
+| Llama-3.x (incl. Llama-3.2-Vision/mllama) | LLM (native inference) | ✅ |
+| Mistral (dense) | LLM (native inference) | ✅ |
+| Nemotron, EXAONE, Granite / Granite-MoE, RWKV-6/7, Mamba/Mamba-2 | LLM (native inference) | ✅ |
+| Quantized GGUF (Q4/Q5/Q6/Q8) | LLM (quantized inference, all models) | ✅ |
 
 ### Image Generation
 

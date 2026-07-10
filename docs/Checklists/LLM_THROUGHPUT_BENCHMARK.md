@@ -5,6 +5,11 @@ Status legend: ⬜ not started · 🔧 in progress · ✅ done · ⚠ blocked
 **Goal.** For every latest-SOTA LLM we support, establish a llama.cpp baseline (tokens/sec, GPU) and prove the HartsyInference engine **matches or beats** it. The bar is set by `llama-bench`; the engine is measured both directly (Tier 1) and through the real Swarm API path (Tier 2).
 
 > **STATUS (2026-07-04):** baseline captured (all 7 models); benchmark revealed a 20-54× gap; the optimization grind (**`LLM_DECODE_PERF_GRIND.md`**) closed it to **1.94-2.88×** (Llama-3.2-1B **under 2×**). Remaining lever = CUDA graphs (foundation verified, full build deferred). See the "AFTER the grind" results table below.
+>
+> **UPDATE (2026-07-10):** CUDA graphs done — see `LLM_DECODE_PERF_GRIND.md`'s top status block. Qwen3-0.6B
+> 1.77× off llama.cpp (was 2.26×, i.e. 4.5× against a fresh baseline run); Llama-3.2-1B 1.72×; Mistral-7B 2.08×
+> (big models are GEMV-bandwidth-bound, not launch-bound, so graphs help them far less — the memory-access
+> redesign is still the open lever there). Byte-identical greedy output verified vs the non-graphed path.
 
 **Hardware.** RTX 3060 12 GB (sm_86), driver CUDA 13.2. Keep desktop/SwarmUI VRAM in mind (~5 GB baseline occupancy); free it before a run for headroom. Single GPU, batch=1.
 

@@ -52,6 +52,7 @@ public sealed class TextHandler : IModalityHandler
             Prompt = prompt,
             MaxTokens = parameters.GetInt("max-tokens", 256),
             Sampling = BuildSampling(parameters),
+            GraphDecode = parameters.GetBool("graph-decode", false) ? true : null,
         };
 
         List<int> streamed = new List<int>();

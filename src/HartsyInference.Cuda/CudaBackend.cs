@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
@@ -4152,6 +4153,295 @@ public sealed class CudaBackend : IBackend
         fixed (int* p = values) CudaDriverApi.cuMemcpyHtoD(dptr, (nint)p, bytes).ThrowOnError();
         return dptr;
     }
+
+    // ── Device-side decode position (autoregressive step-graph replay) ──────────────────────────────────────
+    public bool GraphDecodeSupported => true;
+
+    /// <summary>Persistent 2-int device buffer {kvLen, qOffset} the graph-decode kernels read each step. Allocated
+    /// once (outside capture) via the synchronous persistent allocator so it survives graph AUTO_FREE_ON_LAUNCH.</summary>
+    public ulong AllocDevicePos()
+    {
+        _context.EnsureCurrent();
+        return CudaMemory.AllocatePersistent((nuint)(2 * sizeof(int)));
+    }
+
+    /// <summary>Refreshes the device position buffer for the next step. Must be called OUTSIDE a capture region
+    /// (the captured graph reads this buffer's address; only its contents change per step).</summary>
+    public unsafe void WriteDevicePos(ulong handle, int kvLen, int qOffset)
+    {
+        if (handle == 0) return;
+        _context.EnsureCurrent();
+        int* v = stackalloc int[2]; v[0] = kvLen; v[1] = qOffset;
+        // HtoDAsync from pageable host memory stages synchronously (host buffer consumed before return), so the
+        // stackalloc is safe; the device write is stream-ordered before the subsequent kernels/graph launch.
+        CudaDriverApi.cuMemcpyHtoDAsync(handle, (nint)v, (nuint)(2 * sizeof(int)), _stream.Handle).ThrowOnError();
+    }
+
+    public void FreeDevicePos(ulong handle)
+    {
+        if (handle == 0) return;
+        _context.EnsureCurrent();
+        CudaMemory.Free(handle);
+    }
+
+    /// <summary>KV-cache append with the write slot read from <paramref name="devicePos"/> (graph-replayable).</summary>
+    public unsafe void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos)
+    {
+        if (devicePos == 0 || buffer.DType != DType.F32 || newKv.DType != DType.F32)
+        {
+            KvCacheAppend(buffer, newKv, offset);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        // Flatten batch into heads: buffer [B,H,maxSeq,D] is contiguous == [B*H, maxSeq, D], so B*H heads appends
+        // every batch element at the same slot (cond+uncond share the position). B=1 → unchanged for all callers.
+        int h = (int)(buffer.Shape[0] * buffer.Shape[1]), maxSeq = (int)buffer.Shape[2], d = (int)buffer.Shape[3], tNew = (int)newKv.Shape[2];
+        ulong pBuf = 0, pNew = 0;
+        try
+        {
+            pBuf = GpuTransferHelper.CopyToDevice(buffer);
+            pNew = GpuTransferHelper.CopyToDevice(newKv);
+            _kernels!.LaunchKvAppend(pBuf, pNew, h, maxSeq, tNew, d, offset, _stream.Handle, devicePos);
+            buffer._gpuSyncCallback = null;
+            buffer._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(buffer, pBuf, GpuTransferHelper.ByteSize(buffer));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pNew);
+        }
+    }
+
+    /// <summary>Self-attention FlashAttention with kvLen/qOffset read from <paramref name="devicePos"/>. Uses the
+    /// split-K decode path with a FIXED split count (chunk sized to the cache CAPACITY, not the current kvLen), so
+    /// the grid is position-independent and graph-capturable while still filling the GPU at long context: splits
+    /// whose chunk starts past the current kvLen early-exit in the kernel, so active parallelism grows with position.</summary>
+    public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos)
+    {
+        int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
+        int hkv = (int)key.Shape[1], lk = (int)key.Shape[2];
+        bool kernelOk = d > 0 && d <= 1024;
+        if (devicePos == 0 || query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32 || !kernelOk)
+        {
+            FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+
+        // Fixed split count from CAPACITY (lk) so the grid never changes across steps. Target ~4× SM occupancy;
+        // chunk = ceil(capacity / splits) is constant, so early steps leave later splits empty (they early-exit).
+        // Split-K is gated to b==1: the split/combine kernels have a latent batch>1 bug (they were only exercised by
+        // the b=1 LLM decode), and for CFG-batched decode b=2 already yields 2·heads blocks — enough to fill the GPU
+        // with the monolithic kernel — so batching keeps the (correct) monolithic path with no occupancy loss.
+        int baseBlocks = b * hq * tq;
+        int splits = 1;
+        if (b == 1 && lk >= 128)
+        {
+            int target = 4 * _context.MultiprocessorCount;
+            int g = (target + baseBlocks - 1) / baseBlocks;
+            int maxG = Math.Max(1, lk / 64);   // keep chunks ≥ 64 keys
+            splits = Math.Clamp(g, 1, Math.Min(32, maxG));
+        }
+        int chunk = (lk + splits - 1) / splits;         // fixed chunk over capacity
+        splits = (lk + chunk - 1) / chunk;              // exact # of chunks covering capacity
+
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            int grp = kvGroup <= 0 ? 1 : kvGroup;
+            if (splits >= 2)
+            {
+                long n = baseBlocks;
+                ulong pM = 0, pL = 0, pAcc = 0;
+                try
+                {
+                    pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
+                    pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
+                    pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
+                    _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
+                        grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos);
+                    _kernels!.LaunchFlashAttentionCombine(pOut, pM, pL, pAcc, b, hq, tq, d, splits, _stream.Handle);
+                }
+                finally
+                {
+                    GpuTransferHelper.FreeDevice(pM); GpuTransferHelper.FreeDevice(pL); GpuTransferHelper.FreeDevice(pAcc);
+                }
+            }
+            else
+            {
+                _kernels!.LaunchFlashAttention(pOut, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen, grp,
+                    causal, qOffset, scale, 0f, 0, 0, 0, _stream.Handle, devicePos);
+            }
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+        }
+    }
+
+    /// <summary>DtoH a resident device tensor WITHOUT freeing its buffer (a normal DataPointer read syncs then frees,
+    /// which would break a captured graph's fixed output-buffer address). Stream-syncs first so the pending launch
+    /// has produced the data.</summary>
+    public unsafe void ReadResidentInto(Tensor src, float[] dst)
+    {
+        _context.EnsureCurrent();
+        ulong p = GpuTransferHelper.CopyToDevice(src);   // resident activation → cached ptr (no re-upload, no free)
+        _stream.Synchronize();
+        fixed (float* d = dst)
+            CudaDriverApi.cuMemcpyDtoH((nint)d, p, (nuint)((long)dst.Length * sizeof(float))).ThrowOnError();
+    }
+
+    // ── LLM decode-graph: RoPE / embed / argmax device state ────────────────────────────────────────────────
+    // See IBackend's matching doc comments for the overall design. This backend implements all of it.
+
+    public ulong AllocDeviceTokenId()
+    {
+        _context.EnsureCurrent();
+        return CudaMemory.AllocatePersistent((nuint)sizeof(int));
+    }
+
+    public unsafe void WriteDeviceTokenId(ulong handle, int tokenId)
+    {
+        if (handle == 0) return;
+        _context.EnsureCurrent();
+        int v = tokenId;
+        CudaDriverApi.cuMemcpyHtoDAsync(handle, (nint)(&v), (nuint)sizeof(int), _stream.Handle).ThrowOnError();
+    }
+
+    public void FreeDeviceTokenId(ulong handle)
+    {
+        if (handle == 0) return;
+        _context.EnsureCurrent();
+        CudaMemory.Free(handle);
+    }
+
+    /// <summary>D2H sync read of the 1-int device token-id buffer. Blocking (cuMemcpyDtoH) — the caller does this
+    /// once per decode step, after LaunchGraph, so the sync waits on exactly the work that step's graph replay
+    /// queued (not the whole stream's backlog).</summary>
+    public unsafe int ReadDeviceTokenId(ulong handle)
+    {
+        if (handle == 0) throw new NotSupportedException("ReadDeviceTokenId called with an unallocated buffer.");
+        _context.EnsureCurrent();
+        int v;
+        CudaDriverApi.cuMemcpyDtoH((nint)(&v), handle, (nuint)sizeof(int)).ThrowOnError();
+        return v;
+    }
+
+    /// <summary>Builds the table once and registers it as a permanent (weight-cache) resident tensor pair —
+    /// stable across graph capture/replay and never evicted, exactly like a model weight. Same math as
+    /// GenericTransformer.BuildRope, just for every position 0..maxPos-1 up front instead of one small
+    /// per-step tensor.</summary>
+    public unsafe (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta, RopeScaling scaling)
+    {
+        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
+        int half = rdim / 2;
+        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, scaling, maxPos);
+        Tensor cos = new(new TensorShape(maxPos, headDim), DType.F32);
+        Tensor sin = new(new TensorShape(maxPos, headDim), DType.F32);
+        float* pc = (float*)cos.DataPointer;
+        float* ps = (float*)sin.DataPointer;
+        for (int pos = 0; pos < maxPos; pos++)
+        {
+            long baseOff = (long)pos * headDim;
+            for (int i = 0; i < half; i++)
+            {
+                double angle = pos * invFreq[i];
+                float c = (float)(Math.Cos(angle) * mscale);
+                float s = (float)(Math.Sin(angle) * mscale);
+                pc[baseOff + i] = c; pc[baseOff + i + half] = c;
+                ps[baseOff + i] = s; ps[baseOff + i + half] = s;
+            }
+        }
+        PreloadWeights([cos, sin]);
+        return (cos, sin);
+    }
+
+    public void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos)
+    {
+        if (devicePos == 0 || x.DType != DType.F32 || cosTable.DType != DType.F32 || sinTable.DType != DType.F32)
+        {
+            ((IBackend)this).RopeApplyDecodeStep(x, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int numHeads = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        ulong pX = GpuTransferHelper.CopyToDevice(x);
+        ulong pCos = GpuTransferHelper.CopyToDevice(cosTable);
+        ulong pSin = GpuTransferHelper.CopyToDevice(sinTable);
+        if (interleaved)
+            _kernels!.LaunchRopeDecodeInterleaved(pX, pCos, pSin, numHeads, headDim, devicePos, _stream.Handle);
+        else
+            _kernels!.LaunchRopeDecodeSplitHalf(pX, pCos, pSin, numHeads, headDim, rotaryDim, devicePos, _stream.Handle);
+        x._gpuSyncCallback = null;
+        x._gpuDisposeCallback = null;
+        GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));
+    }
+
+    public unsafe void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId)
+    {
+        if (tokenId == 0 || output.DType != DType.F32 || embedTable.DType != DType.F32)
+        {
+            throw new NotSupportedException("EmbedGatherDecodeStep requires an F32 embed table and a valid device token-id buffer.");
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int hidden = (int)output.ElementCount;
+        ulong pEmb = GpuTransferHelper.CopyToDevice(embedTable);
+        nuint outBytes = GpuTransferHelper.ByteSize(output);
+        ulong pOut = GpuTransferHelper.AllocateDevice(outBytes);
+        _kernels!.LaunchEmbedGatherDecode(pOut, pEmb, tokenId, hidden, _stream.Handle);
+        GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+    }
+
+    public void ArgMaxInto(ulong outputTokenId, Tensor input)
+    {
+        if (outputTokenId == 0 || input.DType != DType.F32)
+        {
+            throw new NotSupportedException("ArgMaxInto requires F32 input and a valid device token-id buffer.");
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int c = (int)input.Shape[input.Shape.Rank - 1];
+        int rows = (int)(input.ElementCount / c);
+        ulong pIn = GpuTransferHelper.CopyToDevice(input);
+        _kernels!.LaunchArgMaxLastDim(outputTokenId, pIn, rows, c, _stream.Handle);
+    }
+
+    /// <summary>Backend-agnostic graph capture (see IBackend). Replays require repeated launches (a decode
+    /// loop), so the graph is instantiated with auto-free-on-relaunch — validated on hardware
+    /// (docs/Research/CUDA_GRAPH_FINDINGS.md): per-op stream-ordered activation allocations captured inside
+    /// recordWork are freed before each relaunch and reuse the same virtual addresses, so pointers cached at
+    /// capture time (e.g. the graph-decode session's cosTable/embedTable/devicePos) stay valid across replays.</summary>
+    public object? CaptureGraph(Action recordWork)
+    {
+        _context.EnsureCurrent();
+        CudaGraph graph = new(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
+        graph.Capture(recordWork);
+        return graph;
+    }
+
+    public void LaunchGraph(object graphHandle)
+    {
+        _context.EnsureCurrent();
+        ((CudaGraph)graphHandle).Launch();
+    }
+
+    public void DisposeGraph(object graphHandle) => ((CudaGraph)graphHandle).Dispose();
 
     private static unsafe ulong UploadFloats(ReadOnlySpan<float> values)
     {

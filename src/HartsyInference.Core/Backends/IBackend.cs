@@ -473,6 +473,107 @@ public interface IBackend : IDisposable
         Buffer.MemoryCopy((void*)src.DataPointer, (void*)dst.DataPointer, bytes, bytes);
     }
 
+    // ── Device-side decode position (autoregressive step-graph replay) ──────────────────────────────────────
+    // A captured decode graph must NOT re-bake the per-step KV position into its kernel params, or every replay
+    // would append/attend at the capture-time position. Instead the self-attention KV-append and flash kernels
+    // read the position from a small device buffer {kvLen, qOffset}, refreshed (outside capture) each step. This
+    // lets ONE captured graph replay at every step. Defaults: unsupported (eager backends use the host ints).
+
+    /// <summary>True when the backend supports device-position decode-graph replay (CUDA only).</summary>
+    bool GraphDecodeSupported => false;
+
+    /// <summary>Allocates a persistent 2-int device buffer holding {kvLen, qOffset}; returns an opaque handle
+    /// (0 = unsupported). Free with <see cref="FreeDevicePos"/>.</summary>
+    ulong AllocDevicePos() => 0;
+
+    /// <summary>Refreshes the device position buffer (outside any capture region) for the next step/launch.</summary>
+    void WriteDevicePos(ulong handle, int kvLen, int qOffset) { }
+
+    /// <summary>Frees a buffer from <see cref="AllocDevicePos"/>.</summary>
+    void FreeDevicePos(ulong handle) { }
+
+    /// <summary>KV-cache append whose write slot comes from the device position buffer when <paramref name="devicePos"/>
+    /// is non-zero (graph-replayable); otherwise identical to <see cref="KvCacheAppend"/> at host <paramref name="offset"/>.</summary>
+    void KvCacheAppendDev(Tensor buffer, Tensor newKv, int offset, ulong devicePos) => KvCacheAppend(buffer, newKv, offset);
+
+    /// <summary>Self-attention FlashAttention whose kvLen/qOffset come from the device position buffer when
+    /// <paramref name="devicePos"/> is non-zero (graph-replayable, forces the fixed-grid path); otherwise identical
+    /// to <see cref="FlashAttention"/> at the host <paramref name="kvLen"/>/<paramref name="qOffset"/>.</summary>
+    void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos)
+        => FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale);
+
+    /// <summary>Copies a RESIDENT device tensor's data to <paramref name="dst"/> WITHOUT freeing/detaching its
+    /// device buffer (unlike a normal <c>DataPointer</c> read, which syncs then frees it). Required for a captured
+    /// graph's fixed OUTPUT buffers that are read back on the host every step but must keep their baked device
+    /// address across replays. Default = host read.</summary>
+    unsafe void ReadResidentInto(Tensor src, float[] dst)
+    {
+        new Span<float>((void*)src.DataPointer, dst.Length).CopyTo(dst);
+    }
+
+    // ── LLM decode-graph: RoPE / embed / argmax reading & writing device state ──────────────────────────────
+    // The remaining per-token host work a captured graph can't tolerate: RoPE's cos/sin table build
+    // (Math.Cos/Sin + H2D every step) and the embedding lookup (host gather from the token id). Both convert
+    // to a one-time device-resident precompute (RoPE table) / preload (embed table) plus a fixed-grid kernel
+    // indexed by device state — the SAME devicePos buffer above for RoPE's position, and a persistent 1-int
+    // "current token id" buffer for embed (see AllocDeviceTokenId) that greedy decode chains entirely
+    // on-device via ArgMaxInto (this step's sampled token becomes next step's embed input, no D2H between).
+
+    /// <summary>Allocates a persistent 1-int device buffer for the "token id to embed next" (0 = unsupported).</summary>
+    ulong AllocDeviceTokenId() => 0;
+
+    /// <summary>Writes the token id into a buffer from <see cref="AllocDeviceTokenId"/> (outside capture — the
+    /// prefill's sampled first token, or any host-driven override; graph replay chains via <see cref="ArgMaxInto"/> instead).</summary>
+    void WriteDeviceTokenId(ulong handle, int tokenId) { }
+
+    /// <summary>Frees a buffer from <see cref="AllocDeviceTokenId"/>.</summary>
+    void FreeDeviceTokenId(ulong handle) { }
+
+    /// <summary>Reads back the token id from a buffer from <see cref="AllocDeviceTokenId"/> (a 1-int D2H sync —
+    /// the ONE per-step host readback a graph-decode loop still needs, for streaming/detokenization/stop-checking;
+    /// everything else about the step stays device-resident). Throws when unsupported.</summary>
+    int ReadDeviceTokenId(ulong handle) => throw new NotSupportedException("ReadDeviceTokenId requires GraphDecodeSupported.");
+
+    /// <summary>Precomputes the full RoPE cos/sin table <c>[maxPos, headDim]</c> (duplicated-half layout,
+    /// identical math to the per-step table a transformer builds each call) as two device-resident tensors, so
+    /// a decode-step RoPE apply only needs to index a row, not rebuild it. Returns (cos, sin); dispose both
+    /// when the graphed session ends.</summary>
+    (Tensor cos, Tensor sin) BuildRopeTableDevice(int maxPos, int headDim, int rotaryDim, float theta, HartsyInference.Core.Rope.RopeScaling scaling)
+        => throw new NotSupportedException("BuildRopeTableDevice requires GraphDecodeSupported.");
+
+    /// <summary>RoPE on a single decode-step Q/K tensor <c>[1,numHeads,1,headDim]</c>, reading the rotation row
+    /// from <paramref name="cosTable"/>/<paramref name="sinTable"/> (from <see cref="BuildRopeTableDevice"/>) at
+    /// the position in <paramref name="devicePos"/> (its qOffset slot) — graph-replayable. No-op default.</summary>
+    void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos) { }
+
+    /// <summary>Gathers one row (the id in the persistent buffer <paramref name="tokenId"/>) from a GPU-resident
+    /// embedding table into <paramref name="output"/> <c>[1,1,hidden]</c> — graph-replayable. No-op default.</summary>
+    void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId) { }
+
+    /// <summary>Argmax over the last dim, writing directly into a persistent device buffer (e.g. from
+    /// <see cref="AllocDeviceTokenId"/>) instead of allocating a fresh output — so the SAME buffer a captured
+    /// graph's embed-gather reads is the one this step's argmax writes, chaining greedy decode on-device with
+    /// no D2H between steps. No-op default.</summary>
+    void ArgMaxInto(ulong outputTokenId, Tensor input) { }
+
+    // ── Graph capture/replay (backend-agnostic handle) ──────────────────────────────────────────────────────
+    // Callers outside HartsyInference.Cuda (e.g. TextGenerationPipeline, which must stay backend-agnostic —
+    // CPU builds link against IBackend only) capture/replay through this opaque-handle indirection instead of
+    // referencing CudaGraph directly. Default: unsupported: CaptureGraph returns null, meaning "not captured,
+    // call recordWork() yourself every time" — callers must treat a null handle as the eager fallback, not an error.
+
+    /// <summary>Captures the device work <paramref name="recordWork"/> issues into a graph and instantiates it;
+    /// returns an opaque handle for <see cref="LaunchGraph"/>/<see cref="DisposeGraph"/>, or null when the
+    /// backend doesn't support graph capture (caller falls back to calling <paramref name="recordWork"/>
+    /// directly on every step instead of ever calling LaunchGraph).</summary>
+    object? CaptureGraph(Action recordWork) => null;
+
+    /// <summary>Replays a graph captured by <see cref="CaptureGraph"/> with a single launch.</summary>
+    void LaunchGraph(object graphHandle) => throw new NotSupportedException("LaunchGraph requires a handle from a backend whose CaptureGraph returned non-null.");
+
+    /// <summary>Disposes a graph handle from <see cref="CaptureGraph"/>.</summary>
+    void DisposeGraph(object graphHandle) { }
+
     /// <summary>Image-output conversion: CHW F32 in [-1,1] → interleaved HWC u8 in [0,255] (round-half-up, clamped).
     /// <paramref name="input"/> is <c>[B(=1), 3, H, W]</c> F32; <paramref name="output"/> is <c>[H, W, 3]</c> U8.
     /// Device backends convert on-GPU so only the 3-byte/pixel result crosses PCIe. Default = host reference loop.</summary>

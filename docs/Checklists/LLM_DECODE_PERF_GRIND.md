@@ -6,6 +6,22 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 
 > **STATUS (2026-07-04): gap closed 20-54× → 1.94-2.88×.** Llama-3.2-1B **1.94× (under 2×)**, Mistral-7B 2.12×, Qwen3 2.26×, Gemma-3 2.88×. All verified coherent, default path is the shipped state. Phases 1-4 done (fused Q4_K/Q6_K/Q8_0 GEMV, quantized lm_head, split-K flash-decode attention, vectorized loads). Phase 5 (dp4a) built but no gain (memory-bound). Phase 6 (CUDA graphs) foundation verified, full device-resident build deferred (multi-session). Progress table + per-phase detail below.
 
+> **STATUS UPDATE (2026-07-10): Phase 6 (CUDA graphs) DONE for the plain dense GQA/RoPE decoder shape** (Llama/
+> Qwen2/Qwen3/Mistral — opt-in `HARTSY_GRAPH_DECODE=1`, greedy only, `GenericTransformer.SupportsGraphDecode`
+> gates eligibility). Result: **Qwen3-0.6B 74.3→190.8 tok/s (2.57×, gap to llama.cpp 4.5×→1.77×)**,
+> **Llama-3.2-1B 112.4→120.2 (1.07×, gap 1.84×→1.72×)**, **Mistral-7B 31.4→32.0 (1.02×, gap 2.12×→2.08×)** —
+> confirms the doc's own prediction below: launch-overhead removal helps small models most, marginal on big
+> GEMV-bound ones. **Correctness: byte-identical greedy token sequences, graph on vs off**, verified across all
+> three. See [`docs/Research/CUDA_GRAPH_FINDINGS.md`](../Research/CUDA_GRAPH_FINDINGS.md) for the underlying
+> capture/replay mechanism (built for diffusion, reused here) and the Phase 6 section below for the LLM-specific
+> device-indexed RoPE/embed-gather/argmax kernels this needed on top. **Also fixed same session:** a missing
+> fused Q5_0 GEMV kernel — llama.cpp's Q4_K_M mixed-quant scheme substitutes Q5_0 for any tensor whose K isn't a
+> multiple of 256 (common on odd hidden sizes, e.g. qwen2.5-0.5b's 896), and there was no fused kernel for it at
+> all — those tensors silently ran the slow dequant-then-cuBLAS path. qwen2.5-0.5b Q4_K_M: 27.5→70.7 tok/s (2.5×).
+> **Not done:** on-device sampler (temperature/top-k/top-p — graph decode is greedy-only until this exists),
+> on-device MoE routing (would unlock olmoe/qwen2moe/granitemoe for graphing), the big-model GEMV
+> memory-access-pattern redesign (blocked on `ncu` access last attempt).
+
 **Method.** Strict measure → optimize → verify loop. Every change must (1) show a speedup on an isolated micro-benchmark, (2) show a speedup on end-to-end t/s, and (3) preserve correctness (greedy token-id match vs the pre-change output). A faster wrong answer is a regression.
 
 ---
@@ -55,11 +71,11 @@ Baselines are **warm, 256-token, decode-dominated** (amortizes JIT+prefill; earl
 **Phase 5 — dp4a int8 GEMV: implemented, numerically exact, but NOT faster.** Built the full llama.cpp-style path (`quantize_activation_q8_1_f32.cu` → int8 + per-block scale/sum; `mul_mat_vec_q4k_q8_1.cu` → `__dp4a` int8 dot). Output byte-identical to the float kernel. **But same speed** (Qwen3 153 vs 159; Mistral 31.4 vs 31.4). **Key finding: our vectorized-float GEMV is memory-bound, not ALU-bound** — cutting ALU (dp4a) doesn't help and the extra quantize kernel offsets it. Kept behind `HARTSY_DP4A_ON` for GPUs/shapes where ALU limits. Also ruled out split-K on the GEMV: for big models N=4096-14336 → thousands of warps already, so it's **not occupancy-starved** either (unlike attention). The remaining GEMV inefficiency is **memory-access-pattern** (needs ncu, blocked by GeForce perms) — a deeper redesign.
 
 ### FINAL STATE: gap **20-54× → 1.94-2.88×**. Qwen3 2.26× · Llama **1.94×** · Mistral 2.12× · Gemma 2.88× (Gemma slowest — sliding-window attn can't use split-K yet). All coherent.
-### Remaining levers (bigger, uncertain): **CUDA graphs** (~640 launches/token, ~30% gaps for small models — the highest-confidence next win); **split-K for sliding-window/softcap attention** (helps Gemma/GPT-OSS); **GEMV memory-pattern redesign** (needs ncu access).
+### Remaining levers: ~~CUDA graphs~~ **✅ done 2026-07-10** for the plain decoder shape (see Phase 6 below); **split-K for sliding-window/softcap attention** (helps Gemma/GPT-OSS, would also unlock those for graph decode); **GEMV memory-pattern redesign** (needs ncu access — the remaining lever for BIG models, which graphs barely helped); **on-device sampler + MoE routing** (would extend graph decode past greedy-only/dense-only).
 
 ---
 
-## Phase 6 — CUDA Graphs (in progress)
+## Phase 6 — CUDA Graphs (✅ done for the plain decoder shape, 2026-07-10)
 
 **Why:** nsys shows ~30% GPU-idle gaps on small models = CPU can't issue the ~640 kernel launches/token fast enough (GPU starves between tiny kernels). A captured graph replays the whole decode step in ONE `cuGraphLaunch`, removing launch issuance from the critical path. Biggest remaining lever for small models.
 
@@ -73,7 +89,23 @@ Baselines are **warm, 256-token, decode-dominated** (amortizes JIT+prefill; earl
 5. **Argmax**: `ArgMaxLastDim` (device, EXISTS) writes the next token to the **device token buffer** → embed of the NEXT replay reads it. Fully GPU-resident greedy: no per-token D2H (accumulate tokens in a device buffer, one D2H at the end).
 6. **Fallback (no hacks):** graph path handles the dense RoPE+GQA case (Qwen/Llama/Mistral); MoE/MLA/sliding-window/softcap/abs-pos fall through to the (verified) default decode. Clean feature gate, not a monkey-patch.
 
-**Status:** foundation ✅ verified; the 5 device-resident conversions + capture/replay pipeline loop are the remaining build. Each is verifiable independently (token-identical to default). This is a substantial multi-file feature; being built flag-gated so the default path stays the verified 1.94-2.88× state throughout.
+**Status: ✅ DONE (2026-07-10).** All 6 conversions built exactly as designed above, plus a device-position
+`{kvLen, qOffset}` buffer convention shared with the (concurrent, separate-session) audio-model CUDA-graph work —
+`IBackend.GraphDecodeSupported`/`AllocDevicePos`/`WriteDevicePos`/`KvCacheAppendDev`/`FlashAttentionDev` landed
+first from that session; this work added the LLM-specific remainder: `native/cuda/lm/lm_f32.cu`'s
+`lm_rope_decode_splithalf`/`lm_rope_decode_interleaved`/`lm_embed_gather_decode_f32` kernels,
+`IBackend.RopeApplyDecodeStep`/`EmbedGatherDecodeStep`/`ArgMaxInto`/`BuildRopeTableDevice`/device-token-id
+buffer, and — since `TextGenerationPipeline` must stay backend-agnostic (CPU builds link `IBackend` only) — a
+backend-agnostic `IBackend.CaptureGraph(Action)`/`LaunchGraph(object)`/`DisposeGraph(object)` (opaque handle)
+so the pipeline never references `CudaGraph`/`CudaBackend` directly. `GenericTransformer.Layer.ForwardGraphStep`
+reuses the EXISTING position-agnostic helpers (`PreSublayer`/`PostSublayer`/`Mlp`/`Project`) verbatim, swapping
+in the device-indexed ops only for RoPE/KV-append/attention. `SupportsGraphDecode` eligibility gate: plain
+pre-norm GQA/RoPE, no MLA/MoE/cross-attention/sliding-window/softcap/sink/ALiBi/parallel-residual/non-1.0
+embedding-scale — covers Llama/Qwen2/Qwen3/Mistral, falls through to the untouched eager path otherwise.
+Opt-in via `HARTSY_GRAPH_DECODE=1`, gated to greedy (no on-device sampler chain yet). **Verified
+byte-identical greedy token output** vs the eager path on Qwen3-0.6B (split-half RoPE) and Llama-3.2-1B +
+Mistral-7B (interleaved RoPE) — not just "coherent," the literal same computation replayed instead of reissued.
+Results in the STATUS UPDATE block at the top of this doc.
 
 **Phase 3 — attention split-K (nsys-guided):** re-nsys after P2c showed attention `lm_flash_attn_f32` had grown to **29.6%** of decode (72.8µs/call — one block/head, ~16 blocks under-occupy 28 SMs, sequential keys). The validated split-K flash-decode kernel existed but only engaged at `kvLen≥1024` (never for decode). Changed the dispatch (`CudaBackend.cs` ~3417): engage for the **occupancy-limited** case (`baseBlocks < 2·SM` = decode) at `kvLen≥128`, `minChunk=32`. Gated to `plain` attention so sliding-window/softcap models (Gemma, GPT-OSS) keep the monolithic path unchanged; split kernel is numerically exact. Result: **Qwen3 103→133 (+28%), Llama 100→111.5 (1.94× off llama.cpp, under 2×)**. Big models (Mistral) unaffected — they're matmul-bound, not attention-bound.
 

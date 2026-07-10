@@ -62,6 +62,12 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [CommandOption("-q|--quiet")]
         [Description("Suppress staging/streaming; print only the final text.")]
         public bool Quiet { get; init; }
+
+        /// <summary>Force CUDA-graph decode on (requires greedy sampling and an eligible dense GQA/RoPE model;
+        /// forces --temperature to 0 if a positive temperature was also given).</summary>
+        [CommandOption("--graph-decode")]
+        [Description("Force CUDA-graph decode (forces greedy sampling). Falls back silently if the model/backend isn't eligible.")]
+        public bool GraphDecode { get; init; }
     }
 
     /// <inheritdoc/>
@@ -79,11 +85,19 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             return 1;
         }
 
+        float temperature = settings.Temperature;
+        if (settings.GraphDecode && temperature > 0f)
+        {
+            AnsiConsole.MarkupLine("[yellow]--graph-decode requires greedy sampling; forcing --temperature to 0.[/]");
+            temperature = 0f;
+        }
+
         ParamState parameters = new ParamState(Modality.Text) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("max-tokens", settings.MaxTokens.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("temperature", settings.Temperature.ToString(CultureInfo.InvariantCulture));
+        parameters.Put("temperature", temperature.ToString(CultureInfo.InvariantCulture));
         parameters.Put("top-p", settings.TopP.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
+        parameters.Put("graph-decode", settings.GraphDecode ? "true" : "false");
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Text);
         string label = spec.Catalog?.Id ?? (settings.ModelPath is { Length: > 0 } mp ? Path.GetFileName(mp) : settings.Model);

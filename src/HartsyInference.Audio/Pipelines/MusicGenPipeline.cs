@@ -47,36 +47,95 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         int maxDelay = MusicGenDelay.Max(_cfg.DelayPattern);
         int tTotal = tReal + maxDelay;
 
-        // Project T5 once for the conditional stream; the unconditional stream cross-attends to zeros.
-        Tensor condCross = _decoder.ProjectText(backend, t5States);
-        Tensor nullCross = new(new TensorShape(1, 1, _cfg.Hidden), DType.F32);   // zeroed → CFG null branch
-
         uint rng = DeterministicRng.Seed(seed);
         // Delayed grid filled autoregressively; each codebook's lead-in and tail hold the special token.
         int[,] delayed = new int[tTotal, k];
 
         float g = guidance ?? _cfg.GuidanceScale;
-        // KV caches with once-projected cross K/V; the CFG null branch decodes against its own cache.
-        MusicGenKvCache condCache = _decoder.CreateCache(backend, condCross, tTotal);
-        MusicGenKvCache? uncondCache = g != 1f ? _decoder.CreateCache(backend, nullCross, tTotal) : null;
-        condCross.Dispose();
-        nullCross.Dispose();
+        // CFG cond+uncond are decoded as ONE batch=B pass (B=2 with CFG, else 1): batch row 0 cross-attends the
+        // T5 text, row 1 the null (zeros) branch. Halves the per-step kernel count and widens every GEMM vs two
+        // sequential passes. Build the batched, once-projected cross states [B, T, hidden].
+        int B = g != 1f ? 2 : 1;
+        Tensor condCross = _decoder.ProjectText(backend, t5States);   // [1, T, hidden]
+        int tText = (int)condCross.Shape[1];
+        Tensor batchedCross;
+        if (B == 2)
+        {
+            batchedCross = new(new TensorShape(2, tText, _cfg.Hidden), DType.F32);   // host, zeroed
+            long rowBytes = (long)tText * _cfg.Hidden * sizeof(float);
+            Buffer.MemoryCopy((void*)condCross.DataPointer, (void*)batchedCross.DataPointer, rowBytes, rowBytes);   // row 0 = cond; row 1 stays 0
+            condCross.Dispose();
+        }
+        else batchedCross = condCross;
+        MusicGenKvCache cache = _decoder.CreateCache(backend, batchedCross, tTotal);   // batch=B, cross primed per row
+        batchedCross.Dispose();
+        _decoder.EnsureGraphBuffers(B);
 
         // Standard causal-LM AR loop (HF `_sample`): feed the previous delay-masked frame — starting with the
         // all-special BOS/decoder_start frame — and read the next-frame logits it produces to sample row `step`.
-        // The prediction of row `step` conditions on rows [0..step-1] only; the current row is never pre-fed.
         int[] prev = new int[k];
         for (int c = 0; c < k; c++) prev[c] = _cfg.SpecialToken;   // BOS frame (decoder_start_token)
-        // TEMP instrumentation: attribute loop time to forward passes vs host sampling.
-        long fwdTicks = 0, sampTicks = 0; Stopwatch _swPhase = new();
+
+        // CUDA-graph decode: the batched per-step op sequence is identical every step (only the token embedding and
+        // the device KV position change), so we capture it ONCE and replay with a single launch. Steps
+        // 0..GraphCaptureStep-1 run eagerly THROUGH the fixed buffers (warming resident weights/cross-K/V so nothing
+        // inside capture does a sync upload); the capture step records + launches; later steps replay. Any
+        // capture-illegal op falls back to eager for the rest of the generation.
+        bool graphOn = backend.StepGraphSupported && backend.GraphDecodeSupported
+            && Environment.GetEnvironmentVariable("HARTSY_MUSICGEN_GRAPH_OFF") is null;
+        bool graphDead = false;
+        const int GraphCaptureStep = 3;
+        if (graphOn)
+        {
+            backend.StepGraphOwner = this;
+            backend.PreloadWeights(_decoder.EnumerateWeights());   // pin so no pageable upload invalidates capture
+        }
+
         for (int step = 0; step < tTotal; step++)
         {
-            _swPhase.Restart();
-            float[][] condLogits = _decoder.ForwardStep(backend, prev, condCache);
-            float[][] uncondLogits = uncondCache is not null
-                ? _decoder.ForwardStep(backend, prev, uncondCache)
-                : condLogits;
-            fwdTicks += _swPhase.ElapsedTicks; _swPhase.Restart();
+            int pos = cache.Length;
+            // Per-step-varying inputs, refreshed OUTSIDE any capture region.
+            _decoder.PrepareEmbed(backend, prev, pos, B);
+            if (cache.DevicePos != 0) backend.WriteDevicePos(cache.DevicePos, pos + 1, pos);
+
+            bool ownerOk = graphOn && ReferenceEquals(backend.StepGraphOwner, this);
+            if (graphOn && !graphDead && ownerOk && backend.StepGraphReady && step > GraphCaptureStep)
+            {
+                backend.StepGraphLaunch();
+            }
+            else
+            {
+                bool capture = graphOn && !graphDead && ownerOk && step == GraphCaptureStep && !backend.StepGraphReady;
+                if (capture) backend.StepGraphBegin();
+                try
+                {
+                    _decoder.RunBatchedIntoFixed(backend, cache);
+                }
+                catch (Exception ex) when (capture)
+                {
+                    backend.StepGraphReset(); graphDead = true;
+                    Logs.Warning($"[MusicGen graph] capture invalidated — eager fallback: {ex.Message}");
+                    _decoder.RunBatchedIntoFixed(backend, cache);
+                }
+                if (capture)
+                {
+                    try
+                    {
+                        backend.StepGraphEndAndLaunch();   // capture records without executing — this runs the step
+                        Logs.Info("[MusicGen graph] batched decode step captured; replaying via cuGraphLaunch.");
+                    }
+                    catch (Exception ex)
+                    {
+                        backend.StepGraphReset(); graphDead = true;
+                        Logs.Warning($"[MusicGen graph] capture failed — eager fallback: {ex.Message}");
+                        _decoder.RunBatchedIntoFixed(backend, cache);
+                    }
+                }
+            }
+            cache.Length = pos + 1;   // device KV was appended at slot=pos by the launch
+            float[][][] batched = _decoder.ReadBatchedLogits(backend, B);
+            float[][] condLogits = batched[0];
+            float[][] uncondLogits = B == 2 ? batched[1] : batched[0];
 
             for (int c = 0; c < k; c++)
             {
@@ -99,12 +158,15 @@ public sealed unsafe class MusicGenPipeline : IDisposable
 
             // The delay-masked frame just produced becomes the next step's input.
             for (int c = 0; c < k; c++) prev[c] = delayed[step, c];
-            sampTicks += _swPhase.ElapsedTicks;
         }
-        Logs.Info($"MusicGen decode phases: fwd={fwdTicks * 1000.0 / Stopwatch.Frequency:F0}ms sample={sampTicks * 1000.0 / Stopwatch.Frequency:F0}ms over {tTotal} steps ({fwdTicks * 1000.0 / Stopwatch.Frequency / tTotal:F2}ms/step fwd)");
 
-        condCache.Dispose();
-        uncondCache?.Dispose();
+        if (graphOn)
+        {
+            backend.StepGraphReset();
+            if (ReferenceEquals(backend.StepGraphOwner, this)) backend.StepGraphOwner = null;
+        }
+        _decoder.ReleaseGraphBuffers();
+        cache.Dispose();
 
         int[,] real = MusicGenDelay.Revert(delayed, _cfg.DelayPattern, tReal);
 
@@ -123,7 +185,7 @@ public sealed unsafe class MusicGenPipeline : IDisposable
         Buffer.MemoryCopy((void*)audioT.DataPointer, System.Runtime.CompilerServices.Unsafe.AsPointer(ref audio[0]), n * 4, n * 4);
         audioT.Dispose();
         sw.Stop();
-        Logs.Info($"MusicGen: {tReal} frames → {audio.Length} samples ({audio.Length / (double)_cfg.CodecSampleRate:F1}s) in {sw.ElapsedMilliseconds}ms.");
+        Logs.Info($"MusicGen: {tReal} frames → {audio.Length} samples ({audio.Length / (double)_cfg.CodecSampleRate:F1}s) in {sw.ElapsedMilliseconds}ms (batch={B}, graph={(graphOn && !graphDead)}).");
         return audio;
     }
 

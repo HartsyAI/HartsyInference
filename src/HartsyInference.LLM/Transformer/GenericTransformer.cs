@@ -29,6 +29,12 @@ public sealed unsafe class GenericTransformer : IDisposable
     // and ~0.5 GB less VRAM (we preload this instead of the F32 table).
     private Tensor? _lmHeadQuant;
     private int _disposed;
+    // Graph-decode RoPE table (see EnsureRopeTableForGraphDecode): built once, lazily, at the first capacity a
+    // caller needs; rebuilt only if a LATER call needs more positions than currently built (the stale table is
+    // simply orphaned in the backend's permanent weight cache — a rare, bounded cost, not a per-call leak, since
+    // request MaxTokens is normally stable across a session).
+    private Tensor? _graphDecodeCos, _graphDecodeSin;
+    private int _graphDecodeCapacity;
 
     /// <summary>The architecture this transformer was built for.</summary>
     public TransformerConfig Config => _cfg;
@@ -298,6 +304,87 @@ public sealed unsafe class GenericTransformer : IDisposable
             cosLocal?.Dispose();
             sinLocal?.Dispose();
         }
+    }
+
+    /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the plain pre-norm
+    /// GQA/RoPE decoder shape (Llama/Qwen/Mistral family — most dense models). Excludes anything
+    /// <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, sliding-window,
+    /// attention softcap/sink, ALiBi, parallel residual, absolute-position embeddings, post-norm placement
+    /// (OLMo-2), dual local/global RoPE (Gemma-3), BLOOM's embedding LayerNorm, and non-1.0 embedding scale
+    /// (Granite/MiniCPM — <see cref="EmbedLookup"/>'s scale isn't applied by the graph-decode embed kernel).</summary>
+    public bool SupportsGraphDecode(IBackend backend) =>
+        backend.GraphDecodeSupported
+        && _cfg.Mla is null
+        && _cfg.Moe is null
+        && _cfg.CrossAttnLayers.Count == 0
+        && _cfg.SlidingWindow == 0
+        && _cfg.AttnLogitSoftcap == 0f
+        && !_cfg.AttnSink
+        && _cfg.AlibiMaxBias <= 0f
+        && !_cfg.ParallelResidual
+        && !_cfg.AbsolutePositionEmbeddings
+        && !_cfg.NoRopeOnGlobalLayers
+        && _cfg.NormPlacement == NormPlacement.PreNorm
+        && _cfg.RopeLocalTheta == 0f
+        && !_cfg.EmbeddingLayerNorm
+        && _cfg.EmbeddingScale == 1f;
+
+    /// <summary>Ensures the embedding table is GPU-resident (permanent weight-cache, like any other weight) and
+    /// returns it — <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather needs this; untied models
+    /// normally skip uploading <c>_embed</c> since <see cref="EmbedLookup"/>'s host gather doesn't need it there.
+    /// Call once before entering a graph-decode session.</summary>
+    public Tensor EnsureEmbedResidentForGraphDecode(IBackend backend)
+    {
+        ThrowIfDisposed();
+        backend.PreloadWeights([_embed!]);
+        return _embed!;
+    }
+
+    /// <summary>Returns the graph-decode RoPE table, building (or rebuilding, if <paramref name="minCapacity"/>
+    /// exceeds what's already built) it via <see cref="IBackend.BuildRopeTableDevice"/>. Cached on this
+    /// instance — see the field doc comment for why rebuilds don't accumulate per call.</summary>
+    public (Tensor cos, Tensor sin) EnsureRopeTableForGraphDecode(IBackend backend, int minCapacity)
+    {
+        ThrowIfDisposed();
+        if (_graphDecodeCos is null || _graphDecodeCapacity < minCapacity)
+        {
+            (_graphDecodeCos, _graphDecodeSin) = backend.BuildRopeTableDevice(minCapacity, _cfg.HeadDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
+            _graphDecodeCapacity = minCapacity;
+        }
+        return (_graphDecodeCos!, _graphDecodeSin!);
+    }
+
+    /// <summary>One full decode step (embed → every layer → final norm → logits → greedy argmax) using the
+    /// device-indexed graph-decode ops throughout, so the entire step is capturable into one CUDA graph and
+    /// replayed with a single launch. <paramref name="deviceTokenId"/> is read at the start (this step's input
+    /// token) and written at the end (the sampled next token) — the SAME buffer, so replaying the captured
+    /// graph repeatedly chains greedy decode entirely on-device (no D2H between steps; the caller reads it back
+    /// only when it needs the token for streaming/detokenization/stop-checking). Caller guarantees
+    /// <see cref="SupportsGraphDecode"/> and that <paramref name="devicePos"/>/<paramref name="deviceTokenId"/>
+    /// were refreshed (outside any capture region) for this step.</summary>
+    public void ForwardGraphDecodeStep(IBackend backend, Tensor embedTable, IKvCache cache,
+        Tensor cosTable, Tensor sinTable, ulong devicePos, ulong deviceTokenId)
+    {
+        ThrowIfDisposed();
+        Tensor embeds = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
+        backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
+
+        Tensor hidden = embeds;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            Tensor next = _layers[i].ForwardGraphStep(backend, hidden, cache, i, cosTable, sinTable, devicePos);
+            hidden.Dispose();
+            hidden = next;
+        }
+
+        Tensor normed = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
+        Normalize(backend, normed, hidden, _finalNorm!, _finalNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+        hidden.Dispose();
+
+        Tensor logits = ProjectLogits(backend, normed, 1);
+        normed.Dispose();
+        backend.ArgMaxInto(deviceTokenId, logits);
+        logits.Dispose();
     }
 
     /// <summary>Batched decode step for continuous batching: <paramref name="embeds"/> is <c>[1, B, hidden]</c>
@@ -846,6 +933,101 @@ public sealed unsafe class GenericTransformer : IDisposable
             Tensor mlpOut = Mlp(backend, preMlp, t);
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
+            Tensor result = new(flat, DType.F32);
+            backend.Add(result, afterAttn, mlpOut);
+            afterAttn.Dispose(); mlpOut.Dispose();
+            return result;
+        }
+
+        /// <summary>Single-token decode step for CUDA-graph capture/replay: identical math to <see cref="Forward"/>
+        /// (t=1, non-parallel-residual, pre-norm path) but RoPE/KV-append/attention read their position from a
+        /// device buffer instead of host ints, so the whole layer is graph-capturable. Caller (<see cref="GenericTransformer"/>'s
+        /// graph-decode eligibility check) guarantees this layer has none of the config this doesn't handle
+        /// (MLA, MoE, cross-attention, sliding window, softcap, sink, ALiBi, parallel residual, sandwich norm) —
+        /// this method does not re-check, it assumes the plain GQA/RoPE decoder shape.</summary>
+        public Tensor ForwardGraphStep(IBackend backend, Tensor hidden, IKvCache cache, int layerIndex,
+            Tensor cosTable, Tensor sinTable, ulong devicePos)
+        {
+            const int t = 1;
+            int h = _cfg.HiddenSize;
+            int hq = _cfg.NumHeads;
+            int hkv = _cfg.NumKvHeads;
+            int d = _cfg.HeadDim;
+            int group = _cfg.KvGroup;
+            TensorShape flat = new(1, t, h);
+
+            Tensor pre = new(flat, DType.F32);
+            PreSublayer(backend, pre, hidden, _inNorm, _normBias);
+
+            bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
+            Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, t, hq, d), DType.F32);
+            Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, t, hkv, d), DType.F32);
+            Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
+            Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
+            Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
+            Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+            pre.Dispose();
+
+            if (_cfg.QkNorm)
+            {
+                Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
+                Tensor kN = new(new TensorShape(1, t, hkv, d), DType.F32);
+                if (_cfg.UseLayerNorm)
+                {
+                    backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
+                    backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                }
+                else
+                {
+                    backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                    backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                }
+                q.Dispose(); k.Dispose();
+                q = qN; k = kN;
+            }
+
+            // q/k are [1,1,heads,d] here (pre-Permute0213) — identical contiguous layout to the [1,heads,1,d]
+            // the graph-decode RoPE kernel assumes (both collapse to heads*d contiguous when t=1), so no reshape.
+            bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
+            backend.RopeApplyDecodeStep(q, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
+            backend.RopeApplyDecodeStep(k, cosTable, sinTable, _cfg.RotaryDim, interleaved, devicePos);
+
+            Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32);
+            Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32);
+            Tensor vMh = new(new TensorShape(1, hkv, t, d), DType.F32);
+            backend.Permute0213(qMh, q, t, hq, d);
+            backend.Permute0213(kMh, k, t, hkv, d);
+            backend.Permute0213(vMh, v, t, hkv, d);
+            q.Dispose(); k.Dispose(); v.Dispose();
+
+            Tensor kFull = cache.KeyPrefix(layerIndex);
+            Tensor vFull = cache.ValuePrefix(layerIndex);
+            backend.KvCacheAppendDev(kFull, kMh, 0, devicePos);
+            backend.KvCacheAppendDev(vFull, vMh, 0, devicePos);
+            kMh.Dispose(); vMh.Dispose();
+
+            float scale = _cfg.AttnScale;
+            Tensor attn = new(new TensorShape(1, hq, t, d), DType.F32);
+            backend.FlashAttentionDev(attn, qMh, kFull, vFull, 0, group, causal: true, 0, scale, devicePos);
+            qMh.Dispose();
+
+            Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
+            backend.Permute0213(attnFlat, attn, hq, t, d);
+            attn.Dispose();
+            Tensor attnOut = new(flat, DType.F32);
+            Project(backend, attnOut, attnFlat, _oW!, _oB, _cfg.LowVramQuant);
+            attnFlat.Dispose();
+
+            attnOut = PostSublayer(backend, attnOut, _postAttnNorm, flat);
+            Tensor afterAttn = new(flat, DType.F32);
+            backend.Add(afterAttn, hidden, attnOut);
+            attnOut.Dispose();
+
+            Tensor preMlp = new(flat, DType.F32);
+            PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
+            Tensor mlpOut = Mlp(backend, preMlp, t);
+
+            mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
             afterAttn.Dispose(); mlpOut.Dispose();

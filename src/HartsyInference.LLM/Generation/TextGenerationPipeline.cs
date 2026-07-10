@@ -56,16 +56,34 @@ public sealed class TextGenerationPipeline
             next = sampler.Next(lastRow, generated);
         }
 
-        for (int step = 0; step < request.MaxTokens; step++)
-        {
-            if (stops.Contains(next)) { stopped = true; break; }
-            generated.Add(next);
-            onToken?.Invoke(next);
+        // CUDA-graph decode: collapses the ~600-700 kernel launches/token the plain loop below issues into one
+        // cuGraphLaunch/step, removing the CPU launch-issuance bottleneck the perf grind identified as the
+        // biggest remaining gap to llama.cpp (docs/Checklists/LLM_DECODE_PERF_GRIND.md Phase 6). Opt-in
+        // (env-gated) and scoped to what's actually graph-safe: greedy only (the on-device argmax has no
+        // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
+        // cross-attention/sliding-window models fall through to the verified default loop unchanged.
+        bool graphDecodeRequested = request.GraphDecode ?? (Environment.GetEnvironmentVariable("HARTSY_GRAPH_DECODE") == "1");
+        bool useGraphDecode = request.Sampling.Greedy
+            && graphDecodeRequested
+            && _model.SupportsGraphDecode(_backend);
 
-            using Tensor hidden = _model.Forward(_backend, [next], cache.CurrentLength, cache);
-            using Tensor logits = _model.ProjectLogits(_backend, hidden, 1);
-            Span<float> row = LastRow(logits, 1, cfg.VocabSize);
-            next = sampler.Next(row, generated);
+        if (useGraphDecode)
+        {
+            stopped = GenerateGraphDecode(request, cache, promptIds.Length, next, generated, stops, onToken);
+        }
+        else
+        {
+            for (int step = 0; step < request.MaxTokens; step++)
+            {
+                if (stops.Contains(next)) { stopped = true; break; }
+                generated.Add(next);
+                onToken?.Invoke(next);
+
+                using Tensor hidden = _model.Forward(_backend, [next], cache.CurrentLength, cache);
+                using Tensor logits = _model.ProjectLogits(_backend, hidden, 1);
+                Span<float> row = LastRow(logits, 1, cfg.VocabSize);
+                next = sampler.Next(row, generated);
+            }
         }
 
         return new GenerationResult
@@ -75,6 +93,53 @@ public sealed class TextGenerationPipeline
             PromptTokens = promptIds.Length,
             StoppedOnStopToken = stopped,
         };
+    }
+
+    /// <summary>Greedy decode via one captured CUDA graph, replayed once per token. <paramref name="firstToken"/>
+    /// is the token already sampled from the prefill's last position (mirrors the eager loop's starting state).
+    /// Device state (position, current token id, the RoPE table) is refreshed OUTSIDE the graph before each
+    /// replay — see IBackend's "Device-side decode position" docs for why that's what makes one capture valid
+    /// for every step. Falls back silently to nothing extra on failure: if capture throws (an eligible-looking
+    /// model hits something the graphed path doesn't actually support), the exception propagates — this path
+    /// is opt-in (env-gated), so a user who turns it on and hits a gap gets a clear error, not silent
+    /// mis-generation.</summary>
+    private bool GenerateGraphDecode(GenerationRequest request, FixedKvCache cache, int promptLen, int firstToken,
+        List<int> generated, HashSet<int> stops, Action<int>? onToken)
+    {
+        TransformerConfig cfg = _model.Config;
+        Tensor embedTable = _model.EnsureEmbedResidentForGraphDecode(_backend);
+        (Tensor cosTable, Tensor sinTable) = _model.EnsureRopeTableForGraphDecode(_backend, cache.MaxSequenceLength);
+        ulong devicePos = _backend.AllocDevicePos();
+        ulong deviceTokenId = _backend.AllocDeviceTokenId();
+        object? graph = null;
+        try
+        {
+            int pos = promptLen;   // absolute position of the token this step is about to generate
+            _backend.WriteDeviceTokenId(deviceTokenId, firstToken);
+            _backend.WriteDevicePos(devicePos, pos + 1, pos);
+            graph = _backend.CaptureGraph(() =>
+                _model.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos, deviceTokenId));
+
+            int next = firstToken;
+            for (int step = 0; step < request.MaxTokens; step++)
+            {
+                if (stops.Contains(next)) return true;
+                generated.Add(next);
+                onToken?.Invoke(next);
+
+                _backend.LaunchGraph(graph!);
+                next = _backend.ReadDeviceTokenId(deviceTokenId);
+                pos++;
+                _backend.WriteDevicePos(devicePos, pos + 1, pos);   // prep for the NEXT replay
+            }
+            return false;
+        }
+        finally
+        {
+            if (graph is not null) _backend.DisposeGraph(graph);
+            _backend.FreeDevicePos(devicePos);
+            _backend.FreeDeviceTokenId(deviceTokenId);
+        }
     }
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
