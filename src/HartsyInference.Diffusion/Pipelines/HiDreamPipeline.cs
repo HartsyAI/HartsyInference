@@ -31,6 +31,26 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     private readonly VaeDecoder _vaeDecoder;
     private readonly HiDreamConfig _config;
 
+    /// <summary>Keeps the 17 GB fp8 DiT GPU-resident across generations (skips the post-loop FreeWeights +
+    /// next-gen ~5 s re-upload). The quad encoder stack (T5 ~5 GB + Llama ~8 GB) cannot co-reside with it,
+    /// so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat
+    /// prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    private static readonly bool KeepModelsResident =
+        HartsyInference.Core.Runtime.EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-conditioning cache (one cond + one uncond slot): the quad encode (CLIP-L/G + T5 + Llama-8B,
+    // 49 per-block hidden states) costs seconds per generation and its outputs are pure functions of the
+    // token ids. Keyed on (T5 ids, Llama ids) — the four tokenizations covary with the prompt string, and
+    // T5+Llama together pin it. Tensors are host-materialized at store time so activation reclaims can't
+    // revert them; the forward must NOT dispose cache-owned tensors.
+    private int[]? _cachedCondKeyT5, _cachedCondKeyLlama;
+    private Tensor? _cachedCondPooled, _cachedCondT5;
+    private IReadOnlyList<Tensor>? _cachedCondLlama;
+    private int[]? _cachedUncondKeyT5, _cachedUncondKeyLlama;
+    private Tensor? _cachedUncondPooled, _cachedUncondT5;
+    private IReadOnlyList<Tensor>? _cachedUncondLlama;
+
     /// <summary>Creates a new HiDream pipeline with all components pre-loaded. Caller owns each component
     /// and is responsible for their lifetime — the pipeline does not dispose them on its own
     /// <see cref="DiffusionPipelineBase.Dispose"/>.</summary>
@@ -72,40 +92,101 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         Logs.Info($"HiDream t2i: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Encode all four text encoders (positive + optional negative) ──
-        Logs.Info("Encoding text with CLIP-L, CLIP-G, T5-XXL, and Llama-3.1...");
+        // ── 1. Encode all four text encoders (positive + optional negative), with a prompt cache ──
+        bool condHit = _cachedCondPooled is not null
+            && _cachedCondKeyT5 is not null && _cachedCondKeyT5.AsSpan().SequenceEqual(promptTokenIdsT5)
+            && _cachedCondKeyLlama is not null && _cachedCondKeyLlama.AsSpan().SequenceEqual(promptTokenIdsLlama);
+        bool uncondHit = !useCfg || (_cachedUncondPooled is not null
+            && _cachedUncondKeyT5 is not null && _cachedUncondKeyT5.AsSpan().SequenceEqual(negativePromptTokenIdsT5)
+            && _cachedUncondKeyLlama is not null && _cachedUncondKeyLlama.AsSpan().SequenceEqual(negativePromptTokenIdsLlama));
 
-        // Bulk-upload T5 + Llama-3.1 weights once. These are the heavy encoders (T5 ~5 GB, Llama
-        // ~8 GB) and the kernels inside touch them on every layer — per-op cache misses would
-        // dominate first-generation latency. CLIP-L/G are tiny and stay lazy-cached. Paired
-        // with FreeWeights below the VAE handoff. No-op on backends without a weight cache.
-        Backend.PreloadWeights(_t5.EnumerateWeights());
-        Backend.PreloadWeights(_llama.EnumerateWeights());
-
-        (Tensor condPooled, Tensor condT5, IReadOnlyList<Tensor> condLlama) = EncodePrompt(
-            promptTokenIdsL, promptTokenIdsG, promptTokenIdsT5, promptTokenIdsLlama,
-            promptEosPositionL, promptEosPositionG, promptAttentionMaskT5);
-
+        Tensor condPooled, condT5;
+        IReadOnlyList<Tensor> condLlama;
         Tensor? uncondPooled = null;
         Tensor? uncondT5 = null;
         IReadOnlyList<Tensor>? uncondLlama = null;
-        if (useCfg)
+        if (condHit && uncondHit)
         {
-            (uncondPooled, uncondT5, uncondLlama) = EncodePrompt(
-                negativePromptTokenIdsL, negativePromptTokenIdsG, negativePromptTokenIdsT5, negativePromptTokenIdsLlama,
-                negativeEosPositionL, negativeEosPositionG, negativeAttentionMaskT5);
+            condPooled = _cachedCondPooled!;
+            condT5 = _cachedCondT5!;
+            condLlama = _cachedCondLlama!;
+            if (useCfg)
+            {
+                uncondPooled = _cachedUncondPooled;
+                uncondT5 = _cachedUncondT5;
+                uncondLlama = _cachedUncondLlama;
+            }
+            Logs.Info("[HiDream] prompt-conditioning cache hit — quad-encoder phase skipped");
         }
+        else
+        {
+            Logs.Info("Encoding text with CLIP-L, CLIP-G, T5-XXL, and Llama-3.1...");
+            if (_ditResident)
+            {
+                // The quad encoders cannot co-reside with the resident 17 GB DiT; evict for this
+                // new-prompt generation and re-preload below.
+                Backend.Sync();
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
 
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+            // Bulk-upload T5 + Llama-3.1 weights once. These are the heavy encoders (T5 ~5 GB, Llama
+            // ~8 GB) and the kernels inside touch them on every layer — per-op cache misses would
+            // dominate first-generation latency. CLIP-L/G are tiny and stay lazy-cached. Paired
+            // with FreeWeights below. No-op on backends without a weight cache.
+            Backend.PreloadWeights(_t5.EnumerateWeights());
+            Backend.PreloadWeights(_llama.EnumerateWeights());
 
-        // Free the text-encoder weights from VRAM now that conditioning is computed — the 17 GB fp8
-        // transformer must fit the 4090 alone (T5 ~5 GB + Llama ~8 GB would not co-reside with it). The
-        // computed conditioning tensors (condT5/condLlama/condPooled) are separate activations and survive.
-        Backend.Sync();
-        Backend.FreeWeights(_clipL.EnumerateWeights());
-        Backend.FreeWeights(_clipG.EnumerateWeights());
-        Backend.FreeWeights(_t5.EnumerateWeights());
-        Backend.FreeWeights(_llama.EnumerateWeights());
+            (condPooled, condT5, condLlama) = EncodePrompt(
+                promptTokenIdsL, promptTokenIdsG, promptTokenIdsT5, promptTokenIdsLlama,
+                promptEosPositionL, promptEosPositionG, promptAttentionMaskT5);
+
+            if (useCfg)
+            {
+                (uncondPooled, uncondT5, uncondLlama) = EncodePrompt(
+                    negativePromptTokenIdsL, negativePromptTokenIdsG, negativePromptTokenIdsT5, negativePromptTokenIdsLlama,
+                    negativeEosPositionL, negativeEosPositionG, negativeAttentionMaskT5);
+            }
+
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+
+            // Free the text-encoder weights from VRAM now that conditioning is computed — the 17 GB fp8
+            // transformer must fit the 4090 alone (T5 ~5 GB + Llama ~8 GB would not co-reside with it). The
+            // computed conditioning tensors (condT5/condLlama/condPooled) are separate activations and survive.
+            Backend.Sync();
+            Backend.FreeWeights(_clipL.EnumerateWeights());
+            Backend.FreeWeights(_clipG.EnumerateWeights());
+            Backend.FreeWeights(_t5.EnumerateWeights());
+            Backend.FreeWeights(_llama.EnumerateWeights());
+            // Return the encode phase's pool reserve to the driver before the 17 GB DiT preload: under the
+            // warm-pool profile the Llama/T5 encode leaves multi-GB reservations that would otherwise starve
+            // the CFG denoise loop (24 GB − 17 GB weights leaves ~7 GB for everything else — measured OOM on
+            // step 1 without this planned trim).
+            Backend.TrimMemoryPool();
+
+            // Host-materialize the conditioning so it survives activation reclaims, then cache it.
+            _ = condPooled.DataPointer;
+            _ = condT5.DataPointer;
+            foreach (Tensor t in condLlama) _ = t.DataPointer;
+            DisposeCachedCond();
+            _cachedCondPooled = condPooled;
+            _cachedCondT5 = condT5;
+            _cachedCondLlama = condLlama;
+            _cachedCondKeyT5 = (int[])promptTokenIdsT5.Clone();
+            _cachedCondKeyLlama = (int[])promptTokenIdsLlama.Clone();
+            if (useCfg)
+            {
+                _ = uncondPooled!.DataPointer;
+                _ = uncondT5!.DataPointer;
+                foreach (Tensor t in uncondLlama!) _ = t.DataPointer;
+                DisposeCachedUncond();
+                _cachedUncondPooled = uncondPooled;
+                _cachedUncondT5 = uncondT5;
+                _cachedUncondLlama = uncondLlama;
+                _cachedUncondKeyT5 = (int[])negativePromptTokenIdsT5.Clone();
+                _cachedUncondKeyLlama = (int[])negativePromptTokenIdsLlama.Clone();
+            }
+        }
 
         // ── 2. Set up flow-match scheduler ──
         TensorShape latentShape = new TensorShape(1, _config.InChannels, latentH, latentW);
@@ -124,9 +205,10 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         }
 
         // ── 4. Denoising loop ──
-        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights
-        // at the VAE handoff so VRAM cycles between generations. No-op on non-cache backends.
+        // Bulk-upload transformer weights before the denoise loop (no-op when already resident under
+        // HARTSY_KEEP_MODELS). Paired with the conditional FreeWeights at the VAE handoff.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
+        _ditResident = true;
 
         Logs.Info("Starting HiDream denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -139,6 +221,11 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             if (useCfg)
             {
                 Tensor condNoise = _transformer.Forward(Backend, latent, t, condT5, condLlama, condPooled);
+                // Bound the async queue to one forward's transients: with the blocks now fully GPU-resident
+                // (no implicit host-sync throttling), two queued 17B F32-activation forwards overflow the
+                // ~7 GB left beside the resident fp8 weights (measured step-1 OOM at 1024²-CFG). One forward
+                // fits; serialize the pair.
+                Backend.Sync();
                 Tensor uncondNoise = _transformer.Forward(Backend, latent, t, uncondT5!, uncondLlama!, uncondPooled!);
                 noisePred = CfgHelper.ApplyCfg(uncondNoise, condNoise, cfgScale);
                 condNoise.Dispose();
@@ -160,20 +247,24 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        condPooled.Dispose();
-        condT5.Dispose();
-        for (int i = 0; i < condLlama.Count; i++) condLlama[i].Dispose();
-        uncondPooled?.Dispose();
-        uncondT5?.Dispose();
-        if (uncondLlama is not null)
-            for (int i = 0; i < uncondLlama.Count; i++) uncondLlama[i].Dispose();
+        // Conditioning tensors are cross-generation cache-owned — NOT disposed here.
 
         HiDreamTransformer.DumpFinalLatent(latent);
 
-        // Free transformer weights from VRAM before VAE decode (text encoders were already freed after
-        // the encode step). Phase 3 deviations #18.
+        // Under HARTSY_KEEP_MODELS the 17 GB fp8 DiT stays resident (the tiled VAE decode fits beside it);
+        // otherwise free it before the decode as before. Phase 3 deviations #18.
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
+        else
+        {
+            // DiT stays resident: hand the loop's pool reserve back so the VAE decode's im2col bands fit
+            // beside the 17 GB weights.
+            Backend.TrimMemoryPool();
+        }
 
         // ── 5. VAE decode ──
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
@@ -189,6 +280,31 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         sw.Stop();
         Logs.Info($"HiDream t2i complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgbData, width, height, seed);
+    }
+
+    /// <summary>Disposes the cached positive conditioning (safe mid-session — the context is live at
+    /// replacement time; end-of-life teardown nulls via the weight-field pattern instead).</summary>
+    private void DisposeCachedCond()
+    {
+        _cachedCondPooled?.Dispose();
+        _cachedCondT5?.Dispose();
+        if (_cachedCondLlama is not null)
+            foreach (Tensor t in _cachedCondLlama) t.Dispose();
+        _cachedCondPooled = null;
+        _cachedCondT5 = null;
+        _cachedCondLlama = null;
+    }
+
+    /// <summary>Negative twin of <see cref="DisposeCachedCond"/>.</summary>
+    private void DisposeCachedUncond()
+    {
+        _cachedUncondPooled?.Dispose();
+        _cachedUncondT5?.Dispose();
+        if (_cachedUncondLlama is not null)
+            foreach (Tensor t in _cachedUncondLlama) t.Dispose();
+        _cachedUncondPooled = null;
+        _cachedUncondT5 = null;
+        _cachedUncondLlama = null;
     }
 
     /// <summary>Encodes a single prompt through all four text encoders, returning (pooled, t5_hidden, llama_per_block_hidden).</summary>

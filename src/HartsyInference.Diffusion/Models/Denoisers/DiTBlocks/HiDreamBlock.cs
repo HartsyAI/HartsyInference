@@ -395,57 +395,103 @@ public sealed unsafe class HiDreamBlock
         backend.RmsNorm(txtKNormed, txtK, _kRmsNormTWeight!, _qkNormEps);
         txtQ.Dispose(); txtK.Dispose();
 
-        // Reshape to multi-head [B, H, S, D]
-        TensorShape imgMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
-        TensorShape txtMhShape = new TensorShape(batch, _numHeads, txtSeqLen, _headDim);
-
-        Tensor imgQMh = new Tensor(imgMhShape, DType.F32);
-        Tensor imgKMh = new Tensor(imgMhShape, DType.F32);
-        Tensor imgVMh = new Tensor(imgMhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(imgQMh, imgQNormed, batch, imgSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(imgKMh, imgKNormed, batch, imgSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(imgVMh, imgV, batch, imgSeqLen, _numHeads, _headDim);
-        imgQNormed.Dispose(); imgKNormed.Dispose(); imgV.Dispose();
-
-        Tensor txtQMh = new Tensor(txtMhShape, DType.F32);
-        Tensor txtKMh = new Tensor(txtMhShape, DType.F32);
-        Tensor txtVMh = new Tensor(txtMhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(txtQMh, txtQNormed, batch, txtSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(txtKMh, txtKNormed, batch, txtSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(txtVMh, txtV, batch, txtSeqLen, _numHeads, _headDim);
-        txtQNormed.Dispose(); txtKNormed.Dispose(); txtV.Dispose();
-
-        // RoPE on image-side Q/K only — RoPE expects [B, H, totalRopeSeqLen, D] tables, but image
-        // tokens occupy the first imgSeqLen positions in the rope table by convention.
-        ApplyRopeImageOnly(imgQMh, imgKMh, rope, batch, imgSeqLen);
-
-        // Concatenate image then text along the seq axis (multi-head layout).
-        Tensor jointQ = new Tensor(totalMhShape, DType.F32);
-        Tensor jointK = new Tensor(totalMhShape, DType.F32);
-        Tensor jointV = new Tensor(totalMhShape, DType.F32);
-        DiTUtils.ConcatAlongSeqDimMultiHead(jointQ, imgQMh, txtQMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-        DiTUtils.ConcatAlongSeqDimMultiHead(jointK, imgKMh, txtKMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-        DiTUtils.ConcatAlongSeqDimMultiHead(jointV, imgVMh, txtVMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-        imgQMh.Dispose(); imgKMh.Dispose(); imgVMh.Dispose();
-        txtQMh.Dispose(); txtKMh.Dispose(); txtVMh.Dispose();
-
-        // SDPA
+        Tensor imgAttn;
+        Tensor txtAttn;
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor jointAttn = new Tensor(totalMhShape, DType.F32);
-        backend.ScaledDotProductAttention(jointAttn, jointQ, jointK, jointV, null, scale);
-        jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
+        if (batch == 1)
+        {
+            // GPU-resident path (the Chroma double-stream idiom): concat [img; txt] in the flat [B, S, H·D]
+            // layout (contiguous device row-concat), rope PRE-permute over the FULL joint sequence (text
+            // positions are all-zero in the table → identity, bit-identical to the old image-only host
+            // rotation), Permute0213 to heads, fused SDPA, permute back, row-slice split. The old path ran
+            // 6 ReshapeToMultiHead + 3 concat + 1 split + 2 reshape-back HOST loops reading DataPointer —
+            // a full pipeline drain around every double block.
+            TensorShape jointFlat = new TensorShape(batch, totalSeqLen, _hiddenSize);
+            Tensor jointQf = new Tensor(jointFlat, DType.F32);
+            backend.Concat(jointQf, new Tensor[] { imgQNormed, txtQNormed }, 1);
+            Tensor jointKf = new Tensor(jointFlat, DType.F32);
+            backend.Concat(jointKf, new Tensor[] { imgKNormed, txtKNormed }, 1);
+            Tensor jointVf = new Tensor(jointFlat, DType.F32);
+            backend.Concat(jointVf, new Tensor[] { imgV, txtV }, 1);
+            imgQNormed.Dispose(); imgKNormed.Dispose(); imgV.Dispose();
+            txtQNormed.Dispose(); txtKNormed.Dispose(); txtV.Dispose();
 
-        // Split back to image / text and reshape to [B, S, hidden]
-        Tensor imgAttnMh = new Tensor(imgMhShape, DType.F32);
-        Tensor txtAttnMh = new Tensor(txtMhShape, DType.F32);
-        DiTUtils.SplitAlongSeqDimMultiHead(imgAttnMh, txtAttnMh, jointAttn, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
-        jointAttn.Dispose();
+            rope.ApplyGpu(backend, jointQf, jointKf, _numHeads);
 
-        Tensor imgAttn = new Tensor(imgShape, DType.F32);
-        Tensor txtAttn = new Tensor(txtShape, DType.F32);
-        DiTUtils.ReshapeFromMultiHead(imgAttn, imgAttnMh, batch, imgSeqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeFromMultiHead(txtAttn, txtAttnMh, batch, txtSeqLen, _numHeads, _headDim);
-        imgAttnMh.Dispose(); txtAttnMh.Dispose();
+            Tensor jointQ = new Tensor(totalMhShape, DType.F32);
+            backend.Permute0213(jointQ, jointQf, totalSeqLen, _numHeads, _headDim);
+            jointQf.Dispose();
+            Tensor jointK = new Tensor(totalMhShape, DType.F32);
+            backend.Permute0213(jointK, jointKf, totalSeqLen, _numHeads, _headDim);
+            jointKf.Dispose();
+            Tensor jointV = new Tensor(totalMhShape, DType.F32);
+            backend.Permute0213(jointV, jointVf, totalSeqLen, _numHeads, _headDim);
+            jointVf.Dispose();
+
+            // allowF16: Q/K are RMS-normed above (flat inner-dim norm) so scores are bounded — the fused
+            // cuDNN engine applies (the D=128 unmasked case).
+            Tensor jointAttn = new Tensor(totalMhShape, DType.F32);
+            backend.ScaledDotProductAttention(jointAttn, jointQ, jointK, jointV, null, scale, allowF16: true);
+            jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
+
+            Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
+            backend.Permute0213(jointAttnFlat, jointAttn, _numHeads, totalSeqLen, _headDim);
+            jointAttn.Dispose();
+
+            imgAttn = new Tensor(imgShape, DType.F32);
+            backend.SliceRows(imgAttn, jointAttnFlat, 0);
+            txtAttn = new Tensor(txtShape, DType.F32);
+            backend.SliceRows(txtAttn, jointAttnFlat, imgSeqLen);
+            jointAttnFlat.Dispose();
+        }
+        else
+        {
+            // Host fallback (B>1): the original reshape/concat/split loops.
+            TensorShape imgMhShape = new TensorShape(batch, _numHeads, imgSeqLen, _headDim);
+            TensorShape txtMhShape = new TensorShape(batch, _numHeads, txtSeqLen, _headDim);
+
+            Tensor imgQMh = new Tensor(imgMhShape, DType.F32);
+            Tensor imgKMh = new Tensor(imgMhShape, DType.F32);
+            Tensor imgVMh = new Tensor(imgMhShape, DType.F32);
+            DiTUtils.ReshapeToMultiHead(imgQMh, imgQNormed, batch, imgSeqLen, _numHeads, _headDim);
+            DiTUtils.ReshapeToMultiHead(imgKMh, imgKNormed, batch, imgSeqLen, _numHeads, _headDim);
+            DiTUtils.ReshapeToMultiHead(imgVMh, imgV, batch, imgSeqLen, _numHeads, _headDim);
+            imgQNormed.Dispose(); imgKNormed.Dispose(); imgV.Dispose();
+
+            Tensor txtQMh = new Tensor(txtMhShape, DType.F32);
+            Tensor txtKMh = new Tensor(txtMhShape, DType.F32);
+            Tensor txtVMh = new Tensor(txtMhShape, DType.F32);
+            DiTUtils.ReshapeToMultiHead(txtQMh, txtQNormed, batch, txtSeqLen, _numHeads, _headDim);
+            DiTUtils.ReshapeToMultiHead(txtKMh, txtKNormed, batch, txtSeqLen, _numHeads, _headDim);
+            DiTUtils.ReshapeToMultiHead(txtVMh, txtV, batch, txtSeqLen, _numHeads, _headDim);
+            txtQNormed.Dispose(); txtKNormed.Dispose(); txtV.Dispose();
+
+            ApplyRopeImageOnly(imgQMh, imgKMh, rope, batch, imgSeqLen);
+
+            Tensor jointQ = new Tensor(totalMhShape, DType.F32);
+            Tensor jointK = new Tensor(totalMhShape, DType.F32);
+            Tensor jointV = new Tensor(totalMhShape, DType.F32);
+            DiTUtils.ConcatAlongSeqDimMultiHead(jointQ, imgQMh, txtQMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+            DiTUtils.ConcatAlongSeqDimMultiHead(jointK, imgKMh, txtKMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+            DiTUtils.ConcatAlongSeqDimMultiHead(jointV, imgVMh, txtVMh, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+            imgQMh.Dispose(); imgKMh.Dispose(); imgVMh.Dispose();
+            txtQMh.Dispose(); txtKMh.Dispose(); txtVMh.Dispose();
+
+            Tensor jointAttn = new Tensor(totalMhShape, DType.F32);
+            backend.ScaledDotProductAttention(jointAttn, jointQ, jointK, jointV, null, scale);
+            jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
+
+            Tensor imgAttnMh = new Tensor(imgMhShape, DType.F32);
+            Tensor txtAttnMh = new Tensor(txtMhShape, DType.F32);
+            DiTUtils.SplitAlongSeqDimMultiHead(imgAttnMh, txtAttnMh, jointAttn, batch, _numHeads, imgSeqLen, txtSeqLen, _headDim);
+            jointAttn.Dispose();
+
+            imgAttn = new Tensor(imgShape, DType.F32);
+            txtAttn = new Tensor(txtShape, DType.F32);
+            DiTUtils.ReshapeFromMultiHead(imgAttn, imgAttnMh, batch, imgSeqLen, _numHeads, _headDim);
+            DiTUtils.ReshapeFromMultiHead(txtAttn, txtAttnMh, batch, txtSeqLen, _numHeads, _headDim);
+            imgAttnMh.Dispose(); txtAttnMh.Dispose();
+        }
 
         // Output projections
         Tensor imgOut = LinearAlloc(backend, imgAttn, _toOutWeight!, _toOutBias, imgShape);
@@ -475,27 +521,55 @@ public sealed unsafe class HiDreamBlock
         backend.RmsNorm(kNormed, k, _kRmsNormWeight!, _qkNormEps);
         q.Dispose(); k.Dispose();
 
-        Tensor qMh = new Tensor(mhShape, DType.F32);
-        Tensor kMh = new Tensor(mhShape, DType.F32);
-        Tensor vMh = new Tensor(mhShape, DType.F32);
-        DiTUtils.ReshapeToMultiHead(qMh, qNormed, batch, seqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(kMh, kNormed, batch, seqLen, _numHeads, _headDim);
-        DiTUtils.ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
-        qNormed.Dispose(); kNormed.Dispose(); v.Dispose();
-
-        // RoPE applies position-by-position; zero-position text tokens just rotate by 0 (identity).
-        // We rotate over min(seqLen, totalRopeSeqLen) positions — the text segment past imgSeqLen
-        // uses the all-zero rope entries from BuildPositionIds.
-        ApplyRopeFullSeq(qMh, kMh, rope, batch, seqLen);
-
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnMh = new Tensor(mhShape, DType.F32);
-        backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
-        qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+        Tensor attn;
+        if (batch == 1)
+        {
+            // GPU-resident path: rope PRE-permute on the flat [B, S, H·D] layout (zero-position text tokens
+            // rotate by identity — bit-identical to the old post-permute host rotation), then Permute0213 →
+            // fused SDPA (allowF16: Q/K RMS-normed → bounded scores) → permute back. Replaces the 3
+            // ReshapeToMultiHead + 1 ReshapeFromMultiHead host loops (a pipeline drain per single block).
+            rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
 
-        Tensor attn = new Tensor(hiddenShape, DType.F32);
-        DiTUtils.ReshapeFromMultiHead(attn, attnMh, batch, seqLen, _numHeads, _headDim);
-        attnMh.Dispose();
+            Tensor qMh = new Tensor(mhShape, DType.F32);
+            backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
+            qNormed.Dispose();
+            Tensor kMh = new Tensor(mhShape, DType.F32);
+            backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
+            kNormed.Dispose();
+            Tensor vMh = new Tensor(mhShape, DType.F32);
+            backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
+            v.Dispose();
+
+            Tensor attnMh = new Tensor(mhShape, DType.F32);
+            backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale, allowF16: true);
+            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+
+            attn = new Tensor(hiddenShape, DType.F32);
+            backend.Permute0213(attn, attnMh, _numHeads, seqLen, _headDim);
+            attnMh.Dispose();
+        }
+        else
+        {
+            Tensor qMh = new Tensor(mhShape, DType.F32);
+            Tensor kMh = new Tensor(mhShape, DType.F32);
+            Tensor vMh = new Tensor(mhShape, DType.F32);
+            DiTUtils.ReshapeToMultiHead(qMh, qNormed, batch, seqLen, _numHeads, _headDim);
+            DiTUtils.ReshapeToMultiHead(kMh, kNormed, batch, seqLen, _numHeads, _headDim);
+            DiTUtils.ReshapeToMultiHead(vMh, v, batch, seqLen, _numHeads, _headDim);
+            qNormed.Dispose(); kNormed.Dispose(); v.Dispose();
+
+            // RoPE applies position-by-position; zero-position text tokens just rotate by 0 (identity).
+            ApplyRopeFullSeq(qMh, kMh, rope, batch, seqLen);
+
+            Tensor attnMh = new Tensor(mhShape, DType.F32);
+            backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, null, scale);
+            qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
+
+            attn = new Tensor(hiddenShape, DType.F32);
+            DiTUtils.ReshapeFromMultiHead(attn, attnMh, batch, seqLen, _numHeads, _headDim);
+            attnMh.Dispose();
+        }
 
         Tensor outProj = LinearAlloc(backend, attn, _toOutWeight!, _toOutBias, hiddenShape);
         attn.Dispose();
@@ -529,26 +603,25 @@ public sealed unsafe class HiDreamBlock
         backend.Linear(gateLogits, input, _moeGateWeight!, null);
 
         // Per-token, per-expert renormalized top-k gate weights (0 for non-selected experts). [B, S, E].
-        // With top-k=1 (or fewer) this collapses to the single-expert fallback (each token routes to its
-        // single argmax expert with weight 1 after renorm) plus the shared expert.
+        // Device op (was a host loop reading the device-produced logits' DataPointer — a full pipeline
+        // drain per block per forward; with the host per-expert accumulate below it dominated the
+        // ~29s/step wall). With top-k=1 (or fewer) this collapses to the single-expert fallback.
         Tensor gateWeights = new Tensor(new TensorShape(batch, seqLen, _numRoutedExperts), DType.F32);
         int activeK = _numActivatedExperts <= 1 ? 1 : _numActivatedExperts;
-        ComputeTopKGateWeights(gateLogits, gateWeights, batch, seqLen, _numRoutedExperts, activeK);
+        backend.MoeTopKGate(gateWeights, gateLogits, activeK);
         gateLogits.Dispose();
 
-        // Accumulate the shared expert, then add each routed expert weighted by its (possibly zero) gate.
-        Tensor combined = new Tensor(inShape, DType.F32);
-        CopyTensor(combined, shared, batch * seqLen * _hiddenSize);
-        shared.Dispose();
-
+        // The shared (always-on) expert output is the accumulator; each routed expert adds in place,
+        // weighted by its (possibly zero) gate — all device-resident, no D2H.
+        _ = inShape;
         for (int e = 0; e < _numRoutedExperts; e++)
         {
             Tensor expertOut = SwiGluForward(backend, input, _expertW1![e], _expertW3![e], _expertW2![e], batch, seqLen);
-            AccumulateGatedExpert(combined, expertOut, gateWeights, e, batch, seqLen, _hiddenSize, _numRoutedExperts);
+            backend.RowGatedAccumulate(shared, expertOut, gateWeights, _numRoutedExperts, e);
             expertOut.Dispose();
         }
         gateWeights.Dispose();
-        return combined;
+        return shared;
     }
 
     /// <summary>SwiGLU forward: <c>w2(silu(w1(x)) * w3(x))</c>. Used by the text FFN, the shared MoE
@@ -612,99 +685,6 @@ public sealed unsafe class HiDreamBlock
         rope.Forward(q, k, batch, q.ShapeValue(1), seqLen);
     }
 
-    /// <summary>Computes the per-token, per-expert renormalized top-k gate weights from routing logits.
-    /// <para>Matches diffusers HiDream <c>MoEGate</c>: <c>scores = softmax(logits, dim=-1)</c>; pick the top-k
-    /// experts by score; renormalize the selected weights to sum to 1 (<c>norm_topk_prob=True</c> path:
-    /// <c>w_k / (sum_k w_k + 1e-20)</c>). The output <paramref name="weights"/> is dense <c>[B, S, E]</c> with the
-    /// renormalized weight at each selected expert slot and 0 elsewhere, so a dense per-expert accumulation
-    /// reproduces the sparse top-k dispatch exactly.</para>
-    /// VALIDATION-PENDING: verify vs diffusers HiDreamImageTransformer2DModel (softmax axis = expert dim,
-    /// top-k renorm denominator includes the 1e-20 epsilon).</summary>
-    private static void ComputeTopKGateWeights(Tensor logits, Tensor weights, int batch, int seqLen, int numExperts, int topK)
-    {
-        float* lp = (float*)logits.DataPointer;
-        float* wp = (float*)weights.DataPointer;
-        Span<float> probs = stackalloc float[numExperts];
-        int k = Math.Min(topK, numExperts);
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int off = (b * seqLen + s) * numExperts;
-
-                // softmax over the expert axis.
-                float maxLogit = lp[off];
-                for (int e = 1; e < numExperts; e++)
-                    if (lp[off + e] > maxLogit) maxLogit = lp[off + e];
-                float sum = 0f;
-                for (int e = 0; e < numExperts; e++)
-                {
-                    float ex = MathF.Exp(lp[off + e] - maxLogit);
-                    probs[e] = ex;
-                    sum += ex;
-                }
-                for (int e = 0; e < numExperts; e++)
-                {
-                    probs[e] /= sum;
-                    wp[off + e] = 0f;
-                }
-
-                // top-k selection (k small — simple repeated argmax over a copy).
-                float denom = 0f;
-                for (int kk = 0; kk < k; kk++)
-                {
-                    int best = -1;
-                    float bestVal = float.NegativeInfinity;
-                    for (int e = 0; e < numExperts; e++)
-                    {
-                        if (wp[off + e] != 0f) continue; // already selected
-                        if (probs[e] > bestVal)
-                        {
-                            bestVal = probs[e];
-                            best = e;
-                        }
-                    }
-                    // Mark selected with its (pre-renorm) prob; renormalize after the loop.
-                    wp[off + best] = bestVal;
-                    denom += bestVal;
-                }
-
-                // Renormalize the selected weights to sum to 1 (norm_topk_prob path).
-                denom += 1e-20f;
-                for (int e = 0; e < numExperts; e++)
-                    if (wp[off + e] != 0f) wp[off + e] /= denom;
-            }
-        }
-    }
-
-    /// <summary>output += gate[..., expert] * expertOut, broadcasting the per-token scalar gate weight over
-    /// the hidden dim. Non-selected tokens have a 0 gate weight so they contribute nothing.</summary>
-    private static void AccumulateGatedExpert(Tensor output, Tensor expertOut, Tensor gateWeights, int expert,
-        int batch, int seqLen, int hiddenSize, int numExperts)
-    {
-        float* op = (float*)output.DataPointer;
-        float* ep = (float*)expertOut.DataPointer;
-        float* gp = (float*)gateWeights.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                float g = gp[(b * seqLen + s) * numExperts + expert];
-                if (g == 0f) continue;
-                int off = (b * seqLen + s) * hiddenSize;
-                for (int d = 0; d < hiddenSize; d++)
-                    op[off + d] += g * ep[off + d];
-            }
-        }
-    }
-
-    /// <summary>Copies <paramref name="count"/> floats from <paramref name="src"/> into <paramref name="dst"/>.</summary>
-    private static void CopyTensor(Tensor dst, Tensor src, int count)
-    {
-        long bytes = (long)count * sizeof(float);
-        Buffer.MemoryCopy((float*)src.DataPointer, (float*)dst.DataPointer, bytes, bytes);
-    }
 }
 
 /// <summary>Tiny helper to read a tensor shape dim by index without a managed cast for every use site.</summary>

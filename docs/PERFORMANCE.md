@@ -151,8 +151,9 @@ rounds land:
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
-| Z-Image-Turbo | **2.77 s** | 3.1 s | Faster than ComfyUI |
-| Krea2-Turbo | **4.48 s** | 6.5 s | Faster than ComfyUI |
+| Z-Image-Turbo | **2.76 s** | 3.1 s | Faster than ComfyUI |
+| Krea2-Turbo | **4.52 s** | 6.5 s | Faster than ComfyUI |
+| Krea2-Base | 30.3 s | — | CFG path validated 07-10 (28 st/cfg 4.5); no Comfy baseline yet |
 | Qwen-Image | **40.9 s** | 54.8 s | Faster than ComfyUI |
 | ERNIE-Image | **20.0 s** | 23.9 s | Faster than ComfyUI (was 49.6 s / 2.1× slower) |
 | Ideogram4 | 19.5 s | 17.0 s | 1.15× — optimization queued |
@@ -161,8 +162,8 @@ rounds land:
 | Chroma1-HD | 28.5 s | 16.6 s | 1.7× — was 3.7× (round 3: F16 blocks, persistent CFG-pair CUDA graph, context trim); batched CFG queued |
 | AuraFlow-0.3 | **13.93 s** | 14.0 s | Tied with ComfyUI (was 31.4 s) |
 | Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
-| Flux-Schnell | 10.5 s | — | First benchmark; optimization in progress |
-| Flux.2 Klein 4B | **3.45 s** | — | No ComfyUI baseline yet. Distilled variant: 4 steps/CFG 1 official (earlier 10-step numbers over-stepped it and artifacted) |
+| Flux-Schnell | 10.5 s | 3.04 s | 3.5× — Flux-family grind queued (Chroma round-3 kit transplants) |
+| Flux.2 Klein 4B | 3.45 s | 1.85 s | 1.9× — Flux-family grind queued. Distilled variant: 4 steps/CFG 1 official |
 | SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
 
 ---

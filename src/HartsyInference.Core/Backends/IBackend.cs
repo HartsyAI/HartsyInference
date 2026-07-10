@@ -141,6 +141,80 @@ public interface IBackend : IDisposable
         }
     }
 
+    /// <summary>MoE top-k gate weights (the HiDream <c>MoEGate</c>): per token, softmax
+    /// <paramref name="logits"/> <c>[B, S, E]</c> over the expert axis, select the top-<paramref name="topK"/>
+    /// experts, renormalize the selected weights to sum to 1 (<c>norm_topk_prob</c>: <c>w/(Σw + 1e-20)</c>).
+    /// Writes a dense <c>[B, S, E]</c> table with the renormalized weight at selected slots and 0 elsewhere,
+    /// so a dense per-expert accumulation reproduces the sparse top-k dispatch exactly.</summary>
+    unsafe void MoeTopKGate(Tensor weights, Tensor logits, int topK)
+    {
+        if (logits.DType != DType.F32 || weights.DType != DType.F32)
+            throw new NotSupportedException("MoeTopKGate default fallback only supports F32.");
+        int numExperts = (int)logits.Shape[logits.Shape.Rank - 1];
+        long tokens = logits.ElementCount / numExperts;
+        float* lp = (float*)logits.DataPointer;
+        float* wp = (float*)weights.DataPointer;
+        Span<float> probs = stackalloc float[numExperts];
+        int k = Math.Min(topK, numExperts);
+        for (long t = 0; t < tokens; t++)
+        {
+            long off = t * numExperts;
+            float maxLogit = lp[off];
+            for (int e = 1; e < numExperts; e++)
+                if (lp[off + e] > maxLogit) maxLogit = lp[off + e];
+            float sum = 0f;
+            for (int e = 0; e < numExperts; e++)
+            {
+                float ex = MathF.Exp(lp[off + e] - maxLogit);
+                probs[e] = ex;
+                sum += ex;
+            }
+            for (int e = 0; e < numExperts; e++)
+            {
+                probs[e] /= sum;
+                wp[off + e] = 0f;
+            }
+            float denom = 0f;
+            for (int kk = 0; kk < k; kk++)
+            {
+                int best = -1;
+                float bestVal = float.NegativeInfinity;
+                for (int e = 0; e < numExperts; e++)
+                {
+                    if (wp[off + e] != 0f) continue;
+                    if (probs[e] > bestVal) { bestVal = probs[e]; best = e; }
+                }
+                wp[off + best] = bestVal;
+                denom += bestVal;
+            }
+            denom += 1e-20f;
+            for (int e = 0; e < numExperts; e++)
+                if (wp[off + e] != 0f) wp[off + e] /= denom;
+        }
+    }
+
+    /// <summary>In-place per-token gated accumulate (the MoE expert combine):
+    /// <c>inout[b,s,:] += gate[(b,s), expertIndex] * value[b,s,:]</c>, where <paramref name="gate"/> is the
+    /// dense <c>[B, S, E]</c> table from <see cref="MoeTopKGate"/> (zero for non-selected tokens).</summary>
+    unsafe void RowGatedAccumulate(Tensor inout, Tensor value, Tensor gate, int numExperts, int expertIndex)
+    {
+        if (inout.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
+            throw new NotSupportedException("RowGatedAccumulate default fallback only supports F32.");
+        int dim = (int)inout.Shape[inout.Shape.Rank - 1];
+        long rows = inout.ElementCount / dim;
+        float* op = (float*)inout.DataPointer;
+        float* vp = (float*)value.DataPointer;
+        float* gp = (float*)gate.DataPointer;
+        for (long r = 0; r < rows; r++)
+        {
+            float g = gp[r * numExperts + expertIndex];
+            if (g == 0f) continue;
+            long off = r * dim;
+            for (int d = 0; d < dim; d++)
+                op[off + d] += g * vp[off + d];
+        }
+    }
+
     /// <summary>Classifier-free-guidance combine + Euler step, in-place on <paramref name="z"/>:
     /// <c>v = guidance*pos + (1-guidance)*neg; z += v*delta</c>. Flat element-wise over the latent.</summary>
     unsafe void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
