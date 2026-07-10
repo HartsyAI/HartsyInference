@@ -203,6 +203,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             // encode, the denoise section re-preloads. Cache hits never pay this.
             if (_ditResident)
             {
+                _transformer.InvalidateStepGraph(Backend);
                 Backend.FreeWeights(_transformer.EnumerateWeights());
                 _ditResident = false;
             }
@@ -437,6 +438,14 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             regionWeights = new float[regionalPlan!.Regions.Count];
         }
 
+        // Drain-free / graph routing decided BEFORE the pre-loop sweep: FreeActivations resets the backend
+        // step-graph slot, so a persistent cross-generation graph requires skipping the sweep on the plain
+        // t2i cache-warm path (the Chroma pattern — per-op disposal + the warm mem-pool keep VRAM flat).
+        bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
+            && !hasRegions && !StatsEnabled;
+        bool graphRoute = drainFree && !doTrueCfg && packedSourceLatent is null
+            && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
+
         // Materialize every tensor that must survive across steps on the host, then reclaim the VAE-encode /
         // packing intermediates (control, Kontext, img2img source). The per-step FreeActivations below frees
         // device buffers WITHOUT a D2H sync-back, so anything still device-only here would be silently lost.
@@ -446,7 +455,8 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         if (packedKontextRef is not null) _ = packedKontextRef.DataPointer;
         if (packedSourceLatent is not null) _ = packedSourceLatent.DataPointer;
         if (packedMask is not null) _ = packedMask.DataPointer;
-        Backend.FreeActivations();
+        if (!graphRoute)
+            Backend.FreeActivations();
 
         Logs.Info("Starting Flux denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
@@ -457,16 +467,35 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         // no per-step D2H of the velocity + H2D re-upload of the latent. Tools/Kontext (host-side per-step
         // concats), regional bias, masked inpaint (host blend), and the opt-in stats scans keep the host
         // branch, which is unchanged.
-        bool drainFree = !isMaskedInpaint && packedControl is null && packedKontextRef is null
-            && !hasRegions && !StatsEnabled;
         Logs.Info(drainFree ? "Flux loop: drain-free device-resident path." : "Flux loop: host-step path.");
+
+        // Persistent step graph (the Chroma round-3 recipe): route the latent through the transformer-owned
+        // FIXED buffer so the whole forward is captured once per (prompt refs, grid) signature and replayed
+        // with one cuGraphLaunch per step — it survives across generations (KEEP_MODELS + drain-free +
+        // sweep-skip keep the buffers alive, so a repeat-prompt gen replays every step with zero re-capture).
+        // True-CFG stays eager (pair capture not wired; Dev/Schnell don't use it).
+        if (graphRoute)
+        {
+            Tensor fixedLatent = _transformer.PrepareGraphLatent(Backend, packedLatent);
+            packedLatent.Dispose();
+            packedLatent = fixedLatent;
+        }
 
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f; // Convert timestep back to sigma [0,1]
 
-            if (drainFree)
+            if (graphRoute)
+            {
+                (Tensor velocity, bool callerOwns) = _transformer.ForwardGraphable(
+                    Backend, packedLatent, condStream, sigma,
+                    clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked);
+                // Euler stays OUTSIDE the capture: in-place on the fixed latent the graph reads next step.
+                Backend.CfgEulerStep(packedLatent, velocity, velocity, 1.0f, scheduler.Dt(i));
+                if (callerOwns) velocity.Dispose();
+            }
+            else if (drainFree)
             {
                 Tensor velocityPred = _transformer.Forward(
                     Backend, packedLatent, condStream, sigma,
@@ -604,6 +633,11 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             }
         }
 
+        // On the graph route packedLatent IS the transformer-owned fixed buffer (alive across generations
+        // for graph replay) — hand a snapshot to the unpack/dispose tail instead.
+        if (graphRoute)
+            packedLatent = _transformer.SnapshotGraphLatent(Backend);
+
         // clipPooled / t5Embeddings / negClipPooled / negT5Embeddings are cross-generation cache entries —
         // not disposed here; replacement on a future cache miss owns their lifetime.
         extendedT5?.Dispose();
@@ -622,6 +656,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         {
             streamer.EvictAll();
             streamer.Dispose();
+            _transformer.InvalidateStepGraph(Backend);
             Backend.FreeWeights(_transformer.EnumerateSharedWeights());
             // Also purge the block weights: the streaming cache registers each uploaded block in the backend
             // weight cache, and any block still cached at the end (or its lingering F16 cast) would stay
@@ -632,6 +667,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         }
         else if (!KeepModelsResident)
         {
+            _transformer.InvalidateStepGraph(Backend);
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
         }
@@ -697,8 +733,13 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         image.Dispose();
 
         // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
-        // memory until GC finalization and shrink the budget of whatever generation runs next.
-        Backend.FreeActivations();
+        // memory until GC finalization and shrink the budget of whatever generation runs next. While a
+        // captured step graph is alive, FreeActivations would destroy it (and free its fixed buffers) —
+        // trim the pool instead (sync + return-to-driver; per-op disposal already freed the intermediates).
+        if (Backend.StepGraphReady)
+            Backend.TrimMemoryPool();
+        else
+            Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Flux ({baseMode}) {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

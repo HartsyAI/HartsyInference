@@ -16,11 +16,11 @@ Authoritative living copies: [`docs/PERFORMANCE.md`](../PERFORMANCE.md) §5 and
 | **SDXL (20 st)** | **2.93 s** | 3.7 s | **Faster than Comfy** (rounds 1+2 `44.24/44.26-local`: 33.9→3.69→2.93; Reshape round-trips + fused loop, then cuDNN conv + Lt epilogue + VAE-attn fix) |
 | Krea2-Turbo (8 st) | **4.52 s** | 6.5 s | Faster than Comfy |
 | Boogu-Turbo (4 st) | 3.26 s | 2.54 s | 1.28× (round 2 `44.22-local`: 48.9→5.05→3.26; D=120 cuDNN fused + packed loop) |
-| Flux-Schnell (4 st) | 10.5 s | — | first bench |
-| Flux.2 Klein 4B (4 st) | **3.45 s** | — | loader FIXED 07-09 (comfy-quant mixed TE: never pre-cast encoder dicts) + params corrected: DISTILLED variant = 4 steps/CFG 1 official; 10-step runs over-stepped it → crunchy artifacts (was benched 10 st since 44.15) |
+| Flux-Schnell (4 st) | **3.6 s** | 3.04 s | 1.18× (kit transplant `44.38-local`: 10.5→3.6; F16 damp + persistent cross-gen step graph + rope/prompt caches) |
+| Flux.2 Klein 4B (4 st) | **2.36 s** | 1.85 s | 1.28× (kit transplant `44.38-local`: 3.45→2.36, same kit as Flux.1; loader FIXED 07-09 — comfy-quant mixed TE: never pre-cast encoder dicts; DISTILLED variant = 4 steps/CFG 1 official) |
 | Ideogram4 (20 st) | 19.5 s | 17.0 s | 1.15× |
 | **ERNIE (20 st)** | **20.0 s** | 23.9 s | **Faster than Comfy** (round 1: 49.6→20.0, seed-777 A/B clean) |
-| Flux-Dev (20 st) | 31.0 s | 12.5 s | grind in progress (was 72.4) |
+| Flux-Dev (20 st) | **16.05 s** | 12.5 s | 1.28× (kit transplant `44.38-local`: 72.4→31.0→16.05; F16 damp + persistent cross-gen step graph; remaining gap = per-step GPU compute — fused QKV / Lt tuning next) |
 | Qwen-Image (20 st) | **40.9 s** | 54.8 s | Faster than Comfy |
 | Boogu-Base (20 st, cfg 4) | 26.5 s | 17.8 s | 1.49× (round 2: ~6 min→43.2→26.5) |
 | Chroma1-HD (20 st) | 28.5 s | 16.6 s | round 3 executed: F16 blocks + persistent CFG-pair CUDA graph + context trim (was 550 → 61.1 → 28.3); batched CFG queued |

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -30,6 +31,15 @@ public sealed unsafe class Flux2Transformer : IDisposable
     // Final layer: AdaLN-Continuous (shift, scale only — no gate) + proj_out
     private Tensor? _normOutLinearWeight;
     private Tensor? _projOutWeight;
+
+    /// <summary>True when this instance runs the audited F16 block loop (HARTSY_DIT_F16) with the exact
+    /// <see cref="ChromaF16.ResidualDamp"/> residual damp — every branch input passes a no-affine LayerNorm
+    /// and the final AdaLN-continuous norm cancels the factor before proj_out (the Chroma/Flux.1 recipe).</summary>
+    private bool _f16Mode;
+
+    // Rope-table signature: Precompute rebuilds host trig tables AND re-uploads the GPU cos/sin tables —
+    // positions only change with resolution / text length.
+    private long _ropeSig = long.MinValue;
 
     private int _disposed;
 
@@ -65,8 +75,19 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// <summary>Loads weights using the canonical naming emitted by <c>Flux2CheckpointConverter</c>. Follows the diffusers Flux2 module hierarchy except where the converter has split fused weights (see <see cref="Flux2DoubleBlock"/> and <see cref="Flux2SingleBlock"/>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
+        _f16Mode = DitDtype.Act == DType.F16;
+        float branchDamp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
+
         _xEmbedWeight = weights["x_embedder.weight"];
         _contextEmbedWeight = weights["context_embedder.weight"];
+        if (_f16Mode)
+        {
+            // Enter the damped-residual regime at the (bias-less) embedders; block-output damping keeps the
+            // stream there; the final no-affine LayerNorm cancels the factor exactly.
+            _xEmbedWeight.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+            _contextEmbedWeight.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+            Logs.Info($"[Flux2] F16 block loop active (residual damp 1/{1.0f / ChromaF16.ResidualDamp:F0})");
+        }
 
         _timestepLinear1Weight = weights["time_guidance_embed.timestep_embedder.linear_1.weight"];
         _timestepLinear2Weight = weights["time_guidance_embed.timestep_embedder.linear_2.weight"];
@@ -83,10 +104,10 @@ public sealed unsafe class Flux2Transformer : IDisposable
         _singleMod.LoadWeights(weights["single_stream_modulation.linear.weight"], null);
 
         for (int i = 0; i < _config.Depth; i++)
-            _doubleBlocks[i].LoadWeights(weights, $"transformer_blocks.{i}");
+            _doubleBlocks[i].LoadWeights(weights, $"transformer_blocks.{i}", branchDamp);
 
         for (int i = 0; i < _config.DepthSingleBlocks; i++)
-            _singleBlocks[i].LoadWeights(weights, $"single_transformer_blocks.{i}");
+            _singleBlocks[i].LoadWeights(weights, $"single_transformer_blocks.{i}", branchDamp);
 
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _projOutWeight = weights["proj_out.weight"];
@@ -123,6 +144,17 @@ public sealed unsafe class Flux2Transformer : IDisposable
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor textEmbeddings,
         float sigma, float guidanceScale, int hPacked, int wPacked)
     {
+        Tensor tembOuter = ComputeTimestepEmbedding(backend, sigma, guidanceScale, (int)packedLatent.Shape[0]);
+        Tensor velocity = ForwardWithTemb(backend, packedLatent, textEmbeddings, tembOuter, hPacked, wPacked);
+        tembOuter.Dispose();
+        return velocity;
+    }
+
+    /// <summary>Forward body with a caller-owned temb (shared by the eager and step-graph paths — the graph
+    /// path computes temb inside the capture from a fixed device sin buffer). Does NOT dispose temb.</summary>
+    private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor textEmbeddings, Tensor temb,
+        int hPacked, int wPacked)
+    {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int txtSeqLen = (int)textEmbeddings.Shape[1];
@@ -138,18 +170,31 @@ public sealed unsafe class Flux2Transformer : IDisposable
         Tensor txtTokens = new Tensor(txtTokShape, DType.F32);
         backend.Linear(txtTokens, textEmbeddings, _contextEmbedWeight!, null);
 
-        // ── 2. Timestep (+ guidance) embedding ──
-        Tensor temb = ComputeTimestepEmbedding(backend, sigma, guidanceScale, batch);
+        // ── 2. F16 block loop (HARTSY_DIT_F16, B=1): one cast per stream before the loop; every block
+        //       activation follows; streams already ride at ResidualDamp scale from the damped embedders.
+        //       Cast back to F32 after the loop for the final norm (which cancels the damp). ──
+        bool f16Loop = _f16Mode && batch == 1;
+        if (f16Loop)
+        {
+            Tensor imgF16 = new Tensor(imgTokShape, DType.F16);
+            backend.CastToF16(imgF16, imgTokens);
+            imgTokens.Dispose();
+            imgTokens = imgF16;
+            Tensor txtF16 = new Tensor(txtTokShape, DType.F16);
+            backend.CastToF16(txtF16, txtTokens);
+            txtTokens.Dispose();
+            txtTokens = txtF16;
+        }
+        DType act = imgTokens.DType;
 
         // ── 3. Shared modulation projections — computed once, reused across all blocks ──
         Tensor[] imgMod = _doubleModImg.Forward(backend, temb);   // 6 tensors [B, hidden]
         Tensor[] txtMod = _doubleModTxt.Forward(backend, temb);   // 6 tensors
         Tensor[] sgMod = _singleMod.Forward(backend, temb);       // 3 tensors
 
-        // ── 4. Precompute 4-axis RoPE for [text, image] concat sequence ──
-        Tensor posIds = Flux2PosEmbed.BuildPositionIds(txtSeqLen, hPacked, wPacked);
-        _rope.Precompute(posIds);
-        posIds.Dispose();
+        // ── 4. Precompute 4-axis RoPE — sig-cached (Precompute rebuilds host tables + re-uploads the GPU
+        //       cos/sin tables; it ran EVERY forward before) ──
+        EnsureRope(txtSeqLen, hPacked, wPacked);
 
         // ── 5. Double-stream blocks (text + image as two parallel streams sharing joint attn) ──
         Tensor currentImg = imgTokens;
@@ -167,7 +212,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         // ── 6. Concatenate [text, image] for single-stream processing (device op — the old host copy was a
         // full D2H sync of both block-loop outputs every forward) ──
         TensorShape concatShape = new TensorShape(batch, totalSeqLen, hidden);
-        Tensor x = new Tensor(concatShape, DType.F32);
+        Tensor x = new Tensor(concatShape, act);
         backend.Concat(x, new Tensor[] { currentTxt, currentImg }, 1);
         if (!ReferenceEquals(currentImg, imgTokens)) currentImg.Dispose();
         if (!ReferenceEquals(currentTxt, txtTokens)) currentTxt.Dispose();
@@ -185,17 +230,25 @@ public sealed unsafe class Flux2Transformer : IDisposable
         // ── 8. Strip text prefix → image-only tokens (B=1: contiguous row-block → device SliceRows;
         // batched keeps the host copy) ──
         TensorShape imgOutShape = new TensorShape(batch, imgSeqLen, hidden);
-        Tensor imgOut = new Tensor(imgOutShape, DType.F32);
+        Tensor imgOut = new Tensor(imgOutShape, act);
         if (batch == 1)
             backend.SliceRows(imgOut, x, txtSeqLen);
         else
             ExtractImageTokens(imgOut, x, batch, txtSeqLen, imgSeqLen, hidden);
         x.Dispose();
 
+        if (imgOut.DType == DType.F16)
+        {
+            // Back to F32 for the final norm + proj_out (velocity precision across Euler steps).
+            Tensor imgOutF32 = new Tensor(imgOutShape, DType.F32);
+            backend.CastToF32(imgOutF32, imgOut);
+            imgOut.Dispose();
+            imgOut = imgOutF32;
+        }
+
         // ── 9. Final layer: AdaLN-Continuous (shift/scale only) + proj_out ──
         Tensor output = ApplyFinalLayer(backend, imgOut, temb, batch, imgSeqLen);
         imgOut.Dispose();
-        temb.Dispose();
         for (int i = 0; i < imgMod.Length; i++) imgMod[i].Dispose();
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
         for (int i = 0; i < sgMod.Length; i++) sgMod[i].Dispose();
@@ -203,24 +256,207 @@ public sealed unsafe class Flux2Transformer : IDisposable
         return output;
     }
 
+    /// <summary>Precomputes the rope tables only when the (text len, grid) signature changes.</summary>
+    private void EnsureRope(int txtSeqLen, int hPacked, int wPacked)
+    {
+        long sig = ((long)txtSeqLen << 32) ^ ((long)hPacked << 16) ^ (long)wPacked ^ 0x2F2F2F2F;
+        if (sig == _ropeSig)
+            return;
+        Tensor posIds = Flux2PosEmbed.BuildPositionIds(txtSeqLen, hPacked, wPacked);
+        _rope.Precompute(posIds);
+        posIds.Dispose();
+        _ropeSig = sig;
+    }
+
+    // ── Persistent step-graph state (the Chroma round-3 recipe, single-forward variant — Klein is
+    // distilled/no-CFG, Dev is guidance-embedded). Same contract as FluxTransformer: the pipeline routes the
+    // latent through PrepareGraphLatent, never sweeps activations on the graph route, and invalidates before
+    // any FreeWeights. ──
+    private const int GraphCaptureCall = 3;
+    private Tensor? _latentFixed;
+    private Tensor? _sinFixed;
+    private Tensor? _guidanceSinFixed;
+    private Tensor? _graphVelocity;
+    private long _graphSig = long.MinValue;
+    private int _graphSigCalls;
+    private int _graphSigFlips;
+    private bool _graphDead;
+
+    /// <summary>Copies a fresh packed latent into the transformer-owned FIXED buffer the captured graph
+    /// reads, and returns that buffer. A shape change resets the graph.</summary>
+    public Tensor PrepareGraphLatent(IBackend backend, Tensor freshPackedLatent)
+    {
+        if (_latentFixed is not null && _latentFixed.Shape != freshPackedLatent.Shape)
+        {
+            InvalidateStepGraph(backend);
+            _latentFixed.Dispose();
+            _latentFixed = null;
+            _graphVelocity?.Dispose();
+            _graphVelocity = null;
+        }
+        _latentFixed ??= new Tensor(freshPackedLatent.Shape, DType.F32);
+        backend.CopyInto(_latentFixed, freshPackedLatent);
+        return _latentFixed;
+    }
+
+    /// <summary>Device copy of the fixed graph latent (for the pipeline's final read-back).</summary>
+    public Tensor SnapshotGraphLatent(IBackend backend)
+    {
+        Tensor snap = new Tensor(_latentFixed!.Shape, DType.F32);
+        backend.CopyInto(snap, _latentFixed);
+        return snap;
+    }
+
+    /// <summary>Resets the backend graph slot and this transformer's signature. Call before
+    /// FreeActivations / FreeWeights.</summary>
+    public void InvalidateStepGraph(IBackend backend)
+    {
+        backend.StepGraphReset();
+        if (ReferenceEquals(backend.StepGraphOwner, this))
+            backend.StepGraphOwner = null;
+        _graphSig = long.MinValue;
+        _graphSigCalls = 0;
+    }
+
+    /// <summary>Step-graph-aware forward (see <c>FluxTransformer.ForwardGraphable</c> — identical state
+    /// machine). <c>callerOwns</c> false = transformer-owned fixed velocity buffer, rewritten next step.</summary>
+    public (Tensor velocity, bool callerOwns) ForwardGraphable(IBackend backend, Tensor packedLatent,
+        Tensor textEmbeddings, float sigma, float guidanceScale, int hPacked, int wPacked)
+    {
+        int batch = (int)packedLatent.Shape[0];
+        bool graphMode = DitStepGraph.EnabledDefaultOn && backend.StepGraphSupported && !_graphDead
+            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed);
+        if (!graphMode)
+            return (Forward(backend, packedLatent, textEmbeddings, sigma, guidanceScale, hPacked, wPacked), true);
+
+        int inCh = _config.TimestepChannels;
+        Tensor sinHost = new Tensor(new TensorShape(1, inCh), DType.F32);
+        ComputeSinusoidalTimestep(sinHost, sigma * 1000.0f, 1, inCh);
+        _sinFixed ??= new Tensor(sinHost.Shape, DType.F32);
+        backend.CopyInto(_sinFixed, sinHost);
+        sinHost.Dispose();
+
+        long sig = ((long)hPacked * 19349663L) ^ ((long)wPacked * 83492791L)
+            ^ ((long)textEmbeddings.Shape[1] * 2654435761L)
+            ^ ((long)BitConverter.SingleToInt32Bits(guidanceScale) << 13)
+            ^ ((long)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(textEmbeddings) << 17);
+        bool ownerLost = !ReferenceEquals(backend.StepGraphOwner, this);
+        if (sig != _graphSig || ownerLost)
+        {
+            backend.StepGraphReset();
+            if (!ownerLost && _graphSig != long.MinValue && ++_graphSigFlips > 8)
+            {
+                _graphDead = true;
+                Logs.Warning("[Flux2 graph] signature flip storm — step-graph disabled for this session.");
+            }
+            _graphSig = sig;
+            _graphSigCalls = 0;
+            backend.StepGraphOwner = this;
+        }
+        else if (_graphSigCalls > GraphCaptureCall && !backend.StepGraphReady)
+        {
+            _graphSigCalls = 0;
+        }
+        _graphSigCalls++;
+        if (_graphSigCalls == 1)
+        {
+            if (_config.GuidanceEmbed && _guidanceLinear1Weight != null)
+            {
+                Tensor gHost = new Tensor(new TensorShape(1, inCh), DType.F32);
+                ComputeSinusoidalTimestep(gHost, guidanceScale * 1000.0f, 1, inCh);
+                _guidanceSinFixed ??= new Tensor(gHost.Shape, DType.F32);
+                backend.CopyInto(_guidanceSinFixed, gHost);
+                gHost.Dispose();
+            }
+            // Pin step-invariant conditioning device-resident (pageable re-upload breaks capture).
+            backend.PreloadWeights(new List<Tensor> { textEmbeddings });
+            EnsureRope((int)textEmbeddings.Shape[1], hPacked, wPacked);
+        }
+        _graphVelocity ??= new Tensor(new TensorShape(1, (long)packedLatent.Shape[1], _config.OutChannels), DType.F32);
+
+        if (backend.StepGraphReady && _graphSigCalls > GraphCaptureCall)
+        {
+            backend.StepGraphLaunch();
+            return (_graphVelocity!, false);
+        }
+
+        bool capture = _graphSigCalls == GraphCaptureCall;
+        if (capture) backend.StepGraphBegin();
+        try
+        {
+            RunStepIntoFixed(backend, packedLatent, textEmbeddings, hPacked, wPacked);
+        }
+        catch (Exception ex) when (capture)
+        {
+            backend.StepGraphReset();
+            _graphDead = true;
+            Logs.Warning($"[Flux2 graph] capture invalidated — falling back to eager: {ex}");
+            RunStepIntoFixed(backend, packedLatent, textEmbeddings, hPacked, wPacked);
+            return (_graphVelocity!, false);
+        }
+        if (capture)
+        {
+            try
+            {
+                backend.StepGraphEndAndLaunch();
+                Logs.Info("[Flux2 graph] denoise step captured; replaying via cuGraphLaunch.");
+            }
+            catch (Exception ex)
+            {
+                backend.StepGraphReset();
+                _graphDead = true;
+                Logs.Warning($"[Flux2 graph] capture failed — falling back to eager: {ex.Message}");
+                RunStepIntoFixed(backend, packedLatent, textEmbeddings, hPacked, wPacked);
+            }
+        }
+        return (_graphVelocity!, false);
+    }
+
+    /// <summary>The captured (or capture-warming) step body: temb from the fixed device sin buffer(s), full
+    /// forward, velocity lands in the fixed buffer via <c>CopyInto</c>.</summary>
+    private void RunStepIntoFixed(IBackend backend, Tensor packedLatent, Tensor textEmbeddings,
+        int hPacked, int wPacked)
+    {
+        Tensor temb = ComputeTembFromSin(backend, _sinFixed!, _guidanceSinFixed, 1);
+        Tensor v = ForwardWithTemb(backend, packedLatent, textEmbeddings, temb, hPacked, wPacked);
+        backend.CopyInto(_graphVelocity!, v);
+        v.Dispose();
+        temb.Dispose();
+    }
+
     private Tensor ComputeTimestepEmbedding(IBackend backend, float sigma, float guidanceScale, int batch)
     {
-        int hidden = _config.HiddenSize;
         int inCh = _config.TimestepChannels;
 
         // Pipeline passes timestep/1000 as `sigma`, so scale back up to match the Flux.2
         // reference `timestep = timestep * 1000` before sinusoidal embedding.
-        float scaledTimestep = sigma * 1000.0f;
-
         TensorShape sinShape = new TensorShape(batch, inCh);
         Tensor sinEmbed = new Tensor(sinShape, DType.F32);
-        ComputeSinusoidalTimestep(sinEmbed, scaledTimestep, batch, inCh);
+        ComputeSinusoidalTimestep(sinEmbed, sigma * 1000.0f, batch, inCh);
+
+        Tensor? guidanceSin = null;
+        if (_config.GuidanceEmbed && _guidanceLinear1Weight != null)
+        {
+            guidanceSin = new Tensor(sinShape, DType.F32);
+            ComputeSinusoidalTimestep(guidanceSin, guidanceScale * 1000.0f, batch, inCh);
+        }
+
+        Tensor temb = ComputeTembFromSin(backend, sinEmbed, guidanceSin, batch);
+        sinEmbed.Dispose();
+        guidanceSin?.Dispose();
+        return temb;
+    }
+
+    /// <summary>temb MLP core from (already-built) sinusoidal embeddings — all device ops, so the step-graph
+    /// path can feed FIXED device sin buffers and capture the whole temb compute.</summary>
+    private Tensor ComputeTembFromSin(IBackend backend, Tensor sinEmbed, Tensor? guidanceSin, int batch)
+    {
+        int hidden = _config.HiddenSize;
 
         // Timestep MLP: Linear(inCh, hidden) → SiLU → Linear(hidden, hidden)
         TensorShape hidShape = new TensorShape(batch, hidden);
         Tensor t1 = new Tensor(hidShape, DType.F32);
         backend.Linear(t1, sinEmbed, _timestepLinear1Weight!, null);
-        sinEmbed.Dispose();
         Tensor t1Act = new Tensor(hidShape, DType.F32);
         backend.Silu(t1Act, t1);
         t1.Dispose();
@@ -228,16 +464,11 @@ public sealed unsafe class Flux2Transformer : IDisposable
         backend.Linear(temb, t1Act, _timestepLinear2Weight!, null);
         t1Act.Dispose();
 
-        if (_config.GuidanceEmbed && _guidanceLinear1Weight != null)
+        if (guidanceSin is not null && _guidanceLinear1Weight != null)
         {
-            // guidance_embed adds to temb (Dev only). guidance is in same units as timestep
-            // (× 1000 internally per the diffusers reference).
-            Tensor gSin = new Tensor(sinShape, DType.F32);
-            ComputeSinusoidalTimestep(gSin, guidanceScale * 1000.0f, batch, inCh);
-
+            // guidance_embed adds to temb (Dev only), same units as timestep (× 1000 by the caller).
             Tensor g1 = new Tensor(hidShape, DType.F32);
-            backend.Linear(g1, gSin, _guidanceLinear1Weight!, null);
-            gSin.Dispose();
+            backend.Linear(g1, guidanceSin, _guidanceLinear1Weight!, null);
             Tensor g1Act = new Tensor(hidShape, DType.F32);
             backend.Silu(g1Act, g1);
             g1.Dispose();
@@ -389,6 +620,17 @@ public sealed unsafe class Flux2Transformer : IDisposable
             _guidanceLinear2Weight = null;
             _normOutLinearWeight = null;
             _projOutWeight = null;
+        }
+        if (_disposed == 1)
+        {
+            _latentFixed?.Dispose();
+            _latentFixed = null;
+            _sinFixed?.Dispose();
+            _sinFixed = null;
+            _guidanceSinFixed?.Dispose();
+            _guidanceSinFixed = null;
+            _graphVelocity?.Dispose();
+            _graphVelocity = null;
         }
         GC.SuppressFinalize(this);
     }

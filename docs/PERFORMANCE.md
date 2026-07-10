@@ -161,9 +161,9 @@ rounds land:
 | Boogu-Base | 26.5 s | 17.8 s | 1.49× — was ~6 min (~13×); optimization in progress |
 | Chroma1-HD | 28.5 s | 16.6 s | 1.7× — was 3.7× (round 3: F16 blocks, persistent CFG-pair CUDA graph, context trim); batched CFG queued |
 | AuraFlow-0.3 | **13.93 s** | 14.0 s | Tied with ComfyUI (was 31.4 s) |
-| Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
-| Flux-Schnell | 10.5 s | 3.04 s | 3.5× — Flux-family grind queued (Chroma round-3 kit transplants) |
-| Flux.2 Klein 4B | 3.45 s | 1.85 s | 1.9× — Flux-family grind queued. Distilled variant: 4 steps/CFG 1 official |
+| Flux-Dev | **16.05 s** | 12.5 s | 1.28× — Flux-family kit transplant done (`44.38-local`: F16 residual damp + persistent cross-generation step graph + rope/prompt caches); remaining gap is per-step GPU compute |
+| Flux-Schnell | **3.6 s** | 3.04 s | 1.18× — Flux-family kit transplant done (`44.38-local`) |
+| Flux.2 Klein 4B | **2.36 s** | 1.85 s | 1.28× — Flux-family kit transplant done (`44.38-local`). Distilled variant: 4 steps/CFG 1 official |
 | SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
 
 ---

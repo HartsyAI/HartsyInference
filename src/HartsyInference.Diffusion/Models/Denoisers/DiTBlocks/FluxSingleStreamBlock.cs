@@ -45,7 +45,9 @@ public sealed class FluxSingleStreamBlock
     }
 
     /// <summary>Loads weights from named tensors using diffusers naming: single_transformer_blocks.{i}.* </summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe —
+    /// see <see cref="ChromaF16"/>): applied to the block's single branch-output projection. 1.0 = off.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         _modulation.LoadWeights(
             weights[$"{prefix}.norm.linear.weight"],
@@ -71,6 +73,12 @@ public sealed class FluxSingleStreamBlock
         // Output projection: [hiddenSize + mlpDim, hiddenSize]
         _projOutWeight = weights[$"{prefix}.proj_out.weight"];
         weights.TryGetValue($"{prefix}.proj_out.bias", out _projOutBias);
+        if (branchDamp != 1.0f)
+        {
+            _projOutWeight.Fp8ScaleFactor *= branchDamp;
+            if (_projOutBias is not null)
+                _projOutBias = ChromaF16.DampBias(_projOutBias, branchDamp);
+        }
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -110,6 +118,9 @@ public sealed class FluxSingleStreamBlock
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
+        // Activation dtype follows the INPUT (the Chroma/Krea2 pattern; see FluxDoubleStreamBlock.Forward).
+        // The MLP tail already ran F16 unconditionally (its own pre-F16-port optimization) — that stays.
+        DType act = x.DType;
 
         TensorShape shape = new TensorShape(batch, seqLen, _hiddenSize);
         // [B, S, H, D] view (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
@@ -124,11 +135,11 @@ public sealed class FluxSingleStreamBlock
         Tensor modulated = DiTUtils.NormModulate(backend, x, mod[0], mod[1], shape);
 
         // ── 3. Q/K/V projections + MLP projection (parallel) ──
-        Tensor q = new Tensor(headsShape, DType.F32);
+        Tensor q = new Tensor(headsShape, act);
         backend.Linear(q, modulated, _toQWeight!, _toQBias);
-        Tensor k = new Tensor(headsShape, DType.F32);
+        Tensor k = new Tensor(headsShape, act);
         backend.Linear(k, modulated, _toKWeight!, _toKBias);
-        Tensor v = new Tensor(headsShape, DType.F32);
+        Tensor v = new Tensor(headsShape, act);
         backend.Linear(v, modulated, _toVWeight!, _toVBias);
         // mlpInput / mlpActivated / concatted run at F16. At 1024x1024 these are the three
         // largest activations in the block (213/213/267 MB at F32) and dominate VRAM peak.
@@ -140,10 +151,10 @@ public sealed class FluxSingleStreamBlock
         modulated.Dispose();
 
         // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor qNormed = new Tensor(headsShape, DType.F32);
+        Tensor qNormed = new Tensor(headsShape, act);
         backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
-        Tensor kNormed = new Tensor(headsShape, DType.F32);
+        Tensor kNormed = new Tensor(headsShape, act);
         backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
@@ -154,13 +165,13 @@ public sealed class FluxSingleStreamBlock
             rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
 
         // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor qMh = new Tensor(mhShape, DType.F32);
+        Tensor qMh = new Tensor(mhShape, act);
         backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
         qNormed.Dispose();
-        Tensor kMh = new Tensor(mhShape, DType.F32);
+        Tensor kMh = new Tensor(mhShape, act);
         backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
         kNormed.Dispose();
-        Tensor vMh = new Tensor(mhShape, DType.F32);
+        Tensor vMh = new Tensor(mhShape, act);
         backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         v.Dispose();
 
@@ -170,14 +181,14 @@ public sealed class FluxSingleStreamBlock
 
         // ── 7. SDPA ──
         float scale = 1.0f / MathF.Sqrt(_headDim);
-        Tensor attnOut = new Tensor(mhShape, DType.F32);
+        Tensor attnOut = new Tensor(mhShape, act);
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
         qMh.Dispose();
         kMh.Dispose();
         vMh.Dispose();
 
         // ── 8. Permute attention output back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attnFlat = new Tensor(shape, DType.F32);
+        Tensor attnFlat = new Tensor(shape, act);
         backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
@@ -205,12 +216,12 @@ public sealed class FluxSingleStreamBlock
         // proj_out's input is F16 (concatted) and its weight is fp8/F16 — joint resolution
         // picks F16 with no input cast needed. Output stays F32 because the gated residual
         // at the end of the block adds it to x (F32).
-        Tensor output = new Tensor(shape, DType.F32);
+        Tensor output = new Tensor(shape, act);
         backend.Linear(output, concatted, _projOutWeight!, _projOutBias);
         concatted.Dispose();
 
         // ── 11. Gated residual: x = x + gate * output ──
-        Tensor result = new Tensor(shape, DType.F32);
+        Tensor result = new Tensor(shape, act);
         backend.GatedResidualLastDim(result, x, output, mod[2]);
         output.Dispose();
 
