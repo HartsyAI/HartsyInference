@@ -30,11 +30,26 @@ public sealed class PytorchPickleLoader : IDisposable
     /// are themselves state-dicts (e.g. Kokoro's <c>{bert:{…}, predictor:{…}, decoder:{…}}</c>) — is flattened
     /// into fully-qualified dotted keys (<c>bert.embeddings.weight</c>, …) covering EVERY module. The default
     /// (false) keeps the legacy behavior: load top-level tensors, else descend one wrapper envelope.</para></summary>
-    public unsafe void Load(string filePath, bool recursiveFlatten = false)
+    public void Load(string filePath, bool recursiveFlatten = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         FilePath = filePath;
 
+        // Sniff the container: "PK\x03\x04" = modern torch.save ZIP; 0x80 = a raw pickle stream (legacy pre-2019
+        // torch.save). AudioGen/MusicGen ship their T5 text encoder in the legacy format.
+        Span<byte> magic = stackalloc byte[2];
+        using (FileStream fs = File.OpenRead(filePath))
+            if (fs.Read(magic) < 2) throw new InvalidOperationException($"'{filePath}' is too small to be a torch checkpoint.");
+
+        if (magic[0] == 0x50 && magic[1] == 0x4b) { LoadZip(filePath, recursiveFlatten); return; }        // "PK"
+        if (magic[0] == 0x80) { LoadLegacy(filePath, recursiveFlatten); return; }                          // pickle PROTO
+        throw new InvalidOperationException($"'{filePath}' is not a recognized torch checkpoint (magic 0x{magic[0]:x2}{magic[1]:x2}).");
+    }
+
+    /// <summary>Modern <c>torch.save</c> path: a ZIP whose <c>data.pkl</c> holds the pickle and whose
+    /// <c>data/&lt;key&gt;</c> entries hold each storage's raw bytes.</summary>
+    private unsafe void LoadZip(string filePath, bool recursiveFlatten)
+    {
         using ZipArchive zip = ZipFile.OpenRead(filePath);
         ZipArchiveEntry pkl = FindEntry(zip, "/data.pkl", "data.pkl")
             ?? throw new InvalidOperationException($"'{filePath}' is not a torch ZIP checkpoint (no data.pkl).");
@@ -64,6 +79,84 @@ public sealed class PytorchPickleLoader : IDisposable
             descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = shape };
         }
         Descriptors = descriptors;
+    }
+
+    /// <summary>Legacy <c>torch.save</c> path (<c>_legacy_save</c>): five back-to-back pickle streams
+    /// (MAGIC_NUMBER, PROTOCOL_VERSION, sys_info, the state_dict, then the storage-key list) followed by each
+    /// storage's raw bytes in key-list order, prefixed by an <c>int64</c> element count. No ZIP, no per-storage
+    /// alignment. The whole file is read into memory (legacy checkpoints predate the &gt;2 GB era; .NET caps a
+    /// single read at ~2 GB, which this format never exceeds in practice).</summary>
+    private unsafe void LoadLegacy(string filePath, bool recursiveFlatten)
+    {
+        byte[] all = File.ReadAllBytes(filePath);
+
+        // Five sequential pickle streams over the SAME buffer; each Run() stops at its '.' opcode and reports the
+        // offset just past it, which seeds the next stream.
+        int off = 0;
+        off = RunPickle(all, off, out _);                                                   // 1: MAGIC_NUMBER
+        off = RunPickle(all, off, out _);                                                   // 2: PROTOCOL_VERSION
+        off = RunPickle(all, off, out _);                                                   // 3: sys_info
+        off = RunPickle(all, off, out object? root);                                        // 4: state_dict
+        off = RunPickle(all, off, out object? keysObj);                                     // 5: storage-key list
+
+        Dictionary<string, PickleTensor> metas = [];
+        if (recursiveFlatten)
+        {
+            FlattenStateDictRecursive(root, "", metas);
+            if (metas.Count == 0) throw new InvalidOperationException("No tensors found in checkpoint.");
+        }
+        else
+        {
+            FlattenStateDict(root, metas);
+        }
+
+        if (keysObj is not List<object?> keyList)
+            throw new InvalidOperationException("Legacy checkpoint is missing its storage-key list (stream 5).");
+
+        // dtype/element-size per storage key comes from the tensors that reference it.
+        Dictionary<string, DType> keyDType = [];
+        foreach (PickleTensor mt in metas.Values) keyDType[mt.Storage.Key] = mt.Storage.DType;
+
+        // Walk the appended storage region once, recording where each key's data bytes start. Each record is an
+        // int64 element count followed by numel * element_size raw bytes; records are packed with no padding.
+        Dictionary<string, long> keyDataOffset = new(keyList.Count);
+        long p = off;
+        foreach (object? ko in keyList)
+        {
+            string key = ko as string ?? throw new InvalidOperationException("Legacy storage key is not a string.");
+            if (p + 8 > all.LongLength) throw new EndOfStreamException("Truncated legacy storage table.");
+            long numel = BitConverter.ToInt64(all, checked((int)p));
+            p += 8;
+            keyDataOffset[key] = p;
+            if (!keyDType.TryGetValue(key, out DType dt))
+                throw new InvalidOperationException($"Legacy storage '{key}' is unreferenced (unknown element size); cannot advance.");
+            p += numel * dt.SizeInBytes;
+            if (p > all.LongLength) throw new EndOfStreamException($"Legacy storage '{key}' runs past end of file.");
+        }
+
+        Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
+        foreach ((string name, PickleTensor meta) in metas)
+        {
+            TensorShape shape = new(meta.Size);
+            Tensor t = new(shape, meta.Storage.DType);
+            long byteCount = shape.ElementCount * meta.Storage.DType.SizeInBytes;
+            long src = keyDataOffset[meta.Storage.Key] + meta.Offset * meta.Storage.DType.SizeInBytes; // storage_offset
+            if (src + byteCount > all.LongLength) throw new EndOfStreamException($"Tensor '{name}' storage out of range.");
+            fixed (byte* pAll = all)
+                Buffer.MemoryCopy(pAll + src, (byte*)t.DataPointer, byteCount, byteCount);
+            _tensors[name] = t;
+            descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = shape };
+        }
+        Descriptors = descriptors;
+    }
+
+    /// <summary>Runs one pickle stream starting at <paramref name="start"/>, yields its unpickled root, and returns
+    /// the offset just past its STOP opcode (i.e. the start of the next stream).</summary>
+    private static int RunPickle(byte[] buf, int start, out object? result)
+    {
+        PickleMachine m = new(buf, start);
+        result = m.Run();
+        return m.Position;
     }
 
     /// <summary>All tensors as name → owned Tensor. Valid until <see cref="Dispose"/>.</summary>

@@ -112,35 +112,11 @@ public sealed unsafe class AudioEncodersTests
         AssertFinite(spec);
     }
 
-    [Fact]
-    public void NeuCodecEncoder_SyntheticForward_ProducesValidFsqTokens()
-    {
-        NeuCodecEncoderConfig c = new()
-        {
-            Ngf = 4,
-            DownRatios = [2, 2, 4],         // 16× downsample
-            ResidualUnitsPerStage = 1,
-            ResidualDilations = [1],
-            ResidualKernel = 7,
-            StemKernel = 7,
-            FinalKernel = 3,
-            FcInDim = 8,
-            FsqLevels = [4, 4, 4, 4, 4, 4, 4, 4],
-            FsqDim = 8,
-        };
-        using CpuBackend backend = new();
-        using NeuCodecEncoder enc = new(c);
-        enc.LoadWeights(NeuCodecEncoderWeights(c));
-
-        float[] pcm = new float[4_096];
-        for (int i = 0; i < pcm.Length; i++) pcm[i] = 0.25f * MathF.Sin(2f * MathF.PI * 150f * i / 16_000f);
-
-        int[] tokens = enc.Encode(backend, pcm);
-        Assert.True(tokens.Length > 0);
-        int vocab = 1;
-        foreach (int lvl in c.FsqLevels) vocab *= lvl;
-        foreach (int tok in tokens) Assert.True(tok >= 0 && tok < vocab);
-    }
+    // NOTE: the former NeuCodecEncoder_SyntheticForward test (and its NeuCodecEncoderWeights helper) were
+    // removed — they targeted the obsolete single-branch encoder (keys encoder.stem.* / encoder.stages.* /
+    // fc_prior.*, config props Ngf/DownRatios/StemKernel/FinalKernel/FcInDim). The current NeuCodecEncoder is a
+    // two-branch (acoustic + Wav2Vec2-BERT semantic) design whose real-weight validation lives in
+    // NeuCodecEncoderDumpTest (diffed against tests/python-reference/neucodec_ref.py).
 
     // ── synthetic weight dictionaries ──
 
@@ -236,40 +212,6 @@ public sealed unsafe class AudioEncodersTests
         w[$"{p}.gru.bias_hh_l0"] = F1(g3);
         w[$"{p}.proj.weight"] = F2(c.Gin, c.GruHidden);
         w[$"{p}.proj.bias"] = F1(c.Gin);
-        return w;
-    }
-
-    private static Dictionary<string, Tensor> NeuCodecEncoderWeights(NeuCodecEncoderConfig c)
-    {
-        string p = "encoder";
-        Dictionary<string, Tensor> w = new()
-        {
-            [$"{p}.stem.weight"] = F3(c.Ngf, 1, c.StemKernel),
-        };
-        int dim = c.Ngf;
-        for (int i = 0; i < c.DownRatios.Count; i++)
-        {
-            int outDim = dim * 2;
-            string sp = $"{p}.stages.{i}";
-            for (int j = 0; j < c.ResidualUnitsPerStage; j++)
-            {
-                string up = $"{sp}.res.{j}";
-                w[$"{up}.snake1.alpha"] = F1(dim);
-                w[$"{up}.snake1.beta"] = F1(dim);
-                w[$"{up}.conv1.weight"] = F3(dim, dim, c.ResidualKernel);
-                w[$"{up}.snake2.alpha"] = F1(dim);
-                w[$"{up}.snake2.beta"] = F1(dim);
-                w[$"{up}.conv2.weight"] = F3(dim, dim, 1);
-            }
-            w[$"{sp}.down_snake.alpha"] = F1(dim);
-            w[$"{sp}.down_snake.beta"] = F1(dim);
-            w[$"{sp}.down.weight"] = F3(outDim, dim, 2 * c.DownRatios[i]);
-            dim = outDim;
-        }
-        w[$"{p}.final_snake.alpha"] = F1(dim);
-        w[$"{p}.final_snake.beta"] = F1(dim);
-        w[$"{p}.final_conv.weight"] = F3(c.FcInDim, dim, c.FinalKernel);
-        w["fc_prior.weight"] = F2(c.FsqDim, c.FcInDim);
         return w;
     }
 

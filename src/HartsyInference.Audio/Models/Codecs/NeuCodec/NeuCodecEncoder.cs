@@ -64,7 +64,9 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
     }
 
     // ── Weight loading (raw checkpoint keys, no prefix rewriting) ─────────────────────────────────
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
+    // `prefix` is accepted for ABI compatibility with consumers compiled against the older 2-arg signature
+    // (the checkpoint keys are absolute, so it is ignored).
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string? prefix = null)
     {
         // Acoustic encoder.
         _acStemW = F32(w["acoustic_encoder.conv1.weight"]);
@@ -157,10 +159,16 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
     {
         if (_acStemW is null) throw new InvalidOperationException("NeuCodecEncoder weights not loaded.");
 
-        Tensor acoustic = AcousticEncode(backend, pcm16k);          // [1,1024,Ta]
-        Tensor semantic = SemanticEncode(backend, pcm16k);          // [1,1024,Ts]
+        // Reference pads the waveform (one zero, then up to a multiple of hop_length 320) before BOTH branches
+        // (transformers PR #47143 NeuCodecFeatureExtractor), so acoustic (320× stride) and semantic frame counts
+        // stay aligned. Feed the same padded buffer to both.
+        float[] pcm = PadForHop(pcm16k);
+
+        Tensor acoustic = AcousticEncode(backend, pcm);             // [1,1024,Ta]
+        Tensor semantic = SemanticEncode(backend, pcm);             // [1,1024,Ts]
         int ta = (int)acoustic.Shape[2], ts = (int)semantic.Shape[2];
         int t = Math.Min(ta, ts);
+        if (t <= 0) { acoustic.Dispose(); semantic.Dispose(); return []; }
         int dim = _cfg.HiddenSize, fus = _cfg.FusionDim;
 
         // Concat [semantic, acoustic] along channels → channels-last [t, 2048], truncated to the shorter branch.
@@ -178,6 +186,19 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
 
         int[] codes = QuantizeFsq(z, t); z.Dispose();
         return codes;
+    }
+
+    /// <summary>Zero-pads the waveform by one sample then up to a multiple of the hop length (16 kHz / 50 Hz = 320),
+    /// matching the reference feature extractor so the 320×-strided acoustic branch yields a clean frame count.</summary>
+    private float[] PadForHop(float[] pcm)
+    {
+        int hop = _cfg.InputSampleRate / _cfg.FrameRate;           // 320
+        if (hop <= 0) return pcm;
+        int target = ((pcm.Length + 1 + hop - 1) / hop) * hop;
+        if (target <= pcm.Length) return pcm;
+        float[] padded = new float[target];
+        Array.Copy(pcm, padded, pcm.Length);
+        return padded;
     }
 
     // ── Acoustic branch ──────────────────────────────────────────────────────────────────────────
@@ -343,6 +364,7 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
         Tensor v = Linear2D(backend, x, l.VW!, l.VB, t, dim, dim);
         float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer;
         float* dp = (float*)l.DistEmb!.DataPointer;                 // [left+right+1, hd]
+        int distRows = (int)l.DistEmb!.Shape[0];                    // clamp target for the position index
 
         Tensor ctx = new(new TensorShape(t, dim), DType.F32);       // attention output, then linear_out
         float* xp = (float*)ctx.DataPointer;
@@ -359,7 +381,9 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
                     float* kj = kp + (long)j * dim + hoff;
                     int dist = j - i;
                     if (dist < -left) dist = -left; else if (dist > right) dist = right;
-                    float* pe = dp + (long)(dist + left) * hd;
+                    int prow = dist + left;                          // in [0, left+right] == [0, distRows-1]
+                    if (prow < 0) prow = 0; else if (prow >= distRows) prow = distRows - 1;
+                    float* pe = dp + (long)prow * hd;
                     float dotK = 0f, dotP = 0f;
                     for (int c = 0; c < hd; c++) { float qc = qi[c]; dotK += qc * kj[c]; dotP += qc * pe[c]; }
                     float sc = (dotK + dotP) * scale;
@@ -424,18 +448,21 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
         return outCl;                                              // [t,dim]
     }
 
-    /// <summary>semantic_adapter: conv1→ReLU→(residual)→conv2→ReLU→conv3→+residual→conv4, all Conv1d k3 SAME pad.</summary>
+    /// <summary>SemanticEncoder (semantic_adapter): x=conv1(in); x = residual_blocks(x)+x; conv4(x), where
+    /// residual_blocks = ReLU→conv2→ReLU→conv3. The skip adds back the conv1 output <b>pre-ReLU</b> (the
+    /// reference does <c>self.residual_blocks(x) + x</c>, and residual_blocks applies its own leading ReLU).</summary>
     private Tensor SemanticAdapter(IBackend backend, Tensor xCf, int t)
     {
         int d = _cfg.HiddenSize;
-        Tensor c1 = Conv1d(backend, xCf, _saConv1W!, null, d, d, t, 3, 1, 1, 1, 1, 1);
-        Relu(c1);
-        Tensor residual = c1;                                      // save post-ReLU as residual
-        Tensor c2 = Conv1d(backend, c1, _saConv2W!, _saConv2B, d, d, t, 3, 1, 1, 1, 1, 1);
+        Tensor a = Conv1d(backend, xCf, _saConv1W!, null, d, d, t, 3, 1, 1, 1, 1, 1);   // conv1 output (residual)
+        Tensor reluA = new(a.Shape, DType.F32);                                          // ReLU(conv1) → conv2 input
+        { float* sp = (float*)a.DataPointer, dp = (float*)reluA.DataPointer; long n = a.ElementCount;
+          for (long i = 0; i < n; i++) { float v = sp[i]; dp[i] = v < 0f ? 0f : v; } }
+        Tensor c2 = Conv1d(backend, reluA, _saConv2W!, _saConv2B, d, d, t, 3, 1, 1, 1, 1, 1); reluA.Dispose();
         Relu(c2);
         Tensor c3 = Conv1d(backend, c2, _saConv3W!, _saConv3B, d, d, t, 3, 1, 1, 1, 1, 1); c2.Dispose();
         Tensor sum = new(new TensorShape(1, d, t), DType.F32);
-        backend.Add(sum, c3, residual); c3.Dispose(); residual.Dispose();
+        backend.Add(sum, c3, a); c3.Dispose(); a.Dispose();                              // + pre-ReLU conv1 output
         Tensor c4 = Conv1d(backend, sum, _saConv4W!, null, d, d, t, 3, 1, 1, 1, 1, 1); sum.Dispose();
         return c4;
     }
@@ -443,7 +470,12 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
     // ── Feature extraction: 80-bin Kaldi log-fbank → per-bin z-norm → stride-2 stacking → [Ts,160] ──
     private Tensor ExtractInputFeatures(float[] pcm)
     {
-        float[,] fb = _fbank.Compute(pcm);                         // [frames,80]
+        // SeamlessM4TFeatureExtractor scales the waveform by 2^15 (Kaldi 16-bit compliance) BEFORE the
+        // fbank. The constant log-offset cancels under per-bin normalization, but the mel_floor is applied
+        // in the SCALED domain — so the scaling must be applied here for the floor to bite identically.
+        float[] scaled = new float[pcm.Length];
+        for (int i = 0; i < pcm.Length; i++) scaled[i] = pcm[i] * 32768f;
+        float[,] fb = _fbank.Compute(scaled);                      // [frames,80]
         int frames = fb.GetLength(0), bins = _cfg.NumMelBins;
         if (frames < 2) throw new InvalidOperationException("NeuCodec reference audio too short for semantic features.");
 
@@ -457,15 +489,22 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
             for (int f = 0; f < frames; f++) fb[f, m] = (float)((fb[f, m] - mean) * inv);
         }
 
-        int ts = frames / _cfg.AntiAliasRatio;                     // stride 2
-        int feat = bins * 2;
+        // SeamlessM4TFeatureExtractor pads mel frames to a multiple of the stride with padding_value 0.0
+        // (its default), AFTER per-bin normalization, then reshapes [F,80] → [ceil(F/2),160]. Keep the
+        // trailing odd frame (pad its partner with 0.0 = the per-bin mean), never reading past the last frame.
+        int stride = _cfg.AntiAliasRatio;                          // 2
+        int ts = (frames + stride - 1) / stride;                   // ceil
+        int feat = bins * stride;
         Tensor o = new(new TensorShape(ts, feat), DType.F32);
         float* op = (float*)o.DataPointer;
         for (int g = 0; g < ts; g++)
-        {
-            for (int m = 0; m < bins; m++) op[(long)g * feat + m] = fb[2 * g, m];
-            for (int m = 0; m < bins; m++) op[(long)g * feat + bins + m] = fb[2 * g + 1, m];
-        }
+            for (int s = 0; s < stride; s++)
+            {
+                int fr = g * stride + s;
+                long baseIdx = (long)g * feat + (long)s * bins;
+                if (fr < frames) for (int m = 0; m < bins; m++) op[baseIdx + m] = fb[fr, m];
+                else for (int m = 0; m < bins; m++) op[baseIdx + m] = 0f;   // padding_value = 0.0
+            }
         return o;
     }
 
@@ -499,9 +538,12 @@ public sealed unsafe class NeuCodecEncoder : IDisposable
             for (int i = 0; i < d; i++)
             {
                 float x = zp[row + i];
-                // quantizer applies bound once, then FSQ.forward bounds again before rounding.
-                x = MathF.Tanh(x + shift[i]) * halfRange[i] - offset[i];
-                x = MathF.Tanh(x + shift[i]) * halfRange[i] - offset[i];
+                // The reference (neucodec 0.0.6 → vector_quantize_pytorch ResidualFSQ) bounds TWICE:
+                // ResidualFSQ.forward does `residual = layer.bound(project_in(x))`, then FSQ.forward's
+                // quantize() bounds again `round(bound(residual))`. Both bounds must be applied before
+                // rounding, else every code is shifted → garbled/wrong-pitch clone.
+                x = MathF.Tanh(x + shift[i]) * halfRange[i] - offset[i];   // ResidualFSQ.bound
+                x = MathF.Tanh(x + shift[i]) * halfRange[i] - offset[i];   // FSQ.quantize → bound
                 int digit = (int)MathF.Round(x, MidpointRounding.ToEven) + half[i];
                 if (digit < 0) digit = 0; else if (digit >= _cfg.FsqLevels[i]) digit = _cfg.FsqLevels[i] - 1;
                 code += digit * basis[i];
