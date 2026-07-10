@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -10,6 +11,17 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     private readonly QwenImageConfig _config;
     private readonly QwenImageBlock[] _blocks;
     private readonly QwenImageRope _rope;
+
+    /// <summary>True when this instance runs the audited F16 block loop (HARTSY_DIT_F16) with the exact
+    /// <see cref="ChromaF16.ResidualDamp"/> residual damp — the Chroma/Flux recipe: every branch input passes
+    /// a no-affine LayerNorm and the final AdaLN-continuous norm cancels the factor before proj_out.</summary>
+    private bool _f16Mode;
+
+    /// <summary>Qwen-Image's residual stream is an outlier among DiTs: massive-activation channels push it to
+    /// ±10M by mid-depth (measured block-input absmax, 60-block V1) — Flux/Chroma stay under ~65k, which is why
+    /// their shared <see cref="ChromaF16.ResidualDamp"/> (1/32) overflowed F16 here after ONE block. 1/512
+    /// (2^-9, exact) parks the plateau at ~±20k with headroom; the no-affine LayerNorms still cancel it.</summary>
+    private const float QwenResidualDamp = 1.0f / 8192.0f;
     private int _disposed;
 
     private Tensor? _imgInWeight, _imgInBias;
@@ -47,6 +59,16 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// <summary>Loads all transformer weights from named tensors using diffusers naming.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
+        // F16 opt-in DISABLED for Qwen-Image (2026-07-10 finding): the residual stream's massive-activation
+        // channels (±10M plateau — 150× past F16 even before growth) forced a 1/2048 damp, which exposed a
+        // second bug (LayerNorm eps breaks damp scale-invariance; fixed below via eps·damp²) — but even with
+        // both fixes and single-forward exactness (corr 0.99998), the SECOND denoise step's forward NaNs
+        // deterministically (not a race — reproduces under CUDA_LAUNCH_BLOCKING). The reference stacks run
+        // this model in BF16 for exactly this range reason; a BF16 activation path is the correct future
+        // lever. Until then Qwen stays F32 (still beats ComfyUI on t2i; edit ~1.05× of Comfy).
+        _f16Mode = false;
+        float branchDamp = _f16Mode ? QwenResidualDamp : 1.0f;
+
         _imgInWeight = weights["img_in.weight"];
         _imgInBias = weights["img_in.bias"];
 
@@ -54,6 +76,17 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
         _txtInWeight = weights["txt_in.weight"];
         _txtInBias = weights["txt_in.bias"];
+        if (_f16Mode)
+        {
+            // Enter the damped-residual regime at the embedders (see ChromaF16): both token streams start at
+            // damp scale; the block-output damping keeps them there; the final no-affine LayerNorm cancels
+            // the factor exactly. Weight damp rides the GEMM alpha (dequantized-GGUF cuBLAS path included).
+            _imgInWeight.Fp8ScaleFactor *= QwenResidualDamp;
+            _imgInBias = ChromaF16.DampBias(_imgInBias!, QwenResidualDamp);
+            _txtInWeight.Fp8ScaleFactor *= QwenResidualDamp;
+            _txtInBias = ChromaF16.DampBias(_txtInBias!, QwenResidualDamp);
+            Logs.Info($"[QwenImage] F16 block loop active (residual damp 1/{1.0f / QwenResidualDamp:F0})");
+        }
 
         _timestepLinear1Weight = weights["time_text_embed.timestep_embedder.linear_1.weight"];
         _timestepLinear1Bias = weights["time_text_embed.timestep_embedder.linear_1.bias"];
@@ -61,7 +94,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         _timestepLinear2Bias = weights["time_text_embed.timestep_embedder.linear_2.bias"];
 
         for (int i = 0; i < _config.Depth; i++)
-            _blocks[i].LoadWeights(weights, $"transformer_blocks.{i}");
+            _blocks[i].LoadWeights(weights, $"transformer_blocks.{i}", branchDamp);
 
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _normOutLinearBias = weights["norm_out.linear.bias"];
@@ -101,23 +134,28 @@ public sealed unsafe class QwenImageTransformer : IDisposable
     /// <param name="timestep">Normalized timestep in [0, 1] (diffusers passes <c>t / 1000</c>).</param>
     /// <param name="hPacked">Packed-grid height (<c>latent_h / patch_size</c>) of the MAIN (noise) latent.</param>
     /// <param name="wPacked">Packed-grid width (<c>latent_w / patch_size</c>) of the MAIN (noise) latent.</param>
-    /// <param name="refHPacked">Packed-grid height of the trailing Qwen-Image-Edit reference-latent tokens
-    /// (0 = none). Ref tokens run through every block as image tokens with frame-axis-1 RoPE (ComfyUI
-    /// <c>qwen_image/model.py</c> ref "index" method) and are DROPPED from the output — the returned velocity
-    /// covers only the main <c>hPacked·wPacked</c> tokens (upstream <c>hidden_states[:, :num_embeds]</c>).</param>
-    /// <param name="refWPacked">Packed-grid width of the reference-latent tokens (0 = none).</param>
+    /// <param name="refGrids">Packed grids of the trailing Qwen-Image-Edit reference-latent token sections,
+    /// in sequence order (null/empty = none). Ref section <c>i</c> runs through every block as image tokens
+    /// with frame-axis <c>i+1</c> RoPE (ComfyUI <c>qwen_image/model.py</c> ref "index" method) and is DROPPED
+    /// from the output — the returned velocity covers only the main <c>hPacked·wPacked</c> tokens (upstream
+    /// <c>hidden_states[:, :num_embeds]</c>).</param>
+    /// <param name="refTimestepZero">Qwen-Image-Edit-2511 (<c>index_timestep_zero</c>): modulate/gate the
+    /// reference-latent rows with the t=0 modulation in every block (ComfyUI <c>timestep_zero_index</c>).
+    /// The 2509 checkpoints use plain "index" (false). Ignored when no ref tokens are present.</param>
     public Tensor Forward(IBackend backend, Tensor packedLatent, Tensor encoderHidden, float timestep,
-        int hPacked, int wPacked, int refHPacked = 0, int refWPacked = 0)
+        int hPacked, int wPacked, (int H, int W)[]? refGrids = null, bool refTimestepZero = false)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
         int txtSeqLen = (int)encoderHidden.Shape[1];
         int hidden = _config.HiddenSize;
-        int refSeqLen = refHPacked * refWPacked;
+        refGrids ??= [];
+        int refSeqLen = 0;
+        foreach ((int rh, int rw) in refGrids) refSeqLen += rh * rw;
         int mainSeqLen = imgSeqLen - refSeqLen;
         if (refSeqLen > 0 && mainSeqLen != hPacked * wPacked)
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
-                $"packedLatent seq {imgSeqLen} must equal main ({hPacked}x{wPacked}) + ref ({refHPacked}x{refWPacked}) tokens.");
+                $"packedLatent seq {imgSeqLen} must equal main ({hPacked}x{wPacked}) + {refSeqLen} ref tokens.");
         // The output slice below (and the block's seq-dim [txt|img] split) assume contiguous batch-1 rows.
         if (refSeqLen > 0 && batch != 1)
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
@@ -138,8 +176,31 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         txtNormed.Dispose();
         QwenImageDebugDump.Dump("txt_in", txtTokens);
 
+        // F16 block loop (HARTSY_DIT_F16, B=1): one cast per stream before the loop — every block
+        // activation follows, and all 60 SDPAs run zero-cast cuDNN F16. Streams already ride at
+        // ResidualDamp scale from the damped embedders. Cast back to F32 after the loop for the final
+        // norm (which cancels the damp) + proj_out.
+        bool f16Loop = _f16Mode && batch == 1;
+        if (f16Loop)
+        {
+            Tensor imgF16 = new Tensor(imgTokShape, DType.F16);
+            backend.CastToF16(imgF16, imgTokens);
+            imgTokens.Dispose();
+            imgTokens = imgF16;
+            Tensor txtF16 = new Tensor(txtTokShape, DType.F16);
+            backend.CastToF16(txtF16, txtTokens);
+            txtTokens.Dispose();
+            txtTokens = txtF16;
+        }
+
         Tensor temb = ComputeTimestepEmbedding(backend, timestep, batch);
         QwenImageDebugDump.Dump("time_text_embed", temb);
+
+        // 2511 timestep-zero ref method: a second temb at t=0 drives the ref-row modulation in every block
+        // (identical to upstream's batch-2 `cat([timestep, timestep*0])` — separate embedding call, same math).
+        Tensor? tembZero = refSeqLen > 0 && refTimestepZero
+            ? ComputeTimestepEmbedding(backend, 0.0f, batch)
+            : null;
 
         int txtPositionStart = QwenImageRope.ComputeTextPositionStart(hPacked, wPacked);
 
@@ -150,7 +211,7 @@ public sealed unsafe class QwenImageTransformer : IDisposable
         {
             (Tensor newImg, Tensor newTxt) = _blocks[i].Forward(
                 backend, currentImg, currentTxt, temb, _rope,
-                hPacked, wPacked, txtPositionStart, refHPacked, refWPacked);
+                hPacked, wPacked, txtPositionStart, refGrids, tembZero, mainSeqLen);
 
             currentImg.Dispose();
             currentTxt.Dispose();
@@ -164,10 +225,20 @@ public sealed unsafe class QwenImageTransformer : IDisposable
 
         currentTxt.Dispose();
 
+        if (currentImg.DType == DType.F16)
+        {
+            // Back to F32 for the final norm + proj_out (velocity precision across Euler steps).
+            Tensor imgF32 = new Tensor(imgTokShape, DType.F32);
+            backend.CastToF32(imgF32, currentImg);
+            currentImg.Dispose();
+            currentImg = imgF32;
+        }
+
         Tensor output = ApplyFinalLayer(backend, currentImg, temb, batch, imgSeqLen);
         QwenImageDebugDump.Dump("proj_out", output);
         currentImg.Dispose();
         temb.Dispose();
+        tembZero?.Dispose();
 
         // Qwen-Image-Edit: drop the reference-latent rows — only the main noise tokens carry velocity
         // (upstream `hidden_states[:, :num_embeds]`, applied AFTER norm_out/proj_out; per-token final

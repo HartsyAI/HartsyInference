@@ -18,6 +18,7 @@ public sealed unsafe class QwenImageBlock
     private Tensor? _toKWeight, _toKBias;
     private Tensor? _toVWeight, _toVBias;
     private Tensor? _toOutWeight, _toOutBias;
+    private float _streamLnEps = 1e-6f;
 
     private Tensor? _addQWeight, _addQBias;
     private Tensor? _addKWeight, _addKBias;
@@ -61,8 +62,15 @@ public sealed unsafe class QwenImageBlock
     }
 
     /// <summary>Loads weights using diffusers naming under <c>transformer_blocks.{i}.*</c>. Modulation linears project temb to <c>2 * 6 * hidden</c> (mod1 + mod2 each with 6 params); attention is bias=True; QK-norm is RMSNorm; FFNs are GELU(approximate) with <c>ff.net.0.proj</c> + <c>ff.net.2</c> naming.</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma/Flux
+    /// recipe — see <see cref="ChromaF16"/>): damps every branch-output projection so the residual stream
+    /// rides at 1/32 scale; the no-affine LayerNorms make it exact. 1.0 = off.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
+        // LayerNorm scale-invariance is only exact with eps scaled alongside: LN_eps(c·x) = c·LN_{eps/c²}(x).
+        // At Qwen's deep damp (1/2048) the block-0 stream variance (~4e-6) is COMPARABLE to the raw 1e-6 eps,
+        // which silently distorted the normalization (velocity std +37%, corr 0.995 — the damp "leak").
+        _streamLnEps = 1e-6f * branchDamp * branchDamp;
         _imgModulation.LoadWeights(
             weights[$"{prefix}.img_mod.1.weight"],
             weights[$"{prefix}.img_mod.1.bias"]);
@@ -93,17 +101,36 @@ public sealed unsafe class QwenImageBlock
         _normAddedQ.LoadWeights(weights[$"{prefix}.attn.norm_added_q.weight"]);
         _normAddedK.LoadWeights(weights[$"{prefix}.attn.norm_added_k.weight"]);
 
+        Tensor imgFfnOutWeight = weights[$"{prefix}.img_mlp.net.2.weight"];
+        Tensor imgFfnOutBias = weights[$"{prefix}.img_mlp.net.2.bias"];
+        Tensor txtFfnOutWeight = weights[$"{prefix}.txt_mlp.net.2.weight"];
+        Tensor txtFfnOutBias = weights[$"{prefix}.txt_mlp.net.2.bias"];
+        if (branchDamp != 1.0f)
+        {
+            // Weight damp rides the GEMM alpha (honored on the dequantized-GGUF cuBLAS path too — every
+            // damped weight sees token-count-sized GEMMs, never the alpha-less M=1 mat-vec kernels);
+            // biases get value-scaled F32 copies (the epilogue adds bias after alpha). Once per load.
+            _toOutWeight!.Fp8ScaleFactor *= branchDamp;
+            _toOutBias = ChromaF16.DampBias(_toOutBias!, branchDamp);
+            _toAddOutWeight!.Fp8ScaleFactor *= branchDamp;
+            _toAddOutBias = ChromaF16.DampBias(_toAddOutBias!, branchDamp);
+            imgFfnOutWeight.Fp8ScaleFactor *= branchDamp;
+            imgFfnOutBias = ChromaF16.DampBias(imgFfnOutBias, branchDamp);
+            txtFfnOutWeight.Fp8ScaleFactor *= branchDamp;
+            txtFfnOutBias = ChromaF16.DampBias(txtFfnOutBias, branchDamp);
+        }
+
         _imgFfn.LoadGeluWeights(
             weights[$"{prefix}.img_mlp.net.0.proj.weight"],
             weights[$"{prefix}.img_mlp.net.0.proj.bias"],
-            weights[$"{prefix}.img_mlp.net.2.weight"],
-            weights[$"{prefix}.img_mlp.net.2.bias"]);
+            imgFfnOutWeight,
+            imgFfnOutBias);
 
         _txtFfn.LoadGeluWeights(
             weights[$"{prefix}.txt_mlp.net.0.proj.weight"],
             weights[$"{prefix}.txt_mlp.net.0.proj.bias"],
-            weights[$"{prefix}.txt_mlp.net.2.weight"],
-            weights[$"{prefix}.txt_mlp.net.2.bias"]);
+            txtFfnOutWeight,
+            txtFfnOutBias);
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -149,9 +176,15 @@ public sealed unsafe class QwenImageBlock
     /// (0 = no ref tokens). Ref tokens ride at the END of the image stream and get their own RoPE positions
     /// (frame axis 1, centered on the ref grid) — everything else in the block treats them as ordinary image tokens.</param>
     /// <param name="refPackedW">Packed-grid width of the reference-latent section (0 = no ref tokens).</param>
+    /// <param name="tembZero">Qwen-Image-Edit-2511 (<c>index_timestep_zero</c> ref method): the timestep-0
+    /// embedding. When set, the reference-latent rows of the IMAGE stream (rows ≥ <paramref name="timestepZeroIndex"/>)
+    /// are modulated and gated with the t=0 modulation while the noise rows keep the real-timestep modulation —
+    /// ComfyUI <c>qwen_image/model.py</c> <c>_modulate/_apply_gate</c> with <c>timestep_zero_index</c>. The text
+    /// stream always uses the real-timestep modulation (upstream chunks temb back to row 0 for txt_mod).</param>
+    /// <param name="timestepZeroIndex">First image-stream row of the reference tokens (= main noise token count).</param>
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
         QwenImageRope rope, int imgPackedH, int imgPackedW, int txtPositionStart,
-        int refPackedH = 0, int refPackedW = 0)
+        (int H, int W)[]? refGrids = null, Tensor? tembZero = null, int timestepZeroIndex = 0)
     {
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
@@ -163,7 +196,12 @@ public sealed unsafe class QwenImageBlock
         // .Forward runs Silu+Linear on the GPU; the per-row split it returns is tiny ([B, hidden] each) — negligible.
         Tensor[] imgMod = _imgModulation.Forward(backend, temb);
         Tensor[] txtMod = _txtModulation.Forward(backend, temb);
+        Tensor[]? imgModZero = tembZero is not null ? _imgModulation.Forward(backend, tembZero) : null;
 
+        // F16 activation path: every activation tensor follows the incoming stream dtype (the transformer
+        // decides by casting the streams once before the block loop; F32 when the F16 mode is off).
+        DType act = image.DType;
+        ChromaF16.Probe("qwen.blk.imgIn", image);
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
         // [B, S, H, D] views (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
@@ -173,46 +211,48 @@ public sealed unsafe class QwenImageBlock
         TensorShape jointMh = new TensorShape(batch, _numHeads, totalSeqLen, _headDim);
 
         // ── 1. LayerNorm (no affine, eps 1e-6) + AdaLN modulate: x*(1+scale)+shift ──
-        Tensor imgModulated = NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
-        Tensor txtModulated = NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
+        Tensor imgModulated = imgModZero is null
+            ? NormModulate(backend, image, imgMod[0], imgMod[1], imgShape, _streamLnEps)
+            : NormModulateSplit(backend, image, imgMod[0], imgMod[1], imgModZero[0], imgModZero[1], imgShape, timestepZeroIndex, _streamLnEps);
+        Tensor txtModulated = NormModulate(backend, text, txtMod[0], txtMod[1], txtShape, _streamLnEps);
 
         // ── 2. Q/K/V projections (declared [B, S, H, D] so QK-norm + permute need no reshape view) ──
-        Tensor imgQ = new Tensor(imgHeads, DType.F32);
+        Tensor imgQ = new Tensor(imgHeads, act);
         backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgHeads, DType.F32);
+        Tensor imgK = new Tensor(imgHeads, act);
         backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgHeads, DType.F32);
+        Tensor imgV = new Tensor(imgHeads, act);
         backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
         imgModulated.Dispose();
 
-        Tensor txtQ = new Tensor(txtHeads, DType.F32);
+        Tensor txtQ = new Tensor(txtHeads, act);
         backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
-        Tensor txtK = new Tensor(txtHeads, DType.F32);
+        Tensor txtK = new Tensor(txtHeads, act);
         backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
-        Tensor txtV = new Tensor(txtHeads, DType.F32);
+        Tensor txtV = new Tensor(txtHeads, act);
         backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
         txtModulated.Dispose();
 
         // ── 3. QK-norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor imgQn = new Tensor(imgHeads, DType.F32);
+        Tensor imgQn = new Tensor(imgHeads, act);
         backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
         imgQ.Dispose();
-        Tensor imgKn = new Tensor(imgHeads, DType.F32);
+        Tensor imgKn = new Tensor(imgHeads, act);
         backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
         imgK.Dispose();
-        Tensor txtQn = new Tensor(txtHeads, DType.F32);
+        Tensor txtQn = new Tensor(txtHeads, act);
         backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
         txtQ.Dispose();
-        Tensor txtKn = new Tensor(txtHeads, DType.F32);
+        Tensor txtKn = new Tensor(txtHeads, act);
         backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
         txtK.Dispose();
 
         // ── 4. Concat [txt, img] along the seq dim (contiguous row-concat in [B, S, hidden] layout) ──
-        Tensor jointQf = new Tensor(jointFlat, DType.F32);
+        Tensor jointQf = new Tensor(jointFlat, act);
         backend.Concat(jointQf, new Tensor[] { txtQn, imgQn }, 1);
-        Tensor jointKf = new Tensor(jointFlat, DType.F32);
+        Tensor jointKf = new Tensor(jointFlat, act);
         backend.Concat(jointKf, new Tensor[] { txtKn, imgKn }, 1);
-        Tensor jointVf = new Tensor(jointFlat, DType.F32);
+        Tensor jointVf = new Tensor(jointFlat, act);
         backend.Concat(jointVf, new Tensor[] { txtV, imgV }, 1);
         txtQn.Dispose(); imgQn.Dispose();
         txtKn.Dispose(); imgKn.Dispose();
@@ -225,83 +265,89 @@ public sealed unsafe class QwenImageBlock
         if (batch == 1)
         {
             (Tensor ropeCos, Tensor ropeSin) = rope.GetOrBuildJointTables(
-                imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refPackedH, refPackedW);
+                imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids ?? []);
             backend.WanRopeInterleaved(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
             backend.WanRopeInterleaved(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
         }
 
         // ── 6. Permute [B, S, H, D] → [B, H, S, D] for SDPA ──
-        Tensor jointQ = new Tensor(jointMh, DType.F32);
+        Tensor jointQ = new Tensor(jointMh, act);
         backend.Permute0213(jointQ, jointQf, totalSeqLen, _numHeads, _headDim);
         jointQf.Dispose();
-        Tensor jointK = new Tensor(jointMh, DType.F32);
+        Tensor jointK = new Tensor(jointMh, act);
         backend.Permute0213(jointK, jointKf, totalSeqLen, _numHeads, _headDim);
         jointKf.Dispose();
-        Tensor jointV = new Tensor(jointMh, DType.F32);
+        Tensor jointV = new Tensor(jointMh, act);
         backend.Permute0213(jointV, jointVf, totalSeqLen, _numHeads, _headDim);
         jointVf.Dispose();
 
         if (batch != 1)
         {
             rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart,
-                refPackedH, refPackedW);
+                refGrids ?? []);
         }
 
         // ── 7. Joint scaled dot-product attention (no mask) ──
         // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe and
         // engages the cuDNN fused flash path (head_dim 128, no mask: the proven Krea2/Z-Image config).
-        Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
+        Tensor jointAttnOut = new Tensor(jointMh, act);
         backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: true);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();
 
         // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] (B=1: contiguous rows) ──
-        Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
+        Tensor jointAttnFlat = new Tensor(jointFlat, act);
         backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
-        Tensor txtAttn = new Tensor(txtShape, DType.F32);
+        Tensor txtAttn = new Tensor(txtShape, act);
         backend.SliceRows(txtAttn, jointAttnFlat, 0);
-        Tensor imgAttn = new Tensor(imgShape, DType.F32);
+        Tensor imgAttn = new Tensor(imgShape, act);
         backend.SliceRows(imgAttn, jointAttnFlat, txtSeqLen);
         jointAttnFlat.Dispose();
 
         // ── 9. Output projections + gated residual (input + gate*value) ──
-        Tensor imgAttnProj = new Tensor(imgShape, DType.F32);
+        Tensor imgAttnProj = new Tensor(imgShape, act);
         backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
         imgAttn.Dispose();
-        Tensor imgAfterAttn = new Tensor(imgShape, DType.F32);
-        backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
+        Tensor imgAfterAttn = imgModZero is null
+            ? GatedResidual(backend, image, imgAttnProj, imgMod[2], imgShape)
+            : GatedResidualSplit(backend, image, imgAttnProj, imgMod[2], imgModZero[2], imgShape, timestepZeroIndex);
         imgAttnProj.Dispose();
 
-        Tensor txtAttnProj = new Tensor(txtShape, DType.F32);
+        Tensor txtAttnProj = new Tensor(txtShape, act);
         backend.Linear(txtAttnProj, txtAttn, _toAddOutWeight!, _toAddOutBias);
         txtAttn.Dispose();
-        Tensor txtAfterAttn = new Tensor(txtShape, DType.F32);
+        Tensor txtAfterAttn = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
         txtAttnProj.Dispose();
 
         // ── 10. Image MLP path ──
-        Tensor imgMlpModulated = NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape);
+        Tensor imgMlpModulated = imgModZero is null
+            ? NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape, _streamLnEps)
+            : NormModulateSplit(backend, imgAfterAttn, imgMod[3], imgMod[4], imgModZero[3], imgModZero[4], imgShape, timestepZeroIndex, _streamLnEps);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
-        Tensor imgFinal = new Tensor(imgShape, DType.F32);
-        backend.GatedResidualLastDim(imgFinal, imgAfterAttn, imgMlpOut, imgMod[5]);
+        Tensor imgFinal = imgModZero is null
+            ? GatedResidual(backend, imgAfterAttn, imgMlpOut, imgMod[5], imgShape)
+            : GatedResidualSplit(backend, imgAfterAttn, imgMlpOut, imgMod[5], imgModZero[5], imgShape, timestepZeroIndex);
         imgMlpOut.Dispose();
         imgAfterAttn.Dispose();
 
         // ── 11. Text MLP path ──
-        Tensor txtMlpModulated = NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
+        Tensor txtMlpModulated = NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape, _streamLnEps);
         Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, batch, txtSeqLen);
         txtMlpModulated.Dispose();
-        Tensor txtFinal = new Tensor(txtShape, DType.F32);
+        Tensor txtFinal = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
         txtMlpOut.Dispose();
         txtAfterAttn.Dispose();
 
         for (int i = 0; i < imgMod.Length; i++) imgMod[i].Dispose();
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
+        if (imgModZero is not null)
+            for (int i = 0; i < imgModZero.Length; i++) imgModZero[i].Dispose();
 
         return (imgFinal, txtFinal);
     }
@@ -310,16 +356,98 @@ public sealed unsafe class QwenImageBlock
     /// GPU. <c>AffineBroadcastLastDim</c> computes <c>x*scale+shift</c>, so the scale tensor is pre-incremented by 1
     /// (<c>AddScalar</c>) to reproduce the <c>(1+scale)</c> factor — bit-identical to the old CPU
     /// <see cref="AdaLNModulation.ApplyModulation"/>. Mirrors ChromaDoubleStreamBlock.NormModulate.</summary>
-    private static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
+    private static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape, float eps)
     {
-        Tensor normed = new Tensor(shape, DType.F32);
-        backend.LayerNormNoAffine(normed, x, 1e-6f);
+        Tensor normed = new Tensor(shape, x.DType);
+        backend.LayerNormNoAffine(normed, x, eps);
         Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
         backend.AddScalar(scalePlus1, scale, 1.0f);
-        Tensor output = new Tensor(shape, DType.F32);
+        Tensor output = new Tensor(shape, x.DType);
         backend.AffineBroadcastLastDim(output, normed, scalePlus1, shift);
         normed.Dispose();
         scalePlus1.Dispose();
+        return output;
+    }
+
+    private static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor gate, TensorShape shape)
+    {
+        Tensor output = new Tensor(shape, residual.DType);
+        backend.GatedResidualLastDim(output, residual, value, gate);
+        return output;
+    }
+
+    /// <summary>Row-split <see cref="NormModulate"/> for the 2511 timestep-zero ref method: rows
+    /// <c>[0, mainRows)</c> get (shiftA, scaleA), rows <c>[mainRows, S)</c> get (shiftB, scaleB) — the
+    /// LayerNorm is per-row so it runs once on the whole tensor, then each contiguous segment is affined
+    /// with its own modulation and the segments are row-concatenated back. B=1 only (ref tokens require it).</summary>
+    private static Tensor NormModulateSplit(IBackend backend, Tensor x, Tensor shiftA, Tensor scaleA,
+        Tensor shiftB, Tensor scaleB, TensorShape shape, int mainRows, float eps)
+    {
+        int total = (int)shape[1];
+        int dim = (int)shape[2];
+        DType actT = x.DType;
+        Tensor normed = new Tensor(shape, actT);
+        backend.LayerNormNoAffine(normed, x, eps);
+
+        Tensor main = new Tensor(new TensorShape(1, mainRows, dim), actT);
+        backend.SliceRows(main, normed, 0);
+        Tensor refPart = new Tensor(new TensorShape(1, total - mainRows, dim), actT);
+        backend.SliceRows(refPart, normed, mainRows);
+        normed.Dispose();
+
+        Tensor scaleAPlus1 = new Tensor(scaleA.Shape, DType.F32);
+        backend.AddScalar(scaleAPlus1, scaleA, 1.0f);
+        Tensor mainOut = new Tensor(main.Shape, actT);
+        backend.AffineBroadcastLastDim(mainOut, main, scaleAPlus1, shiftA);
+        main.Dispose();
+        scaleAPlus1.Dispose();
+
+        Tensor scaleBPlus1 = new Tensor(scaleB.Shape, DType.F32);
+        backend.AddScalar(scaleBPlus1, scaleB, 1.0f);
+        Tensor refOut = new Tensor(refPart.Shape, actT);
+        backend.AffineBroadcastLastDim(refOut, refPart, scaleBPlus1, shiftB);
+        refPart.Dispose();
+        scaleBPlus1.Dispose();
+
+        Tensor output = new Tensor(shape, actT);
+        backend.Concat(output, new Tensor[] { mainOut, refOut }, 1);
+        mainOut.Dispose();
+        refOut.Dispose();
+        return output;
+    }
+
+    /// <summary>Row-split gated residual (2511 timestep-zero): <c>out = residual + [gateA·value_main ; gateB·value_ref]</c>.</summary>
+    private static Tensor GatedResidualSplit(IBackend backend, Tensor residual, Tensor value,
+        Tensor gateA, Tensor gateB, TensorShape shape, int mainRows)
+    {
+        int total = (int)shape[1];
+        int dim = (int)shape[2];
+        TensorShape mainShape = new TensorShape(1, mainRows, dim);
+        TensorShape refShape = new TensorShape(1, total - mainRows, dim);
+        DType actT = residual.DType;
+
+        Tensor resMain = new Tensor(mainShape, actT);
+        backend.SliceRows(resMain, residual, 0);
+        Tensor valMain = new Tensor(mainShape, actT);
+        backend.SliceRows(valMain, value, 0);
+        Tensor outMain = new Tensor(mainShape, actT);
+        backend.GatedResidualLastDim(outMain, resMain, valMain, gateA);
+        resMain.Dispose();
+        valMain.Dispose();
+
+        Tensor resRef = new Tensor(refShape, actT);
+        backend.SliceRows(resRef, residual, mainRows);
+        Tensor valRef = new Tensor(refShape, actT);
+        backend.SliceRows(valRef, value, mainRows);
+        Tensor outRef = new Tensor(refShape, actT);
+        backend.GatedResidualLastDim(outRef, resRef, valRef, gateB);
+        resRef.Dispose();
+        valRef.Dispose();
+
+        Tensor output = new Tensor(shape, actT);
+        backend.Concat(output, new Tensor[] { outMain, outRef }, 1);
+        outMain.Dispose();
+        outRef.Dispose();
         return output;
     }
 }
