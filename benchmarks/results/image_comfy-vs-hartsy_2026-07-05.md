@@ -906,3 +906,52 @@ Z-Image-Turbo **2.76s** ✓ (gate ≤3.2) · Chroma1-HD **28.5s** median (28.54/
 graph capture across all gens — cross-gen persistence confirmed) · Krea2-Turbo **4.52s** ✓ (gate <6.5),
 loading AFTER the Chroma graph session — the sync-probe reclaim fired at its VAE decode
 (92 MB free → 4.8 GB free) exactly where the OOM used to be. All three outputs viewed, coherent.
+
+## 2026-07-10 — Board-clearing round 1: Krea2-Base validated, Comfy baselines for Schnell/Klein, Lumina2+OmniGen2 wired
+
+- **Krea2-Base CFG path VALIDATED** (was validation-pending since the Krea2 bring-up): warm **30.3s**
+  median (30.23/30.29/30.33, cold 45.9) @1024²/28 steps/cfg 4.5, peak 21.2 GB, on `44.35-local`. Output
+  sharp + on-prompt with correct contrast (no over-guidance) — the standard uncond-anchored CFG anchoring
+  at `Krea2Pipeline` is correct. No ComfyUI baseline run yet for Base.
+- **ComfyUI baselines recorded** (comfy selfstart backend 1, same 4090, same requests):
+  **Flux-Schnell 3.04s** (ours 10.5s → **3.5× slower**, worse than Flux-Dev's 2.5×!) and
+  **Flux.2 Klein 4B 1.85s** (ours 3.45s → **1.9×**). Both join Flux-Dev in the Flux-family grind bucket —
+  the Chroma round-3 kit (persistent step graph, F16 residual damp, rope/ctx caches) transplants directly.
+- **Lumina2 + OmniGen2 wired into the Swarm extension** (were engine-✅ but unreachable): new
+  `Lumina2Loader`/`OmniGen2Loader` with LIVE text-conditioning — Lumina2 runs Gemma-2-2B
+  (`hidden_states[-2]` tap via EncodeMultiLayer, system-prompt + " <Prompt Start> " template, verified
+  coherent @1024/25st/cfg4) and OmniGen2 runs Qwen2.5-VL-3B (ComfyUI `text_encoders/omnigen2.py` template
+  parity: full templated sequence, final-norm'd last hidden state, no prefix drop). Side-models
+  (`gemma_2_2b_fp16`, `qwen_2.5_vl_fp16` 3B, Flux ae) auto-resolve via the SideModels registry.
+  **Trap:** the diffusers-format Lumina2 transformer matches core's `isOmniGen` key predicate
+  (`time_caption_embed.*` + `context_refiner.*` — OmniGen2 is Lumina-derived) and got classed `omnigen-2`;
+  fixed per-model via `EditModelMetadata type=lumina-2`. The robust discriminator for a future core fix:
+  OmniGen2 has `ref_image_patch_embedder.*` / `image_index_embedding`, Lumina2 doesn't.
+  Both models are SLOW pre-optimization (Lumina2 650s @1024²/25st — F32 + host-glue; the residency
+  backlog applies) — wiring ≠ perf round.
+
+## 2026-07-10 — HiDream-i1 residency round 1: ~29s/step → **~1.4s/step (≈20×)**, 1024-CFG blocked on VRAM
+
+The 29s/step causes, all fixed this round: **(1) MoE host loops** — `ComputeTopKGateWeights` (softmax+top-k
+on host, reading the device logits' DataPointer) and the per-expert `AccumulateGatedExpert` host loop =
+~5 full pipeline drains per block × 48 blocks × forward. New `dit_moe_topk_gate_f32` +
+`dit_row_gated_accum_f32` kernels behind `IBackend.MoeTopKGate`/`RowGatedAccumulate` (host defaults hoisted
+— CPU backend unchanged bit-for-bit); the shared expert is now the in-place accumulator. **(2) Host
+multi-head reshapes/concats/splits** in both attention paths → the Chroma idiom (flat-layout device Concat,
+`Permute0213`, `SliceRows`) for B=1. NOTE: HiDream QK-norm is over the FLAT hidden (not per-head) — norm
+first, then dim-explicit permute on the flat tensor. **(3) Host RoPE** → `FluxRope.ApplyGpu` pre-permute
+over the full joint sequence (text positions all-zero = identity, bit-identical to the old image-only
+rotation). **(4)** rope `Precompute` ran twice per forward (identical args) → signature cache.
+**(5)** SDPA now passes `allowF16` (QK-normed → cuDNN fused engine). Pipeline: KEEP_MODELS residency +
+quad-encoder (CLIP-L/G+T5+Llama, 49 hidden states) prompt cache with DiT-evict-on-miss staging + planned
+pool trims at both handoffs.
+
+**Result (Dev config, 25 st/no-CFG @1024): 50.6s total ≈ 1.4s/step (was ~29s/step)**, composition correct.
+Note the local `hidream_i1.safetensors` is now the **Full** fp8 (re-downloaded after the /tmp loss — the
+no-CFG render is expectedly soft; Full wants cfg≈5).
+
+**Blocker: 1024²/50-step CFG OOMs on step 1** — ~6.9 GB live mid-forward beside the 17 GB resident fp8
+weights (F32 activations; the old host drains were accidentally throttling the queue). Serializing the CFG
+pair + pool trims didn't close it. **Next lever = the F16-activation port** (the fleet recipe — halves every
+transient) plus an audit of mid-forward live-activation growth; until then the standard bench config
+(1024², cfg 5) can't run, so no scoreboard row yet. Comfy comparison pending that.

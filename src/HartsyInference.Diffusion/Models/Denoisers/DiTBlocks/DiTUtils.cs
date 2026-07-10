@@ -534,7 +534,8 @@ public static unsafe class DiTUtils
     /// bit-identical to the old host <see cref="AdaLNModulation.ApplyModulation"/>. Mirrors QwenImageBlock.NormModulate.</summary>
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape, float eps = 1e-6f)
     {
-        Tensor normed = new Tensor(shape, DType.F32);
+        // Intermediate follows the activation dtype (F16 activation stays F16 end-to-end; F32 callers unchanged).
+        Tensor normed = new Tensor(shape, x.DType);
         backend.LayerNormNoAffine(normed, x, eps);
         Tensor output = Modulate(backend, normed, shift, scale, shape);
         normed.Dispose();

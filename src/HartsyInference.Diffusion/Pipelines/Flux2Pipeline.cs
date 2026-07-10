@@ -4,6 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
@@ -169,7 +170,8 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             // evict for this encode, the denoise section re-preloads. Cache hits never pay this.
             if (_ditResident)
             {
-                Backend.FreeWeights(_transformer.EnumerateWeights());
+_transformer.InvalidateStepGraph(Backend);
+                                Backend.FreeWeights(_transformer.EnumerateWeights());
                 _ditResident = false;
             }
 
@@ -225,11 +227,42 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         // keeps the host branch (per-step host blend must read the latent anyway).
         bool drainFree = !isMaskedInpaint;
         Logs.Info(drainFree ? "Flux.2 loop: drain-free device-resident path." : "Flux.2 loop: host-step path.");
+
+        // Persistent step graph (the Chroma/Flux.1 recipe): route the latent through the transformer-owned
+        // FIXED buffer so the whole forward is captured once per (prompt ref, grid) signature and replayed
+        // with one cuGraphLaunch per step; it survives across generations (this pipeline never sweeps
+        // activations on the drain-free route, and the post-decode reclaim below trims instead).
+        bool graphRoute = drainFree && packedSourceLatent is null
+            && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
+        if (graphRoute)
+        {
+            Tensor fixedLatent = _transformer.PrepareGraphLatent(Backend, packedLatent);
+            packedLatent.Dispose();
+            packedLatent = fixedLatent;
+        }
+
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
+
+            if (graphRoute)
+            {
+                (Tensor velocity, bool callerOwns) = _transformer.ForwardGraphable(
+                    Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW);
+                // Euler stays OUTSIDE the capture: in-place on the fixed latent the graph reads next step.
+                Backend.CfgEulerStep(packedLatent, velocity, velocity, 1.0f, scheduler.Dt(i));
+                if (callerOwns) velocity.Dispose();
+
+                stepSw.Stop();
+                Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
+                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    LatentArch = LatentArchitecture.Flux2,
+                });
+                continue;
+            }
 
             Tensor velocityPred = _transformer.Forward(
                 Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW);
@@ -289,6 +322,11 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             });
         }
 
+        // On the graph route packedLatent IS the transformer-owned fixed buffer (alive across generations
+        // for graph replay) — hand a snapshot to the unpack/dispose tail instead.
+        if (graphRoute)
+            packedLatent = _transformer.SnapshotGraphLatent(Backend);
+
         // textEmbeddings is a cross-generation cache entry — not disposed here.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
@@ -297,6 +335,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
         // tiled fallback covers the tight case; a future prompt-cache miss evicts before the TE).
         if (!KeepModelsResident)
         {
+            _transformer.InvalidateStepGraph(Backend);
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
         }

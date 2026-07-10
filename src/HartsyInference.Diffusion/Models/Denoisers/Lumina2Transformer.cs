@@ -9,6 +9,15 @@ public sealed unsafe class Lumina2Transformer : IDisposable
 {
     private readonly Lumina2Config _config;
     private readonly Lumina2ContextRefinerBlock[] _contextRefiners;
+
+    // Per-forward-invariant caches (the 650s wall was dominated by re-doing all of this every forward):
+    // refined captions are prompt-invariant (2-slot, keyed on the embedding tensor identity — the pipeline
+    // passes the same cached cond/uncond tensors every step), and the three rope tables are geometry-keyed.
+    private long _refinedCapKeyA = long.MinValue, _refinedCapKeyB = long.MinValue;
+    private Tensor? _refinedCapA, _refinedCapB;
+    private readonly ZImageRope _captionRopeCached;
+    private readonly ZImageRope _refinerRopeCached;
+    private int _capRopeSig = -1, _refinerRopeSig = -1, _jointRopeSig = -1;
     private readonly Lumina2Block[] _noiseRefiners;
     private readonly Lumina2Block[] _layers;
     private readonly ZImageRope _rope;
@@ -60,6 +69,8 @@ public sealed unsafe class Lumina2Transformer : IDisposable
         }
 
         _rope = new ZImageRope(config.AxesDims, config.RopeTheta);
+        _captionRopeCached = new ZImageRope(config.AxesDims, config.RopeTheta);
+        _refinerRopeCached = new ZImageRope(config.AxesDims, config.RopeTheta);
     }
 
     /// <summary>Loads all weights from a Lumina-Image-2.0 diffusers-format dict.</summary>
@@ -144,24 +155,49 @@ public sealed unsafe class Lumina2Transformer : IDisposable
         Tensor tEmb = ComputeTimestepEmbedding(backend, sigma, batch);
         Lumina2DebugDump.Dump("t_embedder", tEmb);
 
-        // ── 2. Caption embedding: RMSNorm + Linear → context_refiner stack ──
-        Tensor capProjected = EmbedCaption(backend, captionEmbeddings, batch, capLen);
-        Lumina2DebugDump.Dump("cap_embedder", capProjected);
-
-        // Caption-only RoPE: positions (0..capLen-1, 0, 0). Lumina 2.0 uses pos_start=0 (zero-indexed)
-        // for caption frames — see diffusers Lumina2RotaryPosEmbed.
-        ZImageRope captionRope = new ZImageRope(_config.AxesDims, _config.RopeTheta);
-        Tensor capPosIds = BuildCaptionPositionIds(capLen);
-        captionRope.Precompute(capPosIds);
-        capPosIds.Dispose();
-
-        Tensor refinedCaption = capProjected;
-        for (int i = 0; i < _contextRefiners.Length; i++)
+        // ── 2. Caption embedding + context_refiner — PROMPT-INVARIANT, so cached per embedding tensor
+        //       (two slots: cond + uncond). The refiner stack previously re-ran every forward of every step. ──
+        long capKey = ((long)System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(captionEmbeddings) << 16)
+            ^ (uint)capLen;
+        Tensor refinedCaption;
+        if (capKey == _refinedCapKeyA)
         {
-            Tensor next = _contextRefiners[i].Forward(backend, refinedCaption, captionRope);
-            refinedCaption.Dispose();
-            refinedCaption = next;
-            Lumina2DebugDump.Dump($"context_refiner.{i}", refinedCaption);
+            refinedCaption = _refinedCapA!;
+        }
+        else if (capKey == _refinedCapKeyB)
+        {
+            refinedCaption = _refinedCapB!;
+        }
+        else
+        {
+            Tensor capProjected = EmbedCaption(backend, captionEmbeddings, batch, capLen);
+            Lumina2DebugDump.Dump("cap_embedder", capProjected);
+
+            // Caption-only RoPE: positions (0..capLen-1, 0, 0), pos_start=0 (diffusers Lumina2RotaryPosEmbed).
+            if (_capRopeSig != capLen)
+            {
+                Tensor capPosIds = BuildCaptionPositionIds(capLen);
+                _captionRopeCached.Precompute(capPosIds);
+                capPosIds.Dispose();
+                _capRopeSig = capLen;
+            }
+
+            refinedCaption = capProjected;
+            for (int i = 0; i < _contextRefiners.Length; i++)
+            {
+                Tensor next = _contextRefiners[i].Forward(backend, refinedCaption, _captionRopeCached);
+                refinedCaption.Dispose();
+                refinedCaption = next;
+                Lumina2DebugDump.Dump($"context_refiner.{i}", refinedCaption);
+            }
+            _ = refinedCaption.DataPointer;   // host-materialize so the cache survives activation sweeps
+
+            // Install (B slot takes the old A entry, so cond+uncond alternate without churn).
+            if (_refinedCapB != refinedCaption) _refinedCapB?.Dispose();
+            _refinedCapB = _refinedCapA;
+            _refinedCapKeyB = _refinedCapKeyA;
+            _refinedCapA = refinedCaption;
+            _refinedCapKeyA = capKey;
         }
 
         // ── 3. Image patchify + embed → noise_refiner stack with timestep modulation ──
@@ -174,15 +210,19 @@ public sealed unsafe class Lumina2Transformer : IDisposable
 
         // Image-only RoPE for noise_refiner. Lumina 2.0 uses (0, row, col) for image tokens before
         // they get the caption-frame offset (which only matters in the joint sequence).
-        ZImageRope refinerRope = new ZImageRope(_config.AxesDims, _config.RopeTheta);
-        Tensor refinerPosIds = BuildImagePositionIds(hPacked, wPacked, imageFrameStart: 0);
-        refinerRope.Precompute(refinerPosIds);
-        refinerPosIds.Dispose();
+        int refinerSig = hPacked << 16 | wPacked;
+        if (_refinerRopeSig != refinerSig)
+        {
+            Tensor refinerPosIds = BuildImagePositionIds(hPacked, wPacked, imageFrameStart: 0);
+            _refinerRopeCached.Precompute(refinerPosIds);
+            refinerPosIds.Dispose();
+            _refinerRopeSig = refinerSig;
+        }
 
         Tensor refinedImage = imgEmbedded;
         for (int i = 0; i < _noiseRefiners.Length; i++)
         {
-            Tensor next = _noiseRefiners[i].Forward(backend, refinedImage, tEmb, refinerRope);
+            Tensor next = _noiseRefiners[i].Forward(backend, refinedImage, tEmb, _refinerRopeCached);
             refinedImage.Dispose();
             refinedImage = next;
             Lumina2DebugDump.Dump($"noise_refiner.{i}", refinedImage);
@@ -191,14 +231,27 @@ public sealed unsafe class Lumina2Transformer : IDisposable
         // ── 4. Concatenate [refined_caption, refined_image] along sequence dim ──
         // Lumina 2.0 puts captions FIRST (diffusers transformer_lumina2.py — joint_hidden_states with
         // captions concatenated before image patches). Z-Image's order is the opposite.
-        Tensor concat = ConcatAlongSeqDim(refinedCaption, refinedImage, batch, capLen, imgLen, hidden);
-        refinedCaption.Dispose();
-        refinedImage.Dispose();
+        Tensor concat;
+        if (batch == 1)
+        {
+            concat = new Tensor(new TensorShape(1, capLen + imgLen, hidden), refinedImage.DType);
+            backend.Concat(concat, new Tensor[] { refinedCaption, refinedImage }, 1);
+        }
+        else
+        {
+            concat = ConcatAlongSeqDim(refinedCaption, refinedImage, batch, capLen, imgLen, hidden);
+        }
+        refinedImage.Dispose();   // refinedCaption is cache-owned — not disposed here
 
         // ── 5. Build full RoPE for the concatenated [caption, image] sequence ──
-        Tensor fullPosIds = BuildJointPositionIds(capLen, hPacked, wPacked);
-        _rope.Precompute(fullPosIds);
-        fullPosIds.Dispose();
+        int jointSig = (capLen << 20) ^ (hPacked << 10) ^ wPacked;
+        if (_jointRopeSig != jointSig)
+        {
+            Tensor fullPosIds = BuildJointPositionIds(capLen, hPacked, wPacked);
+            _rope.Precompute(fullPosIds);
+            fullPosIds.Dispose();
+            _jointRopeSig = jointSig;
+        }
 
         // ── 6. Main layers ──
         Tensor x = concat;
@@ -210,8 +263,17 @@ public sealed unsafe class Lumina2Transformer : IDisposable
             Lumina2DebugDump.Dump($"layers.{i}", x);
         }
 
-        // ── 7. Slice off image portion (BACK of the [caption, image] sequence) ──
-        Tensor imageSlice = SliceImageBack(x, batch, capLen, imgLen, hidden);
+        // ── 7. Slice off image portion (BACK of the [caption, image] sequence; B=1: device row slice) ──
+        Tensor imageSlice;
+        if (batch == 1)
+        {
+            imageSlice = new Tensor(new TensorShape(1, imgLen, hidden), x.DType);
+            backend.SliceRows(imageSlice, x, capLen);
+        }
+        else
+        {
+            imageSlice = SliceImageBack(x, batch, capLen, imgLen, hidden);
+        }
         x.Dispose();
 
         // ── 8. norm_out: LuminaLayerNormContinuous → unpatchify ──
@@ -220,7 +282,16 @@ public sealed unsafe class Lumina2Transformer : IDisposable
         imageSlice.Dispose();
         tEmb.Dispose();
 
-        Tensor velocity = Unpatchify(finalProj, batch, inChannels, hPacked, wPacked, patch);
+        Tensor velocity;
+        if (batch == 1)
+        {
+            velocity = new Tensor(new TensorShape(1, inChannels, latentH, latentW), DType.F32);
+            backend.UnpatchifyTokens(velocity, finalProj, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+        }
+        else
+        {
+            velocity = Unpatchify(finalProj, batch, inChannels, hPacked, wPacked, patch);
+        }
         finalProj.Dispose();
 
         Lumina2DebugDump.DumpOutput(velocity);
@@ -421,21 +492,33 @@ public sealed unsafe class Lumina2Transformer : IDisposable
         // model's norm_eps).
         TensorShape seqShape = new TensorShape(batch, seqLen, hidden);
         Tensor normed = new Tensor(seqShape, imageTokens.DType);
-        DiTUtils.LayerNormNoAffine(normed, imageTokens, batch, seqLen, hidden, _config.NormEps);
-
-        Tensor modulated = new Tensor(seqShape, imageTokens.DType);
-        float* normPtr = (float*)normed.DataPointer;
-        float* scalePtr = (float*)scaleParam.DataPointer;
-        float* outPtr = (float*)modulated.DataPointer;
-        for (int b = 0; b < batch; b++)
+        Tensor modulated;
+        if (batch == 1)
         {
-            int condBase = b * hidden;
-            for (int s = 0; s < seqLen; s++)
+            backend.LayerNormNoAffine(normed, imageTokens, _config.NormEps);
+            Tensor scalePlus1 = new Tensor(scaleParam.Shape, DType.F32);
+            backend.AddScalar(scalePlus1, scaleParam, 1.0f);
+            modulated = new Tensor(seqShape, imageTokens.DType);
+            backend.AffineBroadcastLastDim(modulated, normed, scalePlus1, null);
+            scalePlus1.Dispose();
+        }
+        else
+        {
+            DiTUtils.LayerNormNoAffine(normed, imageTokens, batch, seqLen, hidden, _config.NormEps);
+            modulated = new Tensor(seqShape, imageTokens.DType);
+            float* normPtr = (float*)normed.DataPointer;
+            float* scalePtr = (float*)scaleParam.DataPointer;
+            float* outPtr = (float*)modulated.DataPointer;
+            for (int b = 0; b < batch; b++)
             {
-                int seqOff = (b * seqLen + s) * hidden;
-                for (int d = 0; d < hidden; d++)
+                int condBase = b * hidden;
+                for (int sIdx = 0; sIdx < seqLen; sIdx++)
                 {
-                    outPtr[seqOff + d] = normPtr[seqOff + d] * (1.0f + scalePtr[condBase + d]);
+                    int seqOff = (b * seqLen + sIdx) * hidden;
+                    for (int d = 0; d < hidden; d++)
+                    {
+                        outPtr[seqOff + d] = normPtr[seqOff + d] * (1.0f + scalePtr[condBase + d]);
+                    }
                 }
             }
         }
@@ -536,6 +619,10 @@ public sealed unsafe class Lumina2Transformer : IDisposable
             _normOutLinear1Bias = null;
             _normOutLinear2Weight = null;
             _normOutLinear2Bias = null;
+            _refinedCapA?.Dispose();
+            _refinedCapA = null;
+            _refinedCapB?.Dispose();
+            _refinedCapB = null;
         }
         GC.SuppressFinalize(this);
     }

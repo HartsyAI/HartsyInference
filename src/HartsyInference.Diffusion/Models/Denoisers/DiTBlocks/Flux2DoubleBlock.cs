@@ -55,7 +55,10 @@ public sealed unsafe class Flux2DoubleBlock
     }
 
     /// <summary>Loads weights with diffusers-style naming. Converter is expected to split BFL <c>img_attn.qkv</c> → <c>attn.to_{q,k,v}</c> and <c>img_mlp.0</c> → <c>ff.linear_in_gate / ff.linear_in_up</c>; same for txt-stream.</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe —
+    /// see <see cref="ChromaF16"/>): damps every branch-output projection so the residual stream rides at
+    /// 1/32 scale; the no-affine LayerNorms make it exact. 1.0 = off.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         // Image Q/K/V (no bias)
         _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
@@ -89,17 +92,31 @@ public sealed unsafe class Flux2DoubleBlock
         _normAddedQ.LoadWeights(weights[$"{prefix}.attn.norm_added_q.weight"]);
         _normAddedK.LoadWeights(weights[$"{prefix}.attn.norm_added_k.weight"]);
 
+        Tensor imgFfnOutWeight = weights[$"{prefix}.ff.linear_out.weight"];
+        Tensor txtFfnOutWeight = weights[$"{prefix}.ff_context.linear_out.weight"];
+        if (branchDamp != 1.0f)
+        {
+            // Weight damp rides the GEMM alpha (any dtype); Flux.2 linears are bias-less except the
+            // _qkvBias variants, whose out-proj biases get value-scaled copies. Once per load.
+            _toOutWeight.Fp8ScaleFactor *= branchDamp;
+            if (_toOutBias is not null) _toOutBias = ChromaF16.DampBias(_toOutBias, branchDamp);
+            _toAddOutWeight.Fp8ScaleFactor *= branchDamp;
+            if (_toAddOutBias is not null) _toAddOutBias = ChromaF16.DampBias(_toAddOutBias, branchDamp);
+            imgFfnOutWeight.Fp8ScaleFactor *= branchDamp;
+            txtFfnOutWeight.Fp8ScaleFactor *= branchDamp;
+        }
+
         // Image SwiGLU MLP (gate, up, out — no biases for Flux.2)
         _imgFfn.LoadSwiGluWeights(
             weights[$"{prefix}.ff.linear_in_gate.weight"], null!,
             weights[$"{prefix}.ff.linear_in_up.weight"], null!,
-            weights[$"{prefix}.ff.linear_out.weight"], null!);
+            imgFfnOutWeight, null!);
 
         // Text SwiGLU MLP
         _txtFfn.LoadSwiGluWeights(
             weights[$"{prefix}.ff_context.linear_in_gate.weight"], null!,
             weights[$"{prefix}.ff_context.linear_in_up.weight"], null!,
-            weights[$"{prefix}.ff_context.linear_out.weight"], null!);
+            txtFfnOutWeight, null!);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -148,6 +165,9 @@ public sealed unsafe class Flux2DoubleBlock
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
 
+        // F16 activation path: every activation tensor follows the incoming stream dtype (blocks are
+        // dtype-transparent; the transformer decides by casting the streams once before the loop).
+        DType act = image.DType;
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
         // [B, S, H, D] views (byte-identical to [B, S, hidden]) so RmsNorm normalizes over headDim.
@@ -162,46 +182,46 @@ public sealed unsafe class Flux2DoubleBlock
         Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape, _layerNormEps);
 
         // ── 2. Q/K/V projections (declared [B, S, H, D] so QK-norm + permute need no reshape view) ──
-        Tensor imgQ = new Tensor(imgHeads, DType.F32);
+        Tensor imgQ = new Tensor(imgHeads, act);
         backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgHeads, DType.F32);
+        Tensor imgK = new Tensor(imgHeads, act);
         backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgHeads, DType.F32);
+        Tensor imgV = new Tensor(imgHeads, act);
         backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
         imgModulated.Dispose();
 
-        Tensor txtQ = new Tensor(txtHeads, DType.F32);
+        Tensor txtQ = new Tensor(txtHeads, act);
         backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
-        Tensor txtK = new Tensor(txtHeads, DType.F32);
+        Tensor txtK = new Tensor(txtHeads, act);
         backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
-        Tensor txtV = new Tensor(txtHeads, DType.F32);
+        Tensor txtV = new Tensor(txtHeads, act);
         backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
         txtModulated.Dispose();
 
         // ── 3. QK-Norm (per-head RMSNorm over the last dim = headDim, pre-RoPE) ──
-        Tensor imgQn = new Tensor(imgHeads, DType.F32);
+        Tensor imgQn = new Tensor(imgHeads, act);
         backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
         imgQ.Dispose();
-        Tensor imgKn = new Tensor(imgHeads, DType.F32);
+        Tensor imgKn = new Tensor(imgHeads, act);
         backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
         imgK.Dispose();
 
-        Tensor txtQn = new Tensor(txtHeads, DType.F32);
+        Tensor txtQn = new Tensor(txtHeads, act);
         backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
         txtQ.Dispose();
-        Tensor txtKn = new Tensor(txtHeads, DType.F32);
+        Tensor txtKn = new Tensor(txtHeads, act);
         backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
         txtK.Dispose();
 
         // ── 4. Concatenate [txt, img] along the seq dim PRE-permute (text first — matches diffusers ordering
         // and the order the rope tables were built in) ──
-        Tensor jointQPre = new Tensor(jointHeads, DType.F32);
+        Tensor jointQPre = new Tensor(jointHeads, act);
         backend.Concat(jointQPre, new Tensor[] { txtQn, imgQn }, 1);
         txtQn.Dispose(); imgQn.Dispose();
-        Tensor jointKPre = new Tensor(jointHeads, DType.F32);
+        Tensor jointKPre = new Tensor(jointHeads, act);
         backend.Concat(jointKPre, new Tensor[] { txtKn, imgKn }, 1);
         txtKn.Dispose(); imgKn.Dispose();
-        Tensor jointVPre = new Tensor(jointHeads, DType.F32);
+        Tensor jointVPre = new Tensor(jointHeads, act);
         backend.Concat(jointVPre, new Tensor[] { txtV, imgV }, 1);
         txtV.Dispose(); imgV.Dispose();
 
@@ -210,13 +230,13 @@ public sealed unsafe class Flux2DoubleBlock
             rope.ApplyGpu(backend, jointQPre, jointKPre, _numHeads);
 
         // ── 6. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor jointQ = new Tensor(jointMhShape, DType.F32);
+        Tensor jointQ = new Tensor(jointMhShape, act);
         backend.Permute0213(jointQ, jointQPre, totalSeqLen, _numHeads, _headDim);
         jointQPre.Dispose();
-        Tensor jointK = new Tensor(jointMhShape, DType.F32);
+        Tensor jointK = new Tensor(jointMhShape, act);
         backend.Permute0213(jointK, jointKPre, totalSeqLen, _numHeads, _headDim);
         jointKPre.Dispose();
-        Tensor jointV = new Tensor(jointMhShape, DType.F32);
+        Tensor jointV = new Tensor(jointMhShape, act);
         backend.Permute0213(jointV, jointVPre, totalSeqLen, _numHeads, _headDim);
         jointVPre.Dispose();
 
@@ -225,21 +245,21 @@ public sealed unsafe class Flux2DoubleBlock
             rope.Forward(jointQ, jointK, batch, _numHeads, totalSeqLen);
 
         // ── 7. Scaled dot-product attention ──
-        Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
+        Tensor jointAttnOut = new Tensor(jointMhShape, act);
         backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path
         jointQ.Dispose(); jointK.Dispose(); jointV.Dispose();
 
         // ── 8. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] ──
-        Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
+        Tensor jointAttnFlat = new Tensor(jointFlat, act);
         backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
         Tensor txtAttn, imgAttn;
         if (batch == 1)
         {
-            txtAttn = new Tensor(txtShape, DType.F32);
+            txtAttn = new Tensor(txtShape, act);
             backend.SliceRows(txtAttn, jointAttnFlat, 0);
-            imgAttn = new Tensor(imgShape, DType.F32);
+            imgAttn = new Tensor(imgShape, act);
             backend.SliceRows(imgAttn, jointAttnFlat, txtSeqLen);
         }
         else
@@ -249,17 +269,17 @@ public sealed unsafe class Flux2DoubleBlock
         jointAttnFlat.Dispose();
 
         // ── 9. Output projections + gated residual (input + gate*value) ──
-        Tensor imgAttnProj = new Tensor(imgShape, DType.F32);
+        Tensor imgAttnProj = new Tensor(imgShape, act);
         backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
         imgAttn.Dispose();
-        Tensor imgAfterAttn = new Tensor(imgShape, DType.F32);
+        Tensor imgAfterAttn = new Tensor(imgShape, act);
         backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
         imgAttnProj.Dispose();
 
-        Tensor txtAttnProj = new Tensor(txtShape, DType.F32);
+        Tensor txtAttnProj = new Tensor(txtShape, act);
         backend.Linear(txtAttnProj, txtAttn, _toAddOutWeight!, _toAddOutBias);
         txtAttn.Dispose();
-        Tensor txtAfterAttn = new Tensor(txtShape, DType.F32);
+        Tensor txtAfterAttn = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
         txtAttnProj.Dispose();
 
@@ -267,7 +287,7 @@ public sealed unsafe class Flux2DoubleBlock
         Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape, _layerNormEps);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
-        Tensor imgFinal = new Tensor(imgShape, DType.F32);
+        Tensor imgFinal = new Tensor(imgShape, act);
         backend.GatedResidualLastDim(imgFinal, imgAfterAttn, imgMlpOut, imgMod[5]);
         imgMlpOut.Dispose();
         imgAfterAttn.Dispose();
@@ -276,7 +296,7 @@ public sealed unsafe class Flux2DoubleBlock
         Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape, _layerNormEps);
         Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, batch, txtSeqLen);
         txtMlpModulated.Dispose();
-        Tensor txtFinal = new Tensor(txtShape, DType.F32);
+        Tensor txtFinal = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
         txtMlpOut.Dispose();
         txtAfterAttn.Dispose();

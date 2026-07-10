@@ -144,26 +144,29 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | ERNIE-Image | 20 | 4.0 |
 | AuraFlow-0.3 | 20 | 3.5 |
 
-**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-09. ComfyUI
+**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.46` + in-flight `44.x-local` optimization rounds, 2026-07-10. ComfyUI
 column is the same request on the same GPU through the ComfyUI backend. The optimization grind is ongoing
 and tracked in [`benchmarks/results/`](../benchmarks/results/); this table is a snapshot, updated as
 rounds land:
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
-| Z-Image-Turbo | **2.77 s** | 3.1 s | Faster than ComfyUI |
-| Krea2-Turbo | **4.48 s** | 6.5 s | Faster than ComfyUI |
-| Qwen-Image | **40.9 s** | 54.8 s | Faster than ComfyUI |
+| Z-Image-Turbo | **2.76 s** | 3.1 s | Faster than ComfyUI |
+| Krea2-Turbo | **4.52 s** | 6.5 s | Faster than ComfyUI |
+| Krea2-Base | 30.3 s | — | CFG path validated 07-10 (28 st/cfg 4.5); no Comfy baseline yet |
+| Qwen-Image | **39.4 s** | 54.8 s | Faster than ComfyUI |
+| Qwen-Image-Edit 2511 | 93 s | 87.8 s | 1.05× — image editing w/ up to 3 reference images (vision-conditioned); GPU-compute-bound, BF16 activations queued |
 | ERNIE-Image | **20.0 s** | 23.9 s | Faster than ComfyUI (was 49.6 s / 2.1× slower) |
 | Ideogram4 | 19.5 s | 17.0 s | 1.15× — optimization queued |
 | Boogu-Turbo | 3.26 s | 2.54 s | 1.28× — was 48.9 s (15× in two rounds); optimization in progress |
 | Boogu-Base | 26.5 s | 17.8 s | 1.49× — was ~6 min (~13×); optimization in progress |
 | Chroma1-HD | 28.5 s | 16.6 s | 1.7× — was 3.7× (round 3: F16 blocks, persistent CFG-pair CUDA graph, context trim); batched CFG queued |
 | AuraFlow-0.3 | **13.93 s** | 14.0 s | Tied with ComfyUI (was 31.4 s) |
-| Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
-| Flux-Schnell | 10.5 s | — | First benchmark; optimization in progress |
-| Flux.2 Klein 4B | **3.45 s** | — | No ComfyUI baseline yet. Distilled variant: 4 steps/CFG 1 official (earlier 10-step numbers over-stepped it and artifacted) |
+| Flux-Dev | **16.05 s** | 12.5 s | 1.28× — Flux-family kit transplant done (`44.38-local`: F16 residual damp + persistent cross-generation step graph + rope/prompt caches); remaining gap is per-step GPU compute |
+| Flux-Schnell | **3.6 s** | 3.04 s | 1.18× — Flux-family kit transplant done (`44.38-local`) |
+| Flux.2 Klein 4B | **2.36 s** | 1.85 s | 1.28× — Flux-family kit transplant done (`44.38-local`). Distilled variant: 4 steps/CFG 1 official |
 | SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
+| Lumina-Image 2.0 | **17.7 s** | — | 37× in one round (was 650 s); no ComfyUI baseline (can't load the diffusers-format file) |
 
 ---
 

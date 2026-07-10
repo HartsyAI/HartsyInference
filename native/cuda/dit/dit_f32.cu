@@ -402,4 +402,78 @@ __global__ void dit_unpatchify_f32(
     output[i] = input[seq * patchVol + inner];
 }
 
+
+// ── MoE top-k gate weights (HiDream MoEGate) ────────────────────────────────
+// Per token: softmax(logits over E experts), select top-k by prob, renormalize the selected
+// weights to sum to 1 (norm_topk_prob: w_k / (sum_k w_k + 1e-20)). Dense [tokens, E] output with
+// zeros at non-selected slots so a dense per-expert accumulation reproduces sparse dispatch
+// exactly. One thread per token; E is small (4 for HiDream) so registers suffice (E <= 16).
+__global__ void dit_moe_topk_gate_f32(
+    float* __restrict__ weights,
+    const float* __restrict__ logits,
+    unsigned int numExperts,
+    unsigned int topK,
+    unsigned long long totalTokens)
+{
+    unsigned long long t = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= totalTokens) return;
+    const float* lp = logits + t * numExperts;
+    float* wp = weights + t * numExperts;
+
+    float probs[16];
+    float maxLogit = lp[0];
+    for (unsigned int e = 1; e < numExperts; e++)
+        maxLogit = fmaxf(maxLogit, lp[e]);
+    float sum = 0.0f;
+    for (unsigned int e = 0; e < numExperts; e++)
+    {
+        float ex = expf(lp[e] - maxLogit);
+        probs[e] = ex;
+        sum += ex;
+    }
+    for (unsigned int e = 0; e < numExperts; e++)
+    {
+        probs[e] /= sum;
+        wp[e] = 0.0f;
+    }
+
+    float denom = 0.0f;
+    unsigned int k = topK < numExperts ? topK : numExperts;
+    for (unsigned int kk = 0; kk < k; kk++)
+    {
+        int best = -1;
+        float bestVal = -1.0f;
+        for (unsigned int e = 0; e < numExperts; e++)
+        {
+            if (wp[e] != 0.0f) continue;
+            if (probs[e] > bestVal) { bestVal = probs[e]; best = (int)e; }
+        }
+        wp[best] = bestVal;
+        denom += bestVal;
+    }
+    denom += 1e-20f;
+    for (unsigned int e = 0; e < numExperts; e++)
+        if (wp[e] != 0.0f) wp[e] /= denom;
+}
+
+// ── Per-row (per-token) gated accumulate (MoE expert combine) ───────────────
+// out[b,s,:] += gate[(b,s), expertIdx] * val[b,s,:]. gate is the dense [tokens, E] weight table from
+// dit_moe_topk_gate_f32; non-selected tokens carry weight 0 and contribute nothing. In-place on out.
+__global__ void dit_row_gated_accum_f32(
+    float* __restrict__ out,
+    const float* __restrict__ val,
+    const float* __restrict__ gate,
+    unsigned int numExperts,
+    unsigned int expertIdx,
+    unsigned int dim,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    unsigned long long row = i / dim;
+    float g = gate[row * numExperts + expertIdx];
+    if (g != 0.0f)
+        out[i] += g * val[i];
+}
+
 } // extern "C"

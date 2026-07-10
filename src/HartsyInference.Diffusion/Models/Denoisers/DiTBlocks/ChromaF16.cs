@@ -32,7 +32,7 @@ public static unsafe class ChromaF16
     /// forwards to locate F16 overflow sites. Each probe D2H-drains the tensor (very slow); debug only.</summary>
     private static readonly bool TraceEnabled =
         Environment.GetEnvironmentVariable("HARTSY_CHROMA_F16TRACE") == "1";
-    private static int _traceCallsLeft = TraceEnabled ? 400 : 0;
+    private static int _traceCallsLeft = TraceEnabled ? 2000 : 0;
 
     /// <summary>Returns a value-scaled F32 copy of a bias tensor (weight damping rides the GEMM alpha, but the
     /// epilogue adds bias AFTER alpha, so the bias must carry the damp factor in its values).</summary>

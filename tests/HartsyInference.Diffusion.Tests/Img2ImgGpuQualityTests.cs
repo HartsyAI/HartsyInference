@@ -636,7 +636,7 @@ public sealed class Img2ImgGpuQualityTests
                     editTokens, negTokens, request,
                     p => _output.WriteLine($"  [{label}] Step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"),
                     promptDropIndex: templatePrefixDrop, negativeDropIndex: templatePrefixDrop,
-                    editRefImage: editRef);
+                    editRefImages: new[] { editRef! });
                 return rgb;
             }
 

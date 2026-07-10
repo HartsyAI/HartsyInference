@@ -22,6 +22,22 @@ public sealed unsafe class HiDreamTransformer : IDisposable
     private readonly HiDreamBlock[] _doubleBlocks;
     private readonly HiDreamBlock[] _singleBlocks;
     private readonly HiDreamRope _rope;
+
+    // Rope-table signature: Precompute rebuilds a ~300k-trig host table AND re-uploads the GPU cos/sin
+    // tables — it ran twice per forward (identical args, dual- then single-stream) = ~100 rebuilds/gen.
+    private long _ropeSig = long.MinValue;
+
+    /// <summary>Precomputes the rope tables only when the (grid, text-length) signature changes.</summary>
+    private void EnsureRope(int imgSeqLen, int patH, int patW, int txtLen)
+    {
+        long sig = ((long)imgSeqLen << 40) ^ ((long)patH << 28) ^ ((long)patW << 16) ^ (long)txtLen;
+        if (sig == _ropeSig)
+            return;
+        Tensor posIds = HiDreamRope.BuildPositionIds(imgSeqLen, patH, patW, txtLen);
+        _rope.Precompute(posIds);
+        posIds.Dispose();
+        _ropeSig = sig;
+    }
     private int _disposed;
 
     // x_embedder: Linear(in_channels * patch_size^2, inner_dim)
@@ -206,9 +222,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         // so we precompute once with imgSeqLen + (initialEncoderSeqLen + llama_seq_len).
         int perLayerLlamaSeqLen = (int)llamaProj[0].Shape[1];
         int doubleStreamTotalSeqLen = imgSeqLen + initialEncoderSeqLen + perLayerLlamaSeqLen;
-        Tensor posIds = HiDreamRope.BuildPositionIds(imgSeqLen, patH, patW, initialEncoderSeqLen + perLayerLlamaSeqLen);
-        _rope.Precompute(posIds);
-        posIds.Dispose();
+        EnsureRope(imgSeqLen, patH, patW, initialEncoderSeqLen + perLayerLlamaSeqLen);
 
         // ── 6. Double-stream blocks ──
         Tensor curImg = imgTokens;
@@ -252,10 +266,8 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         int singleStreamBaseSeqLen = imgSeqLen + initialEncoderSeqLen;
         int singleStreamTotalSeqLen = singleStreamBaseSeqLen + perLayerLlamaSeqLen;
 
-        // Re-precompute rope to the maximum single-stream total seq length (image + enc + llama-per-block).
-        Tensor posIdsSingle = HiDreamRope.BuildPositionIds(imgSeqLen, patH, patW, initialEncoderSeqLen + perLayerLlamaSeqLen);
-        _rope.Precompute(posIdsSingle);
-        posIdsSingle.Dispose();
+        // Same rope table as the double-stream phase (identical args) — EnsureRope no-ops on the sig hit.
+        EnsureRope(imgSeqLen, patH, patW, initialEncoderSeqLen + perLayerLlamaSeqLen);
 
         Tensor curJoint = jointBeforeSingle;
         for (int b = 0; b < _singleBlocks.Length; b++)

@@ -182,6 +182,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _ditRowScaleF32;
     private readonly nint _ditAddScalarF32;
     private readonly nint _ditLayerNormNoAffineF32;
+    private readonly nint _ditMoeTopkGateF32;
+    private readonly nint _ditRowGatedAccumF32;
     private readonly nint _ditIndexAddF32;
     private readonly nint _ditScatterRowsAfterF32;
     private readonly nint _ditSliceRowsF32;
@@ -414,6 +416,8 @@ public sealed class CudaKernels : IDisposable
         _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
         _ditAddScalarF32 = _ditF32Module.GetFunction("dit_add_scalar_f32");
         _ditLayerNormNoAffineF32 = _ditF32Module.GetFunction("dit_layernorm_noaffine_f32");
+        _ditMoeTopkGateF32 = _ditF32Module.GetFunction("dit_moe_topk_gate_f32");
+        _ditRowGatedAccumF32 = _ditF32Module.GetFunction("dit_row_gated_accum_f32");
         _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
         _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
@@ -1706,6 +1710,40 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Non-affine LayerNorm with F16 activation I/O (F32 accumulate) — the DiT F16 activation path.</summary>
     public void LaunchLayerNormNoAffineF16(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
         => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF16, output, input, dim, totalRows, eps, stream);
+
+    /// <summary>MoE top-k gate weights: softmax over E + top-k renorm per token (one thread per token).</summary>
+    public unsafe void LaunchMoeTopkGate(ulong weights, ulong logits, int numExperts, int topK, long totalTokens, nint stream)
+    {
+        ulong wArg = weights, lArg = logits;
+        uint eArg = (uint)numExperts, kArg = (uint)topK;
+        ulong totalArg = (ulong)totalTokens;
+        void** args = stackalloc void*[5];
+        args[0] = &wArg;
+        args[1] = &lArg;
+        args[2] = &eArg;
+        args[3] = &kArg;
+        args[4] = &totalArg;
+        uint gridDim = (uint)((totalTokens + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_ditMoeTopkGateF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Per-token gated accumulate: out[i] += gate[row(i), expertIdx] * val[i] (MoE combine).</summary>
+    public unsafe void LaunchRowGatedAccum(ulong inout, ulong value, ulong gate, int numExperts, int expertIdx, int dim, long total, nint stream)
+    {
+        ulong oArg = inout, vArg = value, gArg = gate;
+        uint eArg = (uint)numExperts, xArg = (uint)expertIdx, dArg = (uint)dim;
+        ulong totalArg = (ulong)total;
+        void** args = stackalloc void*[7];
+        args[0] = &oArg;
+        args[1] = &vArg;
+        args[2] = &gArg;
+        args[3] = &eArg;
+        args[4] = &xArg;
+        args[5] = &dArg;
+        args[6] = &totalArg;
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_ditRowGatedAccumF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Launches index-add of embedding rows in-place: h[row,d] += table[indices[row], d].</summary>
     public void LaunchIndexAdd(ulong h, ulong table, ulong indices, int dim, long total, nint stream)

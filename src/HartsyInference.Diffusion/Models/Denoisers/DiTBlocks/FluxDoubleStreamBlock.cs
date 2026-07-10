@@ -69,7 +69,10 @@ public sealed class FluxDoubleStreamBlock
     }
 
     /// <summary>Loads weights from named tensors using diffusers naming: transformer_blocks.{i}.* </summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe —
+    /// see <see cref="ChromaF16"/>): applied to every branch-OUTPUT projection so the token stream rides at
+    /// damp scale while all branch inputs stay baseline via the scale-invariant no-affine LayerNorm. 1.0 = off.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         _imgModulation.LoadWeights(
             weights[$"{prefix}.norm1.linear.weight"],
@@ -113,19 +116,37 @@ public sealed class FluxDoubleStreamBlock
         _normAddedQ.LoadWeights(weights[$"{prefix}.attn.norm_added_q.weight"]);
         _normAddedK.LoadWeights(weights[$"{prefix}.attn.norm_added_k.weight"]);
 
+        Tensor imgFfnOutWeight = weights[$"{prefix}.ff.net.2.weight"];
+        Tensor imgFfnOutBias = weights[$"{prefix}.ff.net.2.bias"];
+        Tensor txtFfnOutWeight = weights[$"{prefix}.ff_context.net.2.weight"];
+        Tensor txtFfnOutBias = weights[$"{prefix}.ff_context.net.2.bias"];
+        if (branchDamp != 1.0f)
+        {
+            // Weight damp rides the GEMM alpha (any dtype); biases need value-scaled copies (the epilogue
+            // adds bias after alpha). Runs once per transformer instance at load.
+            _toOutWeight.Fp8ScaleFactor *= branchDamp;
+            _toOutBias = ChromaF16.DampBias(_toOutBias, branchDamp);
+            _toAddOutWeight.Fp8ScaleFactor *= branchDamp;
+            _toAddOutBias = ChromaF16.DampBias(_toAddOutBias, branchDamp);
+            imgFfnOutWeight.Fp8ScaleFactor *= branchDamp;
+            imgFfnOutBias = ChromaF16.DampBias(imgFfnOutBias, branchDamp);
+            txtFfnOutWeight.Fp8ScaleFactor *= branchDamp;
+            txtFfnOutBias = ChromaF16.DampBias(txtFfnOutBias, branchDamp);
+        }
+
         // Image MLP (GELU mode): net.0.proj → projection, net.2 → output
         _imgFfn.LoadGeluWeights(
             weights[$"{prefix}.ff.net.0.proj.weight"],
             weights[$"{prefix}.ff.net.0.proj.bias"],
-            weights[$"{prefix}.ff.net.2.weight"],
-            weights[$"{prefix}.ff.net.2.bias"]);
+            imgFfnOutWeight,
+            imgFfnOutBias);
 
         // Text MLP (GELU mode)
         _txtFfn.LoadGeluWeights(
             weights[$"{prefix}.ff_context.net.0.proj.weight"],
             weights[$"{prefix}.ff_context.net.0.proj.bias"],
-            weights[$"{prefix}.ff_context.net.2.weight"],
-            weights[$"{prefix}.ff_context.net.2.bias"]);
+            txtFfnOutWeight,
+            txtFfnOutBias);
     }
 
     /// <summary>Enumerates all weight tensors for GPU preloading.</summary>
@@ -182,6 +203,10 @@ public sealed class FluxDoubleStreamBlock
         int txtSeqLen = (int)text.Shape[1];
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
+        // Activation dtype follows the INPUT (the Chroma/Krea2 pattern): FluxTransformer casts the token
+        // streams to F16 once before the block loop on the HARTSY_DIT_F16 path; the AdaLN modulation vectors
+        // stay F32 (F16 kernels take an F16 activation + F32 params). The F32 path is byte-identical.
+        DType act = image.DType;
 
         TensorShape imgShape = new TensorShape(batch, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
@@ -201,46 +226,46 @@ public sealed class FluxDoubleStreamBlock
         Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
 
         // ── 3. Q/K/V projections (declared [B, S, H, D] so QK-norm + permute need no reshape view) ──
-        Tensor imgQ = new Tensor(imgHeads, DType.F32);
+        Tensor imgQ = new Tensor(imgHeads, act);
         backend.Linear(imgQ, imgModulated, _toQWeight!, _toQBias);
-        Tensor imgK = new Tensor(imgHeads, DType.F32);
+        Tensor imgK = new Tensor(imgHeads, act);
         backend.Linear(imgK, imgModulated, _toKWeight!, _toKBias);
-        Tensor imgV = new Tensor(imgHeads, DType.F32);
+        Tensor imgV = new Tensor(imgHeads, act);
         backend.Linear(imgV, imgModulated, _toVWeight!, _toVBias);
         imgModulated.Dispose();
 
-        Tensor txtQ = new Tensor(txtHeads, DType.F32);
+        Tensor txtQ = new Tensor(txtHeads, act);
         backend.Linear(txtQ, txtModulated, _addQWeight!, _addQBias);
-        Tensor txtK = new Tensor(txtHeads, DType.F32);
+        Tensor txtK = new Tensor(txtHeads, act);
         backend.Linear(txtK, txtModulated, _addKWeight!, _addKBias);
-        Tensor txtV = new Tensor(txtHeads, DType.F32);
+        Tensor txtV = new Tensor(txtHeads, act);
         backend.Linear(txtV, txtModulated, _addVWeight!, _addVBias);
         txtModulated.Dispose();
 
         // ── 4. QK-Norm (per-head RMSNorm over the last dim = headDim) ──
-        Tensor imgQn = new Tensor(imgHeads, DType.F32);
+        Tensor imgQn = new Tensor(imgHeads, act);
         backend.RmsNorm(imgQn, imgQ, _normQ.Weight, _normQ.Eps);
         imgQ.Dispose();
-        Tensor imgKn = new Tensor(imgHeads, DType.F32);
+        Tensor imgKn = new Tensor(imgHeads, act);
         backend.RmsNorm(imgKn, imgK, _normK.Weight, _normK.Eps);
         imgK.Dispose();
 
-        Tensor txtQn = new Tensor(txtHeads, DType.F32);
+        Tensor txtQn = new Tensor(txtHeads, act);
         backend.RmsNorm(txtQn, txtQ, _normAddedQ.Weight, _normAddedQ.Eps);
         txtQ.Dispose();
-        Tensor txtKn = new Tensor(txtHeads, DType.F32);
+        Tensor txtKn = new Tensor(txtHeads, act);
         backend.RmsNorm(txtKn, txtK, _normAddedK.Weight, _normAddedK.Eps);
         txtK.Dispose();
 
         // ── 5. Concatenate [txt, img] along the seq dim PRE-permute ([B, S, H, D], text first — same token
         // order the old post-permute ConcatAlongSeqDim produced, and the order the rope tables were built in) ──
-        Tensor jointQPre = new Tensor(jointHeads, DType.F32);
+        Tensor jointQPre = new Tensor(jointHeads, act);
         backend.Concat(jointQPre, new Tensor[] { txtQn, imgQn }, 1);
         txtQn.Dispose(); imgQn.Dispose();
-        Tensor jointKPre = new Tensor(jointHeads, DType.F32);
+        Tensor jointKPre = new Tensor(jointHeads, act);
         backend.Concat(jointKPre, new Tensor[] { txtKn, imgKn }, 1);
         txtKn.Dispose(); imgKn.Dispose();
-        Tensor jointVPre = new Tensor(jointHeads, DType.F32);
+        Tensor jointVPre = new Tensor(jointHeads, act);
         backend.Concat(jointVPre, new Tensor[] { txtV, imgV }, 1);
         txtV.Dispose(); imgV.Dispose();
 
@@ -251,13 +276,13 @@ public sealed class FluxDoubleStreamBlock
             rope.ApplyGpu(backend, jointQPre, jointKPre, _numHeads);
 
         // ── 7. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor jointQ = new Tensor(jointMhShape, DType.F32);
+        Tensor jointQ = new Tensor(jointMhShape, act);
         backend.Permute0213(jointQ, jointQPre, totalSeqLen, _numHeads, _headDim);
         jointQPre.Dispose();
-        Tensor jointK = new Tensor(jointMhShape, DType.F32);
+        Tensor jointK = new Tensor(jointMhShape, act);
         backend.Permute0213(jointK, jointKPre, totalSeqLen, _numHeads, _headDim);
         jointKPre.Dispose();
-        Tensor jointV = new Tensor(jointMhShape, DType.F32);
+        Tensor jointV = new Tensor(jointMhShape, act);
         backend.Permute0213(jointV, jointVPre, totalSeqLen, _numHeads, _headDim);
         jointVPre.Dispose();
 
@@ -266,14 +291,14 @@ public sealed class FluxDoubleStreamBlock
             rope.Forward(jointQ, jointK, batch, _numHeads, totalSeqLen);
 
         // ── 8. Scaled dot-product attention ──
-        Tensor jointAttnOut = new Tensor(jointMhShape, DType.F32);
+        Tensor jointAttnOut = new Tensor(jointMhShape, act);
         backend.ScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, attnBias, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path (bias rides fp32 in-engine)
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();
 
         // ── 9. Permute back [B, H, S, D] → [B, S, hidden], then split [txt, img] ──
-        Tensor jointAttnFlat = new Tensor(jointFlat, DType.F32);
+        Tensor jointAttnFlat = new Tensor(jointFlat, act);
         backend.Permute0213(jointAttnFlat, jointAttnOut, _numHeads, totalSeqLen, _headDim);
         jointAttnOut.Dispose();
 
@@ -281,9 +306,9 @@ public sealed class FluxDoubleStreamBlock
         if (batch == 1)
         {
             // B=1: text rows then image rows are contiguous row-blocks → device SliceRows.
-            txtAttn = new Tensor(txtShape, DType.F32);
+            txtAttn = new Tensor(txtShape, act);
             backend.SliceRows(txtAttn, jointAttnFlat, 0);
-            imgAttn = new Tensor(imgShape, DType.F32);
+            imgAttn = new Tensor(imgShape, act);
             backend.SliceRows(imgAttn, jointAttnFlat, txtSeqLen);
         }
         else
@@ -293,17 +318,17 @@ public sealed class FluxDoubleStreamBlock
         jointAttnFlat.Dispose();
 
         // ── 10. Output projections + gated residual (input + gate*value) ──
-        Tensor imgAttnProj = new Tensor(imgShape, DType.F32);
+        Tensor imgAttnProj = new Tensor(imgShape, act);
         backend.Linear(imgAttnProj, imgAttn, _toOutWeight!, _toOutBias);
         imgAttn.Dispose();
-        Tensor imgAfterAttn = new Tensor(imgShape, DType.F32);
+        Tensor imgAfterAttn = new Tensor(imgShape, act);
         backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
         imgAttnProj.Dispose();
 
-        Tensor txtAttnProj = new Tensor(txtShape, DType.F32);
+        Tensor txtAttnProj = new Tensor(txtShape, act);
         backend.Linear(txtAttnProj, txtAttn, _toAddOutWeight!, _toAddOutBias);
         txtAttn.Dispose();
-        Tensor txtAfterAttn = new Tensor(txtShape, DType.F32);
+        Tensor txtAfterAttn = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
         txtAttnProj.Dispose();
 
@@ -311,7 +336,7 @@ public sealed class FluxDoubleStreamBlock
         Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
-        Tensor imgFinal = new Tensor(imgShape, DType.F32);
+        Tensor imgFinal = new Tensor(imgShape, act);
         backend.GatedResidualLastDim(imgFinal, imgAfterAttn, imgMlpOut, imgMod[5]);
         imgMlpOut.Dispose();
         imgAfterAttn.Dispose();
@@ -320,7 +345,7 @@ public sealed class FluxDoubleStreamBlock
         Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
         Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, batch, txtSeqLen);
         txtMlpModulated.Dispose();
-        Tensor txtFinal = new Tensor(txtShape, DType.F32);
+        Tensor txtFinal = new Tensor(txtShape, act);
         backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
         txtMlpOut.Dispose();
         txtAfterAttn.Dispose();

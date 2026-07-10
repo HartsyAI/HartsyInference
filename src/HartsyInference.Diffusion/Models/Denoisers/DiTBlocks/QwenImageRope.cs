@@ -14,8 +14,8 @@ public sealed unsafe class QwenImageRope
     // pair i lives at index 2i; both slots filled). Position-only, so one host build serves every block of
     // every step — the per-block host ApplyJoint this replaces was a D2H+H2D round trip of joint Q AND K
     // (~50 MB each) per block. Keyed on the full sequence layout; a resolution/prompt-length change rebuilds.
-    private (int ImgH, int ImgW, int Txt, int TxtStart, int RefH, int RefW, int RefFrame) _jointTableKey =
-        (-1, -1, -1, -1, -1, -1, -1);
+    private (int ImgH, int ImgW, int Txt, int TxtStart, long RefSig) _jointTableKey =
+        (-1, -1, -1, -1, -1);
     private Tensor? _jointCos;
     private Tensor? _jointSin;
 
@@ -89,22 +89,33 @@ public sealed unsafe class QwenImageRope
     /// output.</para></summary>
     public void ApplyJoint(Tensor q, Tensor k, int batch, int numHeads,
         int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart,
-        int refPackedH = 0, int refPackedW = 0, int refFrameIndex = 1)
+        ReadOnlySpan<(int H, int W)> refGrids = default)
     {
         int imgSeqLen = imgPackedH * imgPackedW;
-        int refSeqLen = refPackedH * refPackedW;
+        int refSeqLen = 0;
+        foreach ((int rh, int rw) in refGrids) refSeqLen += rh * rw;
         int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
         int halfDim = _headDim / 2;
         float[] cosTable = new float[totalSeqLen * halfDim];
         float[] sinTable = new float[totalSeqLen * halfDim];
 
-        // Text rows first (matches the [txt, img] concat order).
+        FillJointFreqs(cosTable, sinTable, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids);
+        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);
+    }
+
+    /// <summary>Fills the joint-layout frequency tables: text rows (positions <c>txtPositionStart + s</c>),
+    /// centered main-image rows (frame 0), then each reference grid in order with frame axis <c>i + 1</c>
+    /// (ComfyUI ref_latents "index"/"index_timestep_zero" methods increment the frame per ref) and spatial
+    /// positions centered on that reference's own grid.</summary>
+    private void FillJointFreqs(Span<float> cosTable, Span<float> sinTable,
+        int imgPackedH, int imgPackedW, int txtSeqLen, int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids)
+    {
         for (int s = 0; s < txtSeqLen; s++)
         {
             int pos = txtPositionStart + s;
             FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
         }
-        // Then image rows with centered spatial positions (scale_rope=True), frame axis 0.
+        int imgSeqLen = imgPackedH * imgPackedW;
         int hCenter = imgPackedH - imgPackedH / 2;
         int wCenter = imgPackedW - imgPackedW / 2;
         for (int si = 0; si < imgSeqLen; si++)
@@ -113,22 +124,22 @@ public sealed unsafe class QwenImageRope
             int col = si - row * imgPackedW;
             FillTokenFreqs(cosTable, sinTable, txtSeqLen + si, frame: 0, height: row - hCenter, width: col - wCenter);
         }
-        // Finally the reference-latent rows: frame axis = refFrameIndex, spatial centered on the ref grid
-        // (same centering convention as the main grid — identical to ComfyUI for even packed dims).
-        if (refSeqLen > 0)
+        int rowBase = txtSeqLen + imgSeqLen;
+        for (int r = 0; r < refGrids.Length; r++)
         {
-            int refHCenter = refPackedH - refPackedH / 2;
-            int refWCenter = refPackedW - refPackedW / 2;
-            for (int si = 0; si < refSeqLen; si++)
+            (int refH, int refW) = refGrids[r];
+            int refHCenter = refH - refH / 2;
+            int refWCenter = refW - refW / 2;
+            int refSeq = refH * refW;
+            for (int si = 0; si < refSeq; si++)
             {
-                int row = si / refPackedW;
-                int col = si - row * refPackedW;
-                FillTokenFreqs(cosTable, sinTable, txtSeqLen + imgSeqLen + si,
-                    frame: refFrameIndex, height: row - refHCenter, width: col - refWCenter);
+                int row = si / refW;
+                int col = si - row * refW;
+                FillTokenFreqs(cosTable, sinTable, rowBase + si,
+                    frame: r + 1, height: row - refHCenter, width: col - refWCenter);
             }
+            rowBase += refSeq;
         }
-
-        ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, totalSeqLen);
     }
 
     /// <summary>Builds (or returns the cached) joint cos/sin tables for the device rope path, <c>[S, headDim]</c>
@@ -136,46 +147,27 @@ public sealed unsafe class QwenImageRope
     /// <c>2i</c>). Same position math as <see cref="ApplyJoint"/> — the rotation itself matches the interleaved
     /// kernel exactly (<c>x0·cos−x1·sin, x0·sin+x1·cos</c> on pairs (2i, 2i+1)).</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildJointTables(int imgPackedH, int imgPackedW, int txtSeqLen,
-        int txtPositionStart, int refPackedH = 0, int refPackedW = 0, int refFrameIndex = 1)
+        int txtPositionStart, ReadOnlySpan<(int H, int W)> refGrids = default)
     {
-        (int, int, int, int, int, int, int) key =
-            (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refPackedH, refPackedW, refFrameIndex);
+        long refSig = 0x51F0;
+        int refSeqLen = 0;
+        foreach ((int rh, int rw) in refGrids)
+        {
+            refSig = refSig * 1000003L ^ ((long)rh << 20 | (uint)rw);
+            refSeqLen += rh * rw;
+        }
+        (int, int, int, int, long) key = (imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refSig);
         if (_jointCos is not null && _jointSin is not null && _jointTableKey == key)
             return (_jointCos, _jointSin);
         _jointCos?.Dispose();
         _jointSin?.Dispose();
 
         int imgSeqLen = imgPackedH * imgPackedW;
-        int refSeqLen = refPackedH * refPackedW;
         int totalSeqLen = txtSeqLen + imgSeqLen + refSeqLen;
         int halfDim = _headDim / 2;
         float[] cosTable = new float[totalSeqLen * halfDim];
         float[] sinTable = new float[totalSeqLen * halfDim];
-        for (int s = 0; s < txtSeqLen; s++)
-        {
-            int pos = txtPositionStart + s;
-            FillTokenFreqs(cosTable, sinTable, s, frame: pos, height: pos, width: pos);
-        }
-        int hCenter = imgPackedH - imgPackedH / 2;
-        int wCenter = imgPackedW - imgPackedW / 2;
-        for (int si = 0; si < imgSeqLen; si++)
-        {
-            int row = si / imgPackedW;
-            int col = si - row * imgPackedW;
-            FillTokenFreqs(cosTable, sinTable, txtSeqLen + si, frame: 0, height: row - hCenter, width: col - wCenter);
-        }
-        if (refSeqLen > 0)
-        {
-            int refHCenter = refPackedH - refPackedH / 2;
-            int refWCenter = refPackedW - refPackedW / 2;
-            for (int si = 0; si < refSeqLen; si++)
-            {
-                int row = si / refPackedW;
-                int col = si - row * refPackedW;
-                FillTokenFreqs(cosTable, sinTable, txtSeqLen + imgSeqLen + si,
-                    frame: refFrameIndex, height: row - refHCenter, width: col - refWCenter);
-            }
-        }
+        FillJointFreqs(cosTable, sinTable, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart, refGrids);
 
         Tensor cos = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);
         Tensor sin = new Tensor(new TensorShape(totalSeqLen, _headDim), DType.F32);

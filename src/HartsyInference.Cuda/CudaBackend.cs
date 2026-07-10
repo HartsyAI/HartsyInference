@@ -1533,6 +1533,65 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    public void MoeTopKGate(Tensor weights, Tensor logits, int topK)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("MoeTopKGate");
+        if (logits.DType != DType.F32 || weights.DType != DType.F32)
+            throw new NotSupportedException("CUDA MoeTopKGate supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int numExperts = (int)logits.Shape[logits.Shape.Rank - 1];
+        long tokens = logits.ElementCount / numExperts;
+        if (numExperts > 16)
+            throw new NotSupportedException($"CUDA MoeTopKGate supports up to 16 experts, got {numExperts}.");
+
+        ulong pW = 0, pL = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pL = GpuTransferHelper.CopyToDevice(logits);
+            nuint outBytes = GpuTransferHelper.ByteSize(weights);
+            pW = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchMoeTopkGate(pW, pL, numExperts, topK, tokens, _stream.Handle);
+            GpuTransferHelper.CacheActivation(weights, pW, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pW);
+            GpuTransferHelper.FreeDevice(pL);
+        }
+    }
+
+    public void RowGatedAccumulate(Tensor inout, Tensor value, Tensor gate, int numExperts, int expertIndex)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("RowGatedAccum");
+        if (inout.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
+            throw new NotSupportedException("CUDA RowGatedAccumulate supports F32 only.");
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int dim = (int)inout.Shape[inout.Shape.Rank - 1];
+
+        ulong pOut = 0, pVal = 0, pGate = 0;
+        try
+        {
+            pOut = GpuTransferHelper.CopyToDevice(inout);
+            pVal = GpuTransferHelper.CopyToDevice(value);
+            pGate = GpuTransferHelper.CopyToDevice(gate);
+            _kernels!.LaunchRowGatedAccum(pOut, pVal, pGate, numExperts, expertIndex, dim, inout.ElementCount, _stream.Handle);
+
+            // In-place on inout: clear stale callbacks before re-caching (pitfall #17).
+            inout._gpuSyncCallback = null;
+            inout._gpuDisposeCallback = null;
+            GpuTransferHelper.CacheActivation(inout, pOut, GpuTransferHelper.ByteSize(inout));
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pVal);
+            GpuTransferHelper.FreeDevice(pGate);
+        }
+    }
+
     public void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
     {
         if (z.DType != DType.F32 || pos.DType != DType.F32 || neg.DType != DType.F32)

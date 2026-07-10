@@ -23,6 +23,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private readonly QwenImageTransformer _transformer;
     private readonly QwenImageVaeDecoder _vaeDecoder;
     private readonly QwenImageVaeEncoder? _vaeEncoder;
+    private readonly Qwen25VlMultimodalEncoder? _multimodalEncoder;
     private readonly QwenImageConfig _config;
 
     /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop
@@ -41,6 +42,26 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private int[]? _cachedUncondKey;
     private int _cachedUncondDrop = -1;
     private Tensor? _cachedUncond;
+    // Edit-with-vision: the token ids alone don't identify the conditioning (the reference PIXELS feed the
+    // vision tower) — a content signature of the ref image joins the cache key. 0 = no vision conditioning.
+    private long _cachedEditSig;
+
+    /// <summary>Cheap content signature of a reference image: FNV-1a over 1024 strided samples + dims.
+    /// Collision-safe enough for a single-slot cache whose only job is "same image as last generation?".</summary>
+    private static long ComputeImageSignature(Tensor image)
+    {
+        float* p = (float*)image.DataPointer;
+        long n = image.ElementCount;
+        long stride = Math.Max(1, n / 1024);
+        ulong h = 14695981039346656037UL;
+        for (long i = 0; i < n; i += stride)
+        {
+            h ^= (uint)BitConverter.SingleToInt32Bits(p[i]);
+            h *= 1099511628211UL;
+        }
+        h ^= (ulong)image.Shape[2] << 32 ^ (ulong)image.Shape[3];
+        return (long)h;
+    }
 
     /// <summary>Creates a Qwen-Image pipeline. Caller is responsible for the lifetime of the components — they may be reused across pipelines. Img2img is unavailable; use the overload accepting a <see cref="QwenImageVaeEncoder"/> to enable it.</summary>
     public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
@@ -52,12 +73,24 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     /// <summary>Creates a Qwen-Image pipeline with both VAE halves loaded — required for img2img / inpaint (pass an <see cref="ImageToImageRequest"/> to <see cref="GenerateFromTokens"/>).</summary>
     public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
         QwenImageTransformer transformer, QwenImageVaeDecoder vaeDecoder, QwenImageVaeEncoder? vaeEncoder, QwenImageConfig config)
+        : this(backend, textEncoder, transformer, vaeDecoder, vaeEncoder, multimodalEncoder: null, config)
+    {
+    }
+
+    /// <summary>Creates a Qwen-Image-Edit pipeline: adds the Qwen2.5-VL vision-conditioning path. When
+    /// <paramref name="multimodalEncoder"/> is non-null and an <c>editRefImage</c> is passed, the prompt token
+    /// ids may contain <c>&lt;|image_pad|&gt;</c> placeholders and the TE phase runs the multimodal encode
+    /// (vision tower + sectioned M-RoPE) instead of the text-only encode.</summary>
+    public QwenImagePipeline(IBackend backend, LlamaStyleEncoder textEncoder,
+        QwenImageTransformer transformer, QwenImageVaeDecoder vaeDecoder, QwenImageVaeEncoder? vaeEncoder,
+        Qwen25VlMultimodalEncoder? multimodalEncoder, QwenImageConfig config)
         : base(backend)
     {
         _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _vaeEncoder = vaeEncoder;
+        _multimodalEncoder = multimodalEncoder;
         _config = config;
     }
 
@@ -92,22 +125,28 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress = null,
         int promptDropIndex = 0,
         int negativeDropIndex = 0,
-        Tensor? editRefImage = null)
+        IReadOnlyList<Tensor>? editRefImages = null,
+        bool editRefTimestepZero = false,
+        IReadOnlyList<Tensor>? editRefVisionImages = null)
     {
         ThrowIfDisposed();
         bool isImg2Img = request is ImageToImageRequest;
         if (isImg2Img && _vaeEncoder is null)
             throw new InvalidOperationException("ImageToImageRequest requires a QwenImageVaeEncoder. Construct the pipeline with the overload that accepts one.");
-        if (editRefImage is not null)
+        bool hasEditRefs = editRefImages is { Count: > 0 };
+        if (hasEditRefs)
         {
             if (_vaeEncoder is null)
-                throw new InvalidOperationException("editRefImage (Qwen-Image-Edit) requires a QwenImageVaeEncoder. Construct the pipeline with the overload that accepts one.");
-            if (editRefImage.Shape.Rank != 4 || editRefImage.Shape[0] != 1 || editRefImage.Shape[1] != 3
-                || editRefImage.Shape[2] % 16 != 0 || editRefImage.Shape[3] % 16 != 0 || editRefImage.Shape[2] == 0)
+                throw new InvalidOperationException("editRefImages (Qwen-Image-Edit) requires a QwenImageVaeEncoder. Construct the pipeline with the overload that accepts one.");
+            foreach (Tensor editRef in editRefImages!)
             {
-                throw new ArgumentException(
-                    $"editRefImage must be [1, 3, refH, refW] with dims divisible by 16; got {editRefImage.Shape}.",
-                    nameof(editRefImage));
+                if (editRef.Shape.Rank != 4 || editRef.Shape[0] != 1 || editRef.Shape[1] != 3
+                    || editRef.Shape[2] % 16 != 0 || editRef.Shape[3] % 16 != 0 || editRef.Shape[2] == 0)
+                {
+                    throw new ArgumentException(
+                        $"each edit reference must be [1, 3, refH, refW] with dims divisible by 16; got {editRef.Shape}.",
+                        nameof(editRefImages));
+                }
             }
         }
 
@@ -137,7 +176,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         string opMode = isMaskedInpaint ? $"inpaint (start={startStep}/{steps})"
                       : isImg2Img ? $"img2img (start={startStep}/{steps})"
                       : "txt2img";
-        if (editRefImage is not null) opMode += " + edit-ref";
+        if (hasEditRefs) opMode += $" + edit-ref x{editRefImages!.Count}";
         Logs.Info($"Qwen-Image {opMode}: {width}x{height}, {steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
@@ -145,9 +184,18 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // whole TE phase (preload + encode + free) vanishes for repeat prompts (seed-only changes). Reusing the
         // SAME tensor references also keeps any downstream ref-keyed caches warm. Cache holds one cond + one
         // uncond (the last used); a new prompt evicts + disposes.
+        long editSig = 0L;
+        if (_multimodalEncoder is not null && hasEditRefs)
+        {
+            IReadOnlyList<Tensor> sigSource = editRefVisionImages is { Count: > 0 } ? editRefVisionImages : editRefImages!;
+            foreach (Tensor sigImg in sigSource)
+                editSig = editSig * 1000003L ^ ComputeImageSignature(sigImg);
+        }
         bool condHit = _cachedCond is not null && _cachedCondDrop == promptDropIndex
+            && _cachedEditSig == editSig
             && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIds);
         bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondDrop == negativeDropIndex
+            && _cachedEditSig == editSig
             && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativeTokenIds));
         Tensor condHidden;
         Tensor? uncondHidden = null;
@@ -169,8 +217,41 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             }
             Backend.PreloadWeights(_textEncoder.EnumerateWeights());
 
-            int[][] batchPrompt = [promptTokenIds];
-            condHidden = _textEncoder.Encode(Backend, batchPrompt);
+            // Edit-with-vision: the templated ids contain <|image_pad|> placeholders — run the multimodal
+            // encode (vision tower + spliced embeds + sectioned M-RoPE). Both cond AND uncond carry the
+            // image (the standard ComfyUI edit workflow feeds the reference to both conditionings).
+            // The edit-plus recipe conditions the vision tower on ~384²-area rescales of the references
+            // while the VAE reference latents use the ~1MP rescale — the caller passes both sets. Vision
+            // images are [0,1] (Qwen25VlImageProcessor contract); the fallback converts the [-1,1]
+            // VAE-contract references on the host (one-time, off the step loop).
+            bool visionEncode = _multimodalEncoder is not null && hasEditRefs
+                && Array.IndexOf(promptTokenIds, Qwen25VlMultimodalEncoder.ImageTokenId) >= 0;
+            List<Tensor> visionFallbacks = new();
+            Tensor[] visionImages = [];
+            if (visionEncode)
+            {
+                if (editRefVisionImages is { Count: > 0 })
+                {
+                    visionImages = [.. editRefVisionImages];
+                }
+                else
+                {
+                    foreach (Tensor editRef in editRefImages!)
+                    {
+                        Tensor conv = new Tensor(editRef.Shape, DType.F32);
+                        float* srcPx = (float*)editRef.DataPointer;
+                        float* dstPx = (float*)conv.DataPointer;
+                        long n = editRef.ElementCount;
+                        for (long i = 0; i < n; i++) dstPx[i] = (srcPx[i] + 1.0f) * 0.5f;
+                        visionFallbacks.Add(conv);
+                    }
+                    visionImages = [.. visionFallbacks];
+                }
+            }
+
+            condHidden = visionEncode
+                ? _multimodalEncoder!.Encode(Backend, promptTokenIds, visionImages)
+                : _textEncoder.Encode(Backend, [promptTokenIds]);
             if (promptDropIndex > 0)
             {
                 Tensor trimmed = DropPrefixHiddenStates(condHidden, promptDropIndex);
@@ -180,8 +261,11 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
             if (useCfg)
             {
-                int[][] batchNeg = [negativeTokenIds];
-                uncondHidden = _textEncoder.Encode(Backend, batchNeg);
+                bool negVision = visionEncode
+                    && Array.IndexOf(negativeTokenIds, Qwen25VlMultimodalEncoder.ImageTokenId) >= 0;
+                uncondHidden = negVision
+                    ? _multimodalEncoder!.Encode(Backend, negativeTokenIds, visionImages)
+                    : _textEncoder.Encode(Backend, [negativeTokenIds]);
                 if (negativeDropIndex > 0)
                 {
                     Tensor trimmed = DropPrefixHiddenStates(uncondHidden, negativeDropIndex);
@@ -189,6 +273,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                     uncondHidden = trimmed;
                 }
             }
+
+            foreach (Tensor conv in visionFallbacks) conv.Dispose();
 
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (txt seqLen={condHidden.Shape[1]})");
 
@@ -207,6 +293,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             _cachedCond = condHidden;
             _cachedCondKey = (int[])promptTokenIds.Clone();
             _cachedCondDrop = promptDropIndex;
+            _cachedEditSig = editSig;
             if (useCfg)
             {
                 _cachedUncond?.Dispose();
@@ -245,23 +332,46 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // Qwen-Image-Edit reference: VAE-encode + pack ONCE to [1, refSeq, 64]. Like Flux Kontext, the ref
         // tokens are NOT noised or stepped — they re-enter the transformer identically at every step and are
         // dropped from the velocity output (comfy/ldm/qwen_image/model.py: process_img(ref, index=1) + concat).
-        Tensor? packedEditRef = null;
-        int refHPacked = 0;
-        int refWPacked = 0;
-        if (editRefImage is not null)
+        Tensor? packedEditRef = null;                    // all references, row-concatenated in Picture order
+        (int H, int W)[] refGrids = [];
+        if (hasEditRefs)
         {
-            int refLatentH = (int)editRefImage.Shape[2] / 8;
-            int refLatentW = (int)editRefImage.Shape[3] / 8;
-            refHPacked = refLatentH / _config.PatchSize;
-            refWPacked = refLatentW / _config.PatchSize;
             Stopwatch refSw = Stopwatch.StartNew();
-            Tensor refUnpacked = _vaeEncoder!.Encode(Backend, editRefImage);
-            Tensor packedRef = PackLatent(refUnpacked, refLatentH, refLatentW, _config.InChannels, _config.PatchSize);
-            refUnpacked.Dispose();
-            packedEditRef = packedRef;
+            List<Tensor> packedRefs = new(editRefImages!.Count);
+            refGrids = new (int, int)[editRefImages.Count];
+            int totalRefTokens = 0;
+            for (int r = 0; r < editRefImages.Count; r++)
+            {
+                Tensor editRef = editRefImages[r];
+                int refLatentH = (int)editRef.Shape[2] / 8;
+                int refLatentW = (int)editRef.Shape[3] / 8;
+                refGrids[r] = (refLatentH / _config.PatchSize, refLatentW / _config.PatchSize);
+                Tensor refUnpacked = _vaeEncoder!.Encode(Backend, editRef);
+                Tensor packedRef = PackLatent(refUnpacked, refLatentH, refLatentW, _config.InChannels, _config.PatchSize);
+                refUnpacked.Dispose();
+                packedRefs.Add(packedRef);
+                totalRefTokens += (int)packedRef.Shape[1];
+            }
+            if (packedRefs.Count == 1)
+            {
+                packedEditRef = packedRefs[0];
+            }
+            else
+            {
+                packedEditRef = new Tensor(new TensorShape(1, totalRefTokens, patchDim), DType.F32);
+                float* dstRef = (float*)packedEditRef.DataPointer;
+                long rowOff = 0;
+                foreach (Tensor packedRef in packedRefs)
+                {
+                    long bytes = packedRef.ElementCount * sizeof(float);
+                    Buffer.MemoryCopy((void*)packedRef.DataPointer, dstRef + rowOff * patchDim, bytes, bytes);
+                    rowOff += packedRef.Shape[1];
+                    packedRef.Dispose();
+                }
+            }
             refSw.Stop();
-            Logs.Info($"Qwen-Image-Edit reference encoded in {refSw.ElapsedMilliseconds}ms: " +
-                $"{packedEditRef.Shape[1]} tokens ({refHPacked}x{refWPacked} grid)");
+            Logs.Info($"Qwen-Image-Edit references encoded in {refSw.ElapsedMilliseconds}ms: " +
+                $"{editRefImages.Count} image(s), {totalRefTokens} ref tokens.");
         }
 
         Backend.PreloadWeights(_transformer.EnumerateWeights());
@@ -276,16 +386,22 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         if (packedMask is not null) _ = packedMask.DataPointer;
         if (packedEditRef is not null) _ = packedEditRef.DataPointer;
         Backend.FreeActivations();
+        // Pin the step-invariant ref tokens as a device-resident weight: they re-enter the per-step device
+        // concat below, and a pageable host re-upload every step is an internally-syncing copy.
+        if (packedEditRef is not null)
+            Backend.PreloadWeights(new List<Tensor> { packedEditRef });
 
         Logs.Info("Starting Qwen-Image denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
-        // Drain-free fast path (plain t2i / img2img): the latent stays device-resident across the whole loop,
-        // CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt — for
-        // gw=cfgScale this IS uncond + cfg·(cond−uncond), and gw=1 degenerates to the plain Euler step), and
-        // FreeActivations never runs mid-loop. The masked-inpaint and edit-ref paths keep the host branch:
-        // both must read/rebuild the latent on the host every step.
-        bool drainFree = !isMaskedInpaint && packedEditRef is null;
+        // Drain-free fast path (t2i / img2img / EDIT): the latent stays device-resident across the whole
+        // loop, CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt —
+        // for gw=cfgScale this IS uncond + cfg·(cond−uncond), and gw=1 degenerates to the plain Euler step),
+        // and FreeActivations never runs mid-loop. Edit joins the fast path via a per-step DEVICE row-concat
+        // of [noise ; pinned ref tokens] (the old host ConcatPackedSeqDim forced a full D2H/H2D round trip +
+        // host Euler + a per-step sweep — the dominant edit overhead). Masked inpaint keeps the host branch
+        // (per-step host blend must read the latent anyway).
+        bool drainFree = !isMaskedInpaint;
 
         for (int i = startStep; i < steps; i++)
         {
@@ -295,16 +411,29 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
 
             // Edit mode: append the static ref tokens to the current noisy tokens for THIS forward only —
             // the transformer slices them back off the velocity, so the scheduler below never sees them.
-            Tensor transformerInput = packedEditRef is not null
-                ? ConcatPackedSeqDim(packedLatent, packedEditRef)
-                : packedLatent;
+            // Drain-free: device row-concat (two async DtoD copies); host branch keeps the host concat.
+            Tensor transformerInput;
+            if (packedEditRef is null)
+            {
+                transformerInput = packedLatent;
+            }
+            else if (drainFree)
+            {
+                transformerInput = new Tensor(
+                    new TensorShape(1, packedLatent.Shape[1] + packedEditRef.Shape[1], patchDim), DType.F32);
+                Backend.Concat(transformerInput, new Tensor[] { packedLatent, packedEditRef }, 1);
+            }
+            else
+            {
+                transformerInput = ConcatPackedSeqDim(packedLatent, packedEditRef);
+            }
 
             if (drainFree)
             {
-                Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
                 if (useCfg)
                 {
-                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
                     Backend.CfgEulerStep(packedLatent, condPred, uncondPred, cfgScale, scheduler.Dt(i));
                     uncondPred.Dispose();
                 }
@@ -313,21 +442,22 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
                     Backend.CfgEulerStep(packedLatent, condPred, condPred, 1.0f, scheduler.Dt(i));
                 }
                 condPred.Dispose();
+                if (transformerInput != packedLatent) transformerInput.Dispose();
             }
             else
             {
                 Tensor noisePred;
                 if (useCfg)
                 {
-                    Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
-                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                    Tensor condPred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
+                    Tensor uncondPred = _transformer.Forward(Backend, transformerInput, uncondHidden!, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
                     noisePred = CfgHelper.ApplyCfg(uncondPred, condPred, cfgScale);
                     uncondPred.Dispose();
                     condPred.Dispose();
                 }
                 else
                 {
-                    noisePred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refHPacked, refWPacked);
+                    noisePred = _transformer.Forward(Backend, transformerInput, condHidden, normalizedT, hPacked, wPacked, refGrids, editRefTimestepZero);
                 }
                 if (transformerInput != packedLatent) transformerInput.Dispose();
 
@@ -379,7 +509,13 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         // condHidden/uncondHidden are cross-generation caches — not disposed here.
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
-        packedEditRef?.Dispose();
+        if (packedEditRef is not null)
+        {
+            // Evict the pinned device copy BEFORE disposing: the weight cache is keyed on the tensor object,
+            // and disposing a still-registered pin would leak its device allocation into every later gen.
+            Backend.FreeWeights(new[] { packedEditRef });
+            packedEditRef.Dispose();
+        }
 
         QwenImageTransformer.DumpFinalLatent(packedLatent);
 

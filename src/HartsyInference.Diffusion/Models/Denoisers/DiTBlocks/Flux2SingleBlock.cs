@@ -41,7 +41,9 @@ public sealed unsafe class Flux2SingleBlock
         _normK = new QkNorm(_headDim, qkNormEps);
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    /// <param name="branchDamp">Residual-stream damp for the F16 activation path (see <see cref="ChromaF16"/>);
+    /// damps the fused output projection (the only write into the residual stream). 1.0 = off.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         // Split-from-linear1 projections (converter responsibility — see Flux2CheckpointConverter)
         _toQWeight = weights[$"{prefix}.attn.to_q.weight"];
@@ -67,6 +69,13 @@ public sealed unsafe class Flux2SingleBlock
         // Per-head Q/K RMSNorm
         _normQ.LoadWeights(weights[$"{prefix}.attn.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attn.norm_k.weight"]);
+
+        if (branchDamp != 1.0f)
+        {
+            // Weight damp rides the GEMM alpha; bias (qkvBias variants only) gets a value-scaled copy.
+            _toOutWeight!.Fp8ScaleFactor *= branchDamp;
+            if (_toOutBias is not null) _toOutBias = ChromaF16.DampBias(_toOutBias, branchDamp);
+        }
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -99,6 +108,8 @@ public sealed unsafe class Flux2SingleBlock
         int seqLen = (int)hidden.Shape[1];
         float scale = 1.0f / MathF.Sqrt(_headDim);
 
+        // F16 activation path: activations follow the incoming stream dtype (see Flux2DoubleBlock).
+        DType act = hidden.DType;
         TensorShape hiddenShape = new TensorShape(batch, seqLen, _hiddenSize);
         TensorShape mlpShape = new TensorShape(batch, seqLen, _mlpInner);
         TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
@@ -108,23 +119,23 @@ public sealed unsafe class Flux2SingleBlock
         Tensor modulated = DiTUtils.NormModulate(backend, hidden, mod[0], mod[1], hiddenShape, _layerNormEps);
 
         // ── 2. Q/K/V projections ([B, S, H, D]) + gate/up MLP projections (same modulated input) ──
-        Tensor q = new Tensor(headsShape, DType.F32);
+        Tensor q = new Tensor(headsShape, act);
         backend.Linear(q, modulated, _toQWeight!, _toQBias);
-        Tensor k = new Tensor(headsShape, DType.F32);
+        Tensor k = new Tensor(headsShape, act);
         backend.Linear(k, modulated, _toKWeight!, _toKBias);
-        Tensor v = new Tensor(headsShape, DType.F32);
+        Tensor v = new Tensor(headsShape, act);
         backend.Linear(v, modulated, _toVWeight!, _toVBias);
-        Tensor gate = new Tensor(mlpShape, DType.F32);
+        Tensor gate = new Tensor(mlpShape, act);
         backend.Linear(gate, modulated, _gateWeight!, _gateBias);
-        Tensor up = new Tensor(mlpShape, DType.F32);
+        Tensor up = new Tensor(mlpShape, act);
         backend.Linear(up, modulated, _upWeight!, _upBias);
         modulated.Dispose();
 
         // ── 3. QK-Norm (per-head RMSNorm over the last dim = headDim, pre-RoPE) ──
-        Tensor qNormed = new Tensor(headsShape, DType.F32);
+        Tensor qNormed = new Tensor(headsShape, act);
         backend.RmsNorm(qNormed, q, _normQ.Weight, _normQ.Eps);
         q.Dispose();
-        Tensor kNormed = new Tensor(headsShape, DType.F32);
+        Tensor kNormed = new Tensor(headsShape, act);
         backend.RmsNorm(kNormed, k, _normK.Weight, _normK.Eps);
         k.Dispose();
 
@@ -133,13 +144,13 @@ public sealed unsafe class Flux2SingleBlock
             rope.ApplyGpu(backend, qNormed, kNormed, _numHeads);
 
         // ── 5. Permute [B, S, H, D] → [B, H, S, D] ──
-        Tensor qMh = new Tensor(mhShape, DType.F32);
+        Tensor qMh = new Tensor(mhShape, act);
         backend.Permute0213(qMh, qNormed, seqLen, _numHeads, _headDim);
         qNormed.Dispose();
-        Tensor kMh = new Tensor(mhShape, DType.F32);
+        Tensor kMh = new Tensor(mhShape, act);
         backend.Permute0213(kMh, kNormed, seqLen, _numHeads, _headDim);
         kNormed.Dispose();
-        Tensor vMh = new Tensor(mhShape, DType.F32);
+        Tensor vMh = new Tensor(mhShape, act);
         backend.Permute0213(vMh, v, seqLen, _numHeads, _headDim);
         v.Dispose();
 
@@ -148,37 +159,37 @@ public sealed unsafe class Flux2SingleBlock
             rope.Forward(qMh, kMh, batch, _numHeads, seqLen);
 
         // ── 6. SDPA ──
-        Tensor attnOutMh = new Tensor(mhShape, DType.F32);
+        Tensor attnOutMh = new Tensor(mhShape, act);
         backend.ScaledDotProductAttention(attnOutMh, qMh, kMh, vMh, null, scale, allowF16: true);   // QK RMS-norm bounds scores; enables the cuDNN fused path
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         // ── 7. Permute attn output back [B, H, S, D] → [B, S, hidden] ──
-        Tensor attnOut = new Tensor(hiddenShape, DType.F32);
+        Tensor attnOut = new Tensor(hiddenShape, act);
         backend.Permute0213(attnOut, attnOutMh, _numHeads, seqLen, _headDim);
         attnOutMh.Dispose();
 
         // ── 8. SwiGLU activation: silu(gate) * up ──
-        Tensor gateActivated = new Tensor(mlpShape, DType.F32);
+        Tensor gateActivated = new Tensor(mlpShape, act);
         backend.Silu(gateActivated, gate);
         gate.Dispose();
-        Tensor swigluOut = new Tensor(mlpShape, DType.F32);
+        Tensor swigluOut = new Tensor(mlpShape, act);
         backend.Mul(swigluOut, gateActivated, up);
         gateActivated.Dispose();
         up.Dispose();
 
         // ── 9. Concatenate [attn_out (hidden) || swiglu_out (mlp_inner)] along the last dim ──
         TensorShape concatShape = new TensorShape(batch, seqLen, _hiddenSize + _mlpInner);
-        Tensor concat = new Tensor(concatShape, DType.F32);
+        Tensor concat = new Tensor(concatShape, act);
         backend.Concat(concat, new Tensor[] { attnOut, swigluOut }, 2);
         attnOut.Dispose(); swigluOut.Dispose();
 
         // ── 10. Fused output projection: [hidden + mlp_inner] → hidden ──
-        Tensor proj = new Tensor(hiddenShape, DType.F32);
+        Tensor proj = new Tensor(hiddenShape, act);
         backend.Linear(proj, concat, _toOutWeight!, _toOutBias);
         concat.Dispose();
 
         // ── 11. Gated residual ──
-        Tensor result = new Tensor(hiddenShape, DType.F32);
+        Tensor result = new Tensor(hiddenShape, act);
         backend.GatedResidualLastDim(result, hidden, proj, mod[2]);
         proj.Dispose();
         return result;

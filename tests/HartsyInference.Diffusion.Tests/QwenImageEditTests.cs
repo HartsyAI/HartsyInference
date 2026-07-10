@@ -44,7 +44,7 @@ public sealed unsafe class QwenImageEditTests
         };
 
         Assert.Throws<InvalidOperationException>(() =>
-            pipeline.GenerateFromTokens(promptTokenIds: [0], negativeTokenIds: [0], request, editRefImage: refImage));
+            pipeline.GenerateFromTokens(promptTokenIds: [0], negativeTokenIds: [0], request, editRefImages: new[] { refImage }));
 
         refImage.Dispose();
     }
@@ -65,7 +65,7 @@ public sealed unsafe class QwenImageEditTests
         };
 
         Assert.Throws<ArgumentException>(() =>
-            pipeline.GenerateFromTokens(promptTokenIds: [0], negativeTokenIds: [0], request, editRefImage: refImage));
+            pipeline.GenerateFromTokens(promptTokenIds: [0], negativeTokenIds: [0], request, editRefImages: new[] { refImage }));
 
         refImage.Dispose();
     }
@@ -85,7 +85,7 @@ public sealed unsafe class QwenImageEditTests
         };
 
         Assert.Throws<ArgumentException>(() =>
-            pipeline.GenerateFromTokens(promptTokenIds: [0], negativeTokenIds: [0], request, editRefImage: refImage));
+            pipeline.GenerateFromTokens(promptTokenIds: [0], negativeTokenIds: [0], request, editRefImages: new[] { refImage }));
 
         refImage.Dispose();
     }
@@ -95,7 +95,7 @@ public sealed unsafe class QwenImageEditTests
     /// the main grid and the ref frame index is forced to 0 — the ref section differs from the image section only by
     /// its frame-axis position.</summary>
     [Fact]
-    public void ApplyJoint_RefSection_MatchesImageRowsAtFrame0_AndLeavesMainRowsUnchanged()
+    public void ApplyJoint_RefSection_RotatesFrameBandOnly_AndLeavesMainRowsUnchanged()
     {
         const int batch = 1, heads = 2, headDim = 128, hPacked = 4, wPacked = 4, txtSeq = 3;
         int imgSeq = hPacked * wPacked;
@@ -150,9 +150,11 @@ public sealed unsafe class QwenImageEditTests
         }
         rope.ApplyJoint(qPrefix, kPrefix, batch, heads, hPacked, wPacked, txtSeq, posStart);
 
-        // Frame index 0 + identical grid + identical input rows ⇒ ref rows must rotate exactly like main rows.
+        // One ref, identical grid + identical input rows: ref rows rotate with frame axis 1 (the API assigns
+        // frame i+1 per ref) — the SPATIAL sub-bands (past the 16-dim frame band) must match the main rows
+        // exactly, while the frame band must differ (frame 1 vs 0).
         rope.ApplyJoint(q, k, batch, heads, hPacked, wPacked, txtSeq, posStart,
-            refPackedH: hPacked, refPackedW: wPacked, refFrameIndex: 0);
+            refGrids: new[] { (hPacked, wPacked) });
 
         ReadOnlySpan<float> qs = q.AsReadOnlySpan<float>();
         ReadOnlySpan<float> qp = qPrefix.AsReadOnlySpan<float>();
@@ -169,7 +171,8 @@ public sealed unsafe class QwenImageEditTests
             }
             for (int s = 0; s < imgSeq; s++)
             {
-                for (int d = 0; d < headDim; d++)
+                // Spatial sub-bands (d >= 16, the frame-axis dim) match the main rows exactly.
+                for (int d = 16; d < headDim; d++)
                 {
                     int refIdx = (int)(((long)h * total + txtSeq + imgSeq + s) * headDim + d);
                     int mainIdx = (int)(((long)h * total + txtSeq + s) * headDim + d);
@@ -197,7 +200,7 @@ public sealed unsafe class QwenImageEditTests
             }
         }
         rope.ApplyJoint(q2, k2, batch, heads, hPacked, wPacked, txtSeq, posStart,
-            refPackedH: hPacked, refPackedW: wPacked, refFrameIndex: 1);
+            refGrids: new[] { (hPacked, wPacked) });
 
         bool refDiffers = false;
         ReadOnlySpan<float> q2s = q2.AsReadOnlySpan<float>();
