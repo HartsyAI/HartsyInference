@@ -243,6 +243,22 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphDestroy(nint graph);
 
+    /// <summary>Returns the device's graph-memory-pool reserves to the OS. Memory allocated by captured
+    /// allocation nodes (stream-ordered allocs recorded during graph capture) lives in a per-device GRAPH pool
+    /// that <c>cuGraphExecDestroy</c> does NOT release and <c>cuMemPoolTrimTo</c> does not touch — without this
+    /// call a destroyed multi-GB step graph keeps its whole working set reserved (invisible to the allocator,
+    /// fatal for the next model's load on a full card).</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuDeviceGraphMemTrim(int device);
+
+    internal const int CU_GRAPH_MEM_ATTR_USED_MEM_CURRENT = 0;
+    internal const int CU_GRAPH_MEM_ATTR_RESERVED_MEM_CURRENT = 2;
+
+    /// <summary>Reads a graph-memory-pool attribute (USED = live graph-owned allocations, RESERVED = pool
+    /// footprint including cached-but-free memory).</summary>
+    [LibraryImport(LibName)]
+    internal static unsafe partial int cuDeviceGetGraphMemAttribute(int device, int attr, void* value);
+
     internal const int CU_STREAM_CAPTURE_MODE_GLOBAL = 0;
     internal const int CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1;
     internal const int CU_STREAM_CAPTURE_MODE_RELAXED = 2;

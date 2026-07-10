@@ -115,8 +115,11 @@ public sealed unsafe class ChromaApproximator : IDisposable
         // ── 2. Residual stack (5x): hidden = hidden + linear_2(silu(linear_1(rmsnorm(hidden)))) ──
         for (int i = 0; i < _numLayers; i++)
         {
+            // Device RMSNorm (affine scale, last dim): the old host RmsNormAffine read the device-produced
+            // hidden's DataPointer — a full pipeline drain per layer (5×/table build), and a capture-illegal
+            // op inside the Chroma step graph. Identical formula (mean-of-squares + eps, F32 weight).
             Tensor normed = new Tensor(hiddenShape, DType.F32);
-            RmsNormAffine(normed, hidden, _normWeight[i]!, batch, seqLen, _hiddenDim);
+            backend.RmsNorm(normed, hidden, _normWeight[i]!, 1e-6f);
 
             Tensor lin1 = new Tensor(hiddenShape, DType.F32);
             backend.Linear(lin1, normed, _linear1Weight[i]!, _linear1Bias[i]);
@@ -144,33 +147,6 @@ public sealed unsafe class ChromaApproximator : IDisposable
         hidden.Dispose();
 
         return output;
-    }
-
-    /// <summary>RMSNorm with affine scale (no bias, no centering): <c>output = x * rsqrt(mean(x^2) + eps) * scale</c>.
-    /// Matches PyTorch's <c>nn.RMSNorm(hidden_dim)</c> default (eps=1e-6, affine=True).</summary>
-    private static void RmsNormAffine(Tensor output, Tensor input, Tensor scale, int batch, int seqLen, int dim, float eps = 1e-6f)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        float* sPtr = (float*)scale.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                int offset = (b * seqLen + s) * dim;
-
-                float sumSq = 0f;
-                for (int d = 0; d < dim; d++)
-                {
-                    float v = inPtr[offset + d];
-                    sumSq += v * v;
-                }
-                float invRms = 1.0f / MathF.Sqrt(sumSq / dim + eps);
-                for (int d = 0; d < dim; d++)
-                    outPtr[offset + d] = inPtr[offset + d] * invRms * sPtr[d];
-            }
-        }
     }
 
     /// <summary>Releases tensor references.</summary>

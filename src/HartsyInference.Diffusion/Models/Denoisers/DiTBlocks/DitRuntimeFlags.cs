@@ -20,14 +20,21 @@ public static class DitDtype
         EnvSwitch.IsEnabled("HARTSY_DIT_F16", defaultOn: true) ? DType.F16 : DType.F32;
 }
 
-/// <summary>Per-process switch for CUDA-graph capture of a DiT denoise step (<c>HARTSY_DIT_GRAPH=1</c>): a model
+/// <summary>Per-process switch for CUDA-graph capture of a DiT denoise step (<c>HARTSY_DIT_GRAPH</c>): a model
 /// whose step issues an identical op sequence every step captures it once and replays it with a single
 /// <c>cuGraphLaunch</c> (host issue time → ~0). Models opt in IN CODE via the <c>IBackend.StepGraph*</c> API with
 /// fixed boundary buffers (see <c>Krea2Transformer.ForwardPatched</c> for the reference pattern: per-step-varying
 /// inputs refreshed via <c>CopyInto</c>, in-place Euler via <c>CfgEulerStep</c>, self-disables on capture failure).
-/// Default off.</summary>
+///
+/// <para>Tri-state (the EnvSwitch convention): <see cref="Enabled"/> is the experimental opt-in gate (default
+/// OFF — models where the graph was wall-neutral, e.g. GPU-bound Z-Image); <see cref="EnabledDefaultOn"/> is
+/// default ON, for architectures where the per-generation graph is a validated win (host-issue-bound models —
+/// Chroma). <c>HARTSY_DIT_GRAPH=0</c> kills both; <c>=1</c> forces both.</para></summary>
 public static class DitStepGraph
 {
     public static readonly bool Enabled =
-        Environment.GetEnvironmentVariable("HARTSY_DIT_GRAPH") == "1";
+        EnvSwitch.IsEnabled("HARTSY_DIT_GRAPH", defaultOn: false);
+
+    public static readonly bool EnabledDefaultOn =
+        EnvSwitch.IsEnabled("HARTSY_DIT_GRAPH", defaultOn: true);
 }

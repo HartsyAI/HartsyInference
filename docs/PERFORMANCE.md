@@ -139,6 +139,7 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | Chroma1-HD | 20 | 4.0 |
 | Flux-Dev | 20 | 1.0 (guidance 3.5) |
 | Flux-Schnell | 4 | 1.0 |
+| Flux.2 Klein 4B (distilled) | 4 | 1.0 |
 | SDXL | 20 | 7.0 |
 | ERNIE-Image | 20 | 4.0 |
 | AuraFlow-0.3 | 20 | 3.5 |
@@ -157,11 +158,11 @@ rounds land:
 | Ideogram4 | 19.5 s | 17.0 s | 1.15× — optimization queued |
 | Boogu-Turbo | 3.26 s | 2.54 s | 1.28× — was 48.9 s (15× in two rounds); optimization in progress |
 | Boogu-Base | 26.5 s | 17.8 s | 1.49× — was ~6 min (~13×); optimization in progress |
-| Chroma1-HD | 63.2 s | 16.6 s | 3.8× — optimization in progress |
+| Chroma1-HD | 28.5 s | 16.6 s | 1.7× — was 3.7× (round 3: F16 blocks, persistent CFG-pair CUDA graph, context trim); batched CFG queued |
 | AuraFlow-0.3 | **13.93 s** | 14.0 s | Tied with ComfyUI (was 31.4 s) |
 | Flux-Dev | 31.0 s | 12.5 s | Optimization in progress |
 | Flux-Schnell | 10.5 s | — | First benchmark; optimization in progress |
-| Flux.2 Klein 4B | 15.1 s | — | First benchmark; GPU-residency port landed |
+| Flux.2 Klein 4B | **3.45 s** | — | No ComfyUI baseline yet. Distilled variant: 4 steps/CFG 1 official (earlier 10-step numbers over-stepped it and artifacted) |
 | SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
 
 ---
@@ -173,7 +174,7 @@ Semantics may change between versions.
 
 | Switch | Purpose |
 |---|---|
-| `HARTSY_DIT_GRAPH` | CUDA-graph capture of the denoise step (models opt in in code) |
+| `HARTSY_DIT_GRAPH` | CUDA-graph capture of the denoise step. Tri-state: architectures where the per-generation graph is a validated win run it **by default** (Chroma — the full CFG pair replays as one `cuGraphLaunch`, self-disables on capture failure); other opted-in models (Z-Image, Krea2) stay opt-in (`=1`). `=0` kills it everywhere |
 | `HARTSY_SDPA_V2`, `HARTSY_SDPA_FORCE_FLASH`, `HARTSY_SDPA_FORCE_TILED` | Alternate attention kernels, validation only |
 | `HARTSY_SDPA_F16` / `HARTSY_SDPA_NO_F16` | Force/kill the F16 SDPA path for **all** callers (per-call `allowF16` is the supported mechanism) |
 | `HARTSY_TENSORCORE_GEMM`, `HARTSY_FP8_F16`, `HARTSY_FP8_F32`, `HARTSY_HIGH_PRECISION_GEMM`, `HARTSY_NO_TF32` | GEMM A/B-benchmarking toggles |

@@ -169,14 +169,46 @@ public static class CudaMemory
     /// <summary>Allocates device memory asynchronously on the given stream. Mirrors
     /// <see cref="Allocate"/>'s OOM retry: if the stream-ordered allocator can't satisfy
     /// the request, drain everything and trim the pool, then retry once.</summary>
+    // Capture-window alloc/free tracker (diagnostic): during step-graph capture, every cuMemAllocAsync
+    // becomes a graph allocation whose lifetime the graph owns — an alloc without a matching captured free
+    // leaks one launch's worth of memory permanently when the graph is destroyed. Enabled by
+    // CudaBackend.StepGraphBegin, reported at EndAndLaunch.
+    internal static bool TrackCaptureWindow;
+    internal static readonly System.Collections.Generic.Dictionary<ulong, nuint> CaptureAllocs = new();
+    internal static long CaptureAllocBytes, CaptureFreeBytes;
+    internal static int CaptureAllocCount, CaptureFreeCount;
+
     public static ulong AllocateAsync(nuint byteSize, nint stream)
     {
         int result = CudaDriverApi.cuMemAllocAsync(out ulong dptr, byteSize, stream);
+        if (TrackCaptureWindow && result == 0)
+        {
+            lock (CaptureAllocs)
+            {
+                CaptureAllocs[dptr] = byteSize;
+                CaptureAllocBytes += (long)byteSize;
+                CaptureAllocCount++;
+            }
+        }
         if (result == 2) // CUDA_ERROR_OUT_OF_MEMORY
         {
             LogOomDiagnostic("OOM on async first attempt", byteSize);
             GpuTransferHelper.SyncStreamsAndReleasePool();
             int retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);
+            if (retryResult == 2)
+            {
+                // The driver holds lazily-reclaimable caches (measured: ~4.5 GB of destroyed CUDA-graph
+                // memory after a step-graph session — reported as USED by cuMemGetInfo, untouched by
+                // cuMemPoolTrimTo/cuDeviceGraphMemTrim) that it releases ONLY under synchronous allocation
+                // pressure, never to grow a stream-ordered pool. Probe-allocate the requested size with
+                // cuMemAlloc to force the reclaim, free the probe, then let the pool grow into it.
+                if (CudaDriverApi.cuMemAlloc(out ulong probe, byteSize) == 0)
+                {
+                    CudaDriverApi.cuMemFree(probe);
+                    LogOomDiagnostic("async retry after sync-probe reclaim", byteSize);
+                    retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);
+                }
+            }
             if (retryResult != 0)
             {
                 LogOomDiagnostic("OOM after async sync+pool-trim retry", byteSize);
@@ -195,6 +227,17 @@ public static class CudaMemory
     {
         if (dptr != 0)
         {
+            if (TrackCaptureWindow)
+            {
+                lock (CaptureAllocs)
+                {
+                    if (CaptureAllocs.Remove(dptr, out nuint sz))
+                    {
+                        CaptureFreeBytes += (long)sz;
+                        CaptureFreeCount++;
+                    }
+                }
+            }
             CudaDriverApi.cuMemFreeAsync(dptr, stream).ThrowOnError();
         }
     }

@@ -186,6 +186,7 @@ public sealed class CudaKernels : IDisposable
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
     private readonly nint _ditRmsNormF16;
+    private readonly nint _ditLayerNormNoAffineF16;
     private readonly nint _ditAffineBroadcastF16;
     private readonly nint _ditGatedResidualF16;
     private readonly nint _ditAddScalarF16;
@@ -415,6 +416,7 @@ public sealed class CudaKernels : IDisposable
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
         _ditF16Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "dit_f16.ptx"));
         _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
+        _ditLayerNormNoAffineF16 = _ditF16Module.GetFunction("dit_layernorm_noaffine_f16");
         _ditAffineBroadcastF16 = _ditF16Module.GetFunction("dit_affine_broadcast_lastdim_f16");
         _ditGatedResidualF16 = _ditF16Module.GetFunction("dit_gated_residual_lastdim_f16");
         _ditAddScalarF16 = _ditF16Module.GetFunction("dit_add_scalar_f16");
@@ -1647,6 +1649,10 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Launches non-affine LayerNorm: per-row zero-mean unit-variance, no scale/bias.</summary>
     public void LaunchLayerNormNoAffine(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
         => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF32, output, input, dim, totalRows, eps, stream);
+
+    /// <summary>Non-affine LayerNorm with F16 activation I/O (F32 accumulate) — the DiT F16 activation path.</summary>
+    public void LaunchLayerNormNoAffineF16(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
+        => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF16, output, input, dim, totalRows, eps, stream);
 
     /// <summary>Launches index-add of embedding rows in-place: h[row,d] += table[indices[row], d].</summary>
     public void LaunchIndexAdd(ulong h, ulong table, ulong indices, int dim, long total, nint stream)
