@@ -1564,6 +1564,15 @@ public sealed class CudaBackend : IBackend
         _context.EnsureCurrent();
         _stepGraph ??= new CudaGraph(_stream.Handle, autoFreeAllocationsOnRelaunch: true);
         _stepGraph.Reset();
+        lock (CudaMemory.CaptureAllocs)
+        {
+            CudaMemory.CaptureAllocs.Clear();
+            CudaMemory.CaptureAllocBytes = 0;
+            CudaMemory.CaptureFreeBytes = 0;
+            CudaMemory.CaptureAllocCount = 0;
+            CudaMemory.CaptureFreeCount = 0;
+            CudaMemory.TrackCaptureWindow = true;
+        }
         _stepGraph.BeginCapture();
         _stepGraphCapturing = true;
     }
@@ -1573,6 +1582,18 @@ public sealed class CudaBackend : IBackend
         if (!_stepGraphCapturing || _stepGraph is null)
             return;
         _stepGraphCapturing = false;
+        CudaMemory.TrackCaptureWindow = false;
+        long outstanding;
+        int outstandingCount;
+        lock (CudaMemory.CaptureAllocs)
+        {
+            outstanding = CudaMemory.CaptureAllocBytes - CudaMemory.CaptureFreeBytes;
+            outstandingCount = CudaMemory.CaptureAllocs.Count;
+        }
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[Cuda] step-graph capture window: allocs {CudaMemory.CaptureAllocCount} ({CudaMemory.CaptureAllocBytes >> 20} MB), " +
+            $"frees {CudaMemory.CaptureFreeCount} ({CudaMemory.CaptureFreeBytes >> 20} MB), " +
+            $"OUTSTANDING {outstandingCount} allocs / {outstanding >> 20} MB");
         _stepGraph.EndCaptureAndInstantiate();
         _stepGraph.Launch();
     }
@@ -1592,7 +1613,19 @@ public sealed class CudaBackend : IBackend
             _stepGraph?.AbortCapture();
             _stepGraphCapturing = false;
         }
+        bool hadCapturedGraph = _stepGraph?.IsReady == true;
         _stepGraph?.Reset();
+        if (hadCapturedGraph)
+        {
+            // Best-effort graph-pool trim after destroying a captured graph. NOTE (measured): the bulk of a
+            // destroyed step graph's memory (~4.5 GB for the Chroma CFG pair) is a DRIVER-side lazily-
+            // reclaimable cache that neither this trim nor cuMemPoolTrimTo returns — cuMemGetInfo reports it
+            // used until a SYNCHRONOUS cuMemAlloc forces the reclaim (see CudaMemory.AllocateAsync's
+            // sync-probe retry, which is what actually protects the next model's load). Sync first:
+            // destroy/trim under a still-executing final replay is undefined.
+            _stream.Synchronize();
+            CudaDriverApi.cuDeviceGraphMemTrim(_context.DeviceHandle).ThrowOnError();
+        }
     }
 
     /// <summary>Device copy into <paramref name="dst"/>'s EXISTING buffer (address-preserving — the captured-graph
@@ -2163,8 +2196,10 @@ public sealed class CudaBackend : IBackend
     public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
     {
         using NvtxRange _nvtx = NvtxRange.Push("LayerNormNoAffine");
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("CUDA LayerNormNoAffine supports F32 only.");
+        // F32, or F16 activation I/O with F32 accumulation — the DiT F16 activation recipe.
+        bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
+        if (!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
+            throw new NotSupportedException("CUDA LayerNormNoAffine supports F32 or F16 (matching input/output dtype).");
         _context.EnsureCurrent();
         EnsureKernels();
         int dim = (int)input.Shape[input.Shape.Rank - 1];
@@ -2177,7 +2212,10 @@ public sealed class CudaBackend : IBackend
             pIn = GpuTransferHelper.CopyToDevice(input);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchLayerNormNoAffine(pOut, pIn, dim, (int)rows, eps, _stream.Handle);
+            if (f16)
+                _kernels!.LaunchLayerNormNoAffineF16(pOut, pIn, dim, (int)rows, eps, _stream.Handle);
+            else
+                _kernels!.LaunchLayerNormNoAffine(pOut, pIn, dim, (int)rows, eps, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -4523,13 +4561,28 @@ public sealed class CudaBackend : IBackend
     public void FreeActivations()
     {
         _context.EnsureCurrent();
+        // A captured step graph bakes activation-pool device pointers (fixed latent / velocity buffers) —
+        // freeing activations under it leaves the graph pointing at freed memory, and the next replay is a
+        // context-poisoning CUDA 700. Reset the graph slot here so cross-generation graphs (Chroma) survive
+        // ONLY as long as their buffers do; owners detect the external reset and re-warm.
+        StepGraphInvalidateForActivationFree();
         GpuTransferHelper.FreeActivations();
     }
 
     public void FreeActivations(bool trimPool)
     {
         _context.EnsureCurrent();
+        StepGraphInvalidateForActivationFree();
         GpuTransferHelper.FreeActivations(trimPool);
+    }
+
+    private void StepGraphInvalidateForActivationFree()
+    {
+        if (_stepGraph is not null)
+        {
+            StepGraphReset();
+            StepGraphOwner = null;
+        }
     }
 
     public void TrimMemoryPool()
@@ -4541,10 +4594,15 @@ public sealed class CudaBackend : IBackend
     public void FreeAllDeviceMemory()
     {
         _context.EnsureCurrent();
+        long f0 = (long)_context.GetMemoryInfo().freeBytes;
+        StepGraphInvalidateForActivationFree();
         // EvictAll clears weights + casts + activations (syncing the stream first); the trim then returns the
         // stream-ordered pool's reservations so cuMemGetInfo/persistent allocs see the memory as actually free.
         GpuTransferHelper.EvictAll();
         GpuTransferHelper.TrimPool();
+        long f1 = (long)_context.GetMemoryInfo().freeBytes;
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[Cuda] FreeAllDeviceMemory: free {f0 >> 20} MB → {f1 >> 20} MB");
     }
 
     public long FreeMemoryBytes()

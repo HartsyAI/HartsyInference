@@ -243,6 +243,55 @@ __global__ void dit_repeat_kv_f16(
     output[i] = input[inIdx];
 }
 
+// ── Non-affine LayerNorm (F16 I/O, F32 accumulate) ──────────────────────────
+// F16 twin of dit_layernorm_noaffine_f32: per row, normalize to zero mean / unit variance
+// (biased var, /dim), no scale/bias. One block per row; shared-mem reduction.
+__global__ void dit_layernorm_noaffine_f16(
+    __half* __restrict__ output,
+    const __half* __restrict__ input,
+    unsigned int dim,
+    unsigned int totalRows,
+    float eps)
+{
+    extern __shared__ float sdata[];
+    unsigned int row = blockIdx.x;
+    if (row >= totalRows) return;
+
+    const __half* inRow = input + (size_t)row * dim;
+    __half* outRow = output + (size_t)row * dim;
+
+    float partial = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+        partial += __half2float(inRow[i]);
+    sdata[threadIdx.x] = partial;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    float mean = sdata[0] / (float)dim;
+    __syncthreads();
+
+    float vpart = 0.0f;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+    {
+        float diff = __half2float(inRow[i]) - mean;
+        vpart += diff * diff;
+    }
+    sdata[threadIdx.x] = vpart;
+    __syncthreads();
+    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
+
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
+        outRow[i] = __float2half((__half2float(inRow[i]) - mean) * invStd);
+}
+
 // ── CHW F32 [-1,1] → HWC u8 [0,255] (image output conversion) ───────────────
 // One thread per pixel; reads the 3 channel planes, writes the interleaved byte triple. Replaces the
 // host loop in ImagePostProcessor.TensorToRgbBytes (12 MB D2H + 12M-element CPU loop → 3 MB D2H).

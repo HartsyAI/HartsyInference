@@ -966,6 +966,175 @@ $L__BB9_11:
 	ret;
 
 }
+	// .globl	dit_layernorm_noaffine_f16
+.visible .entry dit_layernorm_noaffine_f16(
+	.param .u64 dit_layernorm_noaffine_f16_param_0,
+	.param .u64 dit_layernorm_noaffine_f16_param_1,
+	.param .u32 dit_layernorm_noaffine_f16_param_2,
+	.param .u32 dit_layernorm_noaffine_f16_param_3,
+	.param .f32 dit_layernorm_noaffine_f16_param_4
+)
+{
+	.reg .pred 	%p<14>;
+	.reg .b16 	%rs<5>;
+	.reg .f32 	%f<35>;
+	.reg .b32 	%r<25>;
+	.reg .b64 	%rd<28>;
+
+
+	ld.param.u64 	%rd5, [dit_layernorm_noaffine_f16_param_0];
+	ld.param.u64 	%rd6, [dit_layernorm_noaffine_f16_param_1];
+	ld.param.u32 	%r16, [dit_layernorm_noaffine_f16_param_2];
+	ld.param.u32 	%r17, [dit_layernorm_noaffine_f16_param_3];
+	ld.param.f32 	%f10, [dit_layernorm_noaffine_f16_param_4];
+	cvta.to.global.u64 	%rd1, %rd6;
+	mov.u32 	%r1, %ctaid.x;
+	setp.ge.u32 	%p1, %r1, %r17;
+	@%p1 bra 	$L__BB10_19;
+
+	mul.wide.u32 	%rd2, %r16, %r1;
+	mov.u32 	%r24, %tid.x;
+	mov.f32 	%f32, 0f00000000;
+	setp.lt.u32 	%p2, %r24, %r16;
+	@%p2 bra 	$L__BB10_2;
+	bra.uni 	$L__BB10_4;
+
+$L__BB10_2:
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r20, %r24;
+
+$L__BB10_3:
+	cvt.u64.u32 	%rd7, %r20;
+	add.s64 	%rd8, %rd2, %rd7;
+	shl.b64 	%rd9, %rd8, 1;
+	add.s64 	%rd10, %rd1, %rd9;
+	ld.global.nc.u16 	%rs1, [%rd10];
+	// begin inline asm
+	{  cvt.f32.f16 %f13, %rs1;}
+
+	// end inline asm
+	add.f32 	%f32, %f32, %f13;
+	add.s32 	%r20, %r20, %r3;
+	setp.lt.u32 	%p3, %r20, %r16;
+	@%p3 bra 	$L__BB10_3;
+
+$L__BB10_4:
+	mul.wide.u32 	%rd11, %r24, 4;
+	mov.u64 	%rd12, sdata;
+	add.s64 	%rd3, %rd12, %rd11;
+	st.shared.f32 	[%rd3], %f32;
+	bar.sync 	0;
+	mov.u32 	%r6, %ntid.x;
+	shr.u32 	%r23, %r6, 1;
+	setp.eq.s32 	%p4, %r23, 0;
+	@%p4 bra 	$L__BB10_9;
+
+	mov.u32 	%r21, %r23;
+
+$L__BB10_6:
+	setp.ge.u32 	%p5, %r24, %r21;
+	@%p5 bra 	$L__BB10_8;
+
+	add.s32 	%r18, %r21, %r24;
+	mul.wide.u32 	%rd13, %r18, 4;
+	add.s64 	%rd15, %rd12, %rd13;
+	ld.shared.f32 	%f14, [%rd3];
+	ld.shared.f32 	%f15, [%rd15];
+	add.f32 	%f16, %f15, %f14;
+	st.shared.f32 	[%rd3], %f16;
+
+$L__BB10_8:
+	bar.sync 	0;
+	shr.u32 	%r21, %r21, 1;
+	setp.ne.s32 	%p6, %r21, 0;
+	@%p6 bra 	$L__BB10_6;
+
+$L__BB10_9:
+	setp.ge.u32 	%p7, %r24, %r16;
+	cvt.rn.f32.u32 	%f4, %r16;
+	ld.shared.f32 	%f18, [sdata];
+	div.rn.f32 	%f5, %f18, %f4;
+	bar.sync 	0;
+	mov.f32 	%f34, 0f00000000;
+	@%p7 bra 	$L__BB10_12;
+
+	mov.f32 	%f34, 0f00000000;
+	mov.u32 	%r22, %r24;
+
+$L__BB10_11:
+	cvt.u64.u32 	%rd16, %r22;
+	add.s64 	%rd17, %rd2, %rd16;
+	shl.b64 	%rd18, %rd17, 1;
+	add.s64 	%rd19, %rd1, %rd18;
+	ld.global.nc.u16 	%rs2, [%rd19];
+	// begin inline asm
+	{  cvt.f32.f16 %f20, %rs2;}
+
+	// end inline asm
+	sub.f32 	%f21, %f20, %f5;
+	fma.rn.f32 	%f34, %f21, %f21, %f34;
+	add.s32 	%r22, %r22, %r6;
+	setp.lt.u32 	%p8, %r22, %r16;
+	@%p8 bra 	$L__BB10_11;
+
+$L__BB10_12:
+	st.shared.f32 	[%rd3], %f34;
+	bar.sync 	0;
+	@%p4 bra 	$L__BB10_16;
+
+$L__BB10_13:
+	setp.ge.u32 	%p10, %r24, %r23;
+	@%p10 bra 	$L__BB10_15;
+
+	add.s32 	%r19, %r23, %r24;
+	mul.wide.u32 	%rd20, %r19, 4;
+	add.s64 	%rd22, %rd12, %rd20;
+	ld.shared.f32 	%f22, [%rd3];
+	ld.shared.f32 	%f23, [%rd22];
+	add.f32 	%f24, %f23, %f22;
+	st.shared.f32 	[%rd3], %f24;
+
+$L__BB10_15:
+	bar.sync 	0;
+	shr.u32 	%r23, %r23, 1;
+	setp.ne.s32 	%p11, %r23, 0;
+	@%p11 bra 	$L__BB10_13;
+
+$L__BB10_16:
+	@%p7 bra 	$L__BB10_19;
+
+	ld.shared.f32 	%f25, [sdata];
+	cvta.to.global.u64 	%rd4, %rd5;
+	div.rn.f32 	%f26, %f25, %f4;
+	add.f32 	%f27, %f26, %f10;
+	rsqrt.approx.f32 	%f9, %f27;
+
+$L__BB10_18:
+	cvt.u64.u32 	%rd23, %r24;
+	add.s64 	%rd24, %rd2, %rd23;
+	shl.b64 	%rd25, %rd24, 1;
+	add.s64 	%rd26, %rd1, %rd25;
+	ld.global.nc.u16 	%rs3, [%rd26];
+	// begin inline asm
+	{  cvt.f32.f16 %f28, %rs3;}
+
+	// end inline asm
+	sub.f32 	%f30, %f28, %f5;
+	mul.f32 	%f29, %f9, %f30;
+	// begin inline asm
+	{  cvt.rn.f16.f32 %rs4, %f29;}
+
+	// end inline asm
+	add.s64 	%rd27, %rd4, %rd25;
+	st.global.u16 	[%rd27], %rs4;
+	add.s32 	%r24, %r24, %r6;
+	setp.lt.u32 	%p13, %r24, %r16;
+	@%p13 bra 	$L__BB10_18;
+
+$L__BB10_19:
+	ret;
+
+}
 	// .globl	dit_chw_f32_to_hwc_u8
 .visible .entry dit_chw_f32_to_hwc_u8(
 	.param .u64 dit_chw_f32_to_hwc_u8_param_0,
@@ -990,7 +1159,7 @@ $L__BB9_11:
 	mad.lo.s32 	%r1, %r6, %r5, %r7;
 	mul.lo.s32 	%r2, %r4, %r3;
 	setp.ge.u32 	%p1, %r1, %r2;
-	@%p1 bra 	$L__BB10_2;
+	@%p1 bra 	$L__BB11_2;
 
 	cvta.to.global.u64 	%rd3, %rd1;
 	mul.lo.s32 	%r8, %r1, 3;
@@ -1030,7 +1199,7 @@ $L__BB9_11:
 	add.s64 	%rd15, %rd3, %rd14;
 	st.global.u8 	[%rd15], %r12;
 
-$L__BB10_2:
+$L__BB11_2:
 	ret;
 
 }

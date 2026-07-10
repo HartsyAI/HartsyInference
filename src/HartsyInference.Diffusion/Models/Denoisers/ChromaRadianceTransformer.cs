@@ -72,10 +72,12 @@ public sealed class ChromaRadianceTransformer : IDisposable
 
         Tensor tokens = _patchifier.Forward(backend, rgb);
 
-        // ForwardCore consumes (disposes) the token tensor and returns pre-final-norm img tokens + the modulation
-        // table. Radiance never applies the final modulation rows — the NeRF head replaces final_layer entirely.
-        (Tensor imgOut, Tensor modTable) = _backbone.ForwardCore(
-            backend, tokens, encoderHidden, timestep, txtSeqLen, hPacked, wPacked, attentionMask);
+        // ForwardCore consumes (disposes) the token tensor and returns pre-final-norm img tokens. Radiance never
+        // applies the final modulation rows — the NeRF head replaces final_layer entirely — so the modulation
+        // table (now caller-built) is disposed right after the core.
+        Tensor modTable = _backbone.BuildModTable(backend, timestep, (int)rgb.Shape[0]);
+        Tensor imgOut = _backbone.ForwardCore(
+            backend, tokens, encoderHidden, modTable, txtSeqLen, hPacked, wPacked, attentionMask);
         modTable.Dispose();
 
         Tensor x0 = _nerfHead.Forward(backend, rgb, imgOut);

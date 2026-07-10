@@ -48,6 +48,10 @@ public sealed class CudaContext : IDisposable
     /// <summary>The CUDA device ordinal.</summary>
     public int DeviceOrdinal => _deviceOrdinal;
 
+    /// <summary>The CUdevice handle (from <c>cuDeviceGet</c>) — for device-scoped driver calls like
+    /// <c>cuDeviceGraphMemTrim</c>.</summary>
+    internal int DeviceHandle => _deviceHandle;
+
     /// <summary>The raw driver context handle. Used as the per-backend state key in
     /// <see cref="GpuTransferHelper"/>/<see cref="CudaMemory"/> (primary contexts: one handle per device).</summary>
     internal nint Handle => _context;

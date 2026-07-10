@@ -30,9 +30,11 @@ public class ChromaGenerationTests
 
     // GGUF Q4_K source (5.6 GB) keeps the F16 weight-cast cache (~17 GB) + quant resident under 24 GB, so the
     // FAST cached path (cast once, not per-forward) fits — fp8 (9 GB) + cache OOMs. ~3-5 min vs 40 min transient.
+    // 20 steps: enough for flow-matching to converge (a 2-step run can't judge coherence) AND for the
+    // per-generation step CUDA graph to capture (pair-call 3) and replay — the production CFG path.
     [Fact]
     public void Chroma_V1_Gpu_512_Cfg5() =>
-        RunGenerationTest("chroma_v1_1024_cfg5", width: 1024, height: 1024, steps: 2, cfgScale: 5.0f, useGguf: false);
+        RunGenerationTest("chroma_v1_1024_cfg5", width: 1024, height: 1024, steps: 20, cfgScale: 5.0f, useGguf: false);
 
     [Fact]
     public void Chroma_V1_Gpu_512_NoCfg() =>

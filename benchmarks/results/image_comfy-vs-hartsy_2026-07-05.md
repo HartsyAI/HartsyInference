@@ -779,3 +779,130 @@ audit), profile the 680ms/step split (fp8 GEMM vs glue), fused QKV.
 44.26+ with `Unsupported dtype conversion: U8 → F16` in `Flux2Loader.Load` (the Qwen3-4B TE cast loop hits a
 U8 tensor in `qwen_3_4b.safetensors`, dated May 10). The loader needs to skip/handle U8 metadata tensors
 (e.g. ComfyUI `scaled_fp8` markers). The 15.1s Klein scoreboard entry is not currently reproducible.
+
+## 2026-07-09 — Flux.2 Klein loader FIXED (U8/comfy-quant TE) + re-bench: 15.1s → **7.50s** — extension-only fix
+
+**The Klein "U8 → F16" load failure is fixed.** Root cause: `qwen_3_4b.safetensors` is a ComfyUI
+comfy-quant MIXED checkpoint (fp8 weights + `.weight_scale` scalars, some layers U8-PACKED NVFP4 with
+F8-E4M3 block scales + `.weight_scale_2` globals, plus `.comfy_quant` U8 JSON metadata blobs).
+`Flux2Loader` ran its own cast-everything-to-F16 loop over the raw dict BEFORE handing it to the encoder —
+crashing on the U8 tensors, and (worse, silently) upcasting fp8 weights before their scales were folded.
+The engine already handles ALL of this: `LlamaStyleEncoder.LoadWeights` runs
+`TextEncoderQuantNormalizer.Normalize` (fp8 scales → `Fp8ScaleFactor` with weights kept PACKED on the
+native fp8 GEMM path; NVFP4 dequant via block-scale companions; metadata blobs dropped). Fix = delete the
+loader's manual cast loop and pass the raw dict through. **Rule: never pre-cast a text-encoder weight dict
+in a loader — the encoder's normalizer owns quant handling.**
+
+Re-bench @1024²/10 steps (pinned, GPU-quiet): warm **7.50s** (7.50/7.56/7.48), cold **10.1s** (was 46s at
+first bench), peak 13.2 GB. The 15.1s → 7.50s is the accumulated fleet inheritance since 44.15 (Lt bias
+epilogue, cuDNN conv, VAE fixes) + the TE's packed-fp8 GEMMs. Coherent ✓ viewed (sharp on-prompt
+lighthouse). No ComfyUI baseline exists for Klein yet (not wired on the Comfy backend) — still a
+Hartsy-only number.
+
+### Klein addendum — the "blurry artifacts" were a PARAMETER bug: this is the step-DISTILLED variant (4 steps, not 10)
+
+The oily/over-sharpened texture on Klein outputs (smudged skies, crunchy grain) was over-stepping:
+`flux-2-klein-4b` (no "base" in the name) is the step-distilled Klein — official settings are **exactly
+4 steps, CFG 1.0-1.5, Euler/Simple**; more steps "breaks the image math" (ComfyUI docs / community guides).
+Every bench since the first (44.15's 15.1s, today's 7.50s) ran 10 steps. At the official 4 steps the same
+seeds render clean and photographic (viewed A/B, seed 424242 + bench seeds). Base-variant Klein checkpoints
+(`flux-2-klein-base-*`) want 20-24 steps + CFG 3.5-5 instead — note our pipeline's Flux.2 loop is g=1
+(guidance-embedded); true-CFG for a base checkpoint would need the dual-pass path.
+
+**Corrected scoreboard number: warm 3.45s @1024²/4 steps** (3.44/3.45/3.52, pinned, GPU-quiet), peak
+13.0 GB. `benchmarks/swarm_image_bench/models.json` now carries the Klein entry at 4 steps.
+
+## 2026-07-09 — Chroma round 3 OPENED: profile attribution + step-invariant mask cache: 63.2s → **61.1s** — engine `alpha.44.29-local`
+
+Serialized profile (the round-3 "profile first"): per warm gen ≈ **Linear 12.4s** (17.5k calls — real fp8
+GEMM work) / **SDPA 6.8s** (2.96ms/call — the F32→F16 CAST route, not zero-cast) / **F32 glue kernels ~6.3s**
+(Permute/Gelu/RmsNorm/LNNoAffine/GatedResidual/Rope) / **H2D_MISS_BIG 642/gen ~1.5s**. Serialized GPU ≈ 27s
+vs 63s wall → a large host-issue tail over ~60k ops/gen.
+
+Lever 1 landed: the fused-SDPA bias mask ([1,1,4608,4608] F32, 85 MB) was HOST-REBUILT (21M-iteration loop)
++ re-uploaded EVERY forward (40×/gen) — now cached per (mask ref, seqLen), two slots for the alternating
+CFG branches (the AuraFlow/ERNIE pattern). 63.2 → **61.1s** (61.09/62.60/60.20), coherent ✓ viewed.
+
+**The remaining round-3 levers are the big ones (next session-scale arc):** (1) `HARTSY_DIT_F16` port for
+ChromaDouble/SingleBlocks — halves the ~6.3s F32 glue traffic AND makes all 57 SDPAs zero-cast native-F16
+(6.8 → ~4s) AND halves activation alloc churn (overflow audit + sandwich-damp per the Z-Image/Ideogram
+recipe); (2) per-gen step CUDA graph (the loop is already drain-free) to erase the ~30s host-issue tail —
+the largest single component; (3) Lt algo tuning / fused QKV on the fp8 GEMMs.
+
+## 2026-07-09 — Chroma round 3 EXECUTED: F16 blocks + persistent CFG-pair CUDA graph + context trim: 61.1s → **28.3s** — engine `alpha.44.30–44.32-local`
+
+All three round-3 levers landed in one arc, plus two the profile surfaced along the way. Warm median
+**28.35s** (28.35/28.42/28.34, @1024²/20 steps/cfg 4, peak 23.5 GB), Comfy 16.6s → gap 3.7× → **1.7×**.
+Coherent verified twice (local 20-step CFG-5 seed-42 BMP + Swarm bench PNG, both viewed).
+
+1. **F16 block loop — exact residual damp, no sandwich norm needed** (`ChromaF16.cs`). Chroma is
+   Flux-family: the F16 killer is residual-stream growth, and unlike Z-Image there is no sandwich norm to
+   damp against. Instead the WHOLE residual stream rides at 1/32: damp x_embedder + context_embedder and
+   every branch-output projection (attn.to_out.0, to_add_out, ff*.net.2, single proj_out). Every branch
+   INPUT passes through the scale-invariant no-affine LayerNorm (sees baseline values); the final
+   no-affine LN cancels the factor exactly before proj_out — the velocity is unchanged in real arithmetic,
+   and 1/32 is a power of two so F16 loses zero relative precision. Weights damp via `Fp8ScaleFactor`
+   (GEMM alpha, any dtype); biases need value-scaled copies (the epilogue adds bias after alpha). New
+   `dit_layernorm_noaffine_f16` kernel (NVRTC recipe: pass `~/.local/lib/cuda13/include` as the include
+   dir for `cuda_fp16.h`). All 57 SDPAs now ride the zero-cast F16 cuDNN fused engine.
+2. **Persistent cross-generation step graph of the WHOLE CFG pair** (approximator → cond forward → uncond
+   forward), replayed as one `cuGraphLaunch`/step at 6ms host issue. `HARTSY_DIT_GRAPH` became tri-state:
+   default ON for Chroma (`DitStepGraph.EnabledDefaultOn`), still opt-in for Z-Image/Krea2 (wall-neutral
+   there), `=0` kills everywhere. Chroma's pipeline never calls FreeActivations, so the graph SURVIVES
+   across generations — repeat-prompt gens replay all 20 steps with zero re-warm/re-capture (exactly ONE
+   capture across the bench's 4 gens). Safety net: `CudaBackend.FreeActivations`/`FreeAllDeviceMemory` now
+   reset the graph slot themselves (the VAE full-res OOM fallback calls FreeActivations — was a latent
+   poisoning CUDA 700), and the transformer re-warms when it finds the slot externally reset.
+3. **Context TRIM replaces the SDPA mask.** Chroma keeps text positions `i <= text_len` — so SLICE the T5
+   context to `text_len+1` rows instead of computing 512 padded tokens and masking them out of every
+   attention. Exact (dropped tokens can't influence kept outputs; verified: seed-42 composition matches
+   the untrimmed run), bench prompts trim to 29/2 kept tokens: −11% joint-seq GEMM, −20% attention score
+   work, the 85 MB additive mask (and round 3's two-slot mask cache) disappear entirely, and cuDNN runs
+   its mask-free fused engine.
+4. **Profile finds:** `ChromaApproximator` ran a HOST RmsNorm loop reading the device hidden's DataPointer
+   (5 pipeline drains per table build + a capture invalidator) → `backend.RmsNorm`; `FluxRope.Precompute`
+   rebuilt host tables + re-expanded + re-uploaded the GPU cos/sin tables EVERY forward → two-slot rope
+   cache keyed (txtSeqLen, grid). ForwardPaired also builds the modulation table ONCE per step (was twice).
+5. **THE eviction bug (44.32): `cuDeviceGraphMemTrim`.** Memory allocated by captured allocation nodes
+   lives in a per-device GRAPH pool that `cuGraphExecDestroy` does NOT release and `cuMemPoolTrimTo` never
+   touches. The destroyed Chroma pair-graph kept its multi-GB working set reserved through model eviction
+   and OOM'd the next model's load (Krea2, 88 MB free). `StepGraphReset` now syncs + trims the graph pool
+   whenever it destroys a captured graph. This was invisible until now because no default-on graph model
+   existed.
+
+**Flagship regression (same session, 44.32):** Z-Image-Turbo **2.76s** ✓ (≤3.2 gate), Krea2-Turbo re-run
+after the graph-mem fix (was the OOM victim) — see results json.
+
+**Remaining gap (~1.7×) is GPU math, not host:** replay pair ≈ 1.3s; the fp8 Linears already run ~200
+TFLOPS effective (≈ Comfy parity per token) and SDPA is fused. Next levers, in order: **batched CFG**
+(B=2 in one forward — Comfy's remaining structural edge; needs the B==1-gated device paths widened),
+cuBLASLt algo tuning, F16/BF16 VAE + device tail. Fused QKV is OFF the table for fp8-scaled checkpoints:
+q/k/v carry different per-tensor weight_scales — one GEMM alpha can't represent them without lossy requant.
+
+### Round-3 addendum (44.33–44.35): the step-graph driver-cache OOM — diagnosed and fixed
+
+The first Krea2-after-Chroma bench OOM'd (88 MB free at its VAE decode). Instrumented eviction +
+a standalone real-pipeline harness pinned it: after a session that captured a step graph, destroying the
+graph leaves **~4.5 GB of driver-side lazily-reclaimable cache** that is reported as USED by
+`cuMemGetInfo`, is NOT in the graph pool (`cuDeviceGetGraphMemAttribute` reads 0 used/0 reserved), and is
+returned by neither `cuMemPoolTrimTo` nor `cuDeviceGraphMemTrim`. Capture-window accounting proved the
+graph itself is balanced (7117 allocs = 7117 frees, ~90 GB round-tripped, zero outstanding); the size is
+constant regardless of replay count. The driver releases this cache ONLY under **synchronous** allocation
+pressure: a probing `cuMemAlloc` of the needed size succeeds and un-hides the memory, while stream-ordered
+pool growth (`cuMemAllocAsync`) just fails.
+
+**Fix (44.35):** `CudaMemory.AllocateAsync`'s OOM retry now probe-allocates the requested size with
+`cuMemAlloc`, frees the probe, and retries the async alloc — self-healing wherever the pressure appears
+(verified in the harness: pool growth 63 MB free → probe → 4.9 GB free → 17×1 GB async allocs succeed).
+Plus defense-in-depth: `FreeActivations`/`FreeAllDeviceMemory` reset the step-graph slot (a captured graph's
+baked pointers die with the activations — the VAE full-res OOM-fallback path was a latent poisoning
+CUDA 700), the transformer re-warms when it finds the slot externally reset, and `StepGraphReset`
+graph-mem-trims after destroying a captured graph. A capture-window alloc/free tracker logs one line per
+capture — OUTSTANDING > 0 there means a tensor created inside the captured region is never disposed, i.e.
+a permanent per-graph leak.
+
+**Final 44.35 deploy verification (fleet bench, sequential Z-Image → Chroma → Krea2 on one backend):**
+Z-Image-Turbo **2.76s** ✓ (gate ≤3.2) · Chroma1-HD **28.5s** median (28.54/28.51/28.54, peak 23.5 GB, ONE
+graph capture across all gens — cross-gen persistence confirmed) · Krea2-Turbo **4.52s** ✓ (gate <6.5),
+loading AFTER the Chroma graph session — the sync-probe reclaim fired at its VAE decode
+(92 MB free → 4.8 GB free) exactly where the OOM used to be. All three outputs viewed, coherent.

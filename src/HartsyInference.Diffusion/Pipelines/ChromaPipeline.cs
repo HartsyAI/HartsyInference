@@ -149,13 +149,13 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         bool uncondHit = !useCfg || (_cachedUncond is not null
             && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5));
         Tensor condContext;
-        Tensor condMask;
+        Tensor? condMask;
         Tensor? uncondContext = null;
         Tensor? uncondMask = null;
         if (condHit && uncondHit)
         {
             condContext = _cachedCond!;
-            condMask = _cachedCondMask!;
+            condMask = _cachedCondMask;
             if (useCfg)
             {
                 uncondContext = _cachedUncond;
@@ -169,7 +169,9 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             if (_ditResident)
             {
                 // The T5 cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
-                // new-prompt generation and re-preload below.
+                // new-prompt generation and re-preload below. The cross-generation step graph bakes the
+                // WEIGHT device pointers — invalidate before the free or a later replay is a CUDA 700.
+                _transformer.InvalidateStepGraph(Backend);
                 Backend.Sync();
                 Backend.FreeWeights(_transformer.EnumerateWeights());
                 _ditResident = false;
@@ -190,26 +192,44 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
             }
 
-            // Build the [B, txtSeqLen] transformer-side mask:
-            //   m[i] = 1.0  if  i <= text_len   (i.e., all real tokens PLUS one extra unmasked padding slot)
-            //   m[i] = 0.0  otherwise
-            // Mirrors pipeline_chroma.py:249-252. text_len = sum(tokenizer_mask).
-            condMask = BuildChromaTextMask(promptAttentionMaskT5, batchSize: 1);
-            uncondMask = useCfg ? BuildChromaTextMask(negativeAttentionMaskT5, batchSize: 1) : null;
+            // Trim the padded context to Chroma's kept tokens instead of masking. Chroma's transformer-side
+            // rule (pipeline_chroma.py:249-252) keeps positions i <= text_len — all real tokens plus exactly
+            // one unmasked padding slot — and masks the rest OUT of every attention. Masked-out tokens
+            // contribute nothing to any kept token (and only kept image tokens reach the output), so slicing
+            // them off is EXACT while shrinking every joint-sequence GEMM and making all 57 SDPAs mask-free
+            // (~500 dead tokens of a 512-pad prompt at 1024²: ~10% of the joint sequence, ~20% of the
+            // attention score work, and the 85 MB additive mask disappears). A prompt that fills the full
+            // window trims nothing and still runs unmasked — all positions are kept either way.
+            condContext = TrimContextToKeptTokens(condContext, promptAttentionMaskT5);
+            if (uncondContext is not null)
+                uncondContext = TrimContextToKeptTokens(uncondContext, negativeAttentionMaskT5);
+            condMask = null;
+            uncondMask = null;
 
-            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms " +
+                $"(context trimmed to {condContext.Shape[1]}/{uncondContext?.Shape[1].ToString() ?? "-"} kept tokens)");
 
-            // Materialize the conditioning on the host so it survives activation reclaims, then cache.
+            // The conditioning is host-materialized (the trim reads it) so it survives activation reclaims;
+            // cache it. Eviction FreeWeights first: the step-graph warm-up pins the cached contexts
+            // device-resident (no-op when they were never pinned — the Z-Image cached-caption pattern).
             _ = condContext.DataPointer;
             if (uncondContext is not null) _ = uncondContext.DataPointer;
-            _cachedCond?.Dispose();
+            if (_cachedCond is not null)
+            {
+                Backend.FreeWeights(new[] { _cachedCond });
+                _cachedCond.Dispose();
+            }
             _cachedCondMask?.Dispose();
             _cachedCond = condContext;
             _cachedCondMask = condMask;
             _cachedCondKey = (int[])promptTokenIdsT5.Clone();
             if (useCfg)
             {
-                _cachedUncond?.Dispose();
+                if (_cachedUncond is not null)
+                {
+                    Backend.FreeWeights(new[] { _cachedUncond });
+                    _cachedUncond.Dispose();
+                }
                 _cachedUncondMask?.Dispose();
                 _cachedUncond = uncondContext;
                 _cachedUncondMask = uncondMask;
@@ -258,13 +278,26 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         Logs.Info("Starting Chroma denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int txtSeqLen = (int)condContext.Shape[1];
-        int uncondTxtSeqLen = uncondContext is not null ? (int)uncondContext.Shape[1] : 0;
 
         // Drain-free fast path (plain t2i / img2img): the latent stays device-resident across the whole loop
         // and CFG combine + Euler run as ONE in-place device op (CfgEulerStep: uncond-anchored CFG then
         // z += v·dt; gw=1 degenerates to the plain Euler step). Masked inpaint keeps the host branch — it
-        // must read/rebuild the latent on the host every step.
+        // must read/rebuild the latent on the host every step. The CFG pair runs through ForwardPaired
+        // (one modulation-table build per step, and — default-on — the per-generation step CUDA graph).
         bool drainFree = !isMaskedInpaint;
+
+        // Step-graph mode: route the latent through the transformer's FIXED buffer so the captured graph's
+        // baked address stays valid across steps (CfgEulerStep updates it in place at the same address).
+        // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read directly —
+        // previews and the final unpack go through SnapshotGraphLatent.
+        bool graphMode = drainFree
+            && Models.Denoisers.DiTBlocks.DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
+        if (graphMode)
+        {
+            Tensor routed = _transformer.PrepareGraphLatent(Backend, packedLatent);
+            packedLatent.Dispose();
+            packedLatent = routed;
+        }
 
         for (int i = startStep; i < steps; i++)
         {
@@ -273,20 +306,22 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
 
             if (drainFree)
             {
-                Tensor condNoise = _transformer.Forward(Backend, packedLatent, condContext, sigma,
-                    txtSeqLen, hPacked, wPacked, condMask);
+                (Tensor condNoise, Tensor? uncondNoise, bool callerOwns) = _transformer.ForwardPaired(
+                    Backend, packedLatent, condContext, useCfg ? uncondContext : null, sigma,
+                    hPacked, wPacked, condMask, useCfg ? uncondMask : null);
                 if (useCfg)
                 {
-                    Tensor uncondNoise = _transformer.Forward(Backend, packedLatent, uncondContext!, sigma,
-                        uncondTxtSeqLen, hPacked, wPacked, uncondMask);
-                    Backend.CfgEulerStep(packedLatent, condNoise, uncondNoise, cfgScale, scheduler.Dt(i));
-                    uncondNoise.Dispose();
+                    Backend.CfgEulerStep(packedLatent, condNoise, uncondNoise!, cfgScale, scheduler.Dt(i));
                 }
                 else
                 {
                     Backend.CfgEulerStep(packedLatent, condNoise, condNoise, 1.0f, scheduler.Dt(i));
                 }
-                condNoise.Dispose();
+                if (callerOwns)
+                {
+                    condNoise.Dispose();
+                    uncondNoise?.Dispose();
+                }
             }
             else
             {
@@ -295,7 +330,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             {
                 noisePred = ClassifierFreeGuidanceStep(packedLatent, sigma,
                     condContext, condMask,
-                    uncondContext!, uncondMask!,
+                    uncondContext!, uncondMask,
                     txtSeqLen, hPacked, wPacked, cfgScale);
             }
             else
@@ -338,10 +373,18 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             // Same packed layout as Flux.1 (Chroma reuses the Flux VAE). Unpack inline so preview renders.
             // On the drain-free path the unpack reads the device-resident latent (a D2H sync per frame), so
             // previews emit every 4th step + final instead of every step; the host path keeps every step.
-            bool emitPreview = onProgress is not null && (!drainFree || (i - startStep) % 4 == 3 || i == steps - 1);
+            // Drain-free previews: every 4th step, but NOT the final step — the finished image follows
+            // immediately, and the final-step latent preview would add a redundant full drain + D2H +
+            // convert right before the end-of-loop snapshot does the same work.
+            bool emitPreview = onProgress is not null
+                && (!drainFree || ((i - startStep) % 4 == 3 && i != steps - 1));
             if (emitPreview)
             {
-                Tensor previewLatent = LatentPreview.UnpackFluxStylePacked(packedLatent, latentH, latentW, channels: 16);
+                // Graph mode: never read the fixed latent's DataPointer (D2H would evict the buffer the
+                // captured graph points at) — preview from a device-copied snapshot instead.
+                Tensor previewSource = graphMode ? _transformer.SnapshotGraphLatent(Backend) : packedLatent;
+                Tensor previewLatent = LatentPreview.UnpackFluxStylePacked(previewSource, latentH, latentW, channels: 16);
+                if (graphMode) previewSource.Dispose();
                 try
                 {
                     onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -362,6 +405,16 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
 
+        // Graph mode: swap the transformer-owned fixed latent for a disposable device snapshot. The captured
+        // graph itself PERSISTS across generations — this pipeline never calls FreeActivations, so the fixed
+        // boundary buffers stay live and a repeat-prompt generation replays every step with zero re-warm /
+        // re-capture cost. Anything that frees the baked pointers invalidates first: the two DiT
+        // FreeWeights sites above, and PrepareGraphLatent on a resolution change.
+        if (graphMode)
+        {
+            packedLatent = _transformer.SnapshotGraphLatent(Backend);
+        }
+
         ChromaTransformer.DumpFinalLatent(packedLatent);
 
         // Free transformer + T5 weights from GPU before VAE decode (mirrors SD3/Flux/AuraFlow pattern).
@@ -370,6 +423,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         Backend.Sync();
         if (!KeepModelsResident)
         {
+            _transformer.InvalidateStepGraph(Backend);
             Backend.FreeWeights(_transformer.EnumerateWeights());
             _ditResident = false;
         }
@@ -458,8 +512,8 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     /// <summary>Runs classifier-free guidance with Chroma's cond-anchored convention: <c>noise_pred = cond + cfg_scale * (cond - uncond)</c>. Chroma does real dual-pass CFG against a negative prompt; only the combine baseline differs from the standard formula.</summary>
     private Tensor ClassifierFreeGuidanceStep(
         Tensor packedLatent, float sigma,
-        Tensor condContext, Tensor condMask,
-        Tensor uncondContext, Tensor uncondMask,
+        Tensor condContext, Tensor? condMask,
+        Tensor uncondContext, Tensor? uncondMask,
         int txtSeqLen, int hPacked, int wPacked, float cfgScale)
     {
         // Note: the negative prompt may have a different sequence length from the positive prompt; the
@@ -482,6 +536,29 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         uncondNoise.Dispose();
         condNoise.Dispose();
         return output;
+    }
+
+    /// <summary>Slices the encoded [1, seqLen, hidden] T5 context down to Chroma's kept tokens
+    /// (<c>text_len + 1</c>: all real tokens plus the one unmasked padding slot). Exact — the dropped rows are
+    /// masked out of every attention by the transformer-side rule, so they can never influence the output.
+    /// Consumes (disposes) the input when a trim happens; the read also host-materializes the result.</summary>
+    private static Tensor TrimContextToKeptTokens(Tensor context, int[] tokenizerMask)
+    {
+        int seqLen = (int)context.Shape[1];
+        int hidden = (int)context.Shape[2];
+        int textLen = 0;
+        for (int i = 0; i < tokenizerMask.Length; i++) if (tokenizerMask[i] != 0) textLen++;
+        int kept = Math.Min(textLen + 1, seqLen);
+        if (kept == seqLen)
+        {
+            _ = context.DataPointer;
+            return context;
+        }
+        Tensor trimmed = new Tensor(new TensorShape(1, kept, hidden), DType.F32);
+        long bytes = (long)kept * hidden * sizeof(float);
+        Buffer.MemoryCopy((void*)context.DataPointer, (void*)trimmed.DataPointer, bytes, bytes);
+        context.Dispose();
+        return trimmed;
     }
 
     /// <summary>Builds Chroma's transformer-side text mask. Per pipeline_chroma.py:249-252, the mask used inside

@@ -17,13 +17,13 @@ Authoritative living copies: [`docs/PERFORMANCE.md`](../PERFORMANCE.md) §5 and
 | Krea2-Turbo (8 st) | **4.48 s** | 6.5 s | Faster than Comfy |
 | Boogu-Turbo (4 st) | 3.26 s | 2.54 s | 1.28× (round 2 `44.22-local`: 48.9→5.05→3.26; D=120 cuDNN fused + packed loop) |
 | Flux-Schnell (4 st) | 10.5 s | — | first bench |
-| Flux.2 Klein 4B (10 st) | 15.1 s | — | first bench (residency port round) |
+| Flux.2 Klein 4B (4 st) | **3.45 s** | — | loader FIXED 07-09 (comfy-quant mixed TE: never pre-cast encoder dicts) + params corrected: DISTILLED variant = 4 steps/CFG 1 official; 10-step runs over-stepped it → crunchy artifacts (was benched 10 st since 44.15) |
 | Ideogram4 (20 st) | 19.5 s | 17.0 s | 1.15× |
 | **ERNIE (20 st)** | **20.0 s** | 23.9 s | **Faster than Comfy** (round 1: 49.6→20.0, seed-777 A/B clean) |
 | Flux-Dev (20 st) | 31.0 s | 12.5 s | grind in progress (was 72.4) |
 | Qwen-Image (20 st) | **40.9 s** | 54.8 s | Faster than Comfy |
 | Boogu-Base (20 st, cfg 4) | 26.5 s | 17.8 s | 1.49× (round 2: ~6 min→43.2→26.5) |
-| Chroma1-HD (20 st) | 63.2 s | 16.6 s | grind in progress (was 550) |
+| Chroma1-HD (20 st) | 28.5 s | 16.6 s | round 3 executed: F16 blocks + persistent CFG-pair CUDA graph + context trim (was 550 → 61.1 → 28.3); batched CFG queued |
 | AuraFlow (20 st) | **13.93 s** | 14.0 s | Tied with Comfy (round 1 `44.28-local`: 31.4→13.93; packed token-space loop + recipe; NOTE proj_out emits (py,px,c) tokens ≠ patchify's (c,py,px) — velocity must be permuted for token-space Euler) |
 
 ## Verified end-to-end (✅)
