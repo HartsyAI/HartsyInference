@@ -43,10 +43,11 @@ internal sealed class CudnnConv : IDisposable
     /// <paramref name="dataType"/> (CUDNN_DATA_HALF / CUDNN_DATA_BFLOAT16), contiguous NCHW.</summary>
     public unsafe void Execute(ulong x, ulong w, ulong y,
         long n, long c, long h, long wIn, long k, long r, long s,
-        long outH, long outW, long strideH, long strideW, long padH, long padW, int dataType)
+        long outH, long outW, long strideH, long strideW, long padH, long padW, int dataType,
+        long dilationH = 1, long dilationW = 1)
     {
-        string key = $"{n},{c},{h},{wIn}|{k},{r},{s}|{strideH},{strideW},{padH},{padW}|{dataType}";
-        Plan plan = _plans.GetOrAdd(key, _ => BuildPlan(n, c, h, wIn, k, r, s, outH, outW, strideH, strideW, padH, padW, dataType));
+        string key = $"{n},{c},{h},{wIn}|{k},{r},{s}|{strideH},{strideW},{padH},{padW}|{dilationH},{dilationW}|{dataType}";
+        Plan plan = _plans.GetOrAdd(key, _ => BuildPlan(n, c, h, wIn, k, r, s, outH, outW, strideH, strideW, padH, padW, dataType, dilationH, dilationW));
 
         nint vp = 0;
         try
@@ -68,7 +69,8 @@ internal sealed class CudnnConv : IDisposable
     }
 
     private unsafe Plan BuildPlan(long n, long c, long h, long wIn, long k, long r, long s,
-        long outH, long outW, long strideH, long strideW, long padH, long padW, int dataType)
+        long outH, long outW, long strideH, long strideW, long padH, long padW, int dataType,
+        long dilationH = 1, long dilationW = 1)
     {
         List<nint> owned = new();
         try
@@ -91,7 +93,7 @@ internal sealed class CudnnConv : IDisposable
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_COMP_TYPE, CUDNN_TYPE_DATA_TYPE, 1, &comp);
             int mode = CUDNN_CROSS_CORRELATION;
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_CONV_MODE, CUDNN_TYPE_CONVOLUTION_MODE, 1, &mode);
-            long* dil = stackalloc long[2] { 1, 1 };
+            long* dil = stackalloc long[2] { dilationH, dilationW };
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_DILATIONS, CUDNN_TYPE_INT64, 2, dil);
             long* strides = stackalloc long[2] { strideH, strideW };
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64, 2, strides);

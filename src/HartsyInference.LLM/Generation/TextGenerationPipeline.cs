@@ -45,7 +45,11 @@ public sealed class TextGenerationPipeline
 
         // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation.
         int maxSeq = promptIds.Length + request.MaxTokens + 1;
-        using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDim, maxSeq);
+        // Gemma-4: local/SWA layers use a narrower head dim than global layers (HeadDimFor); every other
+        // architecture's HeadDimFor is just the uniform HeadDim, so this is a no-op for them.
+        int[] headDimPerLayer = new int[cfg.NumLayers];
+        for (int i = 0; i < cfg.NumLayers; i++) headDimPerLayer[i] = cfg.HeadDimFor(i);
+        using FixedKvCache cache = new(cfg.NumLayers, 1, cfg.NumKvHeads, headDimPerLayer, maxSeq);
 
         bool stopped = false;
         int next;

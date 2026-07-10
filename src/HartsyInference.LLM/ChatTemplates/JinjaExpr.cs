@@ -225,6 +225,13 @@ internal sealed class BinaryExpr(string op, Expr left, Expr right) : Expr
     }
 }
 
+/// <summary>Unary <c>-x</c> — negates a numeric operand (long, matching <see cref="BinaryExpr"/>'s integer
+/// arithmetic; every Jinja number literal here is a long).</summary>
+internal sealed class UnaryMinusExpr(Expr operand) : Expr
+{
+    public override object? Eval(JinjaEngine.Scope scope) => -(long)Values.ToD(operand.Eval(scope));
+}
+
 internal sealed class TernaryExpr(Expr cond, Expr ifTrue, Expr ifFalse) : Expr
 {
     public override object? Eval(JinjaEngine.Scope scope) => Values.Truthy(cond.Eval(scope)) ? ifTrue.Eval(scope) : ifFalse.Eval(scope);
@@ -314,6 +321,19 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
                 case "strftime_now":
                     // Date-string helper used in some default system prompts; value is not load-bearing.
                     return "01 Jan 2025";
+                case "range":
+                {
+                    // Python/Jinja range(stop) / range(start, stop) / range(start, stop, step) — Gemma-4's chat
+                    // template walks message history backwards via range(idx-1, -1, -1).
+                    long start = 0, step = 1;
+                    long stop = (long)Values.ToD(args[0].Eval(scope));
+                    if (args.Count >= 2) { start = stop; stop = (long)Values.ToD(args[1].Eval(scope)); }
+                    if (args.Count >= 3) step = (long)Values.ToD(args[2].Eval(scope));
+                    List<object?> result = [];
+                    if (step > 0) for (long x = start; x < stop; x += step) result.Add(x);
+                    else if (step < 0) for (long x = start; x > stop; x += step) result.Add(x);
+                    return result;
+                }
             }
         }
         throw new NotSupportedException("Unsupported Jinja call expression.");
@@ -416,16 +436,26 @@ internal static class ExprParser
     /// (modulo — used by chat templates like Gemma's <c>loop.index0 % 2</c>). <c>//</c> is tried before <c>/</c>.</summary>
     private static Expr ParseMulDiv(Tokenizer t)
     {
-        Expr e = ParsePostfix(t);
+        Expr e = ParseUnary(t);
         while (true)
         {
-            if (t.TrySymbol("*")) e = new BinaryExpr("*", e, ParsePostfix(t));
-            else if (t.TrySymbol("//")) e = new BinaryExpr("//", e, ParsePostfix(t));
-            else if (t.TrySymbol("/")) e = new BinaryExpr("/", e, ParsePostfix(t));
-            else if (t.TrySymbol("%")) e = new BinaryExpr("%", e, ParsePostfix(t));
+            if (t.TrySymbol("*")) e = new BinaryExpr("*", e, ParseUnary(t));
+            else if (t.TrySymbol("//")) e = new BinaryExpr("//", e, ParseUnary(t));
+            else if (t.TrySymbol("/")) e = new BinaryExpr("/", e, ParseUnary(t));
+            else if (t.TrySymbol("%")) e = new BinaryExpr("%", e, ParseUnary(t));
             else break;
         }
         return e;
+    }
+
+    /// <summary>Unary <c>-</c>/<c>+</c> (e.g. a literal <c>-1</c> arg to <c>range(x, -1, -1)</c> — a real
+    /// construct in Gemma-4's tool-calling chat template). Binds tighter than <c>*</c>/<c>/</c>, matching
+    /// Python/Jinja precedence; right-recursive so <c>--x</c> parses (harmless, just unusual).</summary>
+    private static Expr ParseUnary(Tokenizer t)
+    {
+        if (t.TrySymbol("-")) return new UnaryMinusExpr(ParseUnary(t));
+        if (t.TrySymbol("+")) return ParseUnary(t);
+        return ParsePostfix(t);
     }
 
     private static Expr ParsePostfix(Tokenizer t)
@@ -533,6 +563,9 @@ internal sealed class IsTestExpr(Expr target, string test, bool negated) : Expr
             "string" => target.Eval(scope) is string,
             "mapping" => target.Eval(scope) is Dictionary<string, object?>,
             "iterable" => target.Eval(scope) is System.Collections.IEnumerable,
+            // Python/Jinja "sequence": ordered, indexable — lists and strings, but not dicts (mappings aren't
+            // sequences even though they're iterable). Gemma-4's template checks content is sequence/is string.
+            "sequence" => target.Eval(scope) is List<object?> or string,
             "number" => Values.IsNum(target.Eval(scope)),
             _ => throw new NotSupportedException($"Jinja 'is {test}' test"),
         };

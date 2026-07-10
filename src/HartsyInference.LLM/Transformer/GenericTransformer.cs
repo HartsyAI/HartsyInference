@@ -35,6 +35,9 @@ public sealed unsafe class GenericTransformer : IDisposable
     // request MaxTokens is normally stable across a session).
     private Tensor? _graphDecodeCos, _graphDecodeSin;
     private int _graphDecodeCapacity;
+    // Gemma-4 per-layer embeddings (PLE): a top-level small embedding table + projection, shared across every
+    // layer (each layer additionally has its own gate/proj/post-norm — see Layer). Null when PerLayerEmbeddingDim=0.
+    private Tensor? _perLayerTokEmbd, _perLayerModelProj, _perLayerProjNorm;
 
     /// <summary>The architecture this transformer was built for.</summary>
     public TransformerConfig Config => _cfg;
@@ -143,6 +146,12 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
         _finalNorm = LoadNorm(w[$"{prefix}.norm.weight"], _cfg.RmsNormAddOne);
         if (_cfg.UseLayerNorm) _finalNormBias = LoadBiasOrZero(w, $"{prefix}.norm.bias", _cfg.HiddenSize);
+        if (_cfg.PerLayerEmbeddingDim > 0)
+        {
+            _perLayerTokEmbd = EnsureF32(w[$"{prefix}.per_layer_token_embd.weight"]);
+            _perLayerModelProj = w[$"{prefix}.per_layer_model_proj.weight"];
+            _perLayerProjNorm = LoadNorm(w[$"{prefix}.per_layer_proj_norm.weight"], addOne: false);
+        }
         for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(w, $"{prefix}.layers.{i}", i);
         // lm_head stays in its loaded dtype (quant kept for the dequant/fused matmul path); the matmul backend
         // handles quantized weights. Only the embed table is forced to F32 (host gather).
@@ -178,6 +187,10 @@ public sealed unsafe class GenericTransformer : IDisposable
         if (_embedNorm is not null) { yield return _embedNorm; yield return _embedNormBias!; }
         if (_finalNorm is not null) yield return _finalNorm;
         if (_finalNormBias is not null) yield return _finalNormBias;
+        // _perLayerTokEmbd is gathered host-side (ComputePerLayerInputs), like _embed — never uploaded. It can be
+        // huge (Gemma-4 E2B: [8960, 262144] — 6x wider than the main embed table) so skipping the GPU upload
+        // matters, not just style: forcing it resident nearly OOM'd a 12GB card on a 2GB checkpoint.
+        if (_perLayerModelProj is not null) { yield return _perLayerModelProj; yield return _perLayerProjNorm!; }
         if (_lmHead is not null) yield return _lmHead;
         foreach (Layer l in _layers)
             foreach (Tensor t in l.EnumerateWeights()) yield return t;
@@ -191,7 +204,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         int t = tokenIds.Length;
         Tensor embeds = new(new TensorShape(1, t, _cfg.HiddenSize), DType.F32);
         EmbedLookup(embeds, tokenIds);
-        Tensor output = ForwardEmbeds(backend, embeds, t, posStart, cache);
+        Tensor output = ForwardEmbeds(backend, embeds, t, posStart, cache, tokenIds: tokenIds);
         embeds.Dispose();
         return output;
     }
@@ -199,10 +212,13 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary>Embedding-in path. Runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack)
     /// and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/>
     /// is true (else the raw last-layer hidden). <paramref name="posStart"/> = <see cref="IKvCache.CurrentLength"/>.
-    /// The cache advances once per call (after the layers run), matching the reference decoder.</summary>
+    /// The cache advances once per call (after the layers run), matching the reference decoder.
+    /// <paramref name="tokenIds"/> is required (throws otherwise) when <see cref="TransformerConfig.PerLayerEmbeddingDim"/>
+    /// is set (Gemma-4): its per-layer embedding mixing needs the actual token ids, not just their embedding —
+    /// every other architecture ignores it.</summary>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null,
-        Tensor? crossStates = null, int crossLen = 0)
+        Tensor? crossStates = null, int crossLen = 0, ReadOnlySpan<int> tokenIds = default)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;
@@ -232,13 +248,16 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor cos = new(new TensorShape(1, t, ropeTableDim), DType.F32);
         Tensor sin = new(new TensorShape(1, t, ropeTableDim), DType.F32);
         BuildRope(cos, sin, t, posStart, ropeTableDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
-        // Gemma-3 dual-RoPE: local (sliding-window) layers use a smaller base frequency. Built once, reused.
+        // Gemma-3 dual-RoPE: local (sliding-window) layers use a smaller base frequency. Gemma-4 additionally
+        // narrows the local head dimension itself (HeadDimSwa) — not just the RoPE base. Built once, reused.
         Tensor? cosLocal = null, sinLocal = null;
         if (_cfg.RopeLocalTheta > 0)
         {
-            cosLocal = new(new TensorShape(1, t, d), DType.F32);
-            sinLocal = new(new TensorShape(1, t, d), DType.F32);
-            BuildRope(cosLocal, sinLocal, t, posStart, d, _cfg.RotaryDim, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+            int dLocal = _cfg.HeadDimSwa > 0 ? _cfg.HeadDimSwa : d;
+            int rotaryLocal = _cfg.HeadDimSwa > 0 ? _cfg.RotaryDimSwa : _cfg.RotaryDim;
+            cosLocal = new(new TensorShape(1, t, dLocal), DType.F32);
+            sinLocal = new(new TensorShape(1, t, dLocal), DType.F32);
+            BuildRope(cosLocal, sinLocal, t, posStart, dLocal, rotaryLocal, _cfg.RopeLocalTheta, _cfg.RopeScaling);
         }
 
         // BLOOM applies a LayerNorm to the token embeddings before the first block.
@@ -249,6 +268,16 @@ public sealed unsafe class GenericTransformer : IDisposable
             work = new(embeds.Shape, DType.F32);
             backend.LayerNorm(work, embeds, _embedNorm, _embedNormBias!, _cfg.RmsNormEps);
             ownsWork = true;
+        }
+
+        // Gemma-4 per-layer embeddings: computed once per call (needs the real token ids, not just their
+        // embedding), then each layer consumes (disposes) its own slice inside Layer.Forward.
+        Tensor[]? perLayerInputs = null;
+        if (_cfg.PerLayerEmbeddingDim > 0)
+        {
+            if (tokenIds.Length != t)
+                throw new NotSupportedException("Gemma-4 per-layer embeddings require token ids; raw-embedding input (e.g. multimodal) is not yet supported.");
+            perLayerInputs = ComputePerLayerInputs(backend, embeds, tokenIds, t);
         }
 
         try
@@ -273,7 +302,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 {
                     next = _cfg.Mla is not null
                         ? _layers[i].MlaForward(backend, hidden, t, posStart, cache, i, cos, sin)
-                        : _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls);
+                        : _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls, perLayerInputs?[i]);
                 }
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
@@ -306,6 +335,65 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
     }
 
+    /// <summary>Gemma-4 per-layer embeddings (PLE): for each layer, mixes a small extra embedding derived two
+    /// ways — a direct per-token gather from the top-level <see cref="_perLayerTokEmbd"/> table, and a projection
+    /// of the (already embedding-scaled) main hidden state through <see cref="_perLayerModelProj"/> — averaged
+    /// (via a fixed 1/√2 scale, not learned) after each is independently normalized/scaled. Returns one
+    /// <c>[1, T, PerLayerEmbeddingDim]</c> tensor per layer; each is consumed (disposed) by its layer's
+    /// <see cref="Layer.Forward"/>. Ported from llama.cpp's <c>build_inp_per_layer</c> / <c>project_per_layer_inputs</c>.</summary>
+    private unsafe Tensor[] ComputePerLayerInputs(IBackend backend, Tensor embeds, ReadOnlySpan<int> tokenIds, int t)
+    {
+        int ple = _cfg.PerLayerEmbeddingDim;
+        int layers = _layers.Length;
+        int h = _cfg.HiddenSize;
+
+        // Direct per-token gather from the per-layer token table (row width ple*layers per vocab id, laid out as
+        // `layers` consecutive ple-sized chunks — same flat row-major layout as the main embed table), scaled by
+        // sqrt(ple) (llama.cpp's tok_embd_scale).
+        Tensor tokDirect = new(new TensorShape(1, t, ple * layers), DType.F32);
+        float* td = (float*)tokDirect.DataPointer;
+        float* te = (float*)_perLayerTokEmbd!.DataPointer;
+        int width = ple * layers;
+        float tokScale = MathF.Sqrt(ple);
+        for (int s = 0; s < t; s++)
+        {
+            int id = tokenIds[s];
+            float* row = te + (long)id * width;
+            float* outRow = td + (long)s * width;
+            for (int j = 0; j < width; j++) outRow[j] = row[j] * tokScale;
+        }
+
+        // Projected path: per_layer_model_proj(embeds) / sqrt(hidden) — one [1,T,ple] chunk per layer, packed
+        // layer-major in the last dim (chunk `il` occupies [il*ple, (il+1)*ple)).
+        Tensor projFlat = new(new TensorShape(1, t, ple * layers), DType.F32);
+        Project(backend, projFlat, embeds, _perLayerModelProj!, null, _cfg.LowVramQuant);
+        backend.Scale(projFlat, projFlat, 1f / MathF.Sqrt(h));
+
+        Tensor[] result = new Tensor[layers];
+        float invSqrt2 = 1f / MathF.Sqrt(2f);
+        TensorShape chunkShape = new(1, t, ple);
+        for (int il = 0; il < layers; il++)
+        {
+            Tensor projChunk = new(chunkShape, DType.F32);
+            backend.SliceLastDim(projChunk, projFlat, il * ple);
+            Tensor projNormed = new(chunkShape, DType.F32);
+            backend.RmsNorm(projNormed, projChunk, _perLayerProjNorm!, _cfg.RmsNormEps);
+            projChunk.Dispose();
+
+            Tensor tokChunk = new(chunkShape, DType.F32);
+            backend.SliceLastDim(tokChunk, tokDirect, il * ple);
+
+            Tensor summed = new(chunkShape, DType.F32);
+            backend.Add(summed, projNormed, tokChunk);
+            projNormed.Dispose(); tokChunk.Dispose();
+            backend.Scale(summed, summed, invSqrt2);
+            result[il] = summed;
+        }
+        projFlat.Dispose();
+        tokDirect.Dispose();
+        return result;
+    }
+
     /// <summary>True when this architecture is simple enough for CUDA-graph decode capture: the plain pre-norm
     /// GQA/RoPE decoder shape (Llama/Qwen/Mistral family — most dense models). Excludes anything
     /// <see cref="Layer.ForwardGraphStep"/> doesn't implement: MLA, MoE, cross-attention, sliding-window,
@@ -327,7 +415,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         && _cfg.NormPlacement == NormPlacement.PreNorm
         && _cfg.RopeLocalTheta == 0f
         && !_cfg.EmbeddingLayerNorm
-        && _cfg.EmbeddingScale == 1f;
+        && _cfg.EmbeddingScale == 1f
+        && _cfg.PerLayerEmbeddingDim == 0;
 
     /// <summary>Ensures the embedding table is GPU-resident (permanent weight-cache, like any other weight) and
     /// returns it — <see cref="ForwardGraphDecodeStep"/>'s on-device embed gather needs this; untied models
@@ -570,6 +659,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _embed = null; _posEmbed = null; _embedNorm = null; _embedNormBias = null; _finalNorm = null; _lmHead = null; _lmHeadQuant = null;
+        _perLayerTokEmbd = null; _perLayerModelProj = null; _perLayerProjNorm = null;
     }
 
     /// <summary>One resident decoder layer: RMSNorm → GQA self-attn (optional Q/K norm, +KV cache) → residual
@@ -591,6 +681,18 @@ public sealed unsafe class GenericTransformer : IDisposable
         private Tensor? _gateB, _upB, _downB;   // FFN biases (GPT-2 / Falcon / BLOOM / MPT lineage)
         private MoeFeedForward? _moe;   // non-null on MoE layers (replaces the dense SwiGLU above)
         private Multimodal.MllamaCrossAttentionLayer? _crossAttn;   // non-null on mllama gated cross-attention layers
+        // Gemma-4 per-layer embeddings (PLE): this layer's own gate/proj/post-norm (the top-level token
+        // table/projection/norm shared across all layers lives on GenericTransformer).
+        private Tensor? _pleInpGate, _pleProj, _plePostNorm;
+        // Gemma-4: optional learned per-layer output scale (a single scalar, read to host once — TENSOR_NOT_REQUIRED,
+        // absent on most checkpoints), and the weightless V RMSNorm's constant (all-ones) "weight".
+        private float? _outScale;
+        private Tensor? _vNormOnes;
+        // Gemma-4 parallel dense+MoE branch (26B-A4B only): the MoE branch's own pre-norm and post-norm, and the
+        // dense/"shared" branch's own post-norm (its pre-norm reuses the plain _postNorm/ffn_norm slot). The
+        // router's per-channel input scale is pre-multiplied by 1/sqrt(hidden) at load time (see LoadWeights) so
+        // a single RmsNorm call against it reproduces llama.cpp's rms_norm→scale(1/√h)→mul(scale) chain exactly.
+        private Tensor? _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale;
 
         public Layer(TransformerConfig cfg) => _cfg = cfg;
 
@@ -667,14 +769,23 @@ public sealed unsafe class GenericTransformer : IDisposable
                 return;
             }
             _qW = w[$"{prefix}.self_attn.q_proj.weight"];
-            _kW = w[$"{prefix}.self_attn.k_proj.weight"];
-            _vW = w[$"{prefix}.self_attn.v_proj.weight"];
+            // Gemma-4 KV-sharing layers compute no K/V of their own (see KvSharedFromLayer) — those tensors are
+            // simply absent from the checkpoint for these layers; Forward reads an earlier donor layer's cache.
+            bool hasOwnKv = _cfg.HasOwnKv(layerIndex);
+            if (hasOwnKv)
+            {
+                _kW = w[$"{prefix}.self_attn.k_proj.weight"];
+                _vW = w[$"{prefix}.self_attn.v_proj.weight"];
+            }
             _oW = w[$"{prefix}.self_attn.o_proj.weight"];
             if (_cfg.AttentionBias)
             {
                 _qB = EnsureF32(w[$"{prefix}.self_attn.q_proj.bias"]);
-                _kB = EnsureF32(w[$"{prefix}.self_attn.k_proj.bias"]);
-                _vB = EnsureF32(w[$"{prefix}.self_attn.v_proj.bias"]);
+                if (hasOwnKv)
+                {
+                    _kB = EnsureF32(w[$"{prefix}.self_attn.k_proj.bias"]);
+                    _vB = EnsureF32(w[$"{prefix}.self_attn.v_proj.bias"]);
+                }
                 // GPT-2 / Falcon / BLOOM also bias the output projection (Qwen2 does not — load only if present).
                 if (w.TryGetValue($"{prefix}.self_attn.o_proj.bias", out Tensor? ob)) _oB = EnsureF32(ob);
             }
@@ -698,18 +809,66 @@ public sealed unsafe class GenericTransformer : IDisposable
                 float* ap = (float*)_alibiSlopes.DataPointer;
                 for (int i = 0; i < _cfg.NumHeads; i++) ap[i] = _cfg.AlibiSlopes[i];
             }
+            if (_cfg.VNorm)
+            {
+                // Sized to THIS layer's own head dim (local/SWA layers are narrower than global — HeadDimFor).
+                int vNormWidth = _cfg.HeadDimFor(layerIndex);
+                _vNormOnes = new Tensor(new TensorShape(vNormWidth), DType.F32);
+                float* vp = (float*)_vNormOnes.DataPointer;
+                for (int i = 0; i < vNormWidth; i++) vp[i] = 1f;
+            }
+            if (w.TryGetValue($"{prefix}.layer_out_scale.weight", out Tensor? outScaleT)) _outScale = ReadScalarF32(outScaleT);
+            if (_cfg.PerLayerEmbeddingDim > 0)
+            {
+                _pleInpGate = w[$"{prefix}.per_layer_inp_gate.weight"];
+                _pleProj = w[$"{prefix}.per_layer_proj.weight"];
+                _plePostNorm = LoadNorm(w[$"{prefix}.per_layer_post_norm.weight"], addOne: false);
+            }
             LoadFfn(w, prefix, layerIndex);
         }
 
-        /// <summary>Loads the per-layer FFN: the MoE block on MoE layers, else the dense SwiGLU projections.</summary>
+        /// <summary>Reads a single-element tensor's value to the host (Gemma-4's optional per-layer output scale).</summary>
+        private static unsafe float ReadScalarF32(Tensor t)
+        {
+            Tensor f32 = EnsureF32(t);
+            float v = *(float*)f32.DataPointer;
+            if (!ReferenceEquals(f32, t)) f32.Dispose();
+            return v;
+        }
+
+        /// <summary>Loads the per-layer FFN: the MoE block on MoE layers, the dense gated/non-gated projections
+        /// otherwise. Gemma-4's <see cref="TransformerConfig.ParallelDenseMoeBranch"/> MoE layers load BOTH — the
+        /// dense projections back the "shared"/dense branch (reusing the plain <c>ffn_gate</c>/<c>ffn_up</c>/
+        /// <c>ffn_down</c> tensor names, unlike every other MoE arch's dedicated <c>shared_expert.*</c> tensors)
+        /// plus that branch's own post-norm, and the MoE branch's own pre-norm/post-norm/router-input-scale.</summary>
         private void LoadFfn(IReadOnlyDictionary<string, Tensor> w, string prefix, int layerIndex)
         {
-            if (_cfg.IsMoeLayer(layerIndex))
+            bool moeLayer = _cfg.IsMoeLayer(layerIndex);
+            bool dualBranch = moeLayer && _cfg.ParallelDenseMoeBranch;
+            if (moeLayer)
             {
                 _moe = new MoeFeedForward(_cfg.Moe!, _cfg.HiddenSize, _cfg.LowVramQuant);
                 _moe.LoadWeights(w, prefix);
             }
-            else
+            if (dualBranch)
+            {
+                _ffnPreNorm2 = LoadNorm(w[$"{prefix}.mlp.ffn_pre_norm_2.weight"], addOne: false);
+                _ffnPostNorm1 = LoadNorm(w[$"{prefix}.mlp.ffn_post_norm_1.weight"], addOne: false);
+                _ffnPostNorm2 = LoadNorm(w[$"{prefix}.mlp.ffn_post_norm_2.weight"], addOne: false);
+                // Pre-bake the router's 1/sqrt(hidden) scale into its per-channel weight so a single RmsNorm(attnOut,
+                // this) call reproduces llama.cpp's rms_norm(attn_out) -> scale(1/sqrt(h)) -> mul(gate_inp_s) chain.
+                Tensor rawScale = EnsureF32(w[$"{prefix}.mlp.gate_inp_scale.weight"]);
+                _moeGateInpScale = new Tensor(rawScale.Shape, DType.F32);
+                float invSqrtH = 1f / MathF.Sqrt(_cfg.HiddenSize);
+                unsafe
+                {
+                    float* src = (float*)rawScale.DataPointer;
+                    float* dst = (float*)_moeGateInpScale.DataPointer;
+                    for (long i = 0; i < rawScale.ElementCount; i++) dst[i] = src[i] * invSqrtH;
+                }
+                if (!ReferenceEquals(rawScale, w[$"{prefix}.mlp.gate_inp_scale.weight"])) rawScale.Dispose();
+            }
+            if (!moeLayer || dualBranch)
             {
                 // Non-gated FFN (GPT-2 / Falcon / Nemotron) has no gate_proj — only up (fc1) and down (fc2).
                 if (_cfg.GatedFfn) _gateW = w[$"{prefix}.mlp.gate_proj.weight"];
@@ -742,7 +901,10 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
 
         /// <summary>FFN: routes to the dense SwiGLU/GeGLU, the non-gated MLP, or the MoE block. Consumes (disposes)
-        /// <paramref name="preMlp"/> <c>[1, n, hidden]</c> and returns the FFN output <c>[1, n, hidden]</c>.</summary>
+        /// <paramref name="preMlp"/> <c>[1, n, hidden]</c> and returns the FFN output <c>[1, n, hidden]</c>. On a
+        /// Gemma-4 <see cref="TransformerConfig.ParallelDenseMoeBranch"/> layer this is still the MoE block ONLY
+        /// (the parallel dense branch is handled separately by <see cref="GemmaMoeFfn"/>, which calls
+        /// <see cref="DenseFfn"/> directly instead of going through here).</summary>
         private Tensor Mlp(IBackend backend, Tensor preMlp, int n)
         {
             if (_moe is not null)
@@ -751,7 +913,20 @@ public sealed unsafe class GenericTransformer : IDisposable
                 preMlp.Dispose();
                 return moeOut;
             }
-            TensorShape ff = new(1, n, _cfg.IntermediateSize);
+            return DenseFfn(backend, preMlp, n);
+        }
+
+        /// <summary>The dense gated (SwiGLU/GeGLU) or non-gated FFN only — never the MoE block. Consumes
+        /// (disposes) <paramref name="preMlp"/>. Used by <see cref="Mlp"/> for every non-MoE layer, and directly
+        /// by <see cref="GemmaMoeFfn"/> for Gemma-4's parallel dense/"shared" branch (which has a live
+        /// <see cref="_moe"/> on the SAME layer, so it cannot go through <see cref="Mlp"/>'s dispatch).</summary>
+        private Tensor DenseFfn(IBackend backend, Tensor preMlp, int n)
+        {
+            // Derived from the loaded weight's own shape, not _cfg.IntermediateSize — Gemma-4's KV-sharing
+            // layers use a WIDER FFN than the rest (E2B: 12288 vs 6144), so a single global config value would
+            // under/over-allocate the intermediate buffer for those layers regardless of what governs the split.
+            // Shape[0] is outDim (matches CudaBackend.LinearImpl's own N = weight.Shape[0] reading).
+            TensorShape ff = new(1, n, (int)_upW!.Shape[0]);
             Tensor up = new(ff, DType.F32);
             Project(backend, up, preMlp, _upW!, _upB, _cfg.LowVramQuant);
             Tensor comb;
@@ -781,9 +956,76 @@ public sealed unsafe class GenericTransformer : IDisposable
             return mlpOut;
         }
 
+        /// <summary>Gemma-4's parallel dense+MoE FFN (only on <see cref="TransformerConfig.ParallelDenseMoeBranch"/>
+        /// layers): the dense/"shared" branch and the routed-expert branch each read <paramref name="attnOut"/>
+        /// through their OWN pre-norm, are each normed again after their own FFN, then summed. Neither branch's
+        /// norm is <see cref="_postFfnNorm"/> — that shared norm is applied by the caller (<see cref="Forward"/>)
+        /// to the sum, exactly like every other architecture's single FFN output. Does not consume
+        /// <paramref name="attnOut"/> (the caller still needs it for the residual add).</summary>
+        private Tensor GemmaMoeFfn(IBackend backend, Tensor attnOut, int n)
+        {
+            TensorShape flat = new(1, n, _cfg.HiddenSize);
+
+            // Branch 1: dense ("shared") FFN — pre-norm reuses the plain ffn_norm slot (_postNorm), own post-norm.
+            Tensor dNorm = new(flat, DType.F32);
+            backend.RmsNorm(dNorm, attnOut, _postNorm!, _cfg.RmsNormEps);
+            Tensor dOut = DenseFfn(backend, dNorm, n);   // consumes dNorm
+            Tensor dNormed = new(flat, DType.F32);
+            backend.RmsNorm(dNormed, dOut, _ffnPostNorm1!, _cfg.RmsNormEps);
+            dOut.Dispose();
+
+            // Branch 2: routed MoE — its own pre-norm feeds the experts; the router reads a SEPARATELY normalized
+            // view of attn_out (RmsNorm against the pre-scaled gate_inp_scale "weight" — see LoadWeights).
+            Tensor mIn = new(flat, DType.F32);
+            backend.RmsNorm(mIn, attnOut, _ffnPreNorm2!, _cfg.RmsNormEps);
+            Tensor routerIn = new(flat, DType.F32);
+            backend.RmsNorm(routerIn, attnOut, _moeGateInpScale!, _cfg.RmsNormEps);
+            Tensor routerLogits = _moe!.ComputeRouterLogits(backend, routerIn, n);
+            routerIn.Dispose();
+            Tensor mOut = _moe.Forward(backend, mIn, n, routerLogits);
+            routerLogits.Dispose();
+            mIn.Dispose();
+            Tensor mNormed = new(flat, DType.F32);
+            backend.RmsNorm(mNormed, mOut, _ffnPostNorm2!, _cfg.RmsNormEps);
+            mOut.Dispose();
+
+            Tensor summed = new(flat, DType.F32);
+            backend.Add(summed, dNormed, mNormed);
+            dNormed.Dispose(); mNormed.Dispose();
+            return summed;
+        }
+
+        /// <summary>Gemma-4 per-layer embedding mixing (see <see cref="GenericTransformer.ComputePerLayerInputs"/>
+        /// for how <paramref name="perLayerInput"/> is built). Consumes (disposes) both <paramref name="cur"/>
+        /// (this layer's output before mixing) and <paramref name="perLayerInput"/>; returns the mixed result.</summary>
+        private Tensor ApplyPerLayerEmbedding(IBackend backend, Tensor cur, Tensor perLayerInput, int n)
+        {
+            TensorShape flat = new(1, n, _cfg.HiddenSize);
+            TensorShape ffShape = new(1, n, _cfg.PerLayerEmbeddingDim);
+            Tensor gate = new(ffShape, DType.F32);
+            Project(backend, gate, cur, _pleInpGate!, null, _cfg.LowVramQuant);
+            Tensor gateAct = new(ffShape, DType.F32);
+            backend.Gelu(gateAct, gate);
+            gate.Dispose();
+            Tensor mixed = new(ffShape, DType.F32);
+            backend.Mul(mixed, gateAct, perLayerInput);
+            gateAct.Dispose();
+            perLayerInput.Dispose();
+            Tensor projected = new(flat, DType.F32);
+            Project(backend, projected, mixed, _pleProj!, null, _cfg.LowVramQuant);
+            mixed.Dispose();
+            Tensor projNormed = new(flat, DType.F32);
+            backend.RmsNorm(projNormed, projected, _plePostNorm!, _cfg.RmsNormEps);
+            projected.Dispose();
+            Tensor result = new(flat, DType.F32);
+            backend.Add(result, cur, projNormed);
+            cur.Dispose(); projNormed.Dispose();
+            return result;
+        }
+
         public IEnumerable<Tensor> EnumerateWeights()
         {
-            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _downW, _downB];
+            Tensor?[] all = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias, _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes, _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj, _gateW, _gateB, _upW, _upB, _downW, _downB, _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale];
             foreach (Tensor? t in all) if (t is not null) yield return t;
             if (_moe is not null) foreach (Tensor t in _moe.EnumerateWeights()) yield return t;
             if (_crossAttn is not null) foreach (Tensor t in _crossAttn.EnumerateWeights()) yield return t;
@@ -805,12 +1047,12 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
-            IKvCache cache, int layerIndex, Tensor cos, Tensor sin)
+            IKvCache cache, int layerIndex, Tensor cos, Tensor sin, Tensor? perLayerInput = null)
         {
             int h = _cfg.HiddenSize;
             int hq = _cfg.NumHeads;
             int hkv = _cfg.NumKvHeads;
-            int d = _cfg.HeadDim;
+            int d = _cfg.HeadDimFor(layerIndex);   // Gemma-4: local/SWA layers use a narrower head dim than global
             int group = _cfg.KvGroup;
             TensorShape flat = new(1, t, h);
 
@@ -821,34 +1063,50 @@ public sealed unsafe class GenericTransformer : IDisposable
             // weight, not the output rank, so the byte-identical reshape is free and stays resident). For OLMoE's
             // whole-vector Q/K norm the projection output is shaped [1, T, QDim] so the following RMSNorm reduces
             // over the full vector (RmsNorm reduces over the input's last dim).
+            // Gemma-4 KV-sharing layers (see KvSharedFromLayer) have no k/v of their own — k/v stay null and the
+            // layer reads an earlier donor layer's already-populated cache slot below instead.
+            bool hasOwnKv = _cfg.HasOwnKv(layerIndex);
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
             Tensor q = new(fullNorm ? new TensorShape(1, t, _cfg.QDim) : new TensorShape(1, t, hq, d), DType.F32);
-            Tensor k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, t, hkv, d), DType.F32);
-            Tensor v = new(new TensorShape(1, t, hkv, d), DType.F32);
+            Tensor? k = null, v = null;
             Project(backend, q, pre, _qW!, _qB, _cfg.LowVramQuant);
-            Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
-            Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+            if (hasOwnKv)
+            {
+                k = new(fullNorm ? new TensorShape(1, t, _cfg.KvDim) : new TensorShape(1, t, hkv, d), DType.F32);
+                v = new(new TensorShape(1, t, hkv, d), DType.F32);
+                Project(backend, k, pre, _kW!, _kB, _cfg.LowVramQuant);
+                Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
+            }
             if (!_cfg.ParallelResidual) pre.Dispose();   // parallel residual reuses `pre` for the FFN below
+
+            // Gemma-4: weightless RMSNorm on V (v / rms(v), no learned scale — the "weight" is a constant ones
+            // vector materialized at load time). Every other architecture skips this (_vNormOnes is null).
+            if (_cfg.VNorm && v is not null)
+            {
+                Tensor vN = new(v.Shape, DType.F32);
+                backend.RmsNorm(vN, v, _vNormOnes!, _cfg.RmsNormEps);
+                v.Dispose();
+                v = vN;
+            }
 
             // Q/K RMSNorm before RoPE: per-head over head_dim (Qwen3, q is [1,T,Hq,D]) or whole-vector over QDim
             // (OLMoE, q is [1,T,QDim]) — same call, the input's last dim sets the reduction width. Output is
-            // always head-shaped for RoPE.
+            // always head-shaped for RoPE. k may be null (Gemma-4 KV-sharing layer) — nothing to normalize then.
             if (_cfg.QkNorm)
             {
                 Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
-                Tensor kN = new(new TensorShape(1, t, hkv, d), DType.F32);
-                if (_cfg.UseLayerNorm)   // StableLM: q/k LayerNorm (with optional bias), not RMSNorm
+                if (_cfg.UseLayerNorm) backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);   // StableLM: q/k LayerNorm (with optional bias), not RMSNorm
+                else backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
+                q.Dispose();
+                q = qN;
+                if (k is not null)
                 {
-                    backend.LayerNorm(qN, q, _qNorm!, _qNormBias!, _cfg.RmsNormEps);
-                    backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                    Tensor kN = new(new TensorShape(1, t, hkv, d), DType.F32);
+                    if (_cfg.UseLayerNorm) backend.LayerNorm(kN, k, _kNorm!, _kNormBias!, _cfg.RmsNormEps);
+                    else backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
+                    k.Dispose();
+                    k = kN;
                 }
-                else
-                {
-                    backend.RmsNorm(qN, q, _qNorm!, _cfg.RmsNormEps);
-                    backend.RmsNorm(kN, k, _kNorm!, _cfg.RmsNormEps);
-                }
-                q.Dispose(); k.Dispose();
-                q = qN; k = kN;
             }
 
             // ALiBi / absolute-position models use no RoPE (bias added in attention / positions added to embeds);
@@ -858,27 +1116,41 @@ public sealed unsafe class GenericTransformer : IDisposable
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
                     backend.ApplyRopeInterleaved(q, cos, sin);
-                    backend.ApplyRopeInterleaved(k, cos, sin);
+                    if (k is not null) backend.ApplyRopeInterleaved(k, cos, sin);
                 }
                 else
                 {
-                    backend.ApplyRopeSingle(q, cos, sin, _cfg.RotaryDim);
-                    backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
+                    int rotary = _cfg.RotaryDimFor(layerIndex);
+                    backend.ApplyRopeSingle(q, cos, sin, rotary);
+                    if (k is not null) backend.ApplyRopeSingle(k, cos, sin, rotary);
                 }
             }
 
             Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32);
-            Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32);
-            Tensor vMh = new(new TensorShape(1, hkv, t, d), DType.F32);
             backend.Permute0213(qMh, q, t, hq, d);
-            backend.Permute0213(kMh, k, t, hkv, d);
-            backend.Permute0213(vMh, v, t, hkv, d);
-            q.Dispose(); k.Dispose(); v.Dispose();
+            q.Dispose();
 
-            cache.AppendStep(backend, layerIndex, kMh, vMh);
-            kMh.Dispose(); vMh.Dispose();
-            Tensor kFull = cache.KeyPrefix(layerIndex);   // [1, Hkv, kvLen, D] (cache-owned)
-            Tensor vFull = cache.ValuePrefix(layerIndex);
+            Tensor kFull, vFull;
+            if (hasOwnKv)
+            {
+                Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32);
+                Tensor vMh = new(new TensorShape(1, hkv, t, d), DType.F32);
+                backend.Permute0213(kMh, k!, t, hkv, d);
+                backend.Permute0213(vMh, v!, t, hkv, d);
+                k!.Dispose(); v!.Dispose();
+                cache.AppendStep(backend, layerIndex, kMh, vMh);
+                kMh.Dispose(); vMh.Dispose();
+                kFull = cache.KeyPrefix(layerIndex);   // [1, Hkv, kvLen, D] (cache-owned)
+                vFull = cache.ValuePrefix(layerIndex);
+            }
+            else
+            {
+                // Gemma-4 KV-sharing: the donor layer ran earlier THIS SAME forward call (donor index < layerIndex
+                // always), so its cache slot for this position is already populated — just read it.
+                int donor = _cfg.KvDonorLayer(layerIndex);
+                kFull = cache.KeyPrefix(donor);
+                vFull = cache.ValuePrefix(donor);
+            }
 
             // FlashAttention: GQA-aware (no K/V replication) online-softmax, causal via the absolute query
             // offset (decode t=1 naturally attends the whole prefix; prefill t>1 is per-row causal). No score
@@ -894,7 +1166,10 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.FlashAttention(attn, qMh, kFull, vFull, kvLen, group, causal: true, qOffset: posStart, scale, _cfg.AttnLogitSoftcap, _sink, window, _alibiSlopes);
             qMh.Dispose();
 
-            Tensor attnFlat = new(new TensorShape(1, t, _cfg.QDim), DType.F32);
+            // hq*d (not _cfg.QDim, which is the GLOBAL head dim) — Gemma-4 local/SWA layers project to a
+            // narrower width than global layers, and _oW's own shape (loaded from the checkpoint) already
+            // matches whichever width this specific layer actually uses.
+            Tensor attnFlat = new(new TensorShape(1, t, hq * d), DType.F32);
             backend.Permute0213(attnFlat, attn, hq, t, d);
             attn.Dispose();
             Tensor attnOut = new(flat, DType.F32);
@@ -928,14 +1203,25 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.Add(afterAttn, hidden, attnOut);
             attnOut.Dispose();
 
-            Tensor preMlp = new(flat, DType.F32);
-            PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
-            Tensor mlpOut = Mlp(backend, preMlp, t);
+            Tensor mlpOut;
+            if (_ffnPreNorm2 is not null)   // Gemma-4 parallel dense+MoE branch (26B-A4B MoE layers only)
+            {
+                mlpOut = GemmaMoeFfn(backend, afterAttn, t);
+            }
+            else
+            {
+                Tensor preMlp = new(flat, DType.F32);
+                PreSublayer(backend, preMlp, afterAttn, _postNorm, _postNormBias);
+                mlpOut = Mlp(backend, preMlp, t);
+            }
 
             mlpOut = PostSublayer(backend, mlpOut, _postFfnNorm, flat);   // Gemma post-FFN norm (pre-residual)
             Tensor result = new(flat, DType.F32);
             backend.Add(result, afterAttn, mlpOut);
             afterAttn.Dispose(); mlpOut.Dispose();
+
+            if (perLayerInput is not null) result = ApplyPerLayerEmbedding(backend, result, perLayerInput, t);
+            if (_outScale is float os) backend.Scale(result, result, os);
             return result;
         }
 

@@ -66,10 +66,12 @@ public sealed class GgufLanguageModel : IDisposable
         List<int> extraStops = [];
         if (eot is int e) extraStops.Add(e);
 
-        // SentencePiece (tokenizer.ggml.model == "llama"): Gemma, Llama-1/2. Score-driven merges + byte fallback,
-        // a different algorithm from byte-level BPE, so route to the SPM tokenizer.
+        // SentencePiece (tokenizer.ggml.model == "llama" for Gemma-1/2/3 and Llama-1/2; "gemma4" is the same
+        // SPM/Unigram algorithm under a new model-field label). Score-driven merges + byte fallback, a different
+        // algorithm from byte-level BPE — falling through to the generic BPE tokenizer below silently drops the
+        // "▁" → space substitution, producing coherent-but-unspaced output ("Thecapitalof...").
         string tokModel = meta.GetString("tokenizer.ggml.model") ?? "gpt2";
-        if (tokModel == "llama")
+        if (tokModel is "llama" or "gemma4")
         {
             float[]? scores = meta.GetFloatArray("tokenizer.ggml.scores")
                 ?? throw new NotSupportedException("SentencePiece GGUF missing tokenizer.ggml.scores.");

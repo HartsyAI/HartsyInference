@@ -27,27 +27,45 @@ public sealed class FixedKvCache : IKvCache, IDisposable
 
     public int CurrentLength { get { ThrowIfDisposed(); return _currentLength; } }
 
-    /// <summary>Allocates per-layer fixed buffers sized for <paramref name="maxSequenceLength"/> tokens.</summary>
+    /// <summary>Allocates per-layer fixed buffers sized for <paramref name="maxSequenceLength"/> tokens, all
+    /// layers sharing one <paramref name="headDim"/> (every architecture except Gemma-4).</summary>
     public FixedKvCache(int numLayers, int batch, int numKvHeads, int headDim, int maxSequenceLength)
+        : this(numLayers, batch, numKvHeads, UniformHeadDims(numLayers, headDim), maxSequenceLength) { }
+
+    /// <summary>Allocates per-layer fixed buffers with a PER-LAYER head dimension (Gemma-4: local/SWA layers are
+    /// narrower than global layers). <paramref name="headDimPerLayer"/> must have <paramref name="numLayers"/>
+    /// entries — a layer that shares another layer's KV cache slot (see <see cref="TransformerConfig.HasOwnKv"/>)
+    /// still gets an entry here (simplest to allocate and just never write/read it) sized to its OWN head dim,
+    /// even though nothing ever appends to it.</summary>
+    public FixedKvCache(int numLayers, int batch, int numKvHeads, int[] headDimPerLayer, int maxSequenceLength)
     {
         if (numLayers <= 0) throw new ArgumentOutOfRangeException(nameof(numLayers));
         if (batch != 1) throw new NotSupportedException("FixedKvCache supports batch=1.");
         if (numKvHeads <= 0) throw new ArgumentOutOfRangeException(nameof(numKvHeads));
-        if (headDim <= 0) throw new ArgumentOutOfRangeException(nameof(headDim));
+        if (headDimPerLayer.Length != numLayers) throw new ArgumentException($"headDimPerLayer has {headDimPerLayer.Length} entries, expected {numLayers}.", nameof(headDimPerLayer));
         if (maxSequenceLength <= 0) throw new ArgumentOutOfRangeException(nameof(maxSequenceLength));
 
         BatchSize = batch;
         NumKvHeads = numKvHeads;
-        HeadDim = headDim;
+        HeadDim = headDimPerLayer[0];   // best-effort single-value summary; per-layer callers use KeyPrefix/ValuePrefix shapes directly
         MaxSequenceLength = maxSequenceLength;
         _k = new Tensor[numLayers];
         _v = new Tensor[numLayers];
-        TensorShape shape = new(1, numKvHeads, maxSequenceLength, headDim);
         for (int i = 0; i < numLayers; i++)
         {
+            int hd = headDimPerLayer[i];
+            if (hd <= 0) throw new ArgumentOutOfRangeException(nameof(headDimPerLayer), $"layer {i} head dim must be positive.");
+            TensorShape shape = new(1, numKvHeads, maxSequenceLength, hd);
             _k[i] = new Tensor(shape, DType.F32);
             _v[i] = new Tensor(shape, DType.F32);
         }
+    }
+
+    private static int[] UniformHeadDims(int numLayers, int headDim)
+    {
+        int[] a = new int[numLayers];
+        Array.Fill(a, headDim);
+        return a;
     }
 
     public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)

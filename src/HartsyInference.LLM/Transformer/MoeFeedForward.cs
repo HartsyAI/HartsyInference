@@ -71,23 +71,37 @@ public sealed class MoeFeedForward
         if (_shGateScoreW is not null) yield return _shGateScoreW;
     }
 
-    /// <summary>MoE FFN: <paramref name="x"/> <c>[1, N, hidden]</c> → <c>[1, N, hidden]</c>.</summary>
-    public unsafe Tensor Forward(IBackend backend, Tensor x, int n)
+    /// <summary>Router logits (<c>x @ router_weight</c>) as their own <c>[1, N, E]</c> tensor, for callers that
+    /// need to compute them from a DIFFERENT input than the expert FFN's (Gemma-4: the router reads a separately
+    /// normalized view of the attention output) before passing them to <see cref="Forward"/>.</summary>
+    public Tensor ComputeRouterLogits(IBackend backend, Tensor x, int n)
+    {
+        Tensor logits = new(new TensorShape(1, n, _moe.NumExperts), DType.F32);
+        GenericTransformer.Project(backend, logits, x, _routerW, null, lowVram: false);
+        return logits;
+    }
+
+    /// <summary>MoE FFN: <paramref name="x"/> <c>[1, N, hidden]</c> → <c>[1, N, hidden]</c>. <paramref name="routerLogits"/>
+    /// overrides the internal <c>x @ router_weight</c> projection when provided (Gemma-4: the router reads a
+    /// differently-normalized view of the attention output than the expert FFN input, computed by the caller) —
+    /// same <c>[1, N, E]</c> shape either way, not disposed by this call.</summary>
+    public unsafe Tensor Forward(IBackend backend, Tensor x, int n, Tensor? routerLogits = null)
     {
         int e = _moe.NumExperts;
         int topK = _moe.NumExpertsPerTok;
         int inter = _moe.MoeIntermediateSize;
 
         // 1. Router logits, read to host for top-k selection.
-        Tensor routerLogits = new(new TensorShape(1, n, e), DType.F32);
-        GenericTransformer.Project(backend, routerLogits, x, _routerW, null, lowVram: false);
+        Tensor? ownRouterLogits = null;
+        Tensor routerLogitsT = routerLogits ?? (ownRouterLogits = new(new TensorShape(1, n, e), DType.F32));
+        if (routerLogits is null) GenericTransformer.Project(backend, routerLogitsT, x, _routerW, null, lowVram: false);
         float[] logits = new float[(long)n * e];
         fixed (float* dst = logits)
         {
-            float* src = (float*)routerLogits.DataPointer;   // D2H sync on CUDA
+            float* src = (float*)routerLogitsT.DataPointer;   // D2H sync on CUDA
             Buffer.MemoryCopy(src, dst, logits.Length * 4L, logits.Length * 4L);
         }
-        routerLogits.Dispose();
+        ownRouterLogits?.Dispose();
 
         // 2. Per-token top-k routing → per-expert token groups + weights.
         List<int>[] expertTokens = new List<int>[e];
@@ -146,14 +160,16 @@ public sealed class MoeFeedForward
         return output;
     }
 
-    /// <summary>SwiGLU FFN over <paramref name="rows"/> tokens: down(silu(gate(x)) * up(x)).</summary>
+    /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) — SiLU (SwiGLU, the
+    /// default) or tanh-GELU (GeGLU, Gemma-4's <see cref="MoeConfig.Activation"/>).</summary>
     private Tensor SwiGlu(IBackend backend, Tensor x, int rows, Tensor gateW, Tensor upW, Tensor downW, int inter)
     {
         TensorShape ff = new(1, rows, inter);
         Tensor gate = new(ff, DType.F32);
         GenericTransformer.Project(backend, gate, x, gateW, null, _lowVram);
         Tensor act = new(ff, DType.F32);
-        backend.Silu(act, gate);
+        if (_moe.Activation == ActivationKind.GeluTanh) backend.Gelu(act, gate);
+        else backend.Silu(act, gate);
         gate.Dispose();
         Tensor up = new(ff, DType.F32);
         GenericTransformer.Project(backend, up, x, upW, null, _lowVram);

@@ -200,6 +200,21 @@ public sealed class GgufLoader : IDisposable
                     return (floats, offset);
                 }
 
+                // Bool arrays — needed for Gemma-4's per-layer attention.sliding_window_pattern (llama.cpp's
+                // get_key_or_arr can store this as a real per-layer array, not just a broadcast scalar; silently
+                // dropping it here previously made every layer read as "global", corrupting per-layer head-dim
+                // sizing for architectures that actually rely on a real array).
+                if (elemType == 7)
+                {
+                    bool[] bools = new bool[count];
+                    for (ulong i = 0; i < count; i++)
+                    {
+                        bools[i] = *(ptr + offset) != 0;
+                        offset += 1;
+                    }
+                    return (bools, offset);
+                }
+
                 // For other arrays, skip the data
                 for (ulong i = 0; i < count; i++)
                 {

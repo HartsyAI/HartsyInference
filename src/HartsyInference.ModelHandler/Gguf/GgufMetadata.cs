@@ -89,6 +89,14 @@ public sealed class GgufMetadata
         return null;
     }
 
+    /// <summary>Gets a bool array metadata value (e.g. Gemma-4's per-layer <c>attention.sliding_window_pattern</c>), or null.</summary>
+    public bool[]? GetBoolArray(string key)
+    {
+        if (_values.TryGetValue(key, out object? value) && value is bool[] arr)
+            return arr;
+        return null;
+    }
+
     /// <summary>Checks if a metadata key exists.</summary>
     public bool ContainsKey(string key) => _values.ContainsKey(key);
 

@@ -155,6 +155,11 @@ public sealed class CudaBackend : IBackend
     /// self-disable for the session and fall back to im2col.</summary>
     private readonly bool _convCudnn;
 
+    /// <summary>Route the audio 1D convs (vocoders/codecs/VITS) through cuDNN (mapped to 2D). DEFAULT OFF: the
+    /// path is written but not yet verified stable on a working cuDNN install (on the dev box cuDNN isn't on the
+    /// default library path, and forcing it caused a hang) — opt in with HARTSY_AUDIO_CONV_CUDNN=1 to verify.</summary>
+    private readonly bool _audioConvCudnn;
+
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>: FAST_TF32 for
     /// F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit full-precision request —
     /// is off), otherwise plain 32F accumulate (mixed F16-in/F32-acc stays 32F).</summary>
@@ -240,6 +245,7 @@ public sealed class CudaBackend : IBackend
         // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
         // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
         _convCudnn = EnvSwitch.IsEnabled("HARTSY_CONV_CUDNN", defaultOn: true);
+        _audioConvCudnn = EnvSwitch.IsEnabled("HARTSY_AUDIO_CONV_CUDNN", defaultOn: false);
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +
@@ -3438,6 +3444,15 @@ public sealed class CudaBackend : IBackend
         int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
         int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2], kernel = (int)weight.Shape[2];
 
+        // cuDNN fast path: symmetric-padded, non-grouped 1D conv → 2D (H=1) so cuDNN's tensor-core (TF32 on Ampere)
+        // implicit-GEMM/Winograd engines run it — faster than the direct kernel on the wide vocoder convs. Output
+        // stays F32. Falls back to the direct kernel on group/asymmetric-pad or any cuDNN failure (session-sticky).
+        if (_audioConvCudnn && !_cudnnConvDead && groups == 1 && padLeft == padRight
+            && TryCudnnConv1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, dilation))
+        {
+            return;
+        }
+
         // The conv1d_f32 kernel is F32; bf16/f16 inputs (e.g. ACE-Step's GLUMBConv on bf16 weights) are cast on-device.
         ulong pOut = 0, pIn = 0, pW = 0, pB = 0, inCast = 0, wCast = 0, bCast = 0;
         bool cachedOutput = false;
@@ -3461,6 +3476,59 @@ public sealed class CudaBackend : IBackend
         finally
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+            GpuTransferHelper.FreeDevice(pW);
+            if (pB != 0) GpuTransferHelper.FreeDevice(pB);
+            if (inCast != 0) CudaMemory.FreeAsync(inCast, _stream.Handle);
+            if (wCast != 0) CudaMemory.FreeAsync(wCast, _stream.Handle);
+            if (bCast != 0) CudaMemory.FreeAsync(bCast, _stream.Handle);
+        }
+    }
+
+    /// <summary>cuDNN 1D convolution (mapped to 2D, H=1): F32 output via TF32 tensor cores. Weights/inputs are cast
+    /// to F32; bias is added F32 after. Returns false (session-sticky) on any cuDNN failure so the caller falls back
+    /// to the direct kernel.</summary>
+    private unsafe bool TryCudnnConv1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int batch, int cIn, int cOut, int tIn, int tOut, int kernel, int stride, int pad, int dilation)
+    {
+        ulong pIn = 0, pW = 0, pB = 0, pOut = 0, inCast = 0, wCast = 0, bCast = 0;
+        bool cachedOutput = false;
+        try
+        {
+            _cudnnConv ??= new CudnnConv(_stream.Handle);
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            ulong inF32 = CastIfNeeded(pIn, input.DType, DType.F32, (int)input.ElementCount, out inCast);
+            ulong wF32 = CastIfNeeded(pW, weight.DType, DType.F32, (int)weight.ElementCount, out wCast);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            // 1D → 2D: N,C,H=1,W=tIn ; filter K,C,R=1,S=kernel ; strideW=stride, padW=pad, dilationW=dilation.
+            _cudnnConv.Execute(inF32, wF32, pOut,
+                batch, cIn, 1, tIn, cOut, 1, kernel, 1, tOut, 1, stride, 0, pad, CudnnApi.CUDNN_DATA_FLOAT, 1, dilation);
+            if (bias is not null)
+            {
+                pB = GpuTransferHelper.CopyToDevice(bias);
+                ulong bF32 = CastIfNeeded(pB, bias.DType, DType.F32, (int)bias.ElementCount, out bCast);
+                _kernels!.LaunchBiasAdd(pOut, bF32, cOut, tOut, batch * cOut * tOut, _stream.Handle);
+            }
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+            if (!CudnnConvEngaged)
+            {
+                CudnnConvEngaged = true;
+                HartsyInference.Core.Logging.Logs.Info($"[cuDNN conv] audio conv1d engine engaged (cuDNN {CudnnApi.cudnnGetVersion()})");
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _cudnnConvDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[cuDNN conv] audio conv1d disabled for the session (falling back to direct kernel): {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            if (!cachedOutput && pOut != 0) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pW);
             if (pB != 0) GpuTransferHelper.FreeDevice(pB);

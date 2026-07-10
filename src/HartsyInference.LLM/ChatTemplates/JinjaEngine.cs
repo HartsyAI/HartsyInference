@@ -128,17 +128,31 @@ public sealed class JinjaEngine
 
     internal sealed class SetNode(string name, Expr expr) : Node
     {
+        public override void Render(StringBuilder sb, Scope scope) => AssignSet(name, expr.Eval(scope), scope);
+    }
+
+    /// <summary>Block-capture <c>{% set name %}...{% endset %}</c>: renders the body to a string and assigns it
+    /// (Gemma-4's chat template captures a message's rendered content this way before post-processing it).</summary>
+    internal sealed class SetBlockNode(string name, List<Node> body) : Node
+    {
         public override void Render(StringBuilder sb, Scope scope)
         {
-            object? value = expr.Eval(scope);
-            int dot = name.IndexOf('.');
-            if (dot < 0) { scope.Set(name, value); return; }
-            // Namespace attribute assignment: ns.attr = value (ns is a mutable dict in scope).
-            string baseName = name[..dot];
-            string attr = name[(dot + 1)..];
-            if (scope.Get(baseName) is Dictionary<string, object?> ns) ns[attr] = value;
-            else throw new InvalidOperationException($"Jinja set: '{baseName}' is not a namespace/object.");
+            StringBuilder inner = new();
+            foreach (Node n in body) n.Render(inner, scope);
+            AssignSet(name, inner.ToString(), scope);
         }
+    }
+
+    /// <summary>Shared <c>{% set %}</c> assignment target resolution: a plain variable, or <c>ns.attr</c>
+    /// (namespace attribute assignment — <c>ns</c> is a mutable dict already in scope).</summary>
+    internal static void AssignSet(string name, object? value, Scope scope)
+    {
+        int dot = name.IndexOf('.');
+        if (dot < 0) { scope.Set(name, value); return; }
+        string baseName = name[..dot];
+        string attr = name[(dot + 1)..];
+        if (scope.Get(baseName) is Dictionary<string, object?> ns) ns[attr] = value;
+        else throw new InvalidOperationException($"Jinja set: '{baseName}' is not a namespace/object.");
     }
 
     internal sealed class IfNode(List<(Expr? Cond, List<Node> Body)> branches) : Node
@@ -205,7 +219,15 @@ public sealed class JinjaEngine
                     {
                         string rest = s.Value["set".Length..].Trim();
                         int eq = rest.IndexOf('=');
-                        if (eq < 0) throw new FormatException($"Malformed set: {s.Value}");
+                        if (eq < 0)
+                        {
+                            // Block-capture form: {% set name %}...{% endset %} — rest is just the target name.
+                            i++;
+                            List<Node> setBody = ParseBlock(segs, ref i, ["endset"]);
+                            Expect(segs, ref i, "endset");
+                            nodes.Add(new SetBlockNode(rest, setBody));
+                            break;
+                        }
                         nodes.Add(new SetNode(rest[..eq].Trim(), ExprParser.ParseExpr(rest[(eq + 1)..].Trim())));
                         i++; break;
                     }

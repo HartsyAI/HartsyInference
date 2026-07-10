@@ -55,7 +55,9 @@ public static class GgufConfigFactory
         bool attentionBias = weights.ContainsKey("model.layers.0.self_attn.q_proj.bias");
         bool qkNorm = weights.TryGetValue("model.layers.0.self_attn.q_norm.weight", out Tensor? qNormW);
         // Q/K norm width: head_dim (Qwen3 per-head) vs the full Q dim heads·head_dim (OLMoE whole-vector norm).
-        bool qkNormFull = qkNorm && qNormW!.ElementCount == (long)heads * headDim;
+        // Gemma-4 is always per-head like Gemma-3 — skip the structural check, which assumes a single global
+        // head_dim and would misfire on a layer-0 that happens to be local/SWA-width (256 vs the global 512).
+        bool qkNormFull = qkNorm && qNormW!.ElementCount == (long)heads * headDim && arch != "gemma4";
         bool tied = !weights.ContainsKey("lm_head.weight");
 
         // Gemma family knobs. Most are architectural constants (GeGLU, (1+w) norm, embedding scale, sandwich
@@ -64,20 +66,58 @@ public static class GgufConfigFactory
         bool isGemma = arch.StartsWith("gemma", StringComparison.Ordinal);
         bool isGemma2 = arch == "gemma2";
         bool isGemma3 = arch == "gemma3";
+        // Gemma-4 (Apr 2026): Gemma-3n-lineage per-layer embeddings (PLE) on every variant, hybrid local/global
+        // SWA (own key names, not gemma3's), constant (non-scaled) attention, a weightless V RMSNorm, an optional
+        // per-layer learned output scale, and — only on the 26B-A4B MoE checkpoint — a routed-expert branch that
+        // runs IN PARALLEL WITH (not instead of) the dense FFN, each with its own pre/post norm, summed together.
+        // Ported directly from llama.cpp's src/models/gemma4.cpp (no local reference model existed to diff
+        // against at implementation time — verify empirically against a real checkpoint before trusting output).
+        bool isGemma4 = arch == "gemma4";
+        int perLayerEmbedDim = isGemma4 ? (int)metadata.GetUInt32($"{arch}.embedding_length_per_layer_input", 0u) : 0;
+        // Gemma-4's mobile-oriented E2B/E4B variants (Gemma-3n lineage) skip computing K/V on their last N
+        // layers entirely, reusing an earlier "donor" layer's cache slot instead (see TransformerConfig.KvDonorLayer
+        // / llama.cpp's reuse callback in llama-model.cpp). 0 (absent, or on the 31B/26B-A4B variants) = every
+        // layer owns its KV, unchanged from every other architecture.
+        uint sharedKvLayers = isGemma4 ? metadata.GetUInt32($"{arch}.attention.shared_kv_layers", 0u) : 0u;
+        int kvSharedFromLayer = sharedKvLayers > 0 ? decoderLayers - (int)sharedKvLayers : 0;
+        if (isGemma4 && !weights.ContainsKey("model.layers.0.self_attn.v_proj.weight"))
+            throw new NotSupportedException(
+                "Gemma-4 checkpoint has no layer-0 v_proj weight (\"alternative attention\", V reusing K) — not implemented (this looks like an MTP draft/assistant checkpoint, not a base chat model).");
+        // Gemma-4's local/SWA layers use a NARROWER head dimension than global layers (E2B: 256 vs 512) — not
+        // just a different RoPE base. `headDim`/`rotaryDim` above (read from the generic, non-_swa keys) already
+        // capture the GLOBAL-layer values correctly since gemma4 ships both under the same key names every other
+        // arch uses; these are the local-layer counterparts.
+        int headDimSwa = isGemma4 ? (int)metadata.GetUInt32($"{arch}.attention.key_length_swa", 0u) : 0;
+        int ropeDimCountSwa = isGemma4 ? (int)metadata.GetUInt32($"{arch}.rope.dimension_count_swa", 0u) : 0;
+        int rotaryDimSwa = ropeDimCountSwa > 0 && headDimSwa > 0 && ropeDimCountSwa < headDimSwa ? ropeDimCountSwa : 0;
+        // GGUF stores this as a genuine per-layer bool array (is_swa[i] = true means LOCAL), not the broadcast
+        // period every other sliding-window architecture here uses — read it directly rather than guessing a
+        // period from a single scalar (a bool array silently misread as a scalar UINT32 defaults to 0, which
+        // made every layer read back as "global" and corrupted per-layer head-dim sizing).
+        bool[]? swaArray = isGemma4 ? metadata.GetBoolArray($"{arch}.attention.sliding_window_pattern") : null;
+        bool[]? globalLayers = swaArray is { Length: > 0 } ? new bool[decoderLayers] : null;
+        if (globalLayers is not null)
+            for (int i = 0; i < decoderLayers; i++) globalLayers[i] = !swaArray![i];   // is_swa=true -> local -> NOT global
         // GLM-4 (LLM_ARCH_GLM4, 0414 lineage): Gemma-style sandwich norm but RMSNorm + QKV biases + fused gate/up
         // FFN + partial RoPE + NORM (interleaved) rope. The fused gate/up is split in GgufLanguageModel.
         bool isGlm4 = arch == "glm4";
         bool sandwich = (isGemma || isGlm4) && weights.ContainsKey("model.layers.0.post_feedforward_layernorm.weight");
         float embScale = isGemma ? (float)Math.Sqrt(hidden) : 1f;
-        float queryPreAttn = metadata.GetFloat32($"{arch}.attention.query_pre_attn_scalar", 0f);
-        float localTheta = isGemma3 ? metadata.GetFloat32($"{arch}.rope.local_freq_base", 10_000f) : 0f;
+        // Gemma-4 hardcodes attention scaling to 1.0 (no query_pre_attn_scalar) — forcing QueryPreAttnScalar=1
+        // makes the existing AttnScale property (1/sqrt(QueryPreAttnScalar)) come out to the desired constant 1.
+        float queryPreAttn = isGemma4 ? 1f : metadata.GetFloat32($"{arch}.attention.query_pre_attn_scalar", 0f);
+        // Gemma-3's local (SWA) RoPE base is `rope.local_freq_base`; Gemma-4 renamed the key to `rope.freq_base_swa`.
+        float localTheta = isGemma3 ? metadata.GetFloat32($"{arch}.rope.local_freq_base", 10_000f)
+            : isGemma4 ? metadata.GetFloat32($"{arch}.rope.freq_base_swa", ropeTheta) : 0f;
         int swWindow = (int)metadata.GetUInt32($"{arch}.attention.sliding_window", 0u);
         // Sliding-window layer cadence. GPT-OSS alternates SWA every other layer (period 2); Gemma-3 = 5 local : 1
-        // global (6); Gemma-2 alternates (2); Cohere2 = 3 local : 1 global (4). 0 = all-global.
+        // global (6); Gemma-2 alternates (2); Cohere2 = 3 local : 1 global (4). 0 = all-global. Gemma-4 always
+        // ships this key explicitly (its hybrid design is central to the architecture) so no arch-specific default
+        // is needed for it here.
         int swPattern = (int)metadata.GetUInt32($"{arch}.attention.sliding_window_pattern",
             isGemma3 ? 6u : isGemma2 ? 2u : arch == "cohere2" ? 4u : arch is "gpt-oss" or "gptoss" ? 2u : 0u);
         float attnCap = isGemma2 ? metadata.GetFloat32($"{arch}.attn_logit_softcapping", 0f) : 0f;
-        float finalCap = isGemma2 ? metadata.GetFloat32($"{arch}.final_logit_softcapping", 0f) : 0f;
+        float finalCap = isGemma2 || isGemma4 ? metadata.GetFloat32($"{arch}.final_logit_softcapping", 0f) : 0f;
 
         // Granite: scalar multipliers (embedding/attention/residual/logit). Granite shares the llama tensor
         // dialect; these knobs are all no-ops (1/standard) for other archs.
@@ -235,6 +275,9 @@ public static class GgufConfigFactory
                 // llama.cpp scales the routed-expert weights unconditionally (not only under group routing), so
                 // honor the scale whenever it is set — dots1 / bailingmoe / deepseek-v1 scale without grouping.
                 RoutedScalingFactor = expertWeightsScale,
+                // Gemma-4's MoE branch uses GeGLU (tanh-GELU), matching its dense FFN; every other MoE arch here
+                // (Mixtral/Qwen-MoE/OLMoE/DeepSeek) uses SwiGLU (the record default).
+                Activation = isGemma4 ? ActivationKind.GeluTanh : ActivationKind.Silu,
             };
         }
 
@@ -297,6 +340,13 @@ public static class GgufConfigFactory
             AttnSink = isGptOss,
             CrossAttnLayers = crossAttnLayers,
             Moe = moe,
+            VNorm = isGemma4,
+            PerLayerEmbeddingDim = perLayerEmbedDim,
+            ParallelDenseMoeBranch = isGemma4,
+            KvSharedFromLayer = kvSharedFromLayer,
+            HeadDimSwa = headDimSwa,
+            RotaryDimSwa = rotaryDimSwa,
+            GlobalLayers = globalLayers,
         };
     }
 

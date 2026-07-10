@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -120,9 +121,12 @@ public sealed unsafe class VitsTextEncoder
             _kW = VitsWeights.Conv(w, $"{prefix}.attn_layers.{i}.conv_k"); _kB = VitsWeights.Bias(w, $"{prefix}.attn_layers.{i}.conv_k");
             _vW = VitsWeights.Conv(w, $"{prefix}.attn_layers.{i}.conv_v"); _vB = VitsWeights.Bias(w, $"{prefix}.attn_layers.{i}.conv_v");
             _oW = VitsWeights.Conv(w, $"{prefix}.attn_layers.{i}.conv_o"); _oB = VitsWeights.Bias(w, $"{prefix}.attn_layers.{i}.conv_o");
-            _relK = w[$"{prefix}.attn_layers.{i}.emb_rel_k"]; _relV = w[$"{prefix}.attn_layers.{i}.emb_rel_v"];
-            _norm1G = w[$"{prefix}.norm_layers_1.{i}.gamma"]; _norm1B = w[$"{prefix}.norm_layers_1.{i}.beta"];
-            _norm2G = w[$"{prefix}.norm_layers_2.{i}.gamma"]; _norm2B = w[$"{prefix}.norm_layers_2.{i}.beta"];
+            // rel-pos tables + LayerNorm gains/biases are read host-side as float* (Attention / AddNorm), so they
+            // MUST be F32 — upcast an fp16 checkpoint's copies (a no-op when already F32). Without this an fp16 RVC/
+            // MeloTTS checkpoint produced garbage/blank audio (fp16 bytes misread as f32).
+            _relK = WhisperOps.EnsureF32(w[$"{prefix}.attn_layers.{i}.emb_rel_k"]); _relV = WhisperOps.EnsureF32(w[$"{prefix}.attn_layers.{i}.emb_rel_v"]);
+            _norm1G = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_1.{i}.gamma"]); _norm1B = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_1.{i}.beta"]);
+            _norm2G = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_2.{i}.gamma"]); _norm2B = WhisperOps.EnsureF32(w[$"{prefix}.norm_layers_2.{i}.beta"]);
             _ffn1W = VitsWeights.Conv(w, $"{prefix}.ffn_layers.{i}.conv_1"); _ffn1B = VitsWeights.Bias(w, $"{prefix}.ffn_layers.{i}.conv_1");
             _ffn2W = VitsWeights.Conv(w, $"{prefix}.ffn_layers.{i}.conv_2"); _ffn2B = VitsWeights.Bias(w, $"{prefix}.ffn_layers.{i}.conv_2");
         }

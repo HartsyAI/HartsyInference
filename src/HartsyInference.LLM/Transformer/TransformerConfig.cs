@@ -83,6 +83,10 @@ public sealed record MoeConfig
     /// <summary>Always-on shared expert FFN inner dimension (Qwen2-MoE / DeepSeek). 0 disables the shared expert.</summary>
     public int SharedExpertIntermediateSize { get; init; }
 
+    /// <summary>Expert/shared-expert FFN activation. Default SiLU (SwiGLU: Qwen-MoE/Mixtral/DeepSeek); Gemma-4's
+    /// MoE layers use <see cref="ActivationKind.GeluTanh"/> (GeGLU), matching its dense FFN.</summary>
+    public ActivationKind Activation { get; init; } = ActivationKind.Silu;
+
     /// <summary>Layers <c>[0, FirstDenseLayers)</c> stay dense; the rest are MoE (DeepSeek <c>first_k_dense_replace</c>).
     /// 0 (default) makes every layer MoE.</summary>
     public int FirstDenseLayers { get; init; }
@@ -274,6 +278,25 @@ public sealed record TransformerConfig
     /// <see cref="RopeTheta"/>. 0 (default) means a single RoPE base for all layers.</summary>
     public float RopeLocalTheta { get; init; }
 
+    /// <summary>Gemma-4: local (sliding-window) layers use a SMALLER head dimension than global layers — not
+    /// just a different RoPE base (Gemma-3's <see cref="RopeLocalTheta"/>), the Q/K/V/O projection weights
+    /// themselves are narrower (E2B: 256 local vs 512 global). 0 (default) means every layer shares
+    /// <see cref="HeadDim"/> — every architecture except Gemma-4. See <see cref="HeadDimFor"/>.</summary>
+    public int HeadDimSwa { get; init; }
+
+    /// <summary>Local layers' partial-rotary dimension (parallels <see cref="RotaryDim"/> for
+    /// <see cref="HeadDimSwa"/>); 0 = full rotary over <see cref="HeadDimSwa"/>. Only meaningful when
+    /// <see cref="HeadDimSwa"/> is set.</summary>
+    public int RotaryDimSwa { get; init; }
+
+    /// <summary>The head dimension layer <paramref name="i"/> actually uses: <see cref="HeadDimSwa"/> for a
+    /// local/SWA layer when set, else <see cref="HeadDim"/> for every layer (every architecture but Gemma-4).</summary>
+    public int HeadDimFor(int i) => HeadDimSwa > 0 && !IsGlobalLayer(i) ? HeadDimSwa : HeadDim;
+
+    /// <summary>The (possibly partial) rotary dimension layer <paramref name="i"/> actually uses — parallels
+    /// <see cref="HeadDimFor"/> for <see cref="RotaryDim"/>/<see cref="RotaryDimSwa"/>.</summary>
+    public int RotaryDimFor(int i) => HeadDimSwa > 0 && !IsGlobalLayer(i) ? RotaryDimSwa : RotaryDim;
+
     /// <summary>Sliding-window layer pattern: layer <c>i</c> is a global (full-attention) layer when this is
     /// 0 (all global) or <c>(i+1) % pattern == 0</c>; otherwise it is a local (sliding-window) layer. Gemma-2
     /// alternates (pattern 2); Gemma-3 is 5 local : 1 global (pattern 6).</summary>
@@ -319,8 +342,14 @@ public sealed record TransformerConfig
     /// 0 (default) disables it.</summary>
     public float FinalLogitSoftcap { get; init; }
 
+    /// <summary>Explicit per-layer global/local override (Gemma-4: GGUF stores <c>attention.sliding_window_pattern</c>
+    /// as a real per-layer bool array, not a broadcast period). Null (default) falls back to
+    /// <see cref="SlidingWindowPattern"/>'s modulo period — every other architecture.</summary>
+    public IReadOnlyList<bool>? GlobalLayers { get; init; }
+
     /// <summary>Whether layer <paramref name="i"/> uses global (full) attention vs a local sliding window.</summary>
-    public bool IsGlobalLayer(int i) => SlidingWindowPattern <= 0 || (i + 1) % SlidingWindowPattern == 0;
+    public bool IsGlobalLayer(int i) => GlobalLayers is not null ? GlobalLayers[i]
+        : SlidingWindowPattern <= 0 || (i + 1) % SlidingWindowPattern == 0;
 
     /// <summary>RoPE base frequency for layer <paramref name="i"/> (Gemma-3 dual-RoPE: local layers use
     /// <see cref="RopeLocalTheta"/>, global use <see cref="RopeTheta"/>).</summary>
@@ -372,6 +401,40 @@ public sealed record TransformerConfig
 
     /// <summary>Whether layer <paramref name="layerIndex"/> is a gated cross-attention layer (mllama).</summary>
     public bool IsCrossAttnLayer(int layerIndex) => CrossAttnLayers.Contains(layerIndex);
+
+    /// <summary>Gemma-4 per-layer embeddings (PLE): width of a small extra embedding mixed into every layer's
+    /// output (a Gemma-3n-lineage mechanism carried into Gemma-4). 0 (default) disables it — every other
+    /// architecture. When set, <see cref="GenericTransformer"/> loads the top-level <c>per_layer_token_embd</c> /
+    /// <c>per_layer_model_proj</c> / <c>per_layer_proj_norm</c> tensors plus each layer's own
+    /// <c>per_layer_inp_gate</c> / <c>per_layer_proj</c> / <c>per_layer_post_norm</c>.</summary>
+    public int PerLayerEmbeddingDim { get; init; }
+
+    /// <summary>Gemma-4 (E2B/E4B mobile variants): from this layer index onward, layers compute NO K/V of their
+    /// own — they reuse an earlier "donor" layer's already-populated KV cache slot (a Gemma-3n-lineage
+    /// memory-saving trick). 0 (default) disables this — every layer owns its KV. See <see cref="HasOwnKv"/> /
+    /// <see cref="KvDonorLayer"/>.</summary>
+    public int KvSharedFromLayer { get; init; }
+
+    /// <summary>Whether layer <paramref name="i"/> computes its own K/V projections (true for every layer when
+    /// <see cref="KvSharedFromLayer"/> is 0/disabled, or for any layer before that cutoff).</summary>
+    public bool HasOwnKv(int i) => KvSharedFromLayer <= 0 || i < KvSharedFromLayer;
+
+    /// <summary>The donor layer index whose KV cache slot layer <paramref name="i"/> reads instead of its own
+    /// (only meaningful when <see cref="HasOwnKv"/> is false for <paramref name="i"/>). Ported from llama.cpp's
+    /// reuse callback: the last layer of the SAME type (global vs local/SWA) among the layers that still compute
+    /// their own KV — <c>cutoff-1</c> for a global layer, <c>cutoff-2</c> for a local one (the layer immediately
+    /// before the cutoff is always global, so the last local layer sits one further back).</summary>
+    public int KvDonorLayer(int i) => IsGlobalLayer(i) ? KvSharedFromLayer - 1 : KvSharedFromLayer - 2;
+
+    /// <summary>Gemma-4: RMS-normalizes V (weightless — no learned scale, just <c>v / rms(v)</c>) after the V
+    /// projection, before RoPE/cache-append. <c>false</c> (default) for everything else, which apply no V norm.</summary>
+    public bool VNorm { get; init; }
+
+    /// <summary>Gemma-4 MoE layers run the routed-expert FFN and the plain dense (gated) FFN as two INDEPENDENT
+    /// parallel branches — each reading the same attention output through its own pre-norm, each normed again
+    /// after its own FFN, then summed — rather than the usual "shared expert fused into the router output"
+    /// pattern every other MoE architecture here uses. <c>false</c> (default) for everything else.</summary>
+    public bool ParallelDenseMoeBranch { get; init; }
 
     /// <summary>Computes the per-head ALiBi slopes (llama.cpp / the original ALiBi paper's geometric schedule):
     /// with <c>n2 = 2^floor(log2(nHead))</c>, <c>m0 = 2^(−maxBias/n2)</c>, <c>m1 = 2^(−maxBias/2/n2)</c>, head
