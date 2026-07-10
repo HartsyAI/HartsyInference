@@ -10,12 +10,17 @@ namespace HartsyInference.LLM.Ssm;
 /// <b>selective scan</b> (h<sub>t</sub> = exp(δA)·h<sub>t-1</sub> + δB·x<sub>t</sub>; y<sub>t</sub> = C·h<sub>t</sub> + D·x<sub>t</sub>)
 /// → y·SiLU(z) → out_proj, with a residual. The linear projections run through <see cref="IBackend"/>; the conv,
 /// softplus, scan and gate run host-side (the scan is an inherently sequential recurrence).</summary>
-public sealed unsafe class MambaModel : IDisposable
+public sealed unsafe class MambaModel : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
+    // Per-layer recurrent state, carried across calls — see Mamba2Model's identical pattern for the full
+    // rationale. _convHistory[i]: last (ConvKernel-1) pre-conv x rows. _ssmState[i]: the selective scan state.
+    private readonly float[][] _convHistory;
+    private readonly float[][] _ssmState;
     private int _disposed;
 
+    public GgufMetadata Metadata => _handle.Metadata;
     public int DModel { get; }
     public int NumLayers { get; }
     public int DInner { get; }
@@ -31,6 +36,20 @@ public sealed unsafe class MambaModel : IDisposable
         _handle = handle; _w = w;
         DModel = dModel; NumLayers = layers; DInner = dInner; DState = dState; ConvKernel = convK; DtRank = dtRank;
         VocabSize = vocab; Eps = eps <= 0f ? 1e-5f : eps;
+        _convHistory = new float[layers][];
+        _ssmState = new float[layers][];
+        for (int i = 0; i < layers; i++)
+        {
+            _convHistory[i] = new float[(convK - 1) * dInner];
+            _ssmState[i] = new float[dInner * dState];
+        }
+    }
+
+    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation.</summary>
+    public void ResetState()
+    {
+        foreach (float[] h in _convHistory) Array.Clear(h);
+        foreach (float[] s in _ssmState) Array.Clear(s);
     }
 
     private static Tensor Relabel(Tensor t)
@@ -69,7 +88,9 @@ public sealed unsafe class MambaModel : IDisposable
 
     private Tensor W(string key) => _w[key];
 
-    /// <summary>Runs the full stack over the token ids and returns the next-token logits (last position).</summary>
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each
+    /// layer's carried recurrent state, and returns the next-token logits (last position). Call
+    /// <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;
@@ -124,7 +145,8 @@ public sealed unsafe class MambaModel : IDisposable
         }
         xz.Dispose();
 
-        // Causal depthwise Conv1d (kernel k, left-pad k-1) + SiLU, host-side.
+        // Causal depthwise Conv1d (kernel k, left context = the (k-1) rows carried from the previous call) + SiLU.
+        float[] history = _convHistory[i];
         float* convW = (float*)W($"{p}.ssm_conv1d.weight").DataPointer;   // [di, k]
         float* convB = (float*)W($"{p}.ssm_conv1d.bias").DataPointer;     // [di]
         float[] xc = new float[seq * di];
@@ -134,11 +156,21 @@ public sealed unsafe class MambaModel : IDisposable
                 float acc = convB[c];
                 for (int j = 0; j < k; j++)
                 {
-                    int ti = s - (k - 1) + j;
-                    if (ti >= 0) acc += convW[c * k + j] * x[ti * di + c];
+                    int combined = s + j;
+                    acc += combined < k - 1
+                        ? convW[c * k + j] * history[combined * di + c]
+                        : convW[c * k + j] * x[(combined - (k - 1)) * di + c];
                 }
                 xc[s * di + c] = acc / (1f + MathF.Exp(-acc));   // SiLU
             }
+        if (k > 1)
+        {
+            int carry = Math.Min(k - 1, seq);
+            for (int r = 0; r < k - 1 - carry; r++)
+                Array.Copy(history, (r + carry) * di, history, r * di, di);
+            for (int r = 0; r < carry; r++)
+                Array.Copy(x, (seq - carry + r) * di, history, (k - 1 - carry + r) * di, di);
+        }
 
         // x_proj → [seq, dtr + 2*ds]; split dt, B, C.
         Tensor xcT = new(new TensorShape(1, seq, di), DType.F32);
@@ -171,7 +203,7 @@ public sealed unsafe class MambaModel : IDisposable
         // GGUF ssm_a already stores A = -exp(A_log) (llama.cpp bakes the -exp at conversion), so use it directly.
         float* A = (float*)W($"{p}.ssm_a").DataPointer;      // [di, ds] = A
         float* dD = (float*)W($"{p}.ssm_d").DataPointer;     // [di]
-        float[] state = new float[di * ds];   // zero-init
+        float[] state = _ssmState[i];   // carried across calls — zero only at true position 0
         float[] y = new float[seq * di];
         for (int s = 0; s < seq; s++)
             for (int c = 0; c < di; c++)

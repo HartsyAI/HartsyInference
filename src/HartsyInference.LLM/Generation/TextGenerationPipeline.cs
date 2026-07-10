@@ -77,19 +77,7 @@ public sealed class TextGenerationPipeline
         };
     }
 
-    private int[] BuildPromptIds(GenerationRequest request)
-    {
-        if (request.RawTokenIds is not null) return [.. request.RawTokenIds];
-        if (request.Messages is not null) return _template.Encode(_tokenizer, request.Messages, addGenerationPrompt: true);
-        if (request.Prompt is not null)
-        {
-            List<ChatMessage> messages = new(2);
-            if (!string.IsNullOrEmpty(request.SystemPrompt)) messages.Add(ChatMessage.System(request.SystemPrompt));
-            messages.Add(ChatMessage.User(request.Prompt));
-            return _template.Encode(_tokenizer, messages, addGenerationPrompt: true);
-        }
-        throw new ArgumentException("Request must set RawTokenIds, Messages, or Prompt.", nameof(request));
-    }
+    private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
 
     private static unsafe Span<float> LastRow(Tensor logits, int t, int vocab)
     {

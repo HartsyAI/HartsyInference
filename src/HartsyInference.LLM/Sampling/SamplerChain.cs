@@ -60,13 +60,18 @@ public sealed class SamplerChain
         {
             throw new ArgumentException("Logits span must be non-empty.", nameof(logits));
         }
-        if (_greedy)
-        {
-            return Argmax(logits);
-        }
+        // Greedy still runs the logit-adjustment steps (repetition penalty) — it only skips the RANDOM draw at
+        // the end. Every step here is a monotonic-or-argmax-preserving transform (temperature scales positively,
+        // top-k/top-p/min-p never drop the highest-scoring token), so running them before Argmax is safe and
+        // matches llama.cpp/HF: greedy means "no randomness", not "no penalties". Skipping repetition penalty
+        // here previously made every greedy decode loop into repeated phrases on small/weak models.
         for (int i = 0; i < _steps.Count; i++)
         {
             _steps[i].Apply(logits, history);
+        }
+        if (_greedy)
+        {
+            return Argmax(logits);
         }
         int count = logits.Length;
         float[] probs = new float[count];

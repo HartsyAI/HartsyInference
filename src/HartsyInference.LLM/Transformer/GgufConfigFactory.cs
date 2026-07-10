@@ -263,7 +263,7 @@ public static class GgufConfigFactory
             //     (interleaved adjacent pairs 2i,2i+1) reproduces HF rotate_half → we must apply Interleaved.
             //   - qwen2/qwen3: no permute, ggml uses NEOX rope (split-half pairs i,i+half) → SplitHalf.
             // Using the wrong pairing leaves attention rotating mismatched dimensions → coherent-looking garbage.
-            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" or "exaone" or "minicpm" or "glm4" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
+            Rope = arch is "llama" or "cohere2" or "command-r" or "mllama" or "internlm2" or "minicpm" or "glm4" or "granite" or "granitemoe" ? RopeStyle.Interleaved : RopeStyle.SplitHalf,
             RopeScaling = BuildRopeScaling(metadata, arch, weights, headDim),
             LowVramQuant = lowVramQuant,
             // Activation: Gemma/GPT-2/BLOOM = tanh-approx GELU; Nemotron = squared ReLU; everything else SwiGLU SiLU.

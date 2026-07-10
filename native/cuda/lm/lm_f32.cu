@@ -53,10 +53,15 @@ __global__ void lm_kv_append_f32(
     unsigned int tNew,
     unsigned int headDim,
     unsigned int offset,
-    unsigned long long total)
+    unsigned long long total,
+    const int* __restrict__ dPos)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
+
+    // Graph-capture decode: the write slot comes from a device buffer {kvLen, qOffset}; qOffset (dPos[1]) is
+    // the position to append at. Null → use the host-passed offset (eager path / all other callers).
+    if (dPos != nullptr) offset = (unsigned int)dPos[1];
 
     unsigned int d = (unsigned int)(i % headDim);
     unsigned long long rem = i / headDim;

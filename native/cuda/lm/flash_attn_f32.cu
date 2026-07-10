@@ -22,7 +22,8 @@ extern "C" __global__ void lm_flash_attn_f32(
     unsigned int Hkv, unsigned int Lk, unsigned int kvLen, unsigned int kvGroup,
     int causal, int qOffset, float scale, float softcap,
     const float* __restrict__ sink, int slidingWindow,
-    const float* __restrict__ alibiSlopes)
+    const float* __restrict__ alibiSlopes,
+    const int* __restrict__ dPos)
 {
     unsigned int idx = blockIdx.x;
     unsigned int r = idx % Tq; idx /= Tq;
@@ -33,6 +34,11 @@ extern "C" __global__ void lm_flash_attn_f32(
     unsigned int hkv = h / kvGroup;
     if (hkv >= Hkv) hkv = Hkv - 1;
     unsigned int tid = threadIdx.x;
+
+    // Graph-capture decode: read this step's position from a device buffer {kvLen, qOffset} so one captured
+    // graph replays at every step without re-baking host ints (grid is position-independent for Tq=1). Null →
+    // use the host-passed kvLen/qOffset (eager path, cross-attention, and all LLM callers).
+    if (dPos != nullptr) { kvLen = (unsigned int)dPos[0]; qOffset = dPos[1]; }
 
     // blockDim.x is the next power of two >= D (set by the launcher), so the tree reduction below is always
     // power-of-two; threads tid in [D, blockDim.x) are padding (contribute 0, write no output). This lets the

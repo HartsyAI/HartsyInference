@@ -12,13 +12,20 @@ namespace HartsyInference.LLM.Ssm;
 ///
 /// <para>Big projections run through <see cref="IBackend.Linear"/>; the token-shift LoRAs, WKV6 scan, GroupNorm and
 /// LayerNorms run host-side (the recurrence is inherently sequential).</para></summary>
-public sealed unsafe class RwkvModel : IDisposable
+public sealed unsafe class RwkvModel : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
     private readonly List<Tensor> _keepAlive;   // originals held alive behind the no-copy relabel views
+    // Per-layer recurrent state, carried across calls — see Rwkv7Model's identical pattern for the full
+    // rationale. _wkvState[il]: the WKV6 outer-product state. _timeMixPrevRow/_channelMixPrevRow[il]: each
+    // mix's last normed hidden row (ShiftDiff's "xx[-1]" token-shift context).
+    private readonly float[][] _wkvState;
+    private readonly float[][] _timeMixPrevRow;
+    private readonly float[][] _channelMixPrevRow;
     private int _disposed;
 
+    public GgufMetadata Metadata => _handle.Metadata;
     public int DModel { get; }
     public int NumLayers { get; }
     public int NumHeads { get; }
@@ -34,6 +41,23 @@ public sealed unsafe class RwkvModel : IDisposable
         _handle = handle; _w = w; _keepAlive = keepAlive;
         DModel = dModel; NumLayers = layers; NumHeads = heads; HeadSize = headSize; Ffn = ffn;
         VocabSize = vocab; RescaleEvery = rescale; Eps = eps <= 0f ? 1e-5f : eps;
+        _wkvState = new float[layers][];
+        _timeMixPrevRow = new float[layers][];
+        _channelMixPrevRow = new float[layers][];
+        for (int i = 0; i < layers; i++)
+        {
+            _wkvState[i] = new float[(long)heads * headSize * headSize];
+            _timeMixPrevRow[i] = new float[dModel];
+            _channelMixPrevRow[i] = new float[dModel];
+        }
+    }
+
+    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation.</summary>
+    public void ResetState()
+    {
+        foreach (float[] s in _wkvState) Array.Clear(s);
+        foreach (float[] r in _timeMixPrevRow) Array.Clear(r);
+        foreach (float[] r in _channelMixPrevRow) Array.Clear(r);
     }
 
     public static RwkvModel Load(string ggufPath)
@@ -101,6 +125,9 @@ public sealed unsafe class RwkvModel : IDisposable
             }
     }
 
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each
+    /// layer's carried recurrent state, and returns the next-token logits (last position). Call
+    /// <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;
@@ -130,12 +157,14 @@ public sealed unsafe class RwkvModel : IDisposable
         return logits;
     }
 
-    // sx[t] = xx[t-1] - xx[t]  (token-shift difference; xx[-1] = 0 for a fresh sequence)
-    private float[] ShiftDiff(float[] xx, int t)
+    // sx[t] = xx[t-1] - xx[t]  (token-shift difference). xx[-1] is the carried last row from the previous call
+    // (zero at true sequence position 0).
+    private float[] ShiftDiff(float[] xx, int t, float[] prevRow)
     {
         int d = DModel; float[] sx = new float[(long)t * d];
         for (int s = 0; s < t; s++)
-            for (int c = 0; c < d; c++) sx[s * d + c] = (s == 0 ? 0f : xx[(s - 1) * d + c]) - xx[s * d + c];
+            for (int c = 0; c < d; c++) sx[s * d + c] = (s == 0 ? prevRow[c] : xx[(s - 1) * d + c]) - xx[s * d + c];
+        Array.Copy(xx, ((long)t - 1) * d, prevRow, 0, d);
         return sx;
     }
 
@@ -145,7 +174,7 @@ public sealed unsafe class RwkvModel : IDisposable
         string p = $"blk.{il}.";
         float[] xx = (float[])x.Clone();
         LayerNorm(xx, t, (float*)W(p + "attn_norm.weight").DataPointer, (float*)W(p + "attn_norm.bias").DataPointer);
-        float[] sx = ShiftDiff(xx, t);
+        float[] sx = ShiftDiff(xx, t, _timeMixPrevRow[il]);
 
         float* lerpX = (float*)W(p + "time_mix_lerp_x.weight").DataPointer;
         float[] xmix = new float[(long)t * d];
@@ -197,7 +226,7 @@ public sealed unsafe class RwkvModel : IDisposable
 
         // WKV6 recurrence per head: state S[H,N,N]; out[s,h,j] = Σ_i r[i]*(u[i]*k[i]*v[j] + S[i,j]); S[i,j] = w[i]*S[i,j] + k[i]*v[j]
         float* u = (float*)W(p + "time_mix_first.weight").DataPointer;   // [H,N]
-        float[] state = new float[(long)H * N * N];
+        float[] state = _wkvState[il];   // carried across calls — zero only at true position 0
         float[] outv = new float[(long)t * d];
         for (int s = 0; s < t; s++)
             for (int h = 0; h < H; h++)
@@ -238,7 +267,7 @@ public sealed unsafe class RwkvModel : IDisposable
         string p = $"blk.{il}.";
         float[] xx = (float[])x.Clone();
         LayerNorm(xx, t, (float*)W(p + "attn_norm_2.weight").DataPointer, (float*)W(p + "attn_norm_2.bias").DataPointer);
-        float[] sx = ShiftDiff(xx, t);
+        float[] sx = ShiftDiff(xx, t, _channelMixPrevRow[il]);
         float* lk = (float*)W(p + "channel_mix_lerp_k.weight").DataPointer; float* lr = (float*)W(p + "channel_mix_lerp_r.weight").DataPointer;
         float[] kx = new float[(long)t * d], rx = new float[(long)t * d];
         for (int s = 0; s < t; s++) for (int c = 0; c < d; c++) { kx[s * d + c] = xx[s * d + c] + sx[s * d + c] * lk[c]; rx[s * d + c] = xx[s * d + c] + sx[s * d + c] * lr[c]; }

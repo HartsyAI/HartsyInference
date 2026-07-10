@@ -14,12 +14,21 @@ namespace HartsyInference.LLM.Ssm;
 /// RMSNorm → in_proj → [z, xBC, dt] → Conv1d(xBC)+SiLU → split x/B/C → softplus(dt+bias) →
 /// <b>SSD scan</b> (hₜ = exp(δA)·hₜ₋₁ + δ·x⊗B; y = h·C + D·x) → gated-RMSNorm(y, z) → out_proj + residual.
 /// Linear projections run through <see cref="IBackend"/>; the conv/softplus/scan/gate run host-side.</summary>
-public sealed unsafe class Mamba2Model : IDisposable
+public sealed unsafe class Mamba2Model : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
+    // Per-layer recurrent state, carried across calls so ForwardLastLogits can be fed only the NEW tokens each
+    // call (true O(1)-per-token decode) instead of recomputing the whole growing sequence every step.
+    // _convHistory[i] holds the last (ConvKernel-1) pre-conv xBC rows (the causal conv's left context);
+    // _ssmState[i] holds the SSD scan's running per-head state. Both start zeroed (matches the original
+    // zero-padding / zero-initial-state at true sequence position 0) and ResetState() re-zeros them for a new
+    // generation (the model instance is reused across unrelated chat turns via the provider's device slot).
+    private readonly float[][] _convHistory;
+    private readonly float[][] _ssmState;
     private int _disposed;
 
+    public GgufMetadata Metadata => _handle.Metadata;
     public int DModel { get; }
     public int NumLayers { get; }
     public int DInner { get; }
@@ -41,6 +50,22 @@ public sealed unsafe class Mamba2Model : IDisposable
         DModel = dModel; NumLayers = layers; DInner = dInner; DState = dState; ConvKernel = convK;
         NumHeads = nHeads; HeadDim = dInner / nHeads; NumGroups = nGroups; VocabSize = vocab;
         Eps = eps <= 0f ? 1e-5f : eps;
+        _convHistory = new float[layers][];
+        _ssmState = new float[layers][];
+        for (int i = 0; i < layers; i++)
+        {
+            _convHistory[i] = new float[(convK - 1) * ConvDim];
+            _ssmState[i] = new float[NumHeads * HeadDim * dState];
+        }
+    }
+
+    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation (the
+    /// model instance persists across chat turns via the provider's device slot; without this a fresh prompt
+    /// would continue from the previous conversation's SSM state).</summary>
+    public void ResetState()
+    {
+        foreach (float[] h in _convHistory) Array.Clear(h);
+        foreach (float[] s in _ssmState) Array.Clear(s);
     }
 
     /// <summary>Shape-relabels an nn.Linear weight from the GGUF [in, out] order to [out, in] (no data move — the
@@ -82,7 +107,10 @@ public sealed unsafe class Mamba2Model : IDisposable
 
     private Tensor W(string key) => _w[key];
 
-    /// <summary>Runs the full stack over the token ids and returns the next-token logits (last position).</summary>
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call (the whole
+    /// prompt for the first/prefill call, exactly one token per decode step) — advancing each layer's carried
+    /// recurrent state, and returns the next-token logits (last position). Call <see cref="ResetState"/> before
+    /// the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;
@@ -140,7 +168,9 @@ public sealed unsafe class Mamba2Model : IDisposable
         }
         proj.Dispose();
 
-        // Causal depthwise Conv1d over xBC (kernel k, left-pad k-1) + bias → SiLU.
+        // Causal depthwise Conv1d over xBC (kernel k, left context = the (k-1) rows carried from the previous
+        // call — zero on the very first call, matching the original zero-padding at true position 0).
+        float[] history = _convHistory[i];
         float* convW = (float*)W($"{p}.ssm_conv1d.weight").DataPointer;   // [convDim, k]
         float* convB = (float*)W($"{p}.ssm_conv1d.bias").DataPointer;     // [convDim]
         float[] xc = new float[seq * convDim];
@@ -150,11 +180,23 @@ public sealed unsafe class Mamba2Model : IDisposable
                 float acc = convB[c];
                 for (int j = 0; j < k; j++)
                 {
-                    int ti = s - (k - 1) + j;
-                    if (ti >= 0) acc += convW[c * k + j] * xbc[ti * convDim + c];
+                    // Combined [history (k-1 rows) ++ xbc (seq rows)] index for this tap.
+                    int combined = s + j;
+                    acc += combined < k - 1
+                        ? convW[c * k + j] * history[combined * convDim + c]
+                        : convW[c * k + j] * xbc[(combined - (k - 1)) * convDim + c];
                 }
                 xc[s * convDim + c] = acc / (1f + MathF.Exp(-acc));   // SiLU
             }
+        // Carry the last (k-1) pre-conv rows forward as this layer's conv history for the next call.
+        if (k > 1)
+        {
+            int carry = Math.Min(k - 1, seq);
+            for (int r = 0; r < k - 1 - carry; r++)
+                Array.Copy(history, (r + carry) * convDim, history, r * convDim, convDim);
+            for (int r = 0; r < carry; r++)
+                Array.Copy(xbc, (seq - carry + r) * convDim, history, (k - 1 - carry + r) * convDim, convDim);
+        }
         // Split conv output into x [di], B [ng*ds], C [ng*ds].
         float[] x = new float[seq * di], Bm = new float[seq * gStateW], Cm = new float[seq * gStateW];
         for (int s = 0; s < seq; s++)
@@ -180,7 +222,7 @@ public sealed unsafe class Mamba2Model : IDisposable
         float* A = (float*)W($"{p}.ssm_a").DataPointer;   // [nh]
         float* Dp = (float*)W($"{p}.ssm_d").DataPointer;  // [nh]
         float[] y = new float[seq * di];                  // [seq, nh*hd] == [seq, di]
-        float[] state = new float[nh * hd * ds];          // zero-init
+        float[] state = _ssmState[i];                      // carried across calls — zero only at true position 0
         for (int s = 0; s < seq; s++)
             for (int hh = 0; hh < nh; hh++)
             {

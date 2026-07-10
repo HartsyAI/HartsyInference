@@ -13,13 +13,23 @@ namespace HartsyInference.LLM.Ssm;
 /// → out_proj) and a <b>channel-mix</b> (token-shift → squared-ReLU MLP, no receptance). LayerNorm + residual
 /// around each. Big projections run through <see cref="IBackend.Linear"/>; the LoRAs, scan, GroupNorm and
 /// LayerNorms run host-side (the recurrence is sequential).</summary>
-public sealed unsafe class Rwkv7Model : IDisposable
+public sealed unsafe class Rwkv7Model : IDisposable, ISsmModel
 {
     private readonly GgufModelLoader.LoadedGgufModel _handle;
     private readonly IReadOnlyDictionary<string, Tensor> _w;
     private readonly List<Tensor> _keepAlive;
+    // Per-layer recurrent state, carried across calls so ForwardLastLogits can be fed only the NEW tokens each
+    // call (true O(1)-per-token decode) instead of recomputing the whole growing sequence every step.
+    // _wkvState[il] is the WKV7 delta-rule state S; _timeMixPrevRow/_channelMixPrevRow[il] are each mix's last
+    // normed hidden row from the previous call (ShiftDiff's "xx[-1]" token-shift context). All start zeroed
+    // (matches the original zero-shift / zero-initial-state at true sequence position 0); ResetState() re-zeros
+    // them for a new generation (the model instance is reused across unrelated chat turns via the device slot).
+    private readonly float[][] _wkvState;
+    private readonly float[][] _timeMixPrevRow;
+    private readonly float[][] _channelMixPrevRow;
     private int _disposed;
 
+    public GgufMetadata Metadata => _handle.Metadata;
     public int DModel { get; }
     public int NumLayers { get; }
     public int NumHeads { get; }
@@ -34,6 +44,25 @@ public sealed unsafe class Rwkv7Model : IDisposable
         _handle = handle; _w = w; _keepAlive = keepAlive;
         DModel = dModel; NumLayers = layers; NumHeads = heads; HeadSize = headSize; Ffn = ffn;
         VocabSize = vocab; Eps = eps <= 0f ? 1e-5f : eps;
+        _wkvState = new float[layers][];
+        _timeMixPrevRow = new float[layers][];
+        _channelMixPrevRow = new float[layers][];
+        for (int i = 0; i < layers; i++)
+        {
+            _wkvState[i] = new float[(long)heads * headSize * headSize];
+            _timeMixPrevRow[i] = new float[dModel];
+            _channelMixPrevRow[i] = new float[dModel];
+        }
+    }
+
+    /// <summary>Zeroes every layer's recurrent state — call before starting a new, unrelated generation (the
+    /// model instance persists across chat turns via the provider's device slot; without this a fresh prompt
+    /// would continue from the previous conversation's WKV state).</summary>
+    public void ResetState()
+    {
+        foreach (float[] s in _wkvState) Array.Clear(s);
+        foreach (float[] r in _timeMixPrevRow) Array.Clear(r);
+        foreach (float[] r in _channelMixPrevRow) Array.Clear(r);
     }
 
     public static Rwkv7Model Load(string ggufPath)
@@ -100,6 +129,10 @@ public sealed unsafe class Rwkv7Model : IDisposable
             }
     }
 
+    /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call (the whole
+    /// prompt for the first/prefill call, exactly one token per decode step) — advancing each layer's carried
+    /// recurrent state, and returns the next-token logits (last position). Call <see cref="ResetState"/> before
+    /// the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
     {
         int seq = ids.Count, d = DModel;
@@ -127,12 +160,14 @@ public sealed unsafe class Rwkv7Model : IDisposable
         return logits;
     }
 
-    // sx[t] = xx[t-1] - xx[t]  (shift difference; xx[-1] = 0)
-    private float[] ShiftDiff(float[] xx, int t)
+    // sx[t] = xx[t-1] - xx[t]  (shift difference). xx[-1] is the carried last row from the previous call
+    // (zero at true sequence position 0 — prevRow starts zeroed and ResetState() re-zeros it).
+    private float[] ShiftDiff(float[] xx, int t, float[] prevRow)
     {
         int d = DModel; float[] sx = new float[(long)t * d];
         for (int s = 0; s < t; s++)
-            for (int c = 0; c < d; c++) sx[s * d + c] = (s == 0 ? 0f : xx[(s - 1) * d + c]) - xx[s * d + c];
+            for (int c = 0; c < d; c++) sx[s * d + c] = (s == 0 ? prevRow[c] : xx[(s - 1) * d + c]) - xx[s * d + c];
+        Array.Copy(xx, ((long)t - 1) * d, prevRow, 0, d);
         return sx;
     }
 
@@ -142,7 +177,7 @@ public sealed unsafe class Rwkv7Model : IDisposable
         string p = $"blk.{il}.";
         float[] xx = (float[])x.Clone();
         LayerNorm(xx, t, (float*)W(p + "attn_norm.weight").DataPointer, (float*)W(p + "attn_norm.bias").DataPointer);
-        float[] sx = ShiftDiff(xx, t);
+        float[] sx = ShiftDiff(xx, t, _timeMixPrevRow[il]);
 
         // Fused token-shift lerp for the 6 components r,w,k,v,a,g: xc = xx + sx * lerp_fused[c].
         float* lerp = (float*)W(p + "time_mix_lerp_fused.weight").DataPointer;   // [d, (1,1,) 6] → component c at c*d
@@ -201,9 +236,10 @@ public sealed unsafe class Rwkv7Model : IDisposable
             }
         for (int s = 0; s < t; s++) for (int c = 0; c < d; c++) { float ka = k[s * d + c] * ka_w[c]; k[s * d + c] += ka * (a[s * d + c] - 1f); }
 
-        // WKV7 delta-rule recurrence. Op inputs: r, w, k, v, aIn = −kk, bIn = kk·a. State S[i,j] per head.
+        // WKV7 delta-rule recurrence. Op inputs: r, w, k, v, aIn = −kk, bIn = kk·a. State S[i,j] per head,
+        // carried across calls — zero only at true position 0.
         // for i: sa = Σ_j aIn[j]·S_prev[i,j]; for j: S[i,j] = S_prev[i,j]·w[j] + v[i]·k[j] + sa·bIn[j]; out[i] += S[i,j]·r[j]
-        float[] state = new float[(long)H * N * N];
+        float[] state = _wkvState[il];
         float[] outv = new float[(long)t * d];
         for (int s = 0; s < t; s++)
             for (int h = 0; h < H; h++)
@@ -258,7 +294,7 @@ public sealed unsafe class Rwkv7Model : IDisposable
         string p = $"blk.{il}.";
         float[] xx = (float[])x.Clone();
         LayerNorm(xx, t, (float*)W(p + "attn_norm_2.weight").DataPointer, (float*)W(p + "attn_norm_2.bias").DataPointer);
-        float[] sx = ShiftDiff(xx, t);
+        float[] sx = ShiftDiff(xx, t, _channelMixPrevRow[il]);
         float* lk = (float*)W(p + "channel_mix_lerp_k.weight").DataPointer;
         float[] kx = new float[(long)t * d];
         for (int s = 0; s < t; s++) for (int c = 0; c < d; c++) kx[s * d + c] = xx[s * d + c] + sx[s * d + c] * lk[c];

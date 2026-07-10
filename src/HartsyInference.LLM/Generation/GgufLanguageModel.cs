@@ -48,7 +48,13 @@ public sealed class GgufLanguageModel : IDisposable
         Template = template;
     }
 
-    private static ILlmTokenizer BuildTokenizer(GgufMetadata meta)
+    /// <summary>Architectures that are NOT <see cref="GenericTransformer"/> decoders — dense/MoE-transformer
+    /// config inference (head_count etc.) is meaningless for these and throws (e.g. mamba2's
+    /// <c>attention.head_count</c> is 0, so deriving head_dim = hidden/heads divides by zero). Route them
+    /// through <see cref="Ssm.SsmLanguageModel"/> instead.</summary>
+    internal static readonly HashSet<string> SsmArchitectures = ["mamba", "mamba2", "rwkv6", "rwkv", "rwkv7"];
+
+    internal static ILlmTokenizer BuildTokenizer(GgufMetadata meta)
     {
         string[]? tokens = meta.GetStringArray("tokenizer.ggml.tokens");
         if (tokens is null) throw new NotSupportedException("GGUF has no embedded tokenizer (tokenizer.ggml.tokens missing).");
@@ -71,6 +77,14 @@ public sealed class GgufLanguageModel : IDisposable
             return new SpmGgufTokenizer(tokens, scores, tokenType, bos, eos, extraStops, addSpacePrefix);
         }
 
+        // RWKV World (tokenizer.ggml.model == "rwkv"): fixed byte-string vocab, greedy longest-prefix trie
+        // match — no BPE merges at all (mamba/rwkv GGUFs have none), so this must run before the "no merges"
+        // NotSupportedException below.
+        if (tokModel == "rwkv")
+        {
+            return new RwkvWorldTokenizer(tokens, tokenType, bos, eos, extraStops);
+        }
+
         // Pre-tokenizer family decides the regex split + ignore_merges. The GPT-2/Qwen default keeps word
         // spaces and newline runs; the Llama-3 family (llama-bpe) uses a different split (case-insensitive
         // contractions, digits in groups of ≤3, newline-aware whitespace) and emits whole in-vocab pre-tokens
@@ -80,6 +94,22 @@ public sealed class GgufLanguageModel : IDisposable
         bool gpt4o = pre is "gpt-4o" or "o200k";   // o200k_base split (Phi-4, GPT-OSS, GPT-4o)
         string? preRegex = llama3Family ? Llama3PreTokenRegex : gpt4o ? Gpt4oPreTokenRegex : null;
         return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, preRegex, ignoreMerges: llama3Family);
+    }
+
+    /// <summary>Compiles the model's own Jinja <c>chat_template</c> when present, but stays tolerant: some models
+    /// (e.g. embedding models) ship templates using constructs the engine doesn't support (Python slicing). Those
+    /// models are still usable for raw completion / embeddings, so fall back to ChatML rather than failing the
+    /// whole load.</summary>
+    internal static IChatTemplate BuildTemplate(GgufMetadata meta)
+    {
+        string? chatTemplate = meta.GetString("tokenizer.chat_template");
+        if (string.IsNullOrWhiteSpace(chatTemplate)) return new ChatMlTemplate();
+        try { return new JinjaChatTemplate(chatTemplate); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WRN] GGUF: chat template did not compile ({ex.Message}); falling back to ChatML (raw completion / embeddings still work).");
+            return new ChatMlTemplate();
+        }
     }
 
     // Llama-3 / GPT-4 byte-level pre-token split (matches llama.cpp LLAMA3 + HF tokenizer.json).
@@ -99,6 +129,9 @@ public sealed class GgufLanguageModel : IDisposable
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(path);
         try
         {
+            if (SsmArchitectures.Contains(handle.Architecture))
+                throw new NotSupportedException($"'{handle.Architecture}' is a state-space (non-transformer) architecture — load it via HartsyInference.LLM.Ssm.SsmLanguageModel, not GgufLanguageModel.");
+
             // GGUF stores matrix dims in [in, out] order (data already row-major [out, in], same as HF
             // safetensors). Relabel every rank-2 tensor's shape to [out, in] so the matmul backend (which reads
             // N=Shape[0], K=Shape[1]) and the embed/lm_head ([vocab, hidden]) see the convention they expect.
@@ -137,21 +170,7 @@ public sealed class GgufLanguageModel : IDisposable
             transformer.LoadWeights(weights, "model");
 
             ILlmTokenizer tokenizer = BuildTokenizer(handle.Metadata);
-            string? chatTemplate = handle.Metadata.GetString("tokenizer.chat_template");
-            // Compile the model's Jinja template if present, but stay tolerant: some models (e.g. embedding models)
-            // ship templates using constructs the engine doesn't support (Python slicing). Those models are still
-            // usable for raw completion / embeddings, so fall back to ChatML rather than failing the whole load.
-            IChatTemplate template;
-            if (!string.IsNullOrWhiteSpace(chatTemplate))
-            {
-                try { template = new JinjaChatTemplate(chatTemplate); }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[WRN] GGUF: chat template did not compile ({ex.Message}); falling back to ChatML (raw completion / embeddings still work).");
-                    template = new ChatMlTemplate();
-                }
-            }
-            else template = new ChatMlTemplate();
+            IChatTemplate template = BuildTemplate(handle.Metadata);
 
             return new GgufLanguageModel(handle, config, transformer, tokenizer, template);
         }

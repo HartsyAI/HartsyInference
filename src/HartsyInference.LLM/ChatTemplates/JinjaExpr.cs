@@ -33,11 +33,15 @@ internal static class Values
         _ => v.ToString() ?? string.Empty,
     };
 
+    // Jinja/Python iterates a string character-by-character (not an error) — e.g. Llama-3.2-Vision's chat
+    // template does `for content in message['content']` unconditionally (before checking `content is string`)
+    // to scan every message for image parts; a plain-string content must degrade to a char sequence, not throw.
     public static List<object?> AsList(object? v) => v switch
     {
         null => [],
         List<object?> l => l,
-        System.Collections.IEnumerable e and not string => [.. e.Cast<object?>()],
+        string s => [.. s.Select(ch => (object?)ch.ToString())],
+        System.Collections.IEnumerable e => [.. e.Cast<object?>()],
         _ => throw new InvalidOperationException($"Value is not iterable: {v.GetType().Name}"),
     };
 
@@ -174,7 +178,7 @@ internal sealed class SliceExpr(Expr target, Expr? start, Expr? stop) : Expr
     public override object? Eval(JinjaEngine.Scope scope)
     {
         object? t = target.Eval(scope);
-        List<object?> list = t is string s ? [.. s.Select(ch => (object?)ch.ToString())] : Values.AsList(t);
+        List<object?> list = Values.AsList(t);
         int n = list.Count;
         int lo = Norm(start?.Eval(scope), 0, n);
         int hi = Norm(stop?.Eval(scope), n, n);
