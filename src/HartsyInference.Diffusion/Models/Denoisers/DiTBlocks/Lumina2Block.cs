@@ -110,8 +110,156 @@ public sealed unsafe class Lumina2Block
         if (_ffWeight3 is not null) yield return _ffWeight3;
     }
 
-    /// <summary>Forward pass with timestep modulation and RoPE. Mirrors Lumina 2.0's <c>Lumina2TransformerBlock.forward</c>: <c>norm_h, gate_msa, scale_mlp, gate_mlp = norm1(h, t)</c>; <c>h += tanh(gate_msa) * norm2(attn(norm_h))</c>; <c>h += tanh(gate_mlp) * ffn_norm2(ffn(ffn_norm1(h) * (1 + scale_mlp)))</c>.</summary>
+    /// <summary>Forward pass with timestep modulation and RoPE. Mirrors Lumina 2.0's <c>Lumina2TransformerBlock.forward</c>: <c>norm_h, gate_msa, scale_mlp, gate_mlp = norm1(h, t)</c>; <c>h += tanh(gate_msa) * norm2(attn(norm_h))</c>; <c>h += tanh(gate_mlp) * ffn_norm2(ffn(ffn_norm1(h) * (1 + scale_mlp)))</c>.
+    /// B=1 (the pipeline case: CFG runs as two batch-1 passes) uses the GPU-resident path — every glue op
+    /// (AdaLN split/tanh, scale, head permutes, GQA expand, rope, gated residual) is an IBackend op, so the
+    /// activation never leaves the device (the old host loops were a full pipeline drain per op per block —
+    /// the dominant cost of the 650s Lumina2 wall). Batched callers keep the host reference path.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor tEmb, ZImageRope? rope)
+        => (int)x.Shape[0] == 1 ? ForwardDevice(backend, x, tEmb, rope) : ForwardHost(backend, x, tEmb, rope);
+
+    private Tensor ForwardDevice(IBackend backend, Tensor x, Tensor tEmb, ZImageRope? rope)
+    {
+        int seqLen = (int)x.Shape[1];
+        DType act = x.DType;
+        TensorShape shape = new TensorShape(1, seqLen, _hiddenSize);
+        TensorShape qHeads = new TensorShape(1, seqLen, _numHeads, _headDim);
+        TensorShape kvHeads = new TensorShape(1, seqLen, _numKvHeads, _headDim);
+        TensorShape qMhShape = new TensorShape(1, _numHeads, seqLen, _headDim);
+        TensorShape kvMhShape = new TensorShape(1, _numKvHeads, seqLen, _headDim);
+
+        // ── 1. norm1 RMSNorm + AdaLN(SiLU(temb)) → (scale_msa, tanh(gate_msa), scale_mlp, tanh(gate_mlp)) ──
+        Tensor normed1 = new Tensor(shape, act);
+        backend.RmsNorm(normed1, x, _norm1NormWeight!, _eps);
+        Tensor[] mod = ComputeAdaLNDevice(backend, tEmb);
+        Tensor normedScaled = ScaleDevice(backend, normed1, mod[0], shape, act);
+        normed1.Dispose();
+
+        // ── 2. Q/K/V ([1, S, H, D] — byte-identical to [1, S, H·D], so QK-norm + rope + permute need no reshape) ──
+        Tensor q = new Tensor(qHeads, act);
+        backend.Linear(q, normedScaled, _toQWeight!, null);
+        Tensor k = new Tensor(kvHeads, act);
+        backend.Linear(k, normedScaled, _toKWeight!, null);
+        Tensor v = new Tensor(kvHeads, act);
+        backend.Linear(v, normedScaled, _toVWeight!, null);
+        normedScaled.Dispose();
+
+        // ── 3. QK-norm (per-head RMSNorm over headDim) ──
+        Tensor qN = new Tensor(qHeads, act);
+        backend.RmsNorm(qN, q, _normQ.Weight, _normQ.Eps);
+        q.Dispose();
+        Tensor kN = new Tensor(kvHeads, act);
+        backend.RmsNorm(kN, k, _normK.Weight, _normK.Eps);
+        k.Dispose();
+
+        // ── 4. RoPE on the pre-permute layout (per-tensor head counts — GQA-safe) ──
+        rope?.ApplyGpuGqa(backend, qN, kN, _numHeads, _numKvHeads);
+
+        // ── 5. Permute [1, S, H, D] → [1, H, S, D]; GQA-expand K/V to the Q head count ──
+        Tensor qMh = new Tensor(qMhShape, act);
+        backend.Permute0213(qMh, qN, seqLen, _numHeads, _headDim);
+        qN.Dispose();
+        Tensor kMh = new Tensor(kvMhShape, act);
+        backend.Permute0213(kMh, kN, seqLen, _numKvHeads, _headDim);
+        kN.Dispose();
+        Tensor vMh = new Tensor(kvMhShape, act);
+        backend.Permute0213(vMh, v, seqLen, _numKvHeads, _headDim);
+        v.Dispose();
+
+        Tensor kFull = kMh, vFull = vMh;
+        if (_numKvHeads != _numHeads)
+        {
+            int groupSize = _numHeads / _numKvHeads;
+            kFull = new Tensor(qMhShape, act);
+            backend.RepeatKvHeads(kFull, kMh, _numKvHeads, groupSize);
+            kMh.Dispose();
+            vFull = new Tensor(qMhShape, act);
+            backend.RepeatKvHeads(vFull, vMh, _numKvHeads, groupSize);
+            vMh.Dispose();
+        }
+
+        // ── 6. SDPA (QK-norm bounds scores → F16-safe, engages the cuDNN fused flash path) ──
+        Tensor attnOut = new Tensor(qMhShape, act);
+        backend.ScaledDotProductAttention(attnOut, qMh, kFull, vFull, null, 1.0f / MathF.Sqrt(_headDim), allowF16: true);
+        qMh.Dispose();
+        kFull.Dispose();
+        vFull.Dispose();
+
+        // ── 7. Out-proj + sandwich norm2 + tanh-gated residual ──
+        Tensor attnFlat = new Tensor(new TensorShape(1, seqLen, _qDim), act);
+        backend.Permute0213(attnFlat, attnOut, _numHeads, seqLen, _headDim);
+        attnOut.Dispose();
+        Tensor projected = new Tensor(shape, act);
+        backend.Linear(projected, attnFlat, _toOutWeight!, null);
+        attnFlat.Dispose();
+        Tensor postAttnNorm = new Tensor(shape, act);
+        backend.RmsNorm(postAttnNorm, projected, _norm2Weight!, _eps);
+        projected.Dispose();
+        Tensor afterAttn = new Tensor(shape, act);
+        backend.GatedResidualLastDim(afterAttn, x, postAttnNorm, mod[1]);
+        postAttnNorm.Dispose();
+
+        // ── 8. FFN: ffn_norm1 · (1 + scale_mlp) → SwiGLU → ffn_norm2 → tanh-gated residual ──
+        Tensor ffNormed = new Tensor(shape, act);
+        backend.RmsNorm(ffNormed, afterAttn, _ffnNorm1Weight!, _eps);
+        Tensor ffModulated = ScaleDevice(backend, ffNormed, mod[2], shape, act);
+        ffNormed.Dispose();
+        Tensor ffOut = ForwardSwiGlu(backend, ffModulated, 1, seqLen);
+        ffModulated.Dispose();
+        Tensor postFfNorm = new Tensor(shape, act);
+        backend.RmsNorm(postFfNorm, ffOut, _ffnNorm2Weight!, _eps);
+        ffOut.Dispose();
+        Tensor result = new Tensor(shape, act);
+        backend.GatedResidualLastDim(result, afterAttn, postFfNorm, mod[3]);
+        afterAttn.Dispose();
+        postFfNorm.Dispose();
+
+        for (int i = 0; i < mod.Length; i++) mod[i].Dispose();
+        return result;
+    }
+
+    /// <summary>Device AdaLN: <c>norm1.linear(SiLU(temb))</c> → four <c>[1, hidden]</c> chunks (row-slices of
+    /// the <c>[1, 4·hidden]</c> projection), tanh on the gate chunks (1, 3). The old host split read the
+    /// device-produced projection via DataPointer — a full drain per block per step.</summary>
+    private Tensor[] ComputeAdaLNDevice(IBackend backend, Tensor tEmb)
+    {
+        TensorShape tShape = new TensorShape(1, _adaLNEmbedDim);
+        Tensor activated = new Tensor(tShape, DType.F32);
+        backend.Silu(activated, tEmb);
+        Tensor projected = new Tensor(new TensorShape(1, 4 * _hiddenSize), DType.F32);
+        backend.Linear(projected, activated, _norm1LinearWeight!, _norm1LinearBias);
+        activated.Dispose();
+
+        Tensor[] results = new Tensor[4];
+        for (int p = 0; p < 4; p++)
+        {
+            Tensor chunk = new Tensor(new TensorShape(1, _hiddenSize), DType.F32);
+            backend.SliceRows(chunk, projected, p);   // [1, 4H] rows of H: offset = p·H
+            if (p == 1 || p == 3)
+            {
+                Tensor gated = new Tensor(chunk.Shape, DType.F32);
+                backend.Tanh(gated, chunk);
+                chunk.Dispose();
+                chunk = gated;
+            }
+            results[p] = chunk;
+        }
+        projected.Dispose();
+        return results;
+    }
+
+    /// <summary>Device <c>x · (1 + scale)</c> with a per-channel <c>[1, hidden]</c> scale row.</summary>
+    private static Tensor ScaleDevice(IBackend backend, Tensor input, Tensor scale, TensorShape shape, DType act)
+    {
+        Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        Tensor output = new Tensor(shape, act);
+        backend.AffineBroadcastLastDim(output, input, scalePlus1, null);
+        scalePlus1.Dispose();
+        return output;
+    }
+
+    private Tensor ForwardHost(IBackend backend, Tensor x, Tensor tEmb, ZImageRope? rope)
     {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];

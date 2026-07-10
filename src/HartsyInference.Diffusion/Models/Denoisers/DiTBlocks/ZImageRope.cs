@@ -138,6 +138,22 @@ public sealed unsafe class ZImageRope
         backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
     }
 
+    /// <summary>GQA variant of <see cref="ApplyGpu"/>: rotates Q with <paramref name="numHeads"/> and K with
+    /// <paramref name="numKvHeads"/> (RoPE indexes only (position, dim) — head count is just layout), same
+    /// pre-permute <c>[1, S, H, D]</c> contract. Used by the Lumina2 GPU-resident block path.</summary>
+    public void ApplyGpuGqa(IBackend backend, Tensor q, Tensor k, int numHeads, int numKvHeads)
+    {
+        if (_cosCache == null || _sinCache == null)
+            throw new InvalidOperationException("ZImageRope.Precompute must be called before ApplyGpuGqa.");
+        int seqLen = (int)q.Shape[1];
+        if (seqLen != _cachedSeqLen)
+            throw new InvalidOperationException($"ZImageRope.ApplyGpuGqa: tensor seqLen {seqLen} != precomputed {_cachedSeqLen}.");
+
+        (Tensor cos, Tensor sin) = GetGpuTables(backend);
+        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
+        backend.WanRopeInterleaved(k, cos, sin, seqLen, numKvHeads, _headDim);
+    }
+
     /// <summary>Expands the host <c>[S, headDim/2]</c> caches to the kernel's <c>[S, headDim]</c> layout (pair
     /// angle stored at even index 2i; odd slots unused) and uploads them once as preloaded weights. Re-uploads
     /// only after a new <see cref="Precompute"/>.</summary>

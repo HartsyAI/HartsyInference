@@ -376,23 +376,25 @@ We publish real numbers and we are honest about where we stand. HartsyInference 
 
 ### Image generation end-to-end vs ComfyUI
 
-RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.45` + in-flight `44.x-local` optimization rounds, 2026-07-09 (living snapshot — updated as optimization rounds land):
+RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identical 1024×1024 request routed to the ComfyUI backend, then the HartsyInference backend, on the same GPU. Warm median of 3 runs, randomized seeds, outputs visually verified coherent. Engine `1.0.0-alpha.46` + in-flight `44.x-local` optimization rounds, 2026-07-10 (living snapshot — updated as optimization rounds land):
 
 | Model | HartsyInference | ComfyUI | Status |
 |---|---:|---:|---|
+| Flux.2 Klein 4B (4 steps) | 2.36 s | 1.85 s | 1.28× — Flux-family kit transplant done (was 3.45 s) |
 | Z-Image-Turbo (8 steps) | **2.76 s** | 3.1 s | **Faster than ComfyUI** |
 | SDXL (20 steps) | **2.93 s** | 3.7 s | **Faster than ComfyUI** (was 33.9 s) |
-| Krea2-Turbo (8 steps) | **4.52 s** | 6.5 s | **Faster than ComfyUI** |
-| Qwen-Image (20 steps) | **40.9 s** | 54.8 s | **Faster than ComfyUI** |
-| ERNIE-Image (20 steps) | **20.0 s** | 23.9 s | **Faster than ComfyUI** |
-| Ideogram4 (20 steps) | 19.5 s | 17.0 s | 1.15× — optimization queued |
 | Boogu-Turbo (4 steps) | 3.26 s | 2.54 s | 1.28× — optimization in progress |
+| Flux-Schnell (4 steps) | 3.6 s | 3.04 s | 1.18× — Flux-family kit transplant done (was 10.5 s) |
+| Krea2-Turbo (8 steps) | **4.52 s** | 6.5 s | **Faster than ComfyUI** |
+| AuraFlow-0.3 (20 steps) | **13.93 s** | 14.0 s | **Tied with ComfyUI** (was 31.4 s) |
+| Flux-Dev (20 steps) | 16.05 s | 12.5 s | 1.28× — Flux-family kit transplant done (was 72.4 s) |
+| Ideogram4 (20 steps) | 19.5 s | 17.0 s | 1.15× — optimization queued |
+| ERNIE-Image (20 steps) | **20.0 s** | 23.9 s | **Faster than ComfyUI** |
 | Boogu-Base (20 steps) | 26.5 s | 17.8 s | 1.49× — optimization in progress |
 | Chroma1-HD (20 steps) | 28.5 s | 16.6 s | Optimization in progress (1.7×, was 33×) |
-| Flux-Dev (20 steps) | 31.0 s | 12.5 s | Optimization in progress |
-| AuraFlow-0.3 (20 steps) | **13.93 s** | 14.0 s | **Tied with ComfyUI** (was 31.4 s) |
-| Flux-Schnell (4 steps) | 10.5 s | — | First benchmark; optimization in progress |
-| Flux.2 Klein 4B (4 steps) | **3.45 s** | — | No ComfyUI baseline yet |
+| Qwen-Image (20 steps) | **39.4 s** | 54.8 s | **Faster than ComfyUI** |
+| Qwen-Image-Edit 2511 (20 steps + reference) | 93 s | 87.8 s | 1.05× — full image editing with up to 3 vision-conditioned reference images |
+| Lumina-Image 2.0 (25 steps, cfg 4) | 17.7 s | — | 37× in one optimization round (was 650 s); no ComfyUI baseline |
 
 These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).
 
@@ -454,6 +456,7 @@ Per-op MatMul / Conv2D / norm / SDPA / elementwise timings against PyTorch, with
 | Chroma · Chroma Radiance | Flux-derivative DiT | ✅ |
 | SD3 | MMDiT (3 text encoders) | ✅ |
 | Qwen-Image | MMDiT (Qwen2.5-VL) | ✅ |
+| Qwen-Image-Edit 2511 | MMDiT + Qwen2.5-VL vision tower (image editing, ≤3 reference images) | ✅ |
 | Hunyuan Image 2.1 | 17B MMDiT | ✅ |
 | HiDream i1 | MMDiT (quad encoder + MoE) | ✅ |
 | AuraFlow | MMDiT + single-DiT hybrid (Pile-T5-XL) | ✅ |
