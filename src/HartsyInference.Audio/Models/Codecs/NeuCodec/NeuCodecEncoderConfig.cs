@@ -1,51 +1,50 @@
 namespace HartsyInference.Audio.Models.Codecs.NeuCodec;
 
-/// <summary>Configuration for <see cref="NeuCodecEncoder"/> — the BigCodec acoustic encoder front of NeuCodec.
-/// Defaults follow the BigCodec acoustic encoder used by NeuCodec: base width ngf 48, downsample ratios
-/// <c>[2,2,4,4,5]</c> (product 320 → 50 Hz at 16 kHz), 3 SnakeBeta residual units per stage with dilations
-/// <c>[1,3,9]</c>, and an FSQ head of 8 dims × 4 levels = 65536 codes (mirrors <see cref="NeuCodecConfig"/>'s
-/// FSQ settings so the encoder and decoder agree on the codebook). Channel doubling per stage gives a final
-/// width of <c>ngf · 2^5 = 1536</c> before <c>final_conv</c>.</summary>
+/// <summary>Configuration for <see cref="NeuCodecEncoder"/> — the X-Codec2 encode path of NeuCodec (HF
+/// <c>NeuCodecModel</c>, transformers PR #47143). Two parallel branches at 16 kHz → 50 Hz:
+/// an acoustic BigVGAN-style SnakeBeta conv encoder (<c>acoustic_encoder.*</c>) and a semantic
+/// Wav2Vec2-BERT conformer (<c>semantic_encoder.*</c>, 16 layers, relative-key attention). Their features
+/// are concatenated <c>[semantic, acoustic]</c>, mixed by <c>fc_encoder</c> (2048→2048) and FSQ-quantized
+/// (<c>quantizer.project_in</c> 2048→8, levels <c>[4]^8</c> = 65536 codes).</summary>
 public sealed record NeuCodecEncoderConfig
 {
     public int InputSampleRate { get; init; } = 16_000;
     public int FrameRate { get; init; } = 50;
 
-    /// <summary>Base channel width.</summary>
-    public int Ngf { get; init; } = 48;
+    // ── Acoustic branch (NeuCodecEncoder) ──
+    /// <summary>Base channel width (<c>encoder_hidden_size</c>); stage <c>i</c> has <c>48·2^(i+1)</c> channels.</summary>
+    public int AcousticBaseChannels { get; init; } = 48;
 
-    /// <summary>Downsample ratios (product = total downsample factor, 320×).</summary>
-    public IReadOnlyList<int> DownRatios { get; init; } = [2, 2, 4, 4, 5];
+    /// <summary>Downsample ratios per stage (product = 320× → 50 Hz at 16 kHz).</summary>
+    public IReadOnlyList<int> DownsamplingRatios { get; init; } = [2, 2, 4, 4, 5];
 
-    public int ResidualUnitsPerStage { get; init; } = 3;
+    public int AcousticResidualKernel { get; init; } = 7;
     public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 3, 9];
-    public int ResidualKernel { get; init; } = 7;
 
-    public int StemKernel { get; init; } = 7;
-    public int FinalKernel { get; init; } = 3;
+    /// <summary>Kaiser-sinc anti-aliasing (BigVGAN Activation1d) around every SnakeBeta: up/down ratio 2, kernel 12.</summary>
+    public int AntiAliasKernel { get; init; } = 12;
+    public int AntiAliasRatio { get; init; } = 2;
 
-    /// <summary>Channels feeding <c>final_conv</c> output and <c>fc_prior</c> input.</summary>
-    public int FcInDim { get; init; } = 1_024;
+    // ── Semantic branch (Wav2Vec2-BERT conformer) ──
+    public int HiddenSize { get; init; } = 1_024;
+    public int SemanticLayers { get; init; } = 16;
+    public int SemanticHeads { get; init; } = 16;
+    public int SemanticHeadDim { get; init; } = 64;
+    public int SemanticIntermediate { get; init; } = 4_096;
+    public int ConvDepthwiseKernel { get; init; } = 31;
+    public int LeftMaxPosition { get; init; } = 64;
+    public int RightMaxPosition { get; init; } = 8;
+    public int FeatureProjInputDim { get; init; } = 160;   // 80 mel bins × stride-2 stacking
+    public int NumMelBins { get; init; } = 80;
+    public float LayerNormEps { get; init; } = 1e-5f;
+
+    // ── Fusion + quantizer ──
+    /// <summary>fc_encoder / quantizer.project_in input dim = acoustic 1024 + semantic 1024.</summary>
+    public int FusionDim { get; init; } = 2_048;
 
     /// <summary>FSQ per-dimension levels — 8 dims × 4 levels = 65536 codes (matches the decoder).</summary>
     public IReadOnlyList<int> FsqLevels { get; init; } = [4, 4, 4, 4, 4, 4, 4, 4];
-
-    /// <summary>FSQ code-vector dimension (== FsqLevels.Count).</summary>
     public int FsqDim { get; init; } = 8;
 
-    /// <summary>Optional semantic branch: input feature dim fed to the semantic encoder (e.g. distilled HuBERT features).</summary>
-    public int SemanticEncoderInputDim { get; init; } = 1_024;
-
-    /// <summary>Optional semantic branch: hidden width of the semantic encoder.</summary>
-    public int SemanticEncoderHiddenDim { get; init; } = 1_024;
-
-    /// <summary>Optional semantic branch: output dim of the semantic encoder.</summary>
-    public int SemanticEncoderOutDim { get; init; } = 1_024;
-
-    /// <summary>Optional semantic branch: dim of the post-acoustic <c>fc_post_a</c> projection.</summary>
-    public int FcPostADim { get; init; } = 1_024;
-
     public static NeuCodecEncoderConfig Default => new();
-
-    // A DistillNeuCodec preset (SQCodec + DistillHubert) is Phase 4.
 }

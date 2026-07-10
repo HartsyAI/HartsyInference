@@ -184,6 +184,12 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
             for (int i = 0; i < mono24k.Length; i++) mono24k[i] *= g;
         }
 
+        // Trim leading/trailing silence so tRef reflects actual speech. Otherwise pauses/silence inflate the
+        // reference length, which over-estimates the target duration (target = ref_frames·target_len/ref_len)
+        // and lets the model pad the output start with reference continuation ("reference bleed") — mirrors
+        // upstream preprocess_ref_audio_text, which clips the reference to its non-silent span.
+        mono24k = TrimEdgeSilence(mono24k, sr);
+
         MelSpectrogramExtractor extractor = new(melCfg);
         float[,] melData = extractor.Compute(mono24k);
         int tRef = melData.GetLength(1);
@@ -197,6 +203,38 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         float[] audio = Generate(backend, refMel, refText, targetText, options);
         refMel.Dispose();
         return audio;
+    }
+
+    /// <summary>Trims leading/trailing silence from the reference waveform using windowed RMS, keeping a small
+    /// margin so onsets/offsets aren't clipped. Conservative — only removes clearly-silent edge regions
+    /// (window RMS below a fraction of the loudest window); never touches interior audio.</summary>
+    private static float[] TrimEdgeSilence(float[] x, int sr)
+    {
+        int win = Math.Max(1, sr / 50);          // 20 ms windows
+        int nWin = x.Length / win;
+        if (nWin < 4) return x;                    // too short to bother
+        float[] rms = new float[nWin];
+        float maxRms = 0f;
+        for (int wi = 0; wi < nWin; wi++)
+        {
+            double s = 0; int off = wi * win;
+            for (int i = 0; i < win; i++) { float v = x[off + i]; s += (double)v * v; }
+            rms[wi] = (float)Math.Sqrt(s / win);
+            if (rms[wi] > maxRms) maxRms = rms[wi];
+        }
+        if (maxRms < 1e-4f) return x;              // effectively silent — leave as-is
+        float thresh = 0.08f * maxRms;             // silence = below 8% of the loudest window
+        int first = 0; while (first < nWin && rms[first] < thresh) first++;
+        int last = nWin - 1; while (last > first && rms[last] < thresh) last--;
+        if (first == 0 && last == nWin - 1) return x;   // no edge silence
+        int margin = sr / 20;                      // 50 ms keepout on each side
+        int start = Math.Max(0, first * win - margin);
+        int end = Math.Min(x.Length, (last + 1) * win + margin);
+        int len = end - start;
+        if (len <= 0 || len >= x.Length) return x;
+        float[] outp = new float[len];
+        Array.Copy(x, start, outp, 0, len);
+        return outp;
     }
 
     private static string NormalizeRefText(string refText)
@@ -247,6 +285,7 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         // this the CUDA path streams every weight from host each forward — the audio stack's lazy auto-promote
         // loses its headroom gate to the transient pool, so weights never promote (no-op on CPU).
         backend.PreloadWeights(_dit.EnumerateWeights());
+        _dit.ResetTextCache();   // text embedding is cached across steps; clear any prior generation's entry
         try
         {
             F5SwaySamplingScheduler sched = new(opts.Steps, opts.SwayCoef);

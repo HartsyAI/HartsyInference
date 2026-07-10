@@ -22,7 +22,7 @@ public sealed record NeuCodecConfig
     /// <summary>FSQ code-vector dimension (== FsqLevels.Count).</summary>
     public int FsqDim { get; init; } = 8;
 
-    /// <summary>Quantizer project-out dim (FSQ 8 → 2048), then fc_post_a 2048 → backbone dim.</summary>
+    /// <summary>Quantizer project-out dim (FSQ 8 → 2048), then acoustic_decoder.fc 2048 → backbone dim.</summary>
     public int QuantizerDim { get; init; } = 2_048;
 
     public int BackboneDim { get; init; } = 1_024;

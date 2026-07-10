@@ -24,7 +24,11 @@ internal sealed class PickleMachine
     private readonly List<object?> _stack = [];
     private readonly List<object?> _memo = [];
 
-    public PickleMachine(byte[] data) => _b = data;
+    public PickleMachine(byte[] data, int start = 0) { _b = data; _i = start; }
+
+    /// <summary>Byte offset just past the <c>STOP</c> opcode after <see cref="Run"/> returns. Used to parse the
+    /// legacy <c>torch.save</c> format's five back-to-back pickle streams from one buffer.</summary>
+    public int Position => _i;
 
     public object? Run()
     {

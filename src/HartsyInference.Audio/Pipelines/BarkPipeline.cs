@@ -58,7 +58,10 @@ public sealed unsafe class BarkPipeline : IDisposable
         int[,] codes = _fine.Refine(backend, coarse, seed + 2);
 
         // ── 4. EnCodec decode ──
-        Tensor codesT = new(new TensorShape(1, _cfg.NumCodebooks, t), DType.I32);
+        // Codes are [nQ, batch, T_frames] (EnCodec/RVQ.Decode reads nQ = Shape[0]); Bark is single-batch so
+        // the buffer is codebook-major cp[cb*t + j]. Declaring [1, NumCodebooks, t] here would make RVQ read
+        // nQ=1 and decode ONLY codebook 0 — dropping all 7 residual/fine codebooks (heavy broadband HF noise).
+        Tensor codesT = new(new TensorShape(_cfg.NumCodebooks, 1, t), DType.I32);
         int* cp = (int*)codesT.DataPointer;
         for (int cb = 0; cb < _cfg.NumCodebooks; cb++)
             for (int j = 0; j < t; j++) cp[(long)cb * t + j] = codes[cb, j];

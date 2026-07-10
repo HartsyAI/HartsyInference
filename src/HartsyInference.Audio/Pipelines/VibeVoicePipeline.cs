@@ -24,12 +24,13 @@ namespace HartsyInference.Audio.Pipelines;
 ///   <item><b>Assembly</b>: concatenate all audio chunks → 24 kHz mono waveform.</item>
 /// </list>
 ///
-/// <para><b>Status:</b> first-cut single-stream implementation. The full upstream code path
-/// runs a parallel negative-prompt stream for per-token CFG; we omit that for now and use
-/// the diffusion-head's positive condition only (effective <c>cfg_scale = 1.0</c>). Voice
-/// embedding splicing and the semantic-feedback loop are implemented. Audio quality of
-/// the first pass may not match the reference until CFG is added, but the pipeline runs
-/// end-to-end and produces audible output.</para></summary>
+/// <para><b>Status:</b> full dual-stream implementation. A parallel negative (unconditional,
+/// text/voice-masked) LM stream runs in lockstep with the positive stream; at each diffusion
+/// token the head is evaluated on both conditions and combined as
+/// <c>eps = uncond + cfg_scale*(cond - uncond)</c> (<see cref="VibeVoiceConfig.CfgScale"/>,
+/// default 1.3). Token selection is greedy by default (<see cref="VibeVoiceConfig.DoSample"/>),
+/// matching upstream <c>do_sample=False</c>. Voice-embedding splicing and the semantic-feedback
+/// loop are implemented. Setting <c>CfgScale = 1</c> reverts to the single-stream path.</para></summary>
 public sealed class VibeVoicePipeline : IDisposable
 {
     private readonly VibeVoiceConfig _cfg;
@@ -136,6 +137,7 @@ public sealed class VibeVoicePipeline : IDisposable
     {
         ThrowIfDisposed();
         uint rng = HartsyInference.Audio.Dsp.DeterministicRng.Seed(seed);
+        uint noiseRng = HartsyInference.Audio.Dsp.DeterministicRng.Seed(seed ^ 0x51ED270B);   // separate stream for per-frame diffusion noise
         VibeVoiceProcessor.PreparedPrompt prep = _processor.Prepare(lines, voiceWavPaths);
         int promptLen = prep.TokenIds.Length;
 
@@ -143,6 +145,14 @@ public sealed class VibeVoicePipeline : IDisposable
         // diffusion-head's per-frame embed appends (one per emitted speech_diffusion token).
         int cacheCap = Math.Min(_lmCfg.MaxPositionEmbeddings, promptLen + maxNewTokens + 16);
         using IKvCache kvCache = _lm.CreateDecodeCache(cacheCap);
+
+        // Negative (unconditional) LM stream for classifier-free guidance. Unlike the positive
+        // stream it holds NO text/voice prefill — only a leading speech_start plus the diffusion
+        // embeds of the current speech segment (reset at each speech_start). At every diffusion
+        // token both streams' last hidden states condition the denoiser (see DenoiseLatent).
+        // Only allocated when CFG is active (cfg_scale != 1).
+        bool cfgActive = MathF.Abs(_cfg.CfgScale - 1f) > 1e-6f;
+        using IKvCache? negKvCache = cfgActive ? _lm.CreateDecodeCache(cacheCap) : null;
 
         // ── Prefill ─────────────────────────────────────────────────────────
         // 1. Encode each voice prompt through the acoustic VAE → [1, N_i, 64] mean latents.
@@ -183,6 +193,9 @@ public sealed class VibeVoicePipeline : IDisposable
         // emitted token is a speech_diffusion. Slice last frame of prefillHidden.
         using Tensor _lastHiddenWarm = SliceLastFrame(prefillHidden, _lmCfg.HiddenSize);
         Tensor? lastHidden = CopyOf(_lastHiddenWarm);
+        // Negative-stream conditioning hidden state. Lazily primed (by forwarding a lone
+        // speech_start through negKvCache) at the first diffusion token after each reset.
+        Tensor? negLastHidden = null;
         try
         {
             int prevToken = VibeVoiceTokenizer.SpeechStartTokenId;     // last token in the prompt template
@@ -191,7 +204,10 @@ public sealed class VibeVoicePipeline : IDisposable
                 // Project the last hidden state to logits, mask to the constrained vocab,
                 // sample (greedy for determinism in v1).
                 using Tensor logits = _lm.ProjectLogits(backend, lastHidden!, batch: 1, t: 1);
-                int nextToken = SampleConstrained(logits, temperature, topP, ref rng);
+                // Greedy once CFG is on (upstream do_sample=False); the temperature/top-p path
+                // was a workaround for the missing-guidance ramble. DoSample restores stochastic.
+                float effTemp = _cfg.DoSample ? temperature : 0f;
+                int nextToken = SampleConstrained(logits, effTemp, topP, ref rng);
                 progress?.Report(step);
 
                 if (nextToken == VibeVoiceTokenizer.EndOfTextTokenId)
@@ -206,16 +222,40 @@ public sealed class VibeVoicePipeline : IDisposable
                     semanticCache?.SetToZero(sampleIndices);
                 }
 
+                // speech_start: collapse the negative CFG stream back to a bare speech_start
+                // (upstream masks its attention to the lone start token at each new segment).
+                if (nextToken == VibeVoiceTokenizer.SpeechStartTokenId && negKvCache is not null)
+                {
+                    negKvCache.Reset();
+                    negLastHidden?.Dispose();
+                    negLastHidden = null;
+                }
+
                 if (nextToken == VibeVoiceTokenizer.SpeechDiffusionTokenId)
                 {
                     // ── Diffusion sub-loop ──────────────────────────────────
-                    // Condition is the LM's last hidden state at this position.
+                    // Positive condition is the LM's last hidden state at this position.
                     using Tensor cond = ExpandTo3D(lastHidden!, _lmCfg.HiddenSize);
 
-                    // Run 20 DDPM steps, v-prediction, cosine, single positive stream
-                    // (no CFG batching for v1).
-                    Tensor noiseLatent = SampleNoise(_cfg.AcousticVaeDim, seed: step + 1);
-                    Tensor denoised = DenoiseLatent(backend, noiseLatent, cond);
+                    // Negative condition for CFG: prime the unconditional stream on first use
+                    // (forward a lone speech_start through negKvCache), then read its hidden.
+                    Tensor? negCond = null;
+                    if (negKvCache is not null)
+                    {
+                        if (negLastHidden is null)
+                        {
+                            int[] startTok = [VibeVoiceTokenizer.SpeechStartTokenId];
+                            Tensor negInit = _lm.Forward(backend, startTok, batch: 1, posStart: negKvCache.CurrentLength, negKvCache);
+                            negLastHidden = SliceLastFrame(negInit, _lmCfg.HiddenSize);
+                            negInit.Dispose();
+                        }
+                        negCond = ExpandTo3D(negLastHidden!, _lmCfg.HiddenSize);
+                    }
+
+                    // Run 20 DDPM steps, v-prediction, cosine, CFG-combined cond/uncond.
+                    Tensor noiseLatent = SampleNoise(_cfg.AcousticVaeDim, ref noiseRng);
+                    Tensor denoised = DenoiseLatent(backend, noiseLatent, cond, negCond);
+                    negCond?.Dispose();
                     noiseLatent.Dispose();
 
                     // Un-normalize: raw_latent = latent / scaling - bias.
@@ -254,6 +294,17 @@ public sealed class VibeVoicePipeline : IDisposable
                     lastHidden!.Dispose();
                     lastHidden = SliceLastFrame(newHidden, _lmCfg.HiddenSize);
                     newHidden.Dispose();
+
+                    // Advance the negative stream in lockstep on the SAME diffusion embed
+                    // (upstream feeds both streams identical inputs_embeds), so its next-token
+                    // hidden reflects the same acoustic history minus the text/voice context.
+                    if (negKvCache is not null)
+                    {
+                        Tensor negNew = _lm.ForwardEmbeds(backend, stepEmbed, batch: 1, t: 1, posStart: negKvCache.CurrentLength, negKvCache);
+                        negLastHidden!.Dispose();
+                        negLastHidden = SliceLastFrame(negNew, _lmCfg.HiddenSize);
+                        negNew.Dispose();
+                    }
                 }
                 else
                 {
@@ -273,6 +324,7 @@ public sealed class VibeVoicePipeline : IDisposable
         finally
         {
             lastHidden?.Dispose();
+            negLastHidden?.Dispose();
         }
 
         // ── Assembly ─────────────────────────────────────────────────────────
@@ -353,10 +405,13 @@ public sealed class VibeVoicePipeline : IDisposable
         }
     }
 
-    private Tensor DenoiseLatent(IBackend backend, Tensor noiseLatent, Tensor cond)
+    private Tensor DenoiseLatent(IBackend backend, Tensor noiseLatent, Tensor cond, Tensor? negCond)
     {
         using VibeVoiceCosineDpmSolver scheduler = new();
         scheduler.SetTimesteps(_cfg.DiffusionHead.DdpmNumInferenceSteps);
+
+        float cfg = _cfg.CfgScale;
+        bool useCfg = negCond is not null && MathF.Abs(cfg - 1f) > 1e-6f;
 
         Tensor speech = noiseLatent;
         bool ownsSpeech = false;
@@ -364,7 +419,22 @@ public sealed class VibeVoicePipeline : IDisposable
         for (int step = 0; step < timesteps.Length; step++)
         {
             float[] tBatch = [timesteps[step]];
-            Tensor vPred = _diffusionHead.Forward(backend, speech, tBatch, cond);
+            // Positive (conditional) head pass. Upstream batches cond+uncond and feeds the
+            // SAME noisy latent to both halves — we run two passes on `speech` and combine:
+            //   eps = uncond + cfg_scale * (cond - uncond).
+            Tensor vCond = _diffusionHead.Forward(backend, speech, tBatch, cond);
+            Tensor vPred;
+            if (useCfg)
+            {
+                Tensor vUncond = _diffusionHead.Forward(backend, speech, tBatch, negCond!);
+                vPred = CombineCfg(vUncond, vCond, cfg);
+                vUncond.Dispose();
+                vCond.Dispose();
+            }
+            else
+            {
+                vPred = vCond;
+            }
             Tensor next = scheduler.Step(vPred, speech, step);
             vPred.Dispose();
             if (ownsSpeech) speech.Dispose();
@@ -438,6 +508,18 @@ public sealed class VibeVoicePipeline : IDisposable
         return allowed[order[keep - 1]];
     }
 
+    // CFG combine: eps = uncond + cfg_scale * (cond - uncond). Latents are tiny ([1,1,64]).
+    private static unsafe Tensor CombineCfg(Tensor uncond, Tensor cond, float cfg)
+    {
+        Tensor result = new(cond.Shape, DType.F32);
+        long n = cond.ElementCount;
+        float* rp = (float*)result.DataPointer;
+        float* cp = (float*)cond.DataPointer;
+        float* up = (float*)uncond.DataPointer;
+        for (long i = 0; i < n; i++) rp[i] = up[i] + cfg * (cp[i] - up[i]);
+        return result;
+    }
+
     private static unsafe Tensor SliceLastFrame(Tensor hidden, int dim)
     {
         // [B, T, dim] → [B, 1, dim] of the last T position.
@@ -475,17 +557,15 @@ public sealed class VibeVoicePipeline : IDisposable
         return copy;
     }
 
-    private static unsafe Tensor SampleNoise(int dim, int seed)
+    // Draws fresh decorrelated Gaussian noise from one persistent stream (matching torch.randn per frame). The old
+    // per-frame `new Random(step+1)` gave adjacent frames near-identical first draws (correlated seeds) — near-duplicate
+    // latents that garble short utterances — and ignored the user seed.
+    private static unsafe Tensor SampleNoise(int dim, ref uint rng)
     {
         Tensor t = new(new TensorShape(1, 1, dim), DType.F32);
         float* p = (float*)t.DataPointer;
-        Random rng = new(seed);
         for (int i = 0; i < dim; i++)
-        {
-            double u1 = 1.0 - rng.NextDouble();
-            double u2 = 1.0 - rng.NextDouble();
-            p[i] = (float)(Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2));
-        }
+            p[i] = HartsyInference.Audio.Dsp.DeterministicRng.NextGaussian(ref rng);
         return t;
     }
 

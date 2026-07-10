@@ -82,8 +82,13 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         backend.Transpose2D(mu, muSeq, tMel, mel);
         muSeq.Dispose();
 
-        // Speaker embedding → mel dim [1, mel] (kept as [1, mel, 1] for broadcast).
-        Tensor spk = WhisperOps.ProjectLinear(backend, ReshapeRow(speakerEmbed, _cfg.Flow.SpeakerEmbedDim), _spkAffineW!, _spkAffineB, 1, 1, _cfg.Flow.SpeakerEmbedDim, mel);
+        // Speaker embedding → mel dim [1, mel] (kept as [1, mel, 1] for broadcast). The CAM++ x-vector MUST be
+        // L2-normalized before the affine projection — reference flow.inference does `F.normalize(embedding, dim=1)`
+        // (the affine was trained on unit-norm inputs; feeding the raw ~10-30×-magnitude x-vector over-scales the
+        // speaker conditioning and yields a growly/demonic voice).
+        Tensor spkNorm = L2NormalizeRow(speakerEmbed, _cfg.Flow.SpeakerEmbedDim);
+        Tensor spk = WhisperOps.ProjectLinear(backend, spkNorm, _spkAffineW!, _spkAffineB, 1, 1, _cfg.Flow.SpeakerEmbedDim, mel);
+        spkNorm.Dispose();
         Tensor spkChan = spk.Reshape(new TensorShape(1, mel, 1));
 
         // Reference-mel conditioning: place the prompt mel in the prefix, zeros elsewhere.
@@ -114,10 +119,19 @@ public sealed unsafe class CosyVoiceFlow : IDisposable
         Buffer.MemoryCopy(sp, dp, dim * 4, dim * 4);
     }
 
-    private static Tensor ReshapeRow(Tensor v, int dim)
+    /// <summary>L2-normalizes the speaker x-vector into a fresh <c>[1, 1, dim]</c> tensor
+    /// (<c>F.normalize(embedding, dim=1)</c>, eps 1e-12). Never mutates the caller's tensor.</summary>
+    private static Tensor L2NormalizeRow(Tensor v, int dim)
     {
         if (v.ElementCount != dim) throw new ArgumentException($"speaker embed must have {dim} elements, got {v.ElementCount}.");
-        return v.Reshape(new TensorShape(1, 1, dim));
+        Tensor outT = new(new TensorShape(1, 1, dim), DType.F32);
+        float* sp = (float*)v.DataPointer;
+        float* dp = (float*)outT.DataPointer;
+        double sum = 0;
+        for (int i = 0; i < dim; i++) sum += (double)sp[i] * sp[i];
+        float inv = 1f / MathF.Max((float)Math.Sqrt(sum), 1e-12f);
+        for (int i = 0; i < dim; i++) dp[i] = sp[i] * inv;
+        return outT;
     }
 
     private static void WritePromptCond(Tensor cond, Tensor promptMel, int mel, int tMel)

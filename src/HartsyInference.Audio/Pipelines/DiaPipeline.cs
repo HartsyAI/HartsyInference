@@ -238,7 +238,27 @@ public sealed unsafe class DiaPipeline : IDisposable
         Array.Sort(order, (a, b) => guided[b].CompareTo(guided[a]));
         float[] arr = new float[v];
         Array.Fill(arr, float.NegativeInfinity);
+        // model.py:442-445: the candidate window is the top-K of the CFG-COMBINED logits, but the sampled
+        // distribution (EOS-argmax + top_p + multinomial in _sample_next_token) is the CONDITIONAL logits
+        // restricted to it (`cond_logits.masked_fill(mask, -inf)`). Filling `guided` here is WRONG: at an
+        // utterance's end the all-pad UNCOND branch also wants EOS, so cfg*(cond-uncond) shrinks (or flips)
+        // the EOS margin — EOS then never becomes the argmax and generation runs to the cap (never-EOS +
+        // off-distribution garble → near-silent decode). Sample the conditional, exactly like upstream.
         for (int r = 0; r < k; r++) arr[order[r]] = cond[order[r]];
+        // The window is the top-K of GUIDED, but at an utterance's end the all-pad uncond branch also wants
+        // EOS, so guided = cond+g*(cond-uncond) shrinks/flips the EOS score and EOS drops out of the top-K —
+        // even though the reference (and we) sample the CONDITIONAL. Once EOS leaves the window it can never
+        // be the argmax, so channel 0 never terminates (never-EOS → the model babbles/repeats to the cap).
+        // Rescue: if the CONDITIONAL itself ranks EOS within its own top-K, re-admit it to the window for
+        // channel 0. It still only fires through the EOS-is-argmax path below, so mid-utterance (low cond EOS)
+        // is unchanged; it fires exactly when the conditional most wants to stop.
+        if (channel == 0 && float.IsNegativeInfinity(arr[cfg.AudioEos]))
+        {
+            float eosCond = cond[cfg.AudioEos];
+            int rank = 0;
+            for (int i = 0; i <= cfg.AudioEos && rank < k; i++) if (cond[i] > eosCond) rank++;
+            if (rank < k) arr[cfg.AudioEos] = eosCond;
+        }
         for (int i = cfg.AudioEos + 1; i < v; i++) arr[i] = float.NegativeInfinity;
         if (channel != 0) arr[cfg.AudioEos] = float.NegativeInfinity;
         int top = 0;
