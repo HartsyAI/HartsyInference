@@ -22,6 +22,23 @@ Zeta-Chroma = lodestones' Zeta-Chroma repo sampling code (x0-parameterization!) 
 the shared trunk; Radiance = lodestones Chroma-Radiance reference (pixel head); HunyuanImage/Flux.2 Dev
 are already visually correct — perf-only.
 
+**VIDEO ARC round 11 — Wan-Animate CHECKERBOARD SOLVED (44.84-local, 2026-07-11).** The ~16 px halftone
+tile (period = one DiT token = 2×2 latent patch × 8× VAE) was a **dropped fp8 weight scale**, not an
+Animate-arch bug. `CheckpointConvertUtils.ApplyFp8ScaledDequant:354` folded the `.scale_weight` companion
+into `Fp8ScaleFactor` only when the companion was **F32** — but the Kijai `wan2.2_animate_14B_fp8_scaled_KJ_v2`
+checkpoint ships them **BF16** (all earlier-validated Wan fp8 ckpts use F32, which is why only Animate
+broke). Guard dropped all 514 scales (~0.13–0.46) → raw fp8 weights (±448) ran ~5× hot → stage dump
+(`HARTSY_ANIMATE_DUMP`) showed block-0 out exploding **rms 0.17 → 4.4e5** (→2.7e6 by block-1), collapsing
+every token to the dominant direction (head interTokenStd/rms **0.005**) = identical patches = the tile.
+Fix = read the scalar as F32 for F32/F16/**BF16** companions (F32 branch byte-identical → **zero regression**
+to F32-scale Wan variants; confirmed t2v/i2v/s2v_14B all F32). Post-fix: block-0 rms **0.72**, head
+interTokenStd/rms **0.92**, tile gone. Also chunked `WanAnimateTransformer.BuildMotion` to comfy's
+`encode_bs=8` (the all-frames 512² StyleGAN stack OOM'd beside the resident 14B DiT). **Swarm real-input
+e2e (17f 480²) completes → smooth checkerboard-free video.** Flagships on 44.84: Z-Image 2.82 s, Krea2
+4.52 s; Wan T2V ti2v-5B regen coherent. LESSON: fp8 scale-companion guards must accept BF16/F16 scalars
+(the Zeta/F-Lite BF16-as-float* class, here in the converter). Diagnostics kept: `HARTSY_ANIMATE_DUMP`,
+`HARTSY_ANIMATE_NO_POSE/NO_FACE`. Patches: `scratchpad/video_arc_round11.patch` (+extension pin note).
+
 1. **F-Lite — ✅ CORRECT + FAST (44.66-local, 07-11).** Coherent reference-quality astronaut @1024²/30st
    (verified vs a same-recipe python GPU reference gen — flite_pygen.py in scratchpad). Single gen 67.9s
    (1.9s/step, was 90s/step + AV crash). THE bugs (found via byte-dump oracles, in order): (1) reference
@@ -74,6 +91,120 @@ No 9.2-only instructions were present. Future PTX regens must target ≤9.0 or s
 
 ---
 
+
+## 2026-07-11 — VIDEO ARC round 10: Wan T2V step-floor profile → **COMPUTE-FLOOR EARLY-BAIL** (no code shipped, `44.82-local` unchanged)
+
+**Mission:** kill Wan's per-step host `scheduler.Step` latent drain with a device Euler/UniPC step (drain-free
+loop), then CUDA-graph-capture the resident DiT — OR early-bail if the profile shows the step is already at the
+fp8 compute floor. **Verdict after profiling: EARLY-BAIL — Wan T2V is genuinely compute-bound on fp8 tensor-core
+GEMM + fused flash attention. No host drain worth killing, and graph capture would not help. No engine edit.**
+
+**The decisive experiment — per-op stream-sync leaves the step time UNCHANGED.** Relaunched Swarm with
+`HARTSY_PROFILE=1 HARTSY_PROFILE_SYNC=1` (a `cuStreamSynchronize` after *every* op) and ran `wan2.1_t2v_14B_fp8_scaled`
+(25f 512×320, 15 steps, cfg 3.5, seed 42). Steps ran at **~1.79 s/step — identical to the un-profiled 1.82 s
+baseline** (step 1 @16:36:42 → step 15 @16:37:07 = 25 s / 14 intervals). Forcing a full drain after each of the
+~2500–3000 kernel launches per step added **~0 ms**. This is only possible if (a) there is **no async overlap being
+exploited** (the step is already a serial chain of dependent GPU-compute kernels) and (b) **kernel launch/host
+overhead is negligible** vs the big-kernel execution. Both are the textbook signatures of a compute-bound loop —
+and both are exactly what would make CUDA-graph capture (which only removes launch overhead) a no-op here.
+
+**Op breakdown (`HARTSY_PROFILE_SYNC`, true GPU time, cumulative over a cold 4-step gen = umT5 encode + 4 steps +
+VAE decode; `scratchpad/wan_t2v_profile_round10.txt`):**
+
+| op | calls | total_ms | avg_ms | note |
+|---|---|---|---|---|
+| **Linear** | 3412 | **4930** | 1.445 | native fp8 tensor-core GEMM — the floor |
+| **SDPA** | 664 | **2003** | 3.017 | cuDNN fused flash attn (mask-null, F16) — already optimal |
+| H2D_MISS_BIG | 303 | 1335 | 4.407 | **one-time cold-start**: umT5 8.4 GB encode+upload + DiT 16.4 GB preload (NOT per-step) |
+| Permute0213 | 2560 | 408 | 0.159 | patchify/rope layout |
+| GatedResidual | 2880 | 362 | 0.126 | AdaLN gated residual (device) |
+| RmsNorm | 1329 | 252 | 0.190 | QK-norm |
+| Gelu | 346 | 250 | 0.722 | FFN |
+| AffineBroadcast | 968 | 221 | 0.228 | AdaLN shift/scale (device) |
+| LayerNormNoAffine | 968 | 217 | 0.224 | pre-norms |
+| RopeInterleaved | 640 | 135 | 0.211 | 3D RoPE apply (device) |
+| H2D_MISS_SMALL | 2313 | 36 | 0.016 | tiny cache re-faults |
+| Silu | 16 | 0.3 | 0.017 | — |
+
+Linear + SDPA = **~68% of all GPU time** and an even larger share of the *step* (H2D is cold-start, not per-step —
+confirmed from the phase log: `umT5 prompt cache MISS — encode+free 8889ms` + a cold DiT preload of the resident
+16.4 GB fp8 DiT; `free 22779 MB` before the loop = DiT not yet on device). The AdaLN/norm/rope/permute glue is
+**already device-resident** (rounds 5–7 ports) and sums to only ~0.4 s/step (~22%).
+
+**Step 1 (host drain) — measured negligible, NOT worth killing.** The host `scheduler.Step` (UniPC) +
+`CfgCombineRenormInPlace` read the latent + both velocities to host each step, but the latent is tiny
+(16·7·40·64 = 287 K floats ≈ 1.1 MB; D2H+H2D+CPU-UniPC ≈ a few ms/step, <0.3% of 1.79 s). The per-op-sync result
+already proves it: if the host round-trip were stalling the pipeline, forcing sync everywhere would not have left
+the step time unchanged. **No device-Euler port shipped** — it would save a few ms and carries fp8-CFG numeric
+risk (UniPC is a stateful predictor/corrector; round-9 showed this path is sensitive), for no graph-capture payoff.
+
+**Step 3 (graph capture) — would not help, so not attempted.** Graph capture removes *launch* overhead; the
+per-op-sync experiment shows launch overhead is already ~0% of the step. A captured graph over a 14B fp8 DiT would
+also fight the resident-DiT VRAM and bake the per-forward host-materialized cache re-faults (cos/sin/encoderProj —
+graph capture-invalidators). Zero upside, real cost. Same class of outcome as the Flux.2 Dev graph opt-out.
+
+**Step 4 (fp8 GEMM coverage audit) — CLEAN, no fallbacks, no fix needed.** Native fp8 is default-on
+(`[Cuda] perf flags: … NativeFp8Gemm=True`), and the fallback guards in `CudaBackend.cs:511-515` are `K % 16 == 0
+&& (N · outElemBytes) % 16 == 0`. Every Wan-14B GEMM shape clears both: block dims are 5120 (attn q/k/v/o, FFN out)
+and 13824 (FFN inner), both ≡ 0 (mod 16); N·4 (F32 out) = 20480 / 55296, both ≡ 0 (mod 16); the embedders/final-proj
+(K = 64/256/4096, N = 5120/64) also clear. **The profile table contains NO `Cast`/dequant-to-F16 op** — direct
+confirmation that zero fp8 weights are recast to F16 on the native path (the only per-GEMM fp8 cost is the cheap
+memory-bound activation absmax+quant, folded into `Linear`). No surgical guard-widening is warranted; the shared
+kernel is left untouched (an image flagship must not regress for a Wan win that does not exist).
+
+**Conclusion:** Wan T2V at 1.82 s/step is the fp8 tensor-core compute floor for this DiT on a 4090. The remaining
+theoretical lever is F16 *activations* (`HARTSY_DIT_F16`) to trim the ~0.4 s/step of norm/glue traffic — a minority
+of the step, numerically risky on the fp8-CFG-sensitive Wan path, and out of scope for a step-floor round. No code
+changed; `44.82-local` stands. Correctness unchanged (no edit; gen produced a valid 25-frame seed-42 mp4 at the
+expected 1.79 s/step, matching the round-5/6 verified baseline). Patch: `video_arc_round10.patch` (empty). No deploy
+→ no flagship gate (round-9 precedent). Next lever if ever revisited: F16-activation A/B behind the existing flag
+with per-stage relL2, expected ≤~15% step win at best.
+
+
+## 2026-07-11 — VIDEO ARC round 9: batched-CFG step-floor investigation → **documented NO-GO** (no code shipped, `44.82-local` unchanged)
+
+**Mission:** fuse the CFG pair (cond+uncond) into ONE batch-2 forward to stream the weights once and ~2× the
+step floor. **Verdict after profiling both targets: no-go — the premise does not hold for either model, and
+the change would break fp8 exactness for ~zero real win.** This is a valid documented result (the mission's
+own timebox rule): a stream-floor win that corrupts output is a fail, and there is no stream floor to win here.
+
+**Finding 1 — LTX-2.3 ALREADY captures the stream-once win, bit-exactly (`LtxVideo2Transformer.ForwardCfgPair`,
+lines 325-332).** The block loop runs cond then uncond **back-to-back per block** (`_blocks[i].Forward(...ctxC)`
+then `...ctxU`), with the `BeforeBlockForward` streaming hook uploading each streamed block's weights ONCE
+before both consume it. This is block-level CFG interleave: streamed weights hit the bus once/step (the win the
+mission wanted) while cond and uncond stay **separate M=sv GEMMs, each with its own per-tensor activation quant
+→ bit-identical to two Forwards** (the notes' "proven bitwise-identical"). Merging them into one M=2·sv GEMM
+would add nothing to streaming (already once/step) and would BREAK the per-tensor quant exactness (Finding 3).
+LTX has no remaining CFG-batching win.
+
+**Finding 2 — Wan's DiT is FULLY RESIDENT, not streamed → the mission's premise is factually wrong for Wan.**
+`WanVideoPipeline` `PreloadWeights(_transformer.EnumerateWeights())` loads the whole 16.4 GB fp8 DiT and
+KEEP_MODELS pins it (round-6: "the resident 16.4 GB fp8 I2V DiT"); `WanVideoTransformer.ForwardCore` has **no
+`BlockStreamingController`/`CudaStreamingWeightCache`/streaming hook** (grep = NONE — that machinery is LTX/Flux
+only). So there is no per-forward weight stream to fetch once. The two sequential forwards (`WanVideoPipeline.cs`
+228-229 / 238-239 / 367-369 / 373-375) re-read the *resident* fp8 weights from VRAM, and at S=4480 tokens
+(25f 512×320: gt·gh·gw = 7·20·32) the GEMMs are large-M compute-bound — the resident weight read is amortized
+over M, so it is not the bottleneck. Batching to M=8960 is FLOP-identical (2·S·N·K either way) and gives no
+GEMM speedup. Wan's 1.82 s/step floor is fp8 tensor-core **compute**, which B=2 cannot reduce. (The recurring
+"Axis-B fp8 transient dequant" framing in the notes is loose: on Ada `EnableNativeFp8Gemm` defaults ON
+(`CudaBackend.cs:232`), so fp8-scaled Wan weights are consumed DIRECTLY by fp8 tensor cores staying packed —
+`CudaBackend.cs:505-529` — there is no per-call fp8→F16 weight recast on the native path; the only remaining
+per-GEMM cost is the cheap memory-bound activation absmax+quant.)
+
+**Finding 3 — fp8 activation quant is PER-TENSOR (the round-7 trap, confirmed at kernel source).**
+`native/cuda/dequant/fp8_quant.cu`: `absmax_f32`/`absmax_finalize_scale` reduce over the ENTIRE activation
+tensor `n` → ONE dequant scale (amax/448) consumed via `B_SCALE_POINTER`. Batching cond+uncond into one
+`[2S, dim]` activation makes both samples share one absmax → cond's fp8 quantization changes vs its solo run
+(NOT bit-identical). Prior in-repo measurement on this exact path (round 7, batching the timestep MLP to one
+M=G GEMM): **temb relL2 3.5e-2** — 17× over the documented ~2e-3 fp8 noise floor. Making it exact would require
+a segmented (per-sample) absmax in the shared CUDA fp8 kernel — a numeric-risk change to the path every fp8
+image model rides — for a Wan win that Finding 2 already shows is ~zero.
+
+**Conclusion:** no code changed; `44.82-local` stands. Wan's real step lever is **CUDA-graph capture** (it is
+fully resident = graph-capturable, unlike streaming LTX; blocked today by the host-side `scheduler.Step`
+latent drain — needs a device Euler/UniPC step first) + a native-fp8-path coverage audit (ensure every Wan
+GEMM meets the K%16 / 16-byte-ldc alignment so none falls to the F16 recast). LTX is already optimal on this
+axis. Patches: `video_arc_round9.patch` (empty — no engine edit). No deploy → no flagship gate needed.
 
 ## 2026-07-11 — VIDEO ARC round 8: S2V warm cache (gen 2 **2.39 → 2.04 min**, md5-exact) + MatrixGame2 testhost-crash root cause (`44.82-local`)
 

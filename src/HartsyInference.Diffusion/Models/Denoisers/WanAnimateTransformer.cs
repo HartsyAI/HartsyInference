@@ -30,6 +30,7 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
     private WanAnimateFaceBlock[] _faceAdapter = [];
     private int _poseChannels;
     private int _disposed;
+    private static int _dumpDone;
 
     private Tensor? _patchW2d, _patchB, _posePatchW2d, _posePatchB, _refConvW2d, _refConvB;
     private Tensor? _projOutW, _projOutB, _finalScaleShift;
@@ -139,16 +140,24 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
             throw new ArgumentException("ref_conv token-prepend and the face pathway cannot combine: the fuser's " +
                 "temporal grouping (T | S) breaks once ref tokens are prepended (same constraint as the reference).");
 
+        string? dumpDir = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_DUMP");
+        if (dumpDir is not null && Interlocked.Exchange(ref _dumpDone, 1) != 0) dumpDir = null;   // first forward only
+        bool noPose = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_NO_POSE") == "1";
+        bool noFace = Environment.GetEnvironmentVariable("HARTSY_ANIMATE_NO_FACE") == "1";
+
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchB);
+        if (dumpDir is not null) DumpTensor(backend, dumpDir, "01_patchified", hidden);
 
         // after_patch_embedding: pose tokens added to frames 1..pose_T (x[:, :, 1:pose_T+1] += pose[:, :, :x_T−1]).
-        if (pose is not null)
+        if (pose is not null && !noPose)
         {
             Tensor poseTokens = WanDitOps.Patchify(backend, pose, _poseChannels, dim, _config.PatchSize, _posePatchW2d!, _posePatchB);
             int gtPose = (int)pose.Shape[2] / pt;
             AddPose(hidden, poseTokens, frame, dim, Math.Min(gtPose, gt - 1));
             poseTokens.Dispose();
+            if (dumpDir is not null) DumpTensor(backend, dumpDir, "02_afterpose", hidden);
         }
+        if (noFace) motion = null;
 
         // Face pathway: pixels → motion vectors → face features; zero frame prepended, then padded/truncated to gt.
         // Prefer the caller's precomputed features (EncodeMotion) — the per-forward encode is a debug/compat path.
@@ -195,12 +204,15 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
                 imageContextLen: imageContextLen);
             cur.Dispose();
             cur = next;
+            if (dumpDir is not null && (i == 0 || i == 1)) DumpTensor(backend, dumpDir, $"10_block{i}_preface", cur);
             if (motion is not null && i % FuseEvery == 0)
             {
                 Tensor adapted = _faceAdapter[i / FuseEvery].Forward(backend, cur, motion);
+                if (dumpDir is not null && i == 0) DumpTensor(backend, dumpDir, "11_faceadapter0_out", adapted);
                 AddInPlace(cur, adapted);
                 adapted.Dispose();
             }
+            if (dumpDir is not null && (i == 0 || i == 1)) DumpTensor(backend, dumpDir, $"12_block{i}_postface", cur);
         }
         if (ownsMotion) motion?.Dispose();
         timestepProj.Dispose();
@@ -217,9 +229,48 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
             projected.Dispose();
             projected = trimmed;
         }
+        if (dumpDir is not null) DumpTensor(backend, dumpDir, "20_projected_head", projected);
         Tensor outVel = WanDitOps.Unpatchify(projected, _config.OutChannels, gt, gh, gw, _config.PatchSize);
         projected.Dispose();
+        if (dumpDir is not null) DumpTensor(backend, dumpDir, "21_velocity", outVel);
         return outVel;
+    }
+
+    /// <summary>Env-gated stage dump (<c>HARTSY_ANIMATE_DUMP</c>): writes a tensor's shape + raw F32 bytes and a
+    /// per-token variance summary to diagnose the checkerboard (near-constant tokens = a collapsed sequence).</summary>
+    private static void DumpTensor(IBackend backend, string dir, string name, Tensor t)
+    {
+        try
+        {
+            backend.Sync();
+            Directory.CreateDirectory(dir);
+            Tensor src = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+            long n = src.Shape.ElementCount;
+            float* p = (float*)src.DataPointer;
+            double mean = 0, sq = 0;
+            for (long i = 0; i < n; i++) { mean += p[i]; sq += (double)p[i] * p[i]; }
+            mean /= n; double rms = Math.Sqrt(sq / n);
+            // Token-to-token spread on rank-2 [S, dim]: near-zero interTokenStd = a collapsed sequence (the checkerboard).
+            string tokStat = "";
+            if (src.Shape.Rank == 2)
+            {
+                int s = (int)src.Shape[0], d = (int)src.Shape[1];
+                double interTok = 0; double[] colMean = new double[d];
+                for (int r = 0; r < s; r++) for (int c = 0; c < d; c++) colMean[c] += p[(long)r * d + c];
+                for (int c = 0; c < d; c++) colMean[c] /= s;
+                for (int r = 0; r < s; r++) for (int c = 0; c < d; c++) { double dd = p[(long)r * d + c] - colMean[c]; interTok += dd * dd; }
+                interTok = Math.Sqrt(interTok / ((long)s * d));
+                tokStat = $" interTokenStd={interTok:E4}";
+            }
+            string shapeStr = "";
+            for (int i = 0; i < src.Shape.Rank; i++) shapeStr += (i > 0 ? "," : "") + src.Shape[i];
+            File.WriteAllText(Path.Combine(dir, name + ".txt"),
+                $"shape=[{shapeStr}] mean={mean:E4} rms={rms:E4}{tokStat}\n");
+            using (FileStream fs = File.Create(Path.Combine(dir, name + ".f32")))
+                fs.Write(new ReadOnlySpan<byte>(p, (int)Math.Min(n, 8_000_000) * 4));
+            if (!ReferenceEquals(src, t)) src.Dispose();
+        }
+        catch (Exception ex) { Core.Logging.Logs.Error($"AnimateDump {name} failed", ex); }
     }
 
     /// <summary>Runs the motion encoder over each face frame and the face encoder over the sequence, prepends a zero
@@ -235,7 +286,24 @@ public sealed unsafe class WanAnimateTransformer : IDisposable
         for (int ti = 0; ti < tFace; ti++)
             for (int c = 0; c < 3; c++)
                 Buffer.MemoryCopy(fp + ((long)c * tFace + ti) * frameSize, frp + ((long)ti * 3 + c) * frameSize, frameSize * 4, frameSize * 4);
-        Tensor motionVec = _motionEncoder.Forward(backend, frames);   // [Tface, motionDim]
+        // Run the StyleGAN motion encoder in batches of 8 frames (comfy `encode_bs=8`): the full 512² conv stack
+        // over all Tface frames at once peaks several GB and OOMs beside the resident 14B fp8 DiT.
+        const int encodeBs = 8;
+        int motionDim = _motionEncoder.OutDim;
+        Tensor motionVec = new Tensor(new TensorShape(tFace, motionDim), DType.F32);
+        float* mvp = (float*)motionVec.DataPointer;
+        long chanBytes = (long)h * wdt * 4;
+        for (int c0 = 0; c0 < tFace; c0 += encodeBs)
+        {
+            int cn = Math.Min(encodeBs, tFace - c0);
+            Tensor chunk = new Tensor(new TensorShape(cn, 3, h, wdt), DType.F32);
+            Buffer.MemoryCopy(frp + (long)c0 * 3 * frameSize, (float*)chunk.DataPointer, (long)cn * 3 * chanBytes, (long)cn * 3 * chanBytes);
+            Tensor mvChunk = _motionEncoder.Forward(backend, chunk);   // [cn, motionDim]
+            chunk.Dispose();
+            Buffer.MemoryCopy((float*)mvChunk.DataPointer, mvp + (long)c0 * motionDim, (long)cn * motionDim * 4, (long)cn * motionDim * 4);
+            mvChunk.Dispose();
+            backend.FreeActivations();
+        }
         frames.Dispose();
 
         Tensor faceFeat = _faceEncoder.Forward(backend, motionVec);   // [T', N+1, dim]

@@ -1,5 +1,43 @@
 # Video gen-perf — full audit + optimization plan (2026-07-08)
 
+> ## Round 11 (2026-07-11) — Wan-Animate CHECKERBOARD SOLVED + motion-encoder OOM fix (`44.84-local`, details in E2E_PARITY_WORKLOG round 11 / MODEL_STATUS_VIDEO)
+> The Animate checkerboard was a **converter bug, not perf**: `ApplyFp8ScaledDequant` dropped the KJ v2 Animate
+> checkpoint's **BF16** `.scale_weight` companions (guarded `== F32`; all other Wan fp8 ckpts are F32) → fp8
+> weights ran ~5× hot → block-0 activations exploded (stage dump rms 0.17→4.4e5) → token collapse = the tile.
+> Fixed by accepting BF16/F16 scalar scales (F32 path byte-identical, zero regression). **Perf-relevant second
+> fix:** `WanAnimateTransformer.BuildMotion` now runs the StyleGAN motion encoder in **8-frame chunks** (comfy
+> `encode_bs=8`) with per-chunk `FreeActivations` — the all-frames 512² conv stack OOM'd beside the resident
+> 14B fp8 DiT (real-input 17f 480² e2e now completes). Animate is now the shared-`WanVideoBlock` fast path +
+> correct; no per-step perf pass done yet (`WanAnimateLoader` also still lacks the round-6 warm cache).
+
+> ## Round 10 (2026-07-11) — Wan T2V step-floor: **COMPUTE-FLOOR EARLY-BAIL, no code shipped** (details in E2E_PARITY_WORKLOG round 10)
+> Profiled `wan2.1_t2v_14B_fp8_scaled` (25f 512×320) under `HARTSY_PROFILE_SYNC=1`: a `cuStreamSynchronize` after
+> EVERY op left the step at **~1.79 s/step, identical to the un-profiled 1.82 s baseline** — the definitive
+> compute-bound signature (no async overlap lost, launch overhead ~0%). True-GPU-time op table: **Linear (native
+> fp8 GEMM) 4930 ms + SDPA (cuDNN fused flash) 2003 ms = ~68% of GPU time**, the AdaLN/norm/rope/permute glue
+> already device-resident (~0.4 s/step, ~22%), and `H2D_MISS_BIG` 1335 ms is **one-time cold-start** (umT5 8.4 GB
+> encode + DiT 16.4 GB preload), NOT a per-step drain. The host `scheduler.Step`/CFG-combine round-trip is a tiny
+> 1.1 MB latent (a few ms/step, <0.3%) — killing it saves nothing and does not unlock graph capture. **Graph
+> capture would not help** (removes only the already-negligible launch overhead; would fight the resident 14B DiT
+> and bake per-forward cache re-faults). **fp8 coverage audit CLEAN:** `NativeFp8Gemm=True`, every Wan GEMM shape
+> clears the `K%16 && N·outBytes%16` guards (dims 5120/13824), and the profile shows NO `Cast`/dequant-to-F16 op →
+> zero fp8→F16 recasts. No engine edit; shared kernel untouched. `44.82-local` stands. The only remaining
+> theoretical lever is F16 activations (`HARTSY_DIT_F16`) for the ~0.4 s/step glue — minority, fp8-CFG-risky,
+> out of scope. Wan T2V is at its fp8 compute floor on the 4090.
+
+> ## Round 9 (2026-07-11) — batched-CFG step-floor lever: **NO-GO, no code shipped** (details in E2E_PARITY_WORKLOG round 9)
+> The "fuse cond+uncond into one B=2 forward to stream weights once, ~2×" thesis does NOT hold for either video
+> target. **LTX-2.3** already captures the stream-once win bit-exactly via block-level CFG interleave
+> (`LtxVideo2Transformer.ForwardCfgPair` runs cond then uncond back-to-back per streamed block — weights upload
+> once/step, each sample stays a separate per-tensor-quantized GEMM = bit-identical); a true M=2·sv merge adds no
+> streaming and breaks fp8 exactness. **Wan** DiT is **fully resident** (no `BlockStreamingController` — grep NONE;
+> whole 16.4 GB fp8 DiT preloaded + KEEP_MODELS), so there is no weight stream to fetch once; at S=4480 tokens the
+> fp8 GEMMs are large-M compute-bound and B=2 is FLOP-identical (no speedup). And the fp8 **activation quant is
+> per-tensor** (`native/cuda/dequant/fp8_quant.cu` absmax over the whole tensor) → batching cond+uncond shares one
+> scale = NOT bit-exact (round-7 precedent on this path: temb relL2 3.5e-2, 17× over the ~2e-3 fp8 floor). Wan's
+> real step lever is CUDA-graph capture (resident = capturable; needs a device Euler/UniPC step to drop the host
+> `scheduler.Step` drain) + a native-fp8-path K%16 coverage audit — NOT CFG batching.
+
 > ## Round 7 SHIPPED (2026-07-11, `44.81-local`) — S2V multi-group WanDitOps port: steps **4.15 → 3.44 s/step (17%)**
 > The W4 shared-final-layer port + the G>1 `ConditionTimeGroups` drain kill, S2V-verified (full details in
 > `E2E_PARITY_WORKLOG.md` round 7). The "audio injector host glue" framing was STALE — the injector has been
