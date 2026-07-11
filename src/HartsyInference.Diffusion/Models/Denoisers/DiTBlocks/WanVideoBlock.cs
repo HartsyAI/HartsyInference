@@ -175,17 +175,22 @@ public sealed unsafe class WanVideoBlock
         Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, _nq[1]!, _eps); q.Dispose();
         Tensor qMh = ToBhsd(backend, qn, sq); qn.Dispose();
 
-        Tensor textRows = imageContextLen > 0 ? SliceRows(encoder, imageContextLen, textLen) : encoder;
+        Tensor textRows = imageContextLen > 0 ? SliceRows(backend, encoder, imageContextLen, textLen) : encoder;
         Tensor flat = AttnBranch(backend, qMh, textRows, _k[1]!, _kB[1], _v[1]!, _vB[1], _nk[1]!, sq, textLen);
         if (imageContextLen > 0) textRows.Dispose();
 
         if (imageContextLen > 0 && _addK is not null)
         {
-            Tensor imgRows = SliceRows(encoder, 0, imageContextLen);
+            Tensor imgRows = SliceRows(backend, encoder, 0, imageContextLen);
             Tensor flatImg = AttnBranch(backend, qMh, imgRows, _addK!, _addKB, _addV!, _addVB, _normAddedK!, sq, imageContextLen);
             imgRows.Dispose();
-            AddInPlace(flat, flatImg);
+            // Device add — the old host AddInPlace pointer-loop drained BOTH [sq, dim] branch outputs D2H, summed on
+            // the CPU, and re-uploaded on next use: ~0.5 GB of synchronous PCIe round-trips per block per forward
+            // (×40 blocks ×2 CFG = the dominant Wan2.1-CLIP-I2V cost over T2V).
+            Tensor summed = AddRows(backend, flat, flatImg, sq);
+            flat.Dispose();
             flatImg.Dispose();
+            flat = summed;
         }
         qMh.Dispose();
 
@@ -213,19 +218,14 @@ public sealed unsafe class WanVideoBlock
         return flat;
     }
 
-    private Tensor SliceRows(Tensor x, int start, int len)
+    /// <summary>Device row slice of the encoder context — a host <c>Buffer.MemoryCopy</c> here produced a FRESH
+    /// host tensor per block per forward whose first device use was a cache MISS (full stream drain + pageable H2D,
+    /// the sync-H2D disease).</summary>
+    private Tensor SliceRows(IBackend backend, Tensor x, int start, int len)
     {
         Tensor o = new Tensor(new TensorShape(len, _dim), DType.F32);
-        Buffer.MemoryCopy((float*)x.DataPointer + (long)start * _dim, (float*)o.DataPointer,
-            (long)len * _dim * 4, (long)len * _dim * 4);
+        backend.SliceRows(o, x, start);
         return o;
-    }
-
-    private void AddInPlace(Tensor acc, Tensor add)
-    {
-        long n = acc.Shape.ElementCount;
-        float* ap = (float*)acc.DataPointer, dp = (float*)add.DataPointer;
-        for (long i = 0; i < n; i++) ap[i] += dp[i];
     }
 
     private Tensor Ffn(IBackend backend, Tensor x, int s)

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -33,6 +34,23 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private readonly VaeDecoder _vaeDecoder;
     private readonly HunyuanImageVaeDecoder? _hyVaeDecoder;
     private readonly HunyuanImageConfig _config;
+
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen
+    /// re-upload). The 7B Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under
+    /// this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both (the QwenImagePipeline
+    /// staging pattern). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    private static readonly bool KeepModelsResident =
+        EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _ditResident;
+
+    // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the Qwen token ids — the
+    // FLite/QwenImage pattern. A hit skips the whole TE phase (DiT evict + TE preload + encode + free).
+    // NOTE: when the ByT5 glyph stream gets wired (encoderHidden2), its embedding must join this cache
+    // under the same key — both streams derive from the same prompt.
+    private int[]? _cachedCondKey;
+    private Tensor? _cachedCond;
+    private int[]? _cachedUncondKey;
+    private Tensor? _cachedUncond;
 
     /// <summary>Creates a Hunyuan Image pipeline with the primary Qwen2.5-VL-7B text encoder (matches <c>tencent/HunyuanImage-2.1</c>).</summary>
     public HunyuanImagePipeline(IBackend backend, HunyuanImageQwenTextEncoder qwenEncoder,
@@ -94,16 +112,60 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             throw new ArgumentException("Negative prompt tokens + mask are required when CfgScale > 1.", nameof(negativePromptTokenIdsQwen));
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        Logs.Info("Encoding text with Qwen2.5-VL-7B (primary 3584-dim per-token)...");
-        Backend.PreloadWeights(_qwenEncoder.EnumerateWeights());
-        Tensor cond = _qwenEncoder.Encode(Backend, promptTokenIdsQwen, promptAttentionMaskQwen);
-        Tensor? uncond = useCfg
-            ? _qwenEncoder.Encode(Backend, negativePromptTokenIdsQwen!, negativeAttentionMaskQwen!)
-            : null;
-        Backend.Sync();
-        Backend.FreeWeights(_qwenEncoder.EnumerateWeights());
 
-        return Denoise(cond, uncond, request, seed, onProgress);
+        // Prompt-embedding cache: a hit skips the whole 7B TE phase, which also avoids the TE⇄DiT VRAM swap.
+        // The conditioning is per-token only (no resolution-dependent component), so token ids fully key it.
+        bool condHit = _cachedCond is not null && _cachedCondKey is not null
+            && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsQwen);
+        bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondKey is not null
+            && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsQwen!));
+        Tensor cond;
+        Tensor? uncond = null;
+        if (condHit && uncondHit)
+        {
+            cond = _cachedCond!;
+            if (useCfg) uncond = _cachedUncond;
+            Logs.Info("[HunyuanImage] prompt-embedding cache HIT — TE phase skipped.");
+        }
+        else
+        {
+            // Cache miss: the DiT cannot share the card with the 7B TE's preload — evict it first.
+            if (_ditResident)
+            {
+                Backend.Sync();
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
+            Backend.TrimMemoryPool();
+
+            Logs.Info("Encoding text with Qwen2.5-VL-7B (primary 3584-dim per-token)...");
+            Backend.PreloadWeights(_qwenEncoder.EnumerateWeights());
+            cond = _qwenEncoder.Encode(Backend, promptTokenIdsQwen, promptAttentionMaskQwen);
+            uncond = useCfg
+                ? _qwenEncoder.Encode(Backend, negativePromptTokenIdsQwen!, negativeAttentionMaskQwen!)
+                : null;
+            Backend.Sync();
+            Backend.FreeWeights(_qwenEncoder.EnumerateWeights());
+
+            // Host-materialize so the cached embeddings survive the activation sweep, then reclaim the
+            // encoder's device intermediates before the DiT preload.
+            _ = cond.DataPointer;
+            if (uncond is not null) _ = uncond.DataPointer;
+            Backend.FreeActivations();
+            Backend.TrimMemoryPool();
+
+            _cachedCond?.Dispose();
+            _cachedCond = cond;
+            _cachedCondKey = (int[])promptTokenIdsQwen.Clone();
+            if (useCfg)
+            {
+                _cachedUncond?.Dispose();
+                _cachedUncond = uncond;
+                _cachedUncondKey = (int[])negativePromptTokenIdsQwen!.Clone();
+            }
+        }
+
+        return Denoise(cond, uncond, request, seed, textOwned: false, onProgress);
     }
 
     /// <summary>Generates an image from pre-tokenized input via the legacy CLIP+T5 path. CLIP token args
@@ -142,12 +204,17 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             uncond = _t5Encoder.Encode(Backend, uncondTokenBatch, uncondMaskBatch);
         }
 
-        return Denoise(cond, uncond, request, seed, onProgress);
+        return Denoise(cond, uncond, request, seed, textOwned: true, onProgress);
     }
 
-    /// <summary>Shared denoise + VAE-decode body. Takes ownership of <paramref name="condText"/> / <paramref name="uncondText"/> and disposes them.</summary>
+    /// <summary>Shared denoise + VAE-decode body. The latent stays in patch-token space for the entire loop
+    /// (patchify once, in-place device <c>CfgEulerStep</c> per step, one unpatchify at the end via the device
+    /// <see cref="IBackend.UnpatchifyTokens"/> op) so the pipeline glue never forces a per-step D2H round trip —
+    /// token layout is identical on both sides of the transformer ((py, px, c) inner order), making token-space
+    /// Euler a pure permutation of the old image-space step. When <paramref name="textOwned"/> is true the
+    /// conditioning tensors are disposed at the end; the Qwen path passes false (they live in the prompt cache).</summary>
     private (byte[] rgbData, int width, int height, int seed) Denoise(Tensor condText, Tensor? uncondText,
-        TextToImageRequest request, int seed, Action<GenerationProgress>? onProgress)
+        TextToImageRequest request, int seed, bool textOwned, Action<GenerationProgress>? onProgress)
     {
         (int steps, float cfgScale, int width, int height) = GenerationDefaults.HunyuanImage.Resolve(request);
         const int VaeDownscale = 32;
@@ -167,15 +234,25 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         float distilledGuidance = _config.GuidanceEmbed ? cfgScale : 1.0f;
 
         TensorShape latentShape = new(1, inChannels, latentH, latentW);
-        Tensor latent = SeedGenerator.CreateNoise(latentShape, seed);
+
+        // Initial noise is created in image space (seed parity with the verified e2e recipe) and patchified
+        // ONCE — the loop then integrates in token space, so the old per-step patchify/unpatchify host loops
+        // (a full D2H drain of the velocity every step) are gone.
+        Tensor noise = SeedGenerator.CreateNoise(latentShape, seed);
+        Tensor latentTokens = PatchifyLatent(noise, inChannels, latentH, latentW, patch);
+        noise.Dispose();
 
         FlowMatchEulerDiscreteScheduler scheduler = new(_config.SamplingShift);
         scheduler.SetTimesteps(steps);
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
-        // Bulk-upload transformer weights before the denoise loop. Paired with FreeWeights at
-        // the VAE handoff. No-op on backends without a weight cache.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // Bulk-upload transformer weights before the denoise loop. Kept resident across generations under
+        // HARTSY_KEEP_MODELS (the prompt-cache miss path evicts them before the TE phase).
+        if (!_ditResident)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            _ditResident = true;
+        }
 
         Logs.Info($"Starting denoise loop ({steps} steps, distilled guidance={distilledGuidance})...");
         for (int i = 0; i < steps; i++)
@@ -183,46 +260,47 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i];
 
-            Tensor patched = PatchifyLatent(latent, inChannels, latentH, latentW, patch);
-
-            Tensor velocity = _transformer.Forward(Backend, patched, condText, encoderHidden2: null,
+            // CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt —
+            // for gw=cfgScale this IS uncond + cfg·(cond−uncond); gw=1 degenerates to the plain Euler step),
+            // keeping the latent tokens device-resident across the whole loop.
+            Tensor condVel = _transformer.Forward(Backend, latentTokens, condText, encoderHidden2: null,
                 t, distilledGuidance, hPacked, wPacked);
-            Tensor velocityImage = UnpatchifyTokens(velocity, inChannels, hPacked, wPacked, patch);
-            velocity.Dispose();
-
             if (useCfg && _config.GuidanceEmbed == false)
             {
                 // Standard CFG path (un-distilled variant).
-                Tensor uncondPatched = PatchifyLatent(latent, inChannels, latentH, latentW, patch);
-                Tensor uncondVel = _transformer.Forward(Backend, uncondPatched, uncondText!, encoderHidden2: null,
+                Tensor uncondVel = _transformer.Forward(Backend, latentTokens, uncondText!, encoderHidden2: null,
                     t, 1.0f, hPacked, wPacked);
-                Tensor uncondImage = UnpatchifyTokens(uncondVel, inChannels, hPacked, wPacked, patch);
+                Backend.CfgEulerStep(latentTokens, condVel, uncondVel, cfgScale, scheduler.Dt(i));
                 uncondVel.Dispose();
-                uncondPatched.Dispose();
-
-                Tensor combined = CfgHelper.ApplyCfg(uncondImage, velocityImage, cfgScale);
-                velocityImage.Dispose();
-                uncondImage.Dispose();
-                velocityImage = combined;
             }
-
-            patched.Dispose();
-
-            Tensor newLatent = new(latentShape, DType.F32);
-            scheduler.Step(newLatent, velocityImage, latent, i);
-            velocityImage.Dispose();
-            latent.Dispose();
-            latent = newLatent;
+            else
+            {
+                Backend.CfgEulerStep(latentTokens, condVel, condVel, 1.0f, scheduler.Dt(i));
+            }
+            condVel.Dispose();
 
             stepSw.Stop();
             onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
         }
 
-        condText.Dispose();
-        uncondText?.Dispose();
+        if (textOwned)
+        {
+            condText.Dispose();
+            uncondText?.Dispose();
+        }
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
+
+        // Device unpatchify (innerChannelFastest: (py, px, c) inner order — matches PatchifyLatent) keeps the
+        // latent → VAE chain device-resident; the CPU backend falls back to the IBackend host loop.
+        Tensor latent = new(latentShape, DType.F32);
+        Backend.UnpatchifyTokens(latent, latentTokens, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+        latentTokens.Dispose();
 
         Logs.Info("Decoding latents to image (32-channel VAE)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
@@ -234,6 +312,11 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(decoded);
         decoded.Dispose();
+
+        // Final reclaim: in a long-lived host (SwarmUI) the decode intermediates otherwise sit in device
+        // memory until GC finalization and shrink the next generation's budget — and under KEEP_MODELS the
+        // trimmed pool is what lets a cross-model switch reclaim VRAM beside the resident DiT.
+        Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Hunyuan Image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
@@ -286,47 +369,4 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         return result;
     }
 
-    /// <summary>Inverse of <see cref="PatchifyLatent"/>.</summary>
-    private static Tensor UnpatchifyTokens(Tensor tokens, int channels, int hPacked, int wPacked, int patch)
-    {
-        int batch = (int)tokens.Shape[0];
-        int height = hPacked * patch;
-        int width = wPacked * patch;
-        int seqLen = hPacked * wPacked;
-        int patchVolume = patch * patch * channels;
-
-        TensorShape outShape = new(batch, channels, height, width);
-        Tensor result = new(outShape, DType.F32);
-
-        float* src = (float*)tokens.DataPointer;
-        float* dst = (float*)result.DataPointer;
-        long chwStride = (long)channels * height * width;
-        long hwStride = (long)height * width;
-
-        for (int b = 0; b < batch; b++)
-        {
-            float* batchSrc = src + (long)b * seqLen * patchVolume;
-            float* batchDst = dst + b * chwStride;
-            for (int hp = 0; hp < hPacked; hp++)
-            {
-                for (int wp = 0; wp < wPacked; wp++)
-                {
-                    long tokenIdx = (long)hp * wPacked + wp;
-                    float* tokenSrc = batchSrc + tokenIdx * patchVolume;
-                    int srcIdx = 0;
-                    for (int py = 0; py < patch; py++)
-                    {
-                        int dstRow = hp * patch + py;
-                        for (int px = 0; px < patch; px++)
-                        {
-                            int dstCol = wp * patch + px;
-                            for (int c = 0; c < channels; c++)
-                                batchDst[c * hwStride + dstRow * width + dstCol] = tokenSrc[srcIdx++];
-                        }
-                    }
-                }
-            }
-        }
-        return result;
-    }
 }

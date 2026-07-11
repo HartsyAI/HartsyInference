@@ -1,5 +1,15 @@
 [
  {
+  "name": "F-Lite",
+  "model": "F-Lite/dit_model/diffusion_pytorch_model-00001-of-00002.safetensors",
+  "params": {
+   "width": 1024,
+   "height": 1024,
+   "steps": 30,
+   "cfgscale": 6.0
+  }
+ },
+ {
   "name": "HunyuanImage-2.1",
   "model": "HunyuanImage/HunyuanImage2.1-Q4_K_M.gguf",
   "params": {

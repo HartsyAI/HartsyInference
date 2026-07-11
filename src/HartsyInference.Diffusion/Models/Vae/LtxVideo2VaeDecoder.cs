@@ -44,7 +44,6 @@ public sealed unsafe class LtxVideo2VaeDecoder
     private CausalConv3d? _convIn, _convOut;
     private LtxVaeResnetBlock3d[] _midResnets = [];
     private UpStage[] _upStages = [];
-    private int _lastChannel;                    // channels into conv_out
     private bool[] _temporalScaleInferred = [];  // per up-stage: does it upscale the temporal axis (st0 == 2)?
 
     public LtxVideo2VaeDecoder(
@@ -148,7 +147,6 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _upStages = [.. stages];
         _temporalScaleInferred = [.. temporal];
 
-        _lastChannel = output;
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], Bias(w, "decoder.conv_out.conv.bias"),
             padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal);
     }
@@ -205,12 +203,20 @@ public sealed unsafe class LtxVideo2VaeDecoder
             foreach (LtxVaeResnetBlock3d r in s.Resnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
         }
 
-        Tensor normed = ChannelRms(h, _lastChannel);
+        // norm_out + final pixel-unshuffle run on-device: the host loops here D2H-drained the full-res tensor
+        // twice (the literal Krea2-VAE pattern). WanRmsNormChannel is the same channel-RMS math; UnpatchifyVae's
+        // channel unpack (oc = c·p² + r·p + q, q→H, r→W) is exactly this decoder's (c·p + pa)·p + pb layout.
+        Tensor normed = new Tensor(h.Shape, DType.F32);
+        backend.WanRmsNormChannel(normed, h, null, 1e-8f);
         h.Dispose();
         backend.Silu(normed, normed);
         Tensor patched = _convOut!.Forward(backend, normed);   // [1, outChannels·p², F, 8H, 8W]
         normed.Dispose();
-        Tensor rgb = PixelUnshuffle(patched);
+        int pb = (int)patched.Shape[0], pc = (int)patched.Shape[1], pf = (int)patched.Shape[2];
+        int ph = (int)patched.Shape[3], pw = (int)patched.Shape[4];
+        int oc = pc / (_patch * _patch);
+        Tensor rgb = new Tensor(new TensorShape([(long)pb, oc, pf, (long)ph * _patch, (long)pw * _patch]), DType.F32);
+        backend.UnpatchifyVae(rgb, patched, _patch);
         patched.Dispose();
         return rgb;
     }
@@ -241,56 +247,6 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 for (long s = 0; s < spatial; s++) op[basePos + s] = xp[basePos + s] * std + mean;
             }
         if (!ReferenceEquals(latF32, latent)) latF32.Dispose();
-        return outT;
-    }
-
-    /// <summary>Spatial pixel-unshuffle (patch p): <c>[1, oc·p², F, H, W] → [1, oc, F, H·p, W·p]</c>
-    /// (channel = <c>(c·p + p_a)·p + p_b</c>, p_b→H, p_a→W). Matches the upstream reshape/permute.</summary>
-    private Tensor PixelUnshuffle(Tensor x)
-    {
-        int b = (int)x.Shape[0], srcC = (int)x.Shape[1], f = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
-        int p = _patch;
-        int oc = srcC / (p * p);
-        int outH = h * p, outW = w * p;
-        Tensor outT = new Tensor(new TensorShape([(long)b, oc, f, outH, outW]), DType.F32);
-        float* sp = (float*)x.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        long srcFrame = (long)h * w, dstFrame = (long)outH * outW;
-        for (int bi = 0; bi < b; bi++)
-            for (int c = 0; c < oc; c++)
-                for (int fi = 0; fi < f; fi++)
-                    for (int ho = 0; ho < outH; ho++)
-                    {
-                        int hi = ho / p, pb = ho % p;
-                        for (int wo = 0; wo < outW; wo++)
-                        {
-                            int wi = wo / p, pa = wo % p;
-                            int ch = (c * p + pa) * p + pb;
-                            long srcOff = (((long)bi * srcC + ch) * f + fi) * srcFrame + (long)hi * w + wi;
-                            long dstOff = (((long)bi * oc + c) * f + fi) * dstFrame + (long)ho * outW + wo;
-                            op[dstOff] = sp[srcOff];
-                        }
-                    }
-        return outT;
-    }
-
-    /// <summary>Parameter-free per-location channel RMS norm (eps 1e-8, matching LTX-2 <c>PerChannelRMSNorm</c>).</summary>
-    private static Tensor ChannelRms(Tensor x, int c)
-    {
-        int b = (int)x.Shape[0];
-        long spatial = x.Shape.ElementCount / ((long)b * c);
-        Tensor outT = new Tensor(x.Shape, DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (long s = 0; s < spatial; s++)
-            {
-                long basePos = (long)bi * c * spatial + s;
-                double sum = 0;
-                for (int ci = 0; ci < c; ci++) { float v = xp[basePos + (long)ci * spatial]; sum += (double)v * v; }
-                float inv = 1f / MathF.Sqrt((float)(sum / c) + 1e-8f);
-                for (int ci = 0; ci < c; ci++) { long off = basePos + (long)ci * spatial; op[off] = xp[off] * inv; }
-            }
         return outT;
     }
 

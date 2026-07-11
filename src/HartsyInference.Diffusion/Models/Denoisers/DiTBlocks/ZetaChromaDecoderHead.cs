@@ -36,6 +36,7 @@ public sealed unsafe class ZetaChromaDecoderHead : IDisposable
     private readonly Tensor?[] _mlp2Weight, _mlp2Bias;
     private readonly Tensor?[] _adaWeight, _adaBias;
     private Tensor? _finalWeight, _finalBias;
+    private readonly List<Tensor> _ownedCasts = new();
     private int _channels;
     private int _disposed;
 
@@ -131,6 +132,15 @@ public sealed unsafe class ZetaChromaDecoderHead : IDisposable
                 architecture: "zeta-chroma", format: null);
         }
 
+        // in_ln weight/bias are consumed by a HOST float* read in ApplyAffineAndModulation — the checkpoint
+        // ships them BF16, and reinterpreting BF16 bytes as F32 applies garbage per-channel affines in every
+        // res block (THE Zeta confetti bug; same class as the F-Lite register_tokens misread).
+        for (int i = 0; i < _resBlockCount; i++)
+        {
+            _lnWeight[i] = EnsureF32HostReadable(_lnWeight[i]);
+            _lnBias[i] = EnsureF32HostReadable(_lnBias[i]);
+        }
+
         _channels = (int)_condWeight!.Shape[0];
         long expectedEmbedIn = _patchDim + (long)_maxFreqs * _maxFreqs;
         if (_embedWeight!.Shape[1] != expectedEmbedIn)
@@ -187,11 +197,13 @@ public sealed unsafe class ZetaChromaDecoderHead : IDisposable
         TensorShape embedInShape = new TensorShape(batch, numPatches, patchDim + posFeatures);
         Tensor embedInput = new Tensor(embedInShape, DType.F32);
         FillEmbedInput(embedInput, pixelPatches, batch, numPatches, patchDim, posFeatures);
+        ZetaChromaTransformer.DumpBin("dec_embed_input", embedInput);
 
         TensorShape hShape = new TensorShape(batch, numPatches, channels);
         Tensor h = new Tensor(hShape, DType.F32);
         backend.Linear(h, embedInput, _embedWeight, _embedBias);
         embedInput.Dispose();
+        ZetaChromaTransformer.DumpBin("dec_h_embed", h);
 
         // ── 2. Per-patch conditioning from the backbone hidden state ──
         Tensor cond = new Tensor(hShape, DType.F32);
@@ -199,6 +211,7 @@ public sealed unsafe class ZetaChromaDecoderHead : IDisposable
         Tensor condSilu = new Tensor(hShape, DType.F32);
         backend.Silu(condSilu, cond);
         cond.Dispose();
+        ZetaChromaTransformer.DumpBin("dec_cond_silu", condSilu);
 
         // ── 3. AdaLN residual blocks ──
         TensorShape adaShape = new TensorShape(batch, numPatches, 3 * channels);
@@ -220,6 +233,7 @@ public sealed unsafe class ZetaChromaDecoderHead : IDisposable
             backend.Linear(mlpOut, mlpAct, _mlp2Weight[i]!, _mlp2Bias[i]);
 
             ApplyGatedResidualInPlace(h, mlpOut, ada, batch, numPatches, channels);
+            ZetaChromaTransformer.DumpBin($"dec_h_block{i}", h);
         }
 
         ada.Dispose();
@@ -231,12 +245,22 @@ public sealed unsafe class ZetaChromaDecoderHead : IDisposable
         // ── 4. Final layer: LayerNorm-no-affine → Linear → patch space ──
         DiTUtils.LayerNormNoAffine(normed, h, batch, numPatches, channels, LnEps);
         h.Dispose();
+        ZetaChromaTransformer.DumpBin("dec_final_normed", normed);
 
         TensorShape outShape = new TensorShape(batch, numPatches, patchDim);
         Tensor output = new Tensor(outShape, DType.F32);
         backend.Linear(output, normed, _finalWeight, _finalBias);
         normed.Dispose();
         return output;
+    }
+
+    /// <summary>Returns <paramref name="t"/> as F32 for host <c>float*</c> consumption, casting (and taking ownership of the copy) when the checkpoint ships another dtype.</summary>
+    private Tensor? EnsureF32HostReadable(Tensor? t)
+    {
+        if (t is null || t.DType == DType.F32) return t;
+        Tensor cast = t.CastTo(DType.F32);
+        _ownedCasts.Add(cast);
+        return cast;
     }
 
     /// <summary>Constant positional features for the one-token-per-patch NerfEmbedder: with an internal patch size
@@ -333,6 +357,9 @@ public sealed unsafe class ZetaChromaDecoderHead : IDisposable
             }
             _finalWeight = null;
             _finalBias = null;
+            foreach (Tensor cast in _ownedCasts)
+                cast.Dispose();
+            _ownedCasts.Clear();
         }
         GC.SuppressFinalize(this);
     }

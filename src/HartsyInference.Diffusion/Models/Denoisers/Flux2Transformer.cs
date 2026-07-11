@@ -37,6 +37,10 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// and the final AdaLN-continuous norm cancels the factor before proj_out (the Chroma/Flux.1 recipe).</summary>
     private bool _f16Mode;
 
+    // True when any loaded weight is block-quantized (GGUF Q4_K/... or nvfp4) — the transient-dequant regime
+    // that decides the step-graph default (see StepGraphEnabled).
+    private bool _hasQuantizedWeights;
+
     // Rope-table signature: Precompute rebuilds host trig tables AND re-uploads the GPU cos/sin tables —
     // positions only change with resolution / text length.
     private long _ropeSig = long.MinValue;
@@ -111,6 +115,18 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _projOutWeight = weights["proj_out.weight"];
+
+        _hasQuantizedWeights = false;
+        foreach (Tensor w in EnumerateWeights())
+        {
+            if (w.DType.IsQuantized)
+            {
+                _hasQuantizedWeights = true;
+                break;
+            }
+        }
+        if (_hasQuantizedWeights && !DitStepGraph.Enabled)
+            Logs.Info("[Flux2] quantized DiT (transient per-GEMM dequant) — persistent step graph is opt-in (HARTSY_DIT_GRAPH=1); eager loop by default.");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -273,6 +289,16 @@ public sealed unsafe class Flux2Transformer : IDisposable
     // latent through PrepareGraphLatent, never sweeps activations on the graph route, and invalidates before
     // any FreeWeights. ──
     private const int GraphCaptureCall = 3;
+
+    /// <summary>Per-instance step-graph gate. Non-quant weights (Klein BF16 → cached F16 casts) keep the validated
+    /// default-ON graph. GGUF/nvfp4-quantized weights (Dev Q4_K, the 24 GB recipe — a cached F16 cast of the 32B DiT
+    /// cannot fit) dequantize TRANSIENTLY per GEMM, so during capture every per-Linear dequant alloc/free becomes a
+    /// graph-memory node and instantiate must physically reserve that high-water beside the ~18 GB resident quant
+    /// weights — measured capture OOM on 24 GB (worklog 2026-07-10), eager fallback every session. Quantized
+    /// checkpoints therefore require the explicit <c>HARTSY_DIT_GRAPH=1</c> opt-in; the opt-in capture path
+    /// pre-trims the eager pool (see <see cref="ForwardGraphable"/>) to give instantiate the best headroom.</summary>
+    public bool StepGraphEnabled => _hasQuantizedWeights ? DitStepGraph.Enabled : DitStepGraph.EnabledDefaultOn;
+
     private Tensor? _latentFixed;
     private Tensor? _sinFixed;
     private Tensor? _guidanceSinFixed;
@@ -324,7 +350,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         Tensor textEmbeddings, float sigma, float guidanceScale, int hPacked, int wPacked)
     {
         int batch = (int)packedLatent.Shape[0];
-        bool graphMode = DitStepGraph.EnabledDefaultOn && backend.StepGraphSupported && !_graphDead
+        bool graphMode = StepGraphEnabled && backend.StepGraphSupported && !_graphDead
             && batch == 1 && ReferenceEquals(packedLatent, _latentFixed);
         if (!graphMode)
             return (Forward(backend, packedLatent, textEmbeddings, sigma, guidanceScale, hPacked, wPacked), true);
@@ -381,7 +407,16 @@ public sealed unsafe class Flux2Transformer : IDisposable
         }
 
         bool capture = _graphSigCalls == GraphCaptureCall;
-        if (capture) backend.StepGraphBegin();
+        if (capture)
+        {
+            // Quantized opt-in route: hand the eager warm-up passes' unused pool reservation back to the
+            // driver before capture — instantiate reserves the graph pool's transient-dequant high-water ON
+            // TOP of the async pool, and beside the resident Q4 weights that margin decides capture vs OOM.
+            // Live allocations (fixed buffers, rope tables, preloaded weights) are untouched by the trim.
+            if (_hasQuantizedWeights)
+                backend.TrimMemoryPool();
+            backend.StepGraphBegin();
+        }
         try
         {
             RunStepIntoFixed(backend, packedLatent, textEmbeddings, hPacked, wPacked);

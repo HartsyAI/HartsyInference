@@ -232,8 +232,10 @@ _transformer.InvalidateStepGraph(Backend);
         // FIXED buffer so the whole forward is captured once per (prompt ref, grid) signature and replayed
         // with one cuGraphLaunch per step; it survives across generations (this pipeline never sweeps
         // activations on the drain-free route, and the post-decode reclaim below trims instead).
+        // StepGraphEnabled is per-checkpoint: default-ON for Klein (BF16), opt-in HARTSY_DIT_GRAPH=1 for the
+        // Q4-GGUF Dev whose transient per-GEMM dequants OOM the capture on 24 GB (see Flux2Transformer).
         bool graphRoute = drainFree && packedSourceLatent is null
-            && DitStepGraph.EnabledDefaultOn && Backend.StepGraphSupported;
+            && _transformer.StepGraphEnabled && Backend.StepGraphSupported;
         if (graphRoute)
         {
             Tensor fixedLatent = _transformer.PrepareGraphLatent(Backend, packedLatent);
@@ -376,6 +378,17 @@ _transformer.InvalidateStepGraph(Backend);
         // ── 10. RGB conversion ────────────────────────────────────────
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+
+        // Final reclaim (the Flux.1 post-decode idiom): in a long-lived host the VAE-decode intermediates
+        // otherwise hold pool reservation against the next generation / model switch. While a captured step
+        // graph is alive, FreeActivations would destroy it (and free its fixed latent/velocity buffers) —
+        // trim the pool instead; per-op disposal already freed the intermediates, so the trim returns the
+        // unused reservation without touching live buffers. Everything that must survive across generations
+        // (cached prompt embeddings) is host-materialized, and the rope tables live in the weight cache.
+        if (Backend.StepGraphReady)
+            Backend.TrimMemoryPool();
+        else
+            Backend.FreeActivations();
 
         sw.Stop();
         Logs.Info($"Flux.2 image generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

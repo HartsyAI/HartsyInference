@@ -91,14 +91,14 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         // Single-stage: one generator (it applies the final tanh) and we are done.
         if (_single is not null)
         {
-            Tensor sIn = FlattenMel(mel);
+            Tensor sIn = LtxAudioDeviceOps.FlattenMel(backend, mel);
             Tensor sOut = _single.Forward(backend, sIn);
             sIn.Dispose();
             return sOut;
         }
 
         // 1. Stage-1 generator: flatten (audioChannels, melBins) → input channels, then render the low-rate waveform.
-        Tensor mainIn = FlattenMel(mel);
+        Tensor mainIn = LtxAudioDeviceOps.FlattenMel(backend, mel);
         Tensor x = _main!.Forward(backend, mainIn);   // [1, audioChannels, numSamples]
         mainIn.Dispose();
 
@@ -107,39 +107,41 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         int remainder = numSamples % HopLength;
         if (remainder != 0)
         {
-            Tensor padded = PadRight(x, HopLength - remainder);
+            Tensor padded = LtxAudioDeviceOps.PadRightZero(backend, x, HopLength - remainder);
             x.Dispose();
             x = padded;
         }
 
-        // 2. Causal log-mel of the stage-1 waveform → [1, audioChannels, NumMelChannels, frames].
-        Tensor logMel = MelSpectrogram(backend, x);
+        // 2. Causal log-mel of the stage-1 waveform, produced directly in the BWE generator's flattened
+        //    [1, C·mel, frames] layout (the reference's transpose-then-flatten is an identity relabel of it).
+        Tensor bweIn = MelSpectrogram(backend, x);
 
         // 3. BWE generator on the new mel → high-rate residual [1, audioChannels, bweSamples].
-        Tensor bweIn = FlattenMel(TransposeLast(logMel));   // [1, C, frames, mel] → [1, C*mel, frames]
-        logMel.Dispose();
         Tensor residual = _bwe!.Forward(backend, bweIn);
         bweIn.Dispose();
 
         // 4. Residual + resampled stage-1 skip, clamped and cropped to the exact output length.
         Tensor skip = _resampler!.Forward(backend, x);
         int outputSamples = (int)((long)numSamples * OutputSamplingRate / InputSamplingRate);
-        Tensor waveform = AddClampCrop(residual, skip, outputSamples);
+        Tensor waveform = AddClampCrop(backend, residual, skip, outputSamples);
         residual.Dispose();
         skip.Dispose();
         x.Dispose();
         return waveform;
     }
 
-    /// <summary>Causal log-mel: <c>[1, C, samples] → magnitude STFT → mel filterbank → log</c>, producing
-    /// <c>[1, C, NumMelChannels, frames]</c>. The per-channel STFT runs as a stride-hop conv with the loaded DFT
-    /// bases (left-only causal padding).</summary>
+    /// <summary>Causal log-mel: <c>[1, C, samples] → magnitude STFT → mel filterbank → log</c>, produced directly
+    /// in the BWE generator's flattened layout <c>[1, C·NumMelChannels, frames]</c> (identical memory layout to the
+    /// reference's <c>[1, C, mel, frames]</c> — its transpose-then-flatten is a pure relabel). The per-channel STFT
+    /// runs as a stride-hop conv with the loaded DFT bases (left-only causal padding); the small magnitude + mel
+    /// matmul stay host (one tiny drain, once per clip).</summary>
     private Tensor MelSpectrogram(IBackend backend, Tensor x)
     {
         int c = (int)x.Shape[1], samples = (int)x.Shape[2];
-        // CausalSTFT: input [C, 1, samples], left_pad = window_length - hop_length.
+        // CausalSTFT: input [C, 1, samples] — same contiguous layout as [1, C, samples], so a device scale-by-1
+        // relabels without draining the stage-1 waveform off the GPU.
         Tensor stftIn = new(new TensorShape(c, 1, samples), DType.F32);
-        Buffer.MemoryCopy((float*)x.DataPointer, (float*)stftIn.DataPointer, (long)c * samples * 4, (long)c * samples * 4);
+        backend.Scale(stftIn, x, 1f);
         int leftPad = Math.Max(0, WindowLength - HopLength);
         int frames = (samples + leftPad - FilterLength) / HopLength + 1;
         Tensor spec = new(new TensorShape(c, NumFreqs * 2, frames), DType.F32);
@@ -167,7 +169,7 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         spec.Dispose();
 
         // mel = mel_basis [NumMel, NumFreqs] @ magnitude [C, NumFreqs, frames]; log_mel = log(clamp(mel, 1e-5)).
-        Tensor logMel = new(new TensorShape(1, c, NumMelChannels, frames), DType.F32);
+        Tensor logMel = new(new TensorShape(1, (long)c * NumMelChannels, frames), DType.F32);
         float* wp = (float*)_melBasis!.DataPointer;
         float* lp = (float*)logMel.DataPointer;
         for (int ch = 0; ch < c; ch++)
@@ -190,69 +192,22 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
         return logMel;
     }
 
-    /// <summary>Flattens a mel tensor <c>[1, C, frames, melBins]</c> into generator input <c>[1, C·melBins,
-    /// frames]</c> (the reference transposes time-last then merges the channel and mel-bin axes).</summary>
-    private static Tensor FlattenMel(Tensor mel)
-    {
-        int c = (int)mel.Shape[1], frames = (int)mel.Shape[2], melBins = (int)mel.Shape[3];
-        Tensor o = new(new TensorShape(1, c * melBins, frames), DType.F32);
-        float* xp = (float*)mel.DataPointer;
-        float* op = (float*)o.DataPointer;
-        // mel[c, frame, bin] → out[c*melBins + bin, frame].
-        for (int ci = 0; ci < c; ci++)
-            for (int t = 0; t < frames; t++)
-                for (int bin = 0; bin < melBins; bin++)
-                    op[(long)(ci * melBins + bin) * frames + t] = xp[((long)ci * frames + t) * melBins + bin];
-        return o;
-    }
-
-    /// <summary>Transposes the last two axes of <c>[1, C, A, B] → [1, C, B, A]</c> (mel time/bin swap before BWE).</summary>
-    private static Tensor TransposeLast(Tensor x)
-    {
-        int c = (int)x.Shape[1], a = (int)x.Shape[2], b = (int)x.Shape[3];
-        Tensor o = new(new TensorShape(1, c, b, a), DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* op = (float*)o.DataPointer;
-        for (int ci = 0; ci < c; ci++)
-            for (int ai = 0; ai < a; ai++)
-                for (int bi = 0; bi < b; bi++)
-                    op[((long)ci * b + bi) * a + ai] = xp[((long)ci * a + ai) * b + bi];
-        return o;
-    }
-
-    /// <summary>Right-pads the time axis of <c>[1, C, T]</c> with zeros.</summary>
-    private static Tensor PadRight(Tensor x, int pad)
-    {
-        int c = (int)x.Shape[1], t = (int)x.Shape[2], t2 = t + pad;
-        Tensor o = new(new TensorShape(1, c, t2), DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* op = (float*)o.DataPointer;
-        for (int ci = 0; ci < c; ci++)
-        {
-            new Span<float>(op + (long)ci * t2, t2).Clear();
-            Buffer.MemoryCopy(xp + (long)ci * t, op + (long)ci * t2, (long)t * 4, (long)t * 4);
-        }
-        return o;
-    }
-
-    /// <summary><c>clamp(residual + skip, -1, 1)</c> then crop to <paramref name="outputSamples"/>. The two inputs
-    /// are aligned to their shared length defensively (exact-length parity is validation-pending).</summary>
-    private Tensor AddClampCrop(Tensor residual, Tensor skip, int outputSamples)
+    /// <summary><c>clamp(residual + skip, -1, 1)</c> then crop to <paramref name="outputSamples"/>, all on device.
+    /// The two inputs are aligned to their shared length defensively (exact-length parity is validation-pending).</summary>
+    private static Tensor AddClampCrop(IBackend backend, Tensor residual, Tensor skip, int outputSamples)
     {
         int c = (int)residual.Shape[1];
-        int len = Math.Min((int)residual.Shape[2], (int)skip.Shape[2]);
-        int outLen = Math.Min(len, outputSamples);
-        Tensor o = new(new TensorShape(1, c, outLen), DType.F32);
-        float* rp = (float*)residual.DataPointer;
-        float* kp = (float*)skip.DataPointer;
-        float* op = (float*)o.DataPointer;
         int rT = (int)residual.Shape[2], kT = (int)skip.Shape[2];
-        for (int ci = 0; ci < c; ci++)
-            for (int t = 0; t < outLen; t++)
-            {
-                float v = rp[(long)ci * rT + t] + kp[(long)ci * kT + t];
-                op[(long)ci * outLen + t] = Math.Clamp(v, -1f, 1f);
-            }
+        int outLen = Math.Min(Math.Min(rT, kT), outputSamples);
+        Tensor rc = residual;
+        if (rT != outLen) rc = LtxAudioDeviceOps.CropTime(backend, residual, 0, rT - outLen);
+        Tensor kc = skip;
+        if (kT != outLen) kc = LtxAudioDeviceOps.CropTime(backend, skip, 0, kT - outLen);
+        Tensor o = new(new TensorShape(1, c, outLen), DType.F32);
+        backend.Add(o, rc, kc);
+        backend.Clamp(o, o, -1f, 1f);
+        if (!ReferenceEquals(rc, residual)) rc.Dispose();
+        if (!ReferenceEquals(kc, skip)) kc.Dispose();
         return o;
     }
 
@@ -292,35 +247,15 @@ public sealed unsafe class LtxAudioVocoder : IDisposable
 
         public Tensor Forward(IBackend backend, Tensor x)
         {
-            int c = (int)x.Shape[1], t = (int)x.Shape[2];
-            // Replicate-pad both sides by _pad.
-            int tp = t + 2 * _pad;
-            Tensor padded = new(new TensorShape(1, c, tp), DType.F32);
-            float* xp = (float*)x.DataPointer;
-            float* pp = (float*)padded.DataPointer;
-            for (int ci = 0; ci < c; ci++)
-            {
-                float* src = xp + (long)ci * t;
-                float* dst = pp + (long)ci * tp;
-                float left = src[0], right = src[t - 1];
-                for (int i = 0; i < _pad; i++) dst[i] = left;
-                Buffer.MemoryCopy(src, dst + _pad, (long)t * 4, (long)t * 4);
-                for (int i = 0; i < _pad; i++) dst[_pad + t + i] = right;
-            }
-
+            int c = (int)x.Shape[1];
+            Tensor padded = LtxAudioDeviceOps.ReplicatePadTime(backend, x, _pad, _pad);
+            int tp = (int)padded.Shape[2];
             int tOut = (tp - 1) * _ratio + (_kernel - 1) + 1;
             Tensor convt = new(new TensorShape(1, c, tOut), DType.F32);
             backend.ConvTranspose1d(convt, padded, _weight, null, _ratio, 0, 0, 1, c);
             padded.Dispose();
             backend.Scale(convt, convt, _ratio);
-
-            // Crop [cropLeft : -cropRight].
-            int cropped = tOut - _cropLeft - _cropRight;
-            Tensor o = new(new TensorShape(1, c, cropped), DType.F32);
-            float* cp = (float*)convt.DataPointer;
-            float* op = (float*)o.DataPointer;
-            for (int ci = 0; ci < c; ci++)
-                Buffer.MemoryCopy(cp + (long)ci * tOut + _cropLeft, op + (long)ci * cropped, (long)cropped * 4, (long)cropped * 4);
+            Tensor o = LtxAudioDeviceOps.CropTime(backend, convt, _cropLeft, _cropRight);
             convt.Dispose();
             return o;
         }

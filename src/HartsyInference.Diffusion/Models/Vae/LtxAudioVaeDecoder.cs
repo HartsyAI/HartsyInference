@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Music;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -120,7 +121,7 @@ public sealed unsafe class LtxAudioVaeDecoder
             if (s.Upsample is not null) { Tensor n = s.Upsample.Forward(backend, h); h.Dispose(); h = n; }
         }
 
-        Tensor normed = LtxAudioPixelNorm.Forward(h, PixelNormEps);
+        Tensor normed = LtxAudioPixelNorm.Forward(backend, h, PixelNormEps);
         h.Dispose();
         backend.Silu(normed, normed);
         Tensor outT = _convOut!.Forward(backend, normed);   // [B, 2, T, mel]
@@ -153,25 +154,12 @@ public sealed unsafe class LtxAudioCausalConv2d
 
     public Tensor Forward(IBackend backend, Tensor x)
     {
-        int b = (int)x.Shape[0], c = (int)x.Shape[1], h = (int)x.Shape[2], w = (int)x.Shape[3];
+        int b = (int)x.Shape[0], h = (int)x.Shape[2], w = (int)x.Shape[3];
         int padTop = _kh - 1;          // causal: all height padding on top
         int padW = (_kw - 1) / 2;      // symmetric mel padding, handled by Conv2D
 
         Tensor src = x;
-        if (padTop > 0)
-        {
-            Tensor padded = new Tensor(new TensorShape(b, c, h + padTop, w), DType.F32);
-            float* sp = (float*)x.DataPointer;
-            float* pp = (float*)padded.DataPointer;
-            long inHW = (long)h * w, padHW = (long)(h + padTop) * w, topBytes = (long)padTop * w * sizeof(float);
-            for (int bc = 0; bc < b * c; bc++)
-            {
-                // zero the top `padTop` rows, copy the input rows below them
-                new Span<float>(pp + bc * padHW, padTop * w).Clear();
-                Buffer.MemoryCopy(sp + bc * inHW, pp + bc * padHW + (long)padTop * w, inHW * sizeof(float), inHW * sizeof(float));
-            }
-            src = padded;
-        }
+        if (padTop > 0) src = LtxAudioDeviceOps.PadTimeTopZero(backend, x, padTop);
 
         int outH = h;   // (h + padTop) - (kh - 1) = h
         int outW = w;   // w + 2*padW - (kw - 1) = w for odd kw
@@ -189,25 +177,17 @@ public sealed unsafe class LtxAudioCausalConv2d
 }
 
 /// <summary>Parameter-free per-pixel RMS normalization over the channel dim (<c>LTX2AudioPixelNorm</c>):
-/// <c>x / sqrt(mean_c(x²) + eps)</c>.</summary>
-public static unsafe class LtxAudioPixelNorm
+/// <c>x / sqrt(mean_c(x²) + eps)</c>. Routed through the device <see cref="IBackend.WanRmsNormChannel"/> op
+/// (<c>x·sqrt(C)/max(L2_C, eps′)</c>) with the eps folded as <c>eps′ = sqrt(C·eps)</c>, which matches the reference
+/// exactly in both the signal limit (<c>L2 ≫ eps′</c>, difference ≤ eps/(2·mean_C(x²))) and the silence limit
+/// (both reduce to <c>x/sqrt(eps)</c>).</summary>
+public static class LtxAudioPixelNorm
 {
-    public static Tensor Forward(Tensor x, float eps)
+    public static Tensor Forward(IBackend backend, Tensor x, float eps)
     {
-        int b = (int)x.Shape[0], c = (int)x.Shape[1];
-        long spatial = x.ElementCount / ((long)b * c);
+        int c = (int)x.Shape[1];
         Tensor outT = new Tensor(x.Shape, DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (long s = 0; s < spatial; s++)
-            {
-                long basePos = (long)bi * c * spatial + s;
-                double sum = 0;
-                for (int ci = 0; ci < c; ci++) { float v = xp[basePos + (long)ci * spatial]; sum += (double)v * v; }
-                float inv = 1f / MathF.Sqrt((float)(sum / c) + eps);
-                for (int ci = 0; ci < c; ci++) { long off = basePos + (long)ci * spatial; op[off] = xp[off] * inv; }
-            }
+        backend.WanRmsNormChannel(outT, x, null, MathF.Sqrt(c * eps));
         return outT;
     }
 }
@@ -238,11 +218,11 @@ public sealed unsafe class LtxAudioResnetBlock
 
     public Tensor Forward(IBackend backend, Tensor x)
     {
-        Tensor h = LtxAudioPixelNorm.Forward(x, 1e-6f);
+        Tensor h = LtxAudioPixelNorm.Forward(backend, x, 1e-6f);
         backend.Silu(h, h);
         Tensor c1 = _conv1!.Forward(backend, h);
         h.Dispose();
-        Tensor n2 = LtxAudioPixelNorm.Forward(c1, 1e-6f);
+        Tensor n2 = LtxAudioPixelNorm.Forward(backend, c1, 1e-6f);
         c1.Dispose();
         backend.Silu(n2, n2);
         Tensor c2 = _conv2!.Forward(backend, n2);
@@ -287,13 +267,7 @@ public sealed unsafe class LtxAudioUpsample
         up.Dispose();
 
         // Drop the first time row: [:, :, 1:, :] → [b, c, 2h-1, 2w].
-        int ch = (int)conv.Shape[1], hh = (int)conv.Shape[2], ww = (int)conv.Shape[3];
-        Tensor outT = new Tensor(new TensorShape(b, ch, hh - 1, ww), DType.F32);
-        float* sp = (float*)conv.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        long inHW = (long)hh * ww, outHW = (long)(hh - 1) * ww;
-        for (int bc = 0; bc < b * ch; bc++)
-            Buffer.MemoryCopy(sp + bc * inHW + ww, op + bc * outHW, outHW * sizeof(float), outHW * sizeof(float));
+        Tensor outT = LtxAudioDeviceOps.DropFirstTimeRow(backend, conv);
         conv.Dispose();
         return outT;
     }

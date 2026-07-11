@@ -20,6 +20,42 @@ public sealed class ZetaChromaTransformer : IDisposable
     private readonly ZetaChromaDecoderHead _decoder;
     private int _disposed;
 
+    // Binary stage dumps for the torch oracle (HARTSY_ZETA_DUMP=<dir>): raw F32 .bin per stage on the
+    // FIRST forward only (step-0 cond pass — the pipeline runs cond before uncond), plus a shapes manifest.
+    private static readonly string? ZetaDumpDir = Environment.GetEnvironmentVariable("HARTSY_ZETA_DUMP");
+    private static int _dumpForwardIndex = -1;
+
+    /// <summary>True while the step-0 cond forward is being dumped (HARTSY_ZETA_DUMP set).</summary>
+    internal static bool DumpActive => ZetaDumpDir is not null && _dumpForwardIndex == 0;
+
+    /// <summary>Writes <paramref name="t"/> as raw F32 to <c>{HARTSY_ZETA_DUMP}/{name}.bin</c> and appends the shape to the manifest. No-op unless <see cref="DumpActive"/>.</summary>
+    internal static unsafe void DumpBin(string name, Tensor t)
+    {
+        if (!DumpActive) return;
+        Directory.CreateDirectory(ZetaDumpDir!);
+        Tensor src = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
+        long bytes = src.Shape.ElementCount * sizeof(float);
+        byte[] buf = new byte[bytes];
+        fixed (byte* dst = buf) Buffer.MemoryCopy((void*)src.DataPointer, dst, bytes, bytes);
+        File.WriteAllBytes(Path.Combine(ZetaDumpDir!, name + ".bin"), buf);
+        System.Text.StringBuilder shape = new System.Text.StringBuilder();
+        for (int i = 0; i < t.Shape.Rank; i++)
+        {
+            if (i > 0) shape.Append('x');
+            shape.Append(t.Shape[i]);
+        }
+        File.AppendAllText(Path.Combine(ZetaDumpDir!, "shapes.txt"), $"{name} {shape}\n");
+        if (!ReferenceEquals(src, t)) src.Dispose();
+    }
+
+    /// <summary>Appends a scalar record to the dump manifest. No-op unless <see cref="DumpActive"/>.</summary>
+    internal static void DumpScalar(string name, float value)
+    {
+        if (!DumpActive) return;
+        Directory.CreateDirectory(ZetaDumpDir!);
+        File.AppendAllText(Path.Combine(ZetaDumpDir!, "shapes.txt"), $"{name} {value:R}\n");
+    }
+
     /// <summary>Creates a Zeta-Chroma transformer from configuration (use <see cref="ZetaChromaConfig.FromWeights"/>).</summary>
     public ZetaChromaTransformer(ZetaChromaConfig config)
     {
@@ -73,17 +109,25 @@ public sealed class ZetaChromaTransformer : IDisposable
         if (height % patch != 0 || width % patch != 0)
             throw new ArgumentException($"Pixel H/W ({height}x{width}) must be divisible by patch size {patch}.");
 
+        _dumpForwardIndex++;
+        DumpBin("pixels_in", pixels);
+        DumpBin("caption_embeddings", captionEmbeddings);
+        DumpScalar("sigma_arg", sigma);
+
         // Raw noisy patches captured BEFORE the backbone embeds them — the decoder refines these directly.
         Tensor pixelPatches = ZImageTransformer.Patchify(pixels, batch, 3, height, width, patch);
+        DumpBin("pixel_patches", pixelPatches);
 
         (Tensor imgTokens, Tensor tEmb, int hPacked, int wPacked) =
             _backbone.ForwardCore(backend, pixels, captionEmbeddings, sigma);
+        DumpBin("img_tokens", imgTokens);
         // The decoder conditions on per-patch hidden states only; the timestep embedding goes unused.
         tEmb.Dispose();
 
         Tensor decoded = _decoder.Forward(backend, pixelPatches, imgTokens);
         pixelPatches.Dispose();
         imgTokens.Dispose();
+        DumpBin("decoder_out", decoded);
 
         Tensor x0 = ZImageTransformer.Unpatchify(decoded, batch, 3, hPacked, wPacked, patch);
         decoded.Dispose();
@@ -94,6 +138,7 @@ public sealed class ZetaChromaTransformer : IDisposable
         for (long i = 0; i < count; i++)
             p[i] = -p[i];
 
+        DumpBin("x0_out", x0);
         return x0;
     }
 

@@ -112,36 +112,43 @@ public sealed unsafe class FLiteAttention
         Tensor qkvFlat = new Tensor(new TensorShape(batch, seqLen, 3 * _hidden), DType.F32);
         backend.Linear(qkvFlat, x, _qkvWeight, _qkvBias);
 
-        Tensor q = SliceLastDim(qkvFlat, 0, _hidden, batch, seqLen);
-        Tensor k = SliceLastDim(qkvFlat, 1, _hidden, batch, seqLen);
-        Tensor v = SliceLastDim(qkvFlat, 2, _hidden, batch, seqLen);
+        // Device slice straight into [B, S, H, D] (hidden = H·D is already token-major head-then-dim).
+        TensorShape bshd = new TensorShape(batch, seqLen, _numHeads, _headDim);
+        Tensor q = new Tensor(bshd, DType.F32);
+        Tensor k = new Tensor(bshd, DType.F32);
+        Tensor v = new Tensor(bshd, DType.F32);
+        backend.SliceLastDim(q, qkvFlat, 0);
+        backend.SliceLastDim(k, qkvFlat, _hidden);
+        backend.SliceLastDim(v, qkvFlat, 2 * _hidden);
         qkvFlat.Dispose();
 
-        Tensor qHead = DiTUtils.ReshapeToMultiHead(q, batch, seqLen, _numHeads, _headDim);
-        q.Dispose();
-        Tensor kHead = DiTUtils.ReshapeToMultiHead(k, batch, seqLen, _numHeads, _headDim);
-        k.Dispose();
-        Tensor vHead = DiTUtils.ReshapeToMultiHead(v, batch, seqLen, _numHeads, _headDim);
-        v.Dispose();
+        // Device RoPE PRE-permute (llama split-half convention; F-Lite's sign lives in the negated
+        // sin table from FLiteRope.BuildDeviceTables).
+        if (cosRope is not null && sinRope is not null)
+            backend.ApplyRope(q, k, cosRope, sinRope);
+
+        TensorShape bhsd = new TensorShape(batch, _numHeads, seqLen, _headDim);
+        Tensor qHead = new Tensor(bhsd, DType.F32);
+        Tensor kHead = new Tensor(bhsd, DType.F32);
+        Tensor vHead = new Tensor(bhsd, DType.F32);
+        backend.Permute0213(qHead, q, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kHead, k, seqLen, _numHeads, _headDim);
+        backend.Permute0213(vHead, v, seqLen, _numHeads, _headDim);
+        q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor vMixed = MixVResidual(backend, vHead, vPrev);
 
-        if (cosRope is not null && sinRope is not null)
-        {
-            FLiteRope rope = new FLiteRope(_headDim, ropeBase: 10000);
-            rope.ApplyRotation(qHead, cosRope, sinRope, batch, _numHeads, seqLen);
-            rope.ApplyRotation(kHead, cosRope, sinRope, batch, _numHeads, seqLen);
-        }
+        Tensor qNormed = ApplyHeadRmsNorm(backend, qHead, _qNormWeight);
+        Tensor kNormed = ApplyHeadRmsNorm(backend, kHead, _kNormWeight);
+        qHead.Dispose(); kHead.Dispose();
 
-        ApplyHeadRmsNorm(qHead, _qNormWeight, batch, _numHeads, seqLen);
-        ApplyHeadRmsNorm(kHead, _kNormWeight, batch, _numHeads, seqLen);
+        Tensor attnOut = new Tensor(bhsd, DType.F32);
+        backend.ScaledDotProductAttention(attnOut, qNormed, kNormed, vMixed, mask: null, _scale, allowF16: true);
+        qNormed.Dispose();
+        kNormed.Dispose();
 
-        Tensor attnOut = new Tensor(new TensorShape(batch, _numHeads, seqLen, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qHead, kHead, vMixed, mask: null, _scale);
-        qHead.Dispose();
-        kHead.Dispose();
-
-        Tensor flat = DiTUtils.ReshapeFromMultiHead(attnOut, batch, seqLen, _numHeads, _headDim);
+        Tensor flat = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
+        backend.Permute0213(flat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
         Tensor output = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
@@ -161,32 +168,39 @@ public sealed unsafe class FLiteAttention
         int seqLen = (int)x.Shape[1];
         int ctxLen = (int)context.Shape[1];
 
-        Tensor qFlat = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
+        Tensor qFlat = new Tensor(new TensorShape(batch, seqLen, _numHeads, _headDim), DType.F32);
         backend.Linear(qFlat, x, _qWeight, _qBias);
 
         Tensor kvFlat = new Tensor(new TensorShape(batch, ctxLen, 2 * _hidden), DType.F32);
         backend.Linear(kvFlat, context, _ctxKvWeight, _ctxKvBias);
-        Tensor k = SliceLastDim(kvFlat, 0, _hidden, batch, ctxLen);
-        Tensor v = SliceLastDim(kvFlat, 1, _hidden, batch, ctxLen);
+        TensorShape ctxBshd = new TensorShape(batch, ctxLen, _numHeads, _headDim);
+        Tensor k = new Tensor(ctxBshd, DType.F32);
+        Tensor v = new Tensor(ctxBshd, DType.F32);
+        backend.SliceLastDim(k, kvFlat, 0);
+        backend.SliceLastDim(v, kvFlat, _hidden);
         kvFlat.Dispose();
 
-        Tensor qHead = DiTUtils.ReshapeToMultiHead(qFlat, batch, seqLen, _numHeads, _headDim);
-        qFlat.Dispose();
-        Tensor kHead = DiTUtils.ReshapeToMultiHead(k, batch, ctxLen, _numHeads, _headDim);
-        k.Dispose();
-        Tensor vHead = DiTUtils.ReshapeToMultiHead(v, batch, ctxLen, _numHeads, _headDim);
-        v.Dispose();
+        Tensor qHead = new Tensor(new TensorShape(batch, _numHeads, seqLen, _headDim), DType.F32);
+        Tensor kHead = new Tensor(new TensorShape(batch, _numHeads, ctxLen, _headDim), DType.F32);
+        Tensor vHead = new Tensor(new TensorShape(batch, _numHeads, ctxLen, _headDim), DType.F32);
+        backend.Permute0213(qHead, qFlat, seqLen, _numHeads, _headDim);
+        backend.Permute0213(kHead, k, ctxLen, _numHeads, _headDim);
+        backend.Permute0213(vHead, v, ctxLen, _numHeads, _headDim);
+        qFlat.Dispose(); k.Dispose(); v.Dispose();
 
-        ApplyHeadRmsNorm(qHead, _qNormWeight, batch, _numHeads, seqLen);
-        ApplyHeadRmsNorm(kHead, _kNormWeight, batch, _numHeads, ctxLen);
+        Tensor qN = ApplyHeadRmsNorm(backend, qHead, _qNormWeight);
+        Tensor kN = ApplyHeadRmsNorm(backend, kHead, _kNormWeight);
+        qHead.Dispose(); kHead.Dispose();
+        qHead = qN; kHead = kN;
 
         Tensor attnOut = new Tensor(new TensorShape(batch, _numHeads, seqLen, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(attnOut, qHead, kHead, vHead, mask: null, _scale);
+        backend.ScaledDotProductAttention(attnOut, qHead, kHead, vHead, mask: null, _scale, allowF16: true);
         qHead.Dispose();
         kHead.Dispose();
         vHead.Dispose();
 
-        Tensor flat = DiTUtils.ReshapeFromMultiHead(attnOut, batch, seqLen, _numHeads, _headDim);
+        Tensor flat = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
+        backend.Permute0213(flat, attnOut, _numHeads, seqLen, _headDim);
         attnOut.Dispose();
 
         Tensor output = new Tensor(new TensorShape(batch, seqLen, _hidden), DType.F32);
@@ -195,30 +209,25 @@ public sealed unsafe class FLiteAttention
         return output;
     }
 
-    private static Tensor SliceLastDim(Tensor source, int chunkIdx, int chunkSize, int batch, int seqLen)
-    {
-        Tensor slice = new Tensor(new TensorShape(batch, seqLen, chunkSize), DType.F32);
-        float* srcPtr = (float*)source.DataPointer;
-        float* dstPtr = (float*)slice.DataPointer;
-        long stridePerToken = source.Shape[2];
-        long offset = (long)chunkIdx * chunkSize;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int t = 0; t < seqLen; t++)
-            {
-                long srcRow = ((long)b * seqLen + t) * stridePerToken + offset;
-                long dstRow = ((long)b * seqLen + t) * chunkSize;
-                Buffer.MemoryCopy(srcPtr + srcRow, dstPtr + dstRow, chunkSize * sizeof(float), chunkSize * sizeof(float));
-            }
-        }
-        return slice;
-    }
-
     private Tensor MixVResidual(IBackend backend, Tensor vCur, Tensor? vPrev)
     {
         if (!_residualV || vPrev is null || _lambdaParam is null) return vCur;
 
-        float lambda = ((float*)_lambdaParam.DataPointer)[0];
+        // Read the scalar once and cache. lambda_param ships BF16 — reading its bytes as float was
+        // garbage (the same reinterpretation bug as register_tokens; poisoned V in every block >= 1).
+        if (_lambdaCached is null)
+        {
+            if (_lambdaParam.DType == DType.F32)
+            {
+                _lambdaCached = ((float*)_lambdaParam.DataPointer)[0];
+            }
+            else
+            {
+                using Tensor lamF32 = _lambdaParam.CastTo(DType.F32);
+                _lambdaCached = ((float*)lamF32.DataPointer)[0];
+            }
+        }
+        float lambda = _lambdaCached.Value;
         float oneMinusLambda = 1.0f - lambda;
 
         Tensor scaledCur = new Tensor(vCur.Shape, DType.F32);
@@ -233,40 +242,23 @@ public sealed unsafe class FLiteAttention
         return mixed;
     }
 
-    private static void ApplyHeadRmsNorm(Tensor x, Tensor? scale, int batch, int numHeads, int seqLen)
+    /// <summary>Per-head RMSNorm over headDim on the device. <paramref name="scale"/> null → all-ones (the public 10B ships affine-free QK norms).</summary>
+    private Tensor ApplyHeadRmsNorm(IBackend backend, Tensor x, Tensor? scale)
     {
-        if (x.DType != DType.F32) throw new ArgumentException("FLiteAttention head-RMSNorm expects F32.");
-        int headDim = (int)x.Shape[3];
-        float* xPtr = (float*)x.DataPointer;
-        float* scalePtr = scale is not null ? (float*)scale.DataPointer : null;
-        const float Eps = 1e-6f;
+        Tensor result = new Tensor(x.Shape, DType.F32);
+        backend.RmsNorm(result, x, scale ?? OnesHeadDim(backend), 1e-6f);
+        return result;
+    }
 
-        for (int b = 0; b < batch; b++)
+    private float? _lambdaCached;
+    private Tensor? _onesHeadDim;
+    private Tensor OnesHeadDim(IBackend backend)
+    {
+        if (_onesHeadDim is null)
         {
-            for (int h = 0; h < numHeads; h++)
-            {
-                for (int t = 0; t < seqLen; t++)
-                {
-                    long baseIdx = (((long)b * numHeads + h) * seqLen + t) * headDim;
-                    float sumSq = 0f;
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        float v = xPtr[baseIdx + d];
-                        sumSq += v * v;
-                    }
-                    float invRms = 1.0f / MathF.Sqrt(sumSq / headDim + Eps);
-                    if (scalePtr is null)
-                    {
-                        for (int d = 0; d < headDim; d++)
-                            xPtr[baseIdx + d] *= invRms;
-                    }
-                    else
-                    {
-                        for (int d = 0; d < headDim; d++)
-                            xPtr[baseIdx + d] = xPtr[baseIdx + d] * invRms * scalePtr[d];
-                    }
-                }
-            }
+            _onesHeadDim = new Tensor(new TensorShape(_headDim), DType.F32);
+            backend.Fill(_onesHeadDim, 1.0f);
         }
+        return _onesHeadDim;
     }
 }

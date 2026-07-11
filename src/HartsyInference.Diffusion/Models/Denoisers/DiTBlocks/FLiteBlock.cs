@@ -114,81 +114,52 @@ public sealed unsafe class FLiteBlock
         backend.Linear(projected, activated, _adaLNWeight, _adaLNBias);
         activated.Dispose();
 
+        // Device chunk: 9 × [B, hidden] slices along the last dim — no host round-trip (the old
+        // DataPointer split was both the per-block stall and the async-pool AV hazard).
         Tensor[] result = new Tensor[9];
-        float* projPtr = (float*)projected.DataPointer;
         for (int i = 0; i < 9; i++)
         {
             Tensor part = new Tensor(new TensorShape(batch, hidden), DType.F32);
-            float* partPtr = (float*)part.DataPointer;
-            for (int b = 0; b < batch; b++)
-            {
-                long srcOffset = (long)b * 9 * hidden + (long)i * hidden;
-                long dstOffset = (long)b * hidden;
-                Buffer.MemoryCopy(projPtr + srcOffset, partPtr + dstOffset, hidden * sizeof(float), hidden * sizeof(float));
-            }
+            backend.SliceLastDim(part, projected, i * hidden);
             result[i] = part;
         }
         projected.Dispose();
         return result;
     }
 
-    private static Tensor ModulateRmsNorm(IBackend backend, Tensor x, Tensor? scaleWeight,
+    private Tensor ModulateRmsNorm(IBackend backend, Tensor x, Tensor? scaleWeight,
         Tensor shift, Tensor scale, int batch, int seqLen, int hidden)
     {
-        Tensor result = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
-        float* xPtr = (float*)x.DataPointer;
-        float* outPtr = (float*)result.DataPointer;
-        float* shiftPtr = (float*)shift.DataPointer;
-        float* scalePtrPerBatch = (float*)scale.DataPointer;
-        float* normWeight = scaleWeight is not null ? (float*)scaleWeight.DataPointer : null;
         const float Eps = 1e-6f;
+        Tensor normed = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
+        backend.RmsNorm(normed, x, scaleWeight ?? OnesHidden(backend, hidden), Eps);
 
-        for (int b = 0; b < batch; b++)
-        {
-            float* shiftRow = shiftPtr + (long)b * hidden;
-            float* scaleRow = scalePtrPerBatch + (long)b * hidden;
-            for (int t = 0; t < seqLen; t++)
-            {
-                long baseIdx = ((long)b * seqLen + t) * hidden;
-                float sumSq = 0f;
-                for (int d = 0; d < hidden; d++)
-                {
-                    float v = xPtr[baseIdx + d];
-                    sumSq += v * v;
-                }
-                float invRms = 1.0f / MathF.Sqrt(sumSq / hidden + Eps);
-                for (int d = 0; d < hidden; d++)
-                {
-                    float normed = xPtr[baseIdx + d] * invRms;
-                    if (normWeight is not null) normed *= normWeight[d];
-                    outPtr[baseIdx + d] = normed * (1.0f + scaleRow[d]) + shiftRow[d];
-                }
-            }
-        }
+        Tensor scalePlus1 = new Tensor(scale.Shape, DType.F32);
+        backend.AddScalar(scalePlus1, scale, 1.0f);
+        Tensor result = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
+        backend.AffineBroadcastLastDim(result, normed, scalePlus1, shift);
+        scalePlus1.Dispose();
+        normed.Dispose();
         return result;
+    }
+
+    // Constant all-ones RMSNorm scale for the public 10B's affine-free norms (TrainBiasAndRms=false).
+    private Tensor? _onesHidden;
+    private Tensor OnesHidden(IBackend backend, int hidden)
+    {
+        if (_onesHidden is null)
+        {
+            _onesHidden = new Tensor(new TensorShape(hidden), DType.F32);
+            backend.Fill(_onesHidden, 1.0f);
+        }
+        return _onesHidden;
     }
 
     private static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor delta, Tensor gate,
         int batch, int seqLen, int hidden)
     {
         Tensor result = new Tensor(new TensorShape(batch, seqLen, hidden), DType.F32);
-        float* resPtr = (float*)residual.DataPointer;
-        float* deltaPtr = (float*)delta.DataPointer;
-        float* outPtr = (float*)result.DataPointer;
-        float* gatePtr = (float*)gate.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            float* gateRow = gatePtr + (long)b * hidden;
-            for (int t = 0; t < seqLen; t++)
-            {
-                long baseIdx = ((long)b * seqLen + t) * hidden;
-                for (int d = 0; d < hidden; d++)
-                {
-                    outPtr[baseIdx + d] = resPtr[baseIdx + d] + gateRow[d] * deltaPtr[baseIdx + d];
-                }
-            }
-        }
+        backend.GatedResidualLastDim(result, residual, delta, gate);
         return result;
     }
 

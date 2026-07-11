@@ -18,6 +18,13 @@ namespace HartsyInference.Diffusion.Pipelines;
 public sealed unsafe class FLitePipeline : DiffusionPipelineBase
 {
     private readonly T5TextEncoder _t5;
+
+    // Prompt-embedding cache (the Flux2/Krea2 pattern): a hit skips the whole T5 phase, which also
+    // avoids the TE⇄DiT VRAM swap. Keyed on the positive tokens + whether a real negative was encoded.
+    private int[]? _cachedPromptKey;
+    private Tensor? _cachedPositive;
+    private Tensor? _cachedNegative;
+    private bool _ditResident;
     private readonly FLiteTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder? _vaeEncoder;
@@ -62,7 +69,7 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
     /// Strength=0 short-circuits to byte-identical pass-through.</para></summary>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] t5TokenIds, int[] t5AttentionMask,
-        int[] negativeT5TokenIds, int[] negativeT5AttentionMask,
+        int[]? negativeT5TokenIds, int[]? negativeT5AttentionMask,
         TextToImageRequest request,
         Action<GenerationProgress>? onProgress = null)
     {
@@ -102,20 +109,61 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         // per-op cache-miss H2D transfer. Paired with FreeWeights immediately after encoding
         // since T5-XXL is ~5 GB and we want it gone before the transformer phase. No-op on
         // backends without a weight cache.
+        // Cache covers the common zero-negative path only; a real negative always re-encodes.
+        bool cacheHit = negativeT5TokenIds is null && _cachedPromptKey is not null
+            && t5TokenIds.AsSpan().SequenceEqual(_cachedPromptKey);
+        Tensor positiveContext;
+        Tensor negativeContext;
+        if (cacheHit)
+        {
+            positiveContext = _cachedPositive!;
+            negativeContext = _cachedNegative!;
+            Logs.Info("F-Lite prompt cache HIT — skipping T5 encode.");
+            goto AfterEncode;
+        }
+        // Cache miss: the 20GB DiT cannot share the card with T5-XXL's preload — evict it first.
+        if (_ditResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _ditResident = false;
+        }
+        Backend.TrimMemoryPool();
         Backend.PreloadWeights(_t5.EnumerateWeights());
         int[][] posTokens = [t5TokenIds];
         int[][] posMask = [t5AttentionMask];
-        Tensor positiveContext = _t5.EncodeAtLayer(Backend, posTokens, _config.T5LayerIndex, applyFinalNorm: true, posMask);
-        int[][] negTokens = [negativeT5TokenIds];
-        int[][] negMask = [negativeT5AttentionMask];
-        Tensor negativeContext = _t5.EncodeAtLayer(Backend, negTokens, _config.T5LayerIndex, applyFinalNorm: true, negMask);
+        positiveContext = _t5.EncodeAtLayer(Backend, posTokens, _config.T5LayerIndex, applyFinalNorm: true, posMask);
+        // fal-ai reference: an unset negative prompt is a ZERO context tensor (torch.zeros_like), not an
+        // encoded empty string.
+        if (negativeT5TokenIds is null)
+        {
+            negativeContext = new Tensor(positiveContext.Shape, DType.F32);
+            Backend.Fill(negativeContext, 0.0f);
+        }
+        else
+        {
+            int[][] negTokens = [negativeT5TokenIds];
+            int[][] negMask = [negativeT5AttentionMask!];
+            negativeContext = _t5.EncodeAtLayer(Backend, negTokens, _config.T5LayerIndex, applyFinalNorm: true, negMask);
+        }
         sw.Stop();
         Logs.Info($"T5 encode (layer {_config.T5LayerIndex}) done in {sw.ElapsedMilliseconds}ms (pos shape={positiveContext.Shape}, neg shape={negativeContext.Shape}).");
 
         Backend.Sync();
         Backend.FreeWeights(_t5.EnumerateWeights());
+        // Host-materialize so the cached embeddings survive activation sweeps, then cache for reuse.
+        unsafe { _ = positiveContext.DataPointer; _ = negativeContext.DataPointer; }
+        Backend.FreeActivations();
+        Backend.TrimMemoryPool();
+        if (!ReferenceEquals(_cachedPositive, positiveContext)) _cachedPositive?.Dispose();
+        if (!ReferenceEquals(_cachedNegative, negativeContext)) _cachedNegative?.Dispose();
+        _cachedPositive = positiveContext;
+        _cachedNegative = negativeContext;
+        _cachedPromptKey = (int[])t5TokenIds.Clone();
+        AfterEncode: ;
 
-        int imgTokenCount = hPacked * wPacked;
+        // Reference alpha uses the LATENT cell grid (h/8 · w/8), not the post-patchify token grid:
+        // fal-ai pipeline.py `image_token_size = latent_height * latent_width` → alpha 4 at 1024².
+        int imgTokenCount = latentH * latentW;
         float alpha = 2.0f * MathF.Sqrt(imgTokenCount / (64.0f * 64.0f));
         Logs.Info($"F-Lite: dynamic-shift alpha={alpha:F3} for {hPacked}x{wPacked} image-token grid.");
 
@@ -158,7 +206,11 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
         // Bulk-upload transformer weights before the denoise loop. F-Lite is a 40-block
         // single-stream DiT — without preload the first step would pay cache-miss overhead
         // for every block. Paired with FreeWeights below the VAE handoff.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        if (!_ditResident)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            _ditResident = true;
+        }
 
         Tensor accumulator = new Tensor(latentShape, DType.F32);
         Buffer.MemoryCopy((void*)latent.DataPointer, (void*)accumulator.DataPointer,
@@ -226,13 +278,10 @@ public sealed unsafe class FLitePipeline : DiffusionPipelineBase
             });
         }
         accumulator.Dispose();
-        positiveContext.Dispose();
-        negativeContext.Dispose();
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
 
         ApplyVaeShiftScale(latent);
         Logs.Info("F-Lite VAE decode...");

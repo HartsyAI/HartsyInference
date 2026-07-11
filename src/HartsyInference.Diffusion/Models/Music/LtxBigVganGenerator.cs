@@ -142,13 +142,12 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             backend.ConvTranspose1d(up, cur, uw, ub, stride, pad, pad, 1, 1);
             cur.Dispose();
 
-            // Multi-receptive-field fusion: mean of the per-kernel resblocks.
-            Tensor sum = new(up.Shape, DType.F32);
-            new Span<float>((float*)sum.DataPointer, (int)sum.Shape.ElementCount).Clear();
-            for (int j = 0; j < resPerUp; j++)
+            // Multi-receptive-field fusion: mean of the per-kernel resblocks (accumulated on device).
+            Tensor sum = _resnets[i * resPerUp].Forward(backend, up);
+            for (int j = 1; j < resPerUp; j++)
             {
                 Tensor r = _resnets[i * resPerUp + j].Forward(backend, up);
-                AddInPlace(sum, r);
+                backend.Add(sum, sum, r);
                 r.Dispose();
             }
             up.Dispose();
@@ -177,14 +176,6 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         Tensor o = new(new TensorShape(1, outC, tOut), DType.F32);
         backend.Conv1d(o, x, w, bias, 1, padL, padR, dilation, 1);
         return o;
-    }
-
-    private static void AddInPlace(Tensor acc, Tensor add)
-    {
-        float* ap = (float*)acc.DataPointer;
-        float* dp = (float*)add.DataPointer;
-        long n = acc.Shape.ElementCount;
-        for (long e = 0; e < n; e++) ap[e] += dp[e];
     }
 
     private static Tensor? Get(IReadOnlyDictionary<string, Tensor> w, string k) =>
@@ -246,7 +237,9 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
 
         public Tensor Forward(IBackend backend, Tensor x)
         {
-            Tensor cur = Clone(x);
+            // The residual chain accumulates on device; `x` is only borrowed (dilations.Length ≥ 1, so the
+            // returned tensor is always a fresh conv output and never the caller's input).
+            Tensor cur = x;
             for (int j = 0; j < _dilations.Length; j++)
             {
                 int d = _dilations[j];
@@ -257,8 +250,8 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
                 h1.Dispose();
                 Tensor h2 = Conv(backend, a2, _convs2[j].W, _convs2[j].B, _channels, (_kernel - 1) / 2, (_kernel - 1) / 2, 1);
                 a2.Dispose();
-                AddInPlace(h2, cur);
-                cur.Dispose();
+                backend.Add(h2, h2, cur);
+                if (!ReferenceEquals(cur, x)) cur.Dispose();
                 cur = h2;
             }
             return cur;
@@ -270,14 +263,6 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
             if (_activation == LtxVocoderActivation.SnakeBeta) return acts[j].Forward(backend, x);
             Tensor o = new(x.Shape, DType.F32);
             backend.LeakyRelu(o, x, _leakySlope);
-            return o;
-        }
-
-        private static Tensor Clone(Tensor x)
-        {
-            Tensor o = new(x.Shape, DType.F32);
-            long n = x.Shape.ElementCount;
-            Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, n * 4, n * 4);
             return o;
         }
     }
@@ -364,14 +349,14 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         public Tensor Up(IBackend backend, Tensor x)
         {
             int c = (int)x.Shape[1];
-            Tensor padded = ReplicatePad(x, _upPad, _upPad);
+            Tensor padded = LtxAudioDeviceOps.ReplicatePadTime(backend, x, _upPad, _upPad);
             int tp = (int)padded.Shape[2];
             int tOut = (tp - 1) * _ratio + (_kernel - 1) + 1;
             Tensor convt = new(new TensorShape(1, c, tOut), DType.F32);
             backend.ConvTranspose1d(convt, padded, Depthwise(c), null, _ratio, 0, 0, 1, c);
             padded.Dispose();
             backend.Scale(convt, convt, _ratio);
-            Tensor cropped = Crop(convt, _upCropL, _upCropR);
+            Tensor cropped = LtxAudioDeviceOps.CropTime(backend, convt, _upCropL, _upCropR);
             convt.Dispose();
             return cropped;
         }
@@ -379,45 +364,12 @@ public sealed unsafe class LtxBigVganGenerator : IDisposable
         public Tensor Down(IBackend backend, Tensor x)
         {
             int c = (int)x.Shape[1];
-            Tensor padded = ReplicatePad(x, _downPadL, _downPadR);
+            Tensor padded = LtxAudioDeviceOps.ReplicatePadTime(backend, x, _downPadL, _downPadR);
             int tp = (int)padded.Shape[2];
             int tOut = (tp - _kernel) / _ratio + 1;
             Tensor o = new(new TensorShape(1, c, tOut), DType.F32);
             backend.Conv1d(o, padded, Depthwise(c), null, _ratio, 0, 0, 1, c);
             padded.Dispose();
-            return o;
-        }
-
-        /// <summary>Edge-replicate ("replicate") padding of <c>[1, C, T]</c> along time.</summary>
-        private static Tensor ReplicatePad(Tensor x, int padL, int padR)
-        {
-            int c = (int)x.Shape[1], t = (int)x.Shape[2];
-            int t2 = t + padL + padR;
-            Tensor o = new(new TensorShape(1, c, t2), DType.F32);
-            float* xp = (float*)x.DataPointer;
-            float* op = (float*)o.DataPointer;
-            for (int ci = 0; ci < c; ci++)
-            {
-                float* src = xp + (long)ci * t;
-                float* dst = op + (long)ci * t2;
-                float left = src[0], right = src[t - 1];
-                for (int i = 0; i < padL; i++) dst[i] = left;
-                Buffer.MemoryCopy(src, dst + padL, (long)t * 4, (long)t * 4);
-                for (int i = 0; i < padR; i++) dst[padL + t + i] = right;
-            }
-            return o;
-        }
-
-        /// <summary>Crops <c>left</c>/<c>right</c> samples off the time axis of <c>[1, C, T]</c>.</summary>
-        private static Tensor Crop(Tensor x, int left, int right)
-        {
-            int c = (int)x.Shape[1], t = (int)x.Shape[2];
-            int t2 = t - left - right;
-            Tensor o = new(new TensorShape(1, c, t2), DType.F32);
-            float* xp = (float*)x.DataPointer;
-            float* op = (float*)o.DataPointer;
-            for (int ci = 0; ci < c; ci++)
-                Buffer.MemoryCopy(xp + (long)ci * t + left, op + (long)ci * t2, (long)t2 * 4, (long)t2 * 4);
             return o;
         }
 

@@ -89,6 +89,35 @@ public sealed unsafe class FLiteRope
         return (cosT, sinT);
     }
 
+    /// <summary>Builds FULL-dim cos/sin tables of shape <c>[1, T, headDim]</c> for the device <see cref="IBackend.ApplyRope"/> op (llama split-half convention). F-Lite's rotation <c>y1 = x1·c + x2·s; y2 = −x1·s + x2·c</c> equals llama's with sin negated, so the sin table is emitted NEGATED and both halves duplicate the half-dim values.</summary>
+    public (Tensor cos, Tensor sin) BuildDeviceTables(int hPacked, int wPacked, int numRegisterTokens)
+    {
+        (Tensor cosHalf, Tensor sinHalf) = Build(hPacked, wPacked, numRegisterTokens);
+        int totalSeqLen = (int)cosHalf.Shape[2];
+        int halfDim = _headDim / 2;
+        Tensor cosFull = new Tensor(new TensorShape(1, totalSeqLen, _headDim), DType.F32);
+        Tensor sinFull = new Tensor(new TensorShape(1, totalSeqLen, _headDim), DType.F32);
+        float* ch = (float*)cosHalf.DataPointer;
+        float* sh = (float*)sinHalf.DataPointer;
+        float* cf = (float*)cosFull.DataPointer;
+        float* sf = (float*)sinFull.DataPointer;
+        for (int t = 0; t < totalSeqLen; t++)
+        {
+            for (int i = 0; i < halfDim; i++)
+            {
+                float c = ch[(long)t * halfDim + i];
+                float s = sh[(long)t * halfDim + i];
+                cf[(long)t * _headDim + i] = c;
+                cf[(long)t * _headDim + halfDim + i] = c;
+                sf[(long)t * _headDim + i] = -s;
+                sf[(long)t * _headDim + halfDim + i] = -s;
+            }
+        }
+        cosHalf.Dispose();
+        sinHalf.Dispose();
+        return (cosFull, sinFull);
+    }
+
     /// <summary>Applies the F-Lite half-rotation in place to a multi-head tensor of shape <c>[B, H, T, headDim]</c>. Reads cos/sin of shape <c>[1, 1, T, headDim/2]</c>. Caller is responsible for the matching head-major layout.</summary>
     public void ApplyRotation(Tensor x, Tensor cos, Tensor sin, int batch, int numHeads, int seqLen)
     {
