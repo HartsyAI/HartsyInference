@@ -69,7 +69,7 @@ public sealed unsafe class Tensor : IDisposable
         {
             while (queue.TryDequeue(out Action? cleanup))
             {
-                cleanup();
+                InvokeFinalizerGpuCleanup(cleanup);
             }
         }
     }
@@ -83,8 +83,34 @@ public sealed unsafe class Tensor : IDisposable
         {
             while (queue.TryDequeue(out Action? cleanup))
             {
-                cleanup();
+                InvokeFinalizerGpuCleanup(cleanup);
             }
+        }
+    }
+
+    /// <summary>Drops (without invoking) all queued finalizer GPU-cleanup callbacks for <paramref name="contextKey"/>.
+    /// Call at backend teardown AFTER the backend has freed all its cached device memory: the queued callbacks can
+    /// only reference caches that were just emptied, so running them is a no-op at best — and the CUDA driver reuses
+    /// primary-context handles, so leaving them queued makes the NEXT backend on the same device drain and execute
+    /// another backend's stale callbacks during its own construction (the GGUF model-switch NRE).</summary>
+    public static void DiscardPendingFinalizerGpuCleanup(nint contextKey)
+    {
+        PendingFinalizerGpuCleanup.TryRemove(contextKey, out _);
+    }
+
+    /// <summary>Runs one queued cleanup, containing any failure. A queued callback can be arbitrarily stale (its
+    /// backend torn down, its object graph resurrected post-finalization), and the drain runs inside whatever
+    /// innocent op happened to bind the context next — one throwing callback must not take that op (or a whole
+    /// backend construction) down with it.</summary>
+    private static void InvokeFinalizerGpuCleanup(Action cleanup)
+    {
+        try
+        {
+            cleanup();
+        }
+        catch (Exception ex)
+        {
+            Logging.Logs.Error("Finalizer GPU-cleanup callback failed (stale backend state?); continuing drain.", ex);
         }
     }
 

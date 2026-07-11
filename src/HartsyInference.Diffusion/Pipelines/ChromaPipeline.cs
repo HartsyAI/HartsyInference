@@ -541,8 +541,9 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     /// <summary>Slices the encoded [1, seqLen, hidden] T5 context down to Chroma's kept tokens
     /// (<c>text_len + 1</c>: all real tokens plus the one unmasked padding slot). Exact — the dropped rows are
     /// masked out of every attention by the transformer-side rule, so they can never influence the output.
-    /// Consumes (disposes) the input when a trim happens; the read also host-materializes the result.</summary>
-    private static Tensor TrimContextToKeptTokens(Tensor context, int[] tokenizerMask)
+    /// Consumes (disposes) the input when a trim happens; the read also host-materializes the result.
+    /// Internal so <see cref="ChromaRadiancePipeline"/> shares the identical text path.</summary>
+    internal static Tensor TrimContextToKeptTokens(Tensor context, int[] tokenizerMask)
     {
         int seqLen = (int)context.Shape[1];
         int hidden = (int)context.Shape[2];

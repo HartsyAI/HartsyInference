@@ -82,34 +82,53 @@ public static unsafe class WanDitOps
         int freqDim, int dim, Tensor emb1W, Tensor? emb1B, Tensor emb2W, Tensor? emb2B, Tensor projW, Tensor? projB)
     {
         int g = timesteps.Length;
-        Tensor temb = new Tensor(new TensorShape(g, dim), DType.F32);
-        Tensor proj = new Tensor(new TensorShape([(long)g, 6, dim]), DType.F32);
+        if (g == 1)
+        {
+            Tensor temb = new Tensor(new TensorShape(1, dim), DType.F32);
+            Tensor proj = new Tensor(new TensorShape([1L, 6, dim]), DType.F32);
+            Tensor sinEmb = new Tensor(new TensorShape(1, freqDim), DType.F32);
+            DiTUtils.SinusoidalTimestepEmbedding(sinEmb, timesteps[0], 1, freqDim, 10000f);
+            Tensor e1 = new Tensor(new TensorShape(1, dim), DType.F32); backend.Linear(e1, sinEmb, emb1W, emb1B); sinEmb.Dispose();
+            Tensor e1a = new Tensor(e1.Shape, DType.F32); backend.Silu(e1a, e1); e1.Dispose();
+            Tensor temb2d = new Tensor(new TensorShape(1, dim), DType.F32); backend.Linear(temb2d, e1a, emb2W, emb2B); e1a.Dispose();
+            Tensor sil = new Tensor(new TensorShape(1, dim), DType.F32); backend.Silu(sil, temb2d);
+            Tensor projFlat = new Tensor(new TensorShape(1, 6 * dim), DType.F32); backend.Linear(projFlat, sil, projW, projB); sil.Dispose();
+            // Device copies keep temb/proj GPU-resident. The old host Buffer.MemoryCopy drained both Linear
+            // outputs D2H per forward AND left the results host-side, so every per-block consumer re-uploaded
+            // them — one such 2 KB pageable H2D can stall the whole queued stream (the Kandinsky temb bug).
+            backend.CopyInto(temb, temb2d);
+            backend.CopyInto(proj, projFlat);
+            temb2d.Dispose();
+            projFlat.Dispose();
+            return (temb, proj);
+        }
+
+        // Multi-group (per-frame timesteps: S2V reference tokens, TI2V, Matrix-Game): the per-group M=1 MLP loop
+        // is kept EXACTLY (batching the GEMM to M=G changes the fp8-native per-tensor activation-quant scales →
+        // not bit-identical), but the per-group results are gathered with ONE device Concat each instead of the
+        // old host Buffer.MemoryCopy — a DataPointer read of a GPU op result was a full stream drain (×2G per
+        // forward) AND left temb/proj host-side, so every downstream consumer paid a fresh upload (the Kandinsky
+        // temb bug, G-fold).
+        Tensor tembG = new Tensor(new TensorShape(g, dim), DType.F32);
+        Tensor projG = new Tensor(new TensorShape([(long)g, 6, dim]), DType.F32);
+        Tensor[] tembParts = new Tensor[g];
+        Tensor[] projParts = new Tensor[g];
         for (int gi = 0; gi < g; gi++)
         {
             Tensor sinEmb = new Tensor(new TensorShape(1, freqDim), DType.F32);
             DiTUtils.SinusoidalTimestepEmbedding(sinEmb, timesteps[gi], 1, freqDim, 10000f);
             Tensor e1 = new Tensor(new TensorShape(1, dim), DType.F32); backend.Linear(e1, sinEmb, emb1W, emb1B); sinEmb.Dispose();
             Tensor e1a = new Tensor(e1.Shape, DType.F32); backend.Silu(e1a, e1); e1.Dispose();
-            Tensor temb2d = new Tensor(new TensorShape(1, dim), DType.F32); backend.Linear(temb2d, e1a, emb2W, emb2B); e1a.Dispose();
-            Tensor sil = new Tensor(new TensorShape(1, dim), DType.F32); backend.Silu(sil, temb2d);
-            Tensor projFlat = new Tensor(new TensorShape(1, 6 * dim), DType.F32); backend.Linear(projFlat, sil, projW, projB); sil.Dispose();
-            if (g == 1)
-            {
-                // Device copies keep temb/proj GPU-resident. The old host Buffer.MemoryCopy drained both Linear
-                // outputs D2H per forward AND left the results host-side, so every per-block consumer re-uploaded
-                // them — one such 2 KB pageable H2D can stall the whole queued stream (the Kandinsky temb bug).
-                backend.CopyInto(temb, temb2d);
-                backend.CopyInto(proj, projFlat);
-            }
-            else
-            {
-                Buffer.MemoryCopy((float*)temb2d.DataPointer, (float*)temb.DataPointer + (long)gi * dim, (long)dim * 4, (long)dim * 4);
-                Buffer.MemoryCopy((float*)projFlat.DataPointer, (float*)proj.DataPointer + (long)gi * 6 * dim, (long)6 * dim * 4, (long)6 * dim * 4);
-            }
-            temb2d.Dispose();
-            projFlat.Dispose();
+            tembParts[gi] = new Tensor(new TensorShape(1, dim), DType.F32);
+            backend.Linear(tembParts[gi], e1a, emb2W, emb2B); e1a.Dispose();
+            Tensor sil = new Tensor(new TensorShape(1, dim), DType.F32); backend.Silu(sil, tembParts[gi]);
+            projParts[gi] = new Tensor(new TensorShape(1, 6 * dim), DType.F32);
+            backend.Linear(projParts[gi], sil, projW, projB); sil.Dispose();
         }
-        return (temb, proj);
+        backend.Concat(tembG, tembParts, 0);
+        backend.Concat(projG, projParts, 0);
+        for (int gi = 0; gi < g; gi++) { tembParts[gi].Dispose(); projParts[gi].Dispose(); }
+        return (tembG, projG);
     }
 
     /// <summary>PixArtAlphaTextProjection: <c>linear_2(gelu_tanh(linear_1(x)))</c>, text features <c>[L, textDim] → [L, dim]</c>.</summary>
@@ -162,6 +181,39 @@ public static unsafe class WanDitOps
             return projDev;
         }
 
+        if ((long)g * tokensPerGroup == s)
+        {
+            // Multi-group device path (per-frame timesteps: S2V reference tokens, TI2V, Matrix-Game). The host
+            // fallback below drains the FULL final hidden state D2H (a mid-forward DataPointer read = stream sync +
+            // activation eviction — at S2V sizes ~180 MB ×2 CFG forwards per step), modulates on the CPU, and
+            // re-uploads for proj_out; that churn is what forced S2V's per-step pool trim. Rank-3 [G, tokens, dim]
+            // shapes drive the per-group broadcast in AffineBroadcastLastDim.
+            Tensor ssShift = new Tensor(new TensorShape(1, dim), DType.F32);
+            backend.SliceRows(ssShift, finalScaleShift, 0);
+            Tensor ssScale = new Tensor(new TensorShape(1, dim), DType.F32);
+            backend.SliceRows(ssScale, finalScaleShift, 1);
+            Tensor onesRow = new Tensor(new TensorShape(1, dim), DType.F32);
+            new Span<float>((float*)onesRow.DataPointer, dim).Fill(1f);
+            Tensor shiftG = new Tensor(new TensorShape(g, dim), DType.F32);
+            backend.AffineBroadcastLastDim(shiftG, temb, onesRow, ssShift);
+            Tensor scaleG = new Tensor(new TensorShape(g, dim), DType.F32);
+            backend.AffineBroadcastLastDim(scaleG, temb, onesRow, ssScale);
+            ssShift.Dispose(); ssScale.Dispose(); onesRow.Dispose();
+            Tensor scale1pG = new Tensor(new TensorShape(g, dim), DType.F32);
+            backend.AddScalar(scale1pG, scaleG, 1f);
+            scaleG.Dispose();
+            Tensor normedG = new Tensor(new TensorShape([(long)g, tokensPerGroup, dim]), DType.F32);
+            backend.LayerNormNoAffine(normedG, hidden, eps);
+            Tensor moddedG = new Tensor(normedG.Shape, DType.F32);
+            backend.AffineBroadcastLastDim(moddedG, normedG, scale1pG, shiftG);
+            normedG.Dispose(); scale1pG.Dispose(); shiftG.Dispose();
+            Tensor projG = new Tensor(new TensorShape(s, outVec), DType.F32);
+            backend.Linear(projG, moddedG, projOutW, projOutB);
+            moddedG.Dispose();
+            return projG;
+        }
+
+        // Host reference — only reachable for layouts where the groups don't tile the sequence evenly.
         float* ss = (float*)finalScaleShift.DataPointer;
         float* em = (float*)temb.DataPointer;
         Tensor shift = new Tensor(new TensorShape(g, dim), DType.F32);

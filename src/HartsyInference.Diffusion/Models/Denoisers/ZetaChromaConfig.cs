@@ -29,7 +29,7 @@ public sealed record ZetaChromaConfig
     public int DecoderMaxFreqs { get; init; } = 8;
 
     /// <summary>Default CFG scale (5.0 — validation-gated, mid-pretraining recommendation).</summary>
-    public float DefaultCfgScale { get; init; } = 5.0f;
+    public float DefaultCfgScale { get; init; } = 3.0f;
 
     /// <summary>Default inference steps (50).</summary>
     public int DefaultSteps { get; init; } = 50;

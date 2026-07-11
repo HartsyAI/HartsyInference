@@ -33,6 +33,15 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
     private readonly ChromaRadianceTransformer _transformer;
     private readonly ChromaRadianceConfig _config;
 
+    // Prompt-embedding cache + DiT residency (the ChromaPipeline pattern): repeat prompts skip the whole T5
+    // phase AND the ~9 GB transformer re-upload — the DiT stays device-resident across generations and is only
+    // evicted when a new prompt needs the T5 on the card.
+    private int[]? _cachedCondKey;
+    private Tensor? _cachedCond;
+    private int[]? _cachedUncondKey;
+    private Tensor? _cachedUncond;
+    private bool _ditResident;
+
     /// <summary>Creates a new Chroma Radiance pipeline with all components pre-loaded.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="t5">T5-XXL text encoder (joint_attention_dim = 4096, max length 512).</param>
@@ -106,26 +115,72 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
             $"{steps} steps, cfg={cfgScale}, seed={seed}");
         Stopwatch sw = Stopwatch.StartNew();
 
-        // ── 1. Encode prompts with T5-XXL (identical to ChromaPipeline) ──
-        Logs.Info("Encoding text with T5-XXL...");
-        Backend.PreloadWeights(_t5.EnumerateWeights());
-
-        int[][] batchT5 = [promptTokenIdsT5];
-        int[][] batchMask = [promptAttentionMaskT5];
-        Tensor condContext = _t5.Encode(Backend, batchT5, batchMask);
-
+        // ── 1. Encode prompts with T5-XXL (identical text path to ChromaPipeline, including the trim) ──
+        // Prompt-embedding cache: identical token ids reuse the previous gen's hidden states — the whole T5
+        // phase (DiT evict + T5 preload + encode + free) vanishes for repeat prompts (seed-only changes).
+        bool condHit = _cachedCond is not null
+            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5);
+        bool uncondHit = !useCfg || (_cachedUncond is not null
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5));
+        Tensor condContext;
         Tensor? uncondContext = null;
-        if (useCfg)
+        if (condHit && uncondHit)
         {
-            int[][] negBatchT5 = [negativePromptTokenIdsT5];
-            int[][] negBatchMask = [negativeAttentionMaskT5];
-            uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
+            condContext = _cachedCond!;
+            if (useCfg) uncondContext = _cachedUncond;
+            Logs.Info("[Radiance] prompt-embedding cache hit — T5 phase skipped");
         }
+        else
+        {
+            Logs.Info("Encoding text with T5-XXL...");
+            if (_ditResident)
+            {
+                // T5-XXL (~5 GB) cannot coexist with the resident ~9 GB DiT on smaller cards — evict for this
+                // new-prompt generation and re-preload below.
+                Backend.Sync();
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                _ditResident = false;
+            }
+            Backend.PreloadWeights(_t5.EnumerateWeights());
 
-        Tensor condMask = ChromaPipeline.BuildChromaTextMask(promptAttentionMaskT5, batchSize: 1);
-        Tensor? uncondMask = useCfg ? ChromaPipeline.BuildChromaTextMask(negativeAttentionMaskT5, batchSize: 1) : null;
+            int[][] batchT5 = [promptTokenIdsT5];
+            int[][] batchMask = [promptAttentionMaskT5];
+            condContext = _t5.Encode(Backend, batchT5, batchMask);
 
-        Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
+            if (useCfg)
+            {
+                int[][] negBatchT5 = [negativePromptTokenIdsT5];
+                int[][] negBatchMask = [negativeAttentionMaskT5];
+                uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
+            }
+
+            // Trim the padded context to Chroma's kept tokens (text_len + 1) instead of masking — EXACT (the
+            // dropped rows are masked out of every attention by the transformer-side rule) and it makes all 57
+            // SDPAs mask-free while shrinking every joint-sequence GEMM. See ChromaPipeline for the derivation.
+            condContext = ChromaPipeline.TrimContextToKeptTokens(condContext, promptAttentionMaskT5);
+            if (uncondContext is not null)
+                uncondContext = ChromaPipeline.TrimContextToKeptTokens(uncondContext, negativeAttentionMaskT5);
+
+            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms " +
+                $"(context trimmed to {condContext.Shape[1]}/{uncondContext?.Shape[1].ToString() ?? "-"} kept tokens)");
+
+            // The trim host-materialized the contexts, so they survive activation reclaims; cache for reuse.
+            _cachedCond?.Dispose();
+            _cachedCond = condContext;
+            _cachedCondKey = (int[])promptTokenIdsT5.Clone();
+            if (useCfg)
+            {
+                _cachedUncond?.Dispose();
+                _cachedUncond = uncondContext;
+                _cachedUncondKey = (int[])negativePromptTokenIdsT5.Clone();
+            }
+
+            Backend.Sync();
+            Backend.FreeWeights(_t5.EnumerateWeights());
+            // Release the encoder phase's pool pages before the ~19 GB transformer preload — the resident
+            // DiT leaves only a few GB of headroom for the denoise-loop activations.
+            Backend.TrimMemoryPool();
+        }
 
         // ── 2. Static-shift flow-match Euler scheduler (shift 1.0 — see config) ──
         TensorShape pixelShape = new TensorShape(1, 3, padHeight, padWidth);
@@ -172,45 +227,76 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         }
 
         // ── 4. Denoising loop ──
-        // Free T5 (~5 GB) from VRAM before uploading the ~9 GB Radiance transformer; paired re-preload
-        // pattern mirrors ChromaPipeline.
-        Backend.FreeWeights(_t5.EnumerateWeights());
-        Backend.Sync();
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
+        // The transformer stays device-resident across generations; only a new-prompt T5 phase evicts it
+        // (see the encode section above).
+        if (!_ditResident)
+        {
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            _ditResident = true;
+        }
 
         Logs.Info("Starting Chroma Radiance denoising loop...");
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
         int condTxtLen = (int)condContext.Shape[1];
         int uncondTxtLen = useCfg ? (int)uncondContext!.Shape[1] : 0;
 
+        // Drain-free fast path (plain t2i / img2img): the pixel sample stays device-resident across the whole
+        // loop — x0→velocity conversion runs as device elementwise ops and CFG combine + Euler is ONE in-place
+        // CfgEulerStep (cond-anchored CFG maps onto the uncond-anchored kernel via guidance = cfg + 1). Masked
+        // inpaint keeps the host branch — it must read/rebuild the sample on the host every step.
+        bool drainFree = !isMaskedInpaint;
+
         for (int i = startStep; i < steps; i++)
         {
             Stopwatch stepSw = Stopwatch.StartNew();
             float sigma = timesteps[i] / 1000.0f;
 
-            // Model predicts x0; convert each pass to velocity BEFORE the CFG combine (ComfyUI order).
-            Tensor condX0 = _transformer.Forward(Backend, pixels, condContext, sigma, condTxtLen, condMask);
-            Tensor velocity = X0Prediction.ToVelocity(condX0, pixels, sigma);
-            condX0.Dispose();
-
-            if (useCfg)
+            if (drainFree)
             {
-                Tensor uncondX0 = _transformer.Forward(Backend, pixels, uncondContext!, sigma, uncondTxtLen, uncondMask);
-                Tensor uncondV = X0Prediction.ToVelocity(uncondX0, pixels, sigma);
-                uncondX0.Dispose();
-
-                // VALIDATION-PENDING: Chroma-family cond-anchored CFG (cond + scale*(cond - uncond)) on velocity; verify vs reference.
-                Tensor combined = CfgHelper.ApplyCfgCondAnchored(velocity, uncondV, cfgScale);
-                uncondV.Dispose();
-                velocity.Dispose();
-                velocity = combined;
+                // Model predicts x0; convert each pass to velocity BEFORE the CFG combine (ComfyUI order).
+                (Tensor condX0, Tensor? uncondX0) = _transformer.ForwardPaired(
+                    Backend, pixels, condContext, useCfg ? uncondContext : null, sigma, null, null);
+                Tensor condV = X0Prediction.ToVelocityDevice(Backend, condX0, pixels, sigma);
+                condX0.Dispose();
+                if (useCfg)
+                {
+                    Tensor uncondV = X0Prediction.ToVelocityDevice(Backend, uncondX0!, pixels, sigma);
+                    uncondX0!.Dispose();
+                    // Cond-anchored CFG (cond + s·(cond − uncond)) == uncond-anchored kernel at guidance s+1.
+                    Backend.CfgEulerStep(pixels, condV, uncondV, cfgScale + 1.0f, scheduler.Dt(i));
+                    uncondV.Dispose();
+                }
+                else
+                {
+                    Backend.CfgEulerStep(pixels, condV, condV, 1.0f, scheduler.Dt(i));
+                }
+                condV.Dispose();
             }
+            else
+            {
+                Tensor condX0 = _transformer.Forward(Backend, pixels, condContext, sigma, condTxtLen, null);
+                Tensor velocity = X0Prediction.ToVelocity(condX0, pixels, sigma);
+                condX0.Dispose();
 
-            Tensor newPixels = new Tensor(pixelShape, DType.F32);
-            scheduler.Step(newPixels, velocity, pixels, i);
-            velocity.Dispose();
-            pixels.Dispose();
-            pixels = newPixels;
+                if (useCfg)
+                {
+                    Tensor uncondX0 = _transformer.Forward(Backend, pixels, uncondContext!, sigma, uncondTxtLen, null);
+                    Tensor uncondV = X0Prediction.ToVelocity(uncondX0, pixels, sigma);
+                    uncondX0.Dispose();
+
+                    // VALIDATION-PENDING: Chroma-family cond-anchored CFG (cond + scale*(cond - uncond)) on velocity; verify vs reference.
+                    Tensor combined = CfgHelper.ApplyCfgCondAnchored(velocity, uncondV, cfgScale);
+                    uncondV.Dispose();
+                    velocity.Dispose();
+                    velocity = combined;
+                }
+
+                Tensor newPixels = new Tensor(pixelShape, DType.F32);
+                scheduler.Step(newPixels, velocity, pixels, i);
+                velocity.Dispose();
+                pixels.Dispose();
+                pixels = newPixels;
+            }
 
             // Masked-inpaint blend in pixel space: keep unmasked region on the source's
             // flow-matching trajectory by re-noising the source at the next step's sigma.
@@ -236,24 +322,30 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 
             stepSw.Stop();
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
-            // Pixel-space preview: the in-flight sample is already an RGB image — no unpack needed.
-            onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+            // Pixel-space preview: the in-flight sample is already an RGB image — no unpack needed. On the
+            // drain-free path a preview read is a D2H sync of the device-resident sample, so previews emit
+            // every 4th step (and not the final step — the finished image follows immediately).
+            bool emitPreview = onProgress is not null
+                && (!drainFree || ((i - startStep) % 4 == 3 && i != steps - 1));
+            if (emitPreview)
             {
-                Latent = pixels,
-                LatentArch = LatentArchitecture.ChromaRadiance,
-            });
+                onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
+                {
+                    Latent = pixels,
+                    LatentArch = LatentArchitecture.ChromaRadiance,
+                });
+            }
+            else
+            {
+                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds));
+            }
         }
 
-        condContext.Dispose();
-        condMask.Dispose();
-        uncondContext?.Dispose();
-        uncondMask?.Dispose();
+        // condContext/uncondContext are cross-generation caches — not disposed here. The transformer stays
+        // resident (freed only by a new-prompt T5 phase or pipeline disposal).
         sourcePadded?.Dispose();
         maskPadded?.Dispose();
-
         Backend.Sync();
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        Backend.FreeWeights(_t5.EnumerateWeights());
 
         // ── 5. Crop padding (if any) and convert straight to RGB bytes — no VAE ──
         if (padWidth != width || padHeight != height)

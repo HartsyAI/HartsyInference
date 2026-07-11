@@ -26,7 +26,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
     private Tensor? _finalScaleShift;
     private Tensor? _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B;
     private Tensor? _timeProjW, _timeProjB;
-    private Tensor? _imgNorm1W, _imgNorm1B, _imgFf1W, _imgFf1B, _imgFf2W, _imgFf2B, _imgNorm2W, _imgNorm2B;   // img_emb MLPProj
+    private readonly WanImageEmbedder _imgEmbedder;   // img_emb MLPProj (shared with Wan I2V / Animate)
 
     public MatrixGame2Transformer(MatrixGame2Config config)
     {
@@ -47,6 +47,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
                     enableMouse: config.EnableMouse);
         }
         _rope = new WanRope(config.HeadDim, config.RopeTheta, config.RopeMaxSeqLen);
+        _imgEmbedder = new WanImageEmbedder(config.Eps);
         _patchVec = config.InChannels * config.PatchSize.T * config.PatchSize.H * config.PatchSize.W;
     }
 
@@ -66,12 +67,12 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
 
-        // The LayerNorm affine params are read by a manual host-pointer loop (LayerNormRows) → MUST be F32
-        // (the base checkpoint ships BF16; reading BF16 bytes as F32 gives garbage). Weights AND biases.
-        _imgNorm1W = LoadF32(w, "condition_embedder.image_embedder.norm1.weight"); _imgNorm1B = LoadF32Opt(w, "condition_embedder.image_embedder.norm1.bias");
-        _imgFf1W = w["condition_embedder.image_embedder.ff.net.0.proj.weight"]; w.TryGetValue("condition_embedder.image_embedder.ff.net.0.proj.bias", out _imgFf1B);
-        _imgFf2W = w["condition_embedder.image_embedder.ff.net.2.weight"]; w.TryGetValue("condition_embedder.image_embedder.ff.net.2.bias", out _imgFf2B);
-        _imgNorm2W = LoadF32(w, "condition_embedder.image_embedder.norm2.weight"); _imgNorm2B = LoadF32Opt(w, "condition_embedder.image_embedder.norm2.bias");
+        // Shared Wan I2V MLPProj — shape-driven (intermediate width from ff.net.0.proj rows). The old duplicated
+        // projection here hardcoded the intermediate buffer to [L, clipDim]; a checkpoint whose first Linear widens
+        // (rows > clipDim) made backend.Linear write rows·L floats into that undersized buffer → heap corruption
+        // (the MatrixGame2 testhost crash). backend.Linear N always comes from the WEIGHT, the buffer from the caller.
+        if (!_imgEmbedder.TryLoadWeights(w))
+            throw new ArgumentException("Matrix-Game 2 checkpoint is missing condition_embedder.image_embedder.* weights.", nameof(w));
 
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -86,9 +87,9 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor? t in new[] { _patchW2d, _patchB, _projOutW, _projOutB, _finalScaleShift,
-            _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB,
-            _imgNorm1W, _imgNorm1B, _imgFf1W, _imgFf1B, _imgFf2W, _imgFf2B, _imgNorm2W, _imgNorm2B })
+            _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB })
             if (t is not null) yield return t;
+        foreach (Tensor t in _imgEmbedder.EnumerateWeights()) yield return t;
         for (int i = 0; i < _blocks.Length; i++)
         {
             foreach (Tensor t in _blocks[i].EnumerateWeights()) yield return t;
@@ -129,7 +130,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
 
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, frameTimesteps, _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
-        Tensor encoderProj = ProjectClipContext(backend, clipContext);
+        Tensor encoderProj = _imgEmbedder.Forward(backend, clipContext, dim);
         Tensor mask = BuildBlockCausalMask(ropeFrameIndices, gh * gw, _config.LocalAttnSize, _config.NumFramePerBlock);
         if (taps is not null) { taps["patch"] = CloneCpu(hidden); taps["ctx"] = CloneCpu(encoderProj); }
 
@@ -173,27 +174,6 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         return dst;
     }
 
-    /// <summary>The Wan I2V <c>MLPProj</c>: LayerNorm(1280) → Linear(1280→1280) → GELU → Linear(1280→dim) →
-    /// LayerNorm(dim), projecting the CLIP visual context to the cross-attention K/V source. The intermediate
-    /// Linear stays at the CLIP dim (1280); only the second Linear widens to the model dim.</summary>
-    private Tensor ProjectClipContext(IBackend backend, Tensor clipContext)
-    {
-        int l = (int)clipContext.Shape[0], dim = _config.InnerDim, cdim = _config.ClipContextDim;
-        Tensor normed = Clone(clipContext);
-        LayerNormRows(normed, _imgNorm1W!, _imgNorm1B, l, cdim);
-        Tensor h1 = new Tensor(new TensorShape(l, cdim), DType.F32);
-        backend.Linear(h1, normed, _imgFf1W!, _imgFf1B);
-        normed.Dispose();
-        Tensor act = new Tensor(h1.Shape, DType.F32);
-        backend.Gelu(act, h1);
-        h1.Dispose();
-        Tensor h2 = new Tensor(new TensorShape(l, dim), DType.F32);
-        backend.Linear(h2, act, _imgFf2W!, _imgFf2B);
-        act.Dispose();
-        LayerNormRows(h2, _imgNorm2W!, _imgNorm2B, l, dim);
-        return h2;
-    }
-
     /// <summary>Builds the additive block-causal + sliding-window self-attention mask <c>[1, 1, S, S]</c>: token i
     /// (global frame f_i) attends token j (frame f_j) iff <c>block(f_j) ≤ block(f_i)</c> and f_j is within the local
     /// window below the querying block's start (<c>localAttnSize ≤ 0</c> = full block-causal).</summary>
@@ -218,28 +198,6 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         return mask;
     }
 
-    private void LayerNormRows(Tensor x, Tensor weight, Tensor? bias, int rows, int dim)
-    {
-        float* xp = (float*)x.DataPointer;
-        float* wp = (float*)weight.DataPointer;
-        float* bp = bias is null ? null : (float*)bias.DataPointer;
-        for (int r = 0; r < rows; r++)
-        {
-            long off = (long)r * dim;
-            double mean = 0;
-            for (int d = 0; d < dim; d++) mean += xp[off + d];
-            mean /= dim;
-            double var = 0;
-            for (int d = 0; d < dim; d++) { double dd = xp[off + d] - mean; var += dd * dd; }
-            float inv = 1f / MathF.Sqrt((float)(var / dim) + _config.Eps);
-            for (int d = 0; d < dim; d++)
-            {
-                float n = (float)((xp[off + d] - mean) * inv);
-                xp[off + d] = n * wp[d] + (bp is null ? 0f : bp[d]);
-            }
-        }
-    }
-
     private static Tensor SliceFrames(Tensor tokens, int skipFrames, int frames, int tokensPerFrame, int dim)
     {
         Tensor o = new Tensor(new TensorShape(frames * tokensPerFrame, dim), DType.F32);
@@ -256,18 +214,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         return o;
     }
 
-    private static Tensor Clone(Tensor x)
-    {
-        Tensor o = new Tensor(x.Shape, DType.F32);
-        long bytes = x.Shape.ElementCount * 4;
-        Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, bytes, bytes);
-        return o;
-    }
-
     private static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> w, string key) { Tensor t = w[key]; return t.DType == DType.F32 ? t : t.CastTo(DType.F32); }
-
-    private static Tensor? LoadF32Opt(IReadOnlyDictionary<string, Tensor> w, string key)
-        => w.TryGetValue(key, out Tensor? t) ? (t.DType == DType.F32 ? t : t.CastTo(DType.F32)) : null;
 
     public void Dispose()
     {
@@ -275,7 +222,7 @@ public sealed unsafe class MatrixGame2Transformer : IDisposable
         {
             _patchW2d = _patchB = _projOutW = _projOutB = _finalScaleShift = null;
             _timeEmb1W = _timeEmb1B = _timeEmb2W = _timeEmb2B = _timeProjW = _timeProjB = null;
-            _imgNorm1W = _imgNorm1B = _imgFf1W = _imgFf1B = _imgFf2W = _imgFf2B = _imgNorm2W = _imgNorm2B = null;
+            _imgEmbedder.Clear();
         }
         GC.SuppressFinalize(this);
     }

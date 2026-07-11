@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -40,6 +41,27 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     private readonly LlamaStyleEncoder _gemma;
     private readonly LtxVideo2Config _config;
     private readonly float[]? _audioLatentsMean, _audioLatentsStd;
+
+    // Prompt-embedding cache (the FLite/Flux2 pattern): a hit skips the whole Gemma-3-12B encode + connector
+    // phase, including the ~12 GB TE weight upload. The paired-CFG denoise consumes all four embeddings
+    // (video/audio × pos/neg) every step, so they live under one (pos,neg) token key. The tensors are
+    // host-materialized so they survive activation sweeps between generations.
+    private int[]? _cachedPosKey;
+    private int[]? _cachedNegKey;
+    private Tensor? _cachedVideoPos, _cachedAudioPos, _cachedVideoNeg, _cachedAudioNeg;
+
+    // Persistent resident prefix (the Flux KEEP_MODELS idiom, adapted to the streamed 22B DiT): the shared
+    // weights + the first _residentPrefixBlocks blocks stay device-resident ACROSS generations, so the next
+    // gen's PreloadWeights is a cache-hit no-op instead of a multi-GB re-upload — and the boundary the
+    // streaming suffix starts at never moves (per-gen re-sizing drifted 12→10→9 blocks from pool slack).
+    // The count is sized once and pinned; re-sized only when the token load grows past what the sizing
+    // reserved headroom for. A prompt-cache MISS evicts the prefix when the ~12 GB Gemma encode doesn't fit
+    // beside it (decided from measured free VRAM, logged either way).
+    private static readonly bool KeepModelsResident = EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+    private bool _prefixResident;
+    private int _residentPrefixBlocks = -1;
+    private long _prefixSizedTokens = -1;
+    private long _gemmaWeightBytes = -1;
 
     public LtxVideo2Pipeline(IBackend backend, LtxVideo2Transformer transformer, LtxVideo2TextConnectors connectors,
         LtxVideo2VaeDecoder vae, LlamaStyleEncoder gemma, LtxVideo2Config config,
@@ -99,20 +121,78 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             $"seed={seed} (video {tLat}x{hLat}x{wLat}={sv} tokens, audio {audioFrames} tokens, shift={shift:F3})");
         Logs.Warning("LTX-2 pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
-        // 1. Text conditioning (run once): Gemma 49-layer features → per-modality connector embeddings.
+        // 1. Text conditioning: Gemma 49-layer features → per-modality connector embeddings. Cached across
+        // generations keyed on the token ids (the FLite/Flux2 prompt-cache pattern) — a hit skips the whole
+        // Gemma phase including its ~12 GB weight upload.
         Stopwatch phase = Stopwatch.StartNew();
-        (Tensor encVideoPos, Tensor encAudioPos) = EncodeText(promptTokens);
-        (Tensor encVideoNeg, Tensor encAudioNeg) = EncodeText(negativeTokens);
+        bool cacheHit = _cachedPosKey is not null && _cachedNegKey is not null
+            && promptTokens.AsSpan().SequenceEqual(_cachedPosKey)
+            && negativeTokens.AsSpan().SequenceEqual(_cachedNegKey);
+        Tensor encVideoPos, encAudioPos, encVideoNeg, encAudioNeg;
+        if (cacheHit)
+        {
+            (encVideoPos, encAudioPos) = (_cachedVideoPos!, _cachedAudioPos!);
+            (encVideoNeg, encAudioNeg) = (_cachedVideoNeg!, _cachedAudioNeg!);
+            Logs.Info("[ltx2-phase] prompt cache HIT — skipping Gemma encode.");
+        }
+        else
+        {
+            // Reclaim pool slack from the previous generation before the ~12 GB Gemma upload.
+            Backend.TrimMemoryPool();
+            // The persistent resident prefix survives cache hits for free, but a MISS needs the Gemma weights
+            // on device: keep the prefix only when the encoder actually fits beside it (measured free VRAM),
+            // otherwise evict — the denoise section re-uploads at the pinned prefix size after the TE is freed.
+            if (_prefixResident)
+            {
+                if (_gemmaWeightBytes < 0)
+                {
+                    _gemmaWeightBytes = 0;
+                    foreach (Tensor t in _gemma.EnumerateWeights())
+                        _gemmaWeightBytes += t.DType.ComputeByteCount(t.ElementCount);
+                }
+                long freeNow = Backend.FreeMemoryBytes();
+                long teNeed = _gemmaWeightBytes + (2L << 30);
+                if (freeNow < teNeed)
+                {
+                    Backend.FreeWeights(_transformer.EnumerateWeights());
+                    Backend.TrimMemoryPool();
+                    _prefixResident = false;
+                    Logs.Info($"[ltx2-phase] prompt MISS: evicted resident prefix for the Gemma encode " +
+                        $"(free {freeNow >> 20} MB < TE {_gemmaWeightBytes >> 20} MB + 2048 MB margin).");
+                }
+                else
+                {
+                    Logs.Info($"[ltx2-phase] prompt MISS: Gemma fits beside the resident prefix " +
+                        $"(free {freeNow >> 20} MB ≥ TE {_gemmaWeightBytes >> 20} MB + 2048 MB margin).");
+                }
+            }
+            (encVideoPos, encAudioPos) = EncodeText(promptTokens);
+            (encVideoNeg, encAudioNeg) = EncodeText(negativeTokens);
 
-        // Reclaim the ~12 GB Gemma encoder before the DiT — both can't be resident on 24 GB.
-        Backend.Sync();
-        Backend.FreeWeights(_gemma.EnumerateWeights());
-        Logs.Info($"[ltx2-phase] TE(Gemma)+connectors+free: {phase.ElapsedMilliseconds} ms");
+            // Reclaim the ~12 GB Gemma encoder before the DiT — both can't be resident on 24 GB.
+            Backend.Sync();
+            Backend.FreeWeights(_gemma.EnumerateWeights());
+            // Host-materialize the four embeddings so they survive activation sweeps (a never-host-read tensor
+            // loses its only copy in FreeActivations), then drop the TE's device activations + pool slack so
+            // the resident-prefix sizing below sees the reclaimed VRAM. The transformer's RoPE table cache is
+            // host-built, so it survives the sweep too.
+            _ = encVideoPos.DataPointer; _ = encAudioPos.DataPointer;
+            _ = encVideoNeg.DataPointer; _ = encAudioNeg.DataPointer;
+            Backend.FreeActivations();
+            Backend.TrimMemoryPool();
+            _cachedVideoPos?.Dispose(); _cachedAudioPos?.Dispose();
+            _cachedVideoNeg?.Dispose(); _cachedAudioNeg?.Dispose();
+            _cachedVideoPos = encVideoPos; _cachedAudioPos = encAudioPos;
+            _cachedVideoNeg = encVideoNeg; _cachedAudioNeg = encAudioNeg;
+            _cachedPosKey = (int[])promptTokens.Clone();
+            _cachedNegKey = (int[])negativeTokens.Clone();
+            Logs.Info($"[ltx2-phase] TE(Gemma)+connectors+free: {phase.ElapsedMilliseconds} ms");
+        }
         phase.Restart();
 
         // 2. Denoise both streams. The 22B fp8 DiT (~22 GB) doesn't fit resident alongside activations on 24 GB, so
-        // stream its 48 blocks on/off device (only the shared modulation tables stay resident). CPU/Vulkan (no
-        // streaming cache) preload everything eagerly.
+        // stream its 48 blocks on/off device (the shared modulation tables plus a VRAM-sized, cross-generation
+        // persistent block prefix stay resident). CPU/Vulkan (no streaming cache) preload everything eagerly.
         HartsyInference.Core.MemoryManagement.BlockStreamingController? streamer = null;
         int residentBlocks = 0;
         if (Backend.StreamingCache is not null)
@@ -122,22 +202,54 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 new HartsyInference.Core.MemoryManagement.IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
 
-            // Resident prefix: park as many whole blocks as free VRAM allows (uploaded once per generation) and
-            // stream only the remainder. Streaming a block costs its full weight bytes on EVERY forward (2 CFG
-            // forwards × steps), so each resident block saves ~2·steps re-uploads. Headroom covers activations,
-            // the prefetch window, and pool slack; tune via HARTSY_LTX2_HEADROOM_MB (0 disables residency).
+            // Resident prefix: park as many whole blocks as free VRAM allows and stream only the remainder.
+            // Streaming a block costs its full weight bytes on EVERY forward (2 CFG forwards × steps), so each
+            // resident block saves ~2·steps re-uploads. Headroom covers activations, the prefetch window, and
+            // pool slack; tune via HARTSY_LTX2_HEADROOM_MB (0 disables residency). The count is sized ONCE and
+            // pinned across generations; under KEEP_MODELS the prefix weights themselves also stay resident, so
+            // the PreloadWeights below is a cache-hit no-op on every generation after the first.
             long blockBytes = blocks[0].EstimatedWeightBytes;
             long headroomMb = long.TryParse(Environment.GetEnvironmentVariable("HARTSY_LTX2_HEADROOM_MB"), out long hm) ? hm : 4096;
-            long spendable = Backend.FreeMemoryBytes() - headroomMb * 1024 * 1024;
-            residentBlocks = (int)Math.Clamp(spendable / Math.Max(blockBytes, 1), 0, blocks.Length);
+            long tokenLoad = (long)sv + audioFrames;
+            IEnumerable<Tensor> BlockRangeWeights(int from, int to)
+            {
+                for (int b = from; b < to; b++)
+                    foreach (Tensor t in blocks[b].EnumerateWeights()) yield return t;
+            }
+            if (_prefixResident && tokenLoad > _prefixSizedTokens)
+            {
+                // Bigger grid than the pinned sizing reserved headroom for — release and re-size below.
+                Backend.FreeWeights(BlockRangeWeights(0, _residentPrefixBlocks));
+                Backend.TrimMemoryPool();
+                _prefixResident = false;
+                _residentPrefixBlocks = -1;
+                Logs.Info($"[ltx2-phase] resident prefix released for re-size (token load {tokenLoad} > sized {_prefixSizedTokens}).");
+            }
+            if (_residentPrefixBlocks < 0 || tokenLoad > _prefixSizedTokens)
+            {
+                long spendable = Backend.FreeMemoryBytes() - headroomMb * 1024 * 1024;
+                _residentPrefixBlocks = (int)Math.Clamp(spendable / Math.Max(blockBytes, 1), 0, blocks.Length);
+                _prefixSizedTokens = tokenLoad;
+            }
+            residentBlocks = _residentPrefixBlocks;
+            if (!_prefixResident && residentBlocks > 0)
+            {
+                // Re-upload path (after a TE-miss eviction): free VRAM can be tighter than the gen-1 sizing saw
+                // (the video VAE + vocoder auto-promote resident on first decode). Squeeze THIS generation to
+                // what fits but keep the pin — a later generation starts from the kept prefix plus trimmed pool
+                // slack and tops the prefix back up to the pinned max (PreloadWeights is idempotent).
+                long spendable = Backend.FreeMemoryBytes() - headroomMb * 1024 * 1024;
+                int fit = (int)Math.Clamp(spendable / Math.Max(blockBytes, 1), 0, blocks.Length);
+                if (fit < residentBlocks)
+                {
+                    Logs.Info($"[ltx2-phase] pinned prefix {residentBlocks} squeezed to {fit} for this generation " +
+                        $"(free VRAM); pin kept — the next generation tops back up.");
+                    residentBlocks = fit;
+                }
+            }
             if (residentBlocks > 0)
             {
-                IEnumerable<Tensor> PrefixWeights()
-                {
-                    for (int b = 0; b < residentBlocks; b++)
-                        foreach (Tensor t in blocks[b].EnumerateWeights()) yield return t;
-                }
-                Backend.PreloadWeights(PrefixWeights());
+                Backend.PreloadWeights(BlockRangeWeights(0, residentBlocks));
             }
             if (residentBlocks < blocks.Length)
             {
@@ -152,7 +264,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                 _transformer.BeforeBlockForward = i => { if (i >= prefix) s.BeforeBlockForward(i - prefix); };
                 streamer.Prime();
             }
-            Logs.Info($"LTX-2 streaming: {blocks.Length} blocks × {blockBytes / (1024 * 1024)} MB, resident prefix {residentBlocks}, streamed {blocks.Length - residentBlocks} ({(blocks.Length - residentBlocks) * blockBytes / (1024 * 1024)} MB/forward)");
+            Logs.Info($"LTX-2 streaming: {blocks.Length} blocks × {blockBytes / (1024 * 1024)} MB, resident prefix {residentBlocks}{(_prefixResident ? " (persistent, no re-upload)" : "")}, streamed {blocks.Length - residentBlocks} ({(blocks.Length - residentBlocks) * blockBytes / (1024 * 1024)} MB/forward)");
         }
         else
         {
@@ -202,10 +314,46 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         phase.Restart();
         _transformer.BeforeBlockForward = null;
         if (streamer is not null) { streamer.EvictAll(); streamer.Dispose(); }
-        // Frees shared weights + the resident prefix (streamed blocks are already evicted — FreeWeights skips
-        // non-cached tensors). The VAE decode needs this VRAM back.
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        encVideoPos.Dispose(); encAudioPos.Dispose(); encVideoNeg.Dispose(); encAudioNeg.Dispose();
+        if (KeepModelsResident && Backend.StreamingCache is not null && residentBlocks > 0)
+        {
+            // KEEP_MODELS: shared weights + the block prefix stay device-resident for the next generation
+            // (its PreloadWeights becomes a cache-hit no-op and the streaming boundary stays pinned). The
+            // streamed suffix is already evicted — FreeWeights it anyway to reclaim any lingering cached
+            // dtype casts — then trim so the VAE decode gets the streaming window's VRAM.
+            int blockCount = _transformer.BlockCount;
+            int keptPrefix = residentBlocks;
+            IEnumerable<Tensor> SuffixWeights()
+            {
+                for (int b = keptPrefix; b < blockCount; b++)
+                    foreach (Tensor t in _transformer.GetBlock(b).EnumerateWeights()) yield return t;
+            }
+            Backend.FreeWeights(SuffixWeights());
+            Backend.TrimMemoryPool();
+            _prefixResident = true;
+            Logs.Info($"[ltx2-phase] resident prefix kept across generations: {residentBlocks} blocks " +
+                $"(KEEP_MODELS; free {Backend.FreeMemoryBytes() >> 20} MB for decode)");
+        }
+        else
+        {
+            // Frees shared weights + the resident prefix (streamed blocks are already evicted — FreeWeights
+            // skips non-cached tensors). The VAE decode needs this VRAM back.
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            _prefixResident = false;
+        }
+        // The persistent prefix must never starve the decode: the GPU-ported video VAE peaks at a handful of
+        // full-output-grid F32 stages plus conv workspace — if free VRAM is short of that, drop the prefix for
+        // this generation (an OOM is worse than one re-upload).
+        long decodeNeed = Math.Max(3L << 30, (long)numFrames * height * width * 160);
+        if (_prefixResident && Backend.FreeMemoryBytes() < decodeNeed)
+        {
+            Logs.Info($"[ltx2-phase] evicting resident prefix for VAE decode " +
+                $"(free {Backend.FreeMemoryBytes() >> 20} MB < ~{decodeNeed >> 20} MB estimated decode peak).");
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            Backend.TrimMemoryPool();
+            _prefixResident = false;
+        }
+        // The four text embeddings are NOT disposed — they are the cross-generation prompt cache (tiny,
+        // host-materialized; freed on the next cache miss or by the finalizer drain).
 
         // 3. Decode video.
         Tensor videoVaeLatent = UnpackVideoLatents(videoLat, tLat, hLat, wLat, videoChannels);
@@ -359,6 +507,31 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                         dp[(long)c * spatial + token] = sp[token * channels + c];
                 }
         return outT;
+    }
+
+    /// <summary>Drops the cross-generation caches: the persistent resident-prefix device weights and the four
+    /// host-materialized prompt embeddings. Model switches dispose the pipeline while the backend lives on, and
+    /// the weight cache keeps preloaded tensors (and their device copies) alive — free eagerly so a non-empty
+    /// pipeline cache can't strand the prefix VRAM (the Chroma→Krea2 eviction lesson).</summary>
+    protected override void DisposeCore()
+    {
+        try
+        {
+            if (_prefixResident)
+            {
+                Backend.FreeWeights(_transformer.EnumerateWeights());
+                Backend.TrimMemoryPool();
+                _prefixResident = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"LTX-2 pipeline dispose: failed to free the resident prefix: {ex}");
+        }
+        _cachedVideoPos?.Dispose(); _cachedAudioPos?.Dispose();
+        _cachedVideoNeg?.Dispose(); _cachedAudioNeg?.Dispose();
+        _cachedVideoPos = _cachedAudioPos = _cachedVideoNeg = _cachedAudioNeg = null;
+        _cachedPosKey = null; _cachedNegKey = null;
     }
 
     /// <summary>Middle latent frame <c>[1, C, H, W]</c> for latent2rgb previews.</summary>

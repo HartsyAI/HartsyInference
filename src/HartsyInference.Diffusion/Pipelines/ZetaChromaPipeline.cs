@@ -95,7 +95,12 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
 
         // ── 1. Static-shift flow-match Euler scheduler ──
         TensorShape pixelShape = new TensorShape(1, 3, height, width);
-        FlowMatchEulerDiscreteScheduler scheduler = new(_config.SchedulerShift);
+        // Reference dynamic shift (FLUX-style): mu linear in token count, exp(mu) ≈ 1.88 at 1024²
+        // (1024 tokens) — the static 3.0 starved the low-sigma tail where patch texture harmonizes.
+        int tokenCount = (height / 32) * (width / 32);
+        float mu = 0.5f + 0.65f * (tokenCount - 256) / 3840.0f;
+        float dynamicShift = MathF.Exp(mu);
+        FlowMatchEulerDiscreteScheduler scheduler = new(dynamicShift);
         scheduler.SetTimesteps(steps);
 
         // ── 2. Initial pixel sample ──
@@ -150,7 +155,9 @@ public sealed class ZetaChromaPipeline : DiffusionPipelineBase
 
                 // VALIDATION-PENDING: Chroma-family cond-anchored CFG (cond + scale*(cond - uncond)) on velocity
                 // (validation-gated, item 8); deliberately NOT ZImagePipeline's cond-baseline variant. Verify vs reference.
-                Tensor combined = CfgHelper.ApplyCfgCondAnchored(velocity, uncondV, cfgScale);
+                // lodestones sampling.py::denoise_cfg uses STANDARD uncond-anchored CFG; the
+                // cond-anchored form over-guided by one unit and amplified the per-patch x0 tile texture.
+                Tensor combined = CfgHelper.ApplyCfg(uncondV, velocity, cfgScale);
                 uncondV.Dispose();
                 velocity.Dispose();
                 velocity = combined;

@@ -5187,8 +5187,16 @@ public sealed class CudaBackend : IBackend
 
             // Drop this backend's per-context registrations before tearing the context down, so a later
             // backend (or a same-device re-construction) never resolves to freed stream handles.
-            GpuTransferHelper.Unregister(_context);
+            bool lastOwner = GpuTransferHelper.Unregister(_context);
             CudaMemory.RemoveComputeStream(_context);
+            // Discard (don't run) finalizer cleanups still queued under this context's handle: EvictAll above
+            // already freed everything they could reference, and CUDA reuses primary-context handles — a later
+            // same-device backend would otherwise drain these stale callbacks during ITS construction. Only when
+            // this backend was the handle's last owner: a live same-device sibling shares the handle (and queue).
+            if (lastOwner)
+            {
+                HartsyInference.Core.Tensors.Tensor.DiscardPendingFinalizerGpuCleanup(_context.Handle);
+            }
 
             // Order: upload stream first (no other code holds events on it after
             // EvictAll above), then compute stream, then context.

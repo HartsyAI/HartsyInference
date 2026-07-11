@@ -269,13 +269,22 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         // ── 5. VAE decode ──
         Logs.Verbose("Decoding latents to image (tiled F32 path)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent);
+        // 48-latent tiles instead of the 64 default: at 128×128 latent both give a 3×3 grid, but the
+        // smaller tile drops per-tile conv activations ~44% — the decode beside the resident 17 GB DiT
+        // was the whole generation's VRAM peak (measured 23.9 GB with 64, ~620 MB headroom on a 24 GB card).
+        Tensor image = _vaeDecoder.DecodeTiled(Backend, latent, tileLatentSize: 48);
         latent.Dispose();
         vaeSw.Stop();
         Logs.Verbose($"VAE decode done in {vaeSw.ElapsedMilliseconds}ms");
 
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+
+        // The full-res decode's im2col bands leave a ~3 GB pool reservation on top of the resident 17 GB
+        // DiT (measured 23.5 GB retained watermark); hand it back so follow-up work — or another model's
+        // load — starts from the ~20 GB loop plateau instead of the decode peak.
+        if (KeepModelsResident)
+            Backend.TrimMemoryPool();
 
         sw.Stop();
         Logs.Info($"HiDream t2i complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

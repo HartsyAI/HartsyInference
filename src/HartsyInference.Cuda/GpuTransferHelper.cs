@@ -58,6 +58,13 @@ internal static unsafe class GpuTransferHelper
         /// thread that's never bound the context would hit CUDA_ERROR_INVALID_CONTEXT.</summary>
         public CudaContext? Context;
 
+        /// <summary>Set when this state's backend is torn down (<see cref="Unregister"/>). Stale promoted-weight
+        /// callbacks that survived teardown (queued by tensor finalizers before their callbacks could be detached)
+        /// check this FIRST and bail out — reading a bool field is safe on a resurrected object graph, whereas
+        /// touching <see cref="UploadTracker"/> is not (a ConditionalWeakTable whose Container was finalized while
+        /// the state was unreachable throws NRE from its freed dependent handles — the GGUF model-switch crash).</summary>
+        public volatile bool Unregistered;
+
         public long CachedBytes;
         public long Hits;
         public long Misses;
@@ -105,19 +112,27 @@ internal static unsafe class GpuTransferHelper
         state.Context = context;
         state.StreamHandle = stream;
         state.StreamingCache = streamingCache;
+        // A same-device re-registration revives a previously torn-down handle's state.
+        state.Unregistered = false;
         _single = _states.Count == 1 ? state : null;
     }
 
     /// <summary>Removes a context's state at backend disposal (after <see cref="FreeAllCached"/>).
     /// Only removes when the registered state still belongs to this context instance — a same-device
-    /// backend that re-registered the handle keeps its binding.</summary>
-    public static void Unregister(CudaContext context)
+    /// backend that re-registered the handle keeps its binding. Returns true when the state was removed,
+    /// i.e. the caller was the handle's last owner and may discard the handle's pending-cleanup queue.</summary>
+    public static bool Unregister(CudaContext context)
     {
+        bool removed = false;
         if (_states.TryGetValue(context.Handle, out State? state) && ReferenceEquals(state.Context, context))
         {
-            _states.TryRemove(context.Handle, out _);
+            // Mark dead BEFORE removal: any promoted-weight callback that still fires (finalizer-queued before
+            // its tensor could be detached) must see the flag and no-op instead of touching this state's caches.
+            state.Unregistered = true;
+            removed = _states.TryRemove(context.Handle, out _);
         }
         _single = _states.Count == 1 ? System.Linq.Enumerable.First(_states.Values) : null;
+        return removed;
     }
 
     /// <summary>Resolves the state for the calling thread's CURRENT CUDA context. Every CudaBackend op
@@ -386,6 +401,13 @@ internal static unsafe class GpuTransferHelper
     /// (backend teardown) the stale callback finds nothing and the tensor stays promotable for the next session.</summary>
     private static void OnPromotedHostAccess(State s, Tensor tensor)
     {
+        // Torn-down backend: the caches were already freed wholesale and the state's ConditionalWeakTable may
+        // have been finalized while the state was unreachable (resurrected via the finalizer-cleanup queue) —
+        // touching it would NRE. The bool read is always safe.
+        if (s.Unregistered)
+        {
+            return;
+        }
         if (!s.UploadTracker.TryGetValue(tensor, out UploadState? state) || !state.Promoted)
         {
             return;
@@ -408,6 +430,25 @@ internal static unsafe class GpuTransferHelper
                 CudaMemory.Free(cast.castPtr);
                 s.CachedBytes -= (long)cast.bytes;
             }
+        }
+    }
+
+    /// <summary>Detaches the auto-promotion lifecycle from a tensor whose cached device copy is being freed by a
+    /// bulk eviction path (<see cref="FreeWeights"/> / <see cref="FreeAllCached"/> /
+    /// <see cref="TryUnregisterCachedWeight"/>): resets the promoted flag and removes the planted sync/dispose
+    /// callbacks. Without this, a later Dispose — or worse, a finalizer — of the tensor enqueues a stale
+    /// <see cref="OnPromotedHostAccess"/> against a state that may since have been torn down; the CUDA driver
+    /// reuses primary-context handles, so the NEXT backend on the device drains and runs those stale callbacks
+    /// (the GGUF model-switch NRE). Re-promotion stays possible: the tensor's upload count is intact, so the
+    /// next session's second upload re-promotes it (matching the documented FreeAllCached semantics).</summary>
+    private static void DetachPromotedTensor(State s, Tensor tensor)
+    {
+        if (s.UploadTracker.TryGetValue(tensor, out UploadState? promo) && promo.Promoted)
+        {
+            promo.Promoted = false;
+            tensor._gpuSyncCallback = null;
+            tensor._gpuDisposeCallback = null;
+            tensor._gpuCleanupContext = 0;
         }
     }
 
@@ -458,6 +499,7 @@ internal static unsafe class GpuTransferHelper
         {
             s.CachedPointers.Remove(dptr);
             s.CachedBytes -= (long)ByteSize(weight);
+            DetachPromotedTensor(s, weight);
             return true;
         }
         dptr = 0;
@@ -479,6 +521,7 @@ internal static unsafe class GpuTransferHelper
                 s.CachedPointers.Remove(dptr);
                 CudaMemory.Free(dptr);
                 s.CachedBytes -= (long)ByteSize(weight);
+                DetachPromotedTensor(s, weight);
             }
             if (s.WeightCastCache.Remove(weight, out (ulong castPtr, nuint bytes) cast))
             {
@@ -500,6 +543,12 @@ internal static unsafe class GpuTransferHelper
             CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
         }
 
+        // Detach promotion callbacks BEFORE clearing: after this wholesale free, a promoted tensor's
+        // Dispose/finalizer must not queue a cleanup against this state (see DetachPromotedTensor).
+        foreach (Tensor weight in s.WeightCache.Keys)
+        {
+            DetachPromotedTensor(s, weight);
+        }
         foreach (ulong dptr in s.CachedPointers)
         {
             CudaMemory.Free(dptr);

@@ -44,6 +44,21 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
     private (int Frames, int Height, int Width, double Fps, int AudioFrames) _ropeKey = (-1, -1, -1, 0, -1);
     private Tensor? _vCosC, _vSinC, _aCosC, _aSinC, _cvCosC, _cvSinC;
 
+    // Diagnostic (HARTSY_LTX2_PROBE=1): per-block residual-stream absmax/rms on the FIRST forward only — the
+    // mandatory F16-activation go/no-go probe (streams riding >60k overflow F16). Host sync per probe, debug only.
+    private static readonly bool Ltx2Probe = Environment.GetEnvironmentVariable("HARTSY_LTX2_PROBE") == "1";
+    private static bool _probedOnce;
+
+    private static void Probe(string label, Tensor t)
+    {
+        float* p = (float*)t.DataPointer;
+        float mx = 0f;
+        double ss = 0;
+        long n = t.ElementCount;
+        for (long e = 0; e < n; e++) { float av = MathF.Abs(p[e]); if (av > mx) mx = av; ss += (double)p[e] * p[e]; }
+        HartsyInference.Core.Logging.Logs.Info($"[ltx2-probe] {label}: absmax={mx:F2} rms={Math.Sqrt(ss / n):F4}");
+    }
+
     public LtxVideo2Transformer(LtxVideo2Config config)
     {
         _config = config;
@@ -305,13 +320,17 @@ public sealed unsafe class LtxVideo2Transformer : IDisposable
         LtxVideo2BlockContext ctxU = MakeCtx(encoderVideoUncond, encoderAudioUncond);
 
         OnBlockOutput?.Invoke(-1, hidC, audC);
+        bool probeThisForward = Ltx2Probe && !_probedOnce;
+        if (probeThisForward) { Probe("proj_in video", hidC); Probe("proj_in audio", audC); }
         for (int i = 0; i < _blocks.Length; i++)
         {
             BeforeBlockForward?.Invoke(i);
             (hidC, audC) = _blocks[i].Forward(backend, hidC, audC, ctxC);
             (hidU, audU) = _blocks[i].Forward(backend, hidU, audU, ctxU);
             OnBlockOutput?.Invoke(i, hidC, audC);
+            if (probeThisForward) { Probe($"block{i} video", hidC); Probe($"block{i} audio", audC); }
         }
+        if (probeThisForward) _probedOnce = true;
 
         foreach (Tensor? t in new[] { tVideo, tAudio, tPromptV, tPromptA, tCaVss, tCaAss, tCaVGate, tCaAGate })
             t?.Dispose();

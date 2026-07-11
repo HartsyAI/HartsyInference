@@ -145,7 +145,7 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | AuraFlow-0.3 | 20 | 3.5 |
 | OmniGen 2 | 20 | 4.0 |
 
-**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.46` + in-flight `44.x-local` optimization rounds, 2026-07-10. ComfyUI
+**Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.46` + in-flight `44.x-local` optimization rounds, 2026-07-11. ComfyUI
 column is the same request on the same GPU through the ComfyUI backend. The optimization grind is ongoing
 and tracked in [`benchmarks/results/`](../benchmarks/results/); this table is a snapshot, updated as
 rounds land:
@@ -169,8 +169,11 @@ rounds land:
 | SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
 | Lumina-Image 2.0 | **17.7 s** | — | 37× in one round (was 650 s); no ComfyUI baseline (can't load the diffusers-format file) |
 | OmniGen 2 | 90.5 s | 13.0 s | 7.0× — first bench (07-10, pre-optimization); blocks already GPU-resident, fleet perf kit (F16 activations, step graph, drain-free CFG loop) queued |
-| Flux.2 Dev 32B (Q4_K_S GGUF, 20 st) | 52.6 s | — | First e2e 07-10 (native GGUF + live Mistral-Small-3 TE); no ComfyUI baseline (comfy backend can't route the GGUF); step graph OOMs on 24GB → eager |
-| HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | 77.0 s | — | First e2e 07-10 (new pixel-shuffle VAE decoder, live Qwen2.5-VL-7B TE); no ComfyUI baseline (comfy backend can't route the GGUF) |
+| Flux.2 Dev 32B (Q4_K_S GGUF, 20 st) | 52.6 s | — | First e2e 07-10 (native GGUF + live Mistral-Small-3 TE); no ComfyUI baseline (comfy backend can't route the GGUF); eager loop 2.6 s/step (28-st warm 73.9 s on `44.71-local` = same per-step rate; step graph opt-in). Model-switch NRE **fixed + validated 07-11** (Dev→Krea2→Dev in one process, no restart) |
+| HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | **74.1 s** | — | Was 77.0 s; `44.71-local` TE prompt cache (repeat prompt skips the 7B Qwen2.5-VL encode + TE⇄DiT swap) + token-space drain-free loop; no ComfyUI baseline (comfy backend can't route the GGUF) |
+| HiDream-i1 17B (fp8, 25 st, cfg 5) | 44.0 s | 35.2 s | 1.25× — first official row 07-11 (`44.71-local`): activation-memory pass unblocked 1024²-CFG (was FAILED/OOM in the 07-05 run); warm ×3 44.0 s flat, peak 20.6 GB, coherent |
+| F-Lite 10B (30 st, cfg 6) | 61.5 s | — | First correct run 07-11 (4 reference bugs fixed via byte-level python oracle; 47× block-port speedup); no ComfyUI baseline |
+| Chroma1-Radiance (pixel-space, 20 st, cfg 3.5) | 54.4 s | — | Was 735.6 s first-e2e (36.9 s/step → 2.65 s/step, 14× on `44.73-local`): NeRF-head GPU port (was ~50k host-tile Linears/forward) + ForwardPaired + prompt cache + DiT residency + drain-free loop; parity corr 0.99996 vs pre-port; no ComfyUI baseline yet |
 
 ---
 

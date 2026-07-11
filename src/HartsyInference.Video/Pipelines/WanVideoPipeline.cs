@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -46,6 +47,16 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     // Tracks which MoE expert's weights are currently GPU-resident. Two 14B experts (2×14 GB fp8) don't fit in 24 GB,
     // so we keep only the active one loaded and swap once at the boundary crossing (high→low noise).
     private WanVideoTransformer? _loadedExpert;
+
+    /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS, default on): the single-expert DiT stays GPU-resident across generations so the next gen's preload is a cache-hit no-op; every VAE phase beside it is gated on measured free VRAM (evict when short).</summary>
+    private static readonly bool KeepModelsResident = EnvSwitch.IsEnabled("HARTSY_KEEP_MODELS", defaultOn: true);
+
+    // Cross-generation I2V conditioning cache: the [mask, cond-latent] tensor is a deterministic function of
+    // (init frame, last frame, geometry), tiny (~1.4 MB host), and its whole-padded-clip VAE encode is the ONE
+    // phase whose conv-activation peak (~7.5 GB at 25f 512×320, measured) can never run beside the resident
+    // 14B DiT — a same-image repeat skips the encode, the DiT eviction, AND the DiT re-upload.
+    private Tensor? _cachedCondition;
+    private string? _cachedConditionKey;
 
     /// <summary>Ensures <paramref name="expert"/> is the only DiT resident: frees the previously-loaded expert (if
     /// different) and preloads this one. No-op for the single-transformer (non-MoE) case handled by the callers.</summary>
@@ -123,8 +134,8 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     {
         Tensor latent = RunDenoise(promptEmbeds, negativeEmbeds, request, numFrames, onProgress, firstFrameLatent, out _);
         // Preload the VAE decoder weights onto the GPU. Without this every conv/norm in the decode is a weight
-        // cache-miss → SyncStream + re-upload, serializing the whole decode (GPU idle ~79%, ~8 min). The transformer
-        // weights were freed at the end of RunDenoise, so there is room.
+        // cache-miss → SyncStream + re-upload, serializing the whole decode (GPU idle ~79%, ~8 min). RunDenoise
+        // ended with ReleaseOrKeepTransformer, which guarantees decode headroom (kept the DiT only if it fits).
         Backend.PreloadWeights(_vae.EnumerateWeights());
         if (_vae is Wan22VaeDecoder w22)
         {
@@ -251,8 +262,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         if (firstFrameLatent is not null) WriteFirstFrame(latents, firstFrameLatent);
 
         Backend.Sync();
-        if (_transformer2 is null) Backend.FreeWeights(_transformer.EnumerateWeights());
-        else if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
+        ReleaseOrKeepTransformer(numFrames, width, height);
         return latents;
     }
 
@@ -304,26 +314,38 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         // The whole-clip encode's conv activations scale with numFrames·H·W — with a KEEP_MODELS-resident DiT from a
         // prior gen still on-device this OOMs (seen at 33f × native res: 5.25 GB requested, 82 MB free). Evict the
         // transformer first when headroom is short; the denoise loop re-uploads it right after.
-        long encodeNeedBytes = (long)numFrames * height * width * 3L * 4 * 24;   // ~24 F32 conv-activation copies/frame, empirical ceiling
-        if (Backend.FreeMemoryBytes() < encodeNeedBytes + (2L << 30))
+        Stopwatch phase = Stopwatch.StartNew();
+        string condKey = $"{width}x{height}x{numFrames}:" +
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(condRgb24)) + ":" +
+            (lastRgb24 is null ? "-" : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(lastRgb24)));
+        Tensor condition;
+        if (_cachedCondition is not null && condKey == _cachedConditionKey)
         {
-            Logs.Info($"Wan I2V: freeing transformer weights before the conditioning encode " +
-                $"(need ~{encodeNeedBytes >> 20} MB, free {Backend.FreeMemoryBytes() >> 20} MB)");
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+            condition = _cachedCondition;
+            Logs.Info("[wan-phase] I2V conditioning cache HIT — cond VAE encode skipped.");
         }
-        Backend.PreloadWeights(_encoder.EnumerateWeights());
-        Tensor condClip = BuildCondClip(condRgb24, lastRgb24, width, height, numFrames);
-        Tensor condLatent = _encoder.Encode(Backend, condClip);   // [1, z, tLat, hLat, wLat], normalized
-        condClip.Dispose();
-        Backend.Sync();
-        Backend.FreeWeights(_encoder.EnumerateWeights());
-        WanVideoDebugDump.Dump("i2v_cond_latent", condLatent);
-        Tensor condition = BuildI2VCondition(condLatent, lastRgb24 is not null, latentCh, tp, tLat, hLat, wLat);   // [1,tp+z,tLat,hLat,wLat]
-        condLatent.Dispose();
-        WanVideoDebugDump.Dump("i2v_condition", condition);
+        else
+        {
+            EnsureVaeEncodeHeadroom(numFrames, width, height);
+            Backend.PreloadWeights(_encoder.EnumerateWeights());
+            Tensor condClip = BuildCondClip(condRgb24, lastRgb24, width, height, numFrames);
+            Tensor condLatent = _encoder.Encode(Backend, condClip);   // [1, z, tLat, hLat, wLat], normalized
+            condClip.Dispose();
+            Backend.Sync();
+            Backend.FreeWeights(_encoder.EnumerateWeights());
+            WanVideoDebugDump.Dump("i2v_cond_latent", condLatent);
+            condition = BuildI2VCondition(condLatent, lastRgb24 is not null, latentCh, tp, tLat, hLat, wLat);   // [1,tp+z,tLat,hLat,wLat]
+            condLatent.Dispose();
+            WanVideoDebugDump.Dump("i2v_condition", condition);
+            _cachedCondition?.Dispose();
+            _cachedCondition = condition;
+            _cachedConditionKey = condKey;
+            Logs.Info($"[wan-phase] I2V cond encode MISS (evict+VAE encode+free): {phase.ElapsedMilliseconds} ms");
+        }
 
+        phase.Restart();
         if (_transformer2 is null) Backend.PreloadWeights(_transformer.EnumerateWeights());
+        Logs.Info($"[wan-phase] DiT preload: {phase.ElapsedMilliseconds} ms");
         // MoE (A14B): SwapToExpert in the loop keeps only the active expert resident (2×14 GB won't co-reside in 24 GB).
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape([1L, latentCh, tLat, hLat, wLat]), seed);
         // VALIDATION-PENDING: Wan 2.2 UniPC scheduler (solver_order=2, bh2, predict_x0, flow sigmas, exponential
@@ -358,21 +380,29 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             scheduler.Step(latents, vCond);
             vCond.Dispose(); vUncond.Dispose();
             sw.Stop();
+            Logs.Verbose($"[wan-phase] I2V step {k + 1}/{steps}: {sw.Elapsed.TotalMilliseconds:F0} ms");
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, sw.Elapsed.TotalMilliseconds)
             {
                 Latent = latents,
                 LatentArch = LatentArchitecture.Wan,
             });
+            // Reclaim GPU-resident activation buffers between steps (matches the T2V loop): the DiT keeps
+            // intermediates on-device, and any not read-back or disposed linger until GC and accumulate across
+            // steps. The latent/condition are host-side, and the rope/context caches are host-materialized, so
+            // nothing cross-step is lost.
+            Backend.FreeActivations();
         }
 
         Backend.Sync();
-        if (_transformer2 is null) Backend.FreeWeights(_transformer.EnumerateWeights());
-        else if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
-        condition.Dispose();
+        ReleaseOrKeepTransformer(numFrames, width, height);
+        // condition is NOT disposed — it is the cross-generation conditioning cache (host tensor, ~1.4 MB),
+        // freed on the next cache miss or in DisposeCore.
 
+        phase.Restart();
         Tensor rgb;
         try { rgb = _vae.Decode(Backend, latents); }
         finally { latents.Dispose(); }
+        Logs.Info($"[wan-phase] I2V VAE decode: {phase.ElapsedMilliseconds} ms");
         int f = (int)rgb.Shape[2];
         byte[][] frames = new byte[f][];
         for (int i = 0; i < f; i++) frames[i] = FrameToBytes(rgb, i);
@@ -413,6 +443,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             $"cfg={guidance}, seed={seed} (latent {latentCh}x{tLat}x{hLat}x{wLat}, shift={shift})");
         Logs.Warning("Wan-Video V2V pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
+        EnsureVaeEncodeHeadroom(pixT, pixW, pixH);
         Backend.PreloadWeights(_encoder.EnumerateWeights());
         Tensor real = _encoder.Encode(Backend, rgbClip);                 // [1, z, tLat, hLat, wLat]
         Backend.Sync();
@@ -549,6 +580,79 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         float* cp = (float*)condition.DataPointer;
         for (int ci = 0; ci < c; ci++)
             Buffer.MemoryCopy(cp + ci * frame, lp + (long)ci * t * frame, frame * 4, frame * 4);
+    }
+
+    /// <summary>Evicts the (possibly KEEP_MODELS-resident) DiT before a whole-clip VAE encode when measured free VRAM is short of the conv-activation ceiling. Trims the pool first so slack from the previous generation doesn't make the reading pessimistic — that slack, not the DiT, is what the old unconditional path was really evicting for on warm gens.</summary>
+    private void EnsureVaeEncodeHeadroom(int numFrames, int width, int height)
+    {
+        // ~160 F32 conv-activation copies/frame: measured 2026-07-11 — a 25f 512×320 encode consumed ≥7.5 GB
+        // (~153 copies/frame) and OOM'd beside a resident DiT under the old 24-copies estimate.
+        long encodeNeedBytes = (long)numFrames * height * width * 3L * 4 * 160;
+        Backend.TrimMemoryPool();
+        long free = Backend.FreeMemoryBytes();
+        if (free < encodeNeedBytes + (2L << 30))
+        {
+            Logs.Info($"[wan-phase] cond encode: freeing transformer weights " +
+                $"(need ~{encodeNeedBytes >> 20} MB + 2048 MB margin, free {free >> 20} MB)");
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+            _loadedExpert = null;
+            Backend.TrimMemoryPool();
+        }
+        else
+        {
+            Logs.Info($"[wan-phase] cond encode fits beside the resident DiT " +
+                $"(need ~{encodeNeedBytes >> 20} MB + 2048 MB margin, free {free >> 20} MB) — evict skipped.");
+        }
+    }
+
+    /// <summary>Post-denoise DiT residency (the HARTSY_KEEP_MODELS idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside.</summary>
+    private void ReleaseOrKeepTransformer(int numFrames, int width, int height)
+    {
+        if (_transformer2 is not null)
+        {
+            if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
+            return;
+        }
+        if (!KeepModelsResident)
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            return;
+        }
+        Backend.TrimMemoryPool();
+        long decodeNeed = Math.Max(3L << 30, (long)numFrames * height * width * 160);
+        long free = Backend.FreeMemoryBytes();
+        if (free < decodeNeed)
+        {
+            Logs.Info($"[wan-phase] evicting resident DiT for VAE decode " +
+                $"(free {free >> 20} MB < ~{decodeNeed >> 20} MB estimated decode peak).");
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            Backend.TrimMemoryPool();
+        }
+        else
+        {
+            Logs.Info($"[wan-phase] DiT kept resident across generations " +
+                $"(KEEP_MODELS; free {free >> 20} MB ≥ ~{decodeNeed >> 20} MB decode estimate).");
+        }
+    }
+
+    /// <summary>Frees the cross-generation resident DiT device weights on model switch — the backend weight cache would otherwise keep the device copies alive past the pipeline (the Chroma→Krea2 stranded-VRAM lesson) — plus the host conditioning cache.</summary>
+    protected override void DisposeCore()
+    {
+        try
+        {
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+            if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
+            _loadedExpert = null;
+            Backend.TrimMemoryPool();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"Wan pipeline dispose: failed to free resident DiT weights: {ex}");
+        }
+        _cachedCondition?.Dispose();
+        _cachedCondition = null;
+        _cachedConditionKey = null;
     }
 
     private static byte[] FrameToBytes(Tensor rgb, int frameIndex) => VideoRgbFrames.ExtractFrame(rgb, frameIndex);

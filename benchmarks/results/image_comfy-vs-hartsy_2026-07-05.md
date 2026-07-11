@@ -1041,3 +1041,58 @@ Flipped scale-first in `HunyuanImageTransformer.ApplyFinalLayer` → flawless.
 model-switch NRE applies (restart between model switches); perf round pending (77s at 4096 img tokens ×
 2 CFG forwards × Q4/Q5 transient dequant — the Qwen-Image playbook: fused loop already partially there,
 prompt cache missing, F16 activations unverified for this stream).
+
+## 2026-07-10 — Bring-up round pt4: Chroma1-Radiance FIRST E2E (12.26 min), Zeta-Chroma diagnosed, F-Lite blocked on the known host-glue AV — engine `alpha.44.53–44.55-local`
+
+- **Chroma1-Radiance ✅ first e2e**: coherent on-prompt astronaut @1024²/20st/cfg4 in **12.26 min**
+  (36.9s/step). Moody/vignetted output matches the checkpoint's WIP reputation. Perf suspect = pixel-space
+  token count (blocks are the already-resident Chroma ones) — profile before touching ops.
+- **Zeta-Chroma ⚠ diagnosed**: real converter fix shipped (`44.53`: fuse diffusers-split to_q/k/v →
+  Z-Image fused qkv + out/q_norm/k_norm renames); generates with visible composition under a PERIODIC TILE
+  artifact → x0-prediction handling / dec_net unpatchify order to numerical-diff next.
+- **F-Lite ⚠ blocked**: extension model-class registration shipped (core has no f-lite detection;
+  matched on `blocks.0.cross_attn.context_kv.weight`); full load ✓; 90s/step GPU 11% and a fatal
+  AccessViolation ~step 6 = the documented cpu-glue-async-race class. GPU-residency port fixes both.
+- **Fleet-wide incident**: `44.53` failed to init on ALL models — commit `9762b94` (concurrent LLM session)
+  regenerated `lm_f32.ptx` as PTX ISA 9.2 (CUDA 13.2 toolchain); this driver's JIT tops out at 9.0.
+  Downpatched `.version` 9.2→9.0 in both copies (no 9.2-only instructions). **Toolchain must target ≤9.0.**
+- Perf+correctness pass queue for all five new models written at the top of E2E_PARITY_WORKLOG.md.
+
+## 2026-07-11 — F-Lite CORRECT + BENCHED: warm **61.5s** @1024²/30st/cfg6 — engine `alpha.44.56–44.67-local`
+
+From 90s/step + fatal AV + never-a-coherent-image to reference-quality output at 61.5s warm (1.9s/step,
+47× block-port speedup). The byte-level oracle campaign (engine stage dumps vs fal-ai reference run with
+identical inputs, plus a full python GPU reference gen) found FOUR real bugs: (1) `register_tokens` BF16
+read as host float* (16 garbage tokens → bubble grid); (2) `lambda_param` BF16 read as host float*
+(broken V-residual in blocks 1..39 — pinned because block0 matched at 0.002 relL2 while block10 jumped
+to 0.093, and block0 is the only mix-free block); (3) dynamic-shift alpha from the LATENT grid (4 @1024²,
+ours used the token grid = 2); (4) reference T5 conditioning = 512-pad UNMASKED + zeros-tensor negative.
+NOT bugs: t×1000 (the reference caller scales — briefly removed, restored), rope (negated-sin device
+tables proven numerically), QKV/context_kv chunk orders, gates, final [shift,scale]. Warm path fixed with
+the Flux2 TE⇄DiT staging + prompt cache (+TrimMemoryPool at stage bounds). Peak 23.8GB. No Comfy baseline
+(no ComfyUI f-lite support). **FLEET LESSON: audit every host float* weight read for BF16 shards.**
+
+## 2026-07-11 — 44.71-local validation matrix: HiDream first official row (44.0s), HunyuanImage 74.1s (TE cache), Flux.2 Dev model-switch NRE FIXED, flagships green
+
+Engine `alpha.44.71-local` deployed (all 15 nupkgs, clean Release pack — the HunyuanImagePipeline CS0169
+fields from the 07-10 deploy are now fully wired into the TE prompt cache, no warning suppression).
+Standard prompt (astronaut-on-horse), seed 42, Swarm API wall clock, exactbackendid=2, every image
+visually verified coherent.
+
+| Model | Config | Warm | Notes |
+|---|---|---|---|
+| **HiDream-i1** (fp8, 17B) | 1024²/25st/cfg5 | **44.0 s** (×3: 43.99/44.02/44.04) | FIRST OFFICIAL ROW — was FAILED/OOM in the 07-05 run (cold 1462s). vs Comfy 35.2s = **1.25×**. Peak VRAM 20.6 GB (1s sampler around a warm gen); cold-in-process 94.3s incl. load |
+| **HunyuanImage 2.1** (Q4_K_M, 2048²) | 2048²/20st/cfg3.5 | **74.1 s** (was 77.0) | Gen 2 logs `[HunyuanImage] prompt-embedding cache HIT — TE phase skipped`; token-space drain-free loop; zero OOM warnings beside the resident DiT (KEEP_MODELS on) |
+| **Flux.2 Dev** (Q4_K_S GGUF) | 1024²/28st/cfg1 | 73.9 s = **2.64 s/step** | Same per-step rate as the 52.6s/20-st first e2e (eager loop; step graph opt-in `HARTSY_DIT_GRAPH=1`). Benign recoverable warning each gen: 1017 MB VAE-decode alloc async-OOMs then succeeds on retry |
+| **Flux.2 Klein 4B** (BF16) | 1024²/4st/cfg1 | **2.35 s** (engine 2347/2327 ms) | Step-graph captured + replayed (`[Flux2 graph] denoise step captured; replaying via cuGraphLaunch`), ≤2.4s target held |
+| Z-Image-Turbo | 1024²/8st/cfg1 | **2.79 s** | Flagship gate ✓ (≤3.2) |
+| Krea2-Turbo | 1024²/8st/cfg1 | **4.49 s** | Flagship gate ✓ (<6.5) |
+
+**Model-switch NRE fix VALIDATED:** Flux.2 Dev → Krea2-Turbo → Flux.2 Dev in one Swarm process (previously
+NRE'd in `GpuTransferHelper.OnPromotedHostAccess` and the backend gave up). All three gens completed
+coherent; zero `NullReference`/`OnPromotedHostAccess`/`Finalizer GPU-cleanup callback failed` lines in the
+log. The switch back INTO Dev also completed (121.8s including the reload) — the separate VRAM-reclaim OOM
+did not reproduce. Multi-model sessions no longer need restarts between GGUF switches.
+
+**Zeta-Chroma carried clean:** the 44.70 BF16 `in_ln` decoder-head fix is in this build; status promoted
+to ✅ VERIFIED CLEAN in MODEL_STATUS_IMAGE.md.

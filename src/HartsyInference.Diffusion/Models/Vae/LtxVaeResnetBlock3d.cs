@@ -63,13 +63,13 @@ public sealed unsafe class LtxVaeResnetBlock3d
             (shift1, scale1, shift2, scale2) = Modulation(temb!);
         }
 
-        Tensor h = ChannelRms(x, _inC);
+        Tensor h = _timestepCond ? ChannelRms(x, _inC) : ChannelRmsDevice(backend, x);
         if (_timestepCond) ApplyShiftScale(h, scale1!, shift1!);
         Silu(backend, h);
         Tensor c1 = _conv1!.Forward(backend, h);
         h.Dispose();
 
-        Tensor h2 = ChannelRms(c1, _outC);
+        Tensor h2 = _timestepCond ? ChannelRms(c1, _outC) : ChannelRmsDevice(backend, c1);
         c1.Dispose();
         if (_timestepCond) ApplyShiftScale(h2, scale2!, shift2!);
         Silu(backend, h2);
@@ -109,6 +109,14 @@ public sealed unsafe class LtxVaeResnetBlock3d
         }
         // Order matches upstream: shift_1, scale_1, shift_2, scale_2.
         return (o[0], o[1], o[2], o[3]);
+    }
+
+    /// <summary>Device channel RMS via the shared <see cref="IBackend.WanRmsNormChannel"/> op (same math to float rounding: <c>x·sqrt(C)/max(L2_C, eps)</c> vs <c>x/sqrt(mean_C(x²)+eps)</c>), keeping the activation GPU-resident between the convs. The timestep-conditioned path stays on the host loop because <see cref="ApplyShiftScale"/> mutates the host buffer in place — done to a GPU-cached tensor that would leave the device copy stale.</summary>
+    private static Tensor ChannelRmsDevice(IBackend backend, Tensor x)
+    {
+        Tensor outT = new Tensor(x.Shape, DType.F32);
+        backend.WanRmsNormChannel(outT, x, null, NormEps);
+        return outT;
     }
 
     /// <summary>Channel-wise RMS norm (no affine): per spatial-temporal position, <c>x / sqrt(mean_C(x²) + eps)</c>.</summary>

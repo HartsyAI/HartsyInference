@@ -37,7 +37,10 @@ public sealed unsafe class FLiteTransformer : IDisposable
     {
         _patchEmbedWeight = weights["patch_embed.patch_proj.weight"];
         weights.TryGetValue("patch_embed.patch_proj.bias", out _patchEmbedBias);
-        _registerTokens = weights["register_tokens"];
+        // register_tokens ships BF16 and is consumed by a HOST float* read in PrependRegisterTokens —
+        // reinterpreting BF16 bytes as F32 fed 16 garbage tokens into every block (THE bubble-grid bug).
+        Tensor rawRegister = weights["register_tokens"];
+        _registerTokens = rawRegister.DType == DType.F32 ? rawRegister : rawRegister.CastTo(DType.F32);
 
         _timeEmbedUpWeight = weights["time_embed.0.weight"];
         weights.TryGetValue("time_embed.0.bias", out _timeEmbedUpBias);
@@ -78,6 +81,36 @@ public sealed unsafe class FLiteTransformer : IDisposable
         if (_finalProjBias is not null) yield return _finalProjBias;
     }
 
+    // Diagnostic (HARTSY_FLITE_PROBE=1): per-stage absmax — host sync per probe, debug only.
+    private static readonly bool FliteProbe = Environment.GetEnvironmentVariable("HARTSY_FLITE_PROBE") == "1";
+    private static bool _probedOnce;
+    // Binary stage dumps for the Python block-0 oracle (HARTSY_FLITE_DUMP=<dir>): raw F32 .bin per
+    // stage on the FIRST forward only, plus a shapes manifest.
+    private static readonly string? FliteDumpDir = Environment.GetEnvironmentVariable("HARTSY_FLITE_DUMP");
+    private static int _dumpForwardIndex = -1;
+    private static unsafe void DumpBin(string name, Tensor t)
+    {
+        // Capture the SECOND forward of step one (the cond pass — the first is the zeros-context uncond).
+        if (FliteDumpDir is null || _dumpForwardIndex != 1) return;
+        Directory.CreateDirectory(FliteDumpDir);
+        long bytes = t.ElementCount * 4;
+        byte[] buf = new byte[bytes];
+        fixed (byte* dst = buf) Buffer.MemoryCopy((void*)t.DataPointer, dst, bytes, bytes);
+        File.WriteAllBytes(Path.Combine(FliteDumpDir, name + ".bin"), buf);
+        File.AppendAllText(Path.Combine(FliteDumpDir, "shapes.txt"),
+            $"{name} {string.Join("x", Enumerable.Range(0, t.Shape.Rank).Select(i => t.Shape[i]))}\n");
+    }
+
+    private static unsafe void Probe(string label, Tensor t)
+    {
+        if (!FliteProbe || _probedOnce) return;
+        float* p = (float*)t.DataPointer;
+        float mx = 0f; double ss = 0;
+        long n = t.ElementCount;
+        for (long e = 0; e < n; e++) { float a = MathF.Abs(p[e]); if (a > mx) mx = a; ss += (double)p[e] * p[e]; }
+        HartsyInference.Core.Logging.Logs.Info($"[FLite probe] {label}: absmax={mx:F4} rms={Math.Sqrt(ss / n):F5}");
+    }
+
     /// <summary>Forward pass. <paramref name="latent"/> shape <c>[B, in_channels, H, W]</c> (typically [B, 16, h/8, w/8]); <paramref name="context"/> shape <c>[B, S_ctx, cross_attn_input_size]</c> (T5 layer-17 hidden states); <paramref name="timestepNormalized"/> in [0, 1] (caller scales by 1000 internally to match the reference). Returns predicted velocity of the same shape as <paramref name="latent"/>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor context, float timestepNormalized)
     {
@@ -92,18 +125,31 @@ public sealed unsafe class FLiteTransformer : IDisposable
         int hidden = _config.HiddenSize;
         int registerCount = _config.NumRegisterTokens;
 
+        _dumpForwardIndex++;
+        DumpBin("latent_in", latent);
         Tensor patches = PatchEmbed(backend, latent, hPacked, wPacked, hidden);
         Tensor xWithRegister = PrependRegisterTokens(patches, batch, hPacked * wPacked, registerCount, hidden);
         patches.Dispose();
 
         (Tensor cosRope, Tensor sinRope) = _config.UseRope
-            ? _rope.Build(hPacked, wPacked, registerCount)
+            ? _rope.BuildDeviceTables(hPacked, wPacked, registerCount)
             : (null!, null!);
 
         Tensor temb = ComputeTimeEmbedding(backend, batch, timestepNormalized);
+        Probe("context", context);
+        Probe("temb", temb);
+        DumpBin("context", context);
+        DumpBin("temb", temb);
+        if (FliteDumpDir is not null && _dumpForwardIndex == 1)
+        {
+            Directory.CreateDirectory(FliteDumpDir);
+            File.AppendAllText(Path.Combine(FliteDumpDir, "shapes.txt"), $"t {timestepNormalized}\n");
+        }
 
         int totalSeqLen = registerCount + hPacked * wPacked;
         Tensor x = xWithRegister;
+        Probe("x embed+reg", x);
+        DumpBin("x_in", x);
         Tensor? v0 = null;
         for (int i = 0; i < _config.Depth; i++)
         {
@@ -111,17 +157,26 @@ public sealed unsafe class FLiteTransformer : IDisposable
                 v0, _config.UseRope ? cosRope : null, _config.UseRope ? sinRope : null);
             x.Dispose();
             x = xNext;
+            if (i == 0) { Probe("block0 out", x); DumpBin("block0_out", x); }
+            if (i == 10) DumpBin("block10_out", x);
+            if (i == 20) DumpBin("block20_out", x);
+            if (i == 39) DumpBin("block39_out", x);
             if (v0 is null) v0 = v;
             else v.Dispose();
         }
+        Probe("blocks out", x);
         v0?.Dispose();
         cosRope?.Dispose();
         sinRope?.Dispose();
 
+        DumpBin("blocks_final", x);
         Tensor stripped = StripRegisterTokens(x, batch, totalSeqLen, registerCount, hidden);
         x.Dispose();
 
         Tensor velocity = ApplyFinalLayer(backend, stripped, temb, batch, hPacked, wPacked, hidden, latentH, latentW);
+        Probe("velocity", velocity);
+        DumpBin("velocity", velocity);
+        _probedOnce = FliteProbe;
         stripped.Dispose();
         temb.Dispose();
         return velocity;
@@ -188,6 +243,8 @@ public sealed unsafe class FLiteTransformer : IDisposable
         Tensor sinusoidal = new Tensor(new TensorShape(batch, hidden), DType.F32);
         float* sinPtr = (float*)sinusoidal.DataPointer;
         int half = hidden / 2;
+        // fal-ai DiT.forward calls timestep_embedding(timesteps * 1000, dim) — the ×1000 is the
+        // CALLER's (the embedding function itself takes t raw; the model was trained on t·1000).
         float scaledTime = timestepNormalized * 1000.0f;
         for (int b = 0; b < batch; b++)
         {

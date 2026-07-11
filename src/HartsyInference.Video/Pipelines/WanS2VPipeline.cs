@@ -69,10 +69,13 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
     /// <summary>Generates a clip from per-video-frame audio features <c>[≥ 4·T_lat, numLayers, audioDim]</c> (one
     /// stacked Wav2Vec2 feature per output video frame; extra frames are sliced off, missing ones zero-padded, matching
     /// the reference's <c>audio_embed[:, :, :, :T·4]</c>). <paramref name="referenceRgb24"/> optionally conditions
-    /// identity via appended reference tokens (needs the VAE encoder).</summary>
+    /// identity via appended reference tokens (needs the VAE encoder); <paramref name="referenceLatent"/> is an
+    /// optional caller-owned precomputed reference latent (from <see cref="EncodeReferenceImage"/> — the cross-gen
+    /// same-image cache) that takes priority over <paramref name="referenceRgb24"/> and is NOT disposed here.</summary>
     public (byte[][] frames, int width, int height, int seed) GenerateFromAudioFeatures(
         Tensor promptEmbeds, Tensor negativeEmbeds, Tensor audioFeatures, TextToImageRequest request, int numFrames,
-        ReadOnlySpan<byte> referenceRgb24 = default, Action<GenerationProgress>? onProgress = null)
+        ReadOnlySpan<byte> referenceRgb24 = default, Action<GenerationProgress>? onProgress = null,
+        Tensor? referenceLatent = null)
     {
         ThrowIfDisposed();
         int width = request.Width ?? 832, height = request.Height ?? 480;
@@ -81,7 +84,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
             throw new ArgumentException($"Width/height must be divisible by {sp} for Wan-S2V.");
         if (numFrames < 1 || (numFrames - 1) % tp != 0)
             throw new ArgumentException($"num_frames must satisfy (num_frames-1) % {tp} == 0; got {numFrames}.");
-        if (!referenceRgb24.IsEmpty && _encoder is null)
+        if (referenceLatent is null && !referenceRgb24.IsEmpty && _encoder is null)
             throw new InvalidOperationException("S2V reference-image conditioning needs a Wan VAE encoder.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
@@ -90,9 +93,10 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         int steps = request.Steps ?? _config.NumInferenceSteps;
         float guidance = request.CfgScale ?? _config.GuidanceScale;
         float shift = (request as VideoGenerationRequest)?.FlowShift ?? _config.FlowShift;
+        bool hasRef = referenceLatent is not null || !referenceRgb24.IsEmpty;
 
         Logs.Info($"Wan-S2V: {numFrames}f {width}x{height}, {steps} steps, cfg={guidance}, seed={seed} " +
-            $"(latent {latentCh}x{tLat}x{hLat}x{wLat}, ref={(referenceRgb24.IsEmpty ? "no" : "yes")})");
+            $"(latent {latentCh}x{tLat}x{hLat}x{wLat}, ref={(hasRef ? (referenceLatent is not null ? "cached" : "yes") : "no")})");
 
         // Audio is fixed across steps: encode the real features for the conditional pass and ZEROED features for the
         // unconditional pass (the reference node sets negative audio_embed = audio_embed · 0, which still runs the
@@ -118,13 +122,12 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         }
         features.Dispose();
 
-        Tensor? refLatent = null;
-        if (!referenceRgb24.IsEmpty)
+        Tensor? refLatent = referenceLatent;
+        bool ownsRefLatent = false;
+        if (refLatent is null && !referenceRgb24.IsEmpty)
         {
-            Backend.PreloadWeights(_encoder!.EnumerateWeights());
-            refLatent = _encoder.EncodeRgbFrame(Backend, referenceRgb24, width, height);   // [1, z, 1, hLat, wLat]
-            Backend.Sync();
-            Backend.FreeWeights(_encoder.EnumerateWeights());
+            refLatent = EncodeReferenceImage(referenceRgb24, width, height);   // [1, z, 1, hLat, wLat]
+            ownsRefLatent = true;
             WanVideoDebugDump.Dump("ref_latent", refLatent);
         }
 
@@ -164,15 +167,12 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
                 Latent = latents,
                 LatentArch = LatentArchitecture.Wan,
             });
-            // Reclaim GPU-resident activation buffers between steps AND trim the stream-ordered pool — the audio
-            // injector's per-frame host-glue churn interleaved with the fp8 transient weight casts fragments the pool
-            // until a mid-run OOM otherwise (the latent is host-side, so nothing cross-step is lost). A trimPool:false
-            // variant was tried 2026-07-08 and OOM'd at 40 blocks × 13824 FFN even with HARTSY_FP8_NATIVE — the trim
-            // stays until the injector's host glue is ported (which removes the churn at the source).
+            // Reclaim GPU-resident activation buffers between steps AND trim the stream-ordered pool (the latent
+            // is host-side, so nothing cross-step is lost). Measured 2026-07-11 (post multi-group WanDitOps port,
+            // 8-step A/B, 15.7 GB resident DiT + shared-card ambient): trim ON 3.44 s/step / 68 async-OOM retries
+            // vs trim OFF 4.23 s/step / 169 retries — beside a near-capacity pool the per-step trim PREVENTS the
+            // allocation-retry stalls, it is not merely an OOM band-aid. WAN_S2V_TRIM=0 skips it for A/Bs.
             Backend.FreeActivations();
-            // WAN_S2V_TRIM=0 skips the per-step pool trim (perf experiment 2026-07-09: the trim was an OOM
-            // band-aid from the pre-MEMPOOL_KEEP era; profiling shows large per-step re-uploads and the
-            // trim + realloc churn is the prime suspect for the 15× gap vs T2V).
             if (Environment.GetEnvironmentVariable("WAN_S2V_TRIM") != "0")
                 Backend.TrimMemoryPool();
             if (wanDebug) Logs.Info($"[S2VDBG] step {k} post-free   free={Backend.FreeMemoryBytes() >> 20}MB");
@@ -181,7 +181,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
         audioGlobalC.Dispose(); audioLocalC.Dispose(); audioGlobalU.Dispose(); audioLocalU.Dispose();
-        refLatent?.Dispose();
+        if (ownsRefLatent) refLatent?.Dispose();
 
         Tensor rgb;
         try { rgb = _vae.Decode(Backend, latents); }
@@ -192,6 +192,21 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         rgb.Dispose();
         Logs.Info($"Wan-S2V complete ({frames.Length} frames, seed={seed})");
         return (frames, width, height, seed);
+    }
+
+    /// <summary>VAE-encodes the identity reference portrait to the appended-token latent <c>[1, z, 1, hLat, wLat]</c>
+    /// (preloads, syncs, and frees the encoder weights around the encode). Exposed so callers can compute the latent
+    /// once and cache it across generations keyed on the image (pass it back via <c>referenceLatent</c>).</summary>
+    public Tensor EncodeReferenceImage(ReadOnlySpan<byte> rgb24, int width, int height)
+    {
+        ThrowIfDisposed();
+        if (_encoder is null)
+            throw new InvalidOperationException("S2V reference-image conditioning needs a Wan VAE encoder.");
+        Backend.PreloadWeights(_encoder.EnumerateWeights());
+        Tensor refLatent = _encoder.EncodeRgbFrame(Backend, rgb24, width, height);
+        Backend.Sync();
+        Backend.FreeWeights(_encoder.EnumerateWeights());
+        return refLatent;
     }
 
     /// <summary>Reference audio resampling (nodes_wan.py <c>wan_sound_to_video</c>): 50 Hz Wav2Vec2 features →

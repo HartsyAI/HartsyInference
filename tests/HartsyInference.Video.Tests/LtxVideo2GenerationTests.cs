@@ -112,6 +112,42 @@ public class LtxVideo2GenerationTests
 
         _output.WriteLine($"[5/5] Wrote frames → {outDir}");
         Assert.Equal(numFrames, Directory.GetFiles(outDir, "frame_*.bmp").Length);
+
+        // Prompt-cache roundtrip (LTX2_CACHE_ROUNDTRIP=1): gen 2 same tokens must skip the Gemma phase
+        // (cache HIT), gen 3 different tokens must re-encode (miss path + staging). Frames dumped for both.
+        if (Environment.GetEnvironmentVariable("LTX2_CACHE_ROUNDTRIP") == "1")
+        {
+            sw.Restart();
+            LtxVideo2Pipeline.Ltx2Result hit = pipeline.GenerateFromTokens(promptTokens, negTokens, req, numFrames,
+                frameRate: 24.0);
+            _output.WriteLine($"[cache] gen 2 (same tokens, expect HIT): {sw.ElapsedMilliseconds}ms");
+            await DumpFrames(hit, Path.Combine(TestPaths.OutputDir, $"ltx2_video_cachehit_{DateTime.Now:yyyyMMdd_HHmmss}"));
+
+            int[] promptTokens2 = tokenizer.Encode("a red vintage car driving down a coastal road at sunset, engine rumbling");
+            sw.Restart();
+            LtxVideo2Pipeline.Ltx2Result miss = pipeline.GenerateFromTokens(promptTokens2, negTokens, req, numFrames,
+                frameRate: 24.0);
+            _output.WriteLine($"[cache] gen 3 (different tokens, expect MISS): {sw.ElapsedMilliseconds}ms");
+            await DumpFrames(miss, Path.Combine(TestPaths.OutputDir, $"ltx2_video_cachemiss_{DateTime.Now:yyyyMMdd_HHmmss}"));
+
+            // Gen 4 exercises the prefix top-up: the gen-3 MISS evicted the persistent prefix for the Gemma
+            // encode and re-uploaded a squeezed count; this HIT must restore the pinned max (log evidence).
+            sw.Restart();
+            LtxVideo2Pipeline.Ltx2Result topUp = pipeline.GenerateFromTokens(promptTokens2, negTokens, req, numFrames,
+                frameRate: 24.0);
+            _output.WriteLine($"[cache] gen 4 (same tokens as gen 3, expect HIT + prefix top-up): {sw.ElapsedMilliseconds}ms");
+            Assert.Equal(miss.Frames.Length, topUp.Frames.Length);
+            for (int i = 0; i < miss.Frames.Length; i += 12)
+                Assert.True(miss.Frames[i].AsSpan().SequenceEqual(topUp.Frames[i]), $"gen 4 frame {i} differs from gen 3 (same tokens+seed must be reproducible)");
+        }
+    }
+
+    private static async Task DumpFrames(LtxVideo2Pipeline.Ltx2Result result, string outDir)
+    {
+        Directory.CreateDirectory(outDir);
+        VideoFrame[] frames = new VideoFrame[result.Frames.Length];
+        for (int i = 0; i < frames.Length; i++) frames[i] = new VideoFrame(i, result.Width, result.Height, result.Frames[i]);
+        await new BmpSequenceEncoder().EncodeAsync(ToAsync(frames), outDir, fps: 24);
     }
 
     private static async IAsyncEnumerable<VideoFrame> ToAsync(VideoFrame[] frames)

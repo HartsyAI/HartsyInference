@@ -85,6 +85,61 @@ public sealed class ChromaRadianceTransformer : IDisposable
         return x0;
     }
 
+    /// <summary>Runs one full denoise step's transformer work: the cond pass and (for CFG) the uncond pass. The
+    /// two passes share ONE modulation-table build (same timestep), ONE conv patchify of the noisy image, and ONE
+    /// NeRF-head pixel embedding — each was previously recomputed per pass. Returned x0 tensors are caller-owned.</summary>
+    /// <param name="rgb">Noisy pixel sample [B, 3, H, W]; must stay device/host consistent across the pair.</param>
+    /// <param name="condContext">Conditional T5 embeddings [B, condLen, 4096].</param>
+    /// <param name="uncondContext">Unconditional T5 embeddings, or null to skip the second pass.</param>
+    public (Tensor condX0, Tensor? uncondX0) ForwardPaired(
+        IBackend backend,
+        Tensor rgb,
+        Tensor condContext,
+        Tensor? uncondContext,
+        float timestep,
+        Tensor? condMask,
+        Tensor? uncondMask)
+    {
+        int batch = (int)rgb.Shape[0];
+        int height = (int)rgb.Shape[2];
+        int width = (int)rgb.Shape[3];
+        int patch = _patchifier.PatchSize;
+        int hPacked = height / patch;
+        int wPacked = width / patch;
+        int condTxtLen = (int)condContext.Shape[1];
+
+        Tensor modTable = _backbone.BuildModTable(backend, timestep, batch);
+        Tensor embed = _nerfHead.EmbedPixels(backend, rgb);
+        Tensor tokens = _patchifier.Forward(backend, rgb);
+
+        // ForwardCore consumes its token input — device-copy for the second pass before the first runs.
+        Tensor? tokensUncond = null;
+        if (uncondContext is not null)
+        {
+            tokensUncond = new Tensor(tokens.Shape, tokens.DType);
+            backend.CopyInto(tokensUncond, tokens);
+        }
+
+        Tensor imgOutCond = _backbone.ForwardCore(
+            backend, tokens, condContext, modTable, condTxtLen, hPacked, wPacked, condMask);
+        Tensor condX0 = _nerfHead.ForwardFromEmbed(backend, embed, imgOutCond, rgb.Shape);
+        imgOutCond.Dispose();
+
+        Tensor? uncondX0 = null;
+        if (uncondContext is not null)
+        {
+            int uncondTxtLen = (int)uncondContext.Shape[1];
+            Tensor imgOutUncond = _backbone.ForwardCore(
+                backend, tokensUncond!, uncondContext, modTable, uncondTxtLen, hPacked, wPacked, uncondMask);
+            uncondX0 = _nerfHead.ForwardFromEmbed(backend, embed, imgOutUncond, rgb.Shape);
+            imgOutUncond.Dispose();
+        }
+
+        embed.Dispose();
+        modTable.Dispose();
+        return (condX0, uncondX0);
+    }
+
     /// <summary>Releases component weight references.</summary>
     public void Dispose()
     {

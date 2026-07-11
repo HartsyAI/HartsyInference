@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Utilities;
@@ -28,6 +29,28 @@ public static unsafe class X0Prediction
         long count = velocity.Shape.ElementCount;
         for (long i = 0; i < count; i++)
             outPtr[i] = (xtPtr[i] - x0Ptr[i]) * invT;
+        return velocity;
+    }
+
+    /// <summary>Device twin of <see cref="ToVelocity"/>: the same <c>v = (x_t − x0)/max(t, eps)</c> as three
+    /// backend elementwise ops, so a device-resident denoise loop never reads a DataPointer (the host loop was a
+    /// full pipeline drain + D2H of the x0 prediction every step). Neither input is disposed.</summary>
+    public static Tensor ToVelocityDevice(IBackend backend, Tensor x0, Tensor noisySample, float t, float eps = 1e-6f)
+    {
+        if (x0.DType != DType.F32 || noisySample.DType != DType.F32)
+            throw new ArgumentException($"ToVelocityDevice requires F32 inputs; got x0={x0.DType}, noisySample={noisySample.DType}.");
+        if (!x0.Shape.Equals(noisySample.Shape))
+            throw new ArgumentException($"ToVelocityDevice shape mismatch: x0={x0.Shape}, noisySample={noisySample.Shape}.");
+
+        float invT = 1.0f / MathF.Max(t, eps);
+        Tensor negX0 = new Tensor(x0.Shape, DType.F32);
+        backend.Scale(negX0, x0, -invT);
+        Tensor xOverT = new Tensor(x0.Shape, DType.F32);
+        backend.Scale(xOverT, noisySample, invT);
+        Tensor velocity = new Tensor(x0.Shape, DType.F32);
+        backend.Add(velocity, xOverT, negX0);
+        negX0.Dispose();
+        xOverT.Dispose();
         return velocity;
     }
 }

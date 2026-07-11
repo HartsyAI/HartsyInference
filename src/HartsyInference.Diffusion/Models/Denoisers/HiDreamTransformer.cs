@@ -40,6 +40,23 @@ public sealed unsafe class HiDreamTransformer : IDisposable
     }
     private int _disposed;
 
+    // Diagnostic (HARTSY_HIDREAM_PROBE=1): per-block absmax/rms of the residual streams — forces a host
+    // sync per probe, first forward only. Used to decide F16-activation viability (needs absmax << 65k).
+    private static readonly bool StreamProbe = Environment.GetEnvironmentVariable("HARTSY_HIDREAM_PROBE") == "1";
+    private static bool _probedOnce;
+
+    /// <summary>First-forward-only absmax/rms probe of a stream tensor (host-sync; diagnostic only).</summary>
+    private static void Probe(string label, Tensor t)
+    {
+        if (!StreamProbe || _probedOnce) return;
+        float* p = (float*)t.DataPointer;
+        float mx = 0f;
+        double ss = 0;
+        long n = t.ElementCount;
+        for (long e = 0; e < n; e++) { float a = MathF.Abs(p[e]); if (a > mx) mx = a; ss += (double)p[e] * p[e]; }
+        HartsyInference.Core.Logging.Logs.Info($"[HiDream probe] {label}: absmax={mx:F4} rms={Math.Sqrt(ss / n):F5}");
+    }
+
     // x_embedder: Linear(in_channels * patch_size^2, inner_dim)
     private Tensor? _xEmbedWeight, _xEmbedBias;
 
@@ -187,10 +204,12 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         backend.Linear(imgTokens, patched, _xEmbedWeight!, _xEmbedBias);
         patched.Dispose();
         HiDreamDebugDump.Dump("x_embed", imgTokens);
+        Probe("x_embed", imgTokens);
 
         // ── 2. Build temb = timestep_embed + pooled_embed ──
         Tensor temb = ComputeTimestepAndPooledEmbedding(backend, timestep, pooledEmbeds, batch);
         HiDreamDebugDump.Dump("temb", temb);
+        Probe("temb", temb);
 
         // ── 3. Project caption inputs ──
         // For the per-block llama states we use caption_projection[0]; for T5 we use caption_projection[-1].
@@ -214,6 +233,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         Tensor initialEncoder = ConcatSeq(backend, t5Proj, lastLlama);
         int initialEncoderSeqLen = (int)initialEncoder.Shape[1];
         HiDreamDebugDump.Dump("initial_encoder", initialEncoder);
+        Probe("initial_encoder", initialEncoder);
 
         // ── 5. Precompute RoPE for the (image + initial_encoder + per-block-llama) sequence ──
         // We use the longest text sequence the rope table needs — the maximum of (initial_encoder_seq_len + any
@@ -252,15 +272,19 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             curImg = newImg;
             curEncoder = reslicedEncoder;
             HiDreamDebugDump.Dump($"double_block_{b}_img", curImg);
+            Probe($"double_{b}_img", curImg);
+            Probe($"double_{b}_enc", curEncoder);
 
             blockId++;
         }
         if (!ReferenceEquals(curEncoder, initialEncoder)) initialEncoder.Dispose();
+        // The first double block replaced curImg; the x_embed output itself was never freed (a ~40 MB/forward
+        // VRAM leak at 1024² that compounded across the CFG denoise loop).
+        if (!ReferenceEquals(curImg, imgTokens)) imgTokens.Dispose();
 
         // ── 7. Switch to single-stream: concat current image with the running encoder, then per-block llama ──
         Tensor jointBeforeSingle = ConcatSeq(backend, curImg, curEncoder);
-        if (!ReferenceEquals(curImg, imgTokens)) curImg.Dispose();
-        else imgTokens.Dispose();
+        curImg.Dispose();
         curEncoder.Dispose();
 
         int singleStreamBaseSeqLen = imgSeqLen + initialEncoderSeqLen;
@@ -286,6 +310,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
             curJoint.Dispose();
             curJoint = resliced;
             HiDreamDebugDump.Dump($"single_block_{b}", curJoint);
+            Probe($"single_{b}", curJoint);
             blockId++;
         }
 
@@ -302,6 +327,8 @@ public sealed unsafe class HiDreamTransformer : IDisposable
         imgFinal.Dispose();
         temb.Dispose();
         HiDreamDebugDump.Dump("proj_out", projected);
+        Probe("proj_out", projected);
+        if (StreamProbe) _probedOnce = true;
 
         // ── 10. Unpatchify [B, S, p²*C] → [B, C, H, W] ──
         Tensor output = UnpatchifyLatent(projected, batch, _config.OutChannels, patH, patW, _config.PatchSize);
