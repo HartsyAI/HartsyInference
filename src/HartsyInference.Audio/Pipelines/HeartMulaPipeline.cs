@@ -72,6 +72,11 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         CancellationToken cancel = default, Action<int, int>? onFrame = null, ReadOnlySpan<int> tagsTokens = default)
     {
         ThrowIfDisposed();
+        // Quantized weights only: pin the LM matmul weights GPU-resident so the fused quant GEMV reads them from VRAM
+        // instead of re-uploading every step (that thrash made Q8 ~8× slower than bf16, even though the kernel is
+        // FASTER than bf16 when resident). Device weights only — the embed tables are host-gathered. The bf16 path
+        // caches its F16 cast on first use and stays fast without pinning, and pinning its 5.4 GB bodies would OOM.
+        if (_lm.WeightsQuantized) backend.PreloadWeights(_lm.EnumerateDeviceWeights());
         int nb = _cfg.Lm.NumCodebooks;
         float temp = temperature ?? _cfg.Temperature;
         int tk = topK ?? _cfg.TopK;

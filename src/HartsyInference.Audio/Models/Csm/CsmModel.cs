@@ -636,6 +636,25 @@ public sealed unsafe class CsmModel : IDisposable
         if (_uncondText is not null) yield return _uncondText;
     }
 
+    /// <summary>True when the LM matmul weights are quantized (GGUF). The quantized fused GEMV re-reads the weight
+    /// each call, so it MUST be GPU-resident (see <see cref="EnumerateDeviceWeights"/>); the bf16 path caches its
+    /// F16 cast on first use and stays fast without pinning, so callers should preload only when this is true (pinning
+    /// the 5.4 GB bf16 bodies non-evictably would OOM smaller cards).</summary>
+    public bool WeightsQuantized => _c0Head?.DType.IsQuantized ?? false;
+
+    /// <summary>Weights consumed by device matmuls (the per-token decode hot path) — for <see cref="IBackend.PreloadWeights"/>.
+    /// Excludes the embed tables and MuQ/uncond conditioning vectors, which are gathered/read <b>host-side</b>
+    /// (<see cref="CopyRowF32"/>/<see cref="AddRowF32"/>/<see cref="EmbedMuq"/>): pinning those to device wastes VRAM
+    /// (the embed tables are ~2.4 GB) for no speed gain.</summary>
+    public IEnumerable<Tensor> EnumerateDeviceWeights()
+    {
+        foreach (Tensor t in _backbone.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _decoder.EnumerateWeights()) yield return t;
+        if (_c0Head is not null) yield return _c0Head;
+        if (_projW is not null) yield return _projW;
+        foreach (Tensor? hd in _audioHead) if (hd is not null) yield return hd;
+    }
+
     /// <summary>Decoder sequence (in backbone-hidden space, pre-projection) = the backbone last hidden, then the
     /// per-codebook audio embedding of each already-sampled codebook value of this frame. Codebook <c>j</c> uses
     /// audio table <c>j</c> (upstream <c>_embed_audio(j, code)</c> = <c>audio_embeddings(code + j·vocab)</c>).</summary>

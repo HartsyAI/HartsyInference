@@ -39,26 +39,34 @@ Launch overhead — all a CUDA graph can remove — is only ~8 ms/frame (~28 bac
 ~10 kernels × cond/uncond × ~8 µs). So graph decode's ceiling here is ~9%, and it delivered ~5%. Graph decode is
 the right tool for **launch-bound** models (the FX/vocoder decoders gain 2×+); it is a small lever for this one.
 
-## Weight quantization (the real bandwidth lever — but blocked on a kernel)
+## Weight quantization — the real bandwidth lever (1.41× faster)
 
-Cutting the weight bytes should cut the frame time nearly linearly: **Q8 ≈ 2×, Q4 ≈ 3.6×** on paper. Implemented
-as **disk-cached** quantization (`HARTSY_HEARTMULA_QUANT=q8_0|q4_k`, `CsmWeightCache`): the projection/head
-matrices are quantized **once** to a GGUF cache (streaming convert — peak is one tensor's F32 buffer, **no OOM**;
-must run **post-`Remap`** since the remap splits the combined audio embed/head tensors), then the ~4.5 GB Q8 cache
-is mmapped directly (never the 6.6 GB bf16). It produces **valid audio** end-to-end.
+Cutting the weight bytes cuts the frame time. Implemented as **disk-cached** quantization
+(`HARTSY_HEARTMULA_QUANT=q8_0|q4_k`, `CsmWeightCache`): the projection/head matrices are quantized **once** to a
+GGUF cache (streaming convert — peak is one tensor's F32 buffer, **no OOM**; must run **post-`Remap`** since the
+remap splits the combined audio embed/head tensors), then the ~4.5 GB Q8 cache is mmapped directly (never the
+6.6 GB bf16).
 
-**But it is currently a regression, not a win:**
+| Config | ms/frame | frames/s | vs bf16 |
+|---|---:|---:|---:|
+| bf16 | 91.5 | 10.9 | 1.0× |
+| **Q8_0 (disk cache)** | **64.8** | **15.4** | **1.41× faster** (~1/2 VRAM, past real-time) |
 
-| Config | ms/frame | vs bf16 |
-|---|---:|---:|
-| bf16 | 91.5 | 1.0× |
-| Q8_0 (disk cache) | ~270→660→707 | **~3–8× slower** |
+**The catch was residency, not the kernel.** A first build measured Q8 ~3–8× *slower* + degrading frame-to-frame.
+Root cause: the CSM decode never `PreloadWeights`'d its weights (unlike Dia/MusicGen/F5/YuE and the LLM path), so
+the GGUF-mmap quant weights were re-uploaded/cache-thrashed every step. A direct microbench proves the fused Q8
+GEMV (`LaunchMulMatVecQ8_0F32`) is actually **faster than cuBLAS bf16** when the weight is resident:
 
-Measured slower with **and** without `HARTSY_LOWVRAM_QUANT=1`, so it is **not** F16-dequant-cache VRAM thrash —
-the engine's Q8 fused GEMV (`LaunchMulMatVecQ8_0F32`, gated `M≤8 && F32 in/out && K%32==0`) is **~8× slower than
-cuBLAS bf16** at M=1 for the CSM shapes (N=K=3072). The convert-once-to-disk infrastructure is done and correct;
-the open problem is a **quant-GEMV kernel pass** — an M=1 GEMV reading half the bytes should not be 8× slower than
-the dense bf16 path. Until then, quant stays experimental/off and bf16 + graph decode is the shipped config.
+| GEMV shape (M=1, weight resident) | bf16 µs | Q8 µs | Q8/bf16 |
+|---|---:|---:|---:|
+| attn q/o 3072×3072 | 64.4 | 46.5 | 0.72× |
+| mlp up 8192×3072 | 155.9 | 114.4 | 0.73× |
+| mlp down 3072×8192 | 169.8 | 109.6 | 0.65× |
+
+The fix: `HeartMulaPipeline` pins the LM **device** matmul weights (`CsmModel.EnumerateDeviceWeights` — bodies +
+heads + proj, *not* the host-gathered embeds, which would waste ~2.4 GB and OOM the card) via `PreloadWeights`,
+**only when the weights are quantized** (`CsmModel.WeightsQuantized`) — the bf16 path caches its F16 cast on first
+use and stays fast without pinning; pinning its 5.4 GB bodies non-evictably would OOM.
 
 ## Reproduce
 
@@ -66,9 +74,9 @@ the dense bf16 path. Until then, quant stays experimental/off and bf16 + graph d
 # baseline (bf16) + graph decode default-on
 HARTSY_CSM_GRAPH=1 ./src/bin/live_release/SwarmUI --launch_mode none   # graph on (default)
 HARTSY_CSM_GRAPH=0 ./src/bin/live_release/SwarmUI --launch_mode none   # eager baseline
+# Q8 quant (1.41× faster; first gen converts to the disk cache, then mmaps it):
+HARTSY_HEARTMULA_QUANT=q8_0 ./src/bin/live_release/SwarmUI --launch_mode none
 # then POST /API/GenerateText2Image {model:"Audio Models/HeartLib/3b-base", textaudioduration:4, seed:11, ...}
 # read frame-rate from the [AudioLab][HeartMuLa] Frame N/M log timestamps (steady-state frames 10→50).
-
-# experimental quant (currently slower — see above):
-HARTSY_HEARTMULA_QUANT=q8_0 ./src/bin/live_release/SwarmUI --launch_mode none
+# NOTE: run one gen at a time — the 3B model is ~7-10 GB host RAM; concurrent gens / a heavy desktop OOM the box.
 ```

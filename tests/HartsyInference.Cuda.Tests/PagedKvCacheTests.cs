@@ -164,7 +164,12 @@ public sealed class PagedKvCacheTests
     {
         int fixedStride = (int)fixedBuf.Shape[2];
         int pagedStride = (int)pagedBuf.Shape[2];
-        Assert.Equal(len, pagedStride); // paged gather returns EXACTLY the written length, no over-allocation
+        // Paged gather's scratch buffer is grow-only, rounded up to a page boundary (avoids reallocating on
+        // every single decode step — see PagedKvCache.Gather) — it may now be >= len, never exactly len like
+        // the old exact-sized-every-call behavior. This mirrors FixedKvCache's own oversized-buffer contract
+        // (GenericTransformer's attention call always passes the valid length separately and never trusts a
+        // KV tensor's own shape for it), so a looser bound here is the CORRECT invariant to test, not a gap.
+        Assert.True(pagedStride >= len, $"paged gather buffer too small: len={len} but stride={pagedStride}");
         float* fp = (float*)fixedBuf.DataPointer;
         float* pp = (float*)pagedBuf.DataPointer;
         for (int h = 0; h < NumKvHeads; h++)

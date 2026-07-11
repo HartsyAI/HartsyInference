@@ -66,6 +66,16 @@ public sealed class ModelManager : IDisposable
     /// <summary>True if <paramref name="modelId"/> is a loaded LLM/SSM chat model (as opposed to diffusion).</summary>
     public bool IsChatModel(string modelId) => _llmSessions.ContainsKey(modelId);
 
+    /// <summary>Model ids whose serving loop has died (<see cref="DynamicBatchScheduler.IsLoopAlive"/> is
+    /// false) despite the model still being "loaded" — every request against one of these will hang forever
+    /// (the scheduler's background loop is what drains new admissions; once it's gone, nothing ever will).
+    /// Its own decode-round/admission containment (see that class's doc) means this should normally stay
+    /// empty even after individual request failures — a non-empty result here means a specific model's chat
+    /// traffic needs a reload, not just "some requests are failing." SSM sessions have no loop to die, so
+    /// they're never reported here. Intended for a readiness probe, not a per-request check.</summary>
+    public IReadOnlyCollection<string> UnhealthyChatModels =>
+        [.. _llmSessions.Where(kv => kv.Value.Scheduler is { IsLoopAlive: false }).Select(kv => kv.Key)];
+
     // Diffusion mappers registered in GgufKeyMapperRegistry.BuildRegistry() — a small, closed list that
     // changes far less often than the LLM side. Used to derive "is this GGUF architecture a language model"
     // WITHOUT loading any tensor data: GetByArchitecture(arch) is a metadata-only dictionary lookup, and if
@@ -131,7 +141,8 @@ public sealed class ModelManager : IDisposable
             TransformerConfig cfg = model.Config;
             int[] headDimPerLayer = new int[cfg.NumLayers];
             for (int i = 0; i < cfg.NumLayers; i++) headDimPerLayer[i] = cfg.HeadDimFor(i);
-            PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, headDimPerLayer, _options.KvPageSize, _options.KvPoolMaxPages);
+            int maxPages = ComputeKvPoolPageCount(cfg.NumKvHeads, headDimPerLayer, _options.KvPageSize, _options.KvPoolBytesBudget);
+            PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, headDimPerLayer, _options.KvPageSize, maxPages);
             DynamicBatchScheduler scheduler = new(model.Transformer, model.Tokenizer, _backend, pool, model.Template,
                 gpuGate: RunUnderInferenceQueue);
 
@@ -143,6 +154,20 @@ public sealed class ModelManager : IDisposable
         DiffusionPipelineBase pipeline = PipelineFactory.LoadAuto(localPath, _backend);
         _pipelines[modelIdOrPath] = pipeline;
         return arch.ToString();
+    }
+
+    /// <summary>Converts a VRAM byte budget into a page count sized to THIS model's actual KV dimensions
+    /// (<see cref="PagedKvPool"/> pre-allocates every page up front, F32, K+V, across every layer, so this
+    /// must be exact, not a rough estimate). A fixed page count is unsafe across different model shapes —
+    /// see <see cref="HartsyInferenceServerOptions.KvPoolBytesBudget"/>'s doc for the real incident this
+    /// fixes (a 1024-page fixed default OOM'd loading a model with wider heads/more layers than the one it
+    /// was tuned against).</summary>
+    public static int ComputeKvPoolPageCount(int numKvHeads, int[] headDimPerLayer, int pageSize, long bytesBudget)
+    {
+        long bytesPerPage = 0;
+        foreach (int headDim in headDimPerLayer)
+            bytesPerPage += (long)numKvHeads * headDim * pageSize * sizeof(float) * 2; // ×2 for K and V
+        return (int)Math.Max(8, bytesBudget / Math.Max(1, bytesPerPage)); // floor of 8 pages so a tiny budget still admits at least one short sequence
     }
 
     /// <summary>Cheap GGUF metadata-only peek at <c>general.architecture</c> (header/tensor descriptors,

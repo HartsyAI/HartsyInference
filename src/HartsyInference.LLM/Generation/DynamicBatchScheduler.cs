@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Sampling;
@@ -91,7 +92,30 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         _incoming = Channel.CreateUnbounded<PendingRequest>();
         _gpuGate = gpuGate;
         _loopTask = Task.Run(RunLoopAsync);
+        // RunLoopAsync's own decode-round/admission try/catches are the primary defense (they isolate a
+        // failure to the sequences actually involved and keep the loop running) — this continuation is
+        // defense-in-depth for the residual case where something still escapes those and the loop itself
+        // dies: without it, a background Task's fault is completely silent (nothing awaits _loopTask), so
+        // the model's scheduler would go dark with zero log evidence of why.
+        _loopTask.ContinueWith(
+            t => Logs.Error("DynamicBatchScheduler: background loop terminated unexpectedly", t.Exception!),
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
     }
+
+    /// <summary>True while the background loop is still running. Goes false once it exits — cleanly on
+    /// <see cref="Dispose"/>, or (should every containment in <see cref="RunLoopAsync"/> somehow fail to
+    /// catch something) if it faults. Callers that track a model's serving health (e.g. an HTTP readiness
+    /// check) should treat <c>false</c> after a successful construction as "this model's chat traffic is
+    /// dead and won't recover without reloading the model."</summary>
+    public bool IsLoopAlive => !_loopTask.IsCompleted;
+
+    /// <summary>Test-only fault injection: when set, invoked once per decode round with that round's feeder
+    /// count; a non-null return is thrown instead of running the round. Exists so fault-isolation behavior
+    /// (a round failing without killing the loop or affecting unrelated sequences) can be tested
+    /// deterministically — reproducing a REAL backend crash (like the CPU-MoE AccessViolationException that
+    /// motivated this containment) isn't something a fast, safe unit test can do on demand. Null in
+    /// production; never read unless a test sets it.</summary>
+    internal Func<int, Exception?>? TestFaultInjector { get; set; }
 
     private async Task RunGpuWork(Action work)
     {
@@ -148,7 +172,33 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 }
                 if (feeders.Count == 0) continue;
 
-                await RunGpuWork(() => RunDecodeRound(feeders)).ConfigureAwait(false);
+                try
+                {
+                    Exception? injected = TestFaultInjector?.Invoke(feeders.Count);
+                    if (injected is not null) throw injected;
+                    await RunGpuWork(() => RunDecodeRound(feeders)).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // A decode round writes every feeder's KV cache in one native call; once ANY exception
+                    // escapes mid-round, none of those caches can be trusted (partially-written K/V, cache
+                    // position potentially out of sync with what was actually computed), so there's no safe
+                    // way to keep just some of them going. Fail every sequence THIS round touched and free
+                    // its pages back to the pool, but — critically — keep the LOOP running: without this,
+                    // one bad request (or one architecture-specific kernel bug) would silently wedge this
+                    // model's scheduler forever, hanging every future request to it with no crash and no
+                    // log line to explain why (see the granitemoe CPU-MoE AccessViolationException that
+                    // motivated this — that one specific case is still uncatchable/process-fatal by CLR
+                    // design, but an ordinary C# exception from anywhere else in the decode path is not,
+                    // and previously got the same silent-wedge treatment).
+                    Logs.Error($"DynamicBatchScheduler: decode round failed for {feeders.Count} sequence(s), failing them and continuing", ex);
+                    foreach (ActiveSeq seq in feeders)
+                    {
+                        seq.Cache.Dispose();
+                        seq.Pending.Completion.TrySetException(ex);
+                        active.Remove(seq);
+                    }
+                }
             }
         }
         finally
@@ -174,6 +224,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             }
             catch (Exception ex)
             {
+                Logs.Error("DynamicBatchScheduler: admission/prefill failed for one request", ex);
                 pending.Completion.TrySetException(ex);
             }
         }

@@ -40,6 +40,15 @@ public interface IKvCache : IDisposable
     /// <summary>Advances the shared position counter by <paramref name="by"/> (once per step, after all layers).</summary>
     void AdvanceLength(int by);
 
+    /// <summary>Rolls the committed length back to <paramref name="newLength"/> (must be &lt;=
+    /// <see cref="CurrentLength"/>), discarding K/V entries beyond it without disturbing anything before it.
+    /// Used by speculative decoding to drop rejected draft tokens' K/V after a batched verify — the rejected
+    /// entries were already physically written (the verification forward pass has to run before acceptance
+    /// is known), so this is a real rollback, not just "don't write it in the first place." Default throws:
+    /// only implementations speculative decoding actually drives (<see cref="FixedKvCache"/>,
+    /// <see cref="PagedKvCache"/>) need to support it.</summary>
+    void Truncate(int newLength) => throw new NotSupportedException($"{GetType().Name} does not support Truncate (speculative decoding rollback).");
+
     /// <summary>Drops stored K/V and resets the position counter for reuse.</summary>
     void Reset();
 }

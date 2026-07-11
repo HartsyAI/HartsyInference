@@ -91,6 +91,17 @@ public sealed class FixedKvCache : IKvCache, IDisposable
         _currentLength += by;
     }
 
+    /// <summary>Rolls back to <paramref name="newLength"/> (speculative-decode rejection). No physical
+    /// erasure needed: the buffer is a single fixed array written in place, and every read already scopes
+    /// itself to <see cref="CurrentLength"/> via the caller-supplied valid-length, so shrinking the counter
+    /// is sufficient — a subsequent <see cref="AppendStep"/> simply overwrites whatever was beyond it.</summary>
+    public void Truncate(int newLength)
+    {
+        ThrowIfDisposed();
+        if (newLength < 0 || newLength > _currentLength) throw new ArgumentOutOfRangeException(nameof(newLength));
+        _currentLength = newLength;
+    }
+
     public void Reset() { ThrowIfDisposed(); _currentLength = 0; }
 
     private void ThrowIfDisposed()

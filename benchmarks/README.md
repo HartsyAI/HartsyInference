@@ -25,7 +25,7 @@ Prefill (pp512) is not the bottleneck; the remaining decode gap is launch-overhe
 
 ## Audio decode — HeartMuLa music (2026-07-11)
 
-Autoregressive music LM (Sesame-CSM dual-transformer). Metric is **ms/frame** (12.5 Hz codec frames), measured e2e through the SwarmUI API on an **RTX 3060**. HeartMuLa is **memory-bandwidth-bound** (per-token weight streaming dominates), so CUDA-graph decode (`HARTSY_CSM_GRAPH`, default-on, bit-identical) buys only ~5% and weight quant is the real lever on paper — but the current Q8 GEMV kernel makes it ~8× *slower*. Full write-up + cost model + reproduce steps: [`results/heartmula_music_e2e_2026-07-11.md`](results/heartmula_music_e2e_2026-07-11.md).
+Autoregressive music LM (Sesame-CSM dual-transformer). Metric is **ms/frame** (12.5 Hz codec frames), measured e2e through the SwarmUI API on an **RTX 3060**. HeartMuLa is **memory-bandwidth-bound** (per-token weight streaming dominates), so CUDA-graph decode (`HARTSY_CSM_GRAPH`, default-on, bit-identical) buys ~5% and **Q8 weight quant is the real lever: 1.41× faster** (past real-time), once the quant weights are pinned GPU-resident (`PreloadWeights` — without it they re-upload every step and it's ~8× slower). Full write-up + cost model + reproduce steps: [`results/heartmula_music_e2e_2026-07-11.md`](results/heartmula_music_e2e_2026-07-11.md).
 
 ### Current HeartMuLa results (RTX 3060, 3b-base, warm, steady-state frames 10→50)
 
@@ -33,7 +33,7 @@ Autoregressive music LM (Sesame-CSM dual-transformer). Metric is **ms/frame** (1
 |---|---:|---:|---:|
 | bf16 eager | 91.5 | 10.9 | 1.0× |
 | bf16 + CUDA-graph decode (default) | ~85–90 | ~11.2–11.7 | ~1.05× (bit-identical) |
-| Q8_0 disk-quant (experimental) | ~270–707 | ~1.4–3.7 | ~0.1–0.35× — quant-GEMV kernel regression, not yet a win |
+| **Q8_0 disk-quant** (`HARTSY_HEARTMULA_QUANT=q8_0`) | **64.8** | **15.4** | **1.41×** (~1/2 VRAM) |
 
 ## Diffusion / video e2e vs ComfyUI (2026-07-03)
 

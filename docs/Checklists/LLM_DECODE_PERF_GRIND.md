@@ -177,6 +177,39 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > cuDNN failures as every prior phase). **5b (speculative decoding) remains a separate, true stretch item —
 > not started.**
 
+> **STATUS UPDATE (2026-07-11): Phase 6 (production hardening) started.** (1) Added 11 real in-process HTTP
+> integration tests (`ChatCompletionsIntegrationTests`, `WebApplicationFactory<Program>`) covering
+> `/v1/chat/completions`/`/v1/models` request validation — previously this HTTP layer had zero automated
+> coverage beyond manual curl checks. Writing them surfaced a genuine validation-ORDER bug: the route checked
+> "is the model loaded" before "is response_format even valid," so testing the json_schema-rejection path
+> required a real loaded model to reach it. Fixed by reordering to check pure request-shape issues
+> (messages non-empty, response_format recognized) before consulting server state (model loaded) — a
+> defensible fail-fast improvement on its own, not just a testing workaround. (2) Real concurrent-load stress
+> test, live server, real qwen2.5-0.5b: 3 waves of 10 concurrent chat requests each (different prompts/topics
+> per request) plus a deliberately client-cancelled 11th request per wave — **30/30 succeeded, zero
+> cross-contamination between batched sequences** (every response stayed on-topic for its OWN prompt, not
+> mixed with another concurrent request's), zero errors logged, each wave of 10 completed in under 1 second
+> wall-clock. This is the load-bearing thread-safety evidence for Phase 4's batching + backend-exclusivity
+> design actually holding under sustained real concurrency, not just the earlier 2-3-request smoke tests.
+> **A broader architecture sweep through the new batched server path caught a real bug**: loading gemma-3-1b
+> (wider KV heads, fewer layers than the qwen2/qwen3/llama models tested so far) OOM'd on generation. Root
+> cause: `PagedKvPool`'s VRAM footprint had been sized via a FIXED page count (1024, tuned against
+> qwen2.5-0.5b's narrow KV dims) — since the pool pre-allocates every page up front, the exact same 1024
+> pages that used a modest amount of VRAM for a narrow-KV-dim model eagerly grabbed ~3.4GB for a
+> wider-KV-dim one, on a GPU that only had ~4GB free (the rest legitimately in use by the user's own running
+> SwarmUI instance — confirmed via `nvidia-smi --query-compute-apps`, not a leak). Fixed by replacing the
+> fixed page count with `HartsyInferenceServerOptions.KvPoolBytesBudget` (default 512MB) and a new
+> `ModelManager.ComputeKvPoolPageCount` that converts the budget into a page count sized to THAT model's
+> actual `numLayers × numKvHeads × headDim` — safe by construction regardless of model shape, instead of a
+> number tuned against whichever model happened to be tested first. Locked in with 3 new unit tests
+> (`ServerTests`) reproducing the exact narrow-vs-wide shape difference that caused the incident. Reverified
+> the small models (qwen2.5-0.5b) still work identically after the fix (coherence, 4-way concurrent
+> batching, JSON mode all reconfirmed). gemma-3 itself was not retested to full success after the fix — the
+> real constraint is the user's concurrently-running SwarmUI instance leaving too little headroom on this
+> particular shared dev GPU, not a remaining code defect; worth a retry when more VRAM is free.
+
+**Method.** Strict measure → optimize → verify loop.
+
 **Method.** Strict measure → optimize → verify loop. Every change must (1) show a speedup on an isolated micro-benchmark, (2) show a speedup on end-to-end t/s, and (3) preserve correctness (greedy token-id match vs the pre-change output). A faster wrong answer is a regression.
 
 ---

@@ -28,13 +28,20 @@ public sealed class HartsyInferenceServerOptions
     /// <summary>Tokens per KV page for each loaded chat (dense/MoE transformer) model's <c>PagedKvPool</c>.</summary>
     public int KvPageSize { get; set; } = 16;
 
-    /// <summary>Total pages in each loaded chat model's shared KV pool — the real cap on how many concurrent
-    /// chat sequences (and how much total context across them) <see cref="LLM.Generation.DynamicBatchScheduler"/>
-    /// can admit at once for that model. <c>KvPageSize * KvPoolMaxPages</c> tokens of total shared KV capacity.
-    /// Size for your VRAM budget and expected concurrency; admission fails fast with
-    /// <see cref="LLM.Transformer.KvPoolExhaustedException"/> (mapped to HTTP 429) once exhausted, it does
-    /// not degrade silently.</summary>
-    public int KvPoolMaxPages { get; set; } = 1024;
+    /// <summary>VRAM budget (bytes) for each loaded chat model's KV pool — <see cref="ModelManager"/>
+    /// converts this into a page COUNT sized to the specific model's KV dimensions
+    /// (<c>numLayers × numKvHeads × headDim</c>, F32, K+V), not a raw page count, because a fixed page
+    /// count is NOT safe across different model shapes: the same 1024 pages that comfortably fit a small
+    /// model's narrow KV tensors can eagerly pre-allocate several GB for a model with wider heads/more
+    /// layers (measured: a naive fixed default OOM'd loading a 1B model on a 12GB GPU with ~4GB already in
+    /// use by unrelated processes — the pool alone wanted ~3.4GB). <c>PagedKvPool</c> allocates its full
+    /// budget UP FRONT (not lazily), so this bound is exact, not a soft target. This is the real cap on how
+    /// many concurrent chat sequences (and how much total context across them)
+    /// <see cref="LLM.Generation.DynamicBatchScheduler"/> can admit at once for that model — admission fails
+    /// fast with <see cref="LLM.Transformer.KvPoolExhaustedException"/> (mapped to HTTP 429) once exhausted,
+    /// it does not degrade silently. Default (512 MB) is a conservative single-user-dev-box starting point;
+    /// tune for your actual VRAM budget and expected concurrency.</summary>
+    public long KvPoolBytesBudget { get; set; } = 512L * 1024 * 1024;
 }
 
 /// <summary>Selectable compute backends for the server.</summary>

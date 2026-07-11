@@ -122,10 +122,20 @@ public sealed class PagedKvCache : IKvCache
         int headDim = _pool.HeadDimPerLayer[layer];
         Tensor?[] scratchArr = isKey ? _scratchK : _scratchV;
         Tensor? scratch = scratchArr[layer];
-        if (scratch is null || scratch.Shape[2] != len)
+        // Grow-only capacity (mirrors FixedKvCache's oversized-buffer-plus-explicit-valid-length pattern —
+        // GenericTransformer's attention call already passes the valid key count separately and never trusts
+        // this tensor's own shape for it, see its "kFull/vFull may be a fixed-capacity buffer" comment). The
+        // loop below always re-copies every valid position from the pool's pages regardless of whether
+        // `scratch` was just (re)allocated, so nothing needs preserving across a resize — only grow when the
+        // existing buffer is too small. `len` advances by exactly 1 every decode step, so reallocating
+        // whenever it merely CHANGED (the previous check) meant a full GPU tensor allocation every single
+        // round for every active sequence; rounding up to a page boundary cuts that to once per PageSize
+        // tokens instead, at the cost of at most one page's worth of unused VRAM per sequence per layer.
+        if (scratch is null || scratch.Shape[2] < len)
         {
             scratch?.Dispose();
-            scratch = new Tensor(new TensorShape(1, _pool.NumKvHeads, Math.Max(len, 1), headDim), DType.F32);
+            int capacity = ((Math.Max(len, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
+            scratch = new Tensor(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
             scratchArr[layer] = scratch;
         }
         if (len == 0) return scratch;   // nothing written yet; caller shouldn't reach here in practice
@@ -172,6 +182,26 @@ public sealed class PagedKvCache : IKvCache
         ThrowIfDisposed();
         if (by < 0) throw new ArgumentOutOfRangeException(nameof(by));
         _currentLength += by;
+    }
+
+    /// <summary>Rolls back to <paramref name="newLength"/> (speculative-decode rejection): shrinks both the
+    /// committed length and the physically-written count (unlike <see cref="FixedKvCache.Truncate"/>, this
+    /// cache tracks physical-write extent separately — see the class doc — and it must shrink too, or
+    /// <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> would keep gathering the rejected tokens' stale
+    /// K/V into subsequent attention). Also frees any page that's now entirely beyond the new length back to
+    /// the pool, so a rejected multi-token draft doesn't hold VRAM it no longer needs.</summary>
+    public void Truncate(int newLength)
+    {
+        ThrowIfDisposed();
+        if (newLength < 0 || newLength > _currentLength) throw new ArgumentOutOfRangeException(nameof(newLength));
+        int pagesNeeded = (newLength + _pool.PageSize - 1) / _pool.PageSize;
+        while (_blockTable.Count > pagesNeeded)
+        {
+            _pool.FreePage(_blockTable[^1]);
+            _blockTable.RemoveAt(_blockTable.Count - 1);
+        }
+        _physicallyWritten = newLength;
+        _currentLength = newLength;
     }
 
     /// <summary>Returns every held page to the pool and resets to an empty sequence — unlike

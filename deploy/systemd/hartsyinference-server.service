@@ -1,0 +1,41 @@
+[Unit]
+Description=HartsyInference server (OpenAI-compatible LLM/diffusion HTTP API)
+After=network.target
+
+[Service]
+Type=simple
+# Adjust to wherever the server is published, e.g. `dotnet publish -c Release` output.
+WorkingDirectory=/opt/hartsyinference
+ExecStart=/usr/bin/dotnet /opt/hartsyinference/HartsyInference.Server.dll
+
+# --- Configuration ---
+# Every HartsyInferenceServerOptions field can be set via HartsyInference__<Field> (ASP.NET Core's
+# double-underscore env-var convention for nested config sections) instead of appsettings.json. Uncomment
+# and adjust as needed; see HartsyInferenceServerOptions.cs for the full list.
+# Environment=ASPNETCORE_URLS=http://0.0.0.0:5099
+# Environment=HartsyInference__Backend=Cuda
+# Environment=HartsyInference__PtxDirectory=/opt/hartsyinference/Ptx
+# Environment=HartsyInference__CudaDevice=0
+# Environment=HartsyInference__ApiKey=changeme
+
+# --- Restart policy ---
+# This is the primary reason this unit exists: some native/unsafe code paths in this engine can raise a
+# corrupted-state exception (e.g. AccessViolationException) that .NET Core cannot catch in-process — the
+# process terminates unconditionally before any exception handler runs. There is no in-process fix for
+# that class of failure; systemd restarting the process is the actual mitigation. Everything ordinarily
+# catchable (a bad request, a model-specific bug) is now contained in-process (see DynamicBatchScheduler's
+# per-round fault isolation and the server's global exception-handler middleware) and should NOT reach
+# this restart path at all — if it's firing often, that's a signal something upstream of it regressed.
+Restart=always
+RestartSec=2
+# Prevents a true crash-loop (e.g. a config error that fails on every start) from hammering the box —
+# after 5 restarts within 60s, systemd stops trying and leaves the unit failed for a human to look at.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Not sandboxed by default: this process needs GPU device access (/dev/nvidia*) and typically runs as a
+# dedicated service account with access to model files, not as a hardened/isolated unit. Add NoNewPrivileges,
+# ProtectSystem, etc. per your own security requirements once you know your deployment's actual constraints.
+
+[Install]
+WantedBy=multi-user.target

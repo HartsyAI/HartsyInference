@@ -12,4 +12,8 @@
     <ProjectReference Include="..\HartsyInference.Tokenizers\HartsyInference.Tokenizers.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.LLM.Tests" />
+  </ItemGroup>
+
 </Project>

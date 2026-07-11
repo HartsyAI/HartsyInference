@@ -46,6 +46,7 @@ The LM decodes codec frames autoregressively at **12.5 Hz**, so the metric is **
 |---|---:|---:|---|
 | bf16 baseline | 91.5 | 10.9 | ~0.87× realtime (AR decode only) |
 | + CUDA-graph decode (`HARTSY_CSM_GRAPH`, default on) | ~86–90 | ~11.2–11.7 | **bit-identical**, ~5% |
+| **Q8_0 disk-quant** (`HARTSY_HEARTMULA_QUANT=q8_0`) | **64.8** | **15.4** | **1.41× faster**, ~1/2 VRAM, past real-time |
 
 - **CUDA-graph decode** ([`CsmModel`](../../src/HartsyInference.Audio/Models/Csm/CsmModel.cs)): the single-frame
   backbone step and each depth-decoder step are captured once (via
@@ -54,9 +55,11 @@ The LM decodes codec frames autoregressively at **12.5 Hz**, so the metric is **
   overhead → **~5%, the honest ceiling** for a bandwidth-bound model (a launch-bound model like the FX decoders
   gains 2×+ from the same technique). Depth uses persistent per-session KV caches reset each frame.
 - **Weight quantization** ([`CsmWeightCache`](../../src/HartsyInference.Audio/Models/Csm/CsmWeightCache.cs),
-  `HARTSY_HEARTMULA_QUANT=q8_0|q4_k`): quantizes the projection/head matrices (keeps embeds/norms F16) **once** to
-  a disk GGUF cache (streaming convert → no OOM; must run **post-`Remap`** since the remap splits the combined
-  audio embed/head tensors), then mmaps the ~4.5 GB Q8 cache. On paper this is the real lever (Q8 ≈ 2×, Q4 ≈ 3.6×
-  less bandwidth), and it produces **valid audio** — but the engine's Q8 fused GEMV (`LaunchMulMatVecQ8_0F32`) is
-  currently **~8× slower than cuBLAS bf16** at M=1 for these shapes, so quant is **not yet a win**. Realizing it
-  needs a quant-GEMV kernel pass, not more wiring.
+  `HARTSY_HEARTMULA_QUANT=q8_0|q4_k`) — the real lever, **1.41× faster** (64.8 vs 91.5 ms/frame) + ~1/2 the VRAM.
+  Quantizes the projection/head matrices (keeps embeds/norms F16) **once** to a disk GGUF cache (streaming convert
+  → no OOM; must run **post-`Remap`** since the remap splits the combined audio embed/head tensors), then mmaps the
+  ~4.5 GB Q8 cache. The fused Q8 GEMV (`LaunchMulMatVecQ8_0F32`) is *faster* than cuBLAS bf16 at M=1 when the weight
+  is GPU-resident (microbench 0.65–0.73×) — the win only appears once `HeartMulaPipeline` **pins the device matmul
+  weights** (`CsmModel.EnumerateDeviceWeights`, quantized-only via `WeightsQuantized`) with `PreloadWeights`; without
+  that they re-upload every step and it's ~8× slower. Embeds are excluded (host-gathered); bf16 isn't pinned (its
+  F16 cast caches on use, and pinning its 5.4 GB bodies would OOM).

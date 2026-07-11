@@ -33,4 +33,12 @@ public sealed record GenerationRequest
     /// environment variable. Graph decode still requires <see cref="Sampling"/> to be greedy and the model/backend
     /// to report eligibility via <c>SupportsGraphDecode</c> — this only controls the opt-in gate itself.</summary>
     public bool? GraphDecode { get; init; }
+
+    /// <summary>Overrides whether prompt-lookup speculative decoding is attempted. Null defers to the
+    /// <c>HARTSY_SPEC_DECODE</c> environment variable. Requires <see cref="Sampling"/> to be greedy and not
+    /// JSON-mode, and is skipped whenever <see cref="GraphDecode"/> is actually eligible (graph decode wins).
+    /// No draft model: drafts come from n-gram matches against the prompt/generated-so-far, so this only
+    /// speeds up repetitive content (e.g. regenerating similar JSON, quoting earlier text) — on prose it costs
+    /// nothing extra, since an unmatched draft degenerates to one plain decode step.</summary>
+    public bool? SpeculativeDecode { get; init; }
 }

@@ -77,6 +77,20 @@ Embed the engine directly in a .NET app. Each modality is its own package. See [
 
 The bundled CLIs under [`samples/`](samples/) and [`src/HartsyInference.Cli`](src/HartsyInference.Cli) are compile-tested references for verifying a checkpoint or a pipeline end-to-end from the command line. They are development and validation tools, not the intended end-user surface. See [Quick Start (CLI, developer tool)](#quick-start-cli-developer-tool) below.
 
+### 4. HTTP Server (OpenAI-compatible API)
+
+`HartsyInference.Server` hosts an OpenAI-compatible REST API — `/v1/chat/completions` (LLM/SSM chat, streaming and non-streaming, JSON-mode via `response_format: {"type":"json_object"}`), `/v1/images/generations` (SDXL today), and `/v1/models` load/list/unload. Concurrently-submitted chat requests against the same model are batched dynamically (not just queued one at a time) via a paged KV cache and a continuous-batching scheduler — see [`docs/Checklists/LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md) for the real measured numbers.
+
+```bash
+dotnet run --project src/HartsyInference.Server -c Release --urls http://127.0.0.1:8080
+curl -X POST http://127.0.0.1:8080/v1/models/load -H "Content-Type: application/json" \
+  -d '{"model":"/path/to/model.gguf"}'
+curl -X POST http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"/path/to/model.gguf","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+Set `HartsyInference:Backend=Cuda` (and `HartsyInference:PtxDirectory`) via config/env vars for GPU inference; defaults to CPU. Not yet published as its own package (`IsPackable=false` — run from source); see [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md) for what's still needed before that changes.
+
 ---
 
 ## Quick Start (CLI, developer tool)
@@ -415,7 +429,7 @@ RTX 3060 12GB, CUDA, batch=1, 128-token greedy decode, warm, tokens/sec. Same GG
 | Mistral-7B-v0.3 | Q4_K_M | 66.5 | ~30.7 | **32.0** (1.02×) | **2.08×** |
 | Gemma-3-1B | Q4_K_M | 229.8 | ~79.7 | not eligible (sliding-window + softcap) | 2.88× |
 
-CUDA graphs remove kernel-*launch* overhead, so the win scales inversely with model size: dramatic on small models (Qwen3), marginal on large ones already bound by GEMV memory bandwidth (Mistral — the engine reads ~22% of the bandwidth llama.cpp does there, a separate un-fixed bottleneck). Graph decode is greedy-only for now (no on-device sampler chain yet) and requires the plain decoder shape — MoE, MLA, cross-attention, sliding-window, and SSM models fall through to the eager path unchanged. Prefill (prompt processing) is much faster and not the bottleneck. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
+CUDA graphs remove kernel-*launch* overhead, so the win scales inversely with model size: dramatic on small models (Qwen3), marginal on large ones already bound by GEMV memory bandwidth (Mistral — the engine reads ~22% of the bandwidth llama.cpp does there, a separate un-fixed bottleneck). Graph decode requires greedy sampling and the plain decoder shape — MoE, MLA, cross-attention, sliding-window, and SSM models fall through to the eager path unchanged — but it now correctly applies repetition penalty on-device rather than silently ignoring it (the only sampler stage that can change greedy's picked token; temperature/top-k/top-p/min-p are all argmax-preserving so they don't need a device kernel). Fused quantized GEMV now covers Q4_K/Q5_K/Q6_K/Q8_0/Q5_0/Q4_0 — every quant format in the default coverage matrix except the rarer K-quants (Q2_K/Q3_K) and IQ-formats, which still fall to a CPU dequant path. Prefill (prompt processing) is much faster and not the bottleneck. The server (`HartsyInference.Server`) additionally supports **continuous batching** — concurrently-submitted requests against the same model share decode rounds instead of running one at a time — and a **paged KV cache**, both independent of graph decode. Details: [`LLM_THROUGHPUT_BENCHMARK.md`](docs/Checklists/LLM_THROUGHPUT_BENCHMARK.md) + [`LLM_DECODE_PERF_GRIND.md`](docs/Checklists/LLM_DECODE_PERF_GRIND.md).
 
 ### Diffusion / video end-to-end vs ComfyUI
 
@@ -529,7 +543,7 @@ reference embeddings/logits, not just "loads without error".
 | AudioGen | Sound-effect generation (MusicGen-arch, .bin + T5) | 🧪 |
 | ACE-Step | Music generation (flow-matching) | ✅ |
 | YuE | Music generation (dual-stage Llama) | ✅ |
-| HeartMuLa (oss-3B) | Music generation (Sesame-CSM dual-transformer + HeartCodec) | ✅ ~11 fr/s / ~0.9× realtime, RTX 3060 |
+| HeartMuLa (oss-3B) | Music generation (Sesame-CSM dual-transformer + HeartCodec) | ✅ ~11 fr/s bf16 / **~15 fr/s Q8** (past real-time), RTX 3060 |
 | Stable Audio Open | Music generation | 🏗️ |
 | F5-TTS | Voice cloning (flow-matching DiT) | 🧪 |
 | Codecs (Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck) | Neural audio codecs | ✅ |
@@ -610,8 +624,9 @@ See the [Model Support Roadmap](docs/Design/MODEL_SUPPORT_ROADMAP.md) for the fu
 | `HartsyInference.Video` | LTX-Video, Wan, Lance, Kandinsky video generation |
 | `HartsyInference.ThreeD` | Image/text → 3D mesh; glTF/OBJ/PLY export, marching cubes |
 | `HartsyInference.Interactive` | Action-conditioned world models, sessions, action encoders |
-| `HartsyInference` | Meta-package: one reference that pulls in the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (only the abandoned `Server` and the sample `Cli` are excluded) |
+| `HartsyInference` | Meta-package: one reference that pulls in the core, all three backends, and every modality package including `HartsyInference.LLM` and `HartsyInference.Phonemizer` (`Server` and the sample `Cli` are excluded — run those from source) |
 | `HartsyInference.Cli` | Command-line sample/validation tool (not published as a package) |
+| `HartsyInference.Server` | OpenAI-compatible HTTP API host — chat completions (batched, streaming, JSON-mode), image generation, model management (not yet published as a package; run from source — see [How to Use It §4](#4-http-server-openai-compatible-api)) |
 
 See [NuGet Package Design](docs/Design/NUGET_PACKAGE_DESIGN.md) for the dependency graph and minimum install examples.
 
