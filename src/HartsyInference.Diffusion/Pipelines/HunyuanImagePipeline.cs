@@ -31,6 +31,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private readonly HunyuanImageQwenTextEncoder? _qwenEncoder;
     private readonly HunyuanImageTransformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
+    private readonly HunyuanImageVaeDecoder? _hyVaeDecoder;
     private readonly HunyuanImageConfig _config;
 
     /// <summary>Creates a Hunyuan Image pipeline with the primary Qwen2.5-VL-7B text encoder (matches <c>tencent/HunyuanImage-2.1</c>).</summary>
@@ -41,6 +42,18 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         _qwenEncoder = qwenEncoder ?? throw new ArgumentNullException(nameof(qwenEncoder));
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
+        _config = config;
+    }
+
+    /// <summary>Creates a pipeline with the faithful HunyuanImage pixel-shuffle VAE decoder (the generic <see cref="VaeDecoder"/> cannot express its conv→depth-to-space upsamplers).</summary>
+    public HunyuanImagePipeline(IBackend backend, HunyuanImageQwenTextEncoder qwenEncoder,
+        HunyuanImageTransformer transformer, HunyuanImageVaeDecoder vaeDecoder, HunyuanImageConfig config)
+        : base(backend)
+    {
+        _qwenEncoder = qwenEncoder ?? throw new ArgumentNullException(nameof(qwenEncoder));
+        _transformer = transformer;
+        _hyVaeDecoder = vaeDecoder;
+        _vaeDecoder = null!;
         _config = config;
     }
 
@@ -213,7 +226,9 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 
         Logs.Info("Decoding latents to image (32-channel VAE)...");
         Stopwatch vaeSw = Stopwatch.StartNew();
-        Tensor decoded = _vaeDecoder.Decode(Backend, latent);
+        Tensor decoded = _hyVaeDecoder is not null
+            ? _hyVaeDecoder.Decode(Backend, latent)
+            : _vaeDecoder.Decode(Backend, latent);
         latent.Dispose();
         vaeSw.Stop();
 

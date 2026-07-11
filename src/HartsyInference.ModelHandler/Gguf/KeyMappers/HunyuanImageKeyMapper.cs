@@ -7,17 +7,23 @@ public sealed class HunyuanImageKeyMapper : IGgufKeyMapper
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {
-        bool hasHunyuanBlocks = false;
+        // Two shipped layouts: diffusers-style dumps (transformer_blocks + dual_attention/moe) and
+        // original-Tencent GGUF repacks (double_blocks.*.img_attn_qkv + byt5_in — byt5_in distinguishes
+        // HunyuanImage 2.1 from HunyuanVideo, which shares the double_blocks naming).
+        bool hasTencentAttn = false, hasByt5 = false;
         foreach (string name in tensorNames)
         {
             if (name.Contains("transformer_blocks.", StringComparison.Ordinal) &&
                 (name.Contains(".dual_attention", StringComparison.Ordinal) || name.Contains(".moe.", StringComparison.Ordinal)))
             {
-                hasHunyuanBlocks = true;
-                break;
+                return true;
             }
+            if (name.Contains("double_blocks.", StringComparison.Ordinal) && name.Contains("img_attn_qkv.", StringComparison.Ordinal))
+                hasTencentAttn = true;
+            if (name.StartsWith("byt5_in.", StringComparison.Ordinal))
+                hasByt5 = true;
         }
-        return hasHunyuanBlocks;
+        return hasTencentAttn && hasByt5;
     }
 
     public string? MapKey(string ggufKey) => ggufKey;

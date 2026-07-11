@@ -39,6 +39,19 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     /// <summary>Number of transformer blocks. Useful for callers that want to request a specific HF-indexed hidden state via <see cref="EncodeMultiLayer"/> (e.g., Z-Image needs <c>NumLayers - 1</c> for diffusers' <c>hidden_states[-2]</c>).</summary>
     public int NumLayers => _config.NumLayers;
 
+    // Diagnostic (HARTSY_TE_PROBE=1): per-layer absmax of the hidden stream — forces a host sync per
+    // layer, so leave off outside debugging sessions.
+    private static readonly bool TeProbe = Environment.GetEnvironmentVariable("HARTSY_TE_PROBE") == "1";
+
+    private static unsafe void ProbeAbsmax(string label, Tensor t)
+    {
+        float* p = (float*)t.DataPointer;
+        float mx = 0f;
+        long n = t.ElementCount;
+        for (long e = 0; e < n; e++) { float a = MathF.Abs(p[e]); if (a > mx) mx = a; }
+        Logs.Debug($"[TE probe] {label}: absmax={mx:F3}");
+    }
+
     /// <summary>Loads all weights from a HuggingFace-style key dict (keys like <c>model.layers.{i}.self_attn.q_proj.weight</c>). Cast to F32 sites are: token embedding (CPU lookup), RMSNorm scales (CPU pointer code expects float*), per-head q/k norms.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
@@ -227,6 +240,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
 
         Tensor hidden = EmbeddingLookup(tokenIds, batch, seqLen);
         Tensor causalMask = BuildCausalMask(seqLen);
+        if (TeProbe) ProbeAbsmax("embed", hidden);
 
         // Allocate the output tensor up-front: [B, S, K*H]. We'll scatter each requested layer's
         // [B, S, H] hidden state into its slice.
@@ -248,6 +262,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             Tensor next = _blocks[i].Forward(backend, hidden, causalMask, rcos, rsin, seqLen);
             hidden.Dispose();
             hidden = next;
+            if (TeProbe) ProbeAbsmax($"layer {i + 1}", hidden);
 
             // Block i produces hidden_states[i+1] in HF terms.
             int hfLayerIndex = i + 1;
@@ -432,6 +447,9 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
     // ──────────────────────────────────────────────────────────────────────
     private sealed unsafe class LlamaBlock
     {
+        // Diagnostic: first-block-only stage probes for HARTSY_TE_PROBE.
+        private static bool _probedDetail;
+
         private readonly LlamaStyleEncoderConfig _config;
 
         // Norms (pre-attn and pre-mlp), F32. For Gemma 2 (HasFfnSandwichNorms=true), `_postAttnNorm`
@@ -564,6 +582,14 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             backend.Linear(qFlat, preAttn, _qProj!, _qBias);
             backend.Linear(kFlat, preAttn, _kProj!, _kBias);
             backend.Linear(vFlat, preAttn, _vProj!, _vBias);
+            if (TeProbe && !_probedDetail)
+            {
+                ProbeAbsmax("blk0 preAttn", preAttn);
+                ProbeAbsmax("blk0 q", qFlat);
+                ProbeAbsmax("blk0 k", kFlat);
+                ProbeAbsmax("blk0 v", vFlat);
+                Logs.Debug($"[TE probe] blk0 qProj dtype={_qProj!.DType} scale={_qProj.Fp8ScaleFactor}");
+            }
             preAttn.Dispose();
 
             // 3. Reshape Q to [B, Hq, S, D]; K, V to [B, Hkv, S, D].
@@ -613,6 +639,12 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
             float scale = 1.0f / MathF.Sqrt(D);
             Tensor attnOut = new Tensor(qMhShape, DType.F32);
             backend.ScaledDotProductAttention(attnOut, qMh, kRepeated, vRepeated, causalMask, scale);
+            if (TeProbe && !_probedDetail)
+            {
+                ProbeAbsmax("blk0 qRoped", qMh);
+                ProbeAbsmax("blk0 attnOut", attnOut);
+                ProbeAbsmax("blk0 mask", causalMask);
+            }
             qMh.Dispose();
             kRepeated.Dispose();
             vRepeated.Dispose();
@@ -624,6 +656,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
 
             Tensor attnProj = new Tensor(hShape, DType.F32);
             backend.Linear(attnProj, attnFlat, _oProj!, null);
+            if (TeProbe && !_probedDetail) ProbeAbsmax("blk0 oProj", attnProj);
             attnFlat.Dispose();
 
             // 9. First residual.
@@ -670,6 +703,7 @@ public sealed unsafe class LlamaStyleEncoder : IDisposable
 
             Tensor mlpOut = new Tensor(hShape, DType.F32);
             backend.Linear(mlpOut, gated, _downProj!, null);
+            if (TeProbe && !_probedDetail) { ProbeAbsmax("blk0 mlpOut", mlpOut); _probedDetail = true; }
             gated.Dispose();
 
             // 11b. Gemma 2: post-FFN sandwich norm before the residual add.

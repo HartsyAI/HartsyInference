@@ -264,7 +264,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
         return temb;
     }
 
-    /// <summary>Final AdaLN-continuous: <c>SiLU(temb) → Linear → [shift, scale]</c>, unparameterized LayerNorm + modulate, then <c>proj_out</c>. Diffusers' <c>AdaLayerNormContinuous</c> chunks <c>[shift, scale]</c> in that order.</summary>
+    /// <summary>Final AdaLN-continuous: <c>SiLU(temb) → Linear → [shift, scale]</c>, unparameterized LayerNorm + modulate, then <c>proj_out</c>. Diffusers' <c>AdaLayerNormContinuous</c> chunks <c>[scale, shift]</c> scale-first.</summary>
     private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int batch, int seqLen)
     {
         int dim = _config.HiddenSize;
@@ -296,8 +296,10 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable
                 int vecOffset = (b * seqLen + s) * dim;
                 for (int d = 0; d < dim; d++)
                 {
-                    float shift = modPtr[modBase + d];
-                    float scale = modPtr[modBase + dim + d];
+                    // Diffusers AdaLayerNormContinuous chunks [scale, shift] SCALE-FIRST (same as the
+                    // Qwen-Image final layer; the conversion script reorders Tencent's [shift, scale]).
+                    float scale = modPtr[modBase + d];
+                    float shift = modPtr[modBase + dim + d];
                     outModPtr[vecOffset + d] = normPtr[vecOffset + d] * (1.0f + scale) + shift;
                 }
             }

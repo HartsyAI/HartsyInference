@@ -393,7 +393,10 @@ RTX 4090 24GB, full end-to-end wall-clock through the SwarmUI API — the identi
 | Boogu-Base (20 steps) | 26.5 s | 17.8 s | 1.49× — optimization in progress |
 | Chroma1-HD (20 steps) | 28.5 s | 16.6 s | Optimization in progress (1.7×, was 33×) |
 | Qwen-Image (20 steps) | **39.4 s** | 54.8 s | **Faster than ComfyUI** |
+| OmniGen 2 (20 steps) | 90.5 s | 13.0 s | 7.0× — first bench, pre-optimization |
 | Qwen-Image-Edit 2511 (20 steps + reference) | 93 s | 87.8 s | 1.05× — full image editing with up to 3 vision-conditioned reference images |
+| Flux.2 Dev 32B (20 steps, Q4 GGUF) | 52.6 s | — | First e2e 2026-07-10 — native GGUF quant + live Mistral-Small-3 encoder; no ComfyUI baseline |
+| HunyuanImage 2.1 17B (2048², 20 steps, Q4 GGUF) | 77.0 s | — | First e2e 2026-07-10 — native-resolution 2048², new pixel-shuffle VAE decoder; no ComfyUI baseline |
 | Lumina-Image 2.0 (25 steps, cfg 4) | 17.7 s | — | 37× in one optimization round (was 650 s); no ComfyUI baseline |
 
 These times require **zero configuration**: the engine's standard performance profile (cuDNN fused flash attention, fp8 tensor-core GEMM, F16 DiT activations, resident weights, warm activation pool) is default-on with per-feature kill-switches and graceful fallbacks — see the [Performance Guide](docs/PERFORMANCE.md).

@@ -297,7 +297,9 @@ public sealed record LlamaStyleEncoderConfig
         IntermediateSize = 32768,
         VocabSize = 131072,
         RmsNormEps = 1e-5f,
-        RopeTheta = 1_000_000f,
+        // 1e9 per ComfyUI Mistral3Small24BConfig — NOT the usual Mistral 1e6. The 1e6 placeholder gave
+        // statistically-sane but semantically-wrong hidden states → structured-noise images.
+        RopeTheta = 1_000_000_000f,
         MaxPositionEmbeddings = 32768,
         QkHeadNorm = false,
         AttentionBias = false,

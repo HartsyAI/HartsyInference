@@ -101,16 +101,16 @@ public sealed record VaeConfig
     /// <summary>Preset for AuraFlow (reuses SDXL-compatible VAE with 4-channel latent).</summary>
     public static VaeConfig AuraFlow => Sdxl;
 
-    /// <summary>Preset for Hunyuan Image 2.1 (32-channel latent, 32× downscale). Significantly different VAE architecture from standard models.</summary>
+    /// <summary>Preset for Hunyuan Image 2.1 (64-channel latent, 32× downscale, 6 up levels). Derived from the released VAE weights + ComfyUI <c>latent_formats.HunyuanImage21</c> (scale 0.75289); block channels match diffusers' conversion script.</summary>
     public static VaeConfig HunyuanImage => new()
     {
-        LatentChannels = 32,
-        ScalingFactor = 1.0f,
+        LatentChannels = 64,
+        BlockOutChannels = [128, 256, 512, 512, 1024, 1024],
+        ScalingFactor = 0.75289f,
         ShiftFactor = null,
         UsePostQuantConv = false,
         UseQuantConv = false,
         SampleSize = 2048,
-        // TODO: Confirm exact architecture (block channels, scaling factor) once HunyuanImage VAE is analyzed
     };
 
     /// <summary>Per-channel mean values for VAE latent post-denoising rescale. When set, the decode path

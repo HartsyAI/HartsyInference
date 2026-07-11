@@ -143,6 +143,7 @@ python3 bench_t2i.py --backend hartsy --config models.json --out results.json --
 | SDXL | 20 | 7.0 |
 | ERNIE-Image | 20 | 4.0 |
 | AuraFlow-0.3 | 20 | 3.5 |
+| OmniGen 2 | 20 | 4.0 |
 
 **Current scoreboard** — RTX 4090, warm median, engine `1.0.0-alpha.46` + in-flight `44.x-local` optimization rounds, 2026-07-10. ComfyUI
 column is the same request on the same GPU through the ComfyUI backend. The optimization grind is ongoing
@@ -167,6 +168,9 @@ rounds land:
 | Flux.2 Klein 4B | **2.36 s** | 1.85 s | 1.28× — Flux-family kit transplant done (`44.38-local`). Distilled variant: 4 steps/CFG 1 official |
 | SDXL | **2.93 s** | 3.7 s | Faster than ComfyUI (was 33.9 s / 9.2× slower two rounds ago) |
 | Lumina-Image 2.0 | **17.7 s** | — | 37× in one round (was 650 s); no ComfyUI baseline (can't load the diffusers-format file) |
+| OmniGen 2 | 90.5 s | 13.0 s | 7.0× — first bench (07-10, pre-optimization); blocks already GPU-resident, fleet perf kit (F16 activations, step graph, drain-free CFG loop) queued |
+| Flux.2 Dev 32B (Q4_K_S GGUF, 20 st) | 52.6 s | — | First e2e 07-10 (native GGUF + live Mistral-Small-3 TE); no ComfyUI baseline (comfy backend can't route the GGUF); step graph OOMs on 24GB → eager |
+| HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | 77.0 s | — | First e2e 07-10 (new pixel-shuffle VAE decoder, live Qwen2.5-VL-7B TE); no ComfyUI baseline (comfy backend can't route the GGUF) |
 
 ---
 

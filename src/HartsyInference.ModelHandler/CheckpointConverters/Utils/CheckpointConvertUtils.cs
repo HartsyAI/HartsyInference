@@ -79,7 +79,7 @@ public static unsafe class CheckpointConvertUtils
     /// <summary>Converts LDM VAE keys (after stripping first_stage_model. prefix) to diffusers format. Shared across all Stable Diffusion variants.</summary>
     /// <param name="ldmKey">Key after stripping "first_stage_model." prefix.</param>
     /// <param name="numUpLevels">Number of up block levels (4 for SD1.5/SDXL).</param>
-    public static string? ConvertVaeKey(string ldmKey, int numUpLevels = 4)
+    public static string? ConvertVaeKey(string ldmKey, int numUpLevels = 4, bool reverseUpIndices = true)
     {
         // post_quant_conv / quant_conv — keep as-is
         if (ldmKey.StartsWith("post_quant_conv.") || ldmKey.StartsWith("quant_conv."))
@@ -89,12 +89,12 @@ public static unsafe class CheckpointConvertUtils
             return ConvertVaeEncoderKey(ldmKey["encoder.".Length..], numUpLevels);
 
         if (ldmKey.StartsWith("decoder."))
-            return ConvertVaeDecoderKey(ldmKey["decoder.".Length..], numUpLevels);
+            return ConvertVaeDecoderKey(ldmKey["decoder.".Length..], numUpLevels, reverseUpIndices);
 
         return null;
     }
 
-    private static string? ConvertVaeDecoderKey(string decoderKey, int numUpLevels)
+    private static string? ConvertVaeDecoderKey(string decoderKey, int numUpLevels, bool reverseUpIndices = true)
     {
         if (decoderKey.StartsWith("conv_in."))
             return "decoder.conv_in." + decoderKey["conv_in.".Length..];
@@ -107,7 +107,7 @@ public static unsafe class CheckpointConvertUtils
             return ConvertVaeMidKey("decoder", decoderKey["mid.".Length..]);
 
         if (decoderKey.StartsWith("up."))
-            return ConvertVaeUpKey(decoderKey["up.".Length..], numUpLevels);
+            return ConvertVaeUpKey(decoderKey["up.".Length..], numUpLevels, reverseUpIndices);
 
         return "decoder." + decoderKey;
     }
@@ -142,14 +142,15 @@ public static unsafe class CheckpointConvertUtils
         return null;
     }
 
-    private static string? ConvertVaeUpKey(string upKey, int numUpLevels)
+    private static string? ConvertVaeUpKey(string upKey, int numUpLevels, bool reverseUpIndices = true)
     {
         int firstDot = upKey.IndexOf('.');
         if (firstDot < 0) return null;
 
         int ldmLevel = int.Parse(upKey[..firstDot]);
-        // Diffusers indexes up_blocks deepest-first; LDM indexes shallowest-first. Reverse.
-        int diffusersLevel = (numUpLevels - 1) - ldmLevel;
+        // Diffusers indexes up_blocks deepest-first; classic SD-LDM indexes shallowest-first (reverse).
+        // HunyuanImage 2.1's VAE stores up.0 = deepest already — pass reverseUpIndices=false there.
+        int diffusersLevel = reverseUpIndices ? (numUpLevels - 1) - ldmLevel : ldmLevel;
         string rest = upKey[(firstDot + 1)..];
 
         if (rest.StartsWith("block."))

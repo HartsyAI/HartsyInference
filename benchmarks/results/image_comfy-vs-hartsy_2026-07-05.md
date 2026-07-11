@@ -955,3 +955,89 @@ weights (F32 activations; the old host drains were accidentally throttling the q
 pair + pool trims didn't close it. **Next lever = the F16-activation port** (the fleet recipe — halves every
 transient) plus an audit of mid-forward live-activation growth; until then the standard bench config
 (1024², cfg 5) can't run, so no scoreboard row yet. Comfy comparison pending that.
+
+## 2026-07-10 — OmniGen 2 first bench: warm **90.5s** vs ComfyUI **13.0s** (7.0×) — engine `alpha.44.44-local`
+
+First scoreboard numbers for OmniGen 2 (fp16 MMDiT, live Qwen2.5-VL-3B TE, wired 07-10). Warm 1024²/20st/cfg4
+via the Swarm API (`bench_t2i.py`), both backends on the 4090, coherent + visually verified on both sides.
+
+| Backend | cold | warm walls | warm median | peak VRAM |
+|---|---:|---|---:|---:|
+| Hartsy (`44.44-local`) | 123.3s | 90.48 / 90.60 / 90.42 | **90.5s** | 22.5 GB |
+| ComfyUI | 21.4s | 13.00 / 13.00 / 13.02 | **13.0s** | 22.1 GB |
+
+No perf round has touched this model yet — the 98.8s wiring-day number was real. Blocks are already
+GPU-resident (zero host-glue sites), so the gap is the usual fleet-kit list: F32 activations everywhere
+(F16/BF16 port — measure the block-input absmax stream range first), no cuDNN-SDPA/step-graph/drain-free-CFG
+wiring, per-gen TE re-encode (no prompt cache), and the ~22.5 GB residency leaves no headroom. Comfy's 13.0s
+on the same 4B-class DiT says the ceiling is low; the Lumina2 round (650→17.7s on the same block anatomy)
+is the playbook.
+
+Operational notes: the ToggleBackend cycle again left backend #2 `errored` after restoring (known trap) —
+full Swarm restart fixed it; post-restart flagship gate passed (Z-Image-Turbo 2.80–2.83s warm, coherent).
+
+## 2026-07-10 — Flux.2 Dev 32B FIRST E2E: warm **52.6s** @1024²/20st (Q4_K_S GGUF) — engine `alpha.44.45–44.48-local`
+
+Dev-GGUF unblocked end-to-end (was: "Flux2Loader has no GGUF branch + converter splits break on Q4_K").
+Warm 52.62/52.63/52.74s, peak 23.3GB, coherent + visually verified @1024². No Comfy baseline (the comfy
+backend refuses the GGUF — needs comfy-side GGUF-unet setup). Klein Q4_K_S GGUF verified coherent too
+(the bisect oracle). Flagship gate re-passed post-deploy: Z-Image 2.72s, Krea2-Turbo 4.45s, coherent.
+
+**Shipped:**
+- Engine: `Flux2CheckpointConverter` fused-weight splits now quant-block-aligned (`DType.ComputeByteCount`
+  row math — GGUF blocks never span rows, so row splits are byte-exact; proven vs gguf-python dequant).
+- Engine: `LlamaStyleEncoderConfig.MistralSmall3.RopeTheta` 1e6 → **1e9** (ComfyUI `Mistral3Small24BConfig`).
+- Engine (diagnostic): `HARTSY_TE_PROBE=1` per-layer + block-0 stage absmax probes in `LlamaStyleEncoder`.
+- Extension: Flux2Loader GGUF branch (QwenImageLoader pattern: native quant + rank-2 relabel + BF16→F16
+  embedder cast); Mistral tekken tokenization — official HF tokenizer.json via `ErnieTokenizer` +
+  `ByteLevelCodec`, ComfyUI template with specials spliced as raw ids [1,17]+sys+[18,3]+prompt+[4],
+  validated id-exact vs the HF reference; SideModels Mistral entry pinned to the **fp8** file.
+
+**THE noise bug (a day-long hunt):** first runs produced structured noise with *plausible* TE stats.
+Bisect: quant splits proven byte-exact (python oracle) → Klein-GGUF coherent (DiT/GGUF path cleared) →
+CPU streaming reference of the 24B TE (fp8→F32, taps corr 0.9996+ vs engine MRE) → per-layer probe showed
+Swarm diverging from layer 1 with `qProj dtype=F16 scale=1` vs MRE `F8_E4M3 scale=0.00098` → **a stray
+fp4_mixed file named `mistral_3_small_flux2.safetensors` in `Models/text_encoders/` shadowed the fp8 file
+in `Models/clip/`**. nvfp4→F16 dequant crushes Mistral's giant BOS-row activation outliers (absmax 158→55)
+→ garbage conditioning. Renamed the shadow, pinned the canonical name to `_fp8`. Lesson: when the same
+canonical model name exists in multiple Swarm model roots, verify WHICH file the resolver picked before
+trusting any numerics — log absmax of the encode and compare against an isolated-harness run.
+
+**Open (Dev productionization):** (1) switching AWAY from a Flux2-GGUF pipeline NREs in
+`GpuTransferHelper.OnPromotedHostAccess` ← `FreeAllDeviceMemory` (promoted-weight cleanup vs disposed
+mmap tensors); (2) switching INTO Dev beside a resident ~13GB model OOMs in `PreloadWeights` (VRAM
+reclaim timing — the Chroma→Krea2 eviction class); restart between switches meanwhile. (3) Step-graph
+capture OOMs at 24GB → eager loop (~2.6s/step); a capture-friendly memory plan is the perf lever.
+(4) ERNIE lead: `ErnieTokenizer.Encode` feeds raw text to BPE without `ByteLevelCodec.Encode` — ids may
+differ from diffusers on space handling; worth a token-dump check.
+
+## 2026-07-10 — HunyuanImage 2.1 17B FIRST E2E: warm **77.0s** @2048²/20st/cfg3.5 (Q4_K_M GGUF) — engine `alpha.44.49–44.52-local`
+
+Was "BLOCKED on 24GB / incompatible Tencent keys" — now generates a sharp native-2048² astronaut
+(warm 76.98/76.88/77.60s, peak 22.1GB, visually verified). No Comfy baseline (comfy backend can't route
+the GGUF, same as Flux.2 Dev). Flagship gate re-passed post-deploy (Z-Image 2.77s, Krea2-Turbo 4.48s).
+
+**Shipped (bring-up arc across three sessions):**
+- Tencent→diffusers converter (`ConvertTencentToDiffusers`) with quant-block-aligned fused splits — MRE-proven.
+- `HunyuanImageLoader` + 6 dispatch sites; live Qwen2.5-VL-7B fp8 encode (template + hidden_states[-3] tap);
+  ModelSupport refusal gate lifted (the "T5-XXL stand-in" note was stale); SideModels entries w/ hashes.
+- **`HunyuanImageVaeDecoder`** — the pixel-shuffle VAE: conv_in + channel-repeat skip, channel-preserving
+  resnets, 5× [conv → [r1,r2,c]-order depth-to-space + repeat-shortcut] upsamplers, 6 levels, 64-ch latent,
+  scale 0.75289 (ComfyUI `HunyuanImage21`). Composed from device ops only: the non-torch-PixelShuffle
+  rearrange = TWO `Permute0213` calls (contiguous channel halves + inferred batch), `repeat_interleave` =
+  `UpsampleNearest2D` on a channel-major view. **Verified relL2 1.1e-4 vs a hand-written torch reference.**
+- `ConvertVaeKey` gained `reverseUpIndices:false` (this VAE stores up.0 = deepest, opposite of SD-LDM).
+- Loader guards: empty negative → "." (the chat template collapses whitespace-only content to exactly the
+  34-token prefix, which the encoder's prefix-drop rejects).
+
+**THE speckle bug (structure-correct + uniform noise at any step count):** the engine's final
+AdaLN-continuous read **[shift, scale]** but the diffusers layout is **scale-first** — same bug class as
+the Qwen-Image final layer (memory `adaln-continuous-scale-shift-order`). Diagnosis order that worked:
+50-step run (ruled out convergence) → ShuffleRearrange unit test vs numpy (exact) → full-VAE oracle vs
+torch (exact, relL2 1.1e-4) → by elimination the sampling output → the one unverified modulation site.
+Flipped scale-first in `HunyuanImageTransformer.ApplyFinalLayer` → flawless.
+
+**Open:** ByT5 glyph branch not wired (transformer supports `encoder_hidden_states_2`); GGUF-eviction
+model-switch NRE applies (restart between model switches); perf round pending (77s at 4096 img tokens ×
+2 CFG forwards × Q4/Q5 transient dequant — the Qwen-Image playbook: fused loop already partially there,
+prompt cache missing, F16 activations unverified for this stream).
