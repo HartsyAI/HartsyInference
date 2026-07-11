@@ -448,6 +448,7 @@ Per-op MatMul / Conv2D / norm / SDPA / elementwise timings against PyTorch, with
 | Mistral (dense) | LLM (native inference) | ✅ |
 | Nemotron, EXAONE, Granite / Granite-MoE, RWKV-6/7, Mamba/Mamba-2 | LLM (native inference) | ✅ |
 | Gemma-4 (E2B/E4B mobile, verified; 31B-dense/26B-A4B-MoE built, untested — VRAM) | LLM (native inference) | ✅ / 🧪 |
+| Qwen3.5 (0.8B verified; 2B/4B/9B same code path, untested) | LLM (native inference, Gated DeltaNet hybrid) | ✅ / 🧪 |
 | Quantized GGUF (Q4/Q5/Q6/Q8) | LLM (quantized inference, all models) | ✅ |
 
 ### Image Generation

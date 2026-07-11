@@ -39,6 +39,13 @@ public static class CudaLibraryResolver
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             dirs.Add(Path.Combine(home, ".local", "lib", "cuda13"));
         }
+        // cuDNN search dirs (provisioned/bundled): an explicit override, the per-user cache (per CUDA major — the
+        // driver isn't queried here to avoid a circular load during static init, so all common majors are listed;
+        // File.Exists filters), and a 'cudnn' folder beside the assembly. See CudnnRuntime.
+        string? cudnnDir = Environment.GetEnvironmentVariable("HARTSY_CUDNN_DIR");
+        if (!string.IsNullOrEmpty(cudnnDir)) dirs.Add(cudnnDir);
+        foreach (int major in new[] { 13, 12, 11 }) dirs.Add(CudnnRuntime.CacheLibDir(major));
+        dirs.Add(CudnnRuntime.BundledDir());
         return dirs.ToArray();
     }
 

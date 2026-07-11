@@ -52,7 +52,7 @@ public sealed class GgufLanguageModel : IDisposable
     /// config inference (head_count etc.) is meaningless for these and throws (e.g. mamba2's
     /// <c>attention.head_count</c> is 0, so deriving head_dim = hidden/heads divides by zero). Route them
     /// through <see cref="Ssm.SsmLanguageModel"/> instead.</summary>
-    internal static readonly HashSet<string> SsmArchitectures = ["mamba", "mamba2", "rwkv6", "rwkv", "rwkv7"];
+    internal static readonly HashSet<string> SsmArchitectures = ["mamba", "mamba2", "rwkv6", "rwkv", "rwkv7", "qwen35"];
 
     internal static ILlmTokenizer BuildTokenizer(GgufMetadata meta)
     {

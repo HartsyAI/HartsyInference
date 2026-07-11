@@ -241,11 +241,16 @@ public sealed class CudaBackend : IBackend
         // cuDNN fused flash attention: default ON — resolution failures self-disable per session (and engine
         // rejections per head-dim), falling back to the materialized paths, so machines without cuDNN lose
         // speed, never correctness.
-        _sdpaCudnn = EnvSwitch.IsEnabled("HARTSY_SDPA_CUDNN", defaultOn: true);
+        // Probe cuDNN ONCE up front: locate/provision a CUDA-major-matched build, guard against a mismatch (which
+        // would hang mid-inference), and log a single clear line so a "why is it slow?" report is one log check.
+        // Every cuDNN fast path is AND-gated on availability, so a missing/mismatched cuDNN cleanly stays on the
+        // im2col+cuBLAS / custom-flash fallbacks instead of throwing per-op or hanging.
+        CudnnRuntime.LogStatus();
+        _sdpaCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_SDPA_CUDNN", defaultOn: true);
         // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
         // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
-        _convCudnn = EnvSwitch.IsEnabled("HARTSY_CONV_CUDNN", defaultOn: true);
-        _audioConvCudnn = EnvSwitch.IsEnabled("HARTSY_AUDIO_CONV_CUDNN", defaultOn: false);
+        _convCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_CONV_CUDNN", defaultOn: true);
+        _audioConvCudnn = CudnnRuntime.Available && EnvSwitch.IsEnabled("HARTSY_AUDIO_CONV_CUDNN", defaultOn: false);
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
             $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +

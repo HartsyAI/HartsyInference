@@ -6,7 +6,9 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Sampling;
+using HartsyInference.LLM.Ssm;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelHandler.Gguf;
 using HartsyInference.ModelHandler.SafeTensors;
 using HartsyInference.Tokenizers;
 
@@ -58,8 +60,7 @@ public sealed class TextHandler : IModalityHandler
         List<int> streamed = new List<int>();
         int printedChars = 0;
 
-        Stopwatch sw = Stopwatch.StartNew();
-        GenerationResult result = text.Pipeline.Generate(request, tokenId =>
+        void OnToken(int tokenId)
         {
             streamed.Add(tokenId);
             string decoded = text.Tokenizer.Decode(streamed);
@@ -68,7 +69,12 @@ public sealed class TextHandler : IModalityHandler
                 progress.Token(decoded[printedChars..]);
                 printedChars = decoded.Length;
             }
-        });
+        }
+
+        Stopwatch sw = Stopwatch.StartNew();
+        GenerationResult result = text.Pipeline is not null
+            ? text.Pipeline.Generate(request, OnToken)
+            : text.SsmPipeline!.Generate(request, OnToken);
         sw.Stop();
 
         double seconds = Math.Max(sw.Elapsed.TotalSeconds, 1e-6);
@@ -86,6 +92,18 @@ public sealed class TextHandler : IModalityHandler
     private static TextRunner LoadGguf(ModelSpec spec, string path, IBackend backend, bool cuda, IProgressSink progress)
     {
         progress.Stage($"Loading GGUF {Path.GetFileName(path)} …");
+        string architecture = PeekArchitecture(path);
+        if (SsmLanguageModel.IsSsmArchitecture(architecture))
+        {
+            // Recurrent/hybrid decoders (mamba/mamba2/rwkv6/rwkv7/qwen3.5) are not GenericTransformer models —
+            // no attention.head_count metadata for the pure-recurrent ones, no KV cache growth to preload.
+            SsmLanguageModel ssm = SsmLanguageModel.Load(path, architecture);
+            progress.Stage($"  arch={architecture} (recurrent/hybrid) vocab={ssm.Model.VocabSize}");
+            SsmGenerationPipeline ssmPipeline = new SsmGenerationPipeline(ssm.Model, ssm.Tokenizer, backend, ssm.Template);
+            string ssmId = spec.Catalog?.Id ?? Path.GetFileNameWithoutExtension(path);
+            return new TextRunner(ssmId, ssmPipeline, ssm.Tokenizer, ssm);
+        }
+
         bool lowVram = Environment.GetEnvironmentVariable("HARTSY_LOWVRAM") == "1";
         // The CPU backend is F32-only; widen quantized projections at load for it. CUDA dequantizes on-device.
         GgufLanguageModel gguf = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: !cuda);
@@ -148,6 +166,15 @@ public sealed class TextHandler : IModalityHandler
         TextGenerationPipeline pipeline = new TextGenerationPipeline(model, tokenizer, backend, template: null);
         string id = spec.Catalog?.Id ?? Path.GetFileName(dir.TrimEnd(Path.DirectorySeparatorChar));
         return new TextRunner(id, pipeline, tokenizer, ownedModel: null, ownedLoader: loader);
+    }
+
+    /// <summary>Cheap <c>general.architecture</c> read (metadata + tensor descriptors only, no weight data
+    /// touched) used to route a GGUF to the transformer or SSM/hybrid loader before committing to either.</summary>
+    private static string PeekArchitecture(string path)
+    {
+        using GgufLoader probe = new();
+        probe.Load(path);
+        return probe.Metadata.GetString("general.architecture") ?? "";
     }
 
     private static SamplingOptions BuildSampling(ParamState parameters)

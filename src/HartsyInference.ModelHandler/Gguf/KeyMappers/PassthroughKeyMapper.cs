@@ -8,7 +8,10 @@ public sealed class PassthroughKeyMapper : IGgufKeyMapper
     // Encoder-family GGUFs (BERT embedding models) keep their own verbatim tensor names (token_embd, blk.N.attn_q,
     // *_norm, position_embd, token_types). Declaring them here resolves the arch to passthrough instead of letting the
     // llama key-heuristic mangle them. (BertEmbeddingModel reads these names directly.)
-    public IReadOnlyCollection<string> Architectures => ["passthrough", "bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "neo-bert", "mamba", "mamba2", "rwkv6", "rwkv7", "t5", "t5encoder"];
+    // qwen35/qwen35moe (Gated DeltaNet hybrid): also has blk.N.* + token_embd.weight, which would satisfy
+    // LlamaKeyMapper's heuristic (hasBlk && hasTokenEmbd) if this arch weren't registered explicitly here —
+    // Qwen35Model reads raw GGUF names directly (blk.N.attn_qkv.weight etc), same as the SSM models above.
+    public IReadOnlyCollection<string> Architectures => ["passthrough", "bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "neo-bert", "mamba", "mamba2", "rwkv6", "rwkv7", "t5", "t5encoder", "qwen35", "qwen35moe"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames) => true;
     public string? MapKey(string ggufKey) => ggufKey;

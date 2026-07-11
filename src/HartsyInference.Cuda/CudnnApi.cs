@@ -17,6 +17,9 @@ internal static partial class CudnnApi
     [LibraryImport(LibName)] internal static partial int cudnnDestroy(nint handle);
     [LibraryImport(LibName)] internal static partial int cudnnSetStream(nint handle, nint streamId);
     [LibraryImport(LibName)] internal static partial nuint cudnnGetVersion();
+    /// <summary>The CUDA Runtime version cuDNN was BUILT against (e.g. 12080 → CUDA 12.8). Compile-time constant,
+    /// needs no handle/context — safe to call right after the library loads to gate on a CUDA-major mismatch.</summary>
+    [LibraryImport(LibName)] internal static partial nuint cudnnGetCudartVersion();
     [LibraryImport(LibName)] internal static partial nint cudnnGetErrorString(int status);
 
     // ── Backend descriptor graph API ────────────────────────────────────

@@ -12,6 +12,11 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuInit(uint flags);
 
+    /// <summary>The latest CUDA version the installed DRIVER supports (e.g. 13020 → CUDA 13.2). Used to pick and
+    /// version-guard the matching cuDNN build.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuDriverGetVersion(out int driverVersion);
+
     // ── Device Management ───────────────────────────────────────────────
 
     [LibraryImport(LibName)]
