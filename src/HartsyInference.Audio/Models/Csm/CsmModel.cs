@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -47,21 +48,33 @@ public sealed unsafe class CsmModel : IDisposable
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        // Headless Llama bodies: load layers/norm only (no embed_tokens / lm_head inside the transformer).
+        // Weights may arrive pre-quantized (the AR decode is memory-bandwidth-bound, so quantized projection/head
+        // matrices let the fused GEMV read 2–4× fewer bytes/token). Quantization is done at LOAD time from a disk
+        // cache (see CsmWeightCache) — NOT here — to avoid holding the BF16 model + a quantized copy at once (OOM).
+        // This method just keeps whatever dtype it receives: quantized bodies/heads stay quantized (fused GEMV),
+        // embeds/norms stay F16/F32 (host gather / vector ops).
+
+        // Headless Llama bodies: load layers/norm only (no embed_tokens / lm_head inside the transformer). Quantized
+        // layer weights are kept as-is by the transformer (the matmul backend runs the fused quant GEMV).
         _backbone.LoadWeightsHeadless(w, "backbone");
         _decoder.LoadWeightsHeadless(w, "decoder");
         // Embedding tables stay in their source dtype (BF16 stays BF16 — ~2.4 GB saved on HeartMuLa);
         // row reads convert per-element via CopyRowF32/AddRowF32.
         _textEmbed = KeepF32OrBf16(w["text_embeddings.weight"]);
         for (int i = 0; i < _cfg.NumCodebooks; i++) _audioEmbed[i] = KeepF32OrBf16(w[$"audio_embeddings.{i}.weight"]);
-        _c0Head = WhisperOps.EnsureF32(w["codebook0_head.weight"]);
-        _projW = WhisperOps.EnsureF32(w["projection.weight"]);
-        for (int i = 0; i < _cfg.NumCodebooks - 1; i++) _audioHead[i] = WhisperOps.EnsureF32(w[$"audio_head.{i}.weight"]);
+        // Heads + projection: keep quantized (fused GEMV) if quantized, else F32. The audio heads (128k-vocab) are the
+        // single biggest per-frame weight-stream, so quantizing them is the largest bandwidth win.
+        _c0Head = KeepQuantOrF32(w["codebook0_head.weight"]);
+        _projW = KeepQuantOrF32(w["projection.weight"]);
+        for (int i = 0; i < _cfg.NumCodebooks - 1; i++) _audioHead[i] = KeepQuantOrF32(w[$"audio_head.{i}.weight"]);
         // HeartMuLa-only conditioning weights (absent from CSM TTS checkpoints).
         if (w.TryGetValue("muq_linear.weight", out Tensor? mw)) _muqW = WhisperOps.EnsureF32(mw);
         if (w.TryGetValue("muq_linear.bias", out Tensor? mb)) _muqB = WhisperOps.EnsureF32(mb);
         if (w.TryGetValue("unconditional_text_embedding.weight", out Tensor? ue)) _uncondText = WhisperOps.EnsureF32(ue);
     }
+
+    /// <summary>Keeps a quantized head/projection as-is (fused GEMV path); otherwise forces F32.</summary>
+    private static Tensor KeepQuantOrF32(Tensor t) => t.DType.IsQuantized ? t : WhisperOps.EnsureF32(t);
 
     /// <summary>True when the HeartMuLa conditioning weights (muq_linear + unconditional_text_embedding) loaded.</summary>
     public bool HasMulaConditioning => _muqW is not null && _uncondText is not null;
@@ -185,7 +198,39 @@ public sealed unsafe class CsmModel : IDisposable
             uHidden.Dispose();
         }
 
-        return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale);
+        // Stateless path: no persistent session → depth decoder stays eager (per-frame cache).
+        return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale, session: null, graphEnabled: false);
+    }
+
+    /// <summary>Per-stream CUDA-graph decode state for the backbone: fixed-address input-embedding and output-hidden
+    /// buffers (refreshed/read OUTSIDE any capture), a device position buffer, a warmup counter, and the captured
+    /// single-frame graph once warm. cond and uncond are separate streams (separate KV caches → separate graphs).
+    /// The backbone step for a steady-state frame (one appended row) is captured once and replayed per frame,
+    /// collapsing the ~layers×kernels launches into one <c>cuGraphLaunch</c>. See <see cref="BackboneLast"/>.</summary>
+    internal sealed class GraphStream : IDisposable
+    {
+        private readonly IBackend _backend;
+        public readonly Tensor InEmbed;    // [1,1,bh] — CopyInto'd from the frame's new embedding before each step
+        public readonly Tensor OutHidden;  // [1,1,bh] — post-final-norm backbone hidden, read via ReadResidentInto
+        public readonly ulong DevicePos;
+        public object? Graph;
+        public int Warmed;                 // frames run eagerly-through-the-fixed-buffers before capture
+
+        public GraphStream(IBackend backend, int bh)
+        {
+            _backend = backend;
+            InEmbed = new Tensor(new TensorShape(1, 1, bh), DType.F32);
+            OutHidden = new Tensor(new TensorShape(1, 1, bh), DType.F32);
+            DevicePos = backend.AllocDevicePos();
+        }
+
+        public void Dispose()
+        {
+            if (Graph is not null) { _backend.DisposeGraph(Graph); Graph = null; }
+            if (DevicePos != 0) _backend.FreeDevicePos(DevicePos);
+            InEmbed.Dispose();
+            OutHidden.Dispose();
+        }
     }
 
     /// <summary>Persistent per-utterance decode state: the backbone KV cache (and, for CFG, a parallel
@@ -195,6 +240,15 @@ public sealed unsafe class CsmModel : IDisposable
     {
         internal FixedKvCache Backbone { get; }
         internal FixedKvCache? Uncond { get; }
+        internal GraphStream? CondGraph;     // lazily created on the first graph-eligible (single-row) frame
+        internal GraphStream? UncondGraph;
+        // Persistent depth-decoder caches + graphs (graph mode): the depth KV cache must survive across frames so a
+        // captured depth step keeps valid baked addresses; it is RESET (length→0) at the start of each frame's depth
+        // decode. Lazily created on the first graph-eligible frame; null in the eager path (per-frame caches instead).
+        internal FixedKvCache? DepthCond;
+        internal FixedKvCache? DepthUncond;
+        internal GraphStream? DepthCondGraph;
+        internal GraphStream? DepthUncondGraph;
         private int _disposed;
 
         internal DecodeSession(FixedKvCache backbone, FixedKvCache? uncond)
@@ -206,6 +260,12 @@ public sealed unsafe class CsmModel : IDisposable
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            CondGraph?.Dispose();
+            UncondGraph?.Dispose();
+            DepthCondGraph?.Dispose();
+            DepthUncondGraph?.Dispose();
+            DepthCond?.Dispose();
+            DepthUncond?.Dispose();
             Backbone.Dispose();
             Uncond?.Dispose();
         }
@@ -241,10 +301,13 @@ public sealed unsafe class CsmModel : IDisposable
         bool useCfg = cfgScale != 1f && uncondNewEmbeds is not null;
         int bh = _cfg.Backbone.HiddenSize;
 
-        int tNew = (int)condNewEmbeds.Shape[1];
-        Tensor hidden = _backbone.ForwardEmbeds(backend, condNewEmbeds, 1, tNew, session.Backbone.CurrentLength, session.Backbone);
-        Tensor last = SliceLast(hidden, bh);
-        hidden.Dispose();
+        // CUDA-graph decode collapses each single-row backbone step (~layers×kernels launches, the per-frame hot
+        // path over a whole song) into one graph replay. Only the steady-state one-row appends are graphed; the
+        // frame-0 prefill (many rows) and the standalone uncond dummy stay eager. Env-gated with an eager fallback.
+        bool graphEnabled = EnvSwitch.IsEnabled("HARTSY_CSM_GRAPH", defaultOn: true)
+            && backend.GraphDecodeSupported && _backbone.SupportsGraphDecode(backend);
+
+        Tensor last = BackboneLast(backend, session.Backbone, ref session.CondGraph, condNewEmbeds, graphEnabled, bh);
 
         Tensor? uLast = null;
         if (useCfg)
@@ -260,19 +323,76 @@ public sealed unsafe class CsmModel : IDisposable
             else
             {
                 FixedKvCache uc = session.Uncond ?? throw new InvalidOperationException("CFG StepFrame needs a CFG session (useCfg:true).");
-                Tensor uHidden = _backbone.ForwardEmbeds(backend, uncondNewEmbeds, 1, utNew, uc.CurrentLength, uc);
-                uLast = SliceLast(uHidden, bh);
-                uHidden.Dispose();
+                uLast = BackboneLast(backend, uc, ref session.UncondGraph, uncondNewEmbeds!, graphEnabled, bh);
             }
         }
 
-        return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale);
+        return DecodeFrameTail(backend, last, uLast, ref rng, temperature, topK, topP, cfgScale, session, graphEnabled);
+    }
+
+    /// <summary>Runs one backbone step for a stream and returns its last-position hidden <c>[1,1,bh]</c> (a fresh,
+    /// caller-owned tensor). The eager path (prefill / graph disabled) is a plain <see cref="Qwen2Model.ForwardEmbeds"/>
+    /// + slice. The graph path (steady-state single appended row) refreshes the stream's fixed input buffer and device
+    /// position OUTSIDE any capture, warms a couple of frames eagerly-through-the-fixed-buffers so weights/buffers are
+    /// resident, then captures the single-frame step once and replays it every subsequent frame — reading the hidden
+    /// back with a non-freeing DtoH and returning a device copy the frame tail can consume and dispose.</summary>
+    private Tensor BackboneLast(IBackend backend, FixedKvCache cache, ref GraphStream? gs, Tensor newEmbeds, bool graphEnabled, int bh)
+    {
+        int tNew = (int)newEmbeds.Shape[1];
+        // Eager for prefill (many rows) or when graphing is off. The graph path also advances the cache length, so
+        // cache.CurrentLength stays the single source of truth for the append position in both branches.
+        if (!graphEnabled || tNew != 1)
+        {
+            Tensor hidden = _backbone.ForwardEmbeds(backend, newEmbeds, 1, tNew, cache.CurrentLength, cache);
+            Tensor lastEager = SliceLast(hidden, bh);
+            hidden.Dispose();
+            return lastEager;
+        }
+
+        gs ??= new GraphStream(backend, bh);
+        int pos = cache.CurrentLength;                          // absolute slot this frame's row appends at
+        backend.CopyInto(gs.InEmbed, newEmbeds);                // refresh fixed input OUTSIDE capture
+        backend.WriteDevicePos(gs.DevicePos, pos + 1, pos);     // {kvLen, qOffset} for this frame's append
+        (Tensor cos, Tensor sin) = _backbone.EnsureRopeTableForGraphDecode(backend, cache.MaxSequenceLength);
+
+        const int warmup = 2;   // run a few frames eagerly first so nothing allocates during capture
+        if (gs.Graph is not null)
+        {
+            backend.LaunchGraph(gs.Graph);
+        }
+        else if (gs.Warmed >= warmup)
+        {
+            // Capture records the step without executing it; launch runs this frame. One capture is valid for every
+            // later frame because RoPE/KV-append/attention read the position from gs.DevicePos (refreshed per frame).
+            GraphStream s = gs;
+            gs.Graph = backend.CaptureGraph(() =>
+                _backbone.ForwardGraphDecodeStepEmbeds(backend, s.InEmbed, cache, cos, sin, s.DevicePos, s.OutHidden));
+            if (gs.Graph is not null)
+            {
+                backend.LaunchGraph(gs.Graph);   // captured — run this frame via replay
+            }
+            else
+            {
+                // Backend declined to capture: run eagerly and keep warming (never retry-capture in a tight loop).
+                _backbone.ForwardGraphDecodeStepEmbeds(backend, gs.InEmbed, cache, cos, sin, gs.DevicePos, gs.OutHidden);
+            }
+        }
+        else
+        {
+            _backbone.ForwardGraphDecodeStepEmbeds(backend, gs.InEmbed, cache, cos, sin, gs.DevicePos, gs.OutHidden);
+            gs.Warmed++;
+        }
+        cache.AdvanceLength(1);   // graph step appended one row; keep CurrentLength authoritative
+
+        Tensor last = new(new TensorShape(1, 1, bh), DType.F32);
+        backend.CopyInto(last, gs.OutHidden);   // fresh owned copy; the fixed buffer is reused next frame
+        return last;
     }
 
     /// <summary>Shared frame tail: codebook-0 from the backbone <paramref name="last"/> hidden, then the depth
     /// decoder for codebooks 1..7, with optional CFG against <paramref name="uLast"/>. Disposes both hiddens.</summary>
     private int[] DecodeFrameTail(IBackend backend, Tensor last, Tensor? uLast, ref uint rng,
-        float? temperature, int? topK, float? topP, float cfgScale)
+        float? temperature, int? topK, float? topP, float cfgScale, DecodeSession? session, bool graphEnabled)
     {
         float temp = temperature ?? _cfg.Temperature;
         int tk = topK ?? _cfg.TopK;
@@ -300,8 +420,30 @@ public sealed unsafe class CsmModel : IDisposable
         // to FlashAttention — no per-layer/per-codebook D2H stream-drain + host prefix realloc + H2D re-upload that a
         // host StreamingKvCache incurred (~8 codebooks × decoder layers of cuStreamSynchronize stalls per frame).
         int maxDec = _cfg.NumCodebooks + 1;
-        FixedKvCache dCache = new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
-        FixedKvCache? uCache = useCfg ? new(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec) : null;
+        // Graph mode: the 6 single-token depth steps per frame are captured once and replayed (cond + uncond = two
+        // more graphs). That needs a PERSISTENT depth KV cache (stable baked addresses) reset each frame. Eager mode
+        // (stateless path / graph off / decoder not graph-eligible) keeps the per-frame cache.
+        bool depthGraph = graphEnabled && session is not null && _decoder.SupportsGraphDecode(backend);
+        FixedKvCache dCache;
+        FixedKvCache? uCache;
+        if (depthGraph)
+        {
+            session!.DepthCond ??= new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+            dCache = session.DepthCond;
+            dCache.Reset();
+            if (useCfg)
+            {
+                session.DepthUncond ??= new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+                uCache = session.DepthUncond;
+                uCache.Reset();
+            }
+            else { uCache = null; }
+        }
+        else
+        {
+            dCache = new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec);
+            uCache = useCfg ? new FixedKvCache(_cfg.Decoder.NumHiddenLayers, 1, _cfg.Decoder.NumKeyValueHeads, _cfg.Decoder.HeadDim, maxDec) : null;
+        }
         try
         {
             Tensor dLast = DepthPrefill(backend, last, c0, bh, dh, dCache);
@@ -325,15 +467,22 @@ public sealed unsafe class CsmModel : IDisposable
                 // Feed this codebook's embedding as the next decoder token (skip after the final codebook).
                 if (cb < _cfg.NumCodebooks - 1)
                 {
-                    dLast = DepthStep(backend, _audioEmbed[cb]!, cbVal, bh, dh, dCache);
-                    if (useCfg) uLastDec = DepthStep(backend, _audioEmbed[cb]!, cbVal, bh, dh, uCache!);
+                    if (depthGraph)
+                    {
+                        dLast = DepthStepGraph(backend, _audioEmbed[cb]!, cbVal, bh, dh, dCache, ref session!.DepthCondGraph);
+                        if (useCfg) uLastDec = DepthStepGraph(backend, _audioEmbed[cb]!, cbVal, bh, dh, uCache!, ref session!.DepthUncondGraph);
+                    }
+                    else
+                    {
+                        dLast = DepthStep(backend, _audioEmbed[cb]!, cbVal, bh, dh, dCache);
+                        if (useCfg) uLastDec = DepthStep(backend, _audioEmbed[cb]!, cbVal, bh, dh, uCache!);
+                    }
                 }
             }
         }
         finally
         {
-            dCache.Dispose();
-            uCache?.Dispose();
+            if (!depthGraph) { dCache.Dispose(); uCache?.Dispose(); }   // persistent depth caches live on the session
         }
         last.Dispose();
         uLast?.Dispose();
@@ -365,6 +514,49 @@ public sealed unsafe class CsmModel : IDisposable
         decInput.Dispose();
         Tensor dLast = SliceLast(dHidden, dh);
         dHidden.Dispose();
+        return dLast;
+    }
+
+    /// <summary>Graph-decode version of <see cref="DepthStep"/>: the codebook embedding is projected eagerly (outside
+    /// capture — it depends on the just-sampled value), copied into the stream's fixed input buffer, then the depth
+    /// decoder body runs via the captured single-frame graph (or eagerly during warmup). The projected-input →
+    /// last-hidden step is identical math to <see cref="DepthStep"/>; only the launch mechanics differ. Advances the
+    /// persistent depth cache by one and returns a fresh owned last hidden <c>[1,1,dh]</c>.</summary>
+    private Tensor DepthStepGraph(IBackend backend, Tensor table, int id, int bh, int dh, FixedKvCache cache, ref GraphStream? gs)
+    {
+        Tensor embed = EmbedRow(table, id);                                              // [1,1,bh] host-built
+        Tensor decInput = WhisperOps.ProjectLinear(backend, embed, _projW!, bias: null, 1, 1, bh, dh);
+        embed.Dispose();
+
+        gs ??= new GraphStream(backend, dh);
+        int pos = cache.CurrentLength;
+        backend.CopyInto(gs.InEmbed, decInput);                 // refresh fixed input OUTSIDE capture
+        decInput.Dispose();
+        backend.WriteDevicePos(gs.DevicePos, pos + 1, pos);
+        (Tensor cos, Tensor sin) = _decoder.EnsureRopeTableForGraphDecode(backend, cache.MaxSequenceLength);
+
+        const int warmup = 2;
+        if (gs.Graph is not null)
+        {
+            backend.LaunchGraph(gs.Graph);
+        }
+        else if (gs.Warmed >= warmup)
+        {
+            GraphStream s = gs;
+            gs.Graph = backend.CaptureGraph(() =>
+                _decoder.ForwardGraphDecodeStepEmbeds(backend, s.InEmbed, cache, cos, sin, s.DevicePos, s.OutHidden));
+            if (gs.Graph is not null) backend.LaunchGraph(gs.Graph);
+            else _decoder.ForwardGraphDecodeStepEmbeds(backend, gs.InEmbed, cache, cos, sin, gs.DevicePos, gs.OutHidden);
+        }
+        else
+        {
+            _decoder.ForwardGraphDecodeStepEmbeds(backend, gs.InEmbed, cache, cos, sin, gs.DevicePos, gs.OutHidden);
+            gs.Warmed++;
+        }
+        cache.AdvanceLength(1);
+
+        Tensor dLast = new(new TensorShape(1, 1, dh), DType.F32);
+        backend.CopyInto(dLast, gs.OutHidden);
         return dLast;
     }
 

@@ -24,6 +24,17 @@ public sealed class HartsyInferenceServerOptions
 
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
+
+    /// <summary>Tokens per KV page for each loaded chat (dense/MoE transformer) model's <c>PagedKvPool</c>.</summary>
+    public int KvPageSize { get; set; } = 16;
+
+    /// <summary>Total pages in each loaded chat model's shared KV pool — the real cap on how many concurrent
+    /// chat sequences (and how much total context across them) <see cref="LLM.Generation.DynamicBatchScheduler"/>
+    /// can admit at once for that model. <c>KvPageSize * KvPoolMaxPages</c> tokens of total shared KV capacity.
+    /// Size for your VRAM budget and expected concurrency; admission fails fast with
+    /// <see cref="LLM.Transformer.KvPoolExhaustedException"/> (mapped to HTTP 429) once exhausted, it does
+    /// not degrade silently.</summary>
+    public int KvPoolMaxPages { get; set; } = 1024;
 }
 
 /// <summary>Selectable compute backends for the server.</summary>

@@ -529,6 +529,7 @@ reference embeddings/logits, not just "loads without error".
 | AudioGen | Sound-effect generation (MusicGen-arch, .bin + T5) | 🧪 |
 | ACE-Step | Music generation (flow-matching) | ✅ |
 | YuE | Music generation (dual-stage Llama) | ✅ |
+| HeartMuLa (oss-3B) | Music generation (Sesame-CSM dual-transformer + HeartCodec) | ✅ ~11 fr/s / ~0.9× realtime, RTX 3060 |
 | Stable Audio Open | Music generation | 🏗️ |
 | F5-TTS | Voice cloning (flow-matching DiT) | 🧪 |
 | Codecs (Vocos · EnCodec · DAC · SNAC · Mimi · WavTokenizer · BiCodec · XCodec · Oobleck) | Neural audio codecs | ✅ |

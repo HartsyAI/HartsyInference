@@ -95,6 +95,12 @@ public static class GgufQuantizer
         }
     }
 
+    /// <summary>Quantizes a single tensor (F32/F16/BF16 source) to a target quant dtype — Q8_0, Q4_K, Q5_K, or Q6_K.
+    /// For in-memory quantization of decode-hot weights (projections/heads): the fused GEMV reads the quant bytes
+    /// directly, so a quantized weight streams 2–4× fewer bytes/token. Keep 1-D norms and host-gathered embed tables
+    /// unquantized. Returns a new tensor; the source is unchanged.</summary>
+    public static Tensor Quantize(Tensor src, DType targetDtype) => QuantizeTensor(src, targetDtype);
+
     private static unsafe Tensor QuantizeTensor(Tensor src, DType targetDtype)
     {
         IGgufCodec codec = GgufCodecRegistry.Get(targetDtype);

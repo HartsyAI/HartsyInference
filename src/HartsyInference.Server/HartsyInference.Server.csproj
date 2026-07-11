@@ -20,6 +20,7 @@
     <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
     <ProjectReference Include="..\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
     <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+    <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
     <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
   </ItemGroup>

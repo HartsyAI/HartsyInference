@@ -22,6 +22,161 @@ Status legend: ⬜ todo · 🔧 in progress · ✅ done · 📊 measured
 > on-device MoE routing (would unlock olmoe/qwen2moe/granitemoe for graphing), the big-model GEMV
 > memory-access-pattern redesign (blocked on `ncu` access last attempt).
 
+> **STATUS UPDATE (2026-07-11): on-device repetition penalty for graph decode.** Investigated "extend
+> graph decode past greedy" and found the real gap was narrower than it looked: `SamplerChain.Next`'s own
+> doc comment already establishes that **temperature/top-k/top-p/min-p can never change which token wins a
+> greedy argmax** (temperature is a monotonic scale; top-k/top-p/min-p only ever remove non-max candidates,
+> never the max itself) — **repetition penalty is the only sampler stage whose output can differ for
+> greedy**, since it can genuinely change which index has the highest logit. But graph decode's
+> `ForwardGraphDecodeStep` went straight from `ProjectLogits` to `ArgMaxInto` with no sampler steps at
+> all, so a request with `Greedy=true, RepetitionPenalty>1.0` and graph decode enabled was **silently
+> ignoring the penalty** (raw unpenalized argmax) — a real correctness bug, not just a missing feature.
+> Fixed: two new tiny single-thread kernels (`lm_history_append`, `lm_repetition_penalty_f32` in
+> `native/cuda/lm/lm_f32.cu`) chained into the SAME captured graph between `ProjectLogits` and
+> `ArgMaxInto`. A device history buffer (fixed capacity = KV cache capacity) is appended to once per
+> replay (the current input token — mirrors `generated.Add(next)` timing in the eager loop exactly); the
+> penalty kernel then walks history **sequentially, single-threaded**, replicating
+> `RepetitionPenaltyStep.Apply`'s CPU semantics byte-for-byte, including a token that recurs being
+> penalized cumulatively on each occurrence — a parallel scatter would race on repeated tokens and diverge,
+> so single-thread is a correctness choice, not a shortcut (the loop itself is microseconds, nowhere near
+> the forward pass it rides alongside). **Gate**: new `GraphDecodeRepetitionPenaltyTests` (real qwen2.5-0.5b
+> Q4_K_M checkpoint, CUDA) — eager vs. graph-decode token ids are **byte-identical** with
+> `RepetitionPenalty=1.3`, and confirmed to diverge from the graph-decode output with penalty=1.0 (so the
+> kernel is verifiably engaging, not a false-positive match). Full Cuda.Tests suite otherwise green (5
+> pre-existing, unrelated cuDNN SDPA-engagement failures on this box, nothing touched by this change).
+> **Scope note for future readers:** true non-greedy on-device sampling (temperature/top-k/top-p with a
+> real probabilistic multinomial draw) is a separate, much larger effort — needs GPU sort/select
+> primitives for top-k/top-p and a device RNG matching the CPU xorshift exactly for determinism — and
+> remains unbuilt; it was NOT needed to close the greedy correctness gap described here.
+
+> **STATUS UPDATE (2026-07-11): fused GEMV kernel coverage completed for Q4_0 and Q5_K** — the last two
+> quant types on the Phase 1 checklist's original list (`Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, Q5_0`) that didn't
+> have one yet. Q4_0 is a common legacy/baseline GGUF quant; Q5_K appears in some K-quant mixed schemes.
+> Both previously fell all the way to the dequant-to-F16-then-cuBLAS fallback (Q4_0 had a dequant kernel
+> but no fused GEMV; Q5_K likewise). New kernels: `native/cuda/lm/mul_mat_vec_q4_0_f32.cu` (direct
+> structural adaptation of the existing Q5_0 kernel, minus the high-bit plane) and
+> `native/cuda/lm/mul_mat_vec_q5k_f32.cu` (the existing Q4_K kernel's super-block/warp-ownership layout,
+> extended with Q5_K's extra high-bit plane, analogous to how Q5_0 extends Q4_0). Dispatched in
+> `CudaBackend.LinearImpl` alongside the existing Q5_0 branch (M≤8, K%32==0 for Q4_0, K%256==0 for Q5_K).
+> **Correctness**: new ground-truth test `FusedGemvGroundTruthTests` (quantize/synthesize real block data,
+> dequantize independently via the canonical CPU codec, compute a plain-C# reference matmul, compare
+> against the GPU fused path through the actual `CudaBackend.Linear` entry point) — `avg_err` 3.5e-7 to
+> 5.9e-7 (max 1.9e-6 to 3.8e-6), 3-4 orders of magnitude under the 5e-3 tolerance; this is float-rounding
+> noise, not a layout bug. Existing dequant/QuantizedMatMul regression suites (12 tests) stay green.
+> **Speed**: A/B microbench at a 4096×4096 M=1 decode-shaped `Linear` call (fused vs the exact prior
+> fallback code path, same process): **Q4_0 1.43× (0.123→0.086 ms/call), Q5_K 1.63× (0.117→0.072 ms/call)**.
+> Caveat — this number is a floor, not the real decode-loop win: the microbenchmark's `Linear` call
+> re-copies the full weight tensor host→device every call (both paths equally), which is *not* how
+> production decode works (weights stay resident on-device across tokens), so the fixed per-call transfer
+> cost dilutes the measured ratio. The Q5_0 kernel's real end-to-end result (qwen2.5-0.5b, resident
+> weights, full decode loop) was 2.5× — expect similar or better for Q4_0/Q5_K once measured against a
+> real Q4_0- or Q5_K-quantized checkpoint (none in the local model fleet currently; flagged as follow-up
+> for an end-to-end t/s number, not blocking since the kernel-level correctness + speed direction are both
+> independently confirmed). Remaining quant-kernel gap: Q2_K/Q3_K (new bit-packing, no template) and
+> IQ2/IQ3/IQ4 (lookup-table/codebook dequant, genuinely new kernel design) still fall to the CPU dequant
+> path — scoped separately as Phase 1b, out of this update.
+
+> **STATUS UPDATE (2026-07-11): paged KV cache landed** (`src/HartsyInference.LLM/Transformer/PagedKvPool.cs`,
+> `PagedKvCache.cs`) — the production-readiness plan's Phase 3. Replaces `FixedKvCache`'s single
+> contiguous per-sequence buffer (hard-throws on `batch != 1` — genuinely can't serve more than one
+> sequence per instance) with fixed-size pages allocated on demand from a pool SHARED across sequences: a
+> short sequence no longer reserves VRAM for a worst-case max length, and a finished sequence's pages return
+> to the free-list immediately for the next admission instead of sitting reserved. De-risking spike done
+> first (per the plan): audited every use of `FixedKvCache` inside `GenericTransformer.ForwardBatchDecode`/
+> `Layer.ForwardBatchDecode` and found it only ever touches `IKvCache` interface members — no concrete-type
+> leakage — so the `FixedKvCache[] caches` parameter widened to `IKvCache[]` as a pure mechanical signature
+> change (array covariance meant `ContinuousBatchScheduler`'s existing `FixedKvCache[]` needed zero changes).
+> **Design: "physically paged, logically contiguous."** Pages are non-contiguous physical storage (the real
+> memory-management win), but `KeyPrefix`/`ValuePrefix` gather a sequence's pages into a contiguous scratch
+> tensor each call (new `IBackend.SliceTimeRange` + the existing `KvCacheAppend`, page-by-page) so
+> `FlashAttention`'s existing contiguous-buffer contract needs zero changes — this defers writing a new
+> paged-attention kernel (which reads scattered pages directly, no gather) to a follow-up once the block
+> allocator/table are proven correct, rather than bundling a new attention kernel into the same change as a
+> new memory-management scheme. **Exhaustion policy: reject** — `PagedKvPool.AllocatePage` throws
+> `KvPoolExhaustedException` when the free-list is empty; queueing/eviction policy is left to the Phase 4
+> scheduler, not built into the pool. **Gates**: `PagedKvCacheTests` — (1) byte-for-byte parity against
+> `FixedKvCache` across a multi-page-spanning prefill + 8 page-boundary-crossing decode steps, real CUDA
+> hardware; (2) a synthetic 300-round random admit/grow/evict stress harness with a deliberately undersized
+> page budget (11 exhaustion hits exercised) — the load-bearing assertion is `pool.FreePageCount == maxPages`
+> after everything is disposed, i.e. zero page leaks across the whole random churn. Both pass. Full
+> regression suite otherwise unchanged (same 5 pre-existing unrelated cuDNN SDPA failures as prior updates).
+> **Not done / explicitly deferred**: wiring `PagedKvCache` into `ContinuousBatchScheduler` (still uses
+> `FixedKvCache` — that's Phase 4's replacement scheduler, which is also where dynamic mid-flight admission
+> will actually exercise the pool under real multi-sequence load instead of the synthetic harness), prefix
+> caching (a natural extension once pages are shared/reference-countable, noted as Phase 4 scope), and the
+> gather-eliminating true paged-attention kernel mentioned above.
+
+> **STATUS UPDATE (2026-07-11): true continuous batching landed** — the production-readiness plan's Phase
+> 4. Replaces the old static-batch `ContinuousBatchScheduler` (took a fixed request list up front, ran it to
+> completion, returned nothing until every sequence finished; zero production callers, so removed outright)
+> with `DynamicBatchScheduler` (`src/HartsyInference.LLM/Generation/DynamicBatchScheduler.cs`, behind a new
+> `IBatchScheduler` interface): requests are admitted at ANY time via `SubmitAsync`, a single background loop
+> owns the model/backend/every active sequence's state exclusively, and each sequence is evicted the instant
+> it finishes/stops/cancels rather than waiting for the whole cohort. Each round: drain new submissions
+> (single-sequence prefill on admission — chunked/batched prefill is a further throughput optimization, not
+> required for correctness, left as a follow-up), filter out cancelled/stopped/limit-reached sequences BEFORE
+> decoding, then one batched `ForwardBatchDecode` round over everyone left. KV comes from Phase 3's
+> `PagedKvPool`, shared across every sequence the scheduler admits.
+> **The concurrency audit the plan called for found a real gap and changed the design**: naively raising
+> `InferenceQueue.MaxConcurrency` would have been unsafe, because the shared `CudaBackend` instance (one CUDA
+> stream, non-thread-safe activation/weight caches) is also used by diffusion image generation through the
+> SAME queue — concurrent GPU calls from both workloads on one backend instance would race. Fix: `SubmitAsync`
+> itself is cheap and un-gated (so concurrently-submitted chat requests all admit and batch together), but
+> every GPU-touching step (prefill, each decode round) is routed through an injected gate function that wraps
+> the server's existing `InferenceQueue` — one physical GPU operation at a time server-wide (diffusion or one
+> LLM batch round), while every chat request that arrived since the last round still batches into that one
+> operation. This gets the real concurrency win (N requests sharing 1 GPU op) without the unsafe blanket
+> concurrency bump the plan's initial framing suggested.
+> **Gates**: 5 new `DynamicBatchSchedulerTests` (CPU backend, synthetic weights) — (1) concurrently-submitted
+> requests produce BYTE-IDENTICAL output to running each alone through `TextGenerationPipeline` (batching
+> changes throughput, not answers, on CPU's batch-invariant GEMM — same guarantee the old scheduler
+> documented); (2) a gpuGate that would throw on concurrent re-entry proves the exclusivity actually holds
+> while still producing correct results; (3) requests submitted well after the loop starts still get admitted
+> (dynamic, not a fixed up-front list); (4) cancelling one request doesn't affect concurrently-running others;
+> (5) a too-small KV pool fails admission with `KvPoolExhaustedException` without corrupting other sequences.
+> All pass. **Live end-to-end proof** (real qwen2.5-0.5b checkpoint, real HTTP server): two concurrent chat
+> requests completed in **10.3s total vs an 8.4s single-request baseline** — not ~16.8s, which is what
+> serialized-through-a-queue would have measured. Streaming and mid-flight cancellation (Phase 2) both
+> reverified working through the new path. Full regression suite unchanged (same 5 pre-existing cuDNN
+> failures). **Explicitly deferred, not attempted**: prefix/prompt caching (sharing identical-content pages
+> across sequences) — real additional scope (page reference-counting, prefix hashing, copy-on-write on
+> divergence), documented as a distinct follow-up rather than a partial bolt-on. SSM models still run
+> unbatched through the shared queue directly (no KV cache to page — same scope boundary as Phase 3).
+
+> **STATUS UPDATE (2026-07-11): JSON-mode constrained decoding landed** — the production-readiness plan's
+> Phase 5a. `SamplingOptions.JsonMode` + a new `JsonGrammarStep` (`src/HartsyInference.LLM/Sampling/`) mask
+> every candidate token whose decoded text would make the accumulated output an invalid JSON prefix, so the
+> model can only ever emit syntactically valid JSON — exposed over HTTP as OpenAI's
+> `response_format: {"type":"json_object"}` (the richer schema-constrained `json_schema` mode is explicitly
+> rejected with a clear 400, not silently ignored — real additional scope, not attempted here).
+> **Design**: a hand-written incremental (streaming) JSON validator (`JsonGrammarState`) tracks exactly enough
+> state to answer "is this still a valid prefix" character-by-character without re-parsing from scratch each
+> token (`Clone()` is a cheap stack copy) — the same technique llama.cpp's GBNF grammar sampler uses, just
+> specialized to one fixed grammar instead of an arbitrary user one. Per-token vocab-to-text decoding is
+> cached once per tokenizer instance (`ConditionalWeakTable`), not recomputed per request. Cost is O(vocab
+> size) per generated token — the accepted cost of constrained decoding in general — and only applies when
+> `JsonMode` is set.
+> **Two real bugs were caught by unit tests before this ever touched a real model** — worth calling out
+> because they'd have been serious if shipped: (1) object KEYS never set the "what comes after this string"
+> transition, so every key would silently misroute to an invalid state right after the first `"key"` closed
+> (`{"a":1}`-shaped JSON would have been unparseable — nearly all real JSON has at least one key); (2) the
+> `Clone()` copy constructor forgot to copy two fields added after it was first written (`_pendingAfterContainer`,
+> `_pendingAfterScalar`) — every trial-token check inside `Apply` clones the state, so this would have silently
+> corrupted the container stack on literally every candidate-token evaluation in production, not just an edge
+> case. Both caught by a 51-case test file (`JsonGrammarStateTests`) written BEFORE trusting the mechanism
+> enough to wire it into a live model — went from 31/51 passing to 51/51 after two targeted fixes. Also fixed:
+> `IsComplete` didn't originally account for numbers/literals that end simply because input stops (no
+> explicit terminator character in JSON) — "123" as the whole output was incorrectly reported as "incomplete"
+> forever.
+> **Live end-to-end proof** (real qwen2.5-0.5b checkpoint, real HTTP server, independently verified with
+> Python's `json.loads`): a flat object (`{"name":"John Doe","age":30}`) and a deliberately harder nested
+> request (array of objects + a separate nested object) both produced genuinely valid, parseable JSON and
+> correctly stopped generation (`finish_reason: "stop"`) — proving the "always allow the model's stop tokens
+> once the JSON is grammatically complete" rule works in practice, not just in the state-machine unit tests.
+> Default (non-JSON) text mode reverified unaffected. Full regression suite unchanged (same 5 pre-existing
+> cuDNN failures as every prior phase). **5b (speculative decoding) remains a separate, true stretch item —
+> not started.**
+
 **Method.** Strict measure → optimize → verify loop. Every change must (1) show a speedup on an isolated micro-benchmark, (2) show a speedup on end-to-end t/s, and (3) preserve correctness (greedy token-id match vs the pre-change output). A faster wrong answer is a regression.
 
 ---
@@ -138,8 +293,8 @@ Results in the STATUS UPDATE block at the top of this doc.
 - [ ] Lock the correctness gate: capture Qwen3-0.6B greedy 128-token id sequence as golden.
 - [ ] Record the attribution + baseline numbers in the progress table.
 
-## Phase 1 — Fused dequant-GEMV kernel ⬜ (expected biggest win)
-- [ ] Per quant type (Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, Q5_0): a single CUDA kernel that reads quantized blocks and accumulates the dot product with the input vector directly — no F16/F32 weight materialization, one pass over the weight. Model on llama.cpp `mul_mat_vec_q` (one warp per output row, int8/dp4a where applicable, F32 accumulate).
+## Phase 1 — Fused dequant-GEMV kernel ✅ (expected biggest win)
+- [x] Per quant type (Q4_K, Q5_K, Q6_K, Q8_0, Q4_0, Q5_0): a single CUDA kernel that reads quantized blocks and accumulates the dot product with the input vector directly — no F16/F32 weight materialization, one pass over the weight. Model on llama.cpp `mul_mat_vec_q` (one warp per output row, int8/dp4a where applicable, F32 accumulate). **All six done** (Q4_K/Q6_K/Q8_0/Q5_0 2026-07-04..07-10, Q4_0/Q5_K 2026-07-11 — see status update above).
 - [ ] Wire the decode-path Linear (M small, i.e. ≤ a few rows) to dispatch to the fused GEMV; keep the existing GEMM for prefill (M large).
 - [ ] Micro-bench each kernel vs the current dequant-then-GEMM; require ≥ target GB/s.
 - [ ] End-to-end t/s + correctness. Record.

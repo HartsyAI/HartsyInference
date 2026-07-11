@@ -72,6 +72,33 @@ __global__ void lm_kv_append_f32(
     buffer[bufIdx] = newKv[i];
 }
 
+// ── Paged KV: contiguous time-range extraction ──────────────────────────────
+// output[1,h,t,d] = input[1,h,start+t,d] for t in [0,len). Mirror of lm_kv_append_f32's per-head
+// addressing but reading a sub-range instead of writing one — used by the paged KV cache to (a) split a
+// multi-token append across page boundaries and (b) gather a partially-filled page's occupied prefix
+// before copying it into the contiguous scratch buffer FlashAttention expects. One thread per output element.
+__global__ void lm_kv_slice_time_f32(
+    float* __restrict__ output,
+    const float* __restrict__ input,
+    unsigned int heads,
+    unsigned int tIn,
+    unsigned int headDim,
+    unsigned int start,
+    unsigned int len,
+    unsigned long long total)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+
+    unsigned int d = (unsigned int)(i % headDim);
+    unsigned long long rem = i / headDim;
+    unsigned int t = (unsigned int)(rem % len);
+    unsigned int h = (unsigned int)(rem / len);
+
+    unsigned long long inIdx = (((unsigned long long)h * tIn) + (start + t)) * headDim + d;
+    output[i] = input[inIdx];
+}
+
 // ── MoE expert dispatch: gather + weighted scatter-add ──────────────────────
 // gather: output[m, j] = input[rowIndices[m], j]   (collect an expert's routed tokens into a contiguous group)
 __global__ void lm_gather_rows_f32(
@@ -262,6 +289,52 @@ __global__ void lm_embed_gather_decode_f32(
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= hidden) return;
     output[i] = embedTable[(size_t)tokenId[0] * hidden + i];
+}
+
+// ── Graph-capture decode: repetition-penalty history tracking ───────────────
+// Appends tokenId[0] (the token this step is about to embed — same buffer lm_embed_gather_decode_f32
+// reads) into history[*historyCount], then increments the counter. Runs once per graph replay so the
+// device history buffer tracks exactly the same token sequence CPU-side eager decode passes to
+// RepetitionPenaltyStep (SamplerChain.Next appends the current token to `generated` before sampling
+// the next one — see TextGenerationPipeline.GenerateGraphDecode). Single thread: this is a handful of
+// int writes per step, not a bandwidth-bound op, and a fixed 1×1×1 launch keeps it graph-replay-safe.
+__global__ void lm_history_append(
+    int* __restrict__ history,
+    int* __restrict__ historyCount,
+    const int* __restrict__ tokenId)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    int count = *historyCount;
+    history[count] = tokenId[0];
+    *historyCount = count + 1;
+}
+
+// ── Graph-capture decode: on-device repetition penalty ───────────────────────
+// Applies HF-convention repetition penalty (divide positive logits, multiply negative) to
+// logits[history[i]] for every i in [0, *historyCount), SEQUENTIALLY and single-threaded — this
+// exactly replicates RepetitionPenaltyStep.Apply's CPU semantics byte-for-byte, including a token
+// that occurs more than once in history being penalized cumulatively on each occurrence (order-
+// dependent: the second application divides/multiplies the ALREADY-penalized value). A parallel
+// scatter across history entries would race on repeated tokens and diverge from the CPU reference,
+// so single-thread is a correctness choice here, not just simplicity — the loop itself (at most
+// maxSeqLen iterations of one global read + one global write) is microseconds, nowhere near the
+// per-step cost of the transformer forward pass it runs alongside.
+__global__ void lm_repetition_penalty_f32(
+    float* __restrict__ logits,
+    const int* __restrict__ history,
+    const int* __restrict__ historyCount,
+    float penalty,
+    unsigned int vocabSize)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    int count = *historyCount;
+    for (int i = 0; i < count; ++i)
+    {
+        int token = history[i];
+        if ((unsigned int)token >= vocabSize) continue;
+        float logit = logits[token];
+        logits[token] = logit > 0.0f ? logit / penalty : logit * penalty;
+    }
 }
 
 } // extern "C"

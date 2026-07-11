@@ -49,5 +49,8 @@ public sealed class InferenceQueue : IDisposable
         }
     }
 
+    /// <summary>Current number of requests admitted (running + queued-and-waiting) — for observability/logging.</summary>
+    public int PendingCount => Volatile.Read(ref _pending);
+
     public void Dispose() => _slots.Dispose();
 }

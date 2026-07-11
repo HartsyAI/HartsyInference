@@ -20,6 +20,8 @@ KERNELS=(
     "mul_mat_vec_q6k_f32"
     "mul_mat_vec_q8_0_f32"
     "mul_mat_vec_q5_0_f32"
+    "mul_mat_vec_q4_0_f32"
+    "mul_mat_vec_q5k_f32"
     "quantize_activation_q8_1_f32"
     "mul_mat_vec_q4k_q8_1"
 )

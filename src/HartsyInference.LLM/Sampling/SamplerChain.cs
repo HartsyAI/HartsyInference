@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using HartsyInference.Tokenizers;
 
 namespace HartsyInference.LLM.Sampling;
 
@@ -22,14 +23,28 @@ public sealed class SamplerChain
         _rngState = state == 0 ? DefaultSeed : state;
     }
 
-    /// <summary>Builds the ordered chain (repetition penalty, temperature, top-k, top-p, min-p) including only the steps that are active for the given options.</summary>
-    public static SamplerChain FromOptions(SamplingOptions options)
+    /// <summary>Builds the ordered chain (JSON grammar, repetition penalty, temperature, top-k, top-p, min-p)
+    /// including only the steps that are active for the given options. The grammar step goes FIRST — it's a
+    /// hard structural constraint (a token either can or can't extend valid JSON), not a probability-shaping
+    /// setting, so it must exclude invalid tokens before anything else narrows the candidate set (though
+    /// order doesn't actually change correctness here: -infinity logits stay excluded through every
+    /// downstream elementwise transform regardless of where the mask is applied — first is just clearest).
+    /// <paramref name="tokenizer"/>/<paramref name="vocabSize"/> are required when
+    /// <see cref="SamplingOptions.JsonMode"/> is set (the grammar step must decode candidate token ids to
+    /// text) and otherwise unused.</summary>
+    public static SamplerChain FromOptions(SamplingOptions options, ILlmTokenizer? tokenizer = null, int vocabSize = 0)
     {
         if (options is null)
         {
             throw new ArgumentNullException(nameof(options));
         }
         List<ISamplerStep> steps = new List<ISamplerStep>();
+        if (options.JsonMode)
+        {
+            if (tokenizer is null || vocabSize <= 0)
+                throw new ArgumentException("JsonMode requires a tokenizer and vocabSize.", nameof(options));
+            steps.Add(new JsonGrammarStep(tokenizer, vocabSize));
+        }
         if (options.RepetitionPenalty != 1.0f)
         {
             steps.Add(new RepetitionPenaltyStep(options.RepetitionPenalty));

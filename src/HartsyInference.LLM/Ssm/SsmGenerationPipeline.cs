@@ -30,12 +30,15 @@ public sealed class SsmGenerationPipeline
         _stopIds = [.. tokenizer.StopIds];
     }
 
-    public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null)
+    /// <summary><paramref name="ct"/> is checked once per generated token, mirroring
+    /// <see cref="TextGenerationPipeline.Generate"/>.</summary>
+    public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         int[] promptIds = PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
         if (promptIds.Length == 0) throw new ArgumentException("Prompt produced zero tokens.", nameof(request));
 
-        SamplerChain sampler = SamplerChain.FromOptions(request.Sampling);
+        SamplerChain sampler = SamplerChain.FromOptions(request.Sampling, _tokenizer, _model.VocabSize);
         List<int> generated = new(request.MaxTokens);
         HashSet<int> stops = _stopIds;
         if (request.StopTokenIds is not null) { stops = [.. _stopIds]; foreach (int s in request.StopTokenIds) stops.Add(s); }
@@ -47,6 +50,7 @@ public sealed class SsmGenerationPipeline
         bool stopped = false;
         for (int step = 0; step < request.MaxTokens; step++)
         {
+            ct.ThrowIfCancellationRequested();
             if (stops.Contains(next)) { stopped = true; break; }
             generated.Add(next);
             onToken?.Invoke(next);

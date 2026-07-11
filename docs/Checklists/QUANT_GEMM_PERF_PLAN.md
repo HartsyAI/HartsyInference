@@ -23,6 +23,19 @@ The ledger/findings below remain accurate for the **diffusion/prefill (M large)*
 
 ---
 
+## ⚡ UPDATE 2026-07-11 — Q4_0 and Q5_K fused GEMV kernels (completes the Phase-1 quant list)
+
+Same decode-GEMV story as the 2026-07-04 update above, extended to the two remaining quant types
+that had no fused kernel: **Q4_0** (common legacy/baseline GGUF quant) and **Q5_K** (appears in some
+K-quant mixed schemes). Both previously fell to the dequant-to-F16-then-cuBLAS fallback. New:
+`native/cuda/lm/mul_mat_vec_q4_0_f32.cu`, `native/cuda/lm/mul_mat_vec_q5k_f32.cu`, dispatched in
+`CudaBackend.LinearImpl` next to the existing Q5_0 branch. Correctness gated by a new independent
+ground-truth test (`FusedGemvGroundTruthTests` — CPU-dequant + plain-C# reference matmul, not just
+"two entry points agree"); A/B speed numbers in the ledger below. Full detail:
+[`LLM_DECODE_PERF_GRIND.md`](LLM_DECODE_PERF_GRIND.md) 2026-07-11 status update.
+
+---
+
 ## Why this exists (findings from the kernel/quant audit)
 
 Traced on 2026-06-30. The engine already has the right machinery, but the fast paths are
@@ -262,6 +275,8 @@ dir. Keep negative results.
 | 2026-06-30 | 3060 | 5b attn | flash-decoding | FlashAttn decode F32 | μs | monolithic | split-K | **−31% / −24%** (kv 2k/8k) | **gate PASS 5/5** | `scratchpad ab_fd` | **1.45× / 1.32×**; kv512 stays mono |
 | 2026-06-30 | 4090 | 5b attn | flash-decoding | FlashAttn decode F32 | μs | monolithic | split-K | **−36% / −25%** (kv 2k/8k) | **gate PASS 5/5** | `scratchpad ab_fd` | **1.56× / 1.33×** decode win |
 | | | 5b attn | — | — | finding | — | — | — | — | — | Split-K fills the GPU when the base grid (b·hq·tq, e.g. 32 blocks decode) under-occupies it. New `flash_attn_f32_split.cu` (split+combine), exact vs monolithic (gated 5/5 both GPUs via forced-split). Auto-dispatches for the **plain** path (no sink/alibi/softcap/window → those keep monolithic) when occupancy-limited + kvLen≥1024. Kill switch `HARTSY_FLASH_SPLIT_OFF`. Built via nvrtc 12.9. |
+| 2026-07-11 | 3060 | LLM decode P1 | Q4_0 fused GEMV vs fallback | Linear M=1 K=N=4096 | ms/call | 0.1230 (fallback) | 0.0860 (fused) | **−30% (1.43×)** | **gate PASS** (`FusedGemvGroundTruthTests`, avg_err 5.9e-7) | scratchpad `quant-bench` | floor estimate — includes fixed per-call weight H2D copy in both arms, real resident-weight decode win expected larger (cf. Q5_0's 2.5× e2e) |
+| 2026-07-11 | 3060 | LLM decode P1 | Q5_K fused GEMV vs fallback | Linear M=1 K=N=4096 | ms/call | 0.1173 (fallback) | 0.0721 (fused) | **−39% (1.63×)** | **gate PASS** (`FusedGemvGroundTruthTests`, avg_err 3.5e-7) | scratchpad `quant-bench` | same floor-estimate caveat as Q4_0 |
 | 2026-06-30 | 3060 | 6 diffquant | (measure) | Q4_K deq+GEMM, K3072×N12288 | µs overhead | F16 GEMM | +dequant | **+85% (M1) / +32% (M1k) / +16% (M4k)** | n/a | `scratchpad probe_quant` | resident weights |
 | 2026-06-30 | 4090 | 6 diffquant | (measure) | Q4_K deq+GEMM | µs overhead | F16 GEMM | +dequant | **+89% (M1) / +67% (M1k) / +46% (M4k)** | n/a | `scratchpad probe_quant` | dequant ≈ GEMM (both mem-bound) |
 | | | 6 diffquant | — | — | finding | — | — | — | — | — | Dequant is ~constant (~1–2 ms, O(N·K)) = a full weight-sized memory pass, so it ~doubles per-op memory traffic and does **not** amortize at diffusion M (worse on fast GPUs). Also measured: when weights are **re-uploaded per step** (block-swap/streaming — the actual OOM case), Q4_K halves H2D so quant is *faster* there. |

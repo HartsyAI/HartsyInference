@@ -494,6 +494,22 @@ public sealed class CudaBackend : IBackend
                     cachedOutput = true;
                     return;
                 }
+                // Q4_0: common legacy/baseline GGUF quant. Previously missed every fused GEMV path and fell
+                // back to the ~10-20× slower dequant-to-F16-then-cuBLAS route.
+                if (weight.DType == DType.Q4_0 && K % 32 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ4_0F32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                if (weight.DType == DType.Q5_K && K % 256 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ5KF32(pOutput, pInput, pWeight, pBias, N, K, M, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
             }
 
             // For ComfyUI fp8_scaled checkpoints, every FP8 weight has a per-tensor scalar scale.
@@ -4278,6 +4294,34 @@ public sealed class CudaBackend : IBackend
         }
     }
 
+    /// <summary>Extracts a contiguous time-range from a KV-shaped tensor (device-to-device strided read); used
+    /// by the paged KV cache to split multi-token appends across page boundaries and to gather a
+    /// partially-filled page's occupied prefix.</summary>
+    public unsafe void SliceTimeRange(Tensor output, Tensor input, int start, int len)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+        {
+            ((IBackend)this).SliceTimeRange(output, input, start, len);
+            return;
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int h = (int)input.Shape[1], tIn = (int)input.Shape[2], d = (int)input.Shape[3];
+        ulong pIn = 0;
+        nuint outBytes = GpuTransferHelper.ByteSize(output);
+        ulong pOut = GpuTransferHelper.AllocateDevice(outBytes);
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            _kernels!.LaunchKvSliceTime(pOut, pIn, h, tIn, d, start, len, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     private static unsafe ulong UploadInts(ReadOnlySpan<int> values)
     {
         nuint bytes = (nuint)((long)values.Length * sizeof(int));
@@ -4552,6 +4596,64 @@ public sealed class CudaBackend : IBackend
         int rows = (int)(input.ElementCount / c);
         ulong pIn = GpuTransferHelper.CopyToDevice(input);
         _kernels!.LaunchArgMaxLastDim(outputTokenId, pIn, rows, c, _stream.Handle);
+    }
+
+    // ── Graph-capture decode: repetition penalty ────────────────────────────────────────────────────────────
+
+    public ulong AllocDeviceHistory(int capacity)
+    {
+        _context.EnsureCurrent();
+        return CudaMemory.AllocatePersistent((nuint)(Math.Max(1, capacity) * sizeof(int)));
+    }
+
+    public void FreeDeviceHistory(ulong handle)
+    {
+        if (handle == 0) return;
+        _context.EnsureCurrent();
+        CudaMemory.Free(handle);
+    }
+
+    public ulong AllocDeviceCounter()
+    {
+        _context.EnsureCurrent();
+        return CudaMemory.AllocatePersistent((nuint)sizeof(int));
+    }
+
+    public void FreeDeviceCounter(ulong handle)
+    {
+        if (handle == 0) return;
+        _context.EnsureCurrent();
+        CudaMemory.Free(handle);
+    }
+
+    public unsafe void WriteDeviceCounter(ulong handle, int value)
+    {
+        if (handle == 0) return;
+        _context.EnsureCurrent();
+        int v = value;
+        CudaDriverApi.cuMemcpyHtoDAsync(handle, (nint)(&v), (nuint)sizeof(int), _stream.Handle).ThrowOnError();
+    }
+
+    public void AppendTokenHistoryStep(ulong history, ulong historyCount, ulong tokenId)
+    {
+        if (history == 0 || historyCount == 0 || tokenId == 0) return;
+        _context.EnsureCurrent();
+        EnsureKernels();
+        _kernels!.LaunchHistoryAppend(history, historyCount, tokenId, _stream.Handle);
+    }
+
+    public void ApplyRepetitionPenaltyStep(Tensor logits, ulong history, ulong historyCount, float penalty)
+    {
+        if (history == 0 || historyCount == 0 || logits.DType != DType.F32)
+        {
+            throw new NotSupportedException("ApplyRepetitionPenaltyStep requires F32 logits and valid device history buffers.");
+        }
+        _context.EnsureCurrent();
+        EnsureKernels();
+        int vocabSize = (int)logits.Shape[logits.Shape.Rank - 1];
+        ulong pLogits = GpuTransferHelper.CopyToDevice(logits);
+        _kernels!.LaunchRepetitionPenalty(pLogits, history, historyCount, penalty, vocabSize, _stream.Handle);
+        GpuTransferHelper.CacheActivation(logits, pLogits, GpuTransferHelper.ByteSize(logits));
     }
 
     /// <summary>Backend-agnostic graph capture (see IBackend). Replays require repeated launches (a decode

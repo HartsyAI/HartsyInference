@@ -131,6 +131,22 @@ public sealed class Qwen2Model : IDisposable
     /// <summary>All weight tensors for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights() => _transformer.EnumerateWeights();
 
+    // ── CUDA-graph decode pass-throughs (Sesame CSM / HeartMuLa drive the headless body per frame) ─────────────
+
+    /// <summary>True when this body is eligible for single-token CUDA-graph decode capture (plain dense GQA/RoPE).
+    /// See <see cref="GenericTransformer.SupportsGraphDecode"/>.</summary>
+    public bool SupportsGraphDecode(IBackend backend) => _transformer.SupportsGraphDecode(backend);
+
+    /// <summary>Builds/returns the device-resident graph-decode RoPE table sized to <paramref name="minCapacity"/>.</summary>
+    public (Tensor cos, Tensor sin) EnsureRopeTableForGraphDecode(IBackend backend, int minCapacity)
+        => _transformer.EnsureRopeTableForGraphDecode(backend, minCapacity);
+
+    /// <summary>Graph-capturable single-token body step from a fixed input embedding buffer to a fixed output hidden
+    /// buffer (no token gather, no logits). See <see cref="GenericTransformer.ForwardGraphDecodeStepEmbeds"/>.</summary>
+    public void ForwardGraphDecodeStepEmbeds(IBackend backend, Tensor inEmbed, IKvCache cache,
+        Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor outHidden)
+        => _transformer.ForwardGraphDecodeStepEmbeds(backend, inEmbed, cache, cosTable, sinTable, devicePos, outHidden);
+
     private static void RequireBatchOne(int batch)
     {
         if (batch != 1) throw new NotSupportedException($"Qwen2Model supports batch=1, got {batch}.");

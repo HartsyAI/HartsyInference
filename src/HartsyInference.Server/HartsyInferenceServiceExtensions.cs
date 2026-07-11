@@ -1,10 +1,16 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Sampling;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.Server.Imaging;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 
 namespace HartsyInference.Server;
 
@@ -24,8 +30,8 @@ public static class HartsyInferenceServiceExtensions
             _ => new CpuBackend(),
         });
 
-        services.AddSingleton(sp => new ModelManager(sp.GetRequiredService<IBackend>(), options));
         services.AddSingleton(new InferenceQueue(options.MaxConcurrency, options.MaxQueueDepth));
+        services.AddSingleton(sp => new ModelManager(sp.GetRequiredService<IBackend>(), options, sp.GetRequiredService<InferenceQueue>()));
         return services;
     }
 
@@ -53,7 +59,171 @@ public static class HartsyInferenceServiceExtensions
 
         MapModels(app);
         MapImages(app);
+        MapChat(app);
         MapUnsupportedAudio(app);
+    }
+
+    private static void MapChat(WebApplication app)
+    {
+        // OpenAI multiplexes streaming via the "stream" request field on the SAME route (unlike /v1/images,
+        // which uses a separate /stream URL) — client SDKs expect exactly this, so we match it rather than
+        // inventing a HartsyInference-specific shape.
+        app.MapPost("/v1/chat/completions", async (ChatCompletionRequest req, ModelManager mm, InferenceQueue queue,
+            HttpContext ctx, ILogger<Program> log, CancellationToken ct) =>
+        {
+            // Validation failures return a normal JSON error regardless of req.Stream — nothing has been
+            // written to the response yet (SSE headers are only set once we know the request is valid), so
+            // there's no reason to special-case streaming clients here; they handle a non-2xx JSON body fine.
+            if (req.Model is null || !mm.IsChatModel(req.Model))
+                return Problem(StatusCodes.Status400BadRequest, "Field 'model' must name a loaded chat (LLM/SSM) model (POST /v1/models/load first).", "invalid_request_error");
+            if (req.Messages.Count == 0)
+                return Problem(StatusCodes.Status400BadRequest, "Field 'messages' must be non-empty.", "invalid_request_error");
+            if (req.ResponseFormat is { Type: not "text" and not "json_object" })
+                return Problem(StatusCodes.Status400BadRequest, $"response_format.type '{req.ResponseFormat.Type}' is not supported — only 'text' (default) and 'json_object' are; 'json_schema' (schema-constrained, not just valid-JSON) is a separate, larger feature that isn't built yet.", "invalid_request_error");
+
+            GenerationRequest genReq = BuildGenerationRequest(req);
+            string id = $"chatcmpl-{Guid.NewGuid():N}";
+            long created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            Stopwatch sw = Stopwatch.StartNew();
+            // Backend-contention depth across the WHOLE server (diffusion + every model's chat scheduler share
+            // one InferenceQueue gate) — NOT a per-chat-request queue depth anymore: concurrently-submitted
+            // chat requests against the same model batch together into shared decode rounds rather than each
+            // taking their own queue slot (see DynamicBatchScheduler's "Backend exclusivity" doc).
+            int gateDepthAtEntry = queue.PendingCount;
+
+            if (!req.Stream)
+            {
+                try
+                {
+                    GenerationResult result = await mm.GenerateChatAsync(req.Model!, genReq, onToken: null, ct);
+                    sw.Stop();
+                    LogCompletion(log, req.Model!, gateDepthAtEntry, result.PromptTokens, result.TokenIds.Count, sw.Elapsed);
+
+                    return Results.Ok(new ChatCompletionResponse
+                    {
+                        Id = id,
+                        Created = created,
+                        Model = req.Model!,
+                        Choices = [new ChatCompletionChoice
+                        {
+                            Message = new ChatMessageDto { Role = "assistant", Content = result.Text },
+                            FinishReason = result.StoppedOnStopToken ? "stop" : "length",
+                        }],
+                        Usage = new ChatUsage { PromptTokens = result.PromptTokens, CompletionTokens = result.TokenIds.Count },
+                    });
+                }
+                catch (KvPoolExhaustedException ex)
+                {
+                    return Problem(StatusCodes.Status429TooManyRequests, ex.Message, "rate_limit_error");
+                }
+                catch (QueueFullException ex)
+                {
+                    return Problem(StatusCodes.Status429TooManyRequests, ex.Message, "rate_limit_error");
+                }
+                catch (OperationCanceledException)
+                {
+                    log.LogInformation("chat completion {Id} cancelled by client after {Elapsed}ms", id, sw.ElapsedMilliseconds);
+                    return Results.StatusCode(StatusCodes.Status499ClientClosedRequest);
+                }
+                catch (Exception ex)
+                {
+                    log.LogError(ex, "chat completion {Id} failed", id);
+                    return Problem(StatusCodes.Status500InternalServerError, ex.Message, "server_error");
+                }
+            }
+
+            // Streaming: one SSE "chat.completion.chunk" per token, then a final chunk with finish_reason, then [DONE].
+            ctx.Response.Headers.ContentType = "text/event-stream";
+            Channel<string> events = Channel.CreateUnbounded<string>();
+            int tokenCount = 0;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    events.Writer.TryWrite(SseChunk(new ChatCompletionChunk
+                    {
+                        Id = id, Created = created, Model = req.Model!,
+                        Choices = [new ChatCompletionChunkChoice { Delta = new ChatCompletionDelta { Role = "assistant" } }],
+                    }));
+                    GenerationResult result = await mm.GenerateChatAsync(req.Model!, genReq, onToken: tokenId =>
+                    {
+                        tokenCount++;
+                        // Per-token text isn't available from a raw token id without re-decoding incrementally
+                        // (tokenizers aren't guaranteed to decode single ids to valid UTF-8 in isolation for
+                        // BPE-merged scripts), so stream token COUNT progress and send the real text in the
+                        // final chunk — still gives clients live progress without a garbled-text risk.
+                        events.Writer.TryWrite($"event: token\ndata: {{\"count\":{tokenCount}}}\n\n");
+                    }, ct);
+                    sw.Stop();
+                    LogCompletion(log, req.Model!, gateDepthAtEntry, result.PromptTokens, result.TokenIds.Count, sw.Elapsed);
+
+                    events.Writer.TryWrite(SseChunk(new ChatCompletionChunk
+                    {
+                        Id = id, Created = created, Model = req.Model!,
+                        Choices = [new ChatCompletionChunkChoice
+                        {
+                            Delta = new ChatCompletionDelta { Content = result.Text },
+                            FinishReason = result.StoppedOnStopToken ? "stop" : "length",
+                        }],
+                    }));
+                    events.Writer.TryWrite("data: [DONE]\n\n");
+                }
+                catch (OperationCanceledException)
+                {
+                    log.LogInformation("streaming chat completion {Id} cancelled by client after {Elapsed}ms", id, sw.ElapsedMilliseconds);
+                }
+                catch (Exception ex)
+                {
+                    log.LogError(ex, "streaming chat completion {Id} failed", id);
+                    events.Writer.TryWrite($"event: error\ndata: {{\"message\":{System.Text.Json.JsonSerializer.Serialize(ex.Message)}}}\n\n");
+                }
+                finally
+                {
+                    events.Writer.Complete();
+                }
+            }, ct);
+
+            await foreach (string evt in events.Reader.ReadAllAsync(ct))
+            {
+                await ctx.Response.WriteAsync(evt, ct);
+                await ctx.Response.Body.FlushAsync(ct);
+            }
+            return Results.Empty;
+        });
+    }
+
+    private static GenerationRequest BuildGenerationRequest(ChatCompletionRequest req)
+    {
+        SamplingOptions baseSampling = SamplingOptions.Default;
+        SamplingOptions sampling = baseSampling with
+        {
+            Temperature = req.Temperature ?? baseSampling.Temperature,
+            TopP = req.TopP ?? baseSampling.TopP,
+            TopK = req.TopK ?? baseSampling.TopK,
+            MinP = req.MinP ?? baseSampling.MinP,
+            RepetitionPenalty = req.RepetitionPenalty ?? baseSampling.RepetitionPenalty,
+            Seed = req.Seed ?? baseSampling.Seed,
+            Greedy = req.Temperature is 0f,
+            JsonMode = req.ResponseFormat?.Type == "json_object",
+        };
+        return new GenerationRequest
+        {
+            Messages = [.. req.Messages.Select(m => new ChatMessage(m.Role, m.Content))],
+            MaxTokens = req.MaxTokens ?? 256,
+            Sampling = sampling,
+        };
+    }
+
+    private static string SseChunk(ChatCompletionChunk chunk) =>
+        $"data: {System.Text.Json.JsonSerializer.Serialize(chunk)}\n\n";
+
+    private static void LogCompletion(ILogger log, string model, int queueDepthAtEntry, int promptTokens, int completionTokens, TimeSpan elapsed)
+    {
+        double tokensPerSec = completionTokens > 0 && elapsed.TotalSeconds > 0 ? completionTokens / elapsed.TotalSeconds : 0;
+        log.LogInformation(
+            "chat completion: model={Model} queueDepth={QueueDepth} promptTokens={PromptTokens} completionTokens={CompletionTokens} elapsedMs={ElapsedMs} tokensPerSec={TokensPerSec:F1}",
+            model, queueDepthAtEntry, promptTokens, completionTokens, elapsed.TotalMilliseconds, tokensPerSec);
     }
 
     private static void MapModels(WebApplication app)

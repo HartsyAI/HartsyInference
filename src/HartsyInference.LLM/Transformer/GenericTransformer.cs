@@ -443,18 +443,27 @@ public sealed unsafe class GenericTransformer : IDisposable
         return (_graphDecodeCos!, _graphDecodeSin!);
     }
 
-    /// <summary>One full decode step (embed → every layer → final norm → logits → greedy argmax) using the
-    /// device-indexed graph-decode ops throughout, so the entire step is capturable into one CUDA graph and
-    /// replayed with a single launch. <paramref name="deviceTokenId"/> is read at the start (this step's input
-    /// token) and written at the end (the sampled next token) — the SAME buffer, so replaying the captured
-    /// graph repeatedly chains greedy decode entirely on-device (no D2H between steps; the caller reads it back
-    /// only when it needs the token for streaming/detokenization/stop-checking). Caller guarantees
-    /// <see cref="SupportsGraphDecode"/> and that <paramref name="devicePos"/>/<paramref name="deviceTokenId"/>
-    /// were refreshed (outside any capture region) for this step.</summary>
+    /// <summary>One full decode step (embed → every layer → final norm → logits → [repetition penalty] →
+    /// greedy argmax) using the device-indexed graph-decode ops throughout, so the entire step is capturable
+    /// into one CUDA graph and replayed with a single launch. <paramref name="deviceTokenId"/> is read at the
+    /// start (this step's input token) and written at the end (the sampled next token) — the SAME buffer, so
+    /// replaying the captured graph repeatedly chains greedy decode entirely on-device (no D2H between steps;
+    /// the caller reads it back only when it needs the token for streaming/detokenization/stop-checking).
+    /// When <paramref name="repetitionPenalty"/> != 1.0 (and <paramref name="history"/>/<paramref name="historyCount"/>
+    /// are non-zero device buffers), the current input token is appended to the on-device history and repetition
+    /// penalty is applied to the logits before argmax — replicating <c>RepetitionPenaltyStep</c>, the only sampler
+    /// stage that can change greedy's picked token (temperature/top-k/top-p/min-p never remove the argmax
+    /// survivor, so graph decode doesn't need them). Caller guarantees <see cref="SupportsGraphDecode"/> and that
+    /// <paramref name="devicePos"/>/<paramref name="deviceTokenId"/> were refreshed (outside any capture region)
+    /// for this step.</summary>
     public void ForwardGraphDecodeStep(IBackend backend, Tensor embedTable, IKvCache cache,
-        Tensor cosTable, Tensor sinTable, ulong devicePos, ulong deviceTokenId)
+        Tensor cosTable, Tensor sinTable, ulong devicePos, ulong deviceTokenId,
+        ulong history = 0, ulong historyCount = 0, float repetitionPenalty = 1.0f)
     {
         ThrowIfDisposed();
+        bool applyRepPenalty = repetitionPenalty != 1.0f && history != 0 && historyCount != 0;
+        if (applyRepPenalty) backend.AppendTokenHistoryStep(history, historyCount, deviceTokenId);
+
         Tensor embeds = new(new TensorShape(1, 1, _cfg.HiddenSize), DType.F32);
         backend.EmbedGatherDecodeStep(embeds, embedTable, deviceTokenId);
 
@@ -472,8 +481,34 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         Tensor logits = ProjectLogits(backend, normed, 1);
         normed.Dispose();
+        if (applyRepPenalty) backend.ApplyRepetitionPenaltyStep(logits, history, historyCount, repetitionPenalty);
         backend.ArgMaxInto(deviceTokenId, logits);
         logits.Dispose();
+    }
+
+    /// <summary>Graph-capturable single-token body step for embedding-driven callers (Sesame CSM's backbone and
+    /// depth decoder), where the input is a host-built embedding — not a token id — and the output hidden feeds a
+    /// separate head + a second transformer rather than an on-device argmax. Reads the step's input from the
+    /// fixed-address <paramref name="inEmbed"/> <c>[1,1,H]</c> (the caller refreshes its contents OUTSIDE the
+    /// capture region, like <see cref="ForwardGraphDecodeStep"/>'s device token id) and writes the post-final-norm
+    /// hidden into the fixed-address <paramref name="outHidden"/> <c>[1,1,H]</c> (read back after the launch). Every
+    /// layer uses the device-position graph-step ops, so the whole call captures into one graph and replays with a
+    /// single launch. Neither <paramref name="inEmbed"/> nor <paramref name="outHidden"/> is disposed — both are the
+    /// caller's persistent buffers whose baked addresses the graph reuses across replays. Caller guarantees
+    /// <see cref="SupportsGraphDecode"/> and a refreshed <paramref name="devicePos"/> for this step.</summary>
+    public void ForwardGraphDecodeStepEmbeds(IBackend backend, Tensor inEmbed, IKvCache cache,
+        Tensor cosTable, Tensor sinTable, ulong devicePos, Tensor outHidden)
+    {
+        ThrowIfDisposed();
+        Tensor hidden = inEmbed;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            Tensor next = _layers[i].ForwardGraphStep(backend, hidden, cache, i, cosTable, sinTable, devicePos);
+            if (!ReferenceEquals(hidden, inEmbed)) hidden.Dispose();   // never dispose the caller's fixed input buffer
+            hidden = next;
+        }
+        Normalize(backend, outHidden, hidden, _finalNorm!, _finalNormBias, _cfg.UseLayerNorm, _cfg.RmsNormEps);
+        if (!ReferenceEquals(hidden, inEmbed)) hidden.Dispose();
     }
 
     /// <summary>Batched decode step for continuous batching: <paramref name="embeds"/> is <c>[1, B, hidden]</c>
@@ -482,7 +517,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// hidden state <c>[1, B, hidden]</c>; ready for <see cref="ProjectLogits"/> (rows = B). The heavy
     /// projections/MLP run as one batched GEMM over all B tokens; attention is per-sequence (each token attends
     /// only its own prefix). Advances each cache by 1.</summary>
-    public Tensor ForwardBatchDecode(IBackend backend, Tensor embeds, ReadOnlySpan<int> positions, FixedKvCache[] caches)
+    public Tensor ForwardBatchDecode(IBackend backend, Tensor embeds, ReadOnlySpan<int> positions, IKvCache[] caches)
     {
         ThrowIfDisposed();
         int b = (int)embeds.Shape[1];
@@ -1460,7 +1495,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         /// tokens; attention is looped per sequence (each token attends only its own KV prefix via the scalar
         /// FlashAttention). <paramref name="hidden"/> is <c>[1, B, hidden]</c>.</summary>
         public Tensor ForwardBatchDecode(IBackend backend, Tensor hidden, int b, ReadOnlySpan<int> positions,
-            Tensor cos, Tensor sin, FixedKvCache[] caches, int layerIndex)
+            Tensor cos, Tensor sin, IKvCache[] caches, int layerIndex)
         {
             int h = _cfg.HiddenSize;
             int hq = _cfg.NumHeads;
@@ -1528,7 +1563,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 backend.SliceRows(kMh, k, s * hkv);
                 backend.SliceRows(vMh, v, s * hkv);
 
-                FixedKvCache cache = caches[s];
+                IKvCache cache = caches[s];
                 cache.AppendStep(backend, layerIndex, kMh, vMh);
                 kMh.Dispose(); vMh.Dispose();
                 int kvLen = cache.CurrentLength + 1;   // append did not advance; +1 for the just-written token

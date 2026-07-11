@@ -24,6 +24,13 @@ public sealed record SamplingOptions
     /// <summary>When true, always selects the argmax token and ignores every other setting.</summary>
     public bool Greedy { get; init; } = false;
 
+    /// <summary>When true, every generated token is masked so only syntactically-valid JSON can be produced
+    /// (see <see cref="JsonGrammarStep"/>) — a hard structural constraint, not a probability-shaping setting,
+    /// so unlike <see cref="Temperature"/>/<see cref="TopK"/>/etc. it still applies even when
+    /// <see cref="Greedy"/> is true (matches how <see cref="RepetitionPenalty"/> already behaves under
+    /// greedy — see <see cref="SamplerChain.Next"/>'s doc comment).</summary>
+    public bool JsonMode { get; init; } = false;
+
     /// <summary>Default sampling options (all filters disabled, stochastic draw at temperature 1.0).</summary>
     public static SamplingOptions Default { get; } = new();
 

@@ -630,6 +630,41 @@ public interface IBackend : IDisposable
     /// no D2H between steps. No-op default.</summary>
     void ArgMaxInto(ulong outputTokenId, Tensor input) { }
 
+    // ── Graph-capture decode: repetition penalty ────────────────────────────────────────────────────────────
+    // Greedy graph decode previously skipped the sampler chain entirely (raw argmax on unpenalized logits),
+    // silently ignoring a nonzero repetition penalty — repetition penalty is the ONLY sampler stage that can
+    // change greedy's picked token (temperature is monotonic, top-k/top-p/min-p never remove the argmax
+    // survivor), so it's also the only one graph decode needs to replicate. History (the model's own generated
+    // tokens, not the prompt) lives in a fixed-capacity device buffer appended to once per replay.
+
+    /// <summary>Allocates a persistent int[<paramref name="capacity"/>] device buffer for graph-decode
+    /// repetition-penalty history (0 = unsupported). Free with <see cref="FreeDeviceHistory"/>.</summary>
+    ulong AllocDeviceHistory(int capacity) => 0;
+
+    /// <summary>Frees a buffer from <see cref="AllocDeviceHistory"/>.</summary>
+    void FreeDeviceHistory(ulong handle) { }
+
+    /// <summary>Allocates a persistent 1-int device counter (0 = unsupported). Free with
+    /// <see cref="FreeDeviceCounter"/>.</summary>
+    ulong AllocDeviceCounter() => 0;
+
+    /// <summary>Frees a buffer from <see cref="AllocDeviceCounter"/>.</summary>
+    void FreeDeviceCounter(ulong handle) { }
+
+    /// <summary>Writes a device counter's value (outside capture — e.g. resetting to 0 at session start).</summary>
+    void WriteDeviceCounter(ulong handle, int value) { }
+
+    /// <summary>Appends the current value of <paramref name="tokenId"/> (from <see cref="AllocDeviceTokenId"/>)
+    /// into <paramref name="history"/> at the index in <paramref name="historyCount"/>, then increments the
+    /// counter — graph-replayable (fixed 1-thread launch). No-op default.</summary>
+    void AppendTokenHistoryStep(ulong history, ulong historyCount, ulong tokenId) { }
+
+    /// <summary>Applies HF-convention repetition penalty (divide positive logits, multiply negative) to every
+    /// token id in <paramref name="history"/>[0, *<paramref name="historyCount"/>), sequentially — matches
+    /// <c>RepetitionPenaltyStep</c>'s CPU semantics exactly, including a token occurring more than once being
+    /// penalized cumulatively. Graph-replayable (fixed 1-thread launch). No-op default.</summary>
+    void ApplyRepetitionPenaltyStep(Tensor logits, ulong history, ulong historyCount, float penalty) { }
+
     // ── Graph capture/replay (backend-agnostic handle) ──────────────────────────────────────────────────────
     // Callers outside HartsyInference.Cuda (e.g. TextGenerationPipeline, which must stay backend-agnostic —
     // CPU builds link against IBackend only) capture/replay through this opaque-handle indirection instead of
@@ -805,6 +840,30 @@ public interface IBackend : IDisposable
             int d = (int)(i % outDim);
             long row = i / outDim;
             pOut[i] = pIn[row * inDim + offset + d];
+        }
+    }
+
+    /// <summary>Extracts a contiguous TIME-dimension sub-range from a KV-shaped tensor:
+    /// <c>output[1, h, t, d] = input[1, h, start + t, d]</c> for <c>t in [0, len)</c>. Unlike
+    /// <see cref="SliceLastDim"/> (which slices the last/head-dim axis), this slices dim 2 (the sequence/time
+    /// axis) — used by paged KV caches to (a) split a multi-token append across page boundaries and (b) gather
+    /// a partially-filled page's occupied prefix before copying it into a contiguous scratch buffer for
+    /// attention. <paramref name="input"/> is <c>[1, H, Tin, D]</c>, <paramref name="output"/> is
+    /// <c>[1, H, len, D]</c>.</summary>
+    unsafe void SliceTimeRange(Tensor output, Tensor input, int start, int len)
+    {
+        if (output.DType != DType.F32 || input.DType != DType.F32)
+            throw new NotSupportedException("SliceTimeRange default fallback only supports F32.");
+        int h = (int)input.Shape[1];
+        int tIn = (int)input.Shape[2];
+        int d = (int)input.Shape[3];
+        float* pOut = (float*)output.DataPointer;
+        float* pIn = (float*)input.DataPointer;
+        for (int hi = 0; hi < h; hi++)
+        {
+            long srcBase = ((long)hi * tIn + start) * d;
+            long dstBase = (long)hi * len * d;
+            Buffer.MemoryCopy(pIn + srcBase, pOut + dstBase, (long)len * d * 4, (long)len * d * 4);
         }
     }
 

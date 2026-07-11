@@ -75,7 +75,7 @@ lives in [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS
 | **Mimi** (codec) | 🔬 | SeaNet composed-weight load fixed (DSM checkpoint); DSM 32-cb decode reconcile in progress. Shared with CSM. |
 | **MusicGen / AudioGen** | ✅ | T5-base corr 1.0 + decoder logits corr 0.999999 + EnCodec-32k decode corr 1.0; e2e on CUDA writes music-like audio. 5 bugs fixed (T5/EnCodec). |
 | **YuE** (music, Stage-1) | ✅ | Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → generates 16 kHz vocal audio. Stage-2 multi-codebook out of scope. |
-| **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). |
+| **HeartMuLa** (oss-3B) | ✅ | LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). **Perf (RTX 3060, 3b-base):** ~91 ms/frame ≈ 11 fr/s bf16 (~0.9× realtime, memory-bandwidth-bound). CUDA-graph decode of the backbone + depth steps (`HARTSY_CSM_GRAPH`, default on) is bit-identical + ~5% (launch overhead is only ~8/91 ms). Disk-cached weight quant (`HARTSY_HEARTMULA_QUANT`) works E2E (valid audio, no OOM) but is currently ~8× **slower** — the Q8 fused GEMV underperforms cuBLAS bf16 at M=1; blocked on a quant-GEMV kernel pass. |
 | **RVC** (voice conversion) | 🔧 | RMVPE front-end built; parity pending. |
 | **Demucs** (separation) | 🔧 | Built; parity pending. |
 | **CSM** (Sesame) | 🔧 | Uses Mimi; parity pending. |

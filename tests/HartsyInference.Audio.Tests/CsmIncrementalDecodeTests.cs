@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Csm;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Cpu;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -88,6 +91,94 @@ public sealed unsafe class CsmIncrementalDecodeTests
         _out.WriteLine($"cfg={cfgScale}: {maxFrames} frames × {cfg.NumCodebooks} codebooks, mismatches={mismatches}");
         _out.WriteLine($"  A[0]=[{string.Join(",", framesA[0])}]  A[last]=[{string.Join(",", framesA[maxFrames - 1])}]");
         Assert.Equal(0, mismatches);
+    }
+
+    /// <summary>CUDA graph-decode parity: the backbone CUDA-graph decode path (HARTSY_CSM_GRAPH=1 — one captured
+    /// single-frame step replayed per frame, cond + uncond as separate graphs) must produce <b>bit-identical</b>
+    /// frames to the eager path (HARTSY_CSM_GRAPH=0) on the same weights/seed. The device-position graph kernels are
+    /// numerically identical to eager decode (proven at &lt;1e-6 in GraphDecodeEmbedsTests), so identical logits →
+    /// identical nucleus samples. Runs enough frames to pass warmup and exercise capture + replay. CFG on and off.</summary>
+    [Theory]
+    [InlineData(1.0f)]   // no CFG: single backbone graph
+    [InlineData(1.5f)]   // CFG: cond + uncond backbone graphs (two concurrent captured graphs)
+    public void StepFrame_GraphDecode_MatchesEager(float cfgScale)
+    {
+        if (!CudaContext.IsAvailable()) { _out.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string? ptxDir = ResolvePtxDir();
+        if (ptxDir is null) { _out.WriteLine("SKIPPED: PTX dir not found"); return; }
+
+        CsmConfig cfg = TinyConfig();
+        int[] eagerFrames = RunGraphDecode(cfg, ptxDir, cfgScale, graph: false);
+        int[] graphFrames = RunGraphDecode(cfg, ptxDir, cfgScale, graph: true);
+
+        int mismatches = 0;
+        for (int i = 0; i < eagerFrames.Length; i++) if (eagerFrames[i] != graphFrames[i]) mismatches++;
+        _out.WriteLine($"cfg={cfgScale}: {eagerFrames.Length} codes, graph-vs-eager mismatches={mismatches}");
+        Assert.Equal(0, mismatches);
+    }
+
+    // Finds the compiled PTX kernel dir: the test output's Ptx (copied from the Cuda project), else walk up to source.
+    private static string? ResolvePtxDir()
+    {
+        string local = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (Directory.Exists(local)) return local;
+        for (DirectoryInfo? d = new(AppContext.BaseDirectory); d is not null; d = d.Parent)
+        {
+            string cand = Path.Combine(d.FullName, "src", "HartsyInference.Cuda", "Ptx");
+            if (Directory.Exists(cand)) return cand;
+        }
+        return null;
+    }
+
+    // One StepFrame loop on CUDA with the graph flag forced on/off; returns the flattened frame codes.
+    private static int[] RunGraphDecode(CsmConfig cfg, string ptxDir, float cfgScale, bool graph)
+    {
+        string? prev = Environment.GetEnvironmentVariable("HARTSY_CSM_GRAPH");
+        Environment.SetEnvironmentVariable("HARTSY_CSM_GRAPH", graph ? "1" : "0");
+        try
+        {
+            using CudaBackend backend = new(0, ptxDir);
+            CsmModel model = new(cfg);
+            model.LoadWeights(BuildRandomWeights(cfg, seed: 1234));
+            int bh = cfg.Backbone.HiddenSize;
+            int[] lyrics = { 1, 2, 3, 4, 5 };
+            const int maxFrames = 8;
+            bool useCfg = cfgScale != 1f;
+
+            uint rng = DeterministicRng.Seed(777);
+            List<int[]> frames = new();
+            List<int[]> noFrames = new(0);
+            using CsmModel.DecodeSession session = model.CreateSession(lyrics.Length + maxFrames + 4, maxFrames + 4, useCfg);
+            for (int f = 0; f < maxFrames; f++)
+            {
+                Tensor condNew;
+                Tensor? uncondNew;
+                bool standalone;
+                if (f == 0)
+                {
+                    condNew = BuildContext(model, lyrics, noFrames, bh, includePrefix: true);
+                    uncondNew = useCfg ? new Tensor(new TensorShape(1, 1, bh), DType.F32) : null;
+                    standalone = true;
+                }
+                else
+                {
+                    condNew = model.EmbedAudioFrame(frames[f - 1]);
+                    uncondNew = useCfg ? model.EmbedAudioFrame(frames[f - 1]) : null;
+                    standalone = false;
+                }
+                int[] codes = model.StepFrame(backend, session, condNew, ref rng, null, null, null, useCfg ? cfgScale : 1f, uncondNew, standalone);
+                condNew.Dispose();
+                uncondNew?.Dispose();
+                frames.Add(codes);
+            }
+            model.Dispose();
+
+            int[] flat = new int[maxFrames * cfg.NumCodebooks];
+            for (int f = 0; f < maxFrames; f++)
+                for (int c = 0; c < cfg.NumCodebooks; c++) flat[f * cfg.NumCodebooks + c] = frames[f][c];
+            return flat;
+        }
+        finally { Environment.SetEnvironmentVariable("HARTSY_CSM_GRAPH", prev); }
     }
 
     /// <summary>Builds the running context <c>[1, T, bh]</c> exactly like the pipelines: optional prefix (lyric text

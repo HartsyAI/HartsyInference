@@ -76,6 +76,9 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _lmRopeDecodeSplitHalf;
     private readonly nint _lmRopeDecodeInterleaved;
     private readonly nint _lmEmbedGatherDecodeF32;
+    private readonly nint _lmHistoryAppend;
+    private readonly nint _lmRepetitionPenaltyF32;
+    private readonly nint _lmKvSliceTimeF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
     private readonly CudaModule _flashAttnF32SplitModule;
@@ -243,6 +246,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ8_0F32;
     private readonly CudaModule _mulMatVecQ5_0Module;
     private readonly nint _mulMatVecQ5_0F32;
+    private readonly CudaModule _mulMatVecQ4_0Module;
+    private readonly nint _mulMatVecQ4_0F32;
+    private readonly CudaModule _mulMatVecQ5KModule;
+    private readonly nint _mulMatVecQ5KF32;
     private readonly CudaModule _quantActQ8_1Module;
     private readonly nint _quantActQ8_1F32;
     private readonly CudaModule _mulMatVecQ4KQ8_1Module;
@@ -465,6 +472,9 @@ public sealed class CudaKernels : IDisposable
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
         _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
         _lmEmbedGatherDecodeF32 = _lmF32Module.GetFunction("lm_embed_gather_decode_f32");
+        _lmHistoryAppend = _lmF32Module.GetFunction("lm_history_append");
+        _lmRepetitionPenaltyF32 = _lmF32Module.GetFunction("lm_repetition_penalty_f32");
+        _lmKvSliceTimeF32 = _lmF32Module.GetFunction("lm_kv_slice_time_f32");
         _flashAttnF32Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
         _flashAttnF32SplitModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
@@ -498,6 +508,10 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
         _mulMatVecQ5_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5_0_f32.ptx"));
         _mulMatVecQ5_0F32 = _mulMatVecQ5_0Module.GetFunction("mul_mat_vec_q5_0_f32");
+        _mulMatVecQ4_0Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4_0_f32.ptx"));
+        _mulMatVecQ4_0F32 = _mulMatVecQ4_0Module.GetFunction("mul_mat_vec_q4_0_f32");
+        _mulMatVecQ5KModule = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q5k_f32.ptx"));
+        _mulMatVecQ5KF32 = _mulMatVecQ5KModule.GetFunction("mul_mat_vec_q5k_f32");
         _quantActQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "quantize_activation_q8_1_f32.ptx"));
         _quantActQ8_1F32 = _quantActQ8_1Module.GetFunction("quantize_activation_q8_1_f32");
         _mulMatVecQ4KQ8_1Module = CudaModule.LoadFromFile(Path.Combine(ptxDir, "mul_mat_vec_q4k_q8_1.ptx"));
@@ -1519,6 +1533,22 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_lmKvAppendF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Launches KV time-range extraction: output[1,h,t,d] = input[1,h,start+t,d] for t in [0,len).</summary>
+    public unsafe void LaunchKvSliceTime(ulong output, ulong input, int heads, int tIn, int headDim, int start, int len, nint stream)
+    {
+        ulong outArg = output, inArg = input;
+        uint hArg = (uint)heads, tInArg = (uint)tIn, dArg = (uint)headDim, startArg = (uint)start, lenArg = (uint)len;
+        ulong total = (ulong)heads * (ulong)len * (ulong)headDim;
+        ulong totalArg = total;
+
+        void** args = stackalloc void*[8];
+        args[0] = &outArg; args[1] = &inArg; args[2] = &hArg; args[3] = &tInArg;
+        args[4] = &dArg; args[5] = &startArg; args[6] = &lenArg; args[7] = &totalArg;
+
+        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(_lmKvSliceTimeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Launches MoE row-gather: output[m,j] = input[rowIndices[m], j]. total = M·K.</summary>
     public unsafe void LaunchGatherRows(ulong outPtr, ulong inPtr, ulong idxPtr, int k, ulong total, nint stream)
     {
@@ -1681,6 +1711,29 @@ public sealed class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &embArg; args[2] = &tokArg; args[3] = &hiddenArg;
         uint gridDim = (uint)(((uint)hidden + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmEmbedGatherDecodeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Graph-capture decode: appends the current device token id into the repetition-penalty
+    /// history buffer and increments its counter. Fixed 1×1×1 launch — capturable.</summary>
+    public unsafe void LaunchHistoryAppend(ulong history, ulong historyCount, ulong tokenId, nint stream)
+    {
+        ulong histArg = history, countArg = historyCount, tokArg = tokenId;
+        void** args = stackalloc void*[3];
+        args[0] = &histArg; args[1] = &countArg; args[2] = &tokArg;
+        CudaDriverApi.cuLaunchKernel(_lmHistoryAppend, 1, 1, 1, 1, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Graph-capture decode: applies HF-convention repetition penalty to every token id in
+    /// <paramref name="history"/>[0, *<paramref name="historyCount"/>) sequentially (matches
+    /// <c>RepetitionPenaltyStep</c>'s CPU semantics exactly). Fixed 1×1×1 launch — capturable.</summary>
+    public unsafe void LaunchRepetitionPenalty(ulong logits, ulong history, ulong historyCount, float penalty, int vocabSize, nint stream)
+    {
+        ulong logitsArg = logits, histArg = history, countArg = historyCount;
+        float penaltyArg = penalty;
+        uint vocabArg = (uint)vocabSize;
+        void** args = stackalloc void*[5];
+        args[0] = &logitsArg; args[1] = &histArg; args[2] = &countArg; args[3] = &penaltyArg; args[4] = &vocabArg;
+        CudaDriverApi.cuLaunchKernel(_lmRepetitionPenaltyF32, 1, 1, 1, 1, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches last-dim slice: out[row,d] = in[row, offset+d], in row stride = inDim.</summary>
@@ -2188,6 +2241,16 @@ public sealed class CudaKernels : IDisposable
     public void LaunchMulMatVecQ5_0F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecImpl(_mulMatVecQ5_0F32, output, input, weight, bias, N, K, M, stream);
 
+    /// <summary>Fused Q4_0 × F32 matrix-vector product for decode (M small). Same geometry as the Q5_0 GEMV.
+    /// Q4_0 is a common legacy/baseline GGUF quant that previously missed every fused GEMV path.</summary>
+    public void LaunchMulMatVecQ4_0F32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ4_0F32, output, input, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q5_K × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV,
+    /// extended with Q5_K's extra high-bit plane.</summary>
+    public void LaunchMulMatVecQ5KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ5KF32, output, input, weight, bias, N, K, M, stream);
+
     /// <summary>Quantizes an F32 activation [M,K] to int8 (Q8_1): xq int8 + per-32-block scale xd + int-sum xs.
     /// One warp per 32-block.</summary>
     public unsafe void LaunchQuantizeActivationQ8_1(ulong xq, ulong xd, ulong xs, ulong x, int M, int K, nint stream)
@@ -2294,6 +2357,8 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ6KModule?.Dispose();
         _mulMatVecQ8_0Module?.Dispose();
         _mulMatVecQ5_0Module?.Dispose();
+        _mulMatVecQ4_0Module?.Dispose();
+        _mulMatVecQ5KModule?.Dispose();
         _quantActQ8_1Module?.Dispose();
         _mulMatVecQ4KQ8_1Module?.Dispose();
     }

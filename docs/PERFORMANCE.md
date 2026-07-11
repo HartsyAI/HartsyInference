@@ -177,6 +177,27 @@ rounds land:
 
 ---
 
+### Audio — autoregressive music (HeartMuLa / Sesame-CSM)
+
+Different metric from the image models above. The LM decodes codec frames **autoregressively at 12.5 Hz**, so
+the headline is **milliseconds per frame** (lower is better), measured on an **RTX 3060** (not the 4090 above),
+HeartMuLa-oss-3B `3b-base`, 4 s clip, warm, steady-state (frames 10–50), cond+uncond CFG. No ComfyUI baseline.
+
+| Config | ms/frame | frames/s | ≈ realtime (AR decode) |
+|---|---:|---:|---:|
+| bf16 (baseline) | 91.5 | 10.9 | ~0.87× |
+| + CUDA-graph decode (`HARTSY_CSM_GRAPH`, **default on**) | ~86–90 | ~11.2–11.7 | ~0.9× |
+
+The per-frame cost is **almost entirely per-token weight streaming** (cond+uncond, ~360 GB/s on the 3060):
+backbone 3B ≈ 33 ms + depth decoder ≈ 23 ms + heads/embeds — i.e. HeartMuLa is **memory-bandwidth-bound, not
+launch-bound**. CUDA-graph decode captures the single-frame backbone + depth steps as replayable graphs
+(bit-identical audio) and removes the ~8 ms/frame of launch overhead → **~5%, which is the honest ceiling here**.
+Weight **quantization** is the real lever on paper (Q8 ≈ 2×, Q4 ≈ 3.6× less bandwidth), but the current Q8 fused
+GEMV is ~8× slower than cuBLAS bf16 at M=1 for these shapes, so it is **not yet a win** — see
+`HARTSY_HEARTMULA_QUANT` below. Verify audio coherence on every run; a fast broken decode is not a result.
+
+---
+
 ## 6. Experimental and diagnostic switches
 
 Everything below is **default-off**, strict opt-in (`=1` only), and not part of the supported profile.
@@ -185,6 +206,8 @@ Semantics may change between versions.
 | Switch | Purpose |
 |---|---|
 | `HARTSY_DIT_GRAPH` | CUDA-graph capture of the denoise step. Tri-state: architectures where the per-generation graph is a validated win run it **by default** (Chroma — the full CFG pair replays as one `cuGraphLaunch`, self-disables on capture failure); other opted-in models (Z-Image, Krea2) stay opt-in (`=1`). `=0` kills it everywhere |
+| `HARTSY_CSM_GRAPH` | HeartMuLa / Sesame-CSM autoregressive decode: capture the single-frame **backbone + depth-decoder** steps as CUDA graphs (cond + uncond = 2–4 graphs) and replay one `cuGraphLaunch` per frame. **Default-on** — verified bit-identical to eager; `=0` forces the eager path. ~5% on this bandwidth-bound model (launch overhead is only ~8 ms of ~91 ms/frame) |
+| `HARTSY_HEARTMULA_QUANT` | Quantize the HeartMuLa LM weights (`q8_0`/`q4_k`/`q5_k`/`q6_k`) to a disk-cached GGUF once (streaming, no OOM), then load from cache. Correct (valid audio) but **currently SLOWER** — the Q8 fused GEMV underperforms cuBLAS bf16 at M=1 for the CSM shapes (N=K=3072), so bandwidth savings don't translate to speed yet. Experimental, off by default; needs a quant-GEMV kernel pass first |
 | `HARTSY_SDPA_V2`, `HARTSY_SDPA_FORCE_FLASH`, `HARTSY_SDPA_FORCE_TILED` | Alternate attention kernels, validation only |
 | `HARTSY_SDPA_F16` / `HARTSY_SDPA_NO_F16` | Force/kill the F16 SDPA path for **all** callers (per-call `allowF16` is the supported mechanism) |
 | `HARTSY_TENSORCORE_GEMM`, `HARTSY_FP8_F16`, `HARTSY_FP8_F32`, `HARTSY_HIGH_PRECISION_GEMM`, `HARTSY_NO_TF32` | GEMM A/B-benchmarking toggles |

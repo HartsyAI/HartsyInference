@@ -35,3 +35,28 @@ decoder** (SQ-Codec target); encoder fuses Whisper/WavLM semantic features.
 - [ ] **Staged:** the **HeartCodec** flow-matching RVQ decoder (reuse `ConditionalCfm` + the conv codec work),
   the **MuQ-MuLan** style embedder (net-new conditioning encoder; currently lyrics-only), and the sharded
   safetensors loader / exact key reconciliation.
+
+## Performance (RTX 3060, `3b-base`, 4 s clip, cond+uncond CFG)
+
+The LM decodes codec frames autoregressively at **12.5 Hz**, so the metric is **ms/frame**. Per-frame time is
+**almost entirely per-token weight streaming** (~360 GB/s): backbone 3B ≈ 33 ms + depth decoder ≈ 23 ms + heads
+— HeartMuLa is **memory-bandwidth-bound, not launch-bound**. This shapes which optimizations pay off.
+
+| Config | ms/frame | fr/s | Notes |
+|---|---:|---:|---|
+| bf16 baseline | 91.5 | 10.9 | ~0.87× realtime (AR decode only) |
+| + CUDA-graph decode (`HARTSY_CSM_GRAPH`, default on) | ~86–90 | ~11.2–11.7 | **bit-identical**, ~5% |
+
+- **CUDA-graph decode** ([`CsmModel`](../../src/HartsyInference.Audio/Models/Csm/CsmModel.cs)): the single-frame
+  backbone step and each depth-decoder step are captured once (via
+  [`GenericTransformer.ForwardGraphDecodeStepEmbeds`](../../src/HartsyInference.LLM/Transformer/GenericTransformer.cs))
+  and replayed per frame — cond + uncond = up to 4 concurrent graphs. It removes the ~8 ms/frame of kernel-launch
+  overhead → **~5%, the honest ceiling** for a bandwidth-bound model (a launch-bound model like the FX decoders
+  gains 2×+ from the same technique). Depth uses persistent per-session KV caches reset each frame.
+- **Weight quantization** ([`CsmWeightCache`](../../src/HartsyInference.Audio/Models/Csm/CsmWeightCache.cs),
+  `HARTSY_HEARTMULA_QUANT=q8_0|q4_k`): quantizes the projection/head matrices (keeps embeds/norms F16) **once** to
+  a disk GGUF cache (streaming convert → no OOM; must run **post-`Remap`** since the remap splits the combined
+  audio embed/head tensors), then mmaps the ~4.5 GB Q8 cache. On paper this is the real lever (Q8 ≈ 2×, Q4 ≈ 3.6×
+  less bandwidth), and it produces **valid audio** — but the engine's Q8 fused GEMV (`LaunchMulMatVecQ8_0F32`) is
+  currently **~8× slower than cuBLAS bf16** at M=1 for these shapes, so quant is **not yet a win**. Realizing it
+  needs a quant-GEMV kernel pass, not more wiring.

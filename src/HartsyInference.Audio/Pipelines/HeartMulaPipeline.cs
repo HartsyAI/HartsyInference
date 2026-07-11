@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.Csm;
 using HartsyInference.Audio.Models.HeartMula;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelHandler.Gguf;
 
 namespace HartsyInference.Audio.Pipelines;
 
@@ -15,6 +16,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     private readonly HeartMulaConfig _cfg;
     private readonly CsmModel _lm;
     private readonly HeartCodecDecoder _codec;
+    private GgufLoader? _quantCacheLoader;   // owns the mmap of the disk-quantized LM weights (kept alive)
     private int _disposed;
 
     public HeartMulaPipeline(HeartMulaConfig cfg)
@@ -29,9 +31,26 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
     public HeartCodecDecoder Codec => _codec;
 
     /// <summary>Loads the LM weights from the **raw** HeartMuLa checkpoint (torchtune layout). The keys are
-    /// remapped onto the engine layout by <see cref="HeartMulaCheckpointConverter"/> first.</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w) =>
-        _lm.LoadWeights(HeartMulaCheckpointConverter.Remap(w, _cfg));
+    /// remapped onto the engine layout by <see cref="HeartMulaCheckpointConverter"/> first.
+    /// <para>When <paramref name="quant"/> + <paramref name="cacheGgufPath"/> are given, the REMAPPED (engine-layout)
+    /// weights are quantized to a disk GGUF cache once and loaded from it thereafter (see <see cref="CsmWeightCache"/>)
+    /// — 2–4× less per-token weight streaming on the bandwidth-bound AR decode. Quantization MUST run post-remap: the
+    /// remap splits the combined audio embed/head tensors (needs them unquantized) and the raw torchtune keys don't
+    /// match the engine-layout quant policy.</para></summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string? quant = null, string? cacheGgufPath = null)
+    {
+        Dictionary<string, Tensor> remapped = HeartMulaCheckpointConverter.Remap(w, _cfg);
+        if (!string.IsNullOrEmpty(quant) && !string.IsNullOrEmpty(cacheGgufPath) && CsmWeightCache.ResolveQuant(quant) is not null)
+        {
+            (IReadOnlyDictionary<string, Tensor> qWeights, GgufLoader? loader) = CsmWeightCache.LoadQuantized(remapped, cacheGgufPath, quant);
+            _quantCacheLoader = loader;
+            _lm.LoadWeights(qWeights);
+        }
+        else
+        {
+            _lm.LoadWeights(remapped);
+        }
+    }
 
     /// <summary>Loads the HeartCodec decoder weights (separate checkpoint from the LM). Call before
     /// <see cref="Generate"/>; <see cref="GenerateCodes"/> alone needs only the LM weights.</summary>
@@ -193,6 +212,7 @@ public sealed unsafe class HeartMulaPipeline : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _lm.Dispose();
         _codec.Dispose();
+        _quantCacheLoader?.Dispose();
         GC.SuppressFinalize(this);
     }
 
