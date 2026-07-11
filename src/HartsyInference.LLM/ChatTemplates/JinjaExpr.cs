@@ -360,6 +360,20 @@ internal static class ExprParser
         return e;
     }
 
+    /// <summary>Parses a <c>{% for x in SEQ [if FILTER] %}</c> tag's iterable: the sequence expression at the
+    /// <c>or_expr</c> level (deliberately NOT <see cref="ParseTernary"/> — real Jinja disallows a bare ternary
+    /// here specifically because <c>a if c else b</c> and <c>seq if filter</c> would otherwise be ambiguous),
+    /// then an optional trailing <c>if</c> filter clause (no <c>else</c> — that's what distinguishes it from a
+    /// ternary).</summary>
+    public static (Expr seq, Expr? filter) ParseForIterable(string src)
+    {
+        Tokenizer tz = new(src);
+        Expr seq = ParseOr(tz);
+        Expr? filter = tz.TryKeyword("if") ? ParseOr(tz) : null;
+        tz.ExpectEnd();
+        return (seq, filter);
+    }
+
     private static Expr ParseTernary(Tokenizer t)
     {
         Expr e = ParseOr(t);

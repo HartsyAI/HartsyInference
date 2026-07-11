@@ -8,7 +8,7 @@ HartsyInference loads `.safetensors`, `.gguf`, and PyTorch `.pt`/`.ckpt` checkpo
 > **The recommended way to run HartsyInference is inside [SwarmUI](https://github.com/mcmonkeyprojects/SwarmUI) via the [HartsyInference backend extension](https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend).** It registers HartsyInference as a SwarmUI backend (a pure-C# alternative to the ComfyUI backend), so you get a full generation UI, model management, LoRA, and video/audio output with no Python install. HartsyInference is not building its own front-end. You can also consume the engine directly as [NuGet libraries](#quick-start-library) or through the bundled [sample CLIs](#quick-start-cli-developer-tool).
 
 > [!NOTE]
-> HartsyInference ships with **native LLM text generation** (Qwen, Llama, Mistral, quantized GGUF inference), plus diffusion image models, speech-to-text, text-to-speech, music generation, vision embeddings & detection, video generation, 3D mesh, and real-time interactive world models, all in C#.
+> HartsyInference ships with **native LLM text generation** (Qwen/Llama/Mistral/Gemma/Phi/Qwen3.5 and more, MoE/MLA giants like DeepSeek-V3 and Kimi-K2 built for bigger hardware, quantized GGUF inference), plus diffusion image models, speech-to-text, text-to-speech, music generation, vision embeddings & detection, video generation, 3D mesh, and real-time interactive world models, all in C#. See [Supported Models](#supported-models) for the full per-architecture status.
 
 ---
 
@@ -440,16 +440,49 @@ Per-op MatMul / Conv2D / norm / SDPA / elementwise timings against PyTorch, with
 
 ### Language / Text Generation
 
-| Model | Category | Status |
+Full architecture-by-architecture bring-up notes, bugs found, and verification methodology:
+[`docs/Checklists/MODEL_STATUS_LLM.md`](docs/Checklists/MODEL_STATUS_LLM.md) (what's verified today) and
+[`docs/Checklists/LLM_MODEL_COVERAGE.md`](docs/Checklists/LLM_MODEL_COVERAGE.md) (the completion plan + history).
+
+**Dense decoders — verified end-to-end on a 3060:**
+
+| Model | Notes | Status |
 |---|---|---|
-| Qwen2.5 (0.5B → 7B) | LLM (native inference) | ✅ |
-| Qwen3 (0.6B → 7B) | LLM (native inference) | ✅ |
-| Llama-3.x (incl. Llama-3.2-Vision/mllama) | LLM (native inference) | ✅ |
-| Mistral (dense) | LLM (native inference) | ✅ |
-| Nemotron, EXAONE, Granite / Granite-MoE, RWKV-6/7, Mamba/Mamba-2 | LLM (native inference) | ✅ |
-| Gemma-4 (E2B/E4B mobile, verified; 31B-dense/26B-A4B-MoE built, untested — VRAM) | LLM (native inference) | ✅ / 🧪 |
-| Qwen3.5 (0.8B verified; 2B/4B/9B same code path, untested) | LLM (native inference, Gated DeltaNet hybrid) | ✅ / 🧪 |
-| Quantized GGUF (Q4/Q5/Q6/Q8) | LLM (quantized inference, all models) | ✅ |
+| Llama 1/2/3.x, Mistral, TinyLlama, SmolLM, Yi | `llama`-dialect family, interleaved RoPE | ✅ |
+| Qwen2 / Qwen2.5 (0.5B → 7B) | split-half RoPE, QKV bias | ✅ |
+| Qwen3 (0.6B → 7B) | per-head Q/K RMSNorm, decoupled head_dim | ✅ |
+| Gemma 2 / 3 (text) | GeGLU, sandwich norm, dual-RoPE, logit soft-cap | ✅ |
+| **Gemma-4** (Apr 2026 — E2B/E4B mobile) | per-layer embeddings, per-layer head-dim (global≠local), cross-layer KV-cache sharing, weightless V-norm | ✅ |
+| Phi-3 / Phi-3.5-mini / Phi-4-mini | fused QKV, LongRope, partial rotary | ✅ |
+| StableLM-2, Granite-3, Cohere Command-R (cohere2) | partial rotary+bias / scalar multipliers / parallel-residual+NoPE | ✅ |
+| Nemotron, EXAONE, RWKV-6/7, Mamba/Mamba-2 | squared-ReLU / RoPE-pairing fix / recurrent (see below) | ✅ |
+| **Qwen3.5** (Feb 2026 — 0.8B–9B dense) | **Gated DeltaNet hybrid**: regular attention every 4th layer, delta-rule linear attention the rest — new `ISsmModel`, not `GenericTransformer` | ✅ |
+
+**MoE / MLA — built and component-verified against HF/host references; end-to-end deferred to bigger hardware
+(all exceed 12GB):**
+
+| Model | Notes | Status |
+|---|---|---|
+| OLMoE, Granite-MoE | whole-vector Q/K norm; scalars+MoE | ✅ verified e2e (small enough) |
+| Mixtral 8x7B, Qwen3-MoE 30B-A3B/235B | config+mapper+stacked-expert split wired | 🧪 build-defer |
+| DeepSeek-V2-Lite | full MLA path built; loads, OOMs at preload on 12GB | 🧪 build-defer |
+| DeepSeek-V3 671B / Kimi-K2 1T | MLA + q-LoRA + node-limited MoE routing, slice-verified vs HF | 🧪 build-defer |
+| GPT-OSS 20B / 120B | per-head attention sinks, slice-verified vs a reference softmax | 🧪 build-defer |
+| **Gemma-4 31B-dense / 26B-A4B-MoE** | same verified E2B code path + a parallel dense+MoE FFN branch (routes IN PARALLEL with, not instead of, the dense FFN — unique to this arch) | 🧪 build-defer |
+| Qwen3.5-MoE (35B-A3B / 122B-A10B / 397B-A17B) | separate `qwen35moe` GGUF arch — not yet wired | ⬜ not started |
+
+**Vision-language (VLM):** Gemma-3-4B-vision, SmolVLM2-2.2B, LLaVA-1.5-7B, Qwen2.5-VL-3B/7B, Llama-3.2-11B-Vision
+(mllama, gated cross-attention) — all ✅ verified e2e.
+
+**Embeddings / rerankers:** bge-small, all-MiniLM-L6-v2, nomic-embed-text-v1.5, Qwen3-Embedding-0.6B (covers
+gte-Qwen2/e5-mistral), bge-reranker-v2-m3 — all ✅ cosine=1.0 vs HF. mxbai-embed-large is structurally the same
+`bert`-arch path, not independently re-run.
+
+**Non-transformer:** Mamba-1 (✅ cosine=1.0 vs HF), RWKV-6 (✅ cosine=1.0 vs the official `rwkv` package),
+T5/FLAN-T5 encoder-decoder (✅ cosine=1.0 vs HF) — RWKV-7/Mamba-2 are near-variants of the verified paths.
+
+Quantized GGUF (Q4/Q5/Q6/Q8) is ✅ supported across every model above — decode-validated per-quant against F32
+reference embeddings/logits, not just "loads without error".
 
 ### Image Generation
 

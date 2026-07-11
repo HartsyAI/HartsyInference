@@ -153,7 +153,9 @@ public static class CudnnRuntime
             if (string.IsNullOrEmpty(url))
             {
                 // NVIDIA redist. Version is pinned but overridable; the redist layout is stable per major.
-                string ver = Environment.GetEnvironmentVariable("HARTSY_CUDNN_VERSION") ?? "9.6.0.74";
+                // NOTE: the pin MUST have a build for the running CUDA major — 9.6.0.74 shipped only cuda11/12,
+                // so a CUDA-13 box needs >= 9.12 (first cuda13 redist). 9.13.0.50 = newest with a clean cuda13 index.
+                string ver = Environment.GetEnvironmentVariable("HARTSY_CUDNN_VERSION") ?? "9.13.0.50";
                 string ext = win ? "zip" : "tar.xz";
                 url = $"https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/{plat}/" +
                       $"cudnn-{plat}-{ver}_cuda{cudaMajor}-archive.{ext}";

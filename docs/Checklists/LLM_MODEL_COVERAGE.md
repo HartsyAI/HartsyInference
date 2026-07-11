@@ -300,7 +300,12 @@ soft_emb_norm → input_projection → splice 256 embeddings at `<image_soft_tok
 | Qwen2.5-VL (3B + 7B), Gemma-3-vision, LLaVA, MiniCPM-V | 4 | ✅ |
 | Llama-3.2-Vision (11B) | 4/8b | ✅ verified e2e (tower cos=1.0; red→red, blue square→blue square) |
 | nomic-embed / bge / MiniLM | 5 | ✅ |
+| mxbai-embed-large | 5/6b | structurally verified (plain `bert` arch, same `BertEmbeddingModel` path as bge/MiniLM which are cosine=1.0); not independently re-run this pass |
 | GPT-OSS | 5/8c | `[~]` sinks done & slice-verified; 20B+ e2e build-defer |
+| Gemma-4 (E2B/E4B mobile) | new, 2026-07-10 | ✅ verified e2e (E2B: PLE + per-layer head-dim + cross-layer KV-sharing + weightless V-norm) |
+| Gemma-4 (31B-dense / 26B-A4B-MoE) | new, 2026-07-10 | `[~]` build-defer (identical code path incl. parallel dense+MoE branch; compiles clean, >12GB) |
+| Qwen3.5 (0.8B–9B dense, Gated DeltaNet hybrid) | 7c, 2026-07-10 | ✅ verified e2e (0.8B) — see Phase 7c |
+| Qwen3.5-MoE (35B-A3B/122B-A10B/397B-A17B) | not started | ❌ separate `qwen35moe` GGUF arch, no MoE FFN wired into the Gated DeltaNet layer yet |
 
 ---
 
@@ -360,8 +365,19 @@ The config-driven transformer does NOT cover these; each needs new core primitiv
       and **matches at cosine = 1.000000, argmax 281** (maxdiff 1e-4). To fit the 1.6B F32 model in limited host RAM,
       the [out,in] relabels are **no-copy `Reshape` views** (originals held alive) rather than copies — copies would
       double the 6.4 GB model and OOM. RWKV-7 is a near-variant (generalized delta rule).
-- [ ] **7c. Hybrid SSM+attention** — Jamba, Zamba2, Granite-4.0, Nemotron-H (Mamba blocks interleaved with attention +
-      MoE). Composes 7a + the existing attention/MoE once 7a lands. Some fit at Q4.
+- [x] **7c. Hybrid SSM+attention — Qwen3.5 (Gated DeltaNet) VALIDATED e2e (2026-07-10).** `Qwen35Model`
+      (`HartsyInference.LLM.Ssm`, new `ISsmModel` — NOT `GenericTransformer`, since it mixes two attention
+      mechanisms in one model: regular GQA+RoPE every `full_attention_interval`-th layer, **Gated DeltaNet**
+      (delta-rule linear attention) the rest, even on the smallest 0.8B model). Gated DeltaNet layer: fused QKV
+      → causal Conv1d+SiLU → per-head L2-norm on Q/K → sequential delta-rule recurrence
+      (`S_t=α_t·S_{t-1}+β_t(v_t−S_{t-1}k_t)k_t^T`, `o_t=S_t·q_t`) → gated RMSNorm(o,silu(z)) → out_proj. Ported
+      cold from llama.cpp's `src/models/{qwen35.cpp, delta-net-base.cpp}` (no local reference model existed).
+      Text-only M-RoPE degenerates to ordinary partial-rotary RoPE (every section shares one position with no
+      multimodal input) — no M-RoPE machinery needed. **Verified e2e**: Qwen3.5-0.8B (Q8_0), coherent + factually
+      correct generation over ~100 tokens. Real bug found via live testing (not obvious reading the C++ once): a
+      missing `q *= 1/√head_dim` scale immediately before the recurrence — produced fluent-looking word salad,
+      not a crash. Jamba / Zamba2 / Granite-4.0 / Nemotron-H (Mamba-proper, not delta-net, interleaved with
+      attention+MoE) remain `[ ]` — different recurrence primitive, not yet built.
 - [x] **7d. T5/FLAN-T5 seq2seq VALIDATED (cosine = 1.0).** `T5Model` (`HartsyInference.LLM.Seq2Seq`) — full
       encoder-decoder from a `t5` GGUF. Handled T5 quirks: inner attn dim = n_heads·key_length (≠ d_model); **no 1/√d
       scaling** (attention via `ScaledDotProductAttention` with scale=1 + an additive per-head mask carrying the
@@ -418,15 +434,27 @@ The config-driven transformer does NOT cover these; each needs new core primitiv
 | 6d exotic IQ-quant codecs | codec | low–med | ✅ (decode test) |
 | 7a Mamba/SSM | **new arch** | high | ✅ (small) |
 | 7b RWKV | **new arch** | high | ✅ (small) |
-| 7c hybrid SSM+attn | compose | med | partial |
+| 7c hybrid SSM+attn (Qwen3.5 Gated DeltaNet) | **done** (2026-07-10, e2e verified 0.8B) | high | ✅ |
+| 7c hybrid SSM+attn (Jamba/Zamba2/Granite-4/Nemotron-H) | new arch (Mamba-proper, not started) | high | partial |
 | 7d T5/BART seq2seq | new decode path | med | ✅ (small) |
 | 8a DeepSeek-V3 routing+q-LoRA | **done** (slice-verified) | med | ✅ slice / ❌ e2e defer |
 | 8b mllama (Llama-3.2-Vision) | **DONE** — tower cos=1.0 + e2e verified | high | ✅ |
 | 8c GPT-OSS sinks | **done** (slice-verified) | low | ✅ slice / ❌ e2e defer |
 | 8d Mixtral/Qwen-MoE/Qwen2.5-VL-7B e2e | verify only | — | ❌ (>12 GB) |
+| Gemma-4 (new arch, 2026-07-10) | **done** — E2B e2e verified; 31B/26B-A4B-MoE build-defer (>12GB) | high | ✅ (E2B) / ❌ (big tiers) |
+| Qwen3.5-MoE (35B-A3B and up) | not started — separate arch from the verified dense tier | high | ❌ (>12 GB anyway) |
 | 9a–9e serving/quality | infra | varies | ✅ |
 
 **Bottom line:** transformer-family LLMs (dense, MoE, MLA, VLM, embeddings) are effectively complete for common/SOTA
 models. To claim *full* support the open frontier is: **Phase 7 (Mamba/RWKV/hybrid/seq2seq — the only families the engine
 fundamentally cannot run yet)**, the **Phase 6** cheap reuse wins, and finishing the **Phase 8** code gaps (verify when
 bigger hardware is available).
+
+**2026-07-10 update:** two new architecture families released after this plan was written are now closed. **Gemma-4**
+(Apr 2026 — per-layer embeddings, per-layer head dimensions, cross-layer KV-cache sharing, a parallel dense+MoE FFN
+branch) slots into the existing `GenericTransformer` spine; E2B verified e2e, the 31B-dense/26B-A4B-MoE tiers share the
+identical code path (build-defer, >12GB). **Qwen3.5** (Feb 2026 — Gated DeltaNet hybrid linear attention) is the first
+real member of **Phase 7c** (hybrid SSM+attention), landing as a new `ISsmModel` rather than a `GenericTransformer`
+variant; 0.8B verified e2e. Both were found via a systematic "what's missing vs Ollama's top models" sweep, not from
+this plan's own backlog — see [[project_gemma4_sharpinference]] / [[project_qwen35_sharpinference]] in the maintainer's
+session notes for the full bring-up story (bugs found, methodology, what's still open).

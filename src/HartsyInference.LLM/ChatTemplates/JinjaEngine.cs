@@ -168,11 +168,27 @@ public sealed class JinjaEngine
         }
     }
 
-    internal sealed class ForNode(string var, Expr seq, List<Node> body) : Node
+    /// <summary>A <c>{% for x in seq %}</c> loop, optionally with Jinja's inline filter clause
+    /// (<c>{% for x in seq if cond %}</c> — only iterates items where <paramref name="filter"/> is truthy,
+    /// evaluated with <paramref name="var"/> already bound). <c>loop.index</c>/<c>loop.length</c>/etc. reflect
+    /// the FILTERED count, matching real Jinja (the filter narrows the sequence before iteration starts, it
+    /// isn't a per-item skip inside a still-full-length loop).</summary>
+    internal sealed class ForNode(string var, Expr seq, List<Node> body, Expr? filter = null) : Node
     {
         public override void Render(StringBuilder sb, Scope scope)
         {
-            List<object?> items = Values.AsList(seq.Eval(scope));
+            List<object?> raw = Values.AsList(seq.Eval(scope));
+            List<object?> items = raw;
+            if (filter is not null)
+            {
+                items = [];
+                foreach (object? item in raw)
+                {
+                    Scope probe = scope.Child();
+                    probe.Set(var, item);
+                    if (Values.Truthy(filter.Eval(probe))) items.Add(item);
+                }
+            }
             for (int idx = 0; idx < items.Count; idx++)
             {
                 Scope child = scope.Child();
@@ -254,11 +270,15 @@ public sealed class JinjaEngine
                         int inPos = FindKeyword(rest, "in");
                         if (inPos < 0) throw new FormatException($"Malformed for: {s.Value}");
                         string loopVar = rest[..inPos].Trim();
-                        Expr seqExpr = ExprParser.ParseExpr(rest[(inPos + 2)..].Trim());
+                        // Jinja's for-tag grammar allows a trailing inline filter (`for x in seq if cond`),
+                        // parsed separately from a ternary so `for x in a if c else b` isn't ambiguous —
+                        // ParseForIterable stops at the `or_expr` level (no ternary) for the sequence itself,
+                        // matching real Jinja, then optionally consumes ` if cond`.
+                        (Expr seqExpr, Expr? filterExpr) = ExprParser.ParseForIterable(rest[(inPos + 2)..].Trim());
                         i++;
                         List<Node> body = ParseBlock(segs, ref i, ["endfor"]);
                         Expect(segs, ref i, "endfor");
-                        nodes.Add(new ForNode(loopVar, seqExpr, body)); break;
+                        nodes.Add(new ForNode(loopVar, seqExpr, body, filterExpr)); break;
                     }
                     case "generation": case "endgeneration": // {% generation %} markers (assistant-mask) — ignore
                     case "#comment": // stripped comment placeholder
